@@ -224,6 +224,10 @@ notices_item_once_now	e604	%1$s: %2$s (bir kez, az önce)
 notices_item_times	36d7	%1$s: %2$s (%3$d kez, %4$d dk önce)
 notices_item_times_now	8cbd	%1$s: %2$s (%3$d kez, az önce)
 notices_open	c9cf	Sistem bildirimlerini aç
+settings_about_discord	0061	Topluluğa katıl: %s
+settings_about_github	b59f	Hata ve sorun bildir: %s
+settings_about_header	96de	Hakkında
+settings_about_made_by	f019	Dawn Larsson tarafından yapıldı
 settings_already_joined	71fb	%s ağına zaten bağlı
 settings_already_set	0053	zaten ayarlı
 settings_any_text	89dc	herhangi bir komut, moonwater'dan sonraki sözcükler gibi: fiili, sonra bağımsız değişkenleri
@@ -239,6 +243,7 @@ settings_role_swap	d36e	Takas
 settings_role_other	ff95	Diğer
 settings_role_free	ad01	Boş alan
 settings_role_unpartitioned	3c10	Bölüm tablosu yok
+settings_opened	5bd7	tarayıcıda açıldı
 settings_partitioned	70f5	%%%d bölümlenmiş
 settings_used_of	58fb	%1$s / %2$s
 settings_partitions	9b2e	Bölümler
@@ -249,6 +254,7 @@ settings_battery_idle	1635	, şarj olmuyor
 settings_busy	34e0	moonwater meşgul: bundan önceki değişiklikler bitmedi
 settings_button_discover	c0ee	Keşfet
 settings_button_end	adad	Tümünü sonlandır
+settings_button_open	10e9	Aç
 settings_button_pair	f1d1	Eşleştir
 settings_button_run	e66a	Çalıştır
 settings_button_running	25ec	Çalışıyor

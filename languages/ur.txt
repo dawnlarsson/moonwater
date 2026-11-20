@@ -225,6 +225,10 @@ notices_item_once_now	e604	%1$s: %2$s (ایک بار، ابھی ابھی)
 notices_item_times	36d7	%1$s: %2$s (%3$d بار، %4$d منٹ پہلے)
 notices_item_times_now	8cbd	%1$s: %2$s (%3$d بار، ابھی ابھی)
 notices_open	c9cf	سسٹم کی اطلاعات کھولیں
+settings_about_discord	0061	کمیونٹی میں شامل ہوں: %s
+settings_about_github	b59f	خرابیوں اور مسائل کی اطلاع دیں: %s
+settings_about_header	96de	تعارف
+settings_about_made_by	f019	Dawn Larsson کا تیار کردہ
 settings_already_joined	71fb	پہلے سے %s سے منسلک ہے
 settings_already_set	0053	پہلے سے مقرر ہے
 settings_any_text	89dc	کوئی بھی کمانڈ، moonwater کے بعد آنے والے الفاظ کی صورت میں: پہلے فعل، پھر آرگیومنٹس
@@ -240,6 +244,7 @@ settings_role_swap	d36e	سویپ
 settings_role_other	ff95	دیگر
 settings_role_free	ad01	خالی جگہ
 settings_role_unpartitioned	3c10	پارٹیشن ٹیبل نہیں
+settings_opened	5bd7	براؤزر میں کھولا گیا
 settings_partitioned	70f5	%d%% تقسیم شدہ
 settings_used_of	58fb	%1$s / %2$s
 settings_partitions	9b2e	پارٹیشنز
@@ -250,6 +255,7 @@ settings_battery_idle	1635	، چارج نہیں ہو رہی
 settings_busy	34e0	moonwater مصروف ہے: اس سے پہلے کی تبدیلیاں ابھی مکمل نہیں ہوئیں
 settings_button_discover	c0ee	دریافت کریں
 settings_button_end	adad	سب ختم کریں
+settings_button_open	10e9	کھولیں
 settings_button_pair	f1d1	جوڑیں
 settings_button_run	e66a	چلائیں
 settings_button_running	25ec	چل رہا ہے

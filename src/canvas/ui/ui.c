@@ -8225,6 +8225,10 @@ LANGUAGE_ID(notices_item_once_now, "%1$s: %2$s (once, just now)") \
 LANGUAGE_ID(notices_item_times, "%1$s: %2$s (%3$d times, %4$d min ago)") \
 LANGUAGE_ID(notices_item_times_now, "%1$s: %2$s (%3$d times, just now)") \
 LANGUAGE_ID(notices_open, "Open System notices") \
+LANGUAGE_ID(settings_about_discord, "Join the community: %s") \
+LANGUAGE_ID(settings_about_github, "Report bugs and issues: %s") \
+LANGUAGE_ID(settings_about_header, "About") \
+LANGUAGE_ID(settings_about_made_by, "Made By Dawn Larsson") \
 LANGUAGE_ID(settings_already_joined, "already joined to %s") \
 LANGUAGE_ID(settings_already_set, "already set") \
 LANGUAGE_ID(settings_any_text, "any command, as the words after moonwater: its verb, then its arguments") \
@@ -8238,6 +8242,7 @@ LANGUAGE_ID(settings_battery_idle, ", Not charging") \
 LANGUAGE_ID(settings_busy, "moonwater is busy: the changes before this one are not done") \
 LANGUAGE_ID(settings_button_discover, "Discover") \
 LANGUAGE_ID(settings_button_end, "End all") \
+LANGUAGE_ID(settings_button_open, "Open") \
 LANGUAGE_ID(settings_button_pair, "Pair") \
 LANGUAGE_ID(settings_button_run, "Run") \
 LANGUAGE_ID(settings_button_running, "Running") \
@@ -8325,6 +8330,7 @@ LANGUAGE_ID(settings_nothing_typed, "nothing typed") \
 LANGUAGE_ID(settings_notices_count, "%1$d notices") \
 LANGUAGE_ID(settings_notices_dismiss, "dismiss all") \
 LANGUAGE_ID(settings_notices_none, "no kernel notices") \
+LANGUAGE_ID(settings_opened, "opened in browser") \
 LANGUAGE_ID(settings_partitioned, "%d%% partitioned") \
 LANGUAGE_ID(settings_partitions, "Partitions") \
 LANGUAGE_ID(settings_percent, "%d%%") \

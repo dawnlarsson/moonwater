@@ -35,7 +35,7 @@ what the events of the machine do. Its commands are grouped as the Settings wind
 rows, and the ones no row has are under All commands:
 
 ```sh
-# Machine
+# System
 moonwater language [CODE|default]      the language the windows Canvas draws itself speak; bare lists them, machine-translated ones marked [en]
 moonwater name [NEW|random]            what this machine is called, like space-wizard
 
@@ -444,7 +444,7 @@ is not read. Nothing checks who made a build: root with a stick can write any im
 as `setup install` always could (`OUT-D5` in .github/SECURITY.md).
 
 `moonwater settings` opens the same command as a window on the desktop: the groups
-(machine, canvas, display, input, taskbar, time, network, Wi-Fi, Bluetooth, USB, power, boot, and all commands) are
+(system, canvas, display, input, taskbar, time, network, Wi-Fi, Bluetooth, USB, power, boot, and all commands) are
 listed at the left and the rows of the one chosen at the right, each row a setting a
 person flips, and under All commands a row to every line of `moonwater help`, so no
 verb is out of its reach. Tab goes between the groups and the rows, the arrow keys

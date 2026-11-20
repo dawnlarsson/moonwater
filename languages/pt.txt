@@ -224,6 +224,10 @@ notices_item_once_now	e604	%1$s: %2$s (uma vez, agora mesmo)
 notices_item_times	36d7	%1$s: %2$s (%3$d vezes, há %4$d min)
 notices_item_times_now	8cbd	%1$s: %2$s (%3$d vezes, agora mesmo)
 notices_open	c9cf	Abrir avisos do sistema
+settings_about_discord	0061	Entre na comunidade: %s
+settings_about_github	b59f	Relatar erros e problemas: %s
+settings_about_header	96de	Sobre
+settings_about_made_by	f019	Feito por Dawn Larsson
 settings_already_joined	71fb	já conectado a %s
 settings_already_set	0053	já definido
 settings_any_text	89dc	qualquer comando, como as palavras depois de moonwater: o verbo e os argumentos
@@ -239,6 +243,7 @@ settings_role_swap	d36e	Troca
 settings_role_other	ff95	Outro
 settings_role_free	ad01	Espaço livre
 settings_role_unpartitioned	3c10	Sem tabela de partições
+settings_opened	5bd7	aberto no navegador
 settings_partitioned	70f5	%d%% particionado
 settings_used_of	58fb	%1$s / %2$s
 settings_partitions	9b2e	Partições
@@ -249,6 +254,7 @@ settings_battery_idle	1635	, não está carregando
 settings_busy	34e0	moonwater está ocupado: as alterações anteriores não terminaram
 settings_button_discover	c0ee	Descobrir
 settings_button_end	adad	Encerrar todas
+settings_button_open	10e9	Abrir
 settings_button_pair	f1d1	Parear
 settings_button_run	e66a	Executar
 settings_button_running	25ec	Em curso

@@ -266,13 +266,14 @@ struct settings_row
         command shows the rows of a verb in this order too. The labels are
         what the window and its lane find a row by.
 
-        The groups, most used first: Machine (its name), Canvas (how the
-        desktop is drawn and what its windows keep), Display (the screens),
-        Input (the keyboard, the mouse, the pointer and touch), Taskbar (the
-        panel), Time (the clock, its zone and where it is set from), Network, Wi-Fi,
-        Bluetooth, Devices, Power and Boot. A row is in the group a person looks
-        for it in, by what it does and not by the program that applies it: the
-        pointer's size is an Input row though the compositor draws it.
+        The groups, most used first: System (its name, build, language, notices
+        and about), Canvas (how the desktop is drawn and what its windows keep),
+        Display (the screens), Input (the keyboard, the mouse, the pointer and
+        touch), Taskbar (the panel), Time (the clock, its zone and where it is
+        set from), Network, Wi-Fi, Bluetooth, Devices, Power and Boot. A row is
+        in the group a person looks for it in, by what it does and not by the
+        program that applies it: the pointer's size is an Input row though the
+        compositor draws it.
 
         A group of more than a few rows is in parts: a row that names a part
         (part) starts it, and it holds the rows after it up to the next part or
@@ -289,7 +290,7 @@ struct settings_row
          .how = SETTING_PLAIN, __VA_ARGS__}
 
 static const struct settings_row settings_rows[] = {
-    {"Machine", "Name", SETTINGS_FIELD, 0, SETTINGS_LINE, {"name"}, "", null, {"name"}, null, 0,
+    {"System", "Name", SETTINGS_FIELD, 0, SETTINGS_LINE, {"name"}, "", null, {"name"}, null, 0,
      .usage = "name [NEW|random]", .help = "what this machine is called, like space-wizard"},
     //  The commit this build was made from, as moonwater version says it: what tells one build on a stick from another.
     {null, "Build", SETTINGS_INFO, 0, SETTINGS_LINE, {"version"}, "commit ", null, {null}, null, 0,
@@ -302,6 +303,10 @@ static const struct settings_row settings_rows[] = {
                       .refusal = "language is one of " SETTINGS_LANGUAGE_CODES ", not %s\n",
                       .usage = "language [CODE|default]",
                       .help = "the language the windows Canvas draws itself speak; bare lists them, machine-translated ones marked [en]"),
+    //  The kernel's own notices (the feeder puts the errors and warnings of the kernel's log under the key system notices): no verb of its
+    //  own (moonwater notices is the command), so no read; its value is the count, and opening the row lists each notice to copy.
+    {null, "System notices", SETTINGS_INFO, 0, 0, {null}, null, null, {null}, null, 0, .output = SETTINGS_OUT_NOTICES,
+     .help = "the kernel's own errors and warnings the desktop has: open the row to see each one, and copy a line"},
     SETTING_PLAIN_ROW("Canvas", "Background", SETTINGS_CHOICE, SETTINGS_INK, ("canvas", "background"), "background ",
                       "default black dark-grey slate midnight-blue forest plum light-grey white",
                       .type = SETTING_COLOUR, .path = SETTING_BACKGROUND_PATH, .standard = "#1e1e1e", .reset = "default",
@@ -993,10 +998,6 @@ static const struct settings_row settings_rows[] = {
      .usage = "desktop autostart add PROGRAM", .help = "open PROGRAM as well when the desktop starts, after the others"},
     {null, "Remove a program from the start (its path)", SETTINGS_FIELD, 0, SETTINGS_LINE, {null}, null, null, {"desktop", "autostart", "remove"},
      null, 0, .usage = "desktop autostart remove PROGRAM", .help = "no longer open PROGRAM when the desktop starts"},
-    //  The kernel's own notices (the feeder puts the errors and warnings of the kernel's log under the key system notices): no verb of its
-    //  own (moonwater notices is the command), so no read; its value is the count, and opening the row lists each notice to copy.
-    {"System", "System notices", SETTINGS_INFO, 0, 0, {null}, null, null, {null}, null, 0, .output = SETTINGS_OUT_NOTICES,
-     .help = "the kernel's own errors and warnings the desktop has: open the row to see each one, and copy a line"},
     //  OpenSSH's server, from bowl profile ssh, which Moonwater runs from these rows and nothing else (src/sh/ssh.c): the one
     //  switch first, then who may log in and where it listens, what a client is to compare, and the keys. Every row reads
     //  moonwater ssh, which says "this machine has no ssh server" until the profile is installed, so each is not here then.

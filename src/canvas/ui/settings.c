@@ -152,6 +152,8 @@
 #ifndef MOONWATER_CANVAS_SETTINGS
 #define MOONWATER_CANVAS_SETTINGS
 
+#include "../../sh/splash_mark.c"
+
 // The battery reader (ui/ui.c) is read before this file: the Battery row's value is one of its batteries.
 
 // What a row's value is: not asked yet, said, not on this machine, asked and not found in what was said.
@@ -174,6 +176,15 @@
 #define SETTINGS_PROBE 512    // one line, cut
 #define SETTINGS_LABEL_CUT 128 // a label up to its bracket, in bytes (settings_label_window)
 #define SETTINGS_TRY_SPAN 192  // the largest picture of a pointer its row draws, device pixels (settings_try_pointer_one)
+// The built-in Moonwater wordmark from splash_mark.c: its non-zero bounding box, logical size in the About row, and max device cover buffer.
+#define SETTINGS_LOGO_X0 14
+#define SETTINGS_LOGO_Y0 74
+#define SETTINGS_LOGO_SRC_W 292
+#define SETTINGS_LOGO_SRC_H 44
+#define SETTINGS_LOGO_W 172
+#define SETTINGS_LOGO_ROW_H 44
+#define SETTINGS_LOGO_MAX_W 576
+#define SETTINGS_LOGO_MAX_H 96
 #define SETTINGS_NONE 0xffffu
 
 // The size the window opens at, logical pixels; every other size in it is the kit's (ui.c, the page).
@@ -846,6 +857,7 @@ static struct settings_large
         struct ui_view view;
         char label_cut[SETTINGS_ROWS][SETTINGS_LABEL_CUT]; // each row's label as its line in the window says it (settings_label_window)
         unsigned char try_cover[2][SETTINGS_TRY_SPAN * SETTINGS_TRY_SPAN];              // a pointer's covers as the pointer's row draws it, its fill's and its line's
+        unsigned char logo_cover[SETTINGS_LOGO_MAX_W * SETTINGS_LOGO_MAX_H];            // the Moonwater wordmark cover drawn on the System About row
 } address_to settings_large;
 
 static b32 settings_map(void)
@@ -885,6 +897,13 @@ static fn settings_say(string_address text);
 #define SETTINGS_TRY_POINTER 2
 #define SETTINGS_TRIES 3
 #define SETTINGS_TRY ((int)SETTINGS_ALL + SETTINGS_SUBS) // the list's row of the first
+// The About section on the System page: Moonwater logo + author/website, Discord invite, and GitHub issues link.
+#define SETTINGS_ABOUT_BRAND 0
+#define SETTINGS_ABOUT_DISCORD 1
+#define SETTINGS_ABOUT_GITHUB 2
+#define SETTINGS_ABOUT_COUNT 3
+#define SETTINGS_ABOUT (SETTINGS_TRY + SETTINGS_TRIES)
+#define SETTINGS_LIST_IDS (SETTINGS_ABOUT + SETTINGS_ABOUT_COUNT)
 #define SETTINGS_SUB_TEXT 240      // bytes of one line
 #define SETTINGS_BOARD_NS 1000000000ll
 #define SETTINGS_REAP_NS 10000000ll // how often a child that is ending is asked whether it has exited (settings_reap)
@@ -1287,10 +1306,15 @@ static const struct settings_generic address_to settings_generic_of(int row)
         return row > SETTINGS_ANY && row < (int)SETTINGS_LIST ? &settings.generic[row - SETTINGS_ANY - 1] : null;
 }
 
+static int settings_about_of(int id);
+static const char address_to settings_about_label(int which);
+static b32 settings_about_matches_word(int which, const char address_to word, positive size);
+static int settings_system_group(void);
+
 // Which list a row is in (an index of the feeds), or -1 when it is in none.
 static int settings_list_of(int row)
 {
-        return row >= (int)SETTINGS_LIST ? (row - (int)SETTINGS_LIST) / SETTINGS_LIST_ROWS : -1;
+        return row >= (int)SETTINGS_LIST && row < (int)SETTINGS_ALL ? (row - (int)SETTINGS_LIST) / SETTINGS_LIST_ROWS : -1;
 }
 
 // The network or the device a row is, or none: a row of a list that was read and is still there.
@@ -1319,6 +1343,8 @@ static const char address_to settings_label(int row)
 */
 static const char address_to settings_label_shown(int row)
 {
+        if (settings_about_of(row) >= 0)
+                return settings_about_label(settings_about_of(row));
         if (row < SETTINGS_ANY)
                 return language_of(settings_rows[row].label);
         if (settings_item(row) && settings_item(row)->kind == SETTINGS_ADD)
@@ -1476,6 +1502,8 @@ static int settings_group_of(int row)
 {
         int group = -1;
 
+        if (settings_about_of(row) >= 0)
+                return settings_system_group();
         if (row >= (int)SETTINGS_LIST)
         {
                 for (int at = 0; at < settings_groups(); at++)
@@ -1520,6 +1548,8 @@ static b32 settings_matches_name(const char address_to label, const char address
 
 static b32 settings_matches_word(int row, const char address_to word, positive size)
 {
+        if (settings_about_of(row) >= 0)
+                return settings_about_matches_word(settings_about_of(row), word, size);
         if (row >= (int)SETTINGS_LIST)
                 return settings_matches_name(settings_label(row), settings_section(row), word, size);
         if (row < SETTINGS_ANY)
@@ -2313,7 +2343,7 @@ static fn settings_layout(void)
         // What the list shows is the app's: its rows, described by settings_describe, and where a change is drawn again.
         if (!settings.list.ids)
         {
-                settings.list.ids = SETTINGS_TRY + SETTINGS_TRIES;
+                settings.list.ids = SETTINGS_LIST_IDS;
                 settings.list.describe = settings_describe;
                 settings.list.damaged = settings_changed;
                 settings.list.hover = settings.list.down = -1;
@@ -2567,6 +2597,214 @@ static fn settings_try_changed(int row)
                                 ui_list_row_changed(&settings.ui, &settings.list, SETTINGS_TRY + which);
 }
 
+/* ---- the About section (Moonwater logo, author and links) ---- */
+/*
+        Shown at the bottom of the System group: the built-in Moonwater wordmark from splash_mark.c alongside "Made By Dawn Larsson"
+        and "dawning.dev", followed by links to Discord and GitHub issues for bug reports. Activating a link opens it in an installed
+        bowl web browser when one is available, and otherwise copies the URL to the clipboard.
+*/
+static int settings_about_of(int id)
+{
+        return id >= SETTINGS_ABOUT && id < SETTINGS_ABOUT + SETTINGS_ABOUT_COUNT ? id - SETTINGS_ABOUT : -1;
+}
+
+static const char address_to settings_about_url(int which)
+{
+        return which == SETTINGS_ABOUT_BRAND     ? "https://dawning.dev"
+               : which == SETTINGS_ABOUT_DISCORD ? "https://discord.gg/nwvFVGYJhR"
+               : which == SETTINGS_ABOUT_GITHUB  ? "https://github.com/dawnlarsson/moonwater/issues"
+                                                 : "";
+}
+
+static const char address_to settings_about_label(int which)
+{
+        return which == SETTINGS_ABOUT_BRAND     ? WORDS(settings_about_made_by)
+               : which == SETTINGS_ABOUT_DISCORD ? "Discord"
+               : which == SETTINGS_ABOUT_GITHUB  ? "GitHub"
+                                                 : "";
+}
+
+static const char address_to settings_about_sub(int which, char address_to into, positive room)
+{
+        if (which == SETTINGS_ABOUT_BRAND)
+        {
+                string_copy_bounded((string_address)into, (string_address) "dawning.dev", room);
+                return into;
+        }
+        if (which == SETTINGS_ABOUT_DISCORD)
+        {
+                language_format(into, room, WORDS(settings_about_discord), "discord.gg/nwvFVGYJhR");
+                return into;
+        }
+        if (which == SETTINGS_ABOUT_GITHUB)
+        {
+                language_format(into, room, WORDS(settings_about_github), "github.com/dawnlarsson/moonwater/issues");
+                return into;
+        }
+        into[0] = 0;
+        return into;
+}
+
+static b32 settings_about_matches_word(int which, const char address_to word, positive size)
+{
+        char sub[SETTINGS_SUB_TEXT];
+
+        settings_about_sub(which, sub, sizeof(sub));
+        return settings_has(WORDS(settings_about_header), word, size) || settings_has(settings_about_label(which), word, size) ||
+               settings_has(sub, word, size) || settings_has(settings_about_url(which), word, size);
+}
+
+// One pixel of the cropped Moonwater wordmark from splash_mark.c, as 0..255 cover.
+static inline unsigned int settings_logo_sample(int sx, int sy)
+{
+        int x = SETTINGS_LOGO_X0 + (sx < 0 ? 0 : sx >= SETTINGS_LOGO_SRC_W ? SETTINGS_LOGO_SRC_W - 1 : sx);
+        int y = SETTINGS_LOGO_Y0 + (sy < 0 ? 0 : sy >= SETTINGS_LOGO_SRC_H ? SETTINGS_LOGO_SRC_H - 1 : sy);
+        positive at = (positive)y * SPLASH_MARK_W + (positive)x;
+
+        return ((unsigned int)(splash_mark[at >> 2] >> (6 - 2 * (at & 3))) & 3u) * 85u;
+}
+
+// The Moonwater wordmark drawn at the trailing end of the brand row, bilinearly scaled from splash_mark and tinted in the theme's ink.
+static fn settings_about_logo_paint(struct ui address_to ui, int id, int x, int y, int w, int h)
+{
+        int max_h = h - 4 < SETTINGS_LOGO_MAX_H ? h - 4 : SETTINGS_LOGO_MAX_H;
+        int draw_w = w < SETTINGS_LOGO_MAX_W ? w : SETTINGS_LOGO_MAX_W;
+        int draw_h, dx, dy;
+
+        (void)id;
+        if (!settings_large || draw_w <= 0 || max_h <= 0)
+                return;
+        draw_h = draw_w * SETTINGS_LOGO_SRC_H / SETTINGS_LOGO_SRC_W;
+        if (draw_h > max_h)
+        {
+                draw_h = max_h;
+                draw_w = draw_h * SETTINGS_LOGO_SRC_W / SETTINGS_LOGO_SRC_H;
+        }
+        if (draw_w <= 0 || draw_h <= 0)
+                return;
+        for (int py = 0; py < draw_h; py++)
+        {
+                int fy = ((2 * py + 1) * (SETTINGS_LOGO_SRC_H << 8)) / (2 * draw_h) - 128;
+                int y0, y1, wy;
+
+                fy = fy < 0 ? 0 : fy > ((SETTINGS_LOGO_SRC_H - 1) << 8) ? ((SETTINGS_LOGO_SRC_H - 1) << 8) : fy;
+                y0 = fy >> 8, y1 = y0 + 1 < SETTINGS_LOGO_SRC_H ? y0 + 1 : y0, wy = fy & 255;
+                for (int px = 0; px < draw_w; px++)
+                {
+                        int fx = ((2 * px + 1) * (SETTINGS_LOGO_SRC_W << 8)) / (2 * draw_w) - 128;
+                        int x0, x1, wx;
+                        unsigned int c00, c10, c01, c11, top, bot;
+
+                        fx = fx < 0 ? 0 : fx > ((SETTINGS_LOGO_SRC_W - 1) << 8) ? ((SETTINGS_LOGO_SRC_W - 1) << 8) : fx;
+                        x0 = fx >> 8, x1 = x0 + 1 < SETTINGS_LOGO_SRC_W ? x0 + 1 : x0, wx = fx & 255;
+                        c00 = settings_logo_sample(x0, y0), c10 = settings_logo_sample(x1, y0);
+                        c01 = settings_logo_sample(x0, y1), c11 = settings_logo_sample(x1, y1);
+                        top = c00 * (unsigned int)(256 - wx) + c10 * (unsigned int)wx;
+                        bot = c01 * (unsigned int)(256 - wx) + c11 * (unsigned int)wx;
+                        settings_large->logo_cover[(positive)py * (positive)draw_w + (positive)px] =
+                            (unsigned char)((top * (unsigned int)(256 - wy) + bot * (unsigned int)wy + 32768u) >> 16);
+                }
+        }
+        dx = ui_rtl() ? x : x + w - draw_w;
+        dy = y + (h - draw_h) / 2;
+        UI_KEEP(dx, dy, draw_w, draw_h);
+        ui_kit_covers(ui, dx, dy, draw_w, draw_h, settings_large->logo_cover, draw_w, ui_text_colour(ui, UI_ON_SURFACE));
+}
+
+static fn settings_about_describe(int id, struct ui_row address_to row)
+{
+        static char about_text[SETTINGS_ABOUT_COUNT][SETTINGS_SUB_TEXT];
+        int which = settings_about_of(id);
+
+        if (which < 0)
+                return;
+        row->section = SETTINGS_ABOUT;
+        row->header = WORDS(settings_about_header);
+        row->label = settings_about_label(which);
+        row->about = settings_about_sub(which, about_text[which], sizeof(about_text[which]));
+        if (which == SETTINGS_ABOUT_BRAND)
+        {
+                row->picture_w = SETTINGS_LOGO_W;
+                row->picture = SETTINGS_LOGO_ROW_H;
+                row->paint = settings_about_logo_paint;
+        }
+        else
+        {
+                row->kind = UI_ROW_BUTTON;
+                row->words = WORDS(settings_button_open);
+        }
+}
+
+// Whether an installed bowl app entry is a web browser that can open an https URL.
+static b32 settings_browser_match(const char address_to text)
+{
+        static const char address_to const names[] = {
+            "chromium", "chrome", "firefox", "librewolf", "brave", "vivaldi", "zen", "epiphany", "falkon", "qutebrowser", "floorp", "waterfox"};
+
+        if (!text || !text[0])
+                return false;
+        for (positive k = 0; k < sizeof(names) / sizeof(names[0]); k++)
+                if (settings_has(text, names[k], string_length((string_address)names[k])))
+                        return true;
+        return false;
+}
+
+// The index of an installed bowl browser in ui_apps (preferring the chrome bowl profile), or -1 when none is installed.
+static int settings_browser_find(void)
+{
+        int fallback = -1;
+
+        ui_apps_fresh((b64)ui_kit_time());
+        for (int at = 0; at < ui_apps.count; at++)
+        {
+                const struct ui_app_entry address_to app = &ui_apps.app[at];
+
+                if (app->kit || app->terminal || !app->launch[0])
+                        continue;
+                if (string_equals((string_address)app->profile, (string_address) "chrome"))
+                        return at;
+                if (fallback < 0 &&
+                    (settings_browser_match(app->id) || settings_browser_match(app->key) || settings_browser_match(ui_apps_base(app->launch))))
+                        fallback = at;
+        }
+        return fallback;
+}
+
+// Opens url in an installed bowl browser if one is found; otherwise copies url to the clipboard.
+static b32 settings_open_url(const char address_to url)
+{
+        int browser = settings_browser_find();
+
+        if (browser >= 0)
+        {
+                string_address words[UI_APP_START_WORDS + 2];
+                positive count = ui_apps_words_of(browser, words, null, null, null);
+
+                if (count > 0 && count + 1 < sizeof(words) / sizeof(words[0]))
+                {
+                        words[count++] = (string_address)url;
+                        words[count] = null;
+                        if (ui_start_apart(words, count))
+                        {
+                                settings_say((string_address)WORDS(settings_opened));
+                                return true;
+                        }
+                }
+        }
+        windows_clip_offer(&settings.own, WINDOWS_CLIP_CLIPBOARD, url, string_length((string_address)url));
+        settings_say((string_address)WORDS(settings_copied));
+        return false;
+}
+
+static fn settings_about_press(int id)
+{
+        int which = settings_about_of(id);
+
+        if (which < 0)
+                return;
+        settings_open_url(settings_about_url(which));
+}
+
 /*
         The layout the press was taken on: each place of the list (a row's id) and every feed list's labels, which name the rows (a row
         that comes in, goes out or moves is another label in another place). A press holds a place of the list, so when the layout changes
@@ -2641,6 +2879,14 @@ static fn settings_rebuild(void)
                                 count = settings_drive_rows(row, count);
                         }
                 }
+        }
+        // The About section (Moonwater logo, Made By Dawn Larsson / dawning.dev, Discord, GitHub): at the bottom of System, and found by the filter.
+        for (int which = 0; which < SETTINGS_ABOUT_COUNT && count < UI_LIST_MOST; which++)
+        {
+                int id = SETTINGS_ABOUT + which;
+
+                if (settings_filter_length() ? settings_matches(id) : settings.page.chosen == settings_system_group())
+                        settings.list.id[count++] = (unsigned short)id;
         }
         settings.list.count = count;
         // A row typed in that is no longer listed (the group changed under it, or a window asked for another page) is not typed in any more:
@@ -5438,6 +5684,12 @@ static fn settings_activate(int row, int way)
         // The key repeat's field opens on Enter, as on a press; the other rows that show a setting take no key.
         if (settings_try_of(row) == SETTINGS_TRY_REPEAT)
                 settings_edit_begin(row, "", false);
+        if (settings_about_of(row) >= 0)
+        {
+                settings_about_press(row);
+                ui_page_redraw(&settings.page);
+                return;
+        }
         // A line under a row (an issue, a status) is no row: Enter on it does nothing, but on a drive's disclosure it opens or shuts the
         // drive's partitions.
         if (row >= (int)SETTINGS_ALL)
@@ -6154,6 +6406,11 @@ static fn settings_describe(int id, struct ui_row address_to row)
                 settings_try_describe(id, row);
                 return;
         }
+        if (settings_about_of(id) >= 0)
+        {
+                settings_about_describe(id, row);
+                return;
+        }
         if (id >= (int)SETTINGS_ALL)
         {
                 if (id - (int)SETTINGS_ALL < settings_sub_count)
@@ -6350,6 +6607,8 @@ static const char address_to settings_copy_text(int id)
 {
         struct ui_row row;
 
+        if (settings_about_of(id) >= 0)
+                return settings_about_url(settings_about_of(id));
         if (id < 0 || id >= (int)SETTINGS_ALL || settings_try_of(id) >= 0 || !settings_large)
                 return null;
         if (id < SETTINGS_ANY && settings_rows[id].output == SETTINGS_OUT_NONE)
@@ -6626,9 +6885,10 @@ static b32 settings_event_take(const struct window_event address_to event)
                         }
                 }
         }
-        // The right button on a row opens its copies (a finger held still is the right button too); it is no press of the row's.
+        // The right button on a row opens its copies (a finger held still is the right button too); any active drag/stretch is let go first.
         if (event->type == WINDOW_EVENT_BUTTON && event->a == UI_POINTER_RIGHT && !settings.page.card && settings.page.menu_row < 0)
         {
+                ui_page_let_go(&settings.ui, &settings.page, &settings.list);
                 if (event->flags & WINDOW_KEY_DOWN)
                         settings_copy_press(ui_kit.pointer_x, ui_kit.pointer_y);
                 return true;
@@ -6694,6 +6954,13 @@ static fn settings_press_at(void)
         {
                 settings.page.pane = 1;
                 settings_try_press(row, x, y);
+                ui_page_redraw(&settings.page);
+                return;
+        }
+        if (settings_about_of(row) >= 0)
+        {
+                settings.page.pane = 1;
+                settings_about_press(row);
                 ui_page_redraw(&settings.page);
                 return;
         }
@@ -7145,6 +7412,13 @@ static fn settings_close(void)
         }
 }
 
+static b32 settings_focus(b32 focused)
+{
+        if (!focused)
+                ui_page_let_go(&settings.ui, &settings.page, &settings.list);
+        return true;
+}
+
 // The kit's controls moved this frame: their rows are drawn again at the next (the whole picture while the theme turns).
 static struct ui_app settings_app = {
         .own = &settings.own,
@@ -7164,6 +7438,7 @@ static struct ui_app settings_app = {
         .frame = settings_frame,
         .language = settings_language,
         .event = settings_event,
+        .focus = settings_focus,
         .buffers = &settings.page.buffers,
         .size = settings_size,
         .tick = settings_tick,

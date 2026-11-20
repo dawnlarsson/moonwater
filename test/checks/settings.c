@@ -2345,7 +2345,7 @@ static fn check_settings(string_address regular, string_address bold)
                                 here &= settings_group_of(settings.list.id[at]) == 0;
                         check("settings: with nothing typed the rows are those of the group chosen, and not every row",
                               here && settings.list.count < settings_rows_count() &&
-                                  string_equals((string_address)settings_group_name(0), (string_address) "Machine") &&
+                                  string_equals((string_address)settings_group_name(0), (string_address) "System") &&
                                   string_equals((string_address)settings_group_name(settings_groups() - 1), (string_address) SETTINGS_ALL_HEADER));
                 }
                 settings_type_code('W');
@@ -3717,7 +3717,7 @@ static fn check_settings_keys(void)
 
 static unsigned int settings_frames_whole[SETTINGS_FRAMES_W * SETTINGS_FRAMES_H];
 static p8 settings_frames_kept[sizeof(settings)], settings_frames_kit[sizeof(ui_kit)];
-static struct ui_control settings_frames_controls[2 * SETTINGS_ALL];
+static struct ui_control settings_frames_controls[2 * SETTINGS_LIST_IDS];
 
 static struct
 {
@@ -6681,14 +6681,14 @@ static fn check_settings_drive_rows(string_address regular, string_address bold)
 
 static fn check_settings_groups(void)
 {
-        static const char address_to names[] = {"Machine", "Canvas", "Display", "Input", "Scrolling", "Sound", "Taskbar", "Time",
-                                                "Network", "Waterlink", "Wi-Fi", "Bluetooth", "Devices", "Power", "Boot", "System", "SSH"};
+        static const char address_to names[] = {"System", "Canvas", "Display", "Input", "Scrolling", "Sound", "Taskbar", "Time",
+                                                "Network", "Waterlink", "Wi-Fi", "Bluetooth", "Devices", "Power", "Boot", "SSH"};
         static const struct
         {
                 const char address_to words[3];
                 const char address_to group;
         } families[] = {
-            {{"name"}, "Machine"}, {{"canvas", "background"}, "Canvas"}, {{"canvas", "theme"}, "Canvas"},
+            {{"name"}, "System"}, {{"canvas", "background"}, "Canvas"}, {{"canvas", "theme"}, "Canvas"},
             {{"canvas", "motion"}, "Canvas"}, {{"canvas", "caret"}, "Canvas"}, {{"canvas", "text"}, "Canvas"}, {{"canvas", "windows"}, "Canvas"}, {{"canvas", "border"}, "Canvas"},
             {{"canvas", "clipboard"}, "Canvas"}, {{"canvas", "gpu"}, "Display"}, {{"canvas", "display"}, "Display"}, {{"canvas", "modes"}, "Display"}, {{"canvas", "vrr"}, "Display"},
             {{"brightness"}, "Display"}, {{"keyboard"}, "Input"}, {{"mouse"}, "Input"}, {{"canvas", "cursor"}, "Input"},
@@ -6728,7 +6728,7 @@ static fn check_settings_groups(void)
         for (int at = 0; at < count && at < settings_groups(); at++)
                 order &= string_equals((string_address)settings_group_name(at), (string_address)names[at]);
         order &= string_equals((string_address)settings_group_name(settings_groups() - 1), (string_address)SETTINGS_ALL_HEADER);
-        check("settings groups: Machine, Canvas, Display, Input, Scrolling, Sound, Taskbar, Time, Network, Wi-Fi, Bluetooth, USB, Power, Boot, System, SSH, then All commands", order);
+        check("settings groups: System, Canvas, Display, Input, Scrolling, Sound, Taskbar, Time, Network, Waterlink, Wi-Fi, Bluetooth, Devices, Power, Boot, SSH, then All commands", order);
 
         // Each row in the group of its verb's family: the groups are what the rows do.
         for (positive at = 0; at < SETTINGS_ROWS; at++)
@@ -6802,21 +6802,52 @@ static fn check_settings_groups(void)
         check("settings groups: and none of them is listed under Machine", apart);
         check("settings groups: and the filter finds each by the first word of its label, from the group chosen", found);
 
-        // Machine holds only what the machine is called, and the language it speaks.
+        // System holds what the machine is called, its build, its language, its kernel notices, and the About section (logo and links).
         settings.page.chosen = 0;
         settings_filter_clear(), (void)0;
         settings_rebuild();
-        for (int at = 0; at < settings.list.count; at++)
         {
-                const struct settings_row address_to row = settings.list.id[at] < SETTINGS_ANY ? &settings_rows[settings.list.id[at]] : null;
+                b32 has_notices = false, has_brand = false, has_discord = false, has_github = false, about_ok = true;
 
-                bare &= row && row->read[0] && (string_equals((string_address)row->read[0], (string_address) "name") ||
-                                                string_equals((string_address)row->read[0], (string_address) "language") ||
-                                                string_equals((string_address)row->read[0], (string_address) "version") ||
-                                                string_equals((string_address)row->read[0], (string_address) "machine"));
+                for (int at = 0; at < settings.list.count; at++)
+                {
+                        int id = settings.list.id[at];
+                        const struct settings_row address_to row = id < SETTINGS_ANY ? &settings_rows[id] : null;
+
+                        if (settings_about_of(id) >= 0)
+                        {
+                                struct ui_row desc;
+
+                                memory_zero(&desc, sizeof(desc));
+                                settings_describe(id, &desc);
+                                if (settings_about_of(id) == SETTINGS_ABOUT_BRAND)
+                                        has_brand = desc.paint == settings_about_logo_paint && desc.picture_w > 0 && desc.picture > 0 &&
+                                                    desc.label && string_equals((string_address)desc.label, (string_address) "Made By Dawn Larsson") &&
+                                                    desc.about && string_equals((string_address)desc.about, (string_address) "dawning.dev");
+                                else if (settings_about_of(id) == SETTINGS_ABOUT_DISCORD)
+                                        has_discord = desc.kind == UI_ROW_BUTTON && desc.label &&
+                                                      string_equals((string_address)desc.label, (string_address) "Discord") &&
+                                                      string_equals((string_address)settings_copy_text(id), (string_address) "https://discord.gg/nwvFVGYJhR");
+                                else if (settings_about_of(id) == SETTINGS_ABOUT_GITHUB)
+                                        has_github = desc.kind == UI_ROW_BUTTON && desc.label &&
+                                                     string_equals((string_address)desc.label, (string_address) "GitHub") &&
+                                                     string_equals((string_address)settings_copy_text(id), (string_address) "https://github.com/dawnlarsson/moonwater/issues");
+                                continue;
+                        }
+                        if (row && row->output == SETTINGS_OUT_NOTICES)
+                        {
+                                has_notices = true;
+                                continue;
+                        }
+                        bare &= row && row->read[0] && (string_equals((string_address)row->read[0], (string_address) "name") ||
+                                                        string_equals((string_address)row->read[0], (string_address) "language") ||
+                                                        string_equals((string_address)row->read[0], (string_address) "version") ||
+                                                        string_equals((string_address)row->read[0], (string_address) "machine"));
+                }
+                about_ok = has_notices && has_brand && has_discord && has_github && settings_system_group() == 0;
+                check("settings groups: System merges Machine and System notices with the Moonwater logo, Made By Dawn Larsson / dawning.dev, Discord and GitHub links",
+                      bare && about_ok && settings.list.count > 0);
         }
-        check("settings groups: the rows listed under Machine are the machine's name, its build and its language, and nothing of the desktop, the keyboard, the clock or the screens",
-              bare && settings.list.count > 0);
 
         // The filter lists the rows of every group: each row by the first word of its label, and each group's rows by its name.
         for (positive at = 0; at < SETTINGS_ROWS; at++)

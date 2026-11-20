@@ -225,6 +225,10 @@ notices_item_once_now	e604	%1$s: %2$s (یک بار، لحظاتی پیش)
 notices_item_times	36d7	%1$s: %2$s (%3$d بار، %4$d دقیقه پیش)
 notices_item_times_now	8cbd	%1$s: %2$s (%3$d بار، لحظاتی پیش)
 notices_open	c9cf	باز کردن اعلان‌های سیستم
+settings_about_discord	0061	به انجمن بپیوندید: %s
+settings_about_github	b59f	گزارش اشکالات و مشکلات: %s
+settings_about_header	96de	درباره
+settings_about_made_by	f019	ساخته Dawn Larsson
 settings_already_joined	71fb	از قبل به %s متصل است
 settings_already_set	0053	از قبل تنظیم شده است
 settings_any_text	89dc	هر فرمانی، به شکل واژه‌های پس از moonwater: ابتدا فعل، سپس آرگومان‌ها
@@ -240,6 +244,7 @@ settings_role_swap	d36e	مبادله
 settings_role_other	ff95	دیگر
 settings_role_free	ad01	فضای آزاد
 settings_role_unpartitioned	3c10	بدون جدول پارتیشن
+settings_opened	5bd7	در مرورگر باز شد
 settings_partitioned	70f5	%d%% پارتیشن‌بندی‌شده
 settings_used_of	58fb	%1$s / %2$s
 settings_partitions	9b2e	پارتیشن‌ها
@@ -250,6 +255,7 @@ settings_battery_idle	1635	، در حال شارژ نیست
 settings_busy	34e0	moonwater مشغول است: تغییرات پیش از این هنوز انجام نشده‌اند
 settings_button_discover	c0ee	کشف کن
 settings_button_end	adad	پایان همه
+settings_button_open	10e9	باز کردن
 settings_button_pair	f1d1	جفت کردن
 settings_button_run	e66a	اجرا
 settings_button_running	25ec	در حال اجرا

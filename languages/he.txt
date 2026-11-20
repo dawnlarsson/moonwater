@@ -225,6 +225,10 @@ notices_item_once_now	e604	%1$s: %2$s (פעם אחת, הרגע)
 notices_item_times	36d7	%1$s: %2$s (%3$d פעמים, לפני %4$d דק׳)
 notices_item_times_now	8cbd	%1$s: %2$s (%3$d פעמים, הרגע)
 notices_open	c9cf	פתיחת הודעות המערכת
+settings_about_discord	0061	הצטרפו לקהילה: %s
+settings_about_github	b59f	דווחו על באגים ותקלות: %s
+settings_about_header	96de	אודות
+settings_about_made_by	f019	נוצר על ידי Dawn Larsson
 settings_already_joined	71fb	כבר מחובר אל %s
 settings_already_set	0053	כבר מוגדר
 settings_any_text	89dc	כל פקודה, כמילים שאחרי moonwater: הפעולה שלה ואז הארגומנטים
@@ -240,6 +244,7 @@ settings_role_swap	d36e	החלפה
 settings_role_other	ff95	אחר
 settings_role_free	ad01	שטח פנוי
 settings_role_unpartitioned	3c10	אין טבלת מחיצות
+settings_opened	5bd7	נפתח בדפדפן
 settings_partitioned	70f5	%d%% מחולק למחיצות
 settings_used_of	58fb	%1$s / %2$s
 settings_partitions	9b2e	מחיצות
@@ -250,6 +255,7 @@ settings_battery_idle	1635	, לא בטעינה
 settings_busy	34e0	moonwater עסוק: השינויים שלפני זה טרם הושלמו
 settings_button_discover	c0ee	גלה
 settings_button_end	adad	סיים הכול
+settings_button_open	10e9	פתיחה
 settings_button_pair	f1d1	צמד
 settings_button_run	e66a	הפעל
 settings_button_running	25ec	פועל

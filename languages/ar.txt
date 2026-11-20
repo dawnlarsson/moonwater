@@ -225,6 +225,10 @@ notices_item_once_now	e604	%1$s: %2$s (مرة واحدة، الآن)
 notices_item_times	36d7	%1$s: %2$s (عدد المرات: %3$d، قبل %4$d د)
 notices_item_times_now	8cbd	%1$s: %2$s (عدد المرات: %3$d، الآن)
 notices_open	c9cf	فتح إشعارات النظام
+settings_about_discord	0061	انضم إلى المجتمع: %s
+settings_about_github	b59f	الإبلاغ عن الأخطاء والمشكلات: %s
+settings_about_header	96de	حول
+settings_about_made_by	f019	من تطوير Dawn Larsson
 settings_already_joined	71fb	متصل بالفعل بالشبكة %s
 settings_already_set	0053	معيّن بالفعل
 settings_any_text	89dc	أي أمر، بصيغة الكلمات بعد moonwater: الفعل ثم الوسائط
@@ -240,6 +244,7 @@ settings_role_swap	d36e	التبديل
 settings_role_other	ff95	أخرى
 settings_role_free	ad01	مساحة حرة
 settings_role_unpartitioned	3c10	بلا جدول أقسام
+settings_opened	5bd7	تم الفتح في المتصفح
 settings_partitioned	70f5	%d%% مقسّم
 settings_used_of	58fb	%1$s / %2$s
 settings_partitions	9b2e	الأقسام
@@ -250,6 +255,7 @@ settings_battery_idle	1635	، لا يتم الشحن
 settings_busy	34e0	moonwater مشغول: لم تكتمل التغييرات السابقة بعد
 settings_button_discover	c0ee	اكتشف
 settings_button_end	adad	إنهاء الكل
+settings_button_open	10e9	فتح
 settings_button_pair	f1d1	إقران
 settings_button_run	e66a	تشغيل
 settings_button_running	25ec	قيد التشغيل

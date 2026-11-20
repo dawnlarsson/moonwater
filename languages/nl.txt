@@ -224,6 +224,10 @@ notices_item_once_now	e604	%1$s: %2$s (één keer, zojuist)
 notices_item_times	36d7	%1$s: %2$s (%3$d keer, %4$d min geleden)
 notices_item_times_now	8cbd	%1$s: %2$s (%3$d keer, zojuist)
 notices_open	c9cf	Systeemmeldingen openen
+settings_about_discord	0061	Word lid van de gemeenschap: %s
+settings_about_github	b59f	Meld fouten en problemen: %s
+settings_about_header	96de	Over
+settings_about_made_by	f019	Gemaakt door Dawn Larsson
 settings_already_joined	71fb	al verbonden met %s
 settings_already_set	0053	al ingesteld
 settings_any_text	89dc	elke opdracht, als de woorden na moonwater: het werkwoord, dan de argumenten
@@ -239,6 +243,7 @@ settings_role_swap	d36e	Swap
 settings_role_other	ff95	Overig
 settings_role_free	ad01	Vrije ruimte
 settings_role_unpartitioned	3c10	Geen partitietabel
+settings_opened	5bd7	geopend in browser
 settings_partitioned	70f5	%d%% gepartitioneerd
 settings_used_of	58fb	%1$s / %2$s
 settings_partitions	9b2e	Partities
@@ -249,6 +254,7 @@ settings_battery_idle	1635	, laadt niet op
 settings_busy	34e0	moonwater is bezig: de vorige wijzigingen zijn nog niet klaar
 settings_button_discover	c0ee	Detecteren
 settings_button_end	adad	Alles beëindigen
+settings_button_open	10e9	Openen
 settings_button_pair	f1d1	Koppelen
 settings_button_run	e66a	Uitvoeren
 settings_button_running	25ec	Bezig

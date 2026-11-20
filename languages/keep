@@ -68,3 +68,11 @@ src/canvas/ui/ui.c	Shell
 src/canvas/ui/launcher.c	Install Moonwater
 src/canvas/ui/launcher.c	install installer disk drive
 src/canvas/ui/installer.c	Install Moonwater
+src/canvas/ui/settings.c	Discord
+src/canvas/ui/settings.c	GitHub
+src/canvas/ui/settings.c	dawning.dev
+src/canvas/ui/settings.c	discord.gg/nwvFVGYJhR
+src/canvas/ui/settings.c	github.com/dawnlarsson/moonwater/issues
+src/canvas/ui/settings.c	https://dawning.dev
+src/canvas/ui/settings.c	https://discord.gg/nwvFVGYJhR
+src/canvas/ui/settings.c	https://github.com/dawnlarsson/moonwater/issues

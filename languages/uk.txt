@@ -224,6 +224,10 @@ notices_item_once_now	e604	%1$s: %2$s (один випадок, щойно)
 notices_item_times	36d7	%1$s: %2$s (випадків: %3$d, %4$d хв тому)
 notices_item_times_now	8cbd	%1$s: %2$s (випадків: %3$d, щойно)
 notices_open	c9cf	Відкрити системні сповіщення
+settings_about_discord	0061	Приєднатися до спільноти: %s
+settings_about_github	b59f	Повідомити про помилки та проблеми: %s
+settings_about_header	96de	Про систему
+settings_about_made_by	f019	Створено Dawn Larsson
 settings_already_joined	71fb	уже підключено до %s
 settings_already_set	0053	уже встановлено
 settings_any_text	89dc	будь-яка команда, як слова після moonwater: її дієслово, потім аргументи
@@ -239,6 +243,7 @@ settings_role_swap	d36e	Підкачка
 settings_role_other	ff95	Інше
 settings_role_free	ad01	Вільне місце
 settings_role_unpartitioned	3c10	Немає таблиці розділів
+settings_opened	5bd7	відкрито в браузері
 settings_partitioned	70f5	%d %% розмічено
 settings_used_of	58fb	%1$s / %2$s
 settings_partitions	9b2e	Розділи
@@ -249,6 +254,7 @@ settings_battery_idle	1635	, не заряджається
 settings_busy	34e0	moonwater зайнятий: попередні зміни ще не виконано
 settings_button_discover	c0ee	Виявити
 settings_button_end	adad	Завершити всі
+settings_button_open	10e9	Відкрити
 settings_button_pair	f1d1	Зв'язати
 settings_button_run	e66a	Запустити
 settings_button_running	25ec	Виконується

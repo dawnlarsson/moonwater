@@ -224,6 +224,10 @@ notices_item_once_now	e604	%1$s: %2$s (jeden raz, przed chwilą)
 notices_item_times	36d7	%1$s: %2$s (%3$d razy, %4$d min temu)
 notices_item_times_now	8cbd	%1$s: %2$s (%3$d razy, przed chwilą)
 notices_open	c9cf	Otwórz powiadomienia systemowe
+settings_about_discord	0061	Dołącz do społeczności: %s
+settings_about_github	b59f	Zgłoś błędy i problemy: %s
+settings_about_header	96de	O systemie
+settings_about_made_by	f019	Stworzone przez Dawn Larsson
 settings_already_joined	71fb	już połączono z %s
 settings_already_set	0053	już ustawione
 settings_any_text	89dc	dowolne polecenie, jak słowa po moonwater: czasownik, potem argumenty
@@ -239,6 +243,7 @@ settings_role_swap	d36e	Wymiana
 settings_role_other	ff95	Inne
 settings_role_free	ad01	Wolne miejsce
 settings_role_unpartitioned	3c10	Brak tablicy partycji
+settings_opened	5bd7	otwarto w przeglądarce
 settings_partitioned	70f5	%d%% w partycjach
 settings_used_of	58fb	%1$s / %2$s
 settings_partitions	9b2e	Partycje
@@ -249,6 +254,7 @@ settings_battery_idle	1635	, nie ładuje się
 settings_busy	34e0	moonwater jest zajęty: poprzednie zmiany nie są jeszcze gotowe
 settings_button_discover	c0ee	Wykryj
 settings_button_end	adad	Zakończ wszystkie
+settings_button_open	10e9	Otwórz
 settings_button_pair	f1d1	Sparuj
 settings_button_run	e66a	Uruchom
 settings_button_running	25ec	W toku

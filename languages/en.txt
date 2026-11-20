@@ -221,6 +221,10 @@ notices_item_once_now	e604	%1$s: %2$s (once, just now)
 notices_item_times	36d7	%1$s: %2$s (%3$d times, %4$d min ago)
 notices_item_times_now	8cbd	%1$s: %2$s (%3$d times, just now)
 notices_open	c9cf	Open System notices
+settings_about_discord	0061	Join the community: %s
+settings_about_github	b59f	Report bugs and issues: %s
+settings_about_header	96de	About
+settings_about_made_by	f019	Made By Dawn Larsson
 settings_already_joined	71fb	already joined to %s
 settings_already_set	0053	already set
 settings_any_text	89dc	any command, as the words after moonwater: its verb, then its arguments
@@ -234,6 +238,7 @@ settings_role_swap	d36e	Swap
 settings_role_other	ff95	Other
 settings_role_free	ad01	Free space
 settings_role_unpartitioned	3c10	No partition table
+settings_opened	5bd7	opened in browser
 settings_partitioned	70f5	%d%% partitioned
 settings_used_of	58fb	%1$s / %2$s
 settings_partitions	9b2e	Partitions
@@ -244,6 +249,7 @@ settings_battery_idle	1635	, Not charging
 settings_busy	34e0	moonwater is busy: the changes before this one are not done
 settings_button_discover	c0ee	Discover
 settings_button_end	adad	End all
+settings_button_open	10e9	Open
 settings_button_pair	f1d1	Pair
 settings_button_run	e66a	Run
 settings_button_running	25ec	Running

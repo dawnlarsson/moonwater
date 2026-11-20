@@ -224,6 +224,10 @@ notices_item_once_now	e604	%1$s: %2$s (en gång, nyss)
 notices_item_times	36d7	%1$s: %2$s (%3$d gånger, för %4$d min sedan)
 notices_item_times_now	8cbd	%1$s: %2$s (%3$d gånger, nyss)
 notices_open	c9cf	Öppna systemmeddelanden
+settings_about_discord	0061	Gå med i gemenskapen: %s
+settings_about_github	b59f	Rapportera buggar och fel: %s
+settings_about_header	96de	Om
+settings_about_made_by	f019	Skapad av Dawn Larsson
 settings_already_joined	71fb	redan ansluten till %s
 settings_already_set	0053	redan inställd
 settings_any_text	89dc	valfritt kommando, som orden efter moonwater: verbet och sedan argumenten
@@ -239,6 +243,7 @@ settings_role_swap	d36e	Swap
 settings_role_other	ff95	Annat
 settings_role_free	ad01	Ledigt utrymme
 settings_role_unpartitioned	3c10	Ingen partitionstabell
+settings_opened	5bd7	öppnad i webbläsaren
 settings_partitioned	70f5	%d %% partitionerat
 settings_used_of	58fb	%1$s / %2$s
 settings_partitions	9b2e	Partitioner
@@ -249,6 +254,7 @@ settings_battery_idle	1635	, laddar inte
 settings_busy	34e0	moonwater är upptaget: ändringarna före den här är inte klara
 settings_button_discover	c0ee	Upptäck
 settings_button_end	adad	Avsluta alla
+settings_button_open	10e9	Öppna
 settings_button_pair	f1d1	Para ihop
 settings_button_run	e66a	Kör
 settings_button_running	25ec	Pågår
