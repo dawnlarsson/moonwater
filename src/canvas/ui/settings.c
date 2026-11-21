@@ -1744,6 +1744,8 @@ static unsigned int settings_map_load(unsigned int address_to number)
         for (unsigned int at = 0; settings.map.sent && at < count; at++)
                 settings.map.node[at].x = settings.map.sent_x[at], settings.map.node[at].y = settings.map.sent_y[at];
         g->nodes = (int)count;
+        if (g->held >= (int)count)
+                ui_graph_let_go(g);
         g->chosen = settings.map.display < (int)count ? settings.map.display : -1;
         g->keys = settings.map.keys;
         // A screen plugged in or taken out is a new desk: the next picture frames it (the camera moves for nothing else).
@@ -6626,7 +6628,10 @@ static fn settings_close(void)
 static b32 settings_focus(b32 focused)
 {
         if (!focused)
+        {
+                ui_graph_let_go(&settings.map.graph);
                 ui_page_let_go(&settings.ui, &settings.page, &settings.list);
+        }
         return true;
 }
 

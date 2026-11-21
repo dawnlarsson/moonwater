@@ -3075,7 +3075,7 @@ static long files_tick(long timeout, long address_to other)
         if (m->walking)
         {
                 b64 began = (b64)ui_kit_clock();
-                b32 more = true;
+                b32 more = true, reveal_came = !m->reloading && m->came[0] != 0;
 
                 while (more && (b64)ui_kit_clock() - began < FILES_TURN_NS)
                         more = files_model_step(m, FILES_STEP);
@@ -3083,7 +3083,7 @@ static long files_tick(long timeout, long address_to other)
                 {
                         files.next_show = now + FILES_SHOW_NS;
                         files.dirty |= files.seen != m->revision;
-                        if (!more && !files.big->list.scroll.scroll && !ui_body_going(&files.big->list.scroll.body))
+                        if (!more && reveal_came && !files.big->list.scroll.scroll && !ui_body_going(&files.big->list.scroll.body))
                                 files_show_cursor();
                 }
                 return more ? 1 : timeout;

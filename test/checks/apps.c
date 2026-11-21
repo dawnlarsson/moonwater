@@ -1182,10 +1182,10 @@ static fn columns_check(struct ui address_to wui)
                 columns_drag(wui, &c, COLUMNS_AT(460), COLUMNS_HAND(460, 40));
                 name_right = c.wide[0] == 500 && c.at[1] == 500 && c.wide[1] == 90 && c.at[2] == 590 && c.wide[2] == 110 && c.at[3] == 700;
                 columns_drag(wui, &c, COLUMNS_AT(500), COLUMNS_HAND(500, -80));
-                name_left = c.wide[0] == 420 && c.at[1] == 420 && c.wide[1] == 90 && c.wide[2] == 110 && c.wide[3] == 140;
-                // Size's end, at 510, taken 50 along: Size 140, Name as it was, Type and Modified moved along by 50.
+                name_left = c.wide[0] == 420 && c.at[1] == 420 && c.wide[1] == 90 && c.wide[2] == 110 && c.wide[3] == 180;
+                // Size's end, at 510, taken 50 along: Size 140, Name as it was, Type and Modified moved along by 50 (Modified locked to x + w).
                 columns_drag(wui, &c, COLUMNS_AT(510), COLUMNS_HAND(510, 50));
-                size_right = c.wide[0] == 420 && c.wide[1] == 140 && c.at[2] == 560 && c.wide[2] == 110 && c.at[3] == 670 && c.wide[3] == 140;
+                size_right = c.wide[0] == 420 && c.wide[1] == 140 && c.at[2] == 560 && c.wide[2] == 110 && c.at[3] == 670 && c.wide[3] == 130;
                 columns_drag(wui, &c, COLUMNS_AT(560), COLUMNS_HAND(560, -20));
                 size_left = c.wide[0] == 420 && c.wide[1] == 120 && c.at[2] == 540;
                 // Narrower than the least is the least, and its end is still there to widen it again.

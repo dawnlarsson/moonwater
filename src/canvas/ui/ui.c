@@ -21128,18 +21128,22 @@ static fn ui_graph_face(struct ui address_to ui, const struct ui_graph address_t
 
                 cx0 = cx0 < 0 ? 0 : cx0, cx1 = cx1 > ui->width ? ui->width : cx1, cy0 = cy0 < 0 ? 0 : cy0, cy1 = cy1 > ui->height ? ui->height : cy1;
                 cy0 = cy0 > g->y ? cy0 : g->y, cy1 = cy1 < g->y + g->h ? cy1 : g->y + g->h;
-                if (ui->scene && cx1 > cx0 && cy1 > cy0)
-                        ui->scene->lost = UI_LOST_NOTHING;
-                for (int y = cy0; y < cy1; y++)
+                if (ui->scene)
                 {
-                        const unsigned int address_to from = n->picture + (long)((b64)(y - py0) * n->picture_h / (py1 - py0)) * n->picture_w;
-                        unsigned int address_to into = ui->pixels + (long)y * (long)ui->pitch;
-
-                        if (!ui_in_band(ui, y))
-                                continue;
-                        for (int x = cx0; x < cx1; x++)
-                                into[x] = from[(b64)(x - px0) * n->picture_w / (px1 - px0)];
+                        if (cx1 > cx0 && cy1 > cy0)
+                                ui->scene->lost = UI_LOST_NOTHING;
                 }
+                else
+                        for (int y = cy0; y < cy1; y++)
+                        {
+                                const unsigned int address_to from = n->picture + (long)((b64)(y - py0) * n->picture_h / (py1 - py0)) * n->picture_w;
+                                unsigned int address_to into = ui->pixels + (long)y * (long)ui->pitch;
+
+                                if (!ui_in_band(ui, y))
+                                        continue;
+                                for (int x = cx0; x < cx1; x++)
+                                        into[x] = from[(b64)(x - px0) * n->picture_w / (px1 - px0)];
+                        }
         }
         if (n->flags & UI_GRAPH_MARKED)
         {
@@ -22632,7 +22636,10 @@ static void ui_cell_line(struct ui address_to ui, int x, int y, int width, int h
 {
         // A cell's text is not recorded (the font blend on a ground, R4 in the note): the frame is the picture's, painted here.
         if (ui->scene)
+        {
                 ui->scene->lost = UI_LOST_CELL_TEXT;
+                return;
+        }
         const font_face address_to faces[1] = {ui->regular};
         p32 em = (p32)(height * 11 / 20) << 6;
         font_metrics grid = font_metrics_at(ui->regular, em);
@@ -22659,7 +22666,10 @@ static void ui_cell_turned(struct ui address_to ui, int x, int y, int width, int
 {
         // A turned cell's text is not recorded either (R4): the frame is the picture's.
         if (ui->scene)
+        {
                 ui->scene->lost = UI_LOST_CELL_TEXT;
+                return;
+        }
         const font_face address_to faces[1] = {ui->regular};
         p32 em = (p32)(width * 11 / 20) << 6;
         font_metrics grid = font_metrics_at(ui->regular, em);
@@ -23423,7 +23433,10 @@ static fn ui_icon_tile(struct ui address_to ui, int left, int top, int size, con
                 int pad;
 
                 if (ui->scene)
+                {
                         ui->scene->lost = UI_LOST_CELL_TEXT;
+                        return;
+                }
                 pad = (size - (int)(font_draw(ui->engine, faces, 1, (const p8 address_to)letter, length, em, 0, &nowhere, 0, 0, 0xffffff, tone) >> 16)) / 2;
                 font_draw(ui->engine, faces, 1, (const p8 address_to)letter, length, em, 0, &here, (b32)(pad > 0 ? pad : 0) << 16,
                           (size - grid.cell_height) / 2 + grid.baseline, 0xffffff, tone);
@@ -23456,7 +23469,10 @@ static fn ui_icon_picture(struct ui address_to ui, int left, int top, int size, 
         if (size <= 0 || size > UI_PICTURE_MOST || left < 0 || left + size > ui->width)
                 return;
         if (ui->scene)
+        {
                 ui->scene->lost = UI_LOST_CELL_TEXT;
+                return;
+        }
         for (int row = 0; row < size; row++)
         {
                 unsigned int address_to into = ui->pixels + (long)(top + row) * (long)ui->pitch + left;
@@ -25687,6 +25703,8 @@ struct ui_columns
         int x, y, w, h;
         int at[UI_COLUMNS_MOST], wide[UI_COLUMNS_MOST];
         int hover, held, held_edge; // held -1 when no edge is (an app sets it so at the start)
+        int trailing_min;           // logical pixels reserved in the last column for trailing controls (switches/tabs/buttons)
+        int ref_w;                  // logical list width when columns were manually adjusted (for proportional resize)
         struct ui_splitter split;
 };
 
@@ -27262,7 +27280,7 @@ static fn ui_row_label_about(struct ui address_to ui, struct ui_row_parts addres
         from the right every place is turned over the list's middle.
 */
 static fn ui_list_cells(struct ui address_to ui, const struct ui_list address_to l, const struct ui_columns address_to c,
-                        const struct ui_row address_to row, int y, int height, unsigned int ink, unsigned int quiet)
+                        const struct ui_row address_to row, int y, int height, unsigned int ink, unsigned int quiet, int trailing_w)
 {
         int pad = ui_dev(ui, UI_INSET), gap = ui_dev(ui, 8), set_in = ui_dev(ui, UI_INDENT) * row->indent + (row->expander ? ui_dev(ui, UI_INDENT) : 0);
         int baseline = ui_kit_baseline(ui, y + (height - ui_dev(ui, 20)) / 2, UI_BODY_MEDIUM), count = c ? c->count : 1;
@@ -27284,10 +27302,11 @@ static fn ui_list_cells(struct ui address_to ui, const struct ui_list address_to
         {
                 const char address_to words = k ? row->cells[k] : row->label;
                 int x = c ? c->at[k] : l->x, w = c ? (span_all && !k ? span : ui_columns_end(c, k)) : l->w, width;
+                int right_pad = (k == count - 1) ? pad : gap;
                 string_address shown;
 
                 x += k ? gap : pad + set_in;
-                w -= (k ? gap : pad + set_in) + gap;
+                w -= (k ? gap : pad + set_in) + right_pad;
                 // A non-selectable list's mark (a joined network): an accent dot before its label in the first column.
                 if (!k && row->mark && !l->selected && w > 0)
                 {
@@ -27305,6 +27324,9 @@ static fn ui_list_cells(struct ui address_to ui, const struct ui_list address_to
                         ui_file_icon(ui, row->file - 1, null, ui_mirror(x, size, left, span), y + (height - size) / 2, size, quiet);
                         x += size + ui_dev(ui, 8), w -= size + ui_dev(ui, 8);
                 }
+                // Reserve trailing control width (switches, segmented tabs, buttons) at the end of the last column so cell text never collides.
+                if (k == count - 1 && trailing_w > 0 && w > 0)
+                        w -= trailing_w + ui_dev(ui, 6);
                 // Signal bars sit at the end of the last column in a details list (e.g. Wi-Fi signal strength).
                 if (row->bars > 0 && k == count - 1 && w > 0)
                 {
@@ -27331,46 +27353,168 @@ static b32 ui_list_tree_chevron_at(const struct ui address_to ui, const struct u
         return x >= -ui_dev(ui, 4) && x < ui_dev(ui, UI_INDENT);
 }
 
+#define UI_COLUMNS_MIN_L(c, k) ((k) == (c)->count - 1 && (c)->trailing_min > UI_COLUMNS_LEAST ? (c)->trailing_min : UI_COLUMNS_LEAST)
+#define UI_ROW_TRAILING_NEED(row, tr)                                                                                                      \
+        ((row)->kind == UI_ROW_SWITCH                                                                                                      \
+             ? UI_SWITCH_W + UI_INSET + 8                                                                                                  \
+             : (tr) && (tr)->w > 0 &&                                                                                                      \
+                       ((row)->kind == UI_ROW_TABS || (row)->kind == UI_ROW_BUTTON || (row)->kind == UI_ROW_SWATCHES ||                    \
+                        (row)->kind == UI_ROW_SLIDER)                                                                                      \
+                   ? (tr)->w + UI_INSET + 8                                                                                                \
+                   : 0)
+
+// Scans a columned section from start_at so the last column reserves room for any trailing controls before layout.
+static fn ui_list_columns_fit(struct ui address_to ui, struct ui_list address_to l, int start_at, struct ui_columns address_to c)
+{
+        int need = 0;
+
+        if (!c || l->virtual)
+                return;
+        for (int j = start_at; j < l->count && (j == start_at || !(l->starts[j] & UI_LIST_STARTS)); j++)
+        {
+                struct ui_row row;
+                struct ui_control address_to trailing;
+                int one;
+
+                ui_list_describe(l, ui_list_id(l, j), &row);
+                if (row.columns != c)
+                        continue;
+                trailing = ui_list_trailing(ui, l, ui_list_id(l, j), &row);
+                one = UI_ROW_TRAILING_NEED(&row, trailing);
+                if (one > need)
+                        need = one;
+        }
+        c->trailing_min = need;
+}
+
 /*
-        The header's columns placed across [x, x + w) (device pixels), one after another from the start, each as wide as the app says
-        (never less than the least). Until an edge has been held the first has no width of its own and is what the others leave, and
-        where the others would leave it less than two fifths of the width they give way together, each in its share, down to the least:
-        a narrow window keeps the names readable, and its other columns are cut first. Once the first has a width every column keeps
-        its own, the room past the last is the list's ground, and columns past the end are cut there (ui_columns_end).
+        The header's columns placed across [x, x + w) (device pixels), one after another from the start, with the last column
+        always locked flush to x + w. Until an edge has been held the first column takes what the others leave (yielding others
+        above their minimums when narrow so trailing controls stay protected); after manual adjustment, columns scale with window
+        resizes while keeping every column inside [x, x + w) and locking the last column's right edge to x + w.
 */
 static fn ui_columns_layout(const struct ui address_to ui, struct ui_columns address_to c, int x, int y, int w)
 {
-        int others = 0, at = x, least = ui_dev(ui, UI_COLUMNS_LEAST), first = w * 2 / 5 > least ? w * 2 / 5 : least, room = w - first;
+        int count, mins[UI_COLUMNS_MOST], at = x, last;
 
-        c->count = c->count < 1 ? 1 : c->count > UI_COLUMNS_MOST ? UI_COLUMNS_MOST : c->count;
+        count = c->count = c->count < 1 ? 1 : c->count > UI_COLUMNS_MOST ? UI_COLUMNS_MOST : c->count;
+        last = count - 1;
         c->x = x, c->y = y, c->w = w, c->h = ui_dev(ui, UI_COLUMNS_H);
-        for (int k = c->width[0] > 0 ? 0 : 1; k < c->count; k++)
-                c->width[k] = c->width[k] < UI_COLUMNS_LEAST ? UI_COLUMNS_LEAST : c->width[k], others += ui_dev(ui, c->width[k]);
-        for (int k = 0; k < c->count; k++)
+        if (count == 1 || w <= 0)
         {
-                int wide = c->width[0] > 0 || k ? ui_dev(ui, c->width[k]) : 0;
+                for (int k = 0; k < count; k++)
+                        c->at[k] = x, c->wide[k] = !k && w > 0 ? w : 0;
+                return;
+        }
+        for (int k = 0; k < count; k++)
+                mins[k] = ui_dev(ui, UI_COLUMNS_MIN_L(c, k));
+        for (int k = c->width[0] > 0 ? 0 : 1; k < count; k++)
+        {
+                int ml = UI_COLUMNS_MIN_L(c, k);
 
-                if (c->width[0] <= 0 && k && others > room && others > 0)
-                        wide = (int)((long)wide * (room > 0 ? room : 0) / others), wide = wide < least ? least : wide;
-                c->at[k] = at, c->wide[k] = wide, at += wide;
+                if (c->width[k] < ml)
+                        c->width[k] = ml;
         }
         if (c->width[0] <= 0)
         {
-                c->wide[0] = w - (at - x) > least ? w - (at - x) : least;
-                for (int k = 1; k < c->count; k++)
-                        c->at[k] = c->at[k - 1] + c->wide[k - 1];
+                int first = w * 2 / 5 > mins[0] ? w * 2 / 5 : mins[0];
+                int room = w > first ? w - first : 0, others = 0, min_others = 0;
+
+                for (int k = 1; k < count; k++)
+                        c->wide[k] = ui_dev(ui, c->width[k]), others += c->wide[k], min_others += mins[k];
+                if (others > room)
+                {
+                        if (room >= min_others)
+                        {
+                                int extra = room - min_others, surplus = others - min_others;
+
+                                others = 0;
+                                for (int k = 1; k < count; k++)
+                                {
+                                        int add = surplus > 0 ? (int)((b64)extra * (c->wide[k] - mins[k]) / surplus) : 0;
+
+                                        c->wide[k] = mins[k] + add, others += c->wide[k];
+                                }
+                        }
+                        else
+                        {
+                                others = 0;
+                                for (int k = 1; k < count; k++)
+                                        c->wide[k] = mins[k], others += c->wide[k];
+                        }
+                }
+                if (w >= mins[0] + others)
+                        c->wide[0] = w - others;
+                else
+                {
+                        int keep = mins[last] < w ? mins[last] : w, rem = w - keep, sum_pre = 0, used = 0;
+
+                        c->wide[last] = keep;
+                        for (int k = 0; k < last; k++)
+                                c->wide[k] = k ? ui_dev(ui, c->width[k]) : first, sum_pre += c->wide[k];
+                        for (int k = 0; k < last; k++)
+                        {
+                                c->wide[k] = sum_pre > 0 ? (int)((b64)rem * c->wide[k] / sum_pre) : rem / last;
+                                used += c->wide[k];
+                        }
+                        c->wide[0] += rem - used;
+                }
         }
+        else
+        {
+                int ref = c->ref_w > 0 ? ui_dev(ui, c->ref_w) : 0;
+                int pre_sum = 0, pre_min = 0;
+
+                for (int k = 0; k < last; k++)
+                {
+                        int want = ui_dev(ui, c->width[k]);
+
+                        if (ref > 0 && ref != w)
+                                want = (int)((b64)want * w / ref);
+                        if (want < mins[k])
+                                want = mins[k];
+                        c->wide[k] = want, pre_sum += want, pre_min += mins[k];
+                }
+                if (pre_sum + mins[last] <= w)
+                        c->wide[last] = w - pre_sum;
+                else if (pre_min + mins[last] <= w)
+                {
+                        int allow = w - mins[last], extra = allow - pre_min, surplus = pre_sum - pre_min, used = 0;
+
+                        for (int k = 0; k < last; k++)
+                        {
+                                int add = surplus > 0 ? (int)((b64)extra * (c->wide[k] - mins[k]) / surplus) : 0;
+
+                                c->wide[k] = mins[k] + add, used += c->wide[k];
+                        }
+                        c->wide[last] = w - used;
+                }
+                else
+                {
+                        int keep = mins[last] < w ? mins[last] : w, rem = w - keep, used = 0;
+
+                        c->wide[last] = keep;
+                        for (int k = 0; k < last; k++)
+                        {
+                                c->wide[k] = pre_sum > 0 ? (int)((b64)rem * c->wide[k] / pre_sum) : rem / last;
+                                used += c->wide[k];
+                        }
+                        c->wide[0] += rem - used;
+                }
+        }
+        for (int k = 0; k < count; k++)
+                c->at[k] = at, at += c->wide[k];
+        c->wide[last] = x + w - c->at[last];
 }
 
-// The edge a point is on (the number of the column it ends), or -1: each column's end, UI_COLUMN_EDGE either side, within the header; the
-// nearest when two are in reach, and the later one where they meet, so a column pressed narrow to the least is still widened from its end.
+// The edge a point is on (the divider ending column k, 0 <= k < count - 1), or -1: the last column is locked to x + w and not draggable.
 static int ui_columns_edge(const struct ui address_to ui, const struct ui_columns address_to c, int px, int py)
 {
         int x = ui_point(px, c->x, c->w), reach = ui_dev(ui, UI_COLUMN_EDGE), found = -1, best = reach;
 
         if (py < c->y || py >= c->y + c->h)
                 return -1;
-        for (int k = 0; k < c->count; k++)
+        for (int k = 0; k < c->count - 1; k++)
         {
                 int edge = c->at[k] + c->wide[k], off = x - edge;
 
@@ -27405,7 +27549,8 @@ static fn ui_columns_draw(struct ui address_to ui, const struct ui_columns addre
 
         for (int k = 0; k < c->count; k++)
         {
-                int x = c->at[k] + (k ? gap : pad), w = ui_columns_end(c, k) - (k ? gap : pad) - gap, width;
+                int right_pad = (k == c->count - 1) ? pad : gap;
+                int x = c->at[k] + (k ? gap : pad), w = ui_columns_end(c, k) - (k ? gap : pad) - right_pad, width;
                 b32 sorted = k == c->sorted;
                 string_address shown;
 
@@ -27421,7 +27566,7 @@ static fn ui_columns_draw(struct ui address_to ui, const struct ui_columns addre
                                 x += w - width;
                         ui_kit_text(ui, ui_mirror(x, width, c->x, c->w), baseline, shown, UI_LABEL_MEDIUM, sorted || k == c->hover ? strong : quiet, 0);
                 }
-                if (c->at[k] + c->wide[k] < c->x + c->w)
+                if (k + 1 < c->count && c->at[k] + c->wide[k] < c->x + c->w)
                 {
                         struct ui_box sep = ui_box_px(ui_mirror(c->at[k] + c->wide[k], line, c->x, c->w), c->y + c->h / 3, line, c->h / 3, 0);
 
@@ -27436,20 +27581,26 @@ static fn ui_columns_draw(struct ui address_to ui, const struct ui_columns addre
 }
 
 /*
-        The hand on the header: over an edge the pointer says it resizes, and a press there holds it: the edge is a column's end, and the
-        column follows the hand (wider as the hand goes the way the header reads, never narrower than the least), the columns after it
-        moving along; the first's width is taken as it is shown when an edge is first held, so from then on no column gives way for
-        another. A press on a title orders the rows by it, a press on the title they are ordered by turns the order round. UI_COLUMNS_*
-        say what came of it. Events off the header (but the held edge's motion and release) are not its.
+        The hand on the header: over an internal divider the pointer says it resizes, and a press there holds it: the divider is
+        column k's end (0 <= k < count - 1), and the column follows the hand (clamped between UI_COLUMNS_LEAST and what leaves the
+        remaining columns at least their minimums, keeping the last column locked to x + w). A press on a title orders the rows by
+        it, a press on the title they are ordered by turns the order round. UI_COLUMNS_* say what came of it.
 */
 static p32 ui_columns_event(struct ui address_to ui, struct ui_columns address_to c, const struct window_event address_to event, int x, int y)
 {
         b32 down = (event->flags & WINDOW_KEY_DOWN) != 0;
-        int was = c->hover, edge;
+        int was = c->hover, edge, scale = ui->scale > 0 ? ui->scale : 100;
+        int total_l = c->w > 0 ? c->w * 100 / scale : 0;
 
         if (c->held >= 0)
         {
-                p32 r = ui_splitter_event(ui, &c->split, event, x, false, UI_COLUMNS_LEAST, 0, 0, 0, &c->width[c->held]);
+                int used = UI_COLUMNS_MIN_L(c, c->count - 1);
+
+                for (int k = 0; k < c->count - 1; k++)
+                        if (k != c->held)
+                                used += c->width[k] < UI_COLUMNS_LEAST ? UI_COLUMNS_LEAST : c->width[k];
+                p32 r = ui_splitter_event(ui, &c->split, event, x, false, UI_COLUMNS_LEAST, total_l > used ? total_l - used : UI_COLUMNS_LEAST, 0, 0,
+                                          &c->width[c->held]);
 
                 if (r & UI_SPLITTER_MOVED)
                         ui_columns_layout(ui, c, c->x, c->y, c->w);
@@ -27471,9 +27622,16 @@ static p32 ui_columns_event(struct ui address_to ui, struct ui_columns address_t
                 return 0;
         if ((edge = ui_columns_edge(ui, c, x, y)) >= 0)
         {
-                if (c->width[0] <= 0)
-                        c->width[0] = c->wide[0] * 100 / (ui->scale > 0 ? ui->scale : 100);
-                ui_splitter_event(ui, &c->split, event, x, true, UI_COLUMNS_LEAST, 0, 0, c->width[edge], &c->width[edge]);
+                int used = UI_COLUMNS_MIN_L(c, c->count - 1);
+
+                for (int k = 0; k < c->count; k++)
+                        c->width[k] = (c->wide[k] * 100 + scale / 2) / scale;
+                c->ref_w = (c->w * 100 + scale / 2) / scale;
+                for (int k = 0; k < c->count - 1; k++)
+                        if (k != edge)
+                                used += c->width[k] < UI_COLUMNS_LEAST ? UI_COLUMNS_LEAST : c->width[k];
+                ui_splitter_event(ui, &c->split, event, x, true, UI_COLUMNS_LEAST, total_l > used ? total_l - used : UI_COLUMNS_LEAST, 0, c->width[edge],
+                                  &c->width[edge]);
                 c->held_edge = c->held = edge;
                 ui_columns_layout(ui, c, c->x, c->y, c->w);
                 return UI_COLUMNS_DRAW | UI_COLUMNS_TAKEN;
@@ -27510,6 +27668,7 @@ static p32 ui_list_columns_event(struct ui address_to ui, struct ui_list address
                 if (!c)
                         continue;
                 hy = ui_list_row_y(l, at) - col_h;
+                ui_list_columns_fit(ui, l, at, c);
                 ui_columns_layout(ui, c, l->x, hy, l->w);
                 if (c->held >= 0)
                 {
@@ -27632,10 +27791,32 @@ static fn ui_list_row(struct ui address_to ui, struct ui_list address_to l, int 
                 if (ui->glass && !row.tall)
                         quiet = ink;
         }
+        // Keep column layout synchronized with the list width and trailing control requirement before placing row controls.
+        {
+                struct ui_columns address_to cols = row.columns && row.kind != UI_ROW_FIELD ? row.columns : l->columns;
+
+                if (cols)
+                {
+                        int need = UI_ROW_TRAILING_NEED(&row, trailing);
+
+                        if (need > cols->trailing_min)
+                                cols->trailing_min = need;
+                        if (cols->x != l->x || cols->w != l->w ||
+                            (cols->count > 0 && cols->wide[cols->count - 1] < ui_dev(ui, UI_COLUMNS_MIN_L(cols, cols->count - 1))))
+                                ui_columns_layout(ui, cols, l->x, cols->y, l->w);
+                        if (trailing && trailing->w > 0 && cols->count > 0)
+                        {
+                                int last = cols->count - 1, end_x = cols->at[last] + cols->wide[last] - ui_dev(ui, UI_INSET);
+
+                                trailing->x = ui_rtl() ? ui_logical(ui, cols->x + ui_dev(ui, UI_INSET)) : ui_logical(ui, end_x) - trailing->w;
+                        }
+                }
+        }
         // The row's own control: a switch is its row's (the kit's switch is a row), any other row the list's row.
         if (own)
         {
                 unsigned char kind = p->toggle ? UI_SWITCH : UI_LIST_ROW;
+                struct ui_columns address_to cols = row.columns && row.kind != UI_ROW_FIELD ? row.columns : l->columns;
 
                 if (own->kind != kind)
                 {
@@ -27649,7 +27830,15 @@ static fn ui_list_row(struct ui address_to ui, struct ui_list address_to l, int 
                 own->hover = l->hover == id, own->down = l->down == id;
                 own->disabled = row.kind == UI_ROW_FIELD || (row.kind == UI_ROW_BUTTON && row.dim);
                 if (kind == UI_SWITCH)
+                {
                         own->on = row.on, own->w = UI_SWITCH_W, own->h = 48, ui_row_control(ui, own, p->toggle);
+                        if (cols && cols->count > 0)
+                        {
+                                int last = cols->count - 1, end_x = cols->at[last] + cols->wide[last] - ui_dev(ui, UI_INSET);
+
+                                own->x = ui_rtl() ? ui_logical(ui, cols->x + ui_dev(ui, UI_INSET)) : ui_logical(ui, end_x) - own->w;
+                        }
+                }
                 ui_control_draw(ui, own);
         }
         // The app's picture, in its part at the row's end.
@@ -27670,8 +27859,8 @@ static fn ui_list_row(struct ui address_to ui, struct ui_list address_to l, int 
                 }
                 if (cols || l->tree)
                 {
-                        if (cols && (cols->x != l->x || cols->w != l->w))
-                                ui_columns_layout(ui, cols, l->x, cols->y, l->w);
+                        int trailing_w = row.kind == UI_ROW_SWITCH ? ui_dev(ui, UI_SWITCH_W) : trailing && trailing->w > 0 ? ui_dev(ui, trailing->w) : 0;
+
                         if (row.glow)
                         {
                                 struct ui_box glow = {across * 256, y * 256, (across + across_w) * 256, (y + height) * 256, 0, 0};
@@ -27682,7 +27871,7 @@ static fn ui_list_row(struct ui address_to ui, struct ui_list address_to l, int 
                         if (row.mark && l->selected)
                                 ui_kit_fill(ui, &(struct ui_box){across * 256, y * 256, (across + across_w) * 256, (y + height) * 256, 0, 0},
                                             0x38000000u | (ui_role(UI_PRIMARY) & 0xffffffu), null);
-                        ui_list_cells(ui, l, cols, &row, row.tall ? y + ui_dev(ui, UI_DRIVE_TOP) : y, row.tall ? ui_drive_part(ui, UI_DRIVE_LINE) : height, ink, quiet);
+                        ui_list_cells(ui, l, cols, &row, row.tall ? y + ui_dev(ui, UI_DRIVE_TOP) : y, row.tall ? ui_drive_part(ui, UI_DRIVE_LINE) : height, ink, quiet, trailing_w);
                         if (trailing)
                                 ui_control_draw(ui, trailing);
                         if (row.tall)
@@ -27848,6 +28037,7 @@ static fn ui_list_draw(struct ui address_to ui, struct ui_list address_to l)
                                                             ui_text_colour(ui, UI_ON_SURFACE_VARIANT), 0, l->x, l->w);
                                 if ((l->starts[at] & UI_LIST_COLUMNS) && row.columns && y > l->y && y - col_h < l->y + l->h)
                                 {
+                                        ui_list_columns_fit(ui, l, at, row.columns);
                                         ui_columns_layout(ui, row.columns, l->x, y - col_h, l->w);
                                         ui_columns_draw(ui, row.columns);
                                 }
