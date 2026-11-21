@@ -4767,7 +4767,7 @@ static int compositor_wl_direct_try(void)
         when it went, 0 when the key is the loop's (no window of a client's has the keys as made, the key is refused with the modifiers
         held, the lock is the loop's, a rest of a send is still out, a release whose press went to another window: to, -1 for a press).
 */
-static int compositor_wl_direct_key(unsigned int code, int pressed, unsigned long *serial, int *row, int to)
+HOT static int compositor_wl_direct_key(unsigned int code, int pressed, unsigned long *serial, int *row, int to)
 {
         unsigned char bytes[COMPOSITOR_WL_DIRECT_IDS * 24];
         unsigned int length = 0, time;
@@ -4816,7 +4816,7 @@ static void compositor_wl_button_noted(unsigned int code, int pressed, unsigned 
 }
 
 // The reader's send of one locked-pointer packet (relative motion, button, and/or wheel) in one sendto(): 1 when it went, 0 when it is the loop's.
-static int compositor_wl_direct_send_packet(long dx, long dy, unsigned int btn, int btn_val, int wheel_v120, int wheel_horiz,
+HOT static int compositor_wl_direct_send_packet(long dx, long dy, unsigned int btn, int btn_val, int wheel_v120, int wheel_horiz,
                                             positive micro, unsigned long *btn_serial, int *btn_row)
 {
         unsigned char bytes[COMPOSITOR_WL_DIRECT_IDS * 96];
@@ -4913,7 +4913,7 @@ static int compositor_wl_direct_send(long dx, long dy, positive micro)
 }
 
 // Unlocked fullscreen direct wl_pointer.motion + wl_pointer.frame from the SCHED_FIFO reader thread.
-static void compositor_wl_direct_abs(int x, int y, positive now)
+HOT static void compositor_wl_direct_abs(int x, int y, positive now)
 {
         unsigned char bytes[COMPOSITOR_WL_DIRECT_IDS * 28];
         unsigned int length = 0, time_ms;

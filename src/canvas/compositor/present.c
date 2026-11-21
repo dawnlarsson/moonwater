@@ -764,7 +764,7 @@ static void compositor_card_began(positive began)
 }
 #endif
 
-static void compositor_present(void)
+HOT static void compositor_present(void)
 {
         unsigned long long began = clock_monotonic_nanoseconds(), ended;
         enum compositor_record_path path;

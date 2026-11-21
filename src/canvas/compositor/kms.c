@@ -2050,7 +2050,7 @@ static void compositor_cursor_async_sync(int active, int hot_x, int hot_y, int i
 #ifdef CONFIG_MOONWATER_WAYLAND
 static void compositor_wl_direct_abs(int x, int y, positive now);
 #endif
-static void compositor_cursor_async_step(long dx, long dy, positive now)
+HOT static void compositor_cursor_async_step(long dx, long dy, positive now)
 {
         int gain, ax, ay, nx, ny, left, top;
 

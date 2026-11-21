@@ -79,8 +79,15 @@
 #       on any byte left a loop's branch targets wherever they fell: sh-case
 #       took 96M cycles packed and 88M aligned, sh-param, sh-read and cut -c
 #       a few percent less again, for under 200 KB of image.
-#> program_flags -march=x86-64 -mno-avx -mno-bmi -mno-bmi2 -falign-functions=32
+#> program_flags -march=x86-64 -mno-avx -mno-bmi -mno-bmi2 -falign-functions=32 -falign-loops=16 -falign-jumps=16
 #> program_flags -ffunction-sections
+
+# FPU debug checks run on every context switch when DEBUG_KERNEL unhides them.
+CONFIG_X86_DEBUG_FPU=n
+# AMD PMU drivers (match prod's disabling of Intel uncore/RAPL/cstate PMUs).
+CONFIG_PERF_EVENTS_AMD_POWER=n
+CONFIG_PERF_EVENTS_AMD_UNCORE=n
+CONFIG_PERF_EVENTS_AMD_BRS=n
 
 
 CONFIG_64BIT=y

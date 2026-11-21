@@ -17,7 +17,7 @@
 #
 #> program_flags -fdata-sections
 #> program_flags -Qn -Wl,--build-id=none -Wl,--gc-sections -Wl,--strip-all -Wl,--strip-debug -Wl,-x -Wl,-s
-#> program_flags -O2 -fwhole-program -fipa-pta -Wl,-nmagic -fno-asynchronous-unwind-tables -fomit-frame-pointer -fno-stack-protector
+#> program_flags -O2 -fwhole-program -fipa-pta -Wl,-nmagic -Wl,-O2 -fno-asynchronous-unwind-tables -fomit-frame-pointer -fno-stack-protector -fno-math-errno -fno-trapping-math
 #> program_flags -Wl,--defsym=SPARK_HOT_LIMIT=0x200000
 
 #

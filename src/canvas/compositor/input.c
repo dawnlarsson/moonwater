@@ -3521,7 +3521,7 @@ static int compositor_reader_button(unsigned int at, long dx, long dy, unsigned 
         return 1;
 }
 
-static int compositor_reader_direct(unsigned int at, const struct compositor_input_event *raw, unsigned int count)
+HOT static int compositor_reader_direct(unsigned int at, const struct compositor_input_event *raw, unsigned int count)
 {
 #ifdef CONFIG_MOONWATER_WAYLAND
         long dx = 0, dy = 0;
@@ -3609,7 +3609,7 @@ static b32 compositor_reader_owed(void)
 
 static unsigned int compositor_spark_want;
 
-static unsigned int compositor_reader_spark_drain(struct spark_input_ring *ring, positive *last_ns)
+HOT static unsigned int compositor_reader_spark_drain(struct spark_input_ring *ring, positive *last_ns)
 {
         unsigned long long tail, head;
         unsigned int count = 0, forwarded = 0;
@@ -3711,7 +3711,7 @@ static struct spark_input_ring *compositor_reader_spark_open(void)
         return system_close(fd), (struct spark_input_ring *)0;
 }
 
-static fn compositor_reader_run(address_any context)
+HOT static fn compositor_reader_run(address_any context)
 {
         static int watched[COMPOSITOR_INPUTS];
         static unsigned int generations[COMPOSITOR_INPUTS];
