@@ -1142,7 +1142,7 @@ static bipolar bowl_isolated_populate(void)
                 struct bowl_mount_point address_to point =
                     bowl_isolated_mounts + i;
                 string_address data =
-                    string_equals(point->target, "/dev/shm") ? "mode=1777" : 0;
+                    (string_equals(point->target, "/dev/shm") || string_equals(point->target, "/tmp")) ? "mode=1777" : 0;
 
                 failed = bowl_mkdir(point->target);
                 if (!failed)
@@ -2813,7 +2813,7 @@ static b32 bowl_env_named(string_address entry, string_address name)
 #define BOWL_USER_ID_TEXT "1000"
 #define BOWL_USER_NAME "user"
 #define BOWL_ENV_ROOM 512
-#define BOWL_ENV_DEFAULTS 18
+#define BOWL_ENV_DEFAULTS 32
 
 static p8 bowl_runtime_path[sizeof(BOWL_RUNTIME_DIR) + 20]
     __attribute__((section(".bss.hot")));
@@ -3880,6 +3880,8 @@ static string_address address_to bowl_environment(
                 mixed[n++] = (string_address) "ELECTRON_OZONE_PLATFORM_HINT=auto";
         if (offer_wayland && !have_moz_wayland && !have_display)
                 mixed[n++] = (string_address) "MOZ_ENABLE_WAYLAND=1";
+        if (offer_wayland && !have_display)
+                mixed[n++] = (string_address) "QT_QPA_PLATFORM=wayland";
         if (language && !have_language)
                 mixed[n++] = language;
         if (offer_mailbox && !have_vk_present)
@@ -4538,10 +4540,10 @@ static fn bowl_own_namespace(void)
 #define BOWL_RLIMIT_MEMLOCK 8
 #define BOWL_RLIMIT_NICE 13
 #define BOWL_RLIMIT_RTPRIO 14
-#define BOWL_NOFILE_TARGET ((p64)524288)
-#define BOWL_MEMLOCK_TARGET ((p64)64 * 1024 * 1024)
-#define BOWL_NICE_TARGET ((p64)30)
-#define BOWL_RTPRIO_TARGET ((p64)20)
+#define BOWL_NOFILE_TARGET ((p64)1048576)
+#define BOWL_MEMLOCK_TARGET ((p64)512 * 1024 * 1024)
+#define BOWL_NICE_TARGET ((p64)40)
+#define BOWL_RTPRIO_TARGET ((p64)35)
 
 static fn bowl_raise_rlimit(positive resource, p64 target)
 {
@@ -9540,7 +9542,7 @@ static const struct bowl_component bowl_graphics_components[] = {
         "[ -n \"$VK_DRIVER_FILES$VK_ICD_FILENAMES\" ] || { files=; "                                                       \
         "for vendor in /sys/class/drm/renderD*/device/vendor; do "                                                          \
         "case $(cat \"$vendor\" 2>/dev/null) in 0x1002) want=radeon ;; 0x8086) want='intel intel_hasvk' ;; "              \
-        "0x1af4) want=virtio ;; *) continue ;; esac; "                                                                      \
+        "0x10de) want='nvidia nouveau' ;; 0x1af4) want=virtio ;; *) continue ;; esac; "                                     \
         "for name in $want; do for json in " root "/usr/share/vulkan/icd.d/${name}_icd.*json; do "                        \
         "[ -e \"$json\" ] || continue; json=${json#" root "}; "                                                             \
         "case :$files: in *:$json:*) ;; *) files=${files:+$files:}$json ;; esac; done; done; done; "                       \
@@ -9582,13 +9584,14 @@ static string_address bowl_chrome_session[] = {
     "[ -n \"$XDG_SESSION_TYPE\" ] || export XDG_SESSION_TYPE=wayland",
     // GTK's settings (the file dialog's, GTK 3 inside the browser) go to memory: the session bus is Moonwater's, which has the
     // portal's Settings and no dconf, and a dconf backend would warn at every write.
-    "export GSETTINGS_BACKEND=memory",
+    "export GSETTINGS_BACKEND=memory GTK_A11Y=none",
     // GTK 3 (the file dialog in the browser) does not ask the portal what the scheme is: it is told at the start, by the theme
     // of the moment (the bus keeps it in color-scheme), unless the person has named one.
     "[ -n \"$GTK_THEME\" ] || [ \"$(cat /run/moonwater/color-scheme 2>/dev/null)\" != dark ] || export GTK_THEME=Adwaita:dark",
     "for node in /dev/dri/renderD* /dev/kfd /dev/udmabuf /dev/dma_heap/* /dev/nvidia*; do [ -c \"$node\" ] && chown 0:"
     BOWL_GROUP_RENDER_TEXT " \"$node\" && chmod 0660 \"$node\"; done 2>/dev/null",
-    "[ -c /dev/ntsync ] && chmod 0666 /dev/ntsync 2>/dev/null || true",
+    "for node in /dev/video* /dev/media*; do [ -c \"$node\" ] && chown 0:44 \"$node\" && chmod 0660 \"$node\"; done 2>/dev/null",
+    "[ -c /dev/ntsync ] && chmod 0666 /dev/ntsync 2>/dev/null && export PROTON_USE_NTSYNC=${PROTON_USE_NTSYNC:-1} PROTON_ENABLE_NTSYNC=${PROTON_ENABLE_NTSYNC:-1} || true",
     // musl 1.2.6 implements pwrite() via SYS_pwritev2, which Chromium's
     // seccomp-bpf filter traps (nr=0x148 on x86-64). Preloading our tiny
     // syscall-only shim routes pwrite* back to __NR_pwrite64 inside the bowl
@@ -12724,7 +12727,7 @@ static string_address bowl_steam_session[] = {
     "wa sdl-no-udev && export SDL_JOYSTICK_DISABLE_UDEV=1 SDL_HIDAPI_JOYSTICK_DISABLE_UDEV=1 SDL_HIDAPI_UDEV=0",
     "for node in /dev/dri/renderD* /dev/kfd /dev/udmabuf /dev/dma_heap/* /dev/nvidia*; do [ -c \"$node\" ] && chown 0:"
     BOWL_GROUP_RENDER_TEXT " \"$node\" && chmod 0660 \"$node\"; done 2>/dev/null",
-    "[ -c /dev/ntsync ] && chmod 0666 /dev/ntsync 2>/dev/null || true",
+    "[ -c /dev/ntsync ] && chmod 0666 /dev/ntsync 2>/dev/null && export PROTON_USE_NTSYNC=${PROTON_USE_NTSYNC:-1} PROTON_ENABLE_NTSYNC=${PROTON_ENABLE_NTSYNC:-1} || true",
     "gl=software; for node in /sys/class/drm/renderD*; do [ -e \"$node/device\" ] || continue; "
     "case $(cat \"$node\"/device/uevent 2>/dev/null) in *DRIVER=vgem*|*platform:vgem*|*DRIVER=vkms*) continue ;; esac; "
     "case $(cat \"$node\"/device/features \"$node\"/device/virtio*/features 2>/dev/null) in 0*) ;; *) gl=card ;; esac; done",

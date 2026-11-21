@@ -2675,7 +2675,7 @@ static int wayland_commit_ready(struct wayland_client *c, struct wayland_surface
 
         if (sync_st)
                 return sync_st < 0 ? WAYLAND_DEAD : WAYLAND_STALL;
-        if (buffer >= 0)
+        if (buffer >= 0 && !s->pending.sync_acq_set)
         {
                 struct wayland_pool *held = &c->pools[c->buffers[c->objects[buffer].link].pool];
                 if (held->dmabuf && wayland.host->dmabuf_ready && !wayland.host->dmabuf_ready(wayland.host->context, held->fd))
@@ -5982,10 +5982,10 @@ WAYLAND_API void wayland_frame(void)
         wayland.calling = 0;
 }
 
-WAYLAND_API void wayland_latch(void)
+WAYLAND_API void wayland_latch_defer(int defer_callbacks)
 {
         if (!wayland.host) return;
-        wayland.latches++, wayland.framing = wayland.calling = 1;
+        wayland.latches++, wayland.framing = 1, wayland.calling = defer_callbacks ? 0 : 1;
         for (long row = 0; row < wayland.row_made; row++)
         {
                 struct wayland_client *c;
@@ -5998,8 +5998,11 @@ WAYLAND_API void wayland_latch(void)
                 if (wayland.client[slot] && wayland.client[slot]->presenting_surfaces)
                         for (long at = 0; at < wayland.client[slot]->tbl[WLT_SURFACE].count; at++)
                                 wayland.client[slot]->surfaces[at].presentings_framed = wayland.client[slot]->surfaces[at].cbq[WLCB_PRESENTING].count;
-        wayland_callbacks_due(wayland_now());
+        if (!defer_callbacks)
+                wayland_callbacks_due(wayland_now());
 }
+
+WAYLAND_API void wayland_latch(void) { wayland_latch_defer(0); }
 
 static void wayland_presentings_done(struct wayland_client *c, struct wayland_surface *s, unsigned long when, unsigned long refresh,
                                      unsigned long seq, unsigned long flags)

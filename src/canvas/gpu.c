@@ -1221,14 +1221,17 @@ static unsigned int gpu_userptr_error(positive at, unsigned int how)
 // A dma-buf of [offset, offset + size) of a sealed memfd, through /dev/udmabuf: its descriptor, or -errno.
 static long gpu_dmabuf_make(int memfd, positive offset, positive size)
 {
+        static int udmabuf_fd = -1;
         struct { unsigned int memfd, flags; unsigned long offset, size; } create = {(unsigned int)memfd, 1, offset, size}; // UDMABUF_FLAGS_CLOEXEC
-        long udmabuf = GPU_UDMABUF_OPEN(), made;
 
-        if (udmabuf < 0)
-                return udmabuf;
-        made = GPU_CONTROL((int)udmabuf, 0x40187542u, &create); // _IOW('u', 0x42, struct udmabuf_create)
-        system_close((int)udmabuf);
-        return made;
+        if (udmabuf_fd < 0)
+        {
+                long opened = GPU_UDMABUF_OPEN();
+                if (opened < 0)
+                        return opened;
+                udmabuf_fd = (int)opened;
+        }
+        return GPU_CONTROL(udmabuf_fd, 0x40187542u, &create); // _IOW('u', 0x42, struct udmabuf_create)
 }
 
 // A dma-buf imported into the render node: its handle there, or -errno. The descriptor is closed either way (the handle holds the buffer).

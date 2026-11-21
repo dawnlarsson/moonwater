@@ -140,9 +140,9 @@ static fn host_prefix(bool label)
    bits, so it is mounted without device files only. The locked tier has no
    bowl and no one to run su, and keeps the set-user bits out as well. */
 #if MOONWATER_STRICT_HOST >= STRICT_LOCKED
-#define HOST_DATA_MOUNT (MS_NODEV | MS_NOSUID)
+#define HOST_DATA_MOUNT (MS_NODEV | MS_NOSUID | MS_NOATIME)
 #else
-#define HOST_DATA_MOUNT MS_NODEV
+#define HOST_DATA_MOUNT (MS_NODEV | MS_NOATIME)
 #endif
 #define HOST_LOCK HOST_STATE "/lock"
 #define HOST_LOCK_WAIT_NS ((p64)30000000000)

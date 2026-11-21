@@ -2157,7 +2157,6 @@ static b32 compositor_main()
                 }
                 compositor_loop_tick(now, idle_turn);
                 compositor_theme_tick(), compositor_wake_check(now), compositor_wake_pass(now);
-                if (compositor.band && taskbar_tick()) compositor_tabs_changed();
                 compositor_hold_drop(now), compositor_game_watch(), compositor_game_slice();
 #ifdef MOONWATER_GPU_C
                 compositor_gpu_late_tick(now), compositor_gpu_clocks_tick(now);

@@ -53,6 +53,8 @@ CONFIG_PREEMPT=y
 CONFIG_PREEMPT_NONE=n
 CONFIG_PREEMPT_VOLUNTARY=n
 CONFIG_PREEMPT_LAZY=n
+CONFIG_RCU_BOOST=y
+CONFIG_RCU_BOOST_DELAY=500
 
 # rseq time-slice extension lets userspace request a brief extension when an
 # interrupt lands inside a critical section, preventing lock-convoy stalls in

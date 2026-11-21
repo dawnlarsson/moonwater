@@ -5639,13 +5639,17 @@ static void compositor_wl_target_at(positive now)
 */
 static void compositor_wl_latch(void)
 {
+        int jit, defer;
+
         if (!compositor_wl.started)
                 return;
-        wayland_latch();
+        jit = compositor_wl_jit_row();
+        defer = jit >= 0 && !compositor_wl_row_async(jit);
+        wayland_latch_defer(defer);
         compositor_wl.latched_at = clock_monotonic_nanoseconds();
         compositor_wl.landed = 0;
-        // The callbacks the latch answered go now, before the frame is composed: the clients draw while it is.
-        compositor_wl_flush_all();
+        if (!defer)
+                compositor_wl_flush_all();
 }
 
 /* Resume clients whose frame-barrier hold cleared when wayland_frame() advanced the frame count. */

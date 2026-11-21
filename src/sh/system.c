@@ -659,7 +659,10 @@ static COLD fn system_zram_setup(void)
         if (got != (bipolar)sizeof(swap_page))
                 return;
         if (system_call_2(syscall(swapon), (positive) "/dev/zram0", 0x8000 | 100) == 0)
+        {
+                system_sysctl("/sys/module/zswap/parameters/enabled", "N\n");
                 system_sysctl("/proc/sys/vm/swappiness", "100\n");
+        }
 }
 
 static COLD fn system_resource_limits(void)
@@ -700,21 +703,15 @@ static DEAD_END b32 system_init()
         system_sysctl("/proc/sys/net/ipv4/tcp_mtu_probing", "1\n");
         system_sysctl("/proc/sys/net/ipv4/tcp_fastopen", "3\n");
         system_sysctl("/proc/sys/net/ipv4/tcp_notsent_lowat", "16384\n");
-        {
-                static const char *const nvme_rq[4] = {
-                    "/sys/block/nvme0n1/queue/rq_affinity", "/sys/block/nvme1n1/queue/rq_affinity",
-                    "/sys/block/nvme2n1/queue/rq_affinity", "/sys/block/nvme3n1/queue/rq_affinity",
-                };
-                static const char *const nvme_ra[4] = {
-                    "/sys/block/nvme0n1/queue/read_ahead_kb", "/sys/block/nvme1n1/queue/read_ahead_kb",
-                    "/sys/block/nvme2n1/queue/read_ahead_kb", "/sys/block/nvme3n1/queue/read_ahead_kb",
-                };
-                for (int n = 0; n < 4; n++)
-                {
-                        system_sysctl(nvme_rq[n], "2\n");
-                        system_sysctl(nvme_ra[n], "512\n");
-                }
-        }
+        system_sysctl("/proc/sys/net/core/rmem_max", "16777216\n");
+        system_sysctl("/proc/sys/net/core/wmem_max", "16777216\n");
+        system_sysctl("/proc/sys/net/ipv4/tcp_rmem", "4096 131072 16777216\n");
+        system_sysctl("/proc/sys/net/ipv4/tcp_wmem", "4096 131072 16777216\n");
+        system_sysctl("/proc/sys/net/core/netdev_max_backlog", "4096\n");
+        system_sysctl("/proc/sys/fs/inotify/max_user_watches", "524288\n");
+        system_sysctl("/proc/sys/fs/inotify/max_user_instances", "1024\n");
+        system_sysctl("/proc/sys/vm/vfs_cache_pressure", "50\n");
+        system_sysctl("/proc/sys/vm/stat_interval", "10\n");
         system_zram_setup();
 #endif
         mount_devpts();
@@ -751,6 +748,23 @@ static DEAD_END b32 system_init()
         positive machine_failures = 0;
 
         wait_for_settling(settling);
+#if !defined(SHELL_NO_CANVAS) && MOONWATER_STRICT_HOST < STRICT_LOCKED
+        {
+                static const char *const nvme_rq[4] = {
+                    "/sys/block/nvme0n1/queue/rq_affinity", "/sys/block/nvme1n1/queue/rq_affinity",
+                    "/sys/block/nvme2n1/queue/rq_affinity", "/sys/block/nvme3n1/queue/rq_affinity",
+                };
+                static const char *const nvme_ra[4] = {
+                    "/sys/block/nvme0n1/queue/read_ahead_kb", "/sys/block/nvme1n1/queue/read_ahead_kb",
+                    "/sys/block/nvme2n1/queue/read_ahead_kb", "/sys/block/nvme3n1/queue/read_ahead_kb",
+                };
+                for (int n = 0; n < 4; n++)
+                {
+                        system_sysctl(nvme_rq[n], "2\n");
+                        system_sysctl(nvme_ra[n], "512\n");
+                }
+        }
+#endif
         started = clock_monotonic_nanoseconds();
 
         // Returning from PID 1 panics the kernel, which on a machine with no

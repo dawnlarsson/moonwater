@@ -1381,27 +1381,14 @@ static long pulse_record_encode(unsigned char *dst, long format, long frames, lo
                 unsigned char *wide = dst + samples;
 
                 audio_encode(AUDIO_FORMAT_S16LE, wide, frames, channels, left, right);
-                for (long i = 0; i < samples; i++)
-                {
-                        int v = (short)(wide[2 * i] | wide[2 * i + 1] << 8);
-
-                        v = (v + 128) >> 8;
-                        dst[i] = (unsigned char)((v > 127 ? 127 : v) + 128);
-                }
+                memory_s16_to_u8(dst, wide, (positive)samples);
                 return samples;
         }
         bytes = audio_encode(base, dst, frames, channels, left, right);
         if (swap)
         {
                 width = audio_format_bytes(base);
-                for (long i = 0; i < samples; i++)
-                        for (long k = 0; k < width / 2; k++)
-                        {
-                                unsigned char t = dst[i * width + k];
-
-                                dst[i * width + k] = dst[i * width + width - 1 - k];
-                                dst[i * width + width - 1 - k] = t;
-                        }
+                memory_reverse_units(dst, (positive)samples, (positive)width);
         }
         return bytes;
 }

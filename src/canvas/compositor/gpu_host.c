@@ -32,9 +32,16 @@ static struct
 typedef char compositor_gpu_fault_fits[sizeof(gpu_fault) == sizeof(((struct windows *)0)->gpu_fault) ? 1 : -1]; // the table holds the bytes gpu.c writes
 static void compositor_gpu_publish(void)
 {
+        static unsigned int pub_init, pub_faults, pub_maps_user, pub_maps_dma, pub_req_mask, pub_recovered;
+
         if (!compositor.table)
                 return;
         compositor.table->gpu_drawn = compositor_gpu_counts.drawn, compositor.table->gpu_processor = compositor_gpu_counts.processor;
+        if (pub_init && pub_faults == gpu_faults && pub_maps_user == gpu_maps_user && pub_maps_dma == gpu_maps_dma &&
+            pub_req_mask == gpu_req.mask && pub_recovered == gpu_recovered)
+                return;
+        pub_init = 1, pub_faults = gpu_faults, pub_maps_user = gpu_maps_user, pub_maps_dma = gpu_maps_dma,
+        pub_req_mask = gpu_req.mask, pub_recovered = gpu_recovered;
         memory_copy(compositor.table->gpu_refused, compositor_gpu_counts.why, sizeof(compositor_gpu_counts.why));
         compositor.table->gpu_map_why = gpu_map_why;
         compositor.table->gpu_family = gpu.family ? gpu.family : gpu_req.family;

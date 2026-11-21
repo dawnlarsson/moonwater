@@ -1501,7 +1501,9 @@ static bipolar host_mount(string_address name, string_address target,
         return system_mount(device, target, type, flags,
                             !(flags & MS_RDONLY) && string_equals(type, "vfat")
                                 ? (string_address) "errors=continue"
-                                : null);
+                                : !(flags & MS_RDONLY) && string_equals(type, "ext4")
+                                    ? (string_address) "commit=30"
+                                    : null);
 }
 
 /* Resolve the identity again immediately before a later use. Device names are

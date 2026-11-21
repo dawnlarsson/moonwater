@@ -3506,7 +3506,7 @@ static void xwm_pass_one(struct compositor_xwm *x, const struct compositor_poll 
                 xwm_drop(x, "protocol or queue error");
         if (x->fd >= 0 && !x->ready && clock_monotonic_nanoseconds() - x->since > COMPOSITOR_XWM_SETUP_NS)
                 xwm_drop(x, "setup timeout");
-        if (x->fd >= 0 && clock_monotonic_nanoseconds() - x->since > COMPOSITOR_XWM_BIND_NS && compositor_xwm_server(x) < 0)
+        if (x->fd >= 0 && x->client < 0 && clock_monotonic_nanoseconds() - x->since > COMPOSITOR_XWM_BIND_NS && compositor_xwm_server(x) < 0)
                 xwm_drop(x, "no Wayland client for X server");
         if (x->fd < 0 || !x->ready)
                 return;

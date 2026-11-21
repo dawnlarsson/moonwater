@@ -615,17 +615,20 @@ static long audio_playing_stream(int *low)
                 if (!s->used || s->dying || s->corked)
                         continue;
                 frames = s->voice.frame ? (long)(s->asked / s->voice.frame) : 0;
-                *low = frames > 0 && (long long)frames * 1000 <= (long long)s->rate * AUDIO_LOW_MS;
-                if (!*low)
+                if (low)
                 {
-                        char byte;
-                        long gfd = audio_call(syscall(openat), (positive)AT_FDCWD, (positive) "/run/moonwater/game-slice", 0x800 | 0x80000 | 0x20000, 0, 0, 0); // O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW
-
-                        if (gfd >= 0)
+                        *low = frames > 0 && (long long)frames * 1000 <= (long long)s->rate * AUDIO_LOW_MS;
+                        if (!*low)
                         {
-                                if (audio_call(syscall(read), (positive)gfd, (positive)&byte, 1, 0, 0, 0) > 0)
-                                        *low = 1;
-                                audio_call(syscall(close), (positive)gfd, 0, 0, 0, 0, 0);
+                                char byte;
+                                long gfd = audio_call(syscall(openat), (positive)AT_FDCWD, (positive) "/run/moonwater/game-slice", 0x800 | 0x80000 | 0x20000, 0, 0, 0); // O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW
+
+                                if (gfd >= 0)
+                                {
+                                        if (audio_call(syscall(read), (positive)gfd, (positive)&byte, 1, 0, 0, 0) > 0)
+                                                *low = 1;
+                                        audio_call(syscall(close), (positive)gfd, 0, 0, 0, 0, 0);
+                                }
                         }
                 }
                 return s->rate;
@@ -2822,7 +2825,7 @@ static b32 audio_main()
                 // for five seconds suspends it.
                 {
                         int low = 0;
-                        long playing = audio_playing_stream(&low);
+                        long playing = audio_playing_stream(audio_service.played_rate ? 0 : &low);
 
                         if (playing && !audio_service.played_rate)
                                 audio_rate_choose(playing, low);

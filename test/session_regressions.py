@@ -661,11 +661,29 @@ def test_compositor_and_xwm_invariants():
           "buf[65536]" in inp and "while (got < (long)sizeof(buf) - 1" in inp)
     check("Fullscreen ARGB->XRGB direct scanout enabled in scanout.c & wayland_host.c",
           "(blend && !compositor.fullscreen[row])" in scan and "(picture->blend && !compositor.fullscreen[row])" in wlh)
-    check("Async AHCI & USB autosuspend=-1 enabled in desktop cmdline",
-          "driver_async_probe=ahci" in read_text("kernel/profile/desktop") and
-          "usbcore.autosuspend=-1" in read_text("kernel/profile/desktop"))
-    check("NVMe rq_affinity=2, read_ahead_kb=512, and tcp_notsent_lowat configured at boot",
-          all(s in read_text("src/sh/system.c") for s in ("rq_affinity", "read_ahead_kb", "tcp_notsent_lowat")))
+    check("Async AHCI, USB autosuspend=-1, PCIe perf & nmi_watchdog=0 in desktop cmdline",
+          all(s in read_text("kernel/profile/desktop") for s in
+              ("driver_async_probe=ahci", "usbcore.autosuspend=-1", "pci=pcie_bus_perf", "nmi_watchdog=0")))
+    check("ZSWAP default off (no double-compression with zram0) & RCU_BOOST enabled",
+          "CONFIG_ZSWAP_DEFAULT_ON=n" in read_text("kernel/profile/any") and
+          "CONFIG_RCU_BOOST=y" in read_text("kernel/profile/latency"))
+    check("NVMe tuning runs after wait_for_settling() & desktop sysctls configured",
+          all(s in read_text("src/sh/system.c") for s in
+              ("rq_affinity", "read_ahead_kb", "tcp_notsent_lowat", "max_user_watches", "vfs_cache_pressure")) and
+          read_text("src/sh/system.c").find("wait_for_settling(settling);") < read_text("src/sh/system.c").find("rq_affinity"))
+    check("ext4 mounts with MS_NOATIME and commit=30",
+          "MS_NOATIME" in read_text("src/sh/host.c") and '"commit=30"' in read_text("src/sh/host/disk.c"))
+    check("RT audio thread only probes game-slice on idle->playing transition",
+          "audio_playing_stream(audio_service.played_rate ? 0 : &low)" in read_text("src/audio/service.c"))
+    check("Audio pulse.c uses lib.c SIMD memory_s16_to_u8 and memory_reverse_units",
+          "memory_s16_to_u8(" in read_text("src/audio/pulse.c") and "memory_reverse_units(" in read_text("src/audio/pulse.c"))
+    check("Explicit sync skips redundant implicit dmabuf_ready poll & Reflex latch defers callbacks",
+          "!s->pending.sync_acq_set" in read_text("src/canvas/wayland.c") and
+          "wayland_latch_defer(defer)" in wlh)
+    check("Bowl isolated /tmp mode=1777, BOWL_ENV_DEFAULTS>=32, elevated rlimits & NTSYNC/QT/video/NVIDIA",
+          all(s in read_text("src/bowl.c") for s in
+              ('string_equals(point->target, "/tmp")', "BOWL_ENV_DEFAULTS 32", "BOWL_NOFILE_TARGET ((p64)1048576)",
+               "PROTON_USE_NTSYNC", "QT_QPA_PLATFORM=wayland", "0x10de")))
 
 
 def test_kernel_audio_bowl_invariants():
