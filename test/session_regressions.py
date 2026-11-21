@@ -811,6 +811,10 @@ def test_compositor_and_xwm_invariants():
           "vpmaddwd %ymm10, %ymm3, %ymm3" in lib_c and
           "vpmovmskb %ymm0, %eax" in lib_c and
           "vpcmpeqd 32(%r9), %ymm1, %ymm2" in lib_c)
+    settings_c = read_text("src/canvas/ui/settings.c")
+    check("Settings list row single-ripple fix: settings_press_at uses ui_list_hit instead of re-calling ui_list_pointer(..., true) on release",
+          "row = ui_list_hit(&settings.ui, &settings.list, x, y);" in settings_c and
+          "ui_list_pointer(&settings.ui, &settings.list, WINDOW_EVENT_BUTTON, x, y, true)" not in settings_c)
     check("Steam bowl fixes Win32 dialog inflation (ttf-liberation + 65-moonwater-win32.conf) & GTK dark theme",
           '"ttf-liberation"' in read_text("src/bowl.c") and
           "65-moonwater-win32.conf" in read_text("src/bowl.c") and

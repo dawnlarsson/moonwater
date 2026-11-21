@@ -3990,7 +3990,8 @@ static fn settings_press_at(void)
                 return settings_card_leave();
         if ((row = ui_page_column_hit(&settings.ui, &settings.page, x, y)) >= 0)
                 return settings_edit_end(), settings.page.pane = 0, settings_group_choose(row), ui_page_redraw(&settings.page);
-        row = ui_list_pointer(&settings.ui, &settings.list, WINDOW_EVENT_BUTTON, x, y, true);
+        // ui_page_pointer already ran ui_list_pointer(..., true) on press (setting focus/part/way and starting the single press ripple).
+        row = ui_list_hit(&settings.ui, &settings.list, x, y);
         if (settings_editing() >= 0 && row != settings_editing())
                 settings_edit_end();
         if (row < 0)
