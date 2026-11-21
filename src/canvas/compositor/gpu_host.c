@@ -1580,11 +1580,12 @@ static int compositor_gpu_rotate(unsigned int at, const int *screen, unsigned in
         return 1;
 }
 
-// Whether AMD RDNA2 single-pass tiled/DCC sampling in the scene kernel is active for this present.
+// Single-pass tiled/DCC sampling in the RDNA2 scene kernel is disabled until its sync/fallback/DCC lifecycle is verified
+// on live hardware (enabling it on RDNA2 caused black tears, wallpaper bleed, and cursor damage-rect artifacts in Chrome;
+// tiled/DCC DMA-BUFs use the proven async gpu_image_go path in compositor_wl_card_image instead).
 static int compositor_gpu_tiled_ready(void)
 {
-        return compositor_gpu && compositor_gpu_state.up && !compositor_gpu_state.dead && !compositor_gpu_held() &&
-               gpu_ready() && gpu_set == &gpu_amd_rdna2 && gpu_image_takes(0) && !(compositor.width & 3);
+        return 0;
 }
 #else
 static int compositor_gpu_tiled_ready(void)

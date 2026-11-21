@@ -2113,9 +2113,11 @@ static void compositor_wl_straight_pay(int row)
 {
         if (!compositor_straight(row) || !compositor_wl.straight[row].owed || !compositor.table)
                 return;
-        compositor_wl.straight[row].owed = 0;
         if (compositor_wl_straight_read(row, 0, compositor_wl.straight[row].picture.height))
+        {
+                compositor_wl.straight[row].owed = 0;
                 wl_ext_tiled_settle(), compositor_wl.laying[row].last = (unsigned char)((compositor.front[row] & 1u) + 1);
+        }
 }
 
 static void wl_ext_straight_pays(int keep)
