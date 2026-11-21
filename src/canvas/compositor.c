@@ -1829,6 +1829,25 @@ static void compositor_loop_wanted(struct compositor_poll *wanted, struct compos
 
 static inline void compositor_soon(positive *until, positive due) { if (due && (!*until || due < *until)) *until = due; }
 
+static positive compositor_minute_due;
+static unsigned int compositor_clock_lang;
+
+static inline int compositor_minute_check(positive now)
+{
+        unsigned int lang = compositor.table ? compositor.table->language : 0;
+
+        if (!compositor_minute_due || now >= compositor_minute_due || lang != compositor_clock_lang)
+        {
+                timespec real = {0, 0};
+
+                clock_gettime(CLOCK_REALTIME, address_of real);
+                compositor_minute_due = now + (positive)(59 - real.tv_sec % 60) * 1000000000ull + (positive)(1000000000l - real.tv_nsec) + 1000000ull;
+                compositor_clock_lang = lang;
+                return 1;
+        }
+        return 0;
+}
+
 // Earliest active loop deadline for the current turn (0 = wait forever).
 static positive compositor_timers_arm(positive now, unsigned int fence_at, int held)
 {
@@ -1836,19 +1855,19 @@ static positive compositor_timers_arm(positive now, unsigned int fence_at, int h
         (void)fence_at, (void)held;
         if (compositor.band || compositor.theme_word == 2)
         {
-                static positive next_minute;
-                if (compositor.band && taskbar_clock_stale())
-                        next_minute = 0, compositor_soon(&until, now);
-                else
+                if (!compositor_minute_due || now >= compositor_minute_due ||
+                    (compositor.table && compositor.table->language != compositor_clock_lang))
                 {
-                        if (!next_minute || now >= next_minute)
+                        if (compositor.band && taskbar_clock_stale())
+                                compositor_soon(&until, now);
+                        else
                         {
-                                timespec real = {0, 0};
-                                clock_gettime(CLOCK_REALTIME, address_of real);
-                                next_minute = now + (positive)(59 - real.tv_sec % 60) * 1000000000ull + (positive)(1000000000l - real.tv_nsec) + 1000000ull;
+                                (void)compositor_minute_check(now);
+                                compositor_soon(&until, compositor_minute_due);
                         }
-                        compositor_soon(&until, next_minute);
                 }
+                else
+                        compositor_soon(&until, compositor_minute_due);
         }
         if (compositor.screens_gone && !compositor.screens_look) compositor.screens_look = now + COMPOSITOR_SCREEN_LOOK;
         if ((compositor.damages || compositor.vrr_kick) && !compositor.dark && !compositor_card_holds())
@@ -2254,8 +2273,11 @@ static b32 compositor_main()
                         compositor_sling_only = 0;
 #endif
                 }
+                int minute_tick = (compositor.band || compositor.theme_word == 2) && compositor_minute_check(now);
                 compositor_loop_tick(now, idle_turn);
-                compositor_theme_tick(), compositor_wake_check(now), compositor_wake_pass(now);
+                if (minute_tick)
+                        compositor_theme_tick();
+                compositor_wake_check(now), compositor_wake_pass(now);
                 compositor_hold_drop(now), compositor_game_watch(), compositor_game_slice();
 #ifdef MOONWATER_GPU_C
                 compositor_gpu_late_tick(now), compositor_gpu_clocks_tick(now);
@@ -2314,7 +2336,7 @@ static b32 compositor_main()
                 if (compositor_snap_due()) compositor_snap_tick(now);
                 if (compositor_spots_any(1)) compositor_spots_tick(now);
                 if (compositor_notices_look() && compositor.band) compositor_tabs_changed();
-                if (compositor.band && taskbar_tick()) compositor_tabs_changed();
+                if (compositor.band && minute_tick && taskbar_tick()) compositor_tabs_changed();
                 if (compositor.band && now >= compositor_volume.look_at) compositor_volume_look(now);
 #ifdef CONFIG_MOONWATER_WAYLAND
                 if (compositor_wl_frame_at && (now >= compositor_wl_frame_at || compositor_wl_jit_row() < 0))

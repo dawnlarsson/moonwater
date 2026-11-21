@@ -709,7 +709,7 @@ def test_compositor_and_xwm_invariants():
     comp_main = read_text("src/canvas/compositor.c")
     check("144Hz loop floor: held turns bypass epoll_ctl churn, next_minute/wake_check throttled & rows_any guards",
           "if (held)\n        {\n                for (unsigned int at = 0; at < count; at++) wanted[at].returned = 0;\n                goto ppoll;" in comp_main and
-          "static positive next_minute;" in comp_main and
+          "static positive compositor_minute_due;" in comp_main and
           "if (checked && now >= checked && now - checked < 250000000ull)" in read_text("src/canvas/compositor/session.c") and
           "if (!compositor.table || !rows_any(&compositor_card.rows))" in read_text("src/canvas/compositor/present.c") and
           "if (rows_any(&compositor.held_rows))" in read_text("src/canvas/compositor/scanout.c"))
@@ -774,6 +774,10 @@ def test_compositor_and_xwm_invariants():
           "memory_saturate_u32(taskbar_tint, from + at, (positive)count);" in tb_src and
           "if (d2 >= outer_r)" in tb_src and
           "memory_over_u32_rect(ui->pixels + (long)y0 * (long)ui->pitch + left," in ui_src)
+    check("GPU/Loop Batch E: cached RAM ops staging in gpu_scene_build, minute-gated clock/theme ticks & signaled DMA-BUF skips setitimer",
+          "gpu_ops_stage" in gpu_c and
+          "if (compositor.band && minute_tick && taskbar_tick())" in comp_main and
+          "if (ready)\n                return canvas_dmabuf_sync_fd(fd, 1) != -5;" in wlh_src)
     check("Steam bowl fixes Win32 dialog inflation (ttf-liberation + 65-moonwater-win32.conf) & GTK dark theme",
           '"ttf-liberation"' in read_text("src/bowl.c") and
           "65-moonwater-win32.conf" in read_text("src/bowl.c") and

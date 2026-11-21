@@ -1292,8 +1292,8 @@ static void gpu_route_probe(void)
 
 // Let go of the card: its buffer unmapped, its descriptor closed (the kernel frees the buffer, the context and the maps with it). After a start that failed,
 // or when the card lost its state (gpu_recover).
-static unsigned int *gpu_bin_stage;
-static positive gpu_bin_room;
+static unsigned int *gpu_bin_stage, *gpu_ops_stage;
+static positive gpu_bin_room, gpu_ops_room;
 
 static void gpu_maps_reset(void);
 static void gpu_kmsg_drain(void);
@@ -1301,12 +1301,13 @@ static void gpu_bins_forget(void);
 
 static void gpu_stop(void)
 {
-        void *stage = gpu_bin_stage;
+        void *stage = gpu_bin_stage, *ostage = gpu_ops_stage;
 
         gpu_maps_reset();
         gpu_shared.fd = -1, gpu_shared.at = 0, gpu_shared.bytes = 0, gpu_shared.pin = 0;
         gpu_buf_free(&stage, &gpu_bin_room);
-        gpu_bin_stage = 0;
+        gpu_buf_free(&ostage, &gpu_ops_room);
+        gpu_bin_stage = gpu_ops_stage = 0;
         if (gpu.at)
                 system_call_2(syscall(munmap), (positive)gpu.at, gpu.size);
         if (gpu.fd >= 0)
@@ -3405,6 +3406,17 @@ static int gpu_scene_build(positive ops_at, unsigned int n, positive bins_at, po
         dx1 = dx1 > w ? w : dx1, dy1 = dy1 > h ? h : dy1;
         if (dx0 >= dx1 || dy0 >= dy1)
                 return 0;
+        // Stage ops once from uncached USWC VRAM into cached RAM so the 3 build passes (scan, bins_count, bins_place) hit L1/L2.
+        if (n > 1)
+        {
+                positive ops_bytes = 32ull * n;
+                void *ostage = gpu_ops_stage;
+
+                if (ops_bytes > gpu_ops_room && gpu_buf_grow(&ostage, &gpu_ops_room, ops_bytes < 65536 ? 65536 : ops_bytes, 0))
+                        gpu_ops_stage = (unsigned int *)ostage;
+                if (gpu_ops_stage && ops_bytes <= gpu_ops_room)
+                        memory_copy_apart(gpu_ops_stage, ops, ops_bytes), ops = gpu_ops_stage;
+        }
         partial = dx0 > 0 || dy0 > 0 || dx1 < w || dy1 < h;
         for (i = 0; i < n; i++)
         {

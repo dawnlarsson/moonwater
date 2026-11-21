@@ -715,7 +715,7 @@ static void compositor_wl_laid(int row, long x1, long y1, long x2, long y2)
 }
 
 static int compositor_wl_dmabuf_ready(long client, int fd);
-static int compositor_wl_sync_start(long client, int fd);
+static int compositor_wl_sync_start(long client, int fd, int ready);
 
 // Whether a row currently holds a lent client buffer.
 static inline int wl_row_lent(int row)
@@ -1506,7 +1506,7 @@ static void wl_ext_settle(int row)
 }
 
 static int compositor_wl_dmabuf_ready(long client, int fd);
-static int compositor_wl_sync_start(long client, int fd);
+static int compositor_wl_sync_start(long client, int fd, int ready);
 
 static void compositor_wl_pic_ident(const struct wayland_picture *picture, unsigned long *dev, unsigned long *ino)
 {
@@ -1620,7 +1620,7 @@ static void wl_ext_lent_sync(int start)
                                         continue;
                                 compositor_wl.lent[row].synced =
                                         compositor_wl_dmabuf_ready(client, (int)compositor_wl.lent[row].fd) &&
-                                        compositor_wl_sync_start(client, (int)compositor_wl.lent[row].fd);
+                                        compositor_wl_sync_start(client, (int)compositor_wl.lent[row].fd, 1);
                                 // A present the processor reads this dma-buf in, once a present (a card that draws the present after says so, and
                                 // the count is none again: wl_ext_count_card).
                                 if (compositor_wl.wc_reads[row] < 255)
@@ -1647,7 +1647,7 @@ static void wl_ext_lent_sync(int start)
                         if (start && !l->synced && compositor_wl_row_damaged(row))
                         {
                                 l->synced = compositor_wl_dmabuf_ready(wayland_row_owner(row), (int)l->fd) &&
-                                            compositor_wl_sync_start(wayland_row_owner(row), (int)l->fd);
+                                            compositor_wl_sync_start(wayland_row_owner(row), (int)l->fd, 1);
                                 if (!counted && compositor_wl.wc_reads[row] < 255)
                                         compositor_wl.wc_reads[row]++;
                                 counted = 1;
@@ -2809,7 +2809,7 @@ static int wl_pic_sync_begin(int row, const struct wayland_picture *picture, int
 {
         if (picture->sync_fd >= 0 && !*sync_started)
         {
-                if (!picture->explicit_sync && !compositor_wl_sync_start(wayland_row_owner(row), (int)picture->sync_fd))
+                if (!picture->explicit_sync && !compositor_wl_sync_start(wayland_row_owner(row), (int)picture->sync_fd, 1))
                         return compositor_wl.laying[row].open = 0, 0;
                 *sync_started = 1;
         }
@@ -3707,13 +3707,15 @@ static void compositor_wl_alarm(int number)
         (void)number;
 }
 
-static int compositor_wl_sync_start(long client, int fd)
+static int compositor_wl_sync_start(long client, int fd, int ready)
 {
         positive timer[4] = {0, 0, 0, COMPOSITOR_WL_DMABUF_WAIT_NS / 1000}, off[4] = {0, 0, 0, 0}; // struct itimerval, in us
         long got;
 
         if (client >= 0 && client < compositor_wl.slots && compositor_wl.client[client].slow_until > clock_monotonic_nanoseconds())
                 return 0;
+        if (ready)
+                return canvas_dmabuf_sync_fd(fd, 1) != -5;
 
         compositor_call(syscall(setitimer), 0, (positive)timer, 0, 0, 0, 0); // ITIMER_REAL
         got = canvas_dmabuf_sync_fd(fd, 1); // DMA_BUF_SYNC_START | DMA_BUF_SYNC_READ
