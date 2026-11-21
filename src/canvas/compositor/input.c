@@ -653,17 +653,40 @@ static void compositor_table_button_set(int x, int y, int w, int h, unsigned int
 
 static void compositor_button_rect(int x, int y, int which)
 {
-        int reach = compositor.touching ? COMPOSITOR_FINGER_TARGET * compositor.scale / 100 : 0;
+        int reach = compositor.touching ? COMPOSITOR_FINGER_TARGET * compositor.scale / 100 : 0, found = 0;
 
         for (compositor.band_at = 0; compositor.table && compositor.band_at < compositor_bands(); compositor.band_at++)
         {
                 struct taskbar_view view = compositor_band_view();
-                int rect[4];
+                int rect[4], saved_push;
 
-                if (taskbar_hit_reach(&view, x, y, reach) != which || !taskbar_anchor(&view, which, &rect[0], &rect[1], &rect[2], &rect[3]))
+                if (taskbar_hit_reach(&view, x, y, reach) != which)
+                        continue;
+                saved_push = compositor.mc.push, compositor.mc.push = 0;
+                found = taskbar_anchor(&view, which, &rect[0], &rect[1], &rect[2], &rect[3]);
+                compositor.mc.push = saved_push;
+                if (!found)
                         continue;
                 compositor_table_button_set(rect[0], rect[1], rect[2], rect[3], view.position, (unsigned int)compositor.band_at);
                 break;
+        }
+        // Fallback so stale popup/window coordinates never offset the launcher when invoked via Super or edge hit.
+        if (!found && which == TASKBAR_LAUNCHER && compositor.table)
+        {
+                int saved_push = compositor.mc.push;
+                compositor.mc.push = 0;
+                for (compositor.band_at = 0; compositor.band_at < compositor_bands(); compositor.band_at++)
+                {
+                        struct taskbar_view view = compositor_band_view();
+                        int rect[4];
+
+                        if (taskbar_anchor(&view, which, &rect[0], &rect[1], &rect[2], &rect[3]))
+                        {
+                                compositor_table_button_set(rect[0], rect[1], rect[2], rect[3], view.position, (unsigned int)compositor.band_at);
+                                break;
+                        }
+                }
+                compositor.mc.push = saved_push;
         }
         compositor.band_at = 0;
 }
@@ -868,6 +891,8 @@ static void compositor_menu_close(void);
 static void compositor_launcher_open(int x, int y)
 {
         compositor_menu_close();
+        if (compositor.mc.open)
+                compositor_mc_close();
         compositor_popups_close(-1, -1);
         compositor.launcher_asked++;
         compositor_popup_trigger(null, "launcher_button", x, y, TASKBAR_LAUNCHER);

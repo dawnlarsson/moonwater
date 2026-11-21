@@ -424,8 +424,8 @@ static int launcher_most_height(void)
 
         if (!anchor->anchored || (anchor->edge != TASKBAR_BOTTOM && anchor->edge != TASKBAR_TOP))
                 return most;
-        room = anchor->edge == TASKBAR_BOTTOM ? anchor->button[1] - anchor->screen[1]
-                                              : anchor->screen[1] + anchor->screen[3] - anchor->button[1] - anchor->button[3];
+        room = anchor->edge == TASKBAR_BOTTOM ? anchor->button[1] - anchor->gap - anchor->screen[1]
+                                              : anchor->screen[1] + anchor->screen[3] - anchor->button[1] - anchor->button[3] - anchor->gap;
         return room > 0 && room < most ? room : most;
 }
 
@@ -1127,6 +1127,9 @@ static int launcher_open(void)
         launcher.hashed = (unsigned short address_to)(mapped + names + from);
         ui_app_size(&launcher_app, (unsigned int)ui_px(&launcher.ui, LAUNCHER_WIDTH), 0);
         ui_anchor_take(&launcher.anchor, table, launcher.asked_beside);
+        if (launcher.anchor.anchored)
+                launcher.anchor.gap = (launcher.anchor.edge == TASKBAR_BOTTOM || launcher.anchor.edge == TASKBAR_TOP)
+                                          ? launcher.anchor.button[3] : launcher.anchor.button[2];
         ui_apps_fresh(ui_kit_time());
         launcher_apps_make();
         launcher_recent_read();
@@ -1135,11 +1138,17 @@ static int launcher_open(void)
                 ui_anchor_set(&launcher.anchor, table, row, launcher.width, launcher.height);
         else
         {
+                struct window_place place;
                 int x, y, width, height;
 
-                ui_centre(table, row, launcher.width, 0, 0);
+                memory_zero(&place, sizeof(place));
                 windows_output(table, 0, &x, &y, &width, &height);
-                table->y[row] = y + height / 3 - ui_px(&launcher.ui, UI_PAD) - ui_px(&launcher.ui, UI_TARGET) / 2;
+                place.how = WINDOW_PLACE_AT | WINDOW_PLACE_SCREEN | WINDOW_PLACE_SIZE;
+                place.x = (width - launcher.width) / 2;
+                place.y = height / 3 - ui_px(&launcher.ui, UI_PAD) - ui_px(&launcher.ui, UI_TARGET) / 2;
+                place.width = (unsigned int)launcher.width, place.height = (unsigned int)launcher.height;
+                place.screen = 0;
+                windows_place_set(table, row, &place);
         }
         ui_app_frame(&launcher_app);
         launcher_scan(launcher_path_variable());

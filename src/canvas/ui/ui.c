@@ -14564,7 +14564,7 @@ static fn ui_moon(struct ui address_to ui, int left, int top, int size, b64 phas
                 left -= more, top -= more, size += 2 * more;
                 x0 = left - halo, y0 = top - halo, x1 = left + size + halo, y1 = top + size + halo;
         }
-        if (look->options & UI_MOON_FULL_SQUARE)
+        if ((look->options & UI_MOON_FULL_SQUARE) && look->grow <= 0)
                 for (int py = top > ui->top ? top : ui->top; py < top + size && py < ui->bottom; py++)
                         for (int px = left > 0 ? left : 0; px < left + size && px < ui->width; px++)
                                 ui->pixels[(long)py * (long)ui->pitch + px] = look->rim & 0xffffffu;
@@ -14682,7 +14682,7 @@ static unsigned int ui_moon_hue_turn(unsigned int colour, decimal turn)
 // The rim light's hue at a side of the moon (-1 its left limb, 0 its middle, 1 its right):
 static unsigned int ui_moon_glow_hue(unsigned int accent, decimal side)
 {
-        unsigned int bloom = accent ? accent : 0x6f8fa8u, toward = side < 0 ? ui_moon_hue_turn(bloom, -0.12) : ui_moon_hue_turn(bloom, 0.45);
+        unsigned int bloom = accent ? accent : 0x6f8fa8u, toward = side < 0 ? ui_moon_hue_turn(bloom, -0.10) : ui_moon_hue_turn(bloom, 0.10);
         side = side < 0 ? -side : side;
         return window_mix(bloom, toward, (unsigned int)((side > 1 ? 1 : side) * 256));
 }
@@ -14700,18 +14700,25 @@ static fn ui_moon_rim(struct ui address_to ui, int left, int top, int size, unsi
         for (int y = top < ui->top ? ui->top : top; y < top + size && y < ui->bottom; y++)
                 for (int x = left < 0 ? 0 : left; x < left + size && x < ui->width; x++)
                 {
-                        decimal dx = (x + 0.5 - left - r) / r, dy = (y + 0.5 - top - r) / r, rr = dx * dx + dy * dy, band, value[3];
+                        decimal dx = (x + 0.5 - left - r) / r, dy = (y + 0.5 - top - r) / r, rr = dx * dx + dy * dy, mu, f, band, value[3];
                         unsigned int address_to at = ui->pixels + (long)y * (long)ui->pitch + x, hue, target, h;
                         if (rr >= 1)
                                 continue;
-                        band = (1 - square_root(1 - rr)) * (1 - square_root(1 - rr)) * strength;
+                        mu = square_root(1 - rr);
+                        f = 1 - mu;
+                        band = f * f * f * strength;
+                        if (band > 1)
+                                band = 1;
                         hue = ui_moon_glow_hue(accent, dx);
-                        target = window_mix(ui_luminance(*at & 0xffffffu) > 26000 ? 0xffffffu : 0x7a7a7au, hue, 180);
+                        // Uniform luminous Fresnel rim across the entire limb (no dark-maria 0x7a7a7a cliff).
+                        target = window_mix(0xffffffu, hue, 140);
                         h = ui_moon_hash((unsigned int)x * 2246822519u ^ (unsigned int)y * 3266489917u);
                         for (int c = 0; c < 3; c++)
                         {
-                                decimal v = (*at >> (16 - 8 * c) & 255);
-                                v += ((target >> (16 - 8 * c) & 255) - v) * (band > 1 ? 1 : band) + ((h & 255) + (h >> 8 & 255)) / 512.0 - 0.5;
+                                decimal v = (*at >> (16 - 8 * c) & 255), t = (target >> (16 - 8 * c) & 255);
+                                if (t > v)
+                                        v += (t - v) * band;
+                                v += ((h & 255) + (h >> 8 & 255)) / 512.0 - 0.5;
                                 value[c] = v < 0 ? 0 : v > 255 ? 255 : v;
                         }
                         *at = (*at & 0xff000000u) | (unsigned int)(value[0] + 0.5) << 16 | (unsigned int)(value[1] + 0.5) << 8 | (unsigned int)(value[2] + 0.5);
@@ -25547,6 +25554,7 @@ struct ui_anchor
         b32 anchored;
         int button[4], screen[4];  // the panel's button (x, y, width, height) and the screen's rectangle
         unsigned int edge, number; // the edge the panel is along, and the screen's number
+        int gap;                   // extra offset away from the panel's edge (e.g. taskbar thickness for the start menu)
 };
 
 /* ---- shared app utilities: input provenance, timeouts, verb output, sizes, wifi & async jobs ---- */
@@ -26577,7 +26585,15 @@ static void ui_anchor_take(struct ui_anchor address_to anchor, const struct wind
 static void ui_anchor_beside(const struct ui_anchor address_to anchor, int width, int height, int address_to x, int address_to y)
 {
         const int address_to button = anchor->button, address_to screen = anchor->screen;
-        ui_anchor_place(ui_panel_side(anchor->edge), 0, button, screen, width, height, x, y);
+        int shifted[4] = {button[0], button[1], button[2], button[3]};
+        if (anchor->gap > 0)
+        {
+                if (anchor->edge == TASKBAR_BOTTOM) shifted[1] -= anchor->gap;
+                else if (anchor->edge == TASKBAR_TOP) shifted[1] += anchor->gap;
+                else if (anchor->edge == TASKBAR_LEFT) shifted[0] += anchor->gap;
+                else if (anchor->edge == TASKBAR_RIGHT) shifted[0] -= anchor->gap;
+        }
+        ui_anchor_place(ui_panel_side(anchor->edge), 0, shifted, screen, width, height, x, y);
         if (anchor->edge == TASKBAR_BOTTOM || anchor->edge == TASKBAR_TOP)
         {
                 address_to x = button[0] + button[2] / 2 - width / 2;

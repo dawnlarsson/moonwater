@@ -717,6 +717,21 @@ def test_compositor_and_xwm_invariants():
           cm_start != -1 and cm_end != -1 and
           inp[cm_start:cm_end].rfind("compositor_cursor_move();") > inp[cm_start:cm_end].rfind("compositor_pointer_to(under);") and
           "if (pressed) c->press_serial = (unsigned int)serial;" in read_text("src/canvas/wayland.c"))
+    ui_src = read_text("src/canvas/ui/ui.c")
+    tb_src = read_text("src/canvas/ui/taskbar.c")
+    ln_src = read_text("src/canvas/ui/launcher.c")
+    check("Taskbar globe Fresnel is symmetric/luminous without 0x7a7a7a cliff and hover skips UI_MOON_FULL_SQUARE white fringe",
+          "if ((look->options & UI_MOON_FULL_SQUARE) && look->grow <= 0)" in ui_src and
+          "0x7a7a7au" not in ui_src[ui_src.find("static fn ui_moon_rim("):ui_src.find("struct ui_moon_sky")] and
+          "UI_MOON_RIM | (grow <= 0 ? UI_MOON_FULL_SQUARE : 0u)" in tb_src and
+          "ui_moon(ui, left, top, grown, UI_ONE / 2, turn, &look);" in tb_src)
+    check("Start menu has consistent 1x-taskbar-height offset and never cascades or uses stale/MC-pushed anchor",
+          "anchor->gap" in ui_src and
+          "launcher.anchor.gap =" in ln_src and
+          "anchor->button[1] - anchor->gap - anchor->screen[1]" in ln_src and
+          "windows_place_set(table, row, &place);" in ln_src and
+          "compositor.mc.push = 0;" in inp and
+          "if (compositor.mc.open)\n                compositor_mc_close();" in inp)
     check("Steam bowl fixes Win32 dialog inflation (ttf-liberation + 65-moonwater-win32.conf) & GTK dark theme",
           '"ttf-liberation"' in read_text("src/bowl.c") and
           "65-moonwater-win32.conf" in read_text("src/bowl.c") and

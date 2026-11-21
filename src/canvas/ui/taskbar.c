@@ -1281,9 +1281,12 @@ static unsigned long taskbar_bake_uses;
 static void taskbar_moon_render(struct ui address_to ui, int x, int y, int size, int left, int top, int grown, b64 turn, decimal grow,
                                 unsigned int rim, unsigned int accent)
 {
-        struct ui_moon_look look = {0xff0c0d10u, 0xfff7f5efu, 0, rim, UI_MOON_RIM | UI_MOON_FULL_SQUARE, grow};
-        ui_moon(ui, x, y, size, UI_ONE / 2, turn, &look);
-        ui_moon_rim(ui, left, top, grown, accent, 1.2);
+        unsigned int opts = UI_MOON_RIM | (grow <= 0 ? UI_MOON_FULL_SQUARE : 0u);
+        struct ui_moon_look look = {0xff0c0d10u, 0xfff7f5efu, 0, rim, opts, 0};
+        (void)x, (void)y, (void)size;
+        // Draw sphere and Fresnel rim with the exact same (left, top, grown) bounds so center/radius never drift on hover.
+        ui_moon(ui, left, top, grown, UI_ONE / 2, turn, &look);
+        ui_moon_rim(ui, left, top, grown, accent, 0.85);
 }
 
 static void taskbar_moon_bake_frame(struct taskbar_moon_bake address_to b, int step)
@@ -1404,7 +1407,7 @@ static void taskbar_moon(const struct taskbar_view *view, const struct ui_tree a
         b64 turn = taskbar.moon_at ? (taskbar.glides ? (b64)(taskbar_now_sec(taskbar.moon_at) / 60 % 60) * UI_ONE / 60 : 0) : taskbar.moon_turn;
         decimal grow = (decimal)taskbar_moon_share() / (decimal)UI_ONE * TASKBAR_MOON_GROW / 100;
         int grown = size + (int)(size * grow + 0.5), left = x + (size - grown) / 2, top = y + (size - grown) / 2;
-        unsigned int rim = lit ? 0xffffffffu : light ? 0xa0868686u : 0xb4e8e8e8u, accent = taskbar_accent();
+        unsigned int rim = lit ? 0xffffffffu : light ? 0xb0d8d8d8u : 0xb4e8e8e8u, accent = taskbar_accent();
         const unsigned int address_to cached_frame = null;
 
         if (taskbar.moon_ink)
@@ -1415,7 +1418,7 @@ static void taskbar_moon(const struct taskbar_view *view, const struct ui_tree a
                         for (int c = left < 0 ? 0 : left; c < left + grown && c < ui.width; c++)
                                 ui.pixels[(long)r * (long)ui.pitch + c] = ink;
                 ui_moon_paper(&ui, left, top, grown, turn, light ? 0 : UI_MOON_PAPER_DARK, 0);
-                ui_moon_rim(&ui, left, top, grown, accent, 1.2);
+                ui_moon_rim(&ui, left, top, grown, accent, 0.85);
         }
         else
         {
