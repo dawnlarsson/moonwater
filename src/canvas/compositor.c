@@ -679,7 +679,7 @@ static struct
                 int rect[4], buf_w, buf_h, moving;
                 unsigned int *pixels;
                 unsigned long bytes;
-                unsigned int last_spaces_gen, last_stack_gen;
+                unsigned int last_spaces_gen, last_stack_gen, last_pos;
                 struct compositor_mc_card cards[COMPOSITOR_SPACES_MAX + 1];
                 int card_count;
                 struct compositor_mc_thumb thumbs[COMPOSITOR_MC_THUMBS_MAX];
@@ -995,6 +995,7 @@ static void compositor_mc_motion(int x, int y);
 static int compositor_mc_drag_motion(int row, int x, int y);
 static int compositor_mc_drag_drop(int row, int x, int y);
 static void compositor_row_mode(int row, unsigned int how, int fullscreen, int screen);
+static void compositor_pointer_press(unsigned int code, int down);
 #ifdef CONFIG_MOONWATER_WAYLAND
 static int compositor_wl_started(void);
 #endif

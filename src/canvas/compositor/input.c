@@ -1985,7 +1985,11 @@ static void compositor_button(unsigned int code, int down)
         if (code == COMPOSITOR_BTN_RIGHT && compositor.resize >= 0 && !alt)
                 { int row = compositor.resize; compositor_hold_cancel(), compositor_edge_drag_start(row); return; }
         if (code == COMPOSITOR_BTN_RIGHT && compositor_hold_cancel())
+        {
+                if (compositor.mc.auto_opened)
+                        compositor_mc_close();
                 return;
+        }
         if (under >= 0 && compositor_popup_parent[under] >= 0)
                 { compositor_popups_close(-1, under), compositor_button_deliver(under, code, 0, 0); return; }
         compositor_menu_roots(&roots);
@@ -2278,7 +2282,7 @@ static int compositor_report(positive now, positive stamp)
 
 static int compositor_picture_under(int x, int y)
 {
-        if (compositor_band_hit(x, y) != TASKBAR_HIT_NONE)
+        if (compositor_mc_point(x, y) || compositor_band_hit(x, y) != TASKBAR_HIT_NONE)
                 return COMPOSITOR_NONE;
         for (unsigned int at = compositor.stacked; at--;)
                 if (compositor_visible(compositor.stack[at]) && compositor_in_row(compositor.stack[at], x, y))

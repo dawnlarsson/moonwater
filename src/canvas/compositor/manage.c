@@ -311,6 +311,11 @@ static int compositor_under(int x, int y, int *tab)
         const address_any columns[4] = {compositor.x, compositor.y, compositor.w, compositor.h};
         positive reach, count = compositor.stacked;
 
+        if (compositor_mc_point(x, y))
+        {
+                *tab = TASKBAR_HIT_NONE;
+                return COMPOSITOR_NONE;
+        }
         *tab = compositor_band_hit(x, y);
         if (*tab != TASKBAR_HIT_NONE)
                 return COMPOSITOR_NONE;
@@ -3085,6 +3090,7 @@ static void compositor_spaces_on_outputs_changed(const char (*was_names)[WINDOWS
                         compositor_wl_settle(row);
         if (compositor.focus >= 0 && !compositor_visible(compositor.focus))
                 compositor_refocus();
+        compositor_mc_close();
 }
 
 /* ---- on-screen keyboard ---- */

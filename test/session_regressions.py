@@ -867,10 +867,14 @@ def test_canvas_spaces_invariants():
               "compositor_abs64(pad->swipe_dy) >= thresh_y",
               "compositor_mc_open(compositor_space_current_screen(), 0)",
           )))
-    check("Mission Control: direct-scanout fast path & frame budget preserve zero overhead when closed",
+    check("Mission Control: direct-scanout fast path, pointer-unhold, single GPU map & input-leak guards",
           "!compositor_mc_shown()" in pres and
           "compositor_mc_frame(&frames[count])" in pres and
-          "compositor_space_add_id(" in manage)
+          "compositor_space_add_id(" in manage and
+          "compositor_mc_shown() || compositor_input_override_query(keys) == 2" in read_text("src/canvas/wayland_host.c") and
+          "gpu_map(compositor.mc.pixels, compositor.mc.bytes)" in read_text("src/canvas/compositor/gpu_host.c") and
+          "if (compositor_mc_point(x, y))" in manage and
+          "compositor_mc_point(x, y) || compositor_band_hit(x, y)" in inp)
 
 
 def test_build_and_audit_gates():

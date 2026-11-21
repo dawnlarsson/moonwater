@@ -751,21 +751,28 @@ static void compositor_mc_open(int screen, int auto_opened)
                         compositor.mc.auto_opened = 0;
                 return;
         }
-        if (compositor.mc.push > 0)
-                compositor_mc_damage_now(), compositor_mc_damage_band(compositor.mc.screen);
+        int old_screen = compositor.mc.screen, was_pushed = compositor.mc.push > 0;
+
+        if (was_pushed)
+                compositor_mc_damage_now(), compositor_mc_damage_band(old_screen);
         taskbar_menu_shut();
         compositor_output_rect(screen, &sx, &sy, &sw, &sh);
         scale = compositor_output_scale(screen) > 0 ? compositor_output_scale(screen) : compositor.scale;
+        if (was_pushed && old_screen != screen)
+                compositor_mc_damage_band(screen);
         compositor.mc.open = 1;
         compositor.mc.screen = screen;
         compositor.mc.auto_opened = auto_opened ? 1 : 0;
         compositor.mc.depth = compositor_mc_depth(pos, sw, sh, scale);
         compositor.mc.hover_card = compositor.mc.hover_close = compositor.mc.drop_target = COMPOSITOR_NONE;
         compositor.mc.press_card = compositor.mc.press_row = COMPOSITOR_NONE;
+        compositor.mc.card_count = compositor.mc.thumb_count = 0;
         compositor.mc.dragging = 0;
         compositor.mc.dirty = 1;
         compositor.mc.moving = 1;
         compositor_mc_tick(clock_monotonic_nanoseconds());
+        if (was_pushed && old_screen != screen)
+                compositor_mc_damage_band(old_screen), compositor_mc_damage_band(screen);
         compositor_tabs_changed();
         compositor_mc_damage_now();
 }
@@ -822,7 +829,6 @@ static void compositor_mc_tick(positive now)
                 compositor_mc_drawer_rect(compositor.mc.screen, pos, next_push, compositor.mc.rect);
                 compositor_mc_damage_now();
                 compositor_mc_damage_band(compositor.mc.screen);
-                taskbar_changed();
         }
         else if (compositor.mc.push > 0)
                 compositor_mc_drawer_rect(compositor.mc.screen, pos, compositor.mc.push, compositor.mc.rect);
@@ -1021,10 +1027,10 @@ static unsigned int compositor_mc_frame(struct compositor_frame *frame)
                         return compositor.mc.pixels = 0, 0;
                 compositor.mc.pixels = (unsigned int *)p, compositor.mc.dirty = 1;
         }
-        if (compositor.mc.dirty || compositor.mc.buf_w != buf_w || compositor.mc.buf_h != buf_h ||
+        if (compositor.mc.dirty || compositor.mc.buf_w != buf_w || compositor.mc.buf_h != buf_h || compositor.mc.last_pos != pos ||
             compositor.mc.last_spaces_gen != compositor.spaces.gen || compositor.mc.last_stack_gen != compositor.stack_gen)
         {
-                compositor.mc.buf_w = buf_w, compositor.mc.buf_h = buf_h;
+                compositor.mc.buf_w = buf_w, compositor.mc.buf_h = buf_h, compositor.mc.last_pos = pos;
                 compositor.mc.last_spaces_gen = compositor.spaces.gen;
                 compositor.mc.last_stack_gen = compositor.stack_gen;
                 compositor_mc_draw(compositor.mc.screen, pos, sx, sy, sw, sh, scale, buf_w, buf_h);
@@ -1151,6 +1157,7 @@ static int compositor_mc_hand(unsigned int code, int down)
                         }
                         compositor.mc.dragging = 0, compositor.mc.press_row = compositor.mc.press_card = compositor.mc.drop_target = COMPOSITOR_NONE;
                         compositor.mc.dirty = 1, compositor_mc_damage_now();
+                        compositor_pointer_press(code, 0);
                         return 1;
                 }
                 if (card >= 0 && card == compositor.mc.press_card)
@@ -1162,6 +1169,7 @@ static int compositor_mc_hand(unsigned int code, int down)
                                 compositor_space_switch_index(compositor.mc.screen, c->space_idx), compositor_mc_close();
                 }
                 compositor.mc.press_card = compositor.mc.press_row = COMPOSITOR_NONE, compositor.mc.dragging = 0;
+                compositor_pointer_press(code, 0);
                 return 1;
         }
         if (!compositor_mc_point(x, y))
@@ -1181,12 +1189,16 @@ static int compositor_mc_hand(unsigned int code, int down)
         if (is_close && compositor.mc.cards[card].removable)
         {
                 compositor_space_remove_index(compositor.mc.screen, compositor.mc.cards[card].space_idx);
+                compositor.mc.card_count = compositor.mc.thumb_count = 0;
                 compositor.mc.dirty = 1, compositor_mc_damage_now();
                 return 1;
         }
         compositor.mc.press_card = card;
         compositor.mc.press_x = x, compositor.mc.press_y = y, compositor.mc.dragging = 0;
-        compositor.mc.press_row = compositor.mc.cards[card].is_add ? COMPOSITOR_NONE : compositor_mc_hit_thumb(x, y, card);
+        {
+                int hit_row = compositor.mc.cards[card].is_add ? COMPOSITOR_NONE : compositor_mc_hit_thumb(x, y, card);
+                compositor.mc.press_row = hit_row >= 0 && !compositor.fullscreen[hit_row] ? hit_row : COMPOSITOR_NONE;
+        }
         return 1;
 }
 
@@ -1263,7 +1275,18 @@ static void compositor_taskbar_keep(positive now)
         if (taskbar_sliding(now) || taskbar_moving(now))
                 compositor_taskbar_damage(taskbar_shift());
         if (compositor_mc_moving(now))
-                compositor_mc_damage_now(), compositor_mc_damage_band(compositor.mc.screen);
+        {
+                if (compositor.mc.rect[2] > 0 && compositor.mc.rect[3] > 0)
+                        compositor_mc_damage_now();
+                else if (compositor.mc.depth > 0)
+                {
+                        int r[4];
+                        compositor_mc_drawer_rect(compositor.mc.screen, taskbar_position(), compositor.mc.depth, r);
+                        if (r[2] > 0 && r[3] > 0)
+                                compositor_damage_over(r[0], r[1], r[2], r[3]);
+                }
+                compositor_mc_damage_band(compositor.mc.screen);
+        }
 }
 
 #define COMPOSITOR_TABS_ALL (~0ul)
