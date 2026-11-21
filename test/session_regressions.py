@@ -661,8 +661,11 @@ def test_compositor_and_xwm_invariants():
           "buf[65536]" in inp and "while (got < (long)sizeof(buf) - 1" in inp)
     check("Fullscreen ARGB->XRGB direct scanout enabled in scanout.c & wayland_host.c",
           "(blend && !compositor.fullscreen[row])" in scan and "(picture->blend && !compositor.fullscreen[row])" in wlh)
-    check("Async AHCI boot enabled in desktop cmdline",
-          "driver_async_probe=ahci" in read_text("kernel/profile/desktop"))
+    check("Async AHCI & USB autosuspend=-1 enabled in desktop cmdline",
+          "driver_async_probe=ahci" in read_text("kernel/profile/desktop") and
+          "usbcore.autosuspend=-1" in read_text("kernel/profile/desktop"))
+    check("NVMe rq_affinity=2, read_ahead_kb=512, and tcp_notsent_lowat configured at boot",
+          all(s in read_text("src/sh/system.c") for s in ("rq_affinity", "read_ahead_kb", "tcp_notsent_lowat")))
 
 
 def test_kernel_audio_bowl_invariants():

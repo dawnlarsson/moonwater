@@ -9,7 +9,7 @@
 # atomic locks on Intel 10th-gen+ CPUs, which otherwise stalls older Windows
 # and Proton games (no-op on AMD).
 #
-#> cmdline split_lock_detect=off driver_async_probe=ahci
+#> cmdline split_lock_detect=off driver_async_probe=ahci usbcore.autosuspend=-1
 CONFIG_X86_INTEL_TSX_MODE_ON=y
 CONFIG_NTSYNC=y
 CONFIG_USERFAULTFD=y

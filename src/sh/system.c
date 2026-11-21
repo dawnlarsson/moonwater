@@ -699,6 +699,22 @@ static DEAD_END b32 system_init()
         system_sysctl("/proc/sys/net/ipv4/tcp_slow_start_after_idle", "0\n");
         system_sysctl("/proc/sys/net/ipv4/tcp_mtu_probing", "1\n");
         system_sysctl("/proc/sys/net/ipv4/tcp_fastopen", "3\n");
+        system_sysctl("/proc/sys/net/ipv4/tcp_notsent_lowat", "16384\n");
+        {
+                static const char *const nvme_rq[4] = {
+                    "/sys/block/nvme0n1/queue/rq_affinity", "/sys/block/nvme1n1/queue/rq_affinity",
+                    "/sys/block/nvme2n1/queue/rq_affinity", "/sys/block/nvme3n1/queue/rq_affinity",
+                };
+                static const char *const nvme_ra[4] = {
+                    "/sys/block/nvme0n1/queue/read_ahead_kb", "/sys/block/nvme1n1/queue/read_ahead_kb",
+                    "/sys/block/nvme2n1/queue/read_ahead_kb", "/sys/block/nvme3n1/queue/read_ahead_kb",
+                };
+                for (int n = 0; n < 4; n++)
+                {
+                        system_sysctl(nvme_rq[n], "2\n");
+                        system_sysctl(nvme_ra[n], "512\n");
+                }
+        }
         system_zram_setup();
 #endif
         mount_devpts();
