@@ -260,22 +260,22 @@ typedef struct
 } font_engine;
 
 // Bounds-checked big-endian readers (0 past end).
-static inline p32 font_u8(const font_face address_to face, positive at)
+static inline INLINE PURE p32 font_u8(const font_face address_to face, positive at)
 {
         return at < face->size ? face->data[at] : 0;
 }
 
-static inline p32 font_u16(const font_face address_to face, positive at)
+static inline INLINE PURE p32 font_u16(const font_face address_to face, positive at)
 {
         return at + 2 <= face->size ? (p32)face->data[at] << 8 | face->data[at + 1] : 0;
 }
 
-static inline b32 font_i16(const font_face address_to face, positive at)
+static inline INLINE PURE b32 font_i16(const font_face address_to face, positive at)
 {
         return (b16)font_u16(face, at);
 }
 
-static inline p32 font_u32(const font_face address_to face, positive at)
+static inline INLINE PURE p32 font_u32(const font_face address_to face, positive at)
 {
         return at + 4 <= face->size
                    ? (p32)face->data[at] << 24 | (p32)face->data[at + 1] << 16 |
@@ -283,9 +283,9 @@ static inline p32 font_u32(const font_face address_to face, positive at)
                    : 0;
 }
 
-static inline b64 font_abs64(b64 v) { return v < 0 ? -v : v; }
+static inline INLINE CONST b64 font_abs64(b64 v) { return v < 0 ? -v : v; }
 
-static inline p32 font_hmtx_advance(const font_face address_to face, p32 glyph)
+static inline INLINE PURE p32 font_hmtx_advance(const font_face address_to face, p32 glyph)
 {
         return font_u16(face, face->hmtx + 4 * (positive)(glyph < face->metrics ? glyph : face->metrics - 1));
 }
@@ -309,7 +309,7 @@ static p32 font_search(const font_face address_to face, positive table, p32 coun
 }
 
 // Nearest integer division, halves away from zero, and 16.16 pixel scaling clamped to +-16384 px.
-static inline b64 font_divide(b64 value, b64 denominator)
+static inline INLINE CONST b64 font_divide(b64 value, b64 denominator)
 {
         b64 half = denominator / 2;
         return value >= 0 ? (value + half) / denominator : -((half - value) / denominator);
@@ -317,7 +317,7 @@ static inline b64 font_divide(b64 value, b64 denominator)
 
 #define FONT_FIXED_MOST ((b64)1 << 30)
 
-static inline b32 font_fixed(const font_face address_to face, b64 units, p32 size)
+static inline INLINE PURE b32 font_fixed(const font_face address_to face, b64 units, p32 size)
 {
         b64 value = font_divide(units * size * 1024, face->units);
         return (b32)(value > FONT_FIXED_MOST ? FONT_FIXED_MOST : value < -FONT_FIXED_MOST ? -FONT_FIXED_MOST : value);
@@ -560,12 +560,9 @@ __attribute__((used)) b32 font_advance(const font_face address_to face, p32 glyp
         return font_fixed(face, font_hmtx_advance(face, glyph), size);
 }
 
-static p32 font_bits(p32 format)
+static inline INLINE CONST p32 font_bits(p32 format)
 {
-        p32 count = 0;
-        for (format &= 0xff; format; format &= format - 1)
-                count++;
-        return count;
+        return (p32)__builtin_popcount(format & 0xffu);
 }
 
 static b32 font_coverage(const font_face address_to face, positive table, p32 glyph)
@@ -7349,8 +7346,13 @@ static fn font_blend_turned(font_engine address_to e, const font_target address_
         character map's answers and the kerning pairs it has looked up, a
         few thousand of each, which is what a page of text asks again.
 */
-static positive font_decode(const p8 address_to text, positive length, positive at, p32 address_to code)
+static inline INLINE positive font_decode(const p8 address_to restrict text, positive length, positive at, p32 address_to restrict code)
 {
+        if (likely(at < length && text[at] < 0x80))
+        {
+                *code = text[at];
+                return at + 1;
+        }
         memory_utf8_state state = {0};
 
         while (at < length)
@@ -7369,7 +7371,7 @@ static positive font_decode(const p8 address_to text, positive length, positive 
         return at;
 }
 
-static p8 font_is_drawn(p32 code)
+static inline INLINE CONST p8 font_is_drawn(p32 code)
 {
         //      The cell of an ASCII or Latin-1 character, the common case, is one compare.
         if (code < 0x2190)
@@ -8697,6 +8699,7 @@ fn font_cells(font_engine address_to e, const font_face address_to const address
         b32 band = (b32)(FONT_STRIP / stride);
         band = band > hi - lo + 1 ? hi - lo + 1 : band;
         band = band < 1 ? 1 : band;
+        const p32 address_to tones = font_tones(e, colour, background, font_strength(e, size, flags));
         for (b32 from = lo; from <= hi; from += band)
         {
                 b32 rows = from + band > hi + 1 ? hi + 1 - from : band;
@@ -8704,8 +8707,7 @@ fn font_cells(font_engine address_to e, const font_face address_to const address
                         font_lay_cell(e->strip + (positive)i * (positive)width, stride, &e->run[i], e->run_dx[i],
                                       e->run_dy[i], width, height, from, rows, limit);
                 memory_translate_u32_rect(target->pixels + (positive)(y + from) * target->stride + (positive)x,
-                                          target->stride, e->strip, stride, across, (positive)rows,
-                                          font_tones(e, colour, background, font_strength(e, size, flags)));
+                                          target->stride, e->strip, stride, across, (positive)rows, tones);
         }
 }
 

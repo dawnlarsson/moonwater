@@ -1181,8 +1181,13 @@ static const struct
     {'s', 0, 0, CSI_SAVE_RESTORE, 1, null}, {'u', 0, 0, CSI_SAVE_RESTORE, 0, null},
 };
 
-static fn csi_final(unsigned int final)
+HOT static fn csi_final(unsigned int final)
 {
+        if (likely(final == 'm' && !csi_intermediate && !terminal_csi.marker))
+        {
+                sgr();
+                return;
+        }
         unsigned int a = terminal_csi.count && terminal_csi.value[0] ? terminal_csi.value[0] : 1;
         unsigned int b = terminal_csi.count > 1 && terminal_csi.value[1] ? terminal_csi.value[1] : 1;
         positive match = array_count(csi_rule);
@@ -1694,14 +1699,14 @@ static positive csi_parse(const p8 address_to bytes, positive count)
         return 2 + used;
 }
 
-static fn term_bytes(const p8 address_to bytes, positive count)
+HOT static fn term_bytes(const p8 address_to restrict bytes, positive count)
 {
         for (positive at = 0; at < count;)
         {
                 unsigned int c = bytes[at];
                 positive used = 0;
 
-                if (c >= ' ' && c != 127 && text_ground())
+                if (likely(c >= ' ' && c != 127 && text_ground()))
                         used = text_run(bytes + at, count - at);
                 else if (c == 27 && !in_string)
                         used = csi_parse(bytes + at, count - at);

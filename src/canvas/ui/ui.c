@@ -8452,8 +8452,8 @@ static b32 ui_shown_blank(const p8 address_to shown, positive size)
 }
 
 // A run's scratch line (wide by rows of coverage, drawn on paper for a light or a dark ink) laid over the picture...
-static fn ui_run_lay(struct ui address_to ui, int wide, int rows, int top, int pen_x, int low, int high, unsigned int colour, unsigned int alpha,
-                     b32 light, unsigned int stroke)
+HOT static fn ui_run_lay(struct ui address_to restrict ui, int wide, int rows, int top, int pen_x, int low, int high, unsigned int colour, unsigned int alpha,
+                         b32 light, unsigned int stroke)
 {
         unsigned int paper = light ? 0 : 0xffffffu;
         // The coverage, as the ink at that alpha, over the picture:
@@ -8483,19 +8483,30 @@ static fn ui_run_lay(struct ui address_to ui, int wide, int rows, int top, int p
                 ui_run_walk(&walk);
         }
 #else
-        for (int row = 0; row < rows && first < last; row++)
+        int r0 = 0, r1 = rows;
+        if (ui->top - top > r0)
+                r0 = ui->top - top;
+        if (ui->bottom - top < r1)
+                r1 = ui->bottom - top;
+        if (ui->height - top < r1)
+                r1 = ui->height - top;
+        if (ui->band_bottom > ui->band_top)
+        {
+                if (ui->band_top - top > r0)
+                        r0 = ui->band_top - top;
+                if (ui->band_bottom - top < r1)
+                        r1 = ui->band_bottom - top;
+        }
+        for (int row = r0; row < r1 && first < last; row++)
         {
                 int y = top + row;
-                const unsigned int address_to coverage = ui->scratch + (unsigned long)row * (unsigned long)wide;
-                unsigned int address_to picture;
-                if (y < ui->top || y >= ui->bottom || y >= ui->height || !ui_in_band(ui, y))
-                        continue;
-                picture = ui->pixels + (unsigned long)y * ui->pitch + (unsigned long)(pen_x + first);
+                const unsigned int address_to restrict coverage = ui->scratch + (unsigned long)row * (unsigned long)wide;
+                unsigned int address_to restrict picture = ui->pixels + (unsigned long)y * ui->pitch + (unsigned long)(pen_x + first);
                 for (int column = first; column < last; column++, picture++)
                 {
                         unsigned int value, cover, bit;
                         // Paper no glyph touched (most of the run's rows) is no cover:
-                        if (!stroke && coverage[column] == paper)
+                        if (likely(!stroke) && coverage[column] == paper)
                         {
                                 int from = column;
                                 column += (int)memory_first_differs_u32(coverage + column, (positive)(last - column), paper);
@@ -8505,7 +8516,7 @@ static fn ui_run_lay(struct ui address_to ui, int wide, int rows, int top, int p
                         }
                         value = coverage[column] >> 8 & 255;
                         cover = light ? value : 255 - value;
-                        if (stroke && cover < 255)
+                        if (unlikely(stroke && cover < 255))
                         {
                                 // The stroke: a pixel takes a share of its strongest neighbour's cover (left, right, above, below, those inside the...
                                 const unsigned int address_to here = coverage + column;
@@ -8529,9 +8540,9 @@ static fn ui_run_lay(struct ui address_to ui, int wide, int rows, int top, int p
                         bit = cover & 63;
                         if (!cover)
                                 continue;
-                        if (*picture == ground)
+                        if (likely(*picture == ground))
                         {
-                                if (!(ramp->made[cover >> 6] >> bit & 1))
+                                if (unlikely(!(ramp->made[cover >> 6] >> bit & 1)))
                                 {
                                         ramp->over[cover] = ui_over(ui_tone(colour, cover * alpha / 255), ground);
                                         ramp->made[cover >> 6] |= 1ull << bit;
@@ -8539,7 +8550,7 @@ static fn ui_run_lay(struct ui address_to ui, int wide, int rows, int top, int p
                                 *picture = ramp->over[cover];
                                 continue;
                         }
-                        if (!(ramp->known[cover >> 6] >> bit & 1))
+                        if (unlikely(!(ramp->known[cover >> 6] >> bit & 1)))
                         {
                                 ramp->tone[cover] = ui_tone(colour, cover * alpha / 255);
                                 ramp->known[cover >> 6] |= 1ull << bit;
@@ -9957,7 +9968,7 @@ static void ui_insets(const int address_to dy, int rx, int ry, int address_to in
 #endif
 }
 
-static b32 ui_box_spans_radii(const struct ui_box address_to box, b32 rx, b32 ry, b32 y, b32 first, b32 width, struct ui_spans address_to s)
+HOT static b32 ui_box_spans_radii(const struct ui_box address_to restrict box, b32 rx, b32 ry, b32 y, b32 first, b32 width, struct ui_spans address_to restrict s)
 {
         b32 top = y * 256, bottom = top + 256, low = 0, high = 0, inner_low = 0, inner_high = 0, base = first * 256, reach = width * 256;
         b32 straight, corner, outside = 0;
@@ -9967,7 +9978,24 @@ static b32 ui_box_spans_radii(const struct ui_box address_to box, b32 rx, b32 ry
                 return 0;
         // A row in the straight middle, all of it inside, is every line the box's own span.
         straight = ui_box_straight(box, ry, y);
-        corner = !straight && ry > 0 && rx > 0;
+        if (likely(straight))
+        {
+                b32 left = box->x0 - base, right = box->x1 - base;
+                left = left < 0 ? 0 : left;
+                right = right > reach ? reach : right;
+                if (right <= left)
+                        return 0;
+                for (b32 sub = 0; sub < UI_SUB; sub++)
+                        s->left[sub] = left, s->right[sub] = right;
+                s->count = UI_SUB;
+                s->lo = left >> 8, s->hi = (right + 255) >> 8;
+                s->a = (left + 255) >> 8, s->b = right >> 8;
+                if (s->b <= s->a)
+                        s->a = s->b = s->hi;
+                s->inside = (unsigned int)UI_SUB * 256;
+                return 1;
+        }
+        corner = ry > 0 && rx > 0;
         // Each line's dy over the radius (ui_box_span's), and the lines outside the box, which take no part.
         for (b32 sub = 0; sub < UI_SUB; sub++)
         {
@@ -10030,7 +10058,7 @@ static b32 ui_box_spans(const struct ui_box address_to box, b32 y, b32 first, b3
 }
 
 // The cover of pixel x of a row's spans: what each line covers of it, summed.
-static unsigned int ui_spans_cover(const struct ui_spans address_to s, b32 x)
+HOT static inline INLINE PURE unsigned int ui_spans_cover(const struct ui_spans address_to restrict s, b32 x)
 {
         b32 p0 = x * 256, p1 = p0 + 256;
         unsigned int cover = 0;
@@ -11230,32 +11258,33 @@ struct ui_moon_ink
         int a, r, g, b;
 };
 
-static inline struct ui_moon_ink ui_moon_ink_of(unsigned int argb)
+static inline INLINE CONST struct ui_moon_ink ui_moon_ink_of(unsigned int argb)
 {
         int a = (int)(argb >> 24);
         return (struct ui_moon_ink){a, (int)(argb >> 16 & 255) * a / 255, (int)(argb >> 8 & 255) * a / 255, (int)(argb & 255) * a / 255};
 }
 
 // one moved share (0 to 65536) of the way to two.
-static inline struct ui_moon_ink ui_moon_toward(struct ui_moon_ink one, struct ui_moon_ink two, int share)
+static inline INLINE CONST struct ui_moon_ink ui_moon_toward(struct ui_moon_ink one, struct ui_moon_ink two, int share)
 {
         return (struct ui_moon_ink){one.a + (int)(((long)(two.a - one.a) * share) >> 16), one.r + (int)(((long)(two.r - one.r) * share) >> 16),
                                     one.g + (int)(((long)(two.g - one.g) * share) >> 16), one.b + (int)(((long)(two.b - one.b) * share) >> 16)};
 }
 
 // A premultiplied ink laid over a pixel at cover (0 to 65536).
-static inline unsigned int ui_moon_over(unsigned int pixel, struct ui_moon_ink ink, int cover)
+static inline INLINE CONST unsigned int ui_moon_over(unsigned int pixel, struct ui_moon_ink ink, int cover)
 {
         int a = (int)(((long)ink.a * cover) >> 16), keep = 255 - a;
-        int r = (int)(((long)ink.r * cover) >> 16) + (int)(pixel >> 16 & 255) * keep / 255;
-        int g = (int)(((long)ink.g * cover) >> 16) + (int)(pixel >> 8 & 255) * keep / 255;
-        int b = (int)(((long)ink.b * cover) >> 16) + (int)(pixel & 255) * keep / 255;
+        int tr = (int)(pixel >> 16 & 255) * keep + 1, tg = (int)(pixel >> 8 & 255) * keep + 1, tb = (int)(pixel & 255) * keep + 1;
+        int r = (int)(((long)ink.r * cover) >> 16) + ((tr + (tr >> 8)) >> 8);
+        int g = (int)(((long)ink.g * cover) >> 16) + ((tg + (tg >> 8)) >> 8);
+        int b = (int)(((long)ink.b * cover) >> 16) + ((tb + (tb >> 8)) >> 8);
         r = r > 255 ? 255 : r, g = g > 255 ? 255 : g, b = b > 255 ? 255 : b;
         return (pixel & 0xff000000u) | (unsigned int)(r << 16 | g << 8 | b);
 }
 
 // A share of 65536 from a signed distance in 65536ths of a pixel: none a half pixel out, all a half pixel in.
-static inline int ui_moon_cover(long inside)
+static inline INLINE CONST int ui_moon_cover(long inside)
 {
         inside += 32768;
         return inside <= 0 ? 0 : inside >= 65536 ? 65536 : (int)inside;
@@ -14512,7 +14541,7 @@ static const struct ui_moon_map address_to ui_moon_map_for(int size)
 }
 
 // A map's albedo (0 to 1) and its slopes east and north (of the radius a texel) at u, v texels of a level, bilinear...
-static void ui_moon_sample_slopes(const struct ui_moon_map address_to map, int level, decimal u, decimal v, decimal out[3])
+HOT static inline INLINE void ui_moon_sample_slopes(const struct ui_moon_map address_to restrict map, int level, decimal u, decimal v, decimal out[restrict 3])
 {
         int w = map->width >> level, h = w / 2, i, j;
         long base = ui_moon_level_at(map->width, level);
@@ -14521,7 +14550,7 @@ static void ui_moon_sample_slopes(const struct ui_moon_map address_to map, int l
         v = v < 0 ? 0 : v > h - 1.001 ? h - 1.001 : v;
         i = (int)(u < 0 ? u - 1 : u), j = (int)v, fu = u - i, fv = v - j;
         {
-                int i0 = ((i % w) + w) % w, i1 = (i0 + 1) % w;
+                int mask = w - 1, i0 = i & mask, i1 = (i0 + 1) & mask;
                 const unsigned short address_to a = map->texel + (base + (long)j * w) * 4, address_to b = a + (long)w * 4;
                 decimal w00 = (1 - fu) * (1 - fv), w10 = fu * (1 - fv), w01 = (1 - fu) * fv, w11 = fu * fv;
                 out[0] = (a[i0 * 4] * w00 + a[i1 * 4] * w10 + b[i0 * 4] * w01 + b[i1 * 4] * w11) / 65535.0;
@@ -14622,7 +14651,7 @@ static const struct ui_moon_sphere address_to ui_moon_sphere_for(int size, int s
         return &kept;
 }
 
-static fn ui_moon(struct ui address_to ui, int left, int top, int size, b64 phase, b64 turn, const struct ui_moon_look address_to look)
+HOT static fn ui_moon(struct ui address_to restrict ui, int left, int top, int size, b64 phase, b64 turn, const struct ui_moon_look address_to restrict look)
 {
         const struct ui_moon_map address_to map = ui_moon_map_for(size);
         decimal radius = size / 2.0 * (1 + (look->grow > 0 ? look->grow : 0)), cx = left + size / 2.0, cy = top + size / 2.0;
@@ -14643,9 +14672,12 @@ static fn ui_moon(struct ui address_to ui, int left, int top, int size, b64 phas
                 x0 = left - halo, y0 = top - halo, x1 = left + size + halo, y1 = top + size + halo;
         }
         if ((look->options & UI_MOON_FULL_SQUARE) && look->grow <= 0)
-                for (int py = top > ui->top ? top : ui->top; py < top + size && py < ui->bottom; py++)
-                        for (int px = left > 0 ? left : 0; px < left + size && px < ui->width; px++)
-                                ui->pixels[(long)py * (long)ui->pitch + px] = look->rim & 0xffffffu;
+        {
+                int fy0 = top > ui->top ? top : ui->top, fy1 = top + size < ui->bottom ? top + size : ui->bottom;
+                int fx0 = left > 0 ? left : 0, fx1 = left + size < ui->width ? left + size : ui->width;
+                if (fx1 > fx0 && fy1 > fy0)
+                        memory_fill_u32_rect(ui->pixels + (long)fy0 * (long)ui->pitch + fx0, (positive)ui->pitch, (positive)(fx1 - fx0), (positive)(fy1 - fy0), look->rim & 0xffffffu);
+        }
         if (ui->scene)
                 ui->scene->lost = UI_LOST_GLASS;
         // The sun in the eye's frame (from behind the moon when it is new, from behind the eye when it is full, the right...
@@ -14666,12 +14698,17 @@ static fn ui_moon(struct ui address_to ui, int left, int top, int size, b64 phas
                 t = wrapped;
         }
         sphere = look->grow > 0 || halo > 0 ? null : ui_moon_sphere_for(size, samples);
+        decimal outer = radius + halo + 1, outer2 = outer * outer, inv_r = 1.0 / radius;
         for (int py = y0; py < y1; py++)
         {
                 unsigned int address_to row = ui->pixels + (long)py * (long)ui->pitch;
+                decimal dy = py + 0.5 - cy, dy2 = dy * dy;
                 for (int px = x0; px < x1; px++)
                 {
-                        decimal dx = px + 0.5 - cx, dy = py + 0.5 - cy, far = square_root(dx * dx + dy * dy), limb = radius - far, sum = 0;
+                        decimal dx = px + 0.5 - cx, d2 = dx * dx + dy2;
+                        if (d2 >= outer2)
+                                continue;
+                        decimal far = square_root(d2), limb = radius - far, sum = 0;
                         int cover = ui_moon_cover((long)(limb * 65536)), hits = 0;
                         if (cover < 65536 && halo > 0 && limb < 0 && -limb < halo)
                         {
@@ -14704,7 +14741,10 @@ static fn ui_moon(struct ui address_to ui, int left, int top, int size, b64 phas
                                 ink = ui_moon_toward(dark, lit, (int)(shown * 65536));
                                 if (look->options & UI_MOON_RIM)
                                 {
-                                        decimal edge = 1 - square_root(1 - (far / radius > 1 ? 1 : far / radius) * (far / radius > 1 ? 1 : far / radius));
+                                        decimal u = far * inv_r;
+                                        if (u > 1)
+                                                u = 1;
+                                        decimal edge = 1 - square_root(1 - u * u);
                                         ink = ui_moon_toward(ink, rim, (int)(edge * edge * edge * (look->rim >> 24) / 255.0 * 65536));
                                 }
                                 row[px] = ui_moon_over(row[px], ink, cover);
@@ -14746,7 +14786,7 @@ static void ui_moon_paper_tones(unsigned int options, unsigned int address_to pa
 }
 
 // A colour turned round the wheel by turn (a share of a whole turn) and kept at its lightness: the glow's second hue from the accent.
-static unsigned int ui_moon_hue_turn(unsigned int colour, decimal turn)
+static CONST unsigned int ui_moon_hue_turn(unsigned int colour, decimal turn)
 {
         decimal r = (colour >> 16 & 255) / 255.0, g = (colour >> 8 & 255) / 255.0, b = (colour & 255) / 255.0, grey = (r + g + b) / 3;
         decimal angle = turn * 2 * UI_MOON_PI, c = cosine(angle), s = sine(angle), k = 1 / square_root(3.0);
@@ -14758,7 +14798,7 @@ static unsigned int ui_moon_hue_turn(unsigned int colour, decimal turn)
 }
 
 // The rim light's hue at a side of the moon (-1 its left limb, 0 its middle, 1 its right):
-static unsigned int ui_moon_glow_hue(unsigned int accent, decimal side)
+static CONST unsigned int ui_moon_glow_hue(unsigned int accent, decimal side)
 {
         unsigned int bloom = accent ? accent : 0x6f8fa8u, toward = side < 0 ? ui_moon_hue_turn(bloom, -0.10) : ui_moon_hue_turn(bloom, 0.10);
         side = side < 0 ? -side : side;
@@ -14766,20 +14806,26 @@ static unsigned int ui_moon_glow_hue(unsigned int accent, decimal side)
 }
 
 // The colour of the glow under a clock's digits at a side of the moon: the rim light's hue lightened under a dark ink, darkened under a light one.
-static unsigned int ui_moon_glow_colour(unsigned int accent, decimal side, unsigned int ink)
+static CONST unsigned int ui_moon_glow_colour(unsigned int accent, decimal side, unsigned int ink)
 {
         return ink ? window_mix(0x0e0f12u, ui_moon_glow_hue(accent, side), 70) : window_mix(0xf6f6f4u, ui_moon_glow_hue(accent, side), 64);
 }
 
 // The rim light on a moon already drawn at left, top, size (ui_moon, ui_moon_paper):
-static fn ui_moon_rim(struct ui address_to ui, int left, int top, int size, unsigned int accent, decimal strength)
+HOT static fn ui_moon_rim(struct ui address_to restrict ui, int left, int top, int size, unsigned int accent, decimal strength)
 {
-        decimal r = size / 2.0;
-        for (int y = top < ui->top ? ui->top : top; y < top + size && y < ui->bottom; y++)
-                for (int x = left < 0 ? 0 : left; x < left + size && x < ui->width; x++)
+        decimal r = size / 2.0, inv_r = 1.0 / r;
+        unsigned int bloom = accent ? accent : 0x6f8fa8u, neg = ui_moon_hue_turn(bloom, -0.10), pos = ui_moon_hue_turn(bloom, 0.10);
+        int y0 = top < ui->top ? ui->top : top, y1 = top + size < ui->bottom ? top + size : ui->bottom;
+        int x0 = left < 0 ? 0 : left, x1 = left + size < ui->width ? left + size : ui->width;
+        for (int y = y0; y < y1; y++)
+        {
+                decimal dy = (y + 0.5 - top - r) * inv_r, dy2 = dy * dy;
+                unsigned int address_to row = ui->pixels + (long)y * (long)ui->pitch;
+                for (int x = x0; x < x1; x++)
                 {
-                        decimal dx = (x + 0.5 - left - r) / r, dy = (y + 0.5 - top - r) / r, rr = dx * dx + dy * dy, mu, f, band, value[3];
-                        unsigned int address_to at = ui->pixels + (long)y * (long)ui->pitch + x, hue, target, h;
+                        decimal dx = (x + 0.5 - left - r) * inv_r, rr = dx * dx + dy2, mu, f, band, value[3];
+                        unsigned int address_to at = row + x, hue, target, h;
                         if (rr >= 1)
                                 continue;
                         mu = square_root(1 - rr);
@@ -14787,7 +14833,7 @@ static fn ui_moon_rim(struct ui address_to ui, int left, int top, int size, unsi
                         band = f * f * f * strength;
                         if (band > 1)
                                 band = 1;
-                        hue = ui_moon_glow_hue(accent, dx);
+                        hue = window_mix(bloom, dx < 0 ? neg : pos, (unsigned int)((dx < 0 ? -dx : dx) * 256));
                         // Uniform luminous Fresnel rim across the entire limb (no dark-maria 0x7a7a7a cliff).
                         target = window_mix(0xffffffu, hue, 140);
                         h = ui_moon_hash((unsigned int)x * 2246822519u ^ (unsigned int)y * 3266489917u);
@@ -14801,6 +14847,7 @@ static fn ui_moon_rim(struct ui address_to ui, int left, int top, int size, unsi
                         }
                         *at = (*at & 0xff000000u) | (unsigned int)(value[0] + 0.5) << 16 | (unsigned int)(value[1] + 0.5) << 8 | (unsigned int)(value[2] + 0.5);
                 }
+        }
 }
 
 // The ground under the moon of centre cx, cy and radius r:
@@ -19813,22 +19860,21 @@ static fn ui_icon_picture(struct ui address_to ui, int left, int top, int size, 
 }
 
 // A square picture of any side made (premultiplied 0xaarrggbb both):
-static inline void ui_px_axis(int i, int side, int size, int address_to i0, int address_to i1, int address_to w1)
+static inline INLINE void ui_px_axis(int i, int side, int size, int address_to restrict i0, int address_to restrict i1, int address_to restrict w1)
 {
         int c = ((2 * i + 1) * side * 256) / (2 * size) - 128;
         c = c < 0 ? 0 : c > (side - 1) * 256 ? (side - 1) * 256 : c;
         *i0 = c >> 8, *i1 = *i0 + 1 < side ? *i0 + 1 : *i0, *w1 = c & 255;
 }
 
-static inline unsigned int ui_px_lerp(unsigned int a, unsigned int b, unsigned int w0, unsigned int w1)
+static inline INLINE CONST unsigned int ui_px_lerp(unsigned int a, unsigned int b, unsigned int w0, unsigned int w1)
 {
-        unsigned int out = 0;
-        for (unsigned int s = 0; s < 32; s += 8)
-                out |= ((((a >> s) & 255u) * w0 + ((b >> s) & 255u) * w1 + 128u) >> 8) << s;
-        return out;
+        unsigned int rb = ((a & 0x00ff00ffu) * w0 + (b & 0x00ff00ffu) * w1 + 0x00800080u) >> 8;
+        unsigned int ag = (((a >> 8) & 0x00ff00ffu) * w0 + ((b >> 8) & 0x00ff00ffu) * w1 + 0x00800080u);
+        return (rb & 0x00ff00ffu) | (ag & 0xff00ff00u);
 }
 
-static fn ui_picture_scale(unsigned int address_to into, int size, const unsigned int address_to from, int side)
+HOT static fn ui_picture_scale(unsigned int address_to restrict into, int size, const unsigned int address_to restrict from, int side)
 {
         if (size <= 0 || side <= 0)
                 return;
@@ -19840,19 +19886,23 @@ static fn ui_picture_scale(unsigned int address_to into, int size, const unsigne
         if (size > side)
         {
                 unsigned int row0[UI_PICTURE_MOST], row1[UI_PICTURE_MOST];
-                for (int y = 0; y < size; y++)
+                int cx0[UI_PICTURE_MOST], cx1[UI_PICTURE_MOST], cwx[UI_PICTURE_MOST];
+                for (int x0_b = 0; x0_b < size; x0_b += UI_PICTURE_MOST)
                 {
-                        int y0, y1, wy1;
-                        ui_px_axis(y, side, size, &y0, &y1, &wy1);
-                        for (int x0_b = 0; x0_b < size; x0_b += UI_PICTURE_MOST)
+                        int chunk = size - x0_b < UI_PICTURE_MOST ? size - x0_b : UI_PICTURE_MOST;
+                        for (int k = 0; k < chunk; k++)
+                                ui_px_axis(x0_b + k, side, size, &cx0[k], &cx1[k], &cwx[k]);
+                        for (int y = 0; y < size; y++)
                         {
-                                int chunk = size - x0_b < UI_PICTURE_MOST ? size - x0_b : UI_PICTURE_MOST;
+                                int y0, y1, wy1;
+                                ui_px_axis(y, side, size, &y0, &y1, &wy1);
+                                const unsigned int address_to restrict f0 = from + y0 * side, address_to restrict f1 = from + y1 * side;
                                 for (int k = 0; k < chunk; k++)
                                 {
-                                        int x0, x1, wx1;
-                                        ui_px_axis(x0_b + k, side, size, &x0, &x1, &wx1);
-                                        row0[k] = ui_px_lerp(from[y0 * side + x0], from[y0 * side + x1], (unsigned int)(256 - wx1), (unsigned int)wx1);
-                                        row1[k] = ui_px_lerp(from[y1 * side + x0], from[y1 * side + x1], (unsigned int)(256 - wx1), (unsigned int)wx1);
+                                        unsigned int wx1 = (unsigned int)cwx[k], wx0 = 256u - wx1;
+                                        int ix0 = cx0[k], ix1 = cx1[k];
+                                        row0[k] = ui_px_lerp(f0[ix0], f0[ix1], wx0, wx1);
+                                        row1[k] = ui_px_lerp(f1[ix0], f1[ix1], wx0, wx1);
                                 }
                                 memory_lerp_u32_row(into + y * size + x0_b, row0, row1, (positive)chunk, (positive)wy1);
                         }
@@ -20744,13 +20794,18 @@ static positive ui_png_inflate(const p8 address_to from, positive size, p8 addre
         return done > 0 ? made : 0;
 }
 
-static inline unsigned int ui_png_premultiply(unsigned int r, unsigned int g, unsigned int b, unsigned int a)
+static inline INLINE CONST unsigned int ui_png_premultiply(unsigned int r, unsigned int g, unsigned int b, unsigned int a)
 {
-        return a << 24 | (r * a + 127) / 255 << 16 | (g * a + 127) / 255 << 8 | (b * a + 127) / 255;
+        if (a == 255u)
+                return 0xff000000u | r << 16 | g << 8 | b;
+        if (!a)
+                return 0;
+        unsigned int tr = r * a + 128u, tg = g * a + 128u, tb = b * a + 128u;
+        return a << 24 | ((tr + (tr >> 8)) >> 8) << 16 | ((tg + (tg >> 8)) >> 8) << 8 | ((tb + (tb >> 8)) >> 8);
 }
 
-static unsigned int address_to ui_png_decode_most(const p8 address_to file, positive size, int address_to width_out, int address_to height_out,
-                                               unsigned int most)
+HOT static unsigned int address_to ui_png_decode_most(const p8 address_to restrict file, positive size, int address_to restrict width_out, int address_to restrict height_out,
+                                                   unsigned int most)
 {
         static const p8 signature[8] = {137, 'P', 'N', 'G', 13, 10, 26, 10};
         p8 palette[256 * 4];
@@ -20833,32 +20888,96 @@ static unsigned int address_to ui_png_decode_most(const p8 address_to file, posi
         made = ui_png_inflate(zdata, zsize, raw + stride, room);
         if (made < room)
                 goto refused;
+        unsigned int pal_argb[256];
+        if (colour == 3)
+                for (unsigned int each = 0; each < 256; each++)
+                        pal_argb[each] = ui_png_premultiply(palette[each * 4], palette[each * 4 + 1], palette[each * 4 + 2], palette[each * 4 + 3]);
         // Unfiltered in place, each row against the one before it, and its pixels made.
         for (unsigned int y = 0; y < height; y++)
         {
-                p8 address_to row = raw + stride + (positive)y * (stride + 1), address_to line = row + 1;
+                p8 address_to restrict row = raw + stride + (positive)y * (stride + 1), address_to restrict line = row + 1;
                 // The row before, unfiltered where it is (a row of zeros before the first: raw's first stride bytes).
-                const p8 address_to above = y ? line - (stride + 1) : raw;
+                const p8 address_to restrict above = y ? line - (stride + 1) : raw;
+                unsigned int address_to restrict dst = pixels + (positive)y * width;
                 p8 filter = row[0];
-                if (filter > 4)
+                if (unlikely(filter > 4))
                         goto refused;
-                for (positive x = 0; x < stride; x++)
+                switch (filter)
                 {
-                        unsigned int left = x >= bytes_per_pixel ? line[x - bytes_per_pixel] : 0, up = above[x],
-                                     corner = x >= bytes_per_pixel ? above[x - bytes_per_pixel] : 0;
-                        if (filter == 1)
-                                line[x] = (p8)(line[x] + left);
-                        else if (filter == 2)
-                                line[x] = (p8)(line[x] + up);
-                        else if (filter == 3)
-                                line[x] = (p8)(line[x] + (left + up) / 2);
-                        else if (filter == 4)
+                case 0:
+                        break;
+                case 1:
+                        for (positive x = bytes_per_pixel; x < stride; x++)
+                                line[x] = (p8)(line[x] + line[x - bytes_per_pixel]);
+                        break;
+                case 2:
+                {
+                        positive x = 0;
+#if defined(__x86_64__)
+                        for (; x + 16 <= stride; x += 16)
+                                __asm__ volatile("movdqu (%[l],%[i]), %%xmm0\n\t"
+                                                 "movdqu (%[a],%[i]), %%xmm1\n\t"
+                                                 "paddb %%xmm1, %%xmm0\n\t"
+                                                 "movdqu %%xmm0, (%[l],%[i])"
+                                                 :
+                                                 : [l] "r"(line), [a] "r"(above), [i] "r"(x)
+                                                 : "xmm0", "xmm1", "memory");
+#elif defined(__aarch64__)
+                        for (; x + 16 <= stride; x += 16)
+                                __asm__ volatile("ldr q0, [%[l], %[i]]\n\t"
+                                                 "ldr q1, [%[a], %[i]]\n\t"
+                                                 "add v0.16b, v0.16b, v1.16b\n\t"
+                                                 "str q0, [%[l], %[i]]"
+                                                 :
+                                                 : [l] "r"(line), [a] "r"(above), [i] "r"(x)
+                                                 : "v0", "v1", "memory");
+#endif
+                        for (; x < stride; x++)
+                                line[x] = (p8)(line[x] + above[x]);
+                        break;
+                }
+                case 3:
+                {
+                        positive bpp = bytes_per_pixel < stride ? bytes_per_pixel : stride;
+                        for (positive x = 0; x < bpp; x++)
+                                line[x] = (p8)(line[x] + (above[x] >> 1));
+                        for (positive x = bpp; x < stride; x++)
+                                line[x] = (p8)(line[x] + (((unsigned int)line[x - bytes_per_pixel] + (unsigned int)above[x]) >> 1));
+                        break;
+                }
+                default:
+                {
+                        positive bpp = bytes_per_pixel < stride ? bytes_per_pixel : stride;
+                        for (positive x = 0; x < bpp; x++)
+                                line[x] = (p8)(line[x] + above[x]);
+                        for (positive x = bpp; x < stride; x++)
                         {
-                                int p = (int)left + (int)up - (int)corner, pa = p > (int)left ? p - (int)left : (int)left - p,
-                                    pb = p > (int)up ? p - (int)up : (int)up - p, pc = p > (int)corner ? p - (int)corner : (int)corner - p;
+                                int left = (int)line[x - bytes_per_pixel], up = (int)above[x], corner = (int)above[x - bytes_per_pixel];
+                                int p = left + up - corner, pa = p > left ? p - left : left - p,
+                                    pb = p > up ? p - up : up - p, pc = p > corner ? p - corner : corner - p;
                                 line[x] = (p8)(line[x] + (pa <= pb && pa <= pc ? left : pb <= pc ? up : corner));
                         }
+                        break;
                 }
+                }
+                if (likely(depth == 8 && colour == 6))
+                {
+                        const p8 address_to p = line;
+                        for (unsigned int x = 0; x < width; x++, p += 4)
+                                dst[x] = ui_png_premultiply(p[0], p[1], p[2], p[3]);
+                }
+                else if (depth == 8 && colour == 2 && key_r < 0)
+                {
+                        const p8 address_to p = line;
+                        for (unsigned int x = 0; x < width; x++, p += 3)
+                                dst[x] = 0xff000000u | (unsigned int)p[0] << 16 | (unsigned int)p[1] << 8 | p[2];
+                }
+                else if (depth == 8 && colour == 3)
+                {
+                        for (unsigned int x = 0; x < width; x++)
+                                dst[x] = pal_argb[line[x]];
+                }
+                else
                 for (unsigned int x = 0; x < width; x++)
                 {
                         unsigned int r, g, b, a = 255, sample;
@@ -20867,12 +20986,12 @@ static unsigned int address_to ui_png_decode_most(const p8 address_to file, posi
                                 positive bit = (positive)x * depth;
                                 sample = (unsigned int)(line[bit / 8] >> (8 - depth - bit % 8)) & ((1u << depth) - 1);
                                 if (colour == 3)
-                                        r = palette[sample * 4], g = palette[sample * 4 + 1], b = palette[sample * 4 + 2], a = palette[sample * 4 + 3];
-                                else
                                 {
-                                        a = (int)sample == key_r ? 0 : 255;
-                                        r = g = b = sample * 255 / ((1u << depth) - 1);
+                                        dst[x] = pal_argb[sample];
+                                        continue;
                                 }
+                                a = (int)sample == key_r ? 0 : 255;
+                                r = g = b = sample * 255 / ((1u << depth) - 1);
                         }
                         else
                         {
@@ -20881,9 +21000,7 @@ static unsigned int address_to ui_png_decode_most(const p8 address_to file, posi
 
 #define UI_PNG_AT(k) (p[(k) * wide])
 #define UI_PNG_WORD(k) (depth == 16 ? (int)(p[(k) * 2] << 8 | p[(k) * 2 + 1]) : (int)p[k])
-                                if (colour == 3)
-                                        r = palette[p[0] * 4], g = palette[p[0] * 4 + 1], b = palette[p[0] * 4 + 2], a = palette[p[0] * 4 + 3];
-                                else if (colour == 0 || colour == 4)
+                                if (colour == 0 || colour == 4)
                                 {
                                         r = g = b = UI_PNG_AT(0);
                                         a = colour == 4 ? UI_PNG_AT(1) : UI_PNG_WORD(0) == key_r ? 0 : 255;
@@ -20897,7 +21014,7 @@ static unsigned int address_to ui_png_decode_most(const p8 address_to file, posi
 #undef UI_PNG_AT
 #undef UI_PNG_WORD
                         }
-                        pixels[(positive)y * width + x] = ui_png_premultiply(r, g, b, a);
+                        dst[x] = ui_png_premultiply(r, g, b, a);
                 }
         }
         memory_free(zdata, size);

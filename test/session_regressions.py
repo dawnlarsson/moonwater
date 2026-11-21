@@ -815,6 +815,18 @@ def test_compositor_and_xwm_invariants():
     check("Settings list row single-ripple fix: settings_press_at uses ui_list_hit instead of re-calling ui_list_pointer(..., true) on release",
           "row = ui_list_hit(&settings.ui, &settings.list, x, y);" in settings_c and
           "ui_list_pointer(&settings.ui, &settings.list, WINDOW_EVENT_BUTTON, x, y, true)" not in settings_c)
+    font_c = read_text("src/canvas/font.c")
+    term_c = read_text("src/canvas/term.c")
+    check("Hardware Floor Pass 6: PNG SSE2/NEON Up ASM + premul/fast-paths, hoisted moon Fresnel hue, straight spans fast-path, font popcount/ASCII/tones hoist & term SGR O(1)",
+          "paddb %%xmm1, %%xmm0" in ui_src and
+          "add v0.16b, v0.16b, v1.16b" in ui_src and
+          "if (likely(straight))" in ui_src and
+          "neg = ui_moon_hue_turn(bloom, -0.10)" in ui_src and
+          "neg = ui_moon_hue_turn(bloom, -0.10)" in tb_src and
+          "__builtin_popcount(format & 0xffu)" in font_c and
+          "if (likely(at < length && text[at] < 0x80))" in font_c and
+          "const p32 address_to tones = font_tones(" in font_c and
+          "if (likely(final == 'm' && !csi_intermediate && !terminal_csi.marker))" in term_c)
     check("Steam bowl fixes Win32 dialog inflation (ttf-liberation + 65-moonwater-win32.conf) & GTK dark theme",
           '"ttf-liberation"' in read_text("src/bowl.c") and
           "65-moonwater-win32.conf" in read_text("src/bowl.c") and

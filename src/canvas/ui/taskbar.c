@@ -62,19 +62,19 @@ static void compositor_union(int *into, const int *other);
 static const unsigned int *compositor_grain_row(unsigned int light, int x, int y);
 static unsigned int compositor_vivid(unsigned int pixel);
 static inline b32 language_rtl(void);
-static int taskbar_inset(int scale);
+static inline INLINE CONST int taskbar_inset(int scale);
 static unsigned int taskbar_accent(void);
 static void taskbar_pins_read(void);
 static bool taskbar_tab_full(const struct taskbar_view *view, int at);
 static int taskbar_format_render(const char *format, char *into, int room);
 
-static inline int taskbar_clamp(int v, int lo, int hi) { return v < lo ? lo : v > hi ? hi : v; }
-static inline int taskbar_vertical(unsigned int pos) { return pos == TASKBAR_LEFT || pos == TASKBAR_RIGHT; }
-static inline int taskbar_scaled(int scale) { return scale * taskbar.scale / 100; }
-static int taskbar_thick(int scale) { return COMPOSITOR_PANEL * taskbar_scaled(scale) / 100; }
-static int taskbar_inset(int scale) { int n = 2 * scale / 100; return n < 1 ? 1 : n; }
-static inline b64 taskbar_tween_goal(const struct ui_tween address_to t) { return t->pending ? t->want : t->to; }
-static inline int taskbar_tween_moving(const struct ui_tween address_to t, positive now) { return t->pending || (t->start && (b64)now - t->start < t->duration); }
+static inline INLINE CONST int taskbar_clamp(int v, int lo, int hi) { return v < lo ? lo : v > hi ? hi : v; }
+static inline INLINE CONST int taskbar_vertical(unsigned int pos) { return pos == TASKBAR_LEFT || pos == TASKBAR_RIGHT; }
+static inline INLINE PURE int taskbar_scaled(int scale) { return scale * taskbar.scale / 100; }
+static inline INLINE PURE int taskbar_thick(int scale) { return COMPOSITOR_PANEL * taskbar_scaled(scale) / 100; }
+static inline INLINE CONST int taskbar_inset(int scale) { int n = 2 * scale / 100; return n < 1 ? 1 : n; }
+static inline INLINE PURE b64 taskbar_tween_goal(const struct ui_tween address_to t) { return t->pending ? t->want : t->to; }
+static inline INLINE PURE int taskbar_tween_moving(const struct ui_tween address_to t, positive now) { return t->pending || (t->start && (b64)now - t->start < t->duration); }
 
 static long long taskbar_now_sec(long long fixed)
 {
@@ -92,7 +92,7 @@ static int taskbar_broken_time(long long fixed, tm *broken)
         return localtime_r(&seconds, broken) != 0;
 }
 
-static int taskbar_fits(const struct ui_node address_to outer, const struct ui_node address_to inner)
+static inline INLINE PURE int taskbar_fits(const struct ui_node address_to outer, const struct ui_node address_to inner)
 {
         return inner && inner->x >= outer->x && inner->y >= outer->y &&
                inner->x + inner->w <= outer->x + outer->w && inner->y + inner->h <= outer->y + outer->h;
@@ -106,7 +106,7 @@ static unsigned int address_to taskbar_remap(unsigned int address_to old, positi
         return got < 0 && got > -4096 ? null : (unsigned int address_to)got;
 }
 
-static inline void taskbar_blit_square(unsigned int *restrict dst, long dst_pitch, const unsigned int *restrict src, long src_pitch, int size)
+static inline INLINE void taskbar_blit_square(unsigned int *restrict dst, long dst_pitch, const unsigned int *restrict src, long src_pitch, int size)
 {
         if (size > 0)
                 memory_copy_rect_u32(dst, (positive)dst_pitch, src, (positive)src_pitch, (positive)size, (positive)size);
@@ -961,7 +961,7 @@ static int taskbar_moon_glow_was(int band, int shown)
         return taskbar_bands[band].glow_shown = shown, was;
 }
 
-static int taskbar_moon_glow(const struct taskbar_view *view, unsigned int *pixels, const int square[4])
+HOT static int taskbar_moon_glow(const struct taskbar_view *view, unsigned int *restrict pixels, const int square[4])
 {
         struct taskbar_band address_to band = taskbar_band_cur();
         b64 share = taskbar_moon_share(), level = taskbar_moon_glow_level();
@@ -977,25 +977,41 @@ static int taskbar_moon_glow(const struct taskbar_view *view, unsigned int *pixe
         memory_copy(band->glow_key, key, sizeof(key));
         decimal strength = TASKBAR_MOON_HALO_ALPHA * (decimal)level / (decimal)UI_ONE, c = side / 2.0;
         decimal r = size * (1 + (decimal)share / (decimal)UI_ONE * TASKBAR_MOON_GROW / 100.0) / 2, reach = size * TASKBAR_MOON_HALO / 100.0;
+        decimal inv_r = 1.0 / r, inv_reach = 1.0 / reach, inner_r = r - 1 > 0 ? r - 1 : 0, inner2 = inner_r * inner_r, outer2 = (r + reach) * (r + reach);
+        unsigned int bloom = accent ? accent : 0x6f8fa8u, neg = ui_moon_hue_turn(bloom, -0.10), pos = ui_moon_hue_turn(bloom, 0.10);
         for (int py = 0; py < side; py++)
+        {
+                decimal dy = py + 0.5 - c, dy2 = dy * dy;
+                unsigned int *restrict row = pixels + (long)py * side;
                 for (int px = 0; px < side; px++)
                 {
-                        decimal dx = px + 0.5 - c, dy = py + 0.5 - c, d = square_root(dx * dx + dy * dy), t = (d - r) / reach;
+                        decimal dx = px + 0.5 - c, d2 = dx * dx + dy2;
+                        if (d2 < inner2 || d2 >= outer2)
+                        {
+                                row[px] = 0;
+                                continue;
+                        }
+                        decimal d = square_root(d2), t = (d - r) * inv_reach;
                         decimal a = d < r - 1 || t >= 1 ? 0 : strength * (t < 0 ? 1 : (1 - t) * (1 - t)) * (d < r ? d - (r - 1) : 1);
                         if (a <= 0)
                         {
-                                pixels[(long)py * side + px] = 0;
+                                row[px] = 0;
                                 continue;
                         }
                         unsigned int h = ui_moon_hash((unsigned int)px * 73856093u ^ (unsigned int)py * 19349663u);
-                        unsigned int hue = ui_moon_glow_hue(accent, dx / r < -1 ? -1 : dx / r > 1 ? 1 : dx / r);
+                        decimal side_x = dx * inv_r;
+                        decimal abs_x = side_x < 0 ? -side_x : side_x;
+                        if (abs_x > 1)
+                                abs_x = 1;
+                        unsigned int hue = window_mix(bloom, side_x < 0 ? neg : pos, (unsigned int)(abs_x * 256));
                         decimal dither = ((h & 255) + (h >> 8 & 255)) / 512.0 - 0.5, val[4];
                         val[3] = a * 255 + dither, val[3] = val[3] < 0 ? 0 : val[3] > 255 ? 255 : val[3];
                         for (int k = 0; k < 3; k++)
                                 val[k] = (hue >> (16 - 8 * k) & 255) * a + dither, val[k] = val[k] < 0 ? 0 : val[k] > val[3] ? val[3] : val[k];
-                        pixels[(long)py * side + px] = (unsigned int)(val[3] + 0.5) << 24 | (unsigned int)(val[0] + 0.5) << 16 |
-                                                       (unsigned int)(val[1] + 0.5) << 8 | (unsigned int)(val[2] + 0.5);
+                        row[px] = (unsigned int)(val[3] + 0.5) << 24 | (unsigned int)(val[0] + 0.5) << 16 |
+                                  (unsigned int)(val[1] + 0.5) << 8 | (unsigned int)(val[2] + 0.5);
                 }
+        }
         return 1;
 }
 
@@ -1415,9 +1431,10 @@ static void taskbar_moon(const struct taskbar_view *view, const struct ui_tree a
         {
                 unsigned int paper, ink;
                 ui_moon_paper_tones(light ? 0 : UI_MOON_PAPER_DARK, &paper, &ink);
-                for (int r = top < 0 ? 0 : top; r < top + grown && r < ui.height; r++)
-                        for (int c = left < 0 ? 0 : left; c < left + grown && c < ui.width; c++)
-                                ui.pixels[(long)r * (long)ui.pitch + c] = ink;
+                int r0 = top < 0 ? 0 : top, r1 = top + grown < ui.height ? top + grown : ui.height;
+                int c0 = left < 0 ? 0 : left, c1 = left + grown < ui.width ? left + grown : ui.width;
+                if (c1 > c0 && r1 > r0)
+                        memory_fill_u32_rect(ui.pixels + (long)r0 * (long)ui.pitch + c0, (positive)ui.pitch, (positive)(c1 - c0), (positive)(r1 - r0), ink);
                 ui_moon_paper(&ui, left, top, grown, turn, light ? 0 : UI_MOON_PAPER_DARK, 0);
                 ui_moon_rim(&ui, left, top, grown, accent, 0.85);
         }
@@ -1745,17 +1762,24 @@ static int taskbar_draw(const struct taskbar_view *view, unsigned long redo, tas
                                 if (!time_ok)
                                         ground = taskbar_glass_tab(view, rect[0], rect[1], gw, band->x, band->y, band->w, n->x, n->y, n->w, n->h),
                                         ink = window_contrast(ground);
-                                if (mark && px)
+                                if (mark && px && mark->w > 0 && mark->h > 0)
                                 {
                                         int mx = mark->x - band->x, my = mark->y - band->y, mw = mark->w, mh = mark->h;
-                                        for (int yy = 0; yy < mh && my + yy < band->h; yy++)
-                                                for (int xx = 0; xx < mw && mx + xx < band->w; xx++)
+                                        int yy0 = my < 0 ? -my : 0, yy1 = my + mh > band->h ? band->h - my : mh;
+                                        int xx0 = mx < 0 ? -mx : 0, xx1 = mx + mw > band->w ? band->w - mx : mw;
+                                        unsigned int step_x = ((unsigned int)TASKBAR_TRAY_ITEM_PX << 16) / (unsigned int)mw;
+                                        for (int yy = yy0; yy < yy1; yy++)
+                                        {
+                                                const unsigned int *src_row = px + (yy * TASKBAR_TRAY_ITEM_PX / mh) * TASKBAR_TRAY_ITEM_PX;
+                                                unsigned int *dst_row = view->pixels + (long)(my + yy) * band->w + mx;
+                                                unsigned int sx = (unsigned int)xx0 * step_x;
+                                                for (int xx = xx0; xx < xx1; xx++, sx += step_x)
                                                 {
-                                                        unsigned int src = px[(yy * TASKBAR_TRAY_ITEM_PX / mh) * TASKBAR_TRAY_ITEM_PX + (xx * TASKBAR_TRAY_ITEM_PX / mw)], a = src >> 24;
-                                                        if (a && mx + xx >= 0 && my + yy >= 0)
-                                                                view->pixels[(my + yy) * band->w + mx + xx] =
-                                                                    window_mix(view->pixels[(my + yy) * band->w + mx + xx], src & 0xffffffu, (int)(a + (a >> 7)));
+                                                        unsigned int src = src_row[sx >> 16], a = src >> 24;
+                                                        if (a)
+                                                                dst_row[xx] = window_mix(dst_row[xx], src & 0xffffffu, (int)(a + (a >> 7)));
                                                 }
+                                        }
                                 }
                                 break;
                         }
