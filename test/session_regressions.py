@@ -767,6 +767,13 @@ def test_compositor_and_xwm_invariants():
           "strip = taskbar_thick(scale) + reach" in manage and
           "if (changed)\n                compositor_osk_sync();" in inp and
           "__attribute__((aligned(64))) unsigned long long reading" in inp)
+    check("Compose & UI SIMD Batch D: scaled NV12 SIMD, plan damage culling + y-dedup, taskbar glass SIMD, AA ring fast-reject & ui_icon_picture rect OVER",
+          "memory_nv12_to_xrgb_row(nv_row + x_even," in comp_c and
+          "if (x2 <= t->x1 || fx >= t->x2 || y2 <= t->y1 || fy >= t->y2)" in comp_c and
+          "if (place && edge[place - 1] == ey)" in comp_c and
+          "memory_saturate_u32(taskbar_tint, from + at, (positive)count);" in tb_src and
+          "if (d2 >= outer_r)" in tb_src and
+          "memory_over_u32_rect(ui->pixels + (long)y0 * (long)ui->pitch + left," in ui_src)
     check("Steam bowl fixes Win32 dialog inflation (ttf-liberation + 65-moonwater-win32.conf) & GTK dark theme",
           '"ttf-liberation"' in read_text("src/bowl.c") and
           "65-moonwater-win32.conf" in read_text("src/bowl.c") and

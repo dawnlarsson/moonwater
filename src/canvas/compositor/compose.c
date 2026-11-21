@@ -2297,6 +2297,8 @@ static void compositor_plan_make(struct compositor_plan *plan, const struct comp
 
                 compositor_outline(f, &fx, &fy, &fw, &fh);
                 x2 = fx + fw, y2 = fy + fh;
+                if (x2 <= t->x1 || fx >= t->x2 || y2 <= t->y1 || fy >= t->y2)
+                        continue;
                 if (!r)
                 {
                         box[pieces][0] = fx, box[pieces][1] = fy, box[pieces][2] = x2, box[pieces][3] = y2;
@@ -2314,15 +2316,22 @@ static void compositor_plan_make(struct compositor_plan *plan, const struct comp
 
                 for (unsigned int piece = first; piece < pieces; piece++)
                         for (unsigned int side = 1; side < 4; side += 2)
-                                if (box[piece][side] > t->y1 && box[piece][side] < t->y2)
-                                {
-                                        unsigned int place = edges++;
+                        {
+                                int ey = box[piece][side];
 
-                                        while (place && edge[place - 1] > box[piece][side])
+                                if (ey > t->y1 && ey < t->y2)
+                                {
+                                        unsigned int place = edges;
+
+                                        while (place && edge[place - 1] > ey)
                                                 place--;
-                                        memory_copy(edge + place + 1, edge + place, (edges - 1 - place) * sizeof(edge[0]));
-                                        edge[place] = box[piece][side];
+                                        if (place && edge[place - 1] == ey)
+                                                continue;
+                                        memory_copy(edge + place + 1, edge + place, (edges - place) * sizeof(edge[0]));
+                                        edge[place] = ey;
+                                        edges++;
                                 }
+                        }
         }
         plan->pieces = pieces;
         plan->edges = edges;
@@ -3032,6 +3041,49 @@ static int canvas_ext_xform_blit(const struct canvas_ext_blit *b, int out_box[4]
                         const unsigned char *uv_row = b->uv_base + (unsigned long)(by >> 1) * b->uv_stride + (unsigned long)ox1;
 
                         memory_nv12_to_xrgb_row(dst, y_row, uv_row, (positive)(ox2 - ox1));
+                }
+                return 1;
+        }
+        // Fast scaled/cropped opaque NV12 -> XRGB path: SIMD-convert each unique source row once, then gather.
+        if (b->fourcc == CANVAS_FOURCC_NV12 && !tr && !b->blend && b->uv_base && b->uv_stride > 0 && bw > 0 && bw <= 4096 && ox2 <= 4096)
+        {
+                long tx_buf[4096], min_bx = bw, max_bx = 0, last_by = -1;
+                unsigned int nv_row[4096];
+
+                for (long ox = ox1; ox < ox2; ox++)
+                {
+                        long tx = (sx256 + ((ox * 2 + 1) * sw256) / (2 * tw)) >> 8;
+
+                        tx = tx < 0 ? 0 : tx >= bw ? bw - 1 : tx;
+                        tx_buf[ox] = tx;
+                        if (tx < min_bx)
+                                min_bx = tx;
+                        if (tx > max_bx)
+                                max_bx = tx;
+                }
+                if (min_bx <= max_bx)
+                {
+                        long x_even = min_bx & ~1L, x_len = max_bx - x_even + 1;
+
+                        for (long oy = oy1; oy < oy2; oy++)
+                        {
+                                unsigned int *dst = b->to + (unsigned long)(dy0 + oy) * b->to_pitch + (unsigned long)dx0;
+                                long ty = (sy256 + ((oy * 2 + 1) * sh256) / (2 * th)) >> 8;
+                                long by;
+
+                                ty = ty < 0 ? 0 : ty >= bh ? bh - 1 : ty;
+                                by = b->y_invert ? bh - 1 - ty : ty;
+                                if (by != last_by)
+                                {
+                                        memory_nv12_to_xrgb_row(nv_row + x_even,
+                                                                b->pixels + (unsigned long)by * b->stride + (unsigned long)x_even,
+                                                                b->uv_base + (unsigned long)(by >> 1) * b->uv_stride + (unsigned long)x_even,
+                                                                (positive)x_len);
+                                        last_by = by;
+                                }
+                                for (long ox = ox1; ox < ox2; ox++)
+                                        dst[ox] = nv_row[tx_buf[ox]];
+                        }
                 }
                 return 1;
         }

@@ -851,8 +851,8 @@ static unsigned int taskbar_glass_tab(const struct taskbar_view *view, int gx, i
                 for (int at = 0; at < width; at += TASKBAR_TAB_CHUNK)
                 {
                         int count = width - at < TASKBAR_TAB_CHUNK ? width - at : TASKBAR_TAB_CHUNK;
-                        for (int col = 0; col < count; col++)
-                                taskbar_tint[col] = window_mix(compositor_vivid(from[at + col]), target, amount);
+                        memory_saturate_u32(taskbar_tint, from + at, (positive)count);
+                        memory_tint_u32(taskbar_tint, taskbar_tint, (positive)count, target, amount, 255, 0);
                         memory_glass_over_u32(into + at, taskbar_clear, taskbar_tint, (positive)count,
                                               compositor_grain_row(target != 0, (x - bx) + at, row - by));
                 }
@@ -1485,14 +1485,23 @@ static void taskbar_tab_rounded(struct ui address_to ui, int x, int y, int side,
         static unsigned int cut[UI_PICTURE_MOST * UI_PICTURE_MOST];
         if (side <= 0 || side > UI_PICTURE_MOST)
                 return;
+        int inner_r = side > 1 ? (side - 1) * (side - 1) : 0, outer_r = (side + 1) * (side + 1);
         for (int r = 0; r < side; r++)
                 for (int c = 0; c < side; c++)
                 {
                         unsigned int p = picture[r * side + c], cov = 256;
                         int dx = 2 * c + 1 - side, dy = 2 * r + 1 - side;
                         if (((ends & 1) && dx < 0) || ((ends & 2) && dx > 0) || ((ends & 4) && dy < 0) || ((ends & 8) && dy > 0))
-                                cov = (unsigned int)taskbar_clamp((side - (int)ui_touch_isqrt((unsigned long long)(dx * dx + dy * dy))) * 128 + 128, 0, 256);
-                        if (cov < 256)
+                        {
+                                int d2 = dx * dx + dy * dy;
+                                if (d2 >= outer_r)
+                                        cov = 0;
+                                else if (d2 > inner_r)
+                                        cov = (unsigned int)taskbar_clamp((side - (int)ui_touch_isqrt((unsigned long long)d2)) * 128 + 128, 0, 256);
+                        }
+                        if (cov == 0)
+                                p = 0;
+                        else if (cov < 256)
                                 p = ((p >> 24) * cov >> 8) << 24 | ((p >> 16 & 255) * cov >> 8) << 16 | ((p >> 8 & 255) * cov >> 8) << 8 | ((p & 255) * cov >> 8);
                         cut[r * side + c] = p;
                 }

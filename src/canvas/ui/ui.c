@@ -19720,8 +19720,6 @@ static fn ui_icon_scale(unsigned int address_to into, int size, const unsigned i
 
 static fn ui_icon_picture(struct ui address_to ui, int left, int top, int size, const unsigned int address_to picture)
 {
-        static const unsigned int plain[UI_PICTURE_MOST]; // no grain
-        unsigned int under[UI_PICTURE_MOST];
         if (size <= 0 || size > UI_PICTURE_MOST || left < 0 || left + size > ui->width)
                 return;
         if (ui->scene)
@@ -19729,14 +19727,11 @@ static fn ui_icon_picture(struct ui address_to ui, int left, int top, int size, 
                 ui->scene->lost = UI_LOST_CELL_TEXT;
                 return;
         }
-        for (int row = 0; row < size; row++)
-        {
-                unsigned int address_to into = ui->pixels + (long)(top + row) * (long)ui->pitch + left;
-                if (top + row < ui->top || top + row >= ui->bottom)
-                        continue;
-                memory_copy(under, into, (positive)size * 4);
-                memory_glass_over_u32(into, picture + row * size, under, (positive)size, plain);
-        }
+        int y0 = top < ui->top ? ui->top : top;
+        int y1 = top + size > ui->bottom ? ui->bottom : top + size;
+        if (y1 > y0)
+                memory_over_u32_rect(ui->pixels + (long)y0 * (long)ui->pitch + left, (positive)ui->pitch,
+                                     picture + (y0 - top) * size, (positive)size, (positive)size, (positive)(y1 - y0));
 }
 
 // A square picture of any side made (premultiplied 0xaarrggbb both):
