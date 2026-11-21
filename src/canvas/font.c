@@ -562,7 +562,10 @@ __attribute__((used)) b32 font_advance(const font_face address_to face, p32 glyp
 
 static inline INLINE CONST p32 font_bits(p32 format)
 {
-        return (p32)__builtin_popcount(format & 0xffu);
+        p32 v = format & 0xffu;
+        v = (v & 0x55u) + ((v >> 1) & 0x55u);
+        v = (v & 0x33u) + ((v >> 2) & 0x33u);
+        return (v + (v >> 4)) & 0x0fu;
 }
 
 static b32 font_coverage(const font_face address_to face, positive table, p32 glyph)

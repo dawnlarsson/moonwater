@@ -237,7 +237,10 @@ HOT static positive compositor_present_lead(void)
         if (compositor_metric_paths_count)
         {
                 unsigned int mask = compositor_metric_paths_count >= 32u ? ~0u : (1u << compositor_metric_paths_count) - 1u;
-                cards = (unsigned int)__builtin_popcount(compositor_metric_paths & mask);
+                unsigned int v = compositor_metric_paths & mask;
+                v -= (v >> 1) & 0x55555555u;
+                v = (v & 0x33333333u) + ((v >> 2) & 0x33333333u);
+                cards = (((v + (v >> 4)) & 0x0f0f0f0fu) * 0x01010101u) >> 24;
         }
         processors = compositor_metric_paths_count - cards;
         worst = compositor_metric_worst(compositor_metric_card, compositor_metric_card_at, compositor_metric_card_count, cards);

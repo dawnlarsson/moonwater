@@ -823,7 +823,7 @@ def test_compositor_and_xwm_invariants():
           "if (likely(straight))" in ui_src and
           "neg = ui_moon_hue_turn(bloom, -0.10)" in ui_src and
           "neg = ui_moon_hue_turn(bloom, -0.10)" in tb_src and
-          "__builtin_popcount(format & 0xffu)" in font_c and
+          "(v & 0x55u) + ((v >> 1) & 0x55u)" in font_c and
           "if (likely(at < length && text[at] < 0x80))" in font_c and
           "const p32 address_to tones = font_tones(" in font_c and
           "if (likely(final == 'm' && !csi_intermediate && !terminal_csi.marker))" in term_c)
@@ -840,7 +840,7 @@ def test_compositor_and_xwm_invariants():
           "struct op8 snap = *(const volatile struct op8 *)" in gpu_host_c and
           "memory_hash_33((address_any)cover, (positive)cells)" in gpu_host_c and
           "memory_resample_u32_rect(into, (positive)pitch," in pres_c and
-          "__builtin_popcount(compositor_metric_paths & mask)" in pres_c)
+          "0x01010101u) >> 24" in pres_c)
     check("lib.c ASM Pass 8: AVX2 lerp/add_sat/reverse/invert/copy_rect_u32 NT & arm64 8-px widening NEON st4 memory_nv12_to_xrgb_row",
           "vpbroadcastw %xmm6, %ymm6" in lib_c and
           "vpaddusb %ymm1, %ymm0, %ymm0" in lib_c and
