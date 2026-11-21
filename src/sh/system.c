@@ -393,6 +393,9 @@ static COLD fn system_render_group(void)
                 system_change_mode_at(AT_FDCWD, path, 0660);
         }
         system_device_grant("/dev/kfd", SYSTEM_RENDER_GID);
+        system_device_grant("/dev/udmabuf", SYSTEM_RENDER_GID);
+        if (system_access_at(AT_FDCWD, "/dev/ntsync", 0) >= 0)
+                system_change_mode_at(AT_FDCWD, "/dev/ntsync", 0666);
         system_directory_grant("/dev/dma_heap", null, SYSTEM_RENDER_GID);
         system_directory_grant("/dev", "nvidia", SYSTEM_RENDER_GID);
 }

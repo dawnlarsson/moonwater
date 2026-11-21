@@ -1119,6 +1119,9 @@ static fn bowl_isolated_devices(void)
         bowl_isolated_dir_grant("/dev/dri", "renderD", 105);
         bowl_isolated_dir_grant("/dev/dri", "card", 44);
         bowl_isolated_node_grant("/dev/kfd", 105);
+        bowl_isolated_node_grant("/dev/udmabuf", 105);
+        if (system_access_at(AT_FDCWD, "/dev/ntsync", 0) >= 0)
+                system_change_mode_at(AT_FDCWD, "/dev/ntsync", 0666);
         bowl_isolated_dir_grant("/dev/dma_heap", null, 105);
         bowl_isolated_dir_grant("/dev", "nvidia", 105);
 }
@@ -2798,7 +2801,7 @@ static b32 bowl_env_named(string_address entry, string_address name)
 #define BOWL_USER_ID_TEXT "1000"
 #define BOWL_USER_NAME "user"
 #define BOWL_ENV_ROOM 512
-#define BOWL_ENV_DEFAULTS 13
+#define BOWL_ENV_DEFAULTS 15
 
 static p8 bowl_runtime_path[sizeof(BOWL_RUNTIME_DIR) + 20]
     __attribute__((section(".bss.hot")));
@@ -3653,16 +3656,60 @@ static string_address bowl_language_offered(string_address path)
         return bowl_language_assignment;
 }
 
+#define BOWL_WORKAROUNDS_PATH "/root/workarounds"
+#define BOWL_PR_SET_TIMERSLACK 29
+
+static bool bowl_workaround_on(string_address name, bool default_on)
+{
+        p8 text[512];
+        bipolar fd = system_open_at(AT_FDCWD, BOWL_WORKAROUNDS_PATH, FILE_READ | O_CLOEXEC);
+        bipolar got;
+        positive at = 0;
+        positive nlen = string_length(name);
+
+        if (fd < 0)
+                return default_on;
+        got = system_call_3(syscall(read), (positive)fd, (positive)text, sizeof(text) - 1);
+        system_close((positive)fd);
+        if (got <= 0)
+                return default_on;
+        while (at < (positive)got)
+        {
+                positive start = at;
+                positive len;
+
+                while (at < (positive)got && text[at] != '\n')
+                        at++;
+                len = at - start;
+                if (at < (positive)got)
+                        at++;
+                if (len > nlen && !memory_compare(text + start, name, nlen) && text[start + nlen] == ' ')
+                {
+                        positive vlen = len - nlen - 1;
+                        p8 address_to val = text + start + nlen + 1;
+
+                        if (vlen == 3 && !memory_compare(val, "off", 3))
+                                return false;
+                        if (vlen == 2 && !memory_compare(val, "on", 2))
+                                return true;
+                }
+        }
+        return default_on;
+}
+
 static string_address address_to bowl_environment(
     string_address address_to inherited)
 {
         static string_address mixed[BOWL_ENV_ROOM];
         bool have[BOWL_VARS] = {false};
         bool have_bus = false, have_sound = false, have_wayland = false,
-             have_language = false, have_session_type = false, have_display = false;
+             have_language = false, have_session_type = false, have_display = false,
+             have_vk_present = false, have_glthread = false;
         bool offer_bus = bowl_session_bus_offered(),
              offer_sound = bowl_sound_offered(),
-             offer_wayland = bowl_wayland_offered();
+             offer_wayland = bowl_wayland_offered(),
+             offer_mailbox = bowl_workaround_on("vk-mailbox", false),
+             offer_glthread = bowl_workaround_on("mesa-glthread", false);
         string_address language = bowl_language_offered((string_address)BOWL_LANGUAGE_PATH);
         positive n = 0;
         b32 skipped = false;
@@ -3694,6 +3741,10 @@ static string_address address_to bowl_environment(
                         have_display = true;
                 if (bowl_env_named(inherited[at], BOWL_LANGUAGE_VARIABLE))
                         have_language = true;
+                if (bowl_env_named(inherited[at], "MESA_VK_WSI_PRESENT_MODE"))
+                        have_vk_present = true;
+                if (bowl_env_named(inherited[at], "mesa_glthread"))
+                        have_glthread = true;
 
                 /*  Out of room. Handing back the block as it
                     arrived is only safe while nothing has been
@@ -3723,6 +3774,8 @@ static string_address address_to bowl_environment(
                 missing += offer_wayland && !have_wayland;
                 missing += offer_wayland && !have_session_type && !have_display;
                 missing += language && !have_language;
+                missing += offer_mailbox && !have_vk_present;
+                missing += offer_glthread && !have_glthread;
                 if (!skipped && !missing)
                         return inherited;
                 if (n + BOWL_ENV_DEFAULTS + (offer_wayland ? 2 : 0) >=
@@ -3748,6 +3801,10 @@ static string_address address_to bowl_environment(
                 mixed[n++] = (string_address)BOWL_SESSION_TYPE_VARIABLE "=wayland";
         if (language && !have_language)
                 mixed[n++] = language;
+        if (offer_mailbox && !have_vk_present)
+                mixed[n++] = (string_address) "MESA_VK_WSI_PRESENT_MODE=mailbox";
+        if (offer_glthread && !have_glthread)
+                mixed[n++] = (string_address) "mesa_glthread=true";
         mixed[n] = null;
         return mixed;
 }
@@ -4466,6 +4523,8 @@ static b32 bowl_launch(string_address root, string_address program,
                 bowl_own_namespace();
         environment = bowl_environment(file_environment_all());
         environment = bowl_without_exposed_path(environment);
+        if (bowl_workaround_on("bowl-timerslack", true))
+                (void)system_call_2(syscall(prctl), BOWL_PR_SET_TIMERSLACK, 1);
         if (!bowl_capabilities_wanted(environment))
                 bowl_drop_ambient_capabilities();
 
@@ -9439,8 +9498,9 @@ static string_address bowl_chrome_session[] = {
     // GTK 3 (the file dialog in the browser) does not ask the portal what the scheme is: it is told at the start, by the theme
     // of the moment (the bus keeps it in color-scheme), unless the person has named one.
     "[ -n \"$GTK_THEME\" ] || [ \"$(cat /run/moonwater/color-scheme 2>/dev/null)\" != dark ] || export GTK_THEME=Adwaita:dark",
-    "for node in /dev/dri/renderD* /dev/kfd /dev/dma_heap/* /dev/nvidia*; do [ -c \"$node\" ] && chown 0:"
+    "for node in /dev/dri/renderD* /dev/kfd /dev/udmabuf /dev/dma_heap/* /dev/nvidia*; do [ -c \"$node\" ] && chown 0:"
     BOWL_GROUP_RENDER_TEXT " \"$node\" && chmod 0660 \"$node\"; done 2>/dev/null",
+    "[ -c /dev/ntsync ] && chmod 0666 /dev/ntsync 2>/dev/null || true",
     // musl 1.2.6 implements pwrite() via SYS_pwritev2, which Chromium's
     // seccomp-bpf filter traps (nr=0x148 on x86-64). Preloading our tiny
     // syscall-only shim routes pwrite* back to __NR_pwrite64 inside the bowl
@@ -12574,8 +12634,9 @@ static string_address bowl_steam_session[] = {
     // No udev runs here, so SDL (Steam's own, a game's, Proton's) is told to find the pads by watching /dev/input and /dev: a
     // pad plugged in later and the virtual pad Steam Input makes are seen as their nodes appear (bowl_pad_keeper makes them).
     "wa sdl-no-udev && export SDL_JOYSTICK_DISABLE_UDEV=1 SDL_HIDAPI_JOYSTICK_DISABLE_UDEV=1 SDL_HIDAPI_UDEV=0",
-    "for node in /dev/dri/renderD* /dev/kfd /dev/dma_heap/* /dev/nvidia*; do [ -c \"$node\" ] && chown 0:"
+    "for node in /dev/dri/renderD* /dev/kfd /dev/udmabuf /dev/dma_heap/* /dev/nvidia*; do [ -c \"$node\" ] && chown 0:"
     BOWL_GROUP_RENDER_TEXT " \"$node\" && chmod 0660 \"$node\"; done 2>/dev/null",
+    "[ -c /dev/ntsync ] && chmod 0666 /dev/ntsync 2>/dev/null || true",
     "gl=software; for node in /sys/class/drm/renderD*; do [ -e \"$node/device\" ] || continue; "
     "case $(cat \"$node\"/device/uevent 2>/dev/null) in *DRIVER=vgem*|*platform:vgem*|*DRIVER=vkms*) continue ;; esac; "
     "case $(cat \"$node\"/device/features \"$node\"/device/virtio*/features 2>/dev/null) in 0*) ;; *) gl=card ;; esac; done",
