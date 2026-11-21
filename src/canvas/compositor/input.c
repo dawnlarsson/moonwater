@@ -1098,8 +1098,8 @@ static int compositor_steam_passes(unsigned int code, int value, unsigned int mo
         if (value != 1)
                 return pass = (*bit & mask) != 0, (!value ? (void)(*bit &= (unsigned char)~mask) : (void)0), pass;
         pass = (code == CK_KEY_ESC && (modifiers & WINDOW_KEY_SUPER)) || (chord == WINDOW_KEY_ALT && code == CK_KEY_TAB) ||
-               ((code == CK_KEY_LEFT || code == CK_KEY_RIGHT || code == CK_KEY_UP) && (modifiers & WINDOW_KEY_CONTROL) &&
-                (modifiers & (WINDOW_KEY_ALT | WINDOW_KEY_SUPER)));
+               ((code == CK_KEY_LEFT || code == CK_KEY_RIGHT || code == CK_KEY_UP) &&
+                ((modifiers & WINDOW_KEY_SUPER) || ((modifiers & WINDOW_KEY_CONTROL) && (modifiers & WINDOW_KEY_ALT))));
         for (unsigned int at = 0; !pass && at < compositor_keys.count; at++)
                 pass = code == compositor_keys.code[at] &&
                        (modifiers & (WINDOW_KEY_SHIFT | WINDOW_KEY_CONTROL | WINDOW_KEY_ALT | WINDOW_KEY_SUPER)) == compositor_keys.modifiers[at];
@@ -1109,7 +1109,7 @@ static int compositor_steam_passes(unsigned int code, int value, unsigned int mo
 
 static int compositor_space_chord(unsigned int code, int value, unsigned int mods4)
 {
-        int nav = mods4 == (WINDOW_KEY_CONTROL | WINDOW_KEY_ALT) || mods4 == (WINDOW_KEY_CONTROL | WINDOW_KEY_SUPER);
+        int nav = mods4 == WINDOW_KEY_SUPER || mods4 == (WINDOW_KEY_CONTROL | WINDOW_KEY_ALT) || mods4 == (WINDOW_KEY_CONTROL | WINDOW_KEY_SUPER);
         int move = mods4 == (WINDOW_KEY_CONTROL | WINDOW_KEY_ALT | WINDOW_KEY_SHIFT) ||
                    mods4 == (WINDOW_KEY_CONTROL | WINDOW_KEY_SUPER | WINDOW_KEY_SHIFT);
         int screen_move = mods4 == (WINDOW_KEY_CONTROL | WINDOW_KEY_ALT | WINDOW_KEY_SUPER);
@@ -1120,11 +1120,11 @@ static int compositor_space_chord(unsigned int code, int value, unsigned int mod
                 return value == 1 ? compositor_mc_close() : (void)0, 1;
         if (nav && (code == CK_KEY_LEFT || code == CK_KEY_RIGHT))
                 return value == 1 ? compositor_space_step(compositor_space_current_screen(), code == CK_KEY_RIGHT ? 1 : -1) : (void)0, 1;
-        if (nav && code >= 2 && code <= 10)
+        if (mods4 != WINDOW_KEY_SUPER && nav && code >= 2 && code <= 10)
                 return value == 1 ? compositor_space_switch_index(compositor_space_current_screen(), (int)(code - 2)) : (void)0, 1;
-        if (nav && code == 49) // N: new desktop Space
+        if (mods4 != WINDOW_KEY_SUPER && nav && code == 49) // N: new desktop Space
                 return value == 1 ? compositor_space_add(compositor_space_current_screen(), 1) : (void)0, 1;
-        if (nav && code == 17) // W: close current desktop Space
+        if (mods4 != WINDOW_KEY_SUPER && nav && code == 17) // W: close current desktop Space
                 return value == 1 ? compositor_space_remove_active(compositor_space_current_screen()) : (void)0, 1;
         if (move && (code == CK_KEY_LEFT || code == CK_KEY_RIGHT))
                 return value == 1 ? compositor_space_move_row_step(compositor.focus, code == CK_KEY_RIGHT ? 1 : -1) : (void)0, 1;
@@ -1146,7 +1146,7 @@ static int compositor_key_chord(unsigned int code, int value, unsigned int modif
                 }
         if (!compositor.cycle && compositor_space_chord(code, value, mods4))
                 return 1;
-        if (mods4 == WINDOW_KEY_SUPER && (code == CK_KEY_LEFT || code == CK_KEY_RIGHT || code == CK_KEY_UP || code == CK_KEY_DOWN))
+        if (mods4 == (WINDOW_KEY_SUPER | WINDOW_KEY_ALT) && (code == CK_KEY_LEFT || code == CK_KEY_RIGHT || code == CK_KEY_UP || code == CK_KEY_DOWN))
                 return value == 1 ? compositor_tile_chord(code) : (void)0, 1;
         if (mods4 == (WINDOW_KEY_SUPER | WINDOW_KEY_SHIFT) && (code == CK_KEY_LEFT || code == CK_KEY_RIGHT))
                 return value == 1 ? compositor_screen_chord(code) : (void)0, 1;

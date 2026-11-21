@@ -833,9 +833,11 @@ def test_canvas_spaces_invariants():
           "compositor_space_all_fullscreen()" in pres and
           "!compositor_space_screen_fullscreen(compositor_screen_of(row))" in manage and
           "compositor_space_is_fs_row(row)" in scan)
-    check("Spaces: horizontal slide transition respects compositor_glides() / reduced motion",
-          "slide_dx = (new_pos >= old_pos ? 1 : -1) * screens[screen][2];" in manage and
-          "compositor_glide_start(row, from);" in manage)
+    check("Spaces: horizontal slide transition uses bounded on-screen step & Super+Arrow has no tiling collision",
+          "slide_dx = (new_pos >= old_pos ? 1 : -1) * step;" in manage and
+          "compositor.glide[row] = 0;\n                                compositor_glide_start(row, from);" in manage and
+          "mods4 == (WINDOW_KEY_SUPER | WINDOW_KEY_ALT)" in inp and
+          "int nav = mods4 == WINDOW_KEY_SUPER ||" in inp)
 
     glass = read_text("src/canvas/compositor/glass.c")
     check("Mission Control: taskbar-edge-attached sliding drawer pushes taskbar inward via ui_tween & taskbar_key.mc_push",

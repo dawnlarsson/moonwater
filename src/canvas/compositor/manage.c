@@ -2592,7 +2592,14 @@ static int compositor_space_activate(int screen, unsigned int sid)
                 }
         screens = compositor_screens(&count);
         if (compositor_glides() && count == 1 && (unsigned int)screen < count)
-                slide_dx = (new_pos >= old_pos ? 1 : -1) * screens[screen][2];
+        {
+                int step = 96 * compositor.scale / 100;
+                int cap = screens[screen][2] / 8;
+
+                if (step > cap)
+                        step = cap;
+                slide_dx = (new_pos >= old_pos ? 1 : -1) * step;
+        }
         compositor_grab_end(COMPOSITOR_GRAB_CANCEL, COMPOSITOR_NONE);
         compositor_popups_close(-1, -1);
         old_sp = compositor_space_find(old_id);
@@ -2629,6 +2636,7 @@ static int compositor_space_activate(int screen, unsigned int sid)
                         if (slide_dx && !(compositor.state[row] & WINDOW_MINIMIZED))
                         {
                                 int from[4] = {compositor.x[row] + slide_dx, compositor.y[row], (int)compositor.w[row], (int)compositor.h[row]};
+                                compositor.glide[row] = 0;
                                 compositor_glide_start(row, from);
                         }
                         rows_add(&compositor.woken, row);
