@@ -673,8 +673,9 @@ def test_compositor_and_xwm_invariants():
           read_text("src/sh/system.c").find("wait_for_settling(settling);") < read_text("src/sh/system.c").find("rq_affinity"))
     check("ext4 mounts with MS_NOATIME and commit=30",
           "MS_NOATIME" in read_text("src/sh/host.c") and '"commit=30"' in read_text("src/sh/host/disk.c"))
-    check("RT audio thread only probes game-slice on idle->playing transition",
-          "audio_playing_stream(audio_service.played_rate ? 0 : &low)" in read_text("src/audio/service.c"))
+    check("RT audio thread only probes game-slice on idle->playing transition (and null-guards *low)",
+          "audio_playing_stream(audio_service.played_rate ? 0 : &low)" in read_text("src/audio/service.c") and
+          "if (low)\n                *low = 0;" in read_text("src/audio/service.c"))
     check("Audio pulse.c uses lib.c SIMD memory_s16_to_u8 and memory_reverse_units",
           "memory_s16_to_u8(" in read_text("src/audio/pulse.c") and "memory_reverse_units(" in read_text("src/audio/pulse.c"))
     check("Explicit sync skips redundant implicit dmabuf_ready poll & Reflex latch defers callbacks",

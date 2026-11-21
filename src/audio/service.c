@@ -606,7 +606,8 @@ static long audio_playing_stream(int *low)
 {
         struct pulse *p = &audio_service.pulse;
 
-        *low = 0;
+        if (low)
+                *low = 0;
         for (long i = 0; i < audio_service.pulse.stream_slots; i++)
         {
                 struct pulse_stream *s = &p->stream[i];
