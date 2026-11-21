@@ -827,6 +827,20 @@ def test_compositor_and_xwm_invariants():
           "if (likely(at < length && text[at] < 0x80))" in font_c and
           "const p32 address_to tones = font_tones(" in font_c and
           "if (likely(final == 'm' && !csi_intermediate && !terminal_csi.marker))" in term_c)
+    sess_c = read_text("src/canvas/compositor/session.c")
+    gpu_host_c = read_text("src/canvas/compositor/gpu_host.c")
+    pres_c = read_text("src/canvas/compositor/present.c")
+    scan_c = read_text("src/canvas/compositor/scanout.c")
+    check("Hardware Floor Pass 7: rows_next/ctz64 in session+manage, NT slice_flush & cursor_paint, inline 32B gpu_list_ops, 4-way spot table, memory_hash_33 & wall_picture SIMD",
+          "return (long)w * 64 + (long)rows_ctz64(bit);" in sess_c and
+          "rows_next(&compositor.woken, 0)" in sess_c and
+          "rows_next(&any, 0)" in manage and
+          "memory_copy_rect_out_u32(compositor.scanout +" in scan_c and
+          "memory_copy_rect_out_u32(mapped, CP_PLANE, compositor_cursor_scratch" in kms_c and
+          "struct op8 snap = *(const volatile struct op8 *)" in gpu_host_c and
+          "memory_hash_33((address_any)cover, (positive)cells)" in gpu_host_c and
+          "memory_resample_u32_rect(into, (positive)pitch," in pres_c and
+          "__builtin_popcount(compositor_metric_paths & mask)" in pres_c)
     check("Steam bowl fixes Win32 dialog inflation (ttf-liberation + 65-moonwater-win32.conf) & GTK dark theme",
           '"ttf-liberation"' in read_text("src/bowl.c") and
           "65-moonwater-win32.conf" in read_text("src/bowl.c") and

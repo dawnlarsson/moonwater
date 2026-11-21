@@ -1190,7 +1190,7 @@ static b32 compositor_present_direct(int row, const struct compositor_frame *tab
         host told) only where the frame changed, however large the damage.
         A stale mirror is stored whole.
 */
-static void compositor_slice_flush(const struct compositor_target *slice, int *first, int *last)
+HOT static void compositor_slice_flush(const struct compositor_target *restrict slice, int *restrict first, int *restrict last)
 {
         unsigned long width = (unsigned long)(slice->x2 - slice->x1);
         unsigned long pitch = compositor.scanout_pitch / 4;
@@ -1201,20 +1201,27 @@ static void compositor_slice_flush(const struct compositor_target *slice, int *f
         if (compositor.cursor.drawn)
                 compositor_cursor_draw(slice, compositor.cursor.x, compositor.cursor.y, &compositor.cursor.drawn_as, compositor_cursor_ink(0, 0),
                                        compositor_cursor_ink(1, 0));
-        for (int y = slice->y1; y < slice->y2; y++)
+        if (unlikely(compositor.mirror_stale))
         {
-                const unsigned int *from = slice->pixels + (unsigned long)(y - slice->oy) * slice->pitch +
-                                           (unsigned long)(slice->x1 - slice->ox);
-                unsigned int *into = compositor.scanout + (unsigned long)y * pitch + (unsigned long)slice->x1;
-                unsigned int *mirror = compositor.mirror + (unsigned long)y * compositor.mirror_pitch + (unsigned long)slice->x1;
-
-                if (compositor.mirror_stale)
+                if (slice->y1 < slice->y2)
                 {
-                        memory_copy(into, from, width * 4);
-                        if (mirror != into)
-                                memory_copy(mirror, from, width * 4);
+                        const unsigned int *src0 = slice->pixels + (unsigned long)(slice->y1 - slice->oy) * slice->pitch +
+                                                   (unsigned long)(slice->x1 - slice->ox);
+                        unsigned long rows = (unsigned long)(slice->y2 - slice->y1);
+
+                        memory_copy_rect_out_u32(compositor.scanout + (unsigned long)slice->y1 * pitch + (unsigned long)slice->x1, pitch, src0, slice->pitch, width, rows);
+                        if (compositor.mirror != compositor.scanout)
+                                memory_copy_rect_u32(compositor.mirror + (unsigned long)slice->y1 * compositor.mirror_pitch + (unsigned long)slice->x1, compositor.mirror_pitch, src0, slice->pitch, width, rows);
+                        *first = slice->y1, *last = slice->y2 - 1;
                 }
-                else if (!memory_copy_changed_u32(into, mirror, from, width))
+                return;
+        }
+        const unsigned int *from = slice->pixels + (unsigned long)(slice->y1 - slice->oy) * slice->pitch + (unsigned long)(slice->x1 - slice->ox);
+        unsigned int *into = compositor.scanout + (unsigned long)slice->y1 * pitch + (unsigned long)slice->x1;
+        unsigned int *mirror = compositor.mirror + (unsigned long)slice->y1 * compositor.mirror_pitch + (unsigned long)slice->x1;
+        for (int y = slice->y1; y < slice->y2; y++, from += slice->pitch, into += pitch, mirror += compositor.mirror_pitch)
+        {
+                if (!memory_copy_changed_u32(into, mirror, from, width))
                         continue;
                 *first = *first < 0 ? y : *first;
                 *last = y;

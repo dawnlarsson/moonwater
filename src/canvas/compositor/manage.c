@@ -600,14 +600,14 @@ struct compositor_divider
 
 static void compositor_divider_measure(struct compositor_divider *d)
 {
+        struct compositor_rows all = d->lo;
         int first = 1;
 
-        for (int row = 0; row < (int)compositor_rows_in_use; row++)
+        rows_or(&all, &d->hi);
+        for (int row = rows_next(&all, 0); row >= 0; row = rows_next(&all, row + 1))
         {
                 int near, far, a, b;
 
-                if (!rows_has(&d->lo, row) && !rows_has(&d->hi, row))
-                        continue;
                 compositor_row_span(row, d->vertical, &near, &far, &a, &b);
                 if (first || a < d->from)
                         d->from = a;
@@ -745,10 +745,8 @@ static int compositor_shared_begin(int row, unsigned int edge)
         compositor.shared_lo = d.lo_row, compositor.shared_hi = d.hi_row;
         compositor.shared_lo_set = d.lo, compositor.shared_hi_set = d.hi;
         compositor.shared_vertical = d.vertical;
-        for (int each = 0; each < (int)compositor_rows_in_use; each++)
+        for (int each = rows_next(&all, 0); each >= 0; each = rows_next(&all, each + 1))
         {
-                if (!rows_has(&all, each))
-                        continue;
                 compositor.shared_sizes[each] = d.vertical ? (int)compositor.w[each] : (int)compositor.h[each];
                 if (each == row)
                         continue;
@@ -763,7 +761,7 @@ static int compositor_shared_begin(int row, unsigned int edge)
         return 1;
 }
 
-static void compositor_shared_move(void)
+HOT static void compositor_shared_move(void)
 {
         int vertical = compositor.shared_vertical, low = -2147483647, high = 2147483647;
         int travel = vertical ? compositor.pointer_x - compositor.press_x : compositor.pointer_y - compositor.press_y;
@@ -771,13 +769,11 @@ static void compositor_shared_move(void)
         struct compositor_divider d;
 
         rows_or(&all, &compositor.shared_hi_set);
-        for (int each = 0; each < (int)compositor_rows_in_use; each++)
+        for (int each = rows_next(&all, 0); each >= 0; each = rows_next(&all, each + 1))
         {
                 int size = compositor.shared_sizes[each], least, row_most;
                 int most = (vertical ? compositor_most_width() : compositor_most_height()) - 2 * compositor_line(each);
 
-                if (!rows_has(&all, each))
-                        continue;
                 compositor_bounds(each, !vertical, &least, &row_most);
                 if (row_most > 0 && row_most < most)
                         most = row_most;
@@ -789,12 +785,11 @@ static void compositor_shared_move(void)
         if (low > high)
                 return;
         travel = travel < low ? low : travel > high ? high : travel;
-        for (int each = 0; each < (int)compositor_rows_in_use; each++)
-                if (rows_has(&all, each))
-                {
-                        int size = compositor.shared_sizes[each] + (rows_has(&compositor.shared_lo_set, each) ? travel : -travel);
-                        compositor_want(each, vertical ? size : (int)compositor.w[each], vertical ? (int)compositor.h[each] : size);
-                }
+        for (int each = rows_next(&all, 0); each >= 0; each = rows_next(&all, each + 1))
+        {
+                int size = compositor.shared_sizes[each] + (rows_has(&compositor.shared_lo_set, each) ? travel : -travel);
+                compositor_want(each, vertical ? size : (int)compositor.w[each], vertical ? (int)compositor.h[each] : size);
+        }
         d.lo = compositor.shared_lo_set, d.hi = compositor.shared_hi_set;
         d.lo_row = compositor.shared_lo, d.hi_row = compositor.shared_hi, d.vertical = vertical;
         compositor_divider_measure(&d);
@@ -948,8 +943,8 @@ static int compositor_grab_end(int how, int drop_row)
                 compositor_lit(COMPOSITOR_NONE, 0, 0);
                 compositor_grab_clear();
                 if (!stop)
-                        for (int row = 0; row < (int)compositor_rows_in_use; row++)
-                                if (rows_has(&compositor.hold_rows, row) && compositor.showing[row])
+                        for (int row = rows_next(&compositor.hold_rows, 0); row >= 0; row = rows_next(&compositor.hold_rows, row + 1))
+                                if (compositor.showing[row])
                                         compositor_set_rect(row, compositor.hold_how[row], compositor.hold_rect[row]);
                 rows_none(&compositor.hold_rows);
                 if (resized)
@@ -4232,23 +4227,24 @@ static void compositor_door(int row, int returned)
         compositor_door_gone(row);
 }
 
-static void compositor_doors_done(void)
+HOT static void compositor_doors_done(void)
 {
         unsigned long count = 0;
-        struct compositor_rows drained, reopened;
+        struct compositor_rows drained, reopened, any;
 
         compositor_call(syscall(read), (positive)compositor_doors.done, (positive)&count, sizeof count, 0, 0, 0);
         rows_take(&drained, &compositor_doors.drained);
         rows_take(&reopened, &compositor_doors.reopened);
         rows_and_not(&compositor_doors.busy, &drained), rows_and_not(&compositor_doors.busy, &reopened);
-        for (int row = 0; row < (int)compositor_rows_in_use; row++)
-                if (rows_has(&drained, row) || rows_has(&reopened, row))
-                {
-                        compositor_take(row);
-                        compositor_clip_door(row);
-                        if (rows_has(&reopened, row))
-                                compositor_door_gone(row);
-                }
+        any = drained;
+        rows_or(&any, &reopened);
+        for (int row = rows_next(&any, 0); row >= 0; row = rows_next(&any, row + 1))
+        {
+                compositor_take(row);
+                compositor_clip_door(row);
+                if (unlikely(rows_has(&reopened, row)))
+                        compositor_door_gone(row);
+        }
         if (rows_has(&drained, COMPOSITOR_DOOR_MISC))
                 compositor_clip_cli_read();
 }

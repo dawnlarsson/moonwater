@@ -422,17 +422,22 @@ static unsigned int compositor_gpu_spot_table(int radius, int ring, unsigned int
         if (!table)
                 return at;
         outer_mask = compositor_corner_mask(radius), inner_mask = compositor_corner_mask(inner);
-        for (int row = 0; row < size; row++)
-                for (int col = 0; col < size; col++)
+        for (int row = 0; row < radius; row++)
+                for (int col = 0; col < radius; col++)
                 {
-                        int my = row < radius ? row : size - 1 - row, mx = col < radius ? col : size - 1 - col;
-                        unsigned int out = outer_mask[my * radius + mx];
-                        unsigned int in = mx >= ring && my >= ring ? inner_mask[(my - ring) * inner + (mx - ring)] : 0;
+                        unsigned int out = outer_mask[row * radius + col];
+                        unsigned int in = col >= ring && row >= ring ? inner_mask[(row - ring) * inner + (col - ring)] : 0;
                         unsigned int cover = 0;
 
                         if (out)
-                                cover = edge ? (out > in ? (out - in) * ring_cover / 255 : 0) : (in ? in * fill / 255 : 0);
+                        {
+                                unsigned int v = edge ? (out > in ? (out - in) * ring_cover : 0) : (in ? in * fill : 0);
+                                cover = v ? ((v + 1u + (v >> 8)) >> 8) : 0;
+                        }
                         table[row * size + col] = (unsigned char)cover;
+                        table[row * size + (size - 1 - col)] = (unsigned char)cover;
+                        table[(size - 1 - row) * size + col] = (unsigned char)cover;
+                        table[(size - 1 - row) * size + (size - 1 - col)] = (unsigned char)cover;
                 }
         return at;
 }
@@ -475,10 +480,7 @@ static b32 compositor_gpu_spots(void)
                         const unsigned char *cover = c->cover + (unsigned long)layer * cells;
                         unsigned char *table = 0;
                         unsigned int at, ink = c->kind == COMPOSITOR_CHIP_HINT || layer ? COMPOSITOR_CHIP_GLYPH : COMPOSITOR_CHIP_BODY;
-                        unsigned long tag = 14695981039346656037ull ^ (unsigned long)c->kind;
-
-                        for (unsigned long i = 0; i < cells; i++)
-                                tag = (tag ^ cover[i]) * 1099511628211ull;
+                        unsigned long tag = (unsigned long)memory_hash_33((address_any)cover, (positive)cells) ^ ((unsigned long)c->kind << 56);
                         if (!tag)
                                 tag = 1;
                         if (g->count + 8 > g->room - 400)
@@ -1145,38 +1147,39 @@ static void compositor_gpu_late_tick(positive now)
 #define COMPOSITOR_GPU_LIST_REACH 4096ul
 #define COMPOSITOR_GPU_LIST_REFUSED (~0u)
 #define COMPOSITOR_GPU_LIST_COORD (1 << 24) // a box's place, size and radii in 256ths: a card does not take more (65536 pixels)
-static int compositor_gpu_list_cut(unsigned int word, int low, int high)
+static inline INLINE CONST int compositor_gpu_list_cut(unsigned int word, int low, int high)
 {
         int value = (int)word;
 
         return value < low ? low : value > high ? high : value;
 }
 
-static unsigned int compositor_gpu_list_ops(const unsigned int *from, unsigned int count, positive cover_at, positive cover_used, positive list_bytes, int width,
-                                            int height, unsigned int slot, unsigned int *to, unsigned int room)
+HOT static unsigned int compositor_gpu_list_ops(const unsigned int *restrict from, unsigned int count, positive cover_at, positive cover_used, positive list_bytes, int width,
+                                                int height, unsigned int slot, unsigned int *restrict to, unsigned int room)
 {
+        struct op8 { unsigned int v[8]; };
         unsigned int n = 0;
         b32 text_room = cover_at >= COMPOSITOR_GPU_LIST_REACH && cover_at <= list_bytes && cover_used <= list_bytes - cover_at &&
                         list_bytes - cover_at - cover_used >= COMPOSITOR_GPU_LIST_REACH;
 
-        if (width <= 0 || height <= 0 || slot < 1 || slot > 255)
+        if (unlikely(width <= 0 || height <= 0 || slot < 1 || slot > 255))
                 return COMPOSITOR_GPU_LIST_REFUSED;
         for (unsigned int i = 0; i < count; i++)
         {
-                unsigned int w[8], kind;
+                struct op8 snap = *(const volatile struct op8 *)(from + 8 * (positive)i);
+                unsigned int *w = snap.v, kind;
 
-                memory_copy(w, from + 8 * (positive)i, 32);
                 kind = w[0] & 255;
                 if (kind <= 1)
                 {
                         int x0 = compositor_gpu_list_cut(w[1], 0, width), y0 = compositor_gpu_list_cut(w[2], 0, height);
                         int x1 = compositor_gpu_list_cut(w[3], 0, width), y1 = compositor_gpu_list_cut(w[4], 0, height);
 
-                        if (w[0] >> 8)
+                        if (unlikely(w[0] >> 8))
                                 return COMPOSITOR_GPU_LIST_REFUSED;
                         if (x0 >= x1 || y0 >= y1)
                                 continue;
-                        if (n >= room)
+                        if (unlikely(n >= room))
                                 return COMPOSITOR_GPU_LIST_REFUSED;
                         to[8 * n] = kind, to[8 * n + 1] = (unsigned int)x0, to[8 * n + 2] = (unsigned int)y0, to[8 * n + 3] = (unsigned int)x1;
                         to[8 * n + 4] = (unsigned int)y1, to[8 * n + 5] = w[5], to[8 * n + 6] = to[8 * n + 7] = 0;
@@ -1186,20 +1189,21 @@ static unsigned int compositor_gpu_list_ops(const unsigned int *from, unsigned i
                 {
                         unsigned int records = w[0] >> 8;
 
-                        if (records > 3 || records > count - 1 - i || n + 1 + records > room)
+                        if (unlikely(records > 3 || records > count - 1 - i || n + 1 + records > room))
                                 return COMPOSITOR_GPU_LIST_REFUSED;
                         for (unsigned int k = 0; k <= records; k++)
                         {
-                                unsigned int r[8];
+                                struct op8 rsnap;
+                                unsigned int *r = rsnap.v;
 
                                 if (k)
                                 {
-                                        memory_copy(r, from + 8 * (positive)(i + k), 32);
-                                        if (r[0] != 8 && r[0] != 9)
+                                        rsnap = *(const volatile struct op8 *)(from + 8 * (positive)(i + k));
+                                        if (unlikely(r[0] != 8 && r[0] != 9))
                                                 return COMPOSITOR_GPU_LIST_REFUSED;
                                 }
                                 else
-                                        memory_copy(r, w, 32);
+                                        rsnap = snap;
                                 to[8 * n] = k ? r[0] : 2u | records << 8;
                                 to[8 * n + 1] = (unsigned int)compositor_gpu_list_cut(r[1], -COMPOSITOR_GPU_LIST_COORD, COMPOSITOR_GPU_LIST_COORD);
                                 to[8 * n + 2] = (unsigned int)compositor_gpu_list_cut(r[2], -COMPOSITOR_GPU_LIST_COORD, COMPOSITOR_GPU_LIST_COORD);
@@ -1662,15 +1666,15 @@ static void canvas_ext_import_remap(struct canvas_ext_import *ref, const unsigne
         ref->map = (const unsigned char *)new_at;
 }
 
-static positive canvas_ext_import_cached(struct canvas_ext_import *ref, const unsigned char *map, long fd, long size,
-                                         unsigned long dev, unsigned long ino, int barred, int *reused)
+HOT static positive canvas_ext_import_cached(struct canvas_ext_import *restrict ref, const unsigned char *map, long fd, long size,
+                                             unsigned long dev, unsigned long ino, int barred, int *restrict reused)
 {
 #ifdef MOONWATER_GPU_C
         positive va;
 
-        if (!ref)
+        if (unlikely(!ref))
                 return 0;
-        if (ref->va && canvas_ext_import_same(ref, map, fd, size, dev, ino))
+        if (likely(ref->va && canvas_ext_import_same(ref, map, fd, size, dev, ino)))
         {
                 if (reused)
                         *reused = 1;

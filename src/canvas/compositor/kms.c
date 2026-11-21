@@ -1981,7 +1981,7 @@ static unsigned int *compositor_cursor_mapped(int which)
         return compositor.cursor.mapped[which];
 }
 
-static int compositor_cursor_paint(const struct compositor_pointer *p)
+HOT static int compositor_cursor_paint(const struct compositor_pointer *p)
 {
         unsigned int *mapped = compositor_cursor_mapped(compositor.cursor.back);
         struct compositor_target t = {compositor_cursor_scratch, CP_PLANE, CP_PLANE, CP_PLANE, 0, 0, CP_PLANE, CP_PLANE};
@@ -1992,7 +1992,7 @@ static int compositor_cursor_paint(const struct compositor_pointer *p)
         memory_zero(compositor_cursor_scratch, sizeof(compositor_cursor_scratch));
         inset = compositor_cursor_inset(compositor_pointer_span(p, &hot_x, &hot_y));
         compositor_cursor_draw(&t, hot_x - inset, hot_y - inset, p, compositor_cursor_ink(0, 0xff000000u), compositor_cursor_ink(1, 0xff000000u));
-        memory_copy(mapped, compositor_cursor_scratch, sizeof(compositor_cursor_scratch));
+        memory_copy_rect_out_u32(mapped, CP_PLANE, compositor_cursor_scratch, CP_PLANE, CP_PLANE, CP_PLANE);
         compositor.cursor.back ^= 1;
         compositor.cursor.paints++;
         compositor.cursor.plane = *p;

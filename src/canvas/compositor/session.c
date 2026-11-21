@@ -1769,7 +1769,7 @@ static void compositor_door_misc(unsigned int asked)
 }
 
 // A queued slot taken out of the queue, its bit cleared by this thread alone; -1 when there is none.
-static long compositor_door_next(void)
+HOT static long compositor_door_next(void)
 {
         for (unsigned int k = 0, walked = rows_walked(); k < walked; k++)
         {
@@ -1781,13 +1781,7 @@ static long compositor_door_next(void)
                         unsigned long long bit = word & (0ull - word);
 
                         if (__atomic_fetch_and(&compositor_doors.queued.word[w], ~bit, __ATOMIC_ACQ_REL) & bit)
-                        {
-                                long at = 0;
-
-                                while (!(bit >> at & 1u))
-                                        at++;
-                                return (long)w * 64 + at;
-                        }
+                                return (long)w * 64 + (long)rows_ctz64(bit);
                         word = __atomic_load_n(&compositor_doors.queued.word[w], __ATOMIC_ACQUIRE);
                 }
         }
@@ -1858,12 +1852,14 @@ static void compositor_doors_start(int clip)
 }
 
 // Every row that was given something in this pass is knocked on, once: its byte written by its thread, or here.
-static void compositor_knock(void)
+HOT static void compositor_knock(void)
 {
         char byte = 0;
 
-        for (int row = 0; row < (int)compositor_rows_in_use; row++)
-                if (rows_has(&compositor.woken, row) && !compositor_door_ask((unsigned int)row, COMPOSITOR_DOOR_WAKE))
+        if (!rows_any(&compositor.woken))
+                return;
+        for (int row = rows_next(&compositor.woken, 0); row >= 0; row = rows_next(&compositor.woken, row + 1))
+                if (unlikely(!compositor_door_ask((unsigned int)row, COMPOSITOR_DOOR_WAKE)))
                         system_write_once(compositor.wake[row], &byte, 1);
         rows_none(&compositor.woken);
 }

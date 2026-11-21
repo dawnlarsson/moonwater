@@ -219,7 +219,7 @@ static positive compositor_metric_worst(const unsigned long long *ring, unsigned
         take turns the worse of the two, so that a card's short presents do not set the time for the processor's long one that comes next and misses. 0
         headless, or where the owner asked for none.
 */
-static positive compositor_present_lead(void)
+HOT static positive compositor_present_lead(void)
 {
         unsigned int cards = 0, processors;
         positive worst, worst_processor;
@@ -234,8 +234,11 @@ static positive compositor_present_lead(void)
 
                 return direct_lead < compositor.period ? direct_lead : 0;
         }
-        for (unsigned int back = 0; back < compositor_metric_paths_count; back++)
-                cards += compositor_metric_paths >> back & 1u;
+        if (compositor_metric_paths_count)
+        {
+                unsigned int mask = compositor_metric_paths_count >= 32u ? ~0u : (1u << compositor_metric_paths_count) - 1u;
+                cards = (unsigned int)__builtin_popcount(compositor_metric_paths & mask);
+        }
         processors = compositor_metric_paths_count - cards;
         worst = compositor_metric_worst(compositor_metric_card, compositor_metric_card_at, compositor_metric_card_count, cards);
         worst_processor = compositor_metric_worst(compositor_metric_processor, compositor_metric_processor_at, compositor_metric_processor_count, processors);
@@ -963,9 +966,19 @@ static int compositor_wall_picture(const char *path, unsigned int *into, int pit
         else
                 vis_w = (positive)width, vis_h = (positive)width * (positive)h / (positive)w, ox = 0, oy = ((positive)height - vis_h) / 2;
         vis_w = vis_w ? vis_w : 1, vis_h = vis_h ? vis_h : 1;
+        if (vis_w <= (positive)w && vis_h <= (positive)h)
+        {
+                memory_resample_u32_rect(into, (positive)pitch, (positive)w, (positive)h,
+                                         picture + oy * (positive)width + ox, (positive)width,
+                                         vis_w, vis_h, (positive)w, (positive)h, 0, 0);
+                for (int y = 0; y < h; y++)
+                        memory_or_u32(into + (long)y * pitch, into + (long)y * pitch, (positive)w, 0xff000000u);
+        }
+        else
         for (int y = 0; y < h; y++)
         {
                 positive y0 = oy + (positive)y * vis_h / (positive)h, y1 = oy + ((positive)y + 1) * vis_h / (positive)h;
+                unsigned int *restrict dst_row = into + (long)y * pitch;
 
                 y1 = y1 > y0 ? y1 : y0 + 1;
                 for (int x = 0; x < w; x++)
@@ -974,13 +987,16 @@ static int compositor_wall_picture(const char *path, unsigned int *into, int pit
 
                         x1 = x1 > x0 ? x1 : x0 + 1, n = (y1 - y0) * (x1 - x0);
                         for (positive sy = y0; sy < y1; sy++)
+                        {
+                                const unsigned int *src_row = picture + sy * (positive)width;
                                 for (positive sx = x0; sx < x1; sx++)
                                 {
-                                        unsigned int px = picture[sy * (positive)width + sx];
+                                        unsigned int px = src_row[sx];
 
                                         r += px >> 16 & 255, g += px >> 8 & 255, b += px & 255;
                                 }
-                        into[(long)y * pitch + x] = 0xff000000u | (unsigned int)(r / n) << 16 | (unsigned int)(g / n) << 8 | (unsigned int)(b / n);
+                        }
+                        dst_row[x] = 0xff000000u | (unsigned int)(r / n) << 16 | (unsigned int)(g / n) << 8 | (unsigned int)(b / n);
                 }
         }
         memory_free(picture, (positive)width * (positive)height * 4);
