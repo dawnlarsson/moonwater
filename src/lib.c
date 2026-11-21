@@ -357,6 +357,8 @@
           memory_sum_swap_u32            public  yes     yes     yes
           memory_sweep_coverage          public  yes     yes     yes
           memory_swizzle_rb_u32          public  yes     yes     yes
+          memory_pack_2101010_u32        public  yes     yes     yes
+          memory_nv12_to_xrgb_row        public  yes     yes     yes
           memory_take                    public  yes     yes     yes
           memory_text_clean              public  yes     yes     yes
           memory_text_span               public  yes     yes     yes
@@ -15254,6 +15256,78 @@ __asm__(
     ASM_END(memory_swizzle_rb_u32)
 
     //
+    //       memory_pack_2101010_u32 -- rdi into, rsi from, rdx count, rcx flags:
+    //       converts 10-bit-per-channel 2101010 pixels to 8-bit ARGB8888.
+    //       flags bit 0: swap R/B (ABGR2101010/XBGR2101010); bit 1: opaque alpha (0xff).
+    //
+    ASM_FUNC(memory_pack_2101010_u32)
+    "test %rdx, %rdx\n   jz 9f\n   cmp $4, %rdx\n   jae 10f\n"
+    "5:  mov (%rsi), %eax\n   mov %eax, %r8d\n   mov %eax, %r9d\n   mov %eax, %r10d\n"
+    "shr $22, %r8d\n   and $0xff, %r8d\n   shr $12, %r9d\n   and $0xff, %r9d\n   shr $2, %r10d\n   and $0xff, %r10d\n"
+    "test $1, %cl\n   jz 6f\n   xchg %r8d, %r10d\n"
+    "6:  shl $16, %r8d\n   shl $8, %r9d\n   or %r9d, %r8d\n   or %r10d, %r8d\n"
+    "test $2, %cl\n   jz 7f\n   or $0xff000000, %r8d\n   jmp 8f\n"
+    "7:  shr $30, %eax\n   imul $85, %eax, %eax\n   shl $24, %eax\n   or %eax, %r8d\n"
+    "8:  mov %r8d, (%rdi)\n   add $4, %rsi\n   add $4, %rdi\n   dec %rdx\n   jnz 5b\n"
+    "9:  " ASM_RET
+    "10: mov $0x00ff0000, %eax\n   movd %eax, %xmm5\n   pshufd $0, %xmm5, %xmm5\n"
+    "mov $0x0000ff00, %eax\n   movd %eax, %xmm6\n   pshufd $0, %xmm6, %xmm6\n"
+    "mov $0x000000ff, %eax\n   movd %eax, %xmm7\n   pshufd $0, %xmm7, %xmm7\n"
+    "mov $0xff000000, %eax\n   movd %eax, %xmm4\n   pshufd $0, %xmm4, %xmm4\n"
+    "1:  movdqu (%rsi), %xmm0\n   movdqa %xmm0, %xmm1\n   movdqa %xmm0, %xmm2\n   movdqa %xmm0, %xmm3\n"
+    "test $1, %cl\n   jnz 2f\n"
+    "psrld $6, %xmm1\n   pand %xmm5, %xmm1\n   psrld $4, %xmm2\n   pand %xmm6, %xmm2\n   psrld $2, %xmm3\n   pand %xmm7, %xmm3\n   jmp 3f\n"
+    "2:  pslld $14, %xmm1\n   pand %xmm5, %xmm1\n   psrld $4, %xmm2\n   pand %xmm6, %xmm2\n   psrld $22, %xmm3\n   pand %xmm7, %xmm3\n"
+    "3:  por %xmm2, %xmm1\n   por %xmm3, %xmm1\n"
+    "test $2, %cl\n   jz 4f\n   por %xmm4, %xmm1\n   jmp 11f\n"
+    "4:  psrld $30, %xmm0\n   movdqa %xmm0, %xmm2\n   pslld $2, %xmm2\n   por %xmm2, %xmm0\n   movdqa %xmm0, %xmm2\n   pslld $4, %xmm2\n   por %xmm2, %xmm0\n   pslld $24, %xmm0\n   por %xmm0, %xmm1\n"
+    "11: movdqu %xmm1, (%rdi)\n   add $16, %rsi\n   add $16, %rdi\n   sub $4, %rdx\n   cmp $4, %rdx\n   jae 1b\n"
+    "test %rdx, %rdx\n   jnz 5b\n   " ASM_RET
+    ASM_END(memory_pack_2101010_u32)
+
+    //
+    //       memory_nv12_to_xrgb_row -- rdi dst, rsi y_row, rdx uv_row, rcx count:
+    //       converts count pixels of BT.601 NV12 (y_row[0..count-1], uv_row[0..((count+1)&~1)-1])
+    //       to 0xffRRGGBB, bit-exact with canvas_ext_yuv_rgb.
+    //
+    ASM_FUNC(memory_nv12_to_xrgb_row)
+    "test %rcx, %rcx\n   jz 9f\n   push %rbx\n   push %rbp\n"
+    "cmp $4, %rcx\n   jb 5f\n"
+    "mov $0x10101010, %eax\n   movd %eax, %xmm8\n   pshufd $0, %xmm8, %xmm8\n"
+    "mov $0x00800080, %eax\n   movd %eax, %xmm9\n   pshufd $0, %xmm9, %xmm9\n"
+    "mov $0x0199012a, %eax\n   movd %eax, %xmm10\n   pshufd $0, %xmm10, %xmm10\n"
+    "mov $0x0204012a, %eax\n   movd %eax, %xmm11\n   pshufd $0, %xmm11, %xmm11\n"
+    "mov $0xff30ff9c, %eax\n   movd %eax, %xmm12\n   pshufd $0, %xmm12, %xmm12\n"
+    "mov $298, %eax\n   movd %eax, %xmm13\n   pshufd $0, %xmm13, %xmm13\n"
+    "mov $128, %eax\n   movd %eax, %xmm14\n   pshufd $0, %xmm14, %xmm14\n"
+    "mov $0xff000000, %eax\n   movd %eax, %xmm15\n   pshufd $0, %xmm15, %xmm15\n"
+    "1:  movd (%rsi), %xmm0\n   psubusb %xmm8, %xmm0\n   pxor %xmm7, %xmm7\n   punpcklbw %xmm7, %xmm0\n"
+    "movd (%rdx), %xmm1\n   punpcklbw %xmm7, %xmm1\n   psubw %xmm9, %xmm1\n"
+    "movdqa %xmm1, %xmm2\n   pshuflw $0xa0, %xmm1, %xmm1\n   pshuflw $0xf5, %xmm2, %xmm2\n"
+    "movdqa %xmm0, %xmm3\n   punpcklwd %xmm2, %xmm3\n   pmaddwd %xmm10, %xmm3\n   paddd %xmm14, %xmm3\n   psrad $8, %xmm3\n"
+    "movdqa %xmm0, %xmm4\n   punpcklwd %xmm1, %xmm4\n   pmaddwd %xmm11, %xmm4\n   paddd %xmm14, %xmm4\n   psrad $8, %xmm4\n"
+    "movdqa %xmm0, %xmm5\n   punpcklwd %xmm7, %xmm5\n   pmaddwd %xmm13, %xmm5\n"
+    "movdqa %xmm1, %xmm6\n   punpcklwd %xmm2, %xmm6\n   pmaddwd %xmm12, %xmm6\n   paddd %xmm6, %xmm5\n   paddd %xmm14, %xmm5\n   psrad $8, %xmm5\n"
+    "packssdw %xmm3, %xmm3\n   packuswb %xmm3, %xmm3\n   punpcklbw %xmm7, %xmm3\n   punpcklwd %xmm7, %xmm3\n   pslld $16, %xmm3\n"
+    "packssdw %xmm5, %xmm5\n   packuswb %xmm5, %xmm5\n   punpcklbw %xmm7, %xmm5\n   punpcklwd %xmm7, %xmm5\n   pslld $8, %xmm5\n"
+    "packssdw %xmm4, %xmm4\n   packuswb %xmm4, %xmm4\n   punpcklbw %xmm7, %xmm4\n   punpcklwd %xmm7, %xmm4\n"
+    "por %xmm5, %xmm3\n   por %xmm4, %xmm3\n   por %xmm15, %xmm3\n   movdqu %xmm3, (%rdi)\n"
+    "add $16, %rdi\n   add $4, %rsi\n   add $4, %rdx\n   sub $4, %rcx\n   cmp $4, %rcx\n   jae 1b\n"
+    "test %rcx, %rcx\n   jz 8f\n"
+    "5:  xor %r11, %r11\n"
+    "6:  movzbl (%rsi, %r11), %eax\n   sub $16, %eax\n   jns 61f\n   xor %eax, %eax\n"
+    "61: imul $298, %eax, %eax\n   add $128, %eax\n"
+    "mov %r11, %rbx\n   and $-2, %rbx\n   movzbl (%rdx, %rbx), %r8d\n   sub $128, %r8d\n   movzbl 1(%rdx, %rbx), %r9d\n   sub $128, %r9d\n"
+    "imul $409, %r9d, %r10d\n   add %eax, %r10d\n   sar $8, %r10d\n   cmp $0, %r10d\n   jge 62f\n   xor %r10d, %r10d\n62: cmp $255, %r10d\n   jle 63f\n   mov $255, %r10d\n"
+    "63: imul $-100, %r8d, %ebp\n   imul $-208, %r9d, %ebx\n   add %ebx, %ebp\n   add %eax, %ebp\n   sar $8, %ebp\n   cmp $0, %ebp\n   jge 64f\n   xor %ebp, %ebp\n64: cmp $255, %ebp\n   jle 65f\n   mov $255, %ebp\n"
+    "65: imul $516, %r8d, %r8d\n   add %eax, %r8d\n   sar $8, %r8d\n   cmp $0, %r8d\n   jge 66f\n   xor %r8d, %r8d\n66: cmp $255, %r8d\n   jle 67f\n   mov $255, %r8d\n"
+    "67: shl $16, %r10d\n   shl $8, %ebp\n   or %ebp, %r10d\n   or %r8d, %r10d\n   or $0xff000000, %r10d\n   mov %r10d, (%rdi, %r11, 4)\n"
+    "inc %r11\n   cmp %rcx, %r11\n   jb 6b\n"
+    "8:  pop %rbp\n   pop %rbx\n"
+    "9:  " ASM_RET
+    ASM_END(memory_nv12_to_xrgb_row)
+
+    //
     //       memory_copy_strip_16 -- rdi into, rsi into_stride in bytes, rdx from, rcx from_stride in bytes, r8 rows:
     //       rows rows of sixteen bytes, each read whole from from and stored at into, the next row from_stride and
     //       into_stride bytes on. It is the copy a text run's strip makes of a cell's coverage (src/canvas/font.c,
@@ -27441,6 +27515,64 @@ __asm__(
     ASM_END(memory_swizzle_rb_u32)
 
     //
+    //       memory_pack_2101010_u32: x0 into, x1 from, x2 count, x3 flags (see x86-64).
+    //
+    ASM_FUNC(memory_pack_2101010_u32)
+    "cbz x2, 9f\n   cmp x2, #4\n   b.hs 10f\n"
+    "5:  ldr w4, [x1], #4\n   ubfx w5, w4, #22, #8\n   ubfx w6, w4, #12, #8\n   ubfx w7, w4, #2, #8\n"
+    "tbz x3, #0, 6f\n   mov w8, w5\n   mov w5, w7\n   mov w7, w8\n"
+    "6:  orr w5, w7, w5, lsl #16\n   orr w5, w5, w6, lsl #8\n"
+    "tbz x3, #1, 7f\n   orr w5, w5, #0xff000000\n   b 8f\n"
+    "7:  lsr w4, w4, #30\n   mov w8, #85\n   mul w4, w4, w8\n   orr w5, w5, w4, lsl #24\n"
+    "8:  str w5, [x0], #4\n   subs x2, x2, #1\n   b.ne 5b\n"
+    "9:  " ASM_RET
+    "10: mov w4, #0x00ff0000\n   dup v16.4s, w4\n   mov w4, #0x0000ff00\n   dup v17.4s, w4\n"
+    "mov w4, #0x000000ff\n   dup v18.4s, w4\n   mov w4, #0xff000000\n   dup v19.4s, w4\n"
+    "1:  ld1 {v0.4s}, [x1], #16\n   tbz x3, #0, 2f\n"
+    "shl v1.4s, v0.4s, #14\n   ushr v2.4s, v0.4s, #4\n   ushr v3.4s, v0.4s, #22\n   b 3f\n"
+    "2:  ushr v1.4s, v0.4s, #6\n   ushr v2.4s, v0.4s, #4\n   ushr v3.4s, v0.4s, #2\n"
+    "3:  and v1.16b, v1.16b, v16.16b\n   and v2.16b, v2.16b, v17.16b\n   and v3.16b, v3.16b, v18.16b\n"
+    "orr v1.16b, v1.16b, v2.16b\n   orr v1.16b, v1.16b, v3.16b\n"
+    "tbz x3, #1, 4f\n   orr v1.16b, v1.16b, v19.16b\n   b 11f\n"
+    "4:  ushr v0.4s, v0.4s, #30\n   shl v2.4s, v0.4s, #2\n   orr v0.16b, v0.16b, v2.16b\n"
+    "shl v2.4s, v0.4s, #4\n   orr v0.16b, v0.16b, v2.16b\n   shl v0.4s, v0.4s, #24\n   orr v1.16b, v1.16b, v0.16b\n"
+    "11: st1 {v1.4s}, [x0], #16\n   sub x2, x2, #4\n   cmp x2, #4\n   b.hs 1b\n"
+    "cbnz x2, 5b\n   " ASM_RET
+    ASM_END(memory_pack_2101010_u32)
+
+    //
+    //       memory_nv12_to_xrgb_row: x0 dst, x1 y_row, x2 uv_row, x3 count (see x86-64).
+    //
+    ASM_FUNC(memory_nv12_to_xrgb_row)
+    "cbz x3, 9f\n   cmp x3, #4\n   b.lo 5f\n"
+    "movi v16.8b, #16\n   mov w4, #128\n   dup v17.4s, w4\n   mov w4, #298\n   dup v18.4s, w4\n"
+    "mov w4, #409\n   dup v19.4s, w4\n   mov w4, #100\n   dup v20.4s, w4\n   mov w4, #208\n   dup v21.4s, w4\n"
+    "mov w4, #516\n   dup v22.4s, w4\n   mov w4, #0xff000000\n   dup v23.4s, w4\n"
+    "movi v24.4s, #0\n   mov w4, #255\n   dup v25.4s, w4\n"
+    "1:  ld1 {v0.s}[0], [x1]\n   uqsub v0.8b, v0.8b, v16.8b\n   uxtl v0.8h, v0.8b\n   uxtl v0.4s, v0.4h\n"
+    "ld1 {v1.s}[0], [x2]\n   uzp1 v2.8b, v1.8b, v1.8b\n   uzp2 v3.8b, v1.8b, v1.8b\n"
+    "zip1 v2.8b, v2.8b, v2.8b\n   zip1 v3.8b, v3.8b, v3.8b\n"
+    "uxtl v2.8h, v2.8b\n   uxtl v2.4s, v2.4h\n   sub v2.4s, v2.4s, v17.4s\n"
+    "uxtl v3.8h, v3.8b\n   uxtl v3.4s, v3.4h\n   sub v3.4s, v3.4s, v17.4s\n"
+    "mul v4.4s, v0.4s, v18.4s\n   add v4.4s, v4.4s, v17.4s\n"
+    "mov v5.16b, v4.16b\n   mla v5.4s, v3.4s, v19.4s\n   sshr v5.4s, v5.4s, #8\n   smax v5.4s, v5.4s, v24.4s\n   smin v5.4s, v5.4s, v25.4s\n"
+    "mov v6.16b, v4.16b\n   mls v6.4s, v2.4s, v20.4s\n   mls v6.4s, v3.4s, v21.4s\n   sshr v6.4s, v6.4s, #8\n   smax v6.4s, v6.4s, v24.4s\n   smin v6.4s, v6.4s, v25.4s\n"
+    "mla v4.4s, v2.4s, v22.4s\n   sshr v4.4s, v4.4s, #8\n   smax v4.4s, v4.4s, v24.4s\n   smin v4.4s, v4.4s, v25.4s\n"
+    "shl v5.4s, v5.4s, #16\n   shl v6.4s, v6.4s, #8\n   orr v4.16b, v4.16b, v5.16b\n   orr v4.16b, v4.16b, v6.16b\n   orr v4.16b, v4.16b, v23.16b\n"
+    "st1 {v4.4s}, [x0], #16\n   add x1, x1, #4\n   add x2, x2, #4\n   sub x3, x3, #4\n   cmp x3, #4\n   b.hs 1b\n"
+    "cbz x3, 9f\n"
+    "5:  mov x4, #0\n   mov w12, #298\n   mov w13, #409\n   mov w14, #100\n   mov w15, #208\n   mov w16, #516\n"
+    "6:  ldrb w5, [x1, x4]\n   subs w5, w5, #16\n   csel w5, w5, wzr, ge\n   madd w5, w5, w12, wzr\n   add w5, w5, #128\n"
+    "and x6, x4, #-2\n   ldrb w7, [x2, x6]\n   sub w7, w7, #128\n   add x6, x6, #1\n   ldrb w8, [x2, x6]\n   sub w8, w8, #128\n"
+    "madd w9, w8, w13, w5\n   asr w9, w9, #8\n   cmp w9, #0\n   csel w9, w9, wzr, ge\n   cmp w9, #255\n   mov w6, #255\n   csel w9, w9, w6, le\n"
+    "msub w10, w7, w14, w5\n   msub w10, w8, w15, w10\n   asr w10, w10, #8\n   cmp w10, #0\n   csel w10, w10, wzr, ge\n   cmp w10, #255\n   csel w10, w10, w6, le\n"
+    "madd w11, w7, w16, w5\n   asr w11, w11, #8\n   cmp w11, #0\n   csel w11, w11, wzr, ge\n   cmp w11, #255\n   csel w11, w11, w6, le\n"
+    "orr w9, w11, w9, lsl #16\n   orr w9, w9, w10, lsl #8\n   orr w9, w9, #0xff000000\n   str w9, [x0, x4, lsl #2]\n"
+    "add x4, x4, #1\n   cmp x4, x3\n   b.lo 6b\n"
+    "9:  " ASM_RET
+    ASM_END(memory_nv12_to_xrgb_row)
+
+    //
     //       memory_copy_strip_16: x0 into, x1 into_stride in bytes, x2 from, x3 from_stride in bytes, x4 rows:
     //       rows rows of sixteen bytes, as on x86-64, which carries the contract. Two rows a pass, each a 128-bit
     //       load and store at any alignment (q0 and q1, caller-saved), both loads before the stores; then one.
@@ -37972,6 +38104,38 @@ __asm__(
     "sw t1, 0(a0)\n   addi a0, a0, 4\n   addi a1, a1, 4\n   addi a2, a2, -1\n   bnez a2, 3b\n"
     "9:  " ASM_RET
     ASM_END(memory_swizzle_rb_u32)
+
+    //
+    //       memory_pack_2101010_u32: a0 into, a1 from, a2 count, a3 flags (see x86-64).
+    //
+    ASM_FUNC(memory_pack_2101010_u32)
+    "beqz a2, 9f\n   li t6, 85\n"
+    "5:  lwu t0, 0(a1)\n   srli t1, t0, 22\n   andi t1, t1, 0xff\n"
+    "srli t2, t0, 12\n   andi t2, t2, 0xff\n   srli t3, t0, 2\n   andi t3, t3, 0xff\n"
+    "andi t4, a3, 1\n   beqz t4, 6f\n   mv t5, t1\n   mv t1, t3\n   mv t3, t5\n"
+    "6:  slli t1, t1, 16\n   slli t2, t2, 8\n   or t1, t1, t2\n   or t1, t1, t3\n"
+    "andi t4, a3, 2\n   beqz t4, 7f\n   li t5, 0xff000000\n   or t1, t1, t5\n   j 8f\n"
+    "7:  srli t0, t0, 30\n   mul t0, t0, t6\n   slli t0, t0, 24\n   or t1, t1, t0\n"
+    "8:  sw t1, 0(a0)\n   addi a0, a0, 4\n   addi a1, a1, 4\n   addi a2, a2, -1\n   bnez a2, 5b\n"
+    "9:  " ASM_RET
+    ASM_END(memory_pack_2101010_u32)
+
+    //
+    //       memory_nv12_to_xrgb_row: a0 dst, a1 y_row, a2 uv_row, a3 count (see x86-64).
+    //
+    ASM_FUNC(memory_nv12_to_xrgb_row)
+    "beqz a3, 9f\n   li a4, 0\n   li a5, 298\n   li a6, 409\n   li a7, 516\n"
+    "6:  add t0, a1, a4\n   lbu t0, 0(t0)\n   addi t0, t0, -16\n   bgez t0, 61f\n   li t0, 0\n"
+    "61: mul t0, t0, a5\n   addi t0, t0, 128\n"
+    "andi t1, a4, -2\n   add t1, a2, t1\n   lbu t2, 0(t1)\n   addi t2, t2, -128\n   lbu t3, 1(t1)\n   addi t3, t3, -128\n"
+    "mul t4, t3, a6\n   add t4, t4, t0\n   srai t4, t4, 8\n   bgez t4, 62f\n   li t4, 0\n62: li t1, 255\n   ble t4, t1, 63f\n   mv t4, t1\n"
+    "63: li t5, -100\n   mul t5, t2, t5\n   li t6, -208\n   mul t6, t3, t6\n   add t5, t5, t6\n   add t5, t5, t0\n   srai t5, t5, 8\n"
+    "bgez t5, 64f\n   li t5, 0\n64: ble t5, t1, 65f\n   mv t5, t1\n"
+    "65: mul t6, t2, a7\n   add t6, t6, t0\n   srai t6, t6, 8\n   bgez t6, 66f\n   li t6, 0\n66: ble t6, t1, 67f\n   mv t6, t1\n"
+    "67: slli t4, t4, 16\n   slli t5, t5, 8\n   or t4, t4, t5\n   or t4, t4, t6\n   li t1, 0xff000000\n   or t4, t4, t1\n"
+    "slli t5, a4, 2\n   add t5, a0, t5\n   sw t4, 0(t5)\n   addi a4, a4, 1\n   bltu a4, a3, 6b\n"
+    "9:  " ASM_RET
+    ASM_END(memory_nv12_to_xrgb_row)
 
     //
     //       memory_copy_strip_16: a0 into, a1 into_stride in bytes, a2 from, a3 from_stride in bytes, a4 rows:
@@ -55278,6 +55442,10 @@ fn memory_invert_u32(p32 address_to into, const p32 address_to from, positive co
 fn memory_or_u32(p32 address_to into, const p32 address_to from, positive count, p32 mask);
 // count 32-bit words: swaps bytes 0 and 2 (R and B) of each word of from and ORs or_mask (into and from the same, or apart).
 fn memory_swizzle_rb_u32(p32 address_to into, const p32 address_to from, positive count, p32 or_mask);
+// count 32-bit 2101010 pixels converted to ARGB8888 (flags bit 0: swap R/B, bit 1: opaque 0xff alpha).
+fn memory_pack_2101010_u32(p32 address_to into, const p32 address_to from, positive count, positive flags);
+// count pixels of BT.601 NV12 (y_row[0..count-1], uv_row[0..((count+1)&~1)-1]) decoded to 0xffRRGGBB.
+fn memory_nv12_to_xrgb_row(p32 address_to dst, const p8 address_to y_row, const p8 address_to uv_row, positive count);
 // rows rows of sixteen bytes, each read whole from from and then stored at into, the next row from_stride and
 // into_stride bytes after it: the copy of a cell's coverage into a text run's strip, where a cell up to sixteen bytes
 // wide is one word a row and the word's tail is the next cell's to write over. The rows are stored in order, so rows

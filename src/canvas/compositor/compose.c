@@ -2806,6 +2806,18 @@ static void canvas_ext_convert_row(unsigned int *dst, const unsigned int *src, l
                 case CANVAS_FOURCC_XBGR8888:
                         memory_swizzle_rb_u32(dst, src, (positive)count, 0xff000000u);
                         return;
+                case CANVAS_FOURCC_ARGB2101010:
+                        memory_pack_2101010_u32(dst, src, (positive)count, 0u);
+                        return;
+                case CANVAS_FOURCC_XRGB2101010:
+                        memory_pack_2101010_u32(dst, src, (positive)count, 2u);
+                        return;
+                case CANVAS_FOURCC_ABGR2101010:
+                        memory_pack_2101010_u32(dst, src, (positive)count, 1u);
+                        return;
+                case CANVAS_FOURCC_XBGR2101010:
+                        memory_pack_2101010_u32(dst, src, (positive)count, 3u);
+                        return;
                 default:
                         for (long i = 0; i < count; i++)
                                 dst[i] = canvas_ext_pixel_argb(src[i], fourcc);
@@ -2815,6 +2827,22 @@ static void canvas_ext_convert_row(unsigned int *dst, const unsigned int *src, l
         if (fourcc == CANVAS_FOURCC_ARGB8888)
         {
                 memory_over_u32_rect(dst, (positive)count, src, (positive)count, (positive)count, 1);
+                return;
+        }
+        if (fourcc == CANVAS_FOURCC_ABGR8888 || fourcc == CANVAS_FOURCC_ARGB2101010 || fourcc == CANVAS_FOURCC_ABGR2101010)
+        {
+                unsigned int chunk[1024];
+
+                for (long off = 0; off < count; off += 1024)
+                {
+                        long take = count - off < 1024 ? count - off : 1024;
+
+                        if (fourcc == CANVAS_FOURCC_ABGR8888)
+                                memory_swizzle_rb_u32(chunk, src + off, (positive)take, 0u);
+                        else
+                                memory_pack_2101010_u32(chunk, src + off, (positive)take, fourcc == CANVAS_FOURCC_ABGR2101010 ? 1u : 0u);
+                        memory_over_u32_rect(dst + off, (positive)take, chunk, (positive)take, (positive)take, 1);
+                }
                 return;
         }
         for (long i = 0; i < count; i++)
@@ -2944,6 +2972,21 @@ static int canvas_ext_xform_blit(const struct canvas_ext_blit *b, int out_box[4]
                 else if (b->fourcc == CANVAS_FOURCC_XRGB8888)
                         for (positive ry = 0; ry < rh; ry++)
                                 memory_or_u32(dst_base + ry * b->to_pitch, dst_base + ry * b->to_pitch, rw, 0xff000000u);
+                return 1;
+        }
+        // Fast 1:1 unscaled NV12 -> XRGB row path via lib.c SIMD (AVX2/SSE2/NEON).
+        if (b->fourcc == CANVAS_FOURCC_NV12 && !tr && !b->blend && b->uv_base && b->uv_stride > 0 &&
+            sx256 == 0 && sy256 == 0 && sw256 == bw * 256 && sh256 == bh * 256 && tw == bw && th == bh && (ox1 & 1L) == 0)
+        {
+                for (long oy = oy1; oy < oy2; oy++)
+                {
+                        long by = b->y_invert ? bh - 1 - oy : oy;
+                        unsigned int *dst = b->to + (unsigned long)(dy0 + oy) * b->to_pitch + (unsigned long)(dx0 + ox1);
+                        const unsigned char *y_row = b->pixels + (unsigned long)by * b->stride + (unsigned long)ox1;
+                        const unsigned char *uv_row = b->uv_base + (unsigned long)(by >> 1) * b->uv_stride + (unsigned long)ox1;
+
+                        memory_nv12_to_xrgb_row(dst, y_row, uv_row, (positive)(ox2 - ox1));
+                }
                 return 1;
         }
         // General 8-orientation bit-table blitter (0x36 X-flip / 0x6c Y-flip across Wayland/DRM transforms 0..7) + NV12/10-bit/crop/blend.
