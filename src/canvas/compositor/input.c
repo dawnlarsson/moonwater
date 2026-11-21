@@ -51,40 +51,12 @@ static int compositor_write_sysfs(const char *path, const void *data, unsigned l
         return 1;
 }
 
-static int compositor_multi_ccd(void)
+static struct
 {
-        char l3[64], pkg[64];
-
-        compositor_word("/sys/devices/system/cpu/cpu0/cache/index3/shared_cpu_list", l3, sizeof(l3));
-        compositor_word("/sys/devices/system/cpu/cpu0/topology/package_cpus_list", pkg, sizeof(pkg));
-        return l3[0] && pkg[0] && !string_equals((string_address)l3, (string_address)pkg);
-}
-
-static char compositor_game_epp_saved[32];
-static int compositor_game_epp_active;
-
-static void compositor_game_epp(int on)
-{
-        const char *want = on ? "performance" : compositor_game_epp_saved;
-        unsigned long len;
-
-        if (on == compositor_game_epp_active)
-                return;
-        if (on && !compositor_game_epp_saved[0])
-                compositor_word("/sys/devices/system/cpu/cpu0/cpufreq/energy_performance_preference", compositor_game_epp_saved, sizeof(compositor_game_epp_saved));
-        if (!compositor_game_epp_saved[0] || (on && string_equals((string_address)compositor_game_epp_saved, (string_address) "performance")))
-                return;
-        len = (unsigned long)string_length((string_address)want);
-        for (unsigned int cpu = 0; cpu < 64; cpu++)
-        {
-                char path[96];
-
-                windows_num_path(path, sizeof(path), "/sys/devices/system/cpu/cpu", cpu, "/cpufreq/energy_performance_preference");
-                if (!compositor_write_sysfs(path, want, len))
-                        break;
-        }
-        compositor_game_epp_active = on;
-}
+        int ready, multi, has_bg;
+        unsigned long ccd0[2], ccd1[2];
+        char ccd0_hex[17];
+} compositor_ccd;
 
 static int compositor_cpu_list_mask(const char *path, unsigned long mask[2])
 {
@@ -116,18 +88,86 @@ static int compositor_cpu_list_mask(const char *path, unsigned long mask[2])
         return (mask[0] | mask[1]) != 0;
 }
 
+static void compositor_ccd_init(void)
+{
+        char l3[64], pkg_str[64];
+        unsigned long pkg[2] = {0, 0};
+
+        if (compositor_ccd.ready)
+                return;
+        compositor_ccd.ready = 1;
+        compositor_word("/sys/devices/system/cpu/cpu0/cache/index3/shared_cpu_list", l3, sizeof(l3));
+        compositor_word("/sys/devices/system/cpu/cpu0/topology/package_cpus_list", pkg_str, sizeof(pkg_str));
+        compositor_ccd.multi = l3[0] && pkg_str[0] && !string_equals((string_address)l3, (string_address)pkg_str);
+        if (!compositor_ccd.multi)
+                return;
+        if (!compositor_cpu_list_mask("/sys/devices/system/cpu/cpu0/cache/index3/shared_cpu_list", compositor_ccd.ccd0))
+        {
+                compositor_ccd.multi = 0;
+                return;
+        }
+        if (compositor_cpu_list_mask("/sys/devices/system/cpu/cpu0/topology/package_cpus_list", pkg))
+        {
+                compositor_ccd.ccd1[0] = pkg[0] & ~compositor_ccd.ccd0[0];
+                compositor_ccd.ccd1[1] = pkg[1] & ~compositor_ccd.ccd0[1];
+                compositor_ccd.has_bg = (compositor_ccd.ccd1[0] | compositor_ccd.ccd1[1]) != 0;
+        }
+        {
+                static const char hex[] = "0123456789abcdef";
+                unsigned long lo = compositor_ccd.ccd0[0];
+
+                for (int i = 7; i >= 0; i--)
+                        compositor_ccd.ccd0_hex[7 - i] = hex[(lo >> (i * 4)) & 15u];
+                compositor_ccd.ccd0_hex[8] = 0;
+        }
+}
+
+static int compositor_multi_ccd(void)
+{
+        compositor_ccd_init();
+        return compositor_ccd.multi;
+}
+
+static char compositor_game_epp_saved[32];
+static int compositor_game_epp_active;
+
+static void compositor_game_epp(int on)
+{
+        const char *want = on ? "performance" : compositor_game_epp_saved;
+        unsigned long len;
+
+        if (on == compositor_game_epp_active)
+                return;
+        if (on && !compositor_game_epp_saved[0])
+                compositor_word("/sys/devices/system/cpu/cpu0/cpufreq/energy_performance_preference", compositor_game_epp_saved, sizeof(compositor_game_epp_saved));
+        if (!compositor_game_epp_saved[0] || (on && string_equals((string_address)compositor_game_epp_saved, (string_address) "performance")))
+                return;
+        len = (unsigned long)string_length((string_address)want);
+        for (unsigned int cpu = 0; cpu < 64; cpu++)
+        {
+                char path[96];
+
+                windows_num_path(path, sizeof(path), "/sys/devices/system/cpu/cpu", cpu, "/cpufreq/energy_performance_preference");
+                if (!compositor_write_sysfs(path, want, len))
+                        break;
+        }
+        compositor_game_epp_active = on;
+}
+
 static int compositor_ccd0_mask(unsigned long mask[2])
 {
-        return compositor_multi_ccd() &&
-               compositor_cpu_list_mask("/sys/devices/system/cpu/cpu0/cache/index3/shared_cpu_list", mask);
+        compositor_ccd_init();
+        if (!compositor_ccd.multi)
+                return 0;
+        mask[0] = compositor_ccd.ccd0[0], mask[1] = compositor_ccd.ccd0[1];
+        return 1;
 }
 
 static void compositor_pin_ccd0(void)
 {
-        unsigned long mask[2];
-
-        if (compositor_ccd0_mask(mask))
-                compositor_call(syscall(sched_setaffinity), 0, sizeof(mask), (positive)mask, 0, 0, 0);
+        compositor_ccd_init();
+        if (compositor_ccd.multi)
+                compositor_call(syscall(sched_setaffinity), 0, sizeof(compositor_ccd.ccd0), (positive)compositor_ccd.ccd0, 0, 0, 0);
 }
 
 static void compositor_pin_irqs_ccd0(void)
@@ -158,7 +198,7 @@ static void compositor_pin_irqs_ccd0(void)
 
                         if (used > 0 && buf[p + (long)used] == ':' && irq > 0 && irq < 4096)
                                 windows_num_path(path, sizeof(path), "/proc/irq/", (unsigned int)irq, "/smp_affinity"),
-                                compositor_write_sysfs(path, "000000ff", 8);
+                                compositor_write_sysfs(path, compositor_ccd.ccd0_hex, 8);
                 }
                 buf[stop] = saved;
         }
@@ -259,8 +299,8 @@ static void compositor_bg_throttle_of(unsigned int pid, int throttle)
         char path[40], comm[32];
         p8 buffer[2048];
         bipolar handle, got;
-        unsigned long ccd0[2] = {0, 0}, pkg[2] = {0, 0}, bg_mask[2] = {0, 0}, all_mask[2] = {~0ul, ~0ul};
-        int pin_bg = 0;
+        unsigned long all_mask[2] = {~0ul, ~0ul};
+        int pin_bg;
 
         if (throttle)
         {
@@ -272,13 +312,8 @@ static void compositor_bg_throttle_of(unsigned int pid, int throttle)
                     string_equals((string_address)comm, (string_address) "dbus"))
                         return;
         }
-        if (compositor_ccd0_mask(ccd0) &&
-            compositor_cpu_list_mask("/sys/devices/system/cpu/cpu0/topology/package_cpus_list", pkg))
-        {
-                bg_mask[0] = pkg[0] & ~ccd0[0];
-                bg_mask[1] = pkg[1] & ~ccd0[1];
-                pin_bg = (bg_mask[0] | bg_mask[1]) != 0;
-        }
+        compositor_ccd_init();
+        pin_bg = compositor_ccd.has_bg;
         windows_num_path(path, sizeof(path), "/proc/", pid, "/task");
         if ((handle = system_open_at(AT_FDCWD, (string_address)path, FILE_READ | O_DIRECTORY | O_CLOEXEC)) < 0)
                 return;
@@ -300,8 +335,8 @@ static void compositor_bg_throttle_of(unsigned int pid, int throttle)
                         attr.util_max = throttle ? COMPOSITOR_BG_UCLAMP_MAX : 1024u;
                         (void)compositor_call(syscall(sched_setattr), tid, (positive)&attr, 0, 0, 0, 0);
                         if (pin_bg)
-                                (void)compositor_call(syscall(sched_setaffinity), tid, sizeof(bg_mask),
-                                                      (positive)(throttle ? bg_mask : all_mask), 0, 0, 0);
+                                (void)compositor_call(syscall(sched_setaffinity), tid, sizeof(compositor_ccd.ccd1),
+                                                      (positive)(throttle ? compositor_ccd.ccd1 : all_mask), 0, 0, 0);
                 }
         system_close(handle);
 }
@@ -333,12 +368,19 @@ static void compositor_game_slice(void)
 {
         static unsigned int pids[COMPOSITOR_GAME_SLICES], count;
         static unsigned int bg_pids[COMPOSITOR_BG_SLICES], bg_count;
+        static unsigned int last_stack_gen;
         static b32 started;
-        unsigned int now[COMPOSITOR_GAME_SLICES], nows = 0, me = (unsigned int)compositor_call(syscall(getpid), 0, 0, 0, 0, 0, 0);
+        unsigned int now[COMPOSITOR_GAME_SLICES], nows = 0, me;
         unsigned int bg_now[COMPOSITOR_BG_SLICES], bg_nows = 0;
         int rows[COMPOSITOR_GAME_SLICES];
-        unsigned int tops = compositor_game_off ? 0 : compositor_fullscreen_tops(rows, COMPOSITOR_GAME_SLICES);
+        unsigned int tops;
         b32 changed = false;
+
+        if (started && last_stack_gen == compositor.stack_gen)
+                return;
+        last_stack_gen = compositor.stack_gen;
+        me = (unsigned int)compositor_call(syscall(getpid), 0, 0, 0, 0, 0, 0);
+        tops = compositor_game_off ? 0 : compositor_fullscreen_tops(rows, COMPOSITOR_GAME_SLICES);
 
         if (!started)
         {
