@@ -1158,6 +1158,11 @@ static bipolar bowl_isolated_populate(void)
         }
 
         bowl_isolated_devices();
+#if MOONWATER_STRICT_BOWL < STRICT_LOCKED
+        if (bowl_mkdir("/dev/mqueue") >= 0)
+                (void)system_mount("mqueue", "/dev/mqueue", "mqueue",
+                                   MS_NOSUID | MS_NOEXEC | MS_NODEV, 0);
+#endif
         return bowl_kernel_settings_seal();
 }
 
@@ -2808,7 +2813,7 @@ static b32 bowl_env_named(string_address entry, string_address name)
 #define BOWL_USER_ID_TEXT "1000"
 #define BOWL_USER_NAME "user"
 #define BOWL_ENV_ROOM 512
-#define BOWL_ENV_DEFAULTS 15
+#define BOWL_ENV_DEFAULTS 18
 
 static p8 bowl_runtime_path[sizeof(BOWL_RUNTIME_DIR) + 20]
     __attribute__((section(".bss.hot")));
@@ -3729,6 +3734,7 @@ static string_address address_to bowl_environment(
         bool have[BOWL_VARS] = {false};
         bool have_bus = false, have_sound = false, have_wayland = false,
              have_language = false, have_session_type = false, have_display = false,
+             have_desktop = false, have_electron_ozone = false, have_moz_wayland = false,
              have_vk_present = false, have_glthread = false;
         bool offer_bus = bowl_session_bus_offered(),
              offer_sound = bowl_sound_offered(),
@@ -3769,6 +3775,12 @@ static string_address address_to bowl_environment(
                         have_display = true;
                 if (bowl_env_named(inherited[at], BOWL_LANGUAGE_VARIABLE))
                         have_language = true;
+                if (bowl_env_named(inherited[at], "XDG_CURRENT_DESKTOP"))
+                        have_desktop = true;
+                if (bowl_env_named(inherited[at], "ELECTRON_OZONE_PLATFORM_HINT"))
+                        have_electron_ozone = true;
+                if (bowl_env_named(inherited[at], "MOZ_ENABLE_WAYLAND"))
+                        have_moz_wayland = true;
                 if (bowl_env_named(inherited[at], "MESA_VK_WSI_PRESENT_MODE"))
                         have_vk_present = true;
                 if (bowl_env_named(inherited[at], "mesa_glthread"))
@@ -3800,7 +3812,10 @@ static string_address address_to bowl_environment(
                 missing += offer_bus && !have_bus;
                 missing += offer_sound && !have_sound;
                 missing += offer_wayland && !have_wayland;
+                missing += offer_wayland && !have_desktop;
                 missing += offer_wayland && !have_session_type && !have_display;
+                missing += offer_wayland && !have_electron_ozone && !have_display;
+                missing += offer_wayland && !have_moz_wayland && !have_display;
                 missing += language && !have_language;
                 missing += offer_mailbox && !have_vk_present;
                 missing += offer_glthread && !have_glthread;
@@ -3825,8 +3840,14 @@ static string_address address_to bowl_environment(
                 mixed[n++] = (string_address)BOWL_SOUND_VARIABLE "=unix:" BOWL_SOUND_SOCKET;
         if (offer_wayland && !have_wayland)
                 mixed[n++] = (string_address)BOWL_WAYLAND_VARIABLE "=" BOWL_WAYLAND_SOCKET;
+        if (offer_wayland && !have_desktop)
+                mixed[n++] = (string_address) "XDG_CURRENT_DESKTOP=Moonwater";
         if (offer_wayland && !have_session_type && !have_display)
                 mixed[n++] = (string_address)BOWL_SESSION_TYPE_VARIABLE "=wayland";
+        if (offer_wayland && !have_electron_ozone && !have_display)
+                mixed[n++] = (string_address) "ELECTRON_OZONE_PLATFORM_HINT=auto";
+        if (offer_wayland && !have_moz_wayland && !have_display)
+                mixed[n++] = (string_address) "MOZ_ENABLE_WAYLAND=1";
         if (language && !have_language)
                 mixed[n++] = language;
         if (offer_mailbox && !have_vk_present)

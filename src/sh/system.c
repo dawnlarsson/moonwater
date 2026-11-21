@@ -637,6 +637,12 @@ static DEAD_END b32 system_init()
 #endif
         mount_devpts();
         mount_shm();
+#if MOONWATER_STRICT_HOST < STRICT_LOCKED
+        if (system_make_directory_at(AT_FDCWD, "/dev/mqueue", 01777) >= 0 ||
+            system_access_at(AT_FDCWD, "/dev/mqueue", 0) >= 0)
+                (void)system_mount("mqueue", "/dev/mqueue", "mqueue",
+                                   MS_NOSUID | MS_NOEXEC | MS_NODEV, 0);
+#endif
         link_dev_fd();
 #ifndef SHELL_NO_INPUT_GROUP
         system_input_group();
