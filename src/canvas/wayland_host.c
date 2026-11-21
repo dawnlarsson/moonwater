@@ -3317,14 +3317,15 @@ static void compositor_wl_pointer_hold(void *context, long row, long mode)
         // A lock let go of with a hint (set_cursor_position_hint: where a game drew the pointer it held, or where Xwayland has an X
         // game's pointer, which it warps): the pointer is shown there, in the window, where it would otherwise come back where the
         // lock took it and jump. A hint outside the window's picture is not taken.
-        if (compositor_wl.hold == 1 && mode != 1 && was >= 0 && was < COMPOSITOR_ROWS && wayland.hint_row == was)
+        if (mode != 1 && wayland.hint_row >= 0 && wayland.hint_row < COMPOSITOR_ROWS &&
+            (compositor_wl.hold == 1 ? wayland.hint_row == was : wayland.hint_row == wayland.pointer_row))
         {
                 int sx, sy;
 
-                if (compositor_screen_point((int)was, (int)wayland.hint_x, (int)wayland.hint_y, &sx, &sy))
+                if (compositor_screen_point((int)wayland.hint_row, (int)wayland.hint_x, (int)wayland.hint_y, &sx, &sy))
                 {
-                        compositor.pointer_x = sx;
-                        compositor.pointer_y = sy;
+                        compositor.pointer_x = compositor.kept_x = sx;
+                        compositor.pointer_y = compositor.kept_y = sy;
                         compositor_pointer_sync();
                         compositor_pointer_shown();
                 }
@@ -4554,7 +4555,7 @@ static void compositor_wl_direct_make(void)
                 slot = wayland_pointer_direct(row, compositor_wl_direct.relative, &compositor_wl_direct.relatives,
                                               compositor_wl_direct.frames, &compositor_wl_direct.framed, COMPOSITOR_WL_DIRECT_IDS,
                                               &compositor_wl_direct.scale120) - 1;
-                if (slot >= 0 && slot < compositor_wl.slots && compositor_wl.fd[slot] >= 0)
+                if (slot >= 0 && slot < compositor_wl.slots && compositor_wl.fd[slot] >= 0 && !wayland_out_dirty(slot))
                 {
                         compositor_wl_direct.slot = (int)slot, compositor_wl_direct.fd = compositor_wl.fd[slot], compositor_wl_direct.row = row;
                         compositor_wl_direct.valid = 1;

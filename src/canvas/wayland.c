@@ -5129,7 +5129,7 @@ static void wayland_constraints_update(void)
                             &wayland.client[slot]->constraints[at] != chosen)
                                 wayland_constraint_release(wayland.client[slot], &wayland.client[slot]->constraints[at], 1);
         if (chosen && !chosen->active) chosen->active = 1, wayland_constraint_event(owner, chosen, 1);
-        if (row != wayland.hold_row || mode != wayland.hold_mode)
+        if (row != wayland.hold_row || mode != wayland.hold_mode || wayland.hint_row >= 0)
                 wayland.hold_row = row, wayland.hold_mode = mode, wayland.host->pointer_hold(wayland.host->context, row, mode);
 }
 

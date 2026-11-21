@@ -692,7 +692,10 @@ def test_compositor_and_xwm_invariants():
           "compositor_game_dpm_saved[4][32]" in inp and
           "compositor_space_all_fullscreen()" in read_text("src/canvas/compositor/compose.c"))
     check("Oneshot XWarpPointer hint honored when locked_pointer created+destroyed in one flush",
-          "(con->active || (s->row == wayland.pointer_row && wayland_has_keys(c)))" in read_text("src/canvas/wayland.c"))
+          "(con->active || (s->row == wayland.pointer_row && wayland_has_keys(c)))" in read_text("src/canvas/wayland.c") and
+          "wayland.hint_row >= 0)" in read_text("src/canvas/wayland.c") and
+          "compositor.pointer_x = compositor.kept_x = sx;" in wlh and
+          "!wayland_out_dirty(slot)" in wlh)
     check("XWM Wine fixes: focus re-sync on PROTOCOLS/WM_HINTS, TRANSIENT notify, covers >=, fixed-size dialog cap",
           "XWM_PF_MAP | XWM_PF_NOTIFY, -COMPOSITOR_XWM_XA_WM_TRANSIENT_FOR" in xwm and
           xwm.count("x->focus_row = -3;") >= 2 and
