@@ -657,6 +657,12 @@ def test_compositor_and_xwm_invariants():
           all(s in inp for s in ('"Xwayland"', '"wineserver"', '"audio"', '"dbus"')))
     check("CCD0 topology cached once in compositor_ccd_init()",
           "compositor_ccd_init" in inp and "compositor_ccd.ccd0_hex" in inp)
+    check("CCD0 IRQ pinning loop-reads /proc/interrupts into 64K buffer",
+          "buf[65536]" in inp and "while (got < (long)sizeof(buf) - 1" in inp)
+    check("Fullscreen ARGB->XRGB direct scanout enabled in scanout.c & wayland_host.c",
+          "(blend && !compositor.fullscreen[row])" in scan and "(picture->blend && !compositor.fullscreen[row])" in wlh)
+    check("Async AHCI boot enabled in desktop cmdline",
+          "driver_async_probe=ahci" in read_text("kernel/profile/desktop"))
 
 
 def test_kernel_audio_bowl_invariants():

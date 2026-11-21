@@ -172,12 +172,14 @@ static void compositor_pin_ccd0(void)
 
 static void compositor_pin_irqs_ccd0(void)
 {
-        static char buf[32768];
-        long fd, got;
+        static char buf[65536];
+        long fd, got = 0, n;
 
         if (!compositor_multi_ccd() || (fd = system_open_at(AT_FDCWD, (string_address) "/proc/interrupts", FILE_READ | O_CLOEXEC)) < 0)
                 return;
-        got = (long)compositor_call(syscall(read), (positive)fd, (positive)buf, sizeof(buf) - 1, 0, 0, 0);
+        while (got < (long)sizeof(buf) - 1 &&
+               (n = (long)compositor_call(syscall(read), (positive)fd, (positive)(buf + got), (positive)(sizeof(buf) - 1 - (unsigned long)got), 0, 0, 0)) > 0)
+                got += n;
         system_close((int)fd);
         if (got <= 0)
                 return;
@@ -194,11 +196,15 @@ static void compositor_pin_irqs_ccd0(void)
                 {
                         long p = line + (long)string_span_of_set((string_address)buf + line, (string_address) " ");
                         positive used = 0, irq = string_digits((string_address)buf + p, &used);
-                        char path[64];
+                        char path[64], mask[10];
 
                         if (used > 0 && buf[p + (long)used] == ':' && irq > 0 && irq < 4096)
-                                windows_num_path(path, sizeof(path), "/proc/irq/", (unsigned int)irq, "/smp_affinity"),
-                                compositor_write_sysfs(path, compositor_ccd.ccd0_hex, 8);
+                        {
+                                memory_copy(mask, compositor_ccd.ccd0_hex, 8);
+                                mask[8] = '\n', mask[9] = 0;
+                                windows_num_path(path, sizeof(path), "/proc/irq/", (unsigned int)irq, "/smp_affinity");
+                                compositor_write_sysfs(path, mask, 9);
+                        }
                 }
                 buf[stop] = saved;
         }

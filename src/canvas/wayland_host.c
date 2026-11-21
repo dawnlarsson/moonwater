@@ -2121,7 +2121,7 @@ static int compositor_wl_straight_take(int row, const struct wayland_picture *pi
         unsigned long dev = 0, ino = 0;
         int shown, same;
 
-        if (!compositor_wl_tiled(picture) || !picture->last || picture->blend || picture->dest_x || picture->dest_y || width <= 0 || height <= 0 ||
+        if (!compositor_wl_tiled(picture) || !picture->last || (picture->blend && !compositor.fullscreen[row]) || picture->dest_x || picture->dest_y || width <= 0 || height <= 0 ||
             picture->width < width || picture->height < height || picture->plane_count > 4 || compositor_wl.laying[row].open ||
             compositor_wl_layers.pending_row == row || compositor_wl_layers.count[row] || !compositor_wl_tiled_now() ||
             !compositor_wl_tiled_takes(picture->modifier) || compositor_wl_needs_xform_ordered(picture, width, height, 3))

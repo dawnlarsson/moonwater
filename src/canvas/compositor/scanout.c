@@ -1100,7 +1100,7 @@ static int compositor_direct_eligible(int row, int blend)
             compositor.drag >= 0 || compositor.resize >= 0 || compositor.preview_draw ||
             compositor_spots_any(0) || !compositor_primary_bounds(&ox, &oy, &ow, &oh))
                 return 0;
-        if (blend || compositor.glassy[row] || compositor.landing[row] || compositor.glide[row] || compositor.asking[row])
+        if ((blend && !compositor.fullscreen[row]) || compositor.glassy[row] || compositor.landing[row] || compositor.glide[row] || compositor.asking[row])
                 return 0;
         if (compositor.x[row] != ox || compositor.y[row] != oy ||
             compositor.w[row] != (unsigned int)ow || compositor.h[row] != (unsigned int)oh)
@@ -1127,14 +1127,16 @@ static int compositor_direct_candidate(const struct compositor_frame *frames, co
         if (!compositor_direct_eligible(row, frames[windows - 1].blend) ||
             compositor_radius(&frames[windows - 1]) || frames[windows - 1].line)
                 return -1;
-        return (compositor_client_scans(row) ? compositor_lent_fb(row) : compositor_window_fb(row, compositor.front[row])) ? row : -1;
+        return (compositor_client_scans(row)
+                    ? (compositor.fullscreen[row] ? compositor_lent_fb_opaque(row) : compositor_lent_fb(row))
+                    : compositor_window_fb(row, compositor.front[row])) ? row : -1;
 }
 
 static b32 compositor_present_direct(int row, const struct compositor_frame *tabs, unsigned int count)
 {
         int lent = compositor_client_scans(row), rect[4];
         unsigned int which = compositor.front[row];
-        unsigned int fb = lent ? compositor_lent_fb(row) : compositor_window_fb(row, which);
+        unsigned int fb = lent ? (compositor.fullscreen[row] ? compositor_lent_fb_opaque(row) : compositor_lent_fb(row)) : compositor_window_fb(row, which);
 
         if (!fb || (lent && compositor_tabs_rect(tabs, count, rect)))
                 return 0;
@@ -2021,7 +2023,7 @@ static int compositor_plane_candidate(const struct compositor_frame *frames, con
                 top = by + side;
         if (bottom - top < 64 * compositor.scale / 100) return *why = 8, -1;
         rect[0] = frame->x, rect[1] = top, rect[2] = frame->x + frame->width, rect[3] = bottom;
-        if (frame->blend && !compositor_wl_row_opaque(row, 0, top - frame->y, frame->width, bottom - frame->y)) return *why = 20, -1;
+        if (frame->blend && !compositor.fullscreen[row] && !compositor_wl_row_opaque(row, 0, top - frame->y, frame->width, bottom - frame->y)) return *why = 20, -1;
         compositor_band_frame(&band);
         if (compositor.band && band.x < rect[2] && band.x + band.width > rect[0] && band.y < rect[3] && band.y + band.height > rect[1])
                 return *why = 9, -1;
