@@ -3191,7 +3191,7 @@ static void compositor_input_dropped(unsigned int at, positive now)
 }
 
 #define COMPOSITOR_READER_RING 8192
-#define COMPOSITOR_READER_PRIORITY 2
+#define COMPOSITOR_READER_PRIORITY 50
 #define COMPOSITOR_READER_NOTE_NS 50000000ull
 #define COMPOSITOR_READER_NOTE_DELAY_NS 16000000ull
 #define COMPOSITOR_READER_GONE 0xffffu

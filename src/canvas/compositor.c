@@ -2037,8 +2037,8 @@ static b32 compositor_main()
         if (oom >= 0) (void)system_write_all((positive)oom, (string_address) "-900\n", 5), system_close(oom);
         if (!headless)
         {
-                int lowest = 1;
-                compositor_call(syscall(sched_setscheduler), 0, 1, (positive)&lowest, 0, 0, 0);
+                int prio = 40;
+                compositor_call(syscall(sched_setscheduler), 0, 1, (positive)&prio, 0, 0, 0);
                 compositor_pin_ccd0(), compositor_pin_irqs_ccd0();
         }
         if ((status = headless ? compositor_headless(headless, file) : compositor_card_open()) < 0)

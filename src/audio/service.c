@@ -685,8 +685,24 @@ static long audio_file_read(const char *name, char *text, long room)
         return got;
 }
 
-// A small file replaced whole: written beside it and renamed over it.
-static void audio_file_write(const char *name, const char *text, long length)
+// Background SCHED_OTHER settings saver so fsync() never stalls the SCHED_FIFO audio mixing loop.
+#define AUDIO_SAVE_SLOTS 6
+#define AUDIO_SAVE_BUF (AUDIO_APPS * (PULSE_VALUE + 24))
+static struct
+{
+        thread address_to handle;
+        int running;
+        int done;
+        int count;
+        int queuing;
+        char name[AUDIO_SAVE_SLOTS][24];
+        long offset[AUDIO_SAVE_SLOTS];
+        long length[AUDIO_SAVE_SLOTS];
+        char data[AUDIO_SAVE_BUF + 512];
+        long used;
+} audio_save;
+
+static void audio_file_write_sync(const char *name, const char *text, long length)
 {
         char path[160], temporary[168];
         long fd, put;
@@ -723,6 +739,47 @@ static void audio_file_write(const char *name, const char *text, long length)
                 audio_call(syscall(fsync), (positive)fd, 0, 0, 0, 0, 0);
                 audio_call(syscall(close), (positive)fd, 0, 0, 0, 0, 0);
         }
+}
+
+static fn audio_save_entry(address_any argument)
+{
+        int ordinary = 0;
+
+        (void)argument;
+        audio_call(syscall(sched_setscheduler), 0, 0, (positive)&ordinary, 0, 0, 0);
+        for (int i = 0; i < audio_save.count; i++)
+                audio_file_write_sync(audio_save.name[i], audio_save.data + audio_save.offset[i], audio_save.length[i]);
+        __atomic_store_n(&audio_save.done, 1, __ATOMIC_RELEASE);
+}
+
+static void audio_save_reap(int wait)
+{
+        if (!audio_save.running)
+                return;
+        if (!wait && !__atomic_load_n(&audio_save.done, __ATOMIC_ACQUIRE))
+                return;
+        thread_join(audio_save.handle);
+        audio_save.running = 0;
+}
+
+static void audio_file_write(const char *name, const char *text, long length)
+{
+        if (audio_save.queuing)
+        {
+                if (audio_save.count < AUDIO_SAVE_SLOTS && length >= 0 && audio_save.used + length <= (long)sizeof(audio_save.data))
+                {
+                        int slot = audio_save.count++;
+
+                        pulse_copy(audio_save.name[slot], sizeof(audio_save.name[slot]), name);
+                        audio_save.offset[slot] = audio_save.used;
+                        audio_save.length[slot] = length;
+                        if (length > 0)
+                                memory_copy(audio_save.data + audio_save.used, text, (unsigned long)length);
+                        audio_save.used += length;
+                }
+                return;
+        }
+        audio_file_write_sync(name, text, length);
 }
 
 static long audio_text_length(const char *s)
@@ -2360,7 +2417,7 @@ static void audio_lock_memory(void)
 static void audio_start(void)
 {
         struct pulse_host host = {0};
-        unsigned long long param = 2;
+        unsigned long long param = 45;
         char directory[2][24] = {AUDIO_RUN_DIRECTORY, AUDIO_PULSE_DIRECTORY};
 
         host.alloc = audio_host_alloc;
@@ -2786,16 +2843,31 @@ static b32 audio_main()
                         audio_service.devices_due = 0;
                         audio_devices_pass();
                 }
-                if (audio_service.dirty && audio_service.dirty_since && now - audio_service.dirty_since >= AUDIO_SAVE_NS)
+                audio_save_reap(0);
+                if (audio_service.dirty && audio_service.dirty_since && !audio_save.running && now - audio_service.dirty_since >= AUDIO_SAVE_NS)
                 {
+                        audio_save.count = 0;
+                        audio_save.used = 0;
+                        audio_save.queuing = 1;
                         if (audio_service.dirty & 1)
                                 audio_settings_write();
                         if (audio_service.dirty & 2)
                                 audio_apps_save();
                         if (audio_service.dirty & 12)
                                 audio_inputs_save(audio_service.dirty);
+                        audio_save.queuing = 0;
                         audio_service.dirty = 0;
                         audio_service.dirty_since = 0;
+                        if (audio_save.count > 0)
+                        {
+                                __atomic_store_n(&audio_save.done, 0, __ATOMIC_RELEASE);
+                                audio_save.handle = thread_start(audio_save_entry, null);
+                                if (audio_save.handle)
+                                        audio_save.running = 1;
+                                else
+                                        for (int i = 0; i < audio_save.count; i++)
+                                                audio_file_write_sync(audio_save.name[i], audio_save.data + audio_save.offset[i], audio_save.length[i]);
+                        }
                 }
                 // A card that went is looked for again.
                 if (audio_service.pcm.fd < 0 && !audio_service.no_card && !audio_service.suspended && audio_service.rescan_at && now >= audio_service.rescan_at)
@@ -2808,6 +2880,7 @@ static b32 audio_main()
         for (long slot = 0; slot < audio_service.pulse.client_slots; slot++)
                 if (audio_service.fd[slot] >= 0)
                         audio_client_drop(slot);
+        audio_save_reap(1);
         if (audio_service.dirty & 1)
                 audio_settings_write();
         if (audio_service.dirty & 2)
