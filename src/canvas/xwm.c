@@ -2913,10 +2913,16 @@ static void xwm_event(struct compositor_xwm *x, const struct xwm_event *e)
                           (w->row >= 0 && (compositor.resize == w->row || compositor.arranged[w->row] != COMPOSITOR_FLOATING))))
                         c.mask &= ~(XWM_CONFIGURE_WIDTH | XWM_CONFIGURE_HEIGHT);
                 if (!w || !(w->state & COMPOSITOR_XWM_POPUPTYPE))
-                        c.mask &= ~(XWM_CONFIGURE_X | XWM_CONFIGURE_Y | XWM_CONFIGURE_SIBLING | XWM_CONFIGURE_STACK_MODE);
+                {
+                        c.mask &= ~(XWM_CONFIGURE_SIBLING | XWM_CONFIGURE_STACK_MODE);
+                        if (!w || (w->state & COMPOSITOR_XWM_MAPPED))
+                                c.mask &= ~(XWM_CONFIGURE_X | XWM_CONFIGURE_Y);
+                }
                 c.x = e->x, c.y = e->y;
                 c.width = mw > 0 && e->width > mw ? mw : e->width, c.height = mh > 0 && e->height > mh ? mh : e->height;
-                compositor_xwm_clamp_size(w, &c.width, &c.height);
+                // Per ICCCM 4.1.5, WM_NORMAL_HINTS min/max constrain user/WM resizes (compositor_xwm_sync), never
+                // a client's own ConfigureRequest: clients (e.g. Wine dialogs, SkyrimSELauncher, notification boxes)
+                // update WM_NORMAL_HINTS and send ConfigureRequest in the same flush before async GetProperty returns.
                 if ((c.mask & XWM_CONFIGURE_WIDTH) && (c.width < 1 || c.width > 65535))
                         c.width = c.width < 1 ? 1u : 65535u;
                 if ((c.mask & XWM_CONFIGURE_HEIGHT) && (c.height < 1 || c.height > 65535))
@@ -2925,6 +2931,10 @@ static void xwm_event(struct compositor_xwm *x, const struct xwm_event *e)
                 if (c.mask)
                 {
                         compositor_xwm_configure(x, e->window, &c);
+                        if (w && (c.mask & XWM_CONFIGURE_X))
+                                w->x = w->sent_x = c.x;
+                        if (w && (c.mask & XWM_CONFIGURE_Y))
+                                w->y = w->sent_y = c.y;
                         if (w && (c.mask & XWM_CONFIGURE_WIDTH))
                                 w->width = w->sent_w = c.width;
                         if (w && (c.mask & XWM_CONFIGURE_HEIGHT))

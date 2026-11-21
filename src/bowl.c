@@ -9945,7 +9945,7 @@ static const char bowl_win32_fonts_xml[] =
     "  <alias><family>Microsoft Sans Serif</family><prefer><family>Tahoma</family><family>Liberation Sans</family></prefer></alias>\n"
     "  <alias><family>Helv</family><prefer><family>Tahoma</family><family>Liberation Sans</family></prefer></alias>\n"
     "  <alias><family>Segoe UI</family><prefer><family>Tahoma</family><family>Liberation Sans</family></prefer></alias>\n"
-    "  <alias><family>Tahoma</family><default><family>Liberation Sans</family></default></alias>\n"
+    "  <alias><family>Tahoma</family><prefer><family>Liberation Sans</family></prefer></alias>\n"
     "  <alias><family>Arial</family><prefer><family>Liberation Sans</family></prefer></alias>\n"
     "  <alias><family>Times New Roman</family><prefer><family>Liberation Serif</family></prefer></alias>\n"
     "  <alias><family>Courier New</family><prefer><family>Liberation Mono</family></prefer></alias>\n"

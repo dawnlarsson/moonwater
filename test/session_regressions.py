@@ -691,6 +691,12 @@ def test_compositor_and_xwm_invariants():
           "XWM_PF_MAP | XWM_PF_NOTIFY, -COMPOSITOR_XWM_XA_WM_TRANSIENT_FOR" in xwm and
           xwm.count("x->focus_row = -3;") >= 2 and
           "if (most_px > 0 && most_px < floor_min)" in manage)
+    cr_start = xwm.find("case XWM_EV_CONFIGURE_REQUEST:")
+    cr_end = xwm.find("case XWM_EV_CREATE_NOTIFY:", cr_start)
+    check("XWM ConfigureRequest honors client programmatic resize without clamping against stale WM_NORMAL_HINTS",
+          cr_start != -1 and cr_end != -1 and
+          "compositor_xwm_clamp_size(" not in xwm[cr_start:cr_end] and
+          "if (!w || (w->state & COMPOSITOR_XWM_MAPPED))" in xwm[cr_start:cr_end])
     check("Steam bowl fixes Win32 dialog inflation (ttf-liberation + 65-moonwater-win32.conf) & GTK dark theme",
           '"ttf-liberation"' in read_text("src/bowl.c") and
           "65-moonwater-win32.conf" in read_text("src/bowl.c") and
