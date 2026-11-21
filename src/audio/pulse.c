@@ -565,10 +565,7 @@ static int pulse_key_ok(const char *key, long length)
 {
         if (length < 1 || length >= PULSE_KEY)
                 return 0;
-        for (long i = 0; i < length; i++)
-                if ((unsigned char)key[i] <= ' ' || (unsigned char)key[i] >= 127)
-                        return 0;
-        return 1;
+        return memory_key_printable((const p8 *)key, (positive)length) != 0;
 }
 
 static int pulse_equal(const char *a, const char *b)
@@ -672,54 +669,20 @@ static void pulse_props_update(struct pulse_props *to, const struct pulse_props 
 // The text of a property, cleaned for showing: a string of its length, control bytes and bad UTF-8 turned into '?'. Answers its length.
 static long pulse_props_text(const struct pulse_props *props, const char *key, char *to, long room)
 {
-        long n = 0;
-
         to[0] = 0;
+        if (room <= 1)
+                return 0;
         for (int i = 0; i < props->count; i++)
                 if (pulse_equal(props->entry[i].key, key))
                 {
-                        const unsigned char *v = props->entry[i].value;
                         long length = props->entry[i].length;
+                        positive n;
 
-                        for (long at = 0; at < length && v[at] && n < room - 4; at++)
-                        {
-                                unsigned char c = v[at];
-                                long extra = c >= 0xf0 && c < 0xf5 ? 3 : c >= 0xe0 ? 2 : c >= 0xc2 ? 1 : 0;
-
-                                if (c >= 0x20 && c < 0x7f)
-                                        to[n++] = (char)c;
-                                else if (c >= 0xc2 && c < 0xf5 && at + extra < length)
-                                {
-                                        int good = 1;
-
-                                        for (long k = 1; k <= extra; k++)
-                                                good &= (v[at + k] & 0xc0) == 0x80;
-                                        // C1 controls and surrogates are not text.
-                                        if (good && extra == 1 && c == 0xc2 && v[at + 1] < 0xa0)
-                                                good = 0;
-                                        if (good && extra == 2 && c == 0xed && v[at + 1] >= 0xa0)
-                                                good = 0;
-                                        if (good && extra == 2 && c == 0xe0 && v[at + 1] < 0xa0)
-                                                good = 0;
-                                        // Four bytes are a code point from U+10000 to U+10FFFF: F0 below 90 is overlong, F4 from 90 is past the end.
-                                        if (good && extra == 3 && c == 0xf0 && v[at + 1] < 0x90)
-                                                good = 0;
-                                        if (good && extra == 3 && c == 0xf4 && v[at + 1] >= 0x90)
-                                                good = 0;
-                                        if (good)
-                                        {
-                                                for (long k = 0; k <= extra; k++)
-                                                        to[n++] = (char)v[at + k];
-                                                at += extra;
-                                        }
-                                        else
-                                                to[n++] = '?';
-                                }
-                                else
-                                        to[n++] = '?';
-                        }
+                        if (length > room - 1)
+                                length = room - 1;
+                        n = length > 0 ? memory_text_clean((p8 *)to, (const p8 *)props->entry[i].value, (positive)length) : 0;
                         to[n] = 0;
-                        return n;
+                        return (long)n;
                 }
         return 0;
 }
@@ -1443,29 +1406,17 @@ static void pulse_record_emit(struct pulse *p, struct pulse_record *r, const flo
 static void pulse_record_peaks(struct pulse *p, struct pulse_record *r, const float *left, const float *right, long frames, long source_rate)
 {
         float *o0 = p->record_a[0], *o1 = p->record_a[1];
-        long window = source_rate / r->rate, made = 0;
+        long window = source_rate / r->rate;
+        positive wc = r->window_count > 0 ? (positive)r->window_count : 0, made;
 
         if (window < 1)
                 window = 1;
-        for (long i = 0; i < frames; i++)
-        {
-                float a = left[i] < 0 ? -left[i] : left[i], b = right[i] < 0 ? -right[i] : right[i];
-
-                r->window[0] = a > r->window[0] ? a : r->window[0];
-                r->window[1] = b > r->window[1] ? b : r->window[1];
-                if (++r->window_count >= window)
-                {
-                        o0[made] = r->window[0];
-                        o1[made] = r->window[1];
-                        if (r->channels == 1)
-                                o0[made] = o1[made] = r->window[0] > r->window[1] ? r->window[0] : r->window[1];
-                        made++;
-                        r->window[0] = r->window[1] = 0;
-                        r->window_count = 0;
-                }
-        }
+        made = frames > 0 ? memory_window_peaks(o0, o1, left, right, (positive)frames, r->window, &wc, (positive)window,
+                                                (positive)(r->channels == 1))
+                          : 0;
+        r->window_count = (long)wc;
         if (made)
-                pulse_record_post(p, r, p->record_bytes, pulse_record_encode(p->record_bytes, r->format, made, r->channels, o0, o1));
+                pulse_record_post(p, r, p->record_bytes, pulse_record_encode(p->record_bytes, r->format, (long)made, r->channels, o0, o1));
 }
 
 // A block of the source (its bus, at its volume): into the stream, resampled to its rate when it has a table.

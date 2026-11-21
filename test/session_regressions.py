@@ -710,8 +710,9 @@ def test_compositor_and_xwm_invariants():
           "audio_playing_stream(audio_service.played_rate ? 0 : &low)" in read_text("src/audio/service.c") and
           "if (low)\n                *low = 0;" in read_text("src/audio/service.c") and
           "| O_NOFOLLOW" in read_text("src/audio/service.c"))
-    check("Audio pulse.c uses lib.c SIMD memory_s16_to_u8 and memory_reverse_units",
-          "memory_s16_to_u8(" in read_text("src/audio/pulse.c") and "memory_reverse_units(" in read_text("src/audio/pulse.c"))
+    check("Audio pulse.c uses lib.c SIMD memory_s16_to_u8, memory_reverse_units, memory_window_peaks, memory_text_clean & memory_key_printable",
+          all(s in read_text("src/audio/pulse.c") for s in (
+              "memory_s16_to_u8(", "memory_reverse_units(", "memory_window_peaks(", "memory_text_clean(", "memory_key_printable(")))
     check("Explicit sync skips redundant implicit dmabuf_ready poll & Reflex latch defers callbacks",
           "!s->pending.sync_acq_set" in read_text("src/canvas/wayland.c") and
           "wayland_latch_defer(defer)" in wlh)
