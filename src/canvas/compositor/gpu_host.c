@@ -945,6 +945,99 @@ static int compositor_gpu_present(const struct compositor_frame *frames, unsigne
         return 0;
 }
 
+/*
+        GPU backdrop capture for frosted glass: renders frames[0..count-1] on the GPU over (x0,y0)-(x1,y1) into a
+        cached-RAM memfd so compositor_frost never reads WC/tiled client dma-bufs over PCIe on the CPU.
+        Preserves gpu_handed[] so the subsequent compositor_gpu_present still has every imported dma-buf in its BO list.
+*/
+static struct
+{
+        unsigned int *memory;
+        unsigned long bytes;
+        int fd;
+} compositor_gpu_frost_buf;
+
+static const unsigned int *compositor_gpu_frost_scene(const struct compositor_frame *frames, unsigned int count,
+                                                      int x0, int y0, int x1, int y1, unsigned long *pitch)
+{
+        struct compositor_gscene *g = &compositor_gscene;
+        struct compositor_frame wall;
+        positive bytes, dst_va;
+        b32 was_hold, ok;
+
+        if (!compositor_gpu || !compositor_gpu_state.up || compositor_gpu_state.dead || compositor_gpu_held() ||
+            !gpu_idle() || compositor_card.on || compositor.width <= 0 || compositor.height <= 0 || (compositor.width & 3))
+                return null;
+        if (x0 < 0)
+                x0 = 0;
+        if (y0 < 0)
+                y0 = 0;
+        if (x1 > compositor.width)
+                x1 = compositor.width;
+        if (y1 > compositor.height)
+                y1 = compositor.height;
+        if (x1 <= x0 || y1 <= y0)
+                return null;
+        for (unsigned int k = 0; k < count; k++)
+                if (compositor_scaled(&frames[k]) || !compositor_gpu_picture(&frames[k]))
+                        return null;
+        g->width = (unsigned int)compositor.width, g->height = (unsigned int)compositor.height;
+        if (compositor_gpu_wall_frame(&wall) && !compositor_gpu_picture(&wall))
+                return null;
+        bytes = 4ull * (positive)compositor.width * (positive)compositor.height;
+        if (compositor_gpu_frost_buf.bytes < (unsigned long)bytes)
+        {
+                unsigned long grown = ((unsigned long)bytes + (1ul << 20) - 1) & ~((1ul << 20) - 1);
+                long memfd, mapped;
+                void *old = compositor_gpu_frost_buf.memory, *p = old;
+
+                mem_buf_free(&p, &compositor_gpu_frost_buf.bytes, MEM_BUF_GPU_FORGET);
+                if (old)
+                        gpu_unregister_memfd(old);
+                if (compositor_gpu_frost_buf.fd > 0)
+                        system_close(compositor_gpu_frost_buf.fd - 1);
+                compositor_gpu_frost_buf.memory = 0, compositor_gpu_frost_buf.fd = 0;
+                memfd = compositor_call(syscall(memfd_create), (positive) "moonwater-frost", 1 | 2, 0, 0, 0, 0);
+                if (memfd >= 0 && system_truncate_handle((int)memfd, (positive)grown) == 0 &&
+                    compositor_call(syscall(fcntl), (positive)memfd, WINDOWS_F_ADD_SEALS, 2, 0, 0, 0) == 0)
+                {
+                        mapped = compositor_call(syscall(mmap), 0, (positive)grown, 3, 1, (positive)memfd, 0);
+                        if (mapped < 0 && mapped > -4096)
+                        {
+                                system_close((int)memfd);
+                                return null;
+                        }
+                        compositor_gpu_frost_buf.memory = (unsigned int *)mapped, compositor_gpu_frost_buf.bytes = grown;
+                        compositor_gpu_frost_buf.fd = (int)memfd + 1;
+                        gpu_register_memfd((int)memfd, compositor_gpu_frost_buf.memory, (positive)grown, 0);
+                }
+                else
+                {
+                        if (memfd >= 0)
+                                system_close((int)memfd);
+                        if (!mem_buf_grow(&p, &compositor_gpu_frost_buf.bytes, grown, 0))
+                                return null;
+                        compositor_gpu_frost_buf.memory = (unsigned int *)p;
+                }
+        }
+        if (!(dst_va = gpu_host_va_written(compositor_gpu_frost_buf.memory, bytes, compositor_gpu_frost_buf.bytes, 1)))
+                return null;
+        if (!compositor_gpu_frames(frames, count, compositor_ground))
+                return null;
+        was_hold = gpu_handed_hold;
+        gpu_handed_hold = 1;
+        ok = gpu_scene(COMPOSITOR_GPU_OPS_AT, g->count, COMPOSITOR_GPU_BINS_AT, dst_va, (unsigned int)compositor.width,
+                       g->width, g->height, (unsigned int)x0, (unsigned int)y0, (unsigned int)x1, (unsigned int)y1);
+        gpu_handed_hold = was_hold;
+        if (!ok)
+        {
+                compositor_gpu_fail(0);
+                return null;
+        }
+        *pitch = (unsigned long)compositor.width;
+        return compositor_gpu_frost_buf.memory;
+}
+
 // The machine slept, or the card was found lost: it is started again before the next present draws on it (compositor_gpu_restart_check).
 static void compositor_gpu_resumed(void)
 {

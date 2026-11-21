@@ -101,6 +101,64 @@ static const unsigned int *compositor_grain_row(unsigned int light, int x, int y
         and never all of it. False when there is no memory for it.
 */
 #define COMPOSITOR_GLASS_BAND 64 // full-size rows composed and halved at once: a multiple of the block
+#define COMPOSITOR_GLASS_BG_NS 33000000ull // 30 Hz coalesce cap for continuous GPU animations behind stationary glass
+
+#ifdef MOONWATER_GPU_C
+static const unsigned int *compositor_gpu_frost_scene(const struct compositor_frame *frames, unsigned int count,
+                                                      int x0, int y0, int x1, int y1, unsigned long *pitch);
+#else
+static const unsigned int *compositor_gpu_frost_scene(const struct compositor_frame *frames, unsigned int count,
+                                                      int x0, int y0, int x1, int y1, unsigned long *pitch)
+{
+        (void)frames, (void)count, (void)x0, (void)y0, (void)x1, (void)y1, (void)pitch;
+        return null;
+}
+#endif
+
+static positive compositor_glass_bg_at[WINDOWS];
+static positive compositor_glass_bg_next;
+
+static positive compositor_glass_bg_due(void)
+{
+        return compositor_glass_bg_next;
+}
+
+static void compositor_glass_bg_flush(positive now)
+{
+        if (!compositor_glass_bg_next || now < compositor_glass_bg_next)
+                return;
+        compositor_glass_bg_next = 0;
+        for (int row = 0; row < (int)compositor_rows_in_use; row++)
+                if (compositor.glassy[row] && compositor.showing[row] && compositor.stale[row][2] > compositor.stale[row][0])
+                {
+                        int box[4];
+
+                        compositor_contents_box(row, box);
+                        if (box[2] > box[0] && box[3] > box[1])
+                                compositor_damage_over(box[0], box[1], 1, 1);
+                }
+}
+
+static int compositor_frost_has_gpu(const struct compositor_frame *frames, unsigned int count, int x0, int y0, int x1, int y1, int *has_tiled)
+{
+        int gpu_any = 0, tiled_any = 0;
+
+        for (unsigned int k = 0; k < count; k++)
+        {
+                const struct compositor_frame *f = &frames[k];
+
+                if (f->x < x1 && x0 < f->x + f->width && f->y < y1 && y0 < f->y + f->height)
+                {
+                        if (f->tiled_kind)
+                                tiled_any = 1, gpu_any = 1;
+                        else if (f->gpu_base)
+                                gpu_any = 1;
+                }
+        }
+        if (has_tiled)
+                *has_tiled = tiled_any;
+        return gpu_any;
+}
 
 static int compositor_frost(const struct compositor_frame *frames, unsigned int count, int sx, int sy, int sw, int sh,
                             unsigned int *into, unsigned long pitch)
@@ -109,6 +167,10 @@ static int compositor_frost(const struct compositor_frame *frames, unsigned int 
         int tw = sw + 2 * spread, th = sh + 2 * spread, ax = (sx - spread) * block, ay = (sy - spread) * block;
         int aw = tw * block, ah = th * block;
         int cx0 = ax < 0 ? 0 : ax, cx1 = ax + aw > compositor.width ? compositor.width : ax + aw;
+        int cy0 = ay < 0 ? 0 : ay, cy1 = ay + ah > compositor.height ? compositor.height : ay + ah;
+        const unsigned int *gpu_pic = null;
+        unsigned long gpu_pitch = 0;
+        int has_tiled = 0, has_gpu;
         unsigned int *strip, *small;
         unsigned long bytes;
 
@@ -121,6 +183,19 @@ static int compositor_frost(const struct compositor_frame *frames, unsigned int 
         small = strip + (unsigned long)aw * COMPOSITOR_GLASS_BAND;
         if (cx1 <= cx0)
                 cx0 = ax + aw <= 0 ? 0 : compositor.width - 1, cx1 = cx0 + 1;
+        if (cy1 <= cy0)
+                cy0 = ay + ah <= 0 ? 0 : compositor.height - 1, cy1 = cy0 + 1;
+        has_gpu = compositor_frost_has_gpu(frames, count, cx0, cy0, cx1, cy1, &has_tiled);
+        if (has_gpu)
+        {
+                gpu_pic = compositor_gpu_frost_scene(frames, count, cx0, cy0, cx1, cy1, &gpu_pitch);
+                if (!gpu_pic)
+                {
+                        if (has_tiled)
+                                compositor_wl_straight_pays(-1);
+                        compositor_wl_lent_sync(1);
+                }
+        }
         for (int top = 0; top < ah; top += COMPOSITOR_GLASS_BAND)
         {
                 int rows = ah - top < COMPOSITOR_GLASS_BAND ? ah - top : COMPOSITOR_GLASS_BAND;
@@ -131,8 +206,13 @@ static int compositor_frost(const struct compositor_frame *frames, unsigned int 
                         vy0 = y0 + rows <= 0 ? 0 : compositor.height - 1, vy1 = vy0 + 1;
                 under = (struct compositor_target){strip, (unsigned long)aw, compositor.width, compositor.height,
                                                    cx0, vy0, cx1, vy1, ax, vy0 < y0 || vy0 >= y0 + rows ? vy0 : y0};
-                compositor_scene(&under, frames, count);
                 first = under.oy == y0 ? vy0 - y0 : 0, last = under.oy == y0 ? vy1 - y0 : 1;
+                if (gpu_pic)
+                        memory_copy_rect_u32(strip + (long)first * aw + (cx0 - ax), (unsigned long)aw,
+                                             gpu_pic + (unsigned long)vy0 * gpu_pitch + (unsigned long)cx0, gpu_pitch,
+                                             (unsigned long)(cx1 - cx0), (unsigned long)(vy1 - vy0));
+                else
+                        compositor_scene(&under, frames, count);
                 for (int row = first; row < last; row++)
                 {
                         unsigned int *line = strip + (long)row * aw;
@@ -416,6 +496,7 @@ static void compositor_taskbar_slide(positive now)
 {
         b64 before = 0;
 
+        compositor_glass_bg_flush(now);
         if (taskbar_slide_now(compositor_fullscreen_up(), now, compositor_glides(), &before))
                 compositor_taskbar_damage(before);
 }
@@ -729,6 +810,7 @@ static void compositor_glass_pass(struct compositor_frame *frames, const unsigne
         {
                 int row = rows[at], box[4], *made = compositor.glass_made[row], *blocks, *stale = compositor.stale[row];
                 int place[4] = {compositor.x[row], compositor.y[row], (int)compositor.w[row], (int)compositor.h[row]};
+                int moved = 0, deferred = 0;
 
                 if (!compositor.glassy[row])
                         continue;
@@ -736,6 +818,7 @@ static void compositor_glass_pass(struct compositor_frame *frames, const unsigne
                 blocks = compositor.glass_blocks[row];
                 if (memory_compare(made, place, sizeof(place)))
                 {
+                        moved = 1;
                         if (!compositor_glass_room(row))
                         {
                                 compositor_glass_drop(row);
@@ -759,32 +842,51 @@ static void compositor_glass_pass(struct compositor_frame *frames, const unsigne
                         {
                                 unsigned int *into = compositor.backdrop[row] + (long)(by0 - blocks[1]) * blocks[2] + (bx0 - blocks[0]);
                                 int shown[4] = {(bx0 - 1) * block, (by0 - 1) * block, (bx1 + 1) * block, (by1 + 1) * block};
+                                positive now = 0;
 
-#ifdef CONFIG_MOONWATER_WAYLAND
-                                compositor_wl_lent_sync(1);
-#endif
-                                if (!compositor_frost(frames, at, bx0, by0, bx1 - bx0, by1 - by0, into, (unsigned long)blocks[2]))
+                                // Coalesce continuous GPU-client animation updates behind stationary glass at 30 Hz;
+                                // moving/resizing glass or single changes after idle still update immediately (0 ms).
+                                if (!moved && compositor.card >= 0 && row >= 0 && row < WINDOWS &&
+                                    compositor_frost_has_gpu(frames, at, (bx0 - spread) * block, (by0 - spread) * block,
+                                                             (bx1 + spread) * block, (by1 + spread) * block, null))
                                 {
-                                        compositor_glass_drop(row);
-                                        continue;
-                                }
-                                for (int by = by0; by < by1; by++)
-                                {
-                                        long first = (long)(by - blocks[1]) * blocks[2] + (bx0 - blocks[0]);
-                                        unsigned int *now = compositor.tinted[row] + first;
+                                        now = clock_monotonic_nanoseconds();
+                                        if (compositor_glass_bg_at[row] && now < compositor_glass_bg_at[row] + COMPOSITOR_GLASS_BG_NS)
+                                        {
+                                                positive due = compositor_glass_bg_at[row] + COMPOSITOR_GLASS_BG_NS;
 
-                                        memory_saturate_u32(now, compositor.backdrop[row] + first, (positive)(bx1 - bx0));
-                                        memory_sum_swap_u32((p64 address_to)compositor.glass_sum[row], compositor.boosted[row] + first, now, (positive)(bx1 - bx0));
-                                        compositor_glass_tone_span(now, compositor.boosted[row] + first, (positive)(bx1 - bx0), compositor.glass_side[row]);
+                                                if (!compositor_glass_bg_next || due < compositor_glass_bg_next)
+                                                        compositor_glass_bg_next = due;
+                                                deferred = 1;
+                                        }
                                 }
-                                compositor.blurred += (positive)(bx1 - bx0) * (positive)(by1 - by0);
-                                compositor_meet(shown, box);
-                                compositor_union(compositor.dirty[row], shown);
-                                if (compositor_glass_side(row))
+                                if (!deferred)
                                 {
-                                        compositor_glass_tone_span(compositor.tinted[row], compositor.boosted[row],
-                                                                   (positive)blocks[2] * (positive)blocks[3], compositor.glass_side[row]);
-                                        memory_copy(compositor.dirty[row], box, sizeof(box));
+                                        if (row >= 0 && row < WINDOWS)
+                                                compositor_glass_bg_at[row] = now ? now : clock_monotonic_nanoseconds();
+                                        if (!compositor_frost(frames, at, bx0, by0, bx1 - bx0, by1 - by0, into, (unsigned long)blocks[2]))
+                                        {
+                                                compositor_glass_drop(row);
+                                                continue;
+                                        }
+                                        for (int by = by0; by < by1; by++)
+                                        {
+                                                long first = (long)(by - blocks[1]) * blocks[2] + (bx0 - blocks[0]);
+                                                unsigned int *now_t = compositor.tinted[row] + first;
+
+                                                memory_saturate_u32(now_t, compositor.backdrop[row] + first, (positive)(bx1 - bx0));
+                                                memory_sum_swap_u32((p64 address_to)compositor.glass_sum[row], compositor.boosted[row] + first, now_t, (positive)(bx1 - bx0));
+                                                compositor_glass_tone_span(now_t, compositor.boosted[row] + first, (positive)(bx1 - bx0), compositor.glass_side[row]);
+                                        }
+                                        compositor.blurred += (positive)(bx1 - bx0) * (positive)(by1 - by0);
+                                        compositor_meet(shown, box);
+                                        compositor_union(compositor.dirty[row], shown);
+                                        if (compositor_glass_side(row))
+                                        {
+                                                compositor_glass_tone_span(compositor.tinted[row], compositor.boosted[row],
+                                                                           (positive)blocks[2] * (positive)blocks[3], compositor.glass_side[row]);
+                                                memory_copy(compositor.dirty[row], box, sizeof(box));
+                                        }
                                 }
                         }
                 }
@@ -800,7 +902,8 @@ static void compositor_glass_pass(struct compositor_frame *frames, const unsigne
                         }
                         compositor_damage_from(c[0], c[1], c[2] - c[0], c[3] - c[1], row + 1);
                 }
-                memory_zero(compositor.stale[row], sizeof(compositor.stale[row]));
+                if (!deferred)
+                        memory_zero(compositor.stale[row], sizeof(compositor.stale[row]));
                 memory_zero(compositor.dirty[row], sizeof(compositor.dirty[row]));
                 frames[at].pixels = compositor.composed[row], frames[at].pitch = (unsigned long)place[2];
         }
@@ -808,8 +911,8 @@ static void compositor_glass_pass(struct compositor_frame *frames, const unsigne
 
 static void compositor_close_mean(struct compositor_frame *frame)
 {
-        int bx, by, side, touched = 0;
-        unsigned long sum[3] = {0, 0, 0}, count;
+        int bx, by, side, touched = 0, step;
+        unsigned long sum[3] = {0, 0, 0}, count = 0;
         const unsigned int *picture;
 
         if (!compositor_close_box(frame, &bx, &by, &side))
@@ -824,18 +927,22 @@ static void compositor_close_mean(struct compositor_frame *frame)
         if (!touched)
                 return;
         picture = compositor_scaled(frame) ? 0 : frame->pixels;
-        for (int py = by; py < by + side; py++)
+        // Stride by 4 when reading write-combined client dma-bufs to cut uncached PCIe reads 16x with identical lightness mean.
+        step = frame->gpu_base ? 4 : 1;
+        for (int py = by; py < by + side; py += step)
         {
                 const unsigned int *row = picture ? picture + (unsigned long)(py - frame->y) * frame->pitch + (unsigned long)(bx - frame->x) : 0;
 
-                for (int px = bx; px < bx + side; px++)
+                for (int px = bx; px < bx + side; px += step)
                 {
                         unsigned int under = row ? row[px - bx] : compositor_picture_at(frame, px - frame->x, py - frame->y);
 
                         sum[0] += under >> 16 & 255, sum[1] += under >> 8 & 255, sum[2] += under & 255;
+                        count++;
                 }
         }
-        count = (unsigned long)side * (unsigned long)side;
+        if (!count)
+                return;
         if (frame->swap)
         {
                 unsigned long red = sum[2];

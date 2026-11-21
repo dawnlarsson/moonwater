@@ -1265,10 +1265,13 @@ static unsigned int present_bands_pass(struct compositor_frame *frames, unsigned
                                 frames[windows - 1].pixels = stage;
                         }
                 }
+                if (!solid)
+                {
 #ifdef CONFIG_MOONWATER_WAYLAND
-                compositor_wl_lent_sync(1);
+                        compositor_wl_lent_sync(1);
 #endif
-                compositor_wl_straight_pays(-1);
+                        compositor_wl_straight_pays(-1);
+                }
                 compositor_band_draw_for(band_idx, frames, windows, redo);
         }
         if (saved_direct_pixels && windows)
@@ -1442,7 +1445,7 @@ static void compositor_present_frames(void)
                            compositor.patched[direct][compositor.front[direct] & 1u] &&
                            compositor_window_fb(direct, compositor.front[direct]) == compositor.on_screen &&
                            compositor.under[compositor.front[direct] & 1u];
-        if (direct < 0)
+        if (direct < 0 && !compositor_gpu_tiled_ready())
                 compositor_wl_straight_pays(-1);
         if (!stay_live_direct)
                 compositor_direct_unpatch();
@@ -1550,7 +1553,8 @@ static void compositor_present_frames(void)
                 if (full)
                         compositor.mirror_stale = 0;
         }
-        compositor_runs_learn(frames, rows, windows);
+        if (!gpu_composed)
+                compositor_runs_learn(frames, rows, windows);
         if (compositor_spare.fb)
                 scanout_plate_mark_spare(flip_own ? (const int (*)[4])scene : (const int (*)[4])compositor.damage,
                                          flip_own ? scenes : compositor.damages);

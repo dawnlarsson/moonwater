@@ -1785,9 +1785,13 @@ static void compositor_cursor_moved(positive now)
 // go (0 for neither). The main loop sleeps until then.
 static positive compositor_cursor_due(void)
 {
+        positive glass = compositor_glass_bg_due(), due = 0;
+
         if (compositor.cursor.press.at || compositor.cursor.morph.at || compositor.cursor.lens.at || compositor.cursor.stretch.at)
-                return clock_monotonic_nanoseconds() + (compositor.period ? compositor.period : 16000000ull);
-        return compositor.cursor.stretch.to ? compositor.cursor.idle_until : 0;
+                due = clock_monotonic_nanoseconds() + (compositor.period ? compositor.period : 16000000ull);
+        else if (compositor.cursor.stretch.to)
+                due = compositor.cursor.idle_until;
+        return glass && (!due || glass < due) ? glass : due;
 }
 
 // The pointer's own times that are up: a stretch nothing has moved under lets go, and a value on its way is drawn where it is now.
@@ -1977,6 +1981,114 @@ static int compositor_cursor_paint(const struct compositor_pointer *p)
         return 0;
 }
 
+static int compositor_wl_locked(void);
+
+// Async cursor-plane fast-path: lets the SCHED_FIFO input reader thread issue DRM_MODE_CURSOR_MOVE directly
+// even while the main compositor loop is busy with presents/Wayland/KMS, so cursor motion never drops a frame.
+static struct
+{
+        unsigned int lock;
+        int active, card;
+        unsigned int count;
+        unsigned int crtc[WINDOWS_OUTPUTS];
+        int screens[WINDOWS_OUTPUTS][4];
+        unsigned char shows[WINDOWS_OUTPUTS];
+        int hot_x, hot_y, inset;
+        int flat, sensitivity;
+        int x, y, accel_x, accel_y;
+        positive stamp, moved_ns;
+        int last_left, last_top;
+} compositor_cursor_async;
+
+static void compositor_cursor_lock_take(void)
+{
+        while (__atomic_exchange_n(&compositor_cursor_async.lock, 1u, __ATOMIC_ACQUIRE))
+                while (__atomic_load_n(&compositor_cursor_async.lock, __ATOMIC_RELAXED))
+                        ;
+}
+
+static void compositor_cursor_lock_drop(void)
+{
+        __atomic_store_n(&compositor_cursor_async.lock, 0u, __ATOMIC_RELEASE);
+}
+
+static void compositor_cursor_async_sync(int active, int hot_x, int hot_y, int inset, int left, int top)
+{
+        unsigned int count = 0;
+        const int (*screens)[4] = compositor_screens(&count);
+
+        if (active && compositor.card >= 0 && compositor.cursor.plane_on && !compositor.dark && !compositor_wl_locked() &&
+            count > 0 && count <= WINDOWS_OUTPUTS)
+        {
+                compositor_cursor_async.card = compositor.card;
+                compositor_cursor_async.count = count;
+                for (unsigned int at = 0; at < count; at++)
+                {
+                        compositor_cursor_async.crtc[at] = compositor.outputs ? compositor.output[at].crtc : compositor.crtc;
+                        memory_copy(compositor_cursor_async.screens[at], screens[at], sizeof(screens[at]));
+                        compositor_cursor_async.shows[at] = compositor.output[at].shows != 0;
+                }
+                compositor_cursor_async.hot_x = hot_x, compositor_cursor_async.hot_y = hot_y, compositor_cursor_async.inset = inset;
+                compositor_cursor_async.flat = compositor.flat, compositor_cursor_async.sensitivity = compositor.sensitivity;
+                compositor_cursor_async.x = compositor.pointer_x, compositor_cursor_async.y = compositor.pointer_y;
+                compositor_cursor_async.accel_x = compositor.accel_x, compositor_cursor_async.accel_y = compositor.accel_y;
+                compositor_cursor_async.stamp = compositor.stamp;
+                compositor_cursor_async.last_left = left, compositor_cursor_async.last_top = top;
+                compositor_cursor_async.active = 1;
+        }
+        else
+                compositor_cursor_async.active = 0;
+}
+
+static void compositor_cursor_async_step(long dx, long dy, positive now)
+{
+        int gain, ax, ay, nx, ny, left, top;
+
+        if ((!dx && !dy) || !__atomic_load_n(&compositor_cursor_async.active, __ATOMIC_ACQUIRE) ||
+            __atomic_load_n(&compositor.dark, __ATOMIC_RELAXED))
+                return;
+        compositor_cursor_lock_take();
+        if (!compositor_cursor_async.active)
+        {
+                compositor_cursor_lock_drop();
+                return;
+        }
+        gain = compositor_gain_wanted(compositor_gain_of((int)dx, (int)dy, now > compositor_cursor_async.stamp ? now - compositor_cursor_async.stamp : 0),
+                                      compositor_cursor_async.flat, compositor_cursor_async.sensitivity);
+        compositor_cursor_async.stamp = now;
+        ax = compositor_accel((int)dx, &compositor_cursor_async.accel_x, gain);
+        ay = compositor_accel((int)dy, &compositor_cursor_async.accel_y, gain);
+        nx = compositor_counts(compositor_cursor_async.x, ax);
+        ny = compositor_counts(compositor_cursor_async.y, ay);
+        compositor_screen_keep_point((const int (*)[4])compositor_cursor_async.screens, compositor_cursor_async.count,
+                                     compositor_cursor_async.x, compositor_cursor_async.y, &nx, &ny);
+        compositor_cursor_async.x = nx, compositor_cursor_async.y = ny;
+        left = nx - compositor_cursor_async.hot_x + compositor_cursor_async.inset;
+        top = ny - compositor_cursor_async.hot_y + compositor_cursor_async.inset;
+        if ((left != compositor_cursor_async.last_left || top != compositor_cursor_async.last_top) &&
+            now - compositor_cursor_async.moved_ns >= 1000000ull)
+        {
+                int moved = 0;
+
+                for (unsigned int at = 0; at < compositor_cursor_async.count; at++)
+                {
+                        int x, y;
+
+                        if (compositor_cursor_async.shows[at] &&
+                            compositor_screen_cell(compositor_cursor_async.screens[at], left, top, CP_PLANE, &x, &y))
+                        {
+                                struct compositor_cursor move = {2, compositor_cursor_async.crtc[at], x, y, 0, 0, 0};
+
+                                if (system_control(compositor_cursor_async.card, COMPOSITOR_CURSOR, address_of move) == 0)
+                                        moved = 1;
+                        }
+                }
+                if (moved)
+                        compositor_cursor_async.last_left = left, compositor_cursor_async.last_top = top, compositor_cursor_async.moved_ns = now;
+        }
+        compositor_cursor_lock_drop();
+}
+
 static int compositor_cursor_planes(int left, int top)
 {
         unsigned int count, front = compositor.cursor.handle[compositor.cursor.back ^ 1];
@@ -2023,6 +2135,8 @@ static void compositor_cursor_planes_off(void)
 {
         unsigned int count;
 
+        compositor_cursor_lock_take();
+        compositor_cursor_async.active = 0;
         compositor_screens(&count);
         for (unsigned int at = 0; at < count; at++)
         {
@@ -2032,6 +2146,7 @@ static void compositor_cursor_planes_off(void)
                 compositor.output[at].shows = 0;
         }
         compositor.cursor.plane_on = 0;
+        compositor_cursor_lock_drop();
 }
 
 static void compositor_cursor_start(void)
@@ -2093,13 +2208,32 @@ static void compositor_cursor_move(void)
         }
         if (!compositor.cursor.handle[0])
                 return;
-        inset = compositor_cursor_inset(compositor_pointer_span(&now, &hot_x, &hot_y));
-        if ((compositor.cursor.plane_on && !memory_compare(&now, &compositor.cursor.plane, sizeof(now))) || compositor_cursor_paint(&now) == 0)
-                if (compositor_cursor_planes(compositor_drawn_x() - hot_x + inset, compositor_drawn_y() - hot_y + inset) == 0)
+        {
+                int same = compositor.cursor.plane_on && !memory_compare(&now, &compositor.cursor.plane, sizeof(now));
+                // While a primary page flip is pending, skip dynamic speed-stretch BO swaps (DRM_MODE_CURSOR_BO can
+                // serialize behind the pending flip on amdgpu) and move the current cursor plane immediately (flags = 2).
+                int defer_bo = !same && compositor.cursor.plane_on && compositor.flip_pending &&
+                               now.dyn == compositor.cursor.plane.dyn && now.shape == compositor.cursor.plane.shape &&
+                               now.picture == compositor.cursor.plane.picture && now.lens == compositor.cursor.plane.lens &&
+                               now.scale == compositor.cursor.plane.scale;
+                const struct compositor_pointer *shown = defer_bo ? &compositor.cursor.plane : &now;
+                int left, top, ok;
+
+                inset = compositor_cursor_inset(compositor_pointer_span(shown, &hot_x, &hot_y));
+                left = compositor_drawn_x() - hot_x + inset, top = compositor_drawn_y() - hot_y + inset;
+                compositor_cursor_lock_take();
+                ok = (same || defer_bo || compositor_cursor_paint(&now) == 0) && compositor_cursor_planes(left, top) == 0;
+                if (ok)
+                        compositor_cursor_async_sync(1, hot_x, hot_y, inset, left, top);
+                else
+                        compositor_cursor_async.active = 0;
+                compositor_cursor_lock_drop();
+                if (ok)
                 {
                         compositor_vrr_moved();
                         return;
                 }
+        }
 
         // During wake retrain, a transient cursor refusal must not permanently disable the hardware cursor plane.
         if (compositor.wake_stage)

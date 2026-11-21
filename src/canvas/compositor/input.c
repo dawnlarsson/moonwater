@@ -4624,6 +4624,7 @@ static unsigned int compositor_reader_spark_drain(struct spark_input_ring *ring,
 {
         unsigned long long tail, head;
         unsigned int count = 0, forwarded = 0;
+        long async_dx = 0, async_dy = 0;
 
         if (!ring)
                 return 0;
@@ -4660,11 +4661,14 @@ static unsigned int compositor_reader_spark_drain(struct spark_input_ring *ring,
                                         ev.code = COMPOSITOR_REL_Y, ev.value = dy, compositor_reader_put(COMPOSITOR_INPUTS, 0, &ev);
                                 ev.type = COMPOSITOR_EV_SYN, ev.code = 0, ev.value = 0;
                                 compositor_reader_put(COMPOSITOR_INPUTS, 0, &ev);
+                                async_dx += dx, async_dy += dy;
                                 forwarded = 1;
                         }
                 }
                 count++;
         }
+        if (async_dx || async_dy)
+                compositor_cursor_async_step(async_dx, async_dy, *last_ns);
         if (forwarded)
                 compositor_reader_knock();
         return count;
@@ -4803,14 +4807,28 @@ static fn compositor_reader_run(address_any context)
                                         break;
                                 }
                                 // Report by report: a locked pointer's sent here when it may be, the rest handed to the loop in order.
+                                long async_dx = 0, async_dy = 0;
+                                int is_mouse = !compositor.touchpad[at] && !compositor.touchscreen[at] && !compositor.devices[at].wakeonly;
+
                                 for (unsigned int k2 = 0; k2 < records; k2++)
                                         if (raw[k2].type == COMPOSITOR_EV_SYN && raw[k2].code == 0)
                                         {
                                                 if (!compositor_reader_direct(at, raw + from, k2 + 1 - from))
                                                         for (unsigned int r = from; r <= k2; r++)
+                                                        {
+                                                                if (is_mouse && raw[r].type == COMPOSITOR_EV_REL)
+                                                                {
+                                                                        if (raw[r].code == COMPOSITOR_REL_X)
+                                                                                async_dx += raw[r].value;
+                                                                        else if (raw[r].code == COMPOSITOR_REL_Y)
+                                                                                async_dy += raw[r].value;
+                                                                }
                                                                 compositor_reader_put(at, generations[at], &raw[r]), put++;
+                                                        }
                                                 from = k2 + 1;
                                         }
+                                if (async_dx || async_dy)
+                                        compositor_cursor_async_step(async_dx, async_dy, clock_monotonic_nanoseconds());
                                 for (unsigned int r = from; r < records; r++)
                                         compositor_reader_put(at, generations[at], &raw[r]), put++;
                                 if (bytes < (bipolar)sizeof raw)
