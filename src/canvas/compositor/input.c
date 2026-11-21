@@ -3759,71 +3759,76 @@ HOT static unsigned int compositor_reader_spark_drain(struct spark_input_ring *r
         if (!ring)
                 return 0;
         tail = ring->tail, head = __atomic_load_n(&ring->head, __ATOMIC_ACQUIRE);
-        while (tail != head)
+        if (tail != head)
         {
-                const struct spark_input_slot *s = &ring->slots[tail & ring->mask];
-                int dx = s->dx, dy = s->dy;
-                unsigned short kind = s->kind, code = s->code;
-                positive micro = s->time_us;
                 positive now = clock_monotonic_nanoseconds();
-
-                __atomic_store_n(&ring->tail, ++tail, __ATOMIC_RELEASE);
                 *last_ns = now;
-                if (kind == SPARK_INPUT_KIND_REL)
+                while (tail != head)
                 {
-                        if (dx || dy)
+                        const struct spark_input_slot *s = &ring->slots[tail & ring->mask];
+                        int dx = s->dx, dy = s->dy;
+                        unsigned short kind = s->kind, code = s->code;
+                        positive micro = s->time_us;
+
+                        __atomic_store_n(&ring->tail, ++tail, __ATOMIC_RELEASE);
+                        if (kind == SPARK_INPUT_KIND_REL)
+                        {
+                                if (dx || dy)
+                                {
+#ifdef CONFIG_MOONWATER_WAYLAND
+                                        if (!__atomic_load_n(&compositor.dark, __ATOMIC_RELAXED) &&
+                                            __atomic_load_n(&compositor_reader.taken, __ATOMIC_ACQUIRE) == compositor_reader.handed_out &&
+                                            !compositor_reader.dropped && compositor_wl_direct_send(dx, dy, micro))
+                                                { compositor_reader_direct_stat(now / 1000, micro), count++; continue; }
+#endif
+                                        struct compositor_input_event ev = {(long)(micro / 1000000ull), (long)(micro % 1000000ull), COMPOSITOR_EV_REL, 0, 0};
+                                        if (dx)
+                                                ev.code = COMPOSITOR_REL_X, ev.value = dx, compositor_reader_put(COMPOSITOR_INPUTS, 0, &ev);
+                                        if (dy)
+                                                ev.code = COMPOSITOR_REL_Y, ev.value = dy, compositor_reader_put(COMPOSITOR_INPUTS, 0, &ev);
+                                        ev.type = COMPOSITOR_EV_SYN, ev.code = 0, ev.value = 0;
+                                        compositor_reader_put(COMPOSITOR_INPUTS, 0, &ev);
+                                        async_dx += dx, async_dy += dy, forwarded = 1;
+                                }
+                        }
+                        else if (kind == SPARK_INPUT_KIND_KEY)
                         {
 #ifdef CONFIG_MOONWATER_WAYLAND
-                                if (compositor_wl_direct_send(dx, dy, micro))
-                                        { compositor_reader_direct_stat(now / 1000, micro), count++; continue; }
+                                if (!__atomic_load_n(&compositor.dark, __ATOMIC_RELAXED) &&
+                                    __atomic_load_n(&compositor_reader.taken, __ATOMIC_ACQUIRE) == compositor_reader.handed_out && !compositor_reader.dropped)
+                                {
+                                        if (code < 256 && compositor_reader_key(COMPOSITOR_INPUTS, code, dx, micro))
+                                                { count++; continue; }
+                                        if (code >= COMPOSITOR_BTN_LEFT && code <= COMPOSITOR_BTN_TASK &&
+                                            compositor_reader_button(COMPOSITOR_INPUTS, 0, 0, code, dx, 0, 0, micro))
+                                                { count++; continue; }
+                                }
 #endif
-                                struct compositor_input_event ev = {(long)(micro / 1000000ull), (long)(micro % 1000000ull), COMPOSITOR_EV_REL, 0, 0};
-                                if (dx)
-                                        ev.code = COMPOSITOR_REL_X, ev.value = dx, compositor_reader_put(COMPOSITOR_INPUTS, 0, &ev);
-                                if (dy)
-                                        ev.code = COMPOSITOR_REL_Y, ev.value = dy, compositor_reader_put(COMPOSITOR_INPUTS, 0, &ev);
+                                struct compositor_input_event ev = {(long)(micro / 1000000ull), (long)(micro % 1000000ull), COMPOSITOR_EV_KEY, code, dx};
+                                compositor_reader_put(COMPOSITOR_INPUTS, 0, &ev);
                                 ev.type = COMPOSITOR_EV_SYN, ev.code = 0, ev.value = 0;
                                 compositor_reader_put(COMPOSITOR_INPUTS, 0, &ev);
-                                async_dx += dx, async_dy += dy, forwarded = 1;
+                                forwarded = 1;
                         }
-                }
-                else if (kind == SPARK_INPUT_KIND_KEY)
-                {
-#ifdef CONFIG_MOONWATER_WAYLAND
-                        if (!__atomic_load_n(&compositor.dark, __ATOMIC_RELAXED) &&
-                            __atomic_load_n(&compositor_reader.taken, __ATOMIC_ACQUIRE) == compositor_reader.handed_out && !compositor_reader.dropped)
+                        else if (kind == SPARK_INPUT_KIND_WHEEL)
                         {
-                                if (code < 256 && compositor_reader_key(COMPOSITOR_INPUTS, code, dx, micro))
-                                        { count++; continue; }
-                                if (code >= COMPOSITOR_BTN_LEFT && code <= COMPOSITOR_BTN_TASK &&
-                                    compositor_reader_button(COMPOSITOR_INPUTS, 0, 0, code, dx, 0, 0, micro))
-                                        { count++; continue; }
-                        }
-#endif
-                        struct compositor_input_event ev = {(long)(micro / 1000000ull), (long)(micro % 1000000ull), COMPOSITOR_EV_KEY, code, dx};
-                        compositor_reader_put(COMPOSITOR_INPUTS, 0, &ev);
-                        ev.type = COMPOSITOR_EV_SYN, ev.code = 0, ev.value = 0;
-                        compositor_reader_put(COMPOSITOR_INPUTS, 0, &ev);
-                        forwarded = 1;
-                }
-                else if (kind == SPARK_INPUT_KIND_WHEEL)
-                {
-                        int fine = code == COMPOSITOR_REL_WHEEL_HI || code == COMPOSITOR_REL_HWHEEL_HI;
-                        int sideways = code == COMPOSITOR_REL_HWHEEL || code == COMPOSITOR_REL_HWHEEL_HI;
-                        int v120 = fine ? dx : dx * 120;
+                                int fine = code == COMPOSITOR_REL_WHEEL_HI || code == COMPOSITOR_REL_HWHEEL_HI;
+                                int sideways = code == COMPOSITOR_REL_HWHEEL || code == COMPOSITOR_REL_HWHEEL_HI;
+                                int v120 = fine ? dx : dx * 120;
 #ifdef CONFIG_MOONWATER_WAYLAND
-                        if (v120 && !__atomic_load_n(&compositor.dark, __ATOMIC_RELAXED) &&
-                            __atomic_load_n(&compositor_reader.taken, __ATOMIC_ACQUIRE) == compositor_reader.handed_out && !compositor_reader.dropped &&
-                            compositor_reader_button(COMPOSITOR_INPUTS, 0, 0, 0, 0, v120, sideways, micro))
-                                { count++; continue; }
+                                if (v120 && !__atomic_load_n(&compositor.dark, __ATOMIC_RELAXED) &&
+                                    __atomic_load_n(&compositor_reader.taken, __ATOMIC_ACQUIRE) == compositor_reader.handed_out && !compositor_reader.dropped &&
+                                    compositor_reader_button(COMPOSITOR_INPUTS, 0, 0, 0, 0, v120, sideways, micro))
+                                        { count++; continue; }
 #endif
-                        struct compositor_input_event ev = {(long)(micro / 1000000ull), (long)(micro % 1000000ull), COMPOSITOR_EV_REL, code, dx};
-                        compositor_reader_put(COMPOSITOR_INPUTS, 0, &ev);
-                        ev.type = COMPOSITOR_EV_SYN, ev.code = 0, ev.value = 0;
-                        compositor_reader_put(COMPOSITOR_INPUTS, 0, &ev);
-                        forwarded = 1;
+                                struct compositor_input_event ev = {(long)(micro / 1000000ull), (long)(micro % 1000000ull), COMPOSITOR_EV_REL, code, dx};
+                                compositor_reader_put(COMPOSITOR_INPUTS, 0, &ev);
+                                ev.type = COMPOSITOR_EV_SYN, ev.code = 0, ev.value = 0;
+                                compositor_reader_put(COMPOSITOR_INPUTS, 0, &ev);
+                                forwarded = 1;
+                        }
+                        count++;
                 }
-                count++;
         }
         if (async_dx || async_dy)
                 compositor_cursor_async_step(async_dx, async_dy, *last_ns);
@@ -3879,17 +3884,6 @@ HOT static fn compositor_reader_run(address_any context)
                         if (!__atomic_load_n(&spark_ring->active, __ATOMIC_RELAXED))
                                 __atomic_store_n(&spark_ring->active, 1u, __ATOMIC_RELEASE);
                         compositor_reader_spark_drain(spark_ring, &spark_last);
-                        if (spark_last && (now = clock_monotonic_nanoseconds()) - spark_last < 500000ull)
-                                for (positive stop = now + 15000ull; clock_monotonic_nanoseconds() < stop;)
-                                {
-                                        if (__atomic_load_n(&spark_ring->head, __ATOMIC_ACQUIRE) != spark_ring->tail)
-                                                compositor_reader_spark_drain(spark_ring, &spark_last), stop = clock_monotonic_nanoseconds() + 15000ull;
-#if defined(__x86_64__)
-                                        __asm__ volatile("pause" ::: "memory");
-#elif defined(__aarch64__)
-                                        __asm__ volatile("yield" ::: "memory");
-#endif
-                                }
                 }
                 if (__atomic_load_n(&compositor_reader.changes, __ATOMIC_ACQUIRE) != changes)
                         changes = __atomic_load_n(&compositor_reader.changes, __ATOMIC_ACQUIRE), compositor_reader_sync(watched, generations, &count);
@@ -3907,7 +3901,8 @@ HOT static fn compositor_reader_run(address_any context)
                         unsigned int at = (unsigned int)ready[k].data, put = 0;
                         struct compositor_input_event raw[64];
 
-                        if (at == COMPOSITOR_INPUTS + 1) { compositor_reader_spark_drain(spark_ring, &spark_last); continue; }
+                        if (at == COMPOSITOR_INPUTS + 1)
+                                continue;
                         if (at >= COMPOSITOR_INPUTS) { unsigned long long word; system_read_once(compositor_reader.wake, &word, sizeof word); continue; }
                         for (unsigned int reads = 0; watched[at] >= 0 && reads < COMPOSITOR_INPUT_READS; reads++)
                         {

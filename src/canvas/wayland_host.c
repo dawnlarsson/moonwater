@@ -4865,8 +4865,14 @@ HOT static int compositor_wl_direct_send_packet(long dx, long dy, unsigned int b
         if (wheel_v120)
         {
                 unsigned int axis = wheel_horiz ? 1u : 0u;
-                unsigned int fixed = (unsigned int)((long long)wheel_v120 * 15 * 256 / 120);
-                int notches = wheel_v120 / 120;
+                int v = wheel_horiz ? wheel_v120 : -wheel_v120;
+                unsigned int fixed;
+                int notches;
+
+                if (compositor.table && (compositor.table->scroll_off & WINDOW_SCROLL_FLIP))
+                        v = -v;
+                fixed = (unsigned int)((long long)v * 15 * 256 / 120);
+                notches = v / 120;
 
                 for (long at = 0; at < compositor_wl_direct.ptrs; at++)
                 {
@@ -4881,7 +4887,7 @@ HOT static int compositor_wl_direct_send_packet(long dx, long dy, unsigned int b
                         }
                         if (ver >= 8)
                         {
-                                unsigned int v120w[4] = {id, 16u << 16 | 9u, axis, (unsigned int)wheel_v120}; // wl_pointer.axis_value120
+                                unsigned int v120w[4] = {id, 16u << 16 | 9u, axis, (unsigned int)v}; // wl_pointer.axis_value120
                                 memory_copy(bytes + length, v120w, sizeof v120w);
                                 length += sizeof v120w;
                         }
@@ -5135,10 +5141,16 @@ static void compositor_wl_flush(long slot)
         compositor_wl_direct_hold();
         if (compositor_wl_direct_rest(slot))
                 compositor_wl_flush_held(slot);
-        // What the reader sends to, made again as the loop sends: a delete_id of one of its ids, a leave of the keys, is in this flush
-        // when there was one.
-        compositor_wl_direct_make();
-        compositor_wl_direct_keys_make();
+        // Only rebuild direct tables when seat/direct generation changed; avoids holding the reader spinlock across table scans on every frame flush.
+        {
+                unsigned int gen = compositor_wl.direct_gen ^ wayland.seat_gen ^ (unsigned int)(wayland_dragging() ? 0x80000000u : 0u);
+                if (!compositor_wl_direct.pub_valid || compositor_wl_direct.pub_gen != gen)
+                {
+                        compositor_wl_direct_make();
+                        compositor_wl_direct_keys_make();
+                        compositor_wl_direct.pub_valid = 0;
+                }
+        }
         compositor_wl_direct_release();
 }
 
@@ -5160,14 +5172,19 @@ static void compositor_wl_flush_held(long slot)
         }
         if (length)
         {
-                positive control[2 + WAYLAND_OUT_FDS], vector[2] = {(positive)bytes, (positive)length};
-                positive message[7] = {0, 0, (positive)vector, 1, 0, 0, 0};
-
-                // The queue takes at most WAYLAND_OUT_FDS (the keymap, the format table and a copy's pipe each check it); the control buffer is sized for that.
-                if (fd_count > WAYLAND_OUT_FDS)
-                        fd_count = WAYLAND_OUT_FDS;
-                if (fd_count > 0)
+                if (fd_count <= 0)
                 {
+                        // Fast path (99.9% of flushes): sendto() skips kernel copy_msghdr_from_user + iovec overhead.
+                        got = compositor_call(syscall(sendto), (positive)compositor_wl.fd[slot], (positive)bytes, (positive)length, 0x40 | 0x4000, 0, 0);
+                }
+                else
+                {
+                        positive control[2 + WAYLAND_OUT_FDS], vector[2] = {(positive)bytes, (positive)length};
+                        positive message[7] = {0, 0, (positive)vector, 1, 0, 0, 0};
+
+                        // The queue takes at most WAYLAND_OUT_FDS (the keymap, the format table and a copy's pipe each check it); the control buffer is sized for that.
+                        if (fd_count > WAYLAND_OUT_FDS)
+                                fd_count = WAYLAND_OUT_FDS;
                         memory_zero(control, sizeof control);
                         control[0] = 16 + (positive)fd_count * 4;
                         control[1] = 1 | (positive)1 << 32; // SOL_SOCKET, SCM_RIGHTS
@@ -5175,9 +5192,9 @@ static void compositor_wl_flush_held(long slot)
                                 ((int *)(control + 2))[at] = (int)fds[at];
                         message[4] = (positive)control;
                         message[5] = ((16 + (positive)fd_count * 4) + 7) & ~(positive)7;
+                        // MSG_DONTWAIT | MSG_NOSIGNAL
+                        got = compositor_call(syscall(sendmsg), (positive)compositor_wl.fd[slot], (positive)message, 0x40 | 0x4000, 0, 0, 0);
                 }
-                // MSG_DONTWAIT | MSG_NOSIGNAL
-                got = compositor_call(syscall(sendmsg), (positive)compositor_wl.fd[slot], (positive)message, 0x40 | 0x4000, 0, 0, 0);
                 if (got > 0)
                         wayland_sent(slot, got); // which closes a copy's pipe end that went with it: it is the shim's
                 else if (got != -11)

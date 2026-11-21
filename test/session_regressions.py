@@ -641,9 +641,12 @@ def test_compositor_and_xwm_invariants():
           "if (at < COMPOSITOR_INPUTS)" in inp)
     check("Direct button note: COMPOSITOR_READER_BTN_NOTE excluded from handed_out",
           "raw->type != COMPOSITOR_READER_BTN_NOTE" in inp)
-    check("Direct-socket flick-shot + wheel: compositor_wl_direct_send_packet used & sized >=128/id",
+    check("Direct-socket flick-shot + wheel: compositor_wl_direct_send_packet used, vertical scroll negated, sendto fast-path & dirty flush",
           "compositor_wl_direct_send_packet(" in inp and "compositor_wl_direct_send_packet(" in wlh and
-          "rest[COMPOSITOR_WL_DIRECT_IDS * 128]" in wlh and "bytes[COMPOSITOR_WL_DIRECT_IDS * 128]" in wlh)
+          "rest[COMPOSITOR_WL_DIRECT_IDS * 128]" in wlh and "bytes[COMPOSITOR_WL_DIRECT_IDS * 128]" in wlh and
+          "int v = wheel_horiz ? wheel_v120 : -wheel_v120;" in wlh and
+          "if (fd_count <= 0)" in wlh and
+          "if (pushed && was_empty && wq_has_sleeper(&spark_input_wait))" in read_text("src/moonwater/moonwater.c"))
     check("Direct-socket unlocked motion avoids duplicate wl_pointer.motion from async HW cursor step",
           "compositor_wl_direct_abs(nx, ny, now)" not in kms)
     check("Dirty-checked direct publish tracks dragging, seat_gen on release, and abs_valid clean",

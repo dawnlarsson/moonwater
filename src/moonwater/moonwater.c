@@ -1845,7 +1845,8 @@ static bool rules_device_physical(struct input_dev *dev);
 static bool spark_input_push(struct spark_input_ring *ring, unsigned short kind, unsigned short code, int dx, int dy)
 {
         unsigned long flags;
-        bool pushed = false;
+        u64 now_us = ktime_get_ns() / 1000ull;
+        bool pushed = false, was_empty = false;
 
         spin_lock_irqsave(&spark_input_lock, flags);
         if (READ_ONCE(ring->active))
@@ -1859,18 +1860,20 @@ static bool spark_input_push(struct spark_input_ring *ring, unsigned short kind,
 
                         s->dx = dx;
                         s->dy = dy;
-                        s->time_us = ktime_get_ns() / 1000ull;
+                        s->time_us = now_us;
                         s->kind = kind;
                         s->code = code;
                         s->flags = 0;
                         smp_store_release(&ring->head, head + 1);
-                        wake_up_interruptible(&spark_input_wait);
+                        was_empty = (head == tail);
                         pushed = true;
                 }
                 else
                         ring->drops++;
         }
         spin_unlock_irqrestore(&spark_input_lock, flags);
+        if (pushed && was_empty && wq_has_sleeper(&spark_input_wait))
+                wake_up_interruptible(&spark_input_wait);
         return pushed;
 }
 
