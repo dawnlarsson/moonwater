@@ -189,16 +189,19 @@ static void compositor_bounds(int row, int down, int *least_out, int *most_out)
         unsigned int own_min = named ? (down ? compositor.table->least_height[row] : compositor.table->least_width[row]) : 0;
         unsigned int own_max = named ? (down ? compositor.table->most_height[row] : compositor.table->most_width[row]) : 0;
         unsigned int scale = named ? compositor.table->window_scale[row] : 0;
-        int floor_min = (down ? WINDOW_MIN_HEIGHT : WINDOW_MIN_WIDTH) * compositor.scale / 100, asked_min;
+        int floor_min = (down ? WINDOW_MIN_HEIGHT : WINDOW_MIN_WIDTH) * compositor.scale / 100, asked_min, most_px;
 
         scale = scale >= 25 && scale <= 800 ? scale : (unsigned int)compositor.scale;
         own_min = own_min > WINDOW_LEAST_MOST ? WINDOW_LEAST_MOST : own_min;
         own_max = own_max > WINDOW_LEAST_MOST ? WINDOW_LEAST_MOST : own_max;
         asked_min = (int)(own_min * scale / 100);
+        most_px = own_max ? (int)(own_max * scale / 100) : 0;
+        if (most_px > 0 && most_px < floor_min)
+                floor_min = most_px;
         if (least_out)
                 *least_out = asked_min > floor_min ? asked_min : floor_min;
         if (most_out)
-                *most_out = own_max ? (int)(own_max * scale / 100) : 0;
+                *most_out = most_px;
 }
 
 static int compositor_least(int row, int down)

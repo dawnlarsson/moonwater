@@ -1100,7 +1100,8 @@ static int compositor_direct_eligible(int row, int blend)
             compositor.drag >= 0 || compositor.resize >= 0 || compositor.preview_draw ||
             compositor_spots_any(0) || !compositor_primary_bounds(&ox, &oy, &ow, &oh))
                 return 0;
-        if (blend || compositor.glassy[row] || compositor.landing[row] || compositor.glide[row] || compositor.asking[row])
+        if ((blend && !(compositor.fullscreen[row] && !compositor.glassy[row] && !(compositor.asks[row] & WINDOW_NO_TAB))) ||
+            compositor.glassy[row] || compositor.landing[row] || compositor.glide[row] || compositor.asking[row])
                 return 0;
         if (compositor.x[row] != ox || compositor.y[row] != oy ||
             compositor.w[row] != (unsigned int)ow || compositor.h[row] != (unsigned int)oh)
@@ -2023,7 +2024,8 @@ static int compositor_plane_candidate(const struct compositor_frame *frames, con
                 top = by + side;
         if (bottom - top < 64 * compositor.scale / 100) return *why = 8, -1;
         rect[0] = frame->x, rect[1] = top, rect[2] = frame->x + frame->width, rect[3] = bottom;
-        if (frame->blend && !compositor_wl_row_opaque(row, 0, top - frame->y, frame->width, bottom - frame->y)) return *why = 20, -1;
+        if (frame->blend && !(compositor.fullscreen[row] && !compositor.glassy[row] && !(compositor.asks[row] & WINDOW_NO_TAB)) &&
+            !compositor_wl_row_opaque(row, 0, top - frame->y, frame->width, bottom - frame->y)) return *why = 20, -1;
         compositor_band_frame(&band);
         if (compositor.band && band.x < rect[2] && band.x + band.width > rect[0] && band.y < rect[3] && band.y + band.height > rect[1])
                 return *why = 9, -1;

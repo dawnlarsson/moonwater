@@ -9668,8 +9668,8 @@ static string_address bowl_steam_arch[] = {
     // sound server, in 64 and 32 bits.
     "libpulse", "lib32-libpulse", "alsa-lib", "alsa-plugins",
     "lib32-alsa-plugins",
-    // Fonts for the client's own text and for the games that draw with fontconfig.
-    "fontconfig", "ttf-dejavu",
+    // Fonts for the client's own text, Win32 dialog metrics (Liberation Sans avoids DejaVu dialog inflation), and fontconfig games.
+    "fontconfig", "ttf-dejavu", "ttf-liberation",
     // X11 clients on Canvas: the X server the session starts beside Steam.
     "xorg-xwayland",
     // The Steam Runtime's container.
@@ -9933,12 +9933,33 @@ bowl_guest_install(const struct bowl_profile address_to profile,
         }
 }
 
+#define BOWL_WIN32_FONTS_DIR "/etc/fonts/conf.d"
+#define BOWL_WIN32_FONTS_CONF "/etc/fonts/conf.d/65-moonwater-win32.conf"
+static const char bowl_win32_fonts_xml[] =
+    "<?xml version=\"1.0\"?>\n"
+    "<!DOCTYPE fontconfig SYSTEM \"urn:fontconfig:fonts.dtd\">\n"
+    "<fontconfig>\n"
+    "  <alias><family>MS Shell Dlg</family><prefer><family>Tahoma</family><family>Liberation Sans</family></prefer></alias>\n"
+    "  <alias><family>MS Shell Dlg 2</family><prefer><family>Tahoma</family><family>Liberation Sans</family></prefer></alias>\n"
+    "  <alias><family>MS Sans Serif</family><prefer><family>Tahoma</family><family>Liberation Sans</family></prefer></alias>\n"
+    "  <alias><family>Microsoft Sans Serif</family><prefer><family>Tahoma</family><family>Liberation Sans</family></prefer></alias>\n"
+    "  <alias><family>Helv</family><prefer><family>Tahoma</family><family>Liberation Sans</family></prefer></alias>\n"
+    "  <alias><family>Segoe UI</family><prefer><family>Tahoma</family><family>Liberation Sans</family></prefer></alias>\n"
+    "  <alias><family>Tahoma</family><default><family>Liberation Sans</family></default></alias>\n"
+    "  <alias><family>Arial</family><prefer><family>Liberation Sans</family></prefer></alias>\n"
+    "  <alias><family>Times New Roman</family><prefer><family>Liberation Serif</family></prefer></alias>\n"
+    "  <alias><family>Courier New</family><prefer><family>Liberation Mono</family></prefer></alias>\n"
+    "</fontconfig>\n";
+
 static void __attribute__((__noinline__))
 bowl_xwayland_install(const struct bowl_profile address_to profile)
 {
         bowl_guest_install(profile, BOWL_XWAYLAND_DIRECTORY, BOWL_XWAYLAND_WRAPPER,
                            (const p8 address_to)bowl_xwayland_script,
                            sizeof(bowl_xwayland_script) - 1, 0, null, 0);
+        bowl_guest_install(profile, BOWL_WIN32_FONTS_DIR, BOWL_WIN32_FONTS_CONF,
+                           (const p8 address_to)bowl_win32_fonts_xml,
+                           sizeof(bowl_win32_fonts_xml) - 1, 0, null, 0);
 }
 
 /*
@@ -12713,6 +12734,7 @@ static string_address bowl_steam_session[] = {
     "CONFIG_MOONWATER_WAYLAND=n, or Canvas's desktop is not running (moonwater desktop on)\" >&2; exit 1; }",
     "export WAYLAND_DISPLAY=" BOWL_STEAM_SOCKET " MOONWATER_ASKED=1 BOWL_CAPABILITIES=none GSETTINGS_BACKEND=memory",
     "export STEAM_ZENITY=${STEAM_ZENITY:-zenity} GTK_A11Y=none",
+    "[ -n \"$GTK_THEME\" ] || [ \"$(cat /run/moonwater/color-scheme 2>/dev/null)\" != dark ] || export GTK_THEME=Adwaita:dark",
     "wa(){ ! grep -qx \"$1 off\" /root/workarounds 2>/dev/null; }",
     // Fontconfig's file named, for the copies of the library that games carry with a configuration directory of their builder's
     // own: Half-Life 2's bin/libfontconfig.so.1 looks in /mnt/Code/josh_s2_pango/build_linux32_scout/dist/etc/fonts and said

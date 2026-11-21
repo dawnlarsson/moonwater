@@ -622,7 +622,7 @@ static void compositor_xwm_ask_owner(struct compositor_xwm *x, unsigned int wind
 enum { XWM_PF_MAP = 1u, XWM_PF_PROMOTE = 2u, XWM_PF_NOTIFY = 4u, XWM_PF_TRAY = 8u };
 static const struct { unsigned char what, flags; signed short atom; unsigned int type, err_bit; } xwm_prop_spec[] = {
         {COMPOSITOR_XWM_PROP_PROTOCOLS, XWM_PF_MAP | XWM_PF_PROMOTE | XWM_PF_NOTIFY, COMPOSITOR_XWM_A_PROTOCOLS, COMPOSITOR_XWM_ATOM_TYPE, COMPOSITOR_XWM_PROTO_KNOWN},
-        {COMPOSITOR_XWM_PROP_TRANSIENT, XWM_PF_MAP, -COMPOSITOR_XWM_XA_WM_TRANSIENT_FOR, COMPOSITOR_XWM_XA_WINDOW, 0},
+        {COMPOSITOR_XWM_PROP_TRANSIENT, XWM_PF_MAP | XWM_PF_NOTIFY, -COMPOSITOR_XWM_XA_WM_TRANSIENT_FOR, COMPOSITOR_XWM_XA_WINDOW, 0},
         {COMPOSITOR_XWM_PROP_WM_HINTS, XWM_PF_MAP | XWM_PF_PROMOTE | XWM_PF_NOTIFY, -COMPOSITOR_XWM_XA_WM_HINTS, 0, 0},
         {COMPOSITOR_XWM_PROP_NORMAL_HINTS, XWM_PF_MAP | XWM_PF_NOTIFY, -COMPOSITOR_XWM_XA_WM_NORMAL_HINTS, 0, 0},
         {COMPOSITOR_XWM_PROP_STATE, XWM_PF_MAP, COMPOSITOR_XWM_A_NET_STATE, COMPOSITOR_XWM_ATOM_TYPE, 0},
@@ -956,9 +956,13 @@ static void xwm_property(struct compositor_xwm *x, const unsigned char *in, long
                                 w->protocols |= COMPOSITOR_XWM_PROTO_FOCUS;
                 }
                 w->state |= COMPOSITOR_XWM_PROTO_KNOWN;
+                if (w->row >= 0 && w->row == (int)compositor.focus)
+                        x->focus_row = -3;
                 break;
         case COMPOSITOR_XWM_PROP_WM_HINTS:
                 w->no_input = r.format == XWM_FORMAT_32 && r.value_len >= 8 && (xwm_get32(r.value) & 1u) && xwm_get32(r.value + 4) == 0;
+                if (w->row >= 0 && w->row == (int)compositor.focus)
+                        x->focus_row = -3;
                 break;
         case COMPOSITOR_XWM_PROP_NORMAL_HINTS:
                 w->min_w = w->min_h = w->max_w = w->max_h = 0, w->placed = 0;
@@ -1112,7 +1116,9 @@ static int compositor_xwm_covers(const struct compositor_xwm_window *w)
         if ((w->state & COMPOSITOR_XWM_POPUPTYPE) || w->transient)
                 return -1;
         for (unsigned int at = 0; at < count; at++)
-                if (screens[at][0] == x && screens[at][1] == y && screens[at][2] == (int)w->width && screens[at][3] == (int)w->height)
+                if (x <= screens[at][0] && y <= screens[at][1] &&
+                    x + (int)w->width >= screens[at][0] + screens[at][2] &&
+                    y + (int)w->height >= screens[at][1] + screens[at][3])
                         return (int)at;
         return -1;
 }
@@ -1131,10 +1137,10 @@ static void compositor_xwm_hints_push(const struct compositor_xwm_window *w)
                 return;
         scale = compositor.table->window_scale[w->row];
         scale = scale >= 25 && scale <= 800 ? scale : (unsigned int)compositor.scale;
-        compositor.table->least_width[w->row] = w->min_w ? (unsigned int)((unsigned long)w->min_w * 100ul / scale) : 0;
-        compositor.table->least_height[w->row] = w->min_h ? (unsigned int)((unsigned long)w->min_h * 100ul / scale) : 0;
-        compositor.table->most_width[w->row] = w->max_w ? (unsigned int)((unsigned long)w->max_w * 100ul / scale) : 0;
-        compositor.table->most_height[w->row] = w->max_h ? (unsigned int)((unsigned long)w->max_h * 100ul / scale) : 0;
+        compositor.table->least_width[w->row] = w->min_w ? (unsigned int)(((unsigned long)w->min_w * 100ul + scale / 2ul) / scale) : 0;
+        compositor.table->least_height[w->row] = w->min_h ? (unsigned int)(((unsigned long)w->min_h * 100ul + scale / 2ul) / scale) : 0;
+        compositor.table->most_width[w->row] = w->max_w ? (unsigned int)(((unsigned long)w->max_w * 100ul + scale / 2ul) / scale) : 0;
+        compositor.table->most_height[w->row] = w->max_h ? (unsigned int)(((unsigned long)w->max_h * 100ul + scale / 2ul) / scale) : 0;
 }
 
 static void compositor_xwm_app(struct compositor_xwm_window *w)

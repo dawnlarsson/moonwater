@@ -671,8 +671,19 @@ def test_compositor_and_xwm_invariants():
           "compositor_ccd_init" in inp and "compositor_ccd.ccd0_hex" in inp)
     check("CCD0 IRQ pinning loop-reads /proc/interrupts into 64K buffer",
           "buf[65536]" in inp and "while (got < (long)sizeof(buf) - 1" in inp)
-    check("Fullscreen transparent overlays preserve alpha blend (no blind opaque bypass)",
-          "(blend && !compositor.fullscreen[row])" not in scan and "(picture->blend && !compositor.fullscreen[row])" not in wlh)
+    check("Non-glassy fullscreen games get direct scanout while transparent overlays keep alpha blend",
+          "!(compositor.fullscreen[row] && !compositor.glassy[row] && !(compositor.asks[row] & WINDOW_NO_TAB))" in scan and
+          "!(compositor.fullscreen[row] && !compositor.glassy[row] && !(compositor.asks[row] & WINDOW_NO_TAB))" in wlh)
+    check("Oneshot XWarpPointer hint honored when locked_pointer created+destroyed in one flush",
+          "(con->active || (s->row == wayland.pointer_row && wayland_has_keys(c)))" in read_text("src/canvas/wayland.c"))
+    check("XWM Wine fixes: focus re-sync on PROTOCOLS/WM_HINTS, TRANSIENT notify, covers >=, fixed-size dialog cap",
+          "XWM_PF_MAP | XWM_PF_NOTIFY, -COMPOSITOR_XWM_XA_WM_TRANSIENT_FOR" in xwm and
+          xwm.count("x->focus_row = -3;") >= 2 and
+          "if (most_px > 0 && most_px < floor_min)" in manage)
+    check("Steam bowl fixes Win32 dialog inflation (ttf-liberation + 65-moonwater-win32.conf) & GTK dark theme",
+          '"ttf-liberation"' in read_text("src/bowl.c") and
+          "65-moonwater-win32.conf" in read_text("src/bowl.c") and
+          "GTK_THEME=Adwaita:dark" in read_text("src/bowl.c"))
     check("Async AHCI, USB autosuspend=-1, PCIe perf & nmi_watchdog=0 in desktop cmdline",
           all(s in read_text("kernel/profile/desktop") for s in
               ("driver_async_probe=ahci", "usbcore.autosuspend=-1", "pci=pcie_bus_perf", "nmi_watchdog=0")))

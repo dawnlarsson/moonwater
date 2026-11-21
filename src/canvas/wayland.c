@@ -5086,7 +5086,8 @@ static void wayland_constraint_event(struct wayland_client *c, struct wayland_co
 static void wayland_constraint_release(struct wayland_client *c, struct wayland_constraint *con, int say)
 {
         struct wayland_surface *s = con->surface ? &c->surfaces[con->surface - 1] : 0;
-        if (con->active && con->kind == 1 && con->hinted && s && s->live && wayland_root_of(c, s) == s && s->row >= 0)
+        if (con->kind == 1 && con->hinted && s && s->live && wayland_root_of(c, s) == s && s->row >= 0 &&
+            (con->active || (s->row == wayland.pointer_row && wayland_has_keys(c))))
         {
                 struct wayland_rect w = wayland_window_of(c, s);
                 wayland.hint_row = s->row;
