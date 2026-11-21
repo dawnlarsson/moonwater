@@ -601,7 +601,7 @@ static COLD fn system_zram_setup(void)
 {
         p8 info[256];
         p8 size_text[32];
-        p8 swap_page[4096];
+        static p8 swap_page[4096];
         bipolar fd = system_open_at(AT_FDCWD, "/sys/block/zram0/disksize", FILE_READ | O_CLOEXEC);
         bipolar got;
         p64 mem_kb = 0, bytes, pages;

@@ -3730,7 +3730,7 @@ static bool bowl_workaround_for(const p8 address_to text, positive got, string_a
 /* Read /root/workarounds once (before bowl_become_user drops root, so a 0700 /root still works). */
 static fn bowl_workarounds_load(string_address program)
 {
-        p8 text[512];
+        p8 text[2048];
         bipolar fd;
         bipolar got;
         string_address app = null;

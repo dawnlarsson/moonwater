@@ -1378,8 +1378,8 @@ static bool workarounds_state(p8 address_to text, positive size, const host_work
 
 static bipolar workarounds_store_key(string_address key, string_address value)
 {
-        p8 text[512];
-        p8 out[640];
+        p8 text[2048];
+        p8 out[2304];
         bipolar got = host_read_state(WORKAROUNDS_KEPT, text, sizeof(text));
         positive at = 0;
         positive used = 0;
@@ -1427,7 +1427,7 @@ static bipolar workarounds_store(const host_workaround_row address_to row, bool 
 
 static b32 host_workarounds(string_address address_to arguments, positive count)
 {
-        p8 text[512];
+        p8 text[2048];
         bipolar got;
 
         if (count == 2)

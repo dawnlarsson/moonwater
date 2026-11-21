@@ -86,11 +86,47 @@ static void compositor_game_epp(int on)
         compositor_game_epp_active = on;
 }
 
+static int compositor_cpu_list_mask(const char *path, unsigned long mask[2])
+{
+        char list[64];
+        const char *p = list;
+
+        mask[0] = mask[1] = 0;
+        compositor_word(path, list, sizeof(list));
+        while (*p)
+        {
+                unsigned int lo = 0, hi = 0;
+
+                while (*p >= '0' && *p <= '9')
+                        lo = lo * 10 + (unsigned int)(*p++ - '0');
+                hi = lo;
+                if (*p == '-')
+                {
+                        p++, hi = 0;
+                        while (*p >= '0' && *p <= '9')
+                                hi = hi * 10 + (unsigned int)(*p++ - '0');
+                }
+                for (unsigned int c = lo; c <= hi && c < 128; c++)
+                        mask[c >> 6] |= 1ul << (c & 63);
+                if (*p == ',')
+                        p++;
+                else
+                        break;
+        }
+        return (mask[0] | mask[1]) != 0;
+}
+
+static int compositor_ccd0_mask(unsigned long mask[2])
+{
+        return compositor_multi_ccd() &&
+               compositor_cpu_list_mask("/sys/devices/system/cpu/cpu0/cache/index3/shared_cpu_list", mask);
+}
+
 static void compositor_pin_ccd0(void)
 {
-        unsigned long mask[2] = {0xfful, 0ul};
+        unsigned long mask[2];
 
-        if (compositor_multi_ccd())
+        if (compositor_ccd0_mask(mask))
                 compositor_call(syscall(sched_setaffinity), 0, sizeof(mask), (positive)mask, 0, 0, 0);
 }
 
@@ -153,11 +189,15 @@ static void compositor_game_watch(void)
         compositor.games++;
 }
 
-// EEVDF custom 100 us runtime slice + uclamp.min boost + multi-CCD V-Cache pinning for fullscreen top games.
+// EEVDF custom 100 us runtime slice + uclamp.min boost + multi-CCD V-Cache pinning for fullscreen top games,
+// plus uclamp.max cap + secondary-CCD pinning for background window processes while a fullscreen game runs.
 #define COMPOSITOR_GAME_SLICE_NS 100000ull
 #define COMPOSITOR_GAME_UCLAMP_MIN 512u
+#define COMPOSITOR_BG_UCLAMP_MAX 256u
 #define COMPOSITOR_SCHED_FLAG_UCLAMP_MIN 0x20ull
+#define COMPOSITOR_SCHED_FLAG_UCLAMP_MAX 0x40ull
 #define COMPOSITOR_GAME_SLICES 8
+#define COMPOSITOR_BG_SLICES 32
 #define COMPOSITOR_GAME_SLICE_FILE "/run/moonwater/game-slice"
 static b32 compositor_game_off;
 struct compositor_sched_attr
@@ -170,38 +210,6 @@ struct compositor_sched_attr
         unsigned int util_min, util_max;
 };
 _Static_assert(sizeof(struct compositor_sched_attr) == 56, "sched_attr: SCHED_ATTR_SIZE_VER1");
-
-static int compositor_ccd0_mask(unsigned long mask[2])
-{
-        char list[64];
-        const char *p = list;
-
-        mask[0] = mask[1] = 0;
-        if (!compositor_multi_ccd())
-                return 0;
-        compositor_word("/sys/devices/system/cpu/cpu0/cache/index3/shared_cpu_list", list, sizeof(list));
-        while (*p)
-        {
-                unsigned int lo = 0, hi = 0;
-
-                while (*p >= '0' && *p <= '9')
-                        lo = lo * 10 + (unsigned int)(*p++ - '0');
-                hi = lo;
-                if (*p == '-')
-                {
-                        p++, hi = 0;
-                        while (*p >= '0' && *p <= '9')
-                                hi = hi * 10 + (unsigned int)(*p++ - '0');
-                }
-                for (unsigned int c = lo; c <= hi && c < 128; c++)
-                        mask[c >> 6] |= 1ul << (c & 63);
-                if (*p == ',')
-                        p++;
-                else
-                        break;
-        }
-        return (mask[0] | mask[1]) != 0;
-}
 
 static unsigned int compositor_game_slice_of(unsigned int pid, unsigned long long slice)
 {
@@ -246,6 +254,48 @@ static unsigned int compositor_game_slice_of(unsigned int pid, unsigned long lon
         return asked;
 }
 
+static void compositor_bg_throttle_of(unsigned int pid, int throttle)
+{
+        char path[40];
+        p8 buffer[2048];
+        bipolar handle, got;
+        unsigned long ccd0[2] = {0, 0}, pkg[2] = {0, 0}, bg_mask[2] = {0, 0}, all_mask[2] = {~0ul, ~0ul};
+        int pin_bg = 0;
+
+        if (compositor_ccd0_mask(ccd0) &&
+            compositor_cpu_list_mask("/sys/devices/system/cpu/cpu0/topology/package_cpus_list", pkg))
+        {
+                bg_mask[0] = pkg[0] & ~ccd0[0];
+                bg_mask[1] = pkg[1] & ~ccd0[1];
+                pin_bg = (bg_mask[0] | bg_mask[1]) != 0;
+        }
+        windows_num_path(path, sizeof(path), "/proc/", pid, "/task");
+        if ((handle = system_open_at(AT_FDCWD, (string_address)path, FILE_READ | O_DIRECTORY | O_CLOEXEC)) < 0)
+                return;
+        while ((got = system_call_3(syscall(getdents64), (positive)handle, (positive)buffer, sizeof(buffer))) > 0)
+                for (bipolar at = 0; at < got;)
+                {
+                        string_address name = (string_address)(buffer + at + 19);
+                        struct compositor_sched_attr attr = {0};
+                        positive tid = 0;
+
+                        at += memory_load_unaligned(p16, buffer + at + 16);
+                        for (; *name >= '0' && *name <= '9'; name++)
+                                tid = tid * 10 + (positive)(*name - '0');
+                        if (!tid || *name || compositor_call(syscall(sched_getattr), tid, (positive)&attr, sizeof(attr), 0, 0, 0) != 0 ||
+                            (attr.policy != 0 && attr.policy != 3))
+                                continue;
+                        attr.size = sizeof(attr);
+                        attr.flags = COMPOSITOR_SCHED_FLAG_UCLAMP_MAX;
+                        attr.util_max = throttle ? COMPOSITOR_BG_UCLAMP_MAX : 1024u;
+                        (void)compositor_call(syscall(sched_setattr), tid, (positive)&attr, 0, 0, 0, 0);
+                        if (pin_bg)
+                                (void)compositor_call(syscall(sched_setaffinity), tid, sizeof(bg_mask),
+                                                      (positive)(throttle ? bg_mask : all_mask), 0, 0, 0);
+                }
+        system_close(handle);
+}
+
 static void compositor_game_slice_note(const unsigned int *pids, unsigned int count)
 {
         char text[COMPOSITOR_GAME_SLICES * 12];
@@ -272,8 +322,10 @@ static int compositor_pid_in(const unsigned int *list, unsigned int n, unsigned 
 static void compositor_game_slice(void)
 {
         static unsigned int pids[COMPOSITOR_GAME_SLICES], count;
+        static unsigned int bg_pids[COMPOSITOR_BG_SLICES], bg_count;
         static b32 started;
         unsigned int now[COMPOSITOR_GAME_SLICES], nows = 0, me = (unsigned int)compositor_call(syscall(getpid), 0, 0, 0, 0, 0, 0);
+        unsigned int bg_now[COMPOSITOR_BG_SLICES], bg_nows = 0;
         int rows[COMPOSITOR_GAME_SLICES];
         unsigned int tops = compositor_game_off ? 0 : compositor_fullscreen_tops(rows, COMPOSITOR_GAME_SLICES);
         b32 changed = false;
@@ -315,6 +367,21 @@ static void compositor_game_slice(void)
         for (unsigned int j = 0; j < nows; j++)
                 if (!compositor_pid_in(pids, count, now[j]))
                         compositor_game_slice_of(now[j], COMPOSITOR_GAME_SLICE_NS), changed = true;
+        if (nows > 0 && compositor.table)
+                for (int r = 0; r < (int)compositor_rows_in_use && bg_nows < COMPOSITOR_BG_SLICES; r++)
+                {
+                        unsigned int pid = __atomic_load_n(&compositor.table->pid[r], __ATOMIC_ACQUIRE);
+
+                        if (pid && pid != me && !compositor_pid_in(now, nows, pid) && !compositor_pid_in(bg_now, bg_nows, pid))
+                                bg_now[bg_nows++] = pid;
+                }
+        for (unsigned int k = 0; k < bg_count; k++)
+                if (!compositor_pid_in(bg_now, bg_nows, bg_pids[k]))
+                        compositor_bg_throttle_of(bg_pids[k], 0);
+        for (unsigned int j = 0; j < bg_nows; j++)
+                if (!compositor_pid_in(bg_pids, bg_count, bg_now[j]))
+                        compositor_bg_throttle_of(bg_now[j], 1);
+        memory_copy(bg_pids, bg_now, sizeof bg_now[0] * bg_nows), bg_count = bg_nows;
         if (!changed)
                 return;
         memory_copy(pids, now, sizeof now[0] * nows), count = nows;
