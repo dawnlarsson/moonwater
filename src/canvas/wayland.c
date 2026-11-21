@@ -782,7 +782,7 @@ static void wayland_words(struct wayland_event *e, const unsigned long *words, l
                 wayland_word(e, words[at]);
 }
 
-static void wayland_send(struct wayland_client *c, unsigned long object, long opcode, const unsigned int *words, long count)
+HOT static void wayland_send(struct wayland_client *restrict c, unsigned long object, long opcode, const unsigned int *restrict words, long count)
 {
         int ok = !c->dead && wayland_out_has(c);
         long size;
@@ -5592,7 +5592,7 @@ static const wayland_request_fn wayland_handlers[WLI_COUNT] = {
         [WLI_zwlr_layer_shell_v1] = wayland_ext_request, [WLI_zwlr_layer_surface_v1] = wayland_ext_request,
 };
 
-static int wayland_dispatch(struct wayland_client *c, const unsigned char *message, long size, unsigned long id, long op)
+HOT static int wayland_dispatch(struct wayland_client *c, const unsigned char *message, long size, unsigned long id, long op)
 {
         long slot = wayland_slot_of(c, id), begun = 0;
         const struct wl_interface_info *info;
@@ -5602,18 +5602,19 @@ static int wayland_dispatch(struct wayland_client *c, const unsigned char *messa
         int status, took_fd = 0;
 
         wayland.heard++;
-        if (slot < 0) return wayland_fail(c, id, WAYLAND_INVALID_OBJECT, "no such object");
+        if (unlikely(slot < 0)) return wayland_fail(c, id, WAYLAND_INVALID_OBJECT, "no such object");
         o = &c->objects[slot], info = &wl_interfaces[o->iface];
-        if (op >= info->requests || info->request[op].since > o->version)
+        if (unlikely(op >= info->requests || info->request[op].since > o->version))
                 return wayland_fail(c, id, WAYLAND_INVALID_METHOD, "no such request");
         msg = &info->request[op];
-        if ((status = wayland_args(c, o, msg, message + 8, size - 8, a, &begun, &took_fd)) >= 0)
+        if (likely((status = wayland_args(c, o, msg, message + 8, size - 8, a, &begun, &took_fd)) >= 0))
         {
                 wayland_request_fn handler = o->iface < WLI_COUNT ? wayland_handlers[o->iface] : 0;
                 status = handler ? handler(c, o, op, a) : WAYLAND_OK;
         }
-        for (long n = 0; took_fd && n < begun; n++)
-                if (a[n].fd >= 0) wayland_fd_close(a[n].fd);
+        if (unlikely(took_fd))
+                for (long n = 0; n < begun; n++)
+                        if (a[n].fd >= 0) wayland_fd_close(a[n].fd);
         if (status >= 0 && msg->destructor && o->iface && c->objects[slot].id == id)
                 wayland_object_delete(c, slot);
         return status;

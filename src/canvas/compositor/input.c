@@ -13,9 +13,9 @@ static void compositor_latency(unsigned int which, positive reported, positive n
                 compositor.latency[which].worst = took;
 }
 
-static inline long long compositor_abs64(long long v) { return v < 0 ? -v : v; }
-static inline long long compositor_clamp64(long long v, long long lo, long long hi) { return v < lo ? lo : v > hi ? hi : v; }
-static inline int compositor_in_row(int row, int x, int y)
+static inline INLINE CONST long long compositor_abs64(long long v) { return v < 0 ? -v : v; }
+static inline INLINE CONST long long compositor_clamp64(long long v, long long lo, long long hi) { return v < lo ? lo : v > hi ? hi : v; }
+static inline INLINE PURE int compositor_in_row(int row, int x, int y)
 {
         return x >= compositor.x[row] && x < compositor.x[row] + (int)compositor.w[row] &&
                y >= compositor.y[row] && y < compositor.y[row] + (int)compositor.h[row];
@@ -3609,12 +3609,12 @@ static int compositor_reader_full(void)
                (compositor_reader.dropped ? 2 : 1) > COMPOSITOR_READER_RING;
 }
 
-static void compositor_reader_put(unsigned int at, unsigned int generation, const struct compositor_input_event *raw)
+HOT static void compositor_reader_put(unsigned int at, unsigned int generation, const struct compositor_input_event *restrict raw)
 {
         unsigned long long handed = compositor_reader.handed;
         struct compositor_reader_record *record;
 
-        if (compositor_reader_full())
+        if (unlikely(compositor_reader_full()))
         {
                 if (raw->type == COMPOSITOR_READER_GONE && at < COMPOSITOR_INPUTS)
                         compositor_reader.gone_owing += !compositor_reader.gone_owed[at], compositor_reader.gone_owed[at] = generation + 1;
@@ -3622,7 +3622,7 @@ static void compositor_reader_put(unsigned int at, unsigned int generation, cons
                         compositor_reader.dropped = at + 1;
                 return;
         }
-        if (compositor_reader.dropped)
+        if (unlikely(compositor_reader.dropped))
         {
                 record = &compositor_reader.ring[handed++ % COMPOSITOR_READER_RING];
                 memory_zero(record, sizeof *record);
@@ -3640,7 +3640,7 @@ static void compositor_reader_put(unsigned int at, unsigned int generation, cons
 }
 
 #ifdef CONFIG_MOONWATER_WAYLAND
-static int compositor_reader_key(unsigned int at, unsigned int code, int value, positive micro)
+HOT static int compositor_reader_key(unsigned int at, unsigned int code, int value, positive micro)
 {
         struct compositor_input_event note = {0, 0, COMPOSITOR_READER_NOTE, 0, 0};
         unsigned long serial = 0;

@@ -658,7 +658,7 @@ static void xwm_notify_prop(struct compositor_xwm *x, struct compositor_xwm_wind
 
 static void compositor_xwm_pending_done(struct compositor_xwm *x) { x->pending_at = (x->pending_at + 1) % x->pending_room; x->pending_count--; }
 
-static struct compositor_xwm_window *xwm_find(struct compositor_xwm *x, unsigned int id, int add);
+HOT static struct compositor_xwm_window *xwm_find(struct compositor_xwm *x, unsigned int id, int add);
 static int compositor_xwm_covers(const struct compositor_xwm_window *w);
 static void compositor_xwm_hints_push(const struct compositor_xwm_window *w);
 static void compositor_xwm_app(struct compositor_xwm_window *w);
@@ -1032,9 +1032,9 @@ static void xwm_row_bind(const struct compositor_xwm *x, struct compositor_xwm_w
         xwm_row_map[row].slot_plus1 = tag, xwm_row_map[row].win = (int)(w - x->window);
 }
 
-static struct compositor_xwm_window *xwm_row_lookup(const struct compositor_xwm *only, int row, struct compositor_xwm **slot_out)
+HOT static struct compositor_xwm_window *xwm_row_lookup(const struct compositor_xwm *only, int row, struct compositor_xwm **slot_out)
 {
-        if (row < 0 || row >= WINDOWS || !xwm_row_map[row].slot_plus1)
+        if (unlikely((unsigned int)row >= WINDOWS || !xwm_row_map[row].slot_plus1))
                 return 0;
         struct compositor_xwm *sx = &compositor_xwm_slots[xwm_row_map[row].slot_plus1 - 1];
         int wi = xwm_row_map[row].win;
@@ -1067,7 +1067,7 @@ static void xwm_release(struct compositor_xwm *x, struct compositor_xwm_window *
         x->windows--;
 }
 
-static struct compositor_xwm_window *xwm_find(struct compositor_xwm *x, unsigned int id, int add)
+HOT static struct compositor_xwm_window *xwm_find(struct compositor_xwm *x, unsigned int id, int add)
 {
         struct compositor_xwm_window *free;
         long slot;

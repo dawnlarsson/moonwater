@@ -8191,25 +8191,71 @@ static unsigned char address_to ui_scene_op3(struct ui_scene address_to scene, i
 }
 
 // A text run recorded for the GPU: its coverage (the scratch's green byte, as the ink's cover) as a bitmap with a border, and an op for it.
-static void ui_scene_text(struct ui address_to ui, int wide, int rows, int top, int pen_x, int first, int last, unsigned int colour, unsigned int alpha,
-                          b32 light, unsigned int stroke)
+HOT static void ui_scene_text(struct ui address_to ui, int wide, int rows, int top, int pen_x, int first, int last, unsigned int colour, unsigned int alpha,
+                              b32 light, unsigned int stroke)
 {
         int from = top, to = top + rows, pitch = wide + 2;
         unsigned char address_to bitmap;
+        unsigned char xor_v = light ? 0u : 0xffu;
         from = from < ui->top ? ui->top : from, to = to > ui->bottom ? ui->bottom : to, to = to > ui->height ? ui->height : to;
         if (ui->band_bottom > ui->band_top)
                 from = from < ui->band_top ? ui->band_top : from, to = to > ui->band_bottom ? ui->band_bottom : to;
         if (first >= last || from >= to)
                 return;
         bitmap = ui_scene_op3(ui->scene, wide, rows, pen_x + first, from, pen_x + last, to, first, from - top, colour, alpha, stroke);
-        if (!bitmap)
+        if (unlikely(!bitmap))
                 return;
         for (int row = 0; row < rows; row++)
-                for (int column = 0; column < wide; column++)
+        {
+                const unsigned int *restrict s = ui->scratch + (unsigned long)row * (unsigned long)wide;
+                unsigned char *restrict d = bitmap + (unsigned long)(row + 1) * (unsigned long)pitch + 1;
+                int column = 0;
+#if defined(__x86_64__) && defined(__SSE2__)
+                if (wide >= 16)
                 {
-                        unsigned int value = ui->scratch[(unsigned long)row * (unsigned long)wide + (unsigned long)column] >> 8 & 255;
-                        bitmap[(unsigned long)(row + 1) * (unsigned long)pitch + (unsigned long)column + 1] = (unsigned char)(light ? value : 255 - value);
+                        unsigned int mask32 = 0x000000ffu;
+                        unsigned int xor32 = (unsigned int)xor_v * 0x01010101u;
+                        long blocks = (long)(wide >> 4);
+                        const unsigned int *sp = s;
+                        unsigned char *dp = d;
+                        __asm__ volatile(
+                                "movd %[mask], %%xmm4\n\tpshufd $0, %%xmm4, %%xmm4\n\t"
+                                "movd %[xv], %%xmm5\n\tpshufd $0, %%xmm5, %%xmm5\n\t"
+                                "1:\n\t"
+                                "movdqu (%[sp]), %%xmm0\n\tmovdqu 16(%[sp]), %%xmm1\n\t"
+                                "movdqu 32(%[sp]), %%xmm2\n\tmovdqu 48(%[sp]), %%xmm3\n\t"
+                                "psrld $8, %%xmm0\n\tpsrld $8, %%xmm1\n\tpsrld $8, %%xmm2\n\tpsrld $8, %%xmm3\n\t"
+                                "pand %%xmm4, %%xmm0\n\tpand %%xmm4, %%xmm1\n\tpand %%xmm4, %%xmm2\n\tpand %%xmm4, %%xmm3\n\t"
+                                "packssdw %%xmm1, %%xmm0\n\tpackssdw %%xmm3, %%xmm2\n\tpackuswb %%xmm2, %%xmm0\n\t"
+                                "pxor %%xmm5, %%xmm0\n\tmovdqu %%xmm0, (%[dp])\n\t"
+                                "add $64, %[sp]\n\tadd $16, %[dp]\n\tsub $1, %[n]\n\tjnz 1b\n\t"
+                                : [sp] "+r"(sp), [dp] "+r"(dp), [n] "+r"(blocks)
+                                : [mask] "r"(mask32), [xv] "r"(xor32)
+                                : "xmm0", "xmm1", "xmm2", "xmm3", "xmm4", "xmm5", "memory", "cc");
+                        column = wide & ~15;
                 }
+#elif defined(__aarch64__)
+                if (wide >= 16)
+                {
+                        long blocks = (long)(wide >> 4);
+                        const unsigned int *sp = s;
+                        unsigned char *dp = d;
+                        __asm__ volatile(
+                                "dup v4.16b, %w[xv]\n\t"
+                                "1:\n\t"
+                                "ld4 {v0.16b, v1.16b, v2.16b, v3.16b}, [%[sp]], #64\n\t"
+                                "eor v1.16b, v1.16b, v4.16b\n\t"
+                                "st1 {v1.16b}, [%[dp]], #16\n\t"
+                                "subs %[n], %[n], #1\n\tb.ne 1b\n\t"
+                                : [sp] "+r"(sp), [dp] "+r"(dp), [n] "+r"(blocks)
+                                : [xv] "r"((unsigned int)xor_v)
+                                : "v0", "v1", "v2", "v3", "v4", "memory", "cc");
+                        column = wide & ~15;
+                }
+#endif
+                for (; column < wide; column++)
+                        d[column] = (unsigned char)(((s[column] >> 8) & 255u) ^ xor_v);
+        }
 }
 
 // A picture of covers in one ink (the compositor's pointer is two, its fill's and its line's:
@@ -9870,12 +9916,38 @@ static void ui_insets_x64(const int address_to dy, int rx, int ry, int address_t
                 : [dy] "r"(dy), [inset] "r"(inset), [rxd] "m"(rxd), [ryd] "m"(ryd), [scale] "m"(scale), [full] "m"(full), [back] "m"(back)
                 : "xmm0", "xmm1", "xmm2", "xmm11", "xmm12", "xmm13", "xmm14", "xmm15", "memory", "cc");
 }
+#elif defined(__aarch64__)
+#define UI_INSETS_A64 1
+static void ui_insets_a64(const int address_to dy, int rx, int ry, int address_to inset)
+{
+        double rxd = (double)rx, ryd = (double)ry, scale = 65536.0, full = 4294967296.0, back = 1.0 / 65536.0;
+        long i = 0;
+        __asm__ volatile(
+                "ld1r {v14.2d}, [%[rxd]]\n\tld1r {v15.2d}, [%[ryd]]\n\tld1r {v13.2d}, [%[scale]]\n\t"
+                "ld1r {v12.2d}, [%[full]]\n\tld1r {v11.2d}, [%[back]]\n\t"
+                "1:\n\t"
+                "ldr d0, [%[dy], %[i], lsl #2]\n\t"
+                "sxtl v0.2d, v0.2s\n\tscvtf v0.2d, v0.2d\n\t"
+                "fmul v0.2d, v0.2d, v13.2d\n\tfdiv v0.2d, v0.2d, v15.2d\n\t"
+                "fcvtzs v1.2d, v0.2d\n\tscvtf v1.2d, v1.2d\n\tfmul v1.2d, v1.2d, v1.2d\n\t"
+                "fsub v2.2d, v12.2d, v1.2d\n\tfsqrt v2.2d, v2.2d\n\t"
+                "fcvtzs v2.2d, v2.2d\n\tscvtf v2.2d, v2.2d\n\t"
+                "fmul v2.2d, v2.2d, v14.2d\n\tfmul v2.2d, v2.2d, v11.2d\n\t"
+                "fcvtzs v2.2d, v2.2d\n\txtn v2.2s, v2.2d\n\t"
+                "str d2, [%[inset], %[i], lsl #2]\n\t"
+                "add %[i], %[i], #2\n\tcmp %[i], #16\n\tb.lo 1b\n\t"
+                : [i] "+r"(i)
+                : [dy] "r"(dy), [inset] "r"(inset), [rxd] "r"(&rxd), [ryd] "r"(&ryd), [scale] "r"(&scale), [full] "r"(&full), [back] "r"(&back)
+                : "v0", "v1", "v2", "v11", "v12", "v13", "v14", "v15", "memory", "cc");
+}
 #endif
 
 static void ui_insets(const int address_to dy, int rx, int ry, int address_to inset)
 {
 #ifdef UI_INSETS_X64
         ui_insets_x64(dy, rx, ry, inset);
+#elif defined(UI_INSETS_A64)
+        ui_insets_a64(dy, rx, ry, inset);
 #else
         for (b32 sub = 0; sub < UI_SUB; sub++)
         {

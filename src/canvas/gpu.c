@@ -1299,7 +1299,7 @@ static void gpu_maps_reset(void);
 static void gpu_kmsg_drain(void);
 static void gpu_bins_forget(void);
 
-static void gpu_stop(void)
+COLD static void gpu_stop(void)
 {
         void *stage = gpu_bin_stage, *ostage = gpu_ops_stage;
 
@@ -3209,7 +3209,7 @@ static void gpu_place_elsewhere(void)
         errno; gpu_lost when the card lost its state, the caller recovers). The job is then the pending one, the one pending before it gpu_before: two at most,
         one in each slot. Its deadline is GPU_HANG_NS on (gpu_late_end).
 */
-static positive gpu_submit(void)
+HOT static positive gpu_submit(void)
 {
         const unsigned int which = GPU_KERNEL_OF(GPU_ARGS->op), lanes = gpu_backend->lanes;
         const struct gpu_job job = {gpu_set && which < gpu_set->count ? gpu_set->kernels[which].words : 0, GPU_VA + gpu_kernel_at[which < GPU_KERNELS ? which : 0],
@@ -3222,13 +3222,13 @@ static positive gpu_submit(void)
         unsigned int named, tries = 0, again = 0, before = gpu_submit_serial;
         enum gpu_err kind;
 
-        if (!bos) // no memory for the list of the job's buffers: the job is not made, as one too late is not
+        if (unlikely(!bos)) // no memory for the list of the job's buffers: the job is not made, as one too late is not
                 return gpu_end = GPU_END_LATE, 0;
         // A slot whose job may still run is not the next job's: its packets and arguments are that job's (gpu_slot_take is the caller's way to a free one).
-        if (gpu.pending && (gpu_slot == gpu_pending_slot || (gpu_before.sequence && gpu_done(gpu_before.sequence) == 0)))
+        if (unlikely(gpu.pending && (gpu_slot == gpu_pending_slot || (gpu_before.sequence && gpu_done(gpu_before.sequence) == 0))))
                 return gpu_end = GPU_END_LATE, 0;
         gpu_job_began = began; // (the time a refusal reads the kernel's log from; the pending job's own again if it is refused)
-        if (!++gpu_submit_serial) // (counted from 1: 0 is a map no submit has named)
+        if (unlikely(!++gpu_submit_serial)) // (counted from 1: 0 is a map no submit has named)
                 gpu_submit_serial++;
         for (;;)
         {
@@ -3249,7 +3249,7 @@ static positive gpu_submit(void)
                 GPU_SUBMIT_SEEN(bos, named);
                 gpu_end = GPU_END_NONE;
                 gpu_last_error = gpu_backend->submit(&job, bos, named, &sequence);
-                if (gpu_last_error == 0)
+                if (likely(gpu_last_error == 0))
                         break;
                 kind = gpu_backend->classify(gpu_last_error); // what the errno is to this driver (struct gpu_backend's mapping)
                 // A suspect is a refusal the first time, and the card lost the second in a row (a try of this submit or the next submit's).
@@ -3399,7 +3399,7 @@ static inline b32 gpu_record_holds(const unsigned int *restrict r, unsigned int 
 // The scene's job built: its records binned into the bins at bins_at (room bytes there for the table and the lists), and the arguments of the slot the job is
 // built in (gpu_slot) written. 1 built; 0 nothing to draw (the damage is empty); -1 refused (a record that runs past the scene, a scene the kernels by hand do not
 // draw, bins that do not fit: gpu_end OVERFLOW). binned is the damage the lists hold (whole patches of 64 by 4).
-static int gpu_scene_build(positive ops_at, unsigned int n, positive bins_at, positive room, positive d_at, unsigned int pitch, unsigned int w, unsigned int h,
+HOT static int gpu_scene_build(positive ops_at, unsigned int n, positive bins_at, positive room, positive d_at, unsigned int pitch, unsigned int w, unsigned int h,
                            unsigned int dx0, unsigned int dy0, unsigned int dx1, unsigned int dy1, unsigned int binned[4])
 {
         unsigned int address_to ops = (unsigned int address_to)((p8 address_to)gpu.at + ops_at), address_to tab = (unsigned int address_to)((p8 address_to)gpu.at + bins_at);

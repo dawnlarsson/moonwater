@@ -800,6 +800,13 @@ def test_compositor_and_xwm_invariants():
           "vpor %ymm7, %ymm3, %ymm3" in lib_c and
           "tbl v0.16b, {v0.16b}, v17.16b" in lib_c and
           "24: vmovdqu (%rsi), %ymm0" in lib_c)
+    check("Hardware Floor Pass 4: inline ASM ui_scene_text (SSE2+NEON ld4), ui_insets_a64, HOT/COLD/restrict/likely across gpu/wayland/xwm/input",
+          "ld4 {v0.16b, v1.16b, v2.16b, v3.16b}" in ui_src and
+          "static void ui_insets_a64(" in ui_src and
+          "HOT static positive gpu_submit(void)" in gpu_c and
+          "HOT static int wayland_dispatch(" in wl_c and
+          "HOT static struct compositor_xwm_window *xwm_row_lookup(" in xwm and
+          "HOT static void compositor_reader_put(" in inp)
     check("Steam bowl fixes Win32 dialog inflation (ttf-liberation + 65-moonwater-win32.conf) & GTK dark theme",
           '"ttf-liberation"' in read_text("src/bowl.c") and
           "65-moonwater-win32.conf" in read_text("src/bowl.c") and
