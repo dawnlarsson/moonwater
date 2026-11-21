@@ -3897,7 +3897,7 @@ static int wayland_seat_object_request(struct wayland_client *c, struct wayland_
         }
         else if (op == (self->iface == WLI_wl_pointer ? WLQ_wl_pointer_release
                         : self->iface == WLI_wl_keyboard ? WLQ_wl_keyboard_release : WLQ_wl_touch_release))
-                wayland_ids_remove(wayland_seat_ids(c, self->iface), self->id);
+                wayland_ids_remove(wayland_seat_ids(c, self->iface), self->id), wayland.seat_gen++;
         return WAYLAND_OK;
 }
 

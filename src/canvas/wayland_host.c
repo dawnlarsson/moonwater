@@ -2121,7 +2121,7 @@ static int compositor_wl_straight_take(int row, const struct wayland_picture *pi
         unsigned long dev = 0, ino = 0;
         int shown, same;
 
-        if (!compositor_wl_tiled(picture) || !picture->last || (picture->blend && !compositor.fullscreen[row]) || picture->dest_x || picture->dest_y || width <= 0 || height <= 0 ||
+        if (!compositor_wl_tiled(picture) || !picture->last || picture->blend || picture->dest_x || picture->dest_y || width <= 0 || height <= 0 ||
             picture->width < width || picture->height < height || picture->plane_count > 4 || compositor_wl.laying[row].open ||
             compositor_wl_layers.pending_row == row || compositor_wl_layers.count[row] || !compositor_wl_tiled_now() ||
             !compositor_wl_tiled_takes(picture->modifier) || compositor_wl_needs_xform_ordered(picture, width, height, 3))
@@ -4501,7 +4501,7 @@ static struct
         unsigned int abs_ptr_ids[COMPOSITOR_WL_DIRECT_IDS], abs_frames[COMPOSITOR_WL_DIRECT_IDS];
         unsigned int rest_length; // bytes of the reader's last send the socket did not take
         int rest_slot;            // the client they are for
-        unsigned char rest[COMPOSITOR_WL_DIRECT_IDS * 96];
+        unsigned char rest[COMPOSITOR_WL_DIRECT_IDS * 128];
         // The keys: the client of the window that has them, its socket and keyboards, where its serials are counted, the row, and the keys
         // that are not the client's alone with the modifiers held now (a modifier, a lock, a volume key, a chord the script binds).
         int keys_valid, keys_slot, keys_fd, keys_row;
@@ -4651,7 +4651,7 @@ static void compositor_wl_direct_keys_make(void)
 static void compositor_wl_direct_publish(void)
 {
         int locked, hold_row, key_row, kb_row, ptr_row, focus, drag, resize, chip, fs, ov, keys_to, ax = 0, ay = 0, aw = 0, ah = 0;
-        unsigned int mods, keys_any = 0, gen = compositor_wl.direct_gen ^ wayland.seat_gen;
+        unsigned int mods, keys_any = 0, gen = compositor_wl.direct_gen ^ wayland.seat_gen ^ (unsigned int)(wayland_dragging() ? 0x80000000u : 0u);
 
         if (!compositor_reader.on)
                 return;
@@ -4819,7 +4819,7 @@ static void compositor_wl_button_noted(unsigned int code, int pressed, unsigned 
 HOT static int compositor_wl_direct_send_packet(long dx, long dy, unsigned int btn, int btn_val, int wheel_v120, int wheel_horiz,
                                             positive micro, unsigned long *btn_serial, int *btn_row)
 {
-        unsigned char bytes[COMPOSITOR_WL_DIRECT_IDS * 96];
+        unsigned char bytes[COMPOSITOR_WL_DIRECT_IDS * 128];
         unsigned int length = 0, time_ms;
         long got;
 
@@ -4953,7 +4953,8 @@ HOT static void compositor_wl_direct_abs(int x, int y, positive now)
 
 static int compositor_wl_direct_clean(void)
 {
-        return !compositor_wl_direct.valid || !wayland_out_dirty(compositor_wl_direct.slot);
+        return (!compositor_wl_direct.valid || !wayland_out_dirty(compositor_wl_direct.slot)) &&
+               (!compositor_wl_direct.abs_valid || !wayland_out_dirty(compositor_wl_direct.abs_slot));
 }
 
 // The loop, holding the lock, before the client's own queue: the rest of the reader's send, which goes first. 0 when it is not all out.

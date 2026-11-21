@@ -641,14 +641,26 @@ def test_compositor_and_xwm_invariants():
           "if (at < COMPOSITOR_INPUTS)" in inp)
     check("Direct button note: COMPOSITOR_READER_BTN_NOTE excluded from handed_out",
           "raw->type != COMPOSITOR_READER_BTN_NOTE" in inp)
-    check("Direct-socket flick-shot + wheel: compositor_wl_direct_send_packet used in input.c",
-          "compositor_wl_direct_send_packet(" in inp and "compositor_wl_direct_send_packet(" in wlh)
-    check("Direct-socket unlocked motion: compositor_wl_direct_abs called in compositor_cursor_async_step",
-          "compositor_wl_direct_abs(nx, ny, now)" in kms)
-    check("Dirty-checked direct publish: compositor_wl_direct_publish checks pub_valid & pub_gen",
-          "compositor_wl_direct.pub_valid && compositor_wl_direct.pub_gen == gen" in wlh)
-    check("Direct drop invalidates abs_valid & bumps direct_gen",
+    check("Direct-socket flick-shot + wheel: compositor_wl_direct_send_packet used & sized >=128/id",
+          "compositor_wl_direct_send_packet(" in inp and "compositor_wl_direct_send_packet(" in wlh and
+          "rest[COMPOSITOR_WL_DIRECT_IDS * 128]" in wlh and "bytes[COMPOSITOR_WL_DIRECT_IDS * 128]" in wlh)
+    check("Direct-socket unlocked motion avoids duplicate wl_pointer.motion from async HW cursor step",
+          "compositor_wl_direct_abs(nx, ny, now)" not in kms)
+    check("Dirty-checked direct publish tracks dragging, seat_gen on release, and abs_valid clean",
+          "compositor_wl_direct.pub_valid && compositor_wl_direct.pub_gen == gen" in wlh and
+          "wayland_dragging()" in wlh and "wayland.seat_gen++" in read_text("src/canvas/wayland.c") and
           "compositor_wl_direct.abs_valid = 0" in wlh and "compositor_wl.direct_gen++" in wlh)
+    check("Spark OOB guards in input.c: reader_put, SYN_DROPPED, EV_ABS, EV_KEY, input_gone",
+          "record->at < COMPOSITOR_INPUTS ?" in inp and
+          "if (is_spark)\n                                        compositor.held[COMPOSITOR_INPUTS] = 0;" in inp and
+          "else if (event->code < 2 && !is_spark)" in inp and
+          "is_spark || (compositor.input_kinds[at] & WINDOWS_INPUT_KEYBOARD)" in inp and
+          "compositor.held[COMPOSITOR_INPUTS] = 0, compositor_keys_release();" in inp)
+    check("Game-slice stack_gen invalidates on fullscreen toggle & minimize/reveal",
+          manage.count("compositor.stack_gen++") >= 4)
+    check("GPU publish tracks refuse_gen, gpu_map_why & gpu.family",
+          "compositor_gpu_refuse_gen" in read_text("src/canvas/compositor/gpu_host.c") and
+          "pub_map_why == gpu_map_why" in read_text("src/canvas/compositor/gpu_host.c"))
     check("Reflex JIT pacing extended via compositor_wl_jit_row()",
           "compositor_wl_jit_row()" in scan and "compositor_wl_jit_row()" in comp)
 
@@ -659,32 +671,38 @@ def test_compositor_and_xwm_invariants():
           "compositor_ccd_init" in inp and "compositor_ccd.ccd0_hex" in inp)
     check("CCD0 IRQ pinning loop-reads /proc/interrupts into 64K buffer",
           "buf[65536]" in inp and "while (got < (long)sizeof(buf) - 1" in inp)
-    check("Fullscreen ARGB->XRGB direct scanout enabled in scanout.c & wayland_host.c",
-          "(blend && !compositor.fullscreen[row])" in scan and "(picture->blend && !compositor.fullscreen[row])" in wlh)
+    check("Fullscreen transparent overlays preserve alpha blend (no blind opaque bypass)",
+          "(blend && !compositor.fullscreen[row])" not in scan and "(picture->blend && !compositor.fullscreen[row])" not in wlh)
     check("Async AHCI, USB autosuspend=-1, PCIe perf & nmi_watchdog=0 in desktop cmdline",
           all(s in read_text("kernel/profile/desktop") for s in
               ("driver_async_probe=ahci", "usbcore.autosuspend=-1", "pci=pcie_bus_perf", "nmi_watchdog=0")))
-    check("ZSWAP default off (no double-compression with zram0) & RCU_BOOST enabled",
+    check("ZSWAP default off, RCU_EXPERT+RCU_BOOST enabled, v3 overrides -mno-avx/-mno-bmi",
           "CONFIG_ZSWAP_DEFAULT_ON=n" in read_text("kernel/profile/any") and
-          "CONFIG_RCU_BOOST=y" in read_text("kernel/profile/latency"))
+          "CONFIG_RCU_EXPERT=y" in read_text("kernel/profile/latency") and
+          "CONFIG_RCU_BOOST=y" in read_text("kernel/profile/latency") and
+          "-mavx2" in read_text("kernel/profile/v3"))
     check("NVMe tuning runs after wait_for_settling() & desktop sysctls configured",
           all(s in read_text("src/sh/system.c") for s in
               ("rq_affinity", "read_ahead_kb", "tcp_notsent_lowat", "max_user_watches", "vfs_cache_pressure")) and
           read_text("src/sh/system.c").find("wait_for_settling(settling);") < read_text("src/sh/system.c").find("rq_affinity"))
     check("ext4 mounts with MS_NOATIME and commit=30",
           "MS_NOATIME" in read_text("src/sh/host.c") and '"commit=30"' in read_text("src/sh/host/disk.c"))
-    check("RT audio thread only probes game-slice on idle->playing transition (and null-guards *low)",
+    check("RT audio thread uses portable O_NOFOLLOW & null-guards *low on idle->playing probe",
           "audio_playing_stream(audio_service.played_rate ? 0 : &low)" in read_text("src/audio/service.c") and
-          "if (low)\n                *low = 0;" in read_text("src/audio/service.c"))
+          "if (low)\n                *low = 0;" in read_text("src/audio/service.c") and
+          "| O_NOFOLLOW" in read_text("src/audio/service.c"))
     check("Audio pulse.c uses lib.c SIMD memory_s16_to_u8 and memory_reverse_units",
           "memory_s16_to_u8(" in read_text("src/audio/pulse.c") and "memory_reverse_units(" in read_text("src/audio/pulse.c"))
     check("Explicit sync skips redundant implicit dmabuf_ready poll & Reflex latch defers callbacks",
           "!s->pending.sync_acq_set" in read_text("src/canvas/wayland.c") and
           "wayland_latch_defer(defer)" in wlh)
-    check("Bowl isolated /tmp mode=1777, BOWL_ENV_DEFAULTS>=32, elevated rlimits & NTSYNC/QT/video/NVIDIA",
+    check("Spark hi-res scroll deduplicates low-res REL_WHEEL/REL_HWHEEL",
+          "REL_WHEEL_HI_RES" in read_text("src/moonwater/moonwater.c"))
+    check("Bowl /tmp mode=1777, BOWL_ENV_DEFAULTS>=32, rlimits, QT_QPA_PLATFORM dedup & non-root NTSYNC",
           all(s in read_text("src/bowl.c") for s in
               ('string_equals(point->target, "/tmp")', "BOWL_ENV_DEFAULTS 32", "BOWL_NOFILE_TARGET ((p64)1048576)",
-               "PROTON_USE_NTSYNC", "QT_QPA_PLATFORM=wayland", "0x10de")))
+               "PROTON_USE_NTSYNC", "have_qt_platform", "QT_QPA_PLATFORM=wayland", "0x10de")) and
+          "chmod 0666 /dev/ntsync 2>/dev/null || true; export PROTON_USE_NTSYNC=" in read_text("src/bowl.c"))
 
 
 def test_kernel_audio_bowl_invariants():

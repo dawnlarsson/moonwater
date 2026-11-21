@@ -3767,7 +3767,7 @@ static string_address address_to bowl_environment(
         bool have_bus = false, have_sound = false, have_wayland = false,
              have_language = false, have_session_type = false, have_display = false,
              have_desktop = false, have_electron_ozone = false, have_moz_wayland = false,
-             have_vk_present = false, have_glthread = false;
+             have_qt_platform = false, have_vk_present = false, have_glthread = false;
         bool offer_bus = bowl_session_bus_offered(),
              offer_sound = bowl_sound_offered(),
              offer_wayland = bowl_wayland_offered();
@@ -3813,6 +3813,8 @@ static string_address address_to bowl_environment(
                         have_electron_ozone = true;
                 if (bowl_env_named(inherited[at], "MOZ_ENABLE_WAYLAND"))
                         have_moz_wayland = true;
+                if (bowl_env_named(inherited[at], "QT_QPA_PLATFORM"))
+                        have_qt_platform = true;
                 if (bowl_env_named(inherited[at], "MESA_VK_WSI_PRESENT_MODE"))
                         have_vk_present = true;
                 if (bowl_env_named(inherited[at], "mesa_glthread"))
@@ -3848,6 +3850,7 @@ static string_address address_to bowl_environment(
                 missing += offer_wayland && !have_session_type && !have_display;
                 missing += offer_wayland && !have_electron_ozone && !have_display;
                 missing += offer_wayland && !have_moz_wayland && !have_display;
+                missing += offer_wayland && !have_qt_platform && !have_display;
                 missing += language && !have_language;
                 missing += offer_mailbox && !have_vk_present;
                 missing += offer_glthread && !have_glthread;
@@ -3880,7 +3883,7 @@ static string_address address_to bowl_environment(
                 mixed[n++] = (string_address) "ELECTRON_OZONE_PLATFORM_HINT=auto";
         if (offer_wayland && !have_moz_wayland && !have_display)
                 mixed[n++] = (string_address) "MOZ_ENABLE_WAYLAND=1";
-        if (offer_wayland && !have_display)
+        if (offer_wayland && !have_qt_platform && !have_display)
                 mixed[n++] = (string_address) "QT_QPA_PLATFORM=wayland";
         if (language && !have_language)
                 mixed[n++] = language;
@@ -9591,7 +9594,7 @@ static string_address bowl_chrome_session[] = {
     "for node in /dev/dri/renderD* /dev/kfd /dev/udmabuf /dev/dma_heap/* /dev/nvidia*; do [ -c \"$node\" ] && chown 0:"
     BOWL_GROUP_RENDER_TEXT " \"$node\" && chmod 0660 \"$node\"; done 2>/dev/null",
     "for node in /dev/video* /dev/media*; do [ -c \"$node\" ] && chown 0:44 \"$node\" && chmod 0660 \"$node\"; done 2>/dev/null",
-    "[ -c /dev/ntsync ] && chmod 0666 /dev/ntsync 2>/dev/null && export PROTON_USE_NTSYNC=${PROTON_USE_NTSYNC:-1} PROTON_ENABLE_NTSYNC=${PROTON_ENABLE_NTSYNC:-1} || true",
+    "[ -c /dev/ntsync ] && { chmod 0666 /dev/ntsync 2>/dev/null || true; export PROTON_USE_NTSYNC=${PROTON_USE_NTSYNC:-1} PROTON_ENABLE_NTSYNC=${PROTON_ENABLE_NTSYNC:-1}; } || true",
     // musl 1.2.6 implements pwrite() via SYS_pwritev2, which Chromium's
     // seccomp-bpf filter traps (nr=0x148 on x86-64). Preloading our tiny
     // syscall-only shim routes pwrite* back to __NR_pwrite64 inside the bowl
@@ -12727,7 +12730,7 @@ static string_address bowl_steam_session[] = {
     "wa sdl-no-udev && export SDL_JOYSTICK_DISABLE_UDEV=1 SDL_HIDAPI_JOYSTICK_DISABLE_UDEV=1 SDL_HIDAPI_UDEV=0",
     "for node in /dev/dri/renderD* /dev/kfd /dev/udmabuf /dev/dma_heap/* /dev/nvidia*; do [ -c \"$node\" ] && chown 0:"
     BOWL_GROUP_RENDER_TEXT " \"$node\" && chmod 0660 \"$node\"; done 2>/dev/null",
-    "[ -c /dev/ntsync ] && chmod 0666 /dev/ntsync 2>/dev/null && export PROTON_USE_NTSYNC=${PROTON_USE_NTSYNC:-1} PROTON_ENABLE_NTSYNC=${PROTON_ENABLE_NTSYNC:-1} || true",
+    "[ -c /dev/ntsync ] && { chmod 0666 /dev/ntsync 2>/dev/null || true; export PROTON_USE_NTSYNC=${PROTON_USE_NTSYNC:-1} PROTON_ENABLE_NTSYNC=${PROTON_ENABLE_NTSYNC:-1}; } || true",
     "gl=software; for node in /sys/class/drm/renderD*; do [ -e \"$node/device\" ] || continue; "
     "case $(cat \"$node\"/device/uevent 2>/dev/null) in *DRIVER=vgem*|*platform:vgem*|*DRIVER=vkms*) continue ;; esac; "
     "case $(cat \"$node\"/device/features \"$node\"/device/virtio*/features 2>/dev/null) in 0*) ;; *) gl=card ;; esac; done",

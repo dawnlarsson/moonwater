@@ -28,20 +28,25 @@ static struct
         b64 said_at[COMPOSITOR_GPU_WHY_COUNT];
 } compositor_gpu_counts;
 
+static unsigned int compositor_gpu_refuse_gen;
+
 // The counts as the table says them (moonwater canvas reads the table, not the processor's memory).
 typedef char compositor_gpu_fault_fits[sizeof(gpu_fault) == sizeof(((struct windows *)0)->gpu_fault) ? 1 : -1]; // the table holds the bytes gpu.c writes
 static void compositor_gpu_publish(void)
 {
-        static unsigned int pub_init, pub_faults, pub_maps_user, pub_maps_dma, pub_req_mask, pub_recovered;
+        static unsigned int pub_init, pub_faults, pub_maps_user, pub_maps_dma, pub_req_mask, pub_recovered, pub_refuse_gen, pub_map_why, pub_family;
+        unsigned int family = gpu.family ? gpu.family : gpu_req.family;
 
         if (!compositor.table)
                 return;
         compositor.table->gpu_drawn = compositor_gpu_counts.drawn, compositor.table->gpu_processor = compositor_gpu_counts.processor;
         if (pub_init && pub_faults == gpu_faults && pub_maps_user == gpu_maps_user && pub_maps_dma == gpu_maps_dma &&
-            pub_req_mask == gpu_req.mask && pub_recovered == gpu_recovered)
+            pub_req_mask == gpu_req.mask && pub_recovered == gpu_recovered &&
+            pub_refuse_gen == compositor_gpu_refuse_gen && pub_map_why == gpu_map_why && pub_family == family)
                 return;
         pub_init = 1, pub_faults = gpu_faults, pub_maps_user = gpu_maps_user, pub_maps_dma = gpu_maps_dma,
-        pub_req_mask = gpu_req.mask, pub_recovered = gpu_recovered;
+        pub_req_mask = gpu_req.mask, pub_recovered = gpu_recovered,
+        pub_refuse_gen = compositor_gpu_refuse_gen, pub_map_why = gpu_map_why, pub_family = family;
         memory_copy(compositor.table->gpu_refused, compositor_gpu_counts.why, sizeof(compositor_gpu_counts.why));
         compositor.table->gpu_map_why = gpu_map_why;
         compositor.table->gpu_family = gpu.family ? gpu.family : gpu_req.family;
@@ -92,6 +97,7 @@ static void compositor_gpu_refuse(enum compositor_gpu_why why, int processor)
         unsigned int n = ++compositor_gpu_counts.why[why];
         b64 now = 0;
 
+        compositor_gpu_refuse_gen++;
         compositor_gpu_counts.processor += (unsigned int)processor;
         // Off, headless, no-card and untrusted are session-level states already logged once at startup (compositor_gpu_failed); do not spam per-minute refusal lines.
         if (why == COMPOSITOR_GPU_WHY_OFF || why == COMPOSITOR_GPU_WHY_HEADLESS ||

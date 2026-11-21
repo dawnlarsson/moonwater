@@ -2097,9 +2097,6 @@ HOT static void compositor_cursor_async_step(long dx, long dy, positive now)
                         compositor_cursor_async.last_left = left, compositor_cursor_async.last_top = top, compositor_cursor_async.moved_ns = now;
         }
         compositor_cursor_lock_drop();
-#ifdef CONFIG_MOONWATER_WAYLAND
-        compositor_wl_direct_abs(nx, ny, now);
-#endif
 }
 
 static int compositor_cursor_planes(int left, int top)

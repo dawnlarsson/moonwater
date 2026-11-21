@@ -622,7 +622,7 @@ static long audio_playing_stream(int *low)
                         if (!*low)
                         {
                                 char byte;
-                                long gfd = audio_call(syscall(openat), (positive)AT_FDCWD, (positive) "/run/moonwater/game-slice", 0x800 | 0x80000 | 0x20000, 0, 0, 0); // O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW
+                                long gfd = audio_call(syscall(openat), (positive)AT_FDCWD, (positive) "/run/moonwater/game-slice", 0x800 | 0x80000 | O_NOFOLLOW, 0, 0, 0); // O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW
 
                                 if (gfd >= 0)
                                 {

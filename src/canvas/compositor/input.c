@@ -3461,7 +3461,8 @@ static void compositor_reader_put(unsigned int at, unsigned int generation, cons
                 record = &compositor_reader.ring[handed++ % COMPOSITOR_READER_RING];
                 memory_zero(record, sizeof *record);
                 record->raw.type = COMPOSITOR_EV_SYN, record->raw.code = COMPOSITOR_SYN_DROPPED;
-                record->at = compositor_reader.dropped - 1, record->generation = __atomic_load_n(&compositor_reader.generation[record->at], __ATOMIC_ACQUIRE);
+                record->at = compositor_reader.dropped - 1;
+                record->generation = record->at < COMPOSITOR_INPUTS ? __atomic_load_n(&compositor_reader.generation[record->at], __ATOMIC_ACQUIRE) : 0;
                 compositor_reader.dropped = 0, compositor_reader.handed_out++;
         }
         record = &compositor_reader.ring[handed++ % COMPOSITOR_READER_RING];
@@ -3968,7 +3969,7 @@ static void compositor_input_gone(unsigned int at)
                 compositor.device_open[compositor.devices[at].number / 64] &= ~(1ul << (compositor.devices[at].number % 64));
         compositor.held[at] = 0;
         if (compositor.input_kinds[at] & WINDOWS_INPUT_KEYBOARD)
-                compositor_keys_release();
+                compositor.held[COMPOSITOR_INPUTS] = 0, compositor_keys_release();
         if (compositor.input_kinds[at] & (WINDOWS_INPUT_MOUSE | WINDOWS_INPUT_TABLET | WINDOWS_INPUT_BUTTONS |
                                           WINDOWS_INPUT_TOUCH | WINDOWS_INPUT_FINGERS | WINDOWS_INPUT_DIRECT))
         {
@@ -4101,10 +4102,15 @@ static int compositor_input_take(unsigned int at, const struct compositor_input_
                 case COMPOSITOR_EV_SYN:
                         if (event->code == COMPOSITOR_SYN_DROPPED)
                         {
-                                compositor.table->input_dropped[at]++;
-                                if (pad)
-                                        compositor_input_pad_drop(at);
-                                compositor_input_dropped(at, now);
+                                if (is_spark)
+                                        compositor.held[COMPOSITOR_INPUTS] = 0;
+                                else
+                                {
+                                        compositor.table->input_dropped[at]++;
+                                        if (pad)
+                                                compositor_input_pad_drop(at);
+                                        compositor_input_dropped(at, now);
+                                }
                         }
                         else if (event->code == 0)
                         {
@@ -4118,7 +4124,7 @@ static int compositor_input_take(unsigned int at, const struct compositor_input_
                                 compositor_pad_slot(compositor_pad_of(at), event->code, event->value);
                         else if (event->code < 2 && pad)
                                 *(event->code ? &compositor_pad_of(at)->next_y : &compositor_pad_of(at)->next_x) = event->value;
-                        else if (event->code < 2)
+                        else if (event->code < 2 && !is_spark)
                         {
                                 int *range = event->code ? compositor.absolute_y[at] : compositor.absolute_x[at];
                                 *(event->code ? &compositor.tablet_y : &compositor.tablet_x) =
@@ -4155,7 +4161,7 @@ static int compositor_input_take(unsigned int at, const struct compositor_input_
                         }
                         else if (event->code < 256)
                         {
-                                if (event->value == 1 && (compositor.input_kinds[at] & WINDOWS_INPUT_KEYBOARD))
+                                if (event->value == 1 && (is_spark || (compositor.input_kinds[at] & WINDOWS_INPUT_KEYBOARD)))
                                         compositor.osk_typed = 1;
                                 compositor_key(at, event->code, event->value, now);
                         }

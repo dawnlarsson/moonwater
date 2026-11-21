@@ -1897,6 +1897,12 @@ static _Bool bind_filter(struct input_handle *handle, unsigned int type,
                 }
                 if (type == EV_REL && (code == REL_WHEEL || code == REL_HWHEEL || code == REL_WHEEL_HI_RES || code == REL_HWHEEL_HI_RES))
                 {
+                        if ((code == REL_WHEEL && test_bit(REL_WHEEL_HI_RES, handle->dev->relbit)) ||
+                            (code == REL_HWHEEL && test_bit(REL_HWHEEL_HI_RES, handle->dev->relbit)))
+                        {
+                                taken = true;
+                                goto counted;
+                        }
                         if (bind->rel_x || bind->rel_y)
                         {
                                 spark_input_push(ring, SPARK_INPUT_KIND_REL, 0, bind->rel_x, bind->rel_y);

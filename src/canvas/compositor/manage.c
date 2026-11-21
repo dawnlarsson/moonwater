@@ -1374,6 +1374,8 @@ static void compositor_row_mode(int row, unsigned int arrange, int fullscreen, i
                 compositor_row_rect(row, was_r);
                 compositor_row_saved_get(row, saved);
                 compositor_damage_row(row);
+                if (compositor.fullscreen[row])
+                        compositor.stack_gen++;
                 compositor.arranged[row] = COMPOSITOR_FLOATING, compositor.fullscreen[row] = 0, compositor.edges[row] = 0;
                 compositor_put(row, saved[0], saved[1]);
                 compositor_damage_row(row);
@@ -1405,6 +1407,8 @@ static void compositor_row_mode(int row, unsigned int arrange, int fullscreen, i
                 if (!compositor_wl_locked())
                         compositor_motion();
         }
+        if (compositor.fullscreen[row] != was_fs)
+                compositor.stack_gen++;
 }
 
 static void compositor_row_promote_toplevel(int row, int fullscreen_output)
@@ -2229,6 +2233,7 @@ static void compositor_reveal(int row)
         {
                 compositor.state[row] &= ~WINDOW_MINIMIZED;
                 compositor.table->state[row] = compositor.state[row];
+                compositor.stack_gen++;
 #ifdef CONFIG_MOONWATER_WAYLAND
                 compositor_wl_scan_retry(row);
 #endif
@@ -2271,6 +2276,7 @@ static void compositor_minimize_row(int row)
         compositor_damage_row(row);
         compositor.state[row] |= WINDOW_MINIMIZED;
         compositor.table->state[row] = compositor.state[row];
+        compositor.stack_gen++;
         if (compositor.chip.kind == COMPOSITOR_CHIP_CONTROLS && compositor.chip.row == row)
                 compositor_chip_hide();
         if (row == compositor.focus)
