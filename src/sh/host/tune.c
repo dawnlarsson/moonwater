@@ -1333,3 +1333,154 @@ static b32 tune_hibernate_verb(string_address address_to arguments, positive cou
         return count == 2 ? tune_suspend(arguments[1], "disk") : host_usage();
 }
 
+/* ---- workarounds: opt-out list of upstream app/Wine/Steam/Chrome compatibility shims. ---- */
+
+/*
+        Every workaround in this table is ON by default so games and desktop apps
+        work out of the box. Turning one off writes "<name> off" to /root/workarounds;
+        turning it back on drops the line. Bowl session launchers (src/bowl.c) read
+        /root/workarounds before applying each shim or environment variable.
+*/
+#define WORKAROUNDS_KEPT "/root/workarounds"
+
+typedef struct
+{
+        string_address name;
+        string_address about;
+} host_workaround_row;
+
+static const host_workaround_row host_workaround_rows[] = {
+    {"wine-fpu", "reset x87 FCW/MXCSR on 32-bit GStreamer audio decode threads (fixes robotic audio in Wine/Proton games like RCT3)"},
+    {"steam-overlay-gl", "unbind game shader/sampler around Steam overlay draws and bridge overlay on Wayland"},
+    {"steam-fontconfig", "set FONTCONFIG_FILE/FONTCONFIG_PATH for old bundled libfontconfig in Steam games"},
+    {"sdl-no-udev", "disable SDL udev probing so gamepads hotplug directly from /dev/input"},
+    {"chrome-pwrite", "route musl pwritev2 to pwrite64 so Chromium's seccomp sandbox does not trap"},
+    {"chrome-vaapi-encode", "pass AcceleratedVideoEncoder to Chromium for VA-API hardware video encoding"},
+};
+
+static bool workarounds_is_off(p8 address_to text, positive size, string_address name)
+{
+        p8 value[16];
+
+        return size > 0 && tune_find(text, size, name, value, sizeof(value)) &&
+               string_equals((string_address)value, "off");
+}
+
+static bipolar workarounds_store(string_address key, bool on)
+{
+        p8 text[512];
+        p8 out[640];
+        bipolar got = host_read_state(WORKAROUNDS_KEPT, text, sizeof(text));
+        positive at = 0;
+        positive used = 0;
+        positive start;
+        positive length;
+        positive size = string_length(key);
+
+        if (got >= (bipolar)sizeof(text) - 1)
+                return -EFBIG;
+        if (got < 0 && got != -ENOENT)
+                return got;
+        if (got < 0)
+                got = 0;
+        while (host_line_next(text, (positive)got, address_of at, address_of start, address_of length))
+        {
+                if (tune_line_is(text + start, length, key))
+                        continue;
+                if (used + length + 1 >= sizeof(out))
+                        return -EFBIG;
+                memory_copy(out + used, text + start, length);
+                used += length;
+                out[used++] = '\n';
+        }
+        if (!on)
+        {
+                if (used + size + 5 >= sizeof(out))
+                        return -EFBIG;
+                memory_copy(out + used, key, size);
+                used += size;
+                memory_copy(out + used, " off\n", 5);
+                used += 5;
+        }
+        host_state_ready();
+        return host_write_file(WORKAROUNDS_KEPT, out, used, 0644, true);
+}
+
+static b32 host_workarounds(string_address address_to arguments, positive count)
+{
+        p8 text[512];
+        bipolar got;
+
+        if (count == 2)
+        {
+                got = host_read_state(WORKAROUNDS_KEPT, text, sizeof(text));
+                if (got < 0)
+                        got = 0;
+                for (positive i = 0; i < array_count(host_workaround_rows); i++)
+                {
+                        bool off = workarounds_is_off(text, (positive)got, host_workaround_rows[i].name);
+
+                        host_say(log, "%-20s %-3s  %s\n", host_workaround_rows[i].name,
+                                 off ? (string_address) "off" : (string_address) "on",
+                                 host_workaround_rows[i].about);
+                }
+                return 0;
+        }
+        if (count == 3)
+        {
+                got = host_read_state(WORKAROUNDS_KEPT, text, sizeof(text));
+                if (got < 0)
+                        got = 0;
+                for (positive i = 0; i < array_count(host_workaround_rows); i++)
+                        if (string_equals(arguments[2], host_workaround_rows[i].name))
+                        {
+                                bool off = workarounds_is_off(text, (positive)got, host_workaround_rows[i].name);
+
+                                host_say(log, host_label "workarounds %s %s\n", host_workaround_rows[i].name,
+                                         off ? (string_address) "off" : (string_address) "on");
+                                return 0;
+                        }
+                return host_refuse("unknown workaround %s (run `moonwater workarounds` to list them)\n", arguments[2]);
+        }
+        if (count != 4)
+                return host_usage();
+
+        {
+                bipolar want = host_onoff(arguments[3]);
+                bipolar lock;
+                bipolar failed = 0;
+                bool matched = false;
+                bool all = string_equals(arguments[2], "all");
+
+                if (want < 0)
+                        return host_usage();
+                if (!all)
+                {
+                        for (positive i = 0; i < array_count(host_workaround_rows); i++)
+                                if (string_equals(arguments[2], host_workaround_rows[i].name))
+                                {
+                                        matched = true;
+                                        break;
+                                }
+                        if (!matched)
+                                return host_refuse("unknown workaround %s (run `moonwater workarounds` to list them)\n", arguments[2]);
+                }
+                host_need_root();
+                lock = radio_lock(true);
+                if (lock < 0)
+                        return host_fail(WORKAROUNDS_KEPT, lock);
+                if (all)
+                {
+                        for (positive i = 0; i < array_count(host_workaround_rows) && !failed; i++)
+                                failed = workarounds_store(host_workaround_rows[i].name, want != 0);
+                }
+                else
+                        failed = workarounds_store(arguments[2], want != 0);
+                radio_unlock(lock);
+                if (failed < 0)
+                        return host_fail(WORKAROUNDS_KEPT, failed);
+                host_say(log, host_label "workarounds %s %s\n", arguments[2], want ? (string_address) "on" : (string_address) "off");
+                return 0;
+        }
+}
+

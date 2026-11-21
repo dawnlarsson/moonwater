@@ -1022,6 +1022,7 @@ static b32 host_main()
             {"dns", host_dns, false, true},
             {"network", host_network, false, true},
             {"security", host_security, false, true},
+            {"workarounds", host_workarounds, false, true},
             {"link", link_main, false},
             {"ssh", ssh_main, false},
             {"wipe", host_wipe_verb, true},
