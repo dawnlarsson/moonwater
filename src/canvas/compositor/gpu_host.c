@@ -1584,7 +1584,7 @@ static int compositor_gpu_rotate(unsigned int at, const int *screen, unsigned in
 static int compositor_gpu_tiled_ready(void)
 {
         return compositor_gpu && compositor_gpu_state.up && !compositor_gpu_state.dead && !compositor_gpu_held() &&
-               gpu_ready() && gpu.family >= 800 && !(compositor.width & 3);
+               gpu_ready() && gpu_set == &gpu_amd_rdna2 && gpu_image_takes(0) && !(compositor.width & 3);
 }
 #else
 static int compositor_gpu_tiled_ready(void)

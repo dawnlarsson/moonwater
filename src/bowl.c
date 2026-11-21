@@ -3884,7 +3884,7 @@ static string_address address_to bowl_environment(
         if (offer_wayland && !have_moz_wayland && !have_display)
                 mixed[n++] = (string_address) "MOZ_ENABLE_WAYLAND=1";
         if (offer_wayland && !have_qt_platform && !have_display)
-                mixed[n++] = (string_address) "QT_QPA_PLATFORM=wayland";
+                mixed[n++] = (string_address) "QT_QPA_PLATFORM=wayland;xcb";
         if (language && !have_language)
                 mixed[n++] = language;
         if (offer_mailbox && !have_vk_present)
@@ -9549,7 +9549,7 @@ static const struct bowl_component bowl_graphics_components[] = {
         "for name in $want; do for json in " root "/usr/share/vulkan/icd.d/${name}_icd.*json; do "                        \
         "[ -e \"$json\" ] || continue; json=${json#" root "}; "                                                             \
         "case :$files: in *:$json:*) ;; *) files=${files:+$files:}$json ;; esac; done; done; done; "                       \
-        "[ -z \"$files\" ] || export VK_DRIVER_FILES=$files; }"
+        "[ -z \"$files\" ] || export VK_DRIVER_FILES=$files VK_ICD_FILENAMES=$files; }"
 #define BOWL_SHADER_CACHE_LIVE                                                                                              \
         "case $(stat -f -c %T \"$HOME\" 2>/dev/null) in tmpfs|ramfs) [ -n \"$MESA_SHADER_CACHE_MAX_SIZE\" ] || { kb=0; "   \
         "while read -r key value unit; do [ \"$key\" = MemTotal: ] && kb=$value && break; done < /proc/meminfo; "          \

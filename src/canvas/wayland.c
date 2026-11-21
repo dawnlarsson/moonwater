@@ -2195,6 +2195,10 @@ static void wayland_surface_drop(struct wayland_client *c, struct wayland_surfac
                 wayland.pointer_row = -1;
         if (wayland.cursor_client == c->slot && wayland.cursor_surface == idx)
                 wayland.cursor_client = wayland.cursor_surface = -1, wayland.cursor_serial++;
+        if (s->pending.sync_acq_set)
+                wayland_timeline_unref(c, s->pending.sync_acq_slot);
+        if (s->pending.sync_rel_set)
+                wayland_timeline_unref(c, s->pending.sync_rel_slot);
         s->pending.sync_acq_set = s->pending.sync_rel_set = 0, s->pending.dx = s->pending.dy = 0;
         s->syncobj_id = 0, s->live = 0, s->gen++, wayland_tbl_free(c, WLT_SURFACE, idx), wayland.surfaces--;
 }
@@ -2676,6 +2680,14 @@ static int wayland_syncobj_check(struct wayland_client *c, struct wayland_surfac
         return 0;
 }
 
+static void wayland_syncobj_clear_pending(struct wayland_client *c, struct wayland_surface *s)
+{
+        if (s->pending.sync_acq_set)
+                wayland_timeline_unref(c, s->pending.sync_acq_slot), s->pending.sync_acq_set = 0;
+        if (s->pending.sync_rel_set)
+                wayland_timeline_unref(c, s->pending.sync_rel_slot), s->pending.sync_rel_set = 0;
+}
+
 static void wayland_syncobj_take(struct wayland_client *c, struct wayland_surface *s, struct wayland_buffer *b)
 {
         long tl = s->pending.sync_rel_slot;
@@ -2691,7 +2703,7 @@ static void wayland_syncobj_take(struct wayland_client *c, struct wayland_surfac
                 wayland_buffer_signal_release(c, b);
                 b->rel_pending = 1, b->rel_timeline = (unsigned short)tl, b->rel_point = s->pending.sync_rel_point, c->timelines[tl].refs++;
         }
-        s->pending.sync_acq_set = s->pending.sync_rel_set = 0;
+        wayland_syncobj_clear_pending(c, s);
 }
 
 static int wayland_commit_ready(struct wayland_client *c, struct wayland_surface *s, long buffer)
@@ -2722,6 +2734,7 @@ static int wayland_commit_quiet(const struct wayland_surface *s, int xdg, int sh
                !s->cbq[WLCB_FEEDBACK].count && !s->pending.barrier && !s->pending.opaque_set && s->pending.alpha == s->cur.alpha &&
                s->pending.icon == s->cur.icon && s->pending.async_hint == s->cur.async_hint && !s->pending.fifo_wait &&
                !s->pending.timestamp && !s->pending.sync_acq_set && !s->pending.sync_rel_set && !s->pending.dx && !s->pending.dy &&
+               s->pending.scale == s->cur.scale && !wayland_state_xform_changed(&s->cur, &s->pending) &&
                s->role != WAYLAND_ROLE_CURSOR && s->role != WAYLAND_ROLE_SUBSURFACE && (!xdg || (s->flags & WAYLAND_SURFACE_SENT)) &&
                !(s->row < 0 && s->cbq[WLCB_READY].count) && !(shown && s->row >= 0 && (s->flags & WAYLAND_SURFACE_MAPPED) && wayland_has_children(s));
 }
@@ -2855,6 +2868,8 @@ static int wayland_commit(struct wayland_client *c, struct wayland_object *self,
                 if (wayland.cursor_gen == s->gen)
                         wayland.cursor_hot_x = wayland_clamp(wayland.cursor_hot_x - s->pending.dx, -WAYLAND_DIMENSION, WAYLAND_DIMENSION),
                         wayland.cursor_hot_y = wayland_clamp(wayland.cursor_hot_y - s->pending.dy, -WAYLAND_DIMENSION, WAYLAND_DIMENSION);
+                if (wayland.pointer_row >= 0 && wayland.row[wayland.pointer_row].client == c->slot)
+                        wayland_row_do(wayland.pointer_row, WAYLAND_DO_CURSOR, s->held ? WAYLAND_CURSOR_ARROW : WAYLAND_CURSOR_HIDDEN, 0);
                 wayland.cursor_serial++;
         }
         s->pending.dx = s->pending.dy = 0;
@@ -3324,7 +3339,12 @@ static int wayland_toplevel_request(struct wayland_client *c, struct wayland_obj
                 if (a[0].i < 0 || a[1].i < 0) return wayland_fail(c, self->id, WLN_xdg_toplevel_error_invalid_size, "a negative size");
                 if (op == WLQ_xdg_toplevel_set_max_size) s->u.top.max_width = a[0].i, s->u.top.max_height = a[1].i;
                 else s->u.top.min_width = a[0].i, s->u.top.min_height = a[1].i;
-                if (row >= 0) wayland_row_do(row, op == WLQ_xdg_toplevel_set_max_size ? WAYLAND_DO_MAX_SIZE : WAYLAND_DO_MIN_SIZE, a[0].i, a[1].i);
+                if (row >= 0)
+                {
+                        long unit = wayland_surface_unit(s);
+                        wayland_row_do(row, op == WLQ_xdg_toplevel_set_max_size ? WAYLAND_DO_MAX_SIZE : WAYLAND_DO_MIN_SIZE,
+                                       a[0].i ? wayland_pixels(a[0].i, unit) : 0, a[1].i ? wayland_pixels(a[1].i, unit) : 0);
+                }
                 break;
         case WLQ_xdg_toplevel_set_maximized:
         case WLQ_xdg_toplevel_unset_maximized:
@@ -3574,16 +3594,20 @@ WAYLAND_API void wayland_touch_down(long row, long id, long x, long y)
 WAYLAND_API void wayland_touch_motion(long id, long x, long y)
 {
         struct wayland_client *c = 0;
-        struct wayland_surface *s;
+        struct wayland_surface *s, *root;
         long ox = 0, oy = 0;
         int at = wayland_touch_find(id);
 
         if (!wayland.host || at < 0 || (wayland.touch[at].x == x && wayland.touch[at].y == y) ||
-            !wayland_row_surface(wayland.touch[at].row, &c) || c->slot != wayland.touch[at].client)
+            !(root = wayland_row_surface(wayland.touch[at].row, &c)) || c->slot != wayland.touch[at].client)
                 return;
         if (!(s = &c->surfaces[wayland.touch[at].surface])->live)
                 return;
         wayland.touch[at].x = x, wayland.touch[at].y = y;
+        {
+                struct wayland_rect w = wayland_window_of(c, root);
+                x += w.x, y += w.y;
+        }
         if (s->role == WAYLAND_ROLE_SUBSURFACE) wayland_sub_offset(c, s, &ox, &oy);
         wayland_seat_ev(c, WLI_wl_touch, WLE_wl_touch_motion, 1, (unsigned int)wayland_now(), (unsigned int)id,
                         (unsigned int)wayland_units_fixed(x - ox, s->scale120), (unsigned int)wayland_units_fixed(y - oy, s->scale120));
@@ -3635,7 +3659,14 @@ WAYLAND_API void wayland_pointer_axis(long row, long horizontal, long v120, long
         int precise = notch_px > 0;
         unsigned int time = (unsigned int)wayland_now();
         unsigned int axis = horizontal ? WLN_wl_pointer_axis_horizontal_scroll : WLN_wl_pointer_axis_vertical_scroll;
+        long notches = 0;
         if (precise) c->finger_scroll = 1;
+        else
+        {
+                long *left = &c->axis_left[horizontal ? 1 : 0];
+                notches = (*left += v120) / 120;
+                *left -= notches * 120;
+        }
         for (long at = 0, slot; (slot = wayland_seat_next(c, WLI_wl_pointer, &at)) >= 0;)
         {
                 struct wayland_object *o = &c->objects[slot];
@@ -3645,12 +3676,8 @@ WAYLAND_API void wayland_pointer_axis(long row, long horizontal, long v120, long
                         wayland_ev(c, o->id, WLE_wl_pointer_axis_relative_direction, axis, WLN_wl_pointer_axis_relative_direction_identical);
                 if (!precise && o->version >= 8)
                         wayland_ev(c, o->id, WLE_wl_pointer_axis_value120, axis, (unsigned int)v120);
-                else if (!precise && o->version >= 5)
-                {
-                        long *left = &c->axis_left[horizontal ? 1 : 0], notches = (*left += v120) / 120;
-                        *left -= notches * 120;
-                        if (notches) wayland_ev(c, o->id, WLE_wl_pointer_axis_discrete, axis, (unsigned int)notches);
-                }
+                else if (!precise && o->version >= 5 && notches)
+                        wayland_ev(c, o->id, WLE_wl_pointer_axis_discrete, axis, (unsigned int)notches);
                 wayland_ev(c, o->id, WLE_wl_pointer_axis, time, axis, (unsigned int)(v120 * (precise ? notch_px : WAYLAND_NOTCH) * 256 / 120));
                 wayland_pointer_frame(c, slot);
         }
@@ -3663,10 +3690,13 @@ WAYLAND_API void wayland_pointer_axis_stop(long row)
         c->finger_scroll = 0;
         unsigned int time = (unsigned int)wayland_now();
         for (long at = 0, slot; (slot = wayland_seat_next(c, WLI_wl_pointer, &at)) >= 0;)
-                for (long axis = 0; axis < 2 && c->objects[slot].version >= 5; axis++)
-                        wayland_ev(c, c->objects[slot].id, WLE_wl_pointer_axis_stop, time,
-                                   axis ? WLN_wl_pointer_axis_horizontal_scroll : WLN_wl_pointer_axis_vertical_scroll),
+                if (c->objects[slot].version >= 5)
+                {
+                        wayland_ev(c, c->objects[slot].id, WLE_wl_pointer_axis_source, WLN_wl_pointer_axis_source_finger);
+                        wayland_ev(c, c->objects[slot].id, WLE_wl_pointer_axis_stop, time, WLN_wl_pointer_axis_vertical_scroll);
+                        wayland_ev(c, c->objects[slot].id, WLE_wl_pointer_axis_stop, time, WLN_wl_pointer_axis_horizontal_scroll);
                         wayland_pointer_frame(c, slot);
+                }
 }
 
 static void wayland_text_sync(struct wayland_client *c, struct wayland_text *t)
@@ -3816,8 +3846,8 @@ WAYLAND_API void wayland_keyboard_to(long row)
         if (is)
         {
                 unsigned long serial = wayland_input_serial(now);
-                memory_zero(wayland.keys, sizeof wayland.keys);
-                wayland.mods[0] = wayland.mods[1] = wayland.mods[3] = 0;
+                wayland.mods[0] = wayland_depressed();
+                wayland.mods[1] = wayland.mods[3] = 0;
                 wayland.mods[2] = (unsigned long)wayland.host->locks(wayland.host->context);
                 for (long at = 0, slot; (slot = wayland_seat_next(now, WLI_wl_keyboard, &at)) >= 0;)
                         wayland_keyboard_enter_one(now, slot, is, serial);
@@ -3912,7 +3942,7 @@ static int wayland_seat_object_request(struct wayland_client *c, struct wayland_
                 }
                 if (wayland.pointer_row >= 0 && wayland.row[wayland.pointer_row].client == c->slot && wayland_pointer_serial_ok(c, a[0].u))
                 {
-                        wayland_row_do(wayland.pointer_row, WAYLAND_DO_CURSOR, a[1].slot < 0 ? WAYLAND_CURSOR_HIDDEN : WAYLAND_CURSOR_ARROW, 0);
+                        wayland_row_do(wayland.pointer_row, WAYLAND_DO_CURSOR, (named && named->held) ? WAYLAND_CURSOR_ARROW : WAYLAND_CURSOR_HIDDEN, 0);
                         wayland.cursor_client = named ? c->slot : -1, wayland.cursor_surface = named ? wayland_surface_index(c, named) : -1;
                         wayland.cursor_gen = named ? named->gen : 0;
                         wayland.cursor_hot_x = wayland_clamp(a[2].i, -WAYLAND_DIMENSION, WAYLAND_DIMENSION);
@@ -4960,7 +4990,7 @@ static int wayland_syncobj_request(struct wayland_client *c, struct wayland_obje
         }
         s = wayland_surface_of(c, self - c->objects);
         if (op == WLQ_wp_linux_drm_syncobj_surface_v1_destroy)
-                return s ? (s->syncobj_id = 0, s->pending.sync_acq_set = s->pending.sync_rel_set = 0, WAYLAND_OK) : WAYLAND_OK;
+                return s ? (s->syncobj_id = 0, wayland_syncobj_clear_pending(c, s), WAYLAND_OK) : WAYLAND_OK;
         if (!s) return wayland_fail(c, self->id, WLN_wp_linux_drm_syncobj_surface_v1_error_no_surface, "the surface is gone");
         if (op == WLQ_wp_linux_drm_syncobj_surface_v1_set_acquire_point || op == WLQ_wp_linux_drm_syncobj_surface_v1_set_release_point)
         {
@@ -4969,9 +4999,15 @@ static int wayland_syncobj_request(struct wayland_client *c, struct wayland_obje
                 if (tl < 0 || tl >= c->tbl[WLT_TIMELINE].count || !c->timelines[tl].live)
                         return wayland_fail(c, self->id, WAYLAND_INVALID_OBJECT, "invalid syncobj timeline");
                 if (op == WLQ_wp_linux_drm_syncobj_surface_v1_set_acquire_point)
-                        s->pending.sync_acq_set = 1, s->pending.sync_acq_slot = (unsigned short)tl, s->pending.sync_acq_point = pt;
+                {
+                        if (s->pending.sync_acq_set) wayland_timeline_unref(c, s->pending.sync_acq_slot);
+                        s->pending.sync_acq_set = 1, s->pending.sync_acq_slot = (unsigned short)tl, s->pending.sync_acq_point = pt, c->timelines[tl].refs++;
+                }
                 else
-                        s->pending.sync_rel_set = 1, s->pending.sync_rel_slot = (unsigned short)tl, s->pending.sync_rel_point = pt;
+                {
+                        if (s->pending.sync_rel_set) wayland_timeline_unref(c, s->pending.sync_rel_slot);
+                        s->pending.sync_rel_set = 1, s->pending.sync_rel_slot = (unsigned short)tl, s->pending.sync_rel_point = pt, c->timelines[tl].refs++;
+                }
         }
         return WAYLAND_OK;
 }
@@ -6180,7 +6216,7 @@ WAYLAND_API unsigned long wayland_row_hint(long row, enum wayland_row_hint hint)
 WAYLAND_API void wayland_pointer_pinch(long row, long phase, long scale, long fx, long fy)
 {
         struct wayland_client *c = 0;
-        struct wayland_surface *s;
+        struct wayland_surface *s, *root;
         long time, dx = 0, dy = 0;
         unsigned long serial = 0;
 

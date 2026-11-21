@@ -651,10 +651,10 @@ static unsigned long compositor_keymap_xkb_build(unsigned int layout, char *into
                 }
         }
         compositor_xkb_put(&b, tail);
-        if (b.full || !room)
+        if (b.full || !room || b.used + 1 > room)
                 return 0;
         into[b.used] = 0;
-        return b.used;
+        return b.used + 1;
 }
 
 /* ---- end of the keymap ---- */

@@ -453,6 +453,12 @@ static void compositor_wl_unmap(void *context, void *at, long size)
                         compositor_wl_source_drop(row);
                 if (compositor_lent(row) && compositor_wl.lent[row].map == (const unsigned char *)at)
                         compositor_wl_unlend(row);
+                for (unsigned int k = 0; k < compositor_wl_layers.count[row]; k++)
+                        if (compositor_wl_layers.layer[row][k].imp.map == (const unsigned char *)at)
+                        {
+                                canvas_ext_import_release(&compositor_wl_layers.layer[row][k].imp);
+                                compositor_wl_layers.layer[row][k].pixels = 0;
+                        }
         }
         compositor_wl_map_forget((unsigned long)at);
         compositor_call(syscall(munmap), (positive)at, (positive)size, 0, 0, 0, 0);
@@ -1605,7 +1611,7 @@ static int compositor_wl_card_composes(void)
 
 static int compositor_wl_card_swaps(const struct wayland_picture *picture)
 {
-        return picture->sync_fd >= 0 && compositor_wl_fourcc_swapped(picture->fourcc) && compositor_wl_card_composes();
+        return compositor_wl_fourcc_swapped(picture->fourcc) && compositor_wl_card_composes();
 }
 
 #define COMPOSITOR_WL_SYNC_REACH 512
@@ -2246,7 +2252,7 @@ static int compositor_wl_card_rect(int row, const struct wayland_picture *pictur
                 positive sequence = gpu_blit_go(src_va, (unsigned int)(stride / 4), dst_va + 4 * ((positive)dy * pitch + (positive)dx),
                                                 (unsigned int)pitch, 0, 0, (unsigned int)w, (unsigned int)h);
                 if (sequence)
-                        return compositor_wl.tiled_seq = sequence, compositor_wl.tiled_row = row, compositor_wl.tiled_unwaited++, 1;
+                        return compositor_wl.tiled_seq = sequence, compositor_wl.tiled_row = row, compositor_wl.tiled_lent = 1, compositor_wl.tiled_unwaited++, 1;
                 if (gpu_lost)
                         return compositor_wl_card_refused(7);
         }
@@ -3423,9 +3429,18 @@ static unsigned long compositor_wl_render_node(void)
                 string_copy_bounded((string_address)compositor_wl.render_path, (string_address)r.path, sizeof compositor_wl.render_path);
                 compositor_wl.render_hw = r.hw;
                 compositor_wl.syncobj_ok = r.syncobj;
-                if (compositor_wl.syncobj_pool.drm_fd >= 0 && compositor_wl.syncobj_pool.drm_fd != r.fd)
-                        system_close(compositor_wl.syncobj_pool.drm_fd);
-                canvas_syncobj_init(&compositor_wl.syncobj_pool, r.fd);
+                if (r.dev == compositor_wl.render && compositor_wl.syncobj_pool.drm_fd >= 0)
+                {
+                        // Keep the existing DRM FD so live wp_linux_drm_syncobj_timeline_v1 handles remain valid.
+                        if (r.fd >= 0 && r.fd != compositor_wl.syncobj_pool.drm_fd)
+                                system_close(r.fd);
+                }
+                else
+                {
+                        if (compositor_wl.syncobj_pool.drm_fd >= 0 && compositor_wl.syncobj_pool.drm_fd != r.fd)
+                                system_close(compositor_wl.syncobj_pool.drm_fd);
+                        canvas_syncobj_init(&compositor_wl.syncobj_pool, r.fd);
+                }
                 return r.dev;
         }
         compositor_wl.render_path[0] = 0;
