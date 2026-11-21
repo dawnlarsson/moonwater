@@ -1921,7 +1921,10 @@ static unsigned int compositor_wl_tiled_desc(int row, const struct wayland_pictu
                 return refused ? (*refused = 2), 0u : 0u;
         if (picture->modifier >> 13 & 1)
                 meta_plane = picture->modifier >> 14 & 1 ? 2u : 1u;
-        canvas_ext_fd_ident(picture->sync_fd, &dev, &ino);
+        if (meta_plane)
+                canvas_ext_fd_ident(picture->sync_fd, &dev, &ino);
+        else
+                compositor_wl_pic_ident(picture, &dev, &ino);
         if (meta_plane)
         {
                 unsigned long plane_dev = 0, plane_ino = 0;
@@ -2136,7 +2139,7 @@ static int compositor_wl_straight_take(int row, const struct wayland_picture *pi
                 (compositor_wl_straight_shown(row) || compositor_gpu_tiled_ready() ||
                  (compositor.direct_row >= 0 && compositor.direct_row != row && compositor.plane_row != compositor.direct_row)) &&
                 compositor.table && width == (long)compositor.table->width[row] && height == (long)compositor.table->height[row];
-        canvas_ext_fd_ident(picture->sync_fd, &dev, &ino);
+        compositor_wl_pic_ident(picture, &dev, &ino);
         same = compositor_straight(row) && compositor_wl.straight[row].dev == dev && compositor_wl.straight[row].ino == ino && ino &&
                was->modifier == picture->modifier && was->fourcc == picture->fourcc && was->plane_count == picture->plane_count &&
                was->width == picture->width && was->height == picture->height &&

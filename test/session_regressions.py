@@ -744,6 +744,13 @@ def test_compositor_and_xwm_invariants():
     comp_c = read_text("src/canvas/compositor/compose.c")
     check("lib.c SIMD memory_mix_const_u32_rect wired into canvas_cpu_tint_corner & compositor_spot_draw",
           comp_c.count("memory_mix_const_u32_rect(") >= 4)
+    wl_c = read_text("src/canvas/wayland.c")
+    check("Wayland/XWM O(1) hot-path cleanup: xserial check, idle_notifies guard, latch row walk, short-read break & pic_ident",
+          "WAYLAND_API int wayland_row_has_xserial(" in wl_c and
+          "!wayland_row_has_xserial(w->row, compositor_xwm_server(x), w->serial)" in xwm and
+          "return wayland.host && wayland.idle_notifies ? wayland_idle_scan(0, 0) : 0;" in wl_c and
+          "if (got < room)\n                        return;" in xwm and
+          "compositor_wl_pic_ident(picture, &dev, &ino);" in wlh_src)
     check("Steam bowl fixes Win32 dialog inflation (ttf-liberation + 65-moonwater-win32.conf) & GTK dark theme",
           '"ttf-liberation"' in read_text("src/bowl.c") and
           "65-moonwater-win32.conf" in read_text("src/bowl.c") and

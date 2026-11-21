@@ -5996,11 +5996,10 @@ WAYLAND_API void wayland_latch_defer(int defer_callbacks)
                 if (!s) continue;
                 wayland_lent_drop(c, &s->lent_latched);
                 if (s->lent) s->lent_latched = s->lent, c->buffers[s->lent - 1].held++;
+                if (c->presenting_surfaces)
+                        for (struct wayland_surface *o = s; o; o = wayland_tree_next(c, s, o))
+                                o->presentings_framed = o->cbq[WLCB_PRESENTING].count;
         }
-        for (long slot = 0; slot < wayland.client_slots; slot++)
-                if (wayland.client[slot] && wayland.client[slot]->presenting_surfaces)
-                        for (long at = 0; at < wayland.client[slot]->tbl[WLT_SURFACE].count; at++)
-                                wayland.client[slot]->surfaces[at].presentings_framed = wayland.client[slot]->surfaces[at].cbq[WLCB_PRESENTING].count;
         if (!defer_callbacks)
                 wayland_callbacks_due(wayland_now());
 }
@@ -6173,6 +6172,13 @@ WAYLAND_API long wayland_serial_row(long client, unsigned long long serial)
         return !s ? -2 : s->row >= 0 && s->row < wayland.row_made ? s->row : -1;
 }
 
+WAYLAND_API int wayland_row_has_xserial(long row, long client, unsigned long long serial)
+{
+        struct wayland_client *c = 0;
+        struct wayland_surface *s = wayland_row_surface(row, &c);
+        return s && c && c->slot == client && s->xsurface && s->u.xwin.serial_set && s->u.xwin.serial == serial;
+}
+
 WAYLAND_API long wayland_xwindow_adopt(long client, unsigned long long serial, long popup, long x, long y, const char *title)
 {
         struct wayland_client *c = 0;
@@ -6274,11 +6280,12 @@ WAYLAND_API void wayland_idle_tick(void)
         if (wayland.idle_notifies) wayland_idle_scan(1, wayland_now());
 }
 
-WAYLAND_API long wayland_idle_due(void) { return wayland.host ? wayland_idle_scan(0, 0) : 0; }
+WAYLAND_API long wayland_idle_due(void) { return wayland.host && wayland.idle_notifies ? wayland_idle_scan(0, 0) : 0; }
 
 WAYLAND_API void wayland_idle_state(long *input_ms, long *inhibitors, long *idled)
 {
         *input_ms = wayland.host ? wayland.input_at : 0, *inhibitors = wayland_inhibitors_now(), *idled = 0;
+        if (!wayland.idle_notifies) return;
         for (long slot = 0; slot < wayland.client_slots; slot++)
                 if (wayland.client[slot] && !wayland.client[slot]->dead)
                         for (long at = 0; at < wayland.client[slot]->tbl[WLT_NOTIFY].count; at++)

@@ -3422,8 +3422,9 @@ static void compositor_xwm_read(struct compositor_xwm *x)
                         xwm_drop(x, "input full");
                         return;
                 }
+                long room = COMPOSITOR_XWM_IN - x->in_len;
                 long got = compositor_call(syscall(recvfrom), (positive)x->fd, (positive)(x->in + x->in_len),
-                                           (positive)(COMPOSITOR_XWM_IN - x->in_len), COMPOSITOR_XWM_MSG_DONTWAIT, 0, 0);
+                                           (positive)room, COMPOSITOR_XWM_MSG_DONTWAIT, 0, 0);
                 if (got == COMPOSITOR_XWM_EAGAIN)
                         return;
                 if (got <= 0)
@@ -3433,6 +3434,8 @@ static void compositor_xwm_read(struct compositor_xwm *x)
                 }
                 x->in_len += got;
                 compositor_xwm_messages(x);
+                if (got < room)
+                        return;
         }
 }
 
@@ -3540,7 +3543,7 @@ static void xwm_pass_one(struct compositor_xwm *x, const struct compositor_poll 
                 struct compositor_xwm_window *w = &x->window[at];
                 if (!w->id)
                         continue;
-                if (w->row >= 0 && (!(w->state & COMPOSITOR_XWM_SERIAL) || wayland_serial_row(compositor_xwm_server(x), w->serial) != w->row))
+                if (w->row >= 0 && (!(w->state & COMPOSITOR_XWM_SERIAL) || !wayland_row_has_xserial(w->row, compositor_xwm_server(x), w->serial)))
                         xwm_unmapped(x, w);
                 compositor_xwm_resolve(x, w);
                 if (w->row < 0 || w->row >= COMPOSITOR_ROWS)
