@@ -256,12 +256,22 @@ static unsigned int compositor_game_slice_of(unsigned int pid, unsigned long lon
 
 static void compositor_bg_throttle_of(unsigned int pid, int throttle)
 {
-        char path[40];
+        char path[40], comm[32];
         p8 buffer[2048];
         bipolar handle, got;
         unsigned long ccd0[2] = {0, 0}, pkg[2] = {0, 0}, bg_mask[2] = {0, 0}, all_mask[2] = {~0ul, ~0ul};
         int pin_bg = 0;
 
+        if (throttle)
+        {
+                windows_num_path(path, sizeof(path), "/proc/", pid, "/comm");
+                compositor_word(path, comm, sizeof(comm));
+                if (string_equals((string_address)comm, (string_address) "Xwayland") ||
+                    string_equals((string_address)comm, (string_address) "wineserver") ||
+                    string_equals((string_address)comm, (string_address) "audio") ||
+                    string_equals((string_address)comm, (string_address) "dbus"))
+                        return;
+        }
         if (compositor_ccd0_mask(ccd0) &&
             compositor_cpu_list_mask("/sys/devices/system/cpu/cpu0/topology/package_cpus_list", pkg))
         {
