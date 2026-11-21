@@ -741,6 +741,9 @@ def test_compositor_and_xwm_invariants():
     check("Dynamic Reflex JIT pacing margin adapts to direct scanout (0.6ms + lead) vs GPU compose (1.0ms + lead)",
           "positive lead = compositor_present_lead();" in read_text("src/canvas/compositor/scanout.c") and
           "600000ull : 1000000ull) + lead" in read_text("src/canvas/compositor/scanout.c"))
+    comp_c = read_text("src/canvas/compositor/compose.c")
+    check("lib.c SIMD memory_mix_const_u32_rect wired into canvas_cpu_tint_corner & compositor_spot_draw",
+          comp_c.count("memory_mix_const_u32_rect(") >= 4)
     check("Steam bowl fixes Win32 dialog inflation (ttf-liberation + 65-moonwater-win32.conf) & GTK dark theme",
           '"ttf-liberation"' in read_text("src/bowl.c") and
           "65-moonwater-win32.conf" in read_text("src/bowl.c") and

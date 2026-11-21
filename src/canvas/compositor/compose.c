@@ -1901,23 +1901,31 @@ static int canvas_cpu_tint_corner(void *raw, int corner, int cx, int cy, int r, 
                 return 1;
         for (int py = y1; py < y2; py++)
         {
-                int my = corner & 2 ? cy + r - 1 - py : py - cy, hide_from, hide_to;
+                int my = corner & 2 ? cy + r - 1 - py : py - cy, hide_from, hide_to, w = x2 - x1;
                 unsigned int *at = c->cell.pixels + (unsigned long)(py - c->cell.oy) * c->cell.pitch + (unsigned long)(x1 - c->cell.ox);
+                unsigned char edge_cov[COMPOSITOR_RADIUS_MOST], fill_cov[COMPOSITOR_RADIUS_MOST];
+                unsigned int any_edge = 0, any_fill = 0;
 
                 canvas_cpu_tint_cut(c, py, x2, &hide_from, &hide_to);
-                for (int px = x1; px < x2; px++)
+                for (int k = 0; k < w; k++)
                 {
+                        int px = x1 + k;
                         unsigned int ce, cf;
 
                         if (px >= hide_from && px < hide_to)
+                        {
+                                edge_cov[k] = fill_cov[k] = 0;
                                 continue;
+                        }
                         compositor_shape_covers(&c->shape, px, my, &ce, &cf);
-                        if (ce)
-                                at[px - x1] = compositor_mix(at[px - x1], c->shape.edge & 0xffffffu, ce);
-                        if (cf)
-                                at[px - x1] = compositor_mix(at[px - x1], c->shape.fill & 0xffffffu, cf);
+                        edge_cov[k] = (unsigned char)ce, any_edge |= ce;
+                        fill_cov[k] = (unsigned char)cf, any_fill |= cf;
                         c->made++;
                 }
+                if (any_edge)
+                        memory_mix_const_u32_rect(at, c->cell.pitch, edge_cov, (positive)w, (positive)w, 1, c->shape.edge & 0xffffffu, 255);
+                if (any_fill)
+                        memory_mix_const_u32_rect(at, c->cell.pitch, fill_cov, (positive)w, (positive)w, 1, c->shape.fill & 0xffffffu, 255);
         }
         return 1;
 }
@@ -2704,6 +2712,34 @@ static void compositor_spot_draw(const struct compositor_target *t, int cx, int 
         compositor_reading(t);
         outer_mask = compositor_corner_mask(radius);
         inner_mask = compositor_corner_mask(inner);
+        if (x2 - x1 <= 512)
+        {
+                int w = x2 - x1;
+                unsigned char in_row[512], ring_row[512];
+
+                for (int py = y1; py < y2; py++)
+                {
+                        int my = py < cy ? py - (cy - radius) : cy + radius - 1 - py;
+                        unsigned int *at = t->pixels + (unsigned long)(py - t->oy) * t->pitch + (unsigned long)(x1 - t->ox);
+                        unsigned int any_in = 0, any_ring = 0;
+
+                        for (int k = 0; k < w; k++)
+                        {
+                                int px = x1 + k, mx = px < cx ? px - (cx - radius) : cx + radius - 1 - px;
+                                unsigned int out = outer_mask[my * radius + mx];
+                                unsigned int in = mx >= ring && my >= ring ? inner_mask[(my - ring) * inner + (mx - ring)] : 0;
+                                unsigned int diff = out > in ? out - in : 0;
+
+                                in_row[k] = (unsigned char)in, any_in |= in;
+                                ring_row[k] = (unsigned char)diff, any_ring |= diff;
+                        }
+                        if (any_in && fill)
+                                memory_mix_const_u32_rect(at, t->pitch, in_row, (positive)w, (positive)w, 1, COMPOSITOR_INK_LINE_HELD, fill);
+                        if (any_ring && edge)
+                                memory_mix_const_u32_rect(at, t->pitch, ring_row, (positive)w, (positive)w, 1, COMPOSITOR_INK_LINE_HELD, edge);
+                }
+                return;
+        }
         for (int py = y1; py < y2; py++)
         {
                 // The pixel's place in the quarter it is mirrored into: 0 at the disc's outside, radius - 1 at its middle.
