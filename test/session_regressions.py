@@ -757,6 +757,13 @@ def test_compositor_and_xwm_invariants():
           "return gpu_imports_all || gpu.imported_handed[i];" in gpu_c and
           "return pages ? gpu_maps[i].handed : gpu_maps[i].handed && now;" in gpu_c and
           "gpu_import_handed(compositor_gpu_state.out);" in read_text("src/canvas/compositor/gpu_host.c"))
+    kms_c = read_text("src/canvas/compositor/kms.c")
+    check("1000-8000Hz input hot path: dedup DRM_MODE_CURSOR + trylock, band_hit strip reject, osk_sync guard & reader cache-line split",
+          "else if (output->cursor_x != x || output->cursor_y != y)" in kms_c and
+          "if (__atomic_exchange_n(&compositor_cursor_async.lock, 1u, __ATOMIC_ACQUIRE))" in kms_c and
+          "strip = taskbar_thick(scale) + reach" in manage and
+          "if (changed)\n                compositor_osk_sync();" in inp and
+          "__attribute__((aligned(64))) unsigned long long reading" in inp)
     check("Steam bowl fixes Win32 dialog inflation (ttf-liberation + 65-moonwater-win32.conf) & GTK dark theme",
           '"ttf-liberation"' in read_text("src/bowl.c") and
           "65-moonwater-win32.conf" in read_text("src/bowl.c") and

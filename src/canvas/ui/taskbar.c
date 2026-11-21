@@ -711,11 +711,12 @@ static int taskbar_hit_raw(const struct taskbar_view *view, int px, int py, cons
 static int taskbar_hit_reach(const struct taskbar_view *view, int px, int py, int reach)
 {
         const struct ui_tree address_to t = taskbar_tree(view);
-        int grown[2] = {0, 0}, which;
+        int grown[2] = {0, 0}, at, which;
 
         grown[!t->node[1].dir] = reach + taskbar_inset(taskbar_scaled(view->scale));
-        if (!taskbar_hit_raw(view, px, py, grown, &which))
+        if ((at = ui_tree_hit(t, px, py, grown)) < 0)
                 return TASKBAR_HIT_NONE;
+        which = t->node[at].id - 1;
         return which == -4 || which == -3 || which == -9 || which == TASKBAR_TRAY_BEFORE ? TASKBAR_TRAY
                : which == TASKBAR_TABS || which == TASKBAR_TABS_LEFT || (which <= TASKBAR_ZONE && which > TASKBAR_DONE && !taskbar.editing)
                      ? TASKBAR_HIT_NONE : which;

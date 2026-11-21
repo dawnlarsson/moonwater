@@ -2203,9 +2203,12 @@ static void compositor_predict_sample(unsigned int cls, long long x, long long y
 
 static void compositor_predict_mouse(positive when, positive now)
 {
+        int changed = compositor.owner != COMPOSITOR_PREDICT_MOUSE || compositor.osk_typed != 0;
         (void)when, (void)now;
         compositor.owner = COMPOSITOR_PREDICT_MOUSE, compositor.osk_typed = 0;
-        compositor_pointer_shown(), compositor_osk_sync();
+        compositor_pointer_shown();
+        if (changed)
+                compositor_osk_sync();
 }
 
 static void compositor_predict_place(unsigned int cls, int x, int y, positive now)
@@ -3546,8 +3549,10 @@ static void compositor_input_end(unsigned int at, int moved);
 static struct
 {
         int on, knock, wake, set;
-        unsigned int changes, knocked, dropped, gone_owing;
-        unsigned long long handed, reading, handed_out, reading_out, taken, direct, noted, note_at, late, late_most, keys, note_due, note_read, note_sent;
+        unsigned int changes, gone_owing;
+        __attribute__((aligned(64))) unsigned int knocked, dropped;
+        unsigned long long handed, handed_out, direct, note_read, note_sent;
+        __attribute__((aligned(64))) unsigned long long reading, reading_out, taken, noted, note_at, late, late_most, keys, note_due;
         int down[256], own[COMPOSITOR_INPUTS];
         unsigned int generation[COMPOSITOR_INPUTS], gone_owed[COMPOSITOR_INPUTS];
         struct compositor_reader_record ring[COMPOSITOR_READER_RING];
@@ -3631,7 +3636,7 @@ static void compositor_reader_put(unsigned int at, unsigned int generation, cons
         record->read = raw->type == COMPOSITOR_READER_NOTE ? compositor_reader.note_read : 0;
         record->sent = raw->type == COMPOSITOR_READER_NOTE ? compositor_reader.note_sent : 0;
         compositor_reader.handed_out += (raw->type != COMPOSITOR_READER_NOTE && raw->type != COMPOSITOR_READER_BTN_NOTE);
-        __atomic_store_n(&compositor_reader.handed, handed, __ATOMIC_SEQ_CST);
+        __atomic_store_n(&compositor_reader.handed, handed, __ATOMIC_RELEASE);
 }
 
 #ifdef CONFIG_MOONWATER_WAYLAND
@@ -4010,8 +4015,11 @@ static void compositor_reader_take(void)
         unsigned long long word, at = compositor_reader.reading, handed, direct;
         struct compositor_input_event raw[64];
 
-        system_read_once(compositor_reader.knock, &word, sizeof word);
-        __atomic_store_n(&compositor_reader.knocked, 0u, __ATOMIC_SEQ_CST);
+        if (__atomic_load_n(&compositor_reader.knocked, __ATOMIC_RELAXED))
+        {
+                system_read_once(compositor_reader.knock, &word, sizeof word);
+                __atomic_store_n(&compositor_reader.knocked, 0u, __ATOMIC_SEQ_CST);
+        }
         handed = __atomic_load_n(&compositor_reader.handed, __ATOMIC_SEQ_CST);
         while (at < handed)
         {

@@ -2024,7 +2024,13 @@ static void compositor_cursor_lock_take(void)
 {
         while (__atomic_exchange_n(&compositor_cursor_async.lock, 1u, __ATOMIC_ACQUIRE))
                 while (__atomic_load_n(&compositor_cursor_async.lock, __ATOMIC_RELAXED))
+#if defined(__x86_64__)
+                        __builtin_ia32_pause();
+#elif defined(__aarch64__)
+                        __asm__ __volatile__("yield");
+#else
                         ;
+#endif
 }
 
 static void compositor_cursor_lock_drop(void)
@@ -2070,7 +2076,9 @@ HOT static void compositor_cursor_async_step(long dx, long dy, positive now)
         if ((!dx && !dy) || !__atomic_load_n(&compositor_cursor_async.active, __ATOMIC_ACQUIRE) ||
             __atomic_load_n(&compositor.dark, __ATOMIC_RELAXED))
                 return;
-        compositor_cursor_lock_take();
+        // Trylock: prio-50 reader must never spin behind prio-40 main loop across a DRM ioctl.
+        if (__atomic_exchange_n(&compositor_cursor_async.lock, 1u, __ATOMIC_ACQUIRE))
+                return;
         if (!compositor_cursor_async.active)
         {
                 compositor_cursor_lock_drop();
@@ -2103,7 +2111,7 @@ HOT static void compositor_cursor_async_step(long dx, long dy, positive now)
                                 struct compositor_cursor move = {2, compositor_cursor_async.crtc[at], x, y, 0, 0, 0};
 
                                 if (system_control(compositor_cursor_async.card, COMPOSITOR_CURSOR, address_of move) == 0)
-                                        moved = 1;
+                                        compositor.output[at].cursor_x = x, compositor.output[at].cursor_y = y, moved = 1;
                         }
                 }
                 if (moved)
@@ -2132,15 +2140,17 @@ static int compositor_cursor_planes(int left, int top)
                                 if (system_control(compositor.card, COMPOSITOR_CURSOR, address_of give) != 0)
                                         return -1;
                                 output->shows = (unsigned int)compositor.cursor.paints;
+                                output->cursor_x = x, output->cursor_y = y;
                                 if (compositor_cursor_probe.asked && !compositor_cursor_probe.done &&
                                     compositor_cursor_probed(compositor_cursor_vblank(compositor.outputs ? output->crtc_index : compositor.crtc_index)) < 0)
                                         return -1;
                         }
-                        else
+                        else if (output->cursor_x != x || output->cursor_y != y)
                         {
                                 struct compositor_cursor move = {2, crtc, x, y, 0, 0, 0};
 
-                                compositor.cursor.moves += system_control(compositor.card, COMPOSITOR_CURSOR, address_of move) == 0;
+                                if (system_control(compositor.card, COMPOSITOR_CURSOR, address_of move) == 0)
+                                        output->cursor_x = x, output->cursor_y = y, compositor.cursor.moves++;
                         }
                 }
                 else if (output->shows)

@@ -283,9 +283,19 @@ static int compositor_band_hit(int x, int y)
 {
         int hit = TASKBAR_HIT_NONE, bands = compositor_bands();
         int reach = compositor.touching ? COMPOSITOR_FINGER_TARGET * compositor.scale / 100 : 0;
+        unsigned int pos = taskbar_position();
 
         for (compositor.band_at = 0; compositor.band_at < bands && hit == TASKBAR_HIT_NONE; compositor.band_at++)
         {
+                int sx, sy, sw, sh, scale = compositor_output_scale(compositor.band_at), strip;
+
+                compositor_output_rect(compositor.band_at, &sx, &sy, &sw, &sh);
+                if (x < sx || x >= sx + sw || y < sy || y >= sy + sh)
+                        continue;
+                strip = taskbar_thick(scale) + reach + 24 * scale / 100 + compositor_mc_push_for(compositor.band_at);
+                if ((pos == TASKBAR_BOTTOM && y < sy + sh - strip) || (pos == TASKBAR_TOP && y >= sy + strip) ||
+                    (pos == TASKBAR_LEFT && x >= sx + strip) || (pos == TASKBAR_RIGHT && x < sx + sw - strip))
+                        continue;
                 struct taskbar_view view = compositor_band_view();
                 hit = taskbar_hit_reach(&view, x, y, reach);
                 if (hit != TASKBAR_HIT_NONE)
