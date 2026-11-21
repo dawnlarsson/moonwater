@@ -129,27 +129,44 @@ static int compositor_multi_ccd(void)
 }
 
 static char compositor_game_epp_saved[32];
+static char compositor_game_dpm_saved[32];
 static int compositor_game_epp_active;
 
 static void compositor_game_epp(int on)
 {
         const char *want = on ? "performance" : compositor_game_epp_saved;
+        const char *dpm_want;
         unsigned long len;
 
         if (on == compositor_game_epp_active)
                 return;
         if (on && !compositor_game_epp_saved[0])
                 compositor_word("/sys/devices/system/cpu/cpu0/cpufreq/energy_performance_preference", compositor_game_epp_saved, sizeof(compositor_game_epp_saved));
-        if (!compositor_game_epp_saved[0] || (on && string_equals((string_address)compositor_game_epp_saved, (string_address) "performance")))
-                return;
-        len = (unsigned long)string_length((string_address)want);
-        for (unsigned int cpu = 0; cpu < 64; cpu++)
+        if (compositor_game_epp_saved[0] && !(on && string_equals((string_address)compositor_game_epp_saved, (string_address) "performance")))
         {
-                char path[96];
+                len = (unsigned long)string_length((string_address)want);
+                for (unsigned int cpu = 0; cpu < 64; cpu++)
+                {
+                        char path[96];
 
-                windows_num_path(path, sizeof(path), "/sys/devices/system/cpu/cpu", cpu, "/cpufreq/energy_performance_preference");
-                if (!compositor_write_sysfs(path, want, len))
-                        break;
+                        windows_num_path(path, sizeof(path), "/sys/devices/system/cpu/cpu", cpu, "/cpufreq/energy_performance_preference");
+                        if (!compositor_write_sysfs(path, want, len))
+                                break;
+                }
+        }
+        if (on && !compositor_game_dpm_saved[0])
+                compositor_word("/sys/class/drm/card0/device/power_dpm_force_performance_level", compositor_game_dpm_saved, sizeof(compositor_game_dpm_saved));
+        dpm_want = on ? "high" : compositor_game_dpm_saved;
+        if (compositor_game_dpm_saved[0] && !(on && string_equals((string_address)compositor_game_dpm_saved, (string_address) "high")))
+        {
+                len = (unsigned long)string_length((string_address)dpm_want);
+                for (unsigned int card = 0; card < 4; card++)
+                {
+                        char path[96];
+
+                        windows_num_path(path, sizeof(path), "/sys/class/drm/card", card, "/device/power_dpm_force_performance_level");
+                        compositor_write_sysfs(path, dpm_want, len);
+                }
         }
         compositor_game_epp_active = on;
 }

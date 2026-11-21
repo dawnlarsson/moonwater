@@ -712,6 +712,7 @@ static DEAD_END b32 system_init()
         system_sysctl("/proc/sys/fs/inotify/max_user_instances", "1024\n");
         system_sysctl("/proc/sys/vm/vfs_cache_pressure", "50\n");
         system_sysctl("/proc/sys/vm/stat_interval", "10\n");
+        system_sysctl("/sys/kernel/mm/transparent_hugepage/defrag", "defer\n");
         system_zram_setup();
 #endif
         mount_devpts();

@@ -661,8 +661,12 @@ def test_compositor_and_xwm_invariants():
     check("GPU publish tracks refuse_gen, gpu_map_why & gpu.family",
           "compositor_gpu_refuse_gen" in read_text("src/canvas/compositor/gpu_host.c") and
           "pub_map_why == gpu_map_why" in read_text("src/canvas/compositor/gpu_host.c"))
-    check("Reflex JIT pacing extended via compositor_wl_jit_row()",
-          "compositor_wl_jit_row()" in scan and "compositor_wl_jit_row()" in comp)
+    check("Reflex JIT pacing extended via compositor_wl_jit_row() & zero spurious flip/JIT wakes",
+          "compositor_wl_jit_row()" in scan and "compositor_wl_jit_row()" in comp and
+          "!compositor.flip_pending && !compositor_wl_frame_owed" in comp)
+    check("Game mode locks amdgpu DPM high & boot sets THP defrag=defer (no sync compaction stalls)",
+          "power_dpm_force_performance_level" in inp and
+          'system_sysctl("/sys/kernel/mm/transparent_hugepage/defrag", "defer\\n");' in read_text("src/sh/system.c"))
 
     # Background throttling safety
     check("BG throttle safety: skips Xwayland, wineserver, audio, dbus",

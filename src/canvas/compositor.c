@@ -1786,7 +1786,7 @@ static positive compositor_timers_arm(positive now, unsigned int fence_at, int h
 #ifdef CONFIG_MOONWATER_WAYLAND
         if (compositor_wl.started)
         {
-                if (wayland_frame_wanted() && !compositor.damages && !compositor_card.on)
+                if (wayland_frame_wanted() && !compositor.damages && !compositor_card.on && !compositor.flip_pending && !compositor_wl_frame_owed)
                         compositor_soon(&until, now - compositor.presented < period ? compositor.presented + period : now);
                 compositor_soon(&until, compositor_wl_due());
                 compositor_soon(&until, compositor_wl_frame_at);
