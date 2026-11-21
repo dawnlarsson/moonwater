@@ -381,10 +381,11 @@ struct compositor_row_facts
 static int compositor_row_facts(int row, struct compositor_row_facts *out)
 {
         struct windows *table = compositor.table;
-        b32 want = table && (compositor.arranged[row] != COMPOSITOR_FLOATING || compositor.asking[row]);
+        b32 want;
 
         if (!out || row < 0 || row >= COMPOSITOR_ROWS || !compositor.showing[row])
                 return -1;
+        want = table && (compositor.arranged[row] != COMPOSITOR_FLOATING || compositor.asking[row]);
         *out = (struct compositor_row_facts){
             .x = compositor.x[row], .y = compositor.y[row], .scale = compositor_row_scale(row),
             .width = compositor.w[row], .height = compositor.h[row],
@@ -1400,6 +1401,8 @@ static void compositor_row_mode(int row, unsigned int arrange, int fullscreen, i
                 compositor.fullscreen_was[row] = (unsigned char)was;
                 compositor_raise(row);
                 compositor_focus(row);
+                if (!compositor_wl_locked())
+                        compositor_motion();
         }
 }
 
@@ -1415,6 +1418,8 @@ static void compositor_row_promote_toplevel(int row, int fullscreen_output)
         compositor_raise(row);
         compositor_focus(row);
         compositor_tabs_changed();
+        if (!compositor_wl_locked())
+                compositor_motion();
 }
 
 static void compositor_arrange_on(int row, unsigned int how, int on) { compositor_row_mode(row, how, 0, on); }
@@ -2223,6 +2228,8 @@ static void compositor_reveal(int row)
         }
         compositor_raise(row);
         compositor_focus(row);
+        if (!compositor_wl_locked())
+                compositor_motion();
 }
 
 static void compositor_focus_step(void)
