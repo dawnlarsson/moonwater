@@ -778,6 +778,28 @@ def test_compositor_and_xwm_invariants():
           "gpu_ops_stage" in gpu_c and
           "if (compositor.band && minute_tick && taskbar_tick())" in comp_main and
           "if (ready)\n                return canvas_dmabuf_sync_fd(fd, 1) != -5;" in wlh_src)
+    check("Hardware Floor Pass 1: inline ASM isqrt (sqrtsd/fsqrt), rows_next bsf/rbit+clz, ui_over_body CONST, 2-insn bswap+ror, gpu_radii div hoist & wayland_out_dirty_next",
+          "sqrtsd %%xmm0, %%xmm0" in ui_src and
+          "extern CONST unsigned int ui_over_body(" in ui_src and
+          "sqrtsd %%xmm0, %%xmm0" in read_text("src/canvas/compositor/pointer.c") and
+          "static inline INLINE PURE int rows_next(" in comp_main and
+          "bswap %0\\n\\tror $8, %0" in comp_c and
+          "WAYLAND_API long wayland_out_dirty_next(" in wl_c and
+          "wayland_out_dirty_next(0)" in wlh_src)
+    check("Hardware Floor Pass 2: pointer.c OVER SIMD, wayland_host NV12 SIMD + prefetch, ui_kit_run partial spans, settings/taskbar SIMD & HOT/restrict/INLINE",
+          "memory_over_u32_rect(t->pixels +" in read_text("src/canvas/compositor/pointer.c") and
+          "memory_nv12_to_xrgb_row(into + (unsigned long)y * pitch," in wlh_src and
+          "memory_or_u32(into, into, (positive)((long)w * (long)h), 0xff000000u);" in read_text("src/canvas/ui/settings.c") and
+          "memory_copy_rect_u32(dst, (positive)dst_pitch, src, (positive)src_pitch, (positive)size, (positive)size);" in tb_src and
+          "HOT static void damage_add(struct canvas_damage *restrict d," in read_text("src/canvas/compositor/damage.c") and
+          "HOT static void compositor_blit(const struct compositor_target *restrict t," in comp_c)
+    lib_c = read_text("src/lib.c")
+    check("lib.c ASM Pass 3: 128-bit bins_place (x86_64+arm64), AVX2 memory_or_u32, 2x AVX2 + NEON tbl swizzle & branch-hoisted AVX2 2101010",
+          "movdqu (%r9,%rbx), %xmm0" in lib_c and
+          "ldp q0, q1, [x12]" in lib_c and
+          "vpor %ymm7, %ymm3, %ymm3" in lib_c and
+          "tbl v0.16b, {v0.16b}, v17.16b" in lib_c and
+          "24: vmovdqu (%rsi), %ymm0" in lib_c)
     check("Steam bowl fixes Win32 dialog inflation (ttf-liberation + 65-moonwater-win32.conf) & GTK dark theme",
           '"ttf-liberation"' in read_text("src/bowl.c") and
           "65-moonwater-win32.conf" in read_text("src/bowl.c") and

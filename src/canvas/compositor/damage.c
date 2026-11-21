@@ -81,23 +81,23 @@ struct canvas_damage
         unsigned int count;
 };
 
-static inline int rect_empty(struct canvas_rect r)
+static inline INLINE CONST int rect_empty(struct canvas_rect r)
 {
         return r.x2 <= r.x1 || r.y2 <= r.y1;
 }
 
-static inline long rect_area(struct canvas_rect r)
+static inline INLINE CONST long rect_area(struct canvas_rect r)
 {
         return (long)(r.x2 - r.x1) * (r.y2 - r.y1);
 }
 
-static inline struct canvas_rect rect_join(struct canvas_rect a, struct canvas_rect b)
+static inline INLINE CONST struct canvas_rect rect_join(struct canvas_rect a, struct canvas_rect b)
 {
         return (struct canvas_rect){a.x1 < b.x1 ? a.x1 : b.x1, a.y1 < b.y1 ? a.y1 : b.y1,
                                     a.x2 > b.x2 ? a.x2 : b.x2, a.y2 > b.y2 ? a.y2 : b.y2};
 }
 
-static inline struct canvas_rect rect_meet(struct canvas_rect a, struct canvas_rect b)
+static inline INLINE CONST struct canvas_rect rect_meet(struct canvas_rect a, struct canvas_rect b)
 {
         struct canvas_rect m = {a.x1 > b.x1 ? a.x1 : b.x1, a.y1 > b.y1 ? a.y1 : b.y1,
                                 a.x2 < b.x2 ? a.x2 : b.x2, a.y2 < b.y2 ? a.y2 : b.y2};
@@ -105,22 +105,22 @@ static inline struct canvas_rect rect_meet(struct canvas_rect a, struct canvas_r
         return rect_empty(m) ? (struct canvas_rect){0, 0, 0, 0} : m;
 }
 
-static inline struct canvas_rect rect_from_int4(const int p[4])
+static inline INLINE PURE struct canvas_rect rect_from_int4(const int p[4])
 {
         return (struct canvas_rect){p[0], p[1], p[2], p[3]};
 }
 
-static inline void rect_to_int4(struct canvas_rect r, int p[4])
+static inline INLINE void rect_to_int4(struct canvas_rect r, int p[4])
 {
         p[0] = r.x1, p[1] = r.y1, p[2] = r.x2, p[3] = r.y2;
 }
 
 // Add rectangle r to damage list d, coalescing whenever union area <= sum + slack (0 for exact damage, >0 for GPU slack merge).
-static void damage_add(struct canvas_damage *d, struct canvas_rect r, long slack)
+HOT static void damage_add(struct canvas_damage *restrict d, struct canvas_rect r, long slack)
 {
         unsigned int at = 0;
 
-        if (rect_empty(r))
+        if (unlikely(rect_empty(r)))
                 return;
         while (at < d->count)
         {
@@ -135,7 +135,7 @@ static void damage_add(struct canvas_damage *d, struct canvas_rect r, long slack
                 else
                         at++;
         }
-        if (d->count == COMPOSITOR_DAMAGE)
+        if (unlikely(d->count == COMPOSITOR_DAMAGE))
         {
                 unsigned int best = 0;
                 long least = -1;
@@ -154,7 +154,7 @@ static void damage_add(struct canvas_damage *d, struct canvas_rect r, long slack
 }
 
 // Subtract cut from every rectangle in d; returns 0 (leaving d untouched) if the pieces exceed COMPOSITOR_DAMAGE.
-static int damage_subtract(struct canvas_damage *d, struct canvas_rect cut)
+HOT static int damage_subtract(struct canvas_damage *restrict d, struct canvas_rect cut)
 {
         struct canvas_damage out;
 
@@ -165,7 +165,7 @@ static int damage_subtract(struct canvas_damage *d, struct canvas_rect cut)
 
                 if (r.x2 <= cut.x1 || r.x1 >= cut.x2 || r.y2 <= cut.y1 || r.y1 >= cut.y2)
                 {
-                        if (out.count == COMPOSITOR_DAMAGE)
+                        if (unlikely(out.count == COMPOSITOR_DAMAGE))
                                 return 0;
                         out.r[out.count++] = r;
                         continue;
@@ -185,7 +185,7 @@ static int damage_subtract(struct canvas_damage *d, struct canvas_rect cut)
 
                                 if (rect_empty(c))
                                         continue;
-                                if (out.count == COMPOSITOR_DAMAGE)
+                                if (unlikely(out.count == COMPOSITOR_DAMAGE))
                                         return 0;
                                 out.r[out.count++] = c;
                         }

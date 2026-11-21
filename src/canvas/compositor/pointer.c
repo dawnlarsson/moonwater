@@ -31,8 +31,23 @@
 _Static_assert(CP_ACCEL_ONE == 1024 && CP_ACCEL_FLOOR == 1 && CP_ACCEL_CEILING == 8 && CP_ACCEL_MAX == 2560,
                "the curve pointer_gain is written for");
 
-static unsigned long long compositor_isqrt(unsigned long long value)
+static inline INLINE CONST unsigned long long compositor_isqrt(unsigned long long value)
 {
+#if defined(__x86_64__)
+        if (likely(value < (1ull << 52)))
+        {
+                unsigned long long r;
+                __asm__("cvtsi2sdq %1, %%xmm0\n\tsqrtsd %%xmm0, %%xmm0\n\tcvttsd2siq %%xmm0, %0" : "=r"(r) : "r"(value) : "xmm0");
+                return r;
+        }
+#elif defined(__aarch64__)
+        if (likely(value < (1ull << 52)))
+        {
+                unsigned long long r;
+                __asm__("ucvtf d0, %1\n\tfsqrt d0, d0\n\tfcvtzu %0, d0" : "=r"(r) : "r"(value) : "d0");
+                return r;
+        }
+#endif
         unsigned long long root = 0, bit = 1ull << 62;
 
         while (bit > value)
@@ -665,31 +680,8 @@ static void compositor_picture_draw(const struct compositor_target *t, int left,
                                      compositor_picture.premultiplied + from, CP_PLANE, (positive)(x2 - x1), (positive)(y2 - y1));
                 return;
         }
-        for (int row = y1; row < y2; row++, from += CP_PLANE)
-        {
-                unsigned int *dst = t->pixels + (unsigned long)(row - t->oy) * t->pitch + (unsigned long)(x1 - t->ox);
-                const unsigned int *src = compositor_picture.premultiplied + from;
-
-                for (int at = 0; at < x2 - x1; at++)
-                {
-                        unsigned int s = src[at], a = s >> 24, d = dst[at], inv = 255u - a, out = 0;
-
-                        if (!a)
-                                continue;
-                        if (a == 255u)
-                        {
-                                dst[at] = s & 0xffffffu;
-                                continue;
-                        }
-                        for (int shift = 0; shift < 24; shift += 8)
-                        {
-                                unsigned int v = ((d >> shift & 255u) * inv + 127u) / 255u + (s >> shift & 255u);
-
-                                out |= (v > 255u ? 255u : v) << shift;
-                        }
-                        dst[at] = out;
-                }
-        }
+        memory_over_u32_rect(t->pixels + (unsigned long)(y1 - t->oy) * t->pitch + (unsigned long)(x1 - t->ox), t->pitch,
+                             compositor_picture.premultiplied + from, CP_PLANE, (positive)(x2 - x1), (positive)(y2 - y1));
 }
 
 /*

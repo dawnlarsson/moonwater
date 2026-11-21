@@ -573,10 +573,8 @@ static void compositor_flip_done(void)
         compositor.flip_async = 0;
         compositor.leaving_row = -1;
         if (rows_any(&compositor.held_rows))
-                for (int row = 0; row < (int)compositor_rows_in_use; row++)
+                for (int row = rows_next(&compositor.held_rows, 0); row >= 0; row = rows_next(&compositor.held_rows, row + 1))
                 {
-                        if (!rows_has(&compositor.held_rows, row))
-                                continue;
                         if (row == compositor.flip_row && compositor.front[row] != compositor.flip_buffer)
                                 continue;
                         if (rows_has(&compositor_card.list_rows, row)) // a list's job draws its picture: the loop's turn gives it back at the job's end
@@ -587,8 +585,8 @@ static void compositor_flip_done(void)
                 }
         // A window that left while the card showed it: its framebuffers now, the card being off them.
         if (rows_any(&compositor.dropping))
-                for (int row = 0; row < (int)compositor_rows_in_use; row++)
-                        if (rows_has(&compositor.dropping, row) && !compositor_shows_row(row))
+                for (int row = rows_next(&compositor.dropping, 0); row >= 0; row = rows_next(&compositor.dropping, row + 1))
+                        if (!compositor_shows_row(row))
                         {
                                 rows_del(&compositor.dropping, row);
                                 compositor_window_fb_drop(row);

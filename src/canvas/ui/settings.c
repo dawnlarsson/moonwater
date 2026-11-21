@@ -1114,8 +1114,7 @@ static fn settings_map_wall(struct windows address_to table, unsigned int at, st
                                 memory_fill_u32_rect(into, (positive)w, (positive)w, (positive)h, 0xff000000u);
                                 taskbar_wall_draw(into, w, w, h, (int)dark, !string_equals((string_address)dark_word, "inverted"), seas >= 20 && seas <= 80 ? seas : 45,
                                                   string_equals((string_address)glow, "none") ? 0 : string_equals((string_address)glow, "glow-and-edges") ? 2 : 1, accent, 0, 0, rect);
-                                for (int k = 0; k < w * h; k++)
-                                        into[k] |= 0xff000000u;
+                                memory_or_u32(into, into, (positive)((long)w * (long)h), 0xff000000u);
                         }
                 }
         }

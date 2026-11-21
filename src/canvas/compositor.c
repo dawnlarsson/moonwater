@@ -422,37 +422,78 @@ static unsigned int compositor_rows_grow(unsigned int want);
 #define COMPOSITOR_ROW_WORDS ((WINDOWS + 1 + 63) / 64)
 struct compositor_rows { unsigned long long word[COMPOSITOR_ROW_WORDS]; };
 
-static inline unsigned int compositor_rows_words(void) { unsigned int u = (compositor_rows_in_use + 63) / 64; return u < COMPOSITOR_ROW_WORDS ? u : COMPOSITOR_ROW_WORDS; }
-static inline unsigned int rows_walked(void) { unsigned int u = compositor_rows_words(); return u < COMPOSITOR_ROW_WORDS ? u + 1 : u; }
-static inline unsigned int rows_walk(unsigned int k) { return k < compositor_rows_words() ? k : COMPOSITOR_ROW_WORDS - 1; }
-static inline int rows_has(const struct compositor_rows *s, long at) { return at >= 0 && at <= WINDOWS && (s->word[at / 64] >> (at % 64) & 1u); }
-static inline void rows_add(struct compositor_rows *s, long at) { if (at >= 0 && at <= WINDOWS) s->word[at / 64] |= 1ULL << (at % 64); }
-static inline void rows_del(struct compositor_rows *s, long at) { if (at >= 0 && at <= WINDOWS) s->word[at / 64] &= ~(1ULL << (at % 64)); }
-static inline void rows_add_atomic(struct compositor_rows *s, long at) { if (at >= 0 && at <= WINDOWS) __atomic_or_fetch(&s->word[at / 64], 1ULL << (at % 64), __ATOMIC_RELEASE); }
-static inline unsigned long long rows_low(const struct compositor_rows *s) { return s->word[0]; }
-static inline struct compositor_rows rows_from(unsigned long long low) { struct compositor_rows s = {{0}}; s.word[0] = low; return s; }
+static inline INLINE CONST unsigned int rows_ctz64(unsigned long long w)
+{
+#if defined(__x86_64__)
+        unsigned long long r;
+        __asm__("bsfq %1, %0" : "=r"(r) : "r"(w));
+        return (unsigned int)r;
+#elif defined(__aarch64__)
+        unsigned long long r;
+        __asm__("rbit %0, %1\n\tclz %0, %0" : "=r"(r) : "r"(w));
+        return (unsigned int)r;
+#else
+        return (unsigned int)__builtin_ctzll(w);
+#endif
+}
+static inline INLINE PURE unsigned int compositor_rows_words(void) { unsigned int u = (compositor_rows_in_use + 63) >> 6; return u < COMPOSITOR_ROW_WORDS ? u : COMPOSITOR_ROW_WORDS; }
+static inline INLINE PURE unsigned int rows_walked(void) { unsigned int u = compositor_rows_words(); return u < COMPOSITOR_ROW_WORDS ? u + 1 : u; }
+static inline INLINE PURE unsigned int rows_walk(unsigned int k) { return k < compositor_rows_words() ? k : COMPOSITOR_ROW_WORDS - 1; }
+static inline INLINE PURE int rows_has(const struct compositor_rows *s, long at) { return (unsigned long)at <= WINDOWS && ((s->word[(unsigned long)at >> 6] >> ((unsigned long)at & 63u)) & 1u); }
+static inline INLINE void rows_add(struct compositor_rows *s, long at) { if (likely((unsigned long)at <= WINDOWS)) s->word[(unsigned long)at >> 6] |= 1ULL << ((unsigned long)at & 63u); }
+static inline INLINE void rows_del(struct compositor_rows *s, long at) { if (likely((unsigned long)at <= WINDOWS)) s->word[(unsigned long)at >> 6] &= ~(1ULL << ((unsigned long)at & 63u)); }
+static inline INLINE void rows_add_atomic(struct compositor_rows *s, long at) { if (likely((unsigned long)at <= WINDOWS)) __atomic_or_fetch(&s->word[(unsigned long)at >> 6], 1ULL << ((unsigned long)at & 63u), __ATOMIC_RELEASE); }
+static inline INLINE PURE unsigned long long rows_low(const struct compositor_rows *s) { return s->word[0]; }
+static inline INLINE CONST struct compositor_rows rows_from(unsigned long long low) { struct compositor_rows s = {{0}}; s.word[0] = low; return s; }
 
-static inline void rows_take(struct compositor_rows *into, struct compositor_rows *from)
+static inline INLINE PURE int rows_next(const struct compositor_rows *s, int from)
+{
+        unsigned int limit = compositor_rows_in_use, n = compositor_rows_words(), wi;
+        unsigned long long w;
+
+        if (from < 0)
+                from = 0;
+        if ((unsigned int)from >= limit)
+                return -1;
+        wi = (unsigned int)from >> 6;
+        w = s->word[wi] & (~0ULL << ((unsigned int)from & 63u));
+        for (;;)
+        {
+                if (w)
+                {
+                        unsigned int idx = (wi << 6) + rows_ctz64(w);
+                        return idx < limit ? (int)idx : -1;
+                }
+                if (++wi >= n)
+                        return -1;
+                w = s->word[wi];
+        }
+}
+
+static inline INLINE void rows_take(struct compositor_rows *restrict into, struct compositor_rows *restrict from)
 {
         for (unsigned int k = 0, n = rows_walked(), w; k < n; k++)
                 w = rows_walk(k), into->word[w] = from->word[w] ? __atomic_exchange_n(&from->word[w], 0ULL, __ATOMIC_ACQ_REL) : 0;
 }
-static inline int rows_any(const struct compositor_rows *s)
+static inline INLINE PURE int rows_any(const struct compositor_rows *s)
 {
-        for (unsigned int w = 0; w < compositor_rows_words(); w++)
-                if (s->word[w]) return 1;
-        return s->word[COMPOSITOR_ROW_WORDS - 1] != 0;
+        unsigned int n = compositor_rows_words();
+        unsigned long long acc = s->word[COMPOSITOR_ROW_WORDS - 1];
+        for (unsigned int w = 0; w < n; w++)
+                acc |= s->word[w];
+        return acc != 0;
 }
-static inline void rows_none(struct compositor_rows *s)
+static inline INLINE void rows_none(struct compositor_rows *s)
 {
-        for (unsigned int w = 0; w < compositor_rows_words(); w++) s->word[w] = 0;
+        unsigned int n = compositor_rows_words();
+        for (unsigned int w = 0; w < n; w++) s->word[w] = 0;
         s->word[COMPOSITOR_ROW_WORDS - 1] = 0;
 }
-static inline void rows_or(struct compositor_rows *into, const struct compositor_rows *with)
+static inline INLINE void rows_or(struct compositor_rows *restrict into, const struct compositor_rows *restrict with)
 {
         for (unsigned int k = 0, n = rows_walked(), w; k < n; k++) w = rows_walk(k), into->word[w] |= with->word[w];
 }
-static inline void rows_and_not(struct compositor_rows *into, const struct compositor_rows *without)
+static inline INLINE void rows_and_not(struct compositor_rows *restrict into, const struct compositor_rows *restrict without)
 {
         for (unsigned int k = 0, n = rows_walked(), w; k < n; k++) w = rows_walk(k), into->word[w] &= ~without->word[w];
 }

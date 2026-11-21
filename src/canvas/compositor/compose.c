@@ -168,8 +168,8 @@ static int compositor_close_box(const struct compositor_frame *frame, int *x, in
 }
 
 // Clip (x, y, w, h) against target t; returns 1 if non-empty, writing [x1, x2) x [y1, y2).
-static inline int target_clip(const struct compositor_target *t, int x, int y, int w, int h,
-                              int *x1, int *y1, int *x2, int *y2)
+static inline INLINE int target_clip(const struct compositor_target *restrict t, int x, int y, int w, int h,
+                                     int *restrict x1, int *restrict y1, int *restrict x2, int *restrict y2)
 {
         *x1 = x > t->x1 ? x : t->x1;
         *y1 = y > t->y1 ? y : t->y1;
@@ -178,8 +178,8 @@ static inline int target_clip(const struct compositor_target *t, int x, int y, i
         return *x2 > *x1 && *y2 > *y1;
 }
 
-static void compositor_fill(const struct compositor_target *t, int x, int y, int width,
-                            int height, unsigned int colour)
+HOT static void compositor_fill(const struct compositor_target *restrict t, int x, int y, int width,
+                                int height, unsigned int colour)
 {
         int x1, y1, x2, y2;
 
@@ -191,8 +191,8 @@ static void compositor_fill(const struct compositor_target *t, int x, int y, int
                              colour);
 }
 
-static void compositor_blit(const struct compositor_target *t, int x, int y, int width,
-                            int height, const unsigned int *source, unsigned long pitch)
+HOT static void compositor_blit(const struct compositor_target *restrict t, int x, int y, int width,
+                                int height, const unsigned int *restrict source, unsigned long pitch)
 {
         int x1, y1, x2, y2;
 
@@ -292,8 +292,8 @@ static inline unsigned int compositor_over_weighted(unsigned int dst, unsigned i
 */
 #define COMPOSITOR_GROUND_RUN 1024
 
-static void compositor_over_ground(unsigned int *into, unsigned long into_pitch, const unsigned int *from, unsigned long from_pitch,
-                                   unsigned long width, unsigned long height, int out, int gx, int gy)
+HOT static void compositor_over_ground(unsigned int *restrict into, unsigned long into_pitch, const unsigned int *restrict from, unsigned long from_pitch,
+                                       unsigned long width, unsigned long height, int out, int gx, int gy)
 {
         unsigned int ground[COMPOSITOR_GROUND_RUN];
         fn (*over)(p32 address_to, positive, const p32 address_to, positive, const p32 address_to, positive, positive, positive) =
@@ -312,8 +312,8 @@ static void compositor_over_ground(unsigned int *into, unsigned long into_pitch,
                      (positive)(width - at < COMPOSITOR_GROUND_RUN ? width - at : COMPOSITOR_GROUND_RUN), (positive)height);
 }
 
-static void compositor_blit_blend(const struct compositor_target *t, int x, int y, int width,
-                                  int height, const unsigned int *source, unsigned long pitch, int ground)
+HOT static void compositor_blit_blend(const struct compositor_target *restrict t, int x, int y, int width,
+                                      int height, const unsigned int *restrict source, unsigned long pitch, int ground)
 {
         int x1, y1, x2, y2;
         unsigned int *into;
@@ -376,8 +376,8 @@ static int compositor_runs_same(const struct compositor_run_row *one, const stru
         Rows that hold the same runs, as the rows of a band of one colour or of a line's blank end do, are one block: a call to
         fill each run of it and one to copy each gap, for as many rows as the block has.
 */
-static void compositor_runs_copy(unsigned int *into, unsigned long into_pitch, const unsigned int *from, unsigned long from_pitch,
-                                 unsigned long width, unsigned long height, const struct compositor_run_row *rows, unsigned long skip, int out)
+HOT static void compositor_runs_copy(unsigned int *restrict into, unsigned long into_pitch, const unsigned int *restrict from, unsigned long from_pitch,
+                                     unsigned long width, unsigned long height, const struct compositor_run_row *restrict rows, unsigned long skip, int out)
 {
         fn (*copy)(p32 address_to, positive, const p32 address_to, positive, positive, positive) = out ? memory_copy_rect_out_u32 : memory_copy_rect_u32;
 
@@ -410,15 +410,15 @@ static void compositor_runs_copy(unsigned int *into, unsigned long into_pitch, c
 }
 
 // compositor_blit for a window whose runs are known: rows is the run row of the window's picture row 0.
-static void compositor_blit_runs(const struct compositor_target *t, int x, int y, int width, int height,
-                                 const unsigned int *source, unsigned long pitch, const struct compositor_run_row *rows)
+HOT static void compositor_blit_runs(const struct compositor_target *restrict t, int x, int y, int width, int height,
+                                     const unsigned int *restrict source, unsigned long pitch, const struct compositor_run_row *restrict rows)
 {
         int x1, y1, x2, y2;
 
         if (!target_clip(t, x, y, width, height, &x1, &y1, &x2, &y2))
                 return;
         // A caret's damage, a hover, a letter: what is copied in a few lines is not worth a row's runs.
-        if (x2 - x1 < COMPOSITOR_RUNS_LEAST_WIDTH || (long)(x2 - x1) * (long)(y2 - y1) < COMPOSITOR_RUNS_LEAST_AREA)
+        if (unlikely(x2 - x1 < COMPOSITOR_RUNS_LEAST_WIDTH || (long)(x2 - x1) * (long)(y2 - y1) < COMPOSITOR_RUNS_LEAST_AREA))
         {
                 compositor_blit(t, x, y, width, height, source, pitch);
                 return;
@@ -1720,8 +1720,8 @@ unsigned long compositor_tint_pixels;
         (compositor_tint), the rule the card's mix records follow too. Its ends are its own: an ink of alpha 255 is its colour
         filled (the top byte none), and one of alpha 0 leaves every pixel as it is, its top byte with it, so neither is mixed.
 */
-static void compositor_mix_run(unsigned int *pixels, long count, unsigned int ink, const unsigned int *colour,
-                               const unsigned char *cover)
+HOT static void compositor_mix_run(unsigned int *restrict pixels, long count, unsigned int ink, const unsigned int *restrict colour,
+                                   const unsigned char *restrict cover)
 {
         if ((ink >> 24) >= 255)
         {
@@ -2815,16 +2815,32 @@ static unsigned int canvas_ext_over(unsigned int over, unsigned int under)
         return out;
 }
 
-static inline unsigned int canvas_ext_pixel_argb(unsigned int v, unsigned int fourcc)
+static inline INLINE CONST unsigned int canvas_ext_pixel_argb(unsigned int v, unsigned int fourcc)
 {
         unsigned int r, g, b, a;
 
         switch (fourcc)
         {
         case CANVAS_FOURCC_ABGR8888:
+#if defined(__x86_64__)
+                __asm__("bswap %0\n\tror $8, %0" : "+r"(v));
+                return v;
+#elif defined(__aarch64__)
+                __asm__("rev %w0, %w0\n\tror %w0, %w0, #8" : "+r"(v));
+                return v;
+#else
                 return (v & 0xff00ff00u) | ((v & 0xffu) << 16) | ((v >> 16) & 0xffu);
+#endif
         case CANVAS_FOURCC_XBGR8888:
+#if defined(__x86_64__)
+                __asm__("bswap %0\n\tror $8, %0" : "+r"(v));
+                return v | 0xff000000u;
+#elif defined(__aarch64__)
+                __asm__("rev %w0, %w0\n\tror %w0, %w0, #8" : "+r"(v));
+                return v | 0xff000000u;
+#else
                 return 0xff000000u | (v & 0x0000ff00u) | ((v & 0xffu) << 16) | ((v >> 16) & 0xffu);
+#endif
         case CANVAS_FOURCC_ARGB2101010:
         case CANVAS_FOURCC_XRGB2101010:
                 r = (v >> 22) & 0xffu, g = (v >> 12) & 0xffu, b = (v >> 2) & 0xffu;

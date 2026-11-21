@@ -9,6 +9,22 @@
 #include "wayland_protocol.inc"
 
 #define WAYLAND_API static __attribute__((unused))
+#ifndef likely
+#define likely(x) __builtin_expect(!!(x), 1)
+#define unlikely(x) __builtin_expect(!!(x), 0)
+#endif
+#ifndef INLINE
+#define INLINE __attribute__((always_inline))
+#endif
+#ifndef PURE
+#define PURE __attribute__((pure))
+#endif
+#ifndef HOT
+#define HOT __attribute__((hot))
+#endif
+#ifndef COLD
+#define COLD __attribute__((cold))
+#endif
 
 /* Protocol caps, limits, and constants. */
 #define WAYLAND_IDS 0xff000000UL
@@ -625,8 +641,8 @@ static int wayland_rows_reach(long row)
         return wayland.row_made = row + 1, 1;
 }
 
-static void wayland_out_mark(long slot) { if (slot >= 0 && slot < wayland.client_slots) wayland.out_dirty[slot / 64] |= 1ull << (slot % 64); }
-static void wayland_out_clear(long slot) { if (slot >= 0 && slot < wayland.client_slots) wayland.out_dirty[slot / 64] &= ~(1ull << (slot % 64)); }
+static inline void wayland_out_mark(long slot) { if (likely((unsigned long)slot < (unsigned long)wayland.client_slots)) wayland.out_dirty[(unsigned long)slot >> 6] |= 1ull << ((unsigned long)slot & 63u); }
+static inline void wayland_out_clear(long slot) { if (likely((unsigned long)slot < (unsigned long)wayland.client_slots)) wayland.out_dirty[(unsigned long)slot >> 6] &= ~(1ull << ((unsigned long)slot & 63u)); }
 
 static long wayland_client_slot_grow(void)
 {
@@ -710,7 +726,14 @@ typedef unsigned long long __attribute__((may_alias, aligned(1))) wayland_wire_l
 
 static inline unsigned long wayland_get(const unsigned char *at) { return *(const wayland_wire_word *)at; }
 static inline void wayland_put(unsigned char *at, unsigned long value) { *(wayland_wire_word *)at = (unsigned int)value; }
-static inline void wayland_copy(unsigned char *to, const unsigned char *from, long count) { for (long at = 0; at < count; at++) to[at] = from[at]; }
+static inline INLINE void wayland_copy(unsigned char *restrict to, const unsigned char *restrict from, long count)
+{
+#ifdef HOT_STATE
+        if (count > 0) memory_copy(to, from, (positive)count);
+#else
+        for (long at = 0; at < count; at++) to[at] = from[at];
+#endif
+}
 
 struct wayland_arg { unsigned long u; long i; const unsigned char *text; long length; int slot; long fd, version; };
 struct wayland_event { struct wayland_client *client; unsigned char *at; long start; int ok; };
@@ -731,13 +754,15 @@ static struct wayland_event wayland_begin(struct wayland_client *c, unsigned lon
 
 static inline void wayland_word(struct wayland_event *e, unsigned long value) { wayland_put(e->at, value); e->at += 4; }
 
-static void wayland_pad_bytes(struct wayland_event *e, const unsigned char *bytes, unsigned long len, int nul)
+static void wayland_pad_bytes(struct wayland_event *restrict e, const unsigned char *restrict bytes, unsigned long len, int nul)
 {
         unsigned long wire = len + (unsigned long)nul, padded = (wire + 3) & ~3UL;
 
         wayland_word(e, wire);
-        for (unsigned long at = 0; at < padded; at++)
-                e->at[at] = at < len ? bytes[at] : 0;
+        if (padded)
+                *(wayland_wire_word *)(e->at + padded - 4) = 0;
+        if (len)
+                wayland_copy(e->at, bytes, (long)len);
         e->at += padded;
 }
 
@@ -855,9 +880,9 @@ static int wayland_fail(struct wayland_client *c, unsigned long object, unsigned
 
 /* ---- objects ---- */
 
-static long wayland_slot_of(struct wayland_client *c, unsigned long id)
+static inline INLINE PURE long wayland_slot_of(const struct wayland_client *c, unsigned long id)
 {
-        if (id < WAYLAND_IDS)
+        if (likely(id < WAYLAND_IDS))
                 return id && id < (unsigned long)c->tbl[WLT_INDEX].count ? (long)c->index[id] - 1 : -1;
         return id - WAYLAND_SERVER_BASE < (unsigned long)c->tbl[WLT_SERVER].count ? (long)c->server_index[id - WAYLAND_SERVER_BASE] - 1 : -1;
 }
@@ -5605,7 +5630,31 @@ WAYLAND_API int wayland_row_xoverride(long row) { struct wayland_client *c = 0; 
 WAYLAND_API long wayland_dead(long slot) { struct wayland_client *c = wayland_client_of(slot); return c ? c->dead : 2; }
 WAYLAND_API long wayland_stalled(long slot) { struct wayland_client *c = wayland_client_of(slot); return c && !c->dead && c->stalled; }
 WAYLAND_API long wayland_heard(long *quiet) { return *quiet = wayland.quiet, wayland.heard; }
-WAYLAND_API int wayland_out_dirty(long slot) { return slot >= 0 && slot < wayland.client_slots && (wayland.out_dirty[slot / 64] >> (slot % 64) & 1u); }
+WAYLAND_API int wayland_out_dirty(long slot) { return (unsigned long)slot < (unsigned long)wayland.client_slots && ((wayland.out_dirty[(unsigned long)slot >> 6] >> ((unsigned long)slot & 63u)) & 1u); }
+WAYLAND_API long wayland_out_dirty_next(long from)
+{
+        unsigned long limit = (unsigned long)(wayland.client_slots > 0 ? wayland.client_slots : 0);
+        unsigned long wi, words = (limit + 63ul) >> 6;
+        unsigned long long w;
+
+        if (from < 0)
+                from = 0;
+        if ((unsigned long)from >= limit || !wayland.out_dirty)
+                return -1;
+        wi = (unsigned long)from >> 6;
+        w = wayland.out_dirty[wi] & (~0ULL << ((unsigned long)from & 63u));
+        for (;;)
+        {
+                if (w)
+                {
+                        unsigned long idx = (wi << 6) + (unsigned long)__builtin_ctzll(w);
+                        return idx < limit ? (long)idx : -1;
+                }
+                if (++wi >= words)
+                        return -1;
+                w = wayland.out_dirty[wi];
+        }
+}
 WAYLAND_API int wayland_out_backlog(long slot) { struct wayland_client *c = wayland_live_client(slot); return c && c->out_length > WAYLAND_OUT_HIGH; }
 WAYLAND_API long wayland_client_slots(void) { return wayland.client_slots; }
 WAYLAND_API long wayland_client_count(void) { return wayland.client_slots; }

@@ -3341,16 +3341,20 @@ static positive gpu_go(void)
 }
 
 // ui_box_radii on a box record's rx and ry (words 6 and 7): where two corners come to more than a side, the one factor that fits them all.
-static void gpu_radii(unsigned int address_to r)
+static inline void gpu_radii(unsigned int *restrict r)
 {
         long long w = (int)r[3] - (int)r[1], h = (int)r[4] - (int)r[2], f = 65536;
 
-        if (w <= 0 || h <= 0)
+        if (unlikely(w <= 0 || h <= 0))
                 return;
         if ((int)r[6] > 0 && 2 * (long long)(int)r[6] > w)
                 f = (w << 16) / (2 * (long long)(int)r[6]);
-        if ((int)r[7] > 0 && 2 * (long long)(int)r[7] > h && (h << 16) / (2 * (long long)(int)r[7]) < f)
-                f = (h << 16) / (2 * (long long)(int)r[7]);
+        if ((int)r[7] > 0 && 2 * (long long)(int)r[7] > h)
+        {
+                long long fy = (h << 16) / (2 * (long long)(int)r[7]);
+                if (fy < f)
+                        f = fy;
+        }
         if (f < 65536)
                 r[6] = (unsigned int)(int)(((long long)(int)r[6] * f) >> 16), r[7] = (unsigned int)(int)(((long long)(int)r[7] * f) >> 16);
 }
@@ -3373,7 +3377,7 @@ static void gpu_radii(unsigned int address_to r)
         radii fitted (gpu_radii); each cell's part of the damage the lists are binned for (dx0 dy0 dx1 dy1) inside it. Every record of the cell's list before it
         is then hidden by it: none of their pixels can show. cells: the first and last column and row of them; false for none.
 */
-static b32 gpu_record_holds(const unsigned int address_to r, unsigned int dx0, unsigned int dy0, unsigned int dx1, unsigned int dy1, unsigned int cells[4])
+static inline b32 gpu_record_holds(const unsigned int *restrict r, unsigned int dx0, unsigned int dy0, unsigned int dx1, unsigned int dy1, unsigned int *restrict cells)
 {
         long long x0, y0, x1, y1, ry = (int)r[7];
 

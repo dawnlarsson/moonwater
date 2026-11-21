@@ -1018,7 +1018,7 @@ static positive wl_gpu_va_read(const void *ptr, positive bytes)
 }
 #endif
 
-static unsigned int compositor_wl_gather_column(const struct compositor_wl_layer *l, long x)
+static inline INLINE PURE unsigned int compositor_wl_gather_column(const struct compositor_wl_layer *l, long x)
 {
         long reach = l->transform & 1 ? l->source_h : l->source_w;
         long t = (l->sx + ((l->ox + x) * 2 + 1) * l->sw / (2 * l->tw)) >> 8;
@@ -1028,7 +1028,7 @@ static unsigned int compositor_wl_gather_column(const struct compositor_wl_layer
                                   : (unsigned int)(flip_x ? l->source_w - 1 - t : t);
 }
 
-static unsigned int compositor_wl_gather_line(const struct compositor_wl_layer *l, long y)
+static inline INLINE PURE unsigned int compositor_wl_gather_line(const struct compositor_wl_layer *l, long y)
 {
         long reach = l->transform & 1 ? l->source_w : l->source_h;
         long t = (l->sy + ((l->oy + y) * 2 + 1) * l->sh / (2 * l->th)) >> 8;
@@ -1103,17 +1103,24 @@ static unsigned int *compositor_wl_gathered_room(struct compositor_wl_gathered *
         return g->memory;
 }
 
-static void compositor_wl_gather_run(const struct compositor_wl_layer *l, long y, long x, unsigned long n, unsigned int *run)
+HOT static void compositor_wl_gather_run(const struct compositor_wl_layer *restrict l, long y, long x, unsigned long n, unsigned int *restrict run)
 {
         const unsigned int *line = l->pixels + compositor_wl_gather_line(l, y);
         for (unsigned long at = 0; at < n; at++)
                 run[at] = line[compositor_wl_gather_column(l, x + (long)at)];
 }
 
-static void compositor_wl_nv12_run(const struct compositor_wl_layer *l, const unsigned char *base, long y, long x, unsigned long n, unsigned int *run)
+HOT static void compositor_wl_nv12_run(const struct compositor_wl_layer *restrict l, const unsigned char *restrict base, long y, long x, unsigned long n, unsigned int *restrict run)
 {
         unsigned long line = compositor_wl_gather_line(l, y);
         const unsigned char *luma = base + l->luma + line * l->luma_pitch, *chroma = base + l->chroma + (line >> 1) * l->chroma_pitch;
+        if (!l->transform && !l->y_invert && l->sx == 0 && l->sw == l->source_w * 256 && l->tw == l->source_w &&
+            l->ox + x >= 0 && ((l->ox + x) & 1L) == 0 && l->ox + x + (long)n <= l->source_w)
+        {
+                unsigned long col0 = (unsigned long)(l->ox + x);
+                memory_nv12_to_xrgb_row(run, luma + col0, chroma + col0, (positive)n);
+                return;
+        }
         for (unsigned long at = 0; at < n; at++)
         {
                 unsigned long column = compositor_wl_gather_column(l, x + (long)at), pair = column & ~1ul;
@@ -1201,8 +1208,10 @@ static void wl_ext_gathers_fill(void)
                                 canvas_dmabuf_sync_read(l->fd, 0);
                                 for (long y = 0; y < l->height; y++)
                                 {
-                                        const unsigned int *line = l->pixels + lines[y];
-                                        unsigned int *to = g->memory + (unsigned long)y * (unsigned long)l->width;
+                                        const unsigned int *restrict line = l->pixels + lines[y];
+                                        unsigned int *restrict to = g->memory + (unsigned long)y * (unsigned long)l->width;
+                                        if (l->fd < 0 && y + 1 < l->height)
+                                                prefetch_read(l->pixels + lines[y + 1]), prefetch_write(to + l->width);
                                         for (long x = 0; x < l->width; x++)
                                                 to[x] = line[cols[x]];
                                 }
@@ -1280,16 +1289,30 @@ static void compositor_wl_layers_put_list(const struct compositor_wl_layer *list
                 if (l->nv12)
                 {
                         const unsigned char *base = compositor_wl_nv12_map(l);
-                        unsigned int run[1024];
                         if (!base)
                                 continue;
-                        for (long y = 0; y < l->height; y++)
-                                for (long x = 0; x < l->width; x += 1024)
+                        if (!l->transform && !l->y_invert && l->sx == 0 && l->sw == l->source_w * 256 && l->tw == l->source_w &&
+                            l->ox >= 0 && (l->ox & 1L) == 0 && l->ox + l->width <= l->source_w)
+                        {
+                                for (long y = 0; y < l->height; y++)
                                 {
-                                        unsigned long n = (unsigned long)(l->width - x < 1024 ? l->width - x : 1024);
-                                        compositor_wl_nv12_run(l, base, y, x, n, run);
-                                        memory_copy_rect_u32(into + (unsigned long)y * pitch + (unsigned long)x, pitch, run, n, n, 1);
+                                        unsigned long line = compositor_wl_gather_line(l, y);
+                                        const unsigned char *luma = base + l->luma + line * l->luma_pitch + (unsigned long)l->ox;
+                                        const unsigned char *chroma = base + l->chroma + (line >> 1) * l->chroma_pitch + (unsigned long)l->ox;
+                                        memory_nv12_to_xrgb_row(into + (unsigned long)y * pitch, luma, chroma, (positive)l->width);
                                 }
+                        }
+                        else
+                        {
+                                unsigned int run[1024];
+                                for (long y = 0; y < l->height; y++)
+                                        for (long x = 0; x < l->width; x += 1024)
+                                        {
+                                                unsigned long n = (unsigned long)(l->width - x < 1024 ? l->width - x : 1024);
+                                                compositor_wl_nv12_run(l, base, y, x, n, run);
+                                                memory_copy_rect_u32(into + (unsigned long)y * pitch + (unsigned long)x, pitch, run, n, n, 1);
+                                        }
+                        }
                         compositor_wl_nv12_unmap(l, base);
                         continue;
                 }
@@ -5215,10 +5238,10 @@ static void compositor_wl_flush_held(long slot)
                 compositor_wl_drop(slot);
 }
 
-static void compositor_wl_flush_all(void)
+HOT static void compositor_wl_flush_all(void)
 {
-        for (long slot = 0; slot < compositor_wl.slots; slot++)
-                if (compositor_wl.fd[slot] >= 0 && wayland_out_dirty(slot))
+        for (long slot = wayland_out_dirty_next(0); slot >= 0 && slot < compositor_wl.slots; slot = wayland_out_dirty_next(slot + 1))
+                if (compositor_wl.fd[slot] >= 0)
                         compositor_wl_flush(slot);
         compositor_keytrace_flushed();
 }

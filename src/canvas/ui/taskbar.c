@@ -106,10 +106,10 @@ static unsigned int address_to taskbar_remap(unsigned int address_to old, positi
         return got < 0 && got > -4096 ? null : (unsigned int address_to)got;
 }
 
-static void taskbar_blit_square(unsigned int address_to dst, long dst_pitch, const unsigned int address_to src, long src_pitch, int size)
+static inline void taskbar_blit_square(unsigned int *restrict dst, long dst_pitch, const unsigned int *restrict src, long src_pitch, int size)
 {
-        for (int row = 0; row < size; row++)
-                memory_copy(dst + (long)row * dst_pitch, src + (long)row * src_pitch, (positive)size * 4);
+        if (size > 0)
+                memory_copy_rect_u32(dst, (positive)dst_pitch, src, (positive)src_pitch, (positive)size, (positive)size);
 }
 
 static const char *taskbar_line_value(const char *text, const char *key, char sep)

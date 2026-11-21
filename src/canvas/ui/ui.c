@@ -595,8 +595,23 @@ static inline void ui_touch_end_pinch(struct ui_touch *t, struct ui_touch_out *o
                 ui_touch_put_pinch(out, UI_TOUCH_PINCH_END, t->mid_x, t->mid_y, t->pinch_scale), t->pinching = 0;
 }
 
-static inline unsigned long long ui_touch_isqrt(unsigned long long n)
+static inline INLINE CONST unsigned long long ui_touch_isqrt(unsigned long long n)
 {
+#if defined(__x86_64__)
+        if (likely(n < (1ull << 52)))
+        {
+                unsigned long long r;
+                __asm__("cvtsi2sdq %1, %%xmm0\n\tsqrtsd %%xmm0, %%xmm0\n\tcvttsd2siq %%xmm0, %0" : "=r"(r) : "r"(n) : "xmm0");
+                return r;
+        }
+#elif defined(__aarch64__)
+        if (likely(n < (1ull << 52)))
+        {
+                unsigned long long r;
+                __asm__("ucvtf d0, %1\n\tfsqrt d0, d0\n\tfcvtzu %0, d0" : "=r"(r) : "r"(n) : "d0");
+                return r;
+        }
+#endif
         unsigned long long root = 0, bit = 1ull << 62;
         while (bit > n)
                 bit >>= 2;
@@ -7419,10 +7434,10 @@ static struct ui_ramp address_to ui_ramp_for(unsigned int colour, unsigned int a
 #endif
 
 #ifdef UI_OVER_ASM
-extern unsigned int ui_over_body(unsigned int pixel, unsigned int under) __asm__("ui_over_body")
+extern CONST unsigned int ui_over_body(unsigned int pixel, unsigned int under) __asm__("ui_over_body")
         __attribute__((visibility("hidden")));
 
-static inline unsigned int ui_over(unsigned int pixel, unsigned int under)
+static inline INLINE CONST unsigned int ui_over(unsigned int pixel, unsigned int under)
 {
         return ui_over_body(pixel, under);
 }
@@ -7468,7 +7483,7 @@ asm(".pushsection .text\n"
 
 #else
 // One premultiplied pixel over another.
-static inline unsigned int ui_over(unsigned int pixel, unsigned int under)
+static inline INLINE CONST unsigned int ui_over(unsigned int pixel, unsigned int under)
 {
         unsigned int rest = 255 - (pixel >> 24), out = 0;
         if (!(pixel >> 24))
@@ -10256,13 +10271,7 @@ static fn ui_kit_fill_cols(struct ui address_to ui, const struct ui_box address_
                         for (b32 x = lo; x < a; x++)
                                 ui_kit_put(row, x, clip ? ui_spans_cover(&spans, x) * ui_spans_cover(&cut, x) / UI_FULL : ui_spans_cover(&spans, x), argb);
                         if (b > a && inside)
-                        {
-                                if (inside >= UI_FULL)
-                                        ui_kit_run(row + a, b - a, ui_kit_cover(argb, UI_FULL));
-                                else
-                                        for (b32 x = a; x < b; x++)
-                                                ui_kit_put(row, x, inside, argb);
-                        }
+                                ui_kit_run(row + a, b - a, ui_kit_cover(argb, inside >= UI_FULL ? UI_FULL : inside));
                         for (b32 x = b > a ? b : hi; x < hi; x++)
                                 ui_kit_put(row, x, clip ? ui_spans_cover(&spans, x) * ui_spans_cover(&cut, x) / UI_FULL : ui_spans_cover(&spans, x), argb);
                 }
@@ -10381,11 +10390,8 @@ static fn ui_kit_ring_cols(struct ui address_to ui, const struct ui_box address_
                                 int cover;
                                 if (x == a && b > a)
                                 {
-                                        if (inside >= (int)UI_FULL)
-                                                ui_kit_run(row + a, b - a, ui_premultiplied(argb, UI_FULL));
-                                        else if (inside > 0)
-                                                for (b32 rx = a; rx < b; rx++)
-                                                        ui_kit_put(row, rx, (unsigned int)inside, argb);
+                                        if (inside > 0)
+                                                ui_kit_run(row + a, b - a, ui_premultiplied(argb, inside >= (int)UI_FULL ? UI_FULL : (unsigned int)inside));
                                         x = b - 1;
                                         continue;
                                 }

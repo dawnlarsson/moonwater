@@ -451,8 +451,8 @@ static void compositor_card_release(void)
 {
         if (!compositor.table || !rows_any(&compositor_card.rows))
                 return;
-        for (int row = 0; row < (int)compositor_rows_in_use; row++)
-                if ((rows_has(&compositor.held_rows, row) && rows_has(&compositor_card.rows, row)) && !(compositor.flip_pending && row == compositor.flip_row))
+        for (int row = rows_next(&compositor_card.rows, 0); row >= 0; row = rows_next(&compositor_card.rows, row + 1))
+                if (rows_has(&compositor.held_rows, row) && !(compositor.flip_pending && row == compositor.flip_row))
                 {
                         __atomic_store_n(&compositor.table->shown[row], compositor.taken_held[row], __ATOMIC_RELEASE);
                         rows_del(&compositor.held_rows, row);
@@ -645,12 +645,10 @@ static void compositor_card_after(const unsigned short (*clip)[4], unsigned int 
 static void compositor_card_lists_settle(b32 hung)
 {
         hung |= gpu_recovered != compositor_card.list_recovered;
-        for (int row = 0; row < (int)compositor_rows_in_use && rows_any(&compositor_card.list_rows); row++)
+        for (int row = rows_next(&compositor_card.list_rows, 0); row >= 0; row = rows_next(&compositor_card.list_rows, row + 1))
         {
                 int done;
 
-                if (!rows_has(&compositor_card.list_rows, row))
-                        continue;
                 done = hung ? -1 : gpu_done(compositor_card.list_seq[row]);
                 if (done == 0)
                         continue;
@@ -689,9 +687,8 @@ static void compositor_lists_later(void)
         if (!rows_any(&compositor.list_later))
                 return;
         rows_take(&later, &compositor.list_later);
-        for (int row = 0; row < (int)compositor_rows_in_use; row++)
-                if (rows_has(&later, row))
-                        compositor_take(row);
+        for (int row = rows_next(&later, 0); row >= 0; row = rows_next(&later, row + 1))
+                compositor_take(row);
 }
 
 static void compositor_card_tick(void)
