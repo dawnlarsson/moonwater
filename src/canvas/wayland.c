@@ -5045,11 +5045,13 @@ WAYLAND_API long wayland_pointer_direct_ptrs(long row, unsigned int *ptrs, unsig
         return c->slot + 1;
 }
 
-WAYLAND_API void wayland_pointer_noted(long row, unsigned long serial)
+WAYLAND_API void wayland_pointer_noted(long row, long pressed, unsigned long serial)
 {
         struct wayland_client *c;
+        wayland.buttons += pressed ? 1 : wayland.buttons > 0 ? -1 : 0;
         if (!wayland.host || row != wayland.pointer_row || !wayland_row_surface(row, &c))
                 return;
+        if (pressed) c->press_serial = (unsigned int)serial;
         c->input_serial[c->input_next++ % WAYLAND_INPUT_SERIALS] = (unsigned int)serial;
 }
 

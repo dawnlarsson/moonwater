@@ -298,9 +298,15 @@ int main(void) {
                 return 14;
         }
         unsigned long prev_next = c->input_next;
-        wayland_pointer_noted(0, 777);
-        if (c->input_next != prev_next + 1 || c->input_serial[prev_next % WAYLAND_INPUT_SERIALS] != 777) {
-                fprintf(stderr, "FAIL: wayland_pointer_noted did not record serial\n");
+        wayland_pointer_noted(0, 1, 777);
+        if (c->input_next != prev_next + 1 || c->input_serial[prev_next % WAYLAND_INPUT_SERIALS] != 777 ||
+            wayland.buttons != 1 || c->press_serial != 777) {
+                fprintf(stderr, "FAIL: wayland_pointer_noted did not record press serial/buttons\n");
+                return 15;
+        }
+        wayland_pointer_noted(0, 0, 778);
+        if (wayland.buttons != 0) {
+                fprintf(stderr, "FAIL: wayland_pointer_noted release did not decrement buttons\n");
                 return 15;
         }
         printf("OK wayland_pointer_direct_ptrs + wayland_pointer_noted\n");
@@ -704,6 +710,13 @@ def test_compositor_and_xwm_invariants():
           "if (checked && now >= checked && now - checked < 250000000ull)" in read_text("src/canvas/compositor/session.c") and
           "if (!compositor.table || !rows_any(&compositor_card.rows))" in read_text("src/canvas/compositor/present.c") and
           "if (rows_any(&compositor.held_rows))" in read_text("src/canvas/compositor/scanout.c"))
+    cm_start = inp.find("static void compositor_motion(void)")
+    cm_end = inp.find("static void compositor_shape_sync(void)", cm_start)
+    check("Unlocked/confined cursor latency: DRM_MODE_CURSOR deferred past client delivery, confined skips async cursor & press_serial tracked",
+          "!compositor_wl_held()" in read_text("src/canvas/compositor/kms.c") and
+          cm_start != -1 and cm_end != -1 and
+          inp[cm_start:cm_end].rfind("compositor_cursor_move();") > inp[cm_start:cm_end].rfind("compositor_pointer_to(under);") and
+          "if (pressed) c->press_serial = (unsigned int)serial;" in read_text("src/canvas/wayland.c"))
     check("Steam bowl fixes Win32 dialog inflation (ttf-liberation + 65-moonwater-win32.conf) & GTK dark theme",
           '"ttf-liberation"' in read_text("src/bowl.c") and
           "65-moonwater-win32.conf" in read_text("src/bowl.c") and

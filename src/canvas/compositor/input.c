@@ -1526,19 +1526,17 @@ static void compositor_motion(void)
         compositor_cursor_moved(clock_monotonic_nanoseconds());
         if (compositor.cursor.magnify)
                 compositor_magnify(clock_monotonic_nanoseconds());
-        compositor_cursor_move();
-        if (compositor.motion_ts && !compositor_cursor_in_scene())
-                compositor_latency(0, compositor.motion_ts, clock_monotonic_nanoseconds()), compositor.motion_ts = 0;
         compositor_lit(compositor.resize >= 0 ? compositor.resize : compositor.drag >= 0 ? compositor.drag : under,
                        compositor.resize >= 0 ? compositor.edges[compositor.resize]
                        : compositor.drag >= 0 ? COMPOSITOR_LIT_ALL
                        : compositor.touching ? 0 : zone,
                        compositor.resize >= 0 || compositor.drag >= 0);
-        if (compositor.resize >= 0) { compositor_resize_move(); return; }
+        if (compositor.resize >= 0) { compositor_cursor_move(); compositor_resize_move(); return; }
         if (compositor.drag >= 0)
         {
                 int row = compositor.drag, over_mc;
 
+                compositor_cursor_move();
                 if (compositor.arranged[row] != COMPOSITOR_FLOATING)
                 {
                         if (!ui_touch_past(compositor.press_x, compositor.press_y, compositor.pointer_x, compositor.pointer_y,
@@ -1560,6 +1558,10 @@ static void compositor_motion(void)
                 compositor_pointer_to(compositor.touch.hold_row);
         else if (under >= 0 && !__atomic_load_n(&compositor.table->hover_off[under], __ATOMIC_ACQUIRE))
                 compositor_pointer_to(under);
+        // Deliver pointer motion to the client before the synchronous DRM_MODE_CURSOR ioctl (-15 to -60 us).
+        compositor_cursor_move();
+        if (compositor.motion_ts && !compositor_cursor_in_scene())
+                compositor_latency(0, compositor.motion_ts, clock_monotonic_nanoseconds()), compositor.motion_ts = 0;
 }
 
 static void compositor_shape_sync(void)

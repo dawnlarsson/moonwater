@@ -4810,7 +4810,7 @@ static void compositor_wl_button_noted(unsigned int code, int pressed, unsigned 
                 compositor.button_down &= ~bit;
         if (pressed && row >= 0)
                 compositor_clip_gesture(row);
-        wayland_pointer_noted(row, serial);
+        wayland_pointer_noted(row, pressed, serial);
         compositor_wl_input();
 #ifdef MOONWATER_GPU_C
         compositor_gpu_wake();

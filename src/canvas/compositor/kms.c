@@ -2001,6 +2001,7 @@ static int compositor_cursor_paint(const struct compositor_pointer *p)
 }
 
 static int compositor_wl_locked(void);
+static int compositor_wl_held(void);
 
 // Async cursor-plane fast-path: lets the SCHED_FIFO input reader thread issue DRM_MODE_CURSOR_MOVE directly
 // even while the main compositor loop is busy with presents/Wayland/KMS, so cursor motion never drops a frame.
@@ -2036,7 +2037,7 @@ static void compositor_cursor_async_sync(int active, int hot_x, int hot_y, int i
         unsigned int count = 0;
         const int (*screens)[4] = compositor_screens(&count);
 
-        if (active && compositor.card >= 0 && compositor.cursor.plane_on && !compositor.dark && !compositor_wl_locked() &&
+        if (active && compositor.card >= 0 && compositor.cursor.plane_on && !compositor.dark && !compositor_wl_held() &&
             count > 0 && count <= WINDOWS_OUTPUTS)
         {
                 compositor_cursor_async.card = compositor.card;
