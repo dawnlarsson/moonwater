@@ -4722,11 +4722,14 @@ static void compositor_xwm_read(struct compositor_xwm *x)
 
 /* ---- the socket and the loop ---- */
 
+static void compositor_xwm_register_hooks(void);
+
 static void compositor_xwm_start(void)
 {
         unsigned char address[110];
         long length = 0, got;
 
+        compositor_xwm_register_hooks();
         if (compositor_xwm_listen_fd >= 0)
                 return;
         memory_zero(address, sizeof address);
@@ -5209,6 +5212,81 @@ static int compositor_xwm_steam_pointer(unsigned int pid, unsigned int type, uns
                 compositor_xwm_flush(x);
         }
         return taken;
+}
+
+/* ---- Direct Canvas bridge registrations (input override, DnD, row lifecycle, clipboard) ---- */
+
+static int xwm_steam_input_override(void *ctx, const struct compositor_input_override_event *ev)
+{
+        (void)ctx;
+        if (!ev || !ev->pid)
+                return 0;
+        if (ev->kind == COMPOSITOR_OVERRIDE_QUERY)
+                return compositor_xwm_steam_wants(ev->pid);
+        if (ev->kind == COMPOSITOR_OVERRIDE_KEY)
+                return compositor_xwm_steam_key(ev->pid, (unsigned int)ev->a, ev->b, ev->flags);
+        if (ev->kind == COMPOSITOR_OVERRIDE_POINTER)
+        {
+                int flip = compositor.table && (compositor.table->scroll_off & WINDOW_SCROLL_FLIP) != 0;
+                int notch = (ev->flags & WINDOW_WHEEL_PRECISE) && !(ev->flags & WINDOW_WHEEL_STREAM) ? UI_NOTCH : 120;
+
+                return compositor_xwm_steam_pointer(ev->pid, ev->ev_type, ev->flags, ev->a, ev->b, ev->width, ev->height, flip, notch);
+        }
+        return 0;
+}
+
+static int xwm_dnd_active(void *ctx)
+{
+        (void)ctx;
+        for (int at = 0; at < COMPOSITOR_XWM_SLOTS; at++)
+                if (compositor_xwm_slots[at].fd >= 0 && compositor_xwm_slots[at].xdrag.entered &&
+                    !compositor_xwm_slots[at].xdrag.dropped && !compositor_xwm_slots[at].xdrag.escaped)
+                        return 1;
+        return 0;
+}
+
+static void xwm_dnd_cancel(void *ctx)
+{
+        (void)ctx;
+        (void)compositor_xwm_drag_escape();
+}
+
+static const struct compositor_drag_ops compositor_xwm_drag_ops = {
+        .active = xwm_dnd_active,
+        .cancel = xwm_dnd_cancel,
+};
+
+static void xwm_hook_detach(void *ctx, int row)
+{
+        struct compositor_xwm *x = 0;
+        struct compositor_xwm_window *w = xwm_row_lookup(0, row, &x);
+
+        (void)ctx;
+        if (w && x)
+                xwm_unmapped(x, w);
+}
+
+static void xwm_hook_focus(void *ctx, int old_row, int new_row)
+{
+        (void)ctx;
+        (void)old_row;
+        (void)new_row;
+        for (int at = 0; at < COMPOSITOR_XWM_SLOTS; at++)
+                if (compositor_xwm_slots[at].fd >= 0)
+                        compositor_xwm_slots[at].focus_row = -3;
+}
+
+static const struct compositor_row_hooks compositor_xwm_row_hooks = {
+        .detach = xwm_hook_detach,
+        .focus = xwm_hook_focus,
+};
+
+static void compositor_xwm_register_hooks(void)
+{
+        compositor_input_override_register(xwm_steam_input_override, 0);
+        compositor_dnd_register(&compositor_xwm_drag_ops);
+        compositor_row_hooks_register(&compositor_xwm_row_hooks);
+        compositor_clip_observer_register(compositor_xwm_selection_changed);
 }
 
 /* Test-suite compatibility shims for CHECK_gpu_kit (internal code passes struct compositor_xwm *x explicitly). */

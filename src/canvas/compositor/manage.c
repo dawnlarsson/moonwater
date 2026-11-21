@@ -3449,9 +3449,25 @@ static void compositor_clip_tell(int row, unsigned int which, int what)
                 compositor_post(row, WINDOW_EVENT_CLIP, 0, (int)which, what);
 }
 
-#ifdef CONFIG_MOONWATER_WAYLAND
-static void compositor_wl_selection(unsigned int which);
-#endif
+#define COMPOSITOR_CLIP_OBSERVERS_MAX 8
+static void (*compositor_clip_observers[COMPOSITOR_CLIP_OBSERVERS_MAX])(unsigned int which);
+static unsigned int compositor_clip_observer_count;
+
+static void compositor_clip_observer_register(void (*fn)(unsigned int which))
+{
+        if (!fn || compositor_clip_observer_count >= COMPOSITOR_CLIP_OBSERVERS_MAX)
+                return;
+        for (unsigned int i = 0; i < compositor_clip_observer_count; i++)
+                if (compositor_clip_observers[i] == fn)
+                        return;
+        compositor_clip_observers[compositor_clip_observer_count++] = fn;
+}
+
+static void compositor_clip_notify(unsigned int which)
+{
+        for (unsigned int i = 0; i < compositor_clip_observer_count; i++)
+                compositor_clip_observers[i](which);
+}
 
 // One selection let go, and its watchers told.
 static void compositor_clip_clear(unsigned int which)
@@ -3469,9 +3485,7 @@ static void compositor_clip_clear(unsigned int which)
         for (int row = 0; row < (int)compositor_rows_in_use; row++)
                 if (compositor.table->clip_watch[row])
                         compositor_clip_tell(row, which, WINDOWS_CLIP_CHANGED);
-#ifdef CONFIG_MOONWATER_WAYLAND
-        compositor_wl_selection(which);
-#endif
+        compositor_clip_notify(which);
 }
 
 // Every selection and the history let go: the service turned off, or `moonwater clipboard clear`.
@@ -3630,9 +3644,7 @@ static void compositor_clip_keep(unsigned int which, int opened, unsigned long l
         for (int row = 0; row < (int)compositor_rows_in_use; row++)
                 if (compositor.table->clip_watch[row] && row != owner)
                         compositor_clip_tell(row, which, WINDOWS_CLIP_CHANGED);
-#ifdef CONFIG_MOONWATER_WAYLAND
-        compositor_wl_selection(which);
-#endif
+        compositor_clip_notify(which);
 }
 
 /*

@@ -1032,7 +1032,6 @@ static void compositor_wl_counts(int dx, int dy, int udx, int udy, positive now)
 static void compositor_wl_hold_keep(void);
 static void compositor_wl_input(void);
 static int compositor_wl_suspends(unsigned int code, int value, int super);
-static int compositor_wl_steam_key(unsigned int code, int value, unsigned int modifiers);
 #else
 // No Wayland shim in the build: no window holds the pointer, and the hand's counts are nobody's.
 static int compositor_wl_locked(void)
@@ -1203,11 +1202,7 @@ static void compositor_key(unsigned int at, unsigned int code, int value, positi
         chord = modifiers & (WINDOW_KEY_SHIFT | WINDOW_KEY_CONTROL | WINDOW_KEY_ALT);
         mods4 = chord | (modifiers & WINDOW_KEY_SUPER);
         if (!compositor_steam_passes(code, (int)value, modifiers, chord) &&
-            ((compositor_input_overrides && compositor_input_override_key(compositor.focus, code, (int)value, modifiers))
-#ifdef CONFIG_MOONWATER_WAYLAND
-             || compositor_wl_steam_key(code, (int)value, modifiers)
-#endif
-                 ))
+            compositor_input_overrides && compositor_input_override_key(compositor.focus, code, (int)value, modifiers))
         {
                 if ((bit & (CK_HELD_ALT | CK_HELD_ALTGR)) && !(modifiers & WINDOW_KEY_ALT) && compositor.cycle)
                         compositor_focus_commit();

@@ -133,7 +133,7 @@ static unsigned int compositor_loop_by[WINDOWS_LOOP_SOURCES], compositor_loop_by
 // Where each part of the loop's poll list is (compositor_loop_wanted builds it): 0 for a part that is not in it this turn.
 struct compositor_slots
 {
-        unsigned int count, inputs, doors, done_at, card_at, fence_at, uevents_at, clip_at, wayland_at;
+        unsigned int count, inputs, doors, done_at, card_at, fence_at, uevents_at, clip_at, wayland_at, xwm_at;
 };
 
 // The source of a poll slot that returned events (the same order compositor_main builds the slots in). The card's job's fence is the card's.

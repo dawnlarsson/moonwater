@@ -2818,9 +2818,10 @@ static int compositor_row_is_steam(int row)
 }
 
 #ifdef CONFIG_MOONWATER_WAYLAND
-// The Wayland shim: the protocol (wayland.c) and the compositor's side of it, the socket and the host (wayland_host.c).
+// Peer Canvas protocol bridges: Wayland (wayland.c + wayland_host.c) and X11/Xwayland WM (xwm.c).
 #include "wayland.c"
 #include "wayland_host.c"
+#include "xwm.c"
 
 static int compositor_wl_started(void)
 {
@@ -2873,9 +2874,12 @@ static int compositor_picture_poll(int row)
 #ifndef COMPOSITOR_WL_POLLS
 #define COMPOSITOR_WL_POLLS 0
 #endif
+#ifndef COMPOSITOR_XWM_POLLS
+#define COMPOSITOR_XWM_POLLS 0
+#endif
 #define COMPOSITOR_POLLS_OWN 7
-// The list's room for `rows` rows in use and the clients there are (COMPOSITOR_WL_POLLS): the list grows with them (compositor_polls).
-#define COMPOSITOR_POLLS_FOR(rows) (COMPOSITOR_POLLS_OWN + COMPOSITOR_INPUTS + (unsigned long)(rows) + COMPOSITOR_WL_POLLS)
+// The list's room for `rows` rows in use and peer protocol bridges (Wayland + XWM): the list grows with them (compositor_polls).
+#define COMPOSITOR_POLLS_FOR(rows) (COMPOSITOR_POLLS_OWN + COMPOSITOR_INPUTS + (unsigned long)(rows) + COMPOSITOR_WL_POLLS + COMPOSITOR_XWM_POLLS)
 #define COMPOSITOR_POLLS_MOST (1L << 26) // the entries the list's reservation has room for: address space only
 static struct compositor_poll *compositor_polls_at;
 static long compositor_polls_room;
@@ -3147,6 +3151,7 @@ static int compositor_rows_make(unsigned int rows)
                 compositor_rows_point();
 #ifdef CONFIG_MOONWATER_WAYLAND
                 compositor_wl_register_hooks();
+                compositor_xwm_register_hooks();
 #endif
         }
         if (rows <= compositor_rows_made)
@@ -3415,7 +3420,10 @@ static void compositor_loop_wanted(struct compositor_poll *wanted, struct compos
                 slots->clip_at = count, wanted[count++] = (struct compositor_poll){compositor_clip.door, COMPOSITOR_POLLIN, 0};
 #ifdef CONFIG_MOONWATER_WAYLAND
         if (!held)
+        {
                 slots->wayland_at = count, count = compositor_wl_poll(wanted, count);
+                slots->xwm_at = count, count = compositor_xwm_poll(wanted, count, count);
+        }
 #endif
         slots->count = count;
 }
@@ -3775,6 +3783,7 @@ static b32 compositor_main()
                 compositor_headless_scale();
 #ifdef CONFIG_MOONWATER_WAYLAND
         compositor_wl_start();
+        compositor_xwm_start();
 #endif
         // The theme goes in the table it now has, and what a hand takes (read before there was a table) with it,
         // along with the keyboard's setting (compositor_osk_sync writes the table).
@@ -3801,7 +3810,7 @@ static b32 compositor_main()
                 struct compositor_poll *wanted = compositor_polls(); // every part of it is counted where it is added (COMPOSITOR_POLLS_FOR)
                 struct compositor_slots slots;
                 static unsigned int turns;
-                unsigned int count, inputs, doors, card_at, fence_at, uevents_at, clip_at, wayland_at, done_at;
+                unsigned int count, inputs, doors, card_at, fence_at, uevents_at, clip_at, wayland_at, xwm_at, done_at;
                 positive now = 0, until = 0;
                 b32 idle_turn = 0, held, again = 0;
                 long awaited, wait[2];
@@ -3815,7 +3824,7 @@ static b32 compositor_main()
                 {
                         sling = 0, again = 1, slots = sling_slots, held = sling_held, until = sling_until;
                         count = slots.count, inputs = slots.inputs, doors = slots.doors, done_at = slots.done_at, card_at = slots.card_at;
-                        fence_at = slots.fence_at, uevents_at = slots.uevents_at, clip_at = slots.clip_at, wayland_at = slots.wayland_at;
+                        fence_at = slots.fence_at, uevents_at = slots.uevents_at, clip_at = slots.clip_at, wayland_at = slots.wayland_at, xwm_at = slots.xwm_at;
                         now = clock_monotonic_nanoseconds();
                         goto compositor_sling_poll;
                 }
@@ -3841,7 +3850,7 @@ static b32 compositor_main()
                 }
                 compositor_loop_wanted(wanted, &slots, held);
                 count = slots.count, inputs = slots.inputs, doors = slots.doors, done_at = slots.done_at, card_at = slots.card_at, fence_at = slots.fence_at;
-                uevents_at = slots.uevents_at, clip_at = slots.clip_at, wayland_at = slots.wayland_at;
+                uevents_at = slots.uevents_at, clip_at = slots.clip_at, wayland_at = slots.wayland_at, xwm_at = slots.xwm_at;
                 // A part that adds an entry and not its count (COMPOSITOR_POLLS) has written past the list: said and ended at once, not polled.
                 if (count > COMPOSITOR_POLLS_FOR(compositor_rows_in_use))
                 {
@@ -3978,6 +3987,12 @@ static b32 compositor_main()
 #ifdef CONFIG_MOONWATER_WAYLAND
                 if (wayland_at && compositor_wl.started)
                         compositor_wl_pass(wanted + wayland_at);
+                if (xwm_at)
+                {
+                        compositor_xwm_pass(wanted + xwm_at);
+                        if (compositor_wl.started)
+                                compositor_wl_resume_stalled();
+                }
 #endif
                 if (card_at && wanted[card_at].returned)
                         compositor_card_read();
@@ -4163,6 +4178,7 @@ static b32 compositor_main()
         }
 
 #ifdef CONFIG_MOONWATER_WAYLAND
+        compositor_xwm_stop();
         compositor_wl_stop();
 #endif
         compositor_vrr_off();

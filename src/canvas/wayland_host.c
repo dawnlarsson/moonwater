@@ -4977,8 +4977,10 @@ static void compositor_wl_clip_push(void *context, long row, long which, const c
 
 /* ---- drag and drop: Wayland bridge registered onto Canvas's native compositor_dnd_* engine ---- */
 
+/* Minimal Xwayland cross-bridge declarations (xwm.c is included directly by compositor.c as a peer bridge). */
 static void compositor_xwm_receive(long client, long which, const char *mime, long fd);
-static int compositor_xwm_drag_escape(void);
+static long compositor_xwm_xdrag(long what, long row, long x, long y);
+static int compositor_xwm_row_is_x(int row);
 
 static int compositor_wl_drag_push(const char *mime, long fd)
 {
@@ -5122,11 +5124,7 @@ static void wl_dnd_finished(void *ctx, int ok)
 static void wl_dnd_cancel(void *ctx)
 {
         (void)ctx;
-        if (!compositor_wl.started)
-                return;
-        if (wayland_x_dragging())
-                compositor_xwm_drag_escape();
-        else if (wayland_dragging())
+        if (compositor_wl.started && wayland_dragging())
                 wayland_drag_cancel();
 }
 
@@ -5232,13 +5230,9 @@ static void compositor_wl_clip_clear(void *context, long client, long which)
                 compositor_clip_clear((unsigned int)which);
 }
 
-// What the clipboard changed: the window manager of Xwayland is told first (its X side, xwm.c), then the shim offers it to the client
-// that has the keys.
-static void compositor_xwm_selection_changed(unsigned int which);
-
+// Clipboard observer registered directly onto Canvas (manage.c).
 static void compositor_wl_selection(unsigned int which)
 {
-        compositor_xwm_selection_changed(which);
         if (compositor_wl.started)
                 wayland_selection_changed((long)which);
 }
@@ -5253,16 +5247,6 @@ static void compositor_wl_xreceive(void *context, long client, long which, const
         else
                 compositor_xwm_receive(client, which, mime, fd);
 }
-
-// A Wayland drag over an X window, or the end of a drag across the bridge (xwm.c).
-static long compositor_xwm_xdrag(long what, long row, long x, long y);
-// Steam's overlay in a game on Wayland (xwm.c): what its window wants, and the keys and the pointer sent to the overlay while it is open.
-static int compositor_xwm_steam_wants(unsigned int pid);
-static int compositor_xwm_steam_key(unsigned int pid, unsigned int code, int value, unsigned int modifiers);
-static int compositor_xwm_steam_pointer(unsigned int pid, unsigned int type, unsigned int flags, int a, int b, int width, int height,
-                                        int flip, int notch);
-
-static int compositor_xwm_row_is_x(int row);
 
 // The host's target of a drag: an X window's is the window manager's, a program's Canvas's compositor_dnd (compositor_wl_drag_host); its end both's.
 static long compositor_wl_xdrag(void *context, long what, long row, long x, long y)
@@ -5412,9 +5396,6 @@ static const struct wayland_host compositor_wl_host = {
     compositor_wl_row_app,
 };
 
-/* The window manager of Xwayland (xwm.c): its socket, its connection and its window table, all in fixed storage. */
-#include "xwm.c"
-
 /* ---- the socket ---- */
 
 /*
@@ -5447,6 +5428,7 @@ static void compositor_wl_register_hooks(void)
 {
         canvas_ext_register(&compositor_wl_ext_ops);
         compositor_dnd_register(&compositor_wl_drag_ops);
+        compositor_clip_observer_register(compositor_wl_selection);
 }
 
 static void compositor_wl_start(void)
@@ -5503,7 +5485,6 @@ static void compositor_wl_start(void)
         wayland_syncobj_host(&compositor_wl_syncobj);
         compositor_wl.started = 1;
         compositor_wl.zero_row = -1;
-        compositor_xwm_start();
         // The X server's protocols go to the user the window manager's socket takes (compositor_xwm_accept), and to no other.
         wayland_xwayland_user(compositor_call(syscall(getuid), 0, 0, 0, 0, 0, 0));
         for (long at = 0; at < compositor_wl.transfers; at++)
@@ -5643,14 +5624,13 @@ static void compositor_wl_direct_keys_make(void)
         for (unsigned int at = 0; at < compositor_keys.count; at++)
                 if ((modifiers & (WINDOW_KEY_SHIFT | WINDOW_KEY_CONTROL | WINDOW_KEY_ALT | WINDOW_KEY_SUPER)) == compositor_keys.modifiers[at])
                         compositor_wl_direct.keys_refused[compositor_keys.code[at] >> 3] |= (unsigned char)(1u << (compositor_keys.code[at] & 7));
-        // A game with Steam's overlay window: its Tab is read in the loop (Shift+Tab is the overlay's), and while the overlay is open
-        // no key is sent from here (every key is the overlay's).
+        // Input override query (e.g. Steam overlay): Tab routes through loop (Shift+Tab); while active (2), no direct keys.
         {
-                int steam = compositor_xwm_steam_wants(compositor.table ? __atomic_load_n(&compositor.table->pid[row], __ATOMIC_ACQUIRE) : 0);
+                int ov = compositor_input_override_query(row);
 
-                if (steam == 2)
+                if (ov == 2)
                         return;
-                if (steam)
+                if (ov)
                         compositor_wl_direct.keys_refused[CK_KEY_TAB >> 3] |= (unsigned char)(1u << (CK_KEY_TAB & 7));
         }
         compositor_wl_direct.keys_slot = (int)slot, compositor_wl_direct.keys_fd = compositor_wl.fd[slot], compositor_wl_direct.keys_row = row;
@@ -6049,11 +6029,9 @@ static void compositor_wl_flush_all(void)
 /* Where the polls for the clients go in the loop's list, and what comes of them. COMPOSITOR_WL_POLLS is the most this adds, which
    the loop's list is sized by (COMPOSITOR_POLLS): the socket, every client, the transfers' knock, the dma-buf of every client
    stalled on one, and the X window manager's. An entry added here is added to it. */
-#define COMPOSITOR_WL_POLLS (1 + compositor_wl.slots + 1 + compositor_wl.slots + COMPOSITOR_XWM_POLLS)
+#define COMPOSITOR_WL_POLLS (1 + compositor_wl.slots + 1 + compositor_wl.slots)
 static unsigned int compositor_wl_poll(struct compositor_poll *wanted, unsigned int count)
 {
-        unsigned int base = count;
-
         if (!compositor_wl.started)
                 return count;
         wanted[count++] = (struct compositor_poll){compositor_wl.listen, COMPOSITOR_POLLIN, 0};
@@ -6082,8 +6060,7 @@ static unsigned int compositor_wl_poll(struct compositor_poll *wanted, unsigned 
                 if (compositor_wl.fd[slot] >= 0 && wayland_stall_due(slot, &fd) && fd >= 0)
                         wanted[count++] = (struct compositor_poll){(int)fd, COMPOSITOR_POLLIN, 0};
         }
-        // The window manager of Xwayland (xwm.c): its listening socket and its connection.
-        return compositor_xwm_poll(wanted, count, base);
+        return count;
 }
 
 static void compositor_wl_target(void); // the vblank a commit for a time is held against, said to the shim (below)
@@ -6165,15 +6142,6 @@ static void compositor_wl_pass(const struct compositor_poll *wanted)
         // The transfers whose threads have ended: each thread ends itself at its deadline, so the loop waits on nothing else of them.
         if (wanted[1 + compositor_wl.slots].returned)
                 compositor_wl_transfers_done();
-        compositor_xwm_pass(wanted);
-        // A commit that waited for the window manager to say what an X window is, made now that it has.
-        for (long slot = 0; slot < compositor_wl.slots; slot++)
-                if (compositor_wl.fd[slot] >= 0 && wayland_stalled(slot))
-                {
-                        wayland_resume(slot);
-                        if (wayland_dead(slot))
-                                compositor_wl_flush(slot);
-                }
 }
 
 /* ---- input: the pointer and the keys, as a client is told of them ---- */
@@ -6243,17 +6211,6 @@ static int compositor_wl_suspends(unsigned int code, int value, int super)
         reading of a key (its characters, its dead accents) is for its own windows, which a client does by its keymap. True
         when the key was a client's.
 */
-// A key while a game on Wayland with Steam's overlay window has the keys: its Shift+Tab, and every key while the overlay is
-// open, go to the overlay (xwm.c). True when the key was the overlay's.
-static int compositor_wl_steam_key(unsigned int code, int value, unsigned int modifiers)
-{
-        int row;
-
-        if (!compositor_wl.started || !compositor.table || (row = compositor_wl_key_row()) < 0)
-                return 0;
-        return compositor_xwm_steam_key(__atomic_load_n(&compositor.table->pid[row], __ATOMIC_ACQUIRE), code, value, modifiers);
-}
-
 static int compositor_wl_key(unsigned int code, int value)
 {
         int row;
@@ -6323,13 +6280,6 @@ static void compositor_wl_drain(int row)
                         continue;
                 }
                 if (type != WINDOW_EVENT_MOTION && type != WINDOW_EVENT_BUTTON && type != WINDOW_EVENT_WHEEL)
-                        continue;
-                // Steam's overlay open over a game on Wayland: the pointer is the overlay's (xwm.c), and none of it the game's; a finger
-                // too, as the kit's press and motion (the overlay reads no touch), though the game holds a wl_touch. The window's size
-                // is what the coordinates are scaled from; the turn's sign and notch are as the client's below would be.
-                if (compositor_xwm_steam_pointer(__atomic_load_n(&table->pid[row], __ATOMIC_ACQUIRE), type, flags, a, b, (int)compositor.w[row],
-                                                 (int)compositor.h[row], (table->scroll_off & WINDOW_SCROLL_FLIP) != 0,
-                                                 (flags & WINDOW_WHEEL_PRECISE) && !(flags & WINDOW_WHEEL_STREAM) ? UI_NOTCH : 120))
                         continue;
                 // A finger on a window whose client holds a wl_touch is told of by its touch (compositor_wl_touch_report): the
                 // pointer's version of the same finger (the kit's press and motion, which say so) is not sent to that client.
@@ -6415,8 +6365,7 @@ static void compositor_wl_wake(void)
         {
                 int keys = compositor_wl_key_row();
 
-                wayland_unhold_row(keys >= 0 && compositor_xwm_steam_wants(__atomic_load_n(&compositor.table->pid[keys], __ATOMIC_ACQUIRE)) == 2
-                                           ? keys : -1);
+                wayland_unhold_row(keys >= 0 && compositor_input_override_query(keys) == 2 ? keys : -1);
         }
         if (stats.rows > 0 || stats.clients > 0)
         {
@@ -6620,8 +6569,8 @@ static void compositor_wl_touch_report(unsigned int at, int dropped)
                         if (screen->was[slot] < 0)
                         {
                                 row = compositor_picture_under(x, y);
-                                // A game whose Steam overlay is open is told no new finger: the overlay has it (compositor_wl_drain).
-                                if (row >= 0 && (!compositor.table || compositor_xwm_steam_wants(__atomic_load_n(&compositor.table->pid[row], __ATOMIC_ACQUIRE)) != 2))
+                                // Input override active on row (e.g. Steam overlay): suppress new wl_touch fingers.
+                                if (row >= 0 && compositor_input_override_query(row) != 2)
                                 {
                                         int wx, wy;
 
@@ -6733,7 +6682,6 @@ static void compositor_wl_stop(void)
         for (long at = 0; at < 16; at++)
                 if (compositor_wl.keymap[at] >= 0)
                         system_close(compositor_wl.keymap[at]);
-        compositor_xwm_stop();
         system_close(compositor_wl.listen);
         compositor_wl.listen = -1;
         compositor_wl.started = 0;
