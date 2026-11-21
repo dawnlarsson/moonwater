@@ -1118,10 +1118,17 @@ static fn bowl_isolated_devices(void)
 {
         bowl_isolated_dir_grant("/dev/dri", "renderD", 105);
         bowl_isolated_dir_grant("/dev/dri", "card", 44);
+        bowl_isolated_dir_grant("/dev", "video", 44);
+        bowl_isolated_dir_grant("/dev", "media", 44);
         bowl_isolated_node_grant("/dev/kfd", 105);
         bowl_isolated_node_grant("/dev/udmabuf", 105);
         if (system_access_at(AT_FDCWD, "/dev/ntsync", 0) >= 0)
                 system_change_mode_at(AT_FDCWD, "/dev/ntsync", 0666);
+#if MOONWATER_STRICT_BOWL < STRICT_LOCKED
+        if (system_access_at(AT_FDCWD, "/dev/fuse", 0) >= 0)
+                system_change_mode_at(AT_FDCWD, "/dev/fuse", 0666);
+        bowl_isolated_node_grant("/dev/kvm", 105);
+#endif
         bowl_isolated_dir_grant("/dev/dma_heap", null, 105);
         bowl_isolated_dir_grant("/dev", "nvidia", 105);
 }
@@ -3659,34 +3666,30 @@ static string_address bowl_language_offered(string_address path)
 #define BOWL_WORKAROUNDS_PATH "/root/workarounds"
 #define BOWL_PR_SET_TIMERSLACK 29
 
-static bool bowl_workaround_on(string_address name, bool default_on)
+static bool bowl_wa_loaded;
+static bool bowl_wa_timerslack = true;
+static bool bowl_wa_mailbox = false;
+static bool bowl_wa_glthread = false;
+
+static bool bowl_workaround_in(const p8 address_to text, positive got, string_address name, bool default_on)
 {
-        p8 text[512];
-        bipolar fd = system_open_at(AT_FDCWD, BOWL_WORKAROUNDS_PATH, FILE_READ | O_CLOEXEC);
-        bipolar got;
         positive at = 0;
         positive nlen = string_length(name);
 
-        if (fd < 0)
-                return default_on;
-        got = system_call_3(syscall(read), (positive)fd, (positive)text, sizeof(text) - 1);
-        system_close((positive)fd);
-        if (got <= 0)
-                return default_on;
-        while (at < (positive)got)
+        while (at < got)
         {
                 positive start = at;
                 positive len;
 
-                while (at < (positive)got && text[at] != '\n')
+                while (at < got && text[at] != '\n')
                         at++;
                 len = at - start;
-                if (at < (positive)got)
+                if (at < got)
                         at++;
                 if (len > nlen && !memory_compare(text + start, name, nlen) && text[start + nlen] == ' ')
                 {
                         positive vlen = len - nlen - 1;
-                        p8 address_to val = text + start + nlen + 1;
+                        const p8 address_to val = text + start + nlen + 1;
 
                         if (vlen == 3 && !memory_compare(val, "off", 3))
                                 return false;
@@ -3695,6 +3698,28 @@ static bool bowl_workaround_on(string_address name, bool default_on)
                 }
         }
         return default_on;
+}
+
+/* Read /root/workarounds once (before bowl_become_user drops root, so a 0700 /root still works). */
+static fn bowl_workarounds_load(void)
+{
+        p8 text[512];
+        bipolar fd;
+        bipolar got;
+
+        if (bowl_wa_loaded)
+                return;
+        bowl_wa_loaded = true;
+        fd = system_open_at(AT_FDCWD, BOWL_WORKAROUNDS_PATH, FILE_READ | O_CLOEXEC);
+        if (fd < 0)
+                return;
+        got = system_call_3(syscall(read), (positive)fd, (positive)text, sizeof(text) - 1);
+        system_close((positive)fd);
+        if (got <= 0)
+                return;
+        bowl_wa_timerslack = bowl_workaround_in(text, (positive)got, "bowl-timerslack", true);
+        bowl_wa_mailbox = bowl_workaround_in(text, (positive)got, "vk-mailbox", false);
+        bowl_wa_glthread = bowl_workaround_in(text, (positive)got, "mesa-glthread", false);
 }
 
 static string_address address_to bowl_environment(
@@ -3707,9 +3732,12 @@ static string_address address_to bowl_environment(
              have_vk_present = false, have_glthread = false;
         bool offer_bus = bowl_session_bus_offered(),
              offer_sound = bowl_sound_offered(),
-             offer_wayland = bowl_wayland_offered(),
-             offer_mailbox = bowl_workaround_on("vk-mailbox", false),
-             offer_glthread = bowl_workaround_on("mesa-glthread", false);
+             offer_wayland = bowl_wayland_offered();
+        bool offer_mailbox, offer_glthread;
+
+        bowl_workarounds_load();
+        offer_mailbox = bowl_wa_mailbox;
+        offer_glthread = bowl_wa_glthread;
         string_address language = bowl_language_offered((string_address)BOWL_LANGUAGE_PATH);
         positive n = 0;
         b32 skipped = false;
@@ -4455,8 +4483,12 @@ static fn bowl_own_namespace(void)
 
 #define BOWL_RLIMIT_NOFILE 7
 #define BOWL_RLIMIT_MEMLOCK 8
+#define BOWL_RLIMIT_NICE 13
+#define BOWL_RLIMIT_RTPRIO 14
 #define BOWL_NOFILE_TARGET ((p64)524288)
 #define BOWL_MEMLOCK_TARGET ((p64)64 * 1024 * 1024)
+#define BOWL_NICE_TARGET ((p64)30)
+#define BOWL_RTPRIO_TARGET ((p64)20)
 
 static fn bowl_raise_rlimit(positive resource, p64 target)
 {
@@ -4487,6 +4519,8 @@ static fn bowl_resource_limits(void)
         bowl_raise_rlimit(BOWL_RLIMIT_NOFILE, BOWL_NOFILE_TARGET);
 #if MOONWATER_STRICT_BOWL < STRICT_LOCKED
         bowl_raise_rlimit(BOWL_RLIMIT_MEMLOCK, BOWL_MEMLOCK_TARGET);
+        bowl_raise_rlimit(BOWL_RLIMIT_NICE, BOWL_NICE_TARGET);
+        bowl_raise_rlimit(BOWL_RLIMIT_RTPRIO, BOWL_RTPRIO_TARGET);
 #endif
 }
 
@@ -4508,6 +4542,7 @@ static b32 bowl_launch(string_address root, string_address program,
                               "desktop session\n"));
 
         bowl_resource_limits();
+        bowl_workarounds_load();
         bowl_pad_root = bowl_is_root();
         bowl_pad_granted = bowl_input_granted(root);
         if (!isolated && program && !bowl_as_root && bowl_pad_root)
@@ -4523,7 +4558,7 @@ static b32 bowl_launch(string_address root, string_address program,
                 bowl_own_namespace();
         environment = bowl_environment(file_environment_all());
         environment = bowl_without_exposed_path(environment);
-        if (bowl_workaround_on("bowl-timerslack", true))
+        if (bowl_wa_timerslack)
                 (void)system_call_2(syscall(prctl), BOWL_PR_SET_TIMERSLACK, 1);
         if (!bowl_capabilities_wanted(environment))
                 bowl_drop_ambient_capabilities();

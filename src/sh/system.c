@@ -394,8 +394,15 @@ static COLD fn system_render_group(void)
         }
         system_device_grant("/dev/kfd", SYSTEM_RENDER_GID);
         system_device_grant("/dev/udmabuf", SYSTEM_RENDER_GID);
+        system_directory_grant("/dev", "video", SYSTEM_VIDEO_GID);
+        system_directory_grant("/dev", "media", SYSTEM_VIDEO_GID);
         if (system_access_at(AT_FDCWD, "/dev/ntsync", 0) >= 0)
                 system_change_mode_at(AT_FDCWD, "/dev/ntsync", 0666);
+#if MOONWATER_STRICT_HOST < STRICT_LOCKED
+        if (system_access_at(AT_FDCWD, "/dev/fuse", 0) >= 0)
+                system_change_mode_at(AT_FDCWD, "/dev/fuse", 0666);
+        system_device_grant("/dev/kvm", SYSTEM_RENDER_GID);
+#endif
         system_directory_grant("/dev/dma_heap", null, SYSTEM_RENDER_GID);
         system_directory_grant("/dev", "nvidia", SYSTEM_RENDER_GID);
 }
@@ -595,6 +602,8 @@ static COLD fn system_resource_limits(void)
         bowl_raise_rlimit(BOWL_RLIMIT_NOFILE, BOWL_NOFILE_TARGET);
 #if MOONWATER_STRICT_HOST < STRICT_LOCKED
         bowl_raise_rlimit(BOWL_RLIMIT_MEMLOCK, BOWL_MEMLOCK_TARGET);
+        bowl_raise_rlimit(BOWL_RLIMIT_NICE, BOWL_NICE_TARGET);
+        bowl_raise_rlimit(BOWL_RLIMIT_RTPRIO, BOWL_RTPRIO_TARGET);
 #endif
 }
 
@@ -607,6 +616,7 @@ static DEAD_END b32 system_init()
 #endif
 #if !defined(SHELL_NO_CANVAS) && MOONWATER_STRICT_HOST < STRICT_LOCKED
         system_sysctl("/proc/sys/vm/max_map_count", "1048576\n");
+        system_sysctl("/proc/sys/kernel/split_lock_mitigate", "0\n");
         /*  Desktop memory, compaction, mTHP and network latency tuning:
             fixed dirty byte caps prevent multi-GiB writeback stalls on high-RAM
             machines; zero watermark_boost and compaction_proactiveness avoid
