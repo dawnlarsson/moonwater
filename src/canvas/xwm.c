@@ -137,6 +137,7 @@ static const struct { const char *name; unsigned char len; } xwm_ext_spec[4] = {
 #define COMPOSITOR_XWM_DESKTOP 8192u
 #define COMPOSITOR_XWM_TRAY_ICON 16384u
 #define COMPOSITOR_XWM_ABOVE 65536u
+#define COMPOSITOR_XWM_HIDDEN 131072u
 #define COMPOSITOR_XWM_POPUPISH (COMPOSITOR_XWM_OVERRIDE | COMPOSITOR_XWM_POPUPTYPE)
 #define COMPOSITOR_XWM_EAGAIN (-11)
 #define COMPOSITOR_XWM_MSG_DONTWAIT 0x40
@@ -346,9 +347,9 @@ static int xwm_wait_prop(struct compositor_xwm *x, unsigned int win, unsigned in
         return compositor_xwm_wait(x, req, xwm_enc_get_property(req, sizeof req, 0, win, prop, type, 0, len), win, what, slot);
 }
 
-static void compositor_xwm_wm_state(struct compositor_xwm *x, unsigned int window)
+static void compositor_xwm_wm_state(struct compositor_xwm *x, unsigned int window, unsigned int state)
 {
-        unsigned int vals[2] = {COMPOSITOR_XWM_STATE_NORMAL, 0};
+        unsigned int vals[2] = {state, 0};
         compositor_xwm_put32(x, window, x->atoms[COMPOSITOR_XWM_A_WM_STATE], x->atoms[COMPOSITOR_XWM_A_WM_STATE], vals, 2);
 }
 
@@ -422,17 +423,18 @@ static void compositor_xwm_allow_commits(struct compositor_xwm *x, unsigned int 
         compositor_xwm_put32(x, window, x->atoms[COMPOSITOR_XWM_A_ALLOW_COMMITS], COMPOSITOR_XWM_ALLOW_TYPE, &one, 1);
 }
 
-static const struct { unsigned short atom_idx; unsigned int bit; } xwm_net_state_map[4] = {
+static const struct { unsigned short atom_idx; unsigned int bit; } xwm_net_state_map[5] = {
         {COMPOSITOR_XWM_A_FULLSCREEN, COMPOSITOR_XWM_FULLSCREEN},
         {COMPOSITOR_XWM_A_MAX_VERT, COMPOSITOR_XWM_MAX_VERT},
         {COMPOSITOR_XWM_A_MAX_HORZ, COMPOSITOR_XWM_MAX_HORZ},
         {COMPOSITOR_XWM_A_ABOVE, COMPOSITOR_XWM_ABOVE},
+        {COMPOSITOR_XWM_A_HIDDEN, COMPOSITOR_XWM_HIDDEN},
 };
 
 static unsigned int xwm_net_state_bits(const struct compositor_xwm *x, unsigned int a, unsigned int b)
 {
         unsigned int bits = 0;
-        for (unsigned int i = 0; i < 4; i++)
+        for (unsigned int i = 0; i < 5; i++)
                 if (x->atoms[xwm_net_state_map[i].atom_idx] &&
                     (a == x->atoms[xwm_net_state_map[i].atom_idx] || b == x->atoms[xwm_net_state_map[i].atom_idx]))
                         bits |= xwm_net_state_map[i].bit;
@@ -446,8 +448,8 @@ static unsigned int xwm_net_state_apply(unsigned int action, unsigned int cur, u
 
 static void compositor_xwm_net_state(struct compositor_xwm *x, unsigned int window, int state)
 {
-        unsigned int vals[4], count = 0;
-        for (unsigned int i = 0; i < 4; i++)
+        unsigned int vals[5], count = 0;
+        for (unsigned int i = 0; i < 5; i++)
                 if (((unsigned int)state & xwm_net_state_map[i].bit) && x->atoms[xwm_net_state_map[i].atom_idx])
                         vals[count++] = x->atoms[xwm_net_state_map[i].atom_idx];
         compositor_xwm_put32(x, window, x->atoms[COMPOSITOR_XWM_A_NET_STATE], COMPOSITOR_XWM_ATOM_TYPE, vals, count);
@@ -1091,7 +1093,7 @@ static void xwm_unmapped(struct compositor_xwm *x, struct compositor_xwm_window 
         if (w->id && w->id == x->focus_window)
                 x->focus_window = 0, x->focus_row = -3;
         xwm_row_unbind(x, w);
-        w->state &= ~(COMPOSITOR_XWM_ADOPTED | COMPOSITOR_XWM_RAISED | COMPOSITOR_XWM_COVERED);
+        w->state &= ~(COMPOSITOR_XWM_ADOPTED | COMPOSITOR_XWM_RAISED | COMPOSITOR_XWM_COVERED | COMPOSITOR_XWM_HIDDEN);
         w->closes = 0, w->sent_x = w->sent_y = COMPOSITOR_XWM_NO_PLACE, w->sent_w = w->sent_h = 0, x->last_stack_gen = 0;
 }
 
@@ -1292,8 +1294,13 @@ static void compositor_xwm_sync(struct compositor_xwm *x, struct compositor_xwm_
         if (!(w->state & COMPOSITOR_XWM_FULLSCREEN))
                 w->state = f.filling ? (w->state | COMPOSITOR_XWM_MAXIMIZED) : (w->state & ~COMPOSITOR_XWM_MAXIMIZED);
         w->state = f.layer == WINDOW_LAYER_ABOVE ? (w->state | COMPOSITOR_XWM_ABOVE) : (w->state & ~COMPOSITOR_XWM_ABOVE);
+        w->state = f.minimized ? (w->state | COMPOSITOR_XWM_HIDDEN) : (w->state & ~COMPOSITOR_XWM_HIDDEN);
         if (w->state != prev_state)
+        {
                 compositor_xwm_net_state(x, w->id, (int)w->state);
+                if ((w->state ^ prev_state) & COMPOSITOR_XWM_HIDDEN)
+                        compositor_xwm_wm_state(x, w->id, f.minimized ? COMPOSITOR_XWM_STATE_ICONIC : COMPOSITOR_XWM_STATE_NORMAL);
+        }
         c.x = compositor_xwm_to_x(f.x, 0), c.y = compositor_xwm_to_x(f.y, 1);
         if (c.x != w->sent_x || c.y != w->sent_y || c.x != w->x || c.y != w->y)
                 c.mask |= XWM_CONFIGURE_X | XWM_CONFIGURE_Y;
@@ -2870,7 +2877,7 @@ static void xwm_event(struct compositor_xwm *x, const struct xwm_event *e)
                         compositor_xwm_counted[2]++;
                         break;
                 }
-                w->state = (w->state & ~COMPOSITOR_XWM_OVERRIDE) | COMPOSITOR_XWM_MAPPED;
+                w->state = (w->state & ~(COMPOSITOR_XWM_OVERRIDE | COMPOSITOR_XWM_HIDDEN)) | COMPOSITOR_XWM_MAPPED;
                 compositor_xwm_select(x, e->window, XWM_MASK_PROPERTY_CHANGE);
                 xwm_ask_title(x, w);
                 if (!w->owner)
@@ -2879,7 +2886,7 @@ static void xwm_event(struct compositor_xwm *x, const struct xwm_event *e)
                 compositor_xwm_frame_extents(x, e->window);
                 compositor_xwm_window_op(x, XWM_OP_MAP_WINDOW, e->window);
                 compositor_xwm_allow_commits(x, e->window);
-                compositor_xwm_wm_state(x, e->window);
+                compositor_xwm_wm_state(x, e->window, COMPOSITOR_XWM_STATE_NORMAL);
                 break;
         case XWM_EV_CONFIGURE_REQUEST:
         {
@@ -3094,11 +3101,16 @@ static void xwm_event(struct compositor_xwm *x, const struct xwm_event *e)
                         if ((w = xwm_find(x, e->window, 0)) && xwm_row_showing(w))
                                 compositor_close(w->row);
                 }
-                else if (e->atom && e->atom == x->atoms[COMPOSITOR_XWM_A_CHANGE_STATE] &&
-                         e->format == XWM_FORMAT_32 && e->data[0] == COMPOSITOR_XWM_STATE_ICONIC)
+                else if (e->atom && e->atom == x->atoms[COMPOSITOR_XWM_A_CHANGE_STATE] && e->format == XWM_FORMAT_32 &&
+                         (e->data[0] == COMPOSITOR_XWM_STATE_ICONIC || e->data[0] == COMPOSITOR_XWM_STATE_NORMAL))
                 {
                         if ((w = xwm_find(x, e->window, 0)) && xwm_row_showing(w) && !compositor_xwm_is_popup(w))
-                                compositor_minimize_row(w->row);
+                        {
+                                if (e->data[0] == COMPOSITOR_XWM_STATE_ICONIC)
+                                        compositor_minimize_row(w->row);
+                                else
+                                        compositor_reveal(w->row);
+                        }
                 }
                 break;
         default:
