@@ -841,6 +841,13 @@ def test_compositor_and_xwm_invariants():
           "memory_hash_33((address_any)cover, (positive)cells)" in gpu_host_c and
           "memory_resample_u32_rect(into, (positive)pitch," in pres_c and
           "__builtin_popcount(compositor_metric_paths & mask)" in pres_c)
+    check("lib.c ASM Pass 8: AVX2 lerp/add_sat/reverse/invert/copy_rect_u32 NT & arm64 8-px widening NEON st4 memory_nv12_to_xrgb_row",
+          "vpbroadcastw %xmm6, %ymm6" in lib_c and
+          "vpaddusb %ymm1, %ymm0, %ymm0" in lib_c and
+          "vperm2i128 $0x01, %ymm0, %ymm0, %ymm0" in lib_c and
+          "vpxor %ymm7, %ymm3, %ymm3" in lib_c and
+          "call memory_copy_rect_nt_row_ymm" in lib_c and
+          "st4 {v4.8b, v5.8b, v6.8b, v7.8b}, [x0], #32" in lib_c)
     check("Steam bowl fixes Win32 dialog inflation (ttf-liberation + 65-moonwater-win32.conf) & GTK dark theme",
           '"ttf-liberation"' in read_text("src/bowl.c") and
           "65-moonwater-win32.conf" in read_text("src/bowl.c") and

@@ -14355,7 +14355,22 @@ __asm__(
 
     ASM_FUNC(memory_lerp_u32_row)
     "test %rcx, %rcx\n   jz 90f\n"
-    "pxor %xmm7, %xmm7\n"
+    ASM_USERSPACE_WIDE(
+    ASM_NARROW("cpu_has_avx2", "10f")
+    "cmp $8, %rcx\n   jb 10f\n"
+    "vpxor %ymm7, %ymm7, %ymm7\n"
+    "vmovd %r8d, %xmm6\n   vpbroadcastw %xmm6, %ymm6\n"
+    "mov $256, %eax\n   sub %r8d, %eax\n   vmovd %eax, %xmm5\n   vpbroadcastw %xmm5, %ymm5\n"
+    "20: vmovdqu (%rsi), %ymm0\n   vmovdqu (%rdx), %ymm1\n"
+    "vpunpcklbw %ymm7, %ymm0, %ymm2\n   vpunpckhbw %ymm7, %ymm0, %ymm0\n"
+    "vpunpcklbw %ymm7, %ymm1, %ymm3\n   vpunpckhbw %ymm7, %ymm1, %ymm1\n"
+    "vpmullw %ymm5, %ymm2, %ymm2\n   vpmullw %ymm6, %ymm3, %ymm3\n   vpaddw %ymm3, %ymm2, %ymm2\n   vpsrlw $8, %ymm2, %ymm2\n"
+    "vpmullw %ymm5, %ymm0, %ymm0\n   vpmullw %ymm6, %ymm1, %ymm1\n   vpaddw %ymm1, %ymm0, %ymm0\n   vpsrlw $8, %ymm0, %ymm0\n"
+    "vpackuswb %ymm0, %ymm2, %ymm2\n   vmovdqu %ymm2, (%rdi)\n"
+    "add $32, %rdi\n   add $32, %rsi\n   add $32, %rdx\n   sub $8, %rcx\n   cmp $8, %rcx\n   jae 20b\n"
+    "vzeroupper\n   test %rcx, %rcx\n   jz 90f\n"
+    )
+    "10: pxor %xmm7, %xmm7\n"
     "movd %r8d, %xmm6\n   pshuflw $0, %xmm6, %xmm6\n   punpcklqdq %xmm6, %xmm6\n"
     "mov $256, %eax\n   sub %r8d, %eax\n   movd %eax, %xmm5\n   pshuflw $0, %xmm5, %xmm5\n   punpcklqdq %xmm5, %xmm5\n"
     "cmp $4, %rcx\n   jb 80f\n"
@@ -14903,6 +14918,24 @@ __asm__(
 
     ASM_FUNC(memory_add_sat_u8_rect)
     "test %r8, %r8\n   jz 90f\n   test %r9, %r9\n   jz 90f\n"
+    ASM_USERSPACE_WIDE(
+    ASM_NARROW("cpu_has_avx2", "10f")
+    "cmp $32, %r8\n   jb 10f\n"
+    "20: mov %rdi, %r10\n   mov %rdx, %r11\n   mov %r8, %rax\n"
+    "21: vmovdqu (%rdi), %ymm0\n   vmovdqu (%rdx), %ymm1\n   vpaddusb %ymm1, %ymm0, %ymm0\n   vmovdqu %ymm0, (%rdi)\n"
+    "add $32, %rdi\n   add $32, %rdx\n   sub $32, %rax\n   cmp $32, %rax\n   jae 21b\n"
+    "cmp $16, %rax\n   jb 22f\n"
+    "vmovdqu (%rdi), %xmm0\n   vmovdqu (%rdx), %xmm1\n   vpaddusb %xmm1, %xmm0, %xmm0\n   vmovdqu %xmm0, (%rdi)\n"
+    "add $16, %rdi\n   add $16, %rdx\n   sub $16, %rax\n"
+    "22: test %rax, %rax\n   jz 24f\n"
+    "push %rbx\n   push %r12\n"
+    "23: movzbl (%rdi), %ebx\n   movzbl (%rdx), %r12d\n"
+    "add %r12d, %ebx\n   cmp $255, %ebx\n   jbe 25f\n   mov $255, %ebx\n"
+    "25: mov %bl, (%rdi)\n   inc %rdi\n   inc %rdx\n   dec %rax\n   jnz 23b\n"
+    "pop %r12\n   pop %rbx\n"
+    "24: add %rsi, %r10\n   mov %r10, %rdi\n   add %rcx, %r11\n   mov %r11, %rdx\n   dec %r9\n   jnz 20b\n"
+    "vzeroupper\n   jmp 90f\n"
+    )
     "10: mov %rdi, %r10\n   mov %rdx, %r11\n   mov %r8, %rax\n"
     "cmp $16, %rax\n   jb 80f\n"
     "40: movdqu (%rdi), %xmm0\n   movdqu (%rdx), %xmm1\n   paddusb %xmm1, %xmm0\n   movdqu %xmm0, (%rdi)\n"
@@ -14936,6 +14969,20 @@ __asm__(
     ASM_FUNC(memory_copy_rect_reverse_u32)
     // rdi=into, rsi=into_pitch, rdx=from, rcx=from_pitch, r8=width, r9=height
     "test %r8, %r8\n   jz 9f\n   test %r9, %r9\n   jz 9f\n   shl $2, %rsi\n   shl $2, %rcx\n"
+    ASM_USERSPACE_WIDE(
+    ASM_NARROW("cpu_has_avx2", "10f")
+    "cmp $8, %r8\n   jb 10f\n"
+    "20: mov %rdi, %r10\n   lea (%rdx,%r8,4), %r11\n   mov %r8, %rax\n"
+    "21: sub $32, %r11\n   vmovdqu (%r11), %ymm0\n   vpshufd $0x1b, %ymm0, %ymm0\n   vperm2i128 $0x01, %ymm0, %ymm0, %ymm0\n   vmovdqu %ymm0, (%r10)\n"
+    "add $32, %r10\n   sub $8, %rax\n   cmp $8, %rax\n   jae 21b\n"
+    "cmp $4, %rax\n   jb 22f\n"
+    "sub $16, %r11\n   vmovdqu (%r11), %xmm0\n   vpshufd $0x1b, %xmm0, %xmm0\n   vmovdqu %xmm0, (%r10)\n"
+    "add $16, %r10\n   sub $4, %rax\n"
+    "22: test %rax, %rax\n   jz 24f\n   push %rbx\n"
+    "23: sub $4, %r11\n   mov (%r11), %ebx\n   mov %ebx, (%r10)\n   add $4, %r10\n   dec %rax\n   jnz 23b\n   pop %rbx\n"
+    "24: add %rsi, %rdi\n   add %rcx, %rdx\n   dec %r9\n   jnz 20b\n"
+    "vzeroupper\n   jmp 9f\n"
+    )
     "10: mov %rdi, %r10\n   lea (%rdx,%r8,4), %r11\n   mov %r8, %rax\n"
     "cmp $4, %rax\n   jb 1f\n"
     "4: sub $16, %r11\n   movdqu (%r11), %xmm0\n   pshufd $0x1b, %xmm0, %xmm0\n   movdqu %xmm0, (%r10)\n"
@@ -15175,7 +15222,22 @@ __asm__(
     "xor %eax, %eax\n"
     "5:  mov (%rsi, %rax, 4), %r8d\n   not %r8d\n   mov %r8d, (%rdi, %rax, 4)\n   inc %rax\n   cmp %rax, %rdx\n   jne 5b\n"
     "9:  " ASM_RET
-    "10: pcmpeqd %xmm7, %xmm7\n"
+    "10:\n"
+    ASM_USERSPACE_WIDE(
+    ASM_NARROW("cpu_has_avx2", "11f")
+    "cmp $8, %rdx\n   jb 11f\n"
+    "vpcmpeqd %ymm7, %ymm7, %ymm7\n"
+    "cmp $32, %rdx\n   jb 21f\n"
+    "20: vmovdqu (%rsi), %ymm0\n   vmovdqu 32(%rsi), %ymm1\n   vmovdqu 64(%rsi), %ymm2\n   vmovdqu 96(%rsi), %ymm3\n"
+    "vpxor %ymm7, %ymm0, %ymm0\n   vpxor %ymm7, %ymm1, %ymm1\n   vpxor %ymm7, %ymm2, %ymm2\n   vpxor %ymm7, %ymm3, %ymm3\n"
+    "vmovdqu %ymm0, (%rdi)\n   vmovdqu %ymm1, 32(%rdi)\n   vmovdqu %ymm2, 64(%rdi)\n   vmovdqu %ymm3, 96(%rdi)\n"
+    "add $128, %rsi\n   add $128, %rdi\n   sub $32, %rdx\n   cmp $32, %rdx\n   jae 20b\n"
+    "21: cmp $8, %rdx\n   jb 22f\n"
+    "vmovdqu (%rsi), %ymm0\n   vpxor %ymm7, %ymm0, %ymm0\n   vmovdqu %ymm0, (%rdi)\n"
+    "add $32, %rsi\n   add $32, %rdi\n   sub $8, %rdx\n   jmp 21b\n"
+    "22: vzeroupper\n   cmp $4, %rdx\n   jb 4f\n"
+    )
+    "11: pcmpeqd %xmm7, %xmm7\n"
     "cmp $16, %rdx\n   jb 2f\n"
     "1:  movdqu (%rsi), %xmm0\n   movdqu 16(%rsi), %xmm1\n   movdqu 32(%rsi), %xmm2\n   movdqu 48(%rsi), %xmm3\n"
     "pxor %xmm7, %xmm0\n   pxor %xmm7, %xmm1\n   pxor %xmm7, %xmm2\n   pxor %xmm7, %xmm3\n"
@@ -17323,7 +17385,7 @@ __asm__(
     "   add %r14, %r12\n   add %r15, %r13\n   dec %rbx\n   jnz 2b\n   jmp 7f\n"
     "1:\n"
     ASM_USERSPACE_WIDE(
-    ASM_NARROW("cpu_has_avx512", "3f")
+    ASM_NARROW("cpu_has_avx512", "6f")
     "cmp $512, %rbp\n   jbe 3f\n"
     //
     //       A rectangle of at least 16 MiB whose rows are 1 KiB or more goes row by row through
@@ -17339,6 +17401,12 @@ __asm__(
     "   add %r14, %r12\n   add %r15, %r13\n   dec %rbx\n   jnz 5b\n   sfence\n   jmp 7f\n"
     "4:  mov %r12, %rdi\n   mov %r13, %rsi\n   mov %rbp, %rdx\n   mov %r12, %rax\n   call " ASM_LABEL(memory_copy_apart_zmm) "\n"
     "   add %r14, %r12\n   add %r15, %r13\n   dec %rbx\n   jnz 4b\n   jmp 7f\n"
+    "6:\n"
+    ASM_NARROW("cpu_has_avx2", "3f")
+    "cmp $1024, %rbp\n   jb 3f\n"
+    "mov %rbx, %rax\n   imul %rbp, %rax\n   cmp $0x1000000, %rax\n   jb 3f\n"
+    "9:  mov %r12, %rdi\n   mov %r13, %rsi\n   mov %rbp, %rdx\n   call memory_copy_rect_nt_row_ymm\n"
+    "   add %r14, %r12\n   add %r15, %r13\n   dec %rbx\n   jnz 9b\n   sfence\n   jmp 7f\n"
     )
     "3:  mov %r12, %rdi\n   mov %r13, %rsi\n   mov %rbp, %rdx\n   call memory_copy_apart\n"
     "   add %r14, %r12\n   add %r15, %r13\n   dec %rbx\n   jnz 3b\n"
@@ -27639,22 +27707,29 @@ __asm__(
     //       memory_nv12_to_xrgb_row: x0 dst, x1 y_row, x2 uv_row, x3 count (see x86-64).
     //
     ASM_FUNC(memory_nv12_to_xrgb_row)
-    "cbz x3, 9f\n   cmp x3, #4\n   b.lo 5f\n"
-    "movi v16.8b, #16\n   mov w4, #128\n   dup v17.4s, w4\n   mov w4, #298\n   dup v18.4s, w4\n"
-    "mov w4, #409\n   dup v19.4s, w4\n   mov w4, #100\n   dup v20.4s, w4\n   mov w4, #208\n   dup v21.4s, w4\n"
-    "mov w4, #516\n   dup v22.4s, w4\n   mov w4, #0xff000000\n   dup v23.4s, w4\n"
-    "movi v24.4s, #0\n   mov w4, #255\n   dup v25.4s, w4\n"
-    "1:  ld1 {v0.s}[0], [x1]\n   uqsub v0.8b, v0.8b, v16.8b\n   uxtl v0.8h, v0.8b\n   uxtl v0.4s, v0.4h\n"
-    "ld1 {v1.s}[0], [x2]\n   uzp1 v2.8b, v1.8b, v1.8b\n   uzp2 v3.8b, v1.8b, v1.8b\n"
+    "cbz x3, 9f\n   cmp x3, #8\n   b.lo 5f\n"
+    "movi v16.8b, #16\n   mov w4, #128\n   dup v17.8h, w4\n   dup v18.4s, w4\n"
+    "mov w4, #298\n   dup v19.8h, w4\n   mov w4, #409\n   dup v20.8h, w4\n"
+    "mov w4, #100\n   dup v21.8h, w4\n   mov w4, #208\n   dup v22.8h, w4\n"
+    "mov w4, #516\n   dup v23.8h, w4\n   movi v7.8b, #0xff\n"
+    "1:  ldr d0, [x1], #8\n   uqsub v0.8b, v0.8b, v16.8b\n   uxtl v0.8h, v0.8b\n"
+    "ldr d1, [x2], #8\n   uzp1 v2.8b, v1.8b, v1.8b\n   uzp2 v3.8b, v1.8b, v1.8b\n"
     "zip1 v2.8b, v2.8b, v2.8b\n   zip1 v3.8b, v3.8b, v3.8b\n"
-    "uxtl v2.8h, v2.8b\n   uxtl v2.4s, v2.4h\n   sub v2.4s, v2.4s, v17.4s\n"
-    "uxtl v3.8h, v3.8b\n   uxtl v3.4s, v3.4h\n   sub v3.4s, v3.4s, v17.4s\n"
-    "mul v4.4s, v0.4s, v18.4s\n   add v4.4s, v4.4s, v17.4s\n"
-    "mov v5.16b, v4.16b\n   mla v5.4s, v3.4s, v19.4s\n   sshr v5.4s, v5.4s, #8\n   smax v5.4s, v5.4s, v24.4s\n   smin v5.4s, v5.4s, v25.4s\n"
-    "mov v6.16b, v4.16b\n   mls v6.4s, v2.4s, v20.4s\n   mls v6.4s, v3.4s, v21.4s\n   sshr v6.4s, v6.4s, #8\n   smax v6.4s, v6.4s, v24.4s\n   smin v6.4s, v6.4s, v25.4s\n"
-    "mla v4.4s, v2.4s, v22.4s\n   sshr v4.4s, v4.4s, #8\n   smax v4.4s, v4.4s, v24.4s\n   smin v4.4s, v4.4s, v25.4s\n"
-    "shl v5.4s, v5.4s, #16\n   shl v6.4s, v6.4s, #8\n   orr v4.16b, v4.16b, v5.16b\n   orr v4.16b, v4.16b, v6.16b\n   orr v4.16b, v4.16b, v23.16b\n"
-    "st1 {v4.4s}, [x0], #16\n   add x1, x1, #4\n   add x2, x2, #4\n   sub x3, x3, #4\n   cmp x3, #4\n   b.hs 1b\n"
+    "uxtl v2.8h, v2.8b\n   sub v2.8h, v2.8h, v17.8h\n"
+    "uxtl v3.8h, v3.8b\n   sub v3.8h, v3.8h, v17.8h\n"
+    "smull v24.4s, v0.4h, v19.4h\n   smull2 v25.4s, v0.8h, v19.8h\n"
+    "add v24.4s, v24.4s, v18.4s\n   add v25.4s, v25.4s, v18.4s\n"
+    "mov v26.16b, v24.16b\n   mov v27.16b, v25.16b\n"
+    "smlal v26.4s, v3.4h, v20.4h\n   smlal2 v27.4s, v3.8h, v20.8h\n"
+    "shrn v6.4h, v26.4s, #8\n   shrn2 v6.8h, v27.4s, #8\n   sqxtun v6.8b, v6.8h\n"
+    "mov v26.16b, v24.16b\n   mov v27.16b, v25.16b\n"
+    "smlsl v26.4s, v2.4h, v21.4h\n   smlsl2 v27.4s, v2.8h, v21.8h\n"
+    "smlsl v26.4s, v3.4h, v22.4h\n   smlsl2 v27.4s, v3.8h, v22.8h\n"
+    "shrn v5.4h, v26.4s, #8\n   shrn2 v5.8h, v27.4s, #8\n   sqxtun v5.8b, v5.8h\n"
+    "smlal v24.4s, v2.4h, v23.4h\n   smlal2 v25.4s, v2.8h, v23.8h\n"
+    "shrn v4.4h, v24.4s, #8\n   shrn2 v4.8h, v25.4s, #8\n   sqxtun v4.8b, v4.8h\n"
+    "st4 {v4.8b, v5.8b, v6.8b, v7.8b}, [x0], #32\n"
+    "sub x3, x3, #8\n   cmp x3, #8\n   b.hs 1b\n"
     "cbz x3, 9f\n"
     "5:  mov x4, #0\n   mov w12, #298\n   mov w13, #409\n   mov w14, #100\n   mov w15, #208\n   mov w16, #516\n"
     "6:  ldrb w5, [x1, x4]\n   subs w5, w5, #16\n   csel w5, w5, wzr, ge\n   madd w5, w5, w12, wzr\n   add w5, w5, #128\n"
