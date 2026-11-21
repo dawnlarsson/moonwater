@@ -2689,9 +2689,11 @@ static int compositor_wl_card_gather(int row, const struct wayland_picture *pict
                 positive at = tables + aside;
                 if (w4 > pitch || (pitch & 3) || (dst & 15))
                         return 0;
+                gpu_handed_hold = 1;
                 if (gpu_blit(src, 1, at, ((unsigned int)l.width + 3) & ~3u, tables, 7, (unsigned int)l.width, (unsigned int)l.height) ||
                     (gpu_end == GPU_END_LATE && gpu_finish()))
                 {
+                        gpu_handed_hold = 0;
                         op[0] = 4u | 0x80u, op[1] = (unsigned int)x1, op[2] = (unsigned int)y1, op[3] = (unsigned int)x2, op[4] = (unsigned int)y2;
                         op[5] = (unsigned int)at, op[6] = (unsigned int)(at >> 32), op[7] = ((unsigned int)l.width + 3) & ~3u;
                         if (gpu_scene(COMPOSITOR_GPU_OPS_AT, 1, COMPOSITOR_GPU_BINS_AT, dst, (unsigned int)pitch, w4, (unsigned int)height, (unsigned int)x1,
@@ -2702,6 +2704,7 @@ static int compositor_wl_card_gather(int row, const struct wayland_picture *pict
                         if (gpu_lost)
                                 compositor_gpu_recover();
                 }
+                gpu_handed_hold = 0;
         }
         else if (gpu_blit(src, 1, dst + 4 * ((positive)y1 * pitch + (positive)x1), (unsigned int)pitch, tables, 7, (unsigned int)l.width, (unsigned int)l.height) ||
                  (gpu_end == GPU_END_LATE && gpu_finish()))

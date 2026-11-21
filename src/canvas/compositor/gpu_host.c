@@ -360,6 +360,8 @@ static positive compositor_gpu_output(void)
                         compositor_gpu_state.cache_key[at] = key;
                 }
                 compositor_gpu_state.out = compositor_gpu_state.cache[at];
+                if (compositor_gpu_state.out)
+                        gpu_import_handed(compositor_gpu_state.out);
         }
         compositor_gpu_state.out_key = key;
         return compositor_gpu_state.out;
@@ -1551,6 +1553,8 @@ static int compositor_gpu_rotate(unsigned int at, const int *screen, unsigned in
         }
         if (!compositor_gpu_state.turn_va[at])
                 return 0;
+        gpu_import_handed(compositor_gpu_state.out);
+        gpu_import_handed(compositor_gpu_state.turn_va[at]);
         if (degrees == 90)
                 stepx = -pitch, stepy = 1, first = origin + ((long)lh - 1) * pitch;
         else if (degrees == 270)

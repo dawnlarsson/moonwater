@@ -3171,7 +3171,7 @@ static b32 gpu_import_named(unsigned int i, unsigned int before)
 {
         if (gpu.imported_dead[i])
                 return gpu.imported_dead_after[i] == before;
-        return gpu_imports_all || gpu.imported_own[i] || gpu.imported_handed[i] || gpu.imported_used[i] == gpu_tick;
+        return gpu_imports_all || gpu.imported_handed[i];
 }
 
 // Whether the job's bo list (the submit's buffers) names the map at i. The invariant: every map a record of the job refers to is in the list. A record gets a map's address
@@ -3184,7 +3184,7 @@ static b32 gpu_map_named(unsigned int i)
 {
         const b32 pages = gpu_maps[i].from || gpu_maps[i].to, now = gpu_maps[i].used == gpu_tick;
 
-        return pages ? gpu_maps[i].handed || now : gpu_maps[i].handed && now;
+        return pages ? gpu_maps[i].handed : gpu_maps[i].handed && now;
 }
 
 #define GPU_AGAIN 32 // the submits a job is asked again after EAGAIN (gpu_submit)
@@ -3728,7 +3728,8 @@ static void gpu_wake(void)
         ops_at = gpu.size - GPU_WAKE_AT, bins_at = ops_at + 4096, d_at = ops_at + 8192;
         ops = (unsigned int address_to)((p8 address_to)gpu.at + ops_at);
         ops[0] = 0, ops[1] = 0, ops[2] = 0, ops[3] = 64, ops[4] = 4, ops[5] = 0, ops[6] = ops[7] = 0;
-        gpu_scene(ops_at, 1, bins_at, d_at, 64, 64, 4, 0, 0, 64, 4);
+        // Submit asynchronously so input forwarding never stalls ~2.2 ms on GPU clock ramp.
+        gpu_scene_submit(ops_at, 1, bins_at, d_at, 64, 64, 4, 0, 0, 64, 4);
 }
 
 /*

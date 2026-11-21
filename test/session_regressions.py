@@ -751,6 +751,12 @@ def test_compositor_and_xwm_invariants():
           "return wayland.host && wayland.idle_notifies ? wayland_idle_scan(0, 0) : 0;" in wl_c and
           "if (got < room)\n                        return;" in xwm and
           "compositor_wl_pic_ident(picture, &dev, &ino);" in wlh_src)
+    gpu_c = read_text("src/canvas/gpu.c")
+    check("GPU async wake & strict BO-list hygiene: gpu_wake uses gpu_scene_submit and gpu_import_named/gpu_map_named require handed",
+          "gpu_scene_submit(ops_at, 1, bins_at, d_at, 64, 64, 4, 0, 0, 64, 4);" in gpu_c and
+          "return gpu_imports_all || gpu.imported_handed[i];" in gpu_c and
+          "return pages ? gpu_maps[i].handed : gpu_maps[i].handed && now;" in gpu_c and
+          "gpu_import_handed(compositor_gpu_state.out);" in read_text("src/canvas/compositor/gpu_host.c"))
     check("Steam bowl fixes Win32 dialog inflation (ttf-liberation + 65-moonwater-win32.conf) & GTK dark theme",
           '"ttf-liberation"' in read_text("src/bowl.c") and
           "65-moonwater-win32.conf" in read_text("src/bowl.c") and
