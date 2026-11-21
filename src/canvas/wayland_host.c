@@ -2122,7 +2122,7 @@ static int compositor_wl_straight_take(int row, const struct wayland_picture *pi
         int shown, same;
 
         if (!compositor_wl_tiled(picture) || !picture->last ||
-            (picture->blend && !(compositor.fullscreen[row] && !compositor.glassy[row] && !(compositor.asks[row] & WINDOW_NO_TAB))) ||
+            (picture->blend && !compositor_row_opaque_fs(row)) ||
             picture->dest_x || picture->dest_y || width <= 0 || height <= 0 ||
             picture->width < width || picture->height < height || picture->plane_count > 4 || compositor_wl.laying[row].open ||
             compositor_wl_layers.pending_row == row || compositor_wl_layers.count[row] || !compositor_wl_tiled_now() ||
@@ -4567,7 +4567,8 @@ static void compositor_wl_direct_make(void)
         else if (compositor.focus >= 0 && compositor.fullscreen[compositor.focus] && compositor.focus == wayland.pointer_row &&
                  compositor.drag < 0 && compositor.resize < 0 && !compositor.assist_armed && !compositor.cycle &&
                  !compositor.chip.kind && !compositor_input_override_query(compositor.focus) &&
-                 compositor.stacked > 0 && compositor.stack[compositor.stacked - 1] == compositor.focus)
+                 (compositor_space_is_fs_row(compositor.focus) ||
+                  (compositor.stacked > 0 && compositor.stack[compositor.stacked - 1] == compositor.focus)))
         {
                 int row = compositor.focus;
                 unsigned char dummy_ver[COMPOSITOR_WL_DIRECT_IDS];
@@ -5333,13 +5334,11 @@ static int compositor_wl_pointer_row(void)
         // A pointer locked to a window is over that window, and stays where it was locked: no other window can be under it, so it is not looked
         // for (compositor_under, which walks the band's tree for a tab first: a third of a game's every report on hasty-tail, 8000 a second).
         if (compositor_wl.hold == 1 && compositor_wl.hold_row >= 0 && compositor.grab < 0 && compositor.drag < 0 && compositor.resize < 0 &&
-            wayland_row_owner(compositor_wl.hold_row) >= 0 && compositor.showing[compositor_wl.hold_row] &&
-            !(compositor.state[compositor_wl.hold_row] & WINDOW_MINIMIZED))
+            wayland_row_owner(compositor_wl.hold_row) >= 0 && compositor_visible(compositor_wl.hold_row))
                 return compositor_wl.hold_row;
         row = compositor.grab >= 0 ? compositor.grab : compositor_under(compositor.pointer_x, compositor.pointer_y, &tab);
 
-        if (row < 0 || compositor.drag >= 0 || compositor.resize >= 0 || wayland_row_owner(row) < 0 || !compositor.showing[row] ||
-            (compositor.state[row] & WINDOW_MINIMIZED))
+        if (row < 0 || compositor.drag >= 0 || compositor.resize >= 0 || wayland_row_owner(row) < 0 || !compositor_visible(row))
                 return -1;
         if (compositor.grab < 0 &&
             (compositor.pointer_x < compositor.x[row] || compositor.pointer_y < compositor.y[row] ||

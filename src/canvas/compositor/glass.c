@@ -461,6 +461,30 @@ static unsigned int compositor_fullscreen_tops(int *rows, unsigned int most)
 {
         unsigned int seen = 0, count = 0;
 
+        if (compositor.spaces.ready)
+        {
+                unsigned int scount = 0;
+
+                compositor_screens(&scount);
+                for (unsigned int sc = 0; sc < scount && sc < WINDOWS_OUTPUTS && count < most; sc++)
+                {
+                        unsigned int sid = compositor.spaces.active[sc];
+
+                        for (unsigned int i = 0; i < compositor.spaces.count; i++)
+                        {
+                                const struct compositor_space *sp = &compositor.spaces.list[i];
+
+                                if (sp->id == sid)
+                                {
+                                        if (sp->kind == COMPOSITOR_SPACE_FULLSCREEN && sp->fs_row >= 0 &&
+                                            compositor_visible(sp->fs_row))
+                                                rows[count++] = sp->fs_row;
+                                        break;
+                                }
+                        }
+                }
+                return count;
+        }
         for (unsigned int at = compositor.stacked; at-- > 0 && count < most;)
         {
                 int row = (int)compositor.stack[at], screen;

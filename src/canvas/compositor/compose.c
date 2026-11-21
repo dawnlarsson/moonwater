@@ -212,21 +212,30 @@ static void compositor_blit(const struct compositor_target *t, int x, int y, int
 static unsigned int *compositor_wall;
 static int compositor_wall_w, compositor_wall_h;
 
-// The ground at a point of the space: the wallpaper's pixel, or the colour.
+static int compositor_space_all_fullscreen(void);
+
+// The ground at a point of the space: solid black on Fullscreen Spaces, else the wallpaper's pixel or colour.
 static inline unsigned int compositor_ground_at(int x, int y)
 {
+        if (compositor_space_all_fullscreen())
+                return 0xff000000u;
         return compositor_wall && x >= 0 && y >= 0 && x < compositor_wall_w && y < compositor_wall_h
                        ? compositor_wall[(long)y * compositor_wall_w + x]
                        : compositor_ground;
 }
 
-// The ground over a rectangle of the target: the wallpaper's, where it is, or the colour.
+// The ground over a rectangle of the target: solid black on Fullscreen Spaces, else the wallpaper or colour.
 static void compositor_ground_fill(const struct compositor_target *t, int x, int y, int width, int height)
 {
         int x1, y1, x2, y2;
 
         if (!target_clip(t, x, y, width, height, &x1, &y1, &x2, &y2))
                 return;
+        if (compositor_space_all_fullscreen())
+        {
+                compositor_fill(t, x1, y1, x2 - x1, y2 - y1, 0xff000000u);
+                return;
+        }
         if (!compositor_wall || x1 < 0 || y1 < 0 || x2 > compositor_wall_w || y2 > compositor_wall_h)
         {
                 compositor_fill(t, x1, y1, x2 - x1, y2 - y1, compositor_ground);
@@ -1543,7 +1552,8 @@ static b32 compositor_gpu_tint(const int *rect, unsigned int ink, int radius, in
 static b32 compositor_gpu_wall_frame(struct compositor_frame *wall)
 {
         memory_zero(wall, sizeof(*wall));
-        if (!compositor_wall || compositor_wall_w < (int)compositor_gscene.width || compositor_wall_h < (int)compositor_gscene.height)
+        if (compositor_space_all_fullscreen() || !compositor_wall ||
+            compositor_wall_w < (int)compositor_gscene.width || compositor_wall_h < (int)compositor_gscene.height)
                 return false;
         wall->pixels = compositor_wall, wall->pitch = (unsigned long)compositor_wall_w, wall->width = compositor_wall_w, wall->height = compositor_wall_h;
         return true;

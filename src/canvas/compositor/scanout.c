@@ -531,6 +531,13 @@ static int compositor_flip(unsigned int fb, int row, unsigned int which)
 
 static void canvas_scan_fb_reap(void);
 
+static inline int compositor_row_opaque_fs(int row)
+{
+        if (row < 0 || row >= COMPOSITOR_ROWS || compositor.glassy[row] || (compositor.asks[row] & WINDOW_NO_TAB))
+                return 0;
+        return compositor.spaces.ready ? compositor_space_is_fs_row(row) : (compositor.fullscreen[row] != 0);
+}
+
 // The pictures held back are said taken: for the row the flip showed, once it shows that row's newest buffer.
 #ifdef CONFIG_MOONWATER_WAYLAND
 static void compositor_wl_flip_presented(void); // wayland_host.c: the feedbacks a drawn frame took, answered at its flip
@@ -544,11 +551,14 @@ static int compositor_wl_dmabuf_missing(void);
 static void compositor_wl_scan_retry(int row);
 static inline int compositor_wl_jit_row(void)
 {
-        if (compositor.direct_row >= 0)
+        int fs;
+
+        if (compositor.direct_row >= 0 && compositor_visible(compositor.direct_row))
                 return compositor.direct_row;
-        if (compositor.focus >= 0 && compositor.fullscreen[compositor.focus] && compositor.showing[compositor.focus])
+        if (compositor.focus >= 0 && compositor.fullscreen[compositor.focus] && compositor_visible(compositor.focus))
                 return compositor.focus;
-        return -1;
+        fs = compositor_fullscreen_top();
+        return fs >= 0 && compositor_visible(fs) ? fs : -1;
 }
 #endif
 
@@ -1100,7 +1110,7 @@ static int compositor_direct_eligible(int row, int blend)
             compositor.drag >= 0 || compositor.resize >= 0 || compositor.preview_draw ||
             compositor_spots_any(0) || !compositor_primary_bounds(&ox, &oy, &ow, &oh))
                 return 0;
-        if ((blend && !(compositor.fullscreen[row] && !compositor.glassy[row] && !(compositor.asks[row] & WINDOW_NO_TAB))) ||
+        if ((blend && !compositor_row_opaque_fs(row)) ||
             compositor.glassy[row] || compositor.landing[row] || compositor.glide[row] || compositor.asking[row])
                 return 0;
         if (compositor.x[row] != ox || compositor.y[row] != oy ||
@@ -2025,7 +2035,7 @@ static int compositor_plane_candidate(const struct compositor_frame *frames, con
                 top = by + side;
         if (bottom - top < 64 * compositor.scale / 100) return *why = 8, -1;
         rect[0] = frame->x, rect[1] = top, rect[2] = frame->x + frame->width, rect[3] = bottom;
-        if (frame->blend && !(compositor.fullscreen[row] && !compositor.glassy[row] && !(compositor.asks[row] & WINDOW_NO_TAB)) &&
+        if (frame->blend && !compositor_row_opaque_fs(row) &&
             !compositor_wl_row_opaque(row, 0, top - frame->y, frame->width, bottom - frame->y)) return *why = 20, -1;
         compositor_band_frame(&band);
         if (compositor.band && band.x < rect[2] && band.x + band.width > rect[0] && band.y < rect[3] && band.y + band.height > rect[1])

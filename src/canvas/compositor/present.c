@@ -1240,6 +1240,7 @@ static unsigned int present_bands_pass(struct compositor_frame *frames, unsigned
                 unsigned char solid;
                 unsigned int at = (unsigned int)band_idx < WINDOWS_OUTPUTS ? (unsigned int)band_idx : 0;
 
+                compositor.band_at = band_idx;
                 compositor_band_frame_for(band_idx, &band);
                 view = compositor_taskbar_view_for(band_idx);
                 solid = (unsigned char)compositor_band_covers(frames, windows, &band);
@@ -1282,6 +1283,7 @@ static unsigned int present_bands_pass(struct compositor_frame *frames, unsigned
         {
                 struct taskbar_view view;
 
+                compositor.band_at = band_idx;
                 compositor_band_frame_for(band_idx, &band);
                 if (taskbar_shift() >= UI_ONE)
                         continue;
@@ -1289,6 +1291,7 @@ static unsigned int present_bands_pass(struct compositor_frame *frames, unsigned
                 added += compositor_moon_glow_frame_for(band_idx, &frames[windows + added]);
                 added += compositor_panel_tabs_with(&view, &band, &frames[windows + added]);
         }
+        compositor.band_at = 0;
         return added;
 }
 
@@ -1420,14 +1423,16 @@ static void compositor_present_frames(void)
         if (!compositor.damages || compositor.dark || compositor.flip_pending || compositor_card_holds())
                 return;
         // Steady-state fullscreen direct-scanout fast path.
-        if (compositor.direct_row >= 0 && !compositor_turning() && compositor.stacked > 0 &&
-            (int)compositor.stack[compositor.stacked - 1] == compositor.direct_row &&
+        if (compositor.direct_row >= 0 && compositor_visible(compositor.direct_row) && !compositor_turning() &&
+            (compositor_space_is_fs_row(compositor.direct_row) ||
+             (compositor.stacked > 0 && (int)compositor.stack[compositor.stacked - 1] == compositor.direct_row)) &&
             !compositor.overlay_on && !compositor_overlays_shown() && taskbar_shift() >= UI_ONE && !compositor_record_until)
         {
                 int row = compositor.direct_row, menu[4];
 
                 if (!taskbar_menu_rect(menu) && compositor_client_scans(row) &&
-                    compositor_direct_eligible(row, compositor_wl_row_blend(row)) && compositor_present_direct(row, 0, 0))
+                    compositor_direct_eligible(row, compositor_row_opaque_fs(row) ? 0 : compositor_wl_row_blend(row)) &&
+                    compositor_present_direct(row, 0, 0))
                         return present_direct_cleared();
         }
         compositor_bands_follow();

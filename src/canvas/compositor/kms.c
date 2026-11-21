@@ -925,25 +925,36 @@ static void compositor_space_carry(const int (*was)[4], const char (*names)[WIND
                         compositor.x[row] = compositor.table->x[row] = x;
                         compositor.y[row] = compositor.table->y[row] = y;
                 }
-                // One that filled a screen's room fills the room of the screen it is on now, the band left out.
-                if (row >= 0 && compositor.arranged[row] == COMPOSITOR_ROOM)
+        }
+        // Align per-output Spaces first so fullscreen row re-arrangement targets the updated screen index.
+        compositor_spaces_on_outputs_changed(names, count);
+        // One that filled a screen's room fills the room of the screen it is on now, the band left out.
+        for (unsigned int at = 0; at < compositor.stacked; at++)
+        {
+                int row = (int)compositor.stack[at];
+                int to;
+
+                if (row < 0 || !compositor.showing[row])
+                        continue;
+                to = compositor_screen_of(row);
+                if (to < 0 || (unsigned int)to >= now_count)
+                        to = 0;
+                if (compositor.arranged[row] == COMPOSITOR_ROOM)
                 {
                         int room[4];
 
                         compositor_room(now[to], room);
                         compositor_arrange_rect(row, COMPOSITOR_ROOM, room);
                 }
-                else if (row >= 0 && compositor.arranged[row] != COMPOSITOR_FLOATING)
-                        compositor_arrange_on(row, compositor.arranged[row], to);
-                else if (row >= 0)
+                else if (compositor.arranged[row] != COMPOSITOR_FLOATING)
+                        compositor_row_mode(row, compositor.arranged[row], compositor.fullscreen[row], to);
+                else
                         compositor_place(row, compositor.x[row], compositor.y[row]);
         }
         compositor_screen_keep_point(now, now_count, nowhere, nowhere, &compositor.real_x, &compositor.real_y);
         compositor.kept_x = compositor.real_x;
         compositor.kept_y = compositor.real_y;
         compositor_pointer_shown();
-        // Keep per-output Spaces aligned with moved or disconnected screens, then refit rooms.
-        compositor_spaces_on_outputs_changed(names, count);
         compositor_room_follow();
 }
 

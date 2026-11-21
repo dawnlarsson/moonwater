@@ -943,6 +943,7 @@ static int compositor_spaces_active_index(int screen);
 static int compositor_spaces_kind_at(int screen, int idx);
 static unsigned int compositor_spaces_gen(void);
 static void compositor_spaces_on_outputs_changed(const char (*was_names)[WINDOWS_OUTPUT_NAME], unsigned int was_count);
+static void compositor_row_mode(int row, unsigned int how, int fullscreen, int screen);
 #ifdef CONFIG_MOONWATER_WAYLAND
 static int compositor_wl_started(void);
 #endif

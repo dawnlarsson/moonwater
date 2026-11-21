@@ -675,9 +675,13 @@ def test_compositor_and_xwm_invariants():
           "compositor_ccd_init" in inp and "compositor_ccd.ccd0_hex" in inp)
     check("CCD0 IRQ pinning loop-reads /proc/interrupts into 64K buffer",
           "buf[65536]" in inp and "while (got < (long)sizeof(buf) - 1" in inp)
-    check("Non-glassy fullscreen games get direct scanout while transparent overlays keep alpha blend",
-          "!(compositor.fullscreen[row] && !compositor.glassy[row] && !(compositor.asks[row] & WINDOW_NO_TAB))" in scan and
-          "!(compositor.fullscreen[row] && !compositor.glassy[row] && !(compositor.asks[row] & WINDOW_NO_TAB))" in wlh)
+    check("Non-glassy fullscreen games get direct scanout via centralized compositor_row_opaque_fs()",
+          "compositor_row_opaque_fs(row)" in scan and "compositor_row_opaque_fs(row)" in wlh)
+    check("Spaces bug fixes: pointer_row uses compositor_visible, band_at set per monitor, minimize exits FS Space, DPM per-card, wallpaper skip in compose.c",
+          "compositor_visible(compositor_wl.hold_row)" in wlh and
+          "compositor.band_at = band_idx;" in read_text("src/canvas/compositor/present.c") and
+          "compositor_game_dpm_saved[4][32]" in inp and
+          "compositor_space_all_fullscreen()" in read_text("src/canvas/compositor/compose.c"))
     check("Oneshot XWarpPointer hint honored when locked_pointer created+destroyed in one flush",
           "(con->active || (s->row == wayland.pointer_row && wayland_has_keys(c)))" in read_text("src/canvas/wayland.c"))
     check("XWM Wine fixes: focus re-sync on PROTOCOLS/WM_HINTS, TRANSIENT notify, covers >=, fixed-size dialog cap",
