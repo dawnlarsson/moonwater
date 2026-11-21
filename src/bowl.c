@@ -3705,16 +3705,48 @@ static bool bowl_workaround_in(const p8 address_to text, positive got, string_ad
         return default_on;
 }
 
+static bool bowl_workaround_for(const p8 address_to text, positive got, string_address app, string_address name, bool default_on)
+{
+        if (app && app[0])
+        {
+                p8 key[96];
+                positive alen = string_length(app);
+                positive nlen = string_length(name);
+
+                if (alen + 1 + nlen < sizeof(key))
+                {
+                        memory_copy(key, app, alen);
+                        key[alen] = ':';
+                        memory_copy(key + alen + 1, name, nlen);
+                        key[alen + 1 + nlen] = end;
+                        if (bowl_workaround_in(text, got, (string_address)key, true) !=
+                            bowl_workaround_in(text, got, (string_address)key, false))
+                                return bowl_workaround_in(text, got, (string_address)key, default_on);
+                }
+        }
+        return bowl_workaround_in(text, got, name, default_on);
+}
+
 /* Read /root/workarounds once (before bowl_become_user drops root, so a 0700 /root still works). */
-static fn bowl_workarounds_load(void)
+static fn bowl_workarounds_load(string_address program)
 {
         p8 text[512];
         bipolar fd;
         bipolar got;
+        string_address app = null;
 
         if (bowl_wa_loaded)
                 return;
         bowl_wa_loaded = true;
+        if (program)
+        {
+                string_address slash = program;
+
+                for (string_address p = program; *p; p++)
+                        if (*p == '/')
+                                slash = p + 1;
+                app = slash;
+        }
         fd = system_open_at(AT_FDCWD, BOWL_WORKAROUNDS_PATH, FILE_READ | O_CLOEXEC);
         if (fd < 0)
                 return;
@@ -3722,9 +3754,9 @@ static fn bowl_workarounds_load(void)
         system_close((positive)fd);
         if (got <= 0)
                 return;
-        bowl_wa_timerslack = bowl_workaround_in(text, (positive)got, "bowl-timerslack", true);
-        bowl_wa_mailbox = bowl_workaround_in(text, (positive)got, "vk-mailbox", false);
-        bowl_wa_glthread = bowl_workaround_in(text, (positive)got, "mesa-glthread", false);
+        bowl_wa_timerslack = bowl_workaround_for(text, (positive)got, app, "bowl-timerslack", true);
+        bowl_wa_mailbox = bowl_workaround_for(text, (positive)got, app, "vk-mailbox", false);
+        bowl_wa_glthread = bowl_workaround_for(text, (positive)got, app, "mesa-glthread", false);
 }
 
 static string_address address_to bowl_environment(
@@ -3741,7 +3773,7 @@ static string_address address_to bowl_environment(
              offer_wayland = bowl_wayland_offered();
         bool offer_mailbox, offer_glthread;
 
-        bowl_workarounds_load();
+        bowl_workarounds_load(null);
         offer_mailbox = bowl_wa_mailbox;
         offer_glthread = bowl_wa_glthread;
         string_address language = bowl_language_offered((string_address)BOWL_LANGUAGE_PATH);
@@ -4563,7 +4595,7 @@ static b32 bowl_launch(string_address root, string_address program,
                               "desktop session\n"));
 
         bowl_resource_limits();
-        bowl_workarounds_load();
+        bowl_workarounds_load(program);
         bowl_pad_root = bowl_is_root();
         bowl_pad_granted = bowl_input_granted(root);
         if (!isolated && program && !bowl_as_root && bowl_pad_root)

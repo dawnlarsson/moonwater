@@ -597,6 +597,71 @@ static COLD fn system_kernel_defaults(void)
 #define SYSTEM_NOFILE_TARGET BOWL_NOFILE_TARGET
 #define SYSTEM_MEMLOCK_TARGET BOWL_MEMLOCK_TARGET
 
+static COLD fn system_zram_setup(void)
+{
+        p8 info[256];
+        p8 size_text[32];
+        p8 swap_page[4096];
+        bipolar fd = system_open_at(AT_FDCWD, "/sys/block/zram0/disksize", FILE_READ | O_CLOEXEC);
+        bipolar got;
+        p64 mem_kb = 0, bytes, pages;
+        positive at = 0, used;
+
+        if (fd < 0)
+                return;
+        got = system_call_3(syscall(read), (positive)fd, (positive)size_text, sizeof(size_text) - 1);
+        system_close((positive)fd);
+        if (got <= 0 || size_text[0] != '0')
+                return; // already configured
+
+        fd = system_open_at(AT_FDCWD, "/proc/meminfo", FILE_READ | O_CLOEXEC);
+        if (fd < 0)
+                return;
+        got = system_call_3(syscall(read), (positive)fd, (positive)info, sizeof(info) - 1);
+        system_close((positive)fd);
+        if (got <= 0)
+                return;
+        info[got] = end;
+        while (at < (positive)got && !byte_is_digit(info[at]))
+                at++;
+        mem_kb = string_digits_max(info + at, 18, address_of used);
+        if (!used || mem_kb < 262144)
+                return; // skip tiny <256 MiB VMs
+
+        bytes = (mem_kb * 1024ull) / 2ull;
+        if (bytes > 16ull * 1024ull * 1024ull * 1024ull)
+                bytes = 16ull * 1024ull * 1024ull * 1024ull;
+        bytes &= ~4095ull;
+        pages = bytes / 4096ull;
+        if (pages < 16)
+                return;
+
+        system_sysctl("/sys/block/zram0/comp_algorithm", "zstd\n");
+        used = positive_into_string(size_text, (positive)bytes);
+        size_text[used++] = '\n';
+        size_text[used] = end;
+        system_sysctl("/sys/block/zram0/disksize", (string_address)size_text);
+
+        memory_zero(swap_page, sizeof(swap_page));
+        {
+                p32 version = 1;
+                p32 last_page = (p32)(pages - 1);
+
+                memory_copy(swap_page + 1024, address_of version, 4);
+                memory_copy(swap_page + 1028, address_of last_page, 4);
+                memory_copy(swap_page + 4086, "SWAPSPACE2", 10);
+        }
+        fd = system_open_at(AT_FDCWD, "/dev/zram0", FILE_WRITE | O_CLOEXEC);
+        if (fd < 0)
+                return;
+        got = system_call_3(syscall(write), (positive)fd, (positive)swap_page, sizeof(swap_page));
+        system_close((positive)fd);
+        if (got != (bipolar)sizeof(swap_page))
+                return;
+        if (system_call_2(syscall(swapon), (positive) "/dev/zram0", 0x8000 | 100) == 0)
+                system_sysctl("/proc/sys/vm/swappiness", "100\n");
+}
+
 static COLD fn system_resource_limits(void)
 {
         bowl_raise_rlimit(BOWL_RLIMIT_NOFILE, BOWL_NOFILE_TARGET);
@@ -634,6 +699,7 @@ static DEAD_END b32 system_init()
         system_sysctl("/proc/sys/net/ipv4/tcp_slow_start_after_idle", "0\n");
         system_sysctl("/proc/sys/net/ipv4/tcp_mtu_probing", "1\n");
         system_sysctl("/proc/sys/net/ipv4/tcp_fastopen", "3\n");
+        system_zram_setup();
 #endif
         mount_devpts();
         mount_shm();

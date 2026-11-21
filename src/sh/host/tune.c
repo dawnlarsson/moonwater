@@ -1376,7 +1376,7 @@ static bool workarounds_state(p8 address_to text, positive size, const host_work
         return row->default_on;
 }
 
-static bipolar workarounds_store(const host_workaround_row address_to row, bool on)
+static bipolar workarounds_store_key(string_address key, string_address value)
 {
         p8 text[512];
         p8 out[640];
@@ -1385,7 +1385,7 @@ static bipolar workarounds_store(const host_workaround_row address_to row, bool 
         positive used = 0;
         positive start;
         positive length;
-        positive size = string_length(row->name);
+        positive size = string_length(key);
 
         if (got >= (bipolar)sizeof(text) - 1)
                 return -EFBIG;
@@ -1395,7 +1395,7 @@ static bipolar workarounds_store(const host_workaround_row address_to row, bool 
                 got = 0;
         while (host_line_next(text, (positive)got, address_of at, address_of start, address_of length))
         {
-                if (tune_line_is(text + start, length, row->name))
+                if (tune_line_is(text + start, length, key))
                         continue;
                 if (used + length + 1 >= sizeof(out))
                         return -EFBIG;
@@ -1403,20 +1403,26 @@ static bipolar workarounds_store(const host_workaround_row address_to row, bool 
                 used += length;
                 out[used++] = '\n';
         }
-        if (on != row->default_on)
+        if (value && value[0])
         {
-                string_address word = on ? (string_address) " on\n" : (string_address) " off\n";
-                positive wlen = string_length(word);
+                positive vlen = string_length(value);
 
-                if (used + size + wlen >= sizeof(out))
+                if (used + size + vlen + 2 >= sizeof(out))
                         return -EFBIG;
-                memory_copy(out + used, row->name, size);
+                memory_copy(out + used, key, size);
                 used += size;
-                memory_copy(out + used, word, wlen);
-                used += wlen;
+                out[used++] = ' ';
+                memory_copy(out + used, value, vlen);
+                used += vlen;
+                out[used++] = '\n';
         }
         host_state_ready();
         return host_write_file(WORKAROUNDS_KEPT, out, used, 0644, true);
+}
+
+static bipolar workarounds_store(const host_workaround_row address_to row, bool on)
+{
+        return workarounds_store_key(row->name, on == row->default_on ? (string_address) "" : on ? (string_address) "on" : (string_address) "off");
 }
 
 static b32 host_workarounds(string_address address_to arguments, positive count)
@@ -1426,6 +1432,8 @@ static b32 host_workarounds(string_address address_to arguments, positive count)
 
         if (count == 2)
         {
+                positive at = 0, start, length;
+
                 got = host_read_state(WORKAROUNDS_KEPT, text, sizeof(text));
                 if (got < 0)
                         got = 0;
@@ -1438,6 +1446,50 @@ static b32 host_workarounds(string_address address_to arguments, positive count)
                                  host_workaround_rows[i].about,
                                  host_workaround_rows[i].default_on ? (string_address) "default on" : (string_address) "default off");
                 }
+                while (host_line_next(text, (positive)got, address_of at, address_of start, address_of length))
+                        if (memory_first_of(text + start, ':', length))
+                        {
+                                p8 line[128];
+                                positive take = length < sizeof(line) - 1 ? length : sizeof(line) - 1;
+
+                                memory_copy(line, text + start, take);
+                                line[take] = end;
+                                host_say(log, "app override: %s\n", (string_address)line);
+                        }
+                return 0;
+        }
+        if (count == 6 && string_equals(arguments[2], "app"))
+        {
+                string_address app = arguments[3];
+                string_address name = arguments[4];
+                string_address mode = arguments[5];
+                p8 key[96];
+                positive alen = string_length(app), nlen = string_length(name);
+                bool valid = false;
+                bipolar lock, failed;
+
+                for (positive i = 0; i < array_count(host_workaround_rows); i++)
+                        if (string_equals(name, host_workaround_rows[i].name))
+                                valid = true;
+                if (!valid)
+                        return host_refuse("unknown workaround %s (run `moonwater workarounds` to list them)\n", name);
+                if (!alen || alen + 1 + nlen >= sizeof(key) || memory_first_of(app, ' ', alen) || memory_first_of(app, ':', alen) || memory_first_of(app, '/', alen))
+                        return host_refuse("invalid app name %s (use executable basename without / or :)\n", app);
+                if (!string_equals(mode, "on") && !string_equals(mode, "off") && !string_equals(mode, "default"))
+                        return host_usage();
+                host_need_root();
+                memory_copy(key, app, alen);
+                key[alen] = ':';
+                memory_copy(key + alen + 1, name, nlen);
+                key[alen + 1 + nlen] = end;
+                lock = radio_lock(true);
+                if (lock < 0)
+                        return host_fail(WORKAROUNDS_KEPT, lock);
+                failed = workarounds_store_key((string_address)key, string_equals(mode, "default") ? (string_address) "" : mode);
+                radio_unlock(lock);
+                if (failed < 0)
+                        return host_fail(WORKAROUNDS_KEPT, failed);
+                host_say(log, host_label "workarounds app %s %s %s\n", app, name, mode);
                 return 0;
         }
         if (count == 3)

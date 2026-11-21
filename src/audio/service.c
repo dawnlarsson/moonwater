@@ -616,6 +616,18 @@ static long audio_playing_stream(int *low)
                         continue;
                 frames = s->voice.frame ? (long)(s->asked / s->voice.frame) : 0;
                 *low = frames > 0 && (long long)frames * 1000 <= (long long)s->rate * AUDIO_LOW_MS;
+                if (!*low)
+                {
+                        char byte;
+                        long gfd = audio_call(syscall(openat), (positive)AT_FDCWD, (positive) "/run/moonwater/game-slice", 0x80000 | 0x20000, 0, 0, 0);
+
+                        if (gfd >= 0)
+                        {
+                                if (audio_call(syscall(read), (positive)gfd, (positive)&byte, 1, 0, 0, 0) > 0)
+                                        *low = 1;
+                                audio_call(syscall(close), (positive)gfd, 0, 0, 0, 0, 0);
+                        }
+                }
                 return s->rate;
         }
         return 0;

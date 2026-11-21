@@ -160,7 +160,7 @@ static const host_row host_rows[] = {
     {null, "security http [on|off]", "plain http in wget and fetch, and redirects to it [on]", 'f'},
     {null, "security packages [on|off]", "programs of a bowl may run the package manager of its distribution [on]", 'f'},
     {null, "security sudo [on|off]", "moonwater through sudo or su in a bowl; on trusts root in a bowl as root of the machine, for single-user machines [off]", 'f'},
-    {null, "workarounds [NAME|all [on|off]]", "active app/Wine/Steam/Chrome compatibility workarounds; all on by default, opt out by name", 'b'},
+    {null, "workarounds [NAME|all [on|off]|app PROG NAME on|off|default]", "active app/Wine/Steam/Chrome compatibility workarounds; opt out globally or per executable", 'b'},
     {null, "link", "who this machine is linked with, and what each may do", 'f'},
     {null, "link [pair|NAME]", "machines linked by name, with a code", 'm'},
     {null, "link pair [NAME]", "a code, and wait for the other machine to use it", 'f'},

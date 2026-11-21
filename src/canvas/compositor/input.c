@@ -153,8 +153,10 @@ static void compositor_game_watch(void)
         compositor.games++;
 }
 
-// EEVDF custom 100 us runtime slice for fullscreen top games (restored on exit or restart via game-slice file).
+// EEVDF custom 100 us runtime slice + uclamp.min boost + multi-CCD V-Cache pinning for fullscreen top games.
 #define COMPOSITOR_GAME_SLICE_NS 100000ull
+#define COMPOSITOR_GAME_UCLAMP_MIN 512u
+#define COMPOSITOR_SCHED_FLAG_UCLAMP_MIN 0x20ull
 #define COMPOSITOR_GAME_SLICES 8
 #define COMPOSITOR_GAME_SLICE_FILE "/run/moonwater/game-slice"
 static b32 compositor_game_off;
@@ -169,12 +171,46 @@ struct compositor_sched_attr
 };
 _Static_assert(sizeof(struct compositor_sched_attr) == 56, "sched_attr: SCHED_ATTR_SIZE_VER1");
 
+static int compositor_ccd0_mask(unsigned long mask[2])
+{
+        char list[64];
+        const char *p = list;
+
+        mask[0] = mask[1] = 0;
+        if (!compositor_multi_ccd())
+                return 0;
+        compositor_word("/sys/devices/system/cpu/cpu0/cache/index3/shared_cpu_list", list, sizeof(list));
+        while (*p)
+        {
+                unsigned int lo = 0, hi = 0;
+
+                while (*p >= '0' && *p <= '9')
+                        lo = lo * 10 + (unsigned int)(*p++ - '0');
+                hi = lo;
+                if (*p == '-')
+                {
+                        p++, hi = 0;
+                        while (*p >= '0' && *p <= '9')
+                                hi = hi * 10 + (unsigned int)(*p++ - '0');
+                }
+                for (unsigned int c = lo; c <= hi && c < 128; c++)
+                        mask[c >> 6] |= 1ul << (c & 63);
+                if (*p == ',')
+                        p++;
+                else
+                        break;
+        }
+        return (mask[0] | mask[1]) != 0;
+}
+
 static unsigned int compositor_game_slice_of(unsigned int pid, unsigned long long slice)
 {
         char path[40];
         p8 buffer[2048];
         bipolar handle, got;
         unsigned int asked = 0;
+        unsigned long ccd_mask[2] = {0, 0}, all_mask[2] = {~0ul, ~0ul};
+        int pin_ccd = compositor_ccd0_mask(ccd_mask);
 
         windows_num_path(path, sizeof(path), "/proc/", pid, "/task");
         if ((handle = system_open_at(AT_FDCWD, (string_address)path, FILE_READ | O_DIRECTORY | O_CLOEXEC)) < 0)
@@ -192,8 +228,19 @@ static unsigned int compositor_game_slice_of(unsigned int pid, unsigned long lon
                         if (!tid || *name || compositor_call(syscall(sched_getattr), tid, (positive)&attr, sizeof(attr), 0, 0, 0) != 0 ||
                             (attr.policy != 0 && attr.policy != 3) || (attr.runtime == COMPOSITOR_GAME_SLICE_NS) == !!slice)
                                 continue;
-                        attr.size = sizeof(attr), attr.flags = 0, attr.runtime = slice;
-                        asked += compositor_call(syscall(sched_setattr), tid, (positive)&attr, 0, 0, 0, 0) == 0;
+                        attr.size = sizeof(attr), attr.runtime = slice;
+                        attr.flags = COMPOSITOR_SCHED_FLAG_UCLAMP_MIN;
+                        attr.util_min = slice ? COMPOSITOR_GAME_UCLAMP_MIN : 0;
+                        if (compositor_call(syscall(sched_setattr), tid, (positive)&attr, 0, 0, 0, 0) != 0)
+                        {
+                                attr.flags = 0, attr.util_min = 0;
+                                asked += compositor_call(syscall(sched_setattr), tid, (positive)&attr, 0, 0, 0, 0) == 0;
+                        }
+                        else
+                                asked++;
+                        if (pin_ccd)
+                                compositor_call(syscall(sched_setaffinity), tid, sizeof(ccd_mask),
+                                                (positive)(slice ? ccd_mask : all_mask), 0, 0, 0);
                 }
         system_close(handle);
         return asked;
