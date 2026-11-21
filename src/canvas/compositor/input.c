@@ -891,7 +891,7 @@ static void compositor_logo_act(void)
 
 static unsigned int compositor_modifiers(void)
 {
-        unsigned int held = 0;
+        unsigned int held = compositor.held[COMPOSITOR_INPUTS];
 
         for (unsigned int at = 0; at < compositor.input_count; at++)
                 held |= compositor.held[at];
@@ -3362,6 +3362,7 @@ static void compositor_input_dropped(unsigned int at, positive now)
 #define COMPOSITOR_READER_NOTE_DELAY_NS 16000000ull
 #define COMPOSITOR_READER_GONE 0xffffu
 #define COMPOSITOR_READER_NOTE 0xfffeu
+#define COMPOSITOR_READER_BTN_NOTE 0xfffdu
 #define COMPOSITOR_READER_UNWATCH -1
 
 struct compositor_reader_record
@@ -3413,9 +3414,12 @@ static int compositor_reader_running(void) { return compositor_reader.on; }
 
 #ifdef CONFIG_MOONWATER_WAYLAND
 static int compositor_wl_direct_send(long dx, long dy, positive micro);
+static int compositor_wl_direct_send_packet(long dx, long dy, unsigned int btn, int btn_val, int wheel_v120, int wheel_horiz,
+                                            positive micro, unsigned long *btn_serial, int *btn_row);
 static int compositor_wl_direct_clean(void);
 static int compositor_wl_direct_key(unsigned int code, int pressed, unsigned long *serial, int *row, int to);
 static void compositor_wl_key_noted(unsigned int at, unsigned int code, int value, unsigned long serial, int row, positive stamp, positive read, positive sent);
+static void compositor_wl_button_noted(unsigned int code, int pressed, unsigned long serial, int row);
 static void compositor_wl_direct_publish(void);
 #endif
 
@@ -3458,7 +3462,7 @@ static void compositor_reader_put(unsigned int at, unsigned int generation, cons
         record->raw = *raw, record->at = at, record->generation = generation;
         record->read = raw->type == COMPOSITOR_READER_NOTE ? compositor_reader.note_read : 0;
         record->sent = raw->type == COMPOSITOR_READER_NOTE ? compositor_reader.note_sent : 0;
-        compositor_reader.handed_out += raw->type != COMPOSITOR_READER_NOTE;
+        compositor_reader.handed_out += (raw->type != COMPOSITOR_READER_NOTE && raw->type != COMPOSITOR_READER_BTN_NOTE);
         __atomic_store_n(&compositor_reader.handed, handed, __ATOMIC_SEQ_CST);
 }
 
@@ -3498,11 +3502,30 @@ static void compositor_reader_direct_stat(positive now_us, positive micro)
 }
 #endif
 
+static int compositor_reader_button(unsigned int at, long dx, long dy, unsigned int code, int value, int wheel_v120, int wheel_horiz, positive micro)
+{
+        struct compositor_input_event note = {0, 0, COMPOSITOR_READER_BTN_NOTE, 0, 0};
+        unsigned long serial = 0;
+        int row = -1;
+
+        if (!compositor_wl_direct_send_packet(dx, dy, code, value, wheel_v120, wheel_horiz, micro, &serial, &row))
+                return 0;
+        if (code)
+        {
+                note.seconds = (long)serial, note.microseconds = (long)micro, note.code = (unsigned short)code, note.value = value;
+                compositor_reader_put(at, (unsigned int)row, &note);
+                if (!compositor_reader.note_due)
+                        compositor_reader.note_due = clock_monotonic_nanoseconds() + COMPOSITOR_READER_NOTE_DELAY_NS;
+        }
+        compositor_reader_direct_stat(clock_monotonic_nanoseconds() / 1000, micro);
+        return 1;
+}
+
 static int compositor_reader_direct(unsigned int at, const struct compositor_input_event *raw, unsigned int count)
 {
 #ifdef CONFIG_MOONWATER_WAYLAND
         long dx = 0, dy = 0;
-        int key = -1, value = 0;
+        int key = -1, value = 0, btn = 0, btn_val = 0, wheel_v120 = 0, wheel_horiz = 0;
         positive micro;
 
         if (compositor.touchpad[at] || compositor.touchscreen[at] || compositor.devices[at].wakeonly || __atomic_load_n(&compositor.dark, __ATOMIC_RELAXED) ||
@@ -3513,17 +3536,30 @@ static int compositor_reader_direct(unsigned int at, const struct compositor_inp
                         dx += raw[k].value;
                 else if (raw[k].type == COMPOSITOR_EV_REL && raw[k].code == COMPOSITOR_REL_Y)
                         dy += raw[k].value;
+                else if (raw[k].type == COMPOSITOR_EV_REL &&
+                         (raw[k].code == COMPOSITOR_REL_WHEEL || raw[k].code == COMPOSITOR_REL_HWHEEL ||
+                          raw[k].code == COMPOSITOR_REL_WHEEL_HI || raw[k].code == COMPOSITOR_REL_HWHEEL_HI) && !wheel_v120)
+                {
+                        int fine = raw[k].code == COMPOSITOR_REL_WHEEL_HI || raw[k].code == COMPOSITOR_REL_HWHEEL_HI;
+                        int sideways = raw[k].code == COMPOSITOR_REL_HWHEEL || raw[k].code == COMPOSITOR_REL_HWHEEL_HI;
+
+                        if (!fine && (compositor.hires[at] >> sideways & 1))
+                                continue;
+                        wheel_v120 = fine ? raw[k].value : raw[k].value * 120;
+                        wheel_horiz = sideways;
+                }
+                else if (raw[k].type == COMPOSITOR_EV_KEY && raw[k].code >= COMPOSITOR_BTN_LEFT && raw[k].code <= COMPOSITOR_BTN_TASK && !btn)
+                        btn = raw[k].code, btn_val = raw[k].value;
                 else if (raw[k].type == COMPOSITOR_EV_KEY && raw[k].code < 256 && key < 0)
                         key = raw[k].code, value = raw[k].value;
                 else if (raw[k].type != 4u && !(raw[k].type == COMPOSITOR_EV_SYN && raw[k].code == 0))
                         return 0;
         micro = (positive)raw[count - 1].seconds * 1000000ull + (positive)raw[count - 1].microseconds;
         if (key >= 0)
-                return !dx && !dy && compositor_reader_key(at, (unsigned int)key, value, micro);
-        if ((!dx && !dy) || !compositor_wl_direct_send(dx, dy, micro))
+                return !dx && !dy && !btn && !wheel_v120 && compositor_reader_key(at, (unsigned int)key, value, micro);
+        if (!dx && !dy && !btn && !wheel_v120)
                 return 0;
-        compositor_reader_direct_stat(clock_monotonic_nanoseconds() / 1000, micro);
-        return 1;
+        return compositor_reader_button(at, dx, dy, (unsigned int)btn, btn_val, wheel_v120, wheel_horiz, micro);
 #else
         (void)at, (void)raw, (void)count;
         return 0;
@@ -3586,25 +3622,65 @@ static unsigned int compositor_reader_spark_drain(struct spark_input_ring *ring,
         {
                 const struct spark_input_slot *s = &ring->slots[tail & ring->mask];
                 int dx = s->dx, dy = s->dy;
+                unsigned short kind = s->kind, code = s->code;
                 positive micro = s->time_us;
+                positive now = clock_monotonic_nanoseconds();
 
                 __atomic_store_n(&ring->tail, ++tail, __ATOMIC_RELEASE);
-                if (dx || dy)
+                *last_ns = now;
+                if (kind == SPARK_INPUT_KIND_REL)
                 {
-                        positive now = clock_monotonic_nanoseconds();
-                        *last_ns = now;
+                        if (dx || dy)
+                        {
 #ifdef CONFIG_MOONWATER_WAYLAND
-                        if (compositor_wl_direct_send(dx, dy, micro))
-                                { compositor_reader_direct_stat(now / 1000, micro), count++; continue; }
+                                if (compositor_wl_direct_send(dx, dy, micro))
+                                        { compositor_reader_direct_stat(now / 1000, micro), count++; continue; }
 #endif
-                        struct compositor_input_event ev = {(long)(micro / 1000000ull), (long)(micro % 1000000ull), COMPOSITOR_EV_REL, 0, 0};
-                        if (dx)
-                                ev.code = COMPOSITOR_REL_X, ev.value = dx, compositor_reader_put(COMPOSITOR_INPUTS, 0, &ev);
-                        if (dy)
-                                ev.code = COMPOSITOR_REL_Y, ev.value = dy, compositor_reader_put(COMPOSITOR_INPUTS, 0, &ev);
+                                struct compositor_input_event ev = {(long)(micro / 1000000ull), (long)(micro % 1000000ull), COMPOSITOR_EV_REL, 0, 0};
+                                if (dx)
+                                        ev.code = COMPOSITOR_REL_X, ev.value = dx, compositor_reader_put(COMPOSITOR_INPUTS, 0, &ev);
+                                if (dy)
+                                        ev.code = COMPOSITOR_REL_Y, ev.value = dy, compositor_reader_put(COMPOSITOR_INPUTS, 0, &ev);
+                                ev.type = COMPOSITOR_EV_SYN, ev.code = 0, ev.value = 0;
+                                compositor_reader_put(COMPOSITOR_INPUTS, 0, &ev);
+                                async_dx += dx, async_dy += dy, forwarded = 1;
+                        }
+                }
+                else if (kind == SPARK_INPUT_KIND_KEY)
+                {
+#ifdef CONFIG_MOONWATER_WAYLAND
+                        if (!__atomic_load_n(&compositor.dark, __ATOMIC_RELAXED) &&
+                            __atomic_load_n(&compositor_reader.taken, __ATOMIC_ACQUIRE) == compositor_reader.handed_out && !compositor_reader.dropped)
+                        {
+                                if (code < 256 && compositor_reader_key(COMPOSITOR_INPUTS, code, dx, micro))
+                                        { count++; continue; }
+                                if (code >= COMPOSITOR_BTN_LEFT && code <= COMPOSITOR_BTN_TASK &&
+                                    compositor_reader_button(COMPOSITOR_INPUTS, 0, 0, code, dx, 0, 0, micro))
+                                        { count++; continue; }
+                        }
+#endif
+                        struct compositor_input_event ev = {(long)(micro / 1000000ull), (long)(micro % 1000000ull), COMPOSITOR_EV_KEY, code, dx};
+                        compositor_reader_put(COMPOSITOR_INPUTS, 0, &ev);
                         ev.type = COMPOSITOR_EV_SYN, ev.code = 0, ev.value = 0;
                         compositor_reader_put(COMPOSITOR_INPUTS, 0, &ev);
-                        async_dx += dx, async_dy += dy, forwarded = 1;
+                        forwarded = 1;
+                }
+                else if (kind == SPARK_INPUT_KIND_WHEEL)
+                {
+                        int fine = code == COMPOSITOR_REL_WHEEL_HI || code == COMPOSITOR_REL_HWHEEL_HI;
+                        int sideways = code == COMPOSITOR_REL_HWHEEL || code == COMPOSITOR_REL_HWHEEL_HI;
+                        int v120 = fine ? dx : dx * 120;
+#ifdef CONFIG_MOONWATER_WAYLAND
+                        if (v120 && !__atomic_load_n(&compositor.dark, __ATOMIC_RELAXED) &&
+                            __atomic_load_n(&compositor_reader.taken, __ATOMIC_ACQUIRE) == compositor_reader.handed_out && !compositor_reader.dropped &&
+                            compositor_reader_button(COMPOSITOR_INPUTS, 0, 0, 0, 0, v120, sideways, micro))
+                                { count++; continue; }
+#endif
+                        struct compositor_input_event ev = {(long)(micro / 1000000ull), (long)(micro % 1000000ull), COMPOSITOR_EV_REL, code, dx};
+                        compositor_reader_put(COMPOSITOR_INPUTS, 0, &ev);
+                        ev.type = COMPOSITOR_EV_SYN, ev.code = 0, ev.value = 0;
+                        compositor_reader_put(COMPOSITOR_INPUTS, 0, &ev);
+                        forwarded = 1;
                 }
                 count++;
         }
@@ -3788,12 +3864,19 @@ static void compositor_reader_take(void)
                         at++;
                         continue;
                 }
+                if (first->raw.type == COMPOSITOR_READER_BTN_NOTE)
+                {
+                        compositor_wl_button_noted(first->raw.code, first->raw.value, (unsigned long)first->raw.seconds, (int)first->generation);
+                        at++;
+                        continue;
+                }
 #endif
                 while (at < handed && count < 64)
                 {
                         const struct compositor_reader_record *record = &compositor_reader.ring[at % COMPOSITOR_READER_RING];
 
-                        if (record->at != device || record->generation != generation || record->raw.type == COMPOSITOR_READER_NOTE)
+                        if (record->at != device || record->generation != generation ||
+                            record->raw.type == COMPOSITOR_READER_NOTE || record->raw.type == COMPOSITOR_READER_BTN_NOTE)
                                 break;
                         raw[count++] = record->raw, at++, compositor_reader.reading_out++;
                         if (record->raw.type == COMPOSITOR_READER_GONE)
@@ -3907,19 +3990,21 @@ static void compositor_input_wheel(unsigned int at, unsigned int code, int value
 {
         int fine = code == COMPOSITOR_REL_WHEEL_HI || code == COMPOSITOR_REL_HWHEEL_HI;
         int sideways = code == COMPOSITOR_REL_HWHEEL || code == COMPOSITOR_REL_HWHEEL_HI;
-
-        compositor.table->input_wheel_read[at]++, compositor.table->input_wheel_last[at] = now;
-        if (!fine && (compositor.hires[at] >> sideways & 1))
-                return;
-        int stream = compositor_wheel_streams(at, now);
+        int stream = at < COMPOSITOR_INPUTS ? compositor_wheel_streams(at, now) : 0;
         long long value120 = fine ? (long long)value : (long long)value * 120;
         unsigned int flags = stream ? (WINDOW_WHEEL_PRECISE | WINDOW_WHEEL_STREAM) : 0;
 
-        if (compositor.table)
-                window_wheel_note(compositor.table, at, now, stream);
-        compositor.table->input_wheel_used[at]++;
-        if (stream)
-                value120 = compositor_stream_turn(at, value120, compositor_stream_gain_at(at, now), sideways);
+        if (at < COMPOSITOR_INPUTS)
+        {
+                compositor.table->input_wheel_read[at]++, compositor.table->input_wheel_last[at] = now;
+                if (!fine && (compositor.hires[at] >> sideways & 1))
+                        return;
+                if (compositor.table)
+                        window_wheel_note(compositor.table, at, now, stream);
+                compositor.table->input_wheel_used[at]++;
+                if (stream)
+                        value120 = compositor_stream_turn(at, value120, compositor_stream_gain_at(at, now), sideways);
+        }
         compositor_wheel(compositor_counts(0, value120), sideways, flags);
 }
 

@@ -342,6 +342,7 @@ static struct
         long screens, output_age[WAYLAND_SCREENS];
         long clients, objects, surfaces, pools, buffers, fds, rows;
         long pointer_row, pointer_surface, keyboard_row, pointer_x, pointer_y;
+        unsigned int seat_gen;
         unsigned long mods[4];
         unsigned char keys[16];
         long selection_owner[2], selection_source[2], buttons;
@@ -3838,6 +3839,7 @@ static int wayland_seat_request(struct wayland_client *c, struct wayland_object 
                 return wayland_fail(c, self->id, WLN_wl_seat_error_missing_capability, "the seat has no touch");
         if (!wayland_ids_add(wayland_seat_ids(c, ifaces[op]), c->objects[slot].id))
                 return wayland_fail(c, self->id, WAYLAND_NO_MEMORY, "too many seat objects");
+        wayland.seat_gen++;
         struct wayland_client *owner;
         struct wayland_surface *s;
         if (op == WLQ_wl_seat_get_pointer && wayland.pointer_surface >= 0 &&
@@ -5006,6 +5008,39 @@ WAYLAND_API long wayland_pointer_direct(long row, unsigned int *relative, long *
         return *scale120 = s->scale120, *relatives ? c->slot + 1 : 0;
 }
 
+WAYLAND_API long wayland_pointer_direct_ptrs(long row, unsigned int *ptrs, unsigned char *vers, long *count, unsigned int *frames, long *framed,
+                                             long room, long *scale120, unsigned long **serial)
+{
+        struct wayland_client *c;
+        struct wayland_surface *s = wayland_row_surface(row, &c);
+        long n = 0;
+
+        *count = *framed = 0;
+        if (!wayland.host || !s || row != wayland.pointer_row || wayland_dragging() ||
+            !wayland_ids_collect(c, &c->seat_ids[0], WLI_wl_pointer, 5, frames, framed, room))
+                return 0;
+        for (long at = 0, slot; (slot = wayland_ids_next(c, &c->seat_ids[0], WLI_wl_pointer, &at)) >= 0;)
+        {
+                if (n >= room) return 0;
+                ptrs[n] = c->objects[slot].id;
+                vers[n] = (unsigned char)(c->objects[slot].version > 255 ? 255 : c->objects[slot].version);
+                n++;
+        }
+        if (!n) return 0;
+        *count = n;
+        if (scale120) *scale120 = s->scale120;
+        if (serial) *serial = &c->serial;
+        return c->slot + 1;
+}
+
+WAYLAND_API void wayland_pointer_noted(long row, unsigned long serial)
+{
+        struct wayland_client *c;
+        if (!wayland.host || row != wayland.pointer_row || !wayland_row_surface(row, &c))
+                return;
+        c->input_serial[c->input_next++ % WAYLAND_INPUT_SERIALS] = (unsigned int)serial;
+}
+
 WAYLAND_API long wayland_keyboard_direct(long row, unsigned int *ids, long *count, long room, unsigned long **serial)
 {
         struct wayland_client *c;
@@ -5283,10 +5318,15 @@ static int wayland_ext_request(struct wayland_client *c, struct wayland_object *
                 }
                 return WAYLAND_OK;
         case WLI_zwp_relative_pointer_manager_v1:
-                return op == WLQ_zwp_relative_pointer_manager_v1_get_relative_pointer && !wayland_ids_add(&c->relative_ids, c->objects[a[0].slot].id)
-                           ? wayland_fail(c, self->id, WAYLAND_NO_MEMORY, "no memory for a relative pointer") : WAYLAND_OK;
+                if (op == WLQ_zwp_relative_pointer_manager_v1_get_relative_pointer)
+                {
+                        if (!wayland_ids_add(&c->relative_ids, c->objects[a[0].slot].id))
+                                return wayland_fail(c, self->id, WAYLAND_NO_MEMORY, "no memory for a relative pointer");
+                        wayland.seat_gen++;
+                }
+                return WAYLAND_OK;
         case WLI_zwp_relative_pointer_v1:
-                return wayland_ids_remove(&c->relative_ids, self->id), WAYLAND_OK;
+                return wayland_ids_remove(&c->relative_ids, self->id), wayland.seat_gen++, WAYLAND_OK;
         case WLI_zwp_pointer_constraints_v1:
         {
                 long index;

@@ -541,6 +541,15 @@ static positive compositor_wl_frame_sent_at;     // timestamp of last wl_surface
 static positive compositor_wl_game_render_ns;    // smoothed game render duration (fast-attack / slow-decay)
 static void compositor_wl_dmabuf_refresh(void); // wayland_host.c: re-probe render node after late GPU init or drm uevents
 static int compositor_wl_dmabuf_missing(void);
+static void compositor_wl_scan_retry(int row);
+static inline int compositor_wl_jit_row(void)
+{
+        if (compositor.direct_row >= 0)
+                return compositor.direct_row;
+        if (compositor.focus >= 0 && compositor.fullscreen[compositor.focus] && compositor.showing[compositor.focus])
+                return compositor.focus;
+        return -1;
+}
 #endif
 
 static void compositor_flip_done(void)
@@ -581,10 +590,11 @@ static void compositor_flip_done(void)
                 positive vblank = compositor.flip_stamped && compositor.flip_when ? compositor.flip_when : now;
                 positive margin = 1500000ull; // 1.5 ms safety margin before vblank
                 positive budget = compositor_wl_game_render_ns + margin;
+                int jit = compositor_wl_jit_row();
 
                 compositor_wl_frame_owed = 0;
-                if (compositor.direct_row >= 0 && compositor_wl_game_render_ns > 0 && compositor.period > budget + 1000000ull &&
-                    !compositor_wl_row_async(compositor.direct_row))
+                if (jit >= 0 && compositor_wl_game_render_ns > 0 && compositor.period > budget + 1000000ull &&
+                    !compositor_wl_row_async(jit))
                 {
                         positive target = vblank + compositor.period - budget;
 

@@ -1842,17 +1842,49 @@ static bool rules_device_physical(struct input_dev *dev);
         rover's rules hear an event before any reader does, and a rule that
         takes it drops it here. The bindings below hear what it lets through.
 */
+static bool spark_input_push(struct spark_input_ring *ring, unsigned short kind, unsigned short code, int dx, int dy)
+{
+        unsigned long flags;
+        bool pushed = false;
+
+        spin_lock_irqsave(&spark_input_lock, flags);
+        if (READ_ONCE(ring->active))
+        {
+                u64 head = ring->head;
+                u64 tail = smp_load_acquire(&ring->tail);
+
+                if (head - tail < SPARK_INPUT_SLOTS)
+                {
+                        struct spark_input_slot *s = &ring->slots[head & (SPARK_INPUT_SLOTS - 1u)];
+
+                        s->dx = dx;
+                        s->dy = dy;
+                        s->time_us = ktime_get_ns() / 1000ull;
+                        s->kind = kind;
+                        s->code = code;
+                        s->flags = 0;
+                        smp_store_release(&ring->head, head + 1);
+                        wake_up_interruptible(&spark_input_wait);
+                        pushed = true;
+                }
+                else
+                        ring->drops++;
+        }
+        spin_unlock_irqrestore(&spark_input_lock, flags);
+        return pushed;
+}
+
 static _Bool bind_filter(struct input_handle *handle, unsigned int type,
                          unsigned int code, int value)
 {
         struct bind_handle *bind = container_of(handle, struct bind_handle, handle);
         u64 started = moonwater_cost_begin(&bind_cost);
         bool taken = false;
-
         struct spark_input_ring *ring = READ_ONCE(spark_input_page);
+        bool spark_ok = ring && READ_ONCE(ring->active) && !bind->rover_virtual &&
+                        !test_bit(BTN_TOOL_FINGER, handle->dev->keybit) && !test_bit(ABS_MT_POSITION_X, handle->dev->absbit);
 
-        if (ring && READ_ONCE(ring->active) && !bind->rover_virtual &&
-            !test_bit(BTN_TOOL_FINGER, handle->dev->keybit) && !test_bit(ABS_MT_POSITION_X, handle->dev->absbit))
+        if (spark_ok)
         {
                 if (type == EV_REL && (code == REL_X || code == REL_Y))
                 {
@@ -1863,32 +1895,22 @@ static _Bool bind_filter(struct input_handle *handle, unsigned int type,
                         taken = true;
                         goto counted;
                 }
+                if (type == EV_REL && (code == REL_WHEEL || code == REL_HWHEEL || code == REL_WHEEL_HI_RES || code == REL_HWHEEL_HI_RES))
+                {
+                        if (bind->rel_x || bind->rel_y)
+                        {
+                                spark_input_push(ring, SPARK_INPUT_KIND_REL, 0, bind->rel_x, bind->rel_y);
+                                bind->rel_x = bind->rel_y = 0;
+                        }
+                        taken = spark_input_push(ring, SPARK_INPUT_KIND_WHEEL, (unsigned short)code, value, 0);
+                        goto counted;
+                }
                 if (type == EV_SYN && code == SYN_REPORT && (bind->rel_x || bind->rel_y))
                 {
                         int dx = bind->rel_x, dy = bind->rel_y;
-                        unsigned long flags;
 
                         bind->rel_x = bind->rel_y = 0;
-                        spin_lock_irqsave(&spark_input_lock, flags);
-                        if (READ_ONCE(ring->active))
-                        {
-                                u64 head = ring->head;
-                                u64 tail = smp_load_acquire(&ring->tail);
-
-                                if (head - tail < SPARK_INPUT_SLOTS)
-                                {
-                                        struct spark_input_slot *s = &ring->slots[head & (SPARK_INPUT_SLOTS - 1u)];
-
-                                        s->dx = dx;
-                                        s->dy = dy;
-                                        s->time_us = ktime_get_ns() / 1000ull;
-                                        smp_store_release(&ring->head, head + 1);
-                                        wake_up_interruptible(&spark_input_wait);
-                                }
-                                else
-                                        ring->drops++;
-                        }
-                        spin_unlock_irqrestore(&spark_input_lock, flags);
+                        spark_input_push(ring, SPARK_INPUT_KIND_REL, 0, dx, dy);
                         goto counted;
                 }
         }
@@ -1911,6 +1933,16 @@ static _Bool bind_filter(struct input_handle *handle, unsigned int type,
                 //      counts them for every event it is given).
                 else if (type == EV_KEY)
                         bind_mods(bind, code, value);
+                if (!taken && spark_ok && type == EV_KEY &&
+                    ((code >= BTN_LEFT && code <= BTN_TASK) || (code > 0 && code < 256)))
+                {
+                        if (bind->rel_x || bind->rel_y)
+                        {
+                                spark_input_push(ring, SPARK_INPUT_KIND_REL, 0, bind->rel_x, bind->rel_y);
+                                bind->rel_x = bind->rel_y = 0;
+                        }
+                        taken = spark_input_push(ring, SPARK_INPUT_KIND_KEY, (unsigned short)code, value, 0);
+                }
         }
 counted:
         moonwater_cost_end(&bind_cost, started);

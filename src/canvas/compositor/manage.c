@@ -117,6 +117,7 @@ static void compositor_raise(int row)
 }
 
 static unsigned int compositor_modifiers(void);
+static void compositor_motion(void);
 
 static void compositor_keys_release(void)
 {
@@ -1424,7 +1425,13 @@ static void compositor_row_promote_toplevel(int row, int fullscreen_output)
 
 static void compositor_arrange_on(int row, unsigned int how, int on) { compositor_row_mode(row, how, 0, on); }
 static void compositor_arrange(int row, unsigned int how) { compositor_row_mode(row, how, 0, -1); }
-static void compositor_fullscreen_on(int row, int screen) { compositor_row_mode(row, COMPOSITOR_MAXIMIZED, 1, screen); }
+static void compositor_fullscreen_on(int row, int screen)
+{
+#ifdef CONFIG_MOONWATER_WAYLAND
+        compositor_wl_scan_retry(row);
+#endif
+        compositor_row_mode(row, COMPOSITOR_MAXIMIZED, 1, screen);
+}
 static void compositor_fullscreen_row(int row) { compositor_row_mode(row, COMPOSITOR_MAXIMIZED, 1, -1); }
 static void compositor_float(int row) { compositor_row_mode(row, COMPOSITOR_FLOATING, 0, -1); }
 
@@ -2099,7 +2106,6 @@ static void compositor_take(int row)
         }
 }
 
-static void compositor_motion(void);
 static void compositor_chip_hide(void);
 
 static void compositor_grab_settle(void)
@@ -2223,6 +2229,9 @@ static void compositor_reveal(int row)
         {
                 compositor.state[row] &= ~WINDOW_MINIMIZED;
                 compositor.table->state[row] = compositor.state[row];
+#ifdef CONFIG_MOONWATER_WAYLAND
+                compositor_wl_scan_retry(row);
+#endif
                 compositor_damage_row(row);
                 compositor_tabs_changed();
         }

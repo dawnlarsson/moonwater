@@ -2047,6 +2047,9 @@ static void compositor_cursor_async_sync(int active, int hot_x, int hot_y, int i
                 compositor_cursor_async.active = 0;
 }
 
+#ifdef CONFIG_MOONWATER_WAYLAND
+static void compositor_wl_direct_abs(int x, int y, positive now);
+#endif
 static void compositor_cursor_async_step(long dx, long dy, positive now)
 {
         int gain, ax, ay, nx, ny, left, top;
@@ -2094,6 +2097,9 @@ static void compositor_cursor_async_step(long dx, long dy, positive now)
                         compositor_cursor_async.last_left = left, compositor_cursor_async.last_top = top, compositor_cursor_async.moved_ns = now;
         }
         compositor_cursor_lock_drop();
+#ifdef CONFIG_MOONWATER_WAYLAND
+        compositor_wl_direct_abs(nx, ny, now);
+#endif
 }
 
 static int compositor_cursor_planes(int left, int top)

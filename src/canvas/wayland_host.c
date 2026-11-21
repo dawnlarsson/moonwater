@@ -71,6 +71,7 @@ static struct
         struct compositor_wl_transfer *transfer;
         positive tiled_ns, tiled_most_ns, tiled_pixels, tiled_seq, presenting_since, latched_at, landed_when;
         unsigned long tiled_unwaited;
+        unsigned int direct_gen;
         struct { unsigned int format; unsigned long modifier; } dmabuf_entries[WAYLAND_DMABUF_ENTRIES];
         struct compositor_wl_opaque { short x1, y1, x2, y2; } *row_opaque;
         char render_path[64];
@@ -431,6 +432,7 @@ static void *compositor_wl_remap(void *context, void *at, long old_size, long ne
 static void compositor_wl_unlend(int row);
 static int compositor_straight(int row);
 static void compositor_wl_straight_pay(int row);
+static void compositor_wl_scan_retry(int row);
 static void compositor_wl_straight_drop(int row);
 
 static void compositor_wl_source_drop(int row)
@@ -2029,6 +2031,16 @@ static int compositor_wl_card_image(int row, const struct wayland_picture *pictu
         (void)row, (void)picture, (void)to, (void)pitch, (void)dx, (void)dy, (void)sx, (void)sy, (void)w, (void)h;
         return compositor_wl_tiled_refused(0);
 #endif
+}
+
+static void compositor_wl_scan_retry(int row)
+{
+        if (row < 0 || row >= COMPOSITOR_ROWS)
+                return;
+        if (compositor_wl.straight)
+                compositor_wl.straight[row].scan_failed = 0;
+        if (compositor_wl.lent)
+                compositor_wl.lent[row].scan_failed = 0;
 }
 
 static void compositor_wl_straight_drop(int row)
@@ -4477,12 +4489,19 @@ static struct
 {
         unsigned int lock;  // 1: one thread has it
         unsigned int depth; // the loop's own holds (its sends nest: a flush that lets a client go)
-        int valid, slot, fd;
-        long scale120, relatives, framed;
-        unsigned int relative[COMPOSITOR_WL_DIRECT_IDS], frames[COMPOSITOR_WL_DIRECT_IDS];
+        int valid, slot, fd, row;
+        long scale120, relatives, framed, ptrs;
+        unsigned int relative[COMPOSITOR_WL_DIRECT_IDS], frames[COMPOSITOR_WL_DIRECT_IDS], ptr_ids[COMPOSITOR_WL_DIRECT_IDS];
+        unsigned char ptr_ver[COMPOSITOR_WL_DIRECT_IDS];
+        unsigned long *ptr_serial;
+        int ptr_valid;
+        // Unlocked fullscreen direct wl_pointer.motion target.
+        int abs_valid, abs_slot, abs_fd, abs_row, abs_x, abs_y, abs_w, abs_h;
+        long abs_scale120, abs_ptrs, abs_framed;
+        unsigned int abs_ptr_ids[COMPOSITOR_WL_DIRECT_IDS], abs_frames[COMPOSITOR_WL_DIRECT_IDS];
         unsigned int rest_length; // bytes of the reader's last send the socket did not take
         int rest_slot;            // the client they are for
-        unsigned char rest[COMPOSITOR_WL_DIRECT_IDS * 40];
+        unsigned char rest[COMPOSITOR_WL_DIRECT_IDS * 96];
         // The keys: the client of the window that has them, its socket and keyboards, where its serials are counted, the row, and the keys
         // that are not the client's alone with the modifiers held now (a modifier, a lock, a volume key, a chord the script binds).
         int keys_valid, keys_slot, keys_fd, keys_row;
@@ -4490,7 +4509,12 @@ static struct
         unsigned int keys_ids[COMPOSITOR_WL_DIRECT_IDS];
         unsigned long *keys_serial;
         unsigned char keys_refused[32];
-} compositor_wl_direct = {.slot = -1, .fd = -1, .rest_slot = -1, .keys_slot = -1, .keys_fd = -1, .keys_row = -1};
+        // Dirty-check snapshot so steady-state loop turns never spin on `lock`.
+        unsigned int pub_valid, pub_gen;
+        int pub_locked, pub_hold_row, pub_key_row, pub_kb_row, pub_ptr_row, pub_focus, pub_drag, pub_resize, pub_chip, pub_fs, pub_ov, pub_keys_to;
+        unsigned int pub_mods, pub_stack_gen, pub_binds, pub_assist, pub_cycle, pub_keys_any;
+        int pub_ax, pub_ay, pub_aw, pub_ah;
+} compositor_wl_direct = {.slot = -1, .fd = -1, .row = -1, .abs_slot = -1, .abs_fd = -1, .abs_row = -1, .rest_slot = -1, .keys_slot = -1, .keys_fd = -1, .keys_row = -1};
 
 static void compositor_wl_direct_hold(void)
 {
@@ -4513,19 +4537,55 @@ static void compositor_wl_direct_make(void)
         unsigned int was = __atomic_load_n(&compositor_spark_want, __ATOMIC_RELAXED);
         long slot;
 
-        compositor_wl_direct.valid = 0;
-        if (!compositor_reader.on || !compositor_wl.started || !compositor_wl_locked())
+        compositor_wl_direct.valid = compositor_wl_direct.ptr_valid = compositor_wl_direct.abs_valid = 0;
+        if (!compositor_reader.on || !compositor_wl.started)
                 goto sync_spark;
-        slot = wayland_pointer_direct(compositor_wl.hold_row, compositor_wl_direct.relative, &compositor_wl_direct.relatives,
-                                      compositor_wl_direct.frames, &compositor_wl_direct.framed, COMPOSITOR_WL_DIRECT_IDS,
-                                      &compositor_wl_direct.scale120) - 1;
-        if (slot < 0 || slot >= compositor_wl.slots || compositor_wl.fd[slot] < 0)
-                goto sync_spark;
-        compositor_wl_direct.slot = (int)slot, compositor_wl_direct.fd = compositor_wl.fd[slot], compositor_wl_direct.valid = 1;
-sync_spark:
-        if (was != (unsigned int)compositor_wl_direct.valid)
+        if (compositor_wl_locked())
         {
-                __atomic_store_n(&compositor_spark_want, (unsigned int)compositor_wl_direct.valid, __ATOMIC_RELEASE);
+                int row = compositor_wl.hold_row;
+
+                slot = wayland_pointer_direct(row, compositor_wl_direct.relative, &compositor_wl_direct.relatives,
+                                              compositor_wl_direct.frames, &compositor_wl_direct.framed, COMPOSITOR_WL_DIRECT_IDS,
+                                              &compositor_wl_direct.scale120) - 1;
+                if (slot >= 0 && slot < compositor_wl.slots && compositor_wl.fd[slot] >= 0)
+                {
+                        compositor_wl_direct.slot = (int)slot, compositor_wl_direct.fd = compositor_wl.fd[slot], compositor_wl_direct.row = row;
+                        compositor_wl_direct.valid = 1;
+                        if (compositor.drag < 0 && compositor.resize < 0 && !compositor.assist_armed && !compositor.cycle &&
+                            !compositor_input_override_query(row))
+                        {
+                                long pslot = wayland_pointer_direct_ptrs(row, compositor_wl_direct.ptr_ids, compositor_wl_direct.ptr_ver,
+                                                                         &compositor_wl_direct.ptrs, compositor_wl_direct.frames, &compositor_wl_direct.framed,
+                                                                         COMPOSITOR_WL_DIRECT_IDS, 0, &compositor_wl_direct.ptr_serial) - 1;
+                                if (pslot == slot && compositor_wl_direct.ptrs > 0)
+                                        compositor_wl_direct.ptr_valid = 1;
+                        }
+                }
+        }
+        else if (compositor.focus >= 0 && compositor.fullscreen[compositor.focus] && compositor.focus == wayland.pointer_row &&
+                 compositor.drag < 0 && compositor.resize < 0 && !compositor.assist_armed && !compositor.cycle &&
+                 !compositor.chip.kind && !compositor_input_override_query(compositor.focus) &&
+                 compositor.stacked > 0 && compositor.stack[compositor.stacked - 1] == compositor.focus)
+        {
+                int row = compositor.focus;
+                unsigned char dummy_ver[COMPOSITOR_WL_DIRECT_IDS];
+
+                slot = wayland_pointer_direct_ptrs(row, compositor_wl_direct.abs_ptr_ids, dummy_ver, &compositor_wl_direct.abs_ptrs,
+                                                   compositor_wl_direct.abs_frames, &compositor_wl_direct.abs_framed, COMPOSITOR_WL_DIRECT_IDS,
+                                                   &compositor_wl_direct.abs_scale120, 0) - 1;
+                if (slot >= 0 && slot < compositor_wl.slots && compositor_wl.fd[slot] >= 0 && compositor_wl_direct.abs_ptrs > 0)
+                {
+                        compositor_wl_direct.abs_slot = (int)slot, compositor_wl_direct.abs_fd = compositor_wl.fd[slot], compositor_wl_direct.abs_row = row;
+                        compositor_wl_direct.abs_x = compositor.x[row], compositor_wl_direct.abs_y = compositor.y[row];
+                        compositor_wl_direct.abs_w = (int)compositor.w[row], compositor_wl_direct.abs_h = (int)compositor.h[row];
+                        compositor_wl_direct.abs_valid = 1;
+                }
+        }
+sync_spark:
+        if (was != (unsigned int)(compositor_wl_direct.valid || compositor_wl_direct.abs_valid))
+        {
+                unsigned int want = (unsigned int)(compositor_wl_direct.valid || compositor_wl_direct.abs_valid);
+                __atomic_store_n(&compositor_spark_want, want, __ATOMIC_RELEASE);
                 if (compositor_reader.wake >= 0)
                 {
                         unsigned long long one = 1;
@@ -4590,11 +4650,52 @@ static void compositor_wl_direct_keys_make(void)
 
 static void compositor_wl_direct_publish(void)
 {
+        int locked, hold_row, key_row, kb_row, ptr_row, focus, drag, resize, chip, fs, ov, keys_to, ax = 0, ay = 0, aw = 0, ah = 0;
+        unsigned int mods, keys_any = 0, gen = compositor_wl.direct_gen ^ wayland.seat_gen;
+
         if (!compositor_reader.on)
+                return;
+        locked = compositor_wl.started && compositor_wl_locked();
+        hold_row = locked ? compositor_wl.hold_row : -1;
+        key_row = compositor_wl.started ? compositor_wl_key_row() : -1;
+        kb_row = compositor_wl.started ? (int)wayland.keyboard_row : -1;
+        ptr_row = compositor_wl.started ? (int)wayland.pointer_row : -1;
+        focus = compositor.focus;
+        fs = focus >= 0 ? (int)compositor.fullscreen[focus] : 0;
+        drag = compositor.drag, resize = compositor.resize, chip = (int)compositor.chip.kind;
+        ov = key_row >= 0 ? compositor_input_override_query(key_row) : (focus >= 0 ? compositor_input_override_query(focus) : 0);
+        mods = compositor_modifiers();
+        keys_to = compositor.keys_to;
+        if (keys_to != key_row)
+                for (unsigned int k = 0; k < sizeof compositor.keys_down; k++)
+                        if (compositor.keys_down[k]) { keys_any = 1; break; }
+        if (focus >= 0 && fs)
+                ax = compositor.x[focus], ay = compositor.y[focus], aw = (int)compositor.w[focus], ah = (int)compositor.h[focus];
+        if (compositor_wl_direct.pub_valid && compositor_wl_direct.pub_gen == gen &&
+            compositor_wl_direct.pub_locked == locked && compositor_wl_direct.pub_hold_row == hold_row &&
+            compositor_wl_direct.pub_key_row == key_row && compositor_wl_direct.pub_kb_row == kb_row &&
+            compositor_wl_direct.pub_ptr_row == ptr_row && compositor_wl_direct.pub_focus == focus &&
+            compositor_wl_direct.pub_fs == fs && compositor_wl_direct.pub_drag == drag &&
+            compositor_wl_direct.pub_resize == resize && compositor_wl_direct.pub_chip == chip &&
+            compositor_wl_direct.pub_ov == ov && compositor_wl_direct.pub_mods == mods &&
+            compositor_wl_direct.pub_keys_to == keys_to && compositor_wl_direct.pub_keys_any == keys_any &&
+            compositor_wl_direct.pub_stack_gen == compositor.stack_gen && compositor_wl_direct.pub_binds == compositor_keys.count &&
+            compositor_wl_direct.pub_assist == compositor.assist_armed && compositor_wl_direct.pub_cycle == (unsigned int)compositor.cycle &&
+            compositor_wl_direct.pub_ax == ax && compositor_wl_direct.pub_ay == ay &&
+            compositor_wl_direct.pub_aw == aw && compositor_wl_direct.pub_ah == ah)
                 return;
         compositor_wl_direct_hold();
         compositor_wl_direct_make();
         compositor_wl_direct_keys_make();
+        compositor_wl_direct.pub_valid = 1, compositor_wl_direct.pub_gen = gen;
+        compositor_wl_direct.pub_locked = locked, compositor_wl_direct.pub_hold_row = hold_row;
+        compositor_wl_direct.pub_key_row = key_row, compositor_wl_direct.pub_kb_row = kb_row, compositor_wl_direct.pub_ptr_row = ptr_row;
+        compositor_wl_direct.pub_focus = focus, compositor_wl_direct.pub_fs = fs, compositor_wl_direct.pub_drag = drag;
+        compositor_wl_direct.pub_resize = resize, compositor_wl_direct.pub_chip = chip, compositor_wl_direct.pub_ov = ov;
+        compositor_wl_direct.pub_mods = mods, compositor_wl_direct.pub_keys_to = keys_to, compositor_wl_direct.pub_keys_any = keys_any;
+        compositor_wl_direct.pub_stack_gen = compositor.stack_gen, compositor_wl_direct.pub_binds = compositor_keys.count;
+        compositor_wl_direct.pub_assist = compositor.assist_armed, compositor_wl_direct.pub_cycle = (unsigned int)compositor.cycle;
+        compositor_wl_direct.pub_ax = ax, compositor_wl_direct.pub_ay = ay, compositor_wl_direct.pub_aw = aw, compositor_wl_direct.pub_ah = ah;
         compositor_wl_direct_release();
 }
 
@@ -4695,36 +4796,104 @@ static int compositor_wl_direct_key(unsigned int code, int pressed, unsigned lon
         return sent;
 }
 
-// The reader's send of one report: 1 when it went (or went in part, the loop finishing it), 0 when it is the loop's to send.
-static int compositor_wl_direct_send(long dx, long dy, positive micro)
+static void compositor_wl_button_noted(unsigned int code, int pressed, unsigned long serial, int row)
 {
-        unsigned char bytes[COMPOSITOR_WL_DIRECT_IDS * 40];
-        unsigned int length = 0;
+        unsigned int bit = code >= COMPOSITOR_BTN_LEFT && code <= COMPOSITOR_BTN_TASK ? (1u << (code - COMPOSITOR_BTN_LEFT)) : 0u;
+        positive now = clock_monotonic_nanoseconds();
+
+        if (pressed)
+                compositor.logo_alone = 0, compositor.button_down |= bit;
+        else
+                compositor.button_down &= ~bit;
+        if (pressed && row >= 0)
+                compositor_clip_gesture(row);
+        wayland_pointer_noted(row, serial);
+        compositor_wl_input();
+#ifdef MOONWATER_GPU_C
+        compositor_gpu_wake();
+#endif
+        compositor_hold_touch(now);
+}
+
+// The reader's send of one locked-pointer packet (relative motion, button, and/or wheel) in one sendto(): 1 when it went, 0 when it is the loop's.
+static int compositor_wl_direct_send_packet(long dx, long dy, unsigned int btn, int btn_val, int wheel_v120, int wheel_horiz,
+                                            positive micro, unsigned long *btn_serial, int *btn_row)
+{
+        unsigned char bytes[COMPOSITOR_WL_DIRECT_IDS * 96];
+        unsigned int length = 0, time_ms;
         long got;
 
-        // The loop holds the lock for a send to this client or a change of what is read here, microseconds: waited for that long at the most
-        // (a loop this thread took the processor from cannot let go of it), then the report is the loop's.
         if (!compositor_wl_direct_try())
                 return 0;
-        // What the loop has queued for the client and not sent (a frame's done, a buffer's release) is not in front of the report: it is
-        // of other objects, and the loop's input for it is all sent (compositor_reader_settle says so only then).
-        if (!compositor_wl_direct.valid || compositor_wl_direct.rest_length)
+        if (!compositor_wl_direct.valid || compositor_wl_direct.rest_length ||
+            ((btn || wheel_v120) && !compositor_wl_direct.ptr_valid))
         {
                 __atomic_store_n(&compositor_wl_direct.lock, 0u, __ATOMIC_RELEASE);
                 return 0;
         }
-        // zwp_relative_pointer_v1.relative_motion (event 0: utime_hi, utime_lo, dx, dy, dx_unaccel, dy_unaccel) to each, then wl_pointer.frame
-        // (event 5) to each pointer of version 5 on: wayland_pointer_relative's words.
-        for (long at = 0; at < compositor_wl_direct.relatives; at++)
+        time_ms = (unsigned int)(micro / 1000ull);
+        if (dx || dy)
         {
-                unsigned int words[8] = {compositor_wl_direct.relative[at], 32u << 16, (unsigned int)(micro >> 32), (unsigned int)micro,
-                                         (unsigned int)wayland_fixed_of(dx, compositor_wl_direct.scale120),
-                                         (unsigned int)wayland_fixed_of(dy, compositor_wl_direct.scale120),
-                                         (unsigned int)wayland_fixed_of(dx, compositor_wl_direct.scale120),
-                                         (unsigned int)wayland_fixed_of(dy, compositor_wl_direct.scale120)};
+                for (long at = 0; at < compositor_wl_direct.relatives; at++)
+                {
+                        unsigned int words[8] = {compositor_wl_direct.relative[at], 32u << 16, (unsigned int)(micro >> 32), (unsigned int)micro,
+                                                 (unsigned int)wayland_fixed_of(dx, compositor_wl_direct.scale120),
+                                                 (unsigned int)wayland_fixed_of(dy, compositor_wl_direct.scale120),
+                                                 (unsigned int)wayland_fixed_of(dx, compositor_wl_direct.scale120),
+                                                 (unsigned int)wayland_fixed_of(dy, compositor_wl_direct.scale120)};
 
-                memory_copy(bytes + length, words, sizeof words);
-                length += sizeof words;
+                        memory_copy(bytes + length, words, sizeof words);
+                        length += sizeof words;
+                }
+        }
+        if (btn)
+        {
+                unsigned long ser = __atomic_add_fetch(compositor_wl_direct.ptr_serial, 1, __ATOMIC_RELAXED);
+                if (btn_serial) *btn_serial = ser;
+                if (btn_row) *btn_row = compositor_wl_direct.row;
+                for (long at = 0; at < compositor_wl_direct.ptrs; at++)
+                {
+                        unsigned int words[6] = {compositor_wl_direct.ptr_ids[at], 24u << 16 | 3u, (unsigned int)ser, time_ms, btn, btn_val ? 1u : 0u};
+
+                        memory_copy(bytes + length, words, sizeof words);
+                        length += sizeof words;
+                }
+        }
+        if (wheel_v120)
+        {
+                unsigned int axis = wheel_horiz ? 1u : 0u;
+                unsigned int fixed = (unsigned int)((long long)wheel_v120 * 15 * 256 / 120);
+                int notches = wheel_v120 / 120;
+
+                for (long at = 0; at < compositor_wl_direct.ptrs; at++)
+                {
+                        unsigned int id = compositor_wl_direct.ptr_ids[at];
+                        unsigned char ver = compositor_wl_direct.ptr_ver[at];
+
+                        if (ver >= 5)
+                        {
+                                unsigned int src[3] = {id, 12u << 16 | 6u, 0u}; // wl_pointer.axis_source = wheel
+                                memory_copy(bytes + length, src, sizeof src);
+                                length += sizeof src;
+                        }
+                        if (ver >= 8)
+                        {
+                                unsigned int v120w[4] = {id, 16u << 16 | 9u, axis, (unsigned int)wheel_v120}; // wl_pointer.axis_value120
+                                memory_copy(bytes + length, v120w, sizeof v120w);
+                                length += sizeof v120w;
+                        }
+                        else if (ver >= 5 && notches)
+                        {
+                                unsigned int disc[4] = {id, 16u << 16 | 8u, axis, (unsigned int)notches}; // wl_pointer.axis_discrete
+                                memory_copy(bytes + length, disc, sizeof disc);
+                                length += sizeof disc;
+                        }
+                        {
+                                unsigned int ax[5] = {id, 20u << 16 | 4u, time_ms, axis, fixed}; // wl_pointer.axis
+                                memory_copy(bytes + length, ax, sizeof ax);
+                                length += sizeof ax;
+                        }
+                }
         }
         for (long at = 0; at < compositor_wl_direct.framed; at++)
         {
@@ -4736,6 +4905,50 @@ static int compositor_wl_direct_send(long dx, long dy, positive micro)
         got = compositor_wl_direct_bytes(compositor_wl_direct.slot, compositor_wl_direct.fd, bytes, length);
         __atomic_store_n(&compositor_wl_direct.lock, 0u, __ATOMIC_RELEASE);
         return (int)got;
+}
+
+static int compositor_wl_direct_send(long dx, long dy, positive micro)
+{
+        return compositor_wl_direct_send_packet(dx, dy, 0, 0, 0, 0, micro, 0, 0);
+}
+
+// Unlocked fullscreen direct wl_pointer.motion + wl_pointer.frame from the SCHED_FIFO reader thread.
+static void compositor_wl_direct_abs(int x, int y, positive now)
+{
+        unsigned char bytes[COMPOSITOR_WL_DIRECT_IDS * 28];
+        unsigned int length = 0, time_ms;
+        long sx, sy;
+
+        if (!__atomic_load_n(&compositor_wl_direct.abs_valid, __ATOMIC_RELAXED))
+                return;
+        if (!compositor_wl_direct_try())
+                return;
+        if (!compositor_wl_direct.abs_valid || compositor_wl_direct.rest_length ||
+            x < compositor_wl_direct.abs_x || y < compositor_wl_direct.abs_y ||
+            x >= compositor_wl_direct.abs_x + compositor_wl_direct.abs_w || y >= compositor_wl_direct.abs_y + compositor_wl_direct.abs_h)
+        {
+                __atomic_store_n(&compositor_wl_direct.lock, 0u, __ATOMIC_RELEASE);
+                return;
+        }
+        sx = wayland_fixed_of(x - compositor_wl_direct.abs_x, compositor_wl_direct.abs_scale120);
+        sy = wayland_fixed_of(y - compositor_wl_direct.abs_y, compositor_wl_direct.abs_scale120);
+        time_ms = (unsigned int)(now / 1000000ull);
+        for (long at = 0; at < compositor_wl_direct.abs_ptrs; at++)
+        {
+                unsigned int words[5] = {compositor_wl_direct.abs_ptr_ids[at], 20u << 16 | 2u, time_ms, (unsigned int)sx, (unsigned int)sy};
+
+                memory_copy(bytes + length, words, sizeof words);
+                length += sizeof words;
+        }
+        for (long at = 0; at < compositor_wl_direct.abs_framed; at++)
+        {
+                unsigned int words[2] = {compositor_wl_direct.abs_frames[at], 8u << 16 | 5u};
+
+                memory_copy(bytes + length, words, sizeof words);
+                length += sizeof words;
+        }
+        compositor_wl_direct_bytes(compositor_wl_direct.abs_slot, compositor_wl_direct.abs_fd, bytes, length);
+        __atomic_store_n(&compositor_wl_direct.lock, 0u, __ATOMIC_RELEASE);
 }
 
 static int compositor_wl_direct_clean(void)
@@ -4764,7 +4977,9 @@ static void compositor_wl_drop(long slot)
 {
         compositor_wl_direct_hold();
         if (compositor_wl_direct.slot == slot)
-                compositor_wl_direct.valid = 0;
+                compositor_wl_direct.valid = compositor_wl_direct.ptr_valid = 0;
+        if (compositor_wl_direct.abs_slot == slot)
+                compositor_wl_direct.abs_valid = 0;
         if (compositor_wl_direct.keys_slot == slot)
                 compositor_wl_direct.keys_valid = 0;
         if (compositor_wl_direct.rest_slot == slot)
@@ -4772,6 +4987,7 @@ static void compositor_wl_drop(long slot)
         if (compositor_wl.fd[slot] >= 0)
                 system_close(compositor_wl.fd[slot]);
         compositor_wl.fd[slot] = -1;
+        compositor_wl.direct_gen++;
         compositor_wl_direct_release();
         wayland_drop(slot);
         compositor_wl_transfers_drop(slot);
@@ -4818,6 +5034,7 @@ static void compositor_wl_accept(void)
                 compositor_wl.barred[slot] = 0;
                 compositor_wl.pid[slot] = credentials[0];
                 compositor_wl.client[slot] = (struct compositor_wl_client){.uid = credentials[1], .asked = 0, .slow_until = 0};
+                compositor_wl.direct_gen++;
         }
 }
 

@@ -754,7 +754,7 @@ static struct
         int told_row, told_x, told_y;
         unsigned char button_down;
         int button_row[8];
-        unsigned char held[COMPOSITOR_INPUTS], repeats[COMPOSITOR_INPUTS];
+        unsigned char held[COMPOSITOR_INPUTS + 1], repeats[COMPOSITOR_INPUTS];
         int repeat_own[COMPOSITOR_INPUTS][2], repeat_kept, repeat_delay, repeat_rate, sensitivity, flat, grip, layout_given;
         unsigned long painted;
         positive period, presented;
@@ -1910,21 +1910,25 @@ static void compositor_present_pass(void)
                         compositor_preview_keep(), compositor_overlays_keep();
                         if (compositor.motion_ts) compositor_latency(1, compositor.motion_ts, after), compositor.motion_ts = 0;
 #ifdef CONFIG_MOONWATER_WAYLAND
-                        if (!compositor_card.on && compositor.flip_pending && compositor.direct_row >= 0 && compositor.flip_row == compositor.direct_row &&
-                            !compositor_wl_row_async(compositor.direct_row))
                         {
-                                if (compositor_wl_frame_sent_at && stamp > compositor_wl_frame_sent_at)
+                                int jit = compositor_wl_jit_row();
+                                if (!compositor_card.on && compositor.flip_pending && jit >= 0 &&
+                                    (compositor.direct_row < 0 || compositor.flip_row == compositor.direct_row) &&
+                                    !compositor_wl_row_async(jit))
                                 {
-                                        positive sample = stamp - compositor_wl_frame_sent_at;
-                                        if (sample < compositor.period)
-                                                compositor_wl_game_render_ns = sample > compositor_wl_game_render_ns ? sample : (compositor_wl_game_render_ns * 7 + sample) / 8;
+                                        if (compositor_wl_frame_sent_at && stamp > compositor_wl_frame_sent_at)
+                                        {
+                                                positive sample = stamp - compositor_wl_frame_sent_at;
+                                                if (sample < compositor.period)
+                                                        compositor_wl_game_render_ns = sample > compositor_wl_game_render_ns ? sample : (compositor_wl_game_render_ns * 7 + sample) / 8;
+                                        }
+                                        compositor_wl_frame_owed = 1;
                                 }
-                                compositor_wl_frame_owed = 1;
-                        }
-                        else if (!compositor_card.on)
-                        {
-                                if (compositor.direct_row < 0) compositor_wl_game_render_ns = compositor_wl_frame_sent_at = 0;
-                                compositor_wl_frame();
+                                else if (!compositor_card.on)
+                                {
+                                        if (jit < 0) compositor_wl_game_render_ns = compositor_wl_frame_sent_at = 0;
+                                        compositor_wl_frame();
+                                }
                         }
 #endif
                 }
@@ -2215,7 +2219,7 @@ static b32 compositor_main()
                 if (compositor.band && taskbar_tick()) compositor_tabs_changed();
                 if (compositor.band && now >= compositor_volume.look_at) compositor_volume_look(now);
 #ifdef CONFIG_MOONWATER_WAYLAND
-                if (compositor_wl_frame_at && (now >= compositor_wl_frame_at || compositor.direct_row < 0))
+                if (compositor_wl_frame_at && (now >= compositor_wl_frame_at || compositor_wl_jit_row() < 0))
                         compositor_wl_frame_at = 0, compositor_wl_frame_sent_at = now, compositor_wl_frame();
                 compositor_wl_wake();
 #endif

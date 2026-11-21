@@ -121,14 +121,18 @@ _Static_assert(sizeof(struct header) == SPARK_HEADER_SIZE,
 #define SPARK_INPUT_SLOTS 128u
 #define SPARK_INPUT_MMAP_PGOFF 16ul
 #define SPARK_INPUT_PAGE_BYTES 4096ul
+#define SPARK_INPUT_KIND_REL 0u   // dx, dy = relative mouse motion (backwards-compatible with pad0 == 0)
+#define SPARK_INPUT_KIND_KEY 1u   // code = evdev key/button, dx = value (0/1/2)
+#define SPARK_INPUT_KIND_WHEEL 2u // code = REL_WHEEL/HWHEEL/HI, dx = value
 
 struct spark_input_slot
 {
         int dx;
         int dy;
         unsigned long long time_us;
-        unsigned int pad0;
-        unsigned int pad1;
+        unsigned short kind;
+        unsigned short code;
+        unsigned int flags;
 };
 
 struct spark_input_ring
