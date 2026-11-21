@@ -691,7 +691,7 @@ AUDIO_API int audio_table_build(struct audio_table *table, long rin, long rout)
         }
         num = (unsigned long)rin / a;
         den = (unsigned long)rout / a;
-        if (den <= AUDIO_EXACT_MOST && den * (unsigned long)taps <= AUDIO_TABLE_FLOATS)
+        if (den <= AUDIO_EXACT_MOST && (taps & 63) == 0 && den * (unsigned long)taps <= AUDIO_TABLE_FLOATS)
         {
                 exact = 1;
                 phases = (long)den;
@@ -984,10 +984,85 @@ AUDIO_API int audio_voice_rate(struct audio_voice *voice, long rate)
         table = audio_table_take(rate, voice->out_rate);
         if (!table)
                 return AUDIO_E_NOMEM;
-        audio_table_give(voice->table);
+        if (voice->table)
+        {
+                long old_lead = voice->table->taps / 2 - 1, new_lead = table->taps / 2 - 1;
+                long delta = new_lead - old_lead, int_pos = (long)(voice->rs.pos >> 32);
+                unsigned long frac = (unsigned long)(voice->rs.pos & 0xfffffffful);
+                int preserved = 1;
+
+                if (delta > 0)
+                {
+                        if (int_pos >= delta)
+                                int_pos -= delta;
+                        else
+                        {
+                                long pad = delta - int_pos;
+
+                                if (voice->rs.have + pad <= AUDIO_WORK)
+                                {
+                                        for (int c = 0; c < 2; c++)
+                                        {
+                                                for (long i = voice->rs.have - 1; i >= 0; i--)
+                                                        voice->rs.buf[c][i + pad] = voice->rs.buf[c][i];
+                                                memory_fill(voice->rs.buf[c], 0, (unsigned long)pad * sizeof(float));
+                                        }
+                                        voice->rs.have += pad;
+                                        int_pos = 0;
+                                }
+                                else
+                                        preserved = 0;
+                        }
+                }
+                else if (delta < 0)
+                {
+                        long drop = -delta;
+
+                        if (drop <= voice->rs.have)
+                        {
+                                for (int c = 0; c < 2; c++)
+                                        memory_copy(voice->rs.buf[c], voice->rs.buf[c] + drop, (unsigned long)(voice->rs.have - drop) * sizeof(float));
+                                voice->rs.have -= drop;
+                        }
+                        else
+                                preserved = 0;
+                }
+                audio_table_give(voice->table);
+                voice->table = table;
+                voice->rate = rate;
+                if (preserved)
+                {
+                        voice->rs.table = table;
+                        voice->rs.step = table->exact ? (unsigned long)((((unsigned long long)table->num << 32) + table->den - 1) / table->den)
+                                                      : (unsigned long)(((unsigned long long)table->rin << 32) / (unsigned long long)table->rout);
+                        if (table->exact)
+                        {
+                                unsigned long k = (unsigned long)(((unsigned long long)frac * table->den + (1ull << 31)) >> 32);
+
+                                if (k >= table->den)
+                                {
+                                        int_pos++;
+                                        k = 0;
+                                }
+                                voice->rs.k = k;
+                                voice->rs.pos = ((unsigned long)int_pos << 32) | (unsigned long)((((unsigned long long)k << 32) + table->den - 1) / table->den);
+                        }
+                        else
+                        {
+                                voice->rs.k = 0;
+                                voice->rs.pos = ((unsigned long)int_pos << 32) | frac;
+                        }
+                        voice->flushed = 0;
+                        return 0;
+                }
+                audio_rs_open(&voice->rs, table);
+                voice->flushed = 0;
+                return 0;
+        }
         voice->table = table;
         voice->rate = rate;
         audio_rs_open(&voice->rs, table);
+        voice->flushed = 0;
         return 0;
 }
 

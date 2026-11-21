@@ -264,6 +264,7 @@ struct pulse_stream
         unsigned long asked;            // the latency the program asked for in all (its tlength before the card's share is taken off), in bytes
         long sink_us;                   // the card's share of it: the configured latency of the sink the program is told
         unsigned long outstanding;      // bytes asked of the program and not yet written
+        unsigned long overpaid;         // bytes the program wrote past what was asked (negative requested_bytes in libpulse)
         int drain_pending, drained, flushing;
         unsigned long drain_tag;
         long drain_at;
@@ -1859,16 +1860,20 @@ static void pulse_fill_output(struct pulse *p, struct wire_w *w, struct pulse_cl
 static void pulse_stream_request(struct pulse *p, struct pulse_stream *s)
 {
         struct pulse_client *c;
-        unsigned long queued, target, missing;
+        unsigned long queued, missing;
+        long long ahead, need;
         struct wire_w w = {p->scratch, PULSE_SCRATCH, 0, 0};
 
         if (!s->used || s->dying || s->client < 0 || !(c = p->client[s->client]))
                 return;
         queued = audio_ring_fill(&s->voice.ring);
-        target = s->tlength;
-        if (queued + s->outstanding >= target)
+        ahead = (long long)queued + (long long)s->outstanding - (long long)s->overpaid;
+        if (ahead >= (long long)s->tlength)
                 return;
-        missing = target - queued - s->outstanding;
+        need = (long long)s->tlength - ahead;
+        if (need > (long long)s->maxlength)
+                need = (long long)s->maxlength;
+        missing = (unsigned long)need;
         missing -= missing % s->voice.frame;
         if (!missing || (missing < s->minreq && queued != 0))
                 return;
@@ -1877,7 +1882,15 @@ static void pulse_stream_request(struct pulse *p, struct pulse_stream *s)
         wire_w_u32(&w, s->channel);
         wire_w_u32(&w, missing);
         if (pulse_enqueue(c, PULSE_INVALID, w.p, w.len) == PULSE_DONE)
-                s->outstanding += missing;
+        {
+                if (s->overpaid >= missing)
+                        s->overpaid -= missing;
+                else
+                {
+                        s->outstanding += missing - s->overpaid;
+                        s->overpaid = 0;
+                }
+        }
 }
 
 static void pulse_stream_signal(struct pulse *p, struct pulse_stream *s, unsigned long command, int with_offset)
@@ -2243,6 +2256,7 @@ static int pulse_command_create_playback(struct pulse *p, long slot, struct wire
         if (c->version >= 21)
                 pulse_w_format_info(&w);
         s->outstanding = s->tlength;
+        s->overpaid = 0;
         err = pulse_reply_end(c, &w);
         pulse_event_to(p, PULSE_FACILITY_SINK_INPUT, PULSE_EVENT_NEW, s->index, s->uid);
         pulse_changed(p, PULSE_CHANGED_STREAMS, sink);
@@ -3164,8 +3178,13 @@ static int pulse_command_stream(struct pulse *p, long slot, unsigned long comman
 
                         if (s->underrun || s->corked)
                         {
-                                // Not playing: everything is dropped.
+                                // Not playing: everything is dropped, including any unconsumed frames left in the resampler.
                                 s->voice.ring.limit = s->voice.ring.write = s->voice.ring.read;
+                                if (s->voice.table)
+                                {
+                                        audio_rs_reset(&s->voice.rs);
+                                        s->voice.flushed = 0;
+                                }
                         }
                         else
                         {
@@ -3175,15 +3194,19 @@ static int pulse_command_stream(struct pulse *p, long slot, unsigned long comman
                                 s->voice.ring.write = s->voice.ring.limit;
                                 s->flushing = 1;
                         }
-                        s->outstanding = 0;
                         s->drain_pending = 0;
                         if (s->prebuf)
                                 s->underrun = s->underrun || !s->flushing;
                         s->trigger = 0;
                 }
                 pulse_stream_apply(s);
-                pulse_stream_request(p, s);
-                return pulse_ack(p, c, tag);
+                {
+                        int err = pulse_ack(p, c, tag);
+
+                        if (err == PULSE_DONE)
+                                pulse_stream_request(p, s);
+                        return err;
+                }
         case PULSE_COMMAND_TRIGGER_PLAYBACK_STREAM:
                 if (!s)
                         return pulse_error(p, c, tag, PULSE_ERR_NOENTITY);
@@ -3957,14 +3980,45 @@ static int pulse_data(struct pulse *p, long slot, unsigned long channel, long lo
         }
         if (length % (long)s->voice.frame)
                 return PULSE_DEAD;
-        s->outstanding = s->outstanding > (unsigned long)length ? s->outstanding - (unsigned long)length : 0;
+        if (s->outstanding >= (unsigned long)length)
+                s->outstanding -= (unsigned long)length;
+        else
+        {
+                unsigned long excess = (unsigned long)length - s->outstanding;
+
+                s->outstanding = 0;
+                if (s->overpaid <= PULSE_RING_MAX * 4 - excess)
+                        s->overpaid += excess;
+                else
+                        s->overpaid = PULSE_RING_MAX * 4;
+        }
+        s->flushing = 0;
         if ((flags & 0xff) != 0 || offset != 0)
         {
-                if (audio_ring_seek(&s->voice.ring, (long)(flags & 0xff), offset) < 0)
+                long mode = (long)(flags & 0xff);
+                struct audio_ring *ring = &s->voice.ring;
+
+                if (audio_ring_seek(ring, mode, offset) < 0)
                 {
-                        if (!audio_ring_fill(&s->voice.ring))
-                                pulse_stream_request(p, s);
-                        return PULSE_DONE; // a seek out of the ring is dropped with its data
+                        int ok_offset = mode >= 0 && mode <= 3 && offset % (long long)ring->frame == 0 &&
+                                        (mode == 1 ? offset >= 0 : (offset <= (long long)ring->size * 4 && offset >= -(long long)ring->size * 4));
+                        unsigned long base = mode == 0 ? ring->write : mode == 2 ? ring->read : mode == 3 ? ring->limit : 0;
+                        long long target = ok_offset ? (long long)base + offset : 0;
+
+                        if (ok_offset && target < (long long)ring->read && target + (long long)length > (long long)ring->read)
+                        {
+                                unsigned long skip = (unsigned long)((long long)ring->read - target);
+
+                                data += skip;
+                                length -= (long)skip;
+                                ring->write = ring->read;
+                        }
+                        else
+                        {
+                                if (!audio_ring_fill(ring))
+                                        pulse_stream_request(p, s);
+                                return PULSE_DONE; // a seek out of the ring is dropped with its data
+                        }
                 }
         }
         took = audio_ring_put(&s->voice.ring, data, (unsigned long)length);
@@ -4162,8 +4216,20 @@ static void pulse_stream_play(struct pulse *p, struct pulse_stream *s, struct pu
         }
         if (s->underrun)
         {
+                unsigned long start = s->prebuf;
+
+                if (s->voice.table && start > 0 && !s->trigger)
+                {
+                        unsigned long need = (unsigned long)audio_rs_need(&s->voice.rs, frames) * s->voice.frame;
+                        unsigned long ceiling = s->tlength > s->minreq ? s->tlength - s->minreq + s->voice.frame : s->tlength;
+
+                        if (need > ceiling)
+                                need = ceiling;
+                        if (need > start)
+                                start = need;
+                }
                 // Waiting for the start: the target of data is there, or the program triggered it, or a drain asked for the rest.
-                if (fill > 0 && (fill >= s->prebuf || s->trigger))
+                if (fill > 0 && (fill >= start || s->trigger))
                 {
                         s->underrun = 0;
                         pulse_stream_signal(p, s, PULSE_COMMAND_STARTED, 0);
@@ -4218,6 +4284,11 @@ static void pulse_stream_play(struct pulse *p, struct pulse_stream *s, struct pu
                 }
                 else if (!s->flushing)
                         pulse_stream_signal(p, s, PULSE_COMMAND_UNDERFLOW, 1);
+                if (s->flushing && s->voice.table)
+                {
+                        audio_rs_reset(&s->voice.rs);
+                        s->voice.flushed = 0;
+                }
                 s->flushing = 0;
         }
 }

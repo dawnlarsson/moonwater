@@ -525,6 +525,8 @@ static int audio_output_open(long asked_rate, int low)
         long card = -1, device = -1;
         long period = low ? AUDIO_PERIOD_LOW : AUDIO_PERIOD, fill = low ? AUDIO_FILL_LOW : AUDIO_FILL;
 
+        audio_service.block_left = 0;
+
         if (!audio_service.no_card && audio_card_pick(&card, &device, name, sizeof(name), description, sizeof(description)))
         {
                 struct audio_pcm pcm;
