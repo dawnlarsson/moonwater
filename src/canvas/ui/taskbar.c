@@ -606,9 +606,9 @@ struct taskbar_key
         int strip[2], follow;
         unsigned int marks;
         int tray_gen;
-        unsigned int spaces_gen;
+        unsigned int spaces_gen, pad;
 };
-_Static_assert(sizeof(struct taskbar_key) == 8 + 23 * 4, "a key is compared as bytes, so it has no padding");
+_Static_assert(sizeof(struct taskbar_key) == 8 + 24 * 4, "a key is compared as bytes, so it has no padding");
 
 struct taskbar_lit { struct ui_tween at, length, shown; int row; };
 

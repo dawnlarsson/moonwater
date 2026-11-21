@@ -844,6 +844,10 @@ def test_build_and_audit_gates():
 
     aarch64_gcc = shutil.which("aarch64-linux-gnu-gcc") or "/opt/homebrew/bin/aarch64-linux-gnu-gcc"
     if os.path.exists(aarch64_gcc):
+        r_build = run_cmd([aarch64_gcc, "-O2", "-nostdlib", "-nostartfiles", "-fno-stack-protector",
+                           "-fno-builtin", "-Werror=implicit-function-declaration", "-fsyntax-only", "src/build/build.c"])
+        check("src/build/build.c syntax-checks cleanly with -Werror=implicit-function-declaration",
+              r_build.returncode == 0, r_build.stderr[-400:])
         with tempfile.TemporaryDirectory(prefix="mw_cc_") as td:
             out_o = Path(td) / "utilities.o"
             r3 = run_cmd([aarch64_gcc, "-O2", "-ffreestanding", "-nostdlib", "-fno-builtin",
