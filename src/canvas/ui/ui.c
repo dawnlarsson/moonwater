@@ -19854,9 +19854,23 @@ static fn ui_icon_picture(struct ui address_to ui, int left, int top, int size, 
         }
         int y0 = top < ui->top ? ui->top : top;
         int y1 = top + size > ui->bottom ? ui->bottom : top + size;
-        if (y1 > y0)
+        if (y1 <= y0)
+                return;
+        if (ui->opaque)
+        {
                 memory_over_u32_rect(ui->pixels + (long)y0 * (long)ui->pitch + left, (positive)ui->pitch,
                                      picture + (y0 - top) * size, (positive)size, (positive)size, (positive)(y1 - y0));
+                return;
+        }
+        // Glass/ARGB windows (e.g. Launcher) must preserve destination alpha; memory_over_u32_rect forces alpha=0xFF.
+        static const unsigned int plain[UI_PICTURE_MOST];
+        unsigned int under[UI_PICTURE_MOST];
+        for (int y = y0; y < y1; y++)
+        {
+                unsigned int address_to into = ui->pixels + (long)y * (long)ui->pitch + left;
+                memory_copy(under, into, (positive)size * 4);
+                memory_glass_over_u32(into, picture + (y - top) * size, under, (positive)size, plain);
+        }
 }
 
 // A square picture of any side made (premultiplied 0xaarrggbb both):

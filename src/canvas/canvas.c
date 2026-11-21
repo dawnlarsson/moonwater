@@ -1051,7 +1051,8 @@ static void output_ground(struct output *output)
         if (!output_map(output, &map))
                 return;
         pitch = output->buffer->fb->pitches[0] / sizeof(u32);
-        canvas_rect_fill(map.vaddr, pitch, output->width, output->height, CANVAS_GROUND | output->opaque);
+        // Use iomem-safe iosys_map_memset (0xff -> pure white in XRGB8888/ARGB8888) and flush WC buffers with wmb().
+        iosys_map_memset(&map, 0, 0xff, (size_t)output->buffer->fb->pitches[0] * output->height);
         splash_place(&mark, output->width, output->height, &place);
         for (unsigned int row = 0; row < place.height; row++)
         {
@@ -1064,6 +1065,7 @@ static void output_ground(struct output *output)
                                      (grey << 16) | (grey << 8) | grey | output->opaque);
                 }
         }
+        wmb();
         drm_client_buffer_vunmap_local(output->buffer);
         drm_client_buffer_flush(output->buffer, null);
 }
