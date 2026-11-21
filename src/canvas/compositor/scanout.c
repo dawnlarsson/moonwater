@@ -358,6 +358,7 @@ static unsigned int compositor_flip_refused; // presents the card refused a flip
 static int compositor_plate_refused;                  // the card would not make the second buffer: none until the scanout changes
 static char compositor_scan_name[512], compositor_spare_name[512]; // headless: the scan image's file and its spare
 static int compositor_headless_flip(void);
+static positive compositor_present_lead(void); // after the metric rings it reads (compositor_metric_note)
 static void compositor_flip_done(void);
 static void compositor_plate_make(void);
 #include "../record.h" // the present record: a ring of the last presents, and moonwater canvas record (its files under /run/moonwater/record)
@@ -562,6 +563,7 @@ static inline int compositor_wl_jit_row(void)
 }
 #endif
 
+static positive compositor_present_lead(void); // after the metric rings it reads (compositor_metric_note)
 static void compositor_flip_done(void)
 {
         compositor_record_vblank(clock_monotonic_nanoseconds());
@@ -600,12 +602,14 @@ static void compositor_flip_done(void)
         {
                 positive now = clock_monotonic_nanoseconds();
                 positive vblank = compositor.flip_stamped && compositor.flip_when ? compositor.flip_when : now;
-                positive margin = 1500000ull; // 1.5 ms safety margin before vblank
-                positive budget = compositor_wl_game_render_ns + margin;
                 int jit = compositor_wl_jit_row();
+                positive lead = compositor_present_lead();
+                // Direct-scanout games flip in ~25 us (no GPU compose), so a 0.6 ms safety margin suffices vs 1.0 ms + lead when GPU-composed.
+                positive margin = (jit >= 0 && (jit == compositor.direct_row || compositor_space_is_fs_row(jit)) ? 600000ull : 1000000ull) + lead;
+                positive budget = compositor_wl_game_render_ns + margin;
 
                 compositor_wl_frame_owed = 0;
-                if (jit >= 0 && compositor_wl_game_render_ns > 0 && compositor.period > budget + 1000000ull &&
+                if (jit >= 0 && compositor_wl_game_render_ns > 0 && compositor.period > budget + 300000ull &&
                     !compositor_wl_row_async(jit))
                 {
                         positive target = vblank + compositor.period - budget;

@@ -738,6 +738,9 @@ def test_compositor_and_xwm_invariants():
           "positive sequence = gpu_blit_go(" in wlh_src and
           "card_wanted = !picture->pixels || (picture->sync_fd >= 0 && summed >= COMPOSITOR_WL_CARD_COPY_PIXELS);" in wlh_src and
           "memory_copy_rect_u32(to, pitch, source, pitch, cw, ch);" in wlh_src)
+    check("Dynamic Reflex JIT pacing margin adapts to direct scanout (0.6ms + lead) vs GPU compose (1.0ms + lead)",
+          "positive lead = compositor_present_lead();" in read_text("src/canvas/compositor/scanout.c") and
+          "600000ull : 1000000ull) + lead" in read_text("src/canvas/compositor/scanout.c"))
     check("Steam bowl fixes Win32 dialog inflation (ttf-liberation + 65-moonwater-win32.conf) & GTK dark theme",
           '"ttf-liberation"' in read_text("src/bowl.c") and
           "65-moonwater-win32.conf" in read_text("src/bowl.c") and
