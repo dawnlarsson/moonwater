@@ -1062,6 +1062,12 @@ static void wayland_timeline_unref(struct wayland_client *c, long idx)
                 wayland_timeline_drop(c, idx);
 }
 
+static inline void wayland_timeline_put(struct wayland_client *c, long idx)
+{
+        if (idx >= 0 && idx < c->tbl[WLT_TIMELINE].count && c->timelines[idx].live)
+                c->timelines[idx].refs--, wayland_timeline_unref(c, idx);
+}
+
 static void wayland_buffer_signal_release(struct wayland_client *c, struct wayland_buffer *b)
 {
         long idx = b->rel_timeline;
@@ -2196,9 +2202,9 @@ static void wayland_surface_drop(struct wayland_client *c, struct wayland_surfac
         if (wayland.cursor_client == c->slot && wayland.cursor_surface == idx)
                 wayland.cursor_client = wayland.cursor_surface = -1, wayland.cursor_serial++;
         if (s->pending.sync_acq_set)
-                wayland_timeline_unref(c, s->pending.sync_acq_slot);
+                wayland_timeline_put(c, s->pending.sync_acq_slot);
         if (s->pending.sync_rel_set)
-                wayland_timeline_unref(c, s->pending.sync_rel_slot);
+                wayland_timeline_put(c, s->pending.sync_rel_slot);
         s->pending.sync_acq_set = s->pending.sync_rel_set = 0, s->pending.dx = s->pending.dy = 0;
         s->syncobj_id = 0, s->live = 0, s->gen++, wayland_tbl_free(c, WLT_SURFACE, idx), wayland.surfaces--;
 }
@@ -2683,9 +2689,9 @@ static int wayland_syncobj_check(struct wayland_client *c, struct wayland_surfac
 static void wayland_syncobj_clear_pending(struct wayland_client *c, struct wayland_surface *s)
 {
         if (s->pending.sync_acq_set)
-                wayland_timeline_unref(c, s->pending.sync_acq_slot), s->pending.sync_acq_set = 0;
+                wayland_timeline_put(c, s->pending.sync_acq_slot), s->pending.sync_acq_set = 0;
         if (s->pending.sync_rel_set)
-                wayland_timeline_unref(c, s->pending.sync_rel_slot), s->pending.sync_rel_set = 0;
+                wayland_timeline_put(c, s->pending.sync_rel_slot), s->pending.sync_rel_set = 0;
 }
 
 static void wayland_syncobj_take(struct wayland_client *c, struct wayland_surface *s, struct wayland_buffer *b)
@@ -5000,12 +5006,12 @@ static int wayland_syncobj_request(struct wayland_client *c, struct wayland_obje
                         return wayland_fail(c, self->id, WAYLAND_INVALID_OBJECT, "invalid syncobj timeline");
                 if (op == WLQ_wp_linux_drm_syncobj_surface_v1_set_acquire_point)
                 {
-                        if (s->pending.sync_acq_set) wayland_timeline_unref(c, s->pending.sync_acq_slot);
+                        if (s->pending.sync_acq_set) wayland_timeline_put(c, s->pending.sync_acq_slot);
                         s->pending.sync_acq_set = 1, s->pending.sync_acq_slot = (unsigned short)tl, s->pending.sync_acq_point = pt, c->timelines[tl].refs++;
                 }
                 else
                 {
-                        if (s->pending.sync_rel_set) wayland_timeline_unref(c, s->pending.sync_rel_slot);
+                        if (s->pending.sync_rel_set) wayland_timeline_put(c, s->pending.sync_rel_slot);
                         s->pending.sync_rel_set = 1, s->pending.sync_rel_slot = (unsigned short)tl, s->pending.sync_rel_point = pt, c->timelines[tl].refs++;
                 }
         }
@@ -6216,7 +6222,7 @@ WAYLAND_API unsigned long wayland_row_hint(long row, enum wayland_row_hint hint)
 WAYLAND_API void wayland_pointer_pinch(long row, long phase, long scale, long fx, long fy)
 {
         struct wayland_client *c = 0;
-        struct wayland_surface *s, *root;
+        struct wayland_surface *s;
         long time, dx = 0, dy = 0;
         unsigned long serial = 0;
 
