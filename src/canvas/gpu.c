@@ -3568,6 +3568,19 @@ static b32 gpu_blit(positive src, unsigned int sp, positive dst, unsigned int dp
         return gpu_run();
 }
 
+// gpu_blit submitted without waiting (gpu_go): returns the ring sequence, or 0 when no slot is free or refused.
+static positive gpu_blit_go(positive src, unsigned int sp, positive dst, unsigned int dp, positive tab, unsigned int op, unsigned int w, unsigned int h)
+{
+        struct gpu_args address_to a;
+
+        gpu_last_error = 0, gpu_end = GPU_END_NONE;
+        if (!w || !h || gpu_lost || gpu_slot_take() < 0)
+                return 0;
+        a = GPU_ARGS;
+        a->s = src, a->d = dst, a->g = tab, a->sp = sp, a->dp = dp, a->gp = 0, a->w = w, a->op = op, a->v = 0, a->x0 = a->y0 = 0, a->rows = h, a->tab = op ? GPU_VA + GPU_BASES_AT : 0;
+        return gpu_go();
+}
+
 /*
         An NV12 picture made XRGB by the card (op 9), scaled by tables as op 7 is: its luma at luma (luma_pitch bytes a row), its chroma at chroma
         (chroma_pitch bytes a row, a U and a V byte for each 2 by 2 pixels), into dst (dp pixels a row) over w by h; the processor has made the w

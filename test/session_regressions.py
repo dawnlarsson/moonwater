@@ -732,6 +732,12 @@ def test_compositor_and_xwm_invariants():
           "windows_place_set(table, row, &place);" in ln_src and
           "compositor.mc.push = 0;" in inp and
           "if (compositor.mc.open)\n                compositor_mc_close();" in inp)
+    wlh_src = read_text("src/canvas/wayland_host.c")
+    check("GPU copy stalls eliminated: async gpu_blit_go for DMA-BUF & CPU lib.c SIMD for WB table/SHM copies",
+          "static positive gpu_blit_go(" in read_text("src/canvas/gpu.c") and
+          "positive sequence = gpu_blit_go(" in wlh_src and
+          "card_wanted = !picture->pixels || (picture->sync_fd >= 0 && summed >= COMPOSITOR_WL_CARD_COPY_PIXELS);" in wlh_src and
+          "memory_copy_rect_u32(to, pitch, source, pitch, cw, ch);" in wlh_src)
     check("Steam bowl fixes Win32 dialog inflation (ttf-liberation + 65-moonwater-win32.conf) & GTK dark theme",
           '"ttf-liberation"' in read_text("src/bowl.c") and
           "65-moonwater-win32.conf" in read_text("src/bowl.c") and

@@ -2180,7 +2180,7 @@ static int compositor_wl_card_rect(int row, const struct wayland_picture *pictur
 #endif
         if (picture->blend)
                 return compositor_wl_card_refused(3);
-        if (!gpu_idle())
+        if (!picture->last && !gpu_idle())
                 return compositor_wl_card_refused(2);
         if (compositor_wl_needs_xform(picture, picture->row_width, picture->row_height))
                 return compositor_wl_card_refused(4);
@@ -2214,6 +2214,19 @@ static int compositor_wl_card_rect(int row, const struct wayland_picture *pictur
         }
         if (!(dst_va = wl_gpu_va_written(to, compositor.buffer)))
                 return compositor_wl_card_refused(6);
+#ifdef MOONWATER_GPU_C
+        if (picture->last && !picture->blend && picture->sync_fd >= 0)
+        {
+                positive sequence = gpu_blit_go(src_va, (unsigned int)(stride / 4), dst_va + 4 * ((positive)dy * pitch + (positive)dx),
+                                                (unsigned int)pitch, 0, 0, (unsigned int)w, (unsigned int)h);
+                if (sequence)
+                        return compositor_wl.tiled_seq = sequence, compositor_wl.tiled_row = row, compositor_wl.tiled_unwaited++, 1;
+                if (gpu_lost)
+                        return compositor_wl_card_refused(7);
+        }
+        if (!gpu_idle() && !gpu_finish())
+                return compositor_wl_card_refused(2);
+#endif
         if (gpu_blit(src_va, (unsigned int)(stride / 4), dst_va + 4 * ((positive)dy * pitch + (positive)dx), (unsigned int)pitch, 0, 0, (unsigned int)w, (unsigned int)h))
                 return 1;
 #ifdef MOONWATER_GPU_C
@@ -2781,22 +2794,7 @@ static void compositor_wl_table_copy(int row, unsigned int into, unsigned int fr
         source = (const unsigned int *)((char *)compositor.table + compositor.pixels + ((unsigned long)row * 2 + (from & 1u)) * compositor.buffer);
         if (!cw || !ch)
                 return;
-#ifdef MOONWATER_GPU_C
-        if (cw * ch >= COMPOSITOR_WL_CARD_COPY_PIXELS && compositor_wl_card_composes() && gpu_ready() && gpu_idle())
-        {
-                positive src = wl_gpu_va_written(source, compositor.buffer), dst = wl_gpu_va_written(to, compositor.buffer);
-                if (src && dst &&
-                    (gpu_blit(src, (unsigned int)pitch, dst, (unsigned int)pitch, 0, 0, (unsigned int)cw, (unsigned int)ch) || (gpu_end == GPU_END_LATE && gpu_finish())))
-                {
-                        compositor.table->client_rects_card++, compositor_wl_copied(row, WINDOWS_COPY_CARD);
-                        return;
-                }
-                if (gpu_end != GPU_END_NONE)
-                        compositor_gpu_job_failed();
-                if (!gpu_idle())
-                        gpu_finish();
-        }
-#endif
+        // Both table slots are cached WB system RAM: lib.c SIMD copy is ~6x faster than a synchronous GPU blit (54 us vs 330 us on box).
         compositor.table->client_rects_cpu++, compositor_wl_copied(row, WINDOWS_COPY_CPU);
         memory_copy_rect_u32(to, pitch, source, pitch, cw, ch);
 }
@@ -2926,7 +2924,8 @@ static int compositor_wl_row_picture(void *context, int row, const struct waylan
                         for (long at = 0; at < count; at++)
                                 summed += picture->full || !picture->damages ? (long)picture->width * (long)picture->height
                                                                              : (long)picture->damage[at].width * (long)picture->damage[at].height;
-                        card_wanted = !picture->pixels || summed >= COMPOSITOR_WL_CARD_COPY_PIXELS;
+                        // Only offload DMA-BUF copies to GPU; cached wl_shm (sync_fd < 0) copies ~6x faster on CPU via lib.c SIMD.
+                        card_wanted = !picture->pixels || (picture->sync_fd >= 0 && summed >= COMPOSITOR_WL_CARD_COPY_PIXELS);
                         for (long at = 0; at < count; at++)
                         {
                                 long left = 0, top = 0, right = picture->width, bottom = picture->height, x = picture->dest_x, y = picture->dest_y;
