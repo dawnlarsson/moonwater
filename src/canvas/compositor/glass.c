@@ -515,13 +515,17 @@ static int compositor_fullscreen_up(void)
 }
 
 // The taskbar's place, asked on every pass of the loop before a frame is drawn, with the clock: away while `taskbar fullscreen on`
-// and a window is fullscreen. A move damages the band where it was and where it goes.
+// and a window is fullscreen (unless Mission Control is open). A move damages the band where it was and where it goes.
+static void compositor_mc_tick(positive now);
+static int compositor_mc_moving(positive now);
+
 static void compositor_taskbar_slide(positive now)
 {
         b64 before = 0;
 
         compositor_glass_bg_flush(now);
-        if (taskbar_slide_now(compositor_fullscreen_up(), now, compositor_glides(), &before))
+        compositor_mc_tick(now);
+        if (taskbar_slide_now(compositor_fullscreen_up() && !compositor_mc_shown(), now, compositor_glides(), &before))
                 compositor_taskbar_damage(before);
 }
 
@@ -644,12 +648,622 @@ static unsigned int compositor_moon_menu_frame(struct compositor_frame *frame)
         return 1;
 }
 
+/*
+        Mission Control / Spaces Overview: a taskbar-edge-attached sliding drawer that slides out from the exact same screen edge
+        as the taskbar (bottom, top, left, or right) and pushes the taskbar further inward via ui_tween animation (respecting
+        compositor_glides() / reduced motion and ui_paced() motion speed). When closed, push == 0 and zero work is performed.
+*/
+#define COMPOSITOR_MC_SLIDE_MS 220
+
+static inline int compositor_mc_clamp(int v, int lo, int hi) { return v < lo ? lo : v > hi ? hi : v; }
+
+static int compositor_mc_shown(void)
+{
+        return compositor.mc.open || compositor.mc.push > 0;
+}
+
+static int compositor_mc_push_for(int band)
+{
+        if (compositor.mc.push <= 0)
+                return 0;
+        if (compositor_bands() <= 1)
+                return band == 0 && compositor.mc.screen == 0 ? compositor.mc.push : 0;
+        return band == compositor.mc.screen ? compositor.mc.push : 0;
+}
+
+static int compositor_mc_depth(unsigned int pos, int sw, int sh, int scale)
+{
+        int vertical = pos == TASKBAR_LEFT || pos == TASKBAR_RIGHT;
+        int d, lo, hi, cap;
+
+        if (vertical)
+        {
+                d = sw * 18 / 100;
+                lo = 180 * scale / 100, hi = 280 * scale / 100, cap = sw / 2;
+        }
+        else
+        {
+                d = sh * 22 / 100;
+                lo = 140 * scale / 100, hi = 240 * scale / 100, cap = sh / 2;
+        }
+        if (hi > cap)
+                hi = cap;
+        if (lo > hi)
+                lo = hi;
+        return compositor_mc_clamp(d, lo > 60 ? lo : 60, hi > 60 ? hi : 60);
+}
+
+static void compositor_mc_drawer_rect(int screen, unsigned int pos, int push, int out[4])
+{
+        int sx, sy, sw, sh;
+
+        compositor_output_rect(screen, &sx, &sy, &sw, &sh);
+        if (push <= 0)
+        {
+                out[0] = out[1] = out[2] = out[3] = 0;
+                return;
+        }
+        if (pos == TASKBAR_TOP)
+                out[0] = sx, out[1] = sy, out[2] = sw, out[3] = push;
+        else if (pos == TASKBAR_LEFT)
+                out[0] = sx, out[1] = sy, out[2] = push, out[3] = sh;
+        else if (pos == TASKBAR_RIGHT)
+                out[0] = sx + sw - push, out[1] = sy, out[2] = push, out[3] = sh;
+        else
+                out[0] = sx, out[1] = sy + sh - push, out[2] = sw, out[3] = push;
+}
+
+static void compositor_mc_damage_band(int screen)
+{
+        int bands = compositor_bands();
+
+        for (int b = 0; b < bands; b++)
+                if (bands == 1 ? screen == 0 : b == screen)
+                {
+                        struct taskbar_view view;
+                        int x, y, w, h;
+
+                        compositor.band_at = b;
+                        view = compositor_taskbar_view_for(b);
+                        taskbar_band(&view, &x, &y, &w, &h);
+                        compositor_band_damage(x, y, w, h);
+                        compositor.band_at = 0;
+                }
+}
+
+static void compositor_mc_damage_now(void)
+{
+        if (compositor.mc.rect[2] > 0 && compositor.mc.rect[3] > 0)
+                compositor_damage_over(compositor.mc.rect[0], compositor.mc.rect[1], compositor.mc.rect[2], compositor.mc.rect[3]);
+}
+
+static void compositor_mc_open(int screen, int auto_opened)
+{
+        int count = compositor_output_count(), sx, sy, sw, sh, scale;
+        unsigned int pos = taskbar_position();
+
+        compositor_spaces_ensure();
+        if (screen < 0 || screen >= count)
+                screen = 0;
+        if (compositor.mc.open && compositor.mc.screen == screen)
+        {
+                if (!auto_opened)
+                        compositor.mc.auto_opened = 0;
+                return;
+        }
+        if (compositor.mc.push > 0)
+                compositor_mc_damage_now(), compositor_mc_damage_band(compositor.mc.screen);
+        taskbar_menu_shut();
+        compositor_output_rect(screen, &sx, &sy, &sw, &sh);
+        scale = compositor_output_scale(screen) > 0 ? compositor_output_scale(screen) : compositor.scale;
+        compositor.mc.open = 1;
+        compositor.mc.screen = screen;
+        compositor.mc.auto_opened = auto_opened ? 1 : 0;
+        compositor.mc.depth = compositor_mc_depth(pos, sw, sh, scale);
+        compositor.mc.hover_card = compositor.mc.hover_close = compositor.mc.drop_target = COMPOSITOR_NONE;
+        compositor.mc.press_card = compositor.mc.press_row = COMPOSITOR_NONE;
+        compositor.mc.dragging = 0;
+        compositor.mc.dirty = 1;
+        compositor.mc.moving = 1;
+        compositor_mc_tick(clock_monotonic_nanoseconds());
+        compositor_tabs_changed();
+        compositor_mc_damage_now();
+}
+
+static void compositor_mc_close(void)
+{
+        if (!compositor.mc.open && compositor.mc.push <= 0)
+                return;
+        compositor.mc.open = 0;
+        compositor.mc.auto_opened = 0;
+        compositor.mc.hover_card = compositor.mc.hover_close = compositor.mc.drop_target = COMPOSITOR_NONE;
+        compositor.mc.press_card = compositor.mc.press_row = COMPOSITOR_NONE;
+        compositor.mc.dragging = 0;
+        compositor.mc.dirty = 1;
+        compositor.mc.moving = 1;
+        compositor_mc_tick(clock_monotonic_nanoseconds());
+        compositor_tabs_changed();
+}
+
+static void compositor_mc_toggle(int screen)
+{
+        if (compositor.mc.open && (screen < 0 || screen == compositor.mc.screen))
+                compositor_mc_close();
+        else
+                compositor_mc_open(screen, 0);
+}
+
+static int compositor_mc_moving(positive now)
+{
+        (void)now;
+        return compositor.mc.moving;
+}
+
+static void compositor_mc_tick(positive now)
+{
+        int sx, sy, sw, sh, scale, depth, next_push, moving = 0;
+        unsigned int pos;
+
+        (void)now;
+        if (!compositor.mc.open && compositor.mc.push <= 0 && !compositor.mc.moving)
+                return;
+        pos = taskbar_position();
+        compositor_output_rect(compositor.mc.screen, &sx, &sy, &sw, &sh);
+        scale = compositor_output_scale(compositor.mc.screen) > 0 ? compositor_output_scale(compositor.mc.screen) : compositor.scale;
+        depth = compositor_mc_depth(pos, sw, sh, scale);
+        compositor.mc.depth = depth;
+        next_push = taskbar_mc_tick(compositor.mc.open, compositor_glides(), depth, &moving);
+        compositor.mc.moving = moving;
+        if (next_push != compositor.mc.push)
+        {
+                compositor_mc_damage_now();
+                compositor_mc_damage_band(compositor.mc.screen);
+                compositor.mc.push = next_push;
+                compositor_mc_drawer_rect(compositor.mc.screen, pos, next_push, compositor.mc.rect);
+                compositor_mc_damage_now();
+                compositor_mc_damage_band(compositor.mc.screen);
+                taskbar_changed();
+        }
+        else if (compositor.mc.push > 0)
+                compositor_mc_drawer_rect(compositor.mc.screen, pos, compositor.mc.push, compositor.mc.rect);
+}
+
+static void compositor_mc_layout(int screen, unsigned int pos, int sx, int sy, int sw, int sh, int scale, int buf_w, int buf_h)
+{
+        int vertical = pos == TASKBAR_LEFT || pos == TASKBAR_RIGHT;
+        int n = compositor_spaces_count_on(screen);
+        int desktop_n = compositor_space_desktop_count(screen);
+        int can_add = compositor.spaces.count < COMPOSITOR_SPACES_MAX && n < TASKBAR_SPACE_MAX;
+        int slots = n + (can_add ? 1 : 0);
+        int pad = (vertical ? 12 : 14) * scale / 100;
+        int gap = (vertical ? 10 : 12) * scale / 100;
+        int label_h = (vertical ? 18 : 20) * scale / 100;
+        int close_s = 16 * scale / 100;
+        int card_w, card_h, add_w, add_h, cur, total;
+
+        compositor.mc.card_count = 0;
+        compositor.mc.thumb_count = 0;
+        if (n <= 0 || sw <= 0 || sh <= 0 || buf_w <= 0 || buf_h <= 0)
+                return;
+        if (close_s < 12)
+                close_s = 12;
+        if (!vertical)
+        {
+                card_h = buf_h - 2 * pad - label_h;
+                if (card_h < 36)
+                        card_h = 36;
+                card_w = card_h * sw / sh;
+                card_w = compositor_mc_clamp(card_w, 72 * scale / 100, 260 * scale / 100);
+                add_w = compositor_mc_clamp(card_w / 2, 44 * scale / 100, 84 * scale / 100);
+                add_h = card_h;
+                total = n * card_w + (can_add ? add_w : 0) + (slots > 1 ? (slots - 1) * gap : 0);
+                if (total > buf_w - 2 * pad && buf_w > 2 * pad + (slots - 1) * gap)
+                {
+                        int avail = buf_w - 2 * pad - (slots > 1 ? (slots - 1) * gap : 0);
+                        int units = n * 2 + (can_add ? 1 : 0);
+                        card_w = units > 0 ? avail * 2 / units : card_w;
+                        if (card_w < 36)
+                                card_w = 36;
+                        add_w = card_w / 2 > 28 ? card_w / 2 : 28;
+                        card_h = compositor_mc_clamp(card_w * sh / sw, 28, buf_h - 2 * pad - label_h);
+                        add_h = card_h;
+                        total = n * card_w + (can_add ? add_w : 0) + (slots > 1 ? (slots - 1) * gap : 0);
+                }
+                cur = (buf_w - total) / 2;
+                if (cur < pad)
+                        cur = pad;
+                for (int i = 0; i < n && compositor.mc.card_count < COMPOSITOR_SPACES_MAX; i++)
+                {
+                        struct compositor_space *sp = compositor_space_at(screen, i);
+                        struct compositor_mc_card *c = &compositor.mc.cards[compositor.mc.card_count++];
+                        int cy = (buf_h - (card_h + label_h)) / 2;
+
+                        c->x = cur, c->y = cy, c->w = card_w, c->h = card_h;
+                        c->removable = sp && sp->kind == COMPOSITOR_SPACE_DESKTOP && desktop_n >= 2;
+                        c->close_w = c->close_h = close_s;
+                        c->close_x = c->x + c->w - close_s - 3;
+                        c->close_y = c->y + 3;
+                        c->is_add = 0, c->space_idx = i, c->sid = sp ? sp->id : 0u;
+                        cur += card_w + gap;
+                }
+                if (can_add && compositor.mc.card_count <= COMPOSITOR_SPACES_MAX)
+                {
+                        struct compositor_mc_card *c = &compositor.mc.cards[compositor.mc.card_count++];
+                        int cy = (buf_h - (card_h + label_h)) / 2;
+
+                        memory_zero(c, sizeof(*c));
+                        c->x = cur, c->y = cy, c->w = add_w, c->h = add_h;
+                        c->is_add = 1, c->space_idx = COMPOSITOR_MC_ADD;
+                }
+        }
+        else
+        {
+                card_w = buf_w - 2 * pad;
+                if (card_w < 48)
+                        card_w = 48;
+                card_h = compositor_mc_clamp(card_w * sh / sw, 48 * scale / 100, 150 * scale / 100);
+                add_w = card_w;
+                add_h = compositor_mc_clamp(card_h / 2, 36 * scale / 100, 56 * scale / 100);
+                total = n * (card_h + label_h) + (can_add ? add_h : 0) + (slots > 1 ? (slots - 1) * gap : 0);
+                if (total > buf_h - 2 * pad && buf_h > 2 * pad + (slots - 1) * gap + n * label_h)
+                {
+                        int avail = buf_h - 2 * pad - (slots > 1 ? (slots - 1) * gap : 0) - n * label_h;
+                        int units = n * 2 + (can_add ? 1 : 0);
+                        card_h = units > 0 ? avail * 2 / units : card_h;
+                        if (card_h < 28)
+                                card_h = 28;
+                        add_h = card_h / 2 > 24 ? card_h / 2 : 24;
+                        total = n * (card_h + label_h) + (can_add ? add_h : 0) + (slots > 1 ? (slots - 1) * gap : 0);
+                }
+                cur = (buf_h - total) / 2;
+                if (cur < pad)
+                        cur = pad;
+                for (int i = 0; i < n && compositor.mc.card_count < COMPOSITOR_SPACES_MAX; i++)
+                {
+                        struct compositor_space *sp = compositor_space_at(screen, i);
+                        struct compositor_mc_card *c = &compositor.mc.cards[compositor.mc.card_count++];
+
+                        c->x = pad, c->y = cur, c->w = card_w, c->h = card_h;
+                        c->removable = sp && sp->kind == COMPOSITOR_SPACE_DESKTOP && desktop_n >= 2;
+                        c->close_w = c->close_h = close_s;
+                        c->close_x = c->x + c->w - close_s - 3;
+                        c->close_y = c->y + 3;
+                        c->is_add = 0, c->space_idx = i, c->sid = sp ? sp->id : 0u;
+                        cur += card_h + label_h + gap;
+                }
+                if (can_add && compositor.mc.card_count <= COMPOSITOR_SPACES_MAX)
+                {
+                        struct compositor_mc_card *c = &compositor.mc.cards[compositor.mc.card_count++];
+
+                        memory_zero(c, sizeof(*c));
+                        c->x = pad, c->y = cur, c->w = add_w, c->h = add_h;
+                        c->is_add = 1, c->space_idx = COMPOSITOR_MC_ADD;
+                }
+        }
+        // Record miniature scaled window rectangles for every Space card in bottom-to-top Z-order.
+        for (int ci = 0; ci < compositor.mc.card_count; ci++)
+        {
+                const struct compositor_mc_card *c = &compositor.mc.cards[ci];
+                int inset = 3 * scale / 100;
+                int ix, iy, iw, ih;
+
+                if (c->is_add || !c->sid)
+                        continue;
+                if (inset < 2)
+                        inset = 2;
+                ix = c->x + inset, iy = c->y + inset, iw = c->w - 2 * inset, ih = c->h - 2 * inset;
+                if (iw <= 4 || ih <= 4)
+                        continue;
+                for (unsigned int at = 0; at < compositor.stacked && compositor.mc.thumb_count < COMPOSITOR_MC_THUMBS_MAX; at++)
+                {
+                        int row = (int)compositor.stack[at];
+                        int mx, my, mw, mh, ex, ey;
+
+                        if (row < 0 || row >= COMPOSITOR_ROWS || !compositor.showing[row] ||
+                            (compositor.state[row] & (WINDOW_MINIMIZED | WINDOW_CLOSING)) ||
+                            compositor_popup_parent[row] >= 0 || compositor_row_space_exempt(row) ||
+                            !compositor.row_space || compositor.row_space[row] != c->sid)
+                                continue;
+                        mx = ix + (int)((long long)(compositor.x[row] - sx) * iw / sw);
+                        my = iy + (int)((long long)(compositor.y[row] - sy) * ih / sh);
+                        mw = (int)((long long)(int)compositor.w[row] * iw / sw);
+                        mh = (int)((long long)(int)compositor.h[row] * ih / sh);
+                        if (mw < 10)
+                                mw = 10;
+                        if (mh < 8)
+                                mh = 8;
+                        if (mx < ix)
+                                mw -= (ix - mx), mx = ix;
+                        if (my < iy)
+                                mh -= (iy - my), my = iy;
+                        ex = ix + iw, ey = iy + ih;
+                        if (mx + mw > ex)
+                                mw = ex - mx;
+                        if (my + mh > ey)
+                                mh = ey - my;
+                        if (mw < 4 || mh < 4)
+                                continue;
+                        compositor.mc.thumbs[compositor.mc.thumb_count++] = (struct compositor_mc_thumb){row, ci, mx, my, mw, mh};
+                }
+        }
+}
+
+static void compositor_mc_draw(int screen, unsigned int pos, int sx, int sy, int sw, int sh, int scale, int buf_w, int buf_h)
+{
+        struct taskbar_view view = compositor_taskbar_view_for(compositor_bands() > 1 ? screen : 0);
+
+        compositor_mc_layout(screen, pos, sx, sy, sw, sh, scale, buf_w, buf_h);
+        taskbar_mc_draw(&view, compositor.mc.pixels, buf_w, buf_h, screen, scale);
+}
+
+static unsigned int compositor_mc_frame(struct compositor_frame *frame)
+{
+        int sx, sy, sw, sh, scale, depth, buf_w, buf_h, push;
+        unsigned int pos;
+        unsigned long bytes;
+
+        if (compositor.mc.push <= 0)
+                return 0;
+        pos = taskbar_position();
+        compositor_output_rect(compositor.mc.screen, &sx, &sy, &sw, &sh);
+        scale = compositor_output_scale(compositor.mc.screen) > 0 ? compositor_output_scale(compositor.mc.screen) : compositor.scale;
+        depth = compositor_mc_depth(pos, sw, sh, scale);
+        push = compositor.mc.push > depth ? depth : compositor.mc.push;
+        buf_w = (pos == TASKBAR_LEFT || pos == TASKBAR_RIGHT) ? depth : sw;
+        buf_h = (pos == TASKBAR_LEFT || pos == TASKBAR_RIGHT) ? sh : depth;
+        if (buf_w <= 0 || buf_h <= 0)
+                return 0;
+        bytes = (unsigned long)buf_w * (unsigned long)buf_h * 4;
+        if (compositor.mc.bytes < bytes)
+        {
+                void *p = compositor.mc.pixels;
+                if (!mem_buf_grow(&p, &compositor.mc.bytes, bytes, MEM_BUF_GPU_FORGET))
+                        return compositor.mc.pixels = 0, 0;
+                compositor.mc.pixels = (unsigned int *)p, compositor.mc.dirty = 1;
+        }
+        if (compositor.mc.dirty || compositor.mc.buf_w != buf_w || compositor.mc.buf_h != buf_h ||
+            compositor.mc.last_spaces_gen != compositor.spaces.gen || compositor.mc.last_stack_gen != compositor.stack_gen)
+        {
+                compositor.mc.buf_w = buf_w, compositor.mc.buf_h = buf_h;
+                compositor.mc.last_spaces_gen = compositor.spaces.gen;
+                compositor.mc.last_stack_gen = compositor.stack_gen;
+                compositor_mc_draw(compositor.mc.screen, pos, sx, sy, sw, sh, scale, buf_w, buf_h);
+                compositor.mc.dirty = 0;
+        }
+        compositor_mc_drawer_rect(compositor.mc.screen, pos, push, compositor.mc.rect);
+        memory_zero(frame, sizeof(*frame));
+        frame->x = compositor.mc.rect[0], frame->y = compositor.mc.rect[1];
+        frame->width = compositor.mc.rect[2], frame->height = compositor.mc.rect[3];
+        frame->scale = scale, frame->pitch = (unsigned long)buf_w, frame->slot = -5, frame->square = 15;
+        if (pos == TASKBAR_TOP)
+                frame->pixels = compositor.mc.pixels + (long)(depth - push) * buf_w;
+        else if (pos == TASKBAR_LEFT)
+                frame->pixels = compositor.mc.pixels + (depth - push);
+        else
+                frame->pixels = compositor.mc.pixels;
+        return 1;
+}
+
+static void compositor_mc_to_buf(int x, int y, int *bx, int *by)
+{
+        unsigned int pos = taskbar_position();
+        int off_x = pos == TASKBAR_LEFT ? compositor.mc.depth - compositor.mc.push : 0;
+        int off_y = pos == TASKBAR_TOP ? compositor.mc.depth - compositor.mc.push : 0;
+
+        *bx = x - compositor.mc.rect[0] + off_x;
+        *by = y - compositor.mc.rect[1] + off_y;
+}
+
+static int compositor_mc_point(int x, int y)
+{
+        return compositor.mc.push > 0 && x >= compositor.mc.rect[0] && x < compositor.mc.rect[0] + compositor.mc.rect[2] &&
+               y >= compositor.mc.rect[1] && y < compositor.mc.rect[1] + compositor.mc.rect[3];
+}
+
+static int compositor_mc_hit_card(int x, int y, int *is_close)
+{
+        int bx, by;
+
+        if (is_close)
+                *is_close = 0;
+        if (!compositor_mc_point(x, y))
+                return COMPOSITOR_NONE;
+        compositor_mc_to_buf(x, y, &bx, &by);
+        for (int i = 0; i < compositor.mc.card_count; i++)
+        {
+                const struct compositor_mc_card *c = &compositor.mc.cards[i];
+                if (bx >= c->x && bx < c->x + c->w && by >= c->y && by < c->y + c->h)
+                {
+                        if (is_close && c->removable && bx >= c->close_x && bx < c->close_x + c->close_w &&
+                            by >= c->close_y && by < c->close_y + c->close_h)
+                                *is_close = 1;
+                        return i;
+                }
+        }
+        return COMPOSITOR_NONE;
+}
+
+static int compositor_mc_hit_thumb(int x, int y, int card_idx)
+{
+        int bx, by;
+
+        if (!compositor_mc_point(x, y))
+                return COMPOSITOR_NONE;
+        compositor_mc_to_buf(x, y, &bx, &by);
+        for (int i = compositor.mc.thumb_count; i-- > 0;)
+        {
+                const struct compositor_mc_thumb *tm = &compositor.mc.thumbs[i];
+                if (tm->card_idx == card_idx && bx >= tm->x && bx < tm->x + tm->w && by >= tm->y && by < tm->y + tm->h)
+                        return tm->row;
+        }
+        return COMPOSITOR_NONE;
+}
+
+static void compositor_mc_motion(int x, int y)
+{
+        int is_close = 0, card = compositor_mc_hit_card(x, y, &is_close);
+        int hc = is_close ? card : COMPOSITOR_NONE;
+        int drop = COMPOSITOR_NONE;
+
+        if (compositor.mc.press_row >= 0 && !compositor.mc.dragging &&
+            ui_touch_past(compositor.mc.press_x, compositor.mc.press_y, x, y, ui_touch_slop(compositor.scale)))
+                compositor.mc.dragging = 1, compositor.mc.dirty = 1;
+        if (compositor.mc.dragging)
+        {
+                if (card >= 0 && (compositor.mc.cards[card].is_add ||
+                                  compositor_spaces_kind_at(compositor.mc.screen, compositor.mc.cards[card].space_idx) == COMPOSITOR_SPACE_DESKTOP))
+                        drop = card;
+        }
+        if (card != compositor.mc.hover_card || hc != compositor.mc.hover_close || drop != compositor.mc.drop_target)
+        {
+                compositor.mc.hover_card = card, compositor.mc.hover_close = hc, compositor.mc.drop_target = drop;
+                compositor.mc.dirty = 1;
+                compositor_mc_damage_now();
+        }
+}
+
+static int compositor_mc_hand(unsigned int code, int down)
+{
+        int x = compositor.pointer_x, y = compositor.pointer_y, is_close = 0, card;
+
+        if (!compositor.mc.open && compositor.mc.press_card < 0)
+                return 0;
+        if (compositor.drag >= 0)
+                return 0;
+        if (!down)
+        {
+                if (code != COMPOSITOR_BTN_LEFT || (compositor.mc.press_card < 0 && !compositor.mc.dragging))
+                        return 0;
+                card = compositor_mc_hit_card(x, y, &is_close);
+                if (compositor.mc.dragging && compositor.mc.press_row >= 0)
+                {
+                        if (card >= 0)
+                        {
+                                const struct compositor_mc_card *c = &compositor.mc.cards[card];
+                                if (c->is_add)
+                                {
+                                        unsigned int sid = compositor_space_add_id(compositor.mc.screen, 0);
+                                        if (sid)
+                                                compositor_space_move_row(compositor.mc.press_row, sid, 0);
+                                }
+                                else if (c->sid && card != compositor.mc.press_card)
+                                        compositor_space_move_row(compositor.mc.press_row, c->sid, 0);
+                        }
+                        compositor.mc.dragging = 0, compositor.mc.press_row = compositor.mc.press_card = compositor.mc.drop_target = COMPOSITOR_NONE;
+                        compositor.mc.dirty = 1, compositor_mc_damage_now();
+                        return 1;
+                }
+                if (card >= 0 && card == compositor.mc.press_card)
+                {
+                        const struct compositor_mc_card *c = &compositor.mc.cards[card];
+                        if (c->is_add)
+                                (void)compositor_space_add_id(compositor.mc.screen, 0), compositor.mc.dirty = 1, compositor_mc_damage_now();
+                        else
+                                compositor_space_switch_index(compositor.mc.screen, c->space_idx), compositor_mc_close();
+                }
+                compositor.mc.press_card = compositor.mc.press_row = COMPOSITOR_NONE, compositor.mc.dragging = 0;
+                return 1;
+        }
+        if (!compositor_mc_point(x, y))
+        {
+                if (down && compositor.mc.open)
+                {
+                        if (compositor_band_hit(x, y) == TASKBAR_HIT_NONE)
+                                return compositor_mc_close(), 1;
+                }
+                return 0;
+        }
+        if (code != COMPOSITOR_BTN_LEFT)
+                return 1;
+        card = compositor_mc_hit_card(x, y, &is_close);
+        if (card < 0)
+                return 1;
+        if (is_close && compositor.mc.cards[card].removable)
+        {
+                compositor_space_remove_index(compositor.mc.screen, compositor.mc.cards[card].space_idx);
+                compositor.mc.dirty = 1, compositor_mc_damage_now();
+                return 1;
+        }
+        compositor.mc.press_card = card;
+        compositor.mc.press_x = x, compositor.mc.press_y = y, compositor.mc.dragging = 0;
+        compositor.mc.press_row = compositor.mc.cards[card].is_add ? COMPOSITOR_NONE : compositor_mc_hit_thumb(x, y, card);
+        return 1;
+}
+
+static int compositor_mc_drag_motion(int row, int x, int y)
+{
+        unsigned int count, pos = taskbar_position();
+        const int (*screens)[4] = compositor_screens(&count);
+        int sc, scale, zone, near = 0, card = COMPOSITOR_NONE, drop = COMPOSITOR_NONE;
+
+        if (row < 0 || row >= COMPOSITOR_ROWS || compositor.fullscreen[row] || compositor_row_space_exempt(row))
+                return 0;
+        sc = compositor_screen_at(screens, count, x, y);
+        if (sc < 0)
+                sc = compositor_screen_of(row);
+        scale = compositor_output_scale(sc) > 0 ? compositor_output_scale(sc) : compositor.scale;
+        zone = taskbar_thick(scale) + 12 * scale / 100;
+        if (pos == TASKBAR_TOP)
+                near = y <= screens[sc][1] + zone;
+        else if (pos == TASKBAR_LEFT)
+                near = x <= screens[sc][0] + zone;
+        else if (pos == TASKBAR_RIGHT)
+                near = x >= screens[sc][0] + screens[sc][2] - zone;
+        else
+                near = y >= screens[sc][1] + screens[sc][3] - zone;
+
+        if (!compositor.mc.open && near)
+                compositor_mc_open(sc, 1);
+        if (!compositor_mc_shown())
+                return 0;
+        card = compositor_mc_hit_card(x, y, 0);
+        if (card >= 0 && (compositor.mc.cards[card].is_add ||
+                          compositor_spaces_kind_at(compositor.mc.screen, compositor.mc.cards[card].space_idx) == COMPOSITOR_SPACE_DESKTOP))
+                drop = card;
+        if (drop != compositor.mc.drop_target)
+        {
+                compositor.mc.drop_target = drop;
+                compositor.mc.dirty = 1;
+                compositor_mc_damage_now();
+        }
+        return compositor_mc_point(x, y);
+}
+
+static int compositor_mc_drag_drop(int row, int x, int y)
+{
+        int card, moved = 0;
+
+        if (!compositor_mc_shown())
+                return 0;
+        card = compositor_mc_hit_card(x, y, 0);
+        if (card >= 0 && row >= 0 && row < COMPOSITOR_ROWS && !compositor.fullscreen[row] && !compositor_row_space_exempt(row))
+        {
+                const struct compositor_mc_card *c = &compositor.mc.cards[card];
+                if (c->is_add)
+                {
+                        unsigned int sid = compositor_space_add_id(compositor.mc.screen, 0);
+                        if (sid)
+                                compositor_space_move_row(row, sid, 0), moved = 1;
+                }
+                else if (c->sid && compositor_spaces_kind_at(compositor.mc.screen, c->space_idx) == COMPOSITOR_SPACE_DESKTOP)
+                        compositor_space_move_row(row, c->sid, 0), moved = 1;
+        }
+        compositor.mc.drop_target = COMPOSITOR_NONE;
+        if (compositor.mc.auto_opened)
+                compositor_mc_close();
+        else
+                compositor.mc.dirty = 1, compositor_mc_damage_now();
+        return moved;
+}
+
 // After a present: a slide still going, or the highlight of the tab with the keys still moving from one tab to the next, is damaged
 // again, so the next frame draws the band where it has got to.
 static void compositor_taskbar_keep(positive now)
 {
         if (taskbar_sliding(now) || taskbar_moving(now))
                 compositor_taskbar_damage(taskbar_shift());
+        if (compositor_mc_moving(now))
+                compositor_mc_damage_now(), compositor_mc_damage_band(compositor.mc.screen);
 }
 
 #define COMPOSITOR_TABS_ALL (~0ul)

@@ -1426,7 +1426,7 @@ static void compositor_present_frames(void)
         if (compositor.direct_row >= 0 && compositor_visible(compositor.direct_row) && !compositor_turning() &&
             (compositor_space_is_fs_row(compositor.direct_row) ||
              (compositor.stacked > 0 && (int)compositor.stack[compositor.stacked - 1] == compositor.direct_row)) &&
-            !compositor.overlay_on && !compositor_overlays_shown() && taskbar_shift() >= UI_ONE && !compositor_record_until)
+            !compositor.overlay_on && !compositor_overlays_shown() && !compositor_mc_shown() && taskbar_shift() >= UI_ONE && !compositor_record_until)
         {
                 int row = compositor.direct_row, menu[4];
 
@@ -1447,7 +1447,7 @@ static void compositor_present_frames(void)
         compositor_record_scene(frames, windows);
         tinted = compositor_preview_lift(frames, windows, &preview);
         turning = compositor_turning();
-        direct = turning ? -1 : compositor_direct_candidate(frames, rows, windows);
+        direct = turning || compositor_mc_shown() ? -1 : compositor_direct_candidate(frames, rows, windows);
         stay_live_direct = direct >= 0 && !compositor_client_scans(direct) && direct == compositor.direct_row && !compositor_overlay_ready() &&
                            compositor.patched[direct][compositor.front[direct] & 1u] &&
                            compositor_window_fb(direct, compositor.front[direct]) == compositor.on_screen &&
@@ -1461,6 +1461,7 @@ static void compositor_present_frames(void)
         count += present_bands_pass(frames, windows, direct, stay_live_direct);
         if (tinted)
                 frames[count++] = preview;
+        count += compositor_mc_frame(&frames[count]);
         count += compositor_moon_menu_frame(&frames[count]);
         if ((unsigned int)compositor_overlays_up() != compositor.overlays_up)
         {

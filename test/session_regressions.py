@@ -837,6 +837,39 @@ def test_canvas_spaces_invariants():
           "slide_dx = (new_pos >= old_pos ? 1 : -1) * screens[screen][2];" in manage and
           "compositor_glide_start(row, from);" in manage)
 
+    glass = read_text("src/canvas/compositor/glass.c")
+    check("Mission Control: taskbar-edge-attached sliding drawer pushes taskbar inward via ui_tween & taskbar_key.mc_push",
+          "compositor_mc_push_for(" in glass and
+          "ui_kit_number_to(&taskbar_mc_slide" in tbar and
+          "off -= taskbar_mc_push_px();" in tbar and
+          "int mc_push;" in tbar and
+          "_Static_assert(sizeof(struct taskbar_key) == 8 + 24 * 4" in tbar)
+    check("Mission Control: visual Space preview cards, miniature windows, close button & '+' card for horizontal & vertical edges",
+          all(s in glass for s in (
+              "compositor_mc_layout(",
+              "compositor_mc_draw(",
+              "compositor_mc_frame(",
+              "TASKBAR_LEFT || pos == TASKBAR_RIGHT",
+              "c->removable",
+              "c->is_add",
+              "compositor.mc.thumbs",
+          )) and "taskbar_mc_draw(" in tbar)
+    check("Mission Control: drag-and-drop window sorting, taskbar-edge auto-open, shortcuts & 3/4-finger vertical swipe",
+          all(s in inp for s in (
+              "compositor_mc_toggle(compositor_space_current_screen())",
+              "compositor_mc_close()",
+              "compositor_mc_hand(code, down)",
+              "compositor_mc_motion(",
+              "compositor_mc_drag_motion(",
+              "compositor_mc_drag_drop(",
+              "compositor_abs64(pad->swipe_dy) >= thresh_y",
+              "compositor_mc_open(compositor_space_current_screen(), 0)",
+          )))
+    check("Mission Control: direct-scanout fast path & frame budget preserve zero overhead when closed",
+          "!compositor_mc_shown()" in pres and
+          "compositor_mc_frame(&frames[count])" in pres and
+          "compositor_space_add_id(" in manage)
+
 
 def test_build_and_audit_gates():
     print("\n=== 4. Build & Audit Gates ===")

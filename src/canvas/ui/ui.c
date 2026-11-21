@@ -1057,6 +1057,8 @@ static int taskbar_anchor(const struct taskbar_view *view, int which, int *x, in
 static int taskbar_volume_set(int present, int percent, int muted, int flash);
 static int taskbar_mic_set(int present, int muted);
 static int taskbar_notices_set(int present, unsigned int severity);
+static int taskbar_mc_tick(int open, int animate, int depth, int *moving);
+static void taskbar_mc_draw(const struct taskbar_view *view, unsigned int *pixels, int buf_w, int buf_h, int screen, int scale);
 
 #else
 
@@ -1128,6 +1130,10 @@ static inline int taskbar_mic_set(int present, int muted)
 { (void)present, (void)muted; return 0; }
 static inline int taskbar_notices_set(int present, unsigned int severity)
 { (void)present, (void)severity; return 0; }
+static inline int taskbar_mc_tick(int open, int animate, int depth, int *moving)
+{ (void)animate; if (moving) *moving = 0; return open ? depth : 0; }
+static inline void taskbar_mc_draw(const struct taskbar_view *view, unsigned int *pixels, int buf_w, int buf_h, int screen, int scale)
+{ (void)view, (void)pixels, (void)buf_w, (void)buf_h, (void)screen, (void)scale; }
 
 #endif
 

@@ -560,6 +560,23 @@ struct compositor_space
         int last_focus;
 };
 
+#define COMPOSITOR_MC_ADD (-2)
+#define COMPOSITOR_MC_THUMBS_MAX 64
+
+struct compositor_mc_card
+{
+        int x, y, w, h;
+        int close_x, close_y, close_w, close_h;
+        int removable, is_add, space_idx;
+        unsigned int sid;
+};
+
+struct compositor_mc_thumb
+{
+        int row, card_idx;
+        int x, y, w, h;
+};
+
 static struct
 {
         int card;
@@ -654,6 +671,20 @@ static struct
                 unsigned int active[WINDOWS_OUTPUTS];
                 int ready;
         } spaces;
+        struct
+        {
+                int open, screen, auto_opened, push, depth, dirty;
+                int hover_card, hover_close, drop_target;
+                int press_card, press_row, press_x, press_y, dragging;
+                int rect[4], buf_w, buf_h, moving;
+                unsigned int *pixels;
+                unsigned long bytes;
+                unsigned int last_spaces_gen, last_stack_gen;
+                struct compositor_mc_card cards[COMPOSITOR_SPACES_MAX + 1];
+                int card_count;
+                struct compositor_mc_thumb thumbs[COMPOSITOR_MC_THUMBS_MAX];
+                int thumb_count;
+        } mc;
         unsigned int *band_more[WINDOWS_OUTPUTS];
         unsigned long band_more_bytes[WINDOWS_OUTPUTS];
         unsigned char (*band_marks)[WINDOWS], *banded;
@@ -943,6 +974,26 @@ static int compositor_spaces_active_index(int screen);
 static int compositor_spaces_kind_at(int screen, int idx);
 static unsigned int compositor_spaces_gen(void);
 static void compositor_spaces_on_outputs_changed(const char (*was_names)[WINDOWS_OUTPUT_NAME], unsigned int was_count);
+static unsigned int compositor_space_desktop_count(int screen);
+static struct compositor_space *compositor_space_at(int screen, int idx);
+static int compositor_row_space_exempt(int row);
+static unsigned int compositor_space_add_id(int screen, int activate);
+static void compositor_space_switch_index(int screen, int idx);
+static void compositor_space_remove_index(int screen, int idx);
+static void compositor_space_move_row(int row, unsigned int target_sid, int follow);
+static int compositor_space_current_screen(void);
+static int compositor_band_hit(int x, int y);
+static int compositor_screen_of(int row);
+static int compositor_mc_shown(void);
+static int compositor_mc_push_for(int band);
+static void compositor_mc_open(int screen, int auto_opened);
+static void compositor_mc_close(void);
+static void compositor_mc_toggle(int screen);
+static int compositor_mc_point(int x, int y);
+static int compositor_mc_hand(unsigned int code, int down);
+static void compositor_mc_motion(int x, int y);
+static int compositor_mc_drag_motion(int row, int x, int y);
+static int compositor_mc_drag_drop(int row, int x, int y);
 static void compositor_row_mode(int row, unsigned int how, int fullscreen, int screen);
 #ifdef CONFIG_MOONWATER_WAYLAND
 static int compositor_wl_started(void);
@@ -2032,6 +2083,8 @@ static b32 compositor_main()
         compositor.active_grab = (struct compositor_grab){COMPOSITOR_GRAB_NONE, COMPOSITOR_NONE, 0, 0};
         compositor.touch.closing = compositor.touch.hold_row = COMPOSITOR_NONE;
         compositor.swipe.row = compositor.swipe.armed_row = compositor.osk_turn_focus = compositor.cursor.asked_row = COMPOSITOR_NONE;
+        compositor.mc.hover_card = compositor.mc.hover_close = compositor.mc.drop_target = COMPOSITOR_NONE;
+        compositor.mc.press_card = compositor.mc.press_row = COMPOSITOR_NONE;
 
         for (positive at = 1, argc = program_argument_count(); at < argc; at++)
         {

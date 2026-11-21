@@ -2807,7 +2807,7 @@ static void compositor_space_switch_index(int screen, int idx)
                 compositor_space_activate(screen, sp->id);
 }
 
-static void compositor_space_add(int screen, int activate)
+static unsigned int compositor_space_add_id(int screen, int activate)
 {
         struct compositor_space *sp;
         int last = -1;
@@ -2820,11 +2820,18 @@ static void compositor_space_add(int screen, int activate)
                         last = (int)i;
         sp = compositor_space_alloc(screen, COMPOSITOR_SPACE_DESKTOP, COMPOSITOR_NONE, 0, last);
         if (!sp)
-                return;
+                return 0;
         if (activate)
                 compositor_space_activate(screen, sp->id);
         else
                 compositor_tabs_changed();
+        compositor.mc.dirty = 1;
+        return sp->id;
+}
+
+static void compositor_space_add(int screen, int activate)
+{
+        (void)compositor_space_add_id(screen, activate);
 }
 
 static void compositor_space_remove_index(int screen, int idx)

@@ -1098,7 +1098,7 @@ static int compositor_steam_passes(unsigned int code, int value, unsigned int mo
         if (value != 1)
                 return pass = (*bit & mask) != 0, (!value ? (void)(*bit &= (unsigned char)~mask) : (void)0), pass;
         pass = (code == CK_KEY_ESC && (modifiers & WINDOW_KEY_SUPER)) || (chord == WINDOW_KEY_ALT && code == CK_KEY_TAB) ||
-               ((code == CK_KEY_LEFT || code == CK_KEY_RIGHT) && (modifiers & WINDOW_KEY_CONTROL) &&
+               ((code == CK_KEY_LEFT || code == CK_KEY_RIGHT || code == CK_KEY_UP) && (modifiers & WINDOW_KEY_CONTROL) &&
                 (modifiers & (WINDOW_KEY_ALT | WINDOW_KEY_SUPER)));
         for (unsigned int at = 0; !pass && at < compositor_keys.count; at++)
                 pass = code == compositor_keys.code[at] &&
@@ -1114,6 +1114,10 @@ static int compositor_space_chord(unsigned int code, int value, unsigned int mod
                    mods4 == (WINDOW_KEY_CONTROL | WINDOW_KEY_SUPER | WINDOW_KEY_SHIFT);
         int screen_move = mods4 == (WINDOW_KEY_CONTROL | WINDOW_KEY_ALT | WINDOW_KEY_SUPER);
 
+        if (nav && code == CK_KEY_UP)
+                return value == 1 ? compositor_mc_toggle(compositor_space_current_screen()) : (void)0, 1;
+        if (nav && code == CK_KEY_DOWN && compositor.mc.open)
+                return value == 1 ? compositor_mc_close() : (void)0, 1;
         if (nav && (code == CK_KEY_LEFT || code == CK_KEY_RIGHT))
                 return value == 1 ? compositor_space_step(compositor_space_current_screen(), code == CK_KEY_RIGHT ? 1 : -1) : (void)0, 1;
         if (nav && code >= 2 && code <= 10)
@@ -1162,7 +1166,8 @@ static void compositor_key(unsigned int at, unsigned int code, int value, positi
                 compositor_keytrace_read(code, reported, clock_monotonic_nanoseconds());
         if (code == CK_KEY_ESC && value)
         {
-                if (compositor.drag >= 0 || compositor.resize >= 0) { if (value == 1) compositor_hold_cancel(); return; }
+                if (compositor.drag >= 0 || compositor.resize >= 0) { if (value == 1) { compositor_hold_cancel(); if (compositor.mc.auto_opened) compositor_mc_close(); } return; }
+                if (compositor.mc.open) { if (value == 1) compositor_mc_close(); return; }
                 if (compositor_dnd_escape(value))
                         return;
         }
@@ -1460,6 +1465,8 @@ static int compositor_band_hand(unsigned int code, int down)
                 if (down)
                         return compositor_menu_close(), 1;
         }
+        if (compositor_mc_hand(code, down))
+                return 1;
         if (!down && code == COMPOSITOR_BTN_LEFT && !taskbar_editing())
                 compositor_edit_drag.held = 0;
         if (!taskbar_editing() || code != COMPOSITOR_BTN_LEFT)
@@ -1496,6 +1503,8 @@ static void compositor_motion(void)
         if (taskbar_menu_rect(rect))
                 taskbar_menu_hand(WINDOW_EVENT_MOTION, 0, 0, 0, compositor.pointer_x, compositor.pointer_y),
                 compositor_damage(rect[0], rect[1], rect[2], rect[3]);
+        if (compositor_mc_shown() && compositor.drag < 0)
+                compositor_mc_motion(compositor.pointer_x, compositor.pointer_y);
         held = compositor.resize < 0 && compositor.drag < 0 ? compositor.grab : COMPOSITOR_NONE;
         zone = compositor.resize >= 0 || compositor.drag >= 0 || under < 0 || held >= 0 ? 0
                : compositor_edge_zone(under, compositor.pointer_x, compositor.pointer_y);
@@ -1503,6 +1512,7 @@ static void compositor_motion(void)
         asked = of >= 0 ? compositor_asked_shape(of) : -1;
         compositor.cursor.shape = compositor.resize >= 0 ? compositor_cursor_by_edges[compositor.edges[compositor.resize] & 15]
                                   : compositor.drag >= 0 ? CP_ARROW
+                                  : compositor.mc.dragging ? CP_HAND
                                   : zone ? compositor_cursor_by_edges[zone & 15]
                                   : asked >= 0 ? (unsigned int)asked : CP_ARROW;
         if (compositor_dnd_active())
@@ -1527,7 +1537,7 @@ static void compositor_motion(void)
         if (compositor.resize >= 0) { compositor_resize_move(); return; }
         if (compositor.drag >= 0)
         {
-                int row = compositor.drag;
+                int row = compositor.drag, over_mc;
 
                 if (compositor.arranged[row] != COMPOSITOR_FLOATING)
                 {
@@ -1539,7 +1549,8 @@ static void compositor_motion(void)
                 compositor.drag_moved = 1;
                 compositor_damage_row(row);
                 compositor_place(row, compositor.pointer_x - compositor.drag_x, compositor.pointer_y - compositor.drag_y);
-                compositor_damage_row(row), compositor_preview(row);
+                over_mc = compositor_mc_drag_motion(row, compositor.pointer_x, compositor.pointer_y);
+                compositor_damage_row(row), compositor_preview(over_mc ? COMPOSITOR_NONE : row);
                 return;
         }
         compositor_shared_hover(under), compositor.hover = under;
@@ -1675,11 +1686,21 @@ static void compositor_drag_stop(int row) { (void)compositor_grab_end(COMPOSITOR
 
 static void compositor_release_as(unsigned int code, int snap, unsigned int flags)
 {
-        int dragged = compositor.drag, to = COMPOSITOR_NONE, resized = compositor.resize, drop_screen = 0, drop_box[4];
+        int dragged = compositor.drag, to = COMPOSITOR_NONE, resized = compositor.resize, drop_screen = 0, drop_box[4], mc_dropped = 0;
         unsigned int index = code - COMPOSITOR_BTN_LEFT, drop_how = COMPOSITOR_FLOATING, drop_touch = 0;
 
         compositor_pointer_press(code, 0);
-        if (dragged >= 0 && snap && compositor.drag_moved)
+        if (dragged >= 0 && snap && compositor.drag_moved && compositor_mc_shown())
+        {
+                if (compositor_mc_point(compositor.pointer_x, compositor.pointer_y))
+                {
+                        compositor_set_rect(dragged, COMPOSITOR_FLOATING, compositor.drag_keep);
+                        mc_dropped = compositor_mc_drag_drop(dragged, compositor.pointer_x, compositor.pointer_y);
+                }
+                else if (compositor.mc.auto_opened)
+                        compositor_mc_close();
+        }
+        if (dragged >= 0 && snap && compositor.drag_moved && !mc_dropped)
                 compositor_box_of(dragged, drop_box),
                 drop_how = compositor_target(dragged, compositor.pointer_x, compositor.pointer_y, drop_box, &drop_screen, &drop_touch);
         compositor_grab_end(COMPOSITOR_GRAB_COMMIT, COMPOSITOR_NONE);
@@ -1826,7 +1847,12 @@ static int compositor_button_band(int tab, unsigned int code, int up)
         {
                 int idx = TASKBAR_SPACE_BASE - tab;
                 if (code == COMPOSITOR_BTN_LEFT)
-                        compositor_space_switch_index(compositor.band_hit, idx);
+                {
+                        if (idx == compositor_spaces_active_index(compositor.band_hit))
+                                compositor_mc_toggle(compositor.band_hit);
+                        else
+                                compositor_space_switch_index(compositor.band_hit, idx);
+                }
                 else if (code == COMPOSITOR_BTN_MIDDLE || code == COMPOSITOR_BTN_RIGHT)
                         compositor_space_remove_index(compositor.band_hit, idx);
                 return 1;
@@ -2060,10 +2086,14 @@ static int compositor_pad_report(struct compositor_pad *pad, int *x, int *y)
         if (kind == 3)
         {
                 int thresh = 18 * (pad->per_mm_x > 0 ? pad->per_mm_x : 1);
+                int thresh_y = 18 * (pad->per_mm_y > 0 ? pad->per_mm_y : 1);
                 pad->swipe_dx += (int)dx, pad->swipe_dy += (int)dy;
                 if (!pad->swipe_fired && compositor_abs64(pad->swipe_dx) >= thresh &&
                     compositor_abs64(pad->swipe_dx) > 2 * compositor_abs64(pad->swipe_dy))
                         return *x = pad->swipe_dx > 0 ? 1 : -1, pad->swipe_fired = 1, 3;
+                if (!pad->swipe_fired && compositor_abs64(pad->swipe_dy) >= thresh_y &&
+                    compositor_abs64(pad->swipe_dy) > 2 * compositor_abs64(pad->swipe_dx))
+                        return *y = pad->swipe_dy > 0 ? 1 : -1, pad->swipe_fired = 1, 3;
                 return 0;
         }
         *x = compositor_scale_rem_i(dx, per, pad->per_mm_x, &pad->left_x);
@@ -2446,6 +2476,14 @@ static void compositor_pad_apply(unsigned int at, positive now)
         {
                 int flip = compositor.table && (compositor.table->scroll_off & WINDOW_SCROLL_FLIP) ? -1 : 1;
                 compositor_space_step(compositor_space_current_screen(), x * flip);
+        }
+        else if (kind == 3 && y)
+        {
+                int flip = compositor.table && (compositor.table->scroll_off & WINDOW_SCROLL_FLIP) ? -1 : 1;
+                if (y * flip < 0)
+                        compositor_mc_open(compositor_space_current_screen(), 0);
+                else
+                        compositor_mc_close();
         }
         else if (kind == 2 && !pinch)
         {

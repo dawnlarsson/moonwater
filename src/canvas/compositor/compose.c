@@ -1704,7 +1704,7 @@ static unsigned int compositor_panel_tabs(const struct compositor_frame *band, s
 #define COMPOSITOR_LAYERS 64
 // The frames a present of `rows` rows may have: two a window (its picture and its line or shadow), the snap preview and the moon's menu a frame
 // each, the moon's glow one a band, the overlays and the layers. The arrays sized by it are the rows' (compositor_rows_make), as many as the rows in use.
-#define COMPOSITOR_FRAMES_FOR(rows) (2 * (unsigned long)(rows) + 3 + 3 * WINDOWS_OUTPUTS + COMPOSITOR_OVERLAYS + COMPOSITOR_LAYERS)
+#define COMPOSITOR_FRAMES_FOR(rows) (2 * (unsigned long)(rows) + 4 + 3 * WINDOWS_OUTPUTS + COMPOSITOR_OVERLAYS + COMPOSITOR_LAYERS)
 #define COMPOSITOR_PIECES_FOR(rows) (3 * COMPOSITOR_FRAMES_FOR(rows))
 
 static unsigned int compositor_corner_scratch[COMPOSITOR_RADIUS_MOST * COMPOSITOR_RADIUS_MOST];
