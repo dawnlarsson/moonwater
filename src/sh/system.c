@@ -464,13 +464,12 @@ static fn link_dev_fd()
         nothing earlier in a boot can have raised it.
 
         HOST: kptr_restrict 1 (pointers read as zero to a process without
-        CAP_SYSLOG; 2 hides them from root as well), dmesg_restrict 1,
-        io_uring_disabled 1 (2 at the tight tier: io_uring_setup refused to
-        everybody; 1 refuses it to processes without CAP_SYS_ADMIN, and
-        nothing in the image uses it) and randomize_va_space 2. At the tight
-        tier mmap's randomisation is the widest the kernel allows (28 bits is
-        its default on x86-64, 32 its limit), and ptrace attach needs
-        CAP_SYS_PTRACE (Yama 2); at the locked tier
+        CAP_SYSLOG; 2 hides them from root as well), dmesg_restrict 1, and
+        randomize_va_space 2. io_uring stays enabled on the default desktop
+        tier for games, browsers and bowls; at the tight tier io_uring_disabled
+        is set to 2 (refused to everybody), mmap's randomisation is the widest
+        the kernel allows (28 bits is its default on x86-64, 32 its limit), and
+        ptrace attach needs CAP_SYS_PTRACE (Yama 2); at the locked tier
         it is refused to everybody (Yama 3) and no module can be loaded
         (modules_disabled), both until the next boot. Floodlight's confined
         launches read Yama's scope and want 1 or more, so every setting
@@ -549,9 +548,8 @@ static COLD fn system_kernel_defaults(void)
         system_sysctl("/proc/sys/kernel/kptr_restrict",
                       MOONWATER_STRICT_HOST >= STRICT_TIGHT ? "2\n" : "1\n");
         system_sysctl("/proc/sys/kernel/dmesg_restrict", "1\n");
-        system_sysctl("/proc/sys/kernel/io_uring_disabled",
-                      MOONWATER_STRICT_HOST >= STRICT_TIGHT ? "2\n" : "1\n");
 #if MOONWATER_STRICT_HOST >= STRICT_TIGHT
+        system_sysctl("/proc/sys/kernel/io_uring_disabled", "2\n");
         system_sysctl_widest("/proc/sys/vm/mmap_rnd_bits", 33, 28);
         system_sysctl_widest("/proc/sys/vm/mmap_rnd_compat_bits", 16, 8);
         system_sysctl("/proc/sys/kernel/yama/ptrace_scope",
@@ -606,6 +604,23 @@ static DEAD_END b32 system_init()
 #endif
 #if !defined(SHELL_NO_CANVAS) && MOONWATER_STRICT_HOST < STRICT_LOCKED
         system_sysctl("/proc/sys/vm/max_map_count", "1048576\n");
+        /*  Desktop memory, compaction, mTHP and network latency tuning:
+            fixed dirty byte caps prevent multi-GiB writeback stalls on high-RAM
+            machines; zero watermark_boost and compaction_proactiveness avoid
+            periodic kswapd/kcompactd frame-time spikes; 64K/128K mTHP cuts
+            dTLB misses on advised arenas without 2 MiB compaction cost; and
+            tcp_slow_start_after_idle=0 keeps bursty game/web flows warm. */
+        system_sysctl("/proc/sys/vm/dirty_background_bytes", "67108864\n");
+        system_sysctl("/proc/sys/vm/dirty_bytes", "268435456\n");
+        system_sysctl("/proc/sys/vm/watermark_boost_factor", "0\n");
+        system_sysctl("/proc/sys/vm/watermark_scale_factor", "125\n");
+        system_sysctl("/proc/sys/vm/compaction_proactiveness", "0\n");
+        system_sysctl("/proc/sys/vm/page-cluster", "0\n");
+        system_sysctl("/sys/kernel/mm/transparent_hugepage/hugepages-64kB/enabled", "madvise\n");
+        system_sysctl("/sys/kernel/mm/transparent_hugepage/hugepages-128kB/enabled", "madvise\n");
+        system_sysctl("/proc/sys/net/ipv4/tcp_slow_start_after_idle", "0\n");
+        system_sysctl("/proc/sys/net/ipv4/tcp_mtu_probing", "1\n");
+        system_sysctl("/proc/sys/net/ipv4/tcp_fastopen", "3\n");
 #endif
         mount_devpts();
         mount_shm();

@@ -116,8 +116,10 @@ CONFIG_JUMP_LABEL=y
 # CPU
 #
 CONFIG_SMP=y
+CONFIG_SCHED_SMT=y
 CONFIG_SCHED_CLUSTER=y
 CONFIG_SCHED_MC=y
+CONFIG_SCHED_CACHE=y
 CONFIG_NUMA=y
 CONFIG_MTRR=y
 
@@ -138,15 +140,24 @@ CONFIG_ACPI_PCI_SLOT=y
 #
 # The three huge page lines are essential to every build: src/build/build.c
 # fails a configuration that drops one, with the win that stands on it.
+# SHMEM_HUGE_WITHIN_SIZE extends the same within_size policy to the kernel's
+# internal shm_mnt (memfd_create, MAP_SHARED|MAP_ANON, Wayland SHM pools,
+# /run/moonwater/windows and zstd's huge-page ring), which otherwise defaults
+# to never even when TMPFS_HUGE_WITHIN_SIZE is on.
 CONFIG_TRANSPARENT_HUGEPAGE=y
 CONFIG_TRANSPARENT_HUGEPAGE_MADVISE=y
 CONFIG_TRANSPARENT_HUGEPAGE_TMPFS_HUGE_WITHIN_SIZE=y
+CONFIG_TRANSPARENT_HUGEPAGE_SHMEM_HUGE_WITHIN_SIZE=y
 
 CONFIG_SWAP=y
 CONFIG_ZSWAP=y
+CONFIG_ZSWAP_DEFAULT_ON=y
 CONFIG_ZSWAP_SHRINKER_DEFAULT_ON=y
 CONFIG_ZSWAP_COMPRESSOR_DEFAULT_ZSTD=y
 CONFIG_ZSWAP_COMPRESSOR_DEFAULT="zstd"
+CONFIG_ZRAM=y
+CONFIG_ZRAM_BACKEND_ZSTD=y
+CONFIG_ZRAM_DEF_COMP_ZSTD=y
 
 CONFIG_ZONE_DMA=y
 CONFIG_ZONE_DMA32=y
@@ -210,8 +221,6 @@ CONFIG_BLK_DEV_INITRD=y
 CONFIG_SCHED_AUTOGROUP=y
 CONFIG_CHR_DEV_SG=y
 CONFIG_BLK_DEV_SD=y
-CONFIG_CHR_DEV_ST=y
-CONFIG_BLK_DEV_SR=y
 CONFIG_BLK_DEV_RAM=y
 # None made at boot, the loop devices' rule: sixteen idle RAM disks were 1,185
 # sysfs nodes, sixteen queues and backing devices and a millisecond of boot,
@@ -253,7 +262,6 @@ CONFIG_NLS_DEFAULT="utf8"
 CONFIG_NLS_UTF8=y
 CONFIG_NLS_CODEPAGE_437=y
 CONFIG_NLS_ASCII=y
-CONFIG_DLM=y
 CONFIG_UNICODE=y
 CONFIG_FAT_DEFAULT_CODEPAGE=437
 CONFIG_FAT_DEFAULT_IOCHARSET="ascii"

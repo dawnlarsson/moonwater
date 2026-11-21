@@ -27,3 +27,6 @@
 # user.max_user_namespaces to 0 from its own script.
 #
 #> includes sec_baseline
+#> overrides CONFIG_USERFAULTFD
+
+CONFIG_USERFAULTFD=n

@@ -59,12 +59,11 @@ static int compositor_write_sysfs(const char *path, const void *data, unsigned l
 
 static int compositor_multi_ccd(void)
 {
-        long probe = system_open_at(AT_FDCWD, (string_address) "/sys/devices/system/cpu/cpu8/online", FILE_READ | O_CLOEXEC);
+        char l3[64], pkg[64];
 
-        if (probe < 0)
-                return 0;
-        system_close((int)probe);
-        return 1;
+        compositor_word("/sys/devices/system/cpu/cpu0/cache/index3/shared_cpu_list", l3, sizeof(l3));
+        compositor_word("/sys/devices/system/cpu/cpu0/topology/package_cpus_list", pkg, sizeof(pkg));
+        return l3[0] && pkg[0] && !string_equals((string_address)l3, (string_address)pkg);
 }
 
 // Hold amd_pstate/intel_pstate EPP at "performance" while a fullscreen game runs on AC power.

@@ -95,6 +95,7 @@ CONFIG_TIMERFD=y
 CONFIG_EPOLL=y
 CONFIG_FUTEX=y
 CONFIG_AIO=y
+CONFIG_IO_URING=y
 CONFIG_ADVISE_SYSCALLS=y
 CONFIG_MEMBARRIER=y
 # /proc/sys is not a separate option any more -- SYSCTL brings it.

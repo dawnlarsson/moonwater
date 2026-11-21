@@ -128,3 +128,24 @@ CONFIG_X86_MPPARSE=y
 CONFIG_X86_CPU_RESCTRL=y
 CONFIG_X86_AMD_PLATFORM_DEVICE=y
 CONFIG_IA32_EMULATION=y
+
+# Asymmetric core priority (AMD PrefCore, Intel ITMT / P-core vs E-core),
+# dual-CCD 3D V-Cache preference, hardware feedback interfaces, MCE reporting,
+# and x2APIC + IOMMU drivers (in passthrough by default via profile/any so
+# DMA pays no translation tax while x2APIC avoids MMIO EOI/IPI overhead).
+CONFIG_SCHED_MC_PRIO=y
+CONFIG_SCHED_OMIT_FRAME_POINTER=y
+CONFIG_AMD_3D_VCACHE=y
+CONFIG_AMD_HFI=y
+CONFIG_INTEL_HFI_THERMAL=y
+CONFIG_X86_MCE=y
+CONFIG_X86_MCE_INTEL=y
+CONFIG_X86_MCE_AMD=y
+CONFIG_AMD_IOMMU=y
+CONFIG_INTEL_IOMMU=y
+CONFIG_IRQ_REMAP=y
+CONFIG_X86_X2APIC=y
+CONFIG_X86_POSTED_MSI=y
+
+# Hardware AES-NI / VAES acceleration for kernel crypto (TLS, Wi-Fi, disk crypto).
+CONFIG_CRYPTO_AES_NI_INTEL=y

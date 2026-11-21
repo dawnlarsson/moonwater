@@ -54,6 +54,16 @@ CONFIG_PREEMPT_NONE=n
 CONFIG_PREEMPT_VOLUNTARY=n
 CONFIG_PREEMPT_LAZY=n
 
+# rseq time-slice extension lets userspace request a brief extension when an
+# interrupt lands inside a critical section, preventing lock-convoy stalls in
+# multi-threaded games, browsers and allocators.
+CONFIG_RSEQ_SLICE_EXTENSION=y
+
+# JIT-compile classic seccomp-bpf and socket filters (Chrome, Electron, Steam,
+# bubblewrap) into native machine code instead of running the bytecode
+# interpreter on every syscall. Does not enable BPF_SYSCALL / eBPF.
+CONFIG_BPF_JIT=y
+
 # Dynamic preemption compiles all the models in and picks one at boot. It
 # costs a static branch at every preemption point to buy a boot flag nobody is
 # going to use, when the model is decided here.
