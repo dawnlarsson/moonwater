@@ -1267,7 +1267,19 @@ static void wayland_configure(struct wayland_client *c, struct wayland_surface *
                         ask.states |= WAYLAND_STATE_FULLSCREEN | WAYLAND_STATE_ACTIVATED;
                 }
                 else if (s->row < 0 && s->u.top.want_maximized)
+                {
+                        if (wayland.screens)
+                        {
+                                const struct wayland_screen *own = &wayland.screen[wayland_screen_at(ask.x, ask.y)];
+                                ask.x = own->x, ask.y = own->y, ask.width = own->width, ask.height = own->height;
+                        }
                         ask.states |= WAYLAND_STATE_MAXIMIZED | WAYLAND_STATE_ACTIVATED;
+                }
+                if ((ask.states & (WAYLAND_STATE_MAXIMIZED | WAYLAND_STATE_FULLSCREEN)) && (ask.width <= 0 || ask.height <= 0) && wayland.screens)
+                {
+                        const struct wayland_screen *own = &wayland.screen[wayland_screen_at(ask.x, ask.y)];
+                        ask.width = own->width, ask.height = own->height;
+                }
                 if ((slot = wayland_find(c, s->role_id, WLI_xdg_toplevel)) < 0)
                         return;
                 version = c->objects[slot].version;
