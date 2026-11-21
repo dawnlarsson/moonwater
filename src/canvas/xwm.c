@@ -1,90 +1,8 @@
 /*
-        The window manager of Xwayland: the compositor is the X11 window manager of the rootless X server the bowl runs, over
-        one connection it accepts on a socket of its own. It is included by wayland_host.c, after the shim's host, when
-        CONFIG_MOONWATER_WAYLAND is on.
-
-        THE SOCKET
-
-        /run/moonwater/xwm/wm-0 is a unix socket in a directory of mode 0711 (no other user lists it); the socket is mode 0660,
-        its group 1000 when the compositor is root, so the bowl's programs (uid 1000) reach it, and a peer whose uid is neither
-        the compositor's nor, for a root compositor, 1000 is closed at once (SO_PEERCRED). A wrapper (xwayland-moonwater, a
-        bowl program: the compositor does not start it) connects to it and gives the connected descriptor to Xwayland as its
-        -wm argument, so Xwayland's end of the connection is its window manager's, and this end is ours: the setup handshake
-        is ours to start, and Xwayland answers it as a server does. The peer is any program of uid 1000, so a connection is
-        held to being an X server's: see ONE CONNECTION.
-
-        ONE CONNECTION
-
-        One Xwayland has one window manager, and each program run has an Xwayland of its own, so up to COMPOSITOR_XWM_SLOTS
-        connections are live at once, one for each wrapper: a second connection from the same wrapper (its pid) takes the
-        place of the first, which is closed (a wrapper whose display did not come up tries the next with a new connection).
-        A connection that does not finish its setup within COMPOSITOR_XWM_SETUP_NS is closed, and so is one whose X server,
-        the wrapper's child, has not come to the Wayland socket within COMPOSITOR_XWM_BIND_NS (compositor_xwm_server), or
-        has left it: a program that only holds the socket holds no slot, and is offered no selection, for longer than that.
-        So is one whose bytes break the codec's bounds (xwm_wire.c refuses every length it cannot hold, and the connection
-        is dropped on the first refusal).
-
-        WHAT THE WINDOW MANAGER DOES
-
-        It selects SubstructureRedirect, SubstructureNotify and PropertyChange on the root, which makes it the one that
-        maps and configures every top-level window. A MapRequest maps the window and, for a normal window, gives it the
-        keyboard (SetInputFocus). A ConfigureRequest is honoured for the fields the client asked for (a fullscreen window
-        keeps its size). A _NET_WM_STATE request with _NET_WM_STATE_FULLSCREEN makes the window fill the output: its X
-        window is configured to the output's size at the origin, and the shim's row for it is arranged to cover the screen.
-        A WL_SURFACE_SERIAL client message gives the window its X11 serial; the shim's surface that set the same serial
-        (xwayland_surface_v1) names its row (wayland_serial_row), which is looked for on each pass until the shim has it.
-        When the compositor asks a window to go (WINDOW_CLOSING on its row), the window manager sends it WM_DELETE_WINDOW, once for
-        each time it is asked (compositor.close_asks).
-
-        THE SELECTIONS
-
-        The compositor holds the clipboard and the primary selection as copies of any types (compositor_clip_*, windows_clip_build's
-        format), whoever made them, and the window manager is their X side, as Mutter's and wlroots' are (Xwayland binds no data
-        device). A selection the compositor holds that an X client did not make is owned in X by the window manager's selection window:
-        TARGETS is TARGETS, TIMESTAMP, MULTIPLE and each name the copy is offered under (its types as the atoms of their names, and for
-        its text UTF8_STRING, TEXT, STRING, text/plain;charset=utf-8 and text/plain), interned before the ownership is taken so their
-        atoms come before any request for them. A value is the copy's type read where it is (a descriptor of the compositor's own, so a
-        newer copy does not change it half way), STRING made Latin-1. A value longer than a piece (XWM_INCR_CHUNK) goes by INCR, a piece
-        each time the requestor deletes the last. MULTIPLE is each of its pairs answered into its property, one notify for them all
-        (a pair that cannot be is None in the list). A value goes only to an X client whose window has the keys and has just had the
-        person's key or button (a client's paste in the compositor's rule); TARGETS and TIMESTAMP go to any.
-
-        An X client's copy (XFIXES SelectionNotify on CLIPBOARD or PRIMARY) is read once into the compositor's, as a Wayland client's
-        is, when the person has just touched a window of that X client: its TARGETS (the names of the atoms asked for), then its best
-        text (UTF8_STRING, the UTF-8 types, then STRING made UTF-8, then TEXT) as the copy's text, then each other target that is a
-        Wayland type (a name with a slash), one after another into one memfd (ConvertSelection into a requestor window of its own, INCR
-        too), however large, which is given its index and sealed, checked and kept as any copy (compositor_clip_keep) with that window as
-        its owner, so it outlives its X owner and the window manager owns it in X again when that owner goes. The window manager is the
-        clipboard manager too (CLIPBOARD_MANAGER): a SAVE_TARGETS of an owner that quits is answered once its copy is the compositor's.
-        Every transfer is a record in a table that grows, let go of when it ends or moves nothing for COMPOSITOR_XWM_TRANSFER_NS;
-        nothing is buffered past one reply or one piece.
-
-        DRAG AND DROP
-
-        XDND version 5 both ways (the drag and drop section below says each step). A Wayland drag over an X window is offered to the
-        window manager by the shim (xdrag), and the window manager is its XDND source: XdndSelection owned by the selection window,
-        XdndEnter with the drag's types, XdndPosition as it moves, XdndStatus told to the shim as the type and the action the X window
-        takes, XdndDrop, the conversion answered from the Wayland source's send, and XdndFinished the drag's end (XdndLeave on a leave, a
-        cancel or the source gone). An X drag over a Wayland window finds the window manager's proxy there (XdndAware, mapped over the
-        Wayland window under the pointer while an X client drags), whose XdndEnter, XdndPosition, XdndLeave and XdndDrop are a Wayland drag
-        of the X side's in the shim (its offer the X source's types, its receive a conversion of XdndSelection), answered by XdndStatus
-        and XdndFinished. XdndActionCopy, Move and Ask are the drag's copy, move and ask: an X source's Ask is ask and the actions of its
-        XdndActionList that Wayland has (copy alone when it lists none), and a Wayland source with a choice lists its own on the
-        selection window (XdndActionList, XdndActionDescription); XdndFinished names the action the drag came to. An X target's
-        XdndProxy is followed (a proxy that names itself: the messages go to it, naming the window under the pointer). The proxy is
-        mapped while any button held on an X window, or a finger down on one, may be an X drag, under that button's pointer or that
-        finger. The host's Escape ends an X drag on both sides: the Wayland drag of it ends, and the X source is given the Escape
-        through XTEST (its grab has the keyboard). X's root is the compositor's pixels, its origin the top left of the screens
-        (compositor_xwm_origin), and the X server is told its outputs so (wayland_xwayland_client), at any scale and layout.
-
-        WHAT IT KEEPS
-
-        A table of records that grows (the shim's struct wayland_table: its records never move), one for each top-level window the
-        server reports (CreateNotify) or the client maps (MapRequest) or the shim names (serial), found by its X id through an index
-        (open addressing, half full at most), and the property requests waited for in a ring that grows. A record the memory is not
-        there for is refused and counted, as one past the fixed table of 64 was. The output queue and the input buffer are fixed: the
-        queue holds back the reads of the server while it is full (flow, not a count), and the input is the largest message the
-        protocol has. No thread, no fork.
+        Xwayland window manager & X11/Proton/Steam peer bridge for Canvas (included directly by compositor.c
+        when CONFIG_MOONWATER_WAYLAND is on). Manages up to COMPOSITOR_XWM_SLOTS Xwayland connections on
+        /run/moonwater/xwm/wm-0, EWMH/ICCCM/tray lifecycle, CLIPBOARD/PRIMARY + SAVE_TARGETS via XFIXES,
+        bidirectional XDND v5, and Steam Overlay input override.
 */
 #ifndef COMPOSITOR_XWM_INCLUDED
 #define COMPOSITOR_XWM_INCLUDED
@@ -94,152 +12,92 @@
 #define COMPOSITOR_XWM_DIR "/run/moonwater/xwm"
 #define COMPOSITOR_XWM_PATH "/run/moonwater/xwm/wm-0"
 #define COMPOSITOR_XWM_BACKLOG 4
-#define COMPOSITOR_XWM_SLOTS 8                       // one window manager connection per X server (one Xwayland per program run): N slots
-#define COMPOSITOR_XWM_POLLS (1 + COMPOSITOR_XWM_SLOTS) // what compositor_xwm_poll adds to the loop's list: the listening socket and each connection
-#define COMPOSITOR_XWM_IN (XWM_REPLY_MAX + 4096)     // what the server has sent and no message is whole yet: one whole message and more
-#define COMPOSITOR_XWM_OUT 131072                    // what is queued for the server (a selection's piece of 32 KiB and more); a queue that would overflow closes the connection
-#define COMPOSITOR_XWM_SETUP_NS 5000000000ull        // a connection that has not finished its setup in this long is closed
-#define COMPOSITOR_XWM_TARGETS_MOST 64               // the types of an X copy or drag taken, and their names asked: no toolkit offers more
-#define COMPOSITOR_XWM_BIND_NS 15000000000ull        // nor one whose X server is not a Wayland client by then (the wrapper waits 5 s for it)
-// Single source of truth for all 76 interned atoms: enum index, wire name, and flags (SUP = _NET_SUPPORTED, POP = popup window type).
+#define COMPOSITOR_XWM_SLOTS 8
+#define COMPOSITOR_XWM_POLLS (1 + COMPOSITOR_XWM_SLOTS)
+#define COMPOSITOR_XWM_IN (XWM_REPLY_MAX + 4096)
+#define COMPOSITOR_XWM_OUT 131072
+#define COMPOSITOR_XWM_SETUP_NS 5000000000ull
+#define COMPOSITOR_XWM_TARGETS_MOST 64
+#define COMPOSITOR_XWM_BIND_NS 15000000000ull
 #define COMPOSITOR_XWM_AF_SUP 1u
 #define COMPOSITOR_XWM_AF_POP 2u
 #define COMPOSITOR_XWM_ATOM_LIST(X) \
-        X(PROTOCOLS, "WM_PROTOCOLS", 0) \
-        X(DELETE, "WM_DELETE_WINDOW", 0) \
-        X(NET_STATE, "_NET_WM_STATE", COMPOSITOR_XWM_AF_SUP) \
-        X(FULLSCREEN, "_NET_WM_STATE_FULLSCREEN", COMPOSITOR_XWM_AF_SUP) \
-        X(SERIAL, "WL_SURFACE_SERIAL", 0) \
-        X(ALLOW_COMMITS, "_XWAYLAND_ALLOW_COMMITS", 0) \
-        X(WM_S0, "WM_S0", 0) \
-        X(WM_STATE, "WM_STATE", 0) \
-        X(NET_NAME, "_NET_WM_NAME", COMPOSITOR_XWM_AF_SUP) \
-        X(UTF8, "UTF8_STRING", 0) \
-        X(TAKE_FOCUS, "WM_TAKE_FOCUS", 0) \
-        X(TYPE, "_NET_WM_WINDOW_TYPE", COMPOSITOR_XWM_AF_SUP) \
+        X(PROTOCOLS, "WM_PROTOCOLS", 0) X(DELETE, "WM_DELETE_WINDOW", 0) \
+        X(NET_STATE, "_NET_WM_STATE", COMPOSITOR_XWM_AF_SUP) X(FULLSCREEN, "_NET_WM_STATE_FULLSCREEN", COMPOSITOR_XWM_AF_SUP) \
+        X(SERIAL, "WL_SURFACE_SERIAL", 0) X(ALLOW_COMMITS, "_XWAYLAND_ALLOW_COMMITS", 0) \
+        X(WM_S0, "WM_S0", 0) X(WM_STATE, "WM_STATE", 0) \
+        X(NET_NAME, "_NET_WM_NAME", COMPOSITOR_XWM_AF_SUP) X(UTF8, "UTF8_STRING", 0) \
+        X(TAKE_FOCUS, "WM_TAKE_FOCUS", 0) X(TYPE, "_NET_WM_WINDOW_TYPE", COMPOSITOR_XWM_AF_SUP) \
         X(TYPE_TOOLTIP, "_NET_WM_WINDOW_TYPE_TOOLTIP", COMPOSITOR_XWM_AF_SUP | COMPOSITOR_XWM_AF_POP) \
         X(TYPE_DROPDOWN_MENU, "_NET_WM_WINDOW_TYPE_DROPDOWN_MENU", COMPOSITOR_XWM_AF_SUP | COMPOSITOR_XWM_AF_POP) \
         X(TYPE_POPUP_MENU, "_NET_WM_WINDOW_TYPE_POPUP_MENU", COMPOSITOR_XWM_AF_SUP | COMPOSITOR_XWM_AF_POP) \
         X(TYPE_COMBO, "_NET_WM_WINDOW_TYPE_COMBO", COMPOSITOR_XWM_AF_SUP | COMPOSITOR_XWM_AF_POP) \
         X(TYPE_NOTIFICATION, "_NET_WM_WINDOW_TYPE_NOTIFICATION", COMPOSITOR_XWM_AF_SUP | COMPOSITOR_XWM_AF_POP) \
         X(TYPE_DND, "_NET_WM_WINDOW_TYPE_DND", COMPOSITOR_XWM_AF_SUP | COMPOSITOR_XWM_AF_POP) \
-        X(NET_SUPPORTED, "_NET_SUPPORTED", COMPOSITOR_XWM_AF_SUP) \
-        X(NET_CHECK, "_NET_SUPPORTING_WM_CHECK", COMPOSITOR_XWM_AF_SUP) \
-        X(NET_MOVERESIZE, "_NET_WM_MOVERESIZE", COMPOSITOR_XWM_AF_SUP) \
-        X(NET_ACTIVE, "_NET_ACTIVE_WINDOW", COMPOSITOR_XWM_AF_SUP) \
-        X(NET_CLOSE, "_NET_CLOSE_WINDOW", COMPOSITOR_XWM_AF_SUP) \
-        X(MAX_VERT, "_NET_WM_STATE_MAXIMIZED_VERT", COMPOSITOR_XWM_AF_SUP) \
-        X(MAX_HORZ, "_NET_WM_STATE_MAXIMIZED_HORZ", COMPOSITOR_XWM_AF_SUP) \
-        X(FOCUSED, "_NET_WM_STATE_FOCUSED", COMPOSITOR_XWM_AF_SUP) \
-        X(HIDDEN, "_NET_WM_STATE_HIDDEN", COMPOSITOR_XWM_AF_SUP) \
-        X(CHANGE_STATE, "WM_CHANGE_STATE", 0) \
-        X(TYPE_NORMAL, "_NET_WM_WINDOW_TYPE_NORMAL", COMPOSITOR_XWM_AF_SUP) \
-        X(TYPE_DIALOG, "_NET_WM_WINDOW_TYPE_DIALOG", COMPOSITOR_XWM_AF_SUP) \
-        X(TYPE_UTILITY, "_NET_WM_WINDOW_TYPE_UTILITY", COMPOSITOR_XWM_AF_SUP) \
-        X(TYPE_SPLASH, "_NET_WM_WINDOW_TYPE_SPLASH", COMPOSITOR_XWM_AF_SUP) \
-        X(CLIPBOARD, "CLIPBOARD", 0) \
-        X(TARGETS, "TARGETS", 0) \
-        X(TIMESTAMP, "TIMESTAMP", 0) \
-        X(INCR, "INCR", 0) \
-        X(TEXT, "TEXT", 0) \
-        X(MIME_UTF8, "text/plain;charset=utf-8", 0) \
-        X(MIME_TEXT, "text/plain", 0) \
-        X(SELECTION, "_MOONWATER_SELECTION", 0) \
-        X(XDND_AWARE, "XdndAware", 0) \
-        X(XDND_ENTER, "XdndEnter", 0) \
-        X(XDND_POSITION, "XdndPosition", 0) \
-        X(XDND_STATUS, "XdndStatus", 0) \
-        X(XDND_LEAVE, "XdndLeave", 0) \
-        X(XDND_DROP, "XdndDrop", 0) \
-        X(XDND_FINISHED, "XdndFinished", 0) \
-        X(XDND_SELECTION, "XdndSelection", 0) \
-        X(XDND_TYPES, "XdndTypeList", 0) \
-        X(XDND_COPY, "XdndActionCopy", 0) \
-        X(XDND_MOVE, "XdndActionMove", 0) \
-        X(XDND_ASK, "XdndActionAsk", 0) \
-        X(MULTIPLE, "MULTIPLE", 0) \
-        X(ATOM_PAIR, "ATOM_PAIR", 0) \
-        X(MANAGER, "CLIPBOARD_MANAGER", 0) \
-        X(SAVE_TARGETS, "SAVE_TARGETS", 0) \
-        X(XDND_PROXY, "XdndProxy", 0) \
-        X(XDND_ACTIONS, "XdndActionList", 0) \
-        X(XDND_DESCRIPTIONS, "XdndActionDescription", 0) \
-        X(XDND_PRIVATE, "XdndActionPrivate", 0) \
-        X(XDND_LINK, "XdndActionLink", 0) \
-        X(STEAM, "_MOONWATER_STEAM_OVERLAY", 0) \
-        X(STEAM_OPEN, "_MOONWATER_STEAM_OVERLAY_OPEN", 0) \
+        X(NET_SUPPORTED, "_NET_SUPPORTED", COMPOSITOR_XWM_AF_SUP) X(NET_CHECK, "_NET_SUPPORTING_WM_CHECK", COMPOSITOR_XWM_AF_SUP) \
+        X(NET_MOVERESIZE, "_NET_WM_MOVERESIZE", COMPOSITOR_XWM_AF_SUP) X(NET_ACTIVE, "_NET_ACTIVE_WINDOW", COMPOSITOR_XWM_AF_SUP) \
+        X(NET_CLOSE, "_NET_CLOSE_WINDOW", COMPOSITOR_XWM_AF_SUP) X(MAX_VERT, "_NET_WM_STATE_MAXIMIZED_VERT", COMPOSITOR_XWM_AF_SUP) \
+        X(MAX_HORZ, "_NET_WM_STATE_MAXIMIZED_HORZ", COMPOSITOR_XWM_AF_SUP) X(FOCUSED, "_NET_WM_STATE_FOCUSED", COMPOSITOR_XWM_AF_SUP) \
+        X(HIDDEN, "_NET_WM_STATE_HIDDEN", COMPOSITOR_XWM_AF_SUP) X(CHANGE_STATE, "WM_CHANGE_STATE", 0) \
+        X(TYPE_NORMAL, "_NET_WM_WINDOW_TYPE_NORMAL", COMPOSITOR_XWM_AF_SUP) X(TYPE_DIALOG, "_NET_WM_WINDOW_TYPE_DIALOG", COMPOSITOR_XWM_AF_SUP) \
+        X(TYPE_UTILITY, "_NET_WM_WINDOW_TYPE_UTILITY", COMPOSITOR_XWM_AF_SUP) X(TYPE_SPLASH, "_NET_WM_WINDOW_TYPE_SPLASH", COMPOSITOR_XWM_AF_SUP) \
+        X(CLIPBOARD, "CLIPBOARD", 0) X(TARGETS, "TARGETS", 0) X(TIMESTAMP, "TIMESTAMP", 0) X(INCR, "INCR", 0) \
+        X(TEXT, "TEXT", 0) X(MIME_UTF8, "text/plain;charset=utf-8", 0) X(MIME_TEXT, "text/plain", 0) \
+        X(SELECTION, "_MOONWATER_SELECTION", 0) X(XDND_AWARE, "XdndAware", 0) X(XDND_ENTER, "XdndEnter", 0) \
+        X(XDND_POSITION, "XdndPosition", 0) X(XDND_STATUS, "XdndStatus", 0) X(XDND_LEAVE, "XdndLeave", 0) \
+        X(XDND_DROP, "XdndDrop", 0) X(XDND_FINISHED, "XdndFinished", 0) X(XDND_SELECTION, "XdndSelection", 0) \
+        X(XDND_TYPES, "XdndTypeList", 0) X(XDND_COPY, "XdndActionCopy", 0) X(XDND_MOVE, "XdndActionMove", 0) \
+        X(XDND_ASK, "XdndActionAsk", 0) X(MULTIPLE, "MULTIPLE", 0) X(ATOM_PAIR, "ATOM_PAIR", 0) \
+        X(MANAGER, "CLIPBOARD_MANAGER", 0) X(SAVE_TARGETS, "SAVE_TARGETS", 0) X(XDND_PROXY, "XdndProxy", 0) \
+        X(XDND_ACTIONS, "XdndActionList", 0) X(XDND_DESCRIPTIONS, "XdndActionDescription", 0) \
+        X(XDND_PRIVATE, "XdndActionPrivate", 0) X(XDND_LINK, "XdndActionLink", 0) \
+        X(STEAM, "_MOONWATER_STEAM_OVERLAY", 0) X(STEAM_OPEN, "_MOONWATER_STEAM_OVERLAY_OPEN", 0) \
         X(TYPE_DESKTOP, "_NET_WM_WINDOW_TYPE_DESKTOP", COMPOSITOR_XWM_AF_SUP) \
-        X(TRAY_S0, "_NET_SYSTEM_TRAY_S0", 0) \
-        X(TRAY_OPCODE, "_NET_SYSTEM_TRAY_OPCODE", 0) \
-        X(TRAY_ORIENT, "_NET_SYSTEM_TRAY_ORIENTATION", 0) \
-        X(TRAY_VISUAL, "_NET_SYSTEM_TRAY_VISUAL", 0) \
-        X(XEMBED, "_XEMBED", 0) \
-        X(XEMBED_INFO, "_XEMBED_INFO", 0) \
-        X(NET_ICON, "_NET_WM_ICON", 0) \
-        X(X_MANAGER, "MANAGER", 0) \
-        X(FRAME_EXTENTS, "_NET_FRAME_EXTENTS", COMPOSITOR_XWM_AF_SUP) \
-        X(REQ_FRAME_EXTENTS, "_NET_REQUEST_FRAME_EXTENTS", COMPOSITOR_XWM_AF_SUP) \
-        X(WORKAREA, "_NET_WORKAREA", COMPOSITOR_XWM_AF_SUP) \
-        X(ABOVE, "_NET_WM_STATE_ABOVE", COMPOSITOR_XWM_AF_SUP)
+        X(TRAY_S0, "_NET_SYSTEM_TRAY_S0", 0) X(TRAY_OPCODE, "_NET_SYSTEM_TRAY_OPCODE", 0) \
+        X(TRAY_ORIENT, "_NET_SYSTEM_TRAY_ORIENTATION", 0) X(TRAY_VISUAL, "_NET_SYSTEM_TRAY_VISUAL", 0) \
+        X(XEMBED, "_XEMBED", 0) X(XEMBED_INFO, "_XEMBED_INFO", 0) X(NET_ICON, "_NET_WM_ICON", 0) X(X_MANAGER, "MANAGER", 0) \
+        X(FRAME_EXTENTS, "_NET_FRAME_EXTENTS", COMPOSITOR_XWM_AF_SUP) X(REQ_FRAME_EXTENTS, "_NET_REQUEST_FRAME_EXTENTS", COMPOSITOR_XWM_AF_SUP) \
+        X(WORKAREA, "_NET_WORKAREA", COMPOSITOR_XWM_AF_SUP) X(ABOVE, "_NET_WM_STATE_ABOVE", COMPOSITOR_XWM_AF_SUP)
 
-enum
-{
+enum {
 #define X(id, name, flags) COMPOSITOR_XWM_A_##id,
         COMPOSITOR_XWM_ATOM_LIST(X)
 #undef X
         COMPOSITOR_XWM_ATOMS
 };
 
-static const struct
-{
-        const char *name;
-        unsigned char flags;
-} xwm_atom_spec[COMPOSITOR_XWM_ATOMS] = {
+static const struct { const char *name; unsigned char flags; } xwm_atom_spec[COMPOSITOR_XWM_ATOMS] = {
 #define X(id, name, flags) {name, flags},
         COMPOSITOR_XWM_ATOM_LIST(X)
 #undef X
 };
+
 #define COMPOSITOR_XWM_XA_PRIMARY 1
 #define COMPOSITOR_XWM_XA_INTEGER 19
-#define COMPOSITOR_XWM_MOVERESIZE_MOVE 8u
-#define COMPOSITOR_XWM_MOVERESIZE_CANCEL 11u
-#define COMPOSITOR_XWM_XA_WM_TRANSIENT_FOR 68
+#define COMPOSITOR_XWM_XA_STRING 31
 #define COMPOSITOR_XWM_XA_WINDOW 33
+#define COMPOSITOR_XWM_XA_WINDOW_TYPE 33
 #define COMPOSITOR_XWM_XA_WM_HINTS 35
 #define COMPOSITOR_XWM_XA_WM_NAME 39
 #define COMPOSITOR_XWM_XA_WM_NORMAL_HINTS 40
-#define COMPOSITOR_XWM_XA_STRING 31
+#define COMPOSITOR_XWM_XA_WM_CLASS 67
+#define COMPOSITOR_XWM_XA_WM_TRANSIENT_FOR 68
+#define COMPOSITOR_XWM_MOVERESIZE_MOVE 8u
+#define COMPOSITOR_XWM_MOVERESIZE_CANCEL 11u
 #define COMPOSITOR_XWM_TITLE 128
+
 enum compositor_xwm_prop
 {
-        COMPOSITOR_XWM_PROP_NET_NAME = 1,
-        COMPOSITOR_XWM_PROP_NAME,
-        COMPOSITOR_XWM_PROP_PROTOCOLS,
-        COMPOSITOR_XWM_PROP_TRANSIENT,
-        COMPOSITOR_XWM_PROP_TYPE,
-        COMPOSITOR_XWM_PROP_STATE,
-        COMPOSITOR_XWM_PROP_WM_HINTS,
-        COMPOSITOR_XWM_PROP_NORMAL_HINTS,
-        COMPOSITOR_XWM_PROP_OWNER,
-        COMPOSITOR_XWM_PROP_INTERN,
-        COMPOSITOR_XWM_PROP_ATOM_NAME,
-        COMPOSITOR_XWM_PROP_SEL,
-        COMPOSITOR_XWM_PROP_SEL_SYNC,
-        COMPOSITOR_XWM_PROP_XDND_AWARE,
-        COMPOSITOR_XWM_PROP_XDND_TYPES,
-        COMPOSITOR_XWM_PROP_XDND_SYNC,
-        COMPOSITOR_XWM_PROP_ICON,
-        COMPOSITOR_XWM_PROP_MULTIPLE,
-        COMPOSITOR_XWM_PROP_XDND_PROXY,
-        COMPOSITOR_XWM_PROP_XDND_PROXIED,
-        COMPOSITOR_XWM_PROP_XDND_ACTIONS,
-        COMPOSITOR_XWM_PROP_XDND_WORDS,
-        COMPOSITOR_XWM_PROP_STEAM,
-        COMPOSITOR_XWM_PROP_STEAM_OPEN,
-        COMPOSITOR_XWM_PROP_CLASS,
-        COMPOSITOR_XWM_PROP_EXT,
+        COMPOSITOR_XWM_PROP_NET_NAME = 1, COMPOSITOR_XWM_PROP_NAME, COMPOSITOR_XWM_PROP_PROTOCOLS,
+        COMPOSITOR_XWM_PROP_TRANSIENT, COMPOSITOR_XWM_PROP_TYPE, COMPOSITOR_XWM_PROP_STATE,
+        COMPOSITOR_XWM_PROP_WM_HINTS, COMPOSITOR_XWM_PROP_NORMAL_HINTS, COMPOSITOR_XWM_PROP_OWNER,
+        COMPOSITOR_XWM_PROP_INTERN, COMPOSITOR_XWM_PROP_ATOM_NAME, COMPOSITOR_XWM_PROP_SEL,
+        COMPOSITOR_XWM_PROP_SEL_SYNC, COMPOSITOR_XWM_PROP_XDND_AWARE, COMPOSITOR_XWM_PROP_XDND_TYPES,
+        COMPOSITOR_XWM_PROP_XDND_SYNC, COMPOSITOR_XWM_PROP_ICON, COMPOSITOR_XWM_PROP_MULTIPLE,
+        COMPOSITOR_XWM_PROP_XDND_PROXY, COMPOSITOR_XWM_PROP_XDND_PROXIED, COMPOSITOR_XWM_PROP_XDND_ACTIONS,
+        COMPOSITOR_XWM_PROP_XDND_WORDS, COMPOSITOR_XWM_PROP_STEAM, COMPOSITOR_XWM_PROP_STEAM_OPEN,
+        COMPOSITOR_XWM_PROP_CLASS, COMPOSITOR_XWM_PROP_EXT,
 };
-#define COMPOSITOR_XWM_XA_WM_CLASS 67
 #define COMPOSITOR_XWM_DND_REPLY(what) (((what) >= COMPOSITOR_XWM_PROP_XDND_AWARE && (what) <= COMPOSITOR_XWM_PROP_XDND_SYNC) || \
                                         ((what) >= COMPOSITOR_XWM_PROP_XDND_PROXY && (what) <= COMPOSITOR_XWM_PROP_XDND_WORDS))
 #define COMPOSITOR_XWM_PROTO_DELETE 1u
@@ -251,7 +109,6 @@ enum compositor_xwm_prop
 #define COMPOSITOR_XWM_ALLOW_TYPE 6
 #define COMPOSITOR_XWM_ATOM_FIRST_SEQ 2
 #define COMPOSITOR_XWM_KEY_ESCAPE 9
-#define COMPOSITOR_XWM_XA_WINDOW_TYPE 33
 #define COMPOSITOR_XWM_ATOM_TYPE 4
 #define COMPOSITOR_XWM_NET_REMOVE 0
 #define COMPOSITOR_XWM_NET_ADD 1
@@ -261,6 +118,7 @@ enum { XWM_EXT_COMPOSITE, XWM_EXT_XRES, XWM_EXT_XFIXES, XWM_EXT_XTEST };
 static const struct { const char *name; unsigned char len; } xwm_ext_spec[4] = {
         {"Composite", 9}, {"X-Resource", 10}, {"XFIXES", 6}, {"XTEST", 5},
 };
+
 #define COMPOSITOR_XWM_MAPPED 1u
 #define COMPOSITOR_XWM_OVERRIDE 2u
 #define COMPOSITOR_XWM_FULLSCREEN 4u
@@ -268,143 +126,83 @@ static const struct { const char *name; unsigned char len; } xwm_ext_spec[4] = {
 #define COMPOSITOR_XWM_MAX_VERT 16u
 #define COMPOSITOR_XWM_MAX_HORZ 32768u
 #define COMPOSITOR_XWM_MAXIMIZED (COMPOSITOR_XWM_MAX_VERT | COMPOSITOR_XWM_MAX_HORZ)
-#define COMPOSITOR_XWM_NET_TITLE 32u          // the title is _NET_WM_NAME's, which WM_NAME does not replace
-#define COMPOSITOR_XWM_ADOPTED 64u            // the shim has the window's surface and has been told what the window is
-#define COMPOSITOR_XWM_PROTO_KNOWN 128u       // WM_PROTOCOLS has been read
-#define COMPOSITOR_XWM_TITLE_AGAIN 256u       // the title changed while its requests were in flight
-#define COMPOSITOR_XWM_POPUPTYPE 512u         // its _NET_WM_WINDOW_TYPE is a popup's: it is shown as an override-redirect window is
-#define COMPOSITOR_XWM_PROPS_READ 1024u       // the properties asked for at the map (the last is the type) have come
-#define COMPOSITOR_XWM_RAISED 2048u           // a transient window has been raised over its parent once
-#define COMPOSITOR_XWM_COVERED 4096u          // made fullscreen for mapping over a whole screen (compositor_xwm_covers), not by asking
-#define COMPOSITOR_XWM_DESKTOP 8192u          // _NET_WM_WINDOW_TYPE_DESKTOP: live wallpaper window at bottom of stack
-#define COMPOSITOR_XWM_TRAY_ICON 16384u       // docked into _NET_SYSTEM_TRAY_S0: never adopted as a desktop window
-#define COMPOSITOR_XWM_ABOVE 65536u           // _NET_WM_STATE_ABOVE: WINDOW_LAYER_ABOVE
+#define COMPOSITOR_XWM_NET_TITLE 32u
+#define COMPOSITOR_XWM_ADOPTED 64u
+#define COMPOSITOR_XWM_PROTO_KNOWN 128u
+#define COMPOSITOR_XWM_TITLE_AGAIN 256u
+#define COMPOSITOR_XWM_POPUPTYPE 512u
+#define COMPOSITOR_XWM_PROPS_READ 1024u
+#define COMPOSITOR_XWM_RAISED 2048u
+#define COMPOSITOR_XWM_COVERED 4096u
+#define COMPOSITOR_XWM_DESKTOP 8192u
+#define COMPOSITOR_XWM_TRAY_ICON 16384u
+#define COMPOSITOR_XWM_ABOVE 65536u
 #define COMPOSITOR_XWM_POPUPISH (COMPOSITOR_XWM_OVERRIDE | COMPOSITOR_XWM_POPUPTYPE)
 #define COMPOSITOR_XWM_EAGAIN (-11)
 #define COMPOSITOR_XWM_MSG_DONTWAIT 0x40
 #define COMPOSITOR_XWM_MSG_NOSIGNAL 0x4000
 #define COMPOSITOR_XWM_SO_PEERCRED 17
+#define COMPOSITOR_XWM_SEL_WINDOW 2u
+#define COMPOSITOR_XWM_PROXY_WINDOW 3u
+#define COMPOSITOR_XWM_TRAY_WINDOW 4u
+#define COMPOSITOR_XWM_FIRST_REQUESTOR 16u
 
 struct compositor_xwm_window
 {
-        unsigned int id;               // the X window; 0 for a free record
-        unsigned int state;            // COMPOSITOR_XWM_* bits
-        unsigned long long serial;     // the X11 serial its WL_SURFACE_SERIAL gave, when COMPOSITOR_XWM_SERIAL is set
-        int row;                       // the shim's row for the window, -1 until the shim has one
-        unsigned int protocols;        // COMPOSITOR_XWM_PROTO_* from WM_PROTOCOLS
-        unsigned char closes;          // the asks to close of its row that it has been told of (compositor.close_asks)
-        unsigned int transient;        // the window it is transient for (WM_TRANSIENT_FOR), 0 for none
-        int x, y;                      // the X window's place and size, as the server last said (CreateNotify, ConfigureNotify)
-        unsigned int width, height;
-        int sent_x, sent_y;            // what the compositor last asked of its place and size
-        unsigned int sent_w, sent_h;
-        unsigned long long sync_present; // last present a resize configure was sent on
-        unsigned int restore_w, restore_h; // its size before fullscreen
-        unsigned int min_w, min_h, max_w, max_h; // WM_NORMAL_HINTS size bounds (0 = unset)
-        unsigned char placed;          // WM_NORMAL_HINTS has USPosition or PPosition: its place is its own, kept where X says
-        unsigned char no_input;        // 1 if WM_HINTS InputHint is explicitly False
-        unsigned int owner;            // the pid of the program whose window it is, as X-Resource says (0 until it has; compositor_xwm_owned)
-        unsigned int asking;           // title requests in flight
-        unsigned int dirty;            // the shim has not the window's latest title
+        unsigned int id, state, protocols, transient, owner, asking, dirty;
+        unsigned long long serial, sync_present;
+        int row, x, y, sent_x, sent_y;
+        unsigned int width, height, sent_w, sent_h, restore_w, restore_h, min_w, min_h, max_w, max_h;
+        unsigned char closes, placed, no_input;
         char title[COMPOSITOR_XWM_TITLE];
-        char app[WINDOWS_APP_ID];      // its WM_CLASS's class (else its instance), the app_id its row is given (compositor_xwm_app)
+        char app[WINDOWS_APP_ID];
 };
 
-// Singleton Steam overlay bridge state (only one unmapped overlay X window is active for a Wayland game at a time).
 struct compositor_xwm_steam
 {
         struct compositor_xwm *slot;
-        unsigned int window;           // the X window carrying _MOONWATER_STEAM_OVERLAY, 0 for none
-        unsigned int pid;              // the game it is Steam's overlay window for (_MOONWATER_STEAM_OVERLAY), 0 for none
-        unsigned char open;            // the overlay is open (_MOONWATER_STEAM_OVERLAY_OPEN): the person's input is the overlay's
-        unsigned char focused;         // told FocusIn, as the renderer takes the hot-key from the window with the focus
-        unsigned char tab;             // the Tab of a Shift+Tab sent it is held: its repeats and its release are the overlay's too
-        int x, y;                      // the pointer's last place, in the X window's pixels (the game's frame's)
-        int wheel[2];                  // a wheel's turn not yet a whole notch (vertical, horizontal), in its own units
-        unsigned int told;             // when the overlay's state was last told (milliseconds): an open one beats every second
+        unsigned int window, pid, told;
+        unsigned char open, focused, tab;
+        int x, y, wheel[2];
 };
 
-struct compositor_xwm_pending
-{
-        unsigned int seq, window, what; // the request's sequence, the window it is for (0: free), and COMPOSITOR_XWM_PROP_*
-        unsigned int slot;              // the record it is for, when it is not a window's
-};
+struct compositor_xwm_pending { unsigned int seq, window, what, slot; };
+struct compositor_xwm_atom { unsigned int atom, at, length; unsigned char known; };
 
-// A name the window manager knows the atom of (or asks for, the atom 0 until its reply), or an atom it knows the name of.
-struct compositor_xwm_atom
-{
-        unsigned int atom;
-        unsigned int at, length; // its name in the names table
-        unsigned char known;     // both the atom and the name are known
-};
-
-/*
-        A conversion the window manager asked for (it is the requestor): its window (one of its own for each, 0 for a free record), the
-        selection (0 the clipboard, 1 the primary selection, 2 XdndSelection), how far it is (TARGETS asked, the value asked, its pieces
-        coming by INCR, the names of TARGETS awaited), and where the bytes go: into the memfd of a copy the compositor will keep (eager),
-        or into the write end of a pipe a pump empties into a Wayland client's descriptor. offset is where in the property the next
-        GetProperty starts (a piece longer than a reply holds), ready that a piece waits in the property for room in the pipe.
-*/
 struct compositor_xwm_in
 {
-        unsigned int window;
+        unsigned int window, selection, target, time, text;
         unsigned char which, stage, eager, latin1, incr, asking, ready;
-        unsigned int selection, target, time, text; // text: the target an eager copy's text is read as (0 for none)
-        int fd, row, index;                         // index: an eager copy's index, a record a type read whole
-        long pump, next;                            // next: the TARGETS an eager copy looks at after this one (-1: its text first)
-        unsigned long done, offset, total, count;   // total and count: an eager copy's bytes and types kept before this one
+        int fd, row, index;
+        long pump, next;
+        unsigned long done, offset, total, count;
         positive deadline;
-        struct wayland_table targets; // TARGETS: the atoms the owner listed
+        struct wayland_table targets;
 };
 
-/*
-        A conversion the window manager answers (it is the owner): the requestor's window and property (0 for a free record), the type
-        written, where the bytes come from (the compositor's text, a descriptor of its own; or a pipe a pump fills from a Wayland
-        source), its size when it is known, how far it is (to start, a piece written and its delete awaited, the next piece to write),
-        and STRING's Latin-1 made a piece at a time.
-*/
 struct compositor_xwm_out
 {
         unsigned int requestor, property, type, selection, target, time;
-        unsigned char which, from, latin1, stage, quiet; // quiet: a part of a MULTIPLE, whose one notify is its own
+        unsigned char which, from, latin1, stage, quiet;
         struct xwm_utf8_cut cut;
         int fd;
         long pump;
-        unsigned long base, offset, size; // base: where the type is in the compositor's copy
+        unsigned long base, offset, size;
         positive deadline;
 };
 
-// A selection's X side: its atom, whether the window manager owns it in X (and from when), the X window that does when one does,
-// whether its ownership is to be looked at again (dirty), and an X copy being read.
-struct compositor_xwm_selection
-{
-        unsigned int atom, owned_time, x_owner;
-        unsigned char owned, dirty;
-        long reading;
-};
+struct compositor_xwm_selection { unsigned int atom, owned_time, x_owner; unsigned char owned, dirty; long reading; };
 
-/*
-        A Wayland drag over an X window, the window manager its XDND source (DRAG AND DROP): the X window it is over (0 for none) and its
-        row, the version its XdndAware says (none read yet, or none: aware_no), whether it was entered, a position waits for its status
-        (waiting) and the pointer moved since (moved), the last place, and the source's action as X's atom.
-*/
 struct compositor_xwm_wdrag
 {
-        unsigned int target, version, place, action;
-        unsigned int proxy; // where its messages go: the X window's XdndProxy when it names one that names itself, else the window
+        unsigned int target, version, place, action, proxy;
         unsigned char live, entered, waiting, moved, dropped, aware_no;
         int row;
 };
 
-/*
-        An X drag over the Wayland windows, the window manager's proxy its target: the X source's window and version, its types (their
-        atoms, whose names are asked for: naming until they have come), whether the Wayland drag of it is begun, dropped or was cancelled
-        under it (until the source's next enter), its action atom and its drop's time, what it was last told (told_*), and the proxy.
-*/
 struct compositor_xwm_xdrag
 {
-        unsigned int source, version, action, time, told_action;
-        unsigned int listed, words; // XdndActionList as the drag's bits (XWM_DND_*), and how many words its XdndActionDescription has
+        unsigned int source, version, action, time, told_action, listed, words;
         unsigned char entered, naming, began, dropped, cancelled, told_accept, proxy_mapped, escaped;
         int proxy_row, proxy_x, proxy_y, proxy_w, proxy_h;
         struct wayland_table types;
@@ -412,54 +210,26 @@ struct compositor_xwm_xdrag
 
 struct compositor_xwm
 {
-        int fd, ready, broken, claimed, composite;  // composite: 1 once the Composite extension has redirected the root (the slot's own connection: fd -1 is a free slot)
-        unsigned int xtest;            // XTEST's major opcode (an X drag's Escape is given to its source through it), 0 without it
-        unsigned int xres;             // X-Resource's major opcode, 0 without it or when its pids are not this compositor's to use
-        int peer_pid;                  // the window manager's peer: the wrapper that started the server (its child is the server), from the credentials
-        long client, client_pid;       // the wayland client that is this X server (its parent is peer_pid), and its pid when found; -1 until it is
-        unsigned int resource_base, resource_mask;
-        int poll_at;                   // where the two polls are in the loop's list, relative to the wayland polls; -1 without a socket
-        unsigned int root, seq, atoms[COMPOSITOR_XWM_ATOMS];
-        unsigned int atoms_seen, refused, errors;
-        long in_len, out_len;
+        int fd, ready, broken, claimed, composite, peer_pid, poll_at, focus_row;
+        unsigned int xtest, xres, resource_base, resource_mask, root, seq, atoms[COMPOSITOR_XWM_ATOMS];
+        unsigned int atoms_seen, refused, errors, last_stack_gen, focus_window;
+        unsigned int pending_at, pending_count, pending_room, xfixes_opcode, xfixes_event, setting, next_requestor;
+        long client, client_pid, in_len, out_len, windows, atoms_indexed, name_bytes;
         positive since;
         unsigned char in[COMPOSITOR_XWM_IN], out[COMPOSITOR_XWM_OUT];
-        struct wayland_table window_table, window_index; // the records, and the index by X id (each bucket a record's slot and one)
+        struct wayland_table window_table, window_index, pending_table;
+        struct wayland_table atom_table, name_table, in_table, out_table, type_table, atom_index;
         struct compositor_xwm_window *window;
-        long windows;                  // records in use
-        struct wayland_table pending_table; // the ring of property requests waited for: pending_room of them, grown by doubling
         struct compositor_xwm_pending *pending;
-        unsigned int pending_at, pending_count, pending_room; // the oldest request waited for, how many are, and the ring's size
-        int focus_row;                 // the row with the keys at the last pass
-        unsigned int last_stack_gen;   // compositor.stack_gen last synced to X11 stacking order
-        unsigned int focus_window;     // and the X window that row was then (0 for none)
-        // The selections (THE SELECTIONS): XFIXES's opcode and first event (0 without it), which selection the window manager is making
-        // the compositor's (its number and one, so its own change is not taken for another's), the next requestor window's number, the
-        // three selections, the atoms and names known, the conversions asked for and answered, and the types of an X copy as a list.
-        unsigned int xfixes_opcode, xfixes_event, setting, next_requestor;
-        struct compositor_xwm_selection sel[3];
-        struct wayland_table atom_table, name_table, in_table, out_table, type_table;
-        struct wayland_table atom_index; // the atoms by their number (each bucket a record's slot and one: compositor_xwm_atom_index)
-        long atoms_indexed;
         struct compositor_xwm_atom *atom;
         struct compositor_xwm_in *ins;
         struct compositor_xwm_out *outs;
-        long name_bytes;
+        struct compositor_xwm_selection sel[3];
         struct compositor_xwm_wdrag wdrag;
         struct compositor_xwm_xdrag xdrag;
-        // A SAVE_TARGETS of the clipboard's X owner, answered once its copy is the compositor's (requestor 0 for none).
-        struct
-        {
-                unsigned int requestor, property, time;
-        } save;
+        struct { unsigned int requestor, property, time; } save;
 };
 
-/*
-        The window manager's connections (THE SLOTS): one per X server, each a whole compositor_xwm (its own window records, selections,
-        drags, input and output queues) and free when its fd is -1. compositor_xwm_at is the slot the code is working on: every
-        function reads it as `compositor_xwm` (the macro below), so a function that serves one server runs on that server's slot.
-        The listening socket and the user the servers may be are the compositor's (compositor_xwm_listen_fd, compositor_xwm_uid).
-*/
 #define COMPOSITOR_XWM_FRESH {.fd = -1, .poll_at = -1, .focus_row = -2, .client = -1, .client_pid = -1, \
                               .sel = {{0, 0, 0, 0, 0, -1}, {0, 0, 0, 0, 0, -1}, {0, 0, 0, 0, 0, -1}}, \
                               .xdrag = {.proxy_row = -1}}
@@ -467,9 +237,8 @@ static const struct compositor_xwm compositor_xwm_fresh = COMPOSITOR_XWM_FRESH;
 static struct compositor_xwm compositor_xwm_slots[COMPOSITOR_XWM_SLOTS] = {[0 ... COMPOSITOR_XWM_SLOTS - 1] = COMPOSITOR_XWM_FRESH};
 static struct compositor_xwm *compositor_xwm_at = &compositor_xwm_slots[0];
 static struct compositor_xwm_steam compositor_xwm_steam;
-static unsigned int compositor_xwm_counted[4]; // the table's xwm_counts: refused connections, refused records, refused MapRequests, closed connections
-static int compositor_xwm_listen_fd = -1, compositor_xwm_listen_at = -1; // the listening socket, and its place in the loop's list
-static int compositor_xwm_uid;                                            // the user the servers may be (the compositor's own, or 1000 under root)
+static unsigned int compositor_xwm_counted[4];
+static int compositor_xwm_listen_fd = -1, compositor_xwm_listen_at = -1, compositor_xwm_uid;
 
 static struct compositor_xwm *compositor_xwm_slot_of_row(long row);
 static struct compositor_xwm *compositor_xwm_first_ready(void);
@@ -478,35 +247,21 @@ static void xwm_drop(struct compositor_xwm *x, const char *why);
 static unsigned int compositor_xwm_id(struct compositor_xwm *x, unsigned int number);
 static void compositor_xwm_atoms_seed(struct compositor_xwm *x);
 static void compositor_xwm_flush(struct compositor_xwm *x);
+static int compositor_xwm_wait(struct compositor_xwm *x, const unsigned char *req, long n, unsigned int window, unsigned int what, unsigned int slot);
 
-#define COMPOSITOR_XWM_SEL_WINDOW 2u                 // the selection window's number (the check window is 1)
-#define COMPOSITOR_XWM_PROXY_WINDOW 3u               // XDND's proxy over the Wayland windows
-#define COMPOSITOR_XWM_TRAY_WINDOW 4u                // _NET_SYSTEM_TRAY_S0 holder window
-#define COMPOSITOR_XWM_FIRST_REQUESTOR 16u           // the requestor windows' numbers start here
-
-/* A line of the compositor's log, from a text that is not a literal. */
 static void compositor_xwm_log(const char *text)
 {
-        unsigned long length = 0;
-
-        while (text[length])
-                length++;
-        log_direct((address_any)text, (positive)length);
+        log_direct((address_any)text, (positive)string_length((string_address)text));
 }
 
-/* ---- the requests: each is encoded by xwm_wire.c, queued for the server, and counted in its sequence ---- */
+/* ---- X11 wire request helpers ---- */
 
-/* Queues one request: its sequence is the count of requests queued, so the server's replies to it carry this number. */
 static int compositor_xwm_queue(struct compositor_xwm *x, const unsigned char *bytes, long count)
 {
-
         if (count <= 0)
                 return -1;
         if (x->out_len + count > COMPOSITOR_XWM_OUT)
-        {
-                x->broken = 1;
-                return -1;
-        }
+                return x->broken = 1, -1;
         memory_copy(x->out + x->out_len, bytes, (positive)count);
         x->out_len += count;
         x->seq = (x->seq + 1) & 0xffffu;
@@ -516,27 +271,21 @@ static int compositor_xwm_queue(struct compositor_xwm *x, const unsigned char *b
 static void compositor_xwm_window_op(struct compositor_xwm *x, unsigned int opcode, unsigned int window)
 {
         unsigned char req[XWM_REQUEST_SHORT];
-        long n = xwm_enc_window_op(req, sizeof req, opcode, window);
-
-        if (n > 0)
-                compositor_xwm_queue(x, req, n);
+        compositor_xwm_queue(x, req, xwm_enc_window_op(req, sizeof req, opcode, window));
 }
 
 static unsigned char compositor_xwm_request_bytes[24 + XWM_PROPERTY_MAX];
 
 static void compositor_xwm_put(struct compositor_xwm *x, unsigned int window, unsigned int property, unsigned int type, unsigned int format, const unsigned char *data, unsigned long length)
 {
-        long n = xwm_enc_change_property(compositor_xwm_request_bytes, sizeof compositor_xwm_request_bytes, XWM_PROP_REPLACE, window, property, type,
-                                         format, data, length);
-
-        if (n > 0)
-                compositor_xwm_queue(x, compositor_xwm_request_bytes, n);
+        compositor_xwm_queue(x, compositor_xwm_request_bytes,
+                             xwm_enc_change_property(compositor_xwm_request_bytes, sizeof compositor_xwm_request_bytes, XWM_PROP_REPLACE,
+                                                     window, property, type, format, data, length));
 }
 
 static void compositor_xwm_put32(struct compositor_xwm *x, unsigned int window, unsigned int property, unsigned int type, const unsigned int *vals, unsigned int count)
 {
         unsigned char data[256];
-
         if ((unsigned long)count * 4 > sizeof data)
                 return;
         for (unsigned int i = 0; i < count; i++)
@@ -547,21 +296,14 @@ static void compositor_xwm_put32(struct compositor_xwm *x, unsigned int window, 
 static void compositor_xwm_send_event(struct compositor_xwm *x, unsigned int dest, int propagate, unsigned int mask, const unsigned char *ev, unsigned long len)
 {
         unsigned char req[64];
-        long n = xwm_enc_send_event(req, sizeof req, propagate, dest, mask, ev, len);
-
-        if (n > 0)
-                compositor_xwm_queue(x, req, n);
+        compositor_xwm_queue(x, req, xwm_enc_send_event(req, sizeof req, propagate, dest, mask, ev, len));
 }
 
 static void compositor_xwm_send_configure(struct compositor_xwm *x, const struct compositor_xwm_window *w, int px, int py, unsigned int width, unsigned int height)
 {
         unsigned char ev[XWM_EVENT_SIZE];
-        long n;
-
-        if (!w || !width || !height)
-                return;
-        n = xwm_enc_configure_notify(ev, sizeof ev, w->id, px, py, width, height, 0, (w->state & COMPOSITOR_XWM_OVERRIDE) != 0);
-        if (n == XWM_EVENT_SIZE)
+        if (w && width && height &&
+            xwm_enc_configure_notify(ev, sizeof ev, w->id, px, py, width, height, 0, (w->state & COMPOSITOR_XWM_OVERRIDE) != 0) == XWM_EVENT_SIZE)
                 compositor_xwm_send_event(x, w->id, 0, XWM_MASK_STRUCTURE_NOTIFY, ev, XWM_EVENT_SIZE);
 }
 
@@ -574,49 +316,56 @@ static void compositor_xwm_active(struct compositor_xwm *x, unsigned int window)
 static void compositor_xwm_focus(struct compositor_xwm *x, unsigned int window)
 {
         unsigned char req[64];
-        long n = xwm_enc_set_input_focus(req, 16, XWM_REVERT_POINTER_ROOT, window, XWM_CURRENT_TIME);
-
-        if (n > 0)
-                compositor_xwm_queue(x, req, n);
+        compositor_xwm_queue(x, req, xwm_enc_set_input_focus(req, 16, XWM_REVERT_POINTER_ROOT, window, XWM_CURRENT_TIME));
         compositor_xwm_active(x, window);
 }
 
 static void compositor_xwm_configure(struct compositor_xwm *x, unsigned int window, const struct xwm_configure *c)
 {
         unsigned char req[64];
-        long n = xwm_enc_configure_window(req, sizeof req, window, c);
-
-        if (n > 0)
-                compositor_xwm_queue(x, req, n);
+        compositor_xwm_queue(x, req, xwm_enc_configure_window(req, sizeof req, window, c));
 }
 
-/* WM_STATE, as ICCCM 4.1.3.1 has the window manager set it when it maps a window: NormalState, with no icon window. */
+static void compositor_xwm_select(struct compositor_xwm *x, unsigned int window, unsigned int mask)
+{
+        unsigned char req[32];
+        compositor_xwm_queue(x, req, xwm_enc_select_events(req, sizeof req, window, mask));
+}
+
+static void xwm_make_win(struct compositor_xwm *x, unsigned int win, int xy, unsigned int cls, unsigned int cw_mask, const unsigned int *vals, unsigned int nvals)
+{
+        unsigned char req[48];
+        compositor_xwm_queue(x, req, xwm_enc_create_window(req, sizeof req, 0, win, x->root, xy, xy, 1, 1, cls, 0));
+        if (cw_mask)
+                compositor_xwm_queue(x, req, xwm_enc_change_window_attributes(req, sizeof req, win, cw_mask, vals, nvals));
+}
+
+static int xwm_wait_prop(struct compositor_xwm *x, unsigned int win, unsigned int prop, unsigned int type, unsigned int len, unsigned int what, unsigned int slot)
+{
+        unsigned char req[32];
+        return compositor_xwm_wait(x, req, xwm_enc_get_property(req, sizeof req, 0, win, prop, type, 0, len), win, what, slot);
+}
+
 static void compositor_xwm_wm_state(struct compositor_xwm *x, unsigned int window)
 {
         unsigned int vals[2] = {COMPOSITOR_XWM_STATE_NORMAL, 0};
-
         compositor_xwm_put32(x, window, x->atoms[COMPOSITOR_XWM_A_WM_STATE], x->atoms[COMPOSITOR_XWM_A_WM_STATE], vals, 2);
 }
 
-/* The window manager's own window, input only, its ownership of WM_S0 (ICCCM 4.3.8), and the EWMH root properties
-   (_NET_SUPPORTING_WM_CHECK and _NET_SUPPORTED) that toolkits check before asking for _NET_WM_MOVERESIZE or fullscreen. */
 static void xwm_claim(struct compositor_xwm *x)
 {
         static const unsigned char wm_name[] = "moonwater";
-        unsigned char req[256];
-        unsigned int vals[48], zero = 0;
-        long n;
-        unsigned int window = x->resource_base | (1u & x->resource_mask), count = 0;
+        unsigned char req[64], ev[XWM_EVENT_SIZE];
+        unsigned int vals[48], zero = 0, count = 0;
+        unsigned int window = x->resource_base | (1u & x->resource_mask);
+        unsigned int sel = compositor_xwm_id(x, COMPOSITOR_XWM_SEL_WINDOW), proxy = compositor_xwm_id(x, COMPOSITOR_XWM_PROXY_WINDOW);
+        unsigned int cw_sel[2] = {1, XWM_MASK_PROPERTY_CHANGE}, ver = XWM_XDND_VERSION;
 
         if (x->claimed)
                 return;
         x->claimed = 1;
-        n = xwm_enc_create_window(req, sizeof req, 0, window, x->root, -1, -1, 1, 1, XWM_CLASS_INPUT_ONLY, 0);
-        if (n > 0)
-                compositor_xwm_queue(x, req, n);
-        n = xwm_enc_set_selection_owner(req, sizeof req, window, x->atoms[COMPOSITOR_XWM_A_WM_S0], XWM_CURRENT_TIME);
-        if (n > 0)
-                compositor_xwm_queue(x, req, n);
+        xwm_make_win(x, window, -1, XWM_CLASS_INPUT_ONLY, 0, 0, 0);
+        compositor_xwm_queue(x, req, xwm_enc_set_selection_owner(req, sizeof req, window, x->atoms[COMPOSITOR_XWM_A_WM_S0], XWM_CURRENT_TIME));
         compositor_xwm_put32(x, window, x->atoms[COMPOSITOR_XWM_A_NET_CHECK], COMPOSITOR_XWM_XA_WINDOW, &window, 1);
         compositor_xwm_put(x, window, x->atoms[COMPOSITOR_XWM_A_NET_NAME], x->atoms[COMPOSITOR_XWM_A_UTF8], XWM_FORMAT_8, wm_name, sizeof wm_name - 1);
         compositor_xwm_put32(x, x->root, x->atoms[COMPOSITOR_XWM_A_NET_CHECK], COMPOSITOR_XWM_XA_WINDOW, &window, 1);
@@ -625,94 +374,54 @@ static void xwm_claim(struct compositor_xwm *x)
                 if (xwm_atom_spec[i].flags & COMPOSITOR_XWM_AF_SUP)
                         vals[count++] = x->atoms[i];
         compositor_xwm_put32(x, x->root, x->atoms[COMPOSITOR_XWM_A_NET_SUPPORTED], COMPOSITOR_XWM_ATOM_TYPE, vals, count);
-        // The selection window (THE SELECTIONS): input only, override-redirect, out of sight, its property changes told; and XDND's proxy,
-        // XdndAware, unmapped until an X drag is over a Wayland window.
-        {
-                unsigned int selection = compositor_xwm_id(x, COMPOSITOR_XWM_SEL_WINDOW), proxy = compositor_xwm_id(x, COMPOSITOR_XWM_PROXY_WINDOW);
-                unsigned int values[2] = {1, XWM_MASK_PROPERTY_CHANGE}, ver = XWM_XDND_VERSION;
-
-                n = xwm_enc_create_window(req, sizeof req, 0, selection, x->root, -1, -1, 1, 1, XWM_CLASS_INPUT_ONLY, 0);
-                if (n > 0)
-                        compositor_xwm_queue(x, req, n);
-                n = xwm_enc_change_window_attributes(req, sizeof req, selection, XWM_CW_OVERRIDE_REDIRECT | XWM_CW_EVENT_MASK, values, 2);
-                if (n > 0)
-                        compositor_xwm_queue(x, req, n);
-                n = xwm_enc_create_window(req, sizeof req, 0, proxy, x->root, 0, 0, 1, 1, XWM_CLASS_INPUT_ONLY, 0);
-                if (n > 0)
-                        compositor_xwm_queue(x, req, n);
-                n = xwm_enc_change_window_attributes(req, sizeof req, proxy, XWM_CW_OVERRIDE_REDIRECT, values, 1);
-                if (n > 0)
-                        compositor_xwm_queue(x, req, n);
-                compositor_xwm_put32(x, proxy, x->atoms[COMPOSITOR_XWM_A_XDND_AWARE], COMPOSITOR_XWM_ATOM_TYPE, &ver, 1);
-                x->sel[0].atom = x->atoms[COMPOSITOR_XWM_A_CLIPBOARD];
-                x->sel[1].atom = COMPOSITOR_XWM_XA_PRIMARY;
-                x->sel[2].atom = x->atoms[COMPOSITOR_XWM_A_XDND_SELECTION];
-                compositor_xwm_atoms_seed(x);
-        }
-        // System tray (_NET_SYSTEM_TRAY_S0): absorb Wine/X11 tray icons into Moonwater's taskbar instead of letting
-        // Wine spawn a floating white tray window.
+        xwm_make_win(x, sel, -1, XWM_CLASS_INPUT_ONLY, XWM_CW_OVERRIDE_REDIRECT | XWM_CW_EVENT_MASK, cw_sel, 2);
+        xwm_make_win(x, proxy, 0, XWM_CLASS_INPUT_ONLY, XWM_CW_OVERRIDE_REDIRECT, cw_sel, 1);
+        compositor_xwm_put32(x, proxy, x->atoms[COMPOSITOR_XWM_A_XDND_AWARE], COMPOSITOR_XWM_ATOM_TYPE, &ver, 1);
+        x->sel[0].atom = x->atoms[COMPOSITOR_XWM_A_CLIPBOARD];
+        x->sel[1].atom = COMPOSITOR_XWM_XA_PRIMARY;
+        x->sel[2].atom = x->atoms[COMPOSITOR_XWM_A_XDND_SELECTION];
+        compositor_xwm_atoms_seed(x);
         if (x->atoms[COMPOSITOR_XWM_A_TRAY_S0])
         {
                 unsigned int tray = compositor_xwm_id(x, COMPOSITOR_XWM_TRAY_WINDOW);
-                unsigned int values[2] = {1, XWM_MASK_SUBSTRUCTURE_NOTIFY | XWM_MASK_STRUCTURE_NOTIFY};
+                unsigned int cw_tray[2] = {1, XWM_MASK_SUBSTRUCTURE_NOTIFY | XWM_MASK_STRUCTURE_NOTIFY};
+                unsigned int mdata[5] = {XWM_CURRENT_TIME, x->atoms[COMPOSITOR_XWM_A_TRAY_S0], tray, 0, 0};
 
-                n = xwm_enc_create_window(req, sizeof req, 0, tray, x->root, -1, -1, 1, 1, XWM_CLASS_INPUT_OUTPUT, 0);
-                if (n > 0)
-                        compositor_xwm_queue(x, req, n);
-                n = xwm_enc_change_window_attributes(req, sizeof req, tray, XWM_CW_OVERRIDE_REDIRECT | XWM_CW_EVENT_MASK, values, 2);
-                if (n > 0)
-                        compositor_xwm_queue(x, req, n);
+                xwm_make_win(x, tray, -1, XWM_CLASS_INPUT_OUTPUT, XWM_CW_OVERRIDE_REDIRECT | XWM_CW_EVENT_MASK, cw_tray, 2);
                 if (x->atoms[COMPOSITOR_XWM_A_TRAY_ORIENT])
                         compositor_xwm_put32(x, tray, x->atoms[COMPOSITOR_XWM_A_TRAY_ORIENT], COMPOSITOR_XWM_ALLOW_TYPE, &zero, 1);
-                n = xwm_enc_set_selection_owner(req, sizeof req, tray, x->atoms[COMPOSITOR_XWM_A_TRAY_S0], XWM_CURRENT_TIME);
-                if (n > 0)
-                        compositor_xwm_queue(x, req, n);
-                if (x->atoms[COMPOSITOR_XWM_A_X_MANAGER])
-                {
-                        unsigned char ev[XWM_EVENT_SIZE];
-                        unsigned int mdata[5] = {XWM_CURRENT_TIME, x->atoms[COMPOSITOR_XWM_A_TRAY_S0], tray, 0, 0};
-
-                        if (xwm_enc_client_message(ev, sizeof ev, x->root, x->atoms[COMPOSITOR_XWM_A_X_MANAGER], mdata, 5) == XWM_EVENT_SIZE)
-                                compositor_xwm_send_event(x, x->root, 0, XWM_MASK_STRUCTURE_NOTIFY, ev, XWM_EVENT_SIZE);
-                }
+                compositor_xwm_queue(x, req, xwm_enc_set_selection_owner(req, sizeof req, tray, x->atoms[COMPOSITOR_XWM_A_TRAY_S0], XWM_CURRENT_TIME));
+                if (x->atoms[COMPOSITOR_XWM_A_X_MANAGER] &&
+                    xwm_enc_client_message(ev, sizeof ev, x->root, x->atoms[COMPOSITOR_XWM_A_X_MANAGER], mdata, 5) == XWM_EVENT_SIZE)
+                        compositor_xwm_send_event(x, x->root, 0, XWM_MASK_STRUCTURE_NOTIFY, ev, XWM_EVENT_SIZE);
         }
-        // _NET_WORKAREA: usable desktop room excluding the taskbar so Qt/GTK/Wine/Aseprite know the non-panel area.
         if (x->atoms[COMPOSITOR_XWM_A_WORKAREA])
         {
-                unsigned int scount = 0;
+                unsigned int scount = 0, wa[4];
                 const int (*screens)[4] = compositor_screens(&scount);
                 int room[4] = {0, 0, compositor.width > 0 ? compositor.width : 1920, compositor.height > 0 ? compositor.height : 1080};
-                unsigned int wa[4];
 
                 if (scount > 0)
                         compositor_room(screens[0], room);
-                wa[0] = (unsigned int)(room[0] > 0 ? room[0] : 0);
-                wa[1] = (unsigned int)(room[1] > 0 ? room[1] : 0);
-                wa[2] = (unsigned int)(room[2] > 0 ? room[2] : 1);
-                wa[3] = (unsigned int)(room[3] > 0 ? room[3] : 1);
+                wa[0] = (unsigned int)(room[0] > 0 ? room[0] : 0), wa[1] = (unsigned int)(room[1] > 0 ? room[1] : 0);
+                wa[2] = (unsigned int)(room[2] > 0 ? room[2] : 1), wa[3] = (unsigned int)(room[3] > 0 ? room[3] : 1);
                 compositor_xwm_put32(x, x->root, x->atoms[COMPOSITOR_XWM_A_WORKAREA], COMPOSITOR_XWM_ALLOW_TYPE, wa, 4);
         }
 }
 
-/* _NET_FRAME_EXTENTS: Moonwater draws no server-side window borders/titlebars, so frame extents are 0 on all sides.
-   Advertising and setting this prevents Wine/Qt/GTK modals from inflating window dimensions with phantom chrome. */
 static void compositor_xwm_frame_extents(struct compositor_xwm *x, unsigned int window)
 {
         static const unsigned int zeroes[4] = {0, 0, 0, 0};
-
         if (x->atoms[COMPOSITOR_XWM_A_FRAME_EXTENTS])
                 compositor_xwm_put32(x, window, x->atoms[COMPOSITOR_XWM_A_FRAME_EXTENTS], COMPOSITOR_XWM_ALLOW_TYPE, zeroes, 4);
 }
 
-/* _XWAYLAND_ALLOW_COMMITS: the window manager's word that Xwayland may commit the window's surface, set once it manages the window. */
 static void compositor_xwm_allow_commits(struct compositor_xwm *x, unsigned int window)
 {
         unsigned int one = 1;
-
         compositor_xwm_put32(x, window, x->atoms[COMPOSITOR_XWM_A_ALLOW_COMMITS], COMPOSITOR_XWM_ALLOW_TYPE, &one, 1);
 }
 
-/* Canonical _NET_WM_STATE atom <-> window state bit map. */
 static const struct { unsigned short atom_idx; unsigned int bit; } xwm_net_state_map[4] = {
         {COMPOSITOR_XWM_A_FULLSCREEN, COMPOSITOR_XWM_FULLSCREEN},
         {COMPOSITOR_XWM_A_MAX_VERT, COMPOSITOR_XWM_MAX_VERT},
@@ -723,14 +432,10 @@ static const struct { unsigned short atom_idx; unsigned int bit; } xwm_net_state
 static unsigned int xwm_net_state_bits(const struct compositor_xwm *x, unsigned int a, unsigned int b)
 {
         unsigned int bits = 0;
-
         for (unsigned int i = 0; i < 4; i++)
-        {
-                unsigned int atom = x->atoms[xwm_net_state_map[i].atom_idx];
-
-                if (atom && (a == atom || b == atom))
+                if (x->atoms[xwm_net_state_map[i].atom_idx] &&
+                    (a == x->atoms[xwm_net_state_map[i].atom_idx] || b == x->atoms[xwm_net_state_map[i].atom_idx]))
                         bits |= xwm_net_state_map[i].bit;
-        }
         return bits;
 }
 
@@ -739,74 +444,43 @@ static unsigned int xwm_net_state_apply(unsigned int action, unsigned int cur, u
         return action == COMPOSITOR_XWM_NET_ADD ? (cur | mask) : action == COMPOSITOR_XWM_NET_REMOVE ? (cur & ~mask) : (cur ^ mask);
 }
 
-/* The window's _NET_WM_STATE: fullscreen, maximized and/or above atoms. */
 static void compositor_xwm_net_state(struct compositor_xwm *x, unsigned int window, int state)
 {
         unsigned int vals[4], count = 0;
-
         for (unsigned int i = 0; i < 4; i++)
                 if (((unsigned int)state & xwm_net_state_map[i].bit) && x->atoms[xwm_net_state_map[i].atom_idx])
                         vals[count++] = x->atoms[xwm_net_state_map[i].atom_idx];
         compositor_xwm_put32(x, window, x->atoms[COMPOSITOR_XWM_A_NET_STATE], COMPOSITOR_XWM_ATOM_TYPE, vals, count);
 }
 
-/* A ClientMessage of WM_PROTOCOLS sent to the window: WM_DELETE_WINDOW or WM_TAKE_FOCUS. */
 static void compositor_xwm_protocol(struct compositor_xwm *x, unsigned int window, unsigned int atom)
 {
         unsigned int data[2] = {atom, XWM_CURRENT_TIME};
         unsigned char event[XWM_EVENT_SIZE];
-
         if (xwm_enc_client_message(event, sizeof event, window, x->atoms[COMPOSITOR_XWM_A_PROTOCOLS], data, 2) == XWM_EVENT_SIZE)
                 compositor_xwm_send_event(x, window, 0, 0, event, XWM_EVENT_SIZE);
 }
 
-static int compositor_xwm_wait(struct compositor_xwm *x, const unsigned char *req, long n, unsigned int window, unsigned int what, unsigned int slot);
-
-static void compositor_xwm_intern(struct compositor_xwm *x, unsigned int at)
-{
-        unsigned char req[64];
-        const char *name = xwm_atom_spec[at].name;
-        unsigned long length = (unsigned long)string_length((string_address)name);
-        long n = xwm_enc_intern_atom(req, sizeof req, 0, (const unsigned char *)name, length);
-
-        if (n > 0)
-                compositor_xwm_queue(x, req, n);
-}
-
-/* The setup and the first requests, once the server's setup reply is read: the root's events, atoms, and extensions. */
 static void compositor_xwm_start_session(struct compositor_xwm *x)
 {
         unsigned char req[64];
-        long n = xwm_enc_select_events(req, sizeof req, x->root, XWM_MASK_WM_ROOT);
-
-        if (n > 0)
-                compositor_xwm_queue(x, req, n);
+        compositor_xwm_select(x, x->root, XWM_MASK_WM_ROOT);
         for (unsigned int at = 0; at < COMPOSITOR_XWM_ATOMS; at++)
-                compositor_xwm_intern(x, at);
+                compositor_xwm_queue(x, req, xwm_enc_intern_atom(req, sizeof req, 0, (const unsigned char *)xwm_atom_spec[at].name,
+                                                                 (unsigned long)string_length((string_address)xwm_atom_spec[at].name)));
         for (unsigned int i = 0; i < 4; i++)
-        {
-                n = xwm_enc_query_extension(req, sizeof req, (const unsigned char *)xwm_ext_spec[i].name, xwm_ext_spec[i].len);
-                compositor_xwm_wait(x, req, n, 0, COMPOSITOR_XWM_PROP_EXT, i);
-        }
+                compositor_xwm_wait(x, req, xwm_enc_query_extension(req, sizeof req, (const unsigned char *)xwm_ext_spec[i].name, xwm_ext_spec[i].len),
+                                    0, COMPOSITOR_XWM_PROP_EXT, i);
 }
 
-/*
-        Where X's root is in the compositor's space. Xwayland's windows are drawn a buffer pixel a pixel, so the X root is in the
-        compositor's pixels (Xwayland is told its outputs so, wayland_xwayland_client: each screen at its place in pixels and its size in
-        pixels, whatever its scale); only its origin is another, the top left of the screens as laid out, since an X coordinate is
-        no less than 0 where a screen may be laid out left of or above the compositor's origin. X places are compositor places less
-        the origin, and the other way.
-*/
 static void compositor_xwm_origin(int *ox, int *oy)
 {
         int count = compositor_output_count();
-
         *ox = *oy = 0;
         for (int at = 0; at < count; at++)
         {
-                int x, y, width, height;
-
-                compositor_output_rect(at, &x, &y, &width, &height);
+                int x, y, w, h;
+                compositor_output_rect(at, &x, &y, &w, &h);
                 if (!at || x < *ox)
                         *ox = x;
                 if (!at || y < *oy)
@@ -814,46 +488,24 @@ static void compositor_xwm_origin(int *ox, int *oy)
         }
 }
 
-// The X place of a compositor place on an axis (vertical: y), and the compositor place of an X one.
-static int compositor_xwm_to_x(int place, int vertical)
-{
-        int ox, oy;
+static int compositor_xwm_to_x(int place, int vertical) { int ox, oy; compositor_xwm_origin(&ox, &oy); return place - (vertical ? oy : ox); }
+static int compositor_xwm_from_x(int place, int vertical) { int ox, oy; compositor_xwm_origin(&ox, &oy); return place + (vertical ? oy : ox); }
 
-        compositor_xwm_origin(&ox, &oy);
-        return place - (vertical ? oy : ox);
-}
-
-static int compositor_xwm_from_x(int place, int vertical)
-{
-        int ox, oy;
-
-        compositor_xwm_origin(&ox, &oy);
-        return place + (vertical ? oy : ox);
-}
-
-/*
-        A window's owner, into its row: the row's pid becomes the program's (the shim made the row with the server's, the client of
-        the shim). Only a pid that is a process here and none of the desktop's own: not 1, not this compositor, not the server.
-*/
 static void compositor_xwm_owned(struct compositor_xwm_window *w)
 {
         struct windows *table = compositor.table;
         unsigned int now;
-
         if (!w->owner || w->row < 0 || !table || w->row >= (int)compositor_rows_in_use)
                 return;
         now = __atomic_load_n(&table->pid[w->row], __ATOMIC_ACQUIRE);
-        if (!now || now == WINDOWS_TAKING || now == w->owner)
-                return;
-        __atomic_compare_exchange_n(&table->pid[w->row], &now, w->owner, 0, __ATOMIC_ACQ_REL, __ATOMIC_RELAXED);
+        if (now && now != WINDOWS_TAKING && now != w->owner)
+                __atomic_compare_exchange_n(&table->pid[w->row], &now, w->owner, 0, __ATOMIC_ACQ_REL, __ATOMIC_RELAXED);
 }
 
-/* Unified QueryExtension reply handler for Composite, X-Resource (with pid-ns check), XFIXES, and XTEST. */
 static void xwm_ext_reply(struct compositor_xwm *x, const unsigned char *in, long size, unsigned int ext)
 {
         struct xwm_extension_reply r;
         unsigned char req[32];
-        long n;
 
         if (xwm_parse_extension_reply(in, (unsigned long)size, &r) != XWM_OK)
         {
@@ -864,73 +516,62 @@ static void xwm_ext_reply(struct compositor_xwm *x, const unsigned char *in, lon
         if (!r.present || r.major_opcode < XWM_EXT_MAJOR_FIRST)
         {
                 if (ext == XWM_EXT_COMPOSITE)
-                        compositor_xwm_log("xwm: no Composite extension: the X windows are not made surfaces\n");
+                        compositor_xwm_log("xwm: no Composite extension\n");
                 else if (ext == XWM_EXT_XFIXES)
-                        compositor_xwm_log("xwm: no XFIXES extension: nothing crosses between X and Wayland\n");
+                        compositor_xwm_log("xwm: no XFIXES extension\n");
                 return;
         }
         if (ext == XWM_EXT_COMPOSITE)
         {
-                if ((n = xwm_enc_composite_query_version(req, sizeof req, r.major_opcode, 0, 4)) > 0)
-                        compositor_xwm_queue(x, req, n);
-                if ((n = xwm_enc_composite_redirect_subwindows(req, sizeof req, r.major_opcode, x->root, XWM_REDIRECT_MANUAL)) > 0)
-                        compositor_xwm_queue(x, req, n);
+                compositor_xwm_queue(x, req, xwm_enc_composite_query_version(req, sizeof req, r.major_opcode, 0, 4));
+                compositor_xwm_queue(x, req, xwm_enc_composite_redirect_subwindows(req, sizeof req, r.major_opcode, x->root, XWM_REDIRECT_MANUAL));
                 x->composite = 1;
-                compositor_xwm_log("xwm: the root's subwindows are redirected (Composite, Manual)\n");
         }
         else if (ext == XWM_EXT_XRES)
         {
                 char mine[64], theirs[64], path[48] = "/proc/";
                 long a, b;
-
                 x->xres = 0;
                 if (x->peer_pid <= 1)
                         return;
                 positive_into_string((p8 *)path + 6, (positive)x->peer_pid);
                 string_append_bounded((p8 *)path, "/ns/pid", sizeof path);
-                a = compositor_call(syscall(readlinkat), (positive)AT_FDCWD, (positive) "/proc/self/ns/pid", (positive)mine, sizeof mine - 1, 0, 0);
+                a = compositor_call(syscall(readlinkat), (positive)AT_FDCWD, (positive)"/proc/self/ns/pid", (positive)mine, sizeof mine - 1, 0, 0);
                 b = compositor_call(syscall(readlinkat), (positive)AT_FDCWD, (positive)path, (positive)theirs, sizeof theirs - 1, 0, 0);
                 if (a <= 0 || a != b || memory_compare(mine, theirs, (positive)a))
-                {
-                        compositor_xwm_log("xwm: the X server is in another pid namespace: its windows' rows keep its pid\n");
                         return;
-                }
-                if ((n = xwm_enc_xres_query_version(req, sizeof req, r.major_opcode, 1, 2)) > 0)
-                        compositor_xwm_queue(x, req, n);
+                compositor_xwm_queue(x, req, xwm_enc_xres_query_version(req, sizeof req, r.major_opcode, 1, 2));
                 x->xres = r.major_opcode;
         }
         else if (ext == XWM_EXT_XFIXES)
         {
                 if (r.first_event <= XWM_EVENT_LAST)
-                {
-                        compositor_xwm_log("xwm: no XFIXES extension: nothing crosses between X and Wayland\n");
                         return;
-                }
                 x->xfixes_opcode = r.major_opcode, x->xfixes_event = r.first_event;
-                if ((n = xwm_enc_xfixes_query_version(req, sizeof req, r.major_opcode, 5, 0)) > 0)
-                        compositor_xwm_queue(x, req, n);
+                compositor_xwm_queue(x, req, xwm_enc_xfixes_query_version(req, sizeof req, r.major_opcode, 5, 0));
                 for (int which = 0; which < 3; which++)
                 {
-                        if ((n = xwm_enc_xfixes_select_selection_input(req, sizeof req, r.major_opcode,
-                                                                       compositor_xwm_id(x, COMPOSITOR_XWM_SEL_WINDOW),
-                                                                       x->sel[which].atom, XWM_XFIXES_SELECTION_MASK)) > 0)
-                                compositor_xwm_queue(x, req, n);
+                        compositor_xwm_queue(x, req, xwm_enc_xfixes_select_selection_input(req, sizeof req, r.major_opcode,
+                                                                                           compositor_xwm_id(x, COMPOSITOR_XWM_SEL_WINDOW),
+                                                                                           x->sel[which].atom, XWM_XFIXES_SELECTION_MASK));
                         x->sel[which].dirty = which < 2;
                 }
-                if ((n = xwm_enc_set_selection_owner(req, sizeof req, compositor_xwm_id(x, COMPOSITOR_XWM_SEL_WINDOW),
-                                                     x->atoms[COMPOSITOR_XWM_A_MANAGER], XWM_CURRENT_TIME)) > 0)
-                        compositor_xwm_queue(x, req, n);
-                compositor_xwm_log("xwm: the clipboard and drag and drop cross between X and Wayland (XFIXES)\n");
+                compositor_xwm_queue(x, req, xwm_enc_set_selection_owner(req, sizeof req, compositor_xwm_id(x, COMPOSITOR_XWM_SEL_WINDOW),
+                                                                         x->atoms[COMPOSITOR_XWM_A_MANAGER], XWM_CURRENT_TIME));
         }
         else if (ext == XWM_EXT_XTEST)
                 x->xtest = r.major_opcode;
 }
 
-/* ---- the properties: a request, and the table that says whose reply it is ---- */
+/* ---- properties, tray, and window table ---- */
 
-/* GetProperty for a window's property (the first 128 bytes of it), the reply to be found by its sequence. The replies come back in
-   the order of the requests, so the table is a queue: a reply or an error to the oldest one asked is its answer. 0 when the request
-   is queued and its reply waited for, and -1 when it is not (nothing will answer it, so nothing is to wait for it). */
+static long xwm_tbl_take(struct wayland_table *t, unsigned long unit)
+{
+        wayland_tables_host(&compositor_wl_host);
+        t->unit = unit;
+        return wayland_table_take(t);
+}
+
 static int compositor_xwm_pending_grow(struct compositor_xwm *x)
 {
         unsigned int room = x->pending_room ? 2 * x->pending_room : 512;
@@ -944,64 +585,40 @@ static int compositor_xwm_pending_grow(struct compositor_xwm *x)
         for (unsigned int k = 0; k < x->pending_count; k++)
                 to[k] = x->pending[(x->pending_at + k) % x->pending_room];
         wayland_table_drop(&x->pending_table);
-        x->pending_table = grown;
-        x->pending = to;
-        x->pending_at = 0;
-        x->pending_room = room;
+        x->pending_table = grown, x->pending = to, x->pending_at = 0, x->pending_room = room;
         return 1;
 }
 
-/* A request whose reply is waited for, queued and put in the ring: 0, or -1 when it is not (nothing waits for it then). */
 static int compositor_xwm_wait(struct compositor_xwm *x, const unsigned char *req, long n, unsigned int window, unsigned int what, unsigned int slot)
 {
         struct compositor_xwm_pending *p;
 
         if (n <= 0 || compositor_xwm_queue(x, req, n) != 0)
                 return -1;
-        // A ring that is full doubles: the requests waited for are laid in order at the start of a new one. Only the memory not being
-        // there closes the connection (a reply that is forgotten leaves its window without the word it waits for, so it is never shown).
         if (x->pending_count == x->pending_room && !compositor_xwm_pending_grow(x))
-        {
-                x->broken = 1;
-                return -1;
-        }
-        p = &x->pending[(x->pending_at + x->pending_count) % x->pending_room];
-        p->seq = x->seq;
-        p->window = window;
-        p->what = what;
-        p->slot = slot;
-        x->pending_count++;
+                return x->broken = 1, -1;
+        p = &x->pending[(x->pending_at + x->pending_count++) % x->pending_room];
+        *p = (struct compositor_xwm_pending){x->seq, window, what, slot};
         return 0;
 }
 
 static int compositor_xwm_ask(struct compositor_xwm *x, unsigned int window, unsigned int what, unsigned int property, unsigned int type)
 {
         unsigned char req[32];
-        long n = xwm_enc_get_property(req, sizeof req, 0, window, property, type, 0,
-                                      what == COMPOSITOR_XWM_PROP_ICON ? (XWM_PROPERTY_MAX / 4) : 32);
-
-        return compositor_xwm_wait(x, req, n, window, what, 0);
+        return compositor_xwm_wait(x, req, xwm_enc_get_property(req, sizeof req, 0, window, property, type, 0,
+                                                                what == COMPOSITOR_XWM_PROP_ICON ? (XWM_PROPERTY_MAX / 4) : 32),
+                                   window, what, 0);
 }
 
 static void compositor_xwm_ask_owner(struct compositor_xwm *x, unsigned int window)
 {
         unsigned char req[16];
-
         if (x->xres)
                 compositor_xwm_wait(x, req, xwm_enc_xres_client_pid(req, sizeof req, x->xres, window), window, COMPOSITOR_XWM_PROP_OWNER, 0);
 }
 
-/* Unified property-fetch / PropertyNotify / error table (PROP_TYPE is last so its reply marks PROPS_READ). */
-#define XWM_PF_MAP 1u
-#define XWM_PF_PROMOTE 2u
-#define XWM_PF_NOTIFY 4u
-#define XWM_PF_TRAY 8u
-static const struct
-{
-        unsigned char what, flags;
-        signed short atom; // >= 0: index into x->atoms[]; < 0: predefined XA_* (-atom)
-        unsigned int type, err_bit;
-} xwm_prop_spec[] = {
+enum { XWM_PF_MAP = 1u, XWM_PF_PROMOTE = 2u, XWM_PF_NOTIFY = 4u, XWM_PF_TRAY = 8u };
+static const struct { unsigned char what, flags; signed short atom; unsigned int type, err_bit; } xwm_prop_spec[] = {
         {COMPOSITOR_XWM_PROP_PROTOCOLS, XWM_PF_MAP | XWM_PF_PROMOTE | XWM_PF_NOTIFY, COMPOSITOR_XWM_A_PROTOCOLS, COMPOSITOR_XWM_ATOM_TYPE, COMPOSITOR_XWM_PROTO_KNOWN},
         {COMPOSITOR_XWM_PROP_TRANSIENT, XWM_PF_MAP, -COMPOSITOR_XWM_XA_WM_TRANSIENT_FOR, COMPOSITOR_XWM_XA_WINDOW, 0},
         {COMPOSITOR_XWM_PROP_WM_HINTS, XWM_PF_MAP | XWM_PF_PROMOTE | XWM_PF_NOTIFY, -COMPOSITOR_XWM_XA_WM_HINTS, 0, 0},
@@ -1037,13 +654,7 @@ static void xwm_notify_prop(struct compositor_xwm *x, struct compositor_xwm_wind
                 }
 }
 
-/* The oldest request waited for has been answered (or refused): it is no longer waited for. */
-static void compositor_xwm_pending_done(struct compositor_xwm *x)
-{
-
-        x->pending_at = (x->pending_at + 1) % x->pending_room;
-        x->pending_count--;
-}
+static void compositor_xwm_pending_done(struct compositor_xwm *x) { x->pending_at = (x->pending_at + 1) % x->pending_room; x->pending_count--; }
 
 static struct compositor_xwm_window *xwm_find(struct compositor_xwm *x, unsigned int id, int add);
 static int compositor_xwm_covers(const struct compositor_xwm_window *w);
@@ -1052,31 +663,18 @@ static void compositor_xwm_app(struct compositor_xwm_window *w);
 
 static void xwm_ask_title(struct compositor_xwm *x, struct compositor_xwm_window *w)
 {
-
-        // A title that changes in a loop is asked of once at a time: what changes while the replies are awaited is asked of again.
         if (w->asking)
-        {
                 w->state |= COMPOSITOR_XWM_TITLE_AGAIN;
-                return;
-        }
-        // The title is _NET_WM_NAME's when it has one, and WM_NAME's when it has not: WM_NAME is asked of only then (its reply is the
-        // second of the two, and it is counted in asking until it comes). A request that could not be queued is not waited for: counted,
-        // no reply ever took it off, and the window's title was never asked of again.
-        w->asking = compositor_xwm_ask(x, w->id, COMPOSITOR_XWM_PROP_NET_NAME, x->atoms[COMPOSITOR_XWM_A_NET_NAME], x->atoms[COMPOSITOR_XWM_A_UTF8]) == 0;
+        else
+                w->asking = compositor_xwm_ask(x, w->id, COMPOSITOR_XWM_PROP_NET_NAME, x->atoms[COMPOSITOR_XWM_A_NET_NAME], x->atoms[COMPOSITOR_XWM_A_UTF8]) == 0;
 }
 
-/* One of a window's title requests has been answered, or refused: when the last is, a title that changed meanwhile is asked of. */
 static void compositor_xwm_title_done(struct compositor_xwm *x, struct compositor_xwm_window *w)
 {
         if (w->asking && --w->asking == 0 && (w->state & COMPOSITOR_XWM_TITLE_AGAIN))
-        {
-                w->state &= ~COMPOSITOR_XWM_TITLE_AGAIN;
-                xwm_ask_title(x, w);
-        }
+                w->state &= ~COMPOSITOR_XWM_TITLE_AGAIN, xwm_ask_title(x, w);
 }
 
-/* A title's bytes as plain text, cut to what the record takes: control bytes become spaces, and a byte that is no valid UTF-8 (or any
-   byte over 0x7f of a Latin-1 string) becomes a question mark. Answers the length. */
 static unsigned int compositor_xwm_text(char *to, const unsigned char *from, unsigned long count, int latin1)
 {
         unsigned int length = 0;
@@ -1085,47 +683,25 @@ static unsigned int compositor_xwm_text(char *to, const unsigned char *from, uns
         {
                 unsigned char c = from[at];
 
-                if (c < 0x20 || c == 0x7f)
+                if (c < 0x80 || latin1)
                 {
-                        to[length++] = ' ';
+                        to[length++] = c < 0x20 || c == 0x7f ? ' ' : c < 0x80 ? (char)c : '?';
                         at++;
-                        continue;
                 }
-                if (c < 0x80)
-                {
-                        to[length++] = (char)c;
-                        at++;
-                        continue;
-                }
-                if (latin1)
-                {
-                        to[length++] = '?';
-                        at++;
-                        continue;
-                }
+                else
                 {
                         memory_utf8_state state = {0};
                         unsigned long start = at;
                         b32 said = 0;
 
-                        while (at < count)
-                        {
-                                said = memory_utf8_feed(&state, from[at]);
-                                if (said != 0)
-                                        break;
+                        while (at < count && !(said = memory_utf8_feed(&state, from[at])))
                                 at++;
-                        }
                         if (said > 0)
-                        {
-                                at++;
-                                for (unsigned long k = start; k < at; k++)
+                                for (unsigned long k = start; k <= at; k++)
                                         to[length++] = (char)from[k];
-                        }
                         else
-                        {
                                 to[length++] = '?';
-                                at = start + 1;
-                        }
+                        at = said > 0 ? at + 1 : start + 1;
                 }
         }
         to[length] = 0;
@@ -1136,18 +712,12 @@ static void compositor_xwm_tray_click_cb(void *owner, unsigned int icon_win, int
 {
         struct compositor_xwm *x = (struct compositor_xwm *)owner;
         unsigned char ev[XWM_EVENT_SIZE];
-        long len;
 
         if (!x || x->fd < 0)
                 return;
-        len = xwm_enc_input_event(ev, sizeof ev, XWM_EVENT_BUTTON_PRESS, (unsigned int)button, XWM_CURRENT_TIME,
-                                  x->root, icon_win, 12, 12, 0);
-        if (len == XWM_EVENT_SIZE)
-                compositor_xwm_send_event(x, icon_win, 0, 0, ev, XWM_EVENT_SIZE);
-        len = xwm_enc_input_event(ev, sizeof ev, XWM_EVENT_BUTTON_RELEASE, (unsigned int)button, XWM_CURRENT_TIME,
-                                  x->root, icon_win, 12, 12, 0);
-        if (len == XWM_EVENT_SIZE)
-                compositor_xwm_send_event(x, icon_win, 0, 0, ev, XWM_EVENT_SIZE);
+        for (unsigned int t = XWM_EVENT_BUTTON_PRESS; t <= XWM_EVENT_BUTTON_RELEASE; t++)
+                if (xwm_enc_input_event(ev, sizeof ev, t, (unsigned int)button, XWM_CURRENT_TIME, x->root, icon_win, 12, 12, 0) == XWM_EVENT_SIZE)
+                        compositor_xwm_send_event(x, icon_win, 0, 0, ev, XWM_EVENT_SIZE);
         compositor_xwm_flush(x);
 }
 
@@ -1155,9 +725,10 @@ static void compositor_xwm_tray_dock(struct compositor_xwm *x, unsigned int icon
 {
         struct compositor_xwm_window *w;
         int slot = -1;
-        unsigned char req[128];
-        unsigned int tray = compositor_xwm_id(x, COMPOSITOR_XWM_TRAY_WINDOW);
-        long n;
+        unsigned char req[32], ev[XWM_EVENT_SIZE];
+        unsigned int tray = compositor_xwm_id(x, COMPOSITOR_XWM_TRAY_WINDOW), info[2] = {0, 1};
+        struct xwm_configure c = {.mask = XWM_CONFIGURE_X | XWM_CONFIGURE_Y | XWM_CONFIGURE_WIDTH | XWM_CONFIGURE_HEIGHT,
+                                  .width = TASKBAR_TRAY_ITEM_PX, .height = TASKBAR_TRAY_ITEM_PX};
 
         if (!icon_win || !x || !x->claimed)
                 return;
@@ -1169,40 +740,23 @@ static void compositor_xwm_tray_dock(struct compositor_xwm *x, unsigned int icon
         if (slot < 0)
                 return;
         memory_zero(&compositor.tray[slot], sizeof compositor.tray[slot]);
-        compositor.tray[slot].used = 1;
-        compositor.tray[slot].owner = x;
-        compositor.tray[slot].id = icon_win;
+        compositor.tray[slot].used = 1, compositor.tray[slot].owner = x, compositor.tray[slot].id = icon_win;
         compositor.tray[slot].click = compositor_xwm_tray_click_cb;
-        compositor.tray_gen++;
-        compositor_tabs_changed();
-        w = xwm_find(x, icon_win, 1);
-        if (w)
+        compositor.tray_gen++, compositor_tabs_changed();
+        if ((w = xwm_find(x, icon_win, 1)))
                 w->state |= COMPOSITOR_XWM_TRAY_ICON;
-        n = xwm_enc_select_events(req, sizeof req, icon_win, XWM_MASK_PROPERTY_CHANGE | XWM_MASK_STRUCTURE_NOTIFY);
-        if (n > 0)
-                compositor_xwm_queue(x, req, n);
-        n = xwm_enc_reparent_window(req, sizeof req, icon_win, tray, 0, 0);
-        if (n > 0)
-                compositor_xwm_queue(x, req, n);
-        {
-                struct xwm_configure c = {.mask = XWM_CONFIGURE_X | XWM_CONFIGURE_Y | XWM_CONFIGURE_WIDTH | XWM_CONFIGURE_HEIGHT,
-                                          .x = 0, .y = 0, .width = TASKBAR_TRAY_ITEM_PX, .height = TASKBAR_TRAY_ITEM_PX};
-                compositor_xwm_configure(x, icon_win, &c);
-        }
+        compositor_xwm_select(x, icon_win, XWM_MASK_PROPERTY_CHANGE | XWM_MASK_STRUCTURE_NOTIFY);
+        compositor_xwm_queue(x, req, xwm_enc_reparent_window(req, sizeof req, icon_win, tray, 0, 0));
+        compositor_xwm_configure(x, icon_win, &c);
         if (x->atoms[COMPOSITOR_XWM_A_XEMBED])
         {
-                unsigned char ev[XWM_EVENT_SIZE];
                 unsigned int xembed[5] = {XWM_CURRENT_TIME, 0, tray, 0, 0};
 
                 if (xwm_enc_client_message(ev, sizeof ev, icon_win, x->atoms[COMPOSITOR_XWM_A_XEMBED], xembed, 5) == XWM_EVENT_SIZE)
                         compositor_xwm_send_event(x, icon_win, 0, 0, ev, XWM_EVENT_SIZE);
         }
         if (x->atoms[COMPOSITOR_XWM_A_XEMBED_INFO])
-        {
-                unsigned int info[2] = {0, 1};
-
                 compositor_xwm_put32(x, icon_win, x->atoms[COMPOSITOR_XWM_A_XEMBED_INFO], x->atoms[COMPOSITOR_XWM_A_XEMBED_INFO], info, 2);
-        }
         compositor_xwm_window_op(x, XWM_OP_MAP_WINDOW, icon_win);
         if (x->atoms[COMPOSITOR_XWM_A_NET_ICON])
                 compositor_xwm_ask(x, icon_win, COMPOSITOR_XWM_PROP_ICON, x->atoms[COMPOSITOR_XWM_A_NET_ICON], COMPOSITOR_XWM_ALLOW_TYPE);
@@ -1211,13 +765,8 @@ static void compositor_xwm_tray_dock(struct compositor_xwm *x, unsigned int icon
 static void compositor_xwm_tray_undock(struct compositor_xwm *x, unsigned int icon_win)
 {
         for (int i = 0; i < TASKBAR_TRAY_ITEM_MAX; i++)
-                if (compositor.tray[i].used && compositor.tray[i].owner == x &&
-                    (!icon_win || compositor.tray[i].id == icon_win))
-                {
-                        compositor.tray[i].used = 0;
-                        compositor.tray_gen++;
-                        compositor_tabs_changed();
-                }
+                if (compositor.tray[i].used && compositor.tray[i].owner == x && (!icon_win || compositor.tray[i].id == icon_win))
+                        compositor.tray[i].used = 0, compositor.tray_gen++, compositor_tabs_changed();
 }
 
 static void compositor_xwm_tray_icon_set(struct compositor_xwm *x, unsigned int icon_win, const unsigned char *val, unsigned long len)
@@ -1226,8 +775,7 @@ static void compositor_xwm_tray_icon_set(struct compositor_xwm *x, unsigned int 
 
         while (at + 8 <= len)
         {
-                unsigned long w = xwm_get32(val + at), h = xwm_get32(val + at + 4);
-                unsigned long need = w * h * 4;
+                unsigned long w = xwm_get32(val + at), h = xwm_get32(val + at + 4), need = w * h * 4;
 
                 at += 8;
                 if (!w || !h || w > 512 || h > 512 || need > len - at)
@@ -1236,29 +784,19 @@ static void compositor_xwm_tray_icon_set(struct compositor_xwm *x, unsigned int 
                         best_w = w, best_h = h, best_off = at;
                 at += need;
         }
-        if (!best_w)
-                return;
-        for (int i = 0; i < TASKBAR_TRAY_ITEM_MAX; i++)
-                if (compositor.tray[i].used && compositor.tray[i].owner == x &&
-                    compositor.tray[i].id == icon_win)
+        for (int i = 0; best_w && i < TASKBAR_TRAY_ITEM_MAX; i++)
+                if (compositor.tray[i].used && compositor.tray[i].owner == x && compositor.tray[i].id == icon_win)
                 {
                         for (int py = 0; py < TASKBAR_TRAY_ITEM_PX; py++)
                                 for (int px = 0; px < TASKBAR_TRAY_ITEM_PX; px++)
-                                {
-                                        unsigned long sx = (unsigned long)px * best_w / TASKBAR_TRAY_ITEM_PX;
-                                        unsigned long sy = (unsigned long)py * best_h / TASKBAR_TRAY_ITEM_PX;
-
                                         compositor.tray[i].pixels[py * TASKBAR_TRAY_ITEM_PX + px] =
-                                                xwm_get32(val + best_off + (sy * best_w + sx) * 4);
-                                }
-                        compositor.tray[i].has_icon = 1;
-                        compositor.tray_gen++;
-                        compositor_tabs_changed();
+                                            xwm_get32(val + best_off + (((unsigned long)py * best_h / TASKBAR_TRAY_ITEM_PX) * best_w +
+                                                                        (unsigned long)px * best_w / TASKBAR_TRAY_ITEM_PX) * 4);
+                        compositor.tray[i].has_icon = 1, compositor.tray_gen++, compositor_tabs_changed();
                         break;
                 }
 }
 
-/* A property reply, whole, for the request it answers. */
 static void xwm_property(struct compositor_xwm *x, const unsigned char *in, long size, const struct compositor_xwm_pending *p)
 {
         struct compositor_xwm_window *w;
@@ -1275,24 +813,22 @@ static void xwm_property(struct compositor_xwm *x, const unsigned char *in, long
                         compositor_xwm_tray_icon_set(x, p->window, r.value, r.value_len);
                 return;
         }
-        w = xwm_find(x, p->window, 0);
-        if (!w)
+        if (!(w = xwm_find(x, p->window, 0)))
                 return;
-        if (p->what == COMPOSITOR_XWM_PROP_NET_NAME || p->what == COMPOSITOR_XWM_PROP_NAME)
+        switch (p->what)
+        {
+        case COMPOSITOR_XWM_PROP_NET_NAME:
+        case COMPOSITOR_XWM_PROP_NAME:
         {
                 char text[COMPOSITOR_XWM_TITLE];
-                unsigned int length = 0;
+                unsigned int length = r.format == XWM_FORMAT_8 ? compositor_xwm_text(text, r.value, r.value_len, p->what == COMPOSITOR_XWM_PROP_NAME) : 0;
 
-                if (r.format == XWM_FORMAT_8)
-                        length = compositor_xwm_text(text, r.value, r.value_len, p->what == COMPOSITOR_XWM_PROP_NAME);
                 if (p->what == COMPOSITOR_XWM_PROP_NET_NAME)
                 {
                         if (length)
                                 w->state |= COMPOSITOR_XWM_NET_TITLE;
                         else
                         {
-                                // No _NET_WM_NAME: the title is WM_NAME's, asked of now. The request in hand stays counted until that reply.
-                                // One that could not be queued is the end of this title's asking, as its reply would have been.
                                 w->state &= ~COMPOSITOR_XWM_NET_TITLE;
                                 if (compositor_xwm_ask(x, w->id, COMPOSITOR_XWM_PROP_NAME, COMPOSITOR_XWM_XA_WM_NAME, COMPOSITOR_XWM_XA_STRING) != 0)
                                         compositor_xwm_title_done(x, w);
@@ -1308,10 +844,10 @@ static void xwm_property(struct compositor_xwm *x, const unsigned char *in, long
                                 w->dirty = 1;
                 }
                 compositor_xwm_title_done(x, w);
+                break;
         }
-        else if (p->what == COMPOSITOR_XWM_PROP_STEAM)
+        case COMPOSITOR_XWM_PROP_STEAM:
         {
-                // Whose overlay window it is: believed only once X-Resource says the window is that program's own (the owner asked now).
                 unsigned int spid = r.format == XWM_FORMAT_32 && r.value_len >= 4 ? xwm_get32(r.value) : 0;
 
                 if (compositor_xwm_steam.slot == x && compositor_xwm_steam.window == w->id)
@@ -1323,30 +859,27 @@ static void xwm_property(struct compositor_xwm *x, const unsigned char *in, long
                 }
                 else if (spid)
                 {
-                        int keep = 0;
-
-                        if (compositor_xwm_steam.slot && compositor_xwm_steam.slot->fd >= 0 && compositor_xwm_steam.window &&
-                            compositor_xwm_steam.pid)
-                        {
-                                struct compositor_xwm_window *cur = xwm_find(compositor_xwm_steam.slot, compositor_xwm_steam.window, 0);
-
-                                keep = cur && cur->owner == compositor_xwm_steam.pid;
-                        }
-                        if (!keep)
+                        struct compositor_xwm_window *cur = compositor_xwm_steam.slot && compositor_xwm_steam.slot->fd >= 0 && compositor_xwm_steam.window && compositor_xwm_steam.pid
+                                                                ? xwm_find(compositor_xwm_steam.slot, compositor_xwm_steam.window, 0) : 0;
+                        if (!cur || cur->owner != compositor_xwm_steam.pid)
                         {
                                 memory_zero(&compositor_xwm_steam, sizeof compositor_xwm_steam);
-                                compositor_xwm_steam.slot = x;
-                                compositor_xwm_steam.window = w->id;
-                                compositor_xwm_steam.pid = spid;
+                                compositor_xwm_steam.slot = x, compositor_xwm_steam.window = w->id, compositor_xwm_steam.pid = spid;
                         }
                 }
                 if (spid && !w->owner)
                         compositor_xwm_ask_owner(x, w->id);
+                break;
         }
-        else if (p->what == COMPOSITOR_XWM_PROP_CLASS)
+        case COMPOSITOR_XWM_PROP_STEAM_OPEN:
+                if (compositor_xwm_steam.slot == x && compositor_xwm_steam.window == w->id)
+                {
+                        compositor_xwm_steam.open = r.format == XWM_FORMAT_32 && r.value_len >= 4 && xwm_get32(r.value) != 0;
+                        compositor_xwm_steam.told = (unsigned int)(clock_monotonic_nanoseconds() / 1000000);
+                }
+                break;
+        case COMPOSITOR_XWM_PROP_CLASS:
         {
-                // WM_CLASS is the instance and the class, each ended by a null: the class is the app's name (Steam), as a desktop entry's
-                // StartupWMClass says it, and the instance stands in where there is no class. One word of printable ASCII, or none.
                 unsigned long at = 0, start = 0, length = 0;
 
                 if (r.format == XWM_FORMAT_8)
@@ -1364,29 +897,17 @@ static void xwm_property(struct compositor_xwm *x, const unsigned char *in, long
                 memory_copy(w->app, r.value + start, length);
                 w->app[length] = 0;
                 compositor_xwm_app(w);
+                break;
         }
-        else if (p->what == COMPOSITOR_XWM_PROP_STEAM_OPEN)
-        {
-                if (compositor_xwm_steam.slot == x && compositor_xwm_steam.window == w->id)
-                {
-                        compositor_xwm_steam.open = r.format == XWM_FORMAT_32 && r.value_len >= 4 && xwm_get32(r.value) != 0;
-                        compositor_xwm_steam.told = (unsigned int)(clock_monotonic_nanoseconds() / 1000000);
-                }
-        }
-        else if (p->what == COMPOSITOR_XWM_PROP_TRANSIENT)
+        case COMPOSITOR_XWM_PROP_TRANSIENT:
                 w->transient = r.format == XWM_FORMAT_32 && r.value_len >= 4 && xwm_get32(r.value) != w->id ? xwm_get32(r.value) : 0;
-        else if (p->what == COMPOSITOR_XWM_PROP_STATE)
+                break;
+        case COMPOSITOR_XWM_PROP_STATE:
         {
-                unsigned int had_fs = w->state & COMPOSITOR_XWM_FULLSCREEN;
-                unsigned int had_max = w->state & COMPOSITOR_XWM_MAXIMIZED;
+                unsigned int had_fs = w->state & COMPOSITOR_XWM_FULLSCREEN, had_max = w->state & COMPOSITOR_XWM_MAXIMIZED;
 
-                // Initial _NET_WM_STATE is only queried on MapRequest (cleared on UnmapNotify). Merge bits rather than
-                // clearing so a _NET_WM_STATE ClientMessage queued right after MapWindow (e.g. SDL2 fullscreen) is not
-                // wiped by the earlier GetProperty snapshot.
                 for (unsigned long at = 0; r.format == XWM_FORMAT_32 && at + 4 <= r.value_len; at += 4)
                         w->state |= xwm_net_state_bits(x, xwm_get32(r.value + at), 0);
-                // If WL_SURFACE_SERIAL adopted the row before _NET_WM_STATE arrived, apply fullscreen/maximized now
-                // so the next compositor_xwm_sync pass does not wipe the state out.
                 if ((w->state & COMPOSITOR_XWM_ADOPTED) && w->row >= 0 && w->row < COMPOSITOR_ROWS)
                 {
                         if ((w->state & COMPOSITOR_XWM_FULLSCREEN) && !had_fs && !compositor.fullscreen[w->row])
@@ -1399,13 +920,12 @@ static void xwm_property(struct compositor_xwm *x, const unsigned char *in, long
                                  compositor.arranged[w->row] == COMPOSITOR_FLOATING)
                                 compositor_arrange(w->row, COMPOSITOR_ROOM);
                 }
+                break;
         }
-        else if (p->what == COMPOSITOR_XWM_PROP_TYPE)
+        case COMPOSITOR_XWM_PROP_TYPE:
         {
                 int was_desktop = !!(w->state & COMPOSITOR_XWM_DESKTOP);
 
-                // A window of a popup's type (a tooltip, a menu, a combo's list, a notification, a drag) is shown as a popup;
-                // _NET_WM_WINDOW_TYPE_DESKTOP is a live wallpaper window kept at the bottom of the stack.
                 w->state &= ~(COMPOSITOR_XWM_POPUPTYPE | COMPOSITOR_XWM_DESKTOP);
                 for (unsigned long at = 0; r.format == XWM_FORMAT_32 && at + 4 <= r.value_len; at += 4)
                 {
@@ -1420,10 +940,9 @@ static void xwm_property(struct compositor_xwm *x, const unsigned char *in, long
                 w->state |= COMPOSITOR_XWM_PROPS_READ;
                 if ((w->state & COMPOSITOR_XWM_DESKTOP) && !was_desktop && (w->state & COMPOSITOR_XWM_ADOPTED) && w->row >= 0)
                         compositor_layer_set(w->row, WINDOW_LAYER_BACKGROUND, -1);
+                break;
         }
-        else if (p->what == COMPOSITOR_XWM_PROP_PROTOCOLS)
-        {
-                // A window with no WM_PROTOCOLS has none of the protocols (ICCCM 4.1.2.7): that is known as much as a list is.
+        case COMPOSITOR_XWM_PROP_PROTOCOLS:
                 w->protocols = 0;
                 for (unsigned long at = 0; r.format == XWM_FORMAT_32 && at + 4 <= r.value_len; at += 4)
                 {
@@ -1435,43 +954,27 @@ static void xwm_property(struct compositor_xwm *x, const unsigned char *in, long
                                 w->protocols |= COMPOSITOR_XWM_PROTO_FOCUS;
                 }
                 w->state |= COMPOSITOR_XWM_PROTO_KNOWN;
-        }
-        else if (p->what == COMPOSITOR_XWM_PROP_WM_HINTS)
-        {
-                w->no_input = 0;
-                if (r.format == XWM_FORMAT_32 && r.value_len >= 8 && (xwm_get32(r.value) & 1u))
-                        w->no_input = xwm_get32(r.value + 4) == 0;
-        }
-        else if (p->what == COMPOSITOR_XWM_PROP_NORMAL_HINTS)
-        {
-                w->min_w = w->min_h = w->max_w = w->max_h = 0;
-                w->placed = 0;
+                break;
+        case COMPOSITOR_XWM_PROP_WM_HINTS:
+                w->no_input = r.format == XWM_FORMAT_32 && r.value_len >= 8 && (xwm_get32(r.value) & 1u) && xwm_get32(r.value + 4) == 0;
+                break;
+        case COMPOSITOR_XWM_PROP_NORMAL_HINTS:
+                w->min_w = w->min_h = w->max_w = w->max_h = 0, w->placed = 0;
                 if (r.format == XWM_FORMAT_32 && r.value_len >= 4)
                 {
                         unsigned int flags = xwm_get32(r.value);
+                        unsigned long min_off = (flags & 16u) && r.value_len >= 28 ? 20ul : (flags & 256u) && r.value_len >= 44 ? 36ul : 0ul;
 
-                        // USPosition (1) or PPosition (4): the program or the person set where the window goes.
                         w->placed = (flags & 5u) != 0;
-
-                        if ((flags & 16u) && r.value_len >= 28)
+                        if (min_off)
                         {
-                                int mw = (int)xwm_get32(r.value + 20), mh = (int)xwm_get32(r.value + 24);
-
+                                int mw = (int)xwm_get32(r.value + min_off), mh = (int)xwm_get32(r.value + min_off + 4);
                                 w->min_w = mw > 0 && mw <= 65535 ? (unsigned int)mw : 0;
                                 w->min_h = mh > 0 && mh <= 65535 ? (unsigned int)mh : 0;
-                        }
-                        else if ((flags & 256u) && r.value_len >= 44)
-                        {
-                                // ICCCM 4.1.2.3: PBaseSize supplies minimum size when PMinSize is unset.
-                                int bw = (int)xwm_get32(r.value + 36), bh = (int)xwm_get32(r.value + 40);
-
-                                w->min_w = bw > 0 && bw <= 65535 ? (unsigned int)bw : 0;
-                                w->min_h = bh > 0 && bh <= 65535 ? (unsigned int)bh : 0;
                         }
                         if ((flags & 32u) && r.value_len >= 36)
                         {
                                 int xw = (int)xwm_get32(r.value + 28), xh = (int)xwm_get32(r.value + 32);
-
                                 w->max_w = xw > 0 ? (xw > 65535 ? 65535u : (unsigned int)xw) : 0;
                                 w->max_h = xh > 0 ? (xh > 65535 ? 65535u : (unsigned int)xh) : 0;
                         }
@@ -1481,57 +984,29 @@ static void xwm_property(struct compositor_xwm *x, const unsigned char *in, long
                                 w->max_h = w->min_h;
                 }
                 compositor_xwm_hints_push(w);
+                break;
+        default: break;
         }
 }
 
-/* ---- open-addressing u32 index (delegated to wayland_host.c's shared canvas_htab_*) ---- */
+/* ---- window table and O(1) row -> (slot, win) index ---- */
 
-static void compositor_xwm_index_put(struct wayland_table *index, unsigned int key, long slot)
-{
-        canvas_htab_put(index, key, slot, 0);
-}
-
-static int compositor_xwm_index_grow(struct wayland_table *index, const struct wayland_table *records, long used, long skip)
-{
-        return canvas_htab_grow(index, records, used, skip, 0);
-}
-
-static long compositor_xwm_index_find(const struct wayland_table *index, const struct wayland_table *records, unsigned int key,
-                                      int first, unsigned long *at)
-{
-        return canvas_htab_find(index, records, key, first, at, 0);
-}
-
-/* ---- the window table and O(1) row -> (slot, win) index ---- */
-
-struct xwm_row_ref
-{
-        unsigned char slot_plus1; // 0 = empty, 1..COMPOSITOR_XWM_SLOTS = slot index + 1
-        int win;
-};
-static struct xwm_row_ref xwm_row_map[WINDOWS];
+static struct { unsigned char slot_plus1; int win; } xwm_row_map[WINDOWS];
+static int compositor_xwm_is_popup(const struct compositor_xwm_window *w);
 
 static unsigned char xwm_slot_tag(const struct compositor_xwm *x)
 {
         long idx = x - compositor_xwm_slots;
-
         return idx >= 0 && idx < COMPOSITOR_XWM_SLOTS ? (unsigned char)(idx + 1) : 0;
 }
 
 static void xwm_row_unbind(const struct compositor_xwm *x, struct compositor_xwm_window *w)
 {
-        if (w->row >= 0 && w->row < WINDOWS)
-        {
-                unsigned char tag = xwm_slot_tag(x);
-                int idx = x->window ? (int)(w - x->window) : -1;
-
-                if (xwm_row_map[w->row].slot_plus1 == tag && xwm_row_map[w->row].win == idx)
-                        xwm_row_map[w->row].slot_plus1 = 0;
-        }
+        if (w->row >= 0 && w->row < WINDOWS && xwm_row_map[w->row].slot_plus1 == xwm_slot_tag(x) &&
+            x->window && xwm_row_map[w->row].win == (int)(w - x->window))
+                xwm_row_map[w->row].slot_plus1 = 0;
         w->row = -1;
 }
-
-static int compositor_xwm_is_popup(const struct compositor_xwm_window *w);
 
 static void xwm_row_bind(const struct compositor_xwm *x, struct compositor_xwm_window *w, int row)
 {
@@ -1545,12 +1020,10 @@ static void xwm_row_bind(const struct compositor_xwm *x, struct compositor_xwm_w
         if (xwm_row_map[row].slot_plus1 == tag && xwm_row_map[row].win >= 0 && xwm_row_map[row].win < x->window_table.count)
         {
                 const struct compositor_xwm_window *cur = &x->window[xwm_row_map[row].win];
-
                 if (cur->id && cur->row == row && !compositor_xwm_is_popup(cur) && compositor_xwm_is_popup(w))
                         return;
         }
-        xwm_row_map[row].slot_plus1 = tag;
-        xwm_row_map[row].win = (int)(w - x->window);
+        xwm_row_map[row].slot_plus1 = tag, xwm_row_map[row].win = (int)(w - x->window);
 }
 
 static struct compositor_xwm_window *xwm_row_lookup(const struct compositor_xwm *only, int row, struct compositor_xwm **slot_out)
@@ -1560,16 +1033,13 @@ static struct compositor_xwm_window *xwm_row_lookup(const struct compositor_xwm 
         struct compositor_xwm *sx = &compositor_xwm_slots[xwm_row_map[row].slot_plus1 - 1];
         int wi = xwm_row_map[row].win;
 
-        if ((only && sx != only) || sx->fd < 0 || !sx->window || wi < 0 || wi >= sx->window_table.count)
-                return 0;
-        if (!sx->window[wi].id || sx->window[wi].row != row)
+        if ((only && sx != only) || sx->fd < 0 || !sx->window || wi < 0 || wi >= sx->window_table.count || !sx->window[wi].id || sx->window[wi].row != row)
                 return 0;
         if (slot_out)
                 *slot_out = sx;
         return &sx->window[wi];
 }
 
-// The record of an X window let go of: out of the index (backward shift), its slot free to be taken again.
 static void xwm_release(struct compositor_xwm *x, struct compositor_xwm_window *w)
 {
         long slot;
@@ -1580,7 +1050,7 @@ static void xwm_release(struct compositor_xwm *x, struct compositor_xwm_window *
                 memory_zero(&compositor_xwm_steam, sizeof compositor_xwm_steam);
         if (w->id && w->id == x->focus_window)
                 x->focus_window = 0, x->focus_row = -3;
-        if (!w->id || (slot = compositor_xwm_index_find(&x->window_index, &x->window_table, w->id, 0, &hole)) < 0)
+        if (!w->id || (slot = canvas_htab_find(&x->window_index, &x->window_table, w->id, 0, &hole, 0)) < 0)
         {
                 w->id = 0;
                 return;
@@ -1598,74 +1068,32 @@ static struct compositor_xwm_window *xwm_find(struct compositor_xwm *x, unsigned
 
         if (!id)
                 return 0;
-        slot = compositor_xwm_index_find(&x->window_index, &x->window_table, id, 0, 0);
-        if (slot >= 0)
+        if ((slot = canvas_htab_find(&x->window_index, &x->window_table, id, 0, 0, 0)) >= 0)
                 return &x->window[slot];
         if (!add)
                 return 0;
-        if (!compositor_xwm_index_grow(&x->window_index, &x->window_table, x->windows, -1))
-        {
-                x->refused++, compositor_xwm_counted[1]++;
-                return 0;
-        }
-        x->window_table.unit = sizeof(struct compositor_xwm_window);
-        slot = wayland_table_take(&x->window_table);
-        if (slot < 0)
-        {
-                x->refused++, compositor_xwm_counted[1]++;
-                return 0;
-        }
+        if (!canvas_htab_grow(&x->window_index, &x->window_table, x->windows, -1, 0) ||
+            (slot = xwm_tbl_take(&x->window_table, sizeof(struct compositor_xwm_window))) < 0)
+                return x->refused++, compositor_xwm_counted[1]++, (struct compositor_xwm_window *)0;
         x->window = (struct compositor_xwm_window *)x->window_table.at;
         free = &x->window[slot];
         memory_zero(free, sizeof(*free));
-        free->id = id;
+        free->id = id, free->row = -1, free->sent_x = free->sent_y = COMPOSITOR_XWM_NO_PLACE;
         x->windows++;
-        compositor_xwm_index_put(&x->window_index, id, slot);
-        free->row = -1;
-        free->sent_x = free->sent_y = COMPOSITOR_XWM_NO_PLACE;
+        canvas_htab_put(&x->window_index, id, slot, 0);
         return free;
 }
 
-static void xwm_forget(struct compositor_xwm *x, unsigned int id)
-{
-        struct compositor_xwm_window *w = xwm_find(x, id, 0);
+static void xwm_forget(struct compositor_xwm *x, unsigned int id) { struct compositor_xwm_window *w = xwm_find(x, id, 0); if (w) xwm_release(x, w); }
 
-        if (w)
-                xwm_release(x, w);
-}
-
-/*
-        The shim told what the window is: a window (or an override-redirect popup at its place) with its title, said again when the
-        title changes, and asked again on each pass until the shim has the window's surface, whichever of the two (the serial from the
-        X side, the surface from the Wayland side) comes first. The shim's answer is the window's row, once it has one.
-*/
-/*
-        A window's mapping ended: its surface is gone or is another one. What belonged to that mapping goes with it -- the row the shim
-        gave it, that the shim was told of it, that it was asked to close and that it was raised over its parent once -- so the next
-        mapping starts as the first did. They were kept for the life of the X window, which outlives its mappings (a window hidden to
-        a tray, a dialog a program keeps): the row was then another program's window, which a close, a _NET_WM_STATE message and the
-        transient raise of the hidden window acted on, a window shown again under another row never had the focus or a close, and one
-        that had been asked to close once was never asked again.
-*/
 static void xwm_unmapped(struct compositor_xwm *x, struct compositor_xwm_window *w)
 {
         if (w->id && w->id == x->focus_window)
                 x->focus_window = 0, x->focus_row = -3;
         xwm_row_unbind(x, w);
         w->state &= ~(COMPOSITOR_XWM_ADOPTED | COMPOSITOR_XWM_RAISED | COMPOSITOR_XWM_COVERED);
-        w->closes = 0;
-        w->sent_x = w->sent_y = COMPOSITOR_XWM_NO_PLACE;
-        w->sent_w = w->sent_h = 0;
-        x->last_stack_gen = 0;
+        w->closes = 0, w->sent_x = w->sent_y = COMPOSITOR_XWM_NO_PLACE, w->sent_w = w->sent_h = 0, x->last_stack_gen = 0;
 }
-
-/*
-        Whether the window is owed an ask to close: its row has been asked more times than the window was told. Each ask of the
-        compositor's is told once (a WM_DELETE_WINDOW, or the unmap of a popup), so a program that answered the first with a
-        question and stayed is asked by the next press of its button. It was one bit, set at the first and cleared only when the
-        mapping ended. The WM_PROTOCOLS reply is waited for first: the ask is owed until then.
-*/
-static int compositor_xwm_is_popup(const struct compositor_xwm_window *w);
 
 static int compositor_xwm_close_owed(const struct compositor_xwm_window *w)
 {
@@ -1673,11 +1101,6 @@ static int compositor_xwm_close_owed(const struct compositor_xwm_window *w)
                (compositor_xwm_is_popup(w) || (w->state & COMPOSITOR_XWM_PROTO_KNOWN));
 }
 
-/*
-        The screen an X window covers exactly, at its place and its size (a game that maps borderless at the output's size, the common way
-        a game goes fullscreen without asking for _NET_WM_STATE_FULLSCREEN), or -1. Recognises both managed windows and fullscreen
-        override-redirect windows (Wine/Proton borderless fullscreen), excluding explicit popup types and transients.
-*/
 static int compositor_xwm_covers(const struct compositor_xwm_window *w)
 {
         unsigned int count;
@@ -1692,20 +1115,12 @@ static int compositor_xwm_covers(const struct compositor_xwm_window *w)
         return -1;
 }
 
-// Whether an X window is an unmanaged popup/menu/tooltip rather than a real toplevel. Fullscreen override-redirect
-// windows (e.g. Wine/Proton borderless fullscreen games) are promoted to managed fullscreen toplevels so they hide
-// the taskbar, appear in the taskbar, receive X11 input focus, and stack above Steam/desktop windows.
 static int compositor_xwm_is_popup(const struct compositor_xwm_window *w)
 {
-        if (!(w->state & COMPOSITOR_XWM_POPUPISH))
-                return 0;
-        if ((w->state & (COMPOSITOR_XWM_FULLSCREEN | COMPOSITOR_XWM_DESKTOP)) ||
-            ((w->state & COMPOSITOR_XWM_OVERRIDE) && !w->transient && compositor_xwm_covers(w) >= 0))
-                return 0;
-        return 1;
+        return (w->state & COMPOSITOR_XWM_POPUPISH) && !(w->state & (COMPOSITOR_XWM_FULLSCREEN | COMPOSITOR_XWM_DESKTOP)) &&
+               !((w->state & COMPOSITOR_XWM_OVERRIDE) && !w->transient && compositor_xwm_covers(w) >= 0);
 }
 
-// Push WM_NORMAL_HINTS size bounds directly into the native Canvas window table (logical pixels at the row's scale).
 static void compositor_xwm_hints_push(const struct compositor_xwm_window *w)
 {
         unsigned int scale;
@@ -1720,7 +1135,6 @@ static void compositor_xwm_hints_push(const struct compositor_xwm_window *w)
         compositor.table->most_height[w->row] = w->max_h ? (unsigned int)((unsigned long)w->max_h * 100ul / scale) : 0;
 }
 
-// A window's class as its row's app_id, once it has both (the panel matches it to its app by it: ui_apps_match).
 static void compositor_xwm_app(struct compositor_xwm_window *w)
 {
         if (w->row >= 0 && w->row < COMPOSITOR_ROWS && w->app[0] && compositor.table &&
@@ -1728,16 +1142,9 @@ static void compositor_xwm_app(struct compositor_xwm_window *w)
                 compositor_take(w->row);
 }
 
-// When an override-redirect window is promoted to a managed fullscreen toplevel (Wine/Proton borderless fullscreen),
-// ask for its title, class, protocols, hints, and X-Resource owner PID so it appears in the taskbar as its own app
-// and can be closed or force-stopped independently of Steam or its launcher.
 static void xwm_promote_props(struct compositor_xwm *x, struct compositor_xwm_window *w)
 {
-        unsigned char req[32];
-        long n = xwm_enc_select_events(req, sizeof req, w->id, XWM_MASK_PROPERTY_CHANGE);
-
-        if (n > 0)
-                compositor_xwm_queue(x, req, n);
+        compositor_xwm_select(x, w->id, XWM_MASK_PROPERTY_CHANGE);
         xwm_ask_title(x, w);
         xwm_ask_props(x, w, XWM_PF_PROMOTE);
         if (!w->owner)
@@ -1757,9 +1164,7 @@ static void xwm_restore_size(struct compositor_xwm *x, struct compositor_xwm_win
 {
         if (w->restore_w && w->restore_h)
         {
-                struct xwm_configure c = {.mask = XWM_CONFIGURE_WIDTH | XWM_CONFIGURE_HEIGHT,
-                                          .width = w->restore_w, .height = w->restore_h};
-
+                struct xwm_configure c = {.mask = XWM_CONFIGURE_WIDTH | XWM_CONFIGURE_HEIGHT, .width = w->restore_w, .height = w->restore_h};
                 compositor_xwm_configure(x, w->id, &c);
                 w->sent_w = w->restore_w, w->sent_h = w->restore_h;
         }
@@ -1770,9 +1175,8 @@ static void compositor_xwm_resolve(struct compositor_xwm *x, struct compositor_x
         long row;
         int covers = -1;
 
-        if (!(w->state & COMPOSITOR_XWM_SERIAL) || (w->state & COMPOSITOR_XWM_TRAY_ICON))
-                return;
-        if (!(w->state & COMPOSITOR_XWM_OVERRIDE) && !(w->state & COMPOSITOR_XWM_PROPS_READ))
+        if (!(w->state & COMPOSITOR_XWM_SERIAL) || (w->state & COMPOSITOR_XWM_TRAY_ICON) ||
+            (!(w->state & COMPOSITOR_XWM_OVERRIDE) && !(w->state & COMPOSITOR_XWM_PROPS_READ)))
                 return;
         if (!(w->state & COMPOSITOR_XWM_ADOPTED) || w->dirty)
         {
@@ -1780,16 +1184,13 @@ static void compositor_xwm_resolve(struct compositor_xwm *x, struct compositor_x
                 long how = (compositor_xwm_is_popup(w) ? WAYLAND_XWINDOW_POPUP : 0) | (w->placed ? WAYLAND_XWINDOW_PLACED : 0) |
                            WAYLAND_XWINDOW_OWNER(owner && owner->row >= 0 && owner->row < COMPOSITOR_ROWS ? owner->row : -1);
 
-                // Wine/Proton borderless fullscreen: override-redirect mapped over a whole screen is promoted to fullscreen.
                 if (!(w->state & (COMPOSITOR_XWM_ADOPTED | COMPOSITOR_XWM_FULLSCREEN)) && (w->state & COMPOSITOR_XWM_OVERRIDE) &&
                     (covers = compositor_xwm_covers(w)) >= 0)
                         xwm_promote_fullscreen(x, w, w->width, w->height);
-                row = wayland_xwindow_adopt(compositor_xwm_server(x), w->serial, how, compositor_xwm_from_x(w->x, 0),
-                                            compositor_xwm_from_x(w->y, 1), w->title);
-                if (row == -2)
+                if ((row = wayland_xwindow_adopt(compositor_xwm_server(x), w->serial, how, compositor_xwm_from_x(w->x, 0),
+                                                 compositor_xwm_from_x(w->y, 1), w->title)) == -2)
                         return;
-                w->state |= COMPOSITOR_XWM_ADOPTED;
-                w->dirty = 0;
+                w->state |= COMPOSITOR_XWM_ADOPTED, w->dirty = 0;
         }
         else if (w->row < 0)
                 row = wayland_serial_row(compositor_xwm_server(x), w->serial);
@@ -1815,7 +1216,6 @@ static void compositor_xwm_resolve(struct compositor_xwm *x, struct compositor_x
         }
 }
 
-/* Fullscreen: the window's X size is the output's, at the origin, and the shim's row covers the screen. Let go: floats again. */
 static void compositor_xwm_fullscreen(struct compositor_xwm *x, struct compositor_xwm_window *w, int on)
 {
         struct compositor_row_facts f;
@@ -1826,24 +1226,17 @@ static void compositor_xwm_fullscreen(struct compositor_xwm *x, struct composito
                 return;
         if (on)
         {
+                int has_f = compositor_row_facts(w->row, &f) == 0;
+
                 if (!(w->state & COMPOSITOR_XWM_MAXIMIZED))
                         w->restore_w = w->width, w->restore_h = w->height;
                 w->state |= COMPOSITOR_XWM_FULLSCREEN;
                 if (w->row >= 0)
                         compositor_fullscreen_row(w->row);
                 c.mask = XWM_CONFIGURE_X | XWM_CONFIGURE_Y | XWM_CONFIGURE_WIDTH | XWM_CONFIGURE_HEIGHT;
-                if (compositor_row_facts(w->row, &f) == 0)
-                {
-                        c.x = compositor_xwm_to_x(f.x, 0), c.y = compositor_xwm_to_x(f.y, 1);
-                        c.width = f.want_width ? f.want_width : f.width ? f.width : (compositor.width > 0 ? (unsigned int)compositor.width : 1u);
-                        c.height = f.want_height ? f.want_height : f.height ? f.height : (compositor.height > 0 ? (unsigned int)compositor.height : 1u);
-                }
-                else
-                {
-                        c.x = compositor_xwm_to_x(0, 0), c.y = compositor_xwm_to_x(0, 1);
-                        c.width = compositor.width > 0 ? (unsigned int)compositor.width : 1u;
-                        c.height = compositor.height > 0 ? (unsigned int)compositor.height : 1u;
-                }
+                c.x = compositor_xwm_to_x(has_f ? f.x : 0, 0), c.y = compositor_xwm_to_x(has_f ? f.y : 0, 1);
+                c.width = has_f && f.want_width ? f.want_width : has_f && f.width ? f.width : (compositor.width > 0 ? (unsigned int)compositor.width : 1u);
+                c.height = has_f && f.want_height ? f.want_height : has_f && f.height ? f.height : (compositor.height > 0 ? (unsigned int)compositor.height : 1u);
                 compositor_xwm_configure(x, w->id, &c);
                 w->sent_x = c.x, w->sent_y = c.y, w->sent_w = c.width, w->sent_h = c.height;
                 compositor_xwm_net_state(x, w->id, (int)w->state);
@@ -1858,9 +1251,8 @@ static void compositor_xwm_fullscreen(struct compositor_xwm *x, struct composito
                         compositor_arrange(w->row, COMPOSITOR_ROOM);
                 else if (w->row >= 0)
                         compositor_float(w->row);
-                if (w->row >= 0 && compositor.arranged[w->row] != COMPOSITOR_FLOATING)
-                        return;
-                xwm_restore_size(x, w);
+                if (w->row < 0 || compositor.arranged[w->row] == COMPOSITOR_FLOATING)
+                        xwm_restore_size(x, w);
         }
 }
 
@@ -1873,24 +1265,19 @@ static void compositor_xwm_clamp_size(const struct compositor_xwm_window *w, uns
                 int iw = (int)*width, ih = (int)*height;
 
                 compositor_row_clamp(w->row, &iw, &ih);
-                *width = iw > 0 ? (unsigned int)iw : 1u;
-                *height = ih > 0 ? (unsigned int)ih : 1u;
+                *width = iw > 0 ? (unsigned int)iw : 1u, *height = ih > 0 ? (unsigned int)ih : 1u;
                 return;
         }
-        if (w->max_w && *width > w->max_w)
-                *width = w->max_w;
-        if (w->max_h && *height > w->max_h)
-                *height = w->max_h;
-        if (w->min_w && *width < w->min_w)
-                *width = w->min_w;
-        if (w->min_h && *height < w->min_h)
-                *height = w->min_h;
+        if (w->max_w && *width > w->max_w) *width = w->max_w;
+        if (w->max_h && *height > w->max_h) *height = w->max_h;
+        if (w->min_w && *width < w->min_w) *width = w->min_w;
+        if (w->min_h && *height < w->min_h) *height = w->min_h;
 }
 
 static void compositor_xwm_sync(struct compositor_xwm *x, struct compositor_xwm_window *w)
 {
         struct compositor_row_facts f;
-        struct xwm_configure c;
+        struct xwm_configure c = {0};
         unsigned int prev_state = w->state;
 
         if (compositor_row_facts(w->row, &f) != 0)
@@ -1907,10 +1294,7 @@ static void compositor_xwm_sync(struct compositor_xwm *x, struct compositor_xwm_
         w->state = f.layer == WINDOW_LAYER_ABOVE ? (w->state | COMPOSITOR_XWM_ABOVE) : (w->state & ~COMPOSITOR_XWM_ABOVE);
         if (w->state != prev_state)
                 compositor_xwm_net_state(x, w->id, (int)w->state);
-
-        c.mask = 0;
-        c.x = compositor_xwm_to_x(f.x, 0);
-        c.y = compositor_xwm_to_x(f.y, 1);
+        c.x = compositor_xwm_to_x(f.x, 0), c.y = compositor_xwm_to_x(f.y, 1);
         if (c.x != w->sent_x || c.y != w->sent_y || c.x != w->x || c.y != w->y)
                 c.mask |= XWM_CONFIGURE_X | XWM_CONFIGURE_Y;
         if (f.want_width && f.want_height)
@@ -1919,18 +1303,13 @@ static void compositor_xwm_sync(struct compositor_xwm *x, struct compositor_xwm_
 
                 compositor_xwm_clamp_size(w, &cw, &ch);
                 if ((cw != w->sent_w || ch != w->sent_h) && (!f.resizing || w->sync_present != compositor_metric_presents))
-                {
-                        c.mask |= XWM_CONFIGURE_WIDTH | XWM_CONFIGURE_HEIGHT;
-                        c.width = cw, c.height = ch;
-                        w->sync_present = compositor_metric_presents;
-                }
+                        c.mask |= XWM_CONFIGURE_WIDTH | XWM_CONFIGURE_HEIGHT, c.width = cw, c.height = ch, w->sync_present = compositor_metric_presents;
         }
         if (!c.mask)
                 return;
         compositor_xwm_configure(x, w->id, &c);
         if (c.mask & XWM_CONFIGURE_X)
         {
-                // ICCCM 4.1.5: deliver synthetic ConfigureNotify on position-only sync so Wine/Proton x11drv updates its origin.
                 if (!(c.mask & (XWM_CONFIGURE_WIDTH | XWM_CONFIGURE_HEIGHT)))
                         compositor_xwm_send_configure(x, w, c.x, c.y, w->width, w->height);
                 w->sent_x = w->x = c.x, w->sent_y = w->y = c.y;
@@ -1939,14 +1318,11 @@ static void compositor_xwm_sync(struct compositor_xwm *x, struct compositor_xwm_
                 w->sent_w = w->width = c.width, w->sent_h = w->height = c.height;
 }
 
-/* EWMH _NET_WM_MOVERESIZE: delegated directly to Canvas's canonical client grab primitive. */
 static void compositor_xwm_moveresize(struct compositor_xwm_window *w, unsigned int direction)
 {
         static const unsigned int edge_of[8] = {
-            COMPOSITOR_EDGE_TOP | COMPOSITOR_EDGE_LEFT,    COMPOSITOR_EDGE_TOP,
-            COMPOSITOR_EDGE_TOP | COMPOSITOR_EDGE_RIGHT,   COMPOSITOR_EDGE_RIGHT,
-            COMPOSITOR_EDGE_BOTTOM | COMPOSITOR_EDGE_RIGHT, COMPOSITOR_EDGE_BOTTOM,
-            COMPOSITOR_EDGE_BOTTOM | COMPOSITOR_EDGE_LEFT,  COMPOSITOR_EDGE_LEFT};
+            COMPOSITOR_EDGE_TOP | COMPOSITOR_EDGE_LEFT, COMPOSITOR_EDGE_TOP, COMPOSITOR_EDGE_TOP | COMPOSITOR_EDGE_RIGHT, COMPOSITOR_EDGE_RIGHT,
+            COMPOSITOR_EDGE_BOTTOM | COMPOSITOR_EDGE_RIGHT, COMPOSITOR_EDGE_BOTTOM, COMPOSITOR_EDGE_BOTTOM | COMPOSITOR_EDGE_LEFT, COMPOSITOR_EDGE_LEFT};
 
         if (!w || w->row < 0)
                 return;
@@ -1958,22 +1334,15 @@ static void compositor_xwm_moveresize(struct compositor_xwm_window *w, unsigned 
                 (void)compositor_grab_begin_client(w->row, edge_of[direction], 0, 0);
 }
 
-/* ---- the selections (THE SELECTIONS) ---- */
+/* ---- selections & dynamic atom cache ---- */
 
-#define COMPOSITOR_XWM_TRANSFER_NS 5000000000ull     // a transfer that moves nothing for this long is let go
-#define COMPOSITOR_XWM_PIPE 262144                   // the size asked for a pipe of the window manager's (F_SETPIPE_SZ)
-#define COMPOSITOR_XWM_PIPE_SLACK 8192               // what a pipe's room is held back by: the kernel lays a write in whole pages
-#define COMPOSITOR_XWM_PIECE_UNITS (XWM_PROPERTY_MAX / XWM_UNIT) // the most a GetProperty of a value asks for, in units
-#define COMPOSITOR_XWM_IN_TARGETS 1
-#define COMPOSITOR_XWM_IN_ASKED 2
-#define COMPOSITOR_XWM_IN_PIECES 3
-#define COMPOSITOR_XWM_IN_NAMING 4
-#define COMPOSITOR_XWM_OUT_START 0
-#define COMPOSITOR_XWM_OUT_WAIT 1
-#define COMPOSITOR_XWM_OUT_NEXT 2
-#define COMPOSITOR_XWM_OUT_MULTIPLE 3        // a MULTIPLE whose pairs are being read
-#define COMPOSITOR_XWM_FROM_FILE 1
-#define COMPOSITOR_XWM_FROM_PIPE 2
+#define COMPOSITOR_XWM_TRANSFER_NS 5000000000ull
+#define COMPOSITOR_XWM_PIPE 262144
+#define COMPOSITOR_XWM_PIPE_SLACK 8192
+#define COMPOSITOR_XWM_PIECE_UNITS (XWM_PROPERTY_MAX / XWM_UNIT)
+enum { COMPOSITOR_XWM_IN_TARGETS = 1, COMPOSITOR_XWM_IN_ASKED, COMPOSITOR_XWM_IN_PIECES, COMPOSITOR_XWM_IN_NAMING };
+enum { COMPOSITOR_XWM_OUT_START = 0, COMPOSITOR_XWM_OUT_WAIT, COMPOSITOR_XWM_OUT_NEXT, COMPOSITOR_XWM_OUT_MULTIPLE };
+enum { COMPOSITOR_XWM_FROM_FILE = 1, COMPOSITOR_XWM_FROM_PIPE = 2 };
 #define COMPOSITOR_XWM_FIONREAD 0x541b
 #define COMPOSITOR_XWM_F_SETFL 4
 #define COMPOSITOR_XWM_F_SETPIPE_SZ 1031
@@ -1985,40 +1354,19 @@ static void compositor_xwm_moveresize(struct compositor_xwm_window *w, unsigned 
 static long compositor_wl_pump(int in, int out);
 static void compositor_wl_pump_nudge(long at);
 
-static unsigned int compositor_xwm_id(struct compositor_xwm *x, unsigned int number)
-{
-        return x->resource_base | (number & x->resource_mask);
-}
+static unsigned int compositor_xwm_id(struct compositor_xwm *x, unsigned int number) { return x->resource_base | (number & x->resource_mask); }
+static int compositor_xwm_same_client(struct compositor_xwm *x, unsigned int a, unsigned int b) { return a && b && (a & ~x->resource_mask) == (b & ~x->resource_mask); }
 
-// Whether two X ids are of one client: the bits past the resource mask are the client's.
-static int compositor_xwm_same_client(struct compositor_xwm *x, unsigned int a, unsigned int b)
-{
-        return a && b && (a & ~x->resource_mask) == (b & ~x->resource_mask);
-}
-
-/* ---- the atoms and their names: a table that grows, the names in one that grows beside it ---- */
-
-/*
-        The atoms indexed by their numbers (open addressing, a power of two of buckets, each a record's slot and one), as the windows are: a server
-        names atoms in lists (a selection's TARGETS, a drag's types), and a walk of the whole table for each was the square of the list on the loop.
-        A record's atom is put in once it is known (at its making, or at its InternAtom's reply) and is never taken out: the table only grows, and
-        is let go of with the connection. At half full the index is made again at twice the buckets.
-*/
-// The record at slot, its atom now known, put in the index (made again when half full); without the memory it is left out and found by the walk.
 static void compositor_xwm_atom_indexed(struct compositor_xwm *x, long slot)
 {
         unsigned int atom = x->atom[slot].atom;
 
         if (!atom)
                 return;
-        if (!compositor_xwm_index_grow(&x->atom_index, &x->atom_table, x->atoms_indexed, slot))
-        {
-                x->atoms_indexed = -1; // no index: every look is the walk (compositor_xwm_atom_index)
-                wayland_table_drop(&x->atom_index);
-                return;
-        }
-        compositor_xwm_index_put(&x->atom_index, atom, slot);
-        x->atoms_indexed++;
+        if (!canvas_htab_grow(&x->atom_index, &x->atom_table, x->atoms_indexed, slot, 0))
+                x->atoms_indexed = -1, wayland_table_drop(&x->atom_index);
+        else
+                canvas_htab_put(&x->atom_index, atom, slot, 0), x->atoms_indexed++;
 }
 
 static long xwm_atom_add(struct compositor_xwm *x, unsigned int atom, const unsigned char *name, unsigned long length, int known)
@@ -2029,15 +1377,10 @@ static long xwm_atom_add(struct compositor_xwm *x, unsigned int atom, const unsi
         x->name_table.unit = 1;
         if (length && !wayland_table_reach(&x->name_table, x->name_bytes + (long)length))
                 return -1;
-        x->atom_table.unit = sizeof(struct compositor_xwm_atom);
-        at = wayland_table_take(&x->atom_table);
-        if (at < 0)
+        if ((at = xwm_tbl_take(&x->atom_table, sizeof(struct compositor_xwm_atom))) < 0)
                 return -1;
         x->atom = (struct compositor_xwm_atom *)x->atom_table.at;
-        x->atom[at].atom = atom;
-        x->atom[at].at = (unsigned int)x->name_bytes;
-        x->atom[at].length = (unsigned int)length;
-        x->atom[at].known = (unsigned char)known;
+        x->atom[at] = (struct compositor_xwm_atom){atom, (unsigned int)x->name_bytes, (unsigned int)length, (unsigned char)known};
         if (length)
                 memory_copy(x->name_table.at + x->name_bytes, name, (positive)length);
         x->name_bytes += (long)length;
@@ -2046,44 +1389,35 @@ static long xwm_atom_add(struct compositor_xwm *x, unsigned int atom, const unsi
         return at;
 }
 
-// The record of an atom, or -1: the first record that has it (an atom interned by name may also be one named by a list before), by the index's
-// chain, which holds every record with it; by the walk where the index could not be made.
 static long xwm_atom_index(struct compositor_xwm *x, unsigned int atom)
 {
-
         if (!atom)
                 return -1;
-        if (x->atoms_indexed < 0)
-        {
-                for (long at = 0; at < x->atom_table.count; at++)
-                        if (x->atom[at].atom == atom)
-                                return at;
-                return -1;
-        }
-        return compositor_xwm_index_find(&x->atom_index, &x->atom_table, atom, 1, 0);
-}
-
-static long compositor_xwm_atom_named(struct compositor_xwm *x, const unsigned char *name, unsigned long length)
-{
-
-        for (long at = 0; length && at < x->atom_table.count; at++)
-                if (x->atom[at].length == length && !memory_compare(x->name_table.at + x->atom[at].at, name, (positive)( length)))
+        if (x->atoms_indexed >= 0)
+                return canvas_htab_find(&x->atom_index, &x->atom_table, atom, 1, 0, 0);
+        for (long at = 0; at < x->atom_table.count; at++)
+                if (x->atom[at].atom == atom)
                         return at;
         return -1;
 }
 
-// An atom's name, or 0 while it is not known.
+static long compositor_xwm_atom_named(struct compositor_xwm *x, const unsigned char *name, unsigned long length)
+{
+        for (long at = 0; length && at < x->atom_table.count; at++)
+                if (x->atom[at].length == length && !memory_compare(x->name_table.at + x->atom[at].at, name, (positive)length))
+                        return at;
+        return -1;
+}
+
 static const unsigned char *compositor_xwm_atom_name(struct compositor_xwm *x, unsigned int atom, unsigned long *length)
 {
         long at = xwm_atom_index(x, atom);
-
         if (at < 0 || !x->atom[at].known)
                 return 0;
         *length = x->atom[at].length;
         return x->name_table.at + x->atom[at].at;
 }
 
-// A name's atom when it is known; else it is asked of the server (InternAtom), and 0 until the reply.
 static unsigned int compositor_xwm_intern_name(struct compositor_xwm *x, const unsigned char *name, unsigned long length)
 {
         unsigned char req[XWM_REQUEST_SHORT + XWM_ATOM_NAME_MAX];
@@ -2097,15 +1431,13 @@ static unsigned int compositor_xwm_intern_name(struct compositor_xwm *x, const u
         return 0;
 }
 
-// An atom's name asked of the server (GetAtomName) when it is not known: the reply comes before any event that follows.
 static void compositor_xwm_name_atom(struct compositor_xwm *x, unsigned int atom)
 {
         unsigned char req[XWM_REQUEST_SHORT];
         long at;
 
-        if (!atom || xwm_atom_index(x, atom) >= 0 || (at = xwm_atom_add(x, atom, 0, 0, 0)) < 0)
-                return;
-        compositor_xwm_wait(x, req, xwm_enc_get_atom_name(req, sizeof req, atom), 0, COMPOSITOR_XWM_PROP_ATOM_NAME, (unsigned int)at);
+        if (atom && xwm_atom_index(x, atom) < 0 && (at = xwm_atom_add(x, atom, 0, 0, 0)) >= 0)
+                compositor_xwm_wait(x, req, xwm_enc_get_atom_name(req, sizeof req, atom), 0, COMPOSITOR_XWM_PROP_ATOM_NAME, (unsigned int)at);
 }
 
 static void xwm_interned(struct compositor_xwm *x, const unsigned char *in, long size, const struct compositor_xwm_pending *p)
@@ -2113,16 +1445,12 @@ static void xwm_interned(struct compositor_xwm *x, const unsigned char *in, long
         struct xwm_atom_reply r;
 
         if (xwm_parse_atom_reply(in, (unsigned long)size, &r) != XWM_OK)
-        {
                 x->broken = 1;
-                return;
-        }
-        if ((long)p->slot < x->atom_table.count && r.atom)
+        else if ((long)p->slot < x->atom_table.count && r.atom)
         {
                 b32 had = x->atom[p->slot].atom != 0;
 
-                x->atom[p->slot].atom = r.atom;
-                x->atom[p->slot].known = 1;
+                x->atom[p->slot].atom = r.atom, x->atom[p->slot].known = 1;
                 if (!had && x->atoms_indexed >= 0)
                         compositor_xwm_atom_indexed(x, (long)p->slot);
         }
@@ -2143,35 +1471,27 @@ static void compositor_xwm_named(struct compositor_xwm *x, const unsigned char *
         if (r.name_len && wayland_table_reach(&x->name_table, x->name_bytes + (long)r.name_len))
         {
                 memory_copy(x->name_table.at + x->name_bytes, r.name, (positive)r.name_len);
-                x->atom[p->slot].at = (unsigned int)x->name_bytes;
-                x->atom[p->slot].length = (unsigned int)r.name_len;
+                x->atom[p->slot].at = (unsigned int)x->name_bytes, x->atom[p->slot].length = (unsigned int)r.name_len;
                 x->name_bytes += (long)r.name_len;
         }
         x->atom[p->slot].known = 1;
 }
 
-// The atoms the window manager interned at its start, known by name from the first: and the predefined ones a selection names.
 static void compositor_xwm_atoms_seed(struct compositor_xwm *x)
 {
-        static const struct
-        {
-                unsigned int atom;
-                const char *name;
-        } predefined[] = {{COMPOSITOR_XWM_XA_PRIMARY, "PRIMARY"}, {COMPOSITOR_XWM_ATOM_TYPE, "ATOM"}, {COMPOSITOR_XWM_XA_INTEGER, "INTEGER"},
-                          {COMPOSITOR_XWM_XA_STRING, "STRING"}};
+        static const struct { unsigned int atom; const char *name; } predefined[] = {
+                {COMPOSITOR_XWM_XA_PRIMARY, "PRIMARY"}, {COMPOSITOR_XWM_ATOM_TYPE, "ATOM"},
+                {COMPOSITOR_XWM_XA_INTEGER, "INTEGER"}, {COMPOSITOR_XWM_XA_STRING, "STRING"}};
 
-        for (unsigned int at = 0; at < COMPOSITOR_XWM_ATOMS + sizeof predefined / sizeof predefined[0]; at++)
+        for (unsigned int at = 0; at < COMPOSITOR_XWM_ATOMS + 4; at++)
         {
                 const char *name = at < COMPOSITOR_XWM_ATOMS ? xwm_atom_spec[at].name : predefined[at - COMPOSITOR_XWM_ATOMS].name;
                 unsigned int atom = at < COMPOSITOR_XWM_ATOMS ? x->atoms[at] : predefined[at - COMPOSITOR_XWM_ATOMS].atom;
-                unsigned long length = (unsigned long)string_length((string_address)name);
 
                 if (atom && xwm_atom_index(x, atom) < 0)
-                        xwm_atom_add(x, atom, (const unsigned char *)name, length, 1);
+                        xwm_atom_add(x, atom, (const unsigned char *)name, (unsigned long)string_length((string_address)name), 1);
         }
 }
-
-/* ---- the selections' requests ---- */
 
 static int compositor_xwm_which(struct compositor_xwm *x, unsigned int selection)
 {
@@ -2184,32 +1504,17 @@ static int compositor_xwm_which(struct compositor_xwm *x, unsigned int selection
 static void compositor_xwm_own(struct compositor_xwm *x, int which, unsigned int owner)
 {
         unsigned char req[16];
-        long n = xwm_enc_set_selection_owner(req, sizeof req, owner, x->sel[which].atom, XWM_CURRENT_TIME);
-
-        if (n > 0)
-                compositor_xwm_queue(x, req, n);
+        compositor_xwm_queue(x, req, xwm_enc_set_selection_owner(req, sizeof req, owner, x->sel[which].atom, XWM_CURRENT_TIME));
         x->sel[which].owned = owner != 0;
 }
 
-// The owner's answer to a requestor: the property the value is in, or 0 for a refusal.
 static void compositor_xwm_notify(struct compositor_xwm *x, unsigned int time, unsigned int requestor, unsigned int selection, unsigned int target, unsigned int property)
 {
         unsigned char event[XWM_EVENT_SIZE];
-
         if (xwm_enc_selection_notify(event, sizeof event, time, requestor, selection, target, property) == XWM_EVENT_SIZE)
                 compositor_xwm_send_event(x, requestor, 0, 0, event, XWM_EVENT_SIZE);
 }
 
-static void compositor_xwm_select(struct compositor_xwm *x, unsigned int window, unsigned int mask)
-{
-        unsigned char req[16];
-        long n = xwm_enc_select_events(req, sizeof req, window, mask);
-
-        if (n > 0)
-                compositor_xwm_queue(x, req, n);
-}
-
-// A pipe, close-on-exec, its end at ours (0 or 1) not waiting, as large as COMPOSITOR_XWM_PIPE where the kernel allows: 0, or -1.
 static int compositor_xwm_pipe(int fds[2], int ours)
 {
         if (compositor_call(syscall(pipe2), (positive)fds, COMPOSITOR_XWM_O_CLOEXEC, 0, 0, 0, 0) < 0)
@@ -2219,7 +1524,6 @@ static int compositor_xwm_pipe(int fds[2], int ours)
         return 0;
 }
 
-// What can be written to a pipe now without waiting: its size less what is in it, held back by the slack.
 static long compositor_xwm_pipe_room(int fd)
 {
         int used = 0;
@@ -2230,7 +1534,6 @@ static long compositor_xwm_pipe_room(int fd)
         return size - used - COMPOSITOR_XWM_PIPE_SLACK > 0 ? size - used - COMPOSITOR_XWM_PIPE_SLACK : 0;
 }
 
-// Iterates NUL-delimited MIME entries in list[0..bytes); returns pointer to next entry and its length, or 0 at end.
 static const char *xwm_mime_next(const char *list, long bytes, long *at, unsigned long *len)
 {
         long start = *at, n = 0;
@@ -2239,8 +1542,7 @@ static const char *xwm_mime_next(const char *list, long bytes, long *at, unsigne
                 return 0;
         while (start + n < bytes && list[start + n])
                 n++;
-        *at = start + n + 1;
-        *len = (unsigned long)n;
+        *at = start + n + 1, *len = (unsigned long)n;
         return list + start;
 }
 
@@ -2255,8 +1557,6 @@ static int compositor_xwm_listed(const unsigned char *list, long bytes, const un
         return 0;
 }
 
-/* ---- the person's rule: who may copy and paste ---- */
-
 static int compositor_xwm_copy_row(struct compositor_xwm *x, unsigned int owner)
 {
         positive now = clock_monotonic_nanoseconds();
@@ -2267,7 +1567,6 @@ static int compositor_xwm_copy_row(struct compositor_xwm *x, unsigned int owner)
         for (long at = 0; at < x->window_table.count; at++)
         {
                 struct compositor_xwm_window *w = &x->window[at];
-
                 if (w->id && w->row >= 0 && w->row < COMPOSITOR_ROWS && compositor_xwm_same_client(x, w->id, owner) &&
                     now - compositor_clip.gesture[w->row] <= COMPOSITOR_CLIP_GESTURE_NS && (best < 0 || w->row == (int)compositor.focus))
                         best = w->row;
@@ -2282,34 +1581,26 @@ static int compositor_xwm_may_paste(struct compositor_xwm *x, unsigned int reque
         if (compositor.focus < 0)
                 return 0;
         for (long at = 0; at < x->window_table.count; at++)
-        {
-                struct compositor_xwm_window *w = &x->window[at];
-
-                if (w->id && w->row >= 0 && compositor_xwm_same_client(x, w->id, requestor) &&
-                    compositor_clip_may_access(w->row, now))
+                if (x->window[at].id && x->window[at].row >= 0 && compositor_xwm_same_client(x, x->window[at].id, requestor) &&
+                    compositor_clip_may_access(x->window[at].row, now))
                         return 1;
-        }
         return 0;
 }
 
-/* ---- the conversions the window manager asks for ---- */
+/* ---- selection conversions requested by XWM (in) ---- */
 
 static struct compositor_xwm_in *compositor_xwm_in_at(struct compositor_xwm *x, long at)
 {
         return at >= 0 && at < x->in_table.count && x->ins[at].window ? &x->ins[at] : 0;
 }
 
-// A conversion begun: its requestor window (its PropertyChange selected), and the selection asked for as target into its property.
 static long compositor_xwm_in_new(struct compositor_xwm *x, int which, unsigned int target, unsigned int time, int eager, int fd, int row)
 {
         unsigned char req[48];
-        unsigned int values[1] = {XWM_MASK_PROPERTY_CHANGE};
+        unsigned int ev_mask = XWM_MASK_PROPERTY_CHANGE;
         struct compositor_xwm_in *in;
-        long at, n;
+        long at = xwm_tbl_take(&x->in_table, sizeof(struct compositor_xwm_in));
 
-        wayland_tables_host(&compositor_wl_host);
-        x->in_table.unit = sizeof(struct compositor_xwm_in);
-        at = wayland_table_take(&x->in_table);
         if (at < 0)
                 return -1;
         x->ins = (struct compositor_xwm_in *)x->in_table.at;
@@ -2322,36 +1613,20 @@ static long compositor_xwm_in_new(struct compositor_xwm *x, int which, unsigned 
         in->stage = target == x->atoms[COMPOSITOR_XWM_A_TARGETS] ? COMPOSITOR_XWM_IN_TARGETS : COMPOSITOR_XWM_IN_ASKED;
         in->eager = (unsigned char)eager;
         in->latin1 = target == COMPOSITOR_XWM_XA_STRING;
-        in->selection = x->sel[which].atom;
-        in->target = target;
-        in->time = time;
-        in->fd = fd;
-        in->row = row;
-        in->pump = -1;
-        in->index = -1;
-        in->next = -1;
+        in->selection = x->sel[which].atom, in->target = target, in->time = time;
+        in->fd = fd, in->row = row, in->pump = -1, in->index = -1, in->next = -1;
         in->deadline = clock_monotonic_nanoseconds() + COMPOSITOR_XWM_TRANSFER_NS;
         in->targets.unit = sizeof(unsigned int);
-        n = xwm_enc_create_window(req, sizeof req, 0, in->window, x->root, -1, -1, 1, 1, XWM_CLASS_INPUT_ONLY, 0);
-        if (n > 0)
-                compositor_xwm_queue(x, req, n);
-        n = xwm_enc_change_window_attributes(req, sizeof req, in->window, XWM_CW_EVENT_MASK, values, 1);
-        if (n > 0)
-                compositor_xwm_queue(x, req, n);
-        n = xwm_enc_convert_selection(req, sizeof req, in->window, in->selection, target, x->atoms[COMPOSITOR_XWM_A_SELECTION], time);
-        if (n > 0)
-                compositor_xwm_queue(x, req, n);
+        xwm_make_win(x, in->window, -1, XWM_CLASS_INPUT_ONLY, XWM_CW_EVENT_MASK, &ev_mask, 1);
+        compositor_xwm_queue(x, req, xwm_enc_convert_selection(req, sizeof req, in->window, in->selection, target, x->atoms[COMPOSITOR_XWM_A_SELECTION], time));
         return at;
 }
 
 static void compositor_xwm_saved(struct compositor_xwm *x, unsigned int which, int ok);
 
-/* An X copy read to its end: every type it gave, the copy whole, checked and kept as any copy (owned by the window touched), so it
-   outlives its X owner; one that gave no type leaves the selection as it was. */
 static void compositor_xwm_copied(struct compositor_xwm *x, struct compositor_xwm_in *in)
 {
         unsigned int which = in->which;
-
         if (!compositor.table || which > 1 || !in->count || in->index < 0 || !windows_clip_seal(in->fd, in->index, in->total, in->count))
                 return;
         x->setting = which + 1;
@@ -2360,11 +1635,9 @@ static void compositor_xwm_copied(struct compositor_xwm *x, struct compositor_xw
         x->setting = 0;
 }
 
-// A conversion let go of, whatever it was in the middle of: an X copy's SAVE_TARGETS, if it was waited for, is answered None.
 static void compositor_xwm_in_free(struct compositor_xwm *x, long at)
 {
         struct compositor_xwm_in *in = compositor_xwm_in_at(x, at);
-
         if (!in)
                 return;
         if (in->eager)
@@ -2382,27 +1655,20 @@ static void compositor_xwm_in_free(struct compositor_xwm *x, long at)
         wayland_table_give(&x->in_table, at);
 }
 
-/* An eager copy's next target, after its text: each of its TARGETS that is a Wayland type (a name with a slash) and is no name text
-   goes by, converted into the copy's memfd after the types before it. None left: the copy is made whole (compositor_xwm_copied). */
 static void compositor_xwm_in_next(struct compositor_xwm *x, long at)
 {
         struct compositor_xwm_in *in = compositor_xwm_in_at(x, at);
         const unsigned int *atoms = (const unsigned int *)in->targets.at;
         unsigned int target = 0;
         unsigned char req[32];
-        long n;
 
         if (in->next < 0)
-        {
-                in->next = 0;
-                target = in->text;
-        }
+                in->next = 0, target = in->text;
         while (!target && atoms && in->next < in->targets.count)
         {
                 unsigned long length = 0;
                 unsigned int atom = atoms[in->next++];
                 const unsigned char *name = compositor_xwm_atom_name(x, atom, &length);
-
                 if (name && atom != in->text && xwm_target_kind(name, length) == XWM_TARGET_MIME && !windows_clip_alias((const char *)name, length))
                         target = atom;
         }
@@ -2412,18 +1678,12 @@ static void compositor_xwm_in_next(struct compositor_xwm *x, long at)
                 compositor_xwm_in_free(x, at);
                 return;
         }
-        in->target = target;
-        in->latin1 = target == COMPOSITOR_XWM_XA_STRING;
-        in->stage = COMPOSITOR_XWM_IN_ASKED;
+        in->target = target, in->latin1 = target == COMPOSITOR_XWM_XA_STRING, in->stage = COMPOSITOR_XWM_IN_ASKED;
         in->incr = 0, in->offset = 0, in->done = 0;
         in->deadline = clock_monotonic_nanoseconds() + COMPOSITOR_XWM_TRANSFER_NS;
-        n = xwm_enc_convert_selection(req, sizeof req, in->window, in->selection, target, x->atoms[COMPOSITOR_XWM_A_SELECTION], in->time);
-        if (n > 0)
-                compositor_xwm_queue(x, req, n);
+        compositor_xwm_queue(x, req, xwm_enc_convert_selection(req, sizeof req, in->window, in->selection, target, x->atoms[COMPOSITOR_XWM_A_SELECTION], in->time));
 }
 
-/* A conversion ended, well (ok) or not. A pipe's (a Wayland client's receive) is let go; an eager copy's type is kept in its index when
-   it came whole (and, for its text, is UTF-8 with no NUL and not empty), else its bytes are cut off again, and the next is asked for. */
 static void compositor_xwm_in_end(struct compositor_xwm *x, long at, int ok)
 {
         struct compositor_xwm_in *in = compositor_xwm_in_at(x, at);
@@ -2439,8 +1699,7 @@ static void compositor_xwm_in_end(struct compositor_xwm *x, long at, int ok)
         }
         if (in->stage == COMPOSITOR_XWM_IN_NAMING)
         {
-                // TARGETS read and named: the copy's types, its text first.
-                in->index = ok ? (int)compositor_call(syscall(memfd_create), (positive) "moonwater-x-index", 1, 0, 0, 0, 0) : -1;
+                in->index = ok ? (int)compositor_call(syscall(memfd_create), (positive)"moonwater-x-index", 1, 0, 0, 0, 0) : -1;
                 if (in->index < 0)
                         compositor_xwm_in_free(x, at);
                 else
@@ -2452,7 +1711,6 @@ static void compositor_xwm_in_end(struct compositor_xwm *x, long at, int ok)
         if (ok && in->target == in->text)
         {
                 long mapped = in->done ? compositor_call(syscall(mmap), 0, (positive)(in->total + in->done), 1, 1, (positive)in->fd, 0) : -22;
-
                 ok = !(mapped < 0 && mapped > -4096) && windows_clip_text((const unsigned char *)mapped + in->total, in->done);
                 if (!(mapped < 0 && mapped > -4096))
                         compositor_call(syscall(munmap), (positive)mapped, (positive)(in->total + in->done), 0, 0, 0, 0);
@@ -2467,9 +1725,6 @@ static void compositor_xwm_in_end(struct compositor_xwm *x, long at, int ok)
         compositor_xwm_in_next(x, at);
 }
 
-/* The next part of the value asked for (GetProperty, deleting it once the last of it is read): as much as a reply holds, and for a pipe
-   as much as the pipe has room for now (a value made UTF-8 from Latin-1 counted twice). None while there is no room: ready says a
-   piece waits, and the pump is asked to knock when it has made some. */
 static void compositor_xwm_in_ask(struct compositor_xwm *x, long at)
 {
         struct compositor_xwm_in *in = compositor_xwm_in_at(x, at);
@@ -2481,15 +1736,11 @@ static void compositor_xwm_in_ask(struct compositor_xwm *x, long at)
         if (!in->eager)
         {
                 long room = compositor_xwm_pipe_room(in->fd);
-
-                // No room: the pump is asked to knock once it has made some, and the room looked at again (it may have made it meanwhile).
                 if ((in->latin1 ? room / 2 : room) / XWM_UNIT < 1024 && in->pump >= 0)
-                {
-                        compositor_wl_pump_nudge(in->pump);
-                        room = compositor_xwm_pipe_room(in->fd);
-                }
+                        compositor_wl_pump_nudge(in->pump), room = compositor_xwm_pipe_room(in->fd);
                 units = (in->latin1 ? room / 2 : room) / XWM_UNIT;
-                units = units > COMPOSITOR_XWM_PIECE_UNITS ? COMPOSITOR_XWM_PIECE_UNITS : units;
+                if (units > COMPOSITOR_XWM_PIECE_UNITS)
+                        units = COMPOSITOR_XWM_PIECE_UNITS;
                 if (units < 1024)
                 {
                         in->ready = 1;
@@ -2498,67 +1749,53 @@ static void compositor_xwm_in_ask(struct compositor_xwm *x, long at)
         }
         in->ready = 0;
         if (compositor_xwm_wait(x, req, xwm_enc_get_property(req, sizeof req, 1, in->window, x->atoms[COMPOSITOR_XWM_A_SELECTION], 0, (unsigned int)in->offset,
-                                                          (unsigned int)units),
+                                                             (unsigned int)units),
                                 in->window, COMPOSITOR_XWM_PROP_SEL, (unsigned int)at) == 0)
                 in->asking = 1;
 }
 
-// Bytes of a value to where they go (STRING made UTF-8 on the way): 1, or 0 when they could not all go (the limit, or the reader gone).
 static int compositor_xwm_in_write(struct compositor_xwm_in *in, const unsigned char *bytes, unsigned long count)
 {
         unsigned char wide[8192];
-
         for (unsigned long at = 0; at < count;)
         {
-                unsigned long take = in->latin1 ? (count - at > 4096 ? 4096 : count - at) : count - at, put = take;
-                const unsigned char *from = bytes + at;
-                long wrote = 0;
-
-                if (in->latin1)
+                unsigned long take = in->latin1 && count - at > 4096 ? 4096 : count - at;
+                unsigned long put = in->latin1 ? xwm_latin1_utf8(bytes + at, take, wide) : take;
+                const unsigned char *from = in->latin1 ? wide : bytes + at;
+                for (unsigned long done = 0; done < put;)
                 {
-                        put = xwm_latin1_utf8(bytes + at, take, wide);
-                        from = wide;
-                }
-                for (unsigned long done = 0; done < put; done += (unsigned long)wrote)
-                {
-                        wrote = compositor_call(syscall(write), (positive)in->fd, (positive)(from + done), (positive)(put - done), 0, 0, 0);
+                        long wrote = compositor_call(syscall(write), (positive)in->fd, (positive)(from + done), (positive)(put - done), 0, 0, 0);
                         if (wrote <= 0)
                                 return 0;
+                        done += (unsigned long)wrote;
                 }
-                in->done += put;
-                at += take;
+                in->done += put, at += take;
         }
         in->deadline = clock_monotonic_nanoseconds() + COMPOSITOR_XWM_TRANSFER_NS;
         return 1;
 }
 
-// Best text target using Canvas's canonical windows_clip_text_rank().
 static unsigned int compositor_xwm_best_text(struct compositor_xwm *x, const unsigned int *atoms, long count)
 {
         unsigned int best = 0;
         int best_rank = 0;
-
         for (long k = 0; k < count; k++)
         {
                 unsigned long len = 0;
                 const unsigned char *name = compositor_xwm_atom_name(x, atoms[k], &len);
                 int rank = name ? windows_clip_text_rank((const char *)name, len) : 0;
-
                 if (rank && (!best_rank || rank < best_rank))
                         best_rank = rank, best = atoms[k];
         }
         return best;
 }
 
-/* A reply to a conversion's GetProperty: TARGETS listed (their names asked for), the INCR that starts a value in pieces, a part of the
-   value, or the end: a value whole, a part past which nothing is left, or INCR's empty piece. */
 static void compositor_xwm_in_reply(struct compositor_xwm *x, const unsigned char *msg, long size, const struct compositor_xwm_pending *p)
 {
         long at = (long)p->slot;
         struct compositor_xwm_in *in = compositor_xwm_in_at(x, at);
         struct xwm_property_reply r;
         unsigned long incr = 0;
-        int first;
 
         if (!in || in->window != p->window)
                 return;
@@ -2575,86 +1812,57 @@ static void compositor_xwm_in_reply(struct compositor_xwm *x, const unsigned cha
         }
         if (in->stage == COMPOSITOR_XWM_IN_TARGETS)
         {
-                unsigned char req[32];
-
                 wayland_tables_host(&compositor_wl_host);
-                for (unsigned long k = 0; r.format == XWM_FORMAT_32 && k + 4 <= r.value_len; k += 4)
+                for (unsigned long k = 0; r.format == XWM_FORMAT_32 && k + 4 <= r.value_len && in->targets.count < COMPOSITOR_XWM_TARGETS_MOST; k += 4)
                 {
                         unsigned int atom = xwm_get32(r.value + k);
-
-                        // The first COMPOSITOR_XWM_TARGETS_MOST (no toolkit offers more): each is named of the server, so a list of thousands filled
-                        // the queue to the server and broke the connection.
-                        if (in->targets.count >= COMPOSITOR_XWM_TARGETS_MOST)
-                                break;
-                        if (!atom || !wayland_table_reach(&in->targets, in->targets.count + 1))
-                                continue;
-                        ((unsigned int *)in->targets.at)[in->targets.count - 1] = atom;
-                        compositor_xwm_name_atom(x, atom);
+                        if (atom && wayland_table_reach(&in->targets, in->targets.count + 1))
+                                ((unsigned int *)in->targets.at)[in->targets.count - 1] = atom, compositor_xwm_name_atom(x, atom);
                 }
                 in->text = compositor_xwm_best_text(x, (const unsigned int *)in->targets.at, in->targets.count);
-                in->offset = 0;
-                // The names asked for are waited for (a reply after them), then each type is read in turn, the text first.
-                in->stage = COMPOSITOR_XWM_IN_NAMING;
-                if (compositor_xwm_wait(x, req, xwm_enc_get_property(req, sizeof req, 0, in->window, x->atoms[COMPOSITOR_XWM_A_SELECTION], 0, 0, 0), in->window,
-                                        COMPOSITOR_XWM_PROP_SEL_SYNC, (unsigned int)at) != 0)
+                in->offset = 0, in->stage = COMPOSITOR_XWM_IN_NAMING;
+                if (xwm_wait_prop(x, in->window, x->atoms[COMPOSITOR_XWM_A_SELECTION], 0, 0, COMPOSITOR_XWM_PROP_SEL_SYNC, (unsigned int)at) != 0)
                         compositor_xwm_in_end(x, at, 0);
                 return;
         }
-        first = in->offset == 0;
-        if (in->stage == COMPOSITOR_XWM_IN_ASKED && first && xwm_property_incr(&r, x->atoms[COMPOSITOR_XWM_A_INCR], &incr))
+        if (in->stage == COMPOSITOR_XWM_IN_ASKED && !in->offset && xwm_property_incr(&r, x->atoms[COMPOSITOR_XWM_A_INCR], &incr))
         {
-                // INCR: the delete told the owner to write its first piece, which comes as the property's new value.
-                in->incr = 1;
-                in->stage = COMPOSITOR_XWM_IN_PIECES;
+                in->incr = 1, in->stage = COMPOSITOR_XWM_IN_PIECES;
                 in->deadline = clock_monotonic_nanoseconds() + COMPOSITOR_XWM_TRANSFER_NS;
                 return;
         }
-        if (in->incr && first && !r.value_len && !r.bytes_after)
-        {
+        if (in->incr && !in->offset && !r.value_len && !r.bytes_after)
                 compositor_xwm_in_end(x, at, 1);
-                return;
-        }
-        if (r.value_len && !compositor_xwm_in_write(in, r.value, r.value_len))
-        {
+        else if (r.value_len && !compositor_xwm_in_write(in, r.value, r.value_len))
                 compositor_xwm_in_end(x, at, 0);
-                return;
-        }
-        if (r.bytes_after)
-        {
-                in->offset += r.value_len / XWM_UNIT;
-                compositor_xwm_in_ask(x, at);
-                return;
-        }
-        in->offset = 0;
-        if (!in->incr)
-                compositor_xwm_in_end(x, at, 1);
+        else if (r.bytes_after)
+                in->offset += r.value_len / XWM_UNIT, compositor_xwm_in_ask(x, at);
         else
-                in->stage = COMPOSITOR_XWM_IN_PIECES;
+        {
+                in->offset = 0;
+                if (!in->incr)
+                        compositor_xwm_in_end(x, at, 1);
+                else
+                        in->stage = COMPOSITOR_XWM_IN_PIECES;
+        }
 }
 
-// A SelectionNotify for one of the window manager's conversions: refused (property 0) is its end, else its value is read.
 static int compositor_xwm_in_notify(struct compositor_xwm *x, const struct xwm_event *e)
 {
-
         for (long at = 0; at < x->in_table.count; at++)
                 if (x->ins[at].window && x->ins[at].window == e->requestor)
                 {
                         if (!e->property)
                                 compositor_xwm_in_end(x, at, 0);
                         else if (x->ins[at].stage == COMPOSITOR_XWM_IN_TARGETS || x->ins[at].stage == COMPOSITOR_XWM_IN_ASKED)
-                        {
-                                x->ins[at].offset = 0;
-                                compositor_xwm_in_ask(x, at);
-                        }
+                                x->ins[at].offset = 0, compositor_xwm_in_ask(x, at);
                         return 1;
                 }
         return 0;
 }
 
-// A property of a requestor window changed: the owner's next INCR piece is there to read.
 static int compositor_xwm_in_property(struct compositor_xwm *x, const struct xwm_event *e)
 {
-
         for (long at = 0; at < x->in_table.count; at++)
                 if (x->ins[at].window && x->ins[at].window == e->window)
                 {
@@ -2665,14 +1873,12 @@ static int compositor_xwm_in_property(struct compositor_xwm *x, const struct xwm
         return 0;
 }
 
-/* A Wayland client's receive of a type of an X drag (which 2): converted into a pipe whose other end a pump writes to the client's
-   descriptor. Refused (the descriptor closed, the client reads an end) when the type has no atom or there is no X drag. */
 static unsigned int compositor_xwm_drag_target(struct compositor_xwm *x, const char *mime, unsigned long length, unsigned int *time);
 
 static void compositor_xwm_receive(long client, long which, const char *mime, long fd)
 {
         struct compositor_xwm *x = compositor_xwm_first_ready();
-        unsigned long length = 0;
+        unsigned long length = mime ? (unsigned long)string_length((string_address)mime) : 0;
         unsigned int target = 0, time = XWM_CURRENT_TIME;
         int fds[2] = {-1, -1};
         long pump, at;
@@ -2686,8 +1892,6 @@ static void compositor_xwm_receive(long client, long which, const char *mime, lo
                                 x = &compositor_xwm_slots[s];
                                 break;
                         }
-        while (mime && mime[length])
-                length++;
         if (which == 2 && x->fd >= 0 && x->ready)
                 target = compositor_xwm_drag_target(x, mime, length, &time);
         if (!target || compositor_xwm_pipe(fds, 1) != 0)
@@ -2695,21 +1899,13 @@ static void compositor_xwm_receive(long client, long which, const char *mime, lo
                 system_close((int)fd);
                 return;
         }
-        pump = compositor_wl_pump(fds[0], (int)fd);
-        if (pump < 0)
-        {
-                system_close(fds[1]);
-                return;
-        }
-        // From here the pump holds the read end and the client's descriptor: closing the write end is the end it reads.
-        at = compositor_xwm_in_new(x, (int)which, target, time, 0, fds[1], -1);
-        if (at < 0)
+        if ((pump = compositor_wl_pump(fds[0], (int)fd)) < 0 || (at = compositor_xwm_in_new(x, (int)which, target, time, 0, fds[1], -1)) < 0)
                 system_close(fds[1]);
         else
                 x->ins[at].pump = pump;
 }
 
-/* ---- the conversions the window manager answers ---- */
+/* ---- selection conversions answered by XWM (out) ---- */
 
 static struct compositor_xwm_out *compositor_xwm_out_at(struct compositor_xwm *x, long at)
 {
@@ -2719,7 +1915,6 @@ static struct compositor_xwm_out *compositor_xwm_out_at(struct compositor_xwm *x
 static void compositor_xwm_out_free(struct compositor_xwm *x, long at)
 {
         struct compositor_xwm_out *o = compositor_xwm_out_at(x, at);
-
         if (!o)
                 return;
         if (o->fd >= 0)
@@ -2730,16 +1925,13 @@ static void compositor_xwm_out_free(struct compositor_xwm *x, long at)
 
 static unsigned char compositor_xwm_piece[XWM_INCR_CHUNK];
 
-// count bytes of the compositor's text from where the transfer is, into the piece: the bytes read.
 static unsigned long compositor_xwm_out_read(struct compositor_xwm_out *o, unsigned long count)
 {
         unsigned long got = 0;
-
         while (got < count)
         {
                 long n = compositor_call(syscall(pread64), (positive)o->fd, (positive)(compositor_xwm_piece + got), (positive)(count - got),
                                          (positive)(o->base + o->offset + got), 0, 0);
-
                 if (n <= 0)
                         break;
                 got += (unsigned long)n;
@@ -2747,8 +1939,6 @@ static unsigned long compositor_xwm_out_read(struct compositor_xwm_out *o, unsig
         return got;
 }
 
-/* The next step of an answer, when the queue to the server has room for it: a value whole and its notify; INCR's start (PropertyChange
-   selected on the requestor) and its notify; a piece, once the requestor deleted the last; and the empty piece that ends it. */
 static void compositor_xwm_out_step(struct compositor_xwm *x, long at)
 {
         struct compositor_xwm_out *o = compositor_xwm_out_at(x, at);
@@ -2758,12 +1948,10 @@ static void compositor_xwm_out_step(struct compositor_xwm *x, long at)
                 return;
         if (o->stage == COMPOSITOR_XWM_OUT_START && o->from == COMPOSITOR_XWM_FROM_FILE && !xwm_incr_needed(o->size))
         {
-                unsigned long got, put;
-
                 if ((unsigned long)room < 32 + o->size)
                         return;
-                got = compositor_xwm_out_read(o, o->size);
-                put = o->latin1 ? xwm_utf8_latin1(&o->cut, compositor_xwm_piece, got, compositor_xwm_piece) : got;
+                unsigned long got = compositor_xwm_out_read(o, o->size);
+                unsigned long put = o->latin1 ? xwm_utf8_latin1(&o->cut, compositor_xwm_piece, got, compositor_xwm_piece) : got;
                 if (got == o->size)
                         compositor_xwm_put(x, o->requestor, o->property, o->type, XWM_FORMAT_8, compositor_xwm_piece, put);
                 if (!o->quiet)
@@ -2774,23 +1962,17 @@ static void compositor_xwm_out_step(struct compositor_xwm *x, long at)
         if (o->stage == COMPOSITOR_XWM_OUT_START)
         {
                 unsigned char req[32];
-                long n = xwm_enc_incr(req, sizeof req, o->requestor, o->property, x->atoms[COMPOSITOR_XWM_A_INCR],
-                                      o->size == XWM_INCR_SIZE_UNKNOWN ? XWM_INCR_CHUNK : o->size);
-
                 compositor_xwm_select(x, o->requestor, XWM_MASK_PROPERTY_CHANGE);
-                if (n > 0)
-                        compositor_xwm_queue(x, req, n);
+                compositor_xwm_queue(x, req, xwm_enc_incr(req, sizeof req, o->requestor, o->property, x->atoms[COMPOSITOR_XWM_A_INCR],
+                                                          o->size == XWM_INCR_SIZE_UNKNOWN ? XWM_INCR_CHUNK : o->size));
                 if (!o->quiet)
                         compositor_xwm_notify(x, o->time, o->requestor, o->selection, o->target, o->property);
-                o->stage = COMPOSITOR_XWM_OUT_WAIT;
-                o->deadline = clock_monotonic_nanoseconds() + COMPOSITOR_XWM_TRANSFER_NS;
+                o->stage = COMPOSITOR_XWM_OUT_WAIT, o->deadline = clock_monotonic_nanoseconds() + COMPOSITOR_XWM_TRANSFER_NS;
                 return;
         }
         for (;;)
         {
-                unsigned long most = xwm_incr_piece(o->from == COMPOSITOR_XWM_FROM_FILE ? o->size - o->offset : XWM_INCR_CHUNK, (unsigned long)room);
-                unsigned long got, put;
-
+                unsigned long most = xwm_incr_piece(o->from == COMPOSITOR_XWM_FROM_FILE ? o->size - o->offset : XWM_INCR_CHUNK, (unsigned long)room), got, put;
                 if (!most && (o->from == COMPOSITOR_XWM_FROM_PIPE || o->offset < o->size))
                         return;
                 if (o->from == COMPOSITOR_XWM_FROM_FILE)
@@ -2798,50 +1980,34 @@ static void compositor_xwm_out_step(struct compositor_xwm *x, long at)
                 else
                 {
                         long n = compositor_call(syscall(read), (positive)o->fd, (positive)compositor_xwm_piece, (positive)most, 0, 0, 0);
-
-                        // Nothing in the pipe yet: the pump knocks once it has put some there, and the pipe is read again (it may have meanwhile).
                         if (n == COMPOSITOR_XWM_EAGAIN && o->pump >= 0)
-                        {
-                                compositor_wl_pump_nudge(o->pump);
-                                n = compositor_call(syscall(read), (positive)o->fd, (positive)compositor_xwm_piece, (positive)most, 0, 0, 0);
-                        }
+                                compositor_wl_pump_nudge(o->pump), n = compositor_call(syscall(read), (positive)o->fd, (positive)compositor_xwm_piece, (positive)most, 0, 0, 0);
                         if (n == COMPOSITOR_XWM_EAGAIN)
                                 return;
                         got = n > 0 ? (unsigned long)n : 0;
                 }
                 put = o->latin1 ? xwm_utf8_latin1(&o->cut, compositor_xwm_piece, got, compositor_xwm_piece) : got;
-                // Only the start of a character: more is read before a piece is written (an empty one would be the end).
                 if (got && !put)
                         continue;
                 compositor_xwm_put(x, o->requestor, o->property, o->type, XWM_FORMAT_8, compositor_xwm_piece, put);
                 o->offset += got;
                 if (!got)
-                {
                         compositor_xwm_out_free(x, at);
-                        return;
-                }
-                o->stage = COMPOSITOR_XWM_OUT_WAIT;
-                o->deadline = clock_monotonic_nanoseconds() + COMPOSITOR_XWM_TRANSFER_NS;
+                else
+                        o->stage = COMPOSITOR_XWM_OUT_WAIT, o->deadline = clock_monotonic_nanoseconds() + COMPOSITOR_XWM_TRANSFER_NS;
                 return;
         }
 }
 
-// The requestor deleted the piece it read: the next is written.
 static void compositor_xwm_out_property(struct compositor_xwm *x, const struct xwm_event *e)
 {
-
         if (e->state != 1)
                 return;
         for (long at = 0; at < x->out_table.count; at++)
-                if (x->outs[at].requestor && x->outs[at].requestor == e->window && x->outs[at].property == e->atom &&
-                    x->outs[at].stage == COMPOSITOR_XWM_OUT_WAIT)
-                {
-                        x->outs[at].stage = COMPOSITOR_XWM_OUT_NEXT;
-                        compositor_xwm_out_step(x, at);
-                }
+                if (x->outs[at].requestor == e->window && x->outs[at].property == e->atom && x->outs[at].stage == COMPOSITOR_XWM_OUT_WAIT)
+                        x->outs[at].stage = COMPOSITOR_XWM_OUT_NEXT, compositor_xwm_out_step(x, at);
 }
 
-/* The types of the drag's Wayland source (2), each with its null; text says whether text is among them. */
 static long compositor_xwm_drag_types(const char **types);
 
 static long compositor_xwm_side_types(int which, const char **types, int *text)
@@ -2849,12 +2015,10 @@ static long compositor_xwm_side_types(int which, const char **types, int *text)
         long bytes = which == 2 ? compositor_xwm_drag_types(types) : 0;
         const char *entry;
         unsigned long n;
-
         *text = 0;
         for (long at = 0; !*text && (entry = xwm_mime_next(*types, bytes, &at, &n));)
         {
                 int k = xwm_target_kind((const unsigned char *)entry, n);
-
                 *text = k == XWM_TARGET_UTF8 || k == XWM_TARGET_LATIN1;
         }
         return bytes;
@@ -2863,7 +2027,6 @@ static long compositor_xwm_side_types(int which, const char **types, int *text)
 static unsigned int compositor_xwm_atom_of(struct compositor_xwm *x, const char *name, unsigned long length)
 {
         long found = compositor_xwm_atom_named(x, (const unsigned char *)name, length);
-
         return found >= 0 && x->atom[found].known ? x->atom[found].atom : 0;
 }
 
@@ -2871,7 +2034,6 @@ static unsigned int xwm_push_text_atoms(const struct compositor_xwm *x, unsigned
 {
         unsigned int list[5] = {x->atoms[COMPOSITOR_XWM_A_UTF8], x->atoms[COMPOSITOR_XWM_A_MIME_UTF8],
                                 x->atoms[COMPOSITOR_XWM_A_MIME_TEXT], COMPOSITOR_XWM_XA_STRING, x->atoms[COMPOSITOR_XWM_A_TEXT]};
-
         for (unsigned int k = 0; k < 5 && count < cap; k++)
                 out[count++] = list[k];
         return count;
@@ -2879,10 +2041,7 @@ static unsigned int xwm_push_text_atoms(const struct compositor_xwm *x, unsigned
 
 static void xwm_put_timestamp(struct compositor_xwm *x, unsigned int requestor, unsigned int property, int which)
 {
-        unsigned char data[4];
-
-        xwm_put32(data, x->sel[which].owned_time);
-        compositor_xwm_put(x, requestor, property, COMPOSITOR_XWM_XA_INTEGER, XWM_FORMAT_32, data, 4);
+        compositor_xwm_put32(x, requestor, property, COMPOSITOR_XWM_XA_INTEGER, &x->sel[which].owned_time, 1);
 }
 
 static void compositor_xwm_targets(struct compositor_xwm *x, const struct xwm_event *e, int which, unsigned int property, int quiet)
@@ -2920,30 +2079,20 @@ static long compositor_xwm_side_mime(int which, int kind, const unsigned char *n
         unsigned long n;
         int text = 0;
         long bytes = compositor_xwm_side_types(which, &types, &text);
-
         for (long at = 0; (entry = xwm_mime_next(types, bytes, &at, &n));)
         {
                 int is = xwm_target_kind((const unsigned char *)entry, n);
-
                 if ((kind == XWM_TARGET_MIME && n == length && !memory_compare(entry, name, (positive)length)) ||
                     (kind != XWM_TARGET_MIME && (is == XWM_TARGET_UTF8 || is == XWM_TARGET_LATIN1)))
-                {
-                        *mime = entry;
-                        return (long)n;
-                }
+                        return *mime = entry, (long)n;
         }
         return 0;
 }
 
 static int compositor_xwm_drag_send(const char *mime, long fd);
 
-/* An answer begun: from the compositor's text (a descriptor of its own) or, for any other type and for a drag, from the Wayland source's
-   send into a pipe a pump fills. 0 when it is refused. */
-/* The answers to a requestor window that is gone (DestroyNotify), or to its property when it asks again into it: a requestor that was
-   killed in the middle of an INCR, whose window number the next client is given, deletes nothing of the old one's. */
 static void compositor_xwm_out_gone(struct compositor_xwm *x, unsigned int requestor, unsigned int property)
 {
-
         for (long at = 0; requestor && at < x->out_table.count; at++)
                 if (x->outs[at].requestor == requestor && (!property || x->outs[at].property == property))
                         compositor_xwm_out_free(x, at);
@@ -2962,7 +2111,6 @@ static long compositor_xwm_out_begin(struct compositor_xwm *x, const struct xwm_
         compositor_xwm_out_gone(x, e->requestor, property);
         if (!name || (which < 2 && !compositor_xwm_may_paste(x, e->requestor)))
                 return -1;
-        // The compositor's copy: the type of the target's name (a name text goes by is its text), wherever it is in the copy.
         if (which < 2)
         {
                 if (compositor_clip.fd[which] < 0 ||
@@ -2971,85 +2119,42 @@ static long compositor_xwm_out_begin(struct compositor_xwm *x, const struct xwm_
                 if (!windows_clip_same(type.name, type.name_length, WINDOWS_CLIP_TEXT))
                         kind = XWM_TARGET_MIME;
                 from = COMPOSITOR_XWM_FROM_FILE;
-                fd = (int)compositor_call(syscall(fcntl), (positive)compositor_clip.fd[which], COMPOSITOR_F_DUPFD_CLOEXEC, 0, 0, 0, 0);
-                if (fd < 0)
+                if ((fd = (int)compositor_call(syscall(fcntl), (positive)compositor_clip.fd[which], COMPOSITOR_F_DUPFD_CLOEXEC, 0, 0, 0, 0)) < 0)
                         return -1;
         }
         else
         {
                 int source[2], ours[2];
-                long pump;
-
                 if (kind == XWM_TARGET_NONE || !compositor_xwm_side_mime(which, kind, name, length, &mime) || compositor_xwm_pipe(source, 0) != 0)
                         return -1;
                 if (compositor_xwm_pipe(ours, 0) != 0)
-                {
-                        system_close(source[0]);
-                        system_close(source[1]);
-                        return -1;
-                }
-                // The source's write end is the shim's once it is sent; then the pump reads the other into the window manager's pipe.
+                        return system_close(source[0]), system_close(source[1]), -1;
                 if (!compositor_xwm_drag_send(mime, source[1]))
-                {
-                        system_close(source[0]);
-                        system_close(source[1]);
-                        system_close(ours[0]);
-                        system_close(ours[1]);
-                        return -1;
-                }
-                pump = compositor_wl_pump(source[0], ours[1]);
-                if (pump < 0)
-                {
-                        system_close(ours[0]);
-                        return -1;
-                }
-                pump_at = pump;
-                from = COMPOSITOR_XWM_FROM_PIPE;
-                fd = ours[0];
+                        return system_close(source[0]), system_close(source[1]), system_close(ours[0]), system_close(ours[1]), -1;
+                if ((pump_at = compositor_wl_pump(source[0], ours[1])) < 0)
+                        return system_close(ours[0]), -1;
+                from = COMPOSITOR_XWM_FROM_PIPE, fd = ours[0];
         }
-        wayland_tables_host(&compositor_wl_host);
-        x->out_table.unit = sizeof(struct compositor_xwm_out);
-        at = wayland_table_take(&x->out_table);
-        if (at < 0)
-        {
-                system_close(fd);
-                return -1;
-        }
+        if ((at = xwm_tbl_take(&x->out_table, sizeof(struct compositor_xwm_out))) < 0)
+                return system_close(fd), -1;
         x->outs = (struct compositor_xwm_out *)x->out_table.at;
         o = &x->outs[at];
         memory_zero(o, sizeof *o);
-        o->requestor = e->requestor;
-        o->property = property;
-        o->selection = e->selection;
-        o->target = e->target;
-        o->time = e->time;
-        o->which = (unsigned char)which;
-        o->from = (unsigned char)from;
-        o->latin1 = kind == XWM_TARGET_LATIN1;
+        o->requestor = e->requestor, o->property = property, o->selection = e->selection, o->target = e->target, o->time = e->time;
+        o->which = (unsigned char)which, o->from = (unsigned char)from, o->latin1 = kind == XWM_TARGET_LATIN1;
         o->type = kind == XWM_TARGET_LATIN1 ? COMPOSITOR_XWM_XA_STRING : e->target == x->atoms[COMPOSITOR_XWM_A_TEXT] ? x->atoms[COMPOSITOR_XWM_A_UTF8] : e->target;
-        o->fd = fd;
-        o->pump = pump_at;
-        o->quiet = (unsigned char)quiet;
-        o->base = type.offset;
+        o->fd = fd, o->pump = pump_at, o->quiet = (unsigned char)quiet, o->base = type.offset;
         o->size = from == COMPOSITOR_XWM_FROM_FILE ? type.length : XWM_INCR_SIZE_UNKNOWN;
-        o->stage = COMPOSITOR_XWM_OUT_START;
-        o->deadline = clock_monotonic_nanoseconds() + COMPOSITOR_XWM_TRANSFER_NS;
+        o->stage = COMPOSITOR_XWM_OUT_START, o->deadline = clock_monotonic_nanoseconds() + COMPOSITOR_XWM_TRANSFER_NS;
         compositor_xwm_out_step(x, at);
         return at;
 }
 
-/* MULTIPLE (ICCCM 2.6.2): the pairs of targets and properties the requestor wrote in its property are read, each answered into its
-   property as any request is (no notify of its own), a target that cannot be (or whose first step finds no room in the queue to the
-   server) made None in the pairs, and the pairs written back with the one notify of the MULTIPLE. */
 static void compositor_xwm_multiple(struct compositor_xwm *x, const struct xwm_event *e, int which, unsigned int property)
 {
         struct compositor_xwm_out *o;
-        unsigned char req[32];
-        long at;
+        long at = xwm_tbl_take(&x->out_table, sizeof(struct compositor_xwm_out));
 
-        wayland_tables_host(&compositor_wl_host);
-        x->out_table.unit = sizeof(struct compositor_xwm_out);
-        at = wayland_table_take(&x->out_table);
         if (at < 0)
         {
                 compositor_xwm_notify(x, e->time, e->requestor, e->selection, e->target, 0);
@@ -3061,12 +2166,8 @@ static void compositor_xwm_multiple(struct compositor_xwm *x, const struct xwm_e
         o->requestor = e->requestor, o->property = property, o->selection = e->selection, o->target = e->target, o->time = e->time;
         o->which = (unsigned char)which, o->stage = COMPOSITOR_XWM_OUT_MULTIPLE, o->fd = -1, o->pump = -1;
         o->deadline = clock_monotonic_nanoseconds() + COMPOSITOR_XWM_TRANSFER_NS;
-        if (compositor_xwm_wait(x, req, xwm_enc_get_property(req, sizeof req, 0, e->requestor, property, 0, 0, COMPOSITOR_XWM_PIECE_UNITS), e->requestor,
-                                COMPOSITOR_XWM_PROP_MULTIPLE, (unsigned int)at) != 0)
-        {
-                compositor_xwm_notify(x, e->time, e->requestor, e->selection, e->target, 0);
-                compositor_xwm_out_free(x, at);
-        }
+        if (xwm_wait_prop(x, e->requestor, property, 0, COMPOSITOR_XWM_PIECE_UNITS, COMPOSITOR_XWM_PROP_MULTIPLE, (unsigned int)at) != 0)
+                compositor_xwm_notify(x, e->time, e->requestor, e->selection, e->target, 0), compositor_xwm_out_free(x, at);
 }
 
 static void compositor_xwm_multiple_reply(struct compositor_xwm *x, const unsigned char *msg, long size, const struct compositor_xwm_pending *p)
@@ -3116,21 +2217,15 @@ static void compositor_xwm_multiple_reply(struct compositor_xwm *x, const unsign
         compositor_xwm_notify(x, multiple.time, multiple.requestor, multiple.selection, multiple.target, multiple.property);
 }
 
-/* SAVE_TARGETS (the clipboard manager's, freedesktop's ClipboardManager): an X client that owns the clipboard asks the manager to keep
-   its copy before it quits. The compositor reads every X copy whole when it is made, so the answer is the copy's own: at once when it
-   is the compositor's, when its read ends while it is being read, and None when it is neither (a copy the person did not make). */
 static void compositor_xwm_save(struct compositor_xwm *x, const struct xwm_event *e, unsigned int property)
 {
         int row = compositor.table ? compositor.table->clip_owner[0] : -1;
-        int ours = 0;
+        struct compositor_xwm_window *ow;
 
         if (e->target == x->atoms[COMPOSITOR_XWM_A_TARGETS])
         {
-                unsigned char data[8];
-
-                xwm_put32(data, x->atoms[COMPOSITOR_XWM_A_TARGETS]);
-                xwm_put32(data + 4, x->atoms[COMPOSITOR_XWM_A_SAVE_TARGETS]);
-                compositor_xwm_put(x, e->requestor, property, COMPOSITOR_XWM_ATOM_TYPE, XWM_FORMAT_32, data, 8);
+                unsigned int t[2] = {x->atoms[COMPOSITOR_XWM_A_TARGETS], x->atoms[COMPOSITOR_XWM_A_SAVE_TARGETS]};
+                compositor_xwm_put32(x, e->requestor, property, COMPOSITOR_XWM_ATOM_TYPE, t, 2);
                 compositor_xwm_notify(x, e->time, e->requestor, e->selection, e->target, property);
                 return;
         }
@@ -3146,18 +2241,13 @@ static void compositor_xwm_save(struct compositor_xwm *x, const struct xwm_event
                 x->save.requestor = e->requestor, x->save.property = property, x->save.time = e->time;
                 return;
         }
-        {
-                struct compositor_xwm_window *ow = xwm_row_lookup(x, row, 0);
-
-                ours = ow && compositor_xwm_same_client(x, ow->id, e->requestor);
-        }
-        compositor_xwm_notify(x, e->time, e->requestor, e->selection, e->target, ours && compositor_clip.fd[0] >= 0 ? property : 0);
+        ow = xwm_row_lookup(x, row, 0);
+        compositor_xwm_notify(x, e->time, e->requestor, e->selection, e->target,
+                              ow && compositor_xwm_same_client(x, ow->id, e->requestor) && compositor_clip.fd[0] >= 0 ? property : 0);
 }
 
-// The clipboard's X copy is the compositor's (ok) or will not be: a SAVE_TARGETS that waited for it is answered.
 static void compositor_xwm_saved(struct compositor_xwm *x, unsigned int which, int ok)
 {
-
         if (which != 0 || !x->save.requestor)
                 return;
         compositor_xwm_notify(x, x->save.time, x->save.requestor, x->atoms[COMPOSITOR_XWM_A_MANAGER], x->atoms[COMPOSITOR_XWM_A_SAVE_TARGETS],
@@ -3165,8 +2255,6 @@ static void compositor_xwm_saved(struct compositor_xwm *x, unsigned int which, i
         x->save.requestor = 0;
 }
 
-
-// A SelectionRequest of the window manager's selection window: TARGETS, TIMESTAMP, or a value; any other is refused.
 static void compositor_xwm_selection_request(struct compositor_xwm *x, const struct xwm_event *e)
 {
         int which = compositor_xwm_which(x, e->selection);
@@ -3175,34 +2263,21 @@ static void compositor_xwm_selection_request(struct compositor_xwm *x, const str
         if (e->owner != compositor_xwm_id(x, COMPOSITOR_XWM_SEL_WINDOW) || !e->requestor)
                 return;
         if (e->selection && e->selection == x->atoms[COMPOSITOR_XWM_A_MANAGER] && property)
-        {
                 compositor_xwm_save(x, e, property);
-                return;
-        }
-        if (which < 0 || (which < 2 && !x->sel[which].owned) || (which == 2 && !x->wdrag.live) || !property)
-        {
+        else if (which < 0 || (which < 2 && !x->sel[which].owned) || (which == 2 && !x->wdrag.live) || !property)
                 compositor_xwm_notify(x, e->time, e->requestor, e->selection, e->target, 0);
-                return;
-        }
-        if (e->target == x->atoms[COMPOSITOR_XWM_A_TARGETS])
+        else if (e->target == x->atoms[COMPOSITOR_XWM_A_TARGETS])
                 compositor_xwm_targets(x, e, which, property, 0);
         else if (e->target == x->atoms[COMPOSITOR_XWM_A_TIMESTAMP])
-        {
-                xwm_put_timestamp(x, e->requestor, property, which);
-                compositor_xwm_notify(x, e->time, e->requestor, e->selection, e->target, property);
-        }
+                xwm_put_timestamp(x, e->requestor, property, which), compositor_xwm_notify(x, e->time, e->requestor, e->selection, e->target, property);
         else if (e->target == x->atoms[COMPOSITOR_XWM_A_MULTIPLE] && which < 2)
                 compositor_xwm_multiple(x, e, which, property);
         else if (compositor_xwm_out_begin(x, e, which, property, 0) < 0)
                 compositor_xwm_notify(x, e->time, e->requestor, e->selection, e->target, 0);
 }
 
-/* ---- who owns a selection ---- */
-
 static void compositor_xwm_xdnd_owner(struct compositor_xwm *x, unsigned int owner);
 
-/* XFIXES: a selection's owner changed. The window manager's own is the time it owns it from. An X client's copy is read into the
-   compositor's when the person has just touched that client, and one whose owner went is the compositor's still, owned in X again. */
 static void compositor_xwm_owner(struct compositor_xwm *x, const struct xwm_event *e)
 {
         int which = compositor_xwm_which(x, e->selection), row;
@@ -3225,29 +2300,20 @@ static void compositor_xwm_owner(struct compositor_xwm *x, const struct xwm_even
         x->sel[which].owned = 0;
         if (x->sel[which].reading >= 0)
                 compositor_xwm_in_free(x, x->sel[which].reading);
-        // Its owner gone (or one that is no X client's): the compositor's copy is owned in X again, by the window manager.
         if (!owner)
         {
                 x->sel[which].dirty = 1;
                 return;
         }
-        row = compositor_xwm_copy_row(x, owner);
-        if (row < 0)
+        if ((row = compositor_xwm_copy_row(x, owner)) < 0 ||
+            (fd = compositor_call(syscall(memfd_create), (positive)"moonwater-x-copy", 3, 0, 0, 0, 0)) < 0)
                 return;
-        // MFD_CLOEXEC | MFD_ALLOW_SEALING
-        fd = compositor_call(syscall(memfd_create), (positive) "moonwater-x-copy", 3, 0, 0, 0, 0);
-        if (fd < 0)
-                return;
-        at = compositor_xwm_in_new(x, which, x->atoms[COMPOSITOR_XWM_A_TARGETS], e->selection_time, 1, (int)fd, row);
-        if (at < 0)
+        if ((at = compositor_xwm_in_new(x, which, x->atoms[COMPOSITOR_XWM_A_TARGETS], e->selection_time, 1, (int)fd, row)) < 0)
                 system_close((int)fd);
         else
                 x->sel[which].reading = at;
 }
 
-/* The selections owned in X as the compositor holds them: owned by the selection window while there is a copy, the atoms of the names
-   it is offered under interned first; let go when there is none. Then each transfer's step, and those that moved nothing in their time
-   let go. */
 static void compositor_xwm_selections_pass(struct compositor_xwm *x)
 {
         positive now = clock_monotonic_nanoseconds();
@@ -3261,7 +2327,6 @@ static void compositor_xwm_selections_pass(struct compositor_xwm *x)
                 {
                         const char *name;
                         unsigned long length;
-
                         for (unsigned long nth = 0; (name = windows_clip_offered(compositor_clip.map[which], compositor.table->clip_length[which], nth, 1, &length));
                              nth++)
                                 if (!windows_clip_same(name, length, "STRING"))
@@ -3274,7 +2339,6 @@ static void compositor_xwm_selections_pass(struct compositor_xwm *x)
         for (long at = 0; at < x->in_table.count && x->fd >= 0 && !x->broken; at++)
         {
                 struct compositor_xwm_in *in = compositor_xwm_in_at(x, at);
-
                 if (in && now > in->deadline)
                         compositor_xwm_in_end(x, at, 0);
                 else if (in && in->ready && !in->asking)
@@ -3283,7 +2347,6 @@ static void compositor_xwm_selections_pass(struct compositor_xwm *x)
         for (long at = 0; at < x->out_table.count && x->fd >= 0 && !x->broken; at++)
         {
                 struct compositor_xwm_out *o = compositor_xwm_out_at(x, at);
-
                 if (o && now > o->deadline)
                         compositor_xwm_out_free(x, at);
                 else if (o && o->stage != COMPOSITOR_XWM_OUT_WAIT)
@@ -3291,36 +2354,13 @@ static void compositor_xwm_selections_pass(struct compositor_xwm *x)
         }
 }
 
-/*
-        ---- drag and drop (DRAG AND DROP): XDND version 5 between the X windows and the Wayland ones ----
+/* ---- bidirectional XDND v5 ---- */
 
-        A Wayland drag over an X window (the shim's xdrag): the window manager owns XdndSelection with its selection window, which is the
-        XDND source; the X window's XdndAware is read (its types' atoms interned before, so they are known when the reply comes), then
-        XdndEnter with the types (text as the five text targets, more than three in XdndTypeList), an XdndPosition at a time (the next
-        once the status of the last has come), each XdndStatus told to the shim as the type taken and the action; the drop is XdndDrop,
-        the conversion of XdndSelection is answered from the source's send (as a selection's is, by INCR through a pump), and
-        XdndFinished is the drag's end. A leave, a cancel (Escape, the source gone) or the X window gone is XdndLeave, or the drop failed.
-
-        An X drag over a Wayland window: while an X client owns XdndSelection and holds the left button on its window, and the pointer is
-        over a Wayland client's window, the window manager's proxy (input only, XdndAware) is mapped over that window, on top, so the X
-        source finds it there, and unmapped elsewhere (the X windows find their own). Its XdndEnter's types are named (their atoms'
-        names asked for, the Wayland drag begun once they have come), its XdndPosition the Wayland drag's motion over the window under
-        that place, answered by XdndStatus with what the Wayland target takes (and again when that changes), its XdndLeave the drag's
-        leave, its XdndDrop the drop; the target's receive converts XdndSelection with the drop's time into the target's descriptor, and
-        the drag's end is XdndFinished, accepted when the target finished.
-*/
-
-// A client message of window to, sent to dest (XDND's proxy: the message names the window under the pointer and goes to its proxy).
 static void compositor_xwm_message_via(struct compositor_xwm *x, unsigned int dest, unsigned int to, unsigned int type, const unsigned int *data)
 {
-        unsigned char event[XWM_EVENT_SIZE], req[64];
-        long n;
-
-        if (!to || !dest || xwm_enc_client_message(event, sizeof event, to, type, data, XWM_DATA_LONGS) != XWM_EVENT_SIZE)
-                return;
-        n = xwm_enc_send_event(req, sizeof req, 0, dest, 0, event, XWM_EVENT_SIZE);
-        if (n > 0)
-                compositor_xwm_queue(x, req, n);
+        unsigned char event[XWM_EVENT_SIZE];
+        if (to && dest && xwm_enc_client_message(event, sizeof event, to, type, data, XWM_DATA_LONGS) == XWM_EVENT_SIZE)
+                compositor_xwm_send_event(x, dest, 0, 0, event, XWM_EVENT_SIZE);
 }
 
 static void compositor_xwm_message32(struct compositor_xwm *x, unsigned int to, unsigned int type, const unsigned int *data)
@@ -3328,10 +2368,8 @@ static void compositor_xwm_message32(struct compositor_xwm *x, unsigned int to, 
         compositor_xwm_message_via(x, to, to, type, data);
 }
 
-// A message of a Wayland drag's to the X window it is over, by way of that window's proxy.
 static void compositor_xwm_wdrag_say(struct compositor_xwm *x, unsigned int type, const unsigned int *data)
 {
-
         compositor_xwm_message_via(x, x->wdrag.proxy ? x->wdrag.proxy : x->wdrag.target, x->wdrag.target, type, data);
 }
 
@@ -3345,11 +2383,7 @@ static unsigned int xwm_dnd_to_x(const struct compositor_xwm *x, unsigned int ac
         return xwm_dnd_action_atom(action, x->atoms[COMPOSITOR_XWM_A_XDND_COPY], x->atoms[COMPOSITOR_XWM_A_XDND_MOVE], x->atoms[COMPOSITOR_XWM_A_XDND_ASK]);
 }
 
-// The X window of a row (O(1) via xwm_row_map), or 0.
-static struct compositor_xwm_window *compositor_xwm_of_row(struct compositor_xwm *x, long row)
-{
-        return xwm_row_lookup(x, (int)row, 0);
-}
+static struct compositor_xwm_window *compositor_xwm_of_row(struct compositor_xwm *x, long row) { return xwm_row_lookup(x, (int)row, 0); }
 
 static unsigned int compositor_xwm_dnd_atoms(struct compositor_xwm *x, unsigned int *atoms, unsigned int room, int intern)
 {
@@ -3365,7 +2399,6 @@ static unsigned int compositor_xwm_dnd_atoms(struct compositor_xwm *x, unsigned 
                 if (xwm_target_kind((const unsigned char *)entry, n) == XWM_TARGET_MIME)
                 {
                         unsigned int atom = compositor_xwm_atom_of(x, entry, n);
-
                         if (!atom && intern)
                                 compositor_xwm_intern_name(x, (const unsigned char *)entry, n);
                         if (atom && count < room)
@@ -3377,16 +2410,13 @@ static unsigned int compositor_xwm_dnd_atoms(struct compositor_xwm *x, unsigned 
 static void compositor_xwm_wdrag_position(struct compositor_xwm *x)
 {
         unsigned int data[5] = {compositor_xwm_id(x, COMPOSITOR_XWM_SEL_WINDOW), 0, x->wdrag.place, XWM_CURRENT_TIME, x->wdrag.action};
-
         compositor_xwm_wdrag_say(x, x->atoms[COMPOSITOR_XWM_A_XDND_POSITION], data);
-        x->wdrag.waiting = 1;
-        x->wdrag.moved = 0;
+        x->wdrag.waiting = 1, x->wdrag.moved = 0;
 }
 
 static void compositor_xwm_wdrag_leave(struct compositor_xwm *x)
 {
         unsigned int data[5] = {compositor_xwm_id(x, COMPOSITOR_XWM_SEL_WINDOW), 0, 0, 0, 0};
-
         if (x->wdrag.entered)
                 compositor_xwm_wdrag_say(x, x->atoms[COMPOSITOR_XWM_A_XDND_LEAVE], data);
         x->wdrag.target = x->wdrag.proxy = 0;
@@ -3396,7 +2426,6 @@ static void compositor_xwm_wdrag_leave(struct compositor_xwm *x)
 
 static void compositor_xwm_xdrag_reset(struct compositor_xwm *x)
 {
-
         x->xdrag.source = x->xdrag.version = x->xdrag.action = x->xdrag.time = x->xdrag.told_action = x->xdrag.listed = x->xdrag.words = 0;
         x->xdrag.entered = x->xdrag.naming = x->xdrag.began = x->xdrag.dropped = x->xdrag.told_accept = x->xdrag.escaped = 0;
         x->xdrag.types.count = 0;
@@ -3405,31 +2434,18 @@ static void compositor_xwm_xdrag_reset(struct compositor_xwm *x)
 static void compositor_xwm_wdrag_actions(struct compositor_xwm *x, unsigned int actions);
 static void compositor_xwm_xdrag_ask_actions(struct compositor_xwm *x, unsigned int source);
 
-/* The shim's word of a Wayland drag over an X window (host->xdrag), or of the end of a drag of the X side's (py: its action). */
 static long xwm_xdrag_slot(struct compositor_xwm *x, long what, long row, long px, long py)
 {
-        unsigned char req[32];
-
         if (what == WAYLAND_XDRAG_END)
         {
-                // An X drag's end: its source told it finished (the target took it) or not, once it dropped.
                 if (x->xdrag.began || x->xdrag.dropped)
                 {
-                        // The action the drag came to at its end (py: the drag's bits), the one the target finished with.
-                        unsigned int done = py ? xwm_dnd_to_x(x, (unsigned int)py)
-                                              : x->xdrag.action;
+                        unsigned int done = py ? xwm_dnd_to_x(x, (unsigned int)py) : x->xdrag.action;
                         unsigned int data[5] = {compositor_xwm_id(x, COMPOSITOR_XWM_PROXY_WINDOW), px ? 1u : 0u, px ? done : 0, 0, 0};
-
                         if (x->xdrag.dropped)
-                        {
-                                compositor_xwm_message32(x, x->xdrag.source, x->atoms[COMPOSITOR_XWM_A_XDND_FINISHED], data);
-                                compositor_xwm_xdrag_reset(x);
-                        }
+                                compositor_xwm_message32(x, x->xdrag.source, x->atoms[COMPOSITOR_XWM_A_XDND_FINISHED], data), compositor_xwm_xdrag_reset(x);
                         else
-                        {
-                                x->xdrag.began = 0;
-                                x->xdrag.cancelled = 1;
-                        }
+                                x->xdrag.began = 0, x->xdrag.cancelled = 1;
                 }
                 if (x->wdrag.live)
                 {
@@ -3443,37 +2459,25 @@ static long xwm_xdrag_slot(struct compositor_xwm *x, long what, long row, long p
         if (x->fd < 0 || !x->ready || !x->claimed || !x->xfixes_event)
                 return 0;
         if (what == WAYLAND_XDRAG_LEAVE)
-        {
-                compositor_xwm_wdrag_leave(x);
-                return 0;
-        }
+                return compositor_xwm_wdrag_leave(x), 0;
         if (what == WAYLAND_XDRAG_DROP)
         {
                 unsigned int data[5] = {compositor_xwm_id(x, COMPOSITOR_XWM_SEL_WINDOW), 0, XWM_CURRENT_TIME, 0, 0};
-
                 if (!x->wdrag.entered)
-                {
-                        wayland_drag_x_finished(0);
-                        return 0;
-                }
+                        return wayland_drag_x_finished(0), 0;
                 compositor_xwm_wdrag_say(x, x->atoms[COMPOSITOR_XWM_A_XDND_DROP], data);
-                x->wdrag.dropped = 1;
-                return 0;
+                return x->wdrag.dropped = 1, 0;
         }
         if (what == WAYLAND_XDRAG_OVER)
         {
                 struct compositor_xwm_window *w = compositor_xwm_of_row(x, row);
                 unsigned int atoms[64], actions = 0;
                 const char *types = 0;
-
                 if (!w)
                         return 0;
                 if (!x->wdrag.live)
                 {
-                        // The drag's first X window: its types' atoms asked for, XdndSelection owned for its conversions, and the actions it
-                        // offers listed with their words where it offers more than one or asks (XdndActionList, XdndActionDescription).
-                        x->wdrag.live = 1;
-                        x->wdrag.dropped = 0;
+                        x->wdrag.live = 1, x->wdrag.dropped = 0;
                         compositor_xwm_dnd_atoms(x, atoms, 64, 1);
                         compositor_xwm_own(x, 2, compositor_xwm_id(x, COMPOSITOR_XWM_SEL_WINDOW));
                         wayland_drag_x_types(&types, &actions);
@@ -3481,16 +2485,12 @@ static long xwm_xdrag_slot(struct compositor_xwm *x, long what, long row, long p
                 }
                 wayland_drag_x_types(&types, &actions);
                 x->wdrag.action = xwm_dnd_to_x(x, actions);
-                x->wdrag.place = xwm_dnd_place(w->x + px, w->y + py);
-                x->wdrag.moved = 1;
+                x->wdrag.place = xwm_dnd_place(w->x + px, w->y + py), x->wdrag.moved = 1;
                 if (x->wdrag.target != w->id)
                 {
-                        // A new X window: its XdndProxy first (XDND's proxy), then the XdndAware of the window its messages go to.
                         compositor_xwm_wdrag_leave(x);
-                        x->wdrag.target = w->id;
-                        x->wdrag.row = (int)row;
-                        compositor_xwm_wait(x, req, xwm_enc_get_property(req, sizeof req, 0, w->id, x->atoms[COMPOSITOR_XWM_A_XDND_PROXY], COMPOSITOR_XWM_XA_WINDOW_TYPE, 0, 1),
-                                            w->id, COMPOSITOR_XWM_PROP_XDND_PROXY, 0);
+                        x->wdrag.target = w->id, x->wdrag.row = (int)row;
+                        xwm_wait_prop(x, w->id, x->atoms[COMPOSITOR_XWM_A_XDND_PROXY], COMPOSITOR_XWM_XA_WINDOW_TYPE, 1, COMPOSITOR_XWM_PROP_XDND_PROXY, 0);
                 }
                 else if (x->wdrag.entered && !x->wdrag.waiting)
                         compositor_xwm_wdrag_position(x);
@@ -3500,75 +2500,53 @@ static long xwm_xdrag_slot(struct compositor_xwm *x, long what, long row, long p
         return 0;
 }
 
-/*
-        The XdndProxy of the X window a Wayland drag is over: a proxy that names itself in its own XdndProxy is where the drag's messages
-        go (asked for here, and its XdndAware after), anything else (none, a window gone, one that names another) is no proxy, and the
-        window's own XdndAware is read.
-*/
 static void compositor_xwm_wdrag_proxy(struct compositor_xwm *x, const struct xwm_property_reply *r, const struct compositor_xwm_pending *p)
 {
         unsigned int named = r && r->format == XWM_FORMAT_32 && r->value_len >= 4 ? xwm_get32(r->value) : 0, ask;
-        unsigned char req[32];
-
         if (!x->wdrag.live || p->window != x->wdrag.target)
                 return;
         if (p->what == COMPOSITOR_XWM_PROP_XDND_PROXY && named && named != p->window)
         {
-                compositor_xwm_wait(x, req, xwm_enc_get_property(req, sizeof req, 0, named, x->atoms[COMPOSITOR_XWM_A_XDND_PROXY], COMPOSITOR_XWM_XA_WINDOW_TYPE, 0, 1),
-                                    p->window, COMPOSITOR_XWM_PROP_XDND_PROXIED, named);
+                xwm_wait_prop(x, named, x->atoms[COMPOSITOR_XWM_A_XDND_PROXY], COMPOSITOR_XWM_XA_WINDOW_TYPE, 1, COMPOSITOR_XWM_PROP_XDND_PROXIED, named);
                 return;
         }
         x->wdrag.proxy = p->what == COMPOSITOR_XWM_PROP_XDND_PROXIED && named == p->slot ? named : 0;
         ask = x->wdrag.proxy ? x->wdrag.proxy : p->window;
-        compositor_xwm_wait(x, req, xwm_enc_get_property(req, sizeof req, 0, ask, x->atoms[COMPOSITOR_XWM_A_XDND_AWARE], COMPOSITOR_XWM_ATOM_TYPE, 0, 1), p->window,
-                            COMPOSITOR_XWM_PROP_XDND_AWARE, ask);
+        xwm_wait_prop(x, ask, x->atoms[COMPOSITOR_XWM_A_XDND_AWARE], COMPOSITOR_XWM_ATOM_TYPE, 1, COMPOSITOR_XWM_PROP_XDND_AWARE, ask);
 }
 
-/* The actions a Wayland drag's source offers, for an X target: XdndActionList and XdndActionDescription on the selection window, the
-   window manager's, when there is a choice in them (more than one, or ask); none when there is not. */
 static void compositor_xwm_wdrag_actions(struct compositor_xwm *x, unsigned int actions)
 {
-        unsigned int window = compositor_xwm_id(x, COMPOSITOR_XWM_SEL_WINDOW);
-        unsigned char list[12], words[16];
-        unsigned long count = 0, bytes = 0;
+        static const struct { unsigned int bit; unsigned short atom; const char *word; unsigned char len; } spec[3] = {
+                {XWM_DND_COPY, COMPOSITOR_XWM_A_XDND_COPY, "Copy", 5},
+                {XWM_DND_MOVE, COMPOSITOR_XWM_A_XDND_MOVE, "Move", 5},
+                {XWM_DND_ASK, COMPOSITOR_XWM_A_XDND_ASK, "Ask", 4},
+        };
+        unsigned int window = compositor_xwm_id(x, COMPOSITOR_XWM_SEL_WINDOW), list[3], count = 0;
+        unsigned char words[16];
+        unsigned long bytes = 0;
 
         if (!(actions & XWM_DND_ASK) && actions != (XWM_DND_COPY | XWM_DND_MOVE))
         {
-                compositor_xwm_put(x, window, x->atoms[COMPOSITOR_XWM_A_XDND_ACTIONS], COMPOSITOR_XWM_ATOM_TYPE, XWM_FORMAT_32, list, 0);
+                compositor_xwm_put32(x, window, x->atoms[COMPOSITOR_XWM_A_XDND_ACTIONS], COMPOSITOR_XWM_ATOM_TYPE, list, 0);
                 return;
         }
-        if (actions & XWM_DND_COPY)
-        {
-                xwm_put32(list + 4 * count++, x->atoms[COMPOSITOR_XWM_A_XDND_COPY]);
-                memory_copy(words + bytes, "Copy", 5), bytes += 5;
-        }
-        if (actions & XWM_DND_MOVE)
-        {
-                xwm_put32(list + 4 * count++, x->atoms[COMPOSITOR_XWM_A_XDND_MOVE]);
-                memory_copy(words + bytes, "Move", 5), bytes += 5;
-        }
-        if (actions & XWM_DND_ASK)
-        {
-                xwm_put32(list + 4 * count++, x->atoms[COMPOSITOR_XWM_A_XDND_ASK]);
-                memory_copy(words + bytes, "Ask", 4), bytes += 4;
-        }
-        compositor_xwm_put(x, window, x->atoms[COMPOSITOR_XWM_A_XDND_ACTIONS], COMPOSITOR_XWM_ATOM_TYPE, XWM_FORMAT_32, list, count * 4);
+        for (unsigned int i = 0; i < 3; i++)
+                if (actions & spec[i].bit)
+                        list[count++] = x->atoms[spec[i].atom], memory_copy(words + bytes, spec[i].word, spec[i].len), bytes += spec[i].len;
+        compositor_xwm_put32(x, window, x->atoms[COMPOSITOR_XWM_A_XDND_ACTIONS], COMPOSITOR_XWM_ATOM_TYPE, list, count);
         compositor_xwm_put(x, window, x->atoms[COMPOSITOR_XWM_A_XDND_DESCRIPTIONS], COMPOSITOR_XWM_XA_STRING, XWM_FORMAT_8, words, bytes);
 }
 
-// The X window's XdndAware (its proxy's, through one): entered (version 3 and later, the types in its enter and in XdndTypeList), or no
-// target there.
 static void compositor_xwm_wdrag_aware(struct compositor_xwm *x, const struct xwm_property_reply *r, unsigned int window)
 {
         unsigned int atoms[256], data[5], count, version;
-
         if (!x->wdrag.live || window != x->wdrag.target)
                 return;
         version = r && r->format == XWM_FORMAT_32 && r->value_len >= 4 ? xwm_get32(r->value) : 0;
         if (version < 3)
         {
-                x->wdrag.aware_no = 1;
-                wayland_drag_x_status(0, 0);
+                x->wdrag.aware_no = 1, wayland_drag_x_status(0, 0);
                 return;
         }
         x->wdrag.version = version > XWM_XDND_VERSION ? XWM_XDND_VERSION : version;
@@ -3576,7 +2554,6 @@ static void compositor_xwm_wdrag_aware(struct compositor_xwm *x, const struct xw
         if (count > 3)
         {
                 unsigned char list[1024];
-
                 for (unsigned int k = 0; k < count; k++)
                         xwm_put32(list + 4 * k, atoms[k]);
                 compositor_xwm_put(x, compositor_xwm_id(x, COMPOSITOR_XWM_SEL_WINDOW), x->atoms[COMPOSITOR_XWM_A_XDND_TYPES], COMPOSITOR_XWM_ATOM_TYPE, XWM_FORMAT_32,
@@ -3588,16 +2565,13 @@ static void compositor_xwm_wdrag_aware(struct compositor_xwm *x, const struct xw
         compositor_xwm_wdrag_position(x);
 }
 
-// XdndStatus and XdndFinished to the selection window: what the X window takes (told to the shim), and its end of the drop.
 static void compositor_xwm_wdrag_message(struct compositor_xwm *x, const struct xwm_event *e)
 {
-
         if (!x->wdrag.live || !x->wdrag.target || e->data[0] != x->wdrag.target)
                 return;
         if (e->atom == x->atoms[COMPOSITOR_XWM_A_XDND_STATUS])
         {
                 unsigned int accepted = e->data[1] & 1u, action = xwm_dnd_to_wl(x, e->data[4]);
-
                 x->wdrag.waiting = 0;
                 wayland_drag_x_status(accepted, accepted && !action ? XWM_DND_COPY : action);
                 if (x->wdrag.moved && x->wdrag.entered && !x->wdrag.dropped)
@@ -3607,57 +2581,41 @@ static void compositor_xwm_wdrag_message(struct compositor_xwm *x, const struct 
                 wayland_drag_x_finished(x->wdrag.version < 5 || (e->data[1] & 1u));
 }
 
-// The X window a Wayland drag is over is gone: its drop failed, or the drag is over no target.
 static void compositor_xwm_wdrag_gone(struct compositor_xwm *x, unsigned int window)
 {
-
         if (!x->wdrag.live || window != x->wdrag.target)
                 return;
         x->wdrag.entered = 0;
         if (x->wdrag.dropped)
                 wayland_drag_x_finished(0);
         else
-        {
-                x->wdrag.target = 0;
-                wayland_drag_x_status(0, 0);
-        }
+                x->wdrag.target = 0, wayland_drag_x_status(0, 0);
 }
 
 static void compositor_xwm_xdrag_status(struct compositor_xwm *x)
 {
         unsigned long action = 0;
         int accepted = x->xdrag.began && !x->xdrag.escaped && wayland_drag_x_answer(&action);
-        unsigned int data[5] = {compositor_xwm_id(x, COMPOSITOR_XWM_PROXY_WINDOW), (accepted ? 1u : 0u) | 2u, 0, 0, 0};
-
-        data[4] = accepted ? xwm_dnd_to_x(x, (unsigned int)action)
-                           : 0;
+        unsigned int data[5] = {compositor_xwm_id(x, COMPOSITOR_XWM_PROXY_WINDOW), (accepted ? 1u : 0u) | 2u, 0, 0,
+                                accepted ? xwm_dnd_to_x(x, (unsigned int)action) : 0};
         compositor_xwm_message32(x, x->xdrag.source, x->atoms[COMPOSITOR_XWM_A_XDND_STATUS], data);
-        x->xdrag.told_accept = (unsigned char)accepted;
-        x->xdrag.told_action = data[4];
+        x->xdrag.told_accept = (unsigned char)accepted, x->xdrag.told_action = data[4];
         if (accepted)
                 x->xdrag.action = data[4];
 }
 
-/*
-        The Wayland actions of what an X source asks: its action, and for XdndActionAsk the person's choice, which a Wayland target makes
-        (ask), of the actions its XdndActionList names that Wayland has (copy and move); a source that lists none is asked for a copy
-        too, the one action every XDND source has.
-*/
 static unsigned int compositor_xwm_xdrag_actions(struct compositor_xwm *x)
 {
         unsigned int action = xwm_dnd_to_wl(x, x->xdrag.action);
-
         if (action == XWM_DND_ASK)
                 return XWM_DND_ASK | ((x->xdrag.listed & (XWM_DND_COPY | XWM_DND_MOVE)) ? x->xdrag.listed & (XWM_DND_COPY | XWM_DND_MOVE) : XWM_DND_COPY);
         return action ? action : XWM_DND_COPY;
 }
 
-// The X drag's types, named, as Wayland types and actions: the Wayland drag of it begun.
 static void compositor_xwm_xdrag_begin(struct compositor_xwm *x)
 {
         const unsigned int *atoms = (const unsigned int *)x->xdrag.types.at;
         long bytes = 0;
-
         wayland_tables_host(&compositor_wl_host);
         x->type_table.unit = 1;
         for (long k = 0; atoms && k < x->xdrag.types.count; k++)
@@ -3666,68 +2624,52 @@ static void compositor_xwm_xdrag_begin(struct compositor_xwm *x)
                 const unsigned char *name = compositor_xwm_atom_name(x, atoms[k], &length);
                 unsigned char mime[XWM_ATOM_NAME_MAX + 1];
                 long n = name ? xwm_target_mime(name, length, mime, sizeof mime) : 0;
-
-                if (n <= 0 || compositor_xwm_listed(x->type_table.at, bytes, mime, (unsigned long)n) ||
-                    !wayland_table_reach(&x->type_table, bytes + n + 1))
-                        continue;
-                memory_copy(x->type_table.at + bytes, mime, (positive)n + 1);
-                bytes += n + 1;
+                if (n > 0 && !compositor_xwm_listed(x->type_table.at, bytes, mime, (unsigned long)n) &&
+                    wayland_table_reach(&x->type_table, bytes + n + 1))
+                        memory_copy(x->type_table.at + bytes, mime, (positive)n + 1), bytes += n + 1;
         }
         if (bytes && wayland_drag_x_begin((const char *)x->type_table.at, bytes, compositor_xwm_xdrag_actions(x)))
                 x->xdrag.began = 1;
 }
 
-// A client message to the proxy: the X source's enter, position, leave and drop.
 static void compositor_xwm_proxy_message(struct compositor_xwm *x, const struct xwm_event *e)
 {
-        unsigned char req[32];
-
         if (e->atom == x->atoms[COMPOSITOR_XWM_A_XDND_ENTER])
         {
                 if (x->xdrag.began)
                         wayland_drag_x_leave();
                 compositor_xwm_xdrag_reset(x);
-                x->xdrag.cancelled = 0;
-                x->xdrag.source = e->data[0];
-                x->xdrag.version = e->data[1] >> 24;
+                x->xdrag.cancelled = 0, x->xdrag.source = e->data[0], x->xdrag.version = e->data[1] >> 24;
                 x->xdrag.entered = x->xdrag.naming = 1;
                 wayland_tables_host(&compositor_wl_host);
                 x->xdrag.types.unit = sizeof(unsigned int);
                 if (e->data[1] & 1u)
                 {
-                        compositor_xwm_wait(x, req, xwm_enc_get_property(req, sizeof req, 0, e->data[0], x->atoms[COMPOSITOR_XWM_A_XDND_TYPES], COMPOSITOR_XWM_ATOM_TYPE, 0, 1024),
-                                            e->data[0], COMPOSITOR_XWM_PROP_XDND_TYPES, 0);
+                        xwm_wait_prop(x, e->data[0], x->atoms[COMPOSITOR_XWM_A_XDND_TYPES], COMPOSITOR_XWM_ATOM_TYPE, 1024, COMPOSITOR_XWM_PROP_XDND_TYPES, 0);
                         compositor_xwm_xdrag_ask_actions(x, e->data[0]);
                         return;
                 }
                 compositor_xwm_xdrag_ask_actions(x, e->data[0]);
                 for (int k = 2; k < 5; k++)
                         if (e->data[k] && wayland_table_reach(&x->xdrag.types, x->xdrag.types.count + 1))
-                        {
-                                ((unsigned int *)x->xdrag.types.at)[x->xdrag.types.count - 1] = e->data[k];
-                                compositor_xwm_name_atom(x, e->data[k]);
-                        }
-                compositor_xwm_wait(x, req, xwm_enc_get_property(req, sizeof req, 0, e->data[0], x->atoms[COMPOSITOR_XWM_A_XDND_TYPES], COMPOSITOR_XWM_ATOM_TYPE, 0, 0),
-                                    e->data[0], COMPOSITOR_XWM_PROP_XDND_SYNC, 0);
+                                ((unsigned int *)x->xdrag.types.at)[x->xdrag.types.count - 1] = e->data[k], compositor_xwm_name_atom(x, e->data[k]);
+                xwm_wait_prop(x, e->data[0], x->atoms[COMPOSITOR_XWM_A_XDND_TYPES], COMPOSITOR_XWM_ATOM_TYPE, 0, COMPOSITOR_XWM_PROP_XDND_SYNC, 0);
                 return;
         }
         if (!x->xdrag.entered || e->data[0] != x->xdrag.source)
                 return;
         if (e->atom == x->atoms[COMPOSITOR_XWM_A_XDND_POSITION])
         {
-                int rx = (int)(e->data[2] >> 16), ry = (int)(e->data[2] & 0xffffu), tab = 0, under;
-
+                int rx = compositor_xwm_from_x((int)(e->data[2] >> 16), 0), ry = compositor_xwm_from_x((int)(e->data[2] & 0xffffu), 1), tab = 0;
+                int under = compositor_under(rx, ry, &tab);
                 if (e->data[4] && e->data[4] != x->xdrag.action)
                 {
-                        // The person changed what the X source asks (a key held): the Wayland drag's actions follow.
                         x->xdrag.action = e->data[4];
                         if (x->xdrag.began)
                                 wayland_drag_x_actions(compositor_xwm_xdrag_actions(x));
                 }
                 if (!x->xdrag.naming && !x->xdrag.began && !x->xdrag.cancelled && !x->xdrag.dropped && !x->xdrag.escaped)
                         compositor_xwm_xdrag_begin(x);
-                rx = compositor_xwm_from_x(rx, 0), ry = compositor_xwm_from_x(ry, 1);
-                under = compositor_under(rx, ry, &tab);
                 if (x->xdrag.began)
                         wayland_drag_x_motion(under, under >= 0 ? rx - compositor.x[under] : 0, under >= 0 ? ry - compositor.y[under] : 0);
                 compositor_xwm_xdrag_status(x);
@@ -3742,129 +2684,80 @@ static void compositor_xwm_proxy_message(struct compositor_xwm *x, const struct 
         {
                 x->xdrag.time = e->data[2];
                 if (x->xdrag.began && !x->xdrag.escaped)
-                {
-                        x->xdrag.dropped = 1;
-                        wayland_drag_x_drop();
-                }
+                        x->xdrag.dropped = 1, wayland_drag_x_drop();
                 else
                 {
                         unsigned int data[5] = {compositor_xwm_id(x, COMPOSITOR_XWM_PROXY_WINDOW), 0, 0, 0, 0};
-
                         compositor_xwm_message32(x, x->xdrag.source, x->atoms[COMPOSITOR_XWM_A_XDND_FINISHED], data);
                         compositor_xwm_xdrag_reset(x);
                 }
         }
 }
 
-// The replies of drag and drop's requests: an X window's XdndAware, an X source's XdndTypeList, the names of its types come.
 static void compositor_xwm_dnd_reply(struct compositor_xwm *x, const unsigned char *in, long size, const struct compositor_xwm_pending *p)
 {
         struct xwm_property_reply r;
-
         if (in && xwm_parse_property_reply(in, (unsigned long)size, &r) != XWM_OK)
         {
                 x->broken = 1;
                 return;
         }
         if (p->what == COMPOSITOR_XWM_PROP_XDND_AWARE)
-        {
                 compositor_xwm_wdrag_aware(x, in ? &r : 0, p->window);
-                return;
-        }
-        if (p->what == COMPOSITOR_XWM_PROP_XDND_PROXY || p->what == COMPOSITOR_XWM_PROP_XDND_PROXIED)
-        {
+        else if (p->what == COMPOSITOR_XWM_PROP_XDND_PROXY || p->what == COMPOSITOR_XWM_PROP_XDND_PROXIED)
                 compositor_xwm_wdrag_proxy(x, in ? &r : 0, p);
+        else if (!x->xdrag.entered || p->window != x->xdrag.source)
                 return;
-        }
-        if (!x->xdrag.entered || p->window != x->xdrag.source)
-                return;
-        if (p->what == COMPOSITOR_XWM_PROP_XDND_ACTIONS)
+        else if (p->what == COMPOSITOR_XWM_PROP_XDND_ACTIONS)
         {
-                // XdndActionList: the actions the X source offers, as the drag's bits (link and private have no Wayland action).
                 x->xdrag.listed = 0;
                 for (unsigned long k = 0; in && r.format == XWM_FORMAT_32 && k + 4 <= r.value_len; k += 4)
                         x->xdrag.listed |= xwm_dnd_to_wl(x, xwm_get32(r.value + k));
-                return;
         }
-        if (p->what == COMPOSITOR_XWM_PROP_XDND_WORDS)
+        else if (p->what == COMPOSITOR_XWM_PROP_XDND_WORDS)
         {
-                // XdndActionDescription: a word for each action of the list, each with its NUL (the Wayland target asks in its own words).
                 x->xdrag.words = 0;
                 for (unsigned long k = 0; in && r.format == XWM_FORMAT_8 && k < r.value_len; k++)
                         x->xdrag.words += !r.value[k];
-                return;
         }
-        if (p->what == COMPOSITOR_XWM_PROP_XDND_TYPES)
+        else if (p->what == COMPOSITOR_XWM_PROP_XDND_TYPES)
         {
-                unsigned char req[32];
-
                 for (unsigned long k = 0; in && r.format == XWM_FORMAT_32 && k + 4 <= r.value_len && x->xdrag.types.count < COMPOSITOR_XWM_TARGETS_MOST; k += 4)
                         if (xwm_get32(r.value + k) && wayland_table_reach(&x->xdrag.types, x->xdrag.types.count + 1))
-                        {
-                                ((unsigned int *)x->xdrag.types.at)[x->xdrag.types.count - 1] = xwm_get32(r.value + k);
-                                compositor_xwm_name_atom(x, xwm_get32(r.value + k));
-                        }
-                compositor_xwm_wait(x, req, xwm_enc_get_property(req, sizeof req, 0, p->window, x->atoms[COMPOSITOR_XWM_A_XDND_TYPES], COMPOSITOR_XWM_ATOM_TYPE, 0, 0),
-                                    p->window, COMPOSITOR_XWM_PROP_XDND_SYNC, 0);
-                return;
+                                ((unsigned int *)x->xdrag.types.at)[x->xdrag.types.count - 1] = xwm_get32(r.value + k), compositor_xwm_name_atom(x, xwm_get32(r.value + k));
+                xwm_wait_prop(x, p->window, x->atoms[COMPOSITOR_XWM_A_XDND_TYPES], COMPOSITOR_XWM_ATOM_TYPE, 0, COMPOSITOR_XWM_PROP_XDND_SYNC, 0);
         }
-        x->xdrag.naming = 0;
+        else
+                x->xdrag.naming = 0;
 }
 
-static int compositor_xwm_row_is_x(int row)
-{
-        return row >= 0 && compositor_xwm_slot_of_row(row) != 0;
-}
+static int compositor_xwm_row_is_x(int row) { return row >= 0 && compositor_xwm_slot_of_row(row) != 0; }
 
-/* An X source's XdndActionList and XdndActionDescription asked for at its enter (before the reply that says its types are named, so
-   they have come by then and its Wayland drag begins with them). */
 static void compositor_xwm_xdrag_ask_actions(struct compositor_xwm *x, unsigned int source)
 {
-        unsigned char req[32];
-
-        compositor_xwm_wait(x, req, xwm_enc_get_property(req, sizeof req, 0, source, x->atoms[COMPOSITOR_XWM_A_XDND_ACTIONS], COMPOSITOR_XWM_ATOM_TYPE, 0, 64),
-                            source, COMPOSITOR_XWM_PROP_XDND_ACTIONS, 0);
-        compositor_xwm_wait(x, req, xwm_enc_get_property(req, sizeof req, 0, source, x->atoms[COMPOSITOR_XWM_A_XDND_DESCRIPTIONS], COMPOSITOR_XWM_XA_STRING, 0,
-                                                      1024),
-                            source, COMPOSITOR_XWM_PROP_XDND_WORDS, 0);
+        xwm_wait_prop(x, source, x->atoms[COMPOSITOR_XWM_A_XDND_ACTIONS], COMPOSITOR_XWM_ATOM_TYPE, 64, COMPOSITOR_XWM_PROP_XDND_ACTIONS, 0);
+        xwm_wait_prop(x, source, x->atoms[COMPOSITOR_XWM_A_XDND_DESCRIPTIONS], COMPOSITOR_XWM_XA_STRING, 1024, COMPOSITOR_XWM_PROP_XDND_WORDS, 0);
 }
 
-/*
-        Where the hand that drives an X drag is: a button held whose press went to an X window (any button: an X client may drag with any),
-        at the pointer; else a finger down on an X window (Xwayland's emulated pointer follows it), at the finger. 1 with the place.
-*/
 static int compositor_xwm_drag_hand(int *hx, int *hy)
 {
         for (int button = 0; button < 8; button++)
                 if ((compositor.button_down & (1u << button)) && compositor_xwm_row_is_x(compositor.button_row[button]))
-                {
-                        *hx = compositor.pointer_x, *hy = compositor.pointer_y;
-                        return 1;
-                }
+                        return *hx = compositor.pointer_x, *hy = compositor.pointer_y, 1;
         for (int at = 0; at < COMPOSITOR_INPUTS; at++)
                 for (int slot = 0; slot < UI_TOUCH_SLOTS; slot++)
                         if (compositor.screen_touch[at].id[slot] >= 0 && compositor_xwm_row_is_x((int)wayland_touch_row(compositor.screen_touch[at].id[slot])))
-                        {
-                                compositor_touch_point((unsigned int)at, slot, hx, hy);
-                                return 1;
-                        }
+                                return compositor_touch_point((unsigned int)at, slot, hx, hy), 1;
         return 0;
 }
 
-/*
-        Escape while an X client drags across the bridge (compositor_wl_drag_escape, the host's one Escape for every drag): the Wayland drag
-        of it ends at once (its target left), the X source is told the proxy takes nothing and its drop finishes nothing, and it is given
-        the Escape itself through XTEST, as the person's key, so it ends its own drag (its grab has the keyboard). True when there was one.
-*/
 static int compositor_xwm_drag_escape(void)
 {
         int done = 0;
-
         for (int at = 0; at < COMPOSITOR_XWM_SLOTS; at++)
         {
                 struct compositor_xwm *x = &compositor_xwm_slots[at];
                 unsigned char req[48];
-
                 if (x->fd < 0 || !x->xdrag.entered || x->xdrag.dropped || x->xdrag.escaped)
                         continue;
                 x->xdrag.escaped = 1;
@@ -3872,11 +2765,10 @@ static int compositor_xwm_drag_escape(void)
                         wayland_drag_x_leave();
                 x->xdrag.began = 0;
                 compositor_xwm_xdrag_status(x);
-                if (x->xtest && xwm_enc_xtest_key(req, sizeof req, x->xtest, XWM_XTEST_KEY_PRESS, COMPOSITOR_XWM_KEY_ESCAPE) > 0)
+                if (x->xtest)
                 {
-                        compositor_xwm_queue(x, req, 36);
-                        if (xwm_enc_xtest_key(req, sizeof req, x->xtest, XWM_XTEST_KEY_RELEASE, COMPOSITOR_XWM_KEY_ESCAPE) > 0)
-                                compositor_xwm_queue(x, req, 36);
+                        compositor_xwm_queue(x, req, xwm_enc_xtest_key(req, sizeof req, x->xtest, XWM_XTEST_KEY_PRESS, COMPOSITOR_XWM_KEY_ESCAPE));
+                        compositor_xwm_queue(x, req, xwm_enc_xtest_key(req, sizeof req, x->xtest, XWM_XTEST_KEY_RELEASE, COMPOSITOR_XWM_KEY_ESCAPE));
                 }
                 compositor_xwm_flush(x);
                 done = 1;
@@ -3884,9 +2776,6 @@ static int compositor_xwm_drag_escape(void)
         return done;
 }
 
-/* The proxy over the Wayland window under the pointer while an X client drags (it owns XdndSelection and holds the left button on its
-   window), on top so the X source finds it; unmapped elsewhere. Then the X source is told again what the Wayland target takes when
-   that changed since it was last told. */
 static void compositor_xwm_dnd_pass(struct compositor_xwm *x)
 {
         unsigned int proxy = compositor_xwm_id(x, COMPOSITOR_XWM_PROXY_WINDOW);
@@ -3897,50 +2786,34 @@ static void compositor_xwm_dnd_pass(struct compositor_xwm *x)
         if (x->sel[2].x_owner && compositor_xwm_drag_hand(&hx, &hy))
         {
                 int under = compositor_under(hx, hy, &tab);
-
                 if (under >= 0 && under < COMPOSITOR_ROWS && !compositor_xwm_row_is_x(under) &&
-                    (wayland_row_owner(under) >= 0 || (compositor.table && compositor.table->drop_ok[under])) && compositor.w[under] > 0 &&
-                    compositor.h[under] > 0)
+                    (wayland_row_owner(under) >= 0 || (compositor.table && compositor.table->drop_ok[under])) && compositor.w[under] > 0 && compositor.h[under] > 0)
                         want = under;
         }
         if (want >= 0 && (!x->xdrag.proxy_mapped || x->xdrag.proxy_row != want || x->xdrag.proxy_x != compositor.x[want] ||
                           x->xdrag.proxy_y != compositor.y[want] || x->xdrag.proxy_w != (int)compositor.w[want] || x->xdrag.proxy_h != (int)compositor.h[want]))
         {
-                struct xwm_configure c;
-
-                c.mask = XWM_CONFIGURE_X | XWM_CONFIGURE_Y | XWM_CONFIGURE_WIDTH | XWM_CONFIGURE_HEIGHT | XWM_CONFIGURE_STACK_MODE;
-                c.x = compositor_xwm_to_x(compositor.x[want], 0);
-                c.y = compositor_xwm_to_x(compositor.y[want], 1);
-                c.width = (unsigned int)compositor.w[want];
-                c.height = (unsigned int)compositor.h[want];
-                c.stack_mode = XWM_STACK_ABOVE;
+                struct xwm_configure c = {.mask = XWM_CONFIGURE_X | XWM_CONFIGURE_Y | XWM_CONFIGURE_WIDTH | XWM_CONFIGURE_HEIGHT | XWM_CONFIGURE_STACK_MODE,
+                                          .x = compositor_xwm_to_x(compositor.x[want], 0), .y = compositor_xwm_to_x(compositor.y[want], 1),
+                                          .width = (unsigned int)compositor.w[want], .height = (unsigned int)compositor.h[want], .stack_mode = XWM_STACK_ABOVE};
                 compositor_xwm_configure(x, proxy, &c);
                 if (!x->xdrag.proxy_mapped)
                         compositor_xwm_window_op(x, XWM_OP_MAP_WINDOW, proxy);
-                x->xdrag.proxy_mapped = 1;
-                x->xdrag.proxy_row = want;
+                x->xdrag.proxy_mapped = 1, x->xdrag.proxy_row = want;
                 x->xdrag.proxy_x = compositor.x[want], x->xdrag.proxy_y = compositor.y[want], x->xdrag.proxy_w = (int)c.width, x->xdrag.proxy_h = (int)c.height;
         }
         else if (want < 0 && x->xdrag.proxy_mapped)
-        {
-                compositor_xwm_window_op(x, XWM_OP_UNMAP_WINDOW, proxy);
-                x->xdrag.proxy_mapped = 0;
-                x->xdrag.proxy_row = -1;
-        }
+                compositor_xwm_window_op(x, XWM_OP_UNMAP_WINDOW, proxy), x->xdrag.proxy_mapped = 0, x->xdrag.proxy_row = -1;
         if (x->xdrag.began && !x->xdrag.dropped)
         {
                 unsigned long action = 0;
                 int accepted = wayland_drag_x_answer(&action);
-                unsigned int atom = accepted ? xwm_dnd_to_x(x, (unsigned int)action)
-                                             : 0;
-
+                unsigned int atom = accepted ? xwm_dnd_to_x(x, (unsigned int)action) : 0;
                 if (accepted != x->xdrag.told_accept || atom != x->xdrag.told_action)
                         compositor_xwm_xdrag_status(x);
         }
 }
 
-/* A Wayland target's receive of an X drag's type: the X target it is converted as (the drag's best text for text, else the atom of its
-   name among the drag's types), with the drop's time; 0 when the drag has no such type. */
 static unsigned int compositor_xwm_drag_target(struct compositor_xwm *x, const char *mime, unsigned long length, unsigned int *time)
 {
         const unsigned int *atoms = (const unsigned int *)x->xdrag.types.at;
@@ -3955,31 +2828,21 @@ static unsigned int compositor_xwm_drag_target(struct compositor_xwm *x, const c
         {
                 unsigned long n = 0;
                 const unsigned char *name = compositor_xwm_atom_name(x, atoms[k], &n);
-
-                if (name && n == length && !memory_compare(name, (const unsigned char *)mime, (positive)( length)))
+                if (name && n == length && !memory_compare(name, (const unsigned char *)mime, (positive)length))
                         return atoms[k];
         }
         return 0;
 }
 
-static long compositor_xwm_drag_types(const char **types)
-{
-        unsigned int actions = 0;
+static long compositor_xwm_drag_types(const char **types) { unsigned int actions = 0; return wayland_drag_x_types(types, &actions); }
 
-        return wayland_drag_x_types(types, &actions);
-}
-
-// A conversion of the drag's type for an X target: a Wayland source's send, or a program's copy pasted.
 static int compositor_xwm_drag_send(const char *mime, long fd)
 {
         return compositor_dnd.active == 1 && compositor_dnd.source >= 0 ? compositor_wl_drag_push(mime, fd) : wayland_drag_x_send(mime, fd);
 }
 
-
-// XdndSelection's owner changed: an X drag's source that is gone ends the Wayland drag of it.
 static void compositor_xwm_xdnd_owner(struct compositor_xwm *x, unsigned int owner)
 {
-
         if (owner)
                 return;
         if (x->xdrag.began && !x->xdrag.dropped)
@@ -3988,7 +2851,12 @@ static void compositor_xwm_xdnd_owner(struct compositor_xwm *x, unsigned int own
                 compositor_xwm_xdrag_reset(x);
 }
 
-/* ---- the events ---- */
+/* ---- X11 events, replies, errors, and connection lifecycle ---- */
+
+static int xwm_row_showing(const struct compositor_xwm_window *w)
+{
+        return w && w->row >= 0 && w->row < COMPOSITOR_ROWS && compositor.showing[w->row];
+}
 
 static void xwm_event(struct compositor_xwm *x, const struct xwm_event *e)
 {
@@ -3997,172 +2865,106 @@ static void xwm_event(struct compositor_xwm *x, const struct xwm_event *e)
         switch (e->kind)
         {
         case XWM_EV_MAP_REQUEST:
-                w = xwm_find(x, e->window, 1);
-                if (!w)
+                if (!(w = xwm_find(x, e->window, 1)))
                 {
-                        compositor_xwm_counted[2]++; // the window is not mapped: said in moonwater debug, not dropped unseen
+                        compositor_xwm_counted[2]++;
                         break;
                 }
-                w->state &= ~COMPOSITOR_XWM_OVERRIDE;
-                w->state |= COMPOSITOR_XWM_MAPPED;
-                // The window's title and protocols are asked for, and changes of its properties are asked to be told.
-                {
-                        unsigned char req[32];
-                        long n = xwm_enc_select_events(req, sizeof req, e->window, XWM_MASK_PROPERTY_CHANGE);
-
-                        if (n > 0)
-                                compositor_xwm_queue(x, req, n);
-                }
+                w->state = (w->state & ~COMPOSITOR_XWM_OVERRIDE) | COMPOSITOR_XWM_MAPPED;
+                compositor_xwm_select(x, e->window, XWM_MASK_PROPERTY_CHANGE);
                 xwm_ask_title(x, w);
                 if (!w->owner)
                         compositor_xwm_ask_owner(x, e->window);
-                // PROP_TYPE is last in xwm_prop_spec: its reply says the others have come.
                 xwm_ask_props(x, w, XWM_PF_MAP);
                 compositor_xwm_frame_extents(x, e->window);
                 compositor_xwm_window_op(x, XWM_OP_MAP_WINDOW, e->window);
                 compositor_xwm_allow_commits(x, e->window);
                 compositor_xwm_wm_state(x, e->window);
-                // The keys: the X focus follows the window that has them (the pass), and a window the compositor gives none is given none.
                 break;
         case XWM_EV_CONFIGURE_REQUEST:
         {
                 struct xwm_configure c;
+                unsigned int prev_w, prev_h, mw = (unsigned int)compositor_most_width(), mh = (unsigned int)compositor_most_height();
 
                 w = xwm_find(x, e->window, 0);
-                // A window made fullscreen for covering its screen that asks for another size is a window of that size again (a game
-                // gone from borderless to windowed in its settings): out of fullscreen, floating at the size it asks.
+                prev_w = w ? w->width : 0, prev_h = w ? w->height : 0;
                 if (w && (w->state & COMPOSITOR_XWM_COVERED) && (w->state & COMPOSITOR_XWM_FULLSCREEN) && w->row >= 0 &&
                     (e->value_mask & (XWM_CONFIGURE_WIDTH | XWM_CONFIGURE_HEIGHT)) == (XWM_CONFIGURE_WIDTH | XWM_CONFIGURE_HEIGHT) &&
                     (e->width != compositor.w[w->row] || e->height != compositor.h[w->row]))
-                {
-                        w->restore_w = e->width, w->restore_h = e->height;
-                        compositor_xwm_fullscreen(x, w, 0);
-                }
-                // A fullscreen window keeps the output's place and size whatever it asks.
+                        w->restore_w = e->width, w->restore_h = e->height, compositor_xwm_fullscreen(x, w, 0);
                 c.mask = e->value_mask & (XWM_CONFIGURE_X | XWM_CONFIGURE_Y | XWM_CONFIGURE_WIDTH | XWM_CONFIGURE_HEIGHT |
                                           XWM_CONFIGURE_BORDER | XWM_CONFIGURE_SIBLING | XWM_CONFIGURE_STACK_MODE);
-                unsigned int prev_w = w ? w->width : 0, prev_h = w ? w->height : 0;
-
                 if (w && (w->state & COMPOSITOR_XWM_FULLSCREEN))
                         c.mask &= ~(XWM_CONFIGURE_X | XWM_CONFIGURE_Y | XWM_CONFIGURE_WIDTH | XWM_CONFIGURE_HEIGHT);
                 if (w && ((w->state & COMPOSITOR_XWM_MAXIMIZED) ||
                           (w->row >= 0 && (compositor.resize == w->row || compositor.arranged[w->row] != COMPOSITOR_FLOATING))))
                         c.mask &= ~(XWM_CONFIGURE_WIDTH | XWM_CONFIGURE_HEIGHT);
-                // The compositor places and stacks a managed window (its place and stacking order are synced from compositor.stack):
-                // client X/Y and stacking requests are not forwarded so X11 hit-testing never diverges from what Moonwater draws.
                 if (!w || !(w->state & COMPOSITOR_XWM_POPUPTYPE))
                         c.mask &= ~(XWM_CONFIGURE_X | XWM_CONFIGURE_Y | XWM_CONFIGURE_SIBLING | XWM_CONFIGURE_STACK_MODE);
-                c.x = e->x;
-                c.y = e->y;
-                // A size within the largest output and the window's WM_NORMAL_HINTS bounds.
-                {
-                        unsigned int mw = (unsigned int)compositor_most_width(), mh = (unsigned int)compositor_most_height();
-
-                        c.width = mw > 0 && e->width > mw ? mw : e->width;
-                        c.height = mh > 0 && e->height > mh ? mh : e->height;
-                }
+                c.x = e->x, c.y = e->y;
+                c.width = mw > 0 && e->width > mw ? mw : e->width, c.height = mh > 0 && e->height > mh ? mh : e->height;
                 compositor_xwm_clamp_size(w, &c.width, &c.height);
                 if ((c.mask & XWM_CONFIGURE_WIDTH) && (c.width < 1 || c.width > 65535))
                         c.width = c.width < 1 ? 1u : 65535u;
                 if ((c.mask & XWM_CONFIGURE_HEIGHT) && (c.height < 1 || c.height > 65535))
                         c.height = c.height < 1 ? 1u : 65535u;
-                c.border = 0;
-                c.sibling = e->sibling;
-                c.stack_mode = e->detail <= 4 ? e->detail : 0;
+                c.border = 0, c.sibling = e->sibling, c.stack_mode = e->detail <= 4 ? e->detail : 0;
                 if (c.mask)
                 {
                         compositor_xwm_configure(x, e->window, &c);
                         if (w && (c.mask & XWM_CONFIGURE_WIDTH))
-                                w->width = c.width, w->sent_w = c.width;
+                                w->width = w->sent_w = c.width;
                         if (w && (c.mask & XWM_CONFIGURE_HEIGHT))
-                                w->height = c.height, w->sent_h = c.height;
+                                w->height = w->sent_h = c.height;
                 }
-                // ICCCM 4.1.5: deliver synthetic ConfigureNotify when the request was refused (!c.mask) or when X/Y was
-                // stripped and the requested width/height did not actually change the window's size.
                 if (w && (!c.mask || ((e->value_mask & (XWM_CONFIGURE_X | XWM_CONFIGURE_Y)) && !(c.mask & (XWM_CONFIGURE_X | XWM_CONFIGURE_Y)) &&
                                       (!(c.mask & XWM_CONFIGURE_WIDTH) || c.width == prev_w) &&
                                       (!(c.mask & XWM_CONFIGURE_HEIGHT) || c.height == prev_h))))
                 {
-                        int nx = w->row >= 0 && compositor.showing[w->row] ? compositor_xwm_to_x(compositor.x[w->row], 0) : w->x;
-                        int ny = w->row >= 0 && compositor.showing[w->row] ? compositor_xwm_to_x(compositor.y[w->row], 1) : w->y;
-                        unsigned int nw = w->width ? w->width : (w->row >= 0 && compositor.showing[w->row] ? compositor.w[w->row] : 1u);
-                        unsigned int nh = w->height ? w->height : (w->row >= 0 && compositor.showing[w->row] ? compositor.h[w->row] : 1u);
-
-                        compositor_xwm_send_configure(x, w, nx, ny, nw, nh);
+                        int sh = xwm_row_showing(w);
+                        compositor_xwm_send_configure(x, w, sh ? compositor_xwm_to_x(compositor.x[w->row], 0) : w->x,
+                                                      sh ? compositor_xwm_to_x(compositor.y[w->row], 1) : w->y,
+                                                      w->width ? w->width : (sh ? compositor.w[w->row] : 1u),
+                                                      w->height ? w->height : (sh ? compositor.h[w->row] : 1u));
                 }
                 break;
         }
         case XWM_EV_CREATE_NOTIFY:
-                w = xwm_find(x, e->window, 1);
-                if (w && e->override)
+                if (!(w = xwm_find(x, e->window, 1)))
+                        break;
+                if (e->override)
                         w->state |= COMPOSITOR_XWM_OVERRIDE;
-                // A window that is not mapped is still watched for _MOONWATER_STEAM_OVERLAY (its changes, and what it has now).
-                if (w && !e->override && x->atoms[COMPOSITOR_XWM_A_STEAM])
+                else if (x->atoms[COMPOSITOR_XWM_A_STEAM])
                 {
-                        unsigned char req[16];
-                        long n = xwm_enc_select_events(req, sizeof req, e->window, XWM_MASK_PROPERTY_CHANGE);
-
-                        if (n > 0)
-                                compositor_xwm_queue(x, req, n);
-                        compositor_xwm_ask(x, e->window, COMPOSITOR_XWM_PROP_STEAM, x->atoms[COMPOSITOR_XWM_A_STEAM],
-                                           COMPOSITOR_XWM_ALLOW_TYPE);
+                        compositor_xwm_select(x, e->window, XWM_MASK_PROPERTY_CHANGE);
+                        compositor_xwm_ask(x, e->window, COMPOSITOR_XWM_PROP_STEAM, x->atoms[COMPOSITOR_XWM_A_STEAM], COMPOSITOR_XWM_ALLOW_TYPE);
                 }
-                if (w)
-                {
-                        w->x = e->x;
-                        w->y = e->y;
-                        w->width = e->width;
-                        w->height = e->height;
-                }
+                w->x = e->x, w->y = e->y, w->width = e->width, w->height = e->height;
                 break;
         case XWM_EV_MAP_NOTIFY:
-                // No MapRequest comes for an override-redirect window: once it is mapped Xwayland may commit its surface.
-                w = xwm_find(x, e->window, 0);
-                if (w && e->override)
-                {
-                        w->state |= COMPOSITOR_XWM_OVERRIDE;
-                        compositor_xwm_allow_commits(x, e->window);
-                }
+                if ((w = xwm_find(x, e->window, 0)) && e->override)
+                        w->state |= COMPOSITOR_XWM_OVERRIDE, compositor_xwm_allow_commits(x, e->window);
                 break;
         case XWM_EV_CONFIGURE_NOTIFY:
-                w = xwm_find(x, e->window, 0);
-                if (w)
+                if ((w = xwm_find(x, e->window, 0)))
                 {
                         unsigned int prev_w = w->width, prev_h = w->height;
-
-                        w->x = e->x;
-                        w->y = e->y;
-                        w->width = e->width;
-                        w->height = e->height;
-                        // Wine/Proton borderless fullscreen games often map a small override-redirect window first and then resize
-                        // it to cover the whole output: promote it to managed fullscreen so it hides/joins the taskbar and takes focus.
+                        int covers;
+                        w->x = e->x, w->y = e->y, w->width = e->width, w->height = e->height;
                         if ((w->state & COMPOSITOR_XWM_ADOPTED) && (w->state & COMPOSITOR_XWM_OVERRIDE) &&
                             w->row >= 0 && w->row < COMPOSITOR_ROWS && !(w->state & COMPOSITOR_XWM_FULLSCREEN) &&
-                            (w->width != prev_w || w->height != prev_h))
-                        {
-                                int covers = compositor_xwm_covers(w);
-
-                                if (covers >= 0)
-                                {
-                                        xwm_promote_fullscreen(x, w, prev_w, prev_h);
-                                        compositor_row_promote_toplevel(w->row, covers);
-                                        break;
-                                }
-                        }
-                        // A popup Xwayland moves while it is shown is adopted again: its new place is sent to the host there.
-                        if ((w->state & COMPOSITOR_XWM_ADOPTED) && compositor_xwm_is_popup(w) && w->row >= 0)
+                            (w->width != prev_w || w->height != prev_h) && (covers = compositor_xwm_covers(w)) >= 0)
+                                xwm_promote_fullscreen(x, w, prev_w, prev_h), compositor_row_promote_toplevel(w->row, covers);
+                        else if ((w->state & COMPOSITOR_XWM_ADOPTED) && compositor_xwm_is_popup(w) && w->row >= 0)
                                 w->dirty = 1;
                 }
                 break;
         case XWM_EV_PROPERTY_NOTIFY:
-                // A requestor window's property is a conversion's piece; another client's, a piece it took of the window manager's answer.
                 if (compositor_xwm_in_property(x, e))
                         break;
                 compositor_xwm_out_property(x, e);
-                w = xwm_find(x, e->window, 0);
-                if (!w)
+                if (!(w = xwm_find(x, e->window, 0)))
                         break;
-                // A window's _NET_WM_NAME is its title; its WM_NAME changes what the title is only while it has no _NET_WM_NAME.
                 if (e->atom == x->atoms[COMPOSITOR_XWM_A_NET_NAME] ||
                     (e->atom == COMPOSITOR_XWM_XA_WM_NAME && !(w->state & COMPOSITOR_XWM_NET_TITLE)))
                         xwm_ask_title(x, w);
@@ -4170,11 +2972,8 @@ static void xwm_event(struct compositor_xwm *x, const struct xwm_event *e)
                         xwm_notify_prop(x, w, e->atom);
                 break;
         case XWM_EV_UNMAP_NOTIFY:
-                w = xwm_find(x, e->window, 0);
-                if (w)
+                if ((w = xwm_find(x, e->window, 0)))
                 {
-                        // The surface the serial named went with the mapping (Xwayland destroys it): the next one says its own.
-                        // Clear per-mapping X11 state here so a later MapRequest starts clean and re-reads all properties.
                         w->state &= ~(COMPOSITOR_XWM_MAPPED | COMPOSITOR_XWM_SERIAL | COMPOSITOR_XWM_FULLSCREEN |
                                       COMPOSITOR_XWM_MAXIMIZED | COMPOSITOR_XWM_POPUPTYPE | COMPOSITOR_XWM_PROPS_READ |
                                       COMPOSITOR_XWM_DESKTOP | COMPOSITOR_XWM_ABOVE);
@@ -4187,78 +2986,65 @@ static void xwm_event(struct compositor_xwm *x, const struct xwm_event *e)
                 compositor_xwm_out_gone(x, e->window, 0);
                 xwm_forget(x, e->window);
                 break;
-        case XWM_EV_SELECTION_REQUEST:
-                compositor_xwm_selection_request(x, e);
-                break;
-        case XWM_EV_SELECTION_NOTIFY:
-                compositor_xwm_in_notify(x, e);
-                break;
+        case XWM_EV_SELECTION_REQUEST: compositor_xwm_selection_request(x, e); break;
+        case XWM_EV_SELECTION_NOTIFY: compositor_xwm_in_notify(x, e); break;
         case XWM_EV_SELECTION_CLEAR:
-                if (e->owner == compositor_xwm_id(x, COMPOSITOR_XWM_SEL_WINDOW) && compositor_xwm_which(x, e->selection) >= 0 &&
-                    compositor_xwm_which(x, e->selection) < 2)
-                        x->sel[compositor_xwm_which(x, e->selection)].owned = 0;
+                if (e->owner == compositor_xwm_id(x, COMPOSITOR_XWM_SEL_WINDOW))
+                {
+                        int which = compositor_xwm_which(x, e->selection);
+                        if (which >= 0 && which < 2)
+                                x->sel[which].owned = 0;
+                }
                 break;
         case XWM_EV_CLIENT_MESSAGE:
-                // XDND: the X source's messages to the proxy, and the X target's to the selection window (DRAG AND DROP).
-                if (e->format == XWM_FORMAT_32 && e->window == compositor_xwm_id(x, COMPOSITOR_XWM_PROXY_WINDOW) && x->claimed)
+                if (e->format == XWM_FORMAT_32 && x->claimed)
                 {
-                        compositor_xwm_proxy_message(x, e);
-                        break;
-                }
-                if (e->format == XWM_FORMAT_32 && e->window == compositor_xwm_id(x, COMPOSITOR_XWM_SEL_WINDOW) && x->claimed)
-                {
-                        compositor_xwm_wdrag_message(x, e);
-                        break;
-                }
-                if (e->format == XWM_FORMAT_32 && e->window == compositor_xwm_id(x, COMPOSITOR_XWM_TRAY_WINDOW) && x->claimed &&
-                    e->atom == x->atoms[COMPOSITOR_XWM_A_TRAY_OPCODE] && e->data[1] == 0)
-                {
-                        compositor_xwm_tray_dock(x, e->data[2]);
-                        break;
+                        if (e->window == compositor_xwm_id(x, COMPOSITOR_XWM_PROXY_WINDOW))
+                        {
+                                compositor_xwm_proxy_message(x, e);
+                                break;
+                        }
+                        if (e->window == compositor_xwm_id(x, COMPOSITOR_XWM_SEL_WINDOW))
+                        {
+                                compositor_xwm_wdrag_message(x, e);
+                                break;
+                        }
+                        if (e->window == compositor_xwm_id(x, COMPOSITOR_XWM_TRAY_WINDOW) &&
+                            e->atom == x->atoms[COMPOSITOR_XWM_A_TRAY_OPCODE] && e->data[1] == 0)
+                        {
+                                compositor_xwm_tray_dock(x, e->data[2]);
+                                break;
+                        }
                 }
                 if (e->atom == x->atoms[COMPOSITOR_XWM_A_SERIAL])
                 {
                         unsigned long long serial = ((unsigned long long)e->data[1] << 32) | e->data[0];
-
-                        w = xwm_find(x, e->window, 1);
-                        if (!w)
+                        if (!(w = xwm_find(x, e->window, 1)))
                                 break;
-                        // Another serial is another surface, and so another mapping, whether or not its unmap was heard first.
                         if (((w->state & COMPOSITOR_XWM_SERIAL) && w->serial != serial) || w->row >= 0 || (w->state & COMPOSITOR_XWM_ADOPTED))
                                 xwm_unmapped(x, w);
-                        w->serial = serial;
-                        w->state |= COMPOSITOR_XWM_SERIAL;
+                        w->serial = serial, w->state |= COMPOSITOR_XWM_SERIAL;
                         compositor_xwm_resolve(x, w);
                 }
-                else if (e->atom == x->atoms[COMPOSITOR_XWM_A_NET_STATE])
+                else if (e->atom == x->atoms[COMPOSITOR_XWM_A_NET_STATE] && (w = xwm_find(x, e->window, 0)))
                 {
-                        unsigned int bits = xwm_net_state_bits(x, e->data[1], e->data[2]);
-                        unsigned int hidden = x->atoms[COMPOSITOR_XWM_A_HIDDEN];
+                        unsigned int bits = xwm_net_state_bits(x, e->data[1], e->data[2]), hidden = x->atoms[COMPOSITOR_XWM_A_HIDDEN];
                         unsigned int want_max = bits & COMPOSITOR_XWM_MAXIMIZED;
-
-                        w = xwm_find(x, e->window, 0);
-                        if (!w)
-                                break;
                         if (bits & COMPOSITOR_XWM_FULLSCREEN)
-                                compositor_xwm_fullscreen(x, w, xwm_net_state_apply(e->data[0], w->state, COMPOSITOR_XWM_FULLSCREEN) & COMPOSITOR_XWM_FULLSCREEN ? 1 : 0);
+                                compositor_xwm_fullscreen(x, w, (xwm_net_state_apply(e->data[0], w->state, COMPOSITOR_XWM_FULLSCREEN) & COMPOSITOR_XWM_FULLSCREEN) != 0);
                         if (want_max)
                         {
                                 unsigned int was_max = w->state & COMPOSITOR_XWM_MAXIMIZED;
                                 unsigned int next_bits = xwm_net_state_apply(e->data[0], was_max, want_max) & COMPOSITOR_XWM_MAXIMIZED;
-
                                 if (next_bits != was_max)
                                 {
                                         int on = next_bits != 0, was_on = was_max != 0;
-
                                         if (on && !was_on && !(w->state & COMPOSITOR_XWM_FULLSCREEN))
                                                 w->restore_w = w->width, w->restore_h = w->height;
                                         w->state = (w->state & ~COMPOSITOR_XWM_MAXIMIZED) | next_bits;
                                         compositor_xwm_net_state(x, w->id, (int)w->state);
-                                        if (on && !was_on)
-                                        {
-                                                if (w->row >= 0 && !(w->state & COMPOSITOR_XWM_FULLSCREEN))
-                                                        compositor_arrange(w->row, COMPOSITOR_ROOM);
-                                        }
+                                        if (on && !was_on && w->row >= 0 && !(w->state & COMPOSITOR_XWM_FULLSCREEN))
+                                                compositor_arrange(w->row, COMPOSITOR_ROOM);
                                         else if (!on && was_on)
                                         {
                                                 if (w->state & COMPOSITOR_XWM_FULLSCREEN)
@@ -4275,8 +3061,7 @@ static void xwm_event(struct compositor_xwm *x, const struct xwm_event *e)
                                         }
                                 }
                         }
-                        if (hidden && (e->data[1] == hidden || e->data[2] == hidden) &&
-                            w->row >= 0 && w->row < COMPOSITOR_ROWS && compositor.showing[w->row] && !compositor_xwm_is_popup(w))
+                        if (hidden && (e->data[1] == hidden || e->data[2] == hidden) && xwm_row_showing(w) && !compositor_xwm_is_popup(w))
                         {
                                 if (xwm_net_state_apply(e->data[0], (compositor.state[w->row] & WINDOW_MINIMIZED) ? 1u : 0u, 1u))
                                         compositor_minimize_row(w->row);
@@ -4286,12 +3071,11 @@ static void xwm_event(struct compositor_xwm *x, const struct xwm_event *e)
                         if ((bits & COMPOSITOR_XWM_ABOVE) && !(w->state & COMPOSITOR_XWM_DESKTOP))
                         {
                                 int on = (xwm_net_state_apply(e->data[0], w->state, COMPOSITOR_XWM_ABOVE) & COMPOSITOR_XWM_ABOVE) != 0;
-
                                 if (on != !!(w->state & COMPOSITOR_XWM_ABOVE))
                                 {
                                         w->state = on ? (w->state | COMPOSITOR_XWM_ABOVE) : (w->state & ~COMPOSITOR_XWM_ABOVE);
                                         compositor_xwm_net_state(x, w->id, (int)w->state);
-                                        if (w->row >= 0 && w->row < COMPOSITOR_ROWS && compositor.showing[w->row])
+                                        if (xwm_row_showing(w))
                                                 compositor_layer_set(w->row, on ? WINDOW_LAYER_ABOVE : WINDOW_LAYER_NORMAL, -1);
                                 }
                         }
@@ -4302,21 +3086,18 @@ static void xwm_event(struct compositor_xwm *x, const struct xwm_event *e)
                         compositor_xwm_moveresize(xwm_find(x, e->window, 0), e->data[2]);
                 else if (e->atom && e->atom == x->atoms[COMPOSITOR_XWM_A_NET_ACTIVE])
                 {
-                        w = xwm_find(x, e->window, 0);
-                        if (w && w->row >= 0 && w->row < COMPOSITOR_ROWS && compositor.showing[w->row] && !compositor_xwm_is_popup(w))
+                        if ((w = xwm_find(x, e->window, 0)) && xwm_row_showing(w) && !compositor_xwm_is_popup(w))
                                 compositor_reveal(w->row);
                 }
                 else if (e->atom && e->atom == x->atoms[COMPOSITOR_XWM_A_NET_CLOSE])
                 {
-                        w = xwm_find(x, e->window, 0);
-                        if (w && w->row >= 0 && w->row < COMPOSITOR_ROWS && compositor.showing[w->row])
+                        if ((w = xwm_find(x, e->window, 0)) && xwm_row_showing(w))
                                 compositor_close(w->row);
                 }
                 else if (e->atom && e->atom == x->atoms[COMPOSITOR_XWM_A_CHANGE_STATE] &&
                          e->format == XWM_FORMAT_32 && e->data[0] == COMPOSITOR_XWM_STATE_ICONIC)
                 {
-                        w = xwm_find(x, e->window, 0);
-                        if (w && w->row >= 0 && w->row < COMPOSITOR_ROWS && compositor.showing[w->row] && !compositor_xwm_is_popup(w))
+                        if ((w = xwm_find(x, e->window, 0)) && xwm_row_showing(w) && !compositor_xwm_is_popup(w))
                                 compositor_minimize_row(w->row);
                 }
                 break;
@@ -4325,12 +3106,9 @@ static void xwm_event(struct compositor_xwm *x, const struct xwm_event *e)
         }
 }
 
-/* An error the server sent: its sequence says which request it answers. The first request is the root's selection, and a
-   refusal of that is another window manager already running: the connection is dropped. Others are counted and go on. */
 static void compositor_xwm_error(struct compositor_xwm *x, const unsigned char *in)
 {
         struct xwm_error err;
-
         if (xwm_parse_error(in, XWM_HEADER, &err) != XWM_OK)
         {
                 x->broken = 1;
@@ -4339,15 +3117,13 @@ static void compositor_xwm_error(struct compositor_xwm *x, const unsigned char *
         x->errors++;
         if (err.sequence == 1)
         {
-                xwm_drop(x, "the server refused the root's events (another window manager runs)");
+                xwm_drop(x, "another window manager runs");
                 return;
         }
-        // A property request that is refused (its window is gone) is answered: a title it was asked for is no longer waited for.
         if (x->pending_count && x->pending[x->pending_at].seq == err.sequence)
         {
                 struct compositor_xwm_pending failed = x->pending[x->pending_at];
                 struct compositor_xwm_window *w;
-
                 compositor_xwm_pending_done(x);
                 w = xwm_find(x, failed.window, 0);
                 if (w && (failed.what == COMPOSITOR_XWM_PROP_NET_NAME || failed.what == COMPOSITOR_XWM_PROP_NAME))
@@ -4359,7 +3135,6 @@ static void compositor_xwm_error(struct compositor_xwm *x, const unsigned char *
                 else if ((failed.what == COMPOSITOR_XWM_PROP_SEL || failed.what == COMPOSITOR_XWM_PROP_SEL_SYNC) &&
                          compositor_xwm_in_at(x, (long)failed.slot) && x->ins[failed.slot].window == failed.window)
                         compositor_xwm_in_end(x, (long)failed.slot, 0);
-                // An X window gone under a drag has no XdndAware; an X source's types that cannot be read are the ones its enter named.
                 else if (COMPOSITOR_XWM_DND_REPLY(failed.what))
                         compositor_xwm_dnd_reply(x, 0, 0, &failed);
                 else if (failed.what == COMPOSITOR_XWM_PROP_MULTIPLE)
@@ -4371,43 +3146,27 @@ static void compositor_xwm_error(struct compositor_xwm *x, const unsigned char *
         }
 }
 
-/* One message the server sent, whole, at the start of the input: a reply, an error or an event. */
 static void compositor_xwm_message(struct compositor_xwm *x, const unsigned char *in, long size, long type)
 {
         if (type == XWM_ERROR)
-        {
                 compositor_xwm_error(x, in);
-                return;
-        }
-        if (type == XWM_REPLY && x->pending_count && x->pending[x->pending_at].seq == xwm_get16(in + 2))
+        else if (type == XWM_REPLY && x->pending_count && x->pending[x->pending_at].seq == xwm_get16(in + 2))
         {
                 struct compositor_xwm_pending found = x->pending[x->pending_at];
-
                 compositor_xwm_pending_done(x);
                 if (found.what == COMPOSITOR_XWM_PROP_EXT)
-                {
                         xwm_ext_reply(x, in, size, found.slot);
-                        return;
-                }
-                if (found.what == COMPOSITOR_XWM_PROP_OWNER)
+                else if (found.what == COMPOSITOR_XWM_PROP_OWNER)
                 {
                         struct compositor_xwm_window *w = xwm_find(x, found.window, 0);
                         unsigned int pid = 0;
-
                         if (xwm_parse_xres_client_pid(in, (unsigned long)size, &pid) != XWM_OK)
-                        {
                                 x->broken = 1;
-                                return;
-                        }
-                        if (w && pid > 1 && pid != (unsigned int)x->peer_pid &&
-                            pid != (unsigned int)compositor_call(syscall(getpid), 0, 0, 0, 0, 0, 0))
-                        {
-                                w->owner = pid;
-                                compositor_xwm_owned(w);
-                        }
-                        return;
+                        else if (w && pid > 1 && pid != (unsigned int)x->peer_pid &&
+                                 pid != (unsigned int)compositor_call(syscall(getpid), 0, 0, 0, 0, 0, 0))
+                                w->owner = pid, compositor_xwm_owned(w);
                 }
-                if (found.what == COMPOSITOR_XWM_PROP_INTERN)
+                else if (found.what == COMPOSITOR_XWM_PROP_INTERN)
                         xwm_interned(x, in, size, &found);
                 else if (found.what == COMPOSITOR_XWM_PROP_ATOM_NAME)
                         compositor_xwm_named(x, in, size, &found);
@@ -4419,14 +3178,11 @@ static void compositor_xwm_message(struct compositor_xwm *x, const unsigned char
                         compositor_xwm_multiple_reply(x, in, size, &found);
                 else
                         xwm_property(x, in, size, &found);
-                return;
         }
-        if (type == XWM_REPLY)
+        else if (type == XWM_REPLY)
         {
                 struct xwm_atom_reply atom;
                 unsigned int at = (xwm_get16(in + 2) + 0x10000u - COMPOSITOR_XWM_ATOM_FIRST_SEQ) & 0xffffu;
-
-                // Only while the atoms are awaited: a reply nothing waits for, once the sequence has gone round, is no atom's.
                 if (at >= COMPOSITOR_XWM_ATOMS || x->atoms_seen >= COMPOSITOR_XWM_ATOMS)
                         return;
                 if (xwm_parse_atom_reply(in, (unsigned long)size, &atom) != XWM_OK)
@@ -4439,95 +3195,69 @@ static void compositor_xwm_message(struct compositor_xwm *x, const unsigned char
                 x->atoms[at] = atom.atom;
                 if (x->atoms_seen == COMPOSITOR_XWM_ATOMS)
                         xwm_claim(x);
-                return;
         }
-        if (x->xfixes_event && (in[0] & XWM_TYPE_MASK) == x->xfixes_event)
+        else if (x->xfixes_event && (in[0] & XWM_TYPE_MASK) == x->xfixes_event)
         {
                 struct xwm_event e;
-
                 if (xwm_parse_xfixes_selection(in, (unsigned long)size, x->xfixes_event, &e) != XWM_OK)
-                {
                         x->broken = 1;
-                        return;
-                }
-                compositor_xwm_owner(x, &e);
-                return;
+                else
+                        compositor_xwm_owner(x, &e);
         }
+        else
         {
                 struct xwm_event e;
-
                 if (xwm_parse_event(in, (unsigned long)size, &e) != XWM_OK)
-                {
                         x->broken = 1;
-                        return;
-                }
-                xwm_event(x, &e);
+                else
+                        xwm_event(x, &e);
         }
 }
 
-/* Consumes n bytes from the front of the input. */
 static void compositor_xwm_consume(struct compositor_xwm *x, long n)
 {
-
         if (n > 0 && x->in_len > n)
                 memory_copy(x->in, x->in + n, (positive)(x->in_len - n));
         x->in_len -= n;
 }
 
-/* Every whole message in the input, in order: the setup reply first, then the messages. A message the codec refuses drops the
-   connection, so nothing a server sends is read past its bounds. The messages answered are taken off the input once, at the end
-   (a burst of them is one move of the input, not one move of the rest of it for each message). */
 static void compositor_xwm_messages(struct compositor_xwm *x)
 {
         long at = 0;
-
         while (x->fd >= 0 && !x->broken)
         {
                 long size, type;
-
                 if (!x->ready)
                 {
                         struct xwm_setup setup;
-
                         size = xwm_setup_size(x->in + at, (unsigned long)(x->in_len - at));
                         if (size == XWM_ERR_SHORT)
                                 break;
                         if (size < 0)
                         {
-                                xwm_drop(x, "the setup reply is too long");
+                                xwm_drop(x, "setup reply too long");
                                 return;
                         }
                         if (x->in_len - at < size)
                                 break;
                         if (xwm_parse_setup(x->in + at, (unsigned long)size, &setup) != XWM_OK || setup.status != XWM_SETUP_SUCCESS)
                         {
-                                string_format(log, (string_address)"xwm: the setup reply has status %p and %p bytes, and the codec says %p\n",
-                                              (positive)x->in[at], (positive)size, (positive)xwm_parse_setup(x->in + at, (unsigned long)size, &setup));
-                                log_flush();
-                                xwm_drop(x, "the setup was refused or is malformed");
+                                xwm_drop(x, "setup refused or malformed");
                                 return;
                         }
-                        x->root = setup.root;
-                        x->resource_base = setup.resource_base;
-                        x->resource_mask = setup.resource_mask;
-                        x->ready = 1;
-                        at += size;
+                        x->root = setup.root, x->resource_base = setup.resource_base, x->resource_mask = setup.resource_mask;
+                        x->ready = 1, at += size;
                         compositor_xwm_start_session(x);
                         continue;
                 }
-                type = xwm_message_type(x->in + at, (unsigned long)(x->in_len - at));
-                if (type == XWM_ERR_SHORT)
+                if ((type = xwm_message_type(x->in + at, (unsigned long)(x->in_len - at))) == XWM_ERR_SHORT)
                         break;
-                size = xwm_server_message_size(x->in + at, (unsigned long)(x->in_len - at));
-                if (size < 0)
+                if ((size = xwm_server_message_size(x->in + at, (unsigned long)(x->in_len - at))) < 0)
                 {
-                        xwm_drop(x, "a reply is longer than the window manager takes");
+                        xwm_drop(x, "reply too long");
                         return;
                 }
-                if (x->in_len - at < size)
-                        break;
-                // A server that sends faster than the queue to it drains is taken a pass at a time: the rest waits in the input.
-                if (x->out_len > COMPOSITOR_XWM_OUT - COMPOSITOR_XWM_ROOM)
+                if (x->in_len - at < size || x->out_len > COMPOSITOR_XWM_OUT - COMPOSITOR_XWM_ROOM)
                         break;
                 compositor_xwm_message(x, x->in + at, size, type);
                 if (x->fd < 0)
@@ -4537,33 +3267,25 @@ static void compositor_xwm_messages(struct compositor_xwm *x)
         compositor_xwm_consume(x, at);
 }
 
-/* ---- the connection ---- */
-
 static void compositor_xwm_close_rows(struct compositor_xwm *x)
 {
-
-        // The windows and system tray items the connection made are taken away, and their surfaces are shown no more.
         compositor_xwm_tray_undock(x, 0);
         for (long at = 0; at < x->window_table.count; at++)
         {
                 struct compositor_xwm_window *w = &x->window[at];
-
                 if (w->id && (w->state & COMPOSITOR_XWM_SERIAL))
                         wayland_xwindow_gone(compositor_xwm_server(x), w->serial);
                 xwm_release(x, w);
         }
-        x->pending_at = x->pending_count = 0;
-        x->focus_row = -2;
-        // The conversions go with the connection (a pipe's pump reads its end), and what X offered with a selection.
+        x->pending_at = x->pending_count = 0, x->focus_row = -2;
         for (long at = 0; at < x->in_table.count; at++)
                 if (x->ins[at].window)
                 {
                         x->ins[at].eager = 0;
                         if (x->ins[at].fd >= 0)
                                 system_close(x->ins[at].fd);
-                        x->ins[at].fd = -1;
+                        x->ins[at].fd = -1, x->ins[at].window = 0;
                         wayland_table_drop(&x->ins[at].targets);
-                        x->ins[at].window = 0;
                 }
         for (long at = 0; at < x->out_table.count; at++)
                 if (x->outs[at].requestor && x->outs[at].fd >= 0)
@@ -4576,14 +3298,8 @@ static void compositor_xwm_close_rows(struct compositor_xwm *x)
         wayland_table_drop(&x->type_table);
         x->ins = 0, x->outs = 0, x->atom = 0, x->name_bytes = 0, x->atoms_indexed = 0;
         for (int which = 0; which < 3; which++)
-        {
-                x->sel[which].atom = x->sel[which].owned_time = x->sel[which].x_owner = 0;
-                x->sel[which].owned = x->sel[which].dirty = 0;
-                x->sel[which].reading = -1;
-        }
-        x->xfixes_opcode = x->xfixes_event = x->setting = 0;
-        x->save.requestor = 0;
-        // A drag across the bridge ends with it.
+                x->sel[which] = (struct compositor_xwm_selection){0, 0, 0, 0, 0, -1};
+        x->xfixes_opcode = x->xfixes_event = x->setting = x->save.requestor = 0;
         if (x->xdrag.began && !x->xdrag.dropped)
                 wayland_drag_x_leave();
         if (x->wdrag.live && x->wdrag.dropped)
@@ -4598,59 +3314,43 @@ static void compositor_xwm_close_rows(struct compositor_xwm *x)
 
 static void xwm_drop(struct compositor_xwm *x, const char *why)
 {
-
         if (x->fd < 0)
                 return;
         compositor_xwm_counted[3]++;
-        compositor_xwm_log("xwm: the window manager connection is closed: ");
-        compositor_xwm_log(why);
-        compositor_xwm_log("\n");
-        log_flush();
+        compositor_xwm_log("xwm: connection closed: "), compositor_xwm_log(why), compositor_xwm_log("\n"), log_flush();
         system_close(x->fd);
         x->fd = -1;
         if (compositor_xwm_steam.slot == x)
                 memory_zero(&compositor_xwm_steam, sizeof compositor_xwm_steam);
         compositor_xwm_close_rows(x);
-        x->ready = 0;
-        x->broken = 0;
-        x->in_len = 0;
-        x->out_len = 0;
-        x->seq = 0;
-        x->atoms_seen = 0;
-        x->claimed = 0;
-        x->composite = 0;
-        for (unsigned int at = 0; at < COMPOSITOR_XWM_ATOMS; at++)
-                x->atoms[at] = 0;
+        x->ready = x->broken = x->claimed = x->composite = 0;
+        x->in_len = x->out_len = 0, x->seq = x->atoms_seen = 0;
+        memory_zero(x->atoms, sizeof x->atoms);
 }
 
-/* The setup request goes out first, before anything else is read: it is the only message the window manager sends unasked. */
 static void compositor_xwm_accept(void)
 {
         int credentials[3] = {0, 0, 0};
         unsigned int size = sizeof credentials;
-        long fd;
+        long fd = compositor_call(syscall(accept4), (positive)compositor_xwm_listen_fd, 0, 0, 0x800 | 0x80000, 0, 0), n;
         unsigned char setup[XWM_SETUP_REQUEST];
-        long n;
         struct compositor_xwm *x = 0;
+        int ok;
 
-        // SOCK_NONBLOCK | SOCK_CLOEXEC
-        fd = compositor_call(syscall(accept4), (positive)compositor_xwm_listen_fd, 0, 0, 0x800 | 0x80000, 0, 0);
         if (fd < 0)
                 return;
-        // The credentials first (E-h9-1): a peer that is refused never takes a live server's place, whatever pid it has.
         if (compositor_call(syscall(getsockopt), (positive)fd, 1, COMPOSITOR_XWM_SO_PEERCRED, (positive)credentials, (positive)&size, 0) < 0)
                 credentials[0] = 0;
-        if (credentials[0] > 0 && (credentials[1] == compositor_xwm_uid || (compositor_xwm_uid == 0 && credentials[1] == 1000)))
-                // One window manager for each wrapper: its new connection (the next display tried) takes the old one's place.
+        ok = credentials[0] > 0 && (credentials[1] == compositor_xwm_uid || (compositor_xwm_uid == 0 && credentials[1] == 1000));
+        if (ok)
                 for (int at = 0; at < COMPOSITOR_XWM_SLOTS; at++)
                         if (compositor_xwm_slots[at].fd >= 0 && compositor_xwm_slots[at].peer_pid == credentials[0])
-                                xwm_drop(&compositor_xwm_slots[at], "its wrapper connected again");
+                                xwm_drop(&compositor_xwm_slots[at], "wrapper reconnected");
         for (int at = 0; at < COMPOSITOR_XWM_SLOTS && !x; at++)
                 if (compositor_xwm_slots[at].fd < 0)
                         x = &compositor_xwm_slots[at];
-        if (credentials[0] <= 0 || (credentials[1] != compositor_xwm_uid && !(compositor_xwm_uid == 0 && credentials[1] == 1000)) || !x)
+        if (!ok || !x)
         {
-                // Every slot is an X server's already: the connection is refused (counted on the first slot).
                 if (!x)
                         compositor_xwm_slots[0].refused++;
                 compositor_xwm_counted[0]++;
@@ -4658,17 +3358,10 @@ static void compositor_xwm_accept(void)
                 return;
         }
         *x = compositor_xwm_fresh;
-        x->fd = (int)fd;
-        x->peer_pid = credentials[0];
-        x->since = clock_monotonic_nanoseconds();
-        n = xwm_enc_setup_request(setup, sizeof setup);
-        if (n > 0)
-        {
-                memory_copy(x->out, setup, (positive)n);
-                x->out_len = n;
-        }
-        compositor_xwm_log("xwm: the window manager of Xwayland is connected\n");
-        log_flush();
+        x->fd = (int)fd, x->peer_pid = credentials[0], x->since = clock_monotonic_nanoseconds();
+        if ((n = xwm_enc_setup_request(setup, sizeof setup)) > 0)
+                memory_copy(x->out, setup, (positive)n), x->out_len = n;
+        compositor_xwm_log("xwm: connected\n"), log_flush();
 }
 
 static void compositor_xwm_flush(struct compositor_xwm *x)
@@ -4692,27 +3385,22 @@ static void compositor_xwm_flush(struct compositor_xwm *x)
         x->out_len -= got;
 }
 
-/* What the server has sent, a bounded amount of it: each read is taken whole into the input and its messages are answered. */
 static void compositor_xwm_read(struct compositor_xwm *x)
 {
-
         for (int reads = 0; reads < 4 && x->fd >= 0 && !x->broken && x->out_len <= COMPOSITOR_XWM_OUT - COMPOSITOR_XWM_ROOM; reads++)
         {
-                long got;
-
                 if (x->in_len >= COMPOSITOR_XWM_IN)
                 {
-                        xwm_drop(x, "the input is full");
+                        xwm_drop(x, "input full");
                         return;
                 }
-                // MSG_DONTWAIT
-                got = compositor_call(syscall(recvfrom), (positive)x->fd, (positive)(x->in + x->in_len),
-                                      (positive)(COMPOSITOR_XWM_IN - x->in_len), COMPOSITOR_XWM_MSG_DONTWAIT, 0, 0);
+                long got = compositor_call(syscall(recvfrom), (positive)x->fd, (positive)(x->in + x->in_len),
+                                           (positive)(COMPOSITOR_XWM_IN - x->in_len), COMPOSITOR_XWM_MSG_DONTWAIT, 0, 0);
                 if (got == COMPOSITOR_XWM_EAGAIN)
                         return;
                 if (got <= 0)
                 {
-                        xwm_drop(x, "the connection ended");
+                        xwm_drop(x, "connection ended");
                         return;
                 }
                 x->in_len += got;
@@ -4720,39 +3408,31 @@ static void compositor_xwm_read(struct compositor_xwm *x)
         }
 }
 
-/* ---- the socket and the loop ---- */
+/* ---- socket, poll loop, slot lookup, Steam overlay, and Canvas bridge hooks ---- */
 
 static void compositor_xwm_register_hooks(void);
 
 static void compositor_xwm_start(void)
 {
         unsigned char address[110];
-        long length = 0, got;
+        unsigned long length = sizeof COMPOSITOR_XWM_PATH - 1;
+        long got;
 
         compositor_xwm_register_hooks();
         if (compositor_xwm_listen_fd >= 0)
                 return;
         memory_zero(address, sizeof address);
-        address[0] = 1; // AF_UNIX
-        while (COMPOSITOR_XWM_PATH[length])
-        {
-                address[2 + length] = (unsigned char)COMPOSITOR_XWM_PATH[length];
-                length++;
-        }
-        // Pre-create /tmp/.X11-unix under the compositor's identity (root on default Moonwater) so Xwayland does not warn about user ownership.
+        address[0] = 1;
+        memory_copy(address + 2, COMPOSITOR_XWM_PATH, (positive)length);
         if (compositor_call(syscall(mkdirat), (positive)AT_FDCWD, (positive)"/tmp", 01777, 0, 0, 0) >= 0)
                 compositor_call(syscall(fchmodat), (positive)AT_FDCWD, (positive)"/tmp", 01777, 0, 0, 0);
         if (compositor_call(syscall(mkdirat), (positive)AT_FDCWD, (positive)"/tmp/.X11-unix", 01777, 0, 0, 0) >= 0)
                 compositor_call(syscall(fchmodat), (positive)AT_FDCWD, (positive)"/tmp/.X11-unix", 01777, 0, 0, 0);
         compositor_xwm_uid = (int)compositor_call(syscall(getuid), 0, 0, 0, 0, 0, 0);
-        // Directory 0711 stops other users listing it while letting uid/gid 1000 traverse to wm-0 (mode 0660, group 1000 when uid 0),
-        // and an old socket at the path is taken away (a compositor that died left it).
         compositor_call(syscall(mkdirat), (positive)AT_FDCWD, (positive)COMPOSITOR_XWM_DIR, 0711, 0, 0, 0);
         compositor_call(syscall(fchmodat), (positive)AT_FDCWD, (positive)COMPOSITOR_XWM_DIR, 0711, 0, 0, 0);
         compositor_call(syscall(unlinkat), (positive)AT_FDCWD, (positive)COMPOSITOR_XWM_PATH, 0, 0, 0, 0);
-        // SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC
-        got = compositor_call(syscall(socket), 1, 1 | 0x800 | 0x80000, 0, 0, 0, 0);
-        if (got < 0)
+        if ((got = compositor_call(syscall(socket), 1, 1 | 0x800 | 0x80000, 0, 0, 0, 0)) < 0)
                 return;
         compositor_xwm_listen_fd = (int)got;
         if (compositor_call(syscall(bind), (positive)got, (positive)address, (positive)(2 + length + 1), 0, 0, 0) < 0 ||
@@ -4764,25 +3444,22 @@ static void compositor_xwm_start(void)
                 return;
         }
         if (compositor_xwm_uid == 0)
-                compositor_call(syscall(fchownat), (positive)AT_FDCWD, (positive)COMPOSITOR_XWM_PATH,
-                                (positive)(unsigned int)-1, (positive)1000u, 0, 0);
+                compositor_call(syscall(fchownat), (positive)AT_FDCWD, (positive)COMPOSITOR_XWM_PATH, (positive)(unsigned int)-1, (positive)1000u, 0, 0);
         compositor_call(syscall(fchmodat), (positive)AT_FDCWD, (positive)COMPOSITOR_XWM_PATH, 0660, 0, 0, 0);
-        compositor_xwm_log("xwm: listening on " COMPOSITOR_XWM_PATH "\n");
-        log_flush();
+        compositor_xwm_log("xwm: listening on " COMPOSITOR_XWM_PATH "\n"), log_flush();
 }
 
 static void compositor_xwm_stop(void)
 {
         for (int at = 0; at < COMPOSITOR_XWM_SLOTS; at++)
                 if (compositor_xwm_slots[at].fd >= 0)
-                        xwm_drop(&compositor_xwm_slots[at], "the compositor stops");
+                        xwm_drop(&compositor_xwm_slots[at], "compositor stops");
         if (compositor_xwm_listen_fd >= 0)
                 system_close(compositor_xwm_listen_fd);
         compositor_xwm_listen_fd = -1;
         compositor_call(syscall(unlinkat), (positive)AT_FDCWD, (positive)COMPOSITOR_XWM_PATH, 0, 0, 0, 0);
 }
 
-/* The two polls of the window manager: its listening socket and its connection, at the end of the wayland polls. */
 static unsigned int compositor_xwm_poll(struct compositor_poll *wanted, unsigned int count, unsigned int base)
 {
         compositor_xwm_listen_at = -1;
@@ -4793,46 +3470,39 @@ static unsigned int compositor_xwm_poll(struct compositor_poll *wanted, unsigned
         compositor_xwm_listen_at = (int)(count - base);
         wanted[count++] = (struct compositor_poll){compositor_xwm_listen_fd, COMPOSITOR_POLLIN, 0};
         for (int at = 0; at < COMPOSITOR_XWM_SLOTS; at++)
-        {
-                struct compositor_xwm *x = &compositor_xwm_slots[at];
-
-                if (x->fd < 0)
-                        continue;
-                x->poll_at = (int)(count - base);
-                wanted[count++] = (struct compositor_poll){x->fd, (short)(COMPOSITOR_POLLIN | (x->out_len ? COMPOSITOR_POLLOUT : 0)), 0};
-        }
+                if (compositor_xwm_slots[at].fd >= 0)
+                {
+                        compositor_xwm_slots[at].poll_at = (int)(count - base);
+                        wanted[count++] = (struct compositor_poll){compositor_xwm_slots[at].fd,
+                                                                   (short)(COMPOSITOR_POLLIN | (compositor_xwm_slots[at].out_len ? COMPOSITOR_POLLOUT : 0)), 0};
+                }
         return count;
 }
 
-/* One pass: a connection accepted, what the server sent answered, what it asks of the rows, and the connection timed out. */
-/* One connection's pass (compositor_xwm_pass runs it for each slot): what its server sent answered, what it asks of the rows. */
 static void xwm_pass_one(struct compositor_xwm *x, const struct compositor_poll *wanted)
 {
         short returned;
-
         if (x->poll_at < 0)
                 return;
         returned = wanted[x->poll_at].returned;
-        // The setup request, queued at the accept, goes out before anything is waited for.
         compositor_xwm_flush(x);
         if (x->fd >= 0 && (returned & COMPOSITOR_POLLIN))
                 compositor_xwm_read(x);
         else if (x->fd >= 0 && (returned & (COMPOSITOR_POLLHUP | COMPOSITOR_POLLERR)))
-                xwm_drop(x, "the connection hung up");
+                xwm_drop(x, "hung up");
         if (x->fd >= 0 && x->broken)
-                xwm_drop(x, "a message the codec refused, or a queue that overflowed");
+                xwm_drop(x, "protocol or queue error");
         if (x->fd >= 0 && !x->ready && clock_monotonic_nanoseconds() - x->since > COMPOSITOR_XWM_SETUP_NS)
-                xwm_drop(x, "the setup did not finish in time");
+                xwm_drop(x, "setup timeout");
         if (x->fd >= 0 && clock_monotonic_nanoseconds() - x->since > COMPOSITOR_XWM_BIND_NS && compositor_xwm_server(x) < 0)
-                xwm_drop(x, "no X server of its wrapper is a Wayland client");
+                xwm_drop(x, "no Wayland client for X server");
         if (x->fd < 0 || !x->ready)
                 return;
-        // What a drained queue lets be taken of the input.
         compositor_xwm_flush(x);
         compositor_xwm_messages(x);
         if (x->fd >= 0 && x->broken)
         {
-                xwm_drop(x, "a message the codec refused, or a queue that overflowed");
+                xwm_drop(x, "protocol or queue error");
                 return;
         }
         compositor_xwm_selections_pass(x);
@@ -4840,18 +3510,13 @@ static void xwm_pass_one(struct compositor_xwm *x, const struct compositor_poll 
         for (long at = 0; at < x->window_table.count && x->fd >= 0 && !x->broken; at++)
         {
                 struct compositor_xwm_window *w = &x->window[at];
-
                 if (!w->id)
                         continue;
-                // The row is the serial's surface's, asked each pass and not remembered: a row whose surface went is not this window's.
                 if (w->row >= 0 && (!(w->state & COMPOSITOR_XWM_SERIAL) || wayland_serial_row(compositor_xwm_server(x), w->serial) != w->row))
                         xwm_unmapped(x, w);
                 compositor_xwm_resolve(x, w);
                 if (w->row < 0 || w->row >= COMPOSITOR_ROWS)
                         continue;
-                // The compositor asked this window to go: a popup is unmapped, a window is asked by WM_DELETE_WINDOW on the first ask
-                // when its WM_PROTOCOLS lists it, and escalated to DestroyWindow (plus SIGTERM/SIGKILL to its owner PID if unresponsive)
-                // on repeated Alt+F4 / close asks so hung Wine/Proton/X11 games can always be closed.
                 if (compositor_xwm_close_owed(w))
                 {
                         w->closes = compositor.close_asks[w->row];
@@ -4868,11 +3533,9 @@ static void xwm_pass_one(struct compositor_xwm *x, const struct compositor_poll 
                 }
                 if (!compositor_xwm_is_popup(w))
                         compositor_xwm_sync(x, w);
-                // A dialog that is transient for a window is over it when it is shown, and takes the keys from it if it has them.
                 if (w->transient && !(w->state & COMPOSITOR_XWM_RAISED))
                 {
                         struct compositor_xwm_window *parent = xwm_find(x, w->transient, 0);
-
                         if (parent && parent->row >= 0 && parent->row < COMPOSITOR_ROWS)
                         {
                                 w->state |= COMPOSITOR_XWM_RAISED;
@@ -4885,22 +3548,19 @@ static void xwm_pass_one(struct compositor_xwm *x, const struct compositor_poll 
         }
         if (x->fd >= 0 && x->broken)
         {
-                xwm_drop(x, "a message the codec refused, or a queue that overflowed");
+                xwm_drop(x, "protocol or queue error");
                 return;
         }
-        // O(1) focus sync via xwm_row_map (replaces two full window-table scans per pass).
         if (x->fd >= 0)
         {
                 struct compositor_xwm_window *fw = xwm_row_lookup(x, (int)compositor.focus, 0);
                 unsigned int now_window = fw && !compositor_xwm_is_popup(fw) ? fw->id : 0;
-
                 if (now_window != x->focus_window)
                         x->focus_row = -3;
                 x->focus_window = now_window;
                 if ((int)compositor.focus != x->focus_row)
                 {
                         int focused = 0;
-
                         x->focus_row = (int)compositor.focus;
                         if (fw && !compositor_xwm_is_popup(fw))
                         {
@@ -4916,99 +3576,68 @@ static void xwm_pass_one(struct compositor_xwm *x, const struct compositor_poll 
                                 compositor_xwm_focus(x, 0);
                 }
         }
-        // O(N) stacking sync via xwm_row_map (replaces O(N^2) stacked x window_table scan).
         if (x->fd >= 0 && x->last_stack_gen != compositor.stack_gen)
         {
+                struct xwm_configure sc = {.mask = XWM_CONFIGURE_STACK_MODE, .stack_mode = XWM_STACK_ABOVE};
                 x->last_stack_gen = compositor.stack_gen;
                 for (unsigned int s = 0; s < compositor.stacked; s++)
                 {
                         struct compositor_xwm_window *w = xwm_row_lookup(x, (int)compositor.stack[s], 0);
-
                         if (w)
-                        {
-                                struct xwm_configure sc = {.mask = XWM_CONFIGURE_STACK_MODE, .stack_mode = XWM_STACK_ABOVE};
-
                                 compositor_xwm_configure(x, w->id, &sc);
-                        }
                 }
         }
         compositor_xwm_flush(x);
 }
 
-/* The loop's pass: a connection accepted, then each live connection's pass on its own slot. */
 static void compositor_xwm_pass(const struct compositor_poll *wanted)
 {
         if (compositor_xwm_listen_at >= 0 && (wanted[compositor_xwm_listen_at].returned & COMPOSITOR_POLLIN))
                 compositor_xwm_accept();
         for (int at = 0; at < COMPOSITOR_XWM_SLOTS; at++)
-        {
-                struct compositor_xwm *x = &compositor_xwm_slots[at];
-
-                if (x->fd < 0 || x->poll_at < 0)
-                        continue;
-                xwm_pass_one(x, wanted);
-        }
+                if (compositor_xwm_slots[at].fd >= 0 && compositor_xwm_slots[at].poll_at >= 0)
+                        xwm_pass_one(&compositor_xwm_slots[at], wanted);
         if (compositor.table)
                 for (unsigned int k = 0; k < 4; k++)
                         compositor.table->xwm_counts[k] = compositor_xwm_counted[k];
 }
 
-/* ---- which Wayland client is this X server ---- */
-
-// The wayland client that is this X server: the one whose process is a child of the wrapper that connected (peer_pid). Found once, then
-// kept while that client is the same process; -1 until a client's parent is the wrapper (the server's connection to Wayland comes first or second).
 static long compositor_xwm_server(struct compositor_xwm *x)
 {
         if (x->client >= 0 && wayland_client_pid(x->client) == x->client_pid && x->client_pid > 0)
                 return x->client;
-        x->client = -1;
-        x->client_pid = -1;
+        x->client = x->client_pid = -1;
         if (x->peer_pid <= 0)
                 return -1;
         for (long at = 0; at < wayland_client_count(); at++)
         {
                 long pid = wayland_client_pid(at);
                 unsigned int parent = 0;
-
                 if (pid > 0)
                 {
                         windows_proc_stat((unsigned int)pid, &parent);
                         if (parent == (unsigned int)x->peer_pid)
-                        {
-                                x->client = at;
-                                x->client_pid = pid;
-                                break;
-                        }
+                                return x->client = at, x->client_pid = pid, at;
                 }
         }
-        return x->client;
+        return -1;
 }
 
-/* ---- the slots: which server a row or a host's call is about ---- */
-
-// The slot whose window the row is (O(1) fast path via xwm_row_map; fallback scan only for tests that write w->row directly).
 static struct compositor_xwm *compositor_xwm_slot_of_row(long row)
 {
         struct compositor_xwm *sx = 0;
-
         if (row < 0 || row >= COMPOSITOR_ROWS)
                 return 0;
         if (xwm_row_lookup(0, (int)row, &sx))
                 return sx;
         for (int at = 0; at < COMPOSITOR_XWM_SLOTS; at++)
-        {
-                struct compositor_xwm *x = &compositor_xwm_slots[at];
-
-                if (x->fd < 0)
-                        continue;
-                for (long w = 0; w < x->window_table.count; w++)
-                        if (x->window[w].id && x->window[w].row == (int)row)
-                                return x;
-        }
+                if (compositor_xwm_slots[at].fd >= 0)
+                        for (long w = 0; w < compositor_xwm_slots[at].window_table.count; w++)
+                                if (compositor_xwm_slots[at].window[w].id && compositor_xwm_slots[at].window[w].row == (int)row)
+                                        return &compositor_xwm_slots[at];
         return 0;
 }
 
-// The first live slot that is ready (its setup is done), or the first slot when none is: where a call with no row goes.
 static struct compositor_xwm *compositor_xwm_first_ready(void)
 {
         for (int at = 0; at < COMPOSITOR_XWM_SLOTS; at++)
@@ -5017,17 +3646,13 @@ static struct compositor_xwm *compositor_xwm_first_ready(void)
         return &compositor_xwm_slots[0];
 }
 
-/* ---- the host's entry points (wayland_host.c): the selections go to every server, a row's and a drag's to the server they are on ---- */
-
 static void compositor_xwm_selection_changed(unsigned int which)
 {
-        // Only to a server that is one: its wrapper's child a Wayland client (a connection that is a socket and nothing else is offered nothing).
         if (which > 1)
                 return;
         for (int at = 0; at < COMPOSITOR_XWM_SLOTS; at++)
         {
                 struct compositor_xwm *x = &compositor_xwm_slots[at];
-
                 if (x->fd < 0 || !x->ready || compositor_xwm_server(x) < 0 || x->setting == which + 1)
                         continue;
                 if (x->sel[which].reading >= 0)
@@ -5039,8 +3664,6 @@ static void compositor_xwm_selection_changed(unsigned int which)
 static long compositor_xwm_xdrag(long what, long row, long px, long py)
 {
         struct compositor_xwm *x = compositor_xwm_slot_of_row(row);
-
-        // A drag's end (no row) goes to each server that holds a drag, an X source's or a Wayland one over its windows (B-h9-1).
         if (what == WAYLAND_XDRAG_END)
         {
                 for (int at = 0; at < COMPOSITOR_XWM_SLOTS; at++)
@@ -5052,29 +3675,22 @@ static long compositor_xwm_xdrag(long what, long row, long px, long py)
         return xwm_xdrag_slot(x ? x : compositor_xwm_first_ready(), what, row, px, py);
 }
 
-/*
-        STEAM'S OVERLAY IN A GAME ON WAYLAND
-*/
-#define COMPOSITOR_XWM_STEAM_QUIET 3000u // milliseconds
+#define COMPOSITOR_XWM_STEAM_QUIET 3000u
 static struct compositor_xwm_window *compositor_xwm_steam_window(unsigned int pid, struct compositor_xwm **slot_out)
 {
         struct compositor_xwm *x = compositor_xwm_steam.slot;
         struct compositor_xwm_window *w;
-
         if (!pid || pid == 1 || !x || x->fd < 0 || !compositor_xwm_steam.window || compositor_xwm_steam.pid != pid)
                 return 0;
-        w = xwm_find(x, compositor_xwm_steam.window, 0);
-        if (!w || w->owner != pid)
+        if (!(w = xwm_find(x, compositor_xwm_steam.window, 0)) || w->owner != pid)
                 return 0;
-        if (compositor_xwm_steam.open &&
-            (unsigned int)(clock_monotonic_nanoseconds() / 1000000) - compositor_xwm_steam.told > COMPOSITOR_XWM_STEAM_QUIET)
+        if (compositor_xwm_steam.open && (unsigned int)(clock_monotonic_nanoseconds() / 1000000) - compositor_xwm_steam.told > COMPOSITOR_XWM_STEAM_QUIET)
                 compositor_xwm_steam.open = 0;
         if (slot_out)
                 *slot_out = x;
         return w;
 }
 
-// The modifiers as X's state mask: Shift, Control, Mod1 (Alt), Mod4 (the logo key).
 static unsigned int compositor_xwm_steam_state(unsigned int modifiers)
 {
         return ((modifiers & WINDOW_KEY_SHIFT) ? 1u : 0u) | ((modifiers & WINDOW_KEY_CONTROL) ? 4u : 0u) |
@@ -5085,136 +3701,98 @@ static void compositor_xwm_steam_send(struct compositor_xwm *x, struct composito
 {
         static unsigned int last;
         unsigned int now = (unsigned int)(clock_monotonic_nanoseconds() / 1000000);
-        unsigned char event[XWM_EVENT_SIZE], req[64];
-        long n;
-
-        // Each event a later time than the one before: an X client takes a release and a press of one time for a key's repeat.
-        now = now > last ? now : last + 1;
-        last = now;
-        n = xwm_enc_input_event(event, sizeof event, type, detail, now, x->root, w->id, compositor_xwm_steam.x,
-                                compositor_xwm_steam.y, state);
-        if (n == XWM_EVENT_SIZE && (n = xwm_enc_send_event(req, sizeof req, 0, w->id, 0, event, XWM_EVENT_SIZE)) > 0)
-                compositor_xwm_queue(x, req, n);
+        unsigned char event[XWM_EVENT_SIZE];
+        now = last = now > last ? now : last + 1;
+        if (xwm_enc_input_event(event, sizeof event, type, detail, now, x->root, w->id, compositor_xwm_steam.x, compositor_xwm_steam.y, state) == XWM_EVENT_SIZE)
+                compositor_xwm_send_event(x, w->id, 0, 0, event, XWM_EVENT_SIZE);
 }
 
-// What the game of pid has: 0 no overlay window, 1 one (its Tab is the compositor's to read), 2 one whose overlay is open.
 static int compositor_xwm_steam_wants(unsigned int pid)
 {
-        struct compositor_xwm_window *w = compositor_xwm_steam_window(pid, 0);
-
-        return w ? (compositor_xwm_steam.open ? 2 : 1) : 0;
+        return compositor_xwm_steam_window(pid, 0) ? (compositor_xwm_steam.open ? 2 : 1) : 0;
 }
 
-// A key while the game of pid has the keys: true when it went to the overlay (and is not the game's).
 static int compositor_xwm_steam_key(unsigned int pid, unsigned int code, int value, unsigned int modifiers)
 {
         struct compositor_xwm *x = 0;
         struct compositor_xwm_window *w = compositor_xwm_steam_window(pid, &x);
-        unsigned int state = compositor_xwm_steam_state(modifiers);
         int taken = 0;
-
         if (!w)
                 return 0;
         if (!compositor_xwm_steam.focused)
         {
-                // FocusIn, mode NotifyNormal, detail NotifyNonlinear: the renderer reads the hot-key of the window with the focus.
-                unsigned char event[XWM_EVENT_SIZE], req[64];
-                long n = xwm_enc_input_event(event, sizeof event, XWM_EVENT_FOCUS_IN, 3, 0, 0, w->id, 0, 0, 0);
-
-                if (n == XWM_EVENT_SIZE && (n = xwm_enc_send_event(req, sizeof req, 0, w->id, 0, event, XWM_EVENT_SIZE)) > 0)
-                        compositor_xwm_queue(x, req, n);
+                unsigned char event[XWM_EVENT_SIZE];
+                if (xwm_enc_input_event(event, sizeof event, XWM_EVENT_FOCUS_IN, 3, 0, 0, w->id, 0, 0, 0) == XWM_EVENT_SIZE)
+                        compositor_xwm_send_event(x, w->id, 0, 0, event, XWM_EVENT_SIZE);
                 compositor_xwm_steam.focused = 1;
         }
         if (code == CK_KEY_TAB && compositor_xwm_steam.tab && value != 1)
-        {
-                // The Tab of the Shift+Tab sent: its repeats and its release are not the game's.
-                if (!value)
-                        compositor_xwm_steam.tab = 0;
-                taken = 1;
-        }
+                compositor_xwm_steam.tab = value ? compositor_xwm_steam.tab : 0, taken = 1;
         else if (compositor_xwm_steam.open)
         {
-                // The overlay is open: the key is its own, at the X keycode of the evdev code (Xwayland's keymap is the compositor's).
                 if (value != 2 && code + 8 <= 255)
-                        compositor_xwm_steam_send(x, w, value ? XWM_EVENT_KEY_PRESS : XWM_EVENT_KEY_RELEASE, code + 8, state);
+                        compositor_xwm_steam_send(x, w, value ? XWM_EVENT_KEY_PRESS : XWM_EVENT_KEY_RELEASE, code + 8, compositor_xwm_steam_state(modifiers));
                 taken = 1;
         }
         else if (code == CK_KEY_TAB && value == 1 && (modifiers & WINDOW_KEY_SHIFT) &&
                  !(modifiers & (WINDOW_KEY_CONTROL | WINDOW_KEY_ALT | WINDOW_KEY_SUPER)))
         {
-                // Shift+Tab: Shift_L (X keycode 50) down, Tab (23) down and up, Shift up, as a person's keys reach an X window.
                 compositor_xwm_steam_send(x, w, XWM_EVENT_KEY_PRESS, 50, 0);
                 compositor_xwm_steam_send(x, w, XWM_EVENT_KEY_PRESS, 23, 1);
                 compositor_xwm_steam_send(x, w, XWM_EVENT_KEY_RELEASE, 23, 1);
                 compositor_xwm_steam_send(x, w, XWM_EVENT_KEY_RELEASE, 50, 1);
-                compositor_xwm_steam.tab = 1;
-                taken = 1;
+                compositor_xwm_steam.tab = 1, taken = 1;
         }
         if (taken)
                 compositor_xwm_flush(x);
         return taken;
 }
 
-// One of the pointer's coordinates in the game's window (of size across) as the X window's pixels.
 static int compositor_xwm_steam_scale(int at, int across, unsigned int x_across)
 {
-        if (across <= 0 || x_across <= 1 || x_across == (unsigned int)across)
-                return at;
-        return (int)((long long)at * (long long)x_across / (long long)across);
+        return across <= 0 || x_across <= 1 || x_across == (unsigned int)across ? at : (int)((long long)at * (long long)x_across / (long long)across);
 }
 
-static int compositor_xwm_steam_pointer(unsigned int pid, unsigned int type, unsigned int flags, int a, int b, int width, int height,
-                                        int flip, int notch)
+static int compositor_xwm_steam_pointer(unsigned int pid, unsigned int type, unsigned int flags, int a, int b, int width, int height, int flip, int notch)
 {
         struct compositor_xwm *x = 0;
         struct compositor_xwm_window *w = compositor_xwm_steam_window(pid, &x);
-        int taken = 0;
-
-        if (w && compositor_xwm_steam.open)
+        if (!w || !compositor_xwm_steam.open)
+                return 0;
+        if (type == WINDOW_EVENT_MOTION)
         {
-                taken = 1;
-                if (type == WINDOW_EVENT_MOTION)
-                {
-                        compositor_xwm_steam.x = compositor_xwm_steam_scale(a, width, w->width);
-                        compositor_xwm_steam.y = compositor_xwm_steam_scale(b, height, w->height);
-                        compositor_xwm_steam_send(x, w, XWM_EVENT_MOTION_NOTIFY, 0, 0);
-                }
-                else if (type == WINDOW_EVENT_BUTTON)
-                {
-                        // The buttons as X numbers them: left 1, middle 2, right 3.
-                        unsigned int button = a == 0x110 ? 1u : a == 0x112 ? 2u : a == 0x111 ? 3u : 0u;
-
-                        if (button)
-                                compositor_xwm_steam_send(x, w, (flags & WINDOW_KEY_DOWN) ? XWM_EVENT_BUTTON_PRESS : XWM_EVENT_BUTTON_RELEASE,
-                                                          button, 0);
-                }
-                else if (type == WINDOW_EVENT_WHEEL && (flags & WINDOW_WHEEL_STOP))
-                        compositor_xwm_steam.wheel[0] = compositor_xwm_steam.wheel[1] = 0;
-                else if (type == WINDOW_EVENT_WHEEL && a)
-                {
-                        int axis = b != 0, turn = flip ? -a : a, *left = &compositor_xwm_steam.wheel[axis];
-
-                        notch = notch > 0 ? notch : 120;
-                        if ((*left > 0 && turn < 0) || (*left < 0 && turn > 0))
-                                *left = 0;
-                        *left += turn;
-                        for (int sent = 0; sent < 16 && (*left >= notch || *left <= -notch); sent++)
-                        {
-                                unsigned int button = axis ? (*left > 0 ? 7u : 6u) : (*left > 0 ? 4u : 5u);
-
-                                *left += *left > 0 ? -notch : notch;
-                                compositor_xwm_steam_send(x, w, XWM_EVENT_BUTTON_PRESS, button, 0);
-                                compositor_xwm_steam_send(x, w, XWM_EVENT_BUTTON_RELEASE, button, 0);
-                        }
-                        if (*left >= notch || *left <= -notch)
-                                *left = 0;
-                }
-                compositor_xwm_flush(x);
+                compositor_xwm_steam.x = compositor_xwm_steam_scale(a, width, w->width);
+                compositor_xwm_steam.y = compositor_xwm_steam_scale(b, height, w->height);
+                compositor_xwm_steam_send(x, w, XWM_EVENT_MOTION_NOTIFY, 0, 0);
         }
-        return taken;
+        else if (type == WINDOW_EVENT_BUTTON)
+        {
+                unsigned int button = a == 0x110 ? 1u : a == 0x112 ? 2u : a == 0x111 ? 3u : 0u;
+                if (button)
+                        compositor_xwm_steam_send(x, w, (flags & WINDOW_KEY_DOWN) ? XWM_EVENT_BUTTON_PRESS : XWM_EVENT_BUTTON_RELEASE, button, 0);
+        }
+        else if (type == WINDOW_EVENT_WHEEL && (flags & WINDOW_WHEEL_STOP))
+                compositor_xwm_steam.wheel[0] = compositor_xwm_steam.wheel[1] = 0;
+        else if (type == WINDOW_EVENT_WHEEL && a)
+        {
+                int axis = b != 0, turn = flip ? -a : a, *left = &compositor_xwm_steam.wheel[axis];
+                notch = notch > 0 ? notch : 120;
+                if ((*left > 0 && turn < 0) || (*left < 0 && turn > 0))
+                        *left = 0;
+                *left += turn;
+                for (int sent = 0; sent < 16 && (*left >= notch || *left <= -notch); sent++)
+                {
+                        unsigned int button = axis ? (*left > 0 ? 7u : 6u) : (*left > 0 ? 4u : 5u);
+                        *left += *left > 0 ? -notch : notch;
+                        compositor_xwm_steam_send(x, w, XWM_EVENT_BUTTON_PRESS, button, 0);
+                        compositor_xwm_steam_send(x, w, XWM_EVENT_BUTTON_RELEASE, button, 0);
+                }
+                if (*left >= notch || *left <= -notch)
+                        *left = 0;
+        }
+        compositor_xwm_flush(x);
+        return 1;
 }
-
-/* ---- Direct Canvas bridge registrations (input override, DnD, row lifecycle, clipboard) ---- */
 
 static int xwm_steam_input_override(void *ctx, const struct compositor_input_override_event *ev)
 {
@@ -5229,7 +3807,6 @@ static int xwm_steam_input_override(void *ctx, const struct compositor_input_ove
         {
                 int flip = compositor.table && (compositor.table->scroll_off & WINDOW_SCROLL_FLIP) != 0;
                 int notch = (ev->flags & WINDOW_WHEEL_PRECISE) && !(ev->flags & WINDOW_WHEEL_STREAM) ? UI_NOTCH : 120;
-
                 return compositor_xwm_steam_pointer(ev->pid, ev->ev_type, ev->flags, ev->a, ev->b, ev->width, ev->height, flip, notch);
         }
         return 0;
@@ -5245,22 +3822,13 @@ static int xwm_dnd_active(void *ctx)
         return 0;
 }
 
-static void xwm_dnd_cancel(void *ctx)
-{
-        (void)ctx;
-        (void)compositor_xwm_drag_escape();
-}
-
-static const struct compositor_drag_ops compositor_xwm_drag_ops = {
-        .active = xwm_dnd_active,
-        .cancel = xwm_dnd_cancel,
-};
+static void xwm_dnd_cancel(void *ctx) { (void)ctx; (void)compositor_xwm_drag_escape(); }
+static const struct compositor_drag_ops compositor_xwm_drag_ops = {.active = xwm_dnd_active, .cancel = xwm_dnd_cancel};
 
 static void xwm_hook_detach(void *ctx, int row)
 {
         struct compositor_xwm *x = 0;
         struct compositor_xwm_window *w = xwm_row_lookup(0, row, &x);
-
         (void)ctx;
         if (w && x)
                 xwm_unmapped(x, w);
@@ -5268,18 +3836,13 @@ static void xwm_hook_detach(void *ctx, int row)
 
 static void xwm_hook_focus(void *ctx, int old_row, int new_row)
 {
-        (void)ctx;
-        (void)old_row;
-        (void)new_row;
+        (void)ctx; (void)old_row; (void)new_row;
         for (int at = 0; at < COMPOSITOR_XWM_SLOTS; at++)
                 if (compositor_xwm_slots[at].fd >= 0)
                         compositor_xwm_slots[at].focus_row = -3;
 }
 
-static const struct compositor_row_hooks compositor_xwm_row_hooks = {
-        .detach = xwm_hook_detach,
-        .focus = xwm_hook_focus,
-};
+static const struct compositor_row_hooks compositor_xwm_row_hooks = {.detach = xwm_hook_detach, .focus = xwm_hook_focus};
 
 static void compositor_xwm_register_hooks(void)
 {
