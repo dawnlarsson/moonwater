@@ -945,7 +945,7 @@ static int compositor_tray_nth(int index)
 {
         int n = 0;
         for (int i = 0; i < TASKBAR_TRAY_ITEM_MAX; i++)
-                if (compositor.tray[i].used && n++ == index) return i;
+                if (compositor.tray[i].used && compositor.tray[i].has_icon && n++ == index) return i;
         return index < 0 ? n : -1;
 }
 static int compositor_tray_count(void) { return compositor_tray_nth(-1); }

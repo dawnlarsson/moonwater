@@ -1744,8 +1744,6 @@ static int taskbar_draw(const struct taskbar_view *view, unsigned long redo, tas
                                                                     window_mix(view->pixels[(my + yy) * band->w + mx + xx], src & 0xffffffu, (int)(a + (a >> 7)));
                                                 }
                                 }
-                                else if (mark)
-                                        taskbar_say(view, t, mark, "\xe2\x80\xa2", ink, ground);
                                 break;
                         }
                         {
