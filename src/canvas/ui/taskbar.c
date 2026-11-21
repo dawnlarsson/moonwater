@@ -249,10 +249,18 @@ static int taskbar_before(int slot)
 #define taskbar_tray_items_count() compositor_tray_count()
 #define taskbar_tray_items_gen() compositor_tray_gen()
 #define taskbar_tray_items_pixels(i) compositor_tray_pixels(i)
+#define taskbar_spaces_count() compositor_spaces_count_on(compositor.band_at)
+#define taskbar_spaces_active() compositor_spaces_active_index(compositor.band_at)
+#define taskbar_spaces_kind(i) compositor_spaces_kind_at(compositor.band_at, (i))
+#define taskbar_spaces_gen() compositor_spaces_gen()
 #else
 #define taskbar_tray_items_count() 0
 #define taskbar_tray_items_gen() 0
 #define taskbar_tray_items_pixels(i) ((const unsigned int *)0)
+#define taskbar_spaces_count() 0
+#define taskbar_spaces_active() 0
+#define taskbar_spaces_kind(i) 0
+#define taskbar_spaces_gen() 0u
 #endif
 
 struct taskbar_metrics { int m, scale, pad, high, side, icon_gap, apart, glyph, square, cell, clocked, text_w; };
@@ -260,7 +268,10 @@ struct taskbar_metrics { int m, scale, pad, high, side, icon_gap, apart, glyph, 
 static int taskbar_tray_lay(struct ui_tree address_to t, int before, const struct taskbar_metrics *M, int margin)
 {
         int scale = M->scale, glyph = M->glyph;
-        int xtray = !before ? taskbar_tray_items_count() : 0, length = xtray > 0 ? xtray * M->square : 0;
+        int spaces = !before ? taskbar_spaces_count() : 0;
+        int space_add = spaces > 0 && spaces < TASKBAR_SPACE_MAX ? 1 : 0;
+        int xtray = !before ? taskbar_tray_items_count() : 0;
+        int length = (spaces + space_add + (xtray > 0 ? xtray : 0)) * M->square;
         const struct { int slot, w, mark; } cells[] = {
 #define TASKBAR_CELL(slot, shown, mark, paint) {slot, (shown) ? ((mark) ? M->square : (slot) == -3 ? M->clocked : M->cell) : 0, mark},
             TASKBAR_TRAY_CELLS(TASKBAR_CELL)
@@ -275,6 +286,10 @@ static int taskbar_tray_lay(struct ui_tree address_to t, int before, const struc
         if (!t || !length)
                 return length;
         taskbar_open(t, before ? TASKBAR_TRAY_BEFORE : TASKBAR_TRAY, M->m, margin, length, M->high);
+        for (int i = 0; i < spaces && i < TASKBAR_SPACE_MAX; i++)
+                taskbar_leaf(t, TASKBAR_SPACE_BASE - i, M->m, 0, M->square, M->high, 0);
+        if (space_add)
+                taskbar_leaf(t, TASKBAR_SPACE_ADD, M->m, 0, M->square, M->high, 0);
         for (int i = 0; i < xtray && i < TASKBAR_TRAY_ITEM_MAX; i++)
                 taskbar_leaf(t, TASKBAR_TRAY_ITEM_BASE - i, M->m, 0, M->square, M->high, M->glyph);
         for (int i = 0; i < ncells; i++)
@@ -591,8 +606,9 @@ struct taskbar_key
         int strip[2], follow;
         unsigned int marks;
         int tray_gen;
+        unsigned int spaces_gen;
 };
-_Static_assert(sizeof(struct taskbar_key) == 8 + 22 * 4, "a key is compared as bytes, so it has no padding");
+_Static_assert(sizeof(struct taskbar_key) == 8 + 23 * 4, "a key is compared as bytes, so it has no padding");
 
 struct taskbar_lit { struct ui_tween at, length, shown; int row; };
 
@@ -620,7 +636,7 @@ static struct ui_tree address_to taskbar_tree(const struct taskbar_view *view)
                                       taskbar.order[0] << 12 | taskbar.order[1] << 14 | taskbar.order[2] << 16,
                                   taskbar.editing | taskbar.clock_tray << 1 | taskbar.moon_ink << 2 | taskbar.clock_tab << 3 | taskbar.clock_none << 4 |
                                       taskbar.separate << 5 | (taskbar.edge_in + 64) << 6 | taskbar.clock_chars << 14, 0,
-                                  {taskbar_strip_from[0], taskbar_strip_from[1]}, taskbar_strip_follow, 0, taskbar_tray_items_gen()};
+                                  {taskbar_strip_from[0], taskbar_strip_from[1]}, taskbar_strip_follow, 0, taskbar_tray_items_gen(), taskbar_spaces_gen()};
 
 #define TASKBAR_CELL(slot, shown, mark, paint) key.cells = key.cells << 1 | ((shown) != 0);
         TASKBAR_TRAY_CELLS(TASKBAR_CELL)
@@ -1624,9 +1640,10 @@ static int taskbar_draw(const struct taskbar_view *view, unsigned long redo, tas
                 const struct ui_node address_to n = &t->node[at];
                 int which = n->id - 1, m = band->dir;
                 b32 tray_item = which <= TASKBAR_TRAY_ITEM_BASE && which > TASKBAR_TRAY_ITEM_BASE - TASKBAR_TRAY_ITEM_MAX;
+                b32 space_item = (which <= TASKBAR_SPACE_BASE && which > TASKBAR_SPACE_BASE - TASKBAR_SPACE_MAX) || which == TASKBAR_SPACE_ADD;
 
                 if (!n->id || which == TASKBAR_TABS || which == TASKBAR_TABS_LEFT || (which <= TASKBAR_ZONE && which > TASKBAR_DONE) || !(redo & taskbar_bit(which)) ||
-                    (which < 0 && which != TASKBAR_LAUNCHER && which != TASKBAR_DONE && !tray_item && !time_ok))
+                    (which < 0 && which != TASKBAR_LAUNCHER && which != TASKBAR_DONE && !tray_item && !space_item && !time_ok))
                         continue;
                 if (which >= 0 || which == TASKBAR_TRAY || which == TASKBAR_TRAY_BEFORE || which == TASKBAR_DONE || which == TASKBAR_STRIP_BACK ||
                     which == TASKBAR_STRIP_ON || (which == -3 && taskbar.clock_tab))
@@ -1669,6 +1686,37 @@ static int taskbar_draw(const struct taskbar_view *view, unsigned long redo, tas
                 TASKBAR_TRAY_CELLS(TASKBAR_CELL)
 #undef TASKBAR_CELL
                 default:
+                        if (space_item)
+                        {
+                                char label[4] = {0};
+                                unsigned int sg = ground, si = ink;
+
+                                if (!time_ok)
+                                        sg = taskbar_glass_tab(view, rect[0], rect[1], gw, band->x, band->y, band->w, n->x, n->y, n->w, n->h),
+                                        si = window_contrast(sg);
+                                if (which == TASKBAR_SPACE_ADD)
+                                        label[0] = '+';
+                                else
+                                {
+                                        int idx = TASKBAR_SPACE_BASE - which, active = taskbar_spaces_active();
+                                        if (idx == active)
+                                        {
+                                                struct ui sui;
+                                                struct ui_box sbox = taskbar_face(t, n, 0, 0);
+                                                taskbar_glass_ui(&sui, view, t, sg);
+                                                sg = ui_glass_button(&sui, &sbox, UI_ONE, null);
+                                                si = window_contrast(sg);
+                                        }
+                                        if (taskbar_spaces_kind(idx))
+                                                label[0] = 'F';
+                                        else if (idx + 1 < 10)
+                                                label[0] = (char)('1' + idx);
+                                        else
+                                                label[0] = (char)('0' + (idx + 1) / 10), label[1] = (char)('0' + (idx + 1) % 10);
+                                }
+                                taskbar_say(view, t, n, label, si, sg);
+                                break;
+                        }
                         if (tray_item)
                         {
                                 const struct ui_node address_to mark = n->first >= 0 ? &t->node[n->first] : null;

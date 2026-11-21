@@ -1125,7 +1125,8 @@ static int compositor_direct_candidate(const struct compositor_frame *frames, co
         if (!compositor_client_scans(row) &&
             (compositor.direct_refused || !compositor.table_memfd || __atomic_load_n(&compositor.table->list_mode, __ATOMIC_ACQUIRE)))
                 return -1;
-        if (!compositor_direct_eligible(row, frames[windows - 1].blend) ||
+        // Dedicated Fullscreen Space row with no overlays on top has no wallpaper or windows underneath: opaque direct scanout is always safe.
+        if (!compositor_direct_eligible(row, windows == 1 && compositor_space_is_fs_row(row) ? 0 : frames[windows - 1].blend) ||
             compositor_radius(&frames[windows - 1]) || frames[windows - 1].line)
                 return -1;
         return (compositor_client_scans(row)

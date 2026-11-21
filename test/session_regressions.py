@@ -766,6 +766,74 @@ def test_kernel_audio_bowl_invariants():
           "wine-fpu.so" in bowl and "PR_SET_TIMERSLACK" in bowl or "timerslack" in bowl.lower())
 
 
+def test_canvas_spaces_invariants():
+    print("\n=== 3b. Native Canvas Spaces Invariants ===")
+    comp = read_text("src/canvas/compositor.c")
+    dmg = read_text("src/canvas/compositor/damage.c")
+    manage = read_text("src/canvas/compositor/manage.c")
+    inp = read_text("src/canvas/compositor/input.c")
+    kms = read_text("src/canvas/compositor/kms.c")
+    tbar = read_text("src/canvas/ui/taskbar.c")
+    ui_c = read_text("src/canvas/ui/ui.c")
+
+    check("Spaces: per-output struct compositor_space & row_space arrays registered in COMPOSITOR_ROWS_OWN",
+          "struct compositor_space" in comp and "COMPOSITOR_SPACES_MAX" in comp and
+          "X(compositor.row_space, COMPOSITOR_ROWS_ROW)" in comp and
+          "X(compositor.row_space_prev, COMPOSITOR_ROWS_ROW)" in comp and
+          "compositor_spaces_ensure();" in comp)
+    check("Spaces: compositor_visible & compositor_windows_for filter by compositor_space_row_active",
+          "compositor_space_row_active(row)" in dmg and
+          re.search(r"static int compositor_visible\(int row\)\s*\{[^}]*compositor_space_row_active\(row\)", dmg, re.S) is not None)
+    check("Spaces: compositor_row_facts marks inactive-Space windows minimized (XWM IconicState + WL SUSPENDED)",
+          "!compositor_space_row_active(row)" in manage and
+          re.search(r"\.minimized\s*=\s*\(compositor\.state\[row\]\s*&\s*WINDOW_MINIMIZED\)\s*!=\s*0\s*\|\|\s*!compositor_space_row_active\(row\)", manage) is not None)
+    check("Spaces: automatic Fullscreen Space enter/exit/close & direct-scanout recovery hooks",
+          all(s in manage for s in (
+              "compositor_space_enter_fullscreen(row, on);",
+              "compositor_space_exit_fullscreen(row, 0);",
+              "compositor_space_exit_fullscreen(row, 1);",
+              "compositor_wl_scan_retry(row);",
+              "compositor.direct_row = -1;",
+              "compositor.stack_gen++;",
+          )))
+    check("Spaces: cross-screen Space & window movement + hotplug realignment",
+          "compositor_space_move_to_screen(" in manage and
+          "compositor_space_move_row(" in manage and
+          "compositor_spaces_on_outputs_changed(names, count);" in kms)
+    check("Spaces: conflict-free keyboard shortcuts, Steam passthrough & 3/4-finger touchpad swipe",
+          all(s in inp for s in (
+              "compositor_space_chord(",
+              "compositor_space_step(",
+              "compositor_space_switch_index(",
+              "compositor_space_add(",
+              "compositor_space_remove_active(",
+              "compositor_space_move_row_step(",
+              "compositor_space_move_active_screen(",
+              "pad->fingers >= 3 ? 3",
+              "TASKBAR_SPACE_ADD",
+              "TASKBAR_SPACE_BASE",
+          )))
+    check("Spaces: taskbar Space strip layout, painting & cache key invalidation",
+          "TASKBAR_SPACE_BASE" in ui_c and "TASKBAR_SPACE_ADD" in ui_c and
+          all(s in tbar for s in (
+              "taskbar_spaces_count()",
+              "taskbar_spaces_active()",
+              "taskbar_spaces_kind(",
+              "taskbar_spaces_gen()",
+              "TASKBAR_SPACE_BASE",
+              "TASKBAR_SPACE_ADD",
+          )))
+    pres = read_text("src/canvas/compositor/present.c")
+    scan = read_text("src/canvas/compositor/scanout.c")
+    check("Spaces: Fullscreen Space skips wallpaper composition & unlocks opaque direct-scanout fast path",
+          "compositor_space_all_fullscreen()" in pres and
+          "!compositor_space_screen_fullscreen(compositor_screen_of(row))" in manage and
+          "compositor_space_is_fs_row(row)" in scan)
+    check("Spaces: horizontal slide transition respects compositor_glides() / reduced motion",
+          "slide_dx = (new_pos >= old_pos ? 1 : -1) * screens[screen][2];" in manage and
+          "compositor_glide_start(row, from);" in manage)
+
+
 def test_build_and_audit_gates():
     print("\n=== 4. Build & Audit Gates ===")
     r1 = run_cmd([sys.executable, "test/compositor_split.py", "--check"])
@@ -788,6 +856,7 @@ def main():
     test_executable_c_harnesses()
     test_compositor_and_xwm_invariants()
     test_kernel_audio_bowl_invariants()
+    test_canvas_spaces_invariants()
     test_build_and_audit_gates()
     print(f"\nSummary: {PASS} passed, {FAIL} failed")
     return 0 if FAIL == 0 else 1

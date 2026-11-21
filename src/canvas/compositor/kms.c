@@ -942,7 +942,8 @@ static void compositor_space_carry(const int (*was)[4], const char (*names)[WIND
         compositor.kept_x = compositor.real_x;
         compositor.kept_y = compositor.real_y;
         compositor_pointer_shown();
-        // A window on a screen that stayed whose band moved (the primary is another now) follows its room.
+        // Keep per-output Spaces aligned with moved or disconnected screens, then refit rooms.
+        compositor_spaces_on_outputs_changed(names, count);
         compositor_room_follow();
 }
 

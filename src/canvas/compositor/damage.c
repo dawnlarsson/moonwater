@@ -443,10 +443,10 @@ static void compositor_damage(int x, int y, int width, int height)
         compositor_damage_from(x, y, width, height, compositor.damage_by);
 }
 
-// Whether a window is on the screen: it has shown a picture and is not put away.
+// Whether a window is on the screen: it has shown a picture, is not put away, and belongs to its screen's active Space.
 static int compositor_visible(int row)
 {
-        return compositor.showing[row] && !(compositor.state[row] & WINDOW_MINIMIZED);
+        return compositor.showing[row] && !(compositor.state[row] & WINDOW_MINIMIZED) && compositor_space_row_active(row);
 }
 
 static int compositor_row_scale(int row);
@@ -1509,6 +1509,7 @@ static unsigned int compositor_windows_for(int band)
                 // is the band's launcher button, lit while it is up (compositor_launcher_row's test: a window that is dismissed and has no close).
                 if (!compositor.showing[row] || compositor_popup_parent[row] >= 0 || (compositor.asks[row] & WINDOW_NO_TAB) ||
                     (compositor.asks[row] & (WINDOW_DISMISS | WINDOW_NO_CLOSE)) == (WINDOW_DISMISS | WINDOW_NO_CLOSE) ||
+                    !compositor_space_row_active(row) ||
                     (bands > 1 && compositor_screen_of(row) != band))
                         continue;
                 while (place && compositor.made[compositor.listed[place - 1]] > compositor.made[row])

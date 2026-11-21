@@ -361,6 +361,7 @@ struct compositor_pad
         int gain_left_x, gain_left_y, slot;
         int mt_down[UI_TOUCH_SLOTS], mt_x[UI_TOUCH_SLOTS], mt_y[UI_TOUCH_SLOTS];
         int pinch_count, pinch_ref, pinching, pinch_scale;
+        int swipe_fingers, swipe_dx, swipe_dy, swipe_fired;
 };
 
 struct compositor_touch_screen
@@ -546,6 +547,19 @@ struct compositor_device
         char name[WINDOWS_INPUT_NAME];
 };
 
+#define COMPOSITOR_SPACES_MAX 16
+enum { COMPOSITOR_SPACE_DESKTOP = 0, COMPOSITOR_SPACE_FULLSCREEN = 1 };
+
+struct compositor_space
+{
+        unsigned int id;
+        unsigned char kind;
+        int screen;
+        int fs_row;
+        unsigned int return_id;
+        int last_focus;
+};
+
 static struct
 {
         int card;
@@ -612,6 +626,7 @@ static struct
         unsigned char *close_asks;
         unsigned int *picture_w, *picture_h, *asking, *arranged;
         unsigned char *fullscreen, *fullscreen_was;
+        unsigned int *row_space, *row_space_prev;
         signed char *layer;
         unsigned int *edges;
         int *far_x, *far_y, *saved_x, *saved_y;
@@ -631,7 +646,14 @@ static struct
                 unsigned int id, pixels[TASKBAR_TRAY_ITEM_PX * TASKBAR_TRAY_ITEM_PX];
                 void (*click)(void *owner, unsigned int id, int button);
         } tray[TASKBAR_TRAY_ITEM_MAX];
-        int tray_gen, band_at;
+        int tray_gen, band_at, band_hit;
+        struct
+        {
+                struct compositor_space list[COMPOSITOR_SPACES_MAX];
+                unsigned int count, next_id, gen;
+                unsigned int active[WINDOWS_OUTPUTS];
+                int ready;
+        } spaces;
         unsigned int *band_more[WINDOWS_OUTPUTS];
         unsigned long band_more_bytes[WINDOWS_OUTPUTS];
         unsigned char (*band_marks)[WINDOWS], *banded;
@@ -911,6 +933,16 @@ static int compositor_input_override_query(int row);
 static int compositor_input_override_pointer(int row, unsigned int type, unsigned int flags, int a, int b);
 static void compositor_row_notify_stack(int row);
 static unsigned int compositor_rows_grow(unsigned int want);
+static int compositor_space_row_active(int row);
+static int compositor_space_screen_fullscreen(int screen);
+static int compositor_space_all_fullscreen(void);
+static int compositor_space_is_fs_row(int row);
+static void compositor_spaces_ensure(void);
+static int compositor_spaces_count_on(int screen);
+static int compositor_spaces_active_index(int screen);
+static int compositor_spaces_kind_at(int screen, int idx);
+static unsigned int compositor_spaces_gen(void);
+static void compositor_spaces_on_outputs_changed(const char (*was_names)[WINDOWS_OUTPUT_NAME], unsigned int was_count);
 #ifdef CONFIG_MOONWATER_WAYLAND
 static int compositor_wl_started(void);
 #endif
@@ -1493,6 +1525,7 @@ _Static_assert(COMPOSITOR_POLLS_OWN + COMPOSITOR_INPUTS_KEPT + COMPOSITOR_CLIP_H
         X(compositor.front, COMPOSITOR_ROWS_ROW) X(compositor.state, COMPOSITOR_ROWS_ROW) X(compositor.close_asks, COMPOSITOR_ROWS_ROW) \
         X(compositor.picture_w, COMPOSITOR_ROWS_ROW) X(compositor.picture_h, COMPOSITOR_ROWS_ROW) X(compositor.asking, COMPOSITOR_ROWS_ROW) \
         X(compositor.arranged, COMPOSITOR_ROWS_ROW) X(compositor.fullscreen, COMPOSITOR_ROWS_ROW) X(compositor.fullscreen_was, COMPOSITOR_ROWS_ROW) \
+        X(compositor.row_space, COMPOSITOR_ROWS_ROW) X(compositor.row_space_prev, COMPOSITOR_ROWS_ROW) \
         X(compositor.layer, COMPOSITOR_ROWS_ROW) X(compositor.edges, COMPOSITOR_ROWS_ROW) X(compositor.far_x, COMPOSITOR_ROWS_ROW) \
         X(compositor.far_y, COMPOSITOR_ROWS_ROW) X(compositor.saved_x, COMPOSITOR_ROWS_ROW) X(compositor.saved_y, COMPOSITOR_ROWS_ROW) \
         X(compositor.saved_w, COMPOSITOR_ROWS_ROW) X(compositor.saved_h, COMPOSITOR_ROWS_ROW) X(compositor.title, COMPOSITOR_ROWS_ROW) \
@@ -2047,6 +2080,7 @@ static b32 compositor_main()
         }
         if ((status = headless ? compositor_headless(headless, file) : compositor_card_open()) < 0)
                 { compositor_say("cannot take the display, error", status); return 1; }
+        compositor_spaces_ensure();
         if (!headless) compositor_cursor_start();
         compositor_inputs_open();
         if (extra >= 0 && compositor.input_count < COMPOSITOR_INPUTS)

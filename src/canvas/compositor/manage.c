@@ -288,6 +288,8 @@ static int compositor_band_hit(int x, int y)
         {
                 struct taskbar_view view = compositor_band_view();
                 hit = taskbar_hit_reach(&view, x, y, reach);
+                if (hit != TASKBAR_HIT_NONE)
+                        compositor.band_hit = compositor.band_at;
         }
         compositor.band_at = 0;
         return hit;
@@ -396,7 +398,8 @@ static int compositor_row_facts(int row, struct compositor_row_facts *out)
             .want_width = want ? table->want_width[row] : 0, .want_height = want ? table->want_height[row] : 0,
             .arranged = compositor.arranged[row], .fullscreen = compositor.fullscreen[row], .layer = compositor.layer[row],
             .focused = compositor.focus == row, .resizing = compositor.resize == row,
-            .minimized = (compositor.state[row] & WINDOW_MINIMIZED) != 0, .filling = compositor_filling(row) != 0,
+            .minimized = (compositor.state[row] & WINDOW_MINIMIZED) != 0 || !compositor_space_row_active(row),
+            .filling = compositor_filling(row) != 0,
             .closing = (compositor.state[row] & WINDOW_CLOSING) ? (unsigned int)compositor.close_asks[row] : 0,
         };
         return 0;
@@ -547,6 +550,13 @@ static void compositor_row_span(int row, int vertical, int *near, int *far, int 
         *b = *a + (int)(vertical ? compositor.h[row] : compositor.w[row]);
 }
 
+static int compositor_space_same(int a, int b);
+static struct compositor_space *compositor_space_find(unsigned int sid);
+static void compositor_space_assign_new(int row, int focus_switch);
+static void compositor_space_enter_fullscreen(int row, int screen);
+static void compositor_space_exit_fullscreen(int row, int closing);
+static int compositor_space_activate(int screen, unsigned int sid);
+
 static int compositor_meets(int row, unsigned int edge)
 {
         int vertical, high, near, far, a, b;
@@ -558,7 +568,7 @@ static int compositor_meets(int row, unsigned int edge)
         {
                 int onear, ofar, oa, ob;
 
-                if (other == row || !compositor_visible(other) || compositor_popup_parent[other] >= 0)
+                if (other == row || !compositor_visible(other) || compositor_popup_parent[other] >= 0 || !compositor_space_same(row, other))
                         continue;
                 compositor_row_span(other, vertical, &onear, &ofar, &oa, &ob);
                 if (oa == a && ob == b && (high ? ofar == near : onear == far))
@@ -614,7 +624,7 @@ static int compositor_divider_of(int row, unsigned int edge, struct compositor_d
                         int en, ef, ea, eb;
 
                         if (rows_has(&d->lo, each) || rows_has(&d->hi, each) || !compositor_visible(each) || compositor_popup_parent[each] >= 0 ||
-                            !compositor_tile_cells(compositor.arranged[each]) || compositor_screen_of(each) != screen)
+                            !compositor_tile_cells(compositor.arranged[each]) || compositor_screen_of(each) != screen || !compositor_space_same(row, each))
                                 continue;
                         compositor_row_span(each, vertical, &en, &ef, &ea, &eb);
                         if (ea >= to || eb <= from || (en != line && ef != line))
@@ -787,7 +797,12 @@ static void compositor_resize_begin(int row, unsigned int edges)
         compositor.resize_w = (int)compositor.w[row], compositor.resize_h = (int)compositor.h[row];
         compositor.press_x = compositor.pointer_x, compositor.press_y = compositor.pointer_y;
         if (!compositor_tile_cells(compositor.arranged[row]))
+        {
+                int was_fs = compositor.fullscreen[row];
                 compositor.arranged[row] = COMPOSITOR_FLOATING, compositor.fullscreen[row] = 0, compositor.layer[row] = WINDOW_LAYER_NORMAL;
+                if (was_fs)
+                        compositor_space_exit_fullscreen(row, 0);
+        }
         compositor.edges[row] = edges;
         compositor.far_x[row] = compositor.x[row] + (int)compositor.w[row];
         compositor.far_y[row] = compositor.y[row] + (int)compositor.h[row];
@@ -828,7 +843,9 @@ static void compositor_set_rect(int row, unsigned int how, const int *rect)
         int was[4], now[4];
 
         compositor_row_rect(row, was);
-        if (how != COMPOSITOR_MAXIMIZED)
+        if (how != COMPOSITOR_MAXIMIZED && compositor.fullscreen[row])
+                compositor.fullscreen[row] = 0, compositor_space_exit_fullscreen(row, 0);
+        else if (how != COMPOSITOR_MAXIMIZED)
                 compositor.fullscreen[row] = 0;
         compositor_damage_row(row);
         compositor.arranged[row] = how, compositor.edges[row] = compositor_tile_edges(how);
@@ -998,7 +1015,7 @@ static void compositor_tile_others(int row, unsigned int how, int screen)
         {
                 unsigned int was = compositor_tile_cells(compositor.arranged[other]), left;
 
-                if (other == row || !was || !compositor.showing[other] || compositor_screen_of(other) != screen)
+                if (other == row || !was || !compositor.showing[other] || compositor_screen_of(other) != screen || !compositor_space_same(row, other))
                         continue;
                 left = was & ~taken;
                 if (left == was)
@@ -1020,7 +1037,8 @@ static unsigned int compositor_occupied(int row, int screen)
         unsigned int cells = 0;
 
         for (int other = 0; other < (int)compositor_rows_in_use; other++)
-                if (other != row && compositor.showing[other] && compositor_screen_of(other) == screen)
+                if (other != row && compositor.showing[other] && compositor_screen_of(other) == screen &&
+                    (row < 0 ? compositor_space_row_active(other) : compositor_space_same(row, other)))
                         cells |= compositor_tile_cells(compositor.arranged[other]);
         return cells;
 }
@@ -1379,7 +1397,10 @@ static void compositor_row_mode(int row, unsigned int arrange, int fullscreen, i
                 compositor_damage_row(row);
                 if (compositor.fullscreen[row])
                         compositor.stack_gen++;
+                was_fs = compositor.fullscreen[row];
                 compositor.arranged[row] = COMPOSITOR_FLOATING, compositor.fullscreen[row] = 0, compositor.edges[row] = 0;
+                if (was_fs)
+                        compositor_space_exit_fullscreen(row, 0);
                 compositor_put(row, saved[0], saved[1]);
                 compositor_damage_row(row);
                 compositor_want(row, saved[2], saved[3]);
@@ -1393,8 +1414,12 @@ static void compositor_row_mode(int row, unsigned int arrange, int fullscreen, i
         was = was_fs ? compositor.fullscreen_was[row] : compositor.arranged[row];
         // Set fullscreen before arrange so compositor_row_clamp/stretch do not clamp fixed-size fullscreen windows.
         compositor.fullscreen[row] = (unsigned char)(fullscreen != 0);
+        if (!fullscreen && was_fs)
+                compositor_space_exit_fullscreen(row, 0);
         compositor_screen_part(screens[on], target, part);
         compositor_arrange_rect(row, target, part);
+        if (fullscreen && compositor.arranged[row] == COMPOSITOR_MAXIMIZED)
+                compositor.glide[row] = 0, compositor_space_enter_fullscreen(row, on);
         if (fullscreen || compositor_region_cells(target))
                 compositor_tile_others(row, target, on);
         if (fullscreen)
@@ -1452,7 +1477,9 @@ static void compositor_layer_set(int row, signed char layer, int screen)
                 compositor.table->layer[row] = layer;
         if (layer == WINDOW_LAYER_BACKGROUND)
         {
-                compositor.fullscreen[row] = 0;
+                if (compositor.fullscreen[row])
+                        compositor.fullscreen[row] = 0, compositor_space_exit_fullscreen(row, 0);
+                compositor.row_space[row] = compositor.row_space_prev[row] = 0;
                 compositor.asks[row] |= WINDOW_NO_TAB;
                 if (compositor.table)
                         compositor.table->glass[row] |= WINDOW_NO_TAB;
@@ -1495,6 +1522,8 @@ static void compositor_float_for_drag(int row)
                 compositor_glide_damage_now(row);
         compositor.glide[row] = 0;
         compositor_damage_row(row);
+        if (compositor.fullscreen[row])
+                compositor.fullscreen[row] = 0, compositor_space_exit_fullscreen(row, 0);
         compositor.arranged[row] = COMPOSITOR_FLOATING, compositor.fullscreen[row] = 0, compositor.edges[row] = 0;
         compositor_put(row, compositor.pointer_x - grab, compositor.pointer_y - at);
         compositor_damage_row(row);
@@ -1739,6 +1768,8 @@ static void compositor_place_apply(int row, const struct window_place *place, co
                 compositor_arrange_rect(row, fills, rect);
                 if (want_fs && compositor.arranged[row] != COMPOSITOR_MAXIMIZED)
                         compositor.fullscreen[row] = 0;
+                else if (want_fs)
+                        compositor_space_enter_fullscreen(row, compositor_screen_of(row));
                 return;
         }
         if (is_move)
@@ -1957,6 +1988,7 @@ static void compositor_take_first(int row, unsigned int width, unsigned int heig
         compositor_close_count(row, 0);
         table->state[row] = compositor.state[row];
         compositor.arranged[row] = COMPOSITOR_FLOATING, compositor.fullscreen[row] = 0, compositor.edges[row] = 0;
+        compositor.row_space[row] = compositor.row_space_prev[row] = 0;
         compositor.lifted[row] = table->lift[row], compositor.moved[row] = table->moved[row];
         compositor.glassy[row] = table->glass[row] & WINDOW_GLASS;
         compositor.asks[row] = table->glass[row] & (WINDOW_NO_CLOSE | WINDOW_DISMISS | WINDOW_NO_TAB | WINDOW_NO_GRAB | WINDOW_NO_KEYS | WINDOW_KEYBOARD);
@@ -1975,6 +2007,8 @@ static void compositor_take_first(int row, unsigned int width, unsigned int heig
         compositor_first_put(row, x, y);
         if (compositor.layer[row] == WINDOW_LAYER_BACKGROUND)
                 compositor_arrange_on(row, COMPOSITOR_MAXIMIZED, -1);
+        else if (compositor.spaces.ready && !compositor.row_space[row])
+                compositor_space_assign_new(row, __atomic_load_n(&table->asked[row], __ATOMIC_ACQUIRE) != 0);
         compositor_raise(row);
         if (compositor.layer[row] != WINDOW_LAYER_BACKGROUND && compositor_visible(row) &&
             __atomic_load_n(&table->asked[row], __ATOMIC_ACQUIRE))
@@ -2174,6 +2208,8 @@ static void compositor_leave(int row)
         compositor.w[row] = compositor.h[row] = compositor.edges[row] = compositor.picture_w[row] = compositor.picture_h[row] = 0;
         compositor.arranged[row] = compositor.fullscreen_was[row] = COMPOSITOR_FLOATING;
         compositor.fullscreen[row] = compositor.banded[row] = 0;
+        compositor_space_exit_fullscreen(row, 1);
+        compositor.row_space[row] = compositor.row_space_prev[row] = 0;
         compositor.layer[row] = WINDOW_LAYER_NORMAL;
         if (table)
                 table->layer[row] = WINDOW_LAYER_NORMAL;
@@ -2232,6 +2268,12 @@ static void compositor_reveal(int row)
 {
         if (row < 0 || !compositor.showing[row])
                 return;
+        if (compositor.spaces.ready && !compositor_space_row_active(row) && compositor.row_space[row])
+        {
+                struct compositor_space *sp = compositor_space_find(compositor.row_space[row]);
+                if (sp)
+                        compositor_space_activate(sp->screen, sp->id);
+        }
         if (compositor.state[row] & WINDOW_MINIMIZED)
         {
                 compositor.state[row] &= ~WINDOW_MINIMIZED;
@@ -2258,9 +2300,9 @@ static void compositor_focus_step(void)
                         focused = at + 1;
         below = compositor.cycle ? compositor.cycle : focused && focused == top ? focused : top + 1;
         next = below > 1 ? below - 1 : top;
-        for (int skipped = 0; next && skipped < top && !compositor_cycles(compositor.stack[next - 1]); skipped++)
+        for (int skipped = 0; next && skipped < top && (!compositor_cycles(compositor.stack[next - 1]) || !compositor_space_row_active((int)compositor.stack[next - 1])); skipped++)
                 next = next > 1 ? next - 1 : top;
-        if (!next || next == focused || !compositor_cycles(compositor.stack[next - 1]))
+        if (!next || next == focused || !compositor_cycles(compositor.stack[next - 1]) || !compositor_space_row_active((int)compositor.stack[next - 1]))
                 return;
         compositor.cycle = next;
         compositor_focus(compositor.stack[next - 1]);
@@ -2285,6 +2327,731 @@ static void compositor_minimize_row(int row)
         if (row == compositor.focus)
                 compositor_refocus();
         compositor_tabs_changed();
+}
+
+/* ---- Spaces (per-output desktops & automatic fullscreen Spaces) ---- */
+
+static int compositor_row_space_exempt(int row)
+{
+        if (row < 0 || row >= COMPOSITOR_ROWS)
+                return 1;
+        return compositor.layer[row] == WINDOW_LAYER_BACKGROUND || (compositor.asks[row] & WINDOW_KEYBOARD) ||
+               (compositor.asks[row] & COMPOSITOR_OVERLAY_ASKS) == COMPOSITOR_OVERLAY_ASKS || (compositor.asks[row] & WINDOW_NO_TAB);
+}
+
+static struct compositor_space *compositor_space_find(unsigned int sid)
+{
+        if (!sid)
+                return 0;
+        for (unsigned int i = 0; i < compositor.spaces.count; i++)
+                if (compositor.spaces.list[i].id == sid)
+                        return &compositor.spaces.list[i];
+        return 0;
+}
+
+static int compositor_space_index_of(unsigned int sid)
+{
+        for (unsigned int i = 0; i < compositor.spaces.count; i++)
+                if (compositor.spaces.list[i].id == sid)
+                        return (int)i;
+        return -1;
+}
+
+static unsigned int compositor_space_first_desktop(int screen)
+{
+        for (unsigned int i = 0; i < compositor.spaces.count; i++)
+                if (compositor.spaces.list[i].screen == screen && compositor.spaces.list[i].kind == COMPOSITOR_SPACE_DESKTOP)
+                        return compositor.spaces.list[i].id;
+        return 0;
+}
+
+static unsigned int compositor_space_desktop_count(int screen)
+{
+        unsigned int n = 0;
+
+        for (unsigned int i = 0; i < compositor.spaces.count; i++)
+                if (compositor.spaces.list[i].screen == screen && compositor.spaces.list[i].kind == COMPOSITOR_SPACE_DESKTOP)
+                        n++;
+        return n;
+}
+
+static struct compositor_space *compositor_space_alloc(int screen, unsigned char kind, int fs_row, unsigned int return_id, int after_idx)
+{
+        unsigned int at = compositor.spaces.count;
+        struct compositor_space *s;
+
+        if (compositor.spaces.count >= COMPOSITOR_SPACES_MAX)
+                return 0;
+        if (after_idx >= 0 && (unsigned int)(after_idx + 1) < compositor.spaces.count)
+        {
+                at = (unsigned int)(after_idx + 1);
+                memory_copy(&compositor.spaces.list[at + 1], &compositor.spaces.list[at],
+                            (compositor.spaces.count - at) * sizeof(compositor.spaces.list[0]));
+        }
+        compositor.spaces.count++;
+        if (!++compositor.spaces.next_id)
+                compositor.spaces.next_id = 1;
+        s = &compositor.spaces.list[at];
+        *s = (struct compositor_space){
+            .id = compositor.spaces.next_id, .kind = kind, .screen = screen,
+            .fs_row = fs_row, .return_id = return_id, .last_focus = COMPOSITOR_NONE,
+        };
+        compositor.spaces.gen++;
+        return s;
+}
+
+static void compositor_space_unlink(unsigned int idx)
+{
+        if (idx >= compositor.spaces.count)
+                return;
+        if (idx + 1 < compositor.spaces.count)
+                memory_copy(&compositor.spaces.list[idx], &compositor.spaces.list[idx + 1],
+                            (compositor.spaces.count - idx - 1) * sizeof(compositor.spaces.list[0]));
+        compositor.spaces.count--;
+        compositor.spaces.gen++;
+}
+
+static void compositor_spaces_ensure(void)
+{
+        int n = compositor_output_count();
+
+        if (n > WINDOWS_OUTPUTS)
+                n = WINDOWS_OUTPUTS;
+        compositor.spaces.ready = 1;
+        for (int sc = 0; sc < n; sc++)
+        {
+                unsigned int first = compositor_space_first_desktop(sc);
+
+                if (!first)
+                {
+                        struct compositor_space *s = compositor_space_alloc(sc, COMPOSITOR_SPACE_DESKTOP, COMPOSITOR_NONE, 0, -1);
+                        first = s ? s->id : 0;
+                }
+                struct compositor_space *act = compositor_space_find(compositor.spaces.active[sc]);
+                if (!act || act->screen != sc)
+                        compositor.spaces.active[sc] = first;
+        }
+}
+
+static int compositor_space_screen_fullscreen(int screen)
+{
+        struct compositor_space *act;
+
+        if (!compositor.spaces.ready || screen < 0 || screen >= WINDOWS_OUTPUTS)
+                return 0;
+        act = compositor_space_find(compositor.spaces.active[screen]);
+        return act && act->kind == COMPOSITOR_SPACE_FULLSCREEN;
+}
+
+static int compositor_space_all_fullscreen(void)
+{
+        int n = compositor_output_count();
+
+        if (!compositor.spaces.ready || n <= 0)
+                return 0;
+        if (n > WINDOWS_OUTPUTS)
+                n = WINDOWS_OUTPUTS;
+        for (int sc = 0; sc < n; sc++)
+                if (!compositor_space_screen_fullscreen(sc))
+                        return 0;
+        return 1;
+}
+
+static int compositor_space_is_fs_row(int row)
+{
+        struct compositor_space *s;
+
+        if (!compositor.spaces.ready || !compositor.row_space || row < 0 || row >= COMPOSITOR_ROWS || !compositor.row_space[row])
+                return 0;
+        s = compositor_space_find(compositor.row_space[row]);
+        return s && s->kind == COMPOSITOR_SPACE_FULLSCREEN && s->fs_row == row &&
+               s->screen >= 0 && s->screen < WINDOWS_OUTPUTS && compositor.spaces.active[s->screen] == s->id;
+}
+
+static int compositor_space_row_active(int row)
+{
+        if (!compositor.spaces.ready || !compositor.row_space || row < 0 || row >= COMPOSITOR_ROWS)
+                return 1;
+        if (compositor.layer[row] == WINDOW_LAYER_BACKGROUND)
+                return !compositor_space_screen_fullscreen(compositor_screen_of(row));
+        if (compositor_popup_parent && compositor_popup_parent[row] >= 0)
+        {
+                int root = compositor_popup_root(row);
+                return root == row ? 1 : compositor_space_row_active(root);
+        }
+        if (compositor_row_space_exempt(row))
+        {
+                if (compositor_owner && compositor_owner[row] > 0)
+                {
+                        int own = compositor_owner[row] - 1;
+                        if (own != row && own >= 0 && own < COMPOSITOR_ROWS && compositor.showing[own])
+                                return compositor_space_row_active(own);
+                }
+                return 1;
+        }
+        unsigned int sid = compositor.row_space[row];
+        if (!sid)
+                return 1;
+        struct compositor_space *s = compositor_space_find(sid);
+        if (!s || s->screen < 0 || s->screen >= WINDOWS_OUTPUTS)
+                return 1;
+        return compositor.spaces.active[s->screen] == sid;
+}
+
+static int compositor_space_same(int a, int b)
+{
+        if (!compositor.spaces.ready || !compositor.row_space)
+                return 1;
+        if (compositor_row_space_exempt(a) || compositor_row_space_exempt(b))
+                return 1;
+        return compositor.row_space[a] == compositor.row_space[b];
+}
+
+static int compositor_spaces_count_on(int screen)
+{
+        int n = 0;
+
+        if (!compositor.spaces.ready)
+                return 0;
+        for (unsigned int i = 0; i < compositor.spaces.count; i++)
+                if (compositor.spaces.list[i].screen == screen)
+                        n++;
+        return n;
+}
+
+static int compositor_spaces_active_index(int screen)
+{
+        int idx = 0;
+
+        if (!compositor.spaces.ready || screen < 0 || screen >= WINDOWS_OUTPUTS)
+                return 0;
+        for (unsigned int i = 0; i < compositor.spaces.count; i++)
+                if (compositor.spaces.list[i].screen == screen)
+                {
+                        if (compositor.spaces.list[i].id == compositor.spaces.active[screen])
+                                return idx;
+                        idx++;
+                }
+        return 0;
+}
+
+static int compositor_spaces_kind_at(int screen, int idx)
+{
+        if (!compositor.spaces.ready || idx < 0)
+                return COMPOSITOR_SPACE_DESKTOP;
+        for (unsigned int i = 0; i < compositor.spaces.count; i++)
+                if (compositor.spaces.list[i].screen == screen && !idx--)
+                        return compositor.spaces.list[i].kind;
+        return COMPOSITOR_SPACE_DESKTOP;
+}
+
+static unsigned int compositor_spaces_gen(void)
+{
+        return compositor.spaces.ready ? compositor.spaces.gen : 0u;
+}
+
+static struct compositor_space *compositor_space_at(int screen, int idx)
+{
+        if (idx < 0)
+                return 0;
+        for (unsigned int i = 0; i < compositor.spaces.count; i++)
+                if (compositor.spaces.list[i].screen == screen && !idx--)
+                        return &compositor.spaces.list[i];
+        return 0;
+}
+
+static int compositor_space_activate(int screen, unsigned int sid)
+{
+        struct compositor_space *target, *old_sp;
+        unsigned int old_id, count;
+        const int (*screens)[4];
+        int focus_on_screen, next = COMPOSITOR_NONE, old_pos = 0, new_pos = 0, slide_dx = 0;
+
+        if (screen < 0 || screen >= WINDOWS_OUTPUTS)
+                return 0;
+        compositor_spaces_ensure();
+        target = compositor_space_find(sid);
+        if (!target || target->screen != screen)
+                return 0;
+        old_id = compositor.spaces.active[screen];
+        if (old_id == sid)
+                return 0;
+        for (unsigned int i = 0, p = 0; i < compositor.spaces.count; i++)
+                if (compositor.spaces.list[i].screen == screen)
+                {
+                        if (compositor.spaces.list[i].id == old_id)
+                                old_pos = (int)p;
+                        if (compositor.spaces.list[i].id == sid)
+                                new_pos = (int)p;
+                        p++;
+                }
+        screens = compositor_screens(&count);
+        if (compositor_glides() && (unsigned int)screen < count)
+                slide_dx = (new_pos >= old_pos ? 1 : -1) * screens[screen][2];
+        compositor_grab_end(COMPOSITOR_GRAB_CANCEL, COMPOSITOR_NONE);
+        compositor_popups_close(-1, -1);
+        old_sp = compositor_space_find(old_id);
+        focus_on_screen = compositor.focus < 0 ||
+                          (compositor.focus >= 0 && compositor.row_space[compositor.focus] == old_id) ||
+                          (compositor.focus >= 0 && compositor_screen_of(compositor.focus) == screen);
+        if (old_sp && compositor.focus >= 0 && compositor.row_space[compositor.focus] == old_id)
+                old_sp->last_focus = compositor.focus;
+        compositor.spaces.active[screen] = sid;
+        compositor.spaces.gen++;
+        compositor.stack_gen++;
+        if (compositor.direct_row >= 0 && !compositor_visible(compositor.direct_row))
+                compositor.direct_row = -1;
+        if (compositor.plane_row >= 0 && !compositor_visible(compositor.plane_row))
+                compositor.plane_row = -1, compositor.plane_gone = 1;
+        for (int row = 0; row < (int)compositor_rows_in_use; row++)
+        {
+                if (!compositor.showing[row])
+                        continue;
+                if (compositor.row_space[row] == old_id)
+                {
+                        compositor.glide[row] = 0;
+                        rows_add(&compositor.woken, row);
+                        compositor_wl_settle(row);
+                        if (compositor.chip.kind == COMPOSITOR_CHIP_CONTROLS && compositor.chip.row == row)
+                                compositor_chip_hide();
+                }
+                else if (compositor.row_space[row] == sid)
+                {
+#ifdef CONFIG_MOONWATER_WAYLAND
+                        if (!(compositor.state[row] & WINDOW_MINIMIZED))
+                                compositor_wl_scan_retry(row);
+#endif
+                        if (slide_dx && !(compositor.state[row] & WINDOW_MINIMIZED))
+                        {
+                                int from[4] = {compositor.x[row] + slide_dx, compositor.y[row], (int)compositor.w[row], (int)compositor.h[row]};
+                                compositor_glide_start(row, from);
+                        }
+                        rows_add(&compositor.woken, row);
+                        compositor_wl_settle(row);
+                }
+        }
+        if (focus_on_screen)
+        {
+                if (target->kind == COMPOSITOR_SPACE_FULLSCREEN && target->fs_row >= 0 && target->fs_row < COMPOSITOR_ROWS &&
+                    compositor_visible(target->fs_row))
+                        next = target->fs_row;
+                else if (target->last_focus >= 0 && target->last_focus < COMPOSITOR_ROWS &&
+                         compositor_visible(target->last_focus) && compositor.row_space[target->last_focus] == sid)
+                        next = target->last_focus;
+                else
+                        for (unsigned int at = compositor.stacked; at-- && next < 0;)
+                        {
+                                int r = (int)compositor.stack[at];
+                                if (compositor_visible(r) && compositor_popup_parent[r] < 0 &&
+                                    !(compositor.state[r] & WINDOW_CLOSING) && compositor_cycles(r) &&
+                                    compositor.row_space[r] == sid)
+                                        next = r;
+                        }
+                if (next >= 0)
+                        compositor_raise(next);
+                compositor_focus(next);
+        }
+        if ((unsigned int)screen < count)
+                compositor_damage(screens[screen][0], screens[screen][1], screens[screen][2], screens[screen][3]);
+        else
+                compositor_damage(0, 0, compositor.width, compositor.height);
+        compositor_tabs_changed();
+        if (!compositor_wl_locked())
+                compositor_motion();
+        return 1;
+}
+
+static void compositor_space_assign_new(int row, int focus_switch)
+{
+        int on = compositor_screen_of(row), own = compositor_owner[row] - 1;
+        unsigned int sid;
+        struct compositor_space *act;
+
+        if (compositor_row_space_exempt(row))
+                return;
+        compositor_spaces_ensure();
+        if (own >= 0 && own < COMPOSITOR_ROWS && own != row && compositor.showing[own] && compositor.row_space[own])
+        {
+                compositor.row_space[row] = compositor.row_space[own];
+                return;
+        }
+        sid = compositor.spaces.active[on];
+        act = compositor_space_find(sid);
+        if (act && act->kind == COMPOSITOR_SPACE_FULLSCREEN && !compositor.fullscreen[row])
+        {
+                unsigned int desk = act->return_id;
+                struct compositor_space *dsp = compositor_space_find(desk);
+                if (!dsp || dsp->screen != on || dsp->kind != COMPOSITOR_SPACE_DESKTOP)
+                        desk = compositor_space_first_desktop(on);
+                compositor.row_space[row] = desk;
+                if (focus_switch && desk)
+                        compositor_space_activate(on, desk);
+                return;
+        }
+        compositor.row_space[row] = sid;
+}
+
+static void compositor_space_move_to_screen(unsigned int sid, int to_screen);
+
+static void compositor_space_enter_fullscreen(int row, int screen)
+{
+        unsigned int prev_id;
+        struct compositor_space *prev, *fs;
+
+        if (!compositor.spaces.ready || compositor_row_space_exempt(row) || row < 0 || row >= COMPOSITOR_ROWS)
+                return;
+        compositor_spaces_ensure();
+        if (screen < 0 || screen >= compositor_output_count())
+                screen = compositor_screen_of(row);
+        for (unsigned int i = 0; i < compositor.spaces.count; i++)
+                if (compositor.spaces.list[i].kind == COMPOSITOR_SPACE_FULLSCREEN && compositor.spaces.list[i].fs_row == row)
+                {
+                        if (compositor.spaces.list[i].screen != screen)
+                                compositor_space_move_to_screen(compositor.spaces.list[i].id, screen);
+                        else
+                                compositor_space_activate(screen, compositor.spaces.list[i].id);
+                        return;
+                }
+        prev_id = compositor.row_space[row];
+        prev = compositor_space_find(prev_id);
+        if (!prev || prev->kind != COMPOSITOR_SPACE_DESKTOP || prev->screen != screen)
+                prev_id = compositor_space_first_desktop(screen);
+        compositor.row_space_prev[row] = prev_id;
+        fs = compositor_space_alloc(screen, COMPOSITOR_SPACE_FULLSCREEN, row, prev_id, compositor_space_index_of(prev_id));
+        if (!fs)
+                return;
+        compositor.row_space[row] = fs->id;
+        for (int c = 0; c < (int)compositor_rows_in_use; c++)
+                if (c != row && compositor_owner[c] == row + 1 && compositor.showing[c] && !compositor_row_space_exempt(c))
+                        compositor.row_space[c] = fs->id;
+        compositor_space_activate(screen, fs->id);
+}
+
+static void compositor_space_exit_fullscreen(int row, int closing)
+{
+        int idx = -1, screen, was_active;
+        unsigned int fs_id, ret_id;
+        struct compositor_space *ret;
+
+        if (!compositor.spaces.ready || row < 0 || row >= COMPOSITOR_ROWS)
+                return;
+        for (unsigned int i = 0; i < compositor.spaces.count; i++)
+                if (compositor.spaces.list[i].kind == COMPOSITOR_SPACE_FULLSCREEN && compositor.spaces.list[i].fs_row == row)
+                        { idx = (int)i; break; }
+        if (idx < 0)
+                return;
+        screen = compositor.spaces.list[idx].screen;
+        fs_id = compositor.spaces.list[idx].id;
+        ret_id = compositor.row_space_prev[row] ? compositor.row_space_prev[row] : compositor.spaces.list[idx].return_id;
+        ret = compositor_space_find(ret_id);
+        if (!ret || ret->screen != screen || ret->id == fs_id)
+                ret_id = compositor_space_first_desktop(screen);
+        was_active = screen >= 0 && screen < WINDOWS_OUTPUTS && compositor.spaces.active[screen] == fs_id;
+        compositor.row_space[row] = closing ? 0u : ret_id;
+        compositor.row_space_prev[row] = 0;
+        for (int c = 0; c < (int)compositor_rows_in_use; c++)
+                if (c != row && compositor.showing[c] && compositor.row_space[c] == fs_id)
+                        compositor.row_space[c] = ret_id;
+        if (was_active && ret_id)
+                compositor_space_activate(screen, ret_id);
+        idx = compositor_space_index_of(fs_id);
+        if (idx >= 0)
+                compositor_space_unlink((unsigned int)idx);
+        compositor_tabs_changed();
+        if (!closing && was_active && compositor.showing[row])
+                compositor_raise(row), compositor_focus(row);
+}
+
+static int compositor_space_current_screen(void)
+{
+        unsigned int count;
+        const int (*screens)[4] = compositor_screens(&count);
+        int sc;
+
+        if (compositor.focus >= 0 && compositor.focus < COMPOSITOR_ROWS && compositor.showing[compositor.focus])
+                return compositor_screen_of(compositor.focus);
+        sc = compositor_screen_at(screens, count, compositor.pointer_x, compositor.pointer_y);
+        return sc >= 0 ? sc : 0;
+}
+
+static void compositor_space_step(int screen, int delta)
+{
+        int count, cur, target;
+        struct compositor_space *sp;
+
+        compositor_spaces_ensure();
+        count = compositor_spaces_count_on(screen);
+        if (count < 2)
+                return;
+        cur = compositor_spaces_active_index(screen);
+        target = cur + delta;
+        if (target < 0 || target >= count)
+                return;
+        sp = compositor_space_at(screen, target);
+        if (sp)
+                compositor_space_activate(screen, sp->id);
+}
+
+static void compositor_space_switch_index(int screen, int idx)
+{
+        struct compositor_space *sp;
+
+        compositor_spaces_ensure();
+        sp = compositor_space_at(screen, idx);
+        if (sp)
+                compositor_space_activate(screen, sp->id);
+}
+
+static void compositor_space_add(int screen, int activate)
+{
+        struct compositor_space *sp;
+        int last = -1;
+
+        compositor_spaces_ensure();
+        if (screen < 0 || screen >= compositor_output_count())
+                screen = 0;
+        for (unsigned int i = 0; i < compositor.spaces.count; i++)
+                if (compositor.spaces.list[i].screen == screen)
+                        last = (int)i;
+        sp = compositor_space_alloc(screen, COMPOSITOR_SPACE_DESKTOP, COMPOSITOR_NONE, 0, last);
+        if (!sp)
+                return;
+        if (activate)
+                compositor_space_activate(screen, sp->id);
+        else
+                compositor_tabs_changed();
+}
+
+static void compositor_space_remove_index(int screen, int idx)
+{
+        struct compositor_space *sp;
+        unsigned int sid, fallback = 0;
+        int was_active, list_idx;
+
+        compositor_spaces_ensure();
+        sp = compositor_space_at(screen, idx);
+        if (!sp || sp->kind != COMPOSITOR_SPACE_DESKTOP || compositor_space_desktop_count(screen) < 2)
+                return;
+        sid = sp->id;
+        for (unsigned int i = 0; i < compositor.spaces.count; i++)
+                if (compositor.spaces.list[i].screen == screen && compositor.spaces.list[i].kind == COMPOSITOR_SPACE_DESKTOP &&
+                    compositor.spaces.list[i].id != sid)
+                {
+                        fallback = compositor.spaces.list[i].id;
+                        if (i < (unsigned int)compositor_space_index_of(sid))
+                                continue;
+                        break;
+                }
+        if (!fallback)
+                return;
+        for (int row = 0; row < (int)compositor_rows_in_use; row++)
+        {
+                if (compositor.row_space[row] == sid)
+                        compositor.row_space[row] = fallback;
+                if (compositor.row_space_prev[row] == sid)
+                        compositor.row_space_prev[row] = fallback;
+        }
+        for (unsigned int i = 0; i < compositor.spaces.count; i++)
+                if (compositor.spaces.list[i].return_id == sid)
+                        compositor.spaces.list[i].return_id = fallback;
+        was_active = compositor.spaces.active[screen] == sid;
+        if (was_active)
+                compositor_space_activate(screen, fallback);
+        list_idx = compositor_space_index_of(sid);
+        if (list_idx >= 0)
+                compositor_space_unlink((unsigned int)list_idx);
+        compositor_tabs_changed();
+}
+
+static void compositor_space_remove_active(int screen)
+{
+        compositor_space_remove_index(screen, compositor_spaces_active_index(screen));
+}
+
+static void compositor_space_carry_row(int row, int from, int to)
+{
+        unsigned int count, how = compositor.arranged[row];
+        const int (*screens)[4] = compositor_screens(&count);
+        int keep[4];
+
+        if (from == to || from < 0 || to < 0 || (unsigned int)from >= count || (unsigned int)to >= count)
+                return;
+        compositor_row_saved_get(row, keep);
+        compositor_screen_carry(screens[from], screens[to], &keep[0], &keep[1], keep[2], keep[3]);
+        compositor_row_saved_set(row, keep);
+        if (compositor.fullscreen[row])
+        {
+                int part[4];
+                compositor_screen_part(screens[to], COMPOSITOR_MAXIMIZED, part);
+                compositor_damage_row(row);
+                compositor.far_x[row] = part[0] + part[2], compositor.far_y[row] = part[1] + part[3];
+                compositor_put(row, part[0], part[1]);
+                compositor_want(row, part[2], part[3]);
+                compositor_damage_row(row);
+        }
+        else if (how == COMPOSITOR_FLOATING)
+        {
+                int rect[4] = {compositor.x[row], compositor.y[row], (int)compositor.w[row], (int)compositor.h[row]};
+                compositor_screen_carry(screens[from], screens[to], &rect[0], &rect[1], rect[2], rect[3]);
+                compositor_set_rect(row, COMPOSITOR_FLOATING, rect);
+        }
+        else
+                compositor_arrange_on(row, how == COMPOSITOR_ROOM ? COMPOSITOR_MAXIMIZED : how, to);
+}
+
+static void compositor_space_move_row(int row, unsigned int target_sid, int follow)
+{
+        struct compositor_space *dst;
+        int from;
+
+        if (row < 0 || row >= COMPOSITOR_ROWS || !compositor.showing[row] || compositor_row_space_exempt(row))
+                return;
+        compositor_spaces_ensure();
+        dst = compositor_space_find(target_sid);
+        if (!dst || dst->kind != COMPOSITOR_SPACE_DESKTOP || compositor.row_space[row] == target_sid)
+                return;
+        if (compositor.fullscreen[row])
+                return;
+        from = compositor_screen_of(row);
+        compositor_damage_row(row);
+        if (dst->screen != from)
+                compositor_space_carry_row(row, from, dst->screen);
+        compositor.row_space[row] = target_sid;
+        for (int c = 0; c < (int)compositor_rows_in_use; c++)
+                if (c != row && compositor_owner[c] == row + 1 && compositor.showing[c] && !compositor_row_space_exempt(c))
+                        compositor.row_space[c] = target_sid;
+        compositor.stack_gen++;
+        rows_add(&compositor.woken, row);
+        compositor_wl_settle(row);
+        if (follow)
+        {
+                compositor_space_activate(dst->screen, target_sid);
+                compositor_raise(row), compositor_focus(row);
+        }
+        else if (compositor.focus == row && !compositor_space_row_active(row))
+                compositor_refocus();
+        compositor_tabs_changed();
+}
+
+static void compositor_space_move_row_step(int row, int delta)
+{
+        int screen, count, cur, idx;
+        struct compositor_space *sp;
+
+        if (row < 0 || row >= COMPOSITOR_ROWS || !compositor.showing[row])
+                return;
+        compositor_spaces_ensure();
+        screen = compositor_screen_of(row);
+        count = compositor_spaces_count_on(screen);
+        cur = compositor_spaces_active_index(screen);
+        for (idx = cur + delta; idx >= 0 && idx < count; idx += delta)
+        {
+                sp = compositor_space_at(screen, idx);
+                if (sp && sp->kind == COMPOSITOR_SPACE_DESKTOP)
+                        { compositor_space_move_row(row, sp->id, 1); return; }
+        }
+}
+
+static void compositor_space_move_row_index(int row, int idx)
+{
+        struct compositor_space *sp;
+
+        if (row < 0 || row >= COMPOSITOR_ROWS || !compositor.showing[row])
+                return;
+        compositor_spaces_ensure();
+        sp = compositor_space_at(compositor_screen_of(row), idx);
+        if (sp && sp->kind == COMPOSITOR_SPACE_DESKTOP)
+                compositor_space_move_row(row, sp->id, 1);
+}
+
+static void compositor_space_move_to_screen(unsigned int sid, int to_screen)
+{
+        struct compositor_space *sp;
+        int from, was_active;
+        unsigned int count, fallback;
+
+        compositor_spaces_ensure();
+        count = (unsigned int)compositor_output_count();
+        sp = compositor_space_find(sid);
+        if (!sp || count < 2 || to_screen < 0 || (unsigned int)to_screen >= count || sp->screen == to_screen)
+                return;
+        from = sp->screen;
+        if (sp->kind == COMPOSITOR_SPACE_DESKTOP && compositor_space_desktop_count(from) < 2)
+                compositor_space_alloc(from, COMPOSITOR_SPACE_DESKTOP, COMPOSITOR_NONE, 0, -1);
+        sp = compositor_space_find(sid);
+        if (!sp)
+                return;
+        was_active = compositor.spaces.active[from] == sid;
+        sp->screen = to_screen;
+        if (sp->kind == COMPOSITOR_SPACE_FULLSCREEN)
+                sp->return_id = compositor_space_first_desktop(to_screen);
+        for (int row = 0; row < (int)compositor_rows_in_use; row++)
+                if (compositor.showing[row] && compositor.row_space[row] == sid)
+                {
+                        compositor_space_carry_row(row, from, to_screen);
+                        if (sp->kind == COMPOSITOR_SPACE_FULLSCREEN)
+                                compositor.row_space_prev[row] = sp->return_id;
+                }
+        if (was_active)
+        {
+                fallback = compositor_space_first_desktop(from);
+                if (fallback)
+                        compositor_space_activate(from, fallback);
+        }
+        compositor_space_activate(to_screen, sid);
+        compositor_damage(0, 0, compositor.width, compositor.height);
+        compositor_tabs_changed();
+}
+
+static void compositor_space_move_active_screen(int screen, int right)
+{
+        unsigned int count;
+        const int (*screens)[4] = compositor_screens(&count);
+        long long best = -1, level = 0;
+        int to = -1;
+
+        if (count < 2 || screen < 0 || (unsigned int)screen >= count)
+                return;
+        for (unsigned int at = 0; at < count; at++)
+        {
+                const int *s = screens[at], *f = screens[screen];
+                long long gap = right ? (long long)s[0] - (f[0] + f[2]) : (long long)f[0] - (s[0] + s[2]);
+                long long off = (long long)s[1] * 2 + s[3] - ((long long)f[1] * 2 + f[3]);
+                if (off < 0)
+                        off = -off;
+                if ((int)at != screen && gap >= 0 && (best < 0 || gap < best || (gap == best && off < level)))
+                        best = gap, level = off, to = (int)at;
+        }
+        if (to >= 0)
+                compositor_space_move_to_screen(compositor.spaces.active[screen], to);
+}
+
+static void compositor_spaces_on_outputs_changed(const char (*was_names)[WINDOWS_OUTPUT_NAME], unsigned int was_count)
+{
+        unsigned int now_count = (unsigned int)compositor_output_count();
+        unsigned int new_active[WINDOWS_OUTPUTS];
+        int map[WINDOWS_OUTPUTS];
+
+        if (!compositor.spaces.ready)
+                return;
+        memory_zero(new_active, sizeof(new_active));
+        for (unsigned int i = 0; i < WINDOWS_OUTPUTS; i++)
+                map[i] = 0;
+        for (unsigned int i = 0; i < was_count && i < WINDOWS_OUTPUTS; i++)
+                for (unsigned int at = 0; at < now_count && at < compositor.outputs; at++)
+                        if (!string_compare((string_address)compositor.output[at].name, (string_address)was_names[i]))
+                                { map[i] = (int)at; break; }
+        for (unsigned int i = 0; i < compositor.spaces.count; i++)
+        {
+                int old_sc = compositor.spaces.list[i].screen;
+                compositor.spaces.list[i].screen = (old_sc >= 0 && (unsigned int)old_sc < was_count) ? map[old_sc] : 0;
+        }
+        for (unsigned int i = 0; i < was_count && i < WINDOWS_OUTPUTS; i++)
+                if (compositor.spaces.active[i] && !new_active[map[i]])
+                        new_active[map[i]] = compositor.spaces.active[i];
+        memory_copy(compositor.spaces.active, new_active, sizeof(new_active));
+        compositor_spaces_ensure();
+        compositor.spaces.gen++;
 }
 
 /* ---- on-screen keyboard ---- */

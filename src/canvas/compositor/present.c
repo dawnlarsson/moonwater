@@ -1077,6 +1077,8 @@ static int compositor_wall_making(void)
 
 static positive compositor_wall_due(positive now)
 {
+        if (compositor_space_all_fullscreen())
+                return 0;
         if (compositor_wall_deferred && compositor.presented)
                 return now;
         if (compositor_wall_job.pixels && compositor_wall_knock < 0)
@@ -1133,7 +1135,7 @@ static void compositor_wall_keep(void)
         const int (*screens)[4] = compositor_screens(&count);
         int dark = !(compositor.table && compositor.table->themed && compositor.table->theme == UI_THEME_LIGHT);
 
-        if (!compositor_wall_rows.ready)
+        if (!compositor_wall_rows.ready || compositor_space_all_fullscreen())
                 return;
         compositor_wall_deferred = 0;
         if (compositor.scanout && !compositor.presented)

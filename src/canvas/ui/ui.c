@@ -1136,6 +1136,9 @@ static inline int taskbar_notices_set(int present, unsigned int severity)
 #define TASKBAR_TRAY_ITEM_BASE (-100)
 #define TASKBAR_TRAY_ITEM_MAX 16
 #define TASKBAR_TRAY_ITEM_PX 24
+#define TASKBAR_SPACE_BASE (-200)
+#define TASKBAR_SPACE_MAX 16
+#define TASKBAR_SPACE_ADD (-220)
 #define TASKBAR_BUTTON_LEFT 0u
 #define TASKBAR_BUTTON_MIDDLE 2u
 #define TASKBAR_BUTTON_WHEEL 3u
