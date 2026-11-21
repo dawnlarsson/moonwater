@@ -3443,14 +3443,19 @@ static positive compositor_timers_arm(positive now, unsigned int fence_at, int h
         (void)held;
         if (compositor.band || compositor.theme_word == 2)
         {
-                timespec real = {0, 0};
+                if (compositor.band && taskbar_clock_stale())
+                        compositor_soon(&until, now);
+                else
+                {
+                        timespec real = {0, 0};
 
-                clock_gettime(CLOCK_REALTIME, address_of real);
-                compositor_soon(&until, now + (positive)(59 - real.tv_sec % 60) * 1000000000ull + (positive)(1000000000l - real.tv_nsec) + 1000000ull);
+                        clock_gettime(CLOCK_REALTIME, address_of real);
+                        compositor_soon(&until, now + (positive)(59 - real.tv_sec % 60) * 1000000000ull + (positive)(1000000000l - real.tv_nsec) + 1000000ull);
+                }
         }
         if (compositor.screens_gone && !compositor.screens_look)
                 compositor.screens_look = now + COMPOSITOR_SCREEN_LOOK;
-        if ((compositor.damages || compositor.vrr_kick) && !compositor_card_holds())
+        if ((compositor.damages || compositor.vrr_kick) && !compositor.dark && !compositor_card_holds())
         {
                 positive waiting = compositor_flip_wait(now);
                 int tear = compositor_tearing();
@@ -3923,6 +3928,8 @@ static b32 compositor_main()
                 compositor_theme_tick();
                 compositor_wake_check(now);
                 compositor_wake_pass(now);
+                if (compositor.band && taskbar_tick())
+                        compositor_tabs_changed();
                 compositor_hold_drop(now);
                 compositor_game_watch();
                 compositor_game_slice();

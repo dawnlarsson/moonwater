@@ -1575,7 +1575,14 @@ static void compositor_dark(int dark)
                 (void)drm_obj_set_prop(conn, COMPOSITOR_OBJECT_CONNECTOR, prop, dark ? 3ul : 0ul);
         }
         if (!dark)
+        {
+                if (compositor.band)
+                {
+                        (void)taskbar_tick();
+                        compositor_tabs_changed();
+                }
                 compositor_damage_space();
+        }
         if (was != dark)
                 compositor_kmsg(dark ? (string_address) "compositor: display off" : (string_address) "compositor: display on", 0,
                                 (string_address) "");

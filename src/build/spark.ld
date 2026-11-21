@@ -668,7 +668,6 @@ SECTIONS
                    mapped already or a clean one, not a page of .data. */
                 *(.data.rel.ro .data.rel.ro.*)
 
-                *(.text.unlikely .text.unlikely.*)
                 /* The routines written in assembly that every command runs,
                    each in a section of its own (ASM_FUNC), first among the
                    rest: what the library's routines call one another with
@@ -832,6 +831,7 @@ SECTIONS
                 *(.text.string_to_host)
                 /* hot_asm end */
                 spark_hot_end = .;
+                *(.text.unlikely .text.unlikely.*)
                 *(.text.*)
         }
 

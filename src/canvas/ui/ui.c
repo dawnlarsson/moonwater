@@ -1387,6 +1387,7 @@ static int taskbar_draw(const struct taskbar_view *view, unsigned long redo, tas
                         int *rect);
 static unsigned int taskbar_tab_ink(int slot, unsigned int mark);
 static int taskbar_tick(void);
+static int taskbar_clock_stale(void);
 static void taskbar_changed(void);
 static int taskbar_stale(void);
 static void taskbar_bytes(int width, int height, int scale, unsigned long *band, unsigned long *glass);
@@ -1481,6 +1482,7 @@ static inline int taskbar_draw(const struct taskbar_view *view, unsigned long re
 static inline unsigned int taskbar_tab_ink(int slot, unsigned int mark)
 { (void)slot, (void)mark; return 0; }
 static inline int taskbar_tick(void) { return 0; }
+static inline int taskbar_clock_stale(void) { return 0; }
 static inline void taskbar_changed(void) {}
 static inline int taskbar_stale(void) { return 0; }
 static inline void taskbar_bytes(int width, int height, int scale, unsigned long *band, unsigned long *glass)
@@ -15173,7 +15175,7 @@ static inline int ui_tab_close_hover(struct ui_tab_hit th)
         return th.kind == UI_TAB_HIT_ADD ? -2 : th.kind == UI_TAB_HIT_CLOSE ? th.item : -1;
 }
 
-static inline struct ui_tab_hit ui_control_hit_tab(const struct ui address_to ui, const struct ui_control address_to c, int x, int y)
+static inline struct ui_tab_hit ui_control_hit_tab(struct ui address_to ui, const struct ui_control address_to c, int x, int y)
 {
         if (!ui_control_live(c))
                 return (struct ui_tab_hit){UI_TAB_HIT_NONE, -1};

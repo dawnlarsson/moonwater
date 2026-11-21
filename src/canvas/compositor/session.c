@@ -165,6 +165,11 @@ static void compositor_woke(positive now, unsigned int how)
         // What the plane wears and where it was is whatever the driver put back: said again, and the whole space drawn.
         compositor.cursor.plane.scale = 0;
         compositor.mirror_stale = 1;
+        if (compositor.band)
+        {
+                (void)taskbar_tick();
+                compositor_tabs_changed();
+        }
         compositor_damage_space();
         compositor_cursor_move();
 #ifdef MOONWATER_GPU_C

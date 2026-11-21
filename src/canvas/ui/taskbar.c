@@ -161,7 +161,18 @@ static b64 taskbar_tween_goal(const struct ui_tween address_to t)
 
 static unsigned int taskbar_minute_now(void)
 {
+        tm broken;
+
+        if (taskbar_broken_time(0, &broken))
+                return (unsigned int)((((broken.tm_year & 0x3ff) * 366 + broken.tm_yday) * 1440) + broken.tm_hour * 60 + broken.tm_min);
         return (unsigned int)(taskbar_now_sec(0) / 60);
+}
+
+static int taskbar_clock_stale(void)
+{
+        unsigned int language_now = compositor.table ? compositor.table->language : 0;
+
+        return taskbar_minute_now() != taskbar.minute || language_now != taskbar.language;
 }
 
 static int taskbar_vertical(unsigned int position)
@@ -2237,7 +2248,6 @@ static int taskbar_draw(const struct taskbar_view *view, unsigned long redo, tas
         b32 live = 0;
         char clock[6] = {0}, text[8];
 
-        taskbar.stale = 0;
         cur->moon_own = 0;
         if (!view->pixels || (unsigned long)band->w * (unsigned long)band->h * 4 > view->band_bytes)
                 return 0;
@@ -2260,8 +2270,15 @@ static int taskbar_draw(const struct taskbar_view *view, unsigned long redo, tas
         gw = glass(context, rect[0], rect[1], rect[2], rect[3]);
         if (!gw)
                 return 1;
-
-        taskbar.minute = taskbar_minute_now();
+        if (redo == ~0ul)
+                taskbar.stale = 0;
+        if (taskbar_clock_stale())
+        {
+                taskbar_battery_refresh();
+                taskbar_tray_render();
+                if (redo == ~0ul)
+                        taskbar.minute = taskbar_minute_now(), taskbar.language = compositor.table ? compositor.table->language : 0;
+        }
         time_ok = taskbar_broken_time(taskbar.moon_at, &broken);
         if (time_ok)
                 clock[0] = (char)('0' + broken.tm_hour / 10), clock[1] = (char)('0' + broken.tm_hour % 10), clock[2] = ':',
