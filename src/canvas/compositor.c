@@ -1836,13 +1836,18 @@ static positive compositor_timers_arm(positive now, unsigned int fence_at, int h
         (void)fence_at, (void)held;
         if (compositor.band || compositor.theme_word == 2)
         {
+                static positive next_minute;
                 if (compositor.band && taskbar_clock_stale())
-                        compositor_soon(&until, now);
+                        next_minute = 0, compositor_soon(&until, now);
                 else
                 {
-                        timespec real = {0, 0};
-                        clock_gettime(CLOCK_REALTIME, address_of real);
-                        compositor_soon(&until, now + (positive)(59 - real.tv_sec % 60) * 1000000000ull + (positive)(1000000000l - real.tv_nsec) + 1000000ull);
+                        if (!next_minute || now >= next_minute)
+                        {
+                                timespec real = {0, 0};
+                                clock_gettime(CLOCK_REALTIME, address_of real);
+                                next_minute = now + (positive)(59 - real.tv_sec % 60) * 1000000000ull + (positive)(1000000000l - real.tv_nsec) + 1000000ull;
+                        }
+                        compositor_soon(&until, next_minute);
                 }
         }
         if (compositor.screens_gone && !compositor.screens_look) compositor.screens_look = now + COMPOSITOR_SCREEN_LOOK;
@@ -1887,12 +1892,17 @@ static positive compositor_timers_arm(positive now, unsigned int fence_at, int h
         return until;
 }
 
-static long compositor_loop_wait(struct compositor_poll *wanted, unsigned int count, const long *wait, b32 again)
+static long compositor_loop_wait(struct compositor_poll *wanted, unsigned int count, const long *wait, b32 again, b32 held)
 {
         struct compositor_epoll_event ready[COMPOSITOR_EPOLL_READY];
         unsigned int forgets, turn;
         long got, awaited = 0;
 
+        if (held)
+        {
+                for (unsigned int at = 0; at < count; at++) wanted[at].returned = 0;
+                goto ppoll;
+        }
         if (compositor_epoll_init() < 0) goto ppoll;
         forgets = __atomic_load_n(&compositor_epoll.forgets, __ATOMIC_ACQUIRE);
         if (again && compositor_epoll.whole && count == compositor_epoll.count && forgets == compositor_epoll.forgets_seen)
@@ -2214,7 +2224,7 @@ static b32 compositor_main()
                 wait[0] = until > now ? (long)((until - now) / 1000000000ull) : 0;
                 wait[1] = until > now ? (long)((until - now) % 1000000000ull) : 0;
                 idle_turn = until && until <= now;
-                awaited = compositor_loop_wait(wanted, slots.count, until ? wait : 0, again);
+                awaited = compositor_loop_wait(wanted, slots.count, until ? wait : 0, again, held);
                 now = clock_monotonic_nanoseconds();
 
                 if (awaited > 0)

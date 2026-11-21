@@ -190,6 +190,10 @@ static void compositor_woke(positive now, unsigned int how)
 // Looked at whenever the loop wakes: whether the machine slept since it last did.
 static void compositor_wake_check(positive now)
 {
+        static positive checked;
+        if (checked && now >= checked && now - checked < 250000000ull)
+                return;
+        checked = now;
         if (compositor_slept(compositor_slept_clock(), &compositor.asleep))
                 compositor_woke(now, COMPOSITOR_WAKE_CLOCK);
 }

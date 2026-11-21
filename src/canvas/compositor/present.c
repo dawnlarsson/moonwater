@@ -449,7 +449,9 @@ static b32 compositor_card_holds(void)
 // the ones held for a flip; a row held for a flip still in flight (the one shown straight) is left to it.
 static void compositor_card_release(void)
 {
-        for (int row = 0; row < (int)compositor_rows_in_use && compositor.table; row++)
+        if (!compositor.table || !rows_any(&compositor_card.rows))
+                return;
+        for (int row = 0; row < (int)compositor_rows_in_use; row++)
                 if ((rows_has(&compositor.held_rows, row) && rows_has(&compositor_card.rows, row)) && !(compositor.flip_pending && row == compositor.flip_row))
                 {
                         __atomic_store_n(&compositor.table->shown[row], compositor.taken_held[row], __ATOMIC_RELEASE);
@@ -1090,7 +1092,7 @@ static positive compositor_wall_due(positive now)
 
                 clock_gettime(CLOCK_REALTIME, address_of real);
                 at = (positive)real.tv_sec * 1000000000ull + (positive)real.tv_nsec;
-                return compositor_wall_step_now() != compositor_wall_stepped ? now : now + COMPOSITOR_WALL_STEP - at % COMPOSITOR_WALL_STEP + 1000000ull;
+                return at / COMPOSITOR_WALL_STEP != compositor_wall_stepped ? now : now + COMPOSITOR_WALL_STEP - at % COMPOSITOR_WALL_STEP + 1000000ull;
         }
         return 0;
 }

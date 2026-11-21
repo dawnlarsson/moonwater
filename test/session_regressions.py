@@ -697,6 +697,13 @@ def test_compositor_and_xwm_invariants():
           cr_start != -1 and cr_end != -1 and
           "compositor_xwm_clamp_size(" not in xwm[cr_start:cr_end] and
           "if (!w || (w->state & COMPOSITOR_XWM_MAPPED))" in xwm[cr_start:cr_end])
+    comp_main = read_text("src/canvas/compositor.c")
+    check("144Hz loop floor: held turns bypass epoll_ctl churn, next_minute/wake_check throttled & rows_any guards",
+          "if (held)\n        {\n                for (unsigned int at = 0; at < count; at++) wanted[at].returned = 0;\n                goto ppoll;" in comp_main and
+          "static positive next_minute;" in comp_main and
+          "if (checked && now >= checked && now - checked < 250000000ull)" in read_text("src/canvas/compositor/session.c") and
+          "if (!compositor.table || !rows_any(&compositor_card.rows))" in read_text("src/canvas/compositor/present.c") and
+          "if (rows_any(&compositor.held_rows))" in read_text("src/canvas/compositor/scanout.c"))
     check("Steam bowl fixes Win32 dialog inflation (ttf-liberation + 65-moonwater-win32.conf) & GTK dark theme",
           '"ttf-liberation"' in read_text("src/bowl.c") and
           "65-moonwater-win32.conf" in read_text("src/bowl.c") and

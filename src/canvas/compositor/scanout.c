@@ -570,26 +570,28 @@ static void compositor_flip_done(void)
         compositor.flip_pending = 0;
         compositor.flip_async = 0;
         compositor.leaving_row = -1;
-        for (int row = 0; row < (int)compositor_rows_in_use; row++)
-        {
-                if (!rows_has(&compositor.held_rows, row))
-                        continue;
-                if (row == compositor.flip_row && compositor.front[row] != compositor.flip_buffer)
-                        continue;
-                if (rows_has(&compositor_card.list_rows, row)) // a list's job draws its picture: the loop's turn gives it back at the job's end
-                        continue;
-                __atomic_store_n(&compositor.table->shown[row], compositor.taken_held[row], __ATOMIC_RELEASE);
-                rows_del(&compositor.held_rows, row);
-                rows_add(&compositor.woken, row);
-        }
-        // A window that left while the card showed it: its framebuffers now, the card being off them.
-        for (int row = 0; row < (int)compositor_rows_in_use; row++)
-                if (rows_has(&compositor.dropping, row) && !compositor_shows_row(row))
+        if (rows_any(&compositor.held_rows))
+                for (int row = 0; row < (int)compositor_rows_in_use; row++)
                 {
-                        rows_del(&compositor.dropping, row);
-                        compositor_window_fb_drop(row);
-                        compositor_row_reclaim(row);
+                        if (!rows_has(&compositor.held_rows, row))
+                                continue;
+                        if (row == compositor.flip_row && compositor.front[row] != compositor.flip_buffer)
+                                continue;
+                        if (rows_has(&compositor_card.list_rows, row)) // a list's job draws its picture: the loop's turn gives it back at the job's end
+                                continue;
+                        __atomic_store_n(&compositor.table->shown[row], compositor.taken_held[row], __ATOMIC_RELEASE);
+                        rows_del(&compositor.held_rows, row);
+                        rows_add(&compositor.woken, row);
                 }
+        // A window that left while the card showed it: its framebuffers now, the card being off them.
+        if (rows_any(&compositor.dropping))
+                for (int row = 0; row < (int)compositor_rows_in_use; row++)
+                        if (rows_has(&compositor.dropping, row) && !compositor_shows_row(row))
+                        {
+                                rows_del(&compositor.dropping, row);
+                                compositor_window_fb_drop(row);
+                                compositor_row_reclaim(row);
+                        }
         canvas_scan_fb_reap();
 #ifdef CONFIG_MOONWATER_WAYLAND
         // The feedbacks of the frame this flip showed are answered with the card's time for it.
