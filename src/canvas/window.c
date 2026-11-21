@@ -1,382 +1,114 @@
 /*
-        Moonwater window
-
-        What a program shares with the compositor, and the cells a terminal's
-        text lives in. It includes canvas.c's ABI itself, and it needs the
-        library before it (lib.c and lib.util.c, as the shell and the tests
-        include them): the file uses the library's types and memory routines.
-        Its own syscall entry is used only where the library does not supply
-        one.
-
-        A program's window is a row of the compositor's table (struct windows,
-        below): the program writes its picture, its size and its title there
-        and knocks on its row's door, and the compositor writes where the
-        window is and which window has the keys. struct window is the page of
-        cells a window of text is made of, which a terminal holds in its own
-        memory (window_grid_open): the program and the emulator address the
-        same ring of lines whoever owns the page. The fields above the line
-        are the program's to write; the ones below are the compositor's,
-        which a program that holds the page itself fills in for itself.
-
-        The fields z, region, display, style, edge, pitch, awake, the output
-        and maximum sizes are the older per-window protocol. No code outside
-        this file names them now, since struct windows (below) carries the
-        live window state. They stay because the page's layout is asserted
-        further down. The title is still read: the terminal takes its title
-        from the page.
+        Moonwater window: shared compositor table (struct windows), terminal cell ring (struct window),
+        and client helpers. Includes canvas.c ABI and ui/ui.c list format; expects lib.c + lib.util.c.
 */
 
 #ifndef WINDOW_INCLUDED
 #define WINDOW_INCLUDED
 
-// The numbers /dev/spark takes, which the compositor's ABI header holds.
 #define CANVAS_ABI_ONLY
 #include "canvas.c"
 #undef CANVAS_ABI_ONLY
 
-// The window list: its format and reader (ui/ui.c's first part, UI_LIST_ONLY), which the compositor checks a list with (window_list_valid).
 #define UI_LIST_ONLY
 #include "ui/ui.c"
 #undef UI_LIST_ONLY
 
-// O_RDWR | O_CLOEXEC, which are the same numbers on all three architectures.
-// A window is this program's, not whatever it goes on to exec.
+// O_RDWR | O_CLOEXEC
 #define WINDOW_OPEN_FLAGS 0x80002u
-
-// The contents start one page in, so the struct and the pixels are one mapping
-// and the pixels stay page aligned.
 #define WINDOW_PIXELS 4096
-
-// The handle of a window of cells the program holds itself (window_grid_open):
-// no file, so no call is made to it.
 #define WINDOW_PRIVATE 0xffffffffu
-
-// style
 #define WINDOW_MINIMIZED 4u
-
-/* Keep a raise's top + 1 away from overflow on an untrusted shared page. */
 #define WINDOW_Z_MAX (1 << 24)
-
-/*
-        The same rule for where a window says it is.
-
-        A window is allowed off the side of the screen -- that is what dragging
-        one half out of view is -- so this is not a placement policy and is far
-        wider than any desktop. It is only far enough inside the type that the
-        compositor can add a frame, a border and a corner radius to it without
-        the arithmetic wrapping, because every rectangle it cuts, damages and
-        clips is worked out from this number.
-*/
 #define WINDOW_COORD_MAX (1 << 24)
-
-/*
-        The compositor is asking this window to go away.
-
-        Asking, because it cannot do more: the pages are the program's and the
-        task is the kernel's, and a compositor that could end either would be a
-        compositor that can be told to end any of them. The compositor's close
-        button, Alt-F4 or a middle press on the window's tab sets this and
-        wakes the program; what happens next is the program's, and one that
-        ignores it keeps its window.
-*/
 #define WINDOW_CLOSING 2u
-
-/*
-        Keys reach the window that has focus, through a ring in this page.
-
-        The compositor writes at head and the program reads at tail, so a
-        program that draws every frame reads its input the same way it reads
-        everything else: no call. One side writes head and the other writes
-        tail, and nothing writes both -- so a ring that fills drops what
-        arrived last, because making room for it would mean moving the other
-        side's index.
-*/
 #define WINDOW_KEYS 64
 
-#define WINDOW_KEY_DOWN 1u
-#define WINDOW_KEY_SHIFT 2u
-#define WINDOW_KEY_CONTROL 4u
-#define WINDOW_KEY_ALT 8u
-#define WINDOW_KEY_POINTER 16u
-#define WINDOW_KEY_POINTER_MOVE 32u
-#define WINDOW_KEY_ALTGR 64u
-// A key held down and repeating, and the logo keys, which only the compositor sends.
-#define WINDOW_KEY_REPEAT 128u
-#define WINDOW_KEY_SUPER 256u
-/*
-        A button, a motion or a wheel that a finger on a touch screen made, which only the compositor sends: a program
-        may scroll what a finger drags where a mouse would select. And a release that is no click: the finger that
-        pressed became two fingers or was held for the right button, and what the press would do is not done.
-*/
-#define WINDOW_KEY_TOUCH 512u
-#define WINDOW_KEY_CANCEL 1024u
-/*
-        A finger held still for the right button (a long press): the right button's press and release, and the left
-        release that ends such a press (CANCEL, TOUCH and HOLD together, once the finger lifts). A program may take the
-        long press as its own, as a terminal selects the word under it, where a click would open a menu.
-*/
-#define WINDOW_KEY_HOLD 2048u
-/*
-        A motion that is no step the hand made: a finger's or a pen's lead (the place it was told at, a frame ahead of where it is)
-        taken away at its lift or in a frame with no report, so the window knows where the hand is. It is a place and not a speed: a
-        program that reads the hand's velocity off its moves leaves it out (the kit does, ui_press_track), as the step back it is
-        would read as the hand turning.
-*/
-#define WINDOW_KEY_SETTLE 4096u
-/*
-        An event the compositor did not read from an input device it found to be the machine's own: set in the flags of a KEY, a
-        BUTTON, a MOTION and a WHEEL event unless the compositor itself read the event from a device whose node hangs under a real bus
-        (compositor_input_add: not under /sys/devices/virtual, where uinput and uhid make theirs, a Bluetooth LE keyboard through
-        bluez's uhid among them), so a key a program typed through uinput, the on-screen keyboard's keys, what the Wayland shim
-        injects, the headless -i file and whatever the compositor makes on its own (a lead taken away by a timer) carry it, and an
-        event whose source is not known does too. A PINCH event has no such bit: 0x8000 is its WINDOW_PINCH_END, so a reader tests
-        the event's type first. A setting only the person at the machine may change takes a press without it.
-*/
-#define WINDOW_EVENT_VIRTUAL 0x8000u
+enum
+{
+        WINDOW_KEY_DOWN = 1u, WINDOW_KEY_SHIFT = 2u, WINDOW_KEY_CONTROL = 4u, WINDOW_KEY_ALT = 8u,
+        WINDOW_KEY_POINTER = 16u, WINDOW_KEY_POINTER_MOVE = 32u, WINDOW_KEY_ALTGR = 64u, WINDOW_KEY_REPEAT = 128u,
+        WINDOW_KEY_SUPER = 256u, WINDOW_KEY_TOUCH = 512u, WINDOW_KEY_CANCEL = 1024u, WINDOW_KEY_HOLD = 2048u,
+        WINDOW_KEY_SETTLE = 4096u, WINDOW_EVENT_VIRTUAL = 0x8000u
+};
 
 struct window_key
 {
-        unsigned int code;      // the key itself, as Linux numbers them
-        unsigned int character; // what it means, or zero for a key that means
-                                // nothing on its own
-        unsigned int flags;
-        unsigned int reserved;
+        unsigned int code, character, flags, reserved;
 };
 
-// A window is never resized below this, whatever is dragged.
-#define WINDOW_MIN_WIDTH 96
-#define WINDOW_MIN_HEIGHT 48
-#define WINDOW_LAYER_BACKGROUND (-1) // live wallpapers, kept behind all normal windows and taskbar
-#define WINDOW_LAYER_NORMAL 0        // normal desktop windows
-#define WINDOW_LAYER_ABOVE 1         // always-on-top windows and floating toolbars/popups
-#define WINDOW_LAYER_OVERLAY 2       // overlays (layer-shell overlay, on-screen keyboard, launcher)
-// A window's own least (struct windows' least_width and least_height) is read as at most this, logical pixels.
-#define WINDOW_LEAST_MOST 16384
-
-// How long a title can be, which is the one string that lives in this page
-// rather than in a window's own content.
-#define WINDOW_TITLE_MAX 128
+enum
+{
+        WINDOW_MIN_WIDTH = 96, WINDOW_MIN_HEIGHT = 48, WINDOW_LEAST_MOST = 16384, WINDOW_TITLE_MAX = 128,
+        WINDOW_LAYER_BACKGROUND = -1, WINDOW_LAYER_NORMAL = 0, WINDOW_LAYER_ABOVE = 1, WINDOW_LAYER_OVERLAY = 2
+};
 
 struct window
 {
-        // The program writes these, and the compositor writes x, y and z back
-        // when it is the one that moved them.
-        int x, y, z; // higher is in front, clamped to +/-WINDOW_Z_MAX
-        unsigned int width, height;
-        unsigned int region;  // placement request; no code names it yet
-        unsigned int display; // which output a region is measured against
-        unsigned int style;
-        unsigned int edge;     // corner radius
-        unsigned int sequence; // bump after drawing
+        int x, y, z;
+        unsigned int width, height, region, display, style, edge, sequence;
         char title[WINDOW_TITLE_MAX];
-
-        // The compositor writes these.
-        unsigned int state;         // WINDOW_CLOSING and the rest, as the compositor writes them
-        unsigned int pitch;         // pixels per row of the contents
-        unsigned int max_width;     // what the mapping actually holds
-        unsigned int max_height;
-        unsigned int display_width; // the output this window is on
-        unsigned int display_height;
-        unsigned int awake;         // whether the compositor is watching
-
-        // The window's own bookkeeping: WINDOW_PRIVATE for a page the program holds itself.
-        unsigned int handle;
-
-        /*
-                A window of cells is a ring of lines rather than a grid.
-
-                stride is how far apart two lines are, which starts as wide
-                as the window opens and only grows, when the program asks
-                with window_widen; the mapping has room for lines as wide as
-                the desktop could ever make the window. history is how many
-                lines the ring holds; head is one past the newest. The visible rows are the last of them, so scrolling is
-                a store to head rather than a copy of every row, and what goes
-                past the top is still there to scroll back to.
-
-                lines is where the length of each one lives, as a byte offset
-                into the mapping. A line is as long as it was written, not as
-                wide as the window: the wrapping happens when it is drawn, so
-                a window made wider re-wraps what it already had.
-
-                The program writes head and the lengths; the rest is the
-                compositor's.
-        */
-        unsigned int stride;
-        unsigned int history;
-        unsigned int head;
-        unsigned int lines;
-
-        // The compositor writes head, the program writes tail.
-        unsigned int key_head;
-        unsigned int key_tail;
+        unsigned int state, pitch, max_width, max_height, display_width, display_height, awake, handle;
+        unsigned int stride, history, head, lines, key_head, key_tail;
         struct window_key keys[WINDOW_KEYS];
-
-        // For cells, width includes the scrollbar gutter; columns excludes it.
-        // The grid's shape, and which rows have changed since
-        // the compositor last looked. Rows rather than a rectangle because
-        // that is what text changes.
-        unsigned int columns;
-        unsigned int rows;
-        unsigned int damage_row;
-        unsigned int damage_rows;
-
-        /*
-                The shape the cells are actually laid out in, which the
-                program writes and the compositor composes from.
-
-                columns and rows above are a request: the compositor rounds a
-                resize to whole cells and says so, and until the program has
-                relaid its text the buffer is still in the old shape. Reading
-                it at the new stride during a drag is a row of text taken from
-                the middle of the row before it.
-        */
-        unsigned int grid_columns;
-        unsigned int grid_rows;
-
-        // What the compositor allocated, which is what has to be mapped: a
-        // window of cells is given room for as many as the desktop could hold
-        // so that resizing it has somewhere to grow into.
-        unsigned int max_columns;
-        unsigned int max_rows;
-        unsigned int mapping;
-
-        unsigned int want;
+        unsigned int columns, rows, damage_row, damage_rows, grid_columns, grid_rows, max_columns, max_rows, mapping, want;
 };
 
-static inline void window_damage(struct window *window, unsigned int row,
-                                 unsigned int rows)
+static inline void window_damage(struct window *window, unsigned int row, unsigned int rows)
 {
-        unsigned int last = row + rows;
-        unsigned int previous;
+        unsigned int last = row + rows, previous;
 
         if (!rows)
                 return;
-
-        // A count that runs off the end saturates: wrapping would turn the
-        // widest possible damage into none at all.
         if (last < row)
                 last = ~0u;
-
         if (!window->damage_rows)
         {
-                window->damage_row = row;
-                window->damage_rows = last - row;
+                window->damage_row = row, window->damage_rows = last - row;
                 return;
         }
-
         previous = window->damage_row + window->damage_rows;
-
         if (row < window->damage_row)
                 window->damage_row = row;
-
         if (previous > last)
                 last = previous;
-
         window->damage_rows = last - window->damage_row;
 }
 
-/*
-        A cell, for a window made of text.
-
-        A program that draws with words writes eight bytes a character and the
-        compositor draws the glyph, rather than the program writing the five
-        hundred and twelve bytes of an eight by sixteen cell itself with a font
-        of its own.
-
-        The colours are indices into the two hundred and fifty six an xterm
-        has: the first sixteen are the ones a terminal has always had, and
-        the rest are the cube and the greys. A cell still carries an index
-        rather than a colour, so the compositor can look the colour up once.
-
-        flags is what SGR could not fold into those indices: underline, a
-        faint ink, a hidden glyph. Reverse is applied when the cell is
-        written, not stored.
-
-        It is also what makes scrolling a store to one number: the cells are a
-        ring of lines, and moving on is naming the next one.
-*/
 struct window_cell
 {
         unsigned int character;
-        unsigned char ink;
-        unsigned char paper;
+        unsigned char ink, paper;
         unsigned short flags;
 };
 
-// The colour an index names, as 0xrrggbb.
 static inline unsigned int window_cell_colour(unsigned int index)
 {
         static const unsigned int sixteen[16] = {
-            0x000000, 0xcd0000, 0x00cd00, 0xcdcd00, 0x0000ee, 0xcd00cd, 0x00cdcd,
-            0xe5e5e5, 0x7f7f7f, 0xff0000, 0x00ff00, 0xffff00, 0x5c5cff, 0xff00ff,
-            0x00ffff, 0xffffff,
+            0x000000, 0xcd0000, 0x00cd00, 0xcdcd00, 0x0000ee, 0xcd00cd, 0x00cdcd, 0xe5e5e5,
+            0x7f7f7f, 0xff0000, 0x00ff00, 0xffff00, 0x5c5cff, 0xff00ff, 0x00ffff, 0xffffff,
         };
         static const unsigned char level[6] = {0, 95, 135, 175, 215, 255};
 
         if (index < 16)
                 return sixteen[index];
-
         if (index < 232)
         {
                 index -= 16;
-                return (unsigned int)level[index / 36] << 16 |
-                       (unsigned int)level[index / 6 % 6] << 8 | level[index % 6];
+                return (unsigned int)level[index / 36] << 16 | (unsigned int)level[index / 6 % 6] << 8 | level[index % 6];
         }
-
         return (8 + (index - 232) % 24 * 10) * 0x010101u;
 }
 
-#define WINDOW_CELL_BOLD 1u
-#define WINDOW_CELL_DIM 2u
-#define WINDOW_CELL_ITALIC 4u
-#define WINDOW_CELL_UNDERLINE 8u
-#define WINDOW_CELL_BLINK 16u
-#define WINDOW_CELL_HIDDEN 32u
-#define WINDOW_CELL_STRIKE 64u
+enum
+{
+        WINDOW_CELL_BOLD = 1u, WINDOW_CELL_DIM = 2u, WINDOW_CELL_ITALIC = 4u, WINDOW_CELL_UNDERLINE = 8u,
+        WINDOW_CELL_BLINK = 16u, WINDOW_CELL_HIDDEN = 32u, WINDOW_CELL_STRIKE = 64u, WINDOW_CELL_WIDE = 128u,
+        WINDOW_CELL_WIDE_RIGHT = 256u, WINDOW_CELL_BAR = 512u, WINDOW_CELL_SELECTED = 1024u,
+        WINDOW_CELL_INK_SET = 8192u, WINDOW_CELL_PAPER_SET = 16384u, WINDOW_CELL_SWAP = 32768u,
+        WINDOW_WANT_POINTER = 1u, WINDOW_CELL_W = 8, WINDOW_CELL_H = 16
+};
 
-/* A character two columns wide takes two cells: itself with WINDOW_CELL_WIDE
-   in the first, and again with WINDOW_CELL_WIDE_RIGHT in the second, so what
-   follows it lands in the column the program counted. */
-#define WINDOW_CELL_WIDE 128u
-#define WINDOW_CELL_WIDE_RIGHT 256u
-
-/* A bar down the left edge of the cell: the terminal's cursor when a program
-   has asked for a bar rather than a block. */
-#define WINDOW_CELL_BAR 512u
-
-/* A cell the hand has selected: drawn on the theme's selection colour. Only a frame's copy of the cells has it;
-   the ring never does. */
-#define WINDOW_CELL_SELECTED 1024u
-
-/* The first and the last cell of a touch selection, a frame's copy only: each is drawn with a flat handle on its outer edge. */
-
-/* Which colours a program set. Without INK_SET the ink is the theme's default ink, and without PAPER_SET the paper is the
-   theme's default paper: the index is then not looked at. SWAP is a cell written in reverse video, where the defaults trade
-   places, so an unset ink is the theme's paper. The index means nothing while its bit is clear. */
-#define WINDOW_CELL_INK_SET 8192u
-#define WINDOW_CELL_PAPER_SET 16384u
-#define WINDOW_CELL_SWAP 32768u
-
-/* The program writes this; the compositor reads it. A terminal that has
-   asked for mouse tracking sets WINDOW_WANT_POINTER so clicks, drags and
-   the wheel reach its key ring instead of only moving the desktop. */
-#define WINDOW_WANT_POINTER 1u
-
-#define WINDOW_CELL_W 8
-#define WINDOW_CELL_H 16
-
-/*
-        Contrast, for what is drawn over a ground it does not choose: a scroll
-        bar on a terminal's paper, a tab's title over the windows under it.
-        Not an invert -- the invert of a middle grey is a middle grey, and of
-        a colour a garish other one -- but the other side of the ground's
-        lightness: a ground darker than where black and white stand out from
-        it equally (a relative luminance of 0.179) takes a light ink, and a
-        lighter one a dark ink. The ink keeps a little of the ground's hue,
-        which is what makes it sit on the ground rather than be stuck to it,
-        and is still far from it in lightness. Luminance is worked out on the
-        colour squared, near enough to sRGB's curve to pick a side.
-*/
 // from, moved amount 256ths of the way to to.
 static inline unsigned int window_mix(unsigned int from, unsigned int to, unsigned int amount)
 {
@@ -399,135 +131,45 @@ static inline unsigned int window_contrast(unsigned int ground)
         return window_mix(ground, window_light(ground) ? 0x000000u : 0xffffffu, 216);
 }
 
-#define window_at(window, type, offset)                                       \
-        ((type *)((char *)(window) + (offset)))
+#define window_at(window, type, offset) ((type *)((char *)(window) + (offset)))
 #define window_cells(window) window_at((window), struct window_cell, WINDOW_PIXELS)
+#define window_lengths(window) window_at((window), unsigned int, (window)->lines)
 
-// One line of the ring. Any index at all: it is taken modulo the history, so
-// counting forever is what a caller is meant to do with head.
-static inline struct window_cell *window_line(struct window *window,
-                                              unsigned int index)
+static inline struct window_cell *window_line(struct window *window, unsigned int index)
 {
         return window_cells(window) + (index % window->history) * window->stride;
 }
 
-// How much of each line has been written. Nothing past this is drawn, so a
-// line that shrinks does not leave the rest of what was there on the screen.
-#define window_lengths(window) window_at((window), unsigned int, (window)->lines)
-
-static inline unsigned int *window_length(struct window *window,
-                                          unsigned int index)
+static inline unsigned int *window_length(struct window *window, unsigned int index)
 {
         return window_lengths(window) + index % window->history;
 }
 
-/*
-        A line has been finished and the next one begins.
-
-        The one being moved to is cleared before head names it, so the
-        compositor never draws the line the ring is about to hand back.
-*/
 static inline void window_scroll(struct window *window)
 {
         *window_length(window, window->head) = 0;
-
         __atomic_store_n(&window->head, window->head + 1, __ATOMIC_RELEASE);
 }
 
-// Says the cells are now laid out this way. Until a program calls this the
-// compositor keeps drawing the shape it last confirmed, so a window of cells
-// that never calls it never reflows.
-static inline void window_grid(struct window *window, unsigned int columns,
-                               unsigned int rows)
+static inline void window_grid(struct window *window, unsigned int columns, unsigned int rows)
 {
-        window->grid_columns = columns;
-        window->grid_rows = rows;
+        window->grid_columns = columns, window->grid_rows = rows;
 }
 
-// The next key, or false when there is none waiting.
 static inline int window_key(struct window *window, struct window_key *key)
 {
-        // The entry was written before head was bumped, so head has to be
-        // read before the entry for that order to hold on arm64 and riscv.
         unsigned int head = __atomic_load_n(&window->key_head, __ATOMIC_ACQUIRE);
 
         if (window->key_tail == head)
                 return 0;
-
         *key = window->keys[window->key_tail % WINDOW_KEYS];
-
-        // The slot is only free once it has been read out of.
         __atomic_store_n(&window->key_tail, window->key_tail + 1, __ATOMIC_RELEASE);
-
         return 1;
 }
 
-/*
-        The window table of the compositor that runs in userspace (src/canvas/compositor.c).
-
-        One table, which the compositor makes and every program maps: a
-        column for each field and a row for each window, and the windows'
-        pixels after it. Nothing is sent. Each side writes its own fields of
-        a row and reads the other's, and knocks on a FIFO when it wrote
-        something the other should look at:
-
-                /run/moonwater/windows          the table
-                /run/moonwater/window.N         row N's door: the program
-                                                writes a byte when it has
-                                                drawn or changed something,
-                                                and when the last of its
-                                                ends closes -- it exits or
-                                                dies -- the row is free
-                /run/moonwater/window.N.wake    the compositor writes a byte
-                                                when there is an event, a
-                                                size asked for, the keys
-                                                gone or come, a close asked
-                                                for or a picture taken
-
-        A row is taken by writing a pid where there was none; only the
-        compositor makes one none again, when its door has closed.
-
-        The program writes x and y (where it wants to be, read once, when
-        the window first shows), place to name (where it asks to be put and
-        what it is remembered by, read then too), width and height (its picture's), buffer,
-        frame, the damage, the title, state's WINDOW_MINIMIZED before the
-        first picture, and event_tail. The compositor writes the rest: the
-        output's numbers, focus, x and y from then on, state, want_width
-        and want_height (the size it asks the window to be), shown and
-        event_head. It reads every field a program writes once, into its
-        own copy, and clamps it there.
-
-        A picture is drawn into one of the row's two buffers, the buffer is
-        named, the damage written and frame counted up, and the door is
-        knocked on. The compositor takes it: it reads that buffer from then
-        until the next picture and says so by writing the frame into shown,
-        so the other buffer is the program's to draw into again once shown
-        is the frame it last counted. A buffer is XR24, 0x00rrggbb a pixel,
-        and every row of every buffer is stride pixels long, the output's
-        width, so a window is any size up to the output's and nothing is
-        made again when it changes.
-
-        A window that writes WINDOW_GLASS into its glass column before its
-        first picture is glass: what is under it shows through, blurred, and
-        its buffer is ARGB, 0xaarrggbb premultiplied, so a pixel of 0 is the
-        glass alone and one of alpha 255 the program's colour alone. The
-        glass is tinted toward its own side of lightness, and the compositor
-        writes the colour it came to, on average, into ground and knocks
-        when that changes enough to matter: the colour an ink has to stand
-        out from (window_contrast).
-
-        lift is a count anyone holding the table may add one to and knock
-        for: the window is brought back if it was put away, raised over the
-        others and given the keys, as its tab would. It is how a second
-        start of a program that keeps one window finds the first. moved is
-        the same for a window's place: the placement columns written again
-        and one more, and the window is put where they say now.
-*/
+/* Shared userspace compositor table (/run/moonwater/windows) and per-row doors. */
 #define WINDOWS_TABLE "/run/moonwater/windows"
-// The reasons the GPU's compose refused a present (struct windows gpu_refused, compositor.c's compositor_gpu_why): one slot each, none of them
-// the card drawing it. The names are host.c's, in the same order.
 #define WINDOWS_GPU_REASONS 24
-// The names, in the order of compositor.c's enum compositor_gpu_why (slot 0 is the card drawing it: no refusal, and never said).
 static const string_address windows_gpu_reasons[WINDOWS_GPU_REASONS] = {
     "drawn", "canvas gpu is off", "headless, and not asked for the GPU (-G)", "no card the GPU's kernels are for", "the self-test drew wrong",
     "cooling down after hangs", "a scanout pitch not 16 bytes", "a job given up on may still run",
@@ -535,9 +177,7 @@ static const string_address windows_gpu_reasons[WINDOWS_GPU_REASONS] = {
     "the records or the cover tables are full", "a close button not wholly in its picture", "the scene did not finish", "a turned screen (the processor turned it)",
     "other frames, or empty damage", "a window with alpha and round corners (the file gpu-round-off is there)",
     "a client's own pointer picture drawn into the scene"};
-// The GPU's prerequisites, in the order the path needs them (gpu.c's enum gpu_req, the same order): their names, and what to do about each one, in words.
-// moonwater debug shows them, and the issue board's detail for a failed one, except the driver's and the chip's steps, whose detail is the machine's own words
-// (gpu.c's gpu_req_words: the driver and its node, the chip), which Settings puts in its message.
+
 #define WINDOWS_GPU_REQS 10
 static const string_address windows_gpu_req_names[WINDOWS_GPU_REQS] = {"none", "render node", "driver", "family", "userptr", "context", "ring", "self-test",
                                                                      "udmabuf", "PRIME import"};
@@ -552,24 +192,9 @@ static const string_address windows_gpu_req_fixes[WINDOWS_GPU_REQS] = {
     "/dev/udmabuf would not make a dma-buf of a memfd page: CONFIG_UDMABUF=y, and /dev/udmabuf must open (the card still composes; a refused userptr then has no fallback)",
     "a dma-buf would not import into the render node: the card cannot read a window's memfd (CONFIG_DRM_AMDGPU, with PRIME; the card still composes)"};
 
-/*
-        The issue board: the problems a Settings option has, which any program that holds the table may raise and clear, and which Settings and
-        moonwater debug read. An issue is its key (the words of the option's row, "canvas gpu", NUL-ended), a severity (WINDOWS_ISSUE_WARNING or
-        WINDOWS_ISSUE_ERROR), a code (the message: WINDOWS_ISSUE_* below, which Settings words in the reader's language), two numbers the
-        message formats (a, b) and a detail string, the kernel's own words say, bounded and NUL-ended. Each slot holds its own detail, so the
-        board's memory is fixed and no write allocates. An issue is one key with one code: setting it again updates it in place.
-*/
-#define WINDOWS_ISSUES 32         // the board's slots; a set that finds none free is refused and counted (issue_refused)
-#define WINDOWS_ISSUE_KEY 24      // a key's bytes, its null with them
-#define WINDOWS_ISSUE_DETAIL 192  // a detail's bytes kept, its null with them
-#define WINDOWS_ISSUE_WARNING 1u
-#define WINDOWS_ISSUE_ERROR 2u
-#define WINDOWS_ISSUE_ANY 0u      // windows_issue_clear's code: every issue of the key
-#define WINDOWS_KEY_GPU "canvas gpu"            // the keys, as Settings' rows for the GPU option and the system notices have them
+enum { WINDOWS_ISSUES = 32, WINDOWS_ISSUE_KEY = 24, WINDOWS_ISSUE_DETAIL = 192, WINDOWS_ISSUE_ANY = 0u, WINDOWS_ISSUE_WARNING = 1u, WINDOWS_ISSUE_ERROR = 2u };
+#define WINDOWS_KEY_GPU "canvas gpu"
 #define WINDOWS_KEY_NOTICES "system notices"
-// The kernel's notice classes, each once: its name in WINDOWS_ISSUE_KERNEL_*, the key its issue is filed under and its name for moonwater debug, in the
-// class's index order (its bit in the dismiss mask, its place on the board). The codes, keys, names and Settings' cases are expanded from it; the
-// words that raise a class are kernel_notice_rules'.
 #define WINDOWS_KERNEL_CLASSES(X)                                          \
         X(GPU, WINDOWS_KEY_GPU, "a kernel notice about the GPU")           \
         X(USB, "usb", "a kernel notice about USB")                         \
@@ -579,40 +204,22 @@ static const string_address windows_gpu_req_fixes[WINDOWS_GPU_REQS] = {
         X(STORAGE, "storage", "a kernel notice about storage")             \
         X(SYSTEM, WINDOWS_KEY_NOTICES, "a kernel notice about the system") \
         X(PROGRAM, WINDOWS_KEY_NOTICES, "a program crashed")
-// The messages (Settings words each in the reader's language, the language table's WINDOWS_ISSUE_* ids in ui/ui.c). a and b are the numbers the message
-// formats, and detail is shown after it, copyable. The numbers are per code: see the comment on each.
+
 enum windows_issue_code
 {
-        WINDOWS_ISSUE_NONE,
-        WINDOWS_ISSUE_GPU_MAP,       // the kernel refused to map window pictures for the card: a the step, b the kernel's error number
-        WINDOWS_ISSUE_GPU_REFUSED,   // the card refused presents: a the count, b the reason (WINDOWS_GPU_REASONS' index)
-        WINDOWS_ISSUE_GPU_LISTS,     // the lists are off: the card is not composing in earnest (a and b 0)
-        WINDOWS_ISSUE_GPU_COOLING,   // the card is cooling down after hangs (a the cool-downs in a row)
-        WINDOWS_ISSUE_GPU_UNTRUSTED, // the card's self-test drew wrong (a the family)
-        WINDOWS_ISSUE_GPU_FAMILY,    // this GPU family is not supported (a the family)
-        WINDOWS_ISSUE_GPU_LOST,      // apps lost frames to the processor: a the lost frames, b the frames tried
-        WINDOWS_ISSUE_GPU_SCANOUT,   // the card refused a window's framebuffer for direct scan-out: a the kernel's error number
-        WINDOWS_ISSUE_GPU_USERPTR,   // the kernel was built without userptr for the GPU (CONFIG_DRM_AMDGPU_USERPTR): a the step, b the error
-        WINDOWS_ISSUE_AUDIO_OPEN,    // the audio service could not open the sink: a the error number
-        WINDOWS_ISSUE_AUDIO_RATE,    // the sink refused the sample rate: a the rate
-        WINDOWS_ISSUE_GPU_REQUIRES,  // a prerequisite of the GPU path failed: a the step (gpu.c's enum gpu_req), b the kernel's error; the detail is the fix, or for the driver's
-                                     // and the chip's steps the machine's words (the driver and its node, the chip), which the message says
-        WINDOWS_ISSUE_GPU_FAULT,     // the card faulted reading GPU memory: a the jobs that found a fault; the detail is the fault's text (what the address was in)
-        WINDOWS_ISSUE_GPU_HUNG,      // the card hung twice within a minute: the processor draws the desktop for the rest of the session (no numbers)
-        // The kernel's own notices (the feeder below): a the records of the class seen, b the seconds since the last, the detail the last line.
+        WINDOWS_ISSUE_NONE, WINDOWS_ISSUE_GPU_MAP, WINDOWS_ISSUE_GPU_REFUSED, WINDOWS_ISSUE_GPU_LISTS,
+        WINDOWS_ISSUE_GPU_COOLING, WINDOWS_ISSUE_GPU_UNTRUSTED, WINDOWS_ISSUE_GPU_FAMILY, WINDOWS_ISSUE_GPU_LOST,
+        WINDOWS_ISSUE_GPU_SCANOUT, WINDOWS_ISSUE_GPU_USERPTR, WINDOWS_ISSUE_AUDIO_OPEN, WINDOWS_ISSUE_AUDIO_RATE,
+        WINDOWS_ISSUE_GPU_REQUIRES, WINDOWS_ISSUE_GPU_FAULT, WINDOWS_ISSUE_GPU_HUNG,
 #define WINDOWS_KERNEL_CODE(name, key, text) WINDOWS_ISSUE_KERNEL_##name,
         WINDOWS_KERNEL_CLASSES(WINDOWS_KERNEL_CODE)
 #undef WINDOWS_KERNEL_CODE
-        WINDOWS_ISSUE_RADIO,            // a radio is blocked by rfkill (under wifi or bluetooth): the detail says which switch
-        WINDOWS_ISSUE_NOTIFICATION,     // a program's notification (the session bus, src/dbus): key the program's name, a its id, b how many it has; the detail is its words
-        WINDOWS_ISSUE_COUNT
+        WINDOWS_ISSUE_RADIO, WINDOWS_ISSUE_NOTIFICATION, WINDOWS_ISSUE_COUNT
 };
 typedef char windows_issue_codes_fit[WINDOWS_ISSUE_COUNT <= 256 ? 1 : -1];
-// The classes are the codes before the radio's; the dismiss mask has a bit for each, and a code is a kernel notice's when it is one of them.
 #define KERNEL_NOTICE_CLASSES (WINDOWS_ISSUE_RADIO - WINDOWS_ISSUE_KERNEL_GPU)
 #define KERNEL_NOTICE_ALL ((1u << KERNEL_NOTICE_CLASSES) - 1u)
 #define windows_issue_kernel(code) ((unsigned int)(code) - WINDOWS_ISSUE_KERNEL_GPU < KERNEL_NOTICE_CLASSES)
-// The codes' names, for moonwater debug (the Settings words are the reader's own).
 static const string_address windows_issue_names[WINDOWS_ISSUE_COUNT] = {
         "none", "the kernel refused to map window pictures", "the card refused presents", "the lists are off", "the card is cooling down",
         "the card's self-test drew wrong", "the GPU family is not supported", "apps lost frames to the processor", "the card refused direct scan-out",
@@ -626,83 +233,27 @@ static const string_address windows_issue_names[WINDOWS_ISSUE_COUNT] = {
 struct windows_issue
 {
         char key[WINDOWS_ISSUE_KEY];
-        unsigned int severity, code, a, b;
-        unsigned int used;
+        unsigned int severity, code, a, b, used;
         char detail[WINDOWS_ISSUE_DETAIL];
 };
 
 #define WINDOWS_DOOR "/run/moonwater/window."
-/*      A door is read by the compositor, which runs as root, and the row it
-        names is freed when every writer of the door has closed (the program
-        ended). A door anyone may write is a door anyone may hold open: a
-        process that is not the window's keeps the door's writer count above
-        zero, so the compositor never hears the keeper leave and never frees
-        the row, and thirty-two held rows leave no room for a new window --
-        the desktop denied to the machine by whoever can open the FIFO. The
-        table itself is the compositor's memfd, reached only through
-        /proc/PID/fd of a root process, so no program that is not root (or the
-        compositor's own user) can map it and be a window at all; a door no
-        such program can use is a door it has no business opening. So the door
-        is root's, 0600, as the wake beside it and the keys FIFO (0600) are:
-        the compositor and the programs a desktop session starts open it as
-        root. A design that lets an unprivileged program be a window must hand
-        it the door (and the table) as a descriptor, not leave the FIFO open
-        to the whole machine. */
-/*
-        The rows the table's layout has: every per-row field of struct windows is an array of WINDOWS, in a memfd of no memory but the
-        pages written (its rows past those in use are never touched), and the rows a table has pictures and lists for are its capacity
-        (windows.capacity, at most WINDOWS, what the address space holds of them), of which the rows in use (windows.rows) are made as
-        they are wanted. No count of windows is a cap: the kernel's descriptors, processes and memory are, before these.
-*/
 #define WINDOWS (1u << 20)
-#define WINDOWS_EVENTS 64
-#define WINDOWS_TITLE 32
-#define WINDOWS_APP_ID 64       // a window's app_id, its null with it
-#define WINDOWS_STARTING 4      // the apps being started the table holds at once (the oldest gives way)
-#define WINDOWS_STARTING_NS 30000000000ull // how long an app's task turns at most with no window of it up
-#define WINDOWS_ICON 32         // a window's icon is this many pixels each way
-#define WINDOWS_ICON_MOST 1024u // the largest picture an icon is made from, each way
-// The screens one desktop spans, at most: as many as a card can drive at once, its CRTCs, which the kernel numbers in 32-bit masks (an
-// encoder's possible_crtcs, a plane's possible_crtcs: drm_crtc_init_with_planes refuses a 33rd), where it was 8. And a screen's
-// connector name with its null.
-#define WINDOWS_OUTPUTS 32
-#define WINDOWS_OUTPUT_NAME 16
-#define WINDOWS_OUTPUT_MODEL 16 // the monitor's name from its EDID, the descriptor's 13 bytes and a null
-#define WINDOWS_OUTPUT_HZ 8 // the refresh rates one screen lists at its size, at most
-#define WINDOWS_OUTPUT_SIZES 48 // the sizes one screen lists (width by height, each once), at most
-// The input devices the compositor reads (as many as the kernel has: INPUT_MAX_CHAR_DEVICES, where it was 32), the room of the name it
-// keeps of each, and what it found each to be.
-#define WINDOWS_INPUTS 1024
-// The wheel turns the readout keeps for each input: the last WINDOW_WHEEL_RING that were used, on the device's clock, and whether each
-// was a stream's notch (window_wheel_note). `moonwater debug` reads the ones within WINDOW_WHEEL_SPAN_NS (window_wheel_report).
-#define WINDOW_WHEEL_RING 1024
+#define WINDOWS_STARTING_NS 30000000000ull
 #define WINDOW_WHEEL_SPAN_NS 5000000000ull
-#define WINDOWS_INPUT_NAME 48
-#define WINDOWS_INPUT_KEYBOARD 1u    // taken as a keyboard: it has the letter A
-#define WINDOWS_INPUT_MOUSE 2u       // as a mouse: relative X and Y
-#define WINDOWS_INPUT_TABLET 4u      // as a tablet: absolute X and Y
-#define WINDOWS_INPUT_WAKES 8u       // a power button or a lid, read only to wake
-#define WINDOWS_INPUT_WHEEL 16u      // it has REL_WHEEL
-#define WINDOWS_INPUT_WHEEL_HI 32u   // REL_WHEEL_HI_RES, the wheel in 120ths of a notch
-#define WINDOWS_INPUT_HWHEEL 64u     // REL_HWHEEL
-#define WINDOWS_INPUT_HWHEEL_HI 128u // REL_HWHEEL_HI_RES
-#define WINDOWS_INPUT_BUTTONS 256u   // BTN_LEFT
-#define WINDOWS_INPUT_TOUCH 512u     // BTN_TOUCH
-#define WINDOWS_INPUT_FINGERS 1024u  // BTN_TOOL_FINGER: a touchpad, or a touch screen that counts fingers
-#define WINDOWS_INPUT_SLOTS 2048u    // ABS_MT_POSITION_X: more than one finger at once
-#define WINDOWS_INPUT_POINTER 4096u  // INPUT_PROP_POINTER: it moves a pointer, a touchpad's mark
-#define WINDOWS_INPUT_DIRECT 8192u   // INPUT_PROP_DIRECT: a touch screen or a pen on one
+enum
+{
+        WINDOWS_EVENTS = 64, WINDOWS_TITLE = 32, WINDOWS_APP_ID = 64, WINDOWS_STARTING = 4,
+        WINDOWS_ICON = 32, WINDOWS_ICON_MOST = 1024u, WINDOWS_OUTPUTS = 32, WINDOWS_OUTPUT_NAME = 16,
+        WINDOWS_OUTPUT_MODEL = 16, WINDOWS_OUTPUT_HZ = 8, WINDOWS_OUTPUT_SIZES = 48,
+        WINDOWS_INPUTS = 1024, WINDOW_WHEEL_RING = 1024, WINDOWS_INPUT_NAME = 48,
+        WINDOWS_INPUT_KEYBOARD = 1u, WINDOWS_INPUT_MOUSE = 2u, WINDOWS_INPUT_TABLET = 4u, WINDOWS_INPUT_WAKES = 8u,
+        WINDOWS_INPUT_WHEEL = 16u, WINDOWS_INPUT_WHEEL_HI = 32u, WINDOWS_INPUT_HWHEEL = 64u, WINDOWS_INPUT_HWHEEL_HI = 128u,
+        WINDOWS_INPUT_BUTTONS = 256u, WINDOWS_INPUT_TOUCH = 512u, WINDOWS_INPUT_FINGERS = 1024u, WINDOWS_INPUT_SLOTS = 2048u,
+        WINDOWS_INPUT_POINTER = 4096u, WINDOWS_INPUT_DIRECT = 8192u
+};
 
-/*
-        A game's device, which is the game's to read and no pointer (keys: the EV_KEY bits, EVIOCGBIT's 96 bytes; properties:
-        EVIOCGPROP's first word): a pad or a joystick, which has a button of the joystick or gamepad ranges (BTN_JOYSTICK 0x120 to
-        BTN_THUMBR 0x13e) or a trigger-happy one past them (0x2c0 to 0x2e7) and no mouse button (BTN_LEFT 0x110), touch (BTN_TOUCH
-        0x14a) or pen (BTN_TOOL_PEN 0x140), nor INPUT_PROP_POINTER or DIRECT; and an accelerometer (INPUT_PROP_ACCELEROMETER): a
-        DualSense's, a DualShock 4's, a Joy-Con's or a Steam Deck's motion sensors, or a laptop's. Each has ABS_X and ABS_Y and was
-        taken for a tablet by the compositor, so a stick's tilt or a pad held at an angle put the pointer at that place on the screen,
-        a hundred and more times a second. The compositor does not open one (a pad's reports, up to a thousand a second, wake no turn
-        of it while a game reads them), and a bowl the input grants name is given these and no other (bowl_pad_event).
-*/
+/* Gamepad/joystick/accelerometer check: excluded from compositor pointer input, passed to bowls. */
 static inline int window_input_game(const unsigned char *keys, unsigned int properties)
 {
         int buttons = 0;
@@ -719,739 +270,209 @@ static inline int window_input_game(const unsigned char *keys, unsigned int prop
                !(keys[0x140 / 8] >> (0x140 % 8) & 1);
 }
 
-/*
-        The mode of the table, its memfd and the doors: owner only, 0600.
-
-        The table is one mapping of every window's buffers and input rings:
-        whoever maps it reads any window's picture (the root terminal's among
-        them) and writes any window's event ring, focus and lift. It is a
-        trust boundary, not a public interface, and every program that uses it
-        legitimately -- the compositor and the windows the machine script
-        starts (the terminal, the log, the launcher, the settings) -- is root.
-        A program that is not root (an unprivileged local process, or a bowl
-        program once it runs as a real unprivileged uid) must not be able to
-        open it: it would be a confused deputy over a root shell. The door
-        FIFOs are the same owner, so a knock, too, is the owner's. The one
-        other way in, /dev/spark's WINDOWS_IOCTL_TABLE_GET, is held to
-        CAP_SYS_ADMIN beside this (canvas.c windows_table_get).
-*/
 #define WINDOWS_MODE 0600
-// The doors and their wakes are the table's owner's too.
 #define WINDOWS_DOOR_MODE WINDOWS_MODE
 
-// event_type, with event_flags WINDOW_KEY_*: a key (a is its code, b its character), the pointer at a, b in
-// the window, a button (a its code), the wheel (a in 120ths of a notch, b 1 when it is sideways).
-#define WINDOW_EVENT_KEY 1u
-#define WINDOW_EVENT_MOTION 2u
-#define WINDOW_EVENT_BUTTON 3u
-#define WINDOW_EVENT_WHEEL 4u
-// A wheel event's flag: its a is a trackpad's motion in 120ths of a notch, as a notch's is, but not taken as notches: the region
-// moves one for one with it, at its own scale (ui_wheel_turn), and no glide is put on it.
-#define WINDOW_WHEEL_PRECISE 4096u
-// A precise gesture is over: a touchpad's fingers have all lifted (a is 0). A region in hand lets go now, with the pause rule
-// (ui_scroll_release: a finger still for UI_HAND_GAP_NS before its lift throws nothing), and not after the gap the reports left.
-#define WINDOW_WHEEL_STOP 8192u
-// A precise turn that is a wheel's stream (a notch to every report, within UI_HAND_GAP_NS of the last): the kit takes it as a
-// trackpad's motion (WINDOW_WHEEL_PRECISE), and a Wayland client takes it as the wheel it is (value120), not as a pad's fingers.
-#define WINDOW_WHEEL_STREAM 16384u // shares the bit of WINDOW_PINCH_BEGIN: the event's type says which meaning a flag has
-// The scroll body's switches, as the table's scroll_off holds them (the standard is DRAG alone: natural direction off, momentum and the rubber
-// band on, a mouse's drag of a list on). FLIP: natural direction is on, so a wheel's notch and a pad's motion move the content the other way from the OS's sign, the way
-// the fingers go (ui_wheel_turn, ui_body_track). STOPS: momentum is off, so a release carries no coast (ui_body_let_go). STILL: the rubber
-// band is off, so past an end the content stops there (ui_body_pin, ui_body_drawn). DRAG: `canvas scroll drag` is on, as it is unless a person turns it off, so a mouse's press on
-// a list drags it as a finger's does and its release throws it (ui_press_drags).
-#define WINDOW_SCROLL_FLIP 1u
-#define WINDOW_SCROLL_STOPS 2u
-#define WINDOW_SCROLL_STILL 4u
-#define WINDOW_SCROLL_DRAG 8u
-/*
-        A pinch: two fingers that moved apart or together on a touch screen, or a trackpad's two (the kit's recogniser, ui/ui.c).
-        a is the scale in 1024ths of the span the pinch began from (WINDOW_PINCH_ONE is 1.0), b the focal point, the middle of the
-        two, in the window's own pixels (window_pinch_pack). The flags are WINDOW_PINCH_BEGIN, WINDOW_PINCH_END, or neither for an
-        update. A program that has said it takes pinches (the window pinch_wanted flag) is sent these; any other is sent Ctrl with a wheel of a notch
-        each time the scale has moved a quarter from the last notch sent (the zoom a browser or GTK program takes from a trackpad).
-*/
-#define WINDOW_EVENT_PINCH 6u
-#define WINDOW_PINCH_BEGIN 16384u
-#define WINDOW_PINCH_END 32768u
-#define WINDOW_PINCH_ONE 1024
-static inline int window_pinch_pack(int x, int y)
+enum
 {
-        return (int)((unsigned int)x << 16 | ((unsigned int)y & 0xffffu));
-}
-static inline int window_pinch_x(int b)
+        WINDOW_EVENT_KEY = 1u, WINDOW_EVENT_MOTION = 2u, WINDOW_EVENT_BUTTON = 3u, WINDOW_EVENT_WHEEL = 4u,
+        WINDOW_EVENT_CLIP = 5u, WINDOW_EVENT_PINCH = 6u, WINDOW_EVENT_DRAG = 7u,
+        WINDOW_WHEEL_PRECISE = 4096u, WINDOW_WHEEL_STOP = 8192u, WINDOW_WHEEL_STREAM = 16384u,
+        WINDOW_SCROLL_FLIP = 1u, WINDOW_SCROLL_STOPS = 2u, WINDOW_SCROLL_STILL = 4u, WINDOW_SCROLL_DRAG = 8u,
+        WINDOW_PINCH_BEGIN = 16384u, WINDOW_PINCH_END = 32768u, WINDOW_PINCH_ONE = 1024,
+        WINDOWS_DRAG_ENTER = 1, WINDOWS_DRAG_MOTION, WINDOWS_DRAG_LEAVE, WINDOWS_DRAG_DROP, WINDOWS_DRAG_READY,
+        WINDOWS_DRAG_DONE, WINDOWS_DRAG_ACTION, WINDOWS_DRAG_DECLINED, WINDOWS_DRAG_ENDED,
+        WINDOWS_DRAG_COPY = 1u, WINDOWS_DRAG_MOVE = 2u, WINDOWS_DRAG_ASK = 4u,
+        WINDOWS_DRAG_KIND_SHIFT = 8, WINDOWS_DRAG_ITEMS_SHIFT = 16
+};
+
+static inline int window_pinch_pack(int x, int y) { return (int)((unsigned int)x << 16 | ((unsigned int)y & 0xffffu)); }
+static inline int window_pinch_x(int b) { return (int)(((unsigned int)b >> 16) & 0xffffu); }
+static inline int window_pinch_y(int b) { return (int)((unsigned int)b & 0xffffu); }
+static inline int window_drag_x(int b) { return (int)(short)((unsigned int)b & 0xffffu); }
+static inline int window_drag_y(int b) { return (int)(short)(((unsigned int)b >> 16) & 0xffffu); }
+
+enum
 {
-        return (int)(((unsigned int)b >> 16) & 0xffffu);
-}
-static inline int window_pinch_y(int b)
-{
-        return (int)((unsigned int)b & 0xffffu);
-}
-/*
-        The clipboard's news, a the selection (WINDOWS_CLIP_CLIPBOARD or WINDOWS_CLIP_PRIMARY) and b what happened: another
-        window copied (CHANGED: a window that asked to watch hears it, and is told no text), the paste this window asked
-        for may be read now (READY: windows_clip_read) or may not (REFUSED: it has not the keys, the person did nothing
-        that asks for a paste, there is nothing, or the service is off), the copy it offered was taken (TAKEN: its
-        memfd may be closed) or not (DECLINED: too large, not UTF-8, a NUL in it, not sealed, or the service is off).
-*/
-#define WINDOW_EVENT_CLIP 5u
-
-/*
-        Drag and drop's news (the compositor's one drag, of a Wayland client's, an X client's or a program's: WINDOWS_DRAG_*), a what
-        happened and b its word. Over a program that takes drops (drop_ok): ENTER and MOTION (b where it is, window_drag_x and _y of the
-        window's pixels: the drag's types are the copy at WINDOWS_CLIP_DRAG, windows_drag_types), LEAVE, DROP (the button let go over it
-        with what it took), READY (the type it took may be read, windows_drag_read) and DONE (it is over). To the program whose drag it
-        is: ACTION (b the action it came to, WINDOWS_DRAG_COPY, MOVE or ASK, 0 for none), ENDED (b 1 when the target finished with it, 0
-        for a cancel: Escape, nothing there, the target gone) and DECLINED (its drag was not begun: no button of the person's down on it).
-*/
-#define WINDOW_EVENT_DRAG 7u
-#define WINDOWS_DRAG_ENTER 1
-#define WINDOWS_DRAG_MOTION 2
-#define WINDOWS_DRAG_LEAVE 3
-#define WINDOWS_DRAG_DROP 4
-#define WINDOWS_DRAG_READY 5
-#define WINDOWS_DRAG_DONE 6
-#define WINDOWS_DRAG_ACTION 7
-#define WINDOWS_DRAG_DECLINED 8
-#define WINDOWS_DRAG_ENDED 9
-#define WINDOWS_DRAG_COPY 1u
-#define WINDOWS_DRAG_MOVE 2u
-#define WINDOWS_DRAG_ASK 4u
-#define WINDOWS_DRAG_ITEMS_SHIFT 16 // a drag offer's actions may carry, from this bit up, how many things it drags: its chip says so
-#define WINDOWS_DRAG_KIND_SHIFT 8   // and in the eight bits from this one the first thing's file symbol plus one (UI_FILE_*), its chip's
-
-static inline int window_drag_x(int b)
-{
-        return (int)(short)((unsigned int)b & 0xffffu);
-}
-
-static inline int window_drag_y(int b)
-{
-        return (int)(short)(((unsigned int)b >> 16) & 0xffffu);
-}
-
-/*
-        Where a program asks its window to be put, and the name the window is known by.
-
-        The program writes these into its row before its first picture, and the compositor reads them once with
-        that picture, into its own copy, and clamps them there as it does x and y. place is one of the
-        WINDOW_PLACE_ modes, with WINDOW_PLACE_SCREEN when a screen was named and WINDOW_PLACE_SIZE when a size
-        was; place_x and place_y are where WINDOW_PLACE_AT puts the top left, counted from the top left of the
-        screen; place_screen counts the screens from 0, in the order `moonwater canvas` lists them. A screen
-        that is not there is the first. The room of a screen is the screen less the taskbar along its edge.
-
-        name is what the compositor remembers where the window was put by: lower-case letters, digits and
-        hyphens, a letter or a digit first, and none for a window that is not remembered. Not the title, which
-        a program changes as it runs (a terminal's is its shell's).
-
-        `moonwater window` hands a program its placement in its environment, as MOONWATER_PLACE: the words of
-        the verb, which window_place_parse reads. windows_take reads it into the row it takes and empties it in
-        the program's environment, so the first window a program opens is the one put there and the programs
-        it starts after that are not. A program that is no window of this compositor's (a bowl's, one of
-        Wayland or X) never reads it.
-*/
-#define WINDOW_PLACE_AUTO 0u       // where the program asked, x and y, as it always was
-#define WINDOW_PLACE_CENTER 1u     // in the middle of the screen's room
-#define WINDOW_PLACE_AT 2u         // its top left at place_x, place_y of the screen
-#define WINDOW_PLACE_MAXIMIZED 3u  // filling the screen's room, the taskbar not covered
-#define WINDOW_PLACE_FULLSCREEN 4u // filling the screen, under the taskbar too
-#define WINDOW_PLACE_HOW 7u        // the mode's bits
-#define WINDOW_PLACE_SCREEN 8u
-#define WINDOW_PLACE_SIZE 16u
-// The window has no place of its own (its program, client or X window hard-set none): where it goes is the compositor's, in the
-// middle of the room of the screen under the pointer, or of its owner's window for a dialog (compositor_free_place). Without it
-// x and y are the window's own, kept where they are (inside the screen).
-#define WINDOW_PLACE_FREE 32u
-// The most a number of a placement can be either way: wider than any desktop, and far inside WINDOW_COORD_MAX.
-#define WINDOW_PLACE_MOST 16384
-// The screens a placement can name, from 1 as it is typed.
+        WINDOW_PLACE_AUTO = 0u, WINDOW_PLACE_CENTER = 1u, WINDOW_PLACE_AT = 2u, WINDOW_PLACE_MAXIMIZED = 3u,
+        WINDOW_PLACE_FULLSCREEN = 4u, WINDOW_PLACE_HOW = 7u, WINDOW_PLACE_SCREEN = 8u, WINDOW_PLACE_SIZE = 16u,
+        WINDOW_PLACE_FREE = 32u, WINDOW_PLACE_MOST = 16384, WINDOWS_NAME = 16,
+        WINDOW_PLACE_WORDS = 14u, WINDOW_PLACE_TEXT = 112u, WINDOW_ASKED_ENVIRONMENT = 256
+};
 #define WINDOW_PLACE_SCREENS ((unsigned int)WINDOWS_OUTPUTS)
-// A name, its null included.
-#define WINDOWS_NAME 16
-// The variable, the words a placement has at most, and the room of its text.
 #define WINDOW_PLACE_VARIABLE "MOONWATER_PLACE"
-#define WINDOW_PLACE_WORDS 14u
-#define WINDOW_PLACE_TEXT 112u
-// A launch the user asked for (the launcher, a typed command, a terminal the keys opened) carries this variable as 1,
-// and the first window its program opens takes the keys when it first shows. Any other window shows without them.
 #define WINDOW_ASKED_VARIABLE "MOONWATER_ASKED"
-#define WINDOWS_ASKED_DIR "/run/moonwater/asked" // the person's asks, by pid (windows_asked_record): root's alone, mode 0700
-#define WINDOW_ASKED_ENVIRONMENT 256
+#define WINDOWS_ASKED_DIR "/run/moonwater/asked"
 
-// A placement as it is parsed, and as a row's columns hold it.
 struct window_place
 {
-        unsigned int how; // WINDOW_PLACE_*
+        unsigned int how;
         int x, y;
         unsigned int width, height, screen;
         char name[WINDOWS_NAME];
 };
 
-// glass: the window is frosted glass, its buffer premultiplied ARGB over it.
-#define WINDOW_GLASS 1u
-// The glass column's other bits: the window has no close button (none is drawn over it, none is hit), and a press
-// anywhere but on it asks it to go, as the close button would (the launcher has both). WINDOW_NO_TAB: the window has
-// no tab on the taskbar, as a popup has none (the identify overlays, which are on the screen for a few seconds only).
-#define WINDOW_NO_CLOSE 2u
-#define WINDOW_DISMISS 4u
-#define WINDOW_NO_TAB 8u
-// A window that draws its own frame, as a Wayland client does: the top of its picture is its own (a press there is not the
-// compositor's to take for moving it), which a client moves by asking (xdg_toplevel.move).
-#define WINDOW_NO_GRAB 16u
-// The on-screen keyboard's two (src/canvas/ui/osk.c): WINDOW_NO_KEYS, the window never has the keys, not when it is made nor when a
-// press lands on it (a tap on a key never moves the keys from the field); WINDOW_KEYBOARD, the window's key requests (the table's
-// osk_*) are sent to the window with the keys, but only while a press of the person's is on this window (compositor_osk_read).
-#define WINDOW_NO_KEYS 32u
-#define WINDOW_KEYBOARD 64u
-// A key request the keyboard makes, one ring of WINDOWS_OSK entries a row: the evdev code, the character (0 for none) and the
-// WINDOW_KEY_* flags (DOWN, the modifiers, REPEAT). The program writes at osk_head and knocks; the compositor reads from osk_tail.
-#define WINDOWS_OSK 16
-
-// The pointer's shape over a program's controls, the compositor's CP_ codes (compositor.c checks they agree): the arrow, the
-// default; the I-beam over a text field or a text well; the hand over a button, a tab, a switch or any other control that is pressed;
-// the two arrows across over an edge that the hand takes to make something wider or narrower (a column's).
-#define WINDOW_POINTER_ARROW 0u
-#define WINDOW_POINTER_RESIZE 1u
-#define WINDOW_POINTER_TEXT 5u
-#define WINDOW_POINTER_HAND 8u
-
-// What the compositor did not do of a screen's displays line (struct windows' output_refused): a refresh rate the screen
-// does not offer at its size, which it keeps its mode for; a turn it cannot do, which it is left unturned for; and a place
-// the file does not read (a bad x or y), which it is put at its default for.
-#define WINDOWS_REFUSED_RATE 1u
-#define WINDOWS_REFUSED_TURN 2u
-#define WINDOWS_REFUSED_PLACE 4u
-// A size the displays line asks (mode=WxH) that the screen does not list, or that the card refused: it is at another.
-#define WINDOWS_REFUSED_SIZE 8u
-
-#define WINDOWS_LOOP_SOURCES 10 // the compositor loop's wake sources (metric_loop_by)
-// Why a window's list may not be rendered (window_list_check), each counted apart in the table's list_invalid for moonwater debug.
-#define WINDOW_LIST_VALID 0u      // it may be rendered
-#define WINDOW_LIST_NONE 1u       // no list, or no picture to render it at
-#define WINDOW_LIST_PUBLISHING 2u // a publish is writing its header (an odd generation)
-#define WINDOW_LIST_HEADER 3u     // not the kit's list: its magic, version or lost flag, or its halves, room, count or cover out of bounds
-#define WINDOW_LIST_TORN 4u       // a publish began while it was read
-#define WINDOW_LIST_ROOM_OTHER 5u // a room other than WINDOW_LIST_ROOM
-#define WINDOW_LIST_SIZE 6u       // its picture is not the size the row's picture is taken at
-#define WINDOW_LIST_PITCH 7u      // a pitch narrower than its picture
-#define WINDOW_LIST_DAMAGE 8u     // damage that reaches outside its picture
-#define WINDOW_LIST_REASONS 9u
-#define WINDOWS_COPY_TABLE 0 // a picture laid into the table
-#define WINDOWS_COPY_CARD 1  // a rectangle the card read or copied into it
-#define WINDOWS_COPY_CPU 2   // a rectangle the processor copied into it
-#define WINDOWS_COPY_WHOLE 3 // a picture read in place copied whole, or layers laid into it
+enum
+{
+        WINDOW_GLASS = 1u, WINDOW_NO_CLOSE = 2u, WINDOW_DISMISS = 4u, WINDOW_NO_TAB = 8u,
+        WINDOW_NO_GRAB = 16u, WINDOW_NO_KEYS = 32u, WINDOW_KEYBOARD = 64u, WINDOWS_OSK = 16,
+        WINDOW_POINTER_ARROW = 0u, WINDOW_POINTER_RESIZE = 1u, WINDOW_POINTER_TEXT = 5u, WINDOW_POINTER_HAND = 8u,
+        WINDOWS_REFUSED_RATE = 1u, WINDOWS_REFUSED_TURN = 2u, WINDOWS_REFUSED_PLACE = 4u, WINDOWS_REFUSED_SIZE = 8u,
+        WINDOWS_LOOP_SOURCES = 10,
+        WINDOW_LIST_VALID = 0u, WINDOW_LIST_NONE, WINDOW_LIST_PUBLISHING, WINDOW_LIST_HEADER, WINDOW_LIST_TORN,
+        WINDOW_LIST_ROOM_OTHER, WINDOW_LIST_SIZE, WINDOW_LIST_PITCH, WINDOW_LIST_DAMAGE, WINDOW_LIST_REASONS,
+        WINDOWS_COPY_TABLE = 0, WINDOWS_COPY_CARD, WINDOWS_COPY_CPU, WINDOWS_COPY_WHOLE
+};
 
 struct windows
 {
-        // The output: its pixels, how many of them one drawn pixel is, a frame in nanoseconds.
-        unsigned int output_width, output_height, scale, period;
-        unsigned int stride;   // pixels a row of every buffer
-        unsigned int focus;    // the row with the keys, or WINDOWS
-        // The compositor's: frames the card showed a window straight from its buffer, and why it would not when it
-        // would not (1 no /dev/udmabuf, 2 udmabuf refused the buffer, 3 the card its import, 4 its framebuffer, 5 a flip;
-        // the table is no memfd at 6 memfd_create, 8 its size, 9 its seals, 10 its mode, 11 the link to it).
-        unsigned int scanned, refused;
-        unsigned int refused_error; // the kernel's error (negated) that refused it, 0 when none
-        // Why the top window was not shown straight at the last present: 0 it was; 1 no card; 2 the table is no memfd;
-        // 3 the pointer is drawn in software; 4 no window, or one dragged or resized; 5 it is glass; 6 it is not at the
-        // size it drew; 7 not wholly on the output; 8 too short past its corners and close button; 9 it meets the
-        // tabs; 10 the card has no overlay for it; 11 the card refused its framebuffer (refused says why); 12 the card
-        // refused the overlay's commit; 13 the desktop spans more than one screen, where every frame is composed; 14 a
-        // finger's mark is drawn over it (`moonwater canvas touch on`); 15 a screen is turned (its displays line), so no window is shown straight; 16 the windows'
-        // lists are drawn (list_mode): the card writes the pictures in place, so they are composed and none is shown straight;
-        // 18 it has subsurfaces composed over it (layers); 19 something the desktop draws after the windows (the tabs, the moon's
-        // glow or menu, the snap preview, the grid) meets the overlay's rectangle; 20 it is not opaque where the overlay would show it
-        // (blended over what is under it); 21 the owner's /run/moonwater/planes-off is there; 22 a client's window whose picture is
-        // no dma-buf read in place (copied into the table: the processor composes, or its format is turned; or its shared memory).
-        unsigned int unscanned;
-        // The compositor's card for moonwater debug: its driver's name, whether the pointer is on a plane of its own (1), drawn (0)
-        // or drawn because the plane's probe saw no vblank with it (2, compositor_cursor_probe), and the overlay: 1 found, -1 none or
-        // refused, 0 not yet asked.
+        unsigned int output_width, output_height, scale, period, stride, focus, scanned, refused, refused_error, unscanned;
         char driver[16];
         unsigned int pointer_plane;
         int overlay;
-        unsigned long pixels;  // where row 0's first buffer is, in bytes from the table
-        unsigned long buffer;  // the bytes of one buffer
+        unsigned long pixels, buffer;
 
-        /*
-                The screens the desktop spans, the compositor's. Every x and y of
-                the table is in one space across them, its top left 0, 0 (which
-                the primary screen is not always at). A screen is named by its
-                place in this list, and index 0 is the primary: the taskbar's
-                and where a window opens. The rest follow in the arrangement's
-                order. A screen's connector name (Virtual-1, HDMI-A-1, eDP-1)
-                is what outlives a list that changes, so what is remembered of a
-                screen is remembered by name. layout counts up each time the
-                list changes. output_width and output_height above are the
-                largest a window may be: the largest screen.
-        */
-        unsigned int outputs; // how many below are filled: 1 for one screen
-        unsigned int layout;
+        /* Outputs (index 0 is primary). */
+        unsigned int outputs, layout;
         int output_x[WINDOWS_OUTPUTS], output_y[WINDOWS_OUTPUTS];
         unsigned int output_w[WINDOWS_OUTPUTS], output_h[WINDOWS_OUTPUTS];
-        char output_name[WINDOWS_OUTPUTS][WINDOWS_OUTPUT_NAME];
-        char output_model[WINDOWS_OUTPUTS][WINDOWS_OUTPUT_MODEL]; // the monitor's name from its EDID, "" when it has none
-
-        /*
-                What each screen can be driven at, for the Displays field: output_rates of its refresh rates in Hz,
-                each once, in the order the screen lists them at its size (output_hz); output_now, the rate it is
-                at; and its turn in degrees (0, 90, 180 or 270), with output_software 1 when the turn is done by
-                Canvas and 0 when the card does it, or none is.
-        */
+        char output_name[WINDOWS_OUTPUTS][WINDOWS_OUTPUT_NAME], output_model[WINDOWS_OUTPUTS][WINDOWS_OUTPUT_MODEL];
         unsigned int output_rates[WINDOWS_OUTPUTS], output_now[WINDOWS_OUTPUTS];
         unsigned int output_hz[WINDOWS_OUTPUTS][WINDOWS_OUTPUT_HZ];
         unsigned int output_turn[WINDOWS_OUTPUTS], output_software[WINDOWS_OUTPUTS];
-
-        /*
-                What the displays file asks of each screen, and what the compositor did not do of it: output_asked_hz the
-                refresh rate it asks (0 for the screen's own), output_asked_turn the turn it asks in degrees, and
-                output_refused the WINDOWS_REFUSED_* bits. The settings window says the refusals on the screen's row.
-        */
         unsigned int output_asked_hz[WINDOWS_OUTPUTS], output_asked_turn[WINDOWS_OUTPUTS], output_refused[WINDOWS_OUTPUTS];
-        unsigned int output_asked_scale[WINDOWS_OUTPUTS]; // the scale its displays line asks, in percent (100 when none)
-
-        /*
-                Every size each screen lists, for the Displays page's Resolution: output_sizes of them in output_size (width,
-                height: the panel's, not turned), each once, the most pixels first; output_size_preferred the index of the one
-                the screen marks preferred (its EDID's native size), or output_sizes when it marks none; output_asked_w and
-                output_asked_h the size its displays line asks (mode=WxH), 0 when it asks none. The size it is at is the
-                mode's, output_w and output_h turned back.
-        */
-        unsigned int output_sizes[WINDOWS_OUTPUTS], output_size_preferred[WINDOWS_OUTPUTS];
+        unsigned int output_asked_scale[WINDOWS_OUTPUTS], output_sizes[WINDOWS_OUTPUTS], output_size_preferred[WINDOWS_OUTPUTS];
         unsigned short output_size[WINDOWS_OUTPUTS][WINDOWS_OUTPUT_SIZES][2];
-        unsigned int output_asked_w[WINDOWS_OUTPUTS], output_asked_h[WINDOWS_OUTPUTS];
-        unsigned int output_mode_w[WINDOWS_OUTPUTS], output_mode_h[WINDOWS_OUTPUTS]; // the size of the mode it is at
+        unsigned int output_asked_w[WINDOWS_OUTPUTS], output_asked_h[WINDOWS_OUTPUTS], output_mode_w[WINDOWS_OUTPUTS], output_mode_h[WINDOWS_OUTPUTS];
 
-        /*
-                The compositor's, for moonwater debug: each input device it reads, by its slot, and what became
-                of the wheel. input_number is the device's eventN, or -1 for a slot that holds none; input_name
-                is what the device calls itself, which is whatever bytes it chose, and is shown escaped;
-                input_id its bus, vendor, product and version; input_kinds the WINDOWS_INPUT_* bits. Counted
-                as the events are read: wheel_read the events of its four wheel codes, wheel_used those that
-                turned a wheel (a wheel that reports in 120ths sends its notches twice, and one of the two is
-                not used), dropped the times the kernel said events were lost because they were not read in
-                time; wheel_last when its last wheel event was made, on the monotonic clock. wheel_sent,
-                wheel_nowhere and wheel_full are what became of each turn: sent to a window, turned with no
-                window under the pointer, or refused by a window's ring it had not read; wheel_row, wheel_x
-                and wheel_y are the window the last was sent to and the place in it.
-        */
+        /* Input devices and wheel diagnostics. */
         int input_number[WINDOWS_INPUTS];
         unsigned short input_id[WINDOWS_INPUTS][4];
-        unsigned int input_kinds[WINDOWS_INPUTS];
-        unsigned int input_wheel_read[WINDOWS_INPUTS], input_wheel_used[WINDOWS_INPUTS], input_dropped[WINDOWS_INPUTS];
+        unsigned int input_kinds[WINDOWS_INPUTS], input_wheel_read[WINDOWS_INPUTS], input_wheel_used[WINDOWS_INPUTS], input_dropped[WINDOWS_INPUTS];
         unsigned long input_wheel_last[WINDOWS_INPUTS];
-        unsigned long long wheel_when[WINDOWS_INPUTS][WINDOW_WHEEL_RING]; // the used turns' times, a ring (wheel_turns is the count ever)
-        unsigned char wheel_stream_flag[WINDOWS_INPUTS][WINDOW_WHEEL_RING]; // 1 when that turn was a stream's notch
-        unsigned int wheel_turns[WINDOWS_INPUTS], wheel_streams[WINDOWS_INPUTS]; // the used turns ever, and how many were a stream's
+        unsigned long long wheel_when[WINDOWS_INPUTS][WINDOW_WHEEL_RING];
+        unsigned char wheel_stream_flag[WINDOWS_INPUTS][WINDOW_WHEEL_RING];
+        unsigned int wheel_turns[WINDOWS_INPUTS], wheel_streams[WINDOWS_INPUTS];
         char input_name[WINDOWS_INPUTS][WINDOWS_INPUT_NAME];
         unsigned int wheel_sent, wheel_nowhere, wheel_full;
         int wheel_row, wheel_x, wheel_y;
 
-        /*
-                The compositor's: the theme Canvas's own windows draw in, as `moonwater canvas theme`, `canvas
-                theme accent` and `canvas motion` keep it -- theme 0 light or 1 dark (auto is worked out to one of
-                them by the clock), accent 0xrrggbb, motion 0 full or 1 reduced. themed counts up each time any
-                of them changes, and every window is knocked, so a window takes a new theme without a restart.
-                wheel_off is 1 when `moonwater canvas wheel smooth off` keeps it: a notch of the wheel then moves a whole row
-                at once, with no glide (ui_wheel_turn), and themed counts it too.
-                caret_speed and caret_thick are the caret's blink and width, `canvas caret blink` and `canvas caret thickness`,
-                each as its place plus one: 0 is not kept, and the standard (normal, and 2 px) is what a window draws then.
-        */
-        unsigned int theme, accent, motion, themed;
-        unsigned int wheel_off;
-        // The compositor's: the scroll body's switches, `moonwater canvas scroll` and `canvas trackpad speed` as they are kept. scroll_off
-        // holds WINDOW_SCROLL_FLIP, WINDOW_SCROLL_STOPS, WINDOW_SCROLL_STILL and WINDOW_SCROLL_DRAG (DRAG alone is the standard); scroll_speed is the trackpad's speed
-        // in percent, 25 to 400 (0 is 100). A change counts themed up, as a theme's does.
-        unsigned int scroll_off, scroll_speed;
-        unsigned int caret_speed, caret_thick;
-        // The compositor's: the language the windows Canvas draws itself speak, `moonwater language` as /root/language keeps it,
-        // packed by windows_language_code (0 for English, which "en" is too). A change counts themed up, as a theme's does.
-        unsigned int language;
-        // The compositor's: the text's size in percent, `moonwater canvas text scale` as /root/canvas.text.scale keeps it (50 to 300); 0
-        // when none is kept, which is 100. A change counts themed up, as a theme's does.
-        unsigned int text_scale;
-        // The compositor's: the pace of every transition in percent, `moonwater canvas motion speed` as /root/canvas.motion.speed keeps it
-        // (50 to 200, the standard 115; ui.c's ui_paced). 0 before the compositor has said one, which leaves a window the pace it has. A
-        // change counts themed up, as a theme's does.
-        unsigned int motion_pace;
-        // The compositor's: the times that decide what a hand did, in ms, and the terminal's lines a wheel's notch: `moonwater mouse double
-        // click` (click_ms, 200 to 900, ui.c's ui_click_ns), `canvas touch hold` (hold_ms, 300 to 1500, ui_hold_ns) and `canvas terminal
-        // wheel` (wheel_lines, 1 to 10), as their files keep them. 0 before the compositor has said one, which leaves a window the one it
-        // has (the standard). A change counts themed up, as a theme's does.
-        unsigned int click_ms, hold_ms, wheel_lines;
+        /* Theme, scroll, caret, language, timing preferences. */
+        unsigned int theme, accent, motion, themed, wheel_off, scroll_off, scroll_speed, caret_speed, caret_thick;
+        unsigned int language, text_scale, motion_pace, click_ms, hold_ms, wheel_lines;
 
-        unsigned int pid[WINDOWS];
-        unsigned int state[WINDOWS]; // WINDOW_MINIMIZED, WINDOW_CLOSING
+        /* Per-window columns. */
+        unsigned int pid[WINDOWS], state[WINDOWS];
         int x[WINDOWS], y[WINDOWS];
-        unsigned int width[WINDOWS], height[WINDOWS];
-        unsigned int want_width[WINDOWS], want_height[WINDOWS];
-        unsigned int buffer_index[WINDOWS];
-        unsigned int frame[WINDOWS];
-        unsigned int shown[WINDOWS];
-        // What the last picture changed: a width of 0 is all of it, and a height of 0 none.
+        unsigned int width[WINDOWS], height[WINDOWS], want_width[WINDOWS], want_height[WINDOWS];
+        unsigned int buffer_index[WINDOWS], frame[WINDOWS], shown[WINDOWS];
         int damage_x[WINDOWS], damage_y[WINDOWS], damage_width[WINDOWS], damage_height[WINDOWS];
         char title[WINDOWS][WINDOWS_TITLE];
-        unsigned int glass[WINDOWS];  // the program's: WINDOW_GLASS, WINDOW_NO_CLOSE and WINDOW_DISMISS, read with the first picture
-        // The program's: the shape its pointer wears over its controls (WINDOW_POINTER_*, the arrow when none). The compositor shows it,
-        // and a press on the titlebar at the top of the window is the program's while the pointer is on one of its controls there.
-        unsigned int pointer_shape[WINDOWS];
-        unsigned int asked[WINDOWS];  // the launch's: 1 when the user asked for the program (MOONWATER_ASKED=1 at its start), so its first window takes the keys
-        unsigned int ground[WINDOWS]; // the compositor's: what a glass window's tint came to, 0xrrggbb
-        unsigned int window_scale[WINDOWS]; // the compositor's: the percent the window is drawn at, its screen's (0 until known)
-        unsigned int lift[WINDOWS];   // anyone's: one more raises the window and gives it the keys
-        // The program's, read by the compositor: how many of the window's text fields have the keys (ui.c's ui_field_focus moves
-        // it with each field's focus; the program zeroes it when it starts). The on-screen keyboard shows while the focus's is not 0.
-        unsigned int field[WINDOWS];
-        // The program's, for moonwater debug: the scroll body that moved last in the window (ui.c's ui_body_note), its state (ui.c's
-        // BODY_*), its position and the place it is drawn, in device pixels, and its speed in pixels a second.
-        unsigned int body_state[WINDOWS];
+        unsigned int glass[WINDOWS], pointer_shape[WINDOWS], asked[WINDOWS], ground[WINDOWS], window_scale[WINDOWS];
+        unsigned int lift[WINDOWS], field[WINDOWS], body_state[WINDOWS];
         int body_raw[WINDOWS], body_drawn[WINDOWS], body_speed[WINDOWS];
-        // The compositor's, for moonwater debug: the on-screen keyboard's setting (0 auto, 1 off, 2 on), whether it is shown, the
-        // last input (0 the mouse, 1 a touch or a pen, 2 a key of a physical keyboard) and whether a physical keyboard is plugged in.
-        // osk_start is the decision the desktop starts the keyboard by (`moonwater keyboard start`): 1 when the setting is on, or
-        // auto with a touch screen plugged in or no physical keyboard.
-        unsigned int osk_setting, osk_shown, osk_input, osk_physical, osk_start;
-        // The compositor's: the keyboard layout's name, its two letters packed (us is 'u' | 's' << 8), which the keyboard lays its letters out by.
-        unsigned int osk_layout;
-        // The compositor's: the content purpose of the focus's text field (the protocol's content_purpose values, 0 normal, and 0 for a
-        // window with no field from a Wayland client), and the bottom of its text cursor in the window's pixels (0 for none).
-        unsigned int osk_purpose, osk_caret;
-        // The keyboard's key requests (WINDOWS_OSK entries a row, the program's head and the compositor's tail, see WINDOWS_KEYBOARD).
+        unsigned int osk_setting, osk_shown, osk_input, osk_physical, osk_start, osk_layout, osk_purpose, osk_caret;
         unsigned int osk_head[WINDOWS], osk_tail[WINDOWS];
         int osk_code[WINDOWS][WINDOWS_OSK], osk_character[WINDOWS][WINDOWS_OSK];
-        unsigned int osk_flags[WINDOWS][WINDOWS_OSK];
-        unsigned int hover_off[WINDOWS]; // the program's: 1 when it does not want the pointer's motion over it
-        unsigned int pinch_wanted[WINDOWS]; // the program's: 1 when it takes WINDOW_EVENT_PINCH (the window pinch_wanted flag); 0 sends a pinch as Ctrl and a wheel
-        /*
-                The compositor's, for a window it shows straight from its buffers (scanned out, with no
-                copy): pinned is 1 while it does, and a program then never gives a buffer's pages back,
-                which the card is reading; spoiled is the rectangle of a buffer the compositor wrote the
-                tabs over while it showed it, which the program draws again the next time it draws into
-                that buffer, and clears. A height of 0 is nothing spoiled.
-        */
-        unsigned int pinned[WINDOWS];
+        unsigned int osk_flags[WINDOWS][WINDOWS_OSK], hover_off[WINDOWS], pinch_wanted[WINDOWS], pinned[WINDOWS];
         int spoiled_x[WINDOWS][2], spoiled_y[WINDOWS][2], spoiled_width[WINDOWS][2], spoiled_height[WINDOWS][2];
-
-        // The program's, read with its first picture: where it asks to be put, and its name (WINDOW_PLACE_*).
         unsigned int place[WINDOWS];
         int place_x[WINDOWS], place_y[WINDOWS];
         unsigned int place_width[WINDOWS], place_height[WINDOWS], place_screen[WINDOWS];
         char name[WINDOWS][WINDOWS_NAME];
-        // Anyone's, as lift is: one more puts a window that shows where its placement says now (`window move`).
-        unsigned int moved[WINDOWS];
-        // Anyone's, with a lift: the page a second start asks the window it lifts to show, its number and one (0: none), which the window takes once.
-        unsigned int page[WINDOWS];
-
-        /*
-                The compositor's, for the launcher: where the panel's launcher button was last pressed, so the launcher it
-                asks for opens beside it. button_x, button_y, button_w and button_h are the rectangle it opens beside (the
-                button along the panel, the panel's whole thickness across it) in the table's space, button_edge the panel's
-                edge of its screen (TASKBAR_BOTTOM 0, TOP 1, LEFT 2, RIGHT 3) and button_screen the screen's number. A width
-                of 0 is no press: the launcher is then in the middle of the primary screen, as its key puts it.
-        */
+        unsigned int moved[WINDOWS], page[WINDOWS];
         int button_x, button_y;
         unsigned int button_w, button_h, button_edge, button_screen;
-
         unsigned int event_head[WINDOWS], event_tail[WINDOWS];
         unsigned short event_type[WINDOWS][WINDOWS_EVENTS], event_flags[WINDOWS][WINDOWS_EVENTS];
         int event_a[WINDOWS][WINDOWS_EVENTS], event_b[WINDOWS][WINDOWS_EVENTS];
-        unsigned long long event_when[WINDOWS][WINDOWS_EVENTS]; // the device's stamp of each event (window_event.when), 0 for none
+        unsigned long long event_when[WINDOWS][WINDOWS_EVENTS];
 
-        /*
-                The clipboard, an OS service the compositor holds (.github/SECURITY.md says what it guards). Two
-                selections, CLIPBOARD (copy and paste) and PRIMARY (what was last selected, pasted with the middle
-                button), each a copy of any types (windows_clip_build's format: text among them is UTF-8 with no NUL), as
-                large as the kernel lets a memfd be. A copy is a sealed memfd the copying program makes and names in its row
-                (clip_offer_*), which the compositor opens through /proc/PID/fd and keeps -- no byte is copied, the copy
-                outlives the window, and nothing the program does after can change it -- and a paste is that memfd opened
-                again by the program the compositor lets read it: the window with the keys, right after a key or a button
-                press of its own, and nothing else. A Wayland client's copy and an X client's are read into one of these by
-                the compositor, so every kind of client copies to and pastes from the same two. The compositor's are clip_*:
-                its pid, whether the service is on, each selection's count of changes, size and the row that copied it (-1
-                for none, or the command line).
-        */
-        unsigned int clip_pid, clip_on;
-        unsigned int clip_serial[3];   // [2]: the drag's copy (WINDOWS_CLIP_DRAG), changed each drag
+        /* Clipboard, drag-and-drop, popups. */
+        unsigned int clip_pid, clip_on, clip_serial[3];
         unsigned long clip_length[3];
         int clip_owner[2];
-        // `moonwater clipboard set` (root): its pid and memfd, the selection, a count up, and the compositor's answer.
-        unsigned int cli_pid, cli_fd, cli_which, cli_serial, cli_answer, cli_clear;
-        // The program's: it wants to hear of copies; it offers a memfd for a selection; it asks to paste one.
-        unsigned int clip_watch[WINDOWS];
+        unsigned int cli_pid, cli_fd, cli_which, cli_serial, cli_answer, cli_clear, clip_watch[WINDOWS];
         int clip_offer_fd[WINDOWS];
-        unsigned int clip_offer_which[WINDOWS], clip_offer_serial[WINDOWS];
-        unsigned int clip_ask_which[WINDOWS], clip_ask_serial[WINDOWS];
-        // The compositor's answers: the offer it took (or refused, the serial with WINDOWS_CLIP_NO), the paste it gave (its copy's size).
+        unsigned int clip_offer_which[WINDOWS], clip_offer_serial[WINDOWS], clip_ask_which[WINDOWS], clip_ask_serial[WINDOWS];
         unsigned int clip_offer_answer[WINDOWS], clip_given_serial[WINDOWS];
         unsigned long clip_given_length[WINDOWS];
-
-        /*
-                Drag and drop, a program's side of the compositor's one drag (WINDOW_EVENT_DRAG says how it goes). A drag: a copy of
-                what is dragged (a sealed memfd in windows_clip_build's format) and the actions it allows, offered while the person's
-                button or finger is down on the window (drag_offer_*, windows_drag_offer); the compositor holds the copy at
-                WINDOWS_CLIP_DRAG while the drag is, and any target, a Wayland client's, an X client's or a program's, takes it from
-                there. A drop: a window that takes drops says so (drop_ok), and over it says what it takes of what it is offered
-                (drop_take: the nth name the drag's copy is offered under, -1 for none; the actions it takes and the one it prefers,
-                windows_drop_take), and once READY has read it says it is done (drop_done: 1 it took it, 0 it did not).
-        */
         int drag_offer_fd[WINDOWS];
-        unsigned int drag_offer_actions[WINDOWS], drag_offer_serial[WINDOWS];
-        unsigned int drop_ok[WINDOWS];
+        unsigned int drag_offer_actions[WINDOWS], drag_offer_serial[WINDOWS], drop_ok[WINDOWS];
         int drop_take[WINDOWS];
         unsigned int drop_take_actions[WINDOWS], drop_take_preferred[WINDOWS], drop_take_serial[WINDOWS];
-        unsigned int drop_done[WINDOWS], drop_done_serial[WINDOWS];
-
-        /*
-                A popup: a menu or a list a window opens, which is a row of its own (so it may reach past its window's
-                edges) placed by the compositor against an anchor in its parent and drawn over every window. The
-                program writes popup_parent (the parent's row + 1; 0 is a window), the anchor (a rectangle in the
-                parent's pixels, width and height 0 for a point) and popup_flags before the first picture; the
-                compositor puts it below or right of the anchor, flipped to the other side where the screen holding
-                the anchor ends, gives it the keys while it is open and still shows its parent as the one with them,
-                and asks it to go (WINDOW_CLOSING) at a press outside every popup of the chain, its parent losing the
-                keys or being moved, or its parent going.
-        */
-        unsigned int popup_parent[WINDOWS];
+        unsigned int drop_done[WINDOWS], drop_done_serial[WINDOWS], popup_parent[WINDOWS];
         int popup_x[WINDOWS], popup_y[WINDOWS], popup_w[WINDOWS], popup_h[WINDOWS];
         unsigned int popup_flags[WINDOWS];
 
-        /*
-                The GPU's compose, for moonwater canvas: the presents the compositor composed on the card (gpu_drawn) and on the
-                processor (gpu_processor), and for each reason in WINDOWS_GPU_REASON how many presents the card was refused them
-                (gpu_refused). A present is counted once, as drawn or as the processor's, and a reason counts the presents it
-                refused (a turn the card refused is counted as the processor's turn, the present still the card's).
-        */
-        unsigned int gpu_drawn, gpu_processor;
-        unsigned int gpu_refused[WINDOWS_GPU_REASONS];
-        unsigned int gpu_map_why; // why the last map of a picture for the card was refused (gpu.c's gpu_map_why), 0 for none yet
-        unsigned int gpu_family, gpu_device, gpu_map_probe; // the card's family and device id, and what the probes after a refused map found (gpu.c)
-        char gpu_said[256];                                 // the last lines the kernel's log had about the card when a map was refused, joined with ' | '
-        unsigned int gpu_faults; char gpu_fault[320]; // the jobs that found a page fault in the kernel's log, and the last one's text (gpu.c's gpu_fault, GPU_FAULT_BYTES): "" for none yet
-        unsigned int gpu_map_user, gpu_map_dma; // the maps the card has, by userptr and by the dma-buf route
-        unsigned int gpu_recovered; // the times the card was started again after it lost its state (a reset, a resume)
-        unsigned int gpu_priority, gpu_priority_error; // the card's context: 2 made at high priority, 1 normal after the high one was refused (its errno), 0 not said (gpu.c)
-        // The machine's wakes the compositor heard (compositor_woke), how it heard the last (1 the clocks, 2 the sleep verb's SIGUSR2, 3 both), and the
-        // takes of the screens after them that set every crtc again and that could not (no screen yet, or the card refused: looked at again in 5 s).
-        unsigned int wakes, wake_how, wake_sets, wake_refused;
-        // The frame period the card's vblanks measure, ns (the stamps of two flips over the vblanks between them, eased; 0 before two have landed),
-        // beside period, which is the fastest screen's mode's: moonwater debug says both.
-        unsigned int period_seen;
-        /*
-                Variable refresh (kms.c's compositor_vrr) for moonwater debug: vrr is WINDOWS_VRR_ bits (the screen's connector says it can, the
-                crtc has VRR_ENABLED, it is set on, the card refused setting it) and the policy (canvas vrr: 0 on, 1 games, 2 off) in bits 8
-                and up; vrr_kicks the flips of the screen's own picture made only so a pointer moved on its plane is shown at once, vrr_set_us
-                how long the last setting of VRR_ENABLED took, and flips_async the flips asked asynchronous for a window that allows tearing.
-        */
-        unsigned int vrr, vrr_kicks, vrr_set_us, flips_async;
-        unsigned int gpu_node_pick; // why the render node is the one it is: 1 the display's own device, 2 another device than the display's, 0 no display's bus known
-        char gpu_node_bus[32], gpu_display_bus[32]; // the chosen node's bus and the display's ("pci:..."), "" when not known
-        unsigned int gpu_req_checked, gpu_req_first, gpu_req_error, gpu_req_mask, gpu_req_mode, gpu_req_owner, gpu_req_route, gpu_req_route_error; // the prerequisites (gpu.c's gpu_req): whether they were checked, the first that failed (0 none), its error, the bits that passed, the node's mode and owner
-        char gpu_req_driver[8], gpu_req_node[20];                                                           // the first node's driver name and path
-
-        /*
-                The window lists (window_list_of): WINDOWS lists of list_bytes each, after the pictures, row r's at lists + r * list_bytes from
-                the table's start (lists 0: a table with none). list_mode is 1 when the compositor renders the lists its windows publish, 0 when
-                every window paints its own frames; compositor_lists_set is the only writer. Per row, list_state is the compositor's: 0 the
-                program's frames, 1 rendered from the list, 2 refused (the program paints its next frame, and the compositor clears 2 at that
-                frame). list_seen is the compositor's: the generation of the last list it took. list_refused counts the lists it refused.
-        */
+        /* GPU, VRR, draw lists, Wayland/XWM metrics, issue board. */
+        unsigned int gpu_drawn, gpu_processor, gpu_refused[WINDOWS_GPU_REASONS], gpu_map_why, gpu_family, gpu_device, gpu_map_probe;
+        char gpu_said[256];
+        unsigned int gpu_faults;
+        char gpu_fault[320];
+        unsigned int gpu_map_user, gpu_map_dma, gpu_recovered, gpu_priority, gpu_priority_error;
+        unsigned int wakes, wake_how, wake_sets, wake_refused, period_seen, vrr, vrr_kicks, vrr_set_us, flips_async, gpu_node_pick;
+        char gpu_node_bus[32], gpu_display_bus[32];
+        unsigned int gpu_req_checked, gpu_req_first, gpu_req_error, gpu_req_mask, gpu_req_mode, gpu_req_owner, gpu_req_route, gpu_req_route_error;
+        char gpu_req_driver[8], gpu_req_node[20];
         unsigned long lists, list_bytes;
-        unsigned int list_mode;
-        unsigned int list_state[WINDOWS];
-        unsigned int list_seen[WINDOWS];
-        unsigned int list_refused;
-        unsigned int list_why[16]; // the compositor's: the lists drawn (0) and the lists refused by reason (compositor_list_why), for moonwater debug
-        // The compositor's: the lists window_list_check refused, by its reason (WINDOW_LIST_*), and of the last refused for its size the
-        // list's picture and the size the row's picture was taken at, width then height, for moonwater debug.
-        unsigned int list_invalid[WINDOW_LIST_REASONS];
-        unsigned int list_size_list[2], list_size_taken[2];
-        // The app's: the frames it recorded into its list (list_tried) and, of them, the ones that did not record whole, by cause (enum ui_list_lost).
-        unsigned int list_tried[WINDOWS];
-        unsigned int list_lost[WINDOWS][UI_LOST_COUNT];
-        // The Wayland shim's state, for moonwater debug, written by the compositor on each wake: the shim's ms of the last input it was
-        // given (0 when the shim is off), the idle inhibitors that hold (their surface is shown), the idle notifications that are idle,
-        // the xdg_system_bell rings and toplevel icons set, and per window its content type (wp_content_type), whether its dialog is
-        // modal (xdg-dialog) and whether it has an icon (xdg-toplevel-icon).
+        unsigned int list_mode, list_state[WINDOWS], list_seen[WINDOWS], list_refused, list_why[16];
+        unsigned int list_invalid[WINDOW_LIST_REASONS], list_size_list[2], list_size_taken[2];
+        unsigned int list_tried[WINDOWS], list_lost[WINDOWS][UI_LOST_COUNT];
         unsigned long wl_input_ms;
         unsigned int wl_inhibitors, wl_idled, wl_bells, wl_icons, wl_shortcuts;
         unsigned char wl_content[WINDOWS], wl_modal[WINDOWS], wl_icon[WINDOWS];
-        /*
-                The issue board (windows_issue_set, windows_issues_read): issue_seq is a seqlock, odd while a writer is in the board; issue_lock is
-                the writers' lock (a compare and swap, held for one write); issue_count the slots in use; issue_refused the sets that found no slot
-                free, counted until a slot is freed. A reader takes a copy only when issue_seq was even and the same at both ends of it.
-        */
         unsigned int issue_seq, issue_lock, issue_count, issue_refused;
         struct windows_issue issues[WINDOWS_ISSUES];
-        /*
-                The GPU's state for the board (windows_gpu_wanted, windows_gpu_judge), the compositor's: gpu_on is the canvas gpu setting, gpu_able
-                is whether the lists go to the card (compositor_gpu_able), gpu_state is 0 up, 1 untrusted, 2 no card, 3 cooling down after hangs,
-                and gpu_steps the cool-downs in a row.
-        */
-        unsigned int gpu_on, gpu_able, gpu_state, gpu_steps;
-        // A client's (Wayland) picture: the committed pictures the compositor read where the client's buffer is (client_in_place) and the
-        // ones it copied into the table (client_copied), and the presents the card drew with such a picture in place (client_card).
-        unsigned int client_in_place, client_copied, client_card;
-        // The last refusal of a client's buffer as a scan-out framebuffer (compositor_lent_fb): its fourcc, modifier, pitch, offset, width
-        // and height, the ioctl's errno or a refusal made before the ioctl (-1 a pitch not a multiple of 256, -2 an offset not a multiple of
-        // 256, -3 PRIME_FD_TO_HANDLE refused), and how many times a buffer was refused.
-        unsigned int client_scan_fourcc;
+        unsigned int gpu_on, gpu_able, gpu_state, gpu_steps, client_in_place, client_copied, client_card, client_scan_fourcc;
         unsigned long long client_scan_modifier;
         unsigned int client_scan_pitch, client_scan_offset, client_scan_width, client_scan_height;
         int client_scan_errno;
-        unsigned int client_scan_refused;
-        // The X window manager's refusals and drops, over the session (xwm.c compositor_xwm_counted): 0 a connection refused (every slot taken, or a
-        // peer not let in), 1 a window's record refused (no memory for the table or its index), 2 a MapRequest so refused (the window not mapped),
-        // 3 a connection closed (each compositor_xwm_drop).
-        unsigned int xwm_counts[4];
-        // The card's copy of a commit's damage refused (compositor_wl_card_rect), by reason: 0 small (under COMPOSITOR_WL_CARD_COPY_PIXELS or a
-        // rectangle under 32768 pixels), 1 the card not ready, 2 the card busy (gpu_idle false), 3 a blended picture, 4 a picture that needs a
-        // transform, 5 the pool cut, 6 the card's map or import refused, 7 the blit failed.
-        unsigned int client_card_refused[8];
-        // A client's picture not lent to the card to be composed where the client drew it (compositor_wl_lend), and copied into the table instead,
-        // by reason: 0 no pixels or not the commit's last, 1 a blended (subsurface) picture, 2 placed off the window's corner or no size, 3 needs a
-        // transform (a format other than ARGB or XRGB 8888, a modifier, a turn, a flip, planes, a crop or a scale), 4 an X window's partly damaged
-        // buffer, 5 the processor composes the row (a dma-buf it reads write-combined), 6 larger than a screen or past its buffer, 7 a pitch not
-        // whole pixels, 8 the pool cut under the read, 9 the card refused to map the pool, 10 the card not ready, 11 the dma-buf's import refused.
-        // And the last refused: the shm format, the dma-buf's fourcc (0 for a pool), its modifier and whether it was a dma-buf.
-        unsigned int client_lend_refused[12];
+        unsigned int client_scan_refused, xwm_counts[4], client_card_refused[8], client_lend_refused[12];
         unsigned int client_lend_format, client_lend_fourcc, client_lend_dmabuf;
         unsigned long long client_lend_modifier;
-        // A row whose processor reads a lent dma-buf in place: the rows copied once into the table because the card did not draw two
-        // presents running (client_wc_seeded), and the presents whose processor read a lent dma-buf in place (client_wc_presents).
         unsigned int client_wc_seeded, client_wc_presents;
-        /*
-                The metrics (moonwater debug, and Settings' line under the GPU row), the compositor's: metric_card_* and metric_processor_* are the mean
-                and the worst, in microseconds, of the last WINDOWS_METRIC_RUN presents the card drew and the processor drew (a whole present each);
-                metric_maps the maps the card holds now, metric_map_hits and metric_map_misses the lookups that found a map and that did not;
-                metric_wakes the clock-ramp wakes of the card, metric_jobs its jobs and metric_job_mean the mean of their wait in microseconds;
-                metric_presents and metric_lists are the presents and the list frames drawn in the last second.
-        */
         unsigned int metric_card_mean, metric_card_worst, metric_processor_mean, metric_processor_worst;
         unsigned int metric_maps, metric_map_hits, metric_map_misses, metric_wakes, metric_jobs, metric_job_mean;
-        unsigned int metric_presents, metric_lists;
-        // metric_loops: the compositor's loop turns in the last second, and metric_loop_idle the turns that waited for nothing (a timer already due).
-        unsigned int metric_loops, metric_loop_idle;
-        // metric_loop_by: the same turns a second by what returned events: signals, the watch, inputs, doors, done, card, uevents, clip,
-        // wayland (xwm too), other (WINDOWS_LOOP_SOURCES of them).
-        unsigned int metric_loop_by[WINDOWS_LOOP_SOURCES];
-        // The present's timing in the last second, the compositor's (compositor_metric_publish):
-        unsigned int metric_late;           // the presents made late in their period
-        unsigned int metric_missed;         // of those, the ones whose flip landed a vblank after the one aimed for
-        unsigned int metric_lead;           // the lead in use at the last present, microseconds (0: the old rule)
-        unsigned int metric_present_most;   // the longest the loop spent inside one present, microseconds
-        unsigned int metric_flip_jobs;      // the flips committed while a job of the card's was still running
-        unsigned int metric_flip_jobs_most; // the most jobs in flight at one such flip (0 to 2)
-        // The microseconds in the last second the loop spent inside the card's waits (every job it waited for: a list's render, a client's
-        // copy, a wake).
-        unsigned int metric_waited;
-        // The maps of the compositor's own memory that fell back to userptr, and the errno of the last fallback.
-        unsigned int metric_maps_own_user, metric_maps_own_errno;
-        // The card's jobs since the start, by kind, each with the time the loop waited for the ones it waited for, in nanoseconds:
-        unsigned int metric_gpu_jobs_scene;          // the card's scene jobs, presents and list renders
-        unsigned long long metric_gpu_job_ns_scene;  // the time the loop waited for the waited ones
-        unsigned int metric_gpu_jobs_copy;           // the card's copies of a client's damage
-        unsigned long long metric_gpu_job_ns_copy;   // and the time waited for them
-        unsigned int metric_gpu_jobs_scale;          // its scaling jobs
-        unsigned long long metric_gpu_job_ns_scale;  // and the time waited for them
-        // The card's jobs since the start the loop waited for, and those submitted without a wait; and of the waited ones, the time inside
-        // the submit (the driver's walk of the pages named, and its retries) and the time from there to the job's end, in nanoseconds.
+        unsigned int metric_presents, metric_lists, metric_loops, metric_loop_idle, metric_loop_by[WINDOWS_LOOP_SOURCES];
+        unsigned int metric_late, metric_missed, metric_lead, metric_present_most, metric_flip_jobs, metric_flip_jobs_most;
+        unsigned int metric_waited, metric_maps_own_user, metric_maps_own_errno;
+        unsigned int metric_gpu_jobs_scene;
+        unsigned long long metric_gpu_job_ns_scene;
+        unsigned int metric_gpu_jobs_copy;
+        unsigned long long metric_gpu_job_ns_copy;
+        unsigned int metric_gpu_jobs_scale;
+        unsigned long long metric_gpu_job_ns_scale;
         unsigned int metric_jobs_waited, metric_jobs_unwaited;
         unsigned long long metric_job_submit_ns, metric_job_wait_ns;
-        // The kernel notices dismissed (windows_kernel_dismiss): bit i is class i (WINDOWS_ISSUE_KERNEL_GPU + i). Settings or moonwater sets a bit and
-        // clears the class's issue; the feeder, the one that counts, takes the bit at its next publish and starts the class again from nothing.
-        unsigned int kernel_dismiss;
-        unsigned int client_rects_card, client_rects_cpu; // the damage rectangles copied by the card, and by the processor
-        /*
-                A window's subsurfaces not kept as layers composed from where their client drew them (compositor_wl_row_layers), and laid into the
-                window's picture in the table instead, by reason: 0 the shim made no list of them (one under a root that shows it, more than
-                WAYLAND_LAYERS, a change of scale), 1 the window lands, is glass, or layers are off, 2 the root's picture is the table's (it is asked
-                for again), 3 the root's picture was copied when last handed with them, 4 a layer of another window size, 5 a dma-buf of a row the
-                processor composes, 6 a picture that cannot be gathered (a format other than 8888, a modifier, planes, a source past its buffer), 7
-                an X window's pool, 8 meets a round corner, 9 past its buffer, its pool cut, or the card's map or import refused, 10 more than
-                COMPOSITOR_LAYERS in all, 11 at a present, the window drawn scaled or as glass or no longer read in place. client_layers_laid is
-                how many layers the processor laid into a picture of the table (compositor_wl_layers_put_list); client_layers_gathered the layers
-                turned, flipped, cropped or scaled into a picture of their own, by the card ([0]) and by the processor ([1]).
-        */
-        unsigned int client_layers_refused[12];
-        unsigned int client_layers_laid, client_layers_gathered[2];
-        // The card's presents taken apart, the mean and the worst of the last WINDOWS_METRIC_RUN whose last job's fence said when it signalled (microseconds):
-        // the loop's part, to the jobs handed to the card; the card's, from there to the fence; and from the fence to the loop's turn that saw it; and how many
-        // presents were taken apart since the start.
+        unsigned int kernel_dismiss, client_rects_card, client_rects_cpu, client_layers_refused[12], client_layers_laid, client_layers_gathered[2];
         unsigned int metric_card_hand_mean, metric_card_hand_worst, metric_card_job_mean, metric_card_job_worst, metric_card_seen_mean, metric_card_seen_worst;
-        unsigned int metric_card_split;
-        // The card's clocks held while input arrives (compositor_gpu_clocks): the level input holds (0: none), whether it is held now, the asks of the driver
-        // since the start, the last ask's time in microseconds, and the errno of the last one refused (0: none).
-        unsigned int metric_clocks_level, metric_clocks_held, metric_clocks_asks, metric_clocks_took, metric_clocks_error;
-        // The layers the card laid into a picture of the table (compositor_wl_card_lay), and a client's picture read in place copied whole into
-        // the table (compositor_wl_seed: a window that changed size, a landing, glass, write-combined reads), by the card ([0]) and the processor ([1]).
+        unsigned int metric_card_split, metric_clocks_level, metric_clocks_held, metric_clocks_asks, metric_clocks_took, metric_clocks_error;
         unsigned int client_layers_laid_card, client_seeded[2];
-        // The program's: the least and most size its window can be laid out at, logical pixels at the scale it is drawn at (0: none/unbounded),
-        // and its stacking layer (WINDOW_LAYER_BACKGROUND..WINDOW_LAYER_OVERLAY; 0 is normal). The compositor enforces these directly on
-        // compositor_want, arrangement, resize, and stacking so native, Wayland, X11, and Wine windows share one data-oriented path.
-        unsigned int least_width[WINDOWS], least_height[WINDOWS];
-        unsigned int most_width[WINDOWS], most_height[WINDOWS];
+        unsigned int least_width[WINDOWS], least_height[WINDOWS], most_width[WINDOWS], most_height[WINDOWS];
         signed char layer[WINDOWS];
-        // The compositor's: how many times the window in the row has been asked to go (its close button, Alt-F4, a middle press on its tab), 0
-        // for never and never 0 again once asked. WINDOW_CLOSING in state says only that it has been asked, and stays; this is what says it
-        // was asked again, and a program answers each ask once (windows_close_asked), so one that stayed for unsaved changes is not ended by
-        // the ask it already answered the moment the changes are saved.
         unsigned int close_asks[WINDOWS];
-        /*
-                Who a window is, for the taskbar's tab (its icon, its group) and the launcher: app_id names the program (a kit program's is
-                its name, "settings"; a Wayland client's is its xdg_toplevel app_id, "org.mozilla.firefox"), WINDOWS_APP_ID bytes with a null
-                among them, and icon is its picture, WINDOWS_ICON by WINDOWS_ICON pixels of premultiplied 0xaarrggbb, whole only while icon_seq
-                is even and not 0 (0: the window has none; odd: a writer is in it). They are written by windows_app_id_set and
-                windows_icon_set and by nothing else of ours, by the row's program or by the compositor for a client it holds the row of, and
-                they are a program's words to whoever reads them: windows_app_id_read and windows_icon_read take a copy and hold it to its
-                bounds, a seqlock and a premultiplied pixel, whatever the row says.
-        */
         char app_id[WINDOWS][WINDOWS_APP_ID];
-        /*
-                What the compositor copied of each window's client pictures (the Wayland shim), by kind (WINDOWS_COPY_*): the pictures laid into
-                the table, the damage rectangles the card read into it (a tiled picture's texture-unit read, a straight picture's owed read, a
-                card blit), the ones the processor copied, and the pictures read in place copied whole (seeds) and layers laid into it. A window
-                shown straight from its client's buffers has none of them; moonwater debug says each window's that has any.
-        */
-        unsigned int client_row_copies[WINDOWS][4];
-        unsigned int icon_seq[WINDOWS];
-        unsigned int icon[WINDOWS][WINDOWS_ICON * WINDOWS_ICON];
-        /*
-                The layout's version and the rows in use. abi is WINDOWS_ABI, written by the compositor before anything else of the
-                table is read: a program built against another layout of this struct refuses the table (windows_abi_ok), where it would
-                have read every field at the wrong place. rows is how many rows a program may take now, the high-water of the rows the
-                compositor has made doors for (at most WINDOWS): every walk of the rows goes to it, not to WINDOWS, and a program that
-                finds every row below it taken knocks the grow door for more. Both are last in the struct, so a program of an older
-                layout finds the pixels moved (WINDOWS_HEADER) and refuses the table too.
-        */
-        /*
-                The apps being started: the launcher writes the registry's id of an app it started (and the taskbar of a pinned one it
-                started), with the monotonic clock's time it did, for the taskbar to show the app's task turning until a window of it is
-                up or WINDOWS_STARTING_NS has passed. A slot whose time is 0 is free. Its time is cleared before its word is written and
-                written after (windows_starting_set), so a reader that finds the same time either side of its copy has the word whole
-                (windows_starting_read); a program's words to whoever reads them, as app_id is.
-        */
+        unsigned int client_row_copies[WINDOWS][4], icon_seq[WINDOWS], icon[WINDOWS][WINDOWS_ICON * WINDOWS_ICON];
         char starting[WINDOWS_STARTING][WINDOWS_APP_ID];
         unsigned long long starting_at[WINDOWS_STARTING];
-        unsigned int abi;
-        unsigned int rows;
-        // The rows the pictures and the lists have room for (at most WINDOWS): the pictures are 2 * capacity buffers from WINDOWS_HEADER
-        // and the lists capacity of them from lists, so the table's size is the header's and capacity rows' worth.
-        unsigned int capacity;
+        unsigned int abi, rows, capacity;
 };
 
-#define WINDOWS_ABI 14u // 13 had no most_width/most_height or layer; 12 had no apps being started; 11 had no per-window copy counts; 10 had no variable refresh counts; 9 had no seed counts; 8 had no layer counts; 7 had no drag and drop; 6 held text alone in the clipboard, of 16 MiB at most; 5 was 8 outputs; 4 was 32 inputs; 3 was 32 rows with the lend refusals and no capacity; 2 had no lend refusals; 1 the layout with no abi and no rows
-// The bits of the table's vrr (the rest of the word, from bit 8, is the policy).
-#define WINDOWS_VRR_CAPABLE 1u
-#define WINDOWS_VRR_PROPERTY 2u
-#define WINDOWS_VRR_ON 4u
-#define WINDOWS_VRR_REFUSED 8u
-
-// Whether a table's layout is the one this program was built against.
-static inline int windows_abi_ok(unsigned int abi)
+#define WINDOWS_ABI 14u
+#define WINDOWS_CLIP_NO 0x80000000u
+#define WINDOWS_CLIP_MOST (64ul << 20)
+#define WINDOWS_CLIP_DOOR "/run/moonwater/clip"
+enum
 {
-        return abi == WINDOWS_ABI;
-}
+        WINDOWS_VRR_CAPABLE = 1u, WINDOWS_VRR_PROPERTY = 2u, WINDOWS_VRR_ON = 4u, WINDOWS_VRR_REFUSED = 8u,
+        WINDOWS_CLIP_CLIPBOARD = 0u, WINDOWS_CLIP_PRIMARY = 1u, WINDOWS_CLIP_DRAG = 2u,
+        WINDOWS_CLIP_CHANGED = 1, WINDOWS_CLIP_READY, WINDOWS_CLIP_REFUSED, WINDOWS_CLIP_TAKEN, WINDOWS_CLIP_DECLINED,
+        WINDOWS_CLIP_FD = 900, WINDOW_POPUP_POINT = 1u, WINDOW_POPUP_RIGHT = 2u, WINDOW_POPUP_EXACT = 4u
+};
 
-// The rows the table has pictures and lists for, as it says (at most WINDOWS).
+static inline int windows_abi_ok(unsigned int abi) { return abi == WINDOWS_ABI; }
+
 static inline unsigned int windows_room(const struct windows *table)
 {
         unsigned int room = table ? __atomic_load_n(&table->capacity, __ATOMIC_ACQUIRE) : 0;
@@ -1459,7 +480,6 @@ static inline unsigned int windows_room(const struct windows *table)
         return room < WINDOWS ? room : WINDOWS;
 }
 
-// The rows in use, as the table says (at most its room): what every walk of the rows goes to.
 static inline unsigned int windows_rows(const struct windows *table)
 {
         unsigned int rows = table ? __atomic_load_n(&table->rows, __ATOMIC_ACQUIRE) : 0, room = windows_room(table);
@@ -1467,59 +487,25 @@ static inline unsigned int windows_rows(const struct windows *table)
         return rows < room ? rows : room;
 }
 
-#define WINDOWS_CLIP_CLIPBOARD 0u
-#define WINDOWS_CLIP_PRIMARY 1u
-#define WINDOWS_CLIP_DRAG 2u // the drag's copy, at WINDOWS_CLIP_FD + 2 (no selection: nothing is pasted from it but a drop)
-#define WINDOWS_CLIP_CHANGED 1
-#define WINDOWS_CLIP_READY 2
-#define WINDOWS_CLIP_REFUSED 3
-#define WINDOWS_CLIP_TAKEN 4
-#define WINDOWS_CLIP_DECLINED 5
-#define WINDOWS_CLIP_NO 0x80000000u
-// The most a copy may be that the compositor takes from a program (compositor_clip_open): it is read through on the compositor's loop (windows_clip_valid),
-// so a larger one is declined, as the kit's own copies are above the same 64 MiB (KIT_COPY_MOST).
-#define WINDOWS_CLIP_MOST (64ul << 20)
-// The compositor keeps each selection's memfd at this descriptor and the next: numbers nothing else is given.
-#define WINDOWS_CLIP_FD 900
-#define WINDOWS_CLIP_DOOR "/run/moonwater/clip"
-// popup_flags: the anchor is a point a context menu opens at (else a rectangle a menu drops from: below it, or to its
-// right for a submenu).
-#define WINDOW_POPUP_POINT 1u
-#define WINDOW_POPUP_RIGHT 2u
-// The popup is put with its top left at the anchor point, as asked, with no flipping: its program has worked out the place.
-#define WINDOW_POPUP_EXACT 4u
-
-// Where the pixels start: the compositor's header, a page-rounded struct windows from the table's start. It is a
-// constant here and not the header's pixels field, which any mapper of the table may write.
-/*
-        A wheel turn the compositor used, from input at, on its device's clock, and whether it was a stream's notch (the
-        compositor's stream test, compositor_wheel_stream). The ring keeps the last WINDOW_WHEEL_RING.
-*/
+/* Wheel readout ring & draw-list validation. */
 static void window_wheel_note(struct windows address_to table, unsigned int at, unsigned long long when, int stream)
 {
-        unsigned int slot = table->wheel_turns[at] % WINDOW_WHEEL_RING;
+        unsigned int slot = table->wheel_turns[at]++ % WINDOW_WHEEL_RING;
 
-        table->wheel_when[at][slot] = when;
-        table->wheel_stream_flag[at][slot] = stream != 0;
-        table->wheel_turns[at]++;
+        table->wheel_when[at][slot] = when, table->wheel_stream_flag[at][slot] = stream != 0;
         table->wheel_streams[at] += stream != 0;
 }
 
 struct window_wheel_report
 {
-        unsigned int notches, streams, peak, gaps; // within the span; the stream's among them; the most in any one second; the gaps between them
-        unsigned long long least, median;          // the shortest gap and the median one, in ns (0 with fewer than two)
+        unsigned int notches, streams, peak, gaps;
+        unsigned long long least, median;
 };
 
-/*
-        The readout for one input at now: the turns within WINDOW_WHEEL_SPAN_NS of now (a turn that is later than now is none),
-        how many were a stream's, the most in one second of the span and the gaps between consecutive ones in it. A ring that
-        has wrapped holds the last WINDOW_WHEEL_RING turns only, so a span with more than that is counted over those.
-*/
 static void window_wheel_report(const struct windows address_to table, unsigned int at, unsigned long long now, struct window_wheel_report address_to r)
 {
         static unsigned long long kept[WINDOW_WHEEL_RING], gap[WINDOW_WHEEL_RING];
-        unsigned int turns = table->wheel_turns[at], first = turns > WINDOW_WHEEL_RING ? turns - WINDOW_WHEEL_RING : 0, n = 0, second[5] = {0, 0, 0, 0, 0};
+        unsigned int turns = table->wheel_turns[at], first = turns > WINDOW_WHEEL_RING ? turns - WINDOW_WHEEL_RING : 0, n = 0, second[5] = {0};
 
         memory_zero(r, sizeof(*r));
         for (unsigned int k = first; k < turns; k++)
@@ -1529,9 +515,7 @@ static void window_wheel_report(const struct windows address_to table, unsigned 
 
                 if (when > now || now - when >= WINDOW_WHEEL_SPAN_NS)
                         continue;
-                kept[n++] = when;
-                r->notches++;
-                r->streams += table->wheel_stream_flag[at][slot] != 0;
+                kept[n++] = when, r->notches++, r->streams += table->wheel_stream_flag[at][slot] != 0;
                 second[(now - when) / 1000000000ull]++;
         }
         for (unsigned int k = 0; k < 5; k++)
@@ -1539,7 +523,6 @@ static void window_wheel_report(const struct windows address_to table, unsigned 
         for (unsigned int k = 1; k < n; k++)
                 if (kept[k] >= kept[k - 1])
                         gap[r->gaps++] = kept[k] - kept[k - 1];
-        // The gaps are sorted by insertion: a span's gaps are a few hundred at most.
         for (unsigned int k = 1; k < r->gaps; k++)
         {
                 unsigned long long v = gap[k];
@@ -1554,19 +537,10 @@ static void window_wheel_report(const struct windows address_to table, unsigned 
 }
 
 #define WINDOWS_HEADER ((sizeof(struct windows) + 4095) & ~4095ul)
-// Where the window lists start in a table whose buffers are buffer bytes each: after the header and every row's two buffers.
 #define WINDOWS_LISTS_AT(buffer, rows) (WINDOWS_HEADER + (unsigned long)(buffer) * 2 * (unsigned long)(rows))
-
-/*
-        A window's list (ui/ui.c's format, the GPU's draw list): each row has one, WINDOW_LIST_BYTES after the pictures, memory the
-        pages of which exist only where the program wrote them. WINDOW_LIST_ROOM is the ops a half holds: the kit's recorder and the
-        compositor's reader take the room from the list's header, and both are made with these numbers.
-*/
 #define WINDOW_LIST_BYTES (4ul << 20)
 #define WINDOW_LIST_ROOM 16384u
 
-// Row row's list in the table, as the program and the compositor both reach it, or 0 when the table has none (lists is 0, a list
-// of another size, or a row that is not one).
 static inline unsigned char *window_list_of(const struct windows *table, int row)
 {
         if (!table || !table->lists || table->list_bytes != WINDOW_LIST_BYTES || row < 0 || (unsigned int)row >= windows_room(table))
@@ -1574,14 +548,6 @@ static inline unsigned char *window_list_of(const struct windows *table, int row
         return (unsigned char *)table + table->lists + (unsigned long)row * table->list_bytes;
 }
 
-/*
-        Whether a list (window_list_of's) may be rendered at width by height: the header is the kit's list, read as ui/ui.c reads it
-        (magic, version, a generation even and the same after the read, the halves, the room, the cover bytes inside the list, and no
-        lost flag), its room is WINDOW_LIST_ROOM, its picture is the row's size and its pitch is at least the width, and the damage it
-        names is inside the picture. A list a program wrote is not trusted: each word is read once, by the reader. The ops are read
-        after this, and the reader's ui_draw_list_still says whether they are the generation this answered for. window_list_check
-        answers which test it failed (WINDOW_LIST_*, WINDOW_LIST_VALID for none), with the header's view where it was read.
-*/
 static inline unsigned int window_list_check(unsigned char *list, int width, int height, struct ui_draw_view *view)
 {
         int opened;
@@ -1589,10 +555,8 @@ static inline unsigned int window_list_check(unsigned char *list, int width, int
         if (!list || width <= 0 || height <= 0)
                 return WINDOW_LIST_NONE;
         opened = ui_draw_list_open(list, WINDOW_LIST_BYTES, view);
-        if (opened == 0)
-                return WINDOW_LIST_PUBLISHING;
-        if (opened != 1)
-                return WINDOW_LIST_HEADER;
+        if (opened <= 0)
+                return opened == 0 ? WINDOW_LIST_PUBLISHING : WINDOW_LIST_HEADER;
         if (!ui_draw_list_still(list, view))
                 return WINDOW_LIST_TORN;
         if (view->room != WINDOW_LIST_ROOM)
@@ -1613,139 +577,108 @@ static inline int window_list_valid(unsigned char *list, int width, int height)
         return window_list_check(list, width, height, &view) == WINDOW_LIST_VALID;
 }
 
-/*
-        The issue board's functions (the struct's comment says what the board is). Writers are any holders of the table: a write takes
-        issue_lock for its one change (a bounded wait, so a writer that died in the lock refuses writes and never hangs the others) and
-        brackets it in the seqlock. A reader copies the board, and takes the copy only when the sequence was even and unchanged across the
-        copy; whatever it copied is then checked on its own terms: a count is not trusted (the used slots are counted), each string is ended,
-        a severity that is neither warning nor error is no issue, and a code past the list is kept as a code the reader does not name.
-*/
-#define WINDOWS_ISSUE_SPINS 100000u
-#define WINDOWS_ISSUE_TRIES 16
+/* Issue board (seqlock + bounded spinlock) & GPU/kernel notice diagnostics. */
+enum { WINDOWS_ISSUE_SPINS = 100000u, WINDOWS_ISSUE_TRIES = 16, WINDOWS_METRIC_RUN = 128 };
 
 struct windows_issues
 {
-        unsigned int count, refused; // the used slots, and the sets refused for want of a slot (until one is freed)
+        unsigned int count, refused;
         struct windows_issue issue[WINDOWS_ISSUES];
 };
 
 static int windows_issue_same(const char *a, const char *b)
 {
         for (unsigned int i = 0; i < WINDOWS_ISSUE_KEY; i++)
-        {
-                if (a[i] != b[i])
-                        return 0;
-                if (!a[i])
-                        return 1;
-        }
+                if (a[i] != b[i] || !a[i])
+                        return a[i] == b[i];
         return 1;
 }
 
-static int windows_issue_lock(struct windows *table)
+static unsigned int windows_issue_lock(struct windows *table)
 {
         for (unsigned int spin = 0; spin < WINDOWS_ISSUE_SPINS; spin++)
         {
                 unsigned int empty = 0;
 
                 if (__atomic_compare_exchange_n(&table->issue_lock, &empty, 1u, 0, __ATOMIC_ACQUIRE, __ATOMIC_RELAXED))
-                        return 1;
+                {
+                        unsigned int seq = __atomic_load_n(&table->issue_seq, __ATOMIC_RELAXED) | 1u;
+
+                        __atomic_store_n(&table->issue_seq, seq, __ATOMIC_RELAXED);
+                        __atomic_thread_fence(__ATOMIC_RELEASE);
+                        return seq;
+                }
         }
         return 0;
 }
 
-static unsigned int windows_issue_begin(struct windows *table)
-{
-        unsigned int seq = __atomic_load_n(&table->issue_seq, __ATOMIC_RELAXED) | 1u;
-
-        __atomic_store_n(&table->issue_seq, seq, __ATOMIC_RELAXED);
-        __atomic_thread_fence(__ATOMIC_RELEASE);
-        return seq;
-}
-
-static void windows_issue_end(struct windows *table, unsigned int seq)
+static void windows_issue_unlock(struct windows *table, unsigned int seq)
 {
         __atomic_store_n(&table->issue_seq, seq + 1, __ATOMIC_RELEASE);
         __atomic_store_n(&table->issue_lock, 0u, __ATOMIC_RELEASE);
 }
 
-// Raises an issue, or updates the one with its key and code in place. 1 when it is on the board; 0 when it is not: a key or a severity or a
-// code that is none of ours, a board with no slot free (counted in issue_refused), or a lock a dead writer left held.
 static int windows_issue_set(struct windows *table, const char *key, unsigned int severity, unsigned int code, unsigned int a, unsigned int b,
                              const char *detail)
 {
         int at = -1, empty = -1;
-        struct windows_issue *issue;
         unsigned int seq;
 
-        if (!table || !key || !key[0] || (severity != WINDOWS_ISSUE_WARNING && severity != WINDOWS_ISSUE_ERROR) || code == WINDOWS_ISSUE_NONE ||
-            code >= WINDOWS_ISSUE_COUNT)
-                return 0;
-        if (!windows_issue_lock(table))
+        if (!table || !key || !key[0] || (severity != WINDOWS_ISSUE_WARNING && severity != WINDOWS_ISSUE_ERROR) ||
+            !code || code >= WINDOWS_ISSUE_COUNT || !(seq = windows_issue_lock(table)))
                 return 0;
         for (int i = 0; i < WINDOWS_ISSUES; i++)
-        {
                 if (table->issues[i].used && table->issues[i].code == code && windows_issue_same(table->issues[i].key, key))
                 {
                         at = i;
                         break;
                 }
-                if (!table->issues[i].used && empty < 0)
+                else if (!table->issues[i].used && empty < 0)
                         empty = i;
-        }
         if (at < 0 && empty < 0)
         {
-                seq = windows_issue_begin(table);
                 table->issue_refused++;
-                windows_issue_end(table, seq);
+                windows_issue_unlock(table, seq);
                 return 0;
         }
-        seq = windows_issue_begin(table);
-        issue = &table->issues[at >= 0 ? at : empty];
+        struct windows_issue *issue = &table->issues[at >= 0 ? at : empty];
+
         if (at < 0)
                 issue->used = 1, table->issue_count++;
         string_copy_bounded((string_address)issue->key, (string_address)key, WINDOWS_ISSUE_KEY);
         issue->severity = severity, issue->code = code, issue->a = a, issue->b = b;
         string_copy_bounded((string_address)issue->detail, (string_address)(detail ? detail : ""), WINDOWS_ISSUE_DETAIL);
-        windows_issue_end(table, seq);
+        windows_issue_unlock(table, seq);
         return 1;
 }
 
-// Clears the issues of a key: the one with code, or every one of the key when code is WINDOWS_ISSUE_ANY. The number cleared.
 static unsigned int windows_issue_clear(struct windows *table, const char *key, unsigned int code)
 {
         unsigned int cleared = 0, seq;
 
-        if (!table || !key || !key[0] || !windows_issue_lock(table))
+        if (!table || !key || !key[0] || !(seq = windows_issue_lock(table)))
                 return 0;
-        seq = windows_issue_begin(table);
         for (int i = 0; i < WINDOWS_ISSUES; i++)
                 if (table->issues[i].used && (code == WINDOWS_ISSUE_ANY || table->issues[i].code == code) && windows_issue_same(table->issues[i].key, key))
-                {
-                        memory_zero(&table->issues[i], sizeof(table->issues[i]));
-                        table->issue_count--, cleared++;
-                }
+                        memory_zero(&table->issues[i], sizeof(table->issues[i])), table->issue_count--, cleared++;
         if (table->issue_count < WINDOWS_ISSUES)
                 table->issue_refused = 0;
-        windows_issue_end(table, seq);
+        windows_issue_unlock(table, seq);
         return cleared;
 }
 
-// Copies the board: 1 when the copy is one the writers left whole, 0 when they kept writing through every try (the caller says the board is
-// busy and reads it again later). The copy is sanitized here, whatever the table says of itself.
 static int windows_issues_read(const struct windows *table, struct windows_issues *into)
 {
         for (int tries = 0; table && into && tries < WINDOWS_ISSUE_TRIES; tries++)
         {
-                unsigned int before = __atomic_load_n(&table->issue_seq, __ATOMIC_ACQUIRE), after;
-                unsigned int count = 0;
+                unsigned int before = __atomic_load_n(&table->issue_seq, __ATOMIC_ACQUIRE), count = 0;
 
                 if (before & 1u)
                         continue;
                 memory_copy(into->issue, table->issues, sizeof(table->issues));
                 into->refused = table->issue_refused;
                 __atomic_thread_fence(__ATOMIC_ACQUIRE);
-                after = __atomic_load_n(&table->issue_seq, __ATOMIC_RELAXED);
-                if (before != after)
+                if (before != __atomic_load_n(&table->issue_seq, __ATOMIC_RELAXED))
                         continue;
                 for (int i = 0; i < WINDOWS_ISSUES; i++)
                 {
@@ -1753,11 +686,9 @@ static int windows_issues_read(const struct windows *table, struct windows_issue
 
                         issue->key[WINDOWS_ISSUE_KEY - 1] = 0, issue->detail[WINDOWS_ISSUE_DETAIL - 1] = 0;
                         if (!issue->used || !issue->key[0] || (issue->severity != WINDOWS_ISSUE_WARNING && issue->severity != WINDOWS_ISSUE_ERROR))
-                        {
                                 memory_zero(issue, sizeof(*issue));
-                                continue;
-                        }
-                        count++;
+                        else
+                                count++;
                 }
                 into->count = count;
                 return 1;
@@ -1767,8 +698,6 @@ static int windows_issues_read(const struct windows *table, struct windows_issue
         return 0;
 }
 
-// The lines an expander shows under a key: when open, each issue's message and, when it has a detail that is not the GPU's prerequisite's fix
-// (which the message says), the detail too; none when shut.
 static unsigned int windows_issue_lines(const struct windows_issues *all, const char *key, unsigned int open)
 {
         unsigned int lines = 0;
@@ -1805,22 +734,14 @@ static unsigned int windows_issues_summary(const struct windows_issues *all, uns
         return windows_issues_scan(all, 0, count);
 }
 
-// The metrics' rings: the last samples of a path's presents (nanoseconds), and the mean and the worst of them in microseconds. A rate is a count over
-// the nanoseconds it took, per second.
-#define WINDOWS_METRIC_RUN 128
 static void windows_metric_stats(const unsigned long long *ring, unsigned int count, unsigned int *mean_us, unsigned int *worst_us)
 {
         unsigned long long sum = 0, worst = 0;
 
-        if (count > WINDOWS_METRIC_RUN)
-                count = WINDOWS_METRIC_RUN;
+        count = count > WINDOWS_METRIC_RUN ? WINDOWS_METRIC_RUN : count;
         for (unsigned int i = 0; i < count; i++)
-        {
-                sum += ring[i];
-                worst = ring[i] > worst ? ring[i] : worst;
-        }
-        *mean_us = count ? (unsigned int)(sum / count / 1000) : 0;
-        *worst_us = (unsigned int)(worst / 1000);
+                sum += ring[i], worst = ring[i] > worst ? ring[i] : worst;
+        *mean_us = count ? (unsigned int)(sum / count / 1000) : 0, *worst_us = (unsigned int)(worst / 1000);
 }
 
 static unsigned int windows_metric_rate(unsigned long long count, unsigned long long nanoseconds)
@@ -1828,31 +749,18 @@ static unsigned int windows_metric_rate(unsigned long long count, unsigned long 
         return nanoseconds ? (unsigned int)(count * 1000000000ull / nanoseconds) : 0;
 }
 
-// The codes the GPU raises under its key, in the order the board shows them (windows_gpu_wanted says which hold now).
 static const unsigned int windows_gpu_codes[] = {
         WINDOWS_ISSUE_GPU_USERPTR, WINDOWS_ISSUE_GPU_MAP, WINDOWS_ISSUE_GPU_UNTRUSTED, WINDOWS_ISSUE_GPU_FAMILY, WINDOWS_ISSUE_GPU_COOLING,
         WINDOWS_ISSUE_GPU_REFUSED, WINDOWS_ISSUE_GPU_LISTS, WINDOWS_ISSUE_GPU_LOST, WINDOWS_ISSUE_GPU_SCANOUT,
         WINDOWS_ISSUE_GPU_HUNG, WINDOWS_ISSUE_GPU_FAULT};
 #define WINDOWS_GPU_CODES (sizeof(windows_gpu_codes) / sizeof(windows_gpu_codes[0]))
-// The GPU states (the table's gpu_state, and what Settings' status line says): the card is up, untrusted, not there, or cooling down.
-#define WINDOWS_GPU_UP 0u
-#define WINDOWS_GPU_UNTRUSTED 1u
-#define WINDOWS_GPU_NO_CARD 2u
-#define WINDOWS_GPU_COOLING 3u
-#define WINDOWS_GPU_HUNG 4u // given up for the session after two hangs within a minute (compositor_gpu_job_failed)
-// What Settings says the GPU does: off (the setting), no supported GPU, in use, partly in use, not in use (windows_gpu_judge).
-#define WINDOWS_GPU_STATUS_OFF 0u
-#define WINDOWS_GPU_STATUS_NONE 1u
-#define WINDOWS_GPU_STATUS_IN_USE 2u
-#define WINDOWS_GPU_STATUS_PARTLY 3u
-#define WINDOWS_GPU_STATUS_NOT 4u
-// A refusal reason is shown when it refused at least this many presents and at least one in this many of the presents the card was given.
-#define WINDOWS_GPU_REFUSAL_MIN 8u
-#define WINDOWS_GPU_REFUSAL_SHARE 20u
-// The lost frames worth an issue: this many, and one in ten of the frames tried.
-#define WINDOWS_GPU_LOST_MIN 8u
+enum
+{
+        WINDOWS_GPU_UP = 0u, WINDOWS_GPU_UNTRUSTED, WINDOWS_GPU_NO_CARD, WINDOWS_GPU_COOLING, WINDOWS_GPU_HUNG,
+        WINDOWS_GPU_STATUS_OFF = 0u, WINDOWS_GPU_STATUS_NONE, WINDOWS_GPU_STATUS_IN_USE, WINDOWS_GPU_STATUS_PARTLY, WINDOWS_GPU_STATUS_NOT,
+        WINDOWS_GPU_REFUSAL_MIN = 8u, WINDOWS_GPU_REFUSAL_SHARE = 20u, WINDOWS_GPU_LOST_MIN = 8u
+};
 
-// Whether text has the bytes of word (the reader's own strings are ended, so the search stops at the null).
 static int windows_has_word(const char *text, const char *word)
 {
         for (unsigned int at = 0; text[at]; at++)
@@ -1867,48 +775,53 @@ static int windows_has_word(const char *text, const char *word)
         return 0;
 }
 
-// The issues the GPU has now, from the table (the compositor's counters, which are read here and never written): each is set in want[] with its
-// severity, code, numbers and detail, and the number of them is returned (at most room). A code not in the answer is not raised: the caller clears
-// it. What the GPU is not doing is the answer, when the setting is off: none.
+static void windows_want_push(struct windows_issue *want, unsigned int *count, unsigned int room, unsigned int sev, unsigned int cod, unsigned int x,
+                              unsigned int y, const char *text)
+{
+        if (*count >= room)
+                return;
+        struct windows_issue *w = &want[(*count)++];
+
+        memory_zero(w, sizeof(*w));
+        w->severity = sev, w->code = cod, w->a = x, w->b = y;
+        string_copy_bounded((string_address)w->detail, (string_address)text, WINDOWS_ISSUE_DETAIL);
+}
+
 static unsigned int windows_gpu_wanted(const struct windows *table, struct windows_issue *want, unsigned int room)
 {
         unsigned int count = 0, step, error, total, refused_top = 0, refused_why = 0, tried = 0, lost = 0;
 
         if (!table || !want || !table->gpu_on)
                 return 0;
-        // A new issue is added at the end of the answer, from the board's point of view in the order of the codes it knows.
-        #define WANT(sev, cod, x, y, text) do { if (count < room) { struct windows_issue *w = &want[count++]; memory_zero(w, sizeof(*w)); \
-                w->severity = (sev), w->code = (cod), w->a = (x), w->b = (y); string_copy_bounded((string_address)w->detail, (string_address)(text), WINDOWS_ISSUE_DETAIL); } } while (0)
         step = table->gpu_map_why & 255u, error = table->gpu_map_why >> 8;
-        // A map refused for the card's own sake (9: a picture it reads in this present is held, the processor draws it) is not the kernel's refusal.
-        if (step && step != 9u && (windows_has_word(table->gpu_said, "HMM_MIRROR") || (step == 3 && error == 19)))
-                WANT(WINDOWS_ISSUE_ERROR, WINDOWS_ISSUE_GPU_USERPTR, step, error, table->gpu_said);
-        else if (step && step != 9u)
-                WANT(WINDOWS_ISSUE_ERROR, WINDOWS_ISSUE_GPU_MAP, step, error, table->gpu_said);
+        if (step && step != 9u)
+                windows_want_push(want, &count, room, WINDOWS_ISSUE_ERROR,
+                                  windows_has_word(table->gpu_said, "HMM_MIRROR") || (step == 3 && error == 19)
+                                      ? WINDOWS_ISSUE_GPU_USERPTR : WINDOWS_ISSUE_GPU_MAP,
+                                  step, error, table->gpu_said);
         if (table->gpu_state == WINDOWS_GPU_UNTRUSTED)
-                WANT(WINDOWS_ISSUE_ERROR, WINDOWS_ISSUE_GPU_UNTRUSTED, table->gpu_family, 0, "");
+                windows_want_push(want, &count, room, WINDOWS_ISSUE_ERROR, WINDOWS_ISSUE_GPU_UNTRUSTED, table->gpu_family, 0, "");
         if (table->gpu_state == WINDOWS_GPU_NO_CARD && table->gpu_family)
         {
-                char driver[sizeof(table->gpu_req_driver) + 1]; // the family's driver (amdgpu's and i915's numbers are each their own), ended here whatever the table holds
+                char driver[sizeof(table->gpu_req_driver) + 1];
 
                 memory_copy(driver, table->gpu_req_driver, sizeof(table->gpu_req_driver)), driver[sizeof(table->gpu_req_driver)] = 0;
-                WANT(WINDOWS_ISSUE_WARNING, WINDOWS_ISSUE_GPU_FAMILY, table->gpu_family, 0, driver);
+                windows_want_push(want, &count, room, WINDOWS_ISSUE_WARNING, WINDOWS_ISSUE_GPU_FAMILY, table->gpu_family, 0, driver);
         }
         if (table->gpu_state == WINDOWS_GPU_COOLING)
-                WANT(WINDOWS_ISSUE_WARNING, WINDOWS_ISSUE_GPU_COOLING, table->gpu_steps, 0, "");
+                windows_want_push(want, &count, room, WINDOWS_ISSUE_WARNING, WINDOWS_ISSUE_GPU_COOLING, table->gpu_steps, 0, "");
         if (table->gpu_state == WINDOWS_GPU_HUNG)
-                WANT(WINDOWS_ISSUE_ERROR, WINDOWS_ISSUE_GPU_HUNG, 0, 0, "");
+                windows_want_push(want, &count, room, WINDOWS_ISSUE_ERROR, WINDOWS_ISSUE_GPU_HUNG, 0, 0, "");
         if (table->gpu_fault[0])
-                WANT(WINDOWS_ISSUE_ERROR, WINDOWS_ISSUE_GPU_FAULT, table->gpu_faults, 0, table->gpu_fault);
-        // Skip session-level non-card states (1 OFF, 2 HEADLESS, 3 NO_CARD, 4 UNTRUSTED): those have their own issues and are not per-frame card refusals.
+                windows_want_push(want, &count, room, WINDOWS_ISSUE_ERROR, WINDOWS_ISSUE_GPU_FAULT, table->gpu_faults, 0, table->gpu_fault);
         for (unsigned int why = 5; why < WINDOWS_GPU_REASONS; why++)
                 if (table->gpu_refused[why] > refused_top)
                         refused_top = table->gpu_refused[why], refused_why = why;
         total = table->gpu_drawn + table->gpu_processor;
         if (refused_top >= WINDOWS_GPU_REFUSAL_MIN && refused_top * WINDOWS_GPU_REFUSAL_SHARE >= total && refused_why)
-                WANT(WINDOWS_ISSUE_WARNING, WINDOWS_ISSUE_GPU_REFUSED, refused_top, refused_why, windows_gpu_reasons[refused_why]);
-        if (!table->gpu_able && table->gpu_state == WINDOWS_GPU_UP && table->gpu_drawn + table->gpu_processor > 0)
-                WANT(WINDOWS_ISSUE_WARNING, WINDOWS_ISSUE_GPU_LISTS, 0, 0, "");
+                windows_want_push(want, &count, room, WINDOWS_ISSUE_WARNING, WINDOWS_ISSUE_GPU_REFUSED, refused_top, refused_why, windows_gpu_reasons[refused_why]);
+        if (!table->gpu_able && table->gpu_state == WINDOWS_GPU_UP && total > 0)
+                windows_want_push(want, &count, room, WINDOWS_ISSUE_WARNING, WINDOWS_ISSUE_GPU_LISTS, 0, 0, "");
         for (unsigned int row = 0; row < windows_rows(table); row++)
                 if (table->pid[row] && table->list_tried[row])
                 {
@@ -1917,84 +830,48 @@ static unsigned int windows_gpu_wanted(const struct windows *table, struct windo
                                 lost += table->list_lost[row][why];
                 }
         if (lost >= WINDOWS_GPU_LOST_MIN && lost * 10 >= tried)
-                WANT(WINDOWS_ISSUE_WARNING, WINDOWS_ISSUE_GPU_LOST, lost, tried, "");
+                windows_want_push(want, &count, room, WINDOWS_ISSUE_WARNING, WINDOWS_ISSUE_GPU_LOST, lost, tried, "");
         if (table->refused && table->refused_error)
-                WANT(WINDOWS_ISSUE_WARNING, WINDOWS_ISSUE_GPU_SCANOUT, table->refused_error, 0, "");
-        #undef WANT
+                windows_want_push(want, &count, room, WINDOWS_ISSUE_WARNING, WINDOWS_ISSUE_GPU_SCANOUT, table->refused_error, 0, "");
         return count;
 }
 
-// What Settings' status line says the GPU does, from the table's counters since the last judgement (drawn and processor presents of the
-// last sample): previous is the answer last time, so a share that moves about a threshold does not flap. Fewer than 16 presents keep it.
 static unsigned int windows_gpu_judge(const struct windows *table, unsigned int previous, unsigned int drawn, unsigned int processor)
 {
-        unsigned int total = drawn + processor, share;
+        unsigned int total = drawn + processor, share, hi = previous == WINDOWS_GPU_STATUS_IN_USE ? 65u : 85u;
 
         if (!table->gpu_on)
                 return WINDOWS_GPU_STATUS_OFF;
-        // No card the path takes, a chip with no kernels among them: the processor draws everything, which is what the line says.
         if (table->gpu_state == WINDOWS_GPU_NO_CARD)
                 return WINDOWS_GPU_STATUS_NONE;
         if (total < 16)
                 return previous == WINDOWS_GPU_STATUS_OFF || previous == WINDOWS_GPU_STATUS_NONE ? WINDOWS_GPU_STATUS_NOT : previous;
         share = drawn * 100 / total;
-        if (previous == WINDOWS_GPU_STATUS_IN_USE)
-                return share >= 65 ? WINDOWS_GPU_STATUS_IN_USE : share > 15 ? WINDOWS_GPU_STATUS_PARTLY : WINDOWS_GPU_STATUS_NOT;
-        if (previous == WINDOWS_GPU_STATUS_NOT)
-                return share <= 15 ? WINDOWS_GPU_STATUS_NOT : share >= 85 ? WINDOWS_GPU_STATUS_IN_USE : WINDOWS_GPU_STATUS_PARTLY;
-        return share >= 85 ? WINDOWS_GPU_STATUS_IN_USE : share <= 15 ? WINDOWS_GPU_STATUS_NOT : WINDOWS_GPU_STATUS_PARTLY;
+        return share >= hi ? WINDOWS_GPU_STATUS_IN_USE : share <= 15u ? WINDOWS_GPU_STATUS_NOT : WINDOWS_GPU_STATUS_PARTLY;
 }
 
-/*
-        The kernel's own notices (moonwater's feeder): /dev/kmsg, the kernel's log, read without waiting, each record classified and the classes put on
-        the board. What a record is raised for is what the kernel says of it, in its level (the low three bits of the record's priority field):
-        emergency to error (0 to 3) is the kernel calling it a fault, and it is raised as an error (in the class its words name, else the system's);
-        a warning (4) is raised as a warning when its words name a class and what went wrong in it (a ring that timed out, a device that failed, a
-        temperature that throttled); notice, info and debug (5 to 7) are the kernel saying it is not a fault, and are not raised (a thermal zone
-        registered, a feature left off by default, a device unplugged are lines of that kind). The few lines the kernel says at info when they are
-        faults all the same are the rules of kernel_notice_rules whose level is 7 (a program's crash; a panel i915 gave up). Lines that are not faults at
-        any level, and that the kernel prints on boots of machines that work, are quiet (kernel_notice_quiet), each there for a reason a machine's
-        log showed. A class is one issue on the board with the records of it counted, its worst severity, the seconds since its last record and its
-        last line, sanitized: the text is copied in as plain bytes, a control byte or an escape becomes a blank, and the line is cut to the detail's
-        room. A flood of one class is still one issue, and a warning not seen again for KERNEL_NOTICE_AGE_NS is cleared; an error is kept until it is
-        dismissed.
-*/
+/* Kernel /dev/kmsg notice feeder. */
 #define KMSG_FILE "/dev/kmsg"
-#define KERNEL_NOTICE_MOST 256
-#define KERNEL_NOTICE_LINE 1024
 #define KERNEL_NOTICE_AGE_NS (600ull * 1000000000ull)
+enum { KERNEL_NOTICE_MOST = 256, KERNEL_NOTICE_LINE = 1024 };
 static const char *const kernel_notice_key[KERNEL_NOTICE_CLASSES] = {
 #define WINDOWS_KERNEL_KEY(name, key, text) key,
     WINDOWS_KERNEL_CLASSES(WINDOWS_KERNEL_KEY)
 #undef WINDOWS_KERNEL_KEY
 };
-// The lines the kernel prints on normal boots that are not faults (every one is here for a reason the box's log showed).
 static const char *const kernel_notice_quiet[] = {
-    "LTTPR count is nonzero", // the amdgpu driver's DisplayPort repeater message, every mode set on a machine with no repeater
-    "ACPI BIOS Error",        // firmware's own tables, on most boards
-    "due to previous error",  // ACPI's method aborted after that firmware error: the same fault said a second time (intel2's _SDD, at every boot)
-    "Direct firmware load",   // an optional blob that is not there
-    "[Firmware Bug]",         // the kernel's own label for a board's firmware being wrong, which it works around (a WMI block that is not there, a table's
-                              // entry): the board's maker's to fix and not the user's, on most boards
-    "no codecs found",        // an HD-Audio controller with nothing on its link: a board whose analog sound is a USB card (the box's MSI PRO X670-P has
-                              // 0db0:3130, and says this of 0000:16:00.6 at every boot while the iGPU's HDMI card plays); a machine with no card at all says so in the audio service
-    "RDSEED32 is broken",     // a CPU bug the kernel works around
-    "kauditd_printk_skb",     // audit's count of the messages it suppressed
-    "Moonwater starting",     // the module's own banner, printed at the alert level so a quiet boot still shows it
-    "Spark format unregistered", // its farewell at the same level
-    0};
+    "LTTPR count is nonzero", "ACPI BIOS Error", "due to previous error", "Direct firmware load", "[Firmware Bug]",
+    "no codecs found", "RDSEED32 is broken", "kauditd_printk_skb", "Moonwater starting", "Spark format unregistered", 0};
 
 struct kernel_notices
 {
-        int fd;                                                                  // /dev/kmsg: -1 until it is first read, -2 when it cannot be
-        unsigned int count[KERNEL_NOTICE_CLASSES], severity[KERNEL_NOTICE_CLASSES]; // the records of each class, and its worst severity
-        unsigned long long seen[KERNEL_NOTICE_CLASSES];                         // when its last record was read (monotonic ns), 0 for none
-        char last[KERNEL_NOTICE_CLASSES][WINDOWS_ISSUE_DETAIL];                  // its last line, sanitized
+        int fd;
+        unsigned int count[KERNEL_NOTICE_CLASSES], severity[KERNEL_NOTICE_CLASSES];
+        unsigned long long seen[KERNEL_NOTICE_CLASSES];
+        char last[KERNEL_NOTICE_CLASSES][WINDOWS_ISSUE_DETAIL];
 };
 static struct kernel_notices kernel_notice_state = {.fd = -1};
 
-// Whether text (length bytes, not ended) has any of words (ended): the alternatives, split at a bar, each found where a word of the line starts
-// (after anything that is not a letter), so that "fault" is not in "default" nor "usb" in "xusb".
 static int kernel_notice_has(const char *text, unsigned int length, const char *words)
 {
         for (unsigned int from = 0, to = 0, k; words[from]; from = to + (words[to] == '|'))
@@ -2014,28 +891,18 @@ static int kernel_notice_has(const char *text, unsigned int length, const char *
         return 0;
 }
 
-// What makes a line a class's, asked in this order, the first that holds wins (the system's crashes and a program's segfault come before the drivers').
-// level is the quietest level the rule raises (the highest number): 4 is the kernel's warning, so a line the kernel says at notice, info or debug is
-// no fault of these classes; 7 is for the lines the kernel says at info and that are faults, which are asked at every level. words: one of these
-// alternatives is in the line; needs, when there are some: so is one of these (a line of level 3 or less needs none). severity is the one it is
-// raised at, or 0 for the level's: an error up to level 3, else a warning. A line none holds is the system's error at level 3 or less.
 static const struct { unsigned int code, severity, level; const char *words, *needs; } kernel_notice_rules[] = {
     {WINDOWS_ISSUE_KERNEL_SYSTEM, WINDOWS_ISSUE_ERROR, 4, "Out of memory|oom_kill_process|Killed process|BUG:|Oops|Kernel panic|WARNING: CPU", null},
-    // A program's crash is the kernel's info line, not its fault (x86's show_signal prints it at KERN_INFO): "segfault at", "traps:" (a trap, an invalid opcode).
     {WINDOWS_ISSUE_KERNEL_PROGRAM, WINDOWS_ISSUE_WARNING, 7, "segfault at|traps:", null},
     {WINDOWS_ISSUE_KERNEL_GPU, 0, 4, "amdgpu|drm|i915", "timeout|reset|fault|failed"},
-    // i915 says at info (drm_info) that it has given up a panel whose link it could not read: the screen it was to drive is not driven.
     {WINDOWS_ISSUE_KERNEL_GPU, WINDOWS_ISSUE_WARNING, 7, "i915", "disabling eDP"},
-    {WINDOWS_ISSUE_KERNEL_USB, 0, 4, "xhci|usb", "overrun|failed"}, // a device unplugged ("USB disconnect") is a person's, not a fault
+    {WINDOWS_ISSUE_KERNEL_USB, 0, 4, "xhci|usb", "overrun|failed"},
     {WINDOWS_ISSUE_KERNEL_WIFI, 0, 4, "iwlwifi|ath1|ath9|mt76|mt79|brcm|cfg80211", "firmware|timeout|error"},
     {WINDOWS_ISSUE_KERNEL_BLUETOOTH, 0, 4, "Bluetooth:", "failed|error"},
     {WINDOWS_ISSUE_KERNEL_AUDIO, 0, 4, "snd_|hda", "no codecs|error|failed"},
     {WINDOWS_ISSUE_KERNEL_STORAGE, 0, 4, "nvme|ext4|btrfs|xfs|mmc|FAT-fs|I/O error|Buffer I/O", "I/O error|Buffer I/O|not properly unmounted|error|timeout"},
     {WINDOWS_ISSUE_KERNEL_SYSTEM, 0, 4, "thermal|throttl|Hardware Error|mce:|EDAC", null}};
 
-// The class of a line of the kernel's log at level, and the severity it is raised at (WINDOWS_ISSUE_*), or 0 when it is not raised: quiet lines,
-// a level of 5 or more but for the rules of level 7, and a level of 4 without the words that make a class of its own. Written as the table of the
-// real lines of the machines' logs it is checked against.
 static unsigned int kernel_notice_class(const char *text, unsigned int length, unsigned int level, unsigned int *severity)
 {
         *severity = 0;
@@ -2052,18 +919,14 @@ static unsigned int kernel_notice_class(const char *text, unsigned int length, u
         return level <= 3 ? (*severity = WINDOWS_ISSUE_ERROR, WINDOWS_ISSUE_KERNEL_SYSTEM) : 0;
 }
 
-// One record of /dev/kmsg: "priority,sequence,time,flags;message", the message ended by a newline (the lines after it, which begin with a blank,
-// are not read). Its level is the priority's low three bits. 0 when the record is not one.
 static int kernel_notice_parse(const char *record, unsigned int length, unsigned int *level, const char **message, unsigned int *message_length)
 {
         unsigned int at = 0, priority = 0, start, stop;
 
         while (at < length && record[at] >= '0' && record[at] <= '9')
         {
-                priority = priority * 10 + (unsigned int)(record[at] - '0');
-                if (priority > 100000u)
+                if ((priority = priority * 10 + (unsigned int)(record[at++] - '0')) > 100000u)
                         return 0;
-                at++;
         }
         if (!at || at >= length || record[at] != ',')
                 return 0;
@@ -2078,7 +941,6 @@ static int kernel_notice_parse(const char *record, unsigned int length, unsigned
         return 1;
 }
 
-// The kernel's words, copied in as plain text: a control byte or an escape is a blank, and the copy stops at the room (ended).
 static void kernel_notice_sanitize(char *into, unsigned int room, const char *text, unsigned int length)
 {
         unsigned int at = 0;
@@ -2092,18 +954,13 @@ static void kernel_notice_sanitize(char *into, unsigned int room, const char *te
         into[at] = 0;
 }
 
-// Counts one record of the kernel's log under its class, when it is raised: 1 when it was, 0 when it is none (a bad record, quiet, or a level
-// nothing raises).
 static int kernel_notices_record(struct kernel_notices *k, const char *record, unsigned int length, unsigned long long now)
 {
-        unsigned int level = 0, severity = 0, message_length = 0, code;
+        unsigned int level = 0, severity = 0, message_length = 0, code, idx;
         const char *message = null;
-        unsigned int idx;
 
-        if (!kernel_notice_parse(record, length, &level, &message, &message_length))
-                return 0;
-        code = kernel_notice_class(message, message_length, level, &severity);
-        if (!code)
+        if (!kernel_notice_parse(record, length, &level, &message, &message_length) ||
+            !(code = kernel_notice_class(message, message_length, level, &severity)))
                 return 0;
         idx = code - WINDOWS_ISSUE_KERNEL_GPU;
         if (k->count[idx] < 0xffffffffu)
@@ -2115,27 +972,21 @@ static int kernel_notices_record(struct kernel_notices *k, const char *record, u
         return 1;
 }
 
-// Puts the classes on the board: a class with records is set (its count, its worst severity, the seconds since its last record, its last line),
-// and one whose warning has not come again for KERNEL_NOTICE_AGE_NS is cleared and its count started again. An error stays until it is dismissed.
 static void kernel_notices_publish(struct windows *table, struct kernel_notices *k, unsigned long long now)
 {
         for (unsigned int idx = 0; idx < KERNEL_NOTICE_CLASSES; idx++)
         {
                 unsigned int code = WINDOWS_ISSUE_KERNEL_GPU + idx;
 
-                // A class dismissed by its reader starts again from nothing, and its bit is taken.
                 if (table && (__atomic_load_n(&table->kernel_dismiss, __ATOMIC_ACQUIRE) >> idx & 1u))
-                {
-                        k->count[idx] = 0, k->severity[idx] = 0;
-                        __atomic_and_fetch(&table->kernel_dismiss, ~(1u << idx), __ATOMIC_RELEASE);
-                }
+                        k->count[idx] = k->severity[idx] = 0, __atomic_and_fetch(&table->kernel_dismiss, ~(1u << idx), __ATOMIC_RELEASE);
                 if (!k->count[idx])
                         continue;
                 if (k->severity[idx] == WINDOWS_ISSUE_WARNING && k->seen[idx] && now - k->seen[idx] > KERNEL_NOTICE_AGE_NS)
                 {
                         if (table)
                                 windows_issue_clear(table, kernel_notice_key[idx], code);
-                        k->count[idx] = 0, k->severity[idx] = 0;
+                        k->count[idx] = k->severity[idx] = 0;
                         continue;
                 }
                 if (table)
@@ -2145,11 +996,6 @@ static void kernel_notices_publish(struct windows *table, struct kernel_notices 
 }
 
 
-/*
-        A language's code as the table carries it: its two or three lower case letters (an ISO 639 code), the first in
-        the low byte, or 0 when the word is none of that. Here because the command, the compositor and every window
-        read the same word.
-*/
 static unsigned int windows_language_code(const char *word, unsigned int length)
 {
         unsigned int code = 0;
@@ -2165,31 +1011,16 @@ static unsigned int windows_language_code(const char *word, unsigned int length)
         return code;
 }
 
-/*
-        The arrangement of the screens, which the compositor lays them by and
-        `moonwater canvas arrange` keeps (/root/canvas.arrange): words, each
-        a screen's connector name alone (laid to the right of the ones
-        before it, tops level), NAME@X,Y (at that place) or NAME@off (dark),
-        in the order they are laid, the first the primary; screens no word
-        names follow in the card's order; default alone is the card's order.
-        Here because the command and the compositor both judge the words.
-*/
-// A word of the arrangement, as long as length: whether it is one, NAME, NAME@X,Y or NAME@off, with the name's length
-// and what it says. A name is letters, digits and dashes, as a connector's is.
-#define WINDOWS_PLACE_FLOW 0
-#define WINDOWS_PLACE_AT 1
-#define WINDOWS_PLACE_OFF 2
-#define WINDOWS_PLACE_MOST 32768
+/* Output arrangement, displays file, and software rotation. */
+enum { WINDOWS_PLACE_FLOW = 0, WINDOWS_PLACE_AT = 1, WINDOWS_PLACE_OFF = 2, WINDOWS_PLACE_MOST = 32768 };
 
-// Appends length bytes of text to into at *at, bounded by room with its NUL; 0 when it does not fit.
 static int windows_buf_put(char *into, unsigned int room, unsigned int *at, const char *text, unsigned int length)
 {
         if (room < *at || room - *at <= length)
                 return 0;
-        for (unsigned int each = 0; each < length; each++)
-                into[*at + each] = text[each];
-        *at += length;
-        into[*at] = 0;
+        if (length)
+                memory_copy(into + *at, text, length);
+        *at += length, into[*at] = 0;
         return 1;
 }
 
@@ -2198,7 +1029,6 @@ static int windows_buf_str(char *into, unsigned int room, unsigned int *at, cons
         return windows_buf_put(into, room, at, text, (unsigned int)string_length((const_string)text));
 }
 
-// Appends value in decimal (a minus first when negative) to into at *at.
 static int windows_buf_num(char *into, unsigned int room, unsigned int *at, long value)
 {
         char digits[24];
@@ -2216,7 +1046,11 @@ static int windows_buf_num(char *into, unsigned int room, unsigned int *at, long
         return 1;
 }
 
-// Formats "<pre><num><post>" into out (room bytes, always NUL-terminated when room > 0).
+static int windows_buf_kv(char *into, unsigned int room, unsigned int *at, const char *key, long value)
+{
+        return windows_buf_str(into, room, at, key) && windows_buf_num(into, room, at, value);
+}
+
 static void windows_num_path(char *out, unsigned int room, const char *pre, unsigned long num, const char *post)
 {
         unsigned int at = 0;
@@ -2231,7 +1065,6 @@ static void windows_num_path(char *out, unsigned int room, const char *pre, unsi
                 windows_buf_str(out, room, &at, post);
 }
 
-// Formats "<pre><a><mid><b>" into out (room bytes, always NUL-terminated when room > 0).
 static void windows_num2_path(char *out, unsigned int room, const char *pre, unsigned long a, const char *mid, unsigned long b)
 {
         unsigned int at = 0;
@@ -2247,8 +1080,6 @@ static void windows_num2_path(char *out, unsigned int room, const char *pre, uns
         windows_buf_num(out, room, &at, (long)b);
 }
 
-// Parses a bounded decimal integer from length bytes at word into *into.
-// When strict_zero is set, leading zeros ("01") and "-0" are rejected.
 static int windows_scan_int(const char *word, unsigned int length, int low, int high, unsigned int max_digits, int strict_zero, int *into)
 {
         unsigned int at = 0, digits = 0;
@@ -2277,35 +1108,25 @@ static int windows_scan_int(const char *word, unsigned int length, int low, int 
 static int windows_arrange_word(const char *word, unsigned int length, unsigned int *name, int *how, int *x, int *y)
 {
         unsigned int at = 0, comma;
+        const char *hit;
 
-        while (at < length && ((unsigned int)((word[at] | 32) - 'a') < 26u || (word[at] >= '0' && word[at] <= '9') ||
-                               word[at] == '-'))
+        while (at < length && ((unsigned int)((word[at] | 32) - 'a') < 26u || (word[at] >= '0' && word[at] <= '9') || word[at] == '-'))
                 at++;
-        *name = at;
-        *how = WINDOWS_PLACE_FLOW;
-        *x = *y = 0;
+        *name = at, *how = WINDOWS_PLACE_FLOW, *x = *y = 0;
         if (!at || at >= WINDOWS_OUTPUT_NAME)
                 return 0;
         if (at == length)
                 return 1;
         if (word[at++] != '@')
                 return 0;
-        if (length - at == 3 && word[at] == 'o' && word[at + 1] == 'f' && word[at + 2] == 'f')
-        {
-                *how = WINDOWS_PLACE_OFF;
-                return 1;
-        }
-        {
-                const char *hit = (const char *)memory_first_of(word + at, ',', length - at);
-
-                comma = hit ? (unsigned int)(hit - word) : length;
-        }
-        if (comma == length ||
-            !windows_scan_int(word + at, comma - at, -WINDOWS_PLACE_MOST, WINDOWS_PLACE_MOST, 6, 0, x) ||
+        if (length - at == 3 && !memory_compare(word + at, "off", 3))
+                return *how = WINDOWS_PLACE_OFF, 1;
+        hit = (const char *)memory_first_of(word + at, ',', length - at);
+        comma = hit ? (unsigned int)(hit - word) : length;
+        if (comma == length || !windows_scan_int(word + at, comma - at, -WINDOWS_PLACE_MOST, WINDOWS_PLACE_MOST, 6, 0, x) ||
             !windows_scan_int(word + comma + 1, length - comma - 1, -WINDOWS_PLACE_MOST, WINDOWS_PLACE_MOST, 6, 0, y))
                 return 0;
-        *how = WINDOWS_PLACE_AT;
-        return 1;
+        return *how = WINDOWS_PLACE_AT, 1;
 }
 
 static int windows_word_next(const char *text, unsigned int *start, unsigned int *stop)
@@ -2323,11 +1144,6 @@ static int windows_word_next(const char *text, unsigned int *start, unsigned int
         return 1;
 }
 
-static int windows_same(const char *a, const char *b, unsigned int count)
-{
-        return !memory_compare(a, b, count);
-}
-
 static int windows_arrange_valid(const char *text)
 {
         unsigned int start = 0, stop, words = 0, starts[WINDOWS_OUTPUTS * 2], names[WINDOWS_OUTPUTS * 2];
@@ -2337,7 +1153,7 @@ static int windows_arrange_valid(const char *text)
                 unsigned int name;
                 int how, x, y;
 
-                if (stop - start == 7 && windows_same(text + start, "default", 7))
+                if (stop - start == 7 && !memory_compare(text + start, "default", 7))
                 {
                         unsigned int next_s = stop, next_e;
 
@@ -2346,7 +1162,7 @@ static int windows_arrange_valid(const char *text)
                 if (words == WINDOWS_OUTPUTS * 2 || !windows_arrange_word(text + start, stop - start, &name, &how, &x, &y))
                         return 0;
                 for (unsigned int other = 0; other < words; other++)
-                        if (names[other] == name && windows_same(text + starts[other], text + start, name))
+                        if (names[other] == name && !memory_compare(text + starts[other], text + start, name))
                                 return 0;
                 starts[words] = start, names[words++] = name;
         }
@@ -2368,77 +1184,50 @@ static unsigned int windows_arrange_lay(const char *text, const char (*names)[WI
 
                 if (!windows_arrange_word(text + start, stop - start, &name, &how, &x, &y))
                         continue;
-                for (unsigned int screen = 0; screen < count; screen++)
-                        if (!laid[screen] && !names[screen][name] && windows_same(names[screen], text + start, name))
-                        {
-                                laid[screen] = 1, dark[screen] = how == WINDOWS_PLACE_OFF, placed[screen] = how == WINDOWS_PLACE_AT;
-                                place[screen][0] = x, place[screen][1] = y, order[used++] = (unsigned char)screen;
-                        }
+                for (unsigned int s = 0; s < count; s++)
+                        if (!laid[s] && !names[s][name] && !memory_compare(names[s], text + start, name))
+                                laid[s] = 1, dark[s] = how == WINDOWS_PLACE_OFF, placed[s] = how == WINDOWS_PLACE_AT,
+                                place[s][0] = x, place[s][1] = y, order[used++] = (unsigned char)s;
         }
-        for (unsigned int screen = 0; screen < count; screen++)
-                if (!laid[screen])
-                        order[used++] = (unsigned char)screen;
-        for (unsigned int screen = 0; screen < count; screen++)
-                lit += !dark[screen];
+        for (unsigned int s = 0; s < count; s++)
+        {
+                if (!laid[s])
+                        order[used++] = (unsigned char)s;
+                lit += !dark[s];
+        }
         if (!lit && count)
                 dark[0] = 0;
         lit = 0;
         for (unsigned int each = 0; each < used; each++)
         {
-                unsigned int screen = order[each];
+                unsigned int s = order[each];
 
-                if (dark[screen])
+                if (dark[s])
                         continue;
-                rects[screen][0] = placed[screen] ? place[screen][0] : right;
-                rects[screen][1] = placed[screen] ? place[screen][1] : 0;
-                rects[screen][2] = sizes[screen][0], rects[screen][3] = sizes[screen][1];
-                right = rects[screen][0] + rects[screen][2] > right || !lit ? rects[screen][0] + rects[screen][2] : right;
-                low_x = !lit || rects[screen][0] < low_x ? rects[screen][0] : low_x;
-                low_y = !lit || rects[screen][1] < low_y ? rects[screen][1] : low_y;
-                order[lit++] = (unsigned char)screen;
+                rects[s][0] = placed[s] ? place[s][0] : right, rects[s][1] = placed[s] ? place[s][1] : 0;
+                rects[s][2] = sizes[s][0], rects[s][3] = sizes[s][1];
+                right = !lit || rects[s][0] + rects[s][2] > right ? rects[s][0] + rects[s][2] : right;
+                low_x = !lit || rects[s][0] < low_x ? rects[s][0] : low_x;
+                low_y = !lit || rects[s][1] < low_y ? rects[s][1] : low_y;
+                order[lit++] = (unsigned char)s;
         }
-        for (unsigned int screen = 0; screen < count; screen++)
-                if (dark[screen])
-                        rects[screen][0] = rects[screen][1] = rects[screen][2] = rects[screen][3] = 0;
+        for (unsigned int s = 0; s < count; s++)
+                if (dark[s])
+                        rects[s][0] = rects[s][1] = rects[s][2] = rects[s][3] = 0;
                 else
-                        rects[screen][0] -= low_x, rects[screen][1] -= low_y;
+                        rects[s][0] -= low_x, rects[s][1] -= low_y;
         return lit;
 }
 
-/*
-        The displays (/root/canvas.displays): one line a screen that has any
-        setting, NAME rotation=0|90|180|270 refresh=preferred|HZ mode=preferred|WxH
-        x=X y=Y, the fields in any order. rotation is 0, and refresh and mode
-        preferred, unless given: a mode is the panel's size (1920x1080), the
-        refresh the rate at it, and mode=preferred leaves the size to Canvas's
-        word (canvas modes). primary=yes makes the screen the primary (the
-        taskbar's, where a window opens: the table's index 0) wherever it is
-        laid; one screen has it, and with none the first laid is the primary.
-        x and y give the screen's place in the arrangement (NAME@X,Y there) and
-        count only when both are given. A malformed field takes its default and
-        its bit is set in bad, so the compositor can name it; a line with no
-        valid name is kept with an empty name and bad NAME. A word that is no
-        field, a field given twice and a name given twice are bad too (the
-        first one holds). windows_displays_write gives back the lines a read
-        takes, so a write and a read agree.
-*/
-#define WINDOWS_DISPLAYS 32
-#define WINDOWS_DISPLAY_NAME 1u
-#define WINDOWS_DISPLAY_ROTATION 2u
-#define WINDOWS_DISPLAY_REFRESH 4u
-#define WINDOWS_DISPLAY_X 8u
-#define WINDOWS_DISPLAY_Y 16u
-#define WINDOWS_DISPLAY_OTHER 32u
-#define WINDOWS_DISPLAY_SCALE 64u
-#define WINDOWS_DISPLAY_MODE 128u
-#define WINDOWS_DISPLAY_PRIMARY 256u
-#define WINDOWS_DISPLAY_SIDE 16384u // the widest or tallest a mode= size may be
-#define WINDOWS_DISPLAY_HZ 1000u
-// The scale a screen is drawn at, in percent: the six presets the settings offer, 100 the default.
-#define WINDOWS_SCALE_DEFAULT 100u
+enum
+{
+        WINDOWS_DISPLAYS = 32, WINDOWS_DISPLAY_NAME = 1u, WINDOWS_DISPLAY_ROTATION = 2u, WINDOWS_DISPLAY_REFRESH = 4u,
+        WINDOWS_DISPLAY_X = 8u, WINDOWS_DISPLAY_Y = 16u, WINDOWS_DISPLAY_OTHER = 32u, WINDOWS_DISPLAY_SCALE = 64u,
+        WINDOWS_DISPLAY_MODE = 128u, WINDOWS_DISPLAY_PRIMARY = 256u, WINDOWS_DISPLAY_SIDE = 16384u,
+        WINDOWS_DISPLAY_HZ = 1000u, WINDOWS_SCALE_DEFAULT = 100u
+};
 static const unsigned int windows_scale_presets[] = {50, 75, 100, 125, 150, 200};
 
-// Whether a percent is one of the scale presets.
 static int windows_scale_ok(int percent)
 {
         for (unsigned int at = 0; at < sizeof(windows_scale_presets) / sizeof(windows_scale_presets[0]); at++)
@@ -2450,43 +1239,27 @@ static int windows_scale_ok(int percent)
 struct windows_display
 {
         char name[WINDOWS_OUTPUT_NAME];
-        unsigned int rotation; // degrees, 0 when not given
-        unsigned int refresh;  // a rate in Hz, or 0 for preferred
-        unsigned int width, height; // the size asked (mode=WxH), the panel's; 0 by 0 for the one Canvas's word picks
-        unsigned int primary;  // 1: the primary screen (primary=yes), whatever its place in the arrangement
-        unsigned int scale;    // the scale in percent, WINDOWS_SCALE_DEFAULT when not given
-        int x, y;              // the place, when placed
-        unsigned int placed;
-        unsigned int bad;      // WINDOWS_DISPLAY_* bits of what was malformed or missing
+        unsigned int rotation, refresh, width, height, primary, scale;
+        int x, y;
+        unsigned int placed, bad;
 };
 
-// Whether length bytes at word are a connector name, and copies them into name: letters, digits and dashes.
 static int windows_display_name(const char *word, unsigned int length, char *name)
 {
         if (!length || length >= WINDOWS_OUTPUT_NAME)
                 return 0;
         for (unsigned int at = 0; at < length; at++)
-                if (!((unsigned int)((word[at] | 32) - 'a') < 26u || (word[at] >= '0' && word[at] <= '9') ||
-                      word[at] == '-'))
+                if (!((unsigned int)((word[at] | 32) - 'a') < 26u || (word[at] >= '0' && word[at] <= '9') || word[at] == '-'))
                         return 0;
-        for (unsigned int at = 0; at < length; at++)
-                name[at] = word[at];
-        name[length] = 0;
+        memory_copy(name, word, length), name[length] = 0;
         return 1;
 }
 
-// Whether name (NUL-ended) is the length bytes at word.
 static int windows_name_is(const char *name, const char *word, unsigned int length)
 {
-        if (length >= WINDOWS_OUTPUT_NAME || name[length])
-                return 0;
-        for (unsigned int at = 0; at < length; at++)
-                if (name[at] != word[at])
-                        return 0;
-        return 1;
+        return length < WINDOWS_OUTPUT_NAME && !name[length] && !memory_compare(name, word, length);
 }
 
-// Whether two NUL-ended connector names are the same.
 static int windows_display_same_name(const char *a, const char *b)
 {
         unsigned int at = 0;
@@ -2496,34 +1269,19 @@ static int windows_display_same_name(const char *a, const char *b)
         return a[at] == b[at];
 }
 
-// Whether length bytes at word are the decimal number value, as at most digits digits (a minus first when signed).
-static int windows_display_number(const char *word, unsigned int length, int signed_number, unsigned int digits, int *into)
-{
-        return windows_scan_int(word, length, signed_number ? -2147483647 : 0, 2147483647, digits, 0, into);
-}
-
-/*
-        A size as a displays line and `canvas display NAME mode` write it, WIDTHxHEIGHT (1920x1080), each a whole number from 1
-        to WINDOWS_DISPLAY_SIDE; preferred is 0 by 0. Answers whether it is one.
-*/
 static int windows_display_size(const char *word, unsigned int length, unsigned int *width, unsigned int *height)
 {
         unsigned int cross = 0;
         int w, h;
 
         if (length == 9 && windows_name_is("preferred", word, 9))
-        {
-                *width = *height = 0;
-                return 1;
-        }
+                return *width = *height = 0, 1;
         while (cross < length && word[cross] != 'x')
                 cross++;
-        if (cross == length || !windows_display_number(word, cross, 0, 5, &w) ||
-            !windows_display_number(word + cross + 1, length - cross - 1, 0, 5, &h) || w < 1 || h < 1 ||
-            w > (int)WINDOWS_DISPLAY_SIDE || h > (int)WINDOWS_DISPLAY_SIDE)
+        if (cross == length || !windows_scan_int(word, cross, 1, (int)WINDOWS_DISPLAY_SIDE, 5, 0, &w) ||
+            !windows_scan_int(word + cross + 1, length - cross - 1, 1, (int)WINDOWS_DISPLAY_SIDE, 5, 0, &h))
                 return 0;
-        *width = (unsigned int)w, *height = (unsigned int)h;
-        return 1;
+        return *width = (unsigned int)w, *height = (unsigned int)h, 1;
 }
 
 static int windows_display_value(unsigned int field, const char *word, unsigned int length, int *into)
@@ -2531,40 +1289,32 @@ static int windows_display_value(unsigned int field, const char *word, unsigned 
         int value = 0;
 
         if (field == WINDOWS_DISPLAY_REFRESH && length == 9 && windows_name_is("preferred", word, 9))
-        {
-                *into = 0;
-                return 1;
-        }
+                return *into = 0, 1;
         if (field == WINDOWS_DISPLAY_ROTATION)
         {
-                if (!windows_display_number(word, length, 0, 3, &value) ||
-                    (value != 0 && value != 90 && value != 180 && value != 270))
+                if (!windows_scan_int(word, length, 0, 270, 3, 0, &value) || value % 90)
                         return 0;
         }
         else if (field == WINDOWS_DISPLAY_SCALE)
         {
-                if (!windows_display_number(word, length, 0, 3, &value) || !windows_scale_ok(value))
+                if (!windows_scan_int(word, length, 0, 999, 3, 0, &value) || !windows_scale_ok(value))
                         return 0;
         }
         else if (field == WINDOWS_DISPLAY_REFRESH)
         {
-                if (!windows_display_number(word, length, 0, 4, &value) || value < 1 || value > (int)WINDOWS_DISPLAY_HZ)
+                if (!windows_scan_int(word, length, 1, (int)WINDOWS_DISPLAY_HZ, 4, 0, &value))
                         return 0;
         }
-        else if (!windows_display_number(word, length, 1, 6, &value) || value > WINDOWS_PLACE_MOST ||
-                 value < -WINDOWS_PLACE_MOST)
+        else if (!windows_scan_int(word, length, -WINDOWS_PLACE_MOST, WINDOWS_PLACE_MOST, 6, 0, &value))
                 return 0;
-        *into = value;
-        return 1;
+        return *into = value, 1;
 }
 
 static void windows_display_line(const char *line, unsigned int length, struct windows_display *display)
 {
         static const struct { const char *name; unsigned char len; unsigned short bit; } fields[] = {
-            {"rotation", 8, WINDOWS_DISPLAY_ROTATION}, {"refresh", 7, WINDOWS_DISPLAY_REFRESH},
-            {"scale", 5, WINDOWS_DISPLAY_SCALE},       {"mode", 4, WINDOWS_DISPLAY_MODE},
-            {"primary", 7, WINDOWS_DISPLAY_PRIMARY},   {"x", 1, WINDOWS_DISPLAY_X},
-            {"y", 1, WINDOWS_DISPLAY_Y},
+            {"rotation", 8, WINDOWS_DISPLAY_ROTATION}, {"refresh", 7, WINDOWS_DISPLAY_REFRESH}, {"scale", 5, WINDOWS_DISPLAY_SCALE},
+            {"mode", 4, WINDOWS_DISPLAY_MODE}, {"primary", 7, WINDOWS_DISPLAY_PRIMARY}, {"x", 1, WINDOWS_DISPLAY_X}, {"y", 1, WINDOWS_DISPLAY_Y},
         };
         unsigned int at = 0, start, seen = 0, have_x = 0, have_y = 0;
         int x = 0, y = 0;
@@ -2591,17 +1341,11 @@ static void windows_display_line(const char *line, unsigned int length, struct w
                         at++;
                 if (at == length)
                         break;
-                word = at;
-                while (at < length && line[at] != ' ' && line[at] != '\t')
-                        at++;
+                for (word = at; at < length && line[at] != ' ' && line[at] != '\t'; at++)
+                        ;
                 for (equals = word; equals < at && line[equals] != '='; equals++)
                         ;
-                if (equals == at || equals == word)
-                {
-                        display->bad |= WINDOWS_DISPLAY_OTHER;
-                        continue;
-                }
-                for (unsigned int f = 0; f < sizeof(fields) / sizeof(fields[0]); f++)
+                for (unsigned int f = 0; equals > word && equals < at && f < sizeof(fields) / sizeof(fields[0]); f++)
                         if (equals - word == fields[f].len && windows_name_is(fields[f].name, line + word, fields[f].len))
                         {
                                 key = fields[f].bit;
@@ -2612,8 +1356,7 @@ static void windows_display_line(const char *line, unsigned int length, struct w
                         display->bad |= WINDOWS_DISPLAY_OTHER;
                         continue;
                 }
-                seen |= key;
-                val = line + equals + 1, val_len = at - equals - 1;
+                seen |= key, val = line + equals + 1, val_len = at - equals - 1;
                 if (key == WINDOWS_DISPLAY_PRIMARY)
                 {
                         if (val_len == 3 && windows_name_is("yes", val, 3))
@@ -2622,22 +1365,14 @@ static void windows_display_line(const char *line, unsigned int length, struct w
                                 display->bad |= key;
                 }
                 else if (key == WINDOWS_DISPLAY_MODE)
-                {
-                        if (!windows_display_size(val, val_len, &display->width, &display->height))
-                                display->bad |= key;
-                }
+                        display->bad |= windows_display_size(val, val_len, &display->width, &display->height) ? 0u : key;
                 else if (!windows_display_value(key, val, val_len, &value))
                         display->bad |= key;
-                else if (key == WINDOWS_DISPLAY_ROTATION)
-                        display->rotation = (unsigned int)value;
-                else if (key == WINDOWS_DISPLAY_SCALE)
-                        display->scale = (unsigned int)value;
-                else if (key == WINDOWS_DISPLAY_REFRESH)
-                        display->refresh = (unsigned int)value;
-                else if (key == WINDOWS_DISPLAY_X)
-                        x = value, have_x = 1;
-                else
-                        y = value, have_y = 1;
+                else if (key == WINDOWS_DISPLAY_ROTATION) display->rotation = (unsigned int)value;
+                else if (key == WINDOWS_DISPLAY_SCALE) display->scale = (unsigned int)value;
+                else if (key == WINDOWS_DISPLAY_REFRESH) display->refresh = (unsigned int)value;
+                else if (key == WINDOWS_DISPLAY_X) x = value, have_x = 1;
+                else y = value, have_y = 1;
         }
         if (have_x && have_y)
                 display->placed = 1, display->x = x, display->y = y;
@@ -2645,7 +1380,6 @@ static void windows_display_line(const char *line, unsigned int length, struct w
                 display->bad |= have_x ? WINDOWS_DISPLAY_Y : WINDOWS_DISPLAY_X;
 }
 
-// Reads the lines of text into list, at most room of them, and answers how many were read; a blank line is none.
 static unsigned int windows_displays_read(const char *text, struct windows_display *list, unsigned int room)
 {
         unsigned int count = 0, at = 0;
@@ -2655,9 +1389,7 @@ static unsigned int windows_displays_read(const char *text, struct windows_displ
                 unsigned int start = at, blank = 1;
 
                 while (text[at] && text[at] != '\n')
-                        at++;
-                for (unsigned int each = start; each < at; each++)
-                        blank &= text[each] == ' ' || text[each] == '\t' || text[each] == '\r';
+                        blank &= text[at] == ' ' || text[at] == '\t' || text[at] == '\r', at++;
                 if (!blank)
                 {
                         windows_display_line(text + start, at - start, &list[count]);
@@ -2666,13 +1398,11 @@ static unsigned int windows_displays_read(const char *text, struct windows_displ
                                         list[count].bad |= WINDOWS_DISPLAY_OTHER;
                         count++;
                 }
-                if (text[at] == '\n')
-                        at++;
+                at += text[at] == '\n';
         }
         return count;
 }
 
-// The first display of the list named as the length bytes at word are: the one a line gives its place or setting.
 static const struct windows_display *windows_display_of(const struct windows_display *list, unsigned int count,
                                                         const char *word, unsigned int length)
 {
@@ -2682,12 +1412,6 @@ static const struct windows_display *windows_display_of(const struct windows_dis
         return 0;
 }
 
-/*
-        The mode a screen is driven at for a rate the displays file asks for: the first of its modes (count of them, each
-        its width, height and rate in modes[i][0..2], in the order the screen lists them) that is width by height at hz;
-        no hz (0) is the preferred rate, the first it lists at that size, which is the rate the settings recommend.
-        Answers its index, or count when the screen lists none, and the screen keeps the mode it has.
-*/
 static unsigned int windows_mode_at(const unsigned int (*modes)[3], unsigned int count, unsigned int width,
                                     unsigned int height, unsigned int hz)
 {
@@ -2697,13 +1421,7 @@ static unsigned int windows_mode_at(const unsigned int (*modes)[3], unsigned int
         return count;
 }
 
-/*
-        The value a plane's rotation property is set to for degrees, when the card lists that rotation: its enum
-        "rotate-DEGREES", whose value is a bit (names[i] with values[i], the enums of the property), so the value is the
-        one-bit mask. 0 when the card lists none, and the screen is then rotated in software.
-*/
-static unsigned long windows_rotation_bit(const char *const *names, const unsigned long *values, unsigned int count,
-                                          unsigned int degrees)
+static unsigned long windows_rotation_bit(const char *const *names, const unsigned long *values, unsigned int count, unsigned int degrees)
 {
         static const char *const wanted[] = {"rotate-0", "rotate-90", "rotate-180", "rotate-270"};
 
@@ -2715,33 +1433,15 @@ static unsigned long windows_rotation_bit(const char *const *names, const unsign
         return 0;
 }
 
-/*
-        A picture turned for the panel it is shown on, in software. The picture is lw wide and lh tall, and for 90 and 270
-        the panel is lh wide and lw tall (for 0 and 180 the same size). The panel's pixel for a picture pixel lx, ly is
-        where the turn sends it: 90 clockwise puts the picture's top left at the panel's top right, 270 anti-clockwise
-        puts it at the bottom left, and 180 turns it over both ways. windows_rotate_u32 copies the picture's rectangle
-        x0, y0 to x1, y1 from from (rows from_pitch words apart) into into (rows into_pitch words apart).
-*/
 static void windows_rotate_at(unsigned int lw, unsigned int lh, unsigned int degrees, unsigned int lx, unsigned int ly,
                               unsigned int *px, unsigned int *py)
 {
-        if (degrees == 90)
-                *px = lh - 1 - ly, *py = lx;
-        else if (degrees == 180)
-                *px = lw - 1 - lx, *py = lh - 1 - ly;
-        else if (degrees == 270)
-                *px = ly, *py = lw - 1 - lx;
-        else
-                *px = lx, *py = ly;
+        if (degrees == 90) *px = lh - 1 - ly, *py = lx;
+        else if (degrees == 180) *px = lw - 1 - lx, *py = lh - 1 - ly;
+        else if (degrees == 270) *px = ly, *py = lw - 1 - lx;
+        else *px = lx, *py = ly;
 }
 
-/*
-        The panel is the card's memory, mapped to be written: a store to it that does not fill a whole line goes over the bus
-        as a partial write, and a quarter turn stored a pixel at a time steps a panel row between stores, so every store of
-        it is one. A quarter turn is therefore done in tiles WINDOWS_TURN_TILE pixels square, 64 bytes a row, each panel
-        row of a tile stored whole and in order from the tile's 16 picture rows, which the tile's rows read again and
-        again from the cache; a half turn and no turn store each panel row in order as they read.
-*/
 #define WINDOWS_TURN_TILE 16u
 
 static void windows_rotate_u32(unsigned int *into, unsigned long into_pitch, const unsigned int *from, unsigned long from_pitch,
@@ -2751,8 +1451,7 @@ static void windows_rotate_u32(unsigned int *into, unsigned long into_pitch, con
         if (degrees == 90 || degrees == 270)
         {
                 int cw = degrees == 90;
-                unsigned int pa = cw ? lh - y1 : y0, pb = cw ? lh - y0 : y1;
-                unsigned int qa = cw ? x0 : lw - x1, qb = cw ? x1 : lw - x0;
+                unsigned int pa = cw ? lh - y1 : y0, pb = cw ? lh - y0 : y1, qa = cw ? x0 : lw - x1, qb = cw ? x1 : lw - x0;
                 long step = cw ? -(long)from_pitch : (long)from_pitch;
 
                 for (unsigned int p = pa, pe; p < pb; p = pe)
@@ -2762,20 +1461,19 @@ static void windows_rotate_u32(unsigned int *into, unsigned long into_pitch, con
                         for (unsigned int q = qa; q < qb; q += WINDOWS_TURN_TILE)
                         {
                                 unsigned int qe = q + WINDOWS_TURN_TILE < qb ? q + WINDOWS_TURN_TILE : qb;
+                                const unsigned int *base = cw ? from + (unsigned long)(lh - 1 - p) * from_pitch
+                                                              : from + (unsigned long)p * from_pitch;
 
                                 if (qe - q >= 4 && pe - p == WINDOWS_TURN_TILE)
                                 {
-                                        const unsigned int *src = cw ? from + (unsigned long)(lh - 1 - p) * from_pitch + q
-                                                                     : from + (unsigned long)p * from_pitch + (lw - 1 - q);
-
-                                        memory_transpose_u32(into + (unsigned long)q * into_pitch + p, into_pitch, src, step, cw ? 1 : -1, qe - q, pe - p);
+                                        memory_transpose_u32(into + (unsigned long)q * into_pitch + p, into_pitch,
+                                                             base + (cw ? q : lw - 1 - q), step, cw ? 1 : -1, qe - q, pe - p);
                                         continue;
                                 }
                                 for (unsigned int row = q; row < qe; row++)
                                 {
                                         unsigned int *to = into + (unsigned long)row * into_pitch;
-                                        const unsigned int *src = cw ? from + (unsigned long)(lh - 1 - p) * from_pitch + row
-                                                                     : from + (unsigned long)p * from_pitch + (lw - 1 - row);
+                                        const unsigned int *src = base + (cw ? row : lw - 1 - row);
 
                                         for (unsigned int px = p; px < pe; px++, src += step)
                                                 to[px] = *src;
@@ -2794,8 +1492,6 @@ static void windows_rotate_u32(unsigned int *into, unsigned long into_pitch, con
                 memory_copy(into + (unsigned long)ly * into_pitch + x0, from + (unsigned long)ly * from_pitch + x0, (positive)(x1 - x0) * 4);
 }
 
-// The panel rectangle (left, top, right, bottom) the picture rectangle x0, y0 to x1, y1 turns into; the corners are
-// where a turn puts the extremes, since each axis of the turn is one of the picture's.
 static void windows_rotate_panel(unsigned int lw, unsigned int lh, unsigned int degrees, unsigned int x0, unsigned int y0,
                                  unsigned int x1, unsigned int y1, unsigned int *panel)
 {
@@ -2807,28 +1503,22 @@ static void windows_rotate_panel(unsigned int lw, unsigned int lh, unsigned int 
                 unsigned int px, py;
 
                 windows_rotate_at(lw, lh, degrees, corner[each][0], corner[each][1], &px, &py);
-                panel[0] = px < panel[0] ? px : panel[0];
-                panel[1] = py < panel[1] ? py : panel[1];
-                panel[2] = px + 1 > panel[2] ? px + 1 : panel[2];
-                panel[3] = py + 1 > panel[3] ? py + 1 : panel[3];
+                panel[0] = px < panel[0] ? px : panel[0], panel[1] = py < panel[1] ? py : panel[1];
+                panel[2] = px + 1 > panel[2] ? px + 1 : panel[2], panel[3] = py + 1 > panel[3] ? py + 1 : panel[3];
         }
 }
 
-// Scans one line of text from start: sets *stop to line end and *word..*word_end to its leading token.
 static void windows_line_first_word(const char *text, unsigned int start, unsigned int *stop, unsigned int *word, unsigned int *word_end)
 {
-        unsigned int s = (unsigned int)(string_first_of_or_end((string_address)text + start, '\n') - (string_address)text), w, e;
+        unsigned int s = (unsigned int)(string_first_of_or_end((string_address)text + start, '\n') - (string_address)text), w = start, e;
 
-        w = start;
         while (w < s && (text[w] == ' ' || text[w] == '\t'))
                 w++;
-        e = w;
-        while (e < s && text[e] != ' ' && text[e] != '\t')
-                e++;
+        for (e = w; e < s && text[e] != ' ' && text[e] != '\t'; e++)
+                ;
         *stop = s, *word = w, *word_end = e;
 }
 
-// The displays a screen has a setting for, one line each, as windows_displays_read reads them; 0 when they do not fit.
 static unsigned int windows_displays_write(char *into, unsigned int room, const struct windows_display *list, unsigned int count)
 {
         unsigned int at = 0;
@@ -2838,129 +1528,30 @@ static unsigned int windows_displays_write(char *into, unsigned int room, const 
         into[0] = 0;
         for (unsigned int each = 0; each < count; each++)
         {
-                const struct windows_display *display = &list[each];
+                const struct windows_display *d = &list[each];
 
-                if (!display->name[0] || (!display->rotation && !display->refresh && !display->placed && !display->width && !display->primary &&
-                                          display->scale == WINDOWS_SCALE_DEFAULT))
+                if (!d->name[0] || (!d->rotation && !d->refresh && !d->placed && !d->width && !d->primary && d->scale == WINDOWS_SCALE_DEFAULT))
                         continue;
-                if (!windows_buf_str(into, room, &at, display->name) ||
-                    !windows_buf_str(into, room, &at, " rotation=") ||
-                    !windows_buf_num(into, room, &at, (long)display->rotation) ||
-                    !windows_buf_str(into, room, &at, " refresh="))
-                        return 0;
-                if (!display->refresh ? !windows_buf_str(into, room, &at, "preferred")
-                                      : !windows_buf_num(into, room, &at, (long)display->refresh))
-                        return 0;
-                if (display->width && (!windows_buf_str(into, room, &at, " mode=") ||
-                                       !windows_buf_num(into, room, &at, (long)display->width) ||
-                                       !windows_buf_str(into, room, &at, "x") ||
-                                       !windows_buf_num(into, room, &at, (long)display->height)))
-                        return 0;
-                if (display->primary && !windows_buf_str(into, room, &at, " primary=yes"))
-                        return 0;
-                if (display->scale != WINDOWS_SCALE_DEFAULT &&
-                    (!windows_buf_str(into, room, &at, " scale=") || !windows_buf_num(into, room, &at, (long)display->scale)))
-                        return 0;
-                if (display->placed && (!windows_buf_str(into, room, &at, " x=") ||
-                                        !windows_buf_num(into, room, &at, display->x) ||
-                                        !windows_buf_str(into, room, &at, " y=") ||
-                                        !windows_buf_num(into, room, &at, display->y)))
-                        return 0;
-                if (!windows_buf_put(into, room, &at, "\n", 1))
+                if (!windows_buf_str(into, room, &at, d->name) || !windows_buf_kv(into, room, &at, " rotation=", (long)d->rotation) ||
+                    !(d->refresh ? windows_buf_kv(into, room, &at, " refresh=", (long)d->refresh) : windows_buf_str(into, room, &at, " refresh=preferred")) ||
+                    (d->width && (!windows_buf_kv(into, room, &at, " mode=", (long)d->width) || !windows_buf_kv(into, room, &at, "x", (long)d->height))) ||
+                    (d->primary && !windows_buf_str(into, room, &at, " primary=yes")) ||
+                    (d->scale != WINDOWS_SCALE_DEFAULT && !windows_buf_kv(into, room, &at, " scale=", (long)d->scale)) ||
+                    (d->placed && (!windows_buf_kv(into, room, &at, " x=", d->x) || !windows_buf_kv(into, room, &at, " y=", d->y))) ||
+                    !windows_buf_put(into, room, &at, "\n", 1))
                         return 0;
         }
         return at;
 }
 
-static int windows_displays_set(char *into, unsigned int room, const char *text, const char *name, unsigned int field,
-                                const struct windows_display *change)
+static int windows_displays_rewrite(char *into, unsigned int room, const char *text, const struct windows_display *list, unsigned int count,
+                                    const unsigned char *dirty, const struct windows_display *added)
 {
-        struct windows_display list[WINDOWS_DISPLAYS], screen = {0};
-        const struct windows_display *found;
-        unsigned int name_length = 0, count, made, at = 0, start = 0, done = 0;
+        unsigned char emitted[WINDOWS_DISPLAYS] = {0};
+        unsigned int at = 0, start = 0, made;
         char line[192];
 
-        if (!room)
-                return -1;
-        into[0] = 0, screen.scale = WINDOWS_SCALE_DEFAULT;
-        while (name_length < WINDOWS_OUTPUT_NAME && name[name_length])
-                name_length++;
-        if (!windows_display_name(name, name_length, screen.name))
-                return -1;
-        count = windows_displays_read(text, list, WINDOWS_DISPLAYS);
-        found = windows_display_of(list, count, name, name_length);
-        if (!found && count == WINDOWS_DISPLAYS)
-                return -1;
-        if (found)
-                screen = *found;
-        screen.bad = 0;
-        if (field & WINDOWS_DISPLAY_ROTATION)
-                screen.rotation = change->rotation;
-        if (field & WINDOWS_DISPLAY_REFRESH)
-                screen.refresh = change->refresh;
-        if (field & WINDOWS_DISPLAY_SCALE)
-                screen.scale = change->scale;
-        if (field & WINDOWS_DISPLAY_MODE)
-                screen.width = change->width, screen.height = change->height;
-        if (field & WINDOWS_DISPLAY_PRIMARY)
-                screen.primary = change->primary;
-        if (field & (WINDOWS_DISPLAY_X | WINDOWS_DISPLAY_Y))
-                screen.placed = 1, screen.x = change->x, screen.y = change->y;
-        made = windows_displays_write(line, sizeof(line), &screen, 1);
-        while (text[start])
-        {
-                unsigned int stop, word, word_end;
-
-                windows_line_first_word(text, start, &stop, &word, &word_end);
-                if (word_end - word == name_length && windows_name_is(name, text + word, name_length))
-                {
-                        if (!done && made && !windows_buf_put(into, room, &at, line, made))
-                                return -1;
-                        done = 1;
-                }
-                else if (!windows_buf_put(into, room, &at, text + start, stop - start) || !windows_buf_put(into, room, &at, "\n", 1))
-                        return -1;
-                start = stop + (text[stop] == '\n');
-        }
-        if (!done && made && !windows_buf_put(into, room, &at, line, made))
-                return -1;
-        return (int)at;
-}
-
-/*
-        The displays file (text, NUL-ended) with name the primary screen (primary=yes on its line) and no other one: every other
-        line that says primary=yes says it no more, and keeps its other fields. With name null no screen is the primary, and the
-        first laid is. work is kept for caller signature compatibility. Answers the bytes written into, or -1 as windows_displays_set.
-*/
-static int windows_displays_primary(char *into, char *work, unsigned int room, const char *text, const char *name)
-{
-        struct windows_display list[WINDOWS_DISPLAYS];
-        unsigned int count = windows_displays_read(text, list, WINDOWS_DISPLAYS), name_len = 0, at = 0, start = 0;
-        unsigned char dirty[WINDOWS_DISPLAYS] = {0}, emitted[WINDOWS_DISPLAYS] = {0};
-        char line[192], valid_name[WINDOWS_OUTPUT_NAME];
-        int target = -1;
-
-        (void)work;
-        if (!room)
-                return -1;
         into[0] = 0;
-        if (name)
-        {
-                name_len = (unsigned int)string_length_max((string_address)name, WINDOWS_OUTPUT_NAME);
-                if (!windows_display_name(name, name_len, valid_name))
-                        return -1;
-        }
-        for (unsigned int i = 0; i < count; i++)
-        {
-                if (!list[i].name[0])
-                        continue;
-                if (name && target < 0 && windows_display_same_name(list[i].name, name))
-                        target = (int)i, list[i].primary = 1, list[i].bad = 0, dirty[i] = 1;
-                else if (list[i].primary)
-                        list[i].primary = 0, list[i].bad = 0, dirty[i] = 1;
-        }
-        if (name && target < 0 && count == WINDOWS_DISPLAYS)
-                return -1;
         while (text[start])
         {
                 unsigned int stop, word, word_end;
@@ -2974,39 +1565,84 @@ static int windows_displays_primary(char *into, char *work, unsigned int room, c
 
                         if (!emitted[idx])
                         {
-                                unsigned int made = windows_displays_write(line, sizeof(line), found, 1);
-
-                                emitted[idx] = 1;
+                                emitted[idx] = 1, made = windows_displays_write(line, sizeof(line), found, 1);
                                 if (made && !windows_buf_put(into, room, &at, line, made))
                                         return -1;
                         }
                 }
-                else if (!windows_buf_put(into, room, &at, text + start, stop - start) ||
-                         !windows_buf_put(into, room, &at, "\n", 1))
+                else if (!windows_buf_put(into, room, &at, text + start, stop - start) || !windows_buf_put(into, room, &at, "\n", 1))
                         return -1;
                 start = stop + (text[stop] == '\n');
         }
-        if (name && target < 0)
-        {
-                struct windows_display added = {0};
-                unsigned int made;
-
-                added.scale = WINDOWS_SCALE_DEFAULT, added.primary = 1;
-                memory_copy(added.name, valid_name, WINDOWS_OUTPUT_NAME);
-                made = windows_displays_write(line, sizeof(line), &added, 1);
-                if (made && !windows_buf_put(into, room, &at, line, made))
-                        return -1;
-        }
+        if (added && (made = windows_displays_write(line, sizeof(line), added, 1)) && !windows_buf_put(into, room, &at, line, made))
+                return -1;
         return (int)at;
 }
 
-/*
-        The displays file (text, NUL-ended) with the lines of the count screens named first, in the order named, and every other
-        line after them as it was. The compositor lays the screens the file places in the order of their lines (windows_arrange_pinned
-        puts them after the screens the arrangement names), so a desk written whole, every screen's place in the order the screens
-        are laid, keeps that order and its primary. A named screen with no line has none here; a later line of a screen named is
-        dropped, as the reader takes only the first. Answers the bytes written into (NUL-ended), or -1 when they do not fit.
-*/
+static int windows_displays_set(char *into, unsigned int room, const char *text, const char *name, unsigned int field,
+                                const struct windows_display *change)
+{
+        struct windows_display list[WINDOWS_DISPLAYS], screen = {0};
+        unsigned char dirty[WINDOWS_DISPLAYS] = {0};
+        const struct windows_display *found;
+        unsigned int name_len = 0, count;
+
+        if (!room)
+                return -1;
+        into[0] = 0, screen.scale = WINDOWS_SCALE_DEFAULT;
+        name_len = (unsigned int)string_length_max((string_address)name, WINDOWS_OUTPUT_NAME);
+        if (!windows_display_name(name, name_len, screen.name))
+                return -1;
+        count = windows_displays_read(text, list, WINDOWS_DISPLAYS);
+        found = windows_display_of(list, count, name, name_len);
+        if (!found && count == WINDOWS_DISPLAYS)
+                return -1;
+        if (found)
+                screen = *found;
+        screen.bad = 0;
+        if (field & WINDOWS_DISPLAY_ROTATION) screen.rotation = change->rotation;
+        if (field & WINDOWS_DISPLAY_REFRESH) screen.refresh = change->refresh;
+        if (field & WINDOWS_DISPLAY_SCALE) screen.scale = change->scale;
+        if (field & WINDOWS_DISPLAY_MODE) screen.width = change->width, screen.height = change->height;
+        if (field & WINDOWS_DISPLAY_PRIMARY) screen.primary = change->primary;
+        if (field & (WINDOWS_DISPLAY_X | WINDOWS_DISPLAY_Y)) screen.placed = 1, screen.x = change->x, screen.y = change->y;
+        if (found)
+                list[found - list] = screen, dirty[found - list] = 1;
+        return windows_displays_rewrite(into, room, text, list, count, dirty, found ? 0 : &screen);
+}
+
+static int windows_displays_primary(char *into, char *work, unsigned int room, const char *text, const char *name)
+{
+        struct windows_display list[WINDOWS_DISPLAYS], added = {0};
+        unsigned char dirty[WINDOWS_DISPLAYS] = {0};
+        unsigned int count = windows_displays_read(text, list, WINDOWS_DISPLAYS), name_len;
+        int target = -1;
+
+        (void)work;
+        if (!room)
+                return -1;
+        into[0] = 0;
+        if (name)
+        {
+                name_len = (unsigned int)string_length_max((string_address)name, WINDOWS_OUTPUT_NAME);
+                if (!windows_display_name(name, name_len, added.name))
+                        return -1;
+        }
+        for (unsigned int i = 0; i < count; i++)
+        {
+                if (!list[i].name[0])
+                        continue;
+                if (name && target < 0 && windows_display_same_name(list[i].name, name))
+                        target = (int)i, list[i].primary = 1, list[i].bad = 0, dirty[i] = 1;
+                else if (list[i].primary)
+                        list[i].primary = 0, list[i].bad = 0, dirty[i] = 1;
+        }
+        if (name && target < 0 && count == WINDOWS_DISPLAYS)
+                return -1;
+        added.scale = WINDOWS_SCALE_DEFAULT, added.primary = 1;
+        return windows_displays_rewrite(into, room, text, list, count, dirty, name && target < 0 ? &added : 0);
+}
+
 static int windows_displays_lead(char *into, unsigned int room, const char *text, const char (*names)[WINDOWS_OUTPUT_NAME], unsigned int count)
 {
         unsigned int at = 0;
@@ -3046,29 +1682,27 @@ static unsigned int windows_name_length(const char *name)
         return at;
 }
 
-static unsigned int windows_screen_of(const char (*names)[WINDOWS_OUTPUT_NAME], unsigned int count, const char *word,
-                                      unsigned int length)
+static unsigned int windows_screen_of(const char (*names)[WINDOWS_OUTPUT_NAME], unsigned int count, const char *word, unsigned int length)
 {
-        for (unsigned int screen = 0; screen < count; screen++)
-                if (windows_name_is(names[screen], word, length))
-                        return screen + 1;
+        for (unsigned int s = 0; s < count; s++)
+                if (windows_name_is(names[s], word, length))
+                        return s + 1;
         return 0;
 }
 
 static int windows_buf_at_xy(char *into, unsigned int room, unsigned int *at, const char *name, unsigned int len, int x, int y)
 {
-        return windows_buf_put(into, room, at, name, len) && windows_buf_put(into, room, at, "@", 1) &&
-               windows_buf_num(into, room, at, x) && windows_buf_put(into, room, at, ",", 1) &&
-               windows_buf_num(into, room, at, y) && windows_buf_put(into, room, at, " ", 1);
+        return windows_buf_put(into, room, at, name, len) && windows_buf_kv(into, room, at, "@", x) &&
+               windows_buf_kv(into, room, at, ",", y) && windows_buf_put(into, room, at, " ", 1);
 }
 
 static unsigned int windows_arrange_pinned(const char *arrangement, const char (*names)[WINDOWS_OUTPUT_NAME],
                                            unsigned int count, const struct windows_display *list, unsigned int listed,
                                            char *into, unsigned int room)
 {
-        unsigned int at = 0, named[WINDOWS_OUTPUTS] = {0}, used[WINDOWS_DISPLAYS] = {0};
+        unsigned char named[WINDOWS_OUTPUTS] = {0}, used[WINDOWS_DISPLAYS] = {0}, extra[WINDOWS_DISPLAYS] = {0};
         const char *base = windows_arrange_valid(arrangement) ? arrangement : "";
-        unsigned int start, stop, name, screen;
+        unsigned int at = 0, start, stop, name, screen;
         int how, x, y;
 
         if (!room || count > WINDOWS_OUTPUTS || listed > WINDOWS_DISPLAYS)
@@ -3085,6 +1719,10 @@ static unsigned int windows_arrange_pinned(const char *arrangement, const char (
                         named[screen - 1] = 1;
                 if ((d = windows_display_of(list, listed, base + start, name)))
                         used[d - list] = 1;
+                d = how == WINDOWS_PLACE_OFF ? 0 : d;
+                if (d && d->placed ? !windows_buf_at_xy(into, room, &at, d->name, name, d->x, d->y)
+                                   : !windows_buf_put(into, room, &at, base + start, stop - start) || !windows_buf_put(into, room, &at, " ", 1))
+                        return 0;
         }
         for (unsigned int each = 0; each < listed; each++)
         {
@@ -3093,241 +1731,117 @@ static unsigned int windows_arrange_pinned(const char *arrangement, const char (
 
                 if (d->placed && !used[each] && length && windows_display_of(list, listed, d->name, length) == d &&
                     (screen = windows_screen_of(names, count, d->name, length)))
-                        named[screen - 1] = 1;
-        }
-        for (start = 0; windows_word_next(base, &start, &stop); start = stop)
-        {
-                const struct windows_display *d;
-
-                if (stop - start == 7 && windows_name_is("default", base + start, 7))
-                        continue;
-                windows_arrange_word(base + start, stop - start, &name, &how, &x, &y);
-                d = how == WINDOWS_PLACE_OFF ? 0 : windows_display_of(list, listed, base + start, name);
-                if (d && d->placed)
-                {
-                        if (!windows_buf_at_xy(into, room, &at, d->name, name, d->x, d->y))
-                                return 0;
-                }
-                else if (!windows_buf_put(into, room, &at, base + start, stop - start) || !windows_buf_put(into, room, &at, " ", 1))
-                        return 0;
+                        named[screen - 1] = 1, extra[each] = 1;
         }
         for (unsigned int s = 0; s < count; s++)
-                if (!named[s])
-                {
-                        if (!windows_buf_put(into, room, &at, names[s], windows_name_length(names[s])) || !windows_buf_put(into, room, &at, " ", 1))
-                                return 0;
-                        named[s] = 1;
-                }
-        for (unsigned int each = 0; each < listed; each++)
-        {
-                const struct windows_display *d = &list[each];
-                unsigned int length = windows_name_length(d->name);
-
-                if (d->placed && !used[each] && length && windows_display_of(list, listed, d->name, length) == d &&
-                    windows_screen_of(names, count, d->name, length) && !windows_buf_at_xy(into, room, &at, d->name, length, d->x, d->y))
+                if (!named[s] && (!windows_buf_put(into, room, &at, names[s], windows_name_length(names[s])) || !windows_buf_put(into, room, &at, " ", 1)))
                         return 0;
-        }
+        for (unsigned int each = 0; each < listed; each++)
+                if (extra[each] && !windows_buf_at_xy(into, room, &at, list[each].name, windows_name_length(list[each].name), list[each].x, list[each].y))
+                        return 0;
         while (at && into[at - 1] == ' ')
                 into[--at] = 0;
         return windows_arrange_valid(into) ? at + 1 : 0;
 }
 
-// Row row's buffer which, for a caller holding the table: the buffer's size is the header's, which the compositor
-// wrote and any mapper may write too, so the program's own copy (windows_pixels) is the one to draw through.
+// Row row's buffer which
 #define windows_buffer(table, row, which)                                                              \
         ((unsigned int *)((char *)(table) + WINDOWS_HEADER +                                           \
                           ((unsigned long)(row) * 2 + ((which) & 1u)) * (table)->buffer))
 
-// What a program has of its window: the table, its row, and its two ends. The rest is the program's copy of the
-// header, taken once by windows_take and checked there: the table is shared, so a peer may write its header.
 struct window_row
 {
         struct windows *table;
         unsigned int row;
         long door, wake;
-        unsigned long bytes;
-        unsigned long buffer;
-        unsigned int stride, output_width, output_height;
-        unsigned int closes; // the asks to go the program has answered (windows_close_asked), of the table's close_asks
+        unsigned long bytes, buffer;
+        unsigned int stride, output_width, output_height, closes;
 };
 
-// Row row's buffer which, through the program's copy of the header: the one it draws into and gives back.
 static inline unsigned int *windows_pixels(const struct window_row *own, unsigned int which)
 {
-        return (unsigned int *)((char *)own->table + WINDOWS_HEADER +
-                                ((unsigned long)own->row * 2 + (which & 1u)) * own->buffer);
+        return (unsigned int *)((char *)own->table + WINDOWS_HEADER + ((unsigned long)own->row * 2 + (which & 1u)) * own->buffer);
 }
 
-// One event, read out of a row's columns.
 struct window_event
 {
         unsigned int type, flags;
         int a, b;
-        // When the device made it (its evdev stamp, CLOCK_MONOTONIC nanoseconds), or 0 when none was given: a drag, its velocity and
-        // its late lift read this, not the time the program dispatched the event (ui_press_now), so a batch of reports is its own speed.
         unsigned long long when;
 };
 
 _Static_assert(sizeof(struct window) == 1288, "window page ABI");
 _Static_assert(sizeof(struct window_key) == 16, "window key ABI");
 _Static_assert(sizeof(struct window_cell) == 8, "window cell ABI");
-
-/* Every field of the page, where the compositor and its programs both
-   expect it. */
-#define WINDOW_AT(field, offset)                                               \
-        _Static_assert(offset_of(struct window, field) == (offset), "window page ABI " #field)
-WINDOW_AT(x, 0);
-WINDOW_AT(y, 4);
-WINDOW_AT(z, 8);
-WINDOW_AT(width, 12);
-WINDOW_AT(height, 16);
-WINDOW_AT(region, 20);
-WINDOW_AT(display, 24);
-WINDOW_AT(style, 28);
-WINDOW_AT(edge, 32);
-WINDOW_AT(sequence, 36);
-WINDOW_AT(title, 40);
-WINDOW_AT(state, 168);
-WINDOW_AT(pitch, 172);
-WINDOW_AT(max_width, 176);
-WINDOW_AT(max_height, 180);
-WINDOW_AT(display_width, 184);
-WINDOW_AT(display_height, 188);
-WINDOW_AT(awake, 192);
-WINDOW_AT(handle, 196);
-WINDOW_AT(stride, 200);
-WINDOW_AT(history, 204);
-WINDOW_AT(head, 208);
-WINDOW_AT(lines, 212);
-WINDOW_AT(key_head, 216);
-WINDOW_AT(key_tail, 220);
-WINDOW_AT(keys, 224);
-WINDOW_AT(columns, 1248);
-WINDOW_AT(rows, 1252);
-WINDOW_AT(damage_row, 1256);
-WINDOW_AT(damage_rows, 1260);
-WINDOW_AT(grid_columns, 1264);
-WINDOW_AT(grid_rows, 1268);
-WINDOW_AT(max_columns, 1272);
-WINDOW_AT(max_rows, 1276);
-WINDOW_AT(mapping, 1280);
-WINDOW_AT(want, 1284);
+#define WINDOW_AT(field, offset) _Static_assert(offset_of(struct window, field) == (offset), "window page ABI " #field)
+WINDOW_AT(x, 0); WINDOW_AT(y, 4); WINDOW_AT(z, 8); WINDOW_AT(width, 12);
+WINDOW_AT(height, 16); WINDOW_AT(region, 20); WINDOW_AT(display, 24); WINDOW_AT(style, 28);
+WINDOW_AT(edge, 32); WINDOW_AT(sequence, 36); WINDOW_AT(title, 40); WINDOW_AT(state, 168);
+WINDOW_AT(pitch, 172); WINDOW_AT(max_width, 176); WINDOW_AT(max_height, 180); WINDOW_AT(display_width, 184);
+WINDOW_AT(display_height, 188); WINDOW_AT(awake, 192); WINDOW_AT(handle, 196); WINDOW_AT(stride, 200);
+WINDOW_AT(history, 204); WINDOW_AT(head, 208); WINDOW_AT(lines, 212); WINDOW_AT(key_head, 216);
+WINDOW_AT(key_tail, 220); WINDOW_AT(keys, 224); WINDOW_AT(columns, 1248); WINDOW_AT(rows, 1252);
+WINDOW_AT(damage_row, 1256); WINDOW_AT(damage_rows, 1260); WINDOW_AT(grid_columns, 1264); WINDOW_AT(grid_rows, 1268);
+WINDOW_AT(max_columns, 1272); WINDOW_AT(max_rows, 1276); WINDOW_AT(mapping, 1280); WINDOW_AT(want, 1284);
 _Static_assert(offset_of(struct window_key, character) == 4, "window key ABI");
 _Static_assert(offset_of(struct window_cell, ink) == 4, "window cell ABI");
 _Static_assert(offset_of(struct window_cell, paper) == 5, "window cell ABI");
 _Static_assert(offset_of(struct window_cell, flags) == 6, "window cell ABI");
 
 #if defined(__x86_64__)
-#define WINDOW_SYS_OPENAT 257
-#define WINDOW_SYS_MMAP 9
-#define WINDOW_SYS_MUNMAP 11
-#define WINDOW_SYS_IOCTL 16
-#define WINDOW_SYS_CLOSE 3
-#define WINDOW_SYS_PPOLL 271
-#define WINDOW_SYS_READ 0
-#define WINDOW_SYS_WRITE 1
-#define WINDOW_SYS_LSEEK 8
-#define WINDOW_SYS_GETPID 39
-#define WINDOW_SYS_MADVISE 28
-#define WINDOW_SYS_MEMFD 319
-#define WINDOW_SYS_FCNTL 72
-#define WINDOW_SYS_PREAD 17
-#define WINDOW_SYS_FSTAT 5
-#define WINDOW_SYS_FTRUNCATE 77
-#define WINDOW_SYS_MKDIRAT 258
+enum
+{
+        WINDOW_SYS_READ = 0, WINDOW_SYS_WRITE = 1, WINDOW_SYS_CLOSE = 3, WINDOW_SYS_FSTAT = 5,
+        WINDOW_SYS_LSEEK = 8, WINDOW_SYS_MMAP = 9, WINDOW_SYS_MUNMAP = 11, WINDOW_SYS_IOCTL = 16,
+        WINDOW_SYS_PREAD = 17, WINDOW_SYS_MADVISE = 28, WINDOW_SYS_GETPID = 39, WINDOW_SYS_FCNTL = 72,
+        WINDOW_SYS_FTRUNCATE = 77, WINDOW_SYS_OPENAT = 257, WINDOW_SYS_MKDIRAT = 258, WINDOW_SYS_PPOLL = 271,
+        WINDOW_SYS_MEMFD = 319
+};
 #else
-// arm64 and riscv share the asm-generic numbering.
-#define WINDOW_SYS_OPENAT 56
-#define WINDOW_SYS_MMAP 222
-#define WINDOW_SYS_MUNMAP 215
-#define WINDOW_SYS_IOCTL 29
-#define WINDOW_SYS_CLOSE 57
-#define WINDOW_SYS_PPOLL 73
-#define WINDOW_SYS_READ 63
-#define WINDOW_SYS_WRITE 64
-#define WINDOW_SYS_LSEEK 62
-#define WINDOW_SYS_GETPID 172
-#define WINDOW_SYS_MADVISE 233
-#define WINDOW_SYS_MEMFD 279
-#define WINDOW_SYS_FCNTL 25
-#define WINDOW_SYS_PREAD 67
-#define WINDOW_SYS_FSTAT 80
-#define WINDOW_SYS_FTRUNCATE 46
-#define WINDOW_SYS_MKDIRAT 34
+enum
+{
+        WINDOW_SYS_FCNTL = 25, WINDOW_SYS_IOCTL = 29, WINDOW_SYS_MKDIRAT = 34, WINDOW_SYS_FTRUNCATE = 46,
+        WINDOW_SYS_OPENAT = 56, WINDOW_SYS_CLOSE = 57, WINDOW_SYS_LSEEK = 62, WINDOW_SYS_READ = 63,
+        WINDOW_SYS_WRITE = 64, WINDOW_SYS_PREAD = 67, WINDOW_SYS_PPOLL = 73, WINDOW_SYS_FSTAT = 80,
+        WINDOW_SYS_GETPID = 172, WINDOW_SYS_MUNMAP = 215, WINDOW_SYS_MMAP = 222, WINDOW_SYS_MADVISE = 233,
+        WINDOW_SYS_MEMFD = 279
+};
 #endif
 
-/*
-        A shell image already carries lib.c's hardware-floor syscall
-        entry on every supported architecture. Use it directly instead of
-        emitting a second syscall body in every program that includes this
-        client. Without the library's include guard the small per-architecture
-        fallback below is used instead; the types and memory routines come from
-        the library either way.
+#define WINDOWS_MAP_ERR(m) ((m) < 0 && (m) > -4096)
 
-        positive and long are both one register wide here. Casting a negative
-        AT_FDCWD through positive preserves its bits, and the raw negative
-        kernel answer becomes long again at the call site.
-*/
 #ifdef STANDARD_MODERN_C
 #define window_call(number, a, b, c, d, e, f)                                \
         ((long)system_call_6((positive)(number), (positive)(a),              \
                              (positive)(b), (positive)(c), (positive)(d),    \
                              (positive)(e), (positive)(f)))
 #elif defined(__x86_64__)
-
 static long window_call(long number, long a, long b, long c, long d, long e, long f)
 {
-        register long r10 __asm__("r10") = d;
-        register long r8 __asm__("r8") = e;
-        register long r9 __asm__("r9") = f;
+        register long r10 __asm__("r10") = d, r8 __asm__("r8") = e, r9 __asm__("r9") = f;
         long result;
 
-        __asm__ volatile("syscall"
-                         : "=a"(result)
-                         : "a"(number), "D"(a), "S"(b), "d"(c), "r"(r10), "r"(r8), "r"(r9)
-                         : "rcx", "r11", "memory");
+        __asm__ volatile("syscall" : "=a"(result) : "a"(number), "D"(a), "S"(b), "d"(c), "r"(r10), "r"(r8), "r"(r9) : "rcx", "r11", "memory");
         return result;
 }
-#else
-#if defined(__aarch64__)
+#elif defined(__aarch64__)
 static long window_call(long number, long a, long b, long c, long d, long e, long f)
 {
-        register long x8 __asm__("x8") = number;
-        register long x0 __asm__("x0") = a;
-        register long x1 __asm__("x1") = b;
-        register long x2 __asm__("x2") = c;
-        register long x3 __asm__("x3") = d;
-        register long x4 __asm__("x4") = e;
-        register long x5 __asm__("x5") = f;
+        register long x8 __asm__("x8") = number, x0 __asm__("x0") = a, x1 __asm__("x1") = b, x2 __asm__("x2") = c, x3 __asm__("x3") = d, x4 __asm__("x4") = e, x5 __asm__("x5") = f;
 
-        __asm__ volatile("svc #0"
-                         : "+r"(x0)
-                         : "r"(x8), "r"(x1), "r"(x2), "r"(x3), "r"(x4), "r"(x5)
-                         : "memory");
+        __asm__ volatile("svc #0" : "+r"(x0) : "r"(x8), "r"(x1), "r"(x2), "r"(x3), "r"(x4), "r"(x5) : "memory");
         return x0;
 }
 #else
 static long window_call(long number, long a, long b, long c, long d, long e, long f)
 {
-        register long a7 __asm__("a7") = number;
-        register long a0 __asm__("a0") = a;
-        register long a1 __asm__("a1") = b;
-        register long a2 __asm__("a2") = c;
-        register long a3 __asm__("a3") = d;
-        register long a4 __asm__("a4") = e;
-        register long a5 __asm__("a5") = f;
+        register long a7 __asm__("a7") = number, a0 __asm__("a0") = a, a1 __asm__("a1") = b, a2 __asm__("a2") = c, a3 __asm__("a3") = d, a4 __asm__("a4") = e, a5 __asm__("a5") = f;
 
-        __asm__ volatile("ecall"
-                         : "+r"(a0)
-                         : "r"(a7), "r"(a1), "r"(a2), "r"(a3), "r"(a4), "r"(a5)
-                         : "memory");
+        __asm__ volatile("ecall" : "+r"(a0) : "r"(a7), "r"(a1), "r"(a2), "r"(a3), "r"(a4), "r"(a5) : "memory");
         return a0;
 }
 #endif
-#endif
 
-// Reads up to room - 1 bytes of a small /proc, /sys or /root file, stripping at the first newline or CR.
-// Returns line length, or -1 on open/read error.
 static long windows_read_line(const char *path, char *buf, unsigned int room, long flags)
 {
         long fd, got;
@@ -3335,49 +1849,34 @@ static long windows_read_line(const char *path, char *buf, unsigned int room, lo
         if (!room)
                 return -1;
         buf[0] = 0;
-        fd = window_call(WINDOW_SYS_OPENAT, -100, (long)path, flags, 0, 0, 0);
-        if (fd < 0)
+        if ((fd = window_call(WINDOW_SYS_OPENAT, -100, (long)path, flags, 0, 0, 0)) < 0)
                 return -1;
         got = window_call(WINDOW_SYS_READ, fd, (long)buf, (long)(room - 1), 0, 0, 0);
         window_call(WINDOW_SYS_CLOSE, fd, 0, 0, 0, 0, 0);
         if (got < 0)
-        {
-                buf[0] = 0;
-                return -1;
-        }
+                return buf[0] = 0, -1;
         buf[got] = 0;
         for (long i = 0; i < got; i++)
                 if (buf[i] == '\n' || buf[i] == '\r')
-                {
-                        buf[i] = 0;
-                        return i;
-                }
+                        return buf[i] = 0, i;
         return got;
 }
 
-/*
-        A table of no file and no compositor's (a check's, a program's that draws alone), made at its first use where *at is 0: the
-        header alone, private and of no memory but the pages written (MAP_NORESERVE), where a struct windows of WINDOWS rows in a
-        program's own data would be gigabytes the kernel is asked for at its start. 0 when the address space is not there. The fresh one
-        is zero each time it is asked for, as a table declared on the stack and zeroed was: its pages given back (MADV_DONTNEED).
-*/
 static struct windows *windows_scratch_table(struct windows **at)
 {
         if (!*at)
         {
-                long got = window_call(WINDOW_SYS_MMAP, 0, (long)sizeof(struct windows), 3, 0x4022, -1, 0); // PRIVATE | ANONYMOUS | NORESERVE
+                long got = window_call(WINDOW_SYS_MMAP, 0, (long)sizeof(struct windows), 3, 0x4022, -1, 0);
 
-                *at = got < 0 && got > -4096 ? 0 : (struct windows *)got;
+                *at = WINDOWS_MAP_ERR(got) ? 0 : (struct windows *)got;
         }
         return *at;
 }
 
-// A table of a private mapping of no file zeroed as a whole: its pages given back (MADV_DONTNEED), not written, which would be the
-// gigabytes of every row's fields.
 static void windows_scratch_zero(struct windows *table)
 {
         if (table)
-                window_call(WINDOW_SYS_MADVISE, (long)table, (long)((sizeof(struct windows) + 4095) & ~4095ul), 4, 0, 0, 0); // MADV_DONTNEED
+                window_call(WINDOW_SYS_MADVISE, (long)table, (long)((sizeof(struct windows) + 4095) & ~4095ul), 4, 0, 0, 0);
 }
 
 static struct windows *windows_scratch_fresh(struct windows **at)
@@ -3388,41 +1887,33 @@ static struct windows *windows_scratch_fresh(struct windows **at)
         return table;
 }
 
-/*
-        The touch trace, a file switch: while /run/moonwater/touch-trace exists, the compositor and each program that takes touch append
-        lines to /run/moonwater/touch-trace.log, up to WINDOW_TRACE_CAP bytes (a line past it is not written). The switch is looked for
-        at a touch-down (window_trace_touch: one open that fails when the file is not there), and a log is made fresh when the switch
-        goes on. Off, a trace line costs one branch (WINDOW_TRACE); the log is not truncated when the switch goes, so it can be sent.
-        window_trace_out is the sink a line goes to (window_trace_write, the file; a check puts its own there).
-*/
+/* Touch trace file switch (/run/moonwater/touch-trace -> /run/moonwater/touch-trace.log). */
 #define WINDOW_TRACE_SWITCH "/run/moonwater/touch-trace"
 #define WINDOW_TRACE_LOG "/run/moonwater/touch-trace.log"
 #define WINDOW_TRACE_CAP 1048576l
-#define WINDOW_TRACE_TEXT 320
-#define WINDOW_TRACE_APPEND (0x1 | 0x400 | 0x40 | 0x80000)  // O_WRONLY | O_APPEND | O_CREAT | O_CLOEXEC
-#define WINDOW_TRACE_NEW (0x1 | 0x200 | 0x40 | 0x80000)     // O_WRONLY | O_TRUNC | O_CREAT | O_CLOEXEC
-#define WINDOW_TRACE_READ 0x80000                          // O_RDONLY | O_CLOEXEC
+enum
+{
+        WINDOW_TRACE_TEXT = 320, WINDOW_TRACE_APPEND = 0x1 | 0x400 | 0x40 | 0x80000,
+        WINDOW_TRACE_NEW = 0x1 | 0x200 | 0x40 | 0x80000, WINDOW_TRACE_READ = 0x80000
+};
 
-static b32 window_trace_live;                    // this program's trace is on: the switch was there at the last touch-down
+static b32 window_trace_live;
 static char window_trace_text[WINDOW_TRACE_TEXT];
 static positive window_trace_length;
 
-// The log holds room for a line of length bytes when it is at size now: the size is the log's own end, so the lines of every program count.
 static b32 window_trace_room(long size, long length)
 {
         return size >= 0 && length > 0 && size + length <= WINDOW_TRACE_CAP;
 }
 
-// Appends a line (length bytes) to the log if it fits under the cap. Answers whether it was written.
 static b32 window_trace_write(const char address_to line, positive length)
 {
-        long handle = window_call(WINDOW_SYS_OPENAT, -100, (long)WINDOW_TRACE_LOG, WINDOW_TRACE_APPEND, 0644, 0, 0);
-        long size;
+        long handle = window_call(WINDOW_SYS_OPENAT, -100, (long)WINDOW_TRACE_LOG, WINDOW_TRACE_APPEND, 0644, 0, 0), size;
         b32 wrote = false;
 
         if (handle < 0)
                 return false;
-        size = window_call(WINDOW_SYS_LSEEK, handle, 0, 2, 0, 0, 0); // SEEK_END
+        size = window_call(WINDOW_SYS_LSEEK, handle, 0, 2, 0, 0, 0);
         if (window_trace_room(size, (long)length))
                 wrote = window_call(WINDOW_SYS_WRITE, handle, (long)line, (long)length, 0, 0, 0) == (long)length;
         window_call(WINDOW_SYS_CLOSE, handle, 0, 0, 0, 0, 0);
@@ -3431,7 +1922,6 @@ static b32 window_trace_write(const char address_to line, positive length)
 
 static b32 (*window_trace_out)(const char address_to line, positive length) = window_trace_write;
 
-// The switch at a touch-down: on when the file is there, and the log made fresh when it was not on before.
 static void window_trace_touch(void)
 {
         long handle = window_call(WINDOW_SYS_OPENAT, -100, (long)WINDOW_TRACE_SWITCH, WINDOW_TRACE_READ, 0, 0, 0);
@@ -3449,7 +1939,6 @@ static void window_trace_touch(void)
         }
 }
 
-// The text of a line is formatted through string_format into window_trace_text, and sent with a newline by window_trace_flush.
 static void window_trace_take(address_any data, positive length)
 {
         const char address_to bytes = (const char address_to)data;
@@ -3460,16 +1949,13 @@ static void window_trace_take(address_any data, positive length)
 
 static void window_trace_flush(void)
 {
-        // A line ends in one newline: the format's own, or the flush's where the format gave none.
-        if (window_trace_length < WINDOW_TRACE_TEXT - 1 && (window_trace_length == 0 || window_trace_text[window_trace_length - 1] != '\n'))
+        if (window_trace_length < WINDOW_TRACE_TEXT - 1 && (!window_trace_length || window_trace_text[window_trace_length - 1] != '\n'))
                 window_trace_text[window_trace_length++] = '\n';
         if (window_trace_out)
                 window_trace_out(window_trace_text, window_trace_length);
         window_trace_length = 0;
 }
 
-// A word of text (a reason), appended as it is. string_format's %s does not come out through this writer, so a line with a word in it
-// is made of parts: WINDOW_TRACE_START, WINDOW_TRACE_PART (the formatter's numbers), window_trace_word, WINDOW_TRACE_END.
 static void window_trace_word(const char address_to word)
 {
         if (!window_trace_live || !word)
@@ -3478,144 +1964,44 @@ static void window_trace_word(const char address_to word)
                 window_trace_text[window_trace_length++] = word[at];
 }
 
-// A trace line when the trace is on: one branch when it is not. The format and its arguments are string_format's (numbers only).
-#define WINDOW_TRACE_START()                                 \
-        do                                                   \
-        {                                                    \
-                if (window_trace_live)                       \
-                        window_trace_length = 0;             \
-        } while (0)
-#define WINDOW_TRACE_PART(...)                               \
-        do                                                   \
-        {                                                    \
-                if (window_trace_live)                       \
-                        string_format(window_trace_take, __VA_ARGS__); \
-        } while (0)
-#define WINDOW_TRACE_END()                                   \
-        do                                                   \
-        {                                                    \
-                if (window_trace_live)                       \
-                        window_trace_flush();                \
-        } while (0)
-#define WINDOW_TRACE(...)                                    \
-        do                                                   \
-        {                                                    \
-                if (window_trace_live)                       \
-                {                                            \
-                        window_trace_length = 0;             \
-                        string_format(window_trace_take, __VA_ARGS__); \
-                        window_trace_flush();                \
-                }                                            \
-        } while (0)
+#define WINDOW_TRACE_START() do { if (window_trace_live) window_trace_length = 0; } while (0)
+#define WINDOW_TRACE_PART(...) do { if (window_trace_live) string_format(window_trace_take, __VA_ARGS__); } while (0)
+#define WINDOW_TRACE_END() do { if (window_trace_live) window_trace_flush(); } while (0)
+#define WINDOW_TRACE(...) do { if (window_trace_live) { window_trace_length = 0; string_format(window_trace_take, __VA_ARGS__); window_trace_flush(); } } while (0)
 
-/*
-        Sleeps until there is something for the program: a key in its ring,
-        a grid the compositor changed, or the other descriptor -- a pty
-        master, for a terminal -- having bytes. Napping and looking was how
-        a terminal used to find a keystroke, and every keystroke paid half
-        the nap on average; the compositor wakes this the moment it writes
-        the key, so what is left is the wakeup itself.
+struct window_poll { int handle; short events, returned; };
 
-        A negative timeout is no timeout. Answers what ppoll answers: how
-        many descriptors are ready, zero on the timeout, negative on refusal.
-*/
-struct window_poll
-{
-        int handle;
-        short events;
-        short returned;
-};
-
-/*
-        Bumping sequence is what says a window changed, and the program that
-        holds the page itself has no compositor to tell: the bump is the whole
-        of it, and the release keeps it from being seen before the cells,
-        damage rows or pixels it announces.
-*/
-
-/*
-        A window of cells given more columns than its lines are apart.
-
-        A line is only as far from the next as the window was wide when it
-        opened, because a line a page apart is a scrolled terminal holding
-        two megabytes for text a quarter as wide. A program laying its text
-        out at more columns than stride calls this first: the compositor
-        moves every line out to a wider stride and stride says what it is.
-        Lines already written keep their text; nothing narrower is ever
-        asked for, so nothing is ever cut.
-*/
 #define WINDOW_STRIDE_STEP 32u
 
-/*
-        The same ring, in the program's own memory.
-
-        A terminal that draws its own pixels needs no compositor to hold its
-        cells: the emulator addresses them through this struct whoever owns
-        the page, so the page is an anonymous mapping, cut for lines
-        max_columns wide and history of them, and only the pages written are
-        ever resident. Its handle names no file, which is what makes
-        window_widen move the lines here and not in a call.
-*/
-static struct window *window_grid_open(unsigned int columns, unsigned int rows,
-                                       unsigned int max_columns, unsigned int history)
+static struct window *window_grid_open(unsigned int columns, unsigned int rows, unsigned int max_columns, unsigned int history)
 {
-        // A ring with no lines has no line to name, and the offsets in the header and
-        // the mapping's length are 32 bits: a grid that needs more is refused here, not
-        // truncated into a mapping the window cannot find its lines in. A line is never
-        // wider than the ring was cut for, and there are never more rows than lines.
-        unsigned long cells, lines, bytes;
+        unsigned long cells, lines, bytes, ring = 1;
         unsigned int cut;
-        // PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS
         long mapped;
         struct window *window;
 
-        if (!history || !max_columns || !columns)
+        if (!history || !max_columns || !columns || history > 0x80000000u)
                 return 0;
         columns = columns < max_columns ? columns : max_columns;
         rows = rows < history ? rows : history;
-
-        /*
-                Line n is slot n modulo history, and head counts lines in 32 bits, so it wraps after four billion
-                of them. A history that does not divide 2^32 puts the lines either side of the wrap in slots that
-                are not next to each other: a screen that spans the wrap showed lines written long ago in place of
-                the newest, and the scrollback was overwritten early. A power of two divides 2^32, so the ring is
-                that size or the next one up.
-        */
-        if (history > 0x80000000u)
-                return 0;
-        // The ring's own name for the size: `power` outside the loop was lib.util.c's function of that name, and its address cut to 32 bits
-        // was the history, so no terminal or kernel log ever got its cells.
-        unsigned long ring = 1;
-
         while (ring < history)
                 ring <<= 1;
-        history = (unsigned int)ring;
-
-        cells = (unsigned long)history * max_columns;
+        history = (unsigned int)ring, cells = (unsigned long)history * max_columns;
         if (cells > 0xffffffffu / sizeof(struct window_cell))
                 return 0;
         lines = WINDOW_PIXELS + cells * sizeof(struct window_cell);
         bytes = (lines + (unsigned long)history * sizeof(unsigned int) + 4095) & ~4095ul;
         if (bytes > 0xffffffffu)
                 return 0;
-
         cut = (columns + WINDOW_STRIDE_STEP - 1) / WINDOW_STRIDE_STEP * WINDOW_STRIDE_STEP;
         mapped = window_call(WINDOW_SYS_MMAP, 0, (long)bytes, 3, 0x22, -1, 0);
-
-        if (mapped < 0 && mapped > -4096)
+        if (WINDOWS_MAP_ERR(mapped))
                 return 0;
-
         window = (struct window *)mapped;
-        window->handle = WINDOW_PRIVATE;
-        window->stride = cut < max_columns ? cut : max_columns;
-        window->history = history;
-        window->head = history + rows;
-        window->lines = (unsigned int)lines;
-        window->columns = window->grid_columns = columns;
-        window->rows = window->grid_rows = rows;
-        window->max_columns = max_columns;
-        window->max_rows = history;
-        window->mapping = (unsigned int)bytes;
+        window->handle = WINDOW_PRIVATE, window->stride = cut < max_columns ? cut : max_columns;
+        window->history = window->max_rows = history, window->head = history + rows, window->lines = (unsigned int)lines;
+        window->columns = window->grid_columns = columns, window->rows = window->grid_rows = rows;
+        window->max_columns = max_columns, window->mapping = (unsigned int)bytes;
         return window;
 }
 
@@ -3625,98 +2011,59 @@ static void window_widen(struct window *window, unsigned int columns)
 
         if (columns <= was)
                 return;
-
-        /*
-                A step at a time, so a drag that widens the window recuts the
-                lines a few times and not once a column, and never past what
-                the ring was cut for. From the last line down: a line only
-                ever moves further out, past the end of every line below it,
-                so nothing lands on a line that has yet to move.
-        */
         stride = (columns + WINDOW_STRIDE_STEP - 1) / WINDOW_STRIDE_STEP * WINDOW_STRIDE_STEP;
         stride = stride < window->max_columns ? stride : window->max_columns;
-
         if (stride <= was)
                 return;
-
         for (unsigned int slot = window->history; slot--;)
         {
-                unsigned int *length = window_lengths(window) + slot;
-                unsigned int kept = *length < was ? *length : was;
+                unsigned int *length = window_lengths(window) + slot, kept = *length < was ? *length : was;
 
                 if (kept)
                         memory_copy(window_cells(window) + (unsigned long)slot * stride,
-                                    window_cells(window) + (unsigned long)slot * was,
-                                    (unsigned long)kept * sizeof(struct window_cell));
+                                    window_cells(window) + (unsigned long)slot * was, (unsigned long)kept * sizeof(struct window_cell));
                 *length = kept;
         }
-
         window->stride = stride;
 }
 
-/*
-        A window on the compositor that runs in userspace: a row of the table taken, drawn into and knocked
-        for, and let go of by closing its door, which the compositor hears as the program having gone.
-*/
-#define WINDOWS_O_READ 0x80800L  // O_RDONLY | O_NONBLOCK | O_CLOEXEC
-#define WINDOWS_O_WRITE 0x80801L // O_WRONLY | O_NONBLOCK | O_CLOEXEC
-#define WINDOWS_O_BOTH 0x80802L  // O_RDWR | O_NONBLOCK | O_CLOEXEC
+/* Window doors, identity/icons, placement, launch-ask, and screen geometry. */
+#define WINDOWS_O_READ 0x80800L
+#define WINDOWS_O_WRITE 0x80801L
+#define WINDOWS_O_BOTH 0x80802L
 
-// "/run/moonwater/window.N" and, with wake, ".wake" after it.
 static void windows_door_name(char *into, unsigned int row, int wake)
 {
-        unsigned int at = 0;
-
-        windows_buf_str(into, 48, &at, WINDOWS_DOOR);
-        windows_buf_num(into, 48, &at, (long)row);
-        if (wake)
-                windows_buf_str(into, 48, &at, ".wake");
+        windows_num_path(into, 48, WINDOWS_DOOR, row, wake ? ".wake" : "");
 }
 
-/*
-        The wake read until it has no more: a read that comes back short had the pipe empty as it read, and a knock
-        after that is still in the pipe for the next wait (a ppoll that is readable), so the read that would answer
-        EAGAIN is not made. A knock is one byte, so a wakeup is one read.
-*/
 static void windows_drain(long handle)
 {
         char bytes[64];
-        long got;
 
-        do
-                got = window_call(WINDOW_SYS_READ, handle, (long)bytes, sizeof(bytes), 0, 0, 0);
-        while (got == (long)sizeof(bytes));
+        while (window_call(WINDOW_SYS_READ, handle, (long)bytes, sizeof(bytes), 0, 0, 0) == (long)sizeof(bytes))
+                ;
 }
 
-/*
-        Whether the table's lists (if it has any) are where the layout puts them and whole inside the mapping: the lists follow the
-        pictures, each list is WINDOW_LIST_BYTES, and the table's room of them fit in size. A table with no lists is fine as it is.
-*/
 static int windows_lists_fit(const struct windows *table, unsigned long size, unsigned long buffer)
 {
         unsigned long lists = table->lists, room = windows_room(table);
 
-        if (!lists)
-                return 1;
-        if (table->list_bytes != WINDOW_LIST_BYTES || lists != WINDOWS_LISTS_AT(buffer, room) || lists > size)
-                return 0;
-        return (size - lists) / WINDOW_LIST_BYTES >= room;
+        return !lists || (table->list_bytes == WINDOW_LIST_BYTES && lists == WINDOWS_LISTS_AT(buffer, room) && lists <= size &&
+                          (size - lists) / WINDOW_LIST_BYTES >= room);
 }
 
 static unsigned int windows_copy_word_clean(char *into, const volatile char *src)
 {
         unsigned int length = 0;
 
-        for (; length < WINDOWS_APP_ID - 1; length++)
+        for (; length < WINDOWS_APP_ID - 1 && src[length]; length++)
         {
                 char byte = src[length];
 
-                if (!byte)
-                        break;
                 into[length] = (unsigned char)byte <= ' ' || byte == 127 ? '?' : byte;
         }
-        into[length] = 0;
-        return length;
+        return into[length] = 0, length;
 }
 
 static void windows_store_word(volatile char *dst, const char *src, unsigned int length)
@@ -3731,15 +2078,10 @@ static unsigned int windows_valid_word_len(const char *text)
 {
         unsigned int length = 0;
 
-        if (!text)
-                return 0;
-        while (length < WINDOWS_APP_ID && text[length])
-        {
+        for (; text && length < WINDOWS_APP_ID && text[length]; length++)
                 if ((unsigned char)text[length] <= ' ' || text[length] == 127)
                         return 0;
-                length++;
-        }
-        return length < WINDOWS_APP_ID ? length : 0;
+        return text && length < WINDOWS_APP_ID ? length : 0;
 }
 
 static void windows_identity_clear(struct windows *table, unsigned int row)
@@ -3756,14 +2098,12 @@ static int windows_app_id_set(struct windows *table, unsigned int row, const cha
 
         if (!length)
                 return 0;
-        windows_store_word(table->app_id[row], text, length);
-        return 1;
+        return windows_store_word(table->app_id[row], text, length), 1;
 }
 
 static unsigned int windows_app_id_read(const struct windows *table, unsigned int row, char *into)
 {
-        into[0] = 0;
-        return table && row < WINDOWS ? windows_copy_word_clean(into, table->app_id[row]) : 0;
+        return into[0] = 0, table && row < WINDOWS ? windows_copy_word_clean(into, table->app_id[row]) : 0;
 }
 
 static unsigned long long windows_starting_read(const struct windows *table, unsigned int slot, char *into)
@@ -3805,29 +2145,19 @@ static void windows_starting_set(struct windows *table, const char *id, unsigned
         __atomic_store_n(&table->starting_at[slot], now, __ATOMIC_RELEASE);
 }
 
-// The app in slot is up, or has been too long: the slot is free.
 static void windows_starting_done(struct windows *table, unsigned int slot)
 {
         if (table && slot < WINDOWS_STARTING)
                 __atomic_store_n(&table->starting_at[slot], 0ull, __ATOMIC_RELEASE);
 }
 
-// A premultiplied pixel held to being one: each colour no more than its alpha.
 static inline unsigned int windows_icon_pixel(unsigned int pixel)
 {
-        unsigned int alpha = pixel >> 24, red = pixel >> 16 & 255, green = pixel >> 8 & 255, blue = pixel & 255;
+        unsigned int a = pixel >> 24, r = pixel >> 16 & 255, g = pixel >> 8 & 255, b = pixel & 255;
 
-        red = red > alpha ? alpha : red, green = green > alpha ? alpha : green, blue = blue > alpha ? alpha : blue;
-        return alpha << 24 | red << 16 | green << 8 | blue;
+        return a << 24 | (r > a ? a : r) << 16 | (g > a ? a : g) << 8 | (b > a ? a : b);
 }
 
-/*
-        Row row's icon is the picture pixels: width by height of premultiplied 0xaarrggbb, stride pixels from one row to the next
-        (stride at least width; nothing past a row's width is read). It is made WINDOWS_ICON each way: the picture's longer side is
-        the icon's, the shorter is centred with clear either side, and each pixel of the icon is the mean of the pixels of the
-        picture under it (one of them where the picture is the smaller). 1 when it was taken and icon_seq moved on to say so; 0, and
-        nothing written, for a row past the table, no pixels, a side of 0 or over WINDOWS_ICON_MOST, or a stride under the width.
-*/
 static int windows_icon_set(struct windows *table, unsigned int row, const unsigned int *pixels, unsigned int width, unsigned int height,
                             unsigned int stride)
 {
@@ -3840,39 +2170,33 @@ static int windows_icon_set(struct windows *table, unsigned int row, const unsig
         __atomic_store_n(&table->icon_seq[row], seq, __ATOMIC_RELEASE);
         for (unsigned int y = 0; y < WINDOWS_ICON; y++)
         {
-                // The rows and columns of the square the picture is in the middle of that this pixel of the icon covers: one at least.
                 unsigned int y0 = y * side / WINDOWS_ICON, y1 = (y + 1) * side / WINDOWS_ICON;
 
                 y1 = y1 > y0 ? y1 : y0 + 1;
                 for (unsigned int x = 0; x < WINDOWS_ICON; x++)
                 {
-                        unsigned int x0 = x * side / WINDOWS_ICON, x1 = (x + 1) * side / WINDOWS_ICON, sum[4] = {0, 0, 0, 0}, count;
+                        unsigned int x0 = x * side / WINDOWS_ICON, x1 = (x + 1) * side / WINDOWS_ICON, sum[4] = {0}, count;
 
                         x1 = x1 > x0 ? x1 : x0 + 1, count = (x1 - x0) * (y1 - y0);
                         for (unsigned int sy = y0; sy < y1; sy++)
                                 for (unsigned int sx = x0; sx < x1; sx++)
                                         if (sx >= left && sx - left < width && sy >= top && sy - top < height)
                                         {
-                                                unsigned int pixel = windows_icon_pixel(pixels[(unsigned long)(sy - top) * stride + (sx - left)]);
+                                                unsigned int p = windows_icon_pixel(pixels[(unsigned long)(sy - top) * stride + (sx - left)]);
 
-                                                sum[0] += pixel >> 24, sum[1] += pixel >> 16 & 255, sum[2] += pixel >> 8 & 255, sum[3] += pixel & 255;
+                                                sum[0] += p >> 24, sum[1] += p >> 16 & 255, sum[2] += p >> 8 & 255, sum[3] += p & 255;
                                         }
                         ((volatile unsigned int *)table->icon[row])[y * WINDOWS_ICON + x] =
                             (sum[0] + count / 2) / count << 24 | (sum[1] + count / 2) / count << 16 | (sum[2] + count / 2) / count << 8 | (sum[3] + count / 2) / count;
                 }
         }
-        // Even again, one on, and never 0, which is no icon.
         __atomic_store_n(&table->icon_seq[row], seq + 1 ? seq + 1 : 2u, __ATOMIC_RELEASE);
         return 1;
 }
 
-// Row row's icon copied into into (WINDOWS_ICON * WINDOWS_ICON pixels, each held premultiplied). Answers the icon_seq the copy is of,
-// which is even and not 0, or 0 with into untouched past what a torn copy left: the row has none, or a writer was in it at each of four tries.
 static unsigned int windows_icon_read(const struct windows *table, unsigned int row, unsigned int *into)
 {
-        if (!table || row >= WINDOWS)
-                return 0;
-        for (int tries = 0; tries < 4; tries++)
+        for (int tries = 0; table && row < WINDOWS && tries < 4; tries++)
         {
                 unsigned int seq = __atomic_load_n(&table->icon_seq[row], __ATOMIC_ACQUIRE);
 
@@ -3889,27 +2213,17 @@ static unsigned int windows_icon_read(const struct windows *table, unsigned int 
         return 0;
 }
 
-/*
-        Whether a header describes a table of size bytes that can be drawn through: the pixels where the layout puts
-        them, every buffer a whole number of pages and all 2 * room of them (the table's capacity) inside the mapping, and each row of a
-        buffer stride pixels long with stride at least the output's width, the rows used fitting in the buffer. The
-        compositor writes exactly that; a table that does not is refused, not drawn through.
-*/
 static int windows_fits(unsigned long size, unsigned long pixels, unsigned long buffer, unsigned int stride,
                         unsigned int width, unsigned int height, unsigned int room)
 {
-        if (pixels != WINDOWS_HEADER || size < WINDOWS_HEADER || !buffer || buffer % 4096 || !room || room > WINDOWS)
-                return 0;
-        if (buffer > (size - WINDOWS_HEADER) / (2 * (unsigned long)room))
-                return 0;
-        if (!width || !height || stride < width)
-                return 0;
-        return buffer / 4 / stride >= height;
+        return pixels == WINDOWS_HEADER && size >= WINDOWS_HEADER && buffer && !(buffer % 4096) && room && room <= WINDOWS &&
+               buffer <= (size - WINDOWS_HEADER) / (2 * (unsigned long)room) && width && height && stride >= width && buffer / 4 / stride >= height;
 }
 
 static void windows_reset_row(struct windows *table, unsigned int row)
 {
         unsigned char *list = window_list_of(table, (int)row);
+        #define Z(f) __atomic_store_n(&table->f, 0, __ATOMIC_RELEASE)
 
         table->state[row] = table->buffer_index[row] = table->glass[row] = table->asked[row] = table->ground[row] = 0;
         table->x[row] = table->y[row] = table->place_x[row] = table->place_y[row] = 0;
@@ -3926,31 +2240,16 @@ static void windows_reset_row(struct windows *table, unsigned int row)
         windows_identity_clear(table, row);
         table->event_tail[row] = __atomic_load_n(&table->event_head[row], __ATOMIC_ACQUIRE);
         __atomic_store_n(&table->osk_tail[row], __atomic_load_n(&table->osk_head[row], __ATOMIC_ACQUIRE), __ATOMIC_RELEASE);
-        __atomic_store_n(&table->close_asks[row], 0u, __ATOMIC_RELEASE);
-        __atomic_store_n(&table->window_scale[row], 0u, __ATOMIC_RELEASE);
-        __atomic_store_n(&table->field[row], 0u, __ATOMIC_RELEASE);
-        __atomic_store_n(&table->pointer_shape[row], WINDOW_POINTER_ARROW, __ATOMIC_RELEASE);
-        __atomic_store_n(&table->lift[row], 0u, __ATOMIC_RELEASE);
-        __atomic_store_n(&table->page[row], 0u, __ATOMIC_RELEASE);
-        __atomic_store_n(&table->hover_off[row], 0u, __ATOMIC_RELEASE);
-        __atomic_store_n(&table->pinch_wanted[row], 0u, __ATOMIC_RELEASE);
-        __atomic_store_n(&table->spoiled_height[row][0], 0, __ATOMIC_RELEASE);
-        __atomic_store_n(&table->spoiled_height[row][1], 0, __ATOMIC_RELEASE);
-        __atomic_store_n(&table->moved[row], 0u, __ATOMIC_RELEASE);
-        __atomic_store_n(&table->clip_watch[row], 0u, __ATOMIC_RELEASE);
-        __atomic_store_n(&table->drop_ok[row], 0u, __ATOMIC_RELEASE);
-        __atomic_store_n(&table->shown[row], 0u, __ATOMIC_RELEASE);
-        __atomic_store_n(&table->frame[row], 0, __ATOMIC_RELEASE);
+        Z(close_asks[row]); Z(window_scale[row]); Z(field[row]); Z(pointer_shape[row]);
+        Z(lift[row]); Z(page[row]); Z(hover_off[row]); Z(pinch_wanted[row]);
+        Z(spoiled_height[row][0]); Z(spoiled_height[row][1]); Z(moved[row]); Z(clip_watch[row]);
+        Z(drop_ok[row]); Z(shown[row]); Z(frame[row]);
         if (list)
                 memory_zero(list, UI_DRAW_LIST_HEADER);
-        __atomic_store_n(&table->list_state[row], 0u, __ATOMIC_RELEASE);
-        __atomic_store_n(&table->list_seen[row], 0u, __ATOMIC_RELEASE);
+        Z(list_state[row]); Z(list_seen[row]);
+        #undef Z
 }
 
-/*
-        A name a window may be remembered by: one to WINDOWS_NAME - 1 lower-case letters, digits and hyphens, a
-        letter or a digit first. It is written into a file of /root and read back, so nothing else is one.
-*/
 static int window_name_valid(const char *name)
 {
         unsigned int at = 0;
@@ -3963,55 +2262,37 @@ static int window_name_valid(const char *name)
         return at < WINDOWS_NAME;
 }
 
-/*
-        A number of a placement, read from text up to stop (0: the end of the word): digits, a minus before them
-        only where low is below zero, no zero in front of another digit and no minus zero, from low to high.
-        Where the number ends, or null for anything else.
-*/
 static const char *window_place_number(const char *text, char stop, int low, int high, int *value)
 {
         unsigned int len = 0;
 
         while (text[len] && text[len] != stop)
                 len++;
-        if (text[len] != stop || !windows_scan_int(text, len, low, high, 6, 1, value))
-                return 0;
-        return text + len;
+        return text[len] == stop && windows_scan_int(text, len, low, high, 6, 1, value) ? text + len : 0;
 }
 
-static int window_place_word(const char *word, const char *name)
-{
-        while (*name && *word == *name)
-                word++, name++;
-        return !*name && !*word;
-}
-
-/*
-        The words of a placement, as `moonwater window` takes them and MOONWATER_PLACE holds them: center, at X,Y,
-        maximized, fullscreen, screen N, size WxH and name NAME, each at most once and one of the first four. X
-        and Y are -16384 to 16384, N 1 to 8, W and H 1 to 16384. Answers how many of words were the placement's
-        (the first that is none of them ends it), or -1 when one of them is wrong: a number out of its range or
-        with anything after its digits, a name that is none, a word with nothing after it, a word given twice,
-        two of the first four, or a size with maximized or fullscreen, which are the screen's size.
-*/
 static int window_place_parse(struct window_place *place, const char *const *words, unsigned int count)
 {
+        static const struct { const char *word; unsigned char how, bit; } spec[] = {
+            {"center", WINDOW_PLACE_CENTER, WINDOW_PLACE_HOW}, {"maximized", WINDOW_PLACE_MAXIMIZED, WINDOW_PLACE_HOW},
+            {"fullscreen", WINDOW_PLACE_FULLSCREEN, WINDOW_PLACE_HOW}, {"at", WINDOW_PLACE_AT, WINDOW_PLACE_HOW},
+            {"screen", 0, WINDOW_PLACE_SCREEN}, {"size", 0, WINDOW_PLACE_SIZE}, {"name", 0, 32u},
+        };
         unsigned int at = 0, seen = 0;
 
         memory_zero(place, sizeof(*place));
         while (at < count)
         {
-                const char *word = words[at], *value = at + 1 < count ? words[at + 1] : 0, *after;
-                unsigned int how = window_place_word(word, "center") ? WINDOW_PLACE_CENTER
-                                   : window_place_word(word, "maximized") ? WINDOW_PLACE_MAXIMIZED
-                                   : window_place_word(word, "fullscreen") ? WINDOW_PLACE_FULLSCREEN
-                                   : window_place_word(word, "at") ? WINDOW_PLACE_AT : 0;
-                unsigned int bit = how ? WINDOW_PLACE_HOW
-                                   : window_place_word(word, "screen") ? WINDOW_PLACE_SCREEN
-                                   : window_place_word(word, "size") ? WINDOW_PLACE_SIZE
-                                   : window_place_word(word, "name") ? 32u : 0;
-                int number;
+                const char *val = at + 1 < count ? words[at + 1] : 0, *after;
+                unsigned int how = 0, bit = 0;
+                int a, b;
 
+                for (unsigned int i = 0; i < sizeof(spec) / sizeof(spec[0]); i++)
+                        if (string_equals((string_address)words[at], (string_address)spec[i].word))
+                        {
+                                how = spec[i].how, bit = spec[i].bit;
+                                break;
+                        }
                 if (!bit)
                         break;
                 if (seen & bit)
@@ -4022,40 +2303,37 @@ static int window_place_parse(struct window_place *place, const char *const *wor
                         place->how |= how;
                         continue;
                 }
-                if (!value)
+                if (!val)
                         return -1;
                 at++;
                 if (how == WINDOW_PLACE_AT)
                 {
-                        after = window_place_number(value, ',', -WINDOW_PLACE_MOST, WINDOW_PLACE_MOST, &place->x);
-                        if (!after || !window_place_number(after + 1, 0, -WINDOW_PLACE_MOST, WINDOW_PLACE_MOST, &place->y))
+                        if (!(after = window_place_number(val, ',', -WINDOW_PLACE_MOST, WINDOW_PLACE_MOST, &place->x)) ||
+                            !window_place_number(after + 1, 0, -WINDOW_PLACE_MOST, WINDOW_PLACE_MOST, &place->y))
                                 return -1;
                         place->how |= how;
                 }
                 else if (bit == WINDOW_PLACE_SCREEN)
                 {
-                        if (!window_place_number(value, 0, 1, (int)WINDOW_PLACE_SCREENS, &number))
+                        if (!window_place_number(val, 0, 1, (int)WINDOW_PLACE_SCREENS, &a))
                                 return -1;
-                        place->screen = (unsigned int)number - 1, place->how |= WINDOW_PLACE_SCREEN;
+                        place->screen = (unsigned int)a - 1, place->how |= bit;
                 }
                 else if (bit == WINDOW_PLACE_SIZE)
                 {
-                        after = window_place_number(value, 'x', 1, WINDOW_PLACE_MOST, &number);
-                        place->width = (unsigned int)number;
-                        if (!after || !window_place_number(after + 1, 0, 1, WINDOW_PLACE_MOST, &number))
+                        if (!(after = window_place_number(val, 'x', 1, WINDOW_PLACE_MOST, &a)) ||
+                            !window_place_number(after + 1, 0, 1, WINDOW_PLACE_MOST, &b))
                                 return -1;
-                        place->height = (unsigned int)number, place->how |= WINDOW_PLACE_SIZE;
+                        place->width = (unsigned int)a, place->height = (unsigned int)b, place->how |= bit;
                 }
-                else if (!window_name_valid(value))
+                else if (!window_name_valid(val))
                         return -1;
                 else
-                        for (unsigned int letter = 0; value[letter]; letter++)
-                                place->name[letter] = value[letter];
+                        string_copy_bounded((string_address)place->name, (string_address)val, WINDOWS_NAME);
         }
-        if ((place->how & WINDOW_PLACE_SIZE) && ((place->how & WINDOW_PLACE_HOW) == WINDOW_PLACE_MAXIMIZED ||
-                                                 (place->how & WINDOW_PLACE_HOW) == WINDOW_PLACE_FULLSCREEN))
-                return -1;
-        return (int)at;
+        return (place->how & WINDOW_PLACE_SIZE) && ((place->how & WINDOW_PLACE_HOW) == WINDOW_PLACE_MAXIMIZED ||
+                                                    (place->how & WINDOW_PLACE_HOW) == WINDOW_PLACE_FULLSCREEN)
+                   ? -1 : (int)at;
 }
 
 static unsigned int window_place_say(const struct window_place *place, char *into, unsigned int room)
@@ -4067,18 +2345,14 @@ static unsigned int window_place_say(const struct window_place *place, char *int
         if (how && how < 5)
                 windows_buf_str(text, sizeof(text), &at, modes[how]);
         if (how == WINDOW_PLACE_AT)
-                windows_buf_str(text, sizeof(text), &at, " "), windows_buf_num(text, sizeof(text), &at, place->x),
-                    windows_buf_str(text, sizeof(text), &at, ","), windows_buf_num(text, sizeof(text), &at, place->y);
+                windows_buf_kv(text, sizeof(text), &at, " ", place->x), windows_buf_kv(text, sizeof(text), &at, ",", place->y);
         if (place->how & WINDOW_PLACE_SCREEN)
-                windows_buf_str(text, sizeof(text), &at, at ? " screen " : "screen "),
-                    windows_buf_num(text, sizeof(text), &at, (long)place->screen + 1);
+                windows_buf_kv(text, sizeof(text), &at, at ? " screen " : "screen ", (long)place->screen + 1);
         if (place->how & WINDOW_PLACE_SIZE)
-                windows_buf_str(text, sizeof(text), &at, at ? " size " : "size "),
-                    windows_buf_num(text, sizeof(text), &at, (long)place->width),
-                    windows_buf_str(text, sizeof(text), &at, "x"), windows_buf_num(text, sizeof(text), &at, (long)place->height);
+                windows_buf_kv(text, sizeof(text), &at, at ? " size " : "size ", (long)place->width),
+                    windows_buf_kv(text, sizeof(text), &at, "x", (long)place->height);
         if (place->name[0])
-                windows_buf_str(text, sizeof(text), &at, at ? " name " : "name "),
-                    windows_buf_str(text, sizeof(text), &at, place->name);
+                windows_buf_str(text, sizeof(text), &at, at ? " name " : "name "), windows_buf_str(text, sizeof(text), &at, place->name);
         length = at < room ? at : room ? room - 1 : 0;
         if (length)
                 memory_copy(into, text, length);
@@ -4087,38 +2361,26 @@ static unsigned int window_place_say(const struct window_place *place, char *int
         return length;
 }
 
-// A placement into a row's columns, the name too when it has one: what the compositor reads with the first picture.
 static void windows_place_set(struct windows *table, unsigned int row, const struct window_place *place)
 {
-        table->place_x[row] = place->x;
-        table->place_y[row] = place->y;
-        table->place_width[row] = place->width;
-        table->place_height[row] = place->height;
-        table->place_screen[row] = place->screen;
+        table->place_x[row] = place->x, table->place_y[row] = place->y;
+        table->place_width[row] = place->width, table->place_height[row] = place->height, table->place_screen[row] = place->screen;
         if (place->name[0])
-                for (unsigned int at = 0; at < WINDOWS_NAME; at++)
-                        table->name[row][at] = place->name[at];
+                memory_copy(table->name[row], place->name, WINDOWS_NAME);
         __atomic_store_n(&table->place[row], place->how, __ATOMIC_RELEASE);
 }
 
-// The row's window has no place of its own (WINDOW_PLACE_FREE): the compositor puts it, whatever its x and y say.
 static void windows_place_free(struct windows *table, unsigned int row)
 {
         __atomic_or_fetch(&table->place[row], WINDOW_PLACE_FREE, __ATOMIC_RELEASE);
 }
 
-/*
-        The text of MOONWATER_PLACE as a placement: words a single blank apart, every one of them the
-        placement's. False for anything else, which is no placement at all.
-*/
 static int window_place_from_text(struct window_place *place, const char *text)
 {
         char words[WINDOW_PLACE_TEXT];
         const char *word[WINDOW_PLACE_WORDS];
-        unsigned int length = 0, count = 0;
+        unsigned int length = (unsigned int)string_length_max((string_address)text, WINDOW_PLACE_TEXT), count = 0;
 
-        while (text[length] && length < WINDOW_PLACE_TEXT)
-                length++;
         if (!length || length == WINDOW_PLACE_TEXT)
                 return 0;
         for (unsigned int at = 0; at <= length; at++)
@@ -4130,7 +2392,6 @@ static int window_place_from_text(struct window_place *place, const char *text)
                                 return 0;
                         word[count++] = words + at;
                 }
-                // A blank at either end, or two together, is a word that is empty.
                 if (text[at] == ' ' && (!at || at + 1 == length || text[at + 1] == ' '))
                         return 0;
         }
@@ -4139,49 +2400,43 @@ static int window_place_from_text(struct window_place *place, const char *text)
 
 static char *windows_env_value(char *entry, const char *name, unsigned int len)
 {
-        for (unsigned int i = 0; i < len; i++)
-                if (entry[i] != name[i])
-                        return 0;
-        return entry[len] == '=' ? entry + len + 1 : 0;
+        return !memory_compare(entry, name, len) && entry[len] == '=' ? entry + len + 1 : 0;
 }
 
 static void windows_place_take(struct windows *table, unsigned int row)
 {
-        string_address address_to environment = program_environment_list();
+        string_address address_to env = program_environment_list();
         int placed = 0;
         struct window_place place;
 
-        for (unsigned int at = 0; environment && environment[at]; at++)
+        for (unsigned int at = 0; env && env[at]; at++)
         {
-                char *val = windows_env_value((char *)environment[at], WINDOW_PLACE_VARIABLE, sizeof(WINDOW_PLACE_VARIABLE) - 1);
+                char *val = windows_env_value((char *)env[at], WINDOW_PLACE_VARIABLE, sizeof(WINDOW_PLACE_VARIABLE) - 1);
 
-                if (!val)
-                        continue;
-                if (!placed && *val && window_place_from_text(&place, val))
-                        windows_place_set(table, row, &place), placed = 1;
-                *val = 0;
+                if (val)
+                {
+                        if (!placed && *val && window_place_from_text(&place, val))
+                                windows_place_set(table, row, &place), placed = 1;
+                        *val = 0;
+                }
         }
 }
 
-static void windows_asked_take(struct windows *table, unsigned int row, string_address address_to environment)
+static void windows_asked_take(struct windows *table, unsigned int row, string_address address_to env)
 {
-        for (unsigned int at = 0; environment && environment[at]; at++)
+        for (unsigned int at = 0; env && env[at]; at++)
         {
-                char *val = windows_env_value((char *)environment[at], WINDOW_ASKED_VARIABLE, sizeof(WINDOW_ASKED_VARIABLE) - 1);
+                char *val = windows_env_value((char *)env[at], WINDOW_ASKED_VARIABLE, sizeof(WINDOW_ASKED_VARIABLE) - 1);
 
-                if (!val)
-                        continue;
-                if (val[0] == '1' && !val[1])
-                        __atomic_store_n(&table->asked[row], 1u, __ATOMIC_RELEASE);
-                *val = 0;
+                if (val)
+                {
+                        if (val[0] == '1' && !val[1])
+                                __atomic_store_n(&table->asked[row], 1u, __ATOMIC_RELEASE);
+                        *val = 0;
+                }
         }
 }
 
-/*
-        A process's parent and its start (/proc/PID/stat's fourth field and its twenty-second, the clock ticks since boot it
-        started at): the start, 0 when there is no such process. The fields are read after the command name's last ')', which
-        may hold anything.
-*/
 static unsigned long windows_proc_stat(unsigned int pid, unsigned int *parent)
 {
         char path[32], text[512];
@@ -4191,49 +2446,32 @@ static unsigned long windows_proc_stat(unsigned int pid, unsigned int *parent)
 
         *parent = 0;
         windows_num_path(path, sizeof(path), "/proc/", pid, "/stat");
-        handle = pid ? window_call(WINDOW_SYS_OPENAT, -100, (long)path, 0x80000, 0, 0, 0) : -1; // O_RDONLY | O_CLOEXEC
-        if (handle < 0)
+        if (!pid || (handle = window_call(WINDOW_SYS_OPENAT, -100, (long)path, 0x80000, 0, 0, 0)) < 0)
                 return 0;
         got = window_call(WINDOW_SYS_READ, handle, (long)text, (long)sizeof text - 1, 0, 0, 0);
         window_call(WINDOW_SYS_CLOSE, handle, 0, 0, 0, 0, 0);
         for (long k = 0; k < got; k++)
                 from = text[k] == ')' ? k : from;
-        if (from < 0)
-                return 0;
-        // " S ppid ... starttime": field 3 is the state; each field a run of what is not a space.
-        for (long k = from + 2; k < got && field <= 22; k++)
+        for (long k = from >= 0 ? from + 2 : got; k < got && field <= 22; k++)
                 if (text[k] == ' ')
                         field++, value = 0;
                 else if (text[k] >= '0' && text[k] <= '9')
                 {
                         value = value * 10 + (unsigned long)(text[k] - '0');
-                        if (field == 4)
-                                *parent = (unsigned int)value;
-                        if (field == 22)
-                                start = value;
+                        if (field == 4) *parent = (unsigned int)value;
+                        if (field == 22) start = value;
                 }
         return start;
 }
 
-/*
-        The person's ask recorded for this process, before it runs what was asked for (the kit's launches, through
-        window_asked_environment; a terminal's shell; the runner's launch of a person's rule): WINDOWS_ASKED_DIR/PID, holding
-        its start (windows_proc_stat). The compositor gives the keys to the first window of a Wayland client that is this
-        process or one of its descendants (compositor_wl_asked), reading only what root wrote there: a client's own
-        environment, which any program sets for itself, is not asked. The start keeps a record of a process gone from naming
-        the next one given its number; the compositor takes such a one away when it meets it. Only root can write it (the
-        directory is root's, 0700): anyone else's record is not made, and its windows are not asked.
-*/
-static const char *windows_asked_dir = WINDOWS_ASKED_DIR; // (a check points it at a directory of its own)
+static const char *windows_asked_dir = WINDOWS_ASKED_DIR;
 
-// The record of pid's ask, windows_asked_dir/PID, into path (64 bytes).
 static void windows_asked_path(char *path, unsigned int pid)
 {
         unsigned int at = 0;
 
         windows_buf_str(path, 64, &at, windows_asked_dir);
-        windows_buf_put(path, 64, &at, "/", 1);
-        windows_buf_num(path, 64, &at, (long)pid);
+        windows_buf_kv(path, 64, &at, "/", (long)pid);
 }
 
 static void windows_asked_record(void)
@@ -4249,97 +2487,57 @@ static void windows_asked_record(void)
         windows_asked_path(path, pid);
         windows_buf_num(line, sizeof(line), &length, (long)start);
         windows_buf_put(line, sizeof(line), &length, "\n", 1);
-        // O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW (the architecture's) | O_CLOEXEC
         handle = window_call(WINDOW_SYS_OPENAT, -100, (long)path, 01 | 0100 | 01000 | O_NOFOLLOW | 02000000, 0600, 0, 0);
-        if (handle < 0)
-                return;
-        window_call(WINDOW_SYS_WRITE, handle, (long)line, (long)length, 0, 0, 0);
-        window_call(WINDOW_SYS_CLOSE, handle, 0, 0, 0, 0, 0);
+        if (handle >= 0)
+                window_call(WINDOW_SYS_WRITE, handle, (long)line, (long)length, 0, 0, 0), window_call(WINDOW_SYS_CLOSE, handle, 0, 0, 0, 0, 0);
 }
 
-/*
-        The environment of a program the user asked for: the program's own, with MOONWATER_ASKED=1 first and any
-        MOONWATER_ASKED it had taken out. Built once in a static array; a program with more variables than that is
-        started as it is, without the mark, which is what it was before the mark. Called in the child that runs it, so the
-        ask is recorded for it there too (windows_asked_record), which is what a Wayland client is asked by.
-*/
 static string_address address_to window_asked_environment(void)
 {
         static string_address environment[WINDOW_ASKED_ENVIRONMENT];
         static char asked[] = WINDOW_ASKED_VARIABLE "=1";
         string_address address_to inherited = program_environment_list();
-        unsigned int used = 0;
+        unsigned int used = 1;
 
         windows_asked_record();
+        environment[0] = asked;
         for (unsigned int at = 0; inherited && inherited[at]; at++)
                 if (!string_has_prefix(inherited[at], WINDOW_ASKED_VARIABLE "="))
-                        used++;
-        if (used + 2 > WINDOW_ASKED_ENVIRONMENT)
-                return inherited;
-
-        used = 0;
-        environment[used++] = asked;
-        for (unsigned int at = 0; inherited && inherited[at]; at++)
-                if (!string_has_prefix(inherited[at], WINDOW_ASKED_VARIABLE "="))
+                {
+                        if (used + 1 >= WINDOW_ASKED_ENVIRONMENT)
+                                return inherited;
                         environment[used++] = inherited[at];
+                }
         environment[used] = null;
         return environment;
 }
 
-// The name a program's windows are remembered by, unless its placement named one.
 static void windows_name(const struct window_row *own, const char *name)
 {
-        if (!name || own->table->name[own->row][0] || !window_name_valid(name))
-                return;
-        for (unsigned int at = 0; name[at] && at < WINDOWS_NAME - 1; at++)
-                own->table->name[own->row][at] = name[at];
+        if (name && !own->table->name[own->row][0] && window_name_valid(name))
+                string_copy_bounded((string_address)own->table->name[own->row], (string_address)name, WINDOWS_NAME);
 }
 
-/*
-        Screen index of the table's list as x, y, width and height in the desktop's space: what a window that opens
-        on it centres on. A table that lists none (a headless compositor, or one from before the list) is one screen,
-        the output's size at 0, 0, and an index past the list is the primary's, 0. The header is shared and any
-        mapper may write it, so what is read is held to what the compositor's arithmetic takes (WINDOW_COORD_MAX).
-        Answers the index it read.
-*/
-static unsigned int windows_output(const struct windows *table, unsigned int index, int *x, int *y, int *width,
-                                   int *height)
+static unsigned int windows_output(const struct windows *table, unsigned int index, int *x, int *y, int *width, int *height)
 {
         unsigned int count = __atomic_load_n(&table->outputs, __ATOMIC_ACQUIRE);
-        long values[4];
+        long v[4];
 
         if (!count || count > WINDOWS_OUTPUTS)
-        {
-                index = 0;
-                values[0] = values[1] = 0;
-                values[2] = (long)table->output_width;
-                values[3] = (long)table->output_height;
-        }
+                index = 0, v[0] = v[1] = 0, v[2] = (long)table->output_width, v[3] = (long)table->output_height;
         else
-        {
-                index = index < count ? index : 0;
-                values[0] = table->output_x[index];
-                values[1] = table->output_y[index];
-                values[2] = (long)table->output_w[index];
-                values[3] = (long)table->output_h[index];
-        }
+                index = index < count ? index : 0, v[0] = table->output_x[index], v[1] = table->output_y[index],
+                v[2] = (long)table->output_w[index], v[3] = (long)table->output_h[index];
         for (unsigned int at = 0; at < 4; at++)
         {
                 long low = at < 2 ? -WINDOW_COORD_MAX : 1;
 
-                values[at] = values[at] < low ? low : values[at] > WINDOW_COORD_MAX ? WINDOW_COORD_MAX : values[at];
+                v[at] = v[at] < low ? low : v[at] > WINDOW_COORD_MAX ? WINDOW_COORD_MAX : v[at];
         }
-        *x = (int)values[0];
-        *y = (int)values[1];
-        *width = (int)values[2];
-        *height = (int)values[3];
+        *x = (int)v[0], *y = (int)v[1], *width = (int)v[2], *height = (int)v[3];
         return index;
 }
 
-/*
-        The screen a point of the desktop is on, as windows_output reads each: the first whose rectangle holds it, and the primary's
-        (index 0) when none does. Answers the index it read; x, y, width and height are that screen's.
-*/
 static unsigned int windows_output_at(const struct windows *table, int px, int py, int *x, int *y, int *width, int *height)
 {
         unsigned int count = __atomic_load_n(&table->outputs, __ATOMIC_ACQUIRE);
@@ -4350,109 +2548,61 @@ static unsigned int windows_output_at(const struct windows *table, int px, int p
         return windows_output(table, 0, x, y, width, height);
 }
 
-/*
-        The identify numbers of the screens the table lists: number[i] is screen i's, from 1, in reading order: the screens
-        are read as lines of text, the top edge first and then the left edge (the top row left to right, then the row
-        below it), and a screen level with another in both is numbered by its place in the list. Answers the count, which
-        is windows_output's: one screen numbered 1 where the table lists none or more than WINDOWS_OUTPUTS. The edges are
-        copied once, so the numbers are a permutation of 1 to the count whatever the compositor writes meanwhile. The
-        identify overlay and the settings' Display map and dropdowns all take their numbers from here.
-*/
 static unsigned int windows_screen_numbers(const struct windows *table, unsigned int number[WINDOWS_OUTPUTS])
 {
         unsigned int count = __atomic_load_n(&table->outputs, __ATOMIC_ACQUIRE);
         int left[WINDOWS_OUTPUTS], top[WINDOWS_OUTPUTS];
 
         if (!count || count > WINDOWS_OUTPUTS)
-        {
-                number[0] = 1;
-                return 1;
-        }
+                return number[0] = 1, 1;
         for (unsigned int at = 0; at < count; at++)
-        {
-                left[at] = table->output_x[at];
-                top[at] = table->output_y[at];
-        }
+                left[at] = table->output_x[at], top[at] = table->output_y[at];
         for (unsigned int at = 0; at < count; at++)
         {
                 unsigned int rank = 1;
 
-                for (unsigned int other = 0; other < count; other++)
-                {
-                        b32 first = top[other] < top[at] || (top[other] == top[at] && left[other] < left[at]) ||
-                                    (top[other] == top[at] && left[other] == left[at] && other < at);
-
-                        rank += first;
-                }
+                for (unsigned int o = 0; o < count; o++)
+                        rank += top[o] < top[at] || (top[o] == top[at] && (left[o] < left[at] || (left[o] == left[at] && o < at)));
                 number[at] = rank;
         }
         return count;
 }
 
-/*
-        Where windows were last put by the hand, by their names: what the compositor keeps across boots in a file
-        of /root (registry.c's SETTING_WINDOWS_PLACES_PATH), written when a drag or a resize ends and read when a
-        window of a name opens, and what `moonwater canvas windows` reads and its forget empties. One line a
-        window, the newest first, PLACES_MOST of them at most:
+/* Remembered window places, rfkill radio state, kmsg tick, and table mapping/row claiming. */
+enum { PLACES_MOST = 32, PLACES_LINE = 96, PLACES_BYTES = PLACES_MOST * PLACES_LINE };
 
-                NAME SCREEN ORIGIN_X ORIGIN_Y X Y WIDTH HEIGHT
+struct place_kept { char name[WINDOWS_NAME], screen[WINDOWS_NAME]; int origin_x, origin_y, x, y, width, height; };
+struct places { unsigned int count; struct place_kept kept[PLACES_MOST]; };
 
-        SCREEN is the name of the connector the window was on (Virtual-1, HDMI-A-1), ORIGIN that screen's top
-        left on the desktop when it was, and X and Y the window's top left from there. Every number is inside
-        WINDOW_PLACE_MOST and a size is at least 1. A line that is not one -- a word too many or too few, a blank
-        at an end or two together, a number past its bound or with anything after its digits, a name that is
-        none, no line end -- is left out, and so is a second line of a name: the file is the compositor's, but
-        it is a file, and a file can be anything.
-*/
-#define PLACES_MOST 32
-#define PLACES_LINE 96
-#define PLACES_BYTES (PLACES_MOST * PLACES_LINE)
-
-struct place_kept
-{
-        char name[WINDOWS_NAME], screen[WINDOWS_NAME];
-        int origin_x, origin_y, x, y, width, height;
-};
-
-struct places
-{
-        unsigned int count;
-        struct place_kept kept[PLACES_MOST];
-};
-
-// A connector's name as a place is kept with it: letters, digits and hyphens, one to fifteen of them.
 static int place_screen_name_valid(const char *name)
 {
         unsigned int at = 0;
 
         for (; at < WINDOWS_NAME && name[at]; at++)
-                if (!((name[at] >= 'a' && name[at] <= 'z') || (name[at] >= 'A' && name[at] <= 'Z') ||
-                      (name[at] >= '0' && name[at] <= '9') || name[at] == '-'))
+                if (!((unsigned int)((name[at] | 32) - 'a') < 26u || (name[at] >= '0' && name[at] <= '9') || name[at] == '-'))
                         return 0;
         return at && at < WINDOWS_NAME;
 }
 
-// The line of a name, or -1.
 static int places_find(const struct places *places, const char *name)
 {
         for (unsigned int at = 0; at < places->count; at++)
         {
-                unsigned int letter = 0;
+                unsigned int k = 0;
 
-                while (letter < WINDOWS_NAME && places->kept[at].name[letter] == name[letter] && name[letter])
-                        letter++;
-                if (letter < WINDOWS_NAME && places->kept[at].name[letter] == name[letter])
+                while (k < WINDOWS_NAME && places->kept[at].name[k] == name[k] && name[k])
+                        k++;
+                if (k < WINDOWS_NAME && places->kept[at].name[k] == name[k])
                         return (int)at;
         }
         return -1;
 }
 
-// One line, ended at its line end, as a place: false when it is none.
 static int places_line(char *line, struct place_kept *kept)
 {
         char *field[8];
         unsigned int fields = 0;
-        int value[6];
+        int v[6];
 
         for (unsigned int at = 0;; at++)
         {
@@ -4466,7 +2616,6 @@ static int places_line(char *line, struct place_kept *kept)
                         }
                         continue;
                 }
-                // A blank first, last or after another is a field that is empty.
                 if (line[at] == ' ' && (!at || !line[at - 1] || !line[at + 1]))
                         return 0;
                 if (!line[at])
@@ -4476,24 +2625,15 @@ static int places_line(char *line, struct place_kept *kept)
         if (fields != 8 || !window_name_valid(field[0]) || !place_screen_name_valid(field[1]))
                 return 0;
         for (unsigned int at = 0; at < 6; at++)
-                if (!window_place_number(field[2 + at], 0, at < 4 ? -WINDOW_PLACE_MOST : 1, WINDOW_PLACE_MOST, &value[at]))
+                if (!window_place_number(field[2 + at], 0, at < 4 ? -WINDOW_PLACE_MOST : 1, WINDOW_PLACE_MOST, &v[at]))
                         return 0;
-        for (unsigned int at = 0; at < WINDOWS_NAME; at++)
-                kept->name[at] = kept->screen[at] = 0;
-        for (unsigned int at = 0; field[0][at]; at++)
-                kept->name[at] = field[0][at];
-        for (unsigned int at = 0; field[1][at]; at++)
-                kept->screen[at] = field[1][at];
-        kept->origin_x = value[0];
-        kept->origin_y = value[1];
-        kept->x = value[2];
-        kept->y = value[3];
-        kept->width = value[4];
-        kept->height = value[5];
+        memory_zero(kept, sizeof(*kept));
+        string_copy_bounded((string_address)kept->name, (string_address)field[0], WINDOWS_NAME);
+        string_copy_bounded((string_address)kept->screen, (string_address)field[1], WINDOWS_NAME);
+        kept->origin_x = v[0], kept->origin_y = v[1], kept->x = v[2], kept->y = v[3], kept->width = v[4], kept->height = v[5];
         return 1;
 }
 
-// The places a file's text holds, of length bytes.
 static void places_parse(struct places *places, const char *text, unsigned long length)
 {
         unsigned long at = 0;
@@ -4508,49 +2648,40 @@ static void places_parse(struct places *places, const char *text, unsigned long 
                 for (; at + size < length && text[at + size] != '\n'; size++)
                         if (size < PLACES_LINE)
                                 line[size] = text[at + size];
-                // A line with no end is a line cut short, and one longer than any the compositor writes is none.
-                if (at + size >= length || size >= PLACES_LINE)
+                if (at + size < length && size < PLACES_LINE)
                 {
-                        at += size + 1;
-                        continue;
+                        line[size] = 0;
+                        if (places_line(line, &kept) && places_find(places, kept.name) < 0)
+                                places->kept[places->count++] = kept;
                 }
-                line[size] = 0;
                 at += size + 1;
-                if (places_line(line, &kept) && places_find(places, kept.name) < 0)
-                        places->kept[places->count++] = kept;
         }
 }
 
-// The places as the file keeps them, into room bytes (PLACES_BYTES holds all of them): its length.
 static unsigned long places_say(const struct places *places, char *into, unsigned long room)
 {
         unsigned long length = 0;
 
         for (unsigned int at = 0; at < places->count; at++)
         {
-                const struct place_kept *kept = &places->kept[at];
-                const int numbers[6] = {kept->origin_x, kept->origin_y, kept->x, kept->y, kept->width, kept->height};
+                const struct place_kept *k = &places->kept[at];
+                const int nums[6] = {k->origin_x, k->origin_y, k->x, k->y, k->width, k->height};
                 char line[PLACES_LINE * 2];
                 unsigned int pos = 0;
 
-                windows_buf_str(line, sizeof(line), &pos, kept->name);
+                windows_buf_str(line, sizeof(line), &pos, k->name);
                 windows_buf_str(line, sizeof(line), &pos, " ");
-                windows_buf_str(line, sizeof(line), &pos, kept->screen);
-                for (unsigned int number = 0; number < 6; number++)
-                {
-                        windows_buf_str(line, sizeof(line), &pos, " ");
-                        windows_buf_num(line, sizeof(line), &pos, numbers[number]);
-                }
+                windows_buf_str(line, sizeof(line), &pos, k->screen);
+                for (unsigned int i = 0; i < 6; i++)
+                        windows_buf_kv(line, sizeof(line), &pos, " ", nums[i]);
                 windows_buf_put(line, sizeof(line), &pos, "\n", 1);
                 if (length + pos > room)
                         break;
-                for (unsigned int byte = 0; byte < pos; byte++)
-                        into[length++] = line[byte];
+                memory_copy(into + length, line, pos), length += pos;
         }
         return length;
 }
 
-// A place noted: the newest line, the line of its name it had taken out, and the oldest left off when they are all used.
 static void places_note(struct places *places, const struct place_kept *kept)
 {
         int found = places_find(places, kept->name);
@@ -4559,37 +2690,19 @@ static void places_note(struct places *places, const struct place_kept *kept)
         for (unsigned int at = last; at > 0; at--)
                 places->kept[at] = places->kept[at - 1];
         places->kept[0] = *kept;
-        if (found < 0 && places->count < PLACES_MOST)
-                places->count++;
+        places->count += found < 0 && places->count < PLACES_MOST;
 }
 
-/*
-        A row taken: the table mapped and its header copied and checked (-22 when it does not fit), the first row
-        with no pid given this one, the row's program fields reset and its placement taken from MOONWATER_PLACE
-        (windows_place_take), and its door and its wake opened. The row is
-        claimed with WINDOWS_TAKING, a pid no peer takes for a program, and the program's pid is stored last, so a
-        peer never finds a row half reset. The door is opened for writing first, which fails when no compositor
-        holds its other end, and then for reading and writing, which is the end kept: a knock on a door whose
-        compositor has gone is then a byte in a pipe and never a SIGPIPE. Answers 0 or a negative errno.
-*/
 #define WINDOWS_TAKING 0x80000000u
 
-
-// The radio a type of rfkill switch is for, as the Settings key its issue is under (window.c's WINDOWS_KEY_GPU style), or null for a type that is none
-// of the radios Settings has a row for. A radio blocked by its switch in hardware is the fault, and one blocked in software is when it was asked for
-// (radio_asked_on); the detail says which.
 static const char *radio_key_of_type(const char *type)
 {
-        if (type && string_equals((string_address)type, (string_address)"wlan"))
-                return "wifi";
-        if (type && string_equals((string_address)type, (string_address)"bluetooth"))
-                return "bluetooth";
-        return null;
+        if (!type)
+                return null;
+        return string_equals((string_address)type, (string_address)"wlan") ? "wifi"
+               : string_equals((string_address)type, (string_address)"bluetooth") ? "bluetooth" : null;
 }
 
-// What a switch's state says is wrong with its radio, or null when nothing is. A block in hardware is always that. A block in software is only when the
-// radio was asked for (asked): the machine blocks Wi-Fi and Bluetooth in software from boot until moonwater wifi on or moonwater bluetooth on, which is
-// the radio as it was set, and not one a person is to be told to unblock.
 static const char *radio_blocked_detail(const char *type, int soft, int hard, int asked)
 {
         const char *key = radio_key_of_type(type);
@@ -4600,92 +2713,58 @@ static const char *radio_blocked_detail(const char *type, int soft, int hard, in
                 return "blocked by its hardware switch: turn the radio on at the switch";
         if (!asked)
                 return null;
-        return string_equals((string_address)key, (string_address)"wifi") ? "blocked in software (rfkill) though it is switched on: run moonwater wifi on"
-                                                                         : "blocked in software (rfkill) though it is switched on: run moonwater bluetooth on";
+        return key[0] == 'w' ? "blocked in software (rfkill) though it is switched on: run moonwater wifi on"
+                             : "blocked in software (rfkill) though it is switched on: run moonwater bluetooth on";
 }
 
-// Reads a small file of sysfs, whole, into buf (ended): its length, or -1.
-static long radio_read_file(const char *path, char *buf, unsigned int room)
-{
-        return windows_read_line(path, buf, room, 0x80000);
-}
-
-// Whether a radio was asked for, as src/sh/host/radio.c's radio_kept reads the machine's own record: the word the person last set (word: the first line of
-// /root/wifi.power or /root/bluetooth.power, null when the file is not there) is "on"; with no word, the radio is in use anyway when it has a saved
-// network or a remembered device (list: the length of the first line of /root/wifi or /root/bluetooth), and the machine counts that as on.
 static int radio_asked(const char *word, long list)
 {
         return word ? string_equals((string_address)word, (string_address)"on") : list > 0;
 }
 
-// The radio under key (wifi or bluetooth) asked for, from the machine's files.
-static int radio_asked_on(const char *key)
-{
-        int wifi = string_equals((string_address)key, (string_address)"wifi");
-        char word[8], list[4];
-
-        if (radio_read_file(wifi ? "/root/wifi.power" : "/root/bluetooth.power", word, sizeof(word)) >= 0)
-                return radio_asked(word, 0);
-        return radio_asked(null, radio_read_file(wifi ? "/root/wifi" : "/root/bluetooth", list, sizeof(list)));
-}
-
-// The path of one of an rfkill switch's files (/sys/class/rfkill/rfkillN/leaf).
-static void radio_path(char *path, unsigned int room, unsigned int n, const char *leaf)
-{
-        windows_num_path(path, room, "/sys/class/rfkill/rfkill", n, "/");
-        string_append_bounded((string_address)path, (string_address)leaf, room);
-}
-
-// The rfkill switches (/sys/class/rfkill, eight at most): a radio that is blocked, in hardware or in software after it was asked for, is on the board
-// under its key (the first switch of its key that is blocked says how), and one that is not, or whose switch has gone (a controller the usb policy
-// held, one unplugged), is cleared, which it was not when it went: the loop only ever saw the switches that were still there. Read once a second with
-// the kernel's records (kernel_notices_tick).
-static unsigned char radio_shown[2]; // wifi, bluetooth: whether the board holds its radio's block, so that nothing is cleared that was never set
+static unsigned char radio_shown[2];
 
 static void radio_state_tick(struct windows *table)
 {
-        static const char *const keys[2] = {"wifi", "bluetooth"};
+        static const struct { const char *key, *power, *list; } radios[2] = {
+            {"wifi", "/root/wifi.power", "/root/wifi"}, {"bluetooth", "/root/bluetooth.power", "/root/bluetooth"}};
         const char *found[2] = {null, null};
 
         if (!table)
                 return;
         for (unsigned int n = 0; n < 8; n++)
         {
-                char type[16], soft[4], hard[4], path[64];
+                char type[16], soft[4], hard[4], path[64], word[8], list[4];
                 const char *key, *detail;
+                unsigned int r;
 
-                radio_path(path, sizeof(path), n, "type");
-                if (radio_read_file(path, type, sizeof(type)) < 0 || !(key = radio_key_of_type(type)))
+                windows_num_path(path, sizeof(path), "/sys/class/rfkill/rfkill", n, "/type");
+                if (windows_read_line(path, type, sizeof(type), 0x80000) < 0 || !(key = radio_key_of_type(type)))
                         continue;
-                radio_path(path, sizeof(path), n, "soft");
-                if (radio_read_file(path, soft, sizeof(soft)) < 0)
-                        soft[0] = 0;
-                radio_path(path, sizeof(path), n, "hard");
-                if (radio_read_file(path, hard, sizeof(hard)) < 0)
-                        hard[0] = 0;
-                detail = radio_blocked_detail(type, soft[0] == '1', hard[0] == '1', soft[0] == '1' && radio_asked_on(key));
-                if (detail && !found[key[0] == 'b'])
-                        found[key[0] == 'b'] = detail;
+                windows_num_path(path, sizeof(path), "/sys/class/rfkill/rfkill", n, "/soft");
+                windows_read_line(path, soft, sizeof(soft), 0x80000);
+                windows_num_path(path, sizeof(path), "/sys/class/rfkill/rfkill", n, "/hard");
+                windows_read_line(path, hard, sizeof(hard), 0x80000);
+                r = key[0] == 'b';
+                detail = radio_blocked_detail(type, soft[0] == '1', hard[0] == '1',
+                                              soft[0] == '1' && (windows_read_line(radios[r].power, word, sizeof(word), 0x80000) >= 0
+                                                                     ? radio_asked(word, 0)
+                                                                     : radio_asked(null, windows_read_line(radios[r].list, list, sizeof(list), 0x80000))));
+                if (detail && !found[r])
+                        found[r] = detail;
         }
         for (unsigned int i = 0; i < 2; i++)
-        {
                 if (found[i])
-                        windows_issue_set(table, keys[i], WINDOWS_ISSUE_WARNING, WINDOWS_ISSUE_RADIO, 0, 0, found[i]), radio_shown[i] = 1;
+                        windows_issue_set(table, radios[i].key, WINDOWS_ISSUE_WARNING, WINDOWS_ISSUE_RADIO, 0, 0, found[i]), radio_shown[i] = 1;
                 else if (radio_shown[i])
-                        windows_issue_clear(table, keys[i], WINDOWS_ISSUE_RADIO), radio_shown[i] = 0;
-        }
+                        windows_issue_clear(table, radios[i].key, WINDOWS_ISSUE_RADIO), radio_shown[i] = 0;
 }
 
-// Dismisses the kernel notices of the classes in mask (bit i is class i): their issues leave the board now, and the feeder starts each class again
-// from nothing at its next publish (kernel_notices_publish takes the bit). An error stays on the board until it is dismissed, so this is how it goes.
-// The number of issues cleared.
 static unsigned int windows_kernel_dismiss(struct windows *table, unsigned int mask)
 {
         unsigned int cleared = 0;
 
-        if (!table)
-                return 0;
-        for (unsigned int idx = 0; idx < KERNEL_NOTICE_CLASSES; idx++)
+        for (unsigned int idx = 0; table && idx < KERNEL_NOTICE_CLASSES; idx++)
                 if (mask >> idx & 1u)
                 {
                         cleared += windows_issue_clear(table, kernel_notice_key[idx], WINDOWS_ISSUE_KERNEL_GPU + idx);
@@ -4694,8 +2773,6 @@ static unsigned int windows_kernel_dismiss(struct windows *table, unsigned int m
         return cleared;
 }
 
-// One tick of the feeder (once a second from the compositor): reads up to KERNEL_NOTICE_MOST records from /dev/kmsg without waiting, counts
-// them, and publishes. /dev/kmsg is opened on the first tick (the compositor is root); a kernel that does not give it is not asked again.
 static void kernel_notices_tick(struct windows *table, unsigned long long now)
 {
         struct kernel_notices *k = &kernel_notice_state;
@@ -4703,7 +2780,7 @@ static void kernel_notices_tick(struct windows *table, unsigned long long now)
 
         if (k->fd == -1)
         {
-                long file = window_call(WINDOW_SYS_OPENAT, -100, (long)KMSG_FILE, 0x800 | 0x80000, 0, 0, 0); // O_NONBLOCK | O_CLOEXEC, O_RDONLY
+                long file = window_call(WINDOW_SYS_OPENAT, -100, (long)KMSG_FILE, 0x800 | 0x80000, 0, 0, 0);
 
                 k->fd = file >= 0 ? (int)file : -2;
         }
@@ -4719,34 +2796,22 @@ static void kernel_notices_tick(struct windows *table, unsigned long long now)
         radio_state_tick(table);
 }
 
-/*
-        The compositor asked for rows past the `had` in use, which every program found taken: the clipboard's door knocked (it wakes the
-        compositor's loop, whose pass makes rows when fewer than its spares are free, compositor_rows_spare), and the table watched for
-        the rows to grow, for as long as the compositor reads the door: while a busy compositor is making rows for others (a thousand
-        windows opened at once), the wait goes on, and it ends when the rows stop growing for WINDOWS_ROWS_WAIT_MS or the door has no
-        reader. 1 when they grew past `had`; 0 when the table has no room for more (its capacity), no compositor reads the door, or none
-        came: the take is refused then, as a full table was.
-*/
 #define WINDOWS_ROWS_WAIT_MS 30000
 static int windows_rows_ask(const struct windows *table, unsigned int had)
 {
         unsigned int seen = windows_rows(table);
         long door;
 
-        if (had >= windows_room(table))
-                return 0;
-        door = window_call(WINDOW_SYS_OPENAT, -100, (long)WINDOWS_CLIP_DOOR, WINDOWS_O_WRITE, 0, 0, 0);
-        if (door < 0)
+        if (had >= windows_room(table) || (door = window_call(WINDOW_SYS_OPENAT, -100, (long)WINDOWS_CLIP_DOOR, WINDOWS_O_WRITE, 0, 0, 0)) < 0)
                 return 0;
         for (unsigned int waited = 0; waited < WINDOWS_ROWS_WAIT_MS && windows_rows(table) <= had; waited++)
         {
-                long nap[2] = {0, 1000000}; // a millisecond, then the table looked at again
+                long nap[2] = {0, 1000000};
                 char byte = 0;
 
-                // Rows made for others since the last look: the compositor is at it, and the wait starts again.
                 if (windows_rows(table) != seen)
                         seen = windows_rows(table), waited = 0;
-                if (waited % 100 == 0 && window_call(WINDOW_SYS_WRITE, door, (long)&byte, 1, 0, 0, 0) == -32) // EPIPE: no compositor
+                if (waited % 100 == 0 && window_call(WINDOW_SYS_WRITE, door, (long)&byte, 1, 0, 0, 0) == -32)
                         break;
                 window_call(WINDOW_SYS_PPOLL, 0, 0, (long)nap, 0, 8, 0);
         }
@@ -4754,123 +2819,80 @@ static int windows_rows_ask(const struct windows *table, unsigned int had)
         return windows_rows(table) > had;
 }
 
-/*
-        A table's file, open as the descriptor file, mapped read-write and shared at the file's length, which is what size gets: the mapping, or a
-        negative errno (-22 for a file shorter than a table). The descriptor is closed either way; the mapping keeps the file.
-*/
 static long windows_table_map(long file, long *size)
 {
         long mapped;
 
         *size = window_call(WINDOW_SYS_LSEEK, file, 0, 2, 0, 0, 0);
-        // PROT_READ | PROT_WRITE, MAP_SHARED
         mapped = *size >= (long)sizeof(struct windows) ? window_call(WINDOW_SYS_MMAP, 0, *size, 3, 1, file, 0) : -22;
         window_call(WINDOW_SYS_CLOSE, file, 0, 0, 0, 0, 0);
         return mapped;
 }
 
-/*
-        The table for a program that is not a window and only writes the board (the audio service): mapped read-write from the table's file, and
-        kept while the file is the one it was mapped from, by its inode and its length. The compositor unlinks the table and makes it again at each
-        start, so each call looks at the file: a table that is new, or grown or cut, is mapped again (the old mapping given back), and a table of
-        another layout (windows_abi_ok) is no table. The table is root's (WINDOWS_MODE), so only a root process raises an issue; a process that
-        cannot map it gets none (null), and its issues are simply not shown.
-*/
 static struct windows *windows_board_cache;
 static unsigned long windows_board_inode;
 static long windows_board_bytes;
 
-// Gives back the board's mapping, if it has one, and forgets it.
 static void windows_board_forget(void)
 {
         if (windows_board_cache)
                 window_call(WINDOW_SYS_MUNMAP, (long)windows_board_cache, windows_board_bytes, 0, 0, 0, 0);
-        windows_board_cache = null;
-        windows_board_inode = 0;
-        windows_board_bytes = 0;
+        windows_board_cache = null, windows_board_inode = 0, windows_board_bytes = 0;
 }
 
 static struct windows *windows_board_at(const char *path)
 {
-        // st_ino is at 8 and st_size at 48 in the struct stat of x86_64 and of the asm-generic layout arm64 and riscv64 share.
-        unsigned long stat[18];
-        long file = window_call(WINDOW_SYS_OPENAT, -100, (long)path, WINDOW_OPEN_FLAGS, 0, 0, 0);
+        unsigned long st[18];
+        long file = window_call(WINDOW_SYS_OPENAT, -100, (long)path, WINDOW_OPEN_FLAGS, 0, 0, 0), size, mapped;
         struct windows *table;
-        long size, mapped;
 
         if (file < 0)
-        {
-                windows_board_forget();
-                return null;
-        }
-        if (window_call(WINDOW_SYS_FSTAT, file, (long)stat, 0, 0, 0, 0) < 0)
+                goto fail;
+        if (window_call(WINDOW_SYS_FSTAT, file, (long)st, 0, 0, 0, 0) < 0)
         {
                 window_call(WINDOW_SYS_CLOSE, file, 0, 0, 0, 0, 0);
-                windows_board_forget();
-                return null;
+                goto fail;
         }
-        if (windows_board_cache && stat[1] == windows_board_inode && (long)stat[6] == windows_board_bytes)
-        {
-                window_call(WINDOW_SYS_CLOSE, file, 0, 0, 0, 0, 0);
-                return windows_board_cache;
-        }
+        if (windows_board_cache && st[1] == windows_board_inode && (long)st[6] == windows_board_bytes)
+                return window_call(WINDOW_SYS_CLOSE, file, 0, 0, 0, 0, 0), windows_board_cache;
         mapped = windows_table_map(file, &size);
-        if (mapped < 0 && mapped > -4096)
-        {
-                windows_board_forget();
-                return null;
-        }
+        if (WINDOWS_MAP_ERR(mapped))
+                goto fail;
         table = (struct windows *)mapped;
         if (!windows_abi_ok(__atomic_load_n(&table->abi, __ATOMIC_ACQUIRE)))
         {
                 window_call(WINDOW_SYS_MUNMAP, mapped, size, 0, 0, 0, 0);
-                windows_board_forget();
-                return null;
+                goto fail;
         }
         windows_board_forget();
-        windows_board_cache = table;
-        windows_board_inode = stat[1];
-        windows_board_bytes = size;
+        windows_board_cache = table, windows_board_inode = st[1], windows_board_bytes = size;
         return table;
+fail:
+        windows_board_forget();
+        return null;
 }
 
-static struct windows *windows_board_map(void)
-{
-        return windows_board_at(WINDOWS_TABLE);
-}
+static struct windows *windows_board_map(void) { return windows_board_at(WINDOWS_TABLE); }
 
 static long windows_take(struct window_row *own)
 {
         long spark = window_call(WINDOW_SYS_OPENAT, -100, (long)"/dev/spark", WINDOW_OPEN_FLAGS, 0, 0, 0);
-        long file = spark >= 0 ? window_call(WINDOW_SYS_IOCTL, spark, WINDOWS_IOCTL_TABLE_GET, 0, 0, 0, 0) : -2;
-        long size, mapped, probe, failed = 0;
-        unsigned int pid = (unsigned int)window_call(WINDOW_SYS_GETPID, 0, 0, 0, 0, 0, 0);
-        struct windows *table;
+        long file = spark >= 0 ? window_call(WINDOW_SYS_IOCTL, spark, WINDOWS_IOCTL_TABLE_GET, 0, 0, 0, 0) : -2, size, mapped, probe, failed = 0, err;
+        unsigned int pid = (unsigned int)window_call(WINDOW_SYS_GETPID, 0, 0, 0, 0, 0, 0), stride, width, height;
         unsigned long pixels, buffer;
-        unsigned int stride, width, height;
+        struct windows *table;
         char name[48];
 
-        // The table from the device, which hands any program the compositor's; the path where it gave none
-        // (a headless compositor's file).
         if (spark >= 0)
                 window_call(WINDOW_SYS_CLOSE, spark, 0, 0, 0, 0, 0);
-        if (file < 0)
-                file = window_call(WINDOW_SYS_OPENAT, -100, (long)WINDOWS_TABLE, WINDOW_OPEN_FLAGS, 0, 0, 0);
-        if (file < 0)
+        if (file < 0 && (file = window_call(WINDOW_SYS_OPENAT, -100, (long)WINDOWS_TABLE, WINDOW_OPEN_FLAGS, 0, 0, 0)) < 0)
                 return file;
-
         mapped = windows_table_map(file, &size);
-        if (mapped < 0 && mapped > -4096)
+        if (WINDOWS_MAP_ERR(mapped))
                 return mapped;
-
         table = (struct windows *)mapped;
-        // The header read once, each field into the program's copy, and checked there: a peer may write any of it.
-        // A table of another layout (an older or newer build of the compositor's): refused, EPROTO, before any other field is read.
         if (!windows_abi_ok(__atomic_load_n(&table->abi, __ATOMIC_ACQUIRE)))
-        {
-                window_call(WINDOW_SYS_MUNMAP, mapped, size, 0, 0, 0, 0);
-                return -71; // EPROTO
-        }
+                return err = -71, window_call(WINDOW_SYS_MUNMAP, mapped, size, 0, 0, 0, 0), err;
         pixels = __atomic_load_n(&table->pixels, __ATOMIC_ACQUIRE);
         buffer = __atomic_load_n(&table->buffer, __ATOMIC_ACQUIRE);
         stride = __atomic_load_n(&table->stride, __ATOMIC_ACQUIRE);
@@ -4878,53 +2900,32 @@ static long windows_take(struct window_row *own)
         height = __atomic_load_n(&table->output_height, __ATOMIC_ACQUIRE);
         if (!windows_fits((unsigned long)size, pixels, buffer, stride, width, height, windows_room(table)) ||
             !windows_lists_fit(table, (unsigned long)size, buffer))
-        {
-                window_call(WINDOW_SYS_MUNMAP, mapped, size, 0, 0, 0, 0);
-                return -22; // EINVAL
-        }
-        own->table = table;
-        own->bytes = (unsigned long)size;
-        own->buffer = buffer;
-        own->stride = stride;
-        own->output_width = width;
-        own->output_height = height;
-        own->closes = 0;
-
-        /*
-                The first free row whose door opens. A row whose door does not open (the compositor could not open it again after
-                the program before closed it, or is doing so at this moment) is given back and the next free row tried: the lowest
-                free row is the one every program takes first, so one door that would not open was every new window refused for
-                the rest of the session, with thirty-one rows free. With no row left the answer is the last door's (no compositor
-                reads any of them: ENXIO), or that the table is full.
-        */
+                return window_call(WINDOW_SYS_MUNMAP, mapped, size, 0, 0, 0, 0), -22;
+        *own = (struct window_row){.table = table, .bytes = (unsigned long)size, .buffer = buffer,
+                                   .stride = stride, .output_width = width, .output_height = height};
         for (unsigned int from = 0;; from = own->row + 1)
         {
                 for (own->row = from; own->row < windows_rows(table); own->row++)
                 {
                         unsigned int none = 0;
 
-                        if (__atomic_compare_exchange_n(&table->pid[own->row], &none, WINDOWS_TAKING, 0, __ATOMIC_ACQ_REL,
-                                                        __ATOMIC_RELAXED))
+                        if (__atomic_compare_exchange_n(&table->pid[own->row], &none, WINDOWS_TAKING, 0, __ATOMIC_ACQ_REL, __ATOMIC_RELAXED))
                                 break;
                 }
-
                 if (own->row >= windows_rows(table))
                 {
                         unsigned int had = own->row;
 
-                        // Every row in use is taken: the compositor is asked for more, and the walk goes on into them.
                         if (had && windows_rows_ask(table, had))
                         {
                                 own->row = had - 1;
                                 continue;
                         }
-                        window_call(WINDOW_SYS_MUNMAP, mapped, size, 0, 0, 0, 0);
-                        return failed ? failed : -28; // ENOSPC
+                        return window_call(WINDOW_SYS_MUNMAP, mapped, size, 0, 0, 0, 0), failed ? failed : -28;
                 }
                 windows_reset_row(table, own->row);
                 windows_place_take(table, own->row);
                 windows_asked_take(table, own->row, program_environment_list());
-
                 windows_door_name(name, own->row, 0);
                 probe = window_call(WINDOW_SYS_OPENAT, -100, (long)name, WINDOWS_O_WRITE, 0, 0, 0);
                 own->door = probe >= 0 ? window_call(WINDOW_SYS_OPENAT, -100, (long)name, WINDOWS_O_BOTH, 0, 0, 0) : probe;
@@ -4934,37 +2935,24 @@ static long windows_take(struct window_row *own)
                 own->wake = own->door >= 0 ? window_call(WINDOW_SYS_OPENAT, -100, (long)name, WINDOWS_O_READ, 0, 0, 0) : -1;
                 if (own->door >= 0 && own->wake >= 0)
                         break;
-
                 failed = own->door < 0 ? own->door : own->wake;
-                // No compositor to empty the row: it is emptied here.
                 if (own->door >= 0)
                         window_call(WINDOW_SYS_CLOSE, own->door, 0, 0, 0, 0, 0);
                 __atomic_store_n(&table->pid[own->row], 0, __ATOMIC_RELEASE);
         }
-
         windows_drain(own->wake);
         __atomic_store_n(&table->pid[own->row], pid, __ATOMIC_RELEASE);
         return 0;
 }
 
-/*
-        Whether the window has been asked to go since this last said so: true once for each ask the compositor counts in the row
-        (close_asks), so a program that answers an ask by staying (an editor with unsaved changes) hears the next press of its
-        close button as a new ask and hears nothing between the two. WINDOW_CLOSING was read instead, a bit that is set at the
-        first ask and stays: a program that stayed was asked again on every pass of its loop, and left by itself the moment the
-        reason it stayed was gone. A row whose count went back to none (the compositor let it go) has been asked nothing.
-*/
+/* Window row operations, atomic file write, clipboard/drag-and-drop codec, and colour parsing. */
 static int windows_close_asked(struct window_row *own)
 {
         unsigned int asks = __atomic_load_n(&own->table->close_asks[own->row], __ATOMIC_ACQUIRE);
 
-        if (asks == own->closes)
-                return 0;
-        own->closes = asks;
-        return asks != 0;
+        return asks == own->closes ? 0 : (own->closes = asks, asks != 0);
 }
 
-// Something for the compositor to look at.
 static void windows_knock(const struct window_row *own)
 {
         char byte = 0;
@@ -4972,7 +2960,12 @@ static void windows_knock(const struct window_row *own)
         window_call(WINDOW_SYS_WRITE, own->door, (long)&byte, 1, 0, 0, 0);
 }
 
-// Writes a UTF-8-safe truncated title into the row (NUL-padded tail) and knocks when changed.
+static void windows_knock_bump(const struct window_row *own, unsigned int *serial)
+{
+        __atomic_add_fetch(serial, 1, __ATOMIC_RELEASE);
+        windows_knock(own);
+}
+
 static void windows_title_set(const struct window_row *own, const char *title)
 {
         char *dst = own->table->title[own->row];
@@ -4980,7 +2973,6 @@ static void windows_title_set(const struct window_row *own, const char *title)
 
         while (title && title[len] && len < WINDOWS_TITLE - 1)
                 len++;
-        // Do not split a multi-byte UTF-8 sequence at the boundary.
         while (len && (unsigned char)title[len] >= 0x80 && (unsigned char)title[len] < 0xc0)
                 len--;
         for (unsigned int i = 0; i < WINDOWS_TITLE; i++)
@@ -4994,11 +2986,6 @@ static void windows_title_set(const struct window_row *own, const char *title)
                 windows_knock(own);
 }
 
-/*
-        A key the on-screen keyboard sends the window with the keys (WINDOW_KEYBOARD): one entry of the row's ring, knocked on. A ring of
-        WINDOWS_OSK entries the compositor has not read yet refuses the key (0): a keyboard that taps faster than the compositor reads is
-        not a case a person reaches, and a refused key is none rather than a late one.
-*/
 static int windows_keyboard_send(const struct window_row *own, int code, int character, unsigned int flags)
 {
         struct windows *table = own->table;
@@ -5007,32 +2994,22 @@ static int windows_keyboard_send(const struct window_row *own, int code, int cha
         if (head - __atomic_load_n(&table->osk_tail[own->row], __ATOMIC_ACQUIRE) >= WINDOWS_OSK)
                 return 0;
         at = head % WINDOWS_OSK;
-        table->osk_code[own->row][at] = code;
-        table->osk_character[own->row][at] = character;
-        table->osk_flags[own->row][at] = flags;
+        table->osk_code[own->row][at] = code, table->osk_character[own->row][at] = character, table->osk_flags[own->row][at] = flags;
         __atomic_store_n(&table->osk_head[own->row], head + 1, __ATOMIC_RELEASE);
-        windows_knock(own);
-        return 1;
+        return windows_knock(own), 1;
 }
 
-// A picture, drawn into buffer which: named, counted and knocked for. Width, height and the damage first.
 static void windows_show(const struct window_row *own, unsigned int which)
 {
-        struct windows *table = own->table;
-
-        table->buffer_index[own->row] = which & 1u;
-        __atomic_store_n(&table->frame[own->row], table->frame[own->row] + 1, __ATOMIC_RELEASE);
-        windows_knock(own);
+        own->table->buffer_index[own->row] = which & 1u;
+        windows_knock_bump(own, &own->table->frame[own->row]);
 }
 
-// Whether the compositor has taken the last picture, so the other buffer is free.
 static int windows_ready(const struct window_row *own)
 {
         return __atomic_load_n(&own->table->shown[own->row], __ATOMIC_ACQUIRE) == own->table->frame[own->row];
 }
 
-// The next event, or false when there is none. Its number is taken and 0 left in its place, which tells the compositor
-// that joins a wheel's turns to the last unread one (compositor_post) that this one is read and no longer to be added to.
 static int windows_event(const struct window_row *own, struct window_event *event)
 {
         struct windows *table = own->table;
@@ -5040,12 +3017,9 @@ static int windows_event(const struct window_row *own, struct window_event *even
 
         if (__atomic_load_n(&table->event_head[row], __ATOMIC_ACQUIRE) == tail)
                 return 0;
-
-        event->type = table->event_type[row][at];
-        event->flags = table->event_flags[row][at];
+        event->type = table->event_type[row][at], event->flags = table->event_flags[row][at];
         event->a = __atomic_exchange_n(&table->event_a[row][at], 0, __ATOMIC_ACQ_REL);
-        event->b = table->event_b[row][at];
-        event->when = table->event_when[row][at];
+        event->b = table->event_b[row][at], event->when = table->event_when[row][at];
         __atomic_store_n(&table->event_tail[row], tail + 1, __ATOMIC_RELEASE);
         return 1;
 }
@@ -5065,7 +3039,7 @@ static long windows_wait_also(const struct window_row *own, long also, long othe
         if (ready > 0 && wanted[0].returned)
         {
                 windows_drain(own->wake);
-                if (wanted[0].returned & 16) // POLLHUP
+                if (wanted[0].returned & 16)
                         return -1;
         }
         if (ready > 0 && also_at < 3 && wanted[also_at].returned)
@@ -5078,12 +3052,7 @@ static long windows_wait(const struct window_row *own, long other, long nanoseco
         return windows_wait_also(own, -1, other, nanoseconds);
 }
 
-/*
-        What of buffer which the compositor wrote over since the program last drew into it: false when nothing,
-        and the rectangle cleared once read. The program draws it again, as it would cells that changed.
-*/
-static int windows_spoiled(const struct window_row *own, unsigned int which, int *x, int *y, int *width,
-                           int *height)
+static int windows_spoiled(const struct window_row *own, unsigned int which, int *x, int *y, int *width, int *height)
 {
         struct windows *table = own->table;
         unsigned int row = own->row;
@@ -5091,25 +3060,18 @@ static int windows_spoiled(const struct window_row *own, unsigned int which, int
         which &= 1u;
         if (__atomic_load_n(&table->spoiled_height[row][which], __ATOMIC_ACQUIRE) <= 0)
                 return 0;
-        *x = table->spoiled_x[row][which];
-        *y = table->spoiled_y[row][which];
-        *width = table->spoiled_width[row][which];
-        *height = table->spoiled_height[row][which];
+        *x = table->spoiled_x[row][which], *y = table->spoiled_y[row][which];
+        *width = table->spoiled_width[row][which], *height = table->spoiled_height[row][which];
         __atomic_store_n(&table->spoiled_height[row][which], 0, __ATOMIC_RELEASE);
         return *width > 0 && *height > 0;
 }
 
-// A buffer's pages given back, for a program that will draw it whole before it shows it again; never while the
-// compositor shows the window straight from its buffers, whose pages the card reads.
 static void windows_discard(const struct window_row *own, unsigned int which)
 {
-        if (__atomic_load_n(&own->table->pinned[own->row], __ATOMIC_ACQUIRE))
-                return;
-        // MADV_REMOVE
-        window_call(WINDOW_SYS_MADVISE, (long)windows_pixels(own, which), (long)own->buffer, 9, 0, 0, 0);
+        if (!__atomic_load_n(&own->table->pinned[own->row], __ATOMIC_ACQUIRE))
+                window_call(WINDOW_SYS_MADVISE, (long)windows_pixels(own, which), (long)own->buffer, 9, 0, 0, 0);
 }
 
-// The window gone: its door closed, which is all the compositor needs.
 static void windows_leave(struct window_row *own)
 {
         window_call(WINDOW_SYS_CLOSE, own->door, 0, 0, 0, 0, 0);
@@ -5119,7 +3081,6 @@ static void windows_leave(struct window_row *own)
 }
 
 #ifdef STANDARD_MODERN_C
-// Writes length bytes to "<path>.new" relative to dir and atomically renames over path (0600 or mode). Returns true on success.
 static b32 file_write_atomic_at(b32 dir, string_address path, const void *bytes, positive length, positive mode)
 {
         char stage[512];
@@ -5129,61 +3090,27 @@ static b32 file_write_atomic_at(b32 dir, string_address path, const void *bytes,
 
         if (path_len + 5 > sizeof(stage))
                 return false;
-        memory_copy(stage, path, path_len);
-        memory_copy(stage + path_len, ".new", 5);
-        handle = system_open_at_mode(dir, (string_address)stage, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC | O_NOFOLLOW, mode);
-        if (handle < 0)
+        memory_copy(stage, path, path_len), memory_copy(stage + path_len, ".new", 5);
+        if ((handle = system_open_at_mode(dir, (string_address)stage, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC | O_NOFOLLOW, mode)) < 0)
                 return false;
         ok = !length || system_write_all((positive)handle, bytes, length) == (bipolar)length;
         system_close(handle);
         if (!ok || system_rename_at(dir, (string_address)stage, dir, path, 0) < 0)
-        {
-                system_remove_at(dir, (string_address)stage, 0);
-                return false;
-        }
+                return system_remove_at(dir, (string_address)stage, 0), false;
         return true;
 }
 #endif
 
-/*
-        The clipboard from a program's side. A copy is one memfd of every type it holds, sealed against any change (the format below),
-        named in the row with a knock; the memfd is held until the compositor says it took it (windows_clip_done) or the next copy of
-        the selection. A paste: asked for with a knock, and read once the compositor says READY, from its own memfd through
-        /proc/PID/fd: the size it said, the index whole, and its text UTF-8 with no NUL, whatever the compositor checked before.
-
-        The format, the one every kind of client's copy is held in (a program's here, a Wayland client's and an X client's read into one
-        by the compositor): the bytes of each type one after another, then the index, a record a type (its offset and its length, 8 bytes
-        each, its name's length, 2, then the name and a NUL), then the index's offset (8), the count of types (4) and WINDOWS_CLIP_MAGIC
-        (8). A name is printable ASCII; text is the type WINDOWS_CLIP_TEXT, UTF-8 with no NUL, and is offered under each name text goes by
-        (windows_clip_offered).
-*/
-#define WINDOWS_MFD_CLOEXEC 1u
-#define WINDOWS_MFD_SEALING 2u
-#define WINDOWS_F_ADD_SEALS 1033
-#define WINDOWS_F_GET_SEALS 1034
-#define WINDOWS_SEALS 15 // SEAL, SHRINK, GROW and WRITE
-#define WINDOWS_CLIP_MAGIC 0x317650494c43574dull // "MWCLIPv1"
-#define WINDOWS_CLIP_TRAILER 20
+enum { WINDOWS_MFD_CLOEXEC = 1u, WINDOWS_MFD_SEALING = 2u, WINDOWS_F_ADD_SEALS = 1033, WINDOWS_F_GET_SEALS = 1034, WINDOWS_SEALS = 15, WINDOWS_CLIP_TRAILER = 20 };
+#define WINDOWS_CLIP_MAGIC 0x317650494c43574dull
 #define WINDOWS_CLIP_TEXT "text/plain;charset=utf-8"
 #define WINDOWS_CLIP_URIS "text/uri-list"
 #define WINDOWS_CLIP_PNG "image/png"
 
-struct windows_clip_type
-{
-        unsigned long offset, length; // where its bytes are in the copy
-        const char *name;             // its name, NUL ended, in the copy's mapping (or the part's)
-        unsigned long name_length;
-};
+struct windows_clip_type { unsigned long offset, length; const char *name; unsigned long name_length; };
+struct windows_clip_part { const char *name; const void *bytes; unsigned long length; };
 
-// A type a program offers: its name and its bytes.
-struct windows_clip_part
-{
-        const char *name;
-        const void *bytes;
-        unsigned long length;
-};
-
-static long windows_clip_held[2] = {-1, -1};
+static long windows_clip_held[2] = {-1, -1}, windows_drag_held = -1;
 
 static unsigned long windows_clip_word(const unsigned char *at, unsigned int bytes)
 {
@@ -5194,6 +3121,12 @@ static unsigned long windows_clip_word(const unsigned char *at, unsigned int byt
         return value;
 }
 
+static void windows_clip_le(unsigned char *at, unsigned long value, unsigned int bytes)
+{
+        for (unsigned int i = 0; i < bytes; i++)
+                at[i] = (unsigned char)(value >> 8 * i);
+}
+
 static int windows_clip_same(const char *a, unsigned long a_length, const char *b)
 {
 #ifdef STANDARD_MODERN_C
@@ -5202,36 +3135,23 @@ static int windows_clip_same(const char *a, unsigned long a_length, const char *
         unsigned long at = 0;
 
         for (; at < a_length && b[at]; at++)
-        {
-                unsigned char x = (unsigned char)a[at], y = (unsigned char)b[at];
-
-                if ((x >= 'A' && x <= 'Z' ? x + 32 : x) != (y >= 'A' && y <= 'Z' ? y + 32 : y))
+                if (((unsigned char)a[at] | ((unsigned char)a[at] >= 'A' && (unsigned char)a[at] <= 'Z' ? 32 : 0)) !=
+                    ((unsigned char)b[at] | ((unsigned char)b[at] >= 'A' && (unsigned char)b[at] <= 'Z' ? 32 : 0)))
                         return 0;
-        }
         return at == a_length && !b[at];
 #endif
 }
 
-/*
-        Canonical text MIME preference rank (1 = highest, 5 = lowest, 0 = not a text MIME):
-        1: text/plain;charset=utf-8, 2: UTF8_STRING, 3: text/plain, 4: STRING, 5: TEXT. Case-insensitive.
-*/
 static int windows_clip_text_rank(const char *mime, unsigned long len)
 {
         static const char *const names[5] = {WINDOWS_CLIP_TEXT, "UTF8_STRING", "text/plain", "STRING", "TEXT"};
 
-        if (!mime)
-                return 0;
-        for (int at = 0; at < 5; at++)
+        for (int at = 0; mime && at < 5; at++)
                 if (windows_clip_same(mime, len, names[at]))
                         return at + 1;
         return 0;
 }
 
-/*
-        Whether a name is one text goes by: 1 for the Wayland ones (text/plain;charset=utf-8, UTF8_STRING, text/plain), 2 for X's own
-        (TEXT, and STRING, which is Latin-1), 0 for any other. Either case.
-*/
 static int windows_clip_alias(const char *name, unsigned long length)
 {
         int rank = windows_clip_text_rank(name, length);
@@ -5239,49 +3159,32 @@ static int windows_clip_alias(const char *name, unsigned long length)
         return !rank ? 0 : rank <= 3 ? 1 : 2;
 }
 
-// Whether bytes are text a selection may hold: UTF-8, every sequence whole and shortest, no surrogate, no NUL.
 static int windows_clip_text(const unsigned char *bytes, unsigned long length)
 {
-        if (!length)
-                return 1;
-        return !memory_first_of((address_any)bytes, 0, (positive)length) &&
-               memory_utf8_valid_span((address_any)bytes, (positive)length).x == (positive)length;
+        return !length || (!memory_first_of((address_any)bytes, 0, (positive)length) &&
+                           memory_utf8_valid_span((address_any)bytes, (positive)length).x == (positive)length);
 }
 
-/*
-        The next type of a copy mapped whole at file (size bytes) after *cursor (0 for the first): 1 with it in type, 0 past the last or
-        when the copy is not one (a trailer, index or name that does not hold together, a type outside the bytes). Every type is read
-        through here, so a copy is checked as it is read.
-*/
 static int windows_clip_next(const unsigned char *file, unsigned long size, unsigned long *cursor, struct windows_clip_type *type)
 {
         unsigned long index, until, at;
 
         if (!file || size < WINDOWS_CLIP_TRAILER || windows_clip_word(file + size - 8, 8) != WINDOWS_CLIP_MAGIC)
                 return 0;
-        index = windows_clip_word(file + size - WINDOWS_CLIP_TRAILER, 8);
-        until = size - WINDOWS_CLIP_TRAILER;
-        at = *cursor ? *cursor : index;
+        index = windows_clip_word(file + size - WINDOWS_CLIP_TRAILER, 8), until = size - WINDOWS_CLIP_TRAILER, at = *cursor ? *cursor : index;
         if (index > until || at < index || at + 19 > until)
                 return 0;
-        type->offset = windows_clip_word(file + at, 8);
-        type->length = windows_clip_word(file + at + 8, 8);
-        type->name_length = windows_clip_word(file + at + 16, 2);
-        type->name = (const char *)file + at + 18;
+        type->offset = windows_clip_word(file + at, 8), type->length = windows_clip_word(file + at + 8, 8);
+        type->name_length = windows_clip_word(file + at + 16, 2), type->name = (const char *)file + at + 18;
         if (!type->name_length || type->offset > index || type->length > index - type->offset || type->name_length > until - at - 19 ||
             type->name[type->name_length])
                 return 0;
         for (unsigned long k = 0; k < type->name_length; k++)
                 if ((unsigned char)type->name[k] < 0x20 || (unsigned char)type->name[k] > 0x7e)
                         return 0;
-        *cursor = at + 19 + type->name_length;
-        return 1;
+        return *cursor = at + 19 + type->name_length, 1;
 }
 
-/*
-        Whether a mapped copy holds together: its count of types is the records its index has, ending where the trailer starts, at least
-        one, and its text (when it has some) UTF-8 with no NUL.
-*/
 static int windows_clip_valid(const unsigned char *file, unsigned long size)
 {
         struct windows_clip_type type;
@@ -5298,61 +3201,44 @@ static int windows_clip_valid(const unsigned char *file, unsigned long size)
         return count && count == windows_clip_word(file + size - 12, 4) && cursor == size - WINDOWS_CLIP_TRAILER;
 }
 
-// The type of a copy a name asks for: the name's own, or, for a name text goes by, the text. 1 when there is one.
 static int windows_clip_find(const unsigned char *file, unsigned long size, const char *name, unsigned long length, struct windows_clip_type *type)
 {
-        unsigned long cursor = 0;
         const char *want = windows_clip_alias(name, length) ? WINDOWS_CLIP_TEXT : 0;
 
-        while (windows_clip_next(file, size, &cursor, type))
-                if (want ? windows_clip_same(type->name, type->name_length, want)
-                         : type->name_length == length && !memory_compare(type->name, name, (positive)length))
-                        return 1;
-        // A copy with no text whose own type is named so (an X client's STRING alone) is that type.
-        cursor = 0;
-        while (want && windows_clip_next(file, size, &cursor, type))
-                if (type->name_length == length && !memory_compare(type->name, name, (positive)length))
-                        return 1;
+        for (int pass = 0; pass < (want ? 2 : 1); pass++)
+                for (unsigned long cursor = 0; windows_clip_next(file, size, &cursor, type);)
+                        if (!pass && want ? windows_clip_same(type->name, type->name_length, want)
+                                          : type->name_length == length && !memory_compare(type->name, name, (positive)length))
+                                return 1;
         return 0;
 }
 
-/*
-        The nth name a copy is offered under: its types, then, when it has text, each name text goes by that it does not hold itself
-        (the Wayland ones, and X's too when x is set). 0 past the last. *length is the name's.
-*/
 static const char *windows_clip_offered(const unsigned char *file, unsigned long size, unsigned long nth, int x, unsigned long *length)
 {
         static const char *const names[4] = {"UTF8_STRING", "text/plain", "TEXT", "STRING"};
         struct windows_clip_type type;
         unsigned long cursor = 0;
-        int text = 0, held;
+        int text = 0;
 
         while (windows_clip_next(file, size, &cursor, &type))
         {
                 text |= windows_clip_same(type.name, type.name_length, WINDOWS_CLIP_TEXT);
                 if (!nth--)
-                {
-                        *length = type.name_length;
-                        return type.name;
-                }
+                        return *length = type.name_length, type.name;
         }
         for (int at = 0; text && at < (x ? 4 : 2); at++)
         {
                 unsigned long n = string_length((string_address)names[at]);
+                int held = 0;
 
-                held = 0, cursor = 0;
-                while (!held && windows_clip_next(file, size, &cursor, &type))
+                for (cursor = 0; !held && windows_clip_next(file, size, &cursor, &type);)
                         held = type.name_length == n && !memory_compare(type.name, names[at], (positive)n);
                 if (!held && !nth--)
-                {
-                        *length = n;
-                        return names[at];
-                }
+                        return *length = n, names[at];
         }
         return 0;
 }
 
-// count bytes to a descriptor at its offset, every one: 1, or 0 when the kernel would not take them.
 static int windows_clip_put(long fd, const void *bytes, unsigned long count)
 {
         for (unsigned long done = 0; done < count;)
@@ -5366,23 +3252,16 @@ static int windows_clip_put(long fd, const void *bytes, unsigned long count)
         return 1;
 }
 
-// A type's record of an index, written where index is: 1, or 0.
 static int windows_clip_record(long index, unsigned long offset, unsigned long length, const char *name, unsigned long name_length)
 {
         unsigned char head[18];
 
         if (!name_length || name_length > 0xffff)
                 return 0;
-        for (int at = 0; at < 8; at++)
-                head[at] = (unsigned char)(offset >> 8 * at), head[8 + at] = (unsigned char)(length >> 8 * at);
-        head[16] = (unsigned char)name_length, head[17] = (unsigned char)(name_length >> 8);
+        windows_clip_le(head, offset, 8), windows_clip_le(head + 8, length, 8), windows_clip_le(head + 16, name_length, 2);
         return windows_clip_put(index, head, 18) && windows_clip_put(index, name, name_length) && windows_clip_put(index, "", 1);
 }
 
-/*
-        A copy made whole: the index (a memfd of count records, from its start) written after the bytes of keep, which end at until, then
-        the trailer, and keep sealed. 1, or 0 when the kernel would not.
-*/
 static int windows_clip_seal(long keep, long index, unsigned long until, unsigned long count)
 {
         unsigned char bytes[4096], trailer[WINDOWS_CLIP_TRAILER];
@@ -5398,14 +3277,10 @@ static int windows_clip_seal(long keep, long index, unsigned long until, unsigne
                         return 0;
                 at += (unsigned long)got;
         }
-        for (int at = 0; at < 8; at++)
-                trailer[at] = (unsigned char)(until >> 8 * at), trailer[12 + at] = (unsigned char)(WINDOWS_CLIP_MAGIC >> 8 * at);
-        for (int at = 0; at < 4; at++)
-                trailer[8 + at] = (unsigned char)(count >> 8 * at);
+        windows_clip_le(trailer, until, 8), windows_clip_le(trailer + 8, count, 4), windows_clip_le(trailer + 12, WINDOWS_CLIP_MAGIC, 8);
         return windows_clip_put(keep, trailer, sizeof trailer) && window_call(WINDOW_SYS_FCNTL, keep, WINDOWS_F_ADD_SEALS, WINDOWS_SEALS, 0, 0, 0) >= 0;
 }
 
-// A copy of the parts a program offers, as a sealed memfd: the descriptor, or a negative errno.
 static long windows_clip_build(const struct windows_clip_part *parts, unsigned long count)
 {
         long fd = window_call(WINDOW_SYS_MEMFD, (long)"moonwater-copy", WINDOWS_MFD_CLOEXEC | WINDOWS_MFD_SEALING, 0, 0, 0, 0);
@@ -5414,23 +3289,17 @@ static long windows_clip_build(const struct windows_clip_part *parts, unsigned l
         int ok = index >= 0 && count;
 
         for (unsigned long at = 0; ok && at < count; at++)
-        {
                 ok = windows_clip_put(fd, parts[at].bytes, parts[at].length) &&
-                     windows_clip_record(index, until, parts[at].length, parts[at].name, string_length((string_address)parts[at].name));
+                     windows_clip_record(index, until, parts[at].length, parts[at].name, string_length((string_address)parts[at].name)),
                 until += parts[at].length;
-        }
         ok = ok && windows_clip_seal(fd, index, until, count);
         if (index >= 0)
                 window_call(WINDOW_SYS_CLOSE, index, 0, 0, 0, 0, 0);
         if (!ok && fd >= 0)
-        {
-                window_call(WINDOW_SYS_CLOSE, fd, 0, 0, 0, 0, 0);
-                return -5;
-        }
+                return window_call(WINDOW_SYS_CLOSE, fd, 0, 0, 0, 0, 0), -5;
         return fd;
 }
 
-// A copy of one text.
 static long windows_clip_memfd(const void *bytes, unsigned long length)
 {
         struct windows_clip_part part = {WINDOWS_CLIP_TEXT, bytes, length};
@@ -5447,16 +3316,14 @@ static void windows_fd_replace(long *slot, long fd)
 
 static long windows_clip_offer_parts(const struct window_row *own, unsigned int which, const struct windows_clip_part *parts, unsigned long count)
 {
-        struct windows *table = own->table;
         long fd = count ? windows_clip_build(parts, count) : -22;
 
         which &= 1u;
         if (fd < 0)
                 return fd;
         windows_fd_replace(&windows_clip_held[which], fd);
-        table->clip_offer_fd[own->row] = (int)fd, table->clip_offer_which[own->row] = which;
-        __atomic_add_fetch(&table->clip_offer_serial[own->row], 1, __ATOMIC_RELEASE);
-        windows_knock(own);
+        own->table->clip_offer_fd[own->row] = (int)fd, own->table->clip_offer_which[own->row] = which;
+        windows_knock_bump(own, &own->table->clip_offer_serial[own->row]);
         return 0;
 }
 
@@ -5467,16 +3334,12 @@ static long windows_clip_offer(const struct window_row *own, unsigned int which,
         return length ? windows_clip_offer_parts(own, which, &part, 1) : -22;
 }
 
-static void windows_clip_done(unsigned int which)
-{
-        windows_fd_replace(&windows_clip_held[which & 1u], -1);
-}
+static void windows_clip_done(unsigned int which) { windows_fd_replace(&windows_clip_held[which & 1u], -1); }
 
 static void windows_clip_ask(const struct window_row *own, unsigned int which)
 {
         own->table->clip_ask_which[own->row] = which & 1u;
-        __atomic_add_fetch(&own->table->clip_ask_serial[own->row], 1, __ATOMIC_RELEASE);
-        windows_knock(own);
+        windows_knock_bump(own, &own->table->clip_ask_serial[own->row]);
 }
 
 static void windows_proc_fd(char *path, unsigned int pid, unsigned int number)
@@ -5496,7 +3359,7 @@ static const unsigned char *windows_clip_map(unsigned int pid, unsigned int whic
                 return 0;
         mapped = window_call(WINDOW_SYS_LSEEK, fd, 0, 2, 0, 0, 0) == (long)want ? window_call(WINDOW_SYS_MMAP, 0, (long)want, 1, 1, fd, 0) : -22;
         window_call(WINDOW_SYS_CLOSE, fd, 0, 0, 0, 0, 0);
-        if (mapped < 0 && mapped > -4096)
+        if (WINDOWS_MAP_ERR(mapped))
                 return 0;
         if (!windows_clip_valid((const unsigned char *)mapped, want))
                 return window_call(WINDOW_SYS_MUNMAP, mapped, (long)want, 0, 0, 0, 0), (const unsigned char *)0;
@@ -5517,13 +3380,12 @@ static long windows_clip_fetch_type(unsigned int pid, unsigned int which, unsign
         if (!windows_clip_find(file, want, name, string_length((string_address)name), &type))
                 return window_call(WINDOW_SYS_MUNMAP, (long)file, (long)want, 0, 0, 0, 0), -61;
         mapped = window_call(WINDOW_SYS_MMAP, 0, (long)type.length + 1, 3, 0x22, -1, 0);
-        if (!(mapped < 0 && mapped > -4096))
+        if (!WINDOWS_MAP_ERR(mapped))
                 memory_copy((address_any)mapped, (address_any)(file + type.offset), (positive)type.length);
         window_call(WINDOW_SYS_MUNMAP, (long)file, (long)want, 0, 0, 0, 0);
-        if (mapped < 0 && mapped > -4096)
+        if (WINDOWS_MAP_ERR(mapped))
                 return mapped;
-        *bytes = (unsigned char *)mapped, *length = type.length;
-        return (long)type.length;
+        return *bytes = (unsigned char *)mapped, *length = type.length, (long)type.length;
 }
 
 static long windows_clip_fetch(unsigned int pid, unsigned int which, unsigned long want, unsigned char **bytes, unsigned long *length)
@@ -5542,27 +3404,20 @@ static long windows_clip_read(const struct window_row *own, unsigned int which, 
         return windows_clip_read_type(own, which, 0, bytes, length);
 }
 
-static long windows_drag_held = -1;
-
 static long windows_drag_offer(const struct window_row *own, const struct windows_clip_part *parts, unsigned long count, unsigned int actions)
 {
-        struct windows *table = own->table;
         long fd = count && (actions & 7u) ? windows_clip_build(parts, count) : -22;
 
         if (fd < 0)
                 return fd;
         windows_fd_replace(&windows_drag_held, fd);
-        table->drag_offer_fd[own->row] = (int)fd;
-        table->drag_offer_actions[own->row] = actions & (7u | 0xffu << WINDOWS_DRAG_KIND_SHIFT | 0xffffu << WINDOWS_DRAG_ITEMS_SHIFT);
-        __atomic_add_fetch(&table->drag_offer_serial[own->row], 1, __ATOMIC_RELEASE);
-        windows_knock(own);
+        own->table->drag_offer_fd[own->row] = (int)fd;
+        own->table->drag_offer_actions[own->row] = actions & (7u | 0xffu << WINDOWS_DRAG_KIND_SHIFT | 0xffffu << WINDOWS_DRAG_ITEMS_SHIFT);
+        windows_knock_bump(own, &own->table->drag_offer_serial[own->row]);
         return 0;
 }
 
-static void windows_drag_over(void)
-{
-        windows_fd_replace(&windows_drag_held, -1);
-}
+static void windows_drag_over(void) { windows_fd_replace(&windows_drag_held, -1); }
 
 static const unsigned char *windows_drag_types(const struct window_row *own, unsigned long *size)
 {
@@ -5572,13 +3427,10 @@ static const unsigned char *windows_drag_types(const struct window_row *own, uns
 
 static void windows_drop_take(const struct window_row *own, long nth, unsigned int actions, unsigned int preferred)
 {
-        struct windows *table = own->table;
-
-        table->drop_take[own->row] = nth < 0 ? -1 : (int)nth;
-        table->drop_take_actions[own->row] = nth < 0 ? 0 : actions & 7u;
-        table->drop_take_preferred[own->row] = preferred & 7u;
-        __atomic_add_fetch(&table->drop_take_serial[own->row], 1, __ATOMIC_RELEASE);
-        windows_knock(own);
+        own->table->drop_take[own->row] = nth < 0 ? -1 : (int)nth;
+        own->table->drop_take_actions[own->row] = nth < 0 ? 0 : actions & 7u;
+        own->table->drop_take_preferred[own->row] = preferred & 7u;
+        windows_knock_bump(own, &own->table->drop_take_serial[own->row]);
 }
 
 static long windows_drag_read(const struct window_row *own, const char *name, unsigned char **bytes, unsigned long *length)
@@ -5589,8 +3441,7 @@ static long windows_drag_read(const struct window_row *own, const char *name, un
 static void windows_drop_done(const struct window_row *own, int took)
 {
         own->table->drop_done[own->row] = took ? 1u : 0u;
-        __atomic_add_fetch(&own->table->drop_done_serial[own->row], 1, __ATOMIC_RELEASE);
-        windows_knock(own);
+        windows_knock_bump(own, &own->table->drop_done_serial[own->row]);
 }
 
 static void windows_clip_free(unsigned char *bytes, unsigned long length)
@@ -5599,23 +3450,6 @@ static void windows_clip_free(unsigned char *bytes, unsigned long length)
                 window_call(WINDOW_SYS_MUNMAP, (long)bytes, (long)length + 1, 0, 0, 0, 0);
 }
 
-/*
-        Whether the pointer's motion over the window is wanted. A program that
-        draws no hover -- a terminal that is not in its any-motion mode -- says
-        it does not, and the compositor sends it none, except what a button
-        held or pressed over it needs; every report of the motion is a wakeup
-        for the program otherwise. A program that never says is sent all of it.
-*/
-
-/*
-        Whether the window takes WINDOW_EVENT_PINCH. One that does not is sent a pinch as Ctrl and a wheel (compositor_pinch_legacy),
-        so a program that handles a wheel with Ctrl zooms with a pinch without knowing one.
-*/
-
-/*
-        A colour as the settings keep it: #rrggbb or rrggbb, or the three digits of either that stand
-        for each one twice. Negative for anything else.
-*/
 static long window_colour_parse(string_address text)
 {
         p8 digits[6], bytes[3];
