@@ -807,6 +807,10 @@ def test_compositor_and_xwm_invariants():
           "HOT static int wayland_dispatch(" in wl_c and
           "HOT static struct compositor_xwm_window *xwm_row_lookup(" in xwm and
           "HOT static void compositor_reader_put(" in inp)
+    check("lib.c ASM Pass 5: AVX2 8-px/iter memory_nv12_to_xrgb_row & AVX2 memory_runs_u32",
+          "vpmaddwd %ymm10, %ymm3, %ymm3" in lib_c and
+          "vpmovmskb %ymm0, %eax" in lib_c and
+          "vpcmpeqd 32(%r9), %ymm1, %ymm2" in lib_c)
     check("Steam bowl fixes Win32 dialog inflation (ttf-liberation + 65-moonwater-win32.conf) & GTK dark theme",
           '"ttf-liberation"' in read_text("src/bowl.c") and
           "65-moonwater-win32.conf" in read_text("src/bowl.c") and

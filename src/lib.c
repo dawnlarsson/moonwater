@@ -15343,7 +15343,35 @@ __asm__(
     ASM_FUNC(memory_nv12_to_xrgb_row)
     "test %rcx, %rcx\n   jz 9f\n   push %rbx\n   push %rbp\n"
     "cmp $4, %rcx\n   jb 5f\n"
-    "mov $0x10101010, %eax\n   movd %eax, %xmm8\n   pshufd $0, %xmm8, %xmm8\n"
+    ASM_USERSPACE_WIDE(
+    ASM_NARROW("cpu_has_avx2", "10f")
+    "cmp $8, %rcx\n   jb 10f\n"
+    "mov $0x10101010, %eax\n   vmovd %eax, %xmm8\n   vpbroadcastd %xmm8, %ymm8\n"
+    "mov $0x00800080, %eax\n   vmovd %eax, %xmm9\n   vpbroadcastd %xmm9, %ymm9\n"
+    "mov $0x0199012a, %eax\n   vmovd %eax, %xmm10\n   vpbroadcastd %xmm10, %ymm10\n"
+    "mov $0x0204012a, %eax\n   vmovd %eax, %xmm11\n   vpbroadcastd %xmm11, %ymm11\n"
+    "mov $0xff30ff9c, %eax\n   vmovd %eax, %xmm12\n   vpbroadcastd %xmm12, %ymm12\n"
+    "mov $298, %eax\n   vmovd %eax, %xmm13\n   vpbroadcastd %xmm13, %ymm13\n"
+    "mov $128, %eax\n   vmovd %eax, %xmm14\n   vpbroadcastd %xmm14, %ymm14\n"
+    "mov $0xff000000, %eax\n   vmovd %eax, %xmm15\n   vpbroadcastd %xmm15, %ymm15\n"
+    "vpxor %ymm7, %ymm7, %ymm7\n"
+    "2:  vmovd (%rsi), %xmm0\n   vmovd 4(%rsi), %xmm1\n   vinserti128 $1, %xmm1, %ymm0, %ymm0\n"
+    "vpsubusb %ymm8, %ymm0, %ymm0\n   vpunpcklbw %ymm7, %ymm0, %ymm0\n"
+    "vmovd (%rdx), %xmm1\n   vmovd 4(%rdx), %xmm2\n   vinserti128 $1, %xmm2, %ymm1, %ymm1\n"
+    "vpunpcklbw %ymm7, %ymm1, %ymm1\n   vpsubw %ymm9, %ymm1, %ymm1\n"
+    "vpshuflw $0xf5, %ymm1, %ymm2\n   vpshuflw $0xa0, %ymm1, %ymm1\n"
+    "vpunpcklwd %ymm2, %ymm0, %ymm3\n   vpmaddwd %ymm10, %ymm3, %ymm3\n   vpaddd %ymm14, %ymm3, %ymm3\n   vpsrad $8, %ymm3, %ymm3\n"
+    "vpunpcklwd %ymm1, %ymm0, %ymm4\n   vpmaddwd %ymm11, %ymm4, %ymm4\n   vpaddd %ymm14, %ymm4, %ymm4\n   vpsrad $8, %ymm4, %ymm4\n"
+    "vpunpcklwd %ymm7, %ymm0, %ymm5\n   vpmaddwd %ymm13, %ymm5, %ymm5\n"
+    "vpunpcklwd %ymm2, %ymm1, %ymm6\n   vpmaddwd %ymm12, %ymm6, %ymm6\n   vpaddd %ymm6, %ymm5, %ymm5\n   vpaddd %ymm14, %ymm5, %ymm5\n   vpsrad $8, %ymm5, %ymm5\n"
+    "vpackssdw %ymm3, %ymm3, %ymm3\n   vpackuswb %ymm3, %ymm3, %ymm3\n   vpunpcklbw %ymm7, %ymm3, %ymm3\n   vpunpcklwd %ymm7, %ymm3, %ymm3\n   vpslld $16, %ymm3, %ymm3\n"
+    "vpackssdw %ymm5, %ymm5, %ymm5\n   vpackuswb %ymm5, %ymm5, %ymm5\n   vpunpcklbw %ymm7, %ymm5, %ymm5\n   vpunpcklwd %ymm7, %ymm5, %ymm5\n   vpslld $8, %ymm5, %ymm5\n"
+    "vpackssdw %ymm4, %ymm4, %ymm4\n   vpackuswb %ymm4, %ymm4, %ymm4\n   vpunpcklbw %ymm7, %ymm4, %ymm4\n   vpunpcklwd %ymm7, %ymm4, %ymm4\n"
+    "vpor %ymm5, %ymm3, %ymm3\n   vpor %ymm4, %ymm3, %ymm3\n   vpor %ymm15, %ymm3, %ymm3\n   vmovdqu %ymm3, (%rdi)\n"
+    "add $32, %rdi\n   add $8, %rsi\n   add $8, %rdx\n   sub $8, %rcx\n   cmp $8, %rcx\n   jae 2b\n"
+    "vzeroupper\n   test %rcx, %rcx\n   jz 8f\n   cmp $4, %rcx\n   jb 5f\n"
+    )
+    "10: mov $0x10101010, %eax\n   movd %eax, %xmm8\n   pshufd $0, %xmm8, %xmm8\n"
     "mov $0x00800080, %eax\n   movd %eax, %xmm9\n   pshufd $0, %xmm9, %xmm9\n"
     "mov $0x0199012a, %eax\n   movd %eax, %xmm10\n   pshufd $0, %xmm10, %xmm10\n"
     "mov $0x0204012a, %eax\n   movd %eax, %xmm11\n   pshufd $0, %xmm11, %xmm11\n"
@@ -17529,7 +17557,7 @@ __asm__(
     "test %r8, %r8\n   jz 9f\n   push %rbx\n   push %r12\n   push %r13\n"
     "shr $4, %rcx\n   cmp $4095, %rcx\n   jbe 1f\n   mov $4095, %ecx\n"
     "1:  shl $2, %rdx\n   mov %rdx, %r13\n"
-    ASM_NARROW("cpu_has_avx512", "30f")
+    ASM_NARROW("cpu_has_avx512", "40f")
     ASM_USERSPACE_WIDE(
     "21: xor %r10d, %r10d\n   xor %r11d, %r11d\n   mov $-1, %rbx\n   mov %rsi, %r9\n"
     "22: cmp %rcx, %r10\n   jae 26f\n"
@@ -17544,6 +17572,25 @@ __asm__(
     "26: cmp $-1, %rbx\n   je 27f\n"
     RUNS_CLOSE_X64
     "27: mov %r11d, (%rdi)\n   movl $0, 4(%rdi)\n   add $128, %rdi\n   add %r13, %rsi\n   dec %r8\n   jnz 21b\n"
+    "vzeroupper\n   jmp 99f\n"
+    )
+    "40: "
+    ASM_USERSPACE_WIDE(
+    ASM_NARROW("cpu_has_avx2", "30f")
+    "41: xor %r10d, %r10d\n   xor %r11d, %r11d\n   mov $-1, %rbx\n   mov %rsi, %r9\n"
+    "42: cmp %rcx, %r10\n   jae 46f\n"
+    "vpbroadcastd (%r9), %ymm1\n   vpcmpeqd (%r9), %ymm1, %ymm0\n   vpcmpeqd 32(%r9), %ymm1, %ymm2\n"
+    "vpand %ymm2, %ymm0, %ymm0\n   vpmovmskb %ymm0, %eax\n   cmp $-1, %eax\n   jne 44f\n"
+    "mov (%r9), %eax\n   cmp $-1, %rbx\n   je 45f\n   cmp %eax, %r12d\n   je 43f\n"
+    RUNS_CLOSE_X64
+    "45: mov %r10, %rbx\n   mov (%r9), %r12d\n"
+    "43: inc %r10\n   add $64, %r9\n   jmp 42b\n"
+    "44: cmp $-1, %rbx\n   je 43b\n"
+    RUNS_CLOSE_X64
+    "   jmp 43b\n"
+    "46: cmp $-1, %rbx\n   je 47f\n"
+    RUNS_CLOSE_X64
+    "47: mov %r11d, (%rdi)\n   movl $0, 4(%rdi)\n   add $128, %rdi\n   add %r13, %rsi\n   dec %r8\n   jnz 41b\n"
     "vzeroupper\n   jmp 99f\n"
     )
     "30: xor %r10d, %r10d\n   xor %r11d, %r11d\n   mov $-1, %rbx\n   mov %rsi, %r9\n"
