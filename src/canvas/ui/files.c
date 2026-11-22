@@ -802,8 +802,10 @@ static fn files_bin_empty(void)
         p8 bin[FILES_PATH], info[FILES_PATH];
         if (!files_in_bin() || !files_model_count(m) || !files_bin_root(bin, null))
                 return;
-        files_select_all(m);
-        if (files.armed && files.armed_at == m->revision)
+        b32 sure = files.armed && files.armed_at == m->revision;
+        if (!sure)
+                files_select_all(m);
+        if (sure)
                 for (p32 at = 0; at < files_model_count(m); at++)
                 {
                         const struct files_entry address_to e = files_model_entry(m, at);
@@ -1794,6 +1796,14 @@ static b32 files_peer_ensure(struct files_peer address_to p)
         return true;
 }
 
+static b32 files_rpc_free(void)
+{
+        for (int k = 0; k < FILES_RPCS_MOST; k++)
+                if (files.big->rpcs[k].kind == FILES_RPC_NONE)
+                        return true;
+        return false;
+}
+
 static fn files_rpc_put(p8 machine, p32 req_id, p8 kind, const p8 address_to path)
 {
         for (int k = 0; k < FILES_RPCS_MOST; k++)
@@ -1819,7 +1829,7 @@ static b32 files_rpc_take(p8 machine, p32 req_id, struct files_rpc address_to ou
 static fn files_remote_request_info(struct files_peer address_to p)
 {
         p32 id, node;
-        if (!files_peer_ensure(p))
+        if (!files_peer_ensure(p) || !files_rpc_free())
                 return;
         if ((id = link_fs_request(&p->fs, FS_OP_INFO, null, 0)))
         {
@@ -1830,18 +1840,20 @@ static fn files_remote_request_info(struct files_peer address_to p)
         }
 }
 
-static fn files_remote_request_list(struct files_peer address_to p, const p8 address_to path, b32 dirs_only, p8 rpc_kind)
+static b32 files_remote_request_list(struct files_peer address_to p, const p8 address_to path, b32 dirs_only, p8 rpc_kind)
 {
         p8 req[FILES_PATH + 4];
         positive plen = path ? string_length((string_address)path) : 0;
         p32 id;
-        if (!plen || plen >= FILES_PATH || !files_peer_ensure(p))
-                return;
+        if (!plen || plen >= FILES_PATH || !files_peer_ensure(p) || !files_rpc_free())
+                return false;
         req[0] = (p8)((files.big->model.hidden && !dirs_only ? 1 : 0) | (dirs_only ? 2 : 0));
         link_fs_put16(req + 1, (p16)plen);
         memory_copy(req + 3, path, plen);
-        if ((id = link_fs_request(&p->fs, FS_OP_LIST, req, (p32)(3 + plen))))
-                files_rpc_put(p->machine, id, rpc_kind, path);
+        if (!(id = link_fs_request(&p->fs, FS_OP_LIST, req, (p32)(3 + plen))))
+                return false;
+        files_rpc_put(p->machine, id, rpc_kind, path);
+        return true;
 }
 
 static fn files_remote_nav(void)
@@ -2156,8 +2168,8 @@ static fn files_tree_toggle(p32 at)
         {
                 static p8 path[FILES_PATH];
                 struct files_peer address_to p = files_peer_by_machine(t->node[at].machine);
-                if (p && files_tree_path(t, at, path))
-                        t->node[at].flags |= FILES_NODE_LOADING, files_remote_request_list(p, path, true, FILES_RPC_TREE_LIST);
+                if (p && files_tree_path(t, at, path) && files_remote_request_list(p, path, true, FILES_RPC_TREE_LIST))
+                        t->node[at].flags |= FILES_NODE_LOADING;
         }
         else
                 files_tree_open(t, at);
