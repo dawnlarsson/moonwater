@@ -1075,8 +1075,13 @@ static b32 files_transfer(const p8 address_to paths, p32 count, int row, int how
         const struct files_entry address_to e = row >= 0 ? files_model_entry(m, (p32)row) : null;
         p8 dest[FILES_PATH];
         if (row <= -2 && files.drop_node >= 0)
-                return files_tree_path(&files.big->tree, (p32)files.drop_node, dest) &&
+        {
+                const struct files_tree address_to t = &files.big->tree;
+                if ((p32)files.drop_node >= t->count || t->node[files.drop_node].kind == FILES_NODE_MACHINE || t->node[files.drop_node].machine != 0)
+                        return false;
+                return files_tree_path(t, (p32)files.drop_node, dest) &&
                        files_transfer_start(paths, count, files_open_dir(AT_FDCWD, dest, 0), dest, how, false);
+        }
         if (e)
                 files_path_join(dest, FILES_PATH, m->path, files_model_name(m, e));
         else
@@ -1114,9 +1119,13 @@ static b32 files_drag_event(const struct window_event address_to event)
         if ((what = ui_drop_event(&files.drop, event)) == UI_DROP_OVER)
         {
                 struct ui_list address_to tl = &files.big->tree_list;
-                int node = ui_list_hit(&files.ui, tl, files.drop.x, files.drop.y), row = node >= 0 ? -2 : files_drop_row(files.drop.x, files.drop.y);
+                int hit_node = ui_list_hit(&files.ui, tl, files.drop.x, files.drop.y);
+                int node = hit_node >= 0 && (p32)hit_node < files.big->tree.count &&
+                           files.big->tree.node[hit_node].kind != FILES_NODE_MACHINE && files.big->tree.node[hit_node].machine == 0
+                               ? hit_node : -1;
+                int row = node >= 0 ? -2 : hit_node >= 0 ? -3 : files_drop_row(files.drop.x, files.drop.y);
                 int spring = node >= 0 ? FILES_SPRING_NODE + node : row;
-                b32 none = (files.drag.live && row == -1) || (node < 0 && files.big->model.state != FILES_READY);
+                b32 none = hit_node >= 0 && node < 0 ? true : (files.drag.live && row == -1) || (node < 0 && (files.big->model.state != FILES_READY || files_model_is_remote(&files.big->model)));
                 p32 pref = files.drop.keys & WINDOW_KEY_CONTROL ? WINDOWS_DRAG_COPY
                            : files.drop.keys & WINDOW_KEY_SHIFT ? WINDOWS_DRAG_MOVE : files.drag.live && files_drop_near() ? WINDOWS_DRAG_MOVE : WINDOWS_DRAG_COPY;
                 files.drop_over = true, tl->drop = node >= 0 ? node + 1 : 0;
@@ -1571,7 +1580,7 @@ static fn files_wallpaper(int screen)
         static p8 path[FILES_PATH];
         string_address words[7] = {(string_address) "/moonwater", (string_address) "canvas", (string_address) "wallpaper", (string_address) "picture",
                                    (string_address)path, screen >= 0 && screen < FILES_WALL_SCREENS ? (string_address)files_wall_names[screen] : null, null};
-        if (e && e->kind != FILES_KIND_DIRECTORY && files_is_png(m, e) && files_path_join(path, sizeof(path), m->path, files_model_name(m, e)))
+        if (!files_model_is_remote(m) && e && e->kind != FILES_KIND_DIRECTORY && files_is_png(m, e) && files_path_join(path, sizeof(path), m->path, files_model_name(m, e)))
                 (void)ui_start_apart(words, words[5] ? 6 : 5);
 }
 
@@ -1586,7 +1595,7 @@ static fn files_menu_open(b32 on, int x, int y)
         menu->count = 0, files.sheet = false;
         if (on && e)
         {
-                b32 png = !folder && files_is_png(m, e);
+                b32 png = !folder && !files_model_is_remote(m) && files_is_png(m, e);
                 const struct ui_menu_spec head[] = {
                     {WORDS(menu_open), "Enter", 0, FILES_MENU_OPEN, false},
                     {WORDS(menu_open_editor), null, 0, FILES_MENU_EDITOR, folder},

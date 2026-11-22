@@ -1806,6 +1806,24 @@ static fn files_move_file_drop(struct files_move address_to job, b32 whole)
         job->left = 0;
 }
 
+static b32 files_path_clean(const p8 address_to path, positive len)
+{
+        if (len <= 1 || path[0] != '/' || path[len - 1] == '/' || len >= FILES_PATH)
+                return false;
+        for (positive pos = 1; pos < len;)
+        {
+                positive stop = pos;
+                while (stop < len && path[stop] != '/')
+                        stop++;
+                if (stop == pos || stop - pos >= FILES_NAME ||
+                    (stop - pos == 1 && path[pos] == '.') ||
+                    (stop - pos == 2 && path[pos] == '.' && path[pos + 1] == '.'))
+                        return false;
+                pos = stop + 1;
+        }
+        return true;
+}
+
 static b32 files_move_begin(struct files_move address_to job, int how, bipolar into, const p8 address_to paths, p32 count)
 {
         bipolar err = 0;
@@ -1824,7 +1842,7 @@ static b32 files_move_begin(struct files_move address_to job, int how, bipolar i
         for (p32 k = 0; k < count && job->count < FILES_MOVE_MOST; k++)
         {
                 positive len = string_length((string_address)paths);
-                if (len > 1 && paths[0] == '/' && len < FILES_PATH && used + len + 1 <= FILES_MOVE_PATHS)
+                if (files_path_clean(paths, len) && used + len + 1 <= FILES_MOVE_PATHS)
                         job->offsets[job->count++] = (p32)used, memory_copy(job->paths + used, paths, len + 1), used += len + 1;
                 paths += len + 1;
         }
@@ -1847,7 +1865,7 @@ static b32 files_move_take(struct files_move address_to job, p32 which)
         p8 folder[FILES_PATH];
         bipolar looked;
         files_close(&job->from);
-        if (!length || path[length - 1] == '/' || string_length((string_address)files_base_name(path)) >= FILES_NAME || !files_path_parent(path, folder, job->name))
+        if (!files_path_clean(path, length) || !files_path_parent(path, folder, job->name) || !files_name_good(job->name))
                 return files_move_fail(job, -ERROR_INVALID);
         string_copy_bounded(job->at, (string_address)job->name, FILES_NAME);
         job->from = files_open_dir(AT_FDCWD, folder, 0);
@@ -2215,7 +2233,7 @@ static int files_bin_put(const p8 address_to bin, const p8 address_to path, cons
         int res = FILES_DID_FAILED;
         if (!files_bin_join(files_dir, bin, "/files", null, null) || !files_bin_folders(files_dir) ||
             !files_bin_join(info, bin, "/info", null, null) || !files_bin_folders(info) ||
-            (folder = files_open_dir(AT_FDCWD, files_dir, 0)) < 0)
+            (folder = files_open_dir(AT_FDCWD, files_dir, O_NOFOLLOW)) < 0)
                 return FILES_DID_FAILED;
         for (int tries = 0; tries < 8 && out < 0; tries++)
         {
@@ -2271,6 +2289,8 @@ static b32 files_bin_was(const p8 address_to bin, const p8 address_to name, p8 a
                         return false;
                 path[out++] = c;
         }
+        if (text[at] && text[at] != '\n' && text[at] != '\r')
+                return false;
         path[out] = 0;
         if (out <= 1 || path[0] != '/' || path[out - 1] == '/')
                 return false;

@@ -2470,7 +2470,8 @@ static inline bool taskbar_pin_runs(const struct taskbar_pin *p, const char *app
 static bool taskbar_pin_put(struct taskbar_pin *pin, positive *used, const char *word)
 {
         positive length = string_length((string_address)word) + 1;
-        if (pin->count >= SETTING_PINS_WORDS || *used + length > sizeof(pin->text))
+        if (pin->count >= SETTING_PINS_WORDS || *used + length > sizeof(pin->text) ||
+            string_first_of((string_address)word, '\n') || string_first_of((string_address)word, '\r'))
                 return false;
         pin->at[pin->count++] = (unsigned short)*used;
         memory_copy(pin->text + *used, word, length), *used += length;

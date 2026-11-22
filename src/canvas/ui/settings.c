@@ -1086,13 +1086,17 @@ static b32 settings_wall_own(const char address_to name, char address_to path, p
 
 static b32 settings_wall_picture(const char address_to path, unsigned int address_to into, int w, int h, positive most)
 {
-        bipolar handle = system_open_at(AT_FDCWD, (string_address)path, FILE_READ | O_NOFOLLOW | O_CLOEXEC), rd;
+        bipolar handle = system_open_at(AT_FDCWD, (string_address)path, FILE_READ | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK), rd;
+        p8 info[256] = {0};
         p8 address_to file;
         positive got = 0, vis_w, vis_h, ox, oy;
         unsigned int address_to pic = null;
         int width = 0, height = 0;
         if (handle < 0)
                 return false;
+        if (system_call_5(syscall(statx), (positive)handle, (positive)"", 0x1000, 0x1, (positive)info) < 0 ||
+            (memory_load_unaligned(p16, info + 28) & 0170000u) != 0100000u)
+                return system_close(handle), false;
         file = (p8 address_to)memory_checked(SETTINGS_WALL_FILE_MOST);
         while (file && got < SETTINGS_WALL_FILE_MOST && (rd = system_read_once(handle, file + got, SETTINGS_WALL_FILE_MOST - got)) > 0)
                 got += (positive)rd;
@@ -2128,6 +2132,7 @@ static fn settings_next_job(void)
                         count = settings_command(&settings_rows[settings.job], settings.moonwater, settings.job_value, words, SETTINGS_WORDS, !settings.job_sets);
                 if (count && settings_start(words, count, null))
                 {
+                        settings_wipe(settings_large->split, sizeof(settings_large->split));
                         if (settings.job >= SETTINGS_ANY)
                         {
                                 char text[SETTINGS_STATUS - 24], line[SETTINGS_STATUS];
@@ -2135,6 +2140,8 @@ static fn settings_next_job(void)
                         }
                         return;
                 }
+                settings_wipe(settings.job_value, sizeof(settings.job_value));
+                settings_wipe(settings_large->split, sizeof(settings_large->split));
                 if (settings.job_sets) settings_say((string_address)(count || settings.job < SETTINGS_ANY ? WORDS(settings_cannot_run) : WORDS(settings_too_many)));
                 else if (settings.job >= 0) settings.state[settings.job] = SETTINGS_FAILED;
                 ui_page_redraw(&settings.page);
@@ -2155,12 +2162,19 @@ static b32 settings_refused(int row, const char address_to value)
 {
         b32 delib = false;
         if (settings.hand) return false;
-        if (row >= 0 && row < SETTINGS_ANY)
+        if (row == SETTINGS_JOB_ACT)
+                delib = value && (value[0] == 'v' || value[0] == 'l' || value[0] == 'L');
+        else if (row >= 0 && row < SETTINGS_ANY)
                 delib = settings_rows[row].deliberate && (settings_rows[row].kind != SETTINGS_SWITCH || string_equals((string_address)value, (string_address) "on"));
         else if (row >= SETTINGS_ANY && row < (int)SETTINGS_LIST)
         {
                 string_address words[SETTINGS_WORDS];
                 positive count = settings_generic_words(row, value, words, SETTINGS_WORDS);
+                if (count >= 3 &&
+                    ((string_equals(words[1], (string_address) "device") && string_equals(words[2], (string_address) "allow")) ||
+                     (string_equals(words[1], (string_address) "link") &&
+                      (string_equals(words[2], (string_address) "allow") || string_equals(words[2], (string_address) "allow-all")))))
+                        delib = true;
                 for (positive at = 0; at < SETTINGS_ROWS && !delib; at++)
                 {
                         const struct settings_row address_to w = &settings_rows[at];
@@ -2168,8 +2182,9 @@ static b32 settings_refused(int row, const char address_to value)
                         b32 same = w->deliberate;
                         while (same && n < SETTING_WORDS && w->set[n])
                                 same = 1 + n < count && string_equals(words[1 + n], (string_address)w->set[n]), n++;
-                        delib = same && n && (w->kind != SETTINGS_SWITCH || (count == 2 + n && string_equals(words[1 + n], (string_address) "on")));
+                        delib = same && n && (w->kind != SETTINGS_SWITCH || (count >= 2 + n && string_equals(words[1 + n], (string_address) "on")));
                 }
+                settings_wipe(settings_large->split, sizeof(settings_large->split));
         }
         if (delib) settings_say((string_address)WORDS(settings_virtual_refused));
         return delib;
@@ -3147,8 +3162,11 @@ static fn settings_complete(b32 killed, positive status)
                         settings_wipe(settings_pair_code, sizeof(settings_pair_code));
                         if (settings.page.card)
                                 settings_card_fill(), ui_lines_wrap(&settings.ui, &settings.card_text, settings.width), settings_layout();
+                        settings_wipe(settings_large->said, sizeof(settings_large->said));
                         ui_page_redraw(&settings.page);
                 }
+                settings_wipe(settings.job_value, sizeof(settings.job_value));
+                settings_wipe(settings_large->split, sizeof(settings_large->split));
                 if (row == SETTINGS_JOB_ACT)
                         settings.feed_due = 0;
                 else
@@ -3620,6 +3638,8 @@ static fn settings_link_grant_toggle(int at)
         if (item->where == 0)
         {
                 b32 allow = (settings_link_global_grants & bit) == 0;
+                if (allow && !settings.hand)
+                        return settings_say((string_address)WORDS(settings_virtual_refused));
                 settings_link_global_grants ^= bit;
                 item->grants = settings_link_global_grants;
                 settings_act(allow ? 'L' : 'N', settings_link_grants[settings_sub[at].part].word, null);
@@ -3628,6 +3648,8 @@ static fn settings_link_grant_toggle(int at)
         if (!(settings_link_global_grants & bit))
                 return;
         b32 allow = (item->grants & bit) == 0;
+        if (allow && !settings.hand)
+                return settings_say((string_address)WORDS(settings_virtual_refused));
         item->grants ^= bit;
         settings_act(allow ? 'l' : 'n', item->label, settings_link_grants[settings_sub[at].part].word);
 }
@@ -4562,6 +4584,13 @@ static fn settings_close(void)
         settings_wall_free();
         settings_wipe(settings_pair_code, sizeof(settings_pair_code));
         settings_wipe(settings.job_value, sizeof(settings.job_value));
+        settings_wipe(settings.status, sizeof(settings.status));
+        if (settings_large)
+        {
+                settings_wipe(settings_large->said, sizeof(settings_large->said));
+                settings_wipe(settings_large->card, sizeof(settings_large->card));
+                settings_wipe(settings_large->split, sizeof(settings_large->split));
+        }
         if (settings.queue && settings.queue_room)
                 settings_wipe(settings.queue, settings.queue_room * sizeof(settings.queue[0]));
         ui_field_close(&settings.edit);
