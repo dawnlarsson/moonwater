@@ -162,15 +162,15 @@ static fn icheck_plan(void)
         string_copy((string_address)c.drive, (string_address) "sda");
         string_copy((string_address)c.language, (string_address) "de");
         string_copy((string_address)c.keyboard, (string_address) "de");
-        c.mode = INSTALLER_OVERWRITE;
+        c.mode = INSTALLER_OVERWRITE, c.bytes = 1000;
         c.profiles = INSTALLER_CHROME | INSTALLER_STEAM | INSTALLER_SSH;
         count = installer_plan(&c, true, plan, sizeof(plan));
         check("installer plan: offline, the install alone: no profile, and nothing the person did not change",
-              count == 1 && string_equals((string_address)plan, (string_address) "/moonwater install sda overwrite yes\n"));
+              count == 1 && string_equals((string_address)plan, (string_address) "/moonwater install sda overwrite yes 1000\n"));
         c.online = true, c.language_changed = true, c.mode = INSTALLER_UPDATE;
         count = installer_plan(&c, true, plan, sizeof(plan));
         check("installer plan: an update's words, the language changed reaching it and the keyboard not",
-              icheck_has(plan, "/moonwater install sda update yes\n") && icheck_has(plan, "/moonwater language de\n") &&
+              icheck_has(plan, "/moonwater install sda update yes 1000\n") && icheck_has(plan, "/moonwater language de\n") &&
                   !icheck_has(plan, "keyboard"));
         check("installer plan: online, every profile chosen, SSH turned on after its profile",
               count == 6 && icheck_has(plan, "/bowl profile chrome\n") && icheck_has(plan, "/bowl profile steam\n") &&
@@ -182,8 +182,11 @@ static fn icheck_plan(void)
         c.mode = INSTALLER_USE;
         installer_plan(&c, false, plan, sizeof(plan));
         check("installer plan: Use is the verb's use, the third answer of the terminal's question",
-              icheck_has(plan, "/moonwater install sda use yes\n") && installer_mode_at(2) == INSTALLER_USE && installer_mode_at(1) == INSTALLER_UPDATE &&
+              icheck_has(plan, "/moonwater install sda use yes 1000\n") && installer_mode_at(2) == INSTALLER_USE && installer_mode_at(1) == INSTALLER_UPDATE &&
                   installer_mode_at(0) == INSTALLER_OVERWRITE);
+        check("installer skipped: mapped and RAID volumes and eMMC boot areas are no drive; a card's whole device is",
+              installer_skipped("dm-0") && installer_skipped("md127") && installer_skipped("mmcblk0boot0") && installer_skipped("sr0") &&
+                  !installer_skipped("mmcblk0") && !installer_skipped("sda") && !installer_skipped("nvme0n1"));
         string_copy((string_address)c.drive, (string_address) "loop0");
         check("installer plan: no plan for a loop device", installer_plan(&c, true, plan, sizeof(plan)) == 0 && !plan[0]);
         {
@@ -279,7 +282,8 @@ static fn icheck_window(void)
               !installer_install() && installer.step == INSTALLER_STEP_REVIEW && installer.big->note[0] && installer.child == 0);
         installer.commands = installer_plan(&installer.choice, installer.x86, installer.big->plan, sizeof(installer.big->plan));
         check("installer plan: what the window chose is what it runs: the update, the language, the keyboard, the profiles",
-              icheck_has(installer.big->plan, "/moonwater install sda update yes\n/moonwater language de\n/moonwater keyboard uk\n/bowl profile chrome\n") &&
+              icheck_has(installer.big->plan, "/moonwater install sda update yes ") &&
+                  icheck_has(installer.big->plan, "\n/moonwater language de\n/moonwater keyboard uk\n/bowl profile chrome\n") &&
                   icheck_has(installer.big->plan, "/bowl profile ssh\n/moonwater ssh on\n") && !icheck_has(installer.big->plan, "steam"));
 }
 
