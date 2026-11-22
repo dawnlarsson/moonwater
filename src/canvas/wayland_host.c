@@ -4604,6 +4604,24 @@ static void compositor_wl_clip_clear(void *context, long client, long which)
                 compositor_clip_clear((unsigned int)which);
 }
 
+/*
+        The shim's view of a clipboard selection, read from the store: the Wayland client slot that owns it (-1 when the owner is native, or
+        there is none), and *serial, the store's change count for the slot (it moves on every install, clear and wipe). Both come from the
+        compositor's private owner and count (manage.c), never from the table's copies, which clients can write.
+*/
+static long compositor_wl_selection_query(void *context, long which, unsigned long *serial)
+{
+        int row;
+
+        (void)context;
+        if (serial)
+                *serial = which >= 0 && which < 2 ? compositor_clip_serial((unsigned int)which) : 0;
+        if (which < 0 || which > 1)
+                return -1;
+        row = compositor_clip_owner_row((unsigned int)which);
+        return row >= 0 ? (long)wayland_row_owner(row) : -1;
+}
+
 static void compositor_wl_selection(unsigned int which) { if (compositor_wl.started) wayland_selection_changed((long)which); }
 
 static void compositor_wl_xreceive(void *context, long client, long which, const char *mime, long fd)
