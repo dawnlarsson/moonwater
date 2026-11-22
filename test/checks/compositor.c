@@ -2733,6 +2733,41 @@ static void band_draw(unsigned int position, const char *const *titles, int bare
     memory_copy(into, band_pixels, sizeof(band_pixels));
 }
 
+/* --dump-band DIR (the check's argv 5 and 6, given by hand): the band as it was drawn, one PPM per position, for a person to look at.
+   Nothing is written unless the flag is given. */
+static void band_dump(const char *name)
+{
+    static unsigned char bytes[sizeof(band_pixels) / sizeof(band_pixels[0]) * 3];
+    char path[512], head[48];
+    unsigned int height = sizeof(band_pixels) / (BAND_W * sizeof(band_pixels[0])), length = 0;
+    bipolar handle;
+
+    if (program_argument_count() < 7 || !string_equals((string_address)program_argument(5), (string_address) "--dump-band"))
+        return;
+    string_copy_bounded((string_address)path, program_argument(6), sizeof(path));
+    string_append_bounded((string_address)path, (string_address) "/", sizeof(path));
+    string_append_bounded((string_address)path, (string_address)name, sizeof(path));
+    for (unsigned int at = 0; at < BAND_W * height; at++)
+    {
+        unsigned int pixel = band_pixels[at];
+
+        bytes[3 * at] = (unsigned char)(pixel >> 16), bytes[3 * at + 1] = (unsigned char)(pixel >> 8), bytes[3 * at + 2] = (unsigned char)pixel;
+    }
+    handle = system_open_at_mode(AT_FDCWD, path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+    if (handle < 0)
+        return;
+    string_copy((string_address)head, (string_address) "P6\n");
+    length = 3;
+    length += (unsigned int)positive_into_string((p8 address_to)head + length, BAND_W);
+    head[length++] = ' ';
+    length += (unsigned int)positive_into_string((p8 address_to)head + length, height);
+    string_copy((string_address)head + length, (string_address) "\n255\n");
+    length += 5;
+    system_write_once(handle, head, length);
+    system_write_once(handle, bytes, 3 * BAND_W * height);
+    system_close(handle);
+}
+
 static p64 band_hash(p64 hash)
 {
     for (unsigned int at = 0; at < sizeof(band_pixels) / sizeof(band_pixels[0]); at++)
@@ -4932,6 +4967,7 @@ static void check_taskbar_text(string_address face_path)
 
             taskbar_settings_set(position == TASKBAR_TOP ? "top" : "bottom", "primary", "battery none\n");
             check("taskbar text: a bottom and a top band draw their tabs", taskbar_draw(&view, 7, band_glass, null, rect) == 1);
+            band_dump(position == TASKBAR_TOP ? "band-top.ppm" : "band-bottom.ppm");
             hash = band_hash(hash);
         }
         if (hash != BAND_UPRIGHT)
