@@ -10027,6 +10027,13 @@ b32 main()
                 }
                 ui_kit_theme(UI_THEME_DARK, UI_ACCENT_STANDARD, 1);
                 ui_kit_theme(UI_THEME_DARK, UI_ACCENT_STANDARD, 0);
+                // The settings window's map (its item lists and the text pool, which check_settings makes first) and its engine and faces:
+                // the settings groups are children of this run and read them without check_settings in their own line.
+                if (settings_map())
+                {
+                        settings.ui.engine = &band_engine, settings.ui.regular = &band_face, settings.ui.scale = 100;
+                        settings_layout(); // the list's callbacks and the page's wiring, once (settings.list.ids is their guard)
+                }
         }
 
         // The transitions run as designed in every check (ui_paced at 100): the durations the rows pin are the designed ones.
