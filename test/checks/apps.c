@@ -9962,6 +9962,19 @@ static void record_rows(void)
 /* Each top-level group of this run is a child of its own: a group that dies by a signal is one CRASHED line and the run goes on,
    and a group that fails counts once in the report. The children share the run's state as it stood at their fork, so a group that
    passed only because an earlier group set something up shows up as a finding. */
+/* A child that takes a fault flushes its own log and leaves with 128 + the signal, so the rows it had not yet written are kept. */
+static void group_crash(int sig, void *info, void *uc)
+{
+        (void)info, (void)uc;
+        log_flush();
+        system_call_3(syscall(exit_group), (positive)(128 + sig), 0, 0);
+}
+static void group_catch(void)
+{
+        static const int signals[4] = {4, 7, 8, 11}; /* SIGILL, SIGBUS, SIGFPE, SIGSEGV */
+        for (int at = 0; at < 4; at++)
+                system_signal_install(signals[at], (positive)group_crash, 4 | 0x04000000, (positive)group_crash, null); /* SA_SIGINFO, SA_RESTORER */
+}
 #define GROUP(name, call) do { \
         positive group_before = failures; \
         bipolar group_pid; \
@@ -9971,6 +9984,7 @@ static void record_rows(void)
         { \
                 string_format(log, "GROUP " name "\n"); \
                 log_flush(); \
+                group_catch(); \
                 call; \
                 log_flush(); \
                 system_call_3(syscall(exit_group), failures != group_before, 0, 0); \
@@ -9979,13 +9993,14 @@ static void record_rows(void)
                 call; \
         else \
         { \
-                int group_status = 0; \
+                int group_status = 0, group_code; \
                 (void)system_wait4_retry(group_pid, address_of(group_status), 0, null); \
-                if ((group_status & 0x7f) == 0) \
-                        failures += ((group_status >> 8) & 0xff) != 0; \
+                group_code = (group_status >> 8) & 0xff; \
+                if ((group_status & 0x7f) == 0 && group_code < 128) \
+                        failures += group_code != 0; \
                 else \
                 { \
-                        string_format(log, "CRASHED: " name " (signal %d)\n", group_status & 0x7f); \
+                        string_format(log, "CRASHED: " name " (signal %p)\n", (positive)((group_status & 0x7f) ? group_status & 0x7f : group_code - 128)); \
                         log_flush(); \
                         failures++; \
                 } \
