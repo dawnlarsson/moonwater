@@ -460,6 +460,8 @@ struct windows
         char starting[WINDOWS_STARTING][WINDOWS_APP_ID];
         unsigned long long starting_at[WINDOWS_STARTING];
         unsigned int abi, rows, capacity;
+        /* Counts the programs that found every row taken and asked for more. The clipboard door is only the doorbell. */
+        unsigned int rows_wanted;
 };
 
 #define WINDOWS_ABI 14u
@@ -2828,12 +2830,15 @@ static void kernel_notices_tick(struct windows *table, unsigned long long now)
 }
 
 #define WINDOWS_ROWS_WAIT_MS 30000
-static int windows_rows_ask(const struct windows *table, unsigned int had)
+static int windows_rows_ask(struct windows *table, unsigned int had)
 {
         unsigned int seen = windows_rows(table);
         long door;
 
-        if (had >= windows_room(table) || (door = window_call(WINDOW_SYS_OPENAT, -100, (long)WINDOWS_CLIP_DOOR, WINDOWS_O_WRITE, 0, 0, 0)) < 0)
+        if (had >= windows_room(table))
+                return 0;
+        __atomic_add_fetch(&table->rows_wanted, 1u, __ATOMIC_RELEASE);
+        if ((door = window_call(WINDOW_SYS_OPENAT, -100, (long)WINDOWS_CLIP_DOOR, WINDOWS_O_WRITE, 0, 0, 0)) < 0)
                 return 0;
         for (unsigned int waited = 0; waited < WINDOWS_ROWS_WAIT_MS && windows_rows(table) <= had; waited++)
         {
