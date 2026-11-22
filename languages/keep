@@ -3,30 +3,11 @@
 # and the check cannot tell from text by what stands round them. One a line: the file, a tab, the literal as it is written
 # between its quotes. Keys, verbs, options, paths, log lines, assembly and static asserts need no line here: the check knows
 # them by their place and shape.
-src/canvas/ui/launcher.c	Settings
-src/canvas/ui/launcher.c	settings preferences options
-src/canvas/ui/launcher.c	Terminal
-src/canvas/ui/launcher.c	terminal shell console
-src/canvas/ui/launcher.c	Kernel log
-src/canvas/ui/launcher.c	kernel log klog dmesg messages
-src/canvas/ui/launcher.c	Mixer
-src/canvas/ui/launcher.c	mixer sound volume audio
-src/canvas/ui/launcher.c	Files
 src/canvas/ui/launcher.c	moonwater sleep
-src/canvas/ui/launcher.c	moonwater desktop rest
-src/canvas/ui/launcher.c	files folders browser directory
 src/canvas/ui/files.c	Files
 src/canvas/ui/files.c	Enter
 src/canvas/ui/files.c	Delete
 src/canvas/ui/mixer.c	Mixer
-src/canvas/ui/terminal.c	cannot use the font
-src/canvas/ui/terminal.c	text size
-src/canvas/ui/terminal.c	px, cell
-src/canvas/ui/terminal.c	by
-src/canvas/ui/terminal.c	px
-src/canvas/ui/terminal.c	klog pid
-src/canvas/ui/terminal.c	terminal pid
-src/canvas/ui/settings.c	[Moonwater]
 src/canvas/ui/settings.c	Normal
 src/canvas/ui/settings.c	Turned right
 src/canvas/ui/settings.c	Upside down
@@ -39,27 +20,18 @@ src/canvas/ui/settings.c	Remembered devices
 src/canvas/ui/settings.c	Power
 src/canvas/ui/settings.c	Time
 src/canvas/ui/settings.c	Network
-src/canvas/ui/settings.c	rotation
-src/canvas/ui/settings.c	scale
 src/canvas/ui/settings.c	refresh
-src/canvas/ui/settings.c	place
-src/canvas/ui/settings.c	more
-src/canvas/ui/settings.c	* joined
 src/canvas/ui/settings.c	All commands
 src/canvas/ui/settings.c	this machine has no
 src/canvas/ui/settings.c	this battery has no
 src/canvas/ui/settings.c	no wireless hardware
 src/canvas/ui/settings.c	on the other machine
-src/canvas/ui/settings.c	dBm
-src/canvas/ui/settings.c	and
 src/canvas/ui/settings.c	wifi
-src/canvas/ui/settings.c	system notices
 src/canvas/ui/settings.c	Devices
 src/canvas/ui/settings.c	Internal storage
 src/canvas/ui/settings.c	External devices
 src/canvas/ui/settings.c	Waterlink
 src/canvas/ui/settings.c	Linked machines
-src/canvas/ui/settings.c	GB
 src/canvas/ui/settings.c	MB
 src/canvas/ui/ui.c	Ctrl
 src/canvas/ui/ui.c	Shift
@@ -67,8 +39,6 @@ src/canvas/ui/ui.c	Alt
 src/canvas/ui/ui.c	Super
 src/canvas/ui/ui.c	Plain Text
 src/canvas/ui/ui.c	Shell
-src/canvas/ui/launcher.c	Install Moonwater
-src/canvas/ui/launcher.c	install installer disk drive
 src/canvas/ui/installer.c	Install Moonwater
 src/canvas/ui/settings.c	Discord
 src/canvas/ui/settings.c	GitHub
@@ -78,3 +48,61 @@ src/canvas/ui/settings.c	github.com/dawnlarsson/moonwater/issues
 src/canvas/ui/settings.c	https://dawning.dev
 src/canvas/ui/settings.c	https://discord.gg/nwvFVGYJhR
 src/canvas/ui/settings.c	https://github.com/dawnlarsson/moonwater/issues
+src/canvas/ui/editor.c	Editor
+src/canvas/ui/settings.c	 mode 
+src/canvas/ui/settings.c	 primary
+src/canvas/ui/settings.c	waiting
+src/canvas/ui/settings.c	view only
+src/canvas/ui/settings.c	part 
+src/canvas/ui/settings.c	drive 
+src/canvas/ui/settings.c	where 
+src/canvas/ui/settings.c	 drive 
+src/canvas/ui/settings.c	link 
+src/canvas/ui/settings.c	  next:
+src/canvas/ui/settings.c	  this machine  
+src/canvas/ui/settings.c	  allow 
+src/canvas/ui/settings.c	 from 
+src/canvas/ui/settings.c	from 
+src/canvas/ui/settings.c	last address 
+src/canvas/ui/settings.c	rtt 
+src/canvas/ui/settings.c	, in group 
+src/canvas/ui/settings.c	Port
+src/canvas/ui/settings.c	none 
+src/canvas/ui/ui.c	 txt md markdown rst c h cc cpp cxx hpp hh py sh bash zsh js mjs ts json toml yaml yml ini conf cfg log csv tsv xml html htm css 
+src/canvas/ui/ui.c	rs go java kt rb pl lua s asm mk cmake diff patch tex sql nix rover 
+src/canvas/ui/ui.c	 png jpg jpeg gif bmp webp svg ico tif tiff ppm pgm pbm qoi avif heic 
+src/canvas/ui/ui.c	 mp3 ogg oga flac wav opus m4a aac mid midi aiff 
+src/canvas/ui/ui.c	 mp4 mkv webm avi mov m4v ogv mpg mpeg 
+src/canvas/ui/ui.c	 tar gz tgz xz txz zst bz2 zip 7z rar lz4 lzma iso img deb rpm apk cpio jar 
+src/canvas/ui/ui.c	 pdf doc docx odt rtf epub xls xlsx ods ppt pptx odp 
+src/canvas/ui/ui.c	Moonwater
+src/canvas/ui/ui.c	Settings
+src/canvas/ui/ui.c	settings preferences options
+src/canvas/ui/ui.c	Terminal
+src/canvas/ui/ui.c	terminal shell console
+src/canvas/ui/ui.c	Kernel log
+src/canvas/ui/ui.c	kernel log klog dmesg messages
+src/canvas/ui/ui.c	Mixer
+src/canvas/ui/ui.c	mixer sound volume audio
+src/canvas/ui/ui.c	Files
+src/canvas/ui/ui.c	files folders browser directory
+src/canvas/ui/ui.c	Editor
+src/canvas/ui/ui.c	editor code text hex
+src/canvas/ui/ui.c	Install Moonwater
+src/canvas/ui/ui.c	install installer disk drive
+src/canvas/ui/ui.c	GenericName
+src/canvas/ui/ui.c	Keywords
+src/canvas/ui/ui.c	Type
+src/canvas/ui/ui.c	Exec
+src/canvas/ui/ui.c	Icon
+src/canvas/ui/ui.c	StartupWMClass
+src/canvas/ui/ui.c	Hidden
+src/canvas/ui/ui.c	NoDisplay
+src/canvas/ui/ui.c	OnlyShowIn
+src/canvas/ui/ui.c	NotShowIn
+src/canvas/ui/ui.c	Delete
+src/canvas/ui/ui.c	 GB
+src/canvas/ui/ui.c	 MB
+src/canvas/ui/ui.c	 KB
+src/canvas/ui/ui.c	 B
+src/canvas/ui/ui.c	 TB
