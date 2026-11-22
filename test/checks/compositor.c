@@ -4568,8 +4568,31 @@ static void check_taskbar_guard(void)
           laid > 0 && outside == 0 && named_outside == 0);
 }
 
+/* A band whose glass is refused this frame writes nothing: its pixels stay as they were and it is not damaged (taskbar_draw returns 0),
+   and the band stays stale, so the next pass redraws it. Drawing 1 over pixels never written put the band on screen blank. */
+static int band_glass_refused(void *context, int x, int y, int width, int height)
+{
+    (void)context, (void)x, (void)y, (void)width, (void)height;
+    return 0;
+}
+
+static void check_taskbar_glass_refused(void)
+{
+    struct taskbar_view view = band_view(TASKBAR_BOTTOM, null);
+    int rect[4] = {0, 0, 0, 0}, kept = 1;
+
+    memory_fill_u32(band_pixels, sizeof(band_pixels) / sizeof(band_pixels[0]), 0x00abcdefu);
+    taskbar_changed();
+    kept = taskbar_draw(&view, ~0ul, band_glass_refused, null, rect) == 0;
+    for (unsigned int at = 0; at < BAND_W * COMPOSITOR_PANEL; at++)
+        kept &= band_pixels[at] == 0x00abcdefu;
+    check("taskbar glass: a band whose glass is refused draws nothing, keeps the pixels it had, and is not damaged (the next pass redraws it)",
+          kept && taskbar_stale());
+}
+
 static void check_taskbar_identity(void)
 {
+    check_taskbar_glass_refused();
     static unsigned int first[BAND_W * COMPOSITOR_PANEL], second[BAND_W * COMPOSITOR_PANEL], picture[WINDOWS_ICON * WINDOWS_ICON], again[WINDOWS_ICON * WINDOWS_ICON];
     static const char *const words[4] = {"bottom", "top", "left", "right"};
     static const int scales[3] = {100, 150, 200};

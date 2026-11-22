@@ -1666,8 +1666,11 @@ static int taskbar_draw(const struct taskbar_view *view, unsigned long redo, tas
         if (span[2] <= span[0])
                 return 0;
         rect[0] = span[0], rect[1] = span[1], rect[2] = span[2] - span[0], rect[3] = span[3] - span[1];
+        /* No glass this frame (the card is busy, a frost is refused, a timeout): nothing of the band is written, so the pixels it
+           had stay, and nothing is damaged. The stale flag is kept, so the next pass redraws every tab (present.c). Returning 1
+           here damaged the band over pixels that were never drawn. */
         if (!(gw = glass(context, rect[0], rect[1], rect[2], rect[3])))
-                return 1;
+                return 0;
         if (redo == ~0ul)
                 taskbar.stale = 0;
         if (taskbar_clock_stale())
