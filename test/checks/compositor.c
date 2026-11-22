@@ -4125,6 +4125,33 @@ static void check_compositor_records(void)
                         mismatches++;
         }
         check("records: 600 random frames of kind 0, 4 and 11 (with and without the 0x80 swap) are the painters' pixels, every one", mismatches == 0 && trials == 600);
+        // Kind 1 (tone over), a premultiplied colour laid over a clipped random rectangle: each target pixel is compositor_over_pixel's, read by a
+        // loop over the whole target, so the clip and the row walk are what is tested (the arithmetic is compositor_over_pixel's, the card's rounding).
+        mismatches = 0;
+        for (int trial = 0; trial < 300; trial++)
+        {
+                int tw = 40 + (int)(records_random(&state) % 100), th = 30 + (int)(records_random(&state) % 80);
+                int rx = (int)(records_random(&state) % (unsigned int)(tw + 40)) - 20, ry = (int)(records_random(&state) % (unsigned int)(th + 40)) - 20;
+                int rw = 1 + (int)(records_random(&state) % 150), rh = 1 + (int)(records_random(&state) % 110);
+                unsigned int colour = records_random(&state), ops[8];
+                struct compositor_target a, b;
+                int count = tw * th, ran;
+
+                for (int at = 0; at < count; at++)
+                        before[at] = executed[at] = painted[at] = records_random(&state);
+                a = (struct compositor_target){painted, (unsigned long)tw, tw, th, 0, 0, tw, th, 0, 0, null, 0};
+                b = (struct compositor_target){executed, (unsigned long)tw, tw, th, 0, 0, tw, th, 0, 0, null, 0};
+                memory_zero(ops, sizeof(ops));
+                ops[0] = 1, ops[1] = (unsigned int)rx, ops[2] = (unsigned int)ry, ops[3] = (unsigned int)(rx + rw), ops[4] = (unsigned int)(ry + rh), ops[5] = colour;
+                for (int py = 0; py < th; py++)
+                        for (int px = 0; px < tw; px++)
+                                if (px >= rx && px < rx + rw && py >= ry && py < ry + rh)
+                                        painted[py * tw + px] = compositor_over_pixel(painted[py * tw + px], colour);
+                ran = compositor_records_run(ops, 1, &b, records_resolve);
+                if (ran != 1 || memory_compare(painted, executed, (positive)count * 4))
+                        mismatches++;
+        }
+        check("records: 300 random tone-over records (kind 1, premultiplied colour) clip to the target and match a pixel loop, every one", mismatches == 0);
         // A tiled record is refused, and the target it was given is left as it was.
         {
                 static unsigned int target[64 * 64];

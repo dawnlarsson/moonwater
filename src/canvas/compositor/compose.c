@@ -3559,6 +3559,27 @@ static int __attribute__((unused)) compositor_records_run(const unsigned int *op
                                 compositor_fill(t, x0, y0, w, h, op[5]);
                         continue;
                 }
+                if (kind == 1)
+                {
+                        // Tone over: the colour is premultiplied by its caller (the lowering of a cover-masked fill does so), and is laid over
+                        // what the target holds: out = colour + dst * (255 - a) / 255, with the over rounding (compositor_over_pixel).
+                        int x2, y2, x3, y3;
+
+                        if (op[0] & ~0x1fu)
+                                return -1;
+                        if (w > 0 && h > 0 && target_clip(t, x0, y0, w, h, &x2, &y2, &x3, &y3))
+                        {
+                                compositor_reading(t);
+                                for (int py = y2; py < y3; py++)
+                                {
+                                        unsigned int *into = t->pixels + (unsigned long)(py - t->oy) * t->pitch + (unsigned long)(x2 - t->ox);
+
+                                        for (int px = x2; px < x3; px++, into++)
+                                                *into = compositor_over_pixel(*into, op[5]);
+                                }
+                        }
+                        continue;
+                }
                 if ((kind != 4 && kind != 11) || (op[0] & ~0x9fu))
                         return -1;
                 if (w > 0 && h > 0)
