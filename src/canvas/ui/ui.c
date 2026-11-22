@@ -1304,6 +1304,8 @@ enum
         UI_FILE_TRASH,       // the bin
         UI_FILE_SPECIAL,     // a device, a pipe, a socket
         UI_FILE_MACHINE,     // a computer: this machine or a linked peer
+        UI_FILE_STICK,       // a disk on USB: a stick's body and its plug with its two contacts (Files' Devices)
+        UI_FILE_PARTITION,   // a part of a disk: the disk's outline cut once, the part before the cut shaded (Files' Devices)
         UI_FILE_KINDS
 };
 #define UI_FILE_LINKED 0x100u // with a kind: it is a link to one (the arrow at its foot)
@@ -1334,6 +1336,9 @@ static const struct ui_icon_part ui_file_parts[UI_FILE_KINDS][UI_FILE_PARTS] = {
         [UI_FILE_TRASH] = {{UI_ICON_LINE, 7, 12, 41, 12, 0}, {UI_ICON_RING, 18, 6, 30, 12, 1}, {UI_ICON_LINE, 12, 12, 15, 43, 0}, {UI_ICON_LINE, 36, 12, 33, 43, 0},
                            {UI_ICON_LINE, 15, 43, 33, 43, 0}, {UI_ICON_LINE, 20, 18, 20, 37, 0}, {UI_ICON_LINE, 28, 18, 28, 37, 0}},
         [UI_FILE_SPECIAL] = {{UI_ICON_RING, 8, 8, 40, 40, 16}, {UI_ICON_BOX, 20, 20, 28, 28, 4}},
+        [UI_FILE_STICK] = {{UI_ICON_RING, 15, 16, 33, 44, 4}, {UI_ICON_RING, 18, 4, 30, 16, 1}, {UI_ICON_BOX, 21, 8, 23, 11, 0},
+                            {UI_ICON_BOX, 25, 8, 27, 11, 0}},
+        [UI_FILE_PARTITION] = {{UI_ICON_RING, 4, 15, 44, 35, 3}, {UI_ICON_LINE, 20, 15, 20, 35, 0}, {UI_ICON_SHADE, 6, 17, 20, 33, 2}},
         [UI_FILE_MACHINE] = {{UI_ICON_RING, 6, 8, 42, 32, 2}, {UI_ICON_LINE, 24, 32, 24, 40, 0}, {UI_ICON_LINE, 14, 40, 34, 40, 0}},
 };
 

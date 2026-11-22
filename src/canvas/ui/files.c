@@ -296,12 +296,15 @@ static fn files_device_describe(const struct files_tree address_to t, const stru
         ui_label_foreign(label, sizeof(label), name, n->length), row->label = label;
         if (n->kind == FILES_NODE_DISK && n->device < d->disks)
         {
+                // A disk on USB is a stick's symbol, one inside the machine a drive's: which is which, at a glance.
+                row->file = 1 + (d->disk_external[n->device] ? UI_FILE_STICK : UI_FILE_DRIVE);
                 ui_size_text(size, sizeof(size), d->disk_bytes[n->device]), row->value = size;
                 row->expander = !n->has ? 0 : n->open ? UI_ROW_EXPANDER_OPEN : UI_ROW_EXPANDER_SHUT;
                 return;
         }
         if (n->kind != FILES_NODE_PART || n->device >= d->parts)
                 return;
+        row->file = 1 + UI_FILE_PARTITION;
         ui_size_text(size, sizeof(size), d->part_bytes[n->device]), row->value = size;
         if (d->part_type[n->device][0])
                 ui_label_foreign(type, sizeof(type), d->part_type[n->device], string_length((string_address)d->part_type[n->device])), row->note = type;
