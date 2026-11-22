@@ -1565,6 +1565,22 @@ static fn steam_profile(void)
                       right);
         }
 #endif
+        {
+                // Every profile's session, its lines joined as bowl_profile_session joins them, is under half of what it holds, so
+                // the next lines added are not the ones that stop the program from starting at all (the steam session passed 4 KiB).
+                b32 room = 1;
+
+                for (positive p = 0; p < array_count(bowl_profiles); p++)
+                {
+                        positive used = 0;
+
+                        for (string_address address_to line = bowl_profiles[p].session; line && *line; line++)
+                                used += string_length(*line) + 1;
+                        room &= used + 1 <= BOWL_SESSION_LIMIT / 2;
+                }
+                check("Every profile's session script is under half of what bowl_profile_session holds (BOWL_SESSION_LIMIT), the steam one among them",
+                      room);
+        }
         check("The session looks for Canvas's socket before it starts anything, and says how to turn the shim on",
               socket == 1 && chrome_count(steam->session[0], "echo ") == 1);
         check("The session names the socket as an absolute path, and marks the launch as the person's",

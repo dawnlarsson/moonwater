@@ -56,6 +56,10 @@ static const p8 bowl_usage_text[] = bowl_label
 #define BOWL_PROGRAM "/bowl"
 #define BOWL_PATH_LIMIT 4096
 #define BOWL_SHEBANG_LIMIT 256
+// The most a profile's session script is, its lines joined (bowl_profile_session): 16 KiB, far under the kernel's 128 KiB for one
+// argument. It was 4 KiB, and the steam session outgrew it on 2026-11-22 (the input shim, DXVK's latency sleep, the CCD and the
+// shader warm): every `steam` then ended at once on "session script is too long". A check row holds each profile's under half of it.
+#define BOWL_SESSION_LIMIT (BOWL_SHEBANG_LIMIT * 64)
 #define BOWL_ACCESS_EXECUTE 1
 
 struct bowl_mount_point
@@ -15996,7 +16000,7 @@ static b32 __attribute__((__noinline__))
 bowl_profile_session(const struct bowl_profile address_to profile,
                      positive count, string_address address_to arguments)
 {
-        p8 text[BOWL_SHEBANG_LIMIT * 16];
+        p8 text[BOWL_SESSION_LIMIT];
         string_address argv[BOWL_PROFILE_ARGV];
         positive used = 0;
         positive at = 0;
