@@ -1368,6 +1368,7 @@ static b32 gpu_route_rows(void)
         positive base = gpu.size - (1 << 19), ops_at = base, bins_at = base + 4096, dst;
         unsigned int address_to ops = (unsigned int address_to)((p8 address_to)gpu.at + ops_at);
         long mapped, other, probe = system_open_at(AT_FDCWD, (string_address) "/dev/udmabuf", FILE_READ_WRITE | O_CLOEXEC);
+        b32 kept_userptr_ok;
 
         // The route is udmabuf and PRIME: a user the device refuses (the box's dawn, EACCES; root opens it) cannot run it, and says so.
         if (probe < 0)
@@ -1398,8 +1399,14 @@ static b32 gpu_route_rows(void)
         gpu_shared.fd = (int)fd, gpu_shared.at = (unsigned char address_to)mem, gpu_shared.bytes = BYTES, gpu_shared.pin = gpu_fake_pin;
         gpu_userptr_off = 0, gpu_userptr_gone = 0, gpu_maps_dma = 0, gpu_pin_count = 0, gpu_pin_sum = 0;
 
-        gpu_fake_userptr = 19; // ENODEV: the kernel without CONFIG_DRM_AMDGPU_USERPTR
-        check("gpu route: a userptr refused with ENODEV maps the table's pages by dma-buf", gpu_map_written(pic, W * W * 4) && gpu_userptr_gone && gpu_maps_dma == 1);
+        // No map of the rows before holds these pages: a live map that does is the answer (gpu_map_hit, 3b2e4a1bb) and no route is asked.
+        while (gpu_map_count)
+                gpu_drop(0, GPU_GONE_RECOVER);
+        // The kernel without CONFIG_DRM_AMDGPU_USERPTR: userptr answers ENODEV, and the start's probe took no page by it (gpu_userptr_ok 0; with it, an ENODEV
+        // after would be the card lost).
+        gpu_fake_userptr = 19, kept_userptr_ok = gpu_userptr_ok, gpu_userptr_ok = 0;
+        check("gpu route: the table's pages (a sealed memfd) map by the dma-buf route first, and userptr is not asked for them",
+              gpu_map_written(pic, W * W * 4) && !gpu_userptr_gone && gpu_maps_dma == 1);
         check("gpu route: the map is the table's pages (the pin goes on for their offset)", gpu_pin_count == 1 && gpu_pin_sum == 1 && gpu_pin_offset == 4096);
         dst = (positive)gpu_va_written(pic, W * W * 4);
         check("gpu route: the card's address for the picture", dst != 0);
@@ -1418,7 +1425,8 @@ static b32 gpu_route_rows(void)
                 check("gpu route: the bytes past the picture are not the card's", mem[1024 + W * W] == 0xaaaaaaaau);
         }
         // Another memory of the process is not the table's: no route, and the reason says so. A refused userptr is then refused (5), not mapped.
-        check("gpu route: pages outside the table's memfd are refused with no route (5)", !gpu_map_written((void *)other, 4096) && (gpu_map_why & 255) == 5);
+        check("gpu route: pages outside the table's memfd ask userptr, which ENODEV gives up for the session, and are refused with no route (5)",
+              !gpu_map_written((void *)other, 4096) && gpu_userptr_gone && !gpu_lost && (gpu_map_why & 255) == 5);
         // The table's pages past the memfd's end: udmabuf refuses them (6, with EINVAL).
         gpu_shared.bytes = BYTES + 8192;
         check("gpu route: udmabuf refuses pages past the memfd's end (6, EINVAL)", !gpu_map_written(mem + BYTES / 4, 4096) && (gpu_map_why & 255) == 6 && (gpu_map_why >> 8) == 22);
@@ -1438,7 +1446,7 @@ static b32 gpu_route_rows(void)
         while (gpu_map_count)
                 gpu_drop(0, GPU_GONE_RECOVER);
         check("gpu route: the pins are let go of when the maps are", gpu_pin_sum == 0);
-        gpu_fake_userptr = 0, gpu_userptr_gone = 0, gpu_userptr_off = 0;
+        gpu_fake_userptr = 0, gpu_userptr_gone = 0, gpu_userptr_off = 0, gpu_userptr_ok = kept_userptr_ok;
         gpu_shared.fd = -1, gpu_shared.at = 0, gpu_shared.bytes = 0, gpu_shared.pin = 0;
         system_call_2(syscall(munmap), (positive)mapped, BYTES);
         system_call_2(syscall(munmap), (positive)other, 4096);
@@ -3780,9 +3788,9 @@ static void gpu_own_rows(void)
 
                 gpu_register_memfd((int)fd_big, big, 72ul << 20, 0);
                 userptrs = gpu_kernel.userptrs, udmabufs = gpu_kernel.udmabufs;
-                check("gpu own: a memfd past udmabuf's size limit is refused by it (EINVAL) and mapped by userptr after it",
-                      fd_big >= 0 && gpu_map(big + 1024, PIC) && gpu_kernel.udmabuf_size == 72ul << 20 && gpu_kernel.userptrs == userptrs + 1 &&
-                          (gpu_map_why & 255) == 6 && (gpu_map_why >> 8) == 22);
+                check("gpu own: a memfd past udmabuf's size limit is refused whole (EINVAL) and its picture's slice is made by udmabuf instead, with no userptr",
+                      fd_big >= 0 && gpu_map(big + 1024, PIC) && (gpu_map_why & 255) == 6 && (gpu_map_why >> 8) == 22 && gpu_kernel.udmabuf_size == PIC &&
+                          gpu_kernel.udmabufs == udmabufs + 1 && gpu_kernel.userptrs == userptrs);
                 va = gpu_va_bytes(big + 1024, PIC);
                 {
                         const unsigned int q[8] = {4, 0, 0, 64, 4, (unsigned int)va, (unsigned int)(va >> 32), 64};
