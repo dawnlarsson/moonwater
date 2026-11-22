@@ -1278,16 +1278,73 @@ static int compositor_uevent_drm(const char *message, long length)
         return 0;
 }
 
+/*
+        A drive taken out leaves no mount behind, whether Files is open or not: a block device's remove, heard on this socket, wakes
+        a thread of the compositor's own, which lets go of what moonwater device open opened from it (usb_media_tidy: the mount
+        detached, its folder gone) under the device lock. The loop only adds to the thread's eventfd, and a burst is one look.
+*/
+static int compositor_uevent_block_gone(const char *message, long length)
+{
+        static const char block[] = "SUBSYSTEM=block", gone[] = "ACTION=remove";
+        int seen = 0;
+        for (long at = 0, line; at < length; at++)
+        {
+                line = at;
+                while (at < length && message[at]) at++;
+                seen |= at - line == (long)sizeof(block) - 1 && !memory_compare(message + line, block, sizeof(block) - 1) ? 1 : 0;
+                seen |= at - line == (long)sizeof(gone) - 1 && !memory_compare(message + line, gone, sizeof(gone) - 1) ? 2 : 0;
+        }
+        return seen == 3;
+}
+
+#ifdef USB_MEDIA_KEPT // the device verbs (src/sh/host/device.c) are in this program; a check of the compositor alone has none
+static int compositor_tidy_wake = -1;
+static string_address compositor_tidy_kept = USB_MEDIA_KEPT;
+
+static void compositor_tidy_run(address_any context)
+{
+        (void)context;
+        for (;;)
+        {
+                unsigned long long asked = 0;
+                long got = compositor_call(syscall(read), (positive)compositor_tidy_wake, (positive)&asked, 8, 0, 0, 0);
+                bipolar lock;
+                if (got == -4) continue; // EINTR
+                if (got != 8) return;
+                lock = usb_lock_take(false);
+                if (lock >= 0) (void)usb_media_tidy(compositor_tidy_kept), radio_unlock(lock);
+        }
+}
+
+// The thread is made at the first remove and stays; a remove after it is a count on its eventfd. True when it was asked.
+static int compositor_tidy_ask(void)
+{
+        unsigned long long one = 1;
+        if (compositor_tidy_wake < 0)
+        {
+                compositor_tidy_wake = (int)compositor_call(syscall(eventfd2), 0, COMPOSITOR_CLOEXEC, 0, 0, 0, 0);
+                if (compositor_tidy_wake >= 0 && !thread_start(compositor_tidy_run, null))
+                        system_close(compositor_tidy_wake), compositor_tidy_wake = -1;
+        }
+        return compositor_tidy_wake >= 0 && compositor_call(syscall(write), (positive)compositor_tidy_wake, (positive)&one, 8, 0, 0, 0) == 8;
+}
+#else
+static int compositor_tidy_ask(void) { return 0; }
+#endif
+
 static void compositor_uevents_read(void)
 {
         char message[2048];
-        int drm = 0;
+        int drm = 0, gone = 0;
         for (int reads = 0; reads < 64; reads++)
         {
                 bipolar got = socket_receive((b32)compositor.uevents, message, sizeof(message), MSG_DONTWAIT, 0, 0);
                 if (got <= 0) break;
                 drm |= compositor_uevent_drm(message, got);
+                gone |= compositor_uevent_block_gone(message, got);
         }
+        if (gone)
+                (void)compositor_tidy_ask();
         if (drm)
         {
                 compositor_space_retake();

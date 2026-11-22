@@ -3906,6 +3906,39 @@ static fn device_open_rows(void)
                 tidied = tidied && !media.count && !usb_media_tidy((string_address)kept);
         }
         check("device tidy: a drive taken out is let go of (its mount detached, its folder gone), as is what is no longer mounted; then nothing is left to do", tidied);
+        {
+                // The compositor, with Files closed: a block device's remove on its uevent socket wakes its thread, which lets go of what
+                // was opened from that drive (a tmpfs here, kept as opened from a node that is gone). An add, or a USB device's remove,
+                // asks for nothing.
+                static const char removed[] = "remove@/devices/pci0000:00/usb1/1-2/host6/block/sdb/sdb1\0ACTION=remove\0SUBSYSTEM=block\0DEVNAME=sdb1\0DEVTYPE=partition";
+                static const char added[] = "add@/devices/pci0000:00/usb1/1-2/host6/block/sdb\0ACTION=add\0SUBSYSTEM=block\0DEVNAME=sdb";
+                static const char unplugged[] = "remove@/devices/pci0000:00/usb1/1-2\0ACTION=remove\0SUBSYSTEM=usb\0DEVTYPE=usb_device";
+                p32 ends[2] = {0, 0};
+                b32 heard = compositor_uevent_block_gone(removed, sizeof(removed)) && !compositor_uevent_block_gone(added, sizeof(added)) &&
+                            !compositor_uevent_block_gone(unplugged, sizeof(unplugged));
+                b32 let_go = false;
+                (void)usb_media_folder((string_address)root, "root", "PULLED", 0, folder, sizeof(folder));
+                if (heard && folder[0] && system_mount("none", (string_address)folder, "tmpfs", 0, null) >= 0 &&
+                    (bipolar)system_call_4(syscall(socketpair), AF_UNIX, SOCK_DGRAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0, (positive)ends) >= 0)
+                {
+                        file_facts facts;
+                        int saved = compositor.uevents;
+                        memory_zero(&media, sizeof(media)), media.count = 1;
+                        string_copy(media.one[0].node, "mwgone2"), media.one[0].diskseq = 5, string_copy(media.one[0].folder, folder);
+                        (void)usb_media_write((string_address)kept, &media);
+                        compositor_tidy_kept = (string_address)kept;
+                        compositor.uevents = (int)ends[0];
+                        system_call_3(syscall(write), ends[1], (positive)removed, sizeof(removed));
+                        compositor_uevents_read();
+                        compositor.uevents = saved;
+                        for (int wait = 0; wait < 300 && file_look(AT_FDCWD, (string_address)folder, AT_SYMLINK_NOFOLLOW, &facts); wait++)
+                                process_nap_ns(10000000);
+                        let_go = !file_look(AT_FDCWD, (string_address)folder, AT_SYMLINK_NOFOLLOW, &facts);
+                        system_close(ends[0]), system_close(ends[1]);
+                }
+                check("device tidy: the compositor hears a block device's remove (not an add, nor a USB device's remove) and its thread lets go of what was opened from it",
+                      heard && let_go);
+        }
         system_call_3(syscall(unlinkat), AT_FDCWD, (positive)kept, 0);
         string_join(path, sizeof(path), (string_address)root, "/root/MY STICK");
         system_call_3(syscall(unlinkat), AT_FDCWD, (positive)path, AT_REMOVEDIR);
