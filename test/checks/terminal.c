@@ -1710,6 +1710,77 @@ static void check_terminal_select_stale(void)
         A selection whose start has scrolled out of the ring copies what is kept, the same bytes as a selection that starts at the
         oldest line the ring holds: the walk starts there, not at a line the ring no longer has.
 */
+/*
+        A stream of scroll-region, line, scroll and resize sequences (what apt and the other full-screen installers send) leaves the
+        emulator's rings and region inside their bounds after every step: the cursor on the grid, the region in order, the history
+        count within the ring, and no row longer than the stride.
+*/
+static positive region_digits(p8 address_to into, p32 value)
+{
+    p8 digits[12];
+    positive count = 0, length = 0;
+
+    do
+        digits[count++] = (p8)('0' + value % 10), value /= 10;
+    while (value);
+    while (count)
+        into[length++] = digits[--count];
+    return length;
+}
+
+static void check_terminal_region_stream(void)
+{
+    static p8 bytes[4096];
+    b32 bad = false;
+
+    full_reset();
+    for (positive step = 0; step < 3000 && !bad; step++)
+    {
+        positive length = 0;
+        p32 what = render_next(14), top = 1 + render_next(ROWS), bottom = 1 + render_next(ROWS + 2), count = 1 + render_next(ROWS + 2);
+
+        if (what == 0)
+            bytes[length++] = '\n';
+        else if (what == 1)
+            length = 0, bytes[length++] = '\r', bytes[length++] = '\n';
+        else if (what == 2)
+            bytes[length++] = 'a', bytes[length++] = 'b', bytes[length++] = 'c';
+        else if (what <= 4)
+            bytes[length++] = 0x1b, bytes[length++] = '[', length += region_digits(bytes + length, top),
+            bytes[length++] = ';', length += region_digits(bytes + length, bottom), bytes[length++] = 'r';
+        else if (what <= 6)
+            bytes[length++] = 0x1b, bytes[length++] = '[', length += region_digits(bytes + length, count),
+            bytes[length++] = what == 5 ? 'L' : 'M';
+        else if (what <= 8)
+            bytes[length++] = 0x1b, bytes[length++] = '[', length += region_digits(bytes + length, count),
+            bytes[length++] = what == 7 ? 'S' : 'T';
+        else if (what == 9)
+            bytes[length++] = 0x1b, bytes[length++] = '7';
+        else if (what == 10)
+            bytes[length++] = 0x1b, bytes[length++] = '8';
+        else if (what == 11)
+            bytes[length++] = 0x1b, bytes[length++] = '[', bytes[length++] = 'r';
+        else if (what == 12)
+            bytes[length++] = 0x1b, bytes[length++] = '[', length += region_digits(bytes + length, top),
+            bytes[length++] = 'H';
+        else
+            bytes[length++] = 0x1b, bytes[length++] = '[', bytes[length++] = 'M';
+        term_bytes(bytes, length);
+        if (render_next(40) == 0)
+        {
+            window->rows = 4 + render_next(window->history / 2 - 4);
+            window->columns = 8 + render_next(window->stride - 8);
+            regrid(-1);
+        }
+        bad = ROWS < 1 || row >= ROWS || column > COLUMNS || region_top >= region_bottom || region_bottom > ROWS ||
+              history_lines + ROWS > window->history;
+        for (unsigned int r = 0; r < ROWS && !bad; r++)
+            bad = row_length(r) > window->stride;
+    }
+    check("terminal: a stream of region, line, scroll and resize sequences keeps the cursor, the region and the rings in bounds", !bad);
+    full_reset();
+}
+
 static void check_terminal_select_ancient(void)
 {
     p8 address_to text = null;
