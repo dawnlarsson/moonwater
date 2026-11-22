@@ -26502,6 +26502,16 @@ static b32 ui_apps_uninstall(const char address_to root, int which, const char a
 }
 
 // The same, its working folder the one held open at folder (a terminal opened in a folder a file browser shows); -1...
+// Whether a program's path names the on-screen keyboard (its last part is osk).
+static b32 ui_start_osk(string_address path)
+{
+        string_address name = path;
+        for (string_address at = path; *at; at++)
+                if (*at == '/')
+                        name = at + 1;
+        return string_equals(name, (string_address) "osk");
+}
+
 static b32 ui_start_apart_at(bipolar folder, string_address address_to words, positive count)
 {
         b32 told[2];
@@ -26541,6 +26551,10 @@ static b32 ui_start_apart_at(bipolar folder, string_address address_to words, po
                 quiet = system_open_at(AT_FDCWD, (string_address) "/dev/null", FILE_READ_WRITE | O_CLOEXEC);
                 for (positive at = 0; quiet >= 0 && at < 3; at++)
                         system_call_3(syscall(dup3), (positive)quiet, at, 0);
+                // The on-screen keyboard is the program named osk: its pid is recorded as the table's osk_pid before the exec (the compositor
+                // grants the keys only to that pid, manage.c compositor_osk_is), as rover's runner records it (src/rover/runner.c).
+                if (ui_kit_table && ui_start_osk(words[0]))
+                        __atomic_store_n(&ui_kit_table->osk_pid, (unsigned int)system_call(syscall(getpid)), __ATOMIC_RELEASE);
                 why = (b32)shell_exec_file(words[0], words, count, window_asked_environment());
                 if (why >= 0)
                         why = -2;
