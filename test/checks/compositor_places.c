@@ -1099,6 +1099,23 @@ static void check_compositor_scenes_frames(void)
                !compositor_scaled(&scenes_frames[k]) && scenes_frames[k].pixels == scenes_lent;
     check("scenes frames: closed, a window is drawn where it is, at its size, from its lent picture", own == 1 && !compositor_scenes_took(1));
 
+    // A client's tiled picture keeps its descriptor where the card scales it whole, and gives it up where the clip cuts it.
+    {
+        struct compositor_frame tiled[1];
+        const int from[4] = {0, 0, 400, 240}, inside[4] = {10, 10, 200, 120}, outside[4] = {-50, 10, 200, 120}, screen[4] = {0, 0, 512, 512};
+        unsigned int kept, cut;
+
+        memory_zero(tiled, sizeof(tiled));
+        tiled[0].width = 400, tiled[0].height = 240, tiled[0].pixels = scenes_lent, tiled[0].pitch = 400, tiled[0].tiled_kind = 1, tiled[0].scale = 100;
+        compositor_scenes_put(tiled, 1, from, inside, screen, 8, 1);
+        kept = tiled[0].tiled_kind;
+        memory_zero(tiled, sizeof(tiled));
+        tiled[0].width = 400, tiled[0].height = 240, tiled[0].pixels = scenes_lent, tiled[0].pitch = 400, tiled[0].tiled_kind = 1, tiled[0].scale = 100;
+        compositor_scenes_put(tiled, 1, from, outside, screen, 8, 1);
+        cut = tiled[0].tiled_kind;
+        check("scenes frames: a tiled picture keeps its descriptor when it is scaled whole, and is drawn from the row's own picture when cut",
+              kept == 1 && cut == 0);
+    }
     compositor_wall = 0, compositor_wall_w = compositor_wall_h = 0;
     canvas_ext_row_clear(1);
 }

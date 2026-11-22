@@ -738,6 +738,7 @@ static unsigned int compositor_scenes_put(struct compositor_frame *span, unsigne
         for (unsigned int at = 0; at < count; at++)
         {
                 struct compositor_frame f = span[at];
+                int row = f.row_plus1 - 1;
                 long long fx0 = f.x - from[0], fy0 = f.y - from[1];
                 int x0 = to[0] + (int)(fx0 * to[2] / from[2]), y0 = to[1] + (int)(fy0 * to[3] / from[3]);
                 int x1 = to[0] + (int)((fx0 + f.width) * to[2] / from[2]), y1 = to[1] + (int)((fy0 + f.height) * to[3] / from[3]);
@@ -745,7 +746,15 @@ static unsigned int compositor_scenes_put(struct compositor_frame *span, unsigne
                 if (!f.source_w || !f.source_h)
                         f.source_w = f.width, f.source_h = f.height;
                 f.x = x0, f.y = y0, f.width = x1 - x0, f.height = y1 - y0;
-                f.tiled_kind = 0, f.runs = 0;
+                // A client's tiled picture is scaled by the card from its descriptor whole (compositor_gpu_scale_frames): one the clip cuts is
+                // drawn from the row's own picture instead, which the card brings up to date from it first (one read of the client's).
+                if (f.tiled_kind && (x0 < clip[0] || y0 < clip[1] || x1 > clip[2] || y1 > clip[3]))
+                {
+                        if (row >= 0)
+                                compositor_wl_straight_settle(row, 0, (long)compositor.h[row]);
+                        f.tiled_kind = 0;
+                }
+                f.runs = 0;
                 f.close = f.minimize = 0, f.lit = 0, f.row_plus1 = 0, f.layer = 1;
                 f.preview[2] = f.preview[3] = 0, f.preview_under = 0, f.mark[2] = f.mark[3] = 0;
                 if (!at)
@@ -755,6 +764,16 @@ static unsigned int compositor_scenes_put(struct compositor_frame *span, unsigne
                 span[kept++] = f;
         }
         return kept;
+}
+
+// Whether the card scales a client's tiled picture in place, from its descriptor (gpu.c's op 8 scale bit and its self-test).
+static int compositor_scenes_tiled_scales(void)
+{
+#ifdef MOONWATER_GPU_C
+        return gpu_scaled_ready();
+#else
+        return 0;
+#endif
 }
 
 // Room for a window and as many layers as a window may have (wayland.c's WAYLAND_LAYERS) at frames[at].
@@ -768,9 +787,9 @@ static unsigned int compositor_scenes_own(int row, struct compositor_frame *fram
         compositor_row_prepare(row);
         compositor_frame_of(row, &frames[at]);
         rows[at] = (unsigned int)row;
-        // A client's tiled picture is read by the card at its own size only (the scene's image op, tiled_kind): the overview draws the
-        // row's own picture, which the card brings up to date from it first (compositor_wl_straight_settle: one read of the client's).
-        if (frames[at].tiled_kind)
+        // A client's tiled picture is scaled by the card from its descriptor where the card can (gpu_scaled_ready); where it cannot, the
+        // overview draws the row's own picture, which the card brings up to date from it first (one read of the client's).
+        if (frames[at].tiled_kind && !compositor_scenes_tiled_scales())
                 compositor_wl_straight_settle(row, 0, (long)compositor.h[row]), frames[at].tiled_kind = 0;
         return 1 + (at + 1 + COMPOSITOR_SCENES_LAYERS <= room ? compositor_wl_layers_frames(row, frames, rows, at + 1) : 0);
 }
