@@ -22005,6 +22005,10 @@ static p32 ui_strips_event(struct ui address_to ui, struct ui_strips address_to 
 // A row's badge (ui_row.badge): the severity of the issues its option has, the words the badge says being ui_row.badge_words.
 #define UI_ROW_BADGE_WARNING 1
 #define UI_ROW_BADGE_ERROR 2
+// A row's check (ui_row.check): a tick or a radio dot before its label, drawn when ui_row.on; its part is UI_ROW_CHECK_W logical pixels.
+#define UI_ROW_CHECK_TICK 1
+#define UI_ROW_CHECK_RADIO 2
+#define UI_ROW_CHECK_W 18
 // A row's expander (ui_row.expander): a chevron pointing right when the lines under the row are hidden, down when they show.
 #define UI_ROW_EXPANDER_SHUT 1
 #define UI_ROW_EXPANDER_OPEN 2
@@ -22085,6 +22089,7 @@ struct ui_row
         b32 on;                            // a switch's
         b32 dim;                           // the label and the value quiet: a note, a value that is not there
         b32 mark;                          // a dot before the label: the one in use
+        int check;                         // a mark before the label: UI_ROW_CHECK_TICK or UI_ROW_CHECK_RADIO, drawn when on
         unsigned int mark_ink;             // optional colour for the mark dot (0 defaults to UI_PRIMARY)
         b32 separator;                     // a subtle hairline rule above this row (e.g. between sidebar sections)
         b32 head;                          // a field right after the label, to the row's end (the words after a verb)
@@ -22222,6 +22227,7 @@ struct ui_list
         unsigned char address_to fold_open;
         struct ui_list_fold_slot { int id; struct ui_spring spring; } fold_pool[UI_LIST_FOLDS]; // the springs of the rows moving (id + 1; 0 free)
         void (*shut)(void);                // a fold closed: its rows leave the list, so the app lists them again
+        b32 (*choosable)(int id);          // optional: false for a row the keys and typeahead skip (a separator, a disabled item, a header); null: all
 };
 
 #define UI_LIST_STRIPE_INK 0x0d       // the alpha of the ink a striped row is tinted with in dark mode (about 5 percent)
@@ -22624,6 +22630,17 @@ static int ui_list_row_y(const struct ui_list address_to l, int at)
         return l->y + l->top[at] - l->scroll.scroll;
 }
 
+// A row's box in the window, device pixels: its span across the list and its place's top and height. False when the row is not in the list.
+static b32 ui_list_row_rect(const struct ui_list address_to l, int id, int address_to x, int address_to y, int address_to w, int address_to h)
+{
+        int at = id >= 0 ? ui_list_at(l, id) : -1, across, wide;
+        if (at < 0)
+                return false;
+        ui_list_across(l, &across, &wide);
+        *x = across, *y = ui_list_row_y(l, at), *w = wide, *h = l->tall[at];
+        return true;
+}
+
 static fn ui_list_damage(const struct ui address_to ui, const struct ui_list address_to l, int id)
 {
         int at = id >= 0 ? ui_list_at(l, id) : -1;
@@ -22744,6 +22761,17 @@ static b32 ui_list_move(const struct ui address_to ui, struct ui_list address_to
         by = by < -last - 1 ? -last - 1 : by > last + 1 ? last + 1 : by;
         at = (at < 0 ? -1 : at) + by; // with no row the keys count from above the first, so Down takes it
         at = at < 0 ? 0 : at > last ? last : at;
+        // A row the list's choosable hook refuses is passed over in the direction of the keys; no choosable row past it, the focus stays.
+        if (l->choosable)
+        {
+                int step = by < 0 ? -1 : 1, from = at;
+                while (at >= 0 && at <= last && !l->choosable(l->virtual ? at : l->id[at]))
+                        at += step;
+                if (at < 0 || at > last)
+                        at = from;
+                if (at == from && (at < 0 || at > last || !l->choosable(l->virtual ? at : l->id[at])))
+                        return false;
+        }
         l->focus = l->virtual ? at : l->id[at];
         ui_list_damage(ui, l, before);
         ui_list_damage(ui, l, l->focus);
@@ -22767,6 +22795,8 @@ static int ui_list_type(const struct ui address_to ui, struct ui_list address_to
         for (int at = 0; at < n && found < 0; at++)
         {
                 int id = l->virtual ? at : l->id[at], k = 0;
+                if (l->choosable && !l->choosable(id))
+                        continue;
                 ui_list_describe(l, id, &row);
                 if (!row.label)
                         continue;
@@ -22969,7 +22999,7 @@ static int ui_row_drive_height(const struct ui address_to ui, const struct ui_ro
 static struct ui_row_parts
 {
         struct ui_tree tree;
-        struct ui_node address_to mark, address_to icon, address_to label, address_to note_room, address_to note, address_to value_box, address_to back, address_to value,
+        struct ui_node address_to mark, address_to check, address_to icon, address_to label, address_to note_room, address_to note, address_to value_box, address_to back, address_to value,
                 address_to on, address_to more, address_to control, address_to expander, address_to badge, address_to toggle, address_to bars,
                 address_to share, address_to amount, address_to aside, address_to swatch, address_to segment[UI_STRIP_MOST];
         const char address_to label_shown, address_to value_shown; // the label and the value as they fit, null when they are not written
@@ -23153,6 +23183,8 @@ static fn ui_row_tree_at(struct ui address_to ui, struct ui_list address_to l, i
         // The label is 17 from where the mark starts, which at some scales is a pixel more than the mark and the gap.
         if (row->mark)
                 p->mark = n = ui_row_leaf(t, UI_FIXED, ui_dev(ui, 7)), n->margin[1] = ui_dev(ui, 17) - n->size[0].value - gap;
+        if (row->check)
+                p->check = n = ui_row_leaf(t, UI_FIXED, ui_dev(ui, UI_ROW_CHECK_W));
         if (row->icon || row->tile_picture || row->tile_name)
                 p->icon = ui_row_leaf(t, UI_FIXED, ui_dev(ui, 20));
         least = wraps ? ui_row_label_least(ui) : 0;
@@ -23943,6 +23975,21 @@ static fn ui_list_tile(struct ui address_to ui, struct ui_list address_to l, int
         ui_kit_text(ui, x + (wide - width) / 2, ui_kit_baseline(ui, y + ui_dev(ui, 60), UI_LABEL_MEDIUM), shown, UI_LABEL_MEDIUM, strong, 0);
 }
 
+// A row's check on: a tick, or a radio's dot, in its part (ui_row.check), in the row's ink.
+static void ui_list_check_draw(struct ui address_to ui, const struct ui_row address_to row, const struct ui_node address_to n, unsigned int ink)
+{
+        if (row->check == UI_ROW_CHECK_RADIO)
+        {
+                int side = ui_dev(ui, 6), x = n->x + (n->w - side) / 2, y = n->y + (n->h - side) / 2;
+                ui_round(ui, ui_mirror(x, side, n->x, n->w), y, side, side, side / 2, ink);
+        }
+        else
+        {
+                int width = ui_kit_measure(ui, (string_address) "\xe2\x9c\x93", UI_BODY_MEDIUM), x = n->x + (n->w - width) / 2;
+                ui_kit_text(ui, ui_mirror(x, width, n->x, n->w), ui_row_baseline(ui, n, UI_BODY_MEDIUM), (string_address) "\xe2\x9c\x93", UI_BODY_MEDIUM, ink, 0);
+        }
+}
+
 static fn ui_list_row(struct ui address_to ui, struct ui_list address_to l, int id, int y, int height)
 {
         struct ui_row row;
@@ -24023,6 +24070,8 @@ static fn ui_list_row(struct ui address_to ui, struct ui_list address_to l, int 
         if ((n = p->mark) && !cols && !l->tree)
                 ui_kit_fill(ui, &(struct ui_box){n->x * 256, (n->y + (n->h - n->w) / 2) * 256, (n->x + n->w) * 256, (n->y + (n->h + n->w) / 2) * 256, n->w * 128, n->w * 128},
                             row.mark_ink ? row.mark_ink : ui_role(UI_PRIMARY), null);
+        if ((n = p->check) && seen && row.on)
+                ui_list_check_draw(ui, &row, n, row.check == UI_ROW_CHECK_RADIO ? ui_role(UI_PRIMARY) : strong);
         if ((n = p->icon) && !cols && !l->tree && seen)
         {
                 int icon_side = n->w < n->h ? n->w : n->h;
