@@ -284,6 +284,8 @@ static inline INLINE CONST b64 font_abs64(b64 v) { return v < 0 ? -v : v; }
 
 static inline INLINE PURE p32 font_hmtx_advance(const font_face address_to face, p32 glyph)
 {
+        if (!face->metrics)
+                return 0;
         return font_u16(face, face->hmtx + 4 * (positive)(glyph < face->metrics ? glyph : face->metrics - 1));
 }
 
@@ -2740,8 +2742,15 @@ static p8 font_gsub_apply(font_shaper address_to s, p32 kind, positive t)
                 if (!s->output || !font_subtable_set(face, t, format, glyph, &set, &count))
                         return false;
                 for (p32 i = 0; i < count && i < 4096; i++)
+                {
+                        if (s->ops-- <= 0)
+                        {
+                                s->failed = true;
+                                return false;
+                        }
                         if (font_ligature(s, set, i))
                                 return true;
+                }
                 return false;
         case 5:
         {
@@ -2810,7 +2819,7 @@ static p8 font_gsub_apply(font_shaper address_to s, p32 kind, positive t)
                 positive ahead_at = t + 6 + 2 * (positive)back;
                 p32 ahead = font_u16(face, ahead_at), n = font_u16(face, ahead_at + 2 + 2 * (positive)ahead), at = s->idx;
                 font_matcher behind = {FONT_BY_COVERAGE, t + 6, t}, after = {FONT_BY_COVERAGE, ahead_at + 2, t};
-                if ((p32)ci >= n || !font_match_ahead(s, ahead, &after, s->idx + 1, &(p32){0}))
+                if (back > FONT_MATCH || (p32)ci >= n || !font_match_ahead(s, ahead, &after, s->idx + 1, &(p32){0}))
                         return false;
                 for (p32 i = 0; i < back; i++)
                         if (!font_scan_prev(s, &behind, i, true, &at, s->lookup_props))
@@ -4617,6 +4626,9 @@ static fn font_face_measure(font_engine address_to e, const font_face address_to
         for (p32 k = 0; k < 3; k++)
                 if (out[k] > (b32)face->units / 8)
                         out[k] = 0;
+        for (p32 k = 4; k < 6; k++)
+                if (out[k] > (b32)face->units * 4)
+                        out[k] = 0;
 
         out[3] = font_median_stem(e, face, "HEFTLe", true);
         memory_copy(m->zones, out, sizeof(m->zones));
@@ -5361,6 +5373,8 @@ static fn font_bars(font_engine address_to e, const font_face address_to face, p
 // Analytic area rasterizer: banded difference array (2048*cover - area, area) with optional union pass for overlapping contours.
 static inline fn font_cell_add(font_engine address_to e, b32 row, b32 column, b32 cover, b32 area)
 {
+        if (row < 0 || row >= e->rows || column < 0 || column > e->width)
+                return;
         p32 address_to cells = e->cells + (positive)row * (positive)e->stride;
 
         cells[column] += (p32)(2 * FONT_ONE * cover - area);
@@ -5428,6 +5442,11 @@ static fn font_span_many(font_engine address_to e, p32 address_to cells, b32 row
 
 static inline fn font_span(font_engine address_to e, b32 row, b32 xa, b32 xb, b32 cover)
 {
+        b32 wide = e->width * FONT_ONE;
+        if (row < 0 || row >= e->rows)
+                return;
+        xa = xa < 0 ? 0 : xa > wide ? wide : xa;
+        xb = xb < 0 ? 0 : xb > wide ? wide : xb;
         p32 address_to cells = e->cells + (positive)row * (positive)e->stride;
         if ((xa ^ xb) >> FONT_SHIFT)
                 font_span_many(e, cells, row, xa, xb, cover);
@@ -5523,7 +5542,7 @@ static fn font_edge(font_engine address_to e, b32 x0, b32 y0, b32 x1, b32 y1)
                 for (b32 side = 0; side <= wide; side += wide ? wide : 1)
                         if ((x0 < side) != (x1 < side) && x0 != side && x1 != side)
                         {
-                                b32 y = y0 + (b32)(((b64)side - x0) * (y1 - y0) / ((b64)x1 - x0));
+                                b32 y = y0 + (b32)(((b64)side - x0) * ((b64)y1 - y0) / ((b64)x1 - x0));
                                 font_edge(e, x0, y0, side, y);
                                 font_edge(e, side, y, x1, y1);
                                 return;
@@ -5532,6 +5551,11 @@ static fn font_edge(font_engine address_to e, b32 x0, b32 y0, b32 x1, b32 y1)
                         return;
                 if (x0 < 0 || x1 < 0)
                         x0 = x1 = 0;
+        }
+        else
+        {
+                x0 = x0 < 0 ? 0 : x0 > wide ? wide : x0;
+                x1 = x1 < 0 ? 0 : x1 > wide ? wide : x1;
         }
         b32 sign = 1;
         if (y0 > y1)
@@ -6446,7 +6470,9 @@ static b32 font_shape(font_engine address_to e, const font_face address_to face,
         bottom >>= FONT_SHIFT;
         right = (right + FONT_ONE - 1) >> FONT_SHIFT;
         top = (top + FONT_ONE - 1) >> FONT_SHIFT;
-        if (right - left > FONT_EDGE || top - bottom > FONT_EDGE)
+        if (right - left > FONT_EDGE || top - bottom > FONT_EDGE ||
+            left < -((b64)1 << 24) || right > ((b64)1 << 24) ||
+            bottom < -((b64)1 << 24) || top > ((b64)1 << 24))
                 return FONT_TOO_LARGE;
         *box = (font_bitmap){.left = (b32)left, .top = (b32)top,
                              .width = (b32)(right - left), .height = (b32)(top - bottom)};
@@ -6515,7 +6541,7 @@ b32 font_render(font_engine address_to e, const font_face address_to face, p32 g
 
         if (refused < 0 || box->width <= 0 || box->height <= 0)
                 return refused;
-        if ((positive)box->width > stride || capacity < (positive)box->width ||
+        if (!coverage || (positive)box->width > stride || capacity < (positive)box->width ||
             (positive)(box->height - 1) > (capacity - (positive)box->width) / stride)
                 return FONT_TOO_LARGE;
         box->coverage = coverage;
@@ -7104,15 +7130,17 @@ static COLD __attribute__((noinline)) font_bitmap font_cached_fill(font_engine a
                         return (font_bitmap){0};
                 if (cell && box.width)
                 {
-                        dx = (b16)cell + box.left;
-                        dy = (b32)(cell >> 16 & 0xffff) - box.top;
+                        b64 d64x = (b64)(b16)cell + (b64)box.left;
+                        b64 d64y = (b64)(cell >> 16 & 0xffff) - (b64)box.top;
                         box.left = box.top = 0;
-                        if (dx < 0 || dy < 0 || dx + box.width > (b32)(cell >> 48) ||
-                            dy + box.height > (b32)(cell >> 32 & 0xffff))
+                        if (d64x < 0 || d64y < 0 || d64x + box.width > (b64)(cell >> 48) ||
+                            d64y + box.height > (b64)(cell >> 32 & 0xffff))
                         {
                                 font_enter(e, home, (font_slot){.key = key, .cell = cell, .x = 0xffff});
                                 return (font_bitmap){.stride = 1};
                         }
+                        dx = (b32)d64x;
+                        dy = (b32)d64y;
                 }
         }
         else if ((size >> 16) < 0x800 && (size & 0xffff) < 0x800)
@@ -7328,9 +7356,11 @@ static const p32 address_to font_tones(font_engine address_to e, p32 colour, p32
 static fn font_blend(font_engine address_to e, const font_target address_to target,
                      b32 x, b32 y, font_bitmap glyph, p32 colour, p32 background, p32 strength)
 {
-        b32 x0 = x < 0 ? -x : 0, y0 = y < 0 ? -y : 0;
-        b32 x1 = x + glyph.width > target->width ? target->width - x : glyph.width;
-        b32 y1 = y + glyph.height > target->height ? target->height - y : glyph.height;
+        if (!glyph.coverage || glyph.width <= 0 || glyph.height <= 0 || target->width <= 0 || target->height <= 0)
+                return;
+        b64 x0 = x < 0 ? -(b64)x : 0, y0 = y < 0 ? -(b64)y : 0;
+        b64 x1 = (b64)x + glyph.width > target->width ? (b64)target->width - x : glyph.width;
+        b64 y1 = (b64)y + glyph.height > target->height ? (b64)target->height - y : glyph.height;
         p8 known = !(background & FONT_UNKNOWN);
 
         if (x0 >= x1 || y0 >= y1)
@@ -7340,7 +7370,7 @@ static fn font_blend(font_engine address_to e, const font_target address_to targ
         colour &= 0xffffff;
 
         positive width = (positive)(x1 - x0), height = (positive)(y1 - y0), stride = target->stride;
-        p32 address_to into = target->pixels + (positive)(y + y0) * stride + (positive)(x + x0);
+        p32 address_to into = target->pixels + (positive)((b64)y + y0) * stride + (positive)((b64)x + x0);
         const p8 address_to from = glyph.coverage + (positive)y0 * glyph.stride + (positive)x0;
 
         if (known)
@@ -7374,16 +7404,16 @@ static fn font_blend_turned(font_engine address_to e, const font_target address_
                             font_bitmap glyph, p32 colour, p32 background, p32 strength)
 {
         p8 right = turn == FONT_TOPS_RIGHT;
-        b32 left = right ? target->width - y - glyph.height : y;
+        b64 left = right ? (b64)target->width - y - glyph.height : (b64)y;
         b32 most = (b32)(FONT_STRIP / (positive)(glyph.height > 0 ? glyph.height : 1));
 
-        if (!glyph.coverage || glyph.width <= 0 || glyph.height <= 0 || most <= 0 || left >= target->width ||
-            left + glyph.height <= 0)
+        if (!glyph.coverage || glyph.width <= 0 || glyph.height <= 0 || most <= 0 || target->width <= 0 || target->height <= 0 ||
+            left >= target->width || left + glyph.height <= 0)
                 return;
         for (b32 from = 0; from < glyph.width; from += most)
         {
                 b32 rows = glyph.width - from < most ? glyph.width - from : most;
-                b32 top = right ? x + from : target->height - x - from - rows;
+                b64 top = right ? (b64)x + from : (b64)target->height - x - from - rows;
                 if (top >= target->height || top + rows <= 0)
                         continue;
                 memory_transpose_u8(e->strip, (positive)glyph.height,
@@ -7391,7 +7421,7 @@ static fn font_blend_turned(font_engine address_to e, const font_target address_
                                           : glyph.coverage + from + (rows - 1),
                                     right ? -(long)glyph.stride : (long)glyph.stride, right ? 1 : -1,
                                     (positive)rows, (positive)glyph.height);
-                font_blend(e, target, left, top, (font_bitmap){e->strip, (positive)glyph.height, 0, 0, glyph.height, rows},
+                font_blend(e, target, (b32)left, (b32)top, (font_bitmap){e->strip, (positive)glyph.height, 0, 0, glyph.height, rows},
                            colour, background, strength);
         }
 }
@@ -7761,7 +7791,9 @@ static fn font_flow_glyph(font_flow address_to f, p32 glyph, p32 face, b64 advan
                 {
                         font_metrics cell = font_metrics_at(f->faces[0], f->size);
 
-                        box = font_cached(e, null, glyph, (p32)cell.cell_width << 16 | (p32)cell.cell_height, 0, 0, 0);
+                        box = cell.cell_width > 0 && cell.cell_width < 0x800 && cell.cell_height > 0 && cell.cell_height < 0x800
+                                  ? font_cached(e, null, glyph, (p32)cell.cell_width << 16 | (p32)cell.cell_height, 0, 0, 0)
+                                  : (font_bitmap){0};
                         gx = eighth >> 3, gy = f->baseline - cell.baseline;
                 }
                 else
@@ -8218,7 +8250,9 @@ static inline font_bitmap font_run_glyph(const struct font_run_iter address_to i
         {
                 font_metrics cell = font_metrics_at(it->faces[0], it->size);
 
-                box = font_cached(it->e, null, it->glyph, (p32)cell.cell_width << 16 | (p32)cell.cell_height, 0, 0, 0);
+                box = cell.cell_width > 0 && cell.cell_width < 0x800 && cell.cell_height > 0 && cell.cell_height < 0x800
+                          ? font_cached(it->e, null, it->glyph, (p32)cell.cell_width << 16 | (p32)cell.cell_height, 0, 0, 0)
+                          : (font_bitmap){0};
                 *gx = eighth >> 3, *gy = baseline - cell.baseline;
         }
         else
@@ -8470,7 +8504,9 @@ font_cell_find(font_engine address_to e, const font_face address_to const addres
 
         *dx = *dy = 0;
         if (font_is_drawn(code))
-                box = font_cached(e, null, code, (p32)grid->cell_width << 16 | (p32)height, 0, 0, 0);
+                box = grid->cell_width > 0 && grid->cell_width < 0x800 && height > 0 && height < 0x800
+                          ? font_cached(e, null, code, (p32)grid->cell_width << 16 | (p32)height, 0, 0, 0)
+                          : (font_bitmap){0};
         else if (count && code != ' ')
         {
                 font_find(e, faces, count, code, &face, &glyph);
@@ -8557,26 +8593,35 @@ static fn font_plan_finish(font_engine address_to e, const font_target address_t
                            b32 width, b32 height, b32 gx, b32 gy, font_bitmap box, p32 strength,
                            const p32 address_to tones, p32 colour, p32 background, font_cell_plan_t address_to plan)
 {
-        plan->left = x < 0 ? 0 : x;
-        plan->right = x + width > target->width ? target->width : x + width;
-        plan->top = y < 0 ? 0 : y;
-        plan->bottom = y + height > target->height ? target->height : y + height;
-        if (plan->left >= plan->right || plan->top >= plan->bottom)
+        b64 left = x < 0 ? 0 : (b64)x;
+        b64 right = (b64)x + width > target->width ? target->width : (b64)x + width;
+        b64 top = y < 0 ? 0 : (b64)y;
+        b64 bottom = (b64)y + height > target->height ? target->height : (b64)y + height;
+
+        if (target->width <= 0 || target->height <= 0 || width <= 0 || height <= 0 || left >= right || top >= bottom)
         {
                 plan->empty = true;
                 return;
         }
-        plan->from = gx > plan->left ? gx : plan->left;
-        plan->to = gx + box.width < plan->right ? gx + box.width : plan->right;
-        plan->above = gy > plan->top ? gy : plan->top;
-        plan->below = gy + box.height < plan->bottom ? gy + box.height : plan->bottom;
-        if (plan->from >= plan->to || plan->above >= plan->below)
+        plan->left = (b32)left;
+        plan->right = (b32)right;
+        plan->top = (b32)top;
+        plan->bottom = (b32)bottom;
+        b64 from = (b64)gx > left ? (b64)gx : left;
+        b64 to = (b64)gx + box.width < right ? (b64)gx + box.width : right;
+        b64 above = (b64)gy > top ? (b64)gy : top;
+        b64 below = (b64)gy + box.height < bottom ? (b64)gy + box.height : bottom;
+        if (!box.coverage || box.width <= 0 || box.height <= 0 || from >= to || above >= below)
         {
                 plan->from = plan->to = plan->left, plan->above = plan->below = plan->top;
                 return;
         }
+        plan->from = (b32)from;
+        plan->to = (b32)to;
+        plan->above = (b32)above;
+        plan->below = (b32)below;
         plan->translate = true;
-        plan->coverage = box.coverage + (positive)(plan->above - gy) * box.stride + (plan->from - gx);
+        plan->coverage = box.coverage + (positive)(above - gy) * box.stride + (positive)(from - gx);
         plan->stride = box.stride;
         plan->strength = strength;
         plan->tones = tones ? tones : font_tones(e, colour, background, strength);
@@ -8646,6 +8691,11 @@ fn font_cluster_plan(font_engine address_to e, const font_face address_to const 
         if (!font_plan_begin(plan, background))
                 return;
         b32 width = grid->cell_width, height = grid->cell_height, dx, dy;
+        if (width <= 0 || height <= 0 || !scratch)
+        {
+                plan->empty = true;
+                return;
+        }
         b16 ink[2];
         p32 ident;
         p64 base = font_cell_key(e, faces, count, 1, grid, size, &flags, colour, background, &ident);

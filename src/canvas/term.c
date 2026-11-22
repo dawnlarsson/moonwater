@@ -82,7 +82,7 @@ static inline INLINE unsigned int slot_after(unsigned int slot, unsigned int cou
         return after < window->history ? after : after % window->history;
 }
 
-#define slot_cells(slot) (window_cells(window) + (slot) * window->stride)
+#define slot_cells(slot) (window_cells(window) + (positive)(slot) * window->stride)
 #define slot_length(slot) (window_lengths(window) + (slot))
 #define row_cells(row) slot_cells(row_slot(row))
 #define row_length(row) slot_length(row_slot(row))
@@ -132,7 +132,7 @@ static inline INLINE fn ring_scroll()
 
 static inline INLINE fn slot_copy(unsigned int to, unsigned int from)
 {
-        unsigned int length = address_to slot_length(from);
+        unsigned int length = min(address_to slot_length(from), window->stride);
 
         memory_copy(slot_cells(to), slot_cells(from), (positive)length * sizeof(struct window_cell));
         address_to slot_length(to) = length;
