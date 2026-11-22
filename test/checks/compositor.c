@@ -1997,6 +1997,17 @@ static void taskbar_standard(void)
 */
 #define SHARED_W 640
 #define SHARED_H 400
+
+// The last row of the shared edge that the taskbar's band does not take: the band owns the bottom rows of the screen, so an
+// edge's hover and press there are the band's, and the edge's indicator runs to the band's top.
+static int shared_free_bottom(void)
+{
+    int y = SHARED_H - 1;
+
+    while (y > 0 && compositor_band_hit(SHARED_W / 2 + 1, y) != TASKBAR_HIT_NONE)
+        y--;
+    return y;
+}
 // The program of row answers the size it was asked with a picture of exactly that size, as a window does once it has drawn.
 static void shared_answer(int row)
 {
@@ -2081,8 +2092,11 @@ static void check_compositor_shared(void)
           compositor.mark_row == 3 && compositor.mark_with == 2 && compositor.mark[0] == SHARED_W / 2 - 2 &&
               compositor.mark[1] == 0 && compositor.mark[2] == 4 && compositor.mark[3] == SHARED_H);
     {
-        int same = 1;
-        static const int along[] = {0, 3, 20, SHARED_H / 4 - 1, SHARED_H - 21, SHARED_H - 2, SHARED_H - 1};
+        int same = 1, free = shared_free_bottom();
+        int along[] = {0, 3, 20, SHARED_H / 4 - 1, free - 20, free - 1, free};
+
+        check("shared: the taskbar's band takes the bottom rows of the edge, and the edge's free rows end at its top",
+              free < SHARED_H - 1 && compositor_band_hit(SHARED_W / 2 + 1, SHARED_H - 1) != TASKBAR_HIT_NONE);
 
         for (unsigned int at = 0; at < array_count(along); at++)
         {
@@ -2144,7 +2158,7 @@ static void check_compositor_shared(void)
     /* A press at the top quarter, the first row and the last row of the edge takes both as it does in the middle: the screen's
        own top and bottom are no grip of a window, so the end of the edge there is not a corner. */
     {
-        static const int along[] = {20, 0, SHARED_H - 1, SHARED_H - 30};
+        int along[] = {20, 0, shared_free_bottom(), shared_free_bottom() - 29};
         int all = 1;
 
         for (unsigned int at = 0; at < array_count(along); at++)
