@@ -3906,7 +3906,8 @@ static int xwm_steam_input_override(void *ctx, const struct compositor_input_ove
         return 0;
 }
 
-static int xwm_dnd_active(void *ctx)
+/* manage.c calls these by name once its drag registry is gone (comp-manage DnD step 3); until then they are unused. */
+static __attribute__((unused)) int xwm_dnd_active(void *ctx)
 {
         (void)ctx;
         for (int at = 0; at < COMPOSITOR_XWM_SLOTS; at++)
@@ -3916,8 +3917,7 @@ static int xwm_dnd_active(void *ctx)
         return 0;
 }
 
-static void xwm_dnd_cancel(void *ctx) { (void)ctx; (void)compositor_xwm_drag_escape(); }
-static const struct compositor_drag_ops compositor_xwm_drag_ops = {.active = xwm_dnd_active, .cancel = xwm_dnd_cancel};
+static __attribute__((unused)) void xwm_dnd_cancel(void *ctx) { (void)ctx; (void)compositor_xwm_drag_escape(); }
 
 static void xwm_hook_detach(void *ctx, int row)
 {
@@ -3941,7 +3941,6 @@ static const struct compositor_row_hooks compositor_xwm_row_hooks = {.detach = x
 static void compositor_xwm_register_hooks(void)
 {
         compositor_input_override_register(xwm_steam_input_override, 0);
-        compositor_dnd_register(&compositor_xwm_drag_ops);
         compositor_row_hooks_register(&compositor_xwm_row_hooks);
         compositor_clip_observer_register(compositor_xwm_selection_changed);
 }
