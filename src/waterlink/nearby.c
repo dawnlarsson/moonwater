@@ -367,11 +367,11 @@ static p8 link_name_for(link_peers address_to peers, p8 address_to offered,
         memory_zero(name, WATERLINK_NAME_MAX);
         offered[WATERLINK_NAME_MAX - 1] = 0;
         memory_zero(base, sizeof base);
-        string_copy((string_address)base, (string_address)offered);
+        string_copy_bounded((string_address)base, (string_address)offered, sizeof base);
         if (!link_name_good((string_address)base))
-                string_copy((string_address)base, "machine");
+                string_copy_bounded((string_address)base, "machine", sizeof base);
 
-        string_copy((string_address)name, (string_address)base);
+        string_copy_bounded((string_address)name, (string_address)base, WATERLINK_NAME_MAX);
         for (positive width = 3; link_peer_named(peers, (string_address)name) &&
                                  width <= 6;
              width++)
@@ -779,10 +779,10 @@ static p8 link_pair_keep(positive group, p8 address_to key,
         }
         if (peer && peer->group == keys->mark)
         {
-                changed |= peer->seen != stamped ||
-                           memory_compare(peer->address, address, 16) ||
-                           peer->port != port;
-                if (memory_compare(peer->address, address, 16) || peer->port != port)
+                p8 moved = !link_place_same(peer->address, peer->port, address, port);
+
+                changed |= peer->seen != stamped || moved;
+                if (moved)
                         link_place_learn(peer->key, address, port);
                 memory_copy(peer->address, address, 16);
                 peer->port = port;
@@ -1441,8 +1441,9 @@ static fn link_pending_due(struct link_pending address_to slot, p64 now)
 
                 if (!crypto_same(peer->key, slot->key, 32))
                         continue;
-                silent = !memory_compare(peer->address, slot->last, 16) &&
-                         peer->port == slot->last_port && peer->seen == slot->seen;
+                silent = link_place_same(peer->address, peer->port,
+                                         slot->last, slot->last_port) &&
+                         peer->seen == slot->seen;
                 break;
         }
         if (silent && link_greet_allowed(slot->heard, now))

@@ -370,7 +370,10 @@ p8 waterlink_initiate(struct waterlink_noise address_to noise,
 
         // es
         if (!waterlink_mix_dh(noise, noise->ephemeral, responder_public))
+        {
+                crypto_forget(noise, sizeof(address_to noise));
                 return false;
+        }
 
         // s
         memory_copy(at, me->public, 32);
@@ -379,7 +382,10 @@ p8 waterlink_initiate(struct waterlink_noise address_to noise,
 
         // ss, psk
         if (!waterlink_mix_dh(noise, me->secret, responder_public))
+        {
+                crypto_forget(noise, sizeof(address_to noise));
                 return false;
+        }
         if (psk)
                 waterlink_mix_key(noise, psk, 32, true);
 
@@ -416,24 +422,27 @@ p8 waterlink_accept(struct waterlink_noise address_to noise,
 
         // es
         if (!waterlink_mix_dh(noise, me->secret, noise->remote_ephemeral))
-                return false;
+                goto fail;
 
         // s
         if (!waterlink_open_hash(noise, at, 32, noise->remote_static))
-                return false;
+                goto fail;
         at += 48;
 
         // ss, psk
         if (!waterlink_mix_dh(noise, me->secret, noise->remote_static))
-                return false;
+                goto fail;
         if (psk)
                 waterlink_mix_key(noise, psk, 32, true);
 
         if (!waterlink_open_hash(noise, at, WATERLINK_HELLO_BYTES, hello))
-                return false;
+                goto fail;
 
         memory_copy(initiator_public, noise->remote_static, 32);
         return true;
+fail:
+        crypto_forget(noise, sizeof(address_to noise));
+        return false;
 }
 
 /*
@@ -458,7 +467,10 @@ p8 waterlink_respond(struct waterlink_noise address_to noise,
         if (!waterlink_mix_dh(noise, noise->ephemeral,
                               noise->remote_ephemeral) ||
             !waterlink_mix_dh(noise, noise->ephemeral, noise->remote_static))
+        {
+                crypto_forget(noise, sizeof(address_to noise));
                 return false;
+        }
 
         memory_copy(at, address_of our_index, 4);
         waterlink_seal_hash(noise, at, 4);
@@ -482,12 +494,14 @@ p8 waterlink_answered(struct waterlink_noise address_to noise,
 
         // ee, se
         if (!waterlink_mix_dh(noise, noise->ephemeral,
-                              noise->remote_ephemeral))
+                              noise->remote_ephemeral) ||
+            !waterlink_mix_dh(noise, me->secret, noise->remote_ephemeral) ||
+            !waterlink_open_hash(noise, at, 4, (p8 address_to)their_index))
+        {
+                crypto_forget(noise, sizeof(address_to noise));
                 return false;
-        if (!waterlink_mix_dh(noise, me->secret, noise->remote_ephemeral))
-                return false;
-
-        return waterlink_open_hash(noise, at, 4, (p8 address_to)their_index);
+        }
+        return true;
 }
 
 /*

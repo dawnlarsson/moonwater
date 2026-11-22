@@ -327,9 +327,15 @@ static p8 link_carrier(p64 now)
                 return link_tcp_self.carrier;
         link_tcp_self.carrier_read = now ? now : 1;
         host_read_word(LINK_TRANSPORT_PATH, word, sizeof word);
-        link_tcp_self.carrier = string_equals((string_address)word, "tcp")    ? LINK_CARRIER_TCP
-                                : string_equals((string_address)word, "auto") ? LINK_CARRIER_AUTO
-                                                                              : LINK_CARRIER_NETWORK;
+        {
+                positive at = string_table_find((string_address)word,
+                                                link_carrier_names,
+                                                sizeof link_carrier_names[0],
+                                                array_count(link_carrier_names));
+                link_tcp_self.carrier = at < array_count(link_carrier_names)
+                                                ? (p8)at
+                                                : LINK_CARRIER_NETWORK;
+        }
         return link_tcp_self.carrier;
 }
 
@@ -339,8 +345,8 @@ static struct link_tcp address_to link_tcp_for(p8 address_to address, p16 port)
         {
                 struct link_tcp address_to c = link_tcp_self.conn + at;
 
-                if (c->state != LINK_TCP_FREE && c->port == port &&
-                    !memory_compare(c->address, address, 16))
+                if (c->state != LINK_TCP_FREE &&
+                    link_place_same(c->address, c->port, address, port))
                         return c;
         }
         return null;
@@ -503,6 +509,11 @@ static struct link_tcp address_to link_tcp_dial(p8 address_to address, p16 port,
                 return null;
         }
         c = link_tcp_adopt(fd, address, port, true, now);
+        if (!c)
+        {
+                socket_close((b32)fd);
+                return null;
+        }
         c->state = LINK_TCP_CONNECTING;
         c->proxied = proxied;
         return c;
@@ -664,26 +675,14 @@ static fn link_tcp_accept(p64 now)
                 b32 size = sizeof from;
                 p8 address[16];
                 p16 port;
+                memory_zero(address_of from, sizeof from);
                 bipolar fd = socket_accept((b32)(link_tcp_self.listener - 1),
                                            address_of from, address_of size,
                                            SOCK_NONBLOCK | SOCK_CLOEXEC);
 
                 if (fd < 0)
                         return;
-                if (from.family == AF_INET6)
-                {
-                        memory_copy(address, from.host, 16);
-                        port = network_order_16(from.port);
-                }
-                else if (from.family == AF_INET)
-                {
-                        socket_address_internet address_to v4 =
-                                (socket_address_internet address_to)address_of from;
-
-                        link_address_v4(address, network_order_32(v4->host));
-                        port = network_order_16(v4->port);
-                }
-                else
+                if (!link_address_from_sockaddr(address_of from, address, address_of port))
                 {
                         link_tcp_self.refused++;
                         socket_close((b32)fd);

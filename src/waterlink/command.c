@@ -155,6 +155,15 @@ static positive link_listener_state(bipolar owner, b32 on, b32 switched)
         return on ? LINK_LISTENER_NOT_RUNNING : LINK_LISTENER_OFF;
 }
 
+static positive link_listener_status(bipolar owner)
+{
+        p8 word[16];
+
+        host_read_word(LINK_SWITCH_PATH, word, sizeof word);
+        return link_listener_state(owner, string_equals((string_address)word, "on"),
+                                   word[0] != 0);
+}
+
 /*      The session the listener has open with this name, if one is open now:
         its entry, whose address is where it is heard from now. */
 static link_open_entry address_to link_open_of(link_state address_to state,
@@ -219,8 +228,6 @@ static b32 link_status(void)
         link_state state;
         bipolar owner = host_lock_owner(LINK_LOCK_PATH);
         p8 key[48];
-        p8 word[16];
-        b32 on;
         b32 routed = false;
         b32 asked = false;
 
@@ -232,10 +239,8 @@ static b32 link_status(void)
         //      The first line is the listener, and the switch and the process
         //      are two things: its state is one of five, each with the command
         //      that answers it, and link doctor says the same words for it.
-        host_read_word(LINK_SWITCH_PATH, word, sizeof word);
-        on = string_equals((string_address)word, "on");
         {
-                positive listener = link_listener_state(owner, on, word[0] != 0);
+                positive listener = link_listener_status(owner);
 
                 string_format(log, "link %s, udp %p  next: %s\n",
                               link_listener_names[listener],
@@ -403,8 +408,10 @@ static b32 link_status(void)
                 {
                         if (crypto_same(state.seen[s_at].key, peer->key, 32))
                                 seen = state.seen + s_at;
-                        else if (peer->port && state.seen[s_at].port == peer->port &&
-                                 crypto_same(state.seen[s_at].address, peer->address, 16))
+                        else if (peer->port &&
+                                 link_place_same(state.seen[s_at].address,
+                                                 state.seen[s_at].port,
+                                                 peer->address, peer->port))
                                 other = true;
                 }
 
@@ -590,7 +597,7 @@ static b32 link_add_locked(string_address name, string_address text,
                 peer.port = where->port;
         }
 
-        string_copy(peer.name, name);
+        string_copy_bounded(peer.name, name, sizeof peer.name);
         peer.may = WATERLINK_MAY_DEFAULT;
         //      The name is the person's, whatever the machine calls itself: it
         //      is what they type to reach it, and a rename on the far side does
@@ -705,12 +712,35 @@ static b32 link_purge_locked(void)
         return 0;
 }
 
+static p8 link_grants_parse(string_address address_to words, positive count,
+                            p32 address_to mask, string_address address_to bad)
+{
+        p32 may = 0;
+
+        for (positive at = 0; at < count; at++)
+        {
+                p32 bit = link_grant_bit(words[at]);
+
+                if (!bit)
+                {
+                        if (bad)
+                                address_to bad = words[at];
+                        return false;
+                }
+                may |= bit;
+        }
+        address_to mask = may;
+        return true;
+}
+
 static b32 link_grant_locked(string_address name, p8 allow,
                              string_address address_to words, positive count)
 {
         link_peers peers;
         struct waterlink_peer address_to found;
         p8 grants[96];
+        p32 change = 0;
+        string_address bad = null;
 
         if (!link_peers_for_change(address_of peers))
                 return host_refuse("%s could not be read\n", LINK_PEERS_PATH);
@@ -718,19 +748,14 @@ static b32 link_grant_locked(string_address name, p8 allow,
         if (!found)
                 return host_refuse("no machine is called %s\n", name);
 
-        for (positive at = 0; at < count; at++)
-        {
-                p32 bit = link_grant_bit(words[at]);
-
-                if (!bit)
-                        return host_refuse("%s is not a grant: shell run files "
-                                           "log\n",
-                                           words[at]);
-                if (allow)
-                        found->may |= bit;
-                else
-                        found->may &= ~bit;
-        }
+        if (!link_grants_parse(words, count, address_of change, address_of bad))
+                return host_refuse("%s is not a grant: shell run files "
+                                   "log\n",
+                                   bad);
+        if (allow)
+                found->may |= change;
+        else
+                found->may &= ~change;
         if (!allow && !found->may)
                 found->flags |= WATERLINK_PEER_BLOCKED;
         else if (allow && found->may)
@@ -901,21 +926,16 @@ static p8 link_switch_is_on(void)
         return string_equals((string_address)word, "on");
 }
 
-static p32 link_grants_of(string_address address_to words, positive count,
-                          p8 address_to good)
+static struct link_group_record address_to link_group_append(
+    link_groups address_to groups, string_address namespace)
 {
-        p32 may = 0;
+        struct link_group_record address_to record =
+                groups->record + groups->count++;
 
-        address_to good = true;
-        for (positive at = 0; at < count; at++)
-        {
-                p32 bit = link_grant_bit(words[at]);
-
-                if (!bit)
-                        address_to good = false;
-                may |= bit;
-        }
-        return may;
+        memory_zero(record, sizeof(address_to record));
+        string_copy_bounded(record->namespace, namespace,
+                            sizeof record->namespace);
+        return record;
 }
 
 /*
@@ -957,7 +977,6 @@ static b32 link_group_join(string_address address_to words, positive count)
         p8 typed[sizeof made + 1];
         p8 generated = false;
         p8 granted = false;
-        p8 good;
         p32 may = 0;
         p32 taken = 0;
         p32 mark = 0;
@@ -992,9 +1011,8 @@ static b32 link_group_join(string_address address_to words, positive count)
         if (at < count)
         {
                 return_if(!string_equals(words[at], "allow") || at + 1 == count, host_usage());
-                may = link_grants_of(words + at + 1, count - at - 1,
-                                     address_of good);
-                if (!good)
+                if (!link_grants_parse(words + at + 1, count - at - 1,
+                                       address_of may, null))
                         return host_refuse("a grant is one of shell run files "
                                            "log\n");
                 granted = true;
@@ -1087,9 +1105,7 @@ static b32 link_group_join(string_address address_to words, positive count)
                                 return host_refuse("this machine is in 8 groups "
                                                    "already\n");
                         }
-                        record = groups.record + groups.count++;
-                        memory_zero(record, sizeof(address_to record));
-                        string_copy(record->namespace, namespace);
+                        record = link_group_append(address_of groups, namespace);
                         record->may = WATERLINK_MAY_DEFAULT;
                 }
 
@@ -1239,12 +1255,25 @@ static b32 link_group_join(string_address address_to words, positive count)
 #define LINK_GROUP_ENTRY_KEY 32
 #define LINK_GROUP_ENTRY_NAME 36
 
+static const struct
+{
+        string_address word;
+        positive least, most;
+} link_group_subcommands[] = {
+    {"leave", 5, 6},
+    {"new",   4, ~(positive)0},
+    {"key",   4, 5},
+    {"add",   5, ~(positive)0},
+    {"stamp", 5, ~(positive)0},
+};
+
 //      The words `link group` takes where a group's name goes.
 static p8 link_group_word(string_address name)
 {
-        return string_equals(name, "new") || string_equals(name, "stamp") ||
-               string_equals(name, "leave") || string_equals(name, "key") ||
-               string_equals(name, "add");
+        return string_table_find(name, link_group_subcommands,
+                                 sizeof link_group_subcommands[0],
+                                 array_count(link_group_subcommands)) <
+               array_count(link_group_subcommands);
 }
 
 //      Whether a name is one a group can be called.
@@ -1337,11 +1366,7 @@ static b32 link_group_store(string_address namespace, p8 address_to key,
                 return host_refuse("this machine is in 8 groups already\n");
         }
         else
-        {
-                record = groups.record + groups.count++;
-                memory_zero(record, sizeof(address_to record));
-                string_copy(record->namespace, namespace);
-        }
+                record = link_group_append(address_of groups, namespace);
         memory_copy(record->key, key, 32);
         memory_zero(record->check, sizeof record->check);
         record->may = may;
@@ -1598,9 +1623,7 @@ static fn link_group_restore(void)
                 {
                         if (groups.count >= LINK_GROUPS_MAX)
                                 continue;
-                        record = groups.record + groups.count++;
-                        memory_zero(record, sizeof(address_to record));
-                        string_copy(record->namespace, (string_address)name);
+                        record = link_group_append(address_of groups, (string_address)name);
                 }
                 memory_copy(record->key, key, 32);
                 memory_zero(record->check, sizeof record->check);
@@ -1741,15 +1764,12 @@ static b32 link_group_pick(string_address namespace,
 static b32 link_group_allowed(string_address address_to words, positive count,
                               p32 address_to may)
 {
-        p8 good = true;
-
         address_to may = LINK_GROUP_MAY;
         if (!count)
                 return 0;
         if (!string_equals(words[0], "allow") || count == 1)
                 return host_usage();
-        address_to may = link_grants_of(words + 1, count - 1, address_of good);
-        if (!good)
+        if (!link_grants_parse(words + 1, count - 1, may, null))
                 return host_refuse("a grant is one of shell run files log\n");
         return 0;
 }
@@ -1804,7 +1824,9 @@ static b32 link_group_new(string_address address_to words, positive count)
                 for (positive g = 0; g < groups.count; g++)
                         if (!(groups.record[g].flags & LINK_GROUP_ONCE))
                         {
-                                string_copy((string_address)own, groups.record[g].namespace);
+                                string_copy_bounded((string_address)own,
+                                                    groups.record[g].namespace,
+                                                    sizeof own);
                                 found++;
                         }
                 crypto_forget(address_of groups, sizeof groups);
@@ -1897,6 +1919,23 @@ static b32 link_group_text_take(string_address word, p8 address_to made)
         return 0;
 }
 
+static b32 link_group_parse_key_and_grants(string_address address_to words,
+                                           positive count, p8 address_to name,
+                                           p8 address_to key, p32 address_to may)
+{
+        p8 made[LINK_GROUP_LINE];
+        b32 refused;
+
+        scope_exit(crypto_forget(made, sizeof made));
+        refused = link_group_text_take(words[0], made);
+        if (refused)
+                return refused;
+        if (!link_group_text_parse((string_address)made, name, key))
+                return host_refuse("that is not a group's key: NAME:KEY, as moonwater "
+                                   "link group key prints it\n");
+        return link_group_allowed(words + 1, count - 1, may);
+}
+
 /*
         group add NAME:KEY|- [allow GRANT...]
 
@@ -1905,21 +1944,14 @@ static b32 link_group_text_take(string_address word, p8 address_to made)
 */
 static b32 link_group_add(string_address address_to words, positive count)
 {
-        p8 made[LINK_GROUP_LINE];
         p8 name[WATERLINK_NAMESPACE_MAX];
         p8 key[32];
         p8 replaced;
         p32 may;
         b32 refused;
 
-        scope_exit(crypto_forget(made, sizeof made); crypto_forget(key, sizeof key));
-        refused = link_group_text_take(words[0], made);
-        if (refused)
-                return refused;
-        if (!link_group_text_parse((string_address)made, name, key))
-                return host_refuse("that is not a group's key: NAME:KEY, as moonwater "
-                                   "link group key prints it\n");
-        refused = link_group_allowed(words + 1, count - 1, address_of may);
+        scope_exit(crypto_forget(key, sizeof key));
+        refused = link_group_parse_key_and_grants(words, count, name, key, address_of may);
         if (refused)
                 return refused;
         refused = link_group_store((string_address)name, key, may, address_of replaced);
@@ -1954,7 +1986,6 @@ static b32 link_group_stamp(string_address address_to words, positive count)
         struct link_group_record record;
         host_settings settings;
         string_address failed;
-        p8 made[LINK_GROUP_LINE];
         p8 name[WATERLINK_NAMESPACE_MAX];
         p8 key[32];
         p32 may = LINK_GROUP_MAY;
@@ -1962,18 +1993,13 @@ static b32 link_group_stamp(string_address address_to words, positive count)
         b32 read;
         bipolar stamped;
 
-        scope_exit(crypto_forget(made, sizeof made); crypto_forget(key, sizeof key);
+        scope_exit(crypto_forget(key, sizeof key);
                    crypto_forget(address_of record, sizeof record));
         memory_zero(address_of record, sizeof record);
         if (count > 1 && (string_equals(words[1], "-") || string_first_of(words[1], ':')))
         {
-                refused = link_group_text_take(words[1], made);
-                if (refused)
-                        return refused;
-                if (!link_group_text_parse((string_address)made, name, key))
-                        return host_refuse("that is not a group's key: NAME:KEY, as "
-                                           "moonwater link group key prints it\n");
-                refused = link_group_allowed(words + 2, count - 2, address_of may);
+                refused = link_group_parse_key_and_grants(words + 1, count - 1,
+                                                          name, key, address_of may);
                 if (refused)
                         return refused;
         }
@@ -1984,7 +2010,7 @@ static b32 link_group_stamp(string_address address_to words, positive count)
                                                       address_of record);
                 if (refused)
                         return refused;
-                string_copy((string_address)name, record.namespace);
+                string_copy_bounded((string_address)name, record.namespace, sizeof name);
                 memory_copy(key, record.key, 32);
                 may = record.may;
         }
@@ -2165,9 +2191,7 @@ static bipolar link_pair_open(string_address namespace, p8 address_to code,
 
         if (groups.count < LINK_GROUPS_MAX)
         {
-                record = groups.record + groups.count++;
-                memory_zero(record, sizeof(address_to record));
-                string_copy(record->namespace, namespace);
+                record = link_group_append(address_of groups, namespace);
                 memory_copy(record->key, key, 32);
                 record->may = LINK_PAIR_MAY;
                 record->flags = LINK_GROUP_ONCE;
@@ -2706,9 +2730,9 @@ static fn link_paths_places(string_address prefix)
                 for (positive seen = 0; seen < places.count; seen++)
                 {
                         if (!crypto_same(places.place[seen].key, peer->key, 32) ||
-                            (places.place[seen].port == peer->port &&
-                             !memory_compare(places.place[seen].address,
-                                             peer->address, 16)))
+                            link_place_same(places.place[seen].address,
+                                            places.place[seen].port,
+                                            peer->address, peer->port))
                                 continue;
                         link_place_text(places.place[seen].address,
                                         places.place[seen].port, place);
@@ -2806,7 +2830,6 @@ static b32 link_doctor_port_free(void)
 static fn link_doctor_carriers(bipolar owner, positive port)
 {
         link_state state;
-        positive state_length = 0;
         positive shown = 0;
         p8 carrier = link_carrier(0);
         p8 proxy[96];
@@ -2858,18 +2881,12 @@ static fn link_doctor_carriers(bipolar owner, positive port)
         of the same thing, so a check and the status cannot disagree. */
 static b32 link_doctor(void)
 {
-        p8 word[16];
         bipolar owner = host_lock_owner(LINK_LOCK_PATH);
-        b32 on;
         positive failed = 0;
         positive port = (positive)link_port();
-        positive listener;
+        positive listener = link_listener_status(owner);
         positive reach = discovery_lan_reach();
 
-        host_read_word(LINK_SWITCH_PATH, word, sizeof word);
-        on = string_equals((string_address)word, "on");
-
-        listener = link_listener_state(owner, on, word[0] != 0);
         if (listener == LINK_LISTENER_ON || listener == LINK_LISTENER_BY_HAND)
                 string_format(log, "  pass  listener: %s\n",
                               (string_address)link_listener_names[listener]);
@@ -3090,12 +3107,12 @@ static b32 link_modem_send(string_address path)
         return modem_send_file(path);
 }
 
+static const string_address link_transport_names[] = {"network", "tcp", "auto", "modem"};
+
 static b32 link_transport_verb(string_address word)
 {
-        p8 kept[16];
         bipolar failed;
 
-        host_read_word(LINK_TRANSPORT_PATH, kept, sizeof kept);
         if (!word)
         {
                 string_address why = link_modem_why();
@@ -3114,44 +3131,164 @@ static b32 link_transport_verb(string_address word)
                 }
                 return 0;
         }
-        if (string_equals(word, "modem"))
         {
-                string_address why = link_modem_why();
+                positive at = string_table_find(word, link_transport_names,
+                                                sizeof link_transport_names[0],
+                                                array_count(link_transport_names));
 
-                if (why)
-                        return host_refuse("the audio modem is not ready: %s, so "
-                                           "the transport stays network\n", why);
+                if (at == array_count(link_transport_names))
+                        return host_refuse("transport is network, tcp, auto or modem, not %s\n", word);
+                if (at == 3)
+                {
+                        string_address why = link_modem_why();
+
+                        if (why)
+                                return host_refuse("the audio modem is not ready: %s, so "
+                                                   "the transport stays network\n", why);
+                }
         }
-        if (!string_equals(word, "network") && !string_equals(word, "modem") &&
-            !string_equals(word, "tcp") && !string_equals(word, "auto"))
-                return host_refuse("transport is network, tcp, auto or modem, not %s\n", word);
         failed = radio_write_word(LINK_TRANSPORT_PATH, word);
         return_if(failed < 0, host_fail("link transport", failed));
         host_say(log, host_label "transport %s\n", word);
         return 0;
 }
 
+static b32 link_policy_verb(p8 allow, string_address address_to words, positive count)
+{
+        p32 mask = link_policy_load();
+        p32 change = 0;
+        p8 grants[96];
+        string_address bad = null;
+
+        if (!count)
+                return host_usage();
+        if (!link_grants_parse(words, count, address_of change, address_of bad))
+                return host_refuse("unknown grant %s (expected shell, run, files, log, or all)\n",
+                                   bad);
+        mask = allow ? (mask | change) : (mask & ~change);
+        if (!link_policy_save(mask))
+                return host_refuse("%s could not be written\n", LINK_POLICY_PATH);
+        link_grants_text(mask, grants, sizeof grants);
+        host_say(log, "this machine allows %s\n", (string_address)grants);
+        return 0;
+}
+
+static b32 link_modem_dispatch(string_address address_to arguments, positive count)
+{
+        static const struct
+        {
+                string_address word;
+                positive exact;
+        } sub[] = {
+            {"key", 4},
+            {"send", 5},
+        };
+        positive at = string_table_find(arguments[3], sub, sizeof sub[0],
+                                        array_count(sub));
+
+        if (at == array_count(sub) || count != sub[at].exact)
+                return host_usage();
+        return at == 0 ? link_modem_key_verb() : link_modem_send(arguments[4]);
+}
+
+static b32 link_group_dispatch(string_address address_to arguments, positive count)
+{
+        if (count == 3)
+                return link_status();
+        positive at = string_table_find(arguments[3], link_group_subcommands,
+                                        sizeof link_group_subcommands[0],
+                                        array_count(link_group_subcommands));
+        if (at == array_count(link_group_subcommands))
+                return link_group_join(arguments + 3, count - 3);
+        if (count < link_group_subcommands[at].least ||
+            count > link_group_subcommands[at].most)
+                return host_usage();
+        switch (at)
+        {
+        case 0: return count == 5 || string_equals(arguments[5], "forget")
+                           ? link_group_leave(arguments[4], count == 6) : host_usage();
+        case 1: return link_group_new(arguments + 4, count - 4);
+        case 2: return link_group_key(count == 5 ? arguments[4] : null);
+        case 3: return link_group_add(arguments + 4, count - 4);
+        case 4: return link_group_stamp(arguments + 4, count - 4);
+        }
+        return host_usage();
+}
+
+static b32 link_peers_dispatch(p8 op, string_address address_to arguments, positive count)
+{
+        struct waterlink_peer where;
+        bipolar lock;
+        b32 answer;
+
+        //      An address is looked up before the lock, not under it.
+        memory_zero(address_of where, sizeof where);
+        if (op == 0 && count == 6 &&
+            !link_parse_place(arguments[5], where.address, address_of where.port))
+                return host_refuse("%s is not an address this can reach\n", arguments[5]);
+
+        lock = link_peers_lock();
+        if (lock < 0)
+                return host_refuse("%s could not be locked\n", LINK_PEERS_LOCK);
+        answer = op == 0 ? link_add_locked(arguments[3], arguments[4],
+                                           count == 6 ? address_of where : null)
+               : op == 1 ? link_remove_locked(arguments[3])
+               : op == 2 ? link_purge_locked()
+                         : link_grant_locked(arguments[3], op == 3,
+                                             arguments + 4, count - 4);
+        link_peers_unlock(lock);
+        return answer;
+}
+
 /*
-        How many words each verb that takes a fixed number is run with, the
-        two that name the program and the verb among them. A word of these
-        with the wrong number is a usage page for anyone: root's refusal is
-        for what would have been done, and a person who cannot do any of it
-        is still told how it is spelled.
+        Descriptor table for every built-in verb of `moonwater link`: word,
+        argument count bounds, mode + flags (SIGPIPE ignore on mutating verbs),
+        mode-specific arg, and optional handler pointer. Unifies shape checks,
+        SIGPIPE policy, and dispatch without string_equals chains.
 */
-static const struct
+#define LINK_VF_CHANGE 1u // ignores SIGPIPE in link_main
+enum {
+        LINK_DM_FN0, LINK_DM_FN1, LINK_DM_ARGS, LINK_DM_SWITCH,
+        LINK_DM_POLICY, LINK_DM_LOCKED, LINK_DM_KIND,
+};
+
+typedef struct
 {
         string_address word;
-        positive least;
-        positive most;
-} link_shapes[] = {
-    {"on", 3, 3},   {"off", 3, 3},   {"key", 3, 3},  {"serve", 3, 4},
-    {"port", 3, 4},  {"transport", 3, 4}, {"modem", 4, 5},
-    {"pair", 3, 4}, {"add", 5, 6},   {"remove", 4, 4}, {"purge", 3, 3},
-    {"allow", 5, ~(positive)0},      {"deny", 5, ~(positive)0},
-    {"allow-all", 4, ~(positive)0},  {"deny-all", 4, ~(positive)0},
-    {"shell", 4, 4}, {"run", 5, ~(positive)0},
-    {"push", 6, 6}, {"pull", 6, 6}, {"log", 4, 4},
-    {"cancel", 3, 3}, {"doctor", 3, 3}, {"paths", 3, 3},
+        positive least, most;
+        p8 mode, flags, arg;
+        union {
+                b32 (*fn0)(void);
+                b32 (*fn1)(string_address);
+                b32 (*args)(string_address address_to, positive);
+        } run;
+} link_verb_desc;
+
+static const link_verb_desc link_verbs[] = {
+    {"on",        3, 3,            LINK_DM_SWITCH, LINK_VF_CHANGE, 1, {0}},
+    {"off",       3, 3,            LINK_DM_SWITCH, LINK_VF_CHANGE, 0, {0}},
+    {"key",       3, 3,            LINK_DM_FN0,    0,              0, {.fn0 = link_key_verb}},
+    {"serve",     3, 4,            LINK_DM_FN1,    0,              1, {.fn1 = link_serve}},
+    {"port",      3, 4,            LINK_DM_FN1,    LINK_VF_CHANGE, 0, {.fn1 = link_port_verb}},
+    {"transport", 3, 4,            LINK_DM_FN1,    LINK_VF_CHANGE, 0, {.fn1 = link_transport_verb}},
+    {"modem",     4, 5,            LINK_DM_ARGS,   0,              0, {.args = link_modem_dispatch}},
+    {"pair",      3, 4,            LINK_DM_FN1,    LINK_VF_CHANGE, 0, {.fn1 = link_pair_here}},
+    {"add",       5, 6,            LINK_DM_LOCKED, LINK_VF_CHANGE, 0, {0}},
+    {"remove",    4, 4,            LINK_DM_LOCKED, LINK_VF_CHANGE, 1, {0}},
+    {"purge",     3, 3,            LINK_DM_LOCKED, LINK_VF_CHANGE, 2, {0}},
+    {"allow",     5, ~(positive)0, LINK_DM_LOCKED, LINK_VF_CHANGE, 3, {0}},
+    {"deny",      5, ~(positive)0, LINK_DM_LOCKED, LINK_VF_CHANGE, 4, {0}},
+    {"allow-all", 4, ~(positive)0, LINK_DM_POLICY, LINK_VF_CHANGE, 1, {0}},
+    {"deny-all",  4, ~(positive)0, LINK_DM_POLICY, LINK_VF_CHANGE, 0, {0}},
+    {"shell",     4, 4,            LINK_DM_KIND,   0,              LINK_KIND_SHELL, {0}},
+    {"run",       5, ~(positive)0, LINK_DM_KIND,   0,              LINK_KIND_RUN,   {0}},
+    {"push",      6, 6,            LINK_DM_KIND,   0,              LINK_KIND_PUSH,  {0}},
+    {"pull",      6, 6,            LINK_DM_KIND,   0,              LINK_KIND_PULL,  {0}},
+    {"log",       4, 4,            LINK_DM_KIND,   0,              LINK_KIND_LOG,   {0}},
+    {"cancel",    3, 3,            LINK_DM_FN0,    LINK_VF_CHANGE, 0, {.fn0 = link_cancel}},
+    {"doctor",    3, 3,            LINK_DM_FN0,    0,              0, {.fn0 = link_doctor}},
+    {"paths",     3, 3,            LINK_DM_FN0,    0,              0, {.fn0 = link_paths_verb}},
+    {"group",     3, ~(positive)0, LINK_DM_ARGS,   LINK_VF_CHANGE, 1, {.args = link_group_dispatch}},
 };
 
 //      The code as it is printed, abc-def: a word of six letters is as likely
@@ -3169,20 +3306,19 @@ static b32 link_dispatch(string_address address_to arguments, positive count)
 {
         string_address verb = count > 2 ? arguments[2] : null;
         p8 folded[WATERLINK_NAME_MAX];
-        positive kind;
-        positive shape = verb ? string_table_find(verb, link_shapes,
-                                                  sizeof link_shapes[0],
-                                                  array_count(link_shapes))
-                              : array_count(link_shapes);
+        positive idx = verb ? string_table_find(verb, link_verbs,
+                                                sizeof link_verbs[0],
+                                                array_count(link_verbs))
+                            : array_count(link_verbs);
+        const link_verb_desc address_to v =
+                idx < array_count(link_verbs) ? link_verbs + idx : null;
 
-        if (shape < array_count(link_shapes) &&
-            (count < link_shapes[shape].least || count > link_shapes[shape].most))
+        if (v && (count < v->least || count > v->most))
                 return host_usage();
         //      serve's one further word is the descriptor link on hands the
         //      listener it starts, digits and nothing else; any other word
         //      started a listener that never came back to say it was wrong.
-        if (shape < array_count(link_shapes) && count == 4 &&
-            string_equals(verb, "serve"))
+        if (v && v->mode == LINK_DM_FN1 && v->arg && count == 4)
         {
                 positive descriptor;
 
@@ -3194,8 +3330,7 @@ static b32 link_dispatch(string_address address_to arguments, positive count)
         //      A word that is no verb and no name a machine could have (help
         //      and leave are words of the groups, not verbs) is a machine of
         //      nobody's: what root would be told, anyone is.
-        if (verb && shape == array_count(link_shapes) &&
-            !string_equals(verb, "group") && !link_name_good(verb))
+        if (verb && !v && !link_name_good(verb))
                 return count == 4 && link_code_shaped(arguments[3])
                            ? host_refuse("%s is not a machine name\n", verb)
                            : host_usage();
@@ -3204,7 +3339,7 @@ static b32 link_dispatch(string_address address_to arguments, positive count)
         //      anyone else the page would say "nobody linked" of a machine
         //      that has a dozen. An image stamped with a key that is given
         //      reads none of them (link_group_stamp).
-        if (!(verb && string_equals(verb, "group") && count >= 6 &&
+        if (!(v && v->mode == LINK_DM_ARGS && v->arg && count >= 6 &&
               string_equals(arguments[3], "stamp") &&
               (string_equals(arguments[5], "-") || string_first_of(arguments[5], ':'))))
                 host_need_root();
@@ -3212,134 +3347,18 @@ static b32 link_dispatch(string_address address_to arguments, positive count)
         if (!verb)
                 return link_status();
 
-        if (string_equals(verb, "on") || string_equals(verb, "off"))
-                return link_switch(string_equals(verb, "on"), true);
-        if (string_equals(verb, "key"))
-                return link_key_verb();
-        if (string_equals(verb, "port"))
-                return link_port_verb(count == 4 ? arguments[3] : null);
-        if (string_equals(verb, "transport"))
-                return link_transport_verb(count == 4 ? arguments[3] : null);
-        if (string_equals(verb, "modem"))
-        {
-                if (count == 4 && string_equals(arguments[3], "key"))
-                        return link_modem_key_verb();
-                if (count == 5 && string_equals(arguments[3], "send"))
-                        return link_modem_send(arguments[4]);
-                return host_usage();
-        }
-        if (string_equals(verb, "serve"))
-                return link_serve(count == 4 ? arguments[3] : null);
-        if (string_equals(verb, "pair"))
-                return link_pair_here(count == 4 ? arguments[3] : null);
-        if (string_equals(verb, "cancel"))
-                return link_cancel();
-        if (string_equals(verb, "doctor"))
-                return link_doctor();
-        if (string_equals(verb, "paths"))
-                return link_paths_verb();
-
-        if (string_equals(verb, "allow-all") || string_equals(verb, "deny-all"))
-        {
-                p8 allow = string_equals(verb, "allow-all");
-                p32 mask = link_policy_load();
-                p32 change = 0;
-                p8 grants[96];
-
-                if (count < 4)
-                        return host_usage();
-                for (positive at = 3; at < count; at++)
+        if (v)
+                switch (v->mode)
                 {
-                        p32 bit = link_grant_bit(arguments[at]);
-
-                        if (!bit)
-                                return host_refuse("unknown grant %s (expected shell, run, files, log, or all)\n",
-                                                   arguments[at]);
-                        change |= bit;
+                case LINK_DM_FN0:    return v->run.fn0();
+                case LINK_DM_FN1:    return v->run.fn1(count == 4 ? arguments[3] : null);
+                case LINK_DM_ARGS:   return v->run.args(arguments, count);
+                case LINK_DM_SWITCH: return link_switch(v->arg, true);
+                case LINK_DM_POLICY: return link_policy_verb(v->arg, arguments + 3, count - 3);
+                case LINK_DM_LOCKED: return link_peers_dispatch(v->arg, arguments, count);
+                case LINK_DM_KIND:   return link_client_run(arguments[3], v->arg,
+                                                            arguments + 4, count - 4);
                 }
-                mask = allow ? (mask | change) : (mask & ~change);
-                if (!link_policy_save(mask))
-                        return host_refuse("%s could not be written\n", LINK_POLICY_PATH);
-                link_grants_text(mask, grants, sizeof grants);
-                string_format(log, "this machine allows %s\n", (string_address)grants);
-                log_flush();
-                return 0;
-        }
-
-        //      The peers file has a second writer, the listener pairing
-        //      members: each change made here happens under the same lock.
-        if (string_equals(verb, "add") || string_equals(verb, "remove") ||
-            string_equals(verb, "purge") ||
-            string_equals(verb, "allow") || string_equals(verb, "deny"))
-        {
-                struct waterlink_peer where;
-                bipolar lock;
-                b32 answer;
-
-                //      An address is looked up before the lock, not under it.
-                memory_zero(address_of where, sizeof where);
-                if (string_equals(verb, "add") && count == 6 &&
-                    !link_parse_place(arguments[5], where.address,
-                                      address_of where.port))
-                        return host_refuse("%s is not an address this can "
-                                           "reach\n",
-                                           arguments[5]);
-
-                lock = link_peers_lock();
-                if (lock < 0)
-                        return host_refuse("%s could not be locked\n",
-                                           LINK_PEERS_LOCK);
-                answer =
-                        string_equals(verb, "add")
-                                ? link_add_locked(arguments[3], arguments[4],
-                                                  count == 6 ? address_of where
-                                                             : null)
-                        : string_equals(verb, "remove")
-                                ? link_remove_locked(arguments[3])
-                        : string_equals(verb, "purge")
-                                ? link_purge_locked()
-                                : link_grant_locked(arguments[3],
-                                                    string_equals(verb, "allow"),
-                                                    arguments + 4, count - 4);
-
-                link_peers_unlock(lock);
-                return answer;
-        }
-
-        if (string_equals(verb, "group"))
-        {
-                if (count == 3)
-                        return link_status();
-                //      leave is a word no group may be called, so a leave
-                //      that is not spelled group leave NAME [forget] is a
-                //      misspelt leave, and the page is what it is owed.
-                if (string_equals(arguments[3], "leave"))
-                        return count == 5 ||
-                                       (count == 6 && string_equals(arguments[5], "forget"))
-                                   ? link_group_leave(arguments[4], count == 6)
-                                   : host_usage();
-                if (string_equals(arguments[3], "new"))
-                        return link_group_new(arguments + 4, count - 4);
-                if (string_equals(arguments[3], "key"))
-                        return count <= 5 ? link_group_key(count == 5 ? arguments[4] : null)
-                                          : host_usage();
-                if (string_equals(arguments[3], "add"))
-                        return count >= 5 ? link_group_add(arguments + 4, count - 4)
-                                          : host_usage();
-                if (string_equals(arguments[3], "stamp"))
-                        return count >= 5 ? link_group_stamp(arguments + 4, count - 4)
-                                          : host_usage();
-                if (count >= 4)
-                        return link_group_join(arguments + 3, count - 3);
-        }
-
-        //      push, pull, log, shell and run: a machine and what the kind
-        //      takes, which the shapes above held it to.
-        kind = string_table_find(verb, link_kind_names, sizeof link_kind_names[0],
-                                 array_count(link_kind_names));
-        if (kind && kind < array_count(link_kind_names))
-                return link_client_run(arguments[3], (p8)kind, arguments + 4,
-                                       count - 4);
 
         //      A word that is none of those is a machine: its terminal, one
         //      command on it, or, if it is not known and the word after it
@@ -3380,18 +3399,16 @@ static b32 link_dispatch(string_address address_to arguments, positive count)
 */
 static b32 link_main(string_address address_to arguments, positive count)
 {
-        static const string_address changes[] = {"on",     "off",       "port",
-                                                 "pair",   "add",       "remove",
-                                                 "purge",  "allow",     "deny",
-                                                 "allow-all", "deny-all", "transport",
-                                                 "group",  "cancel"};
         string_address verb = count > 2 ? arguments[2] : null;
+        positive idx = verb ? string_table_find(verb, link_verbs,
+                                                sizeof link_verbs[0],
+                                                array_count(link_verbs))
+                            : array_count(link_verbs);
         positive previous[4];
         p8 ignored = false;
         b32 answer;
 
-        if (verb && string_table_find(verb, changes, sizeof changes[0],
-                                      array_count(changes)) < array_count(changes))
+        if (idx < array_count(link_verbs) && (link_verbs[idx].flags & LINK_VF_CHANGE))
                 ignored = system_signal_install(13, 1, 0, 0, previous);
         answer = link_dispatch(arguments, count);
         if (ignored)

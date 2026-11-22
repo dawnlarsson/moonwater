@@ -161,6 +161,15 @@ static void modem_sha_bytes(const p32 h[8], p8 out[32])
         }
 }
 
+/* Volatile zeroization immune to dead-store elimination in both freestanding and hosted builds. */
+static void modem_forget(void *p, sized n)
+{
+        volatile p8 *b = (volatile p8 *)p;
+
+        while (n--)
+                *b++ = 0;
+}
+
 /* SHA-256 of len bytes in one call: how a key over a block is digested. */
 static void modem_sha256(const p8 *msg, sized len, p8 out[32])
 {
@@ -169,7 +178,7 @@ static void modem_sha256(const p8 *msg, sized len, p8 out[32])
         memory_copy(h, modem_sha_iv, sizeof h);
         modem_sha_run(h, msg, len, 0);
         modem_sha_bytes(h, out);
-        memory_zero(h, sizeof h);
+        modem_forget(h, sizeof h);
 }
 
 /* Makes a key ready: the chaining states of its two pads, which a message under the key starts from. A key over a
@@ -195,8 +204,8 @@ static void modem_mac_open(modem_mac *m, const p8 *key, sized klen)
                 pad[i] = k[i] ^ 0x5c;
         memory_copy(m->outer, modem_sha_iv, sizeof m->outer);
         sha256_blocks(m->outer, pad, 1);
-        memory_zero(k, sizeof k);
-        memory_zero(pad, sizeof pad);
+        modem_forget(k, sizeof k);
+        modem_forget(pad, sizeof pad);
 }
 
 /* The portable tag: the message under the inner state, then the inner digest under the outer state. */
@@ -211,8 +220,8 @@ static void modem_hmac_portable(const modem_mac *m, const p8 *msg, sized mlen, p
         memory_copy(h, m->outer, sizeof h);
         modem_sha_run(h, inner, sizeof inner, MODEM_SHA_BLOCK);
         modem_sha_bytes(h, out);
-        memory_zero(h, sizeof h);
-        memory_zero(inner, sizeof inner);
+        modem_forget(h, sizeof h);
+        modem_forget(inner, sizeof inner);
 }
 
 /* The tag of msg under a key made ready by modem_mac_open: lib.c's where this machine has its body, else the portable one. */
@@ -230,7 +239,7 @@ static void modem_tag(const modem_mac *m, const p8 *msg, sized mlen, p8 out[MODE
 
         modem_hmac(m, msg, mlen, mac);
         memory_copy(out, mac, MODEM_TAG);
-        memory_zero(mac, sizeof(mac));
+        modem_forget(mac, sizeof(mac));
 }
 
 /* ---- the public interface ---------------------------------------------- */
@@ -404,7 +413,7 @@ sized modem_encode(const p8 *key, sized klen, p32 seq, const p8 *payload, sized 
 
         modem_mac_open(&mac, key, klen);
         n = modem_encode_mac(&mac, seq, payload, len, pcm, cap);
-        memory_zero(&mac, sizeof mac);
+        modem_forget(&mac, sizeof mac);
         return n;
 }
 
@@ -764,7 +773,7 @@ int modem_decode(const b16 *pcm, sized n, const p8 *key, sized klen,
 
         modem_mac_open(&mac, key, klen);
         r = modem_decode_core(pcm, n, &mac, out, cap, seq, 0, 0, 0, 0, 0);
-        memory_zero(&mac, sizeof mac);
+        modem_forget(&mac, sizeof mac);
         return r;
 }
 
@@ -1048,7 +1057,7 @@ static void modem_seq_fingerprint(const p8 *key, p8 out[MODEM_MAC])
 
         modem_mac_open(&mac, key, 32);
         modem_hmac(&mac, label, sizeof label - 1, out);
-        memory_zero(&mac, sizeof mac);
+        crypto_forget(&mac, sizeof mac);
 }
 
 /* Reads the count for key into seq and id. Answers 0, or the negative error of a file that is there and is not a private
@@ -1384,7 +1393,7 @@ static void modem_lane_key(const p8 key[32], unsigned lane, p8 out[32])
         {
                 modem_mac_open(&mac, key, 32);
                 modem_hmac(&mac, label, sizeof label - 1, out);
-                memory_zero(&mac, sizeof mac);
+                crypto_forget(&mac, sizeof mac);
         }
 }
 

@@ -238,6 +238,7 @@ static bipolar file_publish_with(string_address path, address_any bytes,
         handle = mkstemp((char *)stage);
         if (handle < 0)
                 return -(bipolar)*__error();
+        (void)fcntl(handle, F_SETFD, FD_CLOEXEC);
         (void)fchmod(handle, (mode_t)(mode & 07777));
         written = file_transfer_exact(syscall(pwrite64), handle, (p8 address_to)bytes, length, 0);
         if (written != (bipolar)length || (sync && fsync(handle) != 0))
@@ -319,7 +320,7 @@ static bipolar process_pty_open(b32 address_to master_out, b32 address_to slave_
                 return -darwin_errno();
         name = grantpt(master) == 0 && unlockpt(master) == 0
                    ? ptsname(master) : null;
-        slave = name ? open(name, O_RDWR | O_NOCTTY) : -1;
+        slave = name ? open(name, O_RDWR | O_NOCTTY | O_CLOEXEC) : -1;
         if (slave < 0)
         {
                 bipolar error = -darwin_errno();
@@ -497,7 +498,7 @@ static string_address link_state_dir(void)
         home = file_environment((string_address)"HOME");
         if (!home || home[0] != '/' || string_length(home) > (positive)(LINK_STATE_ROOM - 64))
                 return (string_address)link_dir_text;
-        string_copy((string_address)link_dir_text, home);
+        string_copy_bounded((string_address)link_dir_text, home, LINK_STATE_ROOM);
         string_append_bounded((string_address)link_dir_text,
                               "/Library/Application Support/moonwater",
                               LINK_STATE_ROOM);
@@ -532,7 +533,7 @@ static string_address link_state_path(positive leaf)
         slot[0] = end;
         if (dir[0])
         {
-                string_copy((string_address)slot, dir);
+                string_copy_bounded((string_address)slot, dir, LINK_STATE_ROOM);
                 string_append_bounded((string_address)slot, "/", LINK_STATE_ROOM);
                 string_append_bounded((string_address)slot, link_leaf_names[leaf],
                                       LINK_STATE_ROOM);

@@ -688,6 +688,12 @@ static positive link_places_drop(link_places address_to places, positive at)
         return places->count;
 }
 
+static p8 link_place_same(const p8 address_to a, p16 a_port,
+                          const p8 address_to b, p16 b_port)
+{
+        return a_port == b_port && !memory_compare((p8 address_to)a, (p8 address_to)b, 16);
+}
+
 /* Keeps a place its peer was heard at: the newest of the peer's, and the
    oldest of the file's dropped to make room. A place is never kept twice. */
 static fn link_place_learn(p8 address_to key, p8 address_to address, p16 port)
@@ -701,8 +707,8 @@ static fn link_place_learn(p8 address_to key, p8 address_to address, p16 port)
         link_places_load(address_of places);
         for (at = 0; at < places.count; at++)
                 if (crypto_same(places.place[at].key, key, 32) &&
-                    places.place[at].port == port &&
-                    !memory_compare(places.place[at].address, address, 16))
+                    link_place_same(places.place[at].address, places.place[at].port,
+                                    address, port))
                         break;
         if (at < places.count)
         {
@@ -746,8 +752,8 @@ static p8 link_place_known(struct link_place address_to tried, positive count,
                            struct link_place address_to place)
 {
         for (positive at = 0; at < count; at++)
-                if (tried[at].port == place->port &&
-                    !memory_compare(tried[at].address, place->address, 16))
+                if (link_place_same(tried[at].address, tried[at].port,
+                                    place->address, place->port))
                         return true;
         return false;
 }
@@ -959,6 +965,27 @@ static fn link_socket_address(socket_address_internet6 address_to into,
         into->length = sizeof *into;
 #endif
         memory_copy(into->host, address, 16);
+}
+
+static p8 link_address_from_sockaddr(const socket_address_internet6 address_to from,
+                                     p8 address_to address, p16 address_to port)
+{
+        if (from->family == AF_INET6)
+        {
+                memory_copy(address, (p8 address_to)from->host, 16);
+                address_to port = network_order_16(from->port);
+                return true;
+        }
+        if (from->family == AF_INET)
+        {
+                const socket_address_internet address_to v4 =
+                        (const socket_address_internet address_to)from;
+
+                link_address_v4(address, network_order_32(v4->host));
+                address_to port = network_order_16(v4->port);
+                return true;
+        }
+        return false;
 }
 
 // The lock --------------------------------------------------------------
@@ -1615,8 +1642,12 @@ static p8 link_fs_buf_reserve(struct link_fs_buf address_to b, positive need)
 static p8 link_fs_buf_append(struct link_fs_buf address_to b,
                              const p8 address_to src, positive n)
 {
+        if (n > LINK_FS_MSG_MAX + 65536u)
+                return false;
         if (b->pos && b->pos == b->len)
                 b->pos = b->len = 0;
+        if (b->len > LINK_FS_MSG_MAX + 65536u - n)
+                return false;
         if (b->len + n > b->cap && b->pos)
         {
                 positive rem = b->len - b->pos;
@@ -1705,7 +1736,7 @@ static fn link_keys_install(struct link_keys address_to keys,
                         owner = link_self.session + at;
         if (owner)
                 owner->keyings++;
-        memory_zero(keys, sizeof(address_to keys));
+        crypto_forget(keys, sizeof(address_to keys));
         crypto_aesgcm_prepare(address_of keys->send, send);
         crypto_aesgcm_prepare(address_of keys->receive, receive);
         keys->ours = ours;
@@ -2213,7 +2244,7 @@ static fn link_term_word(p8 address_to from, positive length,
                                           LINK_NAME_CHARACTERS "+") == length;
         }
         if (!good)
-                string_copy((string_address)into, "xterm");
+                string_copy_bounded((string_address)into, "xterm", 32);
 }
 
 static DEAD_END fn link_child_exec(string_address address_to words,
@@ -2257,11 +2288,9 @@ static DEAD_END fn link_child_exec(string_address address_to words,
 #endif
 
         if (path && string_length(path) < sizeof path_line - 6)
-        {
-                string_copy((string_address)path_line, "PATH=");
-                string_copy((string_address)path_line + 5, path);
-        }
-        string_copy((string_address)term_line + 5, (string_address)term);
+                string_copy_bounded((string_address)path_line + 5, path, sizeof path_line - 5);
+        string_copy_bounded((string_address)term_line + 5, (string_address)term,
+                            sizeof term_line - 5);
 
         environment[at++] = (string_address)path_line;
         environment[at++] = (string_address)term_line;
@@ -2608,7 +2637,7 @@ static p8 link_push_unpack(struct link_session address_to s)
         link_part_discard(s->writes[0].fd, s->part);
         system_close(s->writes[0].fd);
         s->writes[0].fd = plain;
-        string_copy((string_address)s->part, (string_address)part);
+        string_copy_bounded((string_address)s->part, (string_address)part, sizeof s->part);
         return true;
 }
 
@@ -2626,8 +2655,8 @@ static p8 link_start_push(struct link_session address_to s, p8 address_to path,
         if (handle < 0)
                 return false;
         (void)system_call_2(syscall(fchmod), (positive)handle, mode);
-        string_copy((string_address)s->whole, (string_address)path);
-        string_copy((string_address)s->part, (string_address)part);
+        string_copy_bounded((string_address)s->whole, (string_address)path, sizeof s->whole);
+        string_copy_bounded((string_address)s->part, (string_address)part, sizeof s->part);
         link_stream_set(s->writes, handle, LINK_KEY_INPUT, 0);
         return true;
 }
@@ -2737,6 +2766,8 @@ static fn link_fs_handle_info(struct link_fs_buf address_to out, p32 req_id)
 {
         string_address home = (string_address)LINK_HOME_DIR;
         positive hlen = home ? string_length(home) : 0;
+        if (hlen > 65535)
+                hlen = 0;
         p8 flags = 0;
         p8 sub[1024];
         file_facts facts;
@@ -4526,20 +4557,8 @@ static bipolar link_receive(link_run address_to run)
                                        ? (positive)segment
                                        : run[at].length;
 
-                if (from[at].family == AF_INET6)
-                {
-                        memory_copy(run[at].address, from[at].host, 16);
-                        run[at].port = network_order_16(from[at].port);
-                }
-                else
-                {
-                        socket_address_internet address_to v4 =
-                                (socket_address_internet address_to)(from + at);
-
-                        link_address_v4(run[at].address,
-                                        network_order_32(v4->host));
-                        run[at].port = network_order_16(v4->port);
-                }
+                (void)link_address_from_sockaddr(from + at, run[at].address,
+                                                 address_of run[at].port);
         }
         return count;
 }
@@ -4563,8 +4582,8 @@ static fn link_note_seen(struct link_session address_to s, p64 wall)
                 memory_zero(state->seen[at].was, sizeof state->seen[at].was);
                 state->seen[at].was_port = 0;
         }
-        else if (memory_compare(state->seen[at].address, s->address, 16) ||
-                 state->seen[at].port != s->port)
+        else if (!link_place_same(state->seen[at].address, state->seen[at].port,
+                                  s->address, s->port))
         {
                 //      Heard from elsewhere than last noted: the address
                 //      changed at this second, and the old one is kept.
@@ -4595,6 +4614,7 @@ static fn link_state_write(p64 now)
         //      or by a command that talked to it -- is not shown under the name
         //      it had, which `moonwater link` would not find a record for.
         link_peers_load(address_of peers);
+        memory_zero(state->open, sizeof state->open);
         state->open_count = 0;
         for (positive at = 0; at < LINK_SESSIONS; at++)
         {
@@ -6089,7 +6109,8 @@ static b32 link_client_run(string_address name, p8 kind,
                                         s->part[0] = 0;
                                         break;
                                 }
-                                string_copy((string_address)s->whole, words[1]);
+                                string_copy_bounded((string_address)s->whole, words[1],
+                                                    sizeof s->whole);
                                 link_stream_close(s, s->writes);
                                 link_stream_set(s->writes, part,
                                                 LINK_KEY_OUTPUT, 0);
