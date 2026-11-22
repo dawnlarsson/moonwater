@@ -36,7 +36,7 @@ static struct { unsigned int packets, args, state, code; } gpu_layout = {GPU_AMD
 // the same import, held again (gpu_import_again); after them, with the card idle, it is unmapped. imported_dead_after is the submit serial an import was let go
 // of after (gpu_submit_serial then): the submit that follows it is the last that names it (gpu_submit).
 #define GPU_IMPORT_GRACE 8
-static struct { int fd, broken; unsigned int family, device, ctx, handle, *imported, imports; positive *imported_va, *imported_bytes; unsigned char *imported_dead, *imported_holds; positive *imported_dead_at; unsigned int *imported_dead_after, address_to at; positive size, pending; unsigned char *imported_own, *imported_handed; positive *imported_used; } gpu;
+static struct { int fd, broken; unsigned int family, device, ctx, handle, *imported, imports; positive *imported_va, *imported_bytes; unsigned char *imported_dead, *imported_holds; positive *imported_dead_at; unsigned int *imported_dead_after, address_to at; positive size, pending; unsigned char *imported_own, *imported_handed; positive *imported_used; unsigned int *imported_gen; } gpu;
 static unsigned char *gpu_import_at_room; // the reservation the import table's arrays are in, and the imports committed in it
 static unsigned int gpu_import_room;
 static p64 *gpu_submit_bos;               // a submit's buffers (the ring, the imports and maps a job may read), as many as the imports have room for
@@ -86,7 +86,7 @@ static void *gpu_buf_grow(void **ptr, positive *cap, positive need, positive pre
 // The import table's arrays pointed at their reservation (made at the first need), with room for `want`: 1, or 0 when the memory is not there.
 #define GPU_IMPORT_ARRAYS(X) X(imported, unsigned int) X(imported_va, positive) X(imported_bytes, positive) X(imported_dead, unsigned char) \
         X(imported_holds, unsigned char) X(imported_dead_at, positive) X(imported_dead_after, unsigned int) X(imported_own, unsigned char) \
-        X(imported_handed, unsigned char) X(imported_used, positive)
+        X(imported_handed, unsigned char) X(imported_used, positive) X(imported_gen, unsigned int)
 static b32 gpu_imports_room(unsigned int want)
 {
         positive at = 0, room;
@@ -2567,7 +2567,13 @@ __attribute__((unused)) static const void *gpu_pointer_of_va(positive va, positi
 }
 
 static void gpu_unimport(positive at, enum gpu_gone_why why);
+static void gpu_unimport_gen(positive at, unsigned int gen, enum gpu_gone_why why);
 static void gpu_release_import(positive at);
+static void gpu_release_import_gen(positive at, unsigned int gen);
+// S2: an import is named by its card address, which the placer reuses after it wraps, so a holder's old address can name another holder's import. Each import has
+// a generation (never 0, new at each placement; a holder keeps the one it had): gpu_import_gen answers the generation of the import at an address, and a release
+// with a generation (gen, not 0) is a no-op when the import there has another. Releases refused that way are counted (gpu_import_stale).
+static unsigned int gpu_import_gen_last, gpu_import_stale;
 
 // A tick is over (a present): the maps unused for 120 ticks are unmapped and their buffers freed, and the maps and imports let go of while a job might still read them
 // (gpu_forget, gpu_release_import) are dropped once the card is idle. The marks of the maps handed to records are not let go of here: a record given before the trim may be
@@ -2664,9 +2670,21 @@ static positive gpu_import_at(unsigned int handle, positive bytes)
                 return gpu_close(handle), 0;
         gpu.imported_va[gpu.imports] = at, gpu.imported_bytes[gpu.imports] = whole, gpu.imported_dead[gpu.imports] = 0, gpu.imported_holds[gpu.imports] = 1;
         gpu.imported_own[gpu.imports] = (unsigned char)gpu_importing_own, gpu.imported_handed[gpu.imports] = 1, gpu.imported_used[gpu.imports] = gpu_tick;
+        if (!++gpu_import_gen_last)
+                ++gpu_import_gen_last;
+        gpu.imported_gen[gpu.imports] = gpu_import_gen_last;
         gpu.imported[gpu.imports++] = handle;
         gpu_map_next = at + whole;
         return at;
+}
+
+// The generation of the import at address at (0 for none): read right after it is made, or held again, and kept with the address by its holder.
+static unsigned int gpu_import_gen(positive at)
+{
+        for (unsigned int i = 0; at && i < gpu.imports; i++)
+                if (gpu.imported_va[i] == at)
+                        return gpu.imported_gen[i];
+        return 0;
 }
 
 // A buffer of another node of the card (the scanout's dumb buffer on the display node, by its handle on that node's descriptor), made reachable here: its address, 0 for none.
@@ -2745,8 +2763,13 @@ static void gpu_import_mark_dead(unsigned int i)
 // pending): then it is only released, and gpu_trim unmaps it once the card is idle.
 static void gpu_unimport(positive at, enum gpu_gone_why why)
 {
+        gpu_unimport_gen(at, 0, why);
+}
+
+static void gpu_unimport_gen(positive at, unsigned int gen, enum gpu_gone_why why)
+{
         for (unsigned int i = 0; at && i < gpu.imports; i++)
-                if (gpu.imported_va[i] == at)
+                if (gpu.imported_va[i] == at && (!gen || gpu.imported_gen[i] == gen))
                 {
                         const struct gpu_bo bo = {at, gpu.imported_bytes[i], 0, 0, gpu.imported[i], 0, 1, 1, 1};
                         unsigned int last;
@@ -2768,13 +2791,20 @@ static void gpu_unimport(positive at, enum gpu_gone_why why)
 #undef GPU_IMPORT_SWAP
                         return;
                 }
+        if (at && gen)
+                gpu_import_stale++;
 }
 
 // An import let go of by one holder: with its last, unmapped by the gpu_trim after the card is idle (a job of this present may still name it, so not now).
 static void gpu_release_import(positive at)
 {
+        gpu_release_import_gen(at, 0);
+}
+
+static void gpu_release_import_gen(positive at, unsigned int gen)
+{
         for (unsigned int i = 0; at && i < gpu.imports; i++)
-                if (gpu.imported_va[i] == at)
+                if (gpu.imported_va[i] == at && (!gen || gpu.imported_gen[i] == gen))
                 {
                         if (!gpu.imported_dead[i] && gpu.imported_holds[i] > 1)
                                 gpu.imported_holds[i]--;
@@ -2782,6 +2812,8 @@ static void gpu_release_import(positive at)
                                 gpu_import_mark_dead(i);
                         return;
                 }
+        if (at && gen)
+                gpu_import_stale++;
 }
 
 // The arguments the kernel reads, at byte 512 of the buffer: s, d, g are GPU addresses (GPU_VA + an offset), pitches in pixels, op 0 copy
@@ -4193,6 +4225,21 @@ static b32 gpu_blit(positive src, unsigned int sp, positive dst, unsigned int dp
                 return false;
         gpu_slot_take(), a = GPU_ARGS;
         a->s = src, a->d = dst, a->g = tab, a->sp = sp, a->dp = dp, a->gp = 0, a->w = w, a->op = op, a->v = 0, a->x0 = a->y0 = 0, a->rows = h, a->tab = op ? GPU_VA + GPU_BASES_AT : 0;
+        return gpu_run();
+}
+
+// The glass job (op 3, gpu.asm glass): the picture s (sp pixels a row) over the ground g (gp a row) into d (dp a row), w by h, with the grain of the absolute
+// x0, y0 (the rect's origin in the surface the ground is) and light: 0 dark glass, 1 light. Card addresses, all pitches in pixels. gpu_run waits, as gpu_blit does.
+__attribute__((unused)) static b32 gpu_glass(positive s, unsigned int sp, positive g, unsigned int gp, positive d, unsigned int dp, unsigned int x0, unsigned int y0,
+                                              unsigned int w, unsigned int h, unsigned int light)
+{
+        struct gpu_args address_to a;
+
+        gpu_last_error = 0, gpu_end = GPU_END_NONE;
+        if (!w || !h || !gpu_idle())
+                return false;
+        gpu_slot_take(), a = GPU_ARGS;
+        a->s = s, a->d = d, a->g = g, a->sp = sp, a->dp = dp, a->gp = gp, a->w = w, a->op = 3, a->v = light ? 1u : 0u, a->x0 = x0, a->y0 = y0, a->rows = h, a->tab = 0;
         return gpu_run();
 }
 

@@ -3049,6 +3049,28 @@ static void gpu_import_rows(void)
         check("gpu import: and the trim unmaps it and closes its handle, once, and no handle that was not there",
               gpu.imports == 0 && gpu_kernel_live() == 0 && gpu_kernel.closes == 1 && gpu_kernel.refused == 0);
 
+        // 4b (S2). The placer wraps: a freed address is handed to a second buffer. A release of the first buffer's address with the first's generation is a
+        // counted no-op on the second; the second's own generation releases it.
+        first = gpu_import_fd(GPU_KERNEL_DMABUF + 1, 8192);
+        {
+                unsigned int gen_first = gpu_import_gen(first), gen_other, stale = gpu_import_stale;
+
+                gpu_unimport(first, GPU_GONE_UNIMPORT);
+                gpu_map_next = first - GPU_IMPORT_GUARD; // the placer's next address is the freed one
+                other = gpu_import_fd(GPU_KERNEL_DMABUF + 2, 8192);
+                gen_other = gpu_import_gen(other);
+                check("gpu import (S2): the placer hands the freed address to a second buffer, under a generation of its own",
+                      other == first && gen_first != 0 && gen_other != 0 && gen_other != gen_first && gpu.imports == 1);
+                gpu_release_import_gen(first, gen_first);
+                check("gpu import (S2): a stale release with the first buffer's generation is a no-op on the second, and counted",
+                      gpu.imports == 1 && !gpu.imported_dead[0] && gpu.imported_holds[0] == 1 && gpu_import_stale == stale + 1);
+                gpu_release_import_gen(other, gen_other);
+                check("gpu import (S2): the second buffer's own release, with its generation, releases it", gpu.imports == 1 && gpu.imported_dead[0]);
+                for (unsigned int t = 0; t < GPU_IMPORT_GRACE; t++)
+                        gpu_trim();
+                check("gpu import (S2): and the trim unmaps it once", gpu.imports == 0 && gpu_kernel_live() == 0 && gpu_kernel.refused == 0);
+        }
+
         // 5. A scanout's buffer (the display node's handle 7) asked for twice: one import, and the first let go of leaves the second its map.
         first = gpu_import(GPU_KERNEL_CARD, 7, 16384);
         again = gpu_import(GPU_KERNEL_CARD, 7, 16384);
