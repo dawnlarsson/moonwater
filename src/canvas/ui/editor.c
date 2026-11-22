@@ -38,7 +38,9 @@ static struct
         struct ui_control strip;
         struct ui_view view;
         struct ui_rect find_box, text_box;
-        int pill_box[4], pill_wrap[4], pill_text[4], pill_hex[4], pill_hover;
+        int pill_box[4], pill_text[4], pill_hex[4], pill_hover;
+        struct ui_control wrap_chip;
+        b32 wrap_shown;
         b32 pill_down;
         char bar_text[256], status[160];
         struct ui_popup menu;
@@ -884,7 +886,7 @@ static fn editor_pill_draw(struct ui address_to ui, struct editor_tab address_to
         struct ui_box box, seg_box;
 
         memory_zero(editor.pill_box, sizeof(editor.pill_box));
-        memory_zero(editor.pill_wrap, sizeof(editor.pill_wrap));
+        editor.wrap_shown = false;
         memory_zero(editor.pill_text, sizeof(editor.pill_text));
         memory_zero(editor.pill_hex, sizeof(editor.pill_hex));
         if (max_w < btns_w + 2 * pad_x || editor.text_box.h < ph + 2 * margin_b)
@@ -921,15 +923,15 @@ static fn editor_pill_draw(struct ui address_to ui, struct editor_tab address_to
         cy = py + (ph - chip_h) / 2;
         if (wrap_w > 0)
         {
-                struct ui_box wb = ui_box_px(cx, cy, wrap_w, chip_h, chip_h * 128);
-                unsigned int wfill = tab->view.wrap ? ui_role(UI_PRIMARY)
-                                                    : editor.pill_hover == 1 ? ui_tone(ui_role(UI_ON_SURFACE) & 0xffffffu, 26) : 0;
-                unsigned int wink = tab->view.wrap ? ui_role(UI_ON_PRIMARY) : ui_text_colour(ui, UI_ON_SURFACE_VARIANT);
+                // The Wrap chip is the kit's UI_BUTTON_CHIP, placed by hand as osk.c places its keys: logical units, drawn on top.
+                struct ui_control address_to c = &editor.wrap_chip;
 
-                editor.pill_wrap[0] = cx, editor.pill_wrap[1] = cy, editor.pill_wrap[2] = wrap_w, editor.pill_wrap[3] = chip_h;
-                if (wfill)
-                        ui_kit_fill(ui, &wb, wfill, null);
-                ui_kit_text(ui, cx + chip_px, baseline, (string_address)wrap_lbl, UI_LABEL_MEDIUM, wink, 0);
+                if (c->kind != UI_BUTTON)
+                        c->kind = UI_BUTTON, c->variant = UI_BUTTON_CHIP, ui_control_start(c);
+                c->label = wrap_lbl, c->on = tab->view.wrap;
+                c->x = cx * 100 / ui->scale, c->y = cy * 100 / ui->scale, c->w = wrap_w * 100 / ui->scale, c->h = 20;
+                editor.wrap_shown = true;
+                ui_control_draw(ui, c);
                 cx += wrap_w + gap;
         }
         // Fixed-position segmented [ Text | Hex ] tab switcher pinned to the right edge of the pill.
@@ -972,10 +974,11 @@ static b32 editor_pill_event(struct editor_tab address_to tab, const struct wind
         }
         if (event->type == WINDOW_EVENT_MOTION)
         {
-                int hover = editor_pill_in(editor.pill_wrap, event->a, event->b) ? 1
-                            : editor_pill_in(editor.pill_text, event->a, event->b) ? 2
+                int hover = editor_pill_in(editor.pill_text, event->a, event->b) ? 2
                             : editor_pill_in(editor.pill_hex, event->a, event->b) ? 3 : 0;
 
+                if (editor.wrap_shown)
+                        ui_kit_pointer(&editor.ui, &editor.wrap_chip, 1, WINDOW_EVENT_MOTION, event->a, event->b, false, event->flags);
                 if (hover)
                         ui_kit_shape = WINDOW_POINTER_HAND;
                 if (hover != editor.pill_hover)
@@ -984,14 +987,16 @@ static b32 editor_pill_event(struct editor_tab address_to tab, const struct wind
         }
         if (event->type == WINDOW_EVENT_BUTTON && (p32)event->a == UI_POINTER_LEFT)
         {
+                // The kit reports a chip click on its release: the press and the release both go to the chip first.
+                if (editor.wrap_shown && ui_kit_pointer(&editor.ui, &editor.wrap_chip, 1, WINDOW_EVENT_BUTTON, ui_kit.pointer_x,
+                                                        ui_kit.pointer_y, (event->flags & WINDOW_KEY_DOWN) != 0, event->flags) == &editor.wrap_chip)
+                        return editor.pill_down = false, editor_toggle((int)DOC_CMD_WRAP);
                 if (event->flags & WINDOW_KEY_DOWN)
                 {
                         if (!editor_pill_in(editor.pill_box, ui_kit.pointer_x, ui_kit.pointer_y))
                                 return false;
                         editor.pill_down = true;
-                        if (editor_pill_in(editor.pill_wrap, ui_kit.pointer_x, ui_kit.pointer_y))
-                                editor_toggle((int)DOC_CMD_WRAP);
-                        else if (editor_pill_in(editor.pill_text, ui_kit.pointer_x, ui_kit.pointer_y) && tab->view.hex)
+                        if (editor_pill_in(editor.pill_text, ui_kit.pointer_x, ui_kit.pointer_y) && tab->view.hex)
                                 editor_toggle((int)DOC_CMD_HEX);
                         else if (editor_pill_in(editor.pill_hex, ui_kit.pointer_x, ui_kit.pointer_y) && !tab->view.hex)
                                 editor_toggle((int)DOC_CMD_HEX);
