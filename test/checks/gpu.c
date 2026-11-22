@@ -5197,18 +5197,21 @@ static void xwm_drag_gate_rows(void)
 // A Wayland client is asked for (its first window takes the keys) by the record root made for it or a forebear (windows_asked_record,
 // compositor_wl_asked, R-seams-13), never by its own environment: a child of this process is asked once this process records its ask, a record
 // of another start is no ask and is taken away, and a directory others may write is not read. Over a directory of the check's own.
-static void asked_record_rows(void)
+/*
+        The asked record (windows_asked_record, compositor_wl_asked), made and read by a child of the check's: the gate runs the check as its pid
+        namespace's pid 1, where the forebears' walk ends by design (a walk from init has no client), so the recorder is the check's child and the
+        client its grandchild. The child says what it saw in one byte on a pipe, a bit a row, and the check holds the bits.
+*/
+static unsigned int asked_record_probe(void)
 {
         static char dir[48] = "/tmp/mw-asked-check-";
-        const char *kept_dir = windows_asked_dir;
-        unsigned int me = (unsigned int)compositor_call(syscall(getpid), 0, 0, 0, 0, 0, 0), parent = 0, at = 20;
+        unsigned int me = (unsigned int)compositor_call(syscall(getpid), 0, 0, 0, 0, 0, 0), parent = 0, at = 20, bits = 0;
         unsigned long start = windows_proc_stat(me, &parent);
-        int saved_started = compositor_wl.started, pipe_ends[2] = {-1, -1}, saved_pid;
+        int pipe_ends[2] = {-1, -1};
         long child;
         char path[64];
-        b32 stat_ok, none, self, descendant, stale, gone, open_dir;
 
-        stat_ok = start > 0 && parent == (unsigned int)compositor_call(syscall(getppid), 0, 0, 0, 0, 0, 0);
+        bits |= (start > 0 && parent == (unsigned int)compositor_call(syscall(getppid), 0, 0, 0, 0, 0, 0)) << 0;
         for (unsigned int copy = me, digits = 0, index; ; )
         {
                 for (unsigned int c = copy; c; c /= 10)
@@ -5222,7 +5225,6 @@ static void asked_record_rows(void)
         windows_asked_dir = dir;
         compositor_wl.started = 1;
         (void)compositor_wl_slots_reach(1);
-        saved_pid = compositor_wl.pid[0];
         compositor_call(syscall(pipe2), (positive)pipe_ends, 0x80000, 0, 0, 0, 0);
         child = (long)system_fork();
         if (child == 0)
@@ -5234,12 +5236,12 @@ static void asked_record_rows(void)
                 system_call_1(syscall(exit_group), 0);
         }
         compositor_wl.pid[0] = (int)child;
-        none = !compositor_wl_asked(0);
+        bits |= (unsigned int)!compositor_wl_asked(0) << 1; // none
         windows_asked_record();
         compositor_wl.pid[0] = (int)me;
-        self = compositor_wl_asked(0);
+        bits |= (unsigned int)!!compositor_wl_asked(0) << 2; // self
         compositor_wl.pid[0] = (int)child;
-        descendant = compositor_wl_asked(0);
+        bits |= (unsigned int)!!compositor_wl_asked(0) << 3; // descendant
         windows_asked_path(path, me);
         {
                 long handle = (long)system_open_at(AT_FDCWD, (string_address)path, FILE_WRITE | O_TRUNC | O_CLOEXEC);
@@ -5247,20 +5249,44 @@ static void asked_record_rows(void)
                 if (handle >= 0)
                         compositor_call(syscall(write), (positive)handle, (positive) "7\n", 2, 0, 0, 0), system_close((int)handle);
         }
-        stale = !compositor_wl_asked(0);
-        gone = system_open_at(AT_FDCWD, (string_address)path, FILE_READ | O_CLOEXEC) < 0;
+        bits |= (unsigned int)!compositor_wl_asked(0) << 4; // stale
+        bits |= (unsigned int)(system_open_at(AT_FDCWD, (string_address)path, FILE_READ | O_CLOEXEC) < 0) << 5; // gone
         windows_asked_record();
         compositor_call(syscall(fchmodat), (positive)AT_FDCWD, (positive)dir, 0755, 0, 0, 0);
-        open_dir = !compositor_wl_asked(0);
-        check("asked: a client is asked by its forebear's record and by nothing of its own; a record of another start is no ask and is taken away; "
-              "a directory others may write is not read",
-              stat_ok && none && self && descendant && stale && gone && open_dir);
+        bits |= (unsigned int)!compositor_wl_asked(0) << 6; // a directory others may read
         system_close(pipe_ends[1]), system_close(pipe_ends[0]);
         if (child > 0)
                 system_wait4_retry((bipolar)child, null, 0, null);
         compositor_call(syscall(unlinkat), (positive)AT_FDCWD, (positive)path, 0, 0, 0, 0);
         compositor_call(syscall(unlinkat), (positive)AT_FDCWD, (positive)dir, 0x200, 0, 0, 0); // AT_REMOVEDIR
-        compositor_wl.pid[0] = saved_pid, compositor_wl.started = saved_started, windows_asked_dir = kept_dir;
+        return bits;
+}
+
+static void asked_record_rows(void)
+{
+        int ends[2] = {-1, -1};
+        unsigned char bits = 0;
+        long prober;
+
+        compositor_call(syscall(pipe2), (positive)ends, 0x80000, 0, 0, 0, 0);
+        prober = (long)system_fork();
+        if (prober == 0)
+        {
+                unsigned char said = (unsigned char)asked_record_probe();
+
+                system_close(ends[0]);
+                system_write_once(ends[1], &said, 1);
+                system_call_1(syscall(exit_group), 0);
+        }
+        system_close(ends[1]);
+        if (prober > 0 && system_read_once(ends[0], &bits, 1) != 1)
+                bits = 0;
+        system_close(ends[0]);
+        if (prober > 0)
+                system_wait4_retry((bipolar)prober, null, 0, null);
+        check("asked: a client is asked by its forebear's record and by nothing of its own; a record of another start is no ask and is taken away; "
+              "a directory others may write is not read",
+              bits == 0x7f);
 }
 
 // The X window manager's socket (xwm.c, S-c3-2): one connection for each wrapper (a second from the same pid takes the first one's place), and a
