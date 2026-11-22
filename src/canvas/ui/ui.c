@@ -7620,7 +7620,7 @@ static inline p32 ui_font_flags(const struct ui address_to ui, const font_face a
 }
 
 // Bidirectional text in the kit's runs.
-#define UI_BIDI_MOST 1024 // the code points of a paragraph whose islands are found: a longer one is laid out by the engine's UAX #9 alone
+#define UI_BIDI_MOST FONT_PARA // the code points of a paragraph whose islands are found (the engine's limit: a longer one is laid out by UAX #9 alone)
 #define UI_BIDI_ROOM 3072 // the bytes of a run with its islands' marks: a run whose marks do not fit is laid out by UAX #9 alone
 #define UI_BIDI_DEEP 128  // the explicit marks open at once that are followed (UAX #9's 125, and room past it)
 #define UI_BIDI_PAIRS 63  // BD16's stack: a paragraph with more brackets open than this pairs none past them
@@ -7645,188 +7645,43 @@ static struct
         char shown[UI_BIDI_ROOM]; // a run with its islands' marks
 } ui_bidi;
 
-// A code point of a script that reads from the right, whatever its class:
-static inline b32 ui_bidi_right_script(p32 code)
-{
-        return (code >= 0x590 && code < 0x900) || (code >= 0xfb1d && code < 0xfe00) || (code >= 0xfe70 && code < 0xfeff) ||
-               (code >= 0x10800 && code < 0x11000) || (code >= 0x1e800 && code < 0x1f000);
-}
-
-// A quotation mark, which pairs with another by no rule of UAX #9: an island never takes one in at its start.
-static inline b32 ui_bidi_quote(p32 code)
-{
-        return code == '"' || code == '\'' || code == 0xab || code == 0xbb || (code >= 0x2018 && code <= 0x201f) || code == 0x2039 || code == 0x203a;
-}
-
-// What may start a word before an island's prefix: the paragraph's start, a blank, a separator, an opening bracket or a quotation mark.
-static b32 ui_bidi_word_start(p32 i)
-{
-        p32 partner;
-        p8 opens = 0;
-        return !i || ui_bidi.type[i - 1] == FONT_BIDI_WS || ui_bidi.type[i - 1] == FONT_BIDI_S || ui_bidi.type[i - 1] == FONT_BIDI_B ||
-               ui_bidi_quote(ui_bidi.code[i - 1]) || (font_bracket(ui_bidi.code[i - 1], &partner, &opens) && opens);
-}
-
-// Reads the paragraph of length bytes at text into ui_bidi:
+// Reads the paragraph of length bytes at text into ui_bidi: each code point, its class and its kind (font_bidi_classify,
+// which the islands are found from). Answers whether the paragraph reads from the right (or has no strong character).
 static b32 ui_bidi_read(const char address_to text, positive length)
 {
-        p8 stack[UI_BIDI_DEEP];
-        p32 depth = 0, over = 0, isolates = 0, n = 0, before = 0;
+        p32 n = 0, isolates = 0;
         b32 left = false, right = false;
+
         for (positive at = 0; at < length;)
         {
-                p32 code, type, kind = 0;
+                p32 code, type;
                 positive next = font_decode((const p8 address_to)text, length, at, &code);
+
                 type = font_bidi_class(code);
-                if (type >= FONT_BIDI_LRE)
-                {
-                        // An explicit mark: inside what it closes, and opening what it opens.
-                        if (type == FONT_BIDI_PDI && isolates)
-                        {
-                                if (over)
-                                        over--;
-                                else
-                                {
-                                        while (depth && !stack[depth - 1])
-                                                depth--;
-                                        depth -= depth > 0;
-                                }
-                                isolates--;
-                        }
-                        else if (type == FONT_BIDI_PDF && (over || (depth && !stack[depth - 1])))
-                                over ? over-- : depth--;
-                        kind = UI_BIDI_INSIDE | UI_BIDI_BREAK | (isolates ? UI_BIDI_SHUT : 0);
-                        if (type != FONT_BIDI_PDI && type != FONT_BIDI_PDF)
-                        {
-                                if (depth < UI_BIDI_DEEP)
-                                        stack[depth++] = (p8)font_bidi_initiator(type);
-                                else
-                                        over++;
-                                isolates += font_bidi_initiator(type);
-                        }
-                }
-                else if (depth || over)
-                        kind = UI_BIDI_INSIDE | UI_BIDI_BREAK | (isolates ? UI_BIDI_SHUT : 0);
-                else if (type == FONT_BIDI_R || type == FONT_BIDI_AL || type == FONT_BIDI_AN || type == FONT_BIDI_B || type == FONT_BIDI_S ||
-                         ui_bidi_right_script(code))
-                        kind = UI_BIDI_BREAK;
-                else if (type == FONT_BIDI_L && code != 0x200e)
-                        kind = UI_BIDI_LETTER;
-                else if (type == FONT_BIDI_EN)
-                        kind = UI_BIDI_DIGIT;
-                else if (type == FONT_BIDI_NSM || type == FONT_BIDI_BN)
-                        kind = before & (UI_BIDI_BREAK | UI_BIDI_LETTER | UI_BIDI_DIGIT); // a mark or a joiner goes with what it is on
+                if (type == FONT_BIDI_PDI && isolates)
+                        isolates--;
+                else if (font_bidi_initiator(type))
+                        isolates++;
                 right |= !isolates && (type == FONT_BIDI_R || type == FONT_BIDI_AL);
                 left |= !isolates && type == FONT_BIDI_L;
                 if (n < UI_BIDI_MOST)
                 {
-                        ui_bidi.code[n] = code, ui_bidi.at[n] = (p16)at, ui_bidi.type[n] = (p8)type, ui_bidi.kind[n] = (p8)kind;
+                        ui_bidi.code[n] = code, ui_bidi.at[n] = (p16)at, ui_bidi.type[n] = (p8)type;
                         ui_bidi.at[n + 1] = (p16)next;
                 }
-                n++, before = kind, at = next;
+                n++, at = next;
         }
         ui_bidi.n = n <= UI_BIDI_MOST ? n : 0;
+        if (ui_bidi.n)
+                font_bidi_classify(ui_bidi.code, ui_bidi.type, ui_bidi.kind, ui_bidi.n);
         return right || !left;
 }
 
 // The islands of the paragraph in ui_bidi (one that reads from the right), each code point of them marked UI_BIDI_ISLAND:
+// font_bidi_islands, which the engine's own layout runs on the same kinds.
 static b32 ui_bidi_islands(void)
 {
-        p32 n = ui_bidi.n, open = 0;
-        p16 opened[UI_BIDI_PAIRS];
-        b32 any = false;
-        ui_bidi.breaks[0] = 0;
-        for (p32 i = 0; i < n; i++)
-        {
-                ui_bidi.pair[i] = UI_BIDI_MOST;
-                ui_bidi.breaks[i + 1] = (p16)(ui_bidi.breaks[i] + (ui_bidi.kind[i] & UI_BIDI_BREAK ? 1 : 0));
-        }
-        for (p32 i = 0; i < n; i++)
-        {
-                p32 partner;
-                p8 opens = 0;
-                if ((ui_bidi.kind[i] & UI_BIDI_INSIDE) || ui_bidi.type[i] != FONT_BIDI_ON || !font_bracket(ui_bidi.code[i], &partner, &opens))
-                        continue;
-                if (opens)
-                {
-                        if (open == UI_BIDI_PAIRS)
-                                break;
-                        opened[open++] = (p16)i;
-                        continue;
-                }
-                for (p32 k = open; k-- > 0;)
-                {
-                        p32 wanted;
-                        p8 opening = 0;
-                        font_bracket(ui_bidi.code[opened[k]], &wanted, &opening);
-                        if (wanted == font_bracket_form(ui_bidi.code[i]))
-                        {
-                                ui_bidi.pair[opened[k]] = (p16)i, ui_bidi.pair[i] = opened[k];
-                                open = k;
-                                break;
-                        }
-                }
-        }
-        for (p32 i = 0; i < n; i++)
-                if (ui_bidi.pair[i] > i && ui_bidi.pair[i] < n && ui_bidi.breaks[ui_bidi.pair[i]] != ui_bidi.breaks[i + 1])
-                        ui_bidi.kind[i] |= UI_BIDI_BREAK, ui_bidi.kind[ui_bidi.pair[i]] |= UI_BIDI_BREAK;
-        // Each span between what ends an island is one island where it has a Latin letter: from its first letter or digit to its last.
-        for (p32 start = 0; start < n;)
-        {
-                p32 stop = start, first = n, last = 0;
-                b32 letter = false;
-                if (ui_bidi.kind[start] & UI_BIDI_BREAK)
-                {
-                        start++;
-                        continue;
-                }
-                for (; stop < n && !(ui_bidi.kind[stop] & UI_BIDI_BREAK); stop++)
-                        if (ui_bidi.kind[stop] & (UI_BIDI_LETTER | UI_BIDI_DIGIT))
-                        {
-                                first = first == n ? stop : first, last = stop;
-                                letter |= (ui_bidi.kind[stop] & UI_BIDI_LETTER) != 0;
-                        }
-                if (letter)
-                {
-                        p32 from = first;
-                        b32 grown = true;
-                        // A prefix glued to the first at a word's start: punctuation that is no bracket and no quotation mark.
-                        while (from > start && !ui_bidi.kind[from - 1])
-                        {
-                                p32 type = ui_bidi.type[from - 1], partner;
-                                p8 opens = 0;
-                                if ((type != FONT_BIDI_ES && type != FONT_BIDI_ET && type != FONT_BIDI_CS && type != FONT_BIDI_ON) ||
-                                    ui_bidi_quote(ui_bidi.code[from - 1]) || font_bracket(ui_bidi.code[from - 1], &partner, &opens))
-                                        break;
-                                from--;
-                        }
-                        first = from < first && ui_bidi_word_start(from) ? from : first;
-                        // A suffix glued to the last: number signs and slashes.
-                        while (last + 1 < stop && !ui_bidi.kind[last + 1] &&
-                               (ui_bidi.type[last + 1] == FONT_BIDI_ES || ui_bidi.type[last + 1] == FONT_BIDI_ET || ui_bidi.code[last + 1] == '/' ||
-                                ui_bidi.code[last + 1] == '\\'))
-                                last++;
-                        // A bracket pair is never split: one bracket in, the other comes in too, and what is between them.
-                        while (grown)
-                        {
-                                grown = false;
-                                for (p32 i = start; i < stop; i++)
-                                {
-                                        p32 other = ui_bidi.pair[i];
-                                        if (other >= n || (i >= first && i <= last) == (other >= first && other <= last))
-                                                continue;
-                                        first = i < first ? i : first, first = other < first ? other : first;
-                                        last = i > last ? i : last, last = other > last ? other : last;
-                                        grown = true;
-                                }
-                        }
-                        for (p32 i = first; i <= last; i++)
-                                ui_bidi.kind[i] |= UI_BIDI_ISLAND;
-                        any = true;
-                }
-                start = stop;
-        }
-        return any;
+        return font_bidi_islands(ui_bidi.code, ui_bidi.type, ui_bidi.kind, ui_bidi.pair, ui_bidi.breaks, ui_bidi.n);
 }
 
 // Writes a code point's bytes (or a mark's) into into at *used when they fit with the NUL and keep more bytes after them: false when not.

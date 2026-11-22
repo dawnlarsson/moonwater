@@ -1556,6 +1556,7 @@ static fn font_bidi_sequence(font_work address_to w, p32 m, p32 sos, p32 eos, p3
 #define FONT_ISO_DIGIT 4
 #define FONT_ISO_ISLAND 8
 #define FONT_ISO_INSIDE 32
+#define FONT_ISO_SHUT 16 // inside an explicit isolate: read by the kit's islands, not by font
 
 static inline p8 font_bidi_right_script(p32 code)
 {
@@ -1569,27 +1570,26 @@ static inline p8 font_bidi_quote(p32 code)
                code == 0x2039 || code == 0x203a;
 }
 
-static p8 font_bidi_word_start(const font_work address_to w, p32 i)
+static p8 font_bidi_word_start(const p32 address_to code, const p8 address_to orig, p32 i)
 {
         p32 partner;
         p8 opens = 0;
 
-        return !i || w->orig[i - 1] == FONT_BIDI_WS || w->orig[i - 1] == FONT_BIDI_S || w->orig[i - 1] == FONT_BIDI_B ||
-               font_bidi_quote(w->code[i - 1]) || (font_bracket(w->code[i - 1], &partner, &opens) && opens);
+        return !i || orig[i - 1] == FONT_BIDI_WS || orig[i - 1] == FONT_BIDI_S || orig[i - 1] == FONT_BIDI_B ||
+               font_bidi_quote(code[i - 1]) || (font_bracket(code[i - 1], &partner, &opens) && opens);
 }
 
-//      LTR Latin islands inside an RTL paragraph, marked with FONT_ISO_ISLAND in w->action[0..n-1]
-//      (uses w->pair and w->run_start as scratch before X9/X10). Matches ui_bidi_islands semantics.
-static p8 font_bidi_islands(font_work address_to w, p32 n)
+//      The explicit marks, the separators and the runs of their classes, as one kind a code point is: the classification
+//      the islands are found from. A code point inside an explicit isolate (or an embedding one) is INSIDE and BREAK, and
+//      with SHUT when it is inside an isolate (UI_BIDI_SHUT's rule, which the kit reads from the same kinds).
+static void font_bidi_classify(const p32 address_to code, const p8 address_to orig, p8 address_to action, p32 n)
 {
         p8 stack[FONT_STACK + 3];
-        p16 opened[63];
-        p32 depth = 0, over = 0, isolates = 0, before = 0, open = 0;
-        p8 any = false;
+        p32 depth = 0, over = 0, isolates = 0, before = 0;
 
         for (p32 i = 0; i < n; i++)
         {
-                p32 code = w->code[i], type = w->orig[i], kind = 0;
+                p32 code_at = code[i], type = orig[i], kind = 0;
 
                 if (type >= FONT_BIDI_LRE)
                 {
@@ -1607,7 +1607,7 @@ static p8 font_bidi_islands(font_work address_to w, p32 n)
                         }
                         else if (type == FONT_BIDI_PDF && (over || (depth && !stack[depth - 1])))
                                 over ? over-- : depth--;
-                        kind = FONT_ISO_INSIDE | FONT_ISO_BREAK;
+                        kind = FONT_ISO_INSIDE | FONT_ISO_BREAK | (isolates ? FONT_ISO_SHUT : 0);
                         if (type != FONT_BIDI_PDI && type != FONT_BIDI_PDF)
                         {
                                 if (depth < FONT_STACK + 3)
@@ -1618,32 +1618,44 @@ static p8 font_bidi_islands(font_work address_to w, p32 n)
                         }
                 }
                 else if (depth || over)
-                        kind = FONT_ISO_INSIDE | FONT_ISO_BREAK;
+                        kind = FONT_ISO_INSIDE | FONT_ISO_BREAK | (isolates ? FONT_ISO_SHUT : 0);
                 else if (type == FONT_BIDI_R || type == FONT_BIDI_AL || type == FONT_BIDI_AN || type == FONT_BIDI_B ||
-                         type == FONT_BIDI_S || font_bidi_right_script(code))
+                         type == FONT_BIDI_S || font_bidi_right_script(code_at))
                         kind = FONT_ISO_BREAK;
-                else if (type == FONT_BIDI_L && code != 0x200e)
+                else if (type == FONT_BIDI_L && code_at != 0x200e)
                         kind = FONT_ISO_LETTER;
                 else if (type == FONT_BIDI_EN)
                         kind = FONT_ISO_DIGIT;
                 else if (type == FONT_BIDI_NSM || type == FONT_BIDI_BN)
                         kind = before & (FONT_ISO_BREAK | FONT_ISO_LETTER | FONT_ISO_DIGIT);
-                w->action[i] = (p8)kind;
+                action[i] = (p8)kind;
                 before = kind;
         }
-        w->run_start[0] = 0;
+}
+
+//      LTR Latin islands inside an RTL paragraph, marked with FONT_ISO_ISLAND in action[0..n-1], which font_bidi_classify
+//      has classified (uses pair and run_start as scratch before X9/X10). The kit's islands are these: ui_bidi_islands
+//      was this function, and reads the same kinds. Answers whether any island was found.
+static b32 font_bidi_islands(const p32 address_to code, const p8 address_to orig, p8 address_to action, p16 address_to pair,
+                             p16 address_to run_start, p32 n)
+{
+        p16 opened[63];
+        p32 open = 0;
+        p8 any = false;
+
+        run_start[0] = 0;
         for (p32 i = 0; i < n; i++)
         {
-                w->pair[i] = (p16)n;
-                w->run_start[i + 1] = (p16)(w->run_start[i] + ((w->action[i] & FONT_ISO_BREAK) ? 1 : 0));
+                pair[i] = (p16)n;
+                run_start[i + 1] = (p16)(run_start[i] + ((action[i] & FONT_ISO_BREAK) ? 1 : 0));
         }
         for (p32 i = 0; i < n; i++)
         {
                 p32 partner;
                 p8 opens = 0;
 
-                if ((w->action[i] & FONT_ISO_INSIDE) || w->orig[i] != FONT_BIDI_ON ||
-                    !font_bracket(w->code[i], &partner, &opens))
+                if ((action[i] & FONT_ISO_INSIDE) || orig[i] != FONT_BIDI_ON ||
+                    !font_bracket(code[i], &partner, &opens))
                         continue;
                 if (opens)
                 {
@@ -1657,61 +1669,61 @@ static p8 font_bidi_islands(font_work address_to w, p32 n)
                         p32 wanted;
                         p8 opening = 0;
 
-                        font_bracket(w->code[opened[k]], &wanted, &opening);
-                        if (wanted == font_bracket_form(w->code[i]))
+                        font_bracket(code[opened[k]], &wanted, &opening);
+                        if (wanted == font_bracket_form(code[i]))
                         {
-                                w->pair[opened[k]] = (p16)i, w->pair[i] = opened[k];
+                                pair[opened[k]] = (p16)i, pair[i] = opened[k];
                                 open = k;
                                 break;
                         }
                 }
         }
         for (p32 i = 0; i < n; i++)
-                if (w->pair[i] > i && w->pair[i] < n && w->run_start[w->pair[i]] != w->run_start[i + 1])
-                        w->action[i] |= FONT_ISO_BREAK, w->action[w->pair[i]] |= FONT_ISO_BREAK;
+                if (pair[i] > i && pair[i] < n && run_start[pair[i]] != run_start[i + 1])
+                        action[i] |= FONT_ISO_BREAK, action[pair[i]] |= FONT_ISO_BREAK;
         for (p32 start = 0; start < n;)
         {
                 p32 stop = start, first = n, last = 0;
                 p8 letter = false;
 
-                if (w->action[start] & FONT_ISO_BREAK)
+                if (action[start] & FONT_ISO_BREAK)
                 {
                         start++;
                         continue;
                 }
-                for (; stop < n && !(w->action[stop] & FONT_ISO_BREAK); stop++)
-                        if (w->action[stop] & (FONT_ISO_LETTER | FONT_ISO_DIGIT))
+                for (; stop < n && !(action[stop] & FONT_ISO_BREAK); stop++)
+                        if (action[stop] & (FONT_ISO_LETTER | FONT_ISO_DIGIT))
                         {
                                 first = first == n ? stop : first, last = stop;
-                                letter |= (w->action[stop] & FONT_ISO_LETTER) != 0;
+                                letter |= (action[stop] & FONT_ISO_LETTER) != 0;
                         }
                 if (letter)
                 {
                         p32 from = first;
                         p8 grown = true;
 
-                        while (from > start && !w->action[from - 1])
+                        while (from > start && !action[from - 1])
                         {
-                                p32 type = w->orig[from - 1], partner;
+                                p32 type = orig[from - 1], partner;
                                 p8 opens = 0;
 
                                 if ((type != FONT_BIDI_ES && type != FONT_BIDI_ET && type != FONT_BIDI_CS &&
-                                     type != FONT_BIDI_ON) || font_bidi_quote(w->code[from - 1]) ||
-                                    font_bracket(w->code[from - 1], &partner, &opens))
+                                     type != FONT_BIDI_ON) || font_bidi_quote(code[from - 1]) ||
+                                    font_bracket(code[from - 1], &partner, &opens))
                                         break;
                                 from--;
                         }
-                        first = from < first && font_bidi_word_start(w, from) ? from : first;
-                        while (last + 1 < stop && !w->action[last + 1] &&
-                               (w->orig[last + 1] == FONT_BIDI_ES || w->orig[last + 1] == FONT_BIDI_ET ||
-                                w->code[last + 1] == '/' || w->code[last + 1] == '\\'))
+                        first = from < first && font_bidi_word_start(code, orig, from) ? from : first;
+                        while (last + 1 < stop && !action[last + 1] &&
+                               (orig[last + 1] == FONT_BIDI_ES || orig[last + 1] == FONT_BIDI_ET ||
+                                code[last + 1] == '/' || code[last + 1] == '\\'))
                                 last++;
                         while (grown)
                         {
                                 grown = false;
                                 for (p32 i = start; i < stop; i++)
                                 {
-                                        p32 other = w->pair[i];
+                                        p32 other = pair[i];
 
                                         if (other >= n || (i >= first && i <= last) == (other >= first && other <= last))
                                                 continue;
@@ -1721,7 +1733,7 @@ static p8 font_bidi_islands(font_work address_to w, p32 n)
                                 }
                         }
                         for (p32 i = first; i <= last; i++)
-                                w->action[i] |= FONT_ISO_ISLAND;
+                                action[i] |= FONT_ISO_ISLAND;
                         any = true;
                 }
                 start = stop;
@@ -1778,7 +1790,9 @@ static p32 font_bidi(font_work address_to w, p32 n, p32 direction)
 
                 para = strong < 0 ? direction - 2 : (p32)strong;
         }
-        has_islands = isolate_latin && para == 1 && font_bidi_islands(w, n);
+        has_islands = isolate_latin && para == 1;
+        if (has_islands)
+                font_bidi_classify(w->code, w->orig, w->action, n), has_islands = font_bidi_islands(w->code, w->orig, w->action, w->pair, w->run_start, n);
 
         //      X1 to X8.
         stack[0].level = (p8)para;
