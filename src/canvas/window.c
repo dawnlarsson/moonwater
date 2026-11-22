@@ -452,6 +452,9 @@ struct windows
         unsigned int least_width[WINDOWS], least_height[WINDOWS], most_width[WINDOWS], most_height[WINDOWS];
         signed char layer[WINDOWS];
         unsigned int close_asks[WINDOWS];
+        /* A close request from this row's program: close_target is the target row plus one (0 is none), and close_target_serial
+           counts the requests. The compositor reads the serial once per take and checks the request itself. */
+        unsigned int close_target[WINDOWS], close_target_serial[WINDOWS];
         char app_id[WINDOWS][WINDOWS_APP_ID];
         unsigned int client_row_copies[WINDOWS][4], icon_seq[WINDOWS], icon[WINDOWS][WINDOWS_ICON * WINDOWS_ICON];
         char starting[WINDOWS_STARTING][WINDOWS_APP_ID];
@@ -2240,7 +2243,7 @@ static void windows_reset_row(struct windows *table, unsigned int row)
         windows_identity_clear(table, row);
         table->event_tail[row] = __atomic_load_n(&table->event_head[row], __ATOMIC_ACQUIRE);
         __atomic_store_n(&table->osk_tail[row], __atomic_load_n(&table->osk_head[row], __ATOMIC_ACQUIRE), __ATOMIC_RELEASE);
-        Z(close_asks[row]); Z(window_scale[row]); Z(field[row]); Z(pointer_shape[row]);
+        Z(close_asks[row]); Z(close_target[row]); Z(close_target_serial[row]); Z(window_scale[row]); Z(field[row]); Z(pointer_shape[row]);
         Z(lift[row]); Z(page[row]); Z(hover_off[row]); Z(pinch_wanted[row]);
         Z(spoiled_height[row][0]); Z(spoiled_height[row][1]); Z(moved[row]); Z(clip_watch[row]);
         Z(drop_ok[row]); Z(shown[row]); Z(frame[row]);
