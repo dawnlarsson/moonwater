@@ -212,29 +212,29 @@ menu_delete	1e3e	حذف
 menu_find	1fa6	جستجو
 menu_go_to_line	bc96	رفتن به سطر
 menu_hex_mode	74bf	ویرایشگر هگز
-menu_new_folder	41cb	پوشه &جدید
+menu_new_folder	41cb	پوشه جدید
 menu_new_tab	ecfa	زبانه جدید
 menu_new_window	c3db	پنجره جدید
-menu_open	61a5	&باز کردن
-menu_open_editor	8ca0	باز کردن در &ویرایشگر
+menu_open	61a5	باز کردن
+menu_open_editor	8ca0	باز کردن در ویرایشگر
 menu_open_file	af39	باز کردن فایل...
-menu_open_terminal	6d2a	باز کردن &پایانه در اینجا
+menu_open_terminal	6d2a	باز کردن پایانه در اینجا
 menu_paste	6854	چسباندن
-menu_properties	c780	&ویژگی‌ها
+menu_properties	c780	ویژگی‌ها
 menu_redo	ac45	انجام دوباره
 menu_remove	901d	حذف
-menu_rename	9529	&تغییر نام
+menu_rename	9529	تغییر نام
 menu_reset_zoom	1b0f	بازنشانی بزرگ‌نمایی
 menu_save_as	7bbe	ذخیره به نام...
 menu_select_all	f6f6	انتخاب همه
-menu_set_wallpaper	1a27	تنظیم به عنوان &پس‌زمینه
+menu_set_wallpaper	1a27	تنظیم به عنوان پس‌زمینه
 menu_set_wallpaper_of	aa60	تنظیم به عنوان پس‌زمینهٔ %s
-menu_show_hidden	37bd	نمایش پرونده‌های &پنهان
+menu_show_hidden	37bd	نمایش پرونده‌های پنهان
 menu_toggle_comment	92ac	تغییر وضعیت توضیح
 menu_undo	b9d3	واگرد
-menu_view_details	d3a1	&جزئیات
-menu_view_icons	57e8	&نمادهای بزرگ
-menu_view_list	4cc5	&فهرست
+menu_view_details	d3a1	جزئیات
+menu_view_icons	57e8	نمادهای بزرگ
+menu_view_list	4cc5	فهرست
 menu_word_wrap	db6f	شکست خودکار خط
 menu_zoom_in	5bcf	بزرگ‌نمایی
 menu_zoom_out	9234	کوچک‌نمایی

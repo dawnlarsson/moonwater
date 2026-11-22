@@ -215,7 +215,7 @@ menu_new_folder	41cb	&Nouveau dossier
 menu_new_tab	ecfa	Nouvel onglet
 menu_new_window	c3db	Nouvelle fenêtre
 menu_open	61a5	&Ouvrir
-menu_open_editor	8ca0	Ouvrir dans l'&éditeur
+menu_open_editor	8ca0	Ouvrir dans l'é&diteur
 menu_open_file	af39	Ouvrir un fichier...
 menu_open_terminal	6d2a	Ouvrir un &terminal ici
 menu_paste	6854	Co&ller

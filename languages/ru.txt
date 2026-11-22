@@ -211,29 +211,29 @@ menu_delete	1e3e	Удалить
 menu_find	1fa6	Найти
 menu_go_to_line	bc96	Перейти к строке
 menu_hex_mode	74bf	Hex-редактор
-menu_new_folder	41cb	&Новая папка
+menu_new_folder	41cb	Новая папка
 menu_new_tab	ecfa	Новая вкладка
 menu_new_window	c3db	Новое окно
-menu_open	61a5	&Открыть
-menu_open_editor	8ca0	Открыть в &редакторе
+menu_open	61a5	Открыть
+menu_open_editor	8ca0	Открыть в редакторе
 menu_open_file	af39	Открыть файл...
-menu_open_terminal	6d2a	Открыть &терминал здесь
+menu_open_terminal	6d2a	Открыть терминал здесь
 menu_paste	6854	Вставить
-menu_properties	c780	&Свойства
+menu_properties	c780	Свойства
 menu_redo	ac45	Повторить
 menu_remove	901d	Удалить
-menu_rename	9529	&Переименовать
+menu_rename	9529	Переименовать
 menu_reset_zoom	1b0f	Сбросить масштаб
 menu_save_as	7bbe	Сохранить как...
 menu_select_all	f6f6	Выделить всё
-menu_set_wallpaper	1a27	Сделать &обоями
+menu_set_wallpaper	1a27	Сделать обоями
 menu_set_wallpaper_of	aa60	Сделать обоями %s
-menu_show_hidden	37bd	Показать &скрытые файлы
+menu_show_hidden	37bd	Показать скрытые файлы
 menu_toggle_comment	92ac	Закомментировать/раскомментировать
 menu_undo	b9d3	Отменить
-menu_view_details	d3a1	&Таблица
-menu_view_icons	57e8	Крупные &значки
-menu_view_list	4cc5	&Список
+menu_view_details	d3a1	Таблица
+menu_view_icons	57e8	Крупные значки
+menu_view_list	4cc5	Список
 menu_word_wrap	db6f	Перенос строк
 menu_zoom_in	5bcf	Увеличить
 menu_zoom_out	9234	Уменьшить

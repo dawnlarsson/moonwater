@@ -212,29 +212,29 @@ menu_delete	1e3e	حذف کریں
 menu_find	1fa6	تلاش
 menu_go_to_line	bc96	لائن پر جائیں
 menu_hex_mode	74bf	ہیکس ایڈیٹر
-menu_new_folder	41cb	&نیا فولڈر
+menu_new_folder	41cb	نیا فولڈر
 menu_new_tab	ecfa	نیا ٹیب
 menu_new_window	c3db	نئی ونڈو
-menu_open	61a5	&کھولیں
-menu_open_editor	8ca0	&ایڈیٹر میں کھولیں
+menu_open	61a5	کھولیں
+menu_open_editor	8ca0	ایڈیٹر میں کھولیں
 menu_open_file	af39	فائل کھولیں...
-menu_open_terminal	6d2a	یہاں &ٹرمینل کھولیں
+menu_open_terminal	6d2a	یہاں ٹرمینل کھولیں
 menu_paste	6854	پیسٹ
-menu_properties	c780	&خصوصیات
+menu_properties	c780	خصوصیات
 menu_redo	ac45	دوبارہ کریں
 menu_remove	901d	ہٹائیں
-menu_rename	9529	نام &تبدیل کریں
+menu_rename	9529	نام تبدیل کریں
 menu_reset_zoom	1b0f	زوم بحال کریں
 menu_save_as	7bbe	بطور محفوظ کریں...
 menu_select_all	f6f6	سب منتخب کریں
-menu_set_wallpaper	1a27	&وال پیپر بنائیں
+menu_set_wallpaper	1a27	وال پیپر بنائیں
 menu_set_wallpaper_of	aa60	%s کا وال پیپر بنائیں
-menu_show_hidden	37bd	&پوشیدہ فائلیں دکھائیں
+menu_show_hidden	37bd	پوشیدہ فائلیں دکھائیں
 menu_toggle_comment	92ac	تبصرہ بدلیں
 menu_undo	b9d3	کالعدم کریں
-menu_view_details	d3a1	&تفصیل
-menu_view_icons	57e8	بڑے &آئیکن
-menu_view_list	4cc5	&فہرست
+menu_view_details	d3a1	تفصیل
+menu_view_icons	57e8	بڑے آئیکن
+menu_view_list	4cc5	فہرست
 menu_word_wrap	db6f	سطر لپیٹنا
 menu_zoom_in	5bcf	بڑا کریں
 menu_zoom_out	9234	چھوٹا کریں

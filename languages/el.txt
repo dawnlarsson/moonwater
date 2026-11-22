@@ -211,29 +211,29 @@ menu_delete	1e3e	Διαγραφή
 menu_find	1fa6	Εύρεση
 menu_go_to_line	bc96	Μετάβαση στη γραμμή
 menu_hex_mode	74bf	Επεξεργαστής Hex
-menu_new_folder	41cb	&Νέος φάκελος
+menu_new_folder	41cb	Νέος φάκελος
 menu_new_tab	ecfa	Νέα καρτέλα
 menu_new_window	c3db	Νέο παράθυρο
-menu_open	61a5	Ά&νοιγμα
-menu_open_editor	8ca0	Άνοιγμα στον &επεξεργαστή
+menu_open	61a5	Άνοιγμα
+menu_open_editor	8ca0	Άνοιγμα στον επεξεργαστή
 menu_open_file	af39	Άνοιγμα αρχείου...
-menu_open_terminal	6d2a	Άνοιγμα &τερματικού εδώ
+menu_open_terminal	6d2a	Άνοιγμα τερματικού εδώ
 menu_paste	6854	Επικόλληση
-menu_properties	c780	&Ιδιότητες
+menu_properties	c780	Ιδιότητες
 menu_redo	ac45	Επανάληψη
 menu_remove	901d	Αφαίρεση
-menu_rename	9529	&Μετονομασία
+menu_rename	9529	Μετονομασία
 menu_reset_zoom	1b0f	Επαναφορά ζουμ
 menu_save_as	7bbe	Αποθήκευση ως...
 menu_select_all	f6f6	Επιλογή όλων
-menu_set_wallpaper	1a27	Ορισμός ως &ταπετσαρία
+menu_set_wallpaper	1a27	Ορισμός ως ταπετσαρία
 menu_set_wallpaper_of	aa60	Ορισμός ως ταπετσαρία της %s
-menu_show_hidden	37bd	Εμφάνιση &κρυφών αρχείων
+menu_show_hidden	37bd	Εμφάνιση κρυφών αρχείων
 menu_toggle_comment	92ac	Εναλλαγή σχολίου
 menu_undo	b9d3	Αναίρεση
-menu_view_details	d3a1	&Λεπτομέρειες
-menu_view_icons	57e8	Μεγάλα &εικονίδια
-menu_view_list	4cc5	&Λίστα
+menu_view_details	d3a1	Λεπτομέρειες
+menu_view_icons	57e8	Μεγάλα εικονίδια
+menu_view_list	4cc5	Λίστα
 menu_word_wrap	db6f	Αναδίπλωση γραμμών
 menu_zoom_in	5bcf	Μεγέθυνση
 menu_zoom_out	9234	Σμίκρυνση

@@ -211,29 +211,29 @@ menu_delete	1e3e	Видалити
 menu_find	1fa6	Знайти
 menu_go_to_line	bc96	Перейти до рядка
 menu_hex_mode	74bf	Hex-редактор
-menu_new_folder	41cb	&Нова тека
+menu_new_folder	41cb	Нова тека
 menu_new_tab	ecfa	Нова вкладка
 menu_new_window	c3db	Нове вікно
-menu_open	61a5	&Відкрити
-menu_open_editor	8ca0	Відкрити в &редакторі
+menu_open	61a5	Відкрити
+menu_open_editor	8ca0	Відкрити в редакторі
 menu_open_file	af39	Відкрити файл...
-menu_open_terminal	6d2a	Відкрити &термінал тут
+menu_open_terminal	6d2a	Відкрити термінал тут
 menu_paste	6854	Вставити
-menu_properties	c780	&Властивості
+menu_properties	c780	Властивості
 menu_redo	ac45	Повторити
 menu_remove	901d	Вилучити
-menu_rename	9529	&Перейменувати
+menu_rename	9529	Перейменувати
 menu_reset_zoom	1b0f	Скинути масштаб
 menu_save_as	7bbe	Зберегти як...
 menu_select_all	f6f6	Вибрати все
-menu_set_wallpaper	1a27	Зробити &шпалерами
+menu_set_wallpaper	1a27	Зробити шпалерами
 menu_set_wallpaper_of	aa60	Зробити шпалерами %s
-menu_show_hidden	37bd	Показати &приховані файли
+menu_show_hidden	37bd	Показати приховані файли
 menu_toggle_comment	92ac	Закоментувати/розкоментувати
 menu_undo	b9d3	Скасувати
-menu_view_details	d3a1	&Таблиця
-menu_view_icons	57e8	Великі &значки
-menu_view_list	4cc5	&Список
+menu_view_details	d3a1	Таблиця
+menu_view_icons	57e8	Великі значки
+menu_view_list	4cc5	Список
 menu_word_wrap	db6f	Перенесення рядків
 menu_zoom_in	5bcf	Збільшити
 menu_zoom_out	9234	Зменшити

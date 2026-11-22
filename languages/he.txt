@@ -212,29 +212,29 @@ menu_delete	1e3e	מחק
 menu_find	1fa6	חפש
 menu_go_to_line	bc96	עבור לשורה
 menu_hex_mode	74bf	עורך הקס
-menu_new_folder	41cb	תיקייה &חדשה
+menu_new_folder	41cb	תיקייה חדשה
 menu_new_tab	ecfa	לשונית חדשה
 menu_new_window	c3db	חלון חדש
-menu_open	61a5	&פתח
-menu_open_editor	8ca0	פתח ב&עורך
+menu_open	61a5	פתח
+menu_open_editor	8ca0	פתח בעורך
 menu_open_file	af39	פתח קובץ...
-menu_open_terminal	6d2a	פתח &מסוף כאן
+menu_open_terminal	6d2a	פתח מסוף כאן
 menu_paste	6854	הדבק
-menu_properties	c780	&מאפיינים
+menu_properties	c780	מאפיינים
 menu_redo	ac45	בצע שוב
 menu_remove	901d	הסר
-menu_rename	9529	&שנה שם
+menu_rename	9529	שנה שם
 menu_reset_zoom	1b0f	אפס זום
 menu_save_as	7bbe	שמירה בשם...
 menu_select_all	f6f6	בחר הכול
-menu_set_wallpaper	1a27	הגדר כ&רקע
+menu_set_wallpaper	1a27	הגדר כרקע
 menu_set_wallpaper_of	aa60	הגדר כרקע של %s
-menu_show_hidden	37bd	הצג קבצים &מוסתרים
+menu_show_hidden	37bd	הצג קבצים מוסתרים
 menu_toggle_comment	92ac	החלף הערה
 menu_undo	b9d3	בטל
-menu_view_details	d3a1	&פרטים
-menu_view_icons	57e8	&סמלים גדולים
-menu_view_list	4cc5	&רשימה
+menu_view_details	d3a1	פרטים
+menu_view_icons	57e8	סמלים גדולים
+menu_view_list	4cc5	רשימה
 menu_word_wrap	db6f	גלישת שורות
 menu_zoom_in	5bcf	הגדל זום
 menu_zoom_out	9234	הקטן זום

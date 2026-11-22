@@ -214,7 +214,7 @@ menu_hex_mode	74bf	Hexredigerare
 menu_new_folder	41cb	&Ny mapp
 menu_new_tab	ecfa	Ny flik
 menu_new_window	c3db	Nytt fönster
-menu_open	61a5	&Öppna
+menu_open	61a5	Ö&ppna
 menu_open_editor	8ca0	Öppna i &redigeraren
 menu_open_file	af39	Öppna fil...
 menu_open_terminal	6d2a	Öppna en &terminal här
