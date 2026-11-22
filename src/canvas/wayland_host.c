@@ -1478,6 +1478,7 @@ static void compositor_wl_seed(int row, unsigned int which)
         canvas_dmabuf_sync_read(compositor_wl.lent[row].fd, 1);
         compositor_wl_layers_put(row, to, (unsigned long)compositor_stride());
         compositor_wl.laying[row].last = (unsigned char)((which & 1u) + 1);
+        compositor_runs_forget(row);
         compositor_wl_unlend(row);
 }
 
@@ -1493,6 +1494,7 @@ static void compositor_wl_layers_lay(int row)
                                                     ((unsigned long)row * 2 + (compositor.front[row] & 1u)) * compositor.buffer);
                 if (!compositor_wl_card_lay(row, to, 0))
                         wl_ext_tiled_settle(), compositor_wl_layers_put(row, to, (unsigned long)compositor_stride());
+                compositor_runs_forget(row);
         }
         compositor_wl_layers_drop(row);
 }
@@ -2108,6 +2110,7 @@ static int compositor_wl_straight_read(int row, long y0, long y1)
         if (w <= 0 || y1 <= y0 || !compositor_wl_card_image(row, &whole, to, (unsigned long)compositor_stride(), 0, y0, 0, y0, w, y1 - y0))
                 return 0;
         table->client_rects_card++, compositor_wl_copied(row, WINDOWS_COPY_CARD);
+        compositor_runs_forget(row);
         return 1;
 }
 
@@ -2844,7 +2847,9 @@ static int wl_pic_sync_begin(int row, const struct wayland_picture *picture, int
 {
         if (picture->sync_fd >= 0 && !*sync_started)
         {
-                if (!picture->explicit_sync && !compositor_wl_sync_start(wayland_row_owner(row), (int)picture->sync_fd, 1))
+                // Always issue DMA_BUF_SYNC_START|READ before CPU mmap reads (explicit sync only covers GPU fence completion,
+                // not CPU cache invalidation on Intel i915/non-coherent DMA-BUFs). ready=1 never sleeps or arms setitimer.
+                if (!compositor_wl_sync_start(wayland_row_owner(row), (int)picture->sync_fd, 1))
                         return compositor_wl.laying[row].open = 0, 0;
                 *sync_started = 1;
         }

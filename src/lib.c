@@ -7244,7 +7244,7 @@ __asm__(
     "bt $27, %ecx\n   jnc 9f  # OSXSAVE: nobody is managing the state\n"
     "bt $28, %ecx\n   jnc 9f  # no AVX register instructions\n"
     "mov %ecx, %r9d\n   xor %ecx, %ecx\n   xgetbv\n   mov %eax, %r8d\n   and $6, %eax\n   cmp $6, %eax\n   jne 9f  # the kernel does not save both halves of ymm\n"
-    "bt $12, %r9d\n   setc cpu_has_fma(%rip)\n   mov $7, %eax\n   xor %ecx, %ecx\n   cpuid\n"
+    "bt $12, %r9d\n   setc cpu_has_fma(%rip)\n   xor %eax, %eax\n   cpuid\n   cmp $7, %eax\n   jb 9f\n   mov $7, %eax\n   xor %ecx, %ecx\n   cpuid\n"
     //
     //       VAES and VPCLMULQDQ are the ymm and zmm forms of the two SSE
     //       instructions above, so they want the ymm state and nothing more;
@@ -17436,8 +17436,9 @@ __asm__(
     "1:  vmovdqu64 (%r12,%rcx), %zmm0\n   vmovdqu64 64(%r12,%rcx), %zmm1\n   vmovdqu64 128(%r12,%rcx), %zmm2\n   vmovdqu64 192(%r12,%rcx), %zmm3\n"
     "vmovntdq %zmm0, (%rbx,%rcx)\n   vmovntdq %zmm1, 64(%rbx,%rcx)\n   vmovntdq %zmm2, 128(%rbx,%rcx)\n   vmovntdq %zmm3, 192(%rbx,%rcx)\n"
     "add $256, %rcx\n   cmp %r15, %rcx\n   jb 1b\n"
+    "vzeroupper\n"
     "lea (%rbx,%r15), %rdi\n   lea (%r12,%r15), %rsi\n   mov %r13, %rdx\n   sub %r15, %rdx\n   jz 2f\n   call memory_copy_apart\n"
-    "2:  vzeroupper\n   pop %r15\n   pop %r14\n   pop %r13\n   pop %r12\n   pop %rbx\n" ASM_RET
+    "2:  pop %r15\n   pop %r14\n   pop %r13\n   pop %r12\n   pop %rbx\n" ASM_RET
     ASM_LOCAL_END(memory_copy_rect_nt_row)
     )
 
@@ -17597,8 +17598,9 @@ __asm__(
     "1:  vmovdqu (%r12,%rcx), %ymm0\n   vmovdqu 32(%r12,%rcx), %ymm1\n   vmovdqu 64(%r12,%rcx), %ymm2\n   vmovdqu 96(%r12,%rcx), %ymm3\n"
     "vmovntdq %ymm0, (%rbx,%rcx)\n   vmovntdq %ymm1, 32(%rbx,%rcx)\n   vmovntdq %ymm2, 64(%rbx,%rcx)\n   vmovntdq %ymm3, 96(%rbx,%rcx)\n"
     "add $128, %rcx\n   cmp %r15, %rcx\n   jb 1b\n"
+    "vzeroupper\n"
     "lea (%rbx,%r15), %rdi\n   lea (%r12,%r15), %rsi\n   mov %r13, %rdx\n   sub %r15, %rdx\n   jz 2f\n   call memory_copy_apart\n"
-    "2:  vzeroupper\n   pop %r15\n   pop %r14\n   pop %r13\n   pop %r12\n   pop %rbx\n" ASM_RET
+    "2:  pop %r15\n   pop %r14\n   pop %r13\n   pop %r12\n   pop %rbx\n" ASM_RET
     ASM_LOCAL_END(memory_copy_rect_nt_row_ymm)
     )
 

@@ -444,16 +444,39 @@ static void compositor_blit_scaled(const struct compositor_target *t, int x, int
 
         if (width <= 0 || height <= 0 || !target_clip(t, x, y, width, height, &x1, &y1, &x2, &y2))
                 return;
+        if (swap)
+        {
+                // Never read back write-combined scanout memory: resample and swizzle in cached RAM chunks, then store out.
+                unsigned int scratch[4096];
+                int w = x2 - x1;
+                fn (*copy)(p32 address_to, positive, const p32 address_to, positive, positive, positive) =
+                    t->out ? memory_copy_rect_out_u32 : memory_copy_rect_u32;
+
+                for (int cx = x1; cx < x2; cx += 1024)
+                {
+                        int cw = x2 - cx < 1024 ? x2 - cx : 1024;
+                        int chunk = 4096 / cw;
+
+                        for (int py = y1; py < y2; py += chunk)
+                        {
+                                int rows = y2 - py < chunk ? y2 - py : chunk;
+
+                                memory_resample_u32_rect(scratch, (unsigned long)cw, (unsigned long)cw, (unsigned long)rows,
+                                                         source, pitch, (unsigned long)source_w, (unsigned long)source_h,
+                                                         (unsigned long)width, (unsigned long)height,
+                                                         (unsigned long)(cx - x), (unsigned long)(py - y));
+                                memory_swizzle_rb_u32(scratch, scratch, (positive)cw * (positive)rows, 0);
+                                copy(t->pixels + (unsigned long)(py - t->oy) * t->pitch + (unsigned long)(cx - t->ox),
+                                     (positive)t->pitch, scratch, (positive)cw, (positive)cw, (positive)rows);
+                        }
+                }
+                (void)w;
+                return;
+        }
         memory_resample_u32_rect(t->pixels + (unsigned long)(y1 - t->oy) * t->pitch + (unsigned long)(x1 - t->ox), t->pitch,
                                  (unsigned long)(x2 - x1), (unsigned long)(y2 - y1), source, pitch,
                                  (unsigned long)source_w, (unsigned long)source_h, (unsigned long)width,
                                  (unsigned long)height, (unsigned long)(x1 - x), (unsigned long)(y1 - y));
-        if (swap)
-                for (int py = y1; py < y2; py++)
-                {
-                        unsigned int *row = t->pixels + (unsigned long)(py - t->oy) * t->pitch + (unsigned long)(x1 - t->ox);
-                        memory_swizzle_rb_u32(row, row, (positive)(x2 - x1), 0);
-                }
 }
 
 // A frame whose contents are its picture at another size (a window landing), so they are scaled from it.

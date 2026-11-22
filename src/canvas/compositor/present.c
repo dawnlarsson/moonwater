@@ -312,6 +312,8 @@ static void compositor_present_tell(const unsigned short (*clip)[4], unsigned in
                         compositor_flip_refused = 0, compositor_plane_carried(1);
                 compositor_plane_carry.fb = 0;
         }
+        if (compositor_modesetting)
+                return;
         if (flip_own && compositor.on_screen != compositor.fb && !compositor_flip(compositor.fb, -1, 0))
         {
                 compositor_record_refuse();

@@ -14814,6 +14814,8 @@ static CONST unsigned int ui_moon_glow_colour(unsigned int accent, decimal side,
 // The rim light on a moon already drawn at left, top, size (ui_moon, ui_moon_paper):
 HOT static fn ui_moon_rim(struct ui address_to restrict ui, int left, int top, int size, unsigned int accent, decimal strength)
 {
+        if (size <= 0)
+                return;
         decimal r = size / 2.0, inv_r = 1.0 / r;
         unsigned int bloom = accent ? accent : 0x6f8fa8u, neg = ui_moon_hue_turn(bloom, -0.10), pos = ui_moon_hue_turn(bloom, 0.10);
         int y0 = top < ui->top ? ui->top : top, y1 = top + size < ui->bottom ? top + size : ui->bottom;

@@ -1282,11 +1282,13 @@ static int compositor_copies_damage(void)
         return compositor.card >= 0 && (drm_driver_flags(compositor.driver) & DRV_COPIES_DAMAGE) != 0;
 }
 
+static int compositor_modesetting; // 1 while painting the initial buffer before COMPOSITOR_SETCRTC (skip spare-plate swap & page-flip)
+
 // Whether this present composes into the second plate and flips to it: one screen, no screen turned, and a card that shows
 // what its buffer holds (a headless scan image's names are exchanged the same way); never one that copies its damage.
 static int compositor_plate_wanted(int turning)
 {
-        return !turning && compositor_output_count() < 2 && !compositor_copies_damage();
+        return !compositor_modesetting && !turning && compositor_output_count() < 2 && !compositor_copies_damage();
 }
 
 static int compositor_changed_ready(void)

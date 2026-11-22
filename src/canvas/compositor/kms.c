@@ -1251,7 +1251,10 @@ static b32 compositor_space_take(int first)
                 }
                 compositor.mirror_stale = 1;
                 compositor_damage_space();
+                // Paint directly into the new scanout FB before SETCRTC without swapping to spare or issuing a premature PAGE_FLIP.
+                compositor_modesetting = 1;
                 compositor_present();
+                compositor_modesetting = 0;
 
                 /*
                         A turned screen is set up on its own buffer, the panel's size, from the origin: a screen Canvas turns
