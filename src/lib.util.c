@@ -2905,6 +2905,118 @@ static inline bool byte_store_append_exact(byte_store address_to store,
         return byte_store_append_span(store, data, length);
 }
 
+/* Bounded stack/buffer cursor writer: the write-side counterpart to
+   byte_reader. Sticky on overflow (full = true), never writes past cap,
+   never allocates, and works identically in freestanding and kernel builds. */
+typedef struct
+{
+        p8 address_to buf;
+        positive used;
+        positive cap;
+        bool full;
+} byte_cursor;
+
+static inline INLINE byte_cursor byte_cursor_open(p8 address_to buf, positive cap)
+{
+        byte_cursor cursor = {buf, 0, cap, false};
+
+        return cursor;
+}
+
+#define byte_cursor_on(array) byte_cursor_open((p8 address_to)(array), sizeof(array))
+
+static inline INLINE bool byte_cursor_ok(const byte_cursor address_to cursor)
+{
+        return !cursor->full;
+}
+
+static inline INLINE positive byte_cursor_left(const byte_cursor address_to cursor)
+{
+        return cursor->full || cursor->used > cursor->cap
+                   ? 0 : cursor->cap - cursor->used;
+}
+
+static inline bool byte_cursor_put_bytes(byte_cursor address_to cursor,
+                                         const address_any data, positive length)
+{
+        if (cursor->full)
+                return false;
+        if (!length)
+                return true;
+        if (!cursor->buf || !data || cursor->used > cursor->cap ||
+            length > cursor->cap - cursor->used)
+        {
+                cursor->full = true;
+                return false;
+        }
+        memory_copy_apart(cursor->buf + cursor->used, data, length);
+        cursor->used += length;
+        return true;
+}
+
+static inline INLINE bool byte_cursor_put_byte(byte_cursor address_to cursor, p8 byte)
+{
+        if (cursor->full || !cursor->buf || cursor->used >= cursor->cap)
+        {
+                cursor->full = true;
+                return false;
+        }
+        cursor->buf[cursor->used++] = byte;
+        return true;
+}
+
+static inline bool byte_cursor_put_string(byte_cursor address_to cursor,
+                                          string_address text)
+{
+        if (!text)
+                return !cursor->full;
+        return byte_cursor_put_bytes(cursor, text, string_length(text));
+}
+
+static inline bool byte_cursor_put_u64(byte_cursor address_to cursor, p64 value)
+{
+        p8 digits[24];
+        positive at = sizeof(digits);
+
+        do
+        {
+                digits[--at] = (p8)('0' + (value % 10));
+                value /= 10;
+        } while (value);
+
+        return byte_cursor_put_bytes(cursor, digits + at, sizeof(digits) - at);
+}
+
+static inline bool byte_cursor_put_s64(byte_cursor address_to cursor, b64 value)
+{
+        p64 magnitude = value < 0 ? (p64)0 - (p64)value : (p64)value;
+
+        if (value < 0 && !byte_cursor_put_byte(cursor, '-'))
+                return false;
+        return byte_cursor_put_u64(cursor, magnitude);
+}
+
+/* NUL-terminate the written span without advancing used. Returns true when
+   the cursor never overflowed and the terminator fit; otherwise clamps the
+   terminator to buf[cap - 1] (when buf and cap > 0), marks full, and returns
+   false. */
+static inline bool byte_cursor_terminate(byte_cursor address_to cursor)
+{
+        if (!cursor->buf || !cursor->cap)
+        {
+                cursor->full = true;
+                return false;
+        }
+        if (cursor->used < cursor->cap)
+        {
+                cursor->buf[cursor->used] = 0;
+                return !cursor->full;
+        }
+        cursor->buf[cursor->cap - 1] = 0;
+        cursor->full = true;
+        return false;
+}
+
 /*
         The read side of byte_store: a window on bytes somebody else wrote,
         and the only way a parser of them touches them.
@@ -3611,6 +3723,83 @@ typedef struct
         string_address name;
         p8 value;
 } named_byte;
+
+/* Typed convenience wrapper over lib.c's assembly string_table_find:
+   returns index < array_count(table) on match, or array_count(table) on miss.
+   The first field of each row must be a NUL-terminated string_address name. */
+#define string_table_lookup(name, table)                                     \
+        string_table_find((name), (table), sizeof((table)[0]),               \
+                          array_count(table))
+
+/* Static-table row mapping a keyword/option name to a 64-bit flag or value. */
+typedef struct
+{
+        string_address name;
+        p64 value;
+} named_flag;
+
+/* Exact span lookup into a static table whose first field is a NUL-terminated
+   string_address name (safe for non-NUL-terminated spans and embedded NULs).
+   Returns index < count on match, or count on miss. */
+static inline INLINE PURE positive memory_table_find(
+    const p8 address_to bytes, positive length, const address_any table,
+    positive stride, positive count)
+{
+        for (positive i = 0; i < count; i++)
+        {
+                string_address entry = memory_load_unaligned(
+                    string_address, (const p8 address_to)table + i * stride);
+                if (!entry)
+                        break;
+                if (string_length(entry) == length &&
+                    !memory_compare(bytes, entry, length))
+                        return i;
+        }
+        return count;
+}
+
+#define memory_table_lookup(bytes, length, table)                            \
+        memory_table_find((bytes), (length), (table), sizeof((table)[0]),    \
+                          array_count(table))
+
+/* Option/flag bitmask exclusivity helpers (zero-allocation, freestanding-safe).
+   Each entry in groups[] is a mask of mutually exclusive bits; a group has a
+   conflict iff more than one bit in (active & group) is set. */
+static inline INLINE PURE p64 flags_conflict_group(
+    p64 active, const p64 address_to groups, positive count)
+{
+        for (positive i = 0; i < count; i++)
+        {
+                p64 overlap = active & groups[i];
+                if (overlap & (overlap - 1))
+                        return overlap;
+        }
+        return 0;
+}
+
+static inline INLINE PURE bool flags_exclusive_conflict(
+    p64 active, const p64 address_to groups, positive count)
+{
+        return flags_conflict_group(active, groups, count) != 0;
+}
+
+/* Last-wins mutex flag update: clears exclusive_mask and sets bit. */
+static inline INLINE fn flags_apply_exclusive(
+    p64 address_to active, p64 bit, p64 exclusive_mask)
+{
+        address_to active = (address_to active & ~exclusive_mask) | bit;
+}
+
+/* Strict conflict-rejecting flag set: returns false without modifying *active
+   when any bit in forbidden_mask is already set. */
+static inline INLINE bool flags_try_set(
+    p64 address_to active, p64 bit, p64 forbidden_mask)
+{
+        if (address_to active & forbidden_mask)
+                return false;
+        address_to active |= bit;
+        return true;
+}
 
 /* printf dialects and seq share the flag grammar. */
 #define CONVERSION_FLAG_LEFT 1
@@ -10731,11 +10920,14 @@ pub p8 address_to parallel_reserve(parallel_output address_to output,
         if (output->room - output->used < length && output->heap)
         {
                 positive want = output->used + length;
-                positive room = output->room ? output->room * 2 : 256;
+                positive room = memory_growth(output->room, want, 256);
                 p8 address_to grown;
 
-                if (room < want)
-                        room = want;
+                if (!room)
+                {
+                        parallel_stop();
+                        return null;
+                }
 
                 grown = memory_resize(output->bytes, room);
 
@@ -12342,6 +12534,10 @@ static parallel_tree_node address_to parallel_tree_record(address_any user,
                                                           string_address name,
                                                           positive length)
 {
+        if (length > 0xffffffffu ||
+            length > positive_max - sizeof(parallel_tree_node) - 1)
+                return null;
+
         parallel_tree_node address_to node =
                 memory_take(sizeof(parallel_tree_node) + length + 1);
 
@@ -12572,8 +12768,10 @@ pub bool parallel_tree(parallel_node_job enter, parallel_node_job leave,
 
                                 if (depth == frames_room)
                                 {
-                                        parallel_tree_frame address_to grown = memory_resize(
-                                                frames, frames_room * 2 * sizeof(parallel_tree_frame));
+                                        parallel_tree_frame address_to grown =
+                                                frames_room <= positive_max / (2 * sizeof(parallel_tree_frame))
+                                                        ? memory_resize(frames, frames_room * 2 * sizeof(parallel_tree_frame))
+                                                        : null;
 
                                         if (!grown)
                                         {
@@ -20704,14 +20902,14 @@ p8 address_to ctime(const time_t address_to stamp)
 typedef struct clock_format_state
 {
         byte_store out;
-        bool failed;
         bipolar width;
+        positive nanoseconds;
         p8 pad;
+        bool failed;
         bool to_upper;
         bool to_lower;
         bool change_case;
         bool extensions;
-        positive nanoseconds;
 } clock_format_state;
 
 /*
@@ -36239,7 +36437,7 @@ static string_address spool_temporary_named(string_address directory,
         if (at > SPOOL_PREFIX_MAX)
                 at = SPOOL_PREFIX_MAX;
 
-        if (length + 1 + at + SPOOL_TEMPLATE_MARKS + 1 > SPOOL_NAME_MAX)
+        if (length > SPOOL_NAME_MAX - SPOOL_TEMPLATE_MARKS - 2 - at)
                 errno_refuse(ENAMETOOLONG, null);
 
         answer = (p8 address_to)malloc(length + 1 + at +
@@ -36292,7 +36490,8 @@ static stream address_to spool_temporary_stream(void)
         b32 handle;
 
         handle = open((string_address)P_tmpdir,
-                      O_RDWR | SPOOL_O_TMPFILE, SPOOL_TEMPORARY_MODE);
+                      O_RDWR | SPOOL_O_TMPFILE | O_CLOEXEC,
+                      SPOOL_TEMPORARY_MODE);
 
         if (handle < 0)
         {
@@ -36300,7 +36499,8 @@ static stream address_to spool_temporary_stream(void)
                             (address_any)SPOOL_TEMPORARY_TEMPLATE,
                             sizeof(SPOOL_TEMPORARY_TEMPLATE));
 
-                handle = spool_temporary_open((string_address)form);
+                handle = spool_temporary_open_flagged((string_address)form,
+                                                      O_CLOEXEC);
 
                 if (handle < 0)
                         return null;
@@ -37870,9 +38070,10 @@ static b32 execvpe(string_address name, string_address address_to arguments,
                 {
                         //      An empty piece is the working directory, and
                         //      the name relative to it is the name itself.
-                        string_copy(candidate, name);
+                        memory_copy_apart(candidate, name, name_length + 1);
                 }
-                else if (length + name_length + 2 <= PATH_MAX)
+                else if (length < PATH_MAX &&
+                         name_length + 2 <= PATH_MAX - length)
                 {
                         string_address tail = memory_copy_apart_end(
                                 candidate, segment, length);
@@ -38249,7 +38450,7 @@ static string_address realpath(string_address path, string_address into)
                 answer[0] = '/';
                 answer[1] = end;
                 answer_length = 1;
-                string_copy(rest, path + 1);
+                string_copy_bounded(rest, path + 1, PATH_MAX);
         }
         else
         {
@@ -38257,7 +38458,7 @@ static string_address realpath(string_address path, string_address into)
                         return null;
 
                 answer_length = string_length(answer);
-                string_copy(rest, path);
+                string_copy_bounded(rest, path, PATH_MAX);
         }
 
         while (rest[at] != end)
@@ -38394,7 +38595,7 @@ static string_address realpath(string_address path, string_address into)
                                                 }
                                         }
 
-                                        string_copy(rest, merged);
+                                        string_copy_bounded(rest, merged, PATH_MAX);
                                         at = 0;
 
                                         if (rest[0] == '/')
