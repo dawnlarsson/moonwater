@@ -71,7 +71,7 @@ static fn host_kmsg(string_address address_to parts)
         for (; *parts; parts++)
                 string_append_bounded(line, *parts, sizeof(line));
 
-        handle = system_open_at(AT_FDCWD, "/dev/kmsg", O_WRONLY | O_CLOEXEC);
+        handle = system_open_at(AT_FDCWD, "/dev/kmsg", O_WRONLY | O_CLOEXEC | O_NOFOLLOW);
         if (handle < 0)
                 return;
 
@@ -98,10 +98,12 @@ static bipolar host_shell_start(string_address address_to argv, positive count,
         system_call(syscall(setsid));
         handle = system_open_at(AT_FDCWD, terminal ? terminal : (string_address) "/dev/null",
                                 FILE_READ_WRITE | O_CLOEXEC | O_NOFOLLOW);
-        if (terminal && handle < 3)
+        if (handle < 0 || (terminal && handle < 3))
                 system_call_1(syscall(exit), 126);
 
-        if (handle > 0)
+        if (handle == 0)
+                system_call_3(syscall(fcntl), 0, SYSTEM_F_SETFD, 0);
+        else
                 for (positive at = 0; at < (terminal ? 3 : 1); at++)
                         system_call_3(syscall(dup3), (positive)handle, at, 0);
         if (!terminal && output > 2)
@@ -576,7 +578,7 @@ static fn host_console_redraw(void)
         unsigned int active;
         unsigned int other;
 
-        tty = system_open_at(AT_FDCWD, "/dev/tty0", O_RDWR | O_NOCTTY | O_CLOEXEC);
+        tty = system_open_at(AT_FDCWD, "/dev/tty0", O_RDWR | O_NOCTTY | O_CLOEXEC | O_NOFOLLOW);
         if (tty < 0)
                 return;
         if (system_call_3(syscall(ioctl), (positive)tty, HOST_VT_GETSTATE, (positive)state) >= 0 && state[0])
@@ -1082,7 +1084,7 @@ static b32 host_bios_set(void)
         //      efivarfs marks a variable immutable, and a write to one is
         //      refused until the mark is cleared; a variable that does not
         //      exist yet has nothing to clear.
-        handle = system_open_at(AT_FDCWD, HOST_EFI_INDICATIONS, FILE_READ | O_CLOEXEC);
+        handle = system_open_at(AT_FDCWD, HOST_EFI_INDICATIONS, FILE_READ | O_CLOEXEC | O_NOFOLLOW);
         if (handle >= 0)
         {
                 if (system_call_3(syscall(ioctl), (positive)handle, HOST_FS_GETFLAGS,

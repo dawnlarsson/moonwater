@@ -1982,7 +1982,12 @@ static fn files_remote_read_abort(void)
 {
         struct files_remote_read address_to rr = &files.big->remote_read;
         if (rr->active)
-                files_close(&rr->fd), rr->active = false;
+        {
+                files_close(&rr->fd);
+                if (rr->local_path[0])
+                        system_remove_at(AT_FDCWD, (string_address)rr->local_path, 0), rr->local_path[0] = 0;
+                rr->active = false;
+        }
 }
 
 static fn files_remote_open_file(struct files_peer address_to p, const p8 address_to remote_path, const p8 address_to name)
