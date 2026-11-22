@@ -7109,22 +7109,23 @@ static bipolar file_input_terminal_name(p8 address_to path, positive limit)
 
 static b32 file_color_when(string_address value, b32 bare)
 {
+        static const named_flag words[] = {
+            {(string_address) "always", FILE_COLOR_ALWAYS},
+            {(string_address) "yes", FILE_COLOR_ALWAYS},
+            {(string_address) "force", FILE_COLOR_ALWAYS},
+            {(string_address) "never", FILE_COLOR_NEVER},
+            {(string_address) "no", FILE_COLOR_NEVER},
+            {(string_address) "none", FILE_COLOR_NEVER},
+            {(string_address) "auto", FILE_COLOR_AUTO},
+            {(string_address) "tty", FILE_COLOR_AUTO},
+            {(string_address) "if-tty", FILE_COLOR_AUTO},
+        };
+
         if (!value)
                 return bare;
 
-        if (string_equals(value, "always") || string_equals(value, "yes") ||
-            string_equals(value, "force"))
-                return FILE_COLOR_ALWAYS;
-
-        if (string_equals(value, "never") || string_equals(value, "no") ||
-            string_equals(value, "none"))
-                return FILE_COLOR_NEVER;
-
-        if (string_equals(value, "auto") || string_equals(value, "tty") ||
-            string_equals(value, "if-tty"))
-                return FILE_COLOR_AUTO;
-
-        return -1;
+        positive found = string_table_lookup(value, words);
+        return found < array_count(words) ? (b32)words[found].value : -1;
 }
 
 static bool file_color_active(b32 when)
@@ -13963,32 +13964,46 @@ static b32 file_ls_as(string_address program, p8 default_format, p8 default_quot
                                 ls_time_format_recent = newline + 1;
                         }
                 }
-                else if (string_equals(style, "full-iso"))
-                        ls_time_style = 'f';
-                else if (string_equals(style, "long-iso"))
+                else
                 {
-                        ls_time_style = '+';
-                        ls_time_format_old = (string_address)"%Y-%m-%d %H:%M";
-                        ls_time_format_recent = ls_time_format_old;
-                }
-                else if (string_equals(style, "iso"))
-                {
-                        ls_time_style = '+';
-                        ls_time_format_old = (string_address)"%Y-%m-%d ";
-                        ls_time_format_recent = (string_address)"%m-%d %H:%M";
-                }
-                else if (!string_equals(style, "locale"))
-                {
-                        return string_report(log_error, 2,
-                                      "%s: invalid argument '%w' for 'time style'\n"
-                                      "Valid arguments are:\n"
-                                      "  - [posix-]full-iso\n"
-                                      "  - [posix-]long-iso\n"
-                                      "  - [posix-]iso\n"
-                                      "  - [posix-]locale\n"
-                                      "  - +FORMAT (e.g., +%%H:%%M) for a 'date'-style format\n"
-                                      "Try '%s --help' for more information.\n",
-                                      program, writer_terminal_quoted_name, style, program);
+                        static const struct
+                        {
+                                string_address name;
+                                p8 style;
+                                string_address old_fmt;
+                                string_address recent_fmt;
+                        } ls_time_styles[] = {
+                            {(string_address)"full-iso", 'f', null, null},
+                            {(string_address)"long-iso", '+', (string_address)"%Y-%m-%d %H:%M",
+                             (string_address)"%Y-%m-%d %H:%M"},
+                            {(string_address)"iso", '+', (string_address)"%Y-%m-%d ",
+                             (string_address)"%m-%d %H:%M"},
+                            {(string_address)"locale", 0, null, null},
+                        };
+                        positive found = string_table_lookup(style, ls_time_styles);
+
+                        if (found >= array_count(ls_time_styles))
+                        {
+                                return string_report(log_error, 2,
+                                              "%s: invalid argument '%w' for 'time style'\n"
+                                              "Valid arguments are:\n"
+                                              "  - [posix-]full-iso\n"
+                                              "  - [posix-]long-iso\n"
+                                              "  - [posix-]iso\n"
+                                              "  - [posix-]locale\n"
+                                              "  - +FORMAT (e.g., +%%H:%%M) for a 'date'-style format\n"
+                                              "Try '%s --help' for more information.\n",
+                                              program, writer_terminal_quoted_name, style, program);
+                        }
+                        if (ls_time_styles[found].style)
+                        {
+                                ls_time_style = ls_time_styles[found].style;
+                                if (ls_time_styles[found].old_fmt)
+                                {
+                                        ls_time_format_old = ls_time_styles[found].old_fmt;
+                                        ls_time_format_recent = ls_time_styles[found].recent_fmt;
+                                }
+                        }
                 }
         }
         if (ls_selected.stamp == 'M')
@@ -14003,11 +14018,8 @@ static b32 file_ls_as(string_address program, p8 default_format, p8 default_quot
 
                 if (style)
                 {
-                        positive word = 0;
+                        positive word = string_table_lookup(style, ls_quoting_words);
 
-                        while (word < array_count(ls_quoting_words) &&
-                               !string_equals(style, ls_quoting_words[word].word))
-                                word++;
                         if (word < array_count(ls_quoting_words))
                                 ls_quoting = ls_quoting_words[word].answer;
                         else
@@ -21050,12 +21062,15 @@ static bool du_time_style_read(string_address style)
                 return true;
         }
 
-        if (string_equals(style, "full-iso"))
-                du_time_style = 'f';
-        else if (string_equals(style, "long-iso"))
-                du_time_style = 'l';
-        else if (string_equals(style, "iso"))
-                du_time_style = 'i';
+        static const named_byte du_time_styles[] = {
+            {(string_address)"full-iso", 'f'},
+            {(string_address)"long-iso", 'l'},
+            {(string_address)"iso", 'i'},
+        };
+        positive found = string_table_lookup(style, du_time_styles);
+
+        if (found < array_count(du_time_styles))
+                du_time_style = du_time_styles[found].value;
         else
         {
                 string_format(log_error,
@@ -21765,6 +21780,9 @@ static bool df_tableless(storage_mount_table address_to mounts, positive first, 
 
         memory_fill(mounts, 0, sizeof(*mounts));
         df_tableless_failed = false;
+        if (room > (positive_max - 1) / sizeof(storage_mount) ||
+            room > (positive_max - 1) / sizeof(positive))
+                return false;
         mounts->entry = (storage_mount address_to)memory_take(room * sizeof(storage_mount) + 1);
         df_tableless_operand = (positive address_to)memory_take(room * sizeof(positive) + 1);
         if (!mounts->entry || !df_tableless_operand)
@@ -25095,10 +25113,20 @@ static bool namei_walk(string_address path, string_address base,
                        positive depth, positive address_to hops,
                        p8 address_to resolved)
 {
+        static p8 candidate[FILE_PATH_MAX];
+        static p8 component[FILE_PATH_MAX];
+        static p8 shown[FILE_PATH_MAX];
+        static p8 actual[FILE_PATH_MAX];
         positive length = string_length(path);
         bool absolute = length && path[0] == '/';
         bool trailing = length > 1 && path[length - 1] == '/';
-        p8 current[FILE_PATH_MAX];
+        p8 address_to frame = (p8 address_to)memory_take(FILE_PATH_MAX * 2);
+
+        if (!frame)
+                return false;
+        scope_exit(memory_give(frame));
+        p8 address_to current = frame;
+        p8 address_to target = frame + FILE_PATH_MAX;
 
         if (absolute)
         {
@@ -25131,8 +25159,6 @@ static bool namei_walk(string_address path, string_address base,
                 positive start = at;
                 at += memory_span_without_byte(path + at, '/', length - at);
                 positive part = at - start;
-                p8 candidate[FILE_PATH_MAX];
-                p8 component[FILE_PATH_MAX];
                 positive kept = min(part, (positive)FILE_PATH_MAX - 1);
 
                 memory_copy_apart_end(component, path + start, kept);
@@ -25156,24 +25182,19 @@ static bool namei_walk(string_address path, string_address base,
                         return false;
                 }
                 row->known = true;
-                {
-                        p8 shown[FILE_PATH_MAX];
-
-                        if (at >= FILE_PATH_MAX)
-                                return false;
-                        memory_copy_apart(shown, path, at);
-                        shown[at] = end;
-                        row->mountpoint = namei_is_mountpoint(
-                            shown, address_of row->facts);
-                }
+                if (at >= FILE_PATH_MAX)
+                        return false;
+                memory_copy_apart(shown, path, at);
+                shown[at] = end;
+                row->mountpoint = namei_is_mountpoint(
+                    shown, address_of row->facts);
                 if (namei_mount_failed)
                         return false;
 
                 if ((row->facts.mode & MODE_FORMAT) == MODE_LINK)
                 {
-                        p8 target[FILE_PATH_MAX];
                         bipolar target_length = file_link_text(
-                            candidate, target, sizeof(target));
+                            candidate, target, FILE_PATH_MAX);
                         if (target_length < 0)
                         {
                                 row->reason = file_reason(target_length);
@@ -25191,12 +25212,9 @@ static bool namei_walk(string_address path, string_address base,
                                                       writer_terminal_name, namei_operand);
                                 }
 
-                                p8 followed[FILE_PATH_MAX];
                                 if (!namei_walk(target, current, depth + 1,
-                                                hops, followed))
+                                                hops, current))
                                         return false;
-                                string_copy_max_end(current, followed,
-                                                    FILE_PATH_MAX - 1);
                                 continue;
                         }
                 }
@@ -25205,7 +25223,6 @@ static bool namei_walk(string_address path, string_address base,
                         continue;
                 if (memory_is_word(path + start, part, ".."))
                 {
-                        p8 actual[FILE_PATH_MAX];
                         if (!file_resolve(candidate, actual, true))
                                 return false;
                         string_copy_max_end(current, actual, FILE_PATH_MAX - 1);
@@ -27139,12 +27156,12 @@ static bool file_sync_one(string_address path, p8 mode)
 {
         bipolar opened = system_open_at(AT_FDCWD,
                                        path,
-                                       FILE_READ | O_NONBLOCK);
+                                       FILE_READ | O_NONBLOCK | O_CLOEXEC);
         bipolar read_error = opened;
 
         if (opened < 0)
                 opened = system_open_at(AT_FDCWD,
-                                       path, 01 | O_NONBLOCK);
+                                       path, 01 | O_NONBLOCK | O_CLOEXEC);
 
         if (opened < 0)
         {
@@ -30655,7 +30672,7 @@ static bool truncate_current_size(string_address path, bipolar handle,
 static bool truncate_one(string_address path, b64 size, b64 reference,
                          p8 relation, bool no_create, bool blocks)
 {
-        positive flags = (FILE_WRITE & ~O_TRUNC) | O_NONBLOCK;
+        positive flags = (FILE_WRITE & ~O_TRUNC) | O_NONBLOCK | O_CLOEXEC;
 
         if (no_create)
                 flags &= ~O_CREAT;
@@ -30863,7 +30880,7 @@ static b32 file_truncate()
                 if ((facts.mode & MODE_FORMAT) != MODE_FILE)
                         handle = system_open_at(AT_FDCWD,
                                                reference_path,
-                                               FILE_READ);
+                                               FILE_READ | O_CLOEXEC);
 
                 if (handle < 0 && (facts.mode & MODE_FORMAT) != MODE_FILE)
                 {
@@ -31314,33 +31331,42 @@ static fn hardlink_walk(bipolar directory, string_address name,
                 return;
         }
 
-        file_walk walk;
+        p8 address_to frame = (p8 address_to)memory_take(sizeof(file_walk) + FILE_PATH_MAX);
+
+        if (!frame)
+        {
+                string_format(log_error, "hardlink: cannot read %w: %s\n",
+                              writer_terminal_name, shown, file_reason(-ERROR_NO_MEMORY));
+                return;
+        }
+        scope_exit(memory_give(frame));
+
+        file_walk address_to walk = (file_walk address_to)frame;
+        p8 address_to below = frame + sizeof(file_walk);
         file_facts opened;
 
-        walk.handle = file_open_same_facts(
+        walk->handle = file_open_same_facts(
             directory, name, address_of facts,
             FILE_READ | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW, address_of opened);
-        walk.error = walk.handle < 0 ? walk.handle : 0;
-        walk.have = 0;
-        walk.at = 0;
+        walk->error = walk->handle < 0 ? walk->handle : 0;
+        walk->have = 0;
+        walk->at = 0;
 
-        if (walk.handle < 0)
+        if (walk->handle < 0)
         {
                 //      util-linux says "cannot read" with the path bare, and
                 //      exits 0 as it does after every error in a run.
                 string_format(log_error, "hardlink: cannot read %w: %s\n",
-                              writer_terminal_name, shown, file_reason(walk.handle));
+                              writer_terminal_name, shown, file_reason(walk->handle));
                 return;
         }
 
         struct linux_dirent64 address_to entry;
 
-        while ((entry = file_walk_next(address_of walk)))
+        while ((entry = file_walk_next(walk)))
         {
                 if (file_is_dot(entry->d_name))
                         continue;
-
-                p8 below[FILE_PATH_MAX];
 
                 if (!file_path_join(below, shown, entry->d_name))
                 {
@@ -31351,11 +31377,11 @@ static fn hardlink_walk(bipolar directory, string_address name,
                         continue;
                 }
 
-                hardlink_walk(walk.handle, entry->d_name, below, depth - 1,
+                hardlink_walk(walk->handle, entry->d_name, below, depth - 1,
                               entry->d_type);
         }
 
-        file_walk_close(address_of walk);
+        file_walk_close(walk);
 }
 
 static string_address hardlink_base(hardlink_file address_to file)
@@ -32312,12 +32338,15 @@ static bool hardlink_option_seen(p8 letter, string_address value)
                 hardlink_reflink_mode = 'a';
                 if (value && string_get(value))
                 {
-                        if (string_equals(value, "auto"))
-                                hardlink_reflink_mode = 'a';
-                        else if (string_equals(value, "always"))
-                                hardlink_reflink_mode = 'A';
-                        else if (string_equals(value, "never"))
-                                hardlink_reflink_mode = 'n';
+                        static const named_byte modes[] = {
+                            {(string_address)"auto", 'a'},
+                            {(string_address)"always", 'A'},
+                            {(string_address)"never", 'n'},
+                        };
+                        positive found = string_table_lookup(value, modes);
+
+                        if (found < array_count(modes))
+                                hardlink_reflink_mode = modes[found].value;
                         else
                         {
                                 hardlink_parse_failed = true;
@@ -32382,11 +32411,19 @@ static b32 file_hardlink()
 
         //      Only these four methods start; any other name is the
         //      fallback the reference falls back to.
-        if (!string_equals(hardlink_method, "memcmp") && !string_equals(hardlink_method, "sha1") &&
-            !string_equals(hardlink_method, "sha256") && !string_equals(hardlink_method, "crc32"))
         {
-                HARDLINK_SAY(1, "cannot initialize %s method, use 'memcmp' fallback\n", hardlink_method);
-                hardlink_method = (string_address) "memcmp";
+                static const named_byte methods[] = {
+                    {(string_address)"memcmp", 1},
+                    {(string_address)"sha1", 1},
+                    {(string_address)"sha256", 1},
+                    {(string_address)"crc32", 1},
+                };
+
+                if (string_table_lookup(hardlink_method, methods) >= array_count(methods))
+                {
+                        HARDLINK_SAY(1, "cannot initialize %s method, use 'memcmp' fallback\n", hardlink_method);
+                        hardlink_method = (string_address) "memcmp";
+                }
         }
         if (!hardlink_io_size)
                 hardlink_io_size = string_equals(hardlink_method, "memcmp") ? 8 * 1024 : FILE_TRANSFER_SIZE;
@@ -36654,6 +36691,16 @@ static bipolar file_move_remove_tree(
         if (inside < 0)
                 return inside;
 
+        p8 address_to frame = (p8 address_to)memory_take(sizeof(file_walk) + FILE_PATH_MAX);
+        if (!frame)
+        {
+                system_close(inside);
+                return -ERROR_NO_MEMORY;
+        }
+        scope_exit(memory_give(frame));
+        file_walk address_to walk = (file_walk address_to)frame;
+        p8 address_to below = frame + sizeof(file_walk);
+
         bipolar result = 0;
         while (result >= 0)
         {
@@ -36668,12 +36715,14 @@ static bipolar file_move_remove_tree(
                 //      another follows until a pass finds nothing: reading
                 //      from the start after each removal, as this once did,
                 //      made a directory of n names cost n reads of it.
-                file_walk walk = {
-                    .handle = inside, .error = 0, .have = 0, .at = 0};
+                walk->handle = inside;
+                walk->error = 0;
+                walk->have = 0;
+                walk->at = 0;
                 struct linux_dirent64 address_to entry;
                 bool any = false;
 
-                while (result >= 0 && (entry = file_walk_next(address_of walk)))
+                while (result >= 0 && (entry = file_walk_next(walk)))
                 {
                         if (file_is_dot(entry->d_name))
                                 continue;
@@ -36691,7 +36740,6 @@ static bipolar file_move_remove_tree(
                                 break;
                         }
 
-                        p8 below[FILE_PATH_MAX];
                         bool named = shown && file_path_join(below, shown, entry->d_name);
                         result = file_move_remove_tree(
                             inside, entry->d_name, address_of child, depth - 1,
@@ -36700,7 +36748,7 @@ static bipolar file_move_remove_tree(
                                 result = 0;
                 }
                 if (result >= 0 && !any)
-                        result = walk.error;
+                        result = walk->error;
                 if (!any || result < 0)
                         break;
         }
@@ -37793,7 +37841,8 @@ static bool file_copy_one(bipolar source_directory, string_address source,
                 everything below sees only that. STRICT_TIGHT keeps the
                 staged replacement of the link itself, which never touches
                 what a planted link points at. */
-        p8 through_leaf[FILE_PATH_MAX];
+        static p8 through_leaf[FILE_PATH_MAX];
+        static p8 through_target[FILE_PATH_MAX];
         static bipolar through_directory = -1;
 
         if (!fresh && !moving && kind != MODE_DIRECTORY && kind != MODE_LINK &&
@@ -37809,7 +37858,6 @@ static bool file_copy_one(bipolar source_directory, string_address source,
                 {
                         file_facts entry;
                         file_facts final;
-                        p8 target[FILE_PATH_MAX];
 
                         if (file_look_code(at_directory, at_name, AT_SYMLINK_NOFOLLOW,
                                            address_of entry) < 0 ||
@@ -37817,7 +37865,8 @@ static bool file_copy_one(bipolar source_directory, string_address source,
                                 break;
 
                         bipolar length = system_read_link_at(at_directory, at_name,
-                                                             target, sizeof(target) - 1);
+                                                             through_target,
+                                                             sizeof(through_target) - 1);
                         bipolar seen = file_look_code(at_directory, at_name, 0,
                                                       address_of final);
 
@@ -37825,11 +37874,11 @@ static bool file_copy_one(bipolar source_directory, string_address source,
                             (seen >= 0 && (final.mode & MODE_FORMAT) == MODE_DIRECTORY) ||
                             (seen < 0 && !(posix && seen == -ERROR_NO_ENTRY)))
                                 break;
-                        target[length] = end;
+                        through_target[length] = end;
 
                         bipolar parent = system_open_parent_pinned(
-                            target[0] == '/' ? AT_FDCWD : at_directory,
-                            (string_address)target, through_leaf, sizeof(through_leaf));
+                            through_target[0] == '/' ? AT_FDCWD : at_directory,
+                            (string_address)through_target, through_leaf, sizeof(through_leaf));
 
                         if (parent < 0)
                                 break;
@@ -38131,7 +38180,15 @@ static bool file_copy_one(bipolar source_directory, string_address source,
             ((moving || (cp_recursive && !cp_copy_contents)) &&
              kind != MODE_DIRECTORY && kind != MODE_FILE))
         {
-                p8 target[FILE_PATH_MAX];
+                p8 address_to target = (p8 address_to)memory_take(FILE_PATH_MAX);
+                if (!target)
+                {
+                        file_path_failed(program, "cannot read symbolic link", writer_shell_quoted_name,
+                                         source_shown, -ERROR_NO_MEMORY, 0);
+                        mv_across_said |= moving;
+                        return false;
+                }
+                scope_exit(memory_give(target));
                 bipolar pinned = known_source_handle >= 0
                     ? known_source_handle
                     : file_open_same(source_directory, source,
@@ -38146,11 +38203,11 @@ static bool file_copy_one(bipolar source_directory, string_address source,
 
                 bipolar length = kind == MODE_LINK
                     ? system_read_link_at(pinned, (string_address)"", target,
-                                          sizeof(target))
+                                          FILE_PATH_MAX)
                     : 0;
                 if (known_source_handle < 0)
                         system_close(pinned);
-                if (length < 0 || (positive)length >= sizeof(target))
+                if (length < 0 || (positive)length >= FILE_PATH_MAX)
                 {
                         file_path_failed(program, "cannot read symbolic link", writer_shell_quoted_name,
                                          source_shown, length < 0 ? length : -ERROR_NAME_TOO_LONG, 0);
@@ -38598,12 +38655,39 @@ static bool file_copy_one(bipolar source_directory, string_address source,
                 file_linked_generation++;
         }
 
-        file_walk walk = {
-            .handle = source_handle,
-            .error = 0,
-            .have = 0,
-            .at = 0,
-        };
+        p8 address_to walk_frame = (p8 address_to)memory_take(
+            sizeof(file_walk) + FILE_PATH_MAX * 2);
+        if (!walk_frame)
+        {
+                if (!facts_held && source_handle >= 0)
+                        system_close(source_handle);
+                system_close(destination_handle);
+                if (staged)
+                {
+                        (void)system_remove_at(protected.directory,
+                                               SYSTEM_PATH_STAGE_LEAF, AT_REMOVEDIR);
+                        system_path_stage_release(address_of protected);
+                }
+                if (linked_root)
+                {
+                        file_linked_root = -1;
+                        file_linked_root_shown = null;
+                }
+                file_path_failed(program, "cannot read directory", writer_shell_quoted_name,
+                                 source_shown, -ERROR_NO_MEMORY, 0);
+                mv_across_said |= moving;
+                return false;
+        }
+        scope_exit(memory_give(walk_frame));
+
+        file_walk address_to walk = (file_walk address_to)walk_frame;
+        p8 address_to from = walk_frame + sizeof(file_walk);
+        p8 address_to to = from + FILE_PATH_MAX;
+
+        walk->handle = source_handle;
+        walk->error = 0;
+        walk->have = 0;
+        walk->at = 0;
 
         bool pushed = !moving && cp_ancestor_count < CP_ANCESTORS_MAX;
         if (pushed)
@@ -38623,10 +38707,10 @@ static bool file_copy_one(bipolar source_directory, string_address source,
         if (!unreadable && (staged || in_place) && !moving && !cp_symbolic && !cp_attributes_only &&
             !file_debug && cp_reflink_policy != 'A' && !cp_memory_bounded())
         {
-                complete = cp_tree_parallel(walk.handle, source_shown,
+                complete = cp_tree_parallel(walk->handle, source_shown,
                                             destination_handle, destination_shown,
                                             depth);
-                walk.have = walk.at = 0;
+                walk->have = walk->at = 0;
         }
 
         /* A move across devices copies a directory's names in the order of
@@ -38647,7 +38731,7 @@ static bool file_copy_one(bipolar source_directory, string_address source,
                              !cp_memory_bounded());
 
         if ((moving || serial_walk) && !unreadable)
-                listed = file_listing_by_inode(address_of walk,
+                listed = file_listing_by_inode(walk,
                                                address_of listed_count);
         //      GNU hands each name of a directory the flag as the directory
         //      itself had it (copy_dir's first_dir_created), so every name
@@ -38660,13 +38744,10 @@ static bool file_copy_one(bipolar source_directory, string_address source,
                !((staged || in_place) && !moving && !cp_hard && !cp_symbolic && !cp_attributes_only &&
                  !file_debug && cp_reflink_policy != 'A' && !cp_memory_bounded()) &&
                (child = listed ? (listed_at < listed_count ? listed[listed_at++] : null)
-                               : file_walk_next(address_of walk)))
+                               : file_walk_next(walk)))
         {
                 if (file_is_dot(child->d_name))
                         continue;
-
-                p8 from[FILE_PATH_MAX];
-                p8 to[FILE_PATH_MAX];
 
                 cp_created_valid = created_in;
 
@@ -38696,7 +38777,7 @@ static bool file_copy_one(bipolar source_directory, string_address source,
                         bool is_directory = child->d_type == DT_DIR;
 
                         held = system_open_at(
-                            walk.handle, child->d_name,
+                            walk->handle, child->d_name,
                             FILE_READ | O_NOFOLLOW | O_CLOEXEC |
                                 (is_directory ? O_DIRECTORY : O_NONBLOCK));
                         if (held >= 0 &&
@@ -38711,7 +38792,7 @@ static bool file_copy_one(bipolar source_directory, string_address source,
                         }
                 }
 
-                if (!file_copy_one(walk.handle, child->d_name, from,
+                if (!file_copy_one(walk->handle, child->d_name, from,
                                    destination_handle, child->d_name, to,
                                    depth - 1, false, moving, false,
                                    held >= 0 ? address_of child_facts : null,
@@ -38756,19 +38837,19 @@ static bool file_copy_one(bipolar source_directory, string_address source,
                               file_reason(-ERROR_ACCESS));
                 complete = false;
         }
-        if (walk.error < 0)
+        if (walk->error < 0)
         {
                 file_path_failed(program, "cannot read directory", writer_shell_quoted_name,
-                                 source_shown, walk.error, 0);
+                                 source_shown, walk->error, 0);
                 mv_across_said |= moving;
                 complete = false;
         }
         if (!unreadable && (moving || cp_preserve) &&
-            file_xattrs_copy(walk.handle, destination_handle, program,
+            file_xattrs_copy(walk->handle, destination_handle, program,
                              destination_shown) < 0)
                 complete = false;
         if (!facts_held)
-                file_walk_close(address_of walk);
+                file_walk_close(walk);
 
         complete &= !skipped;
 
@@ -42606,15 +42687,17 @@ static bool rm_option_seen(p8 letter, string_address value)
         //      Every --interactive=WHEN is held to the list as it is read,
         //      as getopt and argmatch hold it: a bad one is refused even when
         //      a later -i or --interactive would have won.
-        if (letter == 'W' && value &&
-            file_word_among((string_address) "rm", (string_address) "--interactive",
-                            value, rm_whens, sizeof(rm_whens) / sizeof(rm_whens[0])) < 0)
-                return false;
-        if (letter == 'W' &&
-            (!value || string_equals(value, (string_address)"always") ||
-             string_equals(value, (string_address)"yes") ||
-             string_equals(value, (string_address)"once")))
-                rm_force = false;
+        if (letter == 'W')
+        {
+                b32 chosen = value
+                    ? file_word_among((string_address) "rm", (string_address) "--interactive",
+                                      value, rm_whens, array_count(rm_whens))
+                    : 'i';
+                if (chosen < 0)
+                        return false;
+                if (chosen != 'n')
+                        rm_force = false;
+        }
         return true;
 }
 
@@ -43204,7 +43287,8 @@ static b32 file_touch()
                 {
                         created = system_open_at_mode(AT_FDCWD,
                                                      path, (FILE_WRITE & ~O_TRUNC) |
-                                                               O_NONBLOCK | O_NOCTTY,
+                                                               O_NONBLOCK | O_NOCTTY |
+                                                               O_CLOEXEC,
                                                      0666);
 
                         if (created >= 0)
@@ -46107,7 +46191,7 @@ static b32 file_yes()
         // One write of many copies rather than one write per line: the same
         // bytes leave the program in a fraction of the system calls. A line
         // larger than the batching block is already a large write by itself.
-        p8 block[FILE_BLOCK * 4];
+        static p8 block[FILE_BLOCK * 4];
         positive filled = 0;
         p8 address_to output = line;
 
@@ -47669,7 +47753,8 @@ static b32 file_nologin()
         else
         {
                 bipolar handle = system_open_at(
-                    AT_FDCWD, (string_address)"/etc/nologin.txt", FILE_READ);
+                    AT_FDCWD, (string_address)"/etc/nologin.txt",
+                    FILE_READ | O_CLOEXEC);
 
                 if (handle < 0)
                         log("This account is currently not available.\n", 41);
@@ -48645,7 +48730,8 @@ static b32 file_mktemp()
                         answer = system_open_at_mode(
                                                AT_FDCWD,
                                                path,
-                                               FILE_WRITE | FILE_EXCLUSIVE, 0600);
+                                               FILE_WRITE | FILE_EXCLUSIVE | O_CLOEXEC,
+                                               0600);
 
                         if (answer >= 0)
                                 system_close(answer);
@@ -48731,7 +48817,7 @@ static fn kill_name(positive number, p8 address_to into)
                 string_address name = number == 16 ? null : kill_canonical(number);
 
                 if (name)
-                        string_copy(into, name);
+                        string_copy_max_end(into, name, 15);
                 else
                         positive_into_string(into, number);
                 return;
@@ -48843,7 +48929,7 @@ static bool kill_number_named(positive number, p8 address_to into)
 {
         if (!number)
         {
-                string_copy(into, (string_address) "0");
+                string_copy_max_end(into, (string_address) "0", 15);
                 return true;
         }
 
@@ -48851,7 +48937,7 @@ static bool kill_number_named(positive number, p8 address_to into)
 
         if (named)
         {
-                string_copy(into, named);
+                string_copy_max_end(into, named, 15);
                 return true;
         }
 
@@ -49081,10 +49167,10 @@ static b32 kill_listed(string_address word)
                                 return 2;
                         }
 
-                        string_copy(name, (string_address) "EXIT");
+                        string_copy_max_end(name, (string_address) "EXIT", sizeof(name) - 1);
                 }
                 else if (!number)
-                        string_copy(name, (string_address) "0");
+                        string_copy_max_end(name, (string_address) "0", sizeof(name) - 1);
                 else if (!kill_number_named(number, name))
                 {
                         if (kill_shell_spelling && shell_bash_compat)
@@ -49348,28 +49434,45 @@ static b32 file_kill()
                 if (!string_is(argument, '-'))
                         break;
 
-                if (!string_compare(argument, "--"))
+                static const named_byte kill_arg_table[] = {
+                    {(string_address)"--", '-'},
+                    {(string_address)"--verbose", 'v'},
+                    {(string_address)"-a", 'a'},
+                    {(string_address)"--all", 'a'},
+                    {(string_address)"-l", 'l'},
+                    {(string_address)"--list", 'l'},
+                    {(string_address)"-L", 'L'},
+                    {(string_address)"--table", 'L'},
+                    {(string_address)"-d", 'd'},
+                    {(string_address)"--show-process-state", 'd'},
+                    {(string_address)"-r", 'r'},
+                    {(string_address)"--require-handler", 'r'},
+                    {(string_address)"-p", 'p'},
+                    {(string_address)"--pid", 'p'},
+                    {(string_address)"-s", 's'},
+                    {(string_address)"--signal", 's'},
+                };
+                positive kill_arg = string_table_lookup(argument, kill_arg_table);
+                p8 kill_kind = kill_arg < array_count(kill_arg_table)
+                                   ? kill_arg_table[kill_arg].value : 0;
+
+                if (kill_kind == '-')
                 {
                         index++;
                         break;
                 }
-
-                if (!string_compare(argument, "--verbose"))
+                if (kill_kind == 'v')
                 {
                         loud = true;
                         index++;
                         continue;
                 }
-
-                if (!string_compare(argument, "-a") ||
-                    !string_compare(argument, "--all"))
+                if (kill_kind == 'a')
                 {
                         index++;
                         continue;
                 }
-
-                if (!string_compare(argument, "-l") ||
-                    !string_compare(argument, "--list"))
+                if (kill_kind == 'l')
                 {
                         positive left = count - index;
 
@@ -49384,16 +49487,13 @@ static b32 file_kill()
                     !string_compare_max(argument, "-l=", 3))
                         return kill_listed(string_first_of(argument, '=') + 1);
 
-                if (!string_compare(argument, "-L") ||
-                    !string_compare(argument, "--table"))
+                if (kill_kind == 'L')
                 {
                         kill_table_written(log);
                         log_flush();
                         return 0;
                 }
-
-                if (!string_compare(argument, "-d") ||
-                    !string_compare(argument, "--show-process-state"))
+                if (kill_kind == 'd')
                 {
                         positive left = count - index;
 
@@ -49406,25 +49506,20 @@ static b32 file_kill()
                     !string_compare_max(argument, "--show-process-state=", 21))
                         return kill_process_state(string_first_of(argument, '=') + 1);
 
-                if (!string_compare(argument, "-r") ||
-                    !string_compare(argument, "--require-handler"))
+                if (kill_kind == 'r')
                 {
                         needs_handler = true;
                         index++;
                         continue;
                 }
-
-                if (!string_compare(argument, "-p") ||
-                    !string_compare(argument, "--pid"))
+                if (kill_kind == 'p')
                 {
                         refuse_if(do_kill, 1, "kill: --pid and --signal are mutually exclusive\n");
                         print_only = true;
                         index++;
                         continue;
                 }
-
-                if (!string_compare(argument, "-s") ||
-                    !string_compare(argument, "--signal"))
+                if (kill_kind == 's')
                 {
                         //      bash's own words for the three ways a signal
                         //      is asked for and not given or not known.
@@ -50463,6 +50558,20 @@ static string_address cal_exclusive_name(p8 letter)
                : letter == 'n' ? (string_address) "--months" : (string_address) "--year";
 }
 
+static const named_byte cal_color_modes[] = {
+    {(string_address)"never", 1},
+    {(string_address)"auto", 1},
+    {(string_address)"always", 1},
+    {(string_address)"tty", 1},
+};
+
+static const named_byte cal_reform_modes[] = {
+    {(string_address)"gregorian", 'p'},
+    {(string_address)"iso", 'p'},
+    {(string_address)"1752", 'f'},
+    {(string_address)"julian", 'j'},
+};
+
 static bool cal_option_seen(p8 letter, string_address value)
 {
         //      The year, twelve and months options refuse one another as the
@@ -50478,8 +50587,7 @@ static bool cal_option_seen(p8 letter, string_address value)
                 cal_exclusive_first = letter;
         }
         if (letter == 'C' && value && string_get(value) &&
-            !string_equals(value, "never") && !string_equals(value, "auto") &&
-            !string_equals(value, "always") && !string_equals(value, "tty"))
+            string_table_lookup(value, cal_color_modes) >= array_count(cal_color_modes))
         {
                 cal_option_failed = true;
                 return string_report(log_error, false, "cal: unsupported color mode: %s\n", value);
@@ -50488,8 +50596,8 @@ static bool cal_option_seen(p8 letter, string_address value)
         {
                 positive number;
 
-                if (!string_equals(value, "gregorian") && !string_equals(value, "iso") &&
-                    !string_equals(value, "julian") && !string_digits_exact(value, address_of number))
+                if (string_table_lookup(value, cal_reform_modes) >= array_count(cal_reform_modes) &&
+                    !string_digits_exact(value, address_of number))
                 {
                         cal_option_failed = true;
                         return string_report(log_error, false, "cal: invalid --reform value: '%s'\n", value);
@@ -50589,10 +50697,7 @@ static b32 file_cal()
         if (taking.flags & FILE_FLAG('C'))
         {
                 bool allowed = (taking.bare & FILE_FLAG('C')) != 0 || !color ||
-                    string_equals(color, (string_address)"never") ||
-                    string_equals(color, (string_address)"auto") ||
-                    string_equals(color, (string_address)"always") ||
-                    string_equals(color, (string_address)"tty");
+                    string_table_lookup(color, cal_color_modes) < array_count(cal_color_modes);
 
                 refuse_if(!allowed, 1, "cal: unsupported color mode: %s\n", color);
         }
@@ -50603,12 +50708,15 @@ static b32 file_cal()
                 proleptic = true;
         if (reform)
         {
-                if (!string_compare(reform, (string_address)"gregorian") ||
-                    !string_compare(reform, (string_address)"iso"))
+                positive found = string_table_lookup(reform, cal_reform_modes);
+                p8 kind = found < array_count(cal_reform_modes)
+                    ? cal_reform_modes[found].value : 0;
+
+                if (kind == 'p')
                         proleptic = true;
-                else if (!string_compare(reform, (string_address)"1752"))
+                else if (kind == 'f')
                         proleptic = false;
-                else if (!string_compare(reform, (string_address)"julian"))
+                else if (kind == 'j')
                         return string_report(log_error, 1, "cal: only the 1752 and Gregorian reforms are supported\n");
                 else
                 {
