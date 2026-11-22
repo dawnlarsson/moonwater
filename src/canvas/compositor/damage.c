@@ -105,6 +105,38 @@ static inline INLINE CONST struct canvas_rect rect_meet(struct canvas_rect a, st
         return rect_empty(m) ? (struct canvas_rect){0, 0, 0, 0} : m;
 }
 
+// Whether outer covers inner: every point of inner is in outer (an empty inner is covered by anything).
+static inline INLINE CONST int rect_cover(struct canvas_rect outer, struct canvas_rect inner)
+{
+        return rect_empty(inner) || (outer.x1 <= inner.x1 && outer.y1 <= inner.y1 && outer.x2 >= inner.x2 && outer.y2 >= inner.y2);
+}
+
+// The pieces of r outside cut, at most four, into out: the rows above and below cut at r's full width, and the sides between them. A cut that
+// does not meet r leaves r whole. Answers how many pieces (0 for an empty r).
+static inline INLINE int rect_cut(struct canvas_rect r, struct canvas_rect cut, struct canvas_rect out[4])
+{
+        struct canvas_rect m = rect_meet(r, cut);
+        struct canvas_rect parts[4] = {
+            {r.x1, r.y1, r.x2, m.y1},
+            {r.x1, m.y2, r.x2, r.y2},
+            {r.x1, m.y1, m.x1, m.y2},
+            {m.x2, m.y1, r.x2, m.y2},
+        };
+        int n = 0;
+
+        if (rect_empty(r))
+                return 0;
+        if (rect_empty(m))
+        {
+                out[0] = r;
+                return 1;
+        }
+        for (int k = 0; k < 4; k++)
+                if (!rect_empty(parts[k]))
+                        out[n++] = parts[k];
+        return n;
+}
+
 static inline INLINE PURE struct canvas_rect rect_from_int4(const int p[4])
 {
         return (struct canvas_rect){p[0], p[1], p[2], p[3]};
