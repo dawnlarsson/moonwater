@@ -1097,8 +1097,7 @@ static bool floodlight_shebang_prepare(
         if (!terminated && (positive)got == sizeof(line))
                 goto refuse;
 
-        while (line_end > 2 &&
-               (line[line_end - 1] == ' ' || line[line_end - 1] == '\t'))
+        while (line_end > 2 && byte_is_blank(line[line_end - 1]))
                 line_end--;
 
         at = 2 + string_span_max(line + 2, line_end - 2, string_set_blanks);
@@ -6640,7 +6639,7 @@ COLD fn shell_dirs(writer write)
 
                 // -1 is the entry one from the bottom, not an option word,
                 // so a digit ends the option scan.
-                if (word[1] >= '0' && word[1] <= '9')
+                if (byte_is_digit(word[1]))
                         break;
 
                 //      One letter to a word: bash reads "-lp" as a stack
@@ -8587,7 +8586,7 @@ fn shell_options_listed_at_start(writer write, bool as_commands)
 
                         if (shell_options_said & ((positive)1 << index))
                                 continue;
-                        if (letter >= 'a' && letter <= 'z')
+                        if (byte_is_lower(letter))
                                 shell_options |= SHELL_FLAG(letter);
                         else
                                 shell_options_named |= (positive)1 << index;
@@ -18907,8 +18906,7 @@ static bool floodlight_plain(floodlight_token word)
         {
                 p8 c = (p8)word.at[at];
 
-                if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
-                    (c >= '0' && c <= '9') || c == '.' || c == '_' ||
+                if (byte_is_alnum(c) || c == '.' || c == '_' ||
                     c == '-' || c == '/' || c == '+' || c == ':')
                         continue;
 
@@ -21189,7 +21187,7 @@ static bipolar shell_source_direct(string_address name)
                 return -ERROR_ACCESS;
 
         do
-                handle = system_open_at(AT_FDCWD, name, FILE_READ);
+                handle = system_open_at(AT_FDCWD, name, FILE_READ | O_CLOEXEC);
         while (handle == -4);
         return handle;
 }
@@ -26448,7 +26446,8 @@ static bool compgen_cut;
 
 static COLD fn compgen_add(string_address bytes, positive length)
 {
-        if (byte_store_reserve(address_of compgen_out,
+        if (length <= positive_max - compgen_out.used - 1 &&
+            byte_store_reserve(address_of compgen_out,
                                compgen_out.used + length + 1, 256))
         {
                 memory_copy(compgen_out.bytes + compgen_out.used, bytes, length);
@@ -26727,15 +26726,22 @@ static COLD fn compgen_entries(string_address word, bool directories,
         if (length + 2 >= sizeof(path))
                 return;
 
+        positive path_length;
+
         if (head)
         {
                 memory_copy(path, word, head);
                 path[head] = end;
+                path_length = head;
         }
         else
+        {
                 string_copy(path, (string_address) ".");
+                path_length = 1;
+        }
 
-        directory = system_open_at(AT_FDCWD, path, FILE_READ | O_DIRECTORY);
+        directory = system_open_at(AT_FDCWD, path,
+                                   FILE_READ | O_DIRECTORY | O_CLOEXEC);
 
         while (directory >= 0 &&
                (entry = file_directory_next(directory, block, sizeof(block),
@@ -26747,10 +26753,7 @@ static COLD fn compgen_entries(string_address word, bool directories,
                 file_facts facts;
                 p8 full[FILE_PATH_MAX];
 
-                if (string_is(name, '.') &&
-                    (!string_get(name + 1) ||
-                     (string_is(name + 1, '.') && !string_get(name + 2))) &&
-                    !string_is(stem, '.'))
+                if (file_is_dot(name) && !string_is(stem, '.'))
                         continue;
 
                 if (name_length < stem_length ||
@@ -26758,7 +26761,7 @@ static COLD fn compgen_entries(string_address word, bool directories,
                         continue;
 
                 if (head + name_length + 1 >= sizeof(candidate) ||
-                    length + name_length + 4 >= sizeof(full))
+                    path_length + name_length + 2 >= sizeof(full))
                         continue;
 
                 memory_copy(candidate, word, head);
@@ -26766,9 +26769,9 @@ static COLD fn compgen_entries(string_address word, bool directories,
 
                 if (directories || executables)
                 {
-                        memory_copy(full, path, string_length(path));
-                        full[string_length(path)] = '/';
-                        memory_copy_end(full + string_length(path) + 1, name,
+                        memory_copy(full, path, path_length);
+                        full[path_length] = '/';
+                        memory_copy_end(full + path_length + 1, name,
                                         name_length);
 
                         if (!test_facts(full, address_of facts, true))
@@ -26821,7 +26824,7 @@ static COLD fn compgen_programs(string_address word)
                         string_copy(room, (string_address) ".");
 
                 directory = system_open_at(AT_FDCWD, room,
-                                           FILE_READ | O_DIRECTORY);
+                                           FILE_READ | O_DIRECTORY | O_CLOEXEC);
 
                 while (directory >= 0 &&
                        (entry = file_directory_next(directory, block,
@@ -27296,10 +27299,11 @@ COLD fn shell_compgen(writer write)
 
                 while (at < compgen_out.used)
                 {
-                        positive stop = at;
+                        p8 address_to nl = memory_first_of(
+                            text + at, '\n', compgen_out.used - at);
+                        positive stop = nl ? (positive)(nl - text)
+                                           : compgen_out.used;
 
-                        while (stop < compgen_out.used && text[stop] != '\n')
-                                stop++;
                         text[stop] = end;
                         if (!shell_array_room(table, room, count + 1))
                                 break;

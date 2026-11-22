@@ -441,7 +441,8 @@ static fn expand_push(p8 value, p8 mark)
 // A run that all comes out the same way, which is a copy and a fill.
 static HOT fn expand_push_run(const_string text, positive length, p8 mark)
 {
-        if_rare(!expand_room(expand_length + length + 2))
+        if_rare(length > positive_max - expand_length - 2 ||
+                !expand_room(expand_length + length + 2))
         {
                 expand_overflow = true;
                 return;
@@ -2128,7 +2129,7 @@ static fn expand_ifs_prepare()
                 expand_ifs_kind[value] = EXPAND_IFS_MEMBER;
                 expand_ifs_plain[value] = 0;
 
-                if (value == ' ' || value == '\t' || value == '\n')
+                if (lex_is_space(value))
                         expand_ifs_kind[value] |= EXPAND_IFS_BLANK;
         }
 
@@ -3014,8 +3015,7 @@ static COLD fn arith_fail_from(string_address why, string_address from)
                 if (!string_get(at) && arith_origin && arith_at > arith_origin)
                 {
                         at = arith_at;
-                        while (at > arith_origin &&
-                               (at[-1] == ' ' || at[-1] == '\t'))
+                        while (at > arith_origin && byte_is_blank(at[-1]))
                                 at--;
                         if (at > arith_origin)
                                 at--;
@@ -5133,6 +5133,8 @@ static string_address arith_subscripts_held(string_address text)
                 return text;
 
         length = string_length(text);
+        if (length > (positive_max - 1) / 2)
+                return text;
         made = shell_store_take(address_of expand_store, length * 2 + 1);
         if (!made)
                 return text;
@@ -5547,7 +5549,7 @@ static bool expand_command_file(string_address text, bool quoted)
         if (!path)
                 return true;
 
-        opened = system_open_at(AT_FDCWD, path, FILE_READ);
+        opened = system_open_at(AT_FDCWD, path, FILE_READ | O_CLOEXEC);
 
         if (opened < 0)
         {
@@ -7702,8 +7704,7 @@ static string_address expand_ansi(string_address at, p8 mark, bool source)
                         //      the bit that makes it a control: \c0 is p.
                         if (shell_dash_compat)
                         {
-                                if (value >= 'a' && value <= 'z')
-                                        value -= 32;
+                                value = byte_to_upper(value);
                                 value ^= 0x40;
                         }
                         else
@@ -11267,7 +11268,7 @@ static fn glob_level(p8 address_to prefix, positive used, string_address pattern
         prefix[used] = end;
         bipolar directory = system_open_at(
             AT_FDCWD, used ? prefix : (string_address)".",
-            FILE_READ | O_DIRECTORY);
+            FILE_READ | O_DIRECTORY | O_CLOEXEC);
         if (directory < 0)
                 return;
 

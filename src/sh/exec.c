@@ -2160,14 +2160,14 @@ static positive job_signal_named(positive number, p8 address_to into)
 {
         if (number < JOB_SIGNAL_WORDS && job_signal_words[number])
         {
-                string_copy(into, job_signal_words[number]);
-                return string_length(job_signal_words[number]);
+                positive length = string_length(job_signal_words[number]);
+
+                memory_copy_end(into, job_signal_words[number], length);
+                return length;
         }
 
-        string_copy(into, "Signal ");
-        positive_into_string(into + 7, number);
-
-        return string_length(into);
+        memory_copy_apart(into, "Signal ", 7);
+        return 7 + positive_into_string(into + 7, number);
 }
 
 /*
@@ -2445,9 +2445,8 @@ static fn job_status_text(job_entry address_to entry, bool detailed,
         {
                 positive at;
 
-                string_copy(into, "Done(");
-                positive_into_string(into + 5, code);
-                at = string_length(into);
+                memory_copy_apart(into, "Done(", 5);
+                at = 5 + positive_into_string(into + 5, code);
                 into[at] = ')';
                 into[at + 1] = 0;
                 return;
@@ -4416,6 +4415,9 @@ static bool history_hold(string_address text, positive length)
                               history_used + 1))
                 return false;
 
+        if (length == positive_max)
+                return false;
+
         copy = (p8 address_to)shell_map(length + 1);
 
         if (!copy)
@@ -5415,7 +5417,7 @@ static bool history_secret_words(p8 word[][HISTORY_SECRET_ROOM], positive count)
                (history_secret_assignment(word[first]) ||
                 history_secret_wrapper(word[first]) ||
                 (first && (word[first][0] == '-' ||
-                           (word[first][0] >= '0' && word[first][0] <= '9')))))
+                           byte_is_digit(word[first][0])))))
                 first++;
 
         if (first >= count || count - first < 5)
@@ -5447,7 +5449,7 @@ static bool history_secret_line(string_address text, positive length)
                 positive used = 0;
                 p8 mark = 0;
 
-                while (at < length && (text[at] == ' ' || text[at] == '\t'))
+                while (at < length && byte_is_blank(text[at]))
                         at++;
 
                 if (at >= length || text[at] == ';' || text[at] == '&' ||
@@ -5535,7 +5537,7 @@ static bool history_wanted(string_address text, positive length)
                 at = string_get(stop) ? stop + 1 : stop;
         }
 
-        if (space && (string_get(text) == ' ' || string_get(text) == '\t'))
+        if (space && byte_is_blank(string_get(text)))
                 return false;
 
         if (dedupe && history_used &&
@@ -5675,7 +5677,9 @@ fn history_remember(string_address line)
                                         newline = true;
                         }
 
-                        made = (p8 address_to)shell_map(kept + length + 3);
+                        made = length <= positive_max - kept - 3
+                                   ? (p8 address_to)shell_map(kept + length + 3)
+                                   : null;
                         if (made)
                         {
                                 memory_copy(made, before, kept);
@@ -6075,9 +6079,9 @@ HOT fn history_leaving()
 static fn history_listed(writer write, positive at)
 {
         p8 shown[24];
+        positive width = positive_into_string(shown, history_first + at);
 
-        positive_into_string(shown, history_first + at);
-        writer_field_bulk(write, shown, string_length(shown), 5, ' ', false);
+        writer_field_bulk(write, shown, width, 5, ' ', false);
         string_format(write, "  %s\n", history_text[at]);
 }
 
@@ -10790,7 +10794,9 @@ bool shell_inline_substitution(string_address text, p8 mark, positive start)
 static fn shell_prompt_run(string_address text)
 {
         positive size = string_length(text);
-        p8 address_to copy = (p8 address_to)shell_map(size + 2);
+        p8 address_to copy = size <= positive_max - 2
+                                 ? (p8 address_to)shell_map(size + 2)
+                                 : null;
 
         if (!copy)
                 return;
@@ -16920,12 +16926,9 @@ static fn exec_coproc_drop_finished()
         for (positive at = 0; at < exec_coproc_count; at++)
         {
                 positive status = 0;
-                bipolar got = system_call_4(syscall(wait4),
-                                            (positive)exec_coprocs[at].pid,
-                                            (positive)address_of status,
-                                            JOB_NO_HANG | JOB_UNTRACED |
-                                                JOB_CONTINUED,
-                                            0);
+                bipolar got = system_wait4_retry(
+                    exec_coprocs[at].pid, address_of status,
+                    JOB_NO_HANG | JOB_UNTRACED | JOB_CONTINUED, null);
 
                 if (got > 0)
                         job_child_changed(got, status);
