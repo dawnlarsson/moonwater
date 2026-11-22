@@ -2377,12 +2377,7 @@ static const char address_to settings_role_word(unsigned int role)
         return language_text(ids[role < 5 ? role : 5]);
 }
 
-static fn settings_size_text(unsigned long long bytes, char address_to into, positive room)
-{
-        if (bytes >= 1000000ull && bytes < 1000000000000ull)
-                return ui_size_decimal(bytes, into, room);
-        settings_cat(into, room, settings_cat_num(into, room, 0, (long)(bytes >= 1000000000ull ? bytes / 1000000000ull : bytes / 1000000ull)), bytes >= 1000000000ull ? " GB" : " MB");
-}
+static fn settings_size_text(unsigned long long bytes, char address_to into, positive room) { ui_size_decimal(bytes, into, room); }
 
 static b32 settings_name_says(const char address_to name, const char address_to word)
 {
