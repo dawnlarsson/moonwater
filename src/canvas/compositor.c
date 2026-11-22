@@ -624,6 +624,17 @@ struct compositor_mc_thumb
         int x, y, w, h;
 };
 
+// The Scenes overview (C8, scenes.c): the Scene cards along the top, the current Scene's windows in the middle, and the press
+// in progress. Bounded: a Scene shows at most COMPOSITOR_SCENES_WINDOWS windows.
+#define COMPOSITOR_SCENES_WINDOWS 64
+struct compositor_scenes
+{
+        int open, screen, pressed, press_x, press_y, press_row, moved;
+        unsigned int cards, windows;
+        int card[COMPOSITOR_SPACES_MAX + 1][4];
+        int row[COMPOSITOR_SCENES_WINDOWS], rect[COMPOSITOR_SCENES_WINDOWS][4];
+};
+
 static struct
 {
         int card;
@@ -718,6 +729,7 @@ static struct
                 unsigned int active[WINDOWS_OUTPUTS];
                 int ready;
         } spaces;
+        struct compositor_scenes scenes;
         struct
         {
                 int open, screen, auto_opened, push, depth, dirty;

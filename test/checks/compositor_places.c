@@ -788,3 +788,125 @@ static void check_compositor_scenes_layout(void)
               compositor_scenes_hit(cards, count, -5, -5) == -1);
     }
 }
+
+/*
+        C8 Scenes, step 2: the overview's input. A click on a window focuses it and leaves; a click on a Scene card switches to
+        that Scene and leaves; the "+" card adds a Scene and stays; a window dropped on a Scene card moves to it and the overview
+        stays open; a click on nothing, a right button and Escape leave.
+*/
+static void scenes_at(int x, int y)
+{
+    compositor.pointer_x = x;
+    compositor.pointer_y = y;
+}
+
+static void scenes_click(int x, int y)
+{
+    scenes_at(x, y);
+    compositor_button(COMPOSITOR_BTN_LEFT, 1);
+    compositor_button(COMPOSITOR_BTN_LEFT, 0);
+}
+
+static int scenes_rect_of(int row, int out[4])
+{
+    for (unsigned int i = 0; i < compositor.scenes.windows; i++)
+        if (compositor.scenes.row[i] == row)
+        {
+            memory_copy(out, compositor.scenes.rect[i], 4 * sizeof(int));
+            return 1;
+        }
+    return 0;
+}
+
+static void check_compositor_scenes_input(void)
+{
+    int a[4], b[4], card[4];
+
+    if (!layout_table_map(512))
+    {
+        check("scenes input: the table is mapped", false);
+        return;
+    }
+    layout_setup(512, 1);
+    compositor.table->motion = 1;
+    compositor.outputs = 1;
+    compositor.screen[0][0] = 0, compositor.screen[0][1] = 0, compositor.screen[0][2] = 512, compositor.screen[0][3] = 512;
+    compositor_spaces_ensure();
+    layout_show(1, 40, 200, 120, 80);
+    layout_show(2, 260, 200, 120, 80);
+    compositor.stack[0] = 1, compositor.stack[1] = 2, compositor.stacked = 2;
+    // layout_show marks a row no-tab (a row that is not in a Space); an ordinary window has a tab, so the windows are cleared of it.
+    compositor.asks[1] = compositor.asks[2] = 0;
+    compositor_space_assign_new(1, 0);
+    compositor_space_assign_new(2, 0);
+
+    compositor_scenes_open(0);
+    check("scenes input: the overview opens with a card per Scene and a \"+\" card, and both windows of the Scene",
+          compositor.scenes.open && compositor.scenes.cards == compositor_spaces_count_on(0) + 1 && compositor.scenes.windows == 2);
+
+    // A click on a window focuses it and the overview leaves.
+    scenes_rect_of(2, b);
+    scenes_click(b[0] + b[2] / 2, b[1] + b[3] / 2);
+    check("scenes input: a click on a window focuses it and the overview leaves", !compositor.scenes.open && compositor.focus == 2);
+
+    // A click on a Scene card switches to that Scene and leaves.
+    compositor_space_add_id(0, 0);
+    compositor_space_switch_index(0, 1);
+    compositor_scenes_open(0);
+    memory_copy(card, compositor.scenes.card[0], sizeof(card));
+    scenes_click(card[0] + card[2] / 2, card[1] + card[3] / 2);
+    check("scenes input: a click on a Scene card switches to that Scene and the overview leaves",
+          !compositor.scenes.open && compositor_spaces_active_index(0) == 0);
+
+    // The "+" card adds a Scene and the overview stays open.
+    compositor_scenes_open(0);
+    {
+        unsigned int before = compositor_spaces_count_on(0);
+        int plus[4];
+
+        memory_copy(plus, compositor.scenes.card[compositor.scenes.cards - 1], sizeof(plus));
+        scenes_click(plus[0] + plus[2] / 2, plus[1] + plus[3] / 2);
+        check("scenes input: the \"+\" card adds a Scene and the overview stays open",
+              compositor.scenes.open && compositor_spaces_count_on(0) == before + 1);
+    }
+    compositor_scenes_close();
+
+    // A window dropped on a Scene card moves to that Scene; the overview stays open.
+    compositor_space_switch_index(0, 0);
+    compositor_scenes_open(0);
+    scenes_rect_of(1, a);
+    {
+        unsigned int target = compositor_scenes_sid(1);
+        int dest[4];
+
+        memory_copy(dest, compositor.scenes.card[1], sizeof(dest));
+        scenes_at(a[0] + a[2] / 2, a[1] + a[3] / 2);
+        compositor_button(COMPOSITOR_BTN_LEFT, 1);
+        scenes_at(dest[0] + dest[2] / 2, dest[1] + dest[3] / 2);
+        compositor_button(COMPOSITOR_BTN_LEFT, 0);
+        check("scenes input: a window dropped on a Scene card moves to it, and the overview stays open",
+              compositor.scenes.open && compositor.row_space[1] == target);
+    }
+
+    // A press that moves to nothing leaves the window where it was.
+    scenes_rect_of(1, a);
+    {
+        unsigned int before = compositor.row_space[1];
+
+        scenes_at(a[0] + a[2] / 2, a[1] + a[3] / 2);
+        compositor_button(COMPOSITOR_BTN_LEFT, 1);
+        scenes_at(6, 6);
+        compositor_button(COMPOSITOR_BTN_LEFT, 0);
+        check("scenes input: a window dropped on nothing stays where it was", compositor.row_space[1] == before);
+    }
+
+    // Escape leaves; so does a click on nothing and a right button.
+    compositor_key(0, CK_KEY_ESC, 1, 0);
+    check("scenes input: Escape leaves the overview", !compositor.scenes.open);
+    compositor_scenes_open(0);
+    scenes_click(6, 6);
+    check("scenes input: a click on nothing leaves the overview", !compositor.scenes.open);
+    compositor_scenes_open(0);
+    compositor_button(COMPOSITOR_BTN_RIGHT, 1);
+    check("scenes input: a right button leaves the overview", !compositor.scenes.open);
+}

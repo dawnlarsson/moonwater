@@ -1166,6 +1166,11 @@ static int compositor_space_chord(unsigned int code, int value, unsigned int mod
 
 static int compositor_key_chord(unsigned int code, int value, unsigned int modifiers, unsigned int chord, unsigned int mods4)
 {
+        if (compositor.scenes.open && value == 1 && code == CK_KEY_ESC)
+        {
+                compositor_scenes_close();
+                return 1;
+        }
         for (unsigned int k = 0; k < compositor_keys.count; k++)
                 if (code == compositor_keys.code[k] && mods4 == compositor_keys.modifiers[k])
                 {
@@ -2012,6 +2017,11 @@ static void compositor_button(unsigned int code, int down)
         int under, tab, alt = (compositor_modifiers() & WINDOW_KEY_ALT) != 0, up;
         struct compositor_rows roots;
 
+        if (compositor.scenes.open)
+        {
+                compositor_scenes_button(code, down);
+                return;
+        }
         compositor_pointer_clamp();
         under = compositor_under(compositor.pointer_x, compositor.pointer_y, &tab);
         if (compositor_band_hand(code, down))

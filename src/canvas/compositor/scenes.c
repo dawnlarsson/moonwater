@@ -80,3 +80,176 @@ static int compositor_scenes_hit(const int (*rect)[4], unsigned int count, int x
                         return (int)at;
         return -1;
 }
+
+
+// The overview's model: what is on it, from the screen and the Spaces. The Scene cards are the Spaces of the screen, then "+";
+// the windows are the current Scene's (the rows whose Space is the active one), laid out large in the middle.
+static int compositor_scenes_gap(void)
+{
+        int gap = 16 * compositor.scale / 100;
+
+        return gap < 4 ? 4 : gap;
+}
+
+static void compositor_scenes_damage(void)
+{
+        unsigned int count = 0;
+        const int (*screens)[4] = compositor_screens(&count);
+        int screen = compositor.scenes.screen;
+
+        if (screen >= 0 && (unsigned int)screen < count)
+                compositor_damage(screens[screen][0], screens[screen][1], screens[screen][2], screens[screen][3]);
+}
+
+static void compositor_scenes_relayout(void)
+{
+        unsigned int count = 0;
+        const int (*screens)[4] = compositor_screens(&count);
+        int screen = compositor.scenes.screen, gap = compositor_scenes_gap(), strip_h, strip[4], win[4];
+        int sizes[COMPOSITOR_SCENES_WINDOWS][2];
+        unsigned int n = 0;
+        struct compositor_space *active;
+        const int *s;
+
+        if (screen < 0 || (unsigned int)screen >= count)
+                return;
+        s = screens[screen];
+        strip_h = s[3] * 22 / 100;
+        strip[0] = s[0] + gap, strip[1] = s[1] + gap, strip[2] = s[2] - 2 * gap, strip[3] = strip_h;
+        win[0] = s[0] + gap, win[1] = s[1] + strip_h + 2 * gap, win[2] = s[2] - 2 * gap, win[3] = s[3] - strip_h - 3 * gap;
+        compositor.scenes.cards = compositor_scenes_strip((unsigned int)compositor_spaces_count_on(screen), strip, s[2], s[3], gap,
+                                                          compositor.scenes.card);
+        active = compositor_space_at(screen, compositor_spaces_active_index(screen));
+        for (unsigned int at = 0; at < compositor.stacked && n < COMPOSITOR_SCENES_WINDOWS && active && compositor.row_space; at++)
+        {
+                int row = (int)compositor.stack[at];
+
+                if (row < 0 || row >= COMPOSITOR_ROWS || !compositor.showing[row] ||
+                    (compositor.state[row] & (WINDOW_MINIMIZED | WINDOW_CLOSING)) || compositor_popup_parent[row] >= 0 ||
+                    compositor_row_space_exempt(row) || compositor.row_space[row] != active->id)
+                        continue;
+                compositor.scenes.row[n] = row;
+                sizes[n][0] = (int)compositor.w[row], sizes[n][1] = (int)compositor.h[row];
+                n++;
+        }
+        compositor.scenes.windows = compositor_scenes_grid(sizes, n, win, gap, compositor.scenes.rect);
+}
+
+// The Scene card or window rect under (x, y). A window is an index into rect, a card an index into card; -1 is none.
+static int compositor_scenes_card_at(int x, int y)
+{
+        return compositor_scenes_hit(compositor.scenes.card, compositor.scenes.cards, x, y);
+}
+
+static int compositor_scenes_window_at(int x, int y)
+{
+        int at = compositor_scenes_hit(compositor.scenes.rect, compositor.scenes.windows, x, y);
+
+        return at < 0 ? COMPOSITOR_NONE : compositor.scenes.row[at];
+}
+
+// The Space id of Scene card i (the "+" card has none).
+static unsigned int compositor_scenes_sid(int card)
+{
+        struct compositor_space *sp = compositor_space_at(compositor.scenes.screen, card);
+
+        return sp ? sp->id : 0;
+}
+
+// The overview opens on a screen: the Scene strip and the current Scene's windows are laid out there. Mission Control, the
+// drawer this replaces, is closed when it opens.
+static void compositor_scenes_open(int screen)
+{
+        if (screen < 0 || screen >= compositor_output_count())
+                return;
+        compositor_spaces_ensure();
+        compositor_mc_close();
+        compositor.scenes.open = 1, compositor.scenes.screen = screen;
+        compositor.scenes.pressed = 0;
+        compositor_scenes_relayout();
+        compositor_scenes_damage();
+}
+
+static void compositor_scenes_close(void)
+{
+        if (!compositor.scenes.open)
+                return;
+        compositor_scenes_damage();
+        compositor.scenes.open = 0, compositor.scenes.pressed = 0;
+}
+
+// A click that did not drag: a window is focused and the overview leaves; a Scene card switches to that Scene and leaves; the
+// "+" card adds a Scene and stays open; anything else leaves.
+static void compositor_scenes_click(int x, int y)
+{
+        int card = compositor_scenes_card_at(x, y), row = compositor_scenes_window_at(x, y);
+
+        if (row != COMPOSITOR_NONE)
+        {
+                compositor_scenes_close();
+                compositor_focus(row);
+                return;
+        }
+        if (card >= 0 && (unsigned int)card + 1 < compositor.scenes.cards)
+        {
+                int screen = compositor.scenes.screen;
+
+                compositor_scenes_close();
+                compositor_space_switch_index(screen, card);
+                return;
+        }
+        if (card >= 0)
+        {
+                compositor_space_add(compositor.scenes.screen, 1);
+                compositor_scenes_relayout();
+                compositor_scenes_damage();
+                return;
+        }
+        compositor_scenes_close();
+}
+
+// A window dropped on a Scene card moves to that Scene (its membership changes; the overview stays open). Dropped anywhere else
+// it stays where it was.
+static void compositor_scenes_drop(int row, int x, int y)
+{
+        int card = compositor_scenes_card_at(x, y);
+
+        if (row == COMPOSITOR_NONE || card < 0 || (unsigned int)card + 1 >= compositor.scenes.cards)
+                return;
+        compositor_space_move_row(row, compositor_scenes_sid(card), 0);
+        compositor_scenes_relayout();
+        compositor_scenes_damage();
+}
+
+// The overview's button: a press records where it began (and the window under it), a release is a click or, after a move, a
+// drop. A press outside the overview, or a right button, leaves it.
+static void compositor_scenes_button(unsigned int code, int down)
+{
+        int slop = 8 * compositor.scale / 100, dx, dy;
+
+        if (code != COMPOSITOR_BTN_LEFT)
+        {
+                if (down)
+                        compositor_scenes_close();
+                return;
+        }
+        if (down)
+        {
+                compositor.scenes.pressed = 1, compositor.scenes.moved = 0;
+                compositor.scenes.press_x = compositor.pointer_x, compositor.scenes.press_y = compositor.pointer_y;
+                compositor.scenes.press_row = compositor_scenes_window_at(compositor.pointer_x, compositor.pointer_y);
+                return;
+        }
+        if (!compositor.scenes.pressed)
+                return;
+        compositor.scenes.pressed = 0;
+        dx = compositor.pointer_x - compositor.scenes.press_x, dy = compositor.pointer_y - compositor.scenes.press_y;
+        if (dx < 0)
+                dx = -dx;
+        if (dy < 0)
+                dy = -dy;
+        if (dx + dy <= (slop < 2 ? 2 : slop))
+                compositor_scenes_click(compositor.scenes.press_x, compositor.scenes.press_y);
+        else if (compositor.scenes.press_row != COMPOSITOR_NONE)
+                compositor_scenes_drop(compositor.scenes.press_row, compositor.pointer_x, compositor.pointer_y);
+}
