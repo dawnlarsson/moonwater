@@ -367,19 +367,7 @@ static struct
         struct ui_popup popup;
         struct ui_lines card_text;
         struct ui_confirm confirm;
-        union
-        {
-                struct ui_job runner;
-                struct
-                {
-                        bipolar child;
-                        int output, ending;
-                        b32 exited;
-                        positive began, runner_timeout;
-                        char address_to runner_buf;
-                        positive runner_room, said_length;
-                };
-        };
+        struct ui_job runner;
         struct settings_change address_to queue;
         struct settings_map map;
 } settings;
@@ -1108,7 +1096,7 @@ static b32 settings_wall_own(const char address_to name, char address_to path, p
         return settings_wall_look(path, null) == 0100000u;
 }
 
-static b32 settings_wall_picture(const char address_to path, unsigned int address_to into, int w, int h)
+static b32 settings_wall_picture(const char address_to path, unsigned int address_to into, int w, int h, positive most)
 {
         bipolar handle = system_open_at(AT_FDCWD, (string_address)path, FILE_READ | O_NOFOLLOW | O_CLOEXEC), rd;
         p8 address_to file;
@@ -1127,7 +1115,7 @@ static b32 settings_wall_picture(const char address_to path, unsigned int addres
         {
                 positive pw = (positive)file[16] << 24 | (positive)file[17] << 16 | (positive)file[18] << 8 | file[19];
                 positive ph = (positive)file[20] << 24 | (positive)file[21] << 16 | (positive)file[22] << 8 | file[23];
-                if (pw && ph && pw <= 16384 && ph <= 16384 && pw * ph <= (48ul << 20))
+                if (pw && ph && pw <= 16384 && ph <= 16384 && pw * ph <= most)
                         pic = ui_png_decode_most(file, got, &width, &height, 16384);
         }
         memory_free(file, SETTINGS_WALL_FILE_MOST);
@@ -1205,7 +1193,7 @@ static fn settings_map_wall(struct windows address_to table, unsigned int at, st
         {
                 long colour = ground[0] && !string_equals((string_address)ground, "default") ? window_colour_parse((string_address)ground) : -1;
                 settings.map.wall_key[at] = key, settings.map.wall_w[at] = w, settings.map.wall_h[at] = h;
-                if (!picture || !settings_wall_picture(path, into, w, h))
+                if (!picture || !settings_wall_picture(path, into, w, h, (positive)width * (positive)height * 2))
                 {
                         if (string_equals((string_address)kind, "plain"))
                                 memory_fill_u32_rect(into, (positive)w, (positive)w, (positive)h, (unsigned int)(colour < 0 ? 0x1e1e1e : colour) | 0xff000000u);
@@ -1991,9 +1979,9 @@ static fn settings_card_fill(void)
 {
         char line[SETTINGS_PROBE];
         positive at = 0, made = 0;
-        while (at < settings.said_length)
+        while (at < settings.runner.length)
         {
-                positive size = settings_keep(settings_large->said, settings.said_length, &at, line, sizeof(line)), skip = settings_label_length(line, size);
+                positive size = settings_keep(settings_large->said, settings.runner.length, &at, line, sizeof(line)), skip = settings_label_length(line, size);
                 while (size > skip && line[size - 1] == ' ')
                         size--;
                 if (made + (size - skip) + 1 >= sizeof(settings_large->card))
@@ -2111,7 +2099,7 @@ static fn settings_next_job(void)
 {
         string_address words[SETTINGS_WORDS];
         positive count;
-        while (settings.child <= 0)
+        while (settings.runner.child <= 0)
         {
                 if (settings.queued)
                 {
@@ -2170,7 +2158,7 @@ static fn settings_ask_all(void)
 }
 
 static positive settings_slot(int row) { positive at = 0; while (at < settings.queued && settings.queue[at].row != row) at++; return at; }
-static b32 settings_action_busy(int row) { return settings_slot(row) < settings.queued || (settings.child > 0 && settings.job == row && settings.job_sets); }
+static b32 settings_action_busy(int row) { return settings_slot(row) < settings.queued || (settings.runner.child > 0 && settings.job == row && settings.job_sets); }
 
 static b32 settings_refused(int row, const char address_to value)
 {
@@ -2218,7 +2206,7 @@ static fn settings_report(b32 killed, positive status)
         char first[SETTINGS_STATUS], other[SETTINGS_STATUS], title[SETTINGS_STATUS];
         string_address words[SETTINGS_WORDS];
         positive at = 0, lines = 0;
-        while (at < settings.said_length) lines += settings_line(settings_large->said, settings.said_length, &at, lines ? other : first, SETTINGS_STATUS) != 0;
+        while (at < settings.runner.length) lines += settings_line(settings_large->said, settings.runner.length, &at, lines ? other : first, SETTINGS_STATUS) != 0;
         if (!lines) settings_say((string_address)(killed ? WORDS(settings_stopped) : wait_status_code(status) ? WORDS(settings_refused) : WORDS(settings_done)));
         else if (lines == 1) settings_say((string_address)first);
         else settings_join(words, settings_generic_words(settings.job, settings.job_value, words, SETTINGS_WORDS), title, sizeof(title)), settings_card_open(title), settings_say((string_address)(killed ? WORDS(settings_card_stopped) : WORDS(settings_card_back)));
@@ -2284,9 +2272,9 @@ static b32 settings_joinable(const char address_to security)
 static b32 settings_feed_line(positive address_to at, char address_to line, positive room, char address_to address_to text, positive address_to size)
 {
         positive length, skip;
-        if (*at >= settings.said_length)
+        if (*at >= settings.runner.length)
                 return false;
-        length = settings_keep(settings_large->said, settings.said_length, at, line, room), skip = settings_label_length(line, length);
+        length = settings_keep(settings_large->said, settings.runner.length, at, line, room), skip = settings_label_length(line, length);
         while (length > skip && line[length - 1] == ' ')
                 length--;
         line[length] = 0, *text = line + skip, *size = length - skip;
@@ -2299,7 +2287,7 @@ static fn settings_feed_wifi(void)
         positive nets_bytes = ((positive)WIFI_CAP * sizeof(struct ui_wifi_net) + 4095) & ~(positive)4095;
         struct ui_wifi_net address_to nets = (struct ui_wifi_net address_to)settings_alloc_pages(nets_bytes);
         char note[SETTINGS_ITEM_LABEL] = {0};
-        int n = nets ? ui_wifi_parse(settings_large->said, settings.said_length, nets, WIFI_CAP, null, note, sizeof(note)) : 0;
+        int n = nets ? ui_wifi_parse(settings_large->said, settings.runner.length, nets, WIFI_CAP, null, note, sizeof(note)) : 0;
         positive count = 0;
         for (int i = 0; i < n; i++)
         {
@@ -3001,7 +2989,7 @@ static fn settings_feed_read(b32 killed, b32 failed)
                 char value[SETTINGS_VALUE];
                 positive was = settings.state[owner];
                 string_copy_bounded((string_address)value, (string_address)settings.value[owner], sizeof(value));
-                settings.state[owner] = (unsigned char)settings_read(&settings_rows[owner], settings_large->said, settings.said_length, settings.value[owner], SETTINGS_VALUE, failed);
+                settings.state[owner] = (unsigned char)settings_read(&settings_rows[owner], settings_large->said, settings.runner.length, settings.value[owner], SETTINGS_VALUE, failed);
                 changed = was != settings.state[owner] || !string_equals((string_address)value, (string_address)settings.value[owner]);
         }
         before = settings_list_sum(list);
@@ -3030,7 +3018,7 @@ static long settings_feed_tick(void)
         positive now = (positive)ui_kit.now, count = 1;
         string_address words[SETTINGS_WORDS];
         if (feed < 0 || settings.page.card || settings_editing() >= 0 || settings_filter_length() ||
-            (settings.own.table->state[settings.own.row] & WINDOW_MINIMIZED) || settings.child > 0 || settings.queued || settings_unread_any() || settings.help == 1)
+            (settings.own.table && (settings.own.table->state[settings.own.row] & WINDOW_MINIMIZED)) || settings.runner.child > 0 || settings.queued || settings_unread_any() || settings.help == 1)
                 return -1;
         if (now < settings.feed_due)
                 return (long)(settings.feed_due - now);
@@ -3061,10 +3049,10 @@ static b32 settings_waits(int row) { return row >= 0 && row < SETTINGS_ANY && (s
 static positive settings_said_line(char address_to line, positive room, b32 last)
 {
         positive at = 0, size = 0;
-        while (at < settings.said_length)
+        while (at < settings.runner.length)
         {
                 char got[SETTINGS_STATUS];
-                positive made = settings_line(settings_large->said, settings.said_length, &at, got, sizeof(got));
+                positive made = settings_line(settings_large->said, settings.runner.length, &at, got, sizeof(got));
                 if (made)
                 {
                         string_copy_bounded((string_address)line, (string_address)got, room), size = made;
@@ -3084,7 +3072,7 @@ static char settings_pair_code[SETTINGS_PAIR_CODE];
 static positive settings_pair_due;
 
 static b32 settings_pair_row(int row) { return row >= 0 && row < SETTINGS_ANY && settings_rows[row].kind == SETTINGS_ACTION && settings_waits(row); }
-static b32 settings_pair_waiting(int row) { return settings.child > 0 && settings.job_sets && settings.job == row && settings_pair_row(row); }
+static b32 settings_pair_waiting(int row) { return settings.runner.child > 0 && settings.job_sets && settings.job == row && settings_pair_row(row); }
 
 static const char address_to settings_button_words(int row)
 {
@@ -3108,7 +3096,7 @@ static const char address_to settings_button_words(int row)
 static fn settings_pair_paint(struct ui address_to ui)
 {
         char text[SETTINGS_PROBE], line[SETTINGS_PROBE];
-        positive now = (positive)ui_kit.now, gone = now > settings.began ? (now - settings.began) / 1000000000ull : 0;
+        positive now = (positive)ui_kit.now, gone = now > settings.runner.began ? (now - settings.runner.began) / 1000000000ull : 0;
         positive left = gone < SETTINGS_PAIR_SECONDS ? SETTINGS_PAIR_SECONDS - gone : 0, at;
         int edge = ui_px(ui, UI_PAD) + ui_dev(ui, UI_INSET), x = ui_rtl() ? ui->width - edge : edge;
         int baseline = settings.card.y + ui_dev(ui, UI_LINES_PAD + SETTINGS_PAIR_SIZE), y = baseline + ui_dev(ui, 52);
@@ -3125,7 +3113,7 @@ static fn settings_waiting_say(void)
 {
         char line[SETTINGS_STATUS];
         positive size;
-        if (settings.child > 0 && settings.job_sets && settings_waits(settings.job) && (size = settings_said_line(line, sizeof(line), false)))
+        if (settings.runner.child > 0 && settings.job_sets && settings_waits(settings.job) && (size = settings_said_line(line, sizeof(line), false)))
         {
                 settings_say((string_address)line);
                 if (!settings_pair_on && settings_pair_row(settings.job) && settings_find(line, size, "on the other machine") < size)
@@ -3172,7 +3160,7 @@ static fn settings_complete(b32 killed, positive status)
         else if (row == SETTINGS_JOB_HELP)
         {
                 if (!killed)
-                        settings_help(settings_large->said, settings.said_length);
+                        settings_help(settings_large->said, settings.runner.length);
                 settings_refilter();
                 if (settings.truncated)
                         settings_say((string_address)WORDS(settings_help_more));
@@ -3186,14 +3174,14 @@ static fn settings_complete(b32 killed, positive status)
                                 continue;
                         settings_unread_set(o, 0);
                         string_copy_bounded((string_address)before, (string_address)settings.value[o], sizeof(before));
-                        settings.state[o] = killed ? SETTINGS_FAILED : (unsigned char)settings_read(&settings_rows[o], settings_large->said, settings.said_length, settings.value[o], SETTINGS_VALUE, wait_status_code(status) != 0);
+                        settings.state[o] = killed ? SETTINGS_FAILED : (unsigned char)settings_read(&settings_rows[o], settings_large->said, settings.runner.length, settings.value[o], SETTINGS_VALUE, wait_status_code(status) != 0);
                         if (settings.state[o] != was || !string_equals((string_address)before, (string_address)settings.value[o]))
                                 settings_reading_changed((int)o);
                 }
         settings_next_job();
         if (action)
                 ui_page_redraw(&settings.page);
-        if (!settings.told && !settings_unread_any() && settings.child <= 0 && !settings.queued)
+        if (!settings.told && !settings_unread_any() && settings.runner.child <= 0 && !settings.queued)
         {
                 positive failed = settings_not_understood();
                 settings.told = true;
@@ -3205,7 +3193,7 @@ static fn settings_complete(b32 killed, positive status)
 static b32 settings_reap(void) { settings_runner_ready(); return ui_job_reap(&settings.runner); }
 static b32 settings_left_reap(void) { return ui_job_left_reap(); }
 static fn settings_finished(b32 killed) { settings_runner_ready(); ui_job_finish(&settings.runner, killed); }
-static fn settings_feed_drop(void) { if (settings.child > 0 && settings.job == SETTINGS_JOB_FEED) settings_finished(true); }
+static fn settings_feed_drop(void) { if (settings.runner.child > 0 && settings.job == SETTINGS_JOB_FEED) settings_finished(true); }
 static fn settings_confirm_say(const char address_to text) { char line[SETTINGS_STATUS]; ui_confirm_line(line, sizeof(line), text); settings_say((string_address)line); }
 
 static b32 settings_run(int row, const char address_to args)
@@ -3223,7 +3211,7 @@ static b32 settings_run(int row, const char address_to args)
         return settings_refused(row, args) ? false : (settings_change(row, args), true);
 }
 
-static b32 settings_stop(void) { return settings.child > 0 && settings.job_sets && settings.job >= SETTINGS_ANY ? (settings_finished(true), true) : false; }
+static b32 settings_stop(void) { return settings.runner.child > 0 && settings.job_sets && settings.job >= SETTINGS_ANY ? (settings_finished(true), true) : false; }
 
 static b32 settings_output_choice(const struct settings_row address_to which, positive index, char address_to into, positive room);
 
@@ -3589,7 +3577,7 @@ static fn settings_row_activate(int row, int offset, int way)
         const struct settings_row address_to w = &settings_rows[offset];
         char next[SETTINGS_VALUE];
         if (settings_pair_waiting(row))
-                return (void)system_call_2(syscall(kill), (positive)settings.child, SIGTERM);
+                return (void)system_call_2(syscall(kill), (positive)settings.runner.child, SIGTERM);
         if (!w->output && settings.state[row] == SETTINGS_ABSENT)
                 return settings_say((string_address)WORDS(settings_not_here));
         if (!w->output && settings.state[row] == SETTINGS_UNREAD)
@@ -4413,7 +4401,7 @@ static void settings_map_paint(struct ui address_to ui)
 
 static void settings_card_paint(struct ui address_to ui)
 {
-        if (settings_pair_on && settings.child > 0) settings_pair_paint(ui);
+        if (settings_pair_on && settings.runner.child > 0) settings_pair_paint(ui);
         else ui_lines_draw(ui, &settings.card, ui_px(ui, UI_PAD), &settings.card_text);
 }
 
@@ -4544,7 +4532,7 @@ static fn settings_chose(int id)
 
 static long settings_tick(long timeout, long address_to other)
 {
-        if (settings_pair_on && settings.page.card && settings.child > 0)
+        if (settings_pair_on && settings.page.card && settings.runner.child > 0)
         {
                 positive now = (positive)ui_kit.now;
                 if (now >= settings_pair_due)
@@ -4577,11 +4565,11 @@ static long settings_tick(long timeout, long address_to other)
 static fn settings_close(void)
 {
         settings_wall_free();
-        if (settings.child > 0)
+        if (settings.runner.child > 0)
         {
                 positive status = 0;
-                system_call_2(syscall(kill), (positive)settings.child, settings_pair_on ? SIGTERM : SIGKILL);
-                system_wait4_retry(settings.child, address_of status, 1, null);
+                system_call_2(syscall(kill), (positive)settings.runner.child, settings_pair_on ? SIGTERM : SIGKILL);
+                system_wait4_retry(settings.runner.child, address_of status, 1, null);
         }
 }
 
@@ -4609,7 +4597,7 @@ static b32 settings_main()
 {
         memory_zero(&settings, sizeof(settings));
         settings.moonwater = (string_address) "/moonwater", ui_buffers_start(&settings.page.buffers);
-        settings.output = -1, settings.page.pane = 1, settings.page.menu_row = -1, settings_runner_ready();
+        settings.runner.output = -1, settings.page.pane = 1, settings.page.menu_row = -1, settings_runner_ready();
         for (positive at = 1; at < (positive)program_argument_count();)
         {
                 positive used = ui_app_option(&settings_app, at);
