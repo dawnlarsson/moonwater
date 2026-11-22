@@ -1466,6 +1466,8 @@ def test_hardening_66_bug_families():
           "LINK_KIND_FS" in wl_svc_c and
           "link_fs_open(" in wl_svc_c and
           "p16 listen_port = peer->port ? peer->port : link_port();" in wl_svc_c and
+          "p16 next_port = (!link_self.server || !peer->port || port == link_port()) ? port : peer->port;" in wl_svc_c and
+          "if (first_port != def_port && def_port && count < LINK_PLACES_PER_PEER)" in wl_svc_c and
           "link_fs_handle_info(" in wl_svc_c and
           "link_fs_handle_list(" in wl_svc_c and
           "FILES_NODE_MACHINE" in files_model_c and

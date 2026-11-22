@@ -735,16 +735,27 @@ static p8 link_place_known(struct link_place address_to tried, positive count,
         first, then the ones it was heard at, newest first, each at most once,
         up to LINK_PLACES_PER_PEER. Returns how many were put in into.
 */
+static p16 link_port(void);
+
 static positive link_places_for(p8 address_to key, p8 address_to first,
                                 p16 first_port, struct link_place address_to into)
 {
         link_places places;
         positive count = 1;
+        p16 def_port = link_port();
 
         memory_zero(into, sizeof(struct link_place) * LINK_PLACES_PER_PEER);
         memory_copy(into[0].key, key, 32);
         memory_copy(into[0].address, first, 16);
         into[0].port = first_port;
+        // If peer->port was ever poisoned with an ephemeral client source port, always try the default listener port too.
+        if (first_port != def_port && def_port && count < LINK_PLACES_PER_PEER)
+        {
+                memory_copy(into[count].key, key, 32);
+                memory_copy(into[count].address, first, 16);
+                into[count].port = def_port;
+                count++;
+        }
         link_places_load(address_of places);
         while (count < LINK_PLACES_PER_PEER)
         {
@@ -4189,11 +4200,14 @@ static fn link_server_initiation(p8 address_to datagram, positive length,
         crypto_forget(receive, sizeof receive);
 
         //      A place not heard from before is kept for the peer's fallbacks;
-        //      a rekey from the place it is at is not.
+        //      a rekey from the place it is at is not. Never learn an ephemeral
+        //      client source port as a peer's listening port (would evict 22348).
         if (memory_compare(s->address, address, 16) || s->port != port)
         {
+                p16 learn_port = port == link_port() ? port : (peer->port ? peer->port : link_port());
+
                 s->moved = true;
-                link_place_learn(who, address, port);
+                link_place_learn(who, address, learn_port);
         }
         memory_copy(s->address, address, 16);
         s->port = port;
@@ -5514,9 +5528,13 @@ static fn link_peer_moved(p8 address_to key, p8 address_to address, p16 port)
         if (peer && (peer->port != port ||
                      memory_compare(peer->address, address, 16)))
         {
-                link_place_learn(peer->key, peer->address, peer->port);
+                // On the server, never overwrite a peer's listening port with an ephemeral client source port.
+                p16 next_port = (!link_self.server || !peer->port || port == link_port()) ? port : peer->port;
+
+                if (peer->port && (!link_self.server || peer->port == link_port()))
+                        link_place_learn(peer->key, peer->address, peer->port);
                 memory_copy(peer->address, address, 16);
-                peer->port = port;
+                peer->port = next_port;
                 (void)link_peers_save(address_of peers);
         }
         link_peers_unlock(lock);
