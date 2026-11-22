@@ -517,6 +517,7 @@ ui_field_full	fe02	هذا أقصى ما يتسع له
 =Files	1b30	الملفات
 =GPU rendering (alpha)	e5e6	التصيير على GPU (ألفا)
 =Gallery	4cdd	المعرض
+=Game frame cadence	fb65	إيقاع إطارات الألعاب
 =Graphics	9fa8	الرسوميات
 =Host key fingerprint	2398	بصمة مفتاح المضيف
 =How fast the pointer follows the mouse	0a45	سرعة تتبع المؤشر للماوس

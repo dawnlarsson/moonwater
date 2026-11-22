@@ -516,6 +516,7 @@ ui_field_full	fe02	daha fazlası sığmaz
 =Files	1b30	Dosyalar
 =GPU rendering (alpha)	e5e6	GPU ile oluşturma (alfa)
 =Gallery	4cdd	Galeri
+=Game frame cadence	fb65	Oyun kare temposu
 =Graphics	9fa8	Grafik
 =Host key fingerprint	2398	Ana makine anahtarı parmak izi
 =How fast the pointer follows the mouse	0a45	İşaretçinin fareyi ne kadar hızlı izlediği

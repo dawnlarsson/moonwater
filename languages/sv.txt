@@ -516,6 +516,7 @@ ui_field_full	fe02	mer ryms inte
 =Files	1b30	Filer
 =GPU rendering (alpha)	e5e6	GPU-rendering (alfa)
 =Gallery	4cdd	Galleri
+=Game frame cadence	fb65	Bildtakt i spel
 =Graphics	9fa8	Grafik
 =Host key fingerprint	2398	Fingeravtryck för värdnyckeln
 =How fast the pointer follows the mouse	0a45	Hur snabbt pekaren följer musen

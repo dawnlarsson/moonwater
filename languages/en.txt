@@ -512,6 +512,7 @@ ui_field_full	fe02	that is as much as it holds
 =Files	1b30	Files
 =GPU rendering (alpha)	e5e6	GPU rendering (alpha)
 =Gallery	4cdd	Gallery
+=Game frame cadence	fb65	Game frame cadence
 =Graphics	9fa8	Graphics
 =Host key fingerprint	2398	Host key fingerprint
 =How fast the pointer follows the mouse	0a45	How fast the pointer follows the mouse

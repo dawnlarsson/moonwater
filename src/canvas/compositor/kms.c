@@ -54,6 +54,20 @@ static unsigned int compositor_fastest_at(const struct compositor_mode *modes, u
         return best;
 }
 
+// The cadence's rate for a screen at width by height: the highest rate it lists at that size, progressive, that is a multiple of hz (40 on a
+// screen of 144 120 100 85 60 50 is 120; 48 is 144, the rate it has). 0 when it lists none.
+static unsigned int compositor_cadence_rate(const struct compositor_mode *modes, unsigned int count, unsigned int width, unsigned int height,
+                                            unsigned int hz)
+{
+        unsigned int best = 0;
+
+        for (unsigned int at = 0; hz && at < count; at++)
+                if (modes[at].hdisplay == width && modes[at].vdisplay == height && !(modes[at].flags & COMPOSITOR_MODE_INTERLACED) &&
+                    modes[at].vrefresh && modes[at].vrefresh % hz == 0 && modes[at].vrefresh > best)
+                        best = modes[at].vrefresh;
+        return best;
+}
+
 static void compositor_refresh_pick(const char *name, unsigned int count, const struct compositor_mode *modes,
                                     struct compositor_mode *mode)
 {
@@ -65,6 +79,14 @@ static void compositor_refresh_pick(const char *name, unsigned int count, const 
 
         for (at = 0; at < cap; at++)
                 rates[at][0] = modes[at].hdisplay, rates[at][1] = modes[at].vdisplay, rates[at][2] = modes[at].vrefresh;
+        if (compositor_cadence.active && compositor_cadence.hz)
+        {
+                unsigned int rate = compositor_cadence_rate(modes, cap, mode->hdisplay, mode->vdisplay, compositor_cadence.hz);
+
+                compositor_cadence.rate = rate;
+                if (rate)
+                        asked = rate;
+        }
         at = asked ? windows_mode_at(rates, cap, mode->hdisplay, mode->vdisplay, asked)
                    : compositor_fastest_at(modes, cap, mode->hdisplay, mode->vdisplay);
         for (unsigned int forced = 0; !asked && forced < cap; forced++)
@@ -1676,6 +1698,86 @@ static void compositor_dark_woken(void)
         compositor_dark(0);
 }
 
+/*
+        Cadence (`canvas cadence off|40|48|50|60|72`, off by default). On a screen without variable refresh a game held at N frames a second
+        is shown for whole vblanks: 40 on 144 Hz for three, then four (20.8 and 27.8 ms by turns). While a Steam game (SteamGameId in the
+        environment of the window's process, or of the X client under Xwayland) is shown straight and fullscreen on the one screen, the
+        screens are taken again at the highest rate of their size that is a multiple of N (compositor_cadence_rate), and the game has one
+        frame every k = rate / N vblanks (compositor_present_at, compositor_wl_jit_owed): 40 on 120 Hz is every third, 25 ms each. It begins
+        after the 16 steady presents variable refresh waits for and ends a second after the game stops being shown straight (a take of the
+        screens drops it for a few frames), the take made at the loop's next turn (probe_owed). Each way costs a mode switch, a blank; a rate
+        the screen has already (48 and 72 on 144) costs none. A screen whose variable refresh can be on needs none of it.
+*/
+#define COMPOSITOR_CADENCE_LEAVE 1000000000ull
+static const unsigned char compositor_cadence_rates[6] = {0, 40, 48, 50, 60, 72}; // the setting's words, by index
+static unsigned int compositor_row_pids(int row, unsigned int me, int server, unsigned int *out);                // input.c
+static unsigned int compositor_environ_word(unsigned int pid, const char *key, char *value, unsigned int room); // input.c
+
+// Whether the row is a Steam game's (its process carries SteamGameId): asked again when the row or the stack changes.
+static int compositor_cadence_game(int row)
+{
+        static unsigned int gen;
+        static int asked = -1, answer;
+        unsigned int got[2], me;
+        char game[24];
+
+        if (row == asked && gen == compositor.stack_gen)
+                return answer;
+        asked = row, gen = compositor.stack_gen;
+        me = (unsigned int)compositor_call(syscall(getpid), 0, 0, 0, 0, 0, 0);
+        answer = compositor_row_pids(row, me, 0, got) && compositor_environ_word(got[0], "SteamGameId=", game, sizeof game);
+        return answer;
+}
+
+// Vblanks a frame of a cadence of hz frames a second holds on a screen of this period: the rate over hz when it is within 1 Hz of a
+// multiple of it, else 1 (no cadence: every path as it was).
+static unsigned int compositor_cadence_k(int active, unsigned int hz, positive period)
+{
+        positive millihertz, k;
+
+        if (!active || !hz || !period)
+                return 1;
+        millihertz = 1000000000000ull / period;
+        k = (millihertz + hz * 500ull) / (hz * 1000ull);
+        if (k < 2 || (millihertz > k * hz * 1000ull ? millihertz - k * hz * 1000ull : k * hz * 1000ull - millihertz) > 1000ull)
+                return 1;
+        return (unsigned int)k;
+}
+
+// One present's step of the cadence: want is a Steam game shown straight and fullscreen with a cadence of hz asked. It begins at the 16th
+// steady present and ends a second after the last that wanted it, or when the cadence asked changes. 1 when the screens are to be taken again.
+static int compositor_cadence_step(int want, unsigned int hz, positive now)
+{
+        if (want)
+                compositor_cadence.lost_at = 0;
+        else if (compositor_cadence.active && !compositor_cadence.lost_at)
+                compositor_cadence.lost_at = now;
+        if (!compositor_cadence.active)
+        {
+                compositor_cadence.steady = want ? compositor_cadence.steady + (compositor_cadence.steady < COMPOSITOR_VRR_STEADY) : 0;
+                if (!want || compositor_cadence.steady < COMPOSITOR_VRR_STEADY)
+                        return 0;
+                compositor_cadence.active = 1, compositor_cadence.hz = hz;
+                return 1;
+        }
+        if (hz == compositor_cadence.hz && (!compositor_cadence.lost_at || now - compositor_cadence.lost_at < COMPOSITOR_CADENCE_LEAVE))
+                return 0;
+        compositor_cadence.active = 0, compositor_cadence.steady = 0, compositor_cadence.lost_at = 0;
+        return 1;
+}
+
+static void compositor_cadence_keep(void)
+{
+        unsigned int hz = compositor_cadence.choice < sizeof compositor_cadence_rates ? compositor_cadence_rates[compositor_cadence.choice] : 0;
+        int row = compositor.direct_row;
+        int want = hz && !(compositor_vrr.capable && compositor_vrr.policy < 2) && compositor_output_count() == 1 && row >= 0 &&
+                   compositor_space_is_fs_row(row) && compositor_cadence_game(row);
+
+        if (compositor_cadence_step(want, hz, clock_monotonic_nanoseconds()))
+                compositor.probe_owed = 1;
+        compositor_cadence.k = compositor_cadence_k(compositor_cadence.active, compositor_cadence.hz, compositor.period);
+}
+
 static void compositor_vrr_keep(void)
 {
         unsigned long value;
@@ -1701,6 +1803,7 @@ static void compositor_vrr_keep(void)
         if (compositor_vrr.on <= 0)
                 compositor.vrr_kick = 0;
         compositor_vrr_publish();
+        compositor_cadence_keep();
 }
 
 static void compositor_vrr_off(void)

@@ -516,6 +516,7 @@ ui_field_full	fe02	δεν χωράει περισσότερο
 =Files	1b30	Αρχεία
 =GPU rendering (alpha)	e5e6	Απόδοση με GPU (άλφα)
 =Gallery	4cdd	Συλλογή
+=Game frame cadence	fb65	Ρυθμός καρέ παιχνιδιών
 =Graphics	9fa8	Γραφικά
 =Host key fingerprint	2398	Αποτύπωμα κλειδιού διακομιστή
 =How fast the pointer follows the mouse	0a45	Πόσο γρήγορα ακολουθεί ο δείκτης το ποντίκι

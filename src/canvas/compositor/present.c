@@ -270,9 +270,20 @@ static int compositor_tearing(void)
         return compositor.card >= 0 && compositor.direct_row >= 0 && compositor_wl_row_async(compositor.direct_row);
 }
 
+// A cadence's game (compositor_cadence, k > 1) shown straight flips no sooner than the vblank k after its last: its present is due the lead
+// before that one (half a period without a lead), so a frame that came early waits there and its next callback with it.
 static positive compositor_present_at(int tearing, positive lead, positive now)
 {
-        return tearing ? now : compositor_present_due(compositor.presented, compositor.period, compositor.flip_when, lead, now);
+        positive due, slot;
+
+        if (tearing)
+                return now;
+        due = compositor_present_due(compositor.presented, compositor.period, compositor.flip_when, lead, now);
+        if (compositor_cadence.k < 2 || compositor.direct_row < 0 || compositor.flip_row != compositor.direct_row || !compositor.flip_when ||
+            !compositor.period)
+                return due;
+        slot = compositor.flip_when + compositor_cadence.k * compositor.period - (lead && lead < compositor.period ? lead : compositor.period / 2);
+        return slot > due ? slot : due;
 }
 
 /*

@@ -516,6 +516,7 @@ ui_field_full	fe02	meer past er niet in
 =Files	1b30	Bestanden
 =GPU rendering (alpha)	e5e6	GPU-rendering (alpha)
 =Gallery	4cdd	Galerij
+=Game frame cadence	fb65	Beeldritme voor games
 =Graphics	9fa8	Graphics
 =Host key fingerprint	2398	Vingerafdruk van de hostsleutel
 =How fast the pointer follows the mouse	0a45	Hoe snel de aanwijzer de muis volgt

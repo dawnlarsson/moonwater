@@ -516,6 +516,7 @@ ui_field_full	fe02	não cabe mais que isso
 =Files	1b30	Arquivos
 =GPU rendering (alpha)	e5e6	Renderização por GPU (alfa)
 =Gallery	4cdd	Galeria
+=Game frame cadence	fb65	Cadência de quadros em jogos
 =Graphics	9fa8	Gráficos
 =Host key fingerprint	2398	Impressão digital da chave do servidor
 =How fast the pointer follows the mouse	0a45	A rapidez com que o ponteiro segue o mouse

@@ -605,6 +605,18 @@ static inline int compositor_row_opaque_fs(int row)
         return compositor.spaces.ready ? compositor_space_is_fs_row(row) : (compositor.fullscreen[row] != 0);
 }
 
+/*
+        Cadence (kms.c's compositor_cadence_keep, `canvas cadence`, off by default): a game shown straight on a screen whose rate is k times
+        the cadence's frames a second has one frame every k vblanks, its callback k periods out (compositor_wl_jit_owed) and its next flip
+        not before the vblank k after the last (compositor_present_at). k is 1 when it is off, which is every path as it was.
+*/
+static struct
+{
+        unsigned int choice, hz, steady, rate, k;
+        int active;
+        positive lost_at;
+} compositor_cadence = {.k = 1};
+
 // The pictures held back are said taken: for the row the flip showed, once it shows that row's newest buffer.
 #ifdef CONFIG_MOONWATER_WAYLAND
 static void compositor_wl_flip_presented(void); // wayland_host.c: the feedbacks a drawn frame took, answered at its flip
@@ -648,8 +660,8 @@ static inline void compositor_wl_jit_ready(int row)
         start: that is pinned to the slot (the lead before the vblank) the callback's time is set back from (compositor_wl_jit_owed), so its
         sample was the render and the margin, the fast attack took it, and the estimate climbed a margin a frame until the budget passed the
         period, about nine frames in, and the JIT turned itself off for good (a callback at the flip then sampled the period less the lead).
-        A commit after `stamp` is the next frame's, sampled by the present that shows it. A sample of a period or more (a frame that took
-        longer) is no render time to aim by. Fast attack, slow decay: a frame landed late was a sample past the estimate, and sets it.
+        A commit after `stamp` is the next frame's, sampled by the present that shows it. A sample of a period or more (k periods under a
+        cadence: a frame that took longer) is no render time to aim by. Fast attack, slow decay: a frame landed late was a sample past the estimate, and sets it.
 */
 static inline void compositor_wl_jit_measure(positive stamp)
 {
@@ -657,7 +669,7 @@ static inline void compositor_wl_jit_measure(positive stamp)
 
         if (!sent || ready <= sent || ready > stamp)
                 return;
-        if (ready - sent < compositor.period)
+        if (ready - sent < compositor.period * compositor_cadence.k)
         {
                 positive sample = ready - sent;
 
@@ -677,12 +689,12 @@ static void compositor_wl_jit_owed(positive vblank, positive now)
         positive lead = compositor_present_lead();
         // Direct-scanout games flip in ~25 us (no GPU compose), so a 0.6 ms safety margin suffices vs 1.0 ms + lead when GPU-composed.
         positive margin = (jit >= 0 && (jit == compositor.direct_row || compositor_space_is_fs_row(jit)) ? 600000ull : 1000000ull) + lead;
-        positive budget = compositor_wl_game_render_ns + margin;
+        positive budget = compositor_wl_game_render_ns + margin, window = compositor.period * compositor_cadence.k;
 
         compositor_wl_frame_owed = 0;
-        if (jit >= 0 && compositor_wl_game_render_ns > 0 && compositor.period > budget + 300000ull && !compositor_wl_row_async(jit))
+        if (jit >= 0 && compositor_wl_game_render_ns > 0 && window > budget + 300000ull && !compositor_wl_row_async(jit))
         {
-                positive target = vblank + compositor.period - budget;
+                positive target = vblank + window - budget;
 
                 if (target > now + 200000ull)
                 {

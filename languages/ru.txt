@@ -516,6 +516,7 @@ ui_field_full	fe02	больше не помещается
 =Files	1b30	Файлы
 =GPU rendering (alpha)	e5e6	Отрисовка на GPU (альфа)
 =Gallery	4cdd	Галерея
+=Game frame cadence	fb65	Ритм кадров в играх
 =Graphics	9fa8	Графика
 =Host key fingerprint	2398	Отпечаток ключа хоста
 =How fast the pointer follows the mouse	0a45	Как быстро указатель следует за мышью

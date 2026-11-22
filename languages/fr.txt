@@ -516,6 +516,7 @@ ui_field_full	fe02	c'est tout ce que ce champ peut contenir
 =Files	1b30	Fichiers
 =GPU rendering (alpha)	e5e6	Rendu par GPU (alpha)
 =Gallery	4cdd	Galerie
+=Game frame cadence	fb65	Cadence d'images des jeux
 =Graphics	9fa8	Graphismes
 =Host key fingerprint	2398	Empreinte de la clé d'hôte
 =How fast the pointer follows the mouse	0a45	La vitesse à laquelle le pointeur suit la souris

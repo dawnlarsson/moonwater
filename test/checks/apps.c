@@ -10644,6 +10644,7 @@ b32 main()
         GROUP("check_compositor_card_walk", check_compositor_card_walk());
         GROUP("check_compositor_wake", check_compositor_wake());
         GROUP("check_compositor_rate_fastest", check_compositor_rate_fastest());
+        GROUP("check_compositor_cadence", check_compositor_cadence());
         GROUP("check_compositor_screen_wait", check_compositor_screen_wait());
         GROUP("check_compositor_start_room", check_compositor_start_room());
         GROUP("check_compositor_setting_opens", check_compositor_setting_opens());

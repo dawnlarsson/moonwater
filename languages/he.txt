@@ -517,6 +517,7 @@ ui_field_full	fe02	זה המקסימום שהוא מכיל
 =Files	1b30	קבצים
 =GPU rendering (alpha)	e5e6	רינדור ב-GPU (אלפא)
 =Gallery	4cdd	גלריה
+=Game frame cadence	fb65	קצב פריימים במשחקים
 =Graphics	9fa8	גרפיקה
 =Host key fingerprint	2398	טביעת אצבע של מפתח המארח
 =How fast the pointer follows the mouse	0a45	כמה מהר המצביע עוקב אחרי העכבר

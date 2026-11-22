@@ -1680,6 +1680,104 @@ static void check_compositor_rate_fastest(void)
 }
 
 /*
+        Cadence (`canvas cadence`, kms.c's compositor_cadence_*; off by default): the rate a screen of 144 120 100 85 60 50 Hz is asked at for
+        each cadence, the vblanks a frame then holds, the step that begins it at the 16th steady present and ends it a second after the game
+        went, the present of a frame held to the k-th vblank, and the fake card taken at the cadence's rate and then back at its fastest.
+*/
+static void check_compositor_cadence(void)
+{
+    static struct windows *table_scratch;
+    struct windows *const table_at = windows_scratch_table(&table_scratch);
+    static const unsigned int rates[6] = {144, 120, 100, 85, 60, 50};
+    struct compositor_mode modes[7];
+    positive p120, p144, measured, now = 7000000000ull, lead = 500000ull, flip = 9000000000ull;
+    unsigned int at, begun = 0, retakes = 0, held = 0, w, h;
+    int was_row = compositor.direct_row, was_flip_row = compositor.flip_row;
+    positive was_when = compositor.flip_when, was_period = compositor.period, was_presented = compositor.presented;
+
+    for (at = 0; at < 6; at++)
+        card_fake_mode_at(&modes[at], rates[at], 0);
+    card_fake_mode_at(&modes[6], 120, 0), modes[6].vdisplay += 100; // another size's 120 Hz is not this size's
+    w = modes[0].hdisplay, h = modes[0].vdisplay;
+    check("cadence: off by default (the setting's first word, and no cadence is active)",
+          compositor_cadence.choice == 0 && !compositor_cadence.active && compositor_cadence.k == 1 && compositor_cadence_rates[0] == 0);
+    check("cadence: the rate asked is the highest the screen lists at its size that is a multiple (40 120, 48 144, 50 100, 60 120, 72 144)",
+          compositor_cadence_rate(modes, 7, w, h, 40) == 120 && compositor_cadence_rate(modes, 7, w, h, 48) == 144 &&
+              compositor_cadence_rate(modes, 7, w, h, 50) == 100 && compositor_cadence_rate(modes, 7, w, h, 60) == 120 &&
+              compositor_cadence_rate(modes, 7, w, h, 72) == 144);
+    check("cadence: a cadence the screen lists no multiple of asks nothing (45: no 90 or 135), nor does none, nor another size",
+          compositor_cadence_rate(modes, 7, w, h, 45) == 0 && compositor_cadence_rate(modes, 7, w, h, 0) == 0 &&
+              compositor_cadence_rate(modes + 5, 2, w, h, 40) == 0 && compositor_cadence_rate(modes, 7, w, h + 100, 40) == 120);
+    p120 = 1000000000ull / 120, p144 = 1000000000ull / 144, measured = 6957000ull; // the box's 144 Hz measures 6957 us
+    check("cadence: k is the rate over the cadence (40 on 120 is 3, 72 on 144 is 2, 48 on a measured 143.7 Hz is 3)",
+          compositor_cadence_k(1, 40, p120) == 3 && compositor_cadence_k(1, 72, p144) == 2 && compositor_cadence_k(1, 48, measured) == 3);
+    check("cadence: k is 1 when it is off, when the rate is no multiple (50 on 144) and with no period",
+          compositor_cadence_k(0, 40, p120) == 1 && compositor_cadence_k(1, 50, p144) == 1 && compositor_cadence_k(1, 40, 0) == 1 &&
+              compositor_cadence_k(1, 0, p120) == 1);
+    memory_zero(&compositor_cadence, sizeof(compositor_cadence)), compositor_cadence.k = 1;
+    for (at = 0; at < 15; at++)
+        retakes += (unsigned int)compositor_cadence_step(1, 40, now + at);
+    begun = (unsigned int)compositor_cadence.active;
+    retakes += (unsigned int)compositor_cadence_step(1, 40, now + 15);
+    check("cadence: it begins at the 16th steady present, with one take of the screens, not before",
+          !begun && compositor_cadence.active && retakes == 1 && compositor_cadence.hz == 40);
+    retakes = (unsigned int)compositor_cadence_step(0, 40, now + 100) + (unsigned int)compositor_cadence_step(0, 40, now + 100 + 999999999ull);
+    held = (unsigned int)compositor_cadence.active;
+    retakes += (unsigned int)compositor_cadence_step(1, 40, now + 100 + 999999999ull);
+    retakes += (unsigned int)compositor_cadence_step(0, 40, now + 2000000000ull) + (unsigned int)compositor_cadence_step(0, 40, now + 3000000000ull);
+    check("cadence: a game gone for less than a second (a take of the screens) keeps it, gone a second ends it with one take",
+          held && !compositor_cadence.active && retakes == 1);
+    for (at = 0, retakes = 0; at < 16; at++)
+        retakes += (unsigned int)compositor_cadence_step(1, 40, now + at);
+    retakes += (unsigned int)compositor_cadence_step(1, 60, now + 20);
+    check("cadence: another cadence asked ends the one held, to begin again at its own", !compositor_cadence.active && retakes == 2);
+    memory_zero(&compositor_cadence, sizeof(compositor_cadence)), compositor_cadence.k = 1;
+    compositor.direct_row = 3, compositor.flip_row = 3, compositor.flip_when = flip, compositor.period = p120, compositor.presented = flip - lead;
+    {
+        positive plain = compositor_present_at(0, lead, flip + 1000), cadenced, torn, other;
+
+        compositor_cadence.k = 3;
+        cadenced = compositor_present_at(0, lead, flip + 1000);
+        torn = compositor_present_at(1, lead, flip + 1000);
+        compositor.flip_row = 4;
+        other = compositor_present_at(0, lead, flip + 1000);
+        check("cadence: a game's next frame is due the lead before the third vblank after its last at k 3, the next vblank's at k 1",
+              plain == compositor_present_due(flip - lead, p120, flip, lead, flip + 1000) && cadenced == flip + 3 * p120 - lead);
+        check("cadence: a torn frame and another row's flip are not held", torn == flip + 1000 && other == plain);
+    }
+    compositor.direct_row = was_row, compositor.flip_row = was_flip_row, compositor.flip_when = was_when, compositor.period = was_period;
+    compositor.presented = was_presented, compositor_cadence.k = 1;
+    // The fake card at 144 with the screen's six rates: taken at 120 while a cadence of 40 is held, and at 144 when it is not.
+    for (unsigned int pass = 0; pass < 2; pass++)
+    {
+        if (!card_walk_begin(1ul << 0, 0, 0, 0))
+        {
+            check("cadence: the fake card is made", false);
+            return;
+        }
+        memory_copy(card_fake.rates, rates, sizeof(rates));
+        card_fake.rate_count = 6, card_fake.crtc_rate = pass ? 120 : 144;
+        windows_scratch_zero(table_at);
+        compositor_cadence.active = !pass, compositor_cadence.hz = pass ? 0 : 40;
+        if (compositor_cards_walk() != 0)
+        {
+            check("cadence: the fake card is taken", false);
+            card_walk_end();
+            memory_zero(&compositor_cadence, sizeof(compositor_cadence)), compositor_cadence.k = 1;
+            return;
+        }
+        if (!pass)
+            check("cadence: a cadence of 40 held takes a 144 Hz screen at 120 Hz",
+                  compositor.outputs == 1 && compositor.output[0].mode.vrefresh == 120 && card_fake.crtc_rate == 120 && compositor_cadence.rate == 120);
+        else
+            check("cadence: and with it ended the screen is taken back at its fastest, 144 Hz",
+                  compositor.outputs == 1 && compositor.output[0].mode.vrefresh == 144 && card_fake.crtc_rate == 144);
+        card_walk_end();
+    }
+    memory_zero(&compositor_cadence, sizeof(compositor_cadence)), compositor_cadence.k = 1;
+}
+
+/*
         The wait for a screen (compositor_screen_wait) on the socket the kernel's uevents come down, here one end of a pair: a
         uevent of the drm subsystem ends it at once, one of another subsystem does not, and with none it ends at its time.
 */

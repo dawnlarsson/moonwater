@@ -141,6 +141,7 @@
 #define SETTING_CLIPBOARD_PATH "/root/canvas.clipboard"
 #define SETTING_GPU_PATH "/root/canvas.gpu"
 #define SETTING_VRR_PATH "/root/canvas.vrr"
+#define SETTING_CADENCE_PATH "/root/canvas.cadence"
 #define SETTING_CLIPBOARD_HISTORY_PATH "/root/canvas.clipboard.history"
 // The sound server's (src/audio/service.c reads the first three again twice a second and writes the volume and the mute back when
 // a program changes them; the machine script reads the last when it starts the server).
@@ -442,6 +443,14 @@ static const struct settings_row settings_rows[] = {
                       .refusal = "vrr is on, games or off, not %s\n",
                       .usage = "canvas vrr [on|games|off]",
                       .help = "a screen that can waits for each frame, so it is shown when drawn; games: only a fullscreen window [on]"),
+    //  Game frame cadence (kms.c's compositor_cadence_keep): on a screen with no variable refresh, a Steam game shown fullscreen gets the
+    //  screen's mode at the highest rate that is a multiple of this many frames a second (40 on 120 Hz) and a frame every k vblanks of it,
+    //  so each frame is on the screen as long as the next. Off by default: entering and leaving the game is a mode switch, a blank.
+    SETTING_PLAIN_ROW(null, "Game frame cadence", SETTINGS_CHOICE, 0, ("canvas", "cadence"), "cadence ", "off 40 48 50 60 72",
+                      .path = SETTING_CADENCE_PATH, .standard = "off", .reset = "off",
+                      .refusal = "cadence is off, 40, 48, 50, 60 or 72, not %s\n",
+                      .usage = "canvas cadence [off|40|48|50|60|72]",
+                      .help = "a fullscreen Steam game on a screen without variable refresh: a rate that is a multiple of this, a frame every k vblanks [off]"),
     {null, "Brightness", SETTINGS_SLIDER, 1, 0, {"brightness"}, "brightness ", null, {"brightness"}, null, 0,
      .type = SETTING_NUMBER, .unit = "percent", .low = 0, .high = 100,
      .about = "The screen backlight, from 0 to 100 percent. A display with no backlight control has none to set, and this row is greyed out.",
