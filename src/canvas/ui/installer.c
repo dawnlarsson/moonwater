@@ -546,15 +546,19 @@ static fn installer_layout(void)
 
         if (!l->describe)
                 l->describe = installer_describe, l->damaged = installer_damaged, l->hover = l->down = -1;
-        l->count = installer.step == INSTALLER_STEP_LANGUAGE ? (int)INSTALLER_LANGUAGES
-                   : installer.step == INSTALLER_STEP_KEYBOARD ? (int)INSTALLER_LAYOUTS
-                   : installer.step == INSTALLER_STEP_NETWORK  ? (big->wifi_on ? big->net_count : 0)
-                   : installer.step == INSTALLER_STEP_DISK     ? big->drive_count
-                                                               : 0;
-        if (!ui_list_reserve(l, l->count))
-                l->count = 0;
-        for (int k = 0; k < l->count; k++)
-                l->id[k] = k;
+        int count = installer.step == INSTALLER_STEP_LANGUAGE ? (int)INSTALLER_LANGUAGES
+                    : installer.step == INSTALLER_STEP_KEYBOARD ? (int)INSTALLER_LAYOUTS
+                    : installer.step == INSTALLER_STEP_NETWORK  ? (big->wifi_on ? big->net_count : 0)
+                    : installer.step == INSTALLER_STEP_DISK     ? big->drive_count
+                                                                : 0;
+        ui_list_begin(l);
+        for (int k = 0; k < count; k++)
+                if (!ui_list_add(l, k))
+                {
+                        ui_list_begin(l);
+                        break;
+                }
+        ui_list_end(l);
         l->ids = l->count > 0 ? l->count : 1;
         l->empty = installer.step == INSTALLER_STEP_DISK      ? (installer.listed ? WORDS(installer_disk_none) : WORDS(installer_disk_looking))
                    : installer.step == INSTALLER_STEP_NETWORK ? (big->wifi_read ? WORDS(installer_wifi_none) : WORDS(installer_wifi_looking))
