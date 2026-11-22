@@ -14078,6 +14078,20 @@ fn printf_one(writer write, string_address format)
                         continue;
                 }
 
+                // Refuse pathological field widths and numeric precisions
+                // before writer_field_bulk spins emitting gigabytes of padding
+                // (CWE-400/CWE-835).
+                if (width > (64u << 20) ||
+                    (precision > (bipolar)(64u << 20) &&
+                     string_first_of((string_address) "diouxXeEfFgGaA",
+                                     conversion)))
+                {
+                        log_error("printf: no room\n", 0);
+                        printf_status = 2;
+                        printf_cut = true;
+                        break;
+                }
+
                 if (conversion == 's' || conversion == 'b')
                 {
                         string_address value = printf_next();

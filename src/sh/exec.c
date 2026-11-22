@@ -14075,11 +14075,36 @@ static b32 exec_aborted(shell_mark mark)
         Both retain expanded or positional words through the same collector;
         the loop chooses either the next item or the user's selection.
 */
+static positive exec_loop_items_depth;
+
 static b32 exec_loop_items(parse_node address_to node, positive base)
 {
         b32 count = 0;
         positive words = node->flags ? (positive)node->word_count - 1
                                      : shell_parameter_count;
+        bool nested = exec_loop_items_depth > 0;
+        string_address address_to held_fields = exec_fields;
+        positive held_fields_room = exec_fields_room;
+
+        exec_loop_items_depth++;
+        if (nested)
+        {
+                exec_fields = null;
+                exec_fields_room = 0;
+        }
+        scope_exit({
+                if (nested)
+                {
+                        if (exec_fields)
+                                memory_free(exec_fields,
+                                            exec_fields_room *
+                                                sizeof(exec_fields[0]));
+                        exec_fields = held_fields;
+                        exec_fields_room = held_fields_room;
+                }
+                exec_loop_items_depth--;
+        });
+
         for (positive at = 0; at < words; at++)
         {
                 positive made = 1;
@@ -14100,6 +14125,9 @@ static b32 exec_loop_items(parse_node address_to node, positive base)
 
                 // Expanded words and retained positional arguments both own
                 // copies: nested loops may grow either source pointer table.
+                // Publish exec_items_used on every item so an in-process
+                // ${ for ...; } during a later word cannot overwrite earlier
+                // items (CWE-416).
                 for (positive field = 0; field < made; field++)
                 {
                         if (count == 0x7fffffff ||
@@ -14114,6 +14142,7 @@ static b32 exec_loop_items(parse_node address_to node, positive base)
                         if (kept == exec_nothing)
                                 return count;
                         exec_items[base + (positive)count++] = kept;
+                        exec_items_used = base + (positive)count;
                 }
         }
         return count;

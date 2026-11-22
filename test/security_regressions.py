@@ -335,6 +335,32 @@ def test_shell_runtime(shell_bin, bash_bin, workdir):
         f"rc={r.returncode} out={r.stdout!r} err={r.stderr!r}",
     )
 
+    # 17. Nested `for` inside in-process ${ ...; } in outer `for` word list (CWE-416)
+    r = run_bash(
+        bash_bin,
+        (
+            'out=""; for x in first "${ for y in 1 2; do printf "%s" "$y"; done; }" last; '
+            'do out+="$x,"; done; echo "$out"'
+        ),
+    )
+    check(
+        "CWE-416: nested for inside in-process ${ ...; } during outer for list",
+        r.returncode == 0 and r.stdout.strip() == "first,12,last,",
+        f"rc={r.returncode} out={r.stdout!r} err={r.stderr!r}",
+    )
+
+    # 18. printf pathological width / INT64_MIN star width DoS guard (CWE-400/CWE-835)
+    r = run_bash(
+        bash_bin,
+        "printf -v out '%*s' -9223372036854775808 x",
+        timeout=5,
+    )
+    check(
+        "CWE-400/835: printf -v with INT64_MIN width fails fast without hang",
+        r.returncode != 0 and r.returncode < 128,
+        f"rc={r.returncode} out={r.stdout!r} err={r.stderr!r}",
+    )
+
 
 def test_static_invariants():
     print("\n== Kernel / Crypto / Device O_NOFOLLOW / UI Static Invariants ==")
