@@ -469,6 +469,8 @@ typedef struct
 
 static bool tar_text_hold(tar_text address_to into, positive length)
 {
+        if (length >= positive_max)
+                return false;
         return shell_array_room(into->text, into->room, length + 1);
 }
 
@@ -626,7 +628,7 @@ static bool tar_pax_time(p8 address_to text, positive length,
                 return false;
         at += used;
         if (at < length && text[at] == '.')
-                for (at++; at < length && text[at] >= '0' && text[at] <= '9';
+                for (at++; at < length && byte_is_digit(text[at]);
                      at++)
                         if (digits < 9)
                         {
@@ -697,9 +699,6 @@ static bool tar_pax_apply(tar_pax_state address_to state,
                 value = (positive)((body + at + record - 1) - (equal + 1));
                 rest = record;
 
-                if (body[at + rest - 1] != '\n')
-                        return false;
-
                 if (key == 4 && !memory_compare(mark + 1, "path", 4))
                 {
                         if (!tar_text_copy(address_of state->path, equal + 1, value))
@@ -764,17 +763,20 @@ static bool tar_pax_apply(tar_pax_state address_to state,
                         }
                 }
 
-                else if (key > 13 && !memory_compare(mark + 1, "SCHILY.xattr.", 13))
+                else if (state != address_of tar_pax_global && key > 13 &&
+                         !memory_compare(mark + 1, "SCHILY.xattr.", 13))
                 {
                         if (!tar_pax_attr_add(1, mark + 14, key - 13, equal + 1, value))
                                 return false;
                 }
-                else if (key == 17 && !memory_compare(mark + 1, "SCHILY.acl.access", 17))
+                else if (state != address_of tar_pax_global && key == 17 &&
+                         !memory_compare(mark + 1, "SCHILY.acl.access", 17))
                 {
                         if (!tar_pax_attr_add(2, "", 0, equal + 1, value))
                                 return false;
                 }
-                else if (key == 18 && !memory_compare(mark + 1, "SCHILY.acl.default", 18))
+                else if (state != address_of tar_pax_global && key == 18 &&
+                         !memory_compare(mark + 1, "SCHILY.acl.default", 18))
                 {
                         if (!tar_pax_attr_add(3, "", 0, equal + 1, value))
                                 return false;
@@ -3295,6 +3297,21 @@ static bipolar tar_sparse_entry(p8 address_to field)
         return tar_sparse_add(offset, bytes) ? 1 : -1;
 }
 
+static bool tar_sparse_validate(void)
+{
+        p64 held = 0;
+
+        for (positive at = 0; at < tar_sparse_used; at++)
+        {
+                if (tar_sparse[at].offset > tar_sparse_real ||
+                    tar_sparse[at].bytes > tar_sparse_real - tar_sparse[at].offset ||
+                    tar_sparse[at].bytes > positive_max - held)
+                        return false;
+                held += tar_sparse[at].bytes;
+        }
+        return true;
+}
+
 static bool tar_sparse_load(bipolar archive, p8 address_to header)
 {
         positive at;
@@ -3325,10 +3342,8 @@ static bool tar_sparse_load(bipolar archive, p8 address_to header)
                 extended = extra[504] != 0;
         }
 
-        for (at = 0; at < tar_sparse_used; at++)
-                if (tar_sparse[at].offset + tar_sparse[at].bytes >
-                    tar_sparse_real)
-                        return false;
+        if (!tar_sparse_validate())
+                return false;
 
         tar_sparse_active = true;
         return true;
@@ -3382,7 +3397,7 @@ static bool tar_pax_sparse_take(bipolar archive, p64 address_to size)
                         {
                                 p8 byte = block[at];
 
-                                if (byte >= '0' && byte <= '9')
+                                if (byte_is_digit(byte))
                                 {
                                         if (!positive_append_digit(address_of accumulated,
                                                                    (positive)(byte - '0'),
@@ -3421,9 +3436,8 @@ mapped:
                         return false;
                 address_to size -= (p64)consumed;
         }
-        for (at = 0; at < tar_sparse_used; at++)
-                if (tar_sparse[at].offset + tar_sparse[at].bytes > tar_sparse_real)
-                        return false;
+        if (!tar_sparse_validate())
+                return false;
         tar_sparse_active = true;
         return true;
 }
@@ -5117,7 +5131,7 @@ static fn tar_read_members(tar_members address_to run)
                                 tar_refuse("member name is too long");
                                 break;
                         }
-                        if (!tar_text_hold(held, (positive)size))
+                        if (size >= TAR_PAX_LIMIT || !tar_text_hold(held, (positive)size))
                         {
                                 tar_refuse("member name is too long");
                                 tar_skip(handle, tar_padded(size), seekable);
@@ -5125,7 +5139,7 @@ static fn tar_read_members(tar_members address_to run)
                                 continue;
                         }
                         if (!tar_read_payload(handle, size, held->text, seekable))
-                                continue;
+                                break;
                         if (type == 'L')
                                 have_long_name = true;
                         else
