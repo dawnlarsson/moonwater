@@ -4445,6 +4445,13 @@ static positive gpu_image_go(const unsigned int desc[8], unsigned int kind, unsi
 // (w entries of the source's columns, then the rows' source rows, relative to the resource's (x0, y0)), as op 7's are. So a tiled or DCC client picture is scaled
 // by the card with no detile pass. Usable only while gpu_image_ok holds: the card draws a scaled test of its own at each start (gpu_image_test).
 #define GPU_IMAGE_SCALED 16u // gpu_image's kind: the picture is scaled by the tables at tab (the job's g); op 8 reads bit 3 of its kind
+
+// Whether the card can take a tiled or DCC picture scaled in place (gpu_image_scaled): the card is up and its scaled self-test (in gpu_image_test) drew right at
+// the start. The compositor's opt-in for sampling client buffers without a detile reads this; it is false on a host with no card.
+__attribute__((unused)) static b32 gpu_scaled_ready(void)
+{
+        return gpu_ready() && gpu_image_ok;
+}
 static void gpu_image_scaled_args(const unsigned int desc[8], unsigned int kind, positive tab, unsigned int x0, unsigned int y0, positive dst, unsigned int dp,
                                   unsigned int w, unsigned int h)
 {
