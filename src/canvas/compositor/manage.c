@@ -2298,6 +2298,7 @@ static void compositor_leave(int row)
                 compositor_refocus();
         rows_del(&compositor.woken, row);
         __atomic_store_n(&table->pid[row], 0, __ATOMIC_RELEASE);
+        windows_owner_held[row] = (struct windows_owner){0, 0};
         compositor_osk_sync();
         if (pointed)
                 compositor_motion();
@@ -4265,6 +4266,7 @@ static int compositor_row_open_external(const struct compositor_row_spec *spec)
                         table->glass[row] |= WINDOW_NO_TAB;
                 }
                 __atomic_store_n(&table->pid[row], spec->pid > 0 ? spec->pid : 1u, __ATOMIC_RELEASE);
+                windows_owner_take(&windows_owner_held[row], spec->pid > 0 ? spec->pid : 1u); // the claim, as the compositor saw it: a pid it can check later
                 return row;
         }
         return -1;

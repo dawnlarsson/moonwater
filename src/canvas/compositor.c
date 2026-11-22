@@ -1045,6 +1045,9 @@ static void compositor_assist_close(void);
 static int compositor_wl_started(void);
 #endif
 
+/* The owner of each row as the compositor took its claim (window.c windows_owner_take): kept here, never in the shared table, so a client's
+   rewritten pid is refused by windows_owner_ok wherever the compositor uses a row's pid. Indexed by row, sparse in BSS. */
+static struct windows_owner windows_owner_held[WINDOWS];
 #include "compositor/damage.c" // what changed: rectangles and damage, landings and glides, the snap preview's state, a row's pixels and runs, the frames and the bands
 #include "compositor/glass.c" // the glass under the panel and the tabs: the grain, the frost, the blur and its scene
 #include "compositor/scanout.c" // what the card scans out: a window straight from its buffer, the record, the flip and its time, the planes, a turned screen
