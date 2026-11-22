@@ -23,12 +23,20 @@ struct wire_r
 
 static unsigned long wire_be32(const unsigned char *p)
 {
+#ifdef STANDARD_MODERN_C
+        return (unsigned long)network_load_32((const p8 *)p);
+#else
         return (unsigned long)p[0] << 24 | (unsigned long)p[1] << 16 | (unsigned long)p[2] << 8 | (unsigned long)p[3];
+#endif
 }
 
 static void wire_put_be(unsigned char *to, unsigned long v)
 {
+#ifdef STANDARD_MODERN_C
+        network_store_32((p8 *)to, (p32)v);
+#else
         to[0] = (unsigned char)(v >> 24), to[1] = (unsigned char)(v >> 16), to[2] = (unsigned char)(v >> 8), to[3] = (unsigned char)v;
+#endif
 }
 
 static int wire_r_tag(struct wire_r *r, unsigned char tag)
@@ -66,6 +74,44 @@ static int wire_r_bool(struct wire_r *r)
         return r->p[r->at++] == '1';
 }
 
+static const char *wire_r_string(struct wire_r *r, long limit, int *isnull)
+{
+        long start, avail;
+        const unsigned char *nul;
+
+        if (isnull)
+                *isnull = 0;
+        if (r->bad || r->at >= r->length)
+        {
+                r->bad = 1;
+                return 0;
+        }
+        if (r->p[r->at] == 'N')
+        {
+                r->at++;
+                if (isnull)
+                        *isnull = 1;
+                return 0;
+        }
+        if (r->p[r->at] != 't')
+        {
+                r->bad = 1;
+                return 0;
+        }
+        start = r->at + 1;
+        avail = r->length - start;
+        if (limit > 0 && avail > limit + 1)
+                avail = limit + 1;
+        nul = avail > 0 ? (const unsigned char *)memory_first_of((void *)(r->p + start), 0, (unsigned long)avail) : 0;
+        if (!nul)
+        {
+                r->bad = 1;
+                return 0;
+        }
+        r->at = (long)(nul - r->p) + 1;
+        return (const char *)(r->p + start);
+}
+
 static long wire_len(const char *s)
 {
         return (long)string_length(s);
@@ -75,7 +121,7 @@ static void wire_w_raw(struct wire_w *w, const void *data, long n)
 {
         if (w->bad)
                 return;
-        if (w->len + n > w->cap)
+        if (n < 0 || n > w->cap - w->len)
         {
                 w->bad = 1;
                 return;
@@ -117,6 +163,14 @@ static void wire_w_string(struct wire_w *w, const char *s)
         }
         wire_w_byte(w, 't');
         wire_w_raw(w, s, wire_len(s) + 1);
+}
+
+static void wire_w_cvolume(struct wire_w *w, const unsigned long *volume, long channels)
+{
+        wire_w_byte(w, 'v');
+        wire_w_byte(w, (unsigned char)channels);
+        for (long i = 0; i < channels; i++)
+                wire_w_be32(w, volume[i]);
 }
 
 #endif // AUDIO_WIRE_INCLUDED

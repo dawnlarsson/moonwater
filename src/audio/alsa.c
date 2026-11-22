@@ -304,29 +304,43 @@ AUDIO_API int audio_rate_offered(unsigned int mask, long rate)
 AUDIO_API void audio_alsa_path(char *path, long card, long device, int stream, int control)
 {
         const char *prefix = control ? "/dev/snd/controlC" : "/dev/snd/pcmC";
+        unsigned long c = card > 0 ? (unsigned long)card : 0;
+        unsigned long d = device > 0 ? (unsigned long)device : 0;
         long at = 0;
-        char digits[12];
-        int count;
 
         while (*prefix)
                 path[at++] = *prefix++;
-        count = 0;
-        do
-                digits[count++] = (char)('0' + card % 10);
-        while ((card /= 10) > 0);
-        while (count)
-                path[at++] = digits[--count];
+#ifdef STANDARD_MODERN_C
+        at += (long)positive_into_string((p8 *)(path + at), c);
         if (!control)
         {
                 path[at++] = 'D';
-                count = 0;
-                do
-                        digits[count++] = (char)('0' + device % 10);
-                while ((device /= 10) > 0);
-                while (count)
-                        path[at++] = digits[--count];
+                at += (long)positive_into_string((p8 *)(path + at), d);
                 path[at++] = stream == AUDIO_ALSA_CAPTURE ? 'c' : 'p';
         }
+#else
+        {
+                char digits[24];
+                int count = 0;
+
+                do
+                        digits[count++] = (char)('0' + c % 10);
+                while ((c /= 10) > 0);
+                while (count)
+                        path[at++] = digits[--count];
+                if (!control)
+                {
+                        path[at++] = 'D';
+                        count = 0;
+                        do
+                                digits[count++] = (char)('0' + d % 10);
+                        while ((d /= 10) > 0);
+                        while (count)
+                                path[at++] = digits[--count];
+                        path[at++] = stream == AUDIO_ALSA_CAPTURE ? 'c' : 'p';
+                }
+        }
+#endif
         path[at] = 0;
 }
 
@@ -637,16 +651,16 @@ static long audio_pcm_frames(struct audio_pcm *pcm, long result)
 // caller's memory up to what the buffer has room for. A count past the buffer takes what fits, as the kernel does.
 AUDIO_API long audio_pcm_write(struct audio_pcm *pcm, const void *frames, long count)
 {
-        if (count < 0)
+        if (count < 0 || pcm->fd < 0 || pcm->frame_bytes <= 0 || (unsigned long)count > 0x7fffffffUL / (unsigned long)pcm->frame_bytes)
                 return AUDIO_EINVAL;
-        return audio_pcm_frames(pcm, audio_sys_write(pcm->fd, frames, (unsigned long)(count * pcm->frame_bytes)));
+        return audio_pcm_frames(pcm, audio_sys_write(pcm->fd, frames, (unsigned long)count * (unsigned long)pcm->frame_bytes));
 }
 
 AUDIO_API long audio_pcm_read(struct audio_pcm *pcm, void *frames, long count)
 {
-        if (count < 0)
+        if (count < 0 || pcm->fd < 0 || pcm->frame_bytes <= 0 || (unsigned long)count > 0x7fffffffUL / (unsigned long)pcm->frame_bytes)
                 return AUDIO_EINVAL;
-        return audio_pcm_frames(pcm, audio_sys_read(pcm->fd, frames, (unsigned long)(count * pcm->frame_bytes)));
+        return audio_pcm_frames(pcm, audio_sys_read(pcm->fd, frames, (unsigned long)count * (unsigned long)pcm->frame_bytes));
 }
 
 /*
@@ -912,10 +926,10 @@ static int audio_mixer_text_equal(const unsigned char *name, const char *text)
 {
         long i = 0;
 
-        for (; text[i]; i++)
+        for (; i < 44 && text[i]; i++)
                 if (name[i] != (unsigned char)text[i])
                         return 0;
-        return name[i] == 0;
+        return !text[i] && (i == 44 || name[i] == 0);
 }
 
 // Does the name end with the suffix; if so, how long is what comes before it.
@@ -998,6 +1012,8 @@ static long audio_mixer_zero_db(int fd, const struct audio_ctl_info *info)
                 return -1;
         if (tlv.tlv[0] == AUDIO_CTL_TLVT_DB_SCALE)
         {
+                if (max < min || max - min > (1l << 30))
+                        return -1;
                 low = (int)tlv.tlv[2];
                 step = (long)(tlv.tlv[3] & 0xffff);
                 high = low + step * (max - min);
@@ -1065,9 +1081,9 @@ static long audio_mixer_item(int fd, struct audio_ctl_info *info, const char *na
                 ask.value.enumerated.item = item;
                 if (audio_sys_ioctl(fd, AUDIO_CTL_ELEM_INFO, &ask) < 0)
                         return -1;
-                for (; name[i] && (unsigned char)ask.value.enumerated.name[i] == (unsigned char)name[i]; i++)
+                for (; i < 63 && name[i] && (unsigned char)ask.value.enumerated.name[i] == (unsigned char)name[i]; i++)
                         ;
-                if (!name[i] && !ask.value.enumerated.name[i])
+                if (!name[i] && (i == 63 || !ask.value.enumerated.name[i]))
                         return item;
         }
         return -1;
@@ -1156,8 +1172,7 @@ AUDIO_API long audio_mixer_prepare(long card, int which, struct audio_mixer_repo
                         if (audio_sys_ioctl((int)fd, AUDIO_CTL_ELEM_READ, &now) == 0 && now.value.integer[0] == 0)
                         {
                                 if (!report->left_off)
-                                        for (long i = 0; i < 44 && ids[k].name[i]; i++)
-                                                report->first_off[i] = (char)ids[k].name[i];
+                                        audio_alsa_text(report->first_off, ids[k].name, 45);
                                 report->left_off++;
                         }
                 }

@@ -359,9 +359,15 @@ static void audio_device_name(char *to, long room, const char *prefix, const str
 {
         long at = 0;
 
-        for (; *prefix && at < room - 1; prefix++)
+        if (room < 5)
+        {
+                if (room > 0)
+                        to[0] = 0;
+                return;
+        }
+        for (; *prefix && at < room - 4; prefix++)
                 to[at++] = *prefix;
-        for (long i = 0; card->id[i] && at < room - 8; i++)
+        for (long i = 0; card->id[i] && at < room - 4; i++)
         {
                 char c = card->id[i];
 
@@ -399,20 +405,13 @@ static void audio_describe(char *to, long room, const char *card, const char *de
 
 static int audio_is_hdmi(const char *label)
 {
-        for (long k = 0; label[k]; k++)
-                if ((label[k] == 'H' || label[k] == 'h') && (label[k + 1] == 'D' || label[k + 1] == 'd') && (label[k + 2] == 'M' || label[k + 2] == 'm') &&
-                    (label[k + 3] == 'I' || label[k + 3] == 'i'))
-                        return 1;
-        return 0;
+        return string_search_folded((string_address)label, (string_address) "hdmi") != null;
 }
 
 // A USB card is named by where it is plugged in ("... at usb-0000:12:00.0-6, high speed"): it is there because someone plugged it in.
 static int audio_is_usb(const char *longname)
 {
-        for (long k = 0; longname[k]; k++)
-                if (longname[k] == 'u' && longname[k + 1] == 's' && longname[k + 2] == 'b' && longname[k + 3] == '-')
-                        return 1;
-        return 0;
+        return string_search((string_address)longname, (string_address) "usb-") != null;
 }
 
 /*
@@ -817,16 +816,7 @@ static long audio_percent(const char *text)
 
 static long audio_number_text(char *to, unsigned long value)
 {
-        char digits[24];
-        long count = 0, at = 0;
-
-        do
-                digits[count++] = (char)('0' + value % 10);
-        while ((value /= 10) > 0 && count < 20);
-        while (count)
-                to[at++] = digits[--count];
-        to[at] = 0;
-        return at;
+        return (long)positive_into_string((p8 *)to, (positive)value);
 }
 
 static void audio_inputs_choose(void);
@@ -1028,12 +1018,13 @@ static void audio_inputs_save(int bits)
         }
         if (bits & 8)
         {
-                char line[PULSE_NAME + 16];
-                long n = audio_text_length(p->source[p->default_source].name);
+                char line[PULSE_NAME + 18];
+                long n;
 
                 pulse_copy(audio_service.applied_source, sizeof(audio_service.applied_source), p->source[p->default_source].name);
                 pulse_copy(audio_service.wanted_source, sizeof(audio_service.wanted_source), p->source[p->default_source].name);
-                pulse_copy(line, sizeof(line), p->source[p->default_source].name);
+                pulse_copy(line, (long)sizeof(line) - 1, p->source[p->default_source].name);
+                n = audio_text_length(line);
                 line[n] = '\n';
                 line[n + 1] = 0;
                 audio_file_write("audio.source", line, n + 1);
@@ -1091,6 +1082,8 @@ static void audio_apps_save(void)
         {
                 long n = audio_text_length(audio_service.apps[i].name);
 
+                if (length + n + 24 > (long)sizeof(text))
+                        break;
                 memory_copy(text + length, audio_service.apps[i].name, (positive)n);
                 length += n;
                 text[length++] = '\t';
@@ -1369,7 +1362,7 @@ static void audio_page_write(void)
 static void audio_page_open(void)
 {
         audio_service.page_whole = 1;
-        long fd = audio_call(syscall(openat), (positive)AT_FDCWD, (positive)audio_service.page_path, 0x2 | 0x40 | 0x80000, 0600, 0, 0), got;
+        long fd = audio_call(syscall(openat), (positive)AT_FDCWD, (positive)audio_service.page_path, 0x2 | 0x40 | 0x20000 | 0x80000, 0600, 0, 0), got; // O_RDWR | O_CREAT | O_NOFOLLOW | O_CLOEXEC
 
         if (fd < 0)
                 return;
@@ -2222,6 +2215,7 @@ static int audio_test_page(struct audio_state *copy)
                 if (got >= (long)sizeof(*copy) && ((struct audio_state *)raw)->seq == before)
                 {
                         audio_call(syscall(close), (positive)fd, 0, 0, 0, 0, 0);
+                        audio_state_trust(copy);
                         return copy->magic == AUDIO_STATE_MAGIC && copy->version == AUDIO_STATE_VERSION && copy->bytes == sizeof(*copy);
                 }
         }
@@ -2669,7 +2663,11 @@ static b32 audio_main()
                 else if (at + 1 < program_argument_count() && string_equals(option, "-P"))
                         audio_service.page_path = (const char *)program_argument(++at);
                 else if (at + 1 < program_argument_count() && string_equals(option, "-o"))
-                        audio_service.file = (int)audio_call(syscall(openat), (positive)AT_FDCWD, (positive)program_argument(++at), 0x1 | 0x40 | 0x200 | 0x80000, 0644, 0, 0);
+                {
+                        if (audio_service.file >= 0)
+                                system_close(audio_service.file);
+                        audio_service.file = (int)audio_call(syscall(openat), (positive)AT_FDCWD, (positive)program_argument(++at), 0x1 | 0x40 | 0x200 | 0x20000 | 0x80000, 0644, 0, 0);
+                }
                 else if (at + 1 < program_argument_count() && string_equals(option, "-r"))
                         rate = audio_number(program_argument(++at), 48000);
                 else if (at + 1 < program_argument_count() && string_equals(option, "-d"))

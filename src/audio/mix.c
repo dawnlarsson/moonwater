@@ -389,8 +389,9 @@ AUDIO_API long audio_encode(long format, unsigned char *dst, long frames, long c
         static union { float f[2 * AUDIO_BLOCK]; unsigned char b[2 * AUDIO_BLOCK * 4]; } pair;
 
         // Only the card's formats are made: any other would be written four bytes a sample and answered as its own width.
-        if (frames < 1 || channels < 1 || !(format == AUDIO_FORMAT_S16LE || format == AUDIO_FORMAT_S24LE || format == AUDIO_FORMAT_S24_32LE ||
-                                             format == AUDIO_FORMAT_S32LE || format == AUDIO_FORMAT_F32LE))
+        if (frames < 1 || channels < 1 || channels > AUDIO_CHANNELS_MAX ||
+            !(format == AUDIO_FORMAT_S16LE || format == AUDIO_FORMAT_S24LE || format == AUDIO_FORMAT_S24_32LE ||
+              format == AUDIO_FORMAT_S32LE || format == AUDIO_FORMAT_F32LE))
                 return 0;
         for (long done = 0; done < frames;)
         {
@@ -439,7 +440,7 @@ AUDIO_API void audio_ring_open(struct audio_ring *ring, unsigned char *data, uns
 {
         ring->data = data;
         ring->frame = frame;
-        ring->size = size - size % frame;
+        ring->size = frame ? size - size % frame : 0;
         ring->read = ring->write = ring->limit = 0;
         ring->silence = silence;
 }
@@ -452,7 +453,9 @@ AUDIO_API unsigned long audio_ring_fill(const struct audio_ring *ring)
 // What can be written at the cursor before it would pass the oldest byte not yet played, a ring's size on.
 AUDIO_API unsigned long audio_ring_room(const struct audio_ring *ring)
 {
-        return ring->size - (ring->write - ring->read);
+        unsigned long used = ring->write - ring->read;
+
+        return used < ring->size ? ring->size - used : 0;
 }
 
 // Bytes to the cursor, as many as fit and whole frames; answers how many went in. With silence set the bytes are the
@@ -460,6 +463,9 @@ AUDIO_API unsigned long audio_ring_room(const struct audio_ring *ring)
 static unsigned long audio_ring_write(struct audio_ring *ring, const unsigned char *src, unsigned long n, int silence)
 {
         unsigned long room = audio_ring_room(ring), from, first;
+
+        if (!ring->size || !ring->frame)
+                return 0;
 
         if (n > room)
                 n = room;
@@ -507,7 +513,7 @@ AUDIO_API int audio_ring_seek(struct audio_ring *ring, long mode, long long offs
         long long target;
         unsigned long base = mode == 0 ? ring->write : mode == 2 ? ring->read : mode == 3 ? ring->limit : 0;
 
-        if (mode < 0 || mode > 3 || offset % (long long)ring->frame)
+        if (!ring->frame || !ring->size || mode < 0 || mode > 3 || offset % (long long)ring->frame)
                 return -1;
         // An absolute offset is a place in the stream; the others are a distance, and none is further than the ring is big.
         if (mode == 1 ? offset < 0 : (offset > (long long)ring->size * 4 || offset < -(long long)ring->size * 4))
@@ -801,9 +807,14 @@ AUDIO_API void audio_rs_open(struct audio_resampler *rs, const struct audio_tabl
 // The frames the caller should append so that frames outputs can be made.
 AUDIO_API long audio_rs_need(const struct audio_resampler *rs, long frames)
 {
-        unsigned long last = (rs->pos + (unsigned long)(frames - 1) * rs->step) >> 32;
-        long want = (long)last + rs->table->taps, need = want - rs->have;
+        unsigned long last;
+        long want, need;
 
+        if (frames <= 0)
+                return 0;
+        last = (rs->pos + (unsigned long)(frames - 1) * rs->step) >> 32;
+        want = (long)last + rs->table->taps;
+        need = want - rs->have;
         return need > 0 ? need : 0;
 }
 
@@ -830,8 +841,13 @@ AUDIO_API long audio_rs_ready(const struct audio_resampler *rs)
 AUDIO_API long audio_rs_run(struct audio_resampler *rs, float *out0, float *out1, long frames)
 {
         const struct audio_table *table = rs->table;
-        long ready = audio_rs_ready(rs), made = ready < frames ? ready : frames, drop;
+        long ready, made, drop;
         unsigned long pos = rs->pos;
+
+        if (frames <= 0)
+                return 0;
+        ready = audio_rs_ready(rs);
+        made = ready < frames ? ready : frames;
 
         // Each output is the signal at its own place: the row between the two nearest phases (a + f * (b - a)) dotted with
         // the taps of each plane. A float sum in one chain waits on every add; the library's body takes it in lanes.
@@ -1297,6 +1313,8 @@ AUDIO_API long audio_sink_end(struct audio_sink *sink, unsigned char *dst, long 
 {
         float master = sink->master_now;
 
+        if (frames < 1)
+                return 0;
         if (frames > AUDIO_BLOCK)
                 frames = AUDIO_BLOCK;
         for (int c = 0; c < 2; c++)

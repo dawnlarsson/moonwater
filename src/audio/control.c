@@ -60,40 +60,13 @@
 
 static void ctl_w_cvolume(struct wire_w *w, const unsigned long *volume, long channels)
 {
-        wire_w_byte(w, 'v');
-        wire_w_byte(w, (unsigned char)channels);
-        for (long i = 0; i < channels; i++)
-                wire_w_be32(w, volume[i]);
+        wire_w_cvolume(w, volume, channels);
 }
 
 // A string, passed over (the null string 'N' or one that ends in its null inside the answer).
 static void ctl_r_string(struct wire_r *r)
 {
-        void *nul;
-
-        if (r->bad || r->at >= r->length)
-        {
-                r->bad = 1;
-                return;
-        }
-        if (r->p[r->at] == 'N')
-        {
-                r->at++;
-                return;
-        }
-        if (r->p[r->at] != 't')
-        {
-                r->bad = 1;
-                return;
-        }
-        // The string's null, within the answer: none there is a string that runs past it.
-        nul = memory_first_of((void *)(r->p + r->at + 1), 0, (unsigned long)(r->length - r->at - 1));
-        if (!nul)
-        {
-                r->bad = 1;
-                return;
-        }
-        r->at = (long)((const unsigned char *)nul - r->p) + 1;
+        (void)wire_r_string(r, 0, 0);
 }
 
 // A field of fixed size behind its tag, passed over: a sample spec ('a', 6), a 64-bit time ('U', 8).
@@ -231,6 +204,11 @@ static long ctl_exchange(struct ctl *c, long length)
         unsigned char *frame = c->frame;
         unsigned long tag = c->tag;
 
+        if (length < 0 || length > CTL_FRAME)
+        {
+                c->open = 0;
+                return CTL_FAILED;
+        }
         wire_put_be(frame, (unsigned long)length);
         wire_put_be(frame + 4, CTL_NONE); // a command is on the channel -1
         wire_put_be(frame + 8, 0), wire_put_be(frame + 12, 0), wire_put_be(frame + 16, 0);
@@ -594,7 +572,8 @@ static long ctl_wait(int fd, int readable, long timeout_ms)
 {
         short want = (short)(readable ? 1 : 4); // POLLIN, POLLOUT
         struct ctl_pollfd watch = {fd, want, 0};
-        long span[2] = {timeout_ms / 1000, (timeout_ms % 1000) * 1000000};
+        long ms = timeout_ms > 0 ? timeout_ms : 0;
+        long span[2] = {ms / 1000, (ms % 1000) * 1000000};
         long got = ctl_call(syscall(ppoll), (positive)&watch, 1, (positive)span, 0, 0, 0);
 
         if (got < 0)
@@ -672,16 +651,13 @@ static void ctl_disconnect(struct ctl *c)
 static long ctl_connect(struct ctl *c, const char *path)
 {
         unsigned char address[2 + 108]; // a sockaddr_un: its family, and sun_path of 108 bytes with the zero after the path
-        long length = 0, fd, until;
+        long length = wire_len(path), fd, until;
 
-        while (path[length])
-                length++;
         if (length > 107) // a path that does not fit is refused, not cut to the length that does
                 return CTL_FAILED;
         memory_zero(address, sizeof(address));
         address[0] = 1; // AF_UNIX
-        for (long at = 0; at < length; at++)
-                address[2 + at] = (unsigned char)path[at];
+        memory_copy_apart(address + 2, path, (unsigned long)length);
         fd = ctl_call(syscall(socket), 1, 1 | 0x800 | 0x80000, 0, 0, 0, 0); // SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC
         if (fd < 0)
                 return CTL_FAILED;
