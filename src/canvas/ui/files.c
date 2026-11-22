@@ -276,7 +276,7 @@ static fn files_device_describe(const struct files_tree address_to t, const stru
         static char label[FILES_NAME * 3 + 4], size[16], type[48];
         const struct files_devices address_to d = &files.big->devices;
         const p8 address_to name = files_tree_name(t, (p32)id);
-        row->file = 1 + UI_FILE_DRIVE, row->indent = n->depth ? n->depth - 1 : 0;
+        row->file = 1 + UI_FILE_DRIVE, row->indent = n->depth;
         if (n->kind == FILES_NODE_DEVICES)
         {
                 row->label = language_of("Devices"), row->gap = FILES_GROUP_GAP;
