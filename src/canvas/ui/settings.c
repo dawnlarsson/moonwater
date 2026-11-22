@@ -103,7 +103,7 @@ struct settings_item
 {
         char label[SETTINGS_ITEM_LABEL], security[12], state[SETTINGS_STATE], port[SETTINGS_PORT_ROOM], size[SETTINGS_SIZE_TEXT], access[48], detail[SETTINGS_ITEM_LABEL];
         signed short dbm;
-        unsigned char bars, flags, kind, where, segment_count, expanded, fold_live;
+        unsigned char bars, flags, kind, where, segment_count, expanded, fold_live, grants;
         unsigned short segment_more;
         int drive_idx;
         b64 fold_at;
@@ -416,7 +416,13 @@ enum { SETTINGS_ABOUT_BRAND = 0, SETTINGS_ABOUT_DISCORD = 1, SETTINGS_ABOUT_GITH
 #define SETTINGS_GPU_SAMPLES 10
 #define SETTINGS_FOLD_POOL 16
 #define SETTINGS_METRIC_NS 10000000000ll
-enum { SETTINGS_SUB_COPY = 0u, SETTINGS_SUB_DISMISS_ALL = 1u, SETTINGS_SUB_PARTITIONS = 2u, SETTINGS_SUB_PARTITION = 3u };
+enum { SETTINGS_SUB_COPY = 0u, SETTINGS_SUB_DISMISS_ALL = 1u, SETTINGS_SUB_PARTITIONS = 2u, SETTINGS_SUB_PARTITION = 3u, SETTINGS_SUB_LINK_GRANT = 4u };
+static const struct { const char address_to word, address_to label, address_to note; } settings_link_grants[4] = {
+    {"files", "Filesystem access", "Browse, upload, and download files"},
+    {"run",   "Run commands",      "Execute single remote commands"},
+    {"shell", "Interactive shell", "Open a remote terminal session"},
+    {"log",   "Kernel log",        "Stream system logs"},
+};
 #define SETTINGS_PART_FREE -1
 #define SETTINGS_PART_MORE -2
 
@@ -443,6 +449,8 @@ static unsigned int settings_gpu_status = WINDOWS_GPU_STATUS_NOT, settings_gpu_a
 static unsigned int settings_gpu_ring_drawn[SETTINGS_GPU_SAMPLES], settings_gpu_ring_processor[SETTINGS_GPU_SAMPLES];
 static char (address_to settings_drives_open)[SETTINGS_ITEM_LABEL];
 static positive settings_drives_open_room;
+static char (address_to settings_links_open)[SETTINGS_ITEM_LABEL];
+static positive settings_links_open_room;
 
 static unsigned char address_to settings_exp_ptr(int row)
 {
@@ -523,6 +531,31 @@ static fn settings_drive_keep(const char address_to name, b32 open)
         string_copy_bounded((string_address)settings_drives_open[free], (string_address)name, sizeof(settings_drives_open[free]));
 }
 
+static b32 settings_link_is_open(const char address_to name)
+{
+        for (positive at = 0; at < settings_links_open_room; at++)
+                if (settings_links_open[at][0] && string_equals((string_address)settings_links_open[at], (string_address)name)) return true;
+        return false;
+}
+
+static fn settings_link_keep(const char address_to name, b32 open)
+{
+        positive free = settings_links_open_room;
+        for (positive at = 0; at < settings_links_open_room; at++)
+                if (settings_links_open[at][0] && string_equals((string_address)settings_links_open[at], (string_address)name)) settings_links_open[at][0] = 0;
+        if (!open) return;
+        for (positive at = settings_links_open_room; at-- > 0;) free = settings_links_open[at][0] ? free : at;
+        if (free >= settings_links_open_room)
+        {
+                positive was = settings_links_open_room;
+                if (!array_store_reserve(settings_links_open, settings_links_open_room, was, was + 1, 16))
+                        return;
+                memory_zero(settings_links_open + was, (settings_links_open_room - was) * sizeof(settings_links_open[0]));
+                free = was;
+        }
+        string_copy_bounded((string_address)settings_links_open[free], (string_address)name, sizeof(settings_links_open[free]));
+}
+
 static fn settings_fold_drop(int row) { for (positive k = 0; k < SETTINGS_FOLD_POOL; k++) if (settings_fold_pool[k].row == row + 1) settings_fold_pool[k].row = 0; }
 
 static fn settings_fold_start(int row, b64 from_target)
@@ -556,9 +589,14 @@ static fn settings_toggle(int row)
         unsigned char address_to live_p = settings_fold_live_ptr(row);
         b64 address_to at_p = settings_fold_at_ptr(row);
         b64 target;
-        if (!exp_p || !live_p || !at_p || (row >= SETTINGS_ANY && !(item && (item->flags & (SETTINGS_ITEM_DRIVE | SETTINGS_ITEM_DISK))))) return;
+        if (!exp_p || !live_p || !at_p ||
+            (row >= SETTINGS_ANY && !(item && ((item->flags & (SETTINGS_ITEM_DRIVE | SETTINGS_ITEM_DISK)) || (item->kind == SETTINGS_LINK && item->where == 1)))))
+                return;
         *exp_p = !*exp_p;
-        if (item) settings_drive_keep(item->flags & SETTINGS_ITEM_DISK ? item->port : item->label, *exp_p);
+        if (item && item->kind == SETTINGS_LINK && item->where == 1)
+                settings_link_keep(item->label, *exp_p);
+        else if (item)
+                settings_drive_keep(item->flags & SETTINGS_ITEM_DISK ? item->port : item->label, *exp_p);
         target = *exp_p ? UI_ONE : 0;
         if (ui_kit.motion) *at_p = target, *live_p = 0, settings_fold_drop(row);
         else settings_fold_start(row, *at_p - target);
@@ -706,6 +744,15 @@ static fn settings_sub_describe(int at, struct ui_row address_to row)
         const struct settings_sub address_to sub = &settings_sub[at];
         if (sub->action == SETTINGS_SUB_PARTITIONS || sub->action == SETTINGS_SUB_PARTITION)
                 return settings_part_describe(sub, row);
+        if (sub->action == SETTINGS_SUB_LINK_GRANT && sub->part >= 0 && sub->part < 4)
+        {
+                const struct settings_item address_to item = settings_item(sub->owner);
+                row->sub = 1, row->section = sub->section, row->kind = UI_ROW_SWITCH;
+                row->label = settings_link_grants[sub->part].label, row->note = settings_link_grants[sub->part].note;
+                row->on = item && (item->grants & (1u << sub->part)) != 0;
+                row->reveal = settings_fold_at_get(sub->owner);
+                return;
+        }
         row->sub = 1, row->section = sub->section, row->label = sub->text, row->value = sub->words, row->dim = sub->detail;
         row->reveal = sub->owner >= 0 && !settings_always_open(sub->owner) ? settings_fold_at_get(sub->owner) : UI_ONE;
 }
@@ -1468,6 +1515,7 @@ static fn settings_layout(void)
 
 static fn settings_edit_end(void);
 static int settings_drive_rows(int row, int count);
+static int settings_link_rows(int row, int count);
 static fn settings_edit_begin(int row, const char address_to text, b32 masked);
 static b32 settings_row_is(int at, const char address_to path);
 
@@ -1778,7 +1826,7 @@ static fn settings_rebuild(void)
                 {
                         int row = SETTINGS_LIST_ID(list, at);
                         if ((filtered ? settings_matches(row) : group == settings.page.chosen) && ui_list_reserve(&settings.list, count + 1))
-                                settings.list.id[count++] = row, count = settings_drive_rows(row, count);
+                                settings.list.id[count++] = row, count = settings_link_rows(row, settings_drive_rows(row, count));
                 }
         }
         for (int w = 0; w < SETTINGS_ABOUT_COUNT; w++)
@@ -2007,9 +2055,10 @@ static fn settings_join(string_address address_to words, positive count, char ad
                 at = settings_cat_sep(text, room, at, " ", (const char address_to)words[i]);
 }
 
-static const struct settings_act_spec { char code; b32 takes_pass; const char address_to radio, address_to how; } settings_act_specs[] = {
-    {'j', true, "wifi", "add"}, {'f', false, "wifi", "remove"}, {'a', false, "bluetooth", "add"}, {'d', false, "bluetooth", "remove"},
-    {'v', false, "device", "allow"}, {'x', false, "device", "deny"}, {'r', false, "link", "remove"},
+static const struct settings_act_spec { char code; b32 takes_pass, takes_arg; const char address_to radio, address_to how; } settings_act_specs[] = {
+    {'j', true, false, "wifi", "add"}, {'f', false, false, "wifi", "remove"}, {'a', false, false, "bluetooth", "add"}, {'d', false, false, "bluetooth", "remove"},
+    {'v', false, false, "device", "allow"}, {'x', false, false, "device", "deny"}, {'r', false, false, "link", "remove"},
+    {'l', false, true, "link", "allow"}, {'n', false, true, "link", "deny"},
 };
 
 static const char address_to settings_act_words(string_address address_to words)
@@ -2025,9 +2074,17 @@ static const char address_to settings_act_words(string_address address_to words)
                 return null;
         for (char address_to at = name; *at; at++)
                 if (*at == '\n') { *at = 0, pass = at + 1; break; }
-        pass = spec->takes_pass && pass && pass[0] ? pass : null;
         words[0] = settings.moonwater, words[1] = (string_address)spec->radio, words[2] = (string_address)spec->how;
-        words[3] = (string_address)name, words[4] = pass ? (string_address) "-" : null, words[5] = null;
+        words[3] = (string_address)name, words[4] = null, words[5] = null;
+        if (spec->takes_arg)
+        {
+                if (!pass || !pass[0])
+                        return words[0] = null, null;
+                words[4] = (string_address)pass;
+                return null;
+        }
+        pass = spec->takes_pass && pass && pass[0] ? pass : null;
+        words[4] = pass ? (string_address) "-" : null;
         return pass;
 }
 
@@ -2084,7 +2141,7 @@ static fn settings_next_job(void)
                 else if (settings.job == SETTINGS_JOB_ACT)
                 {
                         const char address_to pass = settings_act_words(words);
-                        b32 started = words[0] && settings_start(words, 4 + (positive)(pass != null), pass);
+                        b32 started = words[0] && settings_start(words, words[4] ? 5 : 4, pass);
                         memory_zero(settings.job_value, sizeof(settings.job_value));
                         if (started) return;
                         count = 0;
@@ -2442,6 +2499,52 @@ static fn settings_drive_follow(void)
         }
 }
 
+static int settings_link_rows(int row, int count)
+{
+        const struct settings_item address_to item = settings_item(row);
+        int section = settings_section_start(row), next;
+        if (!item || item->kind != SETTINGS_LINK || item->where != 1 || (!settings_exp_get(row) && !settings_fold_at_get(row)))
+                return count;
+        settings_sub_owner = row;
+        for (int k = 0; k < 4; k++)
+        {
+                if ((next = settings_sub_add(section, false, null, settings_link_grants[k].label, 0, SETTINGS_SUB_LINK_GRANT, k, count)) == count)
+                        break;
+                count = next;
+        }
+        return count;
+}
+
+static fn settings_link_follow(void)
+{
+        for (int at = 0; at < settings.item_count[3]; at++)
+        {
+                int row = SETTINGS_LIST_ID(3, at);
+                struct settings_item address_to it = &settings.item[3][at];
+                b32 open = it->kind == SETTINGS_LINK && it->where == 1 && settings_link_is_open(it->label);
+                if (it->expanded != open)
+                        it->expanded = (unsigned char)open, it->fold_at = open ? UI_ONE : 0, it->fold_live = 0, settings_fold_drop(row);
+        }
+}
+
+static unsigned char settings_link_parse_grants(const char address_to text, positive size)
+{
+        unsigned char mask = 0;
+        positive at = 0;
+        while (at < size && text[at] != ',')
+        {
+                while (at < size && text[at] == ' ') at++;
+                positive start = at;
+                while (at < size && text[at] != ' ' && text[at] != ',') at++;
+                positive len = at - start;
+                for (int k = 0; len && k < 4; k++)
+                        if (string_length((string_address)settings_link_grants[k].word) == len &&
+                            !memory_compare(text + start, settings_link_grants[k].word, len))
+                                mask |= (unsigned char)(1u << k);
+        }
+        return mask;
+}
+
 static const char address_to settings_state_word(const char address_to state)
 {
         static const struct { const char address_to key; unsigned int text; } table[] = {
@@ -2686,6 +2789,7 @@ static fn settings_feed_links(void)
                                 while (cut + 1 < c.n && (c.s[cut] != ' ' || c.s[cut + 1] != ' ')) cut++;
                                 sc_trim_at(&grants, "  next:");
                                 it->kind = SETTINGS_LINK, it->where = 1, it->flags = SETTINGS_ITEM_SAVED;
+                                it->grants = settings_link_parse_grants(grants.s, grants.n);
                                 settings_slice(it->access, sizeof(it->access), grants.s, grants.n);
                                 settings_item_label(it, c.s, cut);
                                 count++;
@@ -2693,7 +2797,7 @@ static fn settings_feed_links(void)
                         else if (sc_eat(&c, "nobody")) settings_note_add(3, &count, 1, text + 2, size - 2);
                 }
         }
-        settings.item_count[3] = (int)count;
+        settings.item_count[3] = (int)count, settings_link_follow();
 }
 
 static struct ui_columns address_to settings_columns_for(int list)
@@ -2758,6 +2862,8 @@ static fn settings_list_sort(int list)
                         }
         if (list == 2)
                 settings_drive_follow();
+        else if (list == 3)
+                settings_link_follow();
 }
 
 static fn settings_focus_keep(int list, char address_to keep, positive room)
@@ -3388,6 +3494,8 @@ static fn settings_item_activate(int row, const struct settings_item address_to 
                 settings_port_set(item, !(item->flags & SETTINGS_ITEM_JOINED));
         else if (item->kind == SETTINGS_ADD)
                 settings_edit_begin(row, "", false), settings_say((string_address)WORDS(settings_type_device));
+        else if (item->kind == SETTINGS_LINK && item->where == 1)
+                settings_toggle(row);
         else if (item->flags & SETTINGS_ITEM_DRIVE)
                 settings_say((string_address)WORDS(settings_item_drive));
         else if (item->kind != SETTINGS_NOTE)
@@ -3438,6 +3546,20 @@ static fn settings_row_activate(int row, int offset, int way)
                 settings_change(row, next);
 }
 
+static fn settings_link_grant_toggle(int at)
+{
+        if (at < 0 || at >= settings_sub_count || settings_sub[at].action != SETTINGS_SUB_LINK_GRANT ||
+            settings_sub[at].part < 0 || settings_sub[at].part >= 4)
+                return;
+        struct settings_item address_to item = settings_item(settings_sub[at].owner);
+        if (!item || item->kind != SETTINGS_LINK || item->where != 1)
+                return;
+        unsigned char bit = (unsigned char)(1u << settings_sub[at].part);
+        b32 allow = (item->grants & bit) == 0;
+        item->grants ^= bit;
+        settings_act(allow ? 'l' : 'n', item->label, settings_link_grants[settings_sub[at].part].word);
+}
+
 static fn settings_activate(int row, int way)
 {
         int offset;
@@ -3446,7 +3568,10 @@ static fn settings_activate(int row, int way)
         case SETTINGS_DOM_ROW:     settings_row_activate(row, offset, way); break;
         case SETTINGS_DOM_COMMAND: if (settings_takes(row)) settings_edit_begin(row, "", false); else settings_run(row, ""); break;
         case SETTINGS_DOM_LIST:    if (settings_item(row)) settings_item_activate(row, settings_item(row)); break;
-        case SETTINGS_DOM_SUB:     if (settings_partitions_owner(row) >= 0) settings_toggle(settings_partitions_owner(row)), ui_page_redraw(&settings.page); break;
+        case SETTINGS_DOM_SUB:
+                if (settings_partitions_owner(row) >= 0) settings_toggle(settings_partitions_owner(row)), ui_page_redraw(&settings.page);
+                else if (offset < settings_sub_count && settings_sub[offset].action == SETTINGS_SUB_LINK_GRANT) settings_link_grant_toggle(offset), ui_page_redraw(&settings.page);
+                break;
         case SETTINGS_DOM_TRY:     if (offset == SETTINGS_TRY_REPEAT) settings_edit_begin(row, "", false); break;
         case SETTINGS_DOM_ABOUT:   settings_about_press(row), ui_page_redraw(&settings.page); break;
         }
@@ -3665,7 +3790,10 @@ static b32 settings_key(const struct window_event address_to event)
         if ((event->a == UI_KEY_RIGHT || event->a == UI_KEY_LEFT) && settings.list.focus >= 0 && settings_editing() < 0 && !settings_filter_typed())
         {
                 int drive = settings_partitions_owner(settings.list.focus), row = drive >= 0 ? drive : settings.list.focus;
-                int exp = drive >= 0 ? (settings_exp_get(drive) ? UI_ROW_EXPANDER_OPEN : UI_ROW_EXPANDER_SHUT) : row < SETTINGS_ANY ? settings_expander(row) : 0;
+                const struct settings_item address_to lit = drive < 0 && row >= SETTINGS_ANY ? settings_item(row) : null;
+                int exp = drive >= 0 ? (settings_exp_get(drive) ? UI_ROW_EXPANDER_OPEN : UI_ROW_EXPANDER_SHUT)
+                        : row < SETTINGS_ANY ? settings_expander(row)
+                        : (lit && lit->kind == SETTINGS_LINK && lit->where == 1) ? (lit->expanded ? UI_ROW_EXPANDER_OPEN : UI_ROW_EXPANDER_SHUT) : 0;
                 if (exp && (event->a == UI_KEY_RIGHT) == (exp == UI_ROW_EXPANDER_SHUT))
                         return settings_toggle(row), ui_page_redraw(&settings.page), true;
         }
@@ -3816,6 +3944,7 @@ static fn settings_describe_item(int id, const struct settings_item address_to i
                 if (item->where == 0)
                         row->note = item->detail[0] ? item->detail : null, row->value = item->access[0] ? item->access : null;
                 else
+                        row->expander = item->expanded ? UI_ROW_EXPANDER_OPEN : UI_ROW_EXPANDER_SHUT, row->turn = item->fold_at,
                         row->columns = settings_columns_for(3), row->cells[1] = item->access[0] ? item->access : null,
                         row->cells[2] = item->detail[0] ? item->detail : null, row->value = row->cells[2] ? row->cells[2] : row->cells[1];
         }
@@ -4152,6 +4281,7 @@ static fn settings_press_at(void)
         if (dom == SETTINGS_DOM_SUB)
         {
                 if (settings_partitions_owner(row) >= 0) settings_toggle(settings_partitions_owner(row));
+                else if (offset < settings_sub_count && settings_sub[offset].action == SETTINGS_SUB_LINK_GRANT) settings_link_grant_toggle(offset);
                 else if (offset < settings_sub_count && settings_sub[offset].action == SETTINGS_SUB_DISMISS_ALL) windows_kernel_dismiss(settings.own.table, KERNEL_NOTICE_ALL);
                 else if (offset < settings_sub_count && settings_sub[offset].action != SETTINGS_SUB_PARTITION) settings_copy(offset);
                 return ui_page_redraw(&settings.page);

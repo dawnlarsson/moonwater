@@ -47,6 +47,36 @@ enum { FILES_MENU_OPEN = 16, FILES_MENU_EDITOR, FILES_MENU_TERMINAL, FILES_MENU_
        FILES_MENU_WALLPAPER, FILES_MENU_WALLPAPER_OF,
        FILES_ACT_BACK = 64, FILES_ACT_FWD, FILES_ACT_UP, FILES_ACT_RELOAD, FILES_ACT_FIND, FILES_ACT_CTX, FILES_ACT_SHEET };
 
+#define FILES_PEERS_MOST 16
+#define FILES_RPCS_MOST 16
+enum { FILES_RPC_NONE, FILES_RPC_INFO, FILES_RPC_TREE_LIST, FILES_RPC_NAV_LIST, FILES_RPC_READ };
+
+struct files_rpc
+{
+        p32 req_id;
+        p8 kind, machine;
+        p8 path[FILES_PATH];
+};
+
+struct files_peer
+{
+        p8 used, machine;
+        p8 name[WATERLINK_NAME_MAX], key[32];
+        p32 may;
+        b32 online, info_loaded;
+        struct link_fs_client fs;
+};
+
+struct files_remote_read
+{
+        b32 active;
+        p8 machine;
+        p32 req_id;
+        bipolar fd;
+        p64 offset;
+        p8 remote_path[FILES_PATH], local_path[FILES_PATH], name[FILES_NAME];
+};
+
 struct files_big
 {
         struct files_model model;
@@ -55,6 +85,11 @@ struct files_big
         struct files_job job;
         struct files_move move;
         struct files_tree tree;
+        struct files_peer peers[FILES_PEERS_MOST];
+        p32 peer_count;
+        struct files_rpc rpcs[FILES_RPCS_MOST];
+        struct files_remote_read remote_read;
+        char peer_crumb[WATERLINK_NAME_MAX * 3 + 4];
         char crumb_words[FILES_TRAIL][FILES_NAME * 3 + 4], note[256], status[192], sheet[FILES_SHEET_LINES][FILES_NAME * 3 + 64];
         p8 band_base[FILES_MOST / 8], git_state[FILES_MOST];
 };
@@ -100,10 +135,20 @@ static b32 files_transfer(const p8 address_to paths, p32 count, int row, int how
 static b32 files_act(int which);
 static fn files_moved(void);
 static fn files_open_with(b32 editor);
+static fn files_remote_nav(void);
+static struct files_peer address_to files_peer_by_machine(p8 machine);
+static struct files_peer address_to files_peer_by_name(const p8 address_to name);
 
 static inline b32 files_in_rect(int x, int y, int rx, int ry, int rw, int rh) { return x >= rx && x < rx + rw && y >= ry && y < ry + rh; }
 static inline fn files_clear_msg(void) { files.said = 0, files.big->note[0] = 0; }
-static inline fn files_reload(void) { files_model_reload(&files.big->model), files.dirty = true; }
+static inline fn files_reload(void)
+{
+        if (files_model_is_remote(&files.big->model))
+                files_remote_nav();
+        else
+                files_model_reload(&files.big->model);
+        files.dirty = true;
+}
 static inline b32 files_tree_trash(const p8 address_to name, positive len) { return (len == 6 && !memory_compare(name, ".Trash", 6)) || (len == 5 && !memory_compare(name, "Trash", 5)); }
 static b32 files_row_selected(int id) { return id >= 0 && files_model_chosen(&files.big->model, (p32)id); }
 static fn files_damaged(int top, int bottom) { (void)top, (void)bottom, files.dirty = true; }
@@ -227,7 +272,26 @@ static fn files_tree_describe(int id, struct ui_row address_to row)
         unsigned int icon;
         if (!n)
                 return;
-        if (n->depth == 0 && n->place > FILES_PLACE_NONE && n->place <= FILES_PLACE_ROOT)
+        if (n->kind == FILES_NODE_MACHINE)
+        {
+                if (n->machine == 0)
+                        row->label = language_text(LANGUAGE_files_this_machine);
+                else
+                {
+                        const p8 address_to name = files_tree_name(t, (p32)id);
+                        ui_label_foreign(label, sizeof(label), name, n->length), row->label = label;
+                        if (n->flags & FILES_NODE_ONLINE)
+                                row->mark = true, row->mark_ink = ui_role(UI_SUCCESS);
+                        if (!(n->flags & FILES_NODE_ONLINE) || !(n->flags & FILES_NODE_MAY_FILES))
+                                row->dim = true;
+                }
+                icon = UI_FILE_MACHINE;
+                row->indent = n->depth, row->file = 1 + icon;
+                row->expander = n->open ? UI_ROW_EXPANDER_OPEN : UI_ROW_EXPANDER_SHUT;
+                row->separator = id > 0 && n->machine == 1;
+                return;
+        }
+        if (n->depth == 1 && n->place > FILES_PLACE_NONE && n->place <= FILES_PLACE_ROOT)
                 row->label = language_text(places[n->place].word), icon = places[n->place].icon;
         else
         {
@@ -237,12 +301,15 @@ static fn files_tree_describe(int id, struct ui_row address_to row)
         }
         row->indent = n->depth, row->file = 1 + icon;
         row->expander = n->open ? UI_ROW_EXPANDER_OPEN : n->read && !n->has ? 0 : UI_ROW_EXPANDER_SHUT;
-        row->separator = id > 0 && n->kind == FILES_NODE_DRIVE && t->node[id - 1].kind != FILES_NODE_DRIVE;
+        row->separator = id > 0 && n->kind == FILES_NODE_DRIVE && t->node[id - 1].kind != FILES_NODE_DRIVE && t->node[id - 1].kind != FILES_NODE_MACHINE;
 }
 
 static fn files_tree_follow(void)
 {
-        files.tree_shown = files_tree_reveal(&files.big->tree, files.big->model.path);
+        const struct files_model address_to m = &files.big->model;
+        struct files_peer address_to p = files_model_is_remote(m) ? files_peer_by_name(m->peer) : null;
+        p8 machine = p ? p->machine : 0;
+        files.tree_shown = files_tree_reveal_in(&files.big->tree, machine, m->path);
         if (files.tree_shown != FILES_NO)
                 files.tree_at = files.tree_shown, files.tree_reseat = true;
 }
@@ -320,11 +387,26 @@ static fn files_crumbs_lay(void)
 {
         struct ui_trail address_to t = &files.crumbs;
         const struct files_trail address_to trail = &files.trail;
-        t->count = trail->count, t->current = trail->current;
-        t->separator = "/", t->rooted = trail->count && trail->from[0] == 0 && trail->to[0] == 1;
-        for (int k = 0; k < trail->count; k++)
-                ui_label_foreign(files.big->crumb_words[k], sizeof(files.big->crumb_words[k]), trail->path + trail->from[k], (positive)(trail->to[k] - trail->from[k])),
-                    t->label[k] = files.big->crumb_words[k];
+        const struct files_model address_to m = &files.big->model;
+        if (files_model_is_remote(m))
+        {
+                ui_label_foreign(files.big->peer_crumb, sizeof(files.big->peer_crumb), m->peer, string_length((string_address)m->peer));
+                t->label[0] = files.big->peer_crumb;
+                t->count = trail->count > 0 ? trail->count : 1;
+                t->current = trail->current < t->count ? trail->current : t->count - 1;
+                t->separator = "/", t->rooted = false;
+                for (int k = 1; k < trail->count; k++)
+                        ui_label_foreign(files.big->crumb_words[k], sizeof(files.big->crumb_words[k]), trail->path + trail->from[k], (positive)(trail->to[k] - trail->from[k])),
+                            t->label[k] = files.big->crumb_words[k];
+        }
+        else
+        {
+                t->count = trail->count, t->current = trail->current;
+                t->separator = "/", t->rooted = trail->count && trail->from[0] == 0 && trail->to[0] == 1;
+                for (int k = 0; k < trail->count; k++)
+                        ui_label_foreign(files.big->crumb_words[k], sizeof(files.big->crumb_words[k]), trail->path + trail->from[k], (positive)(trail->to[k] - trail->from[k])),
+                            t->label[k] = files.big->crumb_words[k];
+        }
         for (int k = 0; k < UI_TRAIL_MOST; k++)
                 t->lost[k] = k < trail->count && trail->lost[k];
         t->x = files.crumbs_box.x, t->y = files.crumbs_box.y, t->w = files.crumbs_box.w, t->h = files.crumbs_box.h;
@@ -627,7 +709,7 @@ static fn files_delete(void)
         char names[256];
         p32 count = files_ask_names(names, sizeof(names));
         files.said = 0;
-        if (!count || m->state != FILES_READY || files.big->job.state == FILES_JOB_RUNNING)
+        if (!count || files_model_is_remote(m) || m->state != FILES_READY || files.big->job.state == FILES_JOB_RUNNING)
                 return;
         if (files.armed && files.armed_at == m->revision)
         {
@@ -647,6 +729,8 @@ static fn files_new_folder(void)
         struct files_model address_to m = &files.big->model;
         static p8 name[FILES_NAME];
         int did = FILES_DID_EXISTS;
+        if (files_model_is_remote(m))
+                return;
         for (int n = 1; n < 100 && did == FILES_DID_EXISTS; n++)
         {
                 string_copy_bounded(name, (string_address)WORDS(files_new_folder), FILES_NAME - 8);
@@ -674,7 +758,7 @@ static fn files_bin_act(b32 restore)
         if (!restore)
         {
                 files_clear_msg(), files.armed = false;
-                if (m->state != FILES_READY)
+                if (files_model_is_remote(m) || m->state != FILES_READY)
                         return;
         }
         else if (!files_in_bin())
@@ -1163,6 +1247,12 @@ static fn files_crumb_go(int which)
         if (which < 0 || which >= trail->count || which == trail->current)
                 return;
         files_trail_path(trail, which, to);
+        if (files_model_is_remote(m))
+        {
+                if (files_model_go_remote(m, m->peer, (string_address)(which == 0 ? (const p8 address_to) "/" : to), true))
+                        files_moved(), files_remote_nav();
+                return;
+        }
         if (which > trail->current)
         {
                 if ((seen = files_trail_open(trail, which, &handle, &error)) != FILES_SAME)
@@ -1244,6 +1334,16 @@ static fn files_open(p32 place)
                 m->cursor = place, files_open_with(true);
                 return;
         }
+        if (files_model_is_remote(m))
+        {
+                p8 into[FILES_PATH];
+                if (e->kind == FILES_KIND_DIRECTORY && files_path_join(into, FILES_PATH, m->path, files_model_name(m, e)) &&
+                    files_model_go_remote(m, m->peer, (string_address)into, true))
+                        files_moved(), files_remote_nav();
+                else if (e->kind == FILES_KIND_LINK)
+                        files.said = LANGUAGE_files_link, files.dirty = true;
+                return;
+        }
         if ((came = files_model_enter(m, place)) == FILES_SAME)
                 files_moved();
         else if (came == FILES_REFUSED)
@@ -1256,7 +1356,11 @@ static b32 files_act(int which)
 {
         struct files_model address_to m = &files.big->model;
         if (which == 2 ? files_model_up(m) : files_model_back(m, which == 1))
+        {
                 files_moved();
+                if (files_model_is_remote(m))
+                        files_remote_nav();
+        }
         return true;
 }
 
@@ -1421,11 +1525,21 @@ static b32 files_is_png(struct files_model address_to m, const struct files_entr
         return len > 4 && name[len - 4] == '.' && (name[len - 3] | 32) == 'p' && (name[len - 2] | 32) == 'n' && (name[len - 1] | 32) == 'g';
 }
 
+static fn files_remote_open_file(struct files_peer address_to p, const p8 address_to remote_path, const p8 address_to name);
+
 static fn files_open_with(b32 editor)
 {
         struct files_model address_to m = &files.big->model;
         const struct files_entry address_to e = files_model_entry(m, m->cursor);
         static p8 path[FILES_PATH];
+        if (files_model_is_remote(m))
+        {
+                struct files_peer address_to p = files_peer_by_name(m->peer);
+                if (editor && p && e && e->kind != FILES_KIND_DIRECTORY &&
+                    files_path_join(path, sizeof(path), m->path, files_model_name(m, e)))
+                        files_remote_open_file(p, path, files_model_name(m, e));
+                return;
+        }
         if (editor)
         {
                 string_address words[5] = {(string_address) "/editor", (string_address) "-f", files_app.font ? files_app.font : (string_address)UI_FONT_REGULAR, (string_address)path, null};
@@ -1565,7 +1679,7 @@ static fn files_menu_do(int id)
         case FILES_MENU_BIN_EMPTY: files_bin_empty(); break;
         case FILES_MENU_NEW_FOLDER: files_new_folder(); break;
         case FILES_MENU_PROPERTIES: files_sheet_open(files.sheet_folder, files.sheet_x, files.sheet_y); break;
-        case FILES_MENU_HIDDEN: m->hidden = !m->hidden, files_model_reload(m); break;
+        case FILES_MENU_HIDDEN: m->hidden = !m->hidden, files_reload(); break;
         case FILES_MENU_ALL: files_select_all(m); break;
         case FILES_ACT_BACK:
         case FILES_ACT_FWD:
@@ -1577,16 +1691,436 @@ static fn files_menu_do(int id)
         }
 }
 
+/* ---- Waterlink remote peers & async FS RPC ---- */
+
+static struct files_peer address_to files_peer_by_machine(p8 machine)
+{
+        for (p32 k = 0; k < files.big->peer_count; k++)
+                if (files.big->peers[k].used && files.big->peers[k].machine == machine)
+                        return &files.big->peers[k];
+        return null;
+}
+
+static struct files_peer address_to files_peer_by_name(const p8 address_to name)
+{
+        if (!name || !name[0])
+                return null;
+        for (p32 k = 0; k < files.big->peer_count; k++)
+                if (files.big->peers[k].used && string_equals((string_address)files.big->peers[k].name, (string_address)name))
+                        return &files.big->peers[k];
+        return null;
+}
+
+static p32 files_tree_machine_node(const struct files_tree address_to t, p8 machine)
+{
+        for (p32 k = 0; k < t->count; k++)
+                if (t->node[k].kind == FILES_NODE_MACHINE && t->node[k].machine == machine)
+                        return k;
+        return FILES_NO;
+}
+
+static fn files_peers_sync(void)
+{
+        link_peers lp;
+        link_state st;
+        b32 has_state;
+        positive st_got = 0;
+        struct files_tree address_to t = &files.big->tree;
+        memory_zero(&lp, sizeof(lp));
+        memory_zero(&st, sizeof(st));
+        link_peers_load(&lp);
+        has_state = link_read_private_records(LINK_STATE_PATH, (p8 address_to)&st, sizeof(st), sizeof(st), &st_got) == 0 && st_got == sizeof(st);
+        for (positive i = 0; i < lp.count; i++)
+        {
+                const struct waterlink_peer address_to wp = &lp.peer[i];
+                struct files_peer address_to p = null;
+                b32 online = false;
+                p8 flags;
+                p32 node;
+                if (wp->flags & WATERLINK_PEER_BLOCKED)
+                        continue;
+                for (p32 k = 0; k < files.big->peer_count; k++)
+                        if (files.big->peers[k].used && !memory_compare(files.big->peers[k].key, wp->key, 32))
+                        {
+                                p = &files.big->peers[k];
+                                break;
+                        }
+                if (has_state)
+                {
+                        for (p32 j = 0; j < st.open_count && j < LINK_SESSIONS && !online; j++)
+                                if (!memory_compare(st.open[j].key, wp->key, 32))
+                                        online = true;
+                        for (p32 j = 0; j < st.seen_count && j < LINK_PEERS_MAX && !online; j++)
+                                if (!memory_compare(st.seen[j].key, wp->key, 32) && st.seen[j].seen > 0)
+                                        online = true;
+                }
+                if (!p)
+                {
+                        if (files.big->peer_count >= FILES_PEERS_MOST)
+                                continue;
+                        p = &files.big->peers[files.big->peer_count];
+                        memory_zero(p, sizeof(*p));
+                        p->used = true;
+                        p->machine = (p8)(files.big->peer_count + 1);
+                        files.big->peer_count++;
+                }
+                if (p->fs.used && p->fs.state == LINK_FS_READY)
+                        online = true;
+                memory_copy(p->key, wp->key, 32);
+                string_copy_bounded((string_address)p->name, (string_address)wp->name, WATERLINK_NAME_MAX);
+                p->may = wp->may, p->online = online;
+                flags = (online ? FILES_NODE_ONLINE : 0) | ((wp->may & WATERLINK_MAY_FILES) ? FILES_NODE_MAY_FILES : 0);
+                node = files_tree_machine_node(t, p->machine);
+                if (node == FILES_NO)
+                        files_tree_add_machine(t, p->name, p->machine, flags, false);
+                else
+                        t->node[node].flags = (p8)((t->node[node].flags & FILES_NODE_LOADING) | flags);
+        }
+}
+
+static b32 files_peer_ensure(struct files_peer address_to p)
+{
+        if (!p)
+                return false;
+        if (!(p->may & WATERLINK_MAY_FILES))
+                return files.said = LANGUAGE_files_remote_denied, files.dirty = true, false;
+        if (!p->fs.used || p->fs.state == LINK_FS_FAILED)
+        {
+                if (p->fs.used)
+                        link_fs_close(&p->fs);
+                if (!link_fs_open(&p->fs, (string_address)p->name))
+                        return files.said = LANGUAGE_files_remote_offline, files.dirty = true, false;
+        }
+        return true;
+}
+
+static fn files_rpc_put(p8 machine, p32 req_id, p8 kind, const p8 address_to path)
+{
+        for (int k = 0; k < FILES_RPCS_MOST; k++)
+                if (files.big->rpcs[k].kind == FILES_RPC_NONE)
+                {
+                        files.big->rpcs[k].req_id = req_id, files.big->rpcs[k].kind = kind, files.big->rpcs[k].machine = machine;
+                        string_copy_bounded((string_address)files.big->rpcs[k].path, (string_address)(path ? path : (const p8 address_to) ""), FILES_PATH);
+                        return;
+                }
+}
+
+static b32 files_rpc_take(p8 machine, p32 req_id, struct files_rpc address_to out)
+{
+        for (int k = 0; k < FILES_RPCS_MOST; k++)
+                if (files.big->rpcs[k].kind != FILES_RPC_NONE && files.big->rpcs[k].machine == machine && files.big->rpcs[k].req_id == req_id)
+                {
+                        *out = files.big->rpcs[k], files.big->rpcs[k].kind = FILES_RPC_NONE;
+                        return true;
+                }
+        return false;
+}
+
+static fn files_remote_request_info(struct files_peer address_to p)
+{
+        p32 id, node;
+        if (!files_peer_ensure(p))
+                return;
+        if ((id = link_fs_request(&p->fs, FS_OP_INFO, null, 0)))
+        {
+                files_rpc_put(p->machine, id, FILES_RPC_INFO, null);
+                node = files_tree_machine_node(&files.big->tree, p->machine);
+                if (node != FILES_NO)
+                        files.big->tree.node[node].flags |= FILES_NODE_LOADING;
+        }
+}
+
+static fn files_remote_request_list(struct files_peer address_to p, const p8 address_to path, b32 dirs_only, p8 rpc_kind)
+{
+        p8 req[FILES_PATH + 4];
+        positive plen = path ? string_length((string_address)path) : 0;
+        p32 id;
+        if (!plen || plen >= FILES_PATH || !files_peer_ensure(p))
+                return;
+        req[0] = (p8)((files.big->model.hidden && !dirs_only ? 1 : 0) | (dirs_only ? 2 : 0));
+        link_fs_put16(req + 1, (p16)plen);
+        memory_copy(req + 3, path, plen);
+        if ((id = link_fs_request(&p->fs, FS_OP_LIST, req, (p32)(3 + plen))))
+                files_rpc_put(p->machine, id, rpc_kind, path);
+}
+
+static fn files_remote_nav(void)
+{
+        struct files_model address_to m = &files.big->model;
+        struct files_peer address_to p = files_peer_by_name(m->peer);
+        if (!p || !files_peer_ensure(p))
+        {
+                files_model_fail(m, -13, true), files.dirty = true;
+                return;
+        }
+        files_remote_request_list(p, m->path, false, FILES_RPC_NAV_LIST);
+}
+
+static fn files_remote_read_chunk(struct files_peer address_to p)
+{
+        struct files_remote_read address_to rr = &files.big->remote_read;
+        p8 req[FILES_PATH + 16];
+        positive plen = string_length((string_address)rr->remote_path);
+        p32 id;
+        if (!rr->active || !plen || plen >= FILES_PATH)
+                return;
+        link_fs_put64(req, rr->offset);
+        link_fs_put32(req + 8, 65536u);
+        link_fs_put16(req + 12, (p16)plen);
+        memory_copy(req + 14, rr->remote_path, plen);
+        if ((id = link_fs_request(&p->fs, FS_OP_READ, req, (p32)(14 + plen))))
+                rr->req_id = id, files_rpc_put(p->machine, id, FILES_RPC_READ, rr->remote_path);
+}
+
+static fn files_remote_read_abort(void)
+{
+        struct files_remote_read address_to rr = &files.big->remote_read;
+        if (rr->active)
+                files_close(&rr->fd), rr->active = false;
+}
+
+static fn files_remote_open_file(struct files_peer address_to p, const p8 address_to remote_path, const p8 address_to name)
+{
+        struct files_remote_read address_to rr = &files.big->remote_read;
+        p8 dir[FILES_PATH], safe[FILES_NAME];
+        char shown[FILES_NAME * 3 + 4];
+        positive nlen = string_length((string_address)name);
+        if (!files_peer_ensure(p) || !nlen || nlen >= FILES_NAME)
+                return;
+        files_remote_read_abort();
+        string_copy_bounded((string_address)dir, (string_address) "/tmp/files-wl-", sizeof(dir));
+        string_append_bounded((string_address)dir, (string_address)p->name, sizeof(dir));
+        if (!files_bin_folders(dir))
+                return;
+        for (positive k = 0; k < nlen; k++)
+                safe[k] = name[k] == '/' ? '_' : name[k];
+        safe[nlen] = 0;
+        if (!files_path_join(rr->local_path, sizeof(rr->local_path), dir, safe))
+                return;
+        rr->fd = system_open_at_mode(AT_FDCWD, (string_address)rr->local_path, FILE_WRITE | FILE_CREATE | FILE_TRUNCATE | O_CLOEXEC, 0600);
+        if (rr->fd < 0)
+                return;
+        rr->active = true, rr->machine = p->machine, rr->offset = 0;
+        string_copy_bounded((string_address)rr->remote_path, (string_address)remote_path, sizeof(rr->remote_path));
+        string_copy_bounded((string_address)rr->name, (string_address)name, sizeof(rr->name));
+        ui_label_foreign(shown, 96, name, nlen);
+        language_format(files.big->note, sizeof(files.big->note), WORDS(files_remote_opening), shown);
+        files.dirty = true;
+        files_remote_read_chunk(p);
+}
+
+static fn files_remote_handle_reply(struct files_peer address_to p, const struct link_fs_reply address_to rep)
+{
+        struct files_rpc rpc;
+        if (!files_rpc_take(p->machine, rep->req_id, &rpc))
+                return;
+        if (rpc.kind == FILES_RPC_INFO && rep->op == FS_OP_INFO && rep->length >= 11)
+        {
+                b32 status = (b32)link_fs_get32(rep->data);
+                p32 node = files_tree_machine_node(&files.big->tree, p->machine);
+                if (status == 0 && node != FILES_NO)
+                {
+                        p8 hflags = rep->data[4];
+                        p16 hlen = link_fs_get16(rep->data + 5);
+                        if (7u + hlen + 4u <= rep->length)
+                        {
+                                p8 home[FILES_PATH];
+                                p32 mlen = link_fs_get32(rep->data + 7 + hlen);
+                                positive copy = hlen < FILES_PATH - 1 ? hlen : FILES_PATH - 1;
+                                memory_copy(home, rep->data + 7, copy), home[copy] = 0;
+                                if (11u + hlen + mlen <= rep->length)
+                                        files_tree_set_machine_children(&files.big->tree, node, home, hflags, mlen ? rep->data + 11 + hlen : null, mlen);
+                                p->info_loaded = true;
+                        }
+                }
+                else if (node != FILES_NO)
+                        files.big->tree.node[node].flags &= (p8)~FILES_NODE_LOADING;
+                files.dirty = true;
+        }
+        else if (rpc.kind == FILES_RPC_TREE_LIST && rep->op == FS_OP_LIST && rep->length >= 4)
+        {
+                b32 status = (b32)link_fs_get32(rep->data);
+                p32 node = files_tree_find_in(&files.big->tree, p->machine, rpc.path);
+                if (status == 0 && node != FILES_NO && rep->length >= 8)
+                {
+                        struct files_tree_open_scratch address_to s = (struct files_tree_open_scratch address_to)files_anon_map(sizeof(*s), null);
+                        if (s)
+                        {
+                                p32 count = link_fs_get32(rep->data + 4), found = 0;
+                                positive at = 8, used = 0;
+                                for (p32 k = 0; k < count && at + 37 <= rep->length && found < FILES_TREE_CHILDREN; k++)
+                                {
+                                        p8 kind = rep->data[at];
+                                        p16 nlen = link_fs_get16(rep->data + at + 35);
+                                        at += 37;
+                                        if (at + nlen > rep->length)
+                                                break;
+                                        if (kind == FILES_KIND_DIRECTORY && nlen && nlen < FILES_NAME && used + nlen + 1 <= sizeof(s->found))
+                                        {
+                                                s->offsets[found++] = (p32)used;
+                                                memory_copy(s->found + used, rep->data + at, nlen);
+                                                s->found[used + nlen] = 0, used += nlen + 1;
+                                        }
+                                        at += nlen;
+                                }
+                                files_tree_splice_folders(&files.big->tree, node, s->found, s->offsets, found, used);
+                                files_unmap(s, sizeof(*s));
+                        }
+                }
+                else if (node != FILES_NO)
+                        files.big->tree.node[node].read = true, files.big->tree.node[node].has = 0, files.big->tree.node[node].flags &= (p8)~FILES_NODE_LOADING;
+                files.dirty = true;
+        }
+        else if (rpc.kind == FILES_RPC_NAV_LIST && rep->op == FS_OP_LIST)
+        {
+                struct files_model address_to m = &files.big->model;
+                if (files_model_is_remote(m) && string_equals((string_address)m->peer, (string_address)p->name) &&
+                    string_equals((string_address)m->path, (string_address)rpc.path))
+                {
+                        files_model_take_remote(m, rep->data, rep->length);
+                        files_tree_follow();
+                        files.dirty = true;
+                }
+        }
+        else if (rpc.kind == FILES_RPC_READ && rep->op == FS_OP_READ)
+        {
+                struct files_remote_read address_to rr = &files.big->remote_read;
+                if (!rr->active || rr->machine != p->machine || rr->req_id != rep->req_id)
+                        return;
+                if (rep->length < 17 || (b32)link_fs_get32(rep->data) < 0)
+                {
+                        files_remote_read_abort(), files.big->note[0] = 0, files.said = LANGUAGE_files_failed, files.dirty = true;
+                        return;
+                }
+                {
+                        p8 eof = rep->data[12];
+                        p32 dlen = link_fs_get32(rep->data + 13);
+                        if (17u + dlen > rep->length)
+                        {
+                                files_remote_read_abort(), files.big->note[0] = 0, files.said = LANGUAGE_files_failed, files.dirty = true;
+                                return;
+                        }
+                        if (dlen && (bipolar)system_write_all((positive)rr->fd, rep->data + 17, dlen) != (bipolar)dlen)
+                        {
+                                files_remote_read_abort(), files.big->note[0] = 0, files.said = LANGUAGE_files_failed, files.dirty = true;
+                                return;
+                        }
+                        rr->offset += dlen;
+                        if (eof)
+                        {
+                                string_address words[5] = {(string_address) "/editor", (string_address) "-f",
+                                                           files_app.font ? files_app.font : (string_address)UI_FONT_REGULAR,
+                                                           (string_address)rr->local_path, null};
+                                files_close(&rr->fd), rr->active = false, files.big->note[0] = 0, files.dirty = true;
+                                (void)ui_start_apart(words, 4);
+                        }
+                        else
+                                files_remote_read_chunk(p);
+                }
+        }
+}
+
+static fn files_remote_tick(long address_to timeout, long address_to other)
+{
+        b32 busy = false;
+        for (p32 k = 0; k < files.big->peer_count; k++)
+        {
+                struct files_peer address_to p = &files.big->peers[k];
+                struct link_fs_reply rep;
+                int st;
+                if (!p->used || !p->fs.used)
+                        continue;
+                for (int n = 0; n < 8; n++)
+                {
+                        st = link_fs_step(&p->fs, &rep);
+                        if (st > 0)
+                                files_remote_handle_reply(p, &rep);
+                        else
+                                break;
+                }
+                if (st < 0)
+                {
+                        p32 node = files_tree_machine_node(&files.big->tree, p->machine);
+                        p->online = false;
+                        if (node != FILES_NO)
+                                files.big->tree.node[node].flags &= (p8)~(FILES_NODE_ONLINE | FILES_NODE_LOADING);
+                        for (int r = 0; r < FILES_RPCS_MOST; r++)
+                                if (files.big->rpcs[r].kind != FILES_RPC_NONE && files.big->rpcs[r].machine == p->machine)
+                                {
+                                        if (files.big->rpcs[r].kind == FILES_RPC_NAV_LIST &&
+                                            files_model_is_remote(&files.big->model) &&
+                                            string_equals((string_address)files.big->model.peer, (string_address)p->name))
+                                                files_model_fail(&files.big->model, -5, true);
+                                        files.big->rpcs[r].kind = FILES_RPC_NONE;
+                                }
+                        if (files.big->remote_read.active && files.big->remote_read.machine == p->machine)
+                                files_remote_read_abort(), files.big->note[0] = 0;
+                        files.said = LANGUAGE_files_remote_offline;
+                        link_fs_close(&p->fs);
+                        files.dirty = true;
+                        continue;
+                }
+                if (p->fs.state == LINK_FS_READY && !p->online)
+                {
+                        p32 node = files_tree_machine_node(&files.big->tree, p->machine);
+                        p->online = true;
+                        if (node != FILES_NO)
+                                files.big->tree.node[node].flags |= FILES_NODE_ONLINE;
+                        files.dirty = true;
+                }
+                if (other && *other < 0)
+                        *other = (long)link_fs_poll_fd(&p->fs);
+                if (p->fs.state == LINK_FS_CONNECTING)
+                        busy = true;
+        }
+        for (int r = 0; !busy && r < FILES_RPCS_MOST; r++)
+                if (files.big->rpcs[r].kind != FILES_RPC_NONE)
+                        busy = true;
+        if (busy)
+                *timeout = ui_timeout_min(*timeout, 50000000);
+}
+
+static fn files_close_window(void)
+{
+        if (!files.big)
+                return;
+        files_remote_read_abort();
+        for (p32 k = 0; k < files.big->peer_count; k++)
+                if (files.big->peers[k].used && files.big->peers[k].fs.used)
+                        link_fs_close(&files.big->peers[k].fs);
+}
+
 /* ---- tree, type-ahead, keyboard ---- */
+
+static fn files_tree_toggle(p32 at);
 
 static b32 files_tree_go(p32 at)
 {
         static p8 path[FILES_PATH];
         const struct files_tree address_to t = &files.big->tree;
-        if (at >= t->count || !files_tree_path(t, at, path) || string_equals((string_address)path, (string_address)files.big->model.path))
+        if (at >= t->count)
+                return false;
+        if (t->node[at].kind == FILES_NODE_MACHINE)
+                return files_tree_toggle(at), true;
+        if (!files_tree_path(t, at, path))
+                return false;
+        if (t->node[at].machine > 0)
+        {
+                struct files_peer address_to p = files_peer_by_machine(t->node[at].machine);
+                if (!p)
+                        return false;
+                if (files_model_is_remote(&files.big->model) &&
+                    string_equals((string_address)files.big->model.peer, (string_address)p->name) &&
+                    string_equals((string_address)files.big->model.path, (string_address)path))
+                        return false;
+                if (files_model_go_remote(&files.big->model, p->name, (string_address)path, true))
+                        files_moved(), files_remote_nav();
+                return true;
+        }
+        if (!files_model_is_remote(&files.big->model) && string_equals((string_address)path, (string_address)files.big->model.path))
                 return false;
         if (files_try_go(path) ||
-            (files.said == LANGUAGE_files_gone && t->node[at].depth == 0 && t->node[at].kind == FILES_NODE_PLACE &&
+            (files.said == LANGUAGE_files_gone && t->node[at].depth == 1 && t->node[at].kind == FILES_NODE_PLACE &&
              files_mkdir(AT_FDCWD, path, 0755) >= 0 && files_try_go(path)))
                 files_moved();
         return true;
@@ -1599,9 +2133,30 @@ static fn files_tree_toggle(p32 at)
                 return;
         if (t->node[at].open)
                 files_tree_shut(t, at);
+        else if (t->node[at].kind == FILES_NODE_MACHINE)
+        {
+                if (t->node[at].machine == 0)
+                        t->node[at].open = true, files_tree_sync_drives(t, (const p8 address_to)getenv((string_address) "HOME"), true);
+                else
+                {
+                        struct files_peer address_to p = files_peer_by_machine(t->node[at].machine);
+                        if (p)
+                                files_remote_request_info(p);
+                }
+        }
+        else if (t->node[at].machine > 0)
+        {
+                static p8 path[FILES_PATH];
+                struct files_peer address_to p = files_peer_by_machine(t->node[at].machine);
+                if (p && files_tree_path(t, at, path))
+                        t->node[at].flags |= FILES_NODE_LOADING, files_remote_request_list(p, path, true, FILES_RPC_TREE_LIST);
+        }
         else
                 files_tree_open(t, at);
-        files.tree_shown = files_tree_find(t, files.big->model.path), files.dirty = true;
+        {
+                struct files_peer address_to cur = files_model_is_remote(&files.big->model) ? files_peer_by_name(files.big->model.peer) : null;
+                files.tree_shown = files_tree_find_in(t, cur ? cur->machine : 0, files.big->model.path), files.dirty = true;
+        }
 }
 
 static b32 files_tree_key(const struct window_event address_to event)
@@ -2032,9 +2587,9 @@ static long files_tick(long timeout, long address_to other)
         struct files_model address_to m = &files.big->model;
         struct ui_text address_to active = files.editing ? files_field() : files.finding && files.focus == FILES_FOCUS_FIND ? &files.finder : null;
         b64 now = (b64)ui_kit.now;
-        (void)other;
+        files_remote_tick(&timeout, other);
         if (m->state == FILES_READY && m->listed != files.git_key)
-                files.git = files_git_marks(m, files.big->git_state), files.git_key = m->listed, files.dirty = true;
+                files.git = files_model_is_remote(m) ? false : files_git_marks(m, files.big->git_state), files.git_key = m->listed, files.dirty = true;
         if (files.drop_over)
         {
                 struct ui_list address_to lists[2] = {&files.big->list, &files.big->tree_list};
@@ -2133,11 +2688,12 @@ static long files_tick(long timeout, long address_to other)
         files.dirty |= files.seen != m->revision;
         if (now >= files.next_look && !(files.own.table->state[files.own.row] & WINDOW_MINIMIZED))
         {
-                int became = files_model_stale(m);
+                int became = files_model_is_remote(m) ? FILES_FRESH : files_model_stale(m);
                 if (became == FILES_STALE)
                         files_model_reload(m);
                 if (files_tree_sync_drives(&files.big->tree, (const p8 address_to)getenv((string_address) "HOME"), false))
                         files_tree_follow(), files.dirty = true;
+                files_peers_sync();
                 files.dirty |= became != FILES_FRESH, files.next_look = now + FILES_LOOK_NS;
                 if (m->walking)
                         return 1;
@@ -2167,6 +2723,7 @@ static int files_open_window(void)
         if (!files_tree_begin(&files.big->tree))
                 return 1;
         files_tree_populate_live(&files.big->tree, (const p8 address_to)getenv((string_address) "HOME"));
+        files_peers_sync();
         if (!files.start || !files_model_go(&files.big->model, files.start))
                 files_model_go(&files.big->model, (string_address) "/");
         files.next_look = (b64)ui_kit.now + FILES_LOOK_NS;
@@ -2190,7 +2747,7 @@ static struct ui_app files_app = {
     .glass = 0, .side = true,
     .nofont = (string_address) "files: no font to draw with (-f FONT.ttf), pid ",
     .dirty = &files.dirty, .focused = &files.focused, .ground = &files.ground,
-    .open = files_open_window, .event = files_event, .tick = files_tick,
+    .open = files_open_window, .close = files_close_window, .event = files_event, .tick = files_tick,
     .popup = &files.menu, .chose = files_chose,
     .width = &files.width, .height = &files.height, .shown = &files.shown, .draw = files_draw,
 };

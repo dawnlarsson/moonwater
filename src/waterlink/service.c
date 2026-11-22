@@ -226,6 +226,7 @@ static p64 link_keepalive = 10000000ull;
 #define LINK_ASK_PUSH 'P'
 #define LINK_ASK_PULL 'G'
 #define LINK_ASK_LOG 'L'
+#define LINK_ASK_FS 'F'
 
 #define LINK_KIND_NONE 0
 #define LINK_KIND_SHELL 1
@@ -233,6 +234,24 @@ static p64 link_keepalive = 10000000ull;
 #define LINK_KIND_PUSH 3
 #define LINK_KIND_PULL 4
 #define LINK_KIND_LOG 5
+#define LINK_KIND_FS 6
+
+#define FS_OP_INFO 1
+#define FS_OP_LIST 2
+#define FS_OP_STAT 3
+#define FS_OP_READ 4
+
+#define LINK_FS_HEAD 9
+#define LINK_FS_MSG_MAX (4u << 20)
+#define LINK_FS_READ_MAX (256u << 10)
+#define LINK_FS_LIST_MAX 16384u
+
+enum {
+        LINK_FS_IDLE = 0,
+        LINK_FS_CONNECTING = 1,
+        LINK_FS_READY = 2,
+        LINK_FS_FAILED = 3,
+};
 
 #define LINK_EXIT_BUSY 3
 #define LINK_FAILED 255
@@ -266,13 +285,14 @@ typedef struct
         p32 bit;
         p8 ask;
         p8 ask_too;
+        p8 ask_three;
 } link_grant;
 
 static const link_grant link_grants[] = {
-    {"shell", WATERLINK_MAY_SHELL, LINK_ASK_SHELL, 0},
-    {"run", WATERLINK_MAY_RUN, LINK_ASK_RUN, 0},
-    {"files", WATERLINK_MAY_FILES, LINK_ASK_PUSH, LINK_ASK_PULL},
-    {"log", WATERLINK_MAY_LOG, LINK_ASK_LOG, 0},
+    {"shell", WATERLINK_MAY_SHELL, LINK_ASK_SHELL, 0, 0},
+    {"run", WATERLINK_MAY_RUN, LINK_ASK_RUN, 0, 0},
+    {"files", WATERLINK_MAY_FILES, LINK_ASK_PUSH, LINK_ASK_PULL, LINK_ASK_FS},
+    {"log", WATERLINK_MAY_LOG, LINK_ASK_LOG, 0, 0},
 };
 
 // The grant a word names, or 0.
@@ -290,7 +310,9 @@ static positive link_grant_asked(p8 ask)
         positive at = 0;
 
         while (at < array_count(link_grants) &&
-               (!ask || (link_grants[at].ask != ask && link_grants[at].ask_too != ask)))
+               (!ask || (link_grants[at].ask != ask &&
+                         link_grants[at].ask_too != ask &&
+                         link_grants[at].ask_three != ask)))
                 at++;
         return at;
 }
@@ -942,6 +964,25 @@ struct link_stream {
         p64 started;   // and how many of them the disk was asked to begin on
 };
 
+struct link_fs_buf {
+        p8 address_to data;
+        positive pos, len, cap;
+};
+
+struct link_fs_state {
+        struct link_fs_buf in;
+        struct link_fs_buf out;
+};
+
+struct link_fs_reply {
+        p32 req_id;
+        p8 op;
+        p32 length;
+        p8 address_to data;
+};
+
+struct link_fs_client;
+
 struct link_session {
         p8 used;
         p8 finished;
@@ -989,6 +1030,8 @@ struct link_session {
         p8 packed; // a pushed file's staging file holds dictionary frames, to unpack at the end
         p8 part[LINK_REQUEST_MAX + 32]; // a transfer's staging file
         p8 whole[LINK_REQUEST_MAX + 1]; // and the name it becomes
+        struct link_fs_state address_to fs;
+        struct link_fs_client address_to fs_client;
 };
 
 /*
@@ -1040,9 +1083,10 @@ typedef struct
 } link_state;
 
 static const string_address link_kind_names[] = {"open", "shell", "run",
-                                                  "push", "pull", "log"};
+                                                  "push", "pull", "log", "fs"};
 static const p8 link_kind_asks[] = {0, LINK_ASK_SHELL, LINK_ASK_RUN,
-                                    LINK_ASK_PUSH, LINK_ASK_PULL, LINK_ASK_LOG};
+                                    LINK_ASK_PUSH, LINK_ASK_PULL, LINK_ASK_LOG,
+                                    LINK_ASK_FS};
 
 typedef struct
 {
@@ -1464,8 +1508,81 @@ static fn link_reap(void)
         }
 }
 
+static fn link_fs_buf_free(struct link_fs_buf address_to b)
+{
+        if (b->data && b->cap)
+                system_call_2(syscall(munmap), (positive)b->data, b->cap);
+        b->data = null;
+        b->pos = b->len = b->cap = 0;
+}
+
+static p8 link_fs_buf_reserve(struct link_fs_buf address_to b, positive need)
+{
+        positive cap;
+        bipolar mapped;
+
+        if (need > LINK_FS_MSG_MAX + 65536u)
+                return false;
+        if (b->cap >= need)
+                return true;
+        cap = b->cap ? b->cap : 16384u;
+        while (cap < need)
+                cap <<= 1;
+        mapped = system_call_6(syscall(mmap), 0, cap,
+                               FILE_PROTECT_READ | FILE_PROTECT_WRITE,
+                               FILE_MAP_PRIVATE | FILE_MAP_ANONYMOUS,
+                               (positive)(bipolar)-1, 0);
+        if (mapped < 0 && mapped > -4096)
+                return false;
+        if (b->data)
+        {
+                if (b->len > b->pos)
+                        memory_copy((p8 address_to)mapped, b->data + b->pos,
+                                    b->len - b->pos);
+                b->len -= b->pos;
+                b->pos = 0;
+                system_call_2(syscall(munmap), (positive)b->data, b->cap);
+        }
+        b->data = (p8 address_to)mapped;
+        b->cap = cap;
+        return true;
+}
+
+static p8 link_fs_buf_append(struct link_fs_buf address_to b,
+                             const p8 address_to src, positive n)
+{
+        if (b->pos && b->pos == b->len)
+                b->pos = b->len = 0;
+        if (b->len + n > b->cap && b->pos)
+        {
+                positive rem = b->len - b->pos;
+                if (rem)
+                        memory_copy(b->data, b->data + b->pos, rem);
+                b->pos = 0;
+                b->len = rem;
+        }
+        if (!link_fs_buf_reserve(b, b->len + n))
+                return false;
+        if (n)
+                memory_copy(b->data + b->len, src, n);
+        b->len += n;
+        return true;
+}
+
+static fn link_fs_state_free(struct link_session address_to s)
+{
+        if (!s->fs)
+                return;
+        link_fs_buf_free(address_of s->fs->in);
+        link_fs_buf_free(address_of s->fs->out);
+        system_call_2(syscall(munmap), (positive)s->fs,
+                      sizeof(struct link_fs_state));
+        s->fs = null;
+}
+
 static fn link_session_close(struct link_session address_to s)
 {
+        link_fs_state_free(s);
         if (s->part[0])
                 link_part_discard(s->writes[0].fd, s->part);
         //      Signalled before it is waited for, as the group is: once the
@@ -2451,6 +2568,495 @@ static p8 link_start_push(struct link_session address_to s, p8 address_to path,
         return true;
 }
 
+static inline fn link_fs_put16(p8 address_to p, p16 v)
+{
+        p[0] = (p8)(v & 0xffu);
+        p[1] = (p8)((v >> 8) & 0xffu);
+}
+
+static inline fn link_fs_put32(p8 address_to p, p32 v)
+{
+        p[0] = (p8)(v & 0xffu);
+        p[1] = (p8)((v >> 8) & 0xffu);
+        p[2] = (p8)((v >> 16) & 0xffu);
+        p[3] = (p8)((v >> 24) & 0xffu);
+}
+
+static inline fn link_fs_put64(p8 address_to p, p64 v)
+{
+        link_fs_put32(p, (p32)(v & 0xffffffffu));
+        link_fs_put32(p + 4, (p32)(v >> 32));
+}
+
+static inline p16 link_fs_get16(const p8 address_to p)
+{
+        return (p16)((p16)p[0] | ((p16)p[1] << 8));
+}
+
+static inline p32 link_fs_get32(const p8 address_to p)
+{
+        return (p32)p[0] | ((p32)p[1] << 8) | ((p32)p[2] << 16) |
+               ((p32)p[3] << 24);
+}
+
+static inline p64 link_fs_get64(const p8 address_to p)
+{
+        return (p64)link_fs_get32(p) | ((p64)link_fs_get32(p + 4) << 32);
+}
+
+static inline p8 link_fs_kind_of(p32 mode)
+{
+        p32 f = mode & MODE_FORMAT;
+        return f == MODE_DIRECTORY ? 0 : f == MODE_FILE ? 1 : f == MODE_LINK ? 2 : 3;
+}
+
+static fn link_fs_reply_put(struct link_fs_buf address_to out, p32 req_id,
+                            p8 op, const p8 address_to body, positive body_len)
+{
+        p8 head[LINK_FS_HEAD];
+
+        link_fs_put32(head, req_id);
+        head[4] = op;
+        link_fs_put32(head + 5, (p32)body_len);
+        if (!link_fs_buf_reserve(out, out->len + LINK_FS_HEAD + body_len))
+                return;
+        (void)link_fs_buf_append(out, head, LINK_FS_HEAD);
+        if (body_len)
+                (void)link_fs_buf_append(out, body, body_len);
+}
+
+static fn link_fs_reply_err(struct link_fs_buf address_to out, p32 req_id,
+                            p8 op, b32 status)
+{
+        p8 body[4];
+        link_fs_put32(body, (p32)status);
+        link_fs_reply_put(out, req_id, op, body, 4);
+}
+
+static fn link_fs_handle_info(struct link_fs_buf address_to out, p32 req_id)
+{
+        string_address home = (string_address)LINK_HOME_DIR;
+        positive hlen = home ? string_length(home) : 0;
+        p8 flags = 0;
+        p8 sub[1024];
+        file_facts facts;
+        p8 address_to mi = null;
+        positive mi_len = 0;
+        struct link_fs_buf body = {0};
+        p8 hdr[11];
+
+        if (hlen > 0 && hlen + 16 < sizeof sub)
+        {
+                memory_copy(sub, home, hlen);
+                memory_copy(sub + hlen, "/Downloads", 11);
+                if (file_look_at((string_address)sub, address_of facts) &&
+                    (facts.mode & MODE_FORMAT) == MODE_DIRECTORY)
+                        flags |= 1;
+                memory_copy(sub + hlen, "/Pictures", 10);
+                if (file_look_at((string_address)sub, address_of facts) &&
+                    (facts.mode & MODE_FORMAT) == MODE_DIRECTORY)
+                        flags |= 2;
+        }
+#if !defined(MACOS)
+        {
+                bipolar mapped = system_call_6(
+                    syscall(mmap), 0, 65536,
+                    FILE_PROTECT_READ | FILE_PROTECT_WRITE,
+                    FILE_MAP_PRIVATE | FILE_MAP_ANONYMOUS,
+                    (positive)(bipolar)-1, 0);
+                if (!(mapped < 0 && mapped > -4096))
+                {
+                        bipolar got = file_slurp_once_at(
+                            AT_FDCWD, (string_address) "/proc/self/mountinfo",
+                            (p8 address_to)mapped, 65535);
+                        mi = (p8 address_to)mapped;
+                        if (got > 0)
+                                mi_len = (positive)got;
+                }
+        }
+#endif
+        link_fs_put32(hdr, 0);
+        hdr[4] = flags;
+        link_fs_put16(hdr + 5, (p16)hlen);
+        (void)link_fs_buf_append(address_of body, hdr, 7);
+        if (hlen)
+                (void)link_fs_buf_append(address_of body, (const p8 address_to)home, hlen);
+        link_fs_put32(hdr, (p32)mi_len);
+        (void)link_fs_buf_append(address_of body, hdr, 4);
+        if (mi_len)
+                (void)link_fs_buf_append(address_of body, mi, mi_len);
+        link_fs_reply_put(out, req_id, FS_OP_INFO, body.data, body.len);
+        link_fs_buf_free(address_of body);
+        if (mi)
+                system_call_2(syscall(munmap), (positive)mi, 65536);
+}
+
+static fn link_fs_handle_list(struct link_fs_buf address_to out, p32 req_id,
+                              const p8 address_to payload, positive plen)
+{
+        p8 flags;
+        p16 path_len;
+        p8 path[4096];
+        struct link_fs_buf body = {0};
+        p8 hdr[8];
+        p32 count = 0;
+
+        if (plen < 3)
+        {
+                link_fs_reply_err(out, req_id, FS_OP_LIST, -22);
+                return;
+        }
+        flags = payload[0];
+        path_len = link_fs_get16(payload + 1);
+        if (!path_len || (positive)path_len + 3 > plen || path_len >= sizeof path ||
+            memory_first_of((p8 address_to)payload + 3, 0, path_len) ||
+            payload[3] != '/')
+        {
+                link_fs_reply_err(out, req_id, FS_OP_LIST, -22);
+                return;
+        }
+        memory_copy(path, payload + 3, path_len);
+        path[path_len] = 0;
+        if (link_path_is_own((string_address)path))
+        {
+                link_fs_reply_err(out, req_id, FS_OP_LIST, -13);
+                return;
+        }
+#if !defined(MACOS)
+        {
+                file_walk walk;
+                struct linux_dirent64 address_to rec;
+
+                if (!file_walk_open(address_of walk, AT_FDCWD,
+                                    (string_address)path))
+                {
+                        link_fs_reply_err(out, req_id, FS_OP_LIST,
+                                          (b32)(walk.error < 0 ? walk.error : -13));
+                        return;
+                }
+                memory_zero(hdr, sizeof hdr);
+                (void)link_fs_buf_append(address_of body, hdr, 8);
+                while (count < LINK_FS_LIST_MAX &&
+                       (rec = file_walk_next(address_of walk)))
+                {
+                        positive nlen = string_length((string_address)rec->d_name);
+                        file_facts facts, target;
+                        bipolar looked;
+                        p8 kind, ent[37];
+                        p16 mode = 0;
+                        p64 size = 0, inode = rec->d_ino;
+                        b64 modified = 0, born = 0;
+
+                        if (file_is_dot((string_address)rec->d_name) || !nlen ||
+                            nlen >= 256)
+                                continue;
+                        if (rec->d_name[0] == '.' && !(flags & 1))
+                                continue;
+                        looked = file_look_code(walk.handle,
+                                                (string_address)rec->d_name,
+                                                AT_SYMLINK_NOFOLLOW,
+                                                address_of facts);
+                        if (looked == -ERROR_NO_ENTRY)
+                                continue;
+                        if (looked == 0)
+                        {
+                                kind = link_fs_kind_of(facts.mode);
+                                mode = (p16)facts.mode;
+                                size = facts.size;
+                                modified = facts.modified.seconds;
+                                born = facts.created.seconds;
+                                inode = facts.inode;
+                                if (kind == 2)
+                                        mode = file_look_code(
+                                                   walk.handle,
+                                                   (string_address)rec->d_name,
+                                                   0, address_of target) == 0
+                                                   ? (p16)target.mode
+                                                   : 0;
+                        }
+                        else
+                                kind = rec->d_type == DT_DIR   ? 0
+                                       : rec->d_type == DT_REG ? 1
+                                       : rec->d_type == DT_LNK ? 2
+                                                               : 3;
+                        if ((flags & 2) && kind != 0)
+                                continue;
+                        if (body.len + 37 + nlen > LINK_FS_MSG_MAX)
+                                break;
+                        ent[0] = kind;
+                        link_fs_put16(ent + 1, mode);
+                        link_fs_put64(ent + 3, size);
+                        link_fs_put64(ent + 11, (p64)modified);
+                        link_fs_put64(ent + 19, (p64)born);
+                        link_fs_put64(ent + 27, inode);
+                        link_fs_put16(ent + 35, (p16)nlen);
+                        (void)link_fs_buf_append(address_of body, ent, 37);
+                        (void)link_fs_buf_append(
+                            address_of body, (const p8 address_to)rec->d_name,
+                            nlen);
+                        count++;
+                }
+                file_walk_close(address_of walk);
+                if (body.len >= 8)
+                        link_fs_put32(body.data + 4, count);
+                link_fs_reply_put(out, req_id, FS_OP_LIST, body.data, body.len);
+                link_fs_buf_free(address_of body);
+        }
+#else
+        (void)flags;
+        (void)body;
+        (void)hdr;
+        (void)count;
+        link_fs_reply_err(out, req_id, FS_OP_LIST, -38);
+#endif
+}
+
+static fn link_fs_handle_stat(struct link_fs_buf address_to out, p32 req_id,
+                              const p8 address_to payload, positive plen)
+{
+        p8 follow;
+        p16 path_len;
+        p8 path[4096];
+        file_facts facts;
+        p8 body[57];
+
+        if (plen < 3)
+        {
+                link_fs_reply_err(out, req_id, FS_OP_STAT, -22);
+                return;
+        }
+        follow = payload[0];
+        path_len = link_fs_get16(payload + 1);
+        if (!path_len || (positive)path_len + 3 > plen || path_len >= sizeof path ||
+            memory_first_of((p8 address_to)payload + 3, 0, path_len) ||
+            payload[3] != '/')
+        {
+                link_fs_reply_err(out, req_id, FS_OP_STAT, -22);
+                return;
+        }
+        memory_copy(path, payload + 3, path_len);
+        path[path_len] = 0;
+        if (link_path_is_own((string_address)path))
+        {
+                link_fs_reply_err(out, req_id, FS_OP_STAT, -13);
+                return;
+        }
+        if (!file_look(AT_FDCWD, (string_address)path,
+                       follow ? 0 : AT_SYMLINK_NOFOLLOW, address_of facts))
+        {
+                link_fs_reply_err(out, req_id, FS_OP_STAT, -2);
+                return;
+        }
+        link_fs_put32(body, 0);
+        body[4] = link_fs_kind_of(facts.mode);
+        link_fs_put32(body + 5, facts.mode);
+        link_fs_put64(body + 9, facts.size);
+        link_fs_put64(body + 17, (p64)facts.modified.seconds);
+#if defined(MACOS)
+        link_fs_put64(body + 25, 0);
+        link_fs_put64(body + 33, facts.inode);
+        link_fs_put32(body + 41, (p32)(facts.device >> 24));
+        link_fs_put32(body + 45, (p32)(facts.device & 0xffffffu));
+#else
+        link_fs_put64(body + 25, (p64)facts.created.seconds);
+        link_fs_put64(body + 33, facts.inode);
+        link_fs_put32(body + 41, facts.device_major);
+        link_fs_put32(body + 45, facts.device_minor);
+#endif
+        link_fs_put32(body + 49, facts.owner);
+        link_fs_put32(body + 53, facts.group);
+        link_fs_reply_put(out, req_id, FS_OP_STAT, body, sizeof body);
+}
+
+static fn link_fs_handle_read(struct link_fs_buf address_to out, p32 req_id,
+                              const p8 address_to payload, positive plen)
+{
+        p64 offset;
+        p32 max_len;
+        p16 path_len;
+        p8 path[4096];
+        bipolar fd;
+        file_facts facts;
+        struct link_fs_buf body = {0};
+        p8 hdr[17];
+        positive want, got = 0;
+        p8 eof = 0;
+
+        if (plen < 14)
+        {
+                link_fs_reply_err(out, req_id, FS_OP_READ, -22);
+                return;
+        }
+        offset = link_fs_get64(payload);
+        max_len = link_fs_get32(payload + 8);
+        path_len = link_fs_get16(payload + 12);
+        if (!path_len || (positive)path_len + 14 > plen ||
+            path_len >= sizeof path ||
+            memory_first_of((p8 address_to)payload + 14, 0, path_len) ||
+            payload[14] != '/')
+        {
+                link_fs_reply_err(out, req_id, FS_OP_READ, -22);
+                return;
+        }
+        memory_copy(path, payload + 14, path_len);
+        path[path_len] = 0;
+        if (link_path_is_own((string_address)path))
+        {
+                link_fs_reply_err(out, req_id, FS_OP_READ, -13);
+                return;
+        }
+        fd = system_open_at(AT_FDCWD, (string_address)path,
+                            FILE_READ | O_CLOEXEC);
+        if (fd < 0)
+        {
+                link_fs_reply_err(out, req_id, FS_OP_READ, (b32)fd);
+                return;
+        }
+        if (!file_look(fd, (string_address) "", AT_EMPTY_PATH,
+                       address_of facts) ||
+            (facts.mode & MODE_FORMAT) != MODE_FILE)
+        {
+                system_close(fd);
+                link_fs_reply_err(out, req_id, FS_OP_READ, -21);
+                return;
+        }
+        want = max_len > LINK_FS_READ_MAX ? LINK_FS_READ_MAX : max_len;
+        if (offset > 0 && (bipolar)system_seek(fd, (bipolar)offset, 0) < 0)
+        {
+                system_close(fd);
+                link_fs_reply_err(out, req_id, FS_OP_READ, -5);
+                return;
+        }
+        if (!link_fs_buf_reserve(address_of body, 17 + want))
+        {
+                system_close(fd);
+                link_fs_reply_err(out, req_id, FS_OP_READ, -12);
+                return;
+        }
+        memory_zero(hdr, sizeof hdr);
+        (void)link_fs_buf_append(address_of body, hdr, 17);
+        while (got < want)
+        {
+                bipolar n = system_read_retry((positive)fd,
+                                              body.data + 17 + got, want - got);
+                if (n < 0)
+                {
+                        system_close(fd);
+                        link_fs_buf_free(address_of body);
+                        link_fs_reply_err(out, req_id, FS_OP_READ, (b32)n);
+                        return;
+                }
+                if (n == 0)
+                {
+                        eof = 1;
+                        break;
+                }
+                got += (positive)n;
+        }
+        system_close(fd);
+        if (offset + got >= facts.size)
+                eof = 1;
+        body.len = 17 + got;
+        link_fs_put32(body.data, 0);
+        link_fs_put64(body.data + 4, facts.size);
+        body.data[12] = eof;
+        link_fs_put32(body.data + 13, (p32)got);
+        link_fs_reply_put(out, req_id, FS_OP_READ, body.data, body.len);
+        link_fs_buf_free(address_of body);
+}
+
+static fn link_fs_flush_buf(struct link_session address_to s, p8 key,
+                            struct link_fs_buf address_to out)
+{
+        while (out->pos < out->len)
+        {
+                positive avail = out->len - out->pos;
+                positive chunk = avail > WATERLINK_FRAME_MAX ? WATERLINK_FRAME_MAX : avail;
+
+                if (!waterlink_post(s->link, key, WATERLINK_FRAME_DURABLE,
+                                    out->data + out->pos, (p16)chunk,
+                                    link_self.now))
+                        break;
+                out->pos += chunk;
+        }
+        if (out->pos == out->len)
+                out->pos = out->len = 0;
+}
+
+static p8 link_fs_server_take(struct link_session address_to s,
+                              p8 address_to payload, positive length)
+{
+        struct link_fs_state address_to fs = s->fs;
+
+        if (!fs)
+                return true;
+        if (fs->out.len - fs->out.pos > (2u << 20))
+                return false;
+        if (!link_fs_buf_append(address_of fs->in, payload, length))
+                return false;
+        while (fs->in.len - fs->in.pos >= LINK_FS_HEAD)
+        {
+                const p8 address_to h = fs->in.data + fs->in.pos;
+                p32 req_id = link_fs_get32(h);
+                p8 op = h[4];
+                p32 plen = link_fs_get32(h + 5);
+
+                if (plen > LINK_FS_MSG_MAX)
+                {
+                        s->finished = true;
+                        return true;
+                }
+                if (fs->in.len - fs->in.pos < LINK_FS_HEAD + (positive)plen)
+                        break;
+                {
+                        const p8 address_to body = h + LINK_FS_HEAD;
+
+                        switch (op)
+                        {
+                        case FS_OP_INFO:
+                                link_fs_handle_info(address_of fs->out, req_id);
+                                break;
+                        case FS_OP_LIST:
+                                link_fs_handle_list(address_of fs->out, req_id,
+                                                    body, plen);
+                                break;
+                        case FS_OP_STAT:
+                                link_fs_handle_stat(address_of fs->out, req_id,
+                                                    body, plen);
+                                break;
+                        case FS_OP_READ:
+                                link_fs_handle_read(address_of fs->out, req_id,
+                                                    body, plen);
+                                break;
+                        default:
+                                link_fs_reply_err(address_of fs->out, req_id,
+                                                  op, -38);
+                                break;
+                        }
+                }
+                fs->in.pos += LINK_FS_HEAD + (positive)plen;
+        }
+        if (fs->in.pos == fs->in.len)
+                fs->in.pos = fs->in.len = 0;
+        link_fs_flush_buf(s, LINK_KEY_OUTPUT, address_of fs->out);
+        return true;
+}
+
+static p8 link_start_fs(struct link_session address_to s)
+{
+        bipolar mapped = system_call_6(syscall(mmap), 0,
+                                       sizeof(struct link_fs_state),
+                                       FILE_PROTECT_READ | FILE_PROTECT_WRITE,
+                                       FILE_MAP_PRIVATE | FILE_MAP_ANONYMOUS,
+                                       (positive)(bipolar)-1, 0);
+
+        if (mapped < 0 && mapped > -4096)
+                return false;
+        s->fs = (struct link_fs_state address_to)mapped;
+        memory_zero(s->fs, sizeof(struct link_fs_state));
+        return true;
+}
+
 static fn link_refuse(struct link_session address_to s, string_address why)
 {
         (void)link_post(s, LINK_KEY_ANSWER,
@@ -2607,6 +3213,9 @@ static fn link_request(struct link_session address_to s, p8 address_to payload,
         case LINK_KIND_PUSH:
                 started = text[0] && link_start_push(s, text, length - skip,
                                                      mode & 0777);
+                break;
+        case LINK_KIND_FS:
+                started = link_start_fs(s);
                 break;
         default:
                 link_refuse(s, "that is not something this machine offers");
@@ -3113,6 +3722,9 @@ static fn link_name_heard(struct link_session address_to s,
         A frame arrives, at either end. The key says which stream or which
         question; the payload's first byte says what it is.
 */
+static p8 link_fs_client_take(struct link_session address_to s,
+                              p8 address_to payload, positive length);
+
 static p8 link_hear(address_any context, struct waterlink_frame address_to head,
                       p8 address_to payload)
 {
@@ -3121,6 +3733,13 @@ static p8 link_hear(address_any context, struct waterlink_frame address_to head,
 
         if (!length)
                 return true;
+        if (s->kind == LINK_KIND_FS)
+        {
+                if (link_self.server && head->key == LINK_KEY_INPUT)
+                        return link_fs_server_take(s, payload, length);
+                if (!link_self.server && head->key == LINK_KEY_OUTPUT)
+                        return link_fs_client_take(s, payload, length);
+        }
         for (positive at = 0; at < 2; at++)
                 if (s->writes[at].key == head->key)
                         return link_stream_take(s, s->writes + at, payload,
@@ -3213,6 +3832,14 @@ static fn link_session_streams(struct link_session address_to s, p64 now)
 
         for (positive at = 0; at < 2; at++)
                 link_stream_read(s, s->reads + at);
+
+        if (link_self.server && s->kind == LINK_KIND_FS && s->fs)
+        {
+                link_fs_flush_buf(s, LINK_KEY_OUTPUT, address_of s->fs->out);
+                if (s->fs->out.len - s->fs->out.pos <= (2u << 20) &&
+                    waterlink_paused(s->link, LINK_KEY_INPUT))
+                        waterlink_resume(s->link, LINK_KEY_INPUT, link_hear, s);
+        }
 
         if (!link_self.server || s->kind == LINK_KIND_NONE)
                 return;
@@ -3494,9 +4121,10 @@ static fn link_server_initiation(p8 address_to datagram, positive length,
         peer = link_peer_keyed(address_of peers, who);
         memory_copy(address_of conversation, hello + WATERLINK_STAMP_BYTES, 8);
         memory_copy(address_of theirs, hello + WATERLINK_STAMP_BYTES + 8, 4);
-        /*      Proof of a key no longer paired: what it has open ends now,
-                before a datagram queued behind this one can use its keys. */
-        if (!peer)
+        /*      Proof of a key no longer paired or blocked: what it has open
+                ends now, before a datagram queued behind this one can use its
+                keys. */
+        if (!peer || (peer->flags & WATERLINK_PEER_BLOCKED))
         {
                 link_self.granted = 0;
                 link_sessions_granted(now);
@@ -4219,8 +4847,9 @@ static fn link_sessions_granted(p64 now)
                         link_peer_keyed(address_of peers, s->peer);
                 positive need = link_grant_asked(link_kind_asks[s->kind]);
 
-                if (!peer || (need < array_count(link_grants) &&
-                              !(peer->may & link_grants[need].bit)))
+                if (!peer || (peer->flags & WATERLINK_PEER_BLOCKED) ||
+                    (need < array_count(link_grants) &&
+                     !(peer->may & link_grants[need].bit)))
                         link_session_end(s, true);
         }
 }
@@ -5538,6 +6167,275 @@ static fn link_secrets_forget(void)
         crypto_forget(address_of link_nearby, sizeof link_nearby);
         crypto_forget(address_of link_client, sizeof link_client);
         crypto_forget(link_inbound, sizeof link_inbound);
+}
+
+/*
+        Non-blocking client API for LINK_KIND_FS sessions, driven from a UI
+        event loop (files_tick) without blocking. Multiple sessions may be open
+        concurrently against different peers using link_self.session[].
+*/
+struct link_fs_client {
+        p8 used;
+        p8 state; // LINK_FS_*
+        p8 asked;
+        p8 peer_name[WATERLINK_NAME_MAX];
+        p8 peer_key[32];
+        struct link_session address_to session;
+        struct link_place places[LINK_PLACES_PER_PEER];
+        positive place_count, tried;
+        p32 next_req_id;
+        struct link_fs_buf out;
+        struct link_fs_buf in;
+        positive reply_consume;
+        p8 refusal[128];
+};
+
+static p8 link_fs_client_take(struct link_session address_to s,
+                              p8 address_to payload, positive length)
+{
+        struct link_fs_client address_to c = s->fs_client;
+
+        if (!c || !c->used)
+                return true;
+        return link_fs_buf_append(address_of c->in, payload, length);
+}
+
+static p8 link_fs_ensure_socket(void)
+{
+        if (link_self.socket > 0)
+                return true;
+        if (link_identity(address_of link_self.me, false) < 0)
+                return false;
+        link_self.socket = link_socket_open(0, false);
+        if (link_self.socket < 0)
+                return false;
+        link_self.gso = LINK_GSO;
+        link_self.server = false;
+        link_tcp_self.client = true;
+        link_nearby.lan.socket = -1;
+        link_keepalive = (p64)discovery_keepalive_seconds() * 1000000ull;
+        return true;
+}
+
+static b32 link_fs_open(struct link_fs_client address_to c,
+                        string_address peer_name)
+{
+        link_peers peers;
+        struct waterlink_peer address_to peer;
+        struct link_session address_to s = null;
+
+        memory_zero(c, sizeof(address_to c));
+        if (!peer_name || !peer_name[0] || !link_fs_ensure_socket())
+                return false;
+        link_peers_load(address_of peers);
+        peer = link_peer_named(address_of peers, peer_name);
+        if (!peer || !peer->port || (peer->flags & WATERLINK_PEER_BLOCKED))
+                return false;
+        for (positive at = 0; at < LINK_SESSIONS; at++)
+                if (!link_self.session[at].used)
+                {
+                        s = link_self.session + at;
+                        break;
+                }
+        if (!s || !link_session_open(s))
+                return false;
+        memory_copy(s->peer, peer->key, 32);
+        memory_copy(s->name, peer->name, WATERLINK_NAME_MAX);
+        memory_copy(s->address, peer->address, 16);
+        s->port = peer->port;
+        s->kind = LINK_KIND_FS;
+        s->fs_client = c;
+        if (system_random_fill(address_of s->conversation, 8, 0) < 0)
+        {
+                link_session_close(s);
+                return false;
+        }
+        c->used = true;
+        c->state = LINK_FS_CONNECTING;
+        c->session = s;
+        c->next_req_id = 1;
+        memory_copy(c->peer_name, peer->name, WATERLINK_NAME_MAX);
+        memory_copy(c->peer_key, peer->key, 32);
+        c->place_count = link_places_for(peer->key, peer->address, peer->port,
+                                         c->places);
+        c->tried = 0;
+        return true;
+}
+
+static fn link_fs_close(struct link_fs_client address_to c)
+{
+        p8 any = false;
+
+        if (c->session)
+        {
+                if (link_client.session == c->session)
+                {
+                        link_client.ours = 0;
+                        link_client.session = null;
+                        link_client.attempts = 0;
+                }
+                if (c->session->now.live)
+                        link_session_end(c->session, true);
+                c->session->fs_client = null;
+                link_session_close(c->session);
+                c->session = null;
+        }
+        link_fs_buf_free(address_of c->out);
+        link_fs_buf_free(address_of c->in);
+        memory_zero(c, sizeof(address_to c));
+        for (positive at = 0; at < LINK_SESSIONS; at++)
+                if (link_self.session[at].used)
+                        any = true;
+        if (!any && link_self.socket > 0)
+        {
+                link_tcp_close_all();
+                system_close(link_self.socket);
+                link_self.socket = -1;
+        }
+}
+
+static p32 link_fs_request(struct link_fs_client address_to c, p8 op,
+                           const p8 address_to payload, p32 payload_len)
+{
+        p32 id;
+        p8 head[LINK_FS_HEAD];
+
+        if (!c->used || c->state == LINK_FS_FAILED || c->state == LINK_FS_IDLE)
+                return 0;
+        id = c->next_req_id++;
+        if (!c->next_req_id)
+                c->next_req_id = 1;
+        link_fs_put32(head, id);
+        head[4] = op;
+        link_fs_put32(head + 5, payload_len);
+        if (!link_fs_buf_reserve(address_of c->out,
+                                 c->out.len + LINK_FS_HEAD + payload_len))
+                return 0;
+        (void)link_fs_buf_append(address_of c->out, head, LINK_FS_HEAD);
+        if (payload_len)
+                (void)link_fs_buf_append(address_of c->out, payload, payload_len);
+        if (c->state == LINK_FS_READY && c->session)
+        {
+                link_self.now = link_now();
+                link_fs_flush_buf(c->session, LINK_KEY_INPUT, address_of c->out);
+                link_session_flush(c->session, link_self.now);
+        }
+        return id;
+}
+
+static bipolar link_fs_poll_fd(const struct link_fs_client address_to c)
+{
+        if (!c || !c->used || !c->session)
+                return -1;
+        return link_self.socket > 0 ? link_self.socket : -1;
+}
+
+static int link_fs_step(struct link_fs_client address_to c,
+                        struct link_fs_reply address_to reply)
+{
+        struct link_session address_to s = c ? c->session : null;
+        p64 now;
+
+        if (!c || !c->used)
+                return -1;
+        if (c->reply_consume)
+        {
+                c->in.pos += c->reply_consume;
+                c->reply_consume = 0;
+                if (c->in.pos == c->in.len)
+                        c->in.pos = c->in.len = 0;
+        }
+        if (c->state == LINK_FS_FAILED || !s || !s->used)
+                return -1;
+
+        now = link_self.now = link_now();
+        link_self.socket_quiet = false;
+        link_tcp_turn(now);
+        link_receive_all(now);
+
+        if (!s->now.live)
+        {
+                if (!link_client.ours || link_client.session == s)
+                {
+                        if (!link_client.ours ||
+                            link_age(now, link_client.initiated) >= LINK_ATTEMPT)
+                        {
+                                positive budget = c->tried ? LINK_PLACE_ATTEMPTS
+                                                           : LINK_ATTEMPTS;
+                                p8 spent = link_client.attempts >= budget;
+
+                                if (!spent)
+                                {
+                                        link_client.attempts++;
+                                        spent = !link_client_initiate(s, now);
+                                }
+                                if (spent && c->tried + 1 < c->place_count)
+                                        link_client_place(s, c->places + ++c->tried);
+                                else if (spent)
+                                {
+                                        link_client.ours = 0;
+                                        link_client.session = null;
+                                        link_client.attempts = 0;
+                                        c->state = LINK_FS_FAILED;
+                                        return -1;
+                                }
+                        }
+                }
+        }
+        else if (!c->asked)
+        {
+                p8 req = LINK_ASK_FS;
+
+                (void)waterlink_post(s->link, LINK_KEY_REQUEST,
+                                     WATERLINK_FRAME_DURABLE |
+                                         WATERLINK_FRAME_URGENT |
+                                         WATERLINK_FRAME_LAST,
+                                     address_of req, 1, now);
+                c->asked = true;
+        }
+        else if (s->refused)
+        {
+                memory_copy(c->refusal, s->refusal, sizeof c->refusal);
+                c->state = LINK_FS_FAILED;
+                return -1;
+        }
+        else if (s->answered && c->state == LINK_FS_CONNECTING)
+                c->state = LINK_FS_READY;
+
+        if (s->now.live && (link_age(now, s->heard) > LINK_DEAD || s->finished))
+        {
+                c->state = LINK_FS_FAILED;
+                return -1;
+        }
+
+        if (c->state == LINK_FS_READY && c->out.pos < c->out.len)
+                link_fs_flush_buf(s, LINK_KEY_INPUT, address_of c->out);
+
+        (void)link_sessions_turn(now);
+
+        if (reply && c->in.len - c->in.pos >= LINK_FS_HEAD)
+        {
+                p8 address_to h = c->in.data + c->in.pos;
+                p32 req_id = link_fs_get32(h);
+                p8 op = h[4];
+                p32 plen = link_fs_get32(h + 5);
+
+                if (plen > LINK_FS_MSG_MAX)
+                {
+                        c->state = LINK_FS_FAILED;
+                        return -1;
+                }
+                if (c->in.len - c->in.pos >= LINK_FS_HEAD + (positive)plen)
+                {
+                        reply->req_id = req_id;
+                        reply->op = op;
+                        reply->length = plen;
+                        reply->data = h + LINK_FS_HEAD;
+                        c->reply_consume = LINK_FS_HEAD + (positive)plen;
+                        return 1;
+                }
+        }
+        return 0;
 }
 
 #endif // WATERLINK_SERVICE_INCLUDED

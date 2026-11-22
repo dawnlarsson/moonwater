@@ -1446,6 +1446,30 @@ def test_hardening_66_bug_families():
           "if (client >= 0 && client < compositor_wl.slots && compositor_wl.client[client].slow_until &&" in wl_host_c and
           "if (paid)\n                wl_ext_tiled_settle();" in wl_host_c)
 
+    # --- Family 12: Waterlink Per-Machine Ability Settings & File Explorer Waterlink Display ---
+    wl_svc_c = read_text("src/waterlink/service.c")
+    files_model_c = read_text("src/canvas/ui/files_model.c")
+    check("Family 12: Waterlink per-machine ability toggles in Settings (files/run/shell/log allow/deny, persistent expansion) & handshake BLOCKED guard",
+          "SETTINGS_SUB_LINK_GRANT" in settings_c and
+          "settings_link_rows(" in settings_c and
+          "settings_link_follow();" in settings_c and
+          "settings_link_grant_toggle(" in settings_c and
+          "{'l', false, true, \"link\", \"allow\"}" in settings_c and
+          "{'n', false, true, \"link\", \"deny\"}" in settings_c and
+          "peer->flags & WATERLINK_PEER_BLOCKED" in wl_svc_c)
+
+    check("Family 12: Waterlink remote FS RPC (LINK_ASK_FS gated by WATERLINK_MAY_FILES) & File Explorer This Machine + linked machine sidebar/browsing",
+          "LINK_ASK_FS" in wl_svc_c and
+          "LINK_KIND_FS" in wl_svc_c and
+          "link_fs_open(" in wl_svc_c and
+          "link_fs_handle_info(" in wl_svc_c and
+          "link_fs_handle_list(" in wl_svc_c and
+          "FILES_NODE_MACHINE" in files_model_c and
+          "files_tree_set_machine_children(" in files_model_c and
+          "files_peers_sync(" in files_c and
+          "files_remote_tick(" in files_c and
+          "UI_FILE_MACHINE" in ui_c)
+
 
 def test_build_and_audit_gates():
     print("\n=== 4. Build & Audit Gates ===")

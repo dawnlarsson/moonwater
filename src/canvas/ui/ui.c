@@ -1364,6 +1364,7 @@ enum
         UI_FILE_PICTURES,    // the pictures folder
         UI_FILE_TRASH,       // the bin
         UI_FILE_SPECIAL,     // a device, a pipe, a socket
+        UI_FILE_MACHINE,     // a computer: this machine or a linked peer
         UI_FILE_KINDS
 };
 #define UI_FILE_LINKED 0x100u // with a kind: it is a link to one (the arrow at its foot)
@@ -1394,6 +1395,7 @@ static const struct ui_icon_part ui_file_parts[UI_FILE_KINDS][UI_FILE_PARTS] = {
         [UI_FILE_TRASH] = {{UI_ICON_LINE, 7, 12, 41, 12, 0}, {UI_ICON_RING, 18, 6, 30, 12, 1}, {UI_ICON_LINE, 12, 12, 15, 43, 0}, {UI_ICON_LINE, 36, 12, 33, 43, 0},
                            {UI_ICON_LINE, 15, 43, 33, 43, 0}, {UI_ICON_LINE, 20, 18, 20, 37, 0}, {UI_ICON_LINE, 28, 18, 28, 37, 0}},
         [UI_FILE_SPECIAL] = {{UI_ICON_RING, 8, 8, 40, 40, 16}, {UI_ICON_BOX, 20, 20, 28, 28, 4}},
+        [UI_FILE_MACHINE] = {{UI_ICON_RING, 6, 8, 42, 32, 2}, {UI_ICON_LINE, 24, 32, 24, 40, 0}, {UI_ICON_LINE, 14, 40, 34, 40, 0}},
 };
 
 // The page every file kind is drawn on: its outline with the top right corner folded, and the fold.
@@ -6582,6 +6584,9 @@ LANGUAGE_ID(files_place_home, "Home") \
 LANGUAGE_ID(files_place_pictures, "Pictures") \
 LANGUAGE_ID(files_reading, "Reading the folder") \
 LANGUAGE_ID(files_redone, "%d done again") \
+LANGUAGE_ID(files_remote_denied, "Files access is not granted") \
+LANGUAGE_ID(files_remote_offline, "Machine is offline") \
+LANGUAGE_ID(files_remote_opening, "Opening %s...") \
 LANGUAGE_ID(files_rename_hint, "New name") \
 LANGUAGE_ID(files_restored, "%d put back where they were") \
 LANGUAGE_ID(files_sheet_created, "Made %s") \
@@ -6597,6 +6602,7 @@ LANGUAGE_ID(files_sheet_other, "Device, pipe or socket") \
 LANGUAGE_ID(files_sheet_owner, "Owner %1$d, group %2$d") \
 LANGUAGE_ID(files_sheet_size, "Size %1$s (%2$s bytes)") \
 LANGUAGE_ID(files_sheet_size_in, "Size %1$s in %2$d items") \
+LANGUAGE_ID(files_this_machine, "This Machine") \
 LANGUAGE_ID(files_type_link, "Link") \
 LANGUAGE_ID(files_type_other, "Special") \
 LANGUAGE_ID(files_undone, "%d undone") \

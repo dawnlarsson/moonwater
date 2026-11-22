@@ -63,7 +63,7 @@ struct files_kept
 
 struct files_model
 {
-        p8 path[FILES_PATH], filter[FILES_NAME], came[FILES_NAME];
+        p8 path[FILES_PATH], filter[FILES_NAME], came[FILES_NAME], peer[WATERLINK_NAME_MAX];
         int state, sort;
         bipolar error, handle, seat;
         struct files_listing shown, next;
@@ -72,11 +72,13 @@ struct files_model
         file_facts folder;
         positive filter_length, mapped_size;
         p32 cursor, anchor, chosen_count, back_count, forward_count, revision, listed, reads;
-        p8 address_to chosen, address_to back, address_to forward;
+        p8 address_to chosen, address_to back, address_to forward, address_to back_peer, address_to forward_peer;
         struct files_kept kept[FILES_KEPT];
         p64 kept_clock;
         address_any mapped;
 };
+
+static inline b32 files_model_is_remote(const struct files_model address_to m) { return m->peer[0] != 0; }
 
 /* ---- memory & syscall primitives ---- */
 
@@ -118,7 +120,7 @@ static b32 files_path_join(p8 address_to into, positive room, const p8 address_t
 
 #define FILES_MODEL_BYTES                                                                                             \
         (2 * ((positive)FILES_MOST * (sizeof(struct files_entry) + sizeof(p32)) + FILES_NAMES) + FILES_MOST / 8 +     \
-         2 * (positive)FILES_HISTORY * FILES_PATH)
+         2 * (positive)FILES_HISTORY * (FILES_PATH + WATERLINK_NAME_MAX))
 
 static fn files_keep_drop(struct files_model address_to m, int which);
 
@@ -138,7 +140,10 @@ static b32 files_model_open(struct files_model address_to m)
                 l->names = at, at += FILES_NAMES;
         }
         m->chosen = at, at += FILES_MOST / 8;
-        m->back = at, m->forward = at + (positive)FILES_HISTORY * FILES_PATH;
+        m->back = at, at += (positive)FILES_HISTORY * FILES_PATH;
+        m->forward = at, at += (positive)FILES_HISTORY * FILES_PATH;
+        m->back_peer = at, at += (positive)FILES_HISTORY * WATERLINK_NAME_MAX;
+        m->forward_peer = at;
         return true;
 }
 
@@ -530,6 +535,7 @@ static fn files_model_show(struct files_model address_to m, string_address path,
         file_facts now;
         int kept;
         files_walk_stop(m), m->reloading = false, files_keep_put(m);
+        m->peer[0] = end;
         m->filter_length = 0, m->filter[0] = end;
         files_close(&m->handle), m->handle = handle;
         if ((const p8 address_to)path != m->path)
@@ -644,22 +650,105 @@ static b32 files_path_parent(const p8 address_to path, p8 address_to parent, p8 
         return parent[cut] = end, true;
 }
 
-static fn files_history_push(p8 address_to stack, p32 address_to count, const p8 address_to path)
+static fn files_history_push(p8 address_to stack, p8 address_to peer_stack, p32 address_to count, const p8 address_to peer, const p8 address_to path)
 {
         if (*count == FILES_HISTORY)
         {
                 for (p32 at = 0; at + 1 < FILES_HISTORY; at++)
+                {
                         memory_copy(stack + (positive)at * FILES_PATH, stack + (positive)(at + 1) * FILES_PATH, FILES_PATH);
+                        memory_copy(peer_stack + (positive)at * WATERLINK_NAME_MAX, peer_stack + (positive)(at + 1) * WATERLINK_NAME_MAX, WATERLINK_NAME_MAX);
+                }
                 (*count)--;
         }
-        string_copy_bounded(stack + (positive)(*count)++ * FILES_PATH, (string_address)path, FILES_PATH);
+        string_copy_bounded(stack + (positive)(*count) * FILES_PATH, (string_address)path, FILES_PATH);
+        string_copy_bounded(peer_stack + (positive)(*count) * WATERLINK_NAME_MAX, (string_address)(peer ? peer : (const p8 address_to) ""), WATERLINK_NAME_MAX);
+        (*count)++;
 }
 
 static fn files_model_commit(struct files_model address_to m, string_address path, bipolar handle, bipolar error)
 {
         if (m->state != FILES_NONE)
-                files_history_push(m->back, &m->back_count, m->path);
+                files_history_push(m->back, m->back_peer, &m->back_count, m->peer, m->path);
         m->forward_count = 0, m->came[0] = end, files_model_show(m, path, handle, error);
+}
+
+static b32 files_model_go_remote(struct files_model address_to m, const p8 address_to peer, string_address path, b32 commit)
+{
+        p8 taken[FILES_PATH];
+        if (!peer || !peer[0] || !files_path_take(taken, path))
+                return false;
+        files_walk_stop(m), m->reloading = false, files_keep_put(m);
+        if (commit && m->state != FILES_NONE)
+                files_history_push(m->back, m->back_peer, &m->back_count, m->peer, m->path), m->forward_count = 0, m->came[0] = end;
+        m->filter_length = 0, m->filter[0] = end;
+        files_close(&m->handle);
+        string_copy_bounded(m->peer, (string_address)peer, WATERLINK_NAME_MAX);
+        string_copy_bounded(m->path, (string_address)taken, FILES_PATH);
+        files_listing_empty(&m->shown), files_listing_empty(&m->next), files_model_choose_none(m);
+        m->cursor = FILES_NO, m->seat = 0, m->restored = false;
+        m->state = FILES_READING, m->error = 0, m->revision++;
+        return true;
+}
+
+static fn files_model_take_remote(struct files_model address_to m, const p8 address_to data, positive length)
+{
+        struct files_listing address_to l = m->reloading ? &m->next : &m->shown;
+        b32 status;
+        p32 count;
+        positive at = 8;
+        if (!data || length < 4)
+        {
+                files_model_finish(m, -5);
+                return;
+        }
+        status = (b32)link_fs_get32(data);
+        if (status < 0)
+        {
+                files_model_finish(m, (bipolar)status);
+                return;
+        }
+        if (length < 8)
+        {
+                files_model_finish(m, -5);
+                return;
+        }
+        count = link_fs_get32(data + 4);
+        files_listing_empty(l);
+        for (p32 k = 0; k < count && at + 37 <= length; k++)
+        {
+                p8 kind = data[at];
+                p16 mode = link_fs_get16(data + at + 1);
+                p64 size = link_fs_get64(data + at + 3);
+                b64 modified = (b64)link_fs_get64(data + at + 11);
+                b64 born = (b64)link_fs_get64(data + at + 19);
+                p64 inode = link_fs_get64(data + at + 27);
+                p16 nlen = link_fs_get16(data + at + 35);
+                at += 37;
+                if (at + nlen > length)
+                        break;
+                if (nlen && nlen < FILES_NAME)
+                {
+                        if (l->count >= FILES_MOST || l->names_used + nlen + 1 > FILES_NAMES)
+                        {
+                                l->cut = true;
+                                break;
+                        }
+                        {
+                                struct files_entry address_to e = &l->entry[l->count];
+                                memory_fill(e, 0, sizeof(*e));
+                                e->name = l->names_used, e->length = nlen;
+                                memory_copy(l->names + l->names_used, data + at, nlen);
+                                l->names[l->names_used + nlen] = end;
+                                l->names_used += (p32)nlen + 1;
+                                e->kind = kind, e->looked = 1, e->mode = mode;
+                                e->size = size, e->modified = modified, e->born = born, e->inode = inode;
+                                l->order[l->count] = l->count, l->places = ++l->count;
+                        }
+                }
+                at += nlen;
+        }
+        files_model_finish(m, 0);
 }
 
 static fn files_model_open_path(struct files_model address_to m, string_address path, b32 commit)
@@ -769,20 +858,27 @@ static b32 files_model_up(struct files_model address_to m)
         p8 parent[FILES_PATH], name[FILES_NAME];
         if (m->state == FILES_NONE || !files_path_parent(m->path, parent, name))
                 return false;
+        if (files_model_is_remote(m))
+                return files_model_go_remote(m, m->peer, (string_address)parent, true), files_model_came(m, name), true;
         return files_model_open_path(m, parent, true), files_model_came(m, name), true;
 }
 
 static b32 files_model_back(struct files_model address_to m, b32 forward)
 {
         p8 address_to from = forward ? m->forward : m->back, address_to onto = forward ? m->back : m->forward;
+        p8 address_to from_peer = forward ? m->forward_peer : m->back_peer, address_to onto_peer = forward ? m->back_peer : m->forward_peer;
         p32 address_to fc = forward ? &m->forward_count : &m->back_count, address_to oc = forward ? &m->back_count : &m->forward_count;
-        p8 to[FILES_PATH], name[FILES_NAME], parent[FILES_PATH];
+        p8 to[FILES_PATH], to_peer[WATERLINK_NAME_MAX], name[FILES_NAME], parent[FILES_PATH];
         if (!*fc)
                 return false;
-        string_copy_bounded(to, (string_address)(from + (positive)--(*fc) * FILES_PATH), FILES_PATH);
-        files_history_push(onto, oc, m->path);
-        if (!files_path_parent(m->path, parent, name) || !string_equals(parent, to))
+        --(*fc);
+        string_copy_bounded(to, (string_address)(from + (positive)(*fc) * FILES_PATH), FILES_PATH);
+        string_copy_bounded(to_peer, (string_address)(from_peer + (positive)(*fc) * WATERLINK_NAME_MAX), WATERLINK_NAME_MAX);
+        files_history_push(onto, onto_peer, oc, m->peer, m->path);
+        if (!string_equals((string_address)m->peer, (string_address)to_peer) || !files_path_parent(m->path, parent, name) || !string_equals(parent, to))
                 name[0] = end;
+        if (to_peer[0])
+                return files_model_go_remote(m, to_peer, (string_address)to, false), files_model_came(m, name), true;
         return files_model_open_path(m, to, false), files_model_came(m, name), true;
 }
 
@@ -1123,10 +1219,13 @@ static b32 files_job_step(struct files_model address_to m, struct files_job addr
 #define FILES_DRIVES_MOST 32
 #define FILES_TREE_BYTES ((positive)FILES_TREE_MOST * sizeof(struct files_node) + FILES_TREE_NAMES)
 
-enum { FILES_NODE_FOLDER, FILES_NODE_PLACE, FILES_NODE_DRIVE };
+enum { FILES_NODE_FOLDER, FILES_NODE_PLACE, FILES_NODE_DRIVE, FILES_NODE_MACHINE };
 enum { FILES_PLACE_NONE, FILES_PLACE_HOME, FILES_PLACE_DOWNLOADS, FILES_PLACE_PICTURES, FILES_PLACE_ROOT };
+#define FILES_NODE_ONLINE 1u
+#define FILES_NODE_MAY_FILES 2u
+#define FILES_NODE_LOADING 4u
 
-struct files_node { p32 name, root_path, device_major, device_minor; p16 length, depth, has; p8 kind, place; b8 open, read; p64 inode; };
+struct files_node { p32 name, root_path, device_major, device_minor; p16 length, depth, has; p8 kind, place, machine, flags; b8 open, read; p64 inode; };
 struct files_tree { struct files_node address_to node; p8 address_to names; p32 count, names_used; p64 drives_hash; address_any mapped; positive mapped_size; };
 struct files_drive { p8 label[FILES_NAME], path[FILES_PATH], device[32], root[256]; };
 
@@ -1136,19 +1235,36 @@ static inline p32 files_tree_store(struct files_tree address_to t, const p8 addr
         return memory_copy(t->names + at, s, len + 1), t->names_used += (p32)(len + 1), at;
 }
 
-static b32 files_tree_add_root(struct files_tree address_to t, const p8 address_to label, const p8 address_to path, p8 kind, p8 place)
+static b32 files_tree_insert_root(struct files_tree address_to t, p32 at, const p8 address_to label, const p8 address_to path, p8 kind, p8 place, p16 depth, p8 machine, b32 stat_local)
 {
-        positive llen = string_length((string_address)label), plen = string_length((string_address)path);
+        positive llen = string_length((string_address)label), plen = path ? string_length((string_address)path) : 0;
         struct files_node address_to n;
         file_facts facts;
-        if (!t->node || t->count >= FILES_TREE_MOST || !llen || !plen || path[0] != '/' || t->names_used + llen + plen + 2 > FILES_TREE_NAMES)
+        if (!t->node || t->count >= FILES_TREE_MOST || at > t->count || !llen || (path && (!plen || path[0] != '/')) || t->names_used + llen + plen + 2 > FILES_TREE_NAMES)
                 return false;
-        n = &t->node[t->count++];
+        if (at < t->count)
+                memory_copy(&t->node[at + 1], &t->node[at], (positive)(t->count - at) * sizeof(struct files_node));
+        n = &t->node[at], t->count++;
         memory_fill(n, 0, sizeof(*n));
-        n->name = files_tree_store(t, label, llen), n->length = (p16)llen, n->root_path = files_tree_store(t, path, plen);
-        n->kind = kind, n->place = place;
-        if (file_look_code(AT_FDCWD, (string_address)path, 0, &facts) >= 0)
+        n->name = files_tree_store(t, label, llen), n->length = (p16)llen;
+        n->root_path = path ? files_tree_store(t, path, plen) : 0;
+        n->kind = kind, n->place = place, n->depth = depth, n->machine = machine;
+        if (stat_local && path && file_look_code(AT_FDCWD, (string_address)path, 0, &facts) >= 0)
                 n->inode = facts.inode, n->device_major = facts.device_major, n->device_minor = facts.device_minor;
+        return true;
+}
+
+static b32 files_tree_add_root(struct files_tree address_to t, const p8 address_to label, const p8 address_to path, p8 kind, p8 place)
+{
+        return files_tree_insert_root(t, t->count, label, path, kind, place, 1, 0, true);
+}
+
+static b32 files_tree_add_machine(struct files_tree address_to t, const p8 address_to label, p8 machine, p8 flags, b32 open)
+{
+        p32 at = t->count;
+        if (!files_tree_insert_root(t, at, label, null, FILES_NODE_MACHINE, FILES_PLACE_NONE, 0, machine, false))
+                return false;
+        t->node[at].flags = flags, t->node[at].open = (b8)open, t->node[at].read = (b8)open;
         return true;
 }
 
@@ -1160,7 +1276,12 @@ static b32 files_tree_begin(struct files_tree address_to t)
                 return false;
         t->mapped = mapped, t->mapped_size = FILES_TREE_BYTES, t->node = (struct files_node address_to)mapped;
         t->names = (p8 address_to)mapped + (positive)FILES_TREE_MOST * sizeof(struct files_node);
-        return files_tree_add_root(t, (const p8 address_to) "/", (const p8 address_to) "/", FILES_NODE_DRIVE, FILES_PLACE_ROOT);
+        if (!files_tree_add_machine(t, (const p8 address_to) "This Machine", 0, FILES_NODE_ONLINE | FILES_NODE_MAY_FILES, true))
+                return false;
+        if (!files_tree_add_root(t, (const p8 address_to) "/", (const p8 address_to) "/", FILES_NODE_DRIVE, FILES_PLACE_ROOT))
+                return false;
+        t->node[0].has = 1;
+        return true;
 }
 
 static inline fn files_tree_end(struct files_tree address_to t) { files_unmap(t->mapped, t->mapped_size), memory_fill(t, 0, sizeof(*t)); }
@@ -1271,6 +1392,9 @@ static int files_drives_parse(const p8 address_to text, positive length, struct 
         return count;
 }
 
+static p32 files_tree_after(const struct files_tree address_to t, p32 at);
+static fn files_tree_compact(struct files_tree address_to t);
+
 static b32 files_tree_load(struct files_tree address_to t, const p8 address_to home, const p8 address_to mountinfo, positive len, b32 force)
 {
         static const struct { const char address_to name; p8 place; } places[] = {{"Downloads", FILES_PLACE_DOWNLOADS}, {"Pictures", FILES_PLACE_PICTURES}};
@@ -1281,19 +1405,81 @@ static b32 files_tree_load(struct files_tree address_to t, const p8 address_to h
         if (changed)
         {
                 p8 sub[FILES_PATH];
-                t->count = t->names_used = 0, t->drives_hash = hash;
-                if (home && home[0] == '/')
+                p32 after, ins = 1, added = 0;
+                t->drives_hash = hash;
+                if (!t->count || t->node[0].kind != FILES_NODE_MACHINE || t->node[0].machine != 0)
                 {
-                        files_tree_add_root(t, (const p8 address_to) "Home", home, FILES_NODE_PLACE, FILES_PLACE_HOME);
-                        for (int k = 0; k < 2; k++)
-                                if (files_path_join(sub, sizeof(sub), home, (const p8 address_to)places[k].name))
-                                        files_tree_add_root(t, (const p8 address_to)places[k].name, sub, FILES_NODE_PLACE, places[k].place);
+                        t->count = t->names_used = 0;
+                        files_tree_add_machine(t, (const p8 address_to) "This Machine", 0, FILES_NODE_ONLINE | FILES_NODE_MAY_FILES, true);
                 }
-                files_tree_add_root(t, (const p8 address_to) "/", (const p8 address_to) "/", FILES_NODE_DRIVE, FILES_PLACE_ROOT);
-                for (int k = 0; k < n; k++)
-                        files_tree_add_root(t, drives[k].label, drives[k].path, FILES_NODE_DRIVE, FILES_PLACE_NONE);
+                else
+                {
+                        after = files_tree_after(t, 0);
+                        if (after > 1)
+                        {
+                                memory_copy(&t->node[1], &t->node[after], (positive)(t->count - after) * sizeof(struct files_node));
+                                t->count -= after - 1;
+                                files_tree_compact(t);
+                        }
+                }
+                if (t->node[0].open)
+                {
+                        if (home && home[0] == '/')
+                        {
+                                if (files_tree_insert_root(t, ins, (const p8 address_to) "Home", home, FILES_NODE_PLACE, FILES_PLACE_HOME, 1, 0, true))
+                                        ins++, added++;
+                                for (int k = 0; k < 2; k++)
+                                        if (files_path_join(sub, sizeof(sub), home, (const p8 address_to)places[k].name) &&
+                                            files_tree_insert_root(t, ins, (const p8 address_to)places[k].name, sub, FILES_NODE_PLACE, places[k].place, 1, 0, true))
+                                                ins++, added++;
+                        }
+                        if (files_tree_insert_root(t, ins, (const p8 address_to) "/", (const p8 address_to) "/", FILES_NODE_DRIVE, FILES_PLACE_ROOT, 1, 0, true))
+                                ins++, added++;
+                        for (int k = 0; k < n; k++)
+                                if (files_tree_insert_root(t, ins, drives[k].label, drives[k].path, FILES_NODE_DRIVE, FILES_PLACE_NONE, 1, 0, true))
+                                        ins++, added++;
+                        t->node[0].has = (p16)added, t->node[0].read = true;
+                }
         }
         return files_unmap(drives, sizeof(struct files_drive) * FILES_DRIVES_MOST), changed;
+}
+
+static b32 files_tree_set_machine_children(struct files_tree address_to t, p32 at, const p8 address_to home, p8 home_flags, const p8 address_to mountinfo, positive mi_len)
+{
+        struct files_drive address_to drives = mountinfo && mi_len ? (struct files_drive address_to)files_anon_map(sizeof(struct files_drive) * FILES_DRIVES_MOST, null) : null;
+        int n = drives ? files_drives_parse(mountinfo, mi_len, drives, FILES_DRIVES_MOST, null) : 0;
+        p32 after, ins, added = 0;
+        p8 machine;
+        p8 sub[FILES_PATH];
+        if (at >= t->count || t->node[at].kind != FILES_NODE_MACHINE)
+                return files_unmap(drives, sizeof(struct files_drive) * FILES_DRIVES_MOST), false;
+        machine = t->node[at].machine;
+        after = files_tree_after(t, at);
+        if (after > at + 1)
+        {
+                memory_copy(&t->node[at + 1], &t->node[after], (positive)(t->count - after) * sizeof(struct files_node));
+                t->count -= after - at - 1;
+                files_tree_compact(t);
+        }
+        ins = at + 1;
+        if (home && home[0] == '/')
+        {
+                if (files_tree_insert_root(t, ins, (const p8 address_to) "Home", home, FILES_NODE_PLACE, FILES_PLACE_HOME, 1, machine, false))
+                        ins++, added++;
+                if ((home_flags & 1) && files_path_join(sub, sizeof(sub), home, (const p8 address_to) "Downloads") &&
+                    files_tree_insert_root(t, ins, (const p8 address_to) "Downloads", sub, FILES_NODE_PLACE, FILES_PLACE_DOWNLOADS, 1, machine, false))
+                        ins++, added++;
+                if ((home_flags & 2) && files_path_join(sub, sizeof(sub), home, (const p8 address_to) "Pictures") &&
+                    files_tree_insert_root(t, ins, (const p8 address_to) "Pictures", sub, FILES_NODE_PLACE, FILES_PLACE_PICTURES, 1, machine, false))
+                        ins++, added++;
+        }
+        if (files_tree_insert_root(t, ins, (const p8 address_to) "/", (const p8 address_to) "/", FILES_NODE_DRIVE, FILES_PLACE_ROOT, 1, machine, false))
+                ins++, added++;
+        for (int k = 0; k < n; k++)
+                if (files_tree_insert_root(t, ins, drives[k].label, drives[k].path, FILES_NODE_DRIVE, FILES_PLACE_NONE, 1, machine, false))
+                        ins++, added++;
+        t->node[at].open = true, t->node[at].read = true, t->node[at].has = (p16)added, t->node[at].flags &= (p8)~FILES_NODE_LOADING;
+        return files_unmap(drives, sizeof(struct files_drive) * FILES_DRIVES_MOST), true;
 }
 
 static inline fn files_tree_populate(struct files_tree address_to t, const p8 address_to home, const p8 address_to mi, positive len) { (void)files_tree_load(t, home, mi, len, true); }
@@ -1337,10 +1523,16 @@ static b32 files_tree_path(const struct files_tree address_to t, p32 at, p8 addr
         int links = 0;
         positive used, rlen;
         const p8 address_to rpath;
-        if (at >= t->count)
+        if (at >= t->count || t->node[at].kind == FILES_NODE_MACHINE)
                 return false;
         for (p32 here = at; here != FILES_NO && here < t->count && links < 256; here = files_tree_parent(t, here))
+        {
+                if (t->node[here].kind == FILES_NODE_MACHINE)
+                        break;
                 chain[links++] = here;
+                if (t->node[here].depth <= 1)
+                        break;
+        }
         if (!links)
                 return false;
         rpath = t->names + t->node[chain[links - 1]].root_path, rlen = string_length((string_address)rpath);
@@ -1363,17 +1555,45 @@ static int files_tree_name_order(address_any l, address_any r, address_any ctx) 
 
 struct files_tree_open_scratch { p8 path[FILES_PATH], found[FILES_TREE_CHILDREN * 64]; p32 offsets[FILES_TREE_CHILDREN]; };
 
+static b32 files_tree_splice_folders(struct files_tree address_to t, p32 at, p8 address_to found, p32 address_to offsets, p32 count, positive used)
+{
+        p32 after, depth;
+        p8 machine;
+        if (at >= t->count)
+                return false;
+        if (count > 1)
+                qsort_r(offsets, count, sizeof(p32), files_tree_name_order, found);
+        after = at + 1, depth = t->node[at].depth + 1u, machine = t->node[at].machine;
+        t->node[at].read = true, t->node[at].has = (p16)count, t->node[at].flags &= (p8)~FILES_NODE_LOADING;
+        if (t->count + count > FILES_TREE_MOST || t->names_used + used > FILES_TREE_NAMES)
+                return false;
+        t->node[at].open = true;
+        if (count)
+                memory_copy(&t->node[after + count], &t->node[after], (positive)(t->count - after) * sizeof(struct files_node));
+        for (p32 k = 0; k < count; k++)
+        {
+                const p8 address_to name = found + offsets[k];
+                positive length = string_length((string_address)name);
+                struct files_node address_to n = &t->node[after + k];
+                memory_fill(n, 0, sizeof(*n));
+                n->name = files_tree_store(t, name, length), n->length = (p16)length, n->depth = (p16)depth, n->machine = machine;
+        }
+        return t->count += count, true;
+}
+
 static b32 files_tree_open(struct files_tree address_to t, p32 at)
 {
         struct files_tree_open_scratch address_to s;
         file_walk walk = {.handle = -1};
         struct linux_dirent64 address_to record;
         file_facts folder;
-        p32 count = 0, scanned = 0, after, depth;
+        p32 count = 0, scanned = 0, after;
         positive used = 0;
         b32 ok = false;
         if (at >= t->count || t->node[at].open)
                 return at < t->count;
+        if (t->node[at].kind == FILES_NODE_MACHINE || t->node[at].machine != 0)
+                return false;
         if (!(s = (struct files_tree_open_scratch address_to)files_anon_map(sizeof(*s), null)))
                 return false;
         if (!files_tree_path(t, at, s->path) || !file_walk_open(&walk, AT_FDCWD, (string_address)s->path) ||
@@ -1396,30 +1616,42 @@ static b32 files_tree_open(struct files_tree address_to t, p32 at)
                 s->offsets[count++] = (p32)used;
                 memory_copy(s->found + used, record->d_name, length + 1), used += length + 1;
         }
-        if (count > 1)
-                qsort_r(s->offsets, count, sizeof(p32), files_tree_name_order, s->found);
-        after = at + 1, depth = t->node[at].depth + 1u;
-        t->node[at].read = true, t->node[at].has = (p16)count;
-        if (t->count + count > FILES_TREE_MOST || t->names_used + used > FILES_TREE_NAMES)
-                goto done;
-        t->node[at].open = true;
-        memory_copy(&t->node[after + count], &t->node[after], (positive)(t->count - after) * sizeof(struct files_node));
-        for (p32 k = 0; k < count; k++)
+        after = at + 1;
+        if (files_tree_splice_folders(t, at, s->found, s->offsets, count, used))
         {
-                const p8 address_to name = s->found + s->offsets[k];
-                positive length = string_length((string_address)name);
-                struct files_node address_to n = &t->node[after + k];
-                file_facts facts;
-                memory_fill(n, 0, sizeof(*n));
-                n->name = files_tree_store(t, name, length), n->length = (p16)length, n->depth = (p16)depth;
-                if (files_look_at(walk.handle, name, &facts) >= 0)
-                        n->inode = facts.inode, n->device_major = facts.device_major, n->device_minor = facts.device_minor;
+                for (p32 k = 0; k < count; k++)
+                {
+                        struct files_node address_to n = &t->node[after + k];
+                        file_facts facts;
+                        if (files_look_at(walk.handle, t->names + n->name, &facts) >= 0)
+                                n->inode = facts.inode, n->device_major = facts.device_major, n->device_minor = facts.device_minor;
+                }
+                ok = true;
         }
-        t->count += count, ok = true;
 done:
         if (walk.handle >= 0)
                 file_walk_close(&walk);
         return files_unmap(s, sizeof(*s)), ok;
+}
+
+static fn files_tree_compact(struct files_tree address_to t)
+{
+        p8 address_to fresh = (p8 address_to)files_anon_map(FILES_TREE_NAMES, null);
+        p32 used = 0;
+        if (!fresh)
+                return;
+        for (p32 k = 0; k < t->count; k++)
+        {
+                struct files_node address_to n = &t->node[k];
+                positive nlen = (positive)n->length + 1;
+                memory_copy(fresh + used, t->names + n->name, nlen), n->name = used, used += (p32)nlen;
+                if (n->depth == 1 && n->kind != FILES_NODE_MACHINE)
+                {
+                        positive rlen = string_length((string_address)(t->names + n->root_path)) + 1;
+                        memory_copy(fresh + used, t->names + n->root_path, rlen), n->root_path = used, used += (p32)rlen;
+                }
+        }
+        memory_copy(t->names, fresh, used), t->names_used = used, files_unmap(fresh, FILES_TREE_NAMES);
 }
 
 static fn files_tree_shut(struct files_tree address_to t, p32 at)
@@ -1431,34 +1663,17 @@ static fn files_tree_shut(struct files_tree address_to t, p32 at)
         memory_copy(&t->node[at + 1], &t->node[after], (positive)(t->count - after) * sizeof(struct files_node));
         t->count -= after - at - 1, t->node[at].open = t->node[at].read = false;
         if (after > at + 1)
-        {
-                p8 address_to fresh = (p8 address_to)files_anon_map(FILES_TREE_NAMES, null);
-                p32 used = 0;
-                if (!fresh)
-                        return;
-                for (p32 k = 0; k < t->count; k++)
-                {
-                        struct files_node address_to n = &t->node[k];
-                        positive nlen = (positive)n->length + 1;
-                        memory_copy(fresh + used, t->names + n->name, nlen), n->name = used, used += (p32)nlen;
-                        if (n->depth == 0)
-                        {
-                                positive rlen = string_length((string_address)(t->names + n->root_path)) + 1;
-                                memory_copy(fresh + used, t->names + n->root_path, rlen), n->root_path = used, used += (p32)rlen;
-                        }
-                }
-                memory_copy(t->names, fresh, used), t->names_used = used, files_unmap(fresh, FILES_TREE_NAMES);
-        }
+                files_tree_compact(t);
 }
 
-static p32 files_tree_find(const struct files_tree address_to t, const p8 address_to path)
+static p32 files_tree_find_in(const struct files_tree address_to t, p8 machine, const p8 address_to path)
 {
         p8 made[FILES_PATH];
         p32 found = FILES_NO;
         for (p32 at = 0; at < t->count; at++)
-                if (files_tree_path(t, at, made) && string_equals((string_address)made, (string_address)path))
+                if (t->node[at].machine == machine && files_tree_path(t, at, made) && string_equals((string_address)made, (string_address)path))
                 {
-                        if (t->node[at].depth == 0)
+                        if (t->node[at].depth == 1)
                                 return at;
                         if (found == FILES_NO)
                                 found = at;
@@ -1466,14 +1681,16 @@ static p32 files_tree_find(const struct files_tree address_to t, const p8 addres
         return found;
 }
 
-static p32 files_tree_reveal(struct files_tree address_to t, const p8 address_to path)
+static inline p32 files_tree_find(const struct files_tree address_to t, const p8 address_to path) { return files_tree_find_in(t, 0, path); }
+
+static p32 files_tree_reveal_in(struct files_tree address_to t, p8 machine, const p8 address_to path)
 {
         positive length = string_length((string_address)path), best_len = 0, start;
         p32 at = FILES_NO;
         if (!t->count || path[0] != '/')
                 return FILES_NO;
         for (p32 k = 0; k < t->count; k++)
-                if (t->node[k].depth == 0)
+                if (t->node[k].machine == machine && t->node[k].depth == 1 && t->node[k].kind != FILES_NODE_MACHINE)
                 {
                         const p8 address_to rpath = t->names + t->node[k].root_path;
                         positive rlen = string_length((string_address)rpath);
@@ -1489,7 +1706,11 @@ static p32 files_tree_reveal(struct files_tree address_to t, const p8 address_to
                 while (stop < length && path[stop] != '/')
                         stop++;
                 if (!t->node[at].open)
+                {
+                        if (machine != 0)
+                                return at;
                         files_tree_open(t, at);
+                }
                 for (p32 k = at + 1; k < t->count && t->node[k].depth > t->node[at].depth; k = files_tree_after(t, k))
                         if (t->node[k].length == stop - start && !memory_compare(t->names + t->node[k].name, path + start, stop - start))
                         {
@@ -1497,11 +1718,13 @@ static p32 files_tree_reveal(struct files_tree address_to t, const p8 address_to
                                 break;
                         }
                 if (next == FILES_NO)
-                        return FILES_NO;
+                        return machine != 0 ? at : FILES_NO;
                 at = next, start = stop + 1;
         }
         return at;
 }
+
+static inline p32 files_tree_reveal(struct files_tree address_to t, const p8 address_to path) { return files_tree_reveal_in(t, 0, path); }
 
 /* ---- stepped/threaded copy, move, and size-measurement job ---- */
 
