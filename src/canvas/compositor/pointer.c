@@ -731,39 +731,42 @@ static int compositor_pointer_span(const struct compositor_pointer *p, int *hot_
         screen's pixels by the length the stretch gives the outline's normal, which keeps the edge as wide all the way round. A place
         deep inside or well outside is answered without a square root.
 */
-static void compositor_dyn_cover(const struct compositor_pointer *p, long long u, long long v, unsigned char *fill, unsigned char *edge)
+struct compositor_dyn_pre
 {
-        long long a = 256 + p->grow, half = 32768 / p->scale + 1, reach = half * a / 256 + 1, x, y, away, nx = 64, ny = 0, along, across, outer, inner;
-        long long line = p->scale < 256 ? 256 : p->scale; // the edge's width, in 256ths of a pixel: a cell, and a pixel at least
-        long long lined = line * 256 / p->scale;           // and in 256ths of a cell
+        long long a, half, reach, line, lined, bound, tip, leg;
+};
+
+static void compositor_dyn_cover(const struct compositor_pointer *p, const struct compositor_dyn_pre *pre, long long u, long long v, unsigned char *fill, unsigned char *edge)
+{
+        long long a = pre->a, reach = pre->reach, x, y, away, nx = 64, ny = 0, along, across, outer, inner;
+        long long line = pre->line, lined = pre->lined;
 
         *fill = *edge = 0;
-        away = (p->hw + p->hh) * a / 256 + half; // nothing of the shape is further than this from its middle, on either axis
-        if (u > away || u < -away || v > away || v < -away)
+        if (u > pre->bound || u < -pre->bound || v > pre->bound || v < -pre->bound)
                 return;
         if (p->lens)
         {
                 // Core circle of radius r (p->hh) with pointy ends at +-tip (p->hw) along (ux, uy): the convex hull of the circle and
                 // its two tips, so the middle keeps the circle's aspect and curvature and the ends taper tangentially to points.
-                long long a = (u * p->ux + v * p->uy) / 64, b = (v * p->ux - u * p->uy) / 64;
-                long long r = p->hh, tip = p->hw > r ? p->hw : r;
+                long long la = (u * p->ux + v * p->uy) / 64, b = (v * p->ux - u * p->uy) / 64;
+                long long r = p->hh, tip = pre->tip;
 
-                a = a < 0 ? -a : a;
+                la = la < 0 ? -la : la;
                 b = b < 0 ? -b : b;
                 if (tip == r)
                 {
-                        away = (long long)compositor_isqrt((unsigned long long)(a * a + b * b)) - r;
+                        away = (long long)compositor_isqrt((unsigned long long)(la * la + b * b)) - r;
                         goto lined;
                 }
                 {
-                        long long leg = (long long)compositor_isqrt((unsigned long long)(tip * tip - r * r));
+                        long long leg = pre->leg;
 
-                        if (a * leg <= b * r)
-                                away = (long long)compositor_isqrt((unsigned long long)(a * a + b * b)) - r;
-                        else if ((a - tip) * leg >= b * r)
-                                away = (long long)compositor_isqrt((unsigned long long)((a - tip) * (a - tip) + b * b));
+                        if (la * leg <= b * r)
+                                away = (long long)compositor_isqrt((unsigned long long)(la * la + b * b)) - r;
+                        else if ((la - tip) * leg >= b * r)
+                                away = (long long)compositor_isqrt((unsigned long long)((la - tip) * (la - tip) + b * b));
                         else
-                                away = (a * r + b * leg) / tip - r;
+                                away = (la * r + b * leg) / tip - r;
                 }
                 goto lined;
         }
@@ -853,12 +856,32 @@ static void compositor_pointer_rows(const struct compositor_pointer *p, int span
 
                 across[k] = (signed char)(u >= 0 && u < CP_CELL * 256 ? u >> 8 : -1);
         }
+        struct compositor_dyn_pre pre = {0};
+
+        if (p->dyn)
+        {
+                pre.a = 256 + p->grow;
+                pre.half = 32768 / p->scale + 1;
+                pre.reach = pre.half * pre.a / 256 + 1;
+                pre.line = p->scale < 256 ? 256 : p->scale;
+                pre.lined = pre.line * 256 / p->scale;
+                pre.bound = (p->hw + p->hh) * pre.a / 256 + pre.half;
+                pre.tip = p->hw > p->hh ? p->hw : p->hh;
+                pre.leg = p->lens && pre.tip > p->hh ? (long long)compositor_isqrt((unsigned long long)(pre.tip * pre.tip - (long long)p->hh * p->hh)) : 0;
+        }
         for (int row = first; row < first + rows; row++, fill += pitch, edge += pitch)
         {
                 if (p->dyn)
                 {
+                        long long v = ((2ll * row + 1) * step >> 16) - oy;
+                        if (v > pre.bound || v < -pre.bound)
+                        {
+                                memory_zero(fill, (positive)span);
+                                memory_zero(edge, (positive)span);
+                                continue;
+                        }
                         for (int column = 0; column < span; column++)
-                                compositor_dyn_cover(p, ((2ll * column + 1) * step >> 16) - ox, ((2ll * row + 1) * step >> 16) - oy, &fill[column], &edge[column]);
+                                compositor_dyn_cover(p, &pre, ((2ll * column + 1) * step >> 16) - ox, v, &fill[column], &edge[column]);
                         continue;
                 }
                 for (int k = 0; k < all; k++)

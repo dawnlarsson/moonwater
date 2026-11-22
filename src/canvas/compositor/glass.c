@@ -202,7 +202,22 @@ static int compositor_frost(const struct compositor_frame *frames, unsigned int 
         {
                 int ox = cx0 < ax || cx0 >= ax + aw ? cx0 : ax;
                 int xfirst = ox == ax ? cx0 - ax : 0, xlast = ox == ax ? cx1 - ax : 1;
+                struct compositor_plan frost_plan;
+                int *frost_radii = 0;
+                int frost_planned = 0;
 
+                if (!gpu_pic)
+                {
+                        int fy0 = ay > 0 ? ay : 0, fy1 = ay + ah < compositor.height ? ay + ah : compositor.height;
+                        if (fy1 <= fy0)
+                                fy0 = ay + ah <= 0 ? 0 : compositor.height - 1, fy1 = fy0 + 1;
+                        struct compositor_target full_under = {strip, (unsigned long)aw, compositor.width, compositor.height,
+                                                               cx0, fy0, cx1, fy1, ox, fy0};
+                        frost_radii = compositor_scene_radii;
+                        compositor_radii(frames, count, frost_radii);
+                        compositor_plan_make(&frost_plan, &full_under, frames, count, frost_radii);
+                        frost_planned = 1;
+                }
                 for (int top = 0; top < ah; top += COMPOSITOR_GLASS_BAND)
                 {
                         int rows = ah - top < COMPOSITOR_GLASS_BAND ? ah - top : COMPOSITOR_GLASS_BAND;
@@ -218,6 +233,8 @@ static int compositor_frost(const struct compositor_frame *frames, unsigned int 
                                 memory_copy_rect_u32(strip + (long)first * aw + xfirst, (unsigned long)aw,
                                                      gpu_pic + (unsigned long)vy0 * gpu_pitch + (unsigned long)cx0, gpu_pitch,
                                                      (unsigned long)(cx1 - cx0), (unsigned long)(vy1 - vy0));
+                        else if (frost_planned)
+                                compositor_scene_plan(&under, frames, count, frost_radii, &frost_plan, 8);
                         else
                                 compositor_scene(&under, frames, count);
                         for (int row = first; row < last; row++)

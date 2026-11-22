@@ -560,8 +560,10 @@ static void compositor_card_split(positive now)
 // and what its clients are told of the frame, held till now: no job reads their pictures any more.
 static void compositor_card_done(void)
 {
+        b64 now = clock_monotonic_nanoseconds();
+
         if (!compositor_card.failed)
-                compositor_card_split(clock_monotonic_nanoseconds());
+                compositor_card_split(now);
         compositor_card_fence_close();
         compositor_card.on = 0;
         if (compositor_card.failed)
@@ -573,11 +575,11 @@ static void compositor_card_done(void)
         compositor_present_tell((const unsigned short (*)[4])compositor_card.clip, compositor_card.clips, compositor_card.turning, compositor_card.composed,
                                 compositor_card.flip_own, compositor_card.back, compositor_card.plane_off);
         compositor_present_on_card = 1;
-        compositor_metric_note(clock_monotonic_nanoseconds() - compositor_card.began);
+        compositor_metric_note(now - compositor_card.began);
         if (compositor_card_record.wanted)
         {
                 compositor_card_record.wanted = 0;
-                compositor_record_present(compositor_card_record.began, clock_monotonic_nanoseconds(), compositor_card_record.path);
+                compositor_record_present(compositor_card_record.began, now, compositor_card_record.path);
         }
 #ifdef CONFIG_MOONWATER_WAYLAND
         compositor_wl_presented();

@@ -804,40 +804,31 @@ static void compositor_blit_scaled_blend(const struct compositor_target *t, cons
         w = x2 - x1;
         if (frame->blend != 2)
                 compositor_reading(t);
-        if (w <= 4096)
         {
                 unsigned int scratch[4096];
-                int chunk = 4096 / w;
 
-                for (int py = y1; py < y2; py += chunk)
+                for (int cx = x1; cx < x2; cx += 1024)
                 {
-                        int rows = y2 - py < chunk ? y2 - py : chunk;
-                        unsigned int *into = t->pixels + (unsigned long)(py - t->oy) * t->pitch + (unsigned long)(x1 - t->ox);
+                        int cw = x2 - cx < 1024 ? x2 - cx : 1024;
+                        int chunk = 4096 / cw;
 
-                        memory_resample_u32_rect(scratch, (unsigned long)w, (unsigned long)w, (unsigned long)rows,
-                                                 frame->pixels, frame->pitch,
-                                                 (unsigned long)frame->source_w, (unsigned long)frame->source_h,
-                                                 (unsigned long)width, (unsigned long)height,
-                                                 (unsigned long)(x1 - x), (unsigned long)(py - y));
-                        if (frame->swap)
-                                memory_swizzle_rb_u32(scratch, scratch, (positive)w * (positive)rows, 0);
-                        if (frame->blend == 2)
-                                compositor_over_ground(into, t->pitch, scratch, (unsigned long)w, (unsigned long)w, (unsigned long)rows, t->out, x1, py);
-                        else
-                                memory_over_u32_rect(into, t->pitch, scratch, (unsigned long)w, (unsigned long)w, (unsigned long)rows);
-                }
-                return;
-        }
-        for (int py = y1; py < y2; py++)
-        {
-                unsigned int *into = t->pixels + (unsigned long)(py - t->oy) * t->pitch + (unsigned long)(x1 - t->ox);
+                        for (int py = y1; py < y2; py += chunk)
+                        {
+                                int rows = y2 - py < chunk ? y2 - py : chunk;
+                                unsigned int *into = t->pixels + (unsigned long)(py - t->oy) * t->pitch + (unsigned long)(cx - t->ox);
 
-                for (int px = x1; px < x2; px++)
-                {
-                        unsigned int src = compositor_picture_at(frame, px - x, py - y);
-                        if (frame->swap)
-                                src = (src & 0xff00ff00u) | ((src >> 16) & 0xffu) | ((src & 0xffu) << 16);
-                        into[px - x1] = compositor_over_pixel(frame->blend == 2 ? compositor_ground_at(px, py) : into[px - x1], src);
+                                memory_resample_u32_rect(scratch, (unsigned long)cw, (unsigned long)cw, (unsigned long)rows,
+                                                         frame->pixels, frame->pitch,
+                                                         (unsigned long)frame->source_w, (unsigned long)frame->source_h,
+                                                         (unsigned long)width, (unsigned long)height,
+                                                         (unsigned long)(cx - x), (unsigned long)(py - y));
+                                if (frame->swap)
+                                        memory_swizzle_rb_u32(scratch, scratch, (positive)cw * (positive)rows, 0);
+                                if (frame->blend == 2)
+                                        compositor_over_ground(into, t->pitch, scratch, (unsigned long)cw, (unsigned long)cw, (unsigned long)rows, t->out, cx, py);
+                                else
+                                        memory_over_u32_rect(into, t->pitch, scratch, (unsigned long)cw, (unsigned long)cw, (unsigned long)rows);
+                        }
                 }
         }
 }
@@ -3115,29 +3106,58 @@ static int canvas_ext_xform_blit(const struct canvas_ext_blit *b, int out_box[4]
                 }
                 return touched;
         }
-        // Fast scaled 32-bit RGB without transform/y_invert/crop/blend/streaming.
+        // Fast scaled 32-bit RGB (8-bit & 10-bit, opaque or blended) chunked through L1 scratch (no 2-pass WC RMW).
         if ((b->fourcc == CANVAS_FOURCC_ARGB8888 || b->fourcc == CANVAS_FOURCC_XRGB8888 ||
-             b->fourcc == CANVAS_FOURCC_ABGR8888 || b->fourcc == CANVAS_FOURCC_XBGR8888) &&
-            !tr && !b->y_invert && !b->blend && !b->streaming &&
+             b->fourcc == CANVAS_FOURCC_ABGR8888 || b->fourcc == CANVAS_FOURCC_XBGR8888 ||
+             b->fourcc == CANVAS_FOURCC_ARGB2101010 || b->fourcc == CANVAS_FOURCC_XRGB2101010 ||
+             b->fourcc == CANVAS_FOURCC_ABGR2101010 || b->fourcc == CANVAS_FOURCC_XBGR2101010) &&
+            !tr && !b->y_invert && !b->streaming &&
             sx256 == 0 && sy256 == 0 && sw256 == bw * 256 && sh256 == bh * 256)
         {
-                unsigned int *dst_base = b->to + (unsigned long)(dy0 + oy1) * b->to_pitch + (unsigned long)(dx0 + ox1);
-                positive rw = (positive)(ox2 - ox1), rh = (positive)(oy2 - oy1);
+                unsigned int scratch[4096];
+                int is_10 = b->fourcc == CANVAS_FOURCC_ARGB2101010 || b->fourcc == CANVAS_FOURCC_XRGB2101010 ||
+                            b->fourcc == CANVAS_FOURCC_ABGR2101010 || b->fourcc == CANVAS_FOURCC_XBGR2101010;
+                int is_bgr = b->fourcc == CANVAS_FOURCC_ABGR8888 || b->fourcc == CANVAS_FOURCC_XBGR8888 ||
+                             b->fourcc == CANVAS_FOURCC_ABGR2101010 || b->fourcc == CANVAS_FOURCC_XBGR2101010;
+                int is_x = b->fourcc == CANVAS_FOURCC_XRGB8888 || b->fourcc == CANVAS_FOURCC_XBGR8888 ||
+                           b->fourcc == CANVAS_FOURCC_XRGB2101010 || b->fourcc == CANVAS_FOURCC_XBGR2101010;
 
-                memory_resample_u32_rect(dst_base, b->to_pitch, rw, rh,
-                                         (const unsigned int *)b->pixels, (positive)(b->stride / 4),
-                                         (positive)bw, (positive)bh, (positive)tw, (positive)th,
-                                         (positive)ox1, (positive)oy1);
-                if (b->fourcc == CANVAS_FOURCC_ABGR8888 || b->fourcc == CANVAS_FOURCC_XBGR8888)
+                if (!b->blend && b->fourcc == CANVAS_FOURCC_ARGB8888)
                 {
-                        p32 mask = b->fourcc == CANVAS_FOURCC_XBGR8888 ? 0xff000000u : 0u;
-
-                        for (positive ry = 0; ry < rh; ry++)
-                                memory_swizzle_rb_u32(dst_base + ry * b->to_pitch, dst_base + ry * b->to_pitch, rw, mask);
+                        unsigned int *dst_base = b->to + (unsigned long)(dy0 + oy1) * b->to_pitch + (unsigned long)(dx0 + ox1);
+                        memory_resample_u32_rect(dst_base, b->to_pitch, (positive)(ox2 - ox1), (positive)(oy2 - oy1),
+                                                 (const unsigned int *)b->pixels, (positive)(b->stride / 4),
+                                                 (positive)bw, (positive)bh, (positive)tw, (positive)th,
+                                                 (positive)ox1, (positive)oy1);
+                        return 1;
                 }
-                else if (b->fourcc == CANVAS_FOURCC_XRGB8888)
-                        for (positive ry = 0; ry < rh; ry++)
-                                memory_or_u32(dst_base + ry * b->to_pitch, dst_base + ry * b->to_pitch, rw, 0xff000000u);
+                for (long cx = ox1; cx < ox2; cx += 1024)
+                {
+                        long cw = ox2 - cx < 1024 ? ox2 - cx : 1024;
+                        long chunk = 4096 / cw;
+
+                        for (long py = oy1; py < oy2; py += chunk)
+                        {
+                                long rows = oy2 - py < chunk ? oy2 - py : chunk;
+                                unsigned int *dst = b->to + (unsigned long)(dy0 + py) * b->to_pitch + (unsigned long)(dx0 + cx);
+                                positive count = (positive)cw * (positive)rows;
+
+                                memory_resample_u32_rect(scratch, (positive)cw, (positive)cw, (positive)rows,
+                                                         (const unsigned int *)b->pixels, (positive)(b->stride / 4),
+                                                         (positive)bw, (positive)bh, (positive)tw, (positive)th,
+                                                         (positive)cx, (positive)py);
+                                if (is_10)
+                                        memory_pack_2101010_u32(scratch, scratch, count, (positive)((is_bgr ? 1u : 0u) | (is_x ? 2u : 0u)));
+                                else if (is_bgr)
+                                        memory_swizzle_rb_u32(scratch, scratch, count, is_x ? 0xff000000u : 0u);
+                                else if (is_x)
+                                        memory_or_u32(scratch, scratch, count, 0xff000000u);
+                                if (b->blend)
+                                        memory_over_u32_rect(dst, b->to_pitch, scratch, (positive)cw, (positive)cw, (positive)rows);
+                                else
+                                        memory_copy_rect_u32(dst, b->to_pitch, scratch, (positive)cw, (positive)cw, (positive)rows);
+                        }
+                }
                 return 1;
         }
         // Fast 1:1 unscaled NV12 -> XRGB row path via lib.c SIMD (AVX2/SSE2/NEON).

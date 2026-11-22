@@ -39177,12 +39177,30 @@ static inline unsigned int canvas_mix_linear(unsigned int ground, unsigned int i
 
 static inline fn canvas_mix_linear_row(p32 address_to into, const p32 address_to ink, const p8 address_to cover, positive count)
 {
-        for (positive i = 0; i < count; i++)
+        positive i = 0;
+
+        while (i < count)
         {
                 unsigned int c = cover[i];
 
-                if (c)
-                        into[i] = c >= 255u ? ink[i] : canvas_mix_linear(into[i], ink[i], c);
+                if (!c)
+                {
+                        while (++i < count && !cover[i])
+                                ;
+                }
+                else if (c >= 255u)
+                {
+                        positive start = i;
+
+                        while (++i < count && cover[i] >= 255u)
+                                ;
+                        memory_copy(into + start, ink + start, (i - start) * 4);
+                }
+                else
+                {
+                        into[i] = canvas_mix_linear(into[i], ink[i], c);
+                        i++;
+                }
         }
 }
 

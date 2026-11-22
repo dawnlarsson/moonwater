@@ -950,7 +950,7 @@ static unsigned int gpu_i915_family_of(unsigned int device)
 
 // What the last identify found of the node (the one picked is the last asked), and the state of the open card: its jobs, their sync_files (+1: 0 none), and the
 // table of bound ranges with the object list of a submit, each a reservation of address space taken at its first use.
-struct gpu_i915_bound { positive va, bytes; unsigned int written, pad; };
+struct gpu_i915_bound { positive va, bytes; unsigned int written, seen_serial, seen_idx, pad; };
 static struct
 {
         b32 llc, softpin, no_reloc, fence, probe, read_only_refused;
@@ -1154,6 +1154,7 @@ static unsigned int gpu_i915_user(positive from, positive bytes, unsigned int ho
         return e;
 }
 
+static unsigned int gpu_submit_serial;
 static unsigned int gpu_i915_submit(const struct gpu_job *job, p64 *bos, unsigned int named, positive *sequence)
 {
         const positive wide = GPU_VA_END > (1ull << 32) ? GPU_I915_WIDE : 0;
@@ -1175,31 +1176,30 @@ static unsigned int gpu_i915_submit(const struct gpu_job *job, p64 *bos, unsigne
         for (unsigned int k = 0; k < named; k++)
         {
                 const unsigned int handle = (unsigned int)bos[k];
-                b32 dup = false;
 
                 if (handle >= GPU_I915_HANDLES || !gpu_i915.bound[handle].bytes)
                         return 2; // a buffer the table never bound: it has no address to be pinned at
                 if (handle == gpu_i915.main)
                         continue;
-                for (unsigned int j = 0; j < n; j++)
-                        if (gpu_i915.objects[j].handle == handle)
-                        {
-                                if (gpu_i915.bound[handle].written)
-                                        gpu_i915.objects[j].flags |= GPU_I915_WRITTEN;
-                                dup = true;
-                                break;
-                        }
-                if (dup)
+                if (gpu_i915.bound[handle].seen_serial == gpu_submit_serial)
+                {
+                        if (gpu_i915.bound[handle].written)
+                                gpu_i915.objects[gpu_i915.bound[handle].seen_idx].flags |= GPU_I915_WRITTEN;
                         continue;
-                memory_zero(&gpu_i915.objects[n], sizeof(gpu_i915.objects[n]));
-                gpu_i915.objects[n].handle = handle, gpu_i915.objects[n].offset = gpu_i915.bound[handle].va;
-                gpu_i915.objects[n++].flags = GPU_I915_PINNED | wide | (gpu_i915.bound[handle].written ? GPU_I915_WRITTEN : 0);
+                }
+                gpu_i915.bound[handle].seen_serial = gpu_submit_serial, gpu_i915.bound[handle].seen_idx = n;
+                gpu_i915.objects[n] = (struct gpu_i915_object){
+                    .handle = handle,
+                    .offset = gpu_i915.bound[handle].va,
+                    .flags = GPU_I915_PINNED | wide | (gpu_i915.bound[handle].written ? GPU_I915_WRITTEN : 0)};
+                n++;
         }
-        memory_zero(&gpu_i915.objects[n], sizeof(gpu_i915.objects[n]));
         // Gen7/7.5 (Ivy Bridge, Valleyview, Haswell): i915's command parser (eb_parse) rejects EXEC_OBJECT_WRITE on the
         // batch BO itself with EINVAL; omit GPU_I915_WRITTEN on main for family < 800 (FENCE_OUT / GEM_WAIT still sync it).
-        gpu_i915.objects[n].handle = gpu_i915.main, gpu_i915.objects[n].offset = GPU_VA;
-        gpu_i915.objects[n++].flags = GPU_I915_PINNED | wide | (gpu.family < 800 ? 0 : GPU_I915_WRITTEN);
+        gpu_i915.objects[n++] = (struct gpu_i915_object){
+            .handle = gpu_i915.main,
+            .offset = GPU_VA,
+            .flags = GPU_I915_PINNED | wide | (gpu.family < 800 ? 0 : GPU_I915_WRITTEN)};
         run.buffers_ptr = (p64)gpu_i915.objects, run.buffer_count = n, run.batch_start_offset = (unsigned int)(job->packets - GPU_VA), run.batch_len = 4 * words;
         run.flags |= gpu_i915.fence ? GPU_I915_FENCE_OUT : 0, run.rsvd1 = gpu.ctx;
         if ((e = gpu_raw(gpu.fd, gpu_i915.fence ? GPU_I915_EXECBUFFER2_WR : GPU_I915_EXECBUFFER2, &run)) != 0)
@@ -1215,8 +1215,6 @@ static unsigned int gpu_i915_submit(const struct gpu_job *job, p64 *bos, unsigne
 // a job of ours (the job did not draw what it was given): -1, the wait failed; else 1.
 static int gpu_i915_ended(positive sequence)
 {
-        unsigned int lost = gpu_i915_lost(gpu.ctx);
-
         if (sequence > gpu_i915.done)
                 gpu_i915.done = sequence;
         for (unsigned int i = 0; i < GPU_I915_JOBS; i++)
@@ -1226,8 +1224,12 @@ static int gpu_i915_ended(positive sequence)
                                 system_close(gpu_i915.jobs[i].fence - 1);
                         gpu_i915.jobs[i].fence = 0, gpu_i915.jobs[i].sequence = 0;
                 }
-        if (lost != gpu_i915.lost)
-                return gpu_i915.lost = lost, -1;
+        if ((sequence & 63u) == 0)
+        {
+                unsigned int lost = gpu_i915_lost(gpu.ctx);
+                if (lost != gpu_i915.lost)
+                        return gpu_i915.lost = lost, -1;
+        }
         return 1;
 }
 
@@ -2354,7 +2356,7 @@ static b32 gpu_start(positive bytes)
                                                 gpu.broken = 1;
                                         break;
                                 }
-                                gpu_image_ok = gpu_set == &gpu_amd_rdna2 && gpu_image_test();
+                                gpu_image_ok = (gpu_set == &gpu_amd_rdna2 || gpu_set == &gpu_amd_rdna3) && gpu_image_test();
                                 gpu_nv12_ok = gpu_backend == &gpu_amd && gpu_nv12_test();
                                 if ((gpu_req.mask & (1u << GPU_REQ_UDMABUF | 1u << GPU_REQ_PRIME)) != (1u << GPU_REQ_UDMABUF | 1u << GPU_REQ_PRIME))
                                         gpu_route_probe();
@@ -2883,16 +2885,19 @@ static b32 gpu_map_as(const void *addr, positive size, b32 written)
 
 // (The map found last is looked at first: a present asks for the same few pictures over and over, and the table is up to 256 maps looked at in order. The
 // place kept is only where the looking starts: the map there is held to the pointer as any other is, so a table that has moved under it costs a look, not an answer.)
-static unsigned int gpu_map_last;
+static unsigned int gpu_map_hint[32];
 static positive gpu_va_lookup(const void *pointer, positive bytes, b32 written_only)
 {
-        for (unsigned int k = 0, i = gpu_map_last < gpu_map_count ? gpu_map_last : 0; k < gpu_map_count; k++, i = i + 1 < gpu_map_count ? i + 1 : 0)
+        unsigned int slot = (unsigned int)(((positive)pointer >> 16) & 31u);
+        unsigned int start = gpu_map_hint[slot] < gpu_map_count ? gpu_map_hint[slot] : 0;
+
+        for (unsigned int k = 0, i = start; k < gpu_map_count; k++, i = i + 1 < gpu_map_count ? i + 1 : 0)
                 if ((!written_only || gpu_maps[i].written) && (positive)pointer >= gpu_maps[i].from && (positive)pointer < gpu_maps[i].to &&
                     bytes <= gpu_maps[i].to - (positive)pointer) // no sum to wrap
                 {
                         gpu_maps[i].used = gpu_tick, gpu_maps[i].handed = 1;
                         if (!written_only)
-                                gpu_map_hits++, gpu_map_last = i;
+                                gpu_map_hits++, gpu_map_hint[slot] = i;
                         return gpu_maps[i].va + (positive)pointer - gpu_maps[i].from;
                 }
         if (!written_only)
@@ -2934,7 +2939,7 @@ static void gpu_trim(void)
         }
         for (unsigned int i = 0; idle && i < gpu.imports; i++)
                 if (gpu.imported_dead[i] && gpu_tick - gpu.imported_dead_at[i] >= GPU_IMPORT_GRACE)
-                        gpu_unimport(gpu.imported_va[i], GPU_GONE_RELEASE), i = ~0u; // the list has moved: looked at again from the start
+                        gpu_unimport(gpu.imported_va[i], GPU_GONE_RELEASE), i--; // swapped last into i: re-check i without O(M^2) restart
 }
 
 // The maps whose pages are not all there any more (the compositor let go of what one was made over: a glass window's backdrop, a band made again at another size)
@@ -4560,7 +4565,7 @@ static void gpu_image_args(const unsigned int desc[8], unsigned int kind, unsign
 static b32 gpu_image(const unsigned int desc[8], unsigned int kind, unsigned int x0, unsigned int y0, positive dst, unsigned int dp, unsigned int w, unsigned int h)
 {
         gpu_last_error = 0, gpu_end = GPU_END_NONE;
-        if (!w || !h || !gpu_idle() || gpu_set != &gpu_amd_rdna2)
+        if (!w || !h || !gpu_idle() || (gpu_set != &gpu_amd_rdna2 && gpu_set != &gpu_amd_rdna3))
                 return false;
         gpu_slot_take();
         gpu_image_args(desc, kind, x0, y0, dst, dp, w, h);
@@ -4573,13 +4578,13 @@ static positive gpu_image_go(const unsigned int desc[8], unsigned int kind, unsi
                              unsigned int h)
 {
         gpu_last_error = 0, gpu_end = GPU_END_NONE;
-        if (!w || !h || gpu_set != &gpu_amd_rdna2 || gpu_lost || gpu_slot_take() < 0)
+        if (!w || !h || (gpu_set != &gpu_amd_rdna2 && gpu_set != &gpu_amd_rdna3) || gpu_lost || gpu_slot_take() < 0)
                 return 0;
         gpu_image_args(desc, kind, x0, y0, dst, dp, w, h);
         return gpu_go();
 }
 
-// AMD gfx10.3 SQ_IMG_RSRC_WORD0..7 texture descriptor for linear, 64K_S/D/S_X/R_X tiled, and DCC buffers.
+// AMD gfx10.3 (RDNA2) & gfx11 (RDNA3/3.5) SQ_IMG_RSRC_WORD0..7 texture descriptor for linear, 64K/256K tiled, and DCC buffers.
 #define GPU_MOD_AMD 2ull
 static unsigned int gpu_amd_image(unsigned int desc[8], positive va, positive meta, unsigned int width, unsigned int height, p64 modifier, b32 swapped, b32 unorm)
 {
@@ -4590,12 +4595,20 @@ static unsigned int gpu_amd_image(unsigned int desc[8], positive va, positive me
         if (modifier)
         {
                 unsigned int version = (unsigned int)(modifier & 0xff);
+                b32 gfx11 = gpu_set == &gpu_amd_rdna3;
 
-                if (modifier >> 56 != GPU_MOD_AMD || (version != 1 && version != 3))
+                if (modifier >> 56 != GPU_MOD_AMD)
+                        return 0;
+                if (gfx11 ? (version != 4) : (version != 1 && version != 3))
                         return 0;
                 tile = (unsigned int)(modifier >> 8 & 0x1f), dcc = (unsigned int)(modifier >> 13 & 1), retile = (unsigned int)(modifier >> 14 & 1);
                 piped = retile ? 1u : (unsigned int)(modifier >> 15 & 1), block = (unsigned int)(modifier >> 18 & 3);
-                if ((tile != 9 && tile != 10 && tile != 25 && tile != 27) || (width & 127) || (dcc && (!meta || (meta & 255) || block > 1)))
+                if (tile == 31 && gfx11)
+                {
+                        if ((width & 255) || (dcc && (!meta || (meta & 255) || block > 1)))
+                                return 0;
+                }
+                else if ((tile != 9 && tile != 10 && tile != 25 && tile != 27) || (width & 127) || (dcc && (!meta || (meta & 255) || block > 1)))
                         return 0;
         }
         else if (width & 63)
@@ -4603,7 +4616,7 @@ static unsigned int gpu_amd_image(unsigned int desc[8], positive va, positive me
         unorm = unorm || dcc;
         desc[0] = (unsigned int)(va >> 8);
         desc[1] = (unsigned int)(va >> 40 & 0xff) | (unorm ? 56u : 20u) << 20 | ((width - 1) & 3) << 30;
-        desc[2] = ((width - 1) >> 2 & 0xfff) | (height - 1) << 14 | 1u << 31;
+        desc[2] = ((width - 1) >> 2 & 0xfff) | (height - 1) << 14 | (gpu_set == &gpu_amd_rdna2 ? 1u << 31 : 0u);
         desc[3] = (!unorm ? 4u : swapped ? 6u | 5u << 3 | 4u << 6 | 7u << 9 : 4u | 5u << 3 | 6u << 6 | 7u << 9) | tile << 20 | 9u << 28;
         desc[4] = modifier ? 0 : width - 1;
         desc[5] = 4u << 20;
@@ -4612,20 +4625,10 @@ static unsigned int gpu_amd_image(unsigned int desc[8], positive va, positive me
         return GPU_IMAGE_MADE | (unorm ? 0 : GPU_IMAGE_RAW | (swapped ? GPU_IMAGE_SWAP : 0));
 }
 
-/*
-        Whether a picture gpu_amd_image makes a resource of lies inside the bytes of the buffer it is read from: the texture unit reads by the
-        layout, not by the buffer, so a client's buffer that is smaller than its layout has the card read past its end, into the gap after the
-        import (a fault and a ring reset) or into whatever the next address holds. width is the pitch in pixels and height the rows, as
-        gpu_amd_image takes them, at offset in the buffer; meta the metadata's offset where the modifier has DCC. A 64 KiB tile of four bytes a pixel
-        is 128 by 128 pixels whatever its swizzle (the pipe and bank xor of the _X modes moves bytes inside the block), and the pitch is whole blocks,
-        so the rows are read in blocks of 128: the picture is width * 4 * the rows rounded up to 128, and linear is width * 4 * its rows. DCC keeps one
-        key byte for each 256 bytes of the picture (MAX_UNCOMPRESSED_BLOCK_SIZE 256, which gpu_amd_image holds the block to), so the metadata is at
-        least the picture's bytes over 256: a buffer shorter than that is refused. The metadata's own layout rounds to its blocks, which this does not
-        know, so what it may read past that is kept off every other buffer by the clear addresses on either side of each import (GPU_IMPORT_GUARD).
-*/
 static b32 gpu_amd_image_fits(positive bytes, positive offset, positive meta, unsigned int width, unsigned int height, p64 modifier)
 {
-        positive picture = (positive)width * 4 * (modifier ? ((positive)height + 127) & ~127ull : (positive)height);
+        positive tile_h = (modifier && (modifier >> 8 & 0x1f) == 31) ? 256ull : 128ull;
+        positive picture = (positive)width * 4 * (modifier ? ((positive)height + tile_h - 1) & ~(tile_h - 1) : (positive)height);
 
         if (offset > bytes || picture > bytes - offset)
                 return false;
@@ -4633,15 +4636,18 @@ static b32 gpu_amd_image_fits(positive bytes, positive offset, positive meta, un
 }
 
 // Whether the card reads a client's picture of this modifier now: the texture unit's read drew its test at this start, and the modifier is one
-// gpu_amd_image makes a resource of (a GFX10_RBPLUS tile only on a card of GFX 10.3: the families GPU_FAMILIES lets in, or a Navi 2x of family 143).
+// gpu_amd_image makes a resource of (GFX10/10.3 on RDNA2, GFX11 version 4 on RDNA3/3.5).
 static b32 gpu_image_takes(p64 modifier)
 {
         unsigned int d[8];
 
-        if (!gpu_image_ok || gpu.broken || gpu.fd < 0 ||
-            (modifier && (modifier & 0xff) == 3 && !GPU_FAMILIES(gpu.family) && !gpu_gfx103 && !(gpu_amd_gfx_major == 10 && gpu_amd_gfx_minor >= 3)))
+        if (!gpu_image_ok || gpu.broken || gpu.fd < 0)
                 return false;
-        return gpu_amd_image(d, 0x100000, modifier >> 13 & 1 ? 0x200000 : 0, 1920, 1080, modifier, false, false) != 0;
+        if (modifier && (modifier & 0xff) == 3 && !GPU_FAMILIES(gpu.family) && !gpu_gfx103 && !(gpu_amd_gfx_major == 10 && gpu_amd_gfx_minor >= 3))
+                return false;
+        if (modifier && (modifier & 0xff) == 4 && gpu_set != &gpu_amd_rdna3)
+                return false;
+        return gpu_amd_image(d, 0x100000, modifier >> 13 & 1 ? 0x200000 : 0, 2048, 1080, modifier, false, false) != 0;
 }
 
 /*

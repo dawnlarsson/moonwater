@@ -1318,13 +1318,11 @@ static void compositor_wl_layers_put_list(const struct compositor_wl_layer *list
                         }
                         else
                         {
-                                unsigned int run[1024];
                                 for (long y = 0; y < l->height; y++)
                                         for (long x = 0; x < l->width; x += 1024)
                                         {
                                                 unsigned long n = (unsigned long)(l->width - x < 1024 ? l->width - x : 1024);
-                                                compositor_wl_nv12_run(l, base, y, x, n, run);
-                                                memory_copy_rect_u32(into + (unsigned long)y * pitch + (unsigned long)x, pitch, run, n, n, 1);
+                                                compositor_wl_nv12_run(l, base, y, x, n, into + (unsigned long)y * pitch + (unsigned long)x);
                                         }
                         }
                         compositor_wl_nv12_unmap(l, base);
@@ -1675,6 +1673,8 @@ static void wl_ext_lent_sync(int start)
                         }
                 }
         // The layers of dma-bufs, each bracketed as the picture under them is, for a present that draws their window.
+        if (!compositor_wl_layers.total)
+                return;
         for (int row = 0; row < (int)compositor_rows_in_use; row++)
                 for (unsigned int k = 0, counted = wl_row_lent(row) && compositor_wl.lent[row].fd >= 0;
                      k < compositor_wl_layers.count[row]; k++)
@@ -3027,8 +3027,8 @@ static int compositor_wl_row_picture(void *context, int row, const struct waylan
                                         wl_ext_tiled_settle();
                                         memory_over_u32_rect(dst_p, pitch, src_p, sp, rw, rh);
                                 }
-                                else if (compositor_wl_card_rect(row, picture, to, pitch, x + left, y + top, left, top, right - left, bottom - top,
-                                                                 card_wanted && (right - left) * (bottom - top) >= 32768))
+                                else if (card_wanted && (right - left) * (bottom - top) >= 32768 &&
+                                         compositor_wl_card_rect(row, picture, to, pitch, x + left, y + top, left, top, right - left, bottom - top, 1))
                                         table->client_rects_card++, compositor_wl_copied(row, WINDOWS_COPY_CARD);
                                 else if (picture->sync_fd >= 0)
                                 {
@@ -5632,11 +5632,20 @@ static void compositor_wl_wake(void)
         compositor_wl_kept_at = clock_monotonic_nanoseconds();
         wayland_stats_get(&stats);
         // The screens: a scale, a mode, a place or a turn is told to every client whole, and each window the scale of its screen.
-        unsigned long digest = compositor_wl_screens_digest();
-        if (digest != compositor_wl.screens_told)
         {
-                compositor_wl.screens_told = digest;
-                wayland_screens_changed();
+                static unsigned int screens_layout;
+                static int screens_scale;
+                static positive screens_period;
+                if (compositor.layout != screens_layout || compositor.scale != screens_scale || compositor.period != screens_period || !compositor_wl.screens_told)
+                {
+                        unsigned long digest = compositor_wl_screens_digest();
+                        screens_layout = compositor.layout, screens_scale = compositor.scale, screens_period = compositor.period;
+                        if (digest != compositor_wl.screens_told)
+                        {
+                                compositor_wl.screens_told = digest;
+                                wayland_screens_changed();
+                        }
+                }
         }
         wayland_idle_tick();
         if (compositor_wl_tiled_now() != compositor_wl.dmabuf_tiled)
@@ -5644,8 +5653,8 @@ static void compositor_wl_wake(void)
         compositor_wl_table();
         if (stats.rows > 0)
                 wayland_scales_sweep();
-        for (int row = 0; row < (int)compositor_rows_in_use; row++)
-                if (rows_has(&compositor.woken, row) && wayland_row_owner(row) >= 0)
+        for (int row = rows_next(&compositor.woken, 0); row >= 0; row = rows_next(&compositor.woken, row + 1))
+                if (wayland_row_owner(row) >= 0)
                         compositor_wl_drain(row);
         // Steam's overlay open over the game with the keys: the game's hold of the pointer is let go (the overlay has the pointer,
         // as on X11), and taken again when it closes.

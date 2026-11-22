@@ -1127,7 +1127,7 @@ static int compositor_direct_eligible(int row, int blend)
                 return 0;
         if ((compositor.picture_w[row] != compositor.w[row] || compositor.picture_h[row] != compositor.h[row]) &&
             !(compositor.fullscreen[row] && compositor_client_scans(row) && !compositor.scale_plane_refused &&
-              compositor.picture_w[row] && compositor.picture_h[row] && compositor_overlay_ready()))
+              compositor.picture_w[row] && compositor.picture_h[row] && (compositor_overlay_ready() || compositor.primary)))
                 return 0;
         return 1;
 }
@@ -1816,18 +1816,38 @@ static int compositor_rotate_commit(const struct compositor_output *output, cons
 // Hardware primary-plane scaling commit for undersized fullscreen games (SRC_W/H -> centered CRTC_X/Y/W/H), or 1:1 restore.
 static int compositor_atomic_primary(unsigned int fb, int row, unsigned int which, int src_w, int src_h, int dx, int dy, int dw, int dh)
 {
+        static int last_geom[6];
         struct drm_atomic_req req = {0};
+        int scaled = (src_w != dw || src_h != dh || dx != 0 || dy != 0);
+        int same_geom = compositor.scaled_direct && scaled && !compositor.overlay_on &&
+                        last_geom[0] == src_w && last_geom[1] == src_h && last_geom[2] == dx &&
+                        last_geom[3] == dy && last_geom[4] == dw && last_geom[5] == dh;
+        int want_async = same_geom && row >= 0 && compositor_wl_row_async(row);
+        int async = 0;
 
-        if (!compositor_overlay_ready() || !compositor.primary || src_w <= 0 || src_h <= 0 || dw <= 0 || dh <= 0)
+        (void)compositor_overlay_ready();
+        if (!compositor.primary || src_w <= 0 || src_h <= 0 || dw <= 0 || dh <= 0)
                 return 0;
-        drm_atomic_set_plane(&req, compositor.primary, compositor.primary_props, compositor.crtc, fb,
-                             0, 0, src_w, src_h, dx, dy, dw, dh);
-        if (compositor.overlay_on && compositor.overlay)
-                drm_atomic_set_plane(&req, compositor.overlay, compositor.overlay_props, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
-        if (drm_atomic_commit(&req, COMPOSITOR_FLIP_EVENT | COMPOSITOR_ATOMIC_NONBLOCK, ++compositor.flip_serial) != 0)
+        if (same_geom)
+        {
+                drm_atomic_begin_obj(&req, compositor.primary);
+                drm_atomic_add(&req, compositor.primary_props[COMPOSITOR_PLANE_FB], fb);
+        }
+        else
+        {
+                drm_atomic_set_plane(&req, compositor.primary, compositor.primary_props, compositor.crtc, fb,
+                                     0, 0, src_w, src_h, dx, dy, dw, dh);
+                if (compositor.overlay_on && compositor.overlay)
+                        drm_atomic_set_plane(&req, compositor.overlay, compositor.overlay_props, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+        }
+        if (want_async && drm_atomic_commit(&req, COMPOSITOR_FLIP_EVENT | COMPOSITOR_ATOMIC_NONBLOCK | COMPOSITOR_FLIP_ASYNC, ++compositor.flip_serial) == 0)
+                async = 1;
+        else if (drm_atomic_commit(&req, COMPOSITOR_FLIP_EVENT | COMPOSITOR_ATOMIC_NONBLOCK, ++compositor.flip_serial) != 0)
                 return 0;
-        compositor_flip_arm(fb, row, which, 0);
-        compositor.scaled_direct = (src_w != dw || src_h != dh || dx != 0 || dy != 0);
+        compositor_flip_arm(fb, row, which, async);
+        compositor.scaled_direct = scaled;
+        if (scaled)
+                last_geom[0] = src_w, last_geom[1] = src_h, last_geom[2] = dx, last_geom[3] = dy, last_geom[4] = dw, last_geom[5] = dh;
         if (req.obj_count == 2)
                 compositor.overlay_on = 0, compositor.plane_fb = 0;
         return 1;

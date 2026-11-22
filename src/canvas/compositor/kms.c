@@ -1725,8 +1725,7 @@ static int compositor_pointer_dynamic(void)
 */
 static void compositor_pointer_now(struct compositor_pointer *p)
 {
-        // The values are read at the frame the clock is in, so the picture changes once a frame however often a moving hand asks for it.
-        positive period = compositor.period ? compositor.period : 16000000ull, now = clock_monotonic_nanoseconds() / period * period;
+        positive period, now;
         int morph, lens, grow, scale, most, resize;
 
         // A window's client's own picture is worn as it was copied: no size of the settings', and no squeeze of a held button.
@@ -1736,6 +1735,8 @@ static void compositor_pointer_now(struct compositor_pointer *p)
                                                  .hot_y = compositor_picture.hot_y, .picture = compositor_picture.worn};
                 return;
         }
+        // The values are read at the frame the clock is in, so the picture changes once a frame however often a moving hand asks for it.
+        period = compositor.period ? compositor.period : 16000000ull, now = clock_monotonic_nanoseconds() / period * period;
         resize = compositor.cursor.shape >= CP_RESIZE_H && compositor.cursor.shape <= CP_RESIZE_NESW;
         compositor_sway_to(&compositor.cursor.morph, compositor.cursor.dyn && compositor.cursor.shape == CP_TEXT ? 256 : 0, now);
         compositor_sway_to(&compositor.cursor.lens, compositor.cursor.dyn && resize ? 256 : 0, now);
@@ -2273,8 +2274,9 @@ static void compositor_cursor_move(void)
 
                 inset = compositor_cursor_inset(compositor_pointer_span(shown, &hot_x, &hot_y));
                 left = compositor_drawn_x() - hot_x + inset, top = compositor_drawn_y() - hot_y + inset;
+                ok = same || defer_bo || compositor_cursor_paint(&now) == 0;
                 compositor_cursor_lock_take();
-                ok = (same || defer_bo || compositor_cursor_paint(&now) == 0) && compositor_cursor_planes(left, top) == 0;
+                ok = ok && compositor_cursor_planes(left, top) == 0;
                 if (ok)
                         compositor_cursor_async_sync(1, hot_x, hot_y, inset, left, top);
                 else

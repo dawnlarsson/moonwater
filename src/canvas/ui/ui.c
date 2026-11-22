@@ -7333,6 +7333,7 @@ struct ui_scene
         int lost;
         int dx0, dy0, dx1, dy1;       // the damage of the ops: their union in pixels, empty when dx1 <= dx0 or dy1 <= dy0
         int ox, oy;                   // the place of the kit origin in the picture: an op is written at its place plus this (0 for a picture's own kit)
+        p32 slot_gen;                 // generation counter for cover_slots/tone_slots (avoids 32 KiB per-frame zeroing)
         struct ui_scene_slot cover_slots[UI_SCENE_SLOTS], tone_slots[UI_SCENE_SLOTS];
 };
 
@@ -8179,7 +8180,9 @@ static unsigned char address_to ui_scene_op3(struct ui_scene address_to scene, i
                 return null;
         }
         bitmap = scene->cover + scene->used;
-        memory_zero(bitmap, bytes);
+        // Only zero the top and bottom border rows; callers write interior rows and zero their left/right 1-byte border.
+        memory_zero(bitmap, (positive)pitch);
+        memory_zero(bitmap + (unsigned long)(rows + 1) * (unsigned long)pitch, (positive)pitch);
         op = scene->ops + 8 * scene->count++;
         op[0] = 3u | (unsigned int)pitch << 8, op[1] = (unsigned int)(scene->ox + x0), op[2] = (unsigned int)(scene->oy + y0);
         op[3] = (unsigned int)(scene->ox + x1), op[4] = (unsigned int)(scene->oy + y1);
@@ -8194,7 +8197,8 @@ static unsigned char address_to ui_scene_op3(struct ui_scene address_to scene, i
 HOT static void ui_scene_text(struct ui address_to ui, int wide, int rows, int top, int pen_x, int first, int last, unsigned int colour, unsigned int alpha,
                               b32 light, unsigned int stroke)
 {
-        int from = top, to = top + rows, pitch = wide + 2;
+        int from = top, to = top + rows, pad = stroke ? 1 : 0;
+        int c0, c1, r0, r1, cwide, crows, pitch;
         unsigned char address_to bitmap;
         unsigned char xor_v = light ? 0u : 0xffu;
         from = from < ui->top ? ui->top : from, to = to > ui->bottom ? ui->bottom : to, to = to > ui->height ? ui->height : to;
@@ -8202,20 +8206,26 @@ HOT static void ui_scene_text(struct ui address_to ui, int wide, int rows, int t
                 from = from < ui->band_top ? ui->band_top : from, to = to > ui->band_bottom ? ui->band_bottom : to;
         if (first >= last || from >= to)
                 return;
-        bitmap = ui_scene_op3(ui->scene, wide, rows, pen_x + first, from, pen_x + last, to, first, from - top, colour, alpha, stroke);
+        c0 = first - pad > 0 ? first - pad : 0;
+        c1 = last + pad < wide ? last + pad : wide;
+        r0 = (from - top) - pad > 0 ? (from - top) - pad : 0;
+        r1 = (to - top) + pad < rows ? (to - top) + pad : rows;
+        cwide = c1 - c0, crows = r1 - r0, pitch = cwide + 2;
+        bitmap = ui_scene_op3(ui->scene, cwide, crows, pen_x + first, from, pen_x + last, to, first - c0, (from - top) - r0, colour, alpha, stroke);
         if (unlikely(!bitmap))
                 return;
-        for (int row = 0; row < rows; row++)
+        for (int row = 0; row < crows; row++)
         {
-                const unsigned int *restrict s = ui->scratch + (unsigned long)row * (unsigned long)wide;
+                const unsigned int *restrict s = ui->scratch + (unsigned long)(r0 + row) * (unsigned long)wide + (unsigned long)c0;
                 unsigned char *restrict d = bitmap + (unsigned long)(row + 1) * (unsigned long)pitch + 1;
                 int column = 0;
+                d[-1] = 0, d[cwide] = 0;
 #if defined(__x86_64__) && defined(__SSE2__)
-                if (wide >= 16)
+                if (cwide >= 16)
                 {
                         unsigned int mask32 = 0x000000ffu;
                         unsigned int xor32 = (unsigned int)xor_v * 0x01010101u;
-                        long blocks = (long)(wide >> 4);
+                        long blocks = (long)(cwide >> 4);
                         const unsigned int *sp = s;
                         unsigned char *dp = d;
                         __asm__ volatile(
@@ -8232,12 +8242,12 @@ HOT static void ui_scene_text(struct ui address_to ui, int wide, int rows, int t
                                 : [sp] "+r"(sp), [dp] "+r"(dp), [n] "+r"(blocks)
                                 : [mask] "r"(mask32), [xv] "r"(xor32)
                                 : "xmm0", "xmm1", "xmm2", "xmm3", "xmm4", "xmm5", "memory", "cc");
-                        column = wide & ~15;
+                        column = cwide & ~15;
                 }
 #elif defined(__aarch64__)
-                if (wide >= 16)
+                if (cwide >= 16)
                 {
-                        long blocks = (long)(wide >> 4);
+                        long blocks = (long)(cwide >> 4);
                         const unsigned int *sp = s;
                         unsigned char *dp = d;
                         __asm__ volatile(
@@ -8250,10 +8260,10 @@ HOT static void ui_scene_text(struct ui address_to ui, int wide, int rows, int t
                                 : [sp] "+r"(sp), [dp] "+r"(dp), [n] "+r"(blocks)
                                 : [xv] "r"((unsigned int)xor_v)
                                 : "v0", "v1", "v2", "v3", "v4", "memory", "cc");
-                        column = wide & ~15;
+                        column = cwide & ~15;
                 }
 #endif
-                for (; column < wide; column++)
+                for (; column < cwide; column++)
                         d[column] = (unsigned char)(((s[column] >> 8) & 255u) ^ xor_v);
         }
 }
@@ -8275,7 +8285,11 @@ static fn ui_kit_covers(struct ui address_to ui, int x, int y, int w, int h, con
                 if (!bitmap)
                         return;
                 for (int row = 0; row < rows; row++)
-                        memory_copy(bitmap + (unsigned long)(row + 1) * (unsigned long)stride + 1, cover + (long)(top - y + row) * pitch + (left - x), (positive)wide);
+                {
+                        unsigned char *d = bitmap + (unsigned long)(row + 1) * (unsigned long)stride + 1;
+                        d[-1] = 0, d[wide] = 0;
+                        memory_copy(d, cover + (long)(top - y + row) * pitch + (left - x), (positive)wide);
+                }
                 return;
         }
         memory_over_cover_u32_rect(ui->pixels + (unsigned long)top * ui->pitch + (unsigned long)left, ui->pitch,
@@ -8284,10 +8298,10 @@ static fn ui_kit_covers(struct ui address_to ui, int x, int y, int w, int h, con
 }
 
 // Look up or reserve a slot for key (a, b, c) in a scene table:
-static int ui_scene_probe(struct ui_scene_slot address_to slots, p64 a, p64 b, p32 c, p32 address_to slot_out, unsigned long address_to at)
+static int ui_scene_probe(struct ui_scene_slot address_to slots, p32 gen, p64 a, p64 b, p32 c, p32 address_to slot_out, unsigned long address_to at)
 {
         p32 slot = (p32)((((a * 0x9e3779b97f4a7c15ull) ^ (b * 0xc2b2ae3d27d4eb4full)) ^ c) >> 55), probe;
-        for (probe = 0; probe < UI_SCENE_SLOTS && slots[slot].used; probe++)
+        for (probe = 0; probe < UI_SCENE_SLOTS && slots[slot].used == gen; probe++)
         {
                 if (slots[slot].a == a && slots[slot].b == b && slots[slot].c == c)
                 {
@@ -8308,7 +8322,7 @@ static b32 ui_scene_copy_rect(struct ui_scene address_to scene, struct ui_scene_
                               unsigned long address_to at)
 {
         p32 slot = 0;
-        int found = ui_scene_probe(slots, a, b, c, &slot, at);
+        int found = ui_scene_probe(slots, scene->slot_gen, a, b, c, &slot, at);
         unsigned long start, count = width * rows;
         if (found != 0)
                 return found > 0;
@@ -8321,7 +8335,7 @@ static b32 ui_scene_copy_rect(struct ui_scene address_to scene, struct ui_scene_
                 for (unsigned long r = 0; r < rows; r++)
                         memory_copy(scene->cover + start + r * width, bytes + r * stride, (positive)width);
         scene->used = start + count;
-        slots[slot] = (struct ui_scene_slot){a, b, c, 1, scene->at + start};
+        slots[slot] = (struct ui_scene_slot){a, b, c, scene->slot_gen, scene->at + start};
         *at = scene->at + start;
         return true;
 }
@@ -8561,6 +8575,7 @@ HOT static fn ui_run_lay(struct ui address_to restrict ui, int wide, int rows, i
 #endif
 }
 
+static b32 ui_rows_seen(const struct ui address_to ui, int top, int bottom);
 static int ui_run_flagged(struct ui address_to ui, const font_face address_to const address_to faces, int x, int baseline,
                           string_address text, int size, unsigned int colour, unsigned int alpha, int low, int high,
                           unsigned int stroke, p32 flags)
@@ -8581,6 +8596,17 @@ static int ui_run_flagged(struct ui address_to ui, const font_face address_to co
         rows = rows > UI_SCRATCH_ROWS * held / 100 ? UI_SCRATCH_ROWS * held / 100 : rows;
         if (ui->band_bottom > ui->band_top && (top + rows <= ui->band_top || top >= ui->band_bottom))
                 return width;
+        {
+                int pen_x = x - left;
+                int first = low - pen_x > 0 ? low - pen_x : 0;
+                int last = high - pen_x < wide ? high - pen_x : wide;
+                if (-pen_x > first)
+                        first = -pen_x;
+                if (ui->width - pen_x < last)
+                        last = ui->width - pen_x;
+                if (first >= last || !ui_rows_seen(ui, top, top + rows))
+                        return width;
+        }
         memory_fill_u32_rect(ui->scratch, (positive)wide, (positive)wide, (positive)rows, paper);
         {
                 font_target line = {ui->scratch, (positive)wide, wide, rows};
@@ -10171,9 +10197,21 @@ static void ui_scene_box(struct ui address_to ui, const struct ui_box address_to
         int ox8, oy8;
         if (ui->band_bottom > ui->band_top)
                 from = from < ui->band_top ? ui->band_top : from, to = to > ui->band_bottom ? ui->band_bottom : to;
-        if (from >= to)
+        if (!(argb >> 24) || from >= to || box->x1 <= box->x0 || box->y1 <= box->y0)
                 return;
-        cut = from > 0 || to < ui->height;
+        {
+                int bx0 = box->x0, by0 = box->y0, bx1 = box->x1, by1 = box->y1;
+                if (clip)
+                {
+                        if (clip->x0 > bx0) bx0 = clip->x0;
+                        if (clip->y0 > by0) by0 = clip->y0;
+                        if (clip->x1 < bx1) bx1 = clip->x1;
+                        if (clip->y1 < by1) by1 = clip->y1;
+                }
+                if (bx1 <= 0 || bx0 >= (ui->width << 8) || by1 <= (from << 8) || by0 >= (to << 8) || bx1 <= bx0 || by1 <= by0)
+                        return;
+                cut = (from > 0 && by0 < (from << 8)) || (to < ui->height && by1 > (to << 8));
+        }
         mods = (ring != 0) + (clip != 0) + cut;
         if (scene->count + 1 + mods > scene->room)
         {
@@ -10257,8 +10295,12 @@ static b32 ui_scene_begin(struct ui address_to ui, struct ui_draw_list address_t
         list->scene.cover = list->base + at + ops;
         list->scene.used = 0, list->scene.size = list->half - ops, list->scene.at = at + ops;
         list->scene.lost = 0;
-        memory_zero(list->scene.cover_slots, sizeof(list->scene.cover_slots));
-        memory_zero(list->scene.tone_slots, sizeof(list->scene.tone_slots));
+        if (!++list->scene.slot_gen)
+        {
+                memory_zero(list->scene.cover_slots, sizeof(list->scene.cover_slots));
+                memory_zero(list->scene.tone_slots, sizeof(list->scene.tone_slots));
+                list->scene.slot_gen = 1;
+        }
         list->scene.dx0 = list->scene.dy0 = list->scene.dx1 = list->scene.dy1 = 0;
         list->scene.ox = list->scene.oy = 0;
         ui->scene = &list->scene;
@@ -10336,44 +10378,74 @@ static fn ui_kit_fill_cols(struct ui address_to ui, const struct ui_box address_
         b32 top = box->y0 >> 8, bottom = (box->y1 + 255) >> 8, rx = box->rx, ry = box->ry;
         b32 cut_rx = 0, cut_ry = 0;
         unsigned int whole = argb >> 24 == 255 ? argb | 0xff000000u : ui_premultiplied(argb, UI_FULL);
+        if (top < 0) top = 0;
+        if (top < ui->top) top = ui->top;
+        if (bottom > ui->bottom) bottom = ui->bottom;
+        if (bottom > ui->height) bottom = ui->height;
+        if (ui->band_bottom > ui->band_top)
+        {
+                if (top < ui->band_top) top = ui->band_top;
+                if (bottom > ui->band_bottom) bottom = ui->band_bottom;
+        }
+        if (top >= bottom || last <= first)
+                return;
         ui_box_radii(box, &rx, &ry);
         if (clip)
                 cut_rx = clip->rx, cut_ry = clip->ry, ui_box_radii(clip, &cut_rx, &cut_ry);
-        for (b32 y = top; y < bottom; y++)
         {
-                unsigned int address_to row;
                 b32 width = last - first;
-                if (y < ui->top || y >= ui->bottom || y >= ui->height || y < 0 || !ui_in_band(ui, y))
-                        continue;
-                if (!clip && ui_box_straight(box, ry, y))
+                b32 aligned = !clip && ((box->x0 | box->x1) & 255) == 0;
+                b32 s0 = aligned ? ((box->y0 + ry + 255) >> 8) : bottom;
+                b32 s1 = aligned ? ((box->y1 - ry) >> 8) : top;
+                b32 ax0 = box->x0 >> 8, ax1 = box->x1 >> 8;
+                if (ax0 < first) ax0 = first;
+                if (ax1 > last) ax1 = last;
+                if (s0 < top) s0 = top;
+                if (s1 > bottom) s1 = bottom;
+                for (b32 y = top; y < bottom; y++)
                 {
-                        ui_kit_straight_span(ui->pixels + (unsigned long)y * ui->pitch + (unsigned long)first, first, width, box->x0, box->x1, argb, whole);
-                        continue;
-                }
-                {
-                        struct ui_spans spans, cut;
-                        b32 lo, hi, a, b;
-                        unsigned int inside;
-                        if (!ui_box_spans_radii(box, rx, ry, y, first, width, &spans) || (clip && !ui_box_spans_radii(clip, cut_rx, cut_ry, y, first, width, &cut)))
-                                continue;
-                        row = ui->pixels + (unsigned long)y * ui->pitch + (unsigned long)first;
-                        lo = spans.lo, hi = spans.hi, a = spans.a, b = spans.b, inside = spans.inside;
-                        // Cut to clip: the pixels both touch, whole where both are whole, each pixel the product of the two.
-                        if (clip)
+                        unsigned int address_to row;
+                        if (aligned && y == s0 && s1 > s0 && ax1 > ax0)
                         {
-                                lo = cut.lo > lo ? cut.lo : lo, hi = cut.hi < hi ? cut.hi : hi;
-                                a = cut.a > a ? cut.a : a, b = cut.b < b ? cut.b : b;
-                                inside = inside * cut.inside / UI_FULL;
+                                unsigned int *dst = ui->pixels + (unsigned long)s0 * ui->pitch + (unsigned long)ax0;
+                                if (argb >> 24 == 255)
+                                        memory_fill_u32_rect(dst, ui->pitch, (positive)(ax1 - ax0), (positive)(s1 - s0), whole);
+                                else
+                                        for (b32 sy = s0; sy < s1; sy++)
+                                                memory_over_tone_u32(ui->pixels + (unsigned long)sy * ui->pitch + (unsigned long)ax0, (positive)(ax1 - ax0), whole);
+                                y = s1 - 1;
+                                continue;
                         }
-                        a = a < lo ? lo : a, b = b > hi ? hi : b;
-                        if (b <= a)
-                                a = b = hi;
-                        for (b32 x = lo; x < a; x++)
-                                ui_kit_put(row, x, clip ? ui_spans_cover(&spans, x) * ui_spans_cover(&cut, x) / UI_FULL : ui_spans_cover(&spans, x), argb);
-                        if (b > a && inside)
-                                ui_kit_run(row + a, b - a, ui_kit_cover(argb, inside >= UI_FULL ? UI_FULL : inside));
-                        for (b32 x = b > a ? b : hi; x < hi; x++)
-                                ui_kit_put(row, x, clip ? ui_spans_cover(&spans, x) * ui_spans_cover(&cut, x) / UI_FULL : ui_spans_cover(&spans, x), argb);
+                        if (!clip && ui_box_straight(box, ry, y))
+                        {
+                                ui_kit_straight_span(ui->pixels + (unsigned long)y * ui->pitch + (unsigned long)first, first, width, box->x0, box->x1, argb, whole);
+                                continue;
+                        }
+                        {
+                                struct ui_spans spans, cut;
+                                b32 lo, hi, a, b;
+                                unsigned int inside;
+                                if (!ui_box_spans_radii(box, rx, ry, y, first, width, &spans) || (clip && !ui_box_spans_radii(clip, cut_rx, cut_ry, y, first, width, &cut)))
+                                        continue;
+                                row = ui->pixels + (unsigned long)y * ui->pitch + (unsigned long)first;
+                                lo = spans.lo, hi = spans.hi, a = spans.a, b = spans.b, inside = spans.inside;
+                                // Cut to clip: the pixels both touch, whole where both are whole, each pixel the product of the two.
+                                if (clip)
+                                {
+                                        lo = cut.lo > lo ? cut.lo : lo, hi = cut.hi < hi ? cut.hi : hi;
+                                        a = cut.a > a ? cut.a : a, b = cut.b < b ? cut.b : b;
+                                        inside = inside * cut.inside / UI_FULL;
+                                }
+                                a = a < lo ? lo : a, b = b > hi ? hi : b;
+                                if (b <= a)
+                                        a = b = hi;
+                                for (b32 x = lo; x < a; x++)
+                                        ui_kit_put(row, x, clip ? ui_spans_cover(&spans, x) * ui_spans_cover(&cut, x) / UI_FULL : ui_spans_cover(&spans, x), argb);
+                                if (b > a && inside)
+                                        ui_kit_run(row + a, b - a, ui_kit_cover(argb, inside >= UI_FULL ? UI_FULL : inside));
+                                for (b32 x = b > a ? b : hi; x < hi; x++)
+                                        ui_kit_put(row, x, clip ? ui_spans_cover(&spans, x) * ui_spans_cover(&cut, x) / UI_FULL : ui_spans_cover(&spans, x), argb);
+                        }
                 }
         }
 }
@@ -10447,13 +10519,22 @@ static fn ui_kit_ring_cols(struct ui address_to ui, const struct ui_box address_
         inner.x0 += thickness, inner.y0 += thickness, inner.x1 -= thickness, inner.y1 -= thickness;
         inner.rx = inner.rx > thickness ? inner.rx - thickness : 0;
         inner.ry = inner.ry > thickness ? inner.ry - thickness : 0;
+        if (top < 0) top = 0;
+        if (top < ui->top) top = ui->top;
+        if (bottom > ui->bottom) bottom = ui->bottom;
+        if (bottom > ui->height) bottom = ui->height;
+        if (ui->band_bottom > ui->band_top)
+        {
+                if (top < ui->band_top) top = ui->band_top;
+                if (bottom > ui->band_bottom) bottom = ui->band_bottom;
+        }
+        if (top >= bottom || last <= first)
+                return;
         ry = ui_box_ry(box), inner_ry = ui_box_ry(&inner);
-        for (b32 y = top; y < bottom && last > first; y++)
+        for (b32 y = top; y < bottom; y++)
         {
                 unsigned int address_to row;
                 b32 width = last - first;
-                if (y < ui->top || y >= ui->bottom || y >= ui->height || y < 0 || !ui_in_band(ui, y))
-                        continue;
                 // A row straight in the box, past the inner box or straight in it too, its two bands apart: their spans alone.
                 if (ui_box_straight(box, ry, y))
                 {
@@ -22536,9 +22617,19 @@ static int ui_list_hit(const struct ui address_to ui, const struct ui_list addre
                 id = inside / row * per + column;
                 return column >= 0 && column < per && id < l->total ? id : -1;
         }
-        for (int at = 0; at < l->count; at++)
-                if (inside >= l->top[at] && inside < l->top[at] + l->tall[at])
-                        return l->id[at];
+        {
+                int lo = 0, hi = l->count;
+                while (lo < hi)
+                {
+                        int mid = lo + ((hi - lo) >> 1);
+                        if (l->top[mid] <= inside)
+                                lo = mid + 1;
+                        else
+                                hi = mid;
+                }
+                if (lo > 0 && inside < l->top[lo - 1] + l->tall[lo - 1])
+                        return l->id[lo - 1];
+        }
         return -1;
 }
 
@@ -23978,23 +24069,31 @@ static fn ui_list_draw(struct ui address_to ui, struct ui_list address_to l)
                 {
                         int y = ui_list_row_y(l, at), height = l->tall[at];
                         int col_h = (l->starts[at] & UI_LIST_COLUMNS) ? ui_dev(ui, UI_COLUMNS_H) : 0;
+                        int sec_h = (l->starts[at] & UI_LIST_HEADED) ? ui_dev(ui, UI_SECTION) : 0;
+                        if (y - col_h - sec_h >= l->y + l->h)
+                                break;
                         if (l->starts[at] & UI_LIST_STARTS)
                                 section_row = 0, section_table = (l->starts[at] & UI_LIST_COLUMNS) != 0;
                         if (l->starts[at] & (UI_LIST_HEADED | UI_LIST_COLUMNS))
                         {
-                                struct ui_row row;
                                 int head_bottom = y - col_h;
-                                ui_list_describe(l, ui_list_id(l, at), &row);
-                                if ((l->starts[at] & UI_LIST_HEADED) && head_bottom > l->y && head_bottom - ui_dev(ui, UI_SECTION) < l->y + l->h)
-                                        ui_kit_text_flipped(ui, l->x + ui_dev(ui, UI_INSET),
-                                                            ui_kit_baseline(ui, head_bottom - ui_dev(ui, UI_SECTION) + ui_dev(ui, 8), UI_TITLE_SMALL),
-                                                            ui_fit(ui, (string_address)row.header, UI_TITLE_SMALL, room, cut, sizeof(cut)), UI_TITLE_SMALL,
-                                                            ui_text_colour(ui, UI_ON_SURFACE_VARIANT), 0, l->x, l->w);
-                                if ((l->starts[at] & UI_LIST_COLUMNS) && row.columns && y > l->y && y - col_h < l->y + l->h)
+                                b32 show_head = (l->starts[at] & UI_LIST_HEADED) && head_bottom > l->y && head_bottom - sec_h < l->y + l->h;
+                                b32 show_cols = (l->starts[at] & UI_LIST_COLUMNS) && y > l->y && y - col_h < l->y + l->h;
+                                if (show_head || show_cols)
                                 {
-                                        ui_list_columns_fit(ui, l, at, row.columns);
-                                        ui_columns_layout(ui, row.columns, l->x, y - col_h, l->w);
-                                        ui_columns_draw(ui, row.columns);
+                                        struct ui_row row;
+                                        ui_list_describe(l, ui_list_id(l, at), &row);
+                                        if (show_head)
+                                                ui_kit_text_flipped(ui, l->x + ui_dev(ui, UI_INSET),
+                                                                    ui_kit_baseline(ui, head_bottom - sec_h + ui_dev(ui, 8), UI_TITLE_SMALL),
+                                                                    ui_fit(ui, (string_address)row.header, UI_TITLE_SMALL, room, cut, sizeof(cut)), UI_TITLE_SMALL,
+                                                                    ui_text_colour(ui, UI_ON_SURFACE_VARIANT), 0, l->x, l->w);
+                                        if (show_cols && row.columns)
+                                        {
+                                                ui_list_columns_fit(ui, l, at, row.columns);
+                                                ui_columns_layout(ui, row.columns, l->x, y - col_h, l->w);
+                                                ui_columns_draw(ui, row.columns);
+                                        }
                                 }
                         }
                         // A row folding is cut to its share: its words stay in it while it shows less than its line (a row, or its lines).
@@ -30644,16 +30743,18 @@ static fn ui_text_draw_line(struct ui address_to ui, struct ui_text address_to t
                 p32 codes[256], cluster[8];
                 positive token = 0, cluster_n = 0;
                 static p8 cluster_cover[256 * 256];
+                b32 has_paper = t->doc.range_count > 0 || doc_any_selected(&t->doc);
                 for (p32 k = from; k < to;)
                 {
                         unsigned int ink = ui_text_token_ink(tokens, token_count, &token, l->offset[k] - l->offset[0], text);
                         p32 run = 0, start = k;
+                        unsigned int start_paper = has_paper ? ui_text_paper(t, l->offset[start], ground) : ground;
                         while (k < to && run < 256)
                         {
                                 p32 code;
                                 positive size = l->shown_at[k + 1] - l->shown_at[k], look = token;
                                 if (ui_text_token_ink(tokens, token_count, &look, l->offset[k] - l->offset[0], text) != ink ||
-                                    (k > start && ui_text_paper(t, l->offset[k], ground) != ui_text_paper(t, l->offset[start], ground)))
+                                    (has_paper && k > start && ui_text_paper(t, l->offset[k], ground) != start_paper))
                                         break;
                                 if (doc_decode(l->shown + l->shown_at[k], size, &code) != size || l->x[k + 1] - l->x[k] != t->cell)
                                 {
@@ -30752,8 +30853,20 @@ cluster_lost:
                 if (range->finish <= l->offset[from] || range->start > l->offset[to])
                         continue;
                 colour = ui_role(range->kind == DOC_RANGE_ERROR ? UI_ERROR : range->kind == DOC_RANGE_WARNING ? UI_WARNING : UI_INFO);
-                for (int x = origin + ui_text_slice_x(l, from, to, range->start), stop = origin + ui_text_slice_x(l, from, to, range->finish); x < stop; x++)
-                        ui_text_fill(ui, t, x, baseline + 2 * ui->scale / 100 + ((x / (2 * ui->scale / 100)) & 1) * ui->scale / 100, 1, ui_px(ui, 1), ui_tone(colour & 0xffffffu, 255));
+                {
+                        int step = 2 * ui->scale / 100, stop = origin + ui_text_slice_x(l, from, to, range->finish);
+                        unsigned int tone = ui_tone(colour & 0xffffffu, 255);
+                        if (step < 1)
+                                step = 1;
+                        for (int x = origin + ui_text_slice_x(l, from, to, range->start); x < stop;)
+                        {
+                                int next = (x / step + 1) * step;
+                                if (next > stop)
+                                        next = stop;
+                                ui_text_fill(ui, t, x, baseline + 2 * ui->scale / 100 + ((x / step) & 1) * ui->scale / 100, next - x, ui_px(ui, 1), tone);
+                                x = next;
+                        }
+                }
         }
         // The carets on this line, in the accent, at the blink's cover (solid, faded or gone:
         if (t->focused && t->caret_fade < UI_CARET_FULL)
@@ -30996,61 +31109,72 @@ static fn ui_text_draw(struct ui address_to ui, struct ui_text address_to t, int
                 ui_run_in(ui, faces, start, t->top + m.baseline, (string_address)t->placeholder,
                           t->size + t->zoom, text & 0xffffffu, alpha, t->left, t->right, 0);
         }
-        for (row_y = t->top - (t->mode != UI_TEXT_FIELD ? t->scroll_rem : 0);
-             (t->mode == UI_TEXT_FIELD ? row_y + t->line_height <= t->bottom + 1 : row_y < t->bottom) && line < lines; line++)
         {
-                p64 hidden_to;
-                int baseline = row_y + (t->line_height - (int)m.cell_height) / 2 + (int)m.baseline;
-                if (doc_hidden(&t->doc, line))
-                        continue;
-                ui_text_layout_line(ui, t, line, &ui_text_lay);
-                // The line's paper: a line range's ground, and the current line lit faintly in a code view with one caret; filled...
-                line_ground = ground;
-                for (positive r = 0; r < t->doc.range_count; r++)
+                b32 any_sel = doc_any_selected(&t->doc);
+                p64 primary_line = doc_line_of(&t->doc, t->doc.selections[t->doc.primary].active);
+                p64 single_caret_line = (t->mode == UI_TEXT_CODE && t->focused && t->doc.selection_count == 1 && !any_sel)
+                                            ? doc_line_of(&t->doc, t->doc.selections[0].active)
+                                            : ~(p64)0;
+                for (row_y = t->top - (t->mode != UI_TEXT_FIELD ? t->scroll_rem : 0);
+                     (t->mode == UI_TEXT_FIELD ? row_y + t->line_height <= t->bottom + 1 : row_y < t->bottom) && line < lines; line++)
                 {
-                        const struct doc_range address_to range = &t->doc.ranges[r];
-                        if (range->kind == DOC_RANGE_LINE && range->start <= doc_line_end(&t->doc, line) &&
-                            range->finish >= doc_line_start(&t->doc, line))
-                                line_ground = window_mix(line_ground, ui_text_range_role(range->data) & 0xffffffu, 40);
-                        if (range->kind == DOC_RANGE_MARK && t->gutter && doc_line_of(&t->doc, range->start) == line)
-                                ui_round(ui, ui_mirror(x + t->cell / 4, t->cell / 2, x, width), row_y + (t->line_height - t->cell / 2) / 2, t->cell / 2, t->cell / 2, t->cell / 4,
-                                         ui_tone(ui_text_range_role(range->data) & 0xffffffu, 255));
-                }
-                if (t->mode == UI_TEXT_CODE && t->focused && t->doc.selection_count == 1 &&
-                    doc_line_of(&t->doc, t->doc.selections[0].active) == line && !doc_any_selected(&t->doc))
-                        line_ground = window_mix(line_ground, ui_role(UI_ON_SURFACE) & 0xffffffu, 10);
-                if (t->numbers && t->gutter > 0)
-                {
-                        char number[24];
-                        positive digits = positive_into_string((string_address)number, (positive)(line + 1));
-                        b32 current = doc_line_of(&t->doc, t->doc.selections[t->doc.primary].active) == line;
-                        int wide = (int)digits * t->cell;
-                        number[digits] = 0;
-                        // The numbers are right-aligned in the gutter, which is at the left of the lines, or left-aligned at their right.
-                        ui_run_in(ui, (const font_face address_to const[]){ui_text_face(ui, t), ui->regular}, ui_rtl() ? t->right + t->cell / 2 : t->left - t->cell / 2 - wide,
-                                  baseline, (string_address)number, t->size + t->zoom, ui_role(UI_ON_SURFACE) & 0xffffffu, current ? 220 : 110,
-                                  ui_rtl() ? t->right : x, ui_rtl() ? x + width : t->left, 0);
-                        if (doc_folded_at(&t->doc, line, &hidden_to))
-                                ui_chevron(ui, ui_mirror(x + t->cell / 2 - t->cell / 3, 2 * (t->cell / 3) + 1, x, width) + t->cell / 3, row_y + t->line_height / 2, t->cell / 3,
-                                           ui_tone(ui_role(UI_ON_SURFACE) & 0xffffffu, 160));
-                }
-                {
-                        b32 wrap = t->wrap && t->mode != UI_TEXT_FIELD && !ui_text_lay.bidi;
-                        p32 from = 0;
-                        int room = t->right - t->left, indent = wrap && room > 0 ? ui_text_wrap_indent(&ui_text_lay, room) : 0;
-                        do
+                        p64 hidden_to;
+                        int baseline = row_y + (t->line_height - (int)m.cell_height) / 2 + (int)m.baseline;
+                        if (doc_hidden(&t->doc, line))
+                                continue;
+                        if (!t->wrap && !ui_rows_seen(ui, row_y, row_y + t->line_height))
                         {
-                                p32 to = wrap && room > 0 ? ui_text_wrap_to(&ui_text_lay, from, room, indent) : ui_text_lay.count;
-                                int offset_x = wrap ? ui_text_lay.x[from] - (from ? indent : 0) : 0;
-                                if (line_ground != ground && room > 0)
-                                        ui_fill(ui, t->left, row_y, room, t->line_height, 0xff000000u | line_ground);
-                                if (room > 0)
-                                        ui_text_draw_line(ui, t, &ui_text_lay, from, to, offset_x, line, row_y,
-                                                          row_y + (t->line_height - (int)m.cell_height) / 2 + (int)m.baseline, line_ground,
-                                                          !wrap || to >= ui_text_lay.count);
                                 row_y += t->line_height;
-                                from = to;
-                        } while (wrap && from < ui_text_lay.count && row_y < t->bottom);
+                                continue;
+                        }
+                        ui_text_layout_line(ui, t, line, &ui_text_lay);
+                        // The line's paper: a line range's ground, and the current line lit faintly in a code view with one caret; filled...
+                        line_ground = ground;
+                        for (positive r = 0; r < t->doc.range_count; r++)
+                        {
+                                const struct doc_range address_to range = &t->doc.ranges[r];
+                                if (range->kind == DOC_RANGE_LINE && range->start <= doc_line_end(&t->doc, line) &&
+                                    range->finish >= doc_line_start(&t->doc, line))
+                                        line_ground = window_mix(line_ground, ui_text_range_role(range->data) & 0xffffffu, 40);
+                                if (range->kind == DOC_RANGE_MARK && t->gutter && doc_line_of(&t->doc, range->start) == line)
+                                        ui_round(ui, ui_mirror(x + t->cell / 4, t->cell / 2, x, width), row_y + (t->line_height - t->cell / 2) / 2, t->cell / 2, t->cell / 2, t->cell / 4,
+                                                 ui_tone(ui_text_range_role(range->data) & 0xffffffu, 255));
+                        }
+                        if (line == single_caret_line)
+                                line_ground = window_mix(line_ground, ui_role(UI_ON_SURFACE) & 0xffffffu, 10);
+                        if (t->numbers && t->gutter > 0)
+                        {
+                                char number[24];
+                                positive digits = positive_into_string((string_address)number, (positive)(line + 1));
+                                b32 current = primary_line == line;
+                                int wide = (int)digits * t->cell;
+                                number[digits] = 0;
+                                // The numbers are right-aligned in the gutter, which is at the left of the lines, or left-aligned at their right.
+                                ui_run_in(ui, (const font_face address_to const[]){ui_text_face(ui, t), ui->regular}, ui_rtl() ? t->right + t->cell / 2 : t->left - t->cell / 2 - wide,
+                                          baseline, (string_address)number, t->size + t->zoom, ui_role(UI_ON_SURFACE) & 0xffffffu, current ? 220 : 110,
+                                          ui_rtl() ? t->right : x, ui_rtl() ? x + width : t->left, 0);
+                                if (doc_folded_at(&t->doc, line, &hidden_to))
+                                        ui_chevron(ui, ui_mirror(x + t->cell / 2 - t->cell / 3, 2 * (t->cell / 3) + 1, x, width) + t->cell / 3, row_y + t->line_height / 2, t->cell / 3,
+                                                   ui_tone(ui_role(UI_ON_SURFACE) & 0xffffffu, 160));
+                        }
+                        {
+                                b32 wrap = t->wrap && t->mode != UI_TEXT_FIELD && !ui_text_lay.bidi;
+                                p32 from = 0;
+                                int room = t->right - t->left, indent = wrap && room > 0 ? ui_text_wrap_indent(&ui_text_lay, room) : 0;
+                                do
+                                {
+                                        p32 to = wrap && room > 0 ? ui_text_wrap_to(&ui_text_lay, from, room, indent) : ui_text_lay.count;
+                                        int offset_x = wrap ? ui_text_lay.x[from] - (from ? indent : 0) : 0;
+                                        if (line_ground != ground && room > 0)
+                                                ui_fill(ui, t->left, row_y, room, t->line_height, 0xff000000u | line_ground);
+                                        if (room > 0)
+                                                ui_text_draw_line(ui, t, &ui_text_lay, from, to, offset_x, line, row_y,
+                                                                  row_y + (t->line_height - (int)m.cell_height) / 2 + (int)m.baseline, line_ground,
+                                                                  !wrap || to >= ui_text_lay.count);
+                                        row_y += t->line_height;
+                                        from = to;
+                                } while (wrap && from < ui_text_lay.count && row_y < t->bottom);
+                        }
                 }
         }
         if (t->mode != UI_TEXT_FIELD)

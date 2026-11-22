@@ -6163,9 +6163,10 @@ static void wayland_presented_rows(unsigned long when, unsigned long refresh, un
                                 wayland_lent_drop(c, &s->lent_latched), wayland_lent_drop(c, &s->lent_shown);
                         wayland_window_gone(c, s, 1);
                 }
-                for (struct wayland_surface *o = s; o; o = wayland_tree_next(c, s, o))
-                        wayland_presentings_done(c, o, when, refresh, seq,
-                                                 o == s && row == zero_row ? flags | WLN_wp_presentation_feedback_kind_zero_copy : flags);
+                if (c->presenting_surfaces)
+                        for (struct wayland_surface *o = s; o; o = wayland_tree_next(c, s, o))
+                                wayland_presentings_done(c, o, when, refresh, seq,
+                                                         o == s && row == zero_row ? flags | WLN_wp_presentation_feedback_kind_zero_copy : flags);
         }
         for (long slot = 0; slot < wayland.client_slots; slot++)
                 if (wayland.client[slot] && wayland.client[slot]->gone.count) wayland_gone_drawn(wayland.client[slot], 1);
@@ -6178,7 +6179,7 @@ static void wayland_drawn_rows(int dmabuf_busy_row)
         {
                 struct wayland_client *c;
                 struct wayland_surface *s = wayland_row_surface(row, &c);
-                if (s && !wayland_row_suspended(row))
+                if (s && (s->lent_gone || wayland_has_children(s)) && !wayland_row_suspended(row))
                         wayland_window_gone(c, s, !(dmabuf_busy_row < -1 || (int)row == dmabuf_busy_row));
         }
         for (long slot = 0; wayland.host && slot < wayland.client_slots; slot++)
