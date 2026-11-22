@@ -206,6 +206,10 @@ static void compositor_gpu_recover(void)
         compositor_gpu_state.cache[0] = compositor_gpu_state.cache[1] = compositor_gpu_state.cache_key[0] = compositor_gpu_state.cache_key[1] = 0;
         memory_zero(compositor_gpu_state.turn_va, sizeof(compositor_gpu_state.turn_va));
         memory_zero(compositor_gpu_state.turn_key, sizeof(compositor_gpu_state.turn_key));
+        if (compositor.card >= 0)
+                gpu_bus_of(compositor.card, gpu_display, sizeof(gpu_display));
+        else
+                gpu_display[0] = 0;
         if (!gpu_recover())
         {
                 compositor_gpu_failed(); // (no card: looked for again when it is due; one that drew its self-test wrong this time: untrusted)
@@ -358,6 +362,16 @@ static positive compositor_gpu_output(void)
                                 gpu_unimport(compositor_gpu_state.cache[at], GPU_GONE_UNIMPORT);
                         compositor_gpu_state.cache[at] = gpu_import(compositor.card, compositor.scanout_handle, compositor.scanout_bytes);
                         compositor_gpu_state.cache_key[at] = key;
+                        // On hybrid/cross-GPU setups (e.g. simpledrm/nouveau display + iGPU render node), a failed scanout
+                        // PRIME import would otherwise repeat PRIME_HANDLE_TO_FD/FD_TO_HANDLE on every frame forever; settle onto CPU.
+                        if (!compositor_gpu_state.cache[at] && gpu_req.pick == 2)
+                        {
+                                gpu_stop();
+                                compositor_gpu_state.up = 0, compositor_gpu_state.dead = 1;
+                                compositor_gpu_state.dead_why = COMPOSITOR_GPU_WHY_OUTPUT;
+                                compositor_gpu_state.settled = gpu_req.nodes;
+                                return 0;
+                        }
                 }
                 compositor_gpu_state.out = compositor_gpu_state.cache[at];
                 if (compositor_gpu_state.out)
