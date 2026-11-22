@@ -8862,6 +8862,8 @@ static fn ui_press_begin(struct ui_press address_to press, int x, int y, int tar
         press->down = true, press->touch = touch, press->dragged = false;
         press->drags = false;
         press->region = null;
+        // A new press has no reports: the last gesture's ring must not reach the velocity of this one.
+        press->samples = press->batch = 0, press->batch_at = 0;
 }
 
 // Whether x, y is past the slop from x0, y0: the one slop of every press (UI_SLOP logical pixels at the scale).

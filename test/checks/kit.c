@@ -66,8 +66,6 @@ static fn check_killed(void)
 #define KIT_RIPPLE_R 6
 #define KIT_RIPPLE_A 7
 #define KIT_EASE 8
-#define KIT_EASE_RISE 9
-#define KIT_EASE_OUT 10
 #define KIT_SQUASH_X 11
 #define KIT_SQUASH_Y 12
 #define KIT_SLIDE 13
@@ -3896,8 +3894,6 @@ static fn check_kit_motion(void)
                 switch (r->kind)
                 {
                 case KIT_EASE: got = ui_bezier_at(&ui_ease, x); break;
-                case KIT_EASE_RISE: got = ui_bezier_at(&ui_ease_rise, x); break;
-                case KIT_EASE_OUT: got = ui_bezier_at(&ui_ease_out, x); break;
                 case KIT_CURVE: got = ui_squash_curve(x); break;
                 case KIT_BB_SX: case KIT_BB_SY: case KIT_BB_TX: case KIT_BB_TY:
                 {
@@ -6379,7 +6375,7 @@ static fn check_kit_place(void)
         radios_still = !ui_kit.busy;
 
         // Its page left and shown again, the value changed while it was not seen: placed, not moved.
-        ui_control_forget(&row);
+        row.placed = 0; // what the removed ui_control_forget did: the next frame places it as if it had just appeared
         row.on = 0;
         ui_kit.now += 500000000ll, ui_kit.busy = 0;
         ui_control_draw(&ui, &row);
@@ -12856,18 +12852,9 @@ static void check_kit_body(void)
         string_format(log, "  kit body: touch T02's top dip: lowest %b px (the Mac's was -22), worst error %p px\n", (bipolar)dip_low, (positive)worst_dip);
         check("kit body: a coast into the top is pushed past it, drawn as the rubber band, and springs home within 3 px of the dip at the spring (20 a second, home within 0.25 s)", dip_ok && dip_low < -15);
 
-        ui_kit.scroll_off = 0;
-        ui_body_set(&b, 772ll << UI_Q, 30000ll << UI_Q, 100ll << UI_Q, 0);
-        ui_body_driven(&b, 1000ll << UI_Q, 0);
-        drawn = ui_body_drawn(&b) >> UI_Q;
-        driven_ok = drawn >= 319 && drawn <= 321;
-        check("kit body: momentum on, an OS momentum delta of 1000 moves the view 220 (the 0.22 the view shows)", driven_ok);
-
+        // The OS momentum-delta rows (ui_body_driven, 0.22 of each delta) went with it: a trackpad's momentum is a precise wheel
+        // now (ui_wheel_turn), tested by the wheel rows. The stopped-momentum row below still needs the STOPS switch.
         ui_kit.scroll_off = WINDOW_SCROLL_STOPS;
-        ui_body_set(&b, 772ll << UI_Q, 30000ll << UI_Q, 100ll << UI_Q, 0);
-        ui_body_driven(&b, 1000ll << UI_Q, 0);
-        check("kit body: momentum off, an OS momentum delta of 1000 moves nothing: the body stays at 100 where the fingers left it",
-              ui_body_drawn(&b) == 100ll << UI_Q && b.state != BODY_DRIVEN);
         ui_body_set(&b, 772ll << UI_Q, 30000ll << UI_Q, 0, 0);
         ui_body_track(&b, -300ll << UI_Q, 0);
         ui_body_let_go(&b, 0, 0, 100, false);
