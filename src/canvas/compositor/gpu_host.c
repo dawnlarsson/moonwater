@@ -534,7 +534,7 @@ static b32 compositor_gpu_spots(void)
                 int box[4], layers = c->kind == COMPOSITOR_CHIP_HINT ? 1 : 2;
                 unsigned long cells;
 
-                if (c->w <= 0 || c->h <= 0)
+                if (c->w <= 0 || c->h <= 0 || c->w > 16384 || c->h > 16384)
                         return g->why = COMPOSITOR_GPU_WHY_OTHER, false;
                 cells = (unsigned long)c->w * (unsigned long)c->h;
 
@@ -1206,7 +1206,8 @@ static const unsigned int *compositor_gpu_frost_scene(const struct compositor_fr
         b32 was_hold, ok;
 
         if (!compositor_gpu || !compositor_gpu_state.up || compositor_gpu_state.dead || compositor_gpu_held() ||
-            !gpu_idle() || compositor_card.on || compositor.width < 4 || compositor.height <= 0)
+            !gpu_idle() || compositor_card.on || compositor.width < 4 || compositor.height <= 0 ||
+            compositor.width > 16384 || compositor.height > 16384)
                 return null;
         fw = (unsigned int)(compositor.width & ~3);
         fpitch = ((unsigned int)compositor.width + 15u) & ~15u;
@@ -1984,8 +1985,12 @@ static void compositor_composed_drop(unsigned int **pixels, unsigned long *bytes
 
 static unsigned int *compositor_composed_make(unsigned int **pixels, unsigned long *bytes, int *fd, unsigned long want)
 {
-        unsigned long round = (want + 4095ul) & ~4095ul;
+        unsigned long round;
         long memfd, mapped;
+
+        if (!want || want > (512ul << 20))
+                return null;
+        round = (want + 4095ul) & ~4095ul;
 
         if (*pixels && *bytes == round)
                 return *pixels;

@@ -151,11 +151,13 @@ static unsigned int compositor_window_fb(int row, unsigned int which)
         struct compositor_fb2 fb = {0};
         long dmabuf, made;
 
+        if (row < 0 || row >= COMPOSITOR_ROWS || which >= 2)
+                return 0;
         if (compositor.scan_fb[row][which] || !compositor.table_memfd || compositor.direct_refused)
                 return compositor.scan_fb[row][which];
         if (!compositor.udmabuf)
         {
-                long handle = (long)system_open_at(AT_FDCWD, (string_address) "/dev/udmabuf", FILE_READ_WRITE | O_CLOEXEC);
+                long handle = (long)system_open_at(AT_FDCWD, (string_address) "/dev/udmabuf", FILE_READ_WRITE | O_CLOEXEC | O_NOFOLLOW);
 
                 if (handle < 0)
                 {
@@ -1038,9 +1040,12 @@ static unsigned long compositor_direct_stage_bytes;
 
 static unsigned int *compositor_direct_stage_ready(void)
 {
-        unsigned long need = (unsigned long)compositor_stride() * (unsigned long)compositor.height * 4;
+        unsigned long need;
         void *p = compositor_direct_stage;
 
+        if (compositor.height <= 0 || compositor_stride() <= 0)
+                return 0;
+        need = (unsigned long)compositor_stride() * (unsigned long)compositor.height * 4;
         if (!need)
                 return 0;
         compositor_direct_stage = (unsigned int *)mem_buf_grow(&p, &compositor_direct_stage_bytes, need, 0);
@@ -1061,8 +1066,12 @@ static unsigned long compositor_under_bytes[2];
 
 static b32 compositor_direct_under_ready(unsigned int which, positive need)
 {
-        unsigned long bytes = (unsigned long)compositor.width * (unsigned long)compositor.height * 4;
+        unsigned long bytes;
         void *p = compositor.under[which];
+
+        if (compositor.width <= 0 || compositor.height <= 0)
+                return false;
+        bytes = (unsigned long)compositor.width * (unsigned long)compositor.height * 4;
 
         if (compositor.under[which] && compositor_under_bytes[which] >= (unsigned long)need)
                 return true;
@@ -1370,10 +1379,14 @@ static int compositor_plate_wanted(int turning)
 
 static int compositor_changed_ready(void)
 {
-        unsigned long bytes = (unsigned long)compositor.width * (unsigned long)compositor.height * 4;
-        unsigned long slices = (unsigned long)compositor.width * COMPOSITOR_SLICE * COMPOSITOR_BANDS * 4;
+        unsigned long bytes, slices;
         unsigned int flags;
         int own, listed, turned = compositor_turning_software();
+
+        if (compositor.width <= 0 || compositor.height <= 0)
+                return 0;
+        bytes = (unsigned long)compositor.width * (unsigned long)compositor.height * 4;
+        slices = (unsigned long)compositor.width * COMPOSITOR_SLICE * COMPOSITOR_BANDS * 4;
 
         if (compositor.changed && compositor.changed_turned == turned)
                 return compositor.changed > 0;
@@ -1554,10 +1567,16 @@ struct drm_atomic_req
         unsigned int objects[WINDOWS_OUTPUTS + 2], counts[WINDOWS_OUTPUTS + 2], props[WINDOWS_OUTPUTS * 10 + 8];
         unsigned long values[WINDOWS_OUTPUTS * 10 + 8];
         unsigned int obj_count, prop_count;
+        int overflow;
 };
 
 static void drm_atomic_begin_obj(struct drm_atomic_req *req, unsigned int obj)
 {
+        if (req->obj_count >= WINDOWS_OUTPUTS + 2)
+        {
+                req->overflow = 1;
+                return;
+        }
         req->objects[req->obj_count] = obj;
         req->counts[req->obj_count] = 0;
         req->obj_count++;
@@ -1565,6 +1584,11 @@ static void drm_atomic_begin_obj(struct drm_atomic_req *req, unsigned int obj)
 
 static void drm_atomic_add(struct drm_atomic_req *req, unsigned int prop, unsigned long val)
 {
+        if (!req->obj_count || req->overflow || req->prop_count >= WINDOWS_OUTPUTS * 10 + 8)
+        {
+                req->overflow = 1;
+                return;
+        }
         req->props[req->prop_count] = prop;
         req->values[req->prop_count] = val;
         req->prop_count++;
@@ -1599,6 +1623,8 @@ static long drm_atomic_commit(const struct drm_atomic_req *req, unsigned int fla
         } commit = {flags, req->obj_count, (unsigned long)req->objects, (unsigned long)req->counts,
                     (unsigned long)req->props, (unsigned long)req->values, 0, user_data};
 
+        if (req->overflow || !req->obj_count)
+                return -COMPOSITOR_EINVAL;
         return system_control(compositor.card, COMPOSITOR_ATOMIC, address_of commit);
 }
 
@@ -1652,6 +1678,8 @@ static b32 drm_dumb_create(struct drm_dumb *b, unsigned int width, unsigned int 
         struct compositor_dumb dumb = {height, width, 32, 0, 0, 0, 0};
 
         memory_zero(b, sizeof(*b));
+        if (!width || !height || width > 32768u || height > 32768u)
+                return -COMPOSITOR_EINVAL;
         if (system_control(compositor.card, COMPOSITOR_CREATE_DUMB, address_of dumb) != 0)
                 return -COMPOSITOR_ENOSPC;
         b->handle = dumb.handle;
@@ -1659,6 +1687,9 @@ static b32 drm_dumb_create(struct drm_dumb *b, unsigned int width, unsigned int 
         b->pitch = dumb.pitch;
         b->width = dumb.width;
         b->height = dumb.height;
+        if (!dumb.handle || dumb.pitch < (unsigned long)width * 4ul || (dumb.pitch & 3u) ||
+            dumb.size < (unsigned long)dumb.pitch * (unsigned long)height)
+                return drm_dumb_destroy(b), -COMPOSITOR_EINVAL;
         if (flags & DRM_DUMB_FB)
         {
                 struct compositor_fb fb = {0, dumb.width, dumb.height, dumb.pitch, 32, 24, dumb.handle};
@@ -1772,9 +1803,13 @@ static int compositor_overlay_buffers(unsigned int rows)
 
                         drm_dumb_destroy(&old);
                         compositor.overlay_fb[which] = 0;
+                        compositor.overlay_handle[which] = 0;
+                        compositor.overlay_pixels[which] = 0;
                 }
         compositor.overlay_rows = 0;
         compositor_overlay_width = 0;
+        if (compositor.width <= 0 || !rows || rows > 32768u)
+                return 0;
         rows = (rows + 63) & ~63u;
         for (unsigned int which = 0; which < 2; which++)
         {
@@ -1790,6 +1825,8 @@ static int compositor_overlay_buffers(unsigned int rows)
 
                                         drm_dumb_destroy(&old);
                                         compositor.overlay_fb[prev] = 0;
+                                        compositor.overlay_handle[prev] = 0;
+                                        compositor.overlay_pixels[prev] = 0;
                                 }
                         return 0;
                 }
@@ -2339,6 +2376,8 @@ static int compositor_damage_cut(const int *rect)
 */
 static void compositor_dirty_screens(const unsigned short (*clip)[4], unsigned int clips)
 {
+        if (clips > COMPOSITOR_DAMAGE)
+                clips = COMPOSITOR_DAMAGE;
         for (unsigned int at = 0; at < compositor.outputs; at++)
         {
                 unsigned int fb = compositor.output[at].fb ? compositor.output[at].fb : compositor.fb, told = 0, users = 0;
@@ -2575,7 +2614,7 @@ static unsigned int canvas_scan_fb_make(const struct canvas_scan_fb_spec *spec, 
         long refused = 0;
 
         memory_zero(out, sizeof(*out));
-        if (!spec || compositor.card < 0)
+        if (!spec || compositor.card < 0 || !spec->width || !spec->height || spec->width > 32768u || spec->height > 32768u)
                 return 0;
         fourcc = spec->fourcc ? spec->fourcc : COMPOSITOR_XRGB8888;
         if (spec->opaque && (fourcc == 0x34325241u || fourcc == 0x34324241u ||
@@ -2594,11 +2633,16 @@ static unsigned int canvas_scan_fb_make(const struct canvas_scan_fb_spec *spec, 
                     !(spec->base_offset & align) && fb.offsets[0] >= spec->base_offset && fb.pitches[0])
                 {
                         unsigned int into = fb.offsets[0] - spec->base_offset;
+                        unsigned int rem = into % fb.pitches[0];
+                        unsigned int sy = into / fb.pitches[0], sx = rem / 4u;
 
-                        out->scan_y = into / fb.pitches[0];
-                        out->scan_x = (into % fb.pitches[0]) / 4u;
-                        fb.width += out->scan_x, fb.height += out->scan_y;
-                        fb.offsets[0] = spec->base_offset;
+                        if (!(rem & 3u) && sx <= 32768u && sy <= 32768u &&
+                            (unsigned long)fb.width + (unsigned long)sx <= (unsigned long)(fb.pitches[0] / 4u))
+                        {
+                                out->scan_y = sy, out->scan_x = sx;
+                                fb.width += sx, fb.height += sy;
+                                fb.offsets[0] = spec->base_offset;
+                        }
                 }
                 if (align && !spec->modifier && (fb.pitches[0] & align || fb.offsets[0] & align))
                 {

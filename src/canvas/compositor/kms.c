@@ -134,9 +134,11 @@ static unsigned long compositor_modes_bytes;
 
 static void *kms_grow_list(void **ptr, unsigned long *bytes, long want, long min_n, unsigned long elem)
 {
-        unsigned long need = (unsigned long)(want < min_n ? min_n : want) * elem;
+        unsigned long n = (unsigned long)(want < min_n ? min_n : want);
 
-        return mem_buf_grow(ptr, bytes, need, MEM_BUF_GROW_2X) ? *ptr : 0;
+        if (!elem || n > (1ul << 28) / elem)
+                return 0;
+        return mem_buf_grow(ptr, bytes, n * elem, MEM_BUF_GROW_2X) ? *ptr : 0;
 }
 
 static unsigned int *compositor_connectors_room(long want)
@@ -759,7 +761,11 @@ static b32 compositor_scanout_make(int width, int height, unsigned int *fb_id, u
                                    unsigned int **pixels, unsigned long *bytes, unsigned long *pitch)
 {
         struct drm_dumb b;
-        b32 status = drm_dumb_create(&b, (unsigned int)width, (unsigned int)height, DRM_DUMB_FB | DRM_DUMB_MAP);
+        b32 status;
+
+        if (width <= 0 || height <= 0)
+                return -COMPOSITOR_EINVAL;
+        status = drm_dumb_create(&b, (unsigned int)width, (unsigned int)height, DRM_DUMB_FB | DRM_DUMB_MAP);
 
         if (status < 0)
                 return status;
@@ -1470,7 +1476,7 @@ static long compositor_card_node(unsigned int minor)
         p8 path[24] = "/dev/dri/card";
 
         path[13 + positive_into_string(path + 13, minor)] = 0;
-        return (long)system_open_at(AT_FDCWD, path, FILE_READ_WRITE | O_CLOEXEC);
+        return (long)system_open_at(AT_FDCWD, path, FILE_READ_WRITE | O_CLOEXEC | O_NOFOLLOW);
 }
 
 #ifndef COMPOSITOR_CARD_NODE
@@ -1973,9 +1979,12 @@ static int compositor_cursor_vblank(unsigned int crtc_index)
                         memory_copy(address_of length, events + at + 4, 4);
                         if (length < 8 || at + (long)length > got)
                                 break;
-                        memory_copy(address_of data, events + at + 8, 8);
-                        if (type == COMPOSITOR_EVENT_VBLANK && data == COMPOSITOR_CURSOR_PROBE_TAG)
-                                return 1;
+                        if (length >= 16)
+                        {
+                                memory_copy(address_of data, events + at + 8, 8);
+                                if (type == COMPOSITOR_EVENT_VBLANK && data == COMPOSITOR_CURSOR_PROBE_TAG)
+                                        return 1;
+                        }
                         at += length;
                 }
         }
@@ -2408,7 +2417,8 @@ struct canvas_drm_render
 
 static int canvas_drm_render_classify(const char *path, unsigned long prev_dev, struct canvas_drm_render *out)
 {
-        unsigned long dev = canvas_drm_node_dev(path);
+        unsigned char st[256];
+        unsigned long dev;
         long fd;
         char name[32];
         struct
@@ -2424,18 +2434,24 @@ static int canvas_drm_render_classify(const char *path, unsigned long prev_dev, 
         unsigned long cap[2] = {0x14, 0}; // DRM_CAP_SYNCOBJ_TIMELINE
         int rank = 1;
 
-        out->dev = dev, out->hw = 0, out->syncobj = 0, out->fd = -1;
+        out->dev = 0, out->hw = 0, out->syncobj = 0, out->fd = -1;
         out->path[0] = 0;
-        if (!dev)
+        fd = compositor_call(syscall(openat), (positive)AT_FDCWD, (positive)path, FILE_READ_WRITE | O_CLOEXEC | O_NOFOLLOW, 0, 0, 0);
+        if (fd < 0)
                 return 0;
+        memory_zero(st, sizeof(st));
+        if (compositor_call(syscall(statx), (positive)fd, (positive)"", 0x1000, 0x7ff, (positive)st, 0) < 0 ||
+            (*(unsigned short *)(st + 28) & 0170000u) != 0020000u)
+                return system_close((int)fd), 0;
+        dev = canvas_drm_makedev(*(unsigned int *)(st + 128), *(unsigned int *)(st + 132));
+        if (!dev)
+                return system_close((int)fd), 0;
+        out->dev = dev;
         if (dev != prev_dev)
         {
-                compositor_call(syscall(fchownat), (positive)AT_FDCWD, (positive)path, 0, CANVAS_DRM_RENDER_GID, 0x100 /* AT_SYMLINK_NOFOLLOW */, 0);
-                compositor_call(syscall(fchmodat), (positive)AT_FDCWD, (positive)path, 0660, 0, 0, 0);
+                compositor_call(syscall(fchown), (positive)fd, 0, CANVAS_DRM_RENDER_GID, 0, 0, 0);
+                compositor_call(syscall(fchmod), (positive)fd, 0660, 0, 0, 0, 0);
         }
-        fd = compositor_call(syscall(openat), (positive)AT_FDCWD, (positive)path, 0x80002, 0, 0, 0);
-        if (fd < 0)
-                return out->dev = 0, 0;
         memory_zero(name, sizeof(name));
         memory_zero(&ver, sizeof(ver));
         ver.name_len = sizeof(name) - 1, ver.name = name;
@@ -2550,9 +2566,15 @@ static unsigned int canvas_drm_plane_formats(int card_fd, unsigned int plane_id,
                 return 0;
         blob.id = (unsigned int)blob_id, blob.length = 0, blob.data = (p64)buf;
         if (system_control(card_fd, COMPOSITOR_GETPROPBLOB, address_of blob) != 0 ||
-            blob.length < 24 || blob.length > sizeof(buf) ||
-            system_control(card_fd, COMPOSITOR_GETPROPBLOB, address_of blob) != 0)
+            blob.length < 24 || blob.length > sizeof(buf))
                 return 0;
+        {
+                unsigned int len = blob.length;
+
+                memory_zero(buf, len);
+                if (system_control(card_fd, COMPOSITOR_GETPROPBLOB, address_of blob) != 0 || blob.length != len)
+                        return 0;
+        }
         {
                 unsigned int nf = *(unsigned int *)(buf + 8), foff = *(unsigned int *)(buf + 12);
                 unsigned int nm = *(unsigned int *)(buf + 16), moff = *(unsigned int *)(buf + 20);

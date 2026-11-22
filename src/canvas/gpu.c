@@ -65,9 +65,12 @@ static void gpu_buf_free(void **ptr, positive *cap)
 
 static void *gpu_buf_grow(void **ptr, positive *cap, positive need, positive preserve)
 {
-        positive want = (need + 4095) & ~(positive)4095;
+        positive want;
         long p;
 
+        if (!need || need > (~(positive)0) - 4095ull)
+                return 0;
+        want = (need + 4095) & ~(positive)4095;
         if (*ptr && *cap >= want)
                 return *ptr;
         p = (long)system_call_6(syscall(mmap), 0, want, 3, 0x22, (positive)-1, 0);
@@ -75,6 +78,10 @@ static void *gpu_buf_grow(void **ptr, positive *cap, positive need, positive pre
                 return 0;
         if (*ptr)
         {
+                if (preserve > *cap)
+                        preserve = *cap;
+                if (preserve > want)
+                        preserve = want;
                 if (preserve)
                         memory_copy_apart((void *)p, *ptr, preserve);
                 system_call_2(syscall(munmap), (positive)*ptr, *cap);
@@ -140,7 +147,7 @@ static b32 gpu_memfds_room(unsigned int want)
         if (want > GPU_IMPORTS_MOST)
                 return false;
         grown = room ? 2 * (positive)room : 64;
-        grown = grown < want ? want : grown;
+        grown = grown < want ? want : grown > GPU_IMPORTS_MOST ? GPU_IMPORTS_MOST : grown;
         if (system_call_3(syscall(mprotect), (positive)gpu_memfds, (grown * sizeof(struct gpu_memfd) + 4095) & ~4095ull, 3) != 0)
                 return false;
         room = (unsigned int)grown;
@@ -229,7 +236,7 @@ static positive gpu_bytes; // the bytes gpu_start was asked for (gpu_recover sta
 #define GPU_WIDE_FAKE(fd) // a check answers for the file that lets the other gfx10 families in
 #endif
 #ifndef GPU_UDMABUF_OPEN
-#define GPU_UDMABUF_OPEN() system_open_at(AT_FDCWD, (string_address) "/dev/udmabuf", FILE_READ_WRITE | O_CLOEXEC) // a check's fake kernel answers here
+#define GPU_UDMABUF_OPEN() system_open_at(AT_FDCWD, (string_address) "/dev/udmabuf", FILE_READ_WRITE | O_CLOEXEC | O_NOFOLLOW) // a check's fake kernel answers here
 #endif
 
 #ifndef GPU_SUBMIT_SEEN
