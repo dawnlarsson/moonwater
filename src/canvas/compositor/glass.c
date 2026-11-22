@@ -1616,7 +1616,7 @@ static void compositor_glass_pass(struct compositor_frame *frames, const unsigne
         }
 }
 
-static void compositor_close_mean(struct compositor_frame *frame)
+static void compositor_close_mean_read(struct compositor_frame *frame)
 {
         int bx, by, side, touched = 0, step;
         unsigned long sum[3] = {0, 0, 0}, count = 0;
@@ -1657,5 +1657,49 @@ static void compositor_close_mean(struct compositor_frame *frame)
                 sum[2] = sum[0], sum[0] = red;
         }
         frame->close_mean = (unsigned int)(sum[0] / count << 16 | sum[1] / count << 8 | sum[2] / count);
+}
+
+/*
+        The close button's ink side with hysteresis. The glyphs flickered on a backdrop whose mean sat at the light/dark threshold of the plain
+        test (window_light): each present decided the side from its own mean, so a mean that crossed the threshold back and forth switched the
+        X each time. Each window row keeps its side (1 dark, 2 light). A side changes only when the mean's weighted lightness (window_light's own
+        value) is past the threshold by COMPOSITOR_INK_MARGIN percent, so a backdrop at the threshold keeps the side it has. The side is decided by
+        the mean made this present; a frame that made no mean keeps its row's side and reads no mean (zero, as before). A row with no close button
+        forgets its side.
+*/
+#define COMPOSITOR_INK_LIGHT 116394750ull // window_light's threshold (window.c): a weighted lightness above it is light paper
+#define COMPOSITOR_INK_MARGIN 8           // percent past the threshold before a side changes
+static unsigned char compositor_close_side[WINDOWS]; // per row: 0 none, 1 dark, 2 light
+
+static int compositor_ink_side_next(int previous, unsigned int mean, unsigned int margin)
+{
+        unsigned long long r = mean >> 16 & 255, g = mean >> 8 & 255, b = mean & 255;
+        unsigned long long value = 2126ull * r * r + 7152ull * g * g + 722ull * b * b;
+
+        if (!previous)
+                return value > COMPOSITOR_INK_LIGHT ? 2 : 1;
+        if (previous == 1 && value * 100 > COMPOSITOR_INK_LIGHT * (100 + margin))
+                return 2;
+        if (previous == 2 && value * 100 < COMPOSITOR_INK_LIGHT * (100 - margin))
+                return 1;
+        return previous;
+}
+
+static void compositor_close_mean(struct compositor_frame *frame)
+{
+        int row = frame->row_plus1 - 1, bx, by, side;
+
+        frame->close_mean = ~0u; // the sentinel: the read sets the mean only when it makes one this present
+        compositor_close_mean_read(frame);
+        if (row >= 0 && row < (int)WINDOWS)
+        {
+                if (!compositor_close_box(frame, &bx, &by, &side))
+                        compositor_close_side[row] = 0;
+                else if (frame->close_mean != ~0u)
+                        compositor_close_side[row] = (unsigned char)compositor_ink_side_next(compositor_close_side[row], frame->close_mean, COMPOSITOR_INK_MARGIN);
+                frame->close_side = compositor_close_side[row];
+        }
+        if (frame->close_mean == ~0u)
+                frame->close_mean = 0;
 }
 

@@ -1394,6 +1394,7 @@ static void compositor_frame_of(int row, struct compositor_frame *frame)
         if (compositor_lent_pixels(row, &lent_pitch))
                 frame->pitch = lent_pitch, frame->gpu_base = compositor_lent_va(row), frame->swap = compositor_lent_swap(row);
         frame->blend = compositor_wl_row_blend(row);
+        frame->row_plus1 = row + 1;
         frame->close = !(compositor.asks[row] & WINDOW_NO_CLOSE);
         frame->minimize = !(compositor.asks[row] & WINDOW_NO_TAB);
         compositor_land_frame(row, frame);

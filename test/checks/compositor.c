@@ -4247,6 +4247,74 @@ static void records_lowering(void)
 }
 #endif
 
+/*
+        The close button's ink does not flicker on a backdrop whose mean sits at the threshold of window_light (the owner's bug: the Settings
+        window's X flickered). A window (row 5) over a backdrop of grey 107 and 108 (the threshold is at 108, window_light's own test), presented
+        twelve times, through compositor_close_mean: its side must not change. The mutant, the same sequence with no margin (the plain test each
+        present), must change side, which shows the fixture reproduces the flicker. The threshold rule itself must agree with window_light, and a
+        window that starts light stays light through the same backdrop.
+*/
+static int close_ink_flips(int start_grey, int margin_mutant)
+{
+        static unsigned int picture[200 * 100];
+        int flips = 0, previous = 0;
+        struct compositor_frame frame;
+
+        compositor_close_side[5] = 0;
+        for (int present = 0; present < 12; present++)
+        {
+                int grey = present == 0 ? start_grey : (present & 1) ? 107 : 108;
+                unsigned int colour = (unsigned int)grey * 0x010101u;
+
+                for (int at = 0; at < 200 * 100; at++)
+                        picture[at] = colour;
+                memory_zero(&frame, sizeof(frame));
+                frame.x = 100, frame.y = 100, frame.width = 200, frame.height = 100, frame.scale = 100, frame.close = 1;
+                frame.pixels = picture, frame.pitch = 200, frame.row_plus1 = 6;
+                if (margin_mutant)
+                {
+                        // The mutant: the plain test of this present's mean, no state.
+                        compositor_close_mean(&frame);
+                        int side = window_light(frame.close_mean) ? 2 : 1;
+
+                        if (present && side != previous)
+                                flips++;
+                        previous = side;
+                        continue;
+                }
+                compositor.damages = 1, compositor.damage[0][0] = 90, compositor.damage[0][1] = 90, compositor.damage[0][2] = 320,
+                compositor.damage[0][3] = 220;
+                compositor_close_mean(&frame);
+                if (present && frame.close_side != previous)
+                        flips++;
+                previous = frame.close_side;
+        }
+        return flips;
+}
+
+static void check_close_ink_hysteresis(void)
+{
+        unsigned int threshold_rule_mismatches = 0;
+        int real_flips, mutant_flips, starts_light_flips;
+        int damages = compositor.damages, damage0[4] = {compositor.damage[0][0], compositor.damage[0][1], compositor.damage[0][2], compositor.damage[0][3]};
+
+        for (int grey = 100; grey <= 116; grey++)
+        {
+                unsigned int colour = (unsigned int)grey * 0x010101u;
+
+                if (compositor_ink_side_next(0, colour, COMPOSITOR_INK_MARGIN) != (window_light(colour) ? 2 : 1))
+                        threshold_rule_mismatches++;
+        }
+        real_flips = close_ink_flips(107, 0);
+        mutant_flips = close_ink_flips(107, 1);
+        starts_light_flips = close_ink_flips(130, 0);
+        compositor.damages = damages, memory_copy(compositor.damage[0], damage0, sizeof(damage0));
+        check("close ink: the threshold rule starts from window_light's own test (greys 100 to 116)", threshold_rule_mismatches == 0);
+        check("close ink: a backdrop of grey 107 and 108 at the threshold, 12 presents, the X keeps its side (no flicker)", real_flips == 0);
+        check("close ink: the mutant with no margin changes side on that backdrop, so the fixture reproduces the flicker", mutant_flips > 0);
+        check("close ink: a window that starts light on grey 130 stays light through the threshold backdrop", starts_light_flips == 0);
+}
+
 static void check_compositor_records(void)
 {
         static unsigned int picture[128 * 96], before[160 * 120], painted[160 * 120], executed[160 * 120];
@@ -4337,6 +4405,7 @@ static void check_compositor_records(void)
         }
         check("records: a record with the 0x20 tiled flag is refused and draws nothing", refused == 1 && mismatches == 0);
         records_covers();
+        check_close_ink_hysteresis();
 #ifdef MOONWATER_GPU_C
         records_lowering();
 #endif

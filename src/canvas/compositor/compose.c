@@ -96,6 +96,8 @@ struct compositor_frame
         int close;           // a window with a close button over its top right
         int minimize;        // a window with a minimise button: it has a tab, which brings it back (none for WINDOW_NO_TAB)
         unsigned int close_mean; // the mean colour under the close button, made once a present (compositor_close_mean)
+        int close_side;          // the close button's ink side, 1 dark or 2 light, from the row's hysteresis (compositor_close_mean); 0: the plain test
+        int row_plus1;           // the window's row + 1 (compositor_frame_of), 0 for a frame that is not a window's: the row keeps its ink side
         // What of its line is lit, and in what ink (COMPOSITOR_INK_LINE_HELD or _HOVER): one edge (CP_EDGE_*) lit whole,
         // two that meet a corner lit with COMPOSITOR_LIT_REACH of each, COMPOSITOR_LIT_ALL all of it; 0 none.
         unsigned int lit, lit_ink;
@@ -541,9 +543,14 @@ static int compositor_minimize_box(const struct compositor_frame *frame, int *x,
         18181b on a light mean and the dark theme's ededef on a dark one, so over a window of the kit the glyphs are its own
         text's ink in either theme, and over any other picture they stand out 3.3 to 1 or more from the mean.
 */
-static unsigned int compositor_glyph_ink(unsigned int mean)
+// The ink of a frame's close glyphs: the side compositor_close_mean's hysteresis chose for its row (2 light, 1 dark), or the plain test of the mean
+// for a frame that has none. A row's side changes only past the threshold by a margin (glass.c), so the glyphs do not alternate on a backdrop that
+// sits at the threshold.
+static unsigned int compositor_glyph_ink(const struct compositor_frame *frame)
 {
-        return (window_light(mean) ? ui_theme_dawning.role[UI_ON_SURFACE] : ui_theme_night.role[UI_ON_SURFACE]) & 0xffffffu;
+        int light = frame->close_side ? frame->close_side == 2 : window_light(frame->close_mean);
+
+        return (light ? ui_theme_dawning.role[UI_ON_SURFACE] : ui_theme_night.role[UI_ON_SURFACE]) & 0xffffffu;
 }
 
 /*
@@ -558,7 +565,7 @@ static void compositor_minimize_draw(const struct compositor_target *t, const st
         if (!compositor_minimize_box(frame, &mx, &my, &side))
                 return;
         compositor_fill(t, mx + in, my + side / 2 - compositor_px1(frame->scale), side - 2 * in, 2 * compositor_px1(frame->scale),
-                        compositor_glyph_ink(frame->close_mean));
+                        compositor_glyph_ink(frame));
 }
 
 // A title's length in characters, the bytes that begin one, to its end or the listing's.
@@ -788,7 +795,7 @@ static void compositor_close_draw(const struct compositor_target *t, const struc
         if (!compositor_close_box(frame, &bx, &by, &side) || !target_clip(t, bx, by, side, side, &x1, &y1, &x2, &y2))
                 return;
 
-        unsigned int ink = compositor_glyph_ink(frame->close_mean);
+        unsigned int ink = compositor_glyph_ink(frame);
         int half = compositor_px1(frame->scale); // half the X's stroke
         int made = compositor_close_cover.side == side && compositor_close_cover.half == half;
         const unsigned int *picture = compositor_scaled(frame) ? 0 : frame->pixels;
@@ -1728,7 +1735,7 @@ static void compositor_gpu_rect(unsigned int kind, int x0, int y0, int x1, int y
 static b32 compositor_gpu_buttons(const struct compositor_frame *f)
 {
         int bx, by, side, mx, my, in = COMPOSITOR_MINIMIZE_IN * f->scale / 100, half = compositor_px1(f->scale);
-        unsigned int ink = compositor_glyph_ink(f->close_mean), cross;
+        unsigned int ink = compositor_glyph_ink(f), cross;
 
         if (!compositor_close_box(f, &bx, &by, &side))
                 return true;
