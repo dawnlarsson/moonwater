@@ -66,6 +66,8 @@ static fn check_killed(void)
 #define KIT_RIPPLE_R 6
 #define KIT_RIPPLE_A 7
 #define KIT_EASE 8
+#define KIT_EASE_RISE 9 // --rb-ease-rise and ease-out: the product draws no transition with them now (ui.c dropped them), so the reference keeps them here
+#define KIT_EASE_OUT 10
 #define KIT_SQUASH_X 11
 #define KIT_SQUASH_Y 12
 #define KIT_SLIDE 13
@@ -3885,6 +3887,7 @@ static fn check_kit_motion(void)
         b64 worst[20] = {0};
         positive counted[20] = {0}, over[20] = {0};
 
+        static const struct ui_bezier ease_rise = UI_BEZIER(UI_Q2(40), UI_Q2(65), UI_Q2(30), UI_ONE), ease_out = UI_BEZIER(0, 0, UI_Q2(58), UI_ONE);
         for (positive at = 0; at < sizeof(kit_reference) / sizeof(kit_reference[0]); at++)
         {
                 const struct kit_reference address_to r = &kit_reference[at];
@@ -3894,6 +3897,8 @@ static fn check_kit_motion(void)
                 switch (r->kind)
                 {
                 case KIT_EASE: got = ui_bezier_at(&ui_ease, x); break;
+                case KIT_EASE_RISE: got = ui_bezier_at(&ease_rise, x); break;
+                case KIT_EASE_OUT: got = ui_bezier_at(&ease_out, x); break;
                 case KIT_CURVE: got = ui_squash_curve(x); break;
                 case KIT_BB_SX: case KIT_BB_SY: case KIT_BB_TX: case KIT_BB_TY:
                 {
@@ -6879,8 +6884,10 @@ static fn check_kit_place(void)
                 ui_scroll_set(&sw, 300);
                 ui_wheel_turn(&ui, &sw, &down);
                 aim_off = scroll_aim(&sw);
-                check("kit scroll switches: natural direction on, a notch down moves the content toward its far end; off, the other way",
-                      aim_on > (b64)300 * 256 && aim_off < (b64)300 * 256);
+                // The natural direction is the compositor's now (input.c turns the wheel once, before any window sees it): the kit takes
+                // a notch as delivered whatever FLIP says, so a notch down moves the content toward its far end either way.
+                check("kit scroll switches: the kit takes a notch as delivered; natural direction (FLIP) is the compositor's, not the kit's",
+                      aim_on > (b64)300 * 256 && aim_off == aim_on);
 
                 ui_kit.scroll_off = 0;
                 ui_scroll_set(&sw, 300);
