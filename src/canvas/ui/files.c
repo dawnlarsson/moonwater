@@ -1989,7 +1989,7 @@ static fn files_remote_handle_reply(struct files_peer address_to p, const struct
                                         at += 37;
                                         if (at + nlen > rep->length)
                                                 break;
-                                        if (kind == FILES_KIND_DIRECTORY && nlen && nlen < FILES_NAME && used + nlen + 1 <= sizeof(s->found))
+                                        if (kind == FILES_KIND_DIRECTORY && files_peer_name_ok(rep->data + at, nlen) && used + nlen + 1 <= sizeof(s->found))
                                         {
                                                 s->offsets[found++] = (p32)used;
                                                 memory_copy(s->found + used, rep->data + at, nlen);

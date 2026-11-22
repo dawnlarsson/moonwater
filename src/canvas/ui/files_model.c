@@ -691,6 +691,19 @@ static b32 files_model_go_remote(struct files_model address_to m, const p8 addre
         return true;
 }
 
+// A name a peer sent: one component, not "." or "..", no slash or NUL. Its bytes are not trusted until this says so.
+static b32 files_peer_name_ok(const p8 address_to s, positive n)
+{
+        if (!n || n >= FILES_NAME)
+                return false;
+        if ((n == 1 && s[0] == '.') || (n == 2 && s[0] == '.' && s[1] == '.'))
+                return false;
+        for (positive k = 0; k < n; k++)
+                if (s[k] == '/' || s[k] == 0)
+                        return false;
+        return true;
+}
+
 static fn files_model_take_remote(struct files_model address_to m, const p8 address_to data, positive length)
 {
         struct files_listing address_to l = m->reloading ? &m->next : &m->shown;
@@ -727,7 +740,7 @@ static fn files_model_take_remote(struct files_model address_to m, const p8 addr
                 at += 37;
                 if (at + nlen > length)
                         break;
-                if (nlen && nlen < FILES_NAME)
+                if (files_peer_name_ok(data + at, nlen))
                 {
                         if (l->count >= FILES_MOST || l->names_used + nlen + 1 > FILES_NAMES)
                         {
@@ -741,7 +754,7 @@ static fn files_model_take_remote(struct files_model address_to m, const p8 addr
                                 memory_copy(l->names + l->names_used, data + at, nlen);
                                 l->names[l->names_used + nlen] = end;
                                 l->names_used += (p32)nlen + 1;
-                                e->kind = kind, e->looked = 1, e->mode = mode;
+                                e->kind = kind > FILES_KIND_OTHER ? FILES_KIND_OTHER : kind, e->looked = 1, e->mode = mode;
                                 e->size = size, e->modified = modified, e->born = born, e->inode = inode;
                                 l->order[l->count] = l->count, l->places = ++l->count;
                         }
