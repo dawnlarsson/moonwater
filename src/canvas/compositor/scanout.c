@@ -1016,7 +1016,8 @@ static b32 compositor_direct_under_ready(unsigned int which, positive need)
         return true;
 }
 
-static void compositor_direct_patch(int row, unsigned int which, const struct compositor_frame *tabs, unsigned int count)
+// The tabs patched over the buffer; 0 when the keep of what they cover could not be had (the frame is then not shown straight).
+static int compositor_direct_patch(int row, unsigned int which, const struct compositor_frame *tabs, unsigned int count)
 {
         int rect[4], u[4], staged = 0;
         unsigned int *pixels = compositor_buffer(row, which), *dst = pixels;
@@ -1028,10 +1029,10 @@ static void compositor_direct_patch(int row, unsigned int which, const struct co
         {
                 if (compositor.patched[row][which])
                         compositor_direct_unpatch_at(row, which);
-                return;
+                return 1;
         }
         if (!compositor_direct_under_ready(which, 4ull * (positive)(rect[2] - rect[0]) * (positive)(rect[3] - rect[1])))
-                return;
+                return 0;
         if (compositor.patched[row][which])
         {
                 unsigned int *stage = compositor_direct_stage_ready();
@@ -1072,6 +1073,7 @@ static void compositor_direct_patch(int row, unsigned int which, const struct co
         table->spoiled_x[row][which] = rect[0], table->spoiled_y[row][which] = rect[1];
         table->spoiled_width[row][which] = rect[2] - rect[0];
         __atomic_store_n(&table->spoiled_height[row][which], rect[3] - rect[1], __ATOMIC_RELEASE);
+        return 1;
 }
 
 static int compositor_copies_damage(void);
@@ -1172,8 +1174,8 @@ static b32 compositor_present_direct(int row, const struct compositor_frame *tab
                 return 0;
         if (compositor.on_screen != fb && compositor.flip_pending)
                 return 1;
-        if (!lent)
-                compositor_direct_patch(row, which, tabs, count);
+        if (!lent && !compositor_direct_patch(row, which, tabs, count))
+                return 0;
         int flipped = compositor.on_screen != fb;
 
         if (flipped)
@@ -1699,6 +1701,9 @@ static int compositor_overlay_buffers(unsigned int rows)
         if (rows <= compositor.overlay_rows && compositor_overlay_width == (unsigned int)compositor.width)
                 return 1;
         compositor_overlay_off();
+        // A plane the card refused to take off still scans its buffers: they are kept, and the band is composed again when it is off.
+        if (compositor.overlay_on)
+                return 0;
         for (unsigned int which = 0; which < 2; which++)
                 if (compositor.overlay_fb[which])
                 {
@@ -2040,7 +2045,12 @@ static b32 compositor_present_overlaid(int row, const struct compositor_frame *f
 
                         compositor_wl_straight_pays(-1);
                         if (!compositor_overlay_buffers((unsigned int)(rect[3] - rect[1])))
-                                return compositor.overlay_state = -1, 0;
+                        {
+                                // The plane still on (its take-off refused) is not a reason to give the overlay up: the band is composed, and the take-off asked again.
+                                if (!compositor.overlay_on)
+                                        compositor.overlay_state = -1;
+                                return 0;
+                        }
                         target.pixels = compositor.overlay_pixels[buffer], target.pitch = compositor.overlay_pitch;
                         compositor_scene_banded(&target, frames, count, 0, rows);
                 }
