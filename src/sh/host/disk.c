@@ -1485,10 +1485,14 @@ static b32 host_build_order(string_address a, string_address b)
         return HOST_BUILD_UNORDERED;
 }
 
-static bipolar host_mount(string_address name, string_address target,
-                          string_address type, positive flags)
+/* A partition mounted at target, made 0700 if it is not there, with the options its type is given and those asked for after
+   them (null: none). */
+static bipolar host_mount_with(string_address name, string_address target,
+                               string_address type, positive flags, string_address asked)
 {
         p8 device[HOST_NAME_ROOM + 8];
+        p8 options[256];
+        string_address own;
         bipolar made;
 
         if (!host_join(device, sizeof(device), "/dev/", name))
@@ -1504,12 +1508,21 @@ static bipolar host_mount(string_address name, string_address target,
                 power cut off part way is wrong in just that way (the directory
                 entry reached the disk and the table did not), and removing it is
                 the next write's first step, which an ro partition refuses. */
+        own = !(flags & MS_RDONLY) && string_equals(type, "vfat")
+                  ? (string_address) "errors=continue"
+                  : !(flags & MS_RDONLY) && string_equals(type, "ext4")
+                      ? (string_address) "commit=30"
+                      : null;
+        if (asked && own && !host_join(options, sizeof(options), own, ",", asked))
+                return -ERROR_INVALID;
         return system_mount(device, target, type, flags,
-                            !(flags & MS_RDONLY) && string_equals(type, "vfat")
-                                ? (string_address) "errors=continue"
-                                : !(flags & MS_RDONLY) && string_equals(type, "ext4")
-                                    ? (string_address) "commit=30"
-                                    : null);
+                            asked && own ? (string_address)options : asked ? asked : own);
+}
+
+static bipolar host_mount(string_address name, string_address target,
+                          string_address type, positive flags)
+{
+        return host_mount_with(name, target, type, flags, null);
 }
 
 /* Resolve the identity again immediately before a later use. Device names are

@@ -248,6 +248,10 @@ moonwater device apply                 judge every device again now, as boot doe
 moonwater device class NAME [allow|deny]  what a new device no rule names may bring up: storage hid audio video net bluetooth hub other [deny]
 moonwater device forget ID|PORT        drop the rule of one device
 moonwater device list                  the devices the system sees, each allowed, blocked or waiting
+moonwater device open NODE BYTES TYPE  mount a partition read-only at /run/media/USER, as Files' Open does
+moonwater device writable NODE         let a partition opened be written to: ext4 btrfs xfs f2fs vfat exfat
+moonwater device eject NODE            unmount a partition opened, and take its folder away
+moonwater device tidy                  let go of what was opened from a drive taken out
 moonwater device log [N]               the last decisions, the newest last [20]
 
 

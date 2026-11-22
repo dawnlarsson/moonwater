@@ -2535,6 +2535,16 @@ static unsigned char usb_plain(unsigned char c)
         return c <= ' ' || c == 0x7f ? '_' : c;
 }
 
+// Where UTF-8 text cut short at at ends whole: before the character the cut fell in.
+static positive usb_whole_cut(const p8 address_to into, positive at)
+{
+        positive lead = at;
+
+        while (lead && (into[lead - 1] & 0xc0) == 0x80)
+                lead--;
+        return lead && lead - 1 + (into[lead - 1] >= 0xf0 ? 4u : into[lead - 1] >= 0xe0 ? 3u : into[lead - 1] >= 0xc0 ? 2u : 1u) > at ? lead - 1 : at;
+}
+
 // A name as one line carries it: the blanks and controls of the kernel's name are underscores. One cut short by room ends before
 // the character it would have cut in two (a label is UTF-8).
 static fn usb_plain_copy(p8 address_to into, positive room, string_address from)
@@ -2544,14 +2554,7 @@ static fn usb_plain_copy(p8 address_to into, positive room, string_address from)
         for (; from[at] && at + 1 < room; at++)
                 into[at] = (p8)usb_plain((unsigned char)from[at]);
         if (from[at])
-        {
-                positive lead = at;
-
-                while (lead && (into[lead - 1] & 0xc0) == 0x80)
-                        lead--;
-                if (lead && lead - 1 + (into[lead - 1] >= 0xf0 ? 4u : into[lead - 1] >= 0xe0 ? 3u : into[lead - 1] >= 0xc0 ? 2u : 1u) > at)
-                        at = lead - 1;
-        }
+                at = usb_whole_cut(into, at);
         into[at] = 0;
 }
 
@@ -2849,6 +2852,571 @@ static b32 usb_list_show(void)
 }
 
 /*
+        A partition opened for the person at the machine, which Files' Devices group asks for:
+
+            moonwater device open NODE BYTES TYPE      mount NODE read-only at /run/media/USER/NAME
+            moonwater device writable NODE             the partition opened there may be written to from now on
+            moonwater device eject NODE                its file system unmounted and its folder taken away
+            moonwater device tidy                      what was opened from a drive that was taken out: detached, its folder gone
+
+        NAME is the file system's label (a slash, a control or a leading dot of it an underscore), or NODE where it has none;
+        USER is the caller's user, root's being root. /run/media/USER and the folder are made here as the caller's alone (0700),
+        each opened through the one above it and never through a link, and one that is there and is not a folder of the caller's
+        is refused, as is a folder something is mounted on. BYTES and TYPE are what device list said of NODE (Files passes them
+        on). The partition is looked at, and looked at again right before the mount: its size, its file system's type, label and
+        UUIDs, and its disk's diskseq (a number the kernel gives a disk each time it attaches one, never twice) are to be as they
+        were; once mounted they are asked a third time, and a mount that is not what was looked at is let go at once. Every mount
+        is nosuid, nodev and noexec, and read-only: writable is a second step, and only ext4, btrfs, xfs, f2fs, vfat and exfat
+        take it. vfat, exfat and ntfs have no owners of their own and are mounted as the caller's with a mask that keeps them its
+        own; NTFS is only read.
+        What is opened is kept in USB_MEDIA_KEPT, a line each (NODE DISKSEQ FOLDER): writable and eject act only on what open
+        made, and tidy knows a drive that was taken out by its diskseq, even where another drive took its name since. tidy is
+        also what open does first.
+        Refused: a session that is no install's (boot's verdict is not "disk DISK": a stick that is live mounts nothing but
+        during an install), a command a link or ssh runs (a forebear is their listener), a partition the storage guard refuses
+        (one mounted anywhere, the system's and boot's, Moonwater's own: storage_device_refusal), one on the drive this session
+        runs from or keeps (installer_excluded), an EFI system partition, a member of a mapped or RAID volume (a holder in
+        sysfs, of it or of its disk), and a file system that is not one of usb_openables. Each open, writable, eject and detach
+        is a line of the device log.
+*/
+#define USB_MEDIA "/run/media"
+#define USB_MEDIA_KEPT HOST_STATE "/media"
+#define USB_MEDIA_MOST 32
+#define USB_MEDIA_TEXT (USB_MEDIA_MOST * (HOST_NAME_ROOM + HOST_PATH_ROOM + 24))
+#define USB_MOUNT_ROOT 0x2000 // statx's STATX_ATTR_MOUNT_ROOT: a file system is mounted on this folder
+
+// install.c's and installer_model.c's, which are compiled after this.
+static bool host_install_boot_drive(p8 address_to into, positive room);
+static b32 installer_skipped(const char address_to name);
+static b32 installer_excluded(const char address_to name, const char address_to boot);
+
+typedef struct
+{
+        string_address type, kind; // the type storage_probe_device says, and the name the kernel's driver has
+        b8 written, owned;         // it may be made writable; it has no owners of its own and is mounted as the caller's
+} usb_openable;
+
+static const usb_openable usb_openables[] = {
+    {"ext4", "ext4", 1, 0},  {"ext3", "ext4", 0, 0}, {"ext2", "ext4", 0, 0},   {"btrfs", "btrfs", 1, 0}, {"xfs", "xfs", 1, 0},
+    {"f2fs", "f2fs", 1, 0},  {"vfat", "vfat", 1, 1}, {"exfat", "exfat", 1, 1}, {"ntfs", "ntfs3", 0, 1},  {"iso9660", "iso9660", 0, 0},
+};
+
+static const usb_openable address_to usb_openable_of(string_address type)
+{
+        for (positive at = 0; type && at < array_count(usb_openables); at++)
+                if (string_equals(type, usb_openables[at].type))
+                        return usb_openables + at;
+        return null;
+}
+
+/* The flags a partition is mounted with, and its options into data: read-only (writable's remount drops that), never a set-id
+   program, a device or a program run from it, and a file system with no owners of its own the caller's. */
+static positive usb_open_how(const usb_openable address_to kind, b32 writable, positive uid, positive gid, p8 address_to data, positive room)
+{
+        p8 user[24], group[24];
+
+        data[0] = end;
+        if (kind->owned)
+        {
+                user[positive_into_string(user, uid)] = end, group[positive_into_string(group, gid)] = end;
+                if (!string_join(data, room, "uid=", (string_address)user, ",gid=", (string_address)group, ",fmask=0177,dmask=0077"))
+                        data[0] = end;
+        }
+        return writable ? HOST_WRITABLE | MS_REMOUNT : HOST_READ_ONLY;
+}
+
+// The folder of the caller's under /run/media: its user's name, root's being root.
+static fn usb_media_user(p8 address_to into, positive room, positive uid)
+{
+        if (!uid)
+                string_copy_bounded(into, "root", room);
+        else if (room > 20)
+                into[positive_into_string(into, uid)] = end;
+}
+
+/* The folder a partition is opened at: its label, a slash, a control or a leading dot of it an underscore, at most 63 bytes
+   and cut before a character it would cut in two; NODE where it has no label. */
+static fn usb_media_name(p8 address_to into, positive room, string_address label, string_address node)
+{
+        positive at = 0, most = room < 64 ? room : 64;
+
+        for (; label && label[at] && at + 1 < most; at++)
+        {
+                p8 c = (p8)label[at];
+
+                into[at] = c < ' ' || c == 0x7f || c == '/' || (!at && c == '.') ? (p8)'_' : c;
+        }
+        if (label && label[at])
+                at = usb_whole_cut(into, at);
+        into[at] = end;
+        if (!at)
+                string_copy_bounded(into, node, room);
+}
+
+/*
+        The folder a partition is opened at, root/user/name, into into: root's media folder (root's alone to write), and under it
+        the caller's and the partition's, made as the caller's alone (0700). Each is opened through the one above it and never
+        through a link. Null when it is ready, else why not: one that is there and is not a folder of the caller's, or one a file
+        system is mounted on already.
+*/
+static string_address usb_media_folder(string_address root, string_address user, string_address name, positive uid, p8 address_to into, positive room)
+{
+        string_address parts[3] = {root, user, name};
+        string_address why = null;
+        bipolar at = AT_FDCWD;
+
+        if (!string_join(into, room, root, "/", user, "/", name))
+                return into[0] = end, (string_address) "has a label too long for a folder";
+        (void)system_make_directory_at(AT_FDCWD, root, 0755);
+        for (int k = 0; k < 3 && !why; k++)
+        {
+                file_facts facts;
+                bipolar next;
+
+                if (k)
+                        (void)system_make_directory_at(at, parts[k], 0700);
+                next = system_open_at(at, parts[k], FILE_READ | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+                if (next < 0 || file_look_code(next, (string_address) "", AT_EMPTY_PATH, address_of facts) < 0)
+                        why = "finds a link, or no folder, where its folder is to be";
+                else if ((facts.mode & MODE_FORMAT) != MODE_DIRECTORY || facts.owner != (k ? (p32)uid : 0) || (!k && (facts.mode & 022)))
+                        why = k ? "finds a folder there that is not the caller's" : "finds the media folder not root's alone";
+                else if (k == 2 && (facts.attributes & USB_MOUNT_ROOT))
+                        why = "finds another drive open at its folder";
+                else if (k && system_call_2(syscall(fchmod), (positive)next, 0700) < 0)
+                        why = "cannot make its folder the caller's alone";
+                if (at >= 0 && at != AT_FDCWD)
+                        system_close(at);
+                at = next;
+        }
+        if (at >= 0 && at != AT_FDCWD)
+                system_close(at);
+        if (why)
+                into[0] = end;
+        return why;
+}
+
+typedef struct
+{
+        p8 node[HOST_NAME_ROOM];
+        p64 diskseq;
+        p8 folder[HOST_PATH_ROOM];
+} usb_opened;
+
+typedef struct
+{
+        usb_opened one[USB_MEDIA_MOST];
+        positive count;
+} usb_media;
+
+// What is opened, as kept: a line each, NODE DISKSEQ FOLDER. A line that is not that is passed by.
+static fn usb_media_read(string_address kept, usb_media address_to media)
+{
+        static p8 text[USB_MEDIA_TEXT];
+        bipolar got = file_slurp_once_at(AT_FDCWD, kept, text, sizeof(text) - 1);
+
+        media->count = 0;
+        if (got <= 0)
+                return;
+        text[got] = end;
+        for (p8 address_to line = text; *line && media->count < USB_MEDIA_MOST;)
+        {
+                p8 address_to stop = (p8 address_to)string_first_of_or_end((string_address)line, '\n');
+                p8 address_to first = (p8 address_to)memory_first_of(line, ' ', (positive)(stop - line));
+                p8 address_to second = first ? (p8 address_to)memory_first_of(first + 1, ' ', (positive)(stop - first - 1)) : null;
+                usb_opened address_to one = media->one + media->count;
+                positive used = 0;
+
+                if (second && first > line && first - line < HOST_NAME_ROOM && second > first + 1 && stop - second - 1 > 0 && stop - second - 1 < HOST_PATH_ROOM)
+                {
+                        memory_copy(one->node, line, (positive)(first - line)), one->node[first - line] = end;
+                        one->diskseq = string_digits_max((string_address)first + 1, (positive)(second - first - 1), address_of used);
+                        memory_copy(one->folder, second + 1, (positive)(stop - second - 1)), one->folder[stop - second - 1] = end;
+                        if (used == (positive)(second - first - 1) && host_name_valid((string_address)one->node) && one->folder[0] == '/')
+                                media->count++;
+                }
+                line = *stop ? stop + 1 : stop;
+        }
+}
+
+static b32 usb_media_write(string_address kept, usb_media address_to media)
+{
+        static p8 text[USB_MEDIA_TEXT];
+        positive used = 0;
+
+        for (positive at = 0; at < media->count; at++)
+        {
+                p8 digits[24];
+
+                digits[positive_into_string(digits, media->one[at].diskseq)] = end;
+                if (!string_join(text + used, sizeof(text) - used, (string_address)media->one[at].node, " ", (string_address)digits, " ",
+                                 (string_address)media->one[at].folder, "\n"))
+                        return 1;
+                used += string_length((string_address)text + used);
+        }
+        return host_write_file(kept, text, used, 0600, false) < 0;
+}
+
+static positive usb_media_find(usb_media address_to media, string_address node)
+{
+        positive at = 0;
+
+        while (at < media->count && !string_equals((string_address)media->one[at].node, node))
+                at++;
+        return at;
+}
+
+// The diskseq of the disk a node is on; 0 for a node that is gone.
+static p64 usb_diskseq(string_address node)
+{
+        p8 disk[HOST_NAME_ROOM], path[HOST_PATH_ROOM], text[32];
+
+        return host_parent(node, disk, sizeof(disk)) && host_join(path, sizeof(path), "/sys/block/", disk, "/diskseq") &&
+                       host_read_kernel(path, text, sizeof(text)) > 0
+                   ? string_digits(text, null)
+                   : 0;
+}
+
+/*
+        What was opened from a drive that was taken out: the disk its node is on now is not the one it was opened from (a diskseq
+        of its own, or none), so its mount is let go (detached: the file system has nowhere to be written) and its folder taken
+        away; what is not mounted any longer is taken off as well. How many went.
+*/
+static positive usb_media_tidy(string_address kept)
+{
+        static usb_media media;
+        positive stays = 0, gone = 0;
+
+        usb_media_read(kept, address_of media);
+        for (positive at = 0; at < media.count; at++)
+        {
+                usb_opened address_to one = media.one + at;
+                file_facts facts;
+                b32 mounted = file_look(AT_FDCWD, (string_address)one->folder, AT_SYMLINK_NOFOLLOW, address_of facts) && (facts.attributes & USB_MOUNT_ROOT);
+
+                if (mounted && usb_diskseq((string_address)one->node) == one->diskseq)
+                {
+                        media.one[stays++] = *one;
+                        continue;
+                }
+                if (mounted && system_call_2(syscall(umount2), (positive)one->folder, MNT_DETACH) >= 0)
+                        usb_tell_text(false, "detached, its drive taken out: ", (string_address)one->folder);
+                (void)system_remove_at(AT_FDCWD, (string_address)one->folder, AT_REMOVEDIR);
+                gone++;
+        }
+        media.count = stays;
+        if (gone)
+                (void)usb_media_write(kept, address_of media);
+        return gone;
+}
+
+/* Whether a process's command line (its words NUL apart, ended) is a listener that runs what another machine asks:
+   moonwater link serve, or ssh serve. */
+static b32 usb_afar_words(const p8 address_to line, positive length)
+{
+        string_address word[3];
+        positive at = 0, count = 0;
+
+        while (count < 3 && at < length)
+        {
+                word[count++] = (string_address)line + at;
+                at += string_length_max((string_address)line + at, length - at) + 1;
+        }
+        return count == 3 && (string_equals(word[1], "link") || string_equals(word[1], "ssh")) && string_equals(word[2], "serve");
+}
+
+// Whether this command was started by such a listener: its parent or a forebear of that, 64 at most.
+static b32 usb_afar(void)
+{
+        positive pid = (positive)system_call(syscall(getppid));
+
+        for (positive depth = 0; pid > 1 && depth < 64; depth++)
+        {
+                p8 path[48], digits[24], text[512];
+                const p8 address_to closing;
+                bipolar got;
+
+                digits[positive_into_string(digits, pid)] = end;
+                if (!host_join(path, sizeof(path), "/proc/", (string_address)digits, "/cmdline"))
+                        return false;
+                got = file_slurp_once_at(AT_FDCWD, (string_address)path, text, sizeof(text) - 1);
+                if (got > 0 && (text[got] = end, usb_afar_words(text, (positive)got)))
+                        return true;
+                // pid (comm) state ppid: the comm may hold anything, so its last ) ends it.
+                if (!host_join(path, sizeof(path), "/proc/", (string_address)digits, "/stat") ||
+                    (got = file_slurp_once_at(AT_FDCWD, (string_address)path, text, sizeof(text) - 1)) <= 0)
+                        return false;
+                text[got] = end;
+                if (!(closing = (const p8 address_to)memory_last_of(text, ')', (positive)got)) || closing + 4 >= text + got)
+                        return false;
+                pid = string_digits((string_address)closing + 4, null);
+        }
+        return false;
+}
+
+static b32 usb_held(string_address name)
+{
+        p8 path[HOST_PATH_ROOM];
+
+        return host_join(path, sizeof(path), "/sys/class/block/", name, "/holders") && host_has_entry((string_address)path, "", null);
+}
+
+typedef struct
+{
+        storage_identity identity;
+        p8 disk[HOST_NAME_ROOM], kept[HOST_NAME_ROOM], boot[HOST_NAME_ROOM];
+        p64 bytes, diskseq;
+        b8 block, session, afar, held;
+        string_address guard;
+} usb_open_facts;
+
+/* What is true of a partition now: what is on it, its size, its disk and that disk's diskseq; with whole, also what may refuse
+   it: this session's verdict, who asked, the drive this runs from, the holders and the storage guard. */
+static fn usb_open_look(string_address node, usb_open_facts address_to facts, b32 whole)
+{
+        p8 path[HOST_PATH_ROOM], sysfs[HOST_PATH_ROOM], text[32];
+        file_facts look;
+
+        memory_zero(facts, sizeof(*facts));
+        if (!host_name_valid(node) || !host_parent(node, facts->disk, sizeof(facts->disk)) || !host_join(path, sizeof(path), "/dev/", node) ||
+            !file_look(AT_FDCWD, (string_address)path, 0, address_of look) || (look.mode & MODE_FORMAT) != MODE_BLOCK)
+                return;
+        facts->block = 1;
+        (void)storage_probe_device((string_address)path, address_of facts->identity);
+        facts->identity.path = null;
+        if (host_join(sysfs, sizeof(sysfs), "/sys/class/block/", node, "/size") && host_read_kernel(sysfs, text, sizeof(text)) > 0)
+                facts->bytes = string_digits(text, null) * 512ull;
+        facts->diskseq = usb_diskseq(node);
+        if (!whole)
+                return;
+        facts->session = host_session_disk(facts->kept, sizeof(facts->kept));
+        facts->afar = usb_afar();
+        facts->held = usb_held(node) || usb_held((string_address)facts->disk);
+        if (facts->session && !facts->afar)
+                (void)host_install_boot_drive(facts->boot, sizeof(facts->boot));
+        facts->guard = storage_device_refusal((string_address)path);
+}
+
+// Why a partition is not opened, from what is true of it (usb_open_look), and what the list said: its size and its type. Null: it may be.
+static string_address usb_open_judge(const usb_open_facts address_to facts, p64 listed, string_address type)
+{
+        const usb_openable address_to kind = usb_openable_of((string_address)facts->identity.type);
+
+        if (!facts->session)
+                return "is not opened: this session is no install's, and a live stick opens no drive but during an install";
+        if (facts->afar)
+                return "is opened only at the machine, not by a command a link or ssh runs";
+        if (!facts->block)
+                return "is no block device here";
+        if (installer_skipped((const char address_to)facts->disk))
+                return "is on a device that is no drive a person keeps (loop, ram, mapped or RAID)";
+        if (installer_excluded((const char address_to)facts->disk, (const char address_to)facts->kept) ||
+            installer_excluded((const char address_to)facts->disk, (const char address_to)facts->boot))
+                return "is on the drive this system runs from";
+        if (facts->guard)
+                return facts->guard;
+        if (facts->held)
+                return "is part of a mapped or RAID volume";
+        if (string_find((string_address)facts->identity.partlabel, "EFI"))
+                return "is an EFI system partition, which a machine boots from";
+        if (!kind)
+                return facts->identity.type_length ? "holds a file system that is not opened here" : "holds no file system it knows";
+        if (facts->bytes != listed || !string_equals((string_address)facts->identity.type, type))
+                return "is not what the list said of it (its size or its file system): read the list again";
+        return null;
+}
+
+// Whether two looks at a partition saw the same one: its size, its file system (type, label, UUIDs) and its disk's attachment.
+static b32 usb_open_same(const usb_open_facts address_to one, const usb_open_facts address_to other)
+{
+        return one->block && other->block && one->bytes == other->bytes && one->diskseq && one->diskseq == other->diskseq &&
+               string_equals((string_address)one->disk, (string_address)other->disk) &&
+               string_equals((string_address)one->identity.type, (string_address)other->identity.type) &&
+               string_equals((string_address)one->identity.label, (string_address)other->identity.label) &&
+               string_equals((string_address)one->identity.uuid, (string_address)other->identity.uuid) &&
+               string_equals((string_address)one->identity.partuuid, (string_address)other->identity.partuuid);
+}
+
+static b32 usb_open_verb(string_address node, string_address listed_word, string_address type)
+{
+        static usb_open_facts first, again;
+        static usb_media media;
+        p8 user[24], name[64], folder[HOST_PATH_ROOM], options[96];
+        positive used = 0, listed = string_digits(listed_word, address_of used);
+        positive uid = (positive)system_call(syscall(getuid)), gid = (positive)system_call(syscall(getgid));
+        const usb_openable address_to kind;
+        string_address why;
+        bipolar lock, made = 0;
+        positive flags;
+
+        return_if(!used || listed_word[used], host_usage());
+        host_need_root();
+        lock = usb_lock_take(true);
+        if (lock < 0)
+                return usb_lock_refused(lock);
+        host_state_ready();
+        (void)usb_media_tidy(USB_MEDIA_KEPT);
+        folder[0] = end;
+        usb_open_look(node, address_of first, true);
+        why = usb_open_judge(address_of first, listed, type);
+        kind = usb_openable_of((string_address)first.identity.type);
+        if (!why)
+        {
+                usb_media_user(user, sizeof(user), uid), usb_media_name(name, sizeof(name), (string_address)first.identity.label, node);
+                why = usb_media_folder(USB_MEDIA, (string_address)user, (string_address)name, uid, folder, sizeof(folder));
+        }
+        if (!why)
+        {
+                // Looked at again right before the mount: the same partition, file system and attachment of its disk.
+                usb_open_look(node, address_of again, false);
+                if (!usb_open_same(address_of first, address_of again))
+                        why = "changed while it was looked at, and nothing was opened";
+        }
+        if (!why)
+        {
+                flags = usb_open_how(kind, false, uid, gid, options, sizeof(options));
+                made = host_mount_with(node, (string_address)folder, kind->kind, flags, options[0] ? (string_address)options : null);
+                if (made < 0)
+                        why = "could not be mounted";
+        }
+        if (!why)
+        {
+                // Mounted: the disk is the one looked at (its diskseq) and what its node holds is what was looked at.
+                usb_open_look(node, address_of again, false);
+                if (!usb_open_same(address_of first, address_of again))
+                        system_call_2(syscall(umount2), (positive)folder, MNT_DETACH), why = "was not what was looked at once mounted, and is let go";
+        }
+        if (!why)
+        {
+                positive at;
+
+                usb_media_read(USB_MEDIA_KEPT, address_of media);
+                at = usb_media_find(address_of media, node);
+                if (at == media.count && media.count < USB_MEDIA_MOST)
+                        media.count++;
+                if (at < media.count)
+                {
+                        string_copy_bounded(media.one[at].node, node, sizeof(media.one[at].node));
+                        string_copy_bounded(media.one[at].folder, (string_address)folder, sizeof(media.one[at].folder));
+                        media.one[at].diskseq = first.diskseq;
+                }
+                if (at == media.count || usb_media_write(USB_MEDIA_KEPT, address_of media))
+                        system_call_2(syscall(umount2), (positive)folder, MNT_DETACH), why = "could not be kept as opened, and is let go";
+        }
+        if (why)
+        {
+                if (folder[0])
+                        (void)system_remove_at(AT_FDCWD, (string_address)folder, AT_REMOVEDIR);
+                radio_unlock(lock);
+                return made < 0 ? host_refuse("device %s could not be mounted: %s\n", node, file_reason(made)) : host_refuse("device %s %s\n", node, why);
+        }
+        usb_tell_text(false, "opened read-only at ", (string_address)folder);
+        radio_unlock(lock);
+        host_say(log, host_label "device opened %s at %s, read-only\n", node, folder);
+        return 0;
+}
+
+static b32 usb_writable_verb(string_address node)
+{
+        static usb_open_facts now;
+        static usb_media media;
+        const usb_openable address_to kind;
+        string_address why = null;
+        file_facts facts;
+        bipolar lock, made = 0;
+        positive at;
+        p8 options[8];
+
+        host_need_root();
+        lock = usb_lock_take(true);
+        if (lock < 0)
+                return usb_lock_refused(lock);
+        (void)usb_media_tidy(USB_MEDIA_KEPT);
+        usb_media_read(USB_MEDIA_KEPT, address_of media);
+        at = usb_media_find(address_of media, node);
+        usb_open_look(node, address_of now, true);
+        kind = usb_openable_of((string_address)now.identity.type);
+        if (at == media.count)
+                why = "is not opened (device open opens it)";
+        else if (!now.session)
+                why = "is not written: this session is no install's";
+        else if (now.afar)
+                why = "is made writable only at the machine, not by a command a link or ssh runs";
+        else if (!kind || !kind->written)
+                why = "holds a file system that is only read here";
+        else if (now.diskseq != media.one[at].diskseq)
+                why = "is not on the drive it was opened from";
+        else if (!file_look(AT_FDCWD, (string_address)media.one[at].folder, AT_SYMLINK_NOFOLLOW, address_of facts) || !(facts.attributes & USB_MOUNT_ROOT))
+                why = "is not mounted where it was opened";
+        else if ((made = host_mount_with(node, (string_address)media.one[at].folder, kind->kind,
+                                         usb_open_how(kind, true, 0, 0, options, sizeof(options)), null)) < 0)
+                why = "could not be made writable";
+        if (why)
+        {
+                radio_unlock(lock);
+                return made < 0 ? host_refuse("device %s could not be made writable: %s\n", node, file_reason(made)) : host_refuse("device %s %s\n", node, why);
+        }
+        usb_tell_text(false, "made writable at ", (string_address)media.one[at].folder);
+        radio_unlock(lock);
+        host_say(log, host_label "device %s may be written to at %s\n", node, media.one[at].folder);
+        return 0;
+}
+
+/* What open opened from node, unmounted and its folder taken away. Null when it went, else why not: nothing opened, or something
+   still has files open on it. */
+static string_address usb_media_eject(string_address kept, string_address node, bipolar address_to error)
+{
+        static usb_media media;
+        positive at;
+        bipolar got;
+
+        usb_media_read(kept, address_of media);
+        at = usb_media_find(address_of media, node);
+        if (at == media.count)
+                return "is not opened (device open opens it)";
+        got = (bipolar)system_call_2(syscall(umount2), (positive)media.one[at].folder, 0);
+        if (got < 0 && got != -EINVAL)
+                return address_to error = got, (string_address) "is in use: close what has files open on it, and eject it again";
+        (void)system_remove_at(AT_FDCWD, (string_address)media.one[at].folder, AT_REMOVEDIR);
+        usb_tell_text(false, "ejected from ", (string_address)media.one[at].folder);
+        media.one[at] = media.one[--media.count];
+        (void)usb_media_write(kept, address_of media);
+        return null;
+}
+
+static b32 usb_eject_verb(string_address node)
+{
+        bipolar lock, error = 0;
+        string_address why;
+
+        host_need_root();
+        lock = usb_lock_take(true);
+        if (lock < 0)
+                return usb_lock_refused(lock);
+        why = usb_media_eject(USB_MEDIA_KEPT, node, address_of error);
+        radio_unlock(lock);
+        if (why)
+                return error ? host_refuse("device %s %s (%s)\n", node, why, file_reason(error)) : host_refuse("device %s %s\n", node, why);
+        host_say(log, host_label "device ejected %s\n", node);
+        return 0;
+}
+
+static b32 usb_tidy_verb(void)
+{
+        bipolar lock;
+        positive gone;
+
+        host_need_root();
+        lock = usb_lock_take(true);
+        if (lock < 0)
+                return usb_lock_refused(lock);
+        gone = usb_media_tidy(USB_MEDIA_KEPT);
+        radio_unlock(lock);
+        if (gone)
+                host_say(log, host_label "device let go of %p opened from drives taken out\n", gone);
+        return 0;
+}
+
+/*
         What is asked is judged before who asks: a word device does not take is a
         usage page for anybody, a change needs root, and reading the mode and
         the devices needs nothing.
@@ -2858,13 +3426,15 @@ static b32 host_device(string_address address_to arguments, positive count)
         enum
         {
                 DEV_CLASS, DEV_LIST, DEV_LOCK, DEV_UNLOCK, DEV_ALLOW,
-                DEV_DENY, DEV_FORGET, DEV_LOG, DEV_APPLY, DEV_WATCH
+                DEV_DENY, DEV_FORGET, DEV_LOG, DEV_APPLY, DEV_WATCH,
+                DEV_OPEN, DEV_WRITABLE, DEV_EJECT, DEV_TIDY
         };
         static const named_byte verbs[] = {
             {"class", DEV_CLASS},   {"list", DEV_LIST},     {"lock", DEV_LOCK},
             {"unlock", DEV_UNLOCK}, {"allow", DEV_ALLOW},   {"deny", DEV_DENY},
             {"forget", DEV_FORGET}, {"log", DEV_LOG},       {"apply", DEV_APPLY},
-            {"watch", DEV_WATCH},
+            {"watch", DEV_WATCH},   {"open", DEV_OPEN},     {"writable", DEV_WRITABLE},
+            {"eject", DEV_EJECT},   {"tidy", DEV_TIDY},
         };
 
         if (count == 2)
@@ -2879,6 +3449,16 @@ static b32 host_device(string_address address_to arguments, positive count)
         case DEV_LIST:
                 return_if(count != 3, host_usage());
                 return usb_list_show();
+        case DEV_OPEN:
+                return_if(count != 6, host_usage());
+                return usb_open_verb(arguments[3], arguments[4], arguments[5]);
+        case DEV_WRITABLE:
+        case DEV_EJECT:
+                return_if(count != 4, host_usage());
+                return verbs[at].value == DEV_EJECT ? usb_eject_verb(arguments[3]) : usb_writable_verb(arguments[3]);
+        case DEV_TIDY:
+                return_if(count != 3, host_usage());
+                return usb_tidy_verb();
         case DEV_LOCK:
                 return_if(count != 3, host_usage());
                 host_need_root();

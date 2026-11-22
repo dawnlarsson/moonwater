@@ -3770,6 +3770,151 @@ static fn device_part_tail(void)
 }
 
 /*
+        A partition opened for the person at the machine (device open, writable, eject, tidy): why one is refused, read-only first
+        and writable as a second step for the file systems that take it, the folder it is opened at, what open keeps, an eject,
+        and a drive taken out let go of. The mounts here are tmpfs in the check's own mount namespace, under /tmp.
+*/
+static fn device_open_rows(void)
+{
+        static usb_open_facts good, bad;
+        static const char link_serve[] = "moonwater\0link\0serve\0003", ssh_serve[] = "/moonwater\0ssh\0serve", verb[] = "moonwater\0device\0open\0sdb1\0";
+        p8 root[96], data[96], name[64], folder[HOST_PATH_ROOM], kept[128], digits[24], path[HOST_PATH_ROOM];
+        const usb_openable address_to vfat = usb_openable_of("vfat"), address_to ntfs = usb_openable_of("ntfs"), address_to ext4 = usb_openable_of("ext4");
+        positive flags;
+        string_address said[12];
+        b32 refused = true, folders, tidied, ejected = false, busy = false;
+        static usb_media media;
+
+        memory_zero(&good, sizeof(good));
+        good.block = good.session = 1, good.bytes = 31000000000ull, good.diskseq = 9;
+        string_copy(good.disk, "sdb"), string_copy(good.kept, "nvme0n1"), string_copy(good.boot, "nvme0n1");
+        string_copy(good.identity.type, "exfat"), good.identity.type_length = 5, string_copy(good.identity.label, "MY STICK");
+        check("device open: a partition of a drive plugged in, as the list said it, in an install's session, at the machine, may be opened",
+              !usb_open_judge(&good, 31000000000ull, "exfat"));
+        bad = good, bad.session = 0, said[0] = usb_open_judge(&bad, 31000000000ull, "exfat");
+        check("device open: a session that is no install's (a live stick, or one not settled) opens nothing", said[0] && string_find(said[0], "live"));
+        bad = good, bad.afar = 1, said[1] = usb_open_judge(&bad, 31000000000ull, "exfat");
+        bad = good, string_copy(bad.disk, "nvme0n1"), said[2] = usb_open_judge(&bad, 31000000000ull, "exfat");
+        bad = good, bad.boot[0] = 0, string_copy(bad.kept, "sdb"), said[3] = usb_open_judge(&bad, 31000000000ull, "exfat");
+        bad = good, string_copy(bad.disk, "dm-0"), said[4] = usb_open_judge(&bad, 31000000000ull, "exfat");
+        bad = good, bad.guard = "holds a moonwater partition", said[5] = usb_open_judge(&bad, 31000000000ull, "exfat");
+        bad = good, bad.held = 1, said[6] = usb_open_judge(&bad, 31000000000ull, "exfat");
+        bad = good, string_copy(bad.identity.partlabel, "EFI system partition"), said[7] = usb_open_judge(&bad, 31000000000ull, "exfat");
+        bad = good, string_copy(bad.identity.type, "swap"), bad.identity.type_length = 4, said[8] = usb_open_judge(&bad, 31000000000ull, "swap");
+        bad = good, said[9] = usb_open_judge(&bad, 32000000000ull, "exfat"), said[10] = usb_open_judge(&bad, 31000000000ull, "vfat");
+        bad = good, bad.block = 0, said[11] = usb_open_judge(&bad, 31000000000ull, "exfat");
+        for (positive at = 1; at < 12; at++)
+                refused &= said[at] != null;
+        check("device open: refused over a link, on the drive this runs from or keeps, on no drive, by the storage guard, held by a mapped or RAID volume, an EFI partition, a file system it does not open, one the list did not say, and no block device",
+              refused && string_find(said[2], "runs from") && string_find(said[3], "runs from") && string_equals(said[5], "holds a moonwater partition") &&
+                  string_find(said[6], "RAID") && string_find(said[7], "EFI"));
+        check("device open: a command run by a link's or ssh's listener is from afar; any other is not",
+              usb_afar_words((const p8 address_to)link_serve, sizeof(link_serve)) && usb_afar_words((const p8 address_to)ssh_serve, sizeof(ssh_serve)) &&
+                  !usb_afar_words((const p8 address_to)verb, sizeof(verb) - 1) && !usb_afar_words((const p8 address_to) "sh", 3));
+        flags = usb_open_how(vfat, false, 1000, 100, data, sizeof(data));
+        check("device open: read-only first, and never a set-id program, a device or a program from it; a FAT is the caller's, with masks of its own",
+              flags == (MS_RDONLY | MS_NOSUID | MS_NODEV | MS_NOEXEC) && string_equals((string_address)data, (string_address) "uid=1000,gid=100,fmask=0177,dmask=0077"));
+        flags = usb_open_how(ext4, true, 0, 0, data, sizeof(data));
+        check("device open: writable is a second step, a remount that drops read-only and keeps the rest; ext4 has owners of its own",
+              flags == (MS_REMOUNT | MS_NOSUID | MS_NODEV | MS_NOEXEC) && !data[0]);
+        check("device open: ext4, btrfs, xfs, f2fs, vfat and exfat may be made writable, NTFS and ISO 9660 are only read, swap is not opened",
+              ext4->written && usb_openable_of("btrfs")->written && usb_openable_of("xfs")->written && usb_openable_of("f2fs")->written && vfat->written &&
+                  usb_openable_of("exfat")->written && ntfs && !ntfs->written && ntfs->owned && !usb_openable_of("iso9660")->written && !usb_openable_of("swap"));
+        bad = good, bad.diskseq = 10;
+        refused = usb_open_same(&good, &good) && !usb_open_same(&good, &bad);
+        bad = good, string_copy(bad.identity.label, "OTHER"), refused = refused && !usb_open_same(&good, &bad);
+        bad = good, bad.bytes++, refused = refused && !usb_open_same(&good, &bad);
+        bad = good, string_copy(bad.identity.uuid, "1234-5678"), refused = refused && !usb_open_same(&good, &bad);
+        check("device open: the look right before the mount and the one after it are held to the first: its disk's attachment, its size, label and UUID", refused);
+        usb_media_name(name, sizeof(name), "MY STICK", "sdb1");
+        folders = string_equals((string_address)name, (string_address) "MY STICK");
+        usb_media_name(name, sizeof(name), "../a/b", "sdb1"), folders = folders && string_equals((string_address)name, (string_address) "_._a_b");
+        usb_media_name(name, sizeof(name), "", "sdb1"), folders = folders && string_equals((string_address)name, (string_address) "sdb1");
+        check("device open: the folder is the label, a slash and a leading dot of it underscores, and the node where there is no label", folders);
+
+        // The folders and the mounts, under /tmp in this check's own namespace.
+        digits[positive_into_string(digits, (positive)system_call(syscall(getpid)))] = end;
+        string_join(root, sizeof(root), "/tmp/mw-media.", (string_address)digits);
+        string_join(kept, sizeof(kept), (string_address)root, ".kept");
+        folders = !usb_media_folder((string_address)root, "root", "MY STICK", 0, folder, sizeof(folder));
+        string_join(path, sizeof(path), (string_address)root, "/root/MY STICK");
+        {
+                file_facts facts;
+                folders = folders && string_equals((string_address)folder, (string_address)path) && file_look(AT_FDCWD, (string_address)folder, AT_SYMLINK_NOFOLLOW, &facts) &&
+                          (facts.mode & 07777) == 0700 && facts.owner == 0;
+        }
+        string_join(path, sizeof(path), (string_address)root, "/root/linked");
+        system_call_3(syscall(symlinkat), (positive) "/tmp", AT_FDCWD, (positive)path);
+        folders = folders && usb_media_folder((string_address)root, "root", "linked", 0, folder, sizeof(folder)) && !folder[0];
+        folders = folders && usb_media_folder((string_address)root, "root", "MY STICK", 1234, folder, sizeof(folder));
+        check("device open: the folder is made the caller's alone (0700); a link where it is to be, or a folder that is another's, is refused", folders);
+        system_call_3(syscall(unlinkat), AT_FDCWD, (positive)path, 0);
+
+        string_join(path, sizeof(path), (string_address)root, "/root/MY STICK");
+        if (system_mount("none", (string_address)path, "tmpfs", 0, null) >= 0)
+        {
+                bipolar held;
+                p8 inside[HOST_PATH_ROOM];
+
+                folders = usb_media_folder((string_address)root, "root", "MY STICK", 0, folder, sizeof(folder)) != null;
+                check("device open: a folder another drive is open at is refused", folders);
+                memory_zero(&media, sizeof(media)), media.count = 1;
+                string_copy(media.one[0].node, "mwgone0"), media.one[0].diskseq = 7, string_copy(media.one[0].folder, path);
+                (void)usb_media_write((string_address)kept, &media);
+                memory_zero(&media, sizeof(media)), usb_media_read((string_address)kept, &media);
+                folders = media.count == 1 && string_equals((string_address)media.one[0].node, (string_address) "mwgone0") && media.one[0].diskseq == 7 &&
+                          string_equals((string_address)media.one[0].folder, (string_address)path);
+                check("device open: what is opened is kept a line each, its node, its disk's diskseq and its folder, and read back the same", folders);
+                // Something with a file open on it: the eject is refused and it stays opened.
+                string_join(inside, sizeof(inside), (string_address)path, "/held");
+                held = system_open_at_mode(AT_FDCWD, (string_address)inside, FILE_CREATE | FILE_WRITE | O_CLOEXEC, 0600);
+                {
+                        bipolar error = 0;
+                        busy = held >= 0 && usb_media_eject((string_address)kept, "mwgone0", &error) && error == -EBUSY;
+                        usb_media_read((string_address)kept, &media);
+                        busy = busy && media.count == 1;
+                }
+                if (held >= 0)
+                        system_close(held);
+                system_call_3(syscall(unlinkat), AT_FDCWD, (positive)inside, 0);
+                check("device eject: a partition something has a file open on is not let go, and stays opened", busy);
+                {
+                        file_facts facts;
+                        bipolar error = 0;
+                        ejected = !usb_media_eject((string_address)kept, "mwgone0", &error) && !file_look(AT_FDCWD, (string_address)path, AT_SYMLINK_NOFOLLOW, &facts);
+                        usb_media_read((string_address)kept, &media);
+                        ejected = ejected && !media.count && usb_media_eject((string_address)kept, "mwgone0", &error);
+                }
+                check("device eject: what open opened is unmounted, its folder taken away and its line with it; a second eject has nothing to eject", ejected);
+        }
+        else
+                check("device open: the check's namespace mounts a tmpfs (it runs as root, in a mount namespace of its own)", false);
+        // A drive taken out: its node's disk has another diskseq, or none; the mount is detached and its folder goes.
+        (void)usb_media_folder((string_address)root, "root", "GONE", 0, folder, sizeof(folder));
+        tidied = system_mount("none", (string_address)folder, "tmpfs", 0, null) >= 0;
+        memory_zero(&media, sizeof(media)), media.count = 2;
+        string_copy(media.one[0].node, "mwgone0"), media.one[0].diskseq = 7, string_copy(media.one[0].folder, folder);
+        string_join(path, sizeof(path), (string_address)root, "/root/LEFT");
+        system_call_3(syscall(mkdirat), AT_FDCWD, (positive)path, 0700);
+        string_copy(media.one[1].node, "mwgone1"), media.one[1].diskseq = 8, string_copy(media.one[1].folder, path);
+        (void)usb_media_write((string_address)kept, &media);
+        {
+                file_facts facts;
+                tidied = tidied && usb_media_tidy((string_address)kept) == 2 && !file_look(AT_FDCWD, (string_address)folder, AT_SYMLINK_NOFOLLOW, &facts) &&
+                         !file_look(AT_FDCWD, (string_address)path, AT_SYMLINK_NOFOLLOW, &facts);
+                usb_media_read((string_address)kept, &media);
+                tidied = tidied && !media.count && !usb_media_tidy((string_address)kept);
+        }
+        check("device tidy: a drive taken out is let go of (its mount detached, its folder gone), as is what is no longer mounted; then nothing is left to do", tidied);
+        system_call_3(syscall(unlinkat), AT_FDCWD, (positive)kept, 0);
+        string_join(path, sizeof(path), (string_address)root, "/root/MY STICK");
+        system_call_3(syscall(unlinkat), AT_FDCWD, (positive)path, AT_REMOVEDIR);
+        string_join(path, sizeof(path), (string_address)root, "/root");
+        system_call_3(syscall(unlinkat), AT_FDCWD, (positive)path, AT_REMOVEDIR);
+        system_call_3(syscall(unlinkat), AT_FDCWD, (positive)root, AT_REMOVEDIR);
+}
+
+/*
         What the census makes of the partitions a hostile bus offers: nine
         disks where it has room for eight, two partitions of one label, a
         label with no identity, and names at and past the room for one.
@@ -6507,6 +6652,7 @@ b32 main(void)
         update_scenes();
         device_where();
         device_part_tail();
+        device_open_rows();
 
         if (program_argument_count() > 1)
                 format_images(program_argument_list()[1]);
