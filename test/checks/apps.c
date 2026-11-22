@@ -5961,12 +5961,14 @@ static fn settings_metric_check(void)
         struct windows *const table_at = windows_scratch_table(&table_scratch);
         b64 t0 = 100000000000ll;
 
+        // The window's table first: settings_size reads its screen, and a group forked from a parent that opened no window has none.
         settings.ui.scale = 100;
+        windows_scratch_zero(table_at);
+        table_at->output_width = 1920, table_at->output_height = 1080;
+        settings.own.table = table_at;
         settings_size(700, 520);
         settings_group_choose(0);
-        windows_scratch_zero(table_at);
         table_at->gpu_on = 1, table_at->gpu_able = 1, table_at->gpu_state = WINDOWS_GPU_UP;
-        settings.own.table = table_at;
         settings_board_due = 0, settings_metric_at = 0;
         ui_kit.now = ui_kit.test_clock = t0;
         settings_board_tick();
@@ -6136,7 +6138,8 @@ static fn settings_display_check(void)
 static fn language_check(void)
 {
         font_face regular, bold;
-        positive size = 0, bytes;
+        positive size = 0, bytes, before = failures;
+        b32 faces;
 
         if (!lcheck_load((string_address) "languages/en.txt", &lcheck_english))
         {
@@ -6164,12 +6167,15 @@ static fn language_check(void)
                         }
                 check("languages: the Noto Sans Arabic and Hebrew faces, regular and bold, load", loaded);
         }
+        // The faces are what the glyph rows below read: without them they are not run. failures counts the groups before this
+        // one too (a group is a fork of the parent that counts them), so it is this group's own that are asked.
+        faces = failures == before;
 #if MOONWATER_UI_SETTINGS && MOONWATER_UI_MIXER
         // Before the failures' return: the rows of the settings metric and the mixer's page run whatever failed before them.
         settings_metric_check();
         mixer_quiet_check();
 #endif
-        if (failures)
+        if (!faces)
                 return;
         language_files_check(&regular, &bold);
         language_sources_check();

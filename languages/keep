@@ -16,6 +16,8 @@ src/canvas/ui/launcher.c	moonwater sleep
 src/canvas/ui/launcher.c	moonwater desktop rest
 src/canvas/ui/launcher.c	files folders browser directory
 src/canvas/ui/files.c	Files
+src/canvas/ui/files.c	Enter
+src/canvas/ui/files.c	Delete
 src/canvas/ui/mixer.c	Mixer
 src/canvas/ui/terminal.c	cannot use the font
 src/canvas/ui/terminal.c	text size
