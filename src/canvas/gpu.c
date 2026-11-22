@@ -2545,12 +2545,15 @@ static unsigned long long gpu_job_submit_ns, gpu_job_wait_ns, gpu_job_ns_kind[3]
 // and 4 the error (the kernel's, negated) is in the bits above the first byte. moonwater canvas says it with the card's refusals.
 static unsigned int gpu_map_why;
 
+static p64 gpu_maps_handed[4];
+
 static void gpu_maps_reset(void)
 {
         for (unsigned int i = 0; i < gpu_map_count; i++)
                 if (gpu_maps[i].dma && gpu_maps[i].pin)
                         gpu_maps[i].pin(gpu_maps[i].offset, 0);
         gpu_map_count = 0, gpu_map_next = GPU_VA_MAPS;
+        memory_zero(gpu_maps_handed, sizeof(gpu_maps_handed));
 }
 
 #define GPU_IMPORT_GUARD 0x100000ull // the addresses kept clear on either side of an import (gpu_place_aligned)
@@ -2647,6 +2650,7 @@ static b32 gpu_recover(void)
                         gpu_maps[i].pin(gpu_maps[i].offset, 0);
         }
         gpu_map_count = 0, gpu_map_next = GPU_VA_MAPS, gpu_lost = 0, gpu_recovered++;
+        memory_zero(gpu_maps_handed, sizeof(gpu_maps_handed));
         gpu_stop();
         gpu_shared.fd = kept_fd, gpu_shared.at = kept_at, gpu_shared.bytes = kept_bytes, gpu_shared.pin = kept_pin;
         return gpu_start(gpu_bytes);
@@ -2661,7 +2665,16 @@ static void gpu_drop(unsigned int i, enum gpu_gone_why why)
         gpu_bo_unbind_close(&bo, why);
         if (gpu_maps[i].dma && gpu_maps[i].pin)
                 gpu_maps[i].pin(gpu_maps[i].offset, 0);
-        gpu_maps[i] = gpu_maps[--gpu_map_count];
+        {
+                unsigned int last = --gpu_map_count;
+
+                gpu_maps[i] = gpu_maps[last];
+                if (gpu_maps[i].handed)
+                        gpu_maps_handed[i >> 6] |= 1ull << (i & 63);
+                else
+                        gpu_maps_handed[i >> 6] &= ~(1ull << (i & 63));
+                gpu_maps_handed[last >> 6] &= ~(1ull << (last & 63));
+        }
 }
 
 // With every map held, the one used longest ago goes first (a window dragged larger makes a map at each size, faster than gpu_trim lets them go), unless all
@@ -2965,6 +2978,7 @@ static positive gpu_va_lookup(const void *pointer, positive bytes, b32 written_o
                     bytes <= gpu_maps[i].to - (positive)pointer) // no sum to wrap
                 {
                         gpu_maps[i].used = gpu_tick, gpu_maps[i].handed = 1;
+                        gpu_maps_handed[i >> 6] |= 1ull << (i & 63);
                         if (!written_only)
                                 gpu_map_hits++, gpu_map_hint[slot] = i;
                         return gpu_maps[i].va + (positive)pointer - gpu_maps[i].from;
@@ -3097,7 +3111,7 @@ static positive gpu_import(int node, unsigned int handle, positive bytes)
         int held;
         positive at;
 
-        if (gpu.fd < 0 || GPU_CONTROL(node, 3u << 30 | 12u << 16 | 0x642du, share) != 0)
+        if (gpu_needs_shadow_output() || gpu.fd < 0 || GPU_CONTROL(node, 3u << 30 | 12u << 16 | 0x642du, share) != 0)
                 return 0;
         share[0] = 0;
         if (GPU_CONTROL(gpu.fd, 3u << 30 | 12u << 16 | 0x642eu, share) != 0)
@@ -3120,7 +3134,7 @@ static positive gpu_import_fd(int fd, positive bytes)
         unsigned int share[3] = {0, 0, (unsigned int)fd};
         int held;
 
-        if (gpu.broken || gpu.fd < 0 || GPU_CONTROL(gpu.fd, 3u << 30 | 12u << 16 | 0x642eu, share) != 0)
+        if (gpu_needs_shadow_output() || gpu.broken || gpu.fd < 0 || GPU_CONTROL(gpu.fd, 3u << 30 | 12u << 16 | 0x642eu, share) != 0)
                 return 0;
         held = gpu_import_of(share[0]);
         return held >= 0 ? gpu_import_again((unsigned int)held, bytes) : gpu_import_at(share[0], bytes);
@@ -3130,6 +3144,11 @@ static positive gpu_import_fd(int fd, positive bytes)
 static b32 gpu_ready(void)
 {
         return !gpu.broken && gpu.fd >= 0;
+}
+
+static b32 gpu_can_import(void)
+{
+        return gpu_ready() && !gpu_needs_shadow_output();
 }
 
 // The maps over [from, from + bytes) let go of, as the compositor unmaps or moves the pages (a client's pool, cut, shrunk, remapped): a map's
@@ -3203,7 +3222,8 @@ static void gpu_release_import(positive at)
 struct gpu_args { positive s, d, g; unsigned int sp, dp, gp, w, op, v, x0, y0, rows, pad; positive tab, ops; unsigned int count, pad2; };
 // ops and count: a scene's records (the card's address of the first, and how many), read by the Intel scene batch (op 6) only.
 #define GPU_ARGS_AT(slot) (gpu_layout.args + 256 * (positive)(slot)) // a slot's arguments, in bytes of the buffer (after every slot's packets)
-#define GPU_ARGS ((struct gpu_args address_to)((p8 address_to)gpu.at + GPU_ARGS_AT(gpu_slot))) // the arguments of the slot the job is built in
+static struct gpu_args gpu_slot_args[GPU_SLOTS]; // cached RAM mirror of GPU_ARGS, flushed in one sequential WC burst in gpu_submit()
+#define GPU_ARGS (&gpu_slot_args[gpu_slot])      // the arguments of the slot the job is built in
 typedef char gpu_slots_fit[sizeof(struct gpu_args) <= 256 ? 1 : -1]; // a slot's arguments in its 256 bytes (gpu_start puts the kernels after the last slot's)
 
 // Gen9 R8 byte-surface row split: 32-byte aligned interior, 16-byte multiple span, 64-byte pitch.
@@ -3538,9 +3558,13 @@ static unsigned int gpu_i915_scene_batch(const struct gpu_job *job, unsigned int
 
                 for (i = 0; i < a->count; i++)
                 {
-                        unsigned int raw = rec[8 * i], k = raw & ~0x80u;
-                        int rx0 = (int)rec[8 * i + 1], ry0 = (int)rec[8 * i + 2], rx1 = (int)rec[8 * i + 3], ry1 = (int)rec[8 * i + 4];
+                        unsigned int r[8], raw, k;
+                        int rx0, ry0, rx1, ry1;
+                        positive va = 0, span = 0;
 
+                        memory_copy(r, rec + 8 * i, 32);
+                        raw = r[0], k = raw & ~0x80u;
+                        rx0 = (int)r[1], ry0 = (int)r[2], rx1 = (int)r[3], ry1 = (int)r[4];
                         if (raw > 1u && k != 4u && k != 11u)
                                 return 0;
                         if (rx1 <= rx0 || ry1 <= ry0)
@@ -3549,10 +3573,9 @@ static unsigned int gpu_i915_scene_batch(const struct gpu_job *job, unsigned int
                                 continue;
                         if (k == 4u || k == 11u)
                         {
-                                positive va = (positive)rec[8 * i + 5] | ((positive)rec[8 * i + 6] << 32);
-                                unsigned int rp = rec[8 * i + 7];
-                                positive span;
+                                unsigned int rp = r[7];
 
+                                va = (positive)r[5] | ((positive)r[6] << 32);
                                 if (!rp || rp > 65535u || va < GPU_VA || (va & 3))
                                         return 0;
                                 span = 4ull * ((positive)(ry1 - ry0 - 1) * (positive)rp + (positive)(rx1 - rx0));
@@ -3560,9 +3583,17 @@ static unsigned int gpu_i915_scene_batch(const struct gpu_job *job, unsigned int
                                         return 0;
                         }
                         if (can_pack && (raw == 0u || k == 4u) && rx0 <= (int)px0 && ry0 <= (int)py0 && rx1 >= (int)px1 && ry1 >= (int)py1)
-                                kept = 0;
+                                kept = 0, has_img = 0;
+                        if (k == 4u || k == 11u)
+                        {
+                                if (!has_img || va < img_min)
+                                        img_min = va;
+                                if (!has_img || va + span > img_max)
+                                        img_max = va + span;
+                                has_img = 1;
+                        }
                         if (can_pack)
-                                memory_copy(dst_rec + 8 * kept, rec + 8 * i, 32);
+                                memory_copy(dst_rec + 8 * kept, r, 32);
                         kept++;
                 }
                 if (!kept)
@@ -3571,28 +3602,9 @@ static unsigned int gpu_i915_scene_batch(const struct gpu_job *job, unsigned int
                         return 2;
                 }
                 {
-                        const unsigned int address_to use_rec = can_pack ? dst_rec : rec;
                         unsigned int use_count = can_pack ? kept : a->count;
                         positive use_ops = can_pack ? pack_va : a->ops;
 
-                        for (i = 0; i < use_count; i++)
-                        {
-                                unsigned int k = use_rec[8 * i] & ~0x80u;
-
-                                if (k == 4u || k == 11u)
-                                {
-                                        int rx0 = (int)use_rec[8 * i + 1], ry0 = (int)use_rec[8 * i + 2], rx1 = (int)use_rec[8 * i + 3], ry1 = (int)use_rec[8 * i + 4];
-                                        positive va = (positive)use_rec[8 * i + 5] | ((positive)use_rec[8 * i + 6] << 32);
-                                        unsigned int rp = use_rec[8 * i + 7];
-                                        positive span = 4ull * ((positive)(ry1 - ry0 - 1) * (positive)rp + (positive)(rx1 - rx0));
-
-                                        if (!has_img || va < img_min)
-                                                img_min = va;
-                                        if (!has_img || va + span > img_max)
-                                                img_max = va + span;
-                                        has_img = 1;
-                                }
-                        }
                         if (has_img)
                         {
                                 positive img_bytes;
@@ -4164,8 +4176,17 @@ static b32 gpu_handed_hold;
 // No record waits for a job any more (the maps' addresses are no longer handed out to one): the marks of the lookups are cleared.
 static void gpu_handed_clear(void)
 {
-        for (unsigned int i = 0; i < gpu_map_count; i++)
-                gpu_maps[i].handed = 0;
+        for (unsigned int w = 0; w < 4; w++)
+        {
+                for (p64 m = gpu_maps_handed[w]; m; m &= m - 1)
+                {
+                        unsigned int i = (w << 6) + (unsigned int)__builtin_ctzll(m);
+
+                        if (i < gpu_map_count)
+                                gpu_maps[i].handed = 0;
+                }
+                gpu_maps_handed[w] = 0;
+        }
         for (unsigned int i = 0; i < gpu.imports; i++)
                 gpu.imported_handed[i] = 0;
 }
@@ -4255,6 +4276,8 @@ HOT static positive gpu_submit(void)
         // A slot whose job may still run is not the next job's: its packets and arguments are that job's (gpu_slot_take is the caller's way to a free one).
         if (unlikely(gpu.pending && (gpu_slot == gpu_pending_slot || (gpu_before.sequence && gpu_done(gpu_before.sequence) == 0))))
                 return gpu_end = GPU_END_LATE, 0;
+        // Flush cached GPU_ARGS to the slot's VRAM arguments in one sequential WC burst before driver submit.
+        memory_copy((p8 address_to)gpu.at + GPU_ARGS_AT(gpu_slot), GPU_ARGS, sizeof(struct gpu_args));
         gpu_job_began = began; // (the time a refusal reads the kernel's log from; the pending job's own again if it is refused)
         if (unlikely(!++gpu_submit_serial)) // (counted from 1: 0 is a map no submit has named)
                 gpu_submit_serial++;
@@ -4268,12 +4291,15 @@ HOT static positive gpu_submit(void)
                 for (unsigned int i = 0; i < gpu.imports; i++)
                         if (gpu_import_named(i, before))
                                 bos[named++] = gpu.imported[i];
-                // Of the maps, the ones a record of this job was given and the ones this present used (gpu_map_named): the kernel looks at the pages of every map named at
-                // every submission (ten 1920 by 1080 window buffers held cost a present 80 to 400 us on the box), and a map not named is not read by this job. A map the
-                // compositor let go of that no record of this job holds is not named: a glass scratch grown in the tick that used it made every job of the tick fail.
-                for (unsigned int i = 0; i < gpu_map_count; i++)
-                        if (gpu_map_named(i))
-                                bos[named++] = gpu_maps[i].handle, gpu_maps[i].listed = gpu_submit_serial;
+                // Of the maps, only those with handed=1 (tracked in 256-bit gpu_maps_handed[4] bitmask: O(popcount) instead of scanning 20 KiB).
+                for (unsigned int w = 0; w < 4; w++)
+                        for (p64 m = gpu_maps_handed[w]; m; m &= m - 1)
+                        {
+                                unsigned int i = (w << 6) + (unsigned int)__builtin_ctzll(m);
+
+                                if (i < gpu_map_count && gpu_map_named(i))
+                                        bos[named++] = gpu_maps[i].handle, gpu_maps[i].listed = gpu_submit_serial;
+                        }
                 GPU_SUBMIT_SEEN(bos, named);
                 gpu_end = GPU_END_NONE;
                 gpu_alarm_arm(2u);
@@ -4452,8 +4478,8 @@ HOT static int gpu_scene_build(positive ops_at, unsigned int n, positive bins_at
         dx1 = dx1 > w ? w : dx1, dy1 = dy1 > h ? h : dy1;
         if (dx0 >= dx1 || dy0 >= dy1)
                 return 0;
-        // Stage ops once from uncached USWC VRAM into cached RAM so the 3 build passes (scan, bins_count, bins_place) hit L1/L2.
-        if (n > 1)
+        // Stage ops once from uncached USWC VRAM into cached RAM (skip on Intel i915 aligned op 6 which skips CPU binning).
+        if (n > 1 && !(aligned && gpu_backend == &gpu_i915_row))
         {
                 positive ops_bytes = 32ull * n;
                 void *ostage = gpu_ops_stage;
@@ -4492,6 +4518,8 @@ HOT static int gpu_scene_build(positive ops_at, unsigned int n, positive bins_at
         if (!(aligned && gpu_backend == &gpu_i915_row))
         {
                 positive tab_bytes = (positive)cw * ch * 8, need;
+                unsigned int dty0 = dy0 >> 6, dty1 = (dy1 - 1) >> 6;
+                positive row_off = (positive)dty0 * cw, row_cells = (positive)(dty1 - dty0 + 1) * cw, row_bytes = row_cells * 8;
                 void *stage = gpu_bin_stage;
                 int staged = 0;
 
@@ -4499,11 +4527,11 @@ HOT static int gpu_scene_build(positive ops_at, unsigned int n, positive bins_at
                         gpu_bin_stage = (unsigned int *)stage;
                 if (gpu_bin_stage && tab_bytes <= gpu_bin_room)
                         tab = gpu_bin_stage, list = tab + 2 * cw * ch, staged = 1;
-                memory_zero(tab, tab_bytes);
+                memory_zero(tab + 2 * row_off, row_bytes);
                 // The three steps of the bins are the library's (bins_count, bins_starts, bins_place: lib.c, in assembly on each machine): a record's squares counted,
-                // the counts made starts, and the record put in each square's list.
+                // the counts made starts, and the record put in each square's list (scoped to damaged tile rows [dty0..dty1]).
                 GPU_RECORDS(bins_count(tab + 2 * (ty0 * cw + tx0), cw, tx1 - tx0 + 1, ty1 - ty0 + 1, 1 + (positive)m);)
-                at = bins_starts(tab, (positive)cw * ch);
+                at = bins_starts(tab + 2 * row_off, row_cells);
                 need = tab_bytes + 32ull * at;
                 if (need > room) // the lists must fit the room they have
                         return gpu_end = GPU_END_OVERFLOW, -1;
@@ -4515,7 +4543,7 @@ HOT static int gpu_scene_build(positive ops_at, unsigned int n, positive bins_at
                         else
                         {
                                 tab = (unsigned int address_to)((p8 address_to)gpu.at + bins_at), list = tab + 2 * cw * ch, staged = 0;
-                                memory_copy_apart(tab, gpu_bin_stage, tab_bytes);
+                                memory_copy_apart(tab + 2 * row_off, gpu_bin_stage + 2 * row_off, row_bytes);
                         }
                 }
                 // A record goes into the list of each square it is in as it is, a box with its corners fitted to its sides (gpu_radii): fitted once, and the same words
@@ -4526,7 +4554,18 @@ HOT static int gpu_scene_build(positive ops_at, unsigned int n, positive bins_at
                                     bins_skip(tab + 2 * (held[1] * cw + held[0]), cw, held[2] - held[0] + 1, held[3] - held[1] + 1);
                             bins_place(tab + 2 * (ty0 * cw + tx0), cw, tx1 - tx0 + 1, ty1 - ty0 + 1, list, record, 1 + (positive)m);)
                 if (staged)
-                        memory_copy_apart((p8 address_to)gpu.at + bins_at, tab, need);
+                {
+                        p8 address_to dst = (p8 address_to)gpu.at + bins_at;
+
+                        if (dty0 == 0 && dty1 + 1 == ch)
+                                memory_copy_apart(dst, tab, need);
+                        else
+                        {
+                                memory_copy_apart(dst + row_off * 8, tab + 2 * row_off, row_bytes);
+                                if (at)
+                                        memory_copy_apart(dst + tab_bytes, list, 32ull * at);
+                        }
+                }
         }
         a->tab = GPU_VA + GPU_BASES_AT, a->s = GPU_VA, a->d = d_at >= GPU_VA ? d_at : GPU_VA + d_at, a->g = GPU_VA + bins_at, a->dp = pitch, a->sp = w, a->gp = h, a->x0 = a->y0 = 0, a->w = w, a->rows = (h + 3) >> 2, a->op = scene_op;
         if (aligned)
@@ -4689,6 +4728,20 @@ static b32 gpu_nv12(positive luma, unsigned int luma_pitch, positive chroma, uns
         return gpu_run();
 }
 
+static positive gpu_nv12_go(positive luma, unsigned int luma_pitch, positive chroma, unsigned int chroma_pitch, positive dst, unsigned int dp, positive tab,
+                            unsigned int w, unsigned int h)
+{
+        struct gpu_args address_to a;
+
+        gpu_last_error = 0, gpu_end = GPU_END_NONE;
+        if (!w || !h || gpu_backend != &gpu_amd || (!gpu_nv12_ok && !gpu_nv12_trying) || gpu_lost || gpu_slot_take() < 0)
+                return 0;
+        a = GPU_ARGS;
+        a->s = luma, a->d = dst, a->g = tab, a->sp = luma_pitch, a->dp = dp, a->gp = chroma_pitch, a->w = w, a->op = 9, a->v = 0, a->x0 = a->y0 = 0, a->rows = h;
+        a->tab = 0, a->ops = chroma, a->count = 0;
+        return gpu_go();
+}
+
 /*
         A picture the card reads through its texture unit (op 8): the resource's eight words desc (gpu_amd_image) at byte 128 of the slot's arguments, the
         rectangle w by h from (x0, y0) of it written linear into dst, dp pixels a row. kind is what gpu_amd_image answered for the resource, and with
@@ -4706,7 +4759,7 @@ static void gpu_image_args(const unsigned int desc[8], unsigned int kind, unsign
 
         a->s = 0, a->d = dst, a->g = 0, a->sp = 0, a->dp = dp, a->gp = 0, a->w = w, a->op = 8;
         a->v = kind & (GPU_IMAGE_OVER | GPU_IMAGE_RAW | GPU_IMAGE_SWAP), a->x0 = x0, a->y0 = y0, a->rows = h, a->tab = 0;
-        memory_copy((p8 address_to)a + 128, desc, 32);
+        memory_copy((p8 address_to)gpu.at + GPU_ARGS_AT(gpu_slot) + 128, desc, 32);
 }
 
 static b32 gpu_image(const unsigned int desc[8], unsigned int kind, unsigned int x0, unsigned int y0, positive dst, unsigned int dp, unsigned int w, unsigned int h)

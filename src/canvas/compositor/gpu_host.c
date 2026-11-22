@@ -126,6 +126,7 @@ static void compositor_gpu_layout(void)
         g->ops = (unsigned int *)((unsigned char *)gpu.at + COMPOSITOR_GPU_OPS_AT), g->room = (compositor_card.lists_nowait ? COMPOSITOR_GPU_LIST_OPS : 1 << 20) / 32;
         g->tables = (unsigned char *)gpu.at + COMPOSITOR_GPU_TABLES_AT, g->tables_at = COMPOSITOR_GPU_TABLES_AT, g->tables_size = 1 << 20;
         g->kept = 0, g->tables_used = 0;
+        compositor_gpu_i915_tiles.static_used = 0, compositor_gpu_i915_tiles.static_count = 0, compositor_gpu_i915_tiles.va_marked = 0;
 }
 
 // The late probe: a card that is not there yet (no render node, a driver or its firmware that loads late) is looked for again while canvas gpu is on and a present
@@ -602,14 +603,14 @@ static struct
 typedef char compositor_card_steps_fit[COMPOSITOR_GPU_SCALED + COMPOSITOR_DAMAGE <= COMPOSITOR_CARD_STEPS ? 1 : -1];
 static b32 compositor_card_add(const struct compositor_card_step *step); // the present's jobs (below)
 
-static enum compositor_gpu_why compositor_gpu_scale_frames(const struct compositor_frame **io, unsigned int count)
+static enum compositor_gpu_why compositor_gpu_scale_frames(const struct compositor_frame **io, unsigned int count, unsigned int first, const int dmg[4])
 {
         const struct compositor_frame *frames = *io;
         unsigned int used = 0;
 
         if (count > COMPOSITOR_FRAMES_FOR(compositor_rows_in_use))
                 return COMPOSITOR_GPU_WHY_OTHER;
-        for (unsigned int k = 0; k < count; k++)
+        for (unsigned int k = first; k < count; k++)
         {
                 const struct compositor_frame *f = &frames[k];
                 struct compositor_frame source;
@@ -619,7 +620,7 @@ static enum compositor_gpu_why compositor_gpu_scale_frames(const struct composit
                 positive bytes, src_va, dst_va;
                 unsigned int dp;
 
-                if (f->builtin || !f->pixels || !compositor_scaled(f))
+                if (f->builtin || !f->pixels || !compositor_scaled(f) || (dmg && !compositor_frame_meets(f, dmg)))
                         continue;
                 if (used == COMPOSITOR_GPU_SCALED || f->width <= 0 || f->height <= 0 || f->source_w <= 0 || f->source_h <= 0 || f->width > 16384 || f->height > 16384 ||
                     f->source_w > 16384 || f->source_h > 16384 || f->pitch < (unsigned long)f->source_w)
@@ -850,34 +851,69 @@ static enum compositor_gpu_why compositor_gpu_draw(const struct compositor_frame
                 return COMPOSITOR_GPU_WHY_OUTPUT;
         compositor_card.steps = compositor_card.next = compositor_card.submitted = 0, compositor_card.failed = compositor_card.fenced = 0, compositor_card.last = 0;
         {
+                int dx0 = rects.r[0].x1, dy0 = rects.r[0].y1, dx1 = rects.r[0].x2, dy1 = rects.r[0].y2;
+                unsigned int first = 0;
+                int skip_ground = 0, has_tint = 0;
                 enum compositor_gpu_why scaled;
 
+                for (unsigned int at = 1; at < rects.count; at++)
+                {
+                        if (rects.r[at].x1 < dx0) dx0 = rects.r[at].x1;
+                        if (rects.r[at].y1 < dy0) dy0 = rects.r[at].y1;
+                        if (rects.r[at].x2 > dx1) dx1 = rects.r[at].x2;
+                        if (rects.r[at].y2 > dy1) dy1 = rects.r[at].y2;
+                }
+                g->damage[0] = dx0 & ~63, g->damage[1] = dy0 & ~3;
+                g->damage[2] = ((dx1 + 63) & ~63) < (int)g->width ? ((dx1 + 63) & ~63) : (int)g->width;
+                g->damage[3] = ((dy1 + 3) & ~3) < (int)g->height ? ((dy1 + 3) & ~3) : (int)g->height;
+                for (unsigned int k = 0; k < count; k++)
+                {
+                        const int *pr = frames[k].preview, *mr = frames[k].mark;
+
+                        if ((pr[2] > 0 && pr[3] > 0 && pr[0] + pr[2] > g->damage[0] && pr[1] + pr[3] > g->damage[1] && pr[0] < g->damage[2] && pr[1] < g->damage[3]) ||
+                            (mr[2] > 0 && mr[3] > 0 && mr[0] + mr[2] > g->damage[0] && mr[1] + mr[3] > g->damage[1] && mr[0] < g->damage[2] && mr[1] < g->damage[3]))
+                        {
+                                has_tint = 1;
+                                break;
+                        }
+                }
+                if (!has_tint)
+                        for (unsigned int k = count; k > 0; k--)
+                                if (compositor_frame_covers_opaque(&frames[k - 1], g->damage))
+                                {
+                                        first = k - 1, skip_ground = 1;
+                                        break;
+                                }
                 gpu_handed_hold = 1;
-                scaled = compositor_gpu_scale_frames(&frames, count); // the landings made pictures of their own size, and the frames those
+                scaled = compositor_gpu_scale_frames(&frames, count, first, g->damage); // the landings made pictures of their own size, and the frames those
                 gpu_handed_hold = 0;
                 if (scaled != COMPOSITOR_GPU_WHY_DRAWN)
                 {
+                        g->damage[0] = g->damage[1] = g->damage[2] = g->damage[3] = 0;
                         if (!gpu.pending)
                                 gpu_handed_clear();
                         return scaled;
                 }
-        }
-        for (unsigned int k = 0; k < count; k++)
-                if (!compositor_gpu_picture(&frames[k]))
+                for (unsigned int k = first; k < count; k++)
+                        if (compositor_frame_meets(&frames[k], g->damage) && !compositor_gpu_picture(&frames[k]))
+                        {
+                                g->damage[0] = g->damage[1] = g->damage[2] = g->damage[3] = 0;
+                                if (!gpu.pending)
+                                        gpu_handed_clear();
+                                return COMPOSITOR_GPU_WHY_PICTURE;
+                        }
+                // The wallpaper, the ground the scene is laid on: mapped once and kept while it is (compositor_wall_take forgets the one let go of).
+                if (!skip_ground)
                 {
-                        if (!gpu.pending)
-                                gpu_handed_clear();
-                        return COMPOSITOR_GPU_WHY_PICTURE;
-                }
-        // The wallpaper, the ground the scene is laid on: mapped once and kept while it is (compositor_wall_take forgets the one let go of).
-        {
-                struct compositor_frame wall;
+                        struct compositor_frame wall;
 
-                if (compositor_gpu_wall_frame(&wall) && !compositor_gpu_picture(&wall))
-                {
-                        if (!gpu.pending)
-                                gpu_handed_clear();
-                        return COMPOSITOR_GPU_WHY_PICTURE;
+                        if (compositor_gpu_wall_frame(&wall) && !compositor_gpu_picture(&wall))
+                        {
+                                g->damage[0] = g->damage[1] = g->damage[2] = g->damage[3] = 0;
+                                if (!gpu.pending)
+                                        gpu_handed_clear();
+                                return COMPOSITOR_GPU_WHY_PICTURE;
+                        }
                 }
         }
         if (!compositor_gpu_frames(frames, count, compositor_ground))
@@ -888,16 +924,19 @@ static enum compositor_gpu_why compositor_gpu_draw(const struct compositor_frame
         }
         if (!compositor_gpu_spots()) // the fingers' marks over the scene, and the pointer over them
         {
+                g->damage[0] = g->damage[1] = g->damage[2] = g->damage[3] = 0;
                 if (!gpu.pending)
                         gpu_handed_clear();
                 return g->why;
         }
         if (compositor.cursor.drawn && !compositor_gpu_cursor(compositor.cursor.x, compositor.cursor.y, &compositor.cursor.drawn_as, compositor_cursor_ink(0, 0), compositor_cursor_ink(1, 0)))
         {
+                g->damage[0] = g->damage[1] = g->damage[2] = g->damage[3] = 0;
                 if (!gpu.pending)
                         gpu_handed_clear();
                 return g->why;
         }
+        g->damage[0] = g->damage[1] = g->damage[2] = g->damage[3] = 0;
         if (compositor_card.nowait && compositor_card.looped && !gpu_needs_shadow_output())
         {
                 // The scenes after the scaled pictures, a rectangle each, submitted as the card has room for them; the present is the card's from the first.
@@ -944,6 +983,7 @@ static enum compositor_gpu_why compositor_gpu_draw(const struct compositor_frame
         else
         {
                 int band_y = gpu_backend == &gpu_i915_row && compositor.height > 256 ? ((compositor.height - 96) & ~3) : compositor.height;
+                int pipe = gpu_needs_shadow_output();
 
                 gpu_handed_hold = 1;
                 for (unsigned int at = 0; at < rects.count; at++)
@@ -957,9 +997,23 @@ static enum compositor_gpu_why compositor_gpu_draw(const struct compositor_frame
                                 for (int sx0 = rx0; sx0 < rx1; )
                                 {
                                         int sx1 = gpu_backend == &gpu_i915_row && ((sx0 & ~63) + 4096) < rx1 ? ((sx0 & ~63) + 4096) : rx1;
-                                        b32 ok = gpu_scene(COMPOSITOR_GPU_OPS_AT, g->count, COMPOSITOR_GPU_BINS_AT, out,
-                                                           (unsigned int)(compositor.scanout_pitch / 4), g->width, (unsigned int)compositor.height,
-                                                           (unsigned int)sx0, (unsigned int)sy0, (unsigned int)sx1, (unsigned int)sy1);
+                                        b32 ok;
+
+                                        if (pipe)
+                                        {
+                                                positive seq = gpu_scene_submit(COMPOSITOR_GPU_OPS_AT, g->count, COMPOSITOR_GPU_SCENE_BINS_AT, out,
+                                                                                (unsigned int)(compositor.scanout_pitch / 4), g->width, (unsigned int)compositor.height,
+                                                                                (unsigned int)sx0, (unsigned int)sy0, (unsigned int)sx1, (unsigned int)sy1);
+                                                if (!seq && gpu_end == GPU_END_LATE && !gpu_lost && gpu_finish())
+                                                        seq = gpu_scene_submit(COMPOSITOR_GPU_OPS_AT, g->count, COMPOSITOR_GPU_SCENE_BINS_AT, out,
+                                                                               (unsigned int)(compositor.scanout_pitch / 4), g->width, (unsigned int)compositor.height,
+                                                                               (unsigned int)sx0, (unsigned int)sy0, (unsigned int)sx1, (unsigned int)sy1);
+                                                ok = seq != 0;
+                                        }
+                                        else
+                                                ok = gpu_scene(COMPOSITOR_GPU_OPS_AT, g->count, COMPOSITOR_GPU_BINS_AT, out,
+                                                               (unsigned int)(compositor.scanout_pitch / 4), g->width, (unsigned int)compositor.height,
+                                                               (unsigned int)sx0, (unsigned int)sy0, (unsigned int)sx1, (unsigned int)sy1);
                                         if (!ok)
                                         {
                                                 compositor_gpu_fail(GPU_FAIL_UNHOLD);
@@ -970,10 +1024,15 @@ static enum compositor_gpu_why compositor_gpu_draw(const struct compositor_frame
                                 sy0 = sy1;
                         }
                 }
+                if (pipe && gpu.pending && !gpu_finish())
+                {
+                        compositor_gpu_fail(GPU_FAIL_UNHOLD);
+                        return compositor_gpu_job_why();
+                }
                 gpu_handed_hold = 0;
                 if (!gpu.pending)
                         gpu_handed_clear();
-                if (gpu_needs_shadow_output() && compositor_gpu_shadow.pixels && compositor.scanout)
+                if (pipe && compositor_gpu_shadow.pixels && compositor.scanout)
                 {
                         unsigned long pitch = (unsigned long)(compositor.scanout_pitch / 4);
 
@@ -983,8 +1042,8 @@ static enum compositor_gpu_why compositor_gpu_draw(const struct compositor_frame
                                 unsigned long cw = (unsigned long)(rects.r[at].x2 - rects.r[at].x1);
                                 unsigned long ch = (unsigned long)(rects.r[at].y2 - rects.r[at].y1);
 
-                                memory_copy_rect_u32(compositor.scanout + y0 * pitch + x0, pitch,
-                                                     compositor_gpu_shadow.pixels + y0 * pitch + x0, pitch, cw, ch);
+                                memory_copy_rect_out_u32(compositor.scanout + y0 * pitch + x0, pitch,
+                                                         compositor_gpu_shadow.pixels + y0 * pitch + x0, pitch, cw, ch);
                         }
                 }
         }
@@ -1163,12 +1222,38 @@ static const unsigned int *compositor_gpu_frost_scene(const struct compositor_fr
                 y1 = compositor.height;
         if (x1 <= x0 || y1 <= y0)
                 return null;
-        for (unsigned int k = 0; k < count; k++)
-                if (compositor_scaled(&frames[k]) || !compositor_gpu_picture(&frames[k]))
-                        return null;
         g->width = fw, g->height = (unsigned int)compositor.height;
-        if (compositor_gpu_wall_frame(&wall) && !compositor_gpu_picture(&wall))
-                return null;
+        g->damage[0] = x0 & ~63, g->damage[1] = y0 & ~3;
+        g->damage[2] = ((x1 + 63) & ~63) < (int)fw ? ((x1 + 63) & ~63) : (int)fw;
+        g->damage[3] = ((y1 + 3) & ~3) < compositor.height ? ((y1 + 3) & ~3) : compositor.height;
+        {
+                unsigned int first = 0;
+                int skip_ground = 0, has_tint = 0;
+
+                for (unsigned int k = 0; k < count; k++)
+                {
+                        const int *pr = frames[k].preview, *mr = frames[k].mark;
+
+                        if ((pr[2] > 0 && pr[3] > 0 && pr[0] + pr[2] > g->damage[0] && pr[1] + pr[3] > g->damage[1] && pr[0] < g->damage[2] && pr[1] < g->damage[3]) ||
+                            (mr[2] > 0 && mr[3] > 0 && mr[0] + mr[2] > g->damage[0] && mr[1] + mr[3] > g->damage[1] && mr[0] < g->damage[2] && mr[1] < g->damage[3]))
+                        {
+                                has_tint = 1;
+                                break;
+                        }
+                }
+                if (!has_tint)
+                        for (unsigned int k = count; k > 0; k--)
+                                if (compositor_frame_covers_opaque(&frames[k - 1], g->damage))
+                                {
+                                        first = k - 1, skip_ground = 1;
+                                        break;
+                                }
+                for (unsigned int k = first; k < count; k++)
+                        if (compositor_frame_meets(&frames[k], g->damage) && (compositor_scaled(&frames[k]) || !compositor_gpu_picture(&frames[k])))
+                                return g->damage[0] = g->damage[1] = g->damage[2] = g->damage[3] = 0, null;
+                if (!skip_ground && compositor_gpu_wall_frame(&wall) && !compositor_gpu_picture(&wall))
+                        return g->damage[0] = g->damage[1] = g->damage[2] = g->damage[3] = 0, null;
+        }
         bytes = 4ull * (positive)fpitch * (positive)compositor.height;
         if (compositor_gpu_frost_buf.bytes < (unsigned long)bytes)
         {
@@ -1209,6 +1294,7 @@ static const unsigned int *compositor_gpu_frost_scene(const struct compositor_fr
                 return null;
         if (!compositor_gpu_frames(frames, count, compositor_ground))
                 return null;
+        g->damage[0] = g->damage[1] = g->damage[2] = g->damage[3] = 0;
         was_hold = gpu_handed_hold;
         gpu_handed_hold = 1;
         ok = gpu_scene(COMPOSITOR_GPU_OPS_AT, g->count, COMPOSITOR_GPU_BINS_AT, dst_va, fpitch,

@@ -229,6 +229,7 @@ static positive compositor_epoll_close(long fd)
 #else
 static unsigned int gpu_epoch;
 static int gpu_ready(void) { return 0; }
+static int gpu_can_import(void) { return 0; }
 static positive gpu_import_fd(int fd, positive bytes) { (void)fd, (void)bytes; return 0; }
 static void gpu_release_import(positive at) { (void)at; }
 static void gpu_forget(const void *addr, positive bytes) { (void)addr, (void)bytes; }

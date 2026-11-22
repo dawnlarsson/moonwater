@@ -1345,6 +1345,7 @@ struct compositor_gscene
         unsigned int *ops;                  // the records, in the GPU's buffer
         unsigned int count, room, width, height; // and the picture they are for
         int clip[4];                        // the rectangle the records are cut to: the picture, or a tint's while its frames are drawn over it (x0 y0 x1 y1)
+        int damage[4];                      // 64x4 patch-aligned damage union for culling off-damage frames and occluded backgrounds (empty => whole picture)
         enum compositor_gpu_why why;        // why the frames were refused, when they were
         unsigned char *tables;              // the cover tables' pool, in the GPU's buffer, its size and its place from the buffer's start
         unsigned int tables_size, tables_at, tables_used, kept;
@@ -1357,6 +1358,29 @@ struct compositor_gscene
         } table[COMPOSITOR_GPU_TABLES];
 };
 static struct compositor_gscene compositor_gscene;
+
+// Whether a frame's outer bounding box intersects a clip/damage box [x0, y0, x1, y1].
+static inline b32 compositor_frame_meets(const struct compositor_frame *f, const int clip[4])
+{
+        int ox, oy, ow, oh;
+
+        compositor_outline(f, &ox, &oy, &ow, &oh);
+        return ow > 0 && oh > 0 && ox + ow > clip[0] && oy + oh > clip[1] && ox < clip[2] && oy < clip[3];
+}
+
+// Whether a frame's opaque interior completely covers [x0, y0, x1, y1] so everything below it (wallpaper + lower windows) can be skipped.
+static inline b32 compositor_frame_covers_opaque(const struct compositor_frame *f, const int clip[4])
+{
+        int r;
+
+        if (f->blend || f->builtin || (!f->pixels && !f->fill && !f->tiled_kind) || compositor_scaled(f) || f->width <= 0 || f->height <= 0)
+                return false;
+        r = compositor_radius(f);
+        if (r <= 0)
+                return f->x <= clip[0] && f->y <= clip[1] && f->x + f->width >= clip[2] && f->y + f->height >= clip[3];
+        return (f->x <= clip[0] && f->y + r <= clip[1] && f->x + f->width >= clip[2] && f->y + f->height - r >= clip[3]) ||
+               (f->x + r <= clip[0] && f->y <= clip[1] && f->x + f->width - r >= clip[2] && f->y + f->height >= clip[3]);
+}
 
 // The pool's table for a key and a tag (a size of bytes): its place from the buffer's start and, when it is new, where to fill it; none when the pool is full.
 static unsigned int compositor_gpu_slot_tag(int r, int b, int corner, int content, unsigned long tag, unsigned int size, unsigned char **fill)
@@ -1445,22 +1469,29 @@ static unsigned int compositor_gpu_desc(const unsigned int desc[8])
         return g->tables_at + off;
 }
 
-// Scratch userptr tile pool for Intel i915: materializes cover-masked ops (5/12/13) and custom RGBA cursors
+// Scratch + static-solid userptr tile pool for Intel i915: materializes cover-masked ops (5/12/13) and custom RGBA cursors
 // as premultiplied op 11 tiles inside GPU_VA_MAPS so every desktop frame stays within i915's 256 MiB surface span.
+// [0, 1 MiB) caches invariant solid cover-masked tiles (borders, rounded corners, close X, cursor); [1 MiB, 2 MiB) is per-frame scratch.
+#define COMPOSITOR_I915_STATIC_BYTES (1ul << 20)
+#define COMPOSITOR_I915_STATIC_SLOTS 256
 static struct
 {
         unsigned int *pixels;
-        unsigned long bytes, used;
+        unsigned long bytes, used, static_used;
         positive va;
+        unsigned int epoch, va_marked, static_count;
+        struct
+        {
+                unsigned int cov_off, colour;
+                unsigned short w, h, r;
+                unsigned int off;
+        } cache[COMPOSITOR_I915_STATIC_SLOTS];
 } compositor_gpu_i915_tiles;
 
-static unsigned int *compositor_gpu_i915_tile_alloc(unsigned long words, positive *va_out)
+static positive compositor_gpu_i915_tiles_va(void)
 {
-        unsigned long bytes = (words * 4ul + 31ul) & ~31ul;
         positive base;
 
-        if (!words || bytes > (2ul << 20))
-                return 0;
         if (!compositor_gpu_i915_tiles.pixels)
         {
                 void *p = 0;
@@ -1469,14 +1500,31 @@ static unsigned int *compositor_gpu_i915_tile_alloc(unsigned long words, positiv
                 if (!gpu_buf_grow(&p, &cap, 2ull << 20, 0))
                         return 0;
                 compositor_gpu_i915_tiles.pixels = (unsigned int *)p, compositor_gpu_i915_tiles.bytes = (unsigned long)cap;
+                compositor_gpu_i915_tiles.va = 0, compositor_gpu_i915_tiles.va_marked = 0;
         }
-        if (bytes > compositor_gpu_i915_tiles.bytes - compositor_gpu_i915_tiles.used)
-                return 0;
+        if (compositor_gpu_i915_tiles.va && compositor_gpu_i915_tiles.va_marked && compositor_gpu_i915_tiles.epoch == gpu_epoch)
+                return compositor_gpu_i915_tiles.va;
         base = gpu_va_bytes(compositor_gpu_i915_tiles.pixels, compositor_gpu_i915_tiles.bytes);
         if (!base && (!gpu_map(compositor_gpu_i915_tiles.pixels, compositor_gpu_i915_tiles.bytes) ||
                       !(base = gpu_va_bytes(compositor_gpu_i915_tiles.pixels, compositor_gpu_i915_tiles.bytes))))
                 return 0;
         compositor_gpu_i915_tiles.va = base;
+        compositor_gpu_i915_tiles.epoch = gpu_epoch;
+        compositor_gpu_i915_tiles.va_marked = 1;
+        return base;
+}
+
+static unsigned int *compositor_gpu_i915_tile_alloc(unsigned long words, positive *va_out)
+{
+        unsigned long bytes = (words * 4ul + 31ul) & ~31ul;
+        positive base = compositor_gpu_i915_tiles_va();
+
+        if (!words || !base || bytes > compositor_gpu_i915_tiles.bytes - COMPOSITOR_I915_STATIC_BYTES)
+                return 0;
+        if (compositor_gpu_i915_tiles.used < COMPOSITOR_I915_STATIC_BYTES)
+                compositor_gpu_i915_tiles.used = COMPOSITOR_I915_STATIC_BYTES;
+        if (bytes > compositor_gpu_i915_tiles.bytes - compositor_gpu_i915_tiles.used)
+                return 0;
         *va_out = base + compositor_gpu_i915_tiles.used;
         {
                 unsigned int *dst = (unsigned int *)((unsigned char *)compositor_gpu_i915_tiles.pixels + compositor_gpu_i915_tiles.used);
@@ -1484,6 +1532,41 @@ static unsigned int *compositor_gpu_i915_tile_alloc(unsigned long words, positiv
                 compositor_gpu_i915_tiles.used += bytes;
                 return dst;
         }
+}
+
+static unsigned int *compositor_gpu_i915_solid_tile(unsigned int cov_off, unsigned int colour, int w, int h, int r, positive *va_out, int *hit)
+{
+        unsigned long bytes = ((unsigned long)w * (unsigned long)h * 4ul + 31ul) & ~31ul;
+        positive base = compositor_gpu_i915_tiles_va();
+
+        *hit = 0;
+        if (!base || w <= 0 || h <= 0)
+                return 0;
+        for (unsigned int k = 0; k < compositor_gpu_i915_tiles.static_count; k++)
+        {
+                if (compositor_gpu_i915_tiles.cache[k].cov_off == cov_off && compositor_gpu_i915_tiles.cache[k].colour == colour &&
+                    compositor_gpu_i915_tiles.cache[k].w == (unsigned short)w && compositor_gpu_i915_tiles.cache[k].h == (unsigned short)h &&
+                    compositor_gpu_i915_tiles.cache[k].r == (unsigned short)r)
+                {
+                        *va_out = base + compositor_gpu_i915_tiles.cache[k].off;
+                        *hit = 1;
+                        return (unsigned int *)((unsigned char *)compositor_gpu_i915_tiles.pixels + compositor_gpu_i915_tiles.cache[k].off);
+                }
+        }
+        if (compositor_gpu_i915_tiles.static_count < COMPOSITOR_I915_STATIC_SLOTS &&
+            bytes <= COMPOSITOR_I915_STATIC_BYTES - compositor_gpu_i915_tiles.static_used)
+        {
+                unsigned int off = (unsigned int)compositor_gpu_i915_tiles.static_used;
+                unsigned int k = compositor_gpu_i915_tiles.static_count++;
+
+                compositor_gpu_i915_tiles.cache[k].cov_off = cov_off, compositor_gpu_i915_tiles.cache[k].colour = colour;
+                compositor_gpu_i915_tiles.cache[k].w = (unsigned short)w, compositor_gpu_i915_tiles.cache[k].h = (unsigned short)h;
+                compositor_gpu_i915_tiles.cache[k].r = (unsigned short)r, compositor_gpu_i915_tiles.cache[k].off = off;
+                compositor_gpu_i915_tiles.static_used += bytes;
+                *va_out = base + off;
+                return (unsigned int *)((unsigned char *)compositor_gpu_i915_tiles.pixels + off);
+        }
+        return compositor_gpu_i915_tile_alloc((unsigned long)w * (unsigned long)h, va_out);
 }
 
 static inline unsigned int compositor_gpu_mul255(unsigned int c, unsigned int a)
@@ -1523,17 +1606,20 @@ static void compositor_gpu_rect(unsigned int kind, int x0, int y0, int x1, int y
                 }
                 if (r > 0 && (!frame || (!frame->tiled_kind && frame->pixels)))
                 {
-                        int w = cx1 - cx0, h = cy1 - cy0;
+                        int w = cx1 - cx0, h = cy1 - cy0, hit = 0;
+                        unsigned int slice_off = cov_off + (unsigned int)((cy0 - y0) * r + (cx0 - x0));
                         positive tile_va = 0;
-                        unsigned int *tile = compositor_gpu_i915_tile_alloc((unsigned long)w * (unsigned long)h, &tile_va);
+                        unsigned int *tile = !frame ? compositor_gpu_i915_solid_tile(slice_off, colour, w, h, r, &tile_va, &hit)
+                                                    : compositor_gpu_i915_tile_alloc((unsigned long)w * (unsigned long)h, &tile_va);
 
                         if (tile)
                         {
-                                const unsigned char *cov = g->tables + cov_off + (cy0 - y0) * r + (cx0 - x0);
+                                const unsigned char *cov = g->tables + slice_off;
 
-                                if (!frame)
+                                if (!frame && !hit)
                                 {
                                         unsigned int cr = (colour >> 16) & 255u, cg = (colour >> 8) & 255u, cb = colour & 255u;
+                                        unsigned int opaque = 0xff000000u | (cr << 16) | (cg << 8) | cb;
 
                                         for (int row = 0; row < h; row++)
                                         {
@@ -1543,12 +1629,14 @@ static void compositor_gpu_rect(unsigned int kind, int x0, int y0, int x1, int y
                                                 for (int col = 0; col < w; col++)
                                                 {
                                                         unsigned int a = crow[col];
-                                                        drow[col] = a ? ((a << 24) | (compositor_gpu_mul255(cr, a) << 16) |
-                                                                         (compositor_gpu_mul255(cg, a) << 8) | compositor_gpu_mul255(cb, a)) : 0u;
+                                                        drow[col] = a == 255u ? opaque
+                                                                              : a ? ((a << 24) | (compositor_gpu_mul255(cr, a) << 16) |
+                                                                                     (compositor_gpu_mul255(cg, a) << 8) | compositor_gpu_mul255(cb, a))
+                                                                                  : 0u;
                                                 }
                                         }
                                 }
-                                else
+                                else if (frame)
                                 {
                                         const unsigned int *src = frame->pixels + (unsigned long)(cy0 - frame->y) * frame->pitch + (unsigned long)(cx0 - frame->x);
                                         unsigned long sp = frame->pitch;
@@ -1566,6 +1654,8 @@ static void compositor_gpu_rect(unsigned int kind, int x0, int y0, int x1, int y
 
                                                         if (!a)
                                                                 drow[col] = 0u;
+                                                        else if (a == 255u && !sw)
+                                                                drow[col] = premul ? srow[col] : (0xff000000u | (srow[col] & 0x00ffffffu));
                                                         else
                                                         {
                                                                 unsigned int px = srow[col];
@@ -1713,6 +1803,9 @@ static b32 compositor_gpu_frame(const struct compositor_frame *f)
         struct compositor_gscene *g = &compositor_gscene;
         int w = f->width, h = f->height, ox, oy, ow, oh, r = compositor_radius(f), b, ri;
 
+        // Off-damage frames contribute zero records to g->clip; skip VA lookup, tiled desc allocation, and emit.
+        if (!compositor_frame_meets(f, g->clip))
+                return true;
         // A frame of no area has no picture to read (a snap preview's lifted frame is one: its tint is in compositor_gpu_frames).
         if (!f->builtin && !f->tiled_kind && f->pixels && w > 0 && h > 0 && !compositor_gpu_va(f))
                 return g->why = COMPOSITOR_GPU_WHY_PICTURE, false;
@@ -1760,14 +1853,41 @@ static b32 compositor_gpu_wall_frame(struct compositor_frame *wall)
 static b32 compositor_gpu_frames(const struct compositor_frame *frames, unsigned int count, unsigned int ground)
 {
         struct compositor_gscene *g = &compositor_gscene;
+        int dmg[4];
+        unsigned int first = 0;
+        int skip_ground = 0, has_tint = 0;
 
         g->count = 0, g->why = COMPOSITOR_GPU_WHY_DRAWN;
-        compositor_gpu_i915_tiles.used = 0;
+        compositor_gpu_i915_tiles.used = COMPOSITOR_I915_STATIC_BYTES;
+        compositor_gpu_i915_tiles.va_marked = 0;
         // The tables of the last scenes let go when the pool is half full, by count or by bytes: a scene is under that, so it never finds the pool shut.
         if (g->kept > COMPOSITOR_GPU_TABLES / 2 || g->tables_used > g->tables_size / 2)
-                g->kept = 0, g->tables_used = 0;
-        g->clip[0] = 0, g->clip[1] = 0, g->clip[2] = (int)g->width, g->clip[3] = (int)g->height;
+                g->kept = 0, g->tables_used = 0, compositor_gpu_i915_tiles.static_used = 0, compositor_gpu_i915_tiles.static_count = 0;
+        if (g->damage[2] > g->damage[0] && g->damage[3] > g->damage[1])
+                dmg[0] = g->damage[0], dmg[1] = g->damage[1], dmg[2] = g->damage[2], dmg[3] = g->damage[3];
+        else
+                dmg[0] = 0, dmg[1] = 0, dmg[2] = (int)g->width, dmg[3] = (int)g->height;
+        g->clip[0] = dmg[0], g->clip[1] = dmg[1], g->clip[2] = dmg[2], g->clip[3] = dmg[3];
+        for (unsigned int k = 0; k < count; k++)
+        {
+                const int *pr = frames[k].preview, *mr = frames[k].mark;
+
+                if ((pr[2] > 0 && pr[3] > 0 && pr[0] + pr[2] > dmg[0] && pr[1] + pr[3] > dmg[1] && pr[0] < dmg[2] && pr[1] < dmg[3]) ||
+                    (mr[2] > 0 && mr[3] > 0 && mr[0] + mr[2] > dmg[0] && mr[1] + mr[3] > dmg[1] && mr[0] < dmg[2] && mr[1] < dmg[3]))
+                {
+                        has_tint = 1;
+                        break;
+                }
+        }
+        if (!has_tint)
+                for (unsigned int k = count; k > 0; k--)
+                        if (compositor_frame_covers_opaque(&frames[k - 1], dmg))
+                        {
+                                first = k - 1, skip_ground = 1;
+                                break;
+                        }
         // The ground: the kept wallpaper copied (a record of its picture, mapped by compositor_gpu_wall), or the colour where there is none.
+        if (!skip_ground)
         {
                 struct compositor_frame wall;
 
@@ -1783,7 +1903,7 @@ static b32 compositor_gpu_frames(const struct compositor_frame *frames, unsigned
                 else
                         compositor_gpu_rect(0, 0, 0, (int)g->width, (int)g->height, ground, 0, 0, 0);
         }
-        for (unsigned int k = 0; k < count; k++)
+        for (unsigned int k = first; k < count; k++)
                 if (!compositor_gpu_frame(&frames[k]))
                         goto refused;
         for (unsigned int pass = 0; pass < 2; pass++)
@@ -1794,6 +1914,8 @@ static b32 compositor_gpu_frames(const struct compositor_frame *frames, unsigned
                         unsigned int from = pass ? k + 1 : f->preview_under > 0 ? (unsigned int)f->preview_under - 1 : k;
 
                         if (rect[2] <= 0 || rect[3] <= 0)
+                                continue;
+                        if (rect[0] + rect[2] <= dmg[0] || rect[1] + rect[3] <= dmg[1] || rect[0] >= dmg[2] || rect[1] >= dmg[3])
                                 continue;
                         // A window carrying its own snap preview is the owner of its ring and hide (compositor_tint), which these records do not make:
                         // a preview lifted to a frame of no area and no line has its window drawn again whole over the tint instead.
@@ -1806,17 +1928,18 @@ static b32 compositor_gpu_frames(const struct compositor_frame *frames, unsigned
                                                  pass ? 0 : f->preview_edge))
                                 goto refused;
                         // the frames it lies over are drawn again inside its rectangle alone (compositor_tint's cell), then the scene is whole again
-                        g->clip[0] = rect[0] > 0 ? rect[0] : 0, g->clip[1] = rect[1] > 0 ? rect[1] : 0;
-                        g->clip[2] = rect[0] + rect[2] < (int)g->width ? rect[0] + rect[2] : (int)g->width;
-                        g->clip[3] = rect[1] + rect[3] < (int)g->height ? rect[1] + rect[3] : (int)g->height;
+                        g->clip[0] = rect[0] > dmg[0] ? rect[0] : dmg[0], g->clip[1] = rect[1] > dmg[1] ? rect[1] : dmg[1];
+                        g->clip[2] = rect[0] + rect[2] < dmg[2] ? rect[0] + rect[2] : dmg[2];
+                        g->clip[3] = rect[1] + rect[3] < dmg[3] ? rect[1] + rect[3] : dmg[3];
                         for (unsigned int j = from; j < count; j++)
                                 if (!compositor_gpu_frame(&frames[j]))
                                         goto refused;
-                        g->clip[0] = 0, g->clip[1] = 0, g->clip[2] = (int)g->width, g->clip[3] = (int)g->height;
+                        g->clip[0] = dmg[0], g->clip[1] = dmg[1], g->clip[2] = dmg[2], g->clip[3] = dmg[3];
                 }
         return true;
 refused:
         g->count = 0, g->clip[0] = 0, g->clip[1] = 0, g->clip[2] = (int)g->width, g->clip[3] = (int)g->height;
+        g->damage[0] = g->damage[1] = g->damage[2] = g->damage[3] = 0;
         return false;
 }
 #endif

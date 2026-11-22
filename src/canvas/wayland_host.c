@@ -91,6 +91,7 @@ static struct
                 struct wayland_picture picture;
                 unsigned long dev, ino;
                 union { struct canvas_scan_fb scan; struct { CANVAS_SCAN_FB_FIELDS; }; };
+                unsigned int desc[8], desc_kind, desc_epoch;
                 unsigned char live, owed;
         } *straight;
         struct canvas_ext_import *source;
@@ -830,7 +831,7 @@ static const unsigned int *wl_ext_lent_info(int row, unsigned long *pitch, posit
         if (va)
         {
 #ifdef MOONWATER_GPU_C
-                if (compositor_wl.lent[row].fd >= 0 && compositor_wl.lent[row].epoch != gpu_epoch && gpu_ready() && !compositor_wl_card_barred(row))
+                if (compositor_wl.lent[row].fd >= 0 && compositor_wl.lent[row].epoch != gpu_epoch && gpu_can_import() && !compositor_wl_card_barred(row))
                 {
                         positive imp = gpu_import_fd((int)compositor_wl.lent[row].fd, (positive)compositor_wl.lent[row].size);
 
@@ -1696,7 +1697,7 @@ static void wl_ext_lent_sync(int start)
                 {
                         struct compositor_wl_layer *l = &compositor_wl_layers.layer[row][k];
 
-                        if (l->fd < 0)
+                        if (l->fd < 0 || l->gather)
                                 continue;
                         if (start && !l->synced && compositor_wl_row_damaged(row))
                         {
@@ -1795,15 +1796,17 @@ static int compositor_wl_lend(int row, const struct wayland_picture *picture, lo
         at = picture->pixels + (unsigned long)y * stride + (unsigned long)x * 4;
         // The pool's file cut under the read: the window's first and last pixel are read here, as a copy would read them, so a pool cut before
         // this commit is found now (the SIGBUS handler maps zeros over it and marks it), and the picture is refused as a copy is refused.
+        // DMA-BUFs (sync_fd >= 0) are kernel GEM objects that cannot be ftruncated to trigger SIGBUS; skip CPU WC/PCIe probe on them.
+        if (picture->sync_fd < 0)
         {
                 volatile unsigned int probe;
 
                 probe = *(const volatile unsigned int *)at;
                 probe = probe + *(const volatile unsigned int *)(at + (unsigned long)(height - 1) * stride + (unsigned long)(width - 1) * 4);
                 (void)probe;
+                if (compositor_wl_cut(picture->pixels))
+                        return compositor_wl_lend_refused(picture, 8);
         }
-        if (compositor_wl_cut(picture->pixels))
-                return compositor_wl_lend_refused(picture, 8);
 #ifdef MOONWATER_GPU_C
         if (picture->sync_fd < 0 && compositor_gpu && compositor_gpu_state.up && !compositor_gpu_state.dead &&
             !gpu_va_bytes(at, (positive)(height - 1) * stride + (positive)width * 4) &&
@@ -1818,7 +1821,7 @@ static int compositor_wl_lend(int row, const struct wayland_picture *picture, lo
                compositor_wl.lent[row].modifier == picture->modifier;
         if (picture->sync_fd >= 0)
         {
-                if (!gpu_ready())
+                if (!gpu_can_import())
                         return compositor_wl_lend_refused(picture, 10);
                 if (compositor_wl_card_barred(row))
                         return compositor_wl_lend_refused(picture, 11);
@@ -2033,9 +2036,27 @@ static unsigned int compositor_wl_tiled_desc(int row, const struct wayland_pictu
 
 static unsigned int wl_ext_straight_desc(int row, unsigned int desc[8])
 {
+        unsigned int kind;
+
         if (!compositor_gpu_tiled_ready() || !compositor_straight(row) || !compositor_wl.straight[row].owed)
                 return 0;
+#ifdef MOONWATER_GPU_C
+        if (compositor_wl.straight[row].desc_kind && compositor_wl.straight[row].desc_epoch == gpu_epoch)
+        {
+                memory_copy(desc, compositor_wl.straight[row].desc, 32);
+                return compositor_wl.straight[row].desc_kind;
+        }
+        kind = compositor_wl_tiled_desc(row, &compositor_wl.straight[row].picture, desc, 0);
+        if (kind)
+        {
+                memory_copy(compositor_wl.straight[row].desc, desc, 32);
+                compositor_wl.straight[row].desc_kind = kind;
+                compositor_wl.straight[row].desc_epoch = gpu_epoch;
+        }
+        return kind;
+#else
         return compositor_wl_tiled_desc(row, &compositor_wl.straight[row].picture, desc, 0);
+#endif
 }
 
 static int compositor_wl_card_image(int row, const struct wayland_picture *picture, unsigned int *to, unsigned long pitch, long dx, long dy, long sx,
@@ -2150,9 +2171,18 @@ static void compositor_wl_straight_pay(int row)
 
 static void wl_ext_straight_pays(int keep)
 {
+        int paid = 0;
+
         for (int row = 0; row < (int)compositor_rows_in_use; row++)
-                if (row != keep && compositor_straight(row) && compositor_wl.straight[row].owed)
-                        compositor_wl_straight_pay(row);
+                if (row != keep && compositor_straight(row) && compositor_wl.straight[row].owed && compositor.table &&
+                    compositor_wl_straight_read(row, 0, compositor_wl.straight[row].picture.height))
+                {
+                        compositor_wl.straight[row].owed = 0;
+                        compositor_wl.laying[row].last = (unsigned char)((compositor.front[row] & 1u) + 1);
+                        paid = 1;
+                }
+        if (paid)
+                wl_ext_tiled_settle();
 }
 
 static void wl_ext_straight_settle(int row, long y0, long y1)
@@ -2207,7 +2237,10 @@ static int compositor_wl_straight_take(int row, const struct wayland_picture *pi
         if (!shown)
                 compositor_wl_straight_pay(row);
         if (!same)
+        {
                 canvas_scan_fb_grave(compositor_wl.straight[row].scan_fb), compositor_wl.straight[row].scan_fb = 0, compositor_wl.straight[row].scan_failed = 0;
+                compositor_wl.straight[row].desc_kind = 0;
+        }
         memory_copy(was, picture, sizeof *was);
         compositor_wl.straight[row].dev = dev, compositor_wl.straight[row].ino = ino;
         compositor_wl.straight[row].live = 1, compositor_wl.straight[row].owed = (unsigned char)(shown != 0);
@@ -2234,7 +2267,7 @@ static int compositor_wl_card_rect(int row, const struct wayland_picture *pictur
                 return compositor_wl_card_image(row, picture, to, pitch, dx, dy, sx, sy, w, h);
         if (!wanted || w <= 0 || h <= 0)
                 return compositor_wl_card_refused(0);
-        if (!gpu_ready())
+        if (picture->sync_fd >= 0 ? !gpu_can_import() : !gpu_ready())
                 return compositor_wl_card_refused(1);
 #ifdef MOONWATER_GPU_C
         if (!compositor_gpu || !compositor_gpu_state.up || compositor_gpu_state.dead || compositor_gpu_held())
@@ -2252,11 +2285,14 @@ static int compositor_wl_card_rect(int row, const struct wayland_picture *pictur
         if (picture->pixels && picture->map)
         {
                 src = picture->pixels + (unsigned long)sy * stride + (unsigned long)sx * 4;
-                probe = *(const volatile unsigned int *)src;
-                probe += *(const volatile unsigned int *)(src + extent - 4);
-                (void)probe;
-                if (compositor_wl_cut(picture->pixels))
-                        return compositor_wl_card_refused(5);
+                if (picture->sync_fd < 0)
+                {
+                        probe = *(const volatile unsigned int *)src;
+                        probe += *(const volatile unsigned int *)(src + extent - 4);
+                        (void)probe;
+                        if (compositor_wl_cut(picture->pixels))
+                                return compositor_wl_card_refused(5);
+                }
         }
         if (picture->sync_fd < 0)
         {
@@ -2353,7 +2389,7 @@ static int compositor_wl_layer_nv12(const struct wayland_picture *picture, long 
         unsigned long dev = 0, ino = 0, plane_dev = 0, plane_ino = 0, luma_end, chroma_end, extent;
         long tw, th, x1, y1, x2, y2, size;
 
-        if (picture->sync_fd < 0 || !compositor_wl_card_composes() || !gpu_ready() ||
+        if (picture->sync_fd < 0 || !compositor_wl_card_composes() || !gpu_can_import() ||
             picture->plane_count != 2 || picture->plane_fd[1] < 0 || (picture->modifier && picture->modifier != WAYLAND_MODIFIER_INVALID) ||
             (picture->transform & 1) || picture->transform < 0 || picture->transform > 7 || picture->width < 2 || picture->height < 2 ||
             picture->width > WAYLAND_DIMENSION || picture->height > WAYLAND_DIMENSION || picture->stride < picture->width ||
@@ -2363,7 +2399,10 @@ static int compositor_wl_layer_nv12(const struct wayland_picture *picture, long 
                                        picture->src_height > WAYLAND_DIMENSION * 256 || picture->src_x > WAYLAND_DIMENSION * 256 || picture->src_y > WAYLAND_DIMENSION * 256))
                 return 0;
         canvas_ext_fd_ident(picture->sync_fd, &dev, &ino);
-        canvas_ext_fd_ident(picture->plane_fd[1], &plane_dev, &plane_ino);
+        if (picture->plane_fd[1] != picture->sync_fd)
+                canvas_ext_fd_ident(picture->plane_fd[1], &plane_dev, &plane_ino);
+        else
+                plane_dev = dev, plane_ino = ino;
         if (!ino || plane_dev != dev || plane_ino != ino)
                 return 0;
         luma_end = picture->plane_offset[0] + (unsigned long)picture->stride * (unsigned long)picture->height;
@@ -2434,11 +2473,14 @@ static int compositor_wl_layer_make(const struct wayland_picture *picture, long 
                        : (unsigned long)(y2 - y1 - 1) * stride + (unsigned long)(x2 - x1) * 4;
         if (at < picture->map || (unsigned long)(at - picture->map) + bytes > (unsigned long)picture->map_bytes)
                 return 0;
-        probe = *(const volatile unsigned int *)at;
-        probe = probe + *(const volatile unsigned int *)(at + bytes - 4);
-        (void)probe;
-        if (compositor_wl_cut(picture->pixels))
-                return 0;
+        if (picture->sync_fd < 0)
+        {
+                probe = *(const volatile unsigned int *)at;
+                probe = probe + *(const volatile unsigned int *)(at + bytes - 4);
+                (void)probe;
+                if (compositor_wl_cut(picture->pixels))
+                        return 0;
+        }
 #ifdef MOONWATER_GPU_C
         if (picture->sync_fd < 0 && compositor_gpu && compositor_gpu_state.up && !compositor_gpu_state.dead && !wl_gpu_va_read(at, (positive)bytes))
                 return 0;
@@ -2446,7 +2488,7 @@ static int compositor_wl_layer_make(const struct wayland_picture *picture, long 
         compositor_wl_pic_ident(picture, &dev, &ino);
         if (picture->sync_fd >= 0)
         {
-                if (!gpu_ready() || !(out->import = compositor_gpu_import_layer(old, olds, picture->map, picture->sync_fd, picture->map_bytes, dev, ino, 0, 0)))
+                if (!gpu_can_import() || !(out->import = compositor_gpu_import_layer(old, olds, picture->map, picture->sync_fd, picture->map_bytes, dev, ino, 0, 0)))
                         return 0;
                 out->va = out->import + (positive)(at - picture->map);
         }
@@ -2657,7 +2699,7 @@ static unsigned int wl_ext_layers_frames(int row, struct compositor_frame *frame
                 memory_zero(f, sizeof *f);
                 f->x = window->x + l->x, f->y = window->y + l->y, f->width = l->width, f->height = l->height, f->scale = window->scale;
 #ifdef MOONWATER_GPU_C
-                if (!l->gather && l->fd >= 0 && l->epoch != gpu_epoch && gpu_ready() && !compositor_wl_card_barred(row))
+                if (!l->gather && l->fd >= 0 && l->epoch != gpu_epoch && gpu_can_import() && !compositor_wl_card_barred(row))
                 {
                         positive imp = gpu_import_fd((int)l->fd, (positive)l->size);
 
@@ -2986,15 +3028,21 @@ static int compositor_wl_row_picture(void *context, int row, const struct waylan
                 if (picture->pixels && compositor_wl_needs_xform(picture, width, height))
                 {
                         int xst;
-                        if (!wl_pic_sync_begin(row, picture, &sync_started))
+                        if (compositor_wl_card_gather(row, picture, to, pitch, width, height))
+                                xst = 2;
+                        else
                         {
-                                if (compositor_wl.tiled_lent)
-                                        wl_ext_tiled_settle();
-                                return 1;
+                                if (!wl_pic_sync_begin(row, picture, &sync_started))
+                                {
+                                        if (compositor_wl.tiled_lent)
+                                                wl_ext_tiled_settle();
+                                        return 1;
+                                }
+                                wl_ext_tiled_settle();
+                                xst = compositor_wl_blit_xform(row, picture, to, pitch, width, height);
+                                if (sync_started)
+                                        canvas_dmabuf_sync_read(picture->sync_fd, 1);
                         }
-                        xst = compositor_wl_card_gather(row, picture, to, pitch, width, height) ? 2 : (wl_ext_tiled_settle(), compositor_wl_blit_xform(row, picture, to, pitch, width, height));
-                        if (sync_started)
-                                canvas_dmabuf_sync_read(picture->sync_fd, 1);
                         if (xst < 0)
                         {
                                 if (compositor_wl.tiled_lent)
@@ -3830,7 +3878,8 @@ static int compositor_wl_sync_start(long client, int fd, int ready)
         positive timer[4] = {0, 0, 0, COMPOSITOR_WL_DMABUF_WAIT_NS / 1000}, off[4] = {0, 0, 0, 0}; // struct itimerval, in us
         long got;
 
-        if (client >= 0 && client < compositor_wl.slots && compositor_wl.client[client].slow_until > clock_monotonic_nanoseconds())
+        if (client >= 0 && client < compositor_wl.slots && compositor_wl.client[client].slow_until &&
+            compositor_wl.client[client].slow_until > clock_monotonic_nanoseconds())
                 return 0;
         if (ready)
                 return canvas_dmabuf_sync_fd(fd, 1) != -5;

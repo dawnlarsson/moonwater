@@ -300,10 +300,14 @@ static void compositor_crtc_sync(void)
 static void compositor_present_tell(const unsigned short (*clip)[4], unsigned int clips, int turning, int gpu_composed, int flip_own, int back, int plane_off)
 {
         // No clips at all would tell the card everything changed. A headless compositor has no card to tell (its scan image is a file).
-        if (clips && compositor_output_count() < 2 && !turning)
-                compositor_dirty(compositor.fb, clip, clips);
-        else if (clips && compositor.card >= 0)
-                compositor_dirty_screens(clip, clips);
+        // When flipping to a new framebuffer on hardware that does not copy damage (non-virtual GPUs), the page flip / atomic commit presents the new fb directly.
+        if (clips && !(flip_own && compositor.on_screen != compositor.fb && !compositor_copies_damage()))
+        {
+                if (compositor_output_count() < 2 && !turning)
+                        compositor_dirty(compositor.fb, clip, clips);
+                else if (compositor.card >= 0)
+                        compositor_dirty_screens(clip, clips);
+        }
         // The screens Canvas turns: their part of the scene, turned into their own buffers and told to their cards.
         if (clips && turning)
                 compositor_turn_frame(clip, clips, gpu_composed);
@@ -1329,14 +1333,6 @@ static unsigned int present_bands_pass(struct compositor_frame *frames, unsigned
                                                      (unsigned long)(old[2] - old[0]), (unsigned long)(old[3] - old[1]));
                                 frames[windows - 1].pixels = stage;
                         }
-                }
-                if (!solid)
-                {
-#ifdef CONFIG_MOONWATER_WAYLAND
-                        compositor_wl_tiled_settle();
-                        compositor_wl_lent_sync(1);
-#endif
-                        compositor_wl_straight_pays(-1);
                 }
                 compositor_band_draw_for(band_idx, frames, windows, redo);
         }

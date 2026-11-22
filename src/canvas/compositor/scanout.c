@@ -1074,16 +1074,21 @@ static void compositor_direct_patch(int row, unsigned int which, const struct co
         __atomic_store_n(&table->spoiled_height[row][which], rect[3] - rect[1], __ATOMIC_RELEASE);
 }
 
-static void scanout_direct_finish(int row, unsigned int fb)
+static int compositor_copies_damage(void);
+
+static void scanout_direct_finish(int row, unsigned int fb, int flipped)
 {
         unsigned short clip[COMPOSITOR_DAMAGE][4];
 
         compositor.direct_row = row;
         compositor.table->scanned++;
-        for (unsigned int at = 0; at < compositor.damages; at++)
-                for (unsigned int side = 0; side < 4; side++)
-                        clip[at][side] = (unsigned short)compositor.damage[at][side];
-        compositor_dirty(fb, (const unsigned short (*)[4])clip, compositor.damages);
+        if (!flipped || compositor_copies_damage())
+        {
+                for (unsigned int at = 0; at < compositor.damages; at++)
+                        for (unsigned int side = 0; side < 4; side++)
+                                clip[at][side] = (unsigned short)compositor.damage[at][side];
+                compositor_dirty(fb, (const unsigned short (*)[4])clip, compositor.damages);
+        }
         compositor.damages = 0;
         compositor.screen_stale = 1;
 }
@@ -1169,7 +1174,9 @@ static b32 compositor_present_direct(int row, const struct compositor_frame *tab
                 return 1;
         if (!lent)
                 compositor_direct_patch(row, which, tabs, count);
-        if (compositor.on_screen != fb)
+        int flipped = compositor.on_screen != fb;
+
+        if (flipped)
         {
                 int dx, dy, dw, dh;
 
@@ -1187,7 +1194,7 @@ static b32 compositor_present_direct(int row, const struct compositor_frame *tab
                         return 0;
                 }
         }
-        scanout_direct_finish(row, fb);
+        scanout_direct_finish(row, fb, flipped);
         return 1;
 }
 
@@ -2038,14 +2045,16 @@ static b32 compositor_present_overlaid(int row, const struct compositor_frame *f
                         compositor_scene_banded(&target, frames, count, 0, rows);
                 }
         }
-        if (fb != compositor.on_screen || drawn || (!shown && compositor.overlay_on))
+        int flipped = fb != compositor.on_screen || drawn || (!shown && compositor.overlay_on);
+
+        if (flipped)
         {
                 if (!compositor_atomic(fb, row, which, drawn || (!shown && compositor.overlay_on), shown ? rect : 0, buffer))
                         return compositor.overlay_state = -1, compositor_overlay_off(), 0;
                 if (drawn)
                         compositor.overlay_back ^= 1;
         }
-        scanout_direct_finish(row, fb);
+        scanout_direct_finish(row, fb, flipped);
         return 1;
 }
 

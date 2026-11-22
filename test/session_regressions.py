@@ -1348,7 +1348,7 @@ def test_hardening_66_bug_families():
     check("Family 8: AMD classify EINTR/EIO, 64K tile VA alignment, 64-bit bins_starts, full-buffer bin fence & gpu_wake hold/lost guard",
           "error == 11 || error == 4 ? GPU_ERR_AGAIN : error == 125 || error == 19 || error == 5 ? GPU_ERR_LOST" in gpu_c and
           "(tile != 9 && tile != 10 && tile != 25 && tile != 27) || (va & 65535)" in gpu_c and
-          "at = bins_starts(tab, (positive)cw * ch);" in gpu_c and
+          "at = bins_starts(tab + 2 * row_off, row_cells);" in gpu_c and
           "if (gpu_bins.full)\n                gpu_bins.job[0] = gpu_bins.job[1] = sequence;" in gpu_c and
           "if (gpu_lost || !gpu.at || !gpu_last_job || now - gpu_last_job < GPU_WAKE_IDLE || !gpu_idle())" in gpu_c and
           "kept_hold = gpu_handed_hold, gpu_handed_hold = 1;" in gpu_c)
@@ -1374,7 +1374,7 @@ def test_hardening_66_bug_families():
     check("Family 8: Intel i915 full desktop compositing (ops 5/12/13 lowered to op 1/11 in GPU_VA_MAPS tile pool, EOPNOTSUPP not logged as fault)",
           "compositor_gpu_i915_tile_alloc(" in read_text("src/canvas/compositor/compose.c") and
           "if (gpu_backend == &gpu_i915_row && (kind == 5 || kind == 12 || kind == 13) && cover >= g->tables_at)" in read_text("src/canvas/compositor/compose.c") and
-          "compositor_gpu_i915_tiles.used = 0;" in read_text("src/canvas/compositor/compose.c") and
+          "compositor_gpu_i915_tiles.used = COMPOSITOR_I915_STATIC_BYTES;" in read_text("src/canvas/compositor/compose.c") and
           "compositor_gpu_i915_tile_alloc((unsigned long)pw * (unsigned long)ph, &tile_va)" in read_text("src/canvas/compositor/pointer.c") and
           "if (gpu_last_error != 95)\n                                gpu_fault_note(false);" in gpu_c)
 
@@ -1389,8 +1389,8 @@ def test_hardening_66_bug_families():
           "int band_y = gpu_backend == &gpu_i915_row && compositor.height > 256 ? ((compositor.height - 96) & ~3) : compositor.height;" in gpu_host_c)
 
     check("Family 9: Post-recover DMA-BUF re-import, scaled_direct fenced-flip guard, card_tick done<0, BO-list own/scale hold, gpu_lost re-check & fence close",
-          "compositor_wl.lent[row].fd >= 0 && compositor_wl.lent[row].epoch != gpu_epoch && gpu_ready()" in wl_host_c and
-          "if (!l->gather && l->fd >= 0 && l->epoch != gpu_epoch && gpu_ready() && !compositor_wl_card_barred(row))" in wl_host_c and
+          "compositor_wl.lent[row].fd >= 0 && compositor_wl.lent[row].epoch != gpu_epoch && gpu_can_import()" in wl_host_c and
+          "if (!l->gather && l->fd >= 0 && l->epoch != gpu_epoch && gpu_can_import() && !compositor_wl_card_barred(row))" in wl_host_c and
           "compositor.flip_pending || compositor.scaled_direct || !compositor_in_fence()" in present_c and
           "int done = gpu_done(compositor_card.last);" in present_c and
           "int strip_damage = 0;" in present_c and
@@ -1418,6 +1418,33 @@ def test_hardening_66_bug_families():
           "flags = modifiers | (value ? WINDOW_KEY_DOWN : 0) | (value == 2 ? WINDOW_KEY_REPEAT : 0);" in inp_c and
           "WINDOW_KEY_REPEAT" not in term_c[term_c.find("static void terminal_key("):term_c.find("static void terminal_pointer_key(")] and
           "WINDOW_KEY_REPEAT" not in ui_c[ui_c.find("static p32 ui_text_key("):ui_c.find("static p32 ui_text_key(") + 2500])
+
+    # --- Family 11: Cross-Vendor GPU Hardware-Floor Optimizations (AMD, Intel i915/Xe, Compositor, Wayland) ---
+    compose_c = read_text("src/canvas/compositor/compose.c")
+    pointer_c = read_text("src/canvas/compositor/pointer.c")
+    check("Family 11: gpu.c O(popcount) handed bitmask, cached RAM GPU_ARGS mirror, single-pass i915 scene pack, damaged-row tile binning & gpu_nv12_go",
+          "static p64 gpu_maps_handed[4];" in gpu_c and
+          "static struct gpu_args gpu_slot_args[GPU_SLOTS];" in gpu_c and
+          "static b32 gpu_can_import(void)" in gpu_c and
+          "if (n > 1 && !(aligned && gpu_backend == &gpu_i915_row))" in gpu_c and
+          "static positive gpu_nv12_go(" in gpu_c)
+
+    check("Family 11: Compositor damage-bbox & opaque-cover culling, i915 static solid-tile cache, pipelined shadow submit + AVX2 NT copy & zero redundant DIRTYFB",
+          "compositor_frame_meets(" in compose_c and
+          "compositor_frame_covers_opaque(" in compose_c and
+          "compositor_gpu_i915_solid_tile(" in compose_c and
+          "px + pw <= compositor_gscene.clip[0]" in pointer_c and
+          "memory_copy_rect_out_u32(compositor.scanout + y0 * pitch + x0" in gpu_host_c and
+          "!(flip_own && compositor.on_screen != compositor.fb && !compositor_copies_damage())" in present_c and
+          "if (!flipped || compositor_copies_damage())" in scan_c)
+
+    check("Family 11: Wayland zero-copy floor (no CPU SIGBUS probe on DMA-BUF, cached straight desc, GPU-first xform gather, batched straight_pays & slow_until guard)",
+          "if (picture->sync_fd < 0)\n        {\n                volatile unsigned int probe;" in wl_host_c and
+          "compositor_wl.straight[row].desc_kind && compositor_wl.straight[row].desc_epoch == gpu_epoch" in wl_host_c and
+          "if (compositor_wl_card_gather(row, picture, to, pitch, width, height))\n                                xst = 2;" in wl_host_c and
+          "if (l->fd < 0 || l->gather)" in wl_host_c and
+          "if (client >= 0 && client < compositor_wl.slots && compositor_wl.client[client].slow_until &&" in wl_host_c and
+          "if (paid)\n                wl_ext_tiled_settle();" in wl_host_c)
 
 
 def test_build_and_audit_gates():

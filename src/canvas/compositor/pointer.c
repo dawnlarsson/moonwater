@@ -1028,6 +1028,9 @@ static b32 compositor_gpu_cursor(int x, int y, const struct compositor_pointer *
 
                 if (p->picture != compositor_picture.made || pw <= 0 || ph <= 0)
                         return true;
+                if (px + pw <= compositor_gscene.clip[0] || py + ph <= compositor_gscene.clip[1] ||
+                    px >= compositor_gscene.clip[2] || py >= compositor_gscene.clip[3])
+                        return true;
                 memory_zero(&cur, sizeof(cur));
                 cur.x = px, cur.y = py, cur.width = pw, cur.height = ph, cur.pitch = (unsigned long)pw;
                 if (gpu_backend == &gpu_i915_row)
@@ -1055,6 +1058,9 @@ static b32 compositor_gpu_cursor(int x, int y, const struct compositor_pointer *
                 compositor_gpu_rect(11, px, py, px + pw, py + ph, 0, &cur, 0, 0);
                 return true;
         }
+        if (left + span <= compositor_gscene.clip[0] || top + span <= compositor_gscene.clip[1] ||
+            left >= compositor_gscene.clip[2] || top >= compositor_gscene.clip[3])
+                return true;
         made = compositor_pointer_cover(p);
         if (memory_compare(&last, p, sizeof(last)))
                 last = *p, count++;
