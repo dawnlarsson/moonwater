@@ -3,6 +3,7 @@
 # machine-made 2026-11-19 (the apps pass), not yet read by a person: launcher_recent
 # machine-made 2026-11-22 (the files top bar), not yet read by a person: files_refresh files_view
 @direction rtl
+# machine-made 2026-11-22 (the devices pass), not yet read by a person: files_device_eject files_device_live files_device_write
 @language he
 @name עברית
 @translated machine
@@ -69,6 +70,10 @@ files_delete_for_good	ec0e	למחוק לצמיתות %1$d: %2$s? Shift+Delete ש
 files_delete_stopped	ef42	נעצר ב-%2$s: נמחקו %1$d לפניו
 files_deleted	8591	נמחקו %d
 files_deleting	a297	מוחק: %d עד כה, Escape עוצר
+files_device_eject	ea96	הוצא
+files_device_live	b607	הפעלה חיה אינה פותחת כוננים
+files_device_write	7442	אפשר כתיבה
+files_devices	f320	התקנים
 files_drive_root	84bc	מערכת
 files_empty	751c	התיקייה הזו ריקה
 files_failed	c564	לא ניתן היה לקרוא את התיקייה

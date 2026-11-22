@@ -2,6 +2,7 @@
 # machine-made 2026-11-19 (the displays pass), not yet read by a person: settings_no_sizes settings_primary_no settings_primary_other settings_primary_yes settings_refused_size settings_size_ask settings_size_back settings_size_best settings_size_keep settings_size_kept settings_size_own settings_size_plain settings_size_refused =Resolution =Primary display =Graphics
 # machine-made 2026-11-19 (the apps pass), not yet read by a person: launcher_recent
 # machine-made 2026-11-22 (the files top bar), not yet read by a person: files_refresh files_view
+# machine-made 2026-11-22 (the devices pass), not yet read by a person: files_device_eject files_device_live files_device_write
 @language nl
 @name Nederlands
 @translated machine
@@ -68,6 +69,10 @@ files_delete_for_good	ec0e	%1$d voorgoed verwijderen: %2$s? Nogmaals Shift+Delet
 files_delete_stopped	ef42	Gestopt bij %2$s: %1$d ervoor verwijderd
 files_deleted	8591	%d verwijderd
 files_deleting	a297	Verwijderen: %d tot nu toe, Escape stopt
+files_device_eject	ea96	Uitwerpen
+files_device_live	b607	Een livesessie opent geen schijven
+files_device_write	7442	Schrijven toestaan
+files_devices	f320	Apparaten
 files_drive_root	84bc	Systeem
 files_empty	751c	Deze map is leeg
 files_failed	c564	Deze map kon niet worden gelezen

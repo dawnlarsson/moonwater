@@ -3,6 +3,7 @@
 # machine-made 2026-11-19 (the apps pass), not yet read by a person: launcher_recent
 # machine-made 2026-11-22 (the files top bar), not yet read by a person: files_refresh files_view
 @direction rtl
+# machine-made 2026-11-22 (the devices pass), not yet read by a person: files_device_eject files_device_live files_device_write
 @language fa
 @name فارسی
 @translated machine
@@ -69,6 +70,10 @@ files_delete_for_good	ec0e	%1$d برای همیشه پاک شود: %2$s؟ دوب
 files_delete_stopped	ef42	در %2$s ایستاد: پیش از آن %1$d حذف شد
 files_deleted	8591	%d حذف شد
 files_deleting	a297	در حال حذف: تاکنون %d، Escape می‌ایستاند
+files_device_eject	ea96	بیرون دادن
+files_device_live	b607	جلسهٔ زنده هیچ درایوی را باز نمی‌کند
+files_device_write	7442	اجازهٔ نوشتن
+files_devices	f320	دستگاه‌ها
 files_drive_root	84bc	سامانه
 files_empty	751c	این پوشه خالی است
 files_failed	c564	خواندن این پوشه ممکن نشد

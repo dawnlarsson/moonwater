@@ -3,6 +3,7 @@
 # machine-made 2026-11-19 (the apps pass), not yet read by a person: launcher_recent
 # machine-made 2026-11-22 (the files top bar), not yet read by a person: files_refresh files_view
 @direction rtl
+# machine-made 2026-11-22 (the devices pass), not yet read by a person: files_device_eject files_device_live files_device_write
 @language ur
 @name اردو
 @translated machine
@@ -69,6 +70,10 @@ files_delete_for_good	ec0e	%1$d ہمیشہ کے لیے حذف کریں: %2$s؟ �
 files_delete_stopped	ef42	%2$s پر رک گیا: اس سے پہلے %1$d حذف ہوئے
 files_deleted	8591	%d حذف ہوئے
 files_deleting	a297	حذف ہو رہا ہے: اب تک %d، Escape روکتا ہے
+files_device_eject	ea96	نکالیں
+files_device_live	b607	لائیو سیشن کوئی ڈرائیو نہیں کھولتا
+files_device_write	7442	لکھنے کی اجازت دیں
+files_devices	f320	ڈیوائسز
 files_drive_root	84bc	سسٹم
 files_empty	751c	یہ فولڈر خالی ہے
 files_failed	c564	یہ فولڈر پڑھا نہیں جا سکا

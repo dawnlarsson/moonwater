@@ -2,6 +2,7 @@
 # machine-made 2026-11-19 (the displays pass), not yet read by a person: settings_no_sizes settings_primary_no settings_primary_other settings_primary_yes settings_refused_size settings_size_ask settings_size_back settings_size_best settings_size_keep settings_size_kept settings_size_own settings_size_plain settings_size_refused =Resolution =Primary display =Graphics
 # machine-made 2026-11-19 (the apps pass), not yet read by a person: launcher_recent
 # machine-made 2026-11-22 (the files top bar), not yet read by a person: files_refresh files_view
+# machine-made 2026-11-22 (the devices pass), not yet read by a person: files_device_eject files_device_live files_device_write
 @language ru
 @name Русский
 @translated machine
@@ -68,6 +69,10 @@ files_delete_for_good	ec0e	Удалить навсегда %1$d: %2$s? Ещё р
 files_delete_stopped	ef42	Остановлено на %2$s: до этого удалено %1$d
 files_deleted	8591	Удалено: %d
 files_deleting	a297	Удаление: пока %d, Escape останавливает
+files_device_eject	ea96	Извлечь
+files_device_live	b607	Live-сеанс не открывает диски
+files_device_write	7442	Разрешить запись
+files_devices	f320	Устройства
 files_drive_root	84bc	Система
 files_empty	751c	Эта папка пуста
 files_failed	c564	Не удалось прочитать эту папку

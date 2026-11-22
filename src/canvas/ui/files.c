@@ -35,6 +35,8 @@
 #define FILES_CENSUS_NS 30000000000ll     // the devices are read again this often when nothing said they changed
 #define FILES_CENSUS_WAIT_NS 10000000000ll // and a reading that takes longer than this is given up
 #define FILES_CENSUS_ROOM 32768
+#define FILES_DEVICE_WAIT_NS 60000000000ll // a partition opened, made writable or ejected, given up after this
+enum { FILES_DEVICE_OPEN = 1, FILES_DEVICE_WRITE, FILES_DEVICE_EJECT, FILES_DEVICE_TIDY };
 
 enum { FILES_KEY_1 = 2, FILES_KEY_R = 19, FILES_KEY_Y = 21, FILES_KEY_A = 30, FILES_KEY_F = 33, FILES_KEY_H = 35,
        FILES_KEY_L = 38, FILES_KEY_Z = 44, FILES_KEY_X = 45, FILES_KEY_C = 46, FILES_KEY_V = 47, FILES_KEY_N = 49,
@@ -91,7 +93,7 @@ struct files_big
         struct ui_tokens path;     // the path band: the kit's token field, a chip a folder of the trail
         char note[256], status[192], sheet[FILES_SHEET_LINES][FILES_NAME * 3 + 64];
         p8 band_base[FILES_MOST / 8], git_state[FILES_MOST];
-        char census[FILES_CENSUS_ROOM];
+        char census[FILES_CENSUS_ROOM], device_said[2048];
 };
 
 struct files_deed { int kind; p32 count; p8 address_to pairs; positive room, used; b32 binned, restored; };
@@ -111,6 +113,10 @@ static struct
         b32 census_again;
         int uevents; // the kernel's uevents: a block device that comes or goes wakes the window
         struct ui_job runner;
+        struct ui_job device;  // moonwater device open, writable, eject or tidy, one at a time
+        int device_kind;
+        p32 device_at;         // the partition the device menu is of
+        p8 device_node[FILES_DEVICE_NODE], open_after[FILES_DEVICE_NODE]; // what the job is of; a partition opened and not yet gone to
         string_address start;
         struct ui_rect path_box, head_box, side_box, nav_box[4];
         struct ui_iconbutton nav[4];
@@ -139,6 +145,9 @@ static char files_wall_names[FILES_WALL_SCREENS][WINDOWS_OUTPUT_NAME], files_wal
 static b32 files_transfer(const p8 address_to paths, p32 count, int row, int how);
 static b32 files_act(int which);
 static fn files_moved(void);
+static fn files_device_enter(p32 p);
+static fn files_device_menu(p32 p, int x, int y);
+static b32 files_device_run(int kind, p32 p);
 static fn files_open_with(b32 editor);
 static fn files_remote_nav(void);
 static struct files_peer address_to files_peer_by_machine(p8 machine);
@@ -279,7 +288,7 @@ static fn files_device_describe(const struct files_tree address_to t, const stru
         row->file = 1 + UI_FILE_DRIVE, row->indent = n->depth;
         if (n->kind == FILES_NODE_DEVICES)
         {
-                row->label = language_of("Devices"), row->gap = FILES_GROUP_GAP;
+                row->label = WORDS(files_devices), row->gap = FILES_GROUP_GAP;
                 row->expander = n->open ? UI_ROW_EXPANDER_OPEN : UI_ROW_EXPANDER_SHUT;
                 return;
         }
@@ -1775,6 +1784,14 @@ static fn files_find(b32 on)
 static fn files_menu_do(int id)
 {
         struct files_model address_to m = &files.big->model;
+        if (id >= FILES_MENU_DEVICE_OPEN && id <= FILES_MENU_DEVICE_LIVE)
+        {
+                if (id == FILES_MENU_DEVICE_OPEN)
+                        files_device_enter(files.device_at);
+                else if (id != FILES_MENU_DEVICE_LIVE)
+                        (void)files_device_run(id == FILES_MENU_DEVICE_WRITE ? FILES_DEVICE_WRITE : FILES_DEVICE_EJECT, files.device_at);
+                return;
+        }
         if (id >= FILES_MENU_WALLPAPER_OF && id < FILES_MENU_WALLPAPER_OF + FILES_WALL_SCREENS)
                 return files_wallpaper(id - FILES_MENU_WALLPAPER_OF);
         if (id >= FILES_MENU_DETAILS && id <= FILES_MENU_LIST)
@@ -2443,7 +2460,10 @@ static b32 files_tree_key(const struct window_event address_to event)
                 break;
         case UI_KEY_ENTER:
         case UI_KEY_ENTER_PAD:
-        case UI_KEY_SPACE: if (!(event->flags & WINDOW_KEY_REPEAT)) files_tree_go(at); break;
+        case UI_KEY_SPACE:
+                if (!(event->flags & WINDOW_KEY_REPEAT) && !files_tree_go(at) && at < t->count && t->node[at].kind == FILES_NODE_PART)
+                        files_device_enter(t->node[at].device);
+                break;
         case UI_KEY_TAB:
         case UI_KEY_ESCAPE: files.focus = FILES_FOCUS_ROWS; break;
         default: return false;
@@ -2641,6 +2661,17 @@ static fn files_button_event(const struct window_event address_to event, b32 dow
         {
                 if (down && event->a == UI_POINTER_LEFT)
                         files.focus = FILES_FOCUS_TREE;
+                if (hit_list->menu_asked)
+                {
+                        // A partition's menu: Open, Allow Writing and Eject, and why nothing opens in a live session.
+                        int mrow = ui_list_hit(ui, hit_list, hit_list->menu_x, hit_list->menu_y);
+                        if (mrow >= 0 && (p32)mrow < files.big->tree.count && files.big->tree.node[mrow].kind == FILES_NODE_PART)
+                        {
+                                ui_view_cancel(ui, &files.big->view);
+                                files.tree_at = (p32)mrow, files_device_menu(files.big->tree.node[mrow].device, hit_list->menu_x, hit_list->menu_y);
+                                return;
+                        }
+                }
                 if (row >= 0 && (p32)row < files.big->tree.count)
                 {
                         files.tree_at = (p32)row;
@@ -2650,7 +2681,9 @@ static fn files_button_event(const struct window_event address_to event, b32 dow
                         {
                                 b32 moved = files_tree_go((p32)row);
                                 files_tree_toggle((p32)row);
-                                if (!moved && files.big->tree.node[row].read && !files.big->tree.node[row].has)
+                                if (!moved && files.big->tree.node[row].kind == FILES_NODE_PART)
+                                        files_device_enter(files.big->tree.node[row].device);
+                                else if (!moved && files.big->tree.node[row].read && !files.big->tree.node[row].has)
                                         files.focus = FILES_FOCUS_ROWS, files_model_reload(m);
                         }
                         else if (files_tree_go((p32)row))
@@ -2870,9 +2903,116 @@ static fn files_census(void)
                 files.census_again = true;
                 return;
         }
+        {
+                // Whether this session is an install's (boot's verdict): a live one lists the devices and opens none.
+                p8 verdict[64];
+                bipolar got = file_slurp_once_at(AT_FDCWD, (string_address) "/run/moonwater/verdict", verdict, sizeof(verdict) - 1);
+                files.big->devices.live = !files_devices_session(verdict, got);
+        }
         files.runner.done = files_census_done, files.runner.data = null;
         files.next_census = (b64)ui_kit.now + FILES_CENSUS_NS;
         (void)ui_job_start(&files.runner, words, 3, null, files.big->census, sizeof(files.big->census), (positive)FILES_CENSUS_WAIT_NS);
+}
+
+/*
+        A partition opened (read-only), made writable or ejected, and what a drive taken out left let go of: moonwater device in a
+        job of its own, one at a time. What the verb says when it refuses is the note; a partition opened is gone to as soon as
+        the mount table has it.
+*/
+static fn files_device_go(const p8 address_to mount)
+{
+        static p8 path[FILES_PATH];
+        if (string_copy_bounded((string_address)path, (string_address)mount, sizeof(path)) < sizeof(path) && files_try_go(path))
+                files_moved();
+}
+
+static fn files_device_arrive(void)
+{
+        const struct files_devices address_to d = &files.big->devices;
+        for (p32 p = 0; files.open_after[0] && p < d->parts; p++)
+                if (string_equals((string_address)d->part_node[p], (string_address)files.open_after) && files_part_mount(d, p))
+                        files.open_after[0] = 0, files_device_go(files_part_mount(d, p));
+}
+
+static fn files_device_done(struct ui_job address_to j, b32 killed, positive status)
+{
+        b32 ok = !killed && (status & 0x7f) == 0 && ((status >> 8) & 0xff) == 0;
+        int kind = files.device_kind;
+        files.device_kind = 0;
+        if (!ok && kind != FILES_DEVICE_TIDY)
+        {
+                // Its last line, the refusal: what the person reads in the foot.
+                const char address_to said = files.big->device_said, address_to line;
+                positive stop = j->length < sizeof(files.big->device_said) ? j->length : 0, start, length;
+                while (stop && (said[stop - 1] == '\n' || said[stop - 1] == ' '))
+                        stop--;
+                for (start = stop; start && said[start - 1] != '\n';)
+                        start--;
+                length = stop - start, line = ui_strip_verb_prefix(said + start, &length);
+                length = length < sizeof(files.big->note) - 1 ? length : sizeof(files.big->note) - 1;
+                for (positive k = 0; k < length; k++)
+                        files.big->note[k] = (p8)line[k] < ' ' ? ' ' : line[k];
+                files.big->note[length] = 0, files.said = 0;
+        }
+        else if (ok && kind == FILES_DEVICE_OPEN)
+                string_copy_bounded((string_address)files.open_after, (string_address)files.device_node, sizeof(files.open_after));
+        if (files_tree_sync_drives(&files.big->tree, (const p8 address_to)getenv((string_address) "HOME"), false))
+                files_tree_follow();
+        files_device_arrive(), files.dirty = true;
+}
+
+static b32 files_device_run(int kind, p32 p)
+{
+        static const char address_to const verbs[] = {[FILES_DEVICE_OPEN] = "open", [FILES_DEVICE_WRITE] = "writable", [FILES_DEVICE_EJECT] = "eject", [FILES_DEVICE_TIDY] = "tidy"};
+        const struct files_devices address_to d = &files.big->devices;
+        static p8 bytes[24];
+        string_address words[7] = {(string_address) "/moonwater", (string_address) "device", (string_address)verbs[kind], null, null, null, null};
+        positive count = 3;
+        if (files.device.child > 0 || (kind != FILES_DEVICE_TIDY && p >= d->parts))
+                return false;
+        files.device_node[0] = 0;
+        if (kind != FILES_DEVICE_TIDY)
+        {
+                string_copy_bounded((string_address)files.device_node, (string_address)d->part_node[p], sizeof(files.device_node));
+                words[count++] = (string_address)files.device_node;
+        }
+        if (kind == FILES_DEVICE_OPEN)
+                bytes[positive_into_string(bytes, d->part_bytes[p])] = 0, words[count++] = (string_address)bytes, words[count++] = (string_address)d->part_type[p];
+        files.device.done = files_device_done, files.device.data = null;
+        if (!ui_job_start(&files.device, words, count, null, files.big->device_said, sizeof(files.big->device_said), (positive)FILES_DEVICE_WAIT_NS))
+                return false;
+        files.device_kind = kind, files_clear_msg();
+        return true;
+}
+
+// Enter on a partition, or a double click: one that is mounted is gone to, one that may be opened is opened (read-only), and a
+// live session says why it opens nothing.
+static fn files_device_enter(p32 p)
+{
+        const struct files_devices address_to d = &files.big->devices;
+        if (files_part_mount(d, p))
+                files_device_go(files_part_mount(d, p));
+        else if (files_device_offers(d, p) & FILES_OFFER_OPEN)
+                (void)files_device_run(FILES_DEVICE_OPEN, p);
+        else if (d->live)
+                files.big->note[0] = 0, files.said = LANGUAGE_files_device_live;
+        files.dirty = true;
+}
+
+static fn files_device_menu(p32 p, int x, int y)
+{
+        const struct files_devices address_to d = &files.big->devices;
+        p32 offers = files_device_offers(d, p);
+        b32 mounted = files_part_mount(d, p) != null, ours = (offers & FILES_OFFER_EJECT) != 0;
+        const struct ui_menu_spec items[] = {
+            {WORDS(menu_open), "Enter", mounted || (offers & FILES_OFFER_OPEN) ? 0 : UI_MENU_DISABLED, FILES_MENU_DEVICE_OPEN, false},
+            {WORDS(files_device_write), null, offers & FILES_OFFER_WRITE ? 0 : UI_MENU_DISABLED, FILES_MENU_DEVICE_WRITE, !ours || p >= d->parts || !d->part_ro[p]},
+            {WORDS(files_device_eject), null, 0, FILES_MENU_DEVICE_EJECT, !ours},
+            {WORDS(files_device_live), null, UI_MENU_DISABLED, FILES_MENU_DEVICE_LIVE, !d->live || mounted},
+        };
+        files.menu.menu.count = 0, files.sheet = false, files.device_at = p;
+        ui_popmenu_build(&files.menu.menu, items, FILES_COUNT(items));
+        files_popup_open(x, y), files.dirty = true;
 }
 
 static long files_tick(long timeout, long address_to other)
@@ -2881,10 +3021,12 @@ static long files_tick(long timeout, long address_to other)
         struct ui_text address_to active = files.editing == FILES_EDIT_PATH ? &files.big->path.text : files.editing ? files_field() : files.finding && files.focus == FILES_FOCUS_FIND ? &files.finder : null;
         b64 now = (b64)ui_kit.now;
         files_remote_tick(&timeout, other);
+        timeout = ui_job_tick(&files.device, timeout, other);
         if (files.uevents >= 0)
         {
+                // A drive taken out leaves no mount behind: what was opened from it is let go of, then the list is read.
                 if (files_census_due(files_devices_heard(files.uevents), false, false, now, files.next_census))
-                        files_census();
+                        (void)files_device_run(FILES_DEVICE_TIDY, 0), files_census();
                 if (other && *other < 0)
                         *other = files.uevents;
         }
@@ -3037,6 +3179,8 @@ static int files_open_window(void)
         if (!files_tree_begin(&files.big->tree))
                 return 1;
         files.big->tree.devices = &files.big->devices, files.uevents = compositor_uevents_open();
+        files_devices_media(&files.big->devices, (positive)compositor_call(syscall(getuid), 0, 0, 0, 0, 0, 0));
+        (void)files_device_run(FILES_DEVICE_TIDY, 0);
         files_tree_populate_live(&files.big->tree, (const p8 address_to)getenv((string_address) "HOME"));
         files_census();
         files_peers_sync();
@@ -3076,7 +3220,7 @@ static struct ui_app files_app = {
 static b32 files_main()
 {
         memory_zero(&files, sizeof(files));
-        files.runner.output = files.uevents = -1;
+        files.runner.output = files.device.output = files.uevents = -1;
         files.start = getenv((string_address) "HOME");
         for (positive at = 1, took; at < (positive)program_argument_count(); at += took ? took : 1)
                 if (!(took = ui_app_option(&files_app, at)) && program_argument(at)[0] == '/')

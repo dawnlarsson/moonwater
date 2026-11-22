@@ -6510,6 +6510,10 @@ LANGUAGE_ID(files_delete_for_good, "Delete %1$d for good: %2$s? Shift+Delete aga
 LANGUAGE_ID(files_delete_stopped, "Stopped at %2$s: %1$d deleted before it") \
 LANGUAGE_ID(files_deleted, "%d deleted") \
 LANGUAGE_ID(files_deleting, "Deleting: %d so far, Escape stops") \
+LANGUAGE_ID(files_device_eject, "Eject") \
+LANGUAGE_ID(files_device_live, "A live session opens no drives") \
+LANGUAGE_ID(files_device_write, "Allow Writing") \
+LANGUAGE_ID(files_devices, "Devices") \
 LANGUAGE_ID(files_drive_root, "System") \
 LANGUAGE_ID(files_empty, "This folder is empty") \
 LANGUAGE_ID(files_failed, "This folder could not be read") \

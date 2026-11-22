@@ -1017,6 +1017,7 @@ enum { FILES_MENU_OPEN = 16, FILES_MENU_EDITOR, FILES_MENU_TERMINAL, FILES_MENU_
        FILES_MENU_SHEET, FILES_MENU_DETAILS, FILES_MENU_ICONS, FILES_MENU_LIST, FILES_MENU_SORT = 32,
        FILES_MENU_UNDO = 40, FILES_MENU_REDO, FILES_MENU_BIN, FILES_MENU_BIN_EMPTY, FILES_MENU_RESTORE,
        FILES_MENU_WALLPAPER, FILES_MENU_WALLPAPER_OF,
+       FILES_MENU_DEVICE_OPEN = 56, FILES_MENU_DEVICE_WRITE, FILES_MENU_DEVICE_EJECT, FILES_MENU_DEVICE_LIVE,
        FILES_ACT_BACK = 64, FILES_ACT_FWD, FILES_ACT_UP, FILES_ACT_RELOAD, FILES_ACT_FIND, FILES_ACT_CTX, FILES_ACT_SHEET };
 
 // The folder's own acts, in their order, 0 a line between two groups: the menu of the folder's empty space and the View menu are both this
@@ -1204,6 +1205,8 @@ struct files_devices
 {
         p32 disks, parts, mounts_used;
         b32 shut, stale;                  // the group is shut (its disks are no rows); the table changed and the rows are not made from it yet
+        b32 live;                         // this session is no install's (boot's verdict is not "disk DISK"): nothing is opened
+        p8 media[64];                     // where moonwater device open opens a partition for this user: /run/media/USER/
         p64 census, mounted;              // hashes: the list last read, the mounts its partitions have
         p64 disk_bytes[FILES_DISKS_MOST];
         p16 disk_first[FILES_DISKS_MOST], disk_count[FILES_DISKS_MOST];
@@ -1211,7 +1214,7 @@ struct files_devices
         p8 disk_name[FILES_DISKS_MOST][FILES_DEVICE_NODE], disk_label[FILES_DISKS_MOST][FILES_DEVICE_WORD];
         p64 part_bytes[FILES_PARTS_MOST];
         p16 part_mount[FILES_PARTS_MOST]; // where it is mounted: an offset into mounts, plus one; 0 where it is not
-        p8 part_disk[FILES_PARTS_MOST], part_role[FILES_PARTS_MOST];
+        p8 part_disk[FILES_PARTS_MOST], part_role[FILES_PARTS_MOST], part_ro[FILES_PARTS_MOST]; // its mount is read-only
         p8 part_node[FILES_PARTS_MOST][FILES_DEVICE_NODE], part_type[FILES_PARTS_MOST][16];
         p8 part_label[FILES_PARTS_MOST][FILES_DEVICE_WORD], part_name[FILES_PARTS_MOST][FILES_DEVICE_WORD];
         p8 mounts[FILES_MOUNTS_ROOM];
@@ -1558,18 +1561,21 @@ static b32 files_devices_mounted(struct files_devices address_to d, const p8 add
         p64 hash = 14695981039346656037ull;
         d->mounts_used = 0;
         for (p32 p = 0; p < d->parts; p++)
-                d->part_mount[p] = 0;
+                d->part_mount[p] = 0, d->part_ro[p] = 0;
         for (positive at = 0; text && at < length;)
         {
                 const p8 address_to nl = (const p8 address_to)memory_first_of(text + at, '\n', length - at);
                 const p8 address_to stop = nl ? nl : text + length, address_to cursor = text + at, address_to target = null, address_to source = null, address_to w;
                 positive n, target_length = 0, source_length = 0;
+                b32 ro = false;
                 p8 node[FILES_DEVICE_NODE + 8];
                 at = nl ? (positive)(nl - text) + 1 : length;
                 for (int k = 0, sep = -1; (w = files_word(&cursor, stop, &n)); k++)
                 {
                         if (k == 4)
                                 target = w, target_length = n;
+                        if (k == 5)
+                                ro = n >= 2 && w[0] == 'r' && w[1] == 'o' && (n == 2 || w[2] == ',');
                         if (sep < 0 && k >= 6 && n == 1 && w[0] == '-')
                                 sep = k;
                         if (sep >= 0 && k == sep + 2)
@@ -1588,8 +1594,8 @@ static b32 files_devices_mounted(struct files_devices address_to d, const p8 add
                                                                      FILES_MOUNTS_ROOM - d->mounts_used > FILES_PATH ? FILES_PATH : FILES_MOUNTS_ROOM - d->mounts_used);
                                 if (!used || d->mounts_used + used + 1 >= FILES_MOUNTS_ROOM)
                                         break;
-                                d->part_mount[p] = (p16)(d->mounts_used + 1), d->mounts_used += (p32)used + 1;
-                                hash = ((hash ^ p) * 1099511628211ull ^ used) * 1099511628211ull;
+                                d->part_mount[p] = (p16)(d->mounts_used + 1), d->mounts_used += (p32)used + 1, d->part_ro[p] = (p8)ro;
+                                hash = (((hash ^ p) * 1099511628211ull ^ used) * 1099511628211ull ^ (p64)ro) * 1099511628211ull;
                                 for (positive i = 0; i < used; i++)
                                         hash = (hash ^ target[i]) * 1099511628211ull;
                         }
@@ -1600,6 +1606,43 @@ static b32 files_devices_mounted(struct files_devices address_to d, const p8 add
 }
 
 static inline const p8 address_to files_part_mount(const struct files_devices address_to d, p32 p) { return p < d->parts && d->part_mount[p] ? d->mounts + d->part_mount[p] - 1 : null; }
+
+// Whether a session is an install's, from boot's verdict: "disk DISK". Any other (live, ask, none) opens no drive.
+static inline b32 files_devices_session(const p8 address_to verdict, bipolar length) { return length >= 5 && !memory_compare(verdict, "disk ", 5); }
+
+// Where the device verb opens a partition for the user uid: /run/media/USER/, root's being root (device.c's usb_media_user).
+static fn files_devices_media(struct files_devices address_to d, positive uid)
+{
+        p8 digits[24];
+        if (uid)
+                digits[positive_into_string(digits, uid)] = end;
+        string_copy_bounded((string_address)d->media, (string_address) "/run/media/", sizeof(d->media));
+        string_append_bounded((string_address)d->media, uid ? (string_address)digits : (string_address) "root", sizeof(d->media));
+        string_append_bounded((string_address)d->media, (string_address) "/", sizeof(d->media));
+}
+
+/*
+        What a partition's row offers: Open where nothing is mounted from it and it holds a file system it knows, Allow Writing
+        where the device verb opened it read-only and its file system is one that is written (device.c's usb_openables), Eject
+        where the device verb opened it. A live session opens nothing and makes nothing writable; what it has open it ejects.
+*/
+enum { FILES_OFFER_OPEN = 1, FILES_OFFER_WRITE = 2, FILES_OFFER_EJECT = 4 };
+static p32 files_device_offers(const struct files_devices address_to d, p32 p)
+{
+        static const char address_to const written[] = {"ext4", "btrfs", "xfs", "f2fs", "vfat", "exfat"};
+        const p8 address_to mount = files_part_mount(d, p);
+        b32 ours = mount && d->media[0] && !string_compare_max((string_address)mount, (string_address)d->media, string_length((string_address)d->media));
+        p32 offers = 0;
+        if (p >= d->parts)
+                return 0;
+        if (!mount && d->part_type[p][0] && !d->live)
+                offers |= FILES_OFFER_OPEN;
+        if (ours)
+                offers |= FILES_OFFER_EJECT;
+        if (ours && d->part_ro[p] && !d->live && files_in_strtab(d->part_type[p], written, sizeof(written) / sizeof(written[0]), 0))
+                offers |= FILES_OFFER_WRITE;
+        return offers;
+}
 
 // Whether a kernel uevent (its fields NUL apart: ACTION@DEVPATH, ACTION=, SUBSYSTEM=, ...) is a block device's: a disk or a
 // partition that came, went or changed (a card put in a reader), which the list is read again for.

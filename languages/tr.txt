@@ -2,6 +2,7 @@
 # machine-made 2026-11-19 (the displays pass), not yet read by a person: settings_no_sizes settings_primary_no settings_primary_other settings_primary_yes settings_refused_size settings_size_ask settings_size_back settings_size_best settings_size_keep settings_size_kept settings_size_own settings_size_plain settings_size_refused =Resolution =Primary display =Graphics
 # machine-made 2026-11-19 (the apps pass), not yet read by a person: launcher_recent
 # machine-made 2026-11-22 (the files top bar), not yet read by a person: files_refresh files_view
+# machine-made 2026-11-22 (the devices pass), not yet read by a person: files_device_eject files_device_live files_device_write
 @language tr
 @name Türkçe
 @translated machine
@@ -68,6 +69,10 @@ files_delete_for_good	ec0e	%1$d kalıcı olarak silinsin mi: %2$s? Yeniden Shift
 files_delete_stopped	ef42	%2$s üzerinde durdu: öncesinde %1$d silindi
 files_deleted	8591	%d silindi
 files_deleting	a297	Siliniyor: şimdiye dek %d, Escape durdurur
+files_device_eject	ea96	Çıkar
+files_device_live	b607	Canlı oturum hiçbir sürücüyü açmaz
+files_device_write	7442	Yazmaya izin ver
+files_devices	f320	Aygıtlar
 files_drive_root	84bc	Sistem
 files_empty	751c	Bu klasör boş
 files_failed	c564	Bu klasör okunamadı

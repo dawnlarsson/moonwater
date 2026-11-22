@@ -2,6 +2,7 @@
 # machine-made 2026-11-19 (the displays pass), not yet read by a person: settings_no_sizes settings_primary_no settings_primary_other settings_primary_yes settings_refused_size settings_size_ask settings_size_back settings_size_best settings_size_keep settings_size_kept settings_size_own settings_size_plain settings_size_refused =Resolution =Primary display =Graphics
 # machine-made 2026-11-19 (the apps pass), not yet read by a person: launcher_recent
 # machine-made 2026-11-22 (the files top bar), not yet read by a person: files_refresh files_view
+# machine-made 2026-11-22 (the devices pass), not yet read by a person: files_device_eject files_device_live files_device_write
 @language fr
 @name Français
 @translated machine
@@ -68,6 +69,10 @@ files_delete_for_good	ec0e	Supprimer définitivement %1$d : %2$s ? Maj+Suppr enc
 files_delete_stopped	ef42	Arrêté à %2$s : %1$d supprimés avant
 files_deleted	8591	%d supprimés
 files_deleting	a297	Suppression : %d pour l'instant, Escape arrête
+files_device_eject	ea96	Éjecter
+files_device_live	b607	Une session live n'ouvre aucun lecteur
+files_device_write	7442	Autoriser l'écriture
+files_devices	f320	Périphériques
 files_drive_root	84bc	Système
 files_empty	751c	Ce dossier est vide
 files_failed	c564	Ce dossier n'a pas pu être lu

@@ -64,6 +64,10 @@ files_delete_for_good	ec0e	Delete %1$d for good: %2$s? Shift+Delete again does i
 files_delete_stopped	ef42	Stopped at %2$s: %1$d deleted before it
 files_deleted	8591	%d deleted
 files_deleting	a297	Deleting: %d so far, Escape stops
+files_device_eject	ea96	Eject
+files_device_live	b607	A live session opens no drives
+files_device_write	7442	Allow Writing
+files_devices	f320	Devices
 files_drive_root	84bc	System
 files_empty	751c	This folder is empty
 files_failed	c564	This folder could not be read

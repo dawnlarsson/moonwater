@@ -4469,8 +4469,35 @@ static fn browser_devices(void)
                   !files_part_mount(&devices, 0) && !files_part_mount(&devices, 3) &&
                   !files_devices_mounted(&devices, (const p8 address_to)mounts, sizeof(mounts) - 1);
         check("browser: a partition is mounted where the mount table's source is its node, and the same table read again changes nothing", mounted);
+        {
+                // What a partition's row offers: the stick mounted read-only by the device verb, an NTFS one likewise, the root, and one
+                // not mounted; then the same in a live session.
+                static struct files_devices offer;
+                static const char list2[] = "  1-2 usb 0781:5581 Stick allowed\n    drive sdb 31000 MB\n"
+                                            "    part 1048576 30000000000 other - fs exfat MY_STICK sdb1\n    part 30001048576 8000000 other - fs ntfs Win sdb2\n"
+                                            "    part 30009048576 8000000 other - fs - - sdb3\n    part 30017048576 8000000 other - fs vfat FREE sdb4\n"
+                                            "  nvme0n1 drive 512110 MB view only\n    part 1048576 511572000000 linux - fs ext4 - nvme0n1p2\n";
+                static const char mounts2[] = "21 1 259:2 / / rw - ext4 /dev/nvme0n1p2 rw\n"
+                                              "40 21 8:17 / /run/media/root/MY\\040STICK ro,nosuid,nodev,noexec - exfat /dev/sdb1 ro\n"
+                                              "41 21 8:18 / /run/media/root/Win ro,nosuid,nodev,noexec - ntfs3 /dev/sdb2 ro\n";
+                b32 offers;
+                memory_zero(&offer, sizeof(offer));
+                files_devices_media(&offer, 0);
+                (void)files_devices_read(&offer, (const p8 address_to)list2, sizeof(list2) - 1);
+                (void)files_devices_mounted(&offer, (const p8 address_to)mounts2, sizeof(mounts2) - 1);
+                offers = string_equals((string_address)offer.media, (string_address) "/run/media/root/") && offer.parts == 5 && offer.part_ro[0] && !offer.part_ro[4] &&
+                         files_device_offers(&offer, 0) == (FILES_OFFER_EJECT | FILES_OFFER_WRITE) && files_device_offers(&offer, 1) == FILES_OFFER_EJECT &&
+                         files_device_offers(&offer, 2) == 0 && files_device_offers(&offer, 3) == FILES_OFFER_OPEN && files_device_offers(&offer, 4) == 0;
+                check("browser: a partition offers Open where it is not mounted and holds a file system, Eject where the device verb opened it, and Allow Writing where that is read-only and written (not NTFS); the root, mounted elsewhere, offers none",
+                      offers);
+                offer.live = !files_devices_session((const p8 address_to) "live\n", 5);
+                offers = offer.live && files_device_offers(&offer, 3) == 0 && files_device_offers(&offer, 0) == FILES_OFFER_EJECT &&
+                         !files_devices_session((const p8 address_to) "ask sda\n", 8) && !files_devices_session((const p8 address_to) "", -2) &&
+                         files_devices_session((const p8 address_to) "disk nvme0n1\n", 13);
+                check("browser: a live session (a verdict that is not disk DISK) offers no Open and no Allow Writing, and still ejects what it has open", offers);
+        }
         devices.disk_shut[1] = 1;
-        again = !files_devices_read(&devices, (const p8 address_to)list, sizeof(list) - 1) && devices.disk_shut[1] &&
+        again =!files_devices_read(&devices, (const p8 address_to)list, sizeof(list) - 1) && devices.disk_shut[1] &&
                 files_devices_read(&devices, (const p8 address_to)list, sizeof(list) - 2) && devices.disks == 3 && devices.disk_shut[1] && !devices.disk_shut[0];
         check("browser: the same list read again changes nothing, and a disk shut stays shut by its name when the list is read anew", again);
         if (files_tree_begin(&tree))

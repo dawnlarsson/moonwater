@@ -2,6 +2,7 @@
 # machine-made 2026-11-19 (the displays pass), not yet read by a person: settings_no_sizes settings_primary_no settings_primary_other settings_primary_yes settings_refused_size settings_size_ask settings_size_back settings_size_best settings_size_keep settings_size_kept settings_size_own settings_size_plain settings_size_refused =Resolution =Primary display =Graphics
 # machine-made 2026-11-19 (the apps pass), not yet read by a person: launcher_recent
 # machine-made 2026-11-22 (the files top bar), not yet read by a person: files_refresh files_view
+# machine-made 2026-11-22 (the devices pass), not yet read by a person: files_device_eject files_device_live files_device_write
 @language el
 @name Ελληνικά
 @translated machine
@@ -68,6 +69,10 @@ files_delete_for_good	ec0e	Οριστική διαγραφή %1$d: %2$s; Ξαν�
 files_delete_stopped	ef42	Σταμάτησε στο %2$s: %1$d διαγράφηκαν πριν
 files_deleted	8591	%d διαγράφηκαν
 files_deleting	a297	Διαγραφή: %d ως τώρα, Escape σταματά
+files_device_eject	ea96	Εξαγωγή
+files_device_live	b607	Μια ζωντανή συνεδρία δεν ανοίγει δίσκους
+files_device_write	7442	Να επιτρέπεται η εγγραφή
+files_devices	f320	Συσκευές
 files_drive_root	84bc	Σύστημα
 files_empty	751c	Αυτός ο φάκελος είναι κενός
 files_failed	c564	Δεν ήταν δυνατή η ανάγνωση του φακέλου
