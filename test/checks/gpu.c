@@ -4999,9 +4999,12 @@ static void view_rows(void)
         compositor_window_point(row, 960, 540, &wx, &wy);
         p.height = 720, compositor.fullscreen[row] = 0;
         windowed = !compositor_wl_view_take(row, &p, &scaled);
+        compositor.fullscreen[row] = 1, p.modifier = 0x0200000000000001ull; // an AMD tiled modifier: the copy keeps its tiling
+        windowed &= compositor_wl_tiled(&p) && !compositor_wl_view_take(row, &p, &scaled);
+        p.modifier = 0;
         check("view: a fullscreen 1280x720 buffer shown at 1920x1080 is taken at its own size, with no transform and its opaque part in its units, and its client is spoken to at 1920x1080",
               taken && spoken && back);
-        check("view: one that changes the shape, or a window not fullscreen, is not, and its client's points are the picture's again",
+        check("view: one that changes the shape, a window not fullscreen, or a tiled buffer, is not, and its client's points are the picture's again",
               shape && windowed && wx == 640 && wy == 360);
         compositor.fullscreen[row] = kept_full, compositor.x[row] = kept_x, compositor.y[row] = kept_y, compositor.w[row] = kept_w, compositor.h[row] = kept_h;
         compositor.picture_w[row] = kept_pw, compositor.picture_h[row] = kept_ph, compositor_wl.view[row].view_w = compositor_wl.view[row].view_h = 0;

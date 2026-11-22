@@ -3016,7 +3016,8 @@ static int wl_pic_commit_lent(struct windows *table, int row, const struct wayla
 /*
         A fullscreen row's picture whose viewport scales the whole buffer up to the surface, keeping its shape to a pixel (compositor_client_size,
         damage.c): taken as a picture of the buffer's own size, whole, into `scaled`, and the row's surface size kept for its client's points.
-        Any other picture of the row ends that. 0 for a picture that is not one.
+        Any other picture of the row ends that. 0 for a picture that is not one. A tiled buffer (or DCC) is not taken: a scaled frame loses its
+        tiling (compositor_frame_of), so the card's scale would read it as linear, and the processor reads no tiled memory; it keeps the copy.
 */
 static int compositor_wl_view_take(int row, const struct wayland_picture *picture, struct wayland_picture *scaled)
 {
@@ -3026,7 +3027,8 @@ static int compositor_wl_view_take(int row, const struct wayland_picture *pictur
                 return 0;
         if (!compositor.fullscreen[row] || vw <= 0 || vh <= 0 || w <= 0 || h <= 0 || (vw == w && vh == h) || w > vw || h > vh ||
             vw > 65535 || vh > 65535 || vw > w * 8 || vh > h * 8 || (cross < 0 ? -cross : cross) > (vw > vh ? vw : vh) ||
-            picture->transform || picture->y_invert || picture->blend || picture->dest_x || picture->dest_y || picture->row_width != vw ||
+            compositor_wl_tiled(picture) || picture->transform || picture->y_invert || picture->blend || picture->dest_x || picture->dest_y ||
+            picture->row_width != vw ||
             picture->row_height != vh || (picture->src_width > 0 && (picture->src_x || picture->src_y || picture->src_width != w * 256 ||
                                                                      picture->src_height != h * 256)))
         {
