@@ -2059,6 +2059,37 @@ static void compositor_damage_clipped(int row, const int r[4], unsigned int widt
                 compositor_damage(compositor.x[row] + (int)x1, compositor.y[row] + (int)y1, (int)(x2 - x1), (int)(y2 - y1));
 }
 
+/*
+        A row asks the compositor to close another row of its program (kit-lists' ui_lift_row): the request is the requester's own row's
+        close_target (a row plus one) and a serial it bumps per request. Both rows must have a claim the compositor took at open and still
+        holds (windows_owner_ok on each), the target must be showing and not the requester, and both must carry the same app_id. The close
+        goes through compositor_close, so the target's NO_CLOSE and its own close rules still apply. A request that fails is dropped.
+*/
+static unsigned int compositor_close_seen[WINDOWS];
+static void compositor_close(int row);
+
+static void compositor_close_request(int row)
+{
+        struct windows *table = compositor.table;
+        unsigned int serial = __atomic_load_n(&table->close_target_serial[row], __ATOMIC_ACQUIRE), target;
+        int want;
+
+        if (serial == compositor_close_seen[row])
+                return;
+        compositor_close_seen[row] = serial;
+        target = table->close_target[row];
+        if (!target || target > COMPOSITOR_ROWS)
+                return;
+        want = (int)target - 1;
+        if (want == row || want >= (int)compositor_rows_in_use || !compositor.showing[want] || !compositor.showing[row] || !compositor.app_id[row][0])
+                return;
+        if (!windows_owner_ok(&windows_owner_held[row], table->pid[row]) || !windows_owner_ok(&windows_owner_held[want], table->pid[want]))
+                return;
+        if (memory_compare(compositor.app_id[row], compositor.app_id[want], WINDOWS_APP_ID))
+                return;
+        compositor_close(want);
+}
+
 static void compositor_take(int row)
 {
         struct windows *table = compositor.table;
@@ -2078,6 +2109,7 @@ static void compositor_take(int row)
                         compositor_tabs_changed();
         }
         compositor_identity_take(row);
+        compositor_close_request(row);
         // The client's lift and move counts are read once each: the compare and the copy are the same value.
         unsigned int lift = table->lift[row], moved = __atomic_load_n(&table->moved[row], __ATOMIC_ACQUIRE);
 
@@ -2262,7 +2294,7 @@ static void compositor_leave(int row)
         if (table)
                 table->layer[row] = WINDOW_LAYER_NORMAL;
         compositor.saved_x[row] = compositor.saved_y[row] = 0, compositor.saved_w[row] = compositor.saved_h[row] = 0;
-        compositor.title[row][0] = compositor.name[row][0] = 0, compositor.icon_seq[row] = 0;
+        compositor.title[row][0] = compositor.name[row][0] = 0, compositor.icon_seq[row] = 0, compositor_close_seen[row] = 0;
         memory_zero(compositor.app_id[row], WINDOWS_APP_ID);
         compositor_glass_drop(row);
         compositor_runs_drop(row);
