@@ -2383,6 +2383,16 @@ static bool tab_words_are(const struct taskbar_pin *pin, int count, const char *
     return same;
 }
 
+/* The pins file as the registry reads it: the line is written there, and the taskbar reads it back. */
+static void check_taskbar_pins_put(const char *line)
+{
+    char path[160];
+
+    ui_apps_pins_path(compositor_settings_root, path, sizeof(path));
+    (void)file_write_atomic_at(AT_FDCWD, (string_address)path, line, string_length((string_address)line), 0644);
+    taskbar_pins_read();
+}
+
 static void check_taskbar_pins(void)
 {
     static unsigned int screen[GLASS_SIDE * GLASS_SIDE];
@@ -2437,10 +2447,6 @@ static void check_taskbar_pins(void)
 
     // A line says the apps of the registry it names: by the id, an older line's app_id taken for the window key it is, an entry of no
     // app not shown; the registry is a fixture's (two bowls under the check's own /bowls, set up below).
-    taskbar_pins_set("a /b /c ; a b");
-    check("taskbar pinned: a line with a fault is none of them, and so is none", !taskbar_pins.count);
-    taskbar_pins_set("none");
-    check("taskbar pinned: none is none", !taskbar_pins.count);
 
     // The fake system: /proc, the settings, /run and the bowls under a directory of the check's own.
     string_copy((string_address)root, (string_address) "/tmp/moonwater-check-pins-");
@@ -2481,6 +2487,10 @@ static void check_taskbar_pins(void)
         string_copy((string_address)local_dir, (string_address)root), string_append_bounded((string_address)local_dir, (string_address) "/root/.local/share", sizeof(local_dir));
         taskbar_proc_root = proc_root, taskbar_run_root = run_root, compositor_settings_root = settings_root;
         ui_apps_bowls = bowls, ui_apps_local = local_dir, ui_apps_owner = (unsigned int)system_call(syscall(getuid)), ui_apps.read = false;
+        check_taskbar_pins_put("a /b /c ; a b");
+        check("taskbar pinned: a line with a fault is none of them, and so is none", !taskbar_pins.count);
+        check_taskbar_pins_put("none");
+        check("taskbar pinned: none is none", !taskbar_pins.count);
         for (unsigned int each = 0; each < sizeof(files) / sizeof(files[0]); each++)
         {
             string_copy((string_address)path, (string_address)root), string_append_bounded((string_address)path, (string_address)files[each].at, sizeof(path));
@@ -2527,13 +2537,13 @@ static void check_taskbar_pins(void)
                   string_equals((string_address)ui_apps.app[game].args[0], (string_address) "steam://rungameid/362890") &&
                   ui_apps_has_picture(game) && ui_apps_pinnable(game));
     }
-    taskbar_pins_set("chromium /x /y ; settings /settings /settings ; nosuch /a /b ; Steam /usr/lib/steam/steam /bowls/bin/steam --x");
+    check_taskbar_pins_put("chromium /x /y ; settings /settings /settings ; nosuch /a /b ; Steam /usr/lib/steam/steam /bowls/bin/steam --x");
     check("taskbar pinned: a line's entries are the registry's apps they name, by id or by an older line's window key, titled by their names; one of no app is not shown",
           taskbar_pins.count == 3 && string_equals((string_address)taskbar_pins.pin[0].app, (string_address) "chromium") &&
               string_equals((string_address)taskbar_pins.pin[0].title, (string_address) "Chromium") && string_equals((string_address)taskbar_pins.pin[1].app, (string_address) "settings") &&
               string_equals((string_address)taskbar_pins.pin[2].app, (string_address) "steam") && taskbar_pins.pin[2].count == 3 &&
               string_equals((string_address)taskbar_pin_word(&taskbar_pins.pin[2], 2), (string_address)ui_apps.app[ui_apps_find("steam")].launch));
-    taskbar_pins_set("none");
+    check_taskbar_pins_put("none");
 
     // The menu on the fixture of the tray's, with one window (61, chromium).
     compositor_zero();
@@ -2589,7 +2599,7 @@ static void check_taskbar_pins(void)
         bipolar got;
         int chromium = ui_apps_find("chromium");
 
-        taskbar_pins_path(path, sizeof(path));
+        ui_apps_pins_path(compositor_settings_root, path, sizeof(path));
         got = file_slurp_regular_at(AT_FDCWD, (string_address)path, (p8 *)kept, sizeof(kept) - 1, 0);
         kept[got > 0 ? got : 0] = 0;
         string_copy((string_address)want, (string_address) "chromium "), string_append_bounded((string_address)want, (string_address)ui_apps.app[chromium].source, sizeof(want));
@@ -2708,7 +2718,7 @@ static void check_taskbar_pins(void)
         char kept[64];
         bipolar got;
 
-        taskbar_pins_path(path, sizeof(path));
+        ui_apps_pins_path(compositor_settings_root, path, sizeof(path));
         got = file_slurp_regular_at(AT_FDCWD, (string_address)path, (p8 *)kept, sizeof(kept) - 1, 0);
         kept[got > 0 ? got : 0] = 0;
         check("taskbar pinned: Unpin from taskbar takes the app from the line, which says none, and the task goes", !taskbar_pins.count &&
@@ -2727,7 +2737,7 @@ static void check_taskbar_pins(void)
     }
     if (taskbar_menu.open && taskbar_menu.menu.count == 4 && taskbar_menu.menu.items[3].id == TASKBAR_MENU_PIN)
         compositor_menu_chose(TASKBAR_MENU_PIN);
-    taskbar_pins_set("none");
+    check_taskbar_pins_put("none");
     taskbar_settings_set("bottom", "primary", "");
     check("taskbar pinned: an X window of Steam's class pins Steam's app, and the pin is read back from the file as the settings are (a restart)",
           taskbar_pins.count == 1 && string_equals((string_address)taskbar_pins.pin[0].app, (string_address) "steam") && compositor_band_view().count == 1);
@@ -2735,7 +2745,7 @@ static void check_taskbar_pins(void)
     taskbar_settings_set("bottom", "primary", "");
     check("taskbar pinned: the settings read the file, so the verb and the menu agree", taskbar_pins.count == 1 && string_equals((string_address)taskbar_pins.pin[0].app, (string_address) "settings"));
     (void)pids, (void)pin, (void)other;
-    taskbar_pins_set("none");
+    check_taskbar_pins_put("none");
 
     tab_remove_tree(root);
     taskbar_proc_root = "/proc", taskbar_run_root = "/run/moonwater", compositor_settings_root = "";

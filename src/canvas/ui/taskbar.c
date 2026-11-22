@@ -2463,7 +2463,6 @@ static const char *taskbar_run_root = "/run/moonwater";
 static const char *taskbar_pin_word(const struct taskbar_pin *pin, int at) { return pin->text + pin->at[at]; }
 static inline const char *taskbar_app_title(const struct ui_app_entry address_to a) { return a->kit ? language_of(ui_kit_programs[a->kit - 1].label) : a->name; }
 static inline bool taskbar_pin_runs(const struct taskbar_pin *p, const char *app) { return app && app[0] && (ui_apps_same(app, p->key) || ui_apps_same(app, p->app)); }
-static void taskbar_pins_path(char *path, positive room) { ui_apps_pins_path(compositor_settings_root, path, room); }
 
 static bool taskbar_pin_put(struct taskbar_pin *pin, positive *used, const char *word)
 {
@@ -2504,42 +2503,17 @@ static int taskbar_pin_find(const char *app)
         return -1;
 }
 
-static void taskbar_pins_set(const char *line)
-{
-        char word[SETTING_PINS_WORD];
-        positive at = 0;
-        int first = 1;
-
-        taskbar_pins.count = 0, taskbar.stale = 1;
-        if (!line || !line[0] || string_equals((string_address)line, (string_address) "none") || !setting_pins_valid(line, null))
-                return;
-        ui_apps_fresh((b64)ui_kit_time());
-        for (;;)
-        {
-                int kind = setting_pins_next(line, &at, word, sizeof(word));
-                if (kind == SETTING_PINS_WORD_NEXT && first)
-                {
-                        int which = ui_apps_find(word);
-                        which = which >= 0 ? which : ui_apps_match(word), first = 0;
-                        if (which >= 0 && taskbar_pins.count < SETTING_PINS_ENTRIES && taskbar_pin_find(ui_apps.app[which].id) < 0 &&
-                            taskbar_pin_of(which, &taskbar_pins.pin[taskbar_pins.count]))
-                                taskbar_pins.count++;
-                }
-                else if (kind != SETTING_PINS_WORD_NEXT)
-                {
-                        first = 1;
-                        if (kind != SETTING_PINS_SEPARATOR)
-                                break;
-                }
-        }
-}
-
+/* The pins file is read by the kit's registry (ui_apps_pinned_list): each pinned entry, in the file's order, once. */
 static void taskbar_pins_read(void)
 {
-        char path[160], text[SETTING_PINS_MOST + 16];
-        taskbar_pins_path(path, sizeof(path));
-        windows_read_line(path, text, sizeof(text), FILE_READ | O_NOFOLLOW | O_CLOEXEC);
-        taskbar_pins_set(text);
+        int which[SETTING_PINS_ENTRIES], listed;
+
+        taskbar_pins.count = 0, taskbar.stale = 1;
+        ui_apps_fresh((b64)ui_kit_time());
+        listed = ui_apps_pinned_list(compositor_settings_root, which, SETTING_PINS_ENTRIES);
+        for (int i = 0; i < listed; i++)
+                if (taskbar_pin_find(ui_apps.app[which[i]].id) < 0 && taskbar_pin_of(which[i], &taskbar_pins.pin[taskbar_pins.count]))
+                        taskbar_pins.count++;
 }
 
 static void taskbar_pin_keep(int which, bool on)
