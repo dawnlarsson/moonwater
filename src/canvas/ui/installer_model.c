@@ -51,6 +51,7 @@ struct installer_drive
 struct installer_choice
 {
         char drive[INSTALLER_NAME];
+        unsigned long long bytes; // the drive's size as listed: sent with the install, and checked by it
         int mode;                 // INSTALLER_OVERWRITE or INSTALLER_UPDATE
         char language[8];         // a code of SETTINGS_LANGUAGE_CODES
         char keyboard[8];         // a layout of the Keyboard row
@@ -62,7 +63,7 @@ struct installer_choice
 // Whether a block device is never one to install on: loop, ram, zram, optical and floppy devices, and an empty name.
 static b32 installer_skipped(const char address_to name)
 {
-        static const char address_to const prefixes[] = {"loop", "ram", "zram", "sr", "fd", "nbd"};
+        static const char address_to const prefixes[] = {"loop", "ram", "zram", "sr", "fd", "nbd", "dm-", "md"};
 
         if (!name || !name[0] || name[0] == '.')
                 return true;
@@ -73,6 +74,11 @@ static b32 installer_skipped(const char address_to name)
                 if (!memory_compare(name, prefixes[at], length))
                         return true;
         }
+        // Device-mapper and RAID volumes are logical disks with other data on them; an eMMC boot area (mmcblk0boot0) is firmware.
+        if (!memory_compare(name, "mmcblk", 6))
+                for (positive at = 6; name[at]; at++)
+                        if (string_length((string_address)(name + at)) >= 4 && !memory_compare(name + at, "boot", 4))
+                                return true;
         return false;
 }
 
@@ -384,11 +390,11 @@ struct installer_network
 
 // A command of the plan, its end a newline.
 static fn installer_plan_line(char address_to into, positive room, const char address_to a, const char address_to b, const char address_to c,
-                              const char address_to d, const char address_to e)
+                              const char address_to d, const char address_to e, const char address_to f)
 {
-        const char address_to words[5] = {a, b, c, d, e};
+        const char address_to words[6] = {a, b, c, d, e, f};
 
-        for (int k = 0; k < 5 && words[k]; k++)
+        for (int k = 0; k < 6 && words[k]; k++)
         {
                 if (k)
                         string_append_bounded((string_address)into, (string_address) " ", room);
@@ -407,23 +413,26 @@ static fn installer_plan_line(char address_to into, positive room, const char ad
 static int installer_plan(const struct installer_choice address_to c, b32 x86, char address_to into, positive room)
 {
         int count = 0;
+        char size[24];
 
         into[0] = 0;
         if (!c->drive[0] || installer_skipped(c->drive))
                 return 0;
-        installer_plan_line(into, room, "/moonwater", "install", c->drive, installer_mode_word(c->mode), "yes"), count++;
+        // The size is the identity the listing showed: the install refuses a drive whose size has since changed.
+        size[positive_into_string((p8 address_to)size, (positive)c->bytes)] = 0;
+        installer_plan_line(into, room, "/moonwater", "install", c->drive, installer_mode_word(c->mode), "yes", size), count++;
         if (c->language_changed && c->language[0])
-                installer_plan_line(into, room, "/moonwater", "language", c->language, null, null), count++;
+                installer_plan_line(into, room, "/moonwater", "language", c->language, null, null, null), count++;
         if (c->keyboard_changed && c->keyboard[0])
-                installer_plan_line(into, room, "/moonwater", "keyboard", c->keyboard, null, null), count++;
+                installer_plan_line(into, room, "/moonwater", "keyboard", c->keyboard, null, null, null), count++;
         if (c->online && (c->profiles & INSTALLER_CHROME))
-                installer_plan_line(into, room, "/bowl", "profile", "chrome", null, null), count++;
+                installer_plan_line(into, room, "/bowl", "profile", "chrome", null, null, null), count++;
         if (c->online && x86 && (c->profiles & INSTALLER_STEAM))
-                installer_plan_line(into, room, "/bowl", "profile", "steam", null, null), count++;
+                installer_plan_line(into, room, "/bowl", "profile", "steam", null, null, null), count++;
         if (c->online && (c->profiles & INSTALLER_SSH))
         {
-                installer_plan_line(into, room, "/bowl", "profile", "ssh", null, null), count++;
-                installer_plan_line(into, room, "/moonwater", "ssh", "on", null, null), count++;
+                installer_plan_line(into, room, "/bowl", "profile", "ssh", null, null, null), count++;
+                installer_plan_line(into, room, "/moonwater", "ssh", "on", null, null, null), count++;
         }
         return count;
 }

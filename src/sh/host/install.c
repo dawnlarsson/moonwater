@@ -197,6 +197,8 @@ static b32 host_install_verb(string_address address_to arguments, positive count
         positive words = 3;
         int mode = -1;
         bool yes = false;
+        bool sized = false;
+        unsigned long long size_want = 0;
         bool interactive;
         bool keeps;
         p8 kept[HOST_NAME_ROOM];
@@ -216,6 +218,9 @@ static b32 host_install_verb(string_address address_to arguments, positive count
                 mode = INSTALLER_USE, words++;
         if (count > words && string_equals(arguments[words], HOST_YES))
                 yes = true, words++;
+        //      The window's plan says the size the listing showed: the install refuses a drive that has changed since.
+        if (count > words && arguments[words][0] >= '0' && arguments[words][0] <= '9')
+                sized = true, size_want = (unsigned long long)string_to_number_unsigned(arguments[words], null, 10), words++;
         return_if(count != words || !host_name_valid(name), host_usage());
         host_need_root();
         interactive = host_asks();
@@ -224,7 +229,9 @@ static b32 host_install_verb(string_address address_to arguments, positive count
                               installer_mode_word(mode < 0 ? INSTALLER_OVERWRITE : mode)));
         host_state_ready();
 
-        host_install_boot_drive(boot, sizeof(boot));
+        //      Fail closed: when the drive this system started from cannot be found, no drive is written but by a use.
+        return_if(!host_install_boot_drive(boot, sizeof(boot)) && mode != INSTALLER_USE,
+                  host_refuse("cannot tell which drive this system started from, so nothing is written\n"));
         return_if(installer_excluded((const char address_to)name, (const char address_to)boot),
                   host_refuse(boot[0] && string_equals(name, boot) ? "%s is the drive this system started from, which an install copies\n"
                                                                  : "%s is not a drive to install on\n",
@@ -234,6 +241,8 @@ static b32 host_install_verb(string_address address_to arguments, positive count
                 if (string_equals((string_address)drives[at].name, name))
                         drive = &drives[at];
         return_if(!drive, host_refuse("there is no drive called %s\n", name));
+        return_if(sized && drive->bytes != size_want,
+                  host_refuse("%s is no longer the drive that was listed (its size changed): nothing is written\n", name));
         if (mode < 0)
                 mode = drive->moonwater ? INSTALLER_UPDATE : INSTALLER_OVERWRITE;
         return_if(mode != INSTALLER_OVERWRITE && !drive->moonwater,

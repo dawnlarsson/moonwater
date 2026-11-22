@@ -189,7 +189,8 @@ static fn installer_listed(void)
         installer.listed = true;
         installer.chosen = big->drive_count == 1 ? 0 : -1;
         if (installer.chosen == 0)
-                string_copy_bounded((string_address)installer.choice.drive, (string_address)big->drives[0].name, sizeof(installer.choice.drive));
+                string_copy_bounded((string_address)installer.choice.drive, (string_address)big->drives[0].name, sizeof(installer.choice.drive)),
+                    installer.choice.bytes = big->drives[0].bytes;
 }
 
 static int installer_wifi_parse(const char address_to text, positive length, struct installer_network address_to nets, int most, b32 address_to on)
@@ -302,6 +303,7 @@ static fn installer_choose_drive(int at)
                 return;
         installer.chosen = at;
         string_copy_bounded((string_address)installer.choice.drive, (string_address)installer.big->drives[at].name, sizeof(installer.choice.drive));
+        installer.choice.bytes = installer.big->drives[at].bytes;
         installer.choice.mode = installer.big->drives[at].moonwater ? INSTALLER_UPDATE : INSTALLER_OVERWRITE;
         installer.dirty = true;
 }
