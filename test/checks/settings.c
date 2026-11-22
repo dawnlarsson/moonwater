@@ -7332,8 +7332,18 @@ static fn check_settings_layout_press(void)
         const int list = 0;
         static struct settings_item kept_items[CHECK_LIST_ROWS];
         int kept_count = settings.item_count[list];
+        positive kept = (positive)(kept_count < CHECK_LIST_ROWS ? kept_count : CHECK_LIST_ROWS);
 
-        memory_copy(kept_items, settings.item[list], sizeof(*kept_items) * (positive)(kept_count < CHECK_LIST_ROWS ? kept_count : CHECK_LIST_ROWS));
+        if (kept)
+                memory_copy(kept_items, settings.item[list], sizeof(*kept_items) * kept);
+        //      The list's rows are the product's to make (settings_item_slot reserves and clears each one): the list can
+        //      have no room yet, and six rows are written below, the press's five and the one that comes in.
+        for (positive at = 0; at < 6; at++)
+                if (!settings_item_slot(list, at))
+                {
+                        check("settings list: the press rows have room", false);
+                        return;
+                }
         settings.item_count[list] = 5;
         for (int at = 0; at < 5; at++)
                 string_copy_bounded((string_address)settings.item[list][at].label, (string_address) "device", sizeof(settings.item[list][at].label));
@@ -7347,7 +7357,8 @@ static fn check_settings_layout_press(void)
         settings_rebuild();
         check("settings list: a row that comes in under a held press lets the press go, so its release clicks nothing (the new row is not clicked)",
               !settings.page.press.down && ui_press_release(&settings.page.press, false, 3) == -1);
-        memory_copy(settings.item[list], kept_items, sizeof(*kept_items) * (positive)(kept_count < CHECK_LIST_ROWS ? kept_count : CHECK_LIST_ROWS));
+        if (kept)
+                memory_copy(settings.item[list], kept_items, sizeof(*kept_items) * kept);
         settings.item_count[list] = kept_count;
         ui_press_end(&settings.page.press, true);
         settings_rebuild();
