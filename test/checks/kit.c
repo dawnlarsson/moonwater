@@ -5660,6 +5660,60 @@ static fn check_kit_text_lines(void)
         ui_text_close(&t);
 }
 
+// A cell's text clipped to the ui: a half-visible cell draws its visible half and nothing outside the ui; a cell outside writes nothing; a ui with no
+// size draws nothing. The buffer is 200 wide with a sentinel past the ui's 100 columns, so a write past the ui shows.
+static fn check_kit_cells(void)
+{
+        static unsigned int buffer[200 * 80], before[200 * 80];
+        static unsigned int scratch[400 * UI_SCRATCH_ROWS];
+        struct ui ui = terminal.ui;
+        long changed = 0, outside = 0, i;
+        unsigned int white = 0xffffffffu, ink = 0xff000000u, sentinel = 0xdeadbeefu;
+
+        ui.pixels = buffer, ui.pitch = 200, ui.width = 100, ui.height = 40, ui.top = 0, ui.bottom = 40, ui.scale = 100, ui.scene = null;
+        ui.scratch = scratch, ui.scratch_width = 400, ui.band_top = ui.band_bottom = 0;
+        for (i = 0; i < 200 * 80; i++)
+                buffer[i] = sentinel;
+        for (int y = 0; y < 40; y++)
+                for (int x = 0; x < 100; x++)
+                        buffer[y * 200 + x] = white;
+        memory_copy(before, buffer, sizeof(buffer));
+        ui_cell_line(&ui, -20, 0, 40, 40, "M", ink, white);
+        for (int y = 0; y < 40; y++)
+                for (int x = 0; x < 20; x++)
+                        changed += buffer[y * 200 + x] != white;
+        for (i = 0; i < 200 * 80; i++)
+                outside += (i % 200 >= 100 || i / 200 >= 40) && buffer[i] != before[i];
+        check("kit cells: a cell half outside the ui draws its visible half, the ink in the columns it has", changed > 0 && outside == 0);
+
+        memory_copy(buffer, before, sizeof(buffer));
+        ui_cell_turned(&ui, -20, 0, 40, 40, "M", 0, ink, white);
+        changed = outside = 0;
+        for (int y = 0; y < 40; y++)
+                for (int x = 0; x < 20; x++)
+                        changed += buffer[y * 200 + x] != white;
+        for (i = 0; i < 200 * 80; i++)
+                outside += (i % 200 >= 100 || i / 200 >= 40) && buffer[i] != before[i];
+        check("kit cells: a turned cell half outside the ui draws its visible half, and writes nothing outside the ui", changed > 0 && outside == 0);
+
+        memory_copy(buffer, before, sizeof(buffer));
+        ui_cell_line(&ui, 80, 0, 40, 40, "M", ink, white);
+        ui_cell_turned(&ui, 80, 0, 40, 40, "M", 0, ink, white);
+        outside = 0;
+        for (i = 0; i < 200 * 80; i++)
+                outside += (i % 200 >= 100 || i / 200 >= 40) && buffer[i] != before[i];
+        check("kit cells: a cell half past the ui's right edge writes nothing past the ui", outside == 0);
+        memory_copy(buffer, before, sizeof(buffer));
+        ui_cell_line(&ui, 150, 0, 40, 40, "M", ink, white);
+        ui_cell_turned(&ui, 150, 0, 40, 40, "M", 0, ink, white);
+        check("kit cells: a cell entirely outside the ui writes nothing", memory_compare(buffer, before, sizeof(buffer)) == 0);
+
+        ui.width = 0;
+        ui_cell_line(&ui, 0, 0, 40, 40, "M", ink, white);
+        ui_cell_turned(&ui, 0, 0, 40, 40, "M", 0, ink, white);
+        check("kit cells: a ui with no width draws nothing", memory_compare(buffer, before, sizeof(buffer)) == 0);
+}
+
 // The token field: '/home/alice/docs' is the root and three names, the last under the caret; a press on a chip gives its prefix; the caret's
 // token is edited in place; an invalid field draws its error outline.
 static fn check_kit_tokens(void)

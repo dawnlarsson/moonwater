@@ -19082,9 +19082,35 @@ static positive ui_cell_fit(struct ui address_to ui, const font_face address_to 
         return ui_cut_write(fitted, (string_address)text, length, cut, kind, capacity, false);
 }
 
+// The part of a cell (x, y, width, height) inside the ui's width and height, as an origin and a size in device pixels: false when none is
+// inside, or the ui or the cell has no size. Arithmetic in 64 bits, so no edge of a cell can overflow the clip.
+static b32 ui_cell_clip(const struct ui address_to ui, int x, int y, int width, int height, int address_to cx, int address_to cy, int address_to cw,
+                        int address_to ch)
+{
+        b64 x0 = x < 0 ? 0 : x, y0 = y < 0 ? 0 : y, x1 = (b64)x + width, y1 = (b64)y + height;
+        b64 uw = ui->width > 0 ? ui->width : 0, uh = ui->height > 0 ? ui->height : 0;
+        if (width <= 0 || height <= 0 || uw <= 0 || uh <= 0)
+                return false;
+        x1 = x1 > uw ? uw : x1, y1 = y1 > uh ? uh : y1;
+        if (x0 >= x1 || y0 >= y1)
+                return false;
+        *cx = (int)x0, *cy = (int)y0, *cw = (int)(x1 - x0), *ch = (int)(y1 - y0);
+        return true;
+}
+
+// A cell's text in its rectangle, clipped to the ui: the text keeps its place in the cell, and the pixels outside the ui are not written.
 static void ui_cell_line(struct ui address_to ui, int x, int y, int width, int height, const char *text, unsigned int ink, unsigned int ground)
 {
-        if (width <= 0 || height <= 0 || x < 0 || y < 0 || (b64)x + (b64)width > ui->width || (b64)y + (b64)height > ui->height)
+        int cx, cy, cw, ch, tx, ty, pad;
+        const font_face address_to faces[1] = {ui->regular};
+        p32 em;
+        font_metrics grid;
+        font_target here;
+        unsigned int scratch[1] = {0};
+        font_target nowhere = {scratch, 1, 1, 1};
+        char fitted[WINDOWS_TITLE + 4];
+        positive length;
+        if (!ui_cell_clip(ui, x, y, width, height, &cx, &cy, &cw, &ch))
                 return;
         // A cell's text is not recorded (the font blend on a ground, R4 in the note): the frame is the picture's, painted here.
         if (ui->scene)
@@ -19092,15 +19118,10 @@ static void ui_cell_line(struct ui address_to ui, int x, int y, int width, int h
                 ui->scene->lost = UI_LOST_CELL_TEXT;
                 return;
         }
-        const font_face address_to faces[1] = {ui->regular};
-        p32 em = (p32)(height * 11 / 20) << 6;
-        font_metrics grid = font_metrics_at(ui->regular, em);
-        font_target here = {ui->pixels + (long)y * (long)ui->pitch + x, (positive)ui->pitch, width, height};
-        unsigned int scratch[1] = {0};
-        font_target nowhere = {scratch, 1, 1, 1};
-        char fitted[WINDOWS_TITLE + 4];
-        positive length = string_length((string_address)text);
-        int pad;
+        em = (p32)(height * 11 / 20) << 6;
+        grid = font_metrics_at(ui->regular, em);
+        here = (font_target){ui->pixels + (long)cy * (long)ui->pitch + cx, (positive)ui->pitch, cw, ch};
+        length = string_length((string_address)text);
         if ((int)(font_extent(ui->engine, faces, 1, (const p8 address_to)text, length, em, 0) >> 16) > width)
         {
                 length = ui_cell_fit(ui, faces, text, em, width, fitted, sizeof(fitted));
@@ -19108,14 +19129,22 @@ static void ui_cell_line(struct ui address_to ui, int x, int y, int width, int h
         }
         // How wide the run is, before it is put anywhere.
         pad = (width - (int)(font_draw(ui->engine, faces, 1, (const p8 address_to)text, length, em, 0, &nowhere, 0, 0, ink, ground) >> 16)) / 2;
-        font_draw(ui->engine, faces, 1, (const p8 address_to)text, length, em, 0, &here, (b32)(pad > 0 ? pad : 0) << 16,
-                  (height - grid.cell_height) / 2 + grid.baseline, ink, ground);
+        // The run's origin in the clipped target: the cell's own origin less the part cut off on the left and the top.
+        tx = (pad > 0 ? pad : 0) + x - cx, ty = (height - grid.cell_height) / 2 + grid.baseline + y - cy;
+        font_draw(ui->engine, faces, 1, (const p8 address_to)text, length, em, 0, &here, (b32)((b64)tx * 65536), (b32)ty, ink, ground);
 }
 
 static void ui_cell_turned(struct ui address_to ui, int x, int y, int width, int height, const char *text, unsigned int turn, unsigned int ink,
                            unsigned int ground)
 {
-        if (width <= 0 || height <= 0 || x < 0 || y < 0 || (b64)x + (b64)width > ui->width || (b64)y + (b64)height > ui->height)
+        int cx, cy, cw, ch, tx, ty, pad, advance;
+        const font_face address_to faces[1] = {ui->regular};
+        p32 em;
+        font_metrics grid;
+        font_target here;
+        char fitted[WINDOWS_TITLE + 4];
+        positive length;
+        if (!ui_cell_clip(ui, x, y, width, height, &cx, &cy, &cw, &ch))
                 return;
         // A turned cell's text is not recorded either (R4): the frame is the picture's.
         if (ui->scene)
@@ -19123,14 +19152,11 @@ static void ui_cell_turned(struct ui address_to ui, int x, int y, int width, int
                 ui->scene->lost = UI_LOST_CELL_TEXT;
                 return;
         }
-        const font_face address_to faces[1] = {ui->regular};
-        p32 em = (p32)(width * 11 / 20) << 6;
-        font_metrics grid = font_metrics_at(ui->regular, em);
-        font_target here = {ui->pixels + (long)y * (long)ui->pitch + x, (positive)ui->pitch, width, height};
-        char fitted[WINDOWS_TITLE + 4];
-        int pad;
-        positive length = string_length((string_address)text);
-        int advance = (int)(font_extent(ui->engine, faces, 1, (const p8 address_to)text, length, em, 0) >> 16);
+        em = (p32)(width * 11 / 20) << 6;
+        grid = font_metrics_at(ui->regular, em);
+        here = (font_target){ui->pixels + (long)cy * (long)ui->pitch + cx, (positive)ui->pitch, cw, ch};
+        length = string_length((string_address)text);
+        advance = (int)(font_extent(ui->engine, faces, 1, (const p8 address_to)text, length, em, 0) >> 16);
         if (advance > height)
         {
                 // Cut to the cell's whole length, as an upright cell's is to its whole width (ui_cell_line):
@@ -19139,8 +19165,8 @@ static void ui_cell_turned(struct ui address_to ui, int x, int y, int width, int
                 advance = (int)(font_extent(ui->engine, faces, 1, (const p8 address_to)text, length, em, 0) >> 16);
         }
         pad = (height - advance) / 2;
-        font_draw_turned(ui->engine, faces, 1, (const p8 address_to)text, length, em, 0, turn, &here, (b32)(pad > 0 ? pad : 0) << 16,
-                         (width - grid.cell_height) / 2 + grid.baseline, ink, ground);
+        tx = (pad > 0 ? pad : 0) + x - cx, ty = (width - grid.cell_height) / 2 + grid.baseline + y - cy;
+        font_draw_turned(ui->engine, faces, 1, (const p8 address_to)text, length, em, 0, turn, &here, (b32)((b64)tx * 65536), (b32)ty, ink, ground);
 }
 
 // A control's items, the words of words a blank apart, kept in its text: as many as fit, UI_ITEMS at most.
