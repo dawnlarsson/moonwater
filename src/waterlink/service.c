@@ -391,10 +391,9 @@ static p8 link_name_good(string_address name)
             !byte_is_alnum((p8)name[0]) ||
             string_span_of_set(name, LINK_NAME_CHARACTERS) != length)
                 return false;
-        for (positive word = 0; word < array_count(link_words); word++)
-                if (string_equals(name, link_words[word]))
-                        return false;
-        return true;
+        return string_table_find(name, link_words, sizeof link_words[0],
+                                 array_count(link_words)) ==
+               array_count(link_words);
 }
 
 /*      Records read from a file keep only the names that could have been
@@ -1043,6 +1042,7 @@ struct link_session {
         p64 tx_bytes;
         p64 rx_bytes;
         p8 hwid_sent;
+        p8 hwid_heard;
         struct waterlink_link address_to link;
 
         //      The streams, and the command behind them at the machine.
@@ -1314,27 +1314,57 @@ static p8 link_path_in_rules(string_address path)
 #endif
 }
 
-static p8 link_path_is_own(string_address path)
+static p8 link_facts_is_own(const file_facts address_to target)
 {
-        //      Not static: on Darwin each path is made at the call (link_state_path),
-        //      so the table cannot be a constant.
         string_address own[] = {
-            LINK_KEY_PATH, LINK_PEERS_PATH, LINK_POLICY_PATH, LINK_GROUPS_PATH, LINK_STAMPS_PATH,
-            LINK_STATE_PATH, LINK_LOCK_PATH, HOST_MACHINE_SCRIPT,
-            LINK_MODEM_PATH, LINK_MODEM_SEQ_PATH, LINK_MODEM_RX_PATH,
-            LINK_PLACES_PATH, LINK_SWITCH_PATH, LINK_PORT_PATH,
-            LINK_TRANSPORT_PATH};
-        file_facts target;
-        p8 exists = file_look_at(path, address_of target);
-        positive leaf_at = memory_after_last(path, '/', string_length(path));
+            LINK_KEY_PATH, LINK_PEERS_PATH, LINK_HWIDS_PATH, LINK_POLICY_PATH,
+            LINK_GROUPS_PATH, LINK_STAMPS_PATH, LINK_STATE_PATH, LINK_LOCK_PATH,
+            HOST_MACHINE_SCRIPT, LINK_MODEM_PATH, LINK_MODEM_SEQ_PATH,
+            LINK_MODEM_RX_PATH, LINK_PLACES_PATH, LINK_SWITCH_PATH,
+            LINK_PORT_PATH, LINK_TRANSPORT_PATH};
 
         for (positive at = 0; at < array_count(own); at++)
         {
                 file_facts named;
 
-                if (exists && file_look_at(own[at], address_of named) &&
-                    file_same_identity(address_of target, address_of named))
+                if (file_look_at(own[at], address_of named) &&
+                    file_same_identity(target, address_of named))
                         return true;
+        }
+        return false;
+}
+
+static p8 link_path_is_own(string_address path)
+{
+        //      Not static: on Darwin each path is made at the call (link_state_path),
+        //      so the table cannot be a constant.
+        string_address own[] = {
+            LINK_KEY_PATH, LINK_PEERS_PATH, LINK_HWIDS_PATH, LINK_POLICY_PATH,
+            LINK_GROUPS_PATH, LINK_STAMPS_PATH, LINK_STATE_PATH, LINK_LOCK_PATH,
+            HOST_MACHINE_SCRIPT, LINK_MODEM_PATH, LINK_MODEM_SEQ_PATH,
+            LINK_MODEM_RX_PATH, LINK_PLACES_PATH, LINK_SWITCH_PATH,
+            LINK_PORT_PATH, LINK_TRANSPORT_PATH};
+        p8 clean[4096];
+        positive len = string_length(path);
+        file_facts target;
+        p8 exists;
+        positive leaf_at;
+
+        if (!len || len >= sizeof clean)
+                return true;
+        while (len > 1 && path[len - 1] == '/')
+                len--;
+        memory_copy(clean, path, len);
+        clean[len] = 0;
+        path = (string_address)clean;
+
+        exists = file_look_at(path, address_of target);
+        if (exists && link_facts_is_own(address_of target))
+                return true;
+        leaf_at = memory_after_last(path, '/', len);
+
+        for (positive at = 0; at < array_count(own); at++)
+        {
                 positive own_leaf = memory_after_last(own[at], '/',
                                                        string_length(own[at]));
                 if (!string_compare(path + leaf_at, own[at] + own_leaf))
@@ -1994,8 +2024,8 @@ static p8 link_size_pack(p8 address_to packed)
 
 static winsize link_size_unpack(p8 address_to packed)
 {
-        return (winsize){(p16)(packed[0] | packed[1] << 8),
-                         (p16)(packed[2] | packed[3] << 8), 0, 0};
+        return (winsize){memory_load_unaligned(p16, packed),
+                         memory_load_unaligned(p16, packed + 2), 0, 0};
 }
 
 // The streams --------------------------------------------------------------
@@ -2604,38 +2634,32 @@ static p8 link_start_push(struct link_session address_to s, p8 address_to path,
 
 static inline fn link_fs_put16(p8 address_to p, p16 v)
 {
-        p[0] = (p8)(v & 0xffu);
-        p[1] = (p8)((v >> 8) & 0xffu);
+        memory_store_unaligned(p16, p, v);
 }
 
 static inline fn link_fs_put32(p8 address_to p, p32 v)
 {
-        p[0] = (p8)(v & 0xffu);
-        p[1] = (p8)((v >> 8) & 0xffu);
-        p[2] = (p8)((v >> 16) & 0xffu);
-        p[3] = (p8)((v >> 24) & 0xffu);
+        memory_store_unaligned(p32, p, v);
 }
 
 static inline fn link_fs_put64(p8 address_to p, p64 v)
 {
-        link_fs_put32(p, (p32)(v & 0xffffffffu));
-        link_fs_put32(p + 4, (p32)(v >> 32));
+        memory_store_unaligned(p64, p, v);
 }
 
 static inline p16 link_fs_get16(const p8 address_to p)
 {
-        return (p16)((p16)p[0] | ((p16)p[1] << 8));
+        return memory_load_unaligned(p16, p);
 }
 
 static inline p32 link_fs_get32(const p8 address_to p)
 {
-        return (p32)p[0] | ((p32)p[1] << 8) | ((p32)p[2] << 16) |
-               ((p32)p[3] << 24);
+        return memory_load_unaligned(p32, p);
 }
 
 static inline p64 link_fs_get64(const p8 address_to p)
 {
-        return (p64)link_fs_get32(p) | ((p64)link_fs_get32(p + 4) << 32);
+        return memory_load_unaligned(p64, p);
 }
 
 static inline p8 link_fs_kind_of(p32 mode)
@@ -2644,19 +2668,61 @@ static inline p8 link_fs_kind_of(p32 mode)
         return f == MODE_DIRECTORY ? 0 : f == MODE_FILE ? 1 : f == MODE_LINK ? 2 : 3;
 }
 
-static fn link_fs_reply_put(struct link_fs_buf address_to out, p32 req_id,
+static p8 link_fs_put_frame(struct link_fs_buf address_to out, p32 req_id,
                             p8 op, const p8 address_to body, positive body_len)
 {
         p8 head[LINK_FS_HEAD];
 
+        if (body_len > LINK_FS_MSG_MAX)
+                return false;
+        if (out->pos && out->pos == out->len)
+                out->pos = out->len = 0;
+        if (out->len + LINK_FS_HEAD + body_len > out->cap && out->pos)
+        {
+                positive rem = out->len - out->pos;
+                if (rem)
+                        memory_copy(out->data, out->data + out->pos, rem);
+                out->pos = 0;
+                out->len = rem;
+        }
         link_fs_put32(head, req_id);
         head[4] = op;
         link_fs_put32(head + 5, (p32)body_len);
         if (!link_fs_buf_reserve(out, out->len + LINK_FS_HEAD + body_len))
-                return;
-        (void)link_fs_buf_append(out, head, LINK_FS_HEAD);
-        if (body_len)
-                (void)link_fs_buf_append(out, body, body_len);
+                return false;
+        if (!link_fs_buf_append(out, head, LINK_FS_HEAD))
+                return false;
+        if (body_len && !link_fs_buf_append(out, body, body_len))
+                return false;
+        return true;
+}
+
+static fn link_fs_reply_put(struct link_fs_buf address_to out, p32 req_id,
+                            p8 op, const p8 address_to body, positive body_len)
+{
+        (void)link_fs_put_frame(out, req_id, op, body, body_len);
+}
+
+static b32 link_fs_extract_path(const p8 address_to payload, positive plen,
+                                positive len_at, p8 address_to path,
+                                positive room)
+{
+        p16 path_len;
+        positive start = len_at + 2;
+
+        if (plen < start)
+                return -22;
+        path_len = link_fs_get16(payload + len_at);
+        if (!path_len || (positive)path_len > plen - start ||
+            path_len >= room ||
+            memory_first_of((p8 address_to)payload + start, 0, path_len) ||
+            payload[start] != '/')
+                return -22;
+        memory_copy(path, payload + start, path_len);
+        path[path_len] = 0;
+        if (link_path_is_own((string_address)path))
+                return -13;
+        return 0;
 }
 
 static fn link_fs_reply_err(struct link_fs_buf address_to out, p32 req_id,
@@ -2712,14 +2778,13 @@ static fn link_fs_handle_info(struct link_fs_buf address_to out, p32 req_id)
         link_fs_put32(hdr, 0);
         hdr[4] = flags;
         link_fs_put16(hdr + 5, (p16)hlen);
-        (void)link_fs_buf_append(address_of body, hdr, 7);
-        if (hlen)
-                (void)link_fs_buf_append(address_of body, (const p8 address_to)home, hlen);
-        link_fs_put32(hdr, (p32)mi_len);
-        (void)link_fs_buf_append(address_of body, hdr, 4);
-        if (mi_len)
-                (void)link_fs_buf_append(address_of body, mi, mi_len);
-        link_fs_reply_put(out, req_id, FS_OP_INFO, body.data, body.len);
+        if (link_fs_buf_append(address_of body, hdr, 7) &&
+            (!hlen || link_fs_buf_append(address_of body, (const p8 address_to)home, hlen)) &&
+            (link_fs_put32(hdr, (p32)mi_len), link_fs_buf_append(address_of body, hdr, 4)) &&
+            (!mi_len || link_fs_buf_append(address_of body, mi, mi_len)))
+                link_fs_reply_put(out, req_id, FS_OP_INFO, body.data, body.len);
+        else
+                link_fs_reply_err(out, req_id, FS_OP_INFO, -12);
         link_fs_buf_free(address_of body);
         if (mi)
                 system_call_2(syscall(munmap), (positive)mi, 65536);
@@ -2729,33 +2794,19 @@ static fn link_fs_handle_list(struct link_fs_buf address_to out, p32 req_id,
                               const p8 address_to payload, positive plen)
 {
         p8 flags;
-        p16 path_len;
         p8 path[4096];
         struct link_fs_buf body = {0};
         p8 hdr[8];
         p32 count = 0;
+        b32 err;
 
-        if (plen < 3)
+        err = link_fs_extract_path(payload, plen, 1, path, sizeof path);
+        if (err < 0)
         {
-                link_fs_reply_err(out, req_id, FS_OP_LIST, -22);
+                link_fs_reply_err(out, req_id, FS_OP_LIST, err);
                 return;
         }
         flags = payload[0];
-        path_len = link_fs_get16(payload + 1);
-        if (!path_len || (positive)path_len + 3 > plen || path_len >= sizeof path ||
-            memory_first_of((p8 address_to)payload + 3, 0, path_len) ||
-            payload[3] != '/')
-        {
-                link_fs_reply_err(out, req_id, FS_OP_LIST, -22);
-                return;
-        }
-        memory_copy(path, payload + 3, path_len);
-        path[path_len] = 0;
-        if (link_path_is_own((string_address)path))
-        {
-                link_fs_reply_err(out, req_id, FS_OP_LIST, -13);
-                return;
-        }
 #if !defined(MACOS)
         {
                 file_walk walk;
@@ -2769,7 +2820,12 @@ static fn link_fs_handle_list(struct link_fs_buf address_to out, p32 req_id,
                         return;
                 }
                 memory_zero(hdr, sizeof hdr);
-                (void)link_fs_buf_append(address_of body, hdr, 8);
+                if (!link_fs_buf_append(address_of body, hdr, 8))
+                {
+                        file_walk_close(address_of walk);
+                        link_fs_reply_err(out, req_id, FS_OP_LIST, -12);
+                        return;
+                }
                 while (count < LINK_FS_LIST_MAX &&
                        (rec = file_walk_next(address_of walk)))
                 {
@@ -2824,10 +2880,11 @@ static fn link_fs_handle_list(struct link_fs_buf address_to out, p32 req_id,
                         link_fs_put64(ent + 19, (p64)born);
                         link_fs_put64(ent + 27, inode);
                         link_fs_put16(ent + 35, (p16)nlen);
-                        (void)link_fs_buf_append(address_of body, ent, 37);
-                        (void)link_fs_buf_append(
-                            address_of body, (const p8 address_to)rec->d_name,
-                            nlen);
+                        if (!link_fs_buf_append(address_of body, ent, 37) ||
+                            !link_fs_buf_append(
+                                address_of body,
+                                (const p8 address_to)rec->d_name, nlen))
+                                break;
                         count++;
                 }
                 file_walk_close(address_of walk);
@@ -2849,36 +2906,27 @@ static fn link_fs_handle_stat(struct link_fs_buf address_to out, p32 req_id,
                               const p8 address_to payload, positive plen)
 {
         p8 follow;
-        p16 path_len;
         p8 path[4096];
         file_facts facts;
         p8 body[57];
+        b32 err;
 
-        if (plen < 3)
+        err = link_fs_extract_path(payload, plen, 1, path, sizeof path);
+        if (err < 0)
         {
-                link_fs_reply_err(out, req_id, FS_OP_STAT, -22);
+                link_fs_reply_err(out, req_id, FS_OP_STAT, err);
                 return;
         }
         follow = payload[0];
-        path_len = link_fs_get16(payload + 1);
-        if (!path_len || (positive)path_len + 3 > plen || path_len >= sizeof path ||
-            memory_first_of((p8 address_to)payload + 3, 0, path_len) ||
-            payload[3] != '/')
-        {
-                link_fs_reply_err(out, req_id, FS_OP_STAT, -22);
-                return;
-        }
-        memory_copy(path, payload + 3, path_len);
-        path[path_len] = 0;
-        if (link_path_is_own((string_address)path))
-        {
-                link_fs_reply_err(out, req_id, FS_OP_STAT, -13);
-                return;
-        }
         if (!file_look(AT_FDCWD, (string_address)path,
                        follow ? 0 : AT_SYMLINK_NOFOLLOW, address_of facts))
         {
                 link_fs_reply_err(out, req_id, FS_OP_STAT, -2);
+                return;
+        }
+        if (link_facts_is_own(address_of facts))
+        {
+                link_fs_reply_err(out, req_id, FS_OP_STAT, -13);
                 return;
         }
         link_fs_put32(body, 0);
@@ -2907,7 +2955,6 @@ static fn link_fs_handle_read(struct link_fs_buf address_to out, p32 req_id,
 {
         p64 offset;
         p32 max_len;
-        p16 path_len;
         p8 path[4096];
         bipolar fd;
         file_facts facts;
@@ -2915,32 +2962,23 @@ static fn link_fs_handle_read(struct link_fs_buf address_to out, p32 req_id,
         p8 hdr[17];
         positive want, got = 0;
         p8 eof = 0;
+        b32 err;
 
-        if (plen < 14)
+        err = link_fs_extract_path(payload, plen, 12, path, sizeof path);
+        if (err < 0)
         {
-                link_fs_reply_err(out, req_id, FS_OP_READ, -22);
+                link_fs_reply_err(out, req_id, FS_OP_READ, err);
                 return;
         }
         offset = link_fs_get64(payload);
         max_len = link_fs_get32(payload + 8);
-        path_len = link_fs_get16(payload + 12);
-        if (!path_len || (positive)path_len + 14 > plen ||
-            path_len >= sizeof path ||
-            memory_first_of((p8 address_to)payload + 14, 0, path_len) ||
-            payload[14] != '/')
+        if (offset > 0x7fffffffffffffffULL)
         {
                 link_fs_reply_err(out, req_id, FS_OP_READ, -22);
                 return;
         }
-        memory_copy(path, payload + 14, path_len);
-        path[path_len] = 0;
-        if (link_path_is_own((string_address)path))
-        {
-                link_fs_reply_err(out, req_id, FS_OP_READ, -13);
-                return;
-        }
         fd = system_open_at(AT_FDCWD, (string_address)path,
-                            FILE_READ | O_CLOEXEC);
+                            FILE_READ | O_NONBLOCK | O_CLOEXEC);
         if (fd < 0)
         {
                 link_fs_reply_err(out, req_id, FS_OP_READ, (b32)fd);
@@ -2952,6 +2990,12 @@ static fn link_fs_handle_read(struct link_fs_buf address_to out, p32 req_id,
         {
                 system_close(fd);
                 link_fs_reply_err(out, req_id, FS_OP_READ, -21);
+                return;
+        }
+        if (link_facts_is_own(address_of facts))
+        {
+                system_close(fd);
+                link_fs_reply_err(out, req_id, FS_OP_READ, -13);
                 return;
         }
         want = max_len > LINK_FS_READ_MAX ? LINK_FS_READ_MAX : max_len;
@@ -2968,7 +3012,13 @@ static fn link_fs_handle_read(struct link_fs_buf address_to out, p32 req_id,
                 return;
         }
         memory_zero(hdr, sizeof hdr);
-        (void)link_fs_buf_append(address_of body, hdr, 17);
+        if (!link_fs_buf_append(address_of body, hdr, 17))
+        {
+                system_close(fd);
+                link_fs_buf_free(address_of body);
+                link_fs_reply_err(out, req_id, FS_OP_READ, -12);
+                return;
+        }
         while (got < want)
         {
                 bipolar n = system_read_retry((positive)fd,
@@ -2988,7 +3038,7 @@ static fn link_fs_handle_read(struct link_fs_buf address_to out, p32 req_id,
                 got += (positive)n;
         }
         system_close(fd);
-        if (offset + got >= facts.size)
+        if (offset >= facts.size || got >= facts.size - offset)
                 eof = 1;
         body.len = 17 + got;
         link_fs_put32(body.data, 0);
@@ -3623,9 +3673,7 @@ static p8 link_hardware_id(p8 out[LINK_HWID_BYTES])
 
 static fn link_hwid_text(const p8 hwid[LINK_HWID_BYTES], p8 out[33])
 {
-        static const p8 hex[] = "0123456789abcdef";
-        for (positive i = 0; i < LINK_HWID_BYTES; i++)
-                out[2 * i] = hex[hwid[i] >> 4], out[2 * i + 1] = hex[hwid[i] & 15];
+        memory_into_hex(out, (p8 address_to)hwid, LINK_HWID_BYTES);
         out[32] = 0;
 }
 
@@ -3675,12 +3723,14 @@ static fn link_hwid_post(struct link_session address_to s)
 
 static bipolar link_peers_lock(void);
 static fn link_peers_unlock(bipolar handle);
+static p8 link_keep_has(p8 address_to key);
 
 static fn link_hwid_heard(struct link_session address_to s,
                           p8 address_to payload, positive length)
 {
-        if (length != 1 + LINK_HWID_BYTES || payload[0] != 'H')
+        if (s->hwid_heard || length != 1 + LINK_HWID_BYTES || payload[0] != 'H')
                 return;
+        s->hwid_heard = true;
         p8 address_to hwid = payload + 1;
         bipolar lock = link_peers_lock();
         if (lock < 0)
@@ -3708,8 +3758,9 @@ static fn link_hwid_heard(struct link_session address_to s,
                                 if ((old->flags & WATERLINK_PEER_BLOCKED) || !old->may)
                                         blocked = true;
                                 prev_may &= old->may;
-                                // If same group reinstall (and not blocked), deduplicate stale old record.
-                                if (!blocked && cur && cur != old && old->group && old->group == cur->group)
+                                // If same group reinstall (and not blocked or online), deduplicate stale old record.
+                                if (!blocked && cur && cur != old && old->group &&
+                                    old->group == cur->group && !link_keep_has(old->key))
                                 {
                                         *old = peers.peer[--peers.count];
                                         cur = link_peer_keyed(address_of peers, s->peer);
@@ -3818,8 +3869,7 @@ static p8 link_hear(address_any context, struct waterlink_frame address_to head,
 
                         //      Printed to a terminal: printable bytes only.
                         for (positive at = 0; at < keep; at++)
-                                s->refusal[at] = payload[1 + at] >= ' ' &&
-                                                                 payload[1 + at] < 127
+                                s->refusal[at] = byte_is_printable(payload[1 + at])
                                                          ? payload[1 + at]
                                                          : '?';
                         s->refusal[keep] = 0;
@@ -5259,6 +5309,9 @@ static b32 link_serve(string_address ready_text)
                         link_session_close(link_self.session + at);
                 }
         link_tcp_close_all();
+        link_signals_close(signals);
+        socket_close((b32)link_self.socket);
+        link_self.socket = -1;
         system_remove_at(AT_FDCWD, LINK_STATE_PATH, 0);
         system_close(lock);
         return 0;
@@ -5905,7 +5958,16 @@ static b32 link_client_run(string_address name, p8 kind,
                 }
 
         link_self.socket = link_socket_open(0, false);
-        return_if(link_self.socket < 0, host_fail("a socket", link_self.socket));
+        if (link_self.socket < 0)
+        {
+                if (input > 2)
+                        system_close(input);
+                return host_fail("a socket", link_self.socket);
+        }
+        scope_exit({
+                socket_close((b32)link_self.socket);
+                link_self.socket = -1;
+        });
         link_self.gso = LINK_GSO;
         link_tcp_self.client = true;
         //      The client greets nobody. Left at zero, the wait watched
@@ -5913,7 +5975,12 @@ static b32 link_client_run(string_address name, p8 kind,
         //      input at its end or on a file woke it at once, every turn.
         link_nearby.lan.socket = -1;
         link_keepalive = (p64)discovery_keepalive_seconds() * 1000000ull;
-        return_if(!link_session_open(s), host_fail("memory", -ENOMEM));
+        if (!link_session_open(s))
+        {
+                if (input > 2)
+                        system_close(input);
+                return host_fail("memory", -ENOMEM);
+        }
         scope_exit(link_session_close(s));
         memory_copy(s->peer, peer->key, 32);
         memory_copy(s->name, peer->name, WATERLINK_NAME_MAX);
@@ -5922,7 +5989,11 @@ static b32 link_client_run(string_address name, p8 kind,
         s->kind = kind;
         s->mode = 0644;
         if (system_random_fill(address_of s->conversation, 8, 0) < 0)
+        {
+                if (input > 2)
+                        system_close(input);
                 return host_fail("randomness", -EIO);
+        }
 
         //      Input is read once the machine has said yes to the request.
         //      Neither it nor what comes back is ever waited on.
@@ -5938,6 +6009,7 @@ static b32 link_client_run(string_address name, p8 kind,
         scope_exit(link_stdio_restore());
 #endif
         signals = link_signals_open(true);
+        scope_exit(link_signals_close(signals));
 
         for (;;)
         {
@@ -6267,6 +6339,22 @@ static p8 link_fs_ensure_socket(void)
         return true;
 }
 
+static fn link_fs_add_place(struct link_fs_client address_to c,
+                            const p8 address_to key,
+                            const p8 address_to address, p16 port)
+{
+        struct link_place cand;
+
+        if (!port || c->place_count >= LINK_PLACES_PER_PEER)
+                return;
+        memory_zero(address_of cand, sizeof cand);
+        memory_copy(cand.key, key, 32);
+        memory_copy(cand.address, address, 16);
+        cand.port = port;
+        if (!link_place_known(c->places, c->place_count, address_of cand))
+                c->places[c->place_count++] = cand;
+}
+
 static b32 link_fs_open(struct link_fs_client address_to c,
                         string_address peer_name)
 {
@@ -6284,53 +6372,26 @@ static b32 link_fs_open(struct link_fs_client address_to c,
         peer = link_peer_named(address_of peers, peer_name);
         if (!peer || (peer->flags & WATERLINK_PEER_BLOCKED))
                 return false;
-        // Collect candidate endpoints: live IP at peer's listen port first, then peer record, then saved link_places.
+        // Collect candidate endpoints: peer record, live IP at peer's listen port, then saved link_places.
         {
                 p16 listen_port = peer->port ? peer->port : link_port();
 
-                if (peer->port && c->place_count < LINK_PLACES_PER_PEER)
-                {
-                        struct link_place cand;
-                        memory_zero(address_of cand, sizeof cand);
-                        memory_copy(cand.key, peer->key, 32);
-                        memory_copy(cand.address, peer->address, 16);
-                        cand.port = peer->port;
-                        c->places[c->place_count++] = cand;
-                }
+                link_fs_add_place(c, peer->key, peer->address, peer->port);
                 memory_zero(address_of st, sizeof st);
                 if (link_read_private_records(LINK_STATE_PATH, (p8 address_to)address_of st, sizeof st, sizeof st, address_of st_got) == 0 && st_got == sizeof st)
                 {
-                        for (p32 j = 0; j < st.open_count && j < LINK_SESSIONS && c->place_count < LINK_PLACES_PER_PEER; j++)
-                        {
-                                struct link_place cand;
-                                if (memory_compare(st.open[j].key, peer->key, 32) || !st.open[j].port)
-                                        continue;
-                                memory_zero(address_of cand, sizeof cand);
-                                memory_copy(cand.key, peer->key, 32);
-                                memory_copy(cand.address, st.open[j].address, 16);
-                                cand.port = listen_port;
-                                if (!link_place_known(c->places, c->place_count, address_of cand))
-                                        c->places[c->place_count++] = cand;
-                        }
-                        for (p32 j = 0; j < st.seen_count && j < LINK_PEERS_MAX && c->place_count < LINK_PLACES_PER_PEER; j++)
-                        {
-                                struct link_place cand;
-                                if (memory_compare(st.seen[j].key, peer->key, 32) || !st.seen[j].port)
-                                        continue;
-                                memory_zero(address_of cand, sizeof cand);
-                                memory_copy(cand.key, peer->key, 32);
-                                memory_copy(cand.address, st.seen[j].address, 16);
-                                cand.port = listen_port;
-                                if (!link_place_known(c->places, c->place_count, address_of cand))
-                                        c->places[c->place_count++] = cand;
-                        }
+                        for (p32 j = 0; j < st.open_count && j < LINK_SESSIONS; j++)
+                                if (crypto_same(st.open[j].key, peer->key, 32) && st.open[j].port)
+                                        link_fs_add_place(c, peer->key, st.open[j].address, listen_port);
+                        for (p32 j = 0; j < st.seen_count && j < LINK_PEERS_MAX; j++)
+                                if (crypto_same(st.seen[j].key, peer->key, 32) && st.seen[j].port)
+                                        link_fs_add_place(c, peer->key, st.seen[j].address, listen_port);
                 }
         }
         link_places_load(address_of saved);
-        for (positive at = 0; at < saved.count && c->place_count < LINK_PLACES_PER_PEER; at++)
-                if (!memory_compare(saved.place[at].key, peer->key, 32) && saved.place[at].port &&
-                    !link_place_known(c->places, c->place_count, saved.place + at))
-                        c->places[c->place_count++] = saved.place[at];
+        for (positive at = 0; at < saved.count; at++)
+                if (crypto_same(saved.place[at].key, peer->key, 32))
+                        link_fs_add_place(c, peer->key, saved.place[at].address, saved.place[at].port);
         if (!c->place_count)
                 return false;
         for (positive at = 0; at < LINK_SESSIONS; at++)
@@ -6398,22 +6459,14 @@ static p32 link_fs_request(struct link_fs_client address_to c, p8 op,
                            const p8 address_to payload, p32 payload_len)
 {
         p32 id;
-        p8 head[LINK_FS_HEAD];
 
         if (!c->used || c->state == LINK_FS_FAILED || c->state == LINK_FS_IDLE)
                 return 0;
         id = c->next_req_id++;
         if (!c->next_req_id)
                 c->next_req_id = 1;
-        link_fs_put32(head, id);
-        head[4] = op;
-        link_fs_put32(head + 5, payload_len);
-        if (!link_fs_buf_reserve(address_of c->out,
-                                 c->out.len + LINK_FS_HEAD + payload_len))
+        if (!link_fs_put_frame(address_of c->out, id, op, payload, payload_len))
                 return 0;
-        (void)link_fs_buf_append(address_of c->out, head, LINK_FS_HEAD);
-        if (payload_len)
-                (void)link_fs_buf_append(address_of c->out, payload, payload_len);
         if (c->state == LINK_FS_READY && c->session)
         {
                 link_self.now = link_now();
@@ -6506,6 +6559,12 @@ static int link_fs_step(struct link_fs_client address_to c,
         }
         else if (s->answered && c->state == LINK_FS_CONNECTING)
                 c->state = LINK_FS_READY;
+        else if (c->state == LINK_FS_READY &&
+                 link_age(now, s->now.made) >= link_rekey_after() &&
+                 (!link_client.ours ||
+                  (link_client.session == s &&
+                   link_age(now, link_client.initiated) > LINK_ATTEMPT)))
+                (void)link_client_initiate(s, now);
 
         if (s->now.live && (link_age(now, s->heard) > LINK_DEAD || s->finished))
         {
