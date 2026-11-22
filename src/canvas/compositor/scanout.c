@@ -375,6 +375,7 @@ static int compositor_headless_flip(void);
 static positive compositor_present_lead(void); // after the metric rings it reads (compositor_metric_note)
 static void compositor_flip_done(void);
 static void compositor_plate_make(void);
+static void compositor_overlay_reap(void);
 #include "../record.h" // the present record: a ring of the last presents, and moonwater canvas record (its files under /run/moonwater/record)
 
 // Double-buffer plate stale tracking and swap (front = compositor.*, spare = compositor_spare.*).
@@ -633,6 +634,7 @@ static void compositor_flip_done(void)
         compositor.flip_pending = 0;
         compositor.flip_async = 0;
         compositor.leaving_row = -1;
+        compositor_overlay_reap();
         if (rows_any(&compositor.held_rows))
                 for (int row = rows_next(&compositor.held_rows, 0); row >= 0; row = rows_next(&compositor.held_rows, row + 1))
                 {
@@ -1786,15 +1788,61 @@ static int compositor_overlay_ready(void)
 */
 static unsigned int compositor_overlay_width;
 static void compositor_overlay_off(void);
+static struct drm_dumb compositor_overlay_old[2]; // the buffers a remake replaced: scanned until the flip that moved the plane is done (compositor_overlay_reap)
+static unsigned int compositor_overlay_shown;     // the framebuffer the overlay plane shows (0: none)
+
+/*
+        The plane is on: buffers of the band's rows and width are made beside the ones it scans, and the plane moves to them in the commit that paints
+        them (compositor_atomic_to, the overlay's framebuffer the commit names). The old ones are given back once that flip is done. Refused when no
+        buffers can be made, or the last ones are not given back yet: the plane keeps the buffers it has, and the band is composed as it was. Never off
+        and then on: a vblank in between scanned the window with no band over it.
+*/
+static int compositor_overlay_remake(unsigned int rows)
+{
+        struct drm_dumb made[2];
+
+        if (compositor_overlay_old[0].fb || compositor_overlay_old[1].fb || compositor.width <= 0 || !rows || rows > 32768u)
+                return 0;
+        rows = (rows + 63) & ~63u;
+        for (unsigned int which = 0; which < 2; which++)
+                if (drm_dumb_create(&made[which], (unsigned int)compositor.width, rows, DRM_DUMB_FB2 | DRM_DUMB_MAP) != 0)
+                {
+                        for (unsigned int prev = 0; prev < which; prev++)
+                                drm_dumb_destroy(&made[prev]);
+                        return 0;
+                }
+        for (unsigned int which = 0; which < 2; which++)
+        {
+                compositor_overlay_old[which] = (struct drm_dumb){compositor.overlay_fb[which], compositor.overlay_handle[which],
+                                                                  compositor.overlay_pixels[which], compositor.overlay_bytes, 0, 0, 0};
+                compositor.overlay_fb[which] = made[which].fb;
+                compositor.overlay_handle[which] = made[which].handle;
+                compositor.overlay_pixels[which] = made[which].pixels;
+        }
+        compositor.overlay_pitch = made[0].pitch / 4;
+        compositor.overlay_bytes = made[0].bytes;
+        compositor.overlay_rows = rows;
+        compositor_overlay_width = (unsigned int)compositor.width;
+        return 1;
+}
+
+// The buffers a remake replaced, given back once no flip shows them: the plane is on the new ones (compositor_overlay_shown).
+static void compositor_overlay_reap(void)
+{
+        if (compositor.flip_pending)
+                return;
+        for (unsigned int which = 0; which < 2; which++)
+                if (compositor_overlay_old[which].fb && compositor_overlay_old[which].fb != compositor_overlay_shown)
+                        drm_dumb_destroy(&compositor_overlay_old[which]);
+}
 
 static int compositor_overlay_buffers(unsigned int rows)
 {
         if (rows <= compositor.overlay_rows && compositor_overlay_width == (unsigned int)compositor.width)
                 return 1;
-        compositor_overlay_off();
-        // A plane the card refused to take off still scans its buffers: they are kept, and the band is composed again when it is off.
+        compositor_record_remakes++;
         if (compositor.overlay_on)
-                return 0;
+                return compositor_overlay_remake(rows);
         for (unsigned int which = 0; which < 2; which++)
                 if (compositor.overlay_fb[which])
                 {
@@ -2054,6 +2102,7 @@ static int compositor_atomic_to(unsigned int fb, int row, unsigned int which, in
         if (overlay)
         {
                 compositor.overlay_on = rect != 0;
+                compositor_overlay_shown = rect ? shown : 0;
                 compositor.plane_fb = 0;
                 if (rect)
                         memory_copy(compositor.overlay_rect, rect, sizeof(compositor.overlay_rect));
@@ -2181,6 +2230,7 @@ static void compositor_overlay_off(void)
                 return;
         }
         compositor.overlay_on = 0;
+        compositor_overlay_shown = 0;
         compositor.plane_fb = 0;
 }
 

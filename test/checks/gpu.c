@@ -2072,6 +2072,20 @@ static void gpu_overlay_rows(void)
         compositor.width = 2560;
         check("gpu overlay: buffers made for a narrower output are made again, not composed into (here refused: no card)",
               !compositor_overlay_buffers(48) && compositor.overlay_rows == 0);
+        // A band grown past its rows while the plane is on (the card has no buffer to give here): the plane is not taken off, and keeps the buffers it
+        // scans. The mutant takes it off first (compositor_overlay_off), which the row sees as overlay_on 0 and the buffers gone.
+        {
+                int kept_on = compositor.overlay_on;
+                unsigned int kept_fb[2] = {compositor.overlay_fb[0], compositor.overlay_fb[1]};
+
+                memory_zero(compositor_overlay_old, sizeof(compositor_overlay_old));
+                compositor.width = 1920, compositor.overlay_rows = 64, compositor_overlay_width = 1920, compositor.overlay_on = 1;
+                compositor.overlay_fb[0] = 7001, compositor.overlay_fb[1] = 7002;
+                check("gpu overlay: a band grown past its rows with the plane on is refused, and the plane stays on its buffers",
+                      !compositor_overlay_buffers(128) && compositor.overlay_on == 1 && compositor.overlay_fb[0] == 7001 && compositor.overlay_fb[1] == 7002);
+                compositor.overlay_on = kept_on;
+                compositor.overlay_fb[0] = kept_fb[0], compositor.overlay_fb[1] = kept_fb[1];
+        }
         compositor.width = kept_width, compositor.card = kept_card;
         compositor.overlay_rows = kept_rows, compositor_overlay_width = kept_made;
 }

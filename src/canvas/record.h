@@ -38,6 +38,7 @@ static unsigned int compositor_records_flip;   // the slot of a flip waiting for
 static unsigned int compositor_record_polls;
 static unsigned int compositor_record_refusals; // flips the card refused, counted as they happen (the refusal's own counter is reset at three)
 static unsigned int compositor_record_backoffs; // refusals that were the card busy (a back-off, scanout.c compositor_refusal_fatal), counted as they happen
+static unsigned int compositor_record_remakes; // the overlay's buffers asked to be made again (scanout.c compositor_overlay_buffers), counted as they are asked
 static unsigned long long compositor_record_until; // the end of a recording (0: none running)
 static unsigned int compositor_record_seconds, compositor_record_frames, compositor_record_late, compositor_record_refused, compositor_record_held,
     compositor_record_flips;
@@ -567,6 +568,7 @@ static void compositor_record_report(void)
         compositor_record_put_number(backoffs), compositor_record_put_text(" of them backed off (the card busy), ");
         compositor_record_put_number(vblanks), compositor_record_put_text(" answered by a vblank, longest ");
         compositor_record_put_number(longest / 1000), compositor_record_put_text(" us\n");
+        compositor_record_put_text("overlay      "), compositor_record_put_number(compositor_record_remakes), compositor_record_put_text(" remakes of its buffers since the start\n");
         compositor_record_put_text("held         "), compositor_record_put_number(held), compositor_record_put_text(" presents kept their damage for the next\n");
         compositor_record_put_text("late         "), compositor_record_put_number(late), compositor_record_put_text(" presents more than 25 ms after the one before\n");
         compositor_record_put_text("lists        "), compositor_record_put_number(lists), compositor_record_put_text(" drawn from lists, ");
