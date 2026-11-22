@@ -20397,7 +20397,7 @@ static b32 ui_apps_launcher(const char address_to root, const char address_to na
                             positive profile_room)
 {
         struct ui_apps_facts facts;
-        char line[256];
+        char line[256] = {0}; // zeroed: the compares below read past what was got when the launcher is short
         bipolar handle, got;
         positive length = string_length((string_address)root);
         profile[0] = 0;
@@ -21321,6 +21321,7 @@ static fn ui_apps_pins_path(const char address_to root, char address_to path, po
 static b32 ui_apps_pins_read(const char address_to root, char address_to path, positive path_room, char address_to line, positive line_room)
 {
         positive got;
+        line[0] = 0;
         ui_apps_pins_path(root, path, path_room);
         got = ui_read_text_file(path, line, line_room);
         while (got > 0 && (line[got - 1] == '\n' || line[got - 1] == '\r'))
@@ -21356,7 +21357,14 @@ static int ui_apps_pin(const char address_to root, int which, b32 on)
         if (which < 0 || which >= ui_apps.count || (on && !ui_apps_pinnable(which)))
                 return -1;
         app = &ui_apps.app[which];
-        if (!ui_apps_pins_read(root, path, sizeof(path), line, sizeof(line)) || string_equals((string_address)line, (string_address) "none"))
+        if (!ui_apps_pins_read(root, path, sizeof(path), line, sizeof(line)))
+        {
+                // An invalid pins file is not rewritten: the programs it names are not dropped by a pin of another.
+                if (line[0] && !string_equals((string_address)line, (string_address) "none"))
+                        return -1;
+                line[0] = 0;
+        }
+        else if (string_equals((string_address)line, (string_address) "none"))
                 line[0] = 0;
         made[0] = 0;
         for (;;)
@@ -23117,7 +23125,7 @@ static fn ui_row_tree_at(struct ui address_to ui, struct ui_list address_to l, i
                 p->bars = n = ui_row_leaf(t, UI_FIXED, ui_signal_width(ui)), n->margin[0] = ui_dev(ui, 18) - n->size[0].value;
         if (row->tall)
         {
-                int count = row->strip_count < 0 || !row->strip_bytes ? 0 : row->strip_count > UI_STRIP_MOST ? UI_STRIP_MOST : row->strip_count;
+                int count = row->strip_count < 0 || !row->strip_bytes || !row->strip_roles ? 0 : row->strip_count > UI_STRIP_MOST ? UI_STRIP_MOST : row->strip_count;
                 int widths[UI_STRIP_MOST], segment_gap = ui_dev(ui, UI_SEGMENT_GAP);
                 // Under the line the heading, its share at its start and its amount at its end, and under it the strip, every...
                 ui_tree_close(t);
@@ -23304,7 +23312,7 @@ static fn ui_list_drive(struct ui address_to ui, const struct ui_row address_to 
 {
         const struct ui_row_parts address_to p = &ui_row_parts;
         const struct ui_node address_to n, address_to first = null, address_to last = null;
-        int count = row->strip_count < 0 || !row->strip_bytes ? 0 : row->strip_count > UI_STRIP_MOST ? UI_STRIP_MOST : row->strip_count;
+        int count = row->strip_count < 0 || !row->strip_bytes || !row->strip_roles ? 0 : row->strip_count > UI_STRIP_MOST ? UI_STRIP_MOST : row->strip_count;
         char cut[UI_CUT_TEXT];
         // The heading: its share in the ink at its start, and on the same baseline its amount in the quiet ink at its end.
         if (seen && (n = p->share) && row->share)
@@ -26107,6 +26115,7 @@ static int ui_wifi_parse(const char address_to text, positive length, struct ui_
 #define UI_JOB_REAP_NS 20000000ull
 #define UI_JOB_LEFT 8
 #define UI_JOB_LEFT_NS 500000000ull
+#define UI_JOB_INPUT_MOST 65000 // the most input a job takes: one pipe's room, written before its child is forked
 
 struct ui_job
 {
@@ -26372,6 +26381,9 @@ static b32 ui_start_piped(string_address address_to words, positive count, const
         int ends[2] = {-1, -1}, feeds[2] = {-1, -1};
         positive length = input ? string_length((string_address)input) : 0;
         bipolar child;
+        // The input is written before the fork, into a pipe nobody reads yet: it must fit the pipe (64 KiB), or the write blocks forever.
+        if (length > UI_JOB_INPUT_MOST)
+                return false;
         if (system_call_2(syscall(pipe2), (positive)ends, O_CLOEXEC) != 0)
                 return false;
         system_call_3(syscall(fcntl), (positive)ends[0], 4, O_NONBLOCK);
@@ -26456,10 +26468,11 @@ static fn ui_job_reset(struct ui_job address_to j, b32 orphan)
 static b32 ui_job_reap(struct ui_job address_to j)
 {
         positive status = 0;
-        b32 killed = j->ending == 2;
+        b32 killed;
         bipolar got;
         if (!j || j->child <= 0 || !j->ending)
                 return false;
+        killed = j->ending == 2;
         if ((got = system_wait4_retry(j->child, address_of status, 1, null)) == 0)
                 return false;
         if (got < 0)
