@@ -147,15 +147,6 @@ static b32 files_model_open(struct files_model address_to m)
         return true;
 }
 
-static fn files_model_close(struct files_model address_to m)
-{
-        for (int k = 0; k < FILES_KEPT; k++)
-                files_keep_drop(m, k);
-        files_walk_stop(m), files_close(&m->handle), files_unmap(m->mapped, m->mapped_size);
-        memory_fill(m, 0, sizeof(*m));
-        m->handle = m->reader.handle = -1;
-}
-
 /* ---- entries, order, filtering, selection ---- */
 
 static inline p32 files_model_count(const struct files_model address_to m) { return m->shown.places; }
@@ -1287,7 +1278,6 @@ static b32 files_tree_begin(struct files_tree address_to t)
         return true;
 }
 
-static inline fn files_tree_end(struct files_tree address_to t) { files_unmap(t->mapped, t->mapped_size), memory_fill(t, 0, sizeof(*t)); }
 
 static inline b32 files_path_under(const p8 address_to path, const char address_to prefix)
 {
@@ -1684,7 +1674,6 @@ static p32 files_tree_find_in(const struct files_tree address_to t, p8 machine, 
         return found;
 }
 
-static inline p32 files_tree_find(const struct files_tree address_to t, const p8 address_to path) { return files_tree_find_in(t, 0, path); }
 
 static p32 files_tree_reveal_in(struct files_tree address_to t, p8 machine, const p8 address_to path)
 {
