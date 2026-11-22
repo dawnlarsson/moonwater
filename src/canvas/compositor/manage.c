@@ -1995,6 +1995,8 @@ static void compositor_take_first(int row, unsigned int width, unsigned int heig
         int x = compositor_fit(table->x[row], -WINDOW_COORD_MAX, WINDOW_COORD_MAX);
         int y = compositor_fit(table->y[row], -WINDOW_COORD_MAX, WINDOW_COORD_MAX);
 
+        unsigned int asked = __atomic_load_n(&table->asked[row], __ATOMIC_ACQUIRE);
+
         compositor.w[row] = compositor.picture_w[row] = width;
         compositor.h[row] = compositor.picture_h[row] = height;
         compositor.asking[row] = 0, compositor.front[row] = front;
@@ -2022,11 +2024,10 @@ static void compositor_take_first(int row, unsigned int width, unsigned int heig
         if (compositor.layer[row] == WINDOW_LAYER_BACKGROUND)
                 compositor_arrange_on(row, COMPOSITOR_MAXIMIZED, -1);
         else if (compositor.spaces.ready && !compositor.row_space[row])
-                compositor_space_assign_new(row, __atomic_load_n(&table->asked[row], __ATOMIC_ACQUIRE) != 0);
+                compositor_space_assign_new(row, asked != 0);
         if (compositor_visible(row))
                 compositor_raise(row);
-        if (compositor.layer[row] != WINDOW_LAYER_BACKGROUND && compositor_visible(row) &&
-            __atomic_load_n(&table->asked[row], __ATOMIC_ACQUIRE))
+        if (compositor.layer[row] != WINDOW_LAYER_BACKGROUND && compositor_visible(row) && asked)
                 compositor_focus(row);
         compositor_land(row);
         compositor_tabs_changed();
@@ -2066,10 +2067,13 @@ static void compositor_take(int row)
                         compositor_tabs_changed();
         }
         compositor_identity_take(row);
-        if (compositor.showing[row] && table->lift[row] != compositor.lifted[row])
-                compositor.lifted[row] = table->lift[row], compositor_reveal(row);
-        if (compositor.showing[row] && __atomic_load_n(&table->moved[row], __ATOMIC_ACQUIRE) != compositor.moved[row])
-                compositor.moved[row] = table->moved[row], compositor_move(row);
+        // The client's lift and move counts are read once each: the compare and the copy are the same value.
+        unsigned int lift = table->lift[row], moved = __atomic_load_n(&table->moved[row], __ATOMIC_ACQUIRE);
+
+        if (compositor.showing[row] && lift != compositor.lifted[row])
+                compositor.lifted[row] = lift, compositor_reveal(row);
+        if (compositor.showing[row] && moved != compositor.moved[row])
+                compositor.moved[row] = moved, compositor_move(row);
         if (frame == compositor.seen[row])
                 return;
         compositor_frametrace_note('T', row, clock_monotonic_nanoseconds());
@@ -3198,17 +3202,19 @@ static void compositor_osk_sync(void)
         int kb = compositor_osk_row(), focus = compositor.focus, want = 0;
         b32 touch = !compositor.osk_typed && compositor.owner != COMPOSITOR_PREDICT_MOUSE, kb_plugged = compositor_input_has(0);
         unsigned int purpose;
+        // The focused window's field flag is the client's: read once, and every use below takes this copy.
+        b32 field = focus >= 0 && table->field[focus] != 0;
 
         if (compositor.osk_turned)
         {
                 if (focus != compositor.osk_turn_focus)
                         compositor.osk_turned = 0;
-                else if (focus >= 0 && !table->field[focus])
+                else if (focus >= 0 && !field)
                         compositor.osk_turn_blur = 1;
                 else if (focus >= 0 && compositor.osk_turn_blur)
                         compositor.osk_turned = 0;
         }
-        if (kb >= 0 && focus >= 0 && focus != kb && table->field[focus] && compositor.osk_setting != COMPOSITOR_OSK_OFF && !compositor.osk_turned)
+        if (kb >= 0 && focus >= 0 && focus != kb && field && compositor.osk_setting != COMPOSITOR_OSK_OFF && !compositor.osk_turned)
                 want = compositor.osk_setting == COMPOSITOR_OSK_ON || touch || !kb_plugged;
         for (unsigned int row = 0; row < compositor_rows_in_use; row++)
                 if ((compositor.osk_pan[row] || compositor.osk_height[row]) && (!want || (int)row != focus))
@@ -3238,11 +3244,11 @@ static void compositor_osk_sync(void)
                             (unsigned int)(unsigned char)compositor_layouts[compositor.keymap.layout].name[1] << 8;
         table->osk_start = compositor.osk_setting == COMPOSITOR_OSK_ON ||
                            (compositor.osk_setting == COMPOSITOR_OSK_AUTO && (compositor_input_has(1) || !kb_plugged));
-        purpose = focus >= 0 && table->field[focus] ? compositor.text_purpose[focus] : 0;
+        purpose = field ? compositor.text_purpose[focus] : 0;
         if (table->osk_purpose != purpose && kb >= 0)
                 rows_add(&compositor.woken, kb);
         table->osk_purpose = purpose;
-        table->osk_caret = focus >= 0 && table->field[focus] && compositor.caret[focus] > 0 ? (unsigned int)compositor.caret[focus] : 0;
+        table->osk_caret = field && compositor.caret[focus] > 0 ? (unsigned int)compositor.caret[focus] : 0;
 }
 
 static void compositor_osk_turned(void)
