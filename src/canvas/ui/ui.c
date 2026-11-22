@@ -51,29 +51,41 @@ struct ui_draw_view
 static inline int ui_draw_list_open(unsigned char address_to base, unsigned long bytes, struct ui_draw_view address_to view)
 {
         unsigned int address_to head = (unsigned int address_to)base;
-        unsigned int gen, half_index, room, count;
+        unsigned int gen, magic, version, flags, half_index, room, count, cover_at, cover_used;
         unsigned long half, ops, at;
         if (!base || bytes < UI_DRAW_LIST_HEADER)
                 return -1;
         gen = __atomic_load_n(&head[UI_DRAW_LIST_GEN], __ATOMIC_ACQUIRE);
         if (gen & 1)
                 return 0;
-        if (head[UI_DRAW_LIST_MAGIC_AT] != UI_DRAW_LIST_MAGIC || head[UI_DRAW_LIST_VERSION_AT] != UI_DRAW_LIST_VERSION || head[UI_DRAW_LIST_FLAGS] & 1)
+        magic = __atomic_load_n(&head[UI_DRAW_LIST_MAGIC_AT], __ATOMIC_RELAXED);
+        version = __atomic_load_n(&head[UI_DRAW_LIST_VERSION_AT], __ATOMIC_RELAXED);
+        flags = __atomic_load_n(&head[UI_DRAW_LIST_FLAGS], __ATOMIC_RELAXED);
+        if (magic != UI_DRAW_LIST_MAGIC || version != UI_DRAW_LIST_VERSION || (flags & 1))
                 return -1;
-        half_index = head[UI_DRAW_LIST_HALF], room = head[UI_DRAW_LIST_ROOM], count = head[UI_DRAW_LIST_COUNT];
+        half_index = __atomic_load_n(&head[UI_DRAW_LIST_HALF], __ATOMIC_RELAXED);
+        room = __atomic_load_n(&head[UI_DRAW_LIST_ROOM], __ATOMIC_RELAXED);
+        count = __atomic_load_n(&head[UI_DRAW_LIST_COUNT], __ATOMIC_RELAXED);
+        cover_at = __atomic_load_n(&head[UI_DRAW_LIST_COVER], __ATOMIC_RELAXED);
+        cover_used = __atomic_load_n(&head[UI_DRAW_LIST_COVER_USED], __ATOMIC_RELAXED);
         half = (bytes - UI_DRAW_LIST_HEADER) / 2 & ~15ul;
         ops = (unsigned long)room * UI_DRAW_LIST_OP;
         if (half_index > 1 || !room || half <= ops + 16 || count > room)
                 return -1;
         at = UI_DRAW_LIST_HEADER + (unsigned long)half_index * half;
-        if ((unsigned long)head[UI_DRAW_LIST_COVER] != at + ops || (unsigned long)head[UI_DRAW_LIST_COVER_USED] > half - ops)
+        if ((unsigned long)cover_at != at + ops || (unsigned long)cover_used > half - ops)
                 return -1;
         view->ops = (const unsigned int address_to)(base + at);
         view->cover = base + at + ops;
         view->count = count, view->room = room, view->gen = gen, view->half = half_index;
-        view->width = head[UI_DRAW_LIST_WIDTH], view->height = head[UI_DRAW_LIST_HEIGHT], view->pitch = head[UI_DRAW_LIST_PITCH];
-        view->x0 = (int)head[UI_DRAW_LIST_DX0], view->y0 = (int)head[UI_DRAW_LIST_DY0], view->x1 = (int)head[UI_DRAW_LIST_DX1], view->y1 = (int)head[UI_DRAW_LIST_DY1];
-        view->cover_at = head[UI_DRAW_LIST_COVER], view->cover_used = head[UI_DRAW_LIST_COVER_USED];
+        view->width = __atomic_load_n(&head[UI_DRAW_LIST_WIDTH], __ATOMIC_RELAXED);
+        view->height = __atomic_load_n(&head[UI_DRAW_LIST_HEIGHT], __ATOMIC_RELAXED);
+        view->pitch = __atomic_load_n(&head[UI_DRAW_LIST_PITCH], __ATOMIC_RELAXED);
+        view->x0 = (int)__atomic_load_n(&head[UI_DRAW_LIST_DX0], __ATOMIC_RELAXED);
+        view->y0 = (int)__atomic_load_n(&head[UI_DRAW_LIST_DY0], __ATOMIC_RELAXED);
+        view->x1 = (int)__atomic_load_n(&head[UI_DRAW_LIST_DX1], __ATOMIC_RELAXED);
+        view->y1 = (int)__atomic_load_n(&head[UI_DRAW_LIST_DY1], __ATOMIC_RELAXED);
+        view->cover_at = cover_at, view->cover_used = cover_used;
         return 1;
 }
 
@@ -1220,8 +1232,10 @@ static bool ui_faces_first(string_address folder, bool regular, bool descend, p8
 
 static positive ui_read_text_file(const char address_to path, char address_to buf, positive room)
 {
-        bipolar handle = system_open_at(AT_FDCWD, (string_address)path, FILE_READ | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK);
-        bipolar got = 0;
+        bipolar handle, got = 0;
+        if (!room)
+                return 0;
+        handle = system_open_at(AT_FDCWD, (string_address)path, FILE_READ | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK);
         if (handle >= 0)
                 got = system_read_once(handle, buf, room - 1), system_close(handle);
         buf[got > 0 ? got : 0] = 0;
@@ -1440,20 +1454,20 @@ static inline b64 ui_tree_gaps(const struct ui_node address_to n)
 static int ui_grown_room(struct ui_grown address_to g, long unit, long most, long want)
 {
         long room;
+        if (unit <= 0 || most <= 0 || want < 0 || want > most || (positive)most > (~(positive)0 - 4095) / (positive)unit)
+                return 0;
         if (want <= g->room)
                 return 1;
-        if (want > most)
-                return 0;
         if (!g->at)
         {
-                long got = compositor_call(syscall(mmap), 0, (positive)(unit * most), 0, 0x4022, (positive)-1, 0); // PROT_NONE, private, anonymous, no reserve
+                long got = compositor_call(syscall(mmap), 0, (positive)unit * (positive)most, 0, 0x4022, (positive)-1, 0); // PROT_NONE, private, anonymous, no reserve
                 if (got < 0 && got > -4096)
                         return 0;
                 g->at = (unsigned char address_to)got;
         }
-        room = g->room ? g->room * 2 : 256;
+        room = g->room ? (g->room > most / 2 ? most : g->room * 2) : 256;
         room = room < want ? want : room > most ? most : room;
-        if (compositor_call(syscall(mprotect), (positive)g->at, (positive)((unit * room + 4095) & ~4095L), 3, 0, 0, 0) != 0)
+        if (compositor_call(syscall(mprotect), (positive)g->at, ((positive)unit * (positive)room + 4095) & ~(positive)4095, 3, 0, 0, 0) != 0)
                 return 0;
         g->room = room;
         return 1;
@@ -6998,7 +7012,12 @@ static unsigned int language_kinds(const char address_to format, char kind[LANGU
                         break;
                 if (index < 1 || index > LANGUAGE_ARGUMENTS)
                         return LANGUAGE_ARGUMENTS + 1;
-                kind[index - 1] = *f == 's' ? 's' : 'd';
+                {
+                        char k = *f == 's' ? 's' : 'd';
+                        if (kind[index - 1] && kind[index - 1] != k)
+                                return LANGUAGE_ARGUMENTS + 1;
+                        kind[index - 1] = k;
+                }
                 used = index > used ? index : used;
         }
         return used;
@@ -7151,13 +7170,16 @@ static fn language_take(unsigned int code)
                 positive at = string_length((string_address)language_directory);
                 char address_to file = language_file[language_side ^= 1];
                 bipolar got;
-                if (at + 8 > sizeof(path))
-                        at = 0;
-                memory_copy(path, language_directory, at);
-                for (unsigned int shift = 0; shift < 24 && (code >> shift & 255); shift += 8)
-                        path[at++] = (char)(code >> shift & 255);
-                memory_copy(path + at, ".txt", 5);
-                got = at ? file_slurp_once_at(AT_FDCWD, (string_address)path, (p8 address_to)file, LANGUAGE_FILE_MOST) : -1;
+                if (at + 8 <= sizeof(path))
+                {
+                        memory_copy(path, language_directory, at);
+                        for (unsigned int shift = 0; shift < 24 && (code >> shift & 255); shift += 8)
+                                path[at++] = (char)(code >> shift & 255);
+                        memory_copy(path + at, ".txt", 5);
+                        got = file_slurp_once_at(AT_FDCWD, (string_address)path, (p8 address_to)file, LANGUAGE_FILE_MOST);
+                }
+                else
+                        got = -1;
                 if (got > 0)
                 {
                         language_parse(file, file + got);
@@ -7180,6 +7202,8 @@ static positive language_format(char address_to into, positive room, const char 
         unsigned int implicit = 0, used = 0;
         positive out = 0;
         var_args list;
+        if (!room)
+                return 0;
         for (const char address_to f = format; *f; f++)
         {
                 unsigned int index;
@@ -7194,7 +7218,12 @@ static positive language_format(char address_to into, positive room, const char 
                 if (!*f)
                         break;
                 if (index >= 1 && index <= LANGUAGE_ARGUMENTS)
-                        kind[index - 1] = *f == 's' ? 's' : 'd', used = index > used ? index : used;
+                {
+                        char k = *f == 's' ? 's' : 'd';
+                        if (!kind[index - 1])
+                                kind[index - 1] = k;
+                        used = index > used ? index : used;
+                }
         }
         var_list(list, format);
         for (unsigned int k = 0; k < used; k++)
@@ -7229,6 +7258,8 @@ static positive language_format(char address_to into, positive room, const char 
                         continue;
                 if (*f == 's')
                 {
+                        if (kind[index - 1] != 's')
+                                continue;
                         for (const char address_to s = argument[index - 1].string; s && *s && out + 1 < room; s++)
                                 into[out++] = *s;
                 }
@@ -7236,8 +7267,12 @@ static positive language_format(char address_to into, positive room, const char 
                 {
                         char digits[24];
                         unsigned int count = 0;
-                        long number = argument[index - 1].number;
-                        unsigned long magnitude = number < 0 ? 0ul - (unsigned long)number : (unsigned long)number;
+                        long number;
+                        unsigned long magnitude;
+                        if (kind[index - 1] == 's')
+                                continue;
+                        number = argument[index - 1].number;
+                        magnitude = number < 0 ? 0ul - (unsigned long)number : (unsigned long)number;
                         do
                                 digits[count++] = (char)('0' + magnitude % 10), magnitude /= 10;
                         while (magnitude);
@@ -7555,11 +7590,15 @@ static fn ui_begin(struct ui address_to ui, unsigned int address_to pixels, unsi
 
 static fn ui_fill(struct ui address_to ui, int x, int y, int width, int height, unsigned int tone)
 {
-        int x2 = x + width, y2 = y + height;
+        b64 x2_wide, y2_wide;
+        int x2, y2;
+        if (width <= 0 || height <= 0)
+                return;
+        x2_wide = (b64)x + (b64)width, y2_wide = (b64)y + (b64)height;
         x = x < 0 ? 0 : x;
         y = y < ui->top ? ui->top : y;
-        x2 = x2 > ui->width ? ui->width : x2;
-        y2 = y2 > ui->bottom ? ui->bottom : y2;
+        x2 = x2_wide > ui->width ? ui->width : x2_wide < 0 ? 0 : (int)x2_wide;
+        y2 = y2_wide > ui->bottom ? ui->bottom : y2_wide < 0 ? 0 : (int)y2_wide;
         y2 = y2 > ui->height ? ui->height : y2;
         if (ui->band_bottom > ui->band_top)
         {
@@ -7996,11 +8035,16 @@ __asm__(
 static unsigned char address_to ui_scene_op3(struct ui_scene address_to scene, int wide, int rows, int x0, int y0, int x1, int y1,
                                              int cover_dx, int cover_dy, unsigned int colour, unsigned int alpha, unsigned int stroke)
 {
-        int pitch = wide + 2;
-        unsigned long bytes = (unsigned long)pitch * (unsigned long)(rows + 2);
+        int pitch;
+        unsigned long bytes, aligned;
         unsigned char address_to bitmap;
         unsigned int address_to op;
-        if (scene->count >= scene->room || scene->used + bytes + 16 > scene->size)
+        if (wide <= 0 || rows <= 0)
+                return null;
+        pitch = wide + 2;
+        bytes = (unsigned long)pitch * (unsigned long)(rows + 2);
+        aligned = (bytes + 15) & ~15ul;
+        if (scene->count >= scene->room || bytes > scene->size || aligned < bytes || aligned > scene->size || scene->used > scene->size - aligned)
         {
                 scene->lost = scene->count >= scene->room ? UI_LOST_ROOM : UI_LOST_POOL;
                 return null;
@@ -8014,7 +8058,7 @@ static unsigned char address_to ui_scene_op3(struct ui_scene address_to scene, i
         op[3] = (unsigned int)(scene->ox + x1), op[4] = (unsigned int)(scene->oy + y1);
         op[5] = colour, op[6] = (alpha > 255 ? 255 : alpha) | (stroke > 255 ? 255 : stroke) << 8;
         op[7] = (unsigned int)(scene->at + scene->used + (unsigned long)(1 + cover_dy) * (unsigned long)pitch + (unsigned long)(1 + cover_dx));
-        scene->used += (bytes + 15) & ~15ul;
+        scene->used += aligned;
         ui_scene_touch(scene, scene->ox + x0, scene->oy + y0, scene->ox + x1, scene->oy + y1);
         return bitmap;
 }
@@ -8027,7 +8071,8 @@ HOT static void ui_scene_text(struct ui address_to ui, int wide, int rows, int t
         int c0, c1, r0, r1, cwide, crows, pitch;
         unsigned char address_to bitmap;
         unsigned char xor_v = light ? 0u : 0xffu;
-        from = from < ui->top ? ui->top : from, to = to > ui->bottom ? ui->bottom : to, to = to > ui->height ? ui->height : to;
+        from = from < ui->top ? ui->top : from, from = from < 0 ? 0 : from;
+        to = to > ui->bottom ? ui->bottom : to, to = to > ui->height ? ui->height : to;
         if (ui->band_bottom > ui->band_top)
                 from = from < ui->band_top ? ui->band_top : from, to = to > ui->band_bottom ? ui->band_bottom : to;
         if (first >= last || from >= to)
@@ -8149,11 +8194,16 @@ static b32 ui_scene_copy_rect(struct ui_scene address_to scene, struct ui_scene_
 {
         p32 slot = 0;
         int found = ui_scene_probe(slots, scene->slot_gen, a, b, c, &slot, at);
-        unsigned long start, count = width * rows;
+        unsigned long start, count;
         if (found != 0)
                 return found > 0;
+        if (rows && width > (~0ul) / rows)
+                return false;
+        count = width * rows;
+        if (scene->used > scene->size)
+                return false;
         start = (scene->used + 15) & ~15ul;
-        if (start + count > scene->size)
+        if (start < scene->used || start > scene->size || count > scene->size - start)
                 return false;
         if (rows == 1 || stride == width)
                 memory_copy(scene->cover + start, bytes, (positive)count);
@@ -8234,8 +8284,9 @@ static void ui_scene_cells(struct ui address_to ui, const font_face address_to c
 {
         struct ui_scene address_to scene = ui->scene;
         int width = grid->cell_width, height = grid->cell_height;
-        int left = x < 0 ? 0 : x, right = x + run * width > target->width ? target->width : x + run * width;
-        int top = y < 0 ? 0 : y, bottom = y + height > target->height ? target->height : y + height;
+        b64 rx1 = (b64)x + (b64)run * (b64)width, ry1 = (b64)y + (b64)height;
+        int left = x < 0 ? 0 : x, right = rx1 > target->width ? target->width : rx1 < 0 ? 0 : (int)rx1;
+        int top = y < 0 ? 0 : y, bottom = ry1 > target->height ? target->height : ry1 < 0 ? 0 : (int)ry1;
         if (background & FONT_UNKNOWN)
         {
                 scene->lost = UI_LOST_GROUND;
@@ -8329,6 +8380,8 @@ HOT static fn ui_run_lay(struct ui address_to restrict ui, int wide, int rows, i
         }
 #else
         int r0 = 0, r1 = rows;
+        if (-top > r0)
+                r0 = -top;
         if (ui->top - top > r0)
                 r0 = ui->top - top;
         if (ui->bottom - top < r1)
@@ -9683,7 +9736,13 @@ static struct ui_box ui_box_transform(struct ui_box box, b64 sx, b64 sy, b32 ox,
 // A box's radii as CSS draws them:
 static fn ui_box_radii(const struct ui_box address_to box, b32 address_to rx, b32 address_to ry)
 {
-        p64 w = (p64)(box->x1 - box->x0), h = (p64)(box->y1 - box->y0), f = 65536;
+        p64 w, h, f = 65536;
+        if (box->x1 <= box->x0 || box->y1 <= box->y0)
+        {
+                *rx = *ry = 0;
+                return;
+        }
+        w = (p64)(box->x1 - box->x0), h = (p64)(box->y1 - box->y0);
         if (*rx > 0 && 2 * (p64)*rx > w)
                 f = (w << 16) / (2 * (p64)*rx);
         if (*ry > 0 && 2 * (p64)*ry > h && (h << 16) / (2 * (p64)*ry) < f)
@@ -15775,13 +15834,20 @@ static inline int ui_stretch_interp(int view, int at, int m0, int m1, int target
 
 static b32 ui_stretch(struct ui address_to ui, int x, int y, int width, int height, int pull)
 {
-        int x0 = x < 0 ? 0 : x, x1 = x + width > ui->width ? ui->width : x + width;
-        int y0 = y < 0 ? 0 : y, y1 = y + height > ui->height ? ui->height : y + height;
-        int view = y1 - y0, wide = x1 - x0, band = pull < 0 ? -pull : pull, at = 0, m0 = 0, m1;
+        b64 x1_wide, y1_wide, pull_abs;
+        int x0, x1, y0, y1, view, wide, band, at = 0, m0 = 0, m1;
         b64 grow;
         positive need;
-        if (!pull || view < 8 || wide <= 0 || view > UI_STRETCH_VIEW)
+        if (!pull || width <= 0 || height <= 0)
                 return false;
+        x1_wide = (b64)x + (b64)width, y1_wide = (b64)y + (b64)height;
+        x0 = x < 0 ? 0 : x, x1 = x1_wide > ui->width ? ui->width : x1_wide < 0 ? 0 : (int)x1_wide;
+        y0 = y < 0 ? 0 : y, y1 = y1_wide > ui->height ? ui->height : y1_wide < 0 ? 0 : (int)y1_wide;
+        view = y1 - y0, wide = x1 - x0;
+        if (view < 8 || wide <= 0 || view > UI_STRETCH_VIEW)
+                return false;
+        pull_abs = pull < 0 ? -(b64)pull : (b64)pull;
+        band = pull_abs > view / 2 ? view / 2 : (int)pull_abs;
         ui_stretch_now = true;
         if (ui->scene)
         {
@@ -15900,12 +15966,18 @@ static b32 ui_face_load(font_face address_to face, string_address path)
 // The scratch line the text is drawn through is at least this wide, and UI_SCRATCH_ROWS rows at the scale:
 static void ui_scratch_fit(struct ui address_to ui, unsigned int width)
 {
-        unsigned int scratch = width + 8u * (unsigned int)ui->scale / 100;
+        positive scratch;
         long mapped;
-        if (scratch <= (unsigned int)ui->scratch_width && (!ui->scratch_scale ? ui->scratch != null : ui->scale <= ui->scratch_scale))
+        if (ui->scale <= 0 || width > 65536u)
                 return;
-        scratch = scratch > (unsigned int)ui->scratch_width ? scratch : (unsigned int)ui->scratch_width;
-        mapped = ui_map((positive)scratch * UI_SCRATCH_ROWS * (positive)ui->scale / 100 * 4);
+        scratch = (positive)width + 8ul * (positive)ui->scale / 100;
+        if (scratch > 65536ul + 8ul * (positive)ui->scale / 100)
+                return;
+        if (scratch <= (positive)(ui->scratch_width > 0 ? ui->scratch_width : 0) && (!ui->scratch_scale ? ui->scratch != null : ui->scale <= ui->scratch_scale))
+                return;
+        if (ui->scratch_width > 0 && (positive)ui->scratch_width > scratch)
+                scratch = (positive)ui->scratch_width;
+        mapped = ui_map(scratch * UI_SCRATCH_ROWS * (positive)ui->scale / 100 * 4);
         if (mapped < 0 && mapped > -4096)
                 return;
         if (ui->scratch && ui->scratch_scale)
@@ -20256,7 +20328,7 @@ static b32 ui_apps_launcher(const char address_to root, const char address_to na
         {
                 const char address_to base = length ? root : ui_apps_bowls;
                 positive base_length = length ? length : string_length((string_address)ui_apps_bowls);
-                return base_length && !memory_compare(line + 9, base, base_length) && line[9 + base_length] == '/';
+                return base_length && 9 + base_length < sizeof(line) && !memory_compare(line + 9, base, base_length) && line[9 + base_length] == '/';
         }
         // A profile's session: #!/bin/sh, then # bowl profile NAME.
         if (!memory_compare(line, "#!/bin/sh\n# bowl profile ", 25))
@@ -20720,8 +20792,11 @@ static positive ui_png_inflate(const p8 address_to from, positive size, p8 addre
         for (;;)
         {
                 done = gzip_inflate_blocks(z);
-                if (done < 0 || made + z->fill > room)
+                if (done < 0 || z->fill > room - made)
+                {
+                        done = -1;
                         break;
+                }
                 memory_copy(into + made, z->out, z->fill);
                 made += z->fill;
                 if (done)
@@ -20753,6 +20828,8 @@ HOT static unsigned int address_to ui_png_decode_most(const p8 address_to restri
         unsigned int width = 0, height = 0, depth = 0, colour = 0, colours = 0;
         b32 header = false, ended = false;
         int key_r = -1, key_g = -1, key_b = -1;
+        if (most > 16384u)
+                most = 16384u;
         if (size < 8 + 25 || memory_compare(file, signature, 8))
                 return null;
         for (int each = 0; each < 256; each++)
@@ -21001,9 +21078,11 @@ static p8 address_to ui_apps_picture_file(const struct ui_app_entry address_to a
         else if (!string_first_of((string_address)app->icon, '/'))
         {
                 b32 is_local = ui_apps_is_local(app);
+                positive nlen;
                 string_copy_bounded((p8 address_to)name, (string_address)app->icon, sizeof(name));
-                if (length > 4 && name[length - 4] == '.')
-                        name[length - 4] = 0;
+                nlen = string_length((string_address)name);
+                if (nlen > 4 && name[nlen - 4] == '.')
+                        name[nlen - 4] = 0;
                 for (positive at = 0; at <= sizeof(sides) / sizeof(sides[0]) && handle < 0; at++)
                 {
                         if (at < sizeof(sides) / sizeof(sides[0]))
@@ -21234,6 +21313,8 @@ static int ui_apps_pin(const char address_to root, int which, b32 on)
         if (first)
                 string_copy_bounded((p8 address_to)made, (string_address) "none", sizeof(made)), used = 4;
         if (!string_equals((string_address)made, (string_address) "none") && !setting_pins_valid(made, null))
+                return -1;
+        if (used >= sizeof(made))
                 return -1;
         made[used++] = '\n';
         if ((handle = system_open_at_mode(AT_FDCWD, (string_address)path, O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW | O_CLOEXEC, 0644)) < 0)
@@ -27428,7 +27509,7 @@ static const struct doc_keymap address_to ui_text_keymap(void)
         if (!read)
         {
                 char address_to text = (char address_to)memory_checked(16384);
-                bipolar handle = text ? system_open_at(AT_FDCWD, (string_address)UI_TEXT_KEYS_PATH, FILE_READ | O_CLOEXEC) : -1;
+                bipolar handle = text ? system_open_at(AT_FDCWD, (string_address)UI_TEXT_KEYS_PATH, FILE_READ | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK) : -1;
                 bipolar got = handle >= 0 ? system_read_once((b32)handle, text, 16383) : 0;
                 if (handle >= 0)
                         system_close(handle);
