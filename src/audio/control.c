@@ -651,7 +651,11 @@ static void ctl_disconnect(struct ctl *c)
 static long ctl_connect(struct ctl *c, const char *path)
 {
         unsigned char address[2 + 108]; // a sockaddr_un: its family, and sun_path of 108 bytes with the zero after the path
-        long length = wire_len(path), fd, until;
+        long length, fd, until;
+
+        if (!path)
+                return CTL_FAILED;
+        length = wire_len(path);
 
         if (length > 107) // a path that does not fit is refused, not cut to the length that does
                 return CTL_FAILED;

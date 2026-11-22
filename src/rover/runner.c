@@ -160,6 +160,8 @@ static bool rover_runner_adopt_bytes(const p8 address_to bytes, positive size, p
                 positive length;
                 const p8 address_to name = rover_runner_pool_word(rover_runner.view.service[at].name, &length);
 
+                if (length > ROVER_WORD_MOST)
+                        length = ROVER_WORD_MOST;
                 memory_copy(names[at], name, length);
                 names[at][length] = 0;
                 before[at] = rover_runner.service[at];
@@ -192,8 +194,7 @@ static bool rover_runner_adopt_bytes(const p8 address_to bytes, positive size, p
                         if (before[k].pidfd >= 0)
                                 system_close(before[k].pidfd);
                         rover_runner_leaving(before[k].pid);
-                        if (string_join(path, sizeof(path), HOST_STATE "/", (string_address)names[k]) &&
-                            string_join(path, sizeof(path), (string_address)path, ".pid"))
+                        if (string_join(path, sizeof(path), HOST_STATE "/", (string_address)names[k], ".pid"))
                                 (void)system_remove_at(AT_FDCWD, (string_address)path, 0);
                 }
         rover_runner.table = table;
@@ -388,8 +389,12 @@ static fn rover_runner_boot_states(void)
                     rover_runner.boots == array_count(rover_runner.boot))
                         continue;
                 rover_runner.boot[rover_runner.boots++] = (p16)at;
-                if (!string_join(key, sizeof(key), "moonwater.", (string_address)(name + 5), "=") ||
-                    !(found = string_search(line, key)))
+                if (!string_join(key, sizeof(key), "moonwater.", (string_address)(name + 5), "="))
+                        continue;
+                found = line;
+                while ((found = string_search(found, key)) && found != line && found[-1] != ' ')
+                        found++;
+                if (!found)
                         continue;
                 found += string_length(key);
                 while (found[size] && found[size] != ' ' && found[size] != '\n')
@@ -473,9 +478,8 @@ static fn rover_runner_reap(void)
                 rover_runner.children[at] = 0;
                 if (status)
                 {
-                        p8 number[24], code[24];
+                        p8 code[24];
 
-                        number[positive_into_string(number, (positive)pid)] = 0;
                         code[positive_into_string(code, (status & 0x7f) ? (positive)(status & 0x7f) : (positive)((status >> 8) & 0xff))] = 0;
                         rover_runner_say((string_address)rover_runner.child_name[at],
                                          (status & 0x7f) ? " was ended by signal " : " exited with status ", (string_address)code);
@@ -748,8 +752,7 @@ static fn rover_runner_pid_file(positive which, bipolar pid)
         const p8 address_to name = rover_runner_pool_word(rover_runner.view.service[which].name, &length);
         p8 path[96], text[24];
 
-        if (length > 48 || !string_join(path, sizeof(path), HOST_STATE "/", (string_address)name) ||
-            !string_join(path, sizeof(path), (string_address)path, ".pid"))
+        if (length > 48 || !string_join(path, sizeof(path), HOST_STATE "/", (string_address)name, ".pid"))
                 return;
         if (pid <= 0)
         {
@@ -1074,8 +1077,6 @@ static fn rover_runner_primitive(p16 id, const struct rover_value address_to val
         }
         case 14: // open APP WORDS: a kit program by its name, or a program by its path, asked for by a person
         {
-                file_facts facts;
-
                 if (values[0].length && values[0].text[0] == '/')
                         string_copy_max(path, (string_address)values[0].text, sizeof(path));
                 else if (!string_join(path, sizeof(path), "/", (string_address)values[0].text))
@@ -1169,23 +1170,32 @@ static fn rover_runner_primitive(p16 id, const struct rover_value address_to val
 
 static fn rover_runner_set(p16 id, const struct rover_value address_to value)
 {
+        static const struct
+        {
+                string_address verb;
+                string_address sub;
+                b32 (address_to run)(string_address address_to, positive);
+        } dispatch[] = {
+            {"brightness", null, tune_brightness},
+            {"power", null, tune_power},
+            {"cpu", "boost", tune_cpu},
+            {"cpu", "smt", tune_cpu},
+            {"charge", "limit", tune_charge},
+            {"airplane", null, tune_airplane},
+        };
         const struct rover_switch_row address_to row = rover_switch_find(id);
         p8 word[32];
         string_address words[5] = {(string_address) "moonwater"};
-        string_address said;
+        positive count = 1;
 
-        if (!row)
+        if (!row || !id || id > array_count(dispatch))
                 return;
-        said = rover_runner_word(value, row->type, word);
-        switch (id)
-        {
-        case 1: words[1] = "brightness"; words[2] = said; rover_runner_verb(tune_brightness, words, 3); return;
-        case 2: words[1] = "power"; words[2] = said; rover_runner_verb(tune_power, words, 3); return;
-        case 3: words[1] = "cpu"; words[2] = "boost"; words[3] = said; rover_runner_verb(tune_cpu, words, 4); return;
-        case 4: words[1] = "cpu"; words[2] = "smt"; words[3] = said; rover_runner_verb(tune_cpu, words, 4); return;
-        case 5: words[1] = "charge"; words[2] = "limit"; words[3] = said; rover_runner_verb(tune_charge, words, 4); return;
-        case 6: words[1] = "airplane"; words[2] = said; rover_runner_verb(tune_airplane, words, 3); return;
-        }
+        words[count++] = dispatch[id - 1].verb;
+        if (dispatch[id - 1].sub)
+                words[count++] = dispatch[id - 1].sub;
+        words[count++] = rover_runner_word(value, row->type, word);
+        words[count] = null;
+        rover_runner_verb(dispatch[id - 1].run, words, count);
 }
 
 //      A hit's actions. kernel_did: the hit is a kernel rule's, whose kernel primitives the kernel has done.
@@ -1454,8 +1464,8 @@ static bool rover_runner_pin_number(const p8 address_to line, positive length, p
 //      One line the compositor said: a chord's key_ name, a button's word, or a pin's start.
 static fn rover_runner_line(const p8 address_to line, positive length)
 {
-        static const char address_to const buttons[6] = {"launcher_button", "volume_button", "mic_button",
-                                                        "notices_button", "tray_double", null};
+        static const string_address buttons[] = {"launcher_button", "volume_button", "mic_button",
+                                                 "notices_button", "tray_double"};
 
         for (positive at = 0; at < rover_runner.key_count; at++)
                 if (rover_bytes_are(line, length, (const char address_to)rover_runner.keys[at].name))
@@ -1463,12 +1473,15 @@ static fn rover_runner_line(const p8 address_to line, positive length)
                         (void)rover_runner_post(64, null, 0, rover_runner.keys[at].chord);
                         return;
                 }
-        for (positive at = 0; buttons[at]; at++)
-                if (rover_bytes_are(line, length, buttons[at]))
+        {
+                positive button = memory_table_lookup(line, length, buttons);
+
+                if (button < array_count(buttons))
                 {
-                        (void)rover_runner_post(71, null, 0, (b64)at);
+                        (void)rover_runner_post(71, null, 0, (b64)button);
                         return;
                 }
+        }
         if (length > 10 && !memory_compare(line, "pin_start_", 10))
         {
                 p8 slot_text[ROVER_PIN_DIGITS + 1], path[48];
@@ -1761,11 +1774,11 @@ static fn rover_runner_find_everys(void)
 //      The boot event, once a boot: the verdict (live, disk or ask) and the disk's name.
 static fn rover_runner_boot_event(const p8 address_to word)
 {
-        //      Each verdict a literal of its own: string_has_prefix measures its literal, and a pointer's would be 8.
-        b64 verdict = string_has_prefix((string_address)word, "live") ? 0 : string_has_prefix((string_address)word, "disk") ? 1
-                    : string_has_prefix((string_address)word, "ask")  ? 2 : -1;
-
+        static const string_address verdicts[] = {"live", "disk", "ask"};
         string_address disk = string_first_of(word, ' ');
+        positive word_len = disk ? (positive)(disk - (string_address)word) : string_length((string_address)word);
+        positive found = memory_table_lookup(word, word_len, verdicts);
+        b64 verdict = found < array_count(verdicts) ? (b64)found : -1;
 
         if (verdict < 0 || !rover_runner_post(101, disk ? (const p8 address_to)(disk + 1) : null, disk ? string_length(disk + 1) : 0, verdict))
                 return;
@@ -1872,14 +1885,18 @@ static fn rover_runner_watched(void)
         bipolar got;
 
         while ((got = system_read_once(rover_runner.watch, buffer, sizeof(buffer))) > 0)
-                for (bipolar at = 0; at < got;)
+                for (bipolar at = 0; at + 16 <= got;)
                 {
                         p32 length = memory_load_unaligned(p32, buffer + at + 12);
+
+                        if (length > (p32)(got - at - 16))
+                                break;
                         string_address name = (string_address)(buffer + at + 16);
                         p8 path[96];
 
                         at += 16 + (bipolar)length;
-                        if (!length || !string_join(path, sizeof(path), "/root/", name))
+                        if (!length || string_length_max(name, length) == length ||
+                            !string_join(path, sizeof(path), "/root/", name))
                                 continue;
                         //      A Settings row's file: its state again, and the setting event by the row's name.
                         p64 bits = rover_runner_settings(path);

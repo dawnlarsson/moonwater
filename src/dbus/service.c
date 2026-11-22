@@ -102,9 +102,12 @@ struct sessionbus_cmsghdr
 
 static void *sessionbus_alloc(void *context, long bytes)
 {
-        long got = sessionbus_call(syscall(mmap), 0, (positive)bytes, 3, 0x22, (positive)-1, 0);
+        long got;
 
         (void)context;
+        if (bytes <= 0)
+                return 0;
+        got = sessionbus_call(syscall(mmap), 0, (positive)bytes, 3, 0x22, (positive)-1, 0);
         return got < 0 && got > -4096 ? 0 : (void *)got;
 }
 
@@ -163,7 +166,7 @@ static struct windows *sessionbus_board_take(void)
 {
         p8 record[256];
         unsigned long inode = 0, size = 0;
-        long file = sessionbus_call(syscall(openat), (positive)AT_FDCWD, (positive)WINDOWS_TABLE, 2 | O_CLOEXEC | O_NOFOLLOW, 0, 0, 0), mapped;
+        long file = sessionbus_call(syscall(openat), (positive)AT_FDCWD, (positive)WINDOWS_TABLE, O_RDWR | O_CLOEXEC | O_NOFOLLOW, 0, 0, 0), mapped;
 
         memory_zero(record, sizeof record);
         // statx of what was opened: its inode at 32 and its size at 40 of the kernel's fixed record
@@ -243,6 +246,8 @@ static void sessionbus_word(const char *path, char *word, unsigned room)
         const char *name = path + sizeof("/root") - 1;
         bipolar handle, got = 0, at = 0;
 
+        if (room == 0)
+                return;
         for (positive k = 0; sessionbus.root[k] && length + 1 < sizeof full; k++)
                 full[length++] = sessionbus.root[k];
         for (positive k = 0; name[k] && length + 1 < sizeof full; k++)
@@ -428,7 +433,7 @@ static long sessionbus_peer_uid(long pid, long uid)
         pos = 6;
         pos += (long)positive_into_string((p8 *)(path + pos), (positive)pid);
         memory_copy_apart(path + pos, "/uid_map", 9);
-        handle = system_open_at(AT_FDCWD, (string_address)path, FILE_READ | O_NONBLOCK | O_CLOEXEC);
+        handle = system_open_at(AT_FDCWD, (string_address)path, FILE_READ | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW);
         if (handle < 0)
                 return uid;
         while (got < (long)sizeof text)
@@ -666,21 +671,37 @@ static b32 sessionbus_main()
 
         for (positive at = 1; at < (positive)program_argument_count(); at++)
         {
+                static const struct
+                {
+                        string_address name;
+                        p8 kind, needs_arg;
+                } bus_opts[] = {
+                    {(string_address) "-s", 1, 1}, {(string_address) "-r", 2, 1},
+                    {(string_address) "-t", 3, 0}, {(string_address) "-i", 4, 1},
+                };
                 string_address option = program_argument(at);
+                positive idx = string_table_lookup(option, bus_opts);
 
-                if (option[0] == '-' && option[1] == 's' && !option[2] && at + 1 < (positive)program_argument_count())
-                        string_copy_bounded((p8 *)sessionbus.path, (string_address)program_argument(++at), sizeof sessionbus.path);
-                else if (option[0] == '-' && option[1] == 'r' && !option[2] && at + 1 < (positive)program_argument_count())
-                        sessionbus.root = (const char *)program_argument(++at);
-                else if (option[0] == '-' && option[1] == 't' && !option[2])
-                        sessionbus_host.trace = sessionbus_trace;
-                else if (option[0] == '-' && option[1] == 'i' && !option[2] && at + 1 < (positive)program_argument_count())
-                        claims[claimed++ & 7] = (const char *)program_argument(++at);
-                else
+                if (idx >= array_count(bus_opts) || (bus_opts[idx].needs_arg && at + 1 >= (positive)program_argument_count()))
                 {
                         string_format(log, (string_address) "sessionbus: [-t] [-i INTERFACE=VERSION] [-s SOCKET] [-r SETTINGS-DIRECTORY]\n");
                         log_flush();
                         return 2;
+                }
+                switch (bus_opts[idx].kind)
+                {
+                case 1:
+                        string_copy_bounded((p8 *)sessionbus.path, (string_address)program_argument(++at), sizeof sessionbus.path);
+                        break;
+                case 2:
+                        sessionbus.root = (const char *)program_argument(++at);
+                        break;
+                case 3:
+                        sessionbus_host.trace = sessionbus_trace;
+                        break;
+                case 4:
+                        claims[claimed++ & 7] = (const char *)program_argument(++at);
+                        break;
                 }
         }
         for (int at = 0; at < DBUS_CLIENTS; at++)
@@ -776,6 +797,10 @@ static b32 sessionbus_main()
 stop:
         for (long slot = 0; slot < DBUS_CLIENTS; slot++)
                 sessionbus_drop(slot);
+        if (sessionbus.signals >= 0)
+                system_close(sessionbus.signals);
+        if (sessionbus.inotify >= 0)
+                system_close(sessionbus.inotify);
         system_close(sessionbus.listen);
         sessionbus_call(syscall(unlinkat), (positive)AT_FDCWD, (positive)sessionbus.path, 0, 0, 0, 0);
         dbus_stop();

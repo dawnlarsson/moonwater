@@ -191,6 +191,11 @@ _Static_assert(sizeof(struct audio_alsa_card_info) == 376, "snd_ctl_card_info");
 #define AUDIO_O_RDWR 02
 #define AUDIO_O_NONBLOCK 04000
 #define AUDIO_O_CLOEXEC 02000000
+#if defined(__aarch64__) || defined(__arm__)
+#define AUDIO_O_NOFOLLOW 0100000
+#else
+#define AUDIO_O_NOFOLLOW 0400000
+#endif
 
 // What the includer is: the kernel's calls.
 static long audio_sys_open(const char *path, int flags);
@@ -383,7 +388,7 @@ AUDIO_API long audio_pcm_open_fill(struct audio_pcm *pcm, long card, long device
 
         memory_zero(pcm, sizeof(*pcm));
         pcm->fd = -1;
-        if (card < 0 || card >= AUDIO_ALSA_CARDS || device < 0 || device >= 256 || rate < 1 || period_at_48000 < 1)
+        if (card < 0 || card >= AUDIO_ALSA_CARDS || device < 0 || device >= 256 || rate < 1 || period_at_48000 < 1 || period_at_48000 > (1 << 20))
                 return AUDIO_EINVAL;
         // Two periods at least: the device is woken when one period has played, so one period of fill would wake it with the buffer empty.
         fill = fill < 2 ? 2 : fill > 8 ? 8 : fill;
@@ -395,7 +400,7 @@ AUDIO_API long audio_pcm_open_fill(struct audio_pcm *pcm, long card, long device
                 int wanted = (int)subdevice;
 
                 audio_alsa_path(control, card, 0, 0, 1);
-                cfd = audio_sys_open(control, AUDIO_O_RDWR | AUDIO_O_CLOEXEC);
+                cfd = audio_sys_open(control, AUDIO_O_RDWR | AUDIO_O_CLOEXEC | AUDIO_O_NOFOLLOW);
                 if (cfd >= 0)
                 {
                         audio_sys_ioctl((int)cfd, AUDIO_ALSA_PCM_PREFER_SUBDEVICE, &wanted);
@@ -403,7 +408,7 @@ AUDIO_API long audio_pcm_open_fill(struct audio_pcm *pcm, long card, long device
                 }
         }
         audio_alsa_path(path, card, device, stream, 0);
-        fd = audio_sys_open(path, AUDIO_O_RDWR | AUDIO_O_NONBLOCK | AUDIO_O_CLOEXEC);
+        fd = audio_sys_open(path, AUDIO_O_RDWR | AUDIO_O_NONBLOCK | AUDIO_O_CLOEXEC | AUDIO_O_NOFOLLOW);
         if (fd < 0)
                 return fd;
 
@@ -759,7 +764,7 @@ AUDIO_API long audio_cards_scan(struct audio_card *cards, long room)
                 int device = -1;
 
                 audio_alsa_path(path, number, 0, 0, 1);
-                fd = audio_sys_open(path, AUDIO_O_RDWR | AUDIO_O_CLOEXEC);
+                fd = audio_sys_open(path, AUDIO_O_RDWR | AUDIO_O_CLOEXEC | AUDIO_O_NOFOLLOW);
                 if (fd < 0)
                         continue;
                 memory_zero(&info, sizeof(info));
@@ -1103,7 +1108,7 @@ AUDIO_API long audio_mixer_prepare(long card, int which, struct audio_mixer_repo
 
         memory_zero(report, sizeof(*report));
         audio_alsa_path(path, card, 0, 0, 1);
-        fd = audio_sys_open(path, AUDIO_O_RDWR | AUDIO_O_CLOEXEC);
+        fd = audio_sys_open(path, AUDIO_O_RDWR | AUDIO_O_CLOEXEC | AUDIO_O_NOFOLLOW);
         if (fd < 0)
                 return fd;
         memory_zero(&list, sizeof(list));
@@ -1243,7 +1248,7 @@ AUDIO_API long audio_jacks_read(long card, struct audio_jacks *jacks)
 
         memory_zero(jacks, sizeof(*jacks));
         audio_alsa_path(path, card, 0, 0, 1);
-        fd = audio_sys_open(path, AUDIO_O_RDWR | AUDIO_O_CLOEXEC);
+        fd = audio_sys_open(path, AUDIO_O_RDWR | AUDIO_O_CLOEXEC | AUDIO_O_NOFOLLOW);
         if (fd < 0)
                 return fd;
         memory_zero(&list, sizeof(list));

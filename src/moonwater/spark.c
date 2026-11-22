@@ -769,19 +769,20 @@ static inline int spark_settings_check(const struct spark_settings *slot)
                 length = entry[4] | (unsigned int)entry[5] << 8;
                 at += SPARK_SETTINGS_ENTRY;
 
+                static const unsigned short list_max_count[SPARK_SETTINGS_LISTS + 1] = {
+                        0, SPARK_SETTINGS_LIST_MOST, SPARK_SETTINGS_LIST_MOST,
+                        SPARK_SETTINGS_LIST_MOST, SPARK_SETTINGS_BIND_MOST,
+                        SPARK_SETTINGS_SECURITY_MOST, SPARK_SETTINGS_GROUPS,
+                };
+                static const unsigned short list_max_length[SPARK_SETTINGS_LISTS + 1] = {
+                        0, SPARK_SETTINGS_TEXT_MOST, SPARK_SETTINGS_TEXT_MOST,
+                        SPARK_SETTINGS_TEXT_MOST, SPARK_SETTINGS_BIND_TEXT_MOST,
+                        SPARK_SETTINGS_TRUST_MOST, SPARK_SETTINGS_GROUP_MOST,
+                };
+
                 if (!list || list > SPARK_SETTINGS_LISTS ||
-                    ++counts[list] > (list == SPARK_SETTINGS_BIND ? SPARK_SETTINGS_BIND_MOST
-                                      : list == SPARK_SETTINGS_SECURITY
-                                          ? SPARK_SETTINGS_SECURITY_MOST
-                                      : list == SPARK_SETTINGS_GROUP
-                                          ? SPARK_SETTINGS_GROUPS
-                                          : SPARK_SETTINGS_LIST_MOST) ||
-                    length > (list == SPARK_SETTINGS_BIND ? SPARK_SETTINGS_BIND_TEXT_MOST
-                              : list == SPARK_SETTINGS_SECURITY
-                                  ? SPARK_SETTINGS_TRUST_MOST
-                              : list == SPARK_SETTINGS_GROUP
-                                  ? SPARK_SETTINGS_GROUP_MOST
-                                  : SPARK_SETTINGS_TEXT_MOST) ||
+                    ++counts[list] > list_max_count[list] ||
+                    length > list_max_length[list] ||
                     slot->length - at < spark_settings_padded(length))
                         return -1;
 
@@ -1048,19 +1049,26 @@ static int spark_stack(struct linux_binprm *bprm, unsigned long *out)
         unsigned long walk = bprm->p;
         unsigned long __user *slot;
         unsigned long bottom;
-        int count = bprm->argc + bprm->envc;
+        unsigned long count;
         unsigned long vdso = (unsigned long)mm->context.vdso;
         unsigned long auxv[] = {AT_SYSINFO_EHDR, vdso, AT_PAGESZ, PAGE_SIZE,
                                 AT_NULL, 0};
         unsigned long *pairs = vdso ? auxv : auxv + 2;
         unsigned long words = vdso ? 6 : 4;
-        int i;
+        unsigned long need, i;
+
+        if (bprm->argc < 0 || bprm->envc < 0)
+                return -EINVAL;
+        count = (unsigned long)bprm->argc + (unsigned long)bprm->envc;
+        need = (count + 3 + words) * sizeof(unsigned long);
+        if (need >= walk)
+                return -EFAULT;
 
         mm->arg_end = mm->env_start = mm->env_end = walk;
 
         // A count, every pointer, the two nulls that end each list, and the
         // auxiliary vector.
-        bottom = (walk - ((unsigned long)(count + 3) + words) * sizeof(unsigned long)) & ~15UL;
+        bottom = (walk - need) & ~15UL;
         slot = (unsigned long __user *)bottom;
 
         if (put_user((unsigned long)bprm->argc, slot++))
@@ -2157,8 +2165,9 @@ static COLD void __init settings_start(void)
         else
         {
                 settings_current = kmemdup(slots + newest, SPARK_SETTINGS_SLOT, GFP_KERNEL);
-                pr_info("[moonwater] " "settings: slot %d, generation %llu\n", newest,
-                        (unsigned long long)slots[newest].generation);
+                if (settings_current)
+                        pr_info("[moonwater] " "settings: slot %d, generation %llu\n", newest,
+                                (unsigned long long)slots[newest].generation);
         }
 
         kfree(slots);

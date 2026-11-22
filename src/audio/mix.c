@@ -217,7 +217,10 @@ AUDIO_API long audio_format_bytes(long format)
 // The byte that is silence in a format.
 AUDIO_API unsigned char audio_format_silence(long format)
 {
-        return format == AUDIO_FORMAT_U8 ? 0x80 : format == AUDIO_FORMAT_ALAW ? 0xd5 : format == AUDIO_FORMAT_ULAW ? 0xff : 0;
+        static const unsigned char silence[AUDIO_FORMATS] = {
+            [AUDIO_FORMAT_U8] = 0x80, [AUDIO_FORMAT_ALAW] = 0xd5, [AUDIO_FORMAT_ULAW] = 0xff};
+
+        return format >= 0 && format < AUDIO_FORMATS ? silence[format] : 0;
 }
 
 // Kept for the callers that name it: the two laws of G.711 are arithmetic in the library's pcm_widen now, and nothing is made here.
@@ -261,8 +264,16 @@ AUDIO_API void audio_decode(long format, const unsigned char *src, long frames, 
                 f32_planes_from_law(dst, src, (unsigned long)frames, (unsigned long)channels, format == AUDIO_FORMAT_ULAW);
                 return;
         }
-        kind = format == AUDIO_FORMAT_U8 ? 0 : format == AUDIO_FORMAT_S16BE ? 1 : format == AUDIO_FORMAT_S32BE || format == AUDIO_FORMAT_F32BE ? 2 :
-               format == AUDIO_FORMAT_S24LE ? 3 : format == AUDIO_FORMAT_S24BE ? 4 : format == AUDIO_FORMAT_S24_32LE ? 5 : format == AUDIO_FORMAT_S24_32BE ? 6 : 7;
+        {
+                static const unsigned char widen_kind[AUDIO_FORMATS] = {
+                    [AUDIO_FORMAT_U8] = 0, [AUDIO_FORMAT_ALAW] = 7, [AUDIO_FORMAT_ULAW] = 7,
+                    [AUDIO_FORMAT_S16LE] = 7, [AUDIO_FORMAT_S16BE] = 1, [AUDIO_FORMAT_F32LE] = 7,
+                    [AUDIO_FORMAT_F32BE] = 2, [AUDIO_FORMAT_S32LE] = 7, [AUDIO_FORMAT_S32BE] = 2,
+                    [AUDIO_FORMAT_S24LE] = 3, [AUDIO_FORMAT_S24BE] = 4, [AUDIO_FORMAT_S24_32LE] = 5,
+                    [AUDIO_FORMAT_S24_32BE] = 6};
+
+                kind = format >= 0 && format < AUDIO_FORMATS ? widen_kind[format] : 7;
+        }
         if (kind > 6)
         {
                 for (long c = 0; c < channels; c++)
@@ -389,7 +400,7 @@ AUDIO_API long audio_encode(long format, unsigned char *dst, long frames, long c
         static union { float f[2 * AUDIO_BLOCK]; unsigned char b[2 * AUDIO_BLOCK * 4]; } pair;
 
         // Only the card's formats are made: any other would be written four bytes a sample and answered as its own width.
-        if (frames < 1 || channels < 1 || channels > AUDIO_CHANNELS_MAX ||
+        if (frames < 1 || channels < 1 || channels > AUDIO_CHANNELS_MAX || !bytes || frames > 0x7fffffffL / (channels * bytes) ||
             !(format == AUDIO_FORMAT_S16LE || format == AUDIO_FORMAT_S24LE || format == AUDIO_FORMAT_S24_32LE ||
               format == AUDIO_FORMAT_S32LE || format == AUDIO_FORMAT_F32LE))
                 return 0;
@@ -578,48 +589,30 @@ AUDIO_API int audio_remix_build(float matrix[2][AUDIO_CHANNELS_MAX], long channe
                 matrix[0][0] = matrix[1][1] = 1.0f;
                 return 1;
         }
+        static const struct
+        {
+                signed char side;
+                float weight;
+        } remix_pos[12] = {
+            [AUDIO_POSITION_MONO] = {2, 1.0f},
+            [AUDIO_POSITION_FRONT_LEFT] = {0, 1.0f},
+            [AUDIO_POSITION_FRONT_RIGHT] = {1, 1.0f},
+            [AUDIO_POSITION_FRONT_CENTER] = {2, 0.70710678f},
+            [AUDIO_POSITION_REAR_CENTER] = {2, 0.5f},
+            [AUDIO_POSITION_REAR_LEFT] = {0, 0.70710678f},
+            [AUDIO_POSITION_REAR_RIGHT] = {1, 0.70710678f},
+            [AUDIO_POSITION_LFE] = {-1, 0.0f},
+            [AUDIO_POSITION_FRONT_LEFT_OF_CENTER] = {0, 1.0f},
+            [AUDIO_POSITION_FRONT_RIGHT_OF_CENTER] = {1, 1.0f},
+            [AUDIO_POSITION_SIDE_LEFT] = {0, 0.70710678f},
+            [AUDIO_POSITION_SIDE_RIGHT] = {1, 0.70710678f},
+        };
         for (long c = 0; c < channels; c++)
         {
-                int position = map[c], side = -1;
-                float weight = 1.0f;
+                int position = map[c];
+                int side = position >= 0 && position < 12 ? remix_pos[position].side : (int)(c & 1);
+                float weight = position >= 0 && position < 12 ? remix_pos[position].weight : 1.0f;
 
-                switch (position)
-                {
-                case AUDIO_POSITION_MONO:
-                        side = 2;
-                        break;
-                case AUDIO_POSITION_FRONT_LEFT:
-                case AUDIO_POSITION_FRONT_LEFT_OF_CENTER:
-                        side = 0;
-                        break;
-                case AUDIO_POSITION_FRONT_RIGHT:
-                case AUDIO_POSITION_FRONT_RIGHT_OF_CENTER:
-                        side = 1;
-                        break;
-                case AUDIO_POSITION_FRONT_CENTER:
-                        side = 2;
-                        weight = 0.70710678f;
-                        break;
-                case AUDIO_POSITION_REAR_CENTER:
-                        side = 2;
-                        weight = 0.5f;
-                        break;
-                case AUDIO_POSITION_REAR_LEFT:
-                case AUDIO_POSITION_SIDE_LEFT:
-                        side = 0;
-                        weight = 0.70710678f;
-                        break;
-                case AUDIO_POSITION_REAR_RIGHT:
-                case AUDIO_POSITION_SIDE_RIGHT:
-                        side = 1;
-                        weight = 0.70710678f;
-                        break;
-                case AUDIO_POSITION_LFE:
-                        break;
-                default:
-                        side = (int)(c & 1);
-                        break;
-                }
                 if (side == 2)
                         matrix[0][c] = matrix[1][c] = weight;
                 else if (side >= 0)

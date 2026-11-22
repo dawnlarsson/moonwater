@@ -791,7 +791,7 @@ static int pulse_enqueue(struct pulse_client *c, unsigned long channel, const un
                                     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
         unsigned long at;
 
-        if (pulse_out_fill(c) + 20 + length > PULSE_OUT)
+        if (length < 0 || length > PULSE_OUT - 20 || pulse_out_fill(c) + 20 + length > PULSE_OUT)
                 return PULSE_DEAD;
         at = (unsigned long)c->out_tail % PULSE_OUT;
         // The descriptor is 20 bytes: a constant-size copy the compiler inlines, unless it straddles the end of the ring.
@@ -815,8 +815,13 @@ static int pulse_enqueue(struct pulse_client *c, unsigned long channel, const un
 */
 static int pulse_table_grow(struct pulse *p, void **table, long *slots, long size)
 {
-        long next = *slots ? *slots * 2 : 8;
-        void *memory = p->host.alloc(p->host.context, next * size);
+        long next;
+        void *memory;
+
+        if (*slots < 0 || *slots > (1l << 18) || size <= 0)
+                return 0;
+        next = *slots ? *slots * 2 : 8;
+        memory = p->host.alloc(p->host.context, next * size);
 
         if (!memory)
                 return 0;
@@ -1271,9 +1276,7 @@ static void pulse_source_retable(struct pulse *p, long slot)
 
 static int pulse_record_format_ok(long format)
 {
-        return format == AUDIO_FORMAT_U8 || format == AUDIO_FORMAT_S16LE || format == AUDIO_FORMAT_S16BE || format == AUDIO_FORMAT_F32LE ||
-               format == AUDIO_FORMAT_F32BE || format == AUDIO_FORMAT_S32LE || format == AUDIO_FORMAT_S32BE || format == AUDIO_FORMAT_S24LE ||
-               format == AUDIO_FORMAT_S24BE || format == AUDIO_FORMAT_S24_32LE || format == AUDIO_FORMAT_S24_32BE;
+        return format >= 0 && format < AUDIO_FORMATS && format != AUDIO_FORMAT_ALAW && format != AUDIO_FORMAT_ULAW;
 }
 
 /*
@@ -1282,33 +1285,20 @@ static int pulse_record_format_ok(long format)
 */
 static long pulse_record_encode(unsigned char *dst, long format, long frames, long channels, const float *left, const float *right)
 {
+        static const signed char be_to_le[AUDIO_FORMATS] = {
+            [AUDIO_FORMAT_S16BE] = AUDIO_FORMAT_S16LE,
+            [AUDIO_FORMAT_F32BE] = AUDIO_FORMAT_F32LE,
+            [AUDIO_FORMAT_S32BE] = AUDIO_FORMAT_S32LE,
+            [AUDIO_FORMAT_S24BE] = AUDIO_FORMAT_S24LE,
+            [AUDIO_FORMAT_S24_32BE] = AUDIO_FORMAT_S24_32LE,
+        };
         long samples = frames * channels, base = format, width, bytes;
         int swap = 0;
 
-        switch (format)
+        if (format >= 0 && format < AUDIO_FORMATS && be_to_le[format])
         {
-        case AUDIO_FORMAT_S16BE:
-                base = AUDIO_FORMAT_S16LE;
+                base = be_to_le[format];
                 swap = 1;
-                break;
-        case AUDIO_FORMAT_F32BE:
-                base = AUDIO_FORMAT_F32LE;
-                swap = 1;
-                break;
-        case AUDIO_FORMAT_S32BE:
-                base = AUDIO_FORMAT_S32LE;
-                swap = 1;
-                break;
-        case AUDIO_FORMAT_S24BE:
-                base = AUDIO_FORMAT_S24LE;
-                swap = 1;
-                break;
-        case AUDIO_FORMAT_S24_32BE:
-                base = AUDIO_FORMAT_S24_32LE;
-                swap = 1;
-                break;
-        default:
-                break;
         }
         if (format == AUDIO_FORMAT_U8)
         {

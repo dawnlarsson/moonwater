@@ -265,12 +265,13 @@ static p8 address_to rover_pool(struct rover_build address_to build)
 static p32 rover_pool_string(struct rover_build address_to build, const p8 address_to bytes, positive length)
 {
         p32 at = (build->pool + 3) & ~3u;
-        p16 size = (p16)length;
+        p16 size;
 
         if (!length)
                 return 0;
-        if (at + 2 + length + 1 > ROVER_POOL_MOST)
+        if (length > ROVER_POOL_MOST - 3 || at > ROVER_POOL_MOST - 3 - length)
                 return rover_refused(build, "too many words and notes for one table", null, null), 0;
+        size = (p16)length;
         //      The alignment's bytes are zero, so a text makes the same table whatever was compiled before it.
         memory_zero(rover_pool(build) + build->pool, at - build->pool);
         memory_copy(rover_pool(build) + at, &size, 2);
@@ -476,7 +477,7 @@ static bool rover_literal(struct rover_build address_to build, const struct rove
                                 //      was 25 minutes), and so did a fraction of one.
                                 if (whole > ROVER_DURATION_MOST / one)
                                         return rover_refused(build, "", word, " is longer than a day");
-                                if (one % scale ? (part * one) % scale : 0)
+                                if (one % scale ? (part > ROVER_DIGITS_MOST / one || (part * one) % scale) : 0)
                                         return rover_refused(build, "", word, " is finer than a nanosecond");
                                 *into = whole * one + (one % scale ? part * one / scale : part * (one / scale));
                                 if (*into > ROVER_DURATION_MOST)
@@ -521,18 +522,16 @@ static bool rover_literal(struct rover_build address_to build, const struct rove
                                 continue;
                         if (at == length)
                         {
-                                for (positive k = 0; k < array_count(rover_keys); k++)
-                                        if (rover_bytes_are(text + start, at - start, rover_keys[k].name))
-                                        {
-                                                *into = modifiers << 16 | rover_keys[k].code;
-                                                return true;
-                                        }
+                                positive k = memory_table_lookup(text + start, at - start, rover_keys);
+
+                                if (k < array_count(rover_keys))
+                                {
+                                        *into = modifiers << 16 | rover_keys[k].code;
+                                        return true;
+                                }
                                 return rover_refused(build, "", word, " ends in no key a chord can name");
                         }
-                        positive k;
-                        for (k = 0; k < array_count(rover_modifiers); k++)
-                                if (rover_bytes_are(text + start, at - start, rover_modifiers[k].name))
-                                        break;
+                        positive k = memory_table_lookup(text + start, at - start, rover_modifiers);
                         if (k == array_count(rover_modifiers))
                                 return rover_refused(build, "", word, " has a modifier that is not ctrl, alt, shift or super");
                         modifiers |= rover_modifiers[k].bit;
@@ -666,10 +665,9 @@ struct rover_side
 
 static const struct rover_state_row address_to rover_state_named(const p8 address_to text, positive length)
 {
-        for (positive at = 0; at < ROVER_STATES; at++)
-                if (rover_bytes_are(text, length, rover_states[at].name))
-                        return &rover_states[at];
-        return null;
+        positive at = memory_table_lookup(text, length, rover_states);
+
+        return at < ROVER_STATES ? &rover_states[at] : null;
 }
 
 static bool rover_constant(struct rover_build address_to build, const struct rover_word address_to word, p8 type,
@@ -722,9 +720,7 @@ static bool rover_read_call(struct rover_build address_to build, const struct ro
         memory_zero(&made, sizeof(made));
         if (word->text[word->length - 1] != ')')
                 return rover_refused(build, "", word, " opens a call it does not close");
-        for (function = 0; function < ROVER_FUNCTIONS; function++)
-                if (rover_bytes_are(word->text, name, rover_functions[function].name))
-                        break;
+        function = memory_table_lookup(word->text, name, rover_functions);
         if (function == ROVER_FUNCTIONS)
         {
                 struct rover_word head = {word->text, (p32)name, 0, {0}};
@@ -886,10 +882,9 @@ static b32 rover_operator(const struct rover_word address_to word)
 {
         if (word->quoted)
                 return -1;
-        for (positive at = 0; at < array_count(rover_operators); at++)
-                if (rover_is(word, rover_operators[at].word))
-                        return rover_operators[at].op;
-        return -1;
+        positive at = memory_table_lookup(word->text, word->length, rover_operators);
+
+        return at < array_count(rover_operators) ? rover_operators[at].op : -1;
 }
 
 static const char address_to rover_operator_word(p8 op)
@@ -1905,6 +1900,8 @@ static bool rover_statement(struct rover_build address_to build)
 
                 if (!rover_header(build, 2))
                         return false;
+                if (!row)
+                        return rover_refused(build, "", keyword, " is no event in this schema");
                 if (build->words != 2)
                         return rover_refused(build, "", keyword, rover_is(keyword, "every") ? " takes one duration"
                                                                                            : " takes one clock time");
@@ -1956,45 +1953,61 @@ static bool rover_statement(struct rover_build address_to build)
                 rule->limit_ms = (p32)(value / 1000000);
                 return true;
         }
-        if (rover_is(keyword, "once") || rover_is(keyword, "off") || rover_is(keyword, "take"))
         {
-                p8 slot = rover_is(keyword, "once") ? 5 : rover_is(keyword, "off") ? 6 : 7;
+                static const struct
+                {
+                        string_address name;
+                        p8 slot;
+                        p8 flag;
+                } header_flags[] = {
+                    {"once", 5, ROVER_RULE_ONCE},
+                    {"off", 6, ROVER_RULE_OFF},
+                    {"take", 7, ROVER_RULE_TAKE},
+                };
+                positive found = memory_table_lookup(keyword->text, keyword->length, header_flags);
 
-                if (!rover_header(build, slot))
-                        return false;
-                if (build->words != 1)
-                        return rover_refused(build, "", keyword, " takes nothing after it");
-                rule->flags |= slot == 5 ? ROVER_RULE_ONCE : slot == 6 ? ROVER_RULE_OFF : ROVER_RULE_TAKE;
-                return true;
+                if (found < array_count(header_flags))
+                {
+                        if (!rover_header(build, header_flags[found].slot))
+                                return false;
+                        if (build->words != 1)
+                                return rover_refused(build, "", keyword, " takes nothing after it");
+                        rule->flags |= header_flags[found].flag;
+                        return true;
+                }
         }
-        if (build->header < 2 && (rover_is(keyword, "if") || rover_is(keyword, "do") || rover_is(keyword, "run") ||
-                                  rover_is(keyword, "tool") || rover_is(keyword, "emit") || rover_is(keyword, "set") ||
-                                  rover_is(keyword, "else")))
-                return rover_refused(build, "", keyword, " before the rule's on or when");
-        if (rover_is(keyword, "if"))
         {
-                if (build->stage > ROVER_STAGE_IF)
-                        return rover_refused(build, "an if after an action: the conditions come first", null, null);
-                build->stage = ROVER_STAGE_IF;
-                return rover_note_flush(build, build->slot++) && rover_read_condition(build, rule, 1);
-        }
-        if (rover_is(keyword, "do") || rover_is(keyword, "run") || rover_is(keyword, "tool") ||
-            rover_is(keyword, "emit") || rover_is(keyword, "set"))
-        {
-                if (build->stage < ROVER_STAGE_THEN)
-                        build->stage = ROVER_STAGE_THEN;
-                return rover_note_flush(build, build->slot++) && rover_read_action(build, rule);
-        }
-        if (rover_is(keyword, "else"))
-        {
-                if (build->words != 1)
-                        return rover_refused(build, "else stands alone; its actions follow on their own lines", null, null);
-                if (build->stage != ROVER_STAGE_THEN)
-                        return rover_refused(build, build->stage == ROVER_STAGE_ELSE ? "a second else"
-                                                                                     : "an else before any action",
-                                             null, null);
-                build->stage = ROVER_STAGE_ELSE;
-                return rover_note_flush(build, build->slot++);
+                static const string_address action_words[] = {"do", "run", "tool", "emit", "set"};
+                bool is_action = memory_table_lookup(keyword->text, keyword->length, action_words) < array_count(action_words);
+                bool is_if = rover_is(keyword, "if");
+                bool is_else = rover_is(keyword, "else");
+
+                if (build->header < 2 && (is_if || is_action || is_else))
+                        return rover_refused(build, "", keyword, " before the rule's on or when");
+                if (is_if)
+                {
+                        if (build->stage > ROVER_STAGE_IF)
+                                return rover_refused(build, "an if after an action: the conditions come first", null, null);
+                        build->stage = ROVER_STAGE_IF;
+                        return rover_note_flush(build, build->slot++) && rover_read_condition(build, rule, 1);
+                }
+                if (is_action)
+                {
+                        if (build->stage < ROVER_STAGE_THEN)
+                                build->stage = ROVER_STAGE_THEN;
+                        return rover_note_flush(build, build->slot++) && rover_read_action(build, rule);
+                }
+                if (is_else)
+                {
+                        if (build->words != 1)
+                                return rover_refused(build, "else stands alone; its actions follow on their own lines", null, null);
+                        if (build->stage != ROVER_STAGE_THEN)
+                                return rover_refused(build, build->stage == ROVER_STAGE_ELSE ? "a second else"
+                                                                                             : "an else before any action",
+                                                     null, null);
+                        build->stage = ROVER_STAGE_ELSE;
+                        return rover_note_flush(build, build->slot++);
+                }
         }
         if (rover_is(keyword, "rule"))
                 return rover_refused(build, "a rule line stands at the left edge, not inside a rule", null, null);
@@ -2053,6 +2066,8 @@ static bool rover_split(struct rover_build address_to build, const p8 address_to
                         {
                                 if (line[at] == '\\' && at + 1 < length && (line[at + 1] == '"' || line[at + 1] == '\\'))
                                         at++;
+                                if (build->scratch_used + made >= sizeof(build->scratch))
+                                        return rover_refused(build, "a line longer than 4096 bytes", null, null);
                                 into[made++] = line[at++];
                         }
                         if (at == length)
@@ -2405,9 +2420,13 @@ static fn rover_action_put(struct rover_text address_to text, const struct rover
         switch (action->kind)
         {
         case ROVER_DO:
+        {
+                const struct rover_primitive_row address_to prim = rover_primitive_find(action->id);
+
                 rover_puts(text, "do ");
-                rover_puts(text, rover_primitive_find(action->id)->name);
+                rover_puts(text, prim ? prim->name : "?");
                 break;
+        }
         case ROVER_RUN:
                 rover_puts(text, "run ");
                 rover_operand_put(text, table, event, table->argument[action->argument]);
@@ -2421,9 +2440,13 @@ static fn rover_action_put(struct rover_text address_to text, const struct rover
                 rover_puts(text, "emit cue");
                 break;
         case ROVER_SET:
+        {
+                const struct rover_switch_row address_to sw = rover_switch_find(action->id);
+
                 rover_puts(text, "set ");
-                rover_puts(text, rover_switch_find(action->id)->name);
+                rover_puts(text, sw ? sw->name : "?");
                 break;
+        }
         }
         for (positive at = first; at < action->count; at++)
         {
@@ -2725,6 +2748,8 @@ static fn rover_graph(struct rover_text address_to text, const struct rover_tabl
                 positive node = 1, conditions = 0, first_action, first_else;
 
                 memory_copy(&name_length, table->pool + rule->name, 2);
+                if (name_length > ROVER_NAME_MOST)
+                        name_length = ROVER_NAME_MOST;
                 memory_copy(name, table->pool + rule->name + 2, name_length);
 
                 struct rover_text label = {label_bytes, 0, sizeof(label_bytes), false};
@@ -2859,9 +2884,11 @@ static bool rover_assign(struct rover_build address_to build, p8 address_to addr
                 return false;
         if (rover_kind_is_word(rover_types[state->type].kind))
         {
-                pages[state->page][state->offset] = (p8)value.length;
-                memory_copy(pages[state->page] + state->offset + 1, value.text, value.length);
-                pages[state->page][state->offset + 1 + value.length] = 0;
+                positive copy_len = value.length > ROVER_WORD_MOST ? ROVER_WORD_MOST : value.length;
+
+                pages[state->page][state->offset] = (p8)copy_len;
+                memory_copy(pages[state->page] + state->offset + 1, value.text, copy_len);
+                pages[state->page][state->offset + 1 + copy_len] = 0;
         }
         else
         {
@@ -3090,20 +3117,42 @@ static b32 rover_verb_test(string_address address_to arguments, positive count)
 
 static b32 rover_verb(string_address address_to arguments, positive count)
 {
+        enum
+        {
+                ROVER_CMD_SCHEMA,
+                ROVER_CMD_CHECK,
+                ROVER_CMD_TEST,
+                ROVER_CMD_PRINT,
+                ROVER_CMD_SHOW,
+                ROVER_CMD_COMPILE,
+        };
+        static const struct
+        {
+                string_address name;
+                p8 id;
+        } rover_verbs[] = {
+            {"schema", ROVER_CMD_SCHEMA},
+            {"check", ROVER_CMD_CHECK},
+            {"test", ROVER_CMD_TEST},
+            {"print", ROVER_CMD_PRINT},
+            {"show", ROVER_CMD_SHOW},
+            {"compile", ROVER_CMD_COMPILE},
+        };
         string_address what = count > 2 ? arguments[2] : null;
+        positive found = what ? string_table_lookup(what, rover_verbs) : array_count(rover_verbs);
         struct rover_table table;
         struct rover_refusal refusal;
         struct rover_text text = {rover_out_bytes, 0, sizeof(rover_out_bytes), false};
 
-        if (!what)
+        if (found >= array_count(rover_verbs))
                 return rover_usage();
-        if (string_equals(what, "schema"))
+        switch (rover_verbs[found].id)
         {
+        case ROVER_CMD_SCHEMA:
                 log((address_any)rover_schema_text, sizeof(rover_schema_text) - 1);
                 log_flush();
                 return 0;
-        }
-        if (string_equals(what, "check"))
+        case ROVER_CMD_CHECK:
         {
                 b32 status = 0;
 
@@ -3118,17 +3167,20 @@ static b32 rover_verb(string_address address_to arguments, positive count)
                 log_flush();
                 return status;
         }
-        if (string_equals(what, "test"))
+        case ROVER_CMD_TEST:
                 return rover_verb_test(arguments, count);
-        if (!string_equals(what, "print") && !string_equals(what, "show") && !string_equals(what, "compile"))
-                return rover_usage();
-        if (count != (string_equals(what, "compile") ? 5u : 4u))
+        case ROVER_CMD_PRINT:
+        case ROVER_CMD_SHOW:
+        case ROVER_CMD_COMPILE:
+                break;
+        }
+        if (count != (rover_verbs[found].id == ROVER_CMD_COMPILE ? 5u : 4u))
                 return rover_usage();
         if (!rover_verb_compile(arguments[3]))
                 return 1;
         if (!rover_check(rover_built(&rover_work), rover_work.size, &table, &refusal))
                 return 1;
-        if (string_equals(what, "compile"))
+        if (rover_verbs[found].id == ROVER_CMD_COMPILE)
         {
                 bipolar handle = system_open_output_at(AT_FDCWD, arguments[4], true, 0644);
 
@@ -3144,7 +3196,7 @@ static b32 rover_verb(string_address address_to arguments, positive count)
                 system_close(handle);
                 return 0;
         }
-        if (string_equals(what, "print"))
+        if (rover_verbs[found].id == ROVER_CMD_PRINT)
                 rover_print(&text, &table);
         else
                 rover_graph(&text, &table);

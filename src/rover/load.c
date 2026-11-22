@@ -129,7 +129,8 @@ static bool rover_load_safe(void)
 
                         if (!found)
                                 break;
-                        if (found == line || found[-1] == ' ')
+                        if ((found == line || found[-1] == ' ') &&
+                            (found + 16 == stop || found[16] == ' ' || found[16] == '\n'))
                                 return true;
                         at = found + 1;
                 }
@@ -149,7 +150,7 @@ static bool rover_load_add(const p8 address_to text, positive length, string_add
                         string_format(log_error, "rover: %s:%p: %s\n", said, (positive)rover_load_one.line, rover_load_one.why);
                 return false;
         }
-        if (rover_load_used + length + 1 > sizeof(rover_load_set))
+        if (length >= sizeof(rover_load_set) || rover_load_used > sizeof(rover_load_set) - 1 - length)
         {
                 if (say)
                         string_format(log_error, "rover: %s is past what one table holds\n", said);
@@ -197,7 +198,9 @@ static bipolar rover_load_compile(bool say)
                 const char address_to name;
 
                 (void)rover_image_file(at, &name);
-                string_copy(names[count++], (string_address)name);
+                if (count < ROVER_FILES_MOST &&
+                    string_copy_bounded(names[count], (string_address)name, ROVER_FILE_NAME_MOST) < ROVER_FILE_NAME_MOST)
+                        count++;
         }
         handle = rover_load_was_safe ? -1
                                      : system_open_at(AT_FDCWD, ROVER_PERSON_RULES, FILE_READ | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
@@ -225,20 +228,25 @@ static bipolar rover_load_compile(bool say)
                 bipolar got;
 
                 while ((got = system_call_3(syscall(getdents64), (positive)handle, (positive)buffer, sizeof(buffer))) > 0)
-                        for (bipolar at = 0; at < got;)
+                        for (bipolar at = 0; at + 20 <= got;)
                         {
+                                p16 reclen = memory_load_unaligned(p16, buffer + at + 16);
+
+                                if (reclen < 20 || at + (bipolar)reclen > got)
+                                        break;
                                 string_address name = (string_address)(buffer + at + 19);
-                                positive size = string_length(name);
+                                positive room = (positive)reclen - 19;
+                                positive size = string_length_max(name, room);
                                 bool known = false;
 
-                                at += memory_load_unaligned(p16, buffer + at + 16);
-                                if (size < 7 || size >= ROVER_FILE_NAME_MOST || name[0] == '.' ||
+                                at += reclen;
+                                if (size == room || size < 7 || size >= ROVER_FILE_NAME_MOST || name[0] == '.' ||
                                     memory_compare(name + size - 6, ".rover", 6) || count == ROVER_FILES_MOST)
                                         continue;
                                 for (positive k = 0; k < count; k++)
                                         known = known || string_equals((string_address)names[k], name);
-                                if (!known)
-                                        string_copy(names[count++], name);
+                                if (!known && string_copy_bounded(names[count], name, ROVER_FILE_NAME_MOST) < ROVER_FILE_NAME_MOST)
+                                        count++;
                         }
                 system_close(handle);
         }
@@ -347,6 +355,7 @@ static bipolar rover_load_now(bipolar device, bool say)
                               (positive)request.table, (positive)files, (positive)request.rules,
                               (positive)request.kernel_rules);
         //      What was loaded, for the runner to read the kernel's records by (rover_runner_adopt_loaded).
+        if (rover_load_all.size <= ROVER_TABLE_MOST)
         {
                 static p64 words[(ROVER_TABLE_MOST + 8) / 8];
                 p8 address_to bytes = (p8 address_to)words;
@@ -411,7 +420,11 @@ static b32 rover_verb_state(bipolar device)
                 rover_puts(&text, state->name);
                 rover_puts(&text, " ");
                 if (rover_kind_is_word(rover_types[state->type].kind))
-                        rover_literal_put(&text, state->type, 0, page + state->offset + 1, page[state->offset]);
+                {
+                        positive len = page[state->offset] > ROVER_WORD_MOST ? ROVER_WORD_MOST : page[state->offset];
+
+                        rover_literal_put(&text, state->type, 0, page + state->offset + 1, len);
+                }
                 else
                 {
                         memory_copy(&value, page + state->offset, 4);
@@ -420,6 +433,7 @@ static b32 rover_verb_state(bipolar device)
                 line[text.used] = 0;
                 string_format(log, "%s\n", line);
         }
+        (void)system_call_2(syscall(munmap), (positive)page, ROVER_PAGE_BYTES);
         return 0;
 }
 
@@ -449,7 +463,8 @@ static fn rover_record_event(const struct rover_record address_to record, struct
         if (record->word_field < ROVER_FIELDS)
         {
                 event->field[record->word_field].text = record->word;
-                event->field[record->word_field].length = record->word_length;
+                event->field[record->word_field].length =
+                    record->word_length > ROVER_RECORD_WORD_MOST ? ROVER_RECORD_WORD_MOST : record->word_length;
         }
 }
 
@@ -470,7 +485,10 @@ static b32 rover_verb_watch(bipolar device, positive most)
                 p64 woken = system_clock_ns(1);
 
                 if (got != sizeof(head))
+                {
+                        (void)system_call_2(syscall(munmap), (positive)map, ROVER_MAP_BYTES);
                         return host_fail("rover watch", got < 0 ? got : -5);
+                }
                 if (head - tail > ROVER_RING_SLOTS)
                 {
                         string_format(log, "rover: %p records were overtaken before they were read\n",
@@ -507,45 +525,76 @@ static b32 rover_verb_watch(bipolar device, positive most)
                                    "average, %p ns at worst\n",
                               (positive)seen, (positive)(decide_total / seen), (positive)(wake_total / seen),
                               (positive)wake_worst);
+        (void)system_call_2(syscall(munmap), (positive)map, ROVER_MAP_BYTES);
         return 0;
 }
+
+static b32 rover_verb_load_cmd(bipolar device, string_address address_to arguments, positive count)
+{
+        (void)arguments;
+        (void)count;
+        return rover_load_now(device, true) < 0;
+}
+
+static b32 rover_verb_unload_cmd(bipolar device, string_address address_to arguments, positive count)
+{
+        struct rover_control request;
+        bipolar failed;
+
+        (void)arguments;
+        (void)count;
+        memory_zero(&request, sizeof(request));
+        request.op = ROVER_OP_UNLOAD;
+        failed = rover_load_ask(device, &request);
+        return failed < 0 ? host_fail("rover unload", failed) : 0;
+}
+
+static b32 rover_verb_status_cmd(bipolar device, string_address address_to arguments, positive count)
+{
+        (void)arguments;
+        (void)count;
+        return rover_verb_status(device);
+}
+
+static b32 rover_verb_state_cmd(bipolar device, string_address address_to arguments, positive count)
+{
+        (void)arguments;
+        (void)count;
+        return rover_verb_state(device);
+}
+
+static b32 rover_verb_watch_cmd(bipolar device, string_address address_to arguments, positive count)
+{
+        positive most = count > 3 ? string_to_positive(arguments[3]) : 0;
+
+        return rover_verb_watch(device, most);
+}
+
+static const struct
+{
+        string_address name;
+        b32 (address_to run)(bipolar, string_address address_to, positive);
+} rover_kernel_verbs[] = {
+    {"load", rover_verb_load_cmd},
+    {"unload", rover_verb_unload_cmd},
+    {"status", rover_verb_status_cmd},
+    {"state", rover_verb_state_cmd},
+    {"watch", rover_verb_watch_cmd},
+};
 
 static b32 rover_kernel_verb(string_address address_to arguments, positive count)
 {
         string_address what = count > 2 ? arguments[2] : null;
+        positive verb = what ? string_table_lookup(what, rover_kernel_verbs) : array_count(rover_kernel_verbs);
         bipolar device;
         b32 answer;
 
-        if (!what || (!string_equals(what, "load") && !string_equals(what, "unload") && !string_equals(what, "status") &&
-                      !string_equals(what, "state") && !string_equals(what, "watch")))
+        if (verb >= array_count(rover_kernel_verbs))
                 return rover_verb(arguments, count);
         device = rover_load_device();
         if (device < 0)
                 return host_fail(SPARK_DEVICE, device);
-        if (string_equals(what, "load"))
-                answer = rover_load_now(device, true) < 0;
-        else if (string_equals(what, "unload"))
-        {
-                struct rover_control request;
-                bipolar failed;
-
-                memory_zero(&request, sizeof(request));
-                request.op = ROVER_OP_UNLOAD;
-                failed = rover_load_ask(device, &request);
-                answer = failed < 0 ? host_fail("rover unload", failed) : 0;
-        }
-        else if (string_equals(what, "status"))
-                answer = rover_verb_status(device);
-        else if (string_equals(what, "state"))
-                answer = rover_verb_state(device);
-        else
-        {
-                positive most = 0;
-
-                if (count > 3)
-                        most = string_to_positive(arguments[3]);
-                answer = rover_verb_watch(device, most);
-        }
+        answer = rover_kernel_verbs[verb].run(device, arguments, count);
         log_flush();
         system_close(device);
         return answer;

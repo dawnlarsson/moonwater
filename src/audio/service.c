@@ -125,7 +125,6 @@ static struct
         positive rescan_at, started_at;
         unsigned long long frames_played;
         const char *settings;           // where /root/audio.* are
-        int page_fd;
         struct audio_state *page;
         int page_whole;                 // the next write copies the whole page: a page that was just mapped may hold what an earlier server wrote
         // The texts a stream and a record show, kept while the programs' properties are as they were (their version and their connection's):
@@ -207,7 +206,7 @@ static long audio_call(positive number, positive a, positive b, positive c, posi
 /* The five kernel calls of alsa.c. */
 static long audio_sys_open(const char *path, int flags)
 {
-        return audio_call(syscall(openat), (positive)AT_FDCWD, (positive)path, (positive)flags, 0, 0, 0);
+        return audio_call(syscall(openat), (positive)AT_FDCWD, (positive)path, (positive)(flags | O_CLOEXEC | O_NOFOLLOW), 0, 0, 0);
 }
 
 static long audio_sys_close(int fd)
@@ -233,9 +232,12 @@ static long audio_sys_write(int fd, const void *buffer, unsigned long bytes)
 /* The host of pulse.c. */
 static void *audio_host_alloc(void *context, long bytes)
 {
-        long got = audio_call(syscall(mmap), 0, (positive)bytes, 3, 0x22, (positive)-1, 0);
+        long got;
 
         (void)context;
+        if (bytes <= 0)
+                return 0;
+        got = audio_call(syscall(mmap), 0, (positive)bytes, 3, 0x22, (positive)-1, 0);
         return got < 0 && got > -4096 ? 0 : (void *)got;
 }
 
@@ -621,7 +623,7 @@ static long audio_playing_stream(int *low)
                         if (!*low)
                         {
                                 char byte;
-                                long gfd = audio_call(syscall(openat), (positive)AT_FDCWD, (positive) "/run/moonwater/game-slice", 0x800 | 0x80000 | O_NOFOLLOW, 0, 0, 0); // O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW
+                                long gfd = audio_call(syscall(openat), (positive)AT_FDCWD, (positive) "/run/moonwater/game-slice", O_RDONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW, 0, 0, 0);
 
                                 if (gfd >= 0)
                                 {
@@ -686,10 +688,12 @@ static long audio_file_read(const char *name, char *text, long room)
         char path[160];
         long fd, got;
 
+        if (room <= 0)
+                return 0;
         text[0] = 0;
         audio_path(path, sizeof(path), name);
         // O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK: a link is not followed and a FIFO is not waited for (the server would wait for ever in a read of it).
-        fd = audio_call(syscall(openat), (positive)AT_FDCWD, (positive)path, 0x80000 | 0x20000 | 0x800, 0, 0, 0);
+        fd = audio_call(syscall(openat), (positive)AT_FDCWD, (positive)path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK, 0, 0, 0);
         if (fd < 0)
                 return 0;
         got = audio_call(syscall(read), (positive)fd, (positive)text, (positive)(room - 1), 0, 0, 0);
@@ -726,7 +730,7 @@ static void audio_file_write_sync(const char *name, const char *text, long lengt
         pulse_copy(temporary, sizeof(temporary), path);
         pulse_copy(temporary + audio_text_length(temporary), (long)sizeof(temporary) - audio_text_length(temporary), ".new");
 
-        fd = audio_call(syscall(openat), (positive)AT_FDCWD, (positive)temporary, 0x1 | 0x40 | 0x200 | 0x80000 | 0x20000, 0644, 0, 0); // O_NOFOLLOW
+        fd = audio_call(syscall(openat), (positive)AT_FDCWD, (positive)temporary, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC | O_NOFOLLOW, 0644, 0, 0);
         if (fd < 0)
                 return;
         put = audio_call(syscall(write), (positive)fd, (positive)text, (positive)length, 0, 0, 0);
@@ -747,8 +751,8 @@ static void audio_file_write_sync(const char *name, const char *text, long lengt
                 audio_call(syscall(unlinkat), (positive)AT_FDCWD, (positive)temporary, 0, 0, 0, 0);
                 return;
         }
-        // The directory's entry for the new name: O_RDONLY | O_DIRECTORY, fsync, close.
-        fd = audio_call(syscall(openat), (positive)AT_FDCWD, (positive)audio_service.settings, 0x10000 | 0x80000, 0, 0, 0);
+        // The directory's entry for the new name: O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW, fsync, close.
+        fd = audio_call(syscall(openat), (positive)AT_FDCWD, (positive)audio_service.settings, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW, 0, 0, 0);
         if (fd >= 0)
         {
                 audio_call(syscall(fsync), (positive)fd, 0, 0, 0, 0, 0);
@@ -1362,11 +1366,15 @@ static void audio_page_write(void)
 static void audio_page_open(void)
 {
         audio_service.page_whole = 1;
-        long fd = audio_call(syscall(openat), (positive)AT_FDCWD, (positive)audio_service.page_path, 0x2 | 0x40 | 0x20000 | 0x80000, 0600, 0, 0), got; // O_RDWR | O_CREAT | O_NOFOLLOW | O_CLOEXEC
+        long fd = audio_call(syscall(openat), (positive)AT_FDCWD, (positive)audio_service.page_path, O_RDWR | O_CREAT | O_NOFOLLOW | O_CLOEXEC, 0600, 0, 0), got;
 
         if (fd < 0)
                 return;
-        audio_call(syscall(ftruncate), (positive)fd, AUDIO_STATE_BYTES, 0, 0, 0, 0);
+        if (audio_call(syscall(ftruncate), (positive)fd, AUDIO_STATE_BYTES, 0, 0, 0, 0) < 0)
+        {
+                audio_call(syscall(close), (positive)fd, 0, 0, 0, 0, 0);
+                return;
+        }
         got = audio_call(syscall(mmap), 0, AUDIO_STATE_BYTES, 3, 1, (positive)fd, 0); // PROT_READ | PROT_WRITE, MAP_SHARED
         audio_call(syscall(close), (positive)fd, 0, 0, 0, 0, 0);
         if (got < 0 && got > -4096)
@@ -1487,6 +1495,8 @@ static void audio_slots_fit(void)
                 return;
         if (want < audio_service.slots * 2)
                 want = audio_service.slots * 2;
+        if (want > (1l << 18))
+                want = (1l << 18);
         audio_service.live = audio_table_grow(audio_service.live, audio_service.slots * (long)sizeof(int), want * (long)sizeof(int));
         audio_service.fd = audio_table_grow(audio_service.fd, audio_service.slots * (long)sizeof(int), want * (long)sizeof(int));
         audio_service.stalled = audio_table_grow(audio_service.stalled, audio_service.slots * (long)sizeof(positive), want * (long)sizeof(positive));
@@ -1744,7 +1754,7 @@ static void audio_card_pass(void)
         {
                 long eighths = fill * 8 / pcm->period;
 
-                audio_service.stats.held[eighths > 31 ? 31 : eighths]++;
+                audio_service.stats.held[eighths < 0 ? 0 : eighths > 31 ? 31 : eighths]++;
         }
         if (want > 0)
                 audio_produce(want);
@@ -2194,7 +2204,7 @@ static int audio_test_page(struct audio_state *copy)
         //      The server sets its page's path when it starts; a program that only reads the page (the link asks whether the
         //      modem's card is open) has none set, and reads the page the server writes.
         const char *path = audio_service.page_path ? audio_service.page_path : AUDIO_STATE_PATH;
-        long fd = audio_call(syscall(openat), (positive)AT_FDCWD, (positive)path, 0x80000, 0, 0, 0), got;
+        long fd = audio_call(syscall(openat), (positive)AT_FDCWD, (positive)path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK, 0, 0, 0), got;
 
         if (fd < 0)
                 return 0;
@@ -2510,9 +2520,9 @@ static int audio_notify_drain(void)
                         memory_copy(&wd, buffer + at, 4);
                         memory_copy(&mask, buffer + at + 4, 4);
                         memory_copy(&length, buffer + at + 12, 4);
-                        next = at + 16 + (long)length;
-                        if (next > got)
+                        if (length > (unsigned int)(got - at - 16))
                                 break;
+                        next = at + 16 + (long)length;
                         if (mask & 0x4000) // IN_Q_OVERFLOW
                                 hit |= 3;
                         else if (wd == audio_service.snd_wd && audio_service.snd_wd >= 0)
@@ -2654,23 +2664,51 @@ static b32 audio_main()
         audio_service.page_path = AUDIO_STATE_PATH;
         for (positive at = 1; at < program_argument_count(); at++)
         {
-                string_address option = program_argument(at);
-
-                if (at + 1 < program_argument_count() && string_equals(option, "-S"))
-                        audio_service.socket_path = (const char *)program_argument(++at);
-                else if (at + 1 < program_argument_count() && string_equals(option, "-C"))
-                        audio_service.settings = (const char *)program_argument(++at);
-                else if (at + 1 < program_argument_count() && string_equals(option, "-P"))
-                        audio_service.page_path = (const char *)program_argument(++at);
-                else if (at + 1 < program_argument_count() && string_equals(option, "-o"))
+                static const struct
                 {
+                        string_address name;
+                        p8 kind, needs_arg;
+                } audio_opts[] = {
+                    {(string_address) "-S", 1, 1}, {(string_address) "-C", 2, 1}, {(string_address) "-P", 3, 1},
+                    {(string_address) "-o", 4, 1}, {(string_address) "-r", 5, 1}, {(string_address) "-d", 6, 1},
+                    {(string_address) "-n", 7, 0}, {(string_address) "-M", 8, 0}, {(string_address) "-t", 9, 0},
+                };
+                string_address option = program_argument(at);
+#ifdef STANDARD_MODERN_C_LIBRARY_COMMON
+                positive idx = string_table_lookup(option, audio_opts);
+#else
+                positive idx = 0;
+
+                while (idx < sizeof(audio_opts) / sizeof(audio_opts[0]) && !string_equals(option, audio_opts[idx].name))
+                        idx++;
+#endif
+                if (idx >= sizeof(audio_opts) / sizeof(audio_opts[0]))
+                        continue;
+                if (audio_opts[idx].needs_arg && at + 1 >= program_argument_count())
+                        continue;
+                switch (audio_opts[idx].kind)
+                {
+                case 1:
+                        audio_service.socket_path = (const char *)program_argument(++at);
+                        break;
+                case 2:
+                        audio_service.settings = (const char *)program_argument(++at);
+                        break;
+                case 3:
+                        audio_service.page_path = (const char *)program_argument(++at);
+                        break;
+                case 4:
                         if (audio_service.file >= 0)
                                 system_close(audio_service.file);
-                        audio_service.file = (int)audio_call(syscall(openat), (positive)AT_FDCWD, (positive)program_argument(++at), 0x1 | 0x40 | 0x200 | 0x20000 | 0x80000, 0644, 0, 0);
-                }
-                else if (at + 1 < program_argument_count() && string_equals(option, "-r"))
+                        audio_service.file = (int)audio_call(syscall(openat), (positive)AT_FDCWD, (positive)program_argument(++at),
+                                                             O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW | O_CLOEXEC, 0644, 0, 0);
+                        if (audio_service.file < 0)
+                                audio_say("the output file could not be opened, error", audio_service.file);
+                        break;
+                case 5:
                         rate = audio_number(program_argument(++at), 48000);
-                else if (at + 1 < program_argument_count() && string_equals(option, "-d"))
+                        break;
+                case 6:
                 {
                         string_address spec = program_argument(++at);
 
@@ -2678,13 +2716,18 @@ static b32 audio_main()
                         for (; *spec && *spec != ':'; spec++)
                                 ;
                         audio_service.device = *spec == ':' ? (long)audio_number(spec + 1, 0) : -1;
+                        break;
                 }
-                else if (string_equals(option, "-n"))
+                case 7:
                         audio_service.no_card = 1;
-                else if (string_equals(option, "-M"))
+                        break;
+                case 8:
                         audio_service.leave_mixer = 1;
-                else if (string_equals(option, "-t"))
+                        break;
+                case 9:
                         audio_service.test = 1;
+                        break;
+                }
         }
         if (rate < 8000 || rate > 384000)
                 rate = 48000;
@@ -2918,6 +2961,18 @@ static b32 audio_main()
                 audio_call(syscall(munmap), (positive)audio_service.page, AUDIO_STATE_BYTES, 0, 0, 0, 0);
         audio_call(syscall(unlinkat), (positive)AT_FDCWD, (positive)audio_service.page_path, 0, 0, 0, 0);
         audio_pcm_close(&audio_service.pcm);
+        if (audio_service.file >= 0)
+                system_close(audio_service.file);
+        if (audio_service.notify >= 0)
+                system_close(audio_service.notify);
+        if (audio_service.timer >= 0)
+                system_close(audio_service.timer);
+        if (audio_service.signals >= 0)
+                system_close(audio_service.signals);
+        if (audio_service.wake[0] >= 0)
+                system_close(audio_service.wake[0]);
+        if (audio_service.wake[1] >= 0)
+                system_close(audio_service.wake[1]);
         system_close(audio_service.listen);
         audio_call(syscall(unlinkat), (positive)AT_FDCWD, (positive)audio_service.socket_path, 0, 0, 0, 0);
         audio_stats_say("at the end");

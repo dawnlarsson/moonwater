@@ -24,7 +24,7 @@ struct wire_r
 static unsigned long wire_be32(const unsigned char *p)
 {
 #ifdef STANDARD_MODERN_C
-        return (unsigned long)network_load_32((const p8 *)p);
+        return (unsigned long)network_load_32((p8 *)p);
 #else
         return (unsigned long)p[0] << 24 | (unsigned long)p[1] << 16 | (unsigned long)p[2] << 8 | (unsigned long)p[3];
 #endif
@@ -121,7 +121,7 @@ static void wire_w_raw(struct wire_w *w, const void *data, long n)
 {
         if (w->bad)
                 return;
-        if (n < 0 || n > w->cap - w->len)
+        if (n < 0 || w->len < 0 || w->cap < w->len || n > w->cap - w->len)
         {
                 w->bad = 1;
                 return;
@@ -167,6 +167,11 @@ static void wire_w_string(struct wire_w *w, const char *s)
 
 static void wire_w_cvolume(struct wire_w *w, const unsigned long *volume, long channels)
 {
+        if (channels < 0 || channels > 255)
+        {
+                w->bad = 1;
+                return;
+        }
         wire_w_byte(w, 'v');
         wire_w_byte(w, (unsigned char)channels);
         for (long i = 0; i < channels; i++)

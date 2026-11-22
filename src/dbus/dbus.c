@@ -161,7 +161,7 @@ struct dbus_client
         long out_head, out_length;              // the queue is out[out_head, out_length): what is sent moves the head
         long full_since;                        // when its queue first refused a message since it last read (0: it has not)
         long id;                                // the unique name is :1.id
-        unsigned char hello, uid_ok, no_fds, want_data, unix_fds; // want_data: EXTERNAL was named with no data, and DATA is asked for
+        unsigned char hello, uid_ok, want_data, unix_fds; // want_data: EXTERNAL was named with no data, and DATA is asked for
         long names, pending;
         long rules;                             // rule[0, rules) holds every rule it has (a hole where one was removed): what a broadcast looks through
         char unique[16];
@@ -302,6 +302,18 @@ static int dbus_equal(const char *a, const char *b)
         return a[n] == b[n];
 #endif
 }
+
+#if DBUS_LIBRARY
+#define DBUS_TABLE_LOOKUP(key, table) ((long)string_table_lookup((string_address)(key), (table)))
+#else
+#define DBUS_TABLE_LOOKUP(key, table)                                                                \
+        ({                                                                                           \
+                long _dbus_i = 0, _dbus_n = (long)(sizeof(table) / sizeof((table)[0]));              \
+                while (_dbus_i < _dbus_n && !dbus_equal((key), (table)[_dbus_i].name))               \
+                        _dbus_i++;                                                                   \
+                _dbus_i;                                                                             \
+        })
+#endif
 
 static int dbus_starts(const char *text, const char *prefix)
 {
@@ -1160,7 +1172,7 @@ static int dbus_deliver_fds(struct dbus_client *c, const unsigned char *bytes, l
                 return 0;
         if (nfds > 0 && (!c->unix_fds || c->out_fds + nfds > DBUS_FDS || c->out_fd_runs >= DBUS_FDS))
                 return 0;
-        if (c->out_length - c->out_head + n > (asked ? DBUS_OUT : DBUS_UNASKED))
+        if (n < 0 || n > DBUS_OUT || c->out_length - c->out_head + n > (asked ? DBUS_OUT : DBUS_UNASKED))
         {
                 if (!c->full_since)
                         c->full_since = dbus.host->now(dbus.host->context) | 1;
@@ -1375,36 +1387,52 @@ static int dbus_rule_parse(const char *text, struct dbus_rule *r)
                 value[vlen] = 0;
                 if (at < n)
                         at++;
-                if (dbus_equal(key, "type"))
                 {
-                        r->type = dbus_equal(value, "signal") ? DBUS_SIGNAL : dbus_equal(value, "method_call") ? DBUS_CALL
-                                  : dbus_equal(value, "method_return") ? DBUS_RETURN : dbus_equal(value, "error") ? DBUS_ERROR : 0;
-                        if (!r->type)
+                        static const struct
+                        {
+                                const char *name;
+                                unsigned char code;
+                        } rule_types[] = {{"signal", DBUS_SIGNAL}, {"method_call", DBUS_CALL}, {"method_return", DBUS_RETURN}, {"error", DBUS_ERROR}};
+                        static const struct
+                        {
+                                const char *name;
+                                unsigned short offset, room;
+                                unsigned char bit;
+                        } rule_fields[] = {
+                            {"sender", (unsigned short)__builtin_offsetof(struct dbus_rule, sender), DBUS_NAME_TEXT, 1},
+                            {"interface", (unsigned short)__builtin_offsetof(struct dbus_rule, interface), DBUS_NAME_TEXT, 2},
+                            {"member", (unsigned short)__builtin_offsetof(struct dbus_rule, member), 64, 4},
+                            {"path", (unsigned short)__builtin_offsetof(struct dbus_rule, path), 128, 8},
+                            {"path_namespace", (unsigned short)__builtin_offsetof(struct dbus_rule, path_namespace), 128, 16},
+                            {"destination", (unsigned short)__builtin_offsetof(struct dbus_rule, destination), DBUS_NAME_TEXT, 32},
+                        };
+                        long fi = DBUS_TABLE_LOOKUP(key, rule_fields);
+
+                        if (fi < (long)(sizeof(rule_fields) / sizeof(rule_fields[0])))
+                        {
+                                if (vlen >= rule_fields[fi].room)
+                                        return -1;
+                                dbus_text((char *)r + rule_fields[fi].offset, rule_fields[fi].room, value);
+                                r->has |= rule_fields[fi].bit;
+                        }
+                        else if (dbus_equal(key, "type"))
+                        {
+                                long ti = DBUS_TABLE_LOOKUP(value, rule_types);
+
+                                if (ti >= (long)(sizeof(rule_types) / sizeof(rule_types[0])))
+                                        return -1;
+                                r->type = rule_types[ti].code;
+                        }
+                        else if (key[0] == 'a' && key[1] == 'r' && key[2] == 'g' && key[3] >= '0' && key[3] <= '3' && vlen < 96 &&
+                                 (!key[4] || dbus_equal(key + 4, "path") || (key[3] == '0' && dbus_equal(key + 4, "namespace"))))
+                        {
+                                r->arg_mode[key[3] - '0'] = !key[4] ? 0 : key[4] == 'p' ? 1 : 2;
+                                dbus_text(r->arg[key[3] - '0'], sizeof r->arg[0], value);
+                                r->arg_has |= (unsigned char)(1u << (key[3] - '0'));
+                        }
+                        else if (!dbus_equal(key, "eavesdrop"))
                                 return -1;
                 }
-                else if (dbus_equal(key, "sender") && vlen < DBUS_NAME_TEXT)
-                        dbus_text(r->sender, sizeof r->sender, value), r->has |= 1;
-                else if (dbus_equal(key, "interface") && vlen < DBUS_NAME_TEXT)
-                        dbus_text(r->interface, sizeof r->interface, value), r->has |= 2;
-                else if (dbus_equal(key, "member") && vlen < 64)
-                        dbus_text(r->member, sizeof r->member, value), r->has |= 4;
-                else if (dbus_equal(key, "path") && vlen < 128)
-                        dbus_text(r->path, sizeof r->path, value), r->has |= 8;
-                else if (dbus_equal(key, "path_namespace") && vlen < 128)
-                        dbus_text(r->path_namespace, sizeof r->path_namespace, value), r->has |= 16;
-                else if (dbus_equal(key, "destination") && vlen < DBUS_NAME_TEXT)
-                        dbus_text(r->destination, sizeof r->destination, value), r->has |= 32;
-                else if (key[0] == 'a' && key[1] == 'r' && key[2] == 'g' && key[3] >= '0' && key[3] <= '3' && vlen < 96 &&
-                         (!key[4] || dbus_equal(key + 4, "path") || (key[3] == '0' && dbus_equal(key + 4, "namespace"))))
-                {
-                        r->arg_mode[key[3] - '0'] = !key[4] ? 0 : key[4] == 'p' ? 1 : 2;
-                        dbus_text(r->arg[key[3] - '0'], sizeof r->arg[0], value);
-                        r->arg_has |= (unsigned char)(1u << (key[3] - '0'));
-                }
-                else if (dbus_equal(key, "eavesdrop"))
-                        ;
-                else
-                        return -1;
         }
         r->sender_hash = dbus_hash(r->sender);
         r->used = 1;
@@ -1760,9 +1788,36 @@ static int dbus_common(struct dbus_client *from, const struct dbus_message *m, c
 // A call to org.freedesktop.DBus.
 static void dbus_bus_call(struct dbus_client *from, const struct dbus_message *m)
 {
+        enum
+        {
+                DBUS_M_HELLO, DBUS_M_REQUEST_NAME, DBUS_M_RELEASE_NAME, DBUS_M_LIST_NAMES, DBUS_M_LIST_ACTIVATABLE,
+                DBUS_M_NAME_HAS_OWNER, DBUS_M_GET_NAME_OWNER, DBUS_M_GET_UID, DBUS_M_GET_PID, DBUS_M_GET_CREDS,
+                DBUS_M_START_SERVICE, DBUS_M_ADD_MATCH, DBUS_M_REMOVE_MATCH, DBUS_M_GET_ID, DBUS_M_NOOP,
+        };
+        static const struct
+        {
+                const char *name;
+                unsigned char op;
+        } methods[] = {
+            {"Hello", DBUS_M_HELLO},
+            {"RequestName", DBUS_M_REQUEST_NAME},
+            {"ReleaseName", DBUS_M_RELEASE_NAME},
+            {"ListNames", DBUS_M_LIST_NAMES},
+            {"ListActivatableNames", DBUS_M_LIST_ACTIVATABLE},
+            {"NameHasOwner", DBUS_M_NAME_HAS_OWNER},
+            {"GetNameOwner", DBUS_M_GET_NAME_OWNER},
+            {"GetConnectionUnixUser", DBUS_M_GET_UID},
+            {"GetConnectionUnixProcessID", DBUS_M_GET_PID},
+            {"GetConnectionCredentials", DBUS_M_GET_CREDS},
+            {"StartServiceByName", DBUS_M_START_SERVICE},
+            {"AddMatch", DBUS_M_ADD_MATCH},
+            {"RemoveMatch", DBUS_M_REMOVE_MATCH},
+            {"GetId", DBUS_M_GET_ID},
+            {"UpdateActivationEnvironment", DBUS_M_NOOP},
+            {"ReloadConfig", DBUS_M_NOOP},
+        };
         char text[DBUS_NAME_TEXT + 160];
-        long length;
-        const char *member = m->member;
+        long length, mi;
 
         if (dbus_common(from, m, DBUS_NAME_BUS, dbus_introspect_bus))
                 return;
@@ -1771,12 +1826,18 @@ static void dbus_bus_call(struct dbus_client *from, const struct dbus_message *m
                 dbus_error_reply(from, m, "org.freedesktop.DBus.Error.UnknownMethod", "No such interface", DBUS_NAME_BUS);
                 return;
         }
-        if (dbus_equal(member, "Hello"))
+        mi = DBUS_TABLE_LOOKUP(m->member, methods);
+        if (mi >= (long)(sizeof(methods) / sizeof(methods[0])))
         {
-                dbus_error_reply(from, m, "org.freedesktop.DBus.Error.Failed", "Already handled an Hello message", DBUS_NAME_BUS);
+                dbus_error_reply(from, m, "org.freedesktop.DBus.Error.UnknownMethod", "No such method", DBUS_NAME_BUS);
                 return;
         }
-        if (dbus_equal(member, "RequestName"))
+        switch (methods[mi].op)
+        {
+        case DBUS_M_HELLO:
+                dbus_error_reply(from, m, "org.freedesktop.DBus.Error.Failed", "Already handled an Hello message", DBUS_NAME_BUS);
+                return;
+        case DBUS_M_REQUEST_NAME:
         {
                 unsigned long flags = 0;
 
@@ -1804,7 +1865,7 @@ static void dbus_bus_call(struct dbus_client *from, const struct dbus_message *m
                         dbus_reply_u32(from, m, flags, DBUS_NAME_BUS);
                 return;
         }
-        if (dbus_equal(member, "ReleaseName"))
+        case DBUS_M_RELEASE_NAME:
         {
                 struct dbus_name *n;
 
@@ -1826,13 +1887,15 @@ static void dbus_bus_call(struct dbus_client *from, const struct dbus_message *m
                 }
                 return;
         }
-        if (dbus_equal(member, "ListNames") || dbus_equal(member, "ListActivatableNames"))
-        {
-                dbus_reply_names(from, m, dbus_equal(member, "ListNames"));
+        case DBUS_M_LIST_NAMES:
+        case DBUS_M_LIST_ACTIVATABLE:
+                dbus_reply_names(from, m, methods[mi].op == DBUS_M_LIST_NAMES);
                 return;
-        }
-        if (dbus_equal(member, "NameHasOwner") || dbus_equal(member, "GetNameOwner") || dbus_equal(member, "GetConnectionUnixUser") ||
-            dbus_equal(member, "GetConnectionUnixProcessID") || dbus_equal(member, "GetConnectionCredentials"))
+        case DBUS_M_NAME_HAS_OWNER:
+        case DBUS_M_GET_NAME_OWNER:
+        case DBUS_M_GET_UID:
+        case DBUS_M_GET_PID:
+        case DBUS_M_GET_CREDS:
         {
                 long slot;
                 struct dbus_client *of;
@@ -1844,7 +1907,7 @@ static void dbus_bus_call(struct dbus_client *from, const struct dbus_message *m
                 }
                 slot = dbus_equal(text, DBUS_NAME_BUS) ? -2 : dbus_resolve(text);
                 of = dbus_client_of(slot);
-                if (dbus_equal(member, "NameHasOwner"))
+                if (methods[mi].op == DBUS_M_NAME_HAS_OWNER)
                 {
                         struct dbus_out w;
                         long body;
@@ -1859,7 +1922,7 @@ static void dbus_bus_call(struct dbus_client *from, const struct dbus_message *m
                         dbus_error_reply(from, m, "org.freedesktop.DBus.Error.NameHasNoOwner", "The name does not have an owner", DBUS_NAME_BUS);
                         return;
                 }
-                if (dbus_equal(member, "GetNameOwner"))
+                if (methods[mi].op == DBUS_M_GET_NAME_OWNER)
                 {
                         dbus_reply_string(from, m, slot == -2 ? DBUS_NAME_BUS : of->unique, DBUS_NAME_BUS);
                         return;
@@ -1869,16 +1932,15 @@ static void dbus_bus_call(struct dbus_client *from, const struct dbus_message *m
                         dbus_error_reply(from, m, "org.freedesktop.DBus.Error.Failed", "The bus has no credentials", DBUS_NAME_BUS);
                         return;
                 }
-                if (dbus_equal(member, "GetConnectionUnixUser"))
+                if (methods[mi].op == DBUS_M_GET_UID)
                         dbus_reply_u32(from, m, (unsigned long)of->uid, DBUS_NAME_BUS);
-                else if (dbus_equal(member, "GetConnectionUnixProcessID"))
+                else if (methods[mi].op == DBUS_M_GET_PID)
                         dbus_reply_u32(from, m, (unsigned long)of->pid, DBUS_NAME_BUS);
                 else
                         dbus_reply_credentials(from, m, of);
                 return;
         }
-        if (dbus_equal(member, "StartServiceByName"))
-        {
+        case DBUS_M_START_SERVICE:
                 if (!dbus_equal(m->signature, "su") || (length = dbus_arg_string(m, 0, text, sizeof text)) < 0)
                 {
                         dbus_error_reply(from, m, "org.freedesktop.DBus.Error.InvalidArgs", "StartServiceByName takes a name and flags", DBUS_NAME_BUS);
@@ -1889,8 +1951,8 @@ static void dbus_bus_call(struct dbus_client *from, const struct dbus_message *m
                 else
                         dbus_error_reply(from, m, "org.freedesktop.DBus.Error.ServiceUnknown", "The name is not provided by any service", DBUS_NAME_BUS);
                 return;
-        }
-        if (dbus_equal(member, "AddMatch") || dbus_equal(member, "RemoveMatch"))
+        case DBUS_M_ADD_MATCH:
+        case DBUS_M_REMOVE_MATCH:
         {
                 struct dbus_rule rule;
                 long free_at = -1, found = -1;
@@ -1913,7 +1975,7 @@ static void dbus_bus_call(struct dbus_client *from, const struct dbus_message *m
                         else if (from->rule[k].used && dbus_rule_same(&from->rule[k], &rule))
                                 found = k;
                 }
-                if (member[0] == 'A')
+                if (methods[mi].op == DBUS_M_ADD_MATCH)
                 {
                         if (free_at < 0)
                         {
@@ -1937,21 +1999,17 @@ static void dbus_bus_call(struct dbus_client *from, const struct dbus_message *m
                 }
                 dbus_reply_empty(from, m, DBUS_NAME_BUS);
                 // a portal Response held for want of a rule goes once there is one: the client subscribed after its call (Qt)
-                if (member[0] == 'A' && from->responses)
+                if (methods[mi].op == DBUS_M_ADD_MATCH && from->responses)
                         dbus_responses_send(from, dbus.host->now(dbus.host->context), &from->rule[free_at]);
                 return;
         }
-        if (dbus_equal(member, "GetId"))
-        {
+        case DBUS_M_GET_ID:
                 dbus_reply_string(from, m, dbus.guid, DBUS_NAME_BUS);
                 return;
-        }
-        if (dbus_equal(member, "UpdateActivationEnvironment") || dbus_equal(member, "ReloadConfig"))
-        {
+        case DBUS_M_NOOP:
                 dbus_reply_empty(from, m, DBUS_NAME_BUS);
                 return;
         }
-        dbus_error_reply(from, m, "org.freedesktop.DBus.Error.UnknownMethod", "No such method", DBUS_NAME_BUS);
 }
 
 /* ---- the Settings portal ---- */
@@ -3097,8 +3155,13 @@ static int dbus_external_ok(struct dbus_client *c, const char *hex)
 // One line of the authentication (without its CR LF).
 static int dbus_auth_line(struct dbus_client *c, char *line, long n)
 {
+        static const struct
+        {
+                const char *name;
+                unsigned char op;
+        } auth_cmds[] = {{"AUTH", 1}, {"DATA", 2}, {"NEGOTIATE_UNIX_FD", 3}, {"BEGIN", 4}, {"CANCEL", 5}, {"ERROR", 5}};
         char *word[4] = {line, 0, 0, 0};
-        long count = 1;
+        long count = 1, ci;
 
         for (long k = 0; k < n; k++)
                 if (line[k] == ' ' && count < 4)
@@ -3106,8 +3169,10 @@ static int dbus_auth_line(struct dbus_client *c, char *line, long n)
                         line[k] = 0;
                         word[count++] = line + k + 1;
                 }
-        if (dbus_equal(word[0], "AUTH"))
+        ci = DBUS_TABLE_LOOKUP(word[0], auth_cmds);
+        switch (ci < (long)(sizeof(auth_cmds) / sizeof(auth_cmds[0])) ? auth_cmds[ci].op : 0)
         {
+        case 1: // AUTH
                 if (count == 1 || (count >= 2 && !dbus_equal(word[1], "EXTERNAL") && !dbus_equal(word[1], "ANONYMOUS")))
                 {
                         c->uid_ok = 0;
@@ -3144,8 +3209,7 @@ static int dbus_auth_line(struct dbus_client *c, char *line, long n)
                         dbus_say(c, "REJECTED EXTERNAL ANONYMOUS\r\n");
                 }
                 return 0;
-        }
-        if (dbus_equal(word[0], "DATA"))
+        case 2: // DATA
         {
                 int asked = c->want_data;
 
@@ -3164,8 +3228,7 @@ static int dbus_auth_line(struct dbus_client *c, char *line, long n)
                 }
                 return 0;
         }
-        if (dbus_equal(word[0], "NEGOTIATE_UNIX_FD"))
-        {
+        case 3: // NEGOTIATE_UNIX_FD
                 if (dbus_fd_ops.close_fd && c->uid_ok)
                 {
                         c->unix_fds = 1;
@@ -3174,22 +3237,19 @@ static int dbus_auth_line(struct dbus_client *c, char *line, long n)
                 else
                         dbus_say(c, "ERROR \"file descriptors are not passed\"\r\n");
                 return 0;
-        }
-        if (dbus_equal(word[0], "BEGIN"))
-        {
+        case 4: // BEGIN
                 if (!c->uid_ok)
                         return -1;
                 c->state = 2;
                 return 1;
-        }
-        if (dbus_equal(word[0], "CANCEL") || dbus_equal(word[0], "ERROR"))
-        {
+        case 5: // CANCEL, ERROR
                 c->uid_ok = 0;
                 dbus_say(c, "REJECTED EXTERNAL ANONYMOUS\r\n");
                 return 0;
+        default:
+                dbus_say(c, "ERROR\r\n");
+                return 0;
         }
-        dbus_say(c, "ERROR\r\n");
-        return 0;
 }
 
 /* ---- the host's side ---- */
@@ -3371,7 +3431,7 @@ DBUS_API void dbus_drop(long slot)
                         else if (p->callee == slot)
                         {
                                 struct dbus_client *caller = dbus_client_of(p->caller);
-                                struct dbus_message fake;
+                                struct dbus_message fake = {0};
 
                                 p->used = 0;
                                 if (caller)
@@ -3663,7 +3723,7 @@ DBUS_API void dbus_tick(void)
                         continue;
                 for (long k = 0; c->pending && k < DBUS_PENDING_PER; k++)
                 {
-                        struct dbus_message fake;
+                        struct dbus_message fake = {0};
 
                         if (!row[k].used)
                                 continue;

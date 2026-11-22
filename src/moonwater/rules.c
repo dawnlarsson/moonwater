@@ -400,21 +400,39 @@ static struct work_struct rules_work;
 static bool rules_started;
 
 //      The schema's primitives by name, found at start; 0 is none.
-static p16 rules_p_poweroff, rules_p_reboot, rules_p_suspend, rules_p_backlight, rules_p_latency, rules_p_unlatency,
-        rules_p_radio_off, rules_p_usb_lock, rules_p_log;
+enum {
+        RP_POWEROFF, RP_REBOOT, RP_SUSPEND, RP_BACKLIGHT, RP_LATENCY, RP_UNLATENCY,
+        RP_RADIO_OFF, RP_USB_LOCK, RP_LOG, RP_COUNT
+};
 
-static p16 rules_primitive_id(const char *name)
+static const char *const rules_primitive_name[RP_COUNT] = {
+        "poweroff", "reboot", "suspend", "backlight", "latency", "latency off",
+        "radio off", "usb lock", "log",
+};
+
+static p16 rules_prim[RP_COUNT];
+
+static void rules_primitives_find(void)
 {
-        for (positive at = 0; at < ROVER_PRIMITIVES; at++)
-                if (string_equals((string_address)rover_primitives[at].name, (string_address)name))
-                        return rover_primitives[at].id;
-        return 0;
+        for (positive mine = 0; mine < RP_COUNT; mine++)
+        {
+                rules_prim[mine] = 0;
+                for (positive at = 0; at < ROVER_PRIMITIVES; at++)
+                        if (string_equals((string_address)rover_primitives[at].name,
+                                          (string_address)rules_primitive_name[mine]))
+                        {
+                                rules_prim[mine] = rover_primitives[at].id;
+                                break;
+                        }
+        }
 }
 
 static void rules_pool_copy(char *into, positive room, const struct rover_table *view, p32 at)
 {
         p16 length;
 
+        if (!room)
+                return;
         memory_copy(&length, view->pool + at, 2);
         if (length >= room)
                 length = (p16)(room - 1);
@@ -450,7 +468,7 @@ static void rules_queue_locked(const struct rules_live *live, const struct rover
         struct rules_job *job;
         positive count;
 
-        if (action->id == rules_p_poweroff || action->id == rules_p_reboot)
+        if (action->id == rules_prim[RP_POWEROFF] || action->id == rules_prim[RP_REBOOT])
         {
                 char name[ROVER_NAME_MOST + 1];
 
@@ -540,12 +558,15 @@ static bool rules_backlight(b64 hundredths)
 
 static void rules_do(const struct rules_job *job)
 {
+        static const char *const radio_commands[] = {
+                "moonwater wifi off", "moonwater bluetooth off", "moonwater airplane on",
+        };
         char line[64];
         p16 id = job->primitive;
 
-        if (id == rules_p_log)
+        if (id == rules_prim[RP_LOG])
                 pr_info("[rover] %s: %*pE\n", job->name, (int)string_length((string_address)job->text), job->text);
-        else if (id == rules_p_latency)
+        else if (id == rules_prim[RP_LATENCY])
         {
                 //      Clamped: a QoS request is s32 microseconds, and the loader holds a rule's to it already.
                 s32 us = job->number <= 0 ? 0 : job->number >= ROVER_LATENCY_MOST ? S32_MAX : (s32)(job->number / 1000);
@@ -555,12 +576,12 @@ static void rules_do(const struct rules_job *job)
                 else
                         cpu_latency_qos_add_request(&rules_qos, us);
         }
-        else if (id == rules_p_unlatency)
+        else if (id == rules_prim[RP_UNLATENCY])
         {
                 if (cpu_latency_qos_request_active(&rules_qos))
                         cpu_latency_qos_remove_request(&rules_qos);
         }
-        else if (id == rules_p_backlight)
+        else if (id == rules_prim[RP_BACKLIGHT])
         {
                 if (!rules_backlight(job->number))
                 {
@@ -568,14 +589,16 @@ static void rules_do(const struct rules_job *job)
                         rules_spawn(line, job->name);
                 }
         }
-        else if (id == rules_p_suspend)
+        else if (id == rules_prim[RP_SUSPEND])
                 rules_spawn("moonwater sleep", job->name);
-        else if (id == rules_p_radio_off)
-                rules_spawn(job->number == 0   ? "moonwater wifi off"
-                            : job->number == 1 ? "moonwater bluetooth off"
-                                               : "moonwater airplane on",
-                            job->name);
-        else if (id == rules_p_usb_lock)
+        else if (id == rules_prim[RP_RADIO_OFF])
+        {
+                positive which = (p64)job->number < array_count(radio_commands) ? (positive)job->number
+                                                                                : array_count(radio_commands) - 1;
+
+                rules_spawn(radio_commands[which], job->name);
+        }
+        else if (id == rules_prim[RP_USB_LOCK])
                 rules_spawn("moonwater device lock", job->name);
 }
 
@@ -616,7 +639,7 @@ static void rules_stop_force(struct work_struct *work)
 
         (void)work;
         pr_warn("[rover] the machine's stop did not come in %u s: stopping it\n", RULES_STOP_GRACE / HZ);
-        if (id == rules_p_reboot)
+        if (id == rules_prim[RP_REBOOT])
                 orderly_reboot();
         else
                 orderly_poweroff(true);
@@ -646,15 +669,15 @@ static void rules_stop_run(struct work_struct *work)
         if (!id)
                 return;
         WRITE_ONCE(rules_stop_doing, id);
-        pr_info("[rover] %s: %s, the line starts\n", name, id == rules_p_poweroff ? "poweroff" : "reboot");
+        pr_info("[rover] %s: %s, the line starts\n", name, id == rules_prim[RP_POWEROFF] ? "poweroff" : "reboot");
         mod_delayed_work(system_highpri_wq, &rules_stop_watchdog, RULES_STOP_GRACE);
-        ret = rules_spawn(id == rules_p_poweroff ? "poweroff" : "reboot", name);
+        ret = rules_spawn(id == rules_prim[RP_POWEROFF] ? "poweroff" : "reboot", name);
         pr_info("[rover] %s: the line answered %d after %llu ms\n", name, ret,
                 (unsigned long long)((ktime_get_ns() - started) / 1000000));
         if (ret)
         {
                 pr_warn("[rover] %s: stopping the machine anyway\n", name);
-                if (id == rules_p_poweroff)
+                if (id == rules_prim[RP_POWEROFF])
                         orderly_poweroff(true);
                 else
                         orderly_reboot();
@@ -1365,26 +1388,20 @@ static atomic_t rules_usb_devices;
 //      The class: the device's, or its first interface's when the device leaves it to them.
 static b64 rules_usb_class(struct usb_device *udev)
 {
+        static const struct { u8 code, id; } usb_classes[] = {
+                {USB_CLASS_AUDIO, 1}, {USB_CLASS_COMM, 2}, {USB_CLASS_HID, 3},
+                {USB_CLASS_STILL_IMAGE, 4}, {USB_CLASS_PRINTER, 5}, {USB_CLASS_MASS_STORAGE, 6},
+                {USB_CLASS_HUB, 7}, {USB_CLASS_CDC_DATA, 8}, {USB_CLASS_CSCID, 9},
+                {USB_CLASS_VIDEO, 10}, {USB_CLASS_WIRELESS_CONTROLLER, 11}, {USB_CLASS_VENDOR_SPEC, 12},
+        };
         u8 code = udev->descriptor.bDeviceClass;
 
         if (!code && udev->actconfig && udev->actconfig->desc.bNumInterfaces && udev->actconfig->interface[0] &&
             udev->actconfig->interface[0]->cur_altsetting)
                 code = udev->actconfig->interface[0]->cur_altsetting->desc.bInterfaceClass;
-        switch (code)
-        {
-        case USB_CLASS_AUDIO: return 1;
-        case USB_CLASS_COMM: return 2;
-        case USB_CLASS_HID: return 3;
-        case USB_CLASS_STILL_IMAGE: return 4;
-        case USB_CLASS_PRINTER: return 5;
-        case USB_CLASS_MASS_STORAGE: return 6;
-        case USB_CLASS_HUB: return 7;
-        case USB_CLASS_CDC_DATA: return 8;
-        case USB_CLASS_CSCID: return 9;
-        case USB_CLASS_VIDEO: return 10;
-        case USB_CLASS_WIRELESS_CONTROLLER: return 11;
-        case USB_CLASS_VENDOR_SPEC: return 12;
-        }
+        for (positive at = 0; at < array_count(usb_classes); at++)
+                if (usb_classes[at].code == code)
+                        return usb_classes[at].id;
         return 0;
 }
 
@@ -1664,7 +1681,7 @@ static long rules_do_asked(struct rover_control *request)
             !rover_number_ok(primitive->type[0], request->number))
                 return -ERANGE;
         raw_spin_lock_irqsave(&rules_lock, flags);
-        if (request->primitive == rules_p_poweroff || request->primitive == rules_p_reboot)
+        if (request->primitive == rules_prim[RP_POWEROFF] || request->primitive == rules_prim[RP_REBOOT])
         {
                 rules_stop_locked(request->primitive, "asked");
                 rules_count.queued++;
@@ -1806,15 +1823,7 @@ static void rules_start(void)
         INIT_WORK(&rules_stop_work, rules_stop_run);
         INIT_DELAYED_WORK(&rules_stop_watchdog, rules_stop_force);
         rules_states_find();
-        rules_p_poweroff = rules_primitive_id("poweroff");
-        rules_p_reboot = rules_primitive_id("reboot");
-        rules_p_suspend = rules_primitive_id("suspend");
-        rules_p_backlight = rules_primitive_id("backlight");
-        rules_p_latency = rules_primitive_id("latency");
-        rules_p_unlatency = rules_primitive_id("latency off");
-        rules_p_radio_off = rules_primitive_id("radio off");
-        rules_p_usb_lock = rules_primitive_id("usb lock");
-        rules_p_log = rules_primitive_id("log");
+        rules_primitives_find();
         for (positive event = 1; event <= SPARK_BIND_EVENTS; event++)
                 for (positive at = 0; at < BIND_CODES_PER; at++)
                         if (bind_spec[event - 1].code[at] && bind_spec[event - 1].code[at] < KEY_CNT)

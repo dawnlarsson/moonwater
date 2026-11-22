@@ -604,11 +604,21 @@ static void script_block(struct script_read *scan, struct moonwater_overlay *int
         either is read as a case, so that its patterns' ) are not taken for
         the end, and the arms of the event hook's are the rows it owns.
 */
+static int script_word_in(const struct script_token *token,
+                          const char *const *words)
+{
+        unsigned int i;
+
+        for (i = 0; words[i]; i++)
+                if (script_word_is(token, words[i]))
+                        return 1;
+        return 0;
+}
+
 static int script_command_start(const struct script_token *token)
 {
         static const char *const before[] = {
                 "if", "while", "until", "then", "do", "else", "elif", "!", "time", 0 };
-        unsigned int i;
 
         if (token->kind == SCRIPT_TOK_DSEMI)
                 return 1;
@@ -617,15 +627,15 @@ static int script_command_start(const struct script_token *token)
                        token->punct == '(' || token->punct == ')' ||
                        token->punct == '{' || token->punct == '}' ||
                        token->punct == '&';
-        for (i = 0; before[i]; i++)
-                if (script_word_is(token, before[i]))
-                        return 1;
-        return 0;
+        return script_word_in(token, before);
 }
 
 static void script_compound(struct script_read *scan, struct moonwater_overlay *into,
                             int parens)
 {
+        static const char *const openers[] = {
+                "if", "while", "until", "for", "select", 0 };
+        static const char *const closers[] = { "fi", "done", 0 };
         struct script_token token;
         unsigned short depth = 1;
         int command = 1;
@@ -642,13 +652,9 @@ static void script_compound(struct script_read *scan, struct moonwater_overlay *
                         depth--;
                 else if (command && script_word_is(&token, "case"))
                         script_parse_case(scan, into);
-                else if (command && !parens &&
-                         (script_word_is(&token, "if") || script_word_is(&token, "while") ||
-                          script_word_is(&token, "until") || script_word_is(&token, "for") ||
-                          script_word_is(&token, "select")))
+                else if (command && !parens && script_word_in(&token, openers))
                         depth++;
-                else if (command && !parens &&
-                         (script_word_is(&token, "fi") || script_word_is(&token, "done")))
+                else if (command && !parens && script_word_in(&token, closers))
                         depth--;
                 command = script_command_start(&token);
         }
@@ -657,6 +663,8 @@ static void script_compound(struct script_read *scan, struct moonwater_overlay *
 static int script_take_function(struct script_read *scan, const char *name,
                                 unsigned short line, struct moonwater_overlay *into)
 {
+        static const char *const bodies[] = {
+                "[[", "if", "while", "until", "for", "select", "case", 0 };
         struct script_token token;
         unsigned int i;
         unsigned char hook = 0;
@@ -671,10 +679,7 @@ static int script_take_function(struct script_read *scan, const char *name,
                 token = script_peek(scan);
         }
         if (!script_punct_is(&token, '{') && !script_punct_is(&token, '(') &&
-            !script_word_is(&token, "[[") && !script_word_is(&token, "if") &&
-            !script_word_is(&token, "while") && !script_word_is(&token, "until") &&
-            !script_word_is(&token, "for") && !script_word_is(&token, "select") &&
-            !script_word_is(&token, "case"))
+            !script_word_in(&token, bodies))
                 return 0;
 
         script_next(scan, &token);
@@ -1893,9 +1898,9 @@ static _Bool bind_filter(struct input_handle *handle, unsigned int type,
                 if (type == EV_REL && (code == REL_X || code == REL_Y))
                 {
                         if (code == REL_X)
-                                bind->rel_x += value;
+                                bind->rel_x = (int)((unsigned int)bind->rel_x + (unsigned int)value);
                         else
-                                bind->rel_y += value;
+                                bind->rel_y = (int)((unsigned int)bind->rel_y + (unsigned int)value);
                         taken = true;
                         goto counted;
                 }
