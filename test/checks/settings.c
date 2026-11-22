@@ -574,8 +574,8 @@ static fn check_launcher(void)
 
         launcher_type_text("");
         check("launcher: with nothing typed there are no rows, and the grid is the desktop's programs in their order",
-              launcher_list_is("") && launcher.app_count == 5 && launcher.apps[0] == 0 && launcher.apps[1] == 1 && launcher.apps[2] == 2 &&
-                  launcher.apps[3] == 3 && launcher.apps[4] == 4);
+              launcher_list_is("") && launcher.app_count == 6 && launcher.apps[0] == 0 && launcher.apps[1] == 1 && launcher.apps[2] == 2 &&
+                  launcher.apps[3] == 3 && launcher.apps[4] == 4 && launcher.apps[5] == 5); // Editor (f197336fd, 11-20) is the sixth kit program
         launcher_type_text("ls");
         check("launcher: a plain word lists the names it is, then starts, then is inside, the shorter first, and the command last",
               launcher_list_is("p:ls,p:lsof,p:lsblk,p:xls,p:also,p:false,c,") && launcher.list.focus == 0);
@@ -798,6 +798,8 @@ static fn check_launcher(void)
         }
 #endif
 
+        // The power row is the beside launcher's (ad788933c, 11-20: a centred launcher shows the recents and no grid or power row).
+        launcher.asked_beside = true;
         // The power buttons under the list are the bar's view (launcher_view): here the launcher hands the view its events, starts what
         // it fires and nothing else, and keeps the rest of its keys. What a start is, is a line in a file (the fixture's shell_exec_file).
         {
@@ -1004,6 +1006,7 @@ static fn check_launcher(void)
                 system_remove_at(AT_FDCWD, made[1], 0x200);
                 system_remove_at(AT_FDCWD, made[0], 0x200);
         }
+        launcher.asked_beside = false;
 }
 
 /*
