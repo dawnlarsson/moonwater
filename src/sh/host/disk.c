@@ -3229,6 +3229,53 @@ static PURE bool host_lone_taken(bool external, bool tight)
 }
 
 /*
+        One install of the running build, as boot tells whether the session
+        started from it, by the medium number an install writes into its own
+        image: 1 it did, 0 it did not, -1 it cannot be told, because the
+        install's image carries no number (one from before there were
+        numbers). A booted image with no number (a stick as build.sh wrote it,
+        never installed) started from no install that carries one.
+*/
+static b32 host_medium_match(const p8 address_to booted, const p8 address_to theirs, positive size)
+{
+        if (host_medium_blank(theirs, size))
+                return -1;
+        return !host_medium_blank(booted, size) && !memory_compare(theirs, booted, size);
+}
+
+/*
+        Whether this session started from one of the installs found, or might
+        have: an install stick is only an installer (owner, 2026-11-22: "the
+        live usb should only be a install usb ... nothing mounted besides
+        during install"), so a session that started from no install mounts
+        nothing on this machine's disks. It is so when no install has the
+        running build, or when every one that has it carries a medium number
+        and none is the booted one. An install of this build that carries
+        none leaves it unknown, and boot decides the old way.
+*/
+static bool host_started_from_install(host_census address_to census, string_address running,
+                                      host_settings address_to booted)
+{
+        static const p8 none[sizeof(booted->medium)];
+
+        //      A build that cannot be read cannot be matched: unknown, the old way.
+        if (!running[0])
+                return true;
+        for (positive at = 0; at < census->count; at++)
+        {
+                host_install address_to install = census->found + at;
+                host_settings theirs;
+
+                if (!install->readable || !string_equals(install->build, running))
+                        continue;
+                if (!host_settings_install(install, address_of theirs) ||
+                    host_medium_match(booted ? booted->medium : none, theirs.medium, sizeof(theirs.medium)) != 0)
+                        return true;
+        }
+        return false;
+}
+
+/*
         The one install of this build that the session started from, if it
         is one.
 */
@@ -3340,6 +3387,19 @@ static b32 host_boot(void)
                                 chosen = census.found + at;
                         same++;
                 }
+        }
+
+        /*      A session that started from no install is an install stick's: live, with nothing on this
+                machine's disks mounted, and the installer opens on its verdict (session.rover's installer rule).
+                Neither an install of this build nor one of another is taken or asked about from it; the
+                installer updates one. */
+        if (!host_started_from_install(address_of census, running, known ? address_of settings : null))
+        {
+                host_settle_live();
+                host_say(log, host_label "this session started from a medium that is not an install: nothing "
+                                         "on this machine's disks is mounted, and the installer opens\n");
+                host_booted(known ? address_of settings : null);
+                return 0;
         }
 
         /*      Two disks with this very build are no reason to take the first

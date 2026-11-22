@@ -3296,6 +3296,18 @@ static fn boot_links(void)
         check("An external disk is asked about at the default tier", !host_lone_taken(true, false));
         check("No disk is taken at the tight tier", !host_lone_taken(false, true));
         check("An external disk is asked about at the tight tier", !host_lone_taken(true, true));
+
+        //      host_medium_match: whether the session started from an install, by the medium number the install wrote
+        //      into its image. An install stick (no number) started from none, so boot mounts nothing.
+        static const p8 blank[16], ours[16] = {1, 2, 3}, theirs[16] = {9};
+
+        check("A booted image with no medium number did not start from an install that carries one (an install stick)",
+              host_medium_match(blank, ours, sizeof(ours)) == 0);
+        check("A booted medium an install carries started from that install", host_medium_match(ours, ours, sizeof(ours)) == 1);
+        check("A booted medium another install carries did not start from this one",
+              host_medium_match(theirs, ours, sizeof(ours)) == 0);
+        check("An install that carries no medium number cannot be told apart, booted number or none",
+              host_medium_match(ours, blank, sizeof(ours)) == -1 && host_medium_match(blank, blank, sizeof(ours)) == -1);
 }
 
 /*
