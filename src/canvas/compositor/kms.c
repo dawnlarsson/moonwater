@@ -782,14 +782,14 @@ static void compositor_scanout_free(unsigned int fb, unsigned int handle, unsign
         for (unsigned int at = 0; at < 2; at++)
                 if (compositor_gpu_state.cache[at] && compositor_gpu_state.cache_key[at] == handle)
                 {
-                        gpu_unimport(compositor_gpu_state.cache[at], GPU_GONE_UNIMPORT);
+                        gpu_unimport_gen(compositor_gpu_state.cache[at], compositor_gpu_state.cache_gen[at], GPU_GONE_UNIMPORT);
                         compositor_gpu_state.cache[at] = compositor_gpu_state.cache_key[at] = 0;
                         if (compositor_gpu_state.out_key == handle)
                                 compositor_gpu_state.out = compositor_gpu_state.out_key = 0;
                 }
         for (unsigned int at = 0; at < WINDOWS_OUTPUTS; at++)
                 if (compositor_gpu_state.turn_key[at] == handle && compositor_gpu_state.turn_va[at])
-                        gpu_unimport(compositor_gpu_state.turn_va[at], GPU_GONE_UNIMPORT), compositor_gpu_state.turn_va[at] = 0;
+                        gpu_unimport_gen(compositor_gpu_state.turn_va[at], compositor_gpu_state.turn_gen[at], GPU_GONE_UNIMPORT), compositor_gpu_state.turn_va[at] = 0;
 #endif
         drm_dumb_destroy(&b);
 }

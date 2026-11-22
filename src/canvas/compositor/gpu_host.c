@@ -18,6 +18,7 @@ static struct
         unsigned int failures, cool_steps, blamed, output_fails;
         b64 cool_until, hung_at, blamed_at, late_first, late_next;
         positive out, out_key, cache[2], cache_key[2], turn_va[WINDOWS_OUTPUTS], turn_key[WINDOWS_OUTPUTS];
+        unsigned int cache_gen[2], turn_gen[WINDOWS_OUTPUTS]; // the generation of each import above (gpu_import_gen): a release names it
         b32 restart_due;
         positive slept_seen, settled, said;
 } compositor_gpu_state;
@@ -395,8 +396,9 @@ static positive compositor_gpu_output(void)
                 {
                         at = compositor_gpu_state.cache_next, compositor_gpu_state.cache_next ^= 1;
                         if (compositor_gpu_state.cache[at])
-                                gpu_unimport(compositor_gpu_state.cache[at], GPU_GONE_UNIMPORT);
+                                gpu_unimport_gen(compositor_gpu_state.cache[at], compositor_gpu_state.cache_gen[at], GPU_GONE_UNIMPORT);
                         compositor_gpu_state.cache[at] = gpu_import(compositor.card, compositor.scanout_handle, compositor.scanout_bytes);
+                        compositor_gpu_state.cache_gen[at] = compositor_gpu_state.cache[at] ? gpu_import_gen(compositor_gpu_state.cache[at]) : 0;
                         compositor_gpu_state.cache_key[at] = key;
                         if (compositor_gpu_state.cache[at])
                                 compositor_gpu_state.output_fails = 0;
@@ -1816,8 +1818,9 @@ static int compositor_gpu_rotate(unsigned int at, const int *screen, unsigned in
                 return 0;
         if (compositor_gpu_state.turn_key[at] != turn->handle || !compositor_gpu_state.turn_va[at])
         {
-                gpu_unimport(compositor_gpu_state.turn_va[at], GPU_GONE_UNIMPORT);
+                gpu_unimport_gen(compositor_gpu_state.turn_va[at], compositor_gpu_state.turn_gen[at], GPU_GONE_UNIMPORT);
                 compositor_gpu_state.turn_va[at] = gpu_import(compositor.card, turn->handle, turn->bytes), compositor_gpu_state.turn_key[at] = turn->handle;
+                compositor_gpu_state.turn_gen[at] = compositor_gpu_state.turn_va[at] ? gpu_import_gen(compositor_gpu_state.turn_va[at]) : 0;
         }
         if (!compositor_gpu_state.turn_va[at])
                 return 0;
@@ -1873,7 +1876,7 @@ struct canvas_ext_import
         long fd, size;
         unsigned long dev, ino;
         positive va;
-        unsigned int epoch;
+        unsigned int epoch, gen; // gen: the import's generation (gpu_import_gen), released with the address
 };
 
 static void canvas_ext_fd_ident(long fd, unsigned long *dev, unsigned long *ino)
@@ -1909,7 +1912,7 @@ static void canvas_ext_import_release(struct canvas_ext_import *ref)
                 return;
 #ifdef MOONWATER_GPU_C
         if (ref->va && ref->epoch == gpu_epoch)
-                gpu_release_import(ref->va);
+                gpu_release_import_gen(ref->va, ref->gen);
 #endif
         memory_zero(ref, sizeof(*ref));
         ref->fd = -1;
@@ -1952,7 +1955,7 @@ HOT static positive canvas_ext_import_cached(struct canvas_ext_import *restrict 
         if (!va)
                 return 0;
         ref->map = map, ref->fd = fd, ref->size = size, ref->dev = dev, ref->ino = ino;
-        ref->va = va, ref->epoch = gpu_epoch;
+        ref->va = va, ref->epoch = gpu_epoch, ref->gen = gpu_import_gen(va);
         if (reused)
                 *reused = 0;
         return va;
