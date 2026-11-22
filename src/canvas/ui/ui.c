@@ -22371,12 +22371,27 @@ static b32 ui_list_reserve(struct ui_list address_to l, int want)
         return true;
 }
 
-static b32 ui_list_push(struct ui_list address_to l, int id)
+// A list's rows are given again: ui_list_begin, then ui_list_add for each row in its order, then ui_list_end. The keys stay on their row by id.
+static void ui_list_begin(struct ui_list address_to l)
+{
+        l->count = 0;
+}
+
+static b32 ui_list_add(struct ui_list address_to l, int id)
 {
         if (!ui_list_reserve(l, l->count + 1))
                 return false;
         l->id[l->count++] = id;
         return true;
+}
+
+static void ui_list_end(struct ui_list address_to l)
+{
+        int at = 0;
+        while (at < l->count && l->id[at] != l->focus)
+                at++;
+        if (at >= l->count && l->count)
+                l->focus = l->id[0];
 }
 
 // A virtual list's places for where it is scrolled to now:
