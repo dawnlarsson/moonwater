@@ -470,6 +470,7 @@ static fn SPARE emit_character(unsigned int character)
 /* ---- CSI parameter machine (shared with sh/edit.c) ---- */
 
 #define TERMINAL_PARAMS_INLINE 16
+#define TERMINAL_PARAMS_MAX 65536
 
 typedef struct
 {
@@ -490,10 +491,13 @@ static void terminal_parameters_reset(terminal_parameters address_to sequence)
         sequence->value[0] = 0, sequence->joined[0] = 0;
 }
 
+/* Parameters past TERMINAL_PARAMS_MAX are dropped, and the scan goes on to the final byte. */
 static b32 terminal_parameters_room(terminal_parameters address_to sequence, positive slots)
 {
         if (!sequence->value)
                 sequence->value = sequence->inline_value, sequence->joined = sequence->inline_joined;
+        if (slots > TERMINAL_PARAMS_MAX)
+                return sequence->full = 1, false;
         if (slots <= TERMINAL_PARAMS_INLINE)
                 return true;
         if (slots > sequence->room)
@@ -519,6 +523,19 @@ static b32 terminal_parameters_room(terminal_parameters address_to sequence, pos
                 sequence->joined = flags, sequence->flag_room = flag_room;
         }
         return true;
+}
+
+/* Ends a sequence's storage: a sequence that grew past the inline slots gives its arrays back. */
+static fn terminal_parameters_free(terminal_parameters address_to sequence)
+{
+        positive used = sequence->count;
+
+        if (sequence->room)
+                array_store_release(sequence->value, sequence->room, used);
+        if (sequence->flag_room)
+                array_store_release(sequence->joined, sequence->flag_room, used);
+        sequence->value = sequence->inline_value, sequence->joined = sequence->inline_joined;
+        sequence->room = sequence->flag_room = 0;
 }
 
 static b32 terminal_parameters_first(terminal_parameters address_to sequence)
@@ -1416,6 +1433,7 @@ static fn utf8_flush()
 
 static fn escape_discard()
 {
+        terminal_parameters_free(address_of terminal_csi);
         terminal_utf8.left = 0;
         in_escape = in_csi = in_string = escape_intermediate = string_escape = false;
 }
@@ -1432,6 +1450,7 @@ static fn consume(unsigned int c)
 {
         if (c == 24 || c == 26)
         {
+                terminal_parameters_free(address_of terminal_csi);
                 in_escape = in_csi = in_string = false, terminal_utf8.left = 0;
                 return;
         }
@@ -1460,6 +1479,7 @@ static fn consume(unsigned int c)
         if (c == 27)
         {
                 utf8_flush();
+                terminal_parameters_free(address_of terminal_csi);
                 in_escape = true, in_csi = escape_intermediate = false;
                 return;
         }
@@ -1484,6 +1504,7 @@ static fn consume(unsigned int c)
                 if (!terminal_parameters_take(address_of terminal_csi, c))
                         return;
                 csi_final(c);
+                terminal_parameters_free(address_of terminal_csi);
                 in_csi = in_escape = false, csi_intermediate = 0;
                 return;
         }
@@ -1693,6 +1714,7 @@ static positive csi_parse(const p8 address_to bytes, positive count)
         utf8_flush();
         escape_intermediate = false, in_escape = in_csi = true, csi_intermediate = intermediate;
         csi_final(bytes[2 + used - 1]);
+        terminal_parameters_free(address_of terminal_csi);
         in_csi = in_escape = false, csi_intermediate = 0;
         return 2 + used;
 }

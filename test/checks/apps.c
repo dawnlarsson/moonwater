@@ -9899,6 +9899,20 @@ static void check_term_parameters(void)
                 check("term hostile: an XTGETTCAP for a name we do not answer is 0+r with no echo of the name", to_shell_length == sizeof(answer) - 1 && !memory_compare(to_shell, answer, sizeof(answer) - 1));
                 to_shell_length = 0;
         }
+        {
+                static p8 flood[70016];
+                positive length = 0;
+
+                full_reset();
+                flood[length++] = 0x1b, flood[length++] = '[';
+                for (positive at = 0; at < 70000; at++)
+                        flood[length++] = ';';
+                flood[length++] = 'm';
+                term_bytes(flood, length);
+                term_bytes((const p8 address_to) "R", 1);
+                check("term hostile: 70000 parameters print the byte after them and give their storage back", row_cells(0)[0].character == 'R' && !terminal_csi.room);
+                full_reset();
+        }
 }
 
 /*
