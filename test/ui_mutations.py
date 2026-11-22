@@ -226,6 +226,13 @@ M = [
     (U, "the mark of a long trail is no place to press", "        if (t->first > 0 && x < t->x + t->mark)\n                return UI_TRAIL_MARK;", ""),
     # ---- the launcher's rows, edge to edge ----
     (L, "the launcher's rows are in from the bar's margin", "        launcher.list.row_x = 0, launcher.list.row_w = launcher.width;\n", ""),
+    # ---- the top bar's buttons: the RTL swap, the symbol's scale, the icon button's press and key, the menu button's keys, the tooltip ----
+    (U, "RTL: back and forward not swapped", "return glyph == UI_ICON_BACK ? UI_ICON_FORWARD : glyph == UI_ICON_FORWARD ? UI_ICON_BACK : glyph;", "return glyph;"),
+    (U, "icon button symbol at a fixed 16 px", "(int)(ui_em(ui, UI_BUTTON_ICON_EM) >> 6)", "16"),
+    (U, "icon button presses when let go off it", "return acted ? UI_ICONBUTTON_PRESSED : 0;", "return b->down ? UI_ICONBUTTON_PRESSED : 0;"),
+    (U, "icon button keys act without focus", "b->focus && (event->a == UI_KEY_ENTER", "(event->a == UI_KEY_ENTER"),
+    (U, "menu button does not open on Down", "event->a == UI_KEY_SPACE || event->a == UI_KEY_DOWN))", "event->a == UI_KEY_SPACE))"),
+    (U, "tooltip chip not drawn", "ui_round(ui, x, y, wide, high, high / 2, ui_role(UI_SURFACE_HIGHEST) | 0xff000000u);", "(void)0;"),
     # ---- a mouse drags a list unless a person turned it off ----
     (R, "the mouse's drag of a list is off unless set", '.path = SETTING_SCROLL_DRAG_PATH, .standard = "on",', '.path = SETTING_SCROLL_DRAG_PATH, .standard = "off",'),
 ]

@@ -19428,6 +19428,12 @@ enum
         UI_ICON_KEY,      // a key, its bow and its bit: a login from afar (the installer's SSH card)
         UI_ICON_LINK,      // a page with an arrow out of it: a link to something elsewhere (a file browser's)
         UI_ICON_BACKSPACE, // a pointed keycap with an X inside: delete backward (the on-screen keyboard's Backspace key)
+        UI_ICON_BACK,      // an arrow pointing left: back (in RTL the forward glyph, see ui_iconbutton_draw)
+        UI_ICON_FORWARD,   // an arrow pointing right: forward (in RTL the back glyph)
+        UI_ICON_UP,        // an arrow up out of a line: up, to the parent folder
+        UI_ICON_REFRESH,   // a circle with its arrowhead at the top right: refresh
+        UI_ICON_HOME,      // a roof over a house: home
+        UI_ICON_NEW_FOLDER, // a folder's outline with a plus in it: new folder
         UI_ICON_COUNT
 };
 
@@ -19457,6 +19463,13 @@ static const struct ui_icon_part ui_icon_parts[UI_ICON_COUNT][UI_ICON_PARTS] = {
         [UI_ICON_LINK] = {{UI_ICON_RING, 10, 6, 38, 42, 4}, {UI_ICON_LINE, 17, 33, 31, 19, 0}, {UI_ICON_LINE, 22, 19, 31, 19, 0}, {UI_ICON_LINE, 31, 19, 31, 28, 0}},
         [UI_ICON_BACKSPACE] = {{UI_ICON_LINE, 6, 24, 16, 12, 0}, {UI_ICON_LINE, 6, 24, 16, 36, 0}, {UI_ICON_LINE, 16, 12, 42, 12, 0}, {UI_ICON_LINE, 42, 12, 42, 36, 0},
                                {UI_ICON_LINE, 16, 36, 42, 36, 0}, {UI_ICON_LINE, 23, 19, 33, 29, 0}, {UI_ICON_LINE, 33, 19, 23, 29, 0}},
+        [UI_ICON_BACK] = {{UI_ICON_LINE, 8, 24, 40, 24, 0}, {UI_ICON_LINE, 8, 24, 20, 12, 0}, {UI_ICON_LINE, 8, 24, 20, 36, 0}},
+        [UI_ICON_FORWARD] = {{UI_ICON_LINE, 8, 24, 40, 24, 0}, {UI_ICON_LINE, 40, 24, 28, 12, 0}, {UI_ICON_LINE, 40, 24, 28, 36, 0}},
+        [UI_ICON_UP] = {{UI_ICON_LINE, 24, 40, 24, 10, 0}, {UI_ICON_LINE, 24, 10, 13, 21, 0}, {UI_ICON_LINE, 24, 10, 35, 21, 0}},
+        [UI_ICON_REFRESH] = {{UI_ICON_RING, 8, 8, 40, 40, 16}, {UI_ICON_LINE, 32, 4, 42, 4, 0}, {UI_ICON_LINE, 42, 4, 42, 14, 0}},
+        [UI_ICON_HOME] = {{UI_ICON_LINE, 6, 24, 24, 8, 0}, {UI_ICON_LINE, 24, 8, 42, 24, 0}, {UI_ICON_LINE, 12, 22, 12, 40, 0},
+                          {UI_ICON_LINE, 36, 22, 36, 40, 0}, {UI_ICON_LINE, 12, 40, 36, 40, 0}, {UI_ICON_LINE, 21, 40, 21, 30, 0}, {UI_ICON_LINE, 27, 40, 27, 30, 0}},
+        [UI_ICON_NEW_FOLDER] = {{UI_ICON_RING, 6, 12, 42, 38, 4}, {UI_ICON_LINE, 24, 20, 24, 30, 0}, {UI_ICON_LINE, 19, 25, 29, 25, 0}},
 };
 
 // A place of a symbol's grid (halves of a 24th) on the picture, in 256ths of a device pixel: a whole pixel, the nearest.
@@ -19955,6 +19968,132 @@ HOT static fn ui_picture_scale(unsigned int address_to restrict into, int size, 
                         into[y * size + x] = out;
                 }
         }
+}
+
+/* ---- the top bar's buttons: icon buttons, a menu button, and the tooltip of a button ---- */
+// An icon button (ui_iconbutton): a symbol in a square, its accessible name and the tip the hover shows. The app owns its box and its focus.
+#define UI_BUTTON_ICON_EM 20   // logical px: an icon button's symbol, scaled by ui_em with the text
+#define UI_BUTTON_TIP_GAP 6    // logical px between a button and its tooltip
+#define UI_BUTTON_TIP_PAD 8    // logical px inside the tooltip's chip, across
+#define UI_ICONBUTTON_PRESSED 1u
+
+struct ui_iconbutton
+{
+        int glyph;                     // UI_ICON_*: BACK, FORWARD, UP, REFRESH, HOME, NEW_FOLDER
+        const char address_to name;    // the accessible name
+        const char address_to tip;     // the hover tooltip: the old English label
+        int x, y, w, h;               // device pixels: the box the button is drawn in
+        b32 hover, down, focus, disabled;
+};
+
+// The symbol a glyph draws in this direction: back and forward swap in RTL (the arrow points the way the bar reads back).
+static inline int ui_iconbutton_glyph(int glyph)
+{
+        if (!ui_rtl())
+                return glyph;
+        return glyph == UI_ICON_BACK ? UI_ICON_FORWARD : glyph == UI_ICON_FORWARD ? UI_ICON_BACK : glyph;
+}
+
+// The button drawn: its hover or focus as a round fill, its symbol in the middle at the text's scale.
+static fn ui_iconbutton_draw(struct ui address_to ui, const struct ui_iconbutton address_to b)
+{
+        int size = (int)(ui_em(ui, UI_BUTTON_ICON_EM) >> 6), left = b->x + (b->w - size) / 2, top = b->y + (b->h - size) / 2;
+        unsigned int ink = b->disabled ? ui_text_colour(ui, UI_ON_SURFACE_VARIANT) : ui_text_colour(ui, UI_ON_SURFACE);
+        if (b->hover || b->focus)
+        {
+                unsigned int fill = b->focus ? ui_role(UI_PRIMARY_CONTAINER) | 0xff000000u : ui_role(UI_SURFACE_HIGHEST) | 0xff000000u;
+                ui_round(ui, b->x, b->y, b->w, b->h, b->w < b->h ? b->w / 2 : b->h / 2, fill);
+        }
+        ui_icon(ui, ui_iconbutton_glyph(b->glyph), left, top, size, 0, ink);
+}
+
+// The tooltip of a hovered button: its tip in a chip under the button, centred on it and kept inside the window's width.
+static fn ui_iconbutton_tip(struct ui address_to ui, const struct ui_iconbutton address_to b)
+{
+        int gap = ui_px(ui, UI_BUTTON_TIP_GAP), pad = ui_px(ui, UI_BUTTON_TIP_PAD), wide, high, x, y;
+        if (!b->hover || !b->tip || !b->tip[0] || b->disabled)
+                return;
+        wide = ui_kit_measure(ui, (string_address)b->tip, UI_LABEL_MEDIUM) + 2 * pad;
+        high = ui_dev(ui, ui_types[UI_LABEL_MEDIUM].line) + ui_dev(ui, 8);
+        x = b->x + b->w / 2 - wide / 2, y = b->y + b->h + gap;
+        x = x < 0 ? 0 : x + wide > ui->width ? ui->width - wide : x;
+        ui_round(ui, x, y, wide, high, high / 2, ui_role(UI_SURFACE_HIGHEST) | 0xff000000u);
+        ui_kit_text(ui, x + pad, ui_kit_baseline(ui, y + (high - ui_dev(ui, ui_types[UI_LABEL_MEDIUM].line)) / 2, UI_LABEL_MEDIUM), (string_address)b->tip,
+                    UI_LABEL_MEDIUM, ui_text_colour(ui, UI_ON_SURFACE), 0);
+}
+
+// The button's event: a press that lets go on it is the press (returns UI_ICONBUTTON_PRESSED when the app should act); the keys act when it is focused.
+static unsigned int ui_iconbutton_event(struct ui address_to ui, struct ui_iconbutton address_to b, const struct window_event address_to event, int x, int y)
+{
+        b32 inside = x >= b->x && x < b->x + b->w && y >= b->y && y < b->y + b->h;
+        (void)ui;
+        if (b->disabled)
+                return 0;
+        if (event->type == WINDOW_EVENT_MOTION)
+                b->hover = inside;
+        if (event->type == WINDOW_EVENT_BUTTON && event->a == UI_POINTER_LEFT)
+        {
+                if (event->flags & WINDOW_KEY_DOWN)
+                        b->down = inside;
+                else
+                {
+                        b32 acted = b->down && inside;
+                        b->down = false;
+                        return acted ? UI_ICONBUTTON_PRESSED : 0;
+                }
+        }
+        if (event->type == WINDOW_EVENT_KEY && (event->flags & WINDOW_KEY_DOWN) && b->focus && (event->a == UI_KEY_ENTER || event->a == UI_KEY_SPACE))
+                return UI_ICONBUTTON_PRESSED;
+        return 0;
+}
+
+// A menu button (ui_menubutton): a compact label with a chevron, that opens its popup menu under its bottom-left corner.
+#define UI_MENUBUTTON_PAD 12  // logical px either side of the label
+struct ui_menubutton
+{
+        const char address_to label;   // the words: also its accessible name
+        int x, y, w, h;               // device pixels
+        b32 hover, down, focus, open;  // open: the app's menu is up for it
+};
+
+// The label and the chevron, in the button's box; the focus is a round ring of the primary.
+static fn ui_menubutton_draw(struct ui address_to ui, const struct ui_menubutton address_to m)
+{
+        int pad = ui_px(ui, UI_MENUBUTTON_PAD), chev = ui_px(ui, 4), label = ui_kit_measure(ui, (string_address)m->label, UI_LABEL_LARGE);
+        int cy = m->y + m->h / 2;
+        unsigned int fill = m->open || m->hover ? ui_role(UI_SURFACE_HIGHEST) | 0xff000000u : 0;
+        if (fill)
+                ui_round(ui, m->x, m->y, m->w, m->h, ui_px(ui, UI_RADIUS), fill);
+        ui_kit_text(ui, m->x + pad, ui_kit_baseline(ui, m->y + (m->h - ui_types[UI_LABEL_LARGE].line) / 2, UI_LABEL_LARGE), (string_address)m->label,
+                    UI_LABEL_LARGE, ui_text_colour(ui, UI_ON_SURFACE), 0);
+        ui_chevron(ui, m->x + pad + label + ui_px(ui, 10) + chev, cy, chev, ui_text_colour(ui, UI_ON_SURFACE_VARIANT));
+        if (m->focus)
+                ui_kit_ring(ui, &(struct ui_box){m->x * 256, m->y * 256, (m->x + m->w) * 256, (m->y + m->h) * 256, ui_px(ui, UI_RADIUS) * 256, ui_px(ui, UI_RADIUS) * 256},
+                            ui_q8(ui, 2), ui_role(UI_PRIMARY));
+}
+
+// The button's event: a click that lets go on it, Enter, Space, or Down while it is focused asks for its menu (returns 1).
+static b32 ui_menubutton_event(struct ui address_to ui, struct ui_menubutton address_to m, const struct window_event address_to event, int x, int y)
+{
+        b32 inside = x >= m->x && x < m->x + m->w && y >= m->y && y < m->y + m->h;
+        (void)ui;
+        if (event->type == WINDOW_EVENT_MOTION)
+                m->hover = inside;
+        if (event->type == WINDOW_EVENT_BUTTON && event->a == UI_POINTER_LEFT)
+        {
+                if (event->flags & WINDOW_KEY_DOWN)
+                        m->down = inside;
+                else
+                {
+                        b32 acted = m->down && inside;
+                        m->down = false;
+                        return acted;
+                }
+        }
+        if (event->type == WINDOW_EVENT_KEY && (event->flags & WINDOW_KEY_DOWN) && m->focus &&
+            (event->a == UI_KEY_ENTER || event->a == UI_KEY_SPACE || event->a == UI_KEY_DOWN))
+                return 1;
+        return 0;
 }
 
 /* ---- apps: the registry ---- */

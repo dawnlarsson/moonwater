@@ -15576,3 +15576,137 @@ static fn check_bar_cells(void)
         check("bar: a letter typed draws its row to the bar and the other rows only the bar's cells", wide <= 1);
 }
 
+
+/*
+        The top bar's buttons (ui.c's ui_iconbutton, ui_menubutton and ui_iconbutton_tip): the six navigation symbols at 1x and 2x, back and forward
+        swapped in RTL and nothing else, a button pressed by a click that lets go on it or by Enter when focused, a menu button opened by a click,
+        Enter, Space or Down, and the tooltip chip of a hovered button under it. The font is Inter Regular from the tree (the bench's path).
+*/
+static font_face topbar_face;
+static p8 topbar_atlas[1024 * 1024];
+static unsigned int topbar_pixels[240 * 90];
+static long topbar_engine;
+
+static fn topbar_ui(struct ui address_to ui, unsigned int address_to pixels, int width, int height)
+{
+        positive size = 0, bytes;
+        if (!topbar_engine)
+        {
+                topbar_engine = compositor_call(syscall(mmap), 0, sizeof(font_engine), 3, 0x4022, (positive)-1, 0);
+                font_start((font_engine address_to)topbar_engine, topbar_atlas, 1024, 1024);
+                bytes = compositor_map_file("fonts/inter/Inter-Regular.ttf", &size);
+                check("topbar: the Inter face loads", bytes && font_load(&topbar_face, (const p8 address_to)bytes, size, 0) == 0);
+        }
+        memory_zero(ui, sizeof(*ui));
+        ui->pixels = pixels, ui->pitch = (unsigned long)width, ui->width = width, ui->height = height, ui->top = 0, ui->bottom = height, ui->scale = 100;
+        ui->opaque = 1;
+        ui->engine = (font_engine address_to)topbar_engine, ui->regular = ui->bold = &topbar_face;
+        ui_scratch_fit(ui, (unsigned int)width);
+        ui_inks(ui, 0xf6f6f4u);
+        return;
+}
+
+static fn check_topbar_buttons(void)
+{
+        static const int glyphs[6] = {UI_ICON_BACK, UI_ICON_FORWARD, UI_ICON_UP, UI_ICON_REFRESH, UI_ICON_HOME, UI_ICON_NEW_FOLDER};
+        static unsigned int field[ICON_FIELD * ICON_FIELD];
+        struct ui ui;
+        int one = 1, two = 1, whole, outside, swap, keep;
+        struct ui_menubutton menu = {"View", 10, 10, 60, 30, 0, 0, 0, 0};
+        struct ui_iconbutton back = {UI_ICON_BACK, "Back", "Back", 10, 40, 24, 24, 0, 0, 0, 0}, tipped = back;
+        struct window_event event;
+        unsigned int ground = 0xff101010u;
+
+        // The six symbols at 1x (20 px) and 2x (40 px): each draws its ink, inside its square, and at 2x more than at 1x.
+        for (int k = 0; k < 6; k++)
+        {
+                int at1, at2;
+                ui = icon_ui(field);
+                ui_icon(&ui, glyphs[k], 16, 16, 20, 0, 0xff3a8f5cu);
+                at1 = icon_count(field, 20, 0xff3a8f5cu, &whole, &outside);
+                one &= at1 >= 20 / 2 && whole > 0 && !outside;
+                ui = icon_ui(field);
+                ui_icon(&ui, glyphs[k], 16, 16, 40, 0, 0xff3a8f5cu);
+                at2 = icon_count(field, 40, 0xff3a8f5cu, &whole, &outside);
+                two &= at2 > at1 && whole > 0 && !outside;
+        }
+        check("topbar: the six navigation symbols draw their ink inside the square at 1x (20 px)", one);
+        check("topbar: and at 2x (40 px) more of it, inside the square, so the symbols scale", two);
+
+        // RTL: back and forward swap their glyph and nothing else does.
+        ui_kit.rtl = 1;
+        swap = ui_iconbutton_glyph(UI_ICON_BACK) == UI_ICON_FORWARD && ui_iconbutton_glyph(UI_ICON_FORWARD) == UI_ICON_BACK &&
+               ui_iconbutton_glyph(UI_ICON_UP) == UI_ICON_UP && ui_iconbutton_glyph(UI_ICON_HOME) == UI_ICON_HOME;
+        ui_kit.rtl = 0;
+        keep = ui_iconbutton_glyph(UI_ICON_BACK) == UI_ICON_BACK && ui_iconbutton_glyph(UI_ICON_FORWARD) == UI_ICON_FORWARD;
+        check("topbar: in RTL back and forward swap their glyphs, and up and home do not", swap);
+        check("topbar: in LTR back is back and forward is forward", keep);
+
+        // The icon button's press: a click that lets go on it acts, one that lets go off it does not, Enter acts when it is focused only.
+        memory_zero(&event, sizeof(event));
+        event.type = WINDOW_EVENT_BUTTON, event.flags = WINDOW_KEY_DOWN, event.a = UI_POINTER_LEFT;
+        ui_iconbutton_event(&ui, &back, &event, 15, 45);
+        event.flags = 0;
+        check("topbar: a click that lets go on an icon button presses it", ui_iconbutton_event(&ui, &back, &event, 15, 45) == UI_ICONBUTTON_PRESSED);
+        event.flags = WINDOW_KEY_DOWN, event.type = WINDOW_EVENT_BUTTON;
+        ui_iconbutton_event(&ui, &back, &event, 15, 45);
+        event.flags = 0;
+        check("topbar: a click that lets go off it does not", ui_iconbutton_event(&ui, &back, &event, 300, 300) == 0);
+        event.type = WINDOW_EVENT_KEY, event.flags = WINDOW_KEY_DOWN, event.a = UI_KEY_ENTER;
+        back.focus = 0;
+        check("topbar: Enter does nothing to an icon button the keys are not on", ui_iconbutton_event(&ui, &back, &event, 0, 0) == 0);
+        back.focus = 1;
+        check("topbar: and presses it when the keys are on it", ui_iconbutton_event(&ui, &back, &event, 0, 0) == UI_ICONBUTTON_PRESSED);
+
+        // The menu button opens on a click that lets go on it, on Enter, Space or Down while focused; not on any key the keys are not on.
+        memory_zero(&event, sizeof(event));
+        event.type = WINDOW_EVENT_BUTTON, event.flags = WINDOW_KEY_DOWN, event.a = UI_POINTER_LEFT;
+        ui_menubutton_event(&ui, &menu, &event, 20, 20);
+        event.flags = 0;
+        check("topbar: a click that lets go on the menu button opens it", ui_menubutton_event(&ui, &menu, &event, 20, 20) == 1);
+        event.type = WINDOW_EVENT_KEY, event.flags = WINDOW_KEY_DOWN;
+        menu.focus = 0, event.a = UI_KEY_DOWN;
+        check("topbar: Down does nothing to a menu button the keys are not on", ui_menubutton_event(&ui, &menu, &event, 0, 0) == 0);
+        menu.focus = 1;
+        check("topbar: Down opens a focused menu button", ui_menubutton_event(&ui, &menu, &event, 0, 0) == 1);
+        event.a = UI_KEY_ENTER;
+        check("topbar: Enter opens it too", ui_menubutton_event(&ui, &menu, &event, 0, 0) == 1);
+        event.a = UI_KEY_SPACE;
+        check("topbar: and Space", ui_menubutton_event(&ui, &menu, &event, 0, 0) == 1);
+        event.a = UI_KEY_ESCAPE;
+        check("topbar: Escape does not open it", ui_menubutton_event(&ui, &menu, &event, 0, 0) == 0);
+
+        // The button's symbol is drawn at the text's scale: at 2x (scale 200) about four times the ink of 1x, in the same 40 px box.
+        {
+                static unsigned int button[120 * 60];
+                int ink[2] = {0, 0};
+                for (int k = 0; k < 2; k++)
+                {
+                        struct ui bui;
+                        topbar_ui(&bui, button, 120, 60);
+                        bui.scale = k ? 200 : 100;
+                        for (int at = 0; at < 120 * 60; at++)
+                                button[at] = ground;
+                        back.hover = 0, back.focus = 0, back.x = 10, back.y = 10, back.w = 40, back.h = 40;
+                        ui_iconbutton_draw(&bui, &back);
+                        for (int at = 0; at < 120 * 60; at++)
+                                ink[k] += button[at] != ground;
+                }
+                check("topbar: an icon button draws its symbol at the text's scale: at 2x about four times the ink of 1x, and more than twice",
+                      ink[0] > 0 && ink[1] > 2 * ink[0]);
+        }
+
+        // The tooltip: a hovered button's tip is a chip under it, centred on the button; off the button nothing is drawn.
+        topbar_ui(&ui, topbar_pixels, 240, 90);
+        for (int at = 0; at < 240 * 90; at++)
+                topbar_pixels[at] = ground;
+        tipped.hover = 1, tipped.tip = "Back";
+        ui_iconbutton_tip(&ui, &tipped);
+        check("topbar: a hovered icon button's tip is a chip under it, where the pixels are not the ground",
+              topbar_pixels[(40 + 24 + 6 + 4) * 240 + 22] != ground && topbar_pixels[10 * 240 + 22] == ground);
+        for (int at = 0; at < 240 * 90; at++)
+                topbar_pixels[at] = ground;
+        tipped.hover = 0;
+        ui_iconbutton_tip(&ui, &tipped);
+        check("topbar: and an unhovered one draws no tip", topbar_pixels[(40 + 24 + 6 + 4) * 240 + 22] == ground);
+}
