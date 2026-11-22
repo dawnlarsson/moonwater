@@ -879,6 +879,9 @@ static fn editor_pill_draw(struct ui address_to ui, struct editor_tab address_to
 {
         int pad_x = ui_dev(ui, 10), gap = ui_dev(ui, 6), chip_px = ui_dev(ui, 8), chip_h = ui_dev(ui, 20), ph = ui_dev(ui, 28);
         int seg_pad = ui_dev(ui, 2), seg_h = chip_h + 2 * seg_pad;
+        // The switch is the pill's last item: the pill's pad at that end is the switch's inset above it, so its outer item's rounded end
+        // is concentric with the pill's own end, not a pad's width short of it.
+        int end_pad = (ph - seg_h) / 2;
         int margin_r = ui_dev(ui, UI_PAD), margin_b = ui_dev(ui, 10);
         int max_w = editor.text_box.w - 2 * margin_r;
         const char address_to wrap_lbl = WORDS(editor_wrap_on);
@@ -902,16 +905,16 @@ static fn editor_pill_draw(struct ui address_to ui, struct editor_tab address_to
 
         memory_zero(editor.pill_box, sizeof(editor.pill_box));
         editor.wrap_shown = editor.mode_shown = false;
-        if (max_w < btns_w + 2 * pad_x || editor.text_box.h < ph + 2 * margin_b)
+        if (max_w < btns_w + pad_x + end_pad || editor.text_box.h < ph + 2 * margin_b)
                 return;
-        info_room = max_w - 2 * pad_x - btns_w - gap - (extra_w ? extra_w + gap : 0);
+        info_room = max_w - pad_x - end_pad - btns_w - gap - (extra_w ? extra_w + gap : 0);
         if (info_room < 0)
-                extra = null, extra_w = 0, info_room = max_w - 2 * pad_x - btns_w - gap;
+                extra = null, extra_w = 0, info_room = max_w - pad_x - end_pad - btns_w - gap;
         if (info_room > 0 && editor.bar_text[0])
                 info = ui_fit(ui, info, UI_LABEL_MEDIUM, info_room, cut, sizeof(cut)), info_w = ui_kit_measure(ui, info, UI_LABEL_MEDIUM);
         else
                 info = (string_address) "", info_w = 0;
-        pw = 2 * pad_x + btns_w + (info_w ? info_w + gap : 0) + (extra_w ? extra_w + gap : 0);
+        pw = pad_x + end_pad + btns_w + (info_w ? info_w + gap : 0) + (extra_w ? extra_w + gap : 0);
         if (pw > max_w)
                 pw = max_w;
         px = ui_rtl() ? editor.text_box.x + margin_r : editor.text_box.x + editor.text_box.w - margin_r - pw;

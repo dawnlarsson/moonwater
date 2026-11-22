@@ -1229,6 +1229,8 @@ static fn editor_pill_click(unsigned int address_to shown, int x, int y)
         view routes its button group through the kit even when it has none: that call's release let go of the switch the pill's press held,
         the kit chose Hex for it, the pill's own call found nothing held, and the next draw set the switch back to the text it shows. The
         Wrap chip went the same way. Its rows: a click on the Wrap chip turns wrap off, a click on Hex shows hex and the switch stays on it.
+        And the switch's outer item ends where the pill's rounded end is: the pill's inset at that end is its inset above the switch, so
+        the two ends are concentric (a pad of 10 there left the Hex item 8 px short of the end at 1x).
 */
 static fn editor_pill_owner_row(int scale, const char address_to text_name, const char address_to hex_name)
 {
@@ -1237,7 +1239,7 @@ static fn editor_pill_owner_row(int scale, const char address_to text_name, cons
         unsigned int address_to shown = (unsigned int address_to)pixels;
         struct ui_control address_to s = &editor.chips[0], address_to w = &editor.chips[1];
         struct editor_tab address_to tab;
-        int px, py, pw, ph;
+        int px, py, pw, ph, hex_end, top_in;
 
         editor.ui = terminal.ui;
         editor.ui.scale = scale;
@@ -1255,6 +1257,10 @@ static fn editor_pill_owner_row(int scale, const char address_to text_name, cons
         editor_draw(shown);
         px = editor.pill_box[0], py = editor.pill_box[1], pw = editor.pill_box[2], ph = editor.pill_box[3];
         editor_pill_dump(text_name, shown, width, px - 24, py - 24, pw + 48, ph + 34);
+        hex_end = ui_dev(&editor.ui, ui_tab_left(&editor.ui, s, 1) + ui_tab_width(&editor.ui, s, 1));
+        top_in = ui_dev(&editor.ui, s->y) - py;
+        check("editor pill: the switch's outer item ends at the pill's rounded end, inset there as it is above the switch (concentric ends)",
+              editor.mode_shown && top_in > 0 && px + pw - hex_end == top_in);
         check("editor pill: as it opens on the owner's screen, a click on the Wrap chip through editor_event turns word wrap off",
               editor.wrap_shown && tab->view.wrap &&
                   (editor_pill_click(shown, ui_dev(&editor.ui, w->x + w->w / 2), ui_dev(&editor.ui, w->y + w->h / 2)), !tab->view.wrap));
