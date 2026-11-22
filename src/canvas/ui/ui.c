@@ -13723,6 +13723,12 @@ static b32 ui_bar_place(const struct ui address_to ui, int left, int top, int ri
         return ui_bar_geom(r->y, r->h, ui_px(ui, 24), (b64)total, (b64)view, (b64)pos, &r->thumb_pos, &r->thumb_len, &r->max_pos);
 }
 
+// The share of a position's max that a thumb's travel rel (device pixels) reaches along a track span long: 0 when there is no track.
+static b64 ui_thumb_share(int rel, int span, b64 max)
+{
+        return span > 0 ? (b64)rel * max / span : 0;
+}
+
 static b32 ui_bar_event(const struct ui address_to ui, struct ui_bar address_to b, const struct ui_bar_rect address_to r,
                         b32 valid, const struct window_event address_to event, int x, int y, p64 address_to pos)
 {
@@ -13739,7 +13745,7 @@ static b32 ui_bar_event(const struct ui address_to ui, struct ui_bar address_to 
                 if (b->held)
                 {
                         int span = r->h - r->thumb_len;
-                        b64 target = span > 0 ? (b64)b->grab_pos + (b64)(y - b->grab_y) * (b64)r->max_pos / span : 0;
+                        b64 target = (b64)b->grab_pos + ui_thumb_share(y - b->grab_y, span, (b64)r->max_pos);
                         *pos = target < 0 ? 0 : (p64)target > r->max_pos ? r->max_pos : (p64)target;
                         ui_kit_shape = WINDOW_POINTER_ARROW;
                         return true;
@@ -13770,7 +13776,7 @@ static b32 ui_bar_event(const struct ui address_to ui, struct ui_bar address_to 
                         if (y < r->thumb_pos || y >= r->thumb_pos + r->thumb_len)
                         {
                                 int rel = y - r->y - r->thumb_len / 2;
-                                p64 jump = span > 0 && rel > 0 ? (p64)rel * r->max_pos / (p64)span : 0;
+                                p64 jump = rel > 0 ? (p64)ui_thumb_share(rel, span, r->max_pos) : 0;
                                 *pos = jump > r->max_pos ? r->max_pos : jump;
                         }
                         b->grab_y = y;
@@ -13938,7 +13944,7 @@ static int ui_scroll_pointer(const struct ui address_to ui, struct ui_scroll add
                 if (track - length <= 0)
                         return s->scroll;
                 ui_scroll_extent(s);
-                ui_body_track(&s->body, (((b64)(y - s->grab - at) * rest / (track - length)) << UI_Q) - s->body.raw, ui_kit_time());
+                ui_body_track(&s->body, (ui_thumb_share(y - s->grab - at, track - length, rest) << UI_Q) - s->body.raw, ui_kit_time());
                 s->precise = 0;
                 s->scroll = ui_body_px(&s->body);
                 return s->scroll < 0 ? 0 : s->scroll;
@@ -13960,7 +13966,7 @@ static int ui_scroll_pointer(const struct ui address_to ui, struct ui_scroll add
         if (!on_thumb && track - length > 0)
         {
                 // The thumb's middle goes under the pointer, as far as its track lets it: a press alone pulls nothing past an end.
-                b64 to = (b64)(y - s->grab - at) * rest / (track - length);
+                b64 to = ui_thumb_share(y - s->grab - at, track - length, rest);
                 to = to < 0 ? 0 : to > rest ? rest : to;
                 ui_body_track(&s->body, (to << UI_Q) - s->body.raw, ui_kit_time());
                 s->precise = 0;
