@@ -495,15 +495,17 @@ static positive rx_code(rx_compiler *c, positive at, p32 *value)
 {
         memory_utf8_state state = {0};
         positive used = 0;
-        b32 fed;
+        b32 fed = -1;
 
+        if (at >= c->length)
+                return *value = 0, 0;
         *value = c->pattern[at];
         if (c->pattern[at] < 0x80 ||
             !(c->program.policy & (REGEX_CHARACTERS | REGEX_UTF8_NAMES)))
                 return 1;
-        while (!(fed = memory_utf8_feed(&state, c->pattern[at + used])))
+        while (at + used < c->length && !(fed = memory_utf8_feed(&state, c->pattern[at + used])))
                 used++;
-        if (fed < 0)
+        if (at + used >= c->length || fed < 0)
                 return 1;
         *value = state.value;
         return used + 1;
@@ -1194,7 +1196,7 @@ static rx_fragment rx_piece(rx_compiler *c)
                 //      ^\+ (and tac's Emacs syntax ^+).
                 positive plain = 0;
 
-                if (!c->extended && c->pool->nodes[body.first].kind == RX_BEGIN)
+                if (!c->extended && body.first && c->pool->nodes[body.first].kind == RX_BEGIN)
                         plain = byte == '*' ? 1
                                 : (c->program.policy & REGEX_BASIC_REPEATS) &&
                                           (rx_operator(c, '+') || rx_operator(c, '?'))
@@ -1343,8 +1345,10 @@ static rx_ref rx_tail(const rx_node *nodes, rx_ref at)
 
 /* Return 0 after a consuming edge, 1 for an empty path, 2 for an unknown
    first byte. The reverse walk passes assertions but never backreferences. */
-static b32 rx_edges(const regex_program *program, rx_ref first, rx_ref last, p8 *table, bool reverse)
+static b32 rx_edges(const regex_program *program, rx_ref first, rx_ref last, p8 *table, bool reverse, b32 depth)
 {
+        if (depth > RX_PARSE_MAX)
+                return 2;
         b32 result = 1;
         for (rx_ref at = reverse ? last : first; at;)
         {
@@ -1375,13 +1379,34 @@ static b32 rx_edges(const regex_program *program, rx_ref first, rx_ref last, p8 
                         result = 2;
                 else if (node->kind == RX_ALT)
                 {
-                        b32 one = rx_edges(program, node->left, rx_tail(program->nodes, node->left), table, reverse);
-                        b32 two = rx_edges(program, node->right, rx_tail(program->nodes, node->right), table, reverse);
-                        result = one == 2 || two == 2 ? 2 : one || two;
+                        /* rx_alternation builds a left-leaning spine of RX_ALT
+                           nodes; iterate down `left` so a|a|...|a with 100k
+                           alternatives does not overflow the C call stack. */
+                        b32 acc = 0;
+                        rx_ref cur = at;
+                        while (cur && program->nodes[cur].kind == RX_ALT && !program->nodes[cur].next &&
+                               !program->nodes[cur].previous)
+                        {
+                                rx_ref r = program->nodes[cur].right;
+                                b32 two = rx_edges(program, r, rx_tail(program->nodes, r), table, reverse, depth + 1);
+                                acc = acc == 2 || two == 2 ? 2 : (acc || two);
+                                cur = program->nodes[cur].left;
+                        }
+                        if (cur == at)
+                        {
+                                b32 one = rx_edges(program, node->left, rx_tail(program->nodes, node->left), table, reverse, depth + 1);
+                                b32 two = rx_edges(program, node->right, rx_tail(program->nodes, node->right), table, reverse, depth + 1);
+                                result = one == 2 || two == 2 ? 2 : one || two;
+                        }
+                        else
+                        {
+                                b32 one = rx_edges(program, cur, rx_tail(program->nodes, cur), table, reverse, depth + 1);
+                                result = one == 2 || acc == 2 ? 2 : (one || acc);
+                        }
                 }
                 else if (node->kind == RX_CAPTURE || (node->kind == RX_COUNT && node->maximum))
                 {
-                        result = rx_edges(program, node->left, node->right, table, reverse);
+                        result = rx_edges(program, node->left, node->right, table, reverse, depth + 1);
                         if (node->kind == RX_COUNT && !node->minimum && result != 2)
                                 result = 1;
                 }
@@ -1535,8 +1560,10 @@ static bool rx_single(const regex_program *program, const rx_node *node, p8 byte
         line's start alone. The right branch of an alternation of three or
         more is the alternation of the rest, so that spine is a loop.
 */
-static bool rx_begins_anchored(const rx_node *nodes, rx_ref at)
+static bool rx_begins_anchored(const rx_node *nodes, rx_ref at, b32 depth)
 {
+        if (depth > RX_PARSE_MAX)
+                return false;
         while (at)
         {
                 if (nodes[at].kind == RX_BEGIN)
@@ -1545,9 +1572,11 @@ static bool rx_begins_anchored(const rx_node *nodes, rx_ref at)
                         at = nodes[at].left;
                 else if (nodes[at].kind == RX_ALT)
                 {
-                        if (!rx_begins_anchored(nodes, nodes[at].left))
+                        /* rx_alternation puts the spine in `left`, so loop on
+                           `left` and recurse on `right`. */
+                        if (!rx_begins_anchored(nodes, nodes[at].right, depth + 1))
                                 return false;
-                        at = nodes[at].right;
+                        at = nodes[at].left;
                 }
                 else
                         return false;
@@ -1575,6 +1604,7 @@ static bool rx_compile_length(rx_pool *pool, regex_program *out, string_address 
         // written: a pattern of nothing leaves the program a table to point at.
         if (!rx_room(address_of c, c.cursor.nodes + 1))
                 return regex_failure = REGEX_FAILED_OTHER, false;
+        pool->nodes[0] = (rx_node){0};
         rx_ref first = (rx_ref)c.cursor.nodes;
         rx_hints *hints = &pool->hints;
         /* Every accepted proof byte is constructed before publication;
@@ -1609,7 +1639,7 @@ static bool rx_compile_length(rx_pool *pool, regex_program *out, string_address 
                 if (node->kind == RX_ALT || (node->kind == RX_COUNT && node->minimum != node->maximum))
                         c.program.flags |= RX_BRANCHING;
         }
-        if (!rx_edges(address_of c.program, root.first, root.last, hints->first_skip, false))
+        if (!rx_edges(address_of c.program, root.first, root.last, hints->first_skip, false, 0))
         {
                 c.program.flags |= RX_FIRST_KNOWN;
                 for (b32 i = 0; i < 256; i++)
@@ -1617,11 +1647,11 @@ static bool rx_compile_length(rx_pool *pool, regex_program *out, string_address 
         }
         if (!(c.program.flags & RX_HAS_BACKREF))
         {
-                rx_edges(address_of c.program, root.first, root.last, hints->last_bytes, true);
+                rx_edges(address_of c.program, root.first, root.last, hints->last_bytes, true, 0);
                 c.program.flags |= RX_LAST_KNOWN;
         }
         // Under M a ^ is also at each line's start, so the walk tries every start.
-        if (root.first && rx_begins_anchored(pool->nodes, root.first) && !(policy & REGEX_LINE_ANCHORS))
+        if (root.first && rx_begins_anchored(pool->nodes, root.first, 0) && !(policy & REGEX_LINE_ANCHORS))
                 c.program.flags |= RX_ANCHORED;
         rx_required_two(pool->nodes, root.first, hints->literal, address_of hints->literal_length,
                         hints->extra, address_of hints->extra_length);
@@ -2372,9 +2402,8 @@ static p8 rx_find_walk(rx_match *match, const regex_program *program, p8 mode, b
                         return RX_NO_MATCH;
                 if (program->flags & RX_IGNORE_CASE)
                 {
-                        for (positive i = 0; i < size; i++)
-                                if (byte_to_lower(bytes[length - size + i]) != hints->literal[i])
-                                        return RX_NO_MATCH;
+                        if (memory_compare_ascii_case(bytes + length - size, hints->literal, size))
+                                return RX_NO_MATCH;
                 }
                 else if (memory_compare(bytes + length - size, hints->literal, size))
                         return RX_NO_MATCH;
@@ -2949,14 +2978,19 @@ static bool rx_dfa_close(rx_dfa_cache *cache, b32 state, bool before, bool after
                 memory_fill(cache->mark, 0, sizeof(cache->mark));
                 cache->generation = 1;
         }
+        p32 gen = (p32)cache->generation;
         for (positive i = 0; i < cache->set_size[state]; i++)
-                cache->stack[top++] = cache->pool[cache->set_at[state] + i];
+        {
+                p16 id = cache->pool[cache->set_at[state] + i];
+                if (cache->mark[id] != gen)
+                {
+                        cache->mark[id] = gen;
+                        cache->stack[top++] = id;
+                }
+        }
         while (top)
         {
                 p16 id = cache->stack[--top];
-                if (cache->mark[id] == cache->generation)
-                        continue;
-                cache->mark[id] = (p32)cache->generation;
                 const rx_nfa *nfa = dfa->nfa + id;
                 switch (nfa->kind)
                 {
@@ -2964,20 +2998,38 @@ static bool rx_dfa_close(rx_dfa_cache *cache, b32 state, bool before, bool after
                         cache->found[count++] = id;
                         break;
                 case RX_NFA_SPLIT:
-                        cache->stack[top++] = nfa->out1;
-                        cache->stack[top++] = nfa->out;
+                        if (cache->mark[nfa->out1] != gen)
+                        {
+                                cache->mark[nfa->out1] = gen;
+                                cache->stack[top++] = nfa->out1;
+                        }
+                        if (cache->mark[nfa->out] != gen)
+                        {
+                                cache->mark[nfa->out] = gen;
+                                cache->stack[top++] = nfa->out;
+                        }
                         break;
                 case RX_NFA_BEGIN:
-                        if (beginning)
+                        if (beginning && cache->mark[nfa->out] != gen)
+                        {
+                                cache->mark[nfa->out] = gen;
                                 cache->stack[top++] = nfa->out;
+                        }
                         break;
                 case RX_NFA_END:
-                        if (ending)
+                        if (ending && cache->mark[nfa->out] != gen)
+                        {
+                                cache->mark[nfa->out] = gen;
                                 cache->stack[top++] = nfa->out;
+                        }
                         break;
                 case RX_NFA_EDGE:
-                        if (edge_masks[nfa->argument] & (1u << (before * 2 + after)))
+                        if ((edge_masks[nfa->argument] & (1u << (before * 2 + after))) &&
+                            cache->mark[nfa->out] != gen)
+                        {
+                                cache->mark[nfa->out] = gen;
                                 cache->stack[top++] = nfa->out;
+                        }
                         break;
                 case RX_NFA_MATCH:
                         matched = true;
@@ -3421,7 +3473,8 @@ static bool rx_keep(rx_pool *pool, const regex_program *program, regex_program *
 {
         positive fixed = program->hints->fixed_length < RX_FIXED_MAX
                              ? program->hints->fixed_length : RX_FIXED_MAX;
-        positive hints = (offset_of(rx_hints, fixed_literal) + fixed + 15) & ~(positive)15;
+        positive hints_copy = offset_of(rx_hints, fixed_literal) + fixed;
+        positive hints = (hints_copy + 15) & ~(positive)15;
         // A pattern of nothing has no nodes and no sets, and the pool may
         // never have been given any: the program points at nothing then.
         positive nodes = program->nodes ? pool->used.nodes * sizeof(rx_node) : 0;
@@ -3431,7 +3484,7 @@ static bool rx_keep(rx_pool *pool, const regex_program *program, regex_program *
         if (!block)
                 return false;
 
-        memory_copy_apart(block, program->hints, hints);
+        memory_copy_apart(block, program->hints, hints_copy);
         memory_copy_apart(block + hints, program->nodes, nodes);
         memory_copy_apart(block + hints + nodes, program->sets, sets);
 
