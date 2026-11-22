@@ -1698,7 +1698,7 @@ static fn settings_about_describe(int id, struct ui_row address_to row)
 {
         static char about_text[SETTINGS_ABOUT_COUNT][SETTINGS_SUB_TEXT];
         int w = settings_about_of(id);
-        if (w < 0)
+        if (w < 0 || w >= SETTINGS_ABOUT_COUNT)
                 return;
         row->section = SETTINGS_ABOUT, row->header = WORDS(settings_about_header), row->label = settings_about_label(w);
         row->about = settings_about_sub(w, about_text[w], sizeof(about_text[w]));

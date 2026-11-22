@@ -2216,7 +2216,7 @@ static bipolar login_message_open(string_address line, bool nonblocking,
         if (!login_message_path(line, path, sizeof(path)))
                 return -ERROR_INVALID;
 
-        positive flags = 01 | O_NOCTTY | O_CLOEXEC;
+        positive flags = 01 | O_NOCTTY | O_CLOEXEC | O_NOFOLLOW;
         if (nonblocking)
                 flags |= O_NONBLOCK;
 

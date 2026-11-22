@@ -44886,9 +44886,19 @@ static const named_flag expr_primaries[] = {
     {(string_address) "substr", EXPR_PRIM_SUBSTR},
 };
 
+static positive expr_depth;
+
 static expr_value expr_primary()
 {
         expr_value made = expr_zero();
+
+        if (expr_depth >= 1024)
+        {
+                expr_stop("expression nesting too deep");
+                return made;
+        }
+        expr_depth++;
+        scope_exit(expr_depth--);
 
         if (!expr_more())
                 return made;
@@ -45266,6 +45276,7 @@ static b32 text_expr()
 
         expr_fault = 0;
         expr_dead = 0;
+        expr_depth = 0;
 
         if (expr_at < expr_count && !string_compare(program_argument(expr_at), "--"))
                 expr_at++;
