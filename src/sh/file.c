@@ -1764,7 +1764,7 @@ static bool file_codec_parse(file_codec_cli address_to codec,
                                 if (!file_codec_act(codec, act, result))
                                         return false;
                         }
-                        else if (*letter >= '0' && *letter <= '9' &&
+                        else if (byte_is_digit(*letter) &&
                                  (*letter > '0' || (codec->features & FILE_CODEC_LEVEL_ZERO)))
                                 codec->level = (p8)(*letter - '0');
                         else if (*letter == 'o' &&
@@ -3175,18 +3175,17 @@ static bool pd_word_of(pd_parser address_to pc, p8 address_to word, pd_token add
 
 static bool pd_space(p8 letter)
 {
-        return letter == ' ' || (letter >= '\t' && letter <= '\r');
+        return byte_is_space(letter);
 }
 
 static bool pd_digit(p8 letter)
 {
-        return letter >= '0' && letter <= '9';
+        return byte_is_digit(letter);
 }
 
 static bool pd_alpha(p8 letter)
 {
-        letter |= 0x20;
-        return letter >= 'a' && letter <= 'z';
+        return byte_is_alpha(letter);
 }
 
 static pd_token pd_lex(pd_parser address_to pc)
@@ -21769,7 +21768,19 @@ static bool df_tableless(storage_mount_table address_to mounts, positive first, 
         mounts->entry = (storage_mount address_to)memory_take(room * sizeof(storage_mount) + 1);
         df_tableless_operand = (positive address_to)memory_take(room * sizeof(positive) + 1);
         if (!mounts->entry || !df_tableless_operand)
+        {
+                if (mounts->entry)
+                {
+                        memory_give(mounts->entry);
+                        mounts->entry = null;
+                }
+                if (df_tableless_operand)
+                {
+                        memory_give(df_tableless_operand);
+                        df_tableless_operand = null;
+                }
                 return false;
+        }
 
         for (positive i = first; i < count; i++)
         {
@@ -21782,7 +21793,16 @@ static bool df_tableless(storage_mount_table address_to mounts, positive first, 
                 file_facts up;
 
                 if (!place)
+                {
+                        for (positive j = 0; j < mounts->count; j++)
+                                memory_give((address_any)mounts->entry[j].target);
+                        mounts->count = 0;
+                        memory_give(mounts->entry);
+                        mounts->entry = null;
+                        memory_give(df_tableless_operand);
+                        df_tableless_operand = null;
                         return false;
+                }
                 if (looked < 0)
                 {
                         string_format(log_error, "df: %w: %s\n", writer_terminal_name, path,
@@ -27595,13 +27615,7 @@ static bool split_output_advance(split_output address_to output)
 
         if (!output->suffix_fixed && next == last)
         {
-                bool leading = true;
-
-                for (positive i = 0; i < changed; i++)
-                        if (output->suffix[i] != last)
-                                leading = false;
-
-                if (leading)
+                if (memory_span_byte(output->suffix, last, changed) == changed)
                 {
                         if (output->suffix_length + 2 > SPLIT_SUFFIX_MAX)
                                 return false;
@@ -32059,14 +32073,18 @@ static bool hardlink_clone(hardlink_file address_to keep, hardlink_file address_
                 return false;
 
         bipolar destination = system_open_at_mode(AT_FDCWD, (string_address)temporary,
-                                                  O_CREAT | O_EXCL | O_WRONLY | O_TRUNC | O_CLOEXEC, 0600);
+                                                  O_CREAT | O_EXCL | O_WRONLY | O_TRUNC | O_NOFOLLOW | O_CLOEXEC, 0600);
         bipolar source = destination < 0 ? -1
-                                         : system_open_at(AT_FDCWD, from, FILE_READ | O_CLOEXEC);
-        bool done = destination >= 0 && source >= 0 &&
-                    file_change_mode_handle(destination, duplicate->facts.mode & 07777) >= 0 &&
+                                         : system_open_at(AT_FDCWD, from, FILE_READ | O_NOFOLLOW | O_CLOEXEC);
+        file_facts source_facts;
+        bool source_ok = source >= 0 &&
+                         file_look_code(source, (string_address)"", AT_EMPTY_PATH, address_of source_facts) >= 0 &&
+                         file_same_identity(address_of source_facts, address_of keep->facts);
+        bool done = destination >= 0 && source_ok &&
                     system_call_3(syscall(fchown), (positive)destination,
                                   (positive)duplicate->facts.owner,
                                   (positive)duplicate->facts.group) >= 0 &&
+                    file_change_mode_handle(destination, duplicate->facts.mode & 07777) >= 0 &&
                     system_call_3(syscall(ioctl), (positive)destination, 0x40049409u,
                                   (positive)source) >= 0 &&
                     system_rename_at(AT_FDCWD, (string_address)temporary, AT_FDCWD, to, 0) >= 0;
@@ -33425,7 +33443,7 @@ static bool shred_one(string_address path, shred_how address_to how)
         file_facts named;
         bipolar named_look = file_look_code(AT_FDCWD, path, AT_SYMLINK_NOFOLLOW,
                                             address_of named);
-        positive flags = O_WRONLY | O_NOCTTY | O_NONBLOCK;
+        positive flags = O_WRONLY | O_NOCTTY | O_NONBLOCK | O_CLOEXEC;
         bipolar handle = system_open_at(AT_FDCWD, path, flags);
 
         //      -f makes a file it may not write writable, and when that is
@@ -40591,19 +40609,8 @@ static b32 file_install()
         install_strip = (flags & FILE_FLAG('s')) != 0;
         install_strip_program = file_option_value(address_of taking, 'P');
 
-        //      GNU's order: the two refusals of a directory install, then
-        //      the operands and the mode, then install_late_checks.
-        if (install_strip && directories)
-                return string_report(
-                    log_error, 1,
-                    "install: the strip option may not be used when installing a directory\n");
-
         if (directories)
         {
-                if (into)
-                        return string_report(
-                            log_error, 1,
-                            "install: target directory not allowed when installing a directory\n");
                 return_if(taking.first >= count, file_need_file((string_address) "install", 1));
                 if ((flags & FILE_FLAG('T')) && count - taking.first > 2)
                         return file_extra_operand((string_address) "install",
@@ -43790,7 +43797,7 @@ static bool seq_decimal_number(string_address text, seq_decimal address_to out)
 
                         point = at;
                 }
-                else if (text[at] >= '0' && text[at] <= '9')
+                else if (byte_is_digit(text[at]))
                 {
                         digits++;
 
@@ -43819,12 +43826,12 @@ static bool seq_decimal_number(string_address text, seq_decimal address_to out)
                         at++;
                 }
 
-                if (text[at] < '0' || text[at] > '9')
+                if (!byte_is_digit(text[at]))
                         return false;
 
                 positive magnitude = 0;
 
-                while (text[at] >= '0' && text[at] <= '9')
+                while (byte_is_digit(text[at]))
                 {
                         positive digit = (positive)(text[at++] - '0');
 
@@ -43993,7 +44000,7 @@ static positive seq_format_number(string_address text, positive address_to at)
 {
         positive value = 0;
 
-        while (text[address_to at] >= '0' && text[address_to at] <= '9')
+        while (byte_is_digit(text[address_to at]))
         {
                 if (value <= SEQ_INT_MAX)
                         value = value * 10 + (positive)(text[address_to at] - '0');
@@ -44124,7 +44131,7 @@ static bool seq_less(seq_decimal left, seq_decimal right)
 */
 static bool seq_all_digits(string_address text)
 {
-        return text[0] >= '0' && text[0] <= '9' &&
+        return byte_is_digit(text[0]) &&
                !text[string_span_of_set(text, "0123456789")];
 }
 
@@ -45341,7 +45348,7 @@ static bipolar seq_exponent_of(string_address text)
         if (*text == '+' || *text == '-')
                 minus = *text++ == '-';
 
-        for (; *text >= '0' && *text <= '9'; text++)
+        for (; byte_is_digit(*text); text++)
                 magnitude = magnitude > (positive)bipolar_max / 10
                                 ? (positive)bipolar_max + 1
                                 : min(magnitude * 10 + (positive)(*text - '0'),
@@ -49177,15 +49184,11 @@ static bipolar kill_process_status(string_address pid, p8 address_to into,
                                    positive capacity)
 {
         p8 path[FILE_PATH_MAX];
-        positive at = 0;
+        positive pid_length = string_length_max(pid, sizeof(path) - 15);
 
-        string_copy(path, (string_address) "/proc/");
-        at = string_length(path);
-
-        for (positive i = 0; string_get(pid + i) && at + 9 < sizeof(path); i++)
-                path[at++] = string_get(pid + i);
-
-        string_copy(path + at, (string_address) "/status");
+        memory_copy_apart(path, (address_any) "/proc/", 6);
+        memory_copy_apart(path + 6, pid, pid_length);
+        memory_copy_apart_end(path + 6 + pid_length, (address_any) "/status", 7);
 
         return file_slurp_once_at(AT_FDCWD, path, into, capacity);
 }
@@ -49195,30 +49198,33 @@ static bipolar kill_process_status(string_address pid, p8 address_to into,
 static bool kill_status_mask(string_address text, string_address label,
                              positive address_to mask)
 {
-        for (positive at = 0; text[at]; at++)
+        positive label_length = string_length(label);
+
+        for (string_address line = text; *line;)
         {
-                if (at && text[at - 1] != '\n')
-                        continue;
+                string_address next = string_first_of_or_end(line, '\n');
 
-                if (string_compare_max(text + at, label, string_length(label)))
-                        continue;
+                if (!string_compare_max(line, label, label_length))
+                {
+                        string_address from = line + label_length;
 
-                positive from = at + string_length(label);
+                        from += string_span_of_set(from, " \t");
 
-                from += string_span_of_set(text + from, " \t");
+                        positive digits = 0;
+                        //      The text is terminated, and a terminator is not a
+                        //      hexadecimal digit, so the run ends at the terminator
+                        //      whatever the bound is.
+                        positive value = string_digits_hexadecimal_max(
+                            from, (positive)-1, address_of digits);
 
-                positive digits = 0;
-                //      The text is terminated, and a terminator is not a
-                //      hexadecimal digit, so the run ends at the terminator
-                //      whatever the bound is.
-                positive value = string_digits_hexadecimal_max(
-                    text + from, (positive)-1, address_of digits);
+                        if (!digits)
+                                return false;
 
-                if (!digits)
-                        return false;
+                        address_to mask = value;
+                        return true;
+                }
 
-                address_to mask = value;
-                return true;
+                line = *next ? next + 1 : next;
         }
 
         return false;
@@ -50526,7 +50532,7 @@ static bool cal_number(string_address text, string_address what, b64 address_to 
 
         if (*at == '-' || *at == '+')
                 negative = *at++ == '-';
-        for (; *at >= '0' && *at <= '9'; at++)
+        for (; byte_is_digit(*at); at++)
         {
                 digits = true;
                 if (value <= 4294967296LL)
@@ -50642,7 +50648,7 @@ static b32 file_cal()
                         bool digit_in_it = false;
 
                         for (string_address at = word; *at; at++)
-                                digit_in_it |= *at >= '0' && *at <= '9';
+                                digit_in_it |= byte_is_digit(*at);
                         if ((digit_in_it || string_equals(word, "now") || string_equals(word, "today") ||
                              string_equals(word, "yesterday") || string_equals(word, "tomorrow")) &&
                             file_moment_read_exact(word, (b64)now, address_of stamp,
@@ -50686,7 +50692,7 @@ static b32 file_cal()
                 {
                         string_address said = file_operand_at(operands == 3 ? 1 : 0);
 
-                        if (*said >= '0' && *said <= '9')
+                        if (byte_is_digit(*said))
                         {
                                 if (!cal_number(said, (string_address) "illegal month value: use 1-12", address_of value))
                                         return 1;
