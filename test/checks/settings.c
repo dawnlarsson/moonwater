@@ -5618,6 +5618,7 @@ static fn check_settings_device_strip(void)
                         settings_large->said[at] = rows[at];
                 settings.runner.length = length;
                 settings_feed_hardware();
+                items = settings.item[2]; // the feed may move the list: its rows are read where they are now
                 check("settings: a drive past the rows has no strip, the port before it keeps none, and a note says one is not shown",
                       settings.item_count[2] == 24 && items[22].kind == SETTINGS_PORT && items[22].segment_count == 0 &&
                           items[23].kind == SETTINGS_NOTE && string_equals((string_address)items[23].label, (string_address) "1 more not shown"));
