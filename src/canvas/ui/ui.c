@@ -907,6 +907,8 @@ static inline int ui_edge_judge(int side, int x0, int y0, int x, int y, int slop
 #define TASKBAR_MIC (-7)
 // The notices dot at the start of the tray, drawn only while the board holds a notice or an issue (taskbar_notices_set):
 #define TASKBAR_NOTICES (-8)
+// The keyboard on the screen, a cell of its own first in the tray while one can be asked for by touch or a controller (taskbar_keyboard_set):
+#define TASKBAR_KEYBOARD (-14)
 // The plate the windows' tabs float on:
 #define TASKBAR_TABS (-10)
 // The tray's items that are set before the tasks (`taskbar tray ITEM before`), a pill of their own on that side:
@@ -1107,7 +1109,8 @@ enum taskbar_cell_act
         TASKBAR_ACT_MIC_OPEN,    // the microphone cell: the recording strips beside it
         TASKBAR_ACT_MIC_MUTE,    // the microphone cell's middle press
         TASKBAR_ACT_SETTINGS,    // the tray: a double press opens the settings
-        TASKBAR_ACT_NOTICES_OPEN // the notices dot: the notices popup beside it
+        TASKBAR_ACT_NOTICES_OPEN, // the notices dot: the notices popup beside it
+        TASKBAR_ACT_KEYBOARD     // the keyboard cell: the keyboard on the screen asked for, or put away
 };
 
 struct taskbar_cell_rule
@@ -1126,6 +1129,7 @@ static const struct taskbar_cell_rule taskbar_cell_rules[] = {
         {TASKBAR_MIC, TASKBAR_BUTTON_LEFT, TASKBAR_ACT_MIC_OPEN, 0},
         {TASKBAR_MIC, TASKBAR_BUTTON_MIDDLE, TASKBAR_ACT_MIC_MUTE, 0},
         {TASKBAR_NOTICES, TASKBAR_BUTTON_LEFT, TASKBAR_ACT_NOTICES_OPEN, 0},
+        {TASKBAR_KEYBOARD, TASKBAR_BUTTON_LEFT, TASKBAR_ACT_KEYBOARD, 0},
         {TASKBAR_TRAY, TASKBAR_BUTTON_LEFT, TASKBAR_ACT_SETTINGS, 1},
 };
 
@@ -19418,6 +19422,7 @@ enum
         UI_ICON_REFRESH,   // a circle with its arrowhead at the top right: refresh
         UI_ICON_HOME,      // a roof over a house: home
         UI_ICON_NEW_FOLDER, // a folder's outline with a plus in it: new folder
+        UI_ICON_KEYBOARD,   // a keyboard: a frame, a row of keys and the space bar (the tray's keyboard on the screen)
         UI_ICON_COUNT
 };
 
@@ -19440,6 +19445,8 @@ static const struct ui_icon_part ui_icon_parts[UI_ICON_COUNT][UI_ICON_PARTS] = {
         [UI_ICON_NOTE] = {{UI_ICON_RING, 6, 8, 42, 40, 4}, {UI_ICON_LINE, 12, 18, 36, 18, 0}, {UI_ICON_LINE, 12, 24, 36, 24, 0}, {UI_ICON_LINE, 12, 30, 28, 30, 0}},
         [UI_ICON_GLOBE] = {{UI_ICON_RING, 6, 6, 42, 42, 18}, {UI_ICON_RING, 15, 6, 33, 42, 9}, {UI_ICON_LINE, 7, 24, 41, 24, 0}, {UI_ICON_LINE, 11, 15, 37, 15, 0},
                            {UI_ICON_LINE, 11, 33, 37, 33, 0}},
+        [UI_ICON_KEYBOARD] = {{UI_ICON_RING, 4, 12, 44, 36, 4}, {UI_ICON_BOX, 10, 18, 15, 22, 1}, {UI_ICON_BOX, 18, 18, 23, 22, 1},
+                              {UI_ICON_BOX, 26, 18, 31, 22, 1}, {UI_ICON_BOX, 34, 18, 38, 22, 1}, {UI_ICON_LINE, 14, 29, 34, 29, 0}},
         [UI_ICON_GAMEPAD] = {{UI_ICON_RING, 4, 13, 44, 37, 11}, {UI_ICON_LINE, 11, 25, 21, 25, 0}, {UI_ICON_LINE, 16, 20, 16, 30, 0}, {UI_ICON_BOX, 29, 19, 35, 25, 3},
                              {UI_ICON_BOX, 34, 25, 40, 31, 3}},
         [UI_ICON_KEY] = {{UI_ICON_RING, 4, 14, 24, 34, 10}, {UI_ICON_BOX, 11, 21, 17, 27, 3}, {UI_ICON_LINE, 24, 24, 44, 24, 0}, {UI_ICON_LINE, 37, 24, 37, 32, 0},

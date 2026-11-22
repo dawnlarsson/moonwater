@@ -124,6 +124,14 @@ static void compositor_access_act(unsigned int action, int down, unsigned int at
 
 static b32 compositor_access_drives(void) { return compositor_access.hand; }
 
+static b32 compositor_access_present(void)
+{
+        for (unsigned int each = 0; each < COMPOSITOR_ACCESS_PADS; each++)
+                if (compositor_access.pad[each].at >= 0)
+                        return 1;
+        return 0;
+}
+
 // A controller is the hand now: the keyboard on the screen is looked at again (it comes up on a field for a controller, as for a touch).
 static void compositor_access_take_hand(void)
 {
@@ -300,6 +308,7 @@ static b32 compositor_access_open(unsigned int at, bipolar handle, const p8 *key
                 pad->xbox_letters |= (unsigned char)(size >= tail && string_equals((string_address)driver + size - tail, (string_address)xbox[each]));
         }
         compositor_access.of[at] = (signed char)index;
+        compositor_osk_sync();
         return 1;
 }
 
@@ -328,6 +337,7 @@ static void compositor_access_close(unsigned int at)
         pad->held = 0;
         compositor_access_release_all();
         pad->at = -1, compositor_access.of[at] = -1;
+        compositor_osk_sync();
 }
 
 // /dev/hidraw*'s character major, as /proc/devices lists it ("NNN hidraw").

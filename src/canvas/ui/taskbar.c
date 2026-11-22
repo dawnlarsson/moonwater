@@ -32,7 +32,7 @@ static struct taskbar_state
         int tray_chars, launcher, hide_fullscreen;
         b64 shift, slide_from, slide_to;
         positive slide_at;
-        int volume_item, volume_percent, volume_muted, volume_flash, mic_item, mic_muted, notices_item;
+        int volume_item, volume_percent, volume_muted, volume_flash, mic_item, mic_muted, notices_item, keyboard_item;
         unsigned int notices_severity;
         int scale, padding, glides, moon_zone, tasks_zone, tasks_right;
         unsigned int tray_before;
@@ -202,6 +202,7 @@ static int taskbar_tab_length(int high, int pad, int scale, int characters)
 }
 
 #define TASKBAR_TRAY_CELLS(CELL)                                                                                          \
+        CELL(TASKBAR_KEYBOARD, taskbar.keyboard_item, glyph, taskbar_keyboard_cell(view, t, n, ink))                     \
         CELL(TASKBAR_NOTICES, taskbar.notices_item, (UI_DOT * scale + 50) / 100, taskbar_notices_cell(view, t, n))       \
         CELL(TASKBAR_MIC, taskbar.mic_item, glyph, taskbar_mic_cell(view, t, n))                                         \
         CELL(TASKBAR_VOLUME, taskbar.volume_item, glyph, taskbar_volume_cell(view, t, n, ink, ground))                   \
@@ -1624,6 +1625,15 @@ static void taskbar_mic_cell(const struct taskbar_view *view, const struct ui_tr
         ui_microphone(&ui, x, y, mark->w, taskbar.mic_muted, compositor_ink_role(UI_ERROR) | 0xff000000u);
 }
 
+// The keyboard cell: the keyboard's mark in the band's ink.
+static void taskbar_keyboard_cell(const struct taskbar_view *view, const struct ui_tree address_to t, const struct ui_node address_to n, unsigned int ink)
+{
+        struct ui ui;
+        int x, y;
+        const struct ui_node address_to mark = taskbar_ui(&ui, view, t, n, &x, &y);
+        ui_icon(&ui, UI_ICON_KEYBOARD, x, y, mark->w, 0, ink | 0xff000000u);
+}
+
 static void taskbar_notices_cell(const struct taskbar_view *view, const struct ui_tree address_to t, const struct ui_node address_to n)
 {
         struct ui ui;
@@ -1873,6 +1883,14 @@ static int taskbar_mic_set(int present, int muted)
         present = present != 0, muted = muted != 0;
         int changed = present != taskbar.mic_item || (present && muted != taskbar.mic_muted);
         taskbar.mic_item = present, taskbar.mic_muted = muted;
+        return taskbar.stale |= changed, changed;
+}
+
+// The keyboard cell there or not: while the keyboard on the screen can be asked for by touch or a controller (compositor_osk_sync).
+static int taskbar_keyboard_set(int present)
+{
+        int changed = (present != 0) != taskbar.keyboard_item;
+        taskbar.keyboard_item = present != 0;
         return taskbar.stale |= changed, changed;
 }
 

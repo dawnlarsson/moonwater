@@ -2321,6 +2321,7 @@ static int compositor_button_band(int tab, unsigned int code, int up)
                 case TASKBAR_ACT_MIC_MUTE: compositor_mic_step(); break;
                 case TASKBAR_ACT_SETTINGS: compositor_settings_open(); break;
                 case TASKBAR_ACT_NOTICES_OPEN: compositor_notices_open(px, py); break;
+                case TASKBAR_ACT_KEYBOARD: compositor_osk_toggle(); break;
                 default: break;
                 }
                 return 1;

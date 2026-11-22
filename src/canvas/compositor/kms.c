@@ -1865,7 +1865,8 @@ static void compositor_sway_to(struct compositor_sway *s, int to, positive now)
         s->at = compositor.table && compositor.table->motion ? 0 : now;
 }
 
-static b32 compositor_access_drives(void); // access.c
+static b32 compositor_access_drives(void);  // access.c
+static b32 compositor_access_present(void); // access.c: a controller is read
 
 // Whether the pointer is the dynamic one now: the style says so, or the last input was a touch (touch.hidden) or a controller's, which always is.
 static int compositor_pointer_dynamic(void)

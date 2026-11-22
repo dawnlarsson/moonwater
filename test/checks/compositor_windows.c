@@ -5588,7 +5588,8 @@ static void check_compositor_access(void)
     compositor.showing[2] = 1, compositor.asks[2] |= WINDOW_KEYBOARD, compositor.y[2] = 200, compositor.h[2] = 56;
     compositor.osk_setting = COMPOSITOR_OSK_AUTO;
     compositor_osk_sync();
-    all = !compositor.osk_shown;
+    /* With a controller read, the tray has the keyboard's cell: the way to it with no chord to type. */
+    all = !compositor.osk_shown && taskbar.keyboard_item;
     /* An Xbox pad: BTN_Y (0x134) is its top face button, BTN_X (0x133) its left one. */
     access_report(COMPOSITOR_EV_KEY, 0x134, 1), access_report(COMPOSITOR_EV_KEY, 0x134, 0);
     all &= compositor.osk_shown && compositor.osk_asked;
@@ -5602,10 +5603,11 @@ static void check_compositor_access(void)
     all &= !compositor.osk_shown && !compositor.osk_asked;
     access_report(COMPOSITOR_EV_KEY, 0x133, 0);
     all &= access_unread(1, WINDOW_EVENT_KEY, CK_KEY_BACKSPACE, &down) == 2 && down == 1 && access_unread(1, WINDOW_EVENT_BUTTON, -1, &down) == 0;
-    check("access: the top face button asks for the keyboard on the screen with no field and puts it away; while it is up the left face button is Backspace and menu Enter, let go as pressed",
+    check("access: a controller puts the keyboard's cell in the tray; the top face button asks for the keyboard with no field and puts it away; while it is up the left face button is Backspace and menu Enter, let go as pressed",
           all);
     compositor.showing[2] = 0, compositor.asks[2] &= ~WINDOW_KEYBOARD;
     compositor_osk_sync();
+    check("access: with no keyboard on the screen to ask for, the tray has no cell for one", !taskbar.keyboard_item);
 
     table->event_tail[1] = table->event_head[1];
     access_report(COMPOSITOR_EV_KEY, 0x130, 1);

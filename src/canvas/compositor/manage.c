@@ -3260,6 +3260,8 @@ static void compositor_osk_unpan(int row)
                 compositor_place(row, compositor.x[row], compositor.y[row] + amount);
 }
 
+static int taskbar_keyboard_set(int present); // ui/taskbar.c: the tray's keyboard cell there or not
+
 static void compositor_osk_sync(void)
 {
         struct windows *table = compositor.table;
@@ -3306,6 +3308,11 @@ static void compositor_osk_sync(void)
                         compositor_osk_pan(focus, kb);
         }
         compositor.osk_shown = (unsigned char)(kb >= 0 && want);
+        // The tray's keyboard cell, while the keyboard can be asked for by a hand with no keys of its own (a touch screen, a
+        // controller, no keyboard at all) or its setting says always: the way to it a person has with no chord to type.
+        if (taskbar_keyboard_set(kb >= 0 && (compositor.osk_setting == COMPOSITOR_OSK_ON || compositor.osk_shown || !kb_plugged ||
+                                             compositor_input_has(1) || compositor_access_present())))
+                compositor_tabs_changed();
         table->osk_setting = compositor.osk_setting, table->osk_shown = compositor.osk_shown;
         table->osk_input = compositor.osk_typed ? 2 : compositor.owner != COMPOSITOR_PREDICT_MOUSE ? 1 : 0;
         table->osk_physical = kb_plugged;
