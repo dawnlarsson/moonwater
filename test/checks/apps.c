@@ -10101,6 +10101,9 @@ b32 main()
                                 memory_copy(settings_large->said, hardware, sizeof(hardware) - 1);
                                 settings.runner.length = sizeof(hardware) - 1;
                                 settings_feed_hardware();
+                                // The devices list the same way: a feed of no devices is its Add row alone (settings_feed_devices).
+                                settings.runner.length = 0;
+                                settings_feed_devices();
                         }
                         settings_layout(); // the list's callbacks and the page's wiring, once (settings.list.ids is their guard)
                 }
