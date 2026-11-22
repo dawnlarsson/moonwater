@@ -4394,23 +4394,23 @@ static fn browser_tree(void)
                 browser_path(home, (string_address) "tr");
                 browser_path(sub_path, (string_address) "tr/a");
                 files_tree_populate(&tree, home, (const p8 address_to)mountinfo, sizeof(mountinfo) - 1);
-                // Expected depth-0 roots: Home, Downloads, Pictures, /, usb, My Drive (6 roots, all collapsed).
-                roots_ok = tree.count == 6 &&
-                           tree.node[0].kind == FILES_NODE_PLACE && tree.node[0].place == FILES_PLACE_HOME && !tree.node[0].open &&
-                           tree.node[1].kind == FILES_NODE_PLACE && tree.node[1].place == FILES_PLACE_DOWNLOADS &&
-                           tree.node[2].kind == FILES_NODE_PLACE && tree.node[2].place == FILES_PLACE_PICTURES &&
-                           tree.node[3].kind == FILES_NODE_DRIVE && tree.node[3].place == FILES_PLACE_ROOT && !tree.node[3].open &&
-                           tree.node[4].kind == FILES_NODE_DRIVE && string_equals((string_address)files_tree_name(&tree, 4), (string_address) "usb") &&
-                           tree.node[5].kind == FILES_NODE_DRIVE && string_equals((string_address)files_tree_name(&tree, 5), (string_address) "My Drive") &&
-                           files_tree_path(&tree, 5, made) && string_equals((string_address)made, (string_address) "/run/media/u/My Drive");
+                // Expected: This Machine, and under it Home, Downloads, Pictures, /, usb, My Drive (six roots, all collapsed).
+                roots_ok = tree.count == 7 && tree.node[0].kind == FILES_NODE_MACHINE && tree.node[0].machine == 0 && tree.node[0].open &&
+                           tree.node[1].kind == FILES_NODE_PLACE && tree.node[1].place == FILES_PLACE_HOME && !tree.node[1].open && tree.node[1].depth == 1 &&
+                           tree.node[2].kind == FILES_NODE_PLACE && tree.node[2].place == FILES_PLACE_DOWNLOADS &&
+                           tree.node[3].kind == FILES_NODE_PLACE && tree.node[3].place == FILES_PLACE_PICTURES &&
+                           tree.node[4].kind == FILES_NODE_DRIVE && tree.node[4].place == FILES_PLACE_ROOT && !tree.node[4].open &&
+                           tree.node[5].kind == FILES_NODE_DRIVE && string_equals((string_address)files_tree_name(&tree, 5), (string_address) "usb") &&
+                           tree.node[6].kind == FILES_NODE_DRIVE && string_equals((string_address)files_tree_name(&tree, 6), (string_address) "My Drive") &&
+                           files_tree_path(&tree, 6, made) && string_equals((string_address)made, (string_address) "/run/media/u/My Drive");
                 hnode = files_tree_reveal(&tree, home);
                 dnode = files_tree_find(&tree, (const p8 address_to) "/");
-                reveal_ok = hnode == 0 && !tree.node[0].open && dnode == 3 && !tree.node[3].open;
+                reveal_ok = hnode == 1 && !tree.node[1].open && dnode == 4 && !tree.node[4].open;
                 snode = files_tree_reveal(&tree, sub_path);
-                reveal_ok = reveal_ok && snode != FILES_NO && tree.node[0].open && !tree.node[3].open &&
+                reveal_ok = reveal_ok && snode != FILES_NO && tree.node[1].open && !tree.node[4].open &&
                             files_tree_path(&tree, snode, made) && string_equals((string_address)made, (string_address)sub_path);
-                files_tree_shut(&tree, 0);
-                find_ok = files_tree_find(&tree, sub_path) == FILES_NO && !tree.node[0].open && files_tree_find(&tree, home) == 0;
+                files_tree_shut(&tree, 1);
+                find_ok = files_tree_find(&tree, sub_path) == FILES_NO && !tree.node[1].open && files_tree_find(&tree, home) == 1;
                 check("browser: multi-root tree puts common folders above root and mounted drives, keeps / collapsed, and find never re-opens shut nodes",
                       roots_ok && reveal_ok && find_ok);
         }
@@ -4495,6 +4495,90 @@ static fn browser_filter(struct files_model address_to m)
         check("browser: a find keeps the rows to the names that hold its text, either case alike, what is chosen staying chosen; none shows them all, and another folder has none",
               kept && again && gone);
         browser_remove_in((string_address) "fl");
+}
+
+/*
+        The Devices group (files_devices_read, files_devices_mounted, files_tree_devices): moonwater device list read into the table,
+        a disk of its own and a USB device's disk named by what the device says it is, each partition with what the line's fs tail
+        says (its type, label and node), free room and a segment with no tail not listed, a disk with no table one partition where a
+        file system is on its whole; where each is mounted from the mount table; and the rows after This Machine's and before a peer.
+*/
+static fn browser_devices(void)
+{
+        static struct files_devices devices;
+        static struct files_tree tree;
+        static const char list[] =
+            "  nvme0n1 drive 512110 MB view only\n"
+            "    part 1048576 536870912 efi EFI_system_partition fs vfat ESP nvme0n1p1\n"
+            "    part 537919488 511572000000 linux Linux_filesystem fs ext4 - nvme0n1p2\n"
+            "    where internal nvme\n"
+            "  1-2 usb 0781:5581 SanDisk Ultra allowed\n"
+            "    drive sdb 31000 MB\n"
+            "    part 0 1048576 free -\n"
+            "    part 1048576 30000000000 other - fs exfat MY_STICK sdb1 more words\n"
+            "    part 30001048576 8192 other Odd words that are no tail\n"
+            "  sdc drive 64 MB view only\n"
+            "    part 0 64000000 unpartitioned - fs vfat CARD sdc\n"
+            "    where external scsi\n"
+            "  1-3 usb 046d:c52b Receiver allowed\n";
+        static const char mounts[] = "21 1 259:2 / / rw - ext4 /dev/nvme0n1p2 rw\n"
+                                     "40 21 8:17 / /run/media/root/MY\\040STICK rw,nosuid,nodev,noexec - exfat /dev/sdb1 ro\n";
+        b32 read, parts, mounted, again, rows = false, shut = false, pathless = false;
+
+        memory_zero(&devices, sizeof(devices));
+        read = files_devices_read(&devices, (const p8 address_to)list, sizeof(list) - 1) && devices.disks == 3 &&
+               string_equals((string_address)devices.disk_name[0], (string_address) "nvme0n1") && !devices.disk_external[0] && devices.disk_bytes[0] == 512110000000ull &&
+               string_equals((string_address)devices.disk_name[1], (string_address) "sdb") && string_equals((string_address)devices.disk_label[1], (string_address) "SanDisk Ultra") &&
+               devices.disk_external[1] && string_equals((string_address)devices.disk_label[2], (string_address) "sdc") && devices.disk_external[2];
+        parts = devices.parts == 4 && devices.disk_count[0] == 2 && devices.disk_count[1] == 1 && devices.disk_count[2] == 1 &&
+                string_equals((string_address)devices.part_type[0], (string_address) "vfat") && string_equals((string_address)devices.part_label[0], (string_address) "ESP") &&
+                string_equals((string_address)devices.part_name[0], (string_address) "EFI system partition") && devices.part_role[0] == FILES_ROLE_EFI &&
+                !devices.part_label[1][0] && string_equals((string_address)devices.part_node[1], (string_address) "nvme0n1p2") &&
+                string_equals((string_address)devices.part_label[2], (string_address) "MY STICK") && string_equals((string_address)devices.part_node[2], (string_address) "sdb1") &&
+                !devices.part_name[2][0] && devices.part_bytes[2] == 30000000000ull && devices.part_disk[2] == 1 &&
+                devices.part_role[3] == FILES_ROLE_WHOLE && string_equals((string_address)devices.part_node[3], (string_address) "sdc");
+        check("browser: the device list is read into disks (a USB one named by what its device says) and the partitions whose line says what is on them",
+              read && parts);
+        mounted = files_devices_mounted(&devices, (const p8 address_to)mounts, sizeof(mounts) - 1) &&
+                  files_part_mount(&devices, 2) && string_equals((string_address)files_part_mount(&devices, 2), (string_address) "/run/media/root/MY STICK") &&
+                  files_part_mount(&devices, 1) && string_equals((string_address)files_part_mount(&devices, 1), (string_address) "/") &&
+                  !files_part_mount(&devices, 0) && !files_part_mount(&devices, 3) &&
+                  !files_devices_mounted(&devices, (const p8 address_to)mounts, sizeof(mounts) - 1);
+        check("browser: a partition is mounted where the mount table's source is its node, and the same table read again changes nothing", mounted);
+        devices.disk_shut[1] = 1;
+        again = !files_devices_read(&devices, (const p8 address_to)list, sizeof(list) - 1) && devices.disk_shut[1] &&
+                files_devices_read(&devices, (const p8 address_to)list, sizeof(list) - 2) && devices.disks == 3 && devices.disk_shut[1] && !devices.disk_shut[0];
+        check("browser: the same list read again changes nothing, and a disk shut stays shut by its name when the list is read anew", again);
+        if (files_tree_begin(&tree))
+        {
+                p8 path[FILES_PATH];
+                p32 group;
+                tree.devices = &devices, devices.disk_shut[1] = 0;
+                files_tree_add_machine(&tree, (const p8 address_to) "peer", 1, FILES_NODE_ONLINE, false);
+                files_tree_populate(&tree, (const p8 address_to) "/home/u", (const p8 address_to)mounts, sizeof(mounts) - 1);
+                group = files_tree_after(&tree, 0);
+                rows = group + 8 < tree.count && tree.node[group].kind == FILES_NODE_DEVICES && tree.node[group].depth == 0 && tree.node[group].open &&
+                       tree.node[group + 1].kind == FILES_NODE_DISK && tree.node[group + 1].device == 0 && tree.node[group + 1].depth == 1 &&
+                       tree.node[group + 2].kind == FILES_NODE_PART && tree.node[group + 2].device == 0 && tree.node[group + 2].depth == 2 &&
+                       string_equals((string_address)files_tree_name(&tree, group + 2), (string_address) "ESP") &&
+                       string_equals((string_address)files_tree_name(&tree, group + 3), (string_address) "Linux filesystem") &&
+                       string_equals((string_address)files_tree_name(&tree, group + 4), (string_address) "SanDisk Ultra") &&
+                       string_equals((string_address)files_tree_name(&tree, group + 5), (string_address) "MY STICK") &&
+                       tree.node[group + 7].kind == FILES_NODE_PART && tree.node[group + 7].device == 3 &&
+                       tree.node[group + 8].kind == FILES_NODE_MACHINE && tree.node[group + 8].machine == 1;
+                pathless = !files_tree_path(&tree, group, path) && !files_tree_path(&tree, group + 1, path) && !files_tree_path(&tree, group + 5, path) &&
+                           !files_tree_open(&tree, group + 5) && files_tree_reveal(&tree, (const p8 address_to) "/run/media/root/MY STICK/a") != group + 5;
+                devices.disk_shut[0] = 1, (void)files_tree_devices(&tree);
+                shut = tree.node[group + 1].kind == FILES_NODE_DISK && !tree.node[group + 1].open && tree.node[group + 2].kind == FILES_NODE_DISK;
+                devices.shut = 1, (void)files_tree_devices(&tree);
+                shut = shut && tree.node[group].kind == FILES_NODE_DEVICES && !tree.node[group].open && tree.node[group + 1].kind == FILES_NODE_MACHINE;
+                devices.disks = 0, (void)files_tree_devices(&tree);
+                shut = shut && tree.node[group].kind == FILES_NODE_MACHINE && tree.count == group + 1;
+                files_tree_end(&tree);
+        }
+        check("browser: the Devices group is after This Machine's rows and before a peer: each disk, then its partitions", rows);
+        check("browser: a disk or a partition has no path, is no folder to open and is never where a path is revealed", pathless);
+        check("browser: a disk shut has no partitions under it, the group shut no disks, and with no disk there is no group", shut);
 }
 
 static fn browser_asks(void)
@@ -4971,6 +5055,7 @@ b32 main(void)
         browser_moves();
         browser_tree();
         browser_filter(address_of model);
+        browser_devices();
         browser_asks();
         browser_bar();
         browser_apart();

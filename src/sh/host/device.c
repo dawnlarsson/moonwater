@@ -2482,6 +2482,10 @@ static fn usb_recover(void)
         512 bytes in sysfs; the segments are printed in order, one line each, as "    part START BYTES ROLE NAME". A disk with more
         partitions than the strip holds shows the first ones by start and ends its segments with "    more N", N being the
         partitions not shown; the room after the last shown is then free only up to the first one not shown.
+        A partition's line, and an unpartitioned disk's where a file system is on the whole of it, end in what is on it:
+        "fs TYPE LABEL NODE", the type and label its file system's superblock says (storage_probe_device; "-" for none, or
+        where the node cannot be read, which needs root), and the kernel's name of its node in /dev, which a mount opens.
+        A reader of the part lines takes their words by place and passes by the ones after those it knows.
 */
 // Sixteen partitions and the free room before, between and after them are 33 segments: settings.c's SETTINGS_SEGMENTS. A drive with
 // more partitions keeps the sixteen that start first, and says how many it does not show (a "more" line after its parts).
@@ -2498,7 +2502,11 @@ typedef struct
 {
         unsigned long long start, bytes;
         unsigned int role;
+        b32 fs;                       // the line ends in what is on it: its file system and its node
         p8 name[64];
+        p8 node[32];                  // the kernel's name of the partition's node (sdb1), the disk's own for an unpartitioned one
+        p8 type[STORAGE_TYPE_ROOM];   // its file system's type, as storage_probe_device names it; empty for none
+        p8 label[64];                 // and the label the file system carries, plained; empty for none
 } usb_segment;
 
 typedef struct
@@ -2511,15 +2519,55 @@ typedef struct
         b32 unknown;                   // a partition whose place could not be read: no room is free
 } usb_parts;
 
-static fn usb_list_segment(unsigned long long start, unsigned long long bytes, unsigned int role, string_address name)
+static fn usb_list_segment(unsigned long long start, unsigned long long bytes, unsigned int role, string_address name, const usb_segment address_to on)
 {
-        host_say(log, "    part %p %p %s %s\n", (positive)start, (positive)bytes, usb_role_words[role], name ? name : (string_address)"-");
+        if (on && on->fs)
+                host_say(log, "    part %p %p %s %s fs %s %s %s\n", (positive)start, (positive)bytes, usb_role_words[role], name ? name : (string_address)"-",
+                         on->type[0] ? (string_address)on->type : (string_address)"-", on->label[0] ? (string_address)on->label : (string_address)"-",
+                         (string_address)on->node);
+        else
+                host_say(log, "    part %p %p %s %s\n", (positive)start, (positive)bytes, usb_role_words[role], name ? name : (string_address)"-");
 }
 
 // A character as the line carries it: a blank or a control character (a newline would end the line) is an underscore.
 static unsigned char usb_plain(unsigned char c)
 {
         return c <= ' ' || c == 0x7f ? '_' : c;
+}
+
+// A name as one line carries it: the blanks and controls of the kernel's name are underscores. One cut short by room ends before
+// the character it would have cut in two (a label is UTF-8).
+static fn usb_plain_copy(p8 address_to into, positive room, string_address from)
+{
+        positive at = 0;
+
+        for (; from[at] && at + 1 < room; at++)
+                into[at] = (p8)usb_plain((unsigned char)from[at]);
+        if (from[at])
+        {
+                positive lead = at;
+
+                while (lead && (into[lead - 1] & 0xc0) == 0x80)
+                        lead--;
+                if (lead && lead - 1 + (into[lead - 1] >= 0xf0 ? 4u : into[lead - 1] >= 0xe0 ? 3u : into[lead - 1] >= 0xc0 ? 2u : 1u) > at)
+                        at = lead - 1;
+        }
+        into[at] = 0;
+}
+
+/* What is on a partition, or on a disk with no table: its node's name, and the type and label its superblock says. A node that cannot
+   be opened (no root) or holds nothing known has neither. */
+static fn usb_segment_fs(usb_segment address_to one, string_address node)
+{
+        p8 path[HOST_PATH_ROOM];
+        storage_identity identity;
+
+        one->fs = 1, one->type[0] = one->label[0] = 0;
+        usb_plain_copy(one->node, sizeof(one->node), node);
+        if (!host_join(path, sizeof(path), "/dev/", node) || !storage_probe_device((string_address)path, address_of identity))
+                return;
+        usb_plain_copy(one->type, sizeof(one->type), (string_address)identity.type);
+        usb_plain_copy(one->label, sizeof(one->label), (string_address)identity.label);
 }
 
 // A partition the strip does not show: its start is noted for the room after the kept ones, and it counts toward the note.
@@ -2612,6 +2660,7 @@ static bool usb_part_visit(string_address directory, string_address name, addres
                 one.role = USB_ROLE_SWAP;
         else if (string_find((string_address)one.name, (string_address) "Linux"))
                 one.role = USB_ROLE_LINUX;
+        usb_segment_fs(&one, name);
         usb_part_keep(parts, &one);
         return true;
 }
@@ -2621,11 +2670,14 @@ static fn usb_list_strip(string_address name, unsigned long long total, usb_part
 {
         unsigned long long cursor = 0, span_end = total;
 
-        (void)name;
         if (!parts->count && !parts->more)
         {
+                usb_segment whole;
+
+                // A file system on the whole disk (a stick formatted with no table) is said as a partition's is.
+                memory_zero(&whole, sizeof(whole));
                 if (total)
-                        usb_list_segment(0, total, USB_ROLE_UNPARTITIONED, null);
+                        usb_segment_fs(&whole, name), whole.fs = whole.type[0] != 0, usb_list_segment(0, total, USB_ROLE_UNPARTITIONED, null, &whole);
                 return;
         }
         // Insertion by start: a disk's partitions are few, and sysfs lists them in no order.
@@ -2646,26 +2698,16 @@ static fn usb_list_strip(string_address name, unsigned long long total, usb_part
                 usb_segment address_to part = &parts->part[at];
 
                 if (!parts->unknown && part->start > cursor)
-                        usb_list_segment(cursor, part->start - cursor, USB_ROLE_FREE, null);
-                usb_list_segment(part->start, part->bytes, part->role, part->name[0] ? (string_address)part->name : null);
+                        usb_list_segment(cursor, part->start - cursor, USB_ROLE_FREE, null, null);
+                usb_list_segment(part->start, part->bytes, part->role, part->name[0] ? (string_address)part->name : null, part);
                 if (part->start + part->bytes > cursor)
                         cursor = part->start + part->bytes;
         }
         if (!parts->unknown && span_end > cursor)
-                usb_list_segment(cursor, span_end - cursor, USB_ROLE_FREE, null);
+                usb_list_segment(cursor, span_end - cursor, USB_ROLE_FREE, null, null);
         if (parts->more)
                 // The segments of a disk of total bytes, in order, free room between and after its partitions included.
                 host_say(log, "    more %p\n", (positive)(parts->more));
-}
-
-// A name as one line carries it: the blanks and controls of the kernel's name are underscores.
-static fn usb_plain_copy(p8 address_to into, positive room, string_address from)
-{
-        positive at = 0;
-
-        for (; from[at] && at + 1 < room; at++)
-                into[at] = (p8)usb_plain((unsigned char)from[at]);
-        into[at] = 0;
 }
 
 // A block device that is no drive a person keeps: a loop, ram, device-mapper, RAID, optical or floppy one, or an eMMC's boot area.

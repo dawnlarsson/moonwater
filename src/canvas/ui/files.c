@@ -32,6 +32,9 @@
 #define FILES_DEEDS 32
 #define FILES_DROP_MOST (FILES_MOVE_MOST * FILES_PATH / 4)
 #define FILES_CLIP_CUT "application/x-moonwater-cut"
+#define FILES_CENSUS_NS 30000000000ll     // the devices are read again this often when nothing said they changed
+#define FILES_CENSUS_WAIT_NS 10000000000ll // and a reading that takes longer than this is given up
+#define FILES_CENSUS_ROOM 32768
 
 enum { FILES_KEY_1 = 2, FILES_KEY_R = 19, FILES_KEY_Y = 21, FILES_KEY_A = 30, FILES_KEY_F = 33, FILES_KEY_H = 35,
        FILES_KEY_L = 38, FILES_KEY_Z = 44, FILES_KEY_X = 45, FILES_KEY_C = 46, FILES_KEY_V = 47, FILES_KEY_N = 49,
@@ -86,6 +89,7 @@ struct files_big
         struct files_job job;
         struct files_move move;
         struct files_tree tree;
+        struct files_devices devices;
         struct files_peer peers[FILES_PEERS_MOST];
         p32 peer_count;
         struct files_rpc rpcs[FILES_RPCS_MOST];
@@ -93,6 +97,7 @@ struct files_big
         struct ui_tokens path;     // the path band: the kit's token field, a chip a folder of the trail
         char note[256], status[192], sheet[FILES_SHEET_LINES][FILES_NAME * 3 + 64];
         p8 band_base[FILES_MOST / 8], git_state[FILES_MOST];
+        char census[FILES_CENSUS_ROOM];
 };
 
 struct files_deed { int kind; p32 count; p8 address_to pairs; positive room, used; b32 binned, restored; };
@@ -108,7 +113,9 @@ static struct
         b32 focused, dirty, reseat, armed, git, moving, tree_reseat, pasting, finding;
         b32 drag_chosen, carrying, cut_dim, band_add, carry_press, drop_over, sheet, sheet_folder, measuring;
         p32 seen, naming, armed_at, drag_place, carry_count, band_base_count, tree_at, tree_shown;
-        b64 next_look, next_show, carry_at, flash_at, spring_at, next_progress, typed_at;
+        b64 next_look, next_show, carry_at, flash_at, spring_at, next_progress, typed_at, next_census;
+        b32 census_again;
+        struct ui_job runner;
         string_address start;
         struct ui_rect path_box, head_box, side_box, nav_box[4];
         struct ui_iconbutton nav[4];
@@ -262,6 +269,41 @@ static fn files_describe(int id, struct ui_row address_to row)
         row->mark = files_model_chosen(m, (p32)id) && m->chosen_count > 1;
 }
 
+/*
+        A row of the Devices group: the group (the word Settings' group of devices has), a disk (what it says it is, or its name; its
+        size), or a partition (its file system's label, else its name in the table, else its node; its file system's type and its size,
+        a dot where it is mounted, quiet where nothing known is on it).
+*/
+static fn files_device_describe(const struct files_tree address_to t, const struct files_node address_to n, int id, struct ui_row address_to row)
+{
+        static char label[FILES_NAME * 3 + 4], size[16], type[48];
+        const struct files_devices address_to d = &files.big->devices;
+        const p8 address_to name = files_tree_name(t, (p32)id);
+        row->file = 1 + UI_FILE_DRIVE, row->indent = n->depth ? n->depth - 1 : 0;
+        if (n->kind == FILES_NODE_DEVICES)
+        {
+                row->label = language_of("Devices"), row->gap = FILES_GROUP_GAP;
+                row->expander = n->open ? UI_ROW_EXPANDER_OPEN : UI_ROW_EXPANDER_SHUT;
+                return;
+        }
+        ui_label_foreign(label, sizeof(label), name, n->length), row->label = label;
+        if (n->kind == FILES_NODE_DISK && n->device < d->disks)
+        {
+                ui_size_text(size, sizeof(size), d->disk_bytes[n->device]), row->value = size;
+                row->expander = !n->has ? 0 : n->open ? UI_ROW_EXPANDER_OPEN : UI_ROW_EXPANDER_SHUT;
+                return;
+        }
+        if (n->kind != FILES_NODE_PART || n->device >= d->parts)
+                return;
+        ui_size_text(size, sizeof(size), d->part_bytes[n->device]), row->value = size;
+        if (d->part_type[n->device][0])
+                ui_label_foreign(type, sizeof(type), d->part_type[n->device], string_length((string_address)d->part_type[n->device])), row->note = type;
+        else
+                row->dim = true;
+        if (files_part_mount(d, n->device))
+                row->mark = true, row->mark_ink = ui_role(UI_SUCCESS);
+}
+
 static fn files_tree_describe(int id, struct ui_row address_to row)
 {
         static const struct { unsigned int word, icon; } places[] = {
@@ -274,6 +316,11 @@ static fn files_tree_describe(int id, struct ui_row address_to row)
         unsigned int icon;
         if (!n)
                 return;
+        if (n->kind >= FILES_NODE_DEVICES)
+        {
+                files_device_describe(t, n, id, row);
+                return;
+        }
         if (n->kind == FILES_NODE_MACHINE)
         {
                 if (n->machine == 0)
@@ -2237,8 +2284,19 @@ static b32 files_tree_go(p32 at)
         const struct files_tree address_to t = &files.big->tree;
         if (at >= t->count)
                 return false;
-        if (t->node[at].kind == FILES_NODE_MACHINE)
+        if (t->node[at].kind == FILES_NODE_MACHINE || t->node[at].kind == FILES_NODE_DEVICES || t->node[at].kind == FILES_NODE_DISK)
                 return files_tree_toggle(at), true;
+        if (t->node[at].kind == FILES_NODE_PART)
+        {
+                // A partition that is mounted is gone to where it is mounted, as its drive is.
+                const p8 address_to mount = files_part_mount(&files.big->devices, t->node[at].device);
+                if (!mount || string_copy_bounded((string_address)path, (string_address)mount, sizeof(path)) >= sizeof(path) ||
+                    (!files_model_is_remote(&files.big->model) && string_equals((string_address)path, (string_address)files.big->model.path)))
+                        return false;
+                if (files_try_go(path))
+                        files_moved();
+                return true;
+        }
         if (!files_tree_path(t, at, path))
                 return false;
         if (t->node[at].machine > 0)
@@ -2268,7 +2326,19 @@ static fn files_tree_toggle(p32 at)
         struct files_tree address_to t = &files.big->tree;
         if (at >= t->count)
                 return;
-        if (t->node[at].open)
+        if (t->node[at].kind == FILES_NODE_DEVICES || t->node[at].kind == FILES_NODE_DISK)
+        {
+                // What is shut is the table's, so that it stays shut when the devices are read again.
+                struct files_devices address_to d = &files.big->devices;
+                if (t->node[at].kind == FILES_NODE_DEVICES)
+                        d->shut = !d->shut;
+                else if (t->node[at].device < d->disks)
+                        d->disk_shut[t->node[at].device] = !d->disk_shut[t->node[at].device];
+                (void)files_tree_devices(t);
+        }
+        else if (t->node[at].kind == FILES_NODE_PART)
+                return;
+        else if (t->node[at].open)
                 files_tree_shut(t, at);
         else if (t->node[at].kind == FILES_NODE_MACHINE)
         {
@@ -2718,6 +2788,32 @@ static fn files_draw(unsigned int address_to pixels)
         files.seen = files.big->model.revision;
 }
 
+/*
+        The devices are what moonwater device list says, read in a job of their own: when the mounts changed, when a block device came
+        or went, and every FILES_CENSUS_NS otherwise; one reading at a time, and one asked for while another runs is made after it.
+*/
+static fn files_census_done(struct ui_job address_to j, b32 killed, positive status)
+{
+        b32 ok = !killed && (status & 0x7f) == 0 && ((status >> 8) & 0xff) == 0;
+        if (ok && files_devices_read(&files.big->devices, (const p8 address_to)files.big->census, j->length) &&
+            files_tree_sync_drives(&files.big->tree, (const p8 address_to)getenv((string_address) "HOME"), false))
+                files_tree_follow(), files.dirty = true;
+        files.next_census = files.census_again ? 0 : (b64)ui_kit.now + FILES_CENSUS_NS, files.census_again = false;
+}
+
+static fn files_census(void)
+{
+        string_address words[4] = {(string_address) "/moonwater", (string_address) "device", (string_address) "list", null};
+        if (files.runner.child > 0)
+        {
+                files.census_again = true;
+                return;
+        }
+        files.runner.done = files_census_done, files.runner.data = null;
+        files.next_census = (b64)ui_kit.now + FILES_CENSUS_NS;
+        (void)ui_job_start(&files.runner, words, 3, null, files.big->census, sizeof(files.big->census), (positive)FILES_CENSUS_WAIT_NS);
+}
+
 static long files_tick(long timeout, long address_to other)
 {
         struct files_model address_to m = &files.big->model;
@@ -2827,8 +2923,14 @@ static long files_tick(long timeout, long address_to other)
                 int became = files_model_is_remote(m) ? FILES_FRESH : files_model_stale(m);
                 if (became == FILES_STALE)
                         files_model_reload(m);
-                if (files_tree_sync_drives(&files.big->tree, (const p8 address_to)getenv((string_address) "HOME"), false))
+                b32 census = files_tree_sync_drives(&files.big->tree, (const p8 address_to)getenv((string_address) "HOME"), false);
+                p64 blocks = files_devices_blocks();
+                if (census)
                         files_tree_follow(), files.dirty = true;
+                if (blocks != files.big->devices.blocks)
+                        files.big->devices.blocks = blocks, census = true;
+                if (census || now >= files.next_census)
+                        files_census();
                 files_peers_sync();
                 files.dirty |= became != FILES_FRESH, files.next_look = now + FILES_LOOK_NS;
                 if (m->walking)
@@ -2869,7 +2971,9 @@ static int files_open_window(void)
                 return 1;
         if (!files_tree_begin(&files.big->tree))
                 return 1;
+        files.big->tree.devices = &files.big->devices, files.big->devices.blocks = files_devices_blocks();
         files_tree_populate_live(&files.big->tree, (const p8 address_to)getenv((string_address) "HOME"));
+        files_census();
         files_peers_sync();
         if (!files.start || !files_model_go(&files.big->model, files.start))
                 files_model_go(&files.big->model, (string_address) "/");
@@ -2899,7 +3003,7 @@ static struct ui_app files_app = {
     .glass = 0, .side = true,
     .nofont = (string_address) "files: no font to draw with (-f FONT.ttf), pid ",
     .dirty = &files.dirty, .focused = &files.focused, .ground = &files.ground,
-    .open = files_open_window, .close = files_close_window, .event = files_event, .tick = files_tick,
+    .open = files_open_window, .close = files_close_window, .event = files_event, .tick = files_tick, .job = &files.runner,
     .popup = &files.menu, .chose = files_chose,
     .width = &files.width, .height = &files.height, .shown = &files.shown, .draw = files_draw,
 };
@@ -2907,6 +3011,7 @@ static struct ui_app files_app = {
 static b32 files_main()
 {
         memory_zero(&files, sizeof(files));
+        files.runner.output = -1;
         files.start = getenv((string_address) "HOME");
         for (positive at = 1, took; at < (positive)program_argument_count(); at += took ? took : 1)
                 if (!(took = ui_app_option(&files_app, at)) && program_argument(at)[0] == '/')

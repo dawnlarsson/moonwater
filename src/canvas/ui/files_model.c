@@ -1222,14 +1222,44 @@ static b32 files_job_step(struct files_model address_to m, struct files_job addr
 #define FILES_DRIVES_MOST 32
 #define FILES_TREE_BYTES ((positive)FILES_TREE_MOST * sizeof(struct files_node) + FILES_TREE_NAMES)
 
-enum { FILES_NODE_FOLDER, FILES_NODE_PLACE, FILES_NODE_DRIVE, FILES_NODE_MACHINE };
+// A node past FILES_NODE_MACHINE is the Devices group's (files_tree_devices): a disk or a partition, no folder and no path of its own.
+enum { FILES_NODE_FOLDER, FILES_NODE_PLACE, FILES_NODE_DRIVE, FILES_NODE_MACHINE, FILES_NODE_DEVICES, FILES_NODE_DISK, FILES_NODE_PART };
 enum { FILES_PLACE_NONE, FILES_PLACE_HOME, FILES_PLACE_DOWNLOADS, FILES_PLACE_PICTURES, FILES_PLACE_ROOT };
 #define FILES_NODE_ONLINE 1u
 #define FILES_NODE_MAY_FILES 2u
 #define FILES_NODE_LOADING 4u
 
-struct files_node { p32 name, root_path, device_major, device_minor; p16 length, depth, has; p8 kind, place, machine, flags; b8 open, read; p64 inode; };
-struct files_tree { struct files_node address_to node; p8 address_to names; p32 count, names_used; p64 drives_hash; address_any mapped; positive mapped_size; };
+/*
+        The devices: the disks and their partitions as moonwater device list says them (device.c's usb_list_show), one table of
+        columns. A disk's partitions are parts [disk_first, disk_first + disk_count). A partition is listed when its line says what
+        is on it (the fs tail: its type, label and node); free room is not. Where one is mounted is read from the mount table.
+*/
+#define FILES_DISKS_MOST 32
+#define FILES_PARTS_MOST 128
+#define FILES_DEVICE_WORD 64
+#define FILES_DEVICE_NODE 32
+#define FILES_MOUNTS_ROOM 16384
+enum { FILES_ROLE_EFI, FILES_ROLE_LINUX, FILES_ROLE_SWAP, FILES_ROLE_OTHER, FILES_ROLE_WHOLE };
+
+struct files_devices
+{
+        p32 disks, parts, mounts_used;
+        b32 shut, stale;                  // the group is shut (its disks are no rows); the table changed and the rows are not made from it yet
+        p64 census, mounted, blocks;      // hashes: the list last read, the mounts its partitions have, the kernel's block devices
+        p64 disk_bytes[FILES_DISKS_MOST];
+        p16 disk_first[FILES_DISKS_MOST], disk_count[FILES_DISKS_MOST];
+        b8 disk_external[FILES_DISKS_MOST], disk_shut[FILES_DISKS_MOST];
+        p8 disk_name[FILES_DISKS_MOST][FILES_DEVICE_NODE], disk_label[FILES_DISKS_MOST][FILES_DEVICE_WORD];
+        p64 part_bytes[FILES_PARTS_MOST];
+        p16 part_mount[FILES_PARTS_MOST]; // where it is mounted: an offset into mounts, plus one; 0 where it is not
+        p8 part_disk[FILES_PARTS_MOST], part_role[FILES_PARTS_MOST];
+        p8 part_node[FILES_PARTS_MOST][FILES_DEVICE_NODE], part_type[FILES_PARTS_MOST][16];
+        p8 part_label[FILES_PARTS_MOST][FILES_DEVICE_WORD], part_name[FILES_PARTS_MOST][FILES_DEVICE_WORD];
+        p8 mounts[FILES_MOUNTS_ROOM];
+};
+
+struct files_node { p32 name, root_path, device_major, device_minor; p16 length, depth, has, device; p8 kind, place, machine, flags; b8 open, read; p64 inode; };
+struct files_tree { struct files_node address_to node; p8 address_to names; p32 count, names_used; p64 drives_hash; address_any mapped; positive mapped_size; struct files_devices address_to devices; };
 struct files_drive { p8 label[FILES_NAME], path[FILES_PATH], device[32], root[256]; };
 
 static inline p32 files_tree_store(struct files_tree address_to t, const p8 address_to s, positive len)
@@ -1399,6 +1429,276 @@ static int files_drives_parse(const p8 address_to text, positive length, struct 
 static p32 files_tree_after(const struct files_tree address_to t, p32 at);
 static fn files_tree_compact(struct files_tree address_to t);
 
+/* ---- the devices: moonwater device list read into the table, the mounts its partitions have, the Devices group's rows ---- */
+
+// The next word of a line, blanks apart, and its length; null at the line's end.
+static const p8 address_to files_word(const p8 address_to address_to at, const p8 address_to stop, positive address_to length)
+{
+        const p8 address_to from = address_to at, address_to to;
+        while (from < stop && *from == ' ')
+                from++;
+        for (to = from; to < stop && *to != ' ';)
+                to++;
+        address_to at = to, address_to length = (positive)(to - from);
+        return to > from ? from : null;
+}
+
+static inline b32 files_word_is(const p8 address_to word, positive length, const char address_to what)
+{
+        return word && length == string_length((string_address)what) && !memory_compare(word, what, length);
+}
+
+static p64 files_word_digits(const p8 address_to word, positive length)
+{
+        p64 value = 0;
+        for (positive at = 0; word && at < length && word[at] >= '0' && word[at] <= '9'; at++)
+                value = value > 1844674407370955160ull ? ~0ull : value * 10 + (p64)(word[at] - '0');
+        return value;
+}
+
+// A word as the list writes it, back to what it names: "-" is none, and with blanks an underscore is a blank (the list plains them).
+static fn files_word_copy(p8 address_to into, positive room, const p8 address_to word, positive length, b32 blanks)
+{
+        positive used = 0;
+        if (word && !(length == 1 && word[0] == '-'))
+                for (; used < length && used + 1 < room; used++)
+                        into[used] = blanks && word[used] == '_' ? (p8)' ' : word[used];
+        into[used] = end;
+}
+
+static int files_disk_add(struct files_devices address_to d, const p8 address_to name, positive name_length, p64 bytes,
+                          const p8 address_to label, positive label_length, b32 external)
+{
+        p32 k = d->disks;
+        if (!name || k >= FILES_DISKS_MOST)
+                return -1;
+        files_word_copy(d->disk_name[k], FILES_DEVICE_NODE, name, name_length, false);
+        if (label && label_length)
+                string_copy_bounded((string_address)d->disk_label[k], (string_address)label, label_length + 1 < FILES_DEVICE_WORD ? label_length + 1 : FILES_DEVICE_WORD);
+        else
+                string_copy_bounded((string_address)d->disk_label[k], (string_address)d->disk_name[k], FILES_DEVICE_WORD);
+        d->disk_bytes[k] = bytes, d->disk_external[k] = (b8)external, d->disk_shut[k] = 0;
+        d->disk_first[k] = (p16)d->parts, d->disk_count[k] = 0;
+        return (int)d->disks++;
+}
+
+/*
+        The list read into d. Its lines: "  NAME drive N MB ..." a disk of its own, followed by its segments and "    where internal BUS"
+        or "    where external BUS"; "  PORT usb ID PRODUCT STATE" a USB device, whose disks follow as "    drive NAME N MB" lines, each
+        followed by its segments; any other line of two blanks is a device with no disk. A segment "    part START BYTES ROLE NAME"
+        with the tail "fs TYPE LABEL NODE" is a partition (an unpartitioned disk's whole is one where a file system is on it); free
+        room and a segment with no tail are not. Words after those known are passed by. A disk shut before stays shut by its name.
+        Returns whether the table changed: the same list read again changes nothing.
+*/
+static b32 files_devices_read(struct files_devices address_to d, const p8 address_to text, positive length)
+{
+        static p8 shut[FILES_DISKS_MOST][FILES_DEVICE_NODE];
+        p8 product[FILES_DEVICE_WORD];
+        p64 hash = 14695981039346656037ull;
+        p32 shut_count = 0;
+        int disk = -1;
+        b32 usb = false, own = false;
+        for (positive at = 0; at < length; at++)
+                hash = (hash ^ text[at]) * 1099511628211ull;
+        if (hash == d->census && (d->disks || !length))
+                return false;
+        for (p32 k = 0; k < d->disks; k++)
+                if (d->disk_shut[k] && shut_count < FILES_DISKS_MOST)
+                        string_copy_bounded((string_address)shut[shut_count++], (string_address)d->disk_name[k], FILES_DEVICE_NODE);
+        d->disks = d->parts = 0, product[0] = end;
+        for (positive at = 0; at < length;)
+        {
+                const p8 address_to nl = (const p8 address_to)memory_first_of(text + at, '\n', length - at);
+                const p8 address_to line = text + at, address_to stop = nl ? nl : text + length, address_to cursor, address_to w[4];
+                positive n[4];
+                at = nl ? (positive)(nl - text) + 1 : length;
+                if (stop - line > 4 && !memory_compare(line, "    ", 4))
+                {
+                        cursor = line + 4;
+                        w[0] = files_word(&cursor, stop, &n[0]);
+                        if (files_word_is(w[0], n[0], "drive") && usb)
+                        {
+                                w[1] = files_word(&cursor, stop, &n[1]), w[2] = files_word(&cursor, stop, &n[2]);
+                                disk = files_disk_add(d, w[1], n[1], files_word_digits(w[2], n[2]) * 1000000ull, product, string_length((string_address)product), true);
+                                own = false;
+                        }
+                        else if (files_word_is(w[0], n[0], "part") && disk >= 0 && d->parts < FILES_PARTS_MOST)
+                        {
+                                const p8 address_to role, address_to name, address_to fs;
+                                positive role_length, name_length, fs_length;
+                                p32 p = d->parts;
+                                p64 bytes;
+                                (void)files_word(&cursor, stop, &n[1]), w[2] = files_word(&cursor, stop, &n[2]);
+                                bytes = files_word_digits(w[2], n[2]);
+                                role = files_word(&cursor, stop, &role_length), name = files_word(&cursor, stop, &name_length);
+                                fs = files_word(&cursor, stop, &fs_length);
+                                if (!name || !files_word_is(fs, fs_length, "fs"))
+                                        continue;
+                                for (int k = 0; k < 3; k++)
+                                        w[k] = files_word(&cursor, stop, &n[k]);
+                                if (!w[2])
+                                        continue;
+                                files_word_copy(d->part_type[p], sizeof(d->part_type[p]), w[0], n[0], false);
+                                files_word_copy(d->part_label[p], FILES_DEVICE_WORD, w[1], n[1], true);
+                                files_word_copy(d->part_node[p], FILES_DEVICE_NODE, w[2], n[2], false);
+                                files_word_copy(d->part_name[p], FILES_DEVICE_WORD, name, name_length, true);
+                                d->part_bytes[p] = bytes, d->part_disk[p] = (p8)disk, d->part_mount[p] = 0;
+                                d->part_role[p] = files_word_is(role, role_length, "efi")     ? FILES_ROLE_EFI
+                                                  : files_word_is(role, role_length, "linux") ? FILES_ROLE_LINUX
+                                                  : files_word_is(role, role_length, "swap")  ? FILES_ROLE_SWAP
+                                                  : files_word_is(role, role_length, "unpartitioned") ? FILES_ROLE_WHOLE
+                                                                                                       : FILES_ROLE_OTHER;
+                                d->disk_count[disk]++, d->parts++;
+                        }
+                        else if (files_word_is(w[0], n[0], "where"))
+                        {
+                                w[1] = files_word(&cursor, stop, &n[1]);
+                                if (disk >= 0 && own)
+                                        d->disk_external[disk] = files_word_is(w[1], n[1], "external");
+                                disk = -1;
+                        }
+                        continue;
+                }
+                disk = -1, usb = own = false;
+                if (stop - line > 2 && line[0] == ' ' && line[1] == ' ' && line[2] != ' ')
+                {
+                        cursor = line + 2;
+                        for (int k = 0; k < 3; k++)
+                                w[k] = files_word(&cursor, stop, &n[k]);
+                        if (files_word_is(w[1], n[1], "drive"))
+                                disk = files_disk_add(d, w[0], n[0], files_word_digits(w[2], n[2]) * 1000000ull, null, 0, false), own = true;
+                        else if (files_word_is(w[1], n[1], "usb") && w[2])
+                        {
+                                // What the device says it is: the words after its id, all but the last (its state).
+                                const p8 address_to from = cursor, address_to last = stop;
+                                positive used;
+                                while (from < stop && *from == ' ')
+                                        from++;
+                                while (last > from && last[-1] != ' ')
+                                        last--;
+                                while (last > from && last[-1] == ' ')
+                                        last--;
+                                used = (positive)(last - from) < FILES_DEVICE_WORD - 1 ? (positive)(last - from) : FILES_DEVICE_WORD - 1;
+                                memory_copy(product, from, used), product[used] = end, usb = true;
+                        }
+                }
+        }
+        for (p32 k = 0; k < d->disks; k++)
+                for (p32 s = 0; s < shut_count; s++)
+                        d->disk_shut[k] |= (b8)string_equals((string_address)d->disk_name[k], (string_address)shut[s]);
+        d->census = hash, d->stale = true, d->mounted = 0;
+        return true;
+}
+
+/*
+        Where each partition is mounted, from the mount table's text: the first mount whose source is the partition's node in /dev.
+        Returns whether that changed since the last reading.
+*/
+static b32 files_devices_mounted(struct files_devices address_to d, const p8 address_to text, positive length)
+{
+        p64 hash = 14695981039346656037ull;
+        d->mounts_used = 0;
+        for (p32 p = 0; p < d->parts; p++)
+                d->part_mount[p] = 0;
+        for (positive at = 0; text && at < length;)
+        {
+                const p8 address_to nl = (const p8 address_to)memory_first_of(text + at, '\n', length - at);
+                const p8 address_to stop = nl ? nl : text + length, address_to cursor = text + at, address_to target = null, address_to source = null, address_to w;
+                positive n, target_length = 0, source_length = 0;
+                p8 node[FILES_DEVICE_NODE + 8];
+                at = nl ? (positive)(nl - text) + 1 : length;
+                for (int k = 0, sep = -1; (w = files_word(&cursor, stop, &n)); k++)
+                {
+                        if (k == 4)
+                                target = w, target_length = n;
+                        if (sep < 0 && k >= 6 && n == 1 && w[0] == '-')
+                                sep = k;
+                        if (sep >= 0 && k == sep + 2)
+                        {
+                                source = w, source_length = n;
+                                break;
+                        }
+                }
+                if (!target || !source || source_length <= 5 || memory_compare(source, "/dev/", 5))
+                        continue;
+                files_mount_unescape(source + 5, source_length - 5, node, sizeof(node));
+                for (p32 p = 0; p < d->parts; p++)
+                        if (!d->part_mount[p] && string_equals((string_address)node, (string_address)d->part_node[p]))
+                        {
+                                positive used = files_mount_unescape(target, target_length, d->mounts + d->mounts_used,
+                                                                     FILES_MOUNTS_ROOM - d->mounts_used > FILES_PATH ? FILES_PATH : FILES_MOUNTS_ROOM - d->mounts_used);
+                                if (!used || d->mounts_used + used + 1 >= FILES_MOUNTS_ROOM)
+                                        break;
+                                d->part_mount[p] = (p16)(d->mounts_used + 1), d->mounts_used += (p32)used + 1;
+                                hash = ((hash ^ p) * 1099511628211ull ^ used) * 1099511628211ull;
+                                for (positive i = 0; i < used; i++)
+                                        hash = (hash ^ target[i]) * 1099511628211ull;
+                        }
+        }
+        if (hash == d->mounted)
+                return false;
+        return d->mounted = hash, true;
+}
+
+static inline const p8 address_to files_part_mount(const struct files_devices address_to d, p32 p) { return p < d->parts && d->part_mount[p] ? d->mounts + d->part_mount[p] - 1 : null; }
+
+// The kernel's block devices by name (/sys/class/block, partitions too), hashed: a disk or a partition that came or went changes it.
+static p64 files_devices_blocks(void)
+{
+        file_walk walk = {.handle = -1};
+        struct linux_dirent64 address_to record;
+        p64 hash = 14695981039346656037ull;
+        if (!file_walk_open(&walk, AT_FDCWD, (string_address) "/sys/class/block"))
+                return 0;
+        while ((record = file_walk_next(&walk)))
+        {
+                for (positive i = 0; record->d_name[i]; i++)
+                        hash = (hash ^ (p8)record->d_name[i]) * 1099511628211ull;
+                hash = (hash ^ 0xffu) * 1099511628211ull;
+        }
+        return file_walk_close(&walk), hash;
+}
+
+/*
+        The Devices group's rows, made again from the table: the group after This Machine's own rows and before any peer, its disks
+        under it and each disk's partitions under that, a group or a disk that is shut with no rows under it. No disk, no group.
+*/
+static b32 files_tree_devices(struct files_tree address_to t)
+{
+        const struct files_devices address_to d = t->devices;
+        p32 at = FILES_NO, ins, top;
+        for (p32 k = 0; k < t->count && at == FILES_NO; k++)
+                if (t->node[k].kind == FILES_NODE_DEVICES)
+                        at = k;
+        if (at != FILES_NO)
+        {
+                p32 after = files_tree_after(t, at);
+                memory_copy(&t->node[at], &t->node[after], (positive)(t->count - after) * sizeof(struct files_node));
+                t->count -= after - at, files_tree_compact(t);
+        }
+        if (!d || !d->disks || !t->count || t->node[0].kind != FILES_NODE_MACHINE || t->node[0].machine != 0)
+                return false;
+        ins = top = files_tree_after(t, 0);
+        if (!files_tree_insert_root(t, ins++, (const p8 address_to) "devices", null, FILES_NODE_DEVICES, FILES_PLACE_NONE, 0, 0, false))
+                return false;
+        t->node[top].open = t->node[top].read = !d->shut, t->node[top].has = (p16)d->disks;
+        for (p32 k = 0; k < d->disks && !d->shut; k++)
+        {
+                p32 disk = ins;
+                if (!files_tree_insert_root(t, ins++, d->disk_label[k][0] ? d->disk_label[k] : d->disk_name[k], null, FILES_NODE_DISK, FILES_PLACE_NONE, 1, 0, false))
+                        return false;
+                t->node[disk].device = (p16)k, t->node[disk].has = d->disk_count[k], t->node[disk].open = t->node[disk].read = !d->disk_shut[k];
+                for (p32 p = d->disk_first[k]; p < (p32)d->disk_first[k] + d->disk_count[k] && !d->disk_shut[k]; p++)
+                {
+                        const p8 address_to label = d->part_label[p][0] ? d->part_label[p] : d->part_name[p][0] ? d->part_name[p] : d->part_node[p];
+                        if (!files_tree_insert_root(t, ins, label, null, FILES_NODE_PART, FILES_PLACE_NONE, 2, 0, false))
+                                return false;
+                        t->node[ins++].device = (p16)p;
+                }
+        }
+        return true;
+}
+
 // A request a link never answered is given up after this long (nanoseconds); so is one a reopened link can no longer answer.
 #define FILES_RPC_WAIT_NS 15000000000ll
 
@@ -1458,6 +1758,12 @@ static b32 files_tree_load(struct files_tree address_to t, const p8 address_to h
                                         ins++, added++;
                         t->node[0].has = (p16)added, t->node[0].read = true;
                 }
+        }
+        if (t->devices)
+        {
+                b32 moved = files_devices_mounted(t->devices, mountinfo, len);
+                if (changed || moved || t->devices->stale)
+                        t->devices->stale = false, (void)files_tree_devices(t), changed = true;
         }
         return files_unmap(drives, sizeof(struct files_drive) * FILES_DRIVES_MOST), changed;
 }
@@ -1541,7 +1847,7 @@ static b32 files_tree_path(const struct files_tree address_to t, p32 at, p8 addr
         int links = 0;
         positive used, rlen;
         const p8 address_to rpath;
-        if (at >= t->count || t->node[at].kind == FILES_NODE_MACHINE)
+        if (at >= t->count || t->node[at].kind >= FILES_NODE_MACHINE)
                 return false;
         for (p32 here = at; here != FILES_NO && here < t->count && links < 256; here = files_tree_parent(t, here))
         {
@@ -1610,7 +1916,7 @@ static b32 files_tree_open(struct files_tree address_to t, p32 at)
         b32 ok = false;
         if (at >= t->count || t->node[at].open)
                 return at < t->count;
-        if (t->node[at].kind == FILES_NODE_MACHINE || t->node[at].machine != 0)
+        if (t->node[at].kind >= FILES_NODE_MACHINE || t->node[at].machine != 0)
                 return false;
         if (!(s = (struct files_tree_open_scratch address_to)files_anon_map(sizeof(*s), null)))
                 return false;
@@ -1663,7 +1969,7 @@ static fn files_tree_compact(struct files_tree address_to t)
                 struct files_node address_to n = &t->node[k];
                 positive nlen = (positive)n->length + 1;
                 memory_copy(fresh + used, t->names + n->name, nlen), n->name = used, used += (p32)nlen;
-                if (n->depth == 1 && n->kind != FILES_NODE_MACHINE)
+                if (n->depth == 1 && (n->kind == FILES_NODE_PLACE || n->kind == FILES_NODE_DRIVE))
                 {
                         positive rlen = string_length((string_address)(t->names + n->root_path)) + 1;
                         memory_copy(fresh + used, t->names + n->root_path, rlen), n->root_path = used, used += (p32)rlen;
@@ -1724,7 +2030,7 @@ static p32 files_tree_reveal_in(struct files_tree address_to t, p8 machine, cons
         if (!t->count || path[0] != '/')
                 return FILES_NO;
         for (p32 k = 0; k < t->count; k++)
-                if (t->node[k].machine == machine && t->node[k].depth == 1 && t->node[k].kind != FILES_NODE_MACHINE)
+                if (t->node[k].machine == machine && t->node[k].depth == 1 && (t->node[k].kind == FILES_NODE_PLACE || t->node[k].kind == FILES_NODE_DRIVE))
                 {
                         const p8 address_to rpath = t->names + t->node[k].root_path;
                         positive rlen = string_length((string_address)rpath);

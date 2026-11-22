@@ -5666,6 +5666,26 @@ static fn check_settings_device_strip(void)
                                   drive_part_says(2, "Basic data partition", "Other", "4 GB", "88.4%") &&
                                   string_equals((string_address)drive_parts[3].label, (string_address) "Linux data") && !drive_parts[3].aside[0]);
                 }
+                // What the line says is on a partition after its name (fs TYPE LABEL NODE, which Files reads) is no part of its name.
+                length = 0;
+                for (const char address_to line = "  vdg drive 1024 MB view only\n    part 1048576 536870912 efi EFI_system_partition fs vfat BOOT vdg1\n"
+                                                  "    part 537919488 4096000000 other Basic_data_partition fs ntfs My_Files vdg2\n"
+                                                  "    part 4633919488 1000000 linux - fs - - vdg3\n";
+                     *line; line++)
+                        rows[length++] = *line;
+                for (positive at = 0; at < length; at++)
+                        settings_large->said[at] = rows[at];
+                settings.runner.length = length;
+                settings_feed_hardware();
+                {
+                        int count = drive_parts_of((int)SETTINGS_LIST_ID(2, 0));
+
+                        check("settings: what a part line says after the partition's name (its file system and node) is not read as its name",
+                              count == 4 && items[0].segment_count == 3 && string_equals((string_address)items[0].segment_name[0], (string_address) "EFI system partition") &&
+                                  string_equals((string_address)items[0].segment_name[1], (string_address) "Basic data partition") && !items[0].segment_name[2][0] &&
+                                  drive_part_says(2, "Basic data partition", "Other", "4 GB", "88.4%") &&
+                                  string_equals((string_address)drive_parts[3].label, (string_address) "Linux data"));
+                }
                 // A reading that lists nothing is a note that says so.
                 settings.runner.length = 0;
                 settings_feed_hardware();

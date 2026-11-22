@@ -2640,14 +2640,15 @@ static fn settings_feed_hardware(void)
                                 struct settings_item address_to d = open && count ? &settings.item[2][count - 1] : null;
                                 struct settings_drive address_to drv = d && d->drive_idx >= 0 ? &settings.drive[d->drive_idx] : null;
                                 unsigned long long bytes;
-                                positive rlen;
+                                positive rlen, nlen;
                                 int code;
                                 sc_word(&c, null), sc_spaces(&c), bytes = sc_u64(&c, 1844674407370955160ull), sc_spaces(&c);
                                 const char address_to role = sc_word(&c, &rlen); // the word first: its length is what it sets, and the call below reads it
                                 code = settings_role_code(role, rlen), sc_spaces(&c);
+                                const char address_to named = sc_word(&c, &nlen); // the name is one word: what the line says after it (fs ...) is not the strip's
                                 if (d) spanned = spanned + bytes < spanned ? ~0ull : spanned + bytes, d->total = spanned > d->total ? spanned : d->total;
                                 if (d && drv && code >= 0 && d->segment_count < SETTINGS_SEGMENTS && (code != 4 || bytes > SETTINGS_ALIGNMENT))
-                                        drv->bytes[d->segment_count] = bytes, settings_segment_name(drv->name[d->segment_count], c.s, c.n),
+                                        drv->bytes[d->segment_count] = bytes, settings_segment_name(drv->name[d->segment_count], named, nlen),
                                         drv->role[d->segment_count++] = (unsigned char)code;
                         }
                         else if (open && count && sc_eat(&c, "more "))

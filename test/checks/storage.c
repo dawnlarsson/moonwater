@@ -3727,6 +3727,49 @@ static fn device_where(void)
 }
 
 /*
+        What a part line of device list says is on a partition (usb_list_segment's fs tail): the file system's type, its label with
+        its blanks plained, "-" for a type or a label there is none of, and the node last; free room has no tail. A label cut short
+        by its room ends before a character it would cut in two (usb_plain_copy).
+*/
+static fn device_part_tail(void)
+{
+        p8 said[512];
+        usb_segment stick, bare;
+        bipolar kept = system_duplicate(1, 101, 0);
+        bipolar handle = system_call_2(syscall(memfd_create), (positive)(string_address) "parts", 0);
+        positive got = 0;
+        p8 cut[8];
+
+        memory_zero(&stick, sizeof(stick)), memory_zero(&bare, sizeof(bare));
+        stick.fs = bare.fs = 1;
+        string_copy(stick.type, "vfat"), usb_plain_copy(stick.label, sizeof(stick.label), (string_address) "MY STICK"), string_copy(stick.node, "sdb1");
+        string_copy(bare.node, "sdb2");
+        if (handle >= 0 && kept >= 0)
+        {
+                system_duplicate(handle, 1, 0);
+                usb_list_segment(1048576, 31000000000ull, USB_ROLE_OTHER, (string_address) "Basic_data", &stick);
+                usb_list_segment(31001048576ull, 4096, USB_ROLE_FREE, null, null);
+                usb_list_segment(31001052672ull, 8192, USB_ROLE_LINUX, null, &bare);
+                log_flush();
+                system_duplicate(kept, 1, 0);
+                got = storage_read(handle, said, sizeof(said) - 1, 0);
+        }
+        said[got] = end;
+        if (kept >= 0)
+                system_close(kept);
+        if (handle >= 0)
+                system_close(handle);
+        check("device list: a partition's line ends in fs, its type, its label plained and its node; none of either is -; free room has no tail",
+              string_equals((string_address)said, (string_address) "    part 1048576 31000000000 other Basic_data fs vfat MY_STICK sdb1\n"
+                                                                    "    part 31001048576 4096 free -\n"
+                                                                    "    part 31001052672 8192 linux - fs - - sdb2\n"));
+        usb_plain_copy(cut, sizeof(cut), (string_address) "ab\xc3\xa9\xc3\xa9\xc3\xa9");
+        check("device list: a label cut short by its room ends before the character it would cut in two", string_equals((string_address)cut, (string_address) "ab\xc3\xa9\xc3\xa9"));
+        usb_plain_copy(cut, sizeof(cut), (string_address) "abcde\xc3\xa9z");
+        check("device list: a label that fits to the last byte keeps its last character whole", string_equals((string_address)cut, (string_address) "abcde\xc3\xa9"));
+}
+
+/*
         What the census makes of the partitions a hostile bus offers: nine
         disks where it has room for eight, two partitions of one label, a
         label with no identity, and names at and past the room for one.
@@ -6463,6 +6506,7 @@ b32 main(void)
         install_helpers();
         update_scenes();
         device_where();
+        device_part_tail();
 
         if (program_argument_count() > 1)
                 format_images(program_argument_list()[1]);
