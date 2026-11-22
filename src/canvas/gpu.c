@@ -3275,11 +3275,13 @@ static void gpu_i915_surface(p8 address_to state, unsigned int at, positive base
 {
         if (gpu.family < 800)
         {
-                // Gen7/Gen7.5 (IVB/VLV/HSW): 32-byte RENDER_SURFACE_STATE with 32-bit address in DW1.
+                // Gen7/Gen7.5 (IVB/VLV/HSW): 32-byte RENDER_SURFACE_STATE with 32-bit address in DW1 and MOCS in DW5[19:16]:
+                // bit 16 = L3 Cacheability Control (L3CC=1), bits 18:17 = 00 (Use PTE for LLC WB). Without bit 16 every EU access bypasses L3!
                 gpu_i915_put(state, at + 0, (1u << 29) | (0x140u << 18) | (1u << 8));
                 gpu_i915_put(state, at + 4, (unsigned int)base);
                 gpu_i915_put(state, at + 8, (width - 1) | ((rows - 1) << 16));
                 gpu_i915_put(state, at + 12, pitch - 1);
+                gpu_i915_put(state, at + 20, 1u << 16);
                 if (gpu.family == 750)
                         gpu_i915_put(state, at + 28, (4u << 25) | (5u << 22) | (6u << 19) | (7u << 16));
                 return;
@@ -3325,14 +3327,15 @@ static void gpu_i915_frame(unsigned int address_to words, unsigned int sbase, un
 
         if (gpu.family < 800)
         {
-                unsigned int threads = gpu_i915.eu_total ? gpu_i915.eu_total * 7u - 1u : (gpu.family == 701 ? 31u : 47u);
+                unsigned int fallback = gpu.family == 750 ? ((gpu.device & 0x0030u) == 0u ? 69u : 139u) : (gpu.family == 701 ? 31u : 47u);
+                unsigned int threads = gpu_i915.eu_total ? gpu_i915.eu_total * 7u - 1u : fallback;
 
                 if (threads > 139u)
                         threads = 139u;
                 words[n++] = 0x69040002u;
                 words[n++] = 0x61010008u; words[n++] = 0; words[n++] = (unsigned int)GPU_VA | 1; words[n++] = (unsigned int)GPU_VA | 1;
                 words[n++] = 0; words[n++] = (unsigned int)GPU_VA | 1; words[n++] = 0; words[n++] = 1; words[n++] = 0; words[n++] = 1;
-                words[n++] = 0x70000006u; words[n++] = 0; words[n++] = (threads << 16) | (1u << 2); words[n++] = 0; words[n++] = 1; words[n++] = 0; words[n++] = 0; words[n++] = 0;
+                words[n++] = 0x70000006u; words[n++] = 0; words[n++] = (threads << 16) | (1u << 8) | (1u << 2); words[n++] = 0; words[n++] = 1; words[n++] = 0; words[n++] = 0; words[n++] = 0;
                 words[n++] = 0x70010002u; words[n++] = 0; words[n++] = 64; words[n++] = sbase + 192;
                 words[n++] = 0x70020002u; words[n++] = 0; words[n++] = 20; words[n++] = sbase + 128;
                 words[n++] = 0x71050009u; words[n++] = 0; words[n++] = 1u << 30; words[n++] = 0; words[n++] = cols; words[n++] = 0; words[n++] = rows;
@@ -3554,7 +3557,7 @@ static unsigned int gpu_i915_scene_batch(const struct gpu_job *job, unsigned int
                 b32 can_pack = a->count > 1u && a->g >= GPU_VA && !(a->g & 63) && a->g != a->ops &&
                                (pack_va - GPU_VA) < gpu.size && 32ull * a->count <= gpu.size - (pack_va - GPU_VA);
                 unsigned int address_to dst_rec = can_pack ? (unsigned int address_to)((p8 address_to)job->state_at + ((long)pack_va - (long)job->state)) : 0;
-                unsigned int kept = 0;
+                unsigned int kept = 0, last_r[8] = {0};
 
                 for (i = 0; i < a->count; i++)
                 {
@@ -3594,12 +3597,47 @@ static unsigned int gpu_i915_scene_batch(const struct gpu_job *job, unsigned int
                         }
                         if (can_pack)
                                 memory_copy(dst_rec + 8 * kept, r, 32);
+                        if (!kept)
+                                memory_copy(last_r, r, 32);
                         kept++;
                 }
                 if (!kept)
                 {
                         words[0] = 0x05000000u, words[1] = 0u;
                         return 2;
+                }
+                rows = py1 - py0;
+                // Single-op fast path: when damage/occlusion culls the rect to 1 full-covering fill (op 0) or unswapped copy (op 4),
+                // dispatch the 9-insn dedicated gpu_i915_fill / gpu_i915_copy kernel (1 send read + 1 write instead of 7 sends & 165-insn loop).
+                if (kept == 1u && (int)last_r[1] <= (int)px0 && (int)last_r[2] <= (int)py0 && (int)last_r[3] >= (int)px1 && (int)last_r[4] >= (int)py1)
+                {
+                        unsigned int span = 4u * (px1 - px0);
+
+                        if (last_r[0] == 0u)
+                        {
+                                struct gpu_job fast = *job;
+                                const struct gpu_i915_surf surfs[3] = {{base, span, rows, 4u * a->dp}, {0, 0, 0, 0}, {0, 0, 0, 0}};
+                                const unsigned int curbe[4] = {last_r[5], 0, 0, 0};
+
+                                fast.code = GPU_VA + gpu_kernel_at[1];
+                                return gpu_i915_emit_batch(&fast, words, surfs, 2u, curbe, 1u, (px1 - px0) / 4, rows);
+                        }
+                        if (last_r[0] == 4u)
+                        {
+                                unsigned int spitch = 4u * last_r[7];
+                                positive src_va = (positive)last_r[5] | ((positive)last_r[6] << 32);
+                                positive src_base = src_va + 4ull * ((positive)(py0 - last_r[2]) * (positive)last_r[7] + (positive)(px0 - last_r[1]));
+
+                                if (src_base >= GPU_VA && !(src_base & 31) && !(spitch & 63) && spitch >= span)
+                                {
+                                        struct gpu_job fast = *job;
+                                        const struct gpu_i915_surf surfs[3] = {{base, span, rows, 4u * a->dp}, {src_base, span, rows, spitch}, {0, 0, 0, 0}};
+                                        const unsigned int curbe[4] = {0, 0, 0, 0};
+
+                                        fast.code = GPU_VA + gpu_kernel_at[0];
+                                        return gpu_i915_emit_batch(&fast, words, surfs, 2u, curbe, 1u, (px1 - px0) / 4, rows);
+                                }
+                        }
                 }
                 {
                         unsigned int use_count = can_pack ? kept : a->count;
@@ -3617,7 +3655,6 @@ static unsigned int gpu_i915_scene_batch(const struct gpu_job *job, unsigned int
                                 if (!img_rows)
                                         img_rows = 1;
                         }
-                        rows = py1 - py0;
                         {
                                 const struct gpu_i915_surf surfs[3] = {
                                     {base, 4u * (px1 - px0), rows, 4u * a->dp},

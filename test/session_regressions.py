@@ -1422,11 +1422,14 @@ def test_hardening_66_bug_families():
     # --- Family 11: Cross-Vendor GPU Hardware-Floor Optimizations (AMD, Intel i915/Xe, Compositor, Wayland) ---
     compose_c = read_text("src/canvas/compositor/compose.c")
     pointer_c = read_text("src/canvas/compositor/pointer.c")
-    check("Family 11: gpu.c O(popcount) handed bitmask, cached RAM GPU_ARGS mirror, single-pass i915 scene pack, damaged-row tile binning & gpu_nv12_go",
+    check("Family 11: gpu.c O(popcount) handed bitmask, cached RAM GPU_ARGS mirror, single-pass i915 scene pack, damaged-row tile binning, Gen7/7.5 L3 MOCS + EU threads + single-op fast path & gpu_nv12_go",
           "static p64 gpu_maps_handed[4];" in gpu_c and
           "static struct gpu_args gpu_slot_args[GPU_SLOTS];" in gpu_c and
           "static b32 gpu_can_import(void)" in gpu_c and
           "if (n > 1 && !(aligned && gpu_backend == &gpu_i915_row))" in gpu_c and
+          "gpu_i915_put(state, at + 20, 1u << 16);" in gpu_c and
+          "(threads << 16) | (1u << 8) | (1u << 2)" in gpu_c and
+          "fast.code = GPU_VA + gpu_kernel_at[0];" in gpu_c and
           "static positive gpu_nv12_go(" in gpu_c)
 
     check("Family 11: Compositor damage-bbox & opaque-cover culling, i915 static solid-tile cache, pipelined shadow submit + AVX2 NT copy & zero redundant DIRTYFB",
