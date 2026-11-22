@@ -5229,17 +5229,33 @@ static positive doc_find_replacement(const struct doc_find address_to find, cons
 
 static b32 doc_replace_bulk(struct doc address_to doc, const struct doc_edit address_to edits, positive count)
 {
-        p64 start = edits[0].at, finish = edits[count - 1].at + edits[count - 1].removed, at = start;
+        p64 start, finish, at;
         p8 address_to span = null;
         positive room = 0, used = 0, need = 0;
         b32 done;
+        if (!count)
+                return false;
+        start = edits[0].at, finish = edits[count - 1].at + edits[count - 1].removed, at = start;
+        if (finish < start || finish > doc_length(doc))
+                return false;
         for (positive i = 0; i < count; i++)
+        {
+                if (edits[i].length > positive_max - need)
+                        return false;
                 need += edits[i].length;
-        need += finish - start;
+        }
+        if ((positive)(finish - start) > positive_max - need || need == positive_max)
+                return false;
+        need += (positive)(finish - start);
         if (!array_store_reserve(span, room, 0, need + 1, 65536))
                 return false;
         for (positive i = 0; i < count; i++)
         {
+                if (edits[i].at < at || edits[i].at > finish || edits[i].removed > finish - edits[i].at)
+                {
+                        array_store_release(span, room, used);
+                        return false;
+                }
                 used += doc_read(doc, at, span + used, (positive)(edits[i].at - at));
                 memory_copy(span + used, edits[i].text, edits[i].length);
                 used += edits[i].length;
@@ -5286,7 +5302,8 @@ static positive doc_replace_all(struct doc address_to doc, struct doc_find addre
                         // The replacement is sized first: a $n that copies a long group, repeated, needs all of it.
                         p8 sizing[1];
                         positive need = doc_find_replacement(find, bytes, with, with_length, sizing, 0);
-                        if (!array_store_reserve(edits, edit_room, count, count + 1, 1024) ||
+                        if (need > positive_max - text_used || count == positive_max ||
+                            !array_store_reserve(edits, edit_room, count, count + 1, 1024) ||
                             !array_store_reserve(texts, text_room, text_used, text_used + need, 65536))
                         {
                                 array_store_release(edits, edit_room, count);
@@ -7544,7 +7561,7 @@ static void ui_scene_rect(struct ui address_to ui, int x0, int y0, int x1, int y
 static fn ui_dot(struct ui address_to ui, int x, int y, unsigned int tone)
 {
         unsigned int address_to at;
-        if (x < 0 || x >= ui->width || y < ui->top || y >= ui->bottom || y >= ui->height || !ui_in_band(ui, y))
+        if (x < 0 || x >= ui->width || y < 0 || y < ui->top || y >= ui->bottom || y >= ui->height || !ui_in_band(ui, y))
                 return;
         if (ui->scene)
         {
@@ -8142,7 +8159,15 @@ HOT static void ui_scene_text(struct ui address_to ui, int wide, int rows, int t
 // A picture of covers in one ink (the compositor's pointer is two, its fill's and its line's:
 static fn ui_kit_covers(struct ui address_to ui, int x, int y, int w, int h, const unsigned char address_to cover, int pitch, unsigned int ink)
 {
-        int top = y < ui->top ? ui->top : y, bottom = y + h > ui->bottom ? ui->bottom : y + h, left = x < 0 ? 0 : x, right = x + w > ui->width ? ui->width : x + w;
+        b64 x2_wide, y2_wide;
+        int top, bottom, left, right;
+        if (w <= 0 || h <= 0 || pitch < w)
+                return;
+        x2_wide = (b64)x + (b64)w, y2_wide = (b64)y + (b64)h;
+        top = y < ui->top ? ui->top : y;
+        bottom = y2_wide > ui->bottom ? ui->bottom : y2_wide < 0 ? 0 : (int)y2_wide;
+        left = x < 0 ? 0 : x;
+        right = x2_wide > ui->width ? ui->width : x2_wide < 0 ? 0 : (int)x2_wide;
         bottom = bottom > ui->height ? ui->height : bottom;
         if (ui->band_bottom > ui->band_top)
                 top = top < ui->band_top ? ui->band_top : top, bottom = bottom > ui->band_bottom ? ui->band_bottom : bottom;
@@ -19161,6 +19186,8 @@ static positive ui_cell_fit(struct ui address_to ui, const font_face address_to 
 
 static void ui_cell_line(struct ui address_to ui, int x, int y, int width, int height, const char *text, unsigned int ink, unsigned int ground)
 {
+        if (width <= 0 || height <= 0 || x < 0 || y < 0 || (b64)x + (b64)width > ui->width || (b64)y + (b64)height > ui->height)
+                return;
         // A cell's text is not recorded (the font blend on a ground, R4 in the note): the frame is the picture's, painted here.
         if (ui->scene)
         {
@@ -19190,6 +19217,8 @@ static void ui_cell_line(struct ui address_to ui, int x, int y, int width, int h
 static void ui_cell_turned(struct ui address_to ui, int x, int y, int width, int height, const char *text, unsigned int turn, unsigned int ink,
                            unsigned int ground)
 {
+        if (width <= 0 || height <= 0 || x < 0 || y < 0 || (b64)x + (b64)width > ui->width || (b64)y + (b64)height > ui->height)
+                return;
         // A turned cell's text is not recorded either (R4): the frame is the picture's.
         if (ui->scene)
         {
@@ -19820,7 +19849,8 @@ static fn ui_icon_tile(struct ui address_to ui, int left, int top, int size, con
                 return;
         ui_kit_fill(ui, &(struct ui_box){left * 256, top * 256, (left + size) * 256, (top + size) * 256, size * 256 / 4, size * 256 / 4}, tone | 0xff000000u, null);
         ui_icon_letter(name, letter);
-        if (ui->engine && ui->regular && left >= 0 && top >= ui->top && top + size <= ui->bottom)
+        if (ui->engine && ui->regular && left >= 0 && top >= 0 && top >= ui->top &&
+            (b64)left + (b64)size <= ui->width && (b64)top + (b64)size <= ui->bottom && (b64)top + (b64)size <= ui->height)
         {
                 // The letter is the picture's (the font blend on its ground), not the list's, as a cell's text is.
                 const font_face address_to faces[1] = {ui->regular};
@@ -19857,7 +19887,8 @@ static fn ui_icon_scale(unsigned int address_to into, int size, const unsigned i
 
 static fn ui_icon_picture(struct ui address_to ui, int left, int top, int size, const unsigned int address_to picture)
 {
-        if (size <= 0 || size > UI_PICTURE_MOST || left < 0 || left + size > ui->width)
+        b64 y1_wide;
+        if (!picture || size <= 0 || size > UI_PICTURE_MOST || left < 0 || (b64)left + (b64)size > ui->width)
                 return;
         if (ui->scene)
         {
@@ -19865,7 +19896,8 @@ static fn ui_icon_picture(struct ui address_to ui, int left, int top, int size, 
                 return;
         }
         int y0 = top < ui->top ? ui->top : top;
-        int y1 = top + size > ui->bottom ? ui->bottom : top + size;
+        y1_wide = (b64)top + (b64)size;
+        int y1 = y1_wide > ui->bottom ? ui->bottom : y1_wide < 0 ? 0 : (int)y1_wide;
         if (y0 < 0)
                 y0 = 0;
         if (y1 > ui->height)
@@ -19899,9 +19931,10 @@ static fn ui_icon_picture(struct ui address_to ui, int left, int top, int size, 
 // A square picture of any side made (premultiplied 0xaarrggbb both):
 static inline INLINE void ui_px_axis(int i, int side, int size, int address_to restrict i0, int address_to restrict i1, int address_to restrict w1)
 {
-        int c = ((2 * i + 1) * side * 256) / (2 * size) - 128;
-        c = c < 0 ? 0 : c > (side - 1) * 256 ? (side - 1) * 256 : c;
-        *i0 = c >> 8, *i1 = *i0 + 1 < side ? *i0 + 1 : *i0, *w1 = c & 255;
+        b64 c = ((2 * (b64)i + 1) * (b64)side * 256) / (2 * (b64)size) - 128;
+        b64 limit = (b64)(side - 1) * 256;
+        c = c < 0 ? 0 : c > limit ? limit : c;
+        *i0 = (int)(c >> 8), *i1 = *i0 + 1 < side ? *i0 + 1 : *i0, *w1 = (int)(c & 255);
 }
 
 static inline INLINE CONST unsigned int ui_px_lerp(unsigned int a, unsigned int b, unsigned int w0, unsigned int w1)
@@ -19933,7 +19966,7 @@ HOT static fn ui_picture_scale(unsigned int address_to restrict into, int size, 
                         {
                                 int y0, y1, wy1;
                                 ui_px_axis(y, side, size, &y0, &y1, &wy1);
-                                const unsigned int address_to restrict f0 = from + y0 * side, address_to restrict f1 = from + y1 * side;
+                                const unsigned int address_to restrict f0 = from + (positive)y0 * (positive)side, address_to restrict f1 = from + (positive)y1 * (positive)side;
                                 for (int k = 0; k < chunk; k++)
                                 {
                                         unsigned int wx1 = (unsigned int)cwx[k], wx0 = 256u - wx1;
@@ -19941,28 +19974,32 @@ HOT static fn ui_picture_scale(unsigned int address_to restrict into, int size, 
                                         row0[k] = ui_px_lerp(f0[ix0], f0[ix1], wx0, wx1);
                                         row1[k] = ui_px_lerp(f1[ix0], f1[ix1], wx0, wx1);
                                 }
-                                memory_lerp_u32_row(into + y * size + x0_b, row0, row1, (positive)chunk, (positive)wy1);
+                                memory_lerp_u32_row(into + (positive)y * (positive)size + (positive)x0_b, row0, row1, (positive)chunk, (positive)wy1);
                         }
                 }
                 return;
         }
         for (int y = 0; y < size; y++)
         {
-                int sy0 = y * side * 256 / size, sy1 = (y + 1) * side * 256 / size;
-                int y0 = sy0 >> 8, y1 = (sy1 - 1) >> 8 >= side ? side - 1 : (sy1 - 1) >> 8;
+                b64 sy0 = (b64)y * (b64)side * 256 / size, sy1 = (b64)(y + 1) * (b64)side * 256 / size;
+                int y0 = (int)(sy0 >> 8), y1 = (int)((sy1 - 1) >> 8) >= side ? side - 1 : (int)((sy1 - 1) >> 8);
                 for (int x = 0; x < size; x++)
                 {
-                        int sx0 = x * side * 256 / size, sx1 = (x + 1) * side * 256 / size;
-                        int x0 = sx0 >> 8, x1 = (sx1 - 1) >> 8 >= side ? side - 1 : (sx1 - 1) >> 8;
+                        b64 sx0 = (b64)x * (b64)side * 256 / size, sx1 = (b64)(x + 1) * (b64)side * 256 / size;
+                        int x0 = (int)(sx0 >> 8), x1 = (int)((sx1 - 1) >> 8) >= side ? side - 1 : (int)((sx1 - 1) >> 8);
                         p64 sum[4] = {0, 0, 0, 0}, total = 0;
                         unsigned int out = 0;
                         for (int sy = y0; sy <= y1; sy++)
                         {
-                                p64 wy = (p64)(((sy + 1) * 256 < sy1 ? (sy + 1) * 256 : sy1) - (sy * 256 > sy0 ? sy * 256 : sy0));
+                                b64 sy_lo = (b64)sy * 256 > sy0 ? (b64)sy * 256 : sy0;
+                                b64 sy_hi = (b64)(sy + 1) * 256 < sy1 ? (b64)(sy + 1) * 256 : sy1;
+                                p64 wy = (p64)(sy_hi - sy_lo);
                                 for (int sx = x0; sx <= x1; sx++)
                                 {
-                                        p64 w = wy * (p64)(((sx + 1) * 256 < sx1 ? (sx + 1) * 256 : sx1) - (sx * 256 > sx0 ? sx * 256 : sx0));
-                                        unsigned int pixel = from[sy * side + sx];
+                                        b64 sx_lo = (b64)sx * 256 > sx0 ? (b64)sx * 256 : sx0;
+                                        b64 sx_hi = (b64)(sx + 1) * 256 < sx1 ? (b64)(sx + 1) * 256 : sx1;
+                                        p64 w = wy * (p64)(sx_hi - sx_lo);
+                                        unsigned int pixel = from[(positive)sy * (positive)side + (positive)sx];
                                         for (int ch = 0; ch < 4; ch++)
                                                 sum[ch] += ((pixel >> (24 - 8 * ch)) & 255u) * w;
                                         total += w;
@@ -19972,7 +20009,7 @@ HOT static fn ui_picture_scale(unsigned int address_to restrict into, int size, 
                                 total = 1;
                         for (int ch = 0; ch < 4; ch++)
                                 out |= (unsigned int)((sum[ch] + total / 2) / total) << (24 - 8 * ch);
-                        into[y * size + x] = out;
+                        into[(positive)y * (positive)size + (positive)x] = out;
                 }
         }
 }
@@ -20469,11 +20506,16 @@ static b32 ui_apps_launcher(const char address_to root, const char address_to na
         string_copy_bounded((p8 address_to)into, (string_address)ui_apps_bowls, room);
         string_append_bounded((p8 address_to)into, (string_address) "/bin/", room);
         string_append_bounded((p8 address_to)into, (string_address)name, room);
-        if (!ui_apps_look(AT_FDCWD, into, false, &facts) || (facts.mode & 0170000u) != 0100000u || facts.owner != ui_apps_owner || (facts.mode & 0022))
-                return false;
         handle = system_open_at(AT_FDCWD, (string_address)into, FILE_READ | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK);
         if (handle < 0)
                 return false;
+        memory_zero(&facts, sizeof(facts));
+        if (system_stat_at(handle, (string_address) "", AT_EMPTY_PATH, 0x7ff, &facts) != 0 ||
+            (facts.mode & 0170000u) != 0100000u || facts.owner != ui_apps_owner || (facts.mode & 0022))
+        {
+                system_close(handle);
+                return false;
+        }
         got = system_read_once(handle, line, sizeof(line) - 1);
         system_close(handle);
         if (got <= 0)
@@ -20614,13 +20656,18 @@ static fn ui_apps_entry(const char address_to root, bipolar directory, const cha
         positive room;
         if (ui_apps.count >= UI_APPS_MOST || length <= 8 || !memory_has_suffix((string_address)file, length, ".desktop"))
                 return;
-        // Root's alone, a regular file, read through the directory and never through a link.
-        if (!ui_apps_look(directory, file, false, &facts) || (facts.mode & 0170000u) != 0100000u || facts.owner != ui_apps_owner || (facts.mode & 0022) ||
-            facts.size > UI_APPS_ENTRY_MOST)
-                return;
+        // Root's alone, a regular file, opened through the directory with O_NOFOLLOW and verified on the open fd to prevent TOCTOU.
         handle = system_open_at(directory, (string_address)file, FILE_READ | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK);
         if (handle < 0)
                 return;
+        memory_zero(&facts, sizeof(facts));
+        if (system_stat_at(handle, (string_address) "", AT_EMPTY_PATH, 0x7ff, &facts) != 0 ||
+            (facts.mode & 0170000u) != 0100000u || facts.owner != ui_apps_owner || (facts.mode & 0022) ||
+            facts.size > UI_APPS_ENTRY_MOST)
+        {
+                system_close(handle);
+                return;
+        }
         // A buffer the file's size (a byte over, to see a file that grew): a desktop file is a few KiB, not the 96 KiB cap.
         room = (positive)facts.size + 1;
         text = (p8 address_to)memory_checked(room);
@@ -20986,7 +21033,7 @@ HOT static unsigned int address_to ui_png_decode_most(const p8 address_to restri
         int key_r = -1, key_g = -1, key_b = -1;
         if (most > 16384u)
                 most = 16384u;
-        if (size < 8 + 25 || memory_compare(file, signature, 8))
+        if (!file || !width_out || !height_out || size < 8 + 25 || memory_compare(file, signature, 8))
                 return null;
         for (int each = 0; each < 256; each++)
                 palette[each * 4] = palette[each * 4 + 1] = palette[each * 4 + 2] = 0, palette[each * 4 + 3] = 255;
@@ -28806,11 +28853,11 @@ static positive ui_uris_quoted(const p8 address_to bytes, positive length, p8 ad
                 at = start;
                 if ((got = ui_uri_next(bytes, stop, &at, path, sizeof(path))))
                         word = path;
-                else if (!memory_compare(bytes + start, "file:", 5))
+                else if (stop - start >= 5 && !memory_compare(bytes + start, "file:", 5))
                         continue; // a file of another machine's, or no path: nothing of it is typed
                 else
                         word = bytes + start, got = stop - start;
-                if (!array_store_reserve(*text, *room, used, used + 4 * got + 4, 256))
+                if (got > (positive_max - 4 - used) / 4 || !array_store_reserve(*text, *room, used, used + 4 * got + 4, 256))
                         break;
                 (*text)[used++] = '\'';
                 for (positive k = 0; k < got; k++)
@@ -31135,14 +31182,16 @@ static fn ui_text_draw_line(struct ui address_to ui, struct ui_text address_to t
         {
                 // A run is the clusters of one role; each cluster of a single code point one cell is part of a run drawn with...
                 const font_face address_to faces[2] = {ui_text_face(ui, t), ui->regular};
-                font_target target = {ui->pixels + (unsigned long)t->top * ui->pitch + t->left, (positive)ui->pitch, t->right - t->left, t->bottom - t->top};
+                int tx0 = t->left < 0 ? 0 : t->left, tx1 = t->right > ui->width ? ui->width : t->right;
+                int ty0 = t->top < 0 ? 0 : t->top, ty1 = t->bottom > ui->height ? ui->height : t->bottom;
+                font_target target = {ui->pixels + (unsigned long)ty0 * ui->pitch + (unsigned long)tx0, (positive)ui->pitch, tx1 > tx0 ? tx1 - tx0 : 0, ty1 > ty0 ? ty1 - ty0 : 0};
                 font_metrics grid = font_metrics_at(faces[0], ui_text_em(ui, t));
-                b32 cell_y = y + (t->line_height - grid.cell_height) / 2 - t->top;
+                b32 cell_y = y + (t->line_height - grid.cell_height) / 2 - ty0;
                 p32 codes[256], cluster[8];
                 positive token = 0, cluster_n = 0;
                 static p8 cluster_cover[256 * 256];
                 b32 has_paper = t->doc.range_count > 0 || doc_any_selected(&t->doc);
-                for (p32 k = from; k < to;)
+                for (p32 k = from; tx1 > tx0 && ty1 > ty0 && k < to;)
                 {
                         unsigned int ink = ui_text_token_ink(tokens, token_count, &token, l->offset[k] - l->offset[0], text);
                         p32 run = 0, start = k;
@@ -31162,19 +31211,19 @@ static fn ui_text_draw_line(struct ui address_to ui, struct ui_text address_to t
                                             origin + l->x[k] >= t->left - t->cell && origin + l->x[k] < t->right)
                                         {
                                                 unsigned int paper = ui_text_paper(t, l->offset[k], ground);
-                                                b32 cell_x = origin + l->x[k] - t->left;
+                                                b32 cell_x = origin + l->x[k] - tx0;
                                                 p32 wide;
                                                 if (doc_decode(l->shown + l->shown_at[k], size, &wide) == size && l->x[k + 1] - l->x[k] == 2 * t->cell)
                                                 {
                                                         if (ui->scene)
-                                                                ui_scene_wide(ui, faces, 2, 0, wide, &grid, ui_text_em(ui, t), &target, t->left, t->top, cell_x, cell_y, ink & 0xffffffu, paper);
+                                                                ui_scene_wide(ui, faces, 2, 0, wide, &grid, ui_text_em(ui, t), &target, tx0, ty0, cell_x, cell_y, ink & 0xffffffu, paper);
                                                         else
                                                                 font_cell(ui->engine, faces, 2, wide, 2, &grid, ui_text_em(ui, t), 0, &target, cell_x, cell_y, ink & 0xffffffu, paper);
                                                 }
                                                 else if (l->x[k + 1] - l->x[k] == t->cell && ui_cluster_codes(l->shown + l->shown_at[k], size, cluster, &cluster_n))
                                                 {
                                                         font_cell_plan_t plan;
-                                                        if (grid.cell_width * grid.cell_height > (b32)sizeof(cluster_cover))
+                                                        if (grid.cell_width <= 0 || grid.cell_height <= 0 || (p64)grid.cell_width * (p64)grid.cell_height > sizeof(cluster_cover))
                                                         {
                                                                 if (ui->scene)
                                                                         ui->scene->lost = UI_LOST_CELL;
@@ -31185,7 +31234,7 @@ static fn ui_text_draw_line(struct ui address_to ui, struct ui_text address_to t
                                                         if (plan.unknown)
                                                                 goto cluster_lost;
                                                         if (ui->scene)
-                                                                ui_scene_cluster(ui, &plan, ink & 0xffffffu, paper, t->left, t->top);
+                                                                ui_scene_cluster(ui, &plan, ink & 0xffffffu, paper, tx0, ty0);
                                                         else
                                                                 font_plan_paint(&plan, &target);
                                                 }
@@ -31195,7 +31244,7 @@ cluster_lost:
                                                         if (ui->scene)
                                                                 ui->scene->lost = UI_LOST_MARKS;
                                                         font_draw(ui->engine, faces, 2, l->shown + l->shown_at[k], size, ui_text_em(ui, t), 0, &target,
-                                                                  (b32)((b64)cell_x * 65536), baseline - t->top, ink & 0xffffffu, FONT_UNKNOWN);
+                                                                  (b32)((b64)cell_x * 65536), baseline - ty0, ink & 0xffffffu, FONT_UNKNOWN);
                                                 }
                                         }
                                         k++, run = 0;
@@ -31206,9 +31255,9 @@ cluster_lost:
                         if (run && origin + l->x[start] < t->right && origin + l->x[k] > t->left - t->cell)
                         {
                                 unsigned int paper = ui_text_paper(t, l->offset[start], ground);
-                                b32 cell_x = origin + l->x[start] - t->left;
+                                b32 cell_x = origin + l->x[start] - tx0;
                                 if (ui->scene)
-                                        ui_scene_cells(ui, faces, 2, 0, codes, run, &grid, ui_text_em(ui, t), &target, t->left, t->top, cell_x, cell_y, ink & 0xffffffu, paper);
+                                        ui_scene_cells(ui, faces, 2, 0, codes, run, &grid, ui_text_em(ui, t), &target, tx0, ty0, cell_x, cell_y, ink & 0xffffffu, paper);
                                 else
                                         font_cells(ui->engine, faces, 2, codes, run, &grid, ui_text_em(ui, t), 0, &target, cell_x, cell_y, ink & 0xffffffu, paper);
                         }
