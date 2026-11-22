@@ -108,9 +108,6 @@ static inline b32 ui_draw_list_still(unsigned char address_to base, const struct
 #endif
 
 // The taskbar: the strip along an edge of the desktop with the windows' tabs, the clock and, when the settings show...
-#ifndef MOONWATER_UI_TASKBAR
-#define MOONWATER_UI_TASKBAR 1
-#endif
 
 // The editor: files in the text engine's code view, tabs, find, a status bar and a context menu.
 #ifndef MOONWATER_UI_EDITOR
@@ -142,7 +139,7 @@ static inline b32 ui_draw_list_still(unsigned char address_to base, const struct
 #define MOONWATER_UI_INSTALLER 1
 #endif
 
-#define MOONWATER_UI_ANY (MOONWATER_UI_LAUNCHER || MOONWATER_UI_SETTINGS || MOONWATER_UI_TASKBAR || MOONWATER_UI_EDITOR || MOONWATER_UI_IDENTIFY || MOONWATER_UI_MIXER || MOONWATER_UI_KEYBOARD || MOONWATER_UI_NOTICES || MOONWATER_UI_FILES || MOONWATER_UI_INSTALLER)
+#define MOONWATER_UI_ANY (MOONWATER_UI_LAUNCHER || MOONWATER_UI_SETTINGS || MOONWATER_UI_EDITOR || MOONWATER_UI_IDENTIFY || MOONWATER_UI_MIXER || MOONWATER_UI_KEYBOARD || MOONWATER_UI_NOTICES || MOONWATER_UI_FILES || MOONWATER_UI_INSTALLER)
 
 #endif /* MOONWATER_CANVAS_UI_SWITCHES */
 
@@ -986,7 +983,6 @@ struct taskbar_view
 // The glass the band's tabs are made of over a rectangle of the output:
 typedef int (*taskbar_glass_fn)(void *context, int x, int y, int width, int height);
 
-#if MOONWATER_UI_TASKBAR
 
 static void taskbar_band(const struct taskbar_view *view, int *x, int *y, int *width, int *height);
 static int taskbar_slot(const struct taskbar_view *view, int which, int *x, int *y, int *width, int *height);
@@ -1076,82 +1072,6 @@ static int taskbar_notices_set(int present, unsigned int severity);
 static int taskbar_mc_tick(int open, int animate, int depth, int *moving);
 static void taskbar_mc_draw(const struct taskbar_view *view, unsigned int *pixels, int buf_w, int buf_h, int screen, int scale);
 
-#else
-
-static inline void taskbar_band(const struct taskbar_view *view, int *x, int *y, int *width, int *height)
-{ (void)view; *x = *y = *width = *height = 0; }
-static inline int taskbar_slot(const struct taskbar_view *view, int which, int *x, int *y, int *width, int *height)
-{ (void)view, (void)which, (void)x, (void)y, (void)width, (void)height; return 0; }
-static inline int taskbar_plate(const struct taskbar_view *view, int at, int *which, int *x, int *y, int *width, int *height)
-{ (void)view, (void)at, (void)which, (void)x, (void)y, (void)width, (void)height; return 0; }
-static inline int taskbar_hit_reach(const struct taskbar_view *view, int px, int py, int reach)
-{ (void)view, (void)px, (void)py, (void)reach; return TASKBAR_HIT_NONE; }
-static inline unsigned long taskbar_meets(const struct taskbar_view *view, int (*damage)[4], unsigned int damages, int solid)
-{ (void)view, (void)damage, (void)damages, (void)solid; return 0; }
-static inline int taskbar_draw(const struct taskbar_view *view, unsigned long redo, taskbar_glass_fn glass, void *context,
-                               int *rect)
-{ (void)view, (void)redo, (void)glass, (void)context, (void)rect; return 0; }
-static inline unsigned int taskbar_tab_ink(int slot, unsigned int mark)
-{ (void)slot, (void)mark; return 0; }
-static inline int taskbar_tick(void) { return 0; }
-static inline int taskbar_clock_stale(void) { return 0; }
-static inline void taskbar_changed(void) {}
-static inline int taskbar_stale(void) { return 0; }
-static inline void taskbar_bytes(int width, int height, int scale, unsigned long *band, unsigned long *glass)
-{ (void)width, (void)height, (void)scale; *band = *glass = 0; }
-static inline unsigned int taskbar_position(void) { return TASKBAR_BOTTOM; }
-static inline void taskbar_position_default(unsigned int position) { (void)position; }
-static inline void taskbar_settings_set(const char *position, const char *display, const char *tune)
-{ (void)position, (void)display, (void)tune; }
-static inline int taskbar_display_all(void) { return 0; }
-static inline void taskbar_text_set(int edge) { (void)edge; }
-static inline void taskbar_tray_set(const char *text) { (void)text; }
-static inline void taskbar_launcher_set(int on) { (void)on; }
-static inline int taskbar_launcher_on(void) { return 0; }
-static inline void taskbar_hide_set(int on) { (void)on; }
-static inline void taskbar_scale_set(int percent) { (void)percent; }
-static inline void taskbar_padding_set(int pixels) { (void)pixels; }
-static inline void taskbar_clock_set(const char *format) { (void)format; }
-static inline int taskbar_thick(int scale) { return COMPOSITOR_PANEL * scale / 100; }
-static inline void taskbar_arrange_set(int moon, int tasks, int newest, int order, unsigned int before, int look, int clock, int bulge, int twelve)
-{ (void)moon, (void)tasks, (void)newest, (void)order, (void)before, (void)look, (void)clock, (void)bulge, (void)twelve; }
-static inline int taskbar_slide_now(int fullscreen, positive now, int animate, b64 *before)
-{ (void)fullscreen, (void)now, (void)animate, *before = 0; return 0; }
-static inline int taskbar_sliding(positive now) { (void)now; return 0; }
-static inline int taskbar_moving(positive now) { (void)now; return 0; }
-static inline int taskbar_moon_tick(positive now, int launcher) { (void)now, (void)launcher; return 0; }
-static inline positive taskbar_moon_due(positive now) { (void)now; return 0; }
-static inline bool taskbar_starting_keep(positive now) { (void)now; return false; }
-static inline positive taskbar_starting_due(void) { return 0; }
-static inline void taskbar_moon_hover(int band) { (void)band; }
-static inline void taskbar_moon_seen(positive now) { (void)now; }
-static inline void taskbar_moon_damaged(int band, const int *rect) { (void)band, (void)rect; }
-static inline int taskbar_moon_more(const struct taskbar_view *view) { (void)view; return 0; }
-static inline int taskbar_moon_most(int size) { (void)size; return 0; }
-static inline void taskbar_spin_set(int seconds) { (void)seconds; }
-static inline void taskbar_bar_set(int separate, int edge) { (void)separate, (void)edge; }
-static inline void taskbar_wall_draw(unsigned int *pixels, int pitch, int width, int height, int dark, int dimmed, int maria, int glow, unsigned int accent,
-                                     b64 turn, int moon_alone, int rect[4])
-{ (void)pixels, (void)pitch, (void)width, (void)height, (void)dark, (void)dimmed, (void)maria, (void)glow, (void)accent, (void)turn, (void)moon_alone, rect[0] = rect[1] = rect[2] = rect[3] = 0; }
-static inline int taskbar_motion_about(positive now) { (void)now; return 0; }
-static inline unsigned int taskbar_wall_accent(void) { return 0; }
-static inline b64 taskbar_shift(void) { return 0; }
-static inline void taskbar_slide_rect(const struct taskbar_view *view, b64 before, int *x, int *y, int *width, int *height)
-{ (void)view, (void)before, *x = *y = *width = *height = 0; }
-static inline int taskbar_anchor(const struct taskbar_view *view, int which, int *x, int *y, int *width, int *height)
-{ (void)view, (void)which, (void)x, (void)y, (void)width, (void)height; return 0; }
-static inline int taskbar_volume_set(int present, int percent, int muted, int flash)
-{ (void)present, (void)percent, (void)muted, (void)flash; return 0; }
-static inline int taskbar_mic_set(int present, int muted)
-{ (void)present, (void)muted; return 0; }
-static inline int taskbar_notices_set(int present, unsigned int severity)
-{ (void)present, (void)severity; return 0; }
-static inline int taskbar_mc_tick(int open, int animate, int depth, int *moving)
-{ (void)animate; if (moving) *moving = 0; return open ? depth : 0; }
-static inline void taskbar_mc_draw(const struct taskbar_view *view, unsigned int *pixels, int buf_w, int buf_h, int screen, int scale)
-{ (void)view, (void)pixels, (void)buf_w, (void)buf_h, (void)screen, (void)scale; }
-
-#endif
 
 // The panel's cells and what a press on one does:
 #define TASKBAR_TRAY (-2) // what a point of the tray is over (the tray as a whole, between the cells)
@@ -31572,7 +31492,6 @@ static fn ui_text_field_draw(struct ui address_to ui, struct ui_control address_
         t->well_left = ui_dev(ui, c->x), t->well_right = ui_dev(ui, c->x + c->w);
 }
 
-#if MOONWATER_UI_SETTINGS || MOONWATER_UI_TASKBAR
 // The battery reader (the sysfs files): the settings window and the taskbar read it.
 // The machine's batteries, as the kernel's power supply class shows them (Documentation/ABI/testing/sysfs-class-power):
 
@@ -31795,6 +31714,5 @@ static b32 battery_read(string_address name, struct battery_state address_to sta
         battery_fill((string_address)names[chosen].text, state);
         return true;
 }
-#endif
 
 #endif /* MOONWATER_CANVAS_UI */

@@ -1426,7 +1426,7 @@ static void compositor_fallbacks(font_engine address_to engine)
 static void compositor_font(string_address path)
 {
         static p8 atlas[128 * 128];
-        positive size = 0, bytes = path && MOONWATER_UI_TASKBAR ? compositor_map_file(path, address_of size) : 0;
+        positive size = 0, bytes = path ? compositor_map_file(path, address_of size) : 0;
         unsigned long band_bytes = 0, glass_bytes = 0;
         void *engine, *band, *glass;
         if (!bytes) return;
