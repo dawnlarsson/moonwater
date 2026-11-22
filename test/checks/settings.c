@@ -1878,7 +1878,7 @@ static fn check_settings(string_address regular, string_address bold)
         settings_next(&settings_rows[keyboard], "us", 1, next, sizeof(next));
         check("settings: a choice is not moved a step at a time, it opens a list", !next[0]);
         settings_next(&settings_rows[bright], "50%", -1, next, sizeof(next));
-        check("settings: a step back is its first word", string_equals((string_address)next, (string_address) "-10"));
+        check("settings: a slider is no word to step: brightness is a slider, so its keys move it through the row and no word is next", !next[0] && settings_rows[bright].kind == SETTINGS_SLIDER);
 
         count = settings_command(&settings_rows[name], (string_address) "/moonwater", "a b; rm -rf /", words, SETTINGS_WORDS, false);
         check("settings: a name typed is one word of the command, whatever is in it",
