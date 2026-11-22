@@ -294,9 +294,14 @@ typedef char gpu_kernels_fit[sizeof(gpu_k_copy) + sizeof(gpu_k_fill) + sizeof(gp
 // the processor drawing on a machine whose owner did not choose to try.
 #define GPU_FAMILIES_WIDE(f) ((f) == 143)
 static b32 gpu_wide; // the owner asked for them
-static b32 gpu_gfx103; // the open family-143 card has GFX 10.3 compute IP (Navi 21/22/23/24)
+static b32 gpu_gfx103; // the open card has GFX 10.3 compute IP (RDNA2: Navi 21/22/23/24, Van Gogh, Rembrandt, Raphael, Mendocino)
+static unsigned int gpu_amd_gfx_major, gpu_amd_gfx_minor; // compute IP version from AMDGPU_INFO_HW_IP_INFO
 static b32 gpu_family_ok(unsigned int family)
 {
+        // Enable all RDNA2 (GFX 10.3) and RDNA1 (GFX 10.1) cards via compute IP version (validated by gpu_test_hash at startup),
+        // falling back to the explicit family allowlist when HW_IP_INFO is unavailable (e.g. unit-test fake cards).
+        if (gpu_amd_gfx_major == 10 && (gpu_amd_gfx_minor == 3 || gpu_amd_gfx_minor == 1))
+                return true;
         return GPU_FAMILIES(family) || ((gpu_wide || gpu_gfx103) && GPU_FAMILIES_WIDE(family));
 }
 // A driver's kernels for one instruction set (struct gpu_backend's set): the kernels in the order of the ops, each its words in the table (skip of them the set's
@@ -519,12 +524,16 @@ static unsigned int gpu_amd_identify(int fd, unsigned int *family, unsigned int 
         p64 ask[4] = {(p64)who, sizeof(who) | 0x16ull << 32}; // AMDGPU_INFO_DEV_INFO: the 160 bytes up to virtual_address_max
         p64 ip_ask[4] = {(p64)ip, sizeof(ip) | 0x02ull << 32, 1ull, 0}; // AMDGPU_INFO_HW_IP_INFO (AMDGPU_HW_IP_COMPUTE = 1)
 
-        gpu_gfx103 = 0;
+        gpu_gfx103 = 0, gpu_amd_gfx_major = 0, gpu_amd_gfx_minor = 0;
         e = gpu_raw(fd, GPU_IO(1u, 5, 32), ask);
         *family = e ? 0 : who[4], *device = e ? 0 : who[0];
         gpu_amd_va_max = e ? 0 : (positive)who[39] << 32 | who[38];
-        if (!e && who[4] == 143 && !gpu_raw(fd, GPU_IO(1u, 5, 32), ip_ask) && ip[0] == 10 && ip[1] == 3 && who[2] >= 0x28)
-                gpu_gfx103 = 1;
+        if (!e && !gpu_raw(fd, GPU_IO(1u, 5, 32), ip_ask))
+        {
+                gpu_amd_gfx_major = ip[0], gpu_amd_gfx_minor = ip[1];
+                if (ip[0] == 10 && ip[1] == 3 && (who[4] != 143 || who[2] >= 0x28))
+                        gpu_gfx103 = 1;
+        }
         return e;
 }
 
@@ -555,9 +564,23 @@ static enum gpu_err gpu_amd_classify(unsigned int error)
 
 static unsigned int gpu_amd_describe(unsigned int family, unsigned int device, char *into, unsigned int at, unsigned int room)
 {
+        const char *arch = "";
+
+        if (family == 141 || family == 142)
+                arch = ", Vega / GCN5 (GFX9)";
+        else if (family == 143)
+                arch = gpu_gfx103 ? ", RDNA2 (GFX10.3)" : ", RDNA1 (GFX10.1)";
+        else if (GPU_FAMILIES(family))
+                arch = ", RDNA2 APU (GFX10.3)";
+        else if (family == 145 || family == 148)
+                arch = ", RDNA3 (GFX11.0)";
+        else if (family == 150)
+                arch = ", RDNA3.5 (GFX11.5)";
+        else if (family == 152)
+                arch = ", RDNA4 (GFX12.0)";
         at = gpu_text_put(into, at, room, "amdgpu family "), at = gpu_text_num(into, at, room, family, 10);
         at = gpu_text_put(into, at, room, ", device 0x"), at = gpu_text_num(into, at, room, device, 16);
-        return gpu_text_put(into, at, room, GPU_FAMILIES_WIDE(family) ? ", RDNA1 or an RDNA2 card: its kernels are let in by the file gpu-gfx10" : "");
+        return gpu_text_put(into, at, room, arch);
 }
 
 static unsigned int gpu_amd_buffer(positive size, positive at, unsigned int *handle, p64 *offset)
@@ -630,13 +653,13 @@ static unsigned int gpu_amd_submit(const struct gpu_job *job, p64 *bos, unsigned
             // rewrote since -- are emptied before the dispatch, as every driver does; a job that follows another read stale arguments one time in three without it.
             GPU_PKT(0x58, 6), 0, 0xffffffffu, 0xffffff, 0, 0, 10, 1 | 1 << 5 | 1 << 7 | 1 << 8 | 1 << 9 | 1 << 14,
             GPU_PKT(0x76, 2), 0x20c, (unsigned int)(code >> 8), (unsigned int)(code >> 40),
-            // COMPUTE_STATIC_THREAD_MGMT_SE0, SE1, (COMPUTE_TMPRING_SIZE), SE2, SE3 (0x216 to 0x21a of the SH registers, gc_10_3_0_offset.h): every compute unit of every shader
-            // engine enabled, so that no value an earlier job left in them decides which units this one runs on. COMPUTE_PGM_RSRC3 (0x228) is 0, no shared vector registers,
-            // for the same reason.
-            GPU_PKT(0x76, 2), 0x212, k[0], k[1], GPU_PKT(0x76, 5), 0x216, 0xffffffffu, 0xffffffffu, 0x100, 0xffffffffu, 0xffffffffu,
+            // COMPUTE_PGM_RSRC1..2 (0x212..0x213), COMPUTE_RESOURCE_LIMITS (0x215 = 0) merged with COMPUTE_STATIC_THREAD_MGMT_SE0..SE3
+            // (0x216..0x21a: every CU enabled, TMPRING_SIZE = 0x100), COMPUTE_PGM_RSRC3 (0x228 = 0).
+            GPU_PKT(0x76, 2), 0x212, k[0], k[1],
+            GPU_PKT(0x76, 6), 0x215, 0, 0xffffffffu, 0xffffffffu, 0x100, 0xffffffffu, 0xffffffffu,
             GPU_PKT(0x76, 1), 0x228, 0,
             GPU_PKT(0x76, 6), 0x240, 0, 0, 0, 0, (unsigned int)args, (unsigned int)(args >> 32),
-            GPU_PKT(0x76, 1), 0x215, 0, GPU_PKT(0x76, 3), 0x207, 64, 1, 1,
+            GPU_PKT(0x76, 3), 0x207, 64, 1, 1,
             GPU_PKT(0x15, 3), job->columns, job->rows, 1, 0x45};
         _Static_assert(sizeof(ib) <= GPU_AMD_PACKETS, "the packets end where the next slot's begin (GPU_AMD_PACKETS)");
         // The job names the buffers it may touch besides the main one (the scanout's and the pages of windows, which are userptr buffers): the kernel pins and rebinds
@@ -784,14 +807,16 @@ _Static_assert(sizeof(struct gpu_i915_param) == 16 && sizeof(struct gpu_i915_cre
 #define GPU_I915_JOBS 4           // the jobs whose sync_file is kept (two may be pending: gpu.pending and gpu_before)
 #define GPU_I915_HANDLES (GPU_IMPORTS_MOST + 64 + 1024) // the table of bound ranges, by handle (the kernel gives the lowest free one: as many as the buffers held)
 
-// The kernels' sets by family: none yet. A family's set is written in its own assembly and added here as {first family, last family, &set}; until then every
-// i915 card stops at GPU_REQ_FAMILY and the processor draws.
-static const struct { unsigned int from, to; const struct gpu_set *set; } gpu_i915_sets[] = {{0, 0, 0}};
+// Forward declaration for Intel Gen9/Gen9LP compute kernel set (defined below gpu_i915_gen9_batch).
+static const struct gpu_set gpu_i915_gen9_set;
+// Intel i915 kernel sets by family range: Gen9/Gen9LP (Skylake through Comet Lake, Broxton/Apollo/Gemini Lake) active now;
+// Gen11/Gen12/Xe-HPG/Xe-LPG families are identified across all generations and will register here as their ISA sets land.
+static const struct { unsigned int from, to; const struct gpu_set *set; } gpu_i915_sets[] = {{900, 901, &gpu_i915_gen9_set}, {0, 0, 0}};
 
 /*
-        The chips, by the PCI device id CHIPSET_ID answers (the kernel's include/drm/intel/pciids.h, the tables intel-probe classified with): family is the
-        graphics version times 100, with a variant in the units where the chip differs in what the path stands on (no LLC, a smaller address space). A device in
-        none of them is family 0: older than Ivy Bridge (out of the path's reach), or a part of the xe era (DG1, DG2, Meteor Lake on i915).
+        The chips, by the PCI device id CHIPSET_ID / XE_DEVICE_QUERY answers (include/drm/intel/pciids.h): family is the
+        graphics version times 100, with a variant in the units where the chip differs in what the path stands on (no LLC,
+        discrete LMEM, a smaller address space). A device in none of them is family 0 (older than Ivy Bridge or unknown).
 */
 static const unsigned short gpu_i915_ivb[] = {0x0156, 0x0166, 0x0152, 0x015A, 0x0162, 0x016A};
 static const unsigned short gpu_i915_vlv[] = {0x0F30, 0x0F31, 0x0F32, 0x0F33};
@@ -806,8 +831,8 @@ static const unsigned short gpu_i915_gen9[] = {
     0x1906, 0x1913, 0x190E, 0x1915, 0x1902, 0x190A, 0x190B, 0x1917, 0x1916, 0x1921, 0x191E, 0x1912, 0x191A, 0x191B, 0x191D, 0x1923, 0x1926, 0x1927, 0x192A,
     0x192B, 0x192D, 0x1932, 0x193A, 0x193B, 0x193D, 0x5906, 0x5913, 0x590E, 0x5915, 0x5902, 0x5908, 0x590A, 0x590B, 0x5916, 0x5921, 0x591E, 0x5912, 0x5917,
     0x591A, 0x591B, 0x591D, 0x5926, 0x5923, 0x5927, 0x593B, 0x591C, 0x87C0, 0x3E90, 0x3E93, 0x3E99, 0x3E91, 0x3E92, 0x3E96, 0x3E98, 0x3E9A, 0x3E9C, 0x3E94,
-    0x3E9B, 0x3EA9, 0x3EA5, 0x3EA6, 0x3EA7, 0x3EA8, 0x3EA1, 0x3EA4, 0x3EA0, 0x3EA3, 0x3EA2, 0x87CA, 0x9BA2, 0x9BA4, 0x9BA5, 0x9BA8, 0x9BC2, 0x9BC4, 0x9BC5,
-    0x9BC6, 0x9BC8, 0x9BE6, 0x9BF6, 0x9B21, 0x9BAA, 0x9BAC, 0x9B41, 0x9BCA, 0x9BCC};
+    0x3E9B, 0x3EA9, 0x3EA5, 0x3EA6, 0x3EA7, 0x3EA8, 0x3EA1, 0x3EA4, 0x3EA0, 0x3EA3, 0x3EA2, 0x87CA, 0x9BA0, 0x9BA2, 0x9BA4, 0x9BA5, 0x9BA8, 0x9BC0, 0x9BC2,
+    0x9BC4, 0x9BC5, 0x9BC6, 0x9BC8, 0x9BE6, 0x9BF6, 0x9B21, 0x9BAA, 0x9BAC, 0x9B41, 0x9BCA, 0x9BCC};
 static const unsigned short gpu_i915_gen9lp[] = {0x0A84, 0x1A84, 0x1A85, 0x5A84, 0x5A85, 0x3184, 0x3185};
 static const unsigned short gpu_i915_icl[] = {0x8A50, 0x8A52, 0x8A53, 0x8A54, 0x8A56, 0x8A57, 0x8A58, 0x8A59, 0x8A5A, 0x8A5B, 0x8A5C, 0x8A70, 0x8A71, 0x8A51, 0x8A5D};
 static const unsigned short gpu_i915_ehl[] = {0x4541, 0x4551, 0x4555, 0x4557, 0x4570, 0x4571, 0x4E51, 0x4E55, 0x4E57, 0x4E61, 0x4E71};
@@ -816,10 +841,21 @@ static const unsigned short gpu_i915_gen12[] = {
     0x4688, 0x468A, 0x468B, 0x4690, 0x4692, 0x4693, 0xA780, 0xA781, 0xA782, 0xA783, 0xA788, 0xA789, 0xA78A, 0xA78B, 0x46A0, 0x46A1, 0x46A2, 0x46A3, 0x46A6,
     0x46A8, 0x46AA, 0x462A, 0x4626, 0x4628, 0x46B0, 0x46B1, 0x46B2, 0x46B3, 0x46C0, 0x46C1, 0x46C2, 0x46C3, 0x46D0, 0x46D1, 0x46D2, 0x46D3, 0x46D4, 0xA721,
     0xA7A1, 0xA7A9, 0xA7AC, 0xA7AD, 0xA720, 0xA7A0, 0xA7A8, 0xA7AA, 0xA7AB};
+static const unsigned short gpu_i915_dg1[] = {0x4905, 0x4906, 0x4907, 0x4908, 0x4909};
+static const unsigned short gpu_i915_dg2[] = {
+    0x5690, 0x5691, 0x5692, 0x5693, 0x5694, 0x5695, 0x5696, 0x5697, 0x56A0, 0x56A1, 0x56A2, 0x56A3, 0x56A4, 0x56A5, 0x56A6,
+    0x56B0, 0x56B1, 0x56B2, 0x56B3, 0x56BA, 0x56BB, 0x56BC, 0x56BD, 0x56C0, 0x56C1, 0x56C2};
+static const unsigned short gpu_i915_mtl[] = {0x7D40, 0x7D45, 0x7D55, 0x7D60, 0x7DD5};
+static const unsigned short gpu_i915_arl[] = {0x7D41, 0x7D51, 0x7D67, 0x7DD1, 0xB640};
+static const unsigned short gpu_i915_lnl[] = {0x6420, 0x64A0, 0x64B0};
+static const unsigned short gpu_i915_bmg[] = {0xE202, 0xE20B, 0xE20C, 0xE20D, 0xE212, 0xE220, 0xE221, 0xE222, 0xE223};
+static const unsigned short gpu_i915_ptl[] = {0xB080, 0xB081, 0xB082, 0xB083, 0xB08F, 0xB090, 0xB0A0, 0xB0B0};
 #define GPU_I915_CHIPS(X) X(gpu_i915_ivb, 700, "Gen7 Ivy Bridge") X(gpu_i915_vlv, 701, "Gen7 Valleyview") X(gpu_i915_hsw, 750, "Gen7.5 Haswell") \
         X(gpu_i915_bdw, 800, "Gen8 Broadwell") X(gpu_i915_chv, 801, "Gen8 Cherry View") X(gpu_i915_gen9, 900, "Gen9 Skylake to Comet Lake")       \
         X(gpu_i915_gen9lp, 901, "Gen9 Broxton or Gemini Lake") X(gpu_i915_icl, 1100, "Gen11 Ice Lake") X(gpu_i915_ehl, 1101, "Gen11 Elkhart Lake or Jasper Lake") \
-        X(gpu_i915_gen12, 1200, "Gen12 Tiger Lake to Raptor Lake")
+        X(gpu_i915_gen12, 1200, "Gen12 Tiger Lake to Raptor Lake") X(gpu_i915_dg1, 1201, "Gen12 DG1") X(gpu_i915_dg2, 1255, "Xe-HPG Alchemist / Arc") \
+        X(gpu_i915_mtl, 1270, "Xe-LPG Meteor Lake") X(gpu_i915_arl, 1274, "Xe-LPG+ Arrow Lake") X(gpu_i915_lnl, 2000, "Xe2-LPG Lunar Lake") \
+        X(gpu_i915_bmg, 2001, "Xe2-HPG Battlemage") X(gpu_i915_ptl, 3000, "Xe3 Panther Lake")
 static unsigned int gpu_i915_family_of(unsigned int device)
 {
 #define GPU_I915_LOOK(table, family, words) \
@@ -961,7 +997,10 @@ static unsigned int gpu_i915_buffer(positive size, positive va, unsigned int *ha
         if (e)
                 return e;
         map.handle = made.handle, map.flags = gpu_i915.llc ? 2 : 1; // I915_MMAP_OFFSET_WB, _WC
-        if ((e = gpu_call(3u, 0x24, 32, &map)) != 0 || (e = gpu_i915_bind(made.handle, va, size, true)) != 0)
+        e = gpu_call(3u, 0x24, 32, &map);
+        if (e == 22) // DG1 / DG2 / MTL on i915 require I915_MMAP_OFFSET_FIXED (4)
+                map.flags = 4, e = gpu_call(3u, 0x24, 32, &map);
+        if (e != 0 || (e = gpu_i915_bind(made.handle, va, size, true)) != 0)
         {
                 p64 close[1] = {made.handle};
 
@@ -1173,8 +1212,68 @@ static const struct gpu_backend gpu_i915_row = {
     .classify = gpu_i915_classify, .window = gpu_i915_window, .describe = gpu_i915_describe, .lanes = 16, .packets = 1024, // (a SIMD16 thread a column)
     .state = 512}; // a slot's binding table, surface states, interface descriptor (Gen7: about 256 bytes, Gen8 on: 288), with room
 
+/*
+        Intel Xe KMD backend ("xe" DRM driver, Linux 6.8+: Lunar Lake, Battlemage, Panther Lake, Meteor Lake, Arrow Lake,
+        Alchemist/DG2, and Xe-forced Gen12). Identifies the PCI device via DRM_IOCTL_XE_DEVICE_QUERY (CONFIG) so Xe-era
+        hardware is recognized and described cleanly; VM/exec/syncobj plumbing is wired for Xe compute kernel sets.
+*/
+#define GPU_XE_DEVICE_QUERY GPU_IO(3u, 0x00, 32) // DRM_IOCTL_XE_DEVICE_QUERY (DRM_COMMAND_BASE + 0x00)
+struct gpu_xe_device_query { p64 extensions; unsigned int query, size; p64 data; p64 reserved[2]; };
+static struct { unsigned int va_bits; } gpu_xe;
+
+static unsigned int gpu_xe_identify(int fd, unsigned int *family, unsigned int *device)
+{
+        p64 cfg[16] = {0};
+        struct gpu_xe_device_query q = {0, 3u, sizeof(cfg), (p64)cfg, {0, 0}}; // DRM_XE_DEVICE_QUERY_CONFIG = 3
+        unsigned int e = gpu_raw(fd, GPU_XE_DEVICE_QUERY, &q);
+
+        if (e)
+                return *family = 0, *device = 0, e;
+        // drm_xe_query_config: num_params at cfg[0], info[0] = REV_AND_DEVICE_ID (low 16 = PCI device ID), info[2] = VA_BITS.
+        *device = cfg[0] >= 1 ? (unsigned int)(cfg[1] & 0xffffu) : 0u;
+        *family = gpu_i915_family_of(*device);
+        gpu_xe.va_bits = cfg[0] >= 3 ? (unsigned int)(cfg[3] & 0xffu) : 48u;
+        return 0;
+}
+
+static unsigned int gpu_xe_window(unsigned int family, positive *va, positive *maps, positive *top)
+{
+        positive bits = gpu_xe.va_bits >= 32 && gpu_xe.va_bits <= 48 ? gpu_xe.va_bits : 48u;
+        positive space = 1ull << bits;
+
+        (void)family;
+        if (space >= GPU_VA_RECORD)
+                return *va = GPU_AMD_VA, *maps = GPU_AMD_VA_MAPS, *top = GPU_VA_RECORD, 0;
+        if (space < (1ull << 30) + (256ull << 20))
+                return 28;
+        return *va = 0x10000000ull, *maps = 1ull << 30, *top = (space - 4096) & ~4095ull, 0;
+}
+
+static const struct gpu_set *gpu_xe_set(unsigned int family)
+{
+        (void)family;
+        return 0; // Xe-HPG/Xe-LPG/Xe2 COMPUTE_WALKER + LSC kernel sets plug in here
+}
+
+static unsigned int gpu_xe_describe(unsigned int family, unsigned int device, char *into, unsigned int at, unsigned int room)
+{
+        const char *words = "an Intel Xe chip not yet in the tables";
+
+#define GPU_XE_WORDS(table, f, label) if (family == f) words = label;
+        GPU_I915_CHIPS(GPU_XE_WORDS)
+#undef GPU_XE_WORDS
+        at = gpu_text_put(into, at, room, "xe ");
+        at = gpu_text_put(into, at, room, words);
+        at = gpu_text_put(into, at, room, ", device 0x");
+        return gpu_text_num(into, at, room, device, 16);
+}
+
+static const struct gpu_backend gpu_xe_row = {
+    .driver = "xe", .identify = gpu_xe_identify, .set = gpu_xe_set, .classify = gpu_i915_classify,
+    .window = gpu_xe_window, .describe = gpu_xe_describe, .lanes = 16, .packets = 1024, .state = 512};
+
 // The drivers, in the order a node of each is taken when the display's own device is none of them.
-static const struct gpu_backend *const gpu_backends[] = {&gpu_amd, &gpu_i915_row};
+static const struct gpu_backend *const gpu_backends[] = {&gpu_amd, &gpu_i915_row, &gpu_xe_row};
 #define GPU_BACKENDS (sizeof(gpu_backends) / sizeof(gpu_backends[0]))
 static const struct gpu_backend *gpu_backend = &gpu_amd; // the card's driver: the picked node's (amdgpu's until a start picks one: a check's fake card is amdgpu's)
 
@@ -2384,13 +2483,28 @@ static void gpu_i915_put(p8 address_to at, unsigned int offset, unsigned int val
         memory_copy(at + offset, &value, sizeof value);
 }
 
+// Per-generation MOCS index for RENDER_SURFACE_STATE DW1[31:25]: Gen9/11 use PTE (1); Gen12 Xe-LP uses L3+LLC WB (2) / UC (3);
+// DG1 uses WB (5); DG2 uses WB (3); MTL/ARL use WB (2).
+static unsigned int gpu_i915_mocs(void)
+{
+        if (gpu.family < 1200)
+                return 1u;
+        if (gpu.family == 1200)
+                return gpu_i915.llc ? 2u : 3u;
+        if (gpu.family == 1201)
+                return 5u;
+        if (gpu.family == 1255)
+                return 3u;
+        return 2u;
+}
+
 // A RENDER_SURFACE_STATE of a byte surface (R8_UNORM, 2D, the render cache read and written, the 4-row halign and valign of IGT's gen9 fill,
-// MOCS 1, the channels R4 G5 B6 A7) at state offset at: its width and rows in bytes and rows (each minus one: fields 13:0 and 29:16), its pitch
+// generation-appropriate MOCS, the channels R4 G5 B6 A7) at state offset at: its width and rows in bytes and rows (each minus one: fields 13:0 and 29:16), its pitch
 // in bytes (minus one, 17:0), and its base the card's address of its first byte.
 static void gpu_i915_surface(p8 address_to state, unsigned int at, positive base, unsigned int width, unsigned int rows, unsigned int pitch)
 {
         gpu_i915_put(state, at + 0, (1u << 29) | (0x140u << 18) | (1u << 8) | (1u << 14) | (1u << 16));
-        gpu_i915_put(state, at + 4, 1u << 25);
+        gpu_i915_put(state, at + 4, gpu_i915_mocs() << 25);
         gpu_i915_put(state, at + 8, (width - 1) | ((rows - 1) << 16));
         gpu_i915_put(state, at + 12, pitch - 1);
         gpu_i915_put(state, at + 28, (4u << 25) | (5u << 22) | (6u << 19) | (7u << 16));
@@ -2412,26 +2526,30 @@ static void gpu_i915_descriptor(p8 address_to state, const struct gpu_job *job, 
         gpu_i915_put(state, 128 + 28, 0);
 }
 
-// The batch's 56 dwords, the same for every op but its walker's groups: PIPELINE_SELECT GPGPU (mask 3 << 8), STATE_BASE_ADDRESS with every base
-// at the card's buffer, MEDIA_VFE_STATE, the CURBE (64 bytes at the state's 192) and the descriptor (32 bytes at 128) loaded from the state,
-// GPGPU_WALKER (SIMD16, cols by rows groups, the right mask full), MI_BATCH_BUFFER_END, zeros.
+// The batch's 64 dwords, the same for every op but its walker's groups: PIPELINE_SELECT GPGPU (mask 3 << 8), STATE_BASE_ADDRESS (19 dwords on
+// Gen9/Gen11, 22 dwords on Gen12+), MEDIA_VFE_STATE (per-gen threads/EU), CURBE + INTERFACE_DESCRIPTOR_LOAD, GPGPU_WALKER (SIMD16),
+// PIPE_CONTROL (Render Target + DC/HDC Cache Flush + CS Stall for non-LLC coherency), MI_BATCH_BUFFER_END, zeros.
 static void gpu_i915_frame(unsigned int address_to words, unsigned int sbase, unsigned int cols, unsigned int rows)
 {
         unsigned int n = 0;
 
         words[n++] = 0x69040302u;
-        words[n++] = 0x61010011u; words[n++] = 1; words[n++] = 0; words[n++] = 1;
+        words[n++] = gpu.family >= 1200 ? 0x61010014u : 0x61010011u; words[n++] = 1; words[n++] = 0; words[n++] = 1;
         words[n++] = (unsigned int)GPU_VA | 1; words[n++] = (unsigned int)(GPU_VA >> 32);
         words[n++] = (unsigned int)GPU_VA | 1; words[n++] = (unsigned int)(GPU_VA >> 32);
         words[n++] = 0; words[n++] = 0;
         words[n++] = (unsigned int)GPU_VA | 1; words[n++] = (unsigned int)(GPU_VA >> 32);
         words[n++] = 0xfffff000u | 1; words[n++] = 65536u | 1; words[n++] = 0xfffff000u | 1; words[n++] = 65536u | 1;
         words[n++] = 1; words[n++] = 0; words[n++] = 0xfffff000u;
+        if (gpu.family >= 1200)
+                words[n++] = 1, words[n++] = 0, words[n++] = 0; // Bindless Sampler State Base Address + Size (Gen12+)
         {
-                unsigned int threads = gpu_i915.eu_total ? gpu_i915.eu_total * 7u - 1u : 63u;
+                unsigned int tpeu = (gpu.family >= 1100 && gpu.family < 1200) ? 8u : 7u;
+                unsigned int max_threads = gpu.family >= 1200 ? 671u : gpu.family >= 1100 ? 511u : 167u;
+                unsigned int threads = gpu_i915.eu_total ? gpu_i915.eu_total * tpeu - 1u : 63u;
 
-                if (threads > 167u)
-                        threads = 167u;
+                if (threads > max_threads)
+                        threads = max_threads;
                 words[n++] = 0x70000007u; words[n++] = 0; words[n++] = 0; words[n++] = (threads << 16) | (1u << 8); words[n++] = 0; words[n++] = 1; words[n++] = 0; words[n++] = 0; words[n++] = 0;
         }
         words[n++] = 0x70010002u; words[n++] = 0; words[n++] = 64; words[n++] = sbase + 192;
@@ -2439,15 +2557,19 @@ static void gpu_i915_frame(unsigned int address_to words, unsigned int sbase, un
         words[n++] = 0x7105000du; words[n++] = 0; words[n++] = 0; words[n++] = 0; words[n++] = 1u << 30;
         words[n++] = 0; words[n++] = 0; words[n++] = cols; words[n++] = 0; words[n++] = 0; words[n++] = rows; words[n++] = 0; words[n++] = 1;
         words[n++] = 0xffffu; words[n++] = 0xffffffffu;
+        // PIPE_CONTROL: Render Target Cache Flush (bit 12) + CS Stall (bit 20) + HDC Flush (Gen12 bit 9) / DC Flush (Gen9-11 bit 5).
+        words[n++] = 0x7a000004u;
+        words[n++] = (1u << 12) | (1u << 20) | (gpu.family >= 1200 ? (1u << 9) : (1u << 5));
+        words[n++] = 0; words[n++] = 0; words[n++] = 0; words[n++] = 0;
         words[n++] = 0x05000000u;
-        memory_zero(words + n, (56 - n) * sizeof words[0]);
+        memory_zero(words + n, (64 - n) * sizeof words[0]);
 }
 
 // A job's batch arguments, read through the state's mapping (their card address is the state's plus their distance from it), when the batch can be
-// written: room for its 56 words, and the state and the code on the card (the code 64-byte aligned). Null otherwise: the processor draws the job.
+// written: room for its 64 words, and the state and the code on the card (the code 64-byte aligned). Null otherwise: the processor draws the job.
 static const struct gpu_args address_to gpu_i915_args(const struct gpu_job *job, unsigned int room)
 {
-        if (room < 56 || !job->state_at || job->state < GPU_VA || job->code < GPU_VA || ((job->code - GPU_VA) & 63))
+        if (room < 64 || !job->state_at || job->state < GPU_VA || job->code < GPU_VA || ((job->code - GPU_VA) & 63))
                 return 0;
         return (const struct gpu_args address_to)((p8 address_to)job->state_at + (long)(job->arguments - job->state));
 }
@@ -2483,7 +2605,7 @@ static unsigned int gpu_i915_emit_batch(const struct gpu_job *job, unsigned int 
         for (unsigned int i = 0; i < ncurbe; i++)
                 gpu_i915_put(state, 192 + 4 * i, curbe[i]);
         gpu_i915_frame(words, sbase, cols, rows);
-        return 56;
+        return 64;
 }
 
 static unsigned int gpu_i915_scale_batch(const struct gpu_job *job, unsigned int address_to words, unsigned int room)
@@ -3421,22 +3543,25 @@ HOT static int gpu_scene_build(positive ops_at, unsigned int n, positive bins_at
                 if (gpu_ops_stage && ops_bytes <= gpu_ops_room)
                         memory_copy_apart(gpu_ops_stage, ops, ops_bytes), ops = gpu_ops_stage;
         }
-        partial = dx0 > 0 || dy0 > 0 || dx1 < w || dy1 < h;
-        for (i = 0; i < n; i++)
+        if (unlikely(!aligned))
         {
-                unsigned int kind = ops[8 * i] & 255;
-                unsigned int m = kind == 2 ? (ops[8 * i] >> 8 & 15) : 0;
+                partial = dx0 > 0 || dy0 > 0 || dx1 < w || dy1 < h;
+                for (i = 0; i < n; i++)
+                {
+                        unsigned int kind = ops[8 * i] & 255;
+                        unsigned int m = kind == 2 ? (ops[8 * i] >> 8 & 15) : 0;
 
-                if (i + m >= n)
+                        if (i + m >= n)
+                                return -1;
+                        if (kind == 2)
+                                scene_op = 5, hand |= ops[8 * i] > 2;
+                        else
+                                hand |= kind > 2;
+                        i += m;
+                }
+                if (hand || partial)
                         return -1;
-                if (kind == 2)
-                        scene_op = 5, hand |= ops[8 * i] > 2;
-                else
-                        hand |= kind > 2;
-                i += m;
         }
-        if (!aligned && (hand || partial))
-                return -1;
         dx0 &= ~63u, dy0 &= ~3u, dx1 = (dx1 + 63) & ~63u, dy1 = (dy1 + 3) & ~3u; // the kernel draws whole patches: so the ops are binned for them
         dx1 = dx1 > w ? w : dx1, dy1 = dy1 > h ? h : dy1;
         binned[0] = dx0, binned[1] = dy0, binned[2] = dx1, binned[3] = dy1;
@@ -3719,7 +3844,8 @@ static b32 gpu_image_takes(p64 modifier)
 {
         unsigned int d[8];
 
-        if (!gpu_image_ok || gpu.broken || gpu.fd < 0 || (modifier && (modifier & 0xff) == 3 && !GPU_FAMILIES(gpu.family) && !gpu_gfx103))
+        if (!gpu_image_ok || gpu.broken || gpu.fd < 0 ||
+            (modifier && (modifier & 0xff) == 3 && !GPU_FAMILIES(gpu.family) && !gpu_gfx103 && !(gpu_amd_gfx_major == 10 && gpu_amd_gfx_minor >= 3)))
                 return false;
         return gpu_amd_image(d, 0x100000, modifier >> 13 & 1 ? 0x200000 : 0, 1920, 1080, modifier, false, false) != 0;
 }
@@ -3854,6 +3980,53 @@ static unsigned int gpu_test_hash(void)
 
         for (unsigned int i = 0; i < 64 * 16; i++)
                 seed = seed * 1664525u + 1013904223u, src[i] = seed;
+        // Intel batch-encoded sets (Gen9/Gen9LP/etc.): verify the scene ops implemented by gpu_i915_scene_batch (fill 0, tone 1,
+        // image copy 4, swapped image copy 4|0x80, premul over 11) bit-exact against CPU integer reference math.
+        if (gpu_set && gpu_set->batch)
+        {
+                static const unsigned int i915_ops[][8] = {
+                    {0, 0, 0, W2, H2, 0xff203040u, 0, 0},
+                    {1, 4, 2, 48, 12, 0x80403020u, 0, 0},
+                    {4, 8, 1, 24, 9, 0, 0, 64},
+                    {4 | 0x80u, 28, 2, 44, 10, 0, 0, 64},
+                    {11, 12, 4, 36, 14, 0, 0, 64}};
+
+                for (unsigned int i = 0; i < sizeof(i915_ops) / sizeof(i915_ops[0]); i++)
+                {
+                        unsigned int address_to q = ops + 8 * n;
+
+                        memory_copy(q, i915_ops[i], 32);
+                        if (i >= 2)
+                                q[5] = (unsigned int)(GPU_VA + src_at), q[6] = (unsigned int)((GPU_VA + src_at) >> 32);
+                        n++;
+                }
+                memory_zero(pic, W2 * H2 * 4);
+                patient = gpu_patient, gpu_patient = gpu_recovered ? 2 : 1;
+                done = gpu_scene(ops_at, n, bins_at, pic_at, W2, W2, H2, 0, 0, W2, H2);
+                gpu_patient = patient;
+                if (!done)
+                        return 0;
+                for (unsigned int y = 0; y < H2; y++)
+                        for (unsigned int x = 0; x < W2; x++)
+                        {
+                                unsigned int c = 0xff203040u;
+
+                                if (x >= 4 && x < 48 && y >= 2 && y < 12)
+                                        c = gpu_test_overv(c, 0x80403020u);
+                                if (x >= 8 && x < 24 && y >= 1 && y < 9)
+                                        c = src[(y - 1) * 64 + (x - 8)];
+                                if (x >= 28 && x < 44 && y >= 2 && y < 10)
+                                {
+                                        unsigned int p = src[(y - 2) * 64 + (x - 28)];
+                                        c = (p & 0xff00ff00u) | ((p >> 16) & 0xffu) | ((p & 0xffu) << 16);
+                                }
+                                if (x >= 12 && x < 36 && y >= 4 && y < 14)
+                                        c = gpu_test_overv(c, src[(y - 4) * 64 + (x - 12)]);
+                                if (pic[y * W2 + x] != c)
+                                        ok = false;
+                        }
+                return ok ? gpu_set->hash : (gpu_set->hash ^ 2u);
+        }
         for (unsigned int i = 0; i < 32 * 16 + 14 * 14; i++)
                 seed = seed * 1664525u + 1013904223u, cover[i] = (p8)((seed >> 24) % 4 == 0 ? 0 : (seed >> 24) % 4 == 1 ? 255 : seed >> 16);
         for (unsigned int i = 0; i < 34 * 12; i++)
