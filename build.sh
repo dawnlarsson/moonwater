@@ -78,6 +78,11 @@ bootstrap_uid=$(/usr/bin/id -u 2>/dev/null || /bin/id -u) || exit 1
 if [ "$bootstrap_uid" = 0 ]; then
         PATH=/usr/sbin:/usr/bin:/sbin:/bin
         export PATH
+        umask 022
+        unset LD_PRELOAD LD_LIBRARY_PATH LD_AUDIT LD_CONFIG \
+                ENV BASH_ENV CDPATH IFS SHELLOPTS \
+                GCC_EXEC_PREFIX COMPILER_PATH CPATH C_INCLUDE_PATH \
+                LIBRARY_PATH CFLAGS LDFLAGS TMPDIR
 fi
 
 # Sourced and compiled by this file's own path rather than a relative one, so
@@ -117,6 +122,9 @@ if [ "$(uname)" = "Linux" ]; then
         # (-MMD), so an edit to a file the tool does not include costs nothing.
         tool_stale() {
                 for dep in $(sed -e 's/\\$//' -e 's/^[^:]*://' "$depfile"); do
+                        case "$dep" in
+                        -* | '!' | '(' | ')') return 0 ;;
+                        esac
                         [ -e "$dep" ] || return 0
                         [ -n "$(find "$dep" -newer "$tool" -print -quit)" ] && return 0
                 done
@@ -125,19 +133,23 @@ if [ "$(uname)" = "Linux" ]; then
 
         # Root does not exec a tool anyone else can write, whatever its
         # timestamp says: an old user-writable ./build with a future timestamp
-        # would otherwise run unchanged under sudo. Only a file root owns, and
-        # that no group or other can write, is taken as built.
+        # would otherwise run unchanged under sudo. Only a regular file root
+        # owns, and that no group or other can write, is taken as built (and
+        # its depfile must be root-owned and non-group/world-writable too).
         tool_untrusted() {
-                [ -n "$(find "$tool" \( ! -user 0 -o -perm -020 -o -perm -002 \) -print -quit)" ]
+                [ -L "$tool" ] || [ -L "$depfile" ] && return 0
+                [ -n "$(find "$tool" \( ! -user 0 -o -perm -020 -o -perm -002 \) -print -quit)" ] && return 0
+                [ -n "$(find "$depfile" \( ! -user 0 -o -perm -020 -o -perm -002 \) -print -quit)" ]
         }
 
-        if [ ! -x "$tool" ] || [ ! -f "$depfile" ] || tool_stale ||
-                { [ "$bootstrap_uid" = 0 ] && tool_untrusted; }; then
-                # Built beside it and renamed over, so a second build.sh
-                # started meanwhile runs the old tool or the new one and
-                # never a half-written file. clang has no nested functions,
-                # and scope_exit is its defer statement, which it takes when
-                # asked (src/lib.util.c).
+        if [ ! -x "$tool" ] || [ ! -f "$depfile" ] ||
+                { [ "$bootstrap_uid" = 0 ] && tool_untrusted; } || tool_stale; then
+                # Built in a private staging directory beside it and renamed
+                # over, so a second build.sh started meanwhile runs the old
+                # tool or the new one and never a half-written file, and a
+                # user-writable checkout cannot race predictable PID names.
+                # clang has no nested functions, and scope_exit is its defer
+                # statement, which it takes when asked (src/lib.util.c).
                 #       Probed, not assumed: some clang builds (Ubuntu's 19, for one) do not
                 #       take -fdefer-ts, and test/run probes the same way.
                 defer=
@@ -153,14 +165,20 @@ if [ "$(uname)" = "Linux" ]; then
                 case $(uname -sm) in
                 "Linux aarch64" | "Linux arm64") outline=-mno-outline-atomics ;;
                 esac
-                "$compiler" -O2 -static -nostdlib -nostartfiles $outline \
-                        -fno-stack-protector -fno-builtin -w $defer \
-                        -MMD -MT "$tool" -MF "$depfile.$$" \
-                        -o "$tool.$$" "$source" &&
-                        mv -f "$depfile.$$" "$depfile" &&
-                        mv -f "$tool.$$" "$tool" ||
+                tool_stage=$(mktemp -d "$here/.build-tool.XXXXXX") || {
+                        echo "build.sh: could not create staging directory" >&2
+                        exit 1
+                }
+                chmod 0700 "$tool_stage" &&
+                        "$compiler" -O2 -static -nostdlib -nostartfiles $outline \
+                                -fno-stack-protector -fno-builtin -w $defer \
+                                -MMD -MT "$tool" -MF "$tool_stage/build.d" \
+                                -o "$tool_stage/build" "$source" &&
+                        mv -f "$tool_stage/build.d" "$depfile" &&
+                        mv -f "$tool_stage/build" "$tool" &&
+                        rmdir "$tool_stage" ||
                         {
-                                rm -f "$tool.$$" "$depfile.$$"
+                                rm -rf "$tool_stage"
                                 echo "build.sh: could not build the build tool" >&2
                                 exit 1
                         }
@@ -1217,6 +1235,9 @@ if [ -n "$group_asked" ]; then
 fi
 if [ -s "$groups_dir/default" ]; then
         group_name=$(cat "$groups_dir/default")
+        case $group_name in
+        *[!A-Za-z0-9._-]* | "" | .* | -*) die "invalid link group name in $groups_dir/default" ;;
+        esac
         group_key=$groups_dir/$group_name.key
         [ -s "$group_key" ] || die "link group $group_name has no key at $group_key: --groupkey $group_name makes one, --groupkey none stops it"
 fi

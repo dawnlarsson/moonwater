@@ -120,6 +120,8 @@ static void flush(void)
 	while (o < on) {
 		i64 r = sys3(SYS_WRITE, 1, (i64)(ob + o), on - o);
 
+		if (r == -4)
+			continue;
 		if (r <= 0)
 			break;
 		o += (u32)r;
@@ -252,6 +254,8 @@ static u64 parse_num(const char *s)
 		else if (c >= 'A' && c <= 'F')
 			d = c - 'A' + 10;
 		else
+			break;
+		if (d >= base)
 			break;
 		v = v * base + d;
 	}
@@ -794,11 +798,11 @@ static void topology(void)
 	eu_stride = *(u16 *)(tb + 14);
 	{
 		/* every byte the loops read must lie inside the reply */
-		u32 L = (u32)it.length;
-		u32 need_sl = 16 + (max_slices + 7u) / 8;
-		u32 need_sub = max_slices ? 16 + subo + (u32)(max_slices - 1) * subs_stride + (max_subs + 7u) / 8 : 0;
-		u32 need_eu = (max_slices && max_subs)
-				  ? 16 + eu_off + ((u32)max_slices * max_subs - 1) * eu_stride + eu_stride
+		u64 L = (u64)(u32)it.length;
+		u64 need_sl = 16ull + ((u64)max_slices + 7ull) / 8ull;
+		u64 need_sub = max_slices ? 16ull + subo + (u64)(max_slices - 1) * subs_stride + ((u64)max_subs + 7ull) / 8ull : 0;
+		u64 need_eu = (max_slices && max_subs)
+				  ? 16ull + eu_off + (u64)max_slices * max_subs * eu_stride
 				  : 0;
 
 		if (L < 16 || need_sl > L || need_sub > L || need_eu > L) {
@@ -936,13 +940,13 @@ static int facts(void)
 	S(" bytes ");
 	D(it.length);
 	NL();
-	if (r < 0)
+	if (r < 0 || it.length < 16 || (u64)it.length > sizeof qbuf)
 		return 1;
 	n = *(u32 *)qbuf;
 	S("   engines ");
 	D(n);
 	NL();
-	for (u32 i = 0; i < n && 16 + (i + 1) * 56 <= sizeof qbuf; i++) {
+	for (u32 i = 0; i < n && 16ull + (u64)(i + 1) * 56ull <= (u64)(u32)it.length; i++) {
 		u8 *e = qbuf + 16 + i * 56;
 		u16 cls = *(u16 *)(e + 0), inst = *(u16 *)(e + 2), logical = *(u16 *)(e + 24);
 		u64 flags = *(u64 *)(e + 8), caps = *(u64 *)(e + 16);
@@ -1772,15 +1776,26 @@ static i32 probe_main(i32 argc, char **argv)
 			c.badlen = 1;
 		else if (streq(a, "--padmask"))
 			c.padmask = 1;
-		else if (streq(a, "--w")) { c.w = (u32)parse_num(v); i++; }
-		else if (streq(a, "--h")) { c.h = (u32)parse_num(v); i++; }
-		else if (streq(a, "--pitch")) { c.pitch = (u32)parse_num(v); i++; }
-		else if (streq(a, "--colour")) { c.colour = (u32)parse_num(v); i++; }
-		else if (streq(a, "--mocs")) { c.mocs = (u32)parse_num(v); i++; }
-		else if (streq(a, "--ggtt")) { c.ggtt = (u32)parse_num(v); i++; }
-		else if (streq(a, "--repeat")) { c.repeat = (u32)parse_num(v); i++; }
-		else if (streq(a, "--kern")) { c.kern = (u32)parse_num(v); kern_given = 1; i++; }
-		else if (streq(a, "--base")) { addr_bias = parse_num(v); base_given = 1; i++; }
+		else if (streq(a, "--w") || streq(a, "--h") || streq(a, "--pitch") || streq(a, "--colour") ||
+			 streq(a, "--mocs") || streq(a, "--ggtt") || streq(a, "--repeat") || streq(a, "--kern") ||
+			 streq(a, "--base")) {
+			if (i + 1 >= argc) {
+				S("missing value for ");
+				S(a);
+				NL();
+				return 2;
+			}
+			v = argv[++i];
+			if (streq(a, "--w")) c.w = (u32)parse_num(v);
+			else if (streq(a, "--h")) c.h = (u32)parse_num(v);
+			else if (streq(a, "--pitch")) c.pitch = (u32)parse_num(v);
+			else if (streq(a, "--colour")) c.colour = (u32)parse_num(v);
+			else if (streq(a, "--mocs")) c.mocs = (u32)parse_num(v);
+			else if (streq(a, "--ggtt")) c.ggtt = (u32)parse_num(v);
+			else if (streq(a, "--repeat")) c.repeat = (u32)parse_num(v);
+			else if (streq(a, "--kern")) { c.kern = (u32)parse_num(v); kern_given = 1; }
+			else if (streq(a, "--base")) { addr_bias = parse_num(v); base_given = 1; }
+		}
 		else if (streq(a, "--secure")) exec_secure = 1;
 		else if (streq(a, "--mi-store")) mi_store7 = 1;
 		else {
