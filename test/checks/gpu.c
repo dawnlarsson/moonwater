@@ -6773,7 +6773,7 @@ b32 main(void)
                                 pic[i] = 0;
                         const struct compositor_frame *drawn = frames;
 
-                        check("gpu frames: the landings are scaled by the card into pictures of their own size", compositor_gpu_scale_frames(&drawn, (unsigned int)count) == COMPOSITOR_GPU_WHY_DRAWN);
+                        check("gpu frames: the landings are scaled by the card into pictures of their own size", compositor_gpu_scale_frames(&drawn, (unsigned int)count, 0, 0) == COMPOSITOR_GPU_WHY_DRAWN);
                         b32 framed = compositor_gpu_frames(drawn, (unsigned int)count, ground);
 
                         if (!framed)

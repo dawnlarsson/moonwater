@@ -4222,7 +4222,7 @@ static void check_notices_dot(void)
                                 const struct ui_node address_to n = &notices.menu.tree.node[item->node];
                                 unsigned int word = ui_popmenu_tone(&notices.ui, item->flags, hot == k, UI_READABLE);
                                 unsigned int mark = ui_popmenu_tone(&notices.ui, item->flags, hot == k, UI_MENU_SEEN);
-                                unsigned int ground = notices.ui.ground, well = ui_popmenu_hot_fill(&notices.ui), cover = well >> 24;
+                                unsigned int ground = notices.ui.ground, well = ui_kit_lit(&notices.ui), cover = well >> 24;
                                 unsigned int under = hot == k ? window_mix(ground, well & 0xffffffu, cover + (cover >> 7)) : ground;
                                 int cx = n->x + ui_dev(&notices.ui, UI_MENU_PAD + 15), cy = n->y + n->h / 2, inked = 0;
 

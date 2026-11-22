@@ -4602,15 +4602,20 @@ static void check_taskbar_text(string_address face_path)
 }
 
 /*
-        A row of the log for a wallpaper made cold (ui_moon_night): its wall time and its CPU time (every thread's), and each stage's
-        (ui_moon_stage_wall and ui_moon_stage_cpu): the sky, the surface's grid, the disc, the craters and the rest.
+        A row of the log for a wallpaper made cold (ui_moon_night): its wall time and its CPU time (every thread's), and the stage counters went with e7537a598.
 */
 static void wallpaper_bench_row(int width, int height, const char address_to look, positive wall, positive cpu)
 {
-    string_format(log, "  wallpaper bench: %p by %p %s cold in %p ms, %p ms of CPU; the sky %p ms (%p of CPU), the grid %p (%p), the disc %p (%p), the craters %p (%p)\n",
-                  (positive)width, (positive)height, (string_address)look, wall / 1000000, cpu / 1000000, ui_moon_stage_wall[0] / 1000000,
-                  ui_moon_stage_cpu[0] / 1000000, ui_moon_stage_wall[1] / 1000000, ui_moon_stage_cpu[1] / 1000000, ui_moon_stage_wall[2] / 1000000,
-                  ui_moon_stage_cpu[2] / 1000000, ui_moon_stage_wall[3] / 1000000, ui_moon_stage_cpu[3] / 1000000);
+    string_format(log, "  wallpaper bench: %p by %p %s cold in %p ms, %p ms of CPU\n",
+                  (positive)width, (positive)height, (string_address)look, wall / 1000000, cpu / 1000000);
+}
+
+// The wall and CPU clocks of a bench row (ui_moon_stage_clock was this, before e7537a598 removed the moon's stage counters).
+static void wallpaper_clock(positive at[2])
+{
+        timespec cpu = {0, 0};
+        clock_gettime(2, address_of cpu); // CLOCK_PROCESS_CPUTIME_ID
+        at[0] = clock_monotonic_nanoseconds(), at[1] = (positive)cpu.tv_sec * 1000000000ull + (positive)cpu.tv_nsec;
 }
 
 /*
@@ -4697,9 +4702,9 @@ static void check_moon_bench(void)
 
             memory_zero(&ui, sizeof(ui));
             ui.pixels = wall, ui.pitch = (unsigned long)sizes[k][0], ui.width = sizes[k][0], ui.height = sizes[k][1], ui.bottom = sizes[k][1], ui.scale = 100;
-            ui_moon_stage_clock(at);
+            wallpaper_clock(at);
             ui_moon_night(&ui, 0, sizes[k][2] ? UI_MOON_PAPER_DARK | UI_MOON_PAPER_STARS | UI_MOON_PAPER_DIM : 0, 0x5b7fa6u, 1, 0);
-            ui_moon_stage_clock(then);
+            wallpaper_clock(then);
             wallpaper_bench_row(sizes[k][0], sizes[k][1], sizes[k][2] ? "dark and dimmed" : "light", then[0] - at[0], then[1] - at[1]);
         }
     }
@@ -4755,9 +4760,9 @@ static void wallpaper_bench(string_address into)
         memory_zero(&ui, sizeof(ui));
         ui.pixels = wall, ui.pitch = (unsigned long)looks[k].width, ui.width = looks[k].width, ui.height = looks[k].height, ui.bottom = looks[k].height,
         ui.scale = 100;
-        ui_moon_stage_clock(at);
+        wallpaper_clock(at);
         ui_moon_night(&ui, 0, looks[k].options, 0x5b7fa6u, 1, 0);
-        ui_moon_stage_clock(then);
+        wallpaper_clock(then);
         wallpaper_bench_row(looks[k].width, looks[k].height, looks[k].name, then[0] - at[0], then[1] - at[1]);
         if (!into[0])
             continue;
