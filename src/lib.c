@@ -73097,7 +73097,7 @@ __asm__(
     //      compare and a narrowing shift, so the first chunk's bytes before the source
     //      are shifted out and the terminator is found with rbit and clz.
     ASM_FUNC(string_copy_bounded_3_16)
-    "cmp x2, #17\n   b.hi string_copy_bounded\n"
+    "cmp x2, #17\n   b.ls 9f\n   b string_copy_bounded\n9:\n"
     "mov x15, x0\n   and x3, x1, #15\n   bic x4, x1, #15\n   movi v1.16b, #0\n   ldr q0, [x4]\n   cmeq v0.16b, v0.16b, v1.16b\n   shrn v0.8b, v0.8h, #4\n   fmov x5, d0\n"
     "lsl x6, x3, #2\n   lsr x5, x5, x6\n   mov x7, #0\n   cbnz x5, 2f\n   mov x7, #16\n   sub x7, x7, x3\n"
     "1:  add x4, x4, #16\n   ldr q0, [x4]\n   cmeq v0.16b, v0.16b, v1.16b\n   shrn v0.8b, v0.8h, #4\n   fmov x5, d0\n   cbnz x5, 2f\n"
