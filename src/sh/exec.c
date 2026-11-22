@@ -11570,6 +11570,8 @@ static bool exec_compound_put(string_address name, positive name_length,
         the running subscript to just after where it landed, which is what
         makes a=(x [5]=w y) put y at six.
 */
+static positive exec_compound_depth;
+
 COLD bool shell_compound_assign(string_address name, positive name_length,
                            string_address body, positive body_length,
                            bool append)
@@ -11577,11 +11579,39 @@ COLD bool shell_compound_assign(string_address name, positive name_length,
         shell_mark held = shell_store_mark(address_of exec_store);
         const_string resolved_name;
         positive resolved_length;
+        bool preparing = exec_compound_preparing;
+        bool prepared_keyed = exec_compound_prepared_keyed;
+        bool nested = exec_compound_depth > 0;
+        string_address address_to held_word = exec_compound_word;
+        positive held_word_room = exec_compound_room;
+        string_address held_piece = exec_compound_piece;
         bool keyed;
         string_address at = body;
         string_address stop = body + body_length;
         positive next = 0;
         bool answer = true;
+
+        exec_compound_preparing = false;
+        exec_compound_depth++;
+        if (nested)
+        {
+                exec_compound_word = null;
+                exec_compound_room = 0;
+        }
+        scope_exit({
+                if (nested)
+                {
+                        if (exec_compound_word)
+                                memory_free(exec_compound_word,
+                                            exec_compound_room *
+                                                sizeof(exec_compound_word[0]));
+                        exec_compound_word = held_word;
+                        exec_compound_room = held_word_room;
+                }
+                exec_compound_piece = held_piece;
+                exec_compound_preparing = preparing;
+                exec_compound_depth--;
+        });
 
         //      A nameref that names nothing is not one for a list: bash says
         //      so, drops the attribute and makes the name an array.
@@ -11606,12 +11636,12 @@ COLD bool shell_compound_assign(string_address name, positive name_length,
 
         name = (string_address)resolved_name;
         name_length = resolved_length;
-        keyed = exec_compound_preparing
-                    ? exec_compound_prepared_keyed
+        keyed = preparing
+                    ? prepared_keyed
                     : (shell_array_attributes(name, name_length) &
                        SHELL_ARRAY_ASSOCIATIVE) != 0;
 
-        if (!exec_compound_preparing &&
+        if (!preparing &&
             !shell_variable_attribute_set(
                 name, name_length,
                 (p8)((keyed ? SHELL_ARRAY_ASSOCIATIVE : SHELL_ARRAY_INDEXED) |
@@ -11647,7 +11677,7 @@ COLD bool shell_compound_assign(string_address name, positive name_length,
                 The body is followed by its ')' and the word's end, so the
                 span can stop at the terminator.
         */
-        bool direct = !exec_compound_preparing && !keyed && !first &&
+        bool direct = !preparing && !keyed && !first &&
                       string_span_without_set(at, "$`[~*?(") >=
                           body_length;
 
@@ -11880,7 +11910,7 @@ COLD bool shell_compound_assign(string_address name, positive name_length,
                 }
         }
 
-        if (exec_compound_preparing)
+        if (preparing)
         {
                 exec_compound_prepared = answer ? first : null;
                 exec_compound_prepared_body = answer ? body : null;

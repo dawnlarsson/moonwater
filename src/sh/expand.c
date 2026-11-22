@@ -4654,10 +4654,52 @@ static HOT bool arith_increment_fast(bipolar address_to value)
         return true;
 }
 
+static positive arith_eval_depth;
+
 static bipolar arith_evaluate(string_address text)
 {
         bipolar value;
         bool held_nounset = arith_nounset;
+        bool nested = arith_eval_depth > 0;
+        string_address held_at = arith_at;
+        string_address held_origin = arith_origin;
+        bool held_active = arith_active;
+        bool held_is_lvalue = arith_is_lvalue;
+        expand_reference held_ref = arith_held;
+        bipolar held_val = arith_held_value;
+        p8 address_to held_name = arith_held_name;
+        positive held_name_room = arith_held_name_room;
+        p8 address_to held_key = arith_held_key;
+        positive held_key_room = arith_held_key_room;
+
+        arith_eval_depth++;
+        if (nested)
+        {
+                arith_held_name = null;
+                arith_held_name_room = 0;
+                arith_held_key = null;
+                arith_held_key_room = 0;
+        }
+        scope_exit({
+                if (nested)
+                {
+                        if (arith_held_name)
+                                memory_free(arith_held_name, arith_held_name_room);
+                        if (arith_held_key)
+                                memory_free(arith_held_key, arith_held_key_room);
+                        arith_at = held_at;
+                        arith_origin = held_origin;
+                        arith_active = held_active;
+                        arith_is_lvalue = held_is_lvalue;
+                        arith_held = held_ref;
+                        arith_held_value = held_val;
+                        arith_held_name = held_name;
+                        arith_held_name_room = held_name_room;
+                        arith_held_key = held_key;
+                        arith_held_key_room = held_key_room;
+                }
+                arith_eval_depth--;
+        });
 
         arith_bad = false;
         arith_unset = false;

@@ -310,6 +310,31 @@ def test_shell_runtime(shell_bin, bash_bin, workdir):
         f"rc={r.returncode} out={r.stdout!r} err={r.stderr!r}",
     )
 
+    # 15. Reentrant arith_evaluate via array subscript + in-process ${ ...; } (CWE-416)
+    r = run_bash(
+        bash_bin,
+        'a=(10 20 30); echo $(( a[${ echo $(( 1 + 1 )); }] + 5 ))',
+    )
+    check(
+        "CWE-416: reentrant arith_evaluate via subscript ${ $((...)) }",
+        r.returncode == 0 and r.stdout.strip() == "35",
+        f"rc={r.returncode} out={r.stdout!r} err={r.stderr!r}",
+    )
+
+    # 16. Nested compound array assignment inside local a=( "${ b=(...); }" ) (CWE-416)
+    r = run_bash(
+        bash_bin,
+        (
+            'f() { local a=( first "${ b=(x y); echo mid; }" last ); '
+            'printf "%s:%s\\n" "${a[*]}" "${b[*]}"; }; f'
+        ),
+    )
+    check(
+        "CWE-416: nested compound array assignment inside local a=( ... )",
+        r.returncode == 0 and r.stdout.strip() == "first mid last:x y",
+        f"rc={r.returncode} out={r.stdout!r} err={r.stderr!r}",
+    )
+
 
 def test_static_invariants():
     print("\n== Kernel / Crypto / Device O_NOFOLLOW / UI Static Invariants ==")
