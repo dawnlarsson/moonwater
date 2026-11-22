@@ -19,6 +19,10 @@
 #define COMPOSITOR_XWM_SETUP_NS 5000000000ull
 #define COMPOSITOR_XWM_TARGETS_MOST 64
 #define COMPOSITOR_XWM_ATOMS_MAX 2048
+#define COMPOSITOR_XWM_WINDOWS_MAX 4096
+#define COMPOSITOR_XWM_PENDING_MAX 8192u
+#define COMPOSITOR_XWM_IN_MAX 64
+#define COMPOSITOR_XWM_OUT_MAX 64
 #define COMPOSITOR_XWM_LIST_MAX 1024 /* TARGETS and MULTIPLE lists, in entries: the stack holds them, so they are not 64 KiB */
 #define COMPOSITOR_XWM_BIND_NS 15000000000ull
 #define COMPOSITOR_XWM_AF_SUP 1u
@@ -221,7 +225,7 @@ struct compositor_xwm
         unsigned int xtest, xres, resource_base, resource_mask, root, seq, atoms[COMPOSITOR_XWM_ATOMS];
         unsigned int atoms_seen, refused, errors, last_stack_gen, focus_window;
         unsigned int pending_at, pending_count, pending_room, xfixes_opcode, xfixes_event, setting, next_requestor;
-        long client, client_pid, in_len, out_len, windows, atoms_indexed, name_bytes;
+        long client, client_pid, in_len, out_len, windows, atoms_indexed, name_bytes, in_count, out_count;
         positive since;
         unsigned char in[COMPOSITOR_XWM_IN], out[COMPOSITOR_XWM_OUT];
         struct wayland_table window_table, window_index, pending_table;
@@ -587,6 +591,10 @@ static int compositor_xwm_pending_grow(struct compositor_xwm *x)
         struct wayland_table grown = {0, sizeof(struct compositor_xwm_pending), 0, 0, 0, 0, 0, 0, 0, 0};
         struct compositor_xwm_pending *to;
 
+        if (x->pending_room >= COMPOSITOR_XWM_PENDING_MAX)
+                return 0;
+        if (room > COMPOSITOR_XWM_PENDING_MAX)
+                room = COMPOSITOR_XWM_PENDING_MAX;
         wayland_tables_host(&compositor_wl_host);
         if (!wayland_table_reach(&grown, room))
                 return 0;
@@ -790,10 +798,13 @@ static void compositor_xwm_tray_icon_set(struct compositor_xwm *x, unsigned int 
 
         while (at + 8 <= len)
         {
-                unsigned long w = xwm_get32(val + at), h = xwm_get32(val + at + 4), need = w * h * 4;
+                unsigned long w = xwm_get32(val + at), h = xwm_get32(val + at + 4), need;
 
                 at += 8;
-                if (!w || !h || w > 512 || h > 512 || need > len - at)
+                if (!w || !h || w > 512 || h > 512)
+                        break;
+                need = w * h * 4;
+                if (need > len - at)
                         break;
                 if (!best_w || (w >= TASKBAR_TRAY_ITEM_PX && w < best_w) || (best_w < TASKBAR_TRAY_ITEM_PX && w > best_w))
                         best_w = w, best_h = h, best_off = at;
@@ -1097,7 +1108,8 @@ HOT static struct compositor_xwm_window *xwm_find(struct compositor_xwm *x, unsi
                 return &x->window[slot];
         if (!add)
                 return 0;
-        if (!canvas_htab_grow(&x->window_index, &x->window_table, x->windows, -1, 0) ||
+        if (x->windows >= COMPOSITOR_XWM_WINDOWS_MAX ||
+            !canvas_htab_grow(&x->window_index, &x->window_table, x->windows, -1, 0) ||
             (slot = xwm_tbl_take(&x->window_table, sizeof(struct compositor_xwm_window))) < 0)
                 return x->refused++, compositor_xwm_counted[1]++, (struct compositor_xwm_window *)0;
         x->window = (struct compositor_xwm_window *)x->window_table.at;
@@ -1632,10 +1644,11 @@ static long compositor_xwm_in_new(struct compositor_xwm *x, int which, unsigned 
         unsigned char req[48];
         unsigned int ev_mask = XWM_MASK_PROPERTY_CHANGE;
         struct compositor_xwm_in *in;
-        long at = xwm_tbl_take(&x->in_table, sizeof(struct compositor_xwm_in));
+        long at;
 
-        if (at < 0)
+        if (x->in_count >= COMPOSITOR_XWM_IN_MAX || (at = xwm_tbl_take(&x->in_table, sizeof(struct compositor_xwm_in))) < 0)
                 return -1;
+        x->in_count++;
         x->ins = (struct compositor_xwm_in *)x->in_table.at;
         in = &x->ins[at];
         memory_zero(in, sizeof *in);
@@ -1685,6 +1698,8 @@ static void compositor_xwm_in_free(struct compositor_xwm *x, long at)
                 if (x->sel[which].reading == at)
                         x->sel[which].reading = -1;
         in->window = 0;
+        if (x->in_count > 0)
+                x->in_count--;
         wayland_table_give(&x->in_table, at);
 }
 
@@ -1873,7 +1888,13 @@ static void compositor_xwm_in_reply(struct compositor_xwm *x, const unsigned cha
         else if (r.value_len && !compositor_xwm_in_write(in, r.value, r.value_len))
                 compositor_xwm_in_end(x, at, 0);
         else if (r.bytes_after)
-                in->offset += r.value_len / XWM_UNIT, compositor_xwm_in_ask(x, at);
+        {
+                if (r.value_len < XWM_UNIT || (r.value_len % XWM_UNIT) != 0 ||
+                    in->offset > 0xfffffffful - r.value_len / XWM_UNIT)
+                        compositor_xwm_in_end(x, at, 0);
+                else
+                        in->offset += r.value_len / XWM_UNIT, compositor_xwm_in_ask(x, at);
+        }
         else
         {
                 in->offset = 0;
@@ -1921,6 +1942,11 @@ static void compositor_xwm_receive(long client, long which, const char *mime, lo
         long pump, at;
 
         (void)client;
+        if (which < 0 || which > 2)
+        {
+                system_close((int)fd);
+                return;
+        }
         if (which != 2)
                 for (int s = 0; s < COMPOSITOR_XWM_SLOTS; s++)
                         if (compositor_xwm_slots[s].fd >= 0 && compositor_xwm_slots[s].ready && !compositor_xwm_slots[s].sel[which].owned &&
@@ -1967,10 +1993,13 @@ static void compositor_xwm_out_free(struct compositor_xwm *x, long at)
         if (o->fd >= 0)
                 system_close(o->fd);
         o->requestor = 0;
+        if (x->out_count > 0)
+                x->out_count--;
         wayland_table_give(&x->out_table, at);
 }
 
 static unsigned char compositor_xwm_piece[XWM_INCR_CHUNK];
+static unsigned char compositor_xwm_latin1_buf[XWM_INCR_CHUNK + 1];
 
 static unsigned long compositor_xwm_out_read(struct compositor_xwm_out *o, unsigned long count)
 {
@@ -1998,9 +2027,10 @@ static void compositor_xwm_out_step(struct compositor_xwm *x, long at)
                 if ((unsigned long)room < 32 + o->size)
                         return;
                 unsigned long got = compositor_xwm_out_read(o, o->size);
-                unsigned long put = o->latin1 ? xwm_utf8_latin1(&o->cut, compositor_xwm_piece, got, compositor_xwm_piece) : got;
+                const unsigned char *src = o->latin1 ? compositor_xwm_latin1_buf : compositor_xwm_piece;
+                unsigned long put = o->latin1 ? xwm_utf8_latin1(&o->cut, compositor_xwm_piece, got, compositor_xwm_latin1_buf) : got;
                 if (got == o->size)
-                        compositor_xwm_put(x, o->requestor, o->property, o->type, XWM_FORMAT_8, compositor_xwm_piece, put);
+                        compositor_xwm_put(x, o->requestor, o->property, o->type, XWM_FORMAT_8, src, put);
                 if (!o->quiet)
                         compositor_xwm_notify(x, o->time, o->requestor, o->selection, o->target, got == o->size ? o->property : 0);
                 compositor_xwm_out_free(x, at);
@@ -2019,7 +2049,11 @@ static void compositor_xwm_out_step(struct compositor_xwm *x, long at)
         }
         for (;;)
         {
-                unsigned long most = xwm_incr_piece(o->from == COMPOSITOR_XWM_FROM_FILE ? o->size - o->offset : XWM_INCR_CHUNK, (unsigned long)room), got, put;
+                unsigned long left = o->from == COMPOSITOR_XWM_FROM_FILE ? o->size - o->offset : XWM_INCR_CHUNK;
+                unsigned long most = xwm_incr_piece(left, (unsigned long)room), got, put;
+                const unsigned char *src;
+                if (o->latin1 && o->cut.need && most >= XWM_INCR_CHUNK)
+                        most = XWM_INCR_CHUNK - 1;
                 if (!most && (o->from == COMPOSITOR_XWM_FROM_PIPE || o->offset < o->size))
                         return;
                 if (o->from == COMPOSITOR_XWM_FROM_FILE)
@@ -2033,11 +2067,12 @@ static void compositor_xwm_out_step(struct compositor_xwm *x, long at)
                                 return;
                         got = n > 0 ? (unsigned long)n : 0;
                 }
-                put = o->latin1 ? xwm_utf8_latin1(&o->cut, compositor_xwm_piece, got, compositor_xwm_piece) : got;
+                o->offset += got;
+                src = o->latin1 ? compositor_xwm_latin1_buf : compositor_xwm_piece;
+                put = o->latin1 ? xwm_utf8_latin1(&o->cut, compositor_xwm_piece, got, compositor_xwm_latin1_buf) : got;
                 if (got && !put)
                         continue;
-                compositor_xwm_put(x, o->requestor, o->property, o->type, XWM_FORMAT_8, compositor_xwm_piece, put);
-                o->offset += got;
+                compositor_xwm_put(x, o->requestor, o->property, o->type, XWM_FORMAT_8, src, put);
                 if (!got)
                         compositor_xwm_out_free(x, at);
                 else
@@ -2157,7 +2192,7 @@ static long compositor_xwm_out_begin(struct compositor_xwm *x, const struct xwm_
         long at, pump_at = -1;
 
         compositor_xwm_out_gone(x, e->requestor, property);
-        if (!name || (which < 2 && !compositor_xwm_may_paste(x, e->requestor)))
+        if (!name || x->out_count >= COMPOSITOR_XWM_OUT_MAX || (which < 2 && !compositor_xwm_may_paste(x, e->requestor)))
                 return -1;
         if (which < 2)
         {
@@ -2185,6 +2220,7 @@ static long compositor_xwm_out_begin(struct compositor_xwm *x, const struct xwm_
         }
         if ((at = xwm_tbl_take(&x->out_table, sizeof(struct compositor_xwm_out))) < 0)
                 return system_close(fd), -1;
+        x->out_count++;
         x->outs = (struct compositor_xwm_out *)x->out_table.at;
         o = &x->outs[at];
         memory_zero(o, sizeof *o);
@@ -2201,13 +2237,14 @@ static long compositor_xwm_out_begin(struct compositor_xwm *x, const struct xwm_
 static void compositor_xwm_multiple(struct compositor_xwm *x, const struct xwm_event *e, int which, unsigned int property)
 {
         struct compositor_xwm_out *o;
-        long at = xwm_tbl_take(&x->out_table, sizeof(struct compositor_xwm_out));
+        long at;
 
-        if (at < 0)
+        if (x->out_count >= COMPOSITOR_XWM_OUT_MAX || (at = xwm_tbl_take(&x->out_table, sizeof(struct compositor_xwm_out))) < 0)
         {
                 compositor_xwm_notify(x, e->time, e->requestor, e->selection, e->target, 0);
                 return;
         }
+        x->out_count++;
         x->outs = (struct compositor_xwm_out *)x->out_table.at;
         o = &x->outs[at];
         memory_zero(o, sizeof *o);
@@ -2923,6 +2960,8 @@ static void xwm_event(struct compositor_xwm *x, const struct xwm_event *e)
         switch (e->kind)
         {
         case XWM_EV_MAP_REQUEST:
+                if (e->synthetic)
+                        break;
                 if (!(w = xwm_find(x, e->window, 1)))
                 {
                         compositor_xwm_counted[2]++;
@@ -2944,6 +2983,8 @@ static void xwm_event(struct compositor_xwm *x, const struct xwm_event *e)
                 struct xwm_configure c;
                 unsigned int prev_w, prev_h, mw = (unsigned int)compositor_most_width(), mh = (unsigned int)compositor_most_height();
 
+                if (e->synthetic)
+                        break;
                 w = xwm_find(x, e->window, 0);
                 int prev_x = w ? w->x : 0, prev_y = w ? w->y : 0;
                 prev_w = w ? w->width : 0, prev_h = w ? w->height : 0;
@@ -3002,7 +3043,7 @@ static void xwm_event(struct compositor_xwm *x, const struct xwm_event *e)
                 break;
         }
         case XWM_EV_CREATE_NOTIFY:
-                if (!(w = xwm_find(x, e->window, 1)))
+                if (e->synthetic || !(w = xwm_find(x, e->window, 1)))
                         break;
                 if (e->override)
                         w->state |= COMPOSITOR_XWM_OVERRIDE;
@@ -3014,7 +3055,7 @@ static void xwm_event(struct compositor_xwm *x, const struct xwm_event *e)
                 w->x = e->x, w->y = e->y, w->width = e->width, w->height = e->height;
                 break;
         case XWM_EV_MAP_NOTIFY:
-                if ((w = xwm_find(x, e->window, 0)) && e->override)
+                if (!e->synthetic && (w = xwm_find(x, e->window, 0)) && e->override)
                         w->state |= COMPOSITOR_XWM_OVERRIDE, compositor_xwm_allow_commits(x, e->window);
                 break;
         case XWM_EV_CONFIGURE_NOTIFY:
@@ -3032,7 +3073,7 @@ static void xwm_event(struct compositor_xwm *x, const struct xwm_event *e)
                 }
                 break;
         case XWM_EV_PROPERTY_NOTIFY:
-                if (compositor_xwm_in_property(x, e))
+                if (e->synthetic || compositor_xwm_in_property(x, e))
                         break;
                 compositor_xwm_out_property(x, e);
                 if (!(w = xwm_find(x, e->window, 0)))
@@ -3056,15 +3097,20 @@ static void xwm_event(struct compositor_xwm *x, const struct xwm_event *e)
                 }
                 break;
         case XWM_EV_DESTROY_NOTIFY:
+                if (e->synthetic)
+                        break;
                 compositor_xwm_tray_undock(x, e->window);
                 compositor_xwm_wdrag_gone(x, e->window);
                 compositor_xwm_out_gone(x, e->window, 0);
                 xwm_forget(x, e->window);
                 break;
-        case XWM_EV_SELECTION_REQUEST: compositor_xwm_selection_request(x, e); break;
+        case XWM_EV_SELECTION_REQUEST:
+                if (!e->synthetic)
+                        compositor_xwm_selection_request(x, e);
+                break;
         case XWM_EV_SELECTION_NOTIFY: compositor_xwm_in_notify(x, e); break;
         case XWM_EV_SELECTION_CLEAR:
-                if (e->owner == compositor_xwm_id(x, COMPOSITOR_XWM_SEL_WINDOW))
+                if (!e->synthetic && e->owner == compositor_xwm_id(x, COMPOSITOR_XWM_SEL_WINDOW))
                 {
                         int which = compositor_xwm_which(x, e->selection);
                         if (which >= 0 && which < 2)
@@ -3091,7 +3137,7 @@ static void xwm_event(struct compositor_xwm *x, const struct xwm_event *e)
                                 break;
                         }
                 }
-                if (e->atom == x->atoms[COMPOSITOR_XWM_A_SERIAL])
+                if (e->atom && e->format == XWM_FORMAT_32 && e->atom == x->atoms[COMPOSITOR_XWM_A_SERIAL])
                 {
                         unsigned long long serial = ((unsigned long long)e->data[1] << 32) | e->data[0];
                         if (!(w = xwm_find(x, e->window, 1)))
@@ -3101,7 +3147,7 @@ static void xwm_event(struct compositor_xwm *x, const struct xwm_event *e)
                         w->serial = serial, w->state |= COMPOSITOR_XWM_SERIAL;
                         compositor_xwm_resolve(x, w);
                 }
-                else if (e->atom == x->atoms[COMPOSITOR_XWM_A_NET_STATE] && (w = xwm_find(x, e->window, 0)))
+                else if (e->atom && e->format == XWM_FORMAT_32 && e->atom == x->atoms[COMPOSITOR_XWM_A_NET_STATE] && (w = xwm_find(x, e->window, 0)))
                 {
                         unsigned int bits = xwm_net_state_bits(x, e->data[1], e->data[2]), hidden = x->atoms[COMPOSITOR_XWM_A_HIDDEN];
                         unsigned int want_max = bits & COMPOSITOR_XWM_MAXIMIZED;
@@ -3157,7 +3203,7 @@ static void xwm_event(struct compositor_xwm *x, const struct xwm_event *e)
                 }
                 else if (e->atom && e->atom == x->atoms[COMPOSITOR_XWM_A_REQ_FRAME_EXTENTS])
                         compositor_xwm_frame_extents(x, e->window);
-                else if (e->atom == x->atoms[COMPOSITOR_XWM_A_NET_MOVERESIZE] && e->format == XWM_FORMAT_32)
+                else if (e->atom && e->atom == x->atoms[COMPOSITOR_XWM_A_NET_MOVERESIZE] && e->format == XWM_FORMAT_32)
                         compositor_xwm_moveresize(xwm_find(x, e->window, 0), e->data[2]);
                 else if (e->atom && e->atom == x->atoms[COMPOSITOR_XWM_A_NET_ACTIVE])
                 {
@@ -3242,7 +3288,7 @@ static void compositor_xwm_message(struct compositor_xwm *x, const unsigned char
                         unsigned int pid = 0;
                         if (xwm_parse_xres_client_pid(in, (unsigned long)size, &pid) != XWM_OK)
                                 x->broken = 1;
-                        else if (w && pid > 1 && pid != (unsigned int)x->peer_pid &&
+                        else if (w && pid > 1 && pid <= 0x7fffffffu && pid != (unsigned int)x->peer_pid &&
                                  pid != (unsigned int)compositor_call(syscall(getpid), 0, 0, 0, 0, 0, 0))
                                 w->owner = pid, compositor_xwm_owned(w);
                 }
@@ -3281,7 +3327,7 @@ static void compositor_xwm_message(struct compositor_xwm *x, const unsigned char
                 struct xwm_event e;
                 if (xwm_parse_xfixes_selection(in, (unsigned long)size, x->xfixes_event, &e) != XWM_OK)
                         x->broken = 1;
-                else
+                else if (!e.synthetic)
                         compositor_xwm_owner(x, &e);
         }
         else
@@ -3382,7 +3428,7 @@ static void compositor_xwm_close_rows(struct compositor_xwm *x)
         wayland_table_drop(&x->name_table);
         wayland_table_drop(&x->type_table);
         x->window = 0, x->pending = 0, x->pending_room = 0, x->windows = 0;
-        x->ins = 0, x->outs = 0, x->atom = 0, x->name_bytes = 0, x->atoms_indexed = 0;
+        x->ins = 0, x->outs = 0, x->atom = 0, x->name_bytes = 0, x->atoms_indexed = 0, x->in_count = 0, x->out_count = 0;
         for (int which = 0; which < 3; which++)
                 x->sel[which] = (struct compositor_xwm_selection){0, 0, 0, 0, 0, -1};
         x->xfixes_opcode = x->xfixes_event = x->setting = x->save.requestor = 0;
@@ -3616,7 +3662,7 @@ static void xwm_pass_one(struct compositor_xwm *x, const struct compositor_poll 
                         else
                         {
                                 compositor_xwm_window_op(x, XWM_OP_DESTROY_WINDOW, w->id);
-                                if (w->closes >= 2 && w->owner > 1)
+                                if (w->closes >= 2 && w->owner > 1 && w->owner <= 0x7fffffffu)
                                         compositor_call(syscall(kill), (positive)w->owner, w->closes >= 3 ? 9 : 15, 0, 0, 0, 0);
                         }
                 }

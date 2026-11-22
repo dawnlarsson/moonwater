@@ -956,10 +956,16 @@ XWM_API int xwm_target_kind(const unsigned char *name, unsigned long len)
                         return XWM_TARGET_UTF8;
         if (xwm_name_is(name, len, "STRING"))
                 return XWM_TARGET_LATIN1;
+        int slash = 0;
+
         for (unsigned long at = 0; at < len; at++)
-                if (name[at] == '/')
-                        return name[0] != '/' && at + 1 < len ? XWM_TARGET_MIME : XWM_TARGET_NONE;
-        return XWM_TARGET_NONE;
+        {
+                if (name[at] < 0x20 || name[at] >= 0x7f)
+                        return XWM_TARGET_NONE;
+                if (name[at] == '/' && at > 0 && at + 1 < len)
+                        slash = 1;
+        }
+        return slash ? XWM_TARGET_MIME : XWM_TARGET_NONE;
 }
 
 XWM_API long xwm_target_mime(const unsigned char *name, unsigned long len, unsigned char *out, unsigned long cap)
