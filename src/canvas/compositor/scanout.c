@@ -81,6 +81,8 @@ enum
         DRV_VIRTUAL         = 1u << 3,
         DRV_FIRMWARE        = 1u << 4,
         DRV_NO_CURSOR_PLANE = 1u << 5,
+        DRV_AMD             = 1u << 6,
+        DRV_INTEL           = 1u << 7,
 };
 
 // Whether the card's driver is one of count names (still used by wayland_host.c).
@@ -99,11 +101,11 @@ static unsigned int drm_driver_flags(const char *name)
                 const char *name;
                 unsigned int flags;
         } table[] = {
-                {"amdgpu",      DRV_NO_IMPORT_FB | DRV_APART_VRAM},
+                {"amdgpu",      DRV_NO_IMPORT_FB | DRV_APART_VRAM | DRV_AMD},
                 {"radeon",      DRV_APART_VRAM},
                 {"nouveau",     DRV_APART_VRAM},
-                {"i915",        DRV_NO_CURSOR_PLANE},
-                {"xe",          DRV_NO_CURSOR_PLANE},
+                {"i915",        DRV_NO_CURSOR_PLANE | DRV_INTEL},
+                {"xe",          DRV_NO_CURSOR_PLANE | DRV_INTEL},
                 {"bochs-drm",   DRV_APART_VRAM | DRV_VIRTUAL},
                 {"qxl",         DRV_APART_VRAM | DRV_VIRTUAL},
                 {"vmwgfx",      DRV_APART_VRAM | DRV_VIRTUAL},
@@ -129,7 +131,7 @@ static void compositor_window_fb_refused(unsigned int step, long error)
 {
         compositor.direct_refused = 1;
         compositor.table->refused = step;
-        compositor.table->refused_error = (drm_driver_flags(compositor.driver) & DRV_NO_IMPORT_FB) ? 0 : (unsigned int)-error;
+        compositor.table->refused_error = (compositor.driver_flags & DRV_NO_IMPORT_FB) ? 0 : (unsigned int)-error;
 }
 
 // The framebuffer of a row's buffer, made the first time it is asked for; 0 when the table is not a memfd or udmabuf
@@ -571,9 +573,12 @@ static inline int compositor_wl_jit_row(void)
 static positive compositor_present_lead(void); // after the metric rings it reads (compositor_metric_note)
 static void compositor_flip_done(void)
 {
-        compositor_record_vblank(clock_monotonic_nanoseconds());
-        compositor_keytrace_shown(compositor.flip_stamped ? compositor.flip_when : clock_monotonic_nanoseconds());
-        compositor_frametrace_note('V', -1, compositor.flip_stamped ? compositor.flip_when : clock_monotonic_nanoseconds());
+        positive now = clock_monotonic_nanoseconds();
+        positive stamped = compositor.flip_stamped && compositor.flip_when ? compositor.flip_when : now;
+
+        compositor_record_vblank(now);
+        compositor_keytrace_shown(stamped);
+        compositor_frametrace_note('V', -1, stamped);
         compositor.flip_pending = 0;
         compositor.flip_async = 0;
         compositor.leaving_row = -1;
@@ -603,8 +608,7 @@ static void compositor_flip_done(void)
         compositor_wl_flip_presented();
         if (compositor_wl_frame_owed)
         {
-                positive now = clock_monotonic_nanoseconds();
-                positive vblank = compositor.flip_stamped && compositor.flip_when ? compositor.flip_when : now;
+                positive vblank = stamped;
                 int jit = compositor_wl_jit_row();
                 positive lead = compositor_present_lead();
                 // Direct-scanout games flip in ~25 us (no GPU compose), so a 0.6 ms safety margin suffices vs 1.0 ms + lead when GPU-composed.
@@ -1284,7 +1288,7 @@ static void compositor_apart_drop(void)
 */
 static int compositor_copies_damage(void)
 {
-        return compositor.card >= 0 && (drm_driver_flags(compositor.driver) & DRV_COPIES_DAMAGE) != 0;
+        return compositor.card >= 0 && (compositor.driver_flags & DRV_COPIES_DAMAGE) != 0;
 }
 
 static int compositor_modesetting; // 1 while painting the initial buffer before COMPOSITOR_SETCRTC (skip spare-plate swap & page-flip)
@@ -1310,7 +1314,7 @@ static int compositor_changed_ready(void)
         compositor.changed_turned = turned;
         if (compositor.card < 0)
                 return 0;
-        flags = drm_driver_flags(compositor.driver);
+        flags = compositor.driver_flags;
         own = (flags & DRV_APART_VRAM) != 0;
         listed = own || (flags & DRV_COPIES_DAMAGE) != 0;
         // A screen Canvas turns reads the scene whole, a frame at a time, and a read of the card's memory is more than a
@@ -1814,14 +1818,20 @@ static int compositor_rotate_commit(const struct compositor_output *output, cons
         refuses it.
 */
 // Hardware primary-plane scaling commit for undersized fullscreen games (SRC_W/H -> centered CRTC_X/Y/W/H), or 1:1 restore.
+static struct { int geom[6], card; unsigned int primary, crtc; } compositor_scaled_state = {.card = -1};
+static void compositor_scaled_reset(void) { compositor.scaled_direct = 0; compositor_scaled_state.card = -1; }
+
 static int compositor_atomic_primary(unsigned int fb, int row, unsigned int which, int src_w, int src_h, int dx, int dy, int dw, int dh)
 {
-        static int last_geom[6];
         struct drm_atomic_req req = {0};
         int scaled = (src_w != dw || src_h != dh || dx != 0 || dy != 0);
         int same_geom = compositor.scaled_direct && scaled && !compositor.overlay_on &&
-                        last_geom[0] == src_w && last_geom[1] == src_h && last_geom[2] == dx &&
-                        last_geom[3] == dy && last_geom[4] == dw && last_geom[5] == dh;
+                        compositor_scaled_state.card == compositor.card &&
+                        compositor_scaled_state.primary == compositor.primary &&
+                        compositor_scaled_state.crtc == compositor.crtc &&
+                        compositor_scaled_state.geom[0] == src_w && compositor_scaled_state.geom[1] == src_h &&
+                        compositor_scaled_state.geom[2] == dx && compositor_scaled_state.geom[3] == dy &&
+                        compositor_scaled_state.geom[4] == dw && compositor_scaled_state.geom[5] == dh;
         int want_async = same_geom && row >= 0 && compositor_wl_row_async(row);
         int async = 0;
 
@@ -1847,7 +1857,16 @@ static int compositor_atomic_primary(unsigned int fb, int row, unsigned int whic
         compositor_flip_arm(fb, row, which, async);
         compositor.scaled_direct = scaled;
         if (scaled)
-                last_geom[0] = src_w, last_geom[1] = src_h, last_geom[2] = dx, last_geom[3] = dy, last_geom[4] = dw, last_geom[5] = dh;
+        {
+                compositor_scaled_state.card = compositor.card;
+                compositor_scaled_state.primary = compositor.primary;
+                compositor_scaled_state.crtc = compositor.crtc;
+                compositor_scaled_state.geom[0] = src_w, compositor_scaled_state.geom[1] = src_h;
+                compositor_scaled_state.geom[2] = dx, compositor_scaled_state.geom[3] = dy;
+                compositor_scaled_state.geom[4] = dw, compositor_scaled_state.geom[5] = dh;
+        }
+        else
+                compositor_scaled_state.card = -1;
         if (req.obj_count == 2)
                 compositor.overlay_on = 0, compositor.plane_fb = 0;
         return 1;
@@ -1881,7 +1900,7 @@ static int compositor_atomic_to(unsigned int fb, int row, unsigned int which, in
         if (drm_atomic_commit(&req, COMPOSITOR_FLIP_EVENT | COMPOSITOR_ATOMIC_NONBLOCK, ++compositor.flip_serial) != 0)
                 return 0;
         compositor_flip_arm(fb, row, which, 0);
-        compositor.scaled_direct = 0;
+        compositor_scaled_reset();
         if (overlay)
         {
                 compositor.overlay_on = rect != 0;

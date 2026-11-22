@@ -1006,9 +1006,14 @@ static unsigned int gpu_i915_window(unsigned int family, positive *va, positive 
 
 static const struct gpu_set *gpu_i915_set(unsigned int family)
 {
+        // Require Full PPGTT (ppgtt >= 2, Gen8+): on Aliasing PPGTT (Gen7/7.5 IVB/VLV/HSW), KMS display scanout BOs
+        // are pinned in the single shared GGTT, so softpinning (EXEC_OBJECT_PINNED) an imported scanout BO livelocks
+        // i915_gem_execbuffer2_ioctl (eb_reserve) at 100% kernel CPU.
+        if (gpu_i915.ppgtt < 2 || !gpu_i915.softpin || !gpu_i915.no_reloc)
+                return 0;
         for (unsigned int i = 0; gpu_i915_sets[i].set; i++)
                 if (family >= gpu_i915_sets[i].from && family <= gpu_i915_sets[i].to)
-                        return gpu_i915.softpin && gpu_i915.no_reloc ? gpu_i915_sets[i].set : 0;
+                        return gpu_i915_sets[i].set;
         return 0;
 }
 
@@ -1154,14 +1159,21 @@ static unsigned int gpu_i915_user(positive from, positive bytes, unsigned int ho
         return e;
 }
 
-static unsigned int gpu_submit_serial;
 static unsigned int gpu_i915_submit(const struct gpu_job *job, p64 *bos, unsigned int named, positive *sequence)
 {
+        static unsigned int dedup_serial;
         const positive wide = GPU_VA_END > (1ull << 32) ? GPU_I915_WIDE : 0;
         struct gpu_i915_exec run = {0, 0, 0, 0, 0, 0, 0, 0, GPU_I915_RUN, 0, 0};
         unsigned int words, n = 0, e, slot;
 
         *sequence = 0;
+        if (!++dedup_serial)
+        {
+                if (gpu_i915.bound)
+                        for (unsigned int i = 0; i < GPU_I915_HANDLES; i++)
+                                gpu_i915.bound[i].seen_serial = 0;
+                dedup_serial = 1;
+        }
         if (!gpu_set || !gpu_set->batch)
                 return 95;
         words = gpu_set->batch(job, job->packets_at, GPU_PACKETS / 4);
@@ -1181,13 +1193,13 @@ static unsigned int gpu_i915_submit(const struct gpu_job *job, p64 *bos, unsigne
                         return 2; // a buffer the table never bound: it has no address to be pinned at
                 if (handle == gpu_i915.main)
                         continue;
-                if (gpu_i915.bound[handle].seen_serial == gpu_submit_serial)
+                if (gpu_i915.bound[handle].seen_serial == dedup_serial)
                 {
                         if (gpu_i915.bound[handle].written)
                                 gpu_i915.objects[gpu_i915.bound[handle].seen_idx].flags |= GPU_I915_WRITTEN;
                         continue;
                 }
-                gpu_i915.bound[handle].seen_serial = gpu_submit_serial, gpu_i915.bound[handle].seen_idx = n;
+                gpu_i915.bound[handle].seen_serial = dedup_serial, gpu_i915.bound[handle].seen_idx = n;
                 gpu_i915.objects[n] = (struct gpu_i915_object){
                     .handle = handle,
                     .offset = gpu_i915.bound[handle].va,
@@ -2164,7 +2176,7 @@ static b32 gpu_start(positive bytes)
         else
         {
                 int pick = gpu_pick(candidate_bus, candidates, gpu_display, &gpu_req.pick);
-                int kept_fd = gpu_shared.fd;
+                int kept_fd = gpu_shared.fd, any_broken = 0;
                 unsigned char *kept_at = gpu_shared.at;
                 positive kept_bytes = gpu_shared.bytes;
                 void (*kept_pin)(positive offset, b32 on) = gpu_shared.pin;
@@ -2188,6 +2200,7 @@ static b32 gpu_start(positive bytes)
 
                         if (step > 0)
                         {
+                                any_broken |= gpu.broken;
                                 gpu_stop();
                                 gpu_shared.fd = kept_fd, gpu_shared.at = kept_at, gpu_shared.bytes = kept_bytes, gpu_shared.pin = kept_pin;
                                 memory_zero(&gpu_req, sizeof(gpu_req));
@@ -2364,6 +2377,7 @@ static b32 gpu_start(positive bytes)
                                 return true;
                         } while (0);
                 }
+                gpu.broken |= any_broken;
         }
         // Settled: no node of a driver this file has, or every one of them answered with a chip that has no kernel set. The same nodes answer the same.
         gpu_req.settled = gpu_req.first == GPU_REQ_DRIVER || (gpu_req.first == GPU_REQ_FAMILY && !candidates && !unasked);
@@ -2786,12 +2800,25 @@ static b32 gpu_map_try(const void *addr, positive size, b32 written)
 
         if (first && region.whole && region.base + (region.bytes & ~4095ull) >= to && !(region.base & 4095))
                 from = region.base, to = region.base + (region.bytes & ~4095ull), widened = (from != orig_from || to != orig_to);
+retry_slice:
         for (unsigned int i = 0; i < gpu_map_count; i++)
                 if ((written || gpu_maps[i].written) && from < gpu_maps[i].to && gpu_maps[i].from < to && gpu_maps[i].handed && gpu_maps[i].used == gpu_tick)
+                {
+                        if (widened)
+                        {
+                                from = orig_from, to = orig_to, widened = false;
+                                goto retry_slice;
+                        }
                         return gpu_map_why = 9, false;
+                }
         for (unsigned int i = 0; i < gpu_map_count; i++)
                 if ((written || gpu_maps[i].written) && from < gpu_maps[i].to && gpu_maps[i].from < to)
                 {
+                        if (widened)
+                        {
+                                from = orig_from, to = orig_to, widened = false;
+                                goto retry_slice;
+                        }
                         if (!gpu_idle())
                                 return gpu_map_why = 10, false;
                         gpu_drop(i--, GPU_GONE_OVERLAP);
@@ -2819,7 +2846,14 @@ static b32 gpu_map_try(const void *addr, positive size, b32 written)
         if (gpu_map_count == GPU_MAPS)
                 return gpu_map_why = 1, false;
         if (!(at = gpu_place_aligned(to - from, 4096, 0)))
+        {
+                if (widened)
+                {
+                        from = orig_from, to = orig_to, widened = false;
+                        goto retry_slice;
+                }
                 return gpu_map_why = 2, false;
+        }
         if (first && gpu_map_dmabuf(&region, from, to, at, written))
                 return true;
         if (widened)
@@ -2995,9 +3029,10 @@ static positive gpu_import_again(unsigned int i, positive bytes)
 static positive gpu_import_at(unsigned int handle, positive bytes)
 {
         positive whole = (bytes + 4095) & ~4095ull, at;
+        positive align = gpu_set == &gpu_amd_rdna3 ? 262144ull : GPU_IMPORT_ALIGN;
 
         // Room for one more import: the table grown (the memory refuses, and the import is refused as a full table's was).
-        at = gpu_imports_room(gpu.imports + 1) ? gpu_place_aligned(whole, GPU_IMPORT_ALIGN, GPU_IMPORT_GUARD) : 0;
+        at = gpu_imports_room(gpu.imports + 1) ? gpu_place_aligned(whole, align, GPU_IMPORT_GUARD) : 0;
         if (!at || gpu_backend->bind(handle, at, whole, true) != 0)
                 return gpu_close(handle), 0;
         gpu.imported_va[gpu.imports] = at, gpu.imported_bytes[gpu.imports] = whole, gpu.imported_dead[gpu.imports] = 0, gpu.imported_holds[gpu.imports] = 1;
@@ -4109,6 +4144,7 @@ static void gpu_place_elsewhere(void)
         errno; gpu_lost when the card lost its state, the caller recovers). The job is then the pending one, the one pending before it gpu_before: two at most,
         one in each slot. Its deadline is GPU_HANG_NS on (gpu_late_end).
 */
+static void gpu_submit_alarm(int sig) { (void)sig; }
 HOT static positive gpu_submit(void)
 {
         const unsigned int which = GPU_KERNEL_OF(GPU_ARGS->op), lanes = gpu_backend->lanes;
@@ -4148,9 +4184,30 @@ HOT static positive gpu_submit(void)
                                 bos[named++] = gpu_maps[i].handle, gpu_maps[i].listed = gpu_submit_serial;
                 GPU_SUBMIT_SEEN(bos, named);
                 gpu_end = GPU_END_NONE;
-                gpu_last_error = gpu_backend->submit(&job, bos, named, &sequence);
+                {
+                        static b32 gpu_alarm_installed;
+                        positive wtimer[4] = {0, 0, 2, 0}, woff[4] = {0, 0, 0, 0};
+
+                        if (unlikely(!gpu_alarm_installed))
+                        {
+                                gpu_alarm_installed = 1;
+                                system_signal_install(14, (positive)gpu_submit_alarm, SIGNAL_CATCH_FLAGS & ~SIGNAL_RESTART, SIGNAL_CATCH_RESTORER, null);
+                        }
+                        system_call_3(syscall(setitimer), 0, (positive)wtimer, 0);
+                        gpu_last_error = gpu_backend->submit(&job, bos, named, &sequence);
+                        system_call_3(syscall(setitimer), 0, (positive)woff, 0);
+                }
                 if (likely(gpu_last_error == 0))
                         break;
+                // Hard submit watchdog: if a kernel DRM ioctl stalled >= 1s (interrupted by SIGALRM -> EINTR),
+                // never retry it — immediately trip hang recovery so the desktop can never freeze.
+                if (clock_monotonic_nanoseconds() - began >= (GPU_HANG_NS / 2))
+                {
+                        gpu_end = GPU_END_HUNG, gpu_last_error = 62, gpu_job_error = 62, gpu_lost = 1;
+                        gpu_fault_note(true);
+                        gpu_job_began = kept, gpu_submit_took = clock_monotonic_nanoseconds() - began;
+                        return 0;
+                }
                 kind = gpu_backend->classify(gpu_last_error); // what the errno is to this driver (struct gpu_backend's mapping)
                 // A suspect is a refusal the first time, and the card lost the second in a row (a try of this submit or the next submit's).
                 if (kind == GPU_ERR_SUSPECT)
@@ -4445,7 +4502,7 @@ static positive gpu_scene_submit(positive ops_at, unsigned int n, positive bins_
                 return gpu_end = gpu_lost ? GPU_END_NONE : GPU_END_LATE, 0;
         at = scratch ? bins_at : bins_at + side * room;
         built = gpu_scene_build(ops_at, n, at, room, d_at, pitch, w, h, dx0, dy0, dx1, dy1, binned);
-        if (built < 0 && gpu_end == GPU_END_OVERFLOW && !scratch && bins_at < top && gpu_done(gpu_bins.job[side ^ 1u]) != 0)
+        if (built < 0 && gpu_end == GPU_END_OVERFLOW && !scratch && bins_at < top && !gpu_lost && gpu_done(gpu_bins.job[side ^ 1u]) > 0)
         {
                 positive full_room = (top - bins_at) & ~4095ull;
 
@@ -4605,7 +4662,7 @@ static unsigned int gpu_amd_image(unsigned int desc[8], positive va, positive me
                 piped = retile ? 1u : (unsigned int)(modifier >> 15 & 1), block = (unsigned int)(modifier >> 18 & 3);
                 if (tile == 31 && gfx11)
                 {
-                        if ((width & 255) || (dcc && (!meta || (meta & 255) || block > 1)))
+                        if ((va & 262143) || (width & 255) || (dcc && (!meta || (meta & 255) || block > 1)))
                                 return 0;
                 }
                 else if ((tile != 9 && tile != 10 && tile != 25 && tile != 27) || (width & 127) || (dcc && (!meta || (meta & 255) || block > 1)))

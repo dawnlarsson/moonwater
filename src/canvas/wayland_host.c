@@ -1159,6 +1159,8 @@ static void compositor_wl_nv12_unmap(const struct compositor_wl_layer *l, const 
 
 static void wl_ext_gathers_fill(void)
 {
+        if (!compositor_wl_layers.total)
+                return;
         for (int row = 0; row < (int)compositor_rows_in_use; row++)
                 for (unsigned int k = 0; k < compositor_wl_layers.count[row]; k++)
                 {
@@ -3027,8 +3029,9 @@ static int compositor_wl_row_picture(void *context, int row, const struct waylan
                                         wl_ext_tiled_settle();
                                         memory_over_u32_rect(dst_p, pitch, src_p, sp, rw, rh);
                                 }
-                                else if (card_wanted && (right - left) * (bottom - top) >= 32768 &&
-                                         compositor_wl_card_rect(row, picture, to, pitch, x + left, y + top, left, top, right - left, bottom - top, 1))
+                                else if ((compositor_wl_tiled(picture) || (card_wanted && (right - left) * (bottom - top) >= 32768)) &&
+                                         compositor_wl_card_rect(row, picture, to, pitch, x + left, y + top, left, top, right - left, bottom - top,
+                                                                 card_wanted && (right - left) * (bottom - top) >= 32768))
                                         table->client_rects_card++, compositor_wl_copied(row, WINDOWS_COPY_CARD);
                                 else if (picture->sync_fd >= 0)
                                 {

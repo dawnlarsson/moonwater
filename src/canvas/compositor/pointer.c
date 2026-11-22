@@ -994,8 +994,9 @@ static void compositor_cursor_draw(const struct compositor_target *t, int x, int
                         for (int at = 0; at < x2 - x1; at++)
                         {
                                 unsigned int f = covers[(unsigned long)down * pitch + at], e = covers[plane + (unsigned long)down * pitch + at];
+                                unsigned int v = f * (255u - e) + 127u;
 
-                                pixels[(unsigned long)down * t->pitch + at] |= (e + (f * (255u - e) + 127) / 255) << 24;
+                                pixels[(unsigned long)down * t->pitch + at] |= (e + ((v + 1u + (v >> 8)) >> 8)) << 24;
                         }
         }
 }
@@ -1016,11 +1017,30 @@ static b32 compositor_gpu_cursor(int x, int y, const struct compositor_pointer *
         unsigned int at[2];
         const unsigned char *made;
 
-        // A client's own picture has colours a cover table cannot carry: the processor draws the present.
+        // A client's own RGBA cursor: cache premultiplied pixels in the GPU tables pool and emit op 11 (image over) so custom cursors never force CPU fallback.
         if (p->picture)
         {
-                compositor_gscene.why = COMPOSITOR_GPU_WHY_POINTER;
-                return false;
+                int px = left + compositor_picture.left, py = top + compositor_picture.top;
+                int pw = compositor_picture.width, ph = compositor_picture.height;
+                unsigned char *slot = 0;
+                unsigned int pic_at;
+                struct compositor_frame cur;
+
+                if (p->picture != compositor_picture.made || pw <= 0 || ph <= 0)
+                        return true;
+                pic_at = compositor_gpu_slot_tag(pw, ph, 6, 0, p->picture, (unsigned int)(pw * ph * 4), &slot);
+                if (!pic_at)
+                {
+                        compositor_gscene.why = COMPOSITOR_GPU_WHY_POOL;
+                        return false;
+                }
+                if (slot)
+                        memory_copy_rect_u32((unsigned int *)slot, (positive)pw, compositor_picture.premultiplied, CP_PLANE, (positive)pw, (positive)ph);
+                memory_zero(&cur, sizeof(cur));
+                cur.x = px, cur.y = py, cur.width = pw, cur.height = ph, cur.pitch = (unsigned long)pw;
+                cur.gpu_base = GPU_VA + pic_at;
+                compositor_gpu_rect(11, px, py, px + pw, py + ph, 0, &cur, 0, 0);
+                return true;
         }
         made = compositor_pointer_cover(p);
         if (memory_compare(&last, p, sizeof(last)))

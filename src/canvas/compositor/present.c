@@ -183,6 +183,8 @@ static void compositor_loop_tick(unsigned long long now, b32 idle)
 // The paths of the last COMPOSITOR_LEAD_FRAMES presents noted, the newest in bit 0 (1: the card's), and how many there are of them: the lead is
 // measured on the presents as they were, the card's and the processor's (compositor_present_lead).
 static unsigned int compositor_metric_paths, compositor_metric_paths_count;
+static positive compositor_metric_worst_cached;
+static int compositor_metric_worst_dirty = 1;
 
 static void compositor_metric_note(unsigned long long nanoseconds)
 {
@@ -194,6 +196,7 @@ static void compositor_metric_note(unsigned long long nanoseconds)
         else
                 compositor_metric_processor[compositor_metric_processor_at] = nanoseconds,
                 compositor_metric_processor_at = (compositor_metric_processor_at + 1) % WINDOWS_METRIC_RUN, compositor_metric_processor_count++;
+        compositor_metric_worst_dirty = 1;
         compositor_metric_presents++;
         if ((compositor_metric_presents & 15) == 1)
                 compositor_metric_publish();
@@ -234,19 +237,23 @@ HOT static positive compositor_present_lead(void)
 
                 return direct_lead < compositor.period ? direct_lead : 0;
         }
-        if (compositor_metric_paths_count)
+        if (compositor_metric_worst_dirty)
         {
-                unsigned int mask = compositor_metric_paths_count >= 32u ? ~0u : (1u << compositor_metric_paths_count) - 1u;
-                unsigned int v = compositor_metric_paths & mask;
-                v -= (v >> 1) & 0x55555555u;
-                v = (v & 0x33333333u) + ((v >> 2) & 0x33333333u);
-                cards = (((v + (v >> 4)) & 0x0f0f0f0fu) * 0x01010101u) >> 24;
+                if (compositor_metric_paths_count)
+                {
+                        unsigned int mask = compositor_metric_paths_count >= 32u ? ~0u : (1u << compositor_metric_paths_count) - 1u;
+                        unsigned int v = compositor_metric_paths & mask;
+                        v -= (v >> 1) & 0x55555555u;
+                        v = (v & 0x33333333u) + ((v >> 2) & 0x33333333u);
+                        cards = (((v + (v >> 4)) & 0x0f0f0f0fu) * 0x01010101u) >> 24;
+                }
+                processors = compositor_metric_paths_count - cards;
+                worst = compositor_metric_worst(compositor_metric_card, compositor_metric_card_at, compositor_metric_card_count, cards);
+                worst_processor = compositor_metric_worst(compositor_metric_processor, compositor_metric_processor_at, compositor_metric_processor_count, processors);
+                compositor_metric_worst_cached = worst_processor > worst ? worst_processor : worst;
+                compositor_metric_worst_dirty = 0;
         }
-        processors = compositor_metric_paths_count - cards;
-        worst = compositor_metric_worst(compositor_metric_card, compositor_metric_card_at, compositor_metric_card_count, cards);
-        worst_processor = compositor_metric_worst(compositor_metric_processor, compositor_metric_processor_at, compositor_metric_processor_count, processors);
-        worst = worst_processor > worst ? worst_processor : worst;
-        return compositor_lead_of(worst, compositor_metric_paths_count, compositor_late.widen, compositor.period);
+        return compositor_lead_of(compositor_metric_worst_cached, compositor_metric_paths_count, compositor_late.widen, compositor.period);
 }
 
 /*
@@ -283,6 +290,7 @@ static void compositor_crtc_sync(void)
                                       0, 0, 0, 1, compositor.mode};
 
         system_control(compositor.card, COMPOSITOR_SETCRTC, address_of set);
+        compositor_scaled_reset();
         compositor_dark_set();
         compositor.on_screen = compositor.fb;
         compositor_flip_refused = 0;
@@ -1280,7 +1288,7 @@ static unsigned int present_bands_pass(struct compositor_frame *frames, unsigned
                         redo = taskbar_meets(&view, compositor.damage, compositor.damages, solid);
                 if (taskbar_shift() >= UI_ONE || !redo)
                         continue;
-                if (stay_live_direct && !saved_direct_pixels && windows)
+                if (!solid && stay_live_direct && !saved_direct_pixels && windows)
                 {
                         unsigned int which = compositor.front[direct] & 1u;
                         unsigned int *stage = compositor_direct_stage_ready();
@@ -1289,9 +1297,20 @@ static unsigned int present_bands_pass(struct compositor_frame *frames, unsigned
                         {
                                 unsigned long stride = (unsigned long)compositor_stride();
                                 const int *old = compositor.under_rect[which];
+                                int down = compositor_glass_reach(COMPOSITOR_GLASS_DOWN) + ((COMPOSITOR_GLASS_LEVELS + 1) << COMPOSITOR_GLASS_LEVELS);
+                                int y0 = band.y - down, y1 = band.y + band.height + down;
 
+                                if (old[3] > old[1])
+                                {
+                                        if (old[1] < y0) y0 = old[1];
+                                        if (old[3] > y1) y1 = old[3];
+                                }
+                                if (y0 < 0) y0 = 0;
+                                if (y1 > compositor.height) y1 = compositor.height;
                                 saved_direct_pixels = frames[windows - 1].pixels;
-                                memory_copy(stage, saved_direct_pixels, stride * (unsigned long)compositor.height * 4);
+                                if (y1 > y0)
+                                        memory_copy(stage + (unsigned long)y0 * stride, saved_direct_pixels + (unsigned long)y0 * stride,
+                                                    (unsigned long)(y1 - y0) * stride * 4);
                                 memory_copy_rect_u32(stage + (unsigned long)old[1] * stride + (unsigned long)old[0], stride,
                                                      compositor.under[which], (unsigned long)(old[2] - old[0]),
                                                      (unsigned long)(old[2] - old[0]), (unsigned long)(old[3] - old[1]));

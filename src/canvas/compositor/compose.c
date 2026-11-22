@@ -1182,9 +1182,24 @@ static int canvas_cpu_round_corner(void *ctx, const struct compositor_frame *f, 
         compositor_reading(t);
         {
                 const unsigned char *outer = compositor_corner_mask(r), *inner = ri ? compositor_corner_mask(ri) : 0;
-                const unsigned int *picture = compositor_scaled(f) ? 0 : f->pixels;
+                int scaled = compositor_scaled(f);
+                const unsigned int *picture = scaled ? 0 : f->pixels;
+                unsigned long step_x = 0, step_y = 0, base_x = 0, base_y = 0;
 
+                if (scaled && w > 0 && h > 0)
+                {
+                        step_x = ((unsigned long)f->source_w << 24) / (unsigned long)w;
+                        step_y = ((unsigned long)f->source_h << 24) / (unsigned long)h;
+                        base_x = ((unsigned long)f->source_w << 23) / (unsigned long)w;
+                        base_y = ((unsigned long)f->source_h << 23) / (unsigned long)h;
+                }
                 for (int py = y1; py < y2; py++)
+                {
+                        int in_y = py >= y && py < y + h;
+                        const unsigned int *src_row = !in_y || f->builtin ? 0
+                                                      : picture ? picture + (unsigned long)(py - y) * f->pitch
+                                                                : f->pixels + ((base_y + (unsigned long)(py - y) * step_y) >> 24) * f->pitch;
+
                         for (int px = x1; px < x2; px++)
                         {
                                 int mx = corner & 1 ? cx + r - 1 - px : px - cx, my = corner & 2 ? cy + r - 1 - py : py - cy;
@@ -1192,7 +1207,7 @@ static int canvas_cpu_round_corner(void *ctx, const struct compositor_frame *f, 
                                 unsigned int *at = t->pixels + (unsigned long)(py - t->oy) * t->pitch + (unsigned long)(px - t->ox);
                                 unsigned int pixel = *at;
 
-                                int inside = px >= x && px < x + w && py >= y && py < y + h;
+                                int inside = in_y && px >= x && px < x + w;
                                 unsigned int in = inside ? (!b ? cover : inner ? inner[(my - b) * ri + (mx - b)] : 0) : 0;
 
                                 if (cover && b)
@@ -1206,8 +1221,8 @@ static int canvas_cpu_round_corner(void *ctx, const struct compositor_frame *f, 
                                 if (inside)
                                 {
                                         unsigned int ink = f->builtin ? tab
-                                                           : picture  ? picture[(unsigned long)(py - y) * f->pitch + (unsigned long)(px - x)]
-                                                                      : compositor_picture_at(f, px - x, py - y);
+                                                           : picture  ? src_row[px - x]
+                                                                      : src_row[(base_x + (unsigned long)(px - x) * step_x) >> 24];
 
                                         if (f->swap && !f->builtin)
                                                 ink = (ink & 0xff00ff00u) | ((ink >> 16) & 0xffu) | ((ink & 0xffu) << 16);
@@ -1218,6 +1233,7 @@ static int canvas_cpu_round_corner(void *ctx, const struct compositor_frame *f, 
                                 }
                                 *at = pixel;
                         }
+                }
         }
         return 1;
 }
@@ -2888,17 +2904,9 @@ static unsigned int canvas_ext_yuv_rgb(long yv, long u, long v)
         return 0xff000000u | (unsigned int)r << 16 | (unsigned int)g << 8 | (unsigned int)b;
 }
 
-static unsigned int canvas_ext_over(unsigned int over, unsigned int under)
+static inline unsigned int canvas_ext_over(unsigned int over, unsigned int under)
 {
-        unsigned int through = 255u - (over >> 24), out = 0xff000000u;
-
-        for (unsigned int shift = 0; shift < 24; shift += 8)
-        {
-                unsigned int sum = ((over >> shift) & 255u) + ((((under >> shift) & 255u) * through + 127u) / 255u);
-
-                out |= (sum > 255u ? 255u : sum) << shift;
-        }
-        return out;
+        return compositor_over_pixel(under, over) | 0xff000000u;
 }
 
 static inline INLINE CONST unsigned int canvas_ext_pixel_argb(unsigned int v, unsigned int fourcc)

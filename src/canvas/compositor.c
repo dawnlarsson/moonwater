@@ -796,6 +796,7 @@ static struct
         } cursor;
         struct compositor_shake shake;
         char driver[16];
+        unsigned int driver_flags;
         struct compositor_mode mode;
         unsigned int connector;
         positive asleep, wake_at;

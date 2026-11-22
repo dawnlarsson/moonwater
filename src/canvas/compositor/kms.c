@@ -1024,6 +1024,7 @@ static int compositor_scales_take(void)
         }
         if (!changed)
                 return 0;
+        compositor.layout++;
         compositor_scale_set(compositor.output[0].scale);
         compositor_space_carry((const int (*)[4])was, (const char (*)[WINDOWS_OUTPUT_NAME])names, compositor.outputs);
         return 1;
@@ -1199,11 +1200,12 @@ static b32 compositor_space_take(int first)
                         compositor.table->period_seen = 0;
                 compositor.period = period;
                 compositor_vblank_last.when = 0;
+                compositor_scaled_reset();
                 if (compositor.crtc != compositor.output[0].crtc)
                 {
                         compositor.overlay_state = 0;
                         compositor.primary = compositor.overlay = 0;
-                        compositor.scaled_direct = compositor.scale_plane_refused = 0;
+                        compositor.scale_plane_refused = 0;
 #ifdef MOONWATER_GPU_C
                         compositor_fence_prop = 0; // the new primary plane's IN_FENCE_FD is looked for again (present.c's, with the GPU)
 #endif
@@ -1435,7 +1437,7 @@ static long compositor_card_node(unsigned int minor)
 #define COMPOSITOR_CARD_NODE(minor) compositor_card_node(minor)
 #endif
 
-static int compositor_card_firmware(void) { return (drm_driver_flags(compositor.driver) & DRV_FIRMWARE) != 0; }
+static int compositor_card_firmware(void) { return (compositor.driver_flags & DRV_FIRMWARE) != 0; }
 
 static b32 compositor_card_try(unsigned int minor, int firmware)
 {
@@ -1446,10 +1448,12 @@ static b32 compositor_card_try(unsigned int minor, int firmware)
         if (card < 0)
                 return card == -COMPOSITOR_ENOENT ? -COMPOSITOR_ENOENT : -COMPOSITOR_EBUSY;
         compositor.card = (int)card;
+        compositor_scaled_reset();
         version.name_length = sizeof(compositor.driver) - 1, version.name = compositor.driver;
         memory_zero(compositor.driver, sizeof(compositor.driver));
         if (system_control(compositor.card, COMPOSITOR_VERSION, address_of version) != 0)
                 compositor.driver[0] = 0;
+        compositor.driver_flags = drm_driver_flags(compositor.driver);
         if (!firmware && compositor_card_firmware())
                 status = -COMPOSITOR_EAGAIN;
         else if (system_control(compositor.card, COMPOSITOR_SET_MASTER, 0) != 0)
@@ -1457,7 +1461,7 @@ static b32 compositor_card_try(unsigned int minor, int firmware)
         else
                 status = compositor_space_first();
         if (status < 0)
-                system_close(compositor.card), compositor.card = -1, compositor.driver[0] = 0;
+                system_close(compositor.card), compositor.card = -1, compositor.driver[0] = 0, compositor.driver_flags = 0, compositor_scaled_reset();
         return status;
 }
 

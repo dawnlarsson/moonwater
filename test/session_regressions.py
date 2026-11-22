@@ -1204,7 +1204,7 @@ def test_hardening_66_bug_families():
           "compositor_atomic_primary(compositor.on_screen, row, compositor.front[row]" in kms_c and
           "if (compositor.scaled_direct)" in scan_c and
           "drm_atomic_set_plane(&req, compositor.primary, compositor.primary_props, compositor.crtc, fb, 0, 0, pw, ph, 0, 0, pw, ph);" in scan_c and
-          "compositor.scaled_direct = 0;" in scan_c[scan_c.find("static int compositor_atomic_to("):])
+          "compositor_scaled_reset();" in scan_c[scan_c.find("static int compositor_atomic_to("):])
 
     check("Family 4: compositor_space_take defers on async GPU/list jobs, syncs cursor thread, and frees old secondary FB",
           "if (!first && (compositor.flip_pending || compositor_card.on || rows_any(&compositor_card.list_rows)))" in kms_c and
@@ -1285,17 +1285,29 @@ def test_hardening_66_bug_families():
           "compositor_gpu_state.hung_off = 0, compositor_gpu_state.hung_at = 0;" in manage_c)
 
     # --- Family 7: Performance & Hardware-Flooring Invariants ---
-    check("Family 7: RDNA3/3.5 (GFX11) gpu_image enabled with version 4 & 256K_R_X, O(1) i915 BO dedup, 32-way VA hint & O(M) gpu_trim",
+    check("Family 7: RDNA3/3.5 (GFX11) gpu_image enabled with version 4 & 256K_R_X (256KiB aligned), O(1) i915 BO dedup (retry-safe), 32-way VA hint & O(M) gpu_trim",
           "gpu_image_ok = (gpu_set == &gpu_amd_rdna2 || gpu_set == &gpu_amd_rdna3) && gpu_image_test();" in gpu_c and
           "tile == 31 && gfx11" in gpu_c and
-          "gpu_i915.bound[handle].seen_serial == gpu_submit_serial" in gpu_c and
+          "gpu_set == &gpu_amd_rdna3 ? 262144ull : GPU_IMPORT_ALIGN" in gpu_c and
+          "gpu_i915.bound[handle].seen_serial == dedup_serial" in gpu_c and
           "static unsigned int gpu_map_hint[32];" in gpu_c and
           "gpu_unimport(gpu.imported_va[i], GPU_GONE_RELEASE), i--;" in gpu_c)
 
-    check("Family 7: Scaled direct scanout async/FB_ID fast path, primary-only eligibility & cursor paint outside lock",
+    check("Family 7: Anti-freeze shield: i915 requires Full PPGTT (ppgtt>=2), 2s setitimer submit watchdog, tiled small-rect guard & secondary scale layout++",
+          "if (gpu_i915.ppgtt < 2 || !gpu_i915.softpin || !gpu_i915.no_reloc)" in gpu_c and
+          "system_call_3(syscall(setitimer), 0, (positive)wtimer, 0);" in gpu_c and
+          "clock_monotonic_nanoseconds() - began >= (GPU_HANG_NS / 2)" in gpu_c and
+          "compositor_wl_tiled(picture) || (card_wanted && (right - left) * (bottom - top) >= 32768)" in read_text("src/canvas/wayland_host.c") and
+          "compositor.layout++;" in kms_c[kms_c.find("static int compositor_scales_take("):kms_c.find("static b32 compositor_space_take(")])
+
+    check("Family 7: Scaled direct scanout async/FB_ID fast path + reset, GPU RGBA client cursor op 11 & Waterlink This-machine + 500ms refresh",
           "(compositor_overlay_ready() || compositor.primary)" in scan_c and
+          "compositor_scaled_reset();" in scan_c and
           "COMPOSITOR_FLIP_ASYNC" in scan_c[scan_c.find("static int compositor_atomic_primary("):scan_c.find("static int compositor_atomic_to(")] and
-          "ok = same || defer_bo || compositor_cursor_paint(&now) == 0;" in kms_c)
+          "ok = same || defer_bo || compositor_cursor_paint(&now) == 0;" in kms_c and
+          "compositor_gpu_rect(11, px, py, px + pw, py + ph, 0, &cur, 0, 0);" in read_text("src/canvas/compositor/pointer.c") and
+          '{"Waterlink", "Waterlink", {"link"}, "Linked machines", 500, SETTINGS_FEED_LINKS}' in settings_c and
+          'return "This machine";' in settings_c)
 
     check("Family 7: CPU fallback hardware-flooring (1024px tiled scaled blend, 10-bit/blended L1 scratch, frost plan hoist, dyn cursor precompute)",
           "for (int cx = x1; cx < x2; cx += 1024)" in read_text("src/canvas/compositor/compose.c") and

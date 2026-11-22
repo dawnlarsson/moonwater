@@ -85,7 +85,7 @@ static const struct settings_feed settings_feeds[] = {
     {"Wi-Fi", "Wi-Fi", {"wifi"}, "In range and saved", 2000, SETTINGS_FEED_WIFI},
     {"Bluetooth", "Bluetooth", {"bluetooth"}, "Remembered devices", 3000, SETTINGS_FEED_DEVICES},
     {"Devices", null, {"device", "list"}, "Internal storage", 3000, SETTINGS_FEED_HARDWARE},
-    {"Waterlink", "Waterlink", {"link"}, "Linked machines", 2000, SETTINGS_FEED_LINKS},
+    {"Waterlink", "Waterlink", {"link"}, "Linked machines", 500, SETTINGS_FEED_LINKS},
     {"Power", null, {null}, null, 2000, SETTINGS_FEED_ROWS},
     {"Time", null, {null}, null, 1000, SETTINGS_FEED_ROWS},
     {"Network", null, {null}, null, 2000, SETTINGS_FEED_ROWS},
@@ -845,6 +845,13 @@ static int settings_section_start(int row)
                                 at--;
                         return SETTINGS_LIST_ID(2, at);
                 }
+                if (list == 3 && item)
+                {
+                        unsigned char w = item->where;
+                        while (at > 0 && settings.item[3][at - 1].where == w)
+                                at--;
+                        return SETTINGS_LIST_ID(3, at);
+                }
                 return SETTINGS_LIST_ID(list, 0);
         }
         default: return row;
@@ -867,6 +874,8 @@ static const char address_to settings_section(int row)
                 const struct settings_item address_to it = settings_item(row);
                 if (list == 2 && it && settings_device_section(it))
                         return settings_device_section(it) == 1 ? SETTINGS_EXTERNAL_HEADER : "";
+                if (list == 3 && it && it->where == 0)
+                        return "This machine";
                 return settings_feeds[list].heading;
         }
         default: return "";
@@ -2600,13 +2609,62 @@ static fn settings_feed_hardware(void)
 static fn settings_feed_links(void)
 {
         char line[SETTINGS_PROBE], address_to text;
+        char self_state[48] = {0};
+        b32 self_on = false;
         positive at, size, count = 0;
         for (at = 0; settings_feed_line(&at, line, sizeof(line), &text, &size);)
         {
                 struct settings_cursor c = {text, size};
-                if (sc_eat(&c, "      ") && c.n && c.s[0] != ' ')
+                if (!self_state[0] && sc_eat(&c, "link ") && c.n)
                 {
-                        if (count && settings.item[3][count - 1].kind == SETTINGS_LINK && (sc_trim_at(&c, "  next:"), c.n))
+                        sc_trim_at(&c, "  next:");
+                        settings_slice(self_state, sizeof(self_state), c.s, c.n);
+                        self_on = (c.n >= 2 && !memory_compare(c.s, "on", 2)) || (c.n >= 7 && !memory_compare(c.s, "running", 7));
+                }
+                else if (sc_eat(&c, "  this machine  ") && c.n)
+                {
+                        struct settings_item address_to it = settings_item_slot(3, count);
+                        if (!it) continue;
+                        sc_trim_at(&c, "  next:");
+                        it->kind = SETTINGS_LINK, it->where = 0, it->flags = self_on ? SETTINGS_ITEM_JOINED : 0;
+                        settings_slice(it->access, sizeof(it->access), self_state, string_length((string_address)self_state));
+                        if (sc_eat(&c, "no key yet"))
+                        {
+                                settings_item_label(it, "this machine", 12);
+                                settings_slice(it->detail, sizeof(it->detail), "no key yet", 10);
+                        }
+                        else
+                        {
+                                positive name_len = 0;
+                                while (name_len + 1 < c.n && (c.s[name_len] != ' ' || c.s[name_len + 1] != ' '))
+                                        name_len++;
+                                settings_item_label(it, c.s, name_len);
+                                c.s += name_len, c.n -= name_len;
+                                while (c.n && c.s[0] == ' ') c.s++, c.n--;
+                                if (c.n)
+                                {
+                                        positive key_len = 0;
+                                        while (key_len < c.n && c.s[key_len] != ' ')
+                                                key_len++;
+                                        positive show = key_len > 8 ? 8 : key_len;
+                                        settings_slice(it->detail, sizeof(it->detail), c.s, show);
+                                        if (key_len > 8)
+                                                settings_cat(it->detail, sizeof(it->detail), string_length((string_address)it->detail), "...");
+                                        c.s += key_len, c.n -= key_len;
+                                        while (c.n && c.s[0] == ' ') c.s++, c.n--;
+                                        if (c.n)
+                                        {
+                                                char rest[SETTINGS_ITEM_LABEL];
+                                                settings_slice(rest, sizeof(rest), c.s, c.n);
+                                                settings_cat_sep(it->detail, sizeof(it->detail), string_length((string_address)it->detail), "  ", rest);
+                                        }
+                                }
+                        }
+                        count++;
+                }
+                else if (sc_eat(&c, "      ") && c.n && c.s[0] != ' ')
+                {
+                        if (count && settings.item[3][count - 1].kind == SETTINGS_LINK && settings.item[3][count - 1].where == 1 && (sc_trim_at(&c, "  next:"), c.n))
                         {
                                 char piece[SETTINGS_ITEM_LABEL];
                                 settings_slice(piece, sizeof(piece), c.s, c.n);
@@ -2627,12 +2685,12 @@ static fn settings_feed_links(void)
                                 if (!it) continue;
                                 while (cut + 1 < c.n && (c.s[cut] != ' ' || c.s[cut + 1] != ' ')) cut++;
                                 sc_trim_at(&grants, "  next:");
-                                it->kind = SETTINGS_LINK, it->flags = SETTINGS_ITEM_SAVED;
+                                it->kind = SETTINGS_LINK, it->where = 1, it->flags = SETTINGS_ITEM_SAVED;
                                 settings_slice(it->access, sizeof(it->access), grants.s, grants.n);
                                 settings_item_label(it, c.s, cut);
                                 count++;
                         }
-                        else if (sc_eat(&c, "nobody")) settings_note_add(3, &count, 0, text + 2, size - 2);
+                        else if (sc_eat(&c, "nobody")) settings_note_add(3, &count, 1, text + 2, size - 2);
                 }
         }
         settings.item_count[3] = (int)count;
@@ -2680,7 +2738,7 @@ static int settings_list_compare(int list, int col, const struct settings_item a
         return cmp ? cmp : (int)string_compare_folded((string_address)a->label, (string_address)b->label);
 }
 
-static b32 settings_item_sortable(int list, const struct settings_item address_to it) { return it->kind != SETTINGS_NOTE && it->kind != SETTINGS_ADD && (list != 2 || settings_device_section(it) == 1); }
+static b32 settings_item_sortable(int list, const struct settings_item address_to it) { return it->kind != SETTINGS_NOTE && it->kind != SETTINGS_ADD && (list != 2 || settings_device_section(it) == 1) && (list != 3 || it->where == 1); }
 
 static fn settings_list_sort(int list)
 {
@@ -3753,12 +3811,17 @@ static fn settings_describe_item(int id, const struct settings_item address_to i
                 settings_drive_strip(item, row);
         }
         else if (item->kind == SETTINGS_LINK)
-                row->columns = settings_columns_for(3), row->mark = (item->flags & SETTINGS_ITEM_JOINED) != 0,
-                row->mark_ink = ui_role(UI_SUCCESS), row->cells[1] = item->access[0] ? item->access : null,
-                row->cells[2] = item->detail[0] ? item->detail : null, row->value = row->cells[2] ? row->cells[2] : row->cells[1];
+        {
+                row->mark = (item->flags & SETTINGS_ITEM_JOINED) != 0, row->mark_ink = ui_role(UI_SUCCESS);
+                if (item->where == 0)
+                        row->note = item->detail[0] ? item->detail : null, row->value = item->access[0] ? item->access : null;
+                else
+                        row->columns = settings_columns_for(3), row->cells[1] = item->access[0] ? item->access : null,
+                        row->cells[2] = item->detail[0] ? item->detail : null, row->value = row->cells[2] ? row->cells[2] : row->cells[1];
+        }
         else if (item->kind == SETTINGS_NOTE)
         {
-                if (((list == 0 || list == 3) && settings.item_count[list] > 1) || (list == 2 && settings_device_section(item) == 1)) row->columns = settings_columns_for(list);
+                if ((list == 0 && settings.item_count[list] > 1) || (list == 2 && settings_device_section(item) == 1)) row->columns = settings_columns_for(list);
                 row->dim = true;
         }
 }
@@ -3882,7 +3945,7 @@ static p32 settings_row_menu_flags(int id)
                 if (!it || it->kind == SETTINGS_ADD) return 0;
                 if (it->kind == SETTINGS_NOTE) return has ? UI_LIST_MENU_HAS_COPY : 0;
                 if (it->kind == SETTINGS_NETWORK) return copy | ((it->flags & SETTINGS_ITEM_SAVED) ? UI_LIST_MENU_CAN_REMOVE : 0);
-                return copy | (it->kind == SETTINGS_DEVICE || it->kind == SETTINGS_LINK ? UI_LIST_MENU_CAN_REMOVE : 0);
+                return copy | (it->kind == SETTINGS_DEVICE || (it->kind == SETTINGS_LINK && it->where == 1) ? UI_LIST_MENU_CAN_REMOVE : 0);
         }
         case SETTINGS_DOM_SUB:
                 if (offset >= settings_sub_count) return 0;
