@@ -55,6 +55,7 @@ struct files_rpc
 {
         p32 req_id;
         p8 kind, machine;
+        p64 sent;
         p8 path[FILES_PATH];
 };
 
@@ -1724,6 +1725,26 @@ static p32 files_tree_machine_node(const struct files_tree address_to t, p8 mach
         return FILES_NO;
 }
 
+// A peer that left the link's peer list: its tree node, requests, reads and slot go; a folder open on it goes home.
+static fn files_peer_drop(p32 k)
+{
+        struct files_peer address_to p = &files.big->peers[k];
+        struct files_model address_to m = &files.big->model;
+        struct files_remote_read address_to rr = &files.big->remote_read;
+        const char address_to home = getenv((string_address) "HOME");
+        (void)files_tree_drop_machine(&files.big->tree, p->machine);
+        for (int r = 0; r < FILES_RPCS_MOST; r++)
+                if (files.big->rpcs[r].kind != FILES_RPC_NONE && files.big->rpcs[r].machine == p->machine)
+                        files.big->rpcs[r].kind = FILES_RPC_NONE;
+        if (rr->active && rr->machine == p->machine)
+                files_close(&rr->fd), rr->active = false, files.big->note[0] = 0;
+        if (p->fs.used)
+                link_fs_close(&p->fs);
+        if (files_model_is_remote(m) && string_equals((string_address)m->peer, (string_address)p->name))
+                files_model_go(m, (string_address)(home && home[0] == '/' ? home : "/")), files_moved();
+        memory_zero(p, sizeof(*p));
+}
+
 static fn files_peers_sync(void)
 {
         link_peers lp;
@@ -1731,6 +1752,8 @@ static fn files_peers_sync(void)
         b32 has_state;
         positive st_got = 0;
         struct files_tree address_to t = &files.big->tree;
+        b32 kept[FILES_PEERS_MOST];
+        memory_zero(kept, sizeof(kept));
         memory_zero(&lp, sizeof(lp));
         memory_zero(&st, sizeof(st));
         link_peers_load(&lp);
@@ -1761,14 +1784,19 @@ static fn files_peers_sync(void)
                 }
                 if (!p)
                 {
-                        if (files.big->peer_count >= FILES_PEERS_MOST)
+                        p32 free_at = 0;
+                        while (free_at < FILES_PEERS_MOST && files.big->peers[free_at].used)
+                                free_at++;
+                        if (free_at >= FILES_PEERS_MOST)
                                 continue;
-                        p = &files.big->peers[files.big->peer_count];
+                        p = &files.big->peers[free_at];
                         memory_zero(p, sizeof(*p));
                         p->used = true;
-                        p->machine = (p8)(files.big->peer_count + 1);
-                        files.big->peer_count++;
+                        p->machine = (p8)(free_at + 1);
+                        if (free_at >= files.big->peer_count)
+                                files.big->peer_count = free_at + 1;
                 }
+                kept[p - files.big->peers] = true;
                 if (p->fs.used && p->fs.state == LINK_FS_READY)
                         online = true;
                 memory_copy(p->key, wp->key, 32);
@@ -1781,7 +1809,12 @@ static fn files_peers_sync(void)
                 else
                         t->node[node].flags = (p8)((t->node[node].flags & FILES_NODE_LOADING) | flags);
         }
+        for (p32 k = 0; k < files.big->peer_count; k++)
+                if (files.big->peers[k].used && !kept[k])
+                        files_peer_drop(k);
 }
+
+static fn files_rpc_forget_machine(p8 machine);
 
 static b32 files_peer_ensure(struct files_peer address_to p)
 {
@@ -1791,6 +1824,7 @@ static b32 files_peer_ensure(struct files_peer address_to p)
                 return files.said = LANGUAGE_files_remote_denied, files.dirty = true, false;
         if (!p->fs.used || p->fs.state == LINK_FS_FAILED)
         {
+                files_rpc_forget_machine(p->machine);
                 if (p->fs.used)
                         link_fs_close(&p->fs);
                 if (!link_fs_open(&p->fs, (string_address)p->name))
@@ -1807,12 +1841,40 @@ static b32 files_rpc_free(void)
         return false;
 }
 
+// A request that a link never answered is given up after this long; so is one a reopened link can no longer answer.
+#define FILES_RPC_WAIT_NS 15000000000ll
+
+// Gives up one pending request: the node it was loading stops loading, and a navigation it was for fails.
+static fn files_rpc_forget(struct files_rpc address_to r)
+{
+        struct files_tree address_to t = &files.big->tree;
+        struct files_model address_to m = &files.big->model;
+        p32 node = FILES_NO;
+        if (r->kind == FILES_RPC_INFO)
+                node = files_tree_machine_node(t, r->machine);
+        else if (r->kind == FILES_RPC_TREE_LIST)
+                node = files_tree_find_in(t, r->machine, r->path);
+        if (node != FILES_NO && r->kind != FILES_RPC_NAV_LIST && r->kind != FILES_RPC_READ)
+                t->node[node].flags &= (p8)~FILES_NODE_LOADING;
+        if (r->kind == FILES_RPC_NAV_LIST && files_model_is_remote(m) && string_equals((string_address)r->path, (string_address)m->path))
+                files_model_fail(m, -5, true), files.said = LANGUAGE_files_failed, files.dirty = true;
+        r->kind = FILES_RPC_NONE;
+}
+
+static fn files_rpc_forget_machine(p8 machine)
+{
+        for (int r = 0; r < FILES_RPCS_MOST; r++)
+                if (files.big->rpcs[r].kind != FILES_RPC_NONE && files.big->rpcs[r].machine == machine)
+                        files_rpc_forget(&files.big->rpcs[r]);
+}
+
 static fn files_rpc_put(p8 machine, p32 req_id, p8 kind, const p8 address_to path)
 {
         for (int k = 0; k < FILES_RPCS_MOST; k++)
                 if (files.big->rpcs[k].kind == FILES_RPC_NONE)
                 {
                         files.big->rpcs[k].req_id = req_id, files.big->rpcs[k].kind = kind, files.big->rpcs[k].machine = machine;
+                        files.big->rpcs[k].sent = (p64)ui_kit.now;
                         string_copy_bounded((string_address)files.big->rpcs[k].path, (string_address)(path ? path : (const p8 address_to) ""), FILES_PATH);
                         return;
                 }
@@ -2125,6 +2187,9 @@ static fn files_remote_tick(long address_to timeout, long address_to other)
         for (int r = 0; !busy && r < FILES_RPCS_MOST; r++)
                 if (files.big->rpcs[r].kind != FILES_RPC_NONE)
                         busy = true;
+        for (int r = 0; r < FILES_RPCS_MOST; r++)
+                if (files.big->rpcs[r].kind != FILES_RPC_NONE && (p64)ui_kit.now - files.big->rpcs[r].sent > FILES_RPC_WAIT_NS)
+                        files_rpc_forget(&files.big->rpcs[r]), files.dirty = true;
         if (busy)
                 *timeout = ui_timeout_min(*timeout, 50000000);
 }

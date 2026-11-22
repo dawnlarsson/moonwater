@@ -1658,6 +1658,21 @@ static fn files_tree_compact(struct files_tree address_to t)
         memory_copy(t->names, fresh, used), t->names_used = used, files_unmap(fresh, FILES_TREE_NAMES);
 }
 
+// Removes a remote machine's node and its children (a peer that is gone). The machine 0 node never goes.
+static b32 files_tree_drop_machine(struct files_tree address_to t, p8 machine)
+{
+        for (p32 at = 0; machine != 0 && at < t->count; at++)
+                if (t->node[at].kind == FILES_NODE_MACHINE && t->node[at].machine == machine)
+                {
+                        p32 after = files_tree_after(t, at);
+                        memory_copy(&t->node[at], &t->node[after], (positive)(t->count - after) * sizeof(struct files_node));
+                        t->count -= after - at;
+                        files_tree_compact(t);
+                        return true;
+                }
+        return false;
+}
+
 static fn files_tree_shut(struct files_tree address_to t, p32 at)
 {
         p32 after;

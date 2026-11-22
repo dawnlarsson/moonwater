@@ -4414,6 +4414,35 @@ static fn browser_tree(void)
                 check("browser: multi-root tree puts common folders above root and mounted drives, keeps / collapsed, and find never re-opens shut nodes",
                       roots_ok && reveal_ok && find_ok);
         }
+        {
+                static struct files_tree probe;
+                p8 home2[FILES_PATH];
+                int homes_a = 0, homes_b = 0, homes_c = 0;
+                b32 dropped = false;
+                browser_path(home2, (string_address) "tr");
+                if (files_tree_begin(&probe))
+                {
+                        files_tree_populate(&probe, home2, null, 0);
+                        for (p32 k = 0; k < probe.count; k++)
+                                homes_a += probe.node[k].kind == FILES_NODE_PLACE && probe.node[k].place == FILES_PLACE_HOME && probe.node[k].depth == 1 && probe.node[k].machine == 0;
+                        (void)files_tree_load(&probe, home2, null, 0, false);
+                        files_tree_add_machine(&probe, (const p8 address_to) "peer", 1, FILES_NODE_ONLINE, false);
+                        (void)files_tree_load(&probe, home2, null, 0, true);
+                        for (p32 k = 0; k < probe.count; k++)
+                                homes_b += probe.node[k].kind == FILES_NODE_PLACE && probe.node[k].place == FILES_PLACE_HOME && probe.node[k].depth == 1 && probe.node[k].machine == 0;
+                        (void)files_tree_load(&probe, home2, null, 0, true);
+                        for (p32 k = 0; k < probe.count; k++)
+                                homes_c += probe.node[k].kind == FILES_NODE_PLACE && probe.node[k].place == FILES_PLACE_HOME && probe.node[k].depth == 1 && probe.node[k].machine == 0;
+                        files_tree_add_machine(&probe, (const p8 address_to) "peer2", 2, FILES_NODE_ONLINE, false);
+                        dropped = files_tree_drop_machine(&probe, 1) && probe.count == 6 && probe.node[5].kind == FILES_NODE_MACHINE &&
+                                  probe.node[5].machine == 2 && !files_tree_drop_machine(&probe, 1) && !files_tree_drop_machine(&probe, 0);
+                        files_tree_end(&probe);
+                }
+                check("browser: the sidebar lists the Home place once after a rebuild, with or without a remote machine",
+                      homes_a == 1 && homes_b == 1 && homes_c == 1);
+                check("browser: a peer that left the list loses its node and its children; the local machine stays",
+                      dropped);
+        }
         files_tree_end(&tree);
         browser_remove_in((string_address) "tr");
 }
