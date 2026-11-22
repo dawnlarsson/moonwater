@@ -170,8 +170,7 @@ static bool shell_command_literal_status(string_address command,
                 positive length = *step == ':' ? 1
                     : !string_compare_max(step, "true", 4) ? 4
                     : !string_compare_max(step, "false", 5) ? 5 : 0;
-                if (!length || (step[length] && step[length] != ' ' &&
-                                step[length] != '\t' && step[length] != '\n'))
+                if (!length || (step[length] && !lex_is_space(step[length])))
                         return false;
                 command_seen = true;
                 answer = length == 5;
@@ -757,13 +756,16 @@ static bool shell_startup_file()
                 {
                         string_address home = env_get("HOME");
                         static p8 made[4096];
+                        positive home_length;
 
-                        if (!home || !*home ||
-                            string_length(home) + 10 >= sizeof(made))
+                        if (!home || !*home)
                                 return true;
-                        string_copy(made, home);
-                        string_copy(made + string_length(home),
-                                    (string_address) "/.bashrc");
+                        home_length = string_length(home);
+                        if (home_length + 10 >= sizeof(made))
+                                return true;
+                        memory_copy_apart(made, home, home_length);
+                        memory_copy_end(made + home_length,
+                                        (string_address) "/.bashrc", 8);
                         value = made;
                 }
         }
@@ -1184,29 +1186,36 @@ b32 main()
                 if (shell_bash_compat)
                 {
                         p8 sample[80];
-                        bipolar got = system_call_4(syscall(pread64),
+                        bipolar got;
+
+                        do
+                                got = system_call_4(syscall(pread64),
                                                     (positive)input,
                                                     (positive)sample,
                                                     sizeof(sample), 0);
+                        while (got == -4);
 
-                        for (bipolar at = 0; at < got; at++)
+                        if (got > 0)
                         {
-                                if (sample[at] == '\n')
-                                        break;
+                                p8 address_to nl = memory_first_of(
+                                    sample, '\n', (positive)got);
+                                positive line_len = nl
+                                    ? (positive)(nl - sample)
+                                    : (positive)got;
 
-                                if (sample[at])
-                                        continue;
-
-                                string_format(log_error,
-                                              "%s: %s: cannot execute binary "
-                                              "file\n",
-                                              shell_invocation_name
-                                                  ? shell_invocation_name
-                                                  : (string_address) "sh",
-                                              shell_script_name);
-                                log_flush();
-                                system_close(input);
-                                return 126;
+                                if (memory_first_of(sample, 0, line_len))
+                                {
+                                        string_format(log_error,
+                                                      "%s: %s: cannot execute binary "
+                                                      "file\n",
+                                                      shell_invocation_name
+                                                          ? shell_invocation_name
+                                                          : (string_address) "sh",
+                                                      shell_script_name);
+                                        log_flush();
+                                        system_close(input);
+                                        return 126;
+                                }
                         }
                 }
                 exec_script_fd = (b32)input;
@@ -1269,10 +1278,11 @@ b32 main()
                         positive length = (positive)(first_newline - command) +
                                           1 + string_length(first_newline + 1);
                         p8 address_to held_command =
-                            (p8 address_to)memory(length + 1);
+                            length < positive_max
+                                ? (p8 address_to)memory_checked(length + 1)
+                                : null;
 
-                        if (!held_command ||
-                            (positive)held_command >= (positive)-4095)
+                        if (!held_command)
                                 return string_report(log_error, 1, "sh: no room for the command\n");
 
                         memory_copy(held_command, command, length + 1);
@@ -1403,7 +1413,8 @@ b32 main()
 
                 //      Room for another read on top of whatever is being
                 //      held back, so a line has no length it cannot reach.
-                if (!shell_array_room(shell_buffer, shell_buffer_room, held + MAX_INPUT_STEP + 1))
+                if (held > positive_max - MAX_INPUT_STEP - 1 ||
+                    !shell_array_room(shell_buffer, shell_buffer_room, held + MAX_INPUT_STEP + 1))
                         return string_report(log_error, 1, "sh: no room to read\n");
 
                 if (script_file)
@@ -1480,9 +1491,7 @@ b32 main()
                 if (interactive && terminal_input && !shell_prompt_ran)
                         for (positive at_byte = 0; at_byte < (positive)got; at_byte++)
                         {
-                                p8 byte = shell_buffer[held + at_byte];
-
-                                if (byte != ' ' && byte != '\t' && byte != '\n')
+                                if (!lex_is_space(shell_buffer[held + at_byte]))
                                 {
                                         shell_prompt_ran = true;
                                         break;

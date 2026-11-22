@@ -920,9 +920,8 @@ typedef struct
 static PURE bool lex_word_is(string_address at, const_string word,
                              positive length)
 {
-        for (positive i = 0; i < length; i++)
-                if (string_get(at + i) != (p8)word[i])
-                        return false;
+        if (string_compare_max(at, (string_address)word, length))
+                return false;
 
         p8 after = string_get(at + length);
 
@@ -1100,7 +1099,8 @@ static string_address lex_nesting_at(string_address at, positive nesting,
 
                 if (comment)
                 {
-                        if (c == '\n')
+                        step = string_first_of_or_end(step, '\n');
+                        if (string_is(step, '\n'))
                         {
                                 string_address after = step + 1;
 
@@ -1118,8 +1118,6 @@ static string_address lex_nesting_at(string_address at, positive nesting,
                                 maybe_here = false;
                                 line = step;
                         }
-                        else
-                                step++;
 
                         continue;
                 }
@@ -1633,7 +1631,7 @@ static PURE bool lex_assignment_head(string_address text, positive length)
         if (length && text[length - 1] == '+')
                 length--;
 
-        if (!length || (text[0] >= '0' && text[0] <= '9'))
+        if (!length || byte_is_digit(text[0]))
                 return false;
 
         at = string_span_max(text, length, string_set_name);
@@ -1689,8 +1687,7 @@ static bool lex_compound_body_legal(string_address open)
                 //      parentheses and operators are not the list's.
                 if (c == '#' && (at == open + 1 || lex_is_space(at[-1])))
                 {
-                        while (string_get(at) && string_not(at, '\n'))
-                                at++;
+                        at = string_first_of_or_end(at, '\n');
                         continue;
                 }
 

@@ -428,7 +428,7 @@ static COLD bool net_address_line(netlink_header address_to header, address_any 
             (net_show_only && body->index != net_show_only))
                 return true;
 
-        host = network_order_32(address_to((p32 address_to)held));
+        host = network_load_32(held);
 
         string_format(net_out, "%p: %w    inet %s/%p\n", (positive)body->index,
                       writer_terminal_name, label ? label : (string_address) "?",
@@ -477,20 +477,18 @@ static COLD bool net_route_line(netlink_header address_to header, address_any co
 
         if (destination)
                 string_format(net_out, "%s/%p",
-                              net_host_text(written, network_order_32(
-                                  address_to((p32 address_to)destination))),
+                              net_host_text(written, network_load_32(destination)),
                               (positive)body->destination_bits);
         else
                 string_format(net_out, "default");
 
         if (gateway)
                 string_format(net_out, " via %s",
-                              net_host_text(written, network_order_32(
-                                  address_to((p32 address_to)gateway))));
+                              net_host_text(written, network_load_32(gateway)));
 
         if (out)
         {
-                p32 index = address_to((p32 address_to)out);
+                p32 index = memory_load_unaligned(p32, out);
                 string_address name = net_name_of(index);
 
                 if (name)
@@ -3896,7 +3894,7 @@ static COLD b32 net_ip(void)
                             "link: only 'show' and 'set NAME up'");
         }
         //      addr ------------------------------------------------------
-        else if (net_word_is(object, "addr", 1) || net_word_is(object, "address", 1))
+        else if (net_word_is(object, "address", 1))
         {
                 if (show)
                         status = net_show_device((b32)handle) ? 1

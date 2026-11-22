@@ -404,8 +404,7 @@ static fn checksum_sponge_close(checksum_sponge address_to s, p8 address_to out)
                 s->block[s->used] = 0x06;
                 s->block[s->rate - 1] |= 0x80;
                 checksum_sponge_block(s, s->block);
-                for (positive at = 0; at < s->size; at++)
-                        out[at] = (p8)(s->lanes[at / 8] >> (8 * (at % 8)));
+                memory_copy_apart(out, s->lanes, s->size);
                 return;
         }
 
@@ -417,11 +416,11 @@ static fn checksum_sponge_close(checksum_sponge address_to s, p8 address_to out)
                 checksum_sponge_block(s, s->block);
                 memory_fill(s->block, 0, 64);
         }
-        for (positive at = 0; at < 8; at++)
-                s->block[63 - at] = (p8)(bits >> (8 * at));
+        network_store_32(s->block + 56, (p32)(bits >> 32));
+        network_store_32(s->block + 60, (p32)bits);
         checksum_sponge_block(s, s->block);
-        for (positive at = 0; at < 32; at++)
-                out[at] = (p8)(s->words[at / 4] >> (24 - 8 * (at % 4)));
+        for (positive at = 0; at < 8; at++)
+                network_store_32(out + at * 4, s->words[at]);
 }
 
 static bipolar checksum_hash_path(const checksum_algorithm address_to algorithm,
@@ -794,10 +793,6 @@ static bool checksum_pool_sink(address_any context, positive index,
         The cut depends on the files, never on the thread count, and the
         bytes written do not depend on it at all.
 */
-#define CHECKSUM_WEIGHED 64
-#define CHECKSUM_GROUP_BYTES (1 << 20)
-#define CHECKSUM_GROUP_MAX 256
-
 #define CHECKSUM_WEIGHED 64
 #define CHECKSUM_GROUP_BYTES (1 << 20)
 #define CHECKSUM_GROUP_MAX 256
@@ -1275,10 +1270,10 @@ static bool checksum_region_grow(p8 address_to address_to region,
         if (wanted <= address_to room)
                 return true;
 
-        positive larger = address_to room ? address_to room : 65536;
+        positive larger = memory_growth(address_to room, wanted, 65536);
 
-        while (larger < wanted)
-                larger *= 2;
+        if (!larger)
+                return false;
 
         p8 address_to fresh = memory_checked(larger);
 
@@ -1330,7 +1325,8 @@ static bool checksum_check_collect(checksum_check_run address_to run)
                 {
                         positive length = string_length(filename) + 1;
 
-                        if (!checksum_region_grow(address_of run->names,
+                        if (run->names_used > positive_max - length ||
+                            !checksum_region_grow(address_of run->names,
                                                   address_of run->names_room,
                                                   run->names_used + length))
                         {

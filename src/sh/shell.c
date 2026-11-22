@@ -290,11 +290,14 @@ static address_any shell_pool_take(positive size)
         if (size >= MEMORY_POOL_BYTES || rounded + 16 > MEMORY_POOL_BYTES)
                 return null;
 
+        if (__atomic_load_n(&shell_pool_used, __ATOMIC_RELAXED) >= MEMORY_POOL_BYTES)
+                return null;
+
         /* A piece and the sixteen bytes that keep it off a page boundary. */
         start = __atomic_fetch_add(&shell_pool_used, rounded + 16,
                                    __ATOMIC_RELAXED);
 
-        if (start + rounded + 16 > MEMORY_POOL_BYTES)
+        if (start >= MEMORY_POOL_BYTES || rounded + 16 > MEMORY_POOL_BYTES - start)
                 return null;
 
         if (!((positive)(memory_pool_block + start) & 4095))
@@ -1382,7 +1385,8 @@ static positive shell_parse_generation HOT_STATE;
 
 static fn token_push_bytes(address_any data, positive length)
 {
-        if (!token_room(token_used + length + 2))
+        if (length > positive_max - token_used - 2 ||
+            !token_room(token_used + length + 2))
         {
                 token_overflow = true;
                 return;
@@ -2187,7 +2191,8 @@ static COLD bool shell_substitution_parses_fresh(string_address body,
         if (length >= sizeof small)
         {
                 copy = null;
-                if (!shell_array_room(copy, room, length + 1))
+                if (length == positive_max ||
+                    !shell_array_room(copy, room, length + 1))
                         return false;
         }
         for (positive at = 0; at < length; at++)
@@ -2266,7 +2271,8 @@ static COLD bool shell_substitutions_parse_word(string_address text,
                         if (!stop || stop == from)
                                 return true;
                         until = (positive)(stop - text);
-                        if (until > length)
+                        if (until > length ||
+                            until < at + (value == '$' ? 3 : 2))
                                 return true;
                         if (!arithmetic &&
                             (value == '$' || !shell_bash_compat) &&
@@ -2398,15 +2404,6 @@ static HOT fn run_line_inner(string_address line)
                                     log_error,
                                     "syntax error near unexpected token `%s'\n",
                                     said);
-                                if (line && string_get(line) &&
-                                    (!shell_is_interactive ||
-                                     shell_interactive_sourcing()))
-                                {
-                                        shell_syntax_where();
-                                        log_error("`", 1);
-                                        log_error(line, 0);
-                                        log_error("'\n", 2);
-                                }
                         }
                         else if (!tok || tok->kind == PT_END ||
                             tok->kind == PT_NEWLINE || !tok->text)
@@ -2414,15 +2411,6 @@ static HOT fn run_line_inner(string_address line)
                                 string_format(
                                     log_error,
                                     "syntax error near unexpected token `newline'\n");
-                                if (line && string_get(line) &&
-                                    (!shell_is_interactive ||
-                                     shell_interactive_sourcing()))
-                                {
-                                        shell_syntax_where();
-                                        log_error("`", 1);
-                                        log_error(line, 0);
-                                        log_error("'\n", 2);
-                                }
                         }
                         else
                         {
@@ -2430,21 +2418,20 @@ static HOT fn run_line_inner(string_address line)
                                     log_error,
                                     "syntax error near unexpected token `%s'\n",
                                     tok->text);
-                                /* Bash repeats the prefix and quotes the
-                                   physical line the token came from --
-                                   except to a person at an interactive
-                                   prompt, who can still see it, which
-                                   takes in eval there too but not a file
-                                   being sourced. */
-                                if (line && string_get(line) &&
-                                    (!shell_is_interactive ||
-                                     shell_interactive_sourcing()))
-                                {
-                                        shell_syntax_where();
-                                        log_error("`", 1);
-                                        log_error(line, 0);
-                                        log_error("'\n", 2);
-                                }
+                        }
+                        /* Bash repeats the prefix and quotes the physical line
+                           the token came from -- except to a person at an
+                           interactive prompt, who can still see it, which
+                           takes in eval there too but not a file being
+                           sourced. */
+                        if (line && string_get(line) &&
+                            (!shell_is_interactive ||
+                             shell_interactive_sourcing()))
+                        {
+                                shell_syntax_where();
+                                log_error("`", 1);
+                                log_error(line, 0);
+                                log_error("'\n", 2);
                         }
                 }
                 /*

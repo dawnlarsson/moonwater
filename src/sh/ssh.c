@@ -226,22 +226,29 @@ static positive ssh_span(string_address text, string_address set, positive lengt
         return at;
 }
 
-// count bytes from from to into, which is before it: the rest of a buffer moved to its start.
-static fn ssh_slide(address_any into, address_any from, positive count)
-{
-        p8 address_to to = into;
-        const p8 address_to source = from;
-
-        for (positive at = 0; at < count; at++)
-                to[at] = source[at];
-}
-
 // A hexadecimal digit's value, 0 for any other byte.
 static positive ssh_hex(p8 digit)
 {
         p8 value = memory_hex_nibbles[digit];
 
         return value == 255 ? 0 : value;
+}
+
+// Four hexadecimal digits (e.g. a /proc/net/tcp port), refusing truncation or non-hex.
+static bool ssh_hex16(string_address text, positive address_to out)
+{
+        positive value = 0;
+
+        for (positive at = 0; at < 4; at++)
+        {
+                p8 nibble = memory_hex_nibbles[(p8)text[at]];
+
+                if (nibble == 255)
+                        return false;
+                value = (value << 4) | nibble;
+        }
+        address_to out = value;
+        return true;
 }
 
 /*
@@ -276,7 +283,7 @@ static bool ssh_address_normal(string_address word, p8 address_to into, positive
         if (!net_ipv6_literal(copy, length, bytes))
                 return false;
         for (positive at = 0; at < 8; at++)
-                groups[at] = (p16)(bytes[at * 2] << 8 | bytes[at * 2 + 1]);
+                groups[at] = network_load_16(bytes + at * 2);
         for (positive at = 0; at < 8; at++)
         {
                 if (groups[at])
@@ -992,11 +999,13 @@ static fn ssh_log_line(string_address what, bool loud)
                                         bipolar got = file_transfer_exact(syscall(pread64), handle, text, keep, (p64)size - keep);
 
                                         system_close(handle);
-                                        if (got >= 0)
+                                        if (got > 0)
                                         {
-                                                from = memory_span_without_byte(text, '\n', keep);
-                                                from += from < keep;
-                                                (void)host_write_file(SSH_LOG, text + from, keep - from, 0600, true);
+                                                positive have = (positive)got;
+
+                                                from = memory_span_without_byte(text, '\n', have);
+                                                from += from < have;
+                                                (void)host_write_file(SSH_LOG, text + from, have - from, 0600, true);
                                         }
                                 }
                         }
@@ -1139,15 +1148,6 @@ static bool ssh_read_at(bipolar handle, address_any into, positive length, p64 o
         return file_transfer_exact(syscall(pread64), handle, into, length, offset) == (bipolar)length;
 }
 
-static p64 ssh_word(const p8 address_to at, positive size)
-{
-        p64 value = 0;
-
-        while (size--)
-                value = value << 8 | at[size];
-        return value;
-}
-
 static bool ssh_elf_needed(bipolar handle, ssh_needed address_to needed, bool address_to elf)
 {
         p8 head[64];
@@ -1163,14 +1163,17 @@ static bool ssh_elf_needed(bipolar handle, ssh_needed address_to needed, bool ad
         if (!ssh_read_at(handle, head, sizeof(head), 0) || memory_compare(head, "\177ELF\2\1", 6))
                 return true;
         address_to elf = true;
-        phoff = ssh_word(head + 32, 8);
-        phnum = ssh_word(head + 56, 2);
-        if (ssh_word(head + 54, 2) != 56 || !phnum || phnum > 32 || !ssh_read_at(handle, table, (positive)phnum * 56, phoff))
+        phoff = memory_load_unaligned(p64, head + 32);
+        phnum = memory_load_unaligned(p16, head + 56);
+        if (memory_load_unaligned(p16, head + 54) != 56 || !phnum || phnum > 32 ||
+            !ssh_read_at(handle, table, (positive)phnum * 56, phoff))
                 return false;
         for (positive at = 0; at < phnum; at++)
         {
                 const p8 address_to entry = table + at * 56;
-                p64 type = ssh_word(entry, 4), offset = ssh_word(entry + 8, 8), size = ssh_word(entry + 32, 8);
+                p64 type = memory_load_unaligned(p32, entry);
+                p64 offset = memory_load_unaligned(p64, entry + 8);
+                p64 size = memory_load_unaligned(p64, entry + 32);
 
                 if (type == 3) // PT_INTERP
                 {
@@ -1190,7 +1193,8 @@ static bool ssh_elf_needed(bipolar handle, ssh_needed address_to needed, bool ad
                 return false;
         for (positive at = 0; at + 16 <= dynamic_size; at += 16)
         {
-                p64 tag = ssh_word(dynamic + at, 8), value = ssh_word(dynamic + at + 8, 8);
+                p64 tag = memory_load_unaligned(p64, dynamic + at);
+                p64 value = memory_load_unaligned(p64, dynamic + at + 8);
 
                 if (tag == 5) // DT_STRTAB
                 {
@@ -1208,9 +1212,13 @@ static bool ssh_elf_needed(bipolar handle, ssh_needed address_to needed, bool ad
         for (positive at = 0; at < phnum && !strings_at; at++)
         {
                 const p8 address_to entry = table + at * 56;
-                p64 offset = ssh_word(entry + 8, 8), address = ssh_word(entry + 16, 8), size = ssh_word(entry + 32, 8);
+                p64 offset = memory_load_unaligned(p64, entry + 8);
+                p64 address = memory_load_unaligned(p64, entry + 16);
+                p64 size = memory_load_unaligned(p64, entry + 32);
 
-                if (ssh_word(entry, 4) == 1 && strtab >= address && strtab + strsz <= address + size)
+                if (memory_load_unaligned(p32, entry) == 1 && strtab >= address &&
+                    strtab - address <= size && strsz <= size - (strtab - address) &&
+                    offset <= ~(p64)0 - (strtab - address))
                         strings_at = strtab - address + offset;
         }
         if (!strings_at)
@@ -1218,7 +1226,8 @@ static bool ssh_elf_needed(bipolar handle, ssh_needed address_to needed, bool ad
         //      Each name is read where it is, and not the whole table, which a library of thousands of symbols makes large.
         for (positive at = 0; at + 16 <= dynamic_size; at += 16)
         {
-                p64 tag = ssh_word(dynamic + at, 8), value = ssh_word(dynamic + at + 8, 8);
+                p64 tag = memory_load_unaligned(p64, dynamic + at);
+                p64 value = memory_load_unaligned(p64, dynamic + at + 8);
                 positive room = sizeof(name);
                 positive length;
 
@@ -1226,7 +1235,7 @@ static bool ssh_elf_needed(bipolar handle, ssh_needed address_to needed, bool ad
                         break;
                 if (tag != 1) // DT_NEEDED
                         continue;
-                if (value >= strsz || used == SSH_NEEDED_MOST)
+                if (value >= strsz || value > ~(p64)0 - strings_at || used == SSH_NEEDED_MOST)
                         return false;
                 if (strsz - value < room)
                         room = (positive)(strsz - value);
@@ -1258,17 +1267,58 @@ typedef struct
         bool found;
 } ssh_apk_ask;
 
-static fn ssh_apk_line(string_address line, positive length, ssh_apk_ask address_to ask)
+// Walk /lib/apk/db/installed one line at a time until take returns false or EOF.
+static fn ssh_apk_walk(string_address root, bool (*take)(string_address line, positive length, address_any context),
+                       address_any context)
 {
+        static p8 chunk[65536];
+        positive kept = 0;
+        bipolar handle = bowl_open_in_root(root, "/lib/apk/db/installed", FILE_READ | O_NONBLOCK | O_CLOEXEC);
+        bipolar got;
+
+        if (handle < 0)
+                return;
+        while ((got = system_read_retry((positive)handle, chunk + kept, sizeof(chunk) - kept)) > 0)
+        {
+                positive have = kept + (positive)got, at = 0;
+                bool keep_going = true;
+
+                while (at < have)
+                {
+                        p8 address_to nl = memory_first_of(chunk + at, '\n', have - at);
+
+                        if (!nl)
+                                break;
+                        positive stop = (positive)(nl - chunk);
+
+                        keep_going = take(chunk + at, stop - at, context);
+                        at = stop + 1;
+                        if (!keep_going)
+                                break;
+                }
+                if (!keep_going)
+                        break;
+                kept = have - at;
+                //      A line longer than the chunk is no line of the database's.
+                if (kept == sizeof(chunk))
+                        kept = 0;
+                memory_copy(chunk, chunk + at, kept);
+        }
+        system_close(handle);
+}
+
+static bool ssh_apk_line(string_address line, positive length, address_any context)
+{
+        ssh_apk_ask address_to ask = context;
         positive folder = string_length((string_address)ask->folder);
 
         if (!length)
         {
                 ask->folder[0] = ask->file[0] = end;
-                return;
+                return true;
         }
         if (length < 2 || line[1] != ':' || length - 2 >= sizeof(ask->folder))
-                return;
+                return true;
         if (line[0] == 'F')
         {
                 memory_copy(ask->folder, line + 2, length - 2);
@@ -1292,40 +1342,20 @@ static fn ssh_apk_line(string_address line, positive length, ssh_apk_ask address
                         memory_copy(ask->sum, line + 2, length - 2);
                         ask->sum[length - 2] = end;
                         ask->found = true;
+                        return false;
                 }
                 ask->file[0] = end;
         }
+        return true;
 }
 
 static bool ssh_apk_checksum(string_address root, string_address path, p8 address_to into, positive room)
 {
-        static p8 chunk[65536];
         ssh_apk_ask ask;
-        positive kept = 0;
-        bipolar handle = bowl_open_in_root(root, "/lib/apk/db/installed", FILE_READ | O_NONBLOCK | O_CLOEXEC);
-        bipolar got;
 
         memory_zero(address_of ask, sizeof(ask));
         ask.path = path;
-        if (handle < 0)
-                return false;
-        while ((got = system_read_retry((positive)handle, chunk + kept, sizeof(chunk) - kept)) > 0 && !ask.found)
-        {
-                positive have = kept + (positive)got, at = 0;
-
-                for (positive stop = 0; stop < have; stop++)
-                        if (chunk[stop] == '\n')
-                        {
-                                ssh_apk_line(chunk + at, stop - at, address_of ask);
-                                at = stop + 1;
-                        }
-                kept = have - at;
-                //      A line longer than the chunk is no line of the database's.
-                if (kept == sizeof(chunk))
-                        kept = 0;
-                ssh_slide(chunk, chunk + at, kept);
-        }
-        system_close(handle);
+        ssh_apk_walk(root, ssh_apk_line, address_of ask);
         if (!ask.found)
                 return false;
         string_copy_bounded(into, (string_address)ask.sum, room);
@@ -1422,6 +1452,9 @@ static b32 ssh_record_file(string_address root, string_address path, string_addr
                                    real + root_length);
         if (record->count == SSH_DIGESTS_MOST)
                 return host_refuse("the server needs more files than the record holds\n");
+        if (string_length((string_address)record->text) + 64 + 1 + string_length(real + root_length) + 1 +
+                string_length(view) + 2 > sizeof(record->text))
+                return host_refuse("the server's digest record is full\n");
         string_copy_bounded(record->seen[record->count++], real + root_length, sizeof(record->seen[0]));
         string_append_bounded(record->text, (string_address)hex, sizeof(record->text));
         string_append_bounded(record->text, " ", sizeof(record->text));
@@ -1473,18 +1506,19 @@ typedef struct
         bool inside;
 } ssh_apk_files;
 
-static fn ssh_apk_files_line(string_address line, positive length, ssh_apk_files address_to files)
+static bool ssh_apk_files_line(string_address line, positive length, address_any context)
 {
+        ssh_apk_files address_to files = context;
         positive name = string_length(files->package);
 
         if (!length)
         {
                 files->inside = false;
                 files->folder[0] = end;
-                return;
+                return true;
         }
         if (length < 2 || line[1] != ':')
-                return;
+                return true;
         if (line[0] == 'P')
                 files->inside = length - 2 == name && !memory_compare(line + 2, files->package, name);
         else if (line[0] == 'F' && files->inside && length - 2 < sizeof(files->folder))
@@ -1498,51 +1532,54 @@ static fn ssh_apk_files_line(string_address line, positive length, ssh_apk_files
                 p8 address_to path = files->paths[files->count];
 
                 if (length - 2 >= sizeof(file))
-                        return;
+                        return true;
                 memory_copy(file, line + 2, length - 2);
                 file[length - 2] = end;
                 if (host_join(path, 128, "/", (string_address)files->folder, files->folder[0] ? "/" : "",
                               (string_address)file))
                         files->count++;
         }
+        return true;
 }
 
 static positive ssh_apk_package(string_address root, string_address package, p8 (address_to paths)[128], positive most)
 {
-        static p8 chunk[65536];
         ssh_apk_files files;
-        positive kept = 0;
-        bipolar handle = bowl_open_in_root(root, "/lib/apk/db/installed", FILE_READ | O_NONBLOCK | O_CLOEXEC);
-        bipolar got;
 
         memory_zero(address_of files, sizeof(files));
         files.package = package;
         files.paths = paths;
         files.most = most;
-        if (handle < 0)
-                return 0;
-        while ((got = system_read_retry((positive)handle, chunk + kept, sizeof(chunk) - kept)) > 0)
-        {
-                positive have = kept + (positive)got, at = 0;
-
-                for (positive stop = 0; stop < have; stop++)
-                        if (chunk[stop] == '\n')
-                        {
-                                ssh_apk_files_line(chunk + at, stop - at, address_of files);
-                                at = stop + 1;
-                        }
-                kept = have - at;
-                if (kept == sizeof(chunk))
-                        kept = 0;
-                ssh_slide(chunk, chunk + at, kept);
-        }
-        system_close(handle);
+        ssh_apk_walk(root, ssh_apk_files_line, address_of files);
         return files.count;
 }
 
 static bool ssh_record_has(const ssh_record address_to record, string_address view)
 {
-        return string_find((string_address)record->text, view) != null;
+        p8 needle[160];
+
+        if (!host_join(needle, sizeof(needle), " ", view, "\n"))
+                return false;
+        return string_find((string_address)record->text, (string_address)needle) != null;
+}
+
+static bool ssh_needed_collect(const ssh_needed address_to needed, p8 (address_to libraries)[96],
+                               positive address_to library_count)
+{
+        for (positive name = 0; name < needed->count; name++)
+        {
+                bool known = false;
+
+                for (positive other = 0; other < address_to library_count; other++)
+                        known |= string_equals((string_address)libraries[other], (string_address)needed->names[name]);
+                if (!known)
+                {
+                        if (address_to library_count >= SSH_NEEDED_MOST)
+                                return false;
+                        string_copy_bounded(libraries[(address_to library_count)++], (string_address)needed->names[name], 96);
+                }
+        }
+        return true;
 }
 
 /*
@@ -1608,15 +1645,8 @@ static b32 ssh_profile_record(string_address root)
                                         return host_refuse("the programs of the server name two loaders\n");
                                 string_copy_bounded(loader, (string_address)needed.loader, sizeof(loader));
                         }
-                        for (positive name = 0; name < needed.count; name++)
-                        {
-                                bool known = false;
-
-                                for (positive other = 0; other < library_count; other++)
-                                        known |= string_equals((string_address)libraries[other], (string_address)needed.names[name]);
-                                if (!known && library_count < SSH_NEEDED_MOST)
-                                        string_copy_bounded(libraries[library_count++], (string_address)needed.names[name], 96);
-                        }
+                        if (!ssh_needed_collect(address_of needed, libraries, address_of library_count))
+                                return host_refuse("the server needs more libraries than the record holds\n");
                 }
         }
         if (!ssh_record_has(address_of record, "tree/usr/sbin/sshd") || !ssh_record_has(address_of record, "tree/usr/bin/ssh-keygen"))
@@ -1653,15 +1683,8 @@ static b32 ssh_profile_record(string_address root)
                                           address_of needed, address_of elf);
                 if (refused)
                         return refused;
-                for (positive name = 0; name < needed.count; name++)
-                {
-                        bool known = false;
-
-                        for (positive other = 0; other < library_count; other++)
-                                known |= string_equals((string_address)libraries[other], (string_address)needed.names[name]);
-                        if (!known && library_count < SSH_NEEDED_MOST)
-                                string_copy_bounded(libraries[library_count++], (string_address)needed.names[name], 96);
-                }
+                if (!ssh_needed_collect(address_of needed, libraries, address_of library_count))
+                        return host_refuse("the server needs more libraries than the record holds\n");
         }
         failed = ssh_state_ready();
         if (failed >= 0)
@@ -1839,8 +1862,8 @@ static positive ssh_btime(void)
         return at ? (positive)string_digits(at + 7, null) : 0;
 }
 
-// The remote end of a socket inode, from /proc/net/tcp or tcp6: "ADDRESS port PORT", or false.
-static bool ssh_peer_of(p64 inode, p8 address_to into, positive room)
+// Walk /proc/net/tcp and tcp6 rows of at least 10 whitespace-separated fields until take returns false.
+static fn ssh_tcp_walk(bool (*take)(string_address address_to fields, address_any context), address_any context)
 {
         static p8 text[262144];
         static const string_address tables[] = {"/proc/net/tcp", "/proc/net/tcp6"};
@@ -1857,80 +1880,96 @@ static bool ssh_peer_of(p64 inode, p8 address_to into, positive room)
                 {
                         positive stop = at;
                         string_address fields[10];
-                        positive count = 0;
+                        positive words = 0;
 
                         while (stop < (positive)got && text[stop] != '\n')
                                 stop++;
                         text[stop] = end;
-                        for (string_address word = text + at; *word && count < 10;)
+                        for (string_address word = text + at; *word && words < 10;)
                         {
                                 while (*word == ' ')
                                         word++;
                                 if (!*word)
                                         break;
-                                fields[count++] = word;
+                                fields[words++] = word;
                                 while (*word && *word != ' ')
                                         word++;
+                                if (*word)
+                                        *word++ = end;
                         }
                         at = stop + 1;
-                        if (count < 10 || (p64)string_digits(fields[9], null) != inode)
-                                continue;
-                        {
-                                string_address remote = fields[2];
-                                string_address colon = string_first_of(remote, ':');
-                                p8 port[8];
-                                positive hex = colon ? (positive)(colon - remote) : 0;
-                                p8 address[48];
-                                p8 bytes[16];
-                                positive digit_count = 0;
-
-                                if (hex != 8 && hex != 32)
-                                        return false;
-                                for (positive byte = 0; byte < hex / 2; byte++)
-                                {
-                                        positive high = ssh_hex(remote[byte * 2]);
-                                        positive low = ssh_hex(remote[byte * 2 + 1]);
-
-                                        //      The kernel writes each 32-bit word in the host's order, which is little-endian here.
-                                        bytes[(byte & ~3u) + 3 - (byte & 3)] = (p8)(high << 4 | low);
-                                }
-                                if (hex == 8 || (hex == 32 && !memory_compare(bytes, "\0\0\0\0\0\0\0\0\0\0\377\377", 12)))
-                                {
-                                        p8 address_to quad = hex == 8 ? bytes : bytes + 12;
-                                        p8 part[4];
-
-                                        address[0] = end;
-                                        for (positive byte = 0; byte < 4; byte++)
-                                        {
-                                                part[positive_into_string(part, quad[byte])] = end;
-                                                string_append_bounded(address, (string_address)part, sizeof(address));
-                                                if (byte < 3)
-                                                        string_append_bounded(address, ".", sizeof(address));
-                                        }
-                                }
-                                else
-                                {
-                                        static const p8 digits[] = "0123456789abcdef";
-                                        positive used = 0;
-
-                                        for (positive byte = 0; byte < 16; byte++)
-                                        {
-                                                address[used++] = digits[bytes[byte] >> 4];
-                                                address[used++] = digits[bytes[byte] & 15];
-                                                if (byte & 1 && byte < 15)
-                                                        address[used++] = ':';
-                                        }
-                                        address[used] = end;
-                                }
-                                digit_count = ssh_hex(colon[1]) << 12 | ssh_hex(colon[2]) << 8 |
-                                              ssh_hex(colon[3]) << 4 | ssh_hex(colon[4]);
-                                port[positive_into_string(port, digit_count)] = end;
-                                (void)string_join(into, room, (string_address)address, " port ", (string_address)port);
-                                return true;
-                        }
+                        if (words == 10 && !take(fields, context))
+                                return;
                 }
         }
+}
+
+typedef struct
+{
+        p64 inode;
+        p8 address_to into;
+        positive room;
+        bool found;
+} ssh_peer_ask;
+
+static bool ssh_peer_row(string_address address_to fields, address_any context)
+{
+        ssh_peer_ask address_to ask = context;
+
+        if ((p64)string_digits(fields[9], null) != ask->inode)
+                return true;
+
+        string_address remote = fields[2];
+        string_address colon = string_first_of(remote, ':');
+        p8 port[8];
+        positive hex = colon ? (positive)(colon - remote) : 0;
+        p8 address[48];
+        p8 bytes[16];
+        positive digit_count = 0;
+
+        if ((hex != 8 && hex != 32) || !ssh_hex16(colon + 1, address_of digit_count))
+                return false;
+        for (positive byte = 0; byte < hex / 2; byte++)
+        {
+                positive high = ssh_hex(remote[byte * 2]);
+                positive low = ssh_hex(remote[byte * 2 + 1]);
+
+                //      The kernel writes each 32-bit word in the host's order, which is little-endian here.
+                bytes[(byte & ~3u) + 3 - (byte & 3)] = (p8)(high << 4 | low);
+        }
+        if (hex == 8 || (hex == 32 && !memory_compare(bytes, "\0\0\0\0\0\0\0\0\0\0\377\377", 12)))
+        {
+                p8 address_to quad = hex == 8 ? bytes : bytes + 12;
+
+                address[host_into(address, network_load_32(quad))] = end;
+        }
+        else
+        {
+                static const p8 digits[] = "0123456789abcdef";
+                positive used = 0;
+
+                for (positive byte = 0; byte < 16; byte++)
+                {
+                        address[used++] = digits[bytes[byte] >> 4];
+                        address[used++] = digits[bytes[byte] & 15];
+                        if ((byte & 1) && byte < 15)
+                                address[used++] = ':';
+                }
+                address[used] = end;
+        }
+        port[positive_into_string(port, digit_count)] = end;
+        (void)string_join(ask->into, ask->room, (string_address)address, " port ", (string_address)port);
+        ask->found = true;
         return false;
+}
+
+// The remote end of a socket inode, from /proc/net/tcp or tcp6: "ADDRESS port PORT", or false.
+static bool ssh_peer_of(p64 inode, p8 address_to into, positive room)
+{
+        ssh_peer_ask ask = {inode, into, room, false};
+
+        ssh_tcp_walk(ssh_peer_row, address_of ask);
+        return ask.found;
 }
 
 // The socket inodes a process holds, the first most of them.
@@ -2060,55 +2099,36 @@ static positive ssh_sessions(positive listener, ssh_list address_to list, bool e
         a socket listening on the port and is not that listener. Each is
         ended with SIGKILL and said in the log. The count.
 */
+typedef struct
+{
+        p16 port;
+        p64 address_to inodes;
+        positive most;
+        positive count;
+} ssh_listen_ask;
+
+static bool ssh_listen_row(string_address address_to fields, address_any context)
+{
+        ssh_listen_ask address_to ask = context;
+        string_address colon;
+        positive here = 0;
+
+        if (ask->count >= ask->most)
+                return false;
+        if (!string_equals(fields[3], "0A"))
+                return true;
+        colon = string_first_of(fields[1], ':');
+        if (colon && ssh_hex16(colon + 1, address_of here) && here == ask->port)
+                ask->inodes[ask->count++] = (p64)string_digits(fields[9], null);
+        return ask->count < ask->most;
+}
+
 static positive ssh_listening(p16 port, p64 address_to inodes, positive most)
 {
-        static p8 text[262144];
-        static const string_address tables[] = {"/proc/net/tcp", "/proc/net/tcp6"};
-        positive count = 0;
+        ssh_listen_ask ask = {port, inodes, most, 0};
 
-        for (positive table = 0; table < array_count(tables); table++)
-        {
-                bipolar got = file_slurp_once_at(AT_FDCWD, tables[table], text, sizeof(text) - 1);
-                positive at = 0;
-
-                if (got <= 0)
-                        continue;
-                text[got] = end;
-                while (at < (positive)got && count < most)
-                {
-                        positive stop = at;
-                        string_address fields[10];
-                        positive words = 0;
-
-                        while (stop < (positive)got && text[stop] != '\n')
-                                stop++;
-                        text[stop] = end;
-                        for (string_address word = text + at; *word && words < 10;)
-                        {
-                                while (*word == ' ')
-                                        word++;
-                                if (!*word)
-                                        break;
-                                fields[words++] = word;
-                                while (*word && *word != ' ')
-                                        word++;
-                                if (*word)
-                                        *word++ = end;
-                        }
-                        at = stop + 1;
-                        if (words < 10 || !string_equals(fields[3], "0A") || !string_first_of(fields[1], ':'))
-                                continue;
-                        {
-                                string_address colon = string_first_of(fields[1], ':');
-                                positive here = ssh_hex(colon[1]) << 12 | ssh_hex(colon[2]) << 8 |
-                                                 ssh_hex(colon[3]) << 4 | ssh_hex(colon[4]);
-
-                                if (here == port)
-                                        inodes[count++] = (p64)string_digits(fields[9], null);
-                        }
-                }
-        }
-        return count;
+        ssh_tcp_walk(ssh_listen_row, address_of ask);
+        return ask.count;
 }
 
 static positive ssh_enforce(const ssh_settings address_to settings, positive ancestor, positive listener)
@@ -2592,7 +2612,7 @@ static b32 ssh_serve(bipolar ready)
                         at = stop + 1;
                 }
                 kept -= at;
-                ssh_slide(chunk, chunk + at, kept);
+                memory_copy(chunk, chunk + at, kept);
                 //      A line longer than the room is said in pieces.
                 if (kept == sizeof(chunk) - 1)
                 {
@@ -3042,7 +3062,7 @@ static b32 ssh_key_remove(string_address label)
                 if (string_equals((string_address)keys.keys[at].label, label))
                         found = at;
         return_if(found == positive_max, host_refuse("ssh: no key is called %s\n", label));
-        ssh_slide(&keys.keys[found], &keys.keys[found + 1], (keys.count - found - 1) * sizeof(keys.keys[0]));
+        memory_copy(&keys.keys[found], &keys.keys[found + 1], (keys.count - found - 1) * sizeof(keys.keys[0]));
         keys.count--;
         return_if(ssh_keys_save(address_of keys) < 0, host_refuse("ssh: %s could not be written\n", SSH_KEYS));
         ended = ssh_sessions(ssh_running(null, 0), null, true);

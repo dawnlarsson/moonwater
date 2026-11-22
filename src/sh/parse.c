@@ -934,12 +934,7 @@ static bool parse_here_take_span(string_address line, positive length,
 
         if (!document->quoted && length)
         {
-                positive slash = length;
-
-                while (slash && string_is(line + slash - 1, '\\'))
-                        slash--;
-
-                continues = ((length - slash) & 1) != 0;
+                continues = (memory_span_byte_reverse(line, '\\', length) & 1) != 0;
                 if (continues)
                         length--;
         }
@@ -959,7 +954,8 @@ static bool parse_here_take_span(string_address line, positive length,
         // A body that does not fit is not a body with its end cut off: the
         // reader does not look at what this answers, so the complaint is made
         // here and the command it belongs to is refused when it is parsed.
-        if (!shell_array_room(here_text, here_text_room, here_used + length + 2))
+        if (length > positive_max - here_used - 2 ||
+            !shell_array_room(here_text, here_text_room, here_used + length + 2))
         {
                 if (!document->overflow)
                         string_format(log_error, "Here-document too long: %s\n",
@@ -1014,18 +1010,20 @@ static bool parse_hold(string_address line, b32 unfinished)
         if (!parse_pending_used)
                 parse_pending_line = shell_line_number ? shell_line_number : 1;
 
-        if (line != parse_pending)
-        {
-                if (!shell_array_room(parse_pending, parse_pending_room, length + 2))
-                        return false;
+        if (length > positive_max - 2 ||
+            !shell_array_room(parse_pending, parse_pending_room, length + 2))
+                return false;
 
+        if (line != parse_pending)
                 memory_copy(parse_pending, line, length + 1);
-        }
 
         // A backslash before a newline was only ever the mark saying "not
         // yet"; a newline inside a quote or a substitution is a byte of it.
         if (unfinished == LEX_CONTINUES)
-                length--;
+        {
+                if (length)
+                        length--;
+        }
         else
                 parse_pending[length++] = '\n';
 
@@ -1389,7 +1387,8 @@ HOT bool parse_feed(string_address line)
                 first_line = parse_pending_start_line();
                 positive length = string_length(line);
 
-                if (!shell_array_room(parse_pending, parse_pending_room,
+                if (length > positive_max - parse_pending_used - 2 ||
+                    !shell_array_room(parse_pending, parse_pending_room,
                                       parse_pending_used + length + 2))
                         return false;
 
