@@ -53,12 +53,15 @@ static bipolar rover_load_read(string_address path)
         bipolar handle, got;
         positive used = 0;
 
-        if (!file_look(AT_FDCWD, path, AT_SYMLINK_NOFOLLOW, address_of facts) ||
-            (facts.mode & MODE_FORMAT) != MODE_FILE || facts.owner != 0 || (facts.mode & 0022))
-                return -1;
         handle = system_open_at(AT_FDCWD, path, FILE_READ | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW);
         if (handle < 0)
                 return -1;
+        if (!file_look(handle, (string_address) "", AT_EMPTY_PATH, address_of facts) ||
+            (facts.mode & MODE_FORMAT) != MODE_FILE || facts.owner != 0 || (facts.mode & 0022))
+        {
+                system_close(handle);
+                return -1;
+        }
         for (;;)
         {
                 got = system_read_retry((positive)handle, rover_load_file + used, sizeof(rover_load_file) - used);
@@ -116,10 +119,20 @@ static bool rover_load_safe(void)
                 system_close(handle);
         if (got > 0)
         {
+                p8 address_to at = line;
+                p8 address_to stop = line + got;
+
                 line[got] = 0;
-                for (bipolar at = 0; at + 16 <= got; at++)
-                        if (!memory_compare(line + at, "moonwater.safe=1", 16) && (at == 0 || line[at - 1] == ' '))
+                while (at < stop)
+                {
+                        p8 address_to found = memory_search(at, (positive)(stop - at), "moonwater.safe=1", 16);
+
+                        if (!found)
+                                break;
+                        if (found == line || found[-1] == ' ')
                                 return true;
+                        at = found + 1;
+                }
         }
         if (rover_load_asked)
                 return rover_load_asked == 2;
@@ -471,17 +484,20 @@ static b32 rover_verb_watch(bipolar device, positive most)
 
                         if (!rover_record_take(map, tail, &record))
                                 continue;
+                        p64 decide_ns = record.decided > record.when ? record.decided - record.when : 0;
+                        p64 wake_ns = woken > record.when ? woken - record.when : 0;
+
                         row = rover_event_find(record.event);
                         string_format(log, "%s event=\"%s\" rule=%p table=%p decided=%pns woken=%pns%s%s\n",
                                       record.kind == ROVER_RECORD_HIT ? "hit" : "event",
                                       row ? row->name : "edge", (positive)record.rule, (positive)record.table,
-                                      (positive)(record.decided - record.when), (positive)(woken - record.when),
+                                      (positive)decide_ns, (positive)wake_ns,
                                       record.flags & ROVER_RECORD_TAKEN ? " taken" : "",
                                       record.flags & ROVER_RECORD_USER ? " user" : "");
-                        wake_total += woken - record.when;
-                        decide_total += record.decided - record.when;
-                        if (woken - record.when > wake_worst)
-                                wake_worst = woken - record.when;
+                        wake_total += wake_ns;
+                        decide_total += decide_ns;
+                        if (wake_ns > wake_worst)
+                                wake_worst = wake_ns;
                         seen++;
                 }
                 log_flush();

@@ -729,6 +729,7 @@ static void moonwater_scan(const char *text, unsigned long length,
         scan.at = 0;
         scan.line = 1;
         scan.heredoc_tabs = 0;
+        scan.heredoc_active = 0;
         scan.heredoc_length = 0;
         scan.heredoc_total = 0;
         scan.rescan = 8 * length;

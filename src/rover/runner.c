@@ -296,28 +296,49 @@ static bool rover_runner_set_word(string_address name, const p8 address_to word,
         return true;
 }
 
+//      A registry row's dotted name (with optional prefix), bounded to room: its length, or 0 on overflow.
+static positive rover_runner_setting_name(const struct settings_row address_to row, string_address prefix,
+                                          p8 address_to into, positive room)
+{
+        positive used = 0;
+
+        if (prefix)
+        {
+                positive plen = string_length(prefix);
+
+                if (plen >= room)
+                        return 0;
+                memory_copy(into, prefix, plen);
+                used = plen;
+        }
+        for (positive at = 0; at < SETTING_WORDS && row->read[at]; at++)
+        {
+                positive size = string_length((string_address)row->read[at]);
+                positive sep = used ? 1 : 0;
+
+                if (used + sep + size >= room)
+                        return 0;
+                if (sep)
+                        into[used++] = '.';
+                memory_copy(into + used, row->read[at], size);
+                used += size;
+        }
+        into[used] = 0;
+        return used;
+}
+
 //      A registry row's state from the file it keeps (or its standard when none is kept). Answers the state's bit, or 0.
 static p64 rover_runner_setting(const struct settings_row address_to row)
 {
         p8 name[96], word[96];
-        positive used = 0;
+        positive used;
         const struct rover_state_row address_to state;
 
         if (row->how != SETTING_PLAIN || !row->path)
                 return 0;
-        memory_copy(name, "setting", 7);
-        used = 7;
-        for (positive at = 0; at < SETTING_WORDS && row->read[at]; at++)
-        {
-                positive size = string_length((string_address)row->read[at]);
-
-                if (used + 1 + size >= sizeof(name))
-                        return 0;
-                name[used++] = '.';
-                memory_copy(name + used, row->read[at], size);
-                used += size;
-        }
-        name[used] = 0;
+        used = rover_runner_setting_name(row, (string_address) "setting", name, sizeof(name));
+        if (!used)
+                return 0;
         state = rover_state_named(name, used);
         if (!state)
                 return 0;
@@ -487,6 +508,10 @@ static fn rover_runner_child(bipolar pid)
         rover_runner_say("a thousand children run at once: the runner waits for the oldest", null, null);
         (void)system_wait4_retry(rover_runner.children[0], null, 0, null);
         rover_runner.children[0] = pid;
+        string_copy_max(rover_runner.child_name[0], (string_address)rover_runner_naming,
+                        sizeof(rover_runner.child_name[0]));
+        rover_runner.child_desktop[0] = rover_runner_on_desktop;
+        rover_runner_on_desktop = false;
 }
 
 /*
@@ -565,12 +590,16 @@ static bipolar rover_runner_exec(string_address address_to argv, string_address 
         bipolar null_handle = system_open_at(AT_FDCWD, "/dev/null", FILE_READ);
         bipolar out = system_open_at_mode(AT_FDCWD, log_path ? log_path : (string_address) "/dev/kmsg",
                                           FILE_WRITE | O_CREAT | O_APPEND | O_NOFOLLOW, 0600);
-        if (null_handle >= 0)
+        if (null_handle > 0)
                 system_descriptor_move(null_handle, 0);
         if (out >= 0)
         {
-                system_descriptor_install(out, 1);
-                system_descriptor_move(out, 2);
+                if (out != 1)
+                        system_descriptor_install(out, 1);
+                if (out != 2)
+                        system_descriptor_install(out, 2);
+                if (out > 2)
+                        system_close(out);
         }
         system_execute(argv[0], argv, environment);
         exit(127);
@@ -951,8 +980,7 @@ static bool rover_runner_pinned(string_address path)
         if (!name || !name[0] || string_length(name) > 48)
                 return false;
         for (string_address at = name; *at; at++)
-                if (!((*at >= 'a' && *at <= 'z') || (*at >= 'A' && *at <= 'Z') || (*at >= '0' && *at <= '9') ||
-                      *at == '-' || *at == '_' || (*at == '.' && at != name)))
+                if (!byte_is_alnum(*at) && *at != '-' && *at != '_' && (*at != '.' || at == name))
                         return false;
         return file_look(AT_FDCWD, path, 0, address_of facts) && (facts.mode & MODE_FORMAT) == MODE_FILE &&
                facts.owner == 0 && !(facts.mode & 0022);
@@ -1393,7 +1421,7 @@ static bool rover_runner_pin_number(const p8 address_to line, positive length, p
                 return false;
         for (positive at = 0; at < count; at++)
         {
-                if (line[10 + at] < '0' || line[10 + at] > '9')
+                if (!byte_is_digit(line[10 + at]))
                         return false;
                 digits[at] = line[10 + at];
         }
@@ -1427,9 +1455,8 @@ static fn rover_runner_line(const p8 address_to line, positive length)
                 positive slot = 0, digits_end = 10;
 
                 //      pin_start_N SLOT: the start's number, then the pin's place on the taskbar.
-                while (digits_end < length && line[digits_end] != ' ')
-                        digits_end++;
-                for (positive at = digits_end + 1; at < length && line[at] >= '0' && line[at] <= '9' && slot < 64; at++)
+                digits_end = 10 + memory_span_without_byte((address_any)(line + 10), ' ', length - 10);
+                for (positive at = digits_end + 1; at < length && byte_is_digit(line[at]) && slot < 64; at++)
                         slot = slot * 10 + (positive)(line[at] - '0');
                 if (!rover_runner_pin_number(line, digits_end, slot_text) ||
                     !string_join(path, sizeof(path), "/run/moonwater/pin.", (string_address)slot_text))
@@ -1489,12 +1516,15 @@ static fn rover_runner_fire_lines(void)
         {
                 positive used = kept + (positive)got, start = 0;
 
-                for (positive at = 0; at < used; at++)
-                        if (text[at] == '\n')
-                        {
-                                rover_runner_line(text + start, at - start);
-                                start = at + 1;
-                        }
+                while (start < used)
+                {
+                        p8 address_to nl = (p8 address_to)memory_first_of(text + start, '\n', used - start);
+
+                        if (!nl)
+                                break;
+                        rover_runner_line(text + start, (positive)(nl - (text + start)));
+                        start = (positive)(nl - text) + 1;
+                }
                 kept = used - start;
                 memory_copy(text, text + start, kept);
                 if (kept == sizeof(text))
@@ -1835,17 +1865,10 @@ static fn rover_runner_watched(void)
                                 if (settings_rows[k].path && string_equals((string_address)settings_rows[k].path, path))
                                 {
                                         p8 row[96];
-                                        positive used = 0;
+                                        positive used = rover_runner_setting_name(&settings_rows[k], null, row, sizeof(row));
 
-                                        for (positive w = 0; w < SETTING_WORDS && settings_rows[k].read[w]; w++)
-                                        {
-                                                if (w)
-                                                        row[used++] = '.';
-                                                string_copy_max(row + used, (string_address)settings_rows[k].read[w],
-                                                                sizeof(row) - used);
-                                                used += string_length((string_address)settings_rows[k].read[w]);
-                                        }
-                                        (void)rover_runner_post(100, row, used, 0);
+                                        if (used)
+                                                (void)rover_runner_post(100, row, used, 0);
                                         rover_runner_drain();
                                         struct rover_event edge;
                                         memory_zero(&edge, sizeof(edge));

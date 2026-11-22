@@ -522,7 +522,8 @@ static bool rules_backlight(b64 hundredths)
 
                 if (device && device->props.max_brightness > 0)
                 {
-                        p64 level = (p64)hundredths * (p64)device->props.max_brightness / 10000;
+                        b64 clamped = hundredths < 0 ? 0 : hundredths > 10000 ? 10000 : hundredths;
+                        p64 level = (p64)clamped * (p64)device->props.max_brightness / 10000;
 
                         return !backlight_device_set_brightness(device, (unsigned long)level);
                 }
@@ -1366,7 +1367,8 @@ static b64 rules_usb_class(struct usb_device *udev)
 {
         u8 code = udev->descriptor.bDeviceClass;
 
-        if (!code && udev->actconfig && udev->actconfig->desc.bNumInterfaces && udev->actconfig->interface[0])
+        if (!code && udev->actconfig && udev->actconfig->desc.bNumInterfaces && udev->actconfig->interface[0] &&
+            udev->actconfig->interface[0]->cur_altsetting)
                 code = udev->actconfig->interface[0]->cur_altsetting->desc.bInterfaceClass;
         switch (code)
         {
@@ -1575,9 +1577,13 @@ static long rules_load(struct rover_control *request)
                         live->kernel_rules++;
                 if (rule->place == ROVER_RUNNER && (rule->flags & ROVER_RULE_WHEN))
                         live->runner_reads |= rule->reads;
-                if (set && rule->event && rover_event_find(rule->event) &&
-                    rover_event_find(rule->event)->source == ROVER_KERNEL)
-                        set[rule->event >> 6] |= 1ull << (rule->event & 63);
+                if (set && rule->event)
+                {
+                        const struct rover_event_row *ev = rover_event_find(rule->event);
+
+                        if (ev && ev->source == ROVER_KERNEL)
+                                set[rule->event >> 6] |= 1ull << (rule->event & 63);
+                }
         }
 
         mutex_lock(&rules_load_lock);

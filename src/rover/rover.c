@@ -666,6 +666,11 @@ static fn rover_value_of(const struct rover_table address_to table, struct rover
                 if (operand.index >= event->count)
                         break;
                 *into = event->field[operand.index];
+                if (!into->text)
+                {
+                        into->text = rover_nothing;
+                        into->length = 0;
+                }
                 return;
         case ROVER_CALL:
                 rover_number(into, rover_called(table, operand.index, event, pages));
@@ -810,7 +815,7 @@ static inline const p8 address_to rover_word_at(const struct rover_table address
                 *length = page[operand.index] > ROVER_WORD_MOST ? ROVER_WORD_MOST : page[operand.index];
                 return page + operand.index + 1;
         case ROVER_FIELD:
-                if (operand.index >= event->count)
+                if (operand.index >= event->count || !event->field[operand.index].text)
                         break;
                 *length = event->field[operand.index].length;
                 return event->field[operand.index].text;
@@ -1732,6 +1737,9 @@ static const char address_to rover_rule_check(const struct rover_table address_t
 
                 if ((why = rover_comparison_check(table, comparison, kernel)))
                         return why;
+                if (!event && (comparison->a.source == ROVER_FIELD || comparison->b.source == ROVER_FIELD ||
+                               comparison->c.source == ROVER_FIELD))
+                        return "a when rule that reads an event's field";
                 //      An on line's filter is one comparison, a field against a constant, ending its line.
                 if (at < rule->trigger && !(rule->flags & ROVER_RULE_WHEN) &&
                     (comparison->a.source != ROVER_FIELD || comparison->a.index >= event->fields ||

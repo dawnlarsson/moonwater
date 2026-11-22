@@ -345,7 +345,7 @@ static bool rover_digits(const p8 address_to text, positive length, positive add
         b64 value = 0;
         positive start = *at;
 
-        while (*at < length && text[*at] >= '0' && text[*at] <= '9')
+        while (*at < length && byte_is_digit(text[*at]))
         {
                 b64 digit = text[*at] - '0';
 
@@ -367,10 +367,8 @@ static b32 rover_choice(const char address_to choices, const p8 address_to word,
 
         while (*at)
         {
-                const char address_to stop = at;
+                const char address_to stop = (const char address_to)string_first_of_or_end((string_address)at, ',');
 
-                while (*stop && *stop != ',')
-                        stop++;
                 if ((positive)(stop - at) == length && !memory_compare(at, word, length))
                         return index;
                 index++;
@@ -397,14 +395,11 @@ static fn rover_choice_put(struct rover_text address_to text, const char address
 
         while (index-- > 0 && *at)
         {
-                while (*at && *at != ',')
-                        at++;
+                at = (const char address_to)string_first_of_or_end((string_address)at, ',');
                 if (*at)
                         at++;
         }
-        const char address_to stop = at;
-        while (*stop && *stop != ',')
-                stop++;
+        const char address_to stop = (const char address_to)string_first_of_or_end((string_address)at, ',');
         rover_put(text, (const p8 address_to)at, (positive)(stop - at));
 }
 
@@ -569,9 +564,8 @@ static bool rover_bare(const p8 address_to text, positive length)
         {
                 p8 c = text[at];
 
-                if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' ||
-                      c == '.' || c == ':' || c == '@' || c == '/' || c == '+' || c == '=' || c == '*' || c == '?' ||
-                      c == '-' || c == '%'))
+                if (!byte_is_alnum(c) && c != '_' && c != '.' && c != ':' && c != '@' && c != '/' && c != '+' &&
+                    c != '=' && c != '*' && c != '?' && c != '-' && c != '%')
                         return false;
         }
         return true;
@@ -1086,6 +1080,19 @@ static const struct rover_event_row address_to rover_event_named(struct rover_bu
         return null;
 }
 
+static bool rover_words_match_name(struct rover_build address_to build, positive first, positive take,
+                                   const char address_to name)
+{
+        const struct rover_word address_to one = &build->word[first];
+        positive length = string_length((string_address)name);
+
+        if (take == 1)
+                return rover_bytes_are(one->text, one->length, name);
+        return length == one->length + 1 + build->word[first + 1].length &&
+               !memory_compare(name, one->text, one->length) && name[one->length] == ' ' &&
+               !memory_compare(name + one->length + 1, build->word[first + 1].text, build->word[first + 1].length);
+}
+
 static const struct rover_primitive_row address_to rover_primitive_named(struct rover_build address_to build,
                                                                           positive first, positive address_to used)
 {
@@ -1094,21 +1101,11 @@ static const struct rover_primitive_row address_to rover_primitive_named(struct 
                 if (first + take > build->words)
                         continue;
                 for (positive at = 0; at < ROVER_PRIMITIVES; at++)
-                {
-                        const char address_to name = rover_primitives[at].name;
-                        positive length = string_length((string_address)name);
-                        const struct rover_word address_to one = &build->word[first];
-
-                        if (take == 1 ? rover_bytes_are(one->text, one->length, name)
-                                      : length == one->length + 1 + build->word[first + 1].length &&
-                                            !memory_compare(name, one->text, one->length) && name[one->length] == ' ' &&
-                                            !memory_compare(name + one->length + 1, build->word[first + 1].text,
-                                                            build->word[first + 1].length))
+                        if (rover_words_match_name(build, first, take, rover_primitives[at].name))
                         {
                                 *used = take;
                                 return &rover_primitives[at];
                         }
-                }
         }
         return null;
 }
@@ -1302,21 +1299,10 @@ static bool rover_read_action(struct rover_build address_to build, struct rover_
                 struct rover_side side;
 
                 for (positive take = 2; take >= 1 && !row; take--)
-                        for (positive at = 0; at < ROVER_SWITCHES && !row; at++)
-                        {
-                                const char address_to name = rover_switches[at].name;
-                                positive length = string_length((string_address)name);
-                                const struct rover_word address_to one = &build->word[1];
-
-                                if (1 + take > build->words)
-                                        continue;
-                                if (take == 1 ? rover_bytes_are(one->text, one->length, name)
-                                              : length == one->length + 1 + build->word[2].length &&
-                                                    !memory_compare(name, one->text, one->length) && name[one->length] == ' ' &&
-                                                    !memory_compare(name + one->length + 1, build->word[2].text,
-                                                                    build->word[2].length))
-                                        row = &rover_switches[at], used = take;
-                        }
+                        if (1 + take <= build->words)
+                                for (positive at = 0; at < ROVER_SWITCHES && !row; at++)
+                                        if (rover_words_match_name(build, 1, take, rover_switches[at].name))
+                                                row = &rover_switches[at], used = take;
                 if (!row)
                         return rover_refused(build, "", &build->word[1], " is no switch (moonwater rover schema lists them)");
                 if (build->words != 2 + used)
@@ -1378,16 +1364,11 @@ static bool rover_read_action(struct rover_build address_to build, struct rover_
                 }
         if (action.kind == ROVER_RUN)
         {
-                const p8 address_to name = rover_pool(build) + build->argument[action.argument].index + 2;
-                p16 length;
+                struct rover_table pool_view = {.pool = rover_pool(build)};
 
-                memory_copy(&length, rover_pool(build) + build->argument[action.argument].index, 2);
-                for (positive at = 0; at < length; at++)
-                        if (!((name[at] >= 'a' && name[at] <= 'z') || (name[at] >= '0' && name[at] <= '9') ||
-                              name[at] == '.' || name[at] == '_' || name[at] == '-') ||
-                            (length <= 2 && name[0] == '.' && name[length - 1] == '.'))
-                                return rover_refused(build, "", &build->word[1],
-                                                     " is no script's name: a word of a-z, 0-9, . _ and -");
+                if (!rover_script_ok(&pool_view, build->argument[action.argument].index))
+                        return rover_refused(build, "", &build->word[1],
+                                             " is no script's name: a word of a-z, 0-9, . _ and -");
         }
         build->action[build->actions++] = action;
         return rover_count_action(build, rule);
@@ -1808,7 +1789,7 @@ static bool rover_name_valid(const struct rover_word address_to name)
         {
                 p8 c = name->text[at];
 
-                if (!((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '.' || c == '_' || c == '-'))
+                if (!byte_is_lower(c) && !byte_is_digit(c) && c != '.' && c != '_' && c != '-')
                         return false;
         }
         return true;
@@ -2248,8 +2229,7 @@ static bool rover_compile(struct rover_build address_to build, const p8 address_
                 for (positive k = 0; k < size; k++)
                         if ((line[k] < 0x20 && line[k] != '\t') || line[k] == 0x7f)
                                 return rover_refused(build, "a line with a control byte in it (only a tab may be)", null, null);
-                while (depth < size && line[depth] == '\t')
-                        depth++;
+                depth = memory_span_byte(line, '\t', size);
                 if (depth < size && line[depth] == ' ')
                 {
                         positive look = depth;
@@ -2769,6 +2749,7 @@ static fn rover_graph(struct rover_text address_to text, const struct rover_tabl
                      at < (positive)rule->comparison + rule->comparisons; conditions++, node++)
                 {
                         label.used = 0;
+                        label.full = false;
                         at = rover_line_put(&label, table, event, at, (positive)rule->comparison + rule->comparisons);
                         rover_puts(text, "node");
                         rover_record_word(text, "rule", name, name_length);
@@ -2783,6 +2764,7 @@ static fn rover_graph(struct rover_text address_to text, const struct rover_tabl
                 for (positive at = 0; at < (positive)rule->then + rule->otherwise; at++, node++)
                 {
                         label.used = 0;
+                        label.full = false;
                         rover_action_put(&label, table, event, (positive)rule->action + at);
                         rover_puts(text, "node");
                         rover_record_word(text, "rule", name, name_length);
@@ -3047,10 +3029,10 @@ static b32 rover_verb_test(string_address address_to arguments, positive count)
         rover_work.why_used = 0;
         for (positive field = used; field < rover_work.words; field++)
         {
-                p8 type = row->field_type[field - used];
                 b64 number = 0;
 
-                if (field - used >= row->fields || !rover_literal(&rover_work, &rover_work.word[field], type, &number))
+                if (field - used >= row->fields ||
+                    !rover_literal(&rover_work, &rover_work.word[field], row->field_type[field - used], &number))
                 {
                         string_format(log_error, "moonwater rover: %s: %s\n", arguments[4 + field],
                                       rover_work.why_used ? rover_work.why : "is more than the event's fields");
