@@ -38,6 +38,7 @@ static const unsigned int terminal_steps[TERMINAL_STEPS] = {8, 10, 12, 14, 16, 1
 #define TERMINAL_IDLE_NANOSECONDS 1000000000ll
 #define TERMINAL_FRAME_NANOSECONDS 16666667ll
 #define TERMINAL_STALL_NANOSECONDS 250000000ll
+#define TERMINAL_DRAIN_HOLD_NANOSECONDS 2000000ll
 
 typedef unsigned long long __attribute__((may_alias)) terminal_word;
 
@@ -81,7 +82,7 @@ static struct
         int phase;
         bipolar child;
         b32 master;
-        positive oom_kills, sync_since, stalled_since, last_frame, settle_since, idle_since;
+        positive oom_kills, sync_since, stalled_since, last_frame, settle_since, idle_since, drain_until;
         long hold_timeout;
 
         struct ui_select sel;
@@ -2288,6 +2289,10 @@ static void terminal_on_ready(void)
 
         if (drew || touched_bottom > touched_top)
                 terminal.changed = terminal.dirty = true;
+        // A drain that read something holds the pty for a moment, so the next batch is larger. A wake that read nothing holds nothing,
+        // and the first read after idle is never held: the echo of a key is drained at once.
+        if (drew && !terminal.reading)
+                terminal.drain_until = (positive)ui_kit.now + TERMINAL_DRAIN_HOLD_NANOSECONDS;
 }
 
 static void terminal_on_pass(void)
@@ -2487,6 +2492,15 @@ static long terminal_tick(long timeout, long address_to other)
         else
                 terminal.sync_held = false;
         terminal.dirty |= terminal.changed;
+        if (terminal.drain_until)
+        {
+                positive now_ = (positive)ui_kit.now;
+
+                if (now_ < terminal.drain_until)
+                        *other = -1, timeout = ui_timeout_min(timeout, (long)(terminal.drain_until - now_));
+                else
+                        terminal.drain_until = 0;
+        }
         timeout = ui_timeout_min(timeout, hold);
         if (ui_body_going(&terminal.bar.body))
                 terminal_bar_step(), timeout = ui_timeout_min(timeout, ui_kit_frame_ns());
