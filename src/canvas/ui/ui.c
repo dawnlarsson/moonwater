@@ -22248,6 +22248,9 @@ static fn ui_list_describe(const struct ui_list address_to l, int id, struct ui_
         row->reveal = UI_ONE; // a whole row unless the app says it folds
         row->turn = -1;       // the expander's flag decides its chevron unless the app says it is turning
         l->describe(id, row);
+        // A row the kit folds: its share is its reveal, and its chevron turns with it (the app's describe is not asked for them).
+        if (l->fold_at && id >= 0 && id < UI_LIST_FOLD_MOST && l->fold_at[id] >= 0)
+                row->reveal = row->turn = l->fold_at[id];
 }
 
 // A virtual list: a list of any number of rows of which the kit lays out and draws only those in the view and a...
@@ -22499,8 +22502,6 @@ static fn ui_list_layout(struct ui address_to ui, struct ui_list address_to l)
         {
                 struct ui_row row;
                 ui_list_describe(l, l->id[at], &row);
-                if (l->fold_at && l->id[at] >= 0 && l->id[at] < UI_LIST_FOLD_MOST && l->fold_at[l->id[at]] >= 0)
-                        row.reveal = l->fold_at[l->id[at]];
                 l->starts[at] = !at || row.section != section
                                     ? UI_LIST_STARTS | (row.header ? UI_LIST_HEADED : 0) | (row.columns ? UI_LIST_COLUMNS : 0)
                                     : 0;
@@ -24243,7 +24244,14 @@ static void ui_list_fold(struct ui_list address_to l, int id, b32 open)
         ui_spring_go(&l->fold_pool[slot].spring, from - target, 0);
 }
 
-// The folds' springs are stepped (in the list's frame): each share, the layout again where one moved, and the shut hook where a fold closed.
+// A row's fold share (Q30, UI_ONE open), or -1 when the kit does not fold it. The chevron and the reveal follow it (ui_list_describe).
+static b64 ui_list_fold_share(const struct ui_list address_to l, int id)
+{
+        return l->fold_at && id >= 0 && id < UI_LIST_FOLD_MOST ? l->fold_at[id] : -1;
+}
+
+// The folds' springs are stepped, once per frame, by the app before it draws the list: each share, the layout again where one moved, and
+// the shut hook where a fold closed. The hook runs here, between frames, so the app may rebuild its rows (never inside ui_list_draw).
 static void ui_list_fold_step(struct ui address_to ui, struct ui_list address_to l)
 {
         b32 moved = false, shut = false;
@@ -24283,7 +24291,6 @@ static fn ui_list_draw(struct ui address_to ui, struct ui_list address_to l)
         int drawn, rest, pointer_y;
         ui_scroll_frame(ui, &l->scroll);
         ui_side_rows(ui, l);
-        ui_list_fold_step(ui, l);
         // A virtual list's places are the rows near where this frame has it scrolled to.
         if (l->virtual)
                 ui_list_window(ui, l);
