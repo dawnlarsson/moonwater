@@ -3319,6 +3319,29 @@ static void test_popup_place(void)
         p.anchor_y = 790;
         wayland_popup_place(&p, 0, 0, &screen, &x, &y, &w, &h);
         WLCHECK(y + h <= 800 && x == 900, "the axes are separate (%ld %ld)", x, y);
+        /* the y axis alone, from a bottom anchor at 790 with 50 of height on an 800 screen: none, flip, slide, resize, and the offset the flip takes */
+        {
+                struct wayland_positioner q;
+
+                memset(&q, 0, sizeof q);
+                q.width = 100, q.height = 50, q.anchor_x = 10, q.anchor_width = 40, q.anchor_y = 780, q.anchor_height = 10;
+                q.anchor = WLN_xdg_positioner_anchor_bottom_right, q.gravity = WLN_xdg_positioner_gravity_bottom_right;
+                wayland_popup_place(&q, 0, 0, &screen, &x, &y, &w, &h);
+                WLCHECK(y == 790 && h == 50, "with no adjustment the popup hangs past the bottom where it asks (%ld %ld)", y, h);
+                q.adjustment = WLN_xdg_positioner_constraint_adjustment_flip_y;
+                wayland_popup_place(&q, 0, 0, &screen, &x, &y, &w, &h);
+                WLCHECK(y == 730 && h == 50, "flip_y puts it above the anchor (%ld %ld)", y, h);
+                q.adjustment = WLN_xdg_positioner_constraint_adjustment_slide_y;
+                wayland_popup_place(&q, 0, 0, &screen, &x, &y, &w, &h);
+                WLCHECK(y == 750 && h == 50, "slide_y slides it up to the bottom edge (%ld %ld)", y, h);
+                q.adjustment = WLN_xdg_positioner_constraint_adjustment_resize_y;
+                wayland_popup_place(&q, 0, 0, &screen, &x, &y, &w, &h);
+                WLCHECK(y == 790 && h == 10, "resize_y cuts it to the room under the anchor (%ld %ld)", y, h);
+                q.adjustment = WLN_xdg_positioner_constraint_adjustment_flip_y;
+                q.offset_y = 5;
+                wayland_popup_place(&q, 0, 0, &screen, &x, &y, &w, &h);
+                WLCHECK(y == 725 && h == 50, "a flipped popup takes its offset the other way (%ld %ld)", y, h);
+        }
 
         /* an anchor far off any screen does not make the arithmetic wrap */
         p.anchor_x = 1L << 24;

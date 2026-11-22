@@ -7,6 +7,7 @@
 #endif
 
 #include "wayland_protocol.inc"
+#include "compositor/place.h"
 
 #define WAYLAND_API static __attribute__((unused))
 #ifndef likely
@@ -3131,54 +3132,31 @@ static int wayland_subsurface_request(struct wayland_client *c, struct wayland_o
 
 /* ---- xdg_shell ---- */
 
-static long wayland_pos_place1d(long ap, long al, long ad, long gd, long off, long len, int flip)
-{
-        long a = flip ? -ad : ad, g = flip ? -gd : gd;
-        return ap + (a < 0 ? 0 : a > 0 ? al : al / 2) + (flip ? -off : off) - (g < 0 ? len : g > 0 ? 0 : len / 2);
-}
+static inline int wayland_place_int(long v) { return (int)wayland_clamp(v, -(1L << 30), 1L << 30); }
 
-static void wayland_pos_axis(long ap, long al, long ad, long gd, long off, long origin, long sp, long sl,
-                             long flip_ok, long slide_ok, long resize_ok, long *out_pos, long *out_len)
-{
-        long len = *out_len, se = sp + sl, a = wayland_pos_place1d(ap, al, ad, gd, off, len, 0);
-        int out = origin + a < sp || origin + a + len > se;
-
-        if (out && flip_ok)
-        {
-                long b = wayland_pos_place1d(ap, al, ad, gd, off, len, 1);
-                if (origin + b >= sp && origin + b + len <= se) a = b, out = 0;
-        }
-        if (out && slide_ok)
-        {
-                long at = origin + a;
-                if (at + len > se) at = se - len;
-                if (at < sp) at = sp;
-                a = at - origin, out = origin + a < sp || origin + a + len > se;
-        }
-        if (out && resize_ok)
-        {
-                long lo = wayland_max(origin + a, sp), hi = wayland_min(origin + a + len, se);
-                if (hi > lo) a = lo - origin, len = hi - lo;
-        }
-        *out_pos = a, *out_len = len;
-}
-
+/* The compositor's one placement (compositor/place.h), in screen space: the anchor is moved by the parent's origin and the answer is moved back. */
 static void wayland_popup_place(const struct wayland_positioner *p, long ox, long oy, const struct wayland_rect *sc,
                                 long *x, long *y, long *width, long *height)
 {
-        static const signed char dir[9][2] = {{0, 0}, {0, -1}, {0, 1}, {-1, 0}, {1, 0}, {-1, -1}, {-1, 1}, {1, -1}, {1, 1}};
-        long ax = p->anchor >= 0 && p->anchor < 9 ? dir[p->anchor][0] : 0, ay = p->anchor >= 0 && p->anchor < 9 ? dir[p->anchor][1] : 0;
-        long gx = p->gravity >= 0 && p->gravity < 9 ? dir[p->gravity][0] : 0, gy = p->gravity >= 0 && p->gravity < 9 ? dir[p->gravity][1] : 0;
+        struct compositor_place place = {0};
+        int out[4];
 
-        *width = p->width, *height = p->height;
-        wayland_pos_axis(p->anchor_x, p->anchor_width, ax, gx, p->offset_x, ox, sc->x, sc->width,
-                         p->adjustment & WLN_xdg_positioner_constraint_adjustment_flip_x,
-                         p->adjustment & WLN_xdg_positioner_constraint_adjustment_slide_x,
-                         p->adjustment & WLN_xdg_positioner_constraint_adjustment_resize_x, x, width);
-        wayland_pos_axis(p->anchor_y, p->anchor_height, ay, gy, p->offset_y, oy, sc->y, sc->height,
-                         p->adjustment & WLN_xdg_positioner_constraint_adjustment_flip_y,
-                         p->adjustment & WLN_xdg_positioner_constraint_adjustment_slide_y,
-                         p->adjustment & WLN_xdg_positioner_constraint_adjustment_resize_y, y, height);
+        place.anchor[0] = wayland_place_int(ox + p->anchor_x), place.anchor[1] = wayland_place_int(oy + p->anchor_y);
+        place.anchor[2] = wayland_place_int(p->anchor_width), place.anchor[3] = wayland_place_int(p->anchor_height);
+        place.side = p->anchor >= 0 && p->anchor < 9 ? (unsigned int)p->anchor : 0;
+        place.gravity = p->gravity >= 0 && p->gravity < 9 ? (unsigned int)p->gravity : 0;
+        place.offset[0] = wayland_place_int(p->offset_x), place.offset[1] = wayland_place_int(p->offset_y);
+        place.adjust = (p->adjustment & WLN_xdg_positioner_constraint_adjustment_flip_x ? COMPOSITOR_PLACE_FLIP_X : 0) |
+                       (p->adjustment & WLN_xdg_positioner_constraint_adjustment_slide_x ? COMPOSITOR_PLACE_SLIDE_X : 0) |
+                       (p->adjustment & WLN_xdg_positioner_constraint_adjustment_resize_x ? COMPOSITOR_PLACE_RESIZE_X : 0) |
+                       (p->adjustment & WLN_xdg_positioner_constraint_adjustment_flip_y ? COMPOSITOR_PLACE_FLIP_Y : 0) |
+                       (p->adjustment & WLN_xdg_positioner_constraint_adjustment_slide_y ? COMPOSITOR_PLACE_SLIDE_Y : 0) |
+                       (p->adjustment & WLN_xdg_positioner_constraint_adjustment_resize_y ? COMPOSITOR_PLACE_RESIZE_Y : 0);
+        place.size[0] = wayland_place_int(p->width), place.size[1] = wayland_place_int(p->height);
+        place.screen[0] = wayland_place_int(sc->x), place.screen[1] = wayland_place_int(sc->y);
+        place.screen[2] = wayland_place_int(sc->width), place.screen[3] = wayland_place_int(sc->height);
+        compositor_place_rect(&place, out);
+        *x = out[0] - ox, *y = out[1] - oy, *width = out[2], *height = out[3];
 }
 
 static void wayland_popup_configure(struct wayland_client *c, struct wayland_surface *s, const struct wayland_positioner *p,
