@@ -4130,11 +4130,16 @@ static b32 compositor_clip_set_memfd(unsigned int which, int fd, int owner)
 */
 #define COMPOSITOR_XFER_MAX 4
 
+#define COMPOSITOR_XFER_NAME 64
+
 struct compositor_xfer
 {
         int live, keep, index, owner;   // the data memfd, the record memfd, and the row that asked
         unsigned int which;             // the store slot it fills when closed (0 clipboard, 1 primary)
-        unsigned long total, count;     // bytes and records so far
+        unsigned long total, count;     // bytes so far, and records written to the index
+        int pend;                       // a type's record is open: its chunks are one record, written when the type changes or ends
+        unsigned long pend_offset, pend_length, pend_name_length;
+        char pend_name[COMPOSITOR_XFER_NAME];
 };
 
 static struct compositor_xfer compositor_xfer_table[COMPOSITOR_XFER_MAX];
@@ -4163,25 +4168,43 @@ static int compositor_xfer_open(unsigned int which, int owner)
         return -1;
 }
 
-// One chunk of a transfer: written to its data memfd and recorded under mime (text: the text alias, the bytes checked as text).
-// 0 when the transfer is not live, the chunk would pass the cap, the text is not text, or the write fails.
-static int compositor_xfer_record(int h, const char *mime, int text, const unsigned char *bytes, unsigned long length)
+// The open type's record goes to the index: one record per type, its chunks contiguous in the data. 1 when there is nothing open.
+static int compositor_xfer_flush(struct compositor_xfer *x)
 {
-        struct compositor_xfer *x = h >= 0 && h < COMPOSITOR_XFER_MAX ? &compositor_xfer_table[h] : 0;
-        unsigned long name_length;
-
-        if (!x || !x->live || !length || length > WINDOWS_CLIP_MOST - x->total || (text && !windows_clip_text(bytes, length)))
+        if (!x->pend)
+                return 1;
+        if (!windows_clip_record(x->index, x->pend_offset, x->pend_length, x->pend_name, x->pend_name_length))
                 return 0;
-        if (!windows_clip_put(x->keep, bytes, length))
-                return 0;
-        name_length = text ? sizeof(WINDOWS_CLIP_TEXT) - 1 : string_length((string_address)mime);
-        if (!windows_clip_record(x->index, x->total, length, text ? WINDOWS_CLIP_TEXT : mime, name_length))
-                return 0;
-        x->total += length, x->count++;
+        x->pend = 0, x->count++;
         return 1;
 }
 
-// The end of a transfer: sealed and installed into its slot when ok and it has records; otherwise it is dropped. 1 when installed.
+// One chunk of a transfer: written to its data memfd under its type's record (text: the text alias, the bytes checked as text).
+// Chunks of one type are one record, so a reader's first match of a name is the whole of it. 0 when the transfer is not live,
+// the chunk would pass the cap, the text is not text, the name is empty or too long, or the write fails.
+static int compositor_xfer_record(int h, const char *mime, int text, const unsigned char *bytes, unsigned long length)
+{
+        struct compositor_xfer *x = h >= 0 && h < COMPOSITOR_XFER_MAX ? &compositor_xfer_table[h] : 0;
+        const char *name = text ? WINDOWS_CLIP_TEXT : mime;
+        unsigned long name_length = text ? sizeof(WINDOWS_CLIP_TEXT) - 1 : string_length((string_address)mime);
+
+        if (!x || !x->live || !length || length > WINDOWS_CLIP_MOST - x->total || !name_length || name_length >= COMPOSITOR_XFER_NAME ||
+            (text && !windows_clip_text(bytes, length)))
+                return 0;
+        if (x->pend && (x->pend_name_length != name_length || memory_compare(x->pend_name, name, (positive)name_length)) &&
+            !compositor_xfer_flush(x))
+                return 0;
+        if (!windows_clip_put(x->keep, bytes, length))
+                return 0;
+        if (!x->pend)
+                x->pend = 1, x->pend_offset = x->total, x->pend_length = 0, x->pend_name_length = name_length,
+                memory_copy(x->pend_name, name, (positive)name_length);
+        x->pend_length += length, x->total += length;
+        return 1;
+}
+
+// The end of a transfer: its open record is written, and it is sealed and installed into its slot when ok and it has records;
+// otherwise it is dropped. 1 when installed.
 static int compositor_xfer_close(int h, int ok)
 {
         struct compositor_xfer *x = h >= 0 && h < COMPOSITOR_XFER_MAX ? &compositor_xfer_table[h] : 0;
@@ -4189,6 +4212,7 @@ static int compositor_xfer_close(int h, int ok)
 
         if (!x || !x->live)
                 return 0;
+        ok = ok && compositor_xfer_flush(x);
         if (ok && x->count && windows_clip_seal(x->keep, x->index, x->total, x->count))
                 installed = compositor_clip_set_memfd(x->which, x->keep, x->owner);
         system_close(x->keep), system_close(x->index);
