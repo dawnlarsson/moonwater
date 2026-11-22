@@ -67,11 +67,9 @@ static fn editor_status_set(const char address_to text)
 
 static positive editor_dir_len(const char address_to path)
 {
-        positive slash = string_length((string_address)path);
+        string_address slash = string_last_of((string_address)path, '/');
 
-        while (slash && path[slash - 1] != '/')
-                slash--;
-        return slash;
+        return slash ? (positive)(slash - (string_address)path) + 1 : 0;
 }
 
 static const char address_to editor_basename(const char address_to path)
