@@ -22480,13 +22480,13 @@ static COLD fn comp_printed(writer write, comp_spec address_to spec)
                         positive offset;
                         bool quoted;
                 } fields[] = {
-                    {" -G ", __builtin_offsetof(comp_spec, glob), true},
-                    {" -W ", __builtin_offsetof(comp_spec, words), true},
-                    {" -P ", __builtin_offsetof(comp_spec, prefix), true},
-                    {" -S ", __builtin_offsetof(comp_spec, suffix), true},
-                    {" -X ", __builtin_offsetof(comp_spec, filter), true},
-                    {" -C ", __builtin_offsetof(comp_spec, command), true},
-                    {" -F ", __builtin_offsetof(comp_spec, function), false},
+                    {" -G ", offset_of(comp_spec, glob), true},
+                    {" -W ", offset_of(comp_spec, words), true},
+                    {" -P ", offset_of(comp_spec, prefix), true},
+                    {" -S ", offset_of(comp_spec, suffix), true},
+                    {" -X ", offset_of(comp_spec, filter), true},
+                    {" -C ", offset_of(comp_spec, command), true},
+                    {" -F ", offset_of(comp_spec, function), false},
                 };
 
                 for (positive at = 0; at < array_count(fields); at++)
@@ -22594,14 +22594,14 @@ static COLD bool comp_read(string_address command, comp_request address_to want,
                 p8 letter;
                 positive offset;
         } string_fields[] = {
-            {'G', __builtin_offsetof(comp_request, glob)},
-            {'W', __builtin_offsetof(comp_request, words)},
-            {'F', __builtin_offsetof(comp_request, function)},
-            {'C', __builtin_offsetof(comp_request, command)},
-            {'X', __builtin_offsetof(comp_request, filter)},
-            {'P', __builtin_offsetof(comp_request, prefix)},
-            {'S', __builtin_offsetof(comp_request, suffix)},
-            {'V', __builtin_offsetof(comp_request, variable)},
+            {'G', offset_of(comp_request, glob)},
+            {'W', offset_of(comp_request, words)},
+            {'F', offset_of(comp_request, function)},
+            {'C', offset_of(comp_request, command)},
+            {'X', offset_of(comp_request, filter)},
+            {'P', offset_of(comp_request, prefix)},
+            {'S', offset_of(comp_request, suffix)},
+            {'V', offset_of(comp_request, variable)},
         };
         static const struct
         {
