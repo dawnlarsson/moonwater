@@ -3969,9 +3969,29 @@ static void check_compositor_picture(void)
     check("picture: the plane is given the same copy, premultiplied, its hotspot the plane's place, and clear round it",
           span == 6 && hot_x == 2 && hot_y == 1 && same);
 #ifdef MOONWATER_GPU_C
-    check("picture: the GPU's scene does not draw a client's picture, and says why (the processor composes that present)",
-          !compositor_gpu_cursor(100, 60, &now, compositor_cursor_ink(0, 0), compositor_cursor_ink(1, 0)) &&
-              compositor_gscene.why == COMPOSITOR_GPU_WHY_POINTER);
+    // The card's scene draws it too (17870859f): its premultiplied pixels kept in the scene's tables, and one image-over record (op 11)
+    // of them at its square, so a client's pointer never sends the present to the processor. Drawn on a scene of the check's own.
+    {
+        static struct compositor_gscene kept;
+        static unsigned int ops[8 * 16];
+        static unsigned char tables[CP_PLANE * CP_PLANE * 4];
+        int hx, hy, sp = compositor_pointer_span(&now, &hx, &hy), px = 100 - hx + compositor_picture.left, py = 60 - hy + compositor_picture.top;
+        int pw = compositor_picture.width, ph = compositor_picture.height, rows_same = pw > 0;
+        b32 drawn;
+
+        memory_copy(&kept, &compositor_gscene, sizeof(kept));
+        memory_zero(&compositor_gscene, sizeof(compositor_gscene));
+        compositor_gscene.ops = ops, compositor_gscene.room = 16, compositor_gscene.width = 512, compositor_gscene.height = 512;
+        compositor_gscene.clip[2] = 512, compositor_gscene.clip[3] = 512;
+        compositor_gscene.tables = tables, compositor_gscene.tables_size = sizeof(tables), compositor_gscene.tables_at = 4096;
+        drawn = compositor_gpu_cursor(100, 60, &now, compositor_cursor_ink(0, 0), compositor_cursor_ink(1, 0));
+        for (int y = 0; y < ph && rows_same; y++)
+            rows_same = !memory_compare(tables + (positive)y * (positive)pw * 4, compositor_picture.premultiplied + (positive)y * CP_PLANE, (positive)pw * 4);
+        check("picture: the GPU's scene draws a client's picture itself: one image-over record of its premultiplied pixels at its square",
+              drawn && sp > 0 && compositor_gscene.count == 1 && (ops[0] & 255) == 11 && ops[1] == (unsigned int)px && ops[2] == (unsigned int)py &&
+                  ops[3] == (unsigned int)(px + pw) && ops[4] == (unsigned int)(py + ph) && rows_same);
+        memory_copy(&compositor_gscene, &kept, sizeof(kept));
+    }
 #endif
 
     compositor.pointer_x = 140, compositor.pointer_y = 90;
