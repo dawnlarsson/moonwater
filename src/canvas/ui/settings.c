@@ -2623,7 +2623,8 @@ static fn settings_feed_hardware(void)
                                 positive rlen;
                                 int code;
                                 sc_word(&c, null), sc_spaces(&c), bytes = sc_u64(&c, 1844674407370955160ull), sc_spaces(&c);
-                                code = settings_role_code(sc_word(&c, &rlen), rlen), sc_spaces(&c);
+                                const char address_to role = sc_word(&c, &rlen); // the word first: its length is what it sets, and the call below reads it
+                                code = settings_role_code(role, rlen), sc_spaces(&c);
                                 if (d) spanned = spanned + bytes < spanned ? ~0ull : spanned + bytes, d->total = spanned > d->total ? spanned : d->total;
                                 if (d && drv && code >= 0 && d->segment_count < SETTINGS_SEGMENTS && (code != 4 || bytes > SETTINGS_ALIGNMENT))
                                         drv->bytes[d->segment_count] = bytes, settings_segment_name(drv->name[d->segment_count], c.s, c.n),
