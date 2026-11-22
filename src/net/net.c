@@ -235,7 +235,7 @@ static bool netlink_begin(netlink_buffer address_to buffer, p16 type, p16 flags,
 
         /* nlmsg_len is 32 bits. Refuse an unrepresentable body before either
            the alignment or allocation arithmetic can wrap. */
-        if (body > 0xffffffffu - NETLINK_HEADER)
+        if (body > 0xfffffffcu - NETLINK_HEADER)
         {
                 buffer->failed = true;
                 return false;
@@ -1444,7 +1444,7 @@ static COLD bool netlink_lease_seen(netlink_header address_to header,
                                             IFA_LOCAL, address_of size);
         if (!named || size != 4)
                 return true;
-        host = network_order_32(memory_load_unaligned(p32, named));
+        host = network_load_32(named);
         if (host == search->host && body->prefix == search->prefix)
                 search->leased = true;
         else if (search->others < NETLINK_LEASES_MAX)
@@ -2091,7 +2091,7 @@ static COLD positive dns_servers(string_address path, p32 address_to servers,
 
                 at = stop + (stop < (positive)got);
 
-                if (stop == sizeof text - 1)
+                if (stop >= sizeof text - 1)
                         break;
                 if (stop - line < 12 ||
                     memory_compare(text + line, "nameserver", 10) ||
@@ -2214,12 +2214,9 @@ static COLD bipolar dns_build_request(p8 address_to request, positive room,
         //      echo of itself either, so it resolved nowhere behind such a
         //      resolver. A length octet is at most 63 and no capital.
         if (!address_to mixed)
-                for (positive at = 0; at < (positive)written; at++)
-                        if (request[DNS_HEADER + at] >= 'A' &&
-                            request[DNS_HEADER + at] <= 'Z')
-                                request[DNS_HEADER + at] |= 0x20;
+                memory_to_lower_ascii(request + DNS_HEADER, (positive)written);
 
-        memory_fill(request, 0, DNS_HEADER);
+        memory_zero(request, DNS_HEADER);
         network_store_16(request, id);
         network_store_16(request + 2, DNS_FLAG_RECURSE);
         network_store_16(request + 4, 1);
@@ -2568,10 +2565,10 @@ static COLD bool dns_internal_line(const p8 address_to text, string_address key,
 
         for (positive at = 0; text[at];)
         {
-                positive stop = at;
+                positive stop = (positive)(string_first_of_or_end(
+                                               (string_address)(text + at), '\n') -
+                                           (string_address)text);
 
-                while (text[stop] && text[stop] != '\n')
-                        stop++;
                 if (stop - at >= size && !memory_compare(text + at, key, size) &&
                     (stop - at == size || text[at + size] == ' '))
                 {
@@ -2589,7 +2586,6 @@ static COLD bool dns_name_internal_in(string_address name, const p8 address_to t
 {
         positive length = string_length(name);
         positive start = 0, words = 0;
-        bool dotted = false;
 
         if (!dns_internal_line(text, "suffixes", address_of start, address_of words))
                 return false;
@@ -2597,28 +2593,18 @@ static COLD bool dns_name_internal_in(string_address name, const p8 address_to t
                 length--;
         if (!length)
                 return false;
-        for (positive at = 0; at < length; at++)
-                dotted |= name[at] == '.';
-        if (!dotted)
+        if (!memory_first_of((address_any)name, '.', length))
                 return true;
         for (positive at = start; at < start + words;)
         {
                 positive size = 0;
-                bool same;
 
                 while (at < start + words && text[at] == ' ')
                         at++;
                 while (at + size < start + words && text[at + size] != ' ')
                         size++;
-                same = size && length > size;
-                for (positive c = 0; same && c < size; c++)
-                {
-                        p8 letter = (p8)name[length - size + c];
-
-                        same = (letter >= 'A' && letter <= 'Z' ? (p8)(letter + 32) : letter) ==
-                               text[at + c];
-                }
-                if (same)
+                if (size && length > size &&
+                    !memory_compare_ascii_case(name + length - size, text + at, size))
                         return true;
                 at += size;
         }
@@ -2977,15 +2963,13 @@ typedef p64 crypto_lane_loose
 
 static inline INLINE p32 crypto_swap32(p32 value)
 {
-        return value >> 24 | (value >> 8 & 0xff00) | (value << 8 & 0xff0000) |
-               value << 24;
+        return network_order_32(value);
 }
 
 //      The bytes of a word written big endian, as the word that holds them.
 static inline INLINE p64 crypto_bytes_of(p64 value)
 {
-        return (p64)crypto_swap32((p32)value) << 32 |
-               crypto_swap32((p32)(value >> 32));
+        return word_bytes_reversed(value);
 }
 
 //      Up to eight bytes as a little-endian word, and not one read past them.
@@ -3119,6 +3103,8 @@ static fn crypto_pbkdf2(positive algorithm, positive size,
         p8 mix[64];
         p8 number[4];
 
+        if (!size || size > sizeof block)
+                return;
         crypto_hmac_prepare(algorithm, size, password, password_length,
                             address_of key);
 
@@ -6538,12 +6524,13 @@ static bipolar tls_decrypt_record(tls_conn address_to tls, p8 address_to payload
         p8 nonce[12];
         p8 aad12[13];
         positive skip = tls->tls12 ? 8 : 0;
-        positive at = payload_length - 16 - skip;
+        positive at;
         bool opened;
 
         if (payload_length < 16 + skip ||
             tls->seq_read >= TLS_AES_GCM_RECORD_LIMIT)
                 return TLS_FAIL;
+        at = payload_length - 16 - skip;
         tls_nonce(tls->s_iv, tls->seq_read, nonce);
         if (skip)
         {
@@ -7465,22 +7452,17 @@ static COLD bool net_ipv6_literal(p8 address_to text, positive length,
 
                         if (quad < 0)
                                 return false;
-                        for (positive k = 0; k < 4; k++)
-                                groups[count++] = (p8)((p32)quad >> (24 - 8 * k));
+                        network_store_32(groups + count, (p32)quad);
+                        count += 4;
                         break;
                 }
                 for (; at < length && digits < 5; at++, digits++)
                 {
-                        p8 c = text[at];
+                        positive nibble = digit_known(text[at], 16);
 
-                        if (c >= 'A' && c <= 'F')
-                                c = (p8)(c + 32);
-                        if (c >= '0' && c <= '9')
-                                group = group << 4 | (p32)(c - '0');
-                        else if (c >= 'a' && c <= 'f')
-                                group = group << 4 | (p32)(c - 'a' + 10);
-                        else
+                        if (nibble == 16)
                                 break;
+                        group = group << 4 | (p32)nibble;
                 }
                 if (!digits || digits > 4)
                         return false;
@@ -7501,7 +7483,7 @@ static COLD bool net_ipv6_literal(p8 address_to text, positive length,
         if (gap == positive_max ? count != 16 : count > 14)
                 return false;
         gap = gap < count ? gap : count;
-        memory_fill(out, 0, 16);
+        memory_zero(out, 16);
         memory_copy(out, groups, gap);
         memory_copy(out + 16 - (count - gap), groups + gap, count - gap);
         return true;
@@ -7623,11 +7605,9 @@ static COLD bool tls_dns_within(p8 address_to name, positive length,
 static COLD p8 tls_email_within(p8 address_to name, positive length,
                                 p8 address_to base, positive base_length)
 {
-        positive host = length;
+        positive host = memory_after_last(name, '@', length);
         positive base_mailbox = memory_span_without_byte(base, '@', base_length);
 
-        while (host && name[host - 1] != '@')
-                host--;
         if (!host)
                 return TLS_UNSURE;
         if (base_mailbox < base_length)
@@ -7658,7 +7638,7 @@ static COLD bipolar tls_folded_next(const p8 address_to text, positive length,
         positive i = address_to at;
         bool space = false;
 
-        while (i < length && (text[i] == ' ' || (text[i] >= 9 && text[i] <= 13)))
+        while (i < length && byte_is_space(text[i]))
         {
                 i++;
                 space = true;
@@ -7671,7 +7651,7 @@ static COLD bipolar tls_folded_next(const p8 address_to text, positive length,
                 return ' ';
         }
         address_to at = i + 1;
-        return text[i] >= 'A' && text[i] <= 'Z' ? text[i] + 32 : text[i];
+        return byte_to_lower(text[i]);
 }
 
 /* Two attribute values, each a whole TLV. PrintableString, UTF8String,
@@ -7694,7 +7674,11 @@ static COLD p8 tls_directory_value(const p8 address_to one, positive one_length,
         {
                 positive at = 0;
                 positive stop = 0;
-                p8 tag = text[k][0];
+                p8 tag;
+
+                if (!size[k])
+                        return TLS_UNSURE;
+                tag = text[k][0];
 
                 if (tls_asn1_enter((p8 address_to)text[k], size[k], tag,
                                    address_of at, address_of stop) ||
@@ -8057,7 +8041,7 @@ static COLD bool tls_date_value(p8 tag, p8 address_to text, positive length,
         if (length != year_digits + 11 || text[length - 1] != 'Z')
                 return false;
         for (i = 0; i + 1 < length; i++)
-                if (text[i] < '0' || text[i] > '9')
+                if (!byte_is_digit(text[i]))
                         return false;
 
         for (i = 0; i < year_digits; i++)
@@ -10056,12 +10040,13 @@ static COLD p64 clock_trust_floor(void)
                                     text, sizeof(text), O_NOFOLLOW);
         if (got < 1 || got > 12)
                 return MOONWATER_CLOCK_FLOOR;
-        while (at < (positive)got && text[at] >= '0' && text[at] <= '9')
-                value = value * 10 + (p64)(text[at++] - '0');
+        at = memory_digits_checked(text, (positive)got, CLOCK_GOOD_MOST,
+                                   address_of value);
+        if (!at)
+                return MOONWATER_CLOCK_FLOOR;
         while (at < (positive)got && text[at] == '\n')
                 at++;
-        if (!at || at != (positive)got || value < MOONWATER_CLOCK_FLOOR ||
-            value > CLOCK_GOOD_MOST)
+        if (at != (positive)got || value < MOONWATER_CLOCK_FLOOR)
                 return MOONWATER_CLOCK_FLOOR;
         return value;
 }
@@ -11100,16 +11085,21 @@ static COLD bipolar tls_send_finished(tls_conn address_to tls,
         p8 msg[36] = {TLS_HS_FINISHED, 0, 0, 32};
         p8 none[8] = {TLS_HS_CERTIFICATE, 0, 0, 4};
         positive at = 0;
+        positive sealed;
 
         if (tls->cert_requested)
         {
                 at = tls_seal(tls, TLS_CT_HANDSHAKE, none, sizeof none, out);
+                if (!at)
+                        return TLS_FAIL;
                 tls_transcript_add(tls, none, sizeof none);
         }
         tls_finished_mac(tls, tls->c_hs_traffic, msg + 4);
-        at += tls_seal(tls, TLS_CT_HANDSHAKE, msg, sizeof msg, out + at);
+        sealed = tls_seal(tls, TLS_CT_HANDSHAKE, msg, sizeof msg, out + at);
         crypto_forget(msg, sizeof msg);
-        return network_stream_send_all_until(tls->handle, out, at, deadline)
+        return sealed &&
+               network_stream_send_all_until(tls->handle, out, at + sealed,
+                                             deadline)
                    ? TLS_OK : TLS_FAIL;
 }
 
@@ -12993,8 +12983,7 @@ static bool http_response_fields(p8 address_to bytes, positive size,
 
                 from += string_span_max((string_address)bytes + from,
                                          stop - from, string_set_blanks);
-                while (stop > from &&
-                       (bytes[stop - 1] == ' ' || bytes[stop - 1] == '\t'))
+                while (stop > from && byte_is_blank(bytes[stop - 1]))
                         stop--;
                 *value = (string_address)bytes + from;
                 *length = stop - from;
@@ -15782,7 +15771,7 @@ static COLD bipolar nts_ke(string_address host, p16 port, bool bootstrap,
         http_link_close(address_of link);
         crypto_forget(reply, sizeof reply);
         if (status)
-                memory_fill(state, 0, sizeof(*state));
+                crypto_forget(state, sizeof(*state));
         return status;
 }
 
@@ -15877,7 +15866,7 @@ static COLD positive dns_tls_mode(void)
                 return dns_tls_held - 1;
         got = file_slurp_regular_at(AT_FDCWD, (string_address)DNS_TLS_PATH,
                                     text, sizeof(text), O_NOFOLLOW);
-        if (got < 0)
+        if (got < 0 || got >= (bipolar)sizeof(text))
                 got = 0;
         while (got && (text[got - 1] == '\n' || text[got - 1] == ' '))
                 got--;
@@ -16868,11 +16857,12 @@ static COLD bipolar net_apart(net_apart_task task, address_any context,
 
         for (;;)
         {
-                positive want = answer->used + 65536;
+                positive cap = most < positive_max ? most + 1 : positive_max;
+                positive want = cap - answer->used > 65536
+                                    ? answer->used + 65536
+                                    : cap;
                 bipolar got;
 
-                if (want > most + 1)
-                        want = most + 1;
                 if (!byte_store_reserve(answer, want, 4096))
                 {
                         whole = false;
@@ -17018,10 +17008,12 @@ static COLD bipolar http_run_apart(string_address start,
         http_apart_said said;
         positive at = sizeof said;
         bipolar status;
+        positive overhead = sizeof said + HTTP_URL_MAX + HTTP_HEAD_MAX;
+        positive limit = how->body_most > positive_max - overhead
+                             ? positive_max
+                             : overhead + how->body_most;
         bipolar ran = net_apart(http_apart_task, address_of ask, dest,
-                                address_of answer,
-                                sizeof said + HTTP_URL_MAX + HTTP_HEAD_MAX +
-                                    how->body_most, false);
+                                address_of answer, limit, false);
 
         if (ran != NET_APART_OK || answer.used < sizeof said)
         {
@@ -18059,7 +18051,8 @@ static COLD bool dhcp_confine(b32 handle)
         if (!descriptors_close_outside(0, keep, 3))
                 return false;
 
-        if ((!system_call_1(syscall(getuid), 0) &&
+        if (((!system_call_1(syscall(getuid), 0) ||
+              !system_call_1(syscall(geteuid), 0)) &&
              (system_call_2(syscall(setgroups), 0, 0) < 0 ||
               system_call_3(syscall(setresgid), NET_APART_NOBODY,
                             NET_APART_NOBODY, NET_APART_NOBODY) < 0 ||
