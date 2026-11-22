@@ -6997,6 +6997,48 @@ static int language_find(const char address_to name)
         return -1;
 }
 
+// The placeholders of a format, by index: the kind ('s' or 'd', 0 for none) and the highest index used. Past the table's
+// room, LANGUAGE_ARGUMENTS + 1.
+static unsigned int language_kinds(const char address_to format, char kind[LANGUAGE_ARGUMENTS])
+{
+        unsigned int implicit = 0, used = 0;
+        for (positive k = 0; k < LANGUAGE_ARGUMENTS; k++)
+                kind[k] = 0;
+        for (const char address_to f = format; *f; f++)
+        {
+                unsigned int index;
+                if (*f != '%')
+                        continue;
+                if (*++f == '%')
+                        continue;
+                if (*f >= '1' && *f <= '9' && f[1] == '$')
+                        index = (unsigned int)(*f - '0'), f += 2;
+                else
+                        index = ++implicit;
+                if (!*f)
+                        break;
+                if (index < 1 || index > LANGUAGE_ARGUMENTS)
+                        return LANGUAGE_ARGUMENTS + 1;
+                kind[index - 1] = *f == 's' ? 's' : 'd';
+                used = index > used ? index : used;
+        }
+        return used;
+}
+
+// Whether a translation may stand for its English: it uses no index the English does not, and each index it uses is
+// the same kind. Reading the arguments follows the translation, so this keeps every read within what the English passes.
+static b32 language_fits(const char address_to english, const char address_to text)
+{
+        char english_kind[LANGUAGE_ARGUMENTS], text_kind[LANGUAGE_ARGUMENTS];
+        unsigned int english_used = language_kinds(english, english_kind), text_used = language_kinds(text, text_kind);
+        if (text_used > LANGUAGE_ARGUMENTS || text_used > english_used)
+                return false;
+        for (unsigned int k = 0; k < text_used; k++)
+                if (text_kind[k] && text_kind[k] != english_kind[k])
+                        return false;
+        return true;
+}
+
 static fn language_put(char address_to key, char address_to text)
 {
         if (key[0] == '=')
@@ -7014,7 +7056,7 @@ static fn language_put(char address_to key, char address_to text)
         else
         {
                 int found = language_find(key);
-                if (found >= 0)
+                if (found >= 0 && language_fits(language_table[found].english, text))
                         language.text[found] = text;
         }
 }

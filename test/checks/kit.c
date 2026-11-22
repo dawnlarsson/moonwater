@@ -4458,6 +4458,10 @@ static fn check_kit_language_table(void)
         for (positive id = 0; id < LANGUAGE_COUNT; id++)
                 lost += language_find(language_table[id].name) != (int)id;
         check("kit: the language table is in byte order, and every id is found by language_find", !unsorted && !lost);
+        /* A translation that reads an argument its English does not, or reads it as the other kind, is refused. */
+        check("kit: a translation with an index its English lacks, or another kind, is not taken",
+              !language_fits("%1$s and %2$d", "%1$s %3$s") && !language_fits("%1$s", "%1$d") && language_fits("%1$s %2$d", "%2$d") &&
+                      language_fits("%1$s %2$d", "%2$d %1$s"));
 }
 
 /*
