@@ -918,12 +918,12 @@ static fn launcher_app_icon(int which, struct ui_row address_to row)
 
 static const unsigned int address_to launcher_grid_picture(int id, int side)
 {
-        return id >= 0 && id < launcher.app_count ? ui_apps_picture(launcher.apps[id], side) : null;
+        return id >= 0 && id < launcher.app_count ? ui_apps_picture_kept(launcher.apps[id], side) : null;
 }
 
 static const unsigned int address_to launcher_recent_picture(int id, int side)
 {
-        return id >= 0 && id < launcher.recent_count ? ui_apps_picture(launcher.recent[id], side) : null;
+        return id >= 0 && id < launcher.recent_count ? ui_apps_picture_kept(launcher.recent[id], side) : null;
 }
 
 static fn launcher_tile_describe(const unsigned short address_to ids, int count, int id, struct ui_row address_to row,
@@ -1065,7 +1065,7 @@ static const unsigned int address_to launcher_list_picture(int id, int side)
 {
         return id >= 0 && (positive)id < launcher.entries && launcher.entry[id].kind == LAUNCHER_WINDOW &&
                        launcher.entry[id].index < ui_apps.count
-                   ? ui_apps_picture(launcher.entry[id].index, side)
+                   ? ui_apps_picture_kept(launcher.entry[id].index, side)
                    : null;
 }
 
@@ -1166,6 +1166,22 @@ static int launcher_open(void)
         return -1;
 }
 
+/* The apps' pictures are made off the draw (ui_apps_picture_kept): a tile is its symbol or its lettered tile until its picture is
+   made. A picture the worker has finished is taken here and the launcher drawn again at once; then the next app not tried is asked
+   (ui_apps_picture_warm), so every tile has its picture soon after the launcher opens, and while one is made the loop looks again a
+   frame on. */
+#define LAUNCHER_PICTURE_LOOK 33000000l
+
+static long launcher_pictures(long timeout)
+{
+        if (ui_apps_picture_take())
+                launcher.dirty = true, timeout = 0;
+        ui_apps_picture_warm();
+        if (timeout && ui_apps_picture_making() && (timeout < 0 || timeout > LAUNCHER_PICTURE_LOOK))
+                timeout = LAUNCHER_PICTURE_LOOK;
+        return timeout;
+}
+
 static long launcher_tick(long timeout, long address_to other)
 {
         b32 redraw = false;
@@ -1175,7 +1191,7 @@ static long launcher_tick(long timeout, long address_to other)
         timeout = ui_text_timeout(&launcher.ui, launcher_field(), timeout, &redraw);
         if (redraw || ui_view_moved(&launcher.view, &top, &bottom))
                 launcher.dirty = true;
-        return timeout;
+        return launcher_pictures(timeout);
 }
 
 static struct ui_app launcher_app = {

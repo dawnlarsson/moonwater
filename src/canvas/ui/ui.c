@@ -21364,27 +21364,44 @@ static const unsigned int address_to ui_apps_picture(int which, int size)
         return ui_apps_picture_sized(&ui_apps.app[which], size);
 }
 
+/* An entry's picture asked of the worker: true when the entry is tried (asked now, or before, or with no file to read, which has
+   no picture and needs no worker), false while the worker makes another's (it is asked again later). */
+static b32 ui_apps_picture_ask(struct ui_app_entry address_to app)
+{
+        if (app->tried)
+                return true;
+        if (!app->root[0] || !app->icon[0])
+                return app->tried = true; // ui_apps_picture_file finds no file for these
+        if (ui_apps_job.worker)
+                return false;
+        string_copy_bounded((p8 address_to)ui_apps_job.id, (string_address)app->id, sizeof(ui_apps_job.id));
+        string_copy_bounded((p8 address_to)ui_apps_job.root, (string_address)app->root, sizeof(ui_apps_job.root));
+        string_copy_bounded((p8 address_to)ui_apps_job.icon, (string_address)app->icon, sizeof(ui_apps_job.icon));
+        ui_apps_job.is_local = ui_apps_is_local(app), ui_apps_job.side = 0, ui_apps_job.picture = null;
+        __atomic_store_n(&ui_apps_job.running, 1, __ATOMIC_RELEASE);
+        if ((ui_apps_job.worker = thread_start(ui_apps_picture_work, null)))
+                app->tried = true;
+        else
+                __atomic_store_n(&ui_apps_job.running, 0, __ATOMIC_RELEASE);
+        return app->tried;
+}
+
 /* The same for a draw: no file is read and nothing is decoded here. An entry not tried is asked of the worker (when it is free;
    else at a later draw) and has none until ui_apps_picture_take puts it in. */
 static const unsigned int address_to ui_apps_picture_kept(int which, int size)
 {
-        struct ui_app_entry address_to app;
         if (which < 0 || which >= ui_apps.count || size <= 0 || size > UI_APP_PICTURE)
                 return null;
-        app = &ui_apps.app[which];
-        if (!app->tried && !ui_apps_job.worker)
-        {
-                string_copy_bounded((p8 address_to)ui_apps_job.id, (string_address)app->id, sizeof(ui_apps_job.id));
-                string_copy_bounded((p8 address_to)ui_apps_job.root, (string_address)app->root, sizeof(ui_apps_job.root));
-                string_copy_bounded((p8 address_to)ui_apps_job.icon, (string_address)app->icon, sizeof(ui_apps_job.icon));
-                ui_apps_job.is_local = ui_apps_is_local(app), ui_apps_job.side = 0, ui_apps_job.picture = null;
-                __atomic_store_n(&ui_apps_job.running, 1, __ATOMIC_RELEASE);
-                if ((ui_apps_job.worker = thread_start(ui_apps_picture_work, null)))
-                        app->tried = true;
-                else
-                        __atomic_store_n(&ui_apps_job.running, 0, __ATOMIC_RELEASE);
-        }
-        return ui_apps_picture_sized(app, size);
+        ui_apps_picture_ask(&ui_apps.app[which]);
+        return ui_apps_picture_sized(&ui_apps.app[which], size);
+}
+
+// At a pass with nothing else to do: the first entry not tried yet asked of the worker, so a window that shows every app (the
+// launcher) has their pictures soon after it opens, one after another and none on the draw's thread.
+static fn ui_apps_picture_warm(void)
+{
+        for (int at = 0; at < ui_apps.count && !ui_apps_job.worker; at++)
+                ui_apps_picture_ask(&ui_apps.app[at]);
 }
 
 // Whether an entry has a picture of its own (made the first time this is asked, as ui_apps_picture makes it; the size kept is left as it was).

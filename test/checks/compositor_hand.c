@@ -2668,6 +2668,24 @@ static void check_taskbar_pins(void)
         check("taskbar picture: the first draw of a new app's task reads no file: it has the window symbol, and the picture is the worker's to make", first);
         check("taskbar picture: when the worker has made it, the loop asks for the band again and the next draw has the task with its picture", later && changed > 0);
     }
+    /* The launcher's tiles the same: on its first frame a tile asks the worker and reads no icon file (it has its symbol or lettered
+       tile meanwhile); the launcher's pass takes the picture the worker made, draws again at once (its wait 0), and the tile has it. */
+    {
+        int game;
+        b32 first, then;
+
+        ui_apps.read = false;
+        ui_apps_fresh((b64)clock_monotonic_nanoseconds());
+        game = ui_apps_find("steam_app_362890");
+        launcher.app_count = game >= 0 ? 1 : 0, launcher.apps[0] = (unsigned short)(game >= 0 ? game : 0), launcher.dirty = false;
+        first = game >= 0 && !launcher_grid_picture(0, 32) && !ui_apps.app[game].picture && ui_apps_picture_making();
+        ui_apps_picture_settle();
+        then = launcher_pictures(-1) == 0 && launcher.dirty && launcher_grid_picture(0, 32) != null;
+        check("launcher picture: the launcher's first frame reads no icon file: a tile asks the worker and is its symbol meanwhile", first);
+        check("launcher picture: its pass takes the picture the worker made and draws again at once, and the tile has it", then);
+        ui_apps_picture_settle(), ui_apps_picture_take(); // the next app the pass asked for (ui_apps_picture_warm), put away
+        launcher.app_count = 0, launcher.dirty = false;
+    }
     check_taskbar_pins_put("chromium /x /y ; settings /settings /settings ; nosuch /a /b ; Steam /usr/lib/steam/steam /bowls/bin/steam --x");
     check("taskbar pinned: a line's entries are the registry's apps they name, by id or by an older line's window key, titled by their names; one of no app is not shown",
           taskbar_pins.count == 3 && string_equals((string_address)taskbar_pins.pin[0].app, (string_address) "chromium") &&
