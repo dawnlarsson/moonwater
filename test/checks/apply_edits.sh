@@ -1,6 +1,6 @@
 #!/bin/sh
 #
-#       test/checks/apply_edits.sh: three edits of kernel/patch/apply, run from their own text.
+#       test/checks/apply_edits.sh: edits of kernel/patch/apply, run from their own text.
 #
 #       fold     the header fold, which the two call sites now share through
 #                header_fold: the header tree is byte-identical to what the
@@ -10,6 +10,10 @@
 #                and a working sudo still makes the edit
 #       wave     the gfx10 wave limit: its three additions land in the compute
 #                ring's funcs and nowhere else, once, and a moved line stops it
+#       start    the scheduler's new-task edit leaves new threads out
+#                (thread_group_leader), in a fresh tree and in one patched
+#                with the text from before, which gets the line and is then
+#                found applied rather than stopping the build
 #
 #       The functions and call blocks are taken from kernel/patch/apply by
 #       sed, so the check runs what the script runs. Run from the repository
@@ -208,6 +212,46 @@ wave_moved=$?
 row "gfx10 wave limit: a compute frame that no longer ends where the edit is placed stops the script" "$(
         if [ "$wave_moved" != 0 ] && grep -q "the compute ring's frame size no longer ends where this edit is placed" "$work/wave-moved.out" &&
            ! grep -q 'Moonwater: gfx_v10_0_emit_wave_limit, twice' "$wave_c"
+        then echo yes; else echo no; fi)"
+
+#       ---- start ---------------------------------------------------------
+start_dir=$work/start
+mkdir -p "$start_dir/linux/kernel/sched" "$start_dir/work"
+cd "$start_dir" || exit 1
+tab=$(printf '\t')
+settings_work=$start_dir/work
+sed -n '/^settings_replace() {/,/^}/p' "$apply" > "$start_dir/replace.sh"
+sed -n '/^settings_insert() {/,/^}/p' "$apply" > "$start_dir/insert.sh"
+sed -n '/^cat > "\$settings_work\/start" <<EOF$/,/"\$settings_work\/start" scheduler$/p' "$apply" > "$start_dir/edit.sh"
+fair=linux/kernel/sched/fair.c
+new_line="${tab}     ((wake_flags & WF_FORK) && thread_group_leader(p) && this_rq()->nr_running <= 1)) &&"
+old_line="${tab}     ((wake_flags & WF_FORK) && this_rq()->nr_running <= 1)) &&"
+printf 'static int select_task_rq_fair(struct task_struct *p, int prev_cpu, int wake_flags)\n{\n%slockdep_assert_held(&p->pi_lock);\n%sreturn cpu;\n}\n' "$tab" "$tab" > "$fair"
+(
+        . "$start_dir/replace.sh"
+        . "$start_dir/insert.sh"
+        . "$start_dir/edit.sh"
+) > "$work/start-fresh.out" 2>&1
+fresh=$?
+row "start: a fresh tree's new-task edit starts only a new process where it was made, not a new thread" "$(
+        if [ "$fresh" = 0 ] && [ "$(grep -c -F -- "$new_line" "$fair")" = 1 ] && ! grep -q -F -- "$old_line" "$fair"
+        then echo yes; else echo no; fi)"
+#       The tree patched before: the block as it was, the old line in it.
+printf 'static int select_task_rq_fair(struct task_struct *p, int prev_cpu, int wake_flags)\n{\n%slockdep_assert_held(&p->pi_lock);\n' "$tab" > "$fair"
+sed -n '/^cat > "\$settings_work\/start" <<EOF$/,/^EOF$/p' "$apply" | sed '1d;$d' | sed "s/\${tab}/$tab/g" |
+        awk -v old="$old_line" -v new="$new_line" '$0 == new { print old; next } { print }' >> "$fair"
+printf '%sreturn cpu;\n}\n' "$tab" >> "$fair"
+had_old=$(grep -c -F -- "$old_line" "$fair")
+(
+        . "$start_dir/replace.sh"
+        . "$start_dir/insert.sh"
+        . "$start_dir/edit.sh"
+        . "$start_dir/edit.sh"
+) > "$work/start-stale.out" 2>&1
+stale=$?
+row "start: a tree patched with the old text gets the line, and the edit (run twice) is then found applied" "$(
+        if [ "$had_old" = 1 ] && [ "$stale" = 0 ] && [ "$(grep -c -F -- "$new_line" "$fair")" = 1 ] && ! grep -q -F -- "$old_line" "$fair" &&
+           [ "$(grep -c -F 'Moonwater: a new task starts on the CPU' "$fair")" = 1 ]
         then echo yes; else echo no; fi)"
 
 exit "$failed"

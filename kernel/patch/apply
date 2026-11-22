@@ -898,6 +898,14 @@ esac
 #       on the runqueue while the parent starts its next command and send
 #       that one to the other CPU after all.
 #
+#       A new thread is no child its maker waits for. A game's or Wine's
+#       thread made mid-play by its render or main thread -- the one task
+#       runnable on its CPU, which is this case exactly -- stacked there and
+#       preempted it or waited behind it until an idle CPU pulled one of the
+#       two at the busy CPU's next tick, up to 4 ms at HZ 250. Only a new
+#       thread group's leader (a process: fork, vfork, posix_spawn) starts
+#       where it was made; a thread goes where Linux puts it.
+#
 cat > "$settings_work/start" <<EOF
 ${tab}/*
 ${tab} * Moonwater: a new task starts on the CPU that made it while nothing
@@ -906,11 +914,18 @@ ${tab} * and exec keeps the CPU fork chose; see kernel/patch/apply, where a
 ${tab} * new process starts.
 ${tab} */
 ${tab}if (((wake_flags & WF_EXEC) ||
-${tab}     ((wake_flags & WF_FORK) && this_rq()->nr_running <= 1)) &&
+${tab}     ((wake_flags & WF_FORK) && thread_group_leader(p) && this_rq()->nr_running <= 1)) &&
 ${tab}    cpumask_test_cpu(cpu, p->cpus_ptr))
 ${tab}${tab}return cpu;
 
 EOF
+#       A tree patched with the text from before threads were left out gets
+#       that one line, and is then this edit's.
+start_c=linux/kernel/sched/fair.c
+if [ -f "$start_c" ] && grep -q -F -- "${tab}     ((wake_flags & WF_FORK) && this_rq()->nr_running <= 1)) &&" "$start_c"; then
+        settings_replace "$start_c" 's/((wake_flags & WF_FORK) && this_rq()->nr_running <= 1)) &&/((wake_flags \& WF_FORK) \&\& thread_group_leader(p) \&\& this_rq()->nr_running <= 1)) \&\&/' ||
+                die "scheduler: could not edit $start_c"
+fi
 settings_insert linux/kernel/sched/fair.c "Moonwater: a new task starts on the CPU" \
         "${tab}lockdep_assert_held(&p->pi_lock);" after "$settings_work/start" scheduler
 
