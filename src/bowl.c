@@ -9800,7 +9800,6 @@ static string_address bowl_chrome_session[] = {
     "for node in /dev/dri/renderD* /dev/kfd /dev/udmabuf /dev/dma_heap/* /dev/nvidia*; do [ -c \"$node\" ] && chown 0:"
     BOWL_GROUP_RENDER_TEXT " \"$node\" && chmod 0660 \"$node\"; done 2>/dev/null",
     "for node in /dev/video* /dev/media*; do [ -c \"$node\" ] && chown 0:44 \"$node\" && chmod 0660 \"$node\"; done 2>/dev/null",
-    "[ -c /dev/ntsync ] && { chmod 0666 /dev/ntsync 2>/dev/null || true; export PROTON_USE_NTSYNC=${PROTON_USE_NTSYNC:-1} PROTON_ENABLE_NTSYNC=${PROTON_ENABLE_NTSYNC:-1}; } || true",
     // musl 1.2.6 implements pwrite() via SYS_pwritev2, which Chromium's
     // seccomp-bpf filter traps (nr=0x148 on x86-64). Preloading our tiny
     // syscall-only shim routes pwrite* back to __NR_pwrite64 inside the bowl
@@ -14889,7 +14888,19 @@ static string_address bowl_steam_session[] = {
     "wa sdl-no-udev && export SDL_JOYSTICK_DISABLE_UDEV=1 SDL_HIDAPI_JOYSTICK_DISABLE_UDEV=1 SDL_HIDAPI_UDEV=0",
     "for node in /dev/dri/renderD* /dev/kfd /dev/udmabuf /dev/dma_heap/* /dev/nvidia*; do [ -c \"$node\" ] && chown 0:"
     BOWL_GROUP_RENDER_TEXT " \"$node\" && chmod 0660 \"$node\"; done 2>/dev/null",
-    "[ -c /dev/ntsync ] && { chmod 0666 /dev/ntsync 2>/dev/null || true; export PROTON_USE_NTSYNC=${PROTON_USE_NTSYNC:-1} PROTON_ENABLE_NTSYNC=${PROTON_ENABLE_NTSYNC:-1}; } || true",
+    // ntsync is Proton 11's own: its wineserver opens /dev/ntsync (0666, the driver's own mode) whenever it is there and has only an
+    // opt-out (PROTON_NO_NTSYNC), so nothing is said for it here (PROTON_USE_NTSYNC and PROTON_ENABLE_NTSYNC were read by nothing).
+    // DXVK's low-latency pacing (dxvk.latencySleep, in Proton 11's DXVK 2.7): the CPU's next frame starts as late as lets it make
+    // the vblank, so the input a frame shows is that much newer. A person's own DXVK_CONFIG is left as it is.
+    "wa dxvk-latency && [ -z \"$DXVK_CONFIG\" ] && export DXVK_CONFIG='dxvk.latencySleep = True'",
+    // A Wine game is told of one CCD's CPUs (WINE_CPU_TOPOLOGY), the compositor's, where game mode pins its threads
+    // (compositor_game_slice), on a machine with two or more: Wine, DXVK and the game size their thread pools by the count, and
+    // 32 threads squeezed onto a CCD's 16 queued behind each other, worst in shader compiles and loads.
+    "wa wine-ccd && [ -z \"$WINE_CPU_TOPOLOGY\" ] && { l3=$(cat /sys/devices/system/cpu/cpu0/cache/index3/shared_cpu_list 2>/dev/null); "
+    "pk=$(cat /sys/devices/system/cpu/cpu0/topology/package_cpus_list 2>/dev/null); "
+    "if [ -n \"$l3\" ] && [ -n \"$pk\" ] && [ \"$l3\" != \"$pk\" ]; then cpus=; n=0; "
+    "for r in $(echo \"$l3\" | tr , ' '); do lo=${r%-*}; hi=${r#*-}; while [ \"$lo\" -le \"$hi\" ]; do "
+    "cpus=${cpus:+$cpus,}$lo; n=$((n + 1)); lo=$((lo + 1)); done; done; [ $n -gt 0 ] && export WINE_CPU_TOPOLOGY=$n:$cpus; fi; } || true",
     "gl=software; for node in /sys/class/drm/renderD*; do [ -e \"$node/device\" ] || continue; "
     "case $(cat \"$node\"/device/uevent 2>/dev/null) in *DRIVER=vgem*|*platform:vgem*|*DRIVER=vkms*) continue ;; esac; "
     "case $(cat \"$node\"/device/features \"$node\"/device/virtio*/features 2>/dev/null) in 0*) ;; *) gl=card ;; esac; done",

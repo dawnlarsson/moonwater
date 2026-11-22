@@ -1575,6 +1575,19 @@ static fn steam_profile(void)
               sound && sound < run && strstr(steam->session[sound - 1], "-S /run/moonwater/pulse/native"));
         check("The session chooses no video driver for the games (no SDL_VIDEODRIVER, no PROTON_ENABLE_WAYLAND): each takes its own default",
               steam && !video_chosen && !proton_chosen);
+        {
+                const struct bowl_profile address_to chrome_profile = bowl_find_profile("chrome");
+                positive latency = chrome_line(steam ? steam->session : null, "export DXVK_CONFIG='dxvk.latencySleep = True'");
+                positive topology = chrome_line(steam ? steam->session : null, "export WINE_CPU_TOPOLOGY=$n:$cpus");
+
+                check("The session turns DXVK's latency sleep on unless the person set DXVK_CONFIG, behind wa dxvk-latency, before Steam starts",
+                      latency && latency < run && strstr(steam->session[latency - 1], "wa dxvk-latency && [ -z \"$DXVK_CONFIG\" ]"));
+                check("The session tells Wine games of the first CCD's CPUs where there are two, unless the person set WINE_CPU_TOPOLOGY",
+                      topology && topology < run && strstr(steam->session[topology - 1], "wa wine-ccd && [ -z \"$WINE_CPU_TOPOLOGY\" ]") &&
+                          strstr(steam->session[topology - 1], "cache/index3/shared_cpu_list"));
+                check("No session says PROTON_USE_NTSYNC or PROTON_ENABLE_NTSYNC (Proton 11 opens /dev/ntsync itself)",
+                      steam && !chrome_line(steam->session, "NTSYNC") && chrome_profile && !chrome_line(chrome_profile->session, "NTSYNC"));
+        }
         check("Xwayland starts before Steam, and the session waits for its socket before exporting DISPLAY",
               display_scan && display_scan < xwayland && xwayland && wait && display && xwayland < wait && wait < display && display < run);
         check("The session skips vgem and vkms render nodes when probing for hardware GL",

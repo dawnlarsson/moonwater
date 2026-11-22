@@ -878,11 +878,11 @@ def test_compositor_and_xwm_invariants():
           "wayland_latch_defer(defer)" in wlh)
     check("Spark hi-res scroll deduplicates low-res REL_WHEEL/REL_HWHEEL",
           "REL_WHEEL_HI_RES" in read_text("src/moonwater/moonwater.c"))
-    check("Bowl /tmp mode=1777, BOWL_ENV_DEFAULTS>=32, rlimits, QT_QPA_PLATFORM dedup & non-root NTSYNC",
+    check("Bowl /tmp mode=1777, BOWL_ENV_DEFAULTS>=32, rlimits & QT_QPA_PLATFORM dedup (ntsync is Proton 11's own: no variable for it)",
           all(s in read_text("src/bowl.c") for s in
               ('string_equals(point->target, "/tmp")', "BOWL_ENV_DEFAULTS 32", "BOWL_NOFILE_TARGET ((p64)1048576)",
-               "PROTON_USE_NTSYNC", "have_qt_platform", "QT_QPA_PLATFORM=wayland", "0x10de")) and
-          "chmod 0666 /dev/ntsync 2>/dev/null || true; export PROTON_USE_NTSYNC=" in read_text("src/bowl.c"))
+               "have_qt_platform", "QT_QPA_PLATFORM=wayland", "0x10de")) and
+          "export PROTON_USE_NTSYNC=" not in read_text("src/bowl.c"))
 
 
 def test_kernel_audio_bowl_invariants():
