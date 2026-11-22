@@ -418,7 +418,7 @@ scene:
 	s_add_u32	s24, s24, s25
 	s_add_u32	s26, s10, s24
 	s_addc_u32	s27, s11, 0
-	s_load_dwordx8	s[32:39], s[26:27], 0x0
+	s_load_dwordx8	s[56:63], s[26:27], 0x0
 	v_lshl_add_u32	v3, v1, 2, s28
 	v_add_nc_u32	v4, s29, v2
 	v_cmp_gt_u32	vcc, s14, v4
@@ -435,43 +435,43 @@ scene:
 	s_add_u32	s41, s29, 4
 	s_min_u32	s41, s41, s14
 	s_waitcnt	lgkmcnt(0)
-	s_cmp_eq_u32	s32, 2
+	s_cmp_eq_u32	s56, 2
 	s_cbranch_scc1	.scene_first_box
-	s_and_b32	s43, s32, 0x1f
+	s_and_b32	s43, s56, 0x1f
 	s_cmp_eq_u32	s43, 4
 	s_cbranch_scc1	.scene_first_rect
-	s_cmp_lg_u32	s32, 0
+	s_cmp_lg_u32	s56, 0
 	s_cbranch_scc1	.scene_read
 .scene_first_rect:
-	s_cmp_gt_i32	s33, s28
+	s_cmp_gt_i32	s57, s28
 	s_cbranch_scc1	.scene_read
-	s_cmp_lt_i32	s35, s40
+	s_cmp_lt_i32	s59, s40
 	s_cbranch_scc1	.scene_read
-	s_cmp_gt_i32	s34, s29
+	s_cmp_gt_i32	s58, s29
 	s_cbranch_scc1	.scene_read
-	s_cmp_lt_i32	s36, s41
+	s_cmp_lt_i32	s60, s41
 	s_cbranch_scc1	.scene_read
 	s_branch	.scene_ops
 .scene_first_box:
-	s_lshr_b32	s43, s37, 24
+	s_lshr_b32	s43, s61, 24
 	s_cmp_lg_u32	s43, 255
 	s_cbranch_scc1	.scene_read
 	s_lshl_b32	s78, s28, 8
 	s_lshl_b32	s79, s29, 8
 	s_lshl_b32	s80, s40, 8
 	s_lshl_b32	s81, s41, 8
-	s_cmp_gt_i32	s33, s78
+	s_cmp_gt_i32	s57, s78
 	s_cbranch_scc1	.scene_read
-	s_cmp_lt_i32	s35, s80
+	s_cmp_lt_i32	s59, s80
 	s_cbranch_scc1	.scene_read
-	s_cmp_gt_i32	s34, s79
+	s_cmp_gt_i32	s58, s79
 	s_cbranch_scc1	.scene_read
-	s_cmp_lt_i32	s36, s81
+	s_cmp_lt_i32	s60, s81
 	s_cbranch_scc1	.scene_read
-	s_add_i32	s43, s34, s39
+	s_add_i32	s43, s58, s63
 	s_cmp_gt_i32	s43, s79
 	s_cbranch_scc1	.scene_read
-	s_sub_i32	s43, s36, s39
+	s_sub_i32	s43, s60, s63
 	s_cmp_lt_i32	s43, s81
 	s_cbranch_scc1	.scene_read
 	s_branch	.scene_ops
@@ -483,8 +483,10 @@ scene:
 	s_mov_b64	exec, s[2:3]
 .scene_ops:
 	s_mov_b32	s75, 0x00ff00ff
-	s_mov_b32	s44, 0
+	s_mov_b32	s44, 1
 	s_mov_b32	s45, 0
+	s_mov_b64	s[48:49], s[26:27]
+	s_branch	.scene_dispatch
 .scene_loop:
 	s_cmp_ge_u32	s44, s23
 	s_cbranch_scc1	.scene_store
@@ -494,27 +496,10 @@ scene:
 	s_load_dwordx8	s[56:63], s[48:49], 0x0
 	s_add_u32	s44, s44, 1
 	s_waitcnt	lgkmcnt(0)
+.scene_dispatch:
 	s_and_b32	s47, s56, 0x1f
-	s_cmp_eq_u32	s47, 2
-	s_cbranch_scc1	.scene_box
-	s_cmp_eq_u32	s47, 3
-	s_cbranch_scc1	.scene_text
-	s_cmp_eq_u32	s47, 4
-	s_cbranch_scc1	.scene_image
-	s_cmp_eq_u32	s47, 5
-	s_cbranch_scc1	.scene_mix
-	s_cmp_eq_u32	s47, 12
-	s_cbranch_scc1	.scene_mix
-	s_cmp_eq_u32	s47, 13
-	s_cbranch_scc1	.scene_mix
-	s_cmp_eq_u32	s47, 6
-	s_cbranch_scc1	.scene_close
-	s_cmp_eq_u32	s47, 7
-	s_cbranch_scc1	.scene_turn
-	s_cmp_eq_u32	s47, 10
-	s_cbranch_scc1	.scene_translate
-	s_cmp_eq_u32	s47, 11
-	s_cbranch_scc1	.scene_image
+	s_cmp_gt_u32	s47, 1
+	s_cbranch_scc1	.scene_other
 	s_cmp_le_i32	s59, s28
 	s_cbranch_scc1	.scene_loop
 	s_add_u32	s50, s28, 64
@@ -561,6 +546,28 @@ scene:
 	v_cndmask_b32_e64 v7, v7, v23, s[68:69]
 	over		v23, v8
 	v_cndmask_b32_e64 v8, v8, v23, s[70:71]
+	s_branch	.scene_loop
+.scene_other:
+	s_cmp_eq_u32	s47, 4
+	s_cbranch_scc1	.scene_image
+	s_cmp_eq_u32	s47, 2
+	s_cbranch_scc1	.scene_box
+	s_cmp_eq_u32	s47, 10
+	s_cbranch_scc1	.scene_translate
+	s_cmp_eq_u32	s47, 3
+	s_cbranch_scc1	.scene_text
+	s_cmp_eq_u32	s47, 11
+	s_cbranch_scc1	.scene_image
+	s_cmp_eq_u32	s47, 5
+	s_cbranch_scc1	.scene_mix
+	s_cmp_eq_u32	s47, 12
+	s_cbranch_scc1	.scene_mix
+	s_cmp_eq_u32	s47, 13
+	s_cbranch_scc1	.scene_mix
+	s_cmp_eq_u32	s47, 6
+	s_cbranch_scc1	.scene_close
+	s_cmp_eq_u32	s47, 7
+	s_cbranch_scc1	.scene_turn
 	s_branch	.scene_loop
 
 ; one pixel of a mix (memory_mix_u32_row): the lane's pixel \o and the ink \ink at the cover \cv (0 to 255), where the mask \mk has it: none leaves the pixel, all takes the ink
@@ -804,23 +811,23 @@ scene:
 	v_mov_b32	v33, s101
 	v_add_co_ci_u32	v33, vcc, v33, v36, vcc
 	s_and_b64	exec, s[92:93], s[82:83]
-	global_load_dword v64, v[32:33], off
+	global_load_dword v24, v[32:33], off
 	s_and_b64	exec, s[92:93], s[84:85]
-	global_load_dword v65, v[32:33], off offset:4
+	global_load_dword v25, v[32:33], off offset:4
 	s_and_b64	exec, s[92:93], s[86:87]
-	global_load_dword v66, v[32:33], off offset:8
+	global_load_dword v26, v[32:33], off offset:8
 	s_and_b64	exec, s[92:93], s[88:89]
-	global_load_dword v67, v[32:33], off offset:12
+	global_load_dword v27, v[32:33], off offset:12
 	s_mov_b64	exec, s[92:93]
 	s_waitcnt	vmcnt(0)
-	v_bfe_u32	v60, v34, 0, 8
-	v_bfe_u32	v61, v34, 8, 8
-	v_bfe_u32	v62, v34, 16, 8
-	v_bfe_u32	v63, v34, 24, 8
-	closepixel	v5, v60, v64, s[82:83]
-	closepixel	v6, v61, v65, s[84:85]
-	closepixel	v7, v62, v66, s[86:87]
-	closepixel	v8, v63, v67, s[88:89]
+	v_bfe_u32	v20, v34, 0, 8
+	v_bfe_u32	v21, v34, 8, 8
+	v_bfe_u32	v22, v34, 16, 8
+	v_bfe_u32	v23, v34, 24, 8
+	closepixel	v5, v20, v24, s[82:83]
+	closepixel	v6, v21, v25, s[84:85]
+	closepixel	v7, v22, v26, s[86:87]
+	closepixel	v8, v23, v27, s[88:89]
 	s_branch	.scene_loop
 
 ; a mix (5 | the cover's pitch << 8 | the ink's pitch << 16, x0, y0, x1, y1 in pixels, the place of the cover byte at x0, y0 from the buffer's start, the ink's address in
@@ -872,14 +879,25 @@ scene:
 	v_add_co_u32	v32, vcc, s62, v35
 	v_mov_b32	v33, s63
 	v_add_co_ci_u32	v33, vcc, v33, v36, vcc
-	s_and_b64	exec, s[92:93], s[82:83]
-	global_load_dword v64, v[32:33], off
-	s_and_b64	exec, s[92:93], s[84:85]
-	global_load_dword v65, v[32:33], off offset:4
-	s_and_b64	exec, s[92:93], s[86:87]
-	global_load_dword v66, v[32:33], off offset:8
-	s_and_b64	exec, s[92:93], s[88:89]
-	global_load_dword v67, v[32:33], off offset:12
+	s_and_b64	s[94:95], s[82:83], s[88:89]
+	s_and_b64	exec, s[92:93], s[94:95]
+	s_cbranch_execz	.mix_edge
+	global_load_dwordx4 v[24:27], v[32:33], off
+.mix_edge:
+	s_andn2_b64	s[94:95], s[90:91], s[94:95]
+	s_and_b64	exec, s[92:93], s[94:95]
+	s_cbranch_execz	.mix_linear_done
+	s_waitcnt	vmcnt(0)
+	s_and_b64	s[96:97], s[92:93], s[94:95]
+	s_and_b64	exec, s[96:97], s[82:83]
+	global_load_dword v24, v[32:33], off
+	s_and_b64	exec, s[96:97], s[84:85]
+	global_load_dword v25, v[32:33], off offset:4
+	s_and_b64	exec, s[96:97], s[86:87]
+	global_load_dword v26, v[32:33], off offset:8
+	s_and_b64	exec, s[96:97], s[88:89]
+	global_load_dword v27, v[32:33], off offset:12
+.mix_linear_done:
 	s_mov_b64	exec, s[92:93]
 	s_branch	.mix_blend
 .mix_tiled:
@@ -901,13 +919,13 @@ scene:
 	s_bitcmp1_b32	s56, 5
 	s_cbranch_scc1	.mix_tiled_unorm
 	s_and_b64	exec, s[92:93], s[82:83]
-	image_load	v64, v[30:31], s[64:71] dmask:0x1 dim:SQ_RSRC_IMG_2D unorm
+	image_load	v24, v[30:31], s[64:71] dmask:0x1 dim:SQ_RSRC_IMG_2D unorm
 	s_and_b64	exec, s[92:93], s[84:85]
-	image_load	v65, v[32:33], s[64:71] dmask:0x1 dim:SQ_RSRC_IMG_2D unorm
+	image_load	v25, v[32:33], s[64:71] dmask:0x1 dim:SQ_RSRC_IMG_2D unorm
 	s_and_b64	exec, s[92:93], s[86:87]
-	image_load	v66, v[38:39], s[64:71] dmask:0x1 dim:SQ_RSRC_IMG_2D unorm
+	image_load	v26, v[38:39], s[64:71] dmask:0x1 dim:SQ_RSRC_IMG_2D unorm
 	s_and_b64	exec, s[92:93], s[88:89]
-	image_load	v67, v[40:41], s[64:71] dmask:0x1 dim:SQ_RSRC_IMG_2D unorm
+	image_load	v27, v[40:41], s[64:71] dmask:0x1 dim:SQ_RSRC_IMG_2D unorm
 	s_mov_b64	exec, s[92:93]
 	s_branch	.mix_blend
 .mix_tiled_unorm:
@@ -921,55 +939,55 @@ scene:
 	image_load	v[56:59], v[40:41], s[64:71] dmask:0xf dim:SQ_RSRC_IMG_2D unorm
 	s_mov_b64	exec, s[92:93]
 	s_waitcnt	vmcnt(0)
-	packunorm	v64, v44, v45, v46, v47
-	packunorm	v65, v48, v49, v50, v51
-	packunorm	v66, v52, v53, v54, v55
-	packunorm	v67, v56, v57, v58, v59
+	packunorm	v24, v44, v45, v46, v47
+	packunorm	v25, v48, v49, v50, v51
+	packunorm	v26, v52, v53, v54, v55
+	packunorm	v27, v56, v57, v58, v59
 	s_branch	.mix_ordered
 .mix_constant:
-	v_mov_b32	v64, s62
-	v_mov_b32	v65, s62
-	v_mov_b32	v66, s62
-	v_mov_b32	v67, s62
+	v_mov_b32	v24, s62
+	v_mov_b32	v25, s62
+	v_mov_b32	v26, s62
+	v_mov_b32	v27, s62
 .mix_blend:
 	s_waitcnt	vmcnt(0)
 	s_and_b32	s50, s56, 0x80
 	s_cmp_eq_u32	s50, 0
 	s_cbranch_scc1	.mix_ordered
 	s_mov_b32	s50, 0x3000102
-	v_perm_b32	v64, v64, v64, s50
-	v_perm_b32	v65, v65, v65, s50
-	v_perm_b32	v66, v66, v66, s50
-	v_perm_b32	v67, v67, v67, s50
+	v_perm_b32	v24, v24, v24, s50
+	v_perm_b32	v25, v25, v25, s50
+	v_perm_b32	v26, v26, v26, s50
+	v_perm_b32	v27, v27, v27, s50
 .mix_ordered:
-	v_bfe_u32	v60, v34, 0, 8
-	v_bfe_u32	v61, v34, 8, 8
-	v_bfe_u32	v62, v34, 16, 8
-	v_bfe_u32	v63, v34, 24, 8
+	v_bfe_u32	v28, v34, 0, 8
+	v_bfe_u32	v29, v34, 8, 8
+	v_bfe_u32	v30, v34, 16, 8
+	v_bfe_u32	v31, v34, 24, 8
 	s_cmp_eq_u32	s47, 12
 	s_cbranch_scc1	.mix_over
 	s_cmp_eq_u32	s47, 13
 	s_cbranch_scc1	.mix_linear
-	mixpixel	v5, v60, v64, s[82:83]
-	mixpixel	v6, v61, v65, s[84:85]
-	mixpixel	v7, v62, v66, s[86:87]
-	mixpixel	v8, v63, v67, s[88:89]
+	mixpixel	v5, v28, v24, s[82:83]
+	mixpixel	v6, v29, v25, s[84:85]
+	mixpixel	v7, v30, v26, s[86:87]
+	mixpixel	v8, v31, v27, s[88:89]
 	s_branch	.scene_loop
 .mix_linear:
 	s_add_u32	s98, s102, 43008
 	s_addc_u32	s99, s103, 0
 	s_add_u32	s100, s102, 44032
 	s_addc_u32	s101, s103, 0
-	mixlinear	v5, v60, v64, s[82:83]
-	mixlinear	v6, v61, v65, s[84:85]
-	mixlinear	v7, v62, v66, s[86:87]
-	mixlinear	v8, v63, v67, s[88:89]
+	mixlinear	v5, v28, v24, s[82:83]
+	mixlinear	v6, v29, v25, s[84:85]
+	mixlinear	v7, v30, v26, s[86:87]
+	mixlinear	v8, v31, v27, s[88:89]
 	s_branch	.scene_loop
 .mix_over:
-	wover		v5, v60, v64, s[82:83]
-	wover		v6, v61, v65, s[84:85]
-	wover		v7, v62, v66, s[86:87]
-	wover		v8, v63, v67, s[88:89]
+	wover		v5, v28, v24, s[82:83]
+	wover		v6, v29, v25, s[84:85]
+	wover		v7, v30, v26, s[86:87]
+	wover		v8, v31, v27, s[88:89]
 	s_branch	.scene_loop
 
 ; an image (4 copied, 11 premultiplied alpha-over blended, x0, y0, x1, y1 in pixels, the address of the picture's pixel at x0, y0 in two words, its pitch in pixels):
@@ -1007,14 +1025,28 @@ scene:
 	v_mov_b32	v33, s62
 	v_add_co_ci_u32	v33, vcc, v33, v31, vcc
 	s_mov_b64	s[92:93], exec
-	s_and_b64	exec, s[92:93], s[82:83]
+	s_and_b64	s[90:91], s[82:83], s[88:89]
+	s_and_b64	exec, s[92:93], s[90:91]
+	s_cbranch_execz	.image_edge
+	global_load_dwordx4 v[34:37], v[32:33], off
+.image_edge:
+	s_or_b64	s[94:95], s[82:83], s[84:85]
+	s_or_b64	s[94:95], s[94:95], s[86:87]
+	s_or_b64	s[94:95], s[94:95], s[88:89]
+	s_andn2_b64	s[94:95], s[94:95], s[90:91]
+	s_and_b64	exec, s[92:93], s[94:95]
+	s_cbranch_execz	.image_linear_wait
+	s_waitcnt	vmcnt(0)
+	s_and_b64	s[96:97], s[92:93], s[94:95]
+	s_and_b64	exec, s[96:97], s[82:83]
 	global_load_dword v34, v[32:33], off
-	s_and_b64	exec, s[92:93], s[84:85]
+	s_and_b64	exec, s[96:97], s[84:85]
 	global_load_dword v35, v[32:33], off offset:4
-	s_and_b64	exec, s[92:93], s[86:87]
+	s_and_b64	exec, s[96:97], s[86:87]
 	global_load_dword v36, v[32:33], off offset:8
-	s_and_b64	exec, s[92:93], s[88:89]
+	s_and_b64	exec, s[96:97], s[88:89]
 	global_load_dword v37, v[32:33], off offset:12
+.image_linear_wait:
 	s_mov_b64	exec, s[92:93]
 	s_waitcnt	vmcnt(0)
 	s_branch	.image_loaded
@@ -1161,24 +1193,24 @@ scene:
 	global_load_dword v36, v[40:41], off
 	global_load_dword v37, v[42:43], off
 	s_waitcnt	vmcnt(0)
-	v_bfe_u32	v74, v34, 0, 8
-	v_bfe_u32	v70, v34, 8, 8
-	v_bfe_u32	v71, v34, 16, 8
-	v_bfe_u32	v72, v34, 24, 8
-	v_bfe_u32	v73, v35, 0, 8
-	v_bfe_u32	v75, v35, 8, 8
-	v_bfe_u32	v76, v36, 0, 8
-	v_bfe_u32	v77, v36, 8, 8
-	v_bfe_u32	v78, v36, 16, 8
-	v_bfe_u32	v79, v36, 24, 8
-	v_bfe_u32	v80, v37, 0, 8
-	v_bfe_u32	v81, v37, 8, 8
-	v_bfe_u32	v82, v37, 16, 8
-	v_bfe_u32	v83, v37, 24, 8
-	textpixel	v5, v70, v74, v71, v76, v80, s[82:83]
-	textpixel	v6, v71, v70, v72, v77, v81, s[84:85]
-	textpixel	v7, v72, v71, v73, v78, v82, s[86:87]
-	textpixel	v8, v73, v72, v75, v79, v83, s[88:89]
+	v_bfe_u32	v28, v34, 0, 8
+	v_bfe_u32	v24, v34, 8, 8
+	v_bfe_u32	v25, v34, 16, 8
+	v_bfe_u32	v26, v34, 24, 8
+	v_bfe_u32	v27, v35, 0, 8
+	v_bfe_u32	v29, v35, 8, 8
+	v_bfe_u32	v30, v36, 0, 8
+	v_bfe_u32	v31, v36, 8, 8
+	v_bfe_u32	v32, v36, 16, 8
+	v_bfe_u32	v33, v36, 24, 8
+	v_bfe_u32	v42, v37, 0, 8
+	v_bfe_u32	v43, v37, 8, 8
+	v_bfe_u32	v44, v37, 16, 8
+	v_bfe_u32	v45, v37, 24, 8
+	textpixel	v5, v24, v28, v25, v30, v42, s[82:83]
+	textpixel	v6, v25, v24, v26, v31, v43, s[84:85]
+	textpixel	v7, v26, v25, v27, v32, v44, s[86:87]
+	textpixel	v8, v27, v26, v29, v33, v45, s[88:89]
 .text_done:
 	s_mov_b64	exec, s[92:93]
 	s_branch	.scene_loop
@@ -1238,35 +1270,35 @@ scene:
 	v_add_co_ci_u32	v39, vcc, v39, v31, vcc
 	s_mov_b64	s[90:91], exec
 	s_and_b64	exec, s[90:91], s[82:83]
-	global_load_ubyte v70, v[38:39], off
+	global_load_ubyte v24, v[38:39], off
 	s_and_b64	exec, s[90:91], s[84:85]
-	global_load_ubyte v71, v[38:39], off offset:1
+	global_load_ubyte v25, v[38:39], off offset:1
 	s_and_b64	exec, s[90:91], s[86:87]
-	global_load_ubyte v72, v[38:39], off offset:2
+	global_load_ubyte v26, v[38:39], off offset:2
 	s_and_b64	exec, s[90:91], s[88:89]
-	global_load_ubyte v73, v[38:39], off offset:3
+	global_load_ubyte v27, v[38:39], off offset:3
 	s_mov_b64	exec, s[90:91]
 	s_waitcnt	vmcnt(0)
 	s_add_u32	s100, s98, s61
 	s_addc_u32	s101, s99, 0
-	v_lshlrev_b32	v70, 2, v70
-	v_lshlrev_b32	v71, 2, v71
-	v_lshlrev_b32	v72, 2, v72
-	v_lshlrev_b32	v73, 2, v73
+	v_lshlrev_b32	v24, 2, v24
+	v_lshlrev_b32	v25, 2, v25
+	v_lshlrev_b32	v26, 2, v26
+	v_lshlrev_b32	v27, 2, v27
 	s_and_b64	exec, s[90:91], s[82:83]
-	global_load_dword v74, v70, s[100:101]
+	global_load_dword v28, v24, s[100:101]
 	s_and_b64	exec, s[90:91], s[84:85]
-	global_load_dword v75, v71, s[100:101]
+	global_load_dword v29, v25, s[100:101]
 	s_and_b64	exec, s[90:91], s[86:87]
-	global_load_dword v76, v72, s[100:101]
+	global_load_dword v30, v26, s[100:101]
 	s_and_b64	exec, s[90:91], s[88:89]
-	global_load_dword v77, v73, s[100:101]
+	global_load_dword v31, v27, s[100:101]
 	s_mov_b64	exec, s[90:91]
 	s_waitcnt	vmcnt(0)
-	v_cndmask_b32_e64 v5, v5, v74, s[82:83]
-	v_cndmask_b32_e64 v6, v6, v75, s[84:85]
-	v_cndmask_b32_e64 v7, v7, v76, s[86:87]
-	v_cndmask_b32_e64 v8, v8, v77, s[88:89]
+	v_cndmask_b32_e64 v5, v5, v28, s[82:83]
+	v_cndmask_b32_e64 v6, v6, v29, s[84:85]
+	v_cndmask_b32_e64 v7, v7, v30, s[86:87]
+	v_cndmask_b32_e64 v8, v8, v31, s[88:89]
 .translate_done:
 	s_mov_b64	exec, s[92:93]
 	s_branch	.scene_loop
@@ -1363,10 +1395,10 @@ scene:
 	v_lshlrev_b32	v29, 8, v17
 	v_lshlrev_b32	v30, 8, v18
 	v_lshlrev_b32	v31, 8, v19
-	v_add_nc_u32	v65, 0x100, v28
-	v_add_nc_u32	v66, 0x100, v29
-	v_add_nc_u32	v67, 0x100, v30
-	v_add_nc_u32	v68, 0x100, v31
+	v_add_nc_u32	v34, 0x100, v28
+	v_add_nc_u32	v35, 0x100, v29
+	v_add_nc_u32	v36, 0x100, v30
+	v_add_nc_u32	v37, 0x100, v31
 	v_cmp_lt_i32_e64 s[82:83], s58, v33
 	v_cmp_gt_i32_e64 s[88:89], s60, v32
 	s_and_b64	s[82:83], s[82:83], s[88:89]
@@ -1465,10 +1497,10 @@ scene:
 	ds_bpermute_b32	v45, v44, v61
 	ds_bpermute_b32	v46, v44, v62
 	s_waitcnt	lgkmcnt(0)
-	accumulate	v24, v28, v65
-	accumulate	v25, v29, v66
-	accumulate	v26, v30, v67
-	accumulate	v27, v31, v68
+	accumulate	v24, v28, v34
+	accumulate	v25, v29, v35
+	accumulate	v26, v30, v36
+	accumulate	v27, v31, v37
 	.endr
 .box_corner_done:
 	s_mov_b64	exec, s[92:93]
@@ -1478,10 +1510,10 @@ scene:
 	v_cndmask_b32_e64 v27, 0, v27, s[82:83]
 	s_cmp_lg_u32	s104, 0
 	s_cbranch_scc1	.box_combine
-	v_mov_b32	v69, v24
-	v_mov_b32	v70, v25
-	v_mov_b32	v71, v26
-	v_mov_b32	v72, v27
+	v_mov_b32	v12, v24
+	v_mov_b32	v13, v25
+	v_mov_b32	v14, v26
+	v_mov_b32	v15, v27
 ; the next change of the box's cover, if it has one: its record, then its cover as the box's was
 .box_next:
 	s_cmp_ge_u32	s104, s105
@@ -1504,24 +1536,24 @@ scene:
 .box_combine:
 	s_bitcmp1_b32	s56, 0
 	s_cbranch_scc1	.box_clip
-	v_sub_nc_u32	v69, v69, v24
-	v_sub_nc_u32	v70, v70, v25
-	v_sub_nc_u32	v71, v71, v26
-	v_sub_nc_u32	v72, v72, v27
-	v_max_i32	v69, 0, v69
-	v_max_i32	v70, 0, v70
-	v_max_i32	v71, 0, v71
-	v_max_i32	v72, 0, v72
+	v_sub_nc_u32	v12, v12, v24
+	v_sub_nc_u32	v13, v13, v25
+	v_sub_nc_u32	v14, v14, v26
+	v_sub_nc_u32	v15, v15, v27
+	v_max_i32	v12, 0, v12
+	v_max_i32	v13, 0, v13
+	v_max_i32	v14, 0, v14
+	v_max_i32	v15, 0, v15
 	s_branch	.box_next
 .box_clip:
-	v_mul_u32_u24	v69, v69, v24
-	v_mul_u32_u24	v70, v70, v25
-	v_mul_u32_u24	v71, v71, v26
-	v_mul_u32_u24	v72, v72, v27
-	v_lshrrev_b32	v69, 12, v69
-	v_lshrrev_b32	v70, 12, v70
-	v_lshrrev_b32	v71, 12, v71
-	v_lshrrev_b32	v72, 12, v72
+	v_mul_u32_u24	v12, v12, v24
+	v_mul_u32_u24	v13, v13, v25
+	v_mul_u32_u24	v14, v14, v26
+	v_mul_u32_u24	v15, v15, v27
+	v_lshrrev_b32	v12, 12, v12
+	v_lshrrev_b32	v13, 12, v13
+	v_lshrrev_b32	v14, 12, v14
+	v_lshrrev_b32	v15, 12, v15
 	s_branch	.box_next
 .box_blend:
 	s_add_u32	s98, s102, 43008
@@ -1549,10 +1581,10 @@ scene:
 	s_and_b32	s73, s71, s75
 	s_lshr_b32	s74, s71, 8
 	s_and_b32	s74, s74, s75
-	boxpixel	v5, v69
-	boxpixel	v6, v70
-	boxpixel	v7, v71
-	boxpixel	v8, v72
+	boxpixel	v5, v12
+	boxpixel	v6, v13
+	boxpixel	v7, v14
+	boxpixel	v8, v15
 	s_branch	.scene_loop
 
 .scene_store:
@@ -1630,6 +1662,10 @@ image:
 	s_mul_i32	s19, s7, s15
 	v_add_nc_u32	v3, s19, v1
 	v_lshlrev_b32	v3, 2, v3
+	s_bitcmp1_b32	s20, 0
+	s_cbranch_scc0	.unit_src
+	global_load_dword v10, v3, s[10:11]
+.unit_src:
 	s_bitcmp1_b32	s20, 1
 	s_cbranch_scc0	.unit_unorm
 	image_load	v2, v[4:5], s[24:31] dmask:0x1 dim:SQ_RSRC_IMG_2D unorm
@@ -1641,24 +1677,36 @@ image:
 .unit_unorm:
 	image_load	v[6:9], v[4:5], s[24:31] dmask:0xf dim:SQ_RSRC_IMG_2D unorm
 	s_waitcnt	vmcnt(0)
-	v_mul_f32	v6, 0x437f8000, v6
-	v_mul_f32	v7, 0x437f8000, v7
-	v_mul_f32	v8, 0x437f8000, v8
-	v_mul_f32	v9, 0x437f8000, v9
-	v_cvt_u32_f32	v6, v6
-	v_cvt_u32_f32	v7, v7
-	v_cvt_u32_f32	v8, v8
-	v_cvt_u32_f32	v9, v9
-	v_lshl_or_b32	v2, v7, 8, v6
-	v_lshl_or_b32	v2, v8, 16, v2
-	v_lshl_or_b32	v2, v9, 24, v2
+	packunorm	v2, v6, v7, v8, v9
 .unit_blend:
 	s_bitcmp1_b32	s20, 0
 	s_cbranch_scc0	.unit_store
-	global_load_dword v10, v3, s[10:11]
-	s_mov_b32	s75, 0x00ff00ff
-	s_waitcnt	vmcnt(0)
-	overv	v2, v10, v2
+	s_mov_b32	s21, 0x00ff00ff
+	v_lshrrev_b32	v4, 24, v2
+	v_sub_nc_u32	v4, 0xff, v4
+	v_and_b32	v5, s21, v2
+	v_lshrrev_b32	v6, 8, v2
+	v_and_b32	v6, s21, v6
+	v_and_b32	v7, s21, v10
+	v_lshrrev_b32	v8, 8, v10
+	v_and_b32	v8, s21, v8
+	v_mad_u32_u24	v7, v7, v4, 0x007f007f
+	v_mad_u32_u24	v8, v8, v4, 0x007f007f
+	v_lshrrev_b32	v9, 8, v7
+	v_and_b32	v9, s21, v9
+	v_add3_u32	v7, v7, 0x00010001, v9
+	v_lshrrev_b32	v7, 8, v7
+	v_and_b32	v7, s21, v7
+	v_lshrrev_b32	v9, 8, v8
+	v_and_b32	v9, s21, v9
+	v_add3_u32	v8, v8, 0x00010001, v9
+	v_lshrrev_b32	v8, 8, v8
+	v_and_b32	v8, s21, v8
+	v_add_nc_u32	v7, v5, v7
+	v_add_nc_u32	v8, v6, v8
+	v_pk_min_u16	v7, v7, s21
+	v_pk_min_u16	v8, v8, s21
+	v_lshl_or_b32	v2, v8, 8, v7
 .unit_store:
 	global_store_dword v3, v2, s[10:11]
 .unit_done:
@@ -1695,8 +1743,9 @@ nv12:
 	s_mov_b32	s29, 0x12a
 	s_mov_b32	s30, 0x199
 	s_mov_b32	s31, 0x204
-	s_mov_b32	s32, 0x64
-	s_mov_b32	s33, 0xd0
+	s_mov_b32	s32, -100
+	s_mov_b32	s33, -208
+	s_mov_b32	s35, 0xff
 	s_waitcnt	lgkmcnt(0)
 	s_mul_i32	s27, s26, s16
 	s_lshr_b32	s28, s26, 1
@@ -1706,34 +1755,27 @@ nv12:
 	v_and_b32	v5, -2, v3
 	v_add_nc_u32	v5, s28, v5
 	global_load_ubyte v6, v4, s[8:9]
-	global_load_ubyte v7, v5, s[20:21]
-	global_load_ubyte v8, v5, s[20:21] offset:1
+	global_load_ushort v7, v5, s[20:21]
 	s_mul_i32	s34, s7, s17
 	v_add_nc_u32	v13, s34, v1
 	v_lshlrev_b32	v13, 2, v13
 	s_waitcnt	vmcnt(0)
-	v_sub_nc_u32	v6, v6, 16
-	v_max_i32	v6, 0, v6
+	v_lshrrev_b32	v8, 8, v7
+	v_and_b32	v7, 0xff, v7
+	v_sub_nc_u32	v6, v6, 16 clamp
 	v_sub_nc_u32	v7, v7, 0x80
 	v_sub_nc_u32	v8, v8, 0x80
 	v_mad_u32_u24	v9, v6, s29, 0x80
-	v_mul_lo_u32	v10, v8, s30
-	v_add_nc_u32	v10, v9, v10
+	v_mad_i32_i24	v10, v8, s30, v9
 	v_ashrrev_i32	v10, 8, v10
-	v_max_i32	v10, 0, v10
-	v_min_i32	v10, 0xff, v10
-	v_mul_lo_u32	v11, v7, s32
-	v_mul_lo_u32	v12, v8, s33
-	v_sub_nc_u32	v11, v9, v11
-	v_sub_nc_u32	v11, v11, v12
+	v_med3_i32	v10, v10, 0, s35
+	v_mad_i32_i24	v11, v7, s32, v9
+	v_mad_i32_i24	v11, v8, s33, v11
 	v_ashrrev_i32	v11, 8, v11
-	v_max_i32	v11, 0, v11
-	v_min_i32	v11, 0xff, v11
-	v_mul_lo_u32	v12, v7, s31
-	v_add_nc_u32	v12, v9, v12
+	v_med3_i32	v11, v11, 0, s35
+	v_mad_i32_i24	v12, v7, s31, v9
 	v_ashrrev_i32	v12, 8, v12
-	v_max_i32	v12, 0, v12
-	v_min_i32	v12, 0xff, v12
+	v_med3_i32	v12, v12, 0, s35
 	v_lshl_or_b32	v12, v11, 8, v12
 	v_lshl_or_b32	v12, v10, 16, v12
 	v_add_nc_u32	v12, 0xff000000, v12
@@ -1763,7 +1805,7 @@ kernel copy, 8, 24
 kernel fill, 8, 24
 kernel tone, 10, 28
 kernel glass, 16, 32
-kernel scene, 88, 106
+kernel scene, 64, 106
 kernel scale, 8, 24
-kernel image, 42, 76
+kernel image, 12, 32
 kernel nv12, 16, 40

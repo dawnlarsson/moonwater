@@ -111,7 +111,15 @@ static int gpu_model_valu(const struct gpu_model_insn address_to in, const struc
                 case GM_KEY(GM_VOPC, 0xe4): bit = GM_WIDE(src[0], lane) > GM_WIDE(src[1], lane); break;
                 case GM_KEY(GM_VOPC, 0xe3): bit = GM_WIDE(src[0], lane) <= GM_WIDE(src[1], lane); break;
                 case GM_KEY(GM_VOP3, 0x101): d = select ? b : a; break;
+                case GM_KEY(GM_VOP3, 0x142): d = (p32)(((b32)(a << 8) >> 8) * ((b32)(b << 8) >> 8) + (b32)c); break;
                 case GM_KEY(GM_VOP3, 0x143): d = (a & 0xffffffu) * (b & 0xffffffu) + c; break;
+                case GM_KEY(GM_VOP3, 0x158):
+                {
+                        b32 x = (b32)a, y = (b32)b, z = (b32)c;
+
+                        d = (p32)(x < y ? (y < z ? y : (x < z ? z : x)) : (x < z ? x : (y < z ? z : y)));
+                        break;
+                }
                 case GM_KEY(GM_VOP3, 0x36d): d = a + b + c; break;
                 case GM_KEY(GM_VOP3, 0x36f): d = (a << (b & 31)) | c; break;
                 case GM_KEY(GM_VOP3, 0x346): d = (a << (b & 31)) + c; break;
@@ -168,7 +176,7 @@ static int gpu_model_valu(const struct gpu_model_insn address_to in, const struc
 static int gpu_model_vmem(const struct gpu_model_insn address_to in, const struct gpu_model_name address_to row)
 {
         b32 store = row->form == GM_GST, off = in->op[2] == 125;
-        unsigned int bytes = row->code == 0x08 ? 1 : row->code == 0x0e || row->code == 0x1e ? 16 : 4, regs = bytes == 16 ? 4 : 1;
+        unsigned int bytes = row->code == 0x08 ? 1 : row->code == 0x0a ? 2 : row->code == 0x0e || row->code == 0x1e ? 16 : 4, regs = bytes == 16 ? 4 : 1;
         unsigned int address = (store ? in->op[0] : in->op[1]) - 256u, data = (store ? in->op[1] : in->op[0]) - 256u;
         p64 exec = gpu_model.s[126] | (p64)gpu_model.s[127] << 32, base = 0;
         int e;
@@ -183,7 +191,7 @@ static int gpu_model_vmem(const struct gpu_model_insn address_to in, const struc
                 if (!(exec >> lane & 1))
                         continue;
                 va = (off ? gpu_model.v[address][lane] | (p64)gpu_model.v[address + 1][lane] << 32 : base + gpu_model.v[address][lane]) + (positive)(b64)in->imm;
-                if (gpu_model.doubt & GPU_MODEL_DOUBT_ALIGN && !store && bytes > 1)
+                if (gpu_model.doubt & GPU_MODEL_DOUBT_ALIGN && !store && bytes >= 4)
                         va &= ~3ull;
                 if (store)
                 {
