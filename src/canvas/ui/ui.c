@@ -22010,6 +22010,7 @@ struct ui_row
         int check;                         // a mark before the label: UI_ROW_CHECK_TICK or UI_ROW_CHECK_RADIO, drawn when on
         unsigned int mark_ink;             // optional colour for the mark dot (0 defaults to UI_PRIMARY)
         b32 separator;                     // a subtle hairline rule above this row (e.g. between sidebar sections)
+        int gap;                           // logical pixels of space above this row in the list's layout (a group's gap; not in a virtual list)
         b32 head;                          // a field right after the label, to the row's end (the words after a verb)
         int badge;                         // UI_ROW_BADGE_* at the row's right (left of a switch): the worst issue its option has, 0 none
         const char address_to badge_words; // what that badge says
@@ -22440,6 +22441,8 @@ static fn ui_list_layout(struct ui address_to ui, struct ui_list address_to l)
                 if (l->starts[at] & UI_LIST_COLUMNS)
                         y += ui_dev(ui, UI_COLUMNS_H);
                 section = row.section;
+                if (row.gap > 0)
+                        y += ui_dev(ui, row.gap);
                 l->top[at] = y;
                 // A row is a row high, and in a list whose words wrap as tall as its lines (its own tree's height, ui_row_whole); a...
                 l->whole[at] = row.kind == UI_ROW_SHARE ? ui_dev(ui, UI_ROW) * UI_ROW_SHARE_HIGH / UI_ROW_LEAST
