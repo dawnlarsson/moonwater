@@ -2276,9 +2276,8 @@ static b32 files_key(const struct window_event address_to event)
         struct files_model address_to m = &files.big->model;
         struct ui_list address_to l = &files.big->list;
         b32 alt = (event->flags & WINDOW_KEY_ALT) != 0, control = (event->flags & WINDOW_KEY_CONTROL) != 0, shift = (event->flags & WINDOW_KEY_SHIFT) != 0;
-        int across = l->tiles ? ui_list_per(&files.ui, l) : 1, page = l->scroll.view / ui_list_unit(&files.ui, l) - 1, key = (int)event->a;
-        bipolar by = 0;
-        page = page < 1 ? 1 : page;
+        int key = (int)event->a;
+        b32 moved = false;
         if (key == UI_KEY_DELETE)
         {
                 if (!(event->flags & WINDOW_KEY_REPEAT))
@@ -2338,18 +2337,14 @@ static b32 files_key(const struct window_event address_to event)
         case UI_KEY_ENTER:
         case UI_KEY_ENTER_PAD: if (!(event->flags & WINDOW_KEY_REPEAT)) files_open(m->cursor); return true;
         case UI_KEY_SPACE: return files_model_choose(m, m->cursor, FILES_CHOOSE_TOGGLE), files.dirty = true, true;
-        case UI_KEY_UP: by = -across; break;
-        case UI_KEY_DOWN: by = across; break;
-        case UI_KEY_LEFT:
-        case UI_KEY_RIGHT: if (across < 2 && !l->tiles) return true; by = ui_arrow(key); break;
-        case UI_KEY_PAGE_UP: by = -page * across; break;
-        case UI_KEY_PAGE_DOWN: by = page * across; break;
-        case UI_KEY_HOME: by = -(bipolar)FILES_MOST; break;
-        case UI_KEY_END: by = (bipolar)FILES_MOST; break;
-        default: return true;
         }
+        // The list's own keys: Up, Down, Left, Right, Page Up, Page Down, Home and End move the focus row.
+        if (!ui_list_key(&files.ui, l, key, &moved))
+                return true;
         files.said = 0;
-        if (files_model_move(m, by) || m->cursor != FILES_NO)
+        if (moved)
+                m->cursor = l->focus < 0 ? FILES_NO : (p32)l->focus, m->revision++;
+        if (m->cursor != FILES_NO)
         {
                 if (!control)
                         files_model_choose(m, m->cursor, shift ? FILES_CHOOSE_RANGE : FILES_CHOOSE_ONLY);

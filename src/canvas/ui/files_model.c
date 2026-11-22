@@ -314,16 +314,6 @@ static p32 files_selected_next(const struct files_model address_to m, p32 addres
         return FILES_NO;
 }
 
-static b32 files_model_move(struct files_model address_to m, bipolar by)
-{
-        bipolar to;
-        if (!m->shown.places)
-                return false;
-        to = (m->cursor == FILES_NO ? (by > 0 ? -1 : (bipolar)m->shown.places) : (bipolar)m->cursor) + by;
-        to = to < 0 ? 0 : to >= (bipolar)m->shown.places ? (bipolar)m->shown.places - 1 : to;
-        return (p32)to != m->cursor ? (m->cursor = (p32)to, m->revision++, true) : false;
-}
-
 static fn files_model_order(struct files_model address_to m)
 {
         p32 on = m->cursor < m->shown.places ? m->shown.order[m->cursor] : FILES_NO, place;
