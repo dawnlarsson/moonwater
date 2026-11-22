@@ -194,7 +194,7 @@ static p8 address_to desktop_autostart_read(bipolar address_to error)
                 }
                 text = more;
                 got = host_read_state(SETTING_DESKTOP_AUTOSTART_PATH, text, room);
-                if (got < 0 || (positive)got + 1 < room)
+                if (got < 0 || (positive)got + 1 < room || room >= (1u << 20))
                         break;
                 room *= 2;
         }

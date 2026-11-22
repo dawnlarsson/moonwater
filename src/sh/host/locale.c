@@ -3122,7 +3122,7 @@ static positive locale_nts_lines(const p8 address_to text, positive length,
                 size = stop - at;
                 while (size && (text[at + size - 1] == '\r' || text[at + size - 1] == ' '))
                         size--;
-                if (size < stride)
+                if (size < stride && size < sizeof(line))
                 {
                         memory_copy(line, text + at, size);
                         line[size] = end;

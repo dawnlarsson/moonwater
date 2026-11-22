@@ -1803,7 +1803,7 @@ static b32 host_copy_file(string_address from, string_address to)
 
         return_if(source < 0, host_fail(from, source));
 
-        target = system_open_at_mode(AT_FDCWD, to, FILE_WRITE | O_CLOEXEC, 0644);
+        target = system_open_at_mode(AT_FDCWD, to, FILE_WRITE | O_NOFOLLOW | O_CLOEXEC, 0644);
         if (target < 0)
         {
                 system_close(source);
@@ -1836,8 +1836,8 @@ static bool host_files_alike(string_address left, string_address right, p64 hole
         bipolar first = system_open_at(AT_FDCWD, left, FILE_READ | O_CLOEXEC);
         bipolar second = system_open_at(AT_FDCWD, right, FILE_READ | O_CLOEXEC);
         bool alike = first >= 0 && second >= 0 &&
-                     file_look_code(AT_FDCWD, left, 0, address_of first_facts) >= 0 &&
-                     file_look_code(AT_FDCWD, right, 0, address_of second_facts) >= 0 &&
+                     file_look_code(first, (string_address) "", AT_EMPTY_PATH, address_of first_facts) >= 0 &&
+                     file_look_code(second, (string_address) "", AT_EMPTY_PATH, address_of second_facts) >= 0 &&
                      first_facts.size == second_facts.size;
         p64 offset = 0;
 

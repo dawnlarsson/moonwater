@@ -680,20 +680,44 @@ static fn host_clip_escaped(const p8 address_to bytes, positive length, b32 line
                 positive put = 0, size = 1;
                 p32 lead = bytes[at], code = lead;
 
-                if (lead >= 0x80)
+                if (lead >= 0xc2 && lead <= 0xf4)
                 {
-                        // A UTF-8 sequence: a C1 control or a bidirectional control is spelled; the rest is shown.
-                        size = lead >= 0xf0 ? 4 : lead >= 0xe0 ? 3 : 2;
-                        size = at + size > length ? length - at : size;
-                        code = lead & (0x7fu >> size);
-                        for (positive k = 1; k < size; k++)
-                                code = code << 6 | (bytes[at + k] & 0x3f);
+                        // A valid UTF-8 sequence: a C1 control or a bidirectional control is spelled; the rest is shown.
+                        // Invalid or truncated sequences fall back to a single byte escaped as \xNN so a malformed lead
+                        // byte can never swallow a following control byte (such as ESC) into raw terminal output.
+                        positive want = lead >= 0xf0 ? 4 : lead >= 0xe0 ? 3 : 2;
+                        bool valid = at + want <= length;
+
+                        if (valid)
+                        {
+                                p32 decoded = lead & (0x7fu >> want);
+
+                                for (positive k = 1; k < want; k++)
+                                {
+                                        if ((bytes[at + k] & 0xc0) != 0x80)
+                                        {
+                                                valid = false;
+                                                break;
+                                        }
+                                        decoded = (decoded << 6) | (bytes[at + k] & 0x3f);
+                                }
+                                if (valid &&
+                                    ((want == 3 && decoded < 0x800) ||
+                                     (want == 4 && (decoded < 0x10000 || decoded > 0x10ffff)) ||
+                                     (decoded >= 0xd800 && decoded <= 0xdfff)))
+                                        valid = false;
+                                if (valid)
+                                {
+                                        size = want;
+                                        code = decoded;
+                                }
+                        }
                 }
                 if (lead == '\n' && lines)
                         out[put++] = '\n';
                 else if (lead == '\n' || lead == '\t')
                         out[put++] = '\\', out[put++] = lead == '\n' ? 'n' : 't';
-                else if (lead < 0x20 || lead == 0x7f)
+                else if (lead < 0x20 || lead == 0x7f || (lead >= 0x80 && size == 1))
                         out[put++] = '\\', out[put++] = 'x', out[put++] = (p8)digits[lead >> 4], out[put++] = (p8)digits[lead & 15];
                 else if ((code >= 0x80 && code < 0xa0) || (code >= 0x202a && code <= 0x202e) || (code >= 0x2066 && code <= 0x2069) ||
                          code == 0x200e || code == 0x200f || code == 0x061c)

@@ -487,12 +487,43 @@ static fn profile_say_thread(positive index, positive seconds, p64 address_to co
         }
 }
 
+static fn profile_cleanup(p8 address_to maps_text, p64 address_to counts)
+{
+        for (positive at = 0; at < profile.thread_count; at++)
+        {
+                if (profile.threads[at].ring)
+                        system_call_2(syscall(munmap), (positive)profile.threads[at].ring,
+                                      profile.threads[at].ring_bytes);
+                if (profile.threads[at].fd >= 0)
+                        system_close(profile.threads[at].fd);
+        }
+        if (counts)
+                memory_give(counts);
+        if (maps_text)
+                memory_give(maps_text);
+        if (profile.whose)
+                memory_give(profile.whose);
+        if (profile.ips)
+                memory_give(profile.ips);
+        if (profile.mappings)
+                memory_give(profile.mappings);
+        if (profile.names)
+                memory_give(profile.names);
+        if (profile.symbol_name)
+                memory_give(profile.symbol_name);
+        if (profile.symbol_at)
+                memory_give(profile.symbol_at);
+        if (profile.symbol_text)
+                memory_give(profile.symbol_text);
+        memory_zero(&profile, sizeof(profile));
+}
+
 static b32 host_profile(string_address address_to arguments, positive count)
 {
         string_address target;
         positive seconds = 5, used = 0, pid;
         p8 address_to maps_text;
-        p64 address_to counts;
+        p64 address_to counts = null;
         positive count_room;
 
         return_if(count < 3 || count > 4, host_usage());
@@ -521,7 +552,10 @@ static b32 host_profile(string_address address_to arguments, positive count)
         profile.ips = memory_take(profile.sample_room * sizeof(p64));
         profile.whose = memory_take(profile.sample_room * sizeof(p16));
         if (!profile.names || !profile.mappings || !maps_text || !profile.ips || !profile.whose)
+        {
+                profile_cleanup(maps_text, null);
                 return host_fail("memory", -ENOMEM);
+        }
 
         for (positive at = 0; at < profile.process_count; at++)
         {
@@ -537,7 +571,10 @@ static b32 host_profile(string_address address_to arguments, positive count)
                 host_each_entry((string_address)path, profile_task, (address_any)at);
         }
         if (!profile.thread_count)
+        {
+                profile_cleanup(maps_text, null);
                 return host_refuse("the kernel would sample none of its threads (perf_event_open)\n");
+        }
 
         host_say(log, "profiling %p threads of %p processes called %s for %p s, %p samples a second of each thread's time\n",
                  profile.thread_count, profile.process_count, target, seconds, (positive)PROFILE_HZ);
@@ -554,7 +591,10 @@ static b32 host_profile(string_address address_to arguments, positive count)
         count_room = profile.symbol_count > profile.mapping_count ? profile.symbol_count : profile.mapping_count;
         counts = memory_take((count_room + 1) * sizeof(p64));
         if (!counts)
+        {
+                profile_cleanup(maps_text, null);
                 return host_fail("memory", -ENOMEM);
+        }
         if (!profile.symbol_count)
                 for (positive at = 0; at < profile.process_count; at++)
                         if (profile.shell[at])
@@ -568,11 +608,7 @@ static b32 host_profile(string_address address_to arguments, positive count)
                             profile.threads[at].samples * 100 >= (p64)PROFILE_HZ * seconds) // a percent of a core or more
                                 profile_say_thread(at, seconds, counts, count_room);
         }
-        for (positive at = 0; at < profile.thread_count; at++)
-        {
-                system_call_2(syscall(munmap), (positive)profile.threads[at].ring, profile.threads[at].ring_bytes);
-                system_close(profile.threads[at].fd);
-        }
+        profile_cleanup(maps_text, counts);
         log_flush();
         return 0;
 }

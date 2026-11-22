@@ -602,26 +602,18 @@ static COLD fn system_zram_setup(void)
         p8 info[256];
         p8 size_text[32];
         static p8 swap_page[4096];
-        bipolar fd = system_open_at(AT_FDCWD, "/sys/block/zram0/disksize", FILE_READ | O_CLOEXEC);
+        bipolar fd;
         bipolar got;
         p64 mem_kb = 0, bytes, pages;
         positive at = 0, used;
 
-        if (fd < 0)
-                return;
-        got = system_call_3(syscall(read), (positive)fd, (positive)size_text, sizeof(size_text) - 1);
-        system_close((positive)fd);
+        got = file_slurp_once_at(AT_FDCWD, "/sys/block/zram0/disksize", size_text, sizeof(size_text));
         if (got <= 0 || size_text[0] != '0')
                 return; // already configured
 
-        fd = system_open_at(AT_FDCWD, "/proc/meminfo", FILE_READ | O_CLOEXEC);
-        if (fd < 0)
-                return;
-        got = system_call_3(syscall(read), (positive)fd, (positive)info, sizeof(info) - 1);
-        system_close((positive)fd);
+        got = file_slurp_once_at(AT_FDCWD, "/proc/meminfo", info, sizeof(info));
         if (got <= 0)
                 return;
-        info[got] = end;
         while (at < (positive)got && !byte_is_digit(info[at]))
                 at++;
         mem_kb = string_digits_max(info + at, 18, address_of used);
@@ -654,7 +646,7 @@ static COLD fn system_zram_setup(void)
         fd = system_open_at(AT_FDCWD, "/dev/zram0", 1 /* O_WRONLY */ | O_CLOEXEC);
         if (fd < 0)
                 return;
-        got = system_call_3(syscall(write), (positive)fd, (positive)swap_page, sizeof(swap_page));
+        got = (bipolar)system_write_all((positive)fd, swap_page, sizeof(swap_page));
         system_close((positive)fd);
         if (got != (bipolar)sizeof(swap_page))
                 return;

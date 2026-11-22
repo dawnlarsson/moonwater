@@ -61,7 +61,8 @@ static bool host_install_layout_is(bipolar handle, b32 sector)
         table = storage_le64(header + 72);
         count = storage_le32(header + 80);
         size = storage_le32(header + 84);
-        if (size < 128 || size > 1024 || count > 1024)
+        if (size < 128 || size > 1024 || count > 1024 ||
+            table == 0 || table > (((p64)1 << 62) / (p64)sector))
                 return false;
         for (p32 at = 0; at < count; at++)
         {

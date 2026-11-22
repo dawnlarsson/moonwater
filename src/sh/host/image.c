@@ -113,7 +113,8 @@ static bool host_settings_next(host_settings address_to settings,
                                positive address_to at,
                                host_setting address_to into)
 {
-        if (address_to at + SPARK_SETTINGS_ENTRY > settings->length)
+        if (settings->length > SPARK_SETTINGS_PAYLOAD ||
+            address_to at + SPARK_SETTINGS_ENTRY > settings->length)
                 return false;
 
         into->at = address_to at;
@@ -190,7 +191,8 @@ static string_address host_settings_add(host_settings address_to settings,
                        : group                     ? "an image carries 4 groups at most"
                                                    : "a list holds 16 entries at most";
 
-        if (SPARK_SETTINGS_PAYLOAD - settings->length < SPARK_SETTINGS_ENTRY + room)
+        if (settings->length > SPARK_SETTINGS_PAYLOAD ||
+            SPARK_SETTINGS_PAYLOAD - settings->length < SPARK_SETTINGS_ENTRY + room)
                 return "the settings block is full";
 
         memory_zero(address_of entry, sizeof(entry));
@@ -1366,7 +1368,7 @@ static b32 host_settings_command(string_address address_to arguments, positive c
 */
 static bipolar host_settings_stamp(string_address path, host_settings address_to settings)
 {
-        bipolar handle = system_open_at(AT_FDCWD, path, FILE_READ_WRITE | O_CLOEXEC);
+        bipolar handle = system_open_at(AT_FDCWD, path, FILE_READ_WRITE | O_NOFOLLOW | O_CLOEXEC);
         bipolar failed = 0;
         p64 offset;
 
