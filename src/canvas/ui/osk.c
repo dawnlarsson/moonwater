@@ -528,7 +528,8 @@ static int osk_trace_line(char address_to into, int room, const int address_to p
                 length += (int)positive_into_string((string_address)(into + length), (positive)n);
                 into[length++] = ' ';
         }
-        for (int w = 0; label[w] && w < OSK_TRACE_LINE - 40; w++)
+        // A key's word is a few bytes ("Space", ".com"): 24 keeps the worst line (3 small numbers, 4 ten-digit ones, the word) inside OSK_TRACE_LINE.
+        for (int w = 0; label[w] && w < 24; w++)
                 into[length++] = label[w];
         into[length++] = '\n';
         return length;
@@ -536,7 +537,7 @@ static int osk_trace_line(char address_to into, int room, const int address_to p
 
 static void osk_trace_save(const char address_to path, const char address_to text, int length)
 {
-        bipolar handle = system_open_at_mode(AT_FDCWD, (string_address)path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
+        bipolar handle = system_open_at_mode(AT_FDCWD, (string_address)path, O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW | O_CLOEXEC, 0600);
 
         if (handle >= 0)
         {
