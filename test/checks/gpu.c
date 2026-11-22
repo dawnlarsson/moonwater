@@ -4432,6 +4432,23 @@ static void xwm_atom_rows(void)
         compositor_xwm_at = kept;
 }
 
+// An X copy's INCR is ended where it would pass the clipboard's largest copy, so a client that never ends its INCR cannot grow the memfd (x11 B6).
+static void xwm_incr_cap_rows(void)
+{
+        struct compositor_xwm_in in;
+        unsigned char bytes[8] = {0};
+        int fd = (int)compositor_call(syscall(memfd_create), (positive)"moonwater-check", 1, 0, 0, 0, 0);
+        int over, under;
+
+        memory_zero(&in, sizeof in);
+        in.fd = fd, in.done = WINDOWS_CLIP_MOST - 3;
+        over = compositor_xwm_in_write(&in, bytes, 4) == 0;
+        under = compositor_xwm_in_write(&in, bytes, 3) == 1;
+        check("xwm copy: an INCR is ended where it would pass the clipboard's largest copy (4 bytes past it refused, 3 taken)", over && under);
+        if (fd >= 0)
+                system_close(fd);
+}
+
 // A tray dock names one of the window manager's own windows (x11 S3): no tray slot is taken for it.
 static void xwm_tray_rows(void)
 {
@@ -5857,6 +5874,7 @@ b32 main(void)
         xwm_drag_gate_rows();
         xwm_hints_rows();
         xwm_tray_rows();
+        xwm_incr_cap_rows();
         display_off_rows();
         reader_own_rows();
         clip_most_rows();

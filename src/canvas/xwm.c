@@ -1795,6 +1795,10 @@ static int compositor_xwm_in_write(struct compositor_xwm_in *in, const unsigned 
                 unsigned long take = in->latin1 && count - at > 4096 ? 4096 : count - at;
                 unsigned long put = in->latin1 ? xwm_latin1_utf8(bytes + at, take, wide) : take;
                 const unsigned char *from = in->latin1 ? wide : bytes + at;
+                /* A copy's memfd is no bigger than the clipboard's largest copy: an INCR that never ends (its deadline reset by each
+                   piece) is ended here, where the native store would refuse it only after the memfd had grown (x11 B6). */
+                if (in->total + in->done + put > WINDOWS_CLIP_MOST)
+                        return 0;
                 for (unsigned long done = 0; done < put;)
                 {
                         long wrote = compositor_call(syscall(write), (positive)in->fd, (positive)(from + done), (positive)(put - done), 0, 0, 0);
