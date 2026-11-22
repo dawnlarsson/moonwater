@@ -4439,6 +4439,29 @@ static void xwm_atom_rows(void)
         compositor_xwm_at = kept;
 }
 
+// A tray dock names one of the window manager's own windows (x11 S3): no tray slot is taken for it.
+static void xwm_tray_rows(void)
+{
+        __typeof__(compositor_xwm_slots[0]) *kept = compositor_xwm_at, *x = &compositor_xwm_slots[COMPOSITOR_XWM_SLOTS - 1];
+        __typeof__(compositor_xwm_slots[0]) saved = *x;
+        int before = 0, after = 0;
+
+        *x = compositor_xwm_fresh;
+        compositor_xwm_at = x;
+        x->claimed = 1;
+        for (int i = 0; i < TASKBAR_TRAY_ITEM_MAX; i++)
+                before += compositor.tray[i].used != 0;
+        compositor_xwm_tray_dock(x, compositor_xwm_id(x, COMPOSITOR_XWM_SEL_WINDOW));
+        compositor_xwm_tray_dock(x, compositor_xwm_id(x, COMPOSITOR_XWM_PROXY_WINDOW));
+        for (int i = 0; i < TASKBAR_TRAY_ITEM_MAX; i++)
+                after += compositor.tray[i].used != 0;
+        check("xwm tray: a dock naming one of the window manager's own windows (selection, proxy) takes no tray slot", before == after);
+        compositor_xwm_tray_undock(x, 0);
+        wayland_table_drop(&x->window_table), wayland_table_drop(&x->window_index), x->windows = 0, x->window = 0;
+        *x = saved;
+        compositor_xwm_at = kept;
+}
+
 // WM_NORMAL_HINTS (ICCCM): the minimum is the PMinSize pair at 20 and 24, and only with PMinSize set. A PBaseSize alone (256) sets no
 // minimum: offset 36 is width_inc, which the reader took for the minimum (x11 B1).
 static void xwm_hints_rows(void)
@@ -5840,6 +5863,7 @@ b32 main(void)
         xwm_atom_rows();
         xwm_drag_gate_rows();
         xwm_hints_rows();
+        xwm_tray_rows();
         display_off_rows();
         reader_own_rows();
         clip_most_rows();

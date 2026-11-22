@@ -742,6 +742,11 @@ static void compositor_xwm_tray_dock(struct compositor_xwm *x, unsigned int icon
 
         if (!icon_win || !x || !x->claimed)
                 return;
+        /* A dock names a window of the client's own; the window manager's selection, proxy and tray windows have
+           predictable ids that any client of the server can name, and docking one reparents it (x11 S3). */
+        if (icon_win == compositor_xwm_id(x, COMPOSITOR_XWM_SEL_WINDOW) || icon_win == compositor_xwm_id(x, COMPOSITOR_XWM_PROXY_WINDOW) ||
+            icon_win == compositor_xwm_id(x, COMPOSITOR_XWM_TRAY_WINDOW))
+                return;
         for (int i = 0; i < TASKBAR_TRAY_ITEM_MAX; i++)
                 if (compositor.tray[i].used && compositor.tray[i].owner == x && compositor.tray[i].id == icon_win)
                         return;
