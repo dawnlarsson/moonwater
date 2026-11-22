@@ -5590,6 +5590,30 @@ static fn check_kit_file_icons(void)
         ui.scale = 100;
 }
 
+// A line of 2048 grapheme clusters of an e and four combining marks (9 bytes each): its laid bytes must stay inside the layout's buffer.
+static fn check_kit_text_lines(void)
+{
+        static struct ui_text t;
+        static struct ui_text_layout l;
+        struct ui ui = terminal.ui;
+        static p8 text[2048 * 9];
+        p64 at = 0;
+        b32 kept;
+
+        for (p64 k = 0; k < 2048; k++)
+        {
+                text[at++] = 'e';
+                for (int m = 0; m < 4; m++)
+                        text[at++] = 0xcc, text[at++] = 0x81;
+        }
+        ui_text_open(&t, UI_TEXT_AREA, text, at, null);
+        ui_text_layout_line(&ui, &t, 0, &l);
+        kept = l.shown_length < sizeof(l.shown) && l.count <= UI_TEXT_CLUSTERS && l.shown[l.shown_length] == 0;
+        check("text layout: a line whose clusters show more bytes than the layout holds keeps its shown bytes inside the buffer and its count in range",
+              kept);
+        ui_text_close(&t);
+}
+
 static fn check_kit_pull_parts(void)
 {
         static unsigned int pixels[400 * 200], picture[400 * 200], scratch[400 * UI_SCRATCH_ROWS];

@@ -10425,6 +10425,7 @@ b32 main()
         check_kit_virtual();
         check_kit_pull_hit();
         check_kit_pull_parts();
+        check_kit_text_lines();
         check_kit_stripes();
         check_kit_file_icons();
         check_kit_view_pull();

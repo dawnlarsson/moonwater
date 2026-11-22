@@ -27678,6 +27678,9 @@ static fn ui_text_layout_line(struct ui address_to ui, const struct ui_text addr
                         shown_size = memory_utf8_encode(shown, 4, 0xfffd);
                 else
                         memory_copy(shown, cluster, shown_size = size);
+                // A cluster can show 32 bytes and a line has 2048 of them: past the shown bytes' room the line is laid out to here (one byte stays for its NUL).
+                if (l->shown_length + shown_size >= sizeof(l->shown))
+                        break;
                 l->offset[l->count] = at;
                 l->shown_at[l->count] = l->shown_length;
                 if (t->mode == UI_TEXT_CODE)
