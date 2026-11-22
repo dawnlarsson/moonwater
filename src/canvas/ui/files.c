@@ -3021,7 +3021,10 @@ static long files_tick(long timeout, long address_to other)
         struct ui_text address_to active = files.editing == FILES_EDIT_PATH ? &files.big->path.text : files.editing ? files_field() : files.finding && files.focus == FILES_FOCUS_FIND ? &files.finder : null;
         b64 now = (b64)ui_kit.now;
         files_remote_tick(&timeout, other);
-        timeout = ui_job_tick(&files.device, timeout, other);
+        // The device job is not the wait's other descriptor: its pipe is the framework's to drain only for the app's own job, and a
+        // line written before the verb ends (the device lock waited for) would wake every wait until the end. It is looked at for
+        // its end every UI_JOB_REAP_NS instead, and says what it said once ended.
+        timeout = ui_job_tick(&files.device, timeout, null);
         if (files.uevents >= 0)
         {
                 // A drive taken out leaves no mount behind: what was opened from it is let go of, then the list is read.
