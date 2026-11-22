@@ -66,7 +66,7 @@ static unsigned int identify_number(const struct windows address_to table, unsig
         int x, y, width, height;
 
         screen = windows_output(table, screen, &x, &y, &width, &height);
-        return numbers[screen < count ? screen : 0];
+        return count ? numbers[screen < count ? screen : 0] : 1;
 }
 
 // The window's size is the badge's, fitted at its start, so the compositor's size is not taken; the scratch holds a
