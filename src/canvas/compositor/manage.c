@@ -2894,17 +2894,26 @@ static void compositor_space_remove_index(int screen, int idx)
                 }
         if (!fallback)
                 return;
+        was_active = compositor.spaces.active[screen] == sid;
         for (int row = 0; row < (int)compositor_rows_in_use; row++)
         {
                 if (compositor.row_space[row] == sid)
+                {
                         compositor.row_space[row] = fallback;
+                        if (compositor.showing[row])
+                        {
+                                rows_add(&compositor.woken, row);
+                                compositor_wl_settle(row);
+                                if (!was_active && compositor.spaces.active[screen] == fallback)
+                                        compositor_damage_row(row), compositor.stack_gen++;
+                        }
+                }
                 if (compositor.row_space_prev[row] == sid)
                         compositor.row_space_prev[row] = fallback;
         }
         for (unsigned int i = 0; i < compositor.spaces.count; i++)
                 if (compositor.spaces.list[i].return_id == sid)
                         compositor.spaces.list[i].return_id = fallback;
-        was_active = compositor.spaces.active[screen] == sid;
         if (was_active)
                 compositor_space_activate(screen, fallback);
         list_idx = compositor_space_index_of(sid);
@@ -3043,6 +3052,7 @@ static void compositor_space_move_to_screen(unsigned int sid, int to_screen)
                         if (sp->kind == COMPOSITOR_SPACE_FULLSCREEN)
                                 compositor.row_space_prev[row] = sp->return_id;
                 }
+        int keep_focus = compositor.focus >= 0 && compositor.row_space[compositor.focus] == sid ? compositor.focus : COMPOSITOR_NONE;
         if (was_active)
         {
                 fallback = compositor_space_first_desktop(from);
@@ -3050,6 +3060,8 @@ static void compositor_space_move_to_screen(unsigned int sid, int to_screen)
                         compositor_space_activate(from, fallback);
         }
         compositor_space_activate(to_screen, sid);
+        if (keep_focus >= 0 && compositor_visible(keep_focus))
+                compositor_raise(keep_focus), compositor_focus(keep_focus);
         compositor_damage(0, 0, compositor.width, compositor.height);
         compositor_tabs_changed();
 }

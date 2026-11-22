@@ -2041,7 +2041,8 @@ static void compositor_press(unsigned int code, int down) { compositor_at_hand(c
 static void compositor_press_at(unsigned int code, int down)
 {
         if (down)
-                compositor.logo_alone = 0, compositor_pointer_press(code, 1);
+                compositor.logo_alone = 0;
+        compositor_pointer_press(code, down);
         if (down && code == COMPOSITOR_BTN_LEFT && compositor.assist_armed)
         {
                 int at = compositor_assist_at(compositor.pointer_x, compositor.pointer_y);

@@ -701,7 +701,7 @@ static void compositor_lists_later(void)
 
 static void compositor_card_tick(void)
 {
-        if (!compositor_card.on && !gpu.pending)
+        if (!compositor_card.on && !gpu.pending && gpu_found == GPU_END_NONE)
         {
                 compositor_card_lists_settle(false); // no job pending: every list's done, or the card started again
                 compositor_card_fence_close();

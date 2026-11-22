@@ -172,6 +172,8 @@ static unsigned int compositor_window_fb(int row, unsigned int which)
         dmabuf = system_control(compositor.udmabuf - 1, COMPOSITOR_UDMABUF_CREATE, address_of create);
         if (dmabuf < 0)
         {
+                __atomic_store_n(&compositor.table->pinned[row],
+                                 compositor_gpu_pins[row] || compositor_shows_row(row) || rows_has(&compositor.dropping, row) ? 1u : 0u, __ATOMIC_RELEASE);
                 compositor_window_fb_refused(2, dmabuf);
                 return 0;
         }
@@ -179,6 +181,8 @@ static unsigned int compositor_window_fb(int row, unsigned int which)
         if ((made = system_control(compositor.card, COMPOSITOR_PRIME_FD_TO_HANDLE, address_of prime)) != 0)
         {
                 system_close(dmabuf);
+                __atomic_store_n(&compositor.table->pinned[row],
+                                 compositor_gpu_pins[row] || compositor_shows_row(row) || rows_has(&compositor.dropping, row) ? 1u : 0u, __ATOMIC_RELEASE);
                 compositor_window_fb_refused(3, made);
                 return 0;
         }
@@ -194,6 +198,8 @@ static unsigned int compositor_window_fb(int row, unsigned int which)
                 unsigned int close[2] = {prime.handle, 0};
 
                 system_control(compositor.card, COMPOSITOR_GEM_CLOSE, address_of close);
+                __atomic_store_n(&compositor.table->pinned[row],
+                                 compositor_gpu_pins[row] || compositor_shows_row(row) || rows_has(&compositor.dropping, row) ? 1u : 0u, __ATOMIC_RELEASE);
                 compositor_window_fb_refused(4, made);
                 return 0;
         }
@@ -503,7 +509,6 @@ static int compositor_flip(unsigned int fb, int row, unsigned int which)
 
                 if (compositor_atomic_primary(fb, row, which, pw, ph, 0, 0, pw, ph))
                         return 1;
-                compositor.scaled_direct = 0;
         }
 
         if (row >= 0 && compositor_wl_row_async(row))
@@ -1676,11 +1681,13 @@ static int compositor_overlay_ready(void)
         (a space grown under them: a game's mode, a screen joined). compositor_overlay_width is the width they hold.
 */
 static unsigned int compositor_overlay_width;
+static void compositor_overlay_off(void);
 
 static int compositor_overlay_buffers(unsigned int rows)
 {
         if (rows <= compositor.overlay_rows && compositor_overlay_width == (unsigned int)compositor.width)
                 return 1;
+        compositor_overlay_off();
         for (unsigned int which = 0; which < 2; which++)
                 if (compositor.overlay_fb[which])
                 {
@@ -1698,7 +1705,18 @@ static int compositor_overlay_buffers(unsigned int rows)
                 struct drm_dumb b;
 
                 if (drm_dumb_create(&b, (unsigned int)compositor.width, rows, DRM_DUMB_FB2 | DRM_DUMB_MAP) != 0)
+                {
+                        for (unsigned int prev = 0; prev < which; prev++)
+                                if (compositor.overlay_fb[prev])
+                                {
+                                        struct drm_dumb old = {compositor.overlay_fb[prev], compositor.overlay_handle[prev],
+                                                               compositor.overlay_pixels[prev], compositor.overlay_bytes, 0, 0, 0};
+
+                                        drm_dumb_destroy(&old);
+                                        compositor.overlay_fb[prev] = 0;
+                                }
                         return 0;
+                }
                 compositor.overlay_fb[which] = b.fb;
                 compositor.overlay_handle[which] = b.handle;
                 compositor.overlay_pixels[which] = b.pixels;
@@ -1820,8 +1838,20 @@ static int compositor_atomic_to(unsigned int fb, int row, unsigned int which, in
 {
         struct drm_atomic_req req = {0};
 
-        drm_atomic_begin_obj(&req, compositor.primary);
-        drm_atomic_add(&req, compositor.primary_props[COMPOSITOR_PLANE_FB], fb);
+        if (compositor.scaled_direct)
+        {
+                unsigned int scount;
+                const int (*screens)[4] = compositor_screens(&scount);
+                int pw = scount > 1 ? screens[0][2] : compositor.width;
+                int ph = scount > 1 ? screens[0][3] : compositor.height;
+
+                drm_atomic_set_plane(&req, compositor.primary, compositor.primary_props, compositor.crtc, fb, 0, 0, pw, ph, 0, 0, pw, ph);
+        }
+        else
+        {
+                drm_atomic_begin_obj(&req, compositor.primary);
+                drm_atomic_add(&req, compositor.primary_props[COMPOSITOR_PLANE_FB], fb);
+        }
         if (overlay)
                 drm_atomic_set_plane(&req, compositor.overlay, compositor.overlay_props, compositor.crtc,
                                      rect ? shown : 0, rect ? source[0] : 0, rect ? source[1] : 0,
@@ -1831,6 +1861,7 @@ static int compositor_atomic_to(unsigned int fb, int row, unsigned int which, in
         if (drm_atomic_commit(&req, COMPOSITOR_FLIP_EVENT | COMPOSITOR_ATOMIC_NONBLOCK, ++compositor.flip_serial) != 0)
                 return 0;
         compositor_flip_arm(fb, row, which, 0);
+        compositor.scaled_direct = 0;
         if (overlay)
         {
                 compositor.overlay_on = rect != 0;

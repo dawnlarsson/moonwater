@@ -2517,7 +2517,7 @@ static void terminal_on_close(void)
 {
         if (terminal.phase == TERMINAL_RUNNING)
         {
-                if (!terminal.gone)
+                if (!terminal.reading && !terminal.gone)
                         term_hang_up(terminal.child, &terminal.hung);
                 terminal_leave(false);
         }

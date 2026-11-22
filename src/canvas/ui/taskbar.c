@@ -276,8 +276,12 @@ static int taskbar_tray_lay(struct ui_tree address_to t, int before, const struc
 {
         int scale = M->scale, glyph = M->glyph;
         int spaces = !before ? taskbar_spaces_count() : 0;
+        if (spaces > TASKBAR_SPACE_MAX)
+                spaces = TASKBAR_SPACE_MAX;
         int space_add = spaces > 0 && spaces < TASKBAR_SPACE_MAX ? 1 : 0;
         int xtray = !before ? taskbar_tray_items_count() : 0;
+        if (xtray > TASKBAR_TRAY_ITEM_MAX)
+                xtray = TASKBAR_TRAY_ITEM_MAX;
         int length = (spaces + space_add + (xtray > 0 ? xtray : 0)) * M->square;
         const struct { int slot, w, mark; } cells[] = {
 #define TASKBAR_CELL(slot, shown, mark, paint) {slot, (shown) ? ((mark) ? M->square : (slot) == -3 ? M->clocked : M->cell) : 0, mark},
@@ -463,8 +467,14 @@ static fn taskbar_lay(struct ui_tree address_to t, const struct taskbar_view *vi
                         M.text_w -= over;
                 else
                 {
+                        int sp = taskbar_spaces_count();
+                        if (sp > TASKBAR_SPACE_MAX) sp = TASKBAR_SPACE_MAX;
+                        int sp_add = sp > 0 && sp < TASKBAR_SPACE_MAX ? 1 : 0;
+                        int xt = taskbar_tray_items_count();
+                        if (xt > TASKBAR_TRAY_ITEM_MAX) xt = TASKBAR_TRAY_ITEM_MAX;
                         int items = (taskbar.notices_item != 0) + (taskbar.mic_item != 0) + (taskbar.volume_item != 0) +
-                                    (taskbar.battery_item && !taskbar.tray_custom) + (taskbar.tray_custom != 0) + (taskbar.clock_tray != 0);
+                                    (taskbar.battery_item && !taskbar.tray_custom) + (taskbar.tray_custom != 0) + (taskbar.clock_tray != 0) +
+                                    sp + sp_add + (xt > 0 ? xt : 0);
                         M.square = M.cell = M.text_w = M.clocked = items ? most / items : 0;
                 }
                 for (int b = 0; b < 2; b++)
@@ -741,7 +751,11 @@ static unsigned long taskbar_bit(int which)
         return which == TASKBAR_LAUNCHER ? 1ul << (TASKBAR_TAB_BITS + 1) : which < 0 ? 1ul << TASKBAR_TAB_BITS : 1ul << (which % TASKBAR_TAB_BITS);
 }
 
-static inline int taskbar_slot_own(int which) { return which != -4 && (which != -3 || taskbar.clock_tab) && which != TASKBAR_TABS; }
+static inline int taskbar_slot_own(int which)
+{
+        return which != -4 && (which != -3 || taskbar.clock_tab) && which != TASKBAR_TABS &&
+               which != TASKBAR_TABS_LEFT && !(which <= TASKBAR_ZONE && which > TASKBAR_DONE);
+}
 static inline int taskbar_is_moon_damage(const struct taskbar_band address_to own, const int rect[4]) { return own->moon_own && !memory_compare(rect, own->moon_damage, sizeof(own->moon_damage)); }
 
 static unsigned long taskbar_meets(const struct taskbar_view *view, int (*damage)[4], unsigned int damages, int solid)
@@ -756,7 +770,7 @@ static unsigned long taskbar_meets(const struct taskbar_view *view, int (*damage
                                 return taskbar_bit(TASKBAR_LAUNCHER);
                 return 0;
         }
-        for (int which = TASKBAR_TRAY_BEFORE; which < (int)view->count; which++)
+        for (int which = TASKBAR_STRIP_ON; which < (int)view->count; which++)
         {
                 int reach[4];
                 if (!taskbar_slot_own(which) || !taskbar_anchor(view, which, &reach[0], &reach[1], &reach[2], &reach[3]))
@@ -1640,7 +1654,7 @@ static int taskbar_draw(const struct taskbar_view *view, unsigned long redo, tas
         cur->moon_own = 0;
         if (!view->pixels || (unsigned long)band->w * (unsigned long)band->h * 4 > view->band_bytes)
                 return 0;
-        for (int which = TASKBAR_TRAY_BEFORE; which < (int)view->count; which++)
+        for (int which = TASKBAR_STRIP_ON; which < (int)view->count; which++)
                 if (taskbar_slot_own(which) && (redo & taskbar_bit(which)) &&
                     taskbar_anchor(view, which, &stripe[0], &stripe[1], &stripe[2], &stripe[3]))
                 {

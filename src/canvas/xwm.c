@@ -1916,8 +1916,18 @@ static void compositor_xwm_receive(long client, long which, const char *mime, lo
                                 x = &compositor_xwm_slots[s];
                                 break;
                         }
-        if (which == 2 && x->fd >= 0 && x->ready)
-                target = compositor_xwm_drag_target(x, mime, length, &time);
+        if (which == 2)
+        {
+                for (int s = 0; s < COMPOSITOR_XWM_SLOTS; s++)
+                        if (compositor_xwm_slots[s].fd >= 0 && compositor_xwm_slots[s].ready &&
+                            compositor_xwm_slots[s].xdrag.entered && compositor_xwm_slots[s].xdrag.source)
+                        {
+                                x = &compositor_xwm_slots[s];
+                                break;
+                        }
+                if (x->fd >= 0 && x->ready)
+                        target = compositor_xwm_drag_target(x, mime, length, &time);
+        }
         if (!target || compositor_xwm_pipe(fds, 1) != 0)
         {
                 system_close((int)fd);
@@ -3334,18 +3344,24 @@ static void compositor_xwm_close_rows(struct compositor_xwm *x)
                         x->ins[at].eager = 0;
                         if (x->ins[at].fd >= 0)
                                 system_close(x->ins[at].fd);
-                        x->ins[at].fd = -1, x->ins[at].window = 0;
+                        if (x->ins[at].index >= 0)
+                                system_close(x->ins[at].index);
+                        x->ins[at].fd = -1, x->ins[at].index = -1, x->ins[at].window = 0;
                         wayland_table_drop(&x->ins[at].targets);
                 }
         for (long at = 0; at < x->out_table.count; at++)
                 if (x->outs[at].requestor && x->outs[at].fd >= 0)
                         system_close(x->outs[at].fd);
+        wayland_table_drop(&x->window_table);
+        wayland_table_drop(&x->window_index);
+        wayland_table_drop(&x->pending_table);
         wayland_table_drop(&x->in_table);
         wayland_table_drop(&x->out_table);
         wayland_table_drop(&x->atom_table);
         wayland_table_drop(&x->atom_index);
         wayland_table_drop(&x->name_table);
         wayland_table_drop(&x->type_table);
+        x->window = 0, x->pending = 0, x->pending_room = 0, x->windows = 0;
         x->ins = 0, x->outs = 0, x->atom = 0, x->name_bytes = 0, x->atoms_indexed = 0;
         for (int which = 0; which < 3; which++)
                 x->sel[which] = (struct compositor_xwm_selection){0, 0, 0, 0, 0, -1};

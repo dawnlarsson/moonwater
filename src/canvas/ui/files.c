@@ -805,12 +805,18 @@ static fn files_carry_end(void)
         files.carrying = files.cut_dim = false, files.dirty = true;
 }
 
-static b32 files_carry_take(void)
+static b32 files_carry_take_mode(b32 use_chosen)
 {
         const struct files_model address_to m = &files.big->model;
         files_carry_end();
-        files.carry_count = files_paths_collect(m->cursor, m->chosen_count > 0, &files.carry_paths, &files.carry_room, &files.carry_used, &files.carry_kind);
+        files.carry_count = files_paths_collect(m->cursor, use_chosen, &files.carry_paths, &files.carry_room, &files.carry_used, &files.carry_kind);
         return string_copy_bounded((string_address)files.carry_from, (string_address)m->path, FILES_PATH), files.carry_count > 0;
+}
+
+static b32 files_carry_take(void)
+{
+        const struct files_model address_to m = &files.big->model;
+        return files_carry_take_mode(m->chosen_count > 0);
 }
 
 static fn files_carry_drop(int row)
@@ -859,7 +865,7 @@ static fn files_rows_copy(b32 cut)
         parts[2] = (struct windows_clip_part){FILES_CLIP_CUT, (const p8 address_to) "cut", 3};
         windows_clip_offer_parts(&files.own, WINDOWS_CLIP_CLIPBOARD, parts, cut ? 3 : 2);
         files_uris_free(uris, ur, paths, pr, parts);
-        if (files_carry_take() && cut)
+        if (files_carry_take_mode(files_model_chosen(m, m->cursor)) && cut)
                 files.cut_dim = true;
         else
                 files_carry_end();
@@ -967,7 +973,7 @@ static b32 files_transfer_start(const p8 address_to paths, p32 count, bipolar in
                 return false;
         }
         if (!files_move_begin(job, how, into, paths, count))
-                return false;
+                return files_move_end(job), false;
         string_copy_bounded((string_address)files.move_into, (string_address)dest, FILES_PATH), files_move_start(job);
         return files.moving = true, files.next_progress = (b64)ui_kit.now, true;
 }
@@ -1511,7 +1517,8 @@ static fn files_menu_open(b32 on, int x, int y)
                         ui_popmenu_add(menu, files.columns.title[col], col == files.columns.sorted ? (files.columns.descending ? "\xe2\x86\x93" : "\xe2\x86\x91") : null,
                                        UI_MENU_RADIO | (col == files.columns.sorted ? UI_MENU_ON : 0), FILES_MENU_SORT + col);
                 ui_popmenu_build(menu, foot, FILES_COUNT(foot));
-                files_model_choose_none(m), m->cursor = FILES_NO, m->revision++;
+                if (m->chosen_count || m->cursor != FILES_NO)
+                        files_model_choose_none(m), m->cursor = FILES_NO, m->revision++;
         }
         files.sheet_folder = !on, files.sheet_x = x, files.sheet_y = y, files_popup_open(x, y), files.dirty = true;
 }
@@ -1816,7 +1823,7 @@ static fn files_button_event(const struct window_event address_to event, b32 dow
         struct ui_list address_to l = &files.big->list, address_to hit_list = null;
         int row;
         files.dirty = true;
-        if (down)
+        if (down && event->a != UI_POINTER_RIGHT)
                 files.armed = false, files.big->note[0] = 0;
         if (down && event->a == UI_POINTER_LEFT && !files.editing &&
             files_in_rect(ui_kit.pointer_x, ui_kit.pointer_y, files.crumbs_box.x, files.crumbs_box.y, files.crumbs_box.w, files.crumbs_box.h))
@@ -1900,7 +1907,8 @@ static fn files_button_event(const struct window_event address_to event, b32 dow
         if (down && l->down >= 0 && (p32)l->down != m->cursor)
                 m->cursor = (p32)l->down, m->revision++;
         if (l->ground_clicked)
-                files_model_choose_none(m), m->cursor = FILES_NO, m->revision++;
+                if (m->chosen_count || m->cursor != FILES_NO)
+                        files_model_choose_none(m), m->cursor = FILES_NO, m->revision++;
         if (row >= 0)
         {
                 files.said = 0;

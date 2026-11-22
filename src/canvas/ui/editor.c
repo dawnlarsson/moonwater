@@ -1058,6 +1058,8 @@ static b32 editor_event(const struct window_event address_to event)
         {
                 if (editor.pill_hover)
                         editor.pill_hover = 0, editor.dirty = true;
+                if (event->type == WINDOW_EVENT_BUTTON && (p32)event->a == UI_POINTER_LEFT && !(event->flags & WINDOW_KEY_DOWN))
+                        editor.pill_down = false;
                 return true;
         }
         if (editor_pill_event(tab, event))

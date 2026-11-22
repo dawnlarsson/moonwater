@@ -4309,14 +4309,16 @@ static b32 gpu_scene_rect(positive bins_at, positive d_at, unsigned int pitch, u
 static positive gpu_scene_submit(positive ops_at, unsigned int n, positive bins_at, positive d_at, unsigned int pitch, unsigned int w, unsigned int h,
                                  unsigned int dx0, unsigned int dy0, unsigned int dx1, unsigned int dy1)
 {
-        positive top = gpu.size > (1 << 20) ? gpu.size - (1 << 20) : 0, room = bins_at < top ? ((top - bins_at) / 2) & ~4095ull : 0, at, sequence;
+        positive top = gpu.size > (1 << 20) ? gpu.size - (1 << 20) : 0;
+        b32 scratch = bins_at >= top && bins_at + 4096 <= gpu.size;
+        positive room = scratch ? 4096ull : (bins_at < top ? ((top - bins_at) / 2) & ~4095ull : 0), at, sequence;
         unsigned int side = gpu_bins.side ^ 1u, binned[4];
         int built;
 
         gpu_last_error = 0, gpu_end = GPU_END_NONE;
         if (gpu_lost || gpu_done(gpu_bins.job[side]) == 0 || gpu_slot_take() < 0)
                 return gpu_end = gpu_lost ? GPU_END_NONE : GPU_END_LATE, 0;
-        at = bins_at + side * room;
+        at = scratch ? bins_at : bins_at + side * room;
         built = gpu_scene_build(ops_at, n, at, room, d_at, pitch, w, h, dx0, dy0, dx1, dy1, binned);
         if (built <= 0 || !(sequence = gpu_go()))
                 return 0;

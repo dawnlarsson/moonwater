@@ -1481,7 +1481,7 @@ static void compositor_glass_pass(struct compositor_frame *frames, const unsigne
                 int place[4] = {compositor.x[row], compositor.y[row], (int)compositor.w[row], (int)compositor.h[row]};
                 int moved = 0, deferred = 0;
 
-                if (!compositor.glassy[row])
+                if (!compositor.glassy[row] || frames[at].layer || (!frames[at].builtin && !frames[at].pixels))
                         continue;
                 compositor_contents_box(row, box);
                 blocks = compositor.glass_blocks[row];

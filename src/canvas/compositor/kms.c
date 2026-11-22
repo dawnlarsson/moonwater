@@ -1030,6 +1030,8 @@ static int compositor_scales_take(void)
 }
 
 // Probe connected outputs, lay out the desktop scanout, and commit each CRTC (dropping refused outputs).
+static void compositor_cursor_async_sync(int active, int hot_x, int hot_y, int inset, int left, int top);
+
 static b32 compositor_space_take(int first)
 {
         struct compositor_connected found;
@@ -1040,6 +1042,9 @@ static b32 compositor_space_take(int first)
         b32 status;
         int carried = 0, regained = 0, later = !first;
 
+        if (!first && (compositor.flip_pending || compositor_card.on || rows_any(&compositor_card.list_rows)))
+                return compositor.space_wanted = 1, 0;
+        compositor_cursor_async_sync(0, 0, 0, 0, 0, 0);
         compositor_displays_read(1);
         status = compositor_connected_read(&found);
         if (status < 0 || !found.count)
@@ -1048,8 +1053,6 @@ static b32 compositor_space_take(int first)
                         compositor.screens_gone = 1;
                 return -COMPOSITOR_ENODEV;
         }
-        if (!first && compositor.flip_pending)
-                return compositor.space_wanted = 1, 0;
         compositor.space_wanted = 0;
         kms_snapshot_outputs(was, was_names, was_crtc, &was_count);
 
@@ -1311,6 +1314,8 @@ static b32 compositor_space_take(int first)
                             !(on_scanout >> at & 1))
                         {
                                 // Its buffer was not drawn by the present above, which the card was to turn: the next one draws it.
+                                if (compositor.output[at].fb && compositor.output[at].fb != compositor.fb)
+                                        system_control(compositor.card, COMPOSITOR_RMFB, address_of compositor.output[at].fb);
                                 compositor.output[at].turned = 2;
                                 compositor.output[at].fb = compositor_turns[at].fb;
                                 compositor_damage_space();
@@ -1671,6 +1676,16 @@ static void compositor_vrr_kick(void)
         if (!compositor.vrr_kick || compositor.flip_pending || !compositor.on_screen)
                 return;
         compositor.vrr_kick = 0;
+        if (compositor.scaled_direct && row >= 0)
+        {
+                int dx, dy, dw, dh;
+                if (compositor_fullscreen_fit(row, &dx, &dy, &dw, &dh) &&
+                    compositor_atomic_primary(compositor.on_screen, row, compositor.front[row],
+                                              (int)compositor.picture_w[row], (int)compositor.picture_h[row], dx, dy, dw, dh) &&
+                    compositor.table)
+                        compositor.table->vrr_kicks++;
+                return;
+        }
         if ((row >= 0 || compositor.on_screen == compositor.fb) &&
             compositor_flip(compositor.on_screen, row, row >= 0 ? compositor.front[row] : 0) && compositor.table)
                 compositor.table->vrr_kicks++;

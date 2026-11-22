@@ -25144,8 +25144,8 @@ static fn ui_page_let_go(const struct ui address_to ui, struct ui_page address_t
 }
 
 // A page's pointer, for a mouse and a finger alike.
-#define UI_PAGE_GROUP 0x1000
-#define UI_PAGE_CARD 0x2000
+#define UI_PAGE_GROUP 0x40000000
+#define UI_PAGE_CARD 0x50000000
 
 // The page's body changed in rows [top, bottom) (device pixels): the picture is due, and those rows are drawn again.
 static fn ui_page_damage(struct ui_page address_to p, int top, int bottom)

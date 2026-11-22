@@ -2201,7 +2201,7 @@ static void wayland_surface_drop(struct wayland_client *c, struct wayland_surfac
                 {
                         unsigned int id = wayland_cb_pop(c, &s->cbq[q]);
                         long slot = q <= WLCB_READY ? wayland_find(c, id, WLI_wl_callback) : -1;
-                        if (slot >= 0) wayland_object_free(c, slot);
+                        if (slot >= 0) wayland_object_delete(c, slot);
                 }
         }
         s->presentings_framed = 0;
@@ -2767,7 +2767,8 @@ static void wayland_hold_buf(struct wayland_client *c, struct wayland_surface *s
 static int wayland_commit(struct wayland_client *c, struct wayland_object *self, struct wayland_surface *s)
 {
         long buffer = -1;
-        int xdg = (s->flags & WAYLAND_SURFACE_XDG) != 0, initial = 0, ready;
+        int layer = s->role == WAYLAND_ROLE_TOPLEVEL && s->u.top.layer_shell;
+        int xdg = ((s->flags & WAYLAND_SURFACE_XDG) != 0) || layer, initial = 0, ready;
         int shown = xdg || (s->xsurface && s->u.xwin.adopted && !s->u.xwin.dead);
 
         if (wayland_commit_quiet(s, xdg, shown) && (!xdg || s->role_id) && !wayland_toplevel_bad_bounds(s))
@@ -2801,11 +2802,11 @@ static int wayland_commit(struct wayland_client *c, struct wayland_object *self,
                 if (!(s->flags & WAYLAND_SURFACE_SENT))
                 {
                         if (s->pending.attach_made && s->pending.attached)
-                                return wayland_fail(c, s->xdg_id, WLN_xdg_surface_error_unconfigured_buffer, "a buffer before the first configure");
+                                return wayland_fail(c, layer ? s->role_id : s->xdg_id, WLN_xdg_surface_error_unconfigured_buffer, "a buffer before the first configure");
                         initial = 1;
                 }
                 else if (s->pending.attach_made && s->pending.attached && !(s->flags & WAYLAND_SURFACE_CONFIGURED))
-                        return wayland_fail(c, s->xdg_id, WLN_xdg_surface_error_unconfigured_buffer, "a buffer before the first configure was acknowledged");
+                        return wayland_fail(c, layer ? s->role_id : s->xdg_id, WLN_xdg_surface_error_unconfigured_buffer, "a buffer before the first configure was acknowledged");
         }
         if (s->pending.attach_made && s->pending.attached && (buffer = wayland_find(c, s->pending.attached, WLI_wl_buffer)) < 0)
                 return wayland_fail(c, self->id, WAYLAND_INVALID_OBJECT, "the attached buffer is gone");
@@ -5483,14 +5484,14 @@ static int wayland_ext_request(struct wayland_client *c, struct wayland_object *
         case WLI_zwlr_layer_shell_v1:
                 if (op == WLQ_zwlr_layer_shell_v1_destroy) return WAYLAND_OK;
                 s = &c->surfaces[c->objects[a[1].slot].link];
-                if (s->role != WAYLAND_ROLE_NONE || s->xsurface)
+                if (s->role != WAYLAND_ROLE_NONE || s->xsurface || (s->flags & WAYLAND_SURFACE_XDG))
                         return wayland_fail(c, self->id, WLN_zwlr_layer_shell_v1_error_already_constructed, "the surface has a role");
                 if (a[3].u > 3) return wayland_fail(c, self->id, WLN_zwlr_layer_shell_v1_error_invalid_layer, "unknown layer");
                 s->role = WAYLAND_ROLE_TOPLEVEL, s->role_id = c->objects[a[0].slot].id, s->u.top.layer_shell = 1;
                 s->u.top.layer_level = (long)a[3].u, s->u.top.layer_w = s->u.top.layer_h = 0, s->u.top.layer_configured = 0;
                 s->u.top.layer_output = a[2].slot >= 0 && c->objects[a[2].slot].iface == WLI_wl_output && c->objects[a[2].slot].aux < WAYLAND_SCREENS
                                             ? (long)c->objects[a[2].slot].aux : 0;
-                return c->objects[a[0].slot].link = c->objects[a[1].slot].link, WAYLAND_OK;
+                return wayland_surface_link(c, a[0].slot, s), WAYLAND_OK;
         case WLI_zwlr_layer_surface_v1:
                 s = &c->surfaces[self->link];
                 if (!s->live || s->role_id != self->id) return WAYLAND_OK;

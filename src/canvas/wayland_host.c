@@ -441,6 +441,8 @@ static void compositor_wl_source_drop(int row)
                 canvas_ext_import_release(&compositor_wl.source[row]);
 }
 
+static void compositor_wl_layers_drop(int row);
+
 static void compositor_wl_unmap(void *context, void *at, long size)
 {
         (void)context;
@@ -456,8 +458,8 @@ static void compositor_wl_unmap(void *context, void *at, long size)
                 for (unsigned int k = 0; k < compositor_wl_layers.count[row]; k++)
                         if (compositor_wl_layers.layer[row][k].imp.map == (const unsigned char *)at)
                         {
-                                canvas_ext_import_release(&compositor_wl_layers.layer[row][k].imp);
-                                compositor_wl_layers.layer[row][k].pixels = 0;
+                                compositor_wl_layers_drop(row);
+                                break;
                         }
         }
         compositor_wl_map_forget((unsigned long)at);
@@ -481,6 +483,12 @@ static void compositor_wl_close(void *context, long fd)
                                 compositor_wl_straight_pay(row);
                                 compositor_wl_straight_drop(row);
                         }
+                        for (unsigned int k = 0; k < compositor_wl_layers.count[row]; k++)
+                                if (compositor_wl_layers.layer[row][k].fd == fd)
+                                {
+                                        compositor_wl_layers_drop(row);
+                                        break;
+                                }
                 }
         }
         system_close((int)fd);
@@ -5223,6 +5231,7 @@ static void compositor_wl_flush(long slot)
         // Only the socket the input thread sends to is shared with it; a hold it does not know of yet is made known at the next send.
         if (!compositor_reader.on || ((compositor_wl_direct.valid ? compositor_wl_direct.slot != slot : !compositor_wl_locked()) &&
                                       (compositor_wl_direct.keys_valid ? compositor_wl_direct.keys_slot != slot : wayland.keyboard_row < 0) &&
+                                      (!compositor_wl_direct.abs_valid || compositor_wl_direct.abs_slot != slot) &&
                                       compositor_wl_direct.rest_slot != slot))
         {
                 compositor_wl_flush_held(slot);

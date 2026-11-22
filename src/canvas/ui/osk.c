@@ -639,7 +639,10 @@ static b32 osk_event(const struct window_event address_to event)
         // The keyboard has no keys of its own: a key the window gets is the kit's to ignore (the window never has them).
         if (event->type == WINDOW_EVENT_MOTION)
         {
-                ui_kit_pointer(ui, osk.keys, OSK_ROWS * OSK_COLS, WINDOW_EVENT_MOTION, event->a, event->b, false, event->flags);
+                if (osk.alt_key >= 0)
+                        ui_kit_pointer(ui, osk.alts, osk.alt_count, WINDOW_EVENT_MOTION, event->a, event->b, false, event->flags);
+                else
+                        ui_kit_pointer(ui, osk.keys, OSK_ROWS * OSK_COLS, WINDOW_EVENT_MOTION, event->a, event->b, false, event->flags);
                 osk.dirty = true;
         }
         else if (event->type == WINDOW_EVENT_BUTTON && event->a == UI_POINTER_LEFT)
@@ -830,6 +833,7 @@ static b32 osk_purpose_take(void)
         osk.page = purpose == OSK_PURPOSE_DIGITS || purpose == OSK_PURPOSE_NUMBER ? OSK_PAGE_NUMBERS
                    : mail                                                          ? OSK_PAGE_SYMBOLS
                                                                                    : OSK_PAGE_LETTERS;
+        osk_release();
         osk.shift = 0;
         osk.held = -1;
         osk.repeat = -1;
