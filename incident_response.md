@@ -3110,7 +3110,7 @@ the commit that added the drain.
 
 | | |
 |---|---|
-| Status | Fixed on main, 2026-11-22 for the compositor's opens (`16e74328d`, `c8678e509`) and for the seal (`40d3d77d9`, which the four reads below now pass through). Open: the pid substitution at those four reads, pending main's choice (see Still open) |
+| Status | Fixed on main, 2026-11-22 (`16e74328d`, `c8678e509` for the compositor's opens; `40d3d77d9` for the seal; `35257a5b3` for the row that gates it). Closed: the residual is accepted under the root-only model (below) |
 | Class | Confused deputy: the compositor opened `/proc/PID/fd/N` for a clipboard offer or a drag, with PID read from the table rather than the compositor's own |
 | Attacker | A writer of the window table: root, or a process with CAP_SYS_ADMIN that maps the table (MW-2026-050). The file it names must be a regular file that passes the clipboard seal and trailer checks |
 | Reachable | src/canvas/compositor/manage.c `compositor_clip_open`, called from `compositor_clip_set_memfd` (a client's clipboard offer by fd) and `compositor_dnd_name_ext_types` (a drag's offered type); src/canvas/wayland_host.c, the drag pull |
@@ -3130,22 +3130,19 @@ the same statement that writes the table's copy, and opens its offers and its
 drag pull through it (`16e74328d`, `c8678e509`). The table's copy is still
 written, for the clients that read it.
 
-**Still open.** Four reads still take `table->clip_pid` and open
-`/proc/<pid>/fd/900` and up. Every one now goes through `windows_clip_map`,
-which requires the seal rule (`40d3d77d9`): an unsealed or tampered clip is
-refused. What stays open is the substitution: a table writer can point them at
-another process's sealed clip. The compositor's own pid cannot be read by a
-client process, so the fix needs a choice of design (accept the residual under
-the root-only model, or serve the paste from the compositor) and is pending main:
+**Closing.** The four reads (`windows_clip_read_type`, `windows_drag_types`,
+and `host_clip_types` and `host_clipboard` in src/sh/host.c) all go through
+`windows_clip_map`, which requires the seal rule (`40d3d77d9`): an unsealed or
+tampered clip is refused. The table is root-only (0600). A writer of the table
+can choose which sealed clip a paste reads, by writing `clip_pid`. The seal
+rule means the clip read cannot be tampered with, and the read is limited to a
+file sealed against write, grow and shrink. This is inside the root-only model;
+it is accepted, not fixed.
 
-
-
-- src/canvas/window.c `windows_clip_read_type` (the paste read, in a client's own process) and `windows_drag_types` (the drag read);
-- src/sh/host.c `host_clip_types`, and two calls in `host_clipboard` (the `moonwater clipboard` path, run as root).
-
-They get their own entry when they are fixed.
-
-**Tests that fail without the fix.** None. `16e74328d` and `c8678e509` add no
+**Tests that fail without the fix.** `35257a5b3` adds the row `te_clip_seal_gate`
+(test/checks/canvas.c), which checks that a clip read is refused when its file is
+not sealed. It compiles; it has not run on the box, because CHECK_canvas exits
+139 on main (a harness failure, the gate's). `16e74328d` and `c8678e509` add no
 check row.
 
 **Related.** MW-2026-050 (who may map the table). `76914efe6`, the commit that
