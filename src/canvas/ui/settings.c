@@ -4463,8 +4463,13 @@ static fn settings_press_at(void)
                 if (settings_row_is(row, SETTING_ACCENT_PATH) && settings.list.part < (int)(sizeof(settings_accents) / sizeof(settings_accents[0])))
                         settings_change(row, settings_accents[settings.list.part].name);
                 else if (settings_word(settings_rows[row].choices, (positive)settings.list.part, word, sizeof(word)))
-                        if (string_equals((string_address)word, (string_address)settings.value[row])) settings_say((string_address)WORDS(settings_already_set));
-                        else settings_change(row, word);
+                {
+                        // The choice's word and the row's value are keys, English both; what is said of them is the language's.
+                        if (string_equals((string_address)word, (string_address)settings.value[row]))
+                                settings_say((string_address)WORDS(settings_already_set));
+                        else
+                                settings_change(row, word);
+                }
                 return;
         }
         if (settings_item(row) && (settings_item(row)->flags & SETTINGS_ITEM_DISK))
