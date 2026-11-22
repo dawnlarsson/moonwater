@@ -544,7 +544,9 @@ static int modem_find_frame(const p8 *bits, sized nb, const modem_mac *mac,
 #if (defined(MOONWATER_ASSEMBLY) || defined(MODEM_TONE_LINKED)) && !defined(MODEM_NO_TONE_ASM) && !defined(KERNEL_MODE) && \
         ((MODEM_TONES) == 8 || (MODEM_TONES) == 16)
 #define MODEM_TONE_ASM 1
+#ifndef MOONWATER_ASSEMBLY
 void modem_tone_scan(const b32 *rows, sized sym, sized tones, const b16 *pcm, sized n, p8 *best);
+#endif
 #endif
 
 #ifdef MODEM_TONE_ASM
