@@ -1658,7 +1658,11 @@ static void compositor_present_frames(void)
         if (compositor_spare.fb)
                 scanout_plate_mark_spare(flip_own ? (const int (*)[4])scene : (const int (*)[4])compositor.damage,
                                          flip_own ? scenes : compositor.damages);
-        if (compositor_output_count() < 2 && (compositor.plane_row < 0 || flip_own))
+        // The buffer composed into is whole now: the plate composed into (flip_own), on one screen or on all of them at once (compositor_flip_all),
+        // or one screen's own buffer composed in place with no plane. Under a plane composed in place, and with two or more screens composed in
+        // place, its stale is kept for the next present that composes into a plate. A plate's stale kept past the present that composed it whole
+        // goes to the other plate at the next swap and is joined there: with two screens every present after the first composed the whole space.
+        if (flip_own || (compositor_output_count() < 2 && compositor.plane_row < 0))
                 compositor_front_stale_any = 0;
         compositor.damages = 0;
 #ifdef MOONWATER_GPU_C

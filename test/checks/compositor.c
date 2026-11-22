@@ -826,6 +826,114 @@ static void check_compositor_screens(void)
 }
 
 /*
+        Two screens composed into the second plate and flipped to it together (compositor_flip_all on a card; headless, the names
+        of the scan image and its spare exchanged): a present composes its own damage and what that plate missed since it was last
+        composed (its stale), and the plate is whole after it, as one screen's is. Kept stale past that present, its box went to the
+        other plate at the next swap and was joined there, so with two screens every present after the first composed the whole
+        space: on a Haswell with a 1920 by 1080 and a 1680 by 1050 screen, a 160 by 96 window's redraw was the card's 3600 by 1080
+        (222 ms a present, 4 presents a second) and the processor's (3.8 ms, against 0.14 ms with one screen). Here A and B side by
+        side, headless, each with its primary plane said found: one whole present, then a 16 by 16 damage on A presented four times.
+*/
+static void check_compositor_screens_plates(void)
+{
+    struct windows address_to table;
+    unsigned long header = (sizeof(struct windows) + 4095) & ~4095ul;
+    unsigned long buffer = ((unsigned long)SCREENS_A_W * SCREENS_H * 4 + 4095) & ~4095ul;
+    unsigned long table_bytes = header + buffer * 2 * COMPOSITOR_ROWS_FIRST;
+    long mapped = compositor_call(syscall(mmap), 0, table_bytes, 3, 0x4022, (positive)-1, 0);
+    long bytes = (long)SCREENS_W * SCREENS_H * 4;
+    char names[2][WINDOWS_OUTPUT_NAME] = {"A-1", "B-1"};
+    char path[64] = {0}, spare[72] = {0};
+    unsigned long painted[4] = {0, 0, 0, 0}, whole = 0, before;
+    unsigned int address_to scan;
+    unsigned int flipped = 0;
+    positive length;
+    b32 made;
+
+    compositor_zero();
+    memory_zero(&compositor_spare, sizeof(compositor_spare));
+    compositor_front_stale_any = 0;
+    compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
+    compositor.resize = compositor.press = compositor.keys_to = COMPOSITOR_NONE;
+    compositor.direct_row = compositor.flip_row = compositor.plane_row = -1;
+    compositor.width = SCREENS_W;
+    compositor.height = SCREENS_H;
+    compositor.scale = 100;
+    compositor.card = -1;
+    compositor.outputs = 2;
+    compositor.screen[0][2] = SCREENS_A_W, compositor.screen[0][3] = SCREENS_A_H;
+    compositor.screen[1][0] = SCREENS_A_W, compositor.screen[1][2] = SCREENS_B_W, compositor.screen[1][3] = SCREENS_H;
+    memory_copy(compositor.output[0].name, names[0], sizeof(names[0]));
+    memory_copy(compositor.output[1].name, names[1], sizeof(names[1]));
+    compositor.stride = compositor.most_w = SCREENS_A_W;
+    compositor.room_h = compositor.most_h = SCREENS_H;
+    if (mapped < 0 && mapped > -4096)
+    {
+        check("screens plates: the table is mapped", false);
+        return;
+    }
+    table = compositor.table = (struct windows address_to)mapped;
+    compositor.pixels = table->pixels = header;
+    compositor.buffer = table->buffer = buffer;
+    table->stride = SCREENS_A_W;
+    compositor_table_outputs();
+    // The scan image and its spare, as -G makes them (compositor_headless_plate): the flip exchanges their names.
+    string_copy((string_address)path, (string_address) "/tmp/moonwater-check-plates-");
+    length = string_length((string_address)path);
+    length += positive_into_string((p8 address_to)path + length, (positive)system_call(syscall(getpid)));
+    path[length] = 0;
+    memory_copy(spare, path, length);
+    memory_copy(spare + length, ".spare", 7);
+    scan = (unsigned int address_to)compositor_map_rw_file((string_address)path, bytes, null);
+    made = scan != null;
+    if (made)
+    {
+        compositor.scanout = scan, compositor.scanout_bytes = (unsigned long)bytes, compositor.scanout_pitch = SCREENS_W * 4;
+        compositor.fb = 1, compositor.period = 1000000000ull / 60;
+        made = compositor_headless_plate((string_address)path, bytes);
+    }
+    if (made)
+    {
+        // Each screen's primary plane found, and no all-screens flip refused: the two compose into the plate (compositor_multi_ok).
+        compositor_out_ok = 1, compositor_multi_off = 0;
+        compositor_damage(0, 0, SCREENS_W, SCREENS_H);
+        compositor_present();
+        whole = compositor.painted;
+        for (unsigned int at = 0; at < 4; at++)
+        {
+            unsigned int shown = compositor.on_screen;
+
+            compositor_damage(40, 40, 16, 16);
+            before = compositor.painted;
+            compositor_present();
+            painted[at] = compositor.painted - before;
+            flipped += compositor.on_screen != shown && compositor.on_screen == compositor.fb;
+        }
+    }
+    check("screens plates: the scan image and its spare are made", made);
+    check("screens plates: each present composes into the plate neither screen shows, and both are flipped to it",
+          made && compositor_plate_wanted(0) && flipped == 4);
+    check("screens plates: the first present after the whole one composes what its plate missed, the whole space",
+          made && whole >= (unsigned long)SCREENS_W * SCREENS_H && painted[0] >= (unsigned long)SCREENS_W * SCREENS_H);
+    // Its own 16 by 16 and the other plate's stale, the same 16 by 16 (one rectangle): 256 pixels, where the stale kept made it the whole space.
+    check("screens plates: after it each present composes its own 16 by 16, not the whole space (the plate composed into is whole after its present)",
+          made && painted[1] >= 16 * 16 && painted[2] >= 16 * 16 && painted[3] >= 16 * 16 &&
+              10 * painted[1] < (unsigned long)SCREENS_W * SCREENS_H && 10 * painted[2] < (unsigned long)SCREENS_W * SCREENS_H &&
+              10 * painted[3] < (unsigned long)SCREENS_W * SCREENS_H && !compositor_front_stale_any);
+    if (compositor.scanout)
+        compositor_call(syscall(munmap), (positive)compositor.scanout, (positive)bytes, 0, 0, 0, 0);
+    if (compositor_spare.pixels)
+        compositor_call(syscall(munmap), (positive)compositor_spare.pixels, (positive)bytes, 0, 0, 0, 0);
+    memory_zero(&compositor_spare, sizeof(compositor_spare));
+    compositor_front_stale_any = 0, compositor_out_ok = 0, compositor_multi_off = 0;
+    compositor_scan_name[0] = compositor_spare_name[0] = 0;
+    system_remove_at(AT_FDCWD, (string_address)path, 0);
+    system_remove_at(AT_FDCWD, (string_address)spare, 0);
+    compositor_call(syscall(munmap), (positive)mapped, table_bytes, 0, 0, 0, 0);
+    compositor_zero();
+}
+
+/*
         A scale changed in a displays line is taken by the screens as they are driven: the same screens at the same modes
         are no new space, so compositor_space_take took nothing and the scale waited for the next start. A is 320 by 192
         and B 256 by 240, the first lit at 100 percent and the second at 100; their lines then ask 150 and 75. Each screen's

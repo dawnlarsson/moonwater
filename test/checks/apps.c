@@ -10497,6 +10497,7 @@ b32 main()
         GROUP("check_compositor_runs", check_compositor_runs());
         GROUP("check_compositor_held", check_compositor_held());
         GROUP("check_compositor_screens", check_compositor_screens());
+        GROUP("check_compositor_screens_plates", check_compositor_screens_plates());
         GROUP("check_compositor_scales", check_compositor_scales());
         GROUP("check_compositor_corner_scales", check_compositor_corner_scales());
         GROUP("check_compositor_turn", check_compositor_turn());
