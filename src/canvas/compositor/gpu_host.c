@@ -1926,12 +1926,13 @@ static int compositor_gpu_rotate(unsigned int at, const int *screen, unsigned in
         return 1;
 }
 
-// Single-pass tiled/DCC sampling in the RDNA2 scene kernel is disabled until its sync/fallback/DCC lifecycle is verified
-// on live hardware (enabling it on RDNA2 caused black tears, wallpaper bleed, and cursor damage-rect artifacts in Chrome;
-// tiled/DCC DMA-BUFs use the proven async gpu_image_go path in compositor_wl_card_image instead).
+// Single-pass tiled/DCC sampling in the RDNA2/RDNA3 scene kernel: on only when the opt-in (canvas.gpu.tiled, off by default) is set and the card
+// passed its own image self-test (gpu_image_ok, which holds only on those families). Off, the proven async gpu_image_go path in
+// compositor_wl_card_image takes the tiled/DCC DMA-BUFs. Enabling it caused black tears, wallpaper bleed and cursor damage-rect artifacts in
+// Chrome before the damage coverage was verified (see the notes in the ledger), which is why it is an opt-in.
 static int compositor_gpu_tiled_ready(void)
 {
-        return 0;
+        return compositor_tiled_on && gpu_image_ok;
 }
 #else
 static int compositor_gpu_tiled_ready(void)

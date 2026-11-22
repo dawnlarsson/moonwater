@@ -1213,6 +1213,7 @@ struct compositor_setting_spec
 static const struct compositor_setting_spec compositor_setting_specs[] = {
         CS_G(SETTING_CLIPBOARD_PATH, COMPOSITOR_SET_CLIP), CS_G(SETTING_CLIPBOARD_HISTORY_PATH, COMPOSITOR_SET_CLIP),
         CS_G(SETTING_GPU_PATH, COMPOSITOR_SET_GPU),
+        {"/root/canvas.gpu.tiled", COMPOSITOR_SET_GPU, COMPOSITOR_BIND_INT_EQ, 0, 0, 0, &compositor_tiled_on}, // the opt-in: a switch, on is 0
         CS_G(SETTING_WALLPAPER_PATH, COMPOSITOR_SET_WALL), CS_G(SETTING_WALLPAPER_DARK_PATH, COMPOSITOR_SET_WALL),
         {SETTING_WALLPAPER_MARIA_PATH, COMPOSITOR_SET_WALL, COMPOSITOR_BIND_INT, 20, 80, 45, &compositor_wall_rows.maria},
         {SETTING_WALLPAPER_GLOW_PATH, COMPOSITOR_SET_WALL, COMPOSITOR_BIND_INT, -1000, 1000, 0, &compositor_wall_rows.glow},

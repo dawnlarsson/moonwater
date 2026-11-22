@@ -35,6 +35,8 @@ enum
 #define COMPOSITOR_GRID_TAKEN   0x80000000u
 
 static unsigned int compositor_ground = COMPOSITOR_INK_DESKTOP;
+// canvas.gpu.tiled (session.c reads it): the opt-in to sample tiled and DCC client pictures in place on the card. Off by default.
+static int compositor_tiled_on;
 
 /* Direct-registration open-addressed epoll reactor (~28 KiB BSS + 8 KiB atomic fd bitmap). */
 enum
