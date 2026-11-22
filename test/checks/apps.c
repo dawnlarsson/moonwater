@@ -1050,6 +1050,66 @@ static fn squiggle_check(struct ui address_to wui)
 }
 
 /*
+        The editor's pill: its right edge is the text box's right edge less the margin and its bottom edge is the box's bottom less the
+        margin below it. It is filled with the surface container at 236 of 255: a pixel inside its left cap is the fill a reference
+        rectangle of that tone takes, and a pixel one to its left or right is the ground, so a pill shifted by a pixel fails. A press
+        and its release on the Wrap chip turn word wrap off, and on the Hex half of the switch show hex: both reach the kit through
+        ui_kit_pointer, which sets the chip or the switch's item on the release.
+*/
+static fn editor_pill_check(void)
+{
+        long pixels = ui_map(400 * 300 * 4);
+        unsigned int *shown = (unsigned int address_to)pixels, ground = 0x111113, expected = ui_tone(ui_role(UI_SURFACE_CONTAINER) & 0xffffffu, 236);
+        unsigned int reference, inside, left, right;
+        struct editor_tab address_to tab;
+        struct ui_box box;
+        struct window_event at = {WINDOW_EVENT_MOTION, 0, 0, 0, 0}, press = {WINDOW_EVENT_BUTTON, WINDOW_KEY_DOWN, UI_POINTER_LEFT, 0, 0};
+        struct window_event release = {WINDOW_EVENT_BUTTON, 0, UI_POINTER_LEFT, 0, 0};
+        int px, py, pw, ph, centre_y;
+
+        editor.ui = terminal.ui;
+        ui_begin(&editor.ui, shown, 400, 400, 300);
+        editor.ui.scale = 100;
+        memory_fill_u32(shown, 400 * 300, ground);
+        editor.width = 400, editor.height = 300;
+        editor.text_box = (struct ui_rect){0, 0, 400, 300};
+        editor.wrap_shown = editor.mode_shown = false;
+        editor.status[0] = 0;
+        editor_open(null);
+        tab = editor_now();
+        editor_layout();
+        editor_pill_draw(&editor.ui, tab);
+        px = editor.pill_box[0], py = editor.pill_box[1], pw = editor.pill_box[2], ph = editor.pill_box[3];
+        check("editor pill: it sits at the text box's bottom right, the margin and the pad from its edges",
+              px + pw == 400 - ui_dev(&editor.ui, UI_PAD) && py + ph == 300 - ui_dev(&editor.ui, 10));
+        centre_y = py + ph / 2;
+        box = ui_box_px(200, 200, 20, 20, 0);
+        ui_kit_fill(&editor.ui, &box, expected, null);
+        reference = shown[210 * 400 + 210];
+        inside = shown[centre_y * 400 + px + 3];
+        left = shown[centre_y * 400 + px - 1];
+        right = shown[centre_y * 400 + px + pw];
+        check("editor pill: its fill is the surface container at 236 of 255, as a reference rectangle of that tone", inside == reference);
+        check("editor pill: the ground is a pixel to its left and to its right, so the pill is where it is drawn", left == ground && right == ground);
+
+        at.a = editor.chips[1].x + editor.chips[1].w / 2, at.b = editor.chips[1].y + editor.chips[1].h / 2;
+        press.a = UI_POINTER_LEFT, release.a = UI_POINTER_LEFT;
+        ui_kit.pointer_x = at.a, ui_kit.pointer_y = at.b;
+        editor_pill_event(tab, &at);
+        editor_pill_event(tab, &press);
+        editor_pill_event(tab, &release);
+        check("editor pill: a press and a release on the Wrap chip turn word wrap off", !tab->view.wrap);
+
+        at.a = editor.chips[0].x + editor.chips[0].w - 4, at.b = editor.chips[0].y + editor.chips[0].h / 2;
+        ui_kit.pointer_x = at.a, ui_kit.pointer_y = at.b;
+        editor_pill_event(tab, &at);
+        editor_pill_event(tab, &press);
+        editor_pill_event(tab, &release);
+        check("editor pill: a press and a release on the Hex half of the switch show hex", tab->view.hex);
+        compositor_call(syscall(munmap), pixels, 400 * 300 * 4, 0, 0, 0, 0);
+}
+
+/*
         The kit's drag and drop helpers. A list of URIs gives this machine's files' paths, %XX made bytes again, and passes over a
         comment, another scheme, another machine's file and a path with a NUL in it; dropped on a command line the same list is each
         path quoted for a shell, a quote in it closed and opened again, never a line's end. A press arms a drag and its release disarms
@@ -2026,6 +2086,7 @@ static fn text_widget_check(string_address inter, string_address mono)
         list_interaction_check(&wui);
         copy_cap_check();
         squiggle_check(&wui);
+        editor_pill_check();
         ui_over_check();
 }
 

@@ -39,7 +39,7 @@ static struct
         struct ui_view view;
         struct ui_rect find_box, text_box;
         int pill_box[4];
-        struct ui_control wrap_chip, mode_switch;
+        struct ui_control chips[2]; // the kit controls the pill places: [0] the Text | Hex switch, [1] the Wrap chip, one array so one kit call routes a press
         b32 wrap_shown, mode_shown;
         b32 pill_down;
         char bar_text[256], status[160];
@@ -933,7 +933,7 @@ static fn editor_pill_draw(struct ui address_to ui, struct editor_tab address_to
         if (wrap_w > 0)
         {
                 // The Wrap chip is the kit's UI_BUTTON_CHIP, placed by hand as osk.c places its keys: logical units, drawn on top.
-                struct ui_control address_to c = &editor.wrap_chip;
+                struct ui_control address_to c = &editor.chips[1];
 
                 if (c->kind != UI_BUTTON)
                         c->kind = UI_BUTTON, c->variant = UI_BUTTON_CHIP, ui_control_start(c);
@@ -946,7 +946,7 @@ static fn editor_pill_draw(struct ui address_to ui, struct editor_tab address_to
         // The Text | Hex switch is the kit's segmented tabs, placed by hand as the Wrap chip is.
         sy = py + (ph - seg_h) / 2;
         {
-                struct ui_control address_to s = &editor.mode_switch;
+                struct ui_control address_to s = &editor.chips[0];
 
                 if (s->kind != UI_TABS)
                         s->kind = UI_TABS, s->variant = UI_TABS_SEGMENTED, ui_control_start(s);
@@ -961,28 +961,31 @@ static b32 editor_pill_event(struct editor_tab address_to tab, const struct wind
 {
         if (tab->view.sel.dragging || tab->view.gutter_drag || tab->view.drag.armed || tab->view.bar.held)
                 return false;
+        // The pill's kit controls are routed as one array: a press holds one control, and a second call's press would let it go.
         if (event->type == WINDOW_EVENT_MOTION)
         {
-                if (editor.wrap_shown)
-                        ui_kit_pointer(&editor.ui, &editor.wrap_chip, 1, WINDOW_EVENT_MOTION, event->a, event->b, false, event->flags);
                 if (editor.mode_shown)
-                        ui_kit_pointer(&editor.ui, &editor.mode_switch, 1, WINDOW_EVENT_MOTION, event->a, event->b, false, event->flags);
+                        ui_kit_pointer(&editor.ui, editor.chips, editor.wrap_shown ? 2 : 1, WINDOW_EVENT_MOTION, event->a, event->b, false, event->flags);
                 if (editor_pill_in(editor.pill_box, event->a, event->b))
                         return editor.dirty = true, true;
                 return false;
         }
         if (event->type == WINDOW_EVENT_BUTTON && (p32)event->a == UI_POINTER_LEFT)
         {
-                // The kit reports a chip click on its release: the press and the release both go to the chip first.
-                if (editor.wrap_shown && ui_kit_pointer(&editor.ui, &editor.wrap_chip, 1, WINDOW_EVENT_BUTTON, ui_kit.pointer_x,
-                                                        ui_kit.pointer_y, (event->flags & WINDOW_KEY_DOWN) != 0, event->flags) == &editor.wrap_chip)
+                // The kit reports a click on the release: the chip's or the switch's control, whichever it is, comes back from the press's call.
+                struct ui_control address_to hit = editor.mode_shown
+                                                       ? ui_kit_pointer(&editor.ui, editor.chips, editor.wrap_shown ? 2 : 1, WINDOW_EVENT_BUTTON,
+                                                                        ui_kit.pointer_x, ui_kit.pointer_y, (event->flags & WINDOW_KEY_DOWN) != 0,
+                                                                        event->flags)
+                                                       : null;
+
+                if (hit == &editor.chips[1])
                         return editor.pill_down = false, editor_toggle((int)DOC_CMD_WRAP);
-                if (editor.mode_shown && ui_kit_pointer(&editor.ui, &editor.mode_switch, 1, WINDOW_EVENT_BUTTON, ui_kit.pointer_x,
-                                                        ui_kit.pointer_y, (event->flags & WINDOW_KEY_DOWN) != 0, event->flags) == &editor.mode_switch)
+                if (hit == &editor.chips[0])
                 {
                         // The kit has set the item on the release: switch when it is not the mode already shown.
                         editor.pill_down = false;
-                        if ((editor.mode_switch.at == 1) != tab->view.hex)
+                        if ((editor.chips[0].at == 1) != tab->view.hex)
                                 editor_toggle((int)DOC_CMD_HEX);
                         return true;
                 }
