@@ -59,6 +59,8 @@
 #define WAYLAND_IDS_MAX 4096 /* one seat, device or relative-pointer list per client */
 #define WAYLAND_MIME_BYTES (64L << 10) /* all the mime types one source offers, NULs included */
 #define WAYLAND_SUB_LEVELS 32L /* subsurface nesting; flatten and the sub walks recurse once per level */
+#define WAYLAND_TOKENS_MAX 256L /* global live activation tokens */
+#define WAYLAND_OUT_FDS_MAX (WAYLAND_OUT_FDS * 16L) /* queued outgoing FDs per client */
 
 enum
 {
@@ -591,7 +593,7 @@ static __attribute__((noinline)) int wayland_out_grow(struct wayland_client *c)
 }
 
 static inline int wayland_out_has(struct wayland_client *c) { return c->out_length + WAYLAND_EVENT <= c->out_room || wayland_out_grow(c); }
-static inline int wayland_out_fd_room(struct wayland_client *c) { return wayland_tbl_reach(c, WLT_OUT_FD, c->out_fd_count + 1); }
+static inline int wayland_out_fd_room(struct wayland_client *c) { return c->out_fd_count < WAYLAND_OUT_FDS_MAX && wayland_tbl_reach(c, WLT_OUT_FD, c->out_fd_count + 1); }
 static inline long wayland_out_fd_batch(const struct wayland_client *c) { return c->out_fd_count < WAYLAND_OUT_FDS ? c->out_fd_count : WAYLAND_OUT_FDS; }
 static inline void wayland_out_fd_put(struct wayland_client *c, long fd, long owned, long at) { c->out_fds[c->out_fd_count++] = (struct wayland_outfd){fd, at, owned}; }
 
@@ -3281,10 +3283,12 @@ static void wayland_configure_owed(struct wayland_client *c, struct wayland_surf
                 wayland_configure(c, s, 0);
 }
 
+static int wayland_ancestor(struct wayland_client *c, long maybe, long of);
+
 static void wayland_xs_role_drop(struct wayland_client *c, struct wayland_surface *s)
 {
         wayland_unhold(c, s), wayland_row_release(c, s);
-        s->role_id = 0, s->serials = 0, s->width = s->height = 0;
+        s->role_id = 0, s->parent = 0, s->serials = 0, s->width = s->height = 0;
         s->flags &= ~(unsigned)(WAYLAND_SURFACE_CONFIGURED | WAYLAND_SURFACE_SENT | WAYLAND_SURFACE_MAPPED);
 }
 
@@ -3313,8 +3317,9 @@ static int wayland_xdg_surface_request(struct wayland_client *c, struct wayland_
                 if (popup)
                 {
                         parent = a[1].slot >= 0 ? wayland_surface_of(c, a[1].slot) : 0;
-                        if (!parent || !(parent->flags & WAYLAND_SURFACE_XDG) || !parent->role_id ||
-                            (parent->role != WAYLAND_ROLE_TOPLEVEL && parent->role != WAYLAND_ROLE_POPUP))
+                        if (!parent || parent == s || !(parent->flags & WAYLAND_SURFACE_XDG) || !parent->role_id ||
+                            (parent->role != WAYLAND_ROLE_TOPLEVEL && parent->role != WAYLAND_ROLE_POPUP) ||
+                            wayland_ancestor(c, wayland_surface_index(c, s), wayland_surface_index(c, parent) + 1))
                                 return wayland_fail(c, self->id, WLN_xdg_wm_base_error_invalid_popup_parent, "the popup's parent is not a window");
                         p = &c->positioners[c->objects[a[2].slot].link];
                         if (p->width < 1 || p->anchor_width < 1)
@@ -3439,8 +3444,11 @@ static int wayland_popup_request(struct wayland_client *c, struct wayland_object
         }
         else
         {
+                const struct wayland_positioner *p = &c->positioners[c->objects[a[0].slot].link];
+                if (p->width < 1 || p->anchor_width < 1)
+                        return wayland_fail(c, self->id, WLN_xdg_wm_base_error_invalid_positioner, "the positioner is not complete");
                 wayland_ev(c, self->id, WLE_xdg_popup_repositioned, (unsigned int)a[1].u);
-                wayland_popup_configure(c, s, &c->positioners[c->objects[a[0].slot].link], s->parent ? &c->surfaces[s->parent - 1] : 0);
+                wayland_popup_configure(c, s, p, s->parent ? &c->surfaces[s->parent - 1] : 0);
                 if (s->row >= 0) wayland_row_do(s->row, WAYLAND_DO_PLACE, s->u.popup.x, s->u.popup.y);
         }
         return WAYLAND_OK;
@@ -4097,7 +4105,7 @@ static unsigned long wayland_offer_create_and_send(struct wayland_client *c, lon
 
 static int wayland_source_send_fd(struct wayland_client *c, const struct wayland_source *s, const char *mime, long fd, int from_host)
 {
-        if (!c || !s || !mime || fd < 0 || wayland_slot_of(c, s->id) < 0 || !wayland_out_fd_room(c))
+        if (!c || c->dead || !s || !mime || fd < 0 || wayland_slot_of(c, s->id) < 0 || !wayland_out_fd_room(c))
                 return 0;
         wayland_ev_fd(c, s->id, s->which ? WLE_zwp_primary_selection_source_v1_send : WLE_wl_data_source_send, mime, fd, 1);
         if (from_host) wayland.fds++;
@@ -4904,7 +4912,7 @@ static long wayland_dmabuf_alloc_buffer(struct wayland_client *c, unsigned long 
 
         for (long e = 0; e < wayland.dmabuf.count; e++)
                 found |= wayland.dmabuf.entry[e].format == format && (modifier == WAYLAND_MODIFIER_INVALID || wayland.dmabuf.entry[e].modifier == modifier);
-        if (!found || (flags & ~1UL) || need < 1) return -2;
+        if (!found || (flags & ~1UL) || need < 1 || need > WAYLAND_POOL_BYTES) return -2;
         pool = wayland_tbl_alloc(c, WLT_POOL), buffer = pool >= 0 ? wayland_tbl_alloc(c, WLT_BUFFER) : -1;
         at = buffer >= 0 ? wayland.host->dmabuf_map(wayland.host->context, fds[0], modifier && modifier != WAYLAND_MODIFIER_INVALID ? -need : need) : 0;
         if (!at)
@@ -5305,7 +5313,7 @@ static int wayland_token_free(void)
         }
         if (free_at >= 0) return wayland.token[free_at].gen++, (int)free_at;
         wayland.token_table.unit = sizeof(struct wayland_token);
-        if (wayland.tokens >= 0x7fffffffL || !wayland_table_reach(&wayland.token_table, wayland.tokens + 1)) return -1;
+        if (wayland.tokens >= WAYLAND_TOKENS_MAX || !wayland_table_reach(&wayland.token_table, wayland.tokens + 1)) return -1;
         wayland.token = (struct wayland_token *)wayland.token_table.at;
         wayland.token[wayland.tokens].live = 0, wayland.token[wayland.tokens].gen = 0;
         return (int)wayland.tokens++;
@@ -5537,7 +5545,7 @@ static int wayland_ext_request(struct wayland_client *c, struct wayland_object *
                 return WAYLAND_OK;
         case WLI_zwlr_layer_shell_v1:
                 if (op == WLQ_zwlr_layer_shell_v1_destroy) return WAYLAND_OK;
-                s = &c->surfaces[c->objects[a[1].slot].link];
+                if (!(s = wayland_surface_of(c, a[1].slot))) return wayland_fail(c, self->id, WAYLAND_INVALID_OBJECT, "a surface is gone");
                 if (s->role != WAYLAND_ROLE_NONE || s->xsurface || (s->flags & WAYLAND_SURFACE_XDG))
                         return wayland_fail(c, self->id, WLN_zwlr_layer_shell_v1_error_already_constructed, "the surface has a role");
                 if (a[3].u > 3) return wayland_fail(c, self->id, WLN_zwlr_layer_shell_v1_error_invalid_layer, "unknown layer");
@@ -5547,12 +5555,11 @@ static int wayland_ext_request(struct wayland_client *c, struct wayland_object *
                                             ? (long)c->objects[a[2].slot].aux : 0;
                 return wayland_surface_link(c, a[0].slot, s), WAYLAND_OK;
         case WLI_zwlr_layer_surface_v1:
-                s = &c->surfaces[self->link];
-                if (!s->live || s->role_id != self->id) return WAYLAND_OK;
+                if (!(s = wayland_surface_of(c, self - c->objects)) || s->role_id != self->id) return WAYLAND_OK;
                 if (op == WLQ_zwlr_layer_surface_v1_destroy)
                         wayland_xs_role_drop(c, s), s->role = WAYLAND_ROLE_NONE, s->u.top.layer_shell = 0;
                 else if (op == WLQ_zwlr_layer_surface_v1_set_size)
-                        s->u.top.layer_w = (long)a[0].u, s->u.top.layer_h = (long)a[1].u;
+                        s->u.top.layer_w = wayland_min((long)a[0].u, WAYLAND_DIMENSION), s->u.top.layer_h = wayland_min((long)a[1].u, WAYLAND_DIMENSION);
                 else if (op == WLQ_zwlr_layer_surface_v1_set_layer)
                 {
                         if (a[0].u > 3) return wayland_fail(c, self->id, WLN_zwlr_layer_shell_v1_error_invalid_layer, "unknown layer");
@@ -5889,12 +5896,24 @@ WAYLAND_API void wayland_stop(void)
 
 static void wayland_stall(struct wayland_client *c, const unsigned char *head, long head_size, const unsigned char *rest, long rest_length)
 {
-        if (head_size + rest_length > WAYLAND_STASH)
+        unsigned char *dst = c->stash + head_size;
+
+        if (head_size < 0 || rest_length < 0 || head_size + rest_length > WAYLAND_STASH)
         {
                 wayland_fail(c, 1, WAYLAND_NO_MEMORY, "more sent than can wait for a buffer");
                 return;
         }
-        wayland_copy(c->stash, head, head_size), wayland_copy(c->stash + head_size, rest, rest_length);
+        if (rest >= c->stash && rest < c->stash + WAYLAND_STASH)
+        {
+                if (dst > rest)
+                        for (long i = rest_length; i > 0; i--) dst[i - 1] = rest[i - 1];
+                else if (dst < rest)
+                        for (long i = 0; i < rest_length; i++) dst[i] = rest[i];
+                if (head_size > 0)
+                        wayland_copy(c->stash, head, head_size);
+        }
+        else
+                wayland_copy(c->stash, head, head_size), wayland_copy(dst, rest, rest_length);
         c->stash_length = head_size + rest_length, c->stalled = 1, c->stalled_at = wayland_now();
 }
 

@@ -16,6 +16,7 @@
 #define COMPOSITOR_WL_SIGALRM 14
 #define COMPOSITOR_WL_TRANSFERS_MOST (1l << 20)
 #define COMPOSITOR_WL_PULLS 8
+#define COMPOSITOR_WL_PUSHES 16
 #define COMPOSITOR_WL_PULL_NS 3000000000ull
 #define COMPOSITOR_WL_PUSH_NS 5000000000ull
 #define COMPOSITOR_WL_CHUNK 4096
@@ -401,6 +402,8 @@ static void *compositor_wl_map(void *context, long fd, long size)
         unsigned long length;
 
         (void)context;
+        if (size < 1 || size > WAYLAND_POOL_BYTES)
+                return 0;
         memory_zero(info, sizeof info);
         got = compositor_call(syscall(statx), (positive)fd, (positive) "", 0x1000, 0x201, (positive)info, 0);
         if (got < 0)
@@ -424,6 +427,8 @@ static void *compositor_wl_remap(void *context, void *at, long old_size, long ne
         int noted = canvas_htab_find(&compositor_wl.map_index, &compositor_wl.map_table, (unsigned long)at, 0, 0, 1) >= 0;
 
         (void)context;
+        if (!at || old_size < 1 || new_size < old_size || new_size > WAYLAND_POOL_BYTES)
+                return 0;
         // The slot the moved range is noted in is taken before the pages move: mremap moves them, so nothing that can fail may come after it
         // (a refusal after the move left the old address unmapped, and the pool's later unmap of it hit whatever was mapped there since).
         if (noted)
@@ -4024,7 +4029,8 @@ static void compositor_wl_transfer_run(address_any context)
                         // A client that streams past the clipboard's largest size is cut off here: what it sent is not kept (pull_end drops it).
                         if (total + done >= WINDOWS_CLIP_MOST)
                                 break;
-                        got = compositor_call(syscall(read), (positive)fd, (positive)bytes, sizeof bytes, 0, 0, 0);
+                        unsigned long left = WINDOWS_CLIP_MOST - (total + done);
+                        got = compositor_call(syscall(read), (positive)fd, (positive)bytes, left < sizeof bytes ? left : sizeof bytes, 0, 0, 0);
                         if (got == -11) continue;
                         if (got == 0) result = 2;
                         if (got <= 0) break;
@@ -4171,10 +4177,14 @@ static int compositor_wl_push_start(unsigned int which, long client, long row, c
 {
         struct windows *table = compositor.table;
         struct windows_clip_type type;
-        long src, slot;
+        long src, slot, live = 0, flags;
 
         if (!table || which > WINDOWS_CLIP_DRAG || compositor_clip.fd[which] < 0 || !mime ||
             !windows_clip_find(compositor_clip.map[which], table->clip_length[which], mime, string_length((string_address)mime), &type))
+                goto fail;
+        for (long at = 0; at < compositor_wl.transfers; at++)
+                live += compositor_wl.transfer[at].state == COMPOSITOR_WL_PUSH;
+        if (live >= COMPOSITOR_WL_PUSHES)
                 goto fail;
         if (check_pipe)
         {
@@ -4184,6 +4194,10 @@ static int compositor_wl_push_start(unsigned int which, long client, long row, c
                     ((((unsigned int)info[28] | (unsigned int)info[29] << 8) & 0170000) != 0010000))
                         goto fail;
         }
+        // Ensure non-blocking writes so a stalled client pipe cannot block the push thread past its deadline/cancel.
+        flags = compositor_call(syscall(fcntl), (positive)fd, 3, 0, 0, 0, 0); // F_GETFL
+        if (flags >= 0)
+                compositor_call(syscall(fcntl), (positive)fd, 4, (positive)(flags | 0x800), 0, 0, 0); // F_SETFL | O_NONBLOCK
         slot = compositor_wl_transfer_place();
         src = slot >= 0 ? compositor_call(syscall(fcntl), (positive)compositor_clip.fd[which], COMPOSITOR_F_DUPFD_CLOEXEC, 0, 0, 0, 0) : -1;
         if (slot < 0 || src < 0)
@@ -4458,7 +4472,7 @@ static int compositor_wl_drag_push(const char *mime, long fd)
 {
         if (compositor_dnd.active != 1 || compositor_dnd.source < 0)
                 return system_close((int)fd), 0;
-        return compositor_wl_push_start(WINDOWS_CLIP_DRAG, -1, -1, mime, fd, 0);
+        return compositor_wl_push_start(WINDOWS_CLIP_DRAG, -1, -1, mime, fd, 1);
 }
 
 static void compositor_wl_drag_pulled(long at, int ok)
@@ -4511,6 +4525,8 @@ static int wl_dnd_read_drop(void *ctx, const char *mime, int target_row)
         int fds[2] = {-1, -1}, keep = -1, index = -1;
         long slot = compositor_wl.wake >= 0 ? compositor_wl_transfer_place() : -1;
         (void)ctx;
+        if (compositor_wl.drag_reading >= 0 && compositor_wl.drag_reading < compositor_wl.transfers)
+                compositor_wl_transfer_cancel(compositor_wl.drag_reading), compositor_wl.drag_reading = -1;
         if (slot < 0 || !compositor_wl_pull_open("moonwater-drop", &keep, &index) ||
             compositor_call(syscall(pipe2), (positive)fds, 0x80000, 0, 0, 0, 0) < 0)
         {
@@ -4785,7 +4801,7 @@ static void compositor_wl_start(void)
         compositor_wl.map_table.unit = sizeof(struct compositor_wl_mapping);
         // Layers off where the owner asks (/run/moonwater/layers-off), looked for once at the start: subsurfaces laid into their window as before.
         {
-                bipolar off = system_open_at(AT_FDCWD, (string_address) "/run/moonwater/layers-off", FILE_READ | O_CLOEXEC);
+                bipolar off = system_open_at(AT_FDCWD, (string_address) "/run/moonwater/layers-off", FILE_READ | O_CLOEXEC | O_NOFOLLOW);
 
                 compositor_wl_layers.off = off >= 0;
                 if (off >= 0)
@@ -5400,7 +5416,8 @@ static void compositor_wl_accept(void)
                         continue;
                 }
                 // SOL_SOCKET, SO_PEERCRED: the kernel's word for who is on the other end, not the client's.
-                if (compositor_call(syscall(getsockopt), (positive)fd, 1, 17, (positive)credentials, (positive)&size, 0) < 0)
+                if (compositor_call(syscall(getsockopt), (positive)fd, 1, 17, (positive)credentials, (positive)&size, 0) < 0 ||
+                    size != sizeof credentials || credentials[0] <= 0)
                 {
                         system_close((int)fd);
                         continue;
