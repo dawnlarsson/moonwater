@@ -4622,6 +4622,18 @@ static long compositor_wl_selection_query(void *context, long which, unsigned lo
         return row >= 0 ? (long)wayland_row_owner(row) : -1;
 }
 
+/*
+        What the drag engine says of a drag: whether one is on (compositor_dnd.active, 0 for none) and the row it is over (-1 for none), read
+        from the engine (manage.c) so the shim keeps no copy of the target row. The shim maps the row to its client itself.
+*/
+static long compositor_wl_drag_state(void *context, long *target_row)
+{
+        (void)context;
+        if (target_row)
+                *target_row = compositor_dnd.active && compositor_dnd.target >= 0 ? compositor_dnd.target : -1;
+        return compositor_dnd.active;
+}
+
 static void compositor_wl_selection(unsigned int which) { if (compositor_wl.started) wayland_selection_changed((long)which); }
 
 static void compositor_wl_xreceive(void *context, long client, long which, const char *mime, long fd)
