@@ -3148,6 +3148,77 @@ check row.
 **Related.** MW-2026-050 (who may map the table). `76914efe6`, the commit that
 added the open through the table's pid.
 
+### MW-2026-216: a spawn that raced a tracer's or a seccomp filter's arrival could start a child the watch did not see
+
+| | |
+|---|---|
+| Status | Fixed on main, 2026-11-22 (`45c4d3265`). A narrower residual is open (below) |
+| Class | Time of check to time of use: the watch check (is the caller traced or under a seccomp filter) ran once, before the blocking user copies and the mutex wait, and the child was cloned after them |
+| Attacker | A program a supervisor watches (traced, or under a filter) that spawns while the watch is being applied. `/dev/spark` is mode 0666 and the spawn ioctl needs no capability, so any local program can make the call; the watch is what it gets around |
+| Reachable | src/moonwater/spark.c `do_spawn` (SPARK_IOCTL_SPAWN, dispatched from src/moonwater/core.c `device_ioctl`), and `spawn_enter`, the child's entry before `execve`. The child is cloned with `CLONE_UNTRACED`, so it is never traced by its parent's tracer |
+
+**What happened.** `d02f1e08d` (2026-11-04, "spark: a caller a seccomp filter or
+a tracer watches is refused SPARK_IOCTL_SPAWN") refuses the spawn ioctl to a
+watched caller, so the shell forks and execs instead and the child stays under
+the watch. The check ran at the top of `do_spawn`. Between it and the clone,
+`do_spawn` copies the arguments and the environment from user space and waits on
+a mutex. A tracer that attached, or a TSYNC seccomp filter applied by another
+thread of the same process, during those steps was not seen, and the child was
+cloned unwatched. This is the window `d02f1e08d` set out to close. The bug was
+in the code from 2026-11-04 to 2026-11-22.
+
+**The fix.** `do_spawn` checks again after the copies and the mutex wait, just
+before the clone (`45c4d3265`). The new task checks again in `spawn_enter`
+before `execve`. The new task's check reads its own seccomp mode, which it
+copied from the caller at clone, so it catches a filter that was in place at the
+clone.
+
+**Residual, narrowed, not closed.** A seccomp filter in place at the clone is
+caught by the child's own test in `spawn_enter`, because the child copies the
+caller's mode at the clone. A tracer that attaches to the caller between
+`do_spawn`'s last test and the clone (a few instructions with no sleep between
+them) is not caught: the child is cloned `CLONE_UNTRACED`, so its own ptrace
+field is always 0 and `spawn_enter`'s ptrace test cannot see it, where a fork in
+that window would have been followed by a tracer using `PTRACE_O_TRACEFORK`. The
+fix would be for `spawn_enter` to test the spawning task's ptrace state before
+`execve`. A watch that arrives after that is the same as one that arrives after
+a fork, which neither path can catch.
+
+**Tests that fail without the fix.** None. `45c4d3265` touches
+src/moonwater/spark.c and the function audit seal only; there is no check row.
+Nothing in the repo runs the race, so the claim is by reading the code.
+
+**Related.** `d02f1e08d` (the watch check this window opens under). MW-2026-050
+is not related; the spawn ioctl's caller is any local program.
+
+### MW-2026-217: a composite glyph's components were read past the glyph's bytes, so a hostile font drew another glyph's outline
+
+| | |
+|---|---|
+| Status | Fixed on main, 2026-11-22 (`c96fc2213`) |
+| Class | Correctness on hostile input: the arguments of a composite glyph's component were read after the glyph's end, into the next glyph's bytes in the same font table. No read leaves the font file |
+| Attacker | Whoever supplies a font face that a program lays text with: a font a person installs or opens |
+| Reachable | src/canvas/font.c `font_outline`, the composite branch (component flags and arguments), in every program that rasterises a face |
+
+**What happened.** The component loop checked `p + 4 > limit` only before the
+flags and the child index. The arguments (two bytes or four, or a byte pair for
+the offsets) were read after that check and were never compared with the glyph's
+end. A composite whose arguments ran past the glyph read the bytes of the
+following glyph and drew them as its own offsets. The reads are bounds-checked
+by `font_u16`, `font_i16` and `font_u8` against the whole face, so the reach is
+the font file and no memory outside it. Introduced by `697155d9a` (2026-10-09,
+the TrueType outlines in font.c). Same class as MW-2026-208: hostile input gives
+wrong output, and the record is kept for that reason.
+
+**The fix.** After the arguments, `if (p > limit) return FONT_BAD;`
+(`c96fc2213`).
+
+**Tests that fail without the fix.** None. `c96fc2213` adds no check row (font.c
+and the function audit seal only). The claim is by reading the code.
+
+**Related.** MW-2026-208 (same face, a substitution that wrote its input).
+`697155d9a`, the commit that added the composite reads.
+
 ## Reviews with no exposure found
 
 Disclosures read against the code on 2026-10-23, each with the check that was
