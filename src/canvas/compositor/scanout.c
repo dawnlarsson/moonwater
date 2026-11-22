@@ -505,6 +505,7 @@ static int compositor_refusal_fatal(void)
                 unsigned int shift = compositor_busy_run < 6 ? compositor_busy_run : 6;
 
                 compositor_busy_run++;
+                compositor_record_backoffs++;
                 compositor_busy_until = clock_monotonic_nanoseconds() + ((compositor.period ? compositor.period : 16666667ull) << shift);
                 return 0;
         }
