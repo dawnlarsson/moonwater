@@ -941,7 +941,7 @@ static int taskbar_moon_most(int size) { return (int)((positive)size * TASKBAR_M
 static int taskbar_moon_more(const struct taskbar_view *view) { return (int)(((positive)taskbar_thick(view->scale) * TASKBAR_MOON_GROW * (positive)taskbar_moon_share() / UI_ONE + 199) / 200); }
 static void taskbar_moon_hover(int band) { taskbar.moon_hover = band + 1; }
 static void taskbar_moon_seen(positive now) { taskbar.moon_seen = now; }
-static int taskbar_motion_about(positive now) { return taskbar.glides && !taskbar.moon_at && now - taskbar.moon_seen < TASKBAR_MOON_IDLE; }
+static int taskbar_motion_about(positive now) { return taskbar.glides && !taskbar.moon_at && taskbar.moon_seen && now - taskbar.moon_seen < TASKBAR_MOON_IDLE; }
 static void taskbar_spin_set(int s) { taskbar.spin = s >= 10 && s <= 3600 ? s : s == 0 ? 0 : TASKBAR_MOON_SPIN; }
 static void taskbar_bar_set(int sep, int edge) { taskbar.separate = sep != 0, taskbar.edge_in = edge >= TASKBAR_EDGE_LEAST && edge <= TASKBAR_EDGE_MOST ? edge : 0, taskbar.stale = 1; }
 
@@ -1034,8 +1034,6 @@ static int taskbar_moon_tick(positive now, int launcher)
         int changed = 0;
         b32 motion = ui_kit.motion;
 
-        if (!taskbar.moon_seen)
-                taskbar.moon_seen = now;
         if (taskbar.spin > 0 && taskbar_motion_about(now))
         {
                 timespec real = {0, 0};
