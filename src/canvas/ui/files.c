@@ -115,7 +115,8 @@ static struct
         struct ui_job runner;
         struct ui_job device;  // moonwater device open, writable, eject or tidy, one at a time
         int device_kind;
-        p32 device_at;         // the partition the device menu is of
+        p32 device_at;         // the partition the device menu is of, and its node: the list read again meanwhile may have moved it
+        p8 device_menu_node[FILES_DEVICE_NODE];
         p8 device_node[FILES_DEVICE_NODE], open_after[FILES_DEVICE_NODE]; // what the job is of; a partition opened and not yet gone to
         string_address start;
         struct ui_rect path_box, head_box, side_box, nav_box[4];
@@ -1786,6 +1787,13 @@ static fn files_menu_do(int id)
         struct files_model address_to m = &files.big->model;
         if (id >= FILES_MENU_DEVICE_OPEN && id <= FILES_MENU_DEVICE_LIVE)
         {
+                const struct files_devices address_to d = &files.big->devices;
+                p32 p = 0;
+                while (p < d->parts && !string_equals((string_address)d->part_node[p], (string_address)files.device_menu_node))
+                        p++;
+                if (p == d->parts)
+                        return;
+                files.device_at = p;
                 if (id == FILES_MENU_DEVICE_OPEN)
                         files_device_enter(files.device_at);
                 else if (id != FILES_MENU_DEVICE_LIVE)
@@ -3011,6 +3019,7 @@ static fn files_device_menu(p32 p, int x, int y)
             {WORDS(files_device_live), null, UI_MENU_DISABLED, FILES_MENU_DEVICE_LIVE, !d->live || mounted},
         };
         files.menu.menu.count = 0, files.sheet = false, files.device_at = p;
+        string_copy_bounded((string_address)files.device_menu_node, (string_address)d->part_node[p < d->parts ? p : 0], sizeof(files.device_menu_node));
         ui_popmenu_build(&files.menu.menu, items, FILES_COUNT(items));
         files_popup_open(x, y), files.dirty = true;
 }
