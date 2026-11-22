@@ -3588,7 +3588,7 @@ static void gpu_round_rows(void)
 }
 
 /*
-        The jobs without a wait (gpu.c's gpu_submit, gpu_scene_submit, gpu_scene_more_submit, gpu_done, gpu_fence_fd), on the fake card (no descriptor, a submit the
+        The jobs without a wait (gpu.c's gpu_submit, gpu_scene_submit, gpu_done, gpu_fence_fd), on the fake card (no descriptor, a submit the
         fake takes and numbers, a fence it answers for every job alike): a scene is submitted and not waited for; the next is built in the other slot and the other
         side of the bins while it runs; a third waits for the first, and nothing of the first's is written; a job is asked after without a wait; its sync_file is
         the kernel's answer to AMDGPU_FENCE_TO_HANDLE; and a pending job's deadline, its fence's error and a refused submit end it, or keep it, as gpu.c says.
@@ -3597,7 +3597,7 @@ static void gpu_async_rows(void)
 {
         unsigned char kept_gpu[sizeof(gpu)], args0[sizeof(struct gpu_args)], bins0[4096];
         unsigned int kept_count = gpu_map_count, kept_tick = gpu_tick, was_ctx, submits;
-        positive base = GPU_DATA + 65536, ops_at = base, bins_at = base + 65536, d_at = base + 8192, first, second, third, more, room, first_g, now, kept_began, kept_pending;
+        positive base = GPU_DATA + 65536, ops_at = base, bins_at = base + 65536, d_at = base + 8192, first, second, third, room, first_g, now, kept_began, kept_pending;
         unsigned int address_to ops = (unsigned int address_to)((p8 address_to)gpu_late_buffer + ops_at);
         const unsigned int q[8] = {0, 0, 0, 64, 4, 0xff336699u, 0, 0};
         const struct gpu_args address_to slot0 = (const struct gpu_args address_to)((p8 address_to)gpu_late_buffer + GPU_ARGS_AT(0));
@@ -3663,19 +3663,12 @@ static void gpu_async_rows(void)
         third = gpu_scene_submit(ops_at, 1, bins_at, d_at, 64, 64, 4, 0, 0, 64, 4);
         check("gpu async: with the first done the third is built in its slot and its side", third && gpu_pending_slot == 0 && slot0->g == first_g && gpu_before.sequence == second);
         submits = gpu_fake_submits;
-        check("gpu async: another rectangle while the job before is in its slot is refused as late", !gpu_scene_more_submit(d_at, 64, 64, 4, 0, 0, 64, 4) &&
-              gpu_end == GPU_END_LATE && gpu_fake_submits == submits);
         gpu_fake_busy = 0, gpu_fake_idle = 1;
-        check("gpu async: another rectangle of a scene of another size is refused, and nothing submitted",
-              !gpu_scene_more_submit(d_at, 128, 128, 4, 0, 0, 64, 4) && gpu_fake_submits == submits);
         check("gpu async: the second is seen done, the third still pending", gpu_done(second) == 1 && !gpu_before.sequence && gpu.pending == third);
         gpu_fake_busy = 1, gpu_fake_idle = 0;
-        more = gpu_scene_more_submit(d_at, 64, 64, 4, 0, 0, 64, 4);
-        check("gpu async: another rectangle of the last scene is drawn from its lists, in the other slot", more && gpu.pending == more && gpu_pending_slot == 1 &&
-              GPU_ARGS->g == first_g && GPU_ARGS->op == 6 && gpu_before.sequence == third && gpu_bins.job[gpu_bins.side] == more);
         submits = gpu_fake_submits;
         check("gpu async: a scene that waits is refused while jobs are pending, and nothing submitted",
-              !gpu_scene(ops_at, 1, bins_at, d_at, 64, 64, 4, 0, 0, 64, 4) && gpu_fake_submits == submits && gpu.pending == more);
+              !gpu_scene(ops_at, 1, bins_at, d_at, 64, 64, 4, 0, 0, 64, 4) && gpu_fake_submits == submits && gpu.pending == third);
 
         // 7. A refused submit while a job is pending leaves the pending job as it was (its sequence, its submit's time, the one before it).
         gpu_fake_busy = 0, gpu_fake_idle = 1, gpu_done(third);

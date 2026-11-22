@@ -1051,7 +1051,7 @@ def test_canvas_spaces_invariants():
           "{800, 801, &gpu_i915_gen9_set}" in gpu_c and
           "{900, 901, &gpu_i915_gen9_set}" in gpu_c and
           "{1100, 1101, &gpu_i915_gen9_set}" in gpu_c and
-          "gpu_intel_xehp_frame(" in gpu_c and "0x70020004u" in gpu_c and "0x70070000u" in gpu_c and
+          "0x70020004u" in gpu_c and "0x70070000u" in gpu_c and
           "GPU_XE_VM_BIND == 0x40886445u" in gpu_c and "GPU_XE_EXEC == 0x40386449u" in gpu_c and
           "gpu_xe_submit" in gpu_c and "gpu_xe_wait" in gpu_c and "gpu_xe_fence" in gpu_c)
     check("GPU 2012-2026: hybrid-GPU priority order (amdgpu > i915 > xe > nouveau) & pick==2 PRIME settle guard",
@@ -1429,8 +1429,7 @@ def test_hardening_66_bug_families():
           "if (n > 1 && !(aligned && gpu_backend == &gpu_i915_row))" in gpu_c and
           "gpu_i915_put(state, at + 20, 1u << 16);" in gpu_c and
           "(threads << 16) | (1u << 8) | (1u << 2)" in gpu_c and
-          "fast.code = GPU_VA + gpu_kernel_at[0];" in gpu_c and
-          "static positive gpu_nv12_go(" in gpu_c)
+          "fast.code = GPU_VA + gpu_kernel_at[0];" in gpu_c)
 
     check("Family 11: Compositor damage-bbox & opaque-cover culling, i915 static solid-tile cache, pipelined shadow submit + AVX2 NT copy & zero redundant DIRTYFB",
           "compositor_frame_meets(" in compose_c and

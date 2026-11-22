@@ -3378,63 +3378,6 @@ static void gpu_i915_frame(unsigned int address_to words, unsigned int sbase, un
         memory_zero(words + n, (64 - n) * sizeof words[0]);
 }
 
-// Compute Front End batch emitter for Xe-HPG (1255), Xe-LPG (1270/1274), Xe2 (2000/2001), and Xe3 (3000), shared by i915 and xe:
-// PIPELINE_SELECT (< Xe2), 22-dw STATE_BASE_ADDRESS, STATE_COMPUTE_MODE, CFE_STATE (0x7002), COMPUTE_WALKER (0x7007) with inline
-// 8-dw INTERFACE_DESCRIPTOR_DATA + CURBE, PIPE_CONTROL (HDC/LSC flush), and MI_BATCH_BUFFER_END (padded to 96 dwords).
-static unsigned int gpu_intel_xehp_frame(unsigned int address_to words, unsigned int code_off, unsigned int sbase, unsigned int cols, unsigned int rows)
-{
-        unsigned int n = 0;
-
-        if (gpu.family < 2000)
-                words[n++] = 0x69040302u; // PIPELINE_SELECT (GPGPU, removed on Xe2+)
-        words[n++] = 0x61010014u; // 22-dw STATE_BASE_ADDRESS
-        words[n++] = 1; words[n++] = 0; words[n++] = 1;
-        words[n++] = (unsigned int)GPU_VA | 1; words[n++] = (unsigned int)(GPU_VA >> 32);
-        words[n++] = (unsigned int)GPU_VA | 1; words[n++] = (unsigned int)(GPU_VA >> 32);
-        words[n++] = 0; words[n++] = 0;
-        words[n++] = (unsigned int)GPU_VA | 1; words[n++] = (unsigned int)(GPU_VA >> 32);
-        words[n++] = 0xfffff000u | 1; words[n++] = 65536u | 1; words[n++] = 0xfffff000u | 1; words[n++] = 65536u | 1;
-        words[n++] = 1; words[n++] = 0; words[n++] = 0xfffff000u;
-        words[n++] = 1; words[n++] = 0; words[n++] = 0;
-        if (gpu.family >= 2000)
-                words[n++] = 0x61050001u, words[n++] = 0, words[n++] = 0; // STATE_COMPUTE_MODE (3 dw on Xe2+)
-        else
-                words[n++] = 0x61050000u, words[n++] = 0; // STATE_COMPUTE_MODE (2 dw on Xe-HPG/LPG)
-        words[n++] = 0x70020004u; words[n++] = 0; words[n++] = 0; words[n++] = (671u << 16); words[n++] = 0; words[n++] = 0; // CFE_STATE (6 dw)
-        // COMPUTE_WALKER: 39 dw on Xe-HPG/LPG (0x70070025), 40 dw on Xe2+ (0x70070026), SIMD16, inline 8-dw IDD + CURBE.
-        {
-                unsigned int wlen = gpu.family >= 2000 ? 40u : 39u;
-                unsigned int base = n;
-
-                memory_zero(words + base, wlen * sizeof(words[0]));
-                words[base + 0] = 0x70070000u | (wlen - 2u);
-                words[base + 2] = 64u;                  // IndirectDataLength (CURBE)
-                words[base + 3] = sbase + 192u;         // IndirectDataStartAddress
-                words[base + 4] = 1u << 30;             // SIMDSize = SIMD16
-                words[base + 7] = cols;                 // ThreadGroupIDXDimension
-                words[base + 8] = rows;                 // ThreadGroupIDYDimension
-                words[base + 9] = 1u;                   // ThreadGroupIDZDimension
-                words[base + 10] = 0xffffu;             // ExecutionMask
-                // Inline 8-dw INTERFACE_DESCRIPTOR_DATA at DW18..25 (Xe-HPG/LPG) or DW19..26 (Xe2+):
-                {
-                        unsigned int idd = base + (gpu.family >= 2000 ? 19u : 18u);
-
-                        words[idd + 0] = code_off;
-                        words[idd + 2] = 1u << 18; // SingleProgramFlow
-                        words[idd + 4] = sbase;    // BindingTablePointer
-                        words[idd + 5] = 1u;       // NumberOfThreadsInGPGPUThreadGroup = 1
-                }
-                n += wlen;
-        }
-        words[n++] = 0x7a000004u;
-        words[n++] = (1u << 12) | (1u << 20) | (1u << 9); // Render Target + CS Stall + HDC/LSC flush
-        words[n++] = 0; words[n++] = 0; words[n++] = 0; words[n++] = 0;
-        words[n++] = 0x05000000u; // MI_BATCH_BUFFER_END
-        if (n < 96u)
-                memory_zero(words + n, (96u - n) * sizeof(words[0]));
-        return 96u;
-}
-
 // A job's batch arguments, read through the state's mapping (their card address is the state's plus their distance from it), when the batch can be
 // written: room for its 64 words, and the state and the code on the card (the code 64-byte aligned). Null otherwise: the processor draws the job.
 static const struct gpu_args address_to gpu_i915_args(const struct gpu_job *job, unsigned int room)
@@ -3725,8 +3668,7 @@ static const struct gpu_code gpu_i915_gen9_kernels[] = {
 static const struct gpu_set gpu_i915_gen9_set = {gpu_i915_gen9_kernels, 8, 0, GPU_TEST_HASH, gpu_i915_gen9_batch};
 
 // The bins sides of the scenes built without a wait (gpu_scene_submit): the last job that reads each (0 none), the side and the place of the last scene
-// binned, and what it was binned for (its width and height, and the damage its lists hold), which gpu_scene_more_submit draws more of.
-static struct { positive job[2], at, ops_at; unsigned int side, w, h, dx0, dy0, dx1, dy1, count; b32 full; } gpu_bins;
+static struct { positive job[2]; unsigned int side; } gpu_bins;
 static void gpu_bins_forget(void)
 {
         memory_zero(&gpu_bins, sizeof(gpu_bins));
@@ -4624,24 +4566,6 @@ static b32 gpu_scene(positive ops_at, unsigned int n, positive bins_at, positive
         return built < 0 ? false : built == 0 ? true : gpu_run();
 }
 
-// The arguments of a job that draws the damage dx0 dy0 dx1 dy1 of a scene of w by h binned at bins_at, the damage made whole patches and cut to clip (the patches
-// the lists were binned for). False for no pixel to draw.
-static b32 gpu_scene_rect(positive bins_at, positive d_at, unsigned int pitch, unsigned int w, unsigned int h, unsigned int dx0, unsigned int dy0, unsigned int dx1,
-                          unsigned int dy1, const unsigned int clip[4])
-{
-        struct gpu_args address_to a = GPU_ARGS;
-
-        dx0 &= ~63u, dy0 &= ~3u, dx1 = (dx1 + 63) & ~63u, dy1 = (dy1 + 3) & ~3u;
-        dx0 = dx0 < clip[0] ? clip[0] : dx0, dy0 = dy0 < clip[1] ? clip[1] : dy0, dx1 = dx1 > clip[2] ? clip[2] : dx1, dy1 = dy1 > clip[3] ? clip[3] : dy1;
-        if (dx0 >= dx1 || dy0 >= dy1)
-                return false;
-        a->tab = GPU_VA + GPU_BASES_AT, a->s = GPU_VA, a->d = d_at >= GPU_VA ? d_at : GPU_VA + d_at, a->g = GPU_VA + bins_at;
-        a->dp = pitch, a->sp = w, a->gp = h;
-        a->op = 6, a->x0 = dx0 >> 6, a->y0 = dy0 >> 2, a->w = (((dx1 + 63) >> 6) - (dx0 >> 6)) * 64, a->rows = ((dy1 + 3) >> 2) - (dy0 >> 2);
-        a->ops = GPU_VA + gpu_bins.ops_at, a->count = gpu_bins.count;
-        return true;
-}
-
 /*
         A scene drawn without a wait: built in the slot gpu_slot_take gives and binned into the side of [bins_at, the buffer's last megabyte) that no pending job
         reads (two sides, used in turn), then submitted (gpu_submit). The job's sequence, which gpu_done, gpu_fence_fd and gpu_wait_job take; 0 when nothing was
@@ -4674,9 +4598,7 @@ static positive gpu_scene_submit(positive ops_at, unsigned int n, positive bins_
                         built = gpu_scene_build(ops_at, n, at, full_room, d_at, pitch, w, h, dx0, dy0, dx1, dy1, binned);
                         if (built > 0 && (sequence = gpu_go()) != 0)
                         {
-                                gpu_bins.job[0] = gpu_bins.job[1] = sequence, gpu_bins.full = 1, gpu_bins.side = side, gpu_bins.at = at, gpu_bins.ops_at = ops_at, gpu_bins.count = n;
-                                gpu_bins.w = w, gpu_bins.h = h;
-                                gpu_bins.dx0 = binned[0], gpu_bins.dy0 = binned[1], gpu_bins.dx1 = binned[2], gpu_bins.dy1 = binned[3];
+                                gpu_bins.job[0] = gpu_bins.job[1] = sequence, gpu_bins.side = side;
                                 return sequence;
                         }
                         return 0;
@@ -4684,31 +4606,7 @@ static positive gpu_scene_submit(positive ops_at, unsigned int n, positive bins_
         }
         if (built <= 0 || !(sequence = gpu_go()))
                 return 0;
-        gpu_bins.job[side] = sequence, gpu_bins.full = 0, gpu_bins.side = side, gpu_bins.at = at, gpu_bins.ops_at = ops_at, gpu_bins.count = n, gpu_bins.w = w, gpu_bins.h = h;
-        gpu_bins.dx0 = binned[0], gpu_bins.dy0 = binned[1], gpu_bins.dx1 = binned[2], gpu_bins.dy1 = binned[3];
-        return sequence;
-}
-
-// Another damage rectangle of the last scene gpu_scene_submit binned (its lists are read as they are), drawn into d_at without a wait: the sequence, 0 for none
-// (as gpu_scene_submit says). Only what those lists were binned for is drawn: a scene of another size, or one the kernel by hand does not draw, is refused,
-// and the damage is cut to the lists'.
-static positive gpu_scene_more_submit(positive d_at, unsigned int pitch, unsigned int w, unsigned int h, unsigned int dx0, unsigned int dy0, unsigned int dx1,
-                                      unsigned int dy1)
-{
-        const unsigned int clip[4] = {gpu_bins.dx0, gpu_bins.dy0, gpu_bins.dx1, gpu_bins.dy1};
-        positive sequence;
-
-        gpu_last_error = 0, gpu_end = GPU_END_NONE;
-        if (!gpu_bins.at || w != gpu_bins.w || h != gpu_bins.h || (w & 3) || (pitch & 3) || (d_at & 15))
-                return 0;
-        if (gpu_lost || gpu_slot_take() < 0)
-                return gpu_end = gpu_lost ? GPU_END_NONE : GPU_END_LATE, 0;
-        if (!gpu_scene_rect(gpu_bins.at, d_at, pitch, w, h, dx0, dy0, dx1, dy1, clip) || !(sequence = gpu_go()))
-                return 0;
-        if (gpu_bins.full)
-                gpu_bins.job[0] = gpu_bins.job[1] = sequence;
-        else
-                gpu_bins.job[gpu_bins.side] = sequence;
+        gpu_bins.job[side] = sequence, gpu_bins.side = side;
         return sequence;
 }
 
@@ -4761,20 +4659,6 @@ static b32 gpu_nv12(positive luma, unsigned int luma_pitch, positive chroma, uns
         a->s = luma, a->d = dst, a->g = tab, a->sp = luma_pitch, a->dp = dp, a->gp = chroma_pitch, a->w = w, a->op = 9, a->v = 0, a->x0 = a->y0 = 0, a->rows = h;
         a->tab = 0, a->ops = chroma, a->count = 0;
         return gpu_run();
-}
-
-static positive gpu_nv12_go(positive luma, unsigned int luma_pitch, positive chroma, unsigned int chroma_pitch, positive dst, unsigned int dp, positive tab,
-                            unsigned int w, unsigned int h)
-{
-        struct gpu_args address_to a;
-
-        gpu_last_error = 0, gpu_end = GPU_END_NONE;
-        if (!w || !h || gpu_backend != &gpu_amd || (!gpu_nv12_ok && !gpu_nv12_trying) || gpu_lost || gpu_slot_take() < 0)
-                return 0;
-        a = GPU_ARGS;
-        a->s = luma, a->d = dst, a->g = tab, a->sp = luma_pitch, a->dp = dp, a->gp = chroma_pitch, a->w = w, a->op = 9, a->v = 0, a->x0 = a->y0 = 0, a->rows = h;
-        a->tab = 0, a->ops = chroma, a->count = 0;
-        return gpu_go();
 }
 
 /*
