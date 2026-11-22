@@ -1538,6 +1538,21 @@ static fn bowl_accounts_prepare(string_address root, bool every)
 
         bowl_quiet = true;
         bowl_mkdir(BOWL_ACCOUNTS_DIRECTORY);
+        {
+                bipolar dir = system_open_at(AT_FDCWD, BOWL_ACCOUNTS_DIRECTORY,
+                                             FILE_READ | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+                bool secured = dir >= 0 &&
+                               system_call_3(syscall(fchown), (positive)dir, 0, 0) >= 0 &&
+                               system_call_2(syscall(fchmod), (positive)dir, 0700) >= 0;
+
+                if (dir >= 0)
+                        system_close(dir);
+                if (!secured)
+                {
+                        bowl_quiet = false;
+                        return;
+                }
+        }
         for (positive at = 0; at < array_count(bowl_accounts); at++)
         {
                 p8 host[BOWL_PATH_LIMIT];
@@ -2164,6 +2179,9 @@ static bipolar bowl_pad_go = -1;   // the launch's end of the pipe that tells th
 static bipolar bowl_pad_done = -1; // and of the one the keeper answers on when the view is made
 static bool bowl_pad_root;         // the launch was the machine's root (a launch that was not has no keeper and keeps its view)
 static bool bowl_pad_granted;      // the grants file named the bowl when the launch began
+static bipolar bowl_pad_sys_class = -1; // host /sys/class opened before entering the bowl's mount namespace
+static bipolar bowl_pad_input_dir = -1; // pinned /dev/input tmpfs directory fd
+static bipolar bowl_pad_stage_dir = -1; // pinned BOWL_PAD_STAGE directory fd
 
 // A sysfs file of a device, /sys/class/CLASS/NAME/LEAF, read into text with its end: its length, or -1.
 static bipolar bowl_pad_read(string_address class, string_address name,
@@ -2171,7 +2189,9 @@ static bipolar bowl_pad_read(string_address class, string_address name,
 {
         p8 path[BOWL_PATH_LIMIT];
         positive used = 0;
-        string_address parts[] = {"/sys/class/", class, "/", name, "/", leaf};
+        bipolar dir = bowl_pad_sys_class >= 0 ? bowl_pad_sys_class : AT_FDCWD;
+        string_address parts[] = {bowl_pad_sys_class >= 0 ? "" : "/sys/class/",
+                                  class, "/", name, "/", leaf};
         bipolar got;
 
         for (positive at = 0; at < array_count(parts); at++)
@@ -2184,7 +2204,7 @@ static bipolar bowl_pad_read(string_address class, string_address name,
                 used += length;
         }
         path[used] = end;
-        got = file_read_once_at(AT_FDCWD, (string_address)path, text, room - 1);
+        got = file_read_once_at(dir, (string_address)path, text, room - 1);
         if (got < 0)
                 return -1;
         text[got] = end;
@@ -2356,37 +2376,50 @@ static positive bowl_pad_number(string_address class, string_address name)
 
         if (bowl_pad_read(class, name, "dev", text, sizeof(text)) <= 0)
                 return 0;
+        if (!byte_is_digit(text[at]))
+                return 0;
         while (byte_is_digit(text[at]))
+        {
                 major = major * 10 + (positive)(text[at++] - '0');
+                if (major > 0xfff)
+                        return 0;
+        }
         if (text[at++] != ':' || !byte_is_digit(text[at]))
                 return 0;
         while (byte_is_digit(text[at]))
+        {
                 minor = minor * 10 + (positive)(text[at++] - '0');
+                if (minor > 0xfffff)
+                        return 0;
+        }
+        if (text[at] && text[at] != '\n')
+                return 0;
+        if (string_equals(class, "input") ? major != 13
+            : string_equals(class, "misc") ? major != 10
+                                           : major == 0)
+                return 0;
         return (minor & 0xff) | (major << 8) | ((minor & ~(positive)0xff) << 12);
 }
 
-// A node of number made at path for owner, 0600, put in its place by a rename (so a watcher of the directory sees it whole).
-static bool bowl_pad_make(string_address path, positive number, p32 owner)
+// A node of number made at name inside dir for owner, 0600, put in its place by a rename (so a watcher of the directory sees it whole).
+static bool bowl_pad_make(bipolar dir, string_address name, positive number, p32 owner)
 {
         p8 made[BOWL_PATH_LIMIT];
-        positive length = string_length(path);
-        positive slash = length;
+        positive length = string_length(name);
 
-        while (slash && path[slash - 1] != '/')
-                slash--;
-        if (!number || length + 2 > sizeof(made))
+        if (dir < 0 || !number || !length || name[0] == '.' ||
+            string_first_of(name, '/') || length + 2 > sizeof(made))
                 return false;
-        memory_copy(made, path, slash);
-        made[slash] = '.';
-        memory_copy(made + slash + 1, path + slash, length - slash + 1);
-        system_remove_at(AT_FDCWD, (string_address)made, 0);
-        if (system_call_4(syscall(mknodat), AT_FDCWD, (positive)made, S_IFCHR | 0600, number) < 0)
+        made[0] = '.';
+        memory_copy(made + 1, name, length + 1);
+        system_remove_at(dir, (string_address)made, 0);
+        if (system_call_4(syscall(mknodat), (positive)dir, (positive)made, S_IFCHR | 0600, number) < 0)
                 return false;
-        if (system_change_owner_at(AT_FDCWD, (string_address)made, owner, owner,
+        if (system_change_owner_at(dir, (string_address)made, owner, owner,
                                    AT_SYMLINK_NOFOLLOW) < 0 ||
-            system_rename_at(AT_FDCWD, made, AT_FDCWD, path, 0) < 0)
+            system_rename_at(dir, made, dir, name, 0) < 0)
         {
-                system_remove_at(AT_FDCWD, (string_address)made, 0);
+                system_remove_at(dir, (string_address)made, 0);
                 return false;
         }
         return true;
@@ -2395,10 +2428,8 @@ static bool bowl_pad_make(string_address path, positive number, p32 owner)
 // An input node that came: made in /dev/input when it is a game's (bowl_pad_event).
 static fn bowl_pad_event_add(string_address name, p32 owner)
 {
-        p8 path[BOWL_PATH_LIMIT];
-
-        if (bowl_pad_event(name) && path_join(path, sizeof(path), "/dev/input", name))
-                bowl_pad_make((string_address)path, bowl_pad_number("input", name), owner);
+        if (bowl_pad_event(name))
+                bowl_pad_make(bowl_pad_input_dir, name, bowl_pad_number("input", name), owner);
 }
 
 /*
@@ -2417,7 +2448,7 @@ static fn bowl_pad_hidraw_add(string_address name, p32 owner)
             system_access_at(AT_FDCWD, (string_address)path, 0) < 0)
                 return;
         if (bowl_pad_hidraw(name) &&
-            bowl_pad_make((string_address)staged, bowl_pad_number("hidraw", name), owner) &&
+            bowl_pad_make(bowl_pad_stage_dir, name, bowl_pad_number("hidraw", name), owner) &&
             !system_mount((string_address)staged, (string_address)path, 0, MS_BIND, 0))
                 return;
         system_mount("/dev/null", (string_address)path, 0, MS_BIND, 0);
@@ -2428,8 +2459,9 @@ static fn bowl_pad_scan(string_address directory, fn (*each)(string_address, p32
 {
         file_walk walk;
         struct linux_dirent64 address_to entry;
+        bipolar base = bowl_pad_sys_class >= 0 ? bowl_pad_sys_class : AT_FDCWD;
 
-        if (!file_walk_open(address_of walk, AT_FDCWD, directory))
+        if (!file_walk_open(address_of walk, base, directory))
                 return;
         while ((entry = file_walk_next(address_of walk)))
                 if (!file_is_dot(entry->d_name))
@@ -2446,12 +2478,21 @@ static bipolar bowl_pad_view(p32 owner)
 
         if (failed)
                 return failed;
+        bowl_pad_input_dir = system_open_at(AT_FDCWD, "/dev/input",
+                                            FILE_READ | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+        if (bowl_pad_input_dir < 0)
+                return bowl_pad_input_dir;
         failed = system_make_directory_at(AT_FDCWD, BOWL_PAD_STAGE, 0700);
         if (failed)
                 return failed;
+        bowl_pad_stage_dir = system_open_at(AT_FDCWD, BOWL_PAD_STAGE,
+                                            FILE_READ | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+        if (bowl_pad_stage_dir < 0)
+                return bowl_pad_stage_dir;
         if (system_access_at(AT_FDCWD, "/dev/uinput", 0) >= 0)
         {
-                failed = bowl_pad_make((string_address)staged, bowl_pad_number("misc", "uinput"), owner)
+                failed = bowl_pad_make(bowl_pad_stage_dir, "uinput",
+                                       bowl_pad_number("misc", "uinput"), owner)
                              ? system_mount((string_address)staged, "/dev/uinput", 0, MS_BIND, 0)
                              : system_mount("/dev/null", "/dev/uinput", 0, MS_BIND, 0);
                 if (failed)
@@ -2459,8 +2500,8 @@ static bipolar bowl_pad_view(p32 owner)
         }
         if (system_access_at(AT_FDCWD, "/dev/uhid", 0) >= 0)
                 failed = system_mount("/dev/null", "/dev/uhid", 0, MS_BIND, 0);
-        bowl_pad_scan("/sys/class/input", bowl_pad_event_add, owner);
-        bowl_pad_scan("/sys/class/hidraw", bowl_pad_hidraw_add, owner);
+        bowl_pad_scan("input", bowl_pad_event_add, owner);
+        bowl_pad_scan("hidraw", bowl_pad_hidraw_add, owner);
         return failed;
 }
 
@@ -2489,7 +2530,6 @@ static fn bowl_pad_uevent(p8 address_to message, positive length, p32 owner)
         string_address action = bowl_pad_uevent_value(message, length, "ACTION");
         string_address subsystem = bowl_pad_uevent_value(message, length, "SUBSYSTEM");
         string_address name = bowl_pad_uevent_value(message, length, "DEVNAME");
-        p8 path[BOWL_PATH_LIMIT];
         bool added, input;
 
         if (!action || !subsystem || !name)
@@ -2512,8 +2552,8 @@ static fn bowl_pad_uevent(p8 address_to message, positive length, p32 owner)
                         bowl_pad_hidraw_add(name, owner);
                 return;
         }
-        if (path_join(path, sizeof(path), input ? "/dev/input" : BOWL_PAD_STAGE, name))
-                system_remove_at(AT_FDCWD, (string_address)path, 0);
+        if (input ? bowl_pad_input_dir >= 0 : bowl_pad_stage_dir >= 0)
+                system_remove_at(input ? bowl_pad_input_dir : bowl_pad_stage_dir, name, 0);
 }
 
 // The mount namespace a process is in, as /proc names it (mnt:[NUMBER]): its length, or 0.
@@ -2626,8 +2666,11 @@ static DEAD_END fn bowl_pad_keeper(positive launch, bipolar go, bipolar done, p3
         memory_copy(path + length, "/ns/mnt", sizeof("/ns/mnt"));
         space = system_open_at(AT_FDCWD, (string_address)path, FILE_READ | O_CLOEXEC);
         watch = system_call_2(syscall(pidfd_open), launch, 0);
+        bowl_pad_sys_class = system_open_at(AT_FDCWD, "/sys/class",
+                                            FILE_READ | O_DIRECTORY | O_CLOEXEC);
         if (heard < 0 || socket_bind((b32)heard, address_of self, sizeof(self)) < 0 || space < 0 ||
-            watch < 0 || system_call_2(syscall(setns), (positive)space, CLONE_NEWNS) < 0 ||
+            watch < 0 || bowl_pad_sys_class < 0 ||
+            system_call_2(syscall(setns), (positive)space, CLONE_NEWNS) < 0 ||
             system_change_directory("/") < 0 || bowl_pad_view(owner))
                 exit(1);
         system_close(space);
@@ -2668,8 +2711,8 @@ static DEAD_END fn bowl_pad_keeper(positive launch, bipolar go, bipolar done, p3
                 if (got == -ENOBUFS)
                 {
                         //      Uevents were lost: what is there now is looked at again.
-                        bowl_pad_scan("/sys/class/input", bowl_pad_event_add, owner);
-                        bowl_pad_scan("/sys/class/hidraw", bowl_pad_hidraw_add, owner);
+                        bowl_pad_scan("input", bowl_pad_event_add, owner);
+                        bowl_pad_scan("hidraw", bowl_pad_hidraw_add, owner);
                 }
                 if (got > 0)
                 {
@@ -4445,7 +4488,7 @@ static fn bowl_user_store_prepare(void)
         static const struct { string_address path; bool owned; } made[] = {
             {BOWL_RUNTIME_DIR BOWL_USER_ID_TEXT, true},
             {BOWL_USER_HOME_STORE, true},
-            {BOWL_ACCOUNTS_DIRECTORY, true},
+            {BOWL_ACCOUNTS_DIRECTORY, false},
             {BOWL_HOST_BIN, false}, {BOWL_HOST_SBIN, false},
             {BOWL_HOST_ETC, false},
             {"/lib", false}, {"/lib32", false}, {"/lib64", false},
@@ -4544,6 +4587,8 @@ static fn bowl_become_user_hardened(void)
                              1, "bowl") ||
             ul_namespace_map("/proc/self/gid_map", BOWL_USER_ID, BOWL_USER_ID,
                              1, "bowl") ||
+            system_call_5(syscall(prctl), BOWL_PR_SET_DUMPABLE, 0, 0, 0, 0) <
+                0 ||
             !bowl_keep_capabilities() ||
             system_call_5(syscall(prctl), BOWL_PR_SET_NO_NEW_PRIVS, 1, 0, 0,
                           0) < 0)
@@ -8951,7 +8996,28 @@ static fn bowl_bus_accounts(string_address root)
 
                 if (!(bowl_accounts_made & (1 << at)) || !bowl_accounts_path(path, sizeof(path), bowl_accounts[at].name))
                         continue;
-                got = file_read_once_at(AT_FDCWD, path, text, sizeof(text));
+                {
+                        bipolar src = system_open_at(AT_FDCWD, path,
+                                                     FILE_READ | O_NOFOLLOW | O_CLOEXEC);
+
+                        got = 0;
+                        if (src < 0)
+                                got = -1;
+                        while (src >= 0 && (positive)got < sizeof(text))
+                        {
+                                bipolar chunk = system_read_once(src, text + got,
+                                                                 sizeof(text) - (positive)got);
+                                if (chunk <= 0)
+                                {
+                                        if (chunk < 0)
+                                                got = -1;
+                                        break;
+                                }
+                                got += chunk;
+                        }
+                        if (src >= 0)
+                                system_close(src);
+                }
                 system_remove_at(AT_FDCWD, path, 0);
                 memory_copy(target, "/proc/", 6);
                 used = 6 + positive_into_string(target + 6, pid);

@@ -46,6 +46,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 #include <zlib.h>
 
 /* The receiver builds the codec alone: the send section of modem.c needs the shell's sound server and host. The two
@@ -223,16 +224,27 @@ static void rx_finish_send(const char *path, int first, unsigned gaps)
                 fclose(src);
                 return;
         }
-        if (snprintf(temp, sizeof temp, "%s.unwrap", path) >= (int)sizeof temp) {
+        if (snprintf(temp, sizeof temp, "%s.unwrap.XXXXXX", path) >= (int)sizeof temp) {
                 fprintf(stderr, "modem_rx: path too long to unwrap %s\n", path);
                 fclose(src);
                 return;
         }
-        dst = fopen(temp, "wb");
-        if (!dst) {
-                fprintf(stderr, "modem_rx: cannot write %s\n", temp);
-                fclose(src);
-                return;
+        {
+                int fd = mkstemp(temp);
+
+                if (fd < 0) {
+                        fprintf(stderr, "modem_rx: cannot write %s\n", temp);
+                        fclose(src);
+                        return;
+                }
+                dst = fdopen(fd, "wb");
+                if (!dst) {
+                        close(fd);
+                        remove(temp);
+                        fprintf(stderr, "modem_rx: cannot write %s\n", temp);
+                        fclose(src);
+                        return;
+                }
         }
         if (marker == 1) {
                 ok = rx_gunzip(src, dst);
@@ -424,6 +436,15 @@ int main(int argc, char **argv)
                                         send_gaps++;
                                         fprintf(stderr, "modem_rx: gap: bytes %lu to %lu were not received\n",
                                                 (unsigned long)expected, (unsigned long)offset);
+                                }
+                                if (offset > RX_GUNZIP_MAX || length > RX_GUNZIP_MAX - offset) {
+                                        rx_forget(&cr.rx.mac, sizeof cr.rx.mac);
+                                        fclose(out);
+                                        if (in != stdin)
+                                                fclose(in);
+                                        fprintf(stderr, "modem_rx: datagram offset %lu exceeds %u bytes: refused\n",
+                                                (unsigned long)offset, RX_GUNZIP_MAX);
+                                        return 1;
                                 }
                                 if (fseeko(out, (off_t)offset, SEEK_SET) != 0 || fwrite(datagram + 4, 1, length, out) != length) {
                                         rx_forget(&cr.rx.mac, sizeof cr.rx.mac);

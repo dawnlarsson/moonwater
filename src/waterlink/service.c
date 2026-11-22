@@ -1480,9 +1480,13 @@ static p8 link_path_is_own(string_address path)
 
         for (positive at = 0; at < array_count(own); at++)
         {
-                positive own_leaf = memory_after_last(own[at], '/',
-                                                       string_length(own[at]));
-                if (!string_compare(path + leaf_at, own[at] + own_leaf))
+                positive own_len = string_length(own[at]);
+                positive own_leaf = memory_after_last(own[at], '/', own_len);
+                positive leaf_len = len - leaf_at;
+                if (leaf_len == own_len - own_leaf &&
+                    !memory_compare_ascii_case((address_any)(path + leaf_at),
+                                               (address_any)(own[at] + own_leaf),
+                                               leaf_len))
                 {
                         p8 leaf[256];
                         bipolar parent = system_open_parent_pinned(
@@ -2652,6 +2656,18 @@ static p8 push_pack(bipolar input, bipolar output)
 /* Unpacks input into output from its present offset to its end. False when the input ends inside a frame, or a frame does not decode with this dictionary. */
 static p8 push_unpack(bipolar input, bipolar output)
 {
+        file_facts facts;
+        positive limit = 64ull << 20;
+        positive total = 0;
+
+        if (file_look(input, "", AT_EMPTY_PATH, address_of facts) &&
+            facts.size > 0)
+        {
+                positive packed = (positive)facts.size;
+                if (packed > limit / 32)
+                        limit = packed <= (~(positive)0) / 32 ? packed * 32
+                                                              : ~(positive)0;
+        }
         if (!(p8)(zstd_dictionary_load(push_dictionary, PUSH_DICTIONARY_SIZE)))
                 return false;
         for (;;)
@@ -2673,8 +2689,10 @@ static p8 push_unpack(bipolar input, bipolar output)
                 if (push_fill(input, push_frame, frame) != (bipolar)frame)
                         return false;
                 plain = zstd_inflate(push_frame, frame, push_block, PUSH_BLOCK);
-                if (plain < 0 || !push_put(output, push_block, (positive)plain))
+                if (plain <= 0 || (positive)plain > limit - total ||
+                    !push_put(output, push_block, (positive)plain))
                         return false;
+                total += (positive)plain;
         }
 }
 
@@ -6642,6 +6660,8 @@ static fn link_fs_close(struct link_fs_client address_to c)
                 link_tcp_close_all();
                 system_close(link_self.socket);
                 link_self.socket = -1;
+                crypto_forget(address_of link_self.me, sizeof link_self.me);
+                crypto_forget(address_of link_inbound, sizeof link_inbound);
         }
 }
 

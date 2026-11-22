@@ -14920,6 +14920,7 @@ typedef struct
         positive age;
         bool used;
         bool failed;
+        bool verified;
 } tls_crl_held;
 
 static tls_crl_held tls_crl_cache[TLS_CRL_HELD];
@@ -14951,10 +14952,11 @@ static COLD tls_crl_held address_to tls_crl_get(const p8 address_to url,
 
                 if (!held->used || memory_compare(held->name, name, 32))
                         continue;
-                if (held->failed ? held->fetched + TLS_CRL_RETRY > quiet
-                                 : !held->next_update ||
-                                       tls_date_seconds(held->next_update) +
-                                               TLS_REVOCATION_SKEW >= at)
+                if (held->failed || !held->verified || !held->next_update
+                        ? quiet >= held->fetched &&
+                              quiet - held->fetched < TLS_CRL_RETRY
+                        : tls_date_seconds(held->next_update) +
+                                  TLS_REVOCATION_SKEW >= at)
                 {
                         held->age = ++tls_crl_clock;
                         return held;
@@ -15022,8 +15024,9 @@ static COLD p8 tls_crl_answer_at(tls_cert address_to cert,
         tls_crl_held address_to held = tls_crl_get(url, length, now, deadline);
         tls_crl crl;
 
-        if (!held || held->failed ||
-            tls_parse_crl(held->crl.bytes, held->crl.used, cert->serial,
+        if (!held || held->failed)
+                return TLS_ANSWER_NONE;
+        if (tls_parse_crl(held->crl.bytes, held->crl.used, cert->serial,
                           cert->serial_length, address_of crl) ||
             crl.issuer_length != cert->issuer_length ||
             memory_compare(crl.issuer, cert->issuer, cert->issuer_length) ||
@@ -15032,15 +15035,24 @@ static COLD p8 tls_crl_answer_at(tls_cert address_to cert,
               memory_compare(crl.authority_key, cert->authority_key,
                              crl.authority_key_length))) ||
             !tls_crl_covers(address_of crl.scope, cert))
+        {
+                if (!held->verified)
+                        tls_crl_drop(held);
                 return TLS_ANSWER_NONE;
-        if (memory_compare(held->signer, signer, 32))
+        }
+        if (!held->verified || memory_compare(held->signer, signer, 32))
         {
                 if (!tls_signed_by(crl.tbs, crl.tbs_length, crl.sig_oid,
                                    crl.sig_oid_length, crl.sig, crl.sig_length,
                                    issuer))
+                {
+                        if (!held->verified)
+                                tls_crl_drop(held);
                         return TLS_ANSWER_NONE;
+                }
                 memory_copy(held->signer, signer, 32);
                 held->next_update = crl.next_update;
+                held->verified = true;
         }
         if (crl.listed)
                 return TLS_ANSWER_REVOKED;
