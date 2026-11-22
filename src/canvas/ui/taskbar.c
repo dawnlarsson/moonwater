@@ -2690,7 +2690,9 @@ static int taskbar_tab_menu_open(const struct taskbar_view *view, int tab)
                 string_copy_bounded((p8 *)taskbar_menu.pin.app, (string_address)taskbar_pins.pin[taskbar_pin_of_tab(tab)].app, sizeof(taskbar_menu.pin.app));
                 return taskbar_menu_build(view, rect, specs, 1);
         }
-        int members = taskbar_stop_plan_for(pid, compositor.app_id[row], &root), windows = members ? taskbar_stop_rows(members) : 0;
+        /* The row's pid is a client's claim: a tree is planned only for the process the compositor took for this row. */
+        int members = windows_owner_ok(&windows_owner_held[row], pid) ? taskbar_stop_plan_for(pid, compositor.app_id[row], &root) : 0;
+        int windows = members ? taskbar_stop_rows(members) : 0;
         int which = ui_apps_match(compositor.app_id[row]);
         if (windows > 1)
                 language_format(taskbar_menu.stop, sizeof(taskbar_menu.stop), WORDS(taskbar_tab_stop_windows), (long)windows);
@@ -2730,7 +2732,11 @@ static void taskbar_tab_chose(int id)
         if (id == TASKBAR_MENU_EXIT)
                 compositor_close(row);
         else if (id == TASKBAR_MENU_STOP)
-                taskbar_stop_run_for(pid, compositor.app_id[row]);
+        {
+                /* Stop signals processes: only the one the compositor took for this row (its owner, by start time) may be the root. */
+                if (windows_owner_ok(&windows_owner_held[row], pid))
+                        taskbar_stop_run_for(pid, compositor.app_id[row]);
+        }
         else if (id == TASKBAR_MENU_PIN && taskbar_menu.pin.app[0] && which >= 0 && which == ui_apps_find(taskbar_menu.pin.app))
                 taskbar_pin_keep(which, true);
         else if (id == TASKBAR_MENU_UNINSTALL && which >= 0 && ui_apps_uninstallable(which))
