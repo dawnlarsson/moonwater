@@ -1619,6 +1619,25 @@ static void spawn_default_signals(unsigned int keep)
         spin_unlock_irq(&current->sighand->siglock);
 }
 
+/*
+        Whether something watches what this caller starts: a seccomp filter
+        or a tracer. The launch below execs with kernel_execve, which is no
+        system call a filter is asked about, and clones CLONE_UNTRACED, which
+        a tracer is not told of, so for such a caller it would be the way
+        round the filter that took execve away and the tracer that follows
+        its children. It is refused, and the shell forks and execs instead (it
+        falls back on any refusal), in calls both of them see. The child
+        inherited the filter all along; what it escaped was the exec.
+*/
+static inline bool spark_spawn_watched(void)
+{
+#ifdef CONFIG_SECCOMP
+        if (READ_ONCE(current->seccomp.mode) != SECCOMP_MODE_DISABLED)
+                return true;
+#endif
+        return READ_ONCE(current->ptrace) != 0;
+}
+
 static int spawn_enter(void *data)
 {
         u64 started = ktime_get_ns();
@@ -1787,25 +1806,6 @@ static void spark_environment_release(struct device_context *context)
         spawn_strings_put(context->environment);
         put_pid(context->environment_owner);
         put_cred(context->environment_cred);
-}
-
-/*
-        Whether something watches what this caller starts: a seccomp filter
-        or a tracer. The launch below execs with kernel_execve, which is no
-        system call a filter is asked about, and clones CLONE_UNTRACED, which
-        a tracer is not told of, so for such a caller it would be the way
-        round the filter that took execve away and the tracer that follows
-        its children. It is refused, and the shell forks and execs instead (it
-        falls back on any refusal), in calls both of them see. The child
-        inherited the filter all along; what it escaped was the exec.
-*/
-static inline bool spark_spawn_watched(void)
-{
-#ifdef CONFIG_SECCOMP
-        if (READ_ONCE(current->seccomp.mode) != SECCOMP_MODE_DISABLED)
-                return true;
-#endif
-        return READ_ONCE(current->ptrace) != 0;
 }
 
 static long do_spawn(struct file *file, struct spawn __user *request)
