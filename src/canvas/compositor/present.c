@@ -231,9 +231,9 @@ HOT static positive compositor_present_lead(void)
                 return 0;
         // Direct scanout only issues a KMS page-flip (~50 us, no GPU compose): use a tight 500 us lead instead of the
         // multi-millisecond composed-GPU lead so input-to-photon latency drops by ~3-4 ms on 144 Hz+ displays.
-        if (compositor.direct_row >= 0 && compositor.plane_row < 0 && compositor.period)
+        if (compositor_lead_direct())
         {
-                positive direct_lead = 500000ull + compositor_late.widen;
+                positive direct_lead = 500000ull + compositor_late.direct.widen;
 
                 return direct_lead < compositor.period ? direct_lead : 0;
         }
@@ -253,7 +253,7 @@ HOT static positive compositor_present_lead(void)
                 compositor_metric_worst_cached = worst_processor > worst ? worst_processor : worst;
                 compositor_metric_worst_dirty = 0;
         }
-        return compositor_lead_of(compositor_metric_worst_cached, compositor_metric_paths_count, compositor_late.widen, compositor.period);
+        return compositor_lead_of(compositor_metric_worst_cached, compositor_metric_paths_count, compositor_late.composed.widen, compositor.period);
 }
 
 /*

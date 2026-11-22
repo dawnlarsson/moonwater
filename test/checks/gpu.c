@@ -5228,38 +5228,39 @@ static void present_due_rows(void)
         }
         {
                 positive was_period = compositor.period, was_when = compositor.flip_when;
+                int was_direct = compositor.direct_row, was_plane = compositor.plane_row;
 
-                compositor.period = period;
-                memory_zero(&compositor_late, sizeof(compositor_late));
+                compositor.period = period, compositor.direct_row = -1, compositor.plane_row = -1; // composed presents
+                memory_zero(&compositor_late, sizeof(compositor_late)), compositor_late.warm = COMPOSITOR_LEAD_WARM;
                 compositor.flip_when = v;
                 compositor_late_begin(lead, v + period - lead);
                 check("present: a present made with a lead inside a vblank's period is for the vblank after it",
                       compositor_late.aim == v + period && compositor_late.made == 1);
                 compositor_late_landed(v + period);
-                check("present: its flip landing at that vblank is no miss", compositor_late.missed == 0 && compositor_late.widen == 0 && compositor_late.aim == 0);
+                check("present: its flip landing at that vblank is no miss", compositor_late.missed == 0 && compositor_late.composed.widen == 0 && compositor_late.aim == 0);
                 compositor_late_begin(lead, v + period - lead);
                 compositor_late_landed(v + 2 * period);
                 check("present: its flip landing a vblank later is one, and widens the lead at once by a quarter of a period",
-                      compositor_late.missed == 1 && compositor_late.widen == period / 4 &&
-                          compositor_lead_of(2000000ull, 32, compositor_late.widen, period) == 4000000ull + period / 4);
+                      compositor_late.missed == 1 && compositor_late.composed.widen == period / 4 &&
+                          compositor_lead_of(2000000ull, 32, compositor_late.composed.widen, period) == 4000000ull + period / 4);
                 compositor_late_begin(0, v + period);
                 check("present: a present by the old rule is for no vblank", compositor_late.aim == 0);
                 compositor_late_landed(v + 9 * period);
-                check("present: and its flip, whenever it lands, is no miss, and one of the calm", compositor_late.missed == 1 && compositor_late.calm == 1);
+                check("present: and its flip, whenever it lands, is no miss, and one of the calm", compositor_late.missed == 1 && compositor_late.composed.calm == 1);
                 compositor_late_begin(lead, v + period - lead), compositor_late_landed(v + 2 * period);
                 check("present: a second miss while widened is the old rule: the lead is none, and the next calm is twice as long",
-                      compositor_late.missed == 2 && compositor_late.widen == period && compositor_lead_of(2000000ull, 32, compositor_late.widen, period) == 0 &&
-                          compositor_late.calm_need == 2 * COMPOSITOR_LEAD_CALM);
+                      compositor_late.missed == 2 && compositor_late.composed.widen == period && compositor_lead_of(2000000ull, 32, compositor_late.composed.widen, period) == 0 &&
+                          compositor_late.composed.calm_need == 2 * COMPOSITOR_LEAD_CALM);
                 for (unsigned int landed = 0; landed < 2 * COMPOSITOR_LEAD_CALM - 1; landed++)
                         compositor_late_begin(0, v + period), compositor_late_landed(v + period);
-                check("present: flips by the old rule short of that calm keep it", compositor_late.widen == period);
+                check("present: flips by the old rule short of that calm keep it", compositor_late.composed.widen == period);
                 compositor_late_begin(0, v + period), compositor_late_landed(v + period);
-                check("present: the calm's last steps back to the quarter", compositor_late.widen == period / 4 && compositor_late.calm == 0);
+                check("present: the calm's last steps back to the quarter", compositor_late.composed.widen == period / 4 && compositor_late.composed.calm == 0);
                 for (unsigned int landed = 0; landed < 2 * COMPOSITOR_LEAD_CALM; landed++)
                         compositor_late_begin(lead, v + period - lead), compositor_late_landed(v + period);
                 check("present: and a calm of late presents that landed to nothing, the calm starting again from the first",
-                      compositor_late.widen == 0 && compositor_late.calm_need == 0 && compositor_late.missed == 2);
-                memory_zero(&compositor_late, sizeof(compositor_late));
+                      compositor_late.composed.widen == 0 && compositor_late.composed.calm_need == 0 && compositor_late.missed == 2);
+                memory_zero(&compositor_late, sizeof(compositor_late)), compositor_late.warm = COMPOSITOR_LEAD_WARM;
                 {
                         // A machine on which every late present misses (a driver that wants the flip long before the vblank): it falls to the old rule
                         // at the second miss and tries a late present again after a calm that doubles each time, so in 20000 frames (five and a half
@@ -5269,7 +5270,7 @@ static void present_due_rows(void)
 
                         for (unsigned int frame = 0; frame < 20000; frame++)
                         {
-                                positive given = compositor_lead_of(measured, 32, compositor_late.widen, period);
+                                positive given = compositor_lead_of(measured, 32, compositor_late.composed.widen, period);
 
                                 none += given == 0;
                                 odd += given && given != compositor_lead_of(measured, 32, 0, period) && given != compositor_lead_of(measured, 32, period / 4, period);
@@ -5278,20 +5279,56 @@ static void present_due_rows(void)
                         }
                         check("present: a machine whose every late present misses is on the old rule nearly always, and tries one less and less often",
                               compositor_late.missed == 8 && none >= 20000 - 8 && odd == 0);
-                        memory_zero(&compositor_late, sizeof(compositor_late));
+                        memory_zero(&compositor_late, sizeof(compositor_late)), compositor_late.warm = COMPOSITOR_LEAD_WARM;
                         // A 4K job longer than a period: measured, it is no lead at all, no present is made late and none misses.
                         for (unsigned int frame = 0; frame < 1000; frame++)
                         {
-                                positive given = compositor_lead_of(20000000ull, 32, compositor_late.widen, period);
+                                positive given = compositor_lead_of(20000000ull, 32, compositor_late.composed.widen, period);
 
                                 compositor_late_begin(given, v + period);
                                 compositor_late_landed(v + 2 * period);
                         }
                         check("present: a job longer than a period is presented by the old rule, none made late and none missed",
-                              compositor_late.made == 0 && compositor_late.missed == 0 && compositor_late.widen == 0);
+                              compositor_late.made == 0 && compositor_late.missed == 0 && compositor_late.composed.widen == 0);
                 }
-                memory_zero(&compositor_late, sizeof(compositor_late));
-                compositor.period = was_period, compositor.flip_when = was_when;
+                memory_zero(&compositor_late, sizeof(compositor_late)), compositor_late.warm = COMPOSITOR_LEAD_WARM;
+                {
+                        // A composed present and one shown straight widen apart: misses at the desktop (composed) widened the one lead to the period, and
+                        // a game shown straight then had the old rule too (500 us + the period is none) for up to 7680 flips, 53 s at 144 Hz.
+                        int was_card = compositor.card, was_early = compositor_late.early;
+                        positive direct_lead;
+                        b32 composed_old;
+
+                        compositor.card = 0, compositor_late.early = 0;
+                        compositor_late_begin(lead, v + period - lead), compositor_late_landed(v + 2 * period);
+                        compositor_late_begin(lead, v + period - lead), compositor_late_landed(v + 2 * period);
+                        composed_old = compositor_late.composed.widen == period && compositor_late.missed == 2;
+                        compositor.direct_row = 3, compositor.plane_row = -1;
+                        direct_lead = compositor_present_lead();
+                        check("present: two composed misses are the old rule for composed presents, and a flip shown straight keeps its 500 us lead",
+                              composed_old && direct_lead == 500000ull && compositor_late.direct.widen == 0);
+                        compositor_late_begin(direct_lead, v + period - direct_lead), compositor_late_landed(v + 2 * period);
+                        check("present: a straight flip's miss widens its own lead a quarter, the composed one's as it was",
+                              compositor_late.direct.widen == period / 4 && compositor_present_lead() == 500000ull + period / 4 && compositor_late.composed.widen == period);
+                        compositor_late_reset();
+                        check("present: a fullscreen game's start begins both leads from none", !compositor_late.direct.widen && !compositor_late.composed.widen &&
+                              !compositor_late.direct.calm_need && !compositor_late.composed.calm_need && compositor_present_lead() == 500000ull);
+                        // An idle gap (no flip for a quarter second, a card whose clock fell): the first flips' misses are counted and widen nothing.
+                        compositor_late_begin(direct_lead, v + period - direct_lead), compositor_late_landed(v + period);
+                        compositor_late_begin(0, v + 60 * period), compositor_late_landed(v + 60 * period); // the first flip after 58 periods (0.97 s) of none
+                        compositor.flip_when = v + 60 * period;
+                        compositor_late_begin(direct_lead, v + 61 * period - direct_lead), compositor_late_landed(v + 62 * period);
+                        check("present: a miss in the first flips after an idle gap is counted and widens nothing",
+                              compositor_late.missed == 4 && compositor_late.direct.widen == 0 && compositor_late.warm == 2);
+                        compositor.flip_when = v + 61 * period;
+                        for (unsigned int landed = 0; landed < COMPOSITOR_LEAD_WARM; landed++)
+                                compositor_late_begin(direct_lead, v + 62 * period - direct_lead), compositor_late_landed(v + 62 * period);
+                        compositor_late_begin(direct_lead, v + 62 * period - direct_lead), compositor_late_landed(v + 63 * period);
+                        check("present: and once warm a miss widens again", compositor_late.missed == 5 && compositor_late.direct.widen == period / 4);
+                        compositor.card = was_card, compositor_late.early = was_early;
+                }
+                memory_zero(&compositor_late, sizeof(compositor_late)), compositor_late.warm = COMPOSITOR_LEAD_WARM;
+                compositor.period = was_period, compositor.flip_when = was_when, compositor.direct_row = was_direct, compositor.plane_row = was_plane;
         }
         {
                 // The lead a present is given (compositor_present_lead) is measured on the last 32 presents, each in the metric ring of the path it took: all
@@ -5326,7 +5363,7 @@ static void present_due_rows(void)
                       compositor_present_lead() == 3000000ull + 1500000ull + COMPOSITOR_LEAD_SPARE);
                 compositor_metric_paths = 0xfffffffeu; // one of the processor's among 31 of the card's: its last one, 2.5 ms
                 check("present: and one of the processor's among the card's is its last one, not its older ones", compositor_present_lead() == 2500000ull + 1250000ull + COMPOSITOR_LEAD_SPARE);
-                compositor_metric_paths = ~0u, compositor_late.widen = period / 4;
+                compositor_metric_paths = ~0u, compositor_late.composed.widen = period / 4;
                 check("present: a miss's widening is in it", compositor_present_lead() == 4000000ull + period / 4);
                 compositor_late.early = 1;
                 check("present: the owner's present-early is the old rule", compositor_present_lead() == 0);

@@ -234,6 +234,8 @@ static void compositor_game_watch(void)
 
         if (game == (compositor.game >= 0))
                 return;
+        if (game)
+                compositor_late_reset();
         if (!game)
                 { compositor_gpu_game_clocks(0), compositor_game_epp(0), system_close(compositor.game), compositor.game = -1; return; }
         if ((compositor.game = (int)system_open_at(AT_FDCWD, (string_address) "/dev/cpu_dma_latency", O_WRONLY | O_CLOEXEC)) < 0)

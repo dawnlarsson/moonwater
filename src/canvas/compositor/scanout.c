@@ -784,20 +784,48 @@ static positive compositor_frame_dated(positive last, positive period, positive 
         misses tries one about every two minutes, and a step back to nothing starts the calm again from the first. The
         presents made late and the misses are counted and said as the compositor ends, and the misses are what says the
         rule holds.
+
+        A present shown straight (a flip of the client's buffer, its lead 500 us, compositor_present_lead) and a composed one
+        widen apart: a composed present that missed at the desktop had widened the one lead to the period, the direct lead
+        with it, so a game that began then was shown by the old rule (a free-running grid a period on, no lead) for up to
+        the calm's 7680 flips, 53 s at 144 Hz. A miss in the first COMPOSITOR_LEAD_WARM flips after COMPOSITOR_LEAD_IDLE_NS
+        without one (a card whose clock fell while idle, its first composes slow) is counted and widens nothing. A
+        fullscreen game's start begins both leads from none (compositor_late_reset, from compositor_game_watch).
 */
 #define COMPOSITOR_LEAD_FRAMES 32
 #define COMPOSITOR_LEAD_SPARE 1000000ull
 #define COMPOSITOR_LEAD_CALM 120
 #define COMPOSITOR_LEAD_CALM_MOST (64 * COMPOSITOR_LEAD_CALM)
-static struct
+#define COMPOSITOR_LEAD_IDLE_NS 250000000ull
+#define COMPOSITOR_LEAD_WARM 8
+struct compositor_lead_step
 {
-        int early;              // /run/moonwater/present-early was there at the start: every present by the old rule
         unsigned int calm;      // flips in a row that landed (late or not) since the lead was last widened or stepped back
         unsigned int calm_need; // the calm the next step back waits for (0: COMPOSITOR_LEAD_CALM)
         positive widen;         // what the misses added to the lead: 0, a quarter of a period, or the period (the old rule)
+};
+static struct
+{
+        int early;              // /run/moonwater/present-early was there at the start: every present by the old rule
+        int aimed_direct;       // the last present was one shown straight (its flip's landing steps compositor_late.direct)
+        struct compositor_lead_step composed, direct; // a composed present's lead, and a flip shown straight's
+        unsigned int warm;      // flips landed since the last idle gap, up to COMPOSITOR_LEAD_WARM
+        positive landed;        // when the last flip landed (0: none yet)
         positive aim;           // the vblank the last late present was for (0: it was not late)
         positive made, missed;  // presents made late in the period, and those whose flip landed a vblank after its aim
 } compositor_late;
+
+// The present to be made is a flip shown straight (the client's buffer, no compose): the 500 us lead (compositor_present_lead).
+static inline int compositor_lead_direct(void)
+{
+        return compositor.direct_row >= 0 && compositor.plane_row < 0 && compositor.period;
+}
+
+// A fullscreen game starts: what the desktop's misses widened is not the game's, and both leads begin from none.
+static void compositor_late_reset(void)
+{
+        compositor_late.composed = compositor_late.direct = (struct compositor_lead_step){0, 0, 0};
+}
 
 static positive compositor_present_due(positive presented, positive period, positive vblank, positive lead, positive now)
 {
@@ -830,6 +858,7 @@ static void compositor_late_begin(positive lead, positive stamp)
         positive vblank = compositor.flip_when;
 
         compositor_late.aim = 0;
+        compositor_late.aimed_direct = compositor_lead_direct();
         if (lead && compositor.period && lead < compositor.period && vblank && stamp >= vblank && stamp - vblank < compositor.period)
         {
                 compositor_late.aim = vblank + compositor.period;
@@ -837,29 +866,38 @@ static void compositor_late_begin(positive lead, positive stamp)
         }
 }
 
-// A flip landed at the vblank `when`: one that was for the vblank before is a frame late, and widens the lead at once, to a quarter of a period and
-// then to the period (the old rule, the next calm twice as long); a calm of flips that landed steps it back (compositor_late, above).
+// A flip landed at the vblank `when`: one that was for the vblank before is a frame late, and widens its path's lead at once, to a quarter of a period
+// and then to the period (the old rule, the next calm twice as long); a calm of flips that landed steps it back (compositor_late, above). A miss in
+// the first flips after an idle gap is counted and widens nothing.
 static void compositor_late_landed(positive when)
 {
-        unsigned int need = compositor_late.calm_need ? compositor_late.calm_need : COMPOSITOR_LEAD_CALM;
+        struct compositor_lead_step *step = compositor_late.aimed_direct ? &compositor_late.direct : &compositor_late.composed;
+        unsigned int need = step->calm_need ? step->calm_need : COMPOSITOR_LEAD_CALM;
 
+        if (compositor_late.landed && when > compositor_late.landed && when - compositor_late.landed >= COMPOSITOR_LEAD_IDLE_NS)
+                compositor_late.warm = 0;
+        compositor_late.landed = when;
         if (compositor_late.aim && when > compositor_late.aim && when - compositor_late.aim >= compositor.period / 2)
         {
                 compositor_late.missed++;
-                compositor_late.calm = 0;
-                if (!compositor_late.widen)
-                        compositor_late.widen = compositor.period / 4;
-                else
-                        compositor_late.widen = compositor.period, compositor_late.calm_need = need * 2 < COMPOSITOR_LEAD_CALM_MOST ? need * 2 : COMPOSITOR_LEAD_CALM_MOST;
+                if (compositor_late.warm >= COMPOSITOR_LEAD_WARM)
+                {
+                        step->calm = 0;
+                        if (!step->widen)
+                                step->widen = compositor.period / 4;
+                        else
+                                step->widen = compositor.period, step->calm_need = need * 2 < COMPOSITOR_LEAD_CALM_MOST ? need * 2 : COMPOSITOR_LEAD_CALM_MOST;
+                }
         }
-        else if (compositor_late.widen && ++compositor_late.calm >= need)
+        else if (step->widen && ++step->calm >= need)
         {
-                compositor_late.calm = 0;
-                if (compositor_late.widen >= compositor.period)
-                        compositor_late.widen = compositor.period / 4;
+                step->calm = 0;
+                if (step->widen >= compositor.period)
+                        step->widen = compositor.period / 4;
                 else
-                        compositor_late.widen = 0, compositor_late.calm_need = 0;
+                        step->widen = 0, step->calm_need = 0;
         }
+        compositor_late.warm += compositor_late.warm < COMPOSITOR_LEAD_WARM;
         compositor_late.aim = 0;
 }
 
