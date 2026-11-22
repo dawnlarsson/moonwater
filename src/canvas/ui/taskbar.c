@@ -1931,6 +1931,22 @@ static struct
         struct taskbar_pin pin;
 } taskbar_menu;
 
+/* The kit's theme is one state for the whole process: the menu takes the table's theme for its own draw, and the theme it
+   found is put back after, so the windows drawn after it in the pass keep theirs. */
+struct taskbar_theme_saved { struct ui_theme shown, from, to; struct ui_tween turn; unsigned int mode, accent, motion; b32 made; };
+
+static void taskbar_theme_take(struct taskbar_theme_saved address_to t)
+{
+        t->shown = ui_kit.shown, t->from = ui_kit.from, t->to = ui_kit.to, t->turn = ui_kit.turn;
+        t->mode = ui_kit.mode, t->accent = ui_kit.accent, t->motion = ui_kit.motion, t->made = ui_kit.made;
+}
+
+static void taskbar_theme_give(const struct taskbar_theme_saved address_to t)
+{
+        ui_kit.shown = t->shown, ui_kit.from = t->from, ui_kit.to = t->to, ui_kit.turn = t->turn;
+        ui_kit.mode = t->mode, ui_kit.accent = t->accent, ui_kit.motion = t->motion, ui_kit.made = t->made;
+}
+
 static fn taskbar_menu_ui(const struct taskbar_view *view, unsigned int address_to pixels)
 {
         struct ui address_to ui = &taskbar_menu.ui;
@@ -1938,10 +1954,8 @@ static fn taskbar_menu_ui(const struct taskbar_view *view, unsigned int address_
         unsigned int themed = table && table->themed;
         unsigned int address_to scratch = ui->scratch;
         int sw = ui->scratch_width, ss = ui->scratch_scale;
-        b32 motion = ui_kit.motion;
 
         ui_kit_theme(themed ? table->theme : UI_THEME_LIGHT, themed ? table->accent : UI_ACCENT_STANDARD, 1);
-        ui_kit.motion = motion;
         memory_zero(ui, sizeof(*ui));
         ui->engine = view->engine, ui->regular = view->face, ui->bold = view->bold ? view->bold : view->face;
         ui->scale = taskbar_scaled(view->scale), ui->opaque = 1;
@@ -1965,10 +1979,14 @@ static int taskbar_menu_begin(const struct taskbar_view *view, int slot, int row
 
 static int taskbar_menu_build(const struct taskbar_view *view, const int rect[4], const struct ui_menu_spec *specs, int count)
 {
+        struct taskbar_theme_saved theme;
+
         ui_popmenu_build(&taskbar_menu.menu, specs, count);
         taskbar_menu.width = taskbar_menu.height = 1;
+        taskbar_theme_take(&theme);
         taskbar_menu_ui(view, null);
         ui_popmenu_size(&taskbar_menu.ui, &taskbar_menu.menu, view->height / 2);
+        taskbar_theme_give(&theme);
         taskbar_menu.width = taskbar_menu.menu.width, taskbar_menu.height = taskbar_menu.menu.height;
         if (taskbar_menu.width <= 0 || taskbar_menu.height <= 0)
                 return 0;
@@ -2000,10 +2018,14 @@ static int taskbar_menu_open(const struct taskbar_view *view)
 
 static fn taskbar_menu_draw(const struct taskbar_view *view, unsigned int address_to pixels)
 {
+        struct taskbar_theme_saved theme;
+
+        taskbar_theme_take(&theme);
         taskbar_menu_ui(view, pixels);
         ui_clear(&taskbar_menu.ui);
         ui_kit.now = (b64)ui_kit_clock();
         ui_popmenu_draw(&taskbar_menu.ui, &taskbar_menu.menu);
+        taskbar_theme_give(&theme);
         taskbar_menu.dirty = taskbar_menu.menu.moving;
 }
 
