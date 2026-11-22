@@ -10825,6 +10825,7 @@ static fn ui_chase_at(struct ui_chase address_to c, const b64 address_to want, b
 // A key of the on-screen keyboard (osk.c): a button whose corners are the kit's 8 px, not the pill a button is.
 #define UI_BUTTON_KEY 4
 #define UI_BUTTON_KEY_RADIUS 8
+#define UI_BUTTON_CHIP 5 // a chip (the editor's Wrap chip): the app's height, label-medium, its pill primary-filled and on-primary inked when on, no fill when off
 #define UI_KEY_GAP 6 // between the keys, and the rows, of the on-screen keyboard (osk.c), logical
 #define UI_SLIDER_STEPS 1
 #define UI_SLIDER_LINE 2
@@ -11202,6 +11203,10 @@ static fn ui_button_targets(struct ui_control address_to c)
                 ink = ui_role(UI_ON_PRIMARY);
                 break;
         case UI_BUTTON_OUTLINED: ink = ui_role(UI_ON_SURFACE); break;
+        case UI_BUTTON_CHIP:
+                fill = c->on ? ui_role(UI_PRIMARY) : 0;
+                ink = c->on ? ui_role(UI_ON_PRIMARY) : ui_role(UI_ON_SURFACE_VARIANT);
+                break;
         case UI_BUTTON_TEXT: ink = ui_ink_readable(ui_role(UI_PRIMARY)); break; // its words are the accent, as words: 4.5:1 on its ground
         default:
                 fill = ui_role(UI_SECONDARY_CONTAINER);
@@ -11243,7 +11248,7 @@ static fn ui_button_draw(struct ui address_to ui, struct ui_control address_to c
         struct ui_box face = ui_box_of(ui, ui_q(c->x), ui_q(c->y), ui_q(c->w), ui_q(c->h),
                                        c->variant == UI_BUTTON_KEY ? ui_q(UI_BUTTON_KEY_RADIUS) : ui_q(c->h) / 2);
         unsigned int fill, ink, layer;
-        int width, baseline, x;
+        int width, baseline, x, type = c->variant == UI_BUTTON_CHIP ? UI_LABEL_MEDIUM : UI_LABEL_LARGE;
         ui_button_targets(c);
         fill = ui_kit_colour(&c->fill);
         ink = ui_kit_colour(&c->ink);
@@ -11262,11 +11267,11 @@ static fn ui_button_draw(struct ui address_to ui, struct ui_control address_to c
                 struct ui_place place = {sx, sy, ox, oy, tx, ty};
                 ui_kit_ripples(ui, c, ui_q8(ui, c->x - 8), ui_q8(ui, c->y - 8), &place, &face, ink);
         }
-        width = ui_kit_measure(ui, (string_address)c->label, UI_LABEL_LARGE);
+        width = ui_kit_measure(ui, (string_address)c->label, type);
         // The label at whole pixels where the transform takes its middle: never scaled, never resampled.
         x = (ox + tx) / 256 - width / 2;
-        baseline = ui_kit_baseline(ui, (oy + ty) / 256 - ui_dev(ui, ui_types[UI_LABEL_LARGE].line) / 2, UI_LABEL_LARGE);
-        ui_kit_text(ui, x, baseline, (string_address)c->label, UI_LABEL_LARGE, ink, 0);
+        baseline = ui_kit_baseline(ui, (oy + ty) / 256 - ui_dev(ui, ui_types[type].line) / 2, type);
+        ui_kit_text(ui, x, baseline, (string_address)c->label, type, ink, 0);
 }
 
 // A button on glass, for a picture the kit has no window in (the taskbar's launcher, its tabs and its tray's cells...

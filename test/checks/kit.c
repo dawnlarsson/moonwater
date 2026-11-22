@@ -5082,6 +5082,32 @@ static fn check_kit_focus(void)
         ui_kit.now = 5000000000ll;
         ground = ui_role(UI_SURFACE) & 0xffffffu;
 
+        // A chip (UI_BUTTON_CHIP, the editor's Wrap chip): primary-filled when on, no fill when off, and its pixel 6 in from the pill's left end
+        // (inside the 10-round end) is the primary and the ground.
+        {
+                struct ui_control chip;
+                unsigned int on_px, off_px;
+                b32 chip_on_ok, chip_off_ok;
+
+                for (int at = 0; at < 400 * 200; at++)
+                        pixels[at] = 0xff000000u | ground;
+                memory_zero(&chip, sizeof(chip));
+                chip.kind = UI_BUTTON, chip.variant = UI_BUTTON_CHIP, chip.x = 40, chip.y = 40, chip.w = 60, chip.h = 20, chip.label = "Wrap", chip.on = 1;
+                ui_control_start(&chip);
+                ui_control_draw(&ui, &chip);
+                on_px = focus_at(pixels, 46, 50);
+                for (int at = 0; at < 400 * 200; at++)
+                        pixels[at] = 0xff000000u | ground;
+                memory_zero(&chip, sizeof(chip));
+                chip.kind = UI_BUTTON, chip.variant = UI_BUTTON_CHIP, chip.x = 40, chip.y = 40, chip.w = 60, chip.h = 20, chip.label = "Wrap", chip.on = 0;
+                ui_control_start(&chip);
+                ui_control_draw(&ui, &chip);
+                off_px = focus_at(pixels, 46, 50);
+                chip_on_ok = on_px == (ui_role(UI_PRIMARY) & 0xffffffu);
+                chip_off_ok = off_px == ground;
+                check("kit chip: a UI_BUTTON_CHIP that is on is filled with the primary at its left end; off, it has no fill there", chip_on_ok && chip_off_ok);
+        }
+
         // A button the keys are on, and the same not: the ring is 2 to 4 pixels out from the pill's side.
         for (int at = 0; at < 400 * 200; at++)
                 pixels[at] = 0xff000000u | ground;
