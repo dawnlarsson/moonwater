@@ -5420,15 +5420,17 @@ static b32 doc_select_next(struct doc address_to doc)
                 return false;
         for (positive s = 0; s < doc->selection_count; s++)
                 after = doc_sel_end(&doc->selections[s]) > after ? doc_sel_end(&doc->selections[s]) : after;
-        for (p32 tries = 0; tries < 2; tries++)
+        // Each match already selected is passed over and the search goes on past it: at most one lap per selection.
+        for (p64 from = after, tries = 0; tries <= doc->selection_count; tries++)
         {
                 b32 taken = false;
-                if (!doc_find_next(doc, &find, tries ? 0 : after, false, !tries, &start, &finish))
+                if (!doc_find_next(doc, &find, from, false, true, &start, &finish))
                         break;
                 for (positive s = 0; s < doc->selection_count; s++)
                         taken |= doc_sel_start(&doc->selections[s]) == start && doc_sel_end(&doc->selections[s]) == finish;
                 if (!taken)
                         return doc_find_drop(&find), doc_select_add(doc, start, finish);
+                from = finish > start ? finish : start + 1;
         }
         doc_find_drop(&find);
         return false;
