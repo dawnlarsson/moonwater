@@ -27109,6 +27109,8 @@ static COLD bool compgen_wordlist(string_address list)
         bool held_soft = expand_errors_soft;
         bool failed = false;
         positive length = string_length(list);
+        if (length == positive_max)
+                return false;
         p8 address_to piece = (p8 address_to)shell_map(length + 1);
 
         if (!piece)
@@ -27185,6 +27187,8 @@ static COLD bool compgen_wordlist(string_address list)
                         else
                                 for (positive each = 0; each < count; each++)
                                         compgen_offer(table[each]);
+                        if (table)
+                                memory_free(table, room * sizeof(table[0]));
                 }
 
                 if (string_get(at))
@@ -27418,7 +27422,66 @@ COLD fn shell_compgen(writer write)
         if (want.first < shell_argc)
                 word = shell_argv[want.first];
 
-        compgen_out.used = 0;
+        //      -G, -W, -F, and -C run expansions, functions, or command
+        //      substitutions that rewind expand_store (clobbering shell_argv)
+        //      and may invoke compgen recursively. Snapshot all argument
+        //      strings into one owned slab and isolate compgen_* state
+        //      (CWE-416).
+        string_address address_to owned_slots[] = {
+            address_of word,          address_of want.variable,
+            address_of want.filter,   address_of want.prefix,
+            address_of want.suffix,   address_of want.glob,
+            address_of want.words,    address_of want.function,
+            address_of want.command,
+        };
+        positive slab_size = 0;
+
+        for (positive i = 0; i < array_count(owned_slots); i++)
+        {
+                string_address item = address_to owned_slots[i];
+
+                if (!item)
+                        continue;
+                positive item_length = string_length(item);
+
+                if (item_length >= positive_max - slab_size)
+                        return shell_answered(2, "%s: no room\n", "compgen");
+                slab_size += item_length + 1;
+        }
+
+        p8 address_to slab = slab_size ? (p8 address_to)shell_map(slab_size) : null;
+
+        if (slab_size && !slab)
+                return shell_answered(2, "%s: no room\n", "compgen");
+        scope_exit(if (slab) memory_free(slab, slab_size));
+
+        {
+                positive at = 0;
+
+                for (positive i = 0; i < array_count(owned_slots); i++)
+                {
+                        string_address item = address_to owned_slots[i];
+
+                        if (!item)
+                                continue;
+                        positive item_length = string_length(item);
+
+                        memory_copy_apart(slab + at, item, item_length + 1);
+                        address_to owned_slots[i] = (string_address)(slab + at);
+                        at += item_length + 1;
+                }
+        }
+
+        byte_store held_out = compgen_out;
+        string_address held_prefix = compgen_prefix;
+        positive held_prefix_length = compgen_prefix_length;
+        positive held_shown = compgen_shown;
+        string_address held_reject = compgen_reject;
+        string_address held_before = compgen_before;
+        string_address held_after = compgen_after;
+        bool held_cut = compgen_cut;
+
+        compgen_out = (byte_store){null, 0, 0};
         compgen_prefix = word;
         compgen_prefix_length = word ? string_length(word) : 0;
         compgen_shown = 0;
@@ -27426,6 +27489,18 @@ COLD fn shell_compgen(writer write)
         compgen_before = want.prefix;
         compgen_after = want.suffix;
         compgen_cut = true;
+        scope_exit({
+                if (compgen_out.bytes)
+                        memory_free(compgen_out.bytes, compgen_out.room);
+                compgen_out = held_out;
+                compgen_prefix = held_prefix;
+                compgen_prefix_length = held_prefix_length;
+                compgen_shown = held_shown;
+                compgen_reject = held_reject;
+                compgen_before = held_before;
+                compgen_after = held_after;
+                compgen_cut = held_cut;
+        });
 
         compgen_generate(address_of want, word ? word : (string_address) "");
 
@@ -27443,6 +27518,8 @@ COLD fn shell_compgen(writer write)
                         if (!(count == 1 && !string_compare(table[at], want.glob) &&
                               string_first_of(want.glob, '*')))
                                 compgen_offer(table[at]);
+                if (table)
+                        memory_free(table, room * sizeof(table[0]));
         }
 
         if (want.words)
@@ -27461,8 +27538,15 @@ COLD fn shell_compgen(writer write)
         {
                 positive length = string_length(want.command);
                 positive tail = word ? string_length(word) : 0;
-                positive room = length + tail * 4 + 32;
-                p8 address_to made = (p8 address_to)shell_map(room);
+                positive room = 0;
+                p8 address_to made = null;
+
+                if (tail <= (positive_max - 32) / 4 &&
+                    length <= positive_max - 32 - tail * 4)
+                {
+                        room = length + tail * 4 + 32;
+                        made = (p8 address_to)shell_map(room);
+                }
 
                 shell_told("compgen: warning: -C option may not work as you "
                            "expect\n");
