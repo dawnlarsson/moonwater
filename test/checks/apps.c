@@ -7719,7 +7719,7 @@ static struct ui_text address_to inputs_target(const struct inputs_input address
 static fn inputs_editor_ensure(struct windows address_to table)
 {
         editor.ui = inputs_ui;
-        editor.own.table = table, editor.own.row = 0, editor.own.door = -1;
+        editor.own.table = table, editor.own.row = 0, editor.own.door = -1, editor.own.stride = 800;
         if (editor.count == 0)
                 editor_open(null);
         editor.width = 400, editor.height = 300;
@@ -7832,8 +7832,9 @@ static fn inputs_draw(const struct inputs_input address_to in)
         case INPUTS_ENGINE: ui_text_draw(&inputs_ui, inputs_target(in), 20, 20, 300, 30, 0); break;
         case INPUTS_LAUNCHER: launcher_draw(inputs_pixels); break;
         case INPUTS_FILTER: case INPUTS_ROW: case INPUTS_GALLERY: settings_draw_rows(inputs_pixels, 0, 0); break;
-        case INPUTS_FIND: editor_draw(inputs_pixels); break;
-        case INPUTS_VIEW: ui_text_draw(&inputs_ui, &editor_now()->view, 0, 0, 400, 200, 0x111113); break;
+        // The editor whole, its code view where the window has it (under the file tabs): drawn at the window's top, the view's first line
+        // was under the tabs' strip, which editor_event's view takes the press of first (a middle click there closed the tab).
+        case INPUTS_FIND: case INPUTS_VIEW: editor_draw(inputs_pixels); break;
         }
 }
 
