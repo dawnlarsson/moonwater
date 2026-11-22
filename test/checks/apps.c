@@ -8401,6 +8401,7 @@ static fn kit_composites_check(struct ui address_to wui)
                 check("menu: below the menu's last row is no item (it has no padding to be one)", pad_m.hot == -1 && ui_popmenu_at(&pad_m, 10 * s, bottom) == -1);
         }
 
+        ui_list_reserve(&keyed, 3); // the rows' arrays are the list's own since 75bf1410a: a zeroed list has none
         keyed.count = 3;
         keyed.id[0] = 10, keyed.id[1] = 11, keyed.id[2] = 12;
         keyed.top[0] = 0, keyed.top[1] = 40 * s, keyed.top[2] = 80 * s;

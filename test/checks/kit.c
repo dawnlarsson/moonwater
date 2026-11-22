@@ -4934,6 +4934,7 @@ static void bounds_row(int id, struct ui_row address_to row)
 static void bounds_list_make(struct ui address_to ui, struct ui_list address_to l, int rows, int h)
 {
         memory_zero(l, sizeof(*l));
+        ui_list_reserve(l, rows); // a zeroed list has no row arrays (75bf1410a)
         l->count = rows, l->ids = rows, l->describe = bounds_row, l->empty = "", l->focus = -1, l->hover = l->down = -1;
         for (int at = 0; at < rows; at++)
                 l->id[at] = (unsigned short)at;
@@ -8959,6 +8960,7 @@ static fn check_kit_slider_row(void)
         memory_zero(&p, sizeof(p));
         p.width = 400, p.height = 200, p.top = 0, p.bottom = 200, p.left = 0, p.right = 400;
         memory_zero(&l, sizeof(l));
+        ui_list_reserve(&l, 2);
         l.count = 2, l.ids = 2, l.describe = slider_row, l.focus = l.hover = l.down = -1;
         l.id[0] = 0, l.id[1] = 1;
         ui_list_place(&ui, &l, 0, 0, 400, 200);
@@ -9056,6 +9058,7 @@ static fn check_kit_slider_row(void)
                 int id;
 
                 memory_zero(&many, sizeof(many));
+                ui_list_reserve(&many, 30);
                 many.count = 30, many.ids = 30, many.describe = slider_many_row, many.focus = many.hover = many.down = -1;
                 for (int at = 0; at < 30; at++)
                         many.id[at] = (unsigned short)at;
@@ -9911,6 +9914,7 @@ static fn check_kit_mouse_drag(void)
 
         // A slider row's slider: a mouse's drag along it moves it, as it always did, and moves no row.
         memory_zero(&sliders, sizeof(sliders));
+        ui_list_reserve(&sliders, 2);
         sliders.count = 2, sliders.ids = 2, sliders.describe = slider_row, sliders.focus = sliders.hover = sliders.down = -1;
         sliders.id[0] = 0, sliders.id[1] = 1;
         ui_list_place(&ui, &sliders, 0, 0, 400, 200);
@@ -10263,6 +10267,7 @@ static fn check_kit_list_wrap(void)
                 struct ui_list address_to list = k ? &plain : &l;
 
                 memory_zero(list, sizeof(*list));
+                ui_list_reserve(list, 5);
                 list->count = list->ids = 5, list->describe = list_wrap_row, list->empty = "", list->focus = list->hover = list->down = -1;
                 list->wrap = !k;
                 for (int at = 0; at < 5; at++)
