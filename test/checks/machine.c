@@ -3625,17 +3625,14 @@ static fn browser_kept(struct files_model address_to m)
 }
 
 /*
-        One folder of a trail spelled again (files_trail_spell, files_trail_resolve): the folder is replaced and the folders after it
-        kept; the model goes to the deepest folder of the new path that is one, and the rest stay in the trail, lost; what a person
-        typed is not trusted.
+        The trail's deeper folders: one is opened only as the folder it was (files_trail_open), and lost ones stay in the trail
+        (files_trail_lose, files_trail_note).
 */
-static fn browser_spell(struct files_model address_to m)
+static fn browser_held(struct files_model address_to m)
 {
         static struct files_trail trail;
-        p8 full[FILES_PATH], want[FILES_PATH], into[FILES_PATH], base[FILES_PATH];
-        b32 replaced, several, refused, whole, part, file, again;
+        p8 want[FILES_PATH];
         bipolar handle = -1, error = 0;
-        int at, why;
 
         browser_folder((string_address) "spell");
         browser_folder((string_address) "spell/to");
@@ -3644,82 +3641,9 @@ static fn browser_spell(struct files_model address_to m)
         browser_folder((string_address) "spell/foo");
         browser_folder((string_address) "spell/foo/something");
         browser_folder((string_address) "spell/foo/something/else");
-        browser_folder((string_address) "spell/bar");
-        browser_folder((string_address) "spell/bar/something");
-        browser_file((string_address) "spell/file", 1, 0);
-        browser_folder((string_address) "spell/deep");
-        browser_folder((string_address) "spell/deep/er");
-        browser_folder((string_address) "spell/deep/er/something");
-        browser_path(base, (string_address) "spell");
         memory_fill(&trail, 0, sizeof(trail));
         browser_go(m, (string_address) "spell/to/something/else");
         files_trail_note(&trail, m->path, &m->folder);
-        at = trail.count - 3; // "to"
-        browser_path(full, (string_address) "spell/to/something/else");
-        browser_path(want, (string_address) "spell/foo/something/else");
-        replaced = files_trail_spell(&trail, at, (const p8 address_to) "foo", into) && string_equals(into, want) && string_equals(trail.path, full);
-        check("browser: a folder of the trail spelled again is replaced in the path and every folder after it is kept: /path/to/something/else with to made foo is /path/foo/something/else",
-              replaced);
-        browser_path(want, (string_address) "spell/deep/er/something/else");
-        several = files_trail_spell(&trail, at, (const p8 address_to) "deep//er/", into) && string_equals(into, want);
-        browser_path(want, (string_address) "spell/something/else");
-        several = several && files_trail_spell(&trail, at, (const p8 address_to) "", into) && string_equals(into, want);
-        browser_path(want, (string_address) "spell/to/something");
-        several = several && files_trail_spell(&trail, trail.count - 1, (const p8 address_to) "", into) && string_equals(into, want);
-        check("browser: a stroke typed in a folder's name makes several folders of it (strokes run together are one), and no name takes the folder out of the path", several);
-        refused = !files_trail_spell(&trail, at, (const p8 address_to) "fo\no", into) && !files_trail_spell(&trail, at, (const p8 address_to) "a\x7f", into) &&
-                  !files_trail_spell(&trail, at, (const p8 address_to) "..", into) && !files_trail_spell(&trail, at, (const p8 address_to) "a/../b", into) &&
-                  !files_trail_spell(&trail, at, (const p8 address_to) "./a", into) && !files_trail_spell(&trail, 0, (const p8 address_to) "x", into) &&
-                  !files_trail_spell(&trail, trail.count, (const p8 address_to) "x", into) && !files_trail_spell(&trail, -1, (const p8 address_to) "x", into);
-        {
-                static p8 long_name[FILES_PATH + 8];
-
-                memory_fill(long_name, 'n', FILES_NAME);
-                long_name[FILES_NAME] = end;
-                refused = refused && !files_trail_spell(&trail, at, long_name, into); // a name longer than a name
-                for (positive k = 0; k + 1 < FILES_PATH; k++)
-                        long_name[k] = k % 100 == 99 ? '/' : 'n';
-                long_name[FILES_PATH - 1] = end;
-                refused = refused && !files_trail_spell(&trail, at, long_name, into); // a path longer than a path
-        }
-        check("browser: what is typed for a folder is not trusted: a control byte, a folder spelled . or .., a name or a path too long, the root and a folder that is not of the trail are refused",
-              refused);
-        // Gone to: every folder of the new path is one, so the deepest is shown and nothing is lost.
-        browser_path(want, (string_address) "spell/foo/something/else");
-        files_trail_spell(&trail, at, (const p8 address_to) "foo", into);
-        why = files_trail_resolve(m, &trail, into);
-        browser_read(m, 64);
-        whole = why == FILES_READY && string_equals(m->path, want) && string_equals(trail.path, want) && trail.current == trail.count - 1 && !trail.lost[trail.count - 1];
-        check("browser: the path spelled is gone to as far as it is folders: with every folder there, the deepest is shown and is the trail's current one", whole);
-        // bar has something and no else: the browser stops in bar/something, and else stays in the trail, lost, with the reason.
-        at = trail.count - 3;
-        browser_path(want, (string_address) "spell/bar/something");
-        browser_path(full, (string_address) "spell/bar/something/else");
-        files_trail_spell(&trail, at, (const p8 address_to) "bar", into);
-        why = files_trail_resolve(m, &trail, into);
-        browser_read(m, 64);
-        part = why == FILES_GONE && string_equals(m->path, want) && string_equals(trail.path, full) && trail.current == trail.count - 2 && trail.lost[trail.count - 1] &&
-               !trail.lost[trail.count - 2] && files_trail_open(&trail, trail.count - 1, &handle, &error) == FILES_MISSING && handle < 0;
-        // nowhere has nothing: the browser stops at the folder before it, shown already, and all three after it are lost.
-        files_trail_spell(&trail, at, (const p8 address_to) "nowhere", into);
-        why = files_trail_resolve(m, &trail, into);
-        browser_read(m, 64);
-        part = part && why == FILES_GONE && string_equals(m->path, base) && trail.current == trail.count - 4 && trail.lost[trail.count - 3] && trail.lost[trail.count - 2] &&
-               trail.lost[trail.count - 1] && trail.count >= 5;
-        check("browser: where a folder of the path spelled is not there the browser stops at the last that is, and the folders after it stay in the trail, lost, with the reason", part);
-        // A file where a folder is spelled: not a folder, said as that, and the trail keeps it lost.
-        at = trail.count - 3;
-        files_trail_spell(&trail, at, (const p8 address_to) "file", into);
-        why = files_trail_resolve(m, &trail, into);
-        file = why == FILES_NOT_DIRECTORY && string_equals(m->path, base) && trail.lost[at];
-        check("browser: a file spelled where a folder goes is said to be no folder, and the browser stays at the last folder", file);
-        // The lost folder spelled right: the path is gone down again and nothing of it is lost.
-        browser_path(want, (string_address) "spell/to/something/else");
-        files_trail_spell(&trail, at, (const p8 address_to) "to", into);
-        why = files_trail_resolve(m, &trail, into);
-        browser_read(m, 64);
-        again = why == FILES_READY && string_equals(m->path, want) && trail.current == trail.count - 1 && !trail.lost[at] && !trail.lost[trail.count - 1];
-        check("browser: a lost folder spelled right is found: the path is gone down to its end and none of it is lost", again);
         // A folder of the trail opened as the folder it was: the descriptor is that folder (compared on the descriptor itself).
         browser_go(m, (string_address) "spell/to");
         files_trail_note(&trail, m->path, &m->folder);
@@ -4969,6 +4893,44 @@ static fn browser_bar_view(struct files_model address_to m)
         check("browser: Refresh in the folder's menus reads the folder again", refresh);
 }
 
+// Tab in the path band: the name under the caret finished from the listed folders of the folder before it, the folder shown's or one kept.
+static fn browser_bar_complete(struct files_model address_to m)
+{
+        const struct ui_tokens address_to k = &files.big->path;
+        b32 shown, inside, kept;
+
+        // At bar/one, whose folders are three and two.
+        browser_bar_send(WINDOW_EVENT_KEY, FILES_KEY_L, 'l', WINDOW_KEY_DOWN | WINDOW_KEY_CONTROL);
+        browser_bar_send(WINDOW_EVENT_KEY, UI_KEY_END, 0, WINDOW_KEY_DOWN);
+        browser_bar_type("/tw");
+        browser_bar_send(WINDOW_EVENT_KEY, UI_KEY_TAB, '\t', WINDOW_KEY_DOWN);
+        shown = files.editing == FILES_EDIT_PATH && browser_bar_says((string_address) "bar/one/two/", (string_address) "");
+        check("browser: Tab in the path band finishes the name under the caret from the folders of the folder shown, and one that ends the path gets its stroke",
+              shown);
+        // In the middle of the path: two made t, then th, finished in place, the caret after it.
+        browser_bar_type("x");
+        browser_bar_send(WINDOW_EVENT_KEY, UI_KEY_LEFT, 0, WINDOW_KEY_DOWN), browser_bar_send(WINDOW_EVENT_KEY, UI_KEY_LEFT, 0, WINDOW_KEY_DOWN);
+        browser_bar_send(WINDOW_EVENT_KEY, UI_KEY_BACKSPACE, 8, WINDOW_KEY_DOWN), browser_bar_send(WINDOW_EVENT_KEY, UI_KEY_BACKSPACE, 8, WINDOW_KEY_DOWN);
+        browser_bar_send(WINDOW_EVENT_KEY, UI_KEY_TAB, '\t', WINDOW_KEY_DOWN);
+        inside = browser_bar_says((string_address) "bar/one/t/x", (string_address) "");
+        browser_bar_type("h");
+        browser_bar_send(WINDOW_EVENT_KEY, UI_KEY_TAB, '\t', WINDOW_KEY_DOWN);
+        inside = inside && browser_bar_says((string_address) "bar/one/three/x", (string_address) "") &&
+                 k->text.doc.selections[0].active == doc_length(&k->text.doc) - 2;
+        check("browser: Tab finishes a name in the middle of the path in place, and two names that start alike are finished as far as they agree", inside);
+        browser_bar_send(WINDOW_EVENT_KEY, UI_KEY_ESCAPE, 0x1b, WINDOW_KEY_DOWN);
+        // At bar/one/two, bar/one is a kept listing: a name in it is finished from that, reading no disk.
+        browser_go(m, (string_address) "bar/one/two"), files_moved(), browser_bar_frame();
+        browser_bar_send(WINDOW_EVENT_KEY, FILES_KEY_L, 'l', WINDOW_KEY_DOWN | WINDOW_KEY_CONTROL);
+        browser_bar_send(WINDOW_EVENT_KEY, UI_KEY_END, 0, WINDOW_KEY_DOWN);
+        browser_bar_send(WINDOW_EVENT_KEY, UI_KEY_BACKSPACE, 8, WINDOW_KEY_DOWN), browser_bar_send(WINDOW_EVENT_KEY, UI_KEY_BACKSPACE, 8, WINDOW_KEY_DOWN);
+        browser_bar_type("h");
+        browser_bar_send(WINDOW_EVENT_KEY, UI_KEY_TAB, '\t', WINDOW_KEY_DOWN);
+        kept = browser_bar_says((string_address) "bar/one/three/", (string_address) "") && browser_bar_at((string_address) "bar/one/two");
+        check("browser: Tab finishes a name of a folder that is not the one shown from its kept listing (files_model_complete_in)", kept);
+        browser_bar_send(WINDOW_EVENT_KEY, UI_KEY_ESCAPE, 0x1b, WINDOW_KEY_DOWN);
+}
+
 static fn browser_bar(void)
 {
         struct ui address_to ui = &files.ui;
@@ -5066,6 +5028,7 @@ static fn browser_bar(void)
         browser_bar_send(WINDOW_EVENT_KEY, UI_KEY_ESCAPE, 0x1b, WINDOW_KEY_DOWN);
         browser_bar_buttons(m);
         browser_bar_view(m);
+        browser_bar_complete(m);
         files_model_close(m);
 }
 
@@ -5145,7 +5108,7 @@ b32 main(void)
         browser_typed(address_of model);
         browser_trail(address_of model);
         browser_kept(address_of model);
-        browser_spell(address_of model);
+        browser_held(address_of model);
         browser_changes(address_of model);
         browser_many(address_of model);
         browser_ops(address_of model);

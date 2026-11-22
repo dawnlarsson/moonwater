@@ -1235,26 +1235,32 @@ static fn files_edit_go(void)
         files_edit(0), files_model_reload(m), string_copy_bounded(m->came, typed, FILES_NAME);
 }
 
-// Tab in the path band: the name after the last stroke finished from the folders listed, when what is before it is the folder shown.
+// Tab in the path band: the name under the caret finished from the folders of the folder before it, as one is listed (the folder shown's
+// listing, or one kept of a folder of the trail: files_model_complete_in). One name found that ends the path is followed by a stroke.
 static fn files_complete(void)
 {
         static p8 typed[FILES_PATH], aux[FILES_PATH], name[FILES_NAME];
         struct ui_text address_to t = &files.big->path.text;
-        const struct files_model address_to m = &files.big->model;
-        positive length, cut, folder;
+        positive length = files_field_read(t, typed, sizeof(typed)), caret = (positive)t->doc.selections[t->doc.primary].active, cut, stop, named, used;
         p32 found;
-        (void)files_field_read(t, typed, sizeof(typed)), length = string_length(typed);
-        for (cut = length; cut > 0 && typed[cut - 1] != '/'; cut--)
+        caret = caret < length ? caret : length;
+        for (cut = caret; cut > 0 && typed[cut - 1] != '/'; cut--)
                 ;
-        folder = cut > 1 ? cut - 1 : cut;
-        if (!cut || folder != string_length(m->path) || memory_compare((address_any)typed, (address_any)m->path, folder) || length - cut >= FILES_NAME)
+        for (stop = caret; stop < length && typed[stop] != '/'; stop++)
+                ;
+        if (!cut || typed[0] != '/' || stop - cut >= FILES_NAME)
                 return;
-        if (!(found = files_model_complete(m, typed + cut, length - cut, name, sizeof(name))) || cut + string_length(name) + 2 >= sizeof(aux))
+        memory_copy(aux, typed, cut > 1 ? cut - 1 : 1), aux[cut > 1 ? cut - 1 : 1] = end;
+        if (!(found = files_model_complete_in(&files.big->model, aux, typed + cut, stop - cut, name, sizeof(name))))
                 return;
-        memory_copy(aux, typed, cut), memory_copy(aux + cut, name, string_length(name) + 1);
-        if (found == 1)
-                string_append_bounded(aux, (string_address) "/", sizeof(aux));
-        ui_text_set(t, aux, string_length(aux)), files.dirty = true;
+        named = string_length(name), used = cut + named + (found == 1 && stop == length) + (length - stop);
+        if (used >= sizeof(aux))
+                return;
+        memory_copy(aux, typed, cut), memory_copy(aux + cut, name, named);
+        if (found == 1 && stop == length)
+                aux[cut + named++] = '/';
+        memory_copy(aux + cut + named, typed + stop, length - stop), aux[used] = end;
+        ui_text_set(t, aux, used), doc_select_set(&t->doc, cut + named, cut + named), files.dirty = true;
 }
 
 static fn files_crumb_go(int which)
