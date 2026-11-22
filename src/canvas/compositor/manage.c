@@ -1956,25 +1956,18 @@ refused:
 
 /* ---- row intake, identity and teardown ---- */
 
-#define COMPOSITOR_OSK_NAME "osk"
 
-static b32 compositor_osk_is(unsigned int pid)
+/*
+        The keyboard is the process the launcher recorded at its fork (osk_pid), and it is the row the compositor took the claim of at the
+        row's open (windows_owner_held): the claimed pid is the recorded one, and the claim still holds. The name and the executable's
+        inode, which a symlink or prctl can fake, are no longer read. The table is 0600, so the writers are root processes.
+*/
+static b32 compositor_osk_is(int row)
 {
-        unsigned char mine[256], theirs[256];
-        char path[40], comm[8];
+        struct windows *table = compositor.table;
+        unsigned int pid = table->pid[row], osk = table->osk_pid;
 
-        if (!pid)
-                return 0;
-        memory_zero(mine, sizeof(mine)), memory_zero(theirs, sizeof(theirs)), memory_zero(comm, sizeof(comm));
-        if (compositor_call(syscall(statx), (positive)AT_FDCWD, (positive) "/proc/self/exe", 0, 0x7ff, (positive)mine, 0) < 0)
-                return 0;
-        windows_num_path(path, sizeof(path), "/proc/", pid, "/exe");
-        if (compositor_call(syscall(statx), (positive)AT_FDCWD, (positive)path, 0, 0x7ff, (positive)theirs, 0) < 0 ||
-            memory_compare(theirs + 32, mine + 32, 8) || memory_compare(theirs + 136, mine + 136, 8))
-                return 0;
-        windows_num_path(path, sizeof(path), "/proc/", pid, "/comm");
-        return windows_read_line(path, comm, sizeof(comm), FILE_READ | O_CLOEXEC) >= 0 &&
-               string_equals((string_address)comm, (string_address)COMPOSITOR_OSK_NAME);
+        return osk != 0 && pid == osk && windows_owner_ok(&windows_owner_held[row], osk);
 }
 
 static void compositor_identity_take(int row)
@@ -2019,7 +2012,7 @@ static void compositor_take_first(int row, unsigned int width, unsigned int heig
         compositor.lifted[row] = table->lift[row], compositor.moved[row] = table->moved[row];
         compositor.glassy[row] = table->glass[row] & WINDOW_GLASS;
         compositor.asks[row] = table->glass[row] & (WINDOW_NO_CLOSE | WINDOW_DISMISS | WINDOW_NO_TAB | WINDOW_NO_GRAB | WINDOW_NO_KEYS | WINDOW_KEYBOARD);
-        if ((compositor.asks[row] & (WINDOW_NO_KEYS | WINDOW_KEYBOARD)) && !compositor_osk_is(table->pid[row]))
+        if ((compositor.asks[row] & (WINDOW_NO_KEYS | WINDOW_KEYBOARD)) && !compositor_osk_is(row))
                 compositor.asks[row] &= ~(WINDOW_NO_KEYS | WINDOW_KEYBOARD);
         compositor.layer[row] = compositor_layer_clamp(table->layer[row]);
         if (compositor.layer[row] == WINDOW_LAYER_BACKGROUND)
