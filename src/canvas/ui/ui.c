@@ -10332,7 +10332,14 @@ static fn ui_kit_fill_cols(struct ui address_to ui, const struct ui_box address_
                                 for (b32 x = lo; x < a; x++)
                                         ui_kit_put(row, x, clip ? ui_spans_cover(&spans, x) * ui_spans_cover(&cut, x) / UI_FULL : ui_spans_cover(&spans, x), argb);
                                 if (b > a && inside)
-                                        ui_kit_run(row + a, b - a, ui_kit_cover(argb, inside >= UI_FULL ? UI_FULL : inside));
+                                {
+                                        // A whole pixel is the run's over; a part of one is the linear-light put, as its edge pixels are (ui_kit_put).
+                                        if (inside >= UI_FULL)
+                                                ui_kit_run(row + a, b - a, ui_kit_cover(argb, UI_FULL));
+                                        else
+                                                for (b32 k = a; k < b; k++)
+                                                        ui_kit_put(row, k, inside, argb);
+                                }
                                 for (b32 x = b > a ? b : hi; x < hi; x++)
                                         ui_kit_put(row, x, clip ? ui_spans_cover(&spans, x) * ui_spans_cover(&cut, x) / UI_FULL : ui_spans_cover(&spans, x), argb);
                         }
@@ -10461,8 +10468,11 @@ static fn ui_kit_ring_cols(struct ui address_to ui, const struct ui_box address_
                                 int cover;
                                 if (x == a && b > a)
                                 {
-                                        if (inside > 0)
-                                                ui_kit_run(row + a, b - a, ui_premultiplied(argb, inside >= (int)UI_FULL ? UI_FULL : (unsigned int)inside));
+                                        if (inside >= (int)UI_FULL)
+                                                ui_kit_run(row + a, b - a, ui_premultiplied(argb, UI_FULL));
+                                        else if (inside > 0)
+                                                for (b32 k = a; k < b; k++)
+                                                        ui_kit_put(row, k, (unsigned int)inside, argb);
                                         x = b - 1;
                                         continue;
                                 }

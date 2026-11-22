@@ -4749,7 +4749,9 @@ static void kit_page_lay(unsigned int address_to page, const struct ui_box addre
                         if (clip)
                                 cover = cover * (int)kit_page_cover(clip, x, y) / UI_FULL;
                         if (cover > 0)
-                                page[at] = ui_over(ui_premultiplied(argb, cover > UI_FULL ? UI_FULL : (unsigned int)cover), page[at]);
+                                // The paint of one pixel by its cover, the way the shipped path paints every pixel of a shape: the linear-light put
+                                // (ui_kit_put, which is what a shape's edges get). The row checks the cover, pixel for pixel, against it.
+                                ui_kit_put(page + y * KIT_PAGE_PITCH, x, cover > UI_FULL ? UI_FULL : (unsigned int)cover, argb);
                 }
 }
 
