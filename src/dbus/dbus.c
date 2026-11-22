@@ -268,6 +268,9 @@ static void dbus_close_fds(const int *fds, long count)
 #else
 #define DBUS_LIBRARY 0
 #endif
+#ifndef offset_of
+#define offset_of(type, member) ((unsigned long)&((type *)0)->member)
+#endif
 // The shortest text lib.c's validator takes, and the shortest copy memory_copy takes. arm64 has x86_64's (BENCH_dbus
 // under qemu: the validator 89% of the C's instructions at 8 bytes, the copy 83% at 300); riscv64 without V its own,
 // as qemu has its instructions (no hardware timing): the validator 101 to 109% at 8 to 12 bytes and 73% at 16, the
@@ -617,7 +620,7 @@ static int dbus_value(const unsigned char *p, long *at, long limit, const char *
                         return 0;
                 if (c == 'b' && dbus_get32(p + *at) > 1)
                         return 0;
-                if (c == 'h' && fds > 0 && dbus_get32(p + *at) >= fds)
+                if (c == 'h' && dbus_get32(p + *at) >= fds)
                         return 0;
                 *at += size;
                 return 1;
@@ -796,40 +799,59 @@ static int dbus_parse(const unsigned char *b, long size, struct dbus_message *m)
                         return -1;
                 if (code > 9)
                         continue;
-                kind = (char)b[type_at];
-                if (length != 1 || (seen & (1u << code)) || kind != (code == 1 ? 'o' : code == 5 || code == 9 ? 'u' : code == 8 ? 'g' : 's'))
-                        return -1;
-                seen |= 1u << code;
-                // the value is valid for its type (its UTF-8, its path, its signature), and ends at `at`
-                text = kind == 'g' ? (const char *)b + type_at + 3 : (const char *)b + DBUS_ALIGN(type_at + 2, 4) + 4;
-                length = kind == 'g' ? b[type_at + 2] : kind == 'u' ? 0 : at - 1 - (text - (const char *)b);
-                if (code == 1)
-                        m->path = text, m->has |= DBUS_HAS_PATH;
-                else if (code == 2 && dbus_valid_name(text, length, 0))
-                        m->interface = text, m->has |= DBUS_HAS_INTERFACE;
-                else if (code == 3 && dbus_valid_name(text, length, 2))
-                        m->member = text, m->has |= DBUS_HAS_MEMBER;
-                else if (code == 4 && dbus_valid_name(text, length, 0))
-                        m->error = text, m->has |= DBUS_HAS_ERROR;
-                else if (code == 5 && (m->reply = dbus_get32(b + at - 4)) != 0)
-                        m->has |= DBUS_HAS_REPLY; // a reply serial of 0 is none: libdbus ends a connection that is sent one
-                else if (code == 6 && dbus_valid_name(text, length, 1))
-                        m->destination = text, m->has |= DBUS_HAS_DESTINATION;
-                else if (code == 7 && dbus_valid_name(text, length, 1))
-                        m->sender = text, m->has |= DBUS_HAS_SENDER;
-                else if (code == 8)
-                        m->signature = text, m->has |= DBUS_HAS_SIGNATURE;
-                else if (code == 9)
                 {
-                        unsigned long count = dbus_get32(b + at - 4);
+                        static const struct
+                        {
+                                char kind;
+                                signed char name_kind;
+                                unsigned short off;
+                                unsigned short bit;
+                        } hdr_fields[10] = {
+                            {0, -1, 0, 0},
+                            {'o', -1, (unsigned short)offset_of(struct dbus_message, path), DBUS_HAS_PATH},
+                            {'s', 0, (unsigned short)offset_of(struct dbus_message, interface), DBUS_HAS_INTERFACE},
+                            {'s', 2, (unsigned short)offset_of(struct dbus_message, member), DBUS_HAS_MEMBER},
+                            {'s', 0, (unsigned short)offset_of(struct dbus_message, error), DBUS_HAS_ERROR},
+                            {'u', -1, 0, DBUS_HAS_REPLY},
+                            {'s', 1, (unsigned short)offset_of(struct dbus_message, destination), DBUS_HAS_DESTINATION},
+                            {'s', 1, (unsigned short)offset_of(struct dbus_message, sender), DBUS_HAS_SENDER},
+                            {'g', -1, (unsigned short)offset_of(struct dbus_message, signature), DBUS_HAS_SIGNATURE},
+                            {'u', -1, 0, DBUS_HAS_FDS},
+                        };
 
-                        if (count > DBUS_FDS || (count && !dbus_fd_ops.close_fd))
+                        kind = (char)b[type_at];
+                        if (length != 1 || (seen & (1u << code)) || !hdr_fields[code].kind || kind != hdr_fields[code].kind)
                                 return -1;
-                        m->fds = count;
-                        m->has |= DBUS_HAS_FDS;
+                        seen |= 1u << code;
+                        // the value is valid for its type (its UTF-8, its path, its signature), and ends at `at`
+                        if (kind == 'u')
+                        {
+                                unsigned long val = dbus_get32(b + at - 4);
+
+                                if (code == 5)
+                                {
+                                        if (!val)
+                                                return -1; // a reply serial of 0 is none: libdbus ends a connection that is sent one
+                                        m->reply = val;
+                                }
+                                else
+                                {
+                                        if (val > DBUS_FDS || (val && !dbus_fd_ops.close_fd))
+                                                return -1;
+                                        m->fds = val;
+                                }
+                                m->has |= hdr_fields[code].bit;
+                        }
+                        else
+                        {
+                                text = kind == 'g' ? (const char *)b + type_at + 3 : (const char *)b + DBUS_ALIGN(type_at + 2, 4) + 4;
+                                length = kind == 'g' ? b[type_at + 2] : at - 1 - (text - (const char *)b);
+                                if (hdr_fields[code].name_kind >= 0 && !dbus_valid_name(text, length, hdr_fields[code].name_kind))
+                                        return -1;
+                                *(const char **)((char *)m + hdr_fields[code].off) = text;
+                                m->has |= hdr_fields[code].bit;
+                        }
                 }
-                else
-                        return -1;
         }
         if (at != limit)
                 return -1;
@@ -861,17 +883,19 @@ struct dbus_out
 
 static void dbus_o_pad(struct dbus_out *w, long align)
 {
+        long to;
+
         if (w->bad)
                 return;
-        while (w->length % align)
+        to = DBUS_ALIGN(w->length, align);
+        if (to > w->room)
         {
-                if (w->length >= w->room)
-                {
-                        w->bad = 1;
-                        return;
-                }
-                w->at[w->length++] = 0;
+                w->bad = 1;
+                return;
         }
+        for (long k = w->length; k < to; k++)
+                w->at[k] = 0;
+        w->length = to;
 }
 
 static void dbus_o_raw(struct dbus_out *w, const void *bytes, long n)
@@ -959,9 +983,33 @@ static void dbus_o_field_string(struct dbus_out *w, unsigned code, char kind, co
         dbus_o_string(w, value);
 }
 
+static void dbus_o_field_u32(struct dbus_out *w, unsigned code, unsigned long value)
+{
+        dbus_o_pad(w, 8);
+        dbus_o_u8(w, code);
+        dbus_o_u8(w, 1);
+        dbus_o_u8(w, 'u');
+        dbus_o_u8(w, 0);
+        dbus_o_u32(w, value);
+}
+
 // A message's header; the body follows, then dbus_o_end.
 static void dbus_o_header_fds(struct dbus_out *w, unsigned type, unsigned flags, unsigned long serial, const struct dbus_fields *f, unsigned long fds)
 {
+        static const struct
+        {
+                unsigned char code;
+                char kind;
+                unsigned short off;
+        } str_fields[] = {
+            {1, 'o', (unsigned short)offset_of(struct dbus_fields, path)},
+            {2, 's', (unsigned short)offset_of(struct dbus_fields, interface)},
+            {3, 's', (unsigned short)offset_of(struct dbus_fields, member)},
+            {4, 's', (unsigned short)offset_of(struct dbus_fields, error)},
+            {6, 's', (unsigned short)offset_of(struct dbus_fields, destination)},
+            {7, 's', (unsigned short)offset_of(struct dbus_fields, sender)},
+            {8, 'g', (unsigned short)offset_of(struct dbus_fields, signature)},
+        };
         long fields_at;
 
         dbus_o_u8(w, 'l');
@@ -972,38 +1020,17 @@ static void dbus_o_header_fds(struct dbus_out *w, unsigned type, unsigned flags,
         dbus_o_u32(w, serial);
         dbus_o_u32(w, 0);
         fields_at = w->length;
-        if (f->path && *f->path)
-                dbus_o_field_string(w, 1, 'o', f->path);
-        if (f->interface && *f->interface)
-                dbus_o_field_string(w, 2, 's', f->interface);
-        if (f->member && *f->member)
-                dbus_o_field_string(w, 3, 's', f->member);
-        if (f->error && *f->error)
-                dbus_o_field_string(w, 4, 's', f->error);
-        if (f->has_reply)
+        for (long i = 0; i < (long)(sizeof str_fields / sizeof str_fields[0]); i++)
         {
-                dbus_o_pad(w, 8);
-                dbus_o_u8(w, 5);
-                dbus_o_u8(w, 1);
-                dbus_o_u8(w, 'u');
-                dbus_o_u8(w, 0);
-                dbus_o_u32(w, f->reply);
+                const char *val = *(const char *const *)((const char *)f + str_fields[i].off);
+
+                if (str_fields[i].code == 6 && f->has_reply)
+                        dbus_o_field_u32(w, 5, f->reply);
+                if (val && *val)
+                        dbus_o_field_string(w, str_fields[i].code, str_fields[i].kind, val);
         }
-        if (f->destination && *f->destination)
-                dbus_o_field_string(w, 6, 's', f->destination);
-        if (f->sender && *f->sender)
-                dbus_o_field_string(w, 7, 's', f->sender);
-        if (f->signature && *f->signature)
-                dbus_o_field_string(w, 8, 'g', f->signature);
         if (fds)
-        {
-                dbus_o_pad(w, 8);
-                dbus_o_u8(w, 9);
-                dbus_o_u8(w, 1);
-                dbus_o_u8(w, 'u');
-                dbus_o_u8(w, 0);
-                dbus_o_u32(w, fds);
-        }
+                dbus_o_field_u32(w, 9, fds);
         dbus_o_patch32(w, 12, (unsigned long)(w->length - fields_at));
         dbus_o_pad(w, 8);
 }
@@ -1132,29 +1159,33 @@ static long dbus_resolve(const char *name)
         return n ? n->owner : -1;
 }
 
+static long dbus_u64_text(char *into, unsigned long u)
+{
+#if DBUS_LIBRARY
+        long n = (long)positive_into_string((p8 *)into, (positive)u);
+
+        into[n] = 0;
+        return n;
+#else
+        char digits[24];
+        long n = 0, at = 0;
+
+        do
+                digits[n++] = (char)('0' + u % 10);
+        while ((u /= 10) > 0);
+        while (n)
+                into[at++] = digits[--n];
+        into[at] = 0;
+        return at;
+#endif
+}
+
 static void dbus_unique_text(char *into, long id)
 {
-        long at = 3;
-
         into[0] = ':';
         into[1] = '1';
         into[2] = '.';
-#if DBUS_LIBRARY
-        at += (long)positive_into_string((p8 *)(into + at), (positive)(id > 0 ? id : 0));
-#else
-        {
-                char digits[24];
-                long n = 0;
-                unsigned long u = id > 0 ? (unsigned long)id : 0;
-
-                do
-                        digits[n++] = (char)('0' + u % 10);
-                while ((u /= 10) > 0);
-                while (n)
-                        into[at++] = digits[--n];
-        }
-#endif
-        into[at] = 0;
+        dbus_u64_text(into + 3, id > 0 ? (unsigned long)id : 0);
 }
 
 #define DBUS_UNASKED_FOR 0 // a call or a signal of another, or the bus's NameOwnerChanged: up to DBUS_UNASKED of the queue
@@ -1286,18 +1317,30 @@ static int dbus_rule_sender_is(const struct dbus_rule *r, long from)
 }
 
 // Whether a message (sent by `from`, -1 for the bus) is what a rule asks for.
+static const struct
+{
+        const char *name;
+        unsigned short offset, room, msg_off;
+        unsigned char bit;
+} dbus_rule_fields[] = {
+    {"sender", (unsigned short)offset_of(struct dbus_rule, sender), DBUS_NAME_TEXT, 0xffff, 1},
+    {"interface", (unsigned short)offset_of(struct dbus_rule, interface), DBUS_NAME_TEXT, (unsigned short)offset_of(struct dbus_message, interface), 2},
+    {"member", (unsigned short)offset_of(struct dbus_rule, member), 64, (unsigned short)offset_of(struct dbus_message, member), 4},
+    {"path", (unsigned short)offset_of(struct dbus_rule, path), 128, (unsigned short)offset_of(struct dbus_message, path), 8},
+    {"path_namespace", (unsigned short)offset_of(struct dbus_rule, path_namespace), 128, 0xffff, 16},
+    {"destination", (unsigned short)offset_of(struct dbus_rule, destination), DBUS_NAME_TEXT, (unsigned short)offset_of(struct dbus_message, destination), 32},
+};
+
 static int dbus_rule_matches(const struct dbus_rule *r, long from, const struct dbus_message *m)
 {
         if (r->type && r->type != m->type)
                 return 0;
         if ((r->has & 1) && !dbus_rule_sender_is(r, from))
                 return 0;
-        if ((r->has & 2) && !dbus_equal(r->interface, m->interface))
-                return 0;
-        if ((r->has & 4) && !dbus_equal(r->member, m->member))
-                return 0;
-        if ((r->has & 8) && !dbus_equal(r->path, m->path))
-                return 0;
+        for (long i = 0; i < (long)(sizeof dbus_rule_fields / sizeof dbus_rule_fields[0]); i++)
+                if (dbus_rule_fields[i].msg_off != 0xffff && (r->has & dbus_rule_fields[i].bit) &&
+                    !dbus_equal((const char *)r + dbus_rule_fields[i].offset, *(const char *const *)((const char *)m + dbus_rule_fields[i].msg_off)))
+                        return 0;
         if (r->has & 16)
         {
                 long n = dbus_length(r->path_namespace);
@@ -1305,8 +1348,6 @@ static int dbus_rule_matches(const struct dbus_rule *r, long from, const struct 
                 if (!dbus_starts(m->path, r->path_namespace) || (m->path[n] && m->path[n] != '/' && n > 1))
                         return 0;
         }
-        if ((r->has & 32) && !dbus_equal(r->destination, m->destination))
-                return 0;
         for (long k = 0; k < 4; k++)
                 if (r->arg_has & (1u << k))
                 {
@@ -1393,27 +1434,14 @@ static int dbus_rule_parse(const char *text, struct dbus_rule *r)
                                 const char *name;
                                 unsigned char code;
                         } rule_types[] = {{"signal", DBUS_SIGNAL}, {"method_call", DBUS_CALL}, {"method_return", DBUS_RETURN}, {"error", DBUS_ERROR}};
-                        static const struct
-                        {
-                                const char *name;
-                                unsigned short offset, room;
-                                unsigned char bit;
-                        } rule_fields[] = {
-                            {"sender", (unsigned short)offset_of(struct dbus_rule, sender), DBUS_NAME_TEXT, 1},
-                            {"interface", (unsigned short)offset_of(struct dbus_rule, interface), DBUS_NAME_TEXT, 2},
-                            {"member", (unsigned short)offset_of(struct dbus_rule, member), 64, 4},
-                            {"path", (unsigned short)offset_of(struct dbus_rule, path), 128, 8},
-                            {"path_namespace", (unsigned short)offset_of(struct dbus_rule, path_namespace), 128, 16},
-                            {"destination", (unsigned short)offset_of(struct dbus_rule, destination), DBUS_NAME_TEXT, 32},
-                        };
-                        long fi = DBUS_TABLE_LOOKUP(key, rule_fields);
+                        long fi = DBUS_TABLE_LOOKUP(key, dbus_rule_fields);
 
-                        if (fi < (long)(sizeof(rule_fields) / sizeof(rule_fields[0])))
+                        if (fi < (long)(sizeof(dbus_rule_fields) / sizeof(dbus_rule_fields[0])))
                         {
-                                if (vlen >= rule_fields[fi].room)
+                                if (vlen >= dbus_rule_fields[fi].room)
                                         return -1;
-                                dbus_text((char *)r + rule_fields[fi].offset, rule_fields[fi].room, value);
-                                r->has |= rule_fields[fi].bit;
+                                dbus_text((char *)r + dbus_rule_fields[fi].offset, dbus_rule_fields[fi].room, value);
+                                r->has |= dbus_rule_fields[fi].bit;
                         }
                         else if (dbus_equal(key, "type"))
                         {
@@ -1446,9 +1474,9 @@ static int dbus_rule_same(const struct dbus_rule *a, const struct dbus_rule *b)
         for (long k = 0; k < 4; k++)
                 if (a->arg_mode[k] != b->arg_mode[k])
                         return 0;
-        if (!dbus_equal(a->sender, b->sender) || !dbus_equal(a->interface, b->interface) || !dbus_equal(a->member, b->member) ||
-            !dbus_equal(a->path, b->path) || !dbus_equal(a->path_namespace, b->path_namespace) || !dbus_equal(a->destination, b->destination))
-                return 0;
+        for (long i = 0; i < (long)(sizeof dbus_rule_fields / sizeof dbus_rule_fields[0]); i++)
+                if (!dbus_equal((const char *)a + dbus_rule_fields[i].offset, (const char *)b + dbus_rule_fields[i].offset))
+                        return 0;
         for (long k = 0; k < 4; k++)
                 if (!dbus_equal(a->arg[k], b->arg[k]))
                         return 0;
@@ -2239,7 +2267,7 @@ static long dbus_arg_at(const struct dbus_message *m, long index, long *s)
 
         *s = 0;
         for (long k = 0; k < index; k++)
-                if (*s >= n || !dbus_value(p, &at, m->body_length, m->signature, n, s, 0, 0))
+                if (*s >= n || !dbus_value(p, &at, m->body_length, m->signature, n, s, 0, m->fds))
                         return -1;
         return *s < n ? at : -1;
 }
@@ -2283,7 +2311,7 @@ static long dbus_option_at(const struct dbus_message *m, long index, const char 
                 if (!dbus_value(p, &at, stop, "s", 1, &ks, 0, 0))
                         return -1;
                 sig_at = at;
-                if (!dbus_value(p, &at, stop, "v", 1, &vs, 0, 0))
+                if (!dbus_value(p, &at, stop, "v", 1, &vs, 0, m->fds))
                         return -1;
                 if (p[sig_at] != 1 || p[sig_at + 1] != (unsigned char)type || !dbus_equal((const char *)p + key_at + 4, key))
                         continue;
@@ -2328,17 +2356,9 @@ static void dbus_request_path(const struct dbus_client *c, const char *token, ch
                         into[n++] = token[k];
         else
         {
-                char digits[24];
-                long d = 0;
-                unsigned long number = ++dbus.requests;
-
                 for (long k = 0; "moonwater"[k]; k++)
                         into[n++] = "moonwater"[k];
-                do
-                        digits[d++] = (char)('0' + number % 10);
-                while ((number /= 10) > 0);
-                while (d)
-                        into[n++] = digits[--d];
+                n += dbus_u64_text(into + n, ++dbus.requests);
         }
         into[n] = 0;
 }
@@ -2781,12 +2801,7 @@ static void dbus_service_call(struct dbus_client *from, const struct dbus_messag
                 return;
         if (!dbus_equal(m->path, DBUS_PATH_PORTAL))
         {
-                static const char req_prefix[] = "/org/freedesktop/portal/desktop/request/";
-                long p = 0;
-
-                while (req_prefix[p] && m->path[p] == req_prefix[p])
-                        p++;
-                if (!req_prefix[p] && dbus_equal(m->interface, "org.freedesktop.portal.Request") && dbus_equal(m->member, "Close"))
+                if (dbus_starts(m->path, DBUS_REQUEST_PREFIX) && dbus_equal(m->interface, "org.freedesktop.portal.Request") && dbus_equal(m->member, "Close"))
                 {
                         dbus_reply_empty(from, m, dbus.service.unique);
                         dbus_request_close(from, m->path);
@@ -3121,25 +3136,8 @@ static void dbus_say(struct dbus_client *c, const char *text)
 // The decimal text of a uid as hex of its characters, which is what EXTERNAL sends.
 static int dbus_external_ok(struct dbus_client *c, const char *hex)
 {
-        char digits[16];
-        long n = 0;
-
-        {
-                unsigned long id = (unsigned long)(unsigned int)c->uid;
-#if DBUS_LIBRARY
-                n = (long)positive_into_string((p8 *)digits, (positive)id);
-#else
-                char rev[12];
-                long k = 0;
-
-                do
-                        rev[k++] = (char)('0' + id % 10);
-                while ((id /= 10) > 0);
-                while (k)
-                        digits[n++] = rev[--k];
-                digits[n] = 0;
-#endif
-        }
+        char digits[24];
+        long n = dbus_u64_text(digits, (unsigned long)(unsigned int)c->uid);
         if (!hex[0])
                 return 1;
         for (long k = 0; k < n; k++)

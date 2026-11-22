@@ -515,9 +515,6 @@ AUDIO_API long audio_pcm_open_fill(struct audio_pcm *pcm, long card, long device
         pcm->device = device;
         pcm->rates = rates;
         pcm->format = audio_alsa_formats[format_at].format;
-        // A 16-bit card gets the shorter resampling filter (its floor is 98 dB); the wider cards keep the 144 dB one.
-        if (stream == AUDIO_ALSA_PLAYBACK)
-                audio_set_card_bits(pcm->format == AUDIO_FORMAT_S16LE ? 16 : 32);
         pcm->channels = channels;
         pcm->rate = (long)audio_alsa_interval(&hw, AUDIO_ALSA_RATE)->min;
         pcm->frame_bytes = audio_alsa_formats[format_at].bytes * channels;
@@ -571,6 +568,9 @@ AUDIO_API long audio_pcm_open_fill(struct audio_pcm *pcm, long card, long device
                 pcm->fd = -1;
                 goto fail;
         }
+        // A 16-bit card gets the shorter resampling filter (its floor is 98 dB); the wider cards keep the 144 dB one.
+        if (stream == AUDIO_ALSA_PLAYBACK)
+                audio_set_card_bits(pcm->format == AUDIO_FORMAT_S16LE ? 16 : 32);
         // A capture device runs from the first frame asked of it.
         if (stream == AUDIO_ALSA_CAPTURE)
                 audio_sys_ioctl((int)fd, AUDIO_ALSA_START, 0);
@@ -940,17 +940,11 @@ static int audio_mixer_text_equal(const unsigned char *name, const char *text)
 // Does the name end with the suffix; if so, how long is what comes before it.
 static int audio_mixer_ends(const unsigned char *name, const char *suffix, long *before)
 {
-        long n = 0, k = 0;
+        long n = (long)string_length_max((string_address)name, 44);
+        long k = (long)string_length((string_address)suffix);
 
-        while (n < 44 && name[n])
-                n++;
-        while (suffix[k])
-                k++;
-        if (n < k)
+        if (n < k || memory_compare(name + n - k, suffix, (positive)k) != 0)
                 return 0;
-        for (long i = 0; i < k; i++)
-                if (name[n - k + i] != (unsigned char)suffix[i])
-                        return 0;
         *before = n - k;
         return 1;
 }
@@ -958,24 +952,24 @@ static int audio_mixer_ends(const unsigned char *name, const char *suffix, long 
 // The outputs: what comes before " Playback Switch" or " Playback Volume" in the name of a control that is a way out, as ALSA's drivers name them.
 static int audio_mixer_output_base(const unsigned char *name, long length)
 {
-        static const char *const bases[] = {"Master",     "Speaker",    "Headphone",    "Headset",         "PCM",     "Front",    "Line Out", "Surround",
-                                            "Center",     "LFE",        "Side",         "Bass Speaker",    "Mono",    "Digital",  "CLFE",     "Headphone+LO",
-                                            "Speaker+LO", "IEC958",     "IEC958 Default PCM", "Front Speaker", "Speaker Front", "Speaker Surround", "Line-Out", "Master Mono"};
+#define AUDIO_BASE(s) {s, (unsigned char)(sizeof(s) - 1)}
+        static const struct
+        {
+                const char *name;
+                unsigned char len;
+        } bases[] = {AUDIO_BASE("Master"),       AUDIO_BASE("Speaker"),        AUDIO_BASE("Headphone"),
+                     AUDIO_BASE("Headset"),      AUDIO_BASE("PCM"),            AUDIO_BASE("Front"),
+                     AUDIO_BASE("Line Out"),     AUDIO_BASE("Surround"),       AUDIO_BASE("Center"),
+                     AUDIO_BASE("LFE"),          AUDIO_BASE("Side"),           AUDIO_BASE("Bass Speaker"),
+                     AUDIO_BASE("Mono"),         AUDIO_BASE("Digital"),        AUDIO_BASE("CLFE"),
+                     AUDIO_BASE("Headphone+LO"), AUDIO_BASE("Speaker+LO"),     AUDIO_BASE("IEC958"),
+                     AUDIO_BASE("IEC958 Default PCM"), AUDIO_BASE("Front Speaker"), AUDIO_BASE("Speaker Front"),
+                     AUDIO_BASE("Speaker Surround"), AUDIO_BASE("Line-Out"),   AUDIO_BASE("Master Mono")};
+#undef AUDIO_BASE
 
         for (unsigned i = 0; i < sizeof(bases) / sizeof(bases[0]); i++)
-        {
-                long k = 0;
-
-                while (bases[i][k])
-                        k++;
-                if (k != length)
-                        continue;
-                for (long j = 0; j < k; j++)
-                        if (name[j] != (unsigned char)bases[i][j])
-                                goto next;
-                return 1;
-        next:;
-        }
+                if ((long)bases[i].len == length && memory_compare(name, bases[i].name, (positive)length) == 0)
+                        return 1;
         return 0;
 }
 
@@ -1015,22 +1009,26 @@ static long audio_mixer_zero_db(int fd, const struct audio_ctl_info *info)
         tlv.length = sizeof(tlv.tlv);
         if (audio_sys_ioctl(fd, AUDIO_CTL_TLV_READ, &tlv) < 0 || tlv.tlv[1] < 8)
                 return -1;
-        if (tlv.tlv[0] == AUDIO_CTL_TLVT_DB_SCALE)
         {
-                if (max < min || max - min > (1l << 30))
+                unsigned long span = max > min ? (unsigned long)max - (unsigned long)min : 0;
+
+                if (span == 0 || span > (1ul << 30))
                         return -1;
-                low = (int)tlv.tlv[2];
-                step = (long)(tlv.tlv[3] & 0xffff);
-                high = low + step * (max - min);
+                if (tlv.tlv[0] == AUDIO_CTL_TLVT_DB_SCALE)
+                {
+                        low = (int)tlv.tlv[2];
+                        step = (long)(tlv.tlv[3] & 0xffff);
+                        high = low + step * (long)span;
+                }
+                else if (tlv.tlv[0] == AUDIO_CTL_TLVT_DB_MINMAX || tlv.tlv[0] == AUDIO_CTL_TLVT_DB_MINMAX_MUTE)
+                {
+                        low = (int)tlv.tlv[2];
+                        high = (int)tlv.tlv[3];
+                        step = (high - low) / (long)span;
+                }
+                else
+                        return -1;
         }
-        else if (tlv.tlv[0] == AUDIO_CTL_TLVT_DB_MINMAX || tlv.tlv[0] == AUDIO_CTL_TLVT_DB_MINMAX_MUTE)
-        {
-                low = (int)tlv.tlv[2];
-                high = (int)tlv.tlv[3];
-                step = max > min ? (high - low) / (max - min) : 0;
-        }
-        else
-                return -1;
         if (high <= 0 || step <= 0)
                 return -1;
         if (low >= 0)
@@ -1099,14 +1097,12 @@ static long audio_mixer_item(int fd, struct audio_ctl_info *info, const char *na
         above. The report says what there was and what was done. Answers 0, or a negative errno when the mixer cannot be
         opened or listed (a card with none is a card that needs nothing here).
 */
-AUDIO_API long audio_mixer_prepare(long card, int which, struct audio_mixer_report *report)
+static long audio_ctl_list(long card, struct audio_ctl_id *ids, unsigned int *used, unsigned int *count)
 {
-        struct audio_ctl_id ids[AUDIO_MIXER_MAX];
         struct audio_ctl_list list;
         char path[40];
         long fd, result;
 
-        memory_zero(report, sizeof(*report));
         audio_alsa_path(path, card, 0, 0, 1);
         fd = audio_sys_open(path, AUDIO_O_RDWR | AUDIO_O_CLOEXEC | AUDIO_O_NOFOLLOW);
         if (fd < 0)
@@ -1120,8 +1116,24 @@ AUDIO_API long audio_mixer_prepare(long card, int which, struct audio_mixer_repo
                 audio_sys_close((int)fd);
                 return result;
         }
-        report->controls = list.count;
-        for (unsigned int k = 0; k < list.used && k < AUDIO_MIXER_MAX; k++)
+        *used = list.used;
+        if (count)
+                *count = list.count;
+        return fd;
+}
+
+AUDIO_API long audio_mixer_prepare(long card, int which, struct audio_mixer_report *report)
+{
+        struct audio_ctl_id ids[AUDIO_MIXER_MAX];
+        unsigned int used = 0, count = 0;
+        long fd;
+
+        memory_zero(report, sizeof(*report));
+        fd = audio_ctl_list(card, ids, &used, &count);
+        if (fd < 0)
+                return fd;
+        report->controls = count;
+        for (unsigned int k = 0; k < used && k < AUDIO_MIXER_MAX; k++)
         {
                 struct audio_ctl_info info;
                 int kind, changed;
@@ -1223,16 +1235,8 @@ static long audio_jack_pcm(const unsigned char *name)
 // Is the text somewhere in the name (a name is 44 bytes at most).
 static int audio_mixer_has(const unsigned char *name, const char *text)
 {
-        for (long from = 0; from < 44 && name[from]; from++)
-        {
-                long k = 0;
-
-                while (text[k] && from + k < 44 && name[from + k] == (unsigned char)text[k])
-                        k++;
-                if (!text[k])
-                        return 1;
-        }
-        return 0;
+        return memory_search((const address_any)name, string_length_max((string_address)name, 44),
+                             (const address_any)text, string_length((string_address)text)) != null;
 }
 
 /*
@@ -1242,25 +1246,14 @@ static int audio_mixer_has(const unsigned char *name, const char *text)
 AUDIO_API long audio_jacks_read(long card, struct audio_jacks *jacks)
 {
         struct audio_ctl_id ids[AUDIO_MIXER_MAX];
-        struct audio_ctl_list list;
-        char path[40];
-        long fd, result;
+        unsigned int used = 0;
+        long fd;
 
         memory_zero(jacks, sizeof(*jacks));
-        audio_alsa_path(path, card, 0, 0, 1);
-        fd = audio_sys_open(path, AUDIO_O_RDWR | AUDIO_O_CLOEXEC | AUDIO_O_NOFOLLOW);
+        fd = audio_ctl_list(card, ids, &used, 0);
         if (fd < 0)
                 return fd;
-        memory_zero(&list, sizeof(list));
-        list.space = AUDIO_MIXER_MAX;
-        list.pids = ids;
-        result = audio_sys_ioctl((int)fd, AUDIO_CTL_ELEM_LIST, &list);
-        if (result < 0)
-        {
-                audio_sys_close((int)fd);
-                return result;
-        }
-        for (unsigned int k = 0; k < list.used && k < AUDIO_MIXER_MAX; k++)
+        for (unsigned int k = 0; k < used && k < AUDIO_MIXER_MAX; k++)
         {
                 struct audio_ctl_value now;
                 long before, pcm;

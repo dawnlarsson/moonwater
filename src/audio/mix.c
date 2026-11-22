@@ -1012,8 +1012,8 @@ AUDIO_API int audio_voice_rate(struct audio_voice *voice, long rate)
                                 {
                                         for (int c = 0; c < 2; c++)
                                         {
-                                                for (long i = voice->rs.have - 1; i >= 0; i--)
-                                                        voice->rs.buf[c][i + pad] = voice->rs.buf[c][i];
+                                                if (voice->rs.have > 0)
+                                                        memory_copy(voice->rs.buf[c] + pad, voice->rs.buf[c], (unsigned long)voice->rs.have * sizeof(float));
                                                 memory_fill(voice->rs.buf[c], 0, (unsigned long)pad * sizeof(float));
                                         }
                                         voice->rs.have += pad;

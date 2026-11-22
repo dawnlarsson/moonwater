@@ -1638,7 +1638,11 @@ static COLD bool descriptors_close_except(p32 from, p32 first, p32 second)
                       (positive)(request), (positive)(argument))
 
 #if !defined(KERNEL_MODE)
-#define SYSTEM_TCGETS 0x5401
+#if defined(MACOS)
+#define SYSTEM_TCGETS 0x40487413u
+#else
+#define SYSTEM_TCGETS 0x5401u
+#endif
 static inline bool stream_is_terminal(b32 descriptor)
 {
         p64 attributes[16];
@@ -2976,15 +2980,9 @@ static inline bool byte_cursor_put_string(byte_cursor address_to cursor,
 static inline bool byte_cursor_put_u64(byte_cursor address_to cursor, p64 value)
 {
         p8 digits[24];
-        positive at = sizeof(digits);
+        positive length = positive_into(digits, (positive)value);
 
-        do
-        {
-                digits[--at] = (p8)('0' + (value % 10));
-                value /= 10;
-        } while (value);
-
-        return byte_cursor_put_bytes(cursor, digits + at, sizeof(digits) - at);
+        return byte_cursor_put_bytes(cursor, digits, length);
 }
 
 static inline bool byte_cursor_put_s64(byte_cursor address_to cursor, b64 value)
@@ -3180,7 +3178,8 @@ static inline address_any memory_arena_take(memory_arena address_to arena,
         if (!alignment || (alignment & (alignment - 1)) ||
             !arena->bytes || arena->used > arena->room)
                 return null;
-        positive pad = (alignment - (arena->used & (alignment - 1))) & (alignment - 1);
+        positive addr = (positive)(arena->bytes + arena->used);
+        positive pad = (alignment - (addr & (alignment - 1))) & (alignment - 1);
         if (pad > arena->room - arena->used || bytes > arena->room - arena->used - pad)
                 return null;
         address_any at = arena->bytes + arena->used + pad;
@@ -3259,8 +3258,14 @@ static p8 address_to memory_arena_read_tail(
                 used += (positive)got;
         }
         bytes[used] = end;
-        arena->used = (positive)(bytes - arena->bytes) +
-                      ((used + alignment) & ~(alignment - 1));
+        {
+                positive end_used = (positive)(bytes - arena->bytes) + used + 1;
+                positive align_pad = (alignment - (end_used & (alignment - 1))) & (alignment - 1);
+
+                arena->used = align_pad <= arena->room - end_used
+                                  ? end_used + align_pad
+                                  : arena->room;
+        }
         address_to length = used;
         return bytes;
 failed:
@@ -3368,6 +3373,8 @@ static inline fn alphabet_values(p8 address_to values, string_address alphabet,
 /* The characters of the padded base64 of bytes bytes. */
 static inline positive base64_length(positive bytes)
 {
+        if (bytes > (positive_max / 4) * 3)
+                return 0;
         return (bytes + 2) / 3 * 4;
 }
 
@@ -14321,8 +14328,8 @@ var_list_entry(ioctl, b32, (b32 handle, positive request, ...), request,
 */
 b32 isatty(b32 handle)
 {
-        p8 attributes[64];
-        bipolar answer = system_control(handle, 0x5401, attributes);
+        p64 attributes[16];
+        bipolar answer = system_control(handle, SYSTEM_TCGETS, attributes);
 
         if (system_failed(answer))
         {
@@ -19657,7 +19664,7 @@ b32 system(string_address command)
 {
         string_address words[4];
         bipolar child;
-        positive raw = 0;
+        b32 raw = 0;
 
         if (is_null(command))
         {
@@ -36751,7 +36758,7 @@ static stream address_to spool_open_process(string_address command,
 
         if (is_null(answer))
         {
-                positive raw = 0;
+                b32 raw = 0;
 
                 close(reading ? pair[0] : pair[1]);
                 system_wait4_retry(child, address_of raw, 0, null);
@@ -36791,7 +36798,7 @@ static stream address_to spool_open_process(string_address command,
 static b32 spool_close_process(stream address_to handle)
 {
         bipolar slot = spool_pipeline_slot_of(handle);
-        positive raw = 0;
+        b32 raw = 0;
         b32 child;
 
         if (is_null(handle) || slot < 0)

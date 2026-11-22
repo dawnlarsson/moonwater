@@ -48,20 +48,24 @@ typedef int i32;
 
 __attribute__((used)) void *memset(void *d, int c, u64 n)
 {
-	volatile u8 *p = d;
+	void *p = d;
 
-	while (n--)
-		*p++ = (u8)c;
+	__asm__ volatile("rep stosb"
+			 : "+D"(p), "+c"(n)
+			 : "a"((u8)c)
+			 : "memory");
 	return d;
 }
 
 __attribute__((used)) void *memcpy(void *d, const void *s, u64 n)
 {
-	volatile u8 *p = d;
-	const volatile u8 *q = s;
+	void *p = d;
+	const void *q = s;
 
-	while (n--)
-		*p++ = *q++;
+	__asm__ volatile("rep movsb"
+			 : "+D"(p), "+S"(q), "+c"(n)
+			 :
+			 : "memory");
 	return d;
 }
 
@@ -599,23 +603,27 @@ static u32 in_list(u32 id, const u16 *l, u32 n)
 
 #define COUNT(a) (sizeof(a) / sizeof((a)[0]))
 
+static const struct {
+	u32 kern, path;
+	const u16 *ids;
+	u32 count;
+	const char *name;
+} gens[] = {
+	{7, 7, ids_k7, COUNT(ids_k7), "gen7 (Ivy Bridge, Valleyview)"},
+	{75, 7, ids_k75, COUNT(ids_k75), "gen7.5 (Haswell)"},
+	{8, 8, ids_k8, COUNT(ids_k8), "gen8 (Broadwell, Cherry View)"},
+	{9, 9, ids_k9, COUNT(ids_k9), "gen9 (Skylake..Comet Lake, Broxton, Gemini Lake)"},
+	{11, 9, ids_k11, COUNT(ids_k11), "gen11 (Ice Lake, Elkhart Lake, Jasper Lake)"},
+	{12, 9, ids_k12, COUNT(ids_k12), "gen12 (Tiger Lake, Rocket Lake, Alder Lake, Raptor Lake)"},
+	{99, 9, ids_xe, COUNT(ids_xe), "xe-era (DG1, DG2, Meteor/Arrow/Lunar Lake, Battlemage, Panther Lake)"},
+};
+
 /* 0 when the id is not in any table (pre-2012 or unknown) */
 static u32 kern_of(u32 id)
 {
-	if (in_list(id, ids_k7, COUNT(ids_k7)))
-		return 7;
-	if (in_list(id, ids_k75, COUNT(ids_k75)))
-		return 75;
-	if (in_list(id, ids_k8, COUNT(ids_k8)))
-		return 8;
-	if (in_list(id, ids_k9, COUNT(ids_k9)))
-		return 9;
-	if (in_list(id, ids_k11, COUNT(ids_k11)))
-		return 11;
-	if (in_list(id, ids_k12, COUNT(ids_k12)))
-		return 12;
-	if (in_list(id, ids_xe, COUNT(ids_xe)))
-		return 99;
+	for (u32 i = 0; i < COUNT(gens); i++)
+		if (in_list(id, gens[i].ids, gens[i].count))
+			return gens[i].kern;
 	return 0;
 }
 
@@ -623,24 +631,17 @@ static u32 kern_of(u32 id)
  * (75) uses the gen7 path with the Haswell surface channel selects. */
 static u32 path_of(u32 kern)
 {
-	if (kern == 75)
-		return 7;
-	if (kern == 7 || kern == 8)
-		return kern;
+	for (u32 i = 0; i < COUNT(gens); i++)
+		if (gens[i].kern == kern)
+			return gens[i].path;
 	return 9;
 }
 
 static const char *kern_name(u32 kern)
 {
-	switch (kern) {
-	case 7: return "gen7 (Ivy Bridge, Valleyview)";
-	case 75: return "gen7.5 (Haswell)";
-	case 8: return "gen8 (Broadwell, Cherry View)";
-	case 9: return "gen9 (Skylake..Comet Lake, Broxton, Gemini Lake)";
-	case 11: return "gen11 (Ice Lake, Elkhart Lake, Jasper Lake)";
-	case 12: return "gen12 (Tiger Lake, Rocket Lake, Alder Lake, Raptor Lake)";
-	case 99: return "xe-era (DG1, DG2, Meteor/Arrow/Lunar Lake, Battlemage, Panther Lake)";
-	}
+	for (u32 i = 0; i < COUNT(gens); i++)
+		if (gens[i].kern == kern)
+			return gens[i].name;
 	return "pre-2012 or not in the device tables";
 }
 
@@ -691,8 +692,10 @@ static u32 kmsg_count(void)
 
 			if (has(line, n, "i915") || has(line, n, "[drm]")) {
 				for (u32 k = 0; kwords[k]; k++)
-					if (has(line, n, kwords[k]))
+					if (has(line, n, kwords[k])) {
 						fault = 1;
+						break;
+					}
 			}
 			if (fault) {
 				hits++;
@@ -1350,11 +1353,7 @@ static u32 build(const struct cfg *c)
 	for (u32 i = 0; i < 10; i++)
 		for (u32 j = 0; j < 4; j++)
 			w32(kern_o + 16 * i + 4 * j, kt[i][j]);
-	if (c->kern == 9 && c->kalt) /* the other acc0/null bit in row 7 dword 1 */
-		w32(kern_o + 16 * 7 + 4, 0x20000a40);
-	if (c->kern == 8 && c->kalt)
-		w32(kern_o + 16 * 7 + 4, 0x20000a40);
-	if (c->kern == 11 && c->kalt)
+	if (c->kalt && (c->kern == 8 || c->kern == 9 || c->kern == 11)) /* the other acc0/null bit in row 7 dword 1 */
 		w32(kern_o + 16 * 7 + 4, 0x20000a40);
 
 	/* RENDER_SURFACE_STATE. ss0: type 2D at 31:29, format 26:18, render cache RW
@@ -1554,14 +1553,30 @@ static int walker_once(const struct cfg *c, u32 index)
 			gem_close(sh);
 			return fail_early(c, index, "guard BO", r);
 		}
-		gem_rw(I915_GEM_PWRITE, g1, gfill, 4096);
-		gem_rw(I915_GEM_PWRITE, g2, gfill, 4096);
+		r = gem_rw(I915_GEM_PWRITE, g1, gfill, 4096);
+		if (r >= 0)
+			r = gem_rw(I915_GEM_PWRITE, g2, gfill, 4096);
+		if (r < 0) {
+			gem_close(g2);
+			gem_close(g1);
+			gem_close(th);
+			gem_close(sh);
+			return fail_early(c, index, "guard pwrite", r);
+		}
 	}
 	/* The target starts as the inverse of the colour, so no unwritten byte can
 	 * match the colour (a zero-filled target with colour 0 would pass vacuously). */
 	memset(tbuf, (int)(u8)~c->colour, tb);
-	gem_rw(I915_GEM_PWRITE, th, tbuf, tb);
-	gem_rw(I915_GEM_PWRITE, sh, img, 65536);
+	r = gem_rw(I915_GEM_PWRITE, th, tbuf, tb);
+	if (r >= 0)
+		r = gem_rw(I915_GEM_PWRITE, sh, img, 65536);
+	if (r < 0) {
+		gem_close(g2);
+		gem_close(g1);
+		gem_close(th);
+		gem_close(sh);
+		return fail_early(c, index, "pwrite", r);
+	}
 
 	k0 = kmsg_count();
 	o[no++] = obj(th, objflags(path) | OBJ_WRITE, ADDR_TARGET);

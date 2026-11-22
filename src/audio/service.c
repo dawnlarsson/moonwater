@@ -858,9 +858,12 @@ static int audio_file_moved(int slot, const char *name, int first)
                 memory_copy(&now.ctime_s, st + 104, 8);
                 memory_copy(&now.ctime_ns, st + 112, 8);
         }
-        clock_gettime(CLOCK_REALTIME, address_of at);
-        if (!first && now.there && now.mtime_s + 2 > (long long)at.tv_sec && now.ctime_s + 2 > (long long)at.tv_sec)
-                return 1; // changed a moment ago: not trusted to be the same as the look before
+        if (!first && now.there)
+        {
+                clock_gettime(CLOCK_REALTIME, address_of at);
+                if (now.mtime_s + 2 > (long long)at.tv_sec && now.ctime_s + 2 > (long long)at.tv_sec)
+                        return 1; // changed a moment ago: not trusted to be the same as the look before
+        }
         if (!first && memory_compare(&now, &stamps[slot], sizeof now) == 0)
                 return 0;
         stamps[slot] = now;
@@ -1545,7 +1548,7 @@ static void audio_client_drop(long slot)
 // A client the server cannot take is told why, in the one frame it can read before its own first command, and let go.
 static void audio_refuse(long fd)
 {
-        unsigned char frame[32];
+        unsigned char frame[36];
         long bytes = pulse_refusal(frame, PULSE_ERR_INTERNAL);
 
         audio_call(syscall(sendto), (positive)fd, (positive)frame, (positive)bytes, 0x4000, 0, 0); // MSG_NOSIGNAL
@@ -2298,6 +2301,8 @@ static b32 audio_stream_open(struct ctl *c, const char *name, const char *role, 
         }
         r = (struct wire_r){c->frame + 20 + 10, got - 10, 0, 0};
         *channel = wire_r_u32(&r);
+        if (r.bad)
+                return 0;
         return 1;
 }
 

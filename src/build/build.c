@@ -307,20 +307,25 @@ static bool build_setting_set(string_address name, string_address value)
 //      One line's worth of words, which is what every splitter asks for.
 #define BUILD_WORD_ROOM 8192
 
-static p8 build_text_arena[BUILD_TEXT_ROOM];
+static p8 build_text_arena[BUILD_TEXT_ROOM] __attribute__((aligned(16)));
 static memory_arena build_text_storage = {build_text_arena, BUILD_TEXT_ROOM, 0};
 
 static b32 build_die(string_address text);
 
-static p8 address_to build_text_take(positive want)
+static p8 address_to build_text_take_aligned(positive want, positive align)
 {
         p8 address_to answer = memory_arena_take(address_of build_text_storage,
-                                                want, 1);
+                                                want, align);
         if (!answer)
                 build_die("build: ran out of room for text");
         if (want)
                 answer[0] = end;
         return answer;
+}
+
+static p8 address_to build_text_take(positive want)
+{
+        return build_text_take_aligned(want, 1);
 }
 
 //      A terminated copy of a span out of a buffer the next read overwrites.
@@ -587,21 +592,34 @@ static string_address build_resolve_privileged(string_address name);
 
 static bool build_env_privileged_drop(string_address entry)
 {
-        return string_has_prefix(entry, "PATH=") ||
-               string_has_prefix(entry, "LD_PRELOAD=") ||
-               string_has_prefix(entry, "LD_LIBRARY_PATH=") ||
-               string_has_prefix(entry, "LD_AUDIT=") ||
-               string_has_prefix(entry, "LD_CONFIG=") ||
-               string_has_prefix(entry, "ENV=") ||
-               string_has_prefix(entry, "BASH_ENV=") ||
-               string_has_prefix(entry, "CDPATH=") ||
-               string_has_prefix(entry, "IFS=") ||
-               string_has_prefix(entry, "SHELLOPTS=") ||
-               string_has_prefix(entry, "GCC_EXEC_PREFIX=") ||
-               string_has_prefix(entry, "COMPILER_PATH=") ||
-               string_has_prefix(entry, "CPATH=") ||
-               string_has_prefix(entry, "C_INCLUDE_PATH=") ||
-               string_has_prefix(entry, "LIBRARY_PATH=");
+#define BUILD_ENV_PREFIX(s) {s, sizeof(s) - 1}
+        static const struct
+        {
+                string_address text;
+                positive length;
+        } prefixes[] = {
+            BUILD_ENV_PREFIX("PATH="),
+            BUILD_ENV_PREFIX("LD_PRELOAD="),
+            BUILD_ENV_PREFIX("LD_LIBRARY_PATH="),
+            BUILD_ENV_PREFIX("LD_AUDIT="),
+            BUILD_ENV_PREFIX("LD_CONFIG="),
+            BUILD_ENV_PREFIX("ENV="),
+            BUILD_ENV_PREFIX("BASH_ENV="),
+            BUILD_ENV_PREFIX("CDPATH="),
+            BUILD_ENV_PREFIX("IFS="),
+            BUILD_ENV_PREFIX("SHELLOPTS="),
+            BUILD_ENV_PREFIX("GCC_EXEC_PREFIX="),
+            BUILD_ENV_PREFIX("COMPILER_PATH="),
+            BUILD_ENV_PREFIX("CPATH="),
+            BUILD_ENV_PREFIX("C_INCLUDE_PATH="),
+            BUILD_ENV_PREFIX("LIBRARY_PATH="),
+        };
+#undef BUILD_ENV_PREFIX
+
+        for (positive at = 0; at < array_count(prefixes); at++)
+                if (!string_compare_max(entry, prefixes[at].text, prefixes[at].length))
+                        return true;
+        return false;
 }
 
 static string_address address_to build_environment_privileged(
@@ -609,8 +627,8 @@ static string_address address_to build_environment_privileged(
 {
         positive have = pointer_vector_count(source);
         string_address address_to answer =
-            (string_address address_to)build_text_take(
-                (have + 2) * sizeof(string_address));
+            (string_address address_to)build_text_take_aligned(
+                (have + 2) * sizeof(string_address), sizeof(string_address));
         positive kept = 0;
 
         for (positive at = 0; at < have; at++)
@@ -753,16 +771,24 @@ static b32 build_start(build_command address_to what)
                 b32 sink = what->quiet ? open("/dev/null", O_WRONLY | O_CLOEXEC, 0)
                                        : what->output;
 
-                if (what->directory && chdir(what->directory) < 0)
-                        exit(126);
+                if (what->quiet && sink < 0)
+                        _exit(127);
 
-                if (sink > 0 && dup2(sink, 1) < 0)
-                        exit(127);
+                if (what->directory && chdir(what->directory) < 0)
+                        _exit(126);
+
+                if (sink == 1)
+                {
+                        if (fcntl(1, SYSTEM_F_SETFD, 0) < 0)
+                                _exit(127);
+                }
+                else if (sink > 0 && dup2(sink, 1) < 0)
+                        _exit(127);
 
                 execve(path, words, environment);
                 //      exec only returns having failed, and this is the child:
                 //      leaving would run the rest of the build twice.
-                exit(127);
+                _exit(127);
         }
 
         return child;
@@ -1877,7 +1903,7 @@ static positive build_profile_add(string_address address_to into, positive count
                                                   architecture, depth + 1);
         }
 
-        if (count >= BUILD_PROFILE_ROOM || build_profile_listed(into, count, name))
+        if (count + 1 >= BUILD_PROFILE_ROOM || build_profile_listed(into, count, name))
                 return count;
 
         into[count++] = name;
@@ -3595,7 +3621,7 @@ static fn build_watch_caught(b32 number)
 {
         build_stop(address_of build_watch_application);
         build_stop(address_of build_watch_watcher);
-        exit(number == SIGNAL_INTERRUPT ? 130 : 143);
+        _exit(number == SIGNAL_INTERRUPT ? 130 : 143);
 }
 
 static b32 build_freestanding(string_address address_to arguments, positive count)
@@ -3735,11 +3761,14 @@ static b32 build_freestanding(string_address address_to arguments, positive coun
                                       SIGNAL_CATCH_FLAGS, SIGNAL_CATCH_RESTORER,
                                       null);
 
+                positive watch_mark = build_text_storage.used;
+
                 while (true)
                 {
                         p8 byte = 0;
                         bipolar got;
 
+                        build_text_storage.used = watch_mark;
                         build_stop(address_of build_watch_application);
                         string_format(log, "\033[H\033[2J");
                         log_flush();
@@ -4094,24 +4123,32 @@ static bool build_install(string_address what)
         bool privileged = true;
         b32 status;
 
-        if (build_is_type("/etc/debian_version", S_IFREG))
-                command = "apt-get install";
-        else if (build_is_type("/etc/redhat-release", S_IFREG))
-                command = "yum install";
-        else if (build_is_type("/etc/arch-release", S_IFREG))
-                command = "pacman -S";
-        else if (build_is_type("/etc/alpine-release", S_IFREG))
-                command = "apk add";
-        else if (build_is_type("/etc/SuSE-release", S_IFREG))
-                command = "zypper install";
-        else if (build_is_type("/etc/gentoo-release", S_IFREG))
-                command = "emerge";
-        else if (build_have("brew"))
+        {
+                static const struct
+                {
+                        string_address marker, command;
+                } distros[] = {
+                    {"/etc/debian_version", "apt-get install"},
+                    {"/etc/redhat-release", "yum install"},
+                    {"/etc/arch-release", "pacman -S"},
+                    {"/etc/alpine-release", "apk add"},
+                    {"/etc/SuSE-release", "zypper install"},
+                    {"/etc/gentoo-release", "emerge"},
+                };
+
+                for (positive at = 0; at < array_count(distros); at++)
+                        if (build_is_type(distros[at].marker, S_IFREG))
+                        {
+                                command = distros[at].command;
+                                break;
+                        }
+        }
+        if (!command && build_have("brew"))
         {
                 command = "brew install";
                 privileged = false;
         }
-        else
+        else if (!command)
         {
                 string_format(log,
                               "Unknown distribution, unable to set up build environment.\n");
@@ -4141,8 +4178,8 @@ static string_address address_to build_environment_with(string_address address_t
         positive have = pointer_vector_count(environ);
         string_address address_to answer;
 
-        answer = (string_address address_to)build_text_take(
-                (have + count + 1) * sizeof(string_address));
+        answer = (string_address address_to)build_text_take_aligned(
+                (have + count + 1) * sizeof(string_address), sizeof(string_address));
 
         memory_copy(answer, environ, have * sizeof(string_address));
         memory_copy(answer + have, extra, count * sizeof(string_address));
@@ -5630,17 +5667,21 @@ static b32 build_kernel_source_tag(string_address tree, string_address version)
 
         {
                 string_address ask[] = {"git", "-C", bare, "rev-parse", tag, null};
+                bipolar got = build_capture_words((string_address address_to)ask, said, sizeof(said));
 
-                if (build_capture_words((string_address address_to)ask, said, sizeof(said)) <= 0 ||
-                    memory_compare(said, want_tag, 40))
+                if (got < 40 || string_length(want_tag) != 40 ||
+                    memory_compare(said, want_tag, 40) ||
+                    (said[40] != '\n' && said[40] != end))
                 {
                         string_format(log_error, BUILD_RED "ERROR: %s is not the tag object pinned (%s).\n"
                                                  "Refusing to build it." BUILD_RESET "\n", tag, want_tag);
                         exit(1);
                 }
                 ask[4] = build_join(tag, "^{commit}", null);
-                if (build_capture_words((string_address address_to)ask, said, sizeof(said)) <= 0 ||
-                    memory_compare(said, want_commit, 40))
+                got = build_capture_words((string_address address_to)ask, said, sizeof(said));
+                if (got < 40 || string_length(want_commit) != 40 ||
+                    memory_compare(said, want_commit, 40) ||
+                    (said[40] != '\n' && said[40] != end))
                 {
                         string_format(log_error, BUILD_RED "ERROR: %s is not the commit pinned (%s).\n"
                                                  "Refusing to build it." BUILD_RESET "\n", tag, want_commit);
@@ -6300,6 +6341,8 @@ static b32 build_local(string_address address_to profiles, positive count,
                 words[at++] = "-p";
                 words[at++] = image;
 
+                if (at + many + 1 > BUILD_ARGUMENT_ROOM)
+                        return build_die("too many image directories");
                 for (positive which = 0; which < many; which++)
                         words[at++] = build_join(image, "/", names[which], null);
 
@@ -6466,6 +6509,8 @@ static b32 build_local(string_address address_to profiles, positive count,
                 build_command what = {.directory = tree, .quiet = true, .privileged = true};
                 positive at;
 
+                if (many + 3 > BUILD_ARGUMENT_ROOM)
+                        return build_die("too many make flags");
                 at = 0;
                 words[at++] = "make";
                 words[at++] = "allnoconfig";
@@ -6712,7 +6757,14 @@ static string_address build_quote(string_address address_to words, positive coun
         p8 address_to at;
 
         for (positive which = 0; which < count; which++)
-                total += string_length(words[which]) * 4 + 4;
+        {
+                positive length = string_length(words[which]);
+
+                if (total >= BUILD_TEXT_ROOM || length > (BUILD_TEXT_ROOM - total) / 4 ||
+                    length * 4 + 4 > BUILD_TEXT_ROOM - total)
+                        build_die("build: ran out of room for text");
+                total += length * 4 + 4;
+        }
 
         into = build_text_take(total + 1);
         at = into;

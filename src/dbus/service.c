@@ -466,7 +466,7 @@ static void sessionbus_accept(void)
                         system_close((int)fd);
                         continue;
                 }
-                slot = dbus_connect(credentials[0], sessionbus_peer_uid(credentials[0], credentials[1]));
+                slot = dbus_connect(credentials[0], sessionbus_peer_uid(credentials[0], (unsigned int)credentials[1]));
                 if (slot < 0)
                 {
                         system_close((int)fd);
@@ -482,7 +482,7 @@ static void sessionbus_read(long slot)
         {
                 long room, got, asked;
                 unsigned char *to = dbus_in_room(slot, &room);
-                unsigned char ctrl[16 + sizeof(int) * DBUS_FDS + 16];
+                unsigned char ctrl[16 + sizeof(int) * DBUS_FDS + 16] __attribute__((aligned(8)));
                 struct sessionbus_iovec iov;
                 struct sessionbus_msghdr msg;
 
@@ -555,7 +555,7 @@ static void sessionbus_flush(long slot)
                 return;
         if (nfds > 0)
         {
-                unsigned char ctrl[16 + sizeof(int) * DBUS_FDS + 8];
+                unsigned char ctrl[16 + sizeof(int) * DBUS_FDS + 8] __attribute__((aligned(8)));
                 struct sessionbus_cmsghdr *cm = (struct sessionbus_cmsghdr *)ctrl;
                 struct sessionbus_iovec iov;
                 struct sessionbus_msghdr msg;
@@ -607,12 +607,16 @@ static void sessionbus_flush(long slot)
 static unsigned long sessionbus_root_identity(unsigned int *major, unsigned int *minor)
 {
         p8 facts[256];
+        unsigned long ino = 0;
 
         *major = *minor = 0;
+        memory_zero(facts, sizeof facts);
         if (system_stat_at(AT_FDCWD, (string_address)sessionbus.root, 0, 0x100u, facts) < 0) // STATX_INO
                 return 0;
-        *major = *(unsigned int *)(facts + 136), *minor = *(unsigned int *)(facts + 140);
-        return *(unsigned long *)(facts + 32);
+        memory_copy(major, facts + 136, sizeof *major);
+        memory_copy(minor, facts + 140, sizeof *minor);
+        memory_copy(&ino, facts + 32, sizeof ino);
+        return ino;
 }
 
 static void sessionbus_watch(void)

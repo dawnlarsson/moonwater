@@ -818,7 +818,7 @@ static int pulse_table_grow(struct pulse *p, void **table, long *slots, long siz
         long next;
         void *memory;
 
-        if (*slots < 0 || *slots > (1l << 18) || size <= 0)
+        if (*slots < 0 || *slots >= (1l << 18) || size <= 0)
                 return 0;
         next = *slots ? *slots * 2 : 8;
         memory = p->host.alloc(p->host.context, next * size);
@@ -868,19 +868,20 @@ static void pulse_changed(struct pulse *p, int what, long sink)
 // facility's bit in its mask, the kind and the index.
 static void pulse_event_to(struct pulse *p, unsigned long facility, unsigned long kind, unsigned long index, long uid)
 {
+        struct wire_w w = {p->scratch, PULSE_SCRATCH, 0, 0};
+
+        wire_w_u32(&w, PULSE_COMMAND_SUBSCRIBE_EVENT);
+        wire_w_u32(&w, PULSE_INVALID);
+        wire_w_u32(&w, facility | kind);
+        wire_w_u32(&w, index);
         for (int i = 0; i < p->client_slots; i++)
         {
                 struct pulse_client *c = p->client[i];
-                struct wire_w w = {p->scratch, PULSE_SCRATCH, 0, 0};
 
                 if (!c || !c->authorized || !(c->subscribe & (1ul << facility)))
                         continue;
                 if (uid >= 0 && !pulse_may(c, uid))
                         continue;
-                wire_w_u32(&w, PULSE_COMMAND_SUBSCRIBE_EVENT);
-                wire_w_u32(&w, PULSE_INVALID);
-                wire_w_u32(&w, facility | kind);
-                wire_w_u32(&w, index);
                 // A client that cannot take an event is dropped by the next call that finds its queue full; here it is only skipped.
                 pulse_enqueue(c, PULSE_INVALID, w.p, w.len);
         }
@@ -1052,14 +1053,25 @@ static void pulse_stream_gains(const struct pulse_stream *s, float *left, float 
 
         for (long c = 0; c < s->map_channels && c < AUDIO_CHANNELS_MAX; c++)
         {
-                int side = 2, pos = s->map[c];
+                static const signed char side_of[12] = {
+                    [AUDIO_POSITION_MONO] = 2,
+                    [AUDIO_POSITION_FRONT_LEFT] = 0,
+                    [AUDIO_POSITION_FRONT_RIGHT] = 1,
+                    [AUDIO_POSITION_FRONT_CENTER] = 2,
+                    [AUDIO_POSITION_REAR_CENTER] = 2,
+                    [AUDIO_POSITION_REAR_LEFT] = 0,
+                    [AUDIO_POSITION_REAR_RIGHT] = 1,
+                    [AUDIO_POSITION_LFE] = 2,
+                    [AUDIO_POSITION_FRONT_LEFT_OF_CENTER] = 0,
+                    [AUDIO_POSITION_FRONT_RIGHT_OF_CENTER] = 1,
+                    [AUDIO_POSITION_SIDE_LEFT] = 0,
+                    [AUDIO_POSITION_SIDE_RIGHT] = 1,
+                };
+                int pos = s->map[c];
+                int side = (pos >= 0 && pos < 12) ? side_of[pos]
+                           : (pos >= AUDIO_POSITION_AUX0 && pos < AUDIO_POSITION_AUX0 + 32) ? ((pos - AUDIO_POSITION_AUX0) & 1)
+                           : (pos >= AUDIO_POSITION_AUX0) ? 1 : 2;
 
-                if (pos == AUDIO_POSITION_FRONT_LEFT || pos == AUDIO_POSITION_REAR_LEFT || pos == AUDIO_POSITION_SIDE_LEFT || pos == AUDIO_POSITION_FRONT_LEFT_OF_CENTER ||
-                    (pos >= AUDIO_POSITION_AUX0 && pos < AUDIO_POSITION_AUX0 + 32 && !((pos - AUDIO_POSITION_AUX0) & 1)))
-                        side = 0;
-                else if (pos == AUDIO_POSITION_FRONT_RIGHT || pos == AUDIO_POSITION_REAR_RIGHT || pos == AUDIO_POSITION_SIDE_RIGHT || pos == AUDIO_POSITION_FRONT_RIGHT_OF_CENTER ||
-                         pos >= AUDIO_POSITION_AUX0)
-                        side = 1;
                 if (side == 0)
                         l += s->volume[c], nl++;
                 else if (side == 1)
@@ -1652,15 +1664,12 @@ static void pulse_fill_device(struct wire_w *w, struct pulse_client *c, unsigned
 static void pulse_fill_sink(struct pulse *p, struct wire_w *w, struct pulse_client *c, long slot)
 {
         struct pulse_sink *s = p->sink + slot;
-        char monitor[PULSE_NAME + 16];
         int busy = 0;
 
-        pulse_copy(monitor, sizeof(monitor), s->name);
-        pulse_copy(monitor + wire_len(monitor), (long)sizeof(monitor) - wire_len(monitor), ".monitor");
         for (int i = 0; i < p->stream_slots; i++)
                 busy |= p->stream[i].used && !p->stream[i].dying && p->stream[i].sink == slot;
         pulse_fill_device(w, c, (unsigned long)slot, s->name, s->description, s->rate, s->volume, s->muted,
-                          (unsigned long)slot, monitor, pulse_sink_latency_us(p, slot),
+                          (unsigned long)slot, p->source[slot].name, pulse_sink_latency_us(p, slot),
                           0x1 | 0x2 | 0x4 | 0x8 | 0x10 | 0x20 | 0x40, "sound", s->suspended ? 2 : busy ? 0 : 1, 21);
 }
 
@@ -1696,12 +1705,8 @@ static void pulse_fill_input(struct pulse *p, struct wire_w *w, struct pulse_cli
 {
         char name[PULSE_VALUE + 1];
         long latency = pulse_sink_latency_us(p, s->sink);
-        unsigned long volume[PULSE_CHANNEL_MAX];
-        long n = s->map_channels;
 
         pulse_props_text(&s->props, "media.name", name, sizeof(name));
-        for (long i = 0; i < n; i++)
-                volume[i] = s->volume[i];
         wire_w_u32(w, s->index);
         wire_w_string(w, name);
         wire_w_u32(w, PULSE_INVALID);
@@ -1709,7 +1714,7 @@ static void pulse_fill_input(struct pulse *p, struct wire_w *w, struct pulse_cli
         wire_w_u32(w, (unsigned long)s->sink);
         pulse_w_sample_spec(w, s->format, s->channels, s->rate);
         pulse_w_channel_map(w, s->map, s->map_channels);
-        pulse_w_cvolume(w, volume, n);
+        pulse_w_cvolume(w, s->volume, s->map_channels);
         pulse_w_64(w, 'U', (long long)(s->voice.ring.limit - s->voice.ring.read) * 1000000 / (long long)(s->voice.frame * (unsigned long)s->rate));
         pulse_w_64(w, 'U', latency);
         wire_w_string(w, "copy");
@@ -1736,13 +1741,10 @@ static void pulse_fill_output(struct pulse *p, struct wire_w *w, struct pulse_cl
         const struct pulse_source *s = p->source + r->source;
         long source_latency = pulse_delay_us(s->delay_frames, s->rate), queued = 0;
         long frame = audio_format_bytes(r->format) * r->channels;
-        unsigned long volume[PULSE_CHANNEL_MAX];
 
         if (r->client >= 0 && p->client[r->client] && frame && r->rate)
                 queued = pulse_out_fill(p->client[r->client]) / frame * 1000000l / r->rate;
         pulse_props_text(&r->props, "media.name", name, sizeof(name));
-        for (long i = 0; i < r->map_channels; i++)
-                volume[i] = r->volume[i];
         wire_w_u32(w, r->index);
         wire_w_string(w, name);
         wire_w_u32(w, PULSE_INVALID);
@@ -1760,7 +1762,7 @@ static void pulse_fill_output(struct pulse *p, struct wire_w *w, struct pulse_cl
                 wire_w_bool(w, r->corked);
         if (c->version >= 22)
         {
-                pulse_w_cvolume(w, volume, r->map_channels);
+                pulse_w_cvolume(w, r->volume, r->map_channels);
                 wire_w_bool(w, r->muted);
                 wire_w_bool(w, 1);
                 wire_w_bool(w, 1);
@@ -2506,6 +2508,23 @@ static int pulse_command_create_record(struct pulse *p, long slot, struct wire_r
 }
 
 // The commands on one record stream by its channel: delete, cork, flush, latency, name, rate, attributes, properties.
+static int pulse_r_props_remove(struct wire_r *r, struct pulse_props *props, const char *protect_key)
+{
+        for (;;)
+        {
+                int isnull;
+                const char *key = pulse_r_string(r, &isnull);
+
+                if (r->bad)
+                        return 0;
+                if (isnull)
+                        break;
+                if (props && (!protect_key || !pulse_equal(key, protect_key)))
+                        pulse_props_remove(props, key);
+        }
+        return pulse_r_eof(r);
+}
+
 static int pulse_command_record(struct pulse *p, long slot, unsigned long command, unsigned long tag, struct wire_r *r)
 {
         struct pulse_client *c = p->client[slot];
@@ -2658,19 +2677,7 @@ static int pulse_command_record(struct pulse *p, long slot, unsigned long comman
         }
         case PULSE_COMMAND_REMOVE_RECORD_STREAM_PROPLIST:
         {
-                for (;;)
-                {
-                        int isnull;
-                        const char *key = pulse_r_string(r, &isnull);
-
-                        if (r->bad)
-                                return PULSE_DEAD;
-                        if (isnull)
-                                break;
-                        if (rec)
-                                pulse_props_remove(&rec->props, key);
-                }
-                if (!pulse_r_eof(r))
+                if (!pulse_r_props_remove(r, rec ? &rec->props : 0, 0))
                         return PULSE_DEAD;
                 if (!rec)
                         return pulse_error(p, c, tag, PULSE_ERR_NOENTITY);
@@ -3248,19 +3255,7 @@ static int pulse_command_stream(struct pulse *p, long slot, unsigned long comman
         }
         case PULSE_COMMAND_REMOVE_PLAYBACK_STREAM_PROPLIST:
         {
-                for (;;)
-                {
-                        int isnull;
-                        const char *key = pulse_r_string(r, &isnull);
-
-                        if (r->bad)
-                                return PULSE_DEAD;
-                        if (isnull)
-                                break;
-                        if (s)
-                                pulse_props_remove(&s->props, key);
-                }
-                if (!pulse_r_eof(r))
+                if (!pulse_r_props_remove(r, s ? &s->props : 0, 0))
                         return PULSE_DEAD;
                 if (!s)
                         return pulse_error(p, c, tag, PULSE_ERR_NOENTITY);
@@ -3528,19 +3523,7 @@ static int pulse_command(struct pulse *p, long slot, const unsigned char *payloa
         }
         case PULSE_COMMAND_REMOVE_CLIENT_PROPLIST:
                 PULSE_NEED_AUTH();
-                for (;;)
-                {
-                        int isnull;
-                        const char *key = pulse_r_string(&r, &isnull);
-
-                        if (r.bad)
-                                return PULSE_DEAD;
-                        if (isnull)
-                                break;
-                        if (!pulse_equal(key, "application.process.id"))
-                                pulse_props_remove(&c->props, key);
-                }
-                if (!pulse_r_eof(&r))
+                if (!pulse_r_props_remove(&r, &c->props, "application.process.id"))
                         return PULSE_DEAD;
                 pulse_event(p, PULSE_FACILITY_CLIENT, PULSE_EVENT_CHANGE, c->index);
                 return pulse_ack(p, c, tag);
@@ -3832,12 +3815,6 @@ static int pulse_command(struct pulse *p, long slot, const unsigned char *payloa
                         return pulse_error(p, c, tag, PULSE_ERR_INVALID);
                 return pulse_ack(p, c, tag); // accepted and not acted on: the card is opened when it is wanted
         }
-        case PULSE_COMMAND_SET_SINK_PORT:
-        case PULSE_COMMAND_SET_SOURCE_PORT:
-        case PULSE_COMMAND_SET_CARD_PROFILE:
-        case PULSE_COMMAND_SET_PORT_LATENCY_OFFSET:
-                PULSE_NEED_AUTH();
-                return pulse_error(p, c, tag, PULSE_ERR_NOENTITY);
         case PULSE_COMMAND_CREATE_UPLOAD_STREAM:
                 return pulse_command_create_upload(p, slot, &r, tag);
         case PULSE_COMMAND_DELETE_UPLOAD_STREAM:
@@ -3847,23 +3824,34 @@ static int pulse_command(struct pulse *p, long slot, const unsigned char *payloa
                 return pulse_command_play_sample(p, slot, &r, tag);
         case PULSE_COMMAND_REMOVE_SAMPLE:
                 return pulse_command_remove_sample(p, slot, &r, tag);
-        case PULSE_COMMAND_SEND_OBJECT_MESSAGE:
-                PULSE_NEED_AUTH();
-                return pulse_error(p, c, tag, PULSE_ERR_NOTIMPLEMENTED);
-        case PULSE_COMMAND_LOAD_MODULE:
-        case PULSE_COMMAND_UNLOAD_MODULE:
-                PULSE_NEED_AUTH();
-                return pulse_error(p, c, tag, PULSE_ERR_ACCESS);
-        case PULSE_COMMAND_EXTENSION:
-                PULSE_NEED_AUTH();
-                return pulse_error(p, c, tag, PULSE_ERR_NOEXTENSION);
-        case PULSE_COMMAND_ENABLE_SRBCHANNEL:
-        case PULSE_COMMAND_DISABLE_SRBCHANNEL:
-        case PULSE_COMMAND_REGISTER_MEMFD_SHMID:
-                // Neither side was told it could: a program that asks anyway is told no.
-                return pulse_error(p, c, tag, PULSE_ERR_NOTSUPPORTED);
         default:
+        {
+                static const struct
+                {
+                        unsigned char cmd, need_auth, err;
+                } err_cmds[] = {
+                    {PULSE_COMMAND_SET_SINK_PORT, 1, PULSE_ERR_NOENTITY},
+                    {PULSE_COMMAND_SET_SOURCE_PORT, 1, PULSE_ERR_NOENTITY},
+                    {PULSE_COMMAND_SET_CARD_PROFILE, 1, PULSE_ERR_NOENTITY},
+                    {PULSE_COMMAND_SET_PORT_LATENCY_OFFSET, 1, PULSE_ERR_NOENTITY},
+                    {PULSE_COMMAND_SEND_OBJECT_MESSAGE, 1, PULSE_ERR_NOTIMPLEMENTED},
+                    {PULSE_COMMAND_LOAD_MODULE, 1, PULSE_ERR_ACCESS},
+                    {PULSE_COMMAND_UNLOAD_MODULE, 1, PULSE_ERR_ACCESS},
+                    {PULSE_COMMAND_EXTENSION, 1, PULSE_ERR_NOEXTENSION},
+                    {PULSE_COMMAND_ENABLE_SRBCHANNEL, 0, PULSE_ERR_NOTSUPPORTED},
+                    {PULSE_COMMAND_DISABLE_SRBCHANNEL, 0, PULSE_ERR_NOTSUPPORTED},
+                    {PULSE_COMMAND_REGISTER_MEMFD_SHMID, 0, PULSE_ERR_NOTSUPPORTED},
+                };
+
+                for (unsigned i = 0; i < sizeof(err_cmds) / sizeof(err_cmds[0]); i++)
+                        if (err_cmds[i].cmd == command)
+                        {
+                                if (err_cmds[i].need_auth)
+                                        PULSE_NEED_AUTH();
+                                return pulse_error(p, c, tag, err_cmds[i].err);
+                        }
                 return pulse_error(p, c, tag, PULSE_ERR_COMMAND);
+        }
         }
 }
 
@@ -3985,8 +3973,8 @@ AUDIO_API long pulse_client_open(struct pulse *p, long uid, long pid)
 */
 AUDIO_API long pulse_refusal(unsigned char *out, unsigned long code)
 {
-        unsigned char header[20] = {0, 0, 0, 12, 0xff, 0xff, 0xff, 0xff, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
-        struct wire_w w = {out + 20, 12, 0, 0};
+        unsigned char header[20] = {0, 0, 0, 15, 0xff, 0xff, 0xff, 0xff, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+        struct wire_w w = {out + 20, 15, 0, 0};
 
         memory_copy_apart(out, header, 20);
         wire_w_u32(&w, PULSE_COMMAND_ERROR);
