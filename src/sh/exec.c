@@ -10305,9 +10305,22 @@ static fn exec_expansion_give_back(exec_held_expansion address_to held)
         value form writes nothing back but REPLY, which is put back the way it
         was on the way out. Returns the file, rewound, or -1.
 */
+static positive exec_funsub_depth;
+
 bipolar shell_funsub_run(string_address text, bool value_form,
                          b32 address_to status)
 {
+        if (exec_function_depth == 0x7fffffff || exec_funsub_depth >= 1024 ||
+            (exec_funsub_depth >= 64 && !shell_stack_within(75)))
+        {
+                shell_told("maximum funsub nesting level exceeded (%p)\n",
+                           exec_funsub_depth);
+                address_to status = 1;
+                return -1;
+        }
+        exec_funsub_depth++;
+        scope_exit(exec_funsub_depth--);
+
         bipolar handle = system_call_2(
             syscall(memfd_create), (positive)(string_address) "shell-funsub",
             SHELL_PARSER_MFD_CLOEXEC | SHELL_PARSER_MFD_NOEXEC_SEAL);
@@ -15536,6 +15549,8 @@ static COLD fn conditional_syntax_finish()
         }
 }
 
+static positive conditional_depth;
+
 static b32 exec_conditional(b32 index)
 {
         shell_mark arena = shell_store_mark(address_of exec_store);
@@ -15547,6 +15562,42 @@ static b32 exec_conditional(b32 index)
 
         if (!exec_bracket_strip(whole, address_of length, address_of held))
                 return 2;
+
+        //      Nested [[ ]] inside in-process ${ ...; } or a trap would
+        //      otherwise overwrite conditional_word and the cursor of the
+        //      outer [[ ]] (CWE-416/CWE-125).
+        bool nested = conditional_depth > 0;
+        string_address address_to held_word = conditional_word;
+        positive held_room = conditional_word_room;
+        positive held_count = conditional_word_count;
+        positive held_at = conditional_at;
+        bool held_bad = conditional_bad;
+        bool held_runtime = conditional_runtime;
+        bool held_active = conditional_active;
+
+        conditional_depth++;
+        if (nested)
+        {
+                conditional_word = null;
+                conditional_word_room = 0;
+        }
+        scope_exit({
+                if (nested)
+                {
+                        if (conditional_word)
+                                memory_free(conditional_word,
+                                            conditional_word_room *
+                                                sizeof(conditional_word[0]));
+                        conditional_word = held_word;
+                        conditional_word_room = held_room;
+                }
+                conditional_word_count = held_count;
+                conditional_at = held_at;
+                conditional_bad = held_bad;
+                conditional_runtime = held_runtime;
+                conditional_active = held_active;
+                conditional_depth--;
+        });
 
         conditional_bad = false;
         conditional_runtime = false;

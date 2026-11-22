@@ -11222,8 +11222,10 @@ static inline INLINE fn shell_declare_apply(shell_declare_state address_to state
                                    : null;
                 saved_scalar = saved_global && !subscript;
 
-                readonly = global_meta ? (global_meta->attributes & SHELL_ARRAY_READONLY) != 0
-                                       : env_readonly(word);
+                readonly = env_restricted_name(word, length) ||
+                           env_bash_readonly_name(word, length) ||
+                           (global_meta ? (global_meta->attributes & SHELL_ARRAY_READONLY) != 0
+                                        : env_readonly(word));
 
                 /* A readonly initializer is refused as one transaction.  In
                    particular, `declare -n PATH=value` must not leave the
