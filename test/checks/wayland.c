@@ -9204,6 +9204,35 @@ static void fake_sync_signal(void *context, long handle, unsigned long long poin
         fake_sync.last_rel = point;
 }
 
+static void test_subsurface_depth(void)
+{
+        struct session s;
+        struct wlc *c;
+        unsigned long sub_mgr, surf[40], sub[40];
+        long i;
+
+        /* hostile: a chain of subsurfaces one level deeper than the shim recurses for is refused at the attach (the flatten and the
+           sub walks recurse once per level, so an unbounded chain was a stack overflow in the compositor) */
+        wayland_stop();
+        memset(&fake, 0, sizeof fake);
+        wayland_start(&fake_host);
+        session_open(&s);
+        c = s.c;
+        sub_mgr = wl_global(c, s.registry, WLI_wl_subcompositor, 1);
+        for (i = 0; i < 40; i++)
+        {
+                surf[i] = wlc_id(c, WLI_wl_surface, 1);
+                wlc_send(c, s.compositor, WLQ_wl_compositor_create_surface, surf[i]);
+        }
+        for (i = 1; i < 40; i++)
+        {
+                sub[i] = wlc_id(c, WLI_wl_subsurface, 1);
+                wlc_send(c, sub_mgr, WLQ_wl_subcompositor_get_subsurface, sub[i], surf[i], surf[i - 1]);
+        }
+        wlc_pump(c);
+        WLCHECK(c->errors == 1, "a subsurface chain past WAYLAND_SUB_LEVELS levels is refused at the attach, not recursed");
+}
+
 static void test_syncobj_timeline_cap(void)
 {
         struct wayland_host host = fake_host;
@@ -9699,6 +9728,7 @@ int main(int argc, char **argv)
         test_dmabuf();
         test_stall_dmabuf();
         test_dmabuf_feedbacks();
+        test_subsurface_depth();
         test_syncobj_timeline_cap();
         test_syncobj_viewporter_and_formats();
         test_games();

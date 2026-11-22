@@ -55,6 +55,7 @@
 #define WAYLAND_TABLE_FALLBACK (1L << 26)
 #define WAYLAND_TABLE_PAGE 4096L
 #define WAYLAND_TABLE_FIRST 64L
+#define WAYLAND_SUB_LEVELS 32L /* subsurface nesting; flatten and the sub walks recurse once per level */
 
 enum
 {
@@ -3033,6 +3034,27 @@ static int wayland_buffer_request(struct wayland_client *c, struct wayland_objec
         return b->live = 0, wayland_tbl_free(c, WLT_BUFFER, self->link), wayland.buffers--, WAYLAND_OK;
 }
 
+/* The subsurface levels above a surface (0 for a root): the depth its subtree may hang below. */
+static long wayland_sub_levels(struct wayland_client *c, const struct wayland_surface *s)
+{
+        long levels = 0;
+
+        for (long hops = 0; s->role == WAYLAND_ROLE_SUBSURFACE && s->sub_parent && hops < c->tbl[WLT_SURFACE].count; hops++, levels++)
+                s = &c->surfaces[s->sub_parent - 1];
+        return levels;
+}
+
+/* The height of a surface's subsurface tree below it (0 with no children). Attaches keep it within WAYLAND_SUB_LEVELS. */
+static long wayland_sub_height(struct wayland_client *c, const struct wayland_surface *s)
+{
+        long height = 0;
+
+        for (int side = 0; side < 2; side++)
+                for (unsigned int ch = s->first_child[side]; ch; ch = c->surfaces[ch - 1].next_sib)
+                        height = wayland_max(height, 1 + wayland_sub_height(c, &c->surfaces[ch - 1]));
+        return height;
+}
+
 static int wayland_subcompositor_request(struct wayland_client *c, struct wayland_object *self, long op, struct wayland_arg *a)
 {
         struct wayland_surface *s, *parent;
@@ -3050,6 +3072,8 @@ static int wayland_subcompositor_request(struct wayland_client *c, struct waylan
              hops++, up = up->role == WAYLAND_ROLE_SUBSURFACE && up->sub_parent ? &c->surfaces[up->sub_parent - 1] : 0)
                 if (up == s)
                         return wayland_fail(c, self->id, WLN_wl_subcompositor_error_bad_parent, "the parent hangs from the surface");
+        if (wayland_sub_levels(c, parent) + 1 + wayland_sub_height(c, s) > WAYLAND_SUB_LEVELS)
+                return wayland_fail(c, self->id, WLN_wl_subcompositor_error_bad_parent, "the subsurfaces nest too deep");
         if (s->role != WAYLAND_ROLE_SUBSURFACE) c->subsurfaces++;
         wayland_sub_unlink(c, s);
         s->role = WAYLAND_ROLE_SUBSURFACE, s->sub_parent = (unsigned int)(wayland_surface_index(c, parent) + 1);
