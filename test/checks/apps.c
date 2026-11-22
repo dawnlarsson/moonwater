@@ -10492,6 +10492,7 @@ b32 main()
         GROUP("check_glass_lift", check_glass_lift());
         GROUP("check_compositor_scenes_layout", check_compositor_scenes_layout());
         GROUP("check_compositor_scenes_input", check_compositor_scenes_input());
+        GROUP("check_compositor_scenes_drag", check_compositor_scenes_drag());
         GROUP("check_screen_numbers", check_screen_numbers());
         GROUP("check_no_tab", check_no_tab());
         GROUP("check_identify_numbers", check_identify_numbers());

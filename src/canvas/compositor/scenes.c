@@ -1,3 +1,5 @@
+#include "scenes.h"
+
 // The Scenes overview's model and layout (C8, comp-manage): pure arithmetic from rects in, rects out. The overview draws
 // nothing here; the drawing and the input sit on these rects. Rects are {x, y, w, h}.
 
@@ -265,4 +267,46 @@ static int compositor_scenes_takes(unsigned int code, int down)
         if (down)
                 return 1;
         return index < 8 && !((compositor.button_down >> index) & 1);
+}
+
+// The globe's drag (scenes.h). BEGIN starts a drag on a screen without opening anything; MOVE sets its progress and velocity;
+// END decides: over the swipe speed away from the band commits, over it toward the band cancels, otherwise progress over half
+// commits. A commit opens the overview on the screen. Phases outside a drag, and a BEGIN while the overview is open, do nothing.
+void compositor_scenes_drag(unsigned int phase, int screen, int progress, int velocity)
+{
+        int commit;
+
+        if (progress < 0)
+                progress = 0;
+        if (progress > COMPOSITOR_SCENES_PROGRESS_ONE)
+                progress = COMPOSITOR_SCENES_PROGRESS_ONE;
+        if (phase == COMPOSITOR_SCENES_DRAG_BEGIN)
+        {
+                if (compositor.scenes.open || compositor.scenes.drag || screen < 0 || (unsigned int)screen >= compositor_output_count())
+                        return;
+                compositor_spaces_ensure();
+                compositor.scenes.drag = 1, compositor.scenes.screen = screen;
+                compositor.scenes.progress = 0, compositor.scenes.velocity = 0;
+                compositor_scenes_relayout();
+        }
+        else if (phase == COMPOSITOR_SCENES_DRAG_MOVE)
+        {
+                if (!compositor.scenes.drag)
+                        return;
+                compositor.scenes.progress = progress, compositor.scenes.velocity = velocity;
+        }
+        else if (phase == COMPOSITOR_SCENES_DRAG_END)
+        {
+                if (!compositor.scenes.drag)
+                        return;
+                compositor.scenes.drag = 0;
+                if (velocity > COMPOSITOR_SCENES_SWIPE)
+                        commit = 1;
+                else if (velocity < -COMPOSITOR_SCENES_SWIPE)
+                        commit = 0;
+                else
+                        commit = progress > COMPOSITOR_SCENES_PROGRESS_ONE / 2;
+                if (commit)
+                        compositor_scenes_open(compositor.scenes.screen);
+        }
 }

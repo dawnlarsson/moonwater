@@ -630,6 +630,7 @@ struct compositor_mc_thumb
 struct compositor_scenes
 {
         int open, screen, pressed, press_x, press_y, press_row, moved;
+        int drag, progress, velocity;   // a drag from the globe: 1 while it is held, its progress 0..1024 and velocity in px/s
         unsigned int cards, windows;
         int card[COMPOSITOR_SPACES_MAX + 1][4];
         int row[COMPOSITOR_SCENES_WINDOWS], rect[COMPOSITOR_SCENES_WINDOWS][4];

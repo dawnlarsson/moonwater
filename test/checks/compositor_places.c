@@ -922,3 +922,62 @@ static void check_compositor_scenes_input(void)
     check("scenes input: a press begun before the overview is let go by the normal path, and no button or grab stays held",
           (compositor.button_down & 1) == 0 && compositor.grab == COMPOSITOR_NONE);
 }
+
+/*
+        C8 Scenes, step 3: the globe's drag. BEGIN starts it and opens nothing; MOVE sets its progress and velocity; END commits
+        (the overview opens) over the swipe speed away from the band, cancels over it toward the band, and otherwise commits
+        when progress is over half. Progress is clamped to 0..1024. Phases outside a drag, and a BEGIN while open, do nothing.
+*/
+static void check_compositor_scenes_drag(void)
+{
+    if (!layout_table_map(512))
+    {
+        check("scenes drag: the table is mapped", false);
+        return;
+    }
+    layout_setup(512, 1);
+    compositor.table->motion = 1;
+    compositor.outputs = 1;
+    compositor.screen[0][0] = 0, compositor.screen[0][1] = 0, compositor.screen[0][2] = 512, compositor.screen[0][3] = 512;
+    compositor_spaces_ensure();
+
+    compositor_scenes_drag(COMPOSITOR_SCENES_DRAG_BEGIN, 0, 0, 0);
+    check("scenes drag: BEGIN starts a drag and opens nothing", compositor.scenes.drag && !compositor.scenes.open);
+
+    compositor_scenes_drag(COMPOSITOR_SCENES_DRAG_MOVE, 0, 600, 0);
+    compositor_scenes_drag(COMPOSITOR_SCENES_DRAG_END, 0, 600, 0);
+    check("scenes drag: a release past half, at no speed, commits: the overview opens", compositor.scenes.open && !compositor.scenes.drag);
+    compositor_scenes_close();
+
+    compositor_scenes_drag(COMPOSITOR_SCENES_DRAG_BEGIN, 0, 0, 0);
+    compositor_scenes_drag(COMPOSITOR_SCENES_DRAG_MOVE, 0, 300, 0);
+    compositor_scenes_drag(COMPOSITOR_SCENES_DRAG_END, 0, 300, 0);
+    check("scenes drag: a release short of half, at no speed, cancels", !compositor.scenes.open && !compositor.scenes.drag);
+
+    compositor_scenes_drag(COMPOSITOR_SCENES_DRAG_BEGIN, 0, 0, 0);
+    compositor_scenes_drag(COMPOSITOR_SCENES_DRAG_MOVE, 0, 300, 1500);
+    compositor_scenes_drag(COMPOSITOR_SCENES_DRAG_END, 0, 300, 1500);
+    check("scenes drag: a short release flung away from the band commits by speed", compositor.scenes.open);
+    compositor_scenes_close();
+
+    compositor_scenes_drag(COMPOSITOR_SCENES_DRAG_BEGIN, 0, 0, 0);
+    compositor_scenes_drag(COMPOSITOR_SCENES_DRAG_MOVE, 0, 900, -1500);
+    compositor_scenes_drag(COMPOSITOR_SCENES_DRAG_END, 0, 900, -1500);
+    check("scenes drag: a long drag flung back toward the band cancels by speed", !compositor.scenes.open);
+
+    compositor_scenes_drag(COMPOSITOR_SCENES_DRAG_BEGIN, 0, 0, 0);
+    compositor_scenes_drag(COMPOSITOR_SCENES_DRAG_MOVE, 0, 5000, 0);
+    check("scenes drag: progress over the whole is clamped to 1024", compositor.scenes.progress == 1024);
+    compositor_scenes_drag(COMPOSITOR_SCENES_DRAG_MOVE, 0, -50, 0);
+    check("scenes drag: progress back past the band is clamped to 0", compositor.scenes.progress == 0);
+    compositor_scenes_drag(COMPOSITOR_SCENES_DRAG_END, 0, 0, 0);
+    check("scenes drag: dragged back to the band and let go, the overview does not open", !compositor.scenes.open);
+
+    compositor_scenes_drag(COMPOSITOR_SCENES_DRAG_END, 0, 900, 0);
+    check("scenes drag: an END without a BEGIN does nothing", !compositor.scenes.open && !compositor.scenes.drag);
+
+    compositor_scenes_open(0);
+    compositor_scenes_drag(COMPOSITOR_SCENES_DRAG_BEGIN, 0, 0, 0);
+    check("scenes drag: a BEGIN while the overview is open does nothing", !compositor.scenes.drag);
+    compositor_scenes_close();
+}
