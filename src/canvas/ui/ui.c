@@ -728,6 +728,7 @@ static inline void ui_touch_report(struct ui_touch *t, const struct ui_touch_fra
                 else if (count >= 2)
                 {
                         int one = f->id[t->first] >= 0 ? t->first : other, per = UI_NOTCH * f->scale / 100;
+                        per = per < 1 ? 1 : per; // a scale under 3 percent would make the turn's notch 0 (a division by it)
                         int mid_x, mid_y, span, slop2 = UI_TOUCH_PINCH_SLOP * slop;
                         ui_touch_fingers(f, one, &other);
                         mid_x = (f->x[other] + f->x[one]) / 2, mid_y = (f->y[other] + f->y[one]) / 2;
@@ -27948,12 +27949,7 @@ static fn ui_text_scroll_sync(struct ui address_to ui, struct ui_text address_to
                 if (room > 0 && (t->wrap_cache_rows == 0 || t->wrap_cache_rev != t->doc.version ||
                                  t->wrap_cache_room != room || t->wrap_cache_lh != t->line_height || t->wrap_cache_zoom != t->zoom))
                 {
-                        p64 cap = rows < 4096 ? rows : 4096, vrows = 0;
-
-                        for (p64 i = 0; i < cap; i++)
-                                vrows += (p64)ui_text_line_rows(ui, t, i);
-                        if (rows > cap)
-                                vrows += rows - cap;
+                        p64 vrows = ui_text_wrap_vrow_of(ui, t, rows);
                         t->wrap_cache_rev = t->doc.version, t->wrap_cache_room = room, t->wrap_cache_lh = t->line_height;
                         t->wrap_cache_zoom = t->zoom, t->wrap_cache_rows = vrows > rows ? vrows : rows;
                 }
@@ -28628,7 +28624,7 @@ static b32 ui_text_visual(struct ui address_to ui, struct ui_text address_to t, 
 static int ui_text_wrap_rows(int room, int indent, p32 address_to starts, p32 address_to ends, p64 active, int address_to cur)
 {
         int rows = 0;
-        for (p32 from = 0; rows < 128;)
+        for (p32 from = 0; rows <= UI_TEXT_CLUSTERS;)
         {
                 p32 to = ui_text_wrap_to(&ui_text_lay, from, room, indent);
                 starts[rows] = from, ends[rows] = to;
@@ -28662,7 +28658,7 @@ static b32 ui_text_wrap_step(struct ui address_to ui, struct ui_text address_to 
         struct doc_selection address_to sel = &t->doc.selections[t->doc.primary];
         p64 line = doc_line_of(&t->doc, sel->active), lines = doc_line_count(&t->doc);
         int room = t->right - t->left, indent, rows, cur = 0, want_x, r;
-        p32 starts[128], ends[128];
+        static p32 starts[UI_TEXT_CLUSTERS + 1], ends[UI_TEXT_CLUSTERS + 1]; // a row is one or more clusters: a line has at most this many rows
         if (!t->wrap || t->hex || t->mode == UI_TEXT_FIELD || t->doc.selection_count != 1 || room <= 0)
                 return false;
         ui_text_layout_line(ui, t, line, &ui_text_lay);
@@ -28953,7 +28949,7 @@ static p32 ui_text_command(struct ui address_to ui, struct ui_text address_to t,
                         return UI_TEXT_MOVED;
                 {
                         b32 whole = ui_text_code_line_span(t, &start, &finish);
-                        p64 caret = t->doc.selections[0].active;
+                        p64 caret = t->doc.selections[t->doc.primary].active;
                         if (whole)
                                 doc_select_set(&t->doc, start, finish);
                         if (!ui_text_copy(t, WINDOWS_CLIP_CLIPBOARD))
@@ -30354,6 +30350,7 @@ static fn ui_findbar_open_path(const struct window_row address_to own, struct ui
                                int mode, const char address_to seed, b32 window)
 {
         positive length = seed ? string_length((string_address)seed) : 0;
+        length = length > UI_FINDBAR_QUERY - 1 ? UI_FINDBAR_QUERY - 1 : length;
         ui_findbar_begin(own, bar, view, mode, null, UI_FINDBAR_QUERY - 1, window);
         ui_text_set(&bar->field, (const p8 address_to)(seed ? seed : ""), length);
         doc_select_set(&bar->field.doc, length, length);
