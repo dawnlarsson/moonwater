@@ -6768,7 +6768,7 @@ static fn check_kit_defaults(struct ui address_to wui)
                         ui_kit.rtl = rtl;
                         editor_draw(pixels);
                         first = ui_tab_left(&editor.ui, &editor.strip, 0);
-                        inset_ok[rtl] = editor.strip.y == UI_GAP2 && editor.strip.h == UI_TABS_H &&
+                        inset_ok[rtl] = editor.strip.y == UI_GAP2 && editor.strip.h == UI_ROW_DENSE &&
                                         (rtl ? editor.strip.x + editor.strip.w == wide - UI_PAD && first + ui_tab_width(&editor.ui, &editor.strip, 0) == wide - UI_PAD
                                              : editor.strip.x == UI_PAD && first == UI_PAD);
                 }
@@ -8962,7 +8962,7 @@ static fn editor_tabs_check(struct ui address_to wui)
                         editor_open(null);
                         editor_draw(pixels);
                         ax = ui_dev(&editor.ui, ui_tabs_add_left(&editor.ui, &editor.strip) + UI_TAB_ADD_W / 2);
-                        ay = ui_dev(&editor.ui, editor.strip.y + UI_TABS_H / 2);
+                        ay = ui_dev(&editor.ui, editor.strip.y + editor.strip.h / 2);
                         ui_event_context(&(struct window_event){WINDOW_EVENT_MOTION, 0, ax, ay});
                         editor_event(&(struct window_event){WINDOW_EVENT_BUTTON, WINDOW_KEY_DOWN, 0x110, 0});
                         editor_event(&(struct window_event){WINDOW_EVENT_BUTTON, 0, 0x110, 0});

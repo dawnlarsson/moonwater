@@ -2178,11 +2178,20 @@ static void wayland_sub_drop(struct wayland_client *c, struct wayland_surface *s
 }
 
 static void wayland_constraints_drop(struct wayland_client *c, long surface);
+static void wayland_drag_leave(void);
+static void wayland_drag_end(int how);
 
 static void wayland_surface_drop(struct wayland_client *c, struct wayland_surface *s)
 {
         long idx = wayland_surface_index(c, s);
 
+        if (wayland.drag.live)
+        {
+                if (!wayland.drag.xsource && wayland.drag.client == c->slot && wayland.drag.origin == idx)
+                        wayland_drag_end(0);
+                else if (wayland.drag.target == c->slot && wayland.drag.surface == idx)
+                        wayland_drag_leave();
+        }
         wayland_constraints_drop(c, idx), wayland_sub_drop(c, s), wayland_row_release(c, s);
         for (int q = 0; q < 4; q++)
         {
@@ -4237,7 +4246,6 @@ static void wayland_drag_leave(void)
 
 static void wayland_drag_end(int how)
 {
-        int x_end = wayland.drag.xsource || wayland.drag.xtarget >= 0 || wayland.drag.x_seen;
         unsigned int action = wayland.drag.action;
 
         if (!wayland.drag.live) return;
@@ -4250,7 +4258,7 @@ static void wayland_drag_end(int how)
                 wayland_drag_tell_source(how ? WLE_wl_data_source_dnd_finished : WLE_wl_data_source_cancelled, 0);
         if (wayland.drag.xsource) wayland_table_drop(&wayland.drag.x_types);
         wayland_drag_clear();
-        if (x_end) wayland_xdrag(WAYLAND_XDRAG_END, -1, how == 2, (long)action);
+        wayland_xdrag(WAYLAND_XDRAG_END, -1, how == 2, (long)action);
 }
 
 static void wayland_drag_over(long row, long x, long y)
@@ -6372,7 +6380,19 @@ WAYLAND_API void wayland_idle_tick(void)
         if (wayland.idle_notifies) wayland_idle_scan(1, wayland_now());
 }
 
-WAYLAND_API long wayland_idle_due(void) { return wayland.host && wayland.idle_notifies ? wayland_idle_scan(0, 0) : 0; }
+WAYLAND_API long wayland_idle_due(void)
+{
+        long due = wayland.host && wayland.idle_notifies ? wayland_idle_scan(0, 0) : 0;
+
+        if (wayland.host && wayland.drag.live && wayland.drag.released)
+        {
+                long drag_due = wayland.drag.released_at + WAYLAND_DRAG_ANSWER_MS;
+
+                if (!due || drag_due < due)
+                        due = drag_due;
+        }
+        return due;
+}
 
 WAYLAND_API void wayland_idle_state(long *input_ms, long *inhibitors, long *idled)
 {

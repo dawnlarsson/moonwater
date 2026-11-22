@@ -398,12 +398,9 @@ static fn files_layout(void)
                                 ui_host(&files.head_box, .h = UI_COLUMNS_H, .hidden = files.view != FILES_VIEW_DETAILS);
                                 ui_rows(l, .class = "list", .grow = 1);
                         }
-                        ui_row(.class = "bar")
-                        {
-                                if (files.finding)
+                        if (files.finding)
+                                ui_row(.class = "bar")
                                         ui_control(&files.finder_field, .grow = 1, .h = FILES_BAND);
-                                ui_text(files.big->status, .class = "status");
-                        }
                 }
         }
         ui_view_end(&files.big->view);
@@ -1974,6 +1971,31 @@ static b32 files_event(const struct window_event address_to event)
 
 /* ---- draw, tick, lifecycle ---- */
 
+static fn files_status_pill_draw(struct ui address_to ui, const struct ui_list address_to l)
+{
+        int pad_x = ui_dev(ui, 10), ph = ui_dev(ui, 26), margin_b = ui_dev(ui, 10);
+        int max_w = l->w - ui_dev(ui, 8);
+        char cut[192];
+        string_address text;
+        int tw, pw, px, py, baseline;
+        struct ui_box box;
+
+        if (!files.big->status[0] || max_w < 2 * pad_x + ui_dev(ui, 24) || l->h < ph + 2 * margin_b)
+                return;
+        text = ui_fit(ui, (string_address)files.big->status, UI_LABEL_MEDIUM, max_w - 2 * pad_x, cut, sizeof(cut));
+        tw = ui_kit_measure(ui, text, UI_LABEL_MEDIUM);
+        pw = tw + 2 * pad_x;
+        if (pw > max_w)
+                pw = max_w;
+        px = ui_mirror(l->x + l->w - pw, pw, l->x, l->w);
+        py = l->y + l->h - margin_b - ph;
+        box = ui_box_px(px, py, pw, ph, ph / 2);
+        ui_kit_fill(ui, &box, ui_tone(ui_role(UI_SURFACE_CONTAINER) & 0xffffffu, 236), null);
+        ui_kit_ring(ui, &box, ui_q8(ui, 1), ui_tone(ui_role(UI_OUTLINE_VARIANT) & 0xffffffu, 110));
+        baseline = ui_kit_baseline(ui, py + (ph - ui_dev(ui, ui_types[UI_LABEL_MEDIUM].line)) / 2, UI_LABEL_MEDIUM);
+        ui_kit_text(ui, px + pad_x, baseline, text, UI_LABEL_MEDIUM, ui_text_colour(ui, UI_ON_SURFACE_VARIANT), 0);
+}
+
 static fn files_draw(unsigned int address_to pixels)
 {
         struct ui address_to ui = &files.ui;
@@ -1988,6 +2010,7 @@ static fn files_draw(unsigned int address_to pixels)
                 ui_columns_draw(ui, &files.columns);
         if (!files.editing || files.editing == FILES_EDIT_PART)
                 files_crumbs_draw();
+        files_status_pill_draw(ui, l);
         if (files.editing)
                 ui_text_overlay(ui, files_field());
         if (files.finding)

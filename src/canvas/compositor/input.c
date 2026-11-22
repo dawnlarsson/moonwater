@@ -1542,6 +1542,8 @@ static void compositor_motion(void)
                                   : asked >= 0 ? (unsigned int)asked : CP_ARROW;
         if (compositor_dnd_active())
                 compositor_dnd_motion(under), dnd_shape = compositor_dnd_shape();
+        else if (compositor.chip.kind == COMPOSITOR_CHIP_DRAG)
+                compositor_chip_drag(-1);
         if (dnd_shape >= 0)
                 compositor.cursor.shape = (unsigned int)dnd_shape, asked = -1;
         compositor.cursor.client_hidden = asked == -2, compositor.cursor.asked_row = of, compositor.cursor.asked_seen = asked;
@@ -1741,6 +1743,8 @@ static void compositor_release_as(unsigned int code, int snap, unsigned int flag
         if (index < 8 && (compositor.button_down >> index & 1))
                 to = compositor.button_row[index], compositor.button_down &= (unsigned char)~(1u << index), compositor_grab_settle();
         compositor_dnd_release(to);
+        if (!compositor.button_down && to == COMPOSITOR_NONE && compositor.chip.kind == COMPOSITOR_CHIP_DRAG)
+                compositor_chip_drag(-1);
         compositor_post(to, WINDOW_EVENT_BUTTON,
                         flags | (compositor_modifiers() & (WINDOW_KEY_SHIFT | WINDOW_KEY_CONTROL | WINDOW_KEY_ALT | WINDOW_KEY_SUPER)),
                         (int)code, 0);
@@ -2851,6 +2855,11 @@ static void compositor_chip_tick(positive now)
 
         if (c->kind == COMPOSITOR_CHIP_NONE)
                 return;
+        if (c->kind == COMPOSITOR_CHIP_DRAG && !compositor_dnd_active())
+        {
+                compositor_chip_drag(-1);
+                return;
+        }
         elapsed = now > c->shown ? now - c->shown : 0, total = c->hold + c->fade;
         if (elapsed >= total) { compositor_chip_hide(); return; }
         c->alpha = elapsed <= c->hold ? 255 : (unsigned int)(255 * (total - elapsed) / c->fade);

@@ -38,6 +38,7 @@ static struct
         struct ui_control strip, wrap_btn, hex_btn;
         struct ui_view view;
         struct ui_rect find_box, text_box;
+        int pill_box[4], pill_wrap[4], pill_hex[4], pill_hover;
         char bar_text[256], status[160];
         struct ui_popup menu;
         int tab_menu_at;
@@ -276,6 +277,76 @@ static fn editor_new_window(const char address_to path)
         (void)ui_start_apart(words, count);
 }
 
+static b32 editor_ext_is(const char address_to name, const char address_to ext)
+{
+        positive nlen = string_length((string_address)name), elen = string_length((string_address)ext);
+
+        if (nlen <= elen || name[nlen - elen - 1] != '.')
+                return false;
+        for (positive i = 0; i < elen; i++)
+        {
+                unsigned char a = (unsigned char)name[nlen - elen + i], b = (unsigned char)ext[i];
+
+                if (a >= 'A' && a <= 'Z')
+                        a = (unsigned char)(a + ('a' - 'A'));
+                if (a != b)
+                        return false;
+        }
+        return true;
+}
+
+static b32 editor_is_binary(const char address_to path, const p8 address_to bytes, positive length)
+{
+        static const char address_to const exts[] = {
+            "bin", "o", "a", "so", "elf", "exe", "dll", "wasm", "png", "jpg", "jpeg", "gif", "webp", "bmp", "ico",
+            "pdf", "zip", "gz", "xz", "zst", "bz2", "tar", "7z", "rar", "mp3", "mp4", "mkv", "webm", "ogg", "opus",
+            "flac", "wav", "ttf", "otf", "woff", "woff2", "pyc", "class", "db", "sqlite", "img", "iso", "rom", "pak"};
+        const char address_to base = path ? editor_basename(path) : null;
+        positive probe = length < 8192 ? length : 8192;
+
+        if (bytes && probe > 0)
+        {
+                if (memory_first_of((address_any)bytes, 0, probe))
+                        return true;
+                // Binary file magic headers (covers formats without a NUL in the first 8 KiB).
+                if ((length >= 4 && !memory_compare(bytes, "\x7f" "ELF", 4)) ||
+                    (length >= 4 && !memory_compare(bytes, "\x89PNG", 4)) ||
+                    (length >= 3 && bytes[0] == 0xff && bytes[1] == 0xd8 && bytes[2] == 0xff) ||
+                    (length >= 4 && !memory_compare(bytes, "GIF8", 4)) ||
+                    (length >= 5 && !memory_compare(bytes, "%PDF-", 5)) ||
+                    (length >= 4 && !memory_compare(bytes, "PK\x03\x04", 4)) ||
+                    (length >= 2 && bytes[0] == 0x1f && bytes[1] == 0x8b) ||
+                    (length >= 4 && bytes[0] == 0x28 && bytes[1] == 0xb5 && bytes[2] == 0x2f && bytes[3] == 0xfd) ||
+                    (length >= 6 && !memory_compare(bytes, "\xfd" "7zXZ\0", 6)) ||
+                    (length >= 3 && !memory_compare(bytes, "BZh", 3)) ||
+                    (length >= 4 && !memory_compare(bytes, "OggS", 4)) ||
+                    (length >= 4 && !memory_compare(bytes, "fLaC", 4)) ||
+                    (length >= 4 && !memory_compare(bytes, "RIFF", 4)))
+                        return true;
+        }
+        if (base && base[0])
+        {
+                for (positive i = 0; i < sizeof(exts) / sizeof(exts[0]); i++)
+                        if (editor_ext_is(base, exts[i]))
+                                return true;
+        }
+        if (bytes && length > 0)
+        {
+                positive check = length < 4096 ? length : 4096, bad = 0;
+
+                for (positive i = 0; i < check; i++)
+                {
+                        p8 c = bytes[i];
+
+                        if (c < 9 || (c >= 14 && c < 32 && c != 27))
+                                bad++;
+                }
+                if (bad * 10 > check)
+                        return true;
+        }
+        return false;
+}
+
 static b32 editor_open(string_address path)
 {
         struct editor_tab address_to tab;
@@ -293,8 +364,9 @@ static b32 editor_open(string_address path)
         if (!ui_text_open(&tab->view, UI_TEXT_CODE, tab->bytes ? tab->bytes : (const p8 address_to) "", tab->length, ui_text_keymap()))
                 return editor_tab_release(tab, false), false;
         tab->view.own = &editor.own;
+        tab->view.wrap = true;
         editor_tab_language(tab, (const char address_to)path, tab->bytes, tab->length);
-        if (tab->bytes && tab->length > 0 && memory_first_of((address_any)tab->bytes, 0, tab->length < 4096 ? tab->length : 4096))
+        if (editor_is_binary((const char address_to)path, tab->bytes, tab->length))
                 tab->view.hex = true;
         editor.tab = editor.count++;
         editor_title_sync();
@@ -791,18 +863,118 @@ static fn editor_layout(void)
         ui_control(strip, .class = "filetabs", .on = editor_tabbed);
         ui_host(&editor.find_box, .h = UI_FINDBAR_H, .hidden = editor.find.mode == UI_FINDBAR_CLOSED);
         ui_host(&editor.text_box, .grow = 1);
-        ui_row(.class = "bar")
-        {
-                ui_text(editor.bar_text, .class = "status");
-                ui_host(null, .grow = 1);
-                if (tab->changed_on_disk)
-                        ui_text(WORDS(editor_changed_on_disk), .class = "warning");
-                if (editor.status[0])
-                        ui_text(editor.status, .class = "status");
-                ui_control(&editor.wrap_btn, .h = 26, .hidden = tab->view.hex, .on = editor_toggle, .arg = (int)DOC_CMD_WRAP);
-                ui_control(&editor.hex_btn, .h = 26, .on = editor_toggle, .arg = (int)DOC_CMD_HEX);
-        }
         ui_view_end(&editor.view);
+}
+
+static b32 editor_pill_in(const int r[4], int x, int y)
+{
+        return r[2] > 0 && r[3] > 0 && x >= r[0] && x < r[0] + r[2] && y >= r[1] && y < r[1] + r[3];
+}
+
+// Compact floating bottom-right status overlay pill (clear of the scrollbar and rounded window corner, with measured toggle chips).
+static fn editor_pill_draw(struct ui address_to ui, struct editor_tab address_to tab)
+{
+        int pad_x = ui_dev(ui, 10), gap = ui_dev(ui, 6), chip_px = ui_dev(ui, 8), chip_h = ui_dev(ui, 20), ph = ui_dev(ui, 26);
+        int margin_r = ui_dev(ui, UI_PAD), margin_b = ui_dev(ui, 10);
+        int max_w = editor.text_box.w - 2 * margin_r;
+        const char address_to wrap_lbl = WORDS(editor_wrap_on);
+        const char address_to hex_lbl = tab->view.hex ? WORDS(editor_mode_text) : WORDS(editor_mode_hex);
+        const char address_to extra = tab->changed_on_disk ? WORDS(editor_changed_on_disk) : editor.status[0] ? editor.status : null;
+        int hex_w = ui_kit_measure(ui, (string_address)hex_lbl, UI_LABEL_MEDIUM) + 2 * chip_px;
+        int wrap_w = tab->view.hex ? 0 : ui_kit_measure(ui, (string_address)wrap_lbl, UI_LABEL_MEDIUM) + 2 * chip_px;
+        int btns_w = hex_w + (wrap_w ? wrap_w + gap : 0);
+        int extra_w = extra ? ui_kit_measure(ui, (string_address)extra, UI_LABEL_MEDIUM) : 0;
+        char cut[256];
+        string_address info = (string_address)editor.bar_text;
+        int info_room, info_w, pw, px, py, cx, cy, baseline;
+        struct ui_box box;
+
+        memory_zero(editor.pill_box, sizeof(editor.pill_box));
+        memory_zero(editor.pill_wrap, sizeof(editor.pill_wrap));
+        memory_zero(editor.pill_hex, sizeof(editor.pill_hex));
+        if (max_w < btns_w + 2 * pad_x || editor.text_box.h < ph + 2 * margin_b)
+                return;
+        info_room = max_w - 2 * pad_x - btns_w - gap - (extra_w ? extra_w + gap : 0);
+        if (info_room < 0)
+                extra = null, extra_w = 0, info_room = max_w - 2 * pad_x - btns_w - gap;
+        if (info_room > 0 && editor.bar_text[0])
+                info = ui_fit(ui, info, UI_LABEL_MEDIUM, info_room, cut, sizeof(cut)), info_w = ui_kit_measure(ui, info, UI_LABEL_MEDIUM);
+        else
+                info = (string_address) "", info_w = 0;
+        pw = 2 * pad_x + btns_w + (info_w ? info_w + gap : 0) + (extra_w ? extra_w + gap : 0);
+        if (pw > max_w)
+                pw = max_w;
+        px = ui_rtl() ? editor.text_box.x + margin_r : editor.text_box.x + editor.text_box.w - margin_r - pw;
+        py = editor.text_box.y + editor.text_box.h - margin_b - ph;
+        editor.pill_box[0] = px, editor.pill_box[1] = py, editor.pill_box[2] = pw, editor.pill_box[3] = ph;
+        box = ui_box_px(px, py, pw, ph, ph / 2);
+        ui_kit_fill(ui, &box, ui_tone(ui_role(UI_SURFACE_CONTAINER) & 0xffffffu, 236), null);
+        ui_kit_ring(ui, &box, ui_q8(ui, 1), ui_tone(ui_role(UI_OUTLINE_VARIANT) & 0xffffffu, 110));
+        baseline = ui_kit_baseline(ui, py + (ph - ui_dev(ui, ui_types[UI_LABEL_MEDIUM].line)) / 2, UI_LABEL_MEDIUM);
+        cx = px + pad_x;
+        if (extra && extra_w > 0)
+        {
+                unsigned int eink = ui_text_colour(ui, tab->changed_on_disk ? UI_WARNING : UI_ON_SURFACE_VARIANT);
+                ui_kit_text(ui, cx, baseline, (string_address)extra, UI_LABEL_MEDIUM, eink, 0);
+                cx += extra_w + gap;
+        }
+        if (info_w > 0)
+        {
+                ui_kit_text(ui, cx, baseline, info, UI_LABEL_MEDIUM, ui_text_colour(ui, UI_ON_SURFACE_VARIANT), 0);
+                cx += info_w + gap;
+        }
+        cy = py + (ph - chip_h) / 2;
+        if (wrap_w > 0)
+        {
+                struct ui_box wb = ui_box_px(cx, cy, wrap_w, chip_h, chip_h / 2);
+                unsigned int wfill = tab->view.wrap ? ui_role(UI_PRIMARY)
+                                                    : editor.pill_hover == 1 ? ui_tone(ui_role(UI_ON_SURFACE) & 0xffffffu, 26) : 0;
+                unsigned int wink = tab->view.wrap ? ui_role(UI_ON_PRIMARY) : ui_text_colour(ui, UI_ON_SURFACE_VARIANT);
+
+                editor.pill_wrap[0] = cx, editor.pill_wrap[1] = cy, editor.pill_wrap[2] = wrap_w, editor.pill_wrap[3] = chip_h;
+                if (wfill)
+                        ui_kit_fill(ui, &wb, wfill, null);
+                ui_kit_text(ui, cx + chip_px, baseline, (string_address)wrap_lbl, UI_LABEL_MEDIUM, wink, 0);
+                cx += wrap_w + gap;
+        }
+        {
+                struct ui_box hb = ui_box_px(cx, cy, hex_w, chip_h, chip_h / 2);
+                unsigned int hfill = tab->view.hex ? ui_role(UI_PRIMARY)
+                                                   : editor.pill_hover == 2 ? ui_tone(ui_role(UI_ON_SURFACE) & 0xffffffu, 26) : 0;
+                unsigned int hink = tab->view.hex ? ui_role(UI_ON_PRIMARY) : ui_text_colour(ui, UI_ON_SURFACE_VARIANT);
+
+                editor.pill_hex[0] = cx, editor.pill_hex[1] = cy, editor.pill_hex[2] = hex_w, editor.pill_hex[3] = chip_h;
+                if (hfill)
+                        ui_kit_fill(ui, &hb, hfill, null);
+                ui_kit_text(ui, cx + chip_px, baseline, (string_address)hex_lbl, UI_LABEL_MEDIUM, hink, 0);
+        }
+}
+
+static b32 editor_pill_event(const struct window_event address_to event)
+{
+        if (event->type == WINDOW_EVENT_MOTION)
+        {
+                int hover = editor_pill_in(editor.pill_wrap, event->a, event->b) ? 1
+                            : editor_pill_in(editor.pill_hex, event->a, event->b) ? 2 : 0;
+
+                if (hover)
+                        ui_kit_shape = WINDOW_POINTER_HAND;
+                if (hover != editor.pill_hover)
+                        editor.pill_hover = hover, editor.dirty = true;
+                return editor_pill_in(editor.pill_box, event->a, event->b);
+        }
+        if (event->type == WINDOW_EVENT_BUTTON && (p32)event->a == UI_BTN_LEFT && editor_pill_in(editor.pill_box, ui_kit.pointer_x, ui_kit.pointer_y))
+        {
+                if (event->flags & WINDOW_KEY_DOWN)
+                {
+                        if (editor_pill_in(editor.pill_wrap, ui_kit.pointer_x, ui_kit.pointer_y))
+                                editor_toggle((int)DOC_CMD_WRAP);
+                        else if (editor_pill_in(editor.pill_hex, ui_kit.pointer_x, ui_kit.pointer_y))
+                                editor_toggle((int)DOC_CMD_HEX);
+                }
+                return true;
+        }
+        return false;
 }
 
 static fn editor_draw(unsigned int address_to pixels)
@@ -821,6 +993,7 @@ static fn editor_draw(unsigned int address_to pixels)
         }
         ui_text_draw(ui, &tab->view, editor.text_box.x, editor.text_box.y, editor.text_box.w, editor.text_box.h, ui_role(UI_SURFACE) & 0xffffffu);
         ui_view_draw(ui, &editor.view, false);
+        editor_pill_draw(ui, tab);
         ui_findbar_overlay(ui, &editor.find);
         ui_text_overlay(ui, &tab->view);
 }
@@ -870,6 +1043,8 @@ static b32 editor_event(const struct window_event address_to event)
         if (asks & UI_VIEW_DRAW)
                 editor.dirty = true;
         if (asks & UI_VIEW_TAKEN)
+                return true;
+        if (editor_pill_event(event))
                 return true;
         if (editor_reload_key(event) && (event->flags & WINDOW_KEY_DOWN) && tab->changed_on_disk)
         {

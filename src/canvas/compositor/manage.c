@@ -3674,7 +3674,11 @@ static void compositor_dnd_motion(int under)
         int wx = 0, wy = 0;
 
         if (!compositor_dnd.active)
-                goto done;
+        {
+                if (compositor.chip.kind == COMPOSITOR_CHIP_DRAG)
+                        compositor_chip_drag(-1);
+                return;
+        }
         if (compositor_dnd.dropped)
                 return;
         if (under >= 0 && under < COMPOSITOR_ROWS)

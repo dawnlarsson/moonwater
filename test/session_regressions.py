@@ -751,7 +751,7 @@ def test_compositor_and_xwm_invariants():
     check("Wayland/XWM O(1) hot-path cleanup: xserial check, idle_notifies guard, latch row walk, short-read break & pic_ident",
           "WAYLAND_API int wayland_row_has_xserial(" in wl_c and
           "!wayland_row_has_xserial(w->row, compositor_xwm_server(x), w->serial)" in xwm and
-          "return wayland.host && wayland.idle_notifies ? wayland_idle_scan(0, 0) : 0;" in wl_c and
+          "wayland.host && wayland.idle_notifies ? wayland_idle_scan(0, 0) : 0;" in wl_c and
           "if (got < room)\n                        return;" in xwm and
           "compositor_wl_pic_ident(picture, &dev, &ino);" in wlh_src)
     gpu_c = read_text("src/canvas/gpu.c")
@@ -1062,6 +1062,22 @@ def test_canvas_spaces_invariants():
     check("Blended rounded corner uses pre-compensated ring (outer-inner)/(1-inner) on CPU & GPU (no double AA border on Chrome)",
           "((cover - in) * 255u + (255u - in) / 2u) / (255u - in)" in compose_c and
           "!picture ? 2 : f->blend ? 3 : 0" in compose_c)
+    editor_c = read_text("src/canvas/ui/editor.c")
+    files_c = read_text("src/canvas/ui/files.c")
+    wl_c = read_text("src/canvas/wayland.c")
+    check("Editor & Files polish: default wrap, binary->hex, 28px filetabs, floating status pills & smooth squash scroll",
+          "tab->view.wrap = true;" in editor_c and
+          "editor_is_binary(" in editor_c and
+          "editor_pill_draw(" in editor_c and
+          "files_status_pill_draw(" in files_c and
+          '{"filetabs", .margin = {UI_PAD, UI_PAD, UI_GAP2, 4}, .h = UI_ROW_DENSE}' in ui_c and
+          "ui_scroll_pull(ui, &t->scroll, drawn_scroll" in ui_c and
+          "ui_wheel_turn(ui, &t->scroll, event)" in ui_c)
+    check("Drag-and-drop chip never gets stuck on Wayland text drags (unconditional WAYLAND_XDRAG_END + tick/motion guard)",
+          "wayland_xdrag(WAYLAND_XDRAG_END, -1, how == 2, (long)action);" in wl_c and
+          "if (x_end) wayland_xdrag(WAYLAND_XDRAG_END" not in wl_c and
+          "c->kind == COMPOSITOR_CHIP_DRAG && !compositor_dnd_active()" in inp and
+          "else if (compositor.chip.kind == COMPOSITOR_CHIP_DRAG)" in inp)
 
 
 def test_build_and_audit_gates():

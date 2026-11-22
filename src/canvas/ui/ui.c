@@ -11860,7 +11860,7 @@ static struct ui_tab_hit ui_tab_hit_at(struct ui address_to ui, const struct ui_
                 return (struct ui_tab_hit){UI_TAB_HIT_NONE, -1};
         }
         {
-                int h = c->variant ? 32 : 40;
+                int h = c->h > 0 ? c->h : (c->variant ? 32 : 40);
                 if (c->addable)
                 {
                         int ax = ui_tabs_add_left(ui, c);
@@ -11907,7 +11907,8 @@ static inline struct ui_box ui_tab_axis_stretch(struct ui_box box, b32 vertical,
         return ui_box_transform(box, p.sx, p.sy, p.ox, p.oy, 0, 0);
 }
 
-#define UI_TABS_H 32 // a segmented tab's height, the pill (a strip of tabs, the editor's file tabs too)
+#define UI_TABS_H 32 // a segmented tab's height, the pill (a strip of tabs)
+#define UI_ROW_DENSE 28 // compact row & file-tab height (matches file explorer left sidebar rows)
 static fn ui_tabs_draw(struct ui address_to ui, struct ui_control address_to c)
 {
         UI_CALL();
@@ -11947,7 +11948,7 @@ static fn ui_tabs_draw(struct ui address_to ui, struct ui_control address_to c)
         }
         else
         {
-                ax.height = ax.seg ? UI_TABS_H : 40;
+                ax.height = c->h > 0 ? c->h : (ax.seg ? UI_TABS_H : 40);
                 if (chosen < 0 || chosen >= c->count)
                         chosen = 0;
                 if (!ax.seg)
@@ -12033,7 +12034,9 @@ static fn ui_tabs_draw(struct ui address_to ui, struct ui_control address_to c)
                 }
                 else
                 {
-                        int baseline = ui_kit_baseline(ui, ui_dev(ui, iy) + (ui_dev(ui, ih) - ui_dev(ui, 20)) / 2, UI_LABEL_LARGE), width;
+                        int tfont = ih <= UI_ROW_DENSE ? UI_LABEL_MEDIUM : UI_LABEL_LARGE;
+                        int fline = ui_types[tfont].line;
+                        int baseline = ui_kit_baseline(ui, ui_dev(ui, iy) + (ui_dev(ui, ih) - ui_dev(ui, fline)) / 2, tfont), width;
                         char cut[128];
                         string_address shown = (string_address)c->items[item];
                         if (c->closable)
@@ -12043,9 +12046,9 @@ static fn ui_tabs_draw(struct ui address_to ui, struct ui_control address_to c)
                                 int label_room = ui_dev(ui, iw - close_w - 16);
                                 if (label_room > 0)
                                 {
-                                        shown = ui_fit(ui, shown, UI_LABEL_LARGE, label_room, cut, sizeof(cut));
-                                        width = ui_kit_measure(ui, shown, UI_LABEL_LARGE);
-                                        ui_kit_text(ui, ui_dev(ui, label_x) + (label_room > width ? (label_room - width) / 2 : 0), baseline, shown, UI_LABEL_LARGE, ink, 0);
+                                        shown = ui_fit(ui, shown, tfont, label_room, cut, sizeof(cut));
+                                        width = ui_kit_measure(ui, shown, tfont);
+                                        ui_kit_text(ui, ui_dev(ui, label_x) + (label_room > width ? (label_room - width) / 2 : 0), baseline, shown, tfont, ink, 0);
                                 }
                                 if (close_w > 0)
                                 {
@@ -12065,17 +12068,17 @@ static fn ui_tabs_draw(struct ui address_to ui, struct ui_control address_to c)
                                         }
                                         else if (hot || item == chosen || c->item == item)
                                         {
-                                                int xw = ui_kit_measure(ui, (string_address) "\xc3\x97", UI_LABEL_LARGE);
+                                                int xw = ui_kit_measure(ui, (string_address) "\xc3\x97", tfont);
                                                 unsigned int xink = hot ? ink : (ink & 0xffffffu) | 0xb0000000u;
-                                                ui_kit_text(ui, ui_dev(ui, cx) + (ui_dev(ui, UI_TAB_CLOSE_W) - xw) / 2, baseline, (string_address) "\xc3\x97", UI_LABEL_LARGE, xink, 0);
+                                                ui_kit_text(ui, ui_dev(ui, cx) + (ui_dev(ui, UI_TAB_CLOSE_W) - xw) / 2, baseline, (string_address) "\xc3\x97", tfont, xink, 0);
                                         }
                                 }
                         }
                         else
                         {
                                 b32 middle = anchor + (b32)ui_qmul(a0 + alen / 2 - anchor, dom);
-                                width = ui_kit_measure(ui, shown, UI_LABEL_LARGE);
-                                ui_kit_text(ui, middle / 256 - width / 2, baseline, shown, UI_LABEL_LARGE, ink, 0);
+                                width = ui_kit_measure(ui, shown, tfont);
+                                ui_kit_text(ui, middle / 256 - width / 2, baseline, shown, tfont, ink, 0);
                         }
                 }
         }
@@ -12091,11 +12094,13 @@ static fn ui_tabs_draw(struct ui address_to ui, struct ui_control address_to c)
                 {
                         struct ui_box add_box = ui_box_of(ui, ui_q(add_x), ui_q(c->y), ui_q(UI_TAB_ADD_W), ui_q(ax.height), ui_q(ax.height) / 2);
                         unsigned int ink = ui_role(c->close_hover == -2 ? UI_ON_SURFACE : UI_ON_SURFACE_VARIANT);
-                        int pw = ui_kit_measure(ui, (string_address) "+", UI_LABEL_LARGE);
-                        int baseline = ui_kit_baseline(ui, ui_dev(ui, c->y) + (ui_dev(ui, ax.height) - ui_dev(ui, 20)) / 2, UI_LABEL_LARGE);
+                        int tfont = ax.height <= UI_ROW_DENSE ? UI_LABEL_MEDIUM : UI_LABEL_LARGE;
+                        int fline = ui_types[tfont].line;
+                        int pw = ui_kit_measure(ui, (string_address) "+", tfont);
+                        int baseline = ui_kit_baseline(ui, ui_dev(ui, c->y) + (ui_dev(ui, ax.height) - ui_dev(ui, fline)) / 2, tfont);
                         if (c->close_hover == -2)
                                 ui_kit_layer_fill(ui, &add_box, ink, 24);
-                        ui_kit_text(ui, ui_dev(ui, add_x) + (ui_dev(ui, UI_TAB_ADD_W) - pw) / 2, baseline, (string_address) "+", UI_LABEL_LARGE, ink, 0);
+                        ui_kit_text(ui, ui_dev(ui, add_x) + (ui_dev(ui, UI_TAB_ADD_W) - pw) / 2, baseline, (string_address) "+", tfont, ink, 0);
                 }
         }
         if (!c->closable)
@@ -12220,6 +12225,7 @@ static fn ui_control_size(struct ui address_to ui, struct ui_control address_to 
             {UI_BADGE, UI_LABEL_MEDIUM, 18, 0, 22},
             {UI_TAG, UI_MONO, 20, 0, 26},
             {UI_KBD, UI_MONO, 10, 20, 0},
+            {UI_BUTTON, UI_LABEL_LARGE, 24, 48, 0},
         };
         for (positive k = 0; k < sizeof(specs) / sizeof(specs[0]); k++)
                 if (c->kind == specs[k].kind)
@@ -18057,7 +18063,7 @@ static const struct ui_class ui_classes[] = {
         {"bar", .h = UI_PAGE_FOOT, .pad = {UI_INSET, UI_INSET, 0, 0}, .gap = UI_INSET, .align = UI_CENTER, .fill = UI_ROLE(UI_SURFACE_CONTAINER)}, // a status bar at a window's foot: its words in a row
         {"middle", .justify = UI_CENTER},                                                // the children in the middle of the room along the main axis
         {"tabs", .margin = {UI_GAP2, UI_GAP2, UI_GAP2, UI_GAP2}, .h = UI_TABS_H},        // a band of segmented tabs: a gap round them
-        {"filetabs", .margin = {UI_PAD, UI_PAD, UI_GAP2, UI_GAP2}, .h = UI_TABS_H},      // a window's strip of files along its top: in from its margin at either end, a gap above and below
+        {"filetabs", .margin = {UI_PAD, UI_PAD, UI_GAP2, 4}, .h = UI_ROW_DENSE},         // a window's strip of files along its top: same height as file explorer sidebar rows
         {"card", .pad = {UI_GAP4, UI_GAP4, UI_GAP4, UI_GAP4}, .gap = UI_GAP3, .fill = UI_ROLE(UI_SURFACE_LOW), .radius = UI_RADIUS + 4},
         {"page", .pad = {24, 24, 24, 24}, .gap = 24, .fill = UI_ROLE(UI_SURFACE)},        // a page of the kit's surfaces on the theme's paper: its margin, and the room between its rows
         {"cards", .gap = 24},                                                            // a row of them
@@ -27128,9 +27134,12 @@ struct ui_text
         // Hex editor mode over the same piece table (t->doc): fixed 8-digit offset, 16 bytes/row, dual Hex + ASCII panes.
         b32 hex, hex_ascii, hex_nibble, hex_insert;
         p64 hex_top;
-        // IDE polish: cached matching bracket pair, vertical scrollbar interaction, gutter line-drag selection, and live find highlight.
+        // IDE polish: cached matching bracket pair, vertical scrollbar interaction, smooth squash scroll, gutter line-drag selection, and live find highlight.
         p64 bracket_a, bracket_b;
         struct ui_bar bar;
+        struct ui_scroll scroll;
+        p64 scroll_line;
+        int scroll_rem;
         b32 gutter_drag;
         p64 gutter_anchor;
         struct doc_find address_to live_find;
@@ -27735,10 +27744,39 @@ static int ui_text_where(struct ui address_to ui, struct ui_text address_to t, p
         return *x < t->left ? -1 : *x > t->right ? 1 : 0;
 }
 
+static fn ui_text_scroll_sync(struct ui_text address_to t, int height)
+{
+        p64 rows, content;
+
+        if (t->mode == UI_TEXT_FIELD || t->line_height <= 0)
+                return;
+        rows = t->hex ? (doc_length(&t->doc) / 16 + 1) : doc_line_count(&t->doc);
+        content = rows * (p64)t->line_height;
+        if (content > 0x3fffffff)
+                content = 0x3fffffff;
+        t->scroll.view = height > 0 ? height : 0;
+        t->scroll.content = (int)content;
+        t->scroll.wheel = 3 * t->line_height;
+}
+
+static fn ui_text_scroll_jump(struct ui_text address_to t)
+{
+        p64 line, pos;
+
+        if (t->mode == UI_TEXT_FIELD || t->line_height <= 0)
+                return;
+        line = t->hex ? t->hex_top / 16 : t->top_line;
+        t->scroll_line = line, t->scroll_rem = 0;
+        pos = line * (p64)t->line_height;
+        if (pos > 0x3fffffff)
+                pos = 0x3fffffff;
+        ui_scroll_set(&t->scroll, (int)pos);
+}
+
 // The view keeps the primary caret in sight:
 static fn ui_text_reveal(struct ui address_to ui, struct ui_text address_to t)
 {
-        p64 caret = t->doc.selections[t->doc.primary].active, line = doc_line_of(&t->doc, caret);
+        p64 caret = t->doc.selections[t->doc.primary].active, line = doc_line_of(&t->doc, caret), was_top = t->top_line;
         int rows = ui_text_rows(t), width = t->right - t->left, x;
         if (t->mode != UI_TEXT_FIELD)
         {
@@ -27757,6 +27795,8 @@ static fn ui_text_reveal(struct ui address_to ui, struct ui_text address_to t)
                         while (used > rows && t->top_line < line)
                                 used -= ui_text_line_rows(ui, t, t->top_line++);
                 }
+                if (t->top_line != was_top)
+                        ui_text_scroll_jump(t);
         }
         if (t->wrap && t->mode != UI_TEXT_FIELD)
         {
@@ -27781,7 +27821,11 @@ static fn ui_text_reveal(struct ui address_to ui, struct ui_text address_to t)
 static p64 ui_text_hit(struct ui address_to ui, struct ui_text address_to t, int x, int y)
 {
         struct ui_text_row row;
-        int index = y > t->top && t->line_height ? (y - t->top) / t->line_height : 0, px;
+        int uy = t->mode != UI_TEXT_FIELD && t->bottom > t->top
+                     ? ui_scroll_unpull(ui, &t->scroll, t->scroll.scroll, t->top, t->bottom - t->top, y)
+                     : y;
+        int dy = uy - t->top + (t->mode != UI_TEXT_FIELD ? t->scroll_rem : 0);
+        int index = dy > 0 && t->line_height ? dy / t->line_height : 0, px;
         ui_text_nth_row(ui, t, index < 4096 ? index : 4096, &ui_text_lay, &row);
         if (ui_text_lay.bidi)
         {
@@ -27921,6 +27965,12 @@ static long ui_text_timeout(struct ui address_to ui, struct ui_text address_to t
         struct ui_select address_to s = ui_text_sel(t);
         positive now = (positive)ui_kit_clock();
         positive wakes[3];
+        if (ui_body_going(&t->scroll.body))
+        {
+                ui_scroll_frame(ui, &t->scroll);
+                *redraw = true;
+                timeout = ui_timeout_min(timeout, ui_kit_frame_ns());
+        }
         if (ui_body_going(&s->fling))
         {
                 p64 was = t->top_line;
@@ -29661,7 +29711,8 @@ static fn ui_text_hex_layout(const struct ui_text address_to t, int x, int addre
 static p64 ui_text_hex_hit(const struct ui_text address_to t, int x, int y, b32 address_to in_ascii)
 {
         int addr_w, hex_x, ascii_x, cell = t->cell > 0 ? t->cell : 8;
-        int row = y > t->top && t->line_height > 0 ? (y - t->top) / t->line_height : 0;
+        int dy = y - t->top + t->scroll_rem;
+        int row = dy > 0 && t->line_height > 0 ? dy / t->line_height : 0;
         p64 base = t->hex_top + (p64)row * 16, len = doc_length(&t->doc), col = 0;
         ui_text_hex_layout(t, t->well_left, &addr_w, &hex_x, &ascii_x);
         if (x >= ascii_x - cell)
@@ -29691,17 +29742,12 @@ static p32 ui_text_hex_pointer(struct ui address_to ui, struct ui_text address_t
         b32 shift = (event->flags & WINDOW_KEY_SHIFT) != 0;
         if (event->type == WINDOW_EVENT_WHEEL)
         {
-                if (!well || (event->flags & WINDOW_WHEEL_STOP))
+                if (!well && !(event->flags & WINDOW_WHEEL_STOP))
                         return 0;
-                if (event->flags & WINDOW_KEY_CONTROL)
+                if (!(event->flags & WINDOW_WHEEL_STOP) && (event->flags & WINDOW_KEY_CONTROL))
                         return ui_text_hex_command(ui, t, event->a > 0 ? DOC_CMD_ZOOM_IN : DOC_CMD_ZOOM_OUT);
-                {
-                        long rows = ui_wheel_step(ui, event, t->line_height, 3, &s->wheel_rest, &s->finger_left, null);
-                        p64 total = ui_text_hex_rows_total(t);
-                        b64 to = (b64)(t->hex_top / 16) + rows;
-                        t->hex_top = (to < 0 ? 0 : (p64)to >= total ? total - 1 : (p64)to) * 16;
-                        return UI_TEXT_MOVED;
-                }
+                ui_text_scroll_sync(t, t->bottom - t->top);
+                return ui_wheel_turn(ui, &t->scroll, event) ? UI_TEXT_MOVED : 0;
         }
         if (event->type == WINDOW_EVENT_BUTTON)
         {
@@ -29770,6 +29816,7 @@ static p32 ui_text_pointer(struct ui address_to ui, struct ui_text address_to t,
                                 t->hex_top = pos * 16;
                         else
                                 t->top_line = pos;
+                        ui_text_scroll_jump(t);
                         return UI_TEXT_MOVED;
                 }
                 if (t->bar.held)
@@ -29811,15 +29858,10 @@ static p32 ui_text_pointer(struct ui address_to ui, struct ui_text address_to t,
         if (event->type == WINDOW_EVENT_WHEEL)
         {
                 long pixels;
-                b32 precise = (event->flags & WINDOW_WHEEL_PRECISE) != 0;
-                // A trackpad's lift: the hand lets go and the view is thrown on its speed, the way a finger's lift throws it (ui_select_finger_up).
                 if (event->flags & WINDOW_WHEEL_STOP)
                 {
-                        if (!s->wheel_on)
-                                return 0;
-                        s->wheel_on = false;
-                        ui_body_free(&s->fling, ui_press_velocity(&s->grab, ui_press_now()), ui_kit_time(), ui->scale, false);
-                        return ui_body_going(&s->fling) ? UI_TEXT_MOVED : 0;
+                        ui_text_scroll_sync(t, t->bottom - t->top);
+                        return ui_wheel_turn(ui, &t->scroll, event) ? UI_TEXT_MOVED : 0;
                 }
                 if (!well)
                         return 0;
@@ -29829,7 +29871,6 @@ static p32 ui_text_pointer(struct ui address_to ui, struct ui_text address_to t,
                 if ((event->b || (event->flags & WINDOW_KEY_SHIFT)) && t->wrap && t->mode != UI_TEXT_FIELD)
                         return 0;
                 s->quiet_at = now + UI_SELECT_BAR_AFTER_NS;
-                // A turn is pixels (a notch three lines or columns, a precise turn its share of UI_NOTCH, natural direction...
                 if (event->b || (event->flags & WINDOW_KEY_SHIFT))
                 {
                         struct window_event across = *event;
@@ -29840,30 +29881,10 @@ static p32 ui_text_pointer(struct ui address_to ui, struct ui_text address_to t,
                         most = most > t->scroll_x ? most : t->scroll_x;
                         to = t->scroll_x + pixels;
                         t->scroll_x = to < 0 ? 0 : to > most ? most : to;
+                        return UI_TEXT_MOVED;
                 }
-                else
-                {
-                        long lines;
-                        b64 to;
-                        // A new hand stops a throw in flight, and a precise turn is the hand: its reports are kept for the throw its lift makes.
-                        if (precise && !s->wheel_on)
-                        {
-                                ui_body_hold(&s->fling, ui_kit_time());
-                                ui_press_track_start(&s->grab, 0);
-                                s->wheel_hand = 0, s->wheel_on = true;
-                        }
-                        else if (!precise)
-                                ui_body_hold(&s->fling, ui_kit_time());
-                        lines = ui_wheel_step(ui, event, t->line_height, 3, &s->wheel_rest, &s->finger_left, &pixels);
-                        if (precise)
-                        {
-                                s->wheel_hand -= pixels;
-                                ui_press_track(&s->grab, (int)s->wheel_hand);
-                        }
-                        to = (b64)t->top_line + lines;
-                        t->top_line = to < 0 ? 0 : (p64)to >= doc_line_count(&t->doc) ? doc_line_count(&t->doc) - 1 : (p64)to;
-                }
-                return UI_TEXT_MOVED;
+                ui_text_scroll_sync(t, t->bottom - t->top);
+                return ui_wheel_turn(ui, &t->scroll, event) ? UI_TEXT_MOVED : 0;
         }
         // A finger's: its left button (the press, the lift, the compositor taking it back), the right button of its long...
         if (event->type == WINDOW_EVENT_BUTTON && ((event->a == UI_POINTER_LEFT && (event->flags & WINDOW_KEY_TOUCH)) ||
@@ -30730,64 +30751,81 @@ static fn ui_text_hex_draw(struct ui address_to ui, struct ui_text address_to t,
         t->left = x + t->gutter, t->top = y, t->right = right, t->bottom = y + height;
         t->well_left = x, t->well_top = y, t->well_right = right, t->well_bottom = y + height;
         if (t->laid_width > 0 && (width != t->laid_width || height != t->laid_height || t->line_height != t->laid_line))
-                ui_text_hex_reveal(t);
+                ui_text_hex_reveal(t), ui_text_scroll_jump(t);
         t->laid_width = width, t->laid_height = height, t->laid_line = t->line_height;
-        at = t->hex_top;
-        // Offset gutter background and column dividers (strictly clipped to [x, right)).
-        ui_text_draw_gutter_bg(ui, x, y, t->gutter, height, x + addr_w, right, ground, 110, 90);
-        if (ascii_x - cell > x && ascii_x - cell < right)
-                ui_fill(ui, ascii_x - cell, y, ui_px(ui, 1), height, hair);
-        for (row_y = y; row_y + t->line_height <= y + height && at <= len; row_y += t->line_height, at += 16)
+        ui_text_scroll_sync(t, height);
+        if (t->hex_top / 16 != t->scroll_line)
+                ui_text_scroll_jump(t);
+        ui_scroll_frame(ui, &t->scroll);
         {
-                int baseline = row_y + (t->line_height - (int)m.cell_height) / 2 + (int)m.baseline;
-                b32 cur_row = caret >= at && caret < at + 16;
-                p8 row_bytes[16];
-                positive got = at < len ? doc_read(&t->doc, at, row_bytes, len - at < 16 ? (positive)(len - at) : 16) : 0;
-                char addr[12];
-                if (cur_row && t->focused)
+                int drawn = t->scroll.scroll;
+                int rest = ui_scroll_rest(&t->scroll, drawn, height);
+                int old_top = ui->top, old_bottom = ui->bottom;
+
+                t->scroll_line = (p64)(rest / t->line_height);
+                t->hex_top = t->scroll_line * 16;
+                t->scroll_rem = rest % t->line_height;
+                at = t->hex_top;
+                ui->top = y > old_top ? y : old_top;
+                ui->bottom = y + height < old_bottom ? y + height : old_bottom;
+                // Offset gutter background and column dividers (strictly clipped to [x, right)).
+                ui_text_draw_gutter_bg(ui, x, y, t->gutter, height, x + addr_w, right, ground, 110, 90);
+                if (ascii_x - cell > x && ascii_x - cell < right)
+                        ui_fill(ui, ascii_x - cell, y, ui_px(ui, 1), height, hair);
+                for (row_y = y - t->scroll_rem; row_y < y + height && at <= len; row_y += t->line_height, at += 16)
                 {
-                        unsigned int row_bg = window_mix(ground, ui_role(UI_ON_SURFACE) & 0xffffffu, 10);
-                        if (t->left < right)
-                                ui_fill(ui, t->left, row_y, right - t->left, t->line_height, 0xff000000u | row_bg);
-                }
-                for (int d = 7; d >= 0; d--)
-                        addr[7 - d] = hex[(at >> (d * 4)) & 15];
-                addr[8] = 0;
-                if (x + cell < right)
-                        ui_run_in(ui, faces, x + cell, baseline, (string_address)addr, t->size + t->zoom, cur_row ? ink : dim, cur_row ? 220 : 140,
-                                  x, x + t->gutter, 0);
-                for (positive col = 0; col < 16; col++)
-                {
-                        p64 off = at + col;
-                        int bx = hex_x + (int)col * 3 * cell + (col >= 8 ? cell : 0);
-                        int ax = ascii_x + (int)col * cell;
-                        b32 selected = sel_end > sel_start && off >= sel_start && off < sel_end;
-                        b32 is_caret = off == caret;
-                        if (off > len)
-                                break;
-                        if (selected)
+                        int baseline = row_y + (t->line_height - (int)m.cell_height) / 2 + (int)m.baseline;
+                        b32 cur_row = caret >= at && caret < at + 16;
+                        p8 row_bytes[16];
+                        positive got = at < len ? doc_read(&t->doc, at, row_bytes, len - at < 16 ? (positive)(len - at) : 16) : 0;
+                        char addr[12];
+                        if (cur_row && t->focused)
                         {
-                                unsigned int tone = ui_tone(sel_bg & 0xffffffu, sel_bg >> 24);
-                                ui_fill_clip_x(ui, bx, row_y, 2 * cell, t->line_height, right, tone);
-                                ui_fill_clip_x(ui, ax, row_y, cell, t->line_height, right, tone);
+                                unsigned int row_bg = window_mix(ground, ui_role(UI_ON_SURFACE) & 0xffffffu, 10);
+                                if (t->left < right)
+                                        ui_fill(ui, t->left, row_y, right - t->left, t->line_height, 0xff000000u | row_bg);
                         }
-                        else if (is_caret && t->focused)
-                                ui_fill_clip_x(ui, t->hex_ascii ? bx : ax, row_y, t->hex_ascii ? 2 * cell : cell, t->line_height, right, ui_tone(accent, 42));
-                        if (col < got)
+                        for (int d = 7; d >= 0; d--)
+                                addr[7 - d] = hex[(at >> (d * 4)) & 15];
+                        addr[8] = 0;
+                        if (x + cell < right)
+                                ui_run_in(ui, faces, x + cell, baseline, (string_address)addr, t->size + t->zoom, cur_row ? ink : dim, cur_row ? 220 : 140,
+                                          x, x + t->gutter, 0);
+                        for (positive col = 0; col < 16; col++)
                         {
-                                p8 b = row_bytes[col];
-                                char pair[3] = {hex[b >> 4], hex[b & 15], 0};
-                                char ch[2] = {b >= 0x20 && b <= 0x7e ? (char)b : '.', 0};
-                                unsigned int hcol = b == 0 ? dim : (b >= 0x20 && b <= 0x7e) ? ink : info;
-                                if (bx < right)
-                                        ui_run_in(ui, faces, bx, baseline, (string_address)pair, t->size + t->zoom, hcol, b == 0 ? 120 : 255, t->left, right, 0);
-                                if (ax < right)
-                                        ui_run_in(ui, faces, ax, baseline, (string_address)ch, t->size + t->zoom,
-                                                  b >= 0x20 && b <= 0x7e ? ink : dim, b >= 0x20 && b <= 0x7e ? 255 : 110, t->left, right, 0);
+                                p64 off = at + col;
+                                int bx = hex_x + (int)col * 3 * cell + (col >= 8 ? cell : 0);
+                                int ax = ascii_x + (int)col * cell;
+                                b32 selected = sel_end > sel_start && off >= sel_start && off < sel_end;
+                                b32 is_caret = off == caret;
+                                if (off > len)
+                                        break;
+                                if (selected)
+                                {
+                                        unsigned int tone = ui_tone(sel_bg & 0xffffffu, sel_bg >> 24);
+                                        ui_fill_clip_x(ui, bx, row_y, 2 * cell, t->line_height, right, tone);
+                                        ui_fill_clip_x(ui, ax, row_y, cell, t->line_height, right, tone);
+                                }
+                                else if (is_caret && t->focused)
+                                        ui_fill_clip_x(ui, t->hex_ascii ? bx : ax, row_y, t->hex_ascii ? 2 * cell : cell, t->line_height, right, ui_tone(accent, 42));
+                                if (col < got)
+                                {
+                                        p8 b = row_bytes[col];
+                                        char pair[3] = {hex[b >> 4], hex[b & 15], 0};
+                                        char ch[2] = {b >= 0x20 && b <= 0x7e ? (char)b : '.', 0};
+                                        unsigned int hcol = b == 0 ? dim : (b >= 0x20 && b <= 0x7e) ? ink : info;
+                                        if (bx < right)
+                                                ui_run_in(ui, faces, bx, baseline, (string_address)pair, t->size + t->zoom, hcol, b == 0 ? 120 : 255, t->left, right, 0);
+                                        if (ax < right)
+                                                ui_run_in(ui, faces, ax, baseline, (string_address)ch, t->size + t->zoom,
+                                                          b >= 0x20 && b <= 0x7e ? ink : dim, b >= 0x20 && b <= 0x7e ? 255 : 110, t->left, right, 0);
+                                }
+                                if (is_caret && t->focused && t->caret_fade < UI_CARET_FULL)
+                                        ui_text_draw_caret(ui, t, t->hex_ascii ? ax : bx + (t->hex_nibble ? cell : 0), row_y, right, !t->hex_insert, false);
                         }
-                        if (is_caret && t->focused && t->caret_fade < UI_CARET_FULL)
-                                ui_text_draw_caret(ui, t, t->hex_ascii ? ax : bx + (t->hex_nibble ? cell : 0), row_y, right, !t->hex_insert, false);
                 }
+                ui->top = old_top, ui->bottom = old_bottom;
+                ui_scroll_pull(ui, &t->scroll, drawn, x, y, width, height);
         }
         ui_text_bar_draw(ui, t);
 }
@@ -30840,6 +30878,27 @@ static fn ui_text_draw(struct ui address_to ui, struct ui_text address_to t, int
                 ui_text_reveal(ui, t);
         t->laid_width = width, t->laid_height = height, t->laid_line = t->line_height;
         ui_text_bracket_sync(t);
+        int drawn_scroll = 0, old_top = ui->top, old_bottom = ui->bottom;
+        if (t->mode != UI_TEXT_FIELD && t->line_height > 0)
+        {
+                ui_text_scroll_sync(t, height);
+                if (t->top_line != t->scroll_line)
+                        ui_text_scroll_jump(t);
+                ui_scroll_frame(ui, &t->scroll);
+                drawn_scroll = t->scroll.scroll;
+                {
+                        int rest = ui_scroll_rest(&t->scroll, drawn_scroll, height);
+
+                        t->top_line = (p64)(rest / t->line_height);
+                        if (t->top_line >= lines && lines > 0)
+                                t->top_line = lines - 1;
+                        t->scroll_line = t->top_line;
+                        t->scroll_rem = rest % t->line_height;
+                        line = t->top_line;
+                }
+                ui->top = y > old_top ? y : old_top;
+                ui->bottom = y + height < old_bottom ? y + height : old_bottom;
+        }
         if (!doc_length(&t->doc) && t->placeholder && !t->preedit_length)
         {
                 unsigned int text = ui_text_colour(ui, UI_ON_SURFACE_VARIANT), alpha = 255;
@@ -30849,7 +30908,8 @@ static fn ui_text_draw(struct ui address_to ui, struct ui_text address_to t, int
                 ui_run_in(ui, faces, start, t->top + m.baseline, (string_address)t->placeholder,
                           t->size + t->zoom, text & 0xffffffu, alpha, t->left, t->right, 0);
         }
-        for (row_y = t->top; row_y + t->line_height <= t->bottom + (t->mode == UI_TEXT_FIELD) && line < lines; line++)
+        for (row_y = t->top - (t->mode != UI_TEXT_FIELD ? t->scroll_rem : 0);
+             (t->mode == UI_TEXT_FIELD ? row_y + t->line_height <= t->bottom + 1 : row_y < t->bottom) && line < lines; line++)
         {
                 p64 hidden_to;
                 int baseline = row_y + (t->line_height - (int)m.cell_height) / 2 + (int)m.baseline;
@@ -30902,11 +30962,15 @@ static fn ui_text_draw(struct ui address_to ui, struct ui_text address_to t, int
                                                           !wrap || to >= ui_text_lay.count);
                                 row_y += t->line_height;
                                 from = to;
-                        } while (wrap && from < ui_text_lay.count && row_y + t->line_height <= t->bottom);
+                        } while (wrap && from < ui_text_lay.count && row_y < t->bottom);
                 }
         }
         if (t->mode != UI_TEXT_FIELD)
+        {
+                ui->top = old_top, ui->bottom = old_bottom;
+                ui_scroll_pull(ui, &t->scroll, drawn_scroll, x, y, width, height);
                 ui_text_bar_draw(ui, t);
+        }
 }
 
 // A kit field (UI_INPUT) with a text widget behind it:
