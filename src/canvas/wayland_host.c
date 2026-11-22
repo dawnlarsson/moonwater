@@ -5572,7 +5572,9 @@ static int compositor_wl_key_row(void)
         if (row < 0)
                 return -1;
         row = compositor_popup_top(row);
-        while (row >= 0 && compositor_popup_parent[row] >= 0 && wayland_row_owner(row) >= 0 && !wayland_row_grabs(row))
+        // Bounded: a popup chain that loops (comp-manage has a possible cycle) is walked at most one pass over the rows.
+        for (unsigned int depth = 0; row >= 0 && depth < COMPOSITOR_ROWS && compositor_popup_parent[row] >= 0 && wayland_row_owner(row) >= 0 &&
+                                     !wayland_row_grabs(row); depth++)
                 row = compositor_popup_parent[row];
         return wayland_row_owner(row) >= 0 ? row : -1;
 }
@@ -6062,11 +6064,21 @@ static void compositor_wl_stop(void)
                 if (compositor_wl.fd[slot] >= 0)
                         compositor_wl_drop(slot);
         wayland_stop();
+        // Each transfer's thread is joined before the knock descriptor it writes to is closed: a thread that outlived it would knock on whatever
+        // number the next descriptor was given.
         for (long at = 0; at < compositor_wl.transfers; at++)
                 if (compositor_wl.transfer[at].state && !compositor_wl.transfer[at].worker)
                         compositor_wl_transfer_free(at);
                 else if (compositor_wl.transfer[at].state)
+                {
                         compositor_wl_transfer_cancel(at);
+                        thread_join(compositor_wl.transfer[at].worker);
+                        compositor_wl.transfer[at].worker = 0;
+                        compositor_wl_transfer_free(at);
+                }
+        if (compositor_wl.wake >= 0)
+                system_close(compositor_wl.wake);
+        compositor_wl.wake = -1;
         if (compositor_wl.dmabuf_table > 0)
                 system_close(compositor_wl.dmabuf_table);
         compositor_wl.dmabuf_table = 0;
