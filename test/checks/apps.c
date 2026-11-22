@@ -9891,6 +9891,14 @@ static void check_term_parameters(void)
         term_bytes((const p8 address_to) "xy", 2);
         check("term params: a pty that ended inside a CSI does not swallow the next session's first byte as its final", row_cells(0)[0].character == 'x' && row_cells(0)[1].character == 'y');
         full_reset();
+        {
+                static const char answer[] = "\x1bP0+r\x1b\\";
+
+                to_shell_length = 0;
+                term_bytes((const p8 address_to) "\x1bP+qrm -rf x\x1b\\", 14);
+                check("term hostile: an XTGETTCAP for a name we do not answer is 0+r with no echo of the name", to_shell_length == sizeof(answer) - 1 && !memory_compare(to_shell, answer, sizeof(answer) - 1));
+                to_shell_length = 0;
+        }
 }
 
 /*

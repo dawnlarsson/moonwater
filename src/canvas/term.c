@@ -724,9 +724,7 @@ static fn dcs_answer(void)
                                 stop++;
                         if (!answering())
                                 return;
-                        emit_literal("\x1bP0+r");
-                        emit_bytes(osc_bytes + at, stop - at);
-                        emit_literal("\x1b\\");
+                        emit_literal("\x1bP0+r\x1b\\");
                         at = stop + 1;
                 }
 }
