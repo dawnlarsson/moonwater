@@ -5704,6 +5704,18 @@ static fn check_kit_tokens(void)
         ui_tokens_draw(&ui, &k, 0, 0, 400, 60);
         check("token field: an invalid field draws its error outline across the top", pixels[0] != 0 && pixels[399] == pixels[0] && pixels[0] == (0xff000000u | (ui_role(UI_ERROR) & 0xffffffu)));
 
+        // A chip's text is the field's: its width less the chip's padding is the plain text's width in the field, so a token keeps its width.
+        {
+                static struct ui_text_layout plain;
+                int pad = ui_dev(&ui, 8), chip_w, plain_w;
+                ui_tokens_draw(&ui, &k, 0, 0, 400, 60);
+                chip_w = k.chip_right[1] - k.chip_left[1] - 2 * pad;
+                ui_text_layout_line(&ui, &k.text, 0, &plain);
+                plain_w = ui_text_x_of(&plain, 5) - ui_text_x_of(&plain, 1);
+                check("token field: a chip's width less its padding is the plain width of its name in the field ('home')",
+                      chip_w > 0 && chip_w == plain_w);
+        }
+
         // Overflow: a narrow box holds the caret's token and the last ones; the leading tokens go behind the … chip, which a menu pick names.
         {
                 static struct ui_tokens narrow;

@@ -31765,6 +31765,8 @@ static void ui_tokens_lay(struct ui address_to ui, struct ui_tokens address_to k
         for (int t = 0; t < k->count; t++)
                 if (caret >= (p64)k->start[t] && (caret < (p64)k->finish[t] || t + 1 == k->count))
                         k->active = t;
+        // A chip's text is the field's own: its width is the plain text's width in the field, so a token keeps its width when the caret enters it.
+        ui_text_layout_line(ui, &k->text, 0, &ui_text_lay);
         for (int t = 0; t < k->count; t++)
         {
                 positive length = k->label[t] - k->start[t];
@@ -31774,10 +31776,13 @@ static void ui_tokens_lay(struct ui address_to ui, struct ui_tokens address_to k
                         continue;
                 memory_copy(label, bytes + k->start[t], length), label[length] = 0;
                 string_copy_bounded((string_address)k->hidden[t], (string_address)label, sizeof(k->hidden[t]));
-                width[t] = ui_kit_measure(ui, (string_address)label, UI_BODY_MEDIUM) + 2 * pad;
+                width[t] = ui_text_x_of(&ui_text_lay, (p64)k->label[t]) - ui_text_x_of(&ui_text_lay, (p64)k->start[t]) + 2 * pad;
         }
         // The room from each token on, gaps included: when they do not all fit, the leading tokens before the caret's go behind the … chip.
-        overflow_w = ui_kit_measure(ui, (string_address) "\xe2\x80\xa6", UI_BODY_MEDIUM) + 2 * pad;
+        {
+                const font_face address_to faces[2] = {ui_text_face(ui, &k->text), ui->regular};
+                overflow_w = ui_advance_flagged(ui, faces, (string_address) "\xe2\x80\xa6", 3, ui_text_em(ui, &k->text), ui_text_flags(&k->text)) + 2 * pad;
+        }
         rest[k->count] = 0;
         for (int t = k->count - 1; t >= 0; t--)
                 rest[t] = rest[t + 1] + (width[t] ? width[t] + gap : 0);
@@ -31819,19 +31824,21 @@ static fn ui_tokens_draw(struct ui address_to ui, struct ui_tokens address_to k,
         for (int t = 0; t < k->count; t++)
         {
                 positive length = k->label[t] - k->start[t];
-                int x0 = k->chip_left[t], x1 = k->chip_right[t], text_w;
+                int x0 = k->chip_left[t], x1 = k->chip_right[t];
                 if (x0 < 0 || !length)
                         continue;
                 memory_copy(label, bytes + k->start[t], length), label[length] = 0;
-                text_w = ui_kit_measure(ui, (string_address)label, UI_BODY_MEDIUM);
+                const font_face address_to faces[2] = {ui_text_face(ui, &k->text), ui->regular};
                 ui_round(ui, x0, top + ui_dev(ui, 4), x1 - x0, height - 2 * ui_dev(ui, 4), ui_dev(ui, 8), 0xff000000u | chip);
-                ui_kit_text(ui, x0 + pad + (x1 - x0 - 2 * pad - text_w) / 2, baseline, (string_address)label, UI_BODY_MEDIUM, 0xff000000u | ink, 0);
+                ui_run_in(ui, faces, x0 + pad, baseline, (string_address)label, k->text.size + k->text.zoom, ink, 255, x0, x1, 0);
         }
         if (k->overflow > 0)
         {
                 // The … chip that stands for the leading tokens behind it.
                 ui_round(ui, k->overflow_left, top + ui_dev(ui, 4), k->overflow_right - k->overflow_left, height - 2 * ui_dev(ui, 4), ui_dev(ui, 8), 0xff000000u | chip);
-                ui_kit_text(ui, k->overflow_left + pad, baseline, (string_address) "\xe2\x80\xa6", UI_BODY_MEDIUM, 0xff000000u | ink, 0);
+                const font_face address_to faces[2] = {ui_text_face(ui, &k->text), ui->regular};
+                ui_run_in(ui, faces, k->overflow_left + pad, baseline, (string_address) "\xe2\x80\xa6", k->text.size + k->text.zoom, ink, 255, k->overflow_left,
+                          k->overflow_right, 0);
         }
         if (k->active_left >= 0 && k->active_right > k->active_left)
         {
