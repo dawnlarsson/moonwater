@@ -3987,6 +3987,9 @@ static void compositor_wl_transfer_run(address_any context)
                         continue;
                 if (pull)
                 {
+                        // A client that streams past the clipboard's largest size is cut off here: what it sent is not kept (pull_end drops it).
+                        if (total + done >= WINDOWS_CLIP_MOST)
+                                break;
                         got = compositor_call(syscall(read), (positive)fd, (positive)bytes, sizeof bytes, 0, 0, 0);
                         if (got == -11) continue;
                         if (got == 0) result = 2;
@@ -4266,6 +4269,8 @@ static void compositor_wl_pull_end(long at, int ok)
 
         if (t->drop) { compositor_wl_drag_pulled(at, ok); return; }
         system_close(t->in), t->in = -1;
+        if (t->total + got > WINDOWS_CLIP_MOST)
+                ok = 0;
         if (ok && type && t->reading == t->text)
         {
                 long mapped = got ? compositor_call(syscall(mmap), 0, (positive)(t->total + got), 1, 1, (positive)t->keep, 0) : -22;
