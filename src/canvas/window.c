@@ -1908,7 +1908,7 @@ static b32 window_trace_room(long size, long length)
 
 static b32 window_trace_write(const char address_to line, positive length)
 {
-        long handle = window_call(WINDOW_SYS_OPENAT, -100, (long)WINDOW_TRACE_LOG, WINDOW_TRACE_APPEND, 0644, 0, 0), size;
+        long handle = window_call(WINDOW_SYS_OPENAT, -100, (long)WINDOW_TRACE_LOG, WINDOW_TRACE_APPEND, 0600, 0, 0), size;
         b32 wrote = false;
 
         if (handle < 0)
@@ -1932,7 +1932,7 @@ static void window_trace_touch(void)
                 window_call(WINDOW_SYS_CLOSE, handle, 0, 0, 0, 0, 0);
         if (window_trace_live && !was)
         {
-                long fresh = window_call(WINDOW_SYS_OPENAT, -100, (long)WINDOW_TRACE_LOG, WINDOW_TRACE_NEW, 0644, 0, 0);
+                long fresh = window_call(WINDOW_SYS_OPENAT, -100, (long)WINDOW_TRACE_LOG, WINDOW_TRACE_NEW, 0600, 0, 0);
 
                 if (fresh >= 0)
                         window_call(WINDOW_SYS_CLOSE, fresh, 0, 0, 0, 0, 0);
