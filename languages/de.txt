@@ -275,6 +275,7 @@ settings_column_signal	4529	Signal
 settings_column_status	f20f	Status
 settings_copied	0bd7	in die Zwischenablage kopiert
 settings_copy_both	257a	Bezeichnung und Wert kopieren
+settings_copy_failed	7e08	konnte nicht in die Zwischenablage kopiert werden
 settings_copy_line	56a6	%1$s: %2$s
 settings_copy_value	f3e5	Wert kopieren
 settings_device_deny	fa87	Verweigern

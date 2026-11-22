@@ -276,6 +276,7 @@ settings_column_signal	4529	سگنل
 settings_column_status	f20f	حالت
 settings_copied	0bd7	کلپ بورڈ پر کاپی ہو گیا
 settings_copy_both	257a	لیبل اور قدر کاپی کریں
+settings_copy_failed	7e08	کلپ بورڈ پر کاپی نہیں ہو سکا
 settings_copy_line	56a6	%1$s: %2$s
 settings_copy_value	f3e5	قدر کاپی کریں
 settings_device_deny	fa87	انکار

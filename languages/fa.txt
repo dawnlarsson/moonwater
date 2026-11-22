@@ -276,6 +276,7 @@ settings_column_signal	4529	سیگنال
 settings_column_status	f20f	وضعیت
 settings_copied	0bd7	در کلیپ‌بورد کپی شد
 settings_copy_both	257a	کپی برچسب و مقدار
+settings_copy_failed	7e08	در کلیپ‌بورد کپی نشد
 settings_copy_line	56a6	%1$s: %2$s
 settings_copy_value	f3e5	کپی مقدار
 settings_device_deny	fa87	رد

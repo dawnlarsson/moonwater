@@ -275,6 +275,7 @@ settings_column_signal	4529	Señal
 settings_column_status	f20f	Estado
 settings_copied	0bd7	copiado al portapapeles
 settings_copy_both	257a	Copiar etiqueta y valor
+settings_copy_failed	7e08	no se pudo copiar al portapapeles
 settings_copy_line	56a6	%1$s: %2$s
 settings_copy_value	f3e5	Copiar valor
 settings_device_deny	fa87	Denegar

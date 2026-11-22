@@ -275,6 +275,7 @@ settings_column_signal	4529	Сигнал
 settings_column_status	f20f	Состояние
 settings_copied	0bd7	скопировано в буфер обмена
 settings_copy_both	257a	Копировать название и значение
+settings_copy_failed	7e08	не удалось скопировать в буфер обмена
 settings_copy_line	56a6	%1$s: %2$s
 settings_copy_value	f3e5	Копировать значение
 settings_device_deny	fa87	Запретить

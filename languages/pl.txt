@@ -275,6 +275,7 @@ settings_column_signal	4529	Sygnał
 settings_column_status	f20f	Stan
 settings_copied	0bd7	skopiowano do schowka
 settings_copy_both	257a	Kopiuj etykietę i wartość
+settings_copy_failed	7e08	nie udało się skopiować do schowka
 settings_copy_line	56a6	%1$s: %2$s
 settings_copy_value	f3e5	Kopiuj wartość
 settings_device_deny	fa87	Odmów

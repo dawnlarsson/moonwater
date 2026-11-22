@@ -275,6 +275,7 @@ settings_column_signal	4529	Segnale
 settings_column_status	f20f	Stato
 settings_copied	0bd7	copiato negli appunti
 settings_copy_both	257a	Copia etichetta e valore
+settings_copy_failed	7e08	impossibile copiare negli appunti
 settings_copy_line	56a6	%1$s: %2$s
 settings_copy_value	f3e5	Copia valore
 settings_device_deny	fa87	Nega

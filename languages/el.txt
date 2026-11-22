@@ -275,6 +275,7 @@ settings_column_signal	4529	Σήμα
 settings_column_status	f20f	Κατάσταση
 settings_copied	0bd7	αντιγράφηκε στο πρόχειρο
 settings_copy_both	257a	Αντιγραφή ετικέτας και τιμής
+settings_copy_failed	7e08	δεν ήταν δυνατή η αντιγραφή στο πρόχειρο
 settings_copy_line	56a6	%1$s: %2$s
 settings_copy_value	f3e5	Αντιγραφή τιμής
 settings_device_deny	fa87	Άρνηση

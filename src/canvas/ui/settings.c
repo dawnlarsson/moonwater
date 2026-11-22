@@ -399,6 +399,12 @@ static int settings_section_start(int row);
 static fn settings_rebuild(void);
 static fn settings_sort_runs(void);
 static fn settings_say(string_address text);
+static unsigned int settings_copy_serial; // the table's clipboard serial when a row's menu opened: a copy that took moves it
+// A copy's word: copied when the clipboard took it, and that it could not be copied when it did not (the window has no clipboard to put it on).
+static fn settings_offered(b32 taken)
+{
+        settings_say(taken ? (string_address)WORDS(settings_copied) : (string_address)WORDS(settings_copy_failed));
+}
 static struct settings_item address_to settings_item(int row);
 
 enum { SETTINGS_TRY_REPEAT = 0, SETTINGS_TRY_CLICK = 1, SETTINGS_TRY_POINTER = 2, SETTINGS_TRIES = 3 };
@@ -549,7 +555,7 @@ static fn settings_toggle(int row)
         settings_rebuild();
 }
 
-static void settings_copy(int at) { if (at >= 0 && at < settings_sub_count) windows_clip_offer(&settings.own, WINDOWS_CLIP_CLIPBOARD, settings_sub[at].text, string_length((string_address)settings_sub[at].text)), settings_say((string_address)WORDS(settings_copied)); }
+static void settings_copy(int at) { if (at >= 0 && at < settings_sub_count) settings_offered(windows_clip_offer(&settings.own, WINDOWS_CLIP_CLIPBOARD, settings_sub[at].text, string_length((string_address)settings_sub[at].text)) == 0); }
 
 static void settings_badge(int row, struct ui_row address_to out)
 {
@@ -1744,8 +1750,7 @@ static fn settings_about_press(int id)
                                 return settings_say((string_address)WORDS(settings_opened));
                 }
         }
-        windows_clip_offer(&settings.own, WINDOWS_CLIP_CLIPBOARD, url, string_length((string_address)url));
-        settings_say((string_address)WORDS(settings_copied));
+        settings_offered(windows_clip_offer(&settings.own, WINDOWS_CLIP_CLIPBOARD, url, string_length((string_address)url)) == 0);
 }
 
 #define SETTINGS_FNV64_SEED 1469598103934665603ull
@@ -4229,8 +4234,13 @@ static fn settings_copy_row_text(int id, char address_to into, positive room)
         else string_copy_bounded((string_address)into, (string_address)value, room);
 }
 
-static fn settings_row_copied(int id) { (void)id; settings_say((string_address)WORDS(settings_copied)); }
-static fn settings_row_before_menu(int before, int row) { settings_menu_close(); if (row != before) ui_confirm_drop(&settings.confirm), settings_said_of(before); }
+static fn settings_row_copied(int id)
+{
+        (void)id;
+        // The list offers the copy and then tells the app: the row was copied when the offer took, which the serial the menu opened on says.
+        settings_offered(settings.own.table && settings.own.table->clip_offer_serial[settings.own.row] != settings_copy_serial);
+}
+static fn settings_row_before_menu(int before, int row) { settings_copy_serial = settings.own.table ? settings.own.table->clip_offer_serial[settings.own.row] : 0; settings_menu_close(); if (row != before) ui_confirm_drop(&settings.confirm), settings_said_of(before); }
 
 static fn settings_row_menu_act(int id, int item_id)
 {

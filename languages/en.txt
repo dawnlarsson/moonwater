@@ -271,6 +271,7 @@ settings_column_signal	4529	Signal
 settings_column_status	f20f	Status
 settings_copied	0bd7	copied to the clipboard
 settings_copy_both	257a	Copy label and value
+settings_copy_failed	7e08	could not be copied to the clipboard
 settings_copy_line	56a6	%1$s: %2$s
 settings_copy_value	f3e5	Copy value
 settings_device_deny	fa87	Deny

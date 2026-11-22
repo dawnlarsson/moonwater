@@ -275,6 +275,7 @@ settings_column_signal	4529	Signal
 settings_column_status	f20f	État
 settings_copied	0bd7	copié dans le presse-papiers
 settings_copy_both	257a	Copier le libellé et la valeur
+settings_copy_failed	7e08	impossible de copier dans le presse-papiers
 settings_copy_line	56a6	%1$s : %2$s
 settings_copy_value	f3e5	Copier la valeur
 settings_device_deny	fa87	Refuser

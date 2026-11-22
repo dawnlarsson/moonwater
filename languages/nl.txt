@@ -275,6 +275,7 @@ settings_column_signal	4529	Signaal
 settings_column_status	f20f	Status
 settings_copied	0bd7	gekopieerd naar het klembord
 settings_copy_both	257a	Label en waarde kopiëren
+settings_copy_failed	7e08	kon niet naar het klembord worden gekopieerd
 settings_copy_line	56a6	%1$s: %2$s
 settings_copy_value	f3e5	Waarde kopiëren
 settings_device_deny	fa87	Weigeren

@@ -6242,6 +6242,21 @@ static fn check_settings_actions(void)
         check("settings copies: the right button on a row with a value opens Copy value and Copy label and value at the pointer", opened);
         check("settings copies: Copy value puts the row's value on the clipboard, exactly", copied);
         check("settings copies: and Copy label and value its label and its value", both);
+        // A copy the clipboard declines says it could not be copied, and not that it was: the same row, its window no longer this process's.
+        {
+                unsigned int owner = settings.own.table->pid[settings.own.row];
+                b32 declined_says = false;
+
+                settings.own.table->pid[settings.own.row] = 0;
+                actions_show(info);
+                actions_middle(info, &x, &y);
+                actions_press(UI_POINTER_RIGHT, x, y, 0);
+                actions_pick(0, 0);
+                declined_says = string_equals((string_address)settings.status, (string_address)WORDS(settings_copy_failed)) &&
+                                !string_equals((string_address)settings.status, (string_address)WORDS(settings_copied));
+                settings.own.table->pid[settings.own.row] = owner;
+                check("settings copies: a copy the clipboard declines says it could not be copied, and not that it was copied", declined_says);
+        }
         // The menu key, and Shift-F10, open them under the row the keys are on, the first lit: Enter copies.
         actions_show(info);
         settings_press(SETTINGS_KEY_MENU);
@@ -7612,6 +7627,7 @@ static fn settings_least_check(void)
                                 for (int at = 0; at < settings.list.count; at++)
                                         if (!settings_least_row(settings.list.id[at]))
                                         {
+                                                string_format(log, "  TRACE least row %b label %s width %b\n", (bipolar)settings.list.id[at], settings_label(settings.list.id[at]), (bipolar)settings.width); log_flush();
                                                 if (rows)
                                                         string_format(log, "  settings least: at scale %b, group %b, row %b overlaps or runs past its end\n", (bipolar)scale,
                                                                       (bipolar)group, (bipolar)settings.list.id[at]);

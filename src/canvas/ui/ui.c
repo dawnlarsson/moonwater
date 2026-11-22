@@ -6721,6 +6721,7 @@ LANGUAGE_ID(settings_column_signal, "Signal") \
 LANGUAGE_ID(settings_column_status, "Status") \
 LANGUAGE_ID(settings_copied, "copied to the clipboard") \
 LANGUAGE_ID(settings_copy_both, "Copy label and value") \
+LANGUAGE_ID(settings_copy_failed, "could not be copied to the clipboard") \
 LANGUAGE_ID(settings_copy_line, "%1$s: %2$s") \
 LANGUAGE_ID(settings_copy_value, "Copy value") \
 LANGUAGE_ID(settings_device_deny, "Deny") \

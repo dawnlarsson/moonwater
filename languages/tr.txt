@@ -275,6 +275,7 @@ settings_column_signal	4529	Sinyal
 settings_column_status	f20f	Durum
 settings_copied	0bd7	panoya kopyalandı
 settings_copy_both	257a	Etiketi ve değeri kopyala
+settings_copy_failed	7e08	panoya kopyalanamadı
 settings_copy_line	56a6	%1$s: %2$s
 settings_copy_value	f3e5	Değeri kopyala
 settings_device_deny	fa87	Reddet

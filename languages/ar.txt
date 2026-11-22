@@ -276,6 +276,7 @@ settings_column_signal	4529	الإشارة
 settings_column_status	f20f	الحالة
 settings_copied	0bd7	نُسخ إلى الحافظة
 settings_copy_both	257a	نسخ التسمية والقيمة
+settings_copy_failed	7e08	تعذّر نسخه إلى الحافظة
 settings_copy_line	56a6	%1$s: %2$s
 settings_copy_value	f3e5	نسخ القيمة
 settings_device_deny	fa87	رفض

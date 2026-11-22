@@ -275,6 +275,7 @@ settings_column_signal	4529	Signal
 settings_column_status	f20f	Status
 settings_copied	0bd7	kopierat till urklippet
 settings_copy_both	257a	Kopiera etikett och värde
+settings_copy_failed	7e08	kunde inte kopieras till urklippet
 settings_copy_line	56a6	%1$s: %2$s
 settings_copy_value	f3e5	Kopiera värde
 settings_device_deny	fa87	Neka

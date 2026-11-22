@@ -276,6 +276,7 @@ settings_column_signal	4529	אות
 settings_column_status	f20f	מצב
 settings_copied	0bd7	הועתק ללוח הגזירים
 settings_copy_both	257a	העתק תווית וערך
+settings_copy_failed	7e08	לא ניתן היה להעתיק ללוח הגזירים
 settings_copy_line	56a6	%1$s: %2$s
 settings_copy_value	f3e5	העתק ערך
 settings_device_deny	fa87	דחה
