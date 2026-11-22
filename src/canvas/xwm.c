@@ -18,6 +18,8 @@
 #define COMPOSITOR_XWM_OUT 131072
 #define COMPOSITOR_XWM_SETUP_NS 5000000000ull
 #define COMPOSITOR_XWM_TARGETS_MOST 64
+#define COMPOSITOR_XWM_ATOMS_MAX 2048
+#define COMPOSITOR_XWM_LIST_MAX 1024 /* TARGETS and MULTIPLE lists, in entries: the stack holds them, so they are not 64 KiB */
 #define COMPOSITOR_XWM_BIND_NS 15000000000ull
 #define COMPOSITOR_XWM_AF_SUP 1u
 #define COMPOSITOR_XWM_AF_POP 2u
@@ -1397,6 +1399,8 @@ static long xwm_atom_add(struct compositor_xwm *x, unsigned int atom, const unsi
 {
         long at;
 
+        if (x->atom_table.count >= COMPOSITOR_XWM_ATOMS_MAX)
+                return -1; /* a hostile client's XdndEnter or TARGETS names no more than this many atoms per connection (x11 S1) */
         wayland_tables_host(&compositor_wl_host);
         x->name_table.unit = 1;
         if (length && !wayland_table_reach(&x->name_table, x->name_bytes + (long)length))
@@ -2081,8 +2085,8 @@ static void xwm_put_timestamp(struct compositor_xwm *x, unsigned int requestor, 
 
 static void compositor_xwm_targets(struct compositor_xwm *x, const struct xwm_event *e, int which, unsigned int property, int quiet)
 {
-        unsigned int atoms[XWM_PROPERTY_MAX / 4], count = 0, atom;
-        unsigned char data[XWM_PROPERTY_MAX];
+        unsigned int atoms[COMPOSITOR_XWM_LIST_MAX], count = 0, atom;
+        unsigned char data[COMPOSITOR_XWM_LIST_MAX * 4];
         const char *types = 0, *name, *entry;
         unsigned long length, n;
         int text = 0;
@@ -2209,7 +2213,7 @@ static void compositor_xwm_multiple_reply(struct compositor_xwm *x, const unsign
 {
         struct compositor_xwm_out *o = compositor_xwm_out_at(x, (long)p->slot), multiple;
         struct xwm_property_reply r;
-        unsigned char pairs[XWM_PROPERTY_MAX];
+        unsigned char pairs[COMPOSITOR_XWM_LIST_MAX * 8];
         unsigned long count;
 
         if (!o || o->requestor != p->window || o->stage != COMPOSITOR_XWM_OUT_MULTIPLE)

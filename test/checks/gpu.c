@@ -4400,14 +4400,16 @@ static void xwm_atom_rows(void)
         __typeof__(compositor_xwm_slots[0]) saved = *x;
         b32 found = true;
         long named, dup;
+        int over;
 
         *x = compositor_xwm_fresh;
         compositor_xwm_at = x;
-        for (unsigned int k = 1; k <= 5000; k++)
+        for (unsigned int k = 1; k <= 2047; k++)
                 compositor_xwm_atom_add(k * 7919u, 0, 0, 0);
-        for (unsigned int k = 1; k <= 5000; k++)
+        for (unsigned int k = 1; k <= 2047; k++)
                 found = found && compositor_xwm_atom_index(k * 7919u) == (long)k - 1;
         named = compositor_xwm_atom_add(0, (const unsigned char *)"UTF8_STRING", 11, 0);
+        over = compositor_xwm_atom_add(5000u * 7919u, 0, 0, 0) < 0 && compositor_xwm_atom_index(5000u * 7919u) < 0;
         found = found && compositor_xwm_atom_index(3u) < 0 && compositor_xwm_atom_index(0) < 0;
         compositor_xwm_interned((const unsigned char[32]){1, 0, 0, 0, 0, 0, 0, 0, 7919u * 3 & 0xff, 7919u * 3 >> 8 & 0xff, 7919u * 3 >> 16 & 0xff, 0},
                                 32, &(struct compositor_xwm_pending){.slot = (unsigned int)named});
@@ -4429,9 +4431,9 @@ static void xwm_atom_rows(void)
                 x->fd = kept_fd;
                 wayland_table_drop(&x->window_table), wayland_table_drop(&x->window_index), x->windows = 0, x->window = 0;
         }
-        check("xwm atoms: 5000 atoms each found by the index at their record, none for one not there, the first record of an atom two have, an interned "
-              "name's found by its reply's atom",
-              found && named == 5000 && dup == 2 && x->atoms_indexed == 5001);
+        check("xwm atoms: 2047 atoms each found by the index at their record, none for one not there, the first record of an atom two have, an interned "
+              "name's found by its reply's atom, and an atom past the cap of 2048 refused",
+              found && named == 2047 && dup == 2 && over && x->atoms_indexed == 2048);
         wayland_table_drop(&x->atom_table), wayland_table_drop(&x->atom_index), wayland_table_drop(&x->name_table);
         *x = saved;
         compositor_xwm_at = kept;
