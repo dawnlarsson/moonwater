@@ -1222,16 +1222,29 @@ static void xwm_restore_size(struct compositor_xwm *x, struct compositor_xwm_win
         }
 }
 
+/* A newly mapped X toplevel takes the keys, as an asked Wayland toplevel does: a game the person launched is focused when it maps
+   (the first-take ask is the table's, and a row already taken is focused now). Popups, transients and windows that take no input
+   (WM_HINTS input false: focus comes by WM_TAKE_FOCUS) never take them here. The compositor's focus then sets the X input focus. */
+static void compositor_xwm_takes_keys(const struct compositor_xwm_window *w, int row)
+{
+        if (!compositor.table || row < 0 || row >= COMPOSITOR_ROWS || compositor_xwm_is_popup(w) || w->transient || w->no_input)
+                return;
+        __atomic_store_n(&compositor.table->asked[row], 1u, __ATOMIC_RELEASE);
+        if (compositor.showing[row] && compositor_visible(row))
+                compositor_raise(row), compositor_focus(row);
+}
+
 static void compositor_xwm_resolve(struct compositor_xwm *x, struct compositor_xwm_window *w)
 {
         long row;
-        int covers = -1;
+        int covers = -1, fresh = 0;
 
         if (!(w->state & COMPOSITOR_XWM_SERIAL) || (w->state & COMPOSITOR_XWM_TRAY_ICON) ||
             (!(w->state & COMPOSITOR_XWM_OVERRIDE) && !(w->state & COMPOSITOR_XWM_PROPS_READ)))
                 return;
         if (!(w->state & COMPOSITOR_XWM_ADOPTED) || w->dirty)
         {
+                fresh = !(w->state & COMPOSITOR_XWM_ADOPTED);
                 struct compositor_xwm_window *owner = w->transient ? xwm_find(x, w->transient, 0) : 0;
                 long how = (compositor_xwm_is_popup(w) ? WAYLAND_XWINDOW_POPUP : 0) | (w->placed ? WAYLAND_XWINDOW_PLACED : 0) |
                            WAYLAND_XWINDOW_OWNER(owner && owner->row >= 0 && owner->row < COMPOSITOR_ROWS ? owner->row : -1);
@@ -1267,6 +1280,8 @@ static void compositor_xwm_resolve(struct compositor_xwm *x, struct compositor_x
                 else if (w->state & COMPOSITOR_XWM_MAXIMIZED)
                         compositor_arrange((int)row, COMPOSITOR_ROOM);
         }
+        if (fresh)
+                compositor_xwm_takes_keys(w, (int)row);
 }
 
 static void compositor_xwm_fullscreen(struct compositor_xwm *x, struct compositor_xwm_window *w, int on)
