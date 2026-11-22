@@ -3389,7 +3389,9 @@ static void windows_proc_fd(char *path, unsigned int pid, unsigned int number)
 /* A clip file is read only when it is sealed against write, grow and shrink (the compositor's own rule, manage.c). */
 static int windows_clip_sealed(long fd)
 {
-        return window_call(WINDOW_SYS_FCNTL, fd, WINDOWS_F_GET_SEALS, 0, 0, 0, 0) == WINDOWS_CLIP_SEALS;
+        long seals = window_call(WINDOW_SYS_FCNTL, fd, WINDOWS_F_GET_SEALS, 0, 0, 0, 0);
+
+        return seals >= 0 && ((unsigned long)seals & WINDOWS_CLIP_SEALS) == WINDOWS_CLIP_SEALS;
 }
 
 static const unsigned char *windows_clip_map(unsigned int pid, unsigned int which, unsigned long want)
