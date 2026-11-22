@@ -957,11 +957,14 @@ static fn launcher_layout(void)
         if (!launcher.list.ids)
                 launcher.list.ids = LAUNCHER_ROWS, launcher.list.describe = launcher_describe,
                 launcher.list.damaged = launcher_damaged, launcher.list.hover = launcher.list.down = -1;
-        launcher.list.count = (int)launcher.entries;
-        if (!ui_list_reserve(&launcher.list, launcher.list.count))
-                launcher.list.count = 0;
-        for (int at = 0; at < launcher.list.count; at++)
-                launcher.list.id[at] = at;
+        ui_list_begin(&launcher.list);
+        for (int at = 0; at < (int)launcher.entries; at++)
+                if (!ui_list_add(&launcher.list, at))
+                {
+                        ui_list_begin(&launcher.list);
+                        break;
+                }
+        ui_list_end(&launcher.list);
         launcher.list.lit = true;
         launcher_build(launcher.height);
 }
