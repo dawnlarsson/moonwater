@@ -2841,6 +2841,9 @@ static bool big_multiply_ntt(p64 address_to r, const p64 address_to a, positive 
 
         if (an + bn > ((positive)1 << 30))
                 return false;
+        if (an > positive_max - bn || an + bn > positive_max / (10 * sizeof(p64)))
+                return false;
+
         while (length < an + bn)
                 length <<= 1;
 
@@ -3486,7 +3489,13 @@ static bool base58_level_next(base58_level address_to level, bool inverse)
         positive scale = next->scale;
         positive rn2 = next->inverse_used;
         positive dn2 = next->power_used;
+        if (dn2 > positive_max - rn2)
+                return false;
         positive room = max(scale, dn2 + rn2);
+        if (room > positive_max / sizeof(p64) - 1 ||
+            rn2 > positive_max / sizeof(p64) - 1 - room ||
+            scale > positive_max / sizeof(p64) - 1 - room - rn2)
+                return false;
         p64 address_to error = (p64 address_to)memory_take((room + rn2 + scale + 1) * sizeof(p64));
         p64 address_to step = error + room;
 
@@ -3551,6 +3560,10 @@ static bipolar base58_split(p64 address_to x, positive address_to x_used,
         positive xn = address_to x_used;
         positive skip = dn > 2 ? dn - 2 : 0;
         positive qn = 0;
+        if (xn > positive_max / sizeof(p64) - 2 ||
+            level->inverse_used > positive_max / sizeof(p64) - 2 - xn ||
+            dn > positive_max / sizeof(p64) - 2 - xn - level->inverse_used)
+                return -1;
         p64 address_to work = (p64 address_to)memory_take(
             (xn + level->inverse_used + dn + 2) * sizeof(p64));
 
@@ -3642,6 +3655,8 @@ static bool base58_digits(p64 address_to x, positive used,
         }
 
         const base58_level address_to level = levels + j;
+        if (level->power_used >= positive_max / sizeof(p64))
+                return false;
         p64 address_to q = (p64 address_to)memory_take((level->power_used + 1) * sizeof(p64));
         bipolar qn = q ? base58_split(x, address_of used, level, q) : -1;
         bool made = qn >= 0 &&
@@ -3706,8 +3721,10 @@ static p64 address_to base58_value(const p8 address_to digits, positive count,
         p64 address_to low = high ? base58_value(digits + count - low_count, low_count, levels,
                                                  address_of low_used)
                                   : null;
-        positive room = high_used + level->power_used + 1;
-        p64 address_to value = low ? (p64 address_to)memory_take(room * sizeof(p64)) : null;
+        bool room_ok = high_used < positive_max / sizeof(p64) &&
+                       level->power_used < positive_max / sizeof(p64) - high_used;
+        positive room = room_ok ? high_used + level->power_used + 1 : 0;
+        p64 address_to value = (low && room_ok) ? (p64 address_to)memory_take(room * sizeof(p64)) : null;
 
         if (value && big_multiply(value, high, high_used, level->power, level->power_used))
         {
@@ -8086,7 +8103,7 @@ static b32 text_wc()
                                 if (!text_regular_size(0, address_of size))
                                         unknown = true;
                                 else
-                                        known += size;
+                                        known = size > positive_max - known ? positive_max : known + size;
 
                                 continue;
                         }
@@ -8105,7 +8122,7 @@ static b32 text_wc()
                         // What the inode says, even where it says nothing:
                         // GNU pads to the digits of the sizes it was told,
                         // and a /proc file that reports none is a zero.
-                        known += facts.size;
+                        known = facts.size > positive_max - known ? positive_max : known + facts.size;
                 }
 
                 if (unknown)
@@ -11882,8 +11899,12 @@ static bipolar tee_write(positive handle, p8 address_to at, positive left)
                         return wrote.error ? wrote.error : -ERROR_INPUT_OUTPUT;
 
                 system_poll_descriptor room = {(b32)handle, SYSTEM_POLL_WRITE, 0};
+                bipolar polled;
 
-                if (system_poll_wait(address_of room, 1, null, null) < 0)
+                while ((polled = system_poll_wait(address_of room, 1, null, null)) == -4) // EINTR
+                        ;
+
+                if (polled < 0)
                         return -ERROR_AGAIN;
         }
 
@@ -11956,8 +11977,11 @@ static b32 text_tee()
         // Set aside for the copy only, and put back after it, so the shell
         // this may be running in goes on as it was.
         positive previous[4];
+        positive previous_int[4];
         bool quiet = mode != TEE_SIGPIPE &&
                      system_signal_install(SIGNAL_PIPE, 1, 0, 0, previous);
+        bool ignore_int = (taking.flags & FILE_FLAG('i')) != 0 &&
+                          system_signal_install(SIGNAL_INTERRUPT, 1, 0, 0, previous_int);
 
         positive outputs = 1;
         b32 status = 0;
@@ -12118,6 +12142,9 @@ finished:
                         status = 1;
 
         system_call_2(syscall(munmap), (positive)handles, mapped_bytes);
+
+        if (ignore_int)
+                system_signal_action(SIGNAL_INTERRUPT, previous_int, null, 8);
 
         if (quiet)
                 system_signal_action(SIGNAL_PIPE, previous, null, 8);
@@ -12376,7 +12403,7 @@ static b32 text_nl()
                                                            regex_failure_reason()));
 
                 if (!regex_keep_checked(nl_patterns + pattern_count))
-                        return text_done(string_diagnostic(&text_diagnostic, 2, null, "memory exhausted"));
+                        return text_done(string_diagnostic(&text_diagnostic, 1, null, "memory exhausted"));
                 patterns[k] = pattern_count++;
         }
 
@@ -14542,8 +14569,8 @@ static b32 text_fmt()
         {
                 string_address value = file_option_value(address_of taking, 'g');
 
-                if (!text_xnum(value, 0, width, 0, "invalid width",
-                               address_of goal))
+                if (!text_xnum(value, 0, width_value ? width : 2500, 0,
+                               "invalid width", address_of goal))
                         return text_done(1);
 
                 if (!width_value)
@@ -15309,9 +15336,8 @@ static fn pr_add_line_number(pr_column address_to p)
                 pr_input_position += pr_number_width;
 }
 
-static fn pr_align_column(pr_column address_to p)
+static fn pr_pad_separator()
 {
-        pr_padding_not_printed = p->start_position;
         if (pr_col_sep_length < pr_padding_not_printed)
         {
                 pr_pad_across_to(pr_padding_not_printed - pr_col_sep_length);
@@ -15320,6 +15346,12 @@ static fn pr_align_column(pr_column address_to p)
 
         if (pr_use_col_separator)
                 pr_print_sep_string();
+}
+
+static fn pr_align_column(pr_column address_to p)
+{
+        pr_padding_not_printed = p->start_position;
+        pr_pad_separator();
 
         if (p->numbered)
                 pr_add_line_number(p);
@@ -15665,14 +15697,7 @@ static bool pr_read_line(pr_column address_to p)
                         pr_align_empty_cols = false;
                 }
 
-                if (pr_col_sep_length < pr_padding_not_printed)
-                {
-                        pr_pad_across_to(pr_padding_not_printed - pr_col_sep_length);
-                        pr_padding_not_printed = PR_ANYWHERE;
-                }
-
-                if (pr_use_col_separator)
-                        pr_print_sep_string();
+                pr_pad_separator();
         }
 
         if (p->numbered)
@@ -15771,14 +15796,7 @@ static bool pr_print_stored(pr_column address_to p)
                 }
         }
 
-        if (pr_col_sep_length < pr_padding_not_printed)
-        {
-                pr_pad_across_to(pr_padding_not_printed - pr_col_sep_length);
-                pr_padding_not_printed = PR_ANYWHERE;
-        }
-
-        if (pr_use_col_separator)
-                pr_print_sep_string();
+        pr_pad_separator();
 
         while (first != last)
         {
@@ -24815,13 +24833,16 @@ static b32 text_uniq()
         p8 address_to hold = text_record_hold;
         p8 address_to previous = hold;
         positive previous_length = 0;
+        positive previous_skip = 0;
+        positive previous_key_len = 0;
         bool have_previous = false;
         bool shown_group = false;
         bool plain = !counting && !repeated_only && !unique_only &&
                      !all_repeated && !grouping;
         positive count = 0;
         positive gap = grouping ? group_how : all_how;
-        bool whole = !skip_fields && !skip_characters && !bounded && !fold && !all_repeated && !grouping;
+        bool skipping = skip_fields || skip_characters;
+        bool whole = !skipping && !bounded && !fold && !all_repeated && !grouping;
         positive control = (positive)counting | (positive)repeated_only << 1 | (positive)unique_only << 2 |
                            (positive)text_delimiter << 8;
 
@@ -24865,6 +24886,8 @@ static b32 text_uniq()
                                         text_input.position += took;
                                         count = state[0];
                                         previous_length = state[1];
+                                        previous_skip = 0;
+                                        previous_key_len = previous_length;
                                         previous = at + took - previous_length - 1;
                                         continue;
                                 }
@@ -24873,6 +24896,8 @@ static b32 text_uniq()
 
                 p8 address_to line = null;
                 positive line_length = 0;
+                positive line_skip = 0;
+                positive line_key_len = 0;
                 bool more = text_line_view(address_of line,
                                            address_of line_length,
                                            address_of previous,
@@ -24883,33 +24908,23 @@ static b32 text_uniq()
                         // The compared part starts after the skipped fields
                         // and then after the skipped characters, which is the
                         // order POSIX puts them in.
-                        bool skipping = skip_fields || skip_characters;
-                        positive skip = skipping ? uniq_skipped(line, line_length, skip_fields,
-                                                                skip_characters)
-                                                 : 0;
-                        positive previous_skip =
-                            skipping ? uniq_skipped(previous, previous_length, skip_fields,
-                                                    skip_characters)
-                                     : 0;
-
-                        positive one = line_length - skip;
-                        positive two = previous_length - previous_skip;
-
+                        line_skip = skipping ? uniq_skipped(line, line_length, skip_fields,
+                                                            skip_characters)
+                                             : 0;
+                        line_key_len = line_length - line_skip;
                         if (bounded)
-                        {
-                                one = uniq_bytes_of(line + skip, one, compare_width);
-                                two = uniq_bytes_of(previous + previous_skip, two, compare_width);
-                        }
+                                line_key_len = uniq_bytes_of(line + line_skip, line_key_len,
+                                                             compare_width);
 
-                        bool same = have_previous && one == two;
+                        bool same = have_previous && line_key_len == previous_key_len;
 
                         if (same)
                                 same = !(fold
                                              ? memory_compare_ascii_case(
-                                                   line + skip,
-                                                   previous + previous_skip, one)
-                                             : memory_compare(line + skip,
-                                                              previous + previous_skip, one));
+                                                   line + line_skip,
+                                                   previous + previous_skip, line_key_len)
+                                             : memory_compare(line + line_skip,
+                                                              previous + previous_skip, line_key_len));
 
                         if (same)
                         {
@@ -24920,15 +24935,11 @@ static b32 text_uniq()
                                         each line of a group is written when
                                         the next one proves it repeats, and -u
                                         takes away the one that closes the
-                                        group. So the line before this one goes
-                                        out now and this one becomes the line
-                                        before, and the last of a group never
-                                        does. Equal compared parts are equal to
-                                        each other, so comparing with the line
-                                        just read groups exactly as comparing
-                                        with the first of the group did.
+                                        group. -D without -u prints the first
+                                        line when count reaches 2, then every
+                                        subsequent line as it arrives.
                                 */
-                                if (all_repeated && unique_only)
+                                if (all_repeated && (unique_only || count == 2))
                                 {
                                         if (count == 2 &&
                                             (gap == UNIQ_GROUP_PREPEND ||
@@ -24937,28 +24948,14 @@ static b32 text_uniq()
 
                                         shown_group = true;
                                         text_put(previous, previous_length + 1);
-                                        previous = line;
-                                        previous_length = line_length;
-                                        continue;
-                                }
-
-                                /*
-                                        -D and --group both print every line
-                                        of a group rather than one of them, so
-                                        the rest of a group goes out as it
-                                        arrives. -D cannot do that until the
-                                        second line proves the group repeats,
-                                        which is where the first one is caught
-                                        up on.
-                                */
-                                if (all_repeated && count == 2)
-                                {
-                                        if (gap == UNIQ_GROUP_PREPEND ||
-                                            (gap == UNIQ_GROUP_SEPARATE && shown_group))
-                                                text_put_character(text_delimiter);
-
-                                        shown_group = true;
-                                        text_put(previous, previous_length + 1);
+                                        if (unique_only)
+                                        {
+                                                previous = line;
+                                                previous_length = line_length;
+                                                previous_skip = line_skip;
+                                                previous_key_len = line_key_len;
+                                                continue;
+                                        }
                                 }
 
                                 if ((all_repeated && count >= 2) || grouping)
@@ -25033,6 +25030,8 @@ static b32 text_uniq()
 
                 previous = line;
                 previous_length = line_length;
+                previous_skip = line_skip;
+                previous_key_len = line_key_len;
                 have_previous = true;
                 count = 1;
 
@@ -27185,18 +27184,23 @@ static bool grep_many_build(bool icase, p8 boundary, p8 delimiter)
                 goto done;
 
         // Every string as the classes of its bytes, one after another.
-        for (positive i = 0, at = 0, put = 0; i < total; i++)
+        positive put = 0;
+
+        for (positive i = 0, at = 0; i < total; i++)
         {
                 const p8 address_to newline = memory_first_of(line + at, '\n',
                                                               grep_many_used - at);
                 positive length = (positive)(newline - (line + at));
 
+                if (length > 0xffffffffu)
+                        goto done;
+
                 start[i] = put;
                 size[i] = (p32)length;
                 order[i] = (p32)i;
 
-                for (positive k = 0; k < length; k++)
-                        norm[put + k] = many->classes[line[at + k]];
+                if (length)
+                        memory_copy_apart(norm + put, line + at, length);
 
                 put += length;
                 at += length + 1;
@@ -27204,6 +27208,9 @@ static bool grep_many_build(bool icase, p8 boundary, p8 delimiter)
                 if (length > longest)
                         longest = length;
         }
+
+        if (put)
+                memory_translate(norm, put, many->classes);
 
         grep_many_sort(norm, start, size, order, scratch, stack, total);
 
@@ -28471,6 +28478,20 @@ static bool grep_bytes_hold(const grep_plan address_to plan,
         has no ceiling either. Once a string has been seen, the rest of the
         record is only a hunt for its delimiter.
 */
+static inline INLINE fn grep_binary_check(const grep_plan address_to plan,
+                                          grep_state address_to state,
+                                          p8 address_to at, positive left)
+{
+        if (!plan->binary)
+                return;
+
+        grep_binary_scan(plan->binary, state->offset);
+
+        if (plan->binary->from != positive_max &&
+            (!plan->zap_hits || grep_bytes_hold(plan, at, left)))
+                grep_binary_zap(at, left);
+}
+
 static fn grep_record_stream(const grep_plan address_to plan,
                              grep_state address_to state)
 {
@@ -28508,14 +28529,7 @@ static fn grep_record_stream(const grep_plan address_to plan,
                         and one the string crosses into from the read before
                         is found by the edge whole either way.
                 */
-                if (plan->binary)
-                {
-                        grep_binary_scan(plan->binary, state->offset);
-
-                        if (plan->binary->from != positive_max &&
-                            (!plan->zap_hits || grep_bytes_hold(plan, at, left)))
-                                grep_binary_zap(at, left);
-                }
+                grep_binary_check(plan, state, at, left);
 
                 p8 address_to stop = memory_first_of(at, text_delimiter, left);
                 positive size = stop ? (positive)(stop - at) : left;
@@ -28564,14 +28578,7 @@ static fn grep_record_stream(const grep_plan address_to plan,
                 p8 address_to at = text_input.buffer + text_input.position;
                 positive left = text_input.filled - text_input.position;
 
-                if (plan->binary)
-                {
-                        grep_binary_scan(plan->binary, state->offset);
-
-                        if (plan->binary->from != positive_max &&
-                            (!plan->zap_hits || grep_bytes_hold(plan, at, left)))
-                                grep_binary_zap(at, left);
-                }
+                grep_binary_check(plan, state, at, left);
 
                 p8 address_to stop = memory_first_of(at, text_delimiter, left);
 
@@ -35488,8 +35495,29 @@ static b32 sed_in_place_open(string_address address_to name_io,
         return 1;
 }
 
+static fn sed_close_files()
+{
+        for (b32 c = 0; c < sed_file_count; c++)
+                if (sed_file_handles[c] >= 0)
+                {
+                        if (system_close(sed_file_handles[c]) < 0)
+                                sed_io_failed = true;
+                        sed_file_handles[c] = -1;
+                }
+
+        for (b32 c = 0; c < sed_reader_count; c++)
+                if (sed_reader_open[c] && sed_readers[c])
+                {
+                        text_close_handle(address_of sed_readers[c]->opened,
+                                          sed_readers[c]->handle);
+                        sed_reader_open[c] = 0;
+                }
+}
+
 static b32 text_sed()
 {
+        text_begin("sed");
+
         //      Held here, and ended here without them as GNU's xalloc_die
         //      ends: a way out of this function is one the compiler splits
         //      its hot loop away from.
@@ -35498,7 +35526,7 @@ static b32 text_sed()
                     !byte_store_reserve(address_of sed_stores[s], 4096, 4096))
                 {
                         string_diagnostic(&text_diagnostic, 0, null, "memory exhausted");
-                        return 4;
+                        return text_done(4);
                 }
         b32 leaving = -1;
         file_taking taking = {
@@ -35513,7 +35541,6 @@ static b32 text_sed()
             .seen = sed_option_seen,
         };
 
-        text_begin("sed");
         sed_stdio_fill[0] = sed_stdio_fill[1] = 0;
         sed_stdio_items[0] = sed_stdio_items[1] = 0;
 
@@ -35616,13 +35643,17 @@ static b32 text_sed()
 
                 if (sed_file_handles[c] < 0)
                 {
+                        sed_close_files();
                         string_diagnostic(&text_diagnostic, 0, name, "couldn't open file");
                         return text_done(4);
                 }
         }
 
         if (sed_in_place && !text_files_count)
+        {
+                sed_close_files();
                 return text_done(string_diagnostic(&text_diagnostic, 4, null, "no input files"));
+        }
 
         b32 inputs = text_input_count();
 
@@ -35650,7 +35681,10 @@ static b32 text_sed()
                             address_of written, address_of output_stage,
                             address_of replaced, address_of input_facts);
                         if (opened == -2)
+                        {
+                                sed_close_files();
                                 return text_done(4);
+                        }
                         if (opened < 0)
                                 break;
                         if (!opened)
@@ -35761,8 +35795,9 @@ static b32 text_sed()
                                             !array_store_reserve(sed_append_which, sed_append_which_room,
                                                                  append_count, append_count + 1, 16))
                                         {
+                                                sed_space_full = true;
                                                 string_diagnostic(&text_diagnostic, 4, null, "memory exhausted");
-                                                exit(4);
+                                                goto space_full;
                                         }
                                         sed_append_kind[append_count] = kind;
                                         sed_append_which[append_count++] =
@@ -35992,15 +36027,7 @@ cycle_done:
                         break;
         }
 
-        for (b32 c = 0; c < sed_file_count; c++)
-                if (sed_file_handles[c] >= 0)
-                        if (system_close(sed_file_handles[c]) < 0)
-                                sed_io_failed = true;
-
-        for (b32 c = 0; c < sed_reader_count; c++)
-                if (sed_reader_open[c] && sed_readers[c])
-                        text_close_handle(address_of sed_readers[c]->opened,
-                                          sed_readers[c]->handle);
+        sed_close_files();
 
         if (sed_io_failed)
                 return text_done(string_diagnostic(&text_diagnostic, 4, null, "write error"));
@@ -39070,6 +39097,34 @@ static bool sort_locale_set()
 // One line of --debug's commentary, after whatever the tool still holds.
 #define sort_debug_say(...) (text_flush(), string_format(writer_stderr, __VA_ARGS__))
 
+static positive sort_flags_format(p8 address_to letters, bool blanks,
+                                  positive how, positive kinds, bool reverse)
+{
+        static const struct { p8 mask; p8 letter; bool is_how; } rows[] = {
+            {SORT_DICTIONARY, 'd', true},
+            {SORT_FOLD, 'f', true},
+            {SORT_KIND_G, 'g', false},
+            {SORT_KIND_H, 'h', false},
+            {SORT_PRINTABLE, 'i', true},
+            {SORT_KIND_M, 'M', false},
+            {SORT_KIND_N, 'n', false},
+            {SORT_KIND_R, 'R', false},
+        };
+        positive used = 0;
+
+        if (blanks)
+                letters[used++] = 'b';
+        for (positive i = 0; i < array_count(rows); i++)
+                if ((rows[i].is_how ? how : kinds) & rows[i].mask)
+                        letters[used++] = rows[i].letter;
+        if (reverse)
+                letters[used++] = 'r';
+        if (kinds & SORT_KIND_V)
+                letters[used++] = 'V';
+        letters[used] = 0;
+        return used;
+}
+
 static fn sort_debug_warnings(sort_ordering address_to defaults, b32 count, bool only)
 {
         positive ignore = defaults->how & (SORT_DICTIONARY | SORT_PRINTABLE);
@@ -39194,31 +39249,9 @@ static fn sort_debug_warnings(sort_ordering address_to defaults, b32 count, bool
         if (ignore || fold || start || stop || kinds || (reverse && stays && count))
         {
                 p8 letters[16];
-                positive used = 0;
-
-                if (start || stop)
-                        letters[used++] = 'b';
-                if (ignore == SORT_DICTIONARY)
-                        letters[used++] = 'd';
-                if (fold)
-                        letters[used++] = 'f';
-                if (kinds & SORT_KIND_G)
-                        letters[used++] = 'g';
-                if (kinds & SORT_KIND_H)
-                        letters[used++] = 'h';
-                if (ignore == SORT_PRINTABLE)
-                        letters[used++] = 'i';
-                if (kinds & SORT_KIND_M)
-                        letters[used++] = 'M';
-                if (kinds & SORT_KIND_N)
-                        letters[used++] = 'n';
-                if (kinds & SORT_KIND_R)
-                        letters[used++] = 'R';
-                if (reverse && stays)
-                        letters[used++] = 'r';
-                if (kinds & SORT_KIND_V)
-                        letters[used++] = 'V';
-                letters[used] = 0;
+                positive used = sort_flags_format(
+                    letters, start || stop,
+                    ignore | (fold ? SORT_FOLD : 0), kinds, reverse && stays);
 
                 sort_debug_say(used == 1 ? "%s: option '-%s' is ignored\n"
                                          : "%s: options '-%s' are ignored\n",
@@ -41862,28 +41895,9 @@ static bool sort_order_settle(sort_ordering address_to order)
 
         if (count > 1)
         {
-                p8 letters[12];
-                positive used = 0;
+                p8 letters[16];
 
-                if (order->how & SORT_DICTIONARY)
-                        letters[used++] = 'd';
-                if (order->how & SORT_FOLD)
-                        letters[used++] = 'f';
-                if (kinds & SORT_KIND_G)
-                        letters[used++] = 'g';
-                if (kinds & SORT_KIND_H)
-                        letters[used++] = 'h';
-                if (order->how & SORT_PRINTABLE)
-                        letters[used++] = 'i';
-                if (kinds & SORT_KIND_M)
-                        letters[used++] = 'M';
-                if (kinds & SORT_KIND_N)
-                        letters[used++] = 'n';
-                if (kinds & SORT_KIND_R)
-                        letters[used++] = 'R';
-                if (kinds & SORT_KIND_V)
-                        letters[used++] = 'V';
-                letters[used] = 0;
+                sort_flags_format(letters, false, order->how, kinds, false);
 
                 return text_complain("%s: options '-%s' are incompatible\n", text_name,
                                      letters);
@@ -44442,7 +44456,8 @@ static bool expr_pieces_multiply(p32 address_to r, const p32 address_to a, posit
                               (const p64 address_to)b, (bn + 1) / 2, EXPR_PIECE))
                 return true;
 #endif
-        if (bn >= 2 * EXPR_SCHOOL)
+        if (bn >= 2 * EXPR_SCHOOL && an <= positive_max / (2 * sizeof(p64)) &&
+            bn <= positive_max / (2 * sizeof(p64)) - an)
         {
                 p64 address_to wide = (p64 address_to)utility_arena_take((an + bn + an + bn) * sizeof(p64));
 
@@ -44507,6 +44522,10 @@ static bool expr_pieces_divide(p32 address_to q, p32 address_to r, const p32 add
                 r[0] = (p32)rest;
                 return true;
         }
+
+        if (an > positive_max / sizeof(p32) - 1 ||
+            bn > positive_max / sizeof(p32) - 1 - an)
+                return false;
 
         p32 address_to work = (p32 address_to)utility_arena_take((an + 1 + bn) * sizeof(p32));
 
@@ -44597,8 +44616,15 @@ static bool expr_pieces_divide(p32 address_to q, p32 address_to r, const p32 add
 
 static expr_value expr_pieces_result(const p32 address_to pieces, positive count, bool negative)
 {
-        p8 address_to digits = (p8 address_to)utility_arena_take(EXPR_PIECE_DIGITS * (count + 1));
         expr_value failed = {expr_empty, 0};
+
+        if (count >= positive_max / EXPR_PIECE_DIGITS)
+        {
+                expr_stop("memory exhausted");
+                return failed;
+        }
+
+        p8 address_to digits = (p8 address_to)utility_arena_take(EXPR_PIECE_DIGITS * (count + 1));
 
         if (!digits)
         {
@@ -44620,8 +44646,16 @@ static expr_value expr_big_product(expr_value address_to left,
         expr_magnitude b = expr_magnitude_of(right);
         positive an = (a.length + EXPR_PIECE_DIGITS - 1) / EXPR_PIECE_DIGITS;
         positive bn = (b.length + EXPR_PIECE_DIGITS - 1) / EXPR_PIECE_DIGITS;
-        p32 address_to x = (p32 address_to)utility_arena_take((an + bn + an + bn + 6) * sizeof(p32));
         expr_value failed = {expr_empty, 0};
+
+        if (an > (positive_max / sizeof(p32) - 6) / 2 ||
+            bn > (positive_max / sizeof(p32) - 6) / 2 - an)
+        {
+                expr_stop("memory exhausted");
+                return failed;
+        }
+
+        p32 address_to x = (p32 address_to)utility_arena_take((an + bn + an + bn + 6) * sizeof(p32));
 
         if (!x)
         {
@@ -44655,8 +44689,16 @@ static expr_value expr_big_divide(expr_value address_to left,
         expr_magnitude b = expr_magnitude_of(right);
         positive an = (a.length + EXPR_PIECE_DIGITS - 1) / EXPR_PIECE_DIGITS;
         positive bn = (b.length + EXPR_PIECE_DIGITS - 1) / EXPR_PIECE_DIGITS;
-        p32 address_to x = (p32 address_to)utility_arena_take((an + bn + an + 1 + bn + 4) * sizeof(p32));
         expr_value failed = {expr_empty, 0};
+
+        if (an > (positive_max / sizeof(p32) - 5) / 2 ||
+            bn > (positive_max / sizeof(p32) - 5) / 2 - an)
+        {
+                expr_stop("memory exhausted");
+                return failed;
+        }
+
+        p32 address_to x = (p32 address_to)utility_arena_take((an + bn + an + 1 + bn + 4) * sizeof(p32));
 
         if (!x)
         {
