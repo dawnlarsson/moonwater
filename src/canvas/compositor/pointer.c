@@ -31,36 +31,11 @@
 _Static_assert(CP_ACCEL_ONE == 1024 && CP_ACCEL_FLOOR == 1 && CP_ACCEL_CEILING == 8 && CP_ACCEL_MAX == 2560,
                "the curve pointer_gain is written for");
 
+// The integer root is ui.c's (ui_touch_isqrt, the same instructions for the same purpose); the compositor includes ui.c before
+// this file. Callers outside this file keep the name until their owners switch to ui_touch_isqrt.
 static inline INLINE CONST unsigned long long compositor_isqrt(unsigned long long value)
 {
-#if defined(__x86_64__)
-        if (likely(value < (1ull << 52)))
-        {
-                unsigned long long r;
-                __asm__("cvtsi2sdq %1, %%xmm0\n\tsqrtsd %%xmm0, %%xmm0\n\tcvttsd2siq %%xmm0, %0" : "=r"(r) : "r"(value) : "xmm0");
-                return r;
-        }
-#elif defined(__aarch64__)
-        if (likely(value < (1ull << 52)))
-        {
-                unsigned long long r;
-                __asm__("ucvtf d0, %1\n\tfsqrt d0, d0\n\tfcvtzu %0, d0" : "=r"(r) : "r"(value) : "d0");
-                return r;
-        }
-#endif
-        unsigned long long root = 0, bit = 1ull << 62;
-
-        while (bit > value)
-                bit >>= 2;
-        for (; bit; bit >>= 2)
-                if (value >= root + bit)
-                {
-                        value -= root + bit;
-                        root = (root >> 1) + bit;
-                }
-                else
-                        root >>= 1;
-        return root;
+        return ui_touch_isqrt(value);
 }
 
 // The gain of one movement of the hand, dx and dy together, in the time since the last: the distance's whole root, the speed
