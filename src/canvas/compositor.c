@@ -1775,10 +1775,22 @@ static unsigned int compositor_rows_grow(unsigned int want)
         return compositor_rows_in_use;
 }
 
+// The table's rows_wanted as the compositor last saw it: a client that asked for rows (windows_rows_ask) grows them here, once per ask.
+static unsigned int compositor_rows_asked;
+
 static void compositor_rows_spare(void)
 {
         unsigned int free = 0, step = compositor_rows_in_use / 2 > COMPOSITOR_ROWS_SPARE ? compositor_rows_in_use / 2 : COMPOSITOR_ROWS_SPARE;
+        unsigned int wanted;
+
         if (!compositor.table || compositor_rows_in_use >= compositor_rows_room) return;
+        wanted = __atomic_load_n(&compositor.table->rows_wanted, __ATOMIC_ACQUIRE);
+        if (wanted != compositor_rows_asked)
+        {
+                compositor_rows_asked = wanted;
+                compositor_rows_grow(compositor_rows_in_use + step);
+                return;
+        }
         for (unsigned int row = compositor_rows_in_use; row-- > 0 && free < COMPOSITOR_ROWS_SPARE;)
                 free += __atomic_load_n(&compositor.table->pid[row], __ATOMIC_ACQUIRE) == 0;
         if (free < COMPOSITOR_ROWS_SPARE) compositor_rows_grow(compositor_rows_in_use + step);
