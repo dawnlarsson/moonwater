@@ -57,6 +57,8 @@
 #define WAYLAND_TABLE_PAGE 4096L
 #define WAYLAND_TABLE_FIRST 64L
 #define WAYLAND_OBJECTS (1L << 17) /* live objects per client */
+#define WAYLAND_CLIENT_IDS_MAX (1UL << 21) /* max client-allocated object id (bounds WLT_INDEX to 8 MiB/client) */
+#define WAYLAND_POOLS_MAX 1024L /* live wl_shm_pools per client (prevents vm.max_map_count exhaustion) */
 #define WAYLAND_IDS_MAX 4096 /* one seat, device or relative-pointer list per client */
 #define WAYLAND_MIME_BYTES (64L << 10) /* all the mime types one source offers, NULs included */
 #define WAYLAND_SUB_LEVELS 32L /* subsurface nesting; flatten and the sub walks recurse once per level */
@@ -909,7 +911,7 @@ static long wayland_object_new(struct wayland_client *c, unsigned long id, long 
         /* live objects (the table's count less its free slots) are bounded per client: a refused new_id is a client error */
         if (c->tbl[WLT_OBJECT].count - c->tbl[WLT_OBJECT].frees >= WAYLAND_OBJECTS)
                 return -1;
-        if (!(id >= 1 && id < WAYLAND_IDS) && !(id >= WAYLAND_SERVER_BASE && id - WAYLAND_SERVER_BASE < WAYLAND_SERVER_IDS))
+        if (!(id >= 1 && id < WAYLAND_CLIENT_IDS_MAX) && !(id >= WAYLAND_SERVER_BASE && id - WAYLAND_SERVER_BASE < WAYLAND_SERVER_IDS))
                 return -1;
         if (id < WAYLAND_IDS)
         {
@@ -2249,7 +2251,7 @@ enum
 
 static int wayland_new_fail(struct wayland_client *c, unsigned long self, unsigned long id)
 {
-        if (id < 1 || id >= WAYLAND_IDS || (long)id > (c->tbl[WLT_INDEX].count > 1 ? c->tbl[WLT_INDEX].count : 1) + WAYLAND_ID_GAP)
+        if (id < 1 || id >= WAYLAND_CLIENT_IDS_MAX || (long)id > (c->tbl[WLT_INDEX].count > 1 ? c->tbl[WLT_INDEX].count : 1) + WAYLAND_ID_GAP)
                 return wayland_fail(c, self, WAYLAND_INVALID_OBJECT, "the new id is out of range");
         return wayland_slot_of(c, id) >= 0 ? wayland_fail(c, self, WAYLAND_INVALID_OBJECT, "the new id is in use")
                                            : wayland_fail(c, 1, WAYLAND_NO_MEMORY, "no memory for the object");
@@ -2986,6 +2988,8 @@ static int wayland_shm_request(struct wayland_client *c, struct wayland_object *
         (void)op;
         if (size < 1 || size > WAYLAND_POOL_BYTES)
                 return wayland_fail(c, self->id, WLN_wl_shm_error_invalid_stride, "the pool's size is out of range");
+        if (c->tbl[WLT_POOL].count - c->tbl[WLT_POOL].frees >= WAYLAND_POOLS_MAX)
+                return wayland_fail(c, self->id, WAYLAND_NO_MEMORY, "too many pools");
         if ((pool = wayland_tbl_alloc(c, WLT_POOL)) < 0)
                 return wayland_fail(c, self->id, WAYLAND_NO_MEMORY, "no memory for the pool");
         at = wayland.host->map(wayland.host->context, a[1].fd, size);
@@ -3235,7 +3239,8 @@ static int wayland_wm_base_request(struct wayland_client *c, struct wayland_obje
                         return wayland_fail(c, self->id, WAYLAND_INVALID_OBJECT, "the surface is gone");
                 if (s->flags & WAYLAND_SURFACE_XDG)
                         return wayland_fail(c, self->id, WLN_xdg_wm_base_error_role, "the surface has an xdg_surface");
-                if (s->xsurface || (s->role != WAYLAND_ROLE_NONE && s->role != WAYLAND_ROLE_TOPLEVEL && s->role != WAYLAND_ROLE_POPUP))
+                if (s->xsurface || s->role_id || (s->role == WAYLAND_ROLE_TOPLEVEL && s->u.top.layer_shell) ||
+                    (s->role != WAYLAND_ROLE_NONE && s->role != WAYLAND_ROLE_TOPLEVEL && s->role != WAYLAND_ROLE_POPUP))
                         return wayland_fail(c, self->id, WLN_xdg_wm_base_error_role, "the surface has another role");
                 if (s->width || (s->pending.attach_made && s->pending.attached))
                         return wayland_fail(c, self->id, WLN_xdg_wm_base_error_invalid_surface_state, "the surface has a buffer");

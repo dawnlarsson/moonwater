@@ -62,7 +62,7 @@ struct compositor_wl_client { int uid; unsigned char asked; positive slow_until;
 
 static struct
 {
-        int listen, *fd, *pid, started, handler, wake, hold_row, hold;
+        int listen, *fd, *pid, started, handler, wake, hold_row, hold, uid;
         unsigned char *barred, *cursor_asked, *row_blend, *wc_reads, *wc_copy;
         struct compositor_wl_client *client;
         long slots, polled, transfers, dmabuf_table_size, dmabuf_entry_count, zero_row, map_live, map_hint, drag_reading;
@@ -421,6 +421,8 @@ static void *compositor_wl_map(void *context, long fd, long size)
         return 0;
 }
 
+static void wl_ext_row_sync(int row);
+
 static void *compositor_wl_remap(void *context, void *at, long old_size, long new_size)
 {
         long got, reserved = -1;
@@ -429,6 +431,8 @@ static void *compositor_wl_remap(void *context, void *at, long old_size, long ne
         (void)context;
         if (!at || old_size < 1 || new_size < old_size || new_size > WAYLAND_POOL_BYTES)
                 return 0;
+        if (new_size == old_size)
+                return at;
         // The slot the moved range is noted in is taken before the pages move: mremap moves them, so nothing that can fail may come after it
         // (a refusal after the move left the old address unmapped, and the pool's later unmap of it hit whatever was mapped there since).
         if (noted)
@@ -464,8 +468,11 @@ static void *compositor_wl_remap(void *context, void *at, long old_size, long ne
         // Update lent, damage-source, and layer references whose pool moved on mremap.
         for (int row = 0; row < (int)compositor_rows_in_use; row++)
         {
-                if (compositor_wl.lent[row].pixels)
+                if (compositor_wl.lent[row].pixels && compositor_wl.lent[row].imp.map == (const unsigned char *)at)
+                {
                         canvas_ext_import_remap(&compositor_wl.lent[row].imp, &compositor_wl.lent[row].pixels, at, got);
+                        wl_ext_row_sync(row);
+                }
                 canvas_ext_import_remap(&compositor_wl.source[row], 0, at, got);
                 for (unsigned int k = 0; k < compositor_wl_layers.count[row]; k++)
                         canvas_ext_import_remap(&compositor_wl_layers.layer[row][k].imp, &compositor_wl_layers.layer[row][k].pixels, at, got);
@@ -564,9 +571,13 @@ static void compositor_wl_bus(int number, void *info, void *context)
                 if (compositor_wl.map[slot].at && where >= compositor_wl.map[slot].at &&
                     where - compositor_wl.map[slot].at < compositor_wl.map[slot].size)
                 {
-                        // PROT_READ, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED
-                        compositor_call(syscall(mmap), compositor_wl.map[slot].at, compositor_wl.map[slot].size, 1, 0x32,
-                                        (positive)-1, 0);
+                        // PROT_READ, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED | MAP_NORESERVE
+                        long got = compositor_call(syscall(mmap), compositor_wl.map[slot].at, compositor_wl.map[slot].size, 1, 0x4032,
+                                                   (positive)-1, 0);
+                        if (got < 0 && got > -4096)
+                                got = compositor_call(syscall(mmap), where & ~4095ul, 4096, 1, 0x4032, (positive)-1, 0);
+                        if (got < 0 && got > -4096)
+                                break;
                         compositor_wl.map[slot].bad = 1;
                         return;
                 }
@@ -3432,7 +3443,11 @@ static long compositor_wl_memfd_sealed(const char *name, const void *data, unsig
                 }
                 done += (unsigned long)put;
         }
-        compositor_call(syscall(fcntl), (positive)fd, 1033, 15, 0, 0, 0); // F_ADD_SEALS: SEAL|SHRINK|GROW|WRITE
+        if (compositor_call(syscall(fcntl), (positive)fd, 1033, 15, 0, 0, 0) != 0) // F_ADD_SEALS: SEAL|SHRINK|GROW|WRITE
+        {
+                system_close((int)fd);
+                return -1;
+        }
         return fd;
 }
 
@@ -4064,7 +4079,7 @@ static void compositor_wl_pump_run(long at)
         unsigned char bytes[COMPOSITOR_WL_CHUNK];
         int in = compositor_wl.transfer[at].in, out = compositor_wl.transfer[at].out, result = 1;
         long have = 0, put = 0;
-        unsigned long one = 1;
+        unsigned long one = 1, done = 0;
         positive deadline = clock_monotonic_nanoseconds() + COMPOSITOR_WL_PUMP_NS;
 
         for (;;)
@@ -4080,13 +4095,16 @@ static void compositor_wl_pump_run(long at)
                 compositor_call(syscall(ppoll), (positive)&watch, 1, (positive)wait, 0, 0, 0);
                 if (!have)
                 {
+                        if (done >= WINDOWS_CLIP_MOST)
+                                break;
                         if (!(watch.returned & (COMPOSITOR_POLLIN | COMPOSITOR_POLLHUP | COMPOSITOR_POLLERR)))
                                 continue;
-                        n = compositor_call(syscall(read), (positive)in, (positive)bytes, sizeof bytes, 0, 0, 0);
+                        unsigned long left = WINDOWS_CLIP_MOST - done;
+                        n = compositor_call(syscall(read), (positive)in, (positive)bytes, left < sizeof bytes ? left : sizeof bytes, 0, 0, 0);
                         if (n == -11) continue;
                         if (n == 0) result = 2;
                         if (n <= 0) break;
-                        have = n, put = 0, moved = 1;
+                        have = n, put = 0, done += (unsigned long)n, moved = 1;
                 }
                 else
                 {
@@ -4120,9 +4138,18 @@ static int compositor_wl_transfer_start(long at)
 
 static long compositor_wl_pump(int in, int out)
 {
-        long slot = compositor_wl.wake >= 0 ? compositor_wl_transfer_place() : -1;
+        long live = 0, slot, flags;
+        for (long at = 0; at < compositor_wl.transfers; at++)
+                live += compositor_wl.transfer[at].state == COMPOSITOR_WL_PUMP;
+        slot = compositor_wl.wake >= 0 && live < COMPOSITOR_WL_PUSHES ? compositor_wl_transfer_place() : -1;
         if (slot < 0)
                 return system_close(in), system_close(out), -1;
+        flags = compositor_call(syscall(fcntl), (positive)in, 3, 0, 0, 0, 0);
+        if (flags >= 0)
+                compositor_call(syscall(fcntl), (positive)in, 4, (positive)(flags | 0x800), 0, 0, 0);
+        flags = compositor_call(syscall(fcntl), (positive)out, 3, 0, 0, 0, 0);
+        if (flags >= 0)
+                compositor_call(syscall(fcntl), (positive)out, 4, (positive)(flags | 0x800), 0, 0, 0);
         struct compositor_wl_transfer *t = &compositor_wl.transfer[slot];
         t->state = COMPOSITOR_WL_PUMP, t->which = 0, t->client = t->row = -1, t->in = in, t->out = out, t->total = 0, t->nudge = 0;
         return compositor_wl_transfer_start(slot) ? slot : -1;
@@ -4316,7 +4343,8 @@ static void compositor_wl_pull_next(long at)
                 if (!wayland_clip_send(t->client, t->which, nth, fds[1]))
                 {
                         system_close(fds[0]);
-                        continue;
+                        compositor_wl_pull_whole(at);
+                        return;
                 }
                 t->in = fds[0], t->got = 0, t->deadline = clock_monotonic_nanoseconds() + COMPOSITOR_WL_PULL_NS;
                 return;
@@ -4362,7 +4390,7 @@ static void compositor_wl_pull_step(long at)
                 return;
         type = wayland_clip_type(t->client, t->which, t->reading);
         text = t->reading == t->text;
-        for (;;)
+        for (int reads = 0; reads < 4; reads++)
         {
                 long got;
                 unsigned long count;
@@ -4540,7 +4568,12 @@ static int wl_dnd_read_drop(void *ctx, const char *mime, int target_row)
         t->in = fds[0], t->keep = keep, t->index = index, t->total = t->count = 0, t->drop = mime;
         if (wayland_drag_source())
         {
-                if (!wayland_drag_x_send(mime, fds[1])) system_close(fds[1]);
+                if (!wayland_drag_x_send(mime, fds[1]))
+                {
+                        system_close(fds[1]);
+                        compositor_wl_transfer_free(slot);
+                        return wayland_drag_x_finished(0), 0;
+                }
         }
         else
                 compositor_xwm_receive(-1, 2, mime, fds[1]);
@@ -4814,20 +4847,26 @@ static void compositor_wl_start(void)
                 address[2 + length] = (unsigned char)COMPOSITOR_WL_PATH[length];
                 length++;
         }
+        compositor_wl.uid = (int)compositor_call(syscall(getuid), 0, 0, 0, 0, 0, 0);
         compositor_call(syscall(unlinkat), (positive)AT_FDCWD, (positive)COMPOSITOR_WL_PATH, 0, 0, 0, 0);
         // SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC
         got = compositor_call(syscall(socket), 1, 1 | 0x800 | 0x80000, 0, 0, 0, 0);
         if (got < 0)
                 return;
         compositor_wl.listen = (int)got;
-        if (compositor_call(syscall(bind), (positive)got, (positive)address, (positive)(2 + length + 1), 0, 0, 0) < 0 ||
-            compositor_call(syscall(listen), (positive)got, COMPOSITOR_WL_BACKLOG, 0, 0, 0, 0) < 0)
         {
-                system_close(compositor_wl.listen);
-                compositor_wl.listen = -1;
-                return;
+                long old_mask = compositor_call(syscall(umask), (positive)(compositor_wl.uid == 0 ? 0117 : 0177), 0, 0, 0, 0, 0);
+                long bound = compositor_call(syscall(bind), (positive)got, (positive)address, (positive)(2 + length + 1), 0, 0, 0);
+                compositor_call(syscall(umask), (positive)old_mask, 0, 0, 0, 0, 0);
+                if (bound < 0 || compositor_call(syscall(listen), (positive)got, COMPOSITOR_WL_BACKLOG, 0, 0, 0, 0) < 0)
+                {
+                        system_close(compositor_wl.listen);
+                        compositor_wl.listen = -1;
+                        return;
+                }
         }
-        compositor_call(syscall(fchmodat), (positive)AT_FDCWD, (positive)COMPOSITOR_WL_PATH, 0666, 0, 0, 0);
+        if (compositor_wl.uid == 0)
+                compositor_call(syscall(fchownat), (positive)AT_FDCWD, (positive)COMPOSITOR_WL_PATH, (positive)(unsigned int)-1, (positive)1000u, 0x100, 0);
         for (long at = 0; at < compositor_wl.slots; at++)
                 compositor_wl.fd[at] = -1;
         for (long at = 0; at < 16; at++)
@@ -5417,7 +5456,8 @@ static void compositor_wl_accept(void)
                 }
                 // SOL_SOCKET, SO_PEERCRED: the kernel's word for who is on the other end, not the client's.
                 if (compositor_call(syscall(getsockopt), (positive)fd, 1, 17, (positive)credentials, (positive)&size, 0) < 0 ||
-                    size != sizeof credentials || credentials[0] <= 0)
+                    size != sizeof credentials || credentials[0] <= 0 ||
+                    (credentials[1] != compositor_wl.uid && !(compositor_wl.uid == 0 && credentials[1] == 1000)))
                 {
                         system_close((int)fd);
                         continue;
@@ -5477,12 +5517,13 @@ static void compositor_wl_read(long slot)
                 // The descriptors, from the control data: SCM_RIGHTS in SOL_SOCKET. The kernel puts as many in this process as
                 // the control buffer holds, which is more than the shim takes (36 against 28): one past the shim's are closed
                 // here, and the client is one that sent more than it may, so none of them stays open in the compositor.
-                for (unsigned char *at = (unsigned char *)control; message[5] >= 16 && at < (unsigned char *)control + message[5];)
+                for (unsigned char *at = (unsigned char *)control, *cmsg_end = (unsigned char *)control + (message[5] <= sizeof control ? message[5] : sizeof control);
+                     at + 16 <= cmsg_end;)
                 {
                         unsigned long length = *(unsigned long *)at;
                         int level = *(int *)(at + 8), type = *(int *)(at + 12);
 
-                        if (length < 16 || at + length > (unsigned char *)control + message[5])
+                        if (length < 16 || length > (unsigned long)(cmsg_end - at))
                                 break;
                         if (level == 1 && type == 1)
                                 for (unsigned long item = 16; item + 4 <= length; item += 4)
