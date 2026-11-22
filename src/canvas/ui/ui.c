@@ -13320,12 +13320,6 @@ static b32 ui_body_pin(struct ui_body address_to b)
         return true;
 }
 
-// The natural direction:
-static b64 ui_body_sign(b64 q)
-{
-        return ui_kit.scroll_off & WINDOW_SCROLL_FLIP ? -q : q;
-}
-
 static void ui_body_set(struct ui_body address_to b, b64 view, b64 content, b64 place, b64 at)
 {
         memory_zero(b, sizeof(*b));
@@ -14085,8 +14079,6 @@ static long ui_wheel_pixels(const struct ui address_to ui, const struct window_e
 {
         b64 per = event->flags & WINDOW_WHEEL_PRECISE ? (b64)UI_NOTCH * ui->scale / 100 : step * ui_wheel_percent() / 100, delta = -(b64)event->a * per, total;
         long pixels;
-        if (ui_kit.scroll_off & WINDOW_SCROLL_FLIP)
-                delta = -delta;
         total = *rest + delta;
         pixels = (long)(total / 120);
         *rest = (int)(total - (b64)pixels * 120);
@@ -14177,7 +14169,7 @@ static b32 ui_wheel_turn(const struct ui address_to ui, struct ui_scroll address
         }
         if (!event->a)
                 return false;
-        q = ui_body_sign(-turn * per * UI_ONE / 120);
+        q = -turn * per * UI_ONE / 120; // the natural direction is the compositor's (input.c compositor_wheel_turn): a wheel arrives already turned
         ui_scroll_extent(s);
         // A notch (a mouse's detent, a stream's) moves a region that scrolls: one whose content fits has nowhere to go, in either direction.
         if ((!(event->flags & WINDOW_WHEEL_PRECISE) || (event->flags & WINDOW_WHEEL_STREAM)) && !ui_body_far(&s->body))
