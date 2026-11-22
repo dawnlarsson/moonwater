@@ -2243,7 +2243,7 @@ static void check_compositor_tiling(void)
     compositor_present();
     compositor_focus(1);
     compositor.input_count = 1;
-    compositor.held[0] = CK_HELD_LSUPER;
+    compositor.held[0] = CK_HELD_LSUPER | CK_HELD_ALT;
 
     compositor_key(0, CK_KEY_LEFT, 1, 0);
     check("tiling: Super and Left puts the window with the keys on the left half of its screen",
@@ -2391,11 +2391,15 @@ static void layout_drop(int row, int from_x, int from_y, int x, int y)
     compositor.press = COMPOSITOR_NONE;
 }
 
-// The chord Super with key on the focused window, as the keys make it.
+// The tiling chord Super and Alt with key on the focused window, as the keys make it (Super alone with an arrow is a Space step).
 static void layout_chord(int row, unsigned int key)
 {
+    unsigned int held = compositor.held[0];
+
+    compositor.held[0] = CK_HELD_LSUPER | CK_HELD_ALT;
     compositor_focus(row);
     compositor_key(0, key, 1, 0);
+    compositor.held[0] = held;
 }
 
 static void check_compositor_layout(void)
@@ -3519,14 +3523,14 @@ static void check_compositor_screen_chord(void)
               compositor.y[1] == 20);
     compositor_key(0, CK_KEY_RIGHT, 1, 0);
     check("screen chord: past the last screen there is no wrap", compositor_screen_of(1) == 1 && compositor.x[1] == 266);
-    compositor.held[0] = CK_HELD_LSUPER;
+    compositor.held[0] = CK_HELD_LSUPER | CK_HELD_ALT;
     compositor_key(0, CK_KEY_LEFT, 1, 0);
     check("screen chord: (Super and Left: the left half of the right screen)", layout_is(1, COMPOSITOR_LEFT, 256, 0, 128, 256));
     compositor.held[0] = CK_HELD_LSUPER | CK_HELD_LSHIFT;
     compositor_key(0, CK_KEY_LEFT, 1, 0);
     check("screen chord: a tile goes as the same tile, the left half of the left screen",
           layout_is(1, COMPOSITOR_LEFT, 0, 0, 128, 256) && compositor_screen_of(1) == 0);
-    compositor.held[0] = CK_HELD_LSUPER;
+    compositor.held[0] = CK_HELD_LSUPER | CK_HELD_ALT;
     compositor_key(0, CK_KEY_RIGHT, 1, 0);
     check("screen chord: and its remembered rectangle came with it there and back: undone, it is where it floated on the left screen",
           compositor.arranged[1] == COMPOSITOR_FLOATING && compositor.x[1] == 10 && compositor.y[1] == 20 && compositor_screen_of(1) == 0);
@@ -3851,7 +3855,7 @@ static void check_compositor_tile_square(void)
         compositor_key(0, CK_KEY_RIGHT, 1, 0);
         compositor_frame_of(1, &frame);
         ok = compositor.arranged[1] == COMPOSITOR_FLOATING && frame.radius == 2 * UI_RADIUS && frame.line == 2;
-        compositor.held[0] = CK_HELD_LSUPER;
+        compositor.held[0] = CK_HELD_LSUPER | CK_HELD_ALT;
         compositor_key(0, CK_KEY_LEFT, 1, 0);
         compositor_frame_of(1, &frame);
         ok &= compositor.arranged[1] == COMPOSITOR_LEFT && compositor_screen_of(1) == 1 && frame.radius == 0 && frame.line == 2;
@@ -3859,7 +3863,7 @@ static void check_compositor_tile_square(void)
         compositor_key(0, CK_KEY_LEFT, 1, 0);
         compositor_frame_of(1, &frame);
         ok &= compositor.arranged[1] == COMPOSITOR_LEFT && compositor_screen_of(1) == 0 && frame.radius == 0 && frame.line == 1;
-        compositor.held[0] = CK_HELD_LSUPER;
+        compositor.held[0] = CK_HELD_LSUPER | CK_HELD_ALT;
         compositor_key(0, CK_KEY_RIGHT, 1, 0);
         compositor_frame_of(1, &frame);
         ok &= compositor.arranged[1] == COMPOSITOR_FLOATING && frame.radius == UI_RADIUS && frame.line == 1;
