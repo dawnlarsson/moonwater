@@ -11733,6 +11733,7 @@ static fn ui_slider_draw(struct ui address_to ui, struct ui_control address_to c
         {
                 // ui.js eases the stretch toward its target by 0.3 a frame at 60 Hz: the same per 1/60 s at any rate, as the pace counts the time.
                 b64 dt = ui_paced_elapsed(c->last_frame ? ui_kit.now - c->last_frame : 16666667), keep = UI_Q2(70), k = UI_ONE;
+                dt = dt > 1000000000ll ? 1000000000ll : dt; // a slider not drawn for a while: at most a second of frames, not one per 1/60 s since
                 for (b64 left = dt; left >= 16666667; left -= 16666667)
                         k = ui_qmul(k, keep);
                 if (dt % 16666667)
