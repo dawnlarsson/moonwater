@@ -585,7 +585,9 @@ static void rules_do(const struct rules_job *job)
         {
                 if (!rules_backlight(job->number))
                 {
-                        snprintf(line, sizeof(line), "moonwater brightness %lld%%", (long long)(job->number / 100));
+                        b64 clamped = job->number < 0 ? 0 : job->number > 10000 ? 10000 : job->number;
+
+                        snprintf(line, sizeof(line), "moonwater brightness %lld%%", (long long)(clamped / 100));
                         rules_spawn(line, job->name);
                 }
         }
@@ -1414,7 +1416,7 @@ static int rules_usb_notify(struct notifier_block *nb, unsigned long what, void 
         bool added = what == USB_DEVICE_ADD;
 
         (void)nb;
-        if ((what != USB_DEVICE_ADD && what != USB_DEVICE_REMOVE) || !udev->parent)
+        if ((what != USB_DEVICE_ADD && what != USB_DEVICE_REMOVE) || !udev || !udev->parent)
                 return NOTIFY_OK;
         {
                 b32 now = added ? atomic_fetch_add(1, &rules_usb_devices) + 1
@@ -1675,6 +1677,11 @@ static long rules_do_asked(struct rover_control *request)
                 return -EINVAL;
         if (primitive->klass == ROVER_DELIBERATE)
                 return -EPERM;
+        if ((request->primitive == rules_prim[RP_POWEROFF] ||
+             request->primitive == rules_prim[RP_REBOOT] ||
+             request->primitive == rules_prim[RP_SUSPEND]) &&
+            !capable(CAP_SYS_BOOT))
+                return -EPERM;
         //      Held to the schema's range as a table's constant is by the loader: latency at most a day, a backlight
         //      0 to 100%, an enum one of its words.
         if (primitive->count && !rover_kind_is_word(rover_types[primitive->type[0]].kind) &&
@@ -1763,14 +1770,14 @@ static int rules_mmap(struct file *file, struct vm_area_struct *vma)
 {
         positive length = vma->vm_end - vma->vm_start;
 
-        (void)file;
         if (!rules_map)
                 return -ENODEV;
         if (vma->vm_pgoff || length > PAGE_ALIGN(ROVER_MAP_BYTES))
                 return -EINVAL;
         if (vma->vm_flags & (VM_WRITE | VM_EXEC))
                 return -EPERM;
-        if ((length > ROVER_MAP_RING || PAGE_SIZE > ROVER_MAP_RING) && !capable(CAP_SYS_ADMIN))
+        if ((length > ROVER_MAP_RING || PAGE_SIZE > ROVER_MAP_RING) &&
+            (!file_ns_capable(file, &init_user_ns, CAP_SYS_ADMIN) || !capable(CAP_SYS_ADMIN)))
                 return -EPERM;
         vm_flags_clear(vma, VM_MAYWRITE | VM_MAYEXEC);
         return remap_vmalloc_range(vma, rules_map, 0);
@@ -1793,7 +1800,7 @@ static ssize_t rules_read(struct file *file, p64 *seen, char __user *into, size_
 
         if (room < sizeof(head))
                 return -EINVAL;
-        if (!capable(CAP_SYS_ADMIN))
+        if (!file_ns_capable(file, &init_user_ns, CAP_SYS_ADMIN) || !capable(CAP_SYS_ADMIN))
                 return -EPERM;
         if (!rules_map)
                 return -ENODEV;

@@ -996,6 +996,13 @@ static ssize_t floodlight_write(struct file *file, const char __user *from,
                 goto out;
         }
 
+        /* Embedded NUL bytes would truncate the line before the parser sees
+         * the rest of what was written. */
+        if (memchr(line, '\0', count)) {
+                answer = -EINVAL;
+                goto out;
+        }
+
         at = line;
         if (count && line[count - 1] == '\n')
                 line[count - 1] = 0;

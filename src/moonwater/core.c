@@ -556,6 +556,11 @@ static b32 __init start()
 
 static void __exit exit_module(void)
 {
+        // Deregister /dev/spark before tearing down the state its handlers touch.
+        if (device_registered)
+                misc_deregister(&device);
+        device_registered = false;
+
         // Before anything else: printk must stop being pointed at cells that
         // are about to be freed.
         canvas_unload();
@@ -563,9 +568,6 @@ static void __exit exit_module(void)
         bind_stop();
         rules_stop();
 
-        if (device_registered)
-                misc_deregister(&device);
-        device_registered = false;
         kvfree(snapshot);
         kfree(settings_current);
         unregister_binfmt(&format);

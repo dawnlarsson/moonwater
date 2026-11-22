@@ -101,11 +101,20 @@ static positive rover_load_boots(void)
 static fn rover_load_boots_put(positive count)
 {
         p8 text[24];
+        file_facts facts;
+        bipolar dir;
         positive length = positive_into_string(text, count);
 
         text[length++] = '\n';
         (void)system_call_3(syscall(mkdirat), (positive)AT_FDCWD, (positive)ROVER_PERSON_RULES, 0700);
-        (void)host_write_file(ROVER_BOOTS_FILE, text, length, 0600, false);
+        dir = system_open_at(AT_FDCWD, ROVER_PERSON_RULES, FILE_READ | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+        if (dir < 0)
+                return;
+        bool safe = file_look(dir, (string_address) "", AT_EMPTY_PATH, address_of facts) &&
+                    (facts.mode & MODE_FORMAT) == MODE_DIRECTORY && facts.owner == 0 && !(facts.mode & 0022);
+        system_close(dir);
+        if (safe)
+                (void)host_write_file(ROVER_BOOTS_FILE, text, length, 0600, false);
 }
 
 //      The image's rules alone: moonwater.safe=1 on the command line, or two loads in a row that did not stand a minute.

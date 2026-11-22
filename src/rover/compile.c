@@ -1780,6 +1780,9 @@ static bool rover_name_valid(const struct rover_word address_to name)
 {
         if (name->quoted || !name->length || name->length > ROVER_NAME_MOST)
                 return false;
+        if ((name->length == 1 && name->text[0] == '.') ||
+            (name->length == 2 && name->text[0] == '.' && name->text[1] == '.'))
+                return false;
         for (positive at = 0; at < name->length; at++)
         {
                 p8 c = name->text[at];

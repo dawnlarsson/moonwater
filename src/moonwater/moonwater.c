@@ -194,7 +194,7 @@ struct script_read {
         const unsigned char *text;
         unsigned long length;
         unsigned long at;
-        unsigned short line;
+        unsigned int line;
         unsigned char heredoc_tabs;     // <<- strips leading tabs
         unsigned char heredoc_active;   // a body waits for the next newline (even if delimiter is empty)
         unsigned char heredoc_length;   // length of the delimiter prefix kept in heredoc[]
@@ -274,11 +274,18 @@ static void script_heredoc_start(struct script_read *scan)
                                 value == '|' || value == '&' || value == '>' ||
                                 value == '<' || value == ')')))
                         break;
-                if (value != '\\') {
-                        total++;
-                        if (used + 1 < SCRIPT_WORD)
-                                scan->heredoc[used++] = (char)value;
+                if (value == '\\' && quote != '\'' && scan->at + 1 < scan->length) {
+                        scan->at++;
+                        value = scan->text[scan->at];
+                        if (value == '\n') {
+                                scan->at++;
+                                scan->line++;
+                                continue;
+                        }
                 }
+                total++;
+                if (used + 1 < SCRIPT_WORD)
+                        scan->heredoc[used++] = (char)value;
                 scan->at++;
         }
         scan->heredoc[used] = 0;
@@ -297,7 +304,7 @@ static void script_skip_heredoc(struct script_read *scan)
         //      bounded, and past it a << is a shift.
         unsigned long at = scan->at;
         unsigned long open = scan->at;
-        unsigned short lines = 0;
+        unsigned int lines = 0;
         unsigned long length = scan->heredoc_length;
 
         while (scan->rescan && at < scan->length) {
@@ -373,7 +380,7 @@ static void script_next(struct script_read *scan, struct script_token *token)
                 }
                 break;
         }
-        token->line = scan->line;
+        token->line = (unsigned short)(scan->line > 65535u ? 65535u : scan->line);
         token->fresh = fresh;
         if (scan->at >= scan->length) {
                 token->kind = SCRIPT_TOK_END;
@@ -502,13 +509,13 @@ static void script_arm(struct moonwater_overlay *into, const char *pattern,
 }
 
 static void script_block(struct script_read *scan, struct moonwater_overlay *into,
-                         unsigned short depth);
+                         unsigned int depth);
 
 static void script_parse_case(struct script_read *scan,
                               struct moonwater_overlay *into)
 {
         struct script_token token;
-        unsigned short cases = 1;
+        unsigned int cases = 1;
 
         do {
                 script_next(scan, &token);
@@ -576,7 +583,7 @@ static void script_parse_case(struct script_read *scan,
 }
 
 static void script_block(struct script_read *scan, struct moonwater_overlay *into,
-                         unsigned short depth)
+                         unsigned int depth)
 {
         struct script_token token;
 
@@ -637,7 +644,7 @@ static void script_compound(struct script_read *scan, struct moonwater_overlay *
                 "if", "while", "until", "for", "select", 0 };
         static const char *const closers[] = { "fi", "done", 0 };
         struct script_token token;
-        unsigned short depth = 1;
+        unsigned int depth = 1;
         int command = 1;
 
         while (depth) {
@@ -865,7 +872,7 @@ static int spark_input_mmap(struct file *file, struct vm_area_struct *vma)
 
         if (!page)
                 return -ENODEV;
-        if (!capable(CAP_SYS_ADMIN))
+        if (!file_ns_capable(file, &init_user_ns, CAP_SYS_ADMIN) || !capable(CAP_SYS_ADMIN))
                 return -EPERM;
         if (length != SPARK_INPUT_PAGE_BYTES || (vma->vm_flags & VM_EXEC) || !(vma->vm_flags & VM_SHARED))
                 return -EINVAL;
@@ -1028,6 +1035,7 @@ static const struct {
 
 static const unsigned char bind_machine_admin[MOONWATER_END + 1] = {
         [MOONWATER_ATTACH] = 1,
+        [MOONWATER_DETACH] = 1,
         [MOONWATER_WAIT] = 1,
         [MOONWATER_END] = 1,
 };

@@ -1086,7 +1086,7 @@ static int spark_stack(struct linux_binprm *bprm, unsigned long *out)
 
                 length = strnlen_user((void __user *)walk, MAX_ARG_STRLEN);
 
-                if (length <= 0)
+                if (length <= 0 || length > MAX_ARG_STRLEN)
                         return -EFAULT;
 
                 walk += (unsigned long)length;
@@ -1231,19 +1231,24 @@ int execute_spark(struct linux_binprm *bprm)
         if (unlikely(header->flags != 0))
                 return -ENOEXEC;
 
-        // Every region is a page multiple by construction, and the entry has
-        // to land inside the text it points into. A malformed image must fail
-        // here rather than after the mm has been torn down.
-        if (unlikely(header->base == 0 || (header->base & (SPARK_PAGE - 1))))
-                return -ENOEXEC;
+        // Every region is a page multiple by construction (both SPARK_PAGE and
+        // the kernel's PAGE_SIZE), and the entry has to land inside the text it
+        // points into. A malformed image must fail here rather than after the
+        // mm has been torn down.
+        {
+                unsigned long page_mask = max_t(unsigned long, SPARK_PAGE, PAGE_SIZE) - 1;
 
-        if (unlikely(header->text_size == 0 ||
-                     (header->text_size & (SPARK_PAGE - 1))))
-                return -ENOEXEC;
+                if (unlikely(header->base == 0 || (header->base & page_mask)))
+                        return -ENOEXEC;
 
-        if (unlikely((header->data_size & (SPARK_PAGE - 1)) ||
-                     (header->bss_size & (SPARK_PAGE - 1))))
-                return -ENOEXEC;
+                if (unlikely(header->text_size == 0 ||
+                             (header->text_size & page_mask)))
+                        return -ENOEXEC;
+
+                if (unlikely((header->data_size & page_mask) ||
+                             (header->bss_size & page_mask)))
+                        return -ENOEXEC;
+        }
 
         /*
                 Every size below comes from the file, so the arithmetic has to
@@ -1659,8 +1664,8 @@ static int spawn_enter(void *data)
         {
                 const char **script_argv;
 
-                script_argv = kcalloc((sized)work->argc + 2,
-                                      sizeof(*script_argv), GFP_KERNEL);
+                script_argv = kvcalloc((sized)work->argc + 2,
+                                       sizeof(*script_argv), GFP_KERNEL_ACCOUNT);
 
                 if (!script_argv)
                         ret = -ENOMEM;
@@ -1674,7 +1679,7 @@ static int spawn_enter(void *data)
 
                         ret = kernel_execve(script_argv[0], script_argv,
                                             environment);
-                        kfree(script_argv);
+                        kvfree(script_argv);
                 }
         }
 

@@ -1319,7 +1319,7 @@ static bool rover_refuse(struct rover_refusal address_to why, const char address
 }
 
 //      A string record of the pool: 4-aligned, a two-byte length of at most
-//      most, the bytes and a NUL, all inside the pool.
+//      most, the bytes (with no embedded NUL) and a trailing NUL, all inside the pool.
 static bool rover_string_ok(const struct rover_table address_to table, p32 at, positive most)
 {
         p32 pool = table->head->pool;
@@ -1330,7 +1330,12 @@ static bool rover_string_ok(const struct rover_table address_to table, p32 at, p
         memory_copy(&length, table->pool + at, sizeof(length));
         if (length > most || pool - at - 2 < (p32)length + 1)
                 return false;
-        return table->pool[at + 2 + length] == 0;
+        if (table->pool[at + 2 + length] != 0)
+                return false;
+        for (positive i = 0; i < length; i++)
+                if (table->pool[at + 2 + i] == 0)
+                        return false;
+        return true;
 }
 
 static bool rover_is_number_source(p8 source)
@@ -1570,13 +1575,15 @@ static const char address_to rover_call_check(const struct rover_table address_t
         return null;
 }
 
-//      A script's name: a word of [a-z0-9._-] that is not . or .., so it
-//      names a file in the scripts' directory and nothing above it.
-static bool rover_script_ok(const struct rover_table address_to table, p16 at)
+//      A script's, rule's or service's name: a word of [a-z0-9._-] that is not . or ..,
+//      so it names a single entry with no path traversal or control characters.
+static bool rover_name_ok(const struct rover_table address_to table, p32 at, positive most)
 {
         p16 length;
         const p8 address_to name = table->pool + at + 2;
 
+        if (!rover_string_ok(table, at, most))
+                return false;
         memory_copy(&length, table->pool + at, sizeof(length));
         if (!length || (length == 1 && name[0] == '.') || (length == 2 && name[0] == '.' && name[1] == '.'))
                 return false;
@@ -1588,6 +1595,11 @@ static bool rover_script_ok(const struct rover_table address_to table, p16 at)
                         return false;
         }
         return true;
+}
+
+static bool rover_script_ok(const struct rover_table address_to table, p16 at)
+{
+        return rover_name_ok(table, at, ROVER_WORD_MOST);
 }
 
 static const char address_to rover_action_check(const struct rover_table address_to table,
@@ -1700,7 +1712,6 @@ static const char address_to rover_rule_check(const struct rover_table address_t
         const struct rover_event_row address_to event = null;
         bool kernel = rule->place == ROVER_KERNEL;
         const char address_to why;
-        p16 length;
 
         if (rule->pad || rule->pad2 || rule->pad3 || (rule->flags & ~ROVER_RULE_FLAGS) || rule->place >= ROVER_PLACES)
                 return "a rule of no shape";
@@ -1715,11 +1726,8 @@ static const char address_to rover_rule_check(const struct rover_table address_t
                 if (rule->place != event->source && !(event->source == ROVER_KERNEL && rule->place == ROVER_RUNNER))
                         return "a rule placed where its event never arrives";
         }
-        if (!rover_string_ok(table, rule->name, ROVER_NAME_MOST))
-                return "a rule's name outside the pool";
-        memory_copy(&length, table->pool + rule->name, sizeof(length));
-        if (!length)
-                return "a rule with no name";
+        if (!rover_name_ok(table, rule->name, ROVER_NAME_MOST))
+                return "a rule's name outside the pool or with invalid characters";
         if (rule->about && !rover_string_ok(table, rule->about, ROVER_TEXT_MOST))
                 return "an about outside the pool";
         if (rule->limit_ms > ROVER_LIMIT_MOST_MS)
@@ -1740,9 +1748,10 @@ static const char address_to rover_rule_check(const struct rover_table address_t
                 if (!event && (comparison->a.source == ROVER_FIELD || comparison->b.source == ROVER_FIELD ||
                                comparison->c.source == ROVER_FIELD))
                         return "a when rule that reads an event's field";
-                //      An on line's filter is one comparison, a field against a constant, ending its line.
+                //      An on line's filter is one comparison, a field against a constant of that field's type, ending its line.
                 if (at < rule->trigger && !(rule->flags & ROVER_RULE_WHEN) &&
                     (comparison->a.source != ROVER_FIELD || comparison->a.index >= event->fields ||
+                     comparison->type != rover_types[event->field_type[comparison->a.index]].kind ||
                      (comparison->b.source != ROVER_CONST_NUMBER && comparison->b.source != ROVER_CONST_WORD) ||
                      (comparison->op != ROVER_EQ && comparison->op != ROVER_MATCH) ||
                      !(comparison->join & ROVER_JOIN_LINE)))
@@ -1779,10 +1788,22 @@ static const char address_to rover_rule_check(const struct rover_table address_t
         return null;
 }
 
-//      An absolute path's word: a pool string that starts with a slash.
+//      An absolute path's word: a pool string that starts with a slash and holds no control bytes.
 static bool rover_path_ok(const struct rover_table address_to table, p32 at)
 {
-        return rover_string_ok(table, at, ROVER_WORD_MOST) && table->pool[at + 2] == '/';
+        p16 length;
+
+        if (!rover_string_ok(table, at, ROVER_WORD_MOST) || table->pool[at + 2] != '/')
+                return false;
+        memory_copy(&length, table->pool + at, sizeof(length));
+        for (positive i = 0; i < length; i++)
+        {
+                p8 c = table->pool[at + 2 + i];
+
+                if (c < 0x20 || c == 0x7f)
+                        return false;
+        }
+        return true;
 }
 
 /*
@@ -1798,11 +1819,9 @@ static const char address_to rover_service_check(const struct rover_table addres
 
         if (service->pad[0] || service->pad[1] || service->pad[2] || (service->flags & ~ROVER_SERVICE_OFF))
                 return "a service of no shape";
-        if (!rover_string_ok(table, service->name, ROVER_NAME_MOST))
-                return "a service's name outside the pool";
+        if (!rover_name_ok(table, service->name, ROVER_NAME_MOST))
+                return "a service's name outside the pool or with invalid characters";
         length = memory_load_unaligned(p16, table->pool + service->name);
-        if (!length)
-                return "a service with no name";
         for (p32 other = 0; other < which; other++)
         {
                 const struct rover_service address_to before = table->service + other;

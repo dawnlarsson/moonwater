@@ -155,6 +155,11 @@ static bool rover_runner_adopt_bytes(const p8 address_to bytes, positive size, p
                 rover_runner_say("the table is refused: ", (string_address)refusal.why, null);
                 return false;
         }
+        if (view.head->rules > ROVER_RULES_MOST)
+        {
+                rover_runner_say("the table is refused: more rules than the runner holds", null, null);
+                return false;
+        }
         for (positive at = 0; at < had; at++)
         {
                 positive length;
@@ -221,10 +226,10 @@ static bool rover_runner_adopt_loaded(p32 table)
         static p64 words[(ROVER_TABLE_MOST + 8) / 8];
         p8 address_to bytes = (p8 address_to)words;
         bipolar handle = system_open_at(AT_FDCWD, ROVER_LOADED, FILE_READ | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
-        bipolar got = handle < 0 ? -1 : system_read_retry((positive)handle, bytes, sizeof(words));
         file_facts facts;
         bool owned = handle >= 0 && file_look(handle, (string_address) "", AT_EMPTY_PATH, address_of facts) &&
                      (facts.mode & MODE_FORMAT) == MODE_FILE && facts.owner == 0 && !(facts.mode & 0077);
+        bipolar got = owned ? system_read_retry((positive)handle, bytes, sizeof(words)) : -1;
         p32 number;
 
         if (handle >= 0)
@@ -583,7 +588,8 @@ static void rover_runner_osk_record(void)
                 __atomic_store_n(&table->osk_pid, (unsigned int)system_call(syscall(getpid)), __ATOMIC_RELEASE);
 }
 
-static bipolar rover_runner_exec(string_address address_to argv, string_address log_path, string_address extra)
+static bipolar rover_runner_exec_fd(bipolar exec_fd, string_address address_to argv, string_address log_path,
+                                    string_address extra)
 {
         static string_address environment[256];
         string_address address_to inherited = program_environment_list();
@@ -613,11 +619,24 @@ static bipolar rover_runner_exec(string_address address_to argv, string_address 
 #endif
         if (rover_runner_osk_program(argv[0]))
                 rover_runner_osk_record();
-        bipolar null_handle = system_open_at(AT_FDCWD, "/dev/null", FILE_READ);
+        bipolar null_handle = system_open_at(AT_FDCWD, "/dev/null", FILE_READ | O_CLOEXEC);
         if (null_handle > 0)
                 system_descriptor_move(null_handle, 0);
         bipolar out = system_open_at_mode(AT_FDCWD, log_path ? log_path : (string_address) "/dev/kmsg",
-                                          FILE_WRITE | O_CREAT | O_APPEND | O_NOFOLLOW, 0600);
+                                          FILE_WRITE | O_CREAT | O_APPEND | O_NOFOLLOW | O_CLOEXEC |
+                                              (log_path ? O_NONBLOCK : 0),
+                                          0600);
+        if (out >= 0 && log_path)
+        {
+                file_facts facts;
+
+                if (!file_look(out, (string_address) "", AT_EMPTY_PATH, address_of facts) ||
+                    (facts.mode & MODE_FORMAT) != MODE_FILE)
+                {
+                        system_close(out);
+                        out = system_open_at(AT_FDCWD, "/dev/null", FILE_WRITE | O_CLOEXEC);
+                }
+        }
         if (out >= 0)
         {
                 if (out != 1)
@@ -627,8 +646,21 @@ static bipolar rover_runner_exec(string_address address_to argv, string_address 
                 if (out > 2)
                         system_close(out);
         }
+        if (exec_fd >= 0)
+        {
+                // Clear CLOEXEC only in this child so #! scripts can open /dev/fd/N; execute the exact validated inode.
+                (void)system_call_3(syscall(fcntl), (positive)exec_fd, SYSTEM_F_SETFD, 0);
+                (void)system_call_5(syscall(execveat), (positive)exec_fd, (positive)(string_address) "", (positive)argv,
+                                    (positive)environment, AT_EMPTY_PATH);
+                exit(127);
+        }
         system_execute(argv[0], argv, environment);
         exit(127);
+}
+
+static bipolar rover_runner_exec(string_address address_to argv, string_address log_path, string_address extra)
+{
+        return rover_runner_exec_fd(-1, argv, log_path, extra);
 }
 
 //      A verb of the CLI's own, in a child, as `moonwater WORDS` would run it.
@@ -649,6 +681,20 @@ static fn rover_runner_verb(b32 (address_to verb)(string_address address_to, pos
         }
         if (pid == 0)
         {
+                // Close privileged runner descriptors that O_CLOEXEC does not close because no exec occurs.
+                if (rover_runner.device >= 0)
+                        system_close(rover_runner.device);
+                if (rover_runner.fire >= 0)
+                        system_close(rover_runner.fire);
+                if (rover_runner.watch >= 0)
+                        system_close(rover_runner.watch);
+                if (rover_runner.kernel_pipe[0] >= 0)
+                        system_close(rover_runner.kernel_pipe[0]);
+                if (rover_runner.kernel_pipe[1] >= 0)
+                        system_close(rover_runner.kernel_pipe[1]);
+                for (positive at = 0; rover_runner.view.head && at < rover_runner.view.head->services; at++)
+                        if (rover_runner.service[at].pidfd >= 0)
+                                system_close(rover_runner.service[at].pidfd);
                 b32 answer = verb(words, count);
 
                 log_flush();
@@ -970,8 +1016,8 @@ static string_address rover_runner_word(const struct rover_value address_to valu
         return room;
 }
 
-static fn rover_runner_program(string_address first, const struct rover_value address_to values, positive count,
-                               positive from, string_address extra)
+static fn rover_runner_program_fd(bipolar exec_fd, string_address first, const struct rover_value address_to values,
+                                  positive count, positive from, string_address extra)
 {
         string_address argv[ROVER_ARGUMENTS + 2];
         positive used = 0;
@@ -980,9 +1026,15 @@ static fn rover_runner_program(string_address first, const struct rover_value ad
         for (positive at = from; at < count; at++)
                 argv[used++] = (string_address)values[at].text;
         argv[used] = null;
-        bipolar pid = rover_runner_exec(argv, null, extra);
+        bipolar pid = rover_runner_exec_fd(exec_fd, argv, null, extra);
         if (pid > 0)
                 rover_runner_child(pid);
+}
+
+static fn rover_runner_program(string_address first, const struct rover_value address_to values, positive count,
+                               positive from, string_address extra)
+{
+        rover_runner_program_fd(-1, first, values, count, from, extra);
 }
 
 /*
@@ -1022,12 +1074,14 @@ static bool rover_runner_pinned(string_address path)
         the name is not tried in its place).
 */
 static bipolar rover_runner_script(string_address directory, bool person, string_address name, p8 address_to path,
-                                   positive room)
+                                   positive room, bipolar address_to out_fd)
 {
         file_facts facts;
         bipolar handle = system_open_at(AT_FDCWD, directory, FILE_READ | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+        bipolar script_fd;
         bool fits;
 
+        *out_fd = -1;
         if (handle < 0)
                 return 0;
         fits = file_look(handle, (string_address) "", AT_EMPTY_PATH, address_of facts) &&
@@ -1038,13 +1092,24 @@ static bipolar rover_runner_script(string_address directory, bool person, string
                 system_close(handle);
                 return -1;
         }
-        fits = file_look(handle, name, AT_SYMLINK_NOFOLLOW, address_of facts);
+        // Open without following symlinks and validate the opened fd to eliminate path TOCTOU before execveat.
+        script_fd = system_open_at(handle, name, FILE_READ | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
         system_close(handle);
-        if (!fits)
-                return 0;
-        if ((facts.mode & MODE_FORMAT) != MODE_FILE || facts.owner != 0 || (facts.mode & 0022))
+        if (script_fd < 0)
+                return script_fd == -ENOENT ? 0 : -1;
+        if (!file_look(script_fd, (string_address) "", AT_EMPTY_PATH, address_of facts) ||
+            (facts.mode & MODE_FORMAT) != MODE_FILE || facts.owner != 0 || (facts.mode & 0022))
+        {
+                system_close(script_fd);
                 return -1;
-        return string_join(path, room, directory, "/", name) ? 1 : 0;
+        }
+        if (!string_join(path, room, directory, "/", name))
+        {
+                system_close(script_fd);
+                return 0;
+        }
+        *out_fd = script_fd;
+        return 1;
 }
 
 //      A primitive that is not the kernel's (those are asked of it, rover_runner_do).
@@ -1281,13 +1346,14 @@ static fn rover_runner_do(const struct rover_event address_to event, const struc
                 case ROVER_RUN:
                 {
                         //      The person's script of the name, else the image's, each only from a directory and as a
-                        //      file root alone may write (rover_runner_script).
+                        //      file root alone may write (rover_runner_script), executed by its validated fd.
+                        bipolar script_fd = -1;
                         bipolar found = rover_runner_script(ROVER_ROOT_SCRIPTS, true, (string_address)values[0].text, path,
-                                                            sizeof(path));
+                                                            sizeof(path), &script_fd);
 
                         if (found == 0)
                                 found = rover_runner_script(ROVER_IMAGE_SCRIPTS, false, (string_address)values[0].text, path,
-                                                            sizeof(path));
+                                                            sizeof(path), &script_fd);
                         if (found <= 0)
                         {
                                 rover_runner_say("run ", (string_address)values[0].text,
@@ -1297,7 +1363,8 @@ static fn rover_runner_do(const struct rover_event address_to event, const struc
                                                        : ": no such script");
                                 break;
                         }
-                        rover_runner_program(path, values, count, 1, null);
+                        rover_runner_program_fd(script_fd, path, values, count, 1, null);
+                        system_close(script_fd);
                         break;
                 }
                 case ROVER_TOOL:
@@ -1396,7 +1463,8 @@ static fn rover_runner_keys(void)
                 b64 chord;
                 struct rover_text name = {rover_runner.keys[rover_runner.key_count].name, 0, 47, false};
 
-                if (row->event != 64 || !row->trigger)
+                if (row->event != 64 || !row->trigger ||
+                    rover_runner.view.comparison[row->comparison].b.source != ROVER_CONST_NUMBER)
                         continue;
                 if (rover_runner.key_count == ROVER_KEYS_MOST)
                 {
@@ -1436,6 +1504,17 @@ static fn rover_runner_keys(void)
         (void)system_call_3(syscall(unlinkat), (positive)AT_FDCWD, (positive)ROVER_KEYS_FIRE, 0);
         (void)system_call_4(syscall(mknodat), (positive)AT_FDCWD, (positive)ROVER_KEYS_FIRE, 0010600, 0);
         rover_runner.fire = system_open_at(AT_FDCWD, ROVER_KEYS_FIRE, 2 /* O_RDWR */ | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW);
+        if (rover_runner.fire >= 0)
+        {
+                file_facts facts;
+
+                if (!file_look(rover_runner.fire, (string_address) "", AT_EMPTY_PATH, address_of facts) ||
+                    (facts.mode & MODE_FORMAT) != 0010000 || facts.owner != 0 || (facts.mode & 0077))
+                {
+                        system_close(rover_runner.fire);
+                        rover_runner.fire = -1;
+                }
+        }
 }
 
 /*
@@ -1501,9 +1580,10 @@ static fn rover_runner_line(const p8 address_to line, positive length)
                 bipolar handle = system_open_at(AT_FDCWD, (string_address)path, FILE_READ | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
                 file_facts facts;
 
-                //      A regular file only: a FIFO at the name would hold the runner's loop.
+                //      A regular file of root's only (written by root alone): a FIFO or untrusted file at the name
+                //      would hold the runner's loop or inject pin launches.
                 if (handle >= 0 && (!file_look(handle, (string_address) "", AT_EMPTY_PATH, address_of facts) ||
-                                    (facts.mode & MODE_FORMAT) != MODE_FILE))
+                                    (facts.mode & MODE_FORMAT) != MODE_FILE || facts.owner != 0 || (facts.mode & 0022)))
                 {
                         system_close(handle);
                         handle = -1;
@@ -1758,9 +1838,12 @@ static fn rover_runner_find_everys(void)
                 b64 period;
                 bool known = false;
 
-                if (rule->event != 102 || !rule->trigger)
+                if (rule->event != 102 || !rule->trigger ||
+                    rover_runner.view.comparison[rule->comparison].b.source != ROVER_CONST_NUMBER)
                         continue;
                 period = memory_load_unaligned(b64, rover_runner.view.pool + rover_runner.view.comparison[rule->comparison].b.index);
+                if (period < ROVER_EVERY_LEAST)
+                        continue;
                 for (positive k = 0; k < rover_runner.everys; k++)
                         known = known || (b64)rover_runner.every_period[k] == period;
                 if (known)
