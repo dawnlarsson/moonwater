@@ -727,6 +727,7 @@ static fn check_launcher(void)
                           string_equals(words[4], (string_address) "/fonts/mono-bold.ttf"));
         }
         launcher.height = 0;
+        launcher.asked_beside = true; // the grid and its power row are the beside launcher's (ad788933c)
         launcher.width = LAUNCHER_WIDTH * launcher.ui.scale / 100;
         launcher_changed();
         {
