@@ -3585,44 +3585,15 @@ static void compositor_osk_read(int row)
 #define COMPOSITOR_DND_LEAVE   3
 #define COMPOSITOR_DND_DROP    4
 #define COMPOSITOR_DND_END     5
-#define COMPOSITOR_DND_BRIDGES 4
-
-struct compositor_drag_ops
-{
-        void *ctx;
-        int (*active)(void *ctx);
-        int (*begin)(void *ctx, int source_row, const char *types, long types_bytes, unsigned int actions, int under, int wx, int wy);
-        int (*target_owns)(void *ctx, int row);
-        long (*target_event)(void *ctx, int what, int row, int x, int y);
-        void (*status)(void *ctx, int accept, unsigned int action);
-        int (*read_drop)(void *ctx, const char *mime, int target_row);
-        void (*finished)(void *ctx, int ok);
-        void (*cancel)(void *ctx);
-        unsigned int (*ext_types)(void *ctx, const char **types_out, long *bytes_out);
-        int (*ext_action)(void *ctx);
-};
-
 static struct
 {
         int active, source, target, dropped, named, place;
         long take;
-        unsigned int source_actions, take_actions, take_preferred, action, told_action, bridge_count;
+        unsigned int source_actions, take_actions, take_preferred, action, told_action;
         int ext_wl; // the external source is the Wayland arm's (COMPOSITOR_DND_ARM_WL): its offer, status, drop and finish go there
-        const struct compositor_drag_ops *bridges[COMPOSITOR_DND_BRIDGES];
         int target_wl; // the target row is the Wayland arm's (its drag events go there); the arm is the only target side
         unsigned int *offer_seen, *take_seen, *done_seen;
 } compositor_dnd = {.source = -1, .target = -1, .take = -1};
-
-static int compositor_dnd_register(const struct compositor_drag_ops *ops)
-{
-        if (!ops || compositor_dnd.bridge_count >= COMPOSITOR_DND_BRIDGES)
-                return -1;
-        for (unsigned int i = 0; i < compositor_dnd.bridge_count; i++)
-                if (compositor_dnd.bridges[i] == ops)
-                        return 0;
-        compositor_dnd.bridges[compositor_dnd.bridge_count++] = ops;
-        return 0;
-}
 
 // The arms an external drag can come from: the Wayland arm (wayland_host.c) is the only source; X's drags run through it.
 #define COMPOSITOR_DND_ARM_NONE 0
@@ -3968,7 +3939,7 @@ static void compositor_dnd_offer(int row)
         compositor_chip_drag_items = table->drag_offer_actions[row] >> WINDOWS_DRAG_ITEMS_SHIFT;
         compositor_chip_drag_kind = (table->drag_offer_actions[row] >> WINDOWS_DRAG_KIND_SHIFT) & 0xffu;
         under = compositor_under(compositor.pointer_x, compositor.pointer_y, &tab);
-        if (compositor_dnd.bridge_count)
+#ifdef CONFIG_MOONWATER_WAYLAND
         {
                 char types_buf[4096];
                 long bytes = 0;
@@ -3986,6 +3957,7 @@ static void compositor_dnd_offer(int row)
                         compositor_window_point(under, compositor.pointer_x, compositor.pointer_y, &wx, &wy);
                 compositor_dnd_arm_begin(row, types_buf, bytes, actions, under, wx, wy);
         }
+#endif
         compositor_dnd_motion(under);
 }
 
@@ -4096,11 +4068,6 @@ static int compositor_dnd_ext_begin_arm(int arm, unsigned int actions)
         return 1;
 }
 
-// The bridge form, until wayland_host.c passes its arm (the next step), then it goes.
-static int compositor_dnd_ext_begin(const struct compositor_drag_ops *bridge, unsigned int actions)
-{
-        return bridge ? compositor_dnd_ext_begin_arm(COMPOSITOR_DND_ARM_WL, actions) : 0;
-}
 
 static void compositor_dnd_ext_drop(void)
 {
