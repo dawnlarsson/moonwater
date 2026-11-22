@@ -99,10 +99,7 @@ static const string_address discovery_kind_names[] = {
 //      is for a literal).
 static p8 discovery_starts(string_address text, string_address prefix)
 {
-        positive length = string_length(prefix);
-
-        return text && string_length(text) >= length &&
-               !memory_compare(text, prefix, length);
+        return text && !string_compare_max(text, prefix, string_length(prefix));
 }
 
 /*      An interface's kind, from its name, its hardware type (ARPHRD_*), the
@@ -201,7 +198,7 @@ static positive discovery_address_text(const p8 address_to address,
                 return used;
         }
         for (positive at = 0; at < 8; at++)
-                words[at] = (p16)((address[at * 2] << 8) | address[at * 2 + 1]);
+                words[at] = network_load_16((p8 address_to)address + at * 2);
         for (positive at = 0; at < 8;)
         {
                 positive first = at;
@@ -324,11 +321,8 @@ static p8 discovery_parse6(const p8 address_to text, positive length,
 
                 while (at < length && digits < 5)
                 {
-                        p8 c = text[at];
-                        positive nibble = c >= '0' && c <= '9'   ? (positive)(c - '0')
-                                          : c >= 'a' && c <= 'f' ? (positive)(c - 'a' + 10)
-                                          : c >= 'A' && c <= 'F' ? (positive)(c - 'A' + 10)
-                                                                 : 16;
+                        positive nibble = digit_known(text[at], 16);
+
                         if (nibble == 16)
                                 break;
                         value = value << 4 | nibble;
@@ -360,8 +354,7 @@ static p8 discovery_parse6(const p8 address_to text, positive length,
         {
                 positive place = word < gap ? word : 8 - (count - word);
 
-                address[place * 2] = (p8)(words[word] >> 8);
-                address[place * 2 + 1] = (p8)words[word];
+                network_store_16(address + place * 2, words[word]);
         }
         return true;
 }
@@ -390,39 +383,16 @@ static p32 discovery_stun_fingerprint(const p8 address_to message,
                0x5354554eu;
 }
 
-static fn discovery_put32(p8 address_to into, p32 value)
-{
-        into[0] = (p8)(value >> 24);
-        into[1] = (p8)(value >> 16);
-        into[2] = (p8)(value >> 8);
-        into[3] = (p8)value;
-}
-
-static p32 discovery_get32(const p8 address_to from)
-{
-        return (p32)from[0] << 24 | (p32)from[1] << 16 | (p32)from[2] << 8 |
-               from[3];
-}
-
-static p16 discovery_get16(const p8 address_to from)
-{
-        return (p16)(from[0] << 8 | from[1]);
-}
-
 static positive discovery_stun_request(p8 address_to into,
                                         const p8 address_to transaction)
 {
-        into[0] = 0x00;
-        into[1] = 0x01;
-        into[2] = 0x00;
-        into[3] = 8;
-        discovery_put32(into + 4, DISCOVERY_STUN_MAGIC);
+        network_store_16(into, 0x0001);
+        network_store_16(into + 2, 8);
+        network_store_32(into + 4, DISCOVERY_STUN_MAGIC);
         memory_copy(into + 8, transaction, 12);
-        into[20] = 0x80;
-        into[21] = 0x28;
-        into[22] = 0x00;
-        into[23] = 4;
-        discovery_put32(into + 24, discovery_stun_fingerprint(into, 20));
+        network_store_16(into + 20, DISCOVERY_STUN_FINGERPRINT);
+        network_store_16(into + 22, 4);
+        network_store_32(into + 24, discovery_stun_fingerprint(into, 20));
         return DISCOVERY_STUN_REQUEST;
 }
 
@@ -440,14 +410,16 @@ static p8 discovery_stun_read(const p8 address_to message, positive length,
         p8 found = 0; // 2 xor-mapped, 1 mapped
 
         if (length < 20 || length > 1500 || message[0] != 0x01 ||
-            message[1] != 0x01 || (positive)discovery_get16(message + 2) + 20 != length ||
-            (length & 3) || discovery_get32(message + 4) != DISCOVERY_STUN_MAGIC ||
+            message[1] != 0x01 ||
+            (positive)network_load_16((p8 address_to)message + 2) + 20 != length ||
+            (length & 3) ||
+            network_load_32((p8 address_to)message + 4) != DISCOVERY_STUN_MAGIC ||
             memory_compare(message + 8, transaction, 12))
                 return false;
         while (at + 4 <= length)
         {
-                p16 type = discovery_get16(message + at);
-                positive size = discovery_get16(message + at + 2);
+                p16 type = network_load_16((p8 address_to)message + at);
+                positive size = network_load_16((p8 address_to)message + at + 2);
                 const p8 address_to value = message + at + 4;
                 positive next = at + 4 + ((size + 3) & ~(positive)3);
 
@@ -456,7 +428,7 @@ static p8 discovery_stun_read(const p8 address_to message, positive length,
                 if (type == DISCOVERY_STUN_FINGERPRINT)
                 {
                         if (size != 4 || next != length ||
-                            discovery_get32(value) !=
+                            network_load_32((p8 address_to)value) !=
                                 discovery_stun_fingerprint(message, at))
                                 return false;
                 }
@@ -466,7 +438,7 @@ static p8 discovery_stun_read(const p8 address_to message, positive length,
                 {
                         p8 xored = type == DISCOVERY_STUN_XOR_MAPPED;
                         p8 family = value[1];
-                        p16 got = discovery_get16(value + 2);
+                        p16 got = network_load_16((p8 address_to)value + 2);
 
                         if (family == 1 && size == 8)
                         {
@@ -501,10 +473,9 @@ static p8 discovery_trace_address(const p8 address_to body, positive length,
 {
         for (positive at = 0; at < length;)
         {
-                positive stop = at;
+                positive stop = at + memory_span_without_byte(
+                    (address_any)(body + at), '\n', length - at);
 
-                while (stop < length && body[stop] != '\n')
-                        stop++;
                 if (stop - at > 3 && !memory_compare(body + at, "ip=", 3))
                 {
                         positive size = stop - at - 3;
@@ -841,30 +812,30 @@ static fn discovery_kept_path(string_address directory, string_address leaf,
 static p8 discovery_server_parse(const p8 address_to text, positive length,
                                  discovery_stun_server address_to server)
 {
-        positive name = 0, port = 0, digits = 0;
+        positive name = memory_span_without_byte((address_any)text, ':', length);
+        positive port = 0;
 
-        while (name < length && text[name] != ':')
-                name++;
         if (!name || name >= DISCOVERY_NAME_ROOM || text[0] == '.' || text[0] == '-')
                 return false;
         for (positive at = 0; at < name; at++)
         {
                 p8 c = text[at];
 
-                if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
-                      (c >= '0' && c <= '9') || c == '.' || c == '-'))
+                if (!byte_is_alnum(c) && c != '.' && c != '-')
                         return false;
-                server->name[at] = c >= 'A' && c <= 'Z' ? (p8)(c + 32) : c;
+                server->name[at] = byte_to_lower(c);
         }
         server->name[name] = end;
-        for (positive at = name + 1; at < length; at++)
+        if (name < length)
         {
-                if (text[at] < '0' || text[at] > '9' || ++digits > 5)
+                positive digits = length - name - 1;
+
+                if (digits > 5 ||
+                    !memory_digits_whole(text + name + 1, digits, 65535,
+                                         address_of port) ||
+                    !port)
                         return false;
-                port = port * 10 + (positive)(text[at] - '0');
         }
-        if (name < length && (!digits || !port || port > 65535))
-                return false;
         server->port = (p16)(name < length ? port : DISCOVERY_STUN_PORT);
         return true;
 }
@@ -941,11 +912,13 @@ static fn discovery_url_host(const p8 address_to url, p8 address_to host)
 static positive discovery_number_of(const p8 address_to word, positive low,
                                     positive high, positive standard)
 {
-        positive value = 0, at = 0;
+        positive value = 0;
 
-        while (word[at] >= '0' && word[at] <= '9' && at < 9)
-                value = value * 10 + (positive)(word[at++] - '0');
-        return at && !word[at] && value >= low && value <= high ? value : standard;
+        return string_digits_checked_exact((string_address)word, 10,
+                                           address_of value) &&
+                       value >= low && value <= high
+                   ? value
+                   : standard;
 }
 
 static positive discovery_kept_number(string_address directory, string_address leaf,
@@ -1126,14 +1099,17 @@ static fn discovery_stun_send(bipolar handle, discovery_found address_to found,
 static fn discovery_stun_wait(bipolar handle, discovery_found address_to found,
                                p8 named, p8 transaction[2][12], p64 until)
 {
+        positive discarded = 0;
+
         for (;;)
         {
                 p64 now = clock_monotonic_nanoseconds();
                 timespec limit;
                 p8 answer[1500];
                 bipolar got;
+                p8 matched = false;
 
-                if (now >= until || (found->answered & named) == named)
+                if (!now || now >= until || (found->answered & named) == named)
                         return;
                 limit.tv_sec = (b64)((until - now) / 1000000000ull);
                 limit.tv_nsec = (b64)((until - now) % 1000000000ull);
@@ -1145,22 +1121,33 @@ static fn discovery_stun_wait(bipolar handle, discovery_found address_to found,
                         return;
                 if (ready <= 0)
                         continue;
-                got = socket_receive((b32)handle, answer, sizeof answer, MSG_DONTWAIT,
-                                     null, null);
-                for (positive at = 0; got > 0 && at < 2; at++)
+                got = socket_receive((b32)handle, answer, sizeof answer,
+                                     MSG_DONTWAIT | MSG_TRUNC, null, null);
+                if (got == NETWORK_TRY_AGAIN || got == NETWORK_INTERRUPTED)
+                        continue;
+                if (got < 0)
+                        return;
+                if ((positive)got <= sizeof answer)
                 {
-                        p8 address[16];
-                        p16 port = 0;
-
-                        if (!(found->answered & (1u << at)) &&
-                            discovery_stun_read(answer, (positive)got, transaction[at],
-                                                 address, address_of port))
+                        for (positive at = 0; at < 2; at++)
                         {
-                                memory_copy(found->mapped[at], address, 16);
-                                found->mapped_port[at] = port;
-                                found->answered |= (p8)(1u << at);
+                                p8 address[16];
+                                p16 port = 0;
+
+                                if (!(found->answered & (1u << at)) &&
+                                    discovery_stun_read(answer, (positive)got,
+                                                         transaction[at],
+                                                         address, address_of port))
+                                {
+                                        memory_copy(found->mapped[at], address, 16);
+                                        found->mapped_port[at] = port;
+                                        found->answered |= (p8)(1u << at);
+                                        matched = true;
+                                }
                         }
                 }
+                if (!matched && discarded++ == NETWORK_DISCARD_MAX)
+                        return;
         }
 }
 
@@ -1204,6 +1191,12 @@ static fn discovery_stun(discovery_found address_to found,
                 return;
         }
         start = clock_monotonic_nanoseconds();
+        if (!start)
+        {
+                socket_close((b32)handle);
+                found->udp = DISCOVERY_UDP_BLOCKED;
+                return;
+        }
         discovery_stun_send(handle, found, server, named, transaction);
         discovery_stun_wait(handle, found, named, transaction,
                              start + (p64)settings->stun_ms * 500000ull);
@@ -1307,6 +1300,7 @@ static fn discovery_found_read(discovery_found address_to found)
             found->size != sizeof(address_to found) ||
             found->udp > DISCOVERY_UDP_NO_NAME ||
             found->nat > DISCOVERY_NAT_DEPENDENT ||
+            found->answered > 3 ||
             found->https > DISCOVERY_HTTPS_FAILED)
                 memory_zero(found, sizeof(address_to found));
         found->asked_of[0].name[DISCOVERY_NAME_ROOM - 1] = end;
@@ -1440,8 +1434,11 @@ static p8 discovery_proxy(const discovery_settings address_to settings,
         static const string_address names[] = {"HTTPS_PROXY", "https_proxy",
                                                "ALL_PROXY", "all_proxy"};
         string_address value = null;
+        string_address scheme;
         positive at = 0, length;
 
+        if (!room)
+                return false;
         text[0] = end;
         for (positive name = 0; settings->proxy && !value && name < array_count(names); name++)
         {
@@ -1451,13 +1448,9 @@ static p8 discovery_proxy(const discovery_settings address_to settings,
         }
         if (!value)
                 return false;
-        for (positive scan = 0; value[scan]; scan++)
-                if (value[scan] == ':' && value[scan + 1] == '/' &&
-                    value[scan + 2] == '/')
-                {
-                        at = scan + 3;
-                        break;
-                }
+        scheme = string_search(value, "://");
+        if (scheme)
+                at = (positive)(scheme - value) + 3;
         for (positive scan = at; value[scan] && value[scan] != '/'; scan++)
                 if (value[scan] == '@')
                         at = scan + 1;
@@ -1468,9 +1461,8 @@ static p8 discovery_proxy(const discovery_settings address_to settings,
                 p8 c = (p8)value[at + length];
 
                 //      What is printed is an address: anything else is a dot.
-                text[length] = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') ||
-                                       (c >= 'A' && c <= 'Z') || c == '.' ||
-                                       c == ':' || c == '-' || c == '[' || c == ']'
+                text[length] = byte_is_alnum(c) || c == '.' || c == ':' ||
+                                       c == '-' || c == '[' || c == ']'
                                    ? c
                                    : '.';
         }
@@ -1920,14 +1912,17 @@ positive discovery_mdns_announce(const discovery_mdns_service address_to service
         p8 address_to host;
 
         /* Subtract only after proving the fixed reserve fits: the caller's
-           question length must not wrap the capacity check before the copy. */
-        if (starts + 20 > 63 || room < 12 + reserve ||
+           question length must not wrap the capacity check before the copy,
+           nor push compression pointer targets past DNS's 14-bit offset limit. */
+        if (starts + 20 > 63 || 12 + reserve > 0x3fff || room < 12 + reserve ||
             question_length > room - (12 + reserve) ||
+            question_length > 0x3fff - (12 + reserve) ||
             (!question && question_length) || (question && !question_length))
                 return 0;
         at = discovery_mdns_head(packet, id, 0x8400, question ? 1 : 0,
                                 3 + (address ? 1 : 0));
-        memory_copy(at, question, question_length);
+        if (question_length)
+                memory_copy(at, question, question_length);
         at += question_length;
 
         //      PTR: the service, to the instance.
@@ -1971,7 +1966,7 @@ positive discovery_mdns_query(const discovery_mdns_service address_to service,
 {
         p8 address_to at;
 
-        if (room < 12 + service->type_bytes + 4)
+        if (room < 16 || service->type_bytes > room - 16)
                 return 0;
         at = discovery_mdns_head(packet, 0, 0, 1, 0);
         memory_copy(at, service->type, service->type_bytes);
@@ -2044,9 +2039,12 @@ static p8 discovery_mdns_instance_of(const discovery_mdns_service address_to ser
                                      p8 address_to label,
                                      positive address_to label_length)
 {
-        positive first = name[0];
+        positive first;
 
-        if (!first || 1 + first >= length ||
+        if (!length)
+                return false;
+        first = name[0];
+        if (!first || first > 63 || 1 + first >= length ||
             !discovery_mdns_is_service(service, name + 1 + first,
                                        length - 1 - first))
                 return false;
@@ -2608,7 +2606,7 @@ static fn discovery_lan_interfaces(discovery_lan address_to lan)
 
 static fn discovery_lan_close(discovery_lan address_to lan)
 {
-        if (lan->socket > 0)
+        if (lan->socket >= 0)
                 socket_close((b32)lan->socket);
         lan->socket = -1;
         lan->interfaces = 0;
@@ -2673,6 +2671,8 @@ static fn discovery_lan_open(discovery_lan address_to lan)
 static bipolar discovery_lan_send(discovery_lan address_to lan, positive interface_at,
                                   p8 address_to packet, positive length)
 {
+        if (lan->socket < 0 || interface_at >= lan->interfaces)
+                return -1;
         if (!discovery_lan_allowed(lan, packet, length))
                 return DISCOVERY_LAN_OFF;
 #if defined(MACOS)
@@ -2733,6 +2733,8 @@ static bipolar discovery_lan_reply(discovery_lan address_to lan, p32 address, p1
                                       .port = network_order_16(port),
                                       .host = network_order_32(address)};
 
+        if (lan->socket < 0)
+                return -1;
         if (!discovery_lan_allowed(lan, packet, length))
                 return DISCOVERY_LAN_OFF;
 #if defined(MACOS)
@@ -2856,6 +2858,8 @@ static bipolar discovery_lan_receive(discovery_lan address_to lan, p8 address_to
         ssize_t got;
         b32 ttl = -1;
 
+        if (lan->socket < 0)
+                return -1;
         address_to arrived = 0;
         memory_zero(address_of from, sizeof from);
         memory_zero(address_of message, sizeof message);
@@ -2868,7 +2872,8 @@ static bipolar discovery_lan_receive(discovery_lan address_to lan, p8 address_to
         got = recvmsg((int)lan->socket, address_of message, MSG_DONTWAIT);
         if (got < 0)
                 return -1;
-        if ((positive)got > DISCOVERY_MDNS_MAX)
+        if ((positive)got > DISCOVERY_MDNS_MAX ||
+            message.msg_namelen < sizeof from || from.sin_family != AF_INET)
                 return 0;
 
         for (header = CMSG_FIRSTHDR(address_of message); header;
@@ -2903,7 +2908,10 @@ static bipolar discovery_lan_receive(discovery_lan address_to lan, p8 address_to
         socket_message message;
         bipolar got;
 
+        if (lan->socket < 0)
+                return -1;
         address_to arrived = 0;
+        memory_zero(address_of from, sizeof from);
         memory_zero(address_of message, sizeof message);
         message.name = address_of from;
         message.name_length = sizeof from;
@@ -2915,7 +2923,8 @@ static bipolar discovery_lan_receive(discovery_lan address_to lan, p8 address_to
                             (positive)address_of message, MSG_DONTWAIT);
         if (got < 0)
                 return -1;
-        if ((positive)got > DISCOVERY_MDNS_MAX)
+        if ((positive)got > DISCOVERY_MDNS_MAX ||
+            message.name_length < (b32)sizeof from || from.family != AF_INET)
                 return 0;
         if (socket_control_int((p8 address_to)control, message.control_length,
                                sizeof control, IPPROTO_IP, IP_TTL) != 255)

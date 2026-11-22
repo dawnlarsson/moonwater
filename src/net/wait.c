@@ -220,7 +220,9 @@ static bipolar network_receive_next(
 {
         if (peer)
         {
-                memory_fill(peer, 0, sizeof *peer);
+                if (!peer_size)
+                        return -1;
+                memory_zero(peer, sizeof *peer);
                 address_to peer_size = sizeof *peer;
         }
         return network_receive_until(handle, into, room, MSG_TRUNC, peer,
@@ -384,7 +386,8 @@ static bool network_stream_timeout(bipolar handle, positive seconds,
 {
         timeval limit;
 
-        if ((!seconds && !microseconds) || microseconds >= 1000000)
+        if ((!seconds && !microseconds) || microseconds >= 1000000 ||
+            (b64)seconds < 0)
                 return false;
 
         limit.tv_sec = (b64)seconds;
