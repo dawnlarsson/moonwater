@@ -3577,6 +3577,7 @@ static struct
         __attribute__((aligned(64))) unsigned long long reading, reading_out, taken, noted, note_at, late, late_most, keys, note_due;
         int down[256], own[COMPOSITOR_INPUTS];
         unsigned int generation[COMPOSITOR_INPUTS], gone_owed[COMPOSITOR_INPUTS];
+        unsigned int shape[COMPOSITOR_INPUTS]; // the device's kind as the loop left it (compositor_shape_of), published with its generation
         struct compositor_reader_record ring[COMPOSITOR_READER_RING];
 } compositor_reader = {0, -1, -1, -1};
 
@@ -3584,6 +3585,13 @@ static int compositor_reader_dup(unsigned int at)
 {
         int fd = at < compositor.input_count ? compositor.inputs[at] : -1;
         return fd >= 0 ? (int)compositor_call(syscall(fcntl), (positive)fd, 1030, 0, 0, 0, 0) : -1;
+}
+
+// A device's kind as the loop has it: bit 0 a touchpad, 1 a touchscreen, 2 a device the wake only reads, 3 and 4 its hires wheels.
+static unsigned int compositor_shape_of(unsigned int at)
+{
+        return (unsigned int)compositor.touchpad[at] | (unsigned int)compositor.touchscreen[at] << 1 |
+               (unsigned int)(compositor.devices[at].wakeonly != 0) << 2 | (unsigned int)(compositor.hires[at] & 3) << 3;
 }
 
 static void compositor_reader_changed(unsigned int at)
@@ -3597,7 +3605,9 @@ static void compositor_reader_changed(unsigned int at)
                 if (old > 0)
                         system_close(old - 1);
         }
+        // The kind is published before the generation and the change count say so: the reader reads the loop's flags only as this copy
         if (at < COMPOSITOR_INPUTS)
+                __atomic_store_n(&compositor_reader.shape[at], compositor_shape_of(at), __ATOMIC_RELEASE),
                 __atomic_add_fetch(&compositor_reader.generation[at], 1, __ATOMIC_RELEASE);
         __atomic_add_fetch(&compositor_reader.changes, 1, __ATOMIC_RELEASE);
         if (compositor_reader.on)
@@ -3724,8 +3734,9 @@ HOT static int compositor_reader_direct(unsigned int at, const struct compositor
         long dx = 0, dy = 0;
         int key = -1, value = 0, btn = 0, btn_val = 0, wheel_v120 = 0, wheel_horiz = 0;
         positive micro;
+        unsigned int shape = __atomic_load_n(&compositor_reader.shape[at], __ATOMIC_ACQUIRE);
 
-        if (compositor.touchpad[at] || compositor.touchscreen[at] || compositor.devices[at].wakeonly || __atomic_load_n(&compositor.dark, __ATOMIC_RELAXED) ||
+        if ((shape & 7u) || __atomic_load_n(&compositor.dark, __ATOMIC_RELAXED) ||
             __atomic_load_n(&compositor_reader.taken, __ATOMIC_ACQUIRE) != compositor_reader.handed_out || compositor_reader.dropped)
                 return 0;
         for (unsigned int k = 0; k < count; k++)
@@ -3740,7 +3751,7 @@ HOT static int compositor_reader_direct(unsigned int at, const struct compositor
                         int fine = raw[k].code == COMPOSITOR_REL_WHEEL_HI || raw[k].code == COMPOSITOR_REL_HWHEEL_HI;
                         int sideways = raw[k].code == COMPOSITOR_REL_HWHEEL || raw[k].code == COMPOSITOR_REL_HWHEEL_HI;
 
-                        if (!fine && (compositor.hires[at] >> sideways & 1))
+                        if (!fine && (shape >> (3 + sideways) & 1))
                                 continue;
                         wheel_v120 = compositor_wheel_turn(fine ? raw[k].value : raw[k].value * 120);
                         wheel_horiz = sideways;
@@ -3965,7 +3976,7 @@ HOT static fn compositor_reader_run(address_any context)
                                 bipolar bytes = system_read_once(watched[at], raw, sizeof raw);
                                 unsigned int records = bytes > 0 ? (unsigned int)(bytes / (bipolar)sizeof raw[0]) : 0, from = 0;
                                 long async_dx = 0, async_dy = 0;
-                                int is_mouse = !compositor.touchpad[at] && !compositor.touchscreen[at] && !compositor.devices[at].wakeonly;
+                                int is_mouse = !(__atomic_load_n(&compositor_reader.shape[at], __ATOMIC_ACQUIRE) & 7u);
 
                                 if (bytes < 0 && bytes != -COMPOSITOR_EAGAIN && bytes != -4)
                                 {
