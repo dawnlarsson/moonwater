@@ -6363,28 +6363,78 @@ COLD fn shell_cd(writer write)
                            address_of physical_named,
                            address_of variables_set))
         {
-                shell_answer(shell_bash_compat ? 1 : 2);
+                bool cdable_ok = false;
 
-                //      dash says only that it could not; bash says what the
-                //      kernel said, which is the difference between a name
-                //      that is not there and one that is not readable.
-                shell_diagnostic_where();
-
-                if (!shell_bash_compat)
-                        return string_format(log_error,
-                                             "cd: can't cd to %s\n",
-                                             shell_cd_target);
-
+                if (shell_bash_compat && shell_shopt_on(CDABLE_VARS) &&
+                    !say && shell_cd_target[0] != '/')
                 {
-                        string_address why =
-                            system_error_message(shell_cd_reason);
+                        positive target_length = string_length(shell_cd_target);
 
-                        return string_format(log_error, "cd: %s: %s\n",
-                                             shell_cd_target,
-                                             why ? why
-                                                 : (string_address)
-                                                   "No such file or "
-                                                   "directory");
+                        if (target_length && target_length < 256 &&
+                            shell_valid_name(shell_cd_target, target_length))
+                        {
+                                string_address resolved =
+                                    env_get(shell_cd_target);
+
+                                if (resolved && string_get(resolved))
+                                {
+                                        p8 saved_target[256];
+                                        bipolar saved_reason = shell_cd_reason;
+                                        string_address copied;
+
+                                        memory_copy_end(saved_target,
+                                                        shell_cd_target,
+                                                        target_length);
+                                        copied = string_copy_max_end(
+                                            shell_cd_target, resolved,
+                                            sizeof(shell_cd_target) - 1);
+                                        if (!string_get(
+                                                resolved +
+                                                (copied - shell_cd_target)) &&
+                                            shell_cd_walk(
+                                                physical, address_of say,
+                                                address_of physical_named,
+                                                address_of variables_set))
+                                        {
+                                                say = true;
+                                                cdable_ok = true;
+                                        }
+                                        else
+                                        {
+                                                memory_copy_end(shell_cd_target,
+                                                                saved_target,
+                                                                target_length);
+                                                shell_cd_reason = saved_reason;
+                                        }
+                                }
+                        }
+                }
+
+                if (!cdable_ok)
+                {
+                        shell_answer(shell_bash_compat ? 1 : 2);
+
+                        //      dash says only that it could not; bash says what the
+                        //      kernel said, which is the difference between a name
+                        //      that is not there and one that is not readable.
+                        shell_diagnostic_where();
+
+                        if (!shell_bash_compat)
+                                return string_format(log_error,
+                                                     "cd: can't cd to %s\n",
+                                                     shell_cd_target);
+
+                        {
+                                string_address why =
+                                    system_error_message(shell_cd_reason);
+
+                                return string_format(log_error, "cd: %s: %s\n",
+                                                     shell_cd_target,
+                                                     why ? why
+                                                         : (string_address)
+                                                           "No such file or "
+                                                           "directory");
+                        }
                 }
         }
 
@@ -7514,10 +7564,14 @@ COLD fn shell_exec(writer write)
                 floodlight_inplace_descendants_checked = false;
                 floodlight_inplace_terminal = false;
 
-                shell_answer(126);
+                b32 status = (told == -ERROR_NO_ENTRY || told == -ENOTDIR)
+                                 ? 127
+                                 : 126;
+
+                shell_answer(status);
                 shell_exec_refused(shell_argv[1], told);
+                shell_exec_failed(status);
         }
-        shell_exec_failed(126);
 }
 
 
@@ -8826,18 +8880,16 @@ COLD fn shell_shopt(writer write)
 
         while (shell_option_letter(address_of walk, address_of which))
         {
-                if (which == 's')
-                        set = true;
-                else if (which == 'u')
-                        unset = true;
-                else if (which == 'q')
-                        quiet = true;
-                else if (which == 'p')
-                        as_commands = true;
-                else if (which == 'o')
-                        set_options = true;
-                else
+                switch (which)
+                {
+                case 's': set = true; break;
+                case 'u': unset = true; break;
+                case 'q': quiet = true; break;
+                case 'p': as_commands = true; break;
+                case 'o': set_options = true; break;
+                default:
                         return shell_letter_refuse("shopt", which, "shopt [-pqsu] [-o] [optname ...]");
+                }
         }
 
         positive index = walk.index;
@@ -13363,6 +13415,7 @@ static byte_store printf_hold;
 // What printf writes without looking at it: everything but the terminator and
 // the one or two bytes that mean something where it is being read.
 static b8 printf_plain[STRING_SET_BYTES];
+static b8 printf_plain_quote[STRING_SET_BYTES];
 static b32 printf_sets_ready;
 
 static fn printf_sets_prepare()
@@ -13371,8 +13424,15 @@ static fn printf_sets_prepare()
                 return;
 
         memory_fill(printf_plain + 1, 1, STRING_SET_BYTES - 1);
-
         printf_plain['\\'] = printf_plain['%'] = 0;
+
+        memory_fill(printf_plain_quote + 1, 1, STRING_SET_BYTES - 1);
+        {
+                static const p8 wanted[] = " \t\n'\"\\|&;()<>!{}*[?]^$`,";
+
+                for (positive at = 0; wanted[at]; at++)
+                        printf_plain_quote[wanted[at]] = 0;
+        }
         printf_sets_ready = true;
 }
 
@@ -13546,12 +13606,15 @@ RETURNS_NONNULL string_address printf_escape(writer write, string_address step)
 
         p8 escaped = byte_simple_escape(value);
 
-        if (value == 'e')
+        if (value == 'e' || (shell_bash_compat && value == 'E'))
                 value = 27;
         else if (escaped)
                 value = escaped;
-        else if (value == '\\')
-                value = '\\';
+        else if (value == '\\' ||
+                 (shell_bash_compat && !printf_in_echo_bash &&
+                  (value == '"' ||
+                   (!printf_in_b && (value == '\'' || value == '?')))))
+                value = value;
         else
         {
                 p8 slash = '\\';
@@ -13578,13 +13641,6 @@ RETURNS_NONNULL string_address printf_escape(writer write, string_address step)
         something. That is Bash's rule and not a simplification of it, because
         %q exists to be pasted back into a command line.
 */
-static COLD PURE bool printf_quote_wanted(p8 value)
-{
-        static const p8 wanted[] = " \t\n'\"\\|&;()<>!{}*[?]^$`,";
-
-        return string_first_of((string_address)wanted, value) != null;
-}
-
 COLD fn printf_reusable(writer write, string_address text)
 {
         string_address step = text;
@@ -13592,6 +13648,8 @@ COLD fn printf_reusable(writer write, string_address text)
 
         if (!string_get(text))
                 return write("''", 2);
+
+        printf_sets_prepare();
 
         //      bash spells a byte that is no character in its locale in
         //      octal inside $'...' and keeps a whole character as itself.
@@ -13604,17 +13662,31 @@ COLD fn printf_reusable(writer write, string_address text)
                  length)
                 return shell_ansi_run(write, text, length, false);
 
-        for (step = text; string_get(step); step++)
+        // A comment or tilde only means something where the word starts.
+        if (string_is(step, '#') || string_is(step, '~'))
         {
-                p8 value = string_get(step);
+                p8 pair[2] = {'\\', string_get(step)};
 
-                // A comment only begins a comment where the word does.
-                if (printf_quote_wanted(value) ||
-                    (value == '#' && step == text) ||
-                    (value == '~' && step == text))
-                        write("\\", 1);
+                write(pair, 2);
+                step++;
+        }
 
-                write(address_of value, 1);
+        while (string_get(step))
+        {
+                positive run = string_span(step, printf_plain_quote);
+
+                if (run)
+                {
+                        write(step, run);
+                        step += run;
+                        continue;
+                }
+
+                {
+                        p8 pair[2] = {'\\', string_get(step++)};
+
+                        write(pair, 2);
+                }
         }
 }
 
@@ -14298,15 +14370,19 @@ static bool printf_format_simple(string_address format)
 {
         string_address step = format;
 
+        printf_sets_prepare();
+
         while (string_get(step))
         {
-                p8 byte = string_get(step);
+                positive run = string_span(step, printf_plain);
 
-                if (byte != '%' && byte != '\\')
+                if (run)
                 {
-                        step++;
+                        step += run;
                         continue;
                 }
+
+                p8 byte = string_get(step);
 
                 if (byte == '\\')
                 {
@@ -14352,21 +14428,17 @@ static fn printf_simple_one(writer write, string_address format)
 
         while (string_get(step))
         {
-                p8 byte = string_get(step);
+                positive run = string_span(step, printf_plain);
 
-                if (byte != '%' && byte != '\\')
+                if (run)
                 {
-                        string_address start = step;
-
-                        do
-                                step++;
-                        while (string_get(step) && string_not(step, '%') &&
-                               string_not(step, '\\'));
-
-                        shell_output_put(write, room, address_of used, start,
-                                         (positive)(step - start));
+                        shell_output_put(write, room, address_of used, step,
+                                         run);
+                        step += run;
                         continue;
                 }
+
+                p8 byte = string_get(step);
 
                 if (byte == '\\')
                 {
@@ -14375,10 +14447,12 @@ static fn printf_simple_one(writer write, string_address format)
 
                         step += 2;
 
-                        if (next == 'e')
+                        if (next == 'e' || (shell_bash_compat && next == 'E'))
                                 escaped = 27;
-                        else if (next == '\\')
-                                escaped = '\\';
+                        else if (next == '\\' ||
+                                 (shell_bash_compat &&
+                                  (next == '"' || next == '\'' || next == '?')))
+                                escaped = next;
                         else if (!escaped)
                         {
                                 shell_output_byte(write, room, address_of used,
@@ -15009,10 +15083,10 @@ COLD fn shell_read(writer write)
                             "[-t timeout] [-u fd] [name ...]");
                 string_address value = shell_option_argument(address_of options);
                 return_if(!value, shell_answered(2, "read: option -%s wants a value\n", said));
-                if (which == 'a')
+                switch (which)
                 {
-                        if (!shell_valid_name(value,
-                                              string_length(value)))
+                case 'a':
+                        if (!shell_valid_name(value, string_length(value)))
                         {
                                 shell_name_refused("read", value,
                                                    string_length(value));
@@ -15021,9 +15095,8 @@ COLD fn shell_read(writer write)
                         }
 
                         array_name = value;
-                }
-                else if (which == 'p')
-                {
+                        break;
+                case 'p':
                         //      A prompt is for someone to read, so it is
                         //      held until the descriptor is known and
                         //      written only when that descriptor is a
@@ -15032,14 +15105,13 @@ COLD fn shell_read(writer write)
                         //      error stream of every script that read a
                         //      file.
                         prompt = value;
-                }
-                else if (which == 'i')
-                {
+                        break;
+                case 'i':
                         // The editor would put it in front of what is
                         // typed. Nothing is typed down a pipe, so the
                         // option is taken and its value is not.
-                }
-                else if (which == 'u')
+                        break;
+                case 'u':
                 {
                         positive asked;
 
@@ -15056,8 +15128,10 @@ COLD fn shell_read(writer write)
 
                         descriptor = (b32)asked;
                         named_descriptor = true;
+                        break;
                 }
-                else if (which == 'n' || which == 'N')
+                case 'n':
+                case 'N':
                 {
                         positive asked;
 
@@ -15068,15 +15142,17 @@ COLD fn shell_read(writer write)
                         limited = true;
                         exact = which == 'N';
                         limit = asked;
+                        break;
                 }
-                else if (which == 'd')
+                case 'd':
                         stop_at = string_get(value);
-                else
-                {
+                        break;
+                default:
                         if (!read_timeout(value, address_of timeout))
                                 return shell_answered(1, "read: bad timeout: %s\n", value);
 
                         timed = true;
+                        break;
                 }
         }
         index = options.index;
@@ -15222,7 +15298,7 @@ COLD fn shell_read(writer write)
                         //      The read fails here anyway, with "no room" and
                         //      2, so a give-back that fails too has nothing
                         //      to add to what is said.
-                        if (block_used > block_at)
+                        if (seekable && block_used > block_at)
                                 (void)system_seek(descriptor, (positive)(-(bipolar)(block_used - block_at)), FILE_SEEK_CUR);
                         if (quieted)
                                 system_control(descriptor, PTY_TCSETS,
@@ -15371,7 +15447,7 @@ COLD fn shell_read(writer write)
                 so in the words of a read error and fails as one, where the
                 refusal was dropped and a `while read` loop lost lines.
         */
-        if (block_used > block_at)
+        if (seekable && block_used > block_at)
         {
                 bipolar back = system_seek(descriptor, (positive)(-(bipolar)(block_used - block_at)),
                                            FILE_SEEK_CUR);
@@ -15540,6 +15616,11 @@ static COLD bool mapfile_word_add(byte_store address_to store, string_address wo
 
         for (positive at = 0; at < length; at++)
                 quotes += word[at] == '\'';
+
+        if (quotes > positive_max / 3 ||
+            length > positive_max - 3 - quotes * 3 ||
+            store->used > positive_max - (length + 3 + quotes * 3))
+                return false;
 
         if (!byte_store_reserve(store, store->used + length + 2 + quotes * 3 + 1, 256))
                 return false;
@@ -24643,6 +24724,11 @@ HOT fn hash_remember(string_address name, string_address path)
         if (hash_find(name))
                 return;
 
+        if (name_length > positive_max - 2 ||
+            path_length > positive_max - name_length - 2 ||
+            hash_used > positive_max - (name_length + path_length + 2))
+                return;
+
         if (!shell_array_room(hash_name, hash_name_room, hash_count + 1) ||
             !shell_array_room(hash_path, hash_path_room, hash_count + 1) ||
             !shell_array_room(hash_hits, hash_hits_room, hash_count + 1) ||
@@ -24983,11 +25069,18 @@ static HOT b32 shell_find_in_path_mode(string_address name, p8 address_to into,
                 string_address known = use_hash && shell_hashall_on()
                                            ? hash_find(name) : null;
 
-                /* bash --posix looks again when the remembered file has
-                   gone; bash itself and dash try the stale path. */
-                if (known && shell_bash_compat && shell_posix_on() &&
-                    system_access_at(AT_FDCWD, known, access))
+                /* bash --posix and shopt -s checkhash look again when the
+                   remembered file has gone; drop the stale entry so the
+                   replacement path is recorded. */
+                if (known && shell_bash_compat &&
+                    (shell_posix_on() || shell_shopt_on(CHECKHASH)) &&
+                    (system_access_at(AT_FDCWD, known, access) ||
+                     (!shell_find_directories && test_unary('d', known))))
+                {
+                        if (!shell_find_asking)
+                                hash_drop(name);
                         known = null;
+                }
 
                 if (known)
                 {
@@ -26901,6 +26994,8 @@ static COLD fn compgen_programs(string_address word)
                 else
                         memory_copy_end(scratch->room, ".", 1);
 
+                positive base = walk.length ? walk.length : 1;
+
                 directory = system_open_at(AT_FDCWD, scratch->room,
                                            FILE_READ | O_DIRECTORY | O_CLOEXEC);
 
@@ -26913,7 +27008,6 @@ static COLD fn compgen_programs(string_address word)
                 {
                         string_address name = (string_address)entry->d_name;
                         positive name_length = string_length(name);
-                        positive base = string_length(scratch->room);
                         file_facts facts;
 
                         if (name_length < length ||

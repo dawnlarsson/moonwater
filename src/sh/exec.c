@@ -15719,7 +15719,10 @@ static COLD fn exec_pretty_word(exec_function_text address_to made,
                         string_address close = at + 1;
 
                         while (close < stop && string_not(close, '"'))
-                                close += string_is(close, '\\') ? 2 : 1;
+                                close += (string_is(close, '\\') &&
+                                          close + 1 < stop)
+                                             ? 2
+                                             : 1;
                         if (close < stop)
                                 close++;
                         exec_function_text_add(made, at, (positive)(close - at));
@@ -18461,27 +18464,39 @@ static b32 exec_node_kind(b32 index)
              node->kind == NODE_CASE))
                 exec_debug_before(node);
 
-        if (node->kind == NODE_ARITHMETIC)
+        switch (node->kind)
+        {
+        case NODE_ARITHMETIC:
                 status = exec_arithmetic_command(index);
-        else if (node->kind == NODE_CONDITIONAL)
+                break;
+        case NODE_CONDITIONAL:
                 status = exec_conditional(index);
-        else if (node->kind == NODE_IF)
+                break;
+        case NODE_IF:
                 status = exec_if(index);
-        else if (node->kind == NODE_WHILE)
+                break;
+        case NODE_WHILE:
                 status = exec_loop(index, false);
-        else if (node->kind == NODE_UNTIL)
+                break;
+        case NODE_UNTIL:
                 status = exec_loop(index, true);
-        else if (node->kind == NODE_FOR)
+                break;
+        case NODE_FOR:
                 status = exec_for(index, false);
-        else if (node->kind == NODE_SELECT)
+                break;
+        case NODE_SELECT:
                 status = exec_for(index, true);
-        else if (node->kind == NODE_COPROC)
+                break;
+        case NODE_COPROC:
                 status = exec_coproc(index);
-        else if (node->kind == NODE_CFOR)
+                break;
+        case NODE_CFOR:
                 status = exec_cfor(index);
-        else if (node->kind == NODE_CASE)
+                break;
+        case NODE_CASE:
                 status = exec_case(index);
-        else if (node->kind == NODE_SUBSHELL)
+                break;
+        case NODE_SUBSHELL:
         {
                 /*
                         A subshell whose only content is another subshell,
@@ -18508,9 +18523,12 @@ static b32 exec_node_kind(b32 index)
 
                 status = job_monitor() ? job_foreground_child(made, index)
                                        : exec_child_status(made);
+                break;
         }
-        else
+        default:
                 status = exec_node(node->left);
+                break;
+        }
 
         exec_compound_depth--;
 

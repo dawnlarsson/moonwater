@@ -379,9 +379,10 @@ static fn checksum_sponge_write(checksum_sponge address_to s,
         {
                 if (!s->used && length >= s->rate)
                 {
-                        positive whole = length / s->rate * s->rate;
+                        positive blocks = length / s->rate;
+                        positive whole = blocks * s->rate;
 
-                        checksum_sponge_blocks(s, data, whole / s->rate);
+                        checksum_sponge_blocks(s, data, blocks);
                         data += whole;
                         length -= whole;
                         continue;
@@ -819,7 +820,7 @@ static fn checksum_pool_run(checksum_pool address_to pool)
                                    address_of facts) == 0 &&
                     (facts.mode & MODE_FORMAT) == MODE_FILE)
                 {
-                        total += facts.size;
+                        total = system_saturating_add(total, facts.size);
                         sampled++;
                 }
         }
@@ -1286,7 +1287,7 @@ static bool checksum_region_grow(p8 address_to address_to region,
                 return false;
         if (address_to region)
         {
-                memory_copy(fresh, address_to region, address_to room);
+                memory_copy_apart(fresh, address_to region, address_to room);
                 memory_free(address_to region, address_to room);
         }
         address_to region = fresh;
@@ -1606,14 +1607,14 @@ static b32 checksum_verify(const checksum_algorithm address_to algorithm,
                                         text_flush();
                                         string_format(log_error, "%s: WARNING: %p%s\n", checksum_program, mismatched, mismatched == 1 ? (string_address) " computed checksum did NOT match" : (string_address) " computed checksums did NOT match");
                                 }
-                                if (ignore_missing && !matched)
+                                if (ignore_missing && !verified && !unreadable)
                                 {
                                         text_complain("%s: %w: %s\n",
                                             text_name, checksum_name_put, manifest,
                                             (string_address) "no file was verified");
                                 }
                         }
-                        if (!matched)
+                        if (!verified)
                                 failed = true;
                 }
 
@@ -1948,19 +1949,19 @@ static const checksum_algorithm address_to cksum_sha2_width(positive first,
 
 static const argument_option cksum_options[] = {
     {"algorithm", 'a', ARGUMENT_REQUIRED},
-    {"untagged", 'U', 0, 1},
-    {"tag", 'T', 0, 1},
-    {"raw", 'R'},
-    {"base64", 'B'},
+    {"untagged", 'U', ARGUMENT_LONG_ONLY, ARGUMENT_SELECT(checksum_selection, style)},
+    {"tag", 'T', ARGUMENT_LONG_ONLY, ARGUMENT_SELECT(checksum_selection, style)},
+    {"raw", 'R', ARGUMENT_LONG_ONLY},
+    {"base64", 'B', ARGUMENT_LONG_ONLY},
     {"zero", 'z'},
     {"length", 'l', ARGUMENT_REQUIRED},
     {"check", 'c'},
-    {"ignore-missing", 'i'},
-    {"quiet", 'q', 0, ARGUMENT_SELECT(checksum_selection, verify)},
-    {"status", 's', 0, ARGUMENT_SELECT(checksum_selection, verify)},
-    {"strict", 'S'},
+    {"ignore-missing", 'i', ARGUMENT_LONG_ONLY},
+    {"quiet", 'q', ARGUMENT_LONG_ONLY, ARGUMENT_SELECT(checksum_selection, verify)},
+    {"status", 's', ARGUMENT_LONG_ONLY, ARGUMENT_SELECT(checksum_selection, verify)},
+    {"strict", 'S', ARGUMENT_LONG_ONLY},
     {"warn", 'w', 0, ARGUMENT_SELECT(checksum_selection, verify)},
-    {"debug", 'D'},
+    {"debug", 'D', ARGUMENT_LONG_ONLY},
     {"binary", 'b', 0, ARGUMENT_SELECT(checksum_selection, mode)},
     {"text", 't', 0, ARGUMENT_SELECT(checksum_selection, mode)},
     {null},
@@ -2071,6 +2072,12 @@ static b32 cksum_main()
         }
         if (raw && (taking.flags & FILE_FLAG('B')))
                 return checksum_usage_error("cksum", "--base64 and --raw are mutually exclusive");
+        if (raw && checking)
+                return checksum_usage_error("cksum", "the --raw option is not supported when verifying checksums");
+        if ((taking.flags & FILE_FLAG('B')) && checking)
+                return checksum_usage_error("cksum", "the --base64 option is meaningless when verifying checksums");
+        if (checksum_selected.style == 'U' && checking)
+                return checksum_usage_error("cksum", "the --untagged option is meaningless when verifying checksums");
         b32 refused = checksum_refuse_modes("cksum", checking, tagged, taking.flags);
         if (refused)
                 return refused;

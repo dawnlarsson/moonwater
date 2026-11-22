@@ -29,7 +29,7 @@ static p32 tar_header_sum(p8 address_to block)
 
 static bool tar_header_zero(p8 address_to block)
 {
-        return memory_sum_bytes(block, TAR_BLOCK) == 0;
+        return memory_span_byte(block, 0, TAR_BLOCK) == TAR_BLOCK;
 }
 
 static bool tar_base256(p8 address_to field, positive width,
@@ -2574,6 +2574,10 @@ static fn tar_reset(void)
         path_table_clear(address_of tar_directories);
         path_table_clear(address_of tar_materialized);
         tar_attr_store_used = 0;
+        tar_leading_said = false;
+        tar_leading_link_said = false;
+        tar_listing_width = 19;
+        tar_listing_date_width = 16;
 }
 
 /*
@@ -3554,6 +3558,37 @@ static bool tar_deliver_sparse(bipolar archive, bipolar out, p64 size,
 
                 copied += tar_sparse[at].bytes;
                 cursor = offset + tar_sparse[at].bytes;
+        }
+
+        if (cursor < tar_sparse_real)
+        {
+                if (start < 0)
+                {
+                        if (!tar_write_zeros(out, tar_sparse_real - cursor))
+                        {
+                                tar_write_failure = -ERROR_INPUT_OUTPUT;
+                                (void)tar_skip(archive, tar_padded(size) - copied, seekable);
+                                return false;
+                        }
+                }
+                else if (tar_sparse_real > (p64)bipolar_max - (p64)start)
+                {
+                        tar_write_failure = -ERROR_FILE_TOO_LARGE;
+                        (void)tar_skip(archive, tar_padded(size) - copied, seekable);
+                        return false;
+                }
+                else
+                {
+                        bipolar moved = system_truncate_handle(
+                            out, start + (bipolar)tar_sparse_real);
+
+                        if (moved < 0)
+                        {
+                                tar_write_failure = moved;
+                                (void)tar_skip(archive, tar_padded(size) - copied, seekable);
+                                return false;
+                        }
+                }
         }
 
         return tar_skip(archive, tar_padded(size) - size, seekable);
@@ -4908,6 +4943,11 @@ static fn tar_diff_member(bipolar archive, p8 address_to block, p8 type,
                 tar_skip(archive, tar_padded(size), seekable);
                 return;
         }
+        if (!name[0])
+        {
+                tar_skip(archive, tar_padded(size), seekable);
+                return;
+        }
 
         switch (type)
         {
@@ -5040,6 +5080,8 @@ static fn tar_read_members(tar_members address_to run)
         p8 header_copy[TAR_BLOCK];
         tar_text long_name = {null, 0};
         tar_text long_link = {null, 0};
+        scope_exit(if (long_name.text) memory_free(long_name.text, long_name.room));
+        scope_exit(if (long_link.text) memory_free(long_link.text, long_link.room));
         bool have_long_name = false;
         bool have_long_link = false;
         bool long_refused = false;
@@ -5453,6 +5495,7 @@ static b32 tar_read_archive(struct tar_options address_to options)
         tar_pax_clear(address_of tar_pax_local);
         tar_sparse_clear();
         tar_reset();
+        tar_diff_prefix_count = 0;
         tar_matched = null;
         tar_matched_count = 0;
         if (options->first < count)
@@ -5460,6 +5503,7 @@ static b32 tar_read_archive(struct tar_options address_to options)
                 tar_matched = memory_take_zeroed(count - options->first, 1);
                 tar_matched_count = tar_matched ? count - options->first : 0;
         }
+        scope_exit(if (tar_matched) { memory_give(tar_matched); tar_matched = null; });
         tar_listing = log;
         tar_pack = options->pack;
 
@@ -6374,7 +6418,8 @@ static bipolar tar_put_facts(bipolar handle, string_address name, p8 type,
         if (tar_create_verbose > 1)
                 tar_long_line(block, type, mode & 07777, size, uid,
                               gid, null, null, facts->rdev_major,
-                              facts->rdev_minor, mtime, name, link, false);
+                              facts->rdev_minor, mtime, name, link,
+                              tar_numeric_owner);
         tar_dumped++;
         if (!tar_write_block(handle, block))
                 return -1;
@@ -6506,6 +6551,7 @@ static bipolar tar_scan_end(bipolar handle)
         bool have_long = false;
         p64 offset = 0;
 
+        scope_exit(if (long_name.text) memory_free(long_name.text, long_name.room));
         tar_archived_count = 0;
         tar_archived_names.used = 0;
         for (;;)
@@ -6516,7 +6562,7 @@ static bipolar tar_scan_end(bipolar handle)
                         return (bipolar)offset;
                 if (got != TAR_BLOCK)
                         return -1;
-                if (memory_sum_bytes(block, TAR_BLOCK) == 0)
+                if (tar_header_zero(block))
                         return (bipolar)offset;
                 if (!tar_header_ok(block))
                         return -1;
@@ -6525,17 +6571,18 @@ static bipolar tar_scan_end(bipolar handle)
                 p64 time = 0;
                 p8 type = block[156];
 
-                if (!tar_field_value(block + 124, 12, address_of size))
+                if (!tar_field_value(block + 124, 12, address_of size) ||
+                    !tar_size_fits(size))
                         return -1;
                 if (!tar_field_moment(block + 136, 12, address_of time))
                         time = 0;
 
                 offset += TAR_BLOCK;
-                positive data = (positive)((size + TAR_BLOCK - 1) / TAR_BLOCK * TAR_BLOCK);
+                positive data = tar_padded(size);
 
                 if (type == 'L')
                 {
-                        if (!tar_size_fits(size) ||
+                        if (size >= TAR_PAX_LIMIT ||
                             !tar_text_hold(address_of long_name, (positive)size) ||
                             system_read_retry((positive)handle, long_name.text, (positive)size) != (bipolar)size)
                                 return -1;
@@ -7238,6 +7285,7 @@ enum
 
 static const argument_option tar_option_rules[] = {
     {"extract", 'x'},
+    {"get", 'x'},
     {"list", 't'},
     {"create", 'c'},
     {"append", 'r'},
@@ -7251,6 +7299,7 @@ static const argument_option tar_option_rules[] = {
     {"absolute-names", 'P'},
     {"preserve-permissions", 'p'},
     {"same-permissions", 'p'},
+    {"preserve", 'p'},
     {"no-same-permissions", TAR_NO_SAME_PERMISSIONS, ARGUMENT_LONG_ONLY},
     {"touch", 'm'},
     {"no-same-owner", TAR_NO_SAME_OWNER, ARGUMENT_LONG_ONLY},
@@ -7287,6 +7336,7 @@ static const argument_option tar_option_rules[] = {
     {"overwrite", TAR_OVERWRITE, ARGUMENT_LONG_ONLY},
     {"gzip", 'z'},
     {"gunzip", 'z'},
+    {"ungzip", 'z'},
     {"xz", 'J'},
     {"zstd", TAR_ZSTD, ARGUMENT_LONG_ONLY},
     {"auto-compress", 'a'},
@@ -7732,6 +7782,7 @@ static b32 file_tar(void)
         struct tar_options options;
 
         tar_status = 0;
+        tar_usage_exit = false;
         if (!tar_parse(address_of options))
                 return tar_status ? tar_status : 2;
 

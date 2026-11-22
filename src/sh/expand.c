@@ -5116,8 +5116,13 @@ static p8 address_to arith_hold_span(p8 address_to out, string_address text,
 
                 if (!run || run <= at || run > stop)
                         run = at + 1;
-                while (at < run)
-                        *out++ = string_get(at++);
+                {
+                        positive span = (positive)(run - at);
+
+                        memory_copy_apart(out, at, span);
+                        out += span;
+                        at = run;
+                }
         }
 
         return out;

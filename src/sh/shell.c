@@ -707,6 +707,8 @@ static string_address shell_shopt_names[] = {
 
 //      The position of a name in the table above is its bit. Only the names
 //      something reads are spelled out; the rest are reached by lookup.
+#define SHELL_SHOPT_CDABLE_VARS 4
+#define SHELL_SHOPT_CHECKHASH 6
 #define SHELL_SHOPT_CHECKWINSIZE 8
 #define SHELL_SHOPT_CMDHIST 9
 #define SHELL_SHOPT_COMPLETE_FULLQUOTE 17

@@ -292,10 +292,27 @@ typedef struct
         letter '-' instead. That ordering is observable and is why the
         phases are separate here rather than folded into one loop.
 */
+typedef enum
+{
+        SHELL_LONG_NONE = 0,
+        SHELL_LONG_POSIX,
+        SHELL_LONG_VERBOSE,
+        SHELL_LONG_RESTRICTED,
+        SHELL_LONG_LOGIN,
+        SHELL_LONG_RCFILE,
+        SHELL_LONG_NORC,
+        SHELL_LONG_NOEDITING,
+        SHELL_LONG_DEBUGGER,
+        SHELL_LONG_VERSION,
+        SHELL_LONG_HELP,
+        SHELL_LONG_DUMP_STRINGS,
+} shell_long_action;
+
 typedef struct
 {
         string_address name;
         bool takes_word;
+        p8 action;
 } shell_long_option;
 
 /*
@@ -361,12 +378,22 @@ static bool shell_norc;
 static bool shell_debugger_asked;
 
 static const shell_long_option shell_long_options[] = {
-    {"debug", false}, {"debugger", false}, {"dump-po-strings", false},
-    {"dump-strings", false}, {"help", false}, {"init-file", true},
-    {"login", false}, {"noediting", false}, {"noprofile", false},
-    {"norc", false}, {"posix", false}, {"pretty-print", false},
-    {"rcfile", true}, {"restricted", false}, {"verbose", false},
-    {"version", false},
+    {"debug", false, SHELL_LONG_NONE},
+    {"debugger", false, SHELL_LONG_DEBUGGER},
+    {"dump-po-strings", false, SHELL_LONG_DUMP_STRINGS},
+    {"dump-strings", false, SHELL_LONG_DUMP_STRINGS},
+    {"help", false, SHELL_LONG_HELP},
+    {"init-file", true, SHELL_LONG_RCFILE},
+    {"login", false, SHELL_LONG_LOGIN},
+    {"noediting", false, SHELL_LONG_NOEDITING},
+    {"noprofile", false, SHELL_LONG_NONE},
+    {"norc", false, SHELL_LONG_NORC},
+    {"posix", false, SHELL_LONG_POSIX},
+    {"pretty-print", false, SHELL_LONG_NONE},
+    {"rcfile", true, SHELL_LONG_RCFILE},
+    {"restricted", false, SHELL_LONG_RESTRICTED},
+    {"verbose", false, SHELL_LONG_VERBOSE},
+    {"version", false, SHELL_LONG_VERSION},
 };
 
 /*
@@ -497,35 +524,40 @@ static positive shell_start_long_options(string_address address_to arguments,
                 //      a name the banner advertises would be worse than
                 //      taking it and doing nothing, which is what Bash does
                 //      with most of them for a -c command as well.
-                if (word_is(name, "posix"))
+                switch (shell_long_options[found].action)
                 {
+                case SHELL_LONG_POSIX:
                         if (!shell_extra_told("posix", true))
                         {
                                 invocation->status = 2;
                                 invocation->finished = true;
                                 return at;
                         }
-                }
-                else if (word_is(name, "verbose"))
+                        break;
+                case SHELL_LONG_VERBOSE:
                         shell_option_letter_told('v', true);
-                else if (word_is(name, "restricted"))
-                {
+                        break;
+                case SHELL_LONG_RESTRICTED:
                         shell_restricted_enter();
                         shell_restricted_sticky = true;
-                }
-                else if (word_is(name, "login"))
+                        break;
+                case SHELL_LONG_LOGIN:
                         shell_shopt_state |= SHELL_SHOPT(LOGIN_SHELL);
-                else if (word_is(name, "rcfile") || word_is(name, "init-file"))
+                        break;
+                case SHELL_LONG_RCFILE:
                         shell_rcfile = arguments[at + 1];
-                else if (word_is(name, "norc"))
+                        break;
+                case SHELL_LONG_NORC:
                         shell_norc = true;
+                        break;
                 //      Still the editor a listing on this line reads back.
-                else if (word_is(name, "noediting"))
+                case SHELL_LONG_NOEDITING:
                         shell_start_editing = false;
-                else if (word_is(name, "debugger"))
+                        break;
+                case SHELL_LONG_DEBUGGER:
                         shell_debugger_asked = true;
-                else if (word_is(name, "version"))
-                {
+                        break;
+                case SHELL_LONG_VERSION:
                         /*
                                 What this is, and what it answers for. The
                                 reference writes "GNU bash, version ..." and
@@ -544,23 +576,20 @@ static positive shell_start_long_options(string_address address_to arguments,
                         invocation->status = 0;
                         invocation->finished = true;
                         return at;
-                }
-                else if (word_is(name, "help"))
-                {
+                case SHELL_LONG_HELP:
                         shell_usage_said(log, arguments[0]);
                         invocation->status = 0;
                         invocation->finished = true;
                         return at;
-                }
-                else if (word_is(name, "dump-strings") ||
-                         word_is(name, "dump-po-strings"))
-                {
+                case SHELL_LONG_DUMP_STRINGS:
                         //      Every $"..." in the program, and there are
                         //      none: this shell has no message catalogue, so
                         //      the dump is empty and the program is not run.
                         invocation->status = 0;
                         invocation->finished = true;
                         return at;
+                default:
+                        break;
                 }
 
                 at += shell_long_options[found].takes_word ? 2 : 1;

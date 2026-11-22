@@ -225,7 +225,8 @@ static bool monitor_number(string_address path, bipolar address_to value)
         positive digits = string_digits_max(text + negative, 19,
                                             address_of used);
 
-        if (!used || text[negative + used] != end)
+        if (!used || text[negative + used] != end ||
+            digits > (positive)bipolar_max)
                 return false;
 
         address_to value = negative ? -(bipolar)digits : (bipolar)digits;
@@ -484,7 +485,15 @@ static fn monitor_visit_supply(monitor_find_context address_to context,
             !monitor_word(path, word, sizeof(word)))
                 return;
 
-        if (string_equals(word, "Battery"))
+        static const named_byte supply_kinds[] = {
+            {"Battery", MONITOR_BATTERY},
+            {"Mains", MONITOR_MAINS},
+        };
+        positive hit = string_table_lookup(word, supply_kinds);
+
+        if (hit == array_count(supply_kinds))
+                return;
+        if (supply_kinds[hit].value == MONITOR_BATTERY)
         {
                 p8 scope[24];
 
@@ -506,7 +515,7 @@ static fn monitor_visit_supply(monitor_find_context address_to context,
                         string_copy_bounded(sensor->path, directory,
                                             sizeof(sensor->path));
         }
-        else if (string_equals(word, "Mains"))
+        else
                 monitor_sensor_file(context->hardware, directory, "online",
                                     MONITOR_MAINS, "ac", true);
 }
@@ -1342,8 +1351,10 @@ static HOT b32 tools_monitor()
                 sleep is to the next of them: a sleep of the whole interval
                 after each frame's own work ran every frame late by that
                 work, a frame in a thousand at a tenth of a second. */
-        positive interval_ns = (positive)interval[0] * 1000000000u +
-                               (positive)interval[1];
+        positive interval_ns =
+            (positive)interval[0] > (positive_max - (positive)interval[1]) / 1000000000u
+                ? positive_max
+                : (positive)interval[0] * 1000000000u + (positive)interval[1];
         positive due = clock_monotonic_nanoseconds();
 
         while (!monitor_stopping)

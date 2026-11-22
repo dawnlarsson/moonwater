@@ -3177,39 +3177,52 @@ static HOT b32 parse_command_body()
             !parse_word_is_assignment(0))
                 return parse_function(false);
 
-        if (keyword == PARSE_KEYWORD_IF)
+        switch (keyword)
         {
+        case PARSE_KEYWORD_IF:
                 parse_position++;
                 index = parse_if_tail();
-        }
-        else if (keyword == PARSE_KEYWORD_WHILE)
+                break;
+        case PARSE_KEYWORD_WHILE:
                 index = parse_loop(NODE_WHILE);
-        else if (keyword == PARSE_KEYWORD_UNTIL)
+                break;
+        case PARSE_KEYWORD_UNTIL:
                 index = parse_loop(NODE_UNTIL);
-        else if (keyword == PARSE_KEYWORD_FOR)
+                break;
+        case PARSE_KEYWORD_FOR:
                 index = parse_for(NODE_FOR);
-        else if (keyword == PARSE_KEYWORD_SELECT)
+                break;
+        case PARSE_KEYWORD_SELECT:
                 index = parse_for(NODE_SELECT);
-        else if (keyword == PARSE_KEYWORD_COPROC)
+                break;
+        case PARSE_KEYWORD_COPROC:
                 index = parse_coproc();
-        else if (keyword == PARSE_KEYWORD_CASE)
+                break;
+        case PARSE_KEYWORD_CASE:
                 index = parse_case();
-        else if (keyword == PARSE_KEYWORD_OPEN)
+                break;
+        case PARSE_KEYWORD_OPEN:
                 index = parse_enclosed(NODE_GROUP);
-        else if (parse_look(0)->kind == PT_OP && parse_look(0)->op == OP_LPAREN)
-                index = parse_enclosed(NODE_SUBSHELL);
-        else if (keyword == PARSE_KEYWORD_NONE ||
-                 keyword == PARSE_KEYWORD_TIME)
-        {
+                break;
+        case PARSE_KEYWORD_NONE:
+                if (parse_look(0)->kind == PT_OP &&
+                    parse_look(0)->op == OP_LPAREN)
+                {
+                        index = parse_enclosed(NODE_SUBSHELL);
+                        break;
+                }
+                compound = false;
+                index = parse_simple();
+                break;
+        case PARSE_KEYWORD_TIME:
                 //      `time` after `|` is an ordinary name: the reference runs the
                 //      utility, because a bang is the only reserved word the
                 //      pipeline production itself consumes. At the start of
                 //      a pipeline parse_pipeline has already taken `time`.
                 compound = false;
                 index = parse_simple();
-        }
-        else
-        {
+                break;
+        default:
                 //      then/do/in/fi, a bang after `|`, and bash `]]` are
                 //      reserved here. The reference reports a syntax error, not
                 //      command-not-found. Bang at the start of a pipeline is

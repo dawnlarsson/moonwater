@@ -10,13 +10,14 @@
 
 // Common command handoff ------------------------------------------
 
-static b32 process_tool_exec_environment(
-    string_address program, string_address address_to words,
+static b32 process_tool_exec_target(
+    string_address program, string_address target,
+    string_address address_to words,
     string_address address_to environment, string_address path)
 {
         log_flush();
 
-        bipolar answer = file_exec_path_try_in(words[0], words, environment,
+        bipolar answer = file_exec_path_try_in(target, words, environment,
                                                path);
 
         //      nohup names the command with quoteaf and the others with
@@ -25,10 +26,18 @@ static b32 process_tool_exec_environment(
         if (string_equals(program, "nohup"))
                 return string_report(log_error, answer == -ERROR_NO_ENTRY ? 127 : 126,
                                      "%s: failed to run command %w: %s\n", program,
-                                     writer_shell_quoted_name, words[0],
+                                     writer_shell_quoted_name, target,
                                      file_reason(answer));
         return string_report(log_error, answer == -ERROR_NO_ENTRY ? 127 : 126, "%s: failed to run command '%w': %s\n",
-                      program, writer_terminal_quoted_name, words[0], file_reason(answer));
+                      program, writer_terminal_quoted_name, target, file_reason(answer));
+}
+
+static b32 process_tool_exec_environment(
+    string_address program, string_address address_to words,
+    string_address address_to environment, string_address path)
+{
+        return process_tool_exec_target(program, words[0], words, environment,
+                                        path);
 }
 
 static b32 process_tool_exec(string_address program,
@@ -580,7 +589,9 @@ static b32 process_chroot_credentials(string_address userspec, string_address gr
                 positive entries = 1;
                 for (string_address at = groups; *at; at++)
                         entries += *at == ',';
-                positive address_to list = utility_arena_take(entries * sizeof(positive));
+                if (entries > positive_max / sizeof(p32))
+                        return string_report(log_error, 125, "chroot: out of memory\n");
+                p32 address_to list = utility_arena_take(entries * sizeof(p32));
 
                 if (!list)
                         return string_report(log_error, 125, "chroot: out of memory\n");
@@ -599,10 +610,10 @@ static b32 process_chroot_credentials(string_address userspec, string_address gr
                                 text[length] = end;
                                 bipolar id = file_identity_of((string_address)text, true);
 
-                                if (id < 0)
+                                if (id < 0 || (positive)id > 0xffffffffu)
                                         return string_report(log_error, 125, "chroot: invalid group '%s'\n",
                                                              (string_address)text);
-                                list[listed++] = (positive)id;
+                                list[listed++] = (p32)id;
                         }
                         at += length + (comma != null);
                 }
@@ -1170,6 +1181,7 @@ static b32 process_coresched()
                         words[at] = file_operand_at(first_word + at);
                 words[word_count] = null;
         }
+        scope_exit(if (words && !in_a_row) memory_free(words, words_room * sizeof(string_address)));
 
         if (file_meta(address_of taking, "[get] [--source PID]\n"
                       "       coresched new [-t TYPE] --dest PID|-- COMMAND\n"
@@ -2113,8 +2125,9 @@ static b32 process_script_child(string_address command,
         {
                 string_address words[] = {shell_name, (string_address)"-c",
                                           command, null};
-                return process_tool_exec_environment(
-                    (string_address)"script", words, file_environment_all(),
+                return process_tool_exec_target(
+                    (string_address)"script", shell, words,
+                    file_environment_all(),
                     file_environment((string_address)"PATH"));
         }
         if (command_first < (positive)program_argument_count())
@@ -2125,8 +2138,8 @@ static b32 process_script_child(string_address command,
                     file_environment((string_address)"PATH"));
 
         string_address words[] = {shell_name, (string_address)"-i", null};
-        return process_tool_exec_environment(
-            (string_address)"script", words, file_environment_all(),
+        return process_tool_exec_target(
+            (string_address)"script", shell, words, file_environment_all(),
             file_environment((string_address)"PATH"));
 }
 
@@ -2567,20 +2580,26 @@ static b32 process_script()
         tools_refuse(taking.flags & FILE_FLAG('o'), "script", "output limits are not supported");
 
         positive separator = count;
-        for (positive at = 1; at < count; at++)
-                if (string_equals(program_argument((b32)at),
-                                  (string_address)"--"))
-                {
-                        separator = at;
-                        break;
-                }
+        string_address command = file_option_value(address_of taking, 'c');
+        if (taking.first > 1 &&
+            string_equals(program_argument((b32)(taking.first - 1)),
+                          (string_address)"--") &&
+            (!command || !string_equals(command, (string_address)"--")))
+                separator = taking.first - 1;
+        else
+                for (positive at = taking.first; at < count; at++)
+                        if (string_equals(program_argument((b32)at),
+                                          (string_address)"--"))
+                        {
+                                separator = at;
+                                break;
+                        }
 
         /*      The log operand is whatever stands before the separator; a
                 bare -- at the end names no command at all, which is why the
                 reference takes --command beside one. */
         positive tail = separator < count ? separator : count;
         positive operands = tail > taking.first ? tail - taking.first : 0;
-        string_address command = file_option_value(address_of taking, 'c');
         positive command_first = count;
         string_address positional = operands ? program_argument((b32)taking.first)
                                              : null;
@@ -2720,9 +2739,11 @@ static b32 process_script()
 
         // Two names for one device (the usual /dev/null twice) are no
         // conflict; util-linux minds only a shared regular file.
-        if (process_script_log_regular(state.out) &&
-            (process_script_log_same(state.out, state.in) ||
-             process_script_log_same(state.out, timing)))
+        if ((process_script_log_regular(state.out) &&
+             (process_script_log_same(state.out, state.in) ||
+              process_script_log_same(state.out, timing))) ||
+            (process_script_log_regular(state.in) &&
+             process_script_log_same(state.in, timing)))
         {
                 string_report(log_error, 1, "%s: %s\n", "script", "log files must name distinct objects");
                 goto close_logs;

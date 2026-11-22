@@ -1513,10 +1513,11 @@ bool storage_probe_device(string_address path,
 
         /* Container and fixed-superblock formats precede the deliberately
            broad boot-sector families: storage_probes is that sequence,
-           the same one the enumeration walks. */
-        for (positive at = 0; at < array_count(storage_probes) &&
-                              !identity->type_length; at++)
-                storage_probes[at].probe(handle, identity, bytes, have, null);
+           the same one the enumeration walks. Skip probing empty devices. */
+        if (have)
+                for (positive at = 0; at < array_count(storage_probes) &&
+                                      !identity->type_length; at++)
+                        storage_probes[at].probe(handle, identity, bytes, have, null);
 
         system_close(handle);
         return identity->type_length || identity->partuuid_length ||
@@ -1856,6 +1857,7 @@ typedef struct
         storage_selector selector;
         positive shown;
         positive found;
+        positive printed;
         bool select_seen;
         bool first_only;
 } storage_blkid_context;
@@ -1910,7 +1912,7 @@ static bool storage_blkid_visit(
         {
                 bool exported = context->mode == STORAGE_OUTPUT_EXPORT;
 
-                if (exported && context->found > 1)
+                if (exported && context->printed)
                         context->output("\n", 1);
 
                 if (exported)
@@ -1963,6 +1965,7 @@ static bool storage_blkid_visit(
                 if (context->mode == STORAGE_OUTPUT_FULL)
                         context->output("\n", 1);
         }
+        context->printed++;
 
         return !context->first_only;
 }
@@ -1993,6 +1996,7 @@ b32 storage_blkid_run(positive argc, string_address address_to argv,
             {"match-tag", 's', ARGUMENT_REQUIRED},
             {"match-token", 't', ARGUMENT_REQUIRED},
             {"output", 'o', ARGUMENT_REQUIRED},
+            {"probe", 'p'},
             {"cache-file", 'c', ARGUMENT_REQUIRED},
             {"garbage-collect", 'g'},
             {null},
@@ -2050,9 +2054,9 @@ b32 storage_blkid_run(positive argc, string_address address_to argv,
                         continue;
                 }
 
-                /* This build probes each device: there is no cache to read
-                   or to collect, so both are accepted and do nothing. */
-                if (option == 'c' || option == 'g')
+                /* This build probes each device directly: -p is already the
+                   behaviour, and there is no cache to read or collect. */
+                if (option == 'c' || option == 'g' || option == 'p')
                         continue;
 
                 if (option == 's')
@@ -3185,7 +3189,7 @@ static fn storage_findmnt_walk(storage_mount_table address_to table,
         positive row = parent;
         positive below = depth;
 
-        if (state->failed || done[index])
+        if (state->failed || done[index] || depth >= 256)
                 return;
         if (submounts || storage_findmnt_match(table->entry + index, options,
                                                have_query_id, query_id))
@@ -4671,11 +4675,20 @@ b32 storage_mount_command(positive argc, string_address address_to argv,
                         storage_mount_table table;
                         if (storage_mount_table_load(address_of table, diagnostic))
                         {
+                                positive room = 0;
+                                p8 address_to resolved = canonical
+                                    ? storage_word_path(operand[0],
+                                                        address_of room, 0)
+                                    : null;
                                 storage_mount address_to live =
-                                    storage_mount_find_target(address_of table,
-                                                              operand[0]);
+                                    storage_mount_find_target(
+                                        address_of table,
+                                        resolved ? (string_address)resolved
+                                                 : operand[0]);
                                 bipolar answer;
 
+                                if (resolved)
+                                        memory_free(resolved, room);
                                 if (!live)
                                 {
                                         string_format(diagnostic,
@@ -5018,6 +5031,7 @@ b32 storage_umount_command(positive argc, string_address address_to argv,
             `umount --no-canonicalize clink` reaches the mount under it. */
         positive flags = 0;
         string_address types = null;
+        string_address test_opts = null;
         string_address address_to operand = null;
         positive operand_room = 0;
         positive operands = 0;
@@ -5070,9 +5084,10 @@ b32 storage_umount_command(positive argc, string_address address_to argv,
                         fake = true;
                 else if (option == 'd')
                         loop_detach = true;
-                else if (option == 'O' || option == 'n')
-                        ; /* Every mount matches an empty option filter, and
-                             there is no mtab to leave alone. */
+                else if (option == 'O')
+                        test_opts = value;
+                else if (option == 'n')
+                        ; /* There is no mtab to leave alone. */
                 else if (option == 'l')
                         flags |= MNT_DETACH;
                 else if (option == 'f')
@@ -5132,7 +5147,8 @@ b32 storage_umount_command(positive argc, string_address address_to argv,
                 {
                         storage_mount address_to record = table.entry + i - 1;
                         if (!storage_word(record->target, "/") &&
-                            storage_type_match(types, record->type))
+                            storage_type_match(types, record->type) &&
+                            storage_mount_options_match(record, test_opts))
                                 failed |= storage_umount_one(
                                     diagnostic, record->target, record->type,
                                     record->source, flags,
@@ -5576,7 +5592,8 @@ static bipolar storage_format_fat32(bipolar handle, p64 offset, p64 bytes,
         bipolar failed;
 
         if (sector_size < 512 || sector_size > STORAGE_FAT_CLUSTER ||
-            (sector_size & (sector_size - 1)))
+            (sector_size & (sector_size - 1)) ||
+            offset > (p64)bipolar_max - bytes)
                 return -ERROR_INVALID;
 
         total = bytes / sector_size;
