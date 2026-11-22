@@ -8500,9 +8500,11 @@ typedef struct
         p32 ground, strength;
 } font_cell_plan_t;
 
+//      The plan's rectangle and the glyph's translate, given the cell's strength and tones. tones may be null: then the
+//      plan asks for them now, and a run of cells passes the one pointer every cell of the run shares.
 static fn font_plan_finish(font_engine address_to e, const font_target address_to target, b32 x, b32 y,
-                           b32 width, b32 height, b32 gx, b32 gy, font_bitmap box, p32 size, p32 flags,
-                           p32 colour, p32 background, font_cell_plan_t address_to plan)
+                           b32 width, b32 height, b32 gx, b32 gy, font_bitmap box, p32 strength,
+                           const p32 address_to tones, p32 colour, p32 background, font_cell_plan_t address_to plan)
 {
         plan->left = x < 0 ? 0 : x;
         plan->right = x + width > target->width ? target->width : x + width;
@@ -8525,8 +8527,8 @@ static fn font_plan_finish(font_engine address_to e, const font_target address_t
         plan->translate = true;
         plan->coverage = box.coverage + (positive)(plan->above - gy) * box.stride + (plan->from - gx);
         plan->stride = box.stride;
-        plan->strength = font_strength(e, size, flags);
-        plan->tones = font_tones(e, colour, background, plan->strength);
+        plan->strength = strength;
+        plan->tones = tones ? tones : font_tones(e, colour, background, strength);
 }
 
 static inline p64 font_cell_key(font_engine address_to e, const font_face address_to const address_to faces,
@@ -8545,18 +8547,45 @@ static inline p8 font_plan_begin(font_cell_plan_t address_to plan, p32 backgroun
         return !plan->unknown;
 }
 
+/*
+        Plans for n cells of a row: the key, identity, strength and tones are
+        worked once; a cell's box is its own. The tones pointer is valid until
+        the next font_tones call, so record the plans first.
+*/
+fn font_cell_run(font_engine address_to e, const font_face address_to const address_to faces, p32 count, const p32 address_to codes,
+                 p32 n, p32 cells, const font_metrics address_to grid, p32 size, p32 flags, const font_target address_to target,
+                 b32 x, b32 y, p32 colour, p32 background, font_cell_plan_t address_to plans)
+{
+        b32 width = (b32)(cells ? cells : 1) * grid->cell_width, height = grid->cell_height;
+
+        if (background & FONT_UNKNOWN)
+        {
+                for (p32 i = 0; i < n; i++)
+                        plans[i] = (font_cell_plan_t){.ground = background & 0xffffff, .unknown = true};
+                return;
+        }
+        p32 ident;
+        p64 base = font_cell_key(e, faces, count, cells, grid, size, &flags, colour, background, &ident);
+        p32 strength = font_strength(e, size, flags);
+        const p32 address_to tones = font_tones(e, colour, background, strength);
+
+        for (p32 i = 0; i < n; i++)
+        {
+                b32 dx, dy, cell_x = x + (b32)i * width;
+                b16 ink[2];
+                font_bitmap box = font_cell_box(e, faces, count, codes[i], cells, grid, size, flags, base, ident, &dx, &dy, ink);
+
+                plans[i] = (font_cell_plan_t){.ground = background & 0xffffff};
+                font_plan_finish(e, target, cell_x, y, width, height, cell_x + dx, y + dy, box, strength, tones, colour, background,
+                                 &plans[i]);
+        }
+}
+
 fn font_cell_plan(font_engine address_to e, const font_face address_to const address_to faces, p32 count, p32 code, p32 cells,
                   const font_metrics address_to grid, p32 size, p32 flags, const font_target address_to target, b32 x, b32 y, p32 colour,
                   p32 background, font_cell_plan_t address_to plan)
 {
-        if (!font_plan_begin(plan, background))
-                return;
-        b32 width = (b32)(cells ? cells : 1) * grid->cell_width, height = grid->cell_height, dx, dy;
-        b16 ink[2];
-        p32 ident;
-        p64 base = font_cell_key(e, faces, count, cells, grid, size, &flags, colour, background, &ident);
-        font_bitmap box = font_cell_box(e, faces, count, code, cells, grid, size, flags, base, ident, &dx, &dy, ink);
-        font_plan_finish(e, target, x, y, width, height, x + dx, y + dy, box, size, flags, colour, background, plan);
+        font_cell_run(e, faces, count, &code, 1, cells, grid, size, flags, target, x, y, colour, background, plan);
 }
 
 fn font_cluster_plan(font_engine address_to e, const font_face address_to const address_to faces, p32 count, const p32 address_to codes, p32 n,
@@ -8577,7 +8606,7 @@ fn font_cluster_plan(font_engine address_to e, const font_face address_to const 
                 font_stamp_coverage(scratch, (positive)width, (positive)width, (positive)height, dx, dy, box);
         }
         font_plan_finish(e, target, x, y, width, height, x, y, (font_bitmap){scratch, (positive)width, 0, 0, width, height},
-                         size, flags, colour, background, plan);
+                         font_strength(e, size, flags), null, colour, background, plan);
 }
 
 fn font_plan_paint(const font_cell_plan_t address_to plan, const font_target address_to target)

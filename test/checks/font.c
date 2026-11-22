@@ -4540,6 +4540,40 @@ static __attribute__((noinline)) fn font_check_dots(font_engine address_to e, co
         is run here alone straight after the stack is written with extremes, a stem and a dot, and the trap build
         (MW_UBSAN=1) stopped there; a plain build answers the same either way. Then a dotted letter, hinted.
 */
+//      A row of cells laid by font_cell_run is the plans font_cell_plan gives its cells one by one: every field, and the
+//      coverage's place and the tones, where a plan translates. The run goes first, so both read the same cached boxes.
+static fn check_cell_run(font_face address_to two)
+{
+        static p32 pixels_a[256 * 64], pixels_b[256 * 64];
+        static p32 codes[12] = {'A', 'g', '@', ' ', 0x2500, 0x2588, 'W', '.', 0x2805, 0xe9, '!', 0x25a0};
+        static font_cell_plan_t runs[12], singles[12];
+        font_target one_target = {pixels_a, 256, 256, 64}, other = {pixels_b, 256, 256, 64};
+        const font_face address_to chain[1] = {two};
+        font_metrics grid = font_metrics_at(two, 18 * 64);
+        b32 width = grid.cell_width;
+        b32 same = 1, translated = 0;
+
+        font_cell_run(&engine, chain, 1, codes, 12, 1, &grid, 18 * 64, 0, &one_target, 3, 5, 0xdfe7ef, 0x303030, runs);
+        for (p32 i = 0; i < 12; i++)
+        {
+                font_cell_plan(&engine, chain, 1, codes[i], 1, &grid, 18 * 64, 0, &other, 3 + (b32)i * width, 5, 0xdfe7ef, 0x303030,
+                               &singles[i]);
+                same = same && runs[i].left == singles[i].left && runs[i].right == singles[i].right &&
+                       runs[i].top == singles[i].top && runs[i].bottom == singles[i].bottom && runs[i].from == singles[i].from &&
+                       runs[i].to == singles[i].to && runs[i].above == singles[i].above && runs[i].below == singles[i].below &&
+                       runs[i].translate == singles[i].translate && runs[i].empty == singles[i].empty &&
+                       runs[i].strength == singles[i].strength && runs[i].ground == singles[i].ground;
+                if (singles[i].translate)
+                {
+                        translated++;
+                        same = same && runs[i].coverage == singles[i].coverage && runs[i].stride == singles[i].stride &&
+                               memory_compare(runs[i].tones, singles[i].tones, 256 * sizeof(p32)) == 0;
+                }
+        }
+        check("cell run: the plans of a row are the plans of its cells, one by one, and some of them translate",
+              same && translated >= 8);
+}
+
 //      Big-endian 16-bit store for a hand-built table.
 static fn reverse_put16(p8 address_to at, p32 value)
 {
@@ -4888,6 +4922,7 @@ b32 main()
         check_hostile_arithmetic();
         check_raster_ceiling();
         check_reverse_multiple();
+        check_cell_run(&two);
         //      Last: it loads faces until the 16-bit ids run out, and no face loads after it.
         check_edges(&one, &two);
         check_generation_wrap();
