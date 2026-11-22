@@ -3038,6 +3038,11 @@ static int compositor_wl_row_picture(void *context, int row, const struct waylan
                 compositor_wl.row_opaque[row] = (struct compositor_wl_opaque){(short)picture->opaque_x, (short)picture->opaque_y,
                                                                               (short)(picture->opaque_x + picture->opaque_w), (short)(picture->opaque_y + picture->opaque_h)};
         }
+        // An implicit-sync dma-buf is taken only once the kernel says its writes are done: a straight, lent or card read of one still being
+        // drawn is a tear. (It was checked after the lend, which took the buffer unchecked.) An explicit-sync buffer is held at its acquire
+        // point by the shim's commit (wayland.c), so it needs no check here.
+        if (picture->sync_fd >= 0 && !picture->explicit_sync && !compositor_wl_dmabuf_ready(wayland_row_owner(row), (int)picture->sync_fd))
+                return compositor_wl_layers.pending_row = -1, 1;
         if (has_content && !compositor_wl.laying[row].open && compositor_wl_straight_take(row, picture, width, height) == 2)
                 return wl_pic_commit_lent(table, row, picture, width, height, 0, 0);
         was_lent = compositor_lent(row);
@@ -3045,8 +3050,6 @@ static int compositor_wl_row_picture(void *context, int row, const struct waylan
                 return wl_pic_commit_lent(table, row, picture, width, height, !was_lent, 1);
         if (compositor_wl_layers.pending_row == row && !(picture->last && has_content))
                 compositor_wl_layers.pending_row = -1;
-        if (picture->sync_fd >= 0 && !picture->explicit_sync && !compositor_wl_dmabuf_ready(wayland_row_owner(row), (int)picture->sync_fd))
-                return compositor_wl_layers.pending_row = -1, 1;
         if (compositor_wl_layers.pending_row == row)
         {
                 aside = compositor_wl_layers.count[row];
