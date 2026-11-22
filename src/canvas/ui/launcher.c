@@ -67,7 +67,7 @@ static b32 launcher_offered(positive at)
         got = file_slurp_once_at(AT_FDCWD, (string_address) "/run/moonwater/verdict", (p8 address_to)verdict, sizeof(verdict) - 1);
         if (got >= 4 && (!memory_compare(verdict, "live", 4) || !memory_compare(verdict, "ask ", 4)))
                 offer = 1;
-        else if (got > 5 && !memory_compare(verdict, "disk ", 5))
+        else if (got > 5 && !memory_compare(verdict, "disk ", 5) && verdict[5] != '.')
         {
                 positive length = 5;
 
@@ -848,7 +848,7 @@ static b32 launcher_key(const struct window_event address_to event)
                 b32 moved;
                 ui_list_key(&launcher.ui, &launcher.list, event->a == UI_KEY_P ? UI_KEY_UP : event->a == UI_KEY_N ? UI_KEY_DOWN : event->a, &moved);
         }
-        else if (event->a == UI_KEY_TAB && launcher.entries)
+        else if (event->a == UI_KEY_TAB && launcher.entries && launcher.list.focus >= 0 && (positive)launcher.list.focus < launcher.entries)
         {
                 const struct launcher_entry address_to entry = &launcher.entry[launcher.list.focus];
                 const char address_to name = entry->kind == LAUNCHER_PROGRAM ? launcher_name(entry->index)
