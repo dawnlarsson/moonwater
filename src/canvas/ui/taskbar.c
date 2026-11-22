@@ -1673,15 +1673,9 @@ static int taskbar_draw(const struct taskbar_view *view, unsigned long redo, tas
            here damaged the band over pixels that were never drawn. */
         if (!(gw = glass(context, rect[0], rect[1], rect[2], rect[3])))
                 return 0;
+        // The draw paints what the band holds and reads nothing: the battery, the tray's words and the minute are taskbar_tick's.
         if (redo == ~0ul)
                 taskbar.stale = 0;
-        if (taskbar_clock_stale())
-        {
-                taskbar_battery_refresh();
-                taskbar_tray_render();
-                if (redo == ~0ul)
-                        taskbar.minute = taskbar_minute_now(), taskbar.language = compositor.table ? compositor.table->language : 0;
-        }
         int time_ok = taskbar_broken_time(taskbar.moon_at, &broken);
         if (time_ok)
                 clock[0] = (char)('0' + broken.tm_hour / 10), clock[1] = (char)('0' + broken.tm_hour % 10), clock[2] = ':',

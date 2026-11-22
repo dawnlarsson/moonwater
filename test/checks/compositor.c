@@ -5088,9 +5088,6 @@ static void check_taskbar_text(string_address face_path)
 
             taskbar_settings_set(words[position], "primary", "battery none\n");
             taskbar_text_set(0);
-            // The compositor's loop ticks the taskbar before it draws the band, so the draw finds its minute fresh and does not read
-            // the battery again (9ee96b67a), which would take away the battery set here.
-            taskbar_tick();
             taskbar.battery_item = 1, taskbar.battery_percent = 100, taskbar.battery_charging = 1;
             view = band_view(position, sides);
             taskbar_band(&view, &bx, &by, &bw, &bh);
@@ -5130,6 +5127,28 @@ static void check_taskbar_text(string_address face_path)
         check("taskbar text: turned, taller than wide and as long and thick as the bottom band's are wide and high, to a pixel", turned);
         taskbar.battery_item = 0;
         taskbar_standard();
+    }
+    /* A draw paints and reads nothing, so it never waits on a file: the battery and the minute are the tick's (taskbar_tick, at the
+       minute and at a wake). A draw after the minute turned, of the tray alone or of the whole band, leaves the battery as it was
+       set and the minute as it was (9ee96b67a read the battery there, after the band was laid out with the one it had); the tick
+       then reads the battery's feed, none here, and takes the minute. */
+    {
+        struct taskbar_view view;
+        int rect[4];
+        b32 kept = 1;
+        unsigned int stale = taskbar_minute_now() - 1;
+
+        taskbar_settings_set("bottom", "primary", "battery none\n");
+        for (int whole = 0; whole < 2; whole++)
+        {
+            taskbar.battery_item = 1, taskbar.battery_percent = 100, taskbar.battery_charging = 1, taskbar.minute = stale;
+            view = band_view(TASKBAR_BOTTOM, sides);
+            kept &= taskbar_draw(&view, whole ? ~0ul : 1ul << TASKBAR_TAB_BITS, band_glass, null, rect) == 1;
+            kept &= taskbar.battery_item == 1 && taskbar.battery_percent == 100 && taskbar.battery_charging == 1 && taskbar.minute == stale;
+        }
+        check("taskbar draw: a draw after the minute turned reads no battery and takes no minute, of the tray alone or of the whole band", kept);
+        check("taskbar draw: the tick reads them, the battery's feed and the minute", taskbar_tick() == 1 && !taskbar.battery_item && taskbar.minute != stale);
+        taskbar.battery_item = 0;
     }
     taskbar_text_set(0);
     taskbar_settings_set("bottom", "primary", "battery none\n");
