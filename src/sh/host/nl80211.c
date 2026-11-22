@@ -1151,6 +1151,7 @@ static COLD bipolar wifi_gtk_take(p8 address_to kek, p8 address_to data, positiv
         byte_reader reader;
 
         memory_fill(what, 0, sizeof(*what));
+        scope_exit(crypto_forget(plain, sizeof(plain)));
         if (!crypto_aes_key_unwrap(kek, data, length, plain, address_of size))
                 return -1;
         reader = byte_reader_open(plain, size);
@@ -1211,7 +1212,6 @@ static COLD bipolar wifi_gtk_take(p8 address_to kek, p8 address_to data, positiv
                         }
                 }
         }
-        crypto_forget(plain, sizeof(plain));
         return found;
 }
 
@@ -1343,8 +1343,8 @@ static COLD bipolar wifi_eapol_step(wifi_link address_to link, p8 address_to fra
                 link->replay_set = true;
                 failed = wifi_eapol_reply(link, kck, 0x030a, link->replay, false);
         }
-        if (!failed && fresh && (!link->installed || memory_compare(link->ptk + 32,
-                                                                    kck + 32, 16)))
+        if (!failed && fresh && (!link->installed || !crypto_same(link->ptk + 32,
+                                                                  kck + 32, 16)))
                 failed = nl80211_new_key(address_of link->session, link->index, 0,
                                          NL80211_KEYTYPE_PAIRWISE, link->bssid, kck + 32,
                                          16, null, 0, false, WLAN_CIPHER_CCMP);
@@ -1362,7 +1362,7 @@ static COLD bipolar wifi_eapol_step(wifi_link address_to link, p8 address_to fra
         //      counter. Each key id also keeps its own last key.
         if (!failed && found && (fresh || !pairwise) &&
             (!(link->gtk_installed & (1u << idx)) ||
-             memory_compare(what.gtk, link->gtk[idx], 16)))
+             !crypto_same(what.gtk, link->gtk[idx], 16)))
         {
                 failed = nl80211_new_key(address_of link->session, link->index, idx,
                                          NL80211_KEYTYPE_GROUP, null, what.gtk, 16, frame + 65,
@@ -1380,7 +1380,7 @@ static COLD bipolar wifi_eapol_step(wifi_link address_to link, p8 address_to fra
         //      the group key is.
         if (!failed && link->pmf && what.igtk_id && (fresh || !pairwise) &&
             (!(link->igtk_installed & (1u << (what.igtk_id - 4))) ||
-             memory_compare(what.igtk + 6, link->igtk[what.igtk_id - 4], 16)))
+             !crypto_same(what.igtk + 6, link->igtk[what.igtk_id - 4], 16)))
         {
                 //      The IGTK is a group key of its own cipher, its packet
                 //      number the six bytes at what.igtk.
@@ -2447,6 +2447,7 @@ static COLD fn wifi_sae_confirm(const p8 address_to kck, const p8 address_to cou
         memory_copy(block + 98, other_scalar, 32);
         memory_copy(block + 130, other_element, 64);
         crypto_hmac_sha256((p8 address_to)kck, 32, block, sizeof(block), out);
+        crypto_forget(block, sizeof(block));
 }
 
 /* A small number in Montgomery form. */
