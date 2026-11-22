@@ -1162,6 +1162,9 @@ static fn xz_dec_cut(xz_decoder address_to d)
                 }
         }
 
+        if ((positive)(job->out_end - job->out) >= XZ_MATCH_MAX)
+                return;
+
         p8 address_to from = (p8 address_to)src;
 
         d->chunk_left -= (positive)(job->out_end - job->out);
@@ -1526,10 +1529,8 @@ static bool xz_dec_block(xz_decoder address_to d)
                 positive at = 2;
                 positive limit = header_size - 4;
                 positive count = (positive)(flags & 3) + 1;
-                p32 got = 0;
+                p32 got = memory_load_unaligned(p32, header + limit);
 
-                for (positive i = 0; i < 4; i++)
-                        got |= (p32)header[limit + i] << (8 * i);
                 if (got != ~hash_crc32(0xffffffffu, header, limit))
                         return xz_dec_fail(d, "xz block header CRC");
                 return_if(flags & 0x3c, xz_dec_fail(d, "xz reserved block flags"));
@@ -5080,12 +5081,10 @@ static bool xz_par_grow(p8 address_to address_to area, positive address_to room,
 static bipolar xz_par_header(xz_par address_to r, p8 address_to h, positive size,
                              p64 address_to compressed, p64 address_to uncompressed)
 {
-        p32 crc = 0;
+        p32 crc = memory_load_unaligned(p32, h + size - 4);
         positive at = 2;
         p8 flags = h[1];
 
-        for (positive i = 0; i < 4; i++)
-                crc |= (p32)h[size - 4 + i] << (8 * i);
         if (crc != ~hash_crc32(0xffffffffu, h, size - 4))
                 return xz_par_fail(r, "xz block header CRC"), -1;
         if (flags & 0x3c)
@@ -5347,6 +5346,7 @@ static bipolar xz_par_walk(xz_par address_to r, positive batch_output)
                                          r->check_size;
 
                         if (compressed > (p64)positive_max / 2 ||
+                            r->used > positive_max - total ||
                             !xz_par_grow(address_of r->bytes, address_of r->room, r->used + size,
                                          r->used + total))
                                 return xz_par_fail(r, "xz cannot map the input"), -1;
@@ -5365,7 +5365,8 @@ static bipolar xz_par_walk(xz_par address_to r, positive batch_output)
                                 return -1;
                         r->used += total;
                         r->count++;
-                        held += (positive)uncompressed;
+                        held = uncompressed > positive_max - held ? positive_max
+                                                                  : held + (positive)uncompressed;
                         first = false;
                         if (r->count == XZ_PAR_BLOCKS_MAX ||
                             (r->count >= 2 && held >= batch_output))

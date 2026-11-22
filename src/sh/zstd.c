@@ -503,7 +503,6 @@ static bool zstd_fse_read(p8 address_to src, positive src_len,
 {
         p8 pad[520];
         p8 address_to ip;
-        p8 address_to iend;
         p32 bit_stream;
         positive bit_count;
         p8 table_log;
@@ -522,7 +521,6 @@ static bool zstd_fse_read(p8 address_to src, positive src_len,
         memory_fill(norm, 0, (max_sym + 1) * sizeof(norm[0]));
 
         ip = pad;
-        iend = pad + src_len + 8;
         bit_stream = memory_load_unaligned(p32, ip);
         bit_count = 0;
 
@@ -544,12 +542,10 @@ static bool zstd_fse_read(p8 address_to src, positive src_len,
                                 return_if(charnum > max_sym + 1, zstd_fail("zstd FSE zero run"));
                                 bit_stream >>= 16;
                                 bit_count += 16;
-                                if (ip + 4 <= iend)
-                                {
-                                        ip += bit_count >> 3;
-                                        bit_count &= 7;
-                                        bit_stream = memory_load_unaligned(p32, ip) >> bit_count;
-                                }
+                                ip += bit_count >> 3;
+                                bit_count &= 7;
+                                return_if(ip > pad + src_len, zstd_fail("zstd FSE header over-read"));
+                                bit_stream = memory_load_unaligned(p32, ip) >> bit_count;
                         }
                         while ((bit_stream & 3) == 3)
                         {
@@ -563,12 +559,10 @@ static bool zstd_fse_read(p8 address_to src, positive src_len,
                         bit_stream >>= 2;
                         return_if(charnum > max_sym + 1, zstd_fail("zstd FSE zero run"));
                         previous0 = false;
-                        if (ip + 4 <= iend)
-                        {
-                                ip += bit_count >> 3;
-                                bit_count &= 7;
-                                bit_stream = memory_load_unaligned(p32, ip) >> bit_count;
-                        }
+                        ip += bit_count >> 3;
+                        bit_count &= 7;
+                        return_if(ip > pad + src_len, zstd_fail("zstd FSE header over-read"));
+                        bit_stream = memory_load_unaligned(p32, ip) >> bit_count;
                         continue;
                 }
 
@@ -609,12 +603,10 @@ static bool zstd_fse_read(p8 address_to src, positive src_len,
                                 nb_bits--;
                                 threshold >>= 1;
                         }
-                        if (ip + 4 <= iend)
-                        {
-                                ip += bit_count >> 3;
-                                bit_count &= 7;
-                                bit_stream = memory_load_unaligned(p32, ip) >> bit_count;
-                        }
+                        ip += bit_count >> 3;
+                        bit_count &= 7;
+                        return_if(ip > pad + src_len, zstd_fail("zstd FSE header over-read"));
+                        bit_stream = memory_load_unaligned(p32, ip) >> bit_count;
                 }
         }
 
@@ -671,6 +663,7 @@ static bool zstd_fse_unpack(zstd_fse address_to table, p8 address_to into,
                                             address_of bits);
                 if (zstd_bits_reload(address_of bits))
                 {
+                        return_if(n >= max_out, zstd_fail("zstd Huffman too many weights"));
                         into[n++] = zstd_fse_symbol(table, address_of state1,
                                                     address_of bits);
                         break;
@@ -7434,7 +7427,21 @@ static positive zstd_read_span(bipolar handle, p8 address_to into, positive n)
         --long[=#] a window of 2^# bytes (27 alone).  --no-check leaves out
         the content checksum; -C and --check put it back.
 */
-/* A dictionary file whole, into memory that stays. */
+static p8 address_to zstd_cli_dict_buf;
+static positive zstd_cli_dict_cap;
+
+static fn zstd_cli_dict_clear(void)
+{
+        if (zstd_cli_dict_buf)
+        {
+                memory_free(zstd_cli_dict_buf, zstd_cli_dict_cap);
+                zstd_cli_dict_buf = null;
+                zstd_cli_dict_cap = 0;
+        }
+        zstd_dict_on = false;
+}
+
+/* A dictionary file whole, into memory owned for the invocation. */
 static bool zstd_cli_dictionary(string_address path)
 {
         bipolar handle = system_open_at(AT_FDCWD, path, FILE_READ);
@@ -7486,6 +7493,10 @@ static bool zstd_cli_dictionary(string_address path)
                 string_format(log_error, "zstd: error 32 : Dictionary is corrupted : %s \n", path);
                 return false;
         }
+        if (zstd_cli_dict_buf)
+                memory_free(zstd_cli_dict_buf, zstd_cli_dict_cap);
+        zstd_cli_dict_buf = bytes;
+        zstd_cli_dict_cap = size + 64;
         return true;
 }
 
@@ -7757,6 +7768,7 @@ typedef struct
         positive address_to sizes;
         positive count;
         positive total;
+        positive room;
 } zstd_train_set;
 
 static bool zstd_train_load(string_address address_to paths, positive count,
@@ -7784,10 +7796,17 @@ static bool zstd_train_load(string_address address_to paths, positive count,
                 string_format(log_error, "zstd: error 14 : nothing to train on \n");
                 return false;
         }
-        set->bytes = memory_checked(total + 64);
+        set->room = total + 64;
+        set->bytes = memory_checked(set->room);
         set->sizes = memory_checked(count * sizeof(positive));
         if (!set->bytes || !set->sizes)
+        {
+                if (set->bytes)
+                        memory_free(set->bytes, set->room);
+                if (set->sizes)
+                        memory_free(set->sizes, count * sizeof(positive));
                 return false;
+        }
         set->count = 0;
         set->total = 0;
         for (positive i = 0; i < count; i++)
@@ -7796,7 +7815,11 @@ static bool zstd_train_load(string_address address_to paths, positive count,
                 positive got = 0;
 
                 if (handle < 0)
+                {
+                        memory_free(set->bytes, set->room);
+                        memory_free(set->sizes, count * sizeof(positive));
                         return false;
+                }
                 got = zstd_read_span(handle, set->bytes + set->total,
                                      total - set->total < ZSTD_TRAIN_SAMPLE
                                          ? total - set->total : ZSTD_TRAIN_SAMPLE);
@@ -7807,7 +7830,13 @@ static bool zstd_train_load(string_address address_to paths, positive count,
                         set->total += got;
                 }
         }
-        return set->count != 0;
+        if (!set->count)
+        {
+                memory_free(set->bytes, set->room);
+                memory_free(set->sizes, count * sizeof(positive));
+                return false;
+        }
+        return true;
 }
 
 static positive zstd_train_hash(p8 address_to p)
@@ -7876,7 +7905,15 @@ static positive zstd_train_content(const zstd_train_set address_to set, positive
         positive at = 0;
 
         if (!freq || !seen || !active)
+        {
+                if (freq)
+                        memory_free(freq, (positive)4 << ZSTD_TRAIN_LOG);
+                if (seen)
+                        memory_free(seen, (positive)4 << ZSTD_TRAIN_LOG);
+                if (active)
+                        memory_free(active, (positive)1 << ZSTD_TRAIN_LOG);
                 return 0;
+        }
         for (positive sample = 0; sample < set->count; sample++)
         {
                 positive const size = set->sizes[sample];
@@ -8040,7 +8077,11 @@ static positive zstd_train_score(const zstd_train_set address_to set, p8 address
         zstd_params params;
 
         if (!room || !zstd_dictionary_load(dict, size))
+        {
+                if (room)
+                        memory_free(room, ZSTD_TRAIN_SAMPLE + 4096);
                 return (positive)-1;
+        }
         zstd_single_job = true;
         for (positive i = 0; i < set->count; i++)
         {
@@ -8133,7 +8174,15 @@ static b32 zstd_cli_train(void)
         stats = memory_checked(sizeof(zstd_train_stats));
         best = memory_checked(maxdict + 4096);
         if (!stats || !best)
+        {
+                if (stats)
+                        memory_free(stats, sizeof(zstd_train_stats));
+                if (best)
+                        memory_free(best, maxdict + 4096);
+                memory_free(set.bytes, set.room);
+                memory_free(set.sizes, nfiles * sizeof(positive));
                 return 1;
+        }
         zstd_cli_no_dict_id = false;
         for (positive attempt = 0; attempt < 2; attempt++)
         {
@@ -8147,13 +8196,19 @@ static b32 zstd_cli_train(void)
                 p32 id;
 
                 if (!dict || !content)
-                        return 1;
+                {
+                        if (dict)
+                                memory_free(dict, maxdict + 4096);
+                        if (content)
+                                memory_free(content, maxdict + 4096);
+                        break;
+                }
                 content_size = zstd_train_content(address_of set, k, maxdict > 768 ? maxdict - 384 : maxdict / 2, content);
                 if (!content_size)
-                        continue;
+                        goto next_attempt;
                 memory_fill(stats, 0, sizeof(zstd_train_stats));
                 if (!zstd_train_count(address_of set, content, content_size, stats))
-                        continue;
+                        goto next_attempt;
                 {
                         hash_xxh64_begin(address_of zstd_enc_hash, 0);
                         hash_xxh64_add(address_of zstd_enc_hash, content, content_size);
@@ -8161,8 +8216,8 @@ static b32 zstd_cli_train(void)
                         id = forced_id ? forced_id : (p32)(hash_id % (((p64)1 << 31) - 32768)) + 32768;
                 }
                 header = zstd_train_header(stats, content_size, id, dict);
-                if (!header)
-                        continue;
+                if (!header || header > maxdict)
+                        goto next_attempt;
                 if (header + content_size > maxdict)
                 {
                         positive const drop = header + content_size - maxdict;
@@ -8182,22 +8237,32 @@ static b32 zstd_cli_train(void)
                                 best_size = dict_size;
                         }
                 }
+next_attempt:
+                memory_free(dict, maxdict + 4096);
+                memory_free(content, maxdict + 4096);
         }
         zstd_dict_on = false;
+        memory_free(stats, sizeof(zstd_train_stats));
+        memory_free(set.bytes, set.room);
+        memory_free(set.sizes, nfiles * sizeof(positive));
         if (!best_size)
         {
+                memory_free(best, maxdict + 4096);
                 string_format(log_error, "zstd: error 20 : dictionary training failed \n");
                 return 1;
         }
         {
                 bipolar const handle = system_open_at_mode(AT_FDCWD, output, FILE_WRITE, 0644);
+                bool ok = handle >= 0 && system_write_all((positive)handle, best, best_size) == best_size;
 
-                if (handle < 0 || system_write_all((positive)handle, best, best_size) != best_size)
+                if (handle >= 0)
+                        system_close(handle);
+                memory_free(best, maxdict + 4096);
+                if (!ok)
                 {
                         string_format(log_error, "zstd: error 31 : cannot write dictionary %s \n", output);
                         return 1;
                 }
-                system_close(handle);
         }
         if (!quiet)
                 string_format(log_error, "Save dictionary of size %p into file %s \n", best_size, output);
@@ -8215,6 +8280,7 @@ static b32 file_zstd(void)
                 if (string_has_prefix(word, "--train"))
                         return zstd_cli_train();
         }
+        zstd_cli_dict_clear();
         file_codec_cli codec = {
             .name = "zstd", .decode_name = "unzstd", .cat_name = "zstdcat",
             .usage =
@@ -8233,7 +8299,10 @@ static b32 file_zstd(void)
             .level = 3,
             .run = zstd_cli_stream,
             .option = zstd_cli_option};
-        return file_codec_main(address_of codec);
+        b32 status = file_codec_main(address_of codec);
+
+        zstd_cli_dict_clear();
+        return status;
 }
 
 #endif /* ZSTD_CORE_ONLY */

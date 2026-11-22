@@ -477,13 +477,7 @@ static bool gzip_why_begin(gzip_inflater address_to z, p8 shape)
 
 static fn gzip_why_str(gzip_inflater address_to z, string_address text)
 {
-        positive at = 0;
-
-        while (z->why_text[at])
-                at++;
-        while (*text && at < sizeof(z->why_text) - 1)
-                z->why_text[at++] = (p8)*text++;
-        z->why_text[at] = 0;
+        string_append_bounded(z->why_text, text, sizeof(z->why_text));
 }
 
 static fn gzip_why_num(gzip_inflater address_to z, positive value, positive base, positive width)
@@ -1522,6 +1516,8 @@ static p64 gzip_par_find(const p8 address_to base, positive size, p64 from, p64 
                                 continue;
                         }
                         width = symbol == 16 ? 2 : symbol == 17 ? 3 : 7;
+                        if (cursor + width > (p64)size * 8)
+                                break;
                         repeat = (positive)((window >> take) & (((p64)1 << width) - 1));
                         cursor += width;
                         if (symbol == 16)
@@ -2191,7 +2187,7 @@ static positive gzip_par_header_end(const p8 address_to base, positive size)
         {
                 if (at + 2 > size)
                         return 0;
-                at += 2 + (positive)base[at] + ((positive)base[at + 1] << 8);
+                at += 2 + (positive)memory_load_unaligned(p16, base + at);
         }
         for (p8 part = GZIP_FNAME; part <= GZIP_FCOMMENT; part <<= 1)
                 if (flags & part)
@@ -2330,6 +2326,18 @@ static bool gzip_par_file_size(bipolar fd, positive address_to size)
 }
 #endif
 
+static fn gzip_note_copy(string_address why)
+{
+        if (why)
+        {
+                string_copy_bounded(gzip_note_text, why, sizeof(gzip_note_text));
+                gzip_note = (string_address)gzip_note_text;
+                gzip_why = gzip_note_text + (gzip_note_shape(gzip_note) ? 1 : 0);
+        }
+        else
+                gzip_why = null;
+}
+
 /* The whole stream from in to out (out < 0 tests without writing). */
 static bool gzip_stream_serial(bipolar in, bipolar out)
 {
@@ -2417,21 +2425,7 @@ static bool gzip_stream_serial(bipolar in, bipolar out)
                         ok = gzip_inflate_fail(z, "gzip write failed");
                 }
         }
-        if (z->why)
-        {
-                positive at = 0;
-
-                while (z->why[at] && at < sizeof(gzip_note_text) - 1)
-                {
-                        gzip_note_text[at] = (p8)z->why[at];
-                        at++;
-                }
-                gzip_note_text[at] = 0;
-                gzip_note = (string_address)gzip_note_text;
-                gzip_why = gzip_note_text + (gzip_note_shape(gzip_note) ? 1 : 0);
-        }
-        else
-                gzip_why = null;
+        gzip_note_copy(z->why);
         gzip_note_more = z->why2;
         gzip_garbage = ok && z->garbage;
         gzip_inflater_free(z);
@@ -2817,20 +2811,13 @@ static fn gzip_write_stored(gzip_encoder address_to e, p8 address_to src, positi
 
 static fn gzip_fixed_init(void)
 {
-        positive at;
-
         if (gzip_fixed_codes)
                 return;
-        for (at = 0; at <= 143; at++)
-                gzip_fixed_lit_len[at] = 8;
-        for (; at <= 255; at++)
-                gzip_fixed_lit_len[at] = 9;
-        for (; at <= 279; at++)
-                gzip_fixed_lit_len[at] = 7;
-        for (; at <= 287; at++)
-                gzip_fixed_lit_len[at] = 8;
-        for (at = 0; at < GZIP_MAXDIST; at++)
-                gzip_fixed_dist_len[at] = 5;
+        memory_fill(gzip_fixed_lit_len, 8, 144);
+        memory_fill(gzip_fixed_lit_len + 144, 9, 112);
+        memory_fill(gzip_fixed_lit_len + 256, 7, 24);
+        memory_fill(gzip_fixed_lit_len + 280, 8, 8);
+        memory_fill(gzip_fixed_dist_len, 5, GZIP_MAXDIST);
         huffman_codes(gzip_fixed_lit_len, GZIP_MAXLIT, gzip_fixed_lit_code);
         huffman_codes(gzip_fixed_dist_len, GZIP_MAXDIST, gzip_fixed_dist_code);
         gzip_fixed_codes = true;
@@ -4995,21 +4982,7 @@ static bool gzip_decode_end(void)
 {
         if (gzip_pull_one)
         {
-                string_address why = gzip_pull_one->why;
-                positive at = 0;
-
-                if (why)
-                {
-                        while (why[at] && at < sizeof(gzip_note_text) - 1)
-                        {
-                                gzip_note_text[at] = (p8)why[at];
-                                at++;
-                        }
-                        gzip_note_text[at] = 0;
-                        gzip_why = gzip_note_text + (gzip_note_shape(gzip_note_text) ? 1 : 0);
-                }
-                else
-                        gzip_why = null;
+                gzip_note_copy(gzip_pull_one->why);
                 gzip_pull_close(gzip_pull_one);
                 gzip_pull_one = null;
         }
