@@ -171,10 +171,16 @@ static int compositor_close_box(const struct compositor_frame *frame, int *x, in
 static inline INLINE int target_clip(const struct compositor_target *restrict t, int x, int y, int w, int h,
                                      int *restrict x1, int *restrict y1, int *restrict x2, int *restrict y2)
 {
+        long long rx2, ry2;
+
+        if (w <= 0 || h <= 0)
+                return *x1 = *x2 = t->x1, *y1 = *y2 = t->y1, 0;
+        rx2 = (long long)x + w;
+        ry2 = (long long)y + h;
         *x1 = x > t->x1 ? x : t->x1;
         *y1 = y > t->y1 ? y : t->y1;
-        *x2 = x + w < t->x2 ? x + w : t->x2;
-        *y2 = y + h < t->y2 ? y + h : t->y2;
+        *x2 = rx2 < t->x2 ? (int)rx2 : t->x2;
+        *y2 = ry2 < t->y2 ? (int)ry2 : t->y2;
         return *x2 > *x1 && *y2 > *y1;
 }
 
@@ -442,7 +448,7 @@ static void compositor_blit_scaled(const struct compositor_target *t, int x, int
 {
         int x1, y1, x2, y2;
 
-        if (width <= 0 || height <= 0 || !target_clip(t, x, y, width, height, &x1, &y1, &x2, &y2))
+        if (width <= 0 || height <= 0 || source_w <= 0 || source_h <= 0 || !target_clip(t, x, y, width, height, &x1, &y1, &x2, &y2))
                 return;
         if (swap)
         {
@@ -482,7 +488,7 @@ static void compositor_blit_scaled(const struct compositor_target *t, int x, int
 // A frame whose contents are its picture at another size (a window landing), so they are scaled from it.
 static int compositor_scaled(const struct compositor_frame *frame)
 {
-        return frame->source_w && (frame->width != frame->source_w || frame->height != frame->source_h);
+        return frame->source_w > 0 && frame->source_h > 0 && (frame->width != frame->source_w || frame->height != frame->source_h);
 }
 
 // The picture's pixel at dx, dy from a frame's contents' top left: the frame's own, or, a frame scaled, the one
@@ -490,15 +496,24 @@ static int compositor_scaled(const struct compositor_frame *frame)
 // floored step in 24 bit fractions), so that a corner's or a button's pixel is the contents' own and the card, which makes the whole frame's picture once, agrees.
 static unsigned int compositor_picture_at(const struct compositor_frame *frame, int dx, int dy)
 {
-        unsigned long sx = (unsigned long)dx, sy = (unsigned long)dy;
+        unsigned long sx, sy;
 
+        if (!frame->pixels || dx < 0 || dy < 0 || frame->width <= 0 || frame->height <= 0)
+                return 0;
+        sx = (unsigned long)dx, sy = (unsigned long)dy;
         if (compositor_scaled(frame))
         {
                 unsigned long step_x = ((unsigned long)frame->source_w << 24) / (unsigned long)frame->width, step_y = ((unsigned long)frame->source_h << 24) / (unsigned long)frame->height;
 
                 sx = ((((unsigned long)frame->source_w << 23) / (unsigned long)frame->width) + sx * step_x) >> 24;
                 sy = ((((unsigned long)frame->source_h << 23) / (unsigned long)frame->height) + sy * step_y) >> 24;
+                if (sx >= (unsigned long)frame->source_w)
+                        sx = (unsigned long)frame->source_w - 1;
+                if (sy >= (unsigned long)frame->source_h)
+                        sy = (unsigned long)frame->source_h - 1;
         }
+        else if (sx >= (unsigned long)frame->width || sy >= (unsigned long)frame->height)
+                return 0;
         return frame->pixels[sy * frame->pitch + sx];
 }
 
@@ -593,6 +608,8 @@ static const unsigned char *compositor_corner_mask(int radius)
 {
         unsigned char *mask;
 
+        if (radius < 1 || radius > COMPOSITOR_MASK_MOST)
+                return compositor_corner_none;
         if (!compositor_corner_masks)
         {
                 compositor_corner_masks = compositor_map_zeroed(2 * COMPOSITOR_MASKS_BYTES);
@@ -799,7 +816,7 @@ static void compositor_blit_scaled_blend(const struct compositor_target *t, cons
         int x = frame->x, y = frame->y, width = frame->width, height = frame->height;
         int x1, y1, x2, y2, w;
 
-        if (width <= 0 || height <= 0 || !target_clip(t, x, y, width, height, &x1, &y1, &x2, &y2))
+        if (width <= 0 || height <= 0 || frame->source_w <= 0 || frame->source_h <= 0 || !target_clip(t, x, y, width, height, &x1, &y1, &x2, &y2))
                 return;
         w = x2 - x1;
         if (frame->blend != 2)

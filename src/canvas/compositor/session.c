@@ -1725,7 +1725,7 @@ static void compositor_door_reopen(unsigned int row)
 
         windows_door_name((char *)name, row, 0);
         system_close(compositor.door[row]);
-        __atomic_store_n(&compositor.door[row], (int)system_open_at(AT_FDCWD, name, FILE_READ | O_NONBLOCK | O_CLOEXEC), __ATOMIC_RELEASE);
+        __atomic_store_n(&compositor.door[row], (int)system_open_at(AT_FDCWD, name, FILE_READ | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW), __ATOMIC_RELEASE);
 }
 
 // A row's work: its wake written, its door drained, and its door opened again when it closed.

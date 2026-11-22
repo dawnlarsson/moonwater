@@ -459,10 +459,18 @@ static void compositor_close_join(int *rectangle)
 
 static void compositor_damage_from(int x, int y, int width, int height, int damage_by)
 {
-        int rectangle[4] = {x < 0 ? 0 : x, y < 0 ? 0 : y,
-                            x + width > compositor.width ? compositor.width : x + width,
-                            y + height > compositor.height ? compositor.height : y + height};
+        long long rx2, ry2;
+        int rectangle[4];
         struct canvas_damage d;
+
+        if (width <= 0 || height <= 0)
+                return;
+        rx2 = (long long)x + width;
+        ry2 = (long long)y + height;
+        rectangle[0] = x < 0 ? 0 : x;
+        rectangle[1] = y < 0 ? 0 : y;
+        rectangle[2] = rx2 > compositor.width ? compositor.width : (int)rx2;
+        rectangle[3] = ry2 > compositor.height ? compositor.height : (int)ry2;
 
         if (rectangle[2] <= rectangle[0] || rectangle[3] <= rectangle[1])
                 return;

@@ -625,6 +625,8 @@ static int compositor_volume_map(void)
 
 static int compositor_row_named(const char *word)
 {
+        if (!compositor.table || !word)
+                return COMPOSITOR_NONE;
         for (unsigned int row = 0; row < compositor_rows_in_use; row++)
         {
                 const volatile char *name = compositor.table->name[row];
@@ -632,9 +634,9 @@ static int compositor_row_named(const char *word)
 
                 if (!compositor.showing[row])
                         continue;
-                while (word[at] && name[at] == word[at])
+                while (at < WINDOWS_NAME && word[at] && name[at] == word[at])
                         at++;
-                if (!word[at] && !name[at])
+                if (at < WINDOWS_NAME && !word[at] && !name[at])
                         return (int)row;
         }
         return COMPOSITOR_NONE;

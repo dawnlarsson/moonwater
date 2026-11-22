@@ -1932,7 +1932,7 @@ static int compositor_lists_take(int row, unsigned int width, unsigned int heigh
                 goto refused;
         }
         compositor_list_why = COMPOSITOR_LIST_INVALID, compositor_list_busy = false;
-        if (compositor_gpu_list_render(row, (const unsigned int *)list, compositor_buffer(row, 0), table->stride, (int)width, (int)height, damage) == 1)
+        if (compositor_gpu_list_render(row, (const unsigned int *)list, compositor_buffer(row, 0), (unsigned int)compositor_stride(), (int)width, (int)height, damage) == 1)
         {
                 compositor_list_waits[row] = 0, compositor_listed[row] = 1;
                 compositor_list_count(table, COMPOSITOR_LIST_DRAWN);
@@ -2076,21 +2076,28 @@ static void compositor_close_request(int row)
         want = (int)target - 1;
         if (want == row || want >= (int)compositor_rows_in_use || !compositor.showing[want] || !compositor.showing[row] || !compositor.app_id[row][0])
                 return;
-        if (!windows_owner_ok(&windows_owner_held[row], table->pid[row]) || !windows_owner_ok(&windows_owner_held[want], table->pid[want]))
+        if (!windows_owner_ok(&windows_owner_held[row], __atomic_load_n(&table->pid[row], __ATOMIC_ACQUIRE)) ||
+            !windows_owner_ok(&windows_owner_held[want], __atomic_load_n(&table->pid[want], __ATOMIC_ACQUIRE)))
                 return;
         if (memory_compare(compositor.app_id[row], compositor.app_id[want], WINDOWS_APP_ID))
                 return;
         compositor_close(want);
 }
 
+static unsigned int compositor_clip_self;
+
 static void compositor_take(int row)
 {
         struct windows *table = compositor.table;
+        unsigned int pid = __atomic_load_n(&table->pid[row], __ATOMIC_ACQUIRE);
         unsigned int frame = __atomic_load_n(&table->frame[row], __ATOMIC_ACQUIRE), seen;
         unsigned int width = table->width[row], height = table->height[row], front = table->buffer_index[row] & 1u;
         int damage[4] = {table->damage_x[row], table->damage_y[row], table->damage_width[row], table->damage_height[row]}, listed;
         char title[WINDOWS_TITLE];
         b32 reclaimed, list_refused;
+
+        if (!windows_owner_held[row].pid && pid && pid != WINDOWS_TAKING && pid != compositor_clip_self)
+                windows_owner_take(&windows_owner_held[row], pid);
 
         for (unsigned int at = 0; at < WINDOWS_TITLE; at++)
                 title[at] = ((volatile char *)table->title[row])[at];
@@ -3325,37 +3332,50 @@ static void compositor_close(int row)
 static struct
 {
         int door, fd[3], blank;
-        unsigned int *offer_seen, *ask_seen, cli_seen, history_most, history_count;
+        unsigned int *offer_seen, *ask_seen, cli_seen, history_most, history_count, on;
         positive *gesture;
         int history[COMPOSITOR_CLIP_HISTORY];
         const unsigned char *map[3];
+        unsigned long map_len[3];
 } compositor_clip = {.door = -1, .fd = {-1, -1, -1}, .blank = -1};
 
 static void (*compositor_clip_observers[COMPOSITOR_CLIP_OBSERVERS_MAX])(unsigned int which);
 static unsigned int compositor_clip_observer_count;
-static unsigned int compositor_clip_self; // the compositor's pid, which an fd of a clipboard offer is opened through (never the table's copy)
 
 static void compositor_clip_slot_map(unsigned int which, unsigned long size)
 {
         long mapped;
 
         if (compositor_clip.map[which])
-                compositor_call(syscall(munmap), (positive)compositor_clip.map[which], (positive)compositor.table->clip_length[which], 0, 0, 0, 0);
+                compositor_call(syscall(munmap), (positive)compositor_clip.map[which], (positive)compositor_clip.map_len[which], 0, 0, 0, 0);
         compositor_clip.map[which] = 0;
+        compositor_clip.map_len[which] = 0;
         if (!size || compositor_clip.fd[which] < 0)
                 return;
         mapped = compositor_call(syscall(mmap), 0, (positive)size, 1, 1, (positive)compositor_clip.fd[which], 0);
-        compositor_clip.map[which] = mapped < 0 && mapped > -4096 ? 0 : (const unsigned char *)mapped;
+        if (!(mapped < 0 && mapped > -4096))
+                compositor_clip.map[which] = (const unsigned char *)mapped, compositor_clip.map_len[which] = size;
 }
 
 static void compositor_clip_slot_install(unsigned int which, int opened, unsigned long length)
 {
+        int target = WINDOWS_CLIP_FD + (int)which;
+
         compositor_clip_slot_map(which, 0);
-        compositor_call(syscall(dup3), (positive)opened, WINDOWS_CLIP_FD + which, O_CLOEXEC, 0, 0, 0);
-        system_close(opened);
-        compositor_clip.fd[which] = WINDOWS_CLIP_FD + (int)which;
+        if (opened != target)
+        {
+                if (compositor_call(syscall(dup3), (positive)opened, (positive)target, O_CLOEXEC, 0, 0, 0) < 0)
+                {
+                        system_close(opened);
+                        compositor_clip.fd[which] = -1;
+                        compositor.table->clip_length[which] = 0;
+                        return;
+                }
+                system_close(opened);
+        }
+        compositor_clip.fd[which] = target;
         compositor_clip_slot_map(which, length);
-        compositor.table->clip_length[which] = length;
+        compositor.table->clip_length[which] = compositor_clip.map_len[which];
         __atomic_add_fetch(&compositor.table->clip_serial[which], 1, __ATOMIC_RELEASE);
 }
 
@@ -3424,9 +3444,9 @@ static b32 compositor_clip_gesture_recent(int row, positive now)
 }
 static const char *compositor_clip_offered(unsigned int which, unsigned long nth, unsigned long *length)
 {
-        if (which > WINDOWS_CLIP_DRAG || compositor_clip.fd[which] < 0 || !compositor.table)
+        if (which > WINDOWS_CLIP_DRAG || compositor_clip.fd[which] < 0 || !compositor_clip.map[which])
                 return 0;
-        return windows_clip_offered(compositor_clip.map[which], compositor.table->clip_length[which], nth, 0, length);
+        return windows_clip_offered(compositor_clip.map[which], compositor_clip.map_len[which], nth, 0, length);
 }
 
 /*
@@ -3495,12 +3515,13 @@ static void compositor_clip_settings(void)
         if (!compositor.table)
                 return;
         compositor_word(SETTING_CLIPBOARD_PATH, word, sizeof(word));
-        compositor.table->clip_on = !string_equals((string_address)word, "off");
+        compositor_clip.on = !string_equals((string_address)word, "off");
+        compositor.table->clip_on = compositor_clip.on;
         compositor_word(SETTING_CLIPBOARD_HISTORY_PATH, word, sizeof(word));
         compositor_clip.history_most = compositor_setting_kept(SETTING_CLIPBOARD_HISTORY_PATH, word, &value) && value >= 0 && value <= COMPOSITOR_CLIP_HISTORY
                                            ? (unsigned int)value
                                            : 0;
-        if (!compositor.table->clip_on)
+        if (!compositor_clip.on)
                 compositor_clip_wipe();
         while (compositor_clip.history_count > compositor_clip.history_most)
                 system_close(compositor_clip.history[--compositor_clip.history_count]);
@@ -3770,9 +3791,9 @@ static const char *compositor_dnd_name(long nth)
 {
         unsigned long length;
 
-        if (nth < 0 || !compositor_clip.map[WINDOWS_CLIP_DRAG] || !compositor.table)
+        if (nth < 0 || !compositor_clip.map[WINDOWS_CLIP_DRAG])
                 return 0;
-        return windows_clip_offered(compositor_clip.map[WINDOWS_CLIP_DRAG], compositor.table->clip_length[WINDOWS_CLIP_DRAG],
+        return windows_clip_offered(compositor_clip.map[WINDOWS_CLIP_DRAG], compositor_clip.map_len[WINDOWS_CLIP_DRAG],
                                     (unsigned long)nth, 0, &length);
 }
 
@@ -3936,12 +3957,13 @@ static void compositor_dnd_offer(int row)
         struct windows *table = compositor.table;
         unsigned long length = 0;
         int opened = -1, tab = 0, under, held = 0;
-        unsigned int actions;
+        unsigned int actions, pid = table ? __atomic_load_n(&table->pid[row], __ATOMIC_ACQUIRE) : 0;
 
         for (int b = 0; b < 8; b++)
                 held |= (compositor.button_down & (1u << b)) && compositor.button_row[b] == row;
-        if (!table || compositor_dnd_active() || !held ||
-            (opened = compositor_clip_open(table->pid[row], table->drag_offer_fd[row], &length)) < 0)
+        if (!table || compositor_dnd_active() || !held || pid == compositor_clip_self ||
+            !windows_owner_ok(&windows_owner_held[row], pid) ||
+            (opened = compositor_clip_open(pid, table->drag_offer_fd[row], &length)) < 0)
         {
                 compositor_dnd_tell(row, WINDOWS_DRAG_DECLINED, 0);
                 return;
@@ -4005,7 +4027,7 @@ static void compositor_dnd_ready(void)
 {
         if (!compositor_dnd.active || compositor_dnd.target < 0 || !compositor.table)
                 return;
-        compositor.table->clip_given_length[compositor_dnd.target] = compositor.table->clip_length[WINDOWS_CLIP_DRAG];
+        compositor.table->clip_given_length[compositor_dnd.target] = compositor_clip.map_len[WINDOWS_CLIP_DRAG];
         compositor_dnd_tell(compositor_dnd.target, WINDOWS_DRAG_READY, 0);
 }
 
@@ -4125,7 +4147,7 @@ static b32 compositor_clip_may_access(int row, positive now)
 {
         int root;
 
-        if (!compositor.table || !compositor.table->clip_on || row < 0 || row >= COMPOSITOR_ROWS)
+        if (!compositor.table || !compositor_clip.on || row < 0 || row >= COMPOSITOR_ROWS)
                 return 0;
         root = compositor_popup_root(row);
         return root >= 0 && root == compositor.focus && now - compositor_clip.gesture[row] <= COMPOSITOR_CLIP_GESTURE_NS;
@@ -4283,11 +4305,13 @@ static void compositor_clip_door(int row)
         if (offer != compositor_clip.offer_seen[row])
         {
                 unsigned int which = table->clip_offer_which[row] & 1u;
+                unsigned int pid = __atomic_load_n(&table->pid[row], __ATOMIC_ACQUIRE);
                 int ok;
 
                 compositor_clip.offer_seen[row] = offer;
-                ok = compositor_clip_take_offer(table->clip_on && now - compositor_clip.gesture[row] <= COMPOSITOR_CLIP_GESTURE_NS,
-                                                table->pid[row], table->clip_offer_fd[row], which, row, offer, &table->clip_offer_answer[row]);
+                ok = compositor_clip_take_offer(compositor_clip.on && now - compositor_clip.gesture[row] <= COMPOSITOR_CLIP_GESTURE_NS &&
+                                                    pid != compositor_clip_self && windows_owner_ok(&windows_owner_held[row], pid),
+                                                pid, table->clip_offer_fd[row], which, row, offer, &table->clip_offer_answer[row]);
                 compositor_clip_tell(row, which, ok ? WINDOWS_CLIP_TAKEN : WINDOWS_CLIP_DECLINED);
         }
         if (ask != compositor_clip.ask_seen[row])
@@ -4297,7 +4321,7 @@ static void compositor_clip_door(int row)
 
                 compositor_clip.ask_seen[row] = ask;
                 if (may)
-                        table->clip_given_length[row] = table->clip_length[which], __atomic_store_n(&table->clip_given_serial[row], ask, __ATOMIC_RELEASE);
+                        table->clip_given_length[row] = compositor_clip.map_len[which], __atomic_store_n(&table->clip_given_serial[row], ask, __ATOMIC_RELEASE);
                 compositor_clip_tell(row, which, may ? WINDOWS_CLIP_READY : WINDOWS_CLIP_REFUSED);
         }
 }
@@ -4314,11 +4338,14 @@ static void compositor_clip_cli_read(void)
         }
         if ((serial = __atomic_load_n(&table->cli_serial, __ATOMIC_ACQUIRE)) != compositor_clip.cli_seen)
         {
+                unsigned int cli_pid = __atomic_load_n(&table->cli_pid, __ATOMIC_ACQUIRE);
+
                 compositor_clip.cli_seen = serial;
                 // The same policy as a window's offer: the focused window had a key or button from the person lately (a CLI write
                 // from any same-user process is otherwise a silent clipboard replacement).
-                compositor_clip_take_offer(compositor.focus >= 0 && compositor_clip_may_access(compositor.focus, clock_monotonic_nanoseconds()),
-                                           table->cli_pid, (int)table->cli_fd, table->cli_which & 1u, -2, serial, &table->cli_answer);
+                compositor_clip_take_offer(compositor.focus >= 0 && compositor_clip_may_access(compositor.focus, clock_monotonic_nanoseconds()) &&
+                                               cli_pid != compositor_clip_self,
+                                           cli_pid, (int)table->cli_fd, table->cli_which & 1u, -2, serial, &table->cli_answer);
         }
 }
 
@@ -4336,7 +4363,7 @@ static int compositor_clip_start(void)
         compositor_call(syscall(unlinkat), (positive)AT_FDCWD, (positive)WINDOWS_CLIP_DOOR, 0, 0, 0, 0);
         compositor_call(syscall(mknodat), (positive)AT_FDCWD, (positive)WINDOWS_CLIP_DOOR, 0010000 | WINDOWS_MODE, 0, 0, 0);
         compositor_call(syscall(fchmodat), (positive)AT_FDCWD, (positive)WINDOWS_CLIP_DOOR, WINDOWS_MODE, 0, 0, 0);
-        compositor_clip.door = (int)system_open_at(AT_FDCWD, (string_address)WINDOWS_CLIP_DOOR, FILE_READ_WRITE | O_NONBLOCK | O_CLOEXEC);
+        compositor_clip.door = (int)system_open_at(AT_FDCWD, (string_address)WINDOWS_CLIP_DOOR, FILE_READ_WRITE | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW);
         compositor_clip_reserve();
         // The compositor's own pid is kept here, not read back from the table: the table's copy is written by clients too, and an
         // fd named through a pid another process wrote would be that process's file.

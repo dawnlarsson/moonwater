@@ -1327,7 +1327,7 @@ static void compositor_hand_back(void)
 
 static void *compositor_map_rw_file(string_address path, long bytes, int *error)
 {
-        long handle = (long)system_open_at_mode(AT_FDCWD, path, FILE_READ_WRITE | O_CREAT | O_CLOEXEC, 0644), mapped;
+        long handle = (long)system_open_at_mode(AT_FDCWD, path, FILE_READ_WRITE | O_CREAT | O_CLOEXEC | O_NOFOLLOW, 0644), mapped;
         if (handle < 0) { if (error) *error = -COMPOSITOR_EINVAL; return null; }
         if (compositor_call(syscall(ftruncate), (positive)handle, (positive)bytes, 0, 0, 0, 0) < 0)
                 { system_close((positive)handle); if (error) *error = -COMPOSITOR_EINVAL; return null; }
@@ -1754,7 +1754,7 @@ static long compositor_door_make(unsigned int row)
                 compositor_call(syscall(unlinkat), (positive)AT_FDCWD, (positive)name, 0, 0, 0, 0);
                 compositor_call(syscall(mknodat), (positive)AT_FDCWD, (positive)name, 0010000 | WINDOWS_MODE, 0, 0, 0);
                 compositor_call(syscall(fchmodat), (positive)AT_FDCWD, (positive)name, WINDOWS_MODE, 0, 0, 0);
-                handle = (long)system_open_at(AT_FDCWD, name, (wake ? FILE_READ_WRITE : FILE_READ) | O_NONBLOCK | O_CLOEXEC);
+                handle = (long)system_open_at(AT_FDCWD, name, (wake ? FILE_READ_WRITE : FILE_READ) | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW);
                 if (handle >= 0 && handle >= compositor_descriptors_most - COMPOSITOR_DESCRIPTORS_FIXED)
                         system_close(handle), handle = -24;
                 if (handle < 0)
