@@ -144,17 +144,6 @@ typedef struct
         p8 history[256];
 } xz_filter;
 
-/* The alignment a converter's start offset must have, 0 for an id that is
-   not one (delta has no start offset, and is not asked here). */
-static positive xz_filter_alignment(p64 id)
-{
-        return id == XZ_FILTER_X86 ? 1
-             : id == XZ_FILTER_ARMT || id == XZ_FILTER_RISCV ? 2
-             : id == XZ_FILTER_PPC || id == XZ_FILTER_ARM || id == XZ_FILTER_SPARC ||
-               id == XZ_FILTER_ARM64 ? 4
-             : id == XZ_FILTER_IA64 ? 16 : 0;
-}
-
 static fn xz_filter_reset(xz_filter address_to f)
 {
         f->pos = f->start;
@@ -573,24 +562,27 @@ static positive xz_filter_delta(xz_filter address_to f, bool encode, p8 address_
         return size;
 }
 
+typedef positive (*xz_filter_fn)(xz_filter address_to, bool, p8 address_to, positive);
+static const struct { p8 align; xz_filter_fn code; } xz_filter_table[9] = {
+    {0, xz_filter_delta}, {1, xz_filter_x86}, {4, xz_filter_ppc},
+    {16, xz_filter_ia64}, {4, xz_filter_arm}, {2, xz_filter_armt},
+    {4, xz_filter_sparc}, {4, xz_filter_arm64}, {2, xz_filter_riscv}};
+
+/* The alignment a converter's start offset must have, 0 for an id that is
+   not one (delta has no start offset, and is not asked here). */
+static positive xz_filter_alignment(p64 id)
+{
+        return id >= XZ_FILTER_DELTA && id <= XZ_FILTER_RISCV
+                   ? xz_filter_table[id - XZ_FILTER_DELTA].align : 0;
+}
+
 /* How many bytes of buffer[0, size) the filter has decided; the rest wait
    for more (or pass through at the end). */
 static positive xz_filter_code(xz_filter address_to f, bool encode, p8 address_to buffer,
                                positive size)
 {
-        switch (f->id)
-        {
-        case XZ_FILTER_DELTA: return xz_filter_delta(f, encode, buffer, size);
-        case XZ_FILTER_X86: return xz_filter_x86(f, encode, buffer, size);
-        case XZ_FILTER_PPC: return xz_filter_ppc(f, encode, buffer, size);
-        case XZ_FILTER_IA64: return xz_filter_ia64(f, encode, buffer, size);
-        case XZ_FILTER_ARM: return xz_filter_arm(f, encode, buffer, size);
-        case XZ_FILTER_ARMT: return xz_filter_armt(f, encode, buffer, size);
-        case XZ_FILTER_SPARC: return xz_filter_sparc(f, encode, buffer, size);
-        case XZ_FILTER_ARM64: return xz_filter_arm64(f, encode, buffer, size);
-        case XZ_FILTER_RISCV: return xz_filter_riscv(f, encode, buffer, size);
-        }
-        return size;
+        return f->id >= XZ_FILTER_DELTA && f->id <= XZ_FILTER_RISCV
+                   ? xz_filter_table[f->id - XZ_FILTER_DELTA].code(f, encode, buffer, size) : size;
 }
 
 /* One stage over a window that has XZ_FILTER_HEAD bytes of room before it:
@@ -784,8 +776,9 @@ typedef struct
 /* The check field's size, or -1 for a type the decoder refuses. */
 static bipolar xz_check_size(p8 type)
 {
-        return type == XZ_CHECK_NONE ? 0 : type == XZ_CHECK_CRC32 ? 4
-             : type == XZ_CHECK_CRC64 ? 8 : type == XZ_CHECK_SHA256 ? 32 : -1;
+        static const b8 sizes[11] = {0, 4, -1, -1, 8, -1, -1, -1, -1, -1, 32};
+
+        return type < array_count(sizes) ? sizes[type] : -1;
 }
 
 static bool xz_dec_fail(xz_decoder address_to d, string_address why)
@@ -1512,7 +1505,8 @@ static bool xz_dec_block(xz_decoder address_to d)
 
                 bipolar hdr0 = xz_dec_byte(d);
 
-                return_if(hdr0 < 0, xz_dec_fail(d, "xz truncated block"));
+                return_if(hdr0 <= 0, xz_dec_fail(d, hdr0 < 0 ? "xz truncated block"
+                                                             : "xz block header"));
 
                 positive header_size = ((positive)hdr0 + 1) * 4;
 
@@ -4801,7 +4795,10 @@ static bool xz_encode_setup(p8 level)
         xz_writer.input_room = xz_writer.batch_blocks * xz_writer.block + XZ_SLACK;
         xz_writer.input = (p8 address_to)memory_checked(xz_writer.input_room);
         if (!xz_writer.slots || !xz_writer.unpadded || !xz_writer.input)
+        {
+                xz_writer_close();
                 return xz_fail("xz cannot map the block input");
+        }
         memory_store_unaligned(p32, header + 8, ~hash_crc32(0xffffffffu, header + 6, 2));
         return xz_writer_emit(header, sizeof(header));
 }
@@ -5924,18 +5921,19 @@ static bipolar xz_cli_option(file_codec_cli address_to codec, string_address at,
                         return -1;
                 return at[1] ? (bipolar)string_length(at) : 1;
         }
-        if (string_equals(at, "--extreme"))
-        {
-                xz_cli_extreme = true;
-                xz_cli_count = 0;
-                return 1;
-        }
-        if (string_equals(at, "--fast") || string_equals(at, "--best"))
-        {
-                codec->level = at[2] == 'f' ? 0 : 9;
-                xz_cli_count = 0;
-                return 1;
-        }
+        static const struct { string_address name; b8 level; } long_flags[] = {
+            {"--extreme", -1}, {"--fast", 0}, {"--best", 9}, {"--no-adjust", -2}};
+        for (positive i = 0; i < array_count(long_flags); i++)
+                if (string_equals(at, long_flags[i].name))
+                {
+                        if (long_flags[i].level >= 0)
+                                codec->level = (p8)long_flags[i].level;
+                        else if (long_flags[i].level == -1)
+                                xz_cli_extreme = true;
+                        if (long_flags[i].level != -2)
+                                xz_cli_count = 0;
+                        return 1;
+                }
         for (positive i = 0; i < array_count(bcj); i++)
         {
                 positive n = string_length(bcj[i].name);
@@ -5954,8 +5952,6 @@ static bipolar xz_cli_option(file_codec_cli address_to codec, string_address at,
                         return 1;
                 }
         }
-        if (string_equals(at, "--no-adjust"))
-                return 1;
 
         string_address text = null;
         bipolar got;
@@ -5966,13 +5962,11 @@ static bipolar xz_cli_option(file_codec_cli address_to codec, string_address at,
                 if (got)
                         return got < 0 ? got : xz_cli_limit(xz_cli_limits[i], text) ? 1 : -1;
         }
-        got = xz_cli_value(codec, at, "check", address_of text);
-
-        if (got)
-                return got < 0 ? got : xz_cli_check(text) ? 1 : -1;
-        got = xz_cli_value(codec, at, "threads", address_of text);
-        if (got)
-                return got < 0 ? got : xz_cli_threads(text) ? 1 : -1;
+        static const struct { string_address name; bool (*parse)(string_address); } val_opts[] = {
+            {"check", xz_cli_check}, {"threads", xz_cli_threads}};
+        for (positive i = 0; i < array_count(val_opts); i++)
+                if ((got = xz_cli_value(codec, at, val_opts[i].name, address_of text)) != 0)
+                        return got < 0 ? got : val_opts[i].parse(text) ? 1 : -1;
         got = xz_cli_value(codec, at, "block-size", address_of text);
 
         if (got <= 0)

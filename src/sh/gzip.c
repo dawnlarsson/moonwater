@@ -153,26 +153,37 @@ static const p32 gzip_extra_masks[32] = {
         0xfffff, 0x1fffff, 0x3fffff, 0x7fffff, 0xffffff, 0x1ffffff, 0x3ffffff,
         0x7ffffff, 0xfffffff, 0x1fffffff, 0x3fffffff, 0x7fffffff};
 
+/* A symbol's cell before its bit counts: the builder adds the bits once for
+   the code-length and literal/length kinds, and at bits 0 and 8 for
+   distances; a length adds its extra value at bit 16. */
+static inline INLINE p32 gzip_cell_base(positive kind, positive symbol)
+{
+        if (kind == 0)
+                return (p32)symbol << 16;
+        if (kind == 1)
+        {
+                if (symbol < 256)
+                        return GZIP_CELL_LITERAL | (p32)symbol << 8;
+                if (symbol == 256)
+                        return GZIP_CELL_EXCEPTIONAL | GZIP_CELL_END;
+                if (symbol > 285)
+                        return GZIP_CELL_EXCEPTIONAL | GZIP_CELL_SYMBOL;
+                return (p32)gzip_len_base[symbol - 257] << 16;
+        }
+        if (symbol >= 30)
+                return GZIP_CELL_EXCEPTIONAL | GZIP_CELL_SYMBOL;
+        return (p32)gzip_dist_base[symbol] << 16 | gzip_dist_extra[symbol];
+}
+
 /* kind 0 is the code-length code, 1 literal/length, 2 distance; extra is
    the value of a length's extra bits, which bits already counts. */
 static p32 gzip_cell(positive kind, positive symbol, positive extra, positive bits)
 {
-        if (kind == 0)
-                return (p32)(symbol << 16 | bits);
-        if (kind == 1)
-        {
-                if (symbol < 256)
-                        return GZIP_CELL_LITERAL | (p32)(symbol << 8 | bits);
-                if (symbol == 256)
-                        return GZIP_CELL_EXCEPTIONAL | GZIP_CELL_END | (p32)bits;
-                if (symbol > 285)
-                        return GZIP_CELL_EXCEPTIONAL | GZIP_CELL_SYMBOL | (p32)bits;
-                return (p32)(gzip_len_base[symbol - 257] + extra) << 16 | (p32)bits;
-        }
-        if (symbol >= 30)
-                return GZIP_CELL_EXCEPTIONAL | GZIP_CELL_SYMBOL | (p32)bits;
-        return (p32)gzip_dist_base[symbol] << 16 | (p32)(bits << 8) |
-               (p32)(bits + gzip_dist_extra[symbol]);
+        p32 base = gzip_cell_base(kind, symbol);
+
+        if (kind == 1 && symbol >= 257 && symbol <= 285)
+                base += (p32)extra << 16;
+        return base + (p32)bits * (kind == 2 && symbol < 30 ? 0x101u : 1u);
 }
 
 /* The next canonical code, bit-reversed, of the same length. */
@@ -195,26 +206,22 @@ static const p8 gzip_symbol_extra[GZIP_MAXLIT] = {
         [277] = 4, [278] = 4, [279] = 4, [280] = 4, [281] = 5, [282] = 5,
         [283] = 5, [284] = 5};
 
-/* A symbol's cell before its bit counts: the builder adds the bits once for
-   the code-length and literal/length kinds, and at bits 0 and 8 for
-   distances; a length adds its extra value at bit 16. */
-static inline INLINE p32 gzip_cell_base(positive kind, positive symbol)
+/* RFC 1951 fixed Huffman literal/length runs and 5-bit distances. */
+static fn gzip_fixed_lengths(p8 address_to lit, p8 address_to dist)
 {
-        if (kind == 0)
-                return (p32)symbol << 16;
-        if (kind == 1)
+        static const struct
         {
-                if (symbol < 256)
-                        return GZIP_CELL_LITERAL | (p32)symbol << 8;
-                if (symbol == 256)
-                        return GZIP_CELL_EXCEPTIONAL | GZIP_CELL_END;
-                if (symbol > 285)
-                        return GZIP_CELL_EXCEPTIONAL | GZIP_CELL_SYMBOL;
-                return (p32)gzip_len_base[symbol - 257] << 16;
+                p16 count;
+                p8 len;
+        } runs[4] = {{144, 8}, {112, 9}, {24, 7}, {8, 8}};
+        positive at = 0;
+
+        for (positive i = 0; i < array_count(runs); i++)
+        {
+                memory_fill(lit + at, runs[i].len, runs[i].count);
+                at += runs[i].count;
         }
-        if (symbol >= 30)
-                return GZIP_CELL_EXCEPTIONAL | GZIP_CELL_SYMBOL;
-        return (p32)gzip_dist_base[symbol] << 16 | gzip_dist_extra[symbol];
+        memory_fill(dist, 5, GZIP_MAXDIST);
 }
 
 /* Widened codes a table can hold: 256 literals, end, 286, 287 and the 257
@@ -549,6 +556,10 @@ static bipolar gzip_inflate_get(gzip_inflater address_to z, positive n)
 {
         p32 value;
 
+        if (!n)
+                return 0;
+        if (n >= 32)
+                return gzip_inflate_fail(z, GZIP_WHY_FORMAT), -1;
         if (!gzip_inflate_bits(z, n))
                 return -1;
         if (z->count < n)
@@ -670,22 +681,24 @@ static bool gzip_inflate_dynamic(gzip_inflater address_to z)
                         last = (p8)symbol;
                         continue;
                 }
-                width = symbol == 16 ? 2 : symbol == 17 ? 3 : 7;
+                static const struct
+                {
+                        p8 bits;
+                        p8 base;
+                } rle_spec[3] = {{2, 3}, {3, 3}, {7, 11}};
+
+                width = rle_spec[symbol - 16].bits;
                 return_if(count < width, gzip_inflate_fail(z, GZIP_WHY_EOF));
-                repeat = (positive)(bits & (((p64)1 << width) - 1));
+                repeat = (positive)(bits & (((p64)1 << width) - 1)) + rle_spec[symbol - 16].base;
                 bits >>= width;
                 count -= width;
                 if (symbol == 16)
                 {
                         return_if(!at, gzip_inflate_fail(z, GZIP_WHY_FORMAT));
-                        repeat += 3;
                         fill = last;
                 }
                 else
-                {
-                        repeat += symbol == 17 ? 3 : 11;
                         fill = 0;
-                }
                 return_if(at + repeat > nlit + ndist, gzip_inflate_fail(z, GZIP_WHY_FORMAT));
                 memory_fill(lengths + at, fill, repeat);
                 at += repeat;
@@ -709,11 +722,7 @@ static bool gzip_inflate_fixed(gzip_inflater address_to z)
         z->look_dist = 5;
         if (z->fixed_loaded)
                 return true;
-        memory_fill(lengths, 8, 144);
-        memory_fill(lengths + 144, 9, 112);
-        memory_fill(lengths + 256, 7, 24);
-        memory_fill(lengths + 280, 8, 8);
-        memory_fill(lengths + GZIP_MAXLIT, 5, GZIP_MAXDIST);
+        gzip_fixed_lengths(lengths, lengths + GZIP_MAXLIT);
         if (!gzip_inflate_table(z, z->litlen, lengths, GZIP_MAXLIT, GZIP_LITLEN_ROOT, 1, null) ||
             !gzip_inflate_table(z, z->offset, lengths + GZIP_MAXLIT, GZIP_MAXDIST,
                                 GZIP_OFFSET_ROOT, 2, null))
@@ -797,6 +806,8 @@ static bipolar gzip_inflate_token(gzip_inflater address_to z)
         if (take > z->count)
                 return gzip_inflate_fail(z, GZIP_WHY_EOF), -1;
         code = root + ((cell >> 8) & 255);
+        if (code > take || take - code >= 32)
+                return gzip_inflate_fail(z, GZIP_WHY_FORMAT), -1;
         distance = (cell >> 16) + ((z->bits >> code) & (((positive)1 << (take - code)) - 1));
         z->bits >>= take;
         z->count -= take;
@@ -2813,11 +2824,7 @@ static fn gzip_fixed_init(void)
 {
         if (gzip_fixed_codes)
                 return;
-        memory_fill(gzip_fixed_lit_len, 8, 144);
-        memory_fill(gzip_fixed_lit_len + 144, 9, 112);
-        memory_fill(gzip_fixed_lit_len + 256, 7, 24);
-        memory_fill(gzip_fixed_lit_len + 280, 8, 8);
-        memory_fill(gzip_fixed_dist_len, 5, GZIP_MAXDIST);
+        gzip_fixed_lengths(gzip_fixed_lit_len, gzip_fixed_dist_len);
         huffman_codes(gzip_fixed_lit_len, GZIP_MAXLIT, gzip_fixed_lit_code);
         huffman_codes(gzip_fixed_dist_len, GZIP_MAXDIST, gzip_fixed_dist_code);
         gzip_fixed_codes = true;
@@ -2845,14 +2852,6 @@ static fn gzip_write_tokens(gzip_encoder address_to e, p8 address_to src, positi
         e->out_n = (positive)(j.out - e->out);
         e->bits = j.bits;
         e->bitn = (p32)j.bitn;
-}
-
-static fn gzip_write_fixed(gzip_encoder address_to e, p8 address_to src, positive length,
-                           bool last)
-{
-        gzip_put_bits(e, last ? 1 : 0, 1);
-        gzip_put_bits(e, 1, 2);
-        gzip_write_tokens(e, src, length, gzip_fixed_lit_code, gzip_fixed_dist_code);
 }
 
 /* What a block would cost as each kind, and the dynamic kind's trees.
@@ -3065,41 +3064,38 @@ static fn gzip_block_emit(gzip_encoder address_to e, p8 address_to src, positive
 
         gzip_block_plan(e, length, address_of plan);
         if (plan.stored <= plan.fixed && plan.stored <= plan.dynamic)
-        {
                 gzip_write_stored(e, src, length, last);
-                gzip_block_open(e);
-                return;
-        }
-        if (plan.fixed <= plan.dynamic)
+        else if (plan.fixed <= plan.dynamic)
         {
-                gzip_write_fixed(e, src, length, last);
-                gzip_block_open(e);
-                return;
+                gzip_put_bits(e, last ? 1 : 0, 1);
+                gzip_put_bits(e, 1, 2);
+                gzip_write_tokens(e, src, length, gzip_fixed_lit_code, gzip_fixed_dist_code);
         }
-        huffman_codes(plan.lit_len, GZIP_MAXLIT, lit_code);
-        huffman_codes(plan.dist_len, GZIP_MAXDIST, dist_code);
-        huffman_codes(plan.clen, 19, ccode);
-        gzip_put_bits(e, last ? 1 : 0, 1);
-        gzip_put_bits(e, 2, 2);
-        gzip_put_bits(e, (p32)(plan.hlit - 257), 5);
-        gzip_put_bits(e, (p32)(plan.hdist - 1), 5);
-        gzip_put_bits(e, (p32)(plan.hclen - 4), 4);
-        for (i = 0; i < plan.hclen; i++)
-                gzip_put_bits(e, plan.clen[gzip_clen_order[i]], 3);
-
-        for (i = 0; i < plan.ntok; i++)
+        else
         {
-                positive sym = plan.tok[i];
+                static const p8 clen_extra_bits[3] = {2, 3, 7};
 
-                gzip_put_bits(e, ccode[sym] & 0xffff, ccode[sym] >> 16);
-                if (sym == 16)
-                        gzip_put_bits(e, plan.tok_extra[i], 2);
-                else if (sym == 17)
-                        gzip_put_bits(e, plan.tok_extra[i], 3);
-                else if (sym == 18)
-                        gzip_put_bits(e, plan.tok_extra[i], 7);
+                huffman_codes(plan.lit_len, GZIP_MAXLIT, lit_code);
+                huffman_codes(plan.dist_len, GZIP_MAXDIST, dist_code);
+                huffman_codes(plan.clen, 19, ccode);
+                gzip_put_bits(e, last ? 1 : 0, 1);
+                gzip_put_bits(e, 2, 2);
+                gzip_put_bits(e, (p32)(plan.hlit - 257), 5);
+                gzip_put_bits(e, (p32)(plan.hdist - 1), 5);
+                gzip_put_bits(e, (p32)(plan.hclen - 4), 4);
+                for (i = 0; i < plan.hclen; i++)
+                        gzip_put_bits(e, plan.clen[gzip_clen_order[i]], 3);
+
+                for (i = 0; i < plan.ntok; i++)
+                {
+                        positive sym = plan.tok[i];
+
+                        gzip_put_bits(e, ccode[sym] & 0xffff, ccode[sym] >> 16);
+                        if (sym >= 16)
+                                gzip_put_bits(e, plan.tok_extra[i], clen_extra_bits[sym - 16]);
+                }
+                gzip_write_tokens(e, src, length, lit_code, dist_code);
         }
-        gzip_write_tokens(e, src, length, lit_code, dist_code);
         gzip_block_open(e);
 }
 
@@ -4861,7 +4857,10 @@ static bool gzip_encode_setup(p8 level)
         gzip_writer.input_room = GZIP_WINDOW + gzip_writer.batch_blocks * GZIP_BLOCK;
         gzip_writer.input = (p8 address_to)memory_checked(gzip_writer.input_room);
         if (!gzip_writer.slots || !gzip_writer.done || !gzip_writer.input)
+        {
+                gzip_writer_close();
                 return gzip_fail("gzip cannot map the block input");
+        }
         return gzip_writer_emit(header, sizeof(header));
 }
 

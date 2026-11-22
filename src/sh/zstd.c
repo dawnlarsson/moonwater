@@ -1310,7 +1310,7 @@ static bool zstd_ring_huge(void)
         known = 2;
         handle = system_open_at(AT_FDCWD,
                                 "/sys/kernel/mm/transparent_hugepage/shmem_enabled",
-                                FILE_READ);
+                                FILE_READ | O_CLOEXEC);
         if (handle < 0)
                 return false;
         got = system_call_3(syscall(read), (positive)handle, (positive)text,
@@ -2579,59 +2579,33 @@ static bool zstd_frame(void)
                 window = base + (base >> 3) * mantissa;
         }
 
-        if (dict_flag == 1)
         {
-                if (!zstd_in_take(scratch, 1))
-                        return false;
-                dict = scratch[0];
-        }
-        else if (dict_flag == 2)
-        {
-                if (!zstd_in_take(scratch, 2))
-                        return false;
-                dict = memory_load_unaligned(p16, scratch);
-        }
-        else if (dict_flag == 3)
-        {
-                if (!zstd_in_take(scratch, 4))
-                        return false;
-                dict = memory_load_unaligned(p32, scratch);
-        }
-        if (dict && (!zstd_dict_on || dict != zstd_dict_id))
-                return zstd_fail("zstd Dictionary mismatch");
+                static const p8 dict_bytes[4] = {0, 1, 2, 4};
+                static const p8 fcs_bytes[4] = {0, 2, 4, 8};
+                positive const dn = dict_bytes[dict_flag];
+                positive const fn_bytes = fcs_flag ? fcs_bytes[fcs_flag] : (single ? 1 : 0);
 
-        zstd_have_fcs = false;
-        zstd_fcs = 0;
-        if (fcs_flag == 0)
-        {
-                if (single)
+                if (dn)
                 {
-                        if (!zstd_in_take(scratch, 1))
+                        if (!zstd_in_take(scratch, dn))
                                 return false;
-                        zstd_fcs = scratch[0];
-                        zstd_have_fcs = true;
+                        for (positive i = 0; i < dn; i++)
+                                dict |= (p32)scratch[i] << (8 * i);
                 }
-        }
-        else if (fcs_flag == 1)
-        {
-                if (!zstd_in_take(scratch, 2))
-                        return false;
-                zstd_fcs = (p64)memory_load_unaligned(p16, scratch) + 256;
-                zstd_have_fcs = true;
-        }
-        else if (fcs_flag == 2)
-        {
-                if (!zstd_in_take(scratch, 4))
-                        return false;
-                zstd_fcs = memory_load_unaligned(p32, scratch);
-                zstd_have_fcs = true;
-        }
-        else
-        {
-                if (!zstd_in_take(scratch, 8))
-                        return false;
-                zstd_fcs = memory_get64(scratch);
-                zstd_have_fcs = true;
+                if (dict && (!zstd_dict_on || dict != zstd_dict_id))
+                        return zstd_fail("zstd Dictionary mismatch");
+
+                zstd_have_fcs = fn_bytes != 0;
+                zstd_fcs = 0;
+                if (fn_bytes)
+                {
+                        if (!zstd_in_take(scratch, fn_bytes))
+                                return false;
+                        for (positive i = 0; i < fn_bytes; i++)
+                                zstd_fcs |= (p64)scratch[i] << (8 * i);
+                        if (fcs_flag == 1)
+                                zstd_fcs += 256;
+                }
         }
 
         if (single)
@@ -6737,21 +6711,31 @@ static bool zstd_encoder_job_tables(zstd_encoder address_to e,
                                          ? (positive)4 << hash3_log
                                          : 0;
 
-        if (!e->seqs &&
-            (!(e->lits = memory_checked(ZSTD_BLOCK_MAX + 64)) ||
-             !(e->bits = memory_checked(ZSTD_BLOCK_MAX + 256)) ||
-             !(e->block_out = memory_checked(ZSTD_BLOCK_MAX + 2048)) ||
-             !(e->trial_out = memory_checked(ZSTD_BLOCK_MAX + 2048)) ||
-             !(e->split_out = memory_checked(ZSTD_BLOCK_MAX + 2048 * 4)) ||
-             !(e->cum_lit = memory_checked(sizeof(p32) * (ZSTD_ENC_SEQ_MAX + 2))) ||
-             !(e->cum_src = memory_checked(sizeof(p32) * (ZSTD_ENC_SEQ_MAX + 2))) ||
-             !(e->packed = memory_checked(ZSTD_BLOCK_MAX * 2 + 512)) ||
-             !(e->lit_table_new = memory_checked(sizeof(p32) * 256)) ||
-             !(e->lit_length_new = memory_checked(256)) ||
-             !(e->opt = memory_checked(sizeof(zstd_opt_node) * (ZSTD_OPT_NUM + 3))) ||
-             !(e->matches = memory_checked(sizeof(zstd_opt_match) * (ZSTD_OPT_NUM + 3))) ||
-             !(e->seqs = memory_checked(sizeof(zstd_enc_seq) * ZSTD_ENC_SEQ_MAX))))
-                return false;
+        if (!e->seqs)
+        {
+                static const struct { positive off; positive size; } bufs[] = {
+                    {offset_of(zstd_encoder, lits), ZSTD_BLOCK_MAX + 64},
+                    {offset_of(zstd_encoder, bits), ZSTD_BLOCK_MAX + 256},
+                    {offset_of(zstd_encoder, block_out), ZSTD_BLOCK_MAX + 2048},
+                    {offset_of(zstd_encoder, trial_out), ZSTD_BLOCK_MAX + 2048},
+                    {offset_of(zstd_encoder, split_out), ZSTD_BLOCK_MAX + 2048 * 4},
+                    {offset_of(zstd_encoder, cum_lit), sizeof(p32) * (ZSTD_ENC_SEQ_MAX + 2)},
+                    {offset_of(zstd_encoder, cum_src), sizeof(p32) * (ZSTD_ENC_SEQ_MAX + 2)},
+                    {offset_of(zstd_encoder, packed), ZSTD_BLOCK_MAX * 2 + 512},
+                    {offset_of(zstd_encoder, lit_table_new), sizeof(p32) * 256},
+                    {offset_of(zstd_encoder, lit_length_new), 256},
+                    {offset_of(zstd_encoder, opt), sizeof(zstd_opt_node) * (ZSTD_OPT_NUM + 3)},
+                    {offset_of(zstd_encoder, matches), sizeof(zstd_opt_match) * (ZSTD_OPT_NUM + 3)},
+                    {offset_of(zstd_encoder, seqs), sizeof(zstd_enc_seq) * ZSTD_ENC_SEQ_MAX}};
+                for (positive i = 0; i < array_count(bufs); i++)
+                {
+                        address_any address_to slot =
+                            (address_any address_to)((p8 address_to)e + bufs[i].off);
+
+                        if (!address_to slot && !(address_to slot = memory_checked(bufs[i].size)))
+                                return false;
+                }
+        }
         if (e->hash_bytes != hash_bytes || e->chain_bytes != chain_bytes ||
             e->hash3_bytes != hash3_bytes)
         {
@@ -6918,6 +6902,12 @@ static b32 zstd_jobs_open(const zstd_params address_to p)
         }
         if (zstd_jobs.slot_count < slots)
         {
+                if (zstd_jobs.slots)
+                {
+                        memory_free(zstd_jobs.slots, zstd_jobs.slot_count * sizeof(zstd_encoder));
+                        zstd_jobs.slots = null;
+                        zstd_jobs.slot_count = 0;
+                }
                 if (!(zstd_jobs.slots = memory_checked(slots * sizeof(zstd_encoder))))
                         return -1;
                 zstd_jobs.slot_count = slots;
@@ -7082,6 +7072,8 @@ static b32 zstd_jobs_file(bipolar in, p64 size)
                         memory_free(f.slots, slots * f.slot_room);
                 if (f.failed)
                         memory_free(f.failed, f.count);
+                if (f.check)
+                        memory_free(f.check, zstd_jobs.job);
                 return -2;
         }
         ok = parallel_ordered(zstd_file_job, zstd_file_sink, address_of f, f.count, f.size);
@@ -7444,7 +7436,7 @@ static fn zstd_cli_dict_clear(void)
 /* A dictionary file whole, into memory owned for the invocation. */
 static bool zstd_cli_dictionary(string_address path)
 {
-        bipolar handle = system_open_at(AT_FDCWD, path, FILE_READ);
+        bipolar handle = system_open_at(AT_FDCWD, path, FILE_READ | O_CLOEXEC);
         file_facts facts;
         p8 address_to bytes;
         positive size = 0;
@@ -7547,53 +7539,67 @@ static bipolar zstd_cli_option(file_codec_cli address_to codec,
                         return 0;
                 return 1;
         }
-        if (string_equals(at, "--ultra"))
-                zstd_cli_ultra = true;
-        else if (string_equals(at, "--single-thread"))
-                zstd_single_job = true;
-        else if (string_equals(at, "--no-check"))
-                zstd_cli_no_check = true;
-        else if (string_equals(at, "--no-dictID"))
-                zstd_cli_no_dict_id = true;
-        else if (string_equals(at, "--check"))
-                zstd_cli_no_check = false;
-        else if (string_equals(at, "--quiet"))
-                zstd_cli_quiet = true;
-        else if (string_equals(at, "--fast"))
-                zstd_cli_fast = 1;
-        else if (string_equals(at, "--long"))
-                zstd_cli_long = 27;
-        else if (string_has_prefix(at, "--fast=") ||
-                 string_has_prefix(at, "--long=") ||
-                 string_has_prefix(at, "--threads="))
+        static const struct
         {
-                string_address const number = at + (at[2] == 't' ? 10 : 7);
+                string_address name;
+                bool address_to bflag;
+                positive address_to pval;
+                p8 address_to u8val;
+                p8 set;
+        } flags[] = {
+            {"--ultra", address_of zstd_cli_ultra, null, null, 1},
+            {"--single-thread", address_of zstd_single_job, null, null, 1},
+            {"--no-check", address_of zstd_cli_no_check, null, null, 1},
+            {"--no-dictID", address_of zstd_cli_no_dict_id, null, null, 1},
+            {"--check", address_of zstd_cli_no_check, null, null, 0},
+            {"--quiet", address_of zstd_cli_quiet, null, null, 1},
+            {"--fast", null, address_of zstd_cli_fast, null, 1},
+            {"--long", null, null, address_of zstd_cli_long, 27}};
+        for (positive i = 0; i < array_count(flags); i++)
+                if (string_equals(at, flags[i].name))
+                {
+                        if (flags[i].bflag)
+                                address_to flags[i].bflag = flags[i].set != 0;
+                        else if (flags[i].pval)
+                                address_to flags[i].pval = flags[i].set;
+                        else
+                                address_to flags[i].u8val = flags[i].set;
+                        return 1;
+                }
+        static const struct { string_address prefix; p8 len; p8 kind; } keyed[] = {
+            {"--fast=", 7, 0}, {"--long=", 7, 1}, {"--threads=", 10, 2}};
+        for (positive i = 0; i < array_count(keyed); i++)
+        {
+                if (string_compare_max(at, keyed[i].prefix, keyed[i].len))
+                        continue;
+                string_address const number = at + keyed[i].len;
 
                 taken = zstd_cli_number(number, address_of value);
-                if (!taken || number[taken] || (at[2] == 'f' && !value))
+                if (!taken || number[taken] || (keyed[i].kind == 0 && !value))
                 {
                         string_format(log_error, "zstd: incorrect parameter: %s\n", at);
                         return -1;
                 }
-                if (at[2] == 'l' && (value < 10 || value > 27))
+                if (keyed[i].kind == 1)
                 {
-                        string_format(log_error,
-                                      "zstd: %s: the window log is 10 to 27\n", at);
-                        return -1;
-                }
-                if (at[2] == 'f')
-                        zstd_cli_fast = value;
-                else if (at[2] == 'l')
+                        if (value < 10 || value > 27)
+                        {
+                                string_format(log_error,
+                                              "zstd: %s: the window log is 10 to 27\n", at);
+                                return -1;
+                        }
                         zstd_cli_long = (p8)value;
+                }
+                else if (keyed[i].kind == 0)
+                        zstd_cli_fast = value;
                 else
                 {
                         zstd_job_limit = value;
                         zstd_single_job = false;
                 }
+                return 1;
         }
-        else
-                return 0;
-        return 1;
+        return 0;
 }
 
 /* Read straight into the block or round the encoder fills, as xz reads into its
@@ -7778,7 +7784,7 @@ static bool zstd_train_load(string_address address_to paths, positive count,
 
         for (positive i = 0; i < count; i++)
         {
-                bipolar const handle = system_open_at(AT_FDCWD, paths[i], FILE_READ);
+                bipolar const handle = system_open_at(AT_FDCWD, paths[i], FILE_READ | O_CLOEXEC);
                 file_facts facts;
 
                 if (handle < 0)
@@ -7811,7 +7817,7 @@ static bool zstd_train_load(string_address address_to paths, positive count,
         set->total = 0;
         for (positive i = 0; i < count; i++)
         {
-                bipolar const handle = system_open_at(AT_FDCWD, paths[i], FILE_READ);
+                bipolar const handle = system_open_at(AT_FDCWD, paths[i], FILE_READ | O_CLOEXEC);
                 positive got = 0;
 
                 if (handle < 0)
@@ -8252,7 +8258,8 @@ next_attempt:
                 return 1;
         }
         {
-                bipolar const handle = system_open_at_mode(AT_FDCWD, output, FILE_WRITE, 0644);
+                bipolar const handle = system_open_at_mode(AT_FDCWD, output,
+                                                           FILE_WRITE | O_CLOEXEC | O_NOFOLLOW, 0644);
                 bool ok = handle >= 0 && system_write_all((positive)handle, best, best_size) == best_size;
 
                 if (handle >= 0)
