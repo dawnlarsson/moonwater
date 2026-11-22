@@ -18395,10 +18395,10 @@ static fn ui_view_due(struct ui_view address_to v, int top, int bottom)
 // The variables the build read that are not what they were:
 static b32 ui_view_poll(struct ui_view address_to v)
 {
-        ui_view_ready(v);
         b32 any = false;
         if (!v)
                 return false;
+        ui_view_ready(v);
         for (int k = 0; k < v->watches; k++)
         {
                 struct ui_watch address_to w = &v->watch[k];
@@ -18442,7 +18442,7 @@ static b64 ui_view_value(const void address_to at, unsigned int size)
 static b32 ui_view_moved(struct ui_view address_to v, int address_to top, int address_to bottom)
 {
         ui_view_poll(v);
-        if (v->moved_bottom <= v->moved_top)
+        if (!v || v->moved_bottom <= v->moved_top)
                 return false;
         *top = v->moved_top, *bottom = v->moved_bottom;
         v->moved_top = v->moved_bottom = 0;
