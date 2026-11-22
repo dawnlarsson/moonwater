@@ -10145,6 +10145,21 @@ static void cdoc_rows(void)
                 doc_close(&d);
         }
 
+        /* The one UTF-8 decoder (lib's): a truncated sequence is one invalid byte, and the byte after it is read as it comes;
+           a surrogate and an overlong are invalid, one byte each. */
+        {
+                static const p8 cut[] = {0xe2, 'A'}, surrogate[] = {0xed, 0xa0, 0x80}, overlong[] = {0xc0, 0x80};
+                p32 code = 0;
+                positive used = doc_decode(cut, 2, &code);
+                int invalid = (code & DOC_INVALID) != 0;
+
+                check("doc: a truncated sequence is one invalid byte, and the byte after it is read",
+                      used == 1 && invalid && doc_decode(cut + 1, 1, &code) == 1 && code == 'A');
+                check("doc: a surrogate and an overlong are invalid, one byte each",
+                      doc_decode(surrogate, 3, &code) == 1 && (code & DOC_INVALID) != 0 && doc_decode(overlong, 2, &code) == 1 &&
+                              (code & DOC_INVALID) != 0);
+        }
+
         /* F22 (replace-all of group references) and F3, F4, F21 (failure paths) have no row yet: the regex header chain and a fault-injected allocator are needed (see the ledger). */
 }
 

@@ -826,6 +826,31 @@ static inline INLINE b32 memory_utf8_feed(memory_utf8_state address_to state, p8
         return 0;
 }
 
+/* The first code point of bytes, of which there are available: its length, and its value in code. A byte that does not
+   begin a valid sequence, or a sequence cut short, is one byte long and answers MEMORY_UTF8_INVALID | that byte: the
+   bytes after it are read as they come, so a valid byte after a bad lead is never lost. Every caller's invalid-byte
+   policy is made from that answer (the document keeps the marked byte; the display draws U+FFFD). */
+#define MEMORY_UTF8_INVALID 0x80000000u
+static inline INLINE positive memory_utf8_decode(const p8 address_to bytes, positive available, p32 address_to code)
+{
+        memory_utf8_state state = {0, 0, 0};
+
+        for (positive at = 0; at < available && at < 4; at++)
+        {
+                b32 said = memory_utf8_feed(&state, bytes[at]);
+
+                if (said > 0)
+                {
+                        *code = state.value;
+                        return at + 1;
+                }
+                if (said < 0)
+                        break;
+        }
+        *code = MEMORY_UTF8_INVALID | bytes[0];
+        return 1;
+}
+
 /* The negative half of a signed range has one extra magnitude. Keeping that
    conversion unsigned until the minimum case is selected avoids overflowing
    the signed type in every parser that accepts the full native range. */

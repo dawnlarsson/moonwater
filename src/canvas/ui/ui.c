@@ -1824,7 +1824,7 @@ static int ui_tree_under(const struct ui_tree address_to t, int at, int x, int y
 #define DOC_PIECE_MOST 16384u
 #define DOC_ORIGINAL 0
 #define DOC_ADDED 1
-#define DOC_INVALID 0x80000000u // a byte that is not UTF-8, as a code point: the byte in its low bits
+#define DOC_INVALID MEMORY_UTF8_INVALID // a byte that is not UTF-8, as a code point: the byte in its low bits (lib decodes it)
 #define DOC_EOL_LF 0
 #define DOC_EOL_CRLF 1
 #define DOC_EOL_CR 2
@@ -1964,32 +1964,7 @@ static p64 doc_breaks(const struct doc_sums address_to sums)
 // One code point from bytes, available of them:
 static p32 doc_decode(const p8 address_to bytes, positive available, p32 address_to code)
 {
-        p32 lead = bytes[0], length, value;
-        if (lead < 0x80)
-        {
-                *code = lead;
-                return 1;
-        }
-        if (lead < 0xc2 || lead > 0xf4)
-                goto invalid;
-        length = lead < 0xe0 ? 2 : lead < 0xf0 ? 3 : 4;
-        if (available < length)
-                goto invalid;
-        value = lead & (0x7fu >> length);
-        for (p32 at = 1; at < length; at++)
-        {
-                if ((bytes[at] & 0xc0) != 0x80)
-                        goto invalid;
-                value = value << 6 | (bytes[at] & 0x3f);
-        }
-        if ((length == 3 && (value < 0x800 || (value >= 0xd800 && value <= 0xdfff))) ||
-            (length == 4 && (value < 0x10000 || value > 0x10ffff)))
-                goto invalid;
-        *code = value;
-        return length;
-invalid:
-        *code = DOC_INVALID | lead;
-        return 1;
+        return memory_utf8_decode(bytes, available, code);
 }
 
 // The code point that ends at bytes + count (count bytes before it readable):
