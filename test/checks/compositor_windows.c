@@ -2141,8 +2141,9 @@ static void check_compositor_lifecycle_more(void)
     life_close(6);
     life_step("close the window again", !compositor.showing[6]);
 
-    // A row whose buffer the card refused to show straight is pinned for the attempt (its program may not give its pages
-    // back then), and that pin is no one's once the window is gone: the next program in the row discards as any does.
+    // A row whose buffer the card refused to show straight is not pinned: the card holds no import of its pages, so its
+    // program may give them back (scanout.c, the refusal's pin is kept only for a row the card still scans or holds).
+    // The pin is no one's once the window is gone either: the next program in the row discards as any does.
     // /dev/null stands in for udmabuf: its ioctl fails, which is the refusal the card would have given.
     {
         int devnull = (int)system_open_at(AT_FDCWD, (string_address) "/dev/null", FILE_READ_WRITE | O_CLOEXEC);
@@ -2156,7 +2157,7 @@ static void check_compositor_lifecycle_more(void)
         life_paint(5, 60, 60, GLASS_SIDE);
         compositor.table_memfd = devnull + 1;
         compositor.udmabuf = devnull + 1;
-        check("lifecycle more: a buffer the card refuses is pinned for the attempt", compositor_window_fb(5, 0) == 0 && table->pinned[5] == 1);
+        check("lifecycle more: a buffer the card refuses is not pinned, it is shown by the processor", compositor_window_fb(5, 0) == 0 && table->pinned[5] == 0);
         life_close(5);
         life_step("close a row the card refused", !compositor.showing[5]);
         check("lifecycle more: a closed row is not pinned, so its next program discards its pages as any does", table->pinned[5] == 0);
