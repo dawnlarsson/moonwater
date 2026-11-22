@@ -809,7 +809,7 @@ static fn check_light()
 
         for (p32 s = 0; s < 256; s++)
         {
-                round = round && font_srgb(font_to_linear[s]) == s;
+                round = round && font_srgb_bytes[font_to_linear[s]] == s;
                 rising = rising && (!s || font_to_linear[s] > font_to_linear[s - 1]);
         }
         check("sRGB: every byte survives the round trip through 16-bit light", round);
@@ -824,7 +824,7 @@ static fn check_light()
         light_begins[0] = 0;
         p8 back = true;
         for (p32 light = 0; light < 65536; light++)
-                back = back && font_srgb(light) == light_byte(light);
+                back = back && font_srgb_bytes[light] == light_byte(light);
         check("sRGB: all 65536 lights go back to the byte whose half step they have reached", back);
 
         p8 same = true;
@@ -4784,9 +4784,6 @@ static fn check_strip(void)
 //      Whether a way or a recent cell is still keyed to the engine's current generation: one a lookup would hit.
 static p8 generation_kept(const font_engine address_to e)
 {
-        for (positive i = 0; i < FONT_CACHED; i++)
-                if (e->cached[i].key && e->cached[i].generation == e->generation)
-                        return true;
         for (positive i = 0; i < FONT_RECENT; i++)
                 if (e->recent[i].key && e->recent[i].generation == e->generation)
                         return true;

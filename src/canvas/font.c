@@ -64,7 +64,6 @@
 #define FONT_MEMO 512
 #define FONT_KERN_SETS 512
 #define FONT_KERN_READS 4096
-#define FONT_CACHED 1 // compat for test/checks/font.c
 #define FONT_RECENT 256
 #define FONT_STRIP (1 << 17)
 #define FONT_RUN 1024
@@ -137,7 +136,6 @@ typedef struct
         b16 left, top;
 } font_slot;
 
-typedef struct { p64 key, cell; p32 generation; p16 slot; } font_cache_way;
 typedef struct { b64 x, y; p8 on; } font_point;
 typedef struct { p64 touched, crossed, there[2], twice[2]; } font_row;
 typedef struct { p16 last; p8 wind; } font_contour;
@@ -240,7 +238,6 @@ typedef struct
 
         font_slot slots[FONT_SLOTS * 3 / 4];
         p16 index[FONT_SLOTS];
-        font_cache_way cached[FONT_CACHED];
         font_pairing pairs[FONT_PAIRS];
         font_memo glyph_memo[FONT_MEMO];
         font_kern_way kern_memo[FONT_KERN_SETS][FONT_WAYS];
@@ -7134,7 +7131,6 @@ static inline INLINE font_bitmap font_cached(font_engine address_to e, const fon
 static p16 font_to_linear[256];
 static p8 font_srgb_bytes[65536];
 
-static inline p32 font_srgb(p32 light) { return font_srgb_bytes[light]; }
 
 static f64 font_srgb_to_linear(f64 x)
 {
