@@ -507,12 +507,7 @@ static bool bowl_launcher(string_address encoded, p8 address_to root,
                 return false;
 
         /* A shebang file keeps a newline; the kernel does not pass it. */
-        for (string_address at = encoded; *at; at++)
-                if (*at == '\n' || *at == '\r')
-                {
-                        *at = end;
-                        break;
-                }
+        *string_first_of_either_or_end(encoded, '\n', '\r') = end;
 
         program = bowl_split_root(encoded + 1, root, room);
         if (!program || bowl_path_steps(program))
@@ -729,7 +724,7 @@ static b32 bowl_expose_program(string_address root, string_address program,
                 p8 guest[BOWL_PATH_LIMIT];
                 string_address existing_program = null;
                 bipolar reader = system_open_at(AT_FDCWD, launcher,
-                                                FILE_READ | O_CLOEXEC);
+                                                FILE_READ | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
                 bipolar got = reader < 0
                     ? reader
                     : system_read_retry((positive)reader, line,
@@ -1079,13 +1074,13 @@ static fn bowl_isolated_node_grant(string_address path, positive gid)
 {
         p8 held[256];
 
-        if (system_stat_at(AT_FDCWD, path, 0, 0x001, held) < 0)
+        if (system_stat_at(AT_FDCWD, path, AT_SYMLINK_NOFOLLOW, 0x001, held) < 0)
                 return;
-        if ((held[0] & 0x01) != 0 &&
-            (((unsigned)held[28] | ((unsigned)held[29] << 8)) & 0170000) ==
-                0040000)
+        if ((held[0] & 0x01) == 0 ||
+            (((unsigned)held[28] | ((unsigned)held[29] << 8)) & 0170000) !=
+                0020000)
                 return;
-        system_change_owner_at(AT_FDCWD, path, 0, gid, 0);
+        system_change_owner_at(AT_FDCWD, path, 0, gid, AT_SYMLINK_NOFOLLOW);
         system_change_mode_at(AT_FDCWD, path, 0660);
 }
 
@@ -1268,19 +1263,12 @@ static bipolar bowl_handle_path(bipolar handle, p8 address_to into,
                                 positive room)
 {
         static const p8 prefix[] = "/proc/self/fd/";
-        p8 link[sizeof(prefix) + 12];
+        p8 link[sizeof(prefix) + 24];
         positive length = sizeof(prefix) - 1;
-        positive digits = 1;
 
         memory_copy(link, prefix, length);
-        for (positive rest = (positive)handle; rest >= 10; rest /= 10)
-                digits++;
-        link[length + digits] = end;
-        for (positive rest = (positive)handle, at = digits; at; at--)
-        {
-                link[length + at - 1] = (p8)('0' + rest % 10);
-                rest /= 10;
-        }
+        length += positive_into_string(link + length, (positive)handle);
+        link[length] = end;
 
         return file_link_text(link, into, room);
 }
@@ -1388,14 +1376,12 @@ static bool bowl_accounts_field(string_address line, positive length,
 
         for (positive seen = 0; seen < index; seen++)
         {
-                while (from < length && line[from] != ':')
-                        from++;
+                from += memory_span_without_byte(line + from, ':', length - from);
                 if (from >= length)
                         return false;
                 from++;
         }
-        for (to = from; to < length && line[to] != ':'; to++)
-                ;
+        to = from + memory_span_without_byte(line + from, ':', length - from);
         address_to start = from;
         address_to size = to - from;
         return true;
@@ -1406,12 +1392,13 @@ static bool bowl_accounts_has(string_address text, positive length,
 {
         for (positive at = 0; at < length;)
         {
-                if (at + size < length &&
+                positive stop = at + memory_span_without_byte(text + at, '\n', length - at);
+
+                if (at + size < stop &&
                     !string_compare_max(text + at, name, size) &&
                     text[at + size] == ':')
                         return true;
-                while (at < length && text[at++] != '\n')
-                        ;
+                at = stop + (stop < length);
         }
         return false;
 }
@@ -1422,18 +1409,16 @@ static bool bowl_accounts_has_id(string_address text, positive length,
 {
         for (positive at = 0; at < length;)
         {
-                positive stop = at;
+                positive stop = at + memory_span_without_byte(text + at, '\n', length - at);
                 positive start;
                 positive found;
 
-                while (stop < length && text[stop] != '\n')
-                        stop++;
                 if (bowl_accounts_field(text + at, stop - at, 2, address_of start,
                                         address_of found) &&
                     found == size &&
                     !string_compare_max(text + at + start, id, size))
                         return true;
-                at = stop + 1;
+                at = stop + (stop < length);
         }
         return false;
 }
@@ -1456,14 +1441,12 @@ static positive bowl_accounts_add(p8 address_to text, positive used,
 
         for (positive at = 0; at < length;)
         {
-                positive stop = at;
+                positive stop = at + memory_span_without_byte(from + at, '\n', length - at);
                 positive size;
                 positive id;
                 positive id_size;
                 bool named;
 
-                while (stop < length && from[stop] != '\n')
-                        stop++;
                 if (bowl_accounts_field(from + at, stop - at, 0, address_of id,
                                         address_of size) &&
                     size &&
@@ -1496,7 +1479,7 @@ static positive bowl_accounts_add(p8 address_to text, positive used,
                                 text[used++] = '\n';
                         }
                 }
-                at = stop + 1;
+                at = stop + (stop < length);
         }
         return used;
 }
@@ -1974,14 +1957,11 @@ static bipolar bowl_inputs_mount(void)
         for (positive at = 0; at < bowl_input_count; at++)
         {
                 p8 directory[BOWL_INPUT_ROOM];
-                positive length = string_length(bowl_input_entry[at].target);
                 bipolar failed;
                 bipolar made;
 
-                while (length && bowl_input_entry[at].target[length - 1] != '/')
-                        length--;
-                memory_copy(directory, bowl_input_entry[at].target, length - 1);
-                directory[length - 1] = end;
+                path_head_copy(directory, sizeof(directory),
+                               bowl_input_entry[at].target);
                 failed = bowl_mkdir_parents(directory);
                 if (failed < 0)
                         return failed;
@@ -2440,8 +2420,7 @@ static string_address bowl_pad_uevent_value(p8 address_to message, positive leng
         {
                 positive line = at;
 
-                while (at < length && message[at])
-                        at++;
+                at += memory_span_without_byte(message + at, 0, length - at);
                 if (at - line > key_length && message[line + key_length] == '=' &&
                     !memory_compare(message + line, key, key_length))
                         return (string_address)message + line + key_length + 1;
@@ -3279,13 +3258,11 @@ static bool bowl_input_granted(string_address root)
 
         for (positive at = 0; at < (positive)got;)
         {
-                positive stop = at;
+                positive stop = at + memory_span_without_byte(text + at, '\n', (positive)got - at);
 
-                while (stop < (positive)got && text[stop] != '\n')
-                        stop++;
                 if (stop - at == want_length && memory_compare(text + at, want, want_length) == 0)
                         return true;
-                at = stop + 1;
+                at = stop + (stop < (positive)got);
         }
         return false;
 }
@@ -3317,20 +3294,22 @@ static b32 bowl_input_grant(string_address root, bool granted)
         system_make_directory_at(AT_FDCWD, "/etc/moonwater", 0755);
         for (positive at = 0; at < (positive)got;)
         {
-                positive stop = at;
+                positive stop = at + memory_span_without_byte(text + at, '\n', (positive)got - at);
 
-                while (stop < (positive)got && text[stop] != '\n')
-                        stop++;
                 if (!(stop - at == want_length && memory_compare(text + at, want, want_length) == 0))
                 {
+                        if (used + (stop - at) + 1 > BOWL_INPUT_GRANTS_LIMIT)
+                                return bowl_refuse("the input grants file is too big to change\n");
                         memory_copy(text + used, text + at, stop - at);
                         used += stop - at;
                         text[used++] = '\n';
                 }
-                at = stop + 1;
+                at = stop + (stop < (positive)got);
         }
         if (granted)
         {
+                if (used + want_length + 1 > BOWL_INPUT_GRANTS_LIMIT)
+                        return bowl_refuse("the input grants file is full\n");
                 memory_copy(text + used, want, want_length);
                 used += want_length;
                 text[used++] = '\n';
@@ -4401,10 +4380,14 @@ static fn bowl_user_store_prepare(void)
                         continue;
                 if (!made[at].owned)
                         continue;
-                system_call_5(syscall(fchownat), AT_FDCWD,
-                              (positive)made[at].path, BOWL_USER_ID,
-                              BOWL_USER_ID, 0);
-                bowl_chmod_directory(made[at].path, 0700);
+                bipolar owned_dir = bowl_open_directory(made[at].path, BOWL_MAKE_NONE, null);
+                if (owned_dir >= 0)
+                {
+                        system_call_3(syscall(fchown), (positive)owned_dir,
+                                      BOWL_USER_ID, BOWL_USER_ID);
+                        system_call_2(syscall(fchmod), (positive)owned_dir, 0700);
+                        system_close(owned_dir);
+                }
         }
         bowl_quiet = false;
 }
@@ -9101,12 +9084,13 @@ static DEAD_END fn bowl_bus_accept(bipolar listener)
            -1) it holds the pipe open for good and the reader never sees the
            end, left on a terminal it holds the terminal. The daemon the
            configuration forks lets go of them the same way. */
-        if (nowhere > 2)
+        if (nowhere >= 0)
         {
-                system_duplicate(nowhere, 0, 0);
-                system_duplicate(nowhere, 1, 0);
-                system_duplicate(nowhere, 2, 0);
-                system_close(nowhere);
+                for (positive at = 0; at < 3; at++)
+                        if ((positive)nowhere != at)
+                                system_duplicate(nowhere, at, 0);
+                if (nowhere > 2)
+                        system_close(nowhere);
         }
 
         for (;;)
