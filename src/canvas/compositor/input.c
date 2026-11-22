@@ -1488,6 +1488,9 @@ static int compositor_key_chord(unsigned int code, int value, unsigned int modif
                 return value == 1 ? compositor_tile_chord(code) : (void)0, 1;
         if (mods4 == (WINDOW_KEY_SUPER | WINDOW_KEY_SHIFT) && (code == CK_KEY_LEFT || code == CK_KEY_RIGHT))
                 return value == 1 ? compositor_screen_chord(code) : (void)0, 1;
+        // Super+Ctrl+O: the keyboard on the screen, asked for or put away (the chord Windows has for its own).
+        if (mods4 == (WINDOW_KEY_SUPER | WINDOW_KEY_CONTROL) && code == 24)
+                return value == 1 ? compositor_osk_toggle() : (void)0, 1;
         if (code == CK_KEY_F11 && !compositor.cycle && compositor_fullscreen_key(mods4 == WINDOW_KEY_SUPER, mods4 == 0))
                 return value == 1 ? compositor_fullscreen_toggle(compositor.focus) : (void)0, 1;
         return ((chord & ~WINDOW_KEY_SHIFT) == (WINDOW_KEY_ALT | WINDOW_KEY_CONTROL) && code == CK_KEY_BACKSPACE) ||

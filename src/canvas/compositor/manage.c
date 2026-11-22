@@ -3264,7 +3264,8 @@ static void compositor_osk_sync(void)
 {
         struct windows *table = compositor.table;
         int kb = compositor_osk_row(), focus = compositor.focus, want = 0;
-        b32 touch = !compositor.osk_typed && compositor.owner != COMPOSITOR_PREDICT_MOUSE, kb_plugged = compositor_input_has(0);
+        // A touch's hand, or a controller's (access.c): the keyboard comes up on a field for either, as Steam's does for its controller.
+        b32 touch = (!compositor.osk_typed && compositor.owner != COMPOSITOR_PREDICT_MOUSE) || compositor_access_drives(), kb_plugged = compositor_input_has(0);
         unsigned int purpose;
         // The focused window's field flag is the client's: read once, and every use below takes this copy.
         b32 field = focus >= 0 && table->field[focus] != 0;
@@ -3280,6 +3281,10 @@ static void compositor_osk_sync(void)
         }
         if (kb >= 0 && focus >= 0 && focus != kb && field && compositor.osk_setting != COMPOSITOR_OSK_OFF && !compositor.osk_turned)
                 want = compositor.osk_setting == COMPOSITOR_OSK_ON || touch || !kb_plugged;
+        // Asked for by a person: up over whatever has the keys, a field or not (a program that says nothing of its fields is typed
+        // into all the same), until it is put away, as Steam's keyboard is on Steam+X.
+        if (kb >= 0 && compositor.osk_asked)
+                want = 1;
         for (unsigned int row = 0; row < compositor_rows_in_use; row++)
                 if ((compositor.osk_pan[row] || compositor.osk_height[row]) && (!want || (int)row != focus))
                         compositor_osk_unpan((int)row);
@@ -3297,7 +3302,7 @@ static void compositor_osk_sync(void)
                         compositor_damage_row(kb);
                         rows_add(&compositor.woken, kb);
                 }
-                if (want)
+                if (want && focus >= 0 && focus != kb)
                         compositor_osk_pan(focus, kb);
         }
         compositor.osk_shown = (unsigned char)(kb >= 0 && want);
@@ -3317,8 +3322,21 @@ static void compositor_osk_sync(void)
 
 static void compositor_osk_turned(void)
 {
-        compositor.osk_turned = 1, compositor.osk_turn_blur = 0, compositor.osk_turn_focus = compositor.focus;
+        compositor.osk_turned = 1, compositor.osk_turn_blur = 0, compositor.osk_turn_focus = compositor.focus, compositor.osk_asked = 0;
         compositor_osk_sync();
+}
+
+/*
+        The keyboard on the screen asked for, or put away, by a person: Super+Ctrl+O, or a controller's top face button (access.c).
+        Asked for, it is up whatever has the keys until it is asked away; put away, it stays away from the field it was on until
+        the keys leave it (compositor_osk_turned), as a keyboard put away by hand always did.
+*/
+static void compositor_osk_toggle(void)
+{
+        if (compositor.osk_shown)
+                compositor_osk_turned();
+        else
+                compositor.osk_asked = 1, compositor.osk_turned = 0, compositor_osk_sync();
 }
 
 static void compositor_osk_setting_read(void)

@@ -821,6 +821,7 @@ static struct
         struct compositor_predict predict[COMPOSITOR_PREDICTS];
         unsigned char predict_off[COMPOSITOR_PREDICTS];
         unsigned char osk_setting, osk_typed, osk_shown, osk_turned, osk_turn_blur;
+        unsigned char osk_asked; // a person asked for the keyboard (compositor_osk_toggle): up, a field or not, until put away
         int osk_turn_focus, *osk_pan, *osk_height;
         unsigned int *osk_edges;
         unsigned char *text_purpose;

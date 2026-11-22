@@ -51,7 +51,7 @@ enum
 {
         ACCESS_NONE, ACCESS_PRIMARY, ACCESS_SECONDARY, ACCESS_MIDDLE, ACCESS_BACK, ACCESS_GO_HOME, ACCESS_OVERVIEW,
         ACCESS_PREVIOUS, ACCESS_NEXT, ACCESS_KEY_UP, ACCESS_KEY_DOWN, ACCESS_KEY_LEFT, ACCESS_KEY_RIGHT, ACCESS_FIND,
-        ACCESS_ACTIONS
+        ACCESS_KEYBOARD, ACCESS_BACKSPACE, ACCESS_ENTER, ACCESS_ACTIONS
 };
 
 /*
@@ -60,20 +60,28 @@ enum
         one, and the right face button is back (Escape). The menu button and the home button open the launcher, the view button
         the Scenes overview. The shoulders are the previous and next tab (Ctrl+Shift+Tab and Ctrl+Tab), the cross is the arrows,
         the left stick's press is the middle button and the right stick's finds the pointer. The left stick moves the pointer and
-        the right one scrolls. The top face button is kept for the keyboard on the screen.
+        the right one scrolls. The top face button asks for the keyboard on the screen, or puts it away.
+
+        While that keyboard is up, the left face button is Backspace and the menu button Enter (compositor_access_typing), so a
+        word is typed with the stick and the bottom button and mended and sent without reaching for a key.
 */
 static const unsigned char compositor_access_actions[ACCESS_BUTTONS] = {
-        [ACCESS_SOUTH] = ACCESS_PRIMARY, [ACCESS_EAST] = ACCESS_BACK, [ACCESS_WEST] = ACCESS_SECONDARY, [ACCESS_NORTH] = ACCESS_NONE,
+        [ACCESS_SOUTH] = ACCESS_PRIMARY, [ACCESS_EAST] = ACCESS_BACK, [ACCESS_WEST] = ACCESS_SECONDARY, [ACCESS_NORTH] = ACCESS_KEYBOARD,
         [ACCESS_L1] = ACCESS_PREVIOUS, [ACCESS_R1] = ACCESS_NEXT, [ACCESS_L2] = ACCESS_SECONDARY, [ACCESS_R2] = ACCESS_PRIMARY,
         [ACCESS_SELECT] = ACCESS_OVERVIEW, [ACCESS_START] = ACCESS_GO_HOME, [ACCESS_HOME] = ACCESS_GO_HOME,
         [ACCESS_L3] = ACCESS_MIDDLE, [ACCESS_R3] = ACCESS_FIND,
         [ACCESS_UP] = ACCESS_KEY_UP, [ACCESS_DOWN] = ACCESS_KEY_DOWN, [ACCESS_LEFT] = ACCESS_KEY_LEFT, [ACCESS_RIGHT] = ACCESS_KEY_RIGHT,
 };
 
+// The buttons that are something else while the keyboard on the screen is up.
+static const unsigned char compositor_access_typing[ACCESS_BUTTONS] = {
+        [ACCESS_WEST] = ACCESS_BACKSPACE, [ACCESS_START] = ACCESS_ENTER,
+};
+
 // The key an action is, for the ones that are keys (0 for the rest).
 static const unsigned char compositor_access_keys[ACCESS_ACTIONS] = {
         [ACCESS_BACK] = CK_KEY_ESC, [ACCESS_KEY_UP] = CK_KEY_UP, [ACCESS_KEY_DOWN] = CK_KEY_DOWN, [ACCESS_KEY_LEFT] = 105,
-        [ACCESS_KEY_RIGHT] = 106,
+        [ACCESS_KEY_RIGHT] = 106, [ACCESS_BACKSPACE] = CK_KEY_BACKSPACE, [ACCESS_ENTER] = 28,
 };
 
 struct compositor_access_pad
@@ -85,6 +93,7 @@ struct compositor_access_pad
         int value[ACCESS_AXES];         // and where it is
         unsigned int held;              // the buttons down (the triggers' among them), as bits
         unsigned int acted;             // and as they were when they were last acted on
+        unsigned char pressed_as[ACCESS_BUTTONS]; // the action each button down was pressed as (its let go is that action's)
         positive home_at;               // when the home button went down, while the pad is a program's
 };
 
@@ -115,6 +124,13 @@ static void compositor_access_act(unsigned int action, int down, unsigned int at
 
 static b32 compositor_access_drives(void) { return compositor_access.hand; }
 
+// A controller is the hand now: the keyboard on the screen is looked at again (it comes up on a field for a controller, as for a touch).
+static void compositor_access_take_hand(void)
+{
+        if (!compositor_access.hand)
+                compositor_access.hand = 1, compositor.osk_typed = 0, compositor_osk_sync();
+}
+
 // An event device's minor kept as a game's (game) or dropped (a device that is not one took the minor), for compositor_access_holds_pad.
 static void compositor_access_note(unsigned int minor, b32 game)
 {
@@ -129,7 +145,11 @@ static void compositor_access_note(unsigned int minor, b32 game)
 }
 
 // A mouse, a touchpad, a pen or a touch moved the pointer: it is no longer the pad's.
-static void compositor_access_let_go(void) { compositor_access.hand = 0; }
+static void compositor_access_let_go(void)
+{
+        if (compositor_access.hand)
+                compositor_access.hand = 0, compositor_osk_sync();
+}
 
 static struct compositor_access_pad *compositor_access_pad_of(unsigned int at)
 {
@@ -457,8 +477,9 @@ static void compositor_access_act(unsigned int action, int down, unsigned int at
         case ACCESS_SECONDARY: compositor_press(COMPOSITOR_BTN_RIGHT, down); break;
         case ACCESS_MIDDLE: compositor_press(COMPOSITOR_BTN_LEFT + 2, down); break;
         case ACCESS_BACK: case ACCESS_KEY_UP: case ACCESS_KEY_DOWN: case ACCESS_KEY_LEFT: case ACCESS_KEY_RIGHT:
+        case ACCESS_BACKSPACE: case ACCESS_ENTER:
                 compositor_key(at, compositor_access_keys[action], down, now);
-                if (action != ACCESS_BACK)
+                if (action != ACCESS_BACK && action != ACCESS_ENTER)
                         compositor_access.repeat = down ? (int)action : 0, compositor_access.repeat_at = now + COMPOSITOR_ACCESS_DELAY_NS;
                 break;
         case ACCESS_GO_HOME: if (down) compositor_logo_act(); break;
@@ -468,6 +489,7 @@ static void compositor_access_act(unsigned int action, int down, unsigned int at
                 break;
         case ACCESS_PREVIOUS: case ACCESS_NEXT: if (down) compositor_access_tab(at, action == ACCESS_PREVIOUS, now); break;
         case ACCESS_FIND: if (down) compositor.cursor.magnify = 1, compositor_magnify(now); break;
+        case ACCESS_KEYBOARD: if (down) compositor_osk_toggle(); break;
         }
 }
 
@@ -503,14 +525,26 @@ static void compositor_access_report(struct compositor_access_pad *pad, positive
                 pad->acted = held;
                 return;
         }
-        compositor_access.hand = 1;
+        compositor_access_take_hand();
 #ifdef MOONWATER_GPU_C
         compositor_gpu_wake();
 #endif
         compositor_hold_touch(now);
         for (unsigned int button = 0; button < ACCESS_BUTTONS; button++)
-                if ((changed >> button & 1) && compositor_access_actions[button])
-                        compositor_access_act(compositor_access_actions[button], (int)(held >> button & 1), (unsigned int)pad->at, now);
+        {
+                unsigned int action;
+
+                if (!(changed >> button & 1))
+                        continue;
+                // A press is the action of the moment (the keyboard's when it is up); its let go is whatever it was pressed as.
+                if (held >> button & 1)
+                        action = compositor.osk_shown && compositor_access_typing[button] ? compositor_access_typing[button] : compositor_access_actions[button],
+                        pad->pressed_as[button] = (unsigned char)action;
+                else
+                        action = pad->pressed_as[button], pad->pressed_as[button] = 0;
+                if (action)
+                        compositor_access_act(action, (int)(held >> button & 1), (unsigned int)pad->at, now);
+        }
         pad->acted = held;
 }
 
@@ -656,7 +690,7 @@ static void compositor_access_tick(positive now)
                 compositor_access.left_x += step * lx / (long long)r, compositor_access.left_y += step * ly / (long long)r;
                 dx = (int)(compositor_access.left_x / 65536), dy = (int)(compositor_access.left_y / 65536);
                 compositor_access.left_x -= (long long)dx * 65536, compositor_access.left_y -= (long long)dy * 65536;
-                compositor_access.hand = 1;
+                compositor_access_take_hand();
                 compositor_access_move(dx, dy);
         }
         else if (!share)
@@ -671,7 +705,7 @@ static void compositor_access_tick(positive now)
                 compositor_access.wheel_y += step * -ry / (long long)r, compositor_access.wheel_x += step * rx / (long long)r;
                 up = (int)(compositor_access.wheel_y / 65536), right = (int)(compositor_access.wheel_x / 65536);
                 compositor_access.wheel_y -= (long long)up * 65536, compositor_access.wheel_x -= (long long)right * 65536;
-                compositor_access.hand = 1;
+                compositor_access_take_hand();
                 if (up)
                         compositor_wheel(compositor_wheel_turn(up), 0, WINDOW_WHEEL_PRECISE), compositor_access.scrolled = 1;
                 if (right)

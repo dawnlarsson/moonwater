@@ -5581,7 +5581,32 @@ static void check_compositor_access(void)
     check("access: a pad a program reads is the program's: the left button held is let go, its buttons do nothing here, and a pushed stick owes the loop no tick",
           all && access_unread(1, WINDOW_EVENT_BUTTON, -1, &down) == 2);
 
+    /* The keyboard on the screen, a row of its own below the window: the top face button asks for it with no field focused and
+       puts it away; while it is up the left face button is Backspace (repeating) and the menu button Enter, and a button pressed
+       then lets go as what it was pressed as even when the keyboard went away while it was held. */
     compositor_access.reads = 0, compositor_access.asked_row = -1;
+    compositor.showing[2] = 1, compositor.asks[2] |= WINDOW_KEYBOARD, compositor.y[2] = 200, compositor.h[2] = 56;
+    compositor.osk_setting = COMPOSITOR_OSK_AUTO;
+    compositor_osk_sync();
+    all = !compositor.osk_shown;
+    /* An Xbox pad: BTN_Y (0x134) is its top face button, BTN_X (0x133) its left one. */
+    access_report(COMPOSITOR_EV_KEY, 0x134, 1), access_report(COMPOSITOR_EV_KEY, 0x134, 0);
+    all &= compositor.osk_shown && compositor.osk_asked;
+    table->event_tail[1] = table->event_head[1];
+    access_report(COMPOSITOR_EV_KEY, 0x133, 1);
+    all &= access_unread(1, WINDOW_EVENT_KEY, CK_KEY_BACKSPACE, &down) == 1 && down == 1 && compositor_access.repeat == ACCESS_BACKSPACE &&
+           access_unread(1, WINDOW_EVENT_BUTTON, -1, &down) == 0;
+    access_report(COMPOSITOR_EV_KEY, 0x13b, 1), access_report(COMPOSITOR_EV_KEY, 0x13b, 0);
+    all &= access_unread(1, WINDOW_EVENT_KEY, 28, &down) == 2 && down == 1;
+    access_report(COMPOSITOR_EV_KEY, 0x134, 1), access_report(COMPOSITOR_EV_KEY, 0x134, 0);
+    all &= !compositor.osk_shown && !compositor.osk_asked;
+    access_report(COMPOSITOR_EV_KEY, 0x133, 0);
+    all &= access_unread(1, WINDOW_EVENT_KEY, CK_KEY_BACKSPACE, &down) == 2 && down == 1 && access_unread(1, WINDOW_EVENT_BUTTON, -1, &down) == 0;
+    check("access: the top face button asks for the keyboard on the screen with no field and puts it away; while it is up the left face button is Backspace and menu Enter, let go as pressed",
+          all);
+    compositor.showing[2] = 0, compositor.asks[2] &= ~WINDOW_KEYBOARD;
+    compositor_osk_sync();
+
     table->event_tail[1] = table->event_head[1];
     access_report(COMPOSITOR_EV_KEY, 0x130, 1);
     compositor_input_gone(0);
