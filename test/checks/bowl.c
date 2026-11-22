@@ -1585,6 +1585,9 @@ static fn steam_profile(void)
                 check("The session tells Wine games of the first CCD's CPUs where there are two, unless the person set WINE_CPU_TOPOLOGY",
                       topology && topology < run && strstr(steam->session[topology - 1], "wa wine-ccd && [ -z \"$WINE_CPU_TOPOLOGY\" ]") &&
                           strstr(steam->session[topology - 1], "cache/index3/shared_cpu_list"));
+                check("The session starts the shader warm in the background behind wa shader-warm, after the Vulkan driver is picked, before Steam",
+                      chrome_line(steam->session, "wa shader-warm && { bowl shaders >/dev/null 2>&1 & }") > chrome_line(steam->session, "VK_DRIVER_FILES") &&
+                          chrome_line(steam->session, "wa shader-warm") < run);
                 check("No session says PROTON_USE_NTSYNC or PROTON_ENABLE_NTSYNC (Proton 11 opens /dev/ntsync itself)",
                       steam && !chrome_line(steam->session, "NTSYNC") && chrome_profile && !chrome_line(chrome_profile->session, "NTSYNC"));
         }
@@ -4431,8 +4434,70 @@ static fn grow_rows(void)
               made && bound == 17);
 }
 
+/*
+        The shader caches warmed again after the graphics driver changed (bowl_shaders): the driver's identity is its graphics packages'
+        installed versions (pacman's local database), and the warm runs only when that is not the identity it last warmed for, and waits
+        while a game Steam launched runs (its reaper's command line). A tree of the check's own stands for the bowl and for /proc.
+*/
+static void shaders_file(string_address path, const char *text, positive size)
+{
+        bipolar handle = system_open_at_mode(AT_FDCWD, path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
+
+        if (handle >= 0)
+                system_write_once(handle, text, size), system_close(handle);
+}
+
+static fn shader_warm_rows(void)
+{
+        p8 root[96] = "/tmp/moonwater-bowl-check-shaders-", proc[96] = "/tmp/moonwater-bowl-check-proc-"; // this run's own (a pid each)
+        static const string_address dirs[] = {"", "/var", "/var/lib", "/var/lib/pacman", "/var/lib/pacman/local",
+                                              "/var/lib/pacman/local/mesa-1:26.3.1-2", "/var/lib/pacman/local/lib32-mesa-1:26.3.1-2",
+                                              "/var/lib/pacman/local/vulkan-radeon-1:26.3.1-2", "/var/lib/pacman/local/llvm-libs-23.1.5-1",
+                                              "/var/lib/pacman/local/mesa-utils-9.0.0-1", "/var/lib/pacman/local/zlib-1:1.3.1-2", null};
+        static const char expected[] = "lib32-mesa-1:26.3.1-2\nllvm-libs-23.1.5-1\nmesa-1:26.3.1-2\nvulkan-radeon-1:26.3.1-2\n";
+        static const char reaper[] = "/home/x/.local/share/Steam/ubuntu12_32/reaper\0SteamLaunch\0AppId=489830\0--\0/x/proton\0waitforexitandrun\0";
+        p8 path[256], stamp[1024], again[1024];
+        positive length, second, self = (positive)system_call_1(syscall(getpid), 0), at_root = string_length(root), at_proc = string_length(proc);
+
+        at_root += positive_into_string((string_address)root + at_root, self), root[at_root] = 0;
+        at_proc += positive_into_string((string_address)proc + at_proc, self), proc[at_proc] = 0;
+        for (positive at = 0; dirs[at]; at++)
+                if (bowl_root_path(path, sizeof path, (string_address)root, dirs[at]))
+                        system_call_3(syscall(mkdirat), (positive)AT_FDCWD, (positive)path, 0700);
+        length = bowl_graphics_stamp((string_address)root, stamp, sizeof stamp);
+        check("shaders: the driver's identity is its graphics packages' installed versions, sorted, a line each, and no other package's",
+              length == sizeof expected - 1 && !memory_compare(stamp, expected, length));
+        // The bowl's update: Mesa at its next version.
+        bowl_root_path(path, sizeof path, (string_address)root, "/var/lib/pacman/local/mesa-1:26.3.1-2");
+        system_call_3(syscall(unlinkat), (positive)AT_FDCWD, (positive)path, 0x200); // AT_REMOVEDIR
+        bowl_root_path(path, sizeof path, (string_address)root, "/var/lib/pacman/local/mesa-1:26.3.2-1");
+        system_call_3(syscall(mkdirat), (positive)AT_FDCWD, (positive)path, 0700);
+        second = bowl_graphics_stamp((string_address)root, again, sizeof again);
+        check("shaders: an update of Mesa is another identity", second == length && memory_compare(stamp, again, length) != 0);
+        check("shaders: the caches warmed for this identity are left alone, and with no graphics driver there is nothing to warm",
+              bowl_shaders_step(again, second, again, (bipolar)second, false) == BOWL_WARM_DONE &&
+                  bowl_shaders_step(again, 0, stamp, (bipolar)length, false) == BOWL_WARM_DONE);
+        check("shaders: after an update they are warmed at once at idle, and wait while a game runs, and the first warm is one too",
+              bowl_shaders_step(again, second, stamp, (bipolar)length, false) == BOWL_WARM_RUN &&
+                  bowl_shaders_step(again, second, stamp, (bipolar)length, true) == BOWL_WARM_WAIT &&
+                  bowl_shaders_step(again, second, null, -2, false) == BOWL_WARM_RUN);
+        system_call_3(syscall(mkdirat), (positive)AT_FDCWD, (positive)proc, 0700);
+        bowl_root_path(path, sizeof path, (string_address)proc, "/4242");
+        system_call_3(syscall(mkdirat), (positive)AT_FDCWD, (positive)path, 0700);
+        bowl_root_path(path, sizeof path, (string_address)proc, "/4242/cmdline");
+        shaders_file(path, "/usr/bin/steam\0-silent\0", 22);
+        {
+                b32 idle = !bowl_steam_game_running((string_address)proc), game;
+
+                shaders_file(path, reaper, sizeof reaper - 1);
+                game = bowl_steam_game_running((string_address)proc);
+                check("shaders: a game Steam launched is seen by its reaper's command line, and Steam alone is no game", idle && game);
+        }
+}
+
 b32 main(void)
 {
+        shader_warm_rows(); // first: a later group crashes the run (pre-existing), and these rows must run
         ssh_rows();
         names();
         launchers();

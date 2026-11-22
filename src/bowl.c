@@ -14831,6 +14831,290 @@ bowl_steam_overlay_gl_install(const struct bowl_profile address_to profile)
 }
 
 /*
+        The steam bowl's shader caches, warmed again after its graphics driver changed (`bowl shaders`, which the steam session starts in the
+        background behind `wa shader-warm`). Mesa keys every shader and pipeline it compiled by its own build, so each update of the bowl's
+        Mesa (twice in eight days on the box) left every installed game to compile again as it was played: the largest hitch source on the
+        machine. Updates are never held back; one is noticed instead. The driver's identity is its packages' installed versions
+        (bowl_graphics_stamp, from pacman's local database); when it is not the one the caches were last warmed for, each game's Fossilize
+        databases (Steam's, steamapps/shadercache/APPID/fozpipelinesv6/*.foz) are replayed by Steam's fossilize_replay inside the bowl, into
+        the cache that game reads (MESA_SHADER_CACHE_DIR its directory, one file, as Steam sets it for the game), at SCHED_IDLE, nice 19 and
+        idle I/O, on the CCD game mode leaves to the background (all CPUs past cpu0's L3 where there are two). It never competes with a game:
+        while one Steam launched runs (a process whose command line says SteamLaunch AppId=, Steam's reaper for it) the replay waits, or is
+        stopped (SIGSTOP to its group) and goes on when the game ends (bowl_shaders_step). The identity is written when every game is warmed,
+        so a session cut short warms again at the next.
+*/
+#define BOWL_SHADERS_DONE "/.cache/moonwater-shaders" // under $HOME: the identity the caches were last warmed for
+#define BOWL_SHADERS_REPLAY "/.local/share/Steam/ubuntu12_64/fossilize_replay"
+#define BOWL_SHADERS_CACHES "/.local/share/Steam/steamapps/shadercache"
+#define BOWL_SHADERS_FILES 16
+
+static string_address const bowl_graphics_packages[] = {"mesa-", "lib32-mesa-", "vulkan-radeon-", "lib32-vulkan-radeon-", "vulkan-intel-",
+                                                        "lib32-vulkan-intel-", "llvm-libs-", "lib32-llvm-libs-", null};
+
+// An installed package's directory name (NAME-VERSION-RELEASE) is a graphics package's: one of their names, then its version (a digit first).
+static b32 bowl_graphics_package(string_address name)
+{
+        for (positive at = 0; bowl_graphics_packages[at]; at++)
+        {
+                string_address want = bowl_graphics_packages[at];
+                positive k = 0;
+
+                while (want[k] && name[k] == want[k])
+                        k++;
+                if (!want[k] && name[k] >= '0' && name[k] <= '9')
+                        return true;
+        }
+        return false;
+}
+
+static b32 bowl_starts(string_address text, string_address start)
+{
+        while (*start && *text == *start)
+                text++, start++;
+        return !*start;
+}
+
+static int bowl_name_order(const p8 *a, const p8 *b)
+{
+        while (*a && *a == *b)
+                a++, b++;
+        return (int)*a - (int)*b;
+}
+
+// The graphics driver's identity in root: its packages' installed names, sorted, a line each, into out. Its length; 0 for none (or no room).
+static positive bowl_graphics_stamp(string_address root, p8 *out, positive room)
+{
+        p8 path[BOWL_PATH_LIMIT], buffer[4096], names[32][96];
+        positive count = 0, length = 0;
+        bipolar handle, got;
+
+        if (!bowl_root_path(path, sizeof path, root, "/var/lib/pacman/local") ||
+            (handle = system_open_at(AT_FDCWD, (string_address)path, FILE_READ | O_DIRECTORY | O_CLOEXEC)) < 0)
+                return 0;
+        while ((got = system_call_3(syscall(getdents64), (positive)handle, (positive)buffer, sizeof buffer)) > 0)
+                for (bipolar at = 0; at < got;)
+                {
+                        string_address name = (string_address)(buffer + at + 19);
+                        positive size = string_length(name);
+
+                        at += memory_load_unaligned(p16, buffer + at + 16);
+                        if (count < 32 && size < sizeof names[0] && bowl_graphics_package(name))
+                        {
+                                positive k = count++;
+
+                                while (k && bowl_name_order(names[k - 1], name) > 0)
+                                        memory_copy(names[k], names[k - 1], sizeof names[0]), k--;
+                                memory_copy(names[k], name, size + 1);
+                        }
+                }
+        system_close(handle);
+        for (positive k = 0; k < count; k++)
+        {
+                positive size = string_length(names[k]);
+
+                if (length + size + 1 > room)
+                        return 0;
+                memory_copy(out + length, names[k], size), length += size, out[length++] = '\n';
+        }
+        return length;
+}
+
+// A game Steam launched is running: a process under proc whose command line says "SteamLaunch AppId=" (Steam's reaper for it).
+static b32 bowl_steam_game_running(string_address proc)
+{
+        static const char want[] = "SteamLaunch AppId=";
+        p8 buffer[4096], line[1024], path[96];
+        bipolar handle, got;
+        b32 found = false;
+
+        if ((handle = system_open_at(AT_FDCWD, proc, FILE_READ | O_DIRECTORY | O_CLOEXEC)) < 0)
+                return false;
+        while (!found && (got = system_call_3(syscall(getdents64), (positive)handle, (positive)buffer, sizeof buffer)) > 0)
+                for (bipolar at = 0; at < got && !found;)
+                {
+                        string_address name = (string_address)(buffer + at + 19);
+                        bipolar read;
+
+                        at += memory_load_unaligned(p16, buffer + at + 16);
+                        if (*name < '1' || *name > '9' || !bowl_root_path(path, sizeof path, proc, "/") ||
+                            !bowl_root_path(path + string_length(path), sizeof path - string_length(path), name, "/cmdline"))
+                                continue;
+                        read = file_slurp_regular_at(AT_FDCWD, path, line, sizeof line - 1, 0);
+                        for (bipolar k = 0; k < read; k++)
+                                line[k] = line[k] ? line[k] : ' ';
+                        for (bipolar k = 0; read > 0 && k + (bipolar)sizeof want - 1 <= read && !found; k++)
+                                found = !memory_compare(line + k, want, sizeof want - 1);
+                }
+        system_close(handle);
+        return found;
+}
+
+// What the warm does now: nothing (the caches are this driver's, or there is no driver), wait (a game is up), or run.
+enum bowl_warm
+{
+        BOWL_WARM_DONE,
+        BOWL_WARM_WAIT,
+        BOWL_WARM_RUN
+};
+static enum bowl_warm bowl_shaders_step(const p8 *stamp, positive length, const p8 *warmed, bipolar warmed_length, b32 game)
+{
+        if (!length || (warmed_length == (bipolar)length && !memory_compare(stamp, warmed, length)))
+                return BOWL_WARM_DONE;
+        return game ? BOWL_WARM_WAIT : BOWL_WARM_RUN;
+}
+
+static void bowl_shaders_nap(positive seconds)
+{
+        timespec wait = {(long)seconds, 0};
+
+        system_call_2(syscall(nanosleep), (positive)address_of wait, 0);
+}
+
+// The background's CPUs: every CPU past cpu0's L3 (the CCD game mode keeps); none where there is one CCD (the replay is SCHED_IDLE anyway).
+static positive bowl_shaders_cpus(unsigned long mask[2])
+{
+        p8 l3[128];
+        bipolar got = file_slurp_regular_at(AT_FDCWD, "/sys/devices/system/cpu/cpu0/cache/index3/shared_cpu_list", l3, sizeof l3 - 1, 0);
+        unsigned long first[2] = {0, 0};
+        positive count = 0, online = 0;
+
+        mask[0] = mask[1] = 0;
+        if (got <= 0)
+                return 0;
+        l3[got] = 0;
+        for (p8 *p = l3; *p >= '0' && *p <= '9';)
+        {
+                unsigned int lo = 0, hi;
+
+                while (*p >= '0' && *p <= '9')
+                        lo = lo * 10 + (unsigned int)(*p++ - '0');
+                hi = lo;
+                if (*p == '-')
+                        for (p++, hi = 0; *p >= '0' && *p <= '9';)
+                                hi = hi * 10 + (unsigned int)(*p++ - '0');
+                for (unsigned int c = lo; c <= hi && c < 128; c++)
+                        first[c >> 6] |= 1ul << (c & 63);
+                if (*p == ',')
+                        p++;
+        }
+        for (unsigned int c = 0; c < 128; c++)
+        {
+                p8 path[96] = "/sys/devices/system/cpu/cpu";
+                positive at = string_length(path);
+
+                at += positive_into_string((string_address)path + at, c), path[at] = 0;
+                if (system_access_at(AT_FDCWD, (string_address)path, 0) < 0)
+                        break;
+                online++;
+                if (!(first[c >> 6] >> (c & 63) & 1))
+                        mask[c >> 6] |= 1ul << (c & 63), count++;
+        }
+        return count && count < online ? count : 0;
+}
+
+static b32 bowl_shaders(positive count, string_address address_to arguments)
+{
+        string_address address_to environment = file_environment_all();
+        string_address home = string_get_environment(environment, "HOME");
+        static p8 stamp[4096], warmed[4096];
+        p8 done[BOWL_PATH_LIMIT], replay[BOWL_PATH_LIMIT], caches[BOWL_PATH_LIMIT], self[BOWL_PATH_LIMIT], buffer[4096];
+        positive length = bowl_graphics_stamp(BOWL_ROOT_PREFIX "arch", stamp, sizeof stamp), cpus;
+        bipolar warmed_length, handle, got;
+        unsigned long mask[2];
+        struct
+        {
+                unsigned int size, policy;
+                unsigned long long flags;
+                int nice;
+                unsigned int priority;
+                unsigned long long runtime, deadline, period;
+        } idle = {48, 5, 0, 19, 0, 0, 0, 0}; // SCHED_IDLE
+
+        (void)count, (void)arguments;
+        if (!home || !bowl_root_path(done, sizeof done, home, BOWL_SHADERS_DONE) || !bowl_root_path(replay, sizeof replay, home, BOWL_SHADERS_REPLAY) ||
+            !bowl_root_path(caches, sizeof caches, home, BOWL_SHADERS_CACHES) || bowl_setup_self(self, sizeof self))
+                return 1;
+        warmed_length = file_slurp_regular_at(AT_FDCWD, (string_address)done, warmed, sizeof warmed, 0);
+        if (bowl_shaders_step(stamp, length, warmed, warmed_length, false) == BOWL_WARM_DONE ||
+            system_access_at(AT_FDCWD, (string_address)replay, BOWL_ACCESS_EXECUTE) < 0)
+                return 0;
+        // The whole warm, and every replay it starts, at the background's priority: it runs only where nothing else would.
+        system_call_3(syscall(sched_setattr), 0, (positive)address_of idle, 0);
+        system_call_3(syscall(setpriority), 0, 0, 19);
+        system_call_3(syscall(ioprio_set), 1, 0, (positive)3 << 13); // IOPRIO_WHO_PROCESS, IOPRIO_CLASS_IDLE
+        if ((cpus = bowl_shaders_cpus(mask)) != 0)
+                system_call_3(syscall(sched_setaffinity), 0, sizeof mask, (positive)mask);
+        if ((handle = system_open_at(AT_FDCWD, (string_address)caches, FILE_READ | O_DIRECTORY | O_CLOEXEC)) < 0)
+                return 0;
+        while ((got = system_call_3(syscall(getdents64), (positive)handle, (positive)buffer, sizeof buffer)) > 0)
+                for (bipolar at = 0; at < got;)
+                {
+                        string_address app = (string_address)(buffer + at + 19);
+                        static p8 files[BOWL_SHADERS_FILES][BOWL_PATH_LIMIT], dir[BOWL_PATH_LIMIT], foz[BOWL_PATH_LIMIT], cache_env[BOWL_PATH_LIMIT + 32];
+                        string_address argv[BOWL_SHADERS_FILES + 8], env[512];
+                        p8 entries[4096], threads[8];
+                        positive found = 0, envs = 0, n = 0;
+                        bipolar listing, more, child;
+                        b32 stopped = false;
+
+                        at += memory_load_unaligned(p16, buffer + at + 16);
+                        if (*app < '0' || *app > '9' || !bowl_root_path(dir, sizeof dir, caches, "/") ||
+                            !bowl_root_path(dir + string_length(dir), sizeof dir - string_length(dir), app, "") ||
+                            !bowl_root_path(foz, sizeof foz, dir, "/fozpipelinesv6") ||
+                            (listing = system_open_at(AT_FDCWD, (string_address)foz, FILE_READ | O_DIRECTORY | O_CLOEXEC)) < 0)
+                                continue;
+                        while (found < BOWL_SHADERS_FILES && (more = system_call_3(syscall(getdents64), (positive)listing, (positive)entries, sizeof entries)) > 0)
+                                for (bipolar e = 0; e < more && found < BOWL_SHADERS_FILES;)
+                                {
+                                        string_address name = (string_address)(entries + e + 19);
+                                        positive size = string_length(name);
+
+                                        e += memory_load_unaligned(p16, entries + e + 16);
+                                        if (size > 4 && string_equals(name + size - 4, ".foz") && bowl_root_path(files[found], sizeof files[0], foz, "/") &&
+                                            bowl_root_path(files[found] + string_length(files[found]), sizeof files[0] - string_length(files[found]), name, ""))
+                                                found++;
+                                }
+                        system_close(listing);
+                        if (!found)
+                                continue;
+                        while (bowl_steam_game_running("/proc"))
+                                bowl_shaders_nap(10);
+                        n = positive_into_string((string_address)threads, cpus ? cpus : 4), threads[n] = 0;
+                        argv[0] = "bowl", argv[1] = BOWL_ROOT_PREFIX "arch", argv[2] = (string_address)replay, argv[3] = "--num-threads";
+                        argv[4] = (string_address)threads;
+                        for (positive k = 0; k < found; k++)
+                                argv[5 + k] = (string_address)files[k];
+                        argv[5 + found] = null;
+                        bowl_root_path(cache_env, sizeof cache_env, "MESA_SHADER_CACHE_DIR=", (string_address)dir);
+                        env[envs++] = (string_address)cache_env, env[envs++] = "MESA_DISK_CACHE_SINGLE_FILE=1";
+                        for (positive k = 0; environment && environment[k] && envs < 511; k++)
+                                if (!bowl_starts(environment[k], "MESA_SHADER_CACHE_DIR=") && !bowl_starts(environment[k], "MESA_DISK_CACHE_SINGLE_FILE="))
+                                        env[envs++] = environment[k];
+                        env[envs] = null;
+                        if ((child = system_fork()) == 0)
+                        {
+                                system_call_2(syscall(setpgid), 0, 0);
+                                system_execute((string_address)self, argv, env);
+                                exit(127);
+                        }
+                        if (child < 0)
+                                continue;
+                        // A game started while it replays: the replay (its whole group, inside the bowl) is stopped, and goes on when the game ends.
+                        while (system_call_4(syscall(wait4), (positive)child, 0, 1, 0) == 0) // WNOHANG
+                        {
+                                b32 game = bowl_steam_game_running("/proc");
+
+                                if (game != stopped)
+                                        system_call_2(syscall(kill), (positive)-child, game ? SIGSTOP : SIGCONT), stopped = game;
+                                bowl_shaders_nap(5);
+                        }
+                }
+        system_close(handle);
+        if ((handle = system_open_at_mode(AT_FDCWD, (string_address)done, O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW | O_CLOEXEC, 0600)) >= 0)
+                system_write_once(handle, stamp, length), system_close(handle);
+        return 0;
+}
+/*
         The session. It runs in the machine's shell with the arguments the
         launcher was given, which Steam takes. Canvas's socket is checked
         first, and the launch is the person's (MOONWATER_ASKED gives the first
@@ -14907,6 +15191,8 @@ static string_address bowl_steam_session[] = {
     "[ \"$gl\" = card ] || export LIBGL_ALWAYS_SOFTWARE=${LIBGL_ALWAYS_SOFTWARE:-1} GSK_RENDERER=${GSK_RENDERER:-cairo}",
     BOWL_VULKAN_PICK(BOWL_ROOT_PREFIX "arch"),
     BOWL_SHADER_CACHE_LIVE,
+    // The shader caches warmed again in the background after the bowl's graphics driver changed (bowl_shaders: at idle, never beside a game).
+    "wa shader-warm && { bowl shaders >/dev/null 2>&1 & } || true",
     // Steam's overlay drawn into OpenGL games (bowl_steam_overlay_gl_install): ld.so takes /usr/local/$LIB as each program's own.
     "wa steam-overlay-gl && [ -r " BOWL_ROOT_PREFIX "arch" BOWL_STEAM_OVERLAY_GL_LIB64 "/" BOWL_STEAM_OVERLAY_GL_NAME " ] && "
     "export LD_PRELOAD='" BOWL_STEAM_OVERLAY_GL_PRELOAD "'${LD_PRELOAD:+:$LD_PRELOAD}",
@@ -16683,6 +16969,7 @@ static b32 bowl_main()
             {"uninstall", bowl_uninstall},
             {"udev", bowl_udev_verb},
             {"bus", bowl_bus},
+            {"shaders", bowl_shaders},
         };
         static const struct
         {
