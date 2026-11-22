@@ -1647,6 +1647,12 @@ static int spawn_enter(void *data)
                     unlikely(ret = replace_fd(i, work->stdio[i], 0)))
                         goto finished;
 
+        if (unlikely(spark_spawn_watched()))
+        {
+                ret = -EPERM;
+                goto finished;
+        }
+
         ret = kernel_execve(work->path,
                             (const char *const *)work->arguments->vector,
                             environment);
@@ -1934,6 +1940,14 @@ static long do_spawn(struct file *file, struct spawn __user *request)
 
         work->argc = args.argv_count;
         work->shell_fallback = shell_fallback;
+
+        /* Re-check after blocking user copies and mutex wait so a concurrent
+           ptrace attach or TSYNC seccomp filter cannot be bypassed. */
+        if (unlikely(spark_spawn_watched()))
+        {
+                ret = -EPERM;
+                goto fail;
+        }
 
         // SIGCHLD alone, so the new task is an ordinary child of the caller
         // and wait4 works on it the same way it does for a fork.

@@ -1605,8 +1605,15 @@ static long rules_load(struct rover_control *request)
                 }
         }
 
+        p32 table_id;
+        p32 rule_count;
+        p32 kernel_rules;
+
         mutex_lock(&rules_load_lock);
         live->table = ++rules_loads;
+        table_id = live->table;
+        rule_count = live->view.head->rules;
+        kernel_rules = live->kernel_rules;
         raw_spin_lock_irqsave(&rules_lock, flags);
         before = rcu_dereference_protected(rules_now, lockdep_is_held(&rules_load_lock));
         rcu_assign_pointer(rules_now, live);
@@ -1616,11 +1623,11 @@ static long rules_load(struct rover_control *request)
         rules_after(posted, queued);
         if (before)
                 call_rcu(&before->rcu, rules_free_rcu);
-        request->table = live->table;
-        request->rules = live->view.head->rules;
-        request->kernel_rules = live->kernel_rules;
-        pr_info("[rover] table %u loaded: %u rules, %u of them the kernel's\n", live->table, live->view.head->rules,
-                live->kernel_rules);
+        request->table = table_id;
+        request->rules = rule_count;
+        request->kernel_rules = kernel_rules;
+        pr_info("[rover] table %u loaded: %u rules, %u of them the kernel's\n", table_id, rule_count,
+                kernel_rules);
         return 0;
 }
 

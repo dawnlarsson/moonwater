@@ -2019,12 +2019,12 @@ static void bind_disconnect(struct input_handle *handle)
         unsigned int i;
 
         cancel_work_sync(&bind->open);
-        rules_device(bind, false);
-        for (i = 0; i < ARRAY_SIZE(bind_mod_code); i++)
-                bind_mods(bind, bind_mod_code[i], 0);
         if (!bind->opened)
                 input_close_device(handle);
         input_unregister_handle(handle);
+        rules_device(bind, false);
+        for (i = 0; i < ARRAY_SIZE(bind_mod_code); i++)
+                bind_mods(bind, bind_mod_code[i], 0);
         kfree(bind);
 }
 
