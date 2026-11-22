@@ -341,23 +341,23 @@ static bool logger_size(string_address text, positive address_to size)
 static bool logger_rfc_flags(logger_control address_to control,
                              string_address flags)
 {
+        static const named_byte rfc_flags[] = {
+            {"notime", 3}, {"notq", 2}, {"nohost", 4},
+        };
+
         while (flags && string_get(flags))
         {
                 string_address comma = string_first_of(flags, ',');
                 positive length = comma ? (positive)(comma - flags)
                                         : string_length(flags);
-
-                if (length == 6 && !string_compare_max(flags, "notime", 6))
-                {
-                        control->rfc_time = false;
-                        control->rfc_quality = false;
-                }
-                else if (length == 4 && !string_compare_max(flags, "notq", 4))
-                        control->rfc_quality = false;
-                else if (length == 6 && !string_compare_max(flags, "nohost", 6))
-                        control->rfc_host = false;
-                else
+                positive hit = memory_table_lookup(flags, length, rfc_flags);
+                if (hit == array_count(rfc_flags))
                         return false;
+
+                p8 mask = rfc_flags[hit].value;
+                if (mask & 1) control->rfc_time = false;
+                if (mask & 2) control->rfc_quality = false;
+                if (mask & 4) control->rfc_host = false;
 
                 flags += length;
                 if (comma)
@@ -389,20 +389,27 @@ static positive tools_clock_iso(p8 address_to into, b64 seconds, p8 separator,
                                 p8 mark, positive microseconds)
 {
         p8 format[] = "%Y-%m-%dT%H:%M:%S";
+        time_t stamp = (time_t)seconds;
+        tm broken;
 
         format[8] = separator;
-        positive made = tools_clock_text(into, 40, format, seconds);
-        if (!made)
+        if (!localtime_r(address_of stamp, address_of broken))
+        {
+                into[0] = end;
                 return 0;
+        }
+        positive made = strftime(into, 40, format, address_of broken);
+        if (!made)
+        {
+                into[0] = end;
+                return 0;
+        }
         if (mark)
         {
                 into[made++] = mark;
                 made += positive_into_padded(into + made, microseconds % 1000000,
                                              6, '0');
         }
-        time_t stamp = (time_t)seconds;
-        tm broken;
-        localtime_r(address_of stamp, address_of broken);
         bipolar east = (bipolar)broken.tm_gmtoff;
         positive whole = (positive)(east < 0 ? -east : east);
 
@@ -6467,23 +6474,20 @@ static b32 tools_numfmt()
         {
                 if (!numfmt_format_read(value, address_of numfmt.format))
                 {
+                        static const string_address format_errors[] = {
+                            [NUMFMT_FORMAT_NONE] = "numfmt: format '%w' has no %% directive\n",
+                            [NUMFMT_FORMAT_MANY] = "numfmt: format '%w' has too many %% directives\n",
+                            [NUMFMT_FORMAT_ENDS] = "numfmt: format '%w' ends in %%\n",
+                            [NUMFMT_FORMAT_PRECISION] = "numfmt: invalid precision in format '%w'\n",
+                        };
+                        string_address message =
+                            numfmt_format_kind < array_count(format_errors) &&
+                            format_errors[numfmt_format_kind]
+                                ? format_errors[numfmt_format_kind]
+                                : (string_address)"numfmt: invalid format '%w', directive must be %%[0]['][-][N][.][N]f\n";
                         text_flush();
-                        if (numfmt_format_kind == NUMFMT_FORMAT_NONE)
-                                string_format(writer_stderr,
-                                    "numfmt: format '%w' has no %% directive\n", writer_terminal_quoted_name, value);
-                        else if (numfmt_format_kind == NUMFMT_FORMAT_MANY)
-                                string_format(writer_stderr,
-                                    "numfmt: format '%w' has too many %% directives\n", writer_terminal_quoted_name, value);
-                        else if (numfmt_format_kind == NUMFMT_FORMAT_ENDS)
-                                string_format(writer_stderr,
-                                    "numfmt: format '%w' ends in %%\n", writer_terminal_quoted_name, value);
-                        else if (numfmt_format_kind == NUMFMT_FORMAT_PRECISION)
-                                string_format(writer_stderr,
-                                    "numfmt: invalid precision in format '%w'\n", writer_terminal_quoted_name, value);
-                        else
-                                string_format(writer_stderr,
-                                    "numfmt: invalid format '%w', directive must be %%[0]['][-][N][.][N]f\n",
-                                    writer_terminal_quoted_name, value);
+                        string_format(writer_stderr, message,
+                                      writer_terminal_quoted_name, value);
                         return text_done(1);
                 }
                 numfmt.have_format = true;
@@ -8144,6 +8148,13 @@ static bool factor_number(p8 address_to bytes, positive length,
                 for (positive at = 0; at < array_count(small_primes); at++)
                 {
                         positive prime = small_primes[at];
+                        if (prime * prime > remaining)
+                        {
+                                if (remaining > 1)
+                                        factors[count++] = remaining;
+                                remaining = 1;
+                                break;
+                        }
 
                         while (!(remaining % prime))
                         {
@@ -8157,10 +8168,10 @@ static bool factor_number(p8 address_to bytes, positive length,
                    Bound it at one million: at most 450 odd remainders are
                    tried, while real 32/64-bit work still goes directly to
                    Miller-Rabin and rho. */
-                if (remaining < 1000000)
+                if (remaining > 1 && remaining < 1000000)
                 {
                         for (positive trial = 101;
-                             trial <= remaining / trial; trial += 2)
+                             trial * trial <= remaining; trial += 2)
                                 while (!(remaining % trial))
                                 {
                                         factors[count++] = trial;
@@ -8291,29 +8302,32 @@ static b32 tools_factor()
                 // never ends would otherwise be factored for ever.
                 while (!text_out_failed && text_reader_fill(address_of input))
                 {
-                        p8 byte = input.buffer[input.position++];
-
-                        if (byte_is_space(byte))
+                        while (!text_out_failed && input.position < input.filled)
                         {
-                                if (length || excess)
+                                p8 byte = input.buffer[input.position++];
+
+                                if (byte_is_space(byte))
                                 {
-                                        if (excess ||
-                                            !factor_number(token, length,
-                                                           exponents))
+                                        if (length || excess)
                                         {
-                                                if (excess)
-                                                        string_diagnostic(&text_diagnostic, 0, null, "integer too large; at most 2543 digits are factored");
-                                                failed = true;
+                                                if (excess ||
+                                                    !factor_number(token, length,
+                                                                   exponents))
+                                                {
+                                                        if (excess)
+                                                                string_diagnostic(&text_diagnostic, 0, null, "integer too large; at most 2543 digits are factored");
+                                                        failed = true;
+                                                }
+                                                length = 0;
+                                                excess = false;
                                         }
-                                        length = 0;
-                                        excess = false;
                                 }
+                                else if (array_store_reserve(token, token_room, length,
+                                                             length + 2, 4096))
+                                        token[length++] = byte;
+                                else
+                                        excess = true;
                         }
-                        else if (array_store_reserve(token, token_room, length,
-                                                     length + 2, 4096))
-                                token[length++] = byte;
-                        else
-                                excess = true;
                 }
 
                 if ((length || excess) && !text_out_failed)
@@ -9938,7 +9952,8 @@ static fn dd_copy_block(const p8 address_to from, positive length)
                 dd_copy_simple(from, min(run, room));
                 if (run > room && dd_col <= dd_cbs)
                         dd_truncated++;
-                dd_col += run;
+                dd_col = run <= dd_cbs && dd_col <= dd_cbs - run
+                             ? dd_col + run : dd_cbs + 1;
                 if (!newline)
                         return;
 
@@ -13983,10 +13998,21 @@ static PURE positive diff_hash(diff_side address_to side, bipolar middle)
         // The common exact-line path is already a bounded span. Short lines
         // stay inline; past the measured break-even the four-byte polynomial
         // floor removes three quarters of the dependent hash updates.
-        if (length >= 24 && diff_space == DIFF_SPACE_NONE && !diff_trailing &&
+        if (diff_space == DIFF_SPACE_NONE && !diff_trailing &&
             !diff_tabs && !diff_icase)
-                return memory_hash_33(diff_line(side, middle), length) * 2 +
-                       (diff_stub(side, middle) ? 1 : 0);
+        {
+                p8 address_to line = diff_line(side, middle);
+                positive value;
+                if (length >= 24)
+                        value = memory_hash_33(line, length);
+                else
+                {
+                        value = 5381;
+                        for (positive i = 0; i < length; i++)
+                                value = value * 33 + line[i];
+                }
+                return value * 2 + (diff_stub(side, middle) ? 1 : 0);
+        }
 
         diff_scan scan;
         positive value = 5381;
@@ -18923,6 +18949,7 @@ static b32 ul_table_column_list(
         p32 address_to columns = null; \
         positive columns_room = 0; \
         positive column_count = 0; \
+        scope_exit(array_store_release(columns, columns_room, column_count)); \
         p8 unknown[UL_COLUMN_NAME]; \
         { \
                 b32 fault = ul_table_column_list(text, definitions, maximum, \
@@ -19134,7 +19161,15 @@ static b32 util_linux_prlimit()
                 ul_limit_pair made;
                 bipolar got = ul_prlimit(pid, resource->resource, null,
                                          address_of old);
-                if (got < 0 || !ul_limit_parse(value, old, address_of made))
+                if (got < 0)
+                {
+                        string_format(log_error,
+                                      "prlimit: failed to get %s: %s\n",
+                                      resource->name, file_reason(got));
+                        failed = 1;
+                        continue;
+                }
+                if (!ul_limit_parse(value, old, address_of made))
                 {
                         string_format(log_error,
                                       "prlimit: failed to parse %s limit\n",
@@ -20933,6 +20968,12 @@ static b32 util_linux_setpriv()
                 return string_report(log_error, 1, "%s: %s\n", "setpriv", "requested policy is not supported by this build");
         tools_refuse(taking.first >= (positive)program_argument_count(), "setpriv", "No program specified");
 
+        tools_refuse((taking.flags & FILE_FLAG('U')) &&
+                     (taking.flags & (FILE_FLAG('r') | FILE_FLAG('u'))),
+                     "setpriv", "duplicate or mutually exclusive option");
+        tools_refuse((taking.flags & FILE_FLAG('R')) &&
+                     (taking.flags & (FILE_FLAG('g') | FILE_FLAG('G'))),
+                     "setpriv", "duplicate or mutually exclusive option");
 #define UL_ID(letter, field, is_group) do { if (taking.flags & FILE_FLAG(letter)) { if (!ul_setpriv_id(file_option_value(address_of taking, letter), is_group, address_of set.field)) return string_report(log_error, 1, "%s: %s\n", "setpriv", "failed to parse identity"); set.field##_set = true; } } while (0)
         UL_ID('r', ruid, false); UL_ID('u', euid, false);
         UL_ID('g', rgid, true); UL_ID('G', egid, true);
@@ -21401,6 +21442,7 @@ static b32 tools_uuidparse()
         return_if(output && !string_get(output), text_done(1));
         p32 address_to columns = null;
         positive columns_room = 0;
+        scope_exit(array_store_release(columns, columns_room, column_count));
         positive wanted = output ? name_list_capacity(output) : 0;
         if (wanted < array_count(uuid_defaults))
                 wanted = array_count(uuid_defaults);
@@ -21884,6 +21926,7 @@ static b32 util_linux_lsclocks()
         p32 address_to columns = null;
         positive columns_room = 0;
         positive column_count = 0;
+        scope_exit(array_store_release(columns, columns_room, column_count));
         string_address selected = file_option_value(address_of taking, 'o');
         if (!selected) selected = file_environment("LSCLOCKS_COLUMNS");
         p8 unknown[UL_COLUMN_NAME];
@@ -22452,6 +22495,7 @@ static b32 util_linux_lslocks()
 
         positive lines = memory_count(input, length, '\n') +
                          (length && input[length - 1] != '\n');
+        return_if(lines > positive_max / sizeof(ul_lslocks_entry), text_done(1));
         ul_lslocks_entry address_to locks =
             (ul_lslocks_entry address_to)utility_arena_take(
                 lines * sizeof(ul_lslocks_entry));
@@ -22695,16 +22739,15 @@ static fn ul_lsfd_fdinfo_parse(ul_lsfd_entry address_to descriptor,
         }
 }
 
-static fn ul_lsfd_fdinfo(ul_lsfd_entry address_to descriptor)
+static fn ul_lsfd_fdinfo(ul_lsfd_entry address_to descriptor,
+                         bipolar fdinfo_dir, string_address fd_name)
 {
-        p8 path[FILE_PATH_MAX];
         p8 bytes[1025];
 
-        system_process_path(path, descriptor->process->pid, "fdinfo", "");
-        positive at = string_length(path);
-        positive_into_string(path + at, descriptor->fd);
+        if (fdinfo_dir < 0)
+                return;
 
-        bipolar got = file_slurp_once_at(AT_FDCWD, path, bytes,
+        bipolar got = file_slurp_once_at(fdinfo_dir, fd_name, bytes,
                                          sizeof(bytes) - 1);
         if (got <= 0)
                 return;
@@ -22763,6 +22806,15 @@ static bool ul_lsfd_process(struct snapshot_process address_to process, p8 requi
                 return true;
 
         scope_exit(file_walk_close(address_of walk));
+        bipolar fdinfo_dir = -1;
+        if (requires & UL_LSFD_NEED_INFO)
+        {
+                p8 fdinfo_path[64];
+                system_process_path(fdinfo_path, process->pid, null, "fdinfo");
+                fdinfo_dir = system_open_at(AT_FDCWD, fdinfo_path,
+                                            FILE_READ | O_DIRECTORY | O_CLOEXEC);
+        }
+        scope_exit(if (fdinfo_dir >= 0) system_close(fdinfo_dir));
         struct linux_dirent64 address_to dirent;
         while ((dirent = file_walk_next(address_of walk)))
         {
@@ -22807,7 +22859,7 @@ static bool ul_lsfd_process(struct snapshot_process address_to process, p8 requi
                 descriptor->type = ul_lsfd_type(facts.mode,
                                                  descriptor->name);
                 if (requires & UL_LSFD_NEED_INFO)
-                        ul_lsfd_fdinfo(descriptor);
+                        ul_lsfd_fdinfo(descriptor, fdinfo_dir, dirent->d_name);
                 if (!user)
                         user = requires & UL_LSFD_NEED_NAMES ? ps_name_of(process->uid) : (string_address)"";
                 if (!user)
@@ -22876,9 +22928,7 @@ static b32 util_linux_lsfd()
         array_store_release(ul_lsfd_entries, ul_lsfd_entry_room, ul_lsfd_entry_count);
         ul_taking("lsfd", ul_lsfd_options, "[options]");
         tools_refuse(taking.first != (positive)program_argument_count(), "lsfd", "unexpected operand");
-        if ((taking.flags & FILE_FLAG('J')) &&
-            (taking.flags & FILE_FLAG('r')))
-                return string_report(log_error, 1, "%s: %s\n", "lsfd", "--json and --raw are mutually exclusive");
+        ul_refuse_group(taking, ul_json_raw);
         tools_refuse(taking.flags & FILE_FLAG('l'), "lsfd", "thread descriptors are not supported");
         tools_refuse(taking.flags & FILE_FLAG('i'), "lsfd", "network endpoint filtering is not supported");
         tools_refuse(taking.flags & FILE_FLAG('Q'), "lsfd", "display filters are not supported");
@@ -23028,7 +23078,7 @@ static bool ul_namespace_range(string_address text,
         if (!string_digits_checked(address_of at, 10, address_of count) ||
             string_get(at) || !count || inside > p32_max ||
             outside > p32_max || count > p32_max ||
-            inside + count > p32_max || outside + count > p32_max)
+            count > p32_max - inside || count > p32_max - outside)
                 return false;
         map->inside = (p32)inside;
         map->outside = (p32)outside;
@@ -24191,16 +24241,25 @@ static b32 util_linux_fallocate()
                        FILE_FLAG('x')))))
                 return string_report(log_error, 1, "%s: %s\n", "fallocate", "mutually exclusive options");
 
-        if (flags & FILE_FLAG('c'))
-                mode = UL_FALLOC_COLLAPSE_RANGE;
-        else if (flags & FILE_FLAG('i'))
-                mode = UL_FALLOC_INSERT_RANGE;
-        else if (flags & FILE_FLAG('p'))
-                mode = UL_FALLOC_PUNCH_HOLE | UL_FALLOC_KEEP_SIZE;
-        else if (flags & FILE_FLAG('w'))
-                mode = UL_FALLOC_WRITE_ZEROES;
-        else if (flags & FILE_FLAG('z'))
-                mode = UL_FALLOC_ZERO_RANGE;
+        static const struct {
+                p8 letter;
+                p8 mode;
+                string_address verb;
+        } falloc_ops[] = {
+            {'c', UL_FALLOC_COLLAPSE_RANGE, "removed.\n"},
+            {'i', UL_FALLOC_INSERT_RANGE, "inserted.\n"},
+            {'p', UL_FALLOC_PUNCH_HOLE | UL_FALLOC_KEEP_SIZE, "hole created.\n"},
+            {'w', UL_FALLOC_WRITE_ZEROES, "written as zeroes.\n"},
+            {'z', UL_FALLOC_ZERO_RANGE, "zeroed.\n"},
+        };
+        string_address verb = (string_address)"allocated.\n";
+        for (positive at = 0; at < array_count(falloc_ops); at++)
+                if (flags & FILE_FLAG(falloc_ops[at].letter))
+                {
+                        mode = falloc_ops[at].mode;
+                        verb = falloc_ops[at].verb;
+                        break;
+                }
 
         if (flags & FILE_FLAG('n'))
                 mode |= UL_FALLOC_KEEP_SIZE;
@@ -24227,19 +24286,8 @@ static b32 util_linux_fallocate()
                               ul_lscpu_cache_size(length, false, true));
                 positive_to_string(log, length);
                 log(" bytes) ", 0);
-
-                if (mode & UL_FALLOC_PUNCH_HOLE)
-                        log("hole created.\n", 0);
-                else if (mode & UL_FALLOC_COLLAPSE_RANGE)
-                        log("removed.\n", 0);
-                else if (mode & UL_FALLOC_INSERT_RANGE)
-                        log("inserted.\n", 0);
-                else if (mode & UL_FALLOC_ZERO_RANGE)
-                        log("zeroed.\n", 0);
-                else if (mode & UL_FALLOC_WRITE_ZEROES)
-                        log("written as zeroes.\n", 0);
-                else
-                        log("allocated.\n", 0);
+                log(verb, 0);
+                log_flush();
         }
 
         return 0;
@@ -24404,6 +24452,8 @@ static b32 util_linux_copyfilerange()
 
         system_close(in);
         system_close(out);
+        if (verbose)
+                log_flush();
         return complete ? 0 : 1;
 }
 
@@ -24415,15 +24465,13 @@ static const argument_option ul_fadvise_options[] = {
 
 static PURE b32 ul_fadvise_kind(string_address name)
 {
-        static string_address names[] = {
-            "normal", "sequential", "random", "noreuse", "willneeded",
-            "dontneed",
+        static const named_byte advices[] = {
+            {"normal", 0}, {"sequential", 2}, {"random", 1}, {"noreuse", 5},
+            {"willneed", 3}, {"willneeded", 3}, {"dontneed", 4},
         };
-        static p8 values[] = {0, 2, 1, 5, 3, 4};
-        positive found = string_table_find(name, names, sizeof(names[0]),
-                                           array_count(names));
+        positive found = string_table_lookup(name, advices);
 
-        return found < sizeof(values) ? values[found] : -1;
+        return found < array_count(advices) ? advices[found].value : -1;
 }
 
 static b32 util_linux_fadvise()
@@ -24654,7 +24702,11 @@ static b32 util_linux_ionice()
                 return string_report(log_error, 1, "%s: %s\n", "ionice", "invalid class data");
 
         if (!setting && !which && taking.first == count)
-                return ul_ionice_get(UL_IOPRIO_PROCESS, 0);
+        {
+                answer = ul_ionice_get(UL_IOPRIO_PROCESS, 0);
+                log_flush();
+                return answer;
+        }
 
         if (which)
         {
@@ -28018,6 +28070,7 @@ static const argument_option ul_lscpu_options[] = {
 static b32 util_linux_lscpu()
 {
         ul_taking("lscpu", ul_lscpu_options, "[options]");
+        ul_refuse_group(taking, ul_json_raw);
         tools_refuse(taking.first != (positive)program_argument_count(), "lscpu", "unexpected operand");
         tools_refuse(taking.flags & FILE_FLAG('y'), "lscpu", "physical identifiers are not supported");
         tools_refuse(file_option_value(address_of taking, 's'), "lscpu", "--sysroot is not supported");
@@ -28515,6 +28568,7 @@ static b32 util_linux_lsmem()
                 p32 address_to split_columns = null;
                 positive split_room = 0;
                 positive split_count = 0;
+                scope_exit(array_store_release(split_columns, split_room, split_count));
                 b32 split_fault = ul_table_column_list(
                     splitting, ul_lsmem_columns, UL_LSMEM_COLUMNS, null, 0,
                     address_of split_columns, address_of split_room,
@@ -28658,6 +28712,7 @@ static bool ul_lsblk_paths;
 enum {
         UL_LSBLK_NEED_IDENTITY = 1, UL_LSBLK_NEED_PERMISSIONS = 2, UL_LSBLK_NEED_METADATA = 4,
         UL_LSBLK_NEED_MOUNTS = 8, UL_LSBLK_NEED_FS_STATS = 16, UL_LSBLK_NEED_MOUNT_TEXT = 32,
+        UL_LSBLK_NEED_TOPOLOGY = 64,
 };
 
 #define UL_LSBLK_FIELDS(X) \
@@ -28704,25 +28759,25 @@ enum {
     X(UL_LSBLK_MODE, NULL_TEXT, device->mode, \
       "mode", "MODE", 0, false, TABLE_NULL_STRING, .requires = UL_LSBLK_NEED_PERMISSIONS) \
     X(UL_LSBLK_ALIGNMENT, UNSIGNED, device->alignment, \
-      "alignment", "ALIGNMENT", 0, true, TABLE_NUMBER, .decimal = true) \
+      "alignment", "ALIGNMENT", 0, true, TABLE_NUMBER, .decimal = true, .requires = UL_LSBLK_NEED_TOPOLOGY) \
     X(UL_LSBLK_MINIO, UNSIGNED, device->minimum_io, \
-      "min-io", "MIN-IO", 0, true, TABLE_NUMBER, .decimal = true) \
+      "min-io", "MIN-IO", 0, true, TABLE_NUMBER, .decimal = true, .requires = UL_LSBLK_NEED_TOPOLOGY) \
     X(UL_LSBLK_OPTIO, UNSIGNED, device->optimal_io, \
-      "opt-io", "OPT-IO", 0, true, TABLE_NUMBER, .decimal = true) \
+      "opt-io", "OPT-IO", 0, true, TABLE_NUMBER, .decimal = true, .requires = UL_LSBLK_NEED_TOPOLOGY) \
     X(UL_LSBLK_PHYSEC, UNSIGNED, device->physical_sector, \
-      "phy-sec", "PHY-SEC", 0, true, TABLE_NUMBER, .decimal = true) \
+      "phy-sec", "PHY-SEC", 0, true, TABLE_NUMBER, .decimal = true, .requires = UL_LSBLK_NEED_TOPOLOGY) \
     X(UL_LSBLK_LOGSEC, UNSIGNED, device->logical_sector, \
-      "log-sec", "LOG-SEC", 0, true, TABLE_NUMBER, .decimal = true) \
+      "log-sec", "LOG-SEC", 0, true, TABLE_NUMBER, .decimal = true, .requires = UL_LSBLK_NEED_TOPOLOGY) \
     X(UL_LSBLK_ROTA, UNSIGNED, device->rotational, \
-      "rota", "ROTA", 0, true, TABLE_BOOLEAN, .decimal = true) \
+      "rota", "ROTA", 0, true, TABLE_BOOLEAN, .decimal = true, .requires = UL_LSBLK_NEED_TOPOLOGY) \
     X(UL_LSBLK_SCHED, NULL_TEXT, device->scheduler, \
-      "sched", "SCHED", 0, false, TABLE_NULL_STRING) \
+      "sched", "SCHED", 0, false, TABLE_NULL_STRING, .requires = UL_LSBLK_NEED_TOPOLOGY) \
     X(UL_LSBLK_RQSIZE, CUSTOM, 0, \
-      "rq-size", "RQ-SIZE", 0, true, TABLE_NULL_NUMBER) \
+      "rq-size", "RQ-SIZE", 0, true, TABLE_NULL_NUMBER, .requires = UL_LSBLK_NEED_TOPOLOGY) \
     X(UL_LSBLK_RA, UNSIGNED, device->read_ahead, \
-      "ra", "RA", 0, true, TABLE_NULL_NUMBER, .decimal = true) \
+      "ra", "RA", 0, true, TABLE_NULL_NUMBER, .decimal = true, .requires = UL_LSBLK_NEED_TOPOLOGY) \
     X(UL_LSBLK_WSAME, CUSTOM, 0, \
-      "wsame", "WSAME", 0, true, TABLE_STRING) \
+      "wsame", "WSAME", 0, true, TABLE_STRING, .requires = UL_LSBLK_NEED_TOPOLOGY) \
     X(UL_LSBLK_TRAN, NULL_TEXT, device->transport, \
       "tran", "TRAN", 0, false, TABLE_NULL_STRING, .requires = UL_LSBLK_NEED_METADATA) \
     X(UL_LSBLK_VENDOR, NULL_TEXT, device->vendor, \
@@ -28749,20 +28804,16 @@ static const ul_table_column ul_lsblk_columns[] = {
 static fn ul_lsblk_sysfs(p8 address_to path, string_address name,
                          string_address property)
 {
-        string_address base = (string_address)"/sys/class/block/";
-        positive at = string_length(base);
-        memory_copy(path, base, at);
-        positive length = string_length(name);
-        memory_copy(path + at, name, length);
-        at += length;
+        byte_cursor cursor = byte_cursor_open(path, 384);
+        byte_cursor_put_string(address_of cursor, "/sys/class/block/");
+        byte_cursor_put_string(address_of cursor, name);
         if (property)
         {
-                path[at++] = '/';
-                length = string_length(property);
-                memory_copy(path + at, property, length + 1);
+                byte_cursor_put_byte(address_of cursor, '/');
+                byte_cursor_put_string(address_of cursor, property);
         }
-        else
-                path[at] = end;
+        if (!byte_cursor_terminate(address_of cursor))
+                path[0] = end;
 }
 
 static bool ul_lsblk_dev(string_address text, positive address_to major,
@@ -28794,14 +28845,25 @@ static string_address ul_lsblk_word(string_address name,
         return ul_lscpu_keep(text);
 }
 
-static positive ul_lsblk_number(string_address name,
-                                string_address property)
+static string_address ul_lsblk_word_at(bipolar dir, string_address property)
 {
-        p8 path[384];
+        p8 text[512];
+        bipolar got = file_slurp_once_at(dir, property, text, sizeof(text) - 1);
+        if (got <= 0)
+                return (string_address)"";
+        text[ul_trimmed(text, (positive)got)] = end;
+        return ul_lscpu_keep(text);
+}
+
+static positive ul_lsblk_number_at(bipolar dir, string_address property)
+{
+        p8 text[64];
+        bipolar got = file_slurp_once_at(dir, property, text, sizeof(text) - 1);
+        if (got <= 0)
+                return 0;
+        text[ul_trimmed(text, (positive)got)] = end;
         positive value = 0;
-        ul_lsblk_sysfs(path, name, property);
-        (void)ul_lscpu_file_number(path, address_of value);
-        return value;
+        return ul_unsigned(text, positive_max, address_of value) ? value : 0;
 }
 
 static string_address ul_lsblk_scheduler(string_address text)
@@ -28822,7 +28884,7 @@ static string_address ul_lsblk_scheduler(string_address text)
 
 static bool ul_lsblk_take_path(string_address path, address_any context)
 {
-        (void)context;
+        p8 requires = context ? *(p8 address_to)context : 0;
         if (ul_lsblk.count == ul_lsblk.capacity)
         {
                 ul_lsblk.failed = true;
@@ -28838,39 +28900,51 @@ static bool ul_lsblk_take_path(string_address path, address_any context)
 
         p8 sysfs[384];
         p8 text[64];
-        ul_lsblk_sysfs(sysfs, name, (string_address)"dev");
-        if (ul_slurp_word(sysfs, text, sizeof(text)) <= 0 ||
-            !ul_lsblk_dev(text, address_of device->major,
+        ul_lsblk_sysfs(sysfs, name, null);
+        bipolar dir = system_open_at(AT_FDCWD, sysfs,
+                                     FILE_READ | O_DIRECTORY | O_CLOEXEC);
+        if (dir < 0)
+                return true;
+        scope_exit(system_close(dir));
+
+        bipolar dev_got = file_slurp_once_at(dir, "dev", text, sizeof(text) - 1);
+        if (dev_got <= 0)
+                return true;
+        text[ul_trimmed(text, (positive)dev_got)] = end;
+        if (!ul_lsblk_dev(text, address_of device->major,
                           address_of device->minor))
                 return true;
-        positive sectors = ul_lsblk_number(name, (string_address)"size");
+        positive sectors = ul_lsblk_number_at(dir, (string_address)"size");
         if (sectors <= positive_max / 512)
                 device->size = sectors * 512;
-        device->read_only = ul_lsblk_number(name, (string_address)"ro") != 0;
+        device->read_only = ul_lsblk_number_at(dir, (string_address)"ro") != 0;
         device->removable =
-            ul_lsblk_number(name, (string_address)"removable") != 0;
+            ul_lsblk_number_at(dir, (string_address)"removable") != 0;
         device->partition =
-            ul_lsblk_number(name, (string_address)"partition") != 0;
-        device->alignment =
-            ul_lsblk_number(name, (string_address)"alignment_offset");
-        device->minimum_io =
-            ul_lsblk_number(name, (string_address)"queue/minimum_io_size");
-        device->optimal_io =
-            ul_lsblk_number(name, (string_address)"queue/optimal_io_size");
-        device->physical_sector =
-            ul_lsblk_number(name, (string_address)"queue/physical_block_size");
-        device->logical_sector =
-            ul_lsblk_number(name, (string_address)"queue/logical_block_size");
-        device->rotational =
-            ul_lsblk_number(name, (string_address)"queue/rotational") != 0;
-        device->request_size =
-            ul_lsblk_number(name, (string_address)"queue/nr_requests");
-        device->read_ahead =
-            ul_lsblk_number(name, (string_address)"queue/read_ahead_kb");
-        device->write_same =
-            ul_lsblk_number(name, (string_address)"queue/write_same_max_bytes");
-        device->scheduler = ul_lsblk_scheduler(
-            ul_lsblk_word(name, (string_address)"queue/scheduler"));
+            ul_lsblk_number_at(dir, (string_address)"partition") != 0;
+        if (requires & UL_LSBLK_NEED_TOPOLOGY)
+        {
+                device->alignment =
+                    ul_lsblk_number_at(dir, (string_address)"alignment_offset");
+                device->minimum_io =
+                    ul_lsblk_number_at(dir, (string_address)"queue/minimum_io_size");
+                device->optimal_io =
+                    ul_lsblk_number_at(dir, (string_address)"queue/optimal_io_size");
+                device->physical_sector =
+                    ul_lsblk_number_at(dir, (string_address)"queue/physical_block_size");
+                device->logical_sector =
+                    ul_lsblk_number_at(dir, (string_address)"queue/logical_block_size");
+                device->rotational =
+                    ul_lsblk_number_at(dir, (string_address)"queue/rotational") != 0;
+                device->request_size =
+                    ul_lsblk_number_at(dir, (string_address)"queue/nr_requests");
+                device->read_ahead =
+                    ul_lsblk_number_at(dir, (string_address)"queue/read_ahead_kb");
+                device->write_same =
+                    ul_lsblk_number_at(dir, (string_address)"queue/write_same_max_bytes");
+                device->scheduler = ul_lsblk_scheduler(
+                    ul_lsblk_word_at(dir, (string_address)"queue/scheduler"));
+        }
 
         if (device->partition)
                 device->type = (string_address)"part";
@@ -29290,7 +29364,7 @@ static bool ul_lsblk_take(p8 requires)
             ul_lsblk.capacity * sizeof(ul_lsblk_row));
         if (!ul_lsblk.devices || !ul_lsblk.order || !spare || !ul_lsblk.rows)
                 return false;
-        storage_each_block_path(ul_lsblk_take_path, null);
+        storage_each_block_path(ul_lsblk_take_path, address_of requires);
         if (ul_lsblk.failed || !ul_lsblk.count)
                 return false;
         for (positive i = 0; i < ul_lsblk.count; i++)
@@ -30504,13 +30578,17 @@ static b32 util_linux_lsipc()
                                     : array_count(ul_lsipc_sem_defaults);
         ul_columns_take("lsipc", ul_ipc_columns, UL_IPC_COLUMNS, defaults,
                         default_count, file_option_value(address_of taking, 'o'));
+        if (taking.flags & (FILE_FLAG('c') | FILE_FLAG('t')))
+                if (!name_list_room(address_of columns, address_of columns_room,
+                                    column_count, UL_IPC_COLUMNS))
+                        return ul_columns_refused("lsipc", UL_COLUMNS_NOROOM, unknown);
         if (taking.flags & FILE_FLAG('c'))
         {
                 static const p8 creators[] = {
                     UL_IPC_CUID, UL_IPC_CGID, UL_IPC_UID, UL_IPC_GID};
                 for (positive at = 0; at < array_count(creators); at++)
                         (void)ul_table_column_add(columns, address_of column_count,
-                                                  UL_IPC_COLUMNS, creators[at]);
+                                                  columns_room, creators[at]);
         }
         if (taking.flags & FILE_FLAG('t'))
         {
@@ -30527,7 +30605,7 @@ static b32 util_linux_lsipc()
                     ? array_count(message_times) : array_count(semaphore_times);
                 for (positive at = 0; at < time_count; at++)
                         (void)ul_table_column_add(columns, address_of column_count,
-                                                  UL_IPC_COLUMNS, times[at]);
+                                                  columns_room, times[at]);
                 /* smartcols keeps the open-ended command field last. */
                 if (type == UL_IPC_SHARED)
                 {
