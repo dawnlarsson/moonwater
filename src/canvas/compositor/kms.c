@@ -1926,7 +1926,7 @@ static struct
 // Whether the owner asks for the probe: the file is there.
 static int compositor_cursor_probe_asked(void)
 {
-        return (int)canvas_switch_exists(COMPOSITOR_CURSOR_PROBE_FILE, 0);
+        return (int)canvas_switch_exists(COMPOSITOR_CURSOR_PROBE_FILE, O_NOFOLLOW);
 }
 
 // Whether the card's driver is one refused the plane by name.
@@ -2026,7 +2026,7 @@ static int compositor_cursor_plane_wanted(void)
                 return 0;
 
         handle = system_open_at(AT_FDCWD, (string_address) "/sys/module/moonwater/parameters/cursor_plane",
-                                FILE_READ | O_CLOEXEC);
+                                FILE_READ | O_CLOEXEC | O_NOFOLLOW);
         if (handle >= 0)
         {
                 bipolar got = system_read_once(handle, setting, sizeof(setting) - 1);
@@ -2403,7 +2403,7 @@ static unsigned long canvas_drm_node_dev(const char *path)
         unsigned char st[256];
 
         memory_zero(st, sizeof(st));
-        if (compositor_call(syscall(statx), (positive)AT_FDCWD, (positive)path, 0, 0x7ff, (positive)st, 0) < 0)
+        if (compositor_call(syscall(statx), (positive)AT_FDCWD, (positive)path, 0x100, 0x7ff, (positive)st, 0) < 0) // AT_SYMLINK_NOFOLLOW
                 return 0;
         return canvas_drm_makedev(*(unsigned int *)(st + 128), *(unsigned int *)(st + 132));
 }

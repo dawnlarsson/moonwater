@@ -130,6 +130,8 @@ static unsigned int drm_driver_flags(const char *name)
 static void compositor_window_fb_refused(unsigned int step, long error)
 {
         compositor.direct_refused = 1;
+        if (!compositor.table)
+                return;
         compositor.table->refused = step;
         compositor.table->refused_error = (compositor.driver_flags & DRV_NO_IMPORT_FB) ? 0 : (unsigned int)-error;
 }
@@ -229,6 +231,8 @@ static void compositor_row_reclaim(int row)
 // A row's framebuffers gone, when the card is not showing one of them.
 static void compositor_window_fb_drop(int row)
 {
+        if (row < 0 || row >= COMPOSITOR_ROWS)
+                return;
         for (unsigned int which = 0; which < 2; which++)
                 if (compositor.scan_fb[row][which])
                 {
@@ -239,13 +243,16 @@ static void compositor_window_fb_drop(int row)
                         compositor.scan_fb[row][which] = compositor.scan_handle[row][which] = 0;
                 }
         compositor.patched[row][0] = compositor.patched[row][1] = 0;
-        __atomic_store_n(&compositor.table->pinned[row],
-                         compositor_gpu_pins[row] || rows_has(&compositor.dropping, row) ? 1u : 0u,
-                         __ATOMIC_RELEASE); // the card's pins hold it too
+        if (compositor.table)
+                __atomic_store_n(&compositor.table->pinned[row],
+                                 compositor_gpu_pins[row] || rows_has(&compositor.dropping, row) ? 1u : 0u,
+                                 __ATOMIC_RELEASE); // the card's pins hold it too
 }
 
 static int compositor_shows_row(int row)
 {
+        if (row < 0 || row >= COMPOSITOR_ROWS)
+                return 0;
         return (compositor.on_screen &&
                 (compositor.on_screen == compositor.scan_fb[row][0] || compositor.on_screen == compositor.scan_fb[row][1])) ||
                (compositor.plane_fb &&
@@ -1095,19 +1102,24 @@ static unsigned int *compositor_buffer(int row, unsigned int which)
 // What the tabs covered of the buffer the card shows, put back, so what is made from it (the glass) is the window's.
 static void compositor_direct_unpatch_at(int row, unsigned int which)
 {
-        const int *rect = compositor.under_rect[which];
+        const int *rect;
         unsigned int *pixels;
 
-        if (row < 0 || !compositor.patched[row][which] || !compositor.under[which])
+        if (row < 0 || row >= COMPOSITOR_ROWS || which >= 2 || !compositor.patched[row][which] || !compositor.under[which])
                 return;
+        rect = compositor.under_rect[which];
         compositor_runs_forget(row);
-        pixels = compositor_buffer(row, which);
-        memory_copy_rect_u32(pixels + (unsigned long)rect[1] * (unsigned long)compositor_stride() + (unsigned long)rect[0],
-                             (unsigned long)compositor_stride(),
-                             compositor.under[which],
-                             (unsigned long)(rect[2] - rect[0]),
-                             (unsigned long)(rect[2] - rect[0]),
-                             (unsigned long)(rect[3] - rect[1]));
+        if (rect[0] >= 0 && rect[1] >= 0 && rect[2] > rect[0] && rect[3] > rect[1] &&
+            rect[2] <= (int)compositor_stride() && rect[3] <= compositor.height)
+        {
+                pixels = compositor_buffer(row, which);
+                memory_copy_rect_u32(pixels + (unsigned long)rect[1] * (unsigned long)compositor_stride() + (unsigned long)rect[0],
+                                     (unsigned long)compositor_stride(),
+                                     compositor.under[which],
+                                     (unsigned long)(rect[2] - rect[0]),
+                                     (unsigned long)(rect[2] - rect[0]),
+                                     (unsigned long)(rect[3] - rect[1]));
+        }
         compositor.patched[row][which] = 0;
 }
 
@@ -1125,7 +1137,7 @@ static unsigned int *compositor_direct_stage_ready(void)
         unsigned long need;
         void *p = compositor_direct_stage;
 
-        if (compositor.height <= 0 || compositor_stride() <= 0)
+        if (compositor.height <= 0 || compositor_stride() <= 0 || compositor.height > 32768 || compositor_stride() > 32768)
                 return 0;
         need = (unsigned long)compositor_stride() * (unsigned long)compositor.height * 4;
         if (!need)
@@ -1151,7 +1163,7 @@ static b32 compositor_direct_under_ready(unsigned int which, positive need)
         unsigned long bytes;
         void *p = compositor.under[which];
 
-        if (compositor.width <= 0 || compositor.height <= 0)
+        if (compositor.width <= 0 || compositor.height <= 0 || compositor.width > 32768 || compositor.height > 32768)
                 return false;
         bytes = (unsigned long)compositor.width * (unsigned long)compositor.height * 4;
 
@@ -1188,14 +1200,20 @@ static int compositor_direct_patch(int row, unsigned int which, const struct com
                 {
                         const int *old = compositor.under_rect[which];
 
-                        compositor_joined(old, rect, u);
-                        memory_copy_rect_u32(stage + (unsigned long)u[1] * stride + (unsigned long)u[0], stride,
-                                             pixels + (unsigned long)u[1] * stride + (unsigned long)u[0], stride,
-                                             (unsigned long)(u[2] - u[0]), (unsigned long)(u[3] - u[1]));
-                        memory_copy_rect_u32(stage + (unsigned long)old[1] * stride + (unsigned long)old[0], stride,
-                                             compositor.under[which], (unsigned long)(old[2] - old[0]),
-                                             (unsigned long)(old[2] - old[0]), (unsigned long)(old[3] - old[1]));
-                        dst = stage, staged = 1;
+                        if (old[0] >= 0 && old[1] >= 0 && old[2] > old[0] && old[3] > old[1] &&
+                            old[2] <= (int)stride && old[3] <= compositor.height)
+                        {
+                                compositor_joined(old, rect, u);
+                                memory_copy_rect_u32(stage + (unsigned long)u[1] * stride + (unsigned long)u[0], stride,
+                                                     pixels + (unsigned long)u[1] * stride + (unsigned long)u[0], stride,
+                                                     (unsigned long)(u[2] - u[0]), (unsigned long)(u[3] - u[1]));
+                                memory_copy_rect_u32(stage + (unsigned long)old[1] * stride + (unsigned long)old[0], stride,
+                                                     compositor.under[which], (unsigned long)(old[2] - old[0]),
+                                                     (unsigned long)(old[2] - old[0]), (unsigned long)(old[3] - old[1]));
+                                dst = stage, staged = 1;
+                        }
+                        else
+                                compositor.patched[row][which] = 0;
                 }
                 else
                         compositor_direct_unpatch_at(row, which);
@@ -1465,7 +1483,7 @@ static int compositor_changed_ready(void)
         unsigned int flags;
         int own, listed, turned = compositor_turning_software();
 
-        if (compositor.width <= 0 || compositor.height <= 0)
+        if (compositor.width <= 0 || compositor.height <= 0 || compositor.width > 32768 || compositor.height > 32768)
                 return 0;
         bytes = (unsigned long)compositor.width * (unsigned long)compositor.height * 4;
         slices = (unsigned long)compositor.width * COMPOSITOR_SLICE * COMPOSITOR_BANDS * 4;
@@ -2796,8 +2814,13 @@ static unsigned int canvas_scan_fb_make(const struct canvas_scan_fb_spec *spec, 
                                 same = fb.handles[before];
                 if (!same)
                 {
+                        if (spec->fds[at] < 0 || spec->fds[at] > 0x7fffffffL)
+                        {
+                                refused = CANVAS_SCAN_ERR_PRIME;
+                                break;
+                        }
                         prime.handle = 0, prime.flags = 0, prime.fd = (int)spec->fds[at];
-                        if (prime.fd < 0 || CANVAS_SCAN_PRIME(prime) != 0 || !prime.handle)
+                        if (CANVAS_SCAN_PRIME(prime) != 0 || !prime.handle)
                         {
                                 refused = CANVAS_SCAN_ERR_PRIME;
                                 break;

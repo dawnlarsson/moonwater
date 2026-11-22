@@ -1563,7 +1563,8 @@ static int compositor_gpu_list_render_bytes(int row, unsigned char *list, unsign
 
         damage[0] = damage[1] = damage[2] = damage[3] = 0;
         compositor_list_why = COMPOSITOR_LIST_DRAWN;
-        if (row < 0 || row >= COMPOSITOR_ROWS || width <= 0 || height <= 0 || !picture || ((positive)picture & 15) || pitch < w4 || (pitch & 3))
+        if (row < 0 || row >= COMPOSITOR_ROWS || width <= 0 || height <= 0 || width > 32768 || height > 32768 ||
+            !picture || ((positive)picture & 15) || pitch < w4 || pitch >= (1ul << 29) || (pitch & 3))
                 return compositor_list_why = COMPOSITOR_LIST_OPEN, 0;
         // Not while a present's jobs are on the card (compositor_card): its records and tables are the card's until they are done. Nor while any job runs, a
         // list's drawn without a wait among them: its records, its row's base and its picture are that job's.
@@ -1614,9 +1615,13 @@ static int compositor_gpu_list_render_bytes(int row, unsigned char *list, unsign
                                 return compositor_list_why = COMPOSITOR_LIST_MAPS, 0;
                         }
                 }
+                if (cover_va < view.cover_at - COMPOSITOR_GPU_LIST_REACH)
+                        return compositor_list_why = COMPOSITOR_LIST_MAPS, 0;
                 bases[slot] = cover_va - (view.cover_at - COMPOSITOR_GPU_LIST_REACH);
         }
         bytes = 4 * ((positive)pitch * (positive)(height - 1) + w4);
+        if (bytes >= (1ull << 31))
+                return compositor_list_why = COMPOSITOR_LIST_OPEN, 0;
         if (!(picture_va = gpu_host_va_written(picture, bytes, bytes, 1)))
                 return compositor_list_why = COMPOSITOR_LIST_MAPS, 0;
         if (compositor_card.lists_nowait)
@@ -1806,12 +1811,18 @@ static void compositor_gpu_game_clocks(int on)
 // one op over the whole panel with a step along its rows and one down them): 1 when it is, 0 when the processor is to.
 static int compositor_gpu_rotate(unsigned int at, const int *screen, unsigned int degrees, unsigned int x0, unsigned int y0, unsigned int x1, unsigned int y1)
 {
-        struct drm_dumb *turn = &compositor_turns[at];
+        struct drm_dumb *turn;
         struct compositor_gscene *g = &compositor_gscene;
-        unsigned int lw = (unsigned int)screen[2], lh = (unsigned int)screen[3], pw = degrees == 180 ? lw : lh, ph = degrees == 180 ? lh : lw, panel[4];
-        long pitch = (long)(compositor.scanout_pitch / 4), origin = (long)screen[1] * pitch + screen[0], first, stepx, stepy;
+        unsigned int lw, lh, pw, ph, panel[4];
+        long pitch, origin, first, stepx, stepy;
         unsigned int *op;
         positive from, to;
+
+        if (at >= WINDOWS_OUTPUTS || !screen || screen[0] < 0 || screen[1] < 0 || screen[2] <= 0 || screen[3] <= 0)
+                return 0;
+        turn = &compositor_turns[at];
+        lw = (unsigned int)screen[2], lh = (unsigned int)screen[3], pw = degrees == 180 ? lw : lh, ph = degrees == 180 ? lh : lw;
+        pitch = (long)(compositor.scanout_pitch / 4), origin = (long)screen[1] * pitch + screen[0];
 
         if (!compositor_gpu_state.up || compositor_gpu_state.dead || !compositor_gpu_state.out || compositor.card < 0 || !gpu_idle() || compositor_gpu_held()) // a job given up on may read the import it lets go of
                 return 0;

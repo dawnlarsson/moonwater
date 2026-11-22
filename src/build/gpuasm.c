@@ -346,7 +346,8 @@ static struct
         bool block;
         positive seen;
         positive vgprs;
-        gpuasm_span kernel;
+        positive kernel_name;
+        positive kernel_length;
         positive kernel_line;
 } gpuasm;
 
@@ -360,6 +361,8 @@ static bool gpuasm_run(string_address from, string_address stop, positive line);
 static void gpuasm_put(p8 address_to into, positive address_to used, positive room,
                        string_address text, positive length)
 {
+        if (!room || *used >= room)
+                return;
         for (positive at = 0; at < length && *used + 1 < room; at++)
                 into[(*used)++] = text[at];
         into[*used] = end;
@@ -1603,9 +1606,11 @@ static bool gpuasm_directive(gpuasm_cursor address_to cursor, gpuasm_span head, 
                         if (gpuasm_kernels[at].length == rest.length &&
                             !memory_compare(gpuasm_pool + gpuasm_kernels[at].name, rest.at, rest.length))
                                 return gpuasm_fail_span("a kernel defined twice", rest);
+                if (!gpuasm_keep(rest, address_of gpuasm.kernel_name))
+                        return false;
                 gpuasm.block = true;
                 gpuasm.seen = 0;
-                gpuasm.kernel = rest;
+                gpuasm.kernel_length = rest.length;
                 gpuasm.kernel_line = gpuasm.line;
                 return true;
         }
@@ -1622,9 +1627,8 @@ static bool gpuasm_directive(gpuasm_cursor address_to cursor, gpuasm_span head, 
                                 return gpuasm_fail("the kernel's block has no", gpuasm_properties[at].name,
                                                    string_length(gpuasm_properties[at].name));
                 kernel = gpuasm_kernels + gpuasm_kernel_count++;
-                if (!gpuasm_keep(gpuasm.kernel, address_of kernel->name))
-                        return false;
-                kernel->length = gpuasm.kernel.length;
+                kernel->name = gpuasm.kernel_name;
+                kernel->length = gpuasm.kernel_length;
                 kernel->vgprs = gpuasm.vgprs;
                 kernel->line = gpuasm.kernel_line;
                 gpuasm.block = false;
