@@ -4260,6 +4260,22 @@ __attribute__((unused)) static b32 gpu_glass(positive s, unsigned int sp, positi
         return gpu_run();
 }
 
+// gpu_glass submitted and not waited for (gpu_go, as gpu_blit_go is): its ring sequence, 0 when no slot is free or the submit is refused. The destination is
+// written once gpu_done (or gpu_finish) says the sequence is done; the card runs jobs in submission order, so a later op 4 frame copy on the same ring reads
+// the composed band after it. A job pending in the slot this one needs is LATE (0), and the caller draws the band on the processor.
+__attribute__((unused)) static positive gpu_glass_go(positive s, unsigned int sp, positive g, unsigned int gp, positive d, unsigned int dp, unsigned int x0,
+                                                     unsigned int y0, unsigned int w, unsigned int h, unsigned int light)
+{
+        struct gpu_args address_to a;
+
+        gpu_last_error = 0, gpu_end = GPU_END_NONE;
+        if (!w || !h || gpu_lost || gpu_slot_take() < 0)
+                return 0;
+        a = GPU_ARGS;
+        a->s = s, a->d = d, a->g = g, a->sp = sp, a->dp = dp, a->gp = gp, a->w = w, a->op = 3, a->v = light ? 1u : 0u, a->x0 = x0, a->y0 = y0, a->rows = h, a->tab = 0;
+        return gpu_go();
+}
+
 // gpu_blit submitted without waiting (gpu_go): returns the ring sequence, or 0 when no slot is free or refused.
 static positive gpu_blit_go(positive src, unsigned int sp, positive dst, unsigned int dp, positive tab, unsigned int op, unsigned int w, unsigned int h)
 {
