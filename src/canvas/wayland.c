@@ -4995,6 +4995,9 @@ static int wayland_syncobj_request(struct wayland_client *c, struct wayland_obje
                 if (op != WLQ_wp_linux_drm_syncobj_manager_v1_import_timeline) return WAYLAND_OK;
                 long idx = wayland_tbl_alloc(c, WLT_TIMELINE), handle;
                 if (idx < 0) return wayland_fail(c, self->id, WAYLAND_NO_MEMORY, "no memory for a syncobj timeline");
+                if (idx > 0xffffL) /* sync slots and rel_timeline are 16 bits: a higher index would alias another timeline */
+                        return wayland_tbl_free(c, WLT_TIMELINE, idx),
+                               wayland_fail(c, self->id, WAYLAND_NO_MEMORY, "too many syncobj timelines");
                 handle = wayland.syncobj.import ? wayland.syncobj.import(wayland.syncobj.context, a[1].fd) : -1;
                 wayland_fd_close(a[1].fd), a[1].fd = -1;
                 if (handle < 0)

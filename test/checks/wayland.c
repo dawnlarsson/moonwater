@@ -9192,6 +9192,41 @@ static void fake_sync_signal(void *context, long handle, unsigned long long poin
         fake_sync.last_rel = point;
 }
 
+static void test_syncobj_timeline_cap(void)
+{
+        struct wayland_host host = fake_host;
+        struct wayland_syncobj_host shost = {0, fake_sync_available, fake_sync_import, fake_sync_drop, fake_sync_ready, fake_sync_signal, 0};
+        struct session s;
+        struct wlc *c;
+        unsigned long sync_mgr, tl;
+        long n, fd;
+
+        /* A client may import 65536 timelines (index 0 to 0xffff, which the 16-bit slots and rel_timeline hold); the 65537th is refused
+           rather than aliased onto timeline 0, which an unsigned short index would otherwise do. */
+        wayland_stop();
+        memset(&fake, 0, sizeof fake);
+        wayland_start(&host);
+        wayland_syncobj_host(&shost);
+        session_open(&s);
+        c = s.c;
+        sync_mgr = wl_global(c, s.registry, WLI_wp_linux_drm_syncobj_manager_v1, 1);
+        for (n = 0; n < 0x10000 && c->errors == 0; n++)
+        {
+                tl = wlc_id(c, WLI_wp_linux_drm_syncobj_timeline_v1, 1);
+                fd = wl_file(4096, 0);
+                wlc_send(c, sync_mgr, WLQ_wp_linux_drm_syncobj_manager_v1_import_timeline, tl, fd);
+                close((int)fd);
+        }
+        wlc_pump(c);
+        WLCHECK(c->errors == 0, "65536 syncobj timelines import (the sixteen-bit slots hold every index)");
+        tl = wlc_id(c, WLI_wp_linux_drm_syncobj_timeline_v1, 1);
+        fd = wl_file(4096, 0);
+        wlc_send(c, sync_mgr, WLQ_wp_linux_drm_syncobj_manager_v1_import_timeline, tl, fd);
+        close((int)fd);
+        wlc_pump(c);
+        WLCHECK(c->errors == 1, "the 65537th syncobj timeline is refused, not aliased onto timeline 0");
+}
+
 static void test_syncobj_viewporter_and_formats(void)
 {
         struct wayland_host host = fake_host;
@@ -9652,6 +9687,7 @@ int main(int argc, char **argv)
         test_dmabuf();
         test_stall_dmabuf();
         test_dmabuf_feedbacks();
+        test_syncobj_timeline_cap();
         test_syncobj_viewporter_and_formats();
         test_games();
         test_backlog();
