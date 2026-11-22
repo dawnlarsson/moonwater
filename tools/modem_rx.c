@@ -42,6 +42,7 @@
         another rate.
 */
 
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -58,6 +59,29 @@
 #define RX_WINDOW 131072u
 #define RX_KEEP (modem_encode_samples(MODEM_PAYLOAD_MAX) + 1024)
 
+static void rx_forget(void *ptr, sized len)
+{
+        volatile p8 *p = (volatile p8 *)ptr;
+
+        while (len--)
+                *p++ = 0;
+}
+
+static int rx_parse_u64(const char *text, unsigned long *out)
+{
+        char *end = null;
+        unsigned long v;
+
+        if (!text || text[0] < '0' || text[0] > '9')
+                return 0;
+        errno = 0;
+        v = strtoul(text, &end, 10);
+        if (errno == ERANGE || end == text || *end)
+                return 0;
+        *out = v;
+        return 1;
+}
+
 static int rx_key_read(const char *path, p8 key[32])
 {
         FILE *f = fopen(path, "rb");
@@ -65,6 +89,7 @@ static int rx_key_read(const char *path, p8 key[32])
         sized n, i;
         int high = -1;
         sized at = 0;
+        int ok = 0;
 
         if (!f)
                 return 0;
@@ -84,17 +109,22 @@ static int rx_key_read(const char *path, p8 key[32])
                 else if (c >= 'A' && c <= 'F')
                         v = c - 'A' + 10;
                 else
-                        return 0;
+                        goto done;
                 if (high < 0) {
                         high = v;
                 } else {
                         if (at >= 32)
-                                return 0;
+                                goto done;
                         key[at++] = (p8)(high * 16 + v);
                         high = -1;
                 }
         }
-        return high < 0 && at == 32;
+        ok = high < 0 && at == 32;
+done:
+        rx_forget(text, sizeof text);
+        if (!ok)
+                rx_forget(key, 32);
+        return ok;
 }
 
 static p32 rx_be32(const p8 *p)
@@ -105,10 +135,14 @@ static p32 rx_be32(const p8 *p)
 /* The output for send number send: the -o name for the first, and that name with .2, .3 ... after it for the rest. */
 static FILE *rx_send_output(const char *base, unsigned send, char *name, sized size)
 {
+        int written;
+
         if (send == 1)
-                snprintf(name, size, "%s", base);
+                written = snprintf(name, size, "%s", base);
         else
-                snprintf(name, size, "%s.%u", base, send);
+                written = snprintf(name, size, "%s.%u", base, send);
+        if (written < 0 || (sized)written >= size)
+                return null;
         return fopen(name, "wb");
 }
 
@@ -178,7 +212,11 @@ static void rx_finish_send(const char *path, int first, unsigned gaps)
                 fclose(src);
                 return;
         }
-        snprintf(temp, sizeof temp, "%s.unwrap", path);
+        if (snprintf(temp, sizeof temp, "%s.unwrap", path) >= (int)sizeof temp) {
+                fprintf(stderr, "modem_rx: path too long to unwrap %s\n", path);
+                fclose(src);
+                return;
+        }
         dst = fopen(temp, "wb");
         if (!dst) {
                 fprintf(stderr, "modem_rx: cannot write %s\n", temp);
@@ -233,17 +271,26 @@ int main(int argc, char **argv)
         unsigned long rate = MODEM_RATE;
 
         for (int a = 1; a < argc; a++) {
-                if (!string_compare(argv[a], "--key") && a + 1 < argc)
+                if (!string_compare(argv[a], "--key")) {
+                        if (a + 1 >= argc) {
+                                fprintf(stderr, "modem_rx: --key takes a file path\n");
+                                return 2;
+                        }
                         key_path = argv[++a];
-                else if (!string_compare(argv[a], "-o") && a + 1 < argc)
+                } else if (!string_compare(argv[a], "-o")) {
+                        if (a + 1 >= argc) {
+                                fprintf(stderr, "modem_rx: -o takes an output path\n");
+                                return 2;
+                        }
                         out_path = argv[++a];
-                else if (!string_compare(argv[a], "--after") && a + 1 < argc)
+                } else if (!string_compare(argv[a], "--after")) {
+                        if (a + 1 >= argc) {
+                                fprintf(stderr, "modem_rx: --after takes a frame number\n");
+                                return 2;
+                        }
                         after_text = argv[++a];
-                else if (!string_compare(argv[a], "--rate") && a + 1 < argc) {
-                        char *end = null;
-
-                        rate = strtoul(argv[++a], &end, 10);
-                        if (end == argv[a] || *end) {
+                } else if (!string_compare(argv[a], "--rate")) {
+                        if (a + 1 >= argc || !rx_parse_u64(argv[++a], &rate)) {
                                 fprintf(stderr, "modem_rx: --rate takes a rate in Hz\n");
                                 return 2;
                         }
@@ -264,10 +311,10 @@ int main(int argc, char **argv)
                 return 2;
         }
         if (after_text) {
-                char *end = null;
-                unsigned long v = strtoul(after_text, &end, 10);
+                unsigned long v = 0;
 
-                if (end == after_text || *end || v > 0xffffffffUL) {
+                if (!rx_parse_u64(after_text, &v) || v > 0xffffffffUL) {
+                        rx_forget(key, sizeof key);
                         fprintf(stderr, "modem_rx: --after takes a frame number, 0 to 4294967295\n");
                         return 2;
                 }
@@ -276,16 +323,21 @@ int main(int argc, char **argv)
         if (string_compare(in_path, "-") != 0) {
                 in = fopen(in_path, "rb");
                 if (!in) {
+                        rx_forget(key, sizeof key);
                         fprintf(stderr, "modem_rx: cannot read %s\n", in_path);
                         return 2;
                 }
         }
         out = rx_send_output(out_path, sends, name, sizeof name);
         if (!out) {
-                fprintf(stderr, "modem_rx: cannot write %s\n", name);
+                rx_forget(key, sizeof key);
+                if (in != stdin)
+                        fclose(in);
+                fprintf(stderr, "modem_rx: cannot write %s\n", out_path);
                 return 2;
         }
         modem_chunk_open(&cr, key, sizeof key);
+        rx_forget(key, sizeof key);
         cr.rx.last = after;
 
         while (!eof) {
@@ -348,7 +400,8 @@ int main(int argc, char **argv)
                                         fprintf(stderr, "modem_rx: gap: bytes %lu to %lu were not received\n",
                                                 (unsigned long)expected, (unsigned long)offset);
                                 }
-                                if (fseek(out, (long)offset, SEEK_SET) != 0 || fwrite(datagram + 4, 1, length, out) != length) {
+                                if (fseeko(out, (off_t)offset, SEEK_SET) != 0 || fwrite(datagram + 4, 1, length, out) != length) {
+                                        rx_forget(&cr.rx.mac, sizeof cr.rx.mac);
                                         fprintf(stderr, "modem_rx: cannot write %s\n", name);
                                         return 1;
                                 }
@@ -376,6 +429,7 @@ int main(int argc, char **argv)
                 rx_finish_send(name, send_first, send_gaps);
         if (in != stdin)
                 fclose(in);
+        rx_forget(&cr.rx.mac, sizeof cr.rx.mac);
         fprintf(stderr, "modem_rx: %lu datagrams, %lu bytes in %u send(s), the last to %s; %u gaps; %u refused frames%s; the last frame is %lu\n",
                 (unsigned long)datagrams, (unsigned long)bytes, sends, name, gaps, cr.rx.refused,
                 cr.rx.closed ? "; the session closed after too many refusals" : "", (unsigned long)cr.rx.last);

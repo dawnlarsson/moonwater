@@ -544,7 +544,7 @@ static int modem_find_frame(const p8 *bits, sized nb, const modem_mac *mac,
 #if (defined(MOONWATER_ASSEMBLY) || defined(MODEM_TONE_LINKED)) && !defined(MODEM_NO_TONE_ASM) && !defined(KERNEL_MODE) && \
         ((MODEM_TONES) == 8 || (MODEM_TONES) == 16)
 #define MODEM_TONE_ASM 1
-void modem_tone_scan(const b32 *rows, positive sym, positive tones, const b16 *pcm, positive n, p8 *best);
+void modem_tone_scan(const b32 *rows, sized sym, sized tones, const b16 *pcm, sized n, p8 *best);
 #endif
 
 #ifdef MODEM_TONE_ASM
@@ -834,9 +834,11 @@ sized modem_tx_datagram(modem_tx *tx, const p8 *dg, sized len, b16 *pcm, sized c
 {
         p8 payload[MODEM_PAYLOAD_MAX];
         sized count, index, total = 0;
+        p32 orig_seq;
 
-        if (!tx || !dg || len == 0 || len > MODEM_DATAGRAM_MAX)
+        if (!tx || !dg || !pcm || len == 0 || len > MODEM_DATAGRAM_MAX)
                 return 0;
+        orig_seq = tx->seq;
         count = (len + MODEM_CHUNK_DATA - 1) / MODEM_CHUNK_DATA;
         for (index = 0; index < count; index++) {
                 sized take = len - index * MODEM_CHUNK_DATA, got;
@@ -849,8 +851,10 @@ sized modem_tx_datagram(modem_tx *tx, const p8 *dg, sized len, b16 *pcm, sized c
                 payload[3] = (p8)count;
                 memory_copy(payload + MODEM_CHUNK_HEAD, dg + index * MODEM_CHUNK_DATA, take);
                 got = modem_encode_mac(&tx->mac, ++tx->seq, payload, MODEM_CHUNK_HEAD + take, pcm + total, cap - total);
-                if (got == 0)
+                if (got == 0) {
+                        tx->seq = orig_seq;
                         return 0;
+                }
                 total += got;
         }
         tx->id++;
@@ -1052,7 +1056,6 @@ static bipolar modem_seq_load(string_address path, const p8 *key, p32 *seq, p16 
         p8 record[MODEM_SEQ_RECORD], fingerprint[MODEM_MAC];
         positive got = 0;
         bipolar read;
-        unsigned diff = 0;
 
         *seq = 0;
         *id = 0;
@@ -1064,13 +1067,10 @@ static bipolar modem_seq_load(string_address path, const p8 *key, p32 *seq, p16 
                 return read;
         if (got != sizeof record)
                 return -EIO;
-        for (positive i = 0; i < MODEM_MAC; i++)
-                diff |= (unsigned)(record[i] ^ fingerprint[i]);
-        if (diff)
+        if (!crypto_same(record, fingerprint, MODEM_MAC))
                 return 0;
-        *seq = ((p32)record[MODEM_MAC] << 24) | ((p32)record[MODEM_MAC + 1] << 16) |
-               ((p32)record[MODEM_MAC + 2] << 8) | (p32)record[MODEM_MAC + 3];
-        *id = (p16)(((unsigned)record[MODEM_MAC + 4] << 8) | record[MODEM_MAC + 5]);
+        *seq = network_load_32(record + MODEM_MAC);
+        *id = network_load_16(record + MODEM_MAC + 4);
         return 0;
 }
 
@@ -1080,12 +1080,8 @@ static bipolar modem_seq_save(string_address path, const p8 *key, p32 seq, p16 i
         p8 record[MODEM_SEQ_RECORD];
 
         modem_seq_fingerprint(key, record);
-        record[MODEM_MAC] = (p8)(seq >> 24);
-        record[MODEM_MAC + 1] = (p8)(seq >> 16);
-        record[MODEM_MAC + 2] = (p8)(seq >> 8);
-        record[MODEM_MAC + 3] = (p8)seq;
-        record[MODEM_MAC + 4] = (p8)(id >> 8);
-        record[MODEM_MAC + 5] = (p8)id;
+        network_store_32(record + MODEM_MAC, seq);
+        network_store_16(record + MODEM_MAC + 4, id);
         return link_file_replace(path, record, sizeof record, 1);
 }
 
@@ -1172,7 +1168,8 @@ static b32 modem_send_file(string_address path)
         positive stream = 0;
         bipolar in, src, got;
 
-        scope_exit(crypto_forget(key, sizeof key));
+        memory_zero(&tx, sizeof tx);
+        scope_exit(crypto_forget(key, sizeof key); crypto_forget(&tx, sizeof tx));
         scope_exit(modem_zip_drop());
         if (link_secret_at(LINK_MODEM_PATH, (p8 address_to)key, 0) < 0)
                 return host_refuse("there is no modem key: moonwater link modem key makes one, and the receiver needs the same\n");
@@ -1184,6 +1181,8 @@ static b32 modem_send_file(string_address path)
                 return host_refuse("%s could not be read or compressed for the modem (error %p): nothing is sent\n", path, (positive)(-got));
         if (stream <= 1)
                 return host_refuse("%s is empty: nothing to send\n", path);
+        if (stream > 0xffffffffull)
+                return host_refuse("%s is too large for the modem's 32-bit offset: nothing is sent\n", path);
         if (modem_seq_load(LINK_MODEM_SEQ_PATH, key, &first_seq, &first_id) < 0)
                 return host_refuse("%s is not a private record, so the modem's count cannot be read and nothing is sent (remove it to count from 0 again)\n",
                                    LINK_MODEM_SEQ_PATH);
@@ -1231,22 +1230,19 @@ static b32 modem_send_file(string_address path)
                 }
                 if (got == 0)
                         break;
-                datagram[0] = (p8)(sent_bytes >> 24);
-                datagram[1] = (p8)(sent_bytes >> 16);
-                datagram[2] = (p8)(sent_bytes >> 8);
-                datagram[3] = (p8)sent_bytes;
+                network_store_32(datagram, (p32)sent_bytes);
                 samples = modem_tx_datagram(&tx, datagram, 4 + (sized)got, modem_pcm, MODEM_SEND_SAMPLES);
+                if (!samples)
+                {
+                        ctl_disconnect(&modem_ctl);
+                        return host_refuse("a datagram of %s did not fit its frames: the send is stopped after %p bytes\n", path, (positive)sent_bytes);
+                }
                 //      The count is written before this datagram's sound is played, so a later send cannot reuse a number
                 //      the receiver may already hold.
                 if (modem_seq_save(LINK_MODEM_SEQ_PATH, key, tx.seq, tx.id) < 0)
                 {
                         ctl_disconnect(&modem_ctl);
                         return host_refuse("the count could not be saved to %s: the send is stopped before this datagram is played\n", LINK_MODEM_SEQ_PATH);
-                }
-                if (!samples)
-                {
-                        ctl_disconnect(&modem_ctl);
-                        return host_refuse("a datagram of %s did not fit its frames: the send is stopped after %p bytes\n", path, (positive)sent_bytes);
                 }
                 if (modem_play_samples(&modem_ctl, channel, modem_pcm, 0, (positive)samples) < 0)
                 {
@@ -1471,8 +1467,8 @@ static void modem_in_drop(unsigned lane, positive count)
 
         if (count > fill)
                 count = fill;
-        for (positive k = count; k < fill; k++)
-                modem_in[lane][k - count] = modem_in[lane][k];
+        if (fill > count)
+                memory_copy(modem_in[lane], modem_in[lane] + count, (fill - count) * sizeof(b16));
         modem_in_fill[lane] = fill - count;
         modem_in_seen[lane] = modem_in_seen[lane] > count ? modem_in_seen[lane] - count : 0;
 }
@@ -1495,7 +1491,7 @@ static void modem_streams_set(int streams)
                 return;
         modem_streams = streams;
         host_say(log, host_label "%s", said[streams]);
-        (void)link_file_replace(LINK_MODEM_STREAMS_PATH, (address_any)word[streams], (positive)wire_len(word[streams]), 0);
+        (void)link_file_replace(LINK_MODEM_STREAMS_PATH, (address_any)word[streams], string_length((string_address)word[streams]), 0);
 }
 
 /*
@@ -1814,8 +1810,8 @@ static p8 link_modem_play(p64 now, p64 *next)
                         *next = now + MODEM_IN_POLL_US;
                         return 1;
                 }
-                /* 48 samples in each millisecond of room */
-                room = (positive)((p64)(MODEM_LEAD_US - (modem_busy_until - now)) * 48 / 1000);
+                /* MODEM_RATE / 1000 samples in each millisecond of room */
+                room = (positive)((p64)(MODEM_LEAD_US - (modem_busy_until - now)) * (MODEM_RATE / 1000) / 1000);
                 left = modem_wl_count - modem_wl_at;
                 if (room > left)
                         room = left;
@@ -1823,7 +1819,7 @@ static p8 link_modem_play(p64 now, p64 *next)
                                                modem_wl_pcm[1] + modem_wl_at, room) < 0)
                         return 0;
                 modem_wl_at += room;
-                modem_busy_until += (p64)room * 1000 / 48;
+                modem_busy_until += (p64)room * 1000 / (MODEM_RATE / 1000);
                 if (modem_wl_at < modem_wl_count)
                 {
                         *next = now + MODEM_IN_POLL_US;
@@ -1839,7 +1835,7 @@ static p32 link_modem_far(void)
 {
         p32 left = modem_wl_rx[0].rx.last, right = modem_wl_rx[1].rx.last;
 
-        return right > left ? right : left;
+        return (p32)(right - left) < 0x80000000u ? right : left;
 }
 
 /*
