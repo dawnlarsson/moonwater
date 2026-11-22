@@ -974,8 +974,8 @@ static b32 net_wget(void)
         p8 name[256];
         p8 leaf[256];
         p8 numbered[256 + 24];
-        p8 where[HTTP_URL_MAX];
-        p8 escaped[HTTP_URL_MAX];
+        static p8 where[HTTP_URL_MAX];
+        static p8 escaped[HTTP_URL_MAX];
         string_address path;
         p16 port;
         bool tls;
@@ -1042,7 +1042,7 @@ static b32 net_wget(void)
                         string_format(log_error, "Spider mode enabled. Check if "
                                                  "remote file exists.\n%w\n",
                                       writer_terminal_quoted_name, url);
-                string_copy(where, url);
+                string_copy_bounded(where, url, sizeof where);
                 status = http_run_apart(url, address_of http_manners_spider, check_cert, -1, null, address_of code, where, null);
                 if (status)
                         return net_wget_failed(status, code, where, null);
@@ -1111,7 +1111,7 @@ static b32 net_wget(void)
                               writer_terminal_quoted_name, output);
         }
 
-        string_copy(where, url);
+        string_copy_bounded(where, url, sizeof where);
         status = taking.flags & FILE_FLAG('s')
                      ? http_run_apart(url, address_of http_manners_spider, check_cert, -1, null, address_of code, where, null)
                      : http_fetch_to_apart(url, dest, check_cert,

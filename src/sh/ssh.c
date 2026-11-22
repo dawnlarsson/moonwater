@@ -839,11 +839,11 @@ static bool ssh_keys_parse(string_address text, positive length, ssh_keys addres
         while (at < length)
         {
                 positive stop = at;
-                p8 line[SSH_KEY_TEXT + 128];
+                static p8 line[SSH_KEY_TEXT + 128];
                 string_address words[3];
                 positive count = 0;
                 ssh_key address_to key;
-                p8 bytes[SSH_KEY_TEXT];
+                static p8 bytes[SSH_KEY_TEXT];
                 positive size;
 
                 while (stop < length && text[stop] != '\n')
@@ -1078,7 +1078,7 @@ typedef struct
 // A record read back: false when it is not one, which is a profile not installed.
 static bool ssh_digests_read(ssh_digests address_to digests)
 {
-        p8 text[SSH_DIGESTS_ROOM];
+        static p8 text[SSH_DIGESTS_ROOM];
         bipolar got = ssh_read_owned(SSH_DIGESTS, text, sizeof(text));
         positive at = 0;
         bool server = false;
@@ -1123,7 +1123,7 @@ static bool ssh_digests_read(ssh_digests address_to digests)
 // Whether the profile is installed: its marker in the bowl, and the record the install left.
 static bool ssh_installed(void)
 {
-        ssh_digests digests;
+        static ssh_digests digests;
 
         return bowl_profile_marked(SSH_BOWL, SSH_PROFILE) && ssh_digests_read(address_of digests);
 }
@@ -1151,8 +1151,8 @@ static bool ssh_read_at(bipolar handle, address_any into, positive length, p64 o
 static bool ssh_elf_needed(bipolar handle, ssh_needed address_to needed, bool address_to elf)
 {
         p8 head[64];
-        p8 table[56 * 32];
-        p8 dynamic[16 * 256];
+        static p8 table[56 * 32];
+        static p8 dynamic[16 * 256];
         p8 name[96];
         p64 phoff, phnum, dynamic_at = 0, dynamic_size = 0, strtab = 0, strsz = 0, strings_at = 0;
         positive used = 0;
@@ -1177,7 +1177,8 @@ static bool ssh_elf_needed(bipolar handle, ssh_needed address_to needed, bool ad
 
                 if (type == 3) // PT_INTERP
                 {
-                        if (!size || size >= sizeof(needed->loader) || !ssh_read_at(handle, needed->loader, (positive)size, offset) ||
+                        if (!size || size >= sizeof(needed->loader) || offset > ~(p64)0 - size ||
+                            !ssh_read_at(handle, needed->loader, (positive)size, offset) ||
                             needed->loader[size - 1])
                                 return false;
                 }
@@ -1189,7 +1190,8 @@ static bool ssh_elf_needed(bipolar handle, ssh_needed address_to needed, bool ad
         }
         if (!dynamic_size)
                 return true;
-        if (dynamic_size > sizeof(dynamic) || dynamic_size % 16 || !ssh_read_at(handle, dynamic, (positive)dynamic_size, dynamic_at))
+        if (dynamic_size > sizeof(dynamic) || dynamic_size % 16 || dynamic_at > ~(p64)0 - dynamic_size ||
+            !ssh_read_at(handle, dynamic, (positive)dynamic_size, dynamic_at))
                 return false;
         for (positive at = 0; at + 16 <= dynamic_size; at += 16)
         {
@@ -1418,7 +1420,7 @@ typedef struct
 static b32 ssh_record_file(string_address root, string_address path, string_address view, ssh_record address_to record,
                            ssh_needed address_to needed, bool address_to elf)
 {
-        p8 real[BOWL_PATH_LIMIT];
+        static p8 real[BOWL_PATH_LIMIT];
         p8 checksum[48];
         p8 sha1[20];
         p8 sha256[32];
@@ -1851,7 +1853,7 @@ typedef struct
 
 static positive ssh_btime(void)
 {
-        p8 text[4096];
+        static p8 text[4096];
         bipolar got = file_slurp_once_at(AT_FDCWD, "/proc/stat", text, sizeof(text) - 1);
         string_address at;
 
@@ -2213,8 +2215,8 @@ static DEAD_END fn ssh_child_refuse(string_address first, string_address second,
 static bool ssh_stage(const ssh_digest address_to file)
 {
         static p8 chunk[65536];
-        p8 path[BOWL_PATH_LIMIT];
-        p8 parent[BOWL_PATH_LIMIT];
+        static p8 path[BOWL_PATH_LIMIT];
+        static p8 parent[BOWL_PATH_LIMIT];
         p8 hex[65];
         p8 sum[32];
         digest_state digest;
@@ -2280,7 +2282,7 @@ static bool ssh_bind(string_address source, string_address target, bool director
 // The tmpfs's tree over a directory of the machine: an overlay, the copies on top.
 static bool ssh_overlay(string_address upper, string_address target)
 {
-        p8 options[BOWL_PATH_LIMIT];
+        static p8 options[BOWL_PATH_LIMIT];
 
         if (bowl_mkdir_parents(target) < 0 || !host_join(options, sizeof(options), "lowerdir=", upper, ":", target))
                 return false;
@@ -2832,7 +2834,7 @@ static fn ssh_say_state(const ssh_settings address_to settings)
 {
         static ssh_keys keys;
         ssh_list sessions = {0};
-        ssh_digests digests;
+        static ssh_digests digests;
         p8 fingerprint[64];
         positive listener = ssh_running(null, 0);
         positive count;
@@ -3171,64 +3173,75 @@ static b32 ssh_dispatch(string_address address_to arguments, positive count)
                           host_refuse("ssh key add LABEL TYPE BASE64 [COMMENT], or LABEL - with the key on standard input\n"));
                 return ssh_key_add(arguments[4], arguments[5], arguments[6]);
         }
-        if (count == 3 && (string_equals(verb, "root") || string_equals(verb, "port") || string_equals(verb, "address") ||
-                           string_equals(verb, "limit")))
         {
-                ssh_say_state(address_of settings);
-                return 0;
-        }
-        if (count != 4)
-                return host_usage();
-        if (string_equals(verb, "root"))
-        {
-                bipolar word = host_onoff(arguments[3]);
+                static const named_byte setting_verbs[] = {
+                    {"root", 'r'}, {"port", 'p'}, {"address", 'a'}, {"limit", 'l'},
+                };
+                positive found = string_table_lookup(verb, setting_verbs);
 
-                return_if(word < 0, host_refuse("ssh root is on or off, not %s\n", arguments[3]));
-                settings.root = (p8)word;
-        }
-        else if (string_equals(verb, "port"))
-        {
-                positive port = SSH_PORT;
-
-                return_if(!string_equals(arguments[3], "default") &&
-                              !ssh_number(arguments[3], string_length(arguments[3]), 1, 65535, &port),
-                          host_refuse("ssh port is 1 to 65535, or default, not %s\n", arguments[3]));
-                settings.port = (p16)port;
-        }
-        else if (string_equals(verb, "address"))
-        {
-                if (string_equals(arguments[3], "any"))
-                        settings.address[0] = end;
-                else
-                        return_if(!ssh_address_normal(arguments[3], settings.address, sizeof(settings.address)),
-                                  host_refuse("ssh address is an IPv4 or IPv6 address of this machine, or any, not %s\n", arguments[3]));
-        }
-        else if (string_equals(verb, "limit"))
-        {
-                positive minutes = SSH_LIMIT;
-
-                if (string_equals(arguments[3], "off"))
-                        minutes = 0;
-                else
-                        return_if(!string_equals(arguments[3], "default") &&
-                                      !ssh_number(arguments[3], string_length(arguments[3]), 1, SSH_LIMIT_MOST, &minutes),
-                                  host_refuse("ssh limit is 1 to %p minutes, off or default, not %s\n", (positive)SSH_LIMIT_MOST,
-                                              arguments[3]));
-                settings.limit = (p16)minutes;
-                //      A server on now ends as the new limit says, from now.
-                if (settings.on)
+                if (found == array_count(setting_verbs))
+                        return host_usage();
+                if (count == 3)
                 {
-                        settings.until = 0;
-                        settings.boot[0] = end;
-                        if (minutes)
+                        ssh_say_state(address_of settings);
+                        return 0;
+                }
+                if (count != 4)
+                        return host_usage();
+                switch (setting_verbs[found].value)
+                {
+                case 'r':
+                {
+                        bipolar word = host_onoff(arguments[3]);
+
+                        return_if(word < 0, host_refuse("ssh root is on or off, not %s\n", arguments[3]));
+                        settings.root = (p8)word;
+                        break;
+                }
+                case 'p':
+                {
+                        positive port = SSH_PORT;
+
+                        return_if(!string_equals(arguments[3], "default") &&
+                                      !ssh_number(arguments[3], string_length(arguments[3]), 1, 65535, &port),
+                                  host_refuse("ssh port is 1 to 65535, or default, not %s\n", arguments[3]));
+                        settings.port = (p16)port;
+                        break;
+                }
+                case 'a':
+                        if (string_equals(arguments[3], "any"))
+                                settings.address[0] = end;
+                        else
+                                return_if(!ssh_address_normal(arguments[3], settings.address, sizeof(settings.address)),
+                                          host_refuse("ssh address is an IPv4 or IPv6 address of this machine, or any, not %s\n", arguments[3]));
+                        break;
+                case 'l':
+                {
+                        positive minutes = SSH_LIMIT;
+
+                        if (string_equals(arguments[3], "off"))
+                                minutes = 0;
+                        else
+                                return_if(!string_equals(arguments[3], "default") &&
+                                              !ssh_number(arguments[3], string_length(arguments[3]), 1, SSH_LIMIT_MOST, &minutes),
+                                          host_refuse("ssh limit is 1 to %p minutes, off or default, not %s\n", (positive)SSH_LIMIT_MOST,
+                                                      arguments[3]));
+                        settings.limit = (p16)minutes;
+                        //      A server on now ends as the new limit says, from now.
+                        if (settings.on)
                         {
-                                ssh_boot(settings.boot, sizeof(settings.boot));
-                                settings.until = system_clock_ns(HOST_CLOCK_BOOTTIME) / 1000000000ull + (p64)minutes * 60;
+                                settings.until = 0;
+                                settings.boot[0] = end;
+                                if (minutes)
+                                {
+                                        ssh_boot(settings.boot, sizeof(settings.boot));
+                                        settings.until = system_clock_ns(HOST_CLOCK_BOOTTIME) / 1000000000ull + (p64)minutes * 60;
+                                }
                         }
+                        break;
+                }
                 }
         }
-        else
-                return host_usage();
         return_if(ssh_settings_save(address_of settings) < 0, host_refuse("ssh: %s could not be written\n", SSH_SETTINGS));
         (void)string_join(line, sizeof(line), verb, " ", arguments[3]);
         ssh_log_change((string_address)line);

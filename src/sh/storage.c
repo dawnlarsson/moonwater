@@ -137,6 +137,9 @@ static positive storage_read(bipolar handle, p8 address_to bytes,
 {
         positive used = 0;
 
+        if (offset > (p64)bipolar_max - room)
+                return 0;
+
         while (used < room)
         {
                 bipolar got = system_call_4(syscall(pread64), (positive)handle,
@@ -344,11 +347,15 @@ static fn storage_utf16_label(p8 address_to into, positive room,
         address_to length = out;
 }
 
-static fn storage_probe_ext(storage_identity address_to identity,
-                            p8 address_to bytes, positive have)
+static fn storage_probe_ext(bipolar handle, storage_identity address_to identity,
+                            p8 address_to bytes, positive have,
+                            p64 address_to signature_offset)
 {
         p32 compatible;
         p32 incompatible;
+
+        (void)handle;
+        (void)signature_offset;
 
         if (have < 1024 + 256 || storage_le16(bytes + 1024 + 56) != 0xef53)
                 return;
@@ -369,7 +376,7 @@ static fn storage_probe_ext(storage_identity address_to identity,
                         bytes + 1024 + 120, 16, false);
 }
 
-static fn storage_probe_fat(storage_identity address_to identity,
+static fn storage_probe_fat(bipolar handle, storage_identity address_to identity,
                             p8 address_to bytes, positive have,
                             p64 address_to signature_offset)
 {
@@ -378,6 +385,8 @@ static fn storage_probe_fat(storage_identity address_to identity,
         positive type_at;
         positive serial_at;
         positive label_at;
+
+        (void)handle;
 
         if (have < 512 || bytes[510] != 0x55 || bytes[511] != 0xaa)
                 return;
@@ -417,7 +426,7 @@ static fn storage_probe_exfat_label(bipolar handle,
                                     storage_identity address_to identity,
                                     p8 address_to boot, positive have)
 {
-        p8 sector[STORAGE_PROBE_ROOM];
+        static p8 sector[STORAGE_PROBE_ROOM];
         positive sector_shift;
         positive cluster_shift;
         p64 heap;
@@ -466,7 +475,8 @@ static fn storage_probe_exfat_label(bipolar handle,
 
 static fn storage_probe_exfat(bipolar handle,
                               storage_identity address_to identity,
-                              p8 address_to bytes, positive have)
+                              p8 address_to bytes, positive have,
+                              p64 address_to signature_offset)
 {
         p32 fat_at;
         p32 fat_length;
@@ -476,6 +486,8 @@ static fn storage_probe_exfat(bipolar handle,
         positive fats;
         positive sector_shift;
         positive cluster_shift;
+
+        (void)signature_offset;
 
         if (have < 512 || !storage_bytes(bytes, have, 0,
                                          (p8 address_to)"\xeb\x76\x90", 3) ||
@@ -507,13 +519,20 @@ static fn storage_probe_exfat(bipolar handle,
         storage_probe_exfat_label(handle, identity, bytes, have);
 }
 
-static fn storage_probe_ntfs(storage_identity address_to identity,
-                             p8 address_to bytes, positive have)
+static fn storage_probe_ntfs_label(bipolar handle,
+                                   storage_identity address_to identity,
+                                   p8 address_to boot, positive have);
+
+static fn storage_probe_ntfs(bipolar handle, storage_identity address_to identity,
+                             p8 address_to bytes, positive have,
+                             p64 address_to signature_offset)
 {
         positive sector_size;
         positive sectors_per_cluster;
         p64 sectors;
         p64 mft_cluster;
+
+        (void)signature_offset;
 
         if (have < 512 || !storage_bytes(bytes, have, 3,
                                          (p8 address_to)"NTFS    ", 8) ||
@@ -536,13 +555,14 @@ static fn storage_probe_ntfs(storage_identity address_to identity,
         storage_hex_padded(identity->uuid, (positive)storage_le64(bytes + 72),
                            16, true);
         identity->uuid_length = 16;
+        storage_probe_ntfs_label(handle, identity, bytes, have);
 }
 
 static fn storage_probe_ntfs_label(bipolar handle,
                                    storage_identity address_to identity,
                                    p8 address_to boot, positive have)
 {
-        p8 record[STORAGE_PROBE_ROOM];
+        static p8 record[STORAGE_PROBE_ROOM];
         positive sector_size;
         positive sectors_per_cluster;
         positive cluster_size;
@@ -653,9 +673,12 @@ static fn storage_probe_ntfs_label(bipolar handle,
         }
 }
 
-static fn storage_probe_erofs(storage_identity address_to identity,
-                              p8 address_to bytes, positive have)
+static fn storage_probe_erofs(bipolar handle, storage_identity address_to identity,
+                              p8 address_to bytes, positive have,
+                              p64 address_to signature_offset)
 {
+        (void)handle;
+        (void)signature_offset;
         if (have < 1024 + 80 || storage_le32(bytes + 1024) != 0xe0f5e1e2)
                 return;
 
@@ -669,8 +692,9 @@ static fn storage_probe_erofs(storage_identity address_to identity,
 /* XFS stores its primary superblock in big endian at byte zero.  The geometry
    cross-checks are intentional: XFSB alone is a four-byte file signature, not
    enough authority to choose a filesystem driver for mount. */
-static fn storage_probe_xfs(storage_identity address_to identity,
-                            p8 address_to bytes, positive have)
+static fn storage_probe_xfs(bipolar handle, storage_identity address_to identity,
+                            p8 address_to bytes, positive have,
+                            p64 address_to signature_offset)
 {
         positive block_size;
         positive sector_size;
@@ -679,6 +703,9 @@ static fn storage_probe_xfs(storage_identity address_to identity,
         positive ag_count;
         p64 data_blocks;
         positive version;
+
+        (void)handle;
+        (void)signature_offset;
 
         if (have < 208 ||
             !storage_bytes(bytes, have, 0, (p8 address_to)"XFSB", 4))
@@ -718,8 +745,9 @@ static fn storage_probe_xfs(storage_identity address_to identity,
 /* F2FS keeps two copies; the first begins at 1024 and is wholly inside the
    common probe.  Address ordering and segment accounting reject a magic-only
    block while allowing feature growth after the fixed header. */
-static fn storage_probe_f2fs(storage_identity address_to identity,
-                             p8 address_to bytes, positive have)
+static fn storage_probe_f2fs(bipolar handle, storage_identity address_to identity,
+                             p8 address_to bytes, positive have,
+                             p64 address_to signature_offset)
 {
         p8 address_to super = bytes + 1024;
         positive sector_log;
@@ -730,6 +758,9 @@ static fn storage_probe_f2fs(storage_identity address_to identity,
         p64 block_count;
         positive segment_count;
         positive main_address;
+
+        (void)handle;
+        (void)signature_offset;
 
         if (have < 1024 + 1148 || storage_le32(super) != 0xf2f52010)
                 return;
@@ -776,12 +807,16 @@ static bool storage_squashfs_table(p64 offset, p64 bytes_used)
                (offset >= 96 && offset < bytes_used);
 }
 
-static fn storage_probe_squashfs(storage_identity address_to identity,
-                                 p8 address_to bytes, positive have)
+static fn storage_probe_squashfs(bipolar handle, storage_identity address_to identity,
+                                 p8 address_to bytes, positive have,
+                                 p64 address_to signature_offset)
 {
         positive block_size;
         positive block_log;
         p64 bytes_used;
+
+        (void)handle;
+        (void)signature_offset;
 
         if (have < 96 || storage_le32(bytes) != 0x73717368)
                 return;
@@ -878,7 +913,7 @@ static fn storage_udf_dstring(p8 address_to into, positive room,
 static bool storage_udf_metadata(bipolar handle,
                                  storage_identity address_to identity)
 {
-        p8 descriptor[4096];
+        static p8 descriptor[4096];
         positive block_sizes[] = {512, 1024, 2048, 4096};
 
         for (positive which = 0;
@@ -950,11 +985,15 @@ static bool storage_udf_metadata(bipolar handle,
    require the complete BEA -> NSR -> TEA order, not an isolated NSR word. */
 static fn storage_probe_udf(bipolar handle,
                             storage_identity address_to identity,
+                            p8 address_to bytes, positive have,
                             p64 address_to signature_offset)
 {
         p8 descriptor[2048];
         bool beginning = false;
         bool namespace_seen = false;
+
+        (void)bytes;
+        (void)have;
 
         for (positive sector = 16; sector < 32; sector++)
         {
@@ -1011,11 +1050,15 @@ static fn storage_probe_udf(bipolar handle,
         }
 }
 
-static fn storage_probe_luks(storage_identity address_to identity,
-                             p8 address_to bytes, positive have)
+static fn storage_probe_luks(bipolar handle, storage_identity address_to identity,
+                             p8 address_to bytes, positive have,
+                             p64 address_to signature_offset)
 {
         static const p8 magic[6] = {'L', 'U', 'K', 'S', 0xba, 0xbe};
         positive version;
+
+        (void)handle;
+        (void)signature_offset;
 
         if (have < 592 || memory_compare(bytes, magic, sizeof(magic)))
                 return;
@@ -1171,12 +1214,18 @@ static fn storage_probe_swap(bipolar handle,
         the Btrfs superblock and told it was sector zero.
 */
 static fn storage_probe_btrfs(bipolar handle,
-                              storage_identity address_to identity)
+                              storage_identity address_to identity,
+                              p8 address_to unused_bytes, positive unused_have,
+                              p64 address_to signature_offset)
 {
-        p8 bytes[STORAGE_PROBE_ROOM];
+        static p8 bytes[STORAGE_PROBE_ROOM];
         positive have = storage_read(handle, bytes, sizeof(bytes), 0x10000);
         positive sector_size;
         positive node_size;
+
+        (void)unused_bytes;
+        (void)unused_have;
+        (void)signature_offset;
 
         if (have < 0x12b + 256 || !storage_bytes(bytes, have, 0x40,
                            (p8 address_to)"_BHRfS_M", 8) ||
@@ -1224,9 +1273,15 @@ static bool storage_iso_descriptor(bipolar handle, p8 address_to bytes,
 /* The volume descriptor is at 0x8000, and is likewise read apart from the
    block the recognisers before this one are reading. */
 static fn storage_probe_iso9660(bipolar handle,
-                                storage_identity address_to identity)
+                                storage_identity address_to identity,
+                                p8 address_to unused_bytes, positive unused_have,
+                                p64 address_to signature_offset)
 {
         p8 bytes[2048];
+
+        (void)unused_bytes;
+        (void)unused_have;
+        (void)signature_offset;
 
         if (!storage_iso_descriptor(handle, bytes, null, null))
                 return;
@@ -1278,22 +1333,28 @@ static fn storage_partition_value(storage_identity address_to identity,
                                   string_address key,
                                   p8 address_to value, positive length)
 {
-        if (string_equals(key, "PARTUUID"))
+        static const struct
         {
-                positive copied = min(length, sizeof(identity->partuuid) - 1);
+                string_address key;
+                p16 field_offset;
+                p16 room;
+                p16 length_offset;
+        } fields[] = {
+            {(string_address)"PARTUUID", offset_of(storage_identity, partuuid),
+             sizeof(identity->partuuid), offset_of(storage_identity, partuuid_length)},
+            {(string_address)"PARTNAME", offset_of(storage_identity, partlabel),
+             sizeof(identity->partlabel), offset_of(storage_identity, partlabel_length)},
+        };
+        positive hit = string_table_lookup(key, fields);
 
-                memory_copy(identity->partuuid, value, copied);
-                identity->partuuid[copied] = end;
-                identity->partuuid_length = copied;
-        }
-        else if (string_equals(key, "PARTNAME"))
-        {
-                positive copied = min(length, sizeof(identity->partlabel) - 1);
+        if (hit == array_count(fields))
+                return;
+        p8 address_to dest = (p8 address_to)identity + fields[hit].field_offset;
+        positive copied = min(length, (positive)fields[hit].room - 1);
 
-                memory_copy(identity->partlabel, value, copied);
-                identity->partlabel[copied] = end;
-                identity->partlabel_length = copied;
-        }
+        memory_copy(dest, value, copied);
+        dest[copied] = end;
+        memory_store_unaligned(positive, (p8 address_to)identity + fields[hit].length_offset, copied);
 }
 
 static inline INLINE p8 address_to storage_line_next(
@@ -1304,7 +1365,7 @@ static fn storage_probe_partition(string_address path,
 {
         file_facts facts;
         p8 sysfs[96];
-        p8 text[4096];
+        static p8 text[4096];
         positive used;
         positive major;
         positive minor;
@@ -1349,61 +1410,37 @@ static fn storage_probe_partition(string_address path,
         }
 }
 
-enum
+typedef fn (*storage_probe_fn)(bipolar handle,
+                               storage_identity address_to identity,
+                               p8 address_to bytes, positive have,
+                               p64 address_to signature_offset);
+
+typedef struct
 {
-        STORAGE_LUKS, STORAGE_XFS, STORAGE_SQUASHFS, STORAGE_F2FS,
-        STORAGE_EXFAT, STORAGE_NTFS, STORAGE_FAT, STORAGE_EXT, STORAGE_EROFS,
-        STORAGE_SWAP, STORAGE_BTRFS, STORAGE_UDF, STORAGE_ISO9660,
-};
+        p32 offset;
+        p8 length;
+        string_address usage;
+        storage_probe_fn probe;
+} storage_probe_descriptor;
 
 /* The order every signature walk takes: first-match discovery (blkid, findfs,
    mount's type probe) and complete enumeration (wipefs, mkswap) both use it.
    It is libblkid's chain order: where a device carries a valid swap header and
    an ext superblock, blkid's first match, and so TYPE, is swap. */
-static const p8 storage_probe_order[] = {
-    STORAGE_LUKS, STORAGE_XFS, STORAGE_SQUASHFS, STORAGE_F2FS,
-    STORAGE_EXFAT, STORAGE_FAT, STORAGE_SWAP, STORAGE_NTFS,
-    STORAGE_EXT, STORAGE_EROFS, STORAGE_BTRFS, STORAGE_UDF,
-    STORAGE_ISO9660,
-};
-
-/* Both first-match discovery and complete signature enumeration use these
-   recognisers, including NTFS's conditional secondary metadata read. */
-static fn storage_probe_kind(p8 kind, bipolar handle,
-                              storage_identity address_to identity,
-                              p8 address_to bytes, positive have,
-                              p64 address_to signature_offset)
-{
-        switch (kind)
-        {
-        case STORAGE_LUKS: storage_probe_luks(identity, bytes, have); break;
-        case STORAGE_XFS: storage_probe_xfs(identity, bytes, have); break;
-        case STORAGE_SQUASHFS: storage_probe_squashfs(identity, bytes, have); break;
-        case STORAGE_F2FS: storage_probe_f2fs(identity, bytes, have); break;
-        case STORAGE_EXFAT: storage_probe_exfat(handle, identity, bytes, have); break;
-        case STORAGE_NTFS:
-                storage_probe_ntfs(identity, bytes, have);
-                if (identity->type_length)
-                        storage_probe_ntfs_label(handle, identity, bytes, have);
-                break;
-        case STORAGE_FAT: storage_probe_fat(identity, bytes, have, signature_offset); break;
-        case STORAGE_EXT: storage_probe_ext(identity, bytes, have); break;
-        case STORAGE_EROFS: storage_probe_erofs(identity, bytes, have); break;
-        case STORAGE_SWAP: storage_probe_swap(handle, identity, bytes, have, signature_offset); break;
-        case STORAGE_BTRFS: storage_probe_btrfs(handle, identity); break;
-        case STORAGE_UDF: storage_probe_udf(handle, identity, signature_offset); break;
-        case STORAGE_ISO9660: storage_probe_iso9660(handle, identity); break;
-        }
-}
-
-static const struct { p32 offset; p8 length; } storage_signature_locations[] = {
-    [STORAGE_LUKS] = {0, 6}, [STORAGE_XFS] = {0, 4},
-    [STORAGE_SQUASHFS] = {0, 4}, [STORAGE_F2FS] = {0x400, 4},
-    [STORAGE_EXFAT] = {3, 8}, [STORAGE_NTFS] = {3, 8},
-    [STORAGE_FAT] = {54, 5}, [STORAGE_EXT] = {0x438, 2},
-    [STORAGE_EROFS] = {0x400, 4}, [STORAGE_SWAP] = {0, 10},
-    [STORAGE_BTRFS] = {0x10040, 8}, [STORAGE_UDF] = {0, 5},
-    [STORAGE_ISO9660] = {0x8001, 5},
+static const storage_probe_descriptor storage_probes[] = {
+    {0, 6, (string_address)"crypto", storage_probe_luks},
+    {0, 4, (string_address)"filesystem", storage_probe_xfs},
+    {0, 4, (string_address)"filesystem", storage_probe_squashfs},
+    {0x400, 4, (string_address)"filesystem", storage_probe_f2fs},
+    {3, 8, (string_address)"filesystem", storage_probe_exfat},
+    {54, 5, (string_address)"filesystem", storage_probe_fat},
+    {0, 10, (string_address)"other", storage_probe_swap},
+    {3, 8, (string_address)"filesystem", storage_probe_ntfs},
+    {0x438, 2, (string_address)"filesystem", storage_probe_ext},
+    {0x400, 4, (string_address)"filesystem", storage_probe_erofs},
+    {0x10040, 8, (string_address)"filesystem", storage_probe_btrfs},
+    {0, 5, (string_address)"filesystem", storage_probe_udf},
+    {0x8001, 5, (string_address)"filesystem", storage_probe_iso9660},
 };
 
 /* Enumerate every filesystem/container recogniser over one open descriptor.
@@ -1416,18 +1453,16 @@ static positive storage_each_signature_handle(
         p8 bytes[STORAGE_PROBE_ROOM];
         positive found = 0;
         positive have = storage_read(handle, bytes, sizeof(bytes), 0);
-        for (positive at = 0; at < array_count(storage_probe_order); at++)
+        for (positive at = 0; at < array_count(storage_probes); at++)
         {
+                const storage_probe_descriptor address_to desc = storage_probes + at;
                 storage_signature signature = {0};
                 signature.identity.path = path;
-                p8 kind = storage_probe_order[at];
-                signature.offset = storage_signature_locations[kind].offset;
-                signature.length = storage_signature_locations[kind].length;
-                signature.usage = kind == STORAGE_LUKS ? (string_address)"crypto"
-                                : kind == STORAGE_SWAP ? (string_address)"other"
-                                : (string_address)"filesystem";
-                storage_probe_kind(kind, handle, address_of signature.identity,
-                                   bytes, have, address_of signature.offset);
+                signature.offset = desc->offset;
+                signature.length = desc->length;
+                signature.usage = desc->usage;
+                desc->probe(handle, address_of signature.identity,
+                            bytes, have, address_of signature.offset);
                 if (!signature.identity.type_length)
                         continue;
                 found++;
@@ -1477,12 +1512,11 @@ bool storage_probe_device(string_address path,
         have = storage_read(handle, bytes, sizeof(bytes), 0);
 
         /* Container and fixed-superblock formats precede the deliberately
-           broad boot-sector families: storage_probe_order is that sequence,
+           broad boot-sector families: storage_probes is that sequence,
            the same one the enumeration walks. */
-        for (positive at = 0; at < array_count(storage_probe_order) &&
+        for (positive at = 0; at < array_count(storage_probes) &&
                               !identity->type_length; at++)
-                storage_probe_kind(storage_probe_order[at], handle, identity,
-                                   bytes, have, null);
+                storage_probes[at].probe(handle, identity, bytes, have, null);
 
         system_close(handle);
         return identity->type_length || identity->partuuid_length ||
@@ -1492,12 +1526,9 @@ bool storage_probe_device(string_address path,
 static const storage_tag_descriptor address_to storage_tag_find(
     string_address tag, positive length)
 {
-        for (positive at = 0; at < array_count(storage_tags);
-             at++)
-                if (file_same_word(tag, length, storage_tags[at].name))
-                        return storage_tags + at;
+        positive at = memory_table_lookup(tag, length, storage_tags);
 
-        return null;
+        return at < array_count(storage_tags) ? storage_tags + at : null;
 }
 
 static string_address storage_tag_value(
@@ -1789,7 +1820,7 @@ static bool storage_resolve_visit(
             string_length(identity->path) >= context->room)
                 return true;
 
-        string_copy(context->path, identity->path);
+        string_copy_bounded(context->path, identity->path, context->room);
         context->found = true;
         return false;
 }
@@ -2046,8 +2077,7 @@ b32 storage_blkid_run(positive argc, string_address address_to argv,
                             [STORAGE_OUTPUT_FULL] = "full", [STORAGE_OUTPUT_VALUE] = "value",
                             [STORAGE_OUTPUT_DEVICE] = "device", [STORAGE_OUTPUT_EXPORT] = "export",
                         };
-                        context.mode = string_table_find(
-                            value, names, sizeof(names[0]), array_count(names));
+                        context.mode = string_table_lookup(value, names);
                         if (context.mode == array_count(names))
                                 goto usage;
                         continue;
@@ -5375,7 +5405,8 @@ static bool storage_gpt_span(p64 sectors, p32 sector_size,
                 return false;
 
         table = storage_gpt_table_sectors(sector_size);
-        if (sectors < 2 * (2 + table) + 1)
+        if (sectors < 2 * (2 + table) + 1 ||
+            sectors > (p64)bipolar_max / sector_size)
                 return false;
 
         address_to first = 2 + table;
@@ -5536,7 +5567,7 @@ static bipolar storage_format_fat32(bipolar handle, p64 offset, p64 bytes,
                                     p32 sector_size, p64 hidden,
                                     storage_format_identity address_to identity)
 {
-        p64 total = bytes / sector_size;
+        p64 total;
         p32 per_cluster;
         p64 fat_sectors;
         p64 clusters;
@@ -5545,8 +5576,11 @@ static bipolar storage_format_fat32(bipolar handle, p64 offset, p64 bytes,
         bipolar failed;
 
         if (sector_size < 512 || sector_size > STORAGE_FAT_CLUSTER ||
-            (sector_size & (sector_size - 1)) || total > 0xffffffff ||
-            total <= STORAGE_FAT_RESERVED)
+            (sector_size & (sector_size - 1)))
+                return -ERROR_INVALID;
+
+        total = bytes / sector_size;
+        if (total > 0xffffffff || total <= STORAGE_FAT_RESERVED)
                 return -ERROR_INVALID;
 
         per_cluster = STORAGE_FAT_CLUSTER / sector_size;

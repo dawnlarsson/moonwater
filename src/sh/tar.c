@@ -788,68 +788,75 @@ static bool tar_pax_apply(tar_pax_state address_to state,
                 else if (state != address_of tar_pax_global && key > 11 &&
                          !memory_compare(mark + 1, "GNU.sparse.", 11))
                 {
+                        static const named_byte sparse_keys[] = {
+                            {"name", 'n'}, {"realsize", 's'}, {"size", 's'},
+                            {"major", 'M'}, {"offset", 'o'}, {"numbytes", 'b'},
+                            {"map", 'm'},
+                        };
                         p64 number = 0;
                         string_address name = mark + 12;
                         positive name_length = key - 11;
+                        positive hit = memory_table_lookup(name, name_length, sparse_keys);
                         /* A plain decimal that fits a signed 64 bit size. */
                         bool numeric = memory_digits_whole((p8 *)(equal + 1), value, (positive)bipolar_max, (p64 *)(address_of number));
 
-                        if (name_length == 4 && !memory_compare(name, "name", 4))
-                        {
-                                if (!tar_text_copy(address_of state->sparse_name, equal + 1, value))
-                                        return false;
-                                state->has_sparse_name = true;
-                        }
-                        else if ((name_length == 8 && !memory_compare(name, "realsize", 8)) ||
-                                 (name_length == 4 && !memory_compare(name, "size", 4)))
-                        {
-                                if (numeric)
-                                        tar_psp_real = number;
-                                else
-                                        tar_psp_bad = true;
-                        }
-                        else if (name_length == 5 && !memory_compare(name, "major", 5))
-                                tar_psp_kind = numeric && number == 1 ? 2 : tar_psp_kind;
-                        else if (name_length == 6 && !memory_compare(name, "offset", 6))
-                        {
-                                tar_psp_offset = number;
-                                tar_psp_bad |= !numeric;
-                        }
-                        else if (name_length == 8 && !memory_compare(name, "numbytes", 8))
-                        {
-                                if (numeric)
-                                        tar_psp_add(tar_psp_offset, number);
-                                else
-                                        tar_psp_bad = true;
-                        }
-                        else if (name_length == 3 && !memory_compare(name, "map", 3))
-                        {
-                                positive walk = 0;
-                                p64 first = 0;
-                                bool have = false;
-
-                                while (walk <= value)
+                        if (hit < array_count(sparse_keys))
+                                switch (sparse_keys[hit].value)
                                 {
-                                        positive stop = walk;
-                                        p64 got = 0;
-
-                                        while (stop < value && equal[1 + stop] != ',')
-                                                stop++;
-                                        if (!memory_digits_whole((p8 *)(equal + 1 + walk), stop - walk, (positive)bipolar_max, (p64 *)(address_of got)))
-                                        {
+                                case 'n':
+                                        if (!tar_text_copy(address_of state->sparse_name, equal + 1, value))
+                                                return false;
+                                        state->has_sparse_name = true;
+                                        break;
+                                case 's':
+                                        if (numeric)
+                                                tar_psp_real = number;
+                                        else
                                                 tar_psp_bad = true;
-                                                break;
+                                        break;
+                                case 'M':
+                                        tar_psp_kind = numeric && number == 1 ? 2 : tar_psp_kind;
+                                        break;
+                                case 'o':
+                                        tar_psp_offset = number;
+                                        tar_psp_bad |= !numeric;
+                                        break;
+                                case 'b':
+                                        if (numeric)
+                                                tar_psp_add(tar_psp_offset, number);
+                                        else
+                                                tar_psp_bad = true;
+                                        break;
+                                case 'm':
+                                {
+                                        positive walk = 0;
+                                        p64 first = 0;
+                                        bool have = false;
+
+                                        while (walk <= value)
+                                        {
+                                                positive stop = walk;
+                                                p64 got = 0;
+
+                                                while (stop < value && equal[1 + stop] != ',')
+                                                        stop++;
+                                                if (!memory_digits_whole((p8 *)(equal + 1 + walk), stop - walk, (positive)bipolar_max, (p64 *)(address_of got)))
+                                                {
+                                                        tar_psp_bad = true;
+                                                        break;
+                                                }
+                                                if (have)
+                                                        tar_psp_add(first, got);
+                                                else
+                                                        first = got;
+                                                have = !have;
+                                                walk = stop + 1;
                                         }
                                         if (have)
-                                                tar_psp_add(first, got);
-                                        else
-                                                first = got;
-                                        have = !have;
-                                        walk = stop + 1;
+                                                tar_psp_bad = true;
+                                        break;
                                 }
-                                if (have)
-                                        tar_psp_bad = true;
-                        }
+                                }
                 }
 
                 at += rest;
@@ -860,39 +867,40 @@ static bool tar_pax_apply(tar_pax_state address_to state,
 
 static p8 tar_pack_from_name(string_address name)
 {
+        static const struct { string_address suffix; p8 length; p8 pack; } suffixes[] = {
+            {".gz", 3, TAR_PACK_GZIP}, {".tgz", 4, TAR_PACK_GZIP},
+            {".xz", 3, TAR_PACK_XZ}, {".txz", 4, TAR_PACK_XZ},
+            {".zst", 4, TAR_PACK_ZSTD}, {".tzst", 5, TAR_PACK_ZSTD},
+            {".bz2", 4, TAR_PACK_BZIP2}, {".tbz2", 5, TAR_PACK_BZIP2},
+            {".tbz", 4, TAR_PACK_BZIP2}, {".Z", 2, TAR_PACK_COMPRESS},
+        };
         positive n;
 
         if (!name || string_equals(name, "-"))
                 return TAR_PACK_NONE;
         n = string_length(name);
-        if (memory_has_suffix(name, n, ".gz") || memory_has_suffix(name, n, ".tgz"))
-                return TAR_PACK_GZIP;
-        if (memory_has_suffix(name, n, ".xz") || memory_has_suffix(name, n, ".txz"))
-                return TAR_PACK_XZ;
-        if (memory_has_suffix(name, n, ".zst") || memory_has_suffix(name, n, ".tzst"))
-                return TAR_PACK_ZSTD;
-        if (memory_has_suffix(name, n, ".bz2") || memory_has_suffix(name, n, ".tbz2") ||
-            memory_has_suffix(name, n, ".tbz"))
-                return TAR_PACK_BZIP2;
-        if (memory_has_suffix(name, n, ".Z"))
-                return TAR_PACK_COMPRESS;
+        for (positive i = 0; i < array_count(suffixes); i++)
+                if (n >= suffixes[i].length &&
+                    !memory_compare(name + n - suffixes[i].length,
+                                    suffixes[i].suffix, suffixes[i].length))
+                        return suffixes[i].pack;
         return TAR_PACK_NONE;
 }
 
 static p8 tar_pack_from_magic(p8 address_to magic, positive n)
 {
-        if (n >= 2 && magic[0] == 0x1f && magic[1] == 0x8b)
-                return TAR_PACK_GZIP;
-        if (n >= 6 && magic[0] == 0xfd && magic[1] == 0x37 && magic[2] == 0x7a &&
-            magic[3] == 0x58 && magic[4] == 0x5a && magic[5] == 0)
-                return TAR_PACK_XZ;
-        if (n >= 4 && magic[0] == 0x28 && magic[1] == 0xb5 && magic[2] == 0x2f &&
-            magic[3] == 0xfd)
-                return TAR_PACK_ZSTD;
-        if (n >= 3 && magic[0] == 'B' && magic[1] == 'Z' && magic[2] == 'h')
-                return TAR_PACK_BZIP2;
-        if (n >= 2 && magic[0] == 0x1f && magic[1] == 0x9d)
-                return TAR_PACK_COMPRESS;
+        static const struct { p8 bytes[6]; p8 length; p8 pack; } magics[] = {
+            {{0x1f, 0x8b}, 2, TAR_PACK_GZIP},
+            {{0xfd, 0x37, 0x7a, 0x58, 0x5a, 0x00}, 6, TAR_PACK_XZ},
+            {{0x28, 0xb5, 0x2f, 0xfd}, 4, TAR_PACK_ZSTD},
+            {{'B', 'Z', 'h'}, 3, TAR_PACK_BZIP2},
+            {{0x1f, 0x9d}, 2, TAR_PACK_COMPRESS},
+        };
+
+        for (positive i = 0; i < array_count(magics); i++)
+                if (n >= magics[i].length &&
+                    !memory_compare(magic, magics[i].bytes, magics[i].length))
+                        return magics[i].pack;
         return TAR_PACK_NONE;
 }
 
@@ -4750,7 +4758,7 @@ static bool tar_diff_bytes(bipolar archive, bipolar file, p64 offset,
 static bool tar_diff_holes(bipolar file, p64 from, p64 to,
                            string_address name, bool address_to said)
 {
-        p8 zeros[TAR_BLOCK * 8];
+        static p8 zeros[TAR_BLOCK * 8];
 
         while (!address_to said && from < to)
         {
@@ -5033,9 +5041,9 @@ static fn tar_read_members(tar_members address_to run)
                 string_address user_name;
                 string_address group_name;
                 tar_member_meta meta;
-                p8 kept[TAR_PATH];
-                p8 kept_link[TAR_PATH];
-                p8 shown[TAR_PATH];
+                static p8 kept[TAR_PATH];
+                static p8 kept_link[TAR_PATH];
+                static p8 shown[TAR_PATH];
                 bool escaped;
 
                 /* The header is kept out of the record: a sparse map or a
@@ -7321,22 +7329,12 @@ static bool tar_take(struct tar_options address_to options, p8 letter,
                 break;
         case 'H':
         {
-                static const struct
-                {
-                        string_address name;
-                        p8 format;
-                } formats[] = {{"gnu", TAR_GNU}, {"oldgnu", TAR_OLDGNU},
-                               {"pax", TAR_POSIX}, {"posix", TAR_POSIX},
-                               {"ustar", TAR_USTAR}, {"v7", TAR_V7}};
-                positive at;
+                static const named_byte formats[] = {
+                    {"gnu", TAR_GNU}, {"oldgnu", TAR_OLDGNU},
+                    {"pax", TAR_POSIX}, {"posix", TAR_POSIX},
+                    {"ustar", TAR_USTAR}, {"v7", TAR_V7}};
+                positive at = string_table_lookup(value, formats);
 
-                for (at = 0; at < array_count(formats); at++)
-                        if (string_equals(value, formats[at].name))
-                        {
-                                options->format = formats[at].format;
-                                options->format_set = true;
-                                break;
-                        }
                 if (at == array_count(formats))
                 {
                         string_format(log_error, "tar: %w: Invalid archive format\n",
@@ -7345,6 +7343,8 @@ static bool tar_take(struct tar_options address_to options, p8 letter,
                         tar_status = 2;
                         return false;
                 }
+                options->format = formats[at].value;
+                options->format_set = true;
                 break;
         }
         case TAR_PAX_OPTION:
@@ -7368,16 +7368,16 @@ static bool tar_take(struct tar_options address_to options, p8 letter,
                         tar_xattr_exclude[tar_xattr_exclude_count++] = value;
                 break;
         case TAR_SPARSE_VERSION:
+        {
+                static const named_byte versions[] = {{"0.0", 0}, {"0.1", 1}, {"1.0", 2}};
+                positive at = string_table_lookup(value, versions);
+
                 options->sparse = true;
-                if (string_equals(value, "0.0"))
-                        options->sparse_version = 0;
-                else if (string_equals(value, "0.1"))
-                        options->sparse_version = 1;
-                else if (string_equals(value, "1.0"))
-                        options->sparse_version = 2;
-                else
+                if (at == array_count(versions))
                         return tar_refuse("Unknown sparse version"), false;
+                options->sparse_version = versions[at].value;
                 break;
+        }
         case 'b':
                 options->blocking = string_digits_max(value, positive_max,
                                                       address_of used);
@@ -7612,6 +7612,8 @@ static bool tar_parse(struct tar_options address_to options)
                                         copy[stop] = end;
                                         if (have + 2 >= room)
                                         {
+                                                if (room > positive_max / 2 / sizeof(*grown))
+                                                        return tar_refuse("out of memory"), false;
                                                 positive more = room * 2;
                                                 string_address address_to bigger = memory_take(more * sizeof(*bigger));
 

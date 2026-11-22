@@ -282,9 +282,14 @@ static const checksum_algorithm address_to checksum_algorithm_find(
 {
         if (!name || !*name)
                 return null;
+        if (!type)
+        {
+                positive i = string_table_lookup(name, checksum_algorithms);
+
+                return i < array_count(checksum_algorithms) ? checksum_algorithms + i : null;
+        }
         for (positive i = 0; i < array_count(checksum_algorithms); i++)
-                if (string_equals(name, type ? checksum_algorithms[i].type
-                                             : checksum_algorithms[i].command))
+                if (string_equals(name, checksum_algorithms[i].type))
                         return checksum_algorithms + i;
 
         return null;
@@ -1963,6 +1968,10 @@ static const argument_option cksum_options[] = {
 
 /* Each algorithm is checked as it is read, so an unknown one is refused
    even when a later --algorithm would supersede it. */
+static const named_byte cksum_serial_kinds[] = {
+    {"bsd", 'b'}, {"sysv", 's'}, {"crc", 'p'}, {"crc32b", 'c'},
+};
+
 static bool cksum_option_seen(p8 letter, string_address value)
 {
         static const string_address known[] = {
@@ -1973,9 +1982,8 @@ static bool cksum_option_seen(p8 letter, string_address value)
         if (letter != 'a' || !value)
                 return true;
 
-        for (positive at = 0; at < array_count(known); at++)
-                if (string_equals(value, known[at]))
-                        return true;
+        if (string_table_lookup(value, known) < array_count(known))
+                return true;
 
         text_complain("cksum: invalid argument '%w' for '--algorithm'\nValid arguments are:\n",
             writer_terminal_quoted_name, value);
@@ -2057,8 +2065,7 @@ static b32 cksum_main()
                   algorithm));
         }
         if (checking && algorithm &&
-            (string_equals(algorithm, "bsd") || string_equals(algorithm, "sysv") ||
-             string_equals(algorithm, "crc") || string_equals(algorithm, "crc32b")))
+            string_table_lookup(algorithm, cksum_serial_kinds) < array_count(cksum_serial_kinds))
         {
                 return text_done(text_report(1, "cksum: --check is not supported with --algorithm={bsd,sysv,crc,crc32b}\n"));
         }
@@ -2113,16 +2120,15 @@ static b32 cksum_main()
 
         if (algorithm && !string_equals(algorithm, "crc"))
         {
-                if (string_equals(algorithm, "crc32b"))
-                {
-                        b32 answered = cksum_others('c', debug);
+                positive serial = string_table_lookup(algorithm, cksum_serial_kinds);
 
-                        return answered | cksum_debug_lost;
+                if (serial < array_count(cksum_serial_kinds))
+                {
+                        p8 kind = cksum_serial_kinds[serial].value;
+                        b32 answered = cksum_others(kind, debug);
+
+                        return kind == 'c' ? (answered | cksum_debug_lost) : answered;
                 }
-                if (string_equals(algorithm, "bsd"))
-                        return cksum_others('b', debug);
-                if (string_equals(algorithm, "sysv"))
-                        return cksum_others('s', debug);
 
                 if (digest)
                         return checksum_done(checksum_generate(digest, 0, checksum_selected.style != 'U', true), false);
