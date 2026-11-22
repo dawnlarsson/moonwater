@@ -168,6 +168,14 @@ static void *fake_map(void *context, long fd, long size)
         return at;
 }
 
+#ifdef __linux__
+/* The check builds without _GNU_SOURCE (gate-box.sh), so mremap is named here as the kernel has it. */
+#ifndef MREMAP_MAYMOVE
+#define MREMAP_MAYMOVE 1
+#endif
+void *mremap(void *old_address, size_t old_size, size_t new_size, int flags, ...);
+#endif
+
 static void *fake_remap(void *context, void *at, long old_size, long new_size)
 {
         (void)context;
@@ -3140,7 +3148,11 @@ static void test_presentation(void)
         WLCHECK(wlc_count(c, WLI_wp_presentation_feedback, WLE_wp_presentation_feedback_presented) == 1 && !wayland_frame_wanted(),
                 "and the frame presents the one that replaced it");
 
-        /* more than the surface holds in itself: kept, none discarded (the list grows past them) */
+        /* more than the surface holds in itself: kept, none discarded (the list grows past them). The surface's own count was 4 until
+           ec1595a57 made the queue one bounded list, so the row keeps that count as its size: the feedbacks past it are the test. */
+#ifndef WAYLAND_PRESENTATIONS
+#define WAYLAND_PRESENTATIONS 4
+#endif
         wlc_forget(c);
         for (int at = 0; at < 17; at++) /* four times the old per-surface bound (WAYLAND_PRESENTATIONS, now gone), plus one */
                 wlc_send(c, presentation, WLQ_wp_presentation_feedback, s.surface, wlc_id(c, WLI_wp_presentation_feedback, 1));
