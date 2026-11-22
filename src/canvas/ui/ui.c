@@ -22350,9 +22350,12 @@ static b32 ui_list_add(struct ui_list address_to l, int id)
         return true;
 }
 
+// The rows are given: a focus that is no longer in the list moves to its first row; no focus (-1) stays none.
 static void ui_list_end(struct ui_list address_to l)
 {
         int at = 0;
+        if (l->focus < 0)
+                return;
         while (at < l->count && l->id[at] != l->focus)
                 at++;
         if (at >= l->count && l->count)
