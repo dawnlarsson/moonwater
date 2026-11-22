@@ -1792,7 +1792,7 @@ static void check_terminal_region_stream(void)
         bad = ROWS < 1 || row >= ROWS || column > COLUMNS || region_top >= region_bottom || region_bottom > ROWS ||
               history_lines + ROWS > window->history;
         for (unsigned int r = 0; r < ROWS && !bad; r++)
-            bad = row_length(r) > window->stride;
+            bad = *row_length(r) > window->stride;
     }
     check("terminal: a stream of region, line, scroll and resize sequences keeps the cursor, the region and the rings in bounds", !bad);
     full_reset();
@@ -1801,14 +1801,15 @@ static void check_terminal_region_stream(void)
 static void check_terminal_select_ancient(void)
 {
     p8 address_to text = null;
-    positive room = 0, whole, recent;
+    positive room = 0, whole, recent, wrote;
 
     terminal_view_live();
     for (int line = 0; line < 3 * (int)ROWS; line++)
         term_bytes("ancient\r\n", 9);
     terminal_select_set(terminal_place(0, 0), terminal_place(window->head - 1, window->stride));
     whole = terminal_select_text(&text, &room);
-    array_store_release(text, room, whole);
+    wrote = whole;
+    array_store_release(text, room, wrote);
     terminal_select_set(terminal_place(window->head - window->history, 0), terminal_place(window->head - 1, window->stride));
     recent = terminal_select_text(&text, &room);
     check("terminal: a selection from a line the ring has let go copies as many bytes as one from the oldest kept line",
