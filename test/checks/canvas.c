@@ -2506,6 +2506,24 @@ static b32 te_vectors_in(void)
         return failures != 0;
 }
 
+/* Replace every match with a replacement of sixteen group references: each match becomes sixteen copies, none cut short (F22). */
+static fn te_replacements(void)
+{
+        struct doc d;
+        struct doc_find find = {0};
+        p8 with[64];
+        positive with_length = 0, replaced;
+
+        doc_open(&d, (const p8 address_to) "aaaaaaaaaaaaaaaa", 16);
+        doc_find_set(&find, (const p8 address_to) "a+", 2, DOC_FIND_REGEX | DOC_FIND_CASE);
+        for (positive k = 0; k < 16; k++)
+                with[with_length++] = '$', with[with_length++] = '0';
+        replaced = doc_replace_all(&d, &find, with, with_length);
+        te_check(doc_length(&d) == 256 && replaced == 1, "replace-all writes sixteen group references whole", replaced);
+        doc_find_drop(&find);
+        doc_close(&d);
+}
+
 b32 main(void)
 {
         b32 bench = program_argument_count() > 1 && string_equals(program_argument(1), "bench");
@@ -2536,6 +2554,7 @@ b32 main(void)
                 TE_SECTION("carets", te_carets(200))
                 TE_SECTION("boundaries", te_boundaries())
                 TE_SECTION("find", te_find(12))
+                TE_SECTION("replace", te_replacements())
                 TE_SECTION("bytes", te_utf8(); te_bytes())
                 TE_SECTION("keymap", te_keymap())
                 TE_SECTION("tokens", te_tokens(30))
