@@ -2516,6 +2516,8 @@ static void check_taskbar_pins(void)
         }
         tab_fake_process(proc_root, 61, "chromium", 40, "/usr/lib/chromium/chromium", "chromium\0--type=x\0", 18, "mnt:[1]");
     }
+    // The registry was read by the pins checks above, before these files existed, and ui_apps_fresh looks again only after two seconds: read it now.
+    ui_apps.read = false;
     ui_apps_fresh((b64)clock_monotonic_nanoseconds());
     {
         int chromium = ui_apps_find("chromium"), steam = ui_apps_find("steam"), htop = ui_apps_find("htop"), game = ui_apps_find("steam_app_362890");
