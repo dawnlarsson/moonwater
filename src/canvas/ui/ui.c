@@ -5240,28 +5240,37 @@ static b32 doc_find_next(const struct doc address_to doc, struct doc_find addres
 }
 
 // A replacement for the match just found, with $1 to $9 the captures, $& and $0 the match, $$ a dollar, \n a line...
+// One byte of a replacement at *out: kept when it fits in room, counted either way.
+static void doc_put_byte(p8 address_to into, positive room, positive address_to out, p8 byte)
+{
+        if (*out < room)
+                into[*out] = byte;
+        (*out)++;
+}
+
+// A replacement for the match just found: its length, and its bytes up to room. The length is never capped, so the
+// caller sizes the buffer with a call of room 0 and then makes the replacement in it.
 static positive doc_find_replacement(const struct doc_find address_to find, const p8 address_to bytes, const p8 address_to with,
                                      positive with_length, p8 address_to into, positive room)
 {
         positive out = 0;
         if (!(find->flags & DOC_FIND_REGEX))
         {
-                with_length = with_length < room ? with_length : room;
-                memory_copy(into, with, with_length);
+                memory_copy(into, with, with_length < room ? with_length : room);
                 return with_length;
         }
-        for (positive at = 0; at < with_length && out < room; at++)
+        for (positive at = 0; at < with_length; at++)
         {
                 p8 c = with[at], next = at + 1 < with_length ? with[at + 1] : 0;
                 if (c == '\\' && (next == 'n' || next == 't' || next == '\\'))
                 {
-                        into[out++] = next == 'n' ? '\n' : next == 't' ? '\t' : '\\';
+                        doc_put_byte(into, room, &out, next == 'n' ? '\n' : next == 't' ? '\t' : '\\');
                         at++;
                         continue;
                 }
                 if (c == '$' && next == '$')
                 {
-                        into[out++] = '$';
+                        doc_put_byte(into, room, &out, '$');
                         at++;
                         continue;
                 }
@@ -5272,15 +5281,16 @@ static positive doc_find_replacement(const struct doc_find address_to find, cons
                         positive s = regex_slots[group * 2], e = regex_slots[group * 2 + 1];
                         if (group <= (positive)find->program.groups && s != positive_max && e != positive_max && e >= s)
                         {
-                                positive take = e - s < room - out ? e - s : room - out;
-                                memory_copy(into + out, bytes + s, take);
+                                positive take = e - s;
+                                if (out < room)
+                                        memory_copy(into + out, bytes + s, take < room - out ? take : room - out);
                                 out += take;
                         }
                         at++;
                         continue;
                 }
 #endif
-                into[out++] = c;
+                doc_put_byte(into, room, &out, c);
         }
         return out;
 }
@@ -5354,16 +5364,18 @@ static positive doc_replace_all(struct doc address_to doc, struct doc_find addre
                 p64 line_start = doc_line_start(doc, line);
                 while (from <= length && doc_find_in(doc, find, bytes, length, from, &s, &e))
                 {
-                        positive most = with_length + (find->flags & DOC_FIND_REGEX ? 10 * (length + 1) : 0) + 16;
+                        // The replacement is sized first: a $n that copies a long group, repeated, needs all of it.
+                        p8 sizing[1];
+                        positive need = doc_find_replacement(find, bytes, with, with_length, sizing, 0);
                         if (!array_store_reserve(edits, edit_room, count, count + 1, 1024) ||
-                            !array_store_reserve(texts, text_room, text_used, text_used + most, 65536))
+                            !array_store_reserve(texts, text_room, text_used, text_used + need, 65536))
                         {
                                 array_store_release(edits, edit_room, count);
                                 array_store_release(texts, text_room, text_used);
                                 return 0;
                         }
                         {
-                                positive made = doc_find_replacement(find, bytes, with, with_length, texts + text_used, most);
+                                positive made = doc_find_replacement(find, bytes, with, with_length, texts + text_used, need);
                                 edits[count++] = (struct doc_edit){line_start + s, e - s, (const p8 address_to)text_used, made, DOC_NONE, DOC_NONE};
                                 text_used += made;
                         }
