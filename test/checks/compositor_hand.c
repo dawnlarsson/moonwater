@@ -834,6 +834,23 @@ static void check_compositor_popup(void)
     compositor.showing[7] = 1;
     check("popup cycle: a popup whose parent chain returns to it is refused (3-cycle)", !compositor_popup_first(8) && compositor_popup_parent[8] < 0);
     compositor.showing[7] = compositor.showing[9] = 0;
+
+    // The one placement (compositor_place_rect): below a 10 by 10 anchor, centred on it, and flipped above when the screen has no room below.
+    {
+        struct compositor_place place;
+        int at[4];
+
+        memory_zero(&place, sizeof(place));
+        place.anchor[0] = 50, place.anchor[1] = 50, place.anchor[2] = 10, place.anchor[3] = 10;
+        place.side = 2, place.gravity = 2, place.size[0] = 60, place.size[1] = 40;
+        place.screen[2] = 200, place.screen[3] = 100;
+        compositor_place_rect(&place, at);
+        check("popup placement: a popup below an anchor that fits sits under it, centred on it",
+              at[0] == 25 && at[1] == 60 && at[2] == 60 && at[3] == 40);
+        place.anchor[1] = 80, place.adjust = COMPOSITOR_PLACE_FLIP_Y;
+        compositor_place_rect(&place, at);
+        check("popup placement: a popup the screen has no room below flips above its anchor", at[1] == 40 && at[3] == 40);
+    }
     compositor_popup_leave(1);
     for (int row = 0; row < COMPOSITOR_ROWS; row++)
         compositor_popup_parent[row] = -1;
