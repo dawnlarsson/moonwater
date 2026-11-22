@@ -1320,6 +1320,16 @@ static int compositor_key_chord(unsigned int code, int value, unsigned int modif
                ((modifiers & WINDOW_KEY_ALT) && compositor.cycle);
 }
 
+/* the kit's globe press (ui.c, taskbar_globe_*) and the globe's drag (below): declared here for the key path, which comes first */
+static void taskbar_globe_down(int x, int y, int axis_at, int away);
+static int taskbar_globe_move(int x, int y, int axis_at, int scale);
+static long taskbar_globe_velocity(void);
+static int taskbar_globe_up(b32 cancelled);
+static int taskbar_globe_held(void);
+static void compositor_globe_cancel(void);
+static void compositor_globe_move(void);
+static void compositor_globe_release(int x, int y);
+
 static void compositor_key(unsigned int at, unsigned int code, int value, positive reported)
 {
         unsigned int bit = compositor_held_bit(code), characters[2] = {0, 0}, flags, modifiers, chord, mods4;
@@ -1328,6 +1338,11 @@ static void compositor_key(unsigned int at, unsigned int code, int value, positi
         taskbar_moon_seen(clock_monotonic_nanoseconds());
         if (value == 1)
                 compositor_keytrace_read(code, reported, clock_monotonic_nanoseconds());
+        if (code == CK_KEY_ESC && value == 1 && taskbar_globe_held())
+        {
+                compositor_globe_cancel();
+                return;
+        }
         if (code == CK_KEY_ESC && value)
         {
                 if (compositor.drag >= 0 || compositor.resize >= 0) { if (value == 1) { compositor_hold_cancel(); if (compositor.mc.auto_opened) compositor_mc_close(); } return; }
@@ -1604,6 +1619,84 @@ static int compositor_edit_release(const struct taskbar_view *view, int x, int y
         return 1;
 }
 
+/* ---- the globe's drag (C8): the press is the kit's (taskbar_globe_*), the drag drives the Scenes overview's drag ---- */
+#include "scenes.h" // the drag API (its own include guard; scenes.c includes it again later)
+
+static int compositor_globe_began, compositor_globe_screen, compositor_globe_up; // the launcher row as the press found it
+
+// The globe's axis, along the band's normal, and away: +1 where the axis grows away from the band, else -1.
+static void compositor_globe_axis(int x, int y, int *axis, int *away)
+{
+        unsigned int pos = taskbar_position();
+
+        *axis = pos == TASKBAR_LEFT || pos == TASKBAR_RIGHT ? x : y;
+        *away = pos == TASKBAR_TOP || pos == TASKBAR_LEFT ? 1 : -1;
+}
+
+// The drag's progress, 0 at the band's edge to COMPOSITOR_SCENES_PROGRESS_ONE at the screen's middle (scenes.h).
+static int compositor_globe_progress(int x, int y)
+{
+        int sx, sy, sw, sh, thick, edge, middle, at;
+        unsigned int pos = taskbar_position();
+
+        compositor_output_rect(compositor_globe_screen, &sx, &sy, &sw, &sh);
+        thick = taskbar_thick(compositor_output_scale(compositor_globe_screen));
+        if (pos == TASKBAR_LEFT || pos == TASKBAR_RIGHT)
+                at = x, edge = pos == TASKBAR_LEFT ? sx + thick : sx + sw - thick, middle = sx + sw / 2;
+        else
+                at = y, edge = pos == TASKBAR_TOP ? sy + thick : sy + sh - thick, middle = sy + sh / 2;
+        if (edge == middle)
+                return 0;
+        return (int)compositor_clamp64((long long)(at - edge) * COMPOSITOR_SCENES_PROGRESS_ONE / (middle - edge), 0, COMPOSITOR_SCENES_PROGRESS_ONE);
+}
+
+// The drag's velocity, px/s, positive away from the band's edge.
+static int compositor_globe_velocity(int away)
+{
+        return (int)(taskbar_globe_velocity() * away);
+}
+
+// A report of the held globe: the press latches as a drag away from the band, which begins the overview's drag; each report moves it.
+static void compositor_globe_move(void)
+{
+        int axis, away;
+
+        compositor_globe_axis(compositor.pointer_x, compositor.pointer_y, &axis, &away);
+        if (!taskbar_globe_move(compositor.pointer_x, compositor.pointer_y, axis, compositor.scale))
+                return;
+        if (!compositor_globe_began)
+                compositor_globe_began = 1, compositor_scenes_drag(COMPOSITOR_SCENES_DRAG_BEGIN, compositor_globe_screen, 0, 0);
+        compositor_scenes_drag(COMPOSITOR_SCENES_DRAG_MOVE, compositor_globe_screen, compositor_globe_progress(compositor.pointer_x, compositor.pointer_y),
+                               compositor_globe_velocity(away));
+}
+
+// The globe's release: a drag ends the overview's drag (END decides); a tap opens the launcher, as a tap always did.
+static void compositor_globe_release(int x, int y)
+{
+        int axis, away, ended;
+
+        compositor_globe_axis(x, y, &axis, &away);
+        if (compositor_globe_began)
+                compositor_scenes_drag(COMPOSITOR_SCENES_DRAG_END, compositor_globe_screen, compositor_globe_progress(x, y), compositor_globe_velocity(away));
+        ended = taskbar_globe_up(0);
+        compositor_globe_began = 0;
+        if (ended != 0)
+                return;
+        // The row is the one the press found: the press may have closed it already (a window that dismisses, pressed elsewhere).
+        if (compositor_globe_up >= 0)
+                compositor_close(compositor_globe_up), compositor_tabs_changed();
+        else if (taskbar_launcher_on())
+                compositor_launcher_open(x, y);
+}
+
+// Escape with the globe held: the press is dropped; a latched drag is ended at progress 0, which cancels the overview's drag.
+static void compositor_globe_cancel(void)
+{
+        if (taskbar_globe_up(1) == 1 && compositor_globe_began)
+                compositor_scenes_drag(COMPOSITOR_SCENES_DRAG_END, compositor_globe_screen, 0, 0);
+        compositor_globe_began = 0;
+}
+
 static int compositor_band_hand(unsigned int code, int down)
 {
         int x = compositor.pointer_x, y = compositor.pointer_y, rect[4], taken = 0;
@@ -1626,6 +1719,8 @@ static int compositor_band_hand(unsigned int code, int down)
         }
         if (compositor_mc_hand(code, down))
                 return 1;
+        if (!down && code == COMPOSITOR_BTN_LEFT && taskbar_globe_held())
+                return compositor_globe_release(x, y), 1;
         if (!down && code == COMPOSITOR_BTN_LEFT && !taskbar_editing())
                 compositor_edit_drag.held = 0;
         if (!taskbar_editing() || code != COMPOSITOR_BTN_LEFT)
@@ -1659,6 +1754,8 @@ static void compositor_motion(void)
         under = compositor_under(compositor.pointer_x, compositor.pointer_y, &tab);
         taskbar_moon_seen(clock_monotonic_nanoseconds());
         taskbar_moon_hover(tab == TASKBAR_LAUNCHER ? compositor_moon_band(compositor.pointer_x, compositor.pointer_y) : -1);
+        if (taskbar_globe_held())
+                compositor_globe_move();
         if (taskbar_menu_rect(rect))
                 taskbar_menu_hand(WINDOW_EVENT_MOTION, 0, 0, 0, compositor.pointer_x, compositor.pointer_y),
                 compositor_damage(rect[0], rect[1], rect[2], rect[3]);
@@ -2002,6 +2099,15 @@ static int compositor_button_band(int tab, unsigned int code, int up)
 
         if (tab == TASKBAR_LAUNCHER && code == COMPOSITOR_BTN_RIGHT)
                 return compositor_menu_open(px, py), 1;
+        if (tab == TASKBAR_LAUNCHER && code == COMPOSITOR_BTN_LEFT)
+        {
+                int axis, away;
+
+                compositor_globe_screen = compositor.band_hit, compositor_globe_began = 0, compositor_globe_up = up;
+                compositor_globe_axis(px, py, &axis, &away);
+                taskbar_globe_down(px, py, axis, away);
+                return 1;
+        }
         if (tab == TASKBAR_SPACE_ADD)
         {
                 if (code == COMPOSITOR_BTN_LEFT)
