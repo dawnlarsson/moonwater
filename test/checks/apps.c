@@ -8432,6 +8432,13 @@ static fn check_input_matrix(struct ui address_to ui, unsigned int address_to pi
 {
         inputs_ui = *ui;
         inputs_pixels = pixels;
+        // The scratch table has room for no row until it is given some (as canvas.c gives its clip table eight), and the row is this process's:
+        // a copy or a cut is offered to the table only for a row this process owns.
+        if (table->capacity < 8)
+                table->capacity = 8;
+        if (table->rows < 1)
+                table->rows = 8;
+        table->pid[0] = (unsigned int)window_call(WINDOW_SYS_GETPID, 0, 0, 0, 0, 0, 0);
         inputs_windows = table;
         inputs_own.table = table, inputs_own.row = 0, inputs_own.door = -1;
         ui_begin(&inputs_ui, pixels, 800, 800, 600);
