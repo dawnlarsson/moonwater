@@ -73,6 +73,36 @@ static unsigned int gpu_glass_model(unsigned int picture, unsigned int ground, u
         return out;
 }
 
+// The scaled read on the card (op 8, bit 3): a 64 by 4 linear picture of random words, scaled by tables to 50 by 3 through the card's texture unit, equals the
+// same picture scaled by the same tables on the processor (the linear twin). The mutant: rows of the table reversed must draw other pixels, so the row can tell
+// a wrong table. Both need the card; on the host there is no card and the section returns.
+static void gpu_scaled_rows(void)
+{
+        positive base = gpu.size - (1 << 20), src_at = base + 131072, dst_at = base + 262144, tab_at = base + 786432;
+        unsigned int address_to src = (unsigned int address_to)((p8 address_to)gpu.at + src_at), address_to dst = (unsigned int address_to)((p8 address_to)gpu.at + dst_at);
+        unsigned int address_to tab = (unsigned int address_to)((p8 address_to)gpu.at + tab_at);
+        unsigned int desc[8], kind, seed = 31337u, twin = 0;
+        b32 ran;
+
+        if (gpu.pending)
+                gpu_finish();
+        for (unsigned int i = 0; i < 64 * 4; i++)
+                seed = seed * 1664525u + 1013904223u, src[i] = seed;
+        for (unsigned int x = 0; x < 50; x++)
+                tab[x] = (x * 5 + 3) % 64;
+        for (unsigned int y = 0; y < 3; y++)
+                tab[50 + y] = (y * 2 + 1) % 4;
+        kind = gpu_amd_image(desc, GPU_VA + src_at, 0, 64, 4, 0, false, false);
+        memory_zero(dst, 64 * 4 * 4);
+        gpu_slot_take();
+        gpu_image_scaled_args(desc, kind | GPU_IMAGE_SCALED, GPU_VA + tab_at, 0, 0, GPU_VA + dst_at, 64, 50, 3);
+        ran = gpu_run();
+        for (unsigned int y = 0; y < 3; y++)
+                for (unsigned int x = 0; x < 50; x++)
+                        twin += dst[y * 64 + x] == src[((y * 2 + 1) % 4) * 64 + (x * 5 + 3) % 64];
+        check("gpu scale (op 8, bit 3): the card's scaled read of a picture equals the linear twin scaled by the same tables (150 pixels)", kind && ran && twin == 150);
+}
+
 // Op 3 (gpu.asm glass): the grain the kernel adds is 2 * ((x ^ y) & 1) + (y & 1) for the absolute x and y, and that is the processor's 4x4 Bayer table of
 // glass.c, order >> 2, at every position (checked here); and the kernel's arithmetic (gpu_glass_model) is bit-exact to memory_glass_over_u32 over random
 // pictures and grounds, dark and light, at every origin mod 4. The fake card runs no kernel, so this holds the model, which is the kernel's text; the card's own
@@ -443,6 +473,7 @@ b32 main(void)
         }
         // The texture unit's read (op 8) drew its test at the start (gpu_image_test, a linear picture through an image resource, straight and swapped).
         check("gpu: the card's texture unit reads a picture through an image resource as it is and with red and blue the other way (gpu_image_test)", gpu_image_ok);
+        gpu_scaled_rows();
         src = (unsigned int address_to)((p8 address_to)gpu.at + src_at), dst = (unsigned int address_to)((p8 address_to)gpu.at + dst_at);
         gnd = (unsigned int address_to)((p8 address_to)gpu.at + gnd_at), a = GPU_ARGS;
         tones[4] = gpu_random() | 0x80000000u;

@@ -1651,6 +1651,7 @@ image:
 	s_load_dwordx2	s[12:13], s[4:5], 0x30
 	s_load_dword	s20, s[4:5], 0x2c
 	s_load_dwordx8	s[24:31], s[4:5], 0x80
+	s_load_dwordx2	s[32:33], s[4:5], 0x10
 	v_lshl_or_b32	v1, s6, 6, v0
 	s_waitcnt	lgkmcnt(0)
 	v_cmp_gt_u32	vcc, s16, v1
@@ -1662,6 +1663,20 @@ image:
 	s_mul_i32	s19, s7, s15
 	v_add_nc_u32	v3, s19, v1
 	v_lshlrev_b32	v3, 2, v3
+	; bit 3 of the kind: the picture is scaled. The coordinates are the tables at g, as op 7's (w entries of the source's columns, then the rows' source rows),
+	; relative to the resource's (x0, y0): image(x0 + xtab[x], y0 + ytab[row]). Lanes past w are off in exec, as above.
+	s_bitcmp1_b32	s20, 3
+	s_cbranch_scc0	.unit_coords
+	v_lshlrev_b32	v11, 2, v1
+	global_load_dword v4, v11, s[32:33]
+	s_add_u32	s34, s16, s7
+	s_lshl_b32	s34, s34, 2
+	v_mov_b32	v12, s34
+	global_load_dword v5, v12, s[32:33]
+	s_waitcnt	vmcnt(0)
+	v_add_nc_u32	v4, s12, v4
+	v_add_nc_u32	v5, s13, v5
+.unit_coords:
 	s_bitcmp1_b32	s20, 0
 	s_cbranch_scc0	.unit_src
 	global_load_dword v10, v3, s[10:11]
@@ -1807,5 +1822,5 @@ kernel tone, 10, 28
 kernel glass, 16, 32
 kernel scene, 64, 106
 kernel scale, 8, 24
-kernel image, 12, 32
+kernel image, 16, 40
 kernel nv12, 16, 40

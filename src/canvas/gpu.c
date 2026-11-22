@@ -4441,6 +4441,41 @@ static positive gpu_image_go(const unsigned int desc[8], unsigned int kind, unsi
         return gpu_go();
 }
 
+// A scaled picture read through the texture unit (op 8 with bit 3): the same resource and layout as gpu_image, but the coordinates are the tables at tab
+// (w entries of the source's columns, then the rows' source rows, relative to the resource's (x0, y0)), as op 7's are. So a tiled or DCC client picture is scaled
+// by the card with no detile pass. Usable only while gpu_image_ok holds: the card draws a scaled test of its own at each start (gpu_image_test).
+#define GPU_IMAGE_SCALED 16u // gpu_image's kind: the picture is scaled by the tables at tab (the job's g); op 8 reads bit 3 of its kind
+static void gpu_image_scaled_args(const unsigned int desc[8], unsigned int kind, positive tab, unsigned int x0, unsigned int y0, positive dst, unsigned int dp,
+                                  unsigned int w, unsigned int h)
+{
+        struct gpu_args address_to a;
+
+        gpu_image_args(desc, kind & ~GPU_IMAGE_SCALED, x0, y0, dst, dp, w, h);
+        a = GPU_ARGS;
+        a->g = tab, a->v |= (kind & GPU_IMAGE_SCALED) ? 8u : 0u;
+}
+
+static b32 gpu_image_scaled(const unsigned int desc[8], unsigned int kind, positive tab, unsigned int x0, unsigned int y0, positive dst, unsigned int dp,
+                            unsigned int w, unsigned int h)
+{
+        gpu_last_error = 0, gpu_end = GPU_END_NONE;
+        if (!w || !h || !gpu_idle() || !gpu_image_ok || (gpu_set != &gpu_amd_rdna2 && gpu_set != &gpu_amd_rdna3))
+                return false;
+        gpu_slot_take();
+        gpu_image_scaled_args(desc, kind | GPU_IMAGE_SCALED, tab, x0, y0, dst, dp, w, h);
+        return gpu_run();
+}
+
+__attribute__((unused)) static positive gpu_image_scaled_go(const unsigned int desc[8], unsigned int kind, positive tab, unsigned int x0, unsigned int y0,
+                                                              positive dst, unsigned int dp, unsigned int w, unsigned int h)
+{
+        gpu_last_error = 0, gpu_end = GPU_END_NONE;
+        if (!w || !h || !gpu_image_ok || (gpu_set != &gpu_amd_rdna2 && gpu_set != &gpu_amd_rdna3) || gpu_lost || gpu_slot_take() < 0)
+                return 0;
+        gpu_image_scaled_args(desc, kind | GPU_IMAGE_SCALED, tab, x0, y0, dst, dp, w, h);
+        return gpu_go();
+}
+
 // AMD gfx10.3 (RDNA2) & gfx11 (RDNA3/3.5) SQ_IMG_RSRC_WORD0..7 texture descriptor for linear, 64K/256K tiled, and DCC buffers.
 #define GPU_MOD_AMD 2ull
 static unsigned int gpu_amd_image(unsigned int desc[8], positive va, positive meta, unsigned int width, unsigned int height, p64 modifier, b32 swapped, b32 unorm)
@@ -4819,6 +4854,34 @@ static b32 gpu_image_test(void)
 
                                 ok = dst[y * 64 + x] == ((c & 0xff00ff00u) | (c >> 16 & 0xff) | (c & 0xff) << 16);
                         }
+        }
+        // The scaled read (bit 3 of op 8): the tables at tab_at are 50 columns of the resource (x * 5 + 3, mod 64) and 3 rows ((y * 2 + 1), mod 4), and each
+        // word is read as it is (32_UINT): dst[y * 64 + x] == src[ytab[y] * 64 + xtab[x]]. A card that takes the wrong table or the wrong row draws the wrong word,
+        // and gpu_image_ok stays false: tiled pictures are then the processor's.
+        if (ok)
+        {
+                positive tab_at = base + 393216;
+                unsigned int address_to tab = (unsigned int address_to)((p8 address_to)gpu.at + tab_at);
+                unsigned int desc[8], kind;
+
+                for (unsigned int x = 0; x < 50; x++)
+                        tab[x] = (x * 5 + 3) % 64;
+                for (unsigned int y = 0; y < 3; y++)
+                        tab[50 + y] = (y * 2 + 1) % 4;
+                memory_zero(dst, 64 * 4 * 4);
+                kind = gpu_amd_image(desc, GPU_VA + src_at, 0, 64, 4, 0, false, false);
+                gpu_slot_take();
+                if (!kind)
+                        ok = false;
+                else
+                {
+                        gpu_patient = gpu_recovered ? 2 : 1;
+                        gpu_image_scaled_args(desc, kind | GPU_IMAGE_SCALED, GPU_VA + tab_at, 0, 0, GPU_VA + dst_at, 64, 50, 3);
+                        ok = gpu_run();
+                        for (unsigned int y = 0; y < 3 && ok; y++)
+                                for (unsigned int x = 0; x < 50 && ok; x++)
+                                        ok = dst[y * 64 + x] == src[((y * 2 + 1) % 4) * 64 + (x * 5 + 3) % 64];
+                }
         }
         if (gpu.pending)
                 gpu_finish();
