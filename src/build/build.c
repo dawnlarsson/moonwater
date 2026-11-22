@@ -2374,15 +2374,16 @@ static string_address build_arch_name(string_address word);
         architecture in a "#> arch" line. */
 static string_address build_asm_normalize(string_address name)
 {
+        static const struct { string_address arch; string_address asm_name; } map[] = {
+            {"x64", "x86_64"},
+            {"arm64", "aarch64"},
+        };
         string_address machine = build_arch_name(name);
 
         if (!machine)
                 return null;
-        if (word_is(machine, "x64"))
-                return "x86_64";
-        if (word_is(machine, "arm64"))
-                return "aarch64";
-        return machine;
+        positive idx = string_table_lookup(machine, map);
+        return idx < array_count(map) ? map[idx].asm_name : machine;
 }
 
 static bool build_asm_fail(string_address source, positive line,
@@ -2852,7 +2853,7 @@ static bool build_pad(b32 handle, positive from, positive to)
 //      No file is no content; more than the region holds is a failure.
 static bool build_append(b32 handle, string_address path, positive room, positive address_to put)
 {
-        b32 from = open(path, O_RDONLY, 0);
+        b32 from = open(path, O_RDONLY | O_CLOEXEC, 0);
 
         address_to put = 0;
         if (from < 0)
@@ -2869,14 +2870,14 @@ static bool build_append(b32 handle, string_address path, positive room, positiv
                         good = got == 0;
                         break;
                 }
-                address_to put += (positive)got;
-                if (address_to put > room ||
+                if ((positive)got > room - address_to put ||
                     system_write_all((positive)handle, build_file_one,
                                      (positive)got) != (positive)got)
                 {
                         good = false;
                         break;
                 }
+                address_to put += (positive)got;
         }
         close(from);
         return good;
@@ -3233,14 +3234,15 @@ static b32 build_spark(string_address source, string_address output,
                 if (found == BUILD_ARGUMENT_ROOM)
                         return string_report(log_error, 1,
                                              "spark: too many program_flags words\n");
+                static const string_address strip_flags[] = {
+                    "-s", "-Wl,--strip-all", "-Wl,--strip-debug", "-Wl,-x", "-Wl,-s",
+                };
                 for (positive at = 0; at < found; at++)
                 {
                         if (word_is(pieces[at], "-flto") ||
-                            (keep_lines && (word_is(pieces[at], "-s") ||
-                                            word_is(pieces[at], "-Wl,--strip-all") ||
-                                            word_is(pieces[at], "-Wl,--strip-debug") ||
-                                            word_is(pieces[at], "-Wl,-x") ||
-                                            word_is(pieces[at], "-Wl,-s"))))
+                            (keep_lines &&
+                             string_table_lookup(pieces[at], strip_flags) <
+                                 array_count(strip_flags)))
                                 continue;
                         if (count + 16 >= BUILD_ARGUMENT_ROOM)
                                 return string_report(log_error, 1,
@@ -3612,28 +3614,27 @@ static b32 build_freestanding(string_address address_to arguments, positive coun
 
                 if (options)
                 {
-                        if (word_is(word, "-v"))
-                        {
-                                loud = true;
-                                continue;
-                        }
+                        enum { FS_LOUD = 1u, FS_RUN = 2u, FS_WATCH = 4u, FS_END = 8u };
+                        static const named_flag fs_opts[] = {
+                            {"-v", FS_LOUD},
+                            {"--run", FS_RUN},
+                            {"--watch", FS_RUN | FS_WATCH},
+                            {"--", FS_END},
+                        };
+                        positive idx = string_table_lookup(word, fs_opts);
 
-                        if (word_is(word, "--run"))
+                        if (idx < array_count(fs_opts))
                         {
-                                run = true;
-                                continue;
-                        }
+                                p64 mask = fs_opts[idx].value;
 
-                        if (word_is(word, "--watch"))
-                        {
-                                run = true;
-                                watch = true;
-                                continue;
-                        }
-
-                        if (word_is(word, "--"))
-                        {
-                                options = false;
+                                if (mask & FS_LOUD)
+                                        loud = true;
+                                if (mask & FS_RUN)
+                                        run = true;
+                                if (mask & FS_WATCH)
+                                        watch = true;
+                                if (mask & FS_END)
+                                        options = false;
                                 continue;
                         }
 
@@ -4514,30 +4515,24 @@ static fn build_components(string_address config)
                     !memory_is_word(pair.value, pair.value_length, "n"))
                         continue;
 
-                if (memory_is_word(name, length, "CORE"))
-                        build_moon_core = on;
-                else if (memory_is_word(name, length, "SHELL"))
-                        build_moon_shell = on;
-                else if (memory_is_word(name, length, "UTILITIES"))
-                        build_moon_utilities = on;
-                else if (memory_is_word(name, length, "UTIL_LINUX"))
-                        build_moon_util_linux = on;
-                else if (memory_is_word(name, length, "SHELL_MONITOR"))
-                        build_moon_shell_monitor = on;
-                else if (memory_is_word(name, length, "TOOLS_ALL"))
-                        build_moon_tools_all = on;
-                else if (memory_is_word(name, length, "BUILTINS_ALL"))
-                        build_moon_builtins_all = on;
-                else if (memory_is_word(name, length, "FLOODLIGHT"))
-                        build_moon_floodlight = on;
-                else if (memory_is_word(name, length, "WAYLAND"))
-                        build_moon_wayland = on;
-                else if (memory_is_word(name, length, "GPU"))
-                        build_moon_gpu = on;
-                else if (memory_is_word(name, length, "CANVAS"))
-                        build_moon_canvas = on;
-                else if (memory_is_word(name, length, "INPUT_GROUP"))
-                        build_moon_input_group = on;
+                static const struct { string_address name; bool address_to slot; } moon_switches[] = {
+                    {"CORE", address_of build_moon_core},
+                    {"SHELL", address_of build_moon_shell},
+                    {"UTILITIES", address_of build_moon_utilities},
+                    {"UTIL_LINUX", address_of build_moon_util_linux},
+                    {"SHELL_MONITOR", address_of build_moon_shell_monitor},
+                    {"TOOLS_ALL", address_of build_moon_tools_all},
+                    {"BUILTINS_ALL", address_of build_moon_builtins_all},
+                    {"FLOODLIGHT", address_of build_moon_floodlight},
+                    {"WAYLAND", address_of build_moon_wayland},
+                    {"GPU", address_of build_moon_gpu},
+                    {"CANVAS", address_of build_moon_canvas},
+                    {"INPUT_GROUP", address_of build_moon_input_group},
+                };
+                positive sw = memory_table_lookup(name, length, moon_switches);
+
+                if (sw < array_count(moon_switches))
+                        address_to moon_switches[sw].slot = on;
                 else if ((string_has_prefix(name, "TOOL_") ||
                           string_has_prefix(name, "BUILTIN_") ||
                           string_has_prefix(name, "FLOODLIGHT_")) &&
@@ -4569,21 +4564,31 @@ static bool build_utility_program;
 
 static bool build_category_on(string_address category)
 {
-        bool utilities = build_moon_utilities;
+        enum { CAT_SYSTEM, CAT_GENERAL, CAT_UTIL, CAT_MONITOR };
+        static const struct { string_address name; p8 kind; } categories[] = {
+            {"SYSTEM", CAT_SYSTEM},
+            {"GENERAL", CAT_GENERAL},
+            {"UTIL_BIN", CAT_UTIL},
+            {"UTIL_SBIN", CAT_UTIL},
+            {"MONITOR", CAT_MONITOR},
+        };
+        positive idx = string_table_lookup(category, categories);
 
-        if (word_is(category, "SYSTEM"))
+        if (idx >= array_count(categories))
+                return false;
+
+        switch (categories[idx].kind)
+        {
+        case CAT_SYSTEM:
                 return !build_utility_program;
-
-        if (word_is(category, "GENERAL"))
-                return utilities;
-
-        if (word_is(category, "UTIL_BIN") || word_is(category, "UTIL_SBIN"))
-                return utilities && build_moon_util_linux;
-
-        if (word_is(category, "MONITOR"))
-                return utilities && build_moon_shell_monitor &&
+        case CAT_GENERAL:
+                return build_moon_utilities;
+        case CAT_UTIL:
+                return build_moon_utilities && build_moon_util_linux;
+        case CAT_MONITOR:
+                return build_moon_utilities && build_moon_shell_monitor &&
                        !build_utility_program;
-
+        }
         return false;
 }
 
@@ -6750,32 +6755,43 @@ static string_address build_quote(string_address address_to words, positive coun
 */
 static string_address build_arch_name(string_address word)
 {
-        if (word_is(word, "x64") || word_is(word, "x86_64") ||
-            word_is(word, "amd64") || word_is(word, "x86-64"))
-                return "x64";
-        if (word_is(word, "arm64") || word_is(word, "aarch64") ||
-            word_is(word, "arm"))
-                return "arm64";
-        if (word_is(word, "riscv64") || word_is(word, "riscv"))
-                return "riscv64";
-        return null;
+        static const struct { string_address alias; string_address canonical; } aliases[] = {
+            {"x64", "x64"},
+            {"x86_64", "x64"},
+            {"amd64", "x64"},
+            {"x86-64", "x64"},
+            {"arm64", "arm64"},
+            {"aarch64", "arm64"},
+            {"arm", "arm64"},
+            {"riscv64", "riscv64"},
+            {"riscv", "riscv64"},
+        };
+        positive idx = string_table_lookup(word, aliases);
+
+        return idx < array_count(aliases) ? aliases[idx].canonical : null;
 }
 
 static string_address build_arch_profile(string_address arch)
 {
-        if (word_is(arch, "arm64"))
-                return "arch/arm";
-        if (word_is(arch, "riscv64"))
-                return "arch/riscv";
-        return "arch/x64";
+        static const struct { string_address arch; string_address profile; } profiles[] = {
+            {"arm64", "arch/arm"},
+            {"riscv64", "arch/riscv"},
+        };
+        positive idx = string_table_lookup(arch, profiles);
+
+        return idx < array_count(profiles) ? profiles[idx].profile : (string_address)"arch/x64";
 }
 
 static string_address build_arch_of_profile(string_address profile)
 {
-        if (string_has_prefix(profile, "arch/arm"))
-                return "arm64";
-        if (string_has_prefix(profile, "arch/riscv"))
-                return "riscv64";
+        static const struct { string_address prefix; positive length; string_address arch; } prefixes[] = {
+            {"arch/arm", 8, "arm64"},
+            {"arch/riscv", 10, "riscv64"},
+        };
+
+        for (positive at = 0; at < array_count(prefixes); at++)
+                if (!string_compare_max(profile, prefixes[at].prefix, prefixes[at].length))
+                        return prefixes[at].arch;
         return "x64";
 }
 
@@ -7507,11 +7523,14 @@ static bool build_fat_root(string_address directory)
 */
 static b32 build_usb_update(string_address image, string_address directory)
 {
+        static const struct { string_address name; p16 machine; } efi_machines[] = {
+            {"bootx64.efi", 0x8664},
+            {"bootaa64.efi", 0xaa64},
+            {"bootriscv64.efi", 0x5064},
+        };
         string_address name = build_name_of(image);
-        p16 machine = word_is(name, "bootx64.efi")       ? 0x8664
-                      : word_is(name, "bootaa64.efi")    ? 0xaa64
-                      : word_is(name, "bootriscv64.efi") ? 0x5064
-                                                         : 0;
+        positive efi_idx = string_table_lookup(name, efi_machines);
+        p16 machine = efi_idx < array_count(efi_machines) ? efi_machines[efi_idx].machine : 0;
         p8 build[HOST_BUILD_ROOM];
         p8 sum[32];
         p8 line[160];
@@ -7559,7 +7578,7 @@ static b32 build_usb_update(string_address image, string_address directory)
                 return build_die(build_join("could not copy ", image, " whole to ", stage, null));
         }
 
-        handle = system_open_at(AT_FDCWD, stage, FILE_READ | O_CLOEXEC);
+        handle = system_open_at(AT_FDCWD, stage, FILE_READ | O_CLOEXEC | O_NOFOLLOW);
         read = handle >= 0 && (machine == 0x8664 ? host_setup_version(handle, build, sizeof(build))
                                                  : host_banner_version(handle, build, sizeof(build)));
         if (handle >= 0)
@@ -8001,70 +8020,73 @@ b32 main()
                         command = null;
         }
 
-        for (positive mode = 0; command && mode < array_count(build_commands); mode++)
+        if (command)
         {
-                if (!word_is(command, build_commands[mode].name))
-                        continue;
-                if (build_commands[mode].safe)
-                        build_is_safe();
-                if (build_commands[mode].config)
-                        build_config_load();
-                if (count < build_commands[mode].minimum ||
-                    (build_commands[mode].maximum && count > build_commands[mode].maximum))
-                {
-                        if (build_commands[mode].usage)
-                                string_format(log_error, "%s", build_commands[mode].usage);
-                        return 1;
-                }
+                positive mode = string_table_lookup(command, build_commands);
 
-                switch (mode)
+                if (mode < array_count(build_commands))
                 {
-                case BUILD_CONFIG:
-                        return build_config(arguments + 2, count - 2);
-                case BUILD_VERIFY_CONFIG:
-                        return build_verify_config(arguments[2], arguments + 3, count - 3);
-                case BUILD_ASM:
-                        return build_asm(arguments[2], arguments[3], arguments[4]);
-                case BUILD_SPARK:
-                        return build_spark(arguments[2], arguments[3], count > 4 ? arguments[4] : null);
-                case BUILD_KEY:
-                case BUILD_KEY_ONE:
-                {
-                        bool good = true;
-                        string_address answer = mode == BUILD_KEY
-                            ? build_key(arguments[2]) : build_key_one(arguments[2], address_of good);
-                        if (!good)
+                        if (build_commands[mode].safe)
+                                build_is_safe();
+                        if (build_commands[mode].config)
+                                build_config_load();
+                        if (count < build_commands[mode].minimum ||
+                            (build_commands[mode].maximum && count > build_commands[mode].maximum))
+                        {
+                                if (build_commands[mode].usage)
+                                        string_format(log_error, "%s", build_commands[mode].usage);
                                 return 1;
-                        string_format(log, "%s\n", answer);
-                        log_flush();
-                        return 0;
-                }
-                case BUILD_SIZE:
-                        build_size(arguments[2]);
-                        return 0;
-                case BUILD_SWITCHES:
-                        return build_switches(count > 2 ? arguments[2] : null);
-                case BUILD_SURFACE:
-                        return build_surface(arguments[2], count > 3 ? arguments[3] : null);
-                case BUILD_CONFIG_HEADER:
-                        return build_config_header_write(arguments[2], arguments[3],
-                                                         count > 4 ? arguments[4] : null);
-                case BUILD_GPU_KERNELS:
-                        return build_gpu_kernels(count > 2 ? arguments[2] : build_setting_get("gpu_source"),
-                                                 count > 3 ? arguments[3]
-                                                           : build_in("artifacts", build_setting_get("gpu_kernels")));
-                case BUILD_GPU_I915:
-                        return build_gpu_i915(count > 2 ? arguments[2] : build_setting_get("gpu_i915_source"),
-                                              count > 3 ? arguments[3]
-                                                        : build_in("artifacts", build_setting_get("gpu_i915_kernels")));
-                case BUILD_FREESTANDING:
-                        return build_freestanding(arguments + 2, count - 2);
-                case BUILD_FLOOR:
-                        return build_floor(count > 2 ? arguments[2] : null);
-                case BUILD_HELP:
-                case BUILD_HELP_SHORT:
-                        build_usage();
-                        return 0;
+                        }
+
+                        switch (mode)
+                        {
+                        case BUILD_CONFIG:
+                                return build_config(arguments + 2, count - 2);
+                        case BUILD_VERIFY_CONFIG:
+                                return build_verify_config(arguments[2], arguments + 3, count - 3);
+                        case BUILD_ASM:
+                                return build_asm(arguments[2], arguments[3], arguments[4]);
+                        case BUILD_SPARK:
+                                return build_spark(arguments[2], arguments[3], count > 4 ? arguments[4] : null);
+                        case BUILD_KEY:
+                        case BUILD_KEY_ONE:
+                        {
+                                bool good = true;
+                                string_address answer = mode == BUILD_KEY
+                                    ? build_key(arguments[2]) : build_key_one(arguments[2], address_of good);
+                                if (!good)
+                                        return 1;
+                                string_format(log, "%s\n", answer);
+                                log_flush();
+                                return 0;
+                        }
+                        case BUILD_SIZE:
+                                build_size(arguments[2]);
+                                return 0;
+                        case BUILD_SWITCHES:
+                                return build_switches(count > 2 ? arguments[2] : null);
+                        case BUILD_SURFACE:
+                                return build_surface(arguments[2], count > 3 ? arguments[3] : null);
+                        case BUILD_CONFIG_HEADER:
+                                return build_config_header_write(arguments[2], arguments[3],
+                                                                 count > 4 ? arguments[4] : null);
+                        case BUILD_GPU_KERNELS:
+                                return build_gpu_kernels(count > 2 ? arguments[2] : build_setting_get("gpu_source"),
+                                                         count > 3 ? arguments[3]
+                                                                   : build_in("artifacts", build_setting_get("gpu_kernels")));
+                        case BUILD_GPU_I915:
+                                return build_gpu_i915(count > 2 ? arguments[2] : build_setting_get("gpu_i915_source"),
+                                                      count > 3 ? arguments[3]
+                                                                : build_in("artifacts", build_setting_get("gpu_i915_kernels")));
+                        case BUILD_FREESTANDING:
+                                return build_freestanding(arguments + 2, count - 2);
+                        case BUILD_FLOOR:
+                                return build_floor(count > 2 ? arguments[2] : null);
+                        case BUILD_HELP:
+                        case BUILD_HELP_SHORT:
+                                build_usage();
+                                return 0;
+                        }
                 }
         }
 
@@ -8095,23 +8117,39 @@ b32 main()
 
                 build_is_safe();
 
+                enum { OPT_CLEAN = 1u, OPT_RUN = 2u, OPT_NO_MAKE = 4u, OPT_SHELL = 8u, OPT_USB = 16u };
+                static const named_flag main_flags[] = {
+                    {"--clean", OPT_CLEAN},
+                    {"--run", OPT_RUN},
+                    {"--boot", OPT_RUN | OPT_NO_MAKE},
+                    {"--shell", OPT_SHELL},
+                    {"--usb", OPT_USB},
+                };
+
                 for (positive at = 1; at < count; at++)
                 {
                         string_address word = arguments[at];
+                        positive flag = string_table_lookup(word, main_flags);
 
-                        if (word_is(word, "--clean"))
-                                clean = true;
-                        else if (word_is(word, "--run"))
-                                run = true;
-                        else if (word_is(word, "--boot"))
+                        if (flag < array_count(main_flags))
                         {
-                                run = true;
-                                make = false;
+                                p64 mask = main_flags[flag].value;
+
+                                if (mask & OPT_CLEAN)
+                                        clean = true;
+                                if (mask & OPT_RUN)
+                                        run = true;
+                                if (mask & OPT_NO_MAKE)
+                                        make = false;
+                                if (mask & OPT_SHELL)
+                                        console = true;
+                                if (mask & OPT_USB)
+                                        usb = true;
+                                continue;
                         }
-                        else if (word_is(word, "--shell"))
-                                console = true;
-                        else if (word_is(word, "--ram") ||
-                                 string_has_prefix(word, "--ram="))
+
+                        if (word_is(word, "--ram") ||
+                            string_has_prefix(word, "--ram="))
                         {
                                 string_address given =
                                     word[5] ? word + 6
@@ -8123,8 +8161,6 @@ b32 main()
                                         return build_die(
                                                 "--ram wants whole gigabytes of memory, 1 to 4096");
                         }
-                        else if (word_is(word, "--usb"))
-                                usb = true;
                         else if (word_is(word, "--usb-update") ||
                                  string_has_prefix(word, "--usb-update="))
                         {

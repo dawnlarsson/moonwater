@@ -547,8 +547,7 @@ static bool bowl_needs_isolated(string_address program)
                 return false;
 
         path_tail_copy(name, sizeof(name), program);
-        return string_table_find(name, managers, sizeof(managers[0]),
-                                 array_count(managers)) < array_count(managers);
+        return string_table_lookup(name, managers) < array_count(managers);
 }
 
 /* A usage page is standard error and 2, as the moonwater command's and link's
@@ -2520,13 +2519,20 @@ static bipolar bowl_pad_next_process(void)
 
                 for (positive at = 0; number && entry->d_name[at]; at++)
                 {
-                        number = byte_is_digit(entry->d_name[at]);
-                        if (pid > ((positive)0x7fffffff / 10))
+                        positive digit;
+
+                        if (!byte_is_digit(entry->d_name[at]))
                         {
                                 number = false;
                                 break;
                         }
-                        pid = pid * 10 + (positive)(entry->d_name[at] - '0');
+                        digit = (positive)(entry->d_name[at] - '0');
+                        if (pid > ((positive)0x7fffffff - digit) / 10)
+                        {
+                                number = false;
+                                break;
+                        }
+                        pid = pid * 10 + digit;
                 }
                 if (!number || pid == self ||
                     bowl_pad_namespace(entry->d_name, other, sizeof(other)) != own_length ||
@@ -2979,15 +2985,13 @@ static b32 bowl_session_default_missing(string_address name,
         if (!name)
                 return true;
 
-        if (string_table_find(name, empty_ok, sizeof(empty_ok[0]),
-                              array_count(empty_ok)) < array_count(empty_ok))
+        if (string_table_lookup(name, empty_ok) < array_count(empty_ok))
                 return !value;
 
         if (!value || !value[0])
                 return true;
 
-        if (string_table_find(name, path_vars, sizeof(path_vars[0]),
-                              array_count(path_vars)) < array_count(path_vars))
+        if (string_table_lookup(name, path_vars) < array_count(path_vars))
                 return bowl_path_steps(value) ||
                        bowl_session_host_path(value);
 
@@ -8091,9 +8095,7 @@ static const struct bowl_distro bowl_distros[] = {
 
 static const struct bowl_distro address_to bowl_find_distro(string_address name)
 {
-        positive at = string_table_find(name, bowl_distros,
-                                        sizeof(bowl_distros[0]),
-                                        array_count(bowl_distros));
+        positive at = string_table_lookup(name, bowl_distros);
 
         return at < array_count(bowl_distros) ? bowl_distros + at : null;
 }
@@ -8206,12 +8208,17 @@ static b32 bowl_setup_distro(const struct bowl_distro address_to distro)
                 }
         }
 
-        if (distro->prime == BOWL_PRIME_ARCH)
-                failed = bowl_prime_arch(distro->root);
-        else if (distro->prime == BOWL_PRIME_NIX)
-                failed = bowl_prime_nix(distro->root);
-        else if (distro->prime == BOWL_PRIME_DEBIAN)
-                failed = bowl_prime_debian(distro->root);
+        {
+                static b32 (*const prime_run[])(string_address) = {
+                    [BOWL_PRIME_ARCH] = bowl_prime_arch,
+                    [BOWL_PRIME_NIX] = bowl_prime_nix,
+                    [BOWL_PRIME_DEBIAN] = bowl_prime_debian,
+                };
+
+                if (distro->prime < array_count(prime_run) &&
+                    prime_run[distro->prime])
+                        failed = prime_run[distro->prime](distro->root);
+        }
         if (failed)
                 return failed;
 
@@ -13111,9 +13118,7 @@ static const struct bowl_profile bowl_profiles[] = {
 
 static const struct bowl_profile address_to bowl_find_profile(string_address name)
 {
-        positive at = string_table_find(name, bowl_profiles,
-                                        sizeof(bowl_profiles[0]),
-                                        array_count(bowl_profiles));
+        positive at = string_table_lookup(name, bowl_profiles);
 
         return at < array_count(bowl_profiles) ? bowl_profiles + at : null;
 }
@@ -14457,17 +14462,14 @@ static positive bowl_profile_words(
         if (count == 4)
         {
                 action = arguments[3];
-                if (string_table_find(name, actions, sizeof(actions[0]),
-                                      array_count(actions)) <
-                    array_count(actions))
+                if (string_table_lookup(name, actions) < array_count(actions))
                 {
                         action = name;
                         name = arguments[3];
                 }
         }
 
-        verb = string_table_find(action, actions, sizeof(actions[0]),
-                                 array_count(actions));
+        verb = string_table_lookup(action, actions);
         if (verb >= array_count(actions))
                 return BOWL_PROFILE_WORDS_USAGE;
         address_to remove = verb == 1;
@@ -14598,13 +14600,11 @@ static b32 bowl_main()
 
         return_if(!arguments || count < 2, bowl_usage());
 
-        verb = string_table_find(arguments[1], verbs, sizeof(verbs[0]),
-                                 array_count(verbs));
+        verb = string_table_lookup(arguments[1], verbs);
         if (verb < array_count(verbs))
                 return verbs[verb].run(count, arguments);
 
-        mode = string_table_find(arguments[1], modes, sizeof(modes[0]),
-                                 array_count(modes));
+        mode = string_table_lookup(arguments[1], modes);
         if (mode < array_count(modes))
         {
                 isolated = modes[mode].isolated;

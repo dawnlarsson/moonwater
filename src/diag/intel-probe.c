@@ -784,9 +784,9 @@ static void topology(void)
 	}
 	it.data_ptr = (u64)tb;
 	r = ioc(I915_QUERY, &q);
-	if (r < 0) {
+	if (r < 0 || it.length < 16 || (u64)it.length > sizeof tb) {
 		S("   topology: ");
-		RC(r);
+		RC(r < 0 ? r : (it.length < 0 ? it.length : -22));
 		NL();
 		return;
 	}
@@ -1746,63 +1746,79 @@ static i32 probe_main(i32 argc, char **argv)
 	int f, ok;
 
 	cfg_default(&c);
-	for (i32 i = 1; i < argc; i++) {
-		const char *a = argv[i];
-		const char *v = (i + 1 < argc) ? argv[i + 1] : "0";
+	{
+		const struct { const char *name; void *slot; int is_u32; } bool_opts[] = {
+			{"--facts", &facts_only, 0},
+			{"--walker", &walker, 0},
+			{"--b-only", &b_only, 0},
+			{"--dump", &dump_only, 0},
+			{"--allow-gen7", &allow7, 0},
+			{"--allow-untested", &untested, 0},
+			{"--rgba", &c.rgba, 1},
+			{"--kalt", &c.kalt, 1},
+			{"--control", &c.control, 1},
+			{"--guard", &c.guard, 1},
+			{"--fault", &c.fault, 1},
+			{"--badlen", &c.badlen, 1},
+			{"--padmask", &c.padmask, 1},
+			{"--secure", &exec_secure, 0},
+			{"--mi-store", &mi_store7, 0},
+		};
+		const struct { const char *name; u32 *u32_slot; u64 *u64_slot; int *given; } num_opts[] = {
+			{"--w", &c.w, 0, 0},
+			{"--h", &c.h, 0, 0},
+			{"--pitch", &c.pitch, 0, 0},
+			{"--colour", &c.colour, 0, 0},
+			{"--mocs", &c.mocs, 0, 0},
+			{"--ggtt", &c.ggtt, 0, 0},
+			{"--repeat", &c.repeat, 0, 0},
+			{"--kern", &c.kern, 0, &kern_given},
+			{"--base", 0, &addr_bias, &base_given},
+		};
 
-		if (streq(a, "--facts"))
-			facts_only = 1;
-		else if (streq(a, "--walker"))
-			walker = 1;
-		else if (streq(a, "--b-only"))
-			b_only = 1;
-		else if (streq(a, "--dump"))
-			dump_only = 1;
-		else if (streq(a, "--allow-gen7"))
-			allow7 = 1;
-		else if (streq(a, "--allow-untested"))
-			untested = 1;
-		else if (streq(a, "--rgba"))
-			c.rgba = 1;
-		else if (streq(a, "--kalt"))
-			c.kalt = 1;
-		else if (streq(a, "--control"))
-			c.control = 1;
-		else if (streq(a, "--guard"))
-			c.guard = 1;
-		else if (streq(a, "--fault"))
-			c.fault = 1;
-		else if (streq(a, "--badlen"))
-			c.badlen = 1;
-		else if (streq(a, "--padmask"))
-			c.padmask = 1;
-		else if (streq(a, "--w") || streq(a, "--h") || streq(a, "--pitch") || streq(a, "--colour") ||
-			 streq(a, "--mocs") || streq(a, "--ggtt") || streq(a, "--repeat") || streq(a, "--kern") ||
-			 streq(a, "--base")) {
-			if (i + 1 >= argc) {
-				S("missing value for ");
+		for (i32 i = 1; i < argc; i++) {
+			const char *a = argv[i];
+			int matched = 0;
+
+			for (u32 k = 0; k < COUNT(bool_opts); k++) {
+				if (streq(a, bool_opts[k].name)) {
+					if (bool_opts[k].is_u32)
+						*(u32 *)bool_opts[k].slot = 1;
+					else
+						*(int *)bool_opts[k].slot = 1;
+					matched = 1;
+					break;
+				}
+			}
+			if (matched)
+				continue;
+			for (u32 k = 0; k < COUNT(num_opts); k++) {
+				if (streq(a, num_opts[k].name)) {
+					u64 parsed;
+
+					if (i + 1 >= argc) {
+						S("missing value for ");
+						S(a);
+						NL();
+						return 2;
+					}
+					parsed = parse_num(argv[++i]);
+					if (num_opts[k].u32_slot)
+						*num_opts[k].u32_slot = (u32)parsed;
+					else
+						*num_opts[k].u64_slot = parsed;
+					if (num_opts[k].given)
+						*num_opts[k].given = 1;
+					matched = 1;
+					break;
+				}
+			}
+			if (!matched) {
+				S("unknown argument: ");
 				S(a);
 				NL();
 				return 2;
 			}
-			v = argv[++i];
-			if (streq(a, "--w")) c.w = (u32)parse_num(v);
-			else if (streq(a, "--h")) c.h = (u32)parse_num(v);
-			else if (streq(a, "--pitch")) c.pitch = (u32)parse_num(v);
-			else if (streq(a, "--colour")) c.colour = (u32)parse_num(v);
-			else if (streq(a, "--mocs")) c.mocs = (u32)parse_num(v);
-			else if (streq(a, "--ggtt")) c.ggtt = (u32)parse_num(v);
-			else if (streq(a, "--repeat")) c.repeat = (u32)parse_num(v);
-			else if (streq(a, "--kern")) { c.kern = (u32)parse_num(v); kern_given = 1; }
-			else if (streq(a, "--base")) { addr_bias = parse_num(v); base_given = 1; }
-		}
-		else if (streq(a, "--secure")) exec_secure = 1;
-		else if (streq(a, "--mi-store")) mi_store7 = 1;
-		else {
-			S("unknown argument: ");
-			S(a);
-			NL();
-			return 2;
 		}
 	}
 	if (c.kern != 7 && c.kern != 75 && c.kern != 8 && c.kern != 9 && c.kern != 11 && c.kern != 12) {

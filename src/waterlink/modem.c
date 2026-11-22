@@ -937,12 +937,12 @@ int modem_chunk_take(modem_chunk_rx *cr, const b16 *pcm, sized n, p8 *out, sized
                 sized whole;
 
                 if (len < 0) {
-                        at += took;
+                        at = took > n - at ? n : at + took;
                         if (used)
                                 *used = at;
                         return cr->rx.closed ? -1 : 0;
                 }
-                at += took;
+                at = took > n - at ? n : at + took;
                 whole = modem_chunk_put(cr, payload, (sized)len, out, cap);
                 if (whole) {
                         if (used)
@@ -1484,25 +1484,43 @@ static void modem_in_drop(unsigned lane, positive count)
         modem_in_seen[lane] = modem_in_seen[lane] > count ? modem_in_seen[lane] - count : 0;
 }
 
+static const struct
+{
+        string_address name;
+        string_address log_line;
+        string_address status_line;
+} modem_stream_modes[] = {
+    {(string_address)"two",
+     (string_address)"the modem's capture is two streams: the left and the right, each with its own receiver\n",
+     (string_address)"audio modem streams: two, the left and the right, each with its own receiver\n"},
+    {(string_address)"copy",
+     (string_address)"the modem's capture is one stream: the right channel is a copy of the left (a mono device, or a cable a card reads as mono)\n",
+     (string_address)"audio modem streams: one, the right is a copy of the left (a mono device or cable)\n"},
+    {(string_address)"left",
+     (string_address)"the modem's capture is one stream: the cable or card gives no right channel, so the left is taken alone\n",
+     (string_address)"audio modem streams: one, no right channel, the left alone\n"},
+    {(string_address)"closed",
+     (string_address)"the modem's right channel is closed after refused frames, so the left is taken alone\n",
+     (string_address)"audio modem streams: one, the right's receiver closed after refused frames\n"},
+    {(string_address)"off",
+     (string_address)"the modem is not listening\n",
+     null},
+};
+
 /*
         Says which streams the capture is, when it changes: the log says it in words, and the status file says it in one word for
         `link transport`. A closed right channel stays closed until the modem is off.
 */
 static void modem_streams_set(int streams)
 {
-        static const char *const word[] = {"two", "copy", "left", "closed", "off"};
-        static const char *const said[] = {
-            "the modem's capture is two streams: the left and the right, each with its own receiver\n",
-            "the modem's capture is one stream: the right channel is a copy of the left (a mono device, or a cable a card reads as mono)\n",
-            "the modem's capture is one stream: the cable or card gives no right channel, so the left is taken alone\n",
-            "the modem's right channel is closed after refused frames, so the left is taken alone\n",
-            "the modem is not listening\n"};
-
+        if (streams < 0 || (positive)streams >= array_count(modem_stream_modes))
+                return;
         if (streams == modem_streams || (modem_streams == MODEM_STREAMS_CLOSED && streams != MODEM_STREAMS_OFF))
                 return;
         modem_streams = streams;
-        host_say(log, host_label "%s", said[streams]);
-        (void)link_file_replace(LINK_MODEM_STREAMS_PATH, (address_any)word[streams], string_length((string_address)word[streams]), 0);
+        host_say(log, host_label "%s", modem_stream_modes[streams].log_line);
+        (void)link_file_replace(LINK_MODEM_STREAMS_PATH, (address_any)modem_stream_modes[streams].name,
+                                string_length(modem_stream_modes[streams].name), 0);
 }
 
 /*
@@ -1648,6 +1666,8 @@ static p8 modem_record_create(struct ctl *c, unsigned long *channel)
                 return 0;
         r = (struct wire_r){c->frame + 20 + 10, got - 10, 0, 0};
         *channel = wire_r_u32(&r);
+        if (r.bad)
+                return 0;
         return 1;
 }
 
@@ -1927,17 +1947,13 @@ static p64 link_modem_fail(p64 now, string_address why)
 static void link_modem_streams_say(void)
 {
         p8 word[16];
+        positive hit;
 
         if (host_read_word(LINK_MODEM_STREAMS_PATH, word, sizeof word) < 0)
                 return;
-        if (string_equals((string_address)word, "two"))
-                host_say(log, host_label "audio modem streams: two, the left and the right, each with its own receiver\n");
-        else if (string_equals((string_address)word, "copy"))
-                host_say(log, host_label "audio modem streams: one, the right is a copy of the left (a mono device or cable)\n");
-        else if (string_equals((string_address)word, "left"))
-                host_say(log, host_label "audio modem streams: one, no right channel, the left alone\n");
-        else if (string_equals((string_address)word, "closed"))
-                host_say(log, host_label "audio modem streams: one, the right's receiver closed after refused frames\n");
+        hit = string_table_lookup((string_address)word, modem_stream_modes);
+        if (hit < array_count(modem_stream_modes) && modem_stream_modes[hit].status_line)
+                host_say(log, host_label "%s", modem_stream_modes[hit].status_line);
 }
 
 /*

@@ -48,7 +48,8 @@ static HOT address_any system_snapshot_append(system_snapshot address_to sample,
 {
         positive used = sample->records.used;
 
-        if (width > SPARK_SNAPSHOT_MAX_BYTES - used ||
+        if (used > SPARK_SNAPSHOT_MAX_BYTES ||
+            width > SPARK_SNAPSHOT_MAX_BYTES - used ||
             !byte_store_reserve(address_of sample->records, used + width,
                                 4096))
                 return null;
@@ -148,6 +149,8 @@ static HOT bool system_snapshot_accelerated(system_snapshot address_to sample,
 
 static CONST positive system_scaled(positive value, positive scale)
 {
+        if (!scale)
+                return 0;
         return value > positive_max / scale ? positive_max : value * scale;
 }
 
@@ -174,7 +177,14 @@ static fn system_process_path(p8 address_to path, p32 pid,
                 path[at++] = '/';
         }
 
-        string_copy(path + at, name);
+        if (name)
+        {
+                positive length = string_length(name);
+
+                memory_copy_apart(path + at, name, length);
+                at += length;
+        }
+        path[at] = end;
 }
 
 static PURE string_address system_field_start(string_address at)
@@ -386,7 +396,7 @@ static HOT bool system_snapshot_network(system_snapshot address_to sample)
 
                         positive length = (positive)(name_end - name);
 
-                        if (length && length < 16)
+                        if (length && length < sizeof(sample->networks->name))
                         {
                                 struct snapshot_network address_to network =
                                     system_snapshot_append(
@@ -498,7 +508,8 @@ static HOT bool system_snapshot_processes(system_snapshot address_to sample,
 
                 p8 path[64];
                 p8 block[8192];
-                path_join(path, sizeof(path), entry->d_name, "stat");
+                if (!path_join(path, sizeof(path), entry->d_name, "stat"))
+                        continue;
 
                 if (file_slurp_once_at(walk.handle, path, block,
                                        sizeof(block)) <= 0)
@@ -516,10 +527,9 @@ static HOT bool system_snapshot_processes(system_snapshot address_to sample,
                 {
                         if (owners)
                         {
-                                path_join(path, sizeof(path), entry->d_name,
-                                          "status");
-
-                                if (file_slurp_once_at(walk.handle, path, block,
+                                if (path_join(path, sizeof(path), entry->d_name,
+                                              "status") &&
+                                    file_slurp_once_at(walk.handle, path, block,
                                                        sizeof(block)) > 0)
                                 {
                                         string_address uid = string_search(

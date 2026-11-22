@@ -8122,7 +8122,7 @@ static COLD p64 tls_date_seconds(p64 date)
         p64 of_year;
         p64 days;
 
-        if (!year || !month)
+        if (!year || !month || !day)
                 return 0;
         shifted = month <= 2 ? year - 1 : year;
         era = shifted / 400;
@@ -14578,11 +14578,18 @@ static COLD bool tls_ct_holds(tls_cert address_to certs, const positive address_
                 return false;
         //      tls_date_seconds counts from day zero of its calendar, not
         //      from the epoch an SCT's timestamp counts from.
-        now_ms = (p64)time(null) * 1000;
-        not_before_ms = (tls_date_seconds(leaf->not_before) -
-                         tls_date_seconds(19700101000000ull)) * 1000;
-        not_after_ms = (tls_date_seconds(leaf->not_after) -
-                        tls_date_seconds(19700101000000ull)) * 1000;
+        {
+                bipolar now_s = time(null);
+                p64 epoch = tls_date_seconds(19700101000000ull);
+                p64 nb_s = tls_date_seconds(leaf->not_before);
+                p64 na_s = tls_date_seconds(leaf->not_after);
+
+                if (now_s < 0 || nb_s < epoch || na_s < nb_s)
+                        return false;
+                now_ms = (p64)now_s * 1000;
+                not_before_ms = (nb_s - epoch) * 1000;
+                not_after_ms = (na_s - epoch) * 1000;
+        }
         crypto_sha256_of(issuer->spki, issuer->spki_length, issuer_key_hash);
         if (!byte_store_reserve(address_of precert, leaf->tbs_length, 4096))
                 return false;

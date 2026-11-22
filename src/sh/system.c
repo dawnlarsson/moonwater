@@ -494,6 +494,12 @@ static fn link_dev_fd()
         locked, reference and hardened included.
 */
 #if MOONWATER_STRICT_FILES >= STRICT_SAFE || MOONWATER_STRICT_HOST >= STRICT_SAFE || MOONWATER_STRICT_NET >= STRICT_SAFE || !defined(SHELL_NO_CANVAS)
+typedef struct
+{
+        string_address path;
+        string_address value;
+} system_sysctl_entry;
+
 static COLD fn system_sysctl(string_address path, string_address value)
 {
         bipolar handle = system_open_at(AT_FDCWD, path, 1 | O_CLOEXEC);
@@ -504,6 +510,13 @@ static COLD fn system_sysctl(string_address path, string_address value)
         system_write_all((positive)handle, (p8 address_to)value,
                          string_length(value));
         system_close((positive)handle);
+}
+
+static COLD fn system_sysctl_apply(const system_sysctl_entry address_to entries,
+                                   positive count)
+{
+        for (positive at = 0; at < count; at++)
+                system_sysctl(entries[at].path, entries[at].value);
 }
 #endif
 
@@ -542,39 +555,45 @@ static COLD fn system_sysctl_widest(string_address path, positive most,
 
 static COLD fn system_kernel_defaults(void)
 {
+        static const system_sysctl_entry defaults[] = {
 #if MOONWATER_STRICT_FILES >= STRICT_SAFE
-        system_sysctl("/proc/sys/fs/protected_symlinks", "1\n");
-        system_sysctl("/proc/sys/fs/protected_hardlinks", "1\n");
-        system_sysctl("/proc/sys/fs/protected_fifos",
-                      MOONWATER_STRICT_FILES >= STRICT_TIGHT ? "2\n" : "1\n");
-        system_sysctl("/proc/sys/fs/protected_regular",
-                      MOONWATER_STRICT_FILES >= STRICT_TIGHT ? "2\n" : "1\n");
+            {"/proc/sys/fs/protected_symlinks", "1\n"},
+            {"/proc/sys/fs/protected_hardlinks", "1\n"},
+            {"/proc/sys/fs/protected_fifos",
+             MOONWATER_STRICT_FILES >= STRICT_TIGHT ? "2\n" : "1\n"},
+            {"/proc/sys/fs/protected_regular",
+             MOONWATER_STRICT_FILES >= STRICT_TIGHT ? "2\n" : "1\n"},
 #if MOONWATER_STRICT_FILES >= STRICT_LOCKED
-        system_sysctl("/proc/sys/fs/suid_dumpable", "0\n");
+            {"/proc/sys/fs/suid_dumpable", "0\n"},
 #endif
 #endif
 #if MOONWATER_STRICT_HOST >= STRICT_SAFE
-        system_sysctl("/proc/sys/kernel/randomize_va_space", "2\n");
-        system_sysctl("/proc/sys/kernel/kptr_restrict",
-                      MOONWATER_STRICT_HOST >= STRICT_TIGHT ? "2\n" : "1\n");
-        system_sysctl("/proc/sys/kernel/dmesg_restrict", "1\n");
+            {"/proc/sys/kernel/randomize_va_space", "2\n"},
+            {"/proc/sys/kernel/kptr_restrict",
+             MOONWATER_STRICT_HOST >= STRICT_TIGHT ? "2\n" : "1\n"},
+            {"/proc/sys/kernel/dmesg_restrict", "1\n"},
 #if MOONWATER_STRICT_HOST >= STRICT_TIGHT
-        system_sysctl("/proc/sys/kernel/io_uring_disabled", "2\n");
-        system_sysctl_widest("/proc/sys/vm/mmap_rnd_bits", 33, 28);
-        system_sysctl_widest("/proc/sys/vm/mmap_rnd_compat_bits", 16, 8);
-        system_sysctl("/proc/sys/kernel/yama/ptrace_scope",
-                      MOONWATER_STRICT_HOST >= STRICT_LOCKED ? "3\n" : "2\n");
+            {"/proc/sys/kernel/io_uring_disabled", "2\n"},
+            {"/proc/sys/kernel/yama/ptrace_scope",
+             MOONWATER_STRICT_HOST >= STRICT_LOCKED ? "3\n" : "2\n"},
 #endif
 #if MOONWATER_STRICT_HOST >= STRICT_LOCKED
-        system_sysctl("/proc/sys/kernel/modules_disabled", "1\n");
+            {"/proc/sys/kernel/modules_disabled", "1\n"},
 #endif
 #endif
-        /*  Who may open an ICMP echo socket, which is all ping needs: the
-            kernel's range is empty, so a program of a bowl (whose root is a
-            user namespace with no CAP_NET_RAW in the machine's) could not
-            ping at all. The socket is an echo to a peer, and carries no
-            packet the program wrote. */
-        system_sysctl("/proc/sys/net/ipv4/ping_group_range", "0 2147483647\n");
+            /*  Who may open an ICMP echo socket, which is all ping needs: the
+                kernel's range is empty, so a program of a bowl (whose root is a
+                user namespace with no CAP_NET_RAW in the machine's) could not
+                ping at all. The socket is an echo to a peer, and carries no
+                packet the program wrote. */
+            {"/proc/sys/net/ipv4/ping_group_range", "0 2147483647\n"},
+        };
+
+        system_sysctl_apply(defaults, array_count(defaults));
+#if MOONWATER_STRICT_HOST >= STRICT_TIGHT
+        system_sysctl_widest("/proc/sys/vm/mmap_rnd_bits", 33, 28);
+        system_sysctl_widest("/proc/sys/vm/mmap_rnd_compat_bits", 16, 8);
+#endif
 }
 #endif
 
@@ -652,8 +671,12 @@ static COLD fn system_zram_setup(void)
                 return;
         if (system_call_2(syscall(swapon), (positive) "/dev/zram0", 0x8000 | 100) == 0)
         {
-                system_sysctl("/sys/module/zswap/parameters/enabled", "N\n");
-                system_sysctl("/proc/sys/vm/swappiness", "100\n");
+                static const system_sysctl_entry zram_tuning[] = {
+                    {"/sys/module/zswap/parameters/enabled", "N\n"},
+                    {"/proc/sys/vm/swappiness", "100\n"},
+                };
+
+                system_sysctl_apply(zram_tuning, array_count(zram_tuning));
         }
 }
 
@@ -675,36 +698,42 @@ static DEAD_END b32 system_init()
         system_kernel_defaults();
 #endif
 #if !defined(SHELL_NO_CANVAS) && MOONWATER_STRICT_HOST < STRICT_LOCKED
-        system_sysctl("/proc/sys/vm/max_map_count", "1048576\n");
-        system_sysctl("/proc/sys/kernel/split_lock_mitigate", "0\n");
         /*  Desktop memory, compaction, mTHP and network latency tuning:
             fixed dirty byte caps prevent multi-GiB writeback stalls on high-RAM
             machines; zero watermark_boost and compaction_proactiveness avoid
             periodic kswapd/kcompactd frame-time spikes; 64K/128K mTHP cuts
             dTLB misses on advised arenas without 2 MiB compaction cost; and
             tcp_slow_start_after_idle=0 keeps bursty game/web flows warm. */
-        system_sysctl("/proc/sys/vm/dirty_background_bytes", "67108864\n");
-        system_sysctl("/proc/sys/vm/dirty_bytes", "268435456\n");
-        system_sysctl("/proc/sys/vm/watermark_boost_factor", "0\n");
-        system_sysctl("/proc/sys/vm/watermark_scale_factor", "125\n");
-        system_sysctl("/proc/sys/vm/compaction_proactiveness", "0\n");
-        system_sysctl("/proc/sys/vm/page-cluster", "0\n");
-        system_sysctl("/sys/kernel/mm/transparent_hugepage/hugepages-64kB/enabled", "madvise\n");
-        system_sysctl("/sys/kernel/mm/transparent_hugepage/hugepages-128kB/enabled", "madvise\n");
-        system_sysctl("/proc/sys/net/ipv4/tcp_slow_start_after_idle", "0\n");
-        system_sysctl("/proc/sys/net/ipv4/tcp_mtu_probing", "1\n");
-        system_sysctl("/proc/sys/net/ipv4/tcp_fastopen", "3\n");
-        system_sysctl("/proc/sys/net/ipv4/tcp_notsent_lowat", "16384\n");
-        system_sysctl("/proc/sys/net/core/rmem_max", "16777216\n");
-        system_sysctl("/proc/sys/net/core/wmem_max", "16777216\n");
-        system_sysctl("/proc/sys/net/ipv4/tcp_rmem", "4096 131072 16777216\n");
-        system_sysctl("/proc/sys/net/ipv4/tcp_wmem", "4096 131072 16777216\n");
-        system_sysctl("/proc/sys/net/core/netdev_max_backlog", "4096\n");
-        system_sysctl("/proc/sys/fs/inotify/max_user_watches", "524288\n");
-        system_sysctl("/proc/sys/fs/inotify/max_user_instances", "1024\n");
-        system_sysctl("/proc/sys/vm/vfs_cache_pressure", "50\n");
-        system_sysctl("/proc/sys/vm/stat_interval", "10\n");
-        system_sysctl("/sys/kernel/mm/transparent_hugepage/defrag", "defer\n");
+        {
+                static const system_sysctl_entry desktop_tuning[] = {
+                    {"/proc/sys/vm/max_map_count", "1048576\n"},
+                    {"/proc/sys/kernel/split_lock_mitigate", "0\n"},
+                    {"/proc/sys/vm/dirty_background_bytes", "67108864\n"},
+                    {"/proc/sys/vm/dirty_bytes", "268435456\n"},
+                    {"/proc/sys/vm/watermark_boost_factor", "0\n"},
+                    {"/proc/sys/vm/watermark_scale_factor", "125\n"},
+                    {"/proc/sys/vm/compaction_proactiveness", "0\n"},
+                    {"/proc/sys/vm/page-cluster", "0\n"},
+                    {"/sys/kernel/mm/transparent_hugepage/hugepages-64kB/enabled", "madvise\n"},
+                    {"/sys/kernel/mm/transparent_hugepage/hugepages-128kB/enabled", "madvise\n"},
+                    {"/proc/sys/net/ipv4/tcp_slow_start_after_idle", "0\n"},
+                    {"/proc/sys/net/ipv4/tcp_mtu_probing", "1\n"},
+                    {"/proc/sys/net/ipv4/tcp_fastopen", "3\n"},
+                    {"/proc/sys/net/ipv4/tcp_notsent_lowat", "16384\n"},
+                    {"/proc/sys/net/core/rmem_max", "16777216\n"},
+                    {"/proc/sys/net/core/wmem_max", "16777216\n"},
+                    {"/proc/sys/net/ipv4/tcp_rmem", "4096 131072 16777216\n"},
+                    {"/proc/sys/net/ipv4/tcp_wmem", "4096 131072 16777216\n"},
+                    {"/proc/sys/net/core/netdev_max_backlog", "4096\n"},
+                    {"/proc/sys/fs/inotify/max_user_watches", "524288\n"},
+                    {"/proc/sys/fs/inotify/max_user_instances", "1024\n"},
+                    {"/proc/sys/vm/vfs_cache_pressure", "50\n"},
+                    {"/proc/sys/vm/stat_interval", "10\n"},
+                    {"/sys/kernel/mm/transparent_hugepage/defrag", "defer\n"},
+                };
+
+                system_sysctl_apply(desktop_tuning, array_count(desktop_tuning));
+        }
         system_zram_setup();
 #endif
         mount_devpts();
@@ -743,19 +772,18 @@ static DEAD_END b32 system_init()
         wait_for_settling(settling);
 #if !defined(SHELL_NO_CANVAS) && MOONWATER_STRICT_HOST < STRICT_LOCKED
         {
-                static const char *const nvme_rq[4] = {
-                    "/sys/block/nvme0n1/queue/rq_affinity", "/sys/block/nvme1n1/queue/rq_affinity",
-                    "/sys/block/nvme2n1/queue/rq_affinity", "/sys/block/nvme3n1/queue/rq_affinity",
+                static const system_sysctl_entry nvme_tuning[] = {
+                    {"/sys/block/nvme0n1/queue/rq_affinity", "2\n"},
+                    {"/sys/block/nvme0n1/queue/read_ahead_kb", "512\n"},
+                    {"/sys/block/nvme1n1/queue/rq_affinity", "2\n"},
+                    {"/sys/block/nvme1n1/queue/read_ahead_kb", "512\n"},
+                    {"/sys/block/nvme2n1/queue/rq_affinity", "2\n"},
+                    {"/sys/block/nvme2n1/queue/read_ahead_kb", "512\n"},
+                    {"/sys/block/nvme3n1/queue/rq_affinity", "2\n"},
+                    {"/sys/block/nvme3n1/queue/read_ahead_kb", "512\n"},
                 };
-                static const char *const nvme_ra[4] = {
-                    "/sys/block/nvme0n1/queue/read_ahead_kb", "/sys/block/nvme1n1/queue/read_ahead_kb",
-                    "/sys/block/nvme2n1/queue/read_ahead_kb", "/sys/block/nvme3n1/queue/read_ahead_kb",
-                };
-                for (int n = 0; n < 4; n++)
-                {
-                        system_sysctl(nvme_rq[n], "2\n");
-                        system_sysctl(nvme_ra[n], "512\n");
-                }
+
+                system_sysctl_apply(nvme_tuning, array_count(nvme_tuning));
         }
 #endif
         started = clock_monotonic_nanoseconds();

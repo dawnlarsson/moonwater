@@ -14,11 +14,12 @@ static string_address host_language_header(p8 address_to head, positive size, st
 {
         positive length = string_length(key);
         const char address_to at = (const char address_to)memory_search((address_any)head, size, (address_any)key, length);
+        const char address_to limit = (const char address_to)head + size;
         positive used = 0;
 
-        if (!at || (at != (const char address_to)head && at[-1] != '\n'))
+        if (!room || !at || (at != (const char address_to)head && at[-1] != '\n'))
                 return null;
-        for (at += length; *at && *at != '\n' && used + 1 < room; at++)
+        for (at += length; at < limit && *at && *at != '\n' && used + 1 < room; at++)
                 value[used++] = (p8)*at;
         value[used] = end;
         return (string_address)value;

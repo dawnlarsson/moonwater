@@ -543,7 +543,7 @@ p8 waterlink_post(struct waterlink_link address_to link, p8 key, p8 flags,
                 undefined in C, even when the short-circuit below keeps it
                 from being dereferenced. */
         if (key >= WATERLINK_KEYS || !waterlink_frame_sane(flags) ||
-            length > WATERLINK_FRAME_MAX)
+            length > WATERLINK_FRAME_MAX || (length && !payload))
         {
                 link->refused++;
                 return false;
@@ -673,10 +673,11 @@ static p64 waterlink_timeout(struct waterlink_link address_to link)
                               : 3 * WATERLINK_RTT_FIRST;
         if (base < link->rto_floor)
                 base = link->rto_floor;
-        base <<= doubling;
         if (2 * link->rto_floor > most)
                 most = 2 * link->rto_floor;
-        return base < most ? base : most;
+        if (base >= (most >> doubling))
+                return most;
+        return base << doubling;
 }
 
 static fn waterlink_congested(struct waterlink_link address_to link)

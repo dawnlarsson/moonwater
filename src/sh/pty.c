@@ -53,7 +53,7 @@ static bipolar process_pty_open(b32 address_to master_out,
 
         bipolar slave = system_open_at(AT_FDCWD, path,
                                        FILE_READ_WRITE | O_NOCTTY |
-                                           O_CLOEXEC);
+                                           O_CLOEXEC | O_NOFOLLOW);
         if (slave < 0)
         {
                 system_close((positive)master);
