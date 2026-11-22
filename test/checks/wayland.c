@@ -9204,6 +9204,30 @@ static void fake_sync_signal(void *context, long handle, unsigned long long poin
         fake_sync.last_rel = point;
 }
 
+static void test_callback_queue_cap(void)
+{
+        struct session s;
+        struct wlc *c;
+        unsigned long surf;
+        long i;
+
+        /* hostile: 1100 frame callbacks on one surface with no commit. The queue holds WAYLAND_CALLBACKS (1024); the other 76 are answered
+           at once, so the queue cannot grow without bound. */
+        wayland_stop();
+        memset(&fake, 0, sizeof fake);
+        wayland_start(&fake_host);
+        session_open(&s);
+        c = s.c;
+        surf = wlc_id(c, WLI_wl_surface, 1);
+        wlc_send(c, s.compositor, WLQ_wl_compositor_create_surface, surf);
+        for (i = 0; i < 1100; i++)
+                wlc_send(c, surf, WLQ_wl_surface_frame, wlc_id(c, WLI_wl_callback, 1));
+        wlc_pump(c);
+        WLCHECK(c->errors == 0 && wlc_count(c, WLI_wl_callback, WLE_wl_callback_done) == 1100 - WAYLAND_CALLBACKS,
+                "a surface's frame queue holds WAYLAND_CALLBACKS and answers the rest at once (%ld done)",
+                wlc_count(c, WLI_wl_callback, WLE_wl_callback_done));
+}
+
 static void test_subsurface_depth(void)
 {
         struct session s;
@@ -9728,6 +9752,7 @@ int main(int argc, char **argv)
         test_dmabuf();
         test_stall_dmabuf();
         test_dmabuf_feedbacks();
+        test_callback_queue_cap();
         test_subsurface_depth();
         test_syncobj_timeline_cap();
         test_syncobj_viewporter_and_formats();

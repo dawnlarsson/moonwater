@@ -60,7 +60,7 @@
 enum
 {
         WAYLAND_MESSAGE = 4096, WAYLAND_ARGS = 12, WAYLAND_FDS = 28, WAYLAND_OUT = 65536, WAYLAND_OUT_FDS = 8,
-        WAYLAND_EVENT = 1024, WAYLAND_DAMAGE = 8, WAYLAND_CALLBACKS = 32, WAYLAND_PRESENTATIONS = 4, WAYLAND_SERIALS = 8,
+        WAYLAND_EVENT = 1024, WAYLAND_DAMAGE = 8, WAYLAND_CALLBACKS = 1024, WAYLAND_SERIALS = 8,
         WAYLAND_TEXT = 128, WAYLAND_DIMENSION = 16384, WAYLAND_ID_GAP = 4096, WAYLAND_SCREENS = 32, WAYLAND_GLOBALS_MAX = 40,
         WAYLAND_TOUCHES = 10, WAYLAND_TOKEN_MS = 10000, WAYLAND_INPUT_SERIALS = 8, WAYLAND_CLIP_CLIPBOARD = 0, WAYLAND_CLIP_PRIMARY = 1,
         WAYLAND_PICTURE_LENT = 2, WAYLAND_DMABUF_ENTRIES = 64, WAYLAND_DMABUF_TRANCHES = 4, WAYLAND_REGION_RECTS = 8,
@@ -595,7 +595,12 @@ static inline void wayland_out_fd_put(struct wayland_client *c, long fd, long ow
 
 static int wayland_cb_push(struct wayland_client *c, struct wayland_cbq *q, unsigned int id)
 {
-        long idx = wayland_tbl_alloc(c, WLT_CB);
+        long idx;
+
+        /* a queue past WAYLAND_CALLBACKS is refused: the caller answers or discards the callback at once, so the queue cannot grow without bound */
+        if (q->count >= WAYLAND_CALLBACKS)
+                return 0;
+        idx = wayland_tbl_alloc(c, WLT_CB);
 
         if (idx < 0)
                 return 0;
