@@ -3685,6 +3685,7 @@ static void compositor_reader_direct_stat(positive now_us, positive micro)
 }
 #endif
 
+#ifdef CONFIG_MOONWATER_WAYLAND
 static int compositor_reader_button(unsigned int at, long dx, long dy, unsigned int code, int value, int wheel_v120, int wheel_horiz, positive micro)
 {
         struct compositor_input_event note = {0, 0, COMPOSITOR_READER_BTN_NOTE, 0, 0};
@@ -3703,6 +3704,7 @@ static int compositor_reader_button(unsigned int at, long dx, long dy, unsigned 
         compositor_reader_direct_stat(clock_monotonic_nanoseconds() / 1000, micro);
         return 1;
 }
+#endif
 
 HOT static int compositor_reader_direct(unsigned int at, const struct compositor_input_event *raw, unsigned int count)
 {
