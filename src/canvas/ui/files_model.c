@@ -1737,16 +1737,16 @@ static inline p32 files_tree_reveal(struct files_tree address_to t, const p8 add
 #define FILES_MOVE_MEASURE 3
 #define FILES_MOVE_PATHS ((positive)FILES_MOVE_MOST * FILES_PATH / 4)
 #define FILES_MOVE_BYTES (FILES_MOVE_PATHS + (positive)FILES_MOVE_MOST * (sizeof(p32) + 1 + FILES_NAME))
-enum { FILES_MOVE_RENAME, FILES_MOVE_COUNT, FILES_MOVE_COPYING, FILES_MOVE_REMOVE, FILES_MOVE_OVER };
+enum { FILES_MOVE_RENAME, FILES_MOVE_COUNT, FILES_MOVE_COPYING, FILES_MOVE_OVER };
 
 struct files_move
 {
         int how, state, phase, depth;
-        bipolar error, into, from, made[FILES_JOB_DEEP], in, out, out_folder;
+        bipolar error, into, from, made[FILES_JOB_DEEP], in, out, out_folder, src_dir;
         b32 cancel, ranged, begun;
         p64 bytes_total, bytes_done, left;
         p32 items_total, items_done, skipped, renamed, count, next, address_to offsets;
-        p8 at[FILES_NAME], name[FILES_NAME], named[FILES_NAME], out_name[FILES_NAME], inside[FILES_JOB_DEEP][FILES_NAME];
+        p8 at[FILES_NAME], name[FILES_NAME], named[FILES_NAME], out_name[FILES_NAME], src_name[FILES_NAME], inside[FILES_JOB_DEEP][FILES_NAME];
         p8 address_to paths, address_to copied, address_to landed, address_to buffer;
         file_facts into_facts, facts, made_facts[FILES_JOB_DEEP], piece_facts;
         file_walk walk[FILES_JOB_DEEP];
@@ -1865,6 +1865,19 @@ static b32 files_move_free_name(bipolar into, const p8 address_to name, p8 addre
         return false;
 }
 
+// A source entry a move has copied: removed only if it is still the very entry that was copied, unchanged in size and time.
+static b32 files_move_drop_source(struct files_move address_to job, bipolar dir, const p8 address_to name, const file_facts address_to was)
+{
+        file_facts now;
+        bipolar gone = files_look_at(dir, name, &now);
+        if (gone < 0)
+                return files_move_fail(job, gone);
+        if (now.size != was->size || now.modified.seconds != was->modified.seconds || now.modified.nanoseconds != was->modified.nanoseconds)
+                return files_move_fail(job, -5);
+        gone = file_remove_same(dir, (string_address)name, 0, &now);
+        return gone < 0 ? files_move_fail(job, gone) : true;
+}
+
 static fn files_move_settle(bipolar made, const file_facts address_to facts)
 {
         b64 times[4] = {facts->accessed.seconds, facts->accessed.nanoseconds, facts->modified.seconds, facts->modified.nanoseconds};
@@ -1907,7 +1920,11 @@ static b32 files_move_one(struct files_move address_to job, bipolar source, cons
                 bipolar len = (bipolar)system_call_4(syscall(readlinkat), (positive)source, (positive)name, (positive)points, sizeof(points) - 1);
                 if (len >= 0)
                         points[len] = end, len = (bipolar)system_call_3(syscall(symlinkat), (positive)points, (positive)target, (positive)made_name);
-                return len < 0 ? files_move_fail(job, len) : (__atomic_add_fetch(&job->items_done, 1, __ATOMIC_RELEASE), true);
+                if (len < 0)
+                        return files_move_fail(job, len);
+                if (job->how == FILES_MOVE_MOVE && !files_move_drop_source(job, source, name, facts))
+                        return false;
+                return __atomic_add_fetch(&job->items_done, 1, __ATOMIC_RELEASE), true;
         }
         if (format != MODE_FILE)
                 return job->skipped++, __atomic_add_fetch(&job->items_done, 1, __ATOMIC_RELEASE), true;
@@ -1919,6 +1936,7 @@ static b32 files_move_one(struct files_move address_to job, bipolar source, cons
                 return job->out = -1, files_move_file_drop(job, true), files_move_fail(job, why);
         }
         job->out_folder = target, job->left = facts->size, job->ranged = true, job->piece_facts = *facts;
+        job->src_dir = source, string_copy_bounded(job->src_name, (string_address)name, FILES_NAME);
         return string_copy_bounded(job->out_name, (string_address)made_name, FILES_NAME), true;
 }
 
@@ -1959,14 +1977,14 @@ static b32 files_move_walk(struct files_move address_to job, b32 counting)
                 }
                 job->left -= moved;
                 if (got < 0 || (!moved && job->left))
-                {
-                        if (got == 0)
-                                job->left = 0;
-                        else
-                                return files_move_file_drop(job, false), files_move_fail(job, got);
-                }
+                        return files_move_file_drop(job, false), files_move_fail(job, got < 0 ? got : -5);
                 if (!job->left)
-                        files_move_settle(job->out, &job->piece_facts), files_move_file_drop(job, true), __atomic_add_fetch(&job->items_done, 1, __ATOMIC_RELEASE);
+                {
+                        files_move_settle(job->out, &job->piece_facts), files_move_file_drop(job, true);
+                        if (job->how == FILES_MOVE_MOVE && !files_move_drop_source(job, job->src_dir, job->src_name, &job->piece_facts))
+                                return false;
+                        __atomic_add_fetch(&job->items_done, 1, __ATOMIC_RELEASE);
+                }
                 return job->out >= 0 || job->depth > 0;
         }
         if (!job->depth)
@@ -1981,6 +1999,20 @@ static b32 files_move_walk(struct files_move address_to job, b32 counting)
                 job->depth--, file_walk_close(walk);
                 if (job->made[job->depth] >= 0)
                         files_move_settle(job->made[job->depth], &job->made_facts[job->depth]), files_close(&job->made[job->depth]);
+                if (!counting && job->how == FILES_MOVE_MOVE)
+                {
+                        // The source folder goes only if it is empty: an entry that was not copied (a special, or one added during the copy) stays.
+                        bipolar parent = job->depth ? job->walk[job->depth - 1].handle : job->from;
+                        file_facts now;
+                        bipolar gone = files_look_at(parent, job->inside[job->depth], &now);
+                        if (gone < 0 || !files_same_facts(&now, &job->made_facts[job->depth]))
+                                return files_move_fail(job, gone < 0 ? gone : -5);
+                        gone = (bipolar)system_call_3(syscall(unlinkat), (positive)parent, (positive)job->inside[job->depth], AT_REMOVEDIR);
+                        if (gone == -39)
+                                job->skipped++;
+                        else if (gone < 0)
+                                return files_move_fail(job, gone);
+                }
                 __atomic_add_fetch(counting ? &job->items_total : &job->items_done, 1, __ATOMIC_RELEASE);
                 return job->depth > 0;
         }
@@ -2039,8 +2071,6 @@ static b32 files_move_step(struct files_move address_to job)
                                 return false;
                         if (counting)
                                 job->next++;
-                        else if (job->how == FILES_MOVE_MOVE)
-                                job->phase = FILES_MOVE_REMOVE;
                         else
                                 job->copied[job->next++] = 2;
                         return true;
@@ -2065,20 +2095,8 @@ static b32 files_move_step(struct files_move address_to job)
                 if (!files_move_one(job, job->from, job->name, &job->facts, job->named, false))
                         return false;
                 if (!job->depth && job->out < 0)
-                {
-                        if (job->how == FILES_MOVE_MOVE && (job->facts.mode & MODE_FORMAT) == MODE_LINK)
-                                job->phase = FILES_MOVE_REMOVE;
-                        else
-                                job->copied[job->next++] = 2;
-                }
+                        job->copied[job->next++] = 2;
                 return true;
-        }
-        if (job->phase == FILES_MOVE_REMOVE)
-        {
-                bipolar err = 0;
-                int step = files_rmdir_step(job->from, job->made, job->inside, &job->depth, job->at,
-                                            job->depth ? null : job->name, job->depth ? null : &job->facts, null, &err);
-                return step < 0 ? files_move_fail(job, err) : step == 0 ? true : (job->copied[job->next++] = 2, job->phase = FILES_MOVE_COPYING, true);
         }
         return false;
 }
@@ -2343,9 +2361,14 @@ static b32 files_git_marks(const struct files_model address_to m, p8 address_to 
         rel = string_length((string_address)s->root);
         rel = rel > 1 ? rel + 1 : 1, at_root = rel <= 1 || length + 1 == rel;
         string_append_bounded((string_address)at_path, (string_address) "/index", FILES_PATH);
-        if ((handle = system_open_at(AT_FDCWD, (string_address)at_path, FILE_READ | O_CLOEXEC)) < 0)
+        if ((handle = system_open_at(AT_FDCWD, (string_address)at_path, FILE_READ | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK)) < 0)
                 goto done;
-        mapped_size = files_look_fd(handle, &facts) == 0 ? (positive)facts.size : 0;
+        if (files_look_fd(handle, &facts) != 0 || (facts.mode & MODE_FORMAT) != MODE_FILE)
+        {
+                system_close(handle);
+                goto done;
+        }
+        mapped_size = (positive)facts.size;
         mapped = mapped_size >= 12 && mapped_size <= FILES_GIT_INDEX_MOST ? (p8 address_to)files_anon_map(mapped_size, null) : null;
         for (bipolar part; mapped && got < mapped_size && (part = (bipolar)system_read_once(handle, mapped + got, mapped_size - got)) > 0;)
                 got += (positive)part;
