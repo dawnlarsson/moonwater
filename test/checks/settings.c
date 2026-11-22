@@ -5195,12 +5195,12 @@ static int drive_parts_of(int row)
         static struct settings_sub subs[CHECK_SUBS_MOST];
         int ids_count = settings.list.count < CHECK_LIST_MOST ? settings.list.count : CHECK_LIST_MOST;
         int subs_count = settings_sub_count < CHECK_SUBS_MOST ? settings_sub_count : CHECK_SUBS_MOST, count;
-        unsigned char expanded = (*settings_exp_ptr(row));
-        b64 fold = (*settings_fold_at_ptr(row));
+        unsigned char expanded = settings_exp_get(row);
+        b64 fold = settings_fold_reveal(row);
 
         memory_copy(ids, settings.list.id, sizeof(int) * (positive)ids_count), memory_copy(subs, settings_sub, sizeof(*subs) * (positive)subs_count);
         memory_zero(drive_parts, sizeof(drive_parts));
-        (*settings_exp_ptr(row)) = 1, (*settings_fold_at_ptr(row)) = UI_ONE, settings_sub_count = 0;
+        ui_list_fold(&settings.list, settings_fold_key(row), true), settings_sub_count = 0;
         count = settings_drive_rows(row, 0);
         for (int at = 0; at < count && at < DRIVE_PARTS; at++)
         {
@@ -5216,7 +5216,7 @@ static int drive_parts_of(int row)
                 part->reveal = described.reveal;
         }
         memory_copy(settings.list.id, ids, sizeof(int) * (positive)ids_count), memory_copy(settings_sub, subs, sizeof(*subs) * (positive)subs_count);
-        settings_sub_count = subs_count, (*settings_exp_ptr(row)) = expanded, (*settings_fold_at_ptr(row)) = fold;
+        settings_sub_count = subs_count, ui_list_fold(&settings.list, settings_fold_key(row), expanded);
         return count;
 }
 
@@ -5910,7 +5910,6 @@ static fn drive_fold_run(b64 for_ns)
         {
                 ui_kit.now = (positive)at;
                 ui_kit.busy = 0;
-                settings_fold_step();
         }
 }
 
@@ -6359,9 +6358,6 @@ static fn check_settings_drive_rows(string_address regular, string_address bold)
         settings_record_keep(&drive_settings_kept);
         memory_copy(drive_kit_kept, &ui_kit, sizeof(ui_kit));
         memory_copy(drive_items_kept, settings.item[2], sizeof(drive_items_kept));
-        memory_copy(drive_expanded_kept, settings_expanded, sizeof(drive_expanded_kept));
-        memory_copy(drive_fold_kept, settings_fold_at, sizeof(drive_fold_kept));
-        memory_copy(drive_live_kept, settings_fold_live, sizeof(drive_live_kept));
         window->stride = SETTINGS_FRAMES_W, window->buffer = buffer, window->output_width = 4096, window->output_height = 4096;
         settings.own = (struct window_row){window, 0, -1, -1, WINDOWS_HEADER + 2 * buffer, buffer, SETTINGS_FRAMES_W, 4096, 4096};
         memory_zero(&settings.ui, sizeof(settings.ui));
@@ -6565,7 +6561,7 @@ static fn check_settings_drive_rows(string_address regular, string_address bold)
 
                 ui_list_describe(&settings.list, drive.part_id[0], &row);
                 shut = row.expander == UI_ROW_EXPANDER_SHUT && string_equals((string_address)row.label, (string_address) "Partitions") && row.share &&
-                       string_equals((string_address)row.share, (string_address) "4") && !(*settings_exp_ptr(drive.id)) && (*settings_fold_at_ptr(drive.id)) == 0;
+                       string_equals((string_address)row.share, (string_address) "4") && !settings_exp_get(drive.id) && settings_fold_reveal(drive.id) == 0;
         }
         check("settings drive rows: a drive's partitions are shut when the window starts: the disclosure alone, Partitions and how many", shut);
 
@@ -6585,34 +6581,34 @@ static fn check_settings_drive_rows(string_address regular, string_address bold)
                 drive_click(settings.list.x + settings.list.w / 2, tops);
                 drive_fold_run(0);
                 drive_show(SETTINGS_WIDTH, 1, false), ui_kit.now = 6000000000ull;
-                hits += (*settings_exp_ptr(drive.id)) && drive_lay() && drive.parts == 6 && drive.part_height[1] == 0;
+                hits += settings_exp_get(drive.id) && drive_lay() && drive.parts == 6 && drive.part_height[1] == 0;
                 drive_fold_run(100000000);
-                mid = (*settings_fold_at_ptr(drive.id));
+                mid = settings_fold_reveal(drive.id);
                 hits += mid > 0 && mid < UI_ONE;
                 drive_fold_run(2000000000);
                 drive_show(SETTINGS_WIDTH, 1, false);
-                hits += drive_lay() && drive.parts == 6 && (*settings_fold_at_ptr(drive.id)) == UI_ONE &&
+                hits += drive_lay() && drive.parts == 6 && settings_fold_reveal(drive.id) == UI_ONE &&
                         drive.part_height[5] == ui_dev(&settings.ui, UI_ROW) * UI_ROW_SHARE_HIGH / UI_ROW_LEAST;
                 ui_kit.now = 9000000000ull;
                 drive_click(settings.list.x + settings.list.w / 2, tops);
                 drive_fold_run(2000000000);
                 drive_show(SETTINGS_WIDTH, 1, false);
-                hits += !(*settings_exp_ptr(drive.id)) && drive_lay() && drive.parts == 1;
+                hits += !settings_exp_get(drive.id) && drive_lay() && drive.parts == 1;
                 pressed = hits == 4;
                 // The keys: on the disclosure, with the rows the window's pane.
                 ui_kit.motion = 1, settings.page.pane = 1, settings.focused = 1;
                 settings.list.focus = disclosure;
                 hits = 0;
                 settings_press(UI_KEY_ENTER), drive_fold_run(0);
-                hits += (*settings_exp_ptr(drive.id)) && (*settings_fold_at_ptr(drive.id)) == UI_ONE;
+                hits += settings_exp_get(drive.id) && settings_fold_reveal(drive.id) == UI_ONE;
                 settings_press(UI_KEY_SPACE), drive_fold_run(0);
-                hits += !(*settings_exp_ptr(drive.id)) && (*settings_fold_at_ptr(drive.id)) == 0;
+                hits += !settings_exp_get(drive.id) && settings_fold_reveal(drive.id) == 0;
                 settings_press(UI_KEY_RIGHT), drive_fold_run(0);
-                hits += (*settings_exp_ptr(drive.id));
+                hits += settings_exp_get(drive.id);
                 settings_press(UI_KEY_RIGHT), drive_fold_run(0);
-                hits += (*settings_exp_ptr(drive.id));
+                hits += settings_exp_get(drive.id);
                 settings_press(UI_KEY_LEFT), drive_fold_run(0);
-                hits += !(*settings_exp_ptr(drive.id)) && settings.list.focus == disclosure;
+                hits += !settings_exp_get(drive.id) && settings.list.focus == disclosure;
                 keyed = hits == 5;
                 ui_kit.motion = 0, settings.page.pane = 0, settings.focused = 0;
         }
@@ -6651,8 +6647,8 @@ static fn check_settings_drive_rows(string_address regular, string_address bold)
         string_append_bounded((string_address)moved, (string_address)nvme, sizeof(moved));
         drive_feed(moved);
         drive_show(SETTINGS_WIDTH, 1, false);
-        kept = drive_lay() && drive.id == (int)SETTINGS_LIST_ID(2, 1) && (*settings_exp_ptr(drive.id)) && drive.parts == 6 &&
-               !(*settings_exp_ptr((int)SETTINGS_LIST_ID(2, 0)));
+        kept = drive_lay() && drive.id == (int)SETTINGS_LIST_ID(2, 1) && settings_exp_get(drive.id) && drive.parts == 6 &&
+               !settings_exp_get((int)SETTINGS_LIST_ID(2, 0));
         check("settings drive rows: a drive's partitions stay open by its name when the list is read again and its row moves", kept);
 
         // Free room is the bar's track: a free segment of the least width is the track's colour at its middle, as the gap beside it is,
@@ -6808,9 +6804,6 @@ static fn check_settings_drive_rows(string_address regular, string_address bold)
         // The action rows and a row's copies, on the same window.
         check_settings_actions();
         memory_zero(settings_drives_open, sizeof(settings_drives_open));
-        memory_copy(settings_expanded, drive_expanded_kept, sizeof(drive_expanded_kept));
-        memory_copy(settings_fold_at, drive_fold_kept, sizeof(drive_fold_kept));
-        memory_copy(settings_fold_live, drive_live_kept, sizeof(drive_live_kept));
         ui_kit.rtl = 0;
         if (ui_cuts)
                 memory_zero(ui_cuts, sizeof(struct ui_cut) * UI_CUTS);
@@ -7067,7 +7060,7 @@ static fn check_settings_clicks(void)
         struct windows *const click_table_at = windows_scratch_table(&click_table_scratch);
         int before = settings.page.chosen, scroll_before = list->scroll.scroll, seen = 0, wrong = 0, strips = 0;
         int gpu = settings_row_named("GPU rendering (alpha)"), keyboard = settings_row_named("Keyboard");
-        unsigned char gpu_fold = gpu >= 0 ? (*settings_exp_ptr(gpu)) : 0;
+        unsigned char gpu_fold = gpu >= 0 ? settings_exp_get(gpu) : 0;
         positive queued = settings.queued;
         b32 gpu_pressed = false, gpu_ok = false, arrow_ok = false, value_ok = false, hover_ok = false;
 
@@ -7136,8 +7129,8 @@ static fn check_settings_clicks(void)
                         py = ui_list_row_y(list, at) + list->tall[at] / 2;
                         check_settings_press(px, py);
                         gpu_pressed = true;
-                        gpu_ok = (*settings_exp_ptr(gpu)) == gpu_fold && settings.queued == queued + 1;
-                        if ((*settings_exp_ptr(gpu)) != gpu_fold)
+                        gpu_ok = settings_exp_get(gpu) == gpu_fold && settings.queued == queued + 1;
+                        if (settings_exp_get(gpu) != gpu_fold)
                                 settings_toggle(gpu);
                         settings.queued = queued;
                 }
@@ -7155,7 +7148,7 @@ static fn check_settings_clicks(void)
                 struct ui_row row;
                 struct ui_control measure;
                 struct window_event event;
-                unsigned char keyboard_fold = (*settings_exp_ptr(keyboard));
+                unsigned char keyboard_fold = settings_exp_get(keyboard);
 
                 windows_issue_set(click_table_at, "keyboard", WINDOWS_ISSUE_WARNING, WINDOWS_ISSUE_GPU_LISTS, 0, 0, "");
                 windows_issues_read(click_table_at, &settings_board);
