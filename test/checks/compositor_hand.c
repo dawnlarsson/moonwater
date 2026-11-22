@@ -2591,7 +2591,7 @@ static void check_taskbar_pins(void)
         compositor_button(COMPOSITOR_BTN_RIGHT, 1);
         compositor_button(COMPOSITOR_BTN_RIGHT, 0);
     }
-    check("taskbar pinned: a window of an app has Pin to taskbar after Exit and Force stop", taskbar_menu.open && taskbar_menu.menu.count == 4 &&
+    check("taskbar pinned: a window of an app has Pin to taskbar after Exit and Force stop", taskbar_menu.open && taskbar_menu.menu.count == 5 &&
           taskbar_menu.menu.items[0].id == TASKBAR_MENU_EXIT && taskbar_menu.menu.items[1].id == TASKBAR_MENU_STOP && taskbar_menu.menu.items[3].id == TASKBAR_MENU_PIN &&
           string_equals((string_address)taskbar_menu.menu.items[3].label, (string_address) "Pin to taskbar"));
     if (taskbar_menu.open)
@@ -2601,6 +2601,11 @@ static void check_taskbar_pins(void)
         bipolar got;
         int chromium = ui_apps_find("chromium");
 
+        if (chromium < 0)
+        {
+            check("taskbar pinned: the registry lists chromium (the fixture bowl)", false);
+            return;
+        }
         ui_apps_pins_path(compositor_settings_root, path, sizeof(path));
         got = file_slurp_regular_at(AT_FDCWD, (string_address)path, (p8 *)kept, sizeof(kept) - 1, 0);
         kept[got > 0 ? got : 0] = 0;
@@ -2622,7 +2627,7 @@ static void check_taskbar_pins(void)
         compositor_button(COMPOSITOR_BTN_RIGHT, 0);
     }
     check("taskbar pinned: a pinned app with a window is that window's task, and its window's menu says Unpin from taskbar",
-          ghost == 1 && taskbar_menu.open && taskbar_menu.menu.count == 4 && taskbar_menu.menu.items[3].id == TASKBAR_MENU_UNPIN &&
+          ghost == 1 && taskbar_menu.open && taskbar_menu.menu.count == 5 && taskbar_menu.menu.items[3].id == TASKBAR_MENU_UNPIN &&
               string_equals((string_address)taskbar_menu.menu.items[3].label, (string_address) "Unpin from taskbar"));
     compositor_menu_close();
 
@@ -2737,7 +2742,7 @@ static void check_taskbar_pins(void)
         compositor_button(COMPOSITOR_BTN_RIGHT, 1);
         compositor_button(COMPOSITOR_BTN_RIGHT, 0);
     }
-    if (taskbar_menu.open && taskbar_menu.menu.count == 4 && taskbar_menu.menu.items[3].id == TASKBAR_MENU_PIN)
+    if (taskbar_menu.open && taskbar_menu.menu.count == 5 && taskbar_menu.menu.items[3].id == TASKBAR_MENU_PIN)
         compositor_menu_chose(TASKBAR_MENU_PIN);
     check_taskbar_pins_put("none");
     taskbar_settings_set("bottom", "primary", "");
