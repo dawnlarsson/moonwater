@@ -1191,14 +1191,13 @@ static b32 terminal_frame(void)
         full = shift != 0 || pull != 0 || terminal.shift[slot] != 0 || terminal.stretched[slot];
         if (!shift && !pull && windows_ready(&terminal.own) && ui_list_wanted(&terminal.own))
         {
-                unsigned long key = terminal_list_key(now);
-
-                if (terminal.list_lost && key == terminal.list_lost_key && terminal.list_lost_frames < TERMINAL_LIST_RETRY)
+                /* The key of the frame only matters after a lost frame: a clean frame hashes nothing. */
+                if (terminal.list_lost && terminal_list_key(now) == terminal.list_lost_key && terminal.list_lost_frames < TERMINAL_LIST_RETRY)
                         terminal.list_lost_frames++;
                 else if (terminal_list_frame(now, first, shown, total))
                         return terminal.list_lost = 0, true;
                 else
-                        terminal.list_lost = 1, terminal.list_lost_key = key, terminal.list_lost_frames = 0;
+                        terminal.list_lost = 1, terminal.list_lost_key = terminal_list_key(now), terminal.list_lost_frames = 0;
         }
         whole = windows_buffer(table, own, slot), pixels = terminal_grid(whole);
         drawn = terminal.valid[slot] ? terminal.frame[slot] : null;
