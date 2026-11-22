@@ -4481,6 +4481,27 @@ static void display_off_rows(void)
         compositor.dark = saved_dark, compositor.dark_applied = saved_applied, compositor.card = saved_card, compositor.outputs = saved_outputs;
 }
 
+// The residue of a key or button edge the kernel's filter takes (hid-input's MSC_SCAN and its SYN, read from evdev where the kernel has no
+// EVIOCSMASK): consumed by the reader, not handed to the loop, so the gate straight to the client stays open for the motion and keys after it.
+static void reader_residue_rows(void)
+{
+        struct compositor_input_event residue[2] = {{.type = 4u, .code = 4, .value = 0x90004}, {.type = COMPOSITOR_EV_SYN, .code = 0}};
+        struct compositor_input_event dropped[2] = {{.type = COMPOSITOR_EV_SYN, .code = COMPOSITOR_SYN_DROPPED}, {.type = COMPOSITOR_EV_SYN, .code = 0}};
+        positive kept_taken = compositor_reader.taken, kept_out = compositor_reader.handed_out;
+        int kept_dark = compositor.dark;
+        b32 consumed, shut, lost;
+
+        compositor_reader.taken = compositor_reader.handed_out = 7, compositor.dark = 0;
+        consumed = compositor_reader_direct(0, residue, 2) == 1 && compositor_reader.handed_out == 7 && compositor_reader.taken == 7;
+        compositor_reader.taken = 5; // something handed to the loop is not settled yet: the gate is shut, and the residue is still nobody's
+        shut = compositor_reader_direct(0, residue, 2) == 1;
+        compositor_reader.taken = 7;
+        lost = compositor_reader_direct(0, dropped, 2) == 0; // a SYN_DROPPED goes to the loop, which reads the device again
+        check("reader: an MSC_SCAN and its SYN alone are consumed, not handed to the loop, the gate open or shut; a SYN_DROPPED still goes to the loop",
+              consumed && shut && lost);
+        compositor_reader.taken = kept_taken, compositor_reader.handed_out = kept_out, compositor.dark = kept_dark;
+}
+
 // The X window manager's atoms by their numbers (compositor_xwm_atom_index, H-c3-1): every atom of a list of thousands found by the index as the walk
 // found it, the first record of an atom two records have, none for one not there, and an interned name's atom found once its reply gives it.
 static void xwm_atom_rows(void)
@@ -6105,6 +6126,7 @@ b32 main(void)
         xwm_tray_rows();
         xwm_incr_cap_rows();
         display_off_rows();
+        reader_residue_rows();
         reader_own_rows();
         clip_most_rows();
         asked_record_rows();

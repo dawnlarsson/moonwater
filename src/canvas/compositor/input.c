@@ -3746,6 +3746,16 @@ static int compositor_reader_button(unsigned int at, long dx, long dy, unsigned 
 
 HOT static int compositor_reader_direct(unsigned int at, const struct compositor_input_event *raw, unsigned int count)
 {
+        // A frame of nothing but EV_MSC and SYN_REPORT (hid-input's MSC_SCAN of an edge the kernel's filter took, where the kernel has no
+        // EVIOCSMASK, session.c) holds nothing anyone reads: consumed here, not handed to the loop, which shut the gate straight to the client.
+        {
+                unsigned int k = 0;
+
+                while (k < count && (raw[k].type == 4u || (raw[k].type == COMPOSITOR_EV_SYN && raw[k].code == 0)))
+                        k++;
+                if (count && k == count)
+                        return 1;
+        }
 #ifdef CONFIG_MOONWATER_WAYLAND
         long dx = 0, dy = 0;
         int key = -1, value = 0, btn = 0, btn_val = 0, wheel_v120 = 0, wheel_horiz = 0;
@@ -3979,6 +3989,10 @@ HOT static fn compositor_reader_run(address_any context)
                         wait[1] = 1000000;
                 got = (long)system_call_6(syscall(epoll_pwait2), (positive)compositor_reader.set, (positive)ready, 16,
                                           compositor_reader.note_due || owed ? (positive)wait : 0, 0, 0);
+                // The ring first, before the evdev fds that woke with it: its reports are the newest input, and theirs go to the client only
+                // while nothing is owed to the loop (compositor_reader_direct's gate).
+                if (got > 0 && spark_ring)
+                        compositor_reader_spark_drain(spark_ring, &spark_last);
                 for (long k = 0; k < got; k++)
                 {
                         unsigned int at = (unsigned int)ready[k].data, put = 0;

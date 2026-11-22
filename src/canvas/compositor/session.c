@@ -87,6 +87,7 @@ static void compositor_kmsg(string_address text, positive value, string_address 
 }
 
 // input.c's, for the wake: a device's reports read (a device gone is let go of there), and what no device has down let go.
+#define COMPOSITOR_EVIOCSMASK 0x40104593u // _IOW('E', 0x93, struct input_mask): the codes of one event type a reader is sent
 static void compositor_input_read(unsigned int at);
 static void compositor_input_dropped(unsigned int at, positive now);
 static void compositor_input_add(unsigned int number);
@@ -1092,6 +1093,20 @@ static void compositor_input_add(unsigned int number)
                 int monotonic = 1;
 
                 system_control(handle, COMPOSITOR_EVIOCSCLOCKID, address_of monotonic);
+        }
+        // Nothing here reads EV_MSC. hid-input sends MSC_SCAN before every key and button edge, and where the kernel's filter takes the edge
+        // (the spark ring) the read got the MSC_SCAN and its SYN alone, which the reader handed to the loop: the gate straight to the client
+        // shut until the loop settled, so the click or key itself, and the motion after it, waited on the main loop. An all-zero code mask for
+        // the type (EVIOCSMASK) keeps every MSC event out of the read, and the edge wakes no read here at all.
+        {
+                unsigned long long none = 0;
+                struct
+                {
+                        unsigned int type, codes_size;
+                        unsigned long long codes;
+                } mask = {4u, (unsigned int)sizeof none, (unsigned long long)(positive)address_of none};
+
+                system_control(handle, COMPOSITOR_EVIOCSMASK, address_of mask);
         }
 
         if (tablet)
