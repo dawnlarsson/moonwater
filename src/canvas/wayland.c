@@ -10,8 +10,8 @@
 
 #define WAYLAND_API static __attribute__((unused))
 #ifndef likely
-#define likely(x) __builtin_expect(!!(x), 1)
-#define unlikely(x) __builtin_expect(!!(x), 0)
+#define likely(x) (!!(x)) // lib.c's is the hint; this is only for a build without it
+#define unlikely(x) (!!(x))
 #endif
 #ifndef INLINE
 #define INLINE __attribute__((always_inline))
@@ -5705,7 +5705,7 @@ WAYLAND_API long wayland_out_dirty_next(long from)
         {
                 if (w)
                 {
-                        unsigned long idx = (wi << 6) + (unsigned long)__builtin_ctzll(w);
+                        unsigned long idx = (wi << 6) + (unsigned long)wayland_first_bit(w);
                         return idx < limit ? (long)idx : -1;
                 }
                 if (++wi >= words)

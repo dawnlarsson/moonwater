@@ -3,4 +3,3 @@
 src/canvas/compositor.c 1
 src/canvas/compositor/kms.c 1
 src/canvas/gpu.c 2
-src/canvas/wayland.c 1
