@@ -5536,6 +5536,9 @@ static int wayland_ext_request(struct wayland_client *c, struct wayland_object *
                 if (a[2].u >= 1000000000ul || sec > 18000000000ul)
                         return wayland_fail(c, self->id, WLN_wp_commit_timer_v1_error_invalid_timestamp, "the timestamp is not a time");
                 s->pending.timestamp = sec * 1000000000ul + a[2].u;
+                /* a client may hold its own commits, but not past a second from now: a far-future stamp froze the surface's stream */
+                if (s->pending.timestamp > (unsigned long)wayland_now() * 1000000ul + 1000000000ul)
+                        s->pending.timestamp = (unsigned long)wayland_now() * 1000000ul + 1000000000ul;
                 if (!s->pending.timestamp) s->pending.timestamp = 1;
         }
         return WAYLAND_OK;

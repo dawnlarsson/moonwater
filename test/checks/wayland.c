@@ -2347,6 +2347,18 @@ static void test_pacing(void)
         wayland_target(6006957000ul, 6957000ul);
         WLCHECK(wayland_resume(c->slot) == 0 && !wayland_stalled(c->slot) && wayland_row_hint(0, WAYLAND_HINT_TIMESTAMP) == 6006957000ul,
                 "and is made when the next latch shows at its vblank");
+        /* hostile: a stamp about 4.3e9 seconds away holds the commit for a second at most, not for the stamp (a client froze its own stream) */
+        wlc_send(c, timer, WLQ_wp_commit_timer_v1_set_timestamp, 0ul, 0xffffffffUL, 0ul);
+        wlc_send(c, s.surface, WLQ_wl_surface_commit);
+        {
+                long fd;
+                long due = wayland_stall_due(c->slot, &fd);
+
+                WLCHECK(wayland_stalled(c->slot) && due > 0 && due <= wayland_now() + 1100,
+                        "a commit stamped far in the future is held one second at most (due %ld)", due);
+                fake.now += 2000;
+                WLCHECK(wayland_resume(c->slot) == 0 && !wayland_stalled(c->slot), "and is made once that second has passed");
+        }
         wayland_target(0ul, 0ul);
         wlc_send(c, timer, WLQ_wp_commit_timer_v1_set_timestamp, 0ul, 5ul, 1000000000ul);
         WLCHECK(c->errors == 1 && c->error_code == WLN_wp_commit_timer_v1_error_invalid_timestamp,
