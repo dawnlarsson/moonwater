@@ -30668,7 +30668,7 @@ static fn ui_findbar_overlay(struct ui address_to ui, struct ui_findbar address_
 static unsigned int ui_text_role(int role)
 {
         static const struct { unsigned char role, readable; } map[DOC_ROLE_INVALID + 1] = {
-            [DOC_ROLE_KEYWORD] = {UI_PRIMARY, 1},      [DOC_ROLE_TYPE] = {UI_INFO, 1},
+            [DOC_ROLE_KEYWORD] = {UI_PRIMARY, 1},      [DOC_ROLE_OPERATOR] = {UI_PRIMARY, 1}, [DOC_ROLE_TYPE] = {UI_INFO, 1},
             [DOC_ROLE_STRING] = {UI_SUCCESS, 1},       [DOC_ROLE_NUMBER] = {UI_WARNING, 1},
             [DOC_ROLE_COMMENT] = {UI_ON_SURFACE_VARIANT, 0}, [DOC_ROLE_PREPROCESSOR] = {UI_WARNING, 1},
             [DOC_ROLE_FUNCTION] = {UI_ON_SURFACE, 0},  [DOC_ROLE_VARIABLE] = {UI_INFO, 1},

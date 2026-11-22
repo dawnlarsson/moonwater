@@ -5303,7 +5303,7 @@ static fn check_kit_focus(void)
 
 /*
         Words in a colour read 4.5:1: the accent as a text button's or a tag's words, every syntax colour on the paper and on a well, light
-        and dark, standard and Dawn (whose orange is 2.4:1 on white as it is); and a status badge's words on its container, measured from
+        and dark, standard and Dawn (whose raw orange is 2.4:1 on white, so the syntax and the accent's words take the readable lift to 4.5:1); and a status badge's words on its container, measured from
         the drawn pixels (the light theme's Failed was 3.9:1, Degraded 4.0 and Healthy 4.4).
 */
 static fn check_kit_inks(void)
