@@ -4083,6 +4083,68 @@ static unsigned int records_random(unsigned int *state)
         return *state;
 }
 
+/*
+        A guard for the i915 lowering (compose.c compositor_gpu_rect): a constant-alpha kind 5 (one cover byte, no frame) is lowered to kind 1 with
+        the colour premultiplied by that byte, and laid over a random target it is compared with the processor painter's pixels for the same mix
+        (compositor_mix_run, the tint's row routine). The lowering runs under the i915 backend, which the row sets for its records and puts back;
+        the compositor's record state is saved and restored. The row only exists where the card code does (MOONWATER_GPU_C). A mismatch is a
+        difference between the lowered kind 1 and the painter's mix (the kernel's rounding and the painter's can differ by one), not a crash.
+*/
+#ifdef MOONWATER_GPU_C
+static void records_lowering(void)
+{
+        static unsigned char alpha_table[256], cover_row[COMPOSITOR_TINT_RUN];
+        static unsigned int lowered[8 * 4], painted[160 * 120], executed[160 * 120], colour_row[COMPOSITOR_TINT_RUN];
+        struct compositor_gscene *g = &compositor_gscene;
+        const struct gpu_backend *kept_backend = gpu_backend;
+        unsigned int *kept_ops = g->ops, kept_count = g->count, kept_room = g->room, kept_tables_size = g->tables_size, kept_tables_at = g->tables_at;
+        unsigned char *kept_tables = g->tables;
+        int kept_clip[4] = {g->clip[0], g->clip[1], g->clip[2], g->clip[3]};
+        unsigned int state = 0x1b873593u, mismatches = 0, lowered_ok = 0;
+        int trials = 0;
+
+        gpu_backend = &gpu_i915_row;
+        for (int trial = 0; trial < 200; trial++)
+        {
+                int tw = 40 + (int)(records_random(&state) % 100), th = 30 + (int)(records_random(&state) % 80);
+                int rx = (int)(records_random(&state) % (unsigned int)tw), ry = (int)(records_random(&state) % (unsigned int)th);
+                int rw = 1 + (int)(records_random(&state) % (unsigned int)(tw - rx)), rh = 1 + (int)(records_random(&state) % (unsigned int)(th - ry));
+                unsigned int alpha = 1 + records_random(&state) % 254, colour = records_random(&state) & 0xffffffu;
+                unsigned int ink = alpha << 24 | colour, cover = 0x2000u;
+                int count = tw * th;
+                struct compositor_target card = {executed, (unsigned long)tw, tw, th, 0, 0, tw, th, 0, 0, null, 0};
+
+                for (int at = 0; at < count; at++)
+                        executed[at] = painted[at] = records_random(&state);
+                alpha_table[0] = (unsigned char)alpha;
+                g->ops = lowered, g->count = 0, g->room = 4, g->tables = alpha_table, g->tables_size = 256, g->tables_at = cover;
+                g->clip[0] = 0, g->clip[1] = 0, g->clip[2] = tw, g->clip[3] = th;
+                compositor_gpu_rect(5, rx, ry, rx + rw, ry + rh, colour, 0, cover, 0);
+                if (g->count != 1 || (lowered[0] & 0x1fu) != 1 || (lowered[5] >> 24) != alpha)
+                        mismatches++;
+                else
+                        lowered_ok++;
+                if (compositor_records_run(lowered, g->count, &card, records_resolve) != (int)g->count)
+                        mismatches++;
+                // The painter: the same mix over the same rectangle, row by row, through the tint's routine.
+                for (int py = ry; py < ry + rh; py++)
+                {
+                        for (int k = 0; k < COMPOSITOR_TINT_RUN; k++)
+                                colour_row[k] = colour, cover_row[k] = (unsigned char)alpha;
+                        compositor_mix_run(painted + (unsigned long)py * tw + rx, rw, ink, colour_row, cover_row);
+                }
+                if (memory_compare(painted, executed, (positive)count * 4))
+                        mismatches++;
+                trials++;
+        }
+        g->ops = kept_ops, g->count = kept_count, g->room = kept_room, g->tables = kept_tables, g->tables_size = kept_tables_size, g->tables_at = kept_tables_at;
+        memory_copy(g->clip, kept_clip, sizeof(kept_clip));
+        gpu_backend = kept_backend;
+        check("records: the i915 lowering of 200 random translucent constant kind 5 records is one kind 1 record of the premultiplied colour, and its pixels are the processor painter's (a guard; Intel only)",
+              mismatches == 0 && lowered_ok == 200);
+}
+#endif
+
 static void check_compositor_records(void)
 {
         static unsigned int picture[128 * 96], before[160 * 120], painted[160 * 120], executed[160 * 120];
@@ -4172,6 +4234,9 @@ static void check_compositor_records(void)
                                 mismatches++;
         }
         check("records: a record with the 0x20 tiled flag is refused and draws nothing", refused == 1 && mismatches == 0);
+#ifdef MOONWATER_GPU_C
+        records_lowering();
+#endif
 }
 
 /*
