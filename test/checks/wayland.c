@@ -11305,3 +11305,444 @@ int main(void)
 }
 #endif /* CHECK_xwm_wire */
 
+
+#ifdef CHECK_input_shim
+/*
+        CHECK_input_shim: libmoonwater-input.so (src/shim/input.c), the reader of the focused page in a game's own process, with
+        SDL 2 played by a table of fakes and the kernel by a page this program writes as the filter would. Its page and its numbers
+        are held to spark.c's; its entry to the SDL it is given (the refusals that leave SDL's own table, the places it takes);
+        and its reads to what SDL would have made of the same reports: motion, presses, turns, the relative state, every button
+        let go when the page is no longer the game's, a late reader's losses made good from the page's buttons, observe that only
+        measures, a wait the page can end; and a writer racing the reader through arms, disarms and wipes, after which no report
+        the reader passed on is one that was never written.
+
+            cc -std=gnu11 -O2 -Wall -Wextra -Werror -pthread -D_GNU_SOURCE -DCHECK_input_shim test/checks.c
+*/
+#include <pthread.h>
+#include <stdio.h>
+#include <string.h>
+
+#define MWI_CHECK
+#include "../../src/shim/input.c"
+
+/* spark.c, for its page and numbers; it wants the library's offset_of and, for its settings, the CRC the kernel supplies. */
+#define offset_of(type, member) __builtin_offsetof(type, member)
+static unsigned int hash_crc32(unsigned int crc, void *bytes, unsigned long length) { (void)bytes, (void)length; return crc; }
+#include "../../src/moonwater/spark.c"
+
+static unsigned is_checks, is_failures;
+
+#define ISCHECK(condition, ...)                                                                                       \
+        do                                                                                                            \
+        {                                                                                                             \
+                is_checks++;                                                                                          \
+                if (!(condition))                                                                                     \
+                {                                                                                                     \
+                        is_failures++;                                                                                \
+                        printf("  FAIL: ");                                                                           \
+                        printf(__VA_ARGS__);                                                                          \
+                        printf(" (line %d)\n", __LINE__);                                                             \
+                }                                                                                                     \
+        } while (0)
+
+/* ---- SDL played by fakes: what each place was called with, and the events pushed ---- */
+
+#define IS_TABLE 838
+static mwi_fn is_table[IS_TABLE];
+static union mwi_sdl_event is_pushed[512];
+static unsigned is_pushes, is_polls, is_waits[4], is_wait_calls, is_swaps, is_quits;
+static int is_version_major = 2, is_rel_x, is_rel_y, is_set_relative_result;
+static const char *is_platform = "Linux";
+static union mwi_sdl_event is_x_event;
+static int is_x_pending;
+
+static void is_stub(void) {}
+static void is_version(struct mwi_sdl_version *v) { v->major = (unsigned char)is_version_major, v->minor = 32, v->patch = 10; }
+static const char *is_get_platform(void) { return is_platform; }
+static int is_push(union mwi_sdl_event *event)
+{
+        if (is_pushes < 512)
+                is_pushed[is_pushes] = *event;
+        is_pushes++;
+        return 1;
+}
+static void *is_mouse_focus(void) { return (void *)0x1234; }
+static unsigned int is_window_id(void *window) { return window == (void *)0x1234 ? 7u : 0u; }
+static unsigned int is_mouse_state(int *x, int *y)
+{
+        if (x)
+                *x = 100;
+        if (y)
+                *y = 200;
+        return 0;
+}
+static unsigned int is_relative_state(int *x, int *y)
+{
+        if (x)
+                *x = is_rel_x;
+        if (y)
+                *y = is_rel_y;
+        is_rel_x = is_rel_y = 0;
+        return 0;
+}
+static int is_set_relative(int on) { (void)on; return is_set_relative_result; }
+static int is_poll(union mwi_sdl_event *event)
+{
+        is_polls++;
+        if (is_x_pending)
+        {
+                is_x_pending = 0;
+                if (event)
+                        *event = is_x_event;
+                return 1;
+        }
+        return 0;
+}
+static int is_wait_timeout(union mwi_sdl_event *event, int timeout)
+{
+        (void)event;
+        if (is_wait_calls < 4)
+                is_waits[is_wait_calls] = (unsigned)timeout;
+        is_wait_calls++;
+        return 0;
+}
+static void is_swap(void *window) { (void)window, is_swaps++; }
+static void is_quit(void) { is_quits++; }
+static int is_peep(union mwi_sdl_event *events, int count, int action, unsigned int first, unsigned int last)
+{
+        (void)events, (void)count, (void)action, (void)first, (void)last;
+        return 0;
+}
+
+static int is_entry_refuses;
+static int is_sdl_entry(unsigned int api, void *table, unsigned int size)
+{
+        mwi_fn *slots = table;
+
+        (void)api;
+        if (is_entry_refuses)
+                return -1;
+        for (unsigned at = 0; at < size / sizeof(mwi_fn); at++)
+                slots[at] = is_stub;
+        slots[MWI_AT_VERSION] = (mwi_fn)is_version, slots[MWI_AT_PLATFORM] = (mwi_fn)is_get_platform;
+        slots[MWI_AT_PUSH] = (mwi_fn)is_push, slots[MWI_AT_MOUSE_FOCUS] = (mwi_fn)is_mouse_focus;
+        slots[MWI_AT_WINDOW_ID] = (mwi_fn)is_window_id, slots[MWI_AT_MOUSE_STATE] = (mwi_fn)is_mouse_state;
+        slots[MWI_AT_RELATIVE_STATE] = (mwi_fn)is_relative_state, slots[MWI_AT_SET_RELATIVE] = (mwi_fn)is_set_relative;
+        slots[MWI_AT_POLL] = (mwi_fn)is_poll, slots[MWI_AT_WAIT_TIMEOUT] = (mwi_fn)is_wait_timeout;
+        slots[MWI_AT_SWAP] = (mwi_fn)is_swap, slots[MWI_AT_QUIT] = (mwi_fn)is_quit, slots[MWI_AT_PEEP] = (mwi_fn)is_peep;
+        return 0;
+}
+
+/* ---- the kernel played by this program: the filter's writes and the compositor's arms ---- */
+
+static struct spark_focus_page is_page;
+
+static void is_reset(void)
+{
+        memset(&mwi, 0, sizeof mwi);
+        mwi.fd = 0, mwi.log_fd = -1, mwi.log_looked = 1;
+        memset(&is_page, 0, sizeof is_page);
+        is_page.magic = SPARK_FOCUS_MAGIC, is_page.version = SPARK_FOCUS_VERSION, is_page.mask = SPARK_FOCUS_SLOTS - 1u;
+        is_pushes = is_polls = is_wait_calls = is_swaps = is_quits = 0;
+        mwi_check_claim_count = 0;
+        is_version_major = 2, is_platform = "Linux", is_entry_refuses = 0, is_set_relative_result = 0, is_x_pending = 0;
+        memset(is_table, 0, sizeof is_table);
+        if (mwi_install(1, is_table, sizeof is_table, is_sdl_entry) != 0)
+                printf("  FAIL: the fakes' table was refused\n"), is_failures++;
+        mwi.page = (const volatile struct mwi_page *)&is_page;
+}
+
+static void is_put(unsigned short kind, unsigned short code, int dx, int dy)
+{
+        struct spark_input_slot *s = &is_page.slots[is_page.head & (SPARK_FOCUS_SLOTS - 1u)];
+
+        s->dx = dx, s->dy = dy, s->time_us = 1000u + is_page.head, s->kind = kind, s->code = code, s->flags = 0;
+        __atomic_store_n(&is_page.head, is_page.head + 1, __ATOMIC_RELEASE);
+}
+
+static void is_arm(int armed)
+{
+        is_page.state = armed ? SPARK_FOCUS_STATE_ARMED : SPARK_FOCUS_STATE_OFF;
+        is_page.armed_head = armed ? is_page.head : is_page.armed_head;
+        __atomic_store_n(&is_page.generation, is_page.generation + 1, __ATOMIC_RELEASE);
+        if (!armed)
+                memset(is_page.slots, 0, sizeof is_page.slots), is_page.buttons = 0;
+}
+
+static unsigned is_count(unsigned int type)
+{
+        unsigned found = 0;
+
+        for (unsigned at = 0; at < is_pushes && at < 512; at++)
+                found += is_pushed[at].type == type;
+        return found;
+}
+
+static int is_poll_all(void)
+{
+        union mwi_sdl_event event;
+        int got = 0;
+
+        while (mwi_poll_event(&event) && got < 1000)
+                got++;
+        return got;
+}
+
+/* ---- the rows ---- */
+
+static void is_test_layout(void)
+{
+        ISCHECK(sizeof(struct mwi_page) == sizeof(struct spark_focus_page) && sizeof(struct mwi_slot) == sizeof(struct spark_input_slot),
+                "the page and its slot are spark.c's size (%zu %zu)", sizeof(struct mwi_page), sizeof(struct spark_focus_page));
+        ISCHECK(__builtin_offsetof(struct mwi_page, state) == offset_of(struct spark_focus_page, state) &&
+                    __builtin_offsetof(struct mwi_page, generation) == offset_of(struct spark_focus_page, generation) &&
+                    __builtin_offsetof(struct mwi_page, claim) == offset_of(struct spark_focus_page, claim) &&
+                    __builtin_offsetof(struct mwi_page, head) == offset_of(struct spark_focus_page, head) &&
+                    __builtin_offsetof(struct mwi_page, buttons) == offset_of(struct spark_focus_page, buttons) &&
+                    __builtin_offsetof(struct mwi_page, slots) == offset_of(struct spark_focus_page, slots),
+                "the page's words sit where spark.c puts them");
+        ISCHECK(__builtin_offsetof(struct mwi_slot, time_us) == offset_of(struct spark_input_slot, time_us) &&
+                    __builtin_offsetof(struct mwi_slot, kind) == offset_of(struct spark_input_slot, kind) &&
+                    __builtin_offsetof(struct mwi_slot, code) == offset_of(struct spark_input_slot, code),
+                "a slot's words sit where spark.c puts them");
+        ISCHECK(MWI_PAGE_PGOFF == SPARK_FOCUS_MMAP_PGOFF && MWI_PAGE_MAGIC == SPARK_FOCUS_MAGIC && MWI_PAGE_VERSION == SPARK_FOCUS_VERSION &&
+                    MWI_SLOTS == SPARK_FOCUS_SLOTS && MWI_IOCTL_CLAIM == SPARK_IOCTL_FOCUS_CLAIM && MWI_CLAIM_TAKE == SPARK_FOCUS_CLAIM_TAKE &&
+                    MWI_CLAIM_OBSERVE == SPARK_FOCUS_CLAIM_OBSERVE && MWI_STATE_ARMED == SPARK_FOCUS_STATE_ARMED &&
+                    MWI_KIND_REL == SPARK_INPUT_KIND_REL && MWI_KIND_KEY == SPARK_INPUT_KIND_KEY && MWI_KIND_WHEEL == SPARK_INPUT_KIND_WHEEL,
+                "the shim's numbers are spark.c's");
+}
+
+static void is_test_entry(void)
+{
+        static mwi_fn table[IS_TABLE];
+
+        is_reset();
+        ISCHECK(is_table[MWI_AT_POLL] == (mwi_fn)mwi_poll_event && is_table[MWI_AT_PUMP] == (mwi_fn)mwi_pump_events &&
+                    is_table[MWI_AT_PEEP] == (mwi_fn)mwi_peep_events && is_table[MWI_AT_WAIT_TIMEOUT] == (mwi_fn)mwi_wait_event_timeout &&
+                    is_table[MWI_AT_MOUSE_STATE] == (mwi_fn)mwi_mouse_state && is_table[MWI_AT_RELATIVE_STATE] == (mwi_fn)mwi_relative_state &&
+                    is_table[MWI_AT_SET_RELATIVE] == (mwi_fn)mwi_set_relative && is_table[MWI_AT_SWAP] == (mwi_fn)mwi_swap &&
+                    is_table[MWI_AT_QUIT] == (mwi_fn)mwi_quit && is_table[MWI_AT_WAIT] == (mwi_fn)mwi_wait_event,
+                "the entry puts the shim in front of the pump, the reads, the mouse, relative mode, the swap and SDL_Quit");
+        ISCHECK(mwi.real[MWI_AT_POLL] == (mwi_fn)is_poll && is_table[MWI_AT_PUSH] == (mwi_fn)is_push && is_table[100] == is_stub &&
+                    is_table[MWI_AT_VERSION] == (mwi_fn)is_version,
+                "the entry keeps SDL's own functions everywhere else, and calls SDL's through the places it took");
+        ISCHECK(mwi.claim_wanted == (int)MWI_CLAIM_TAKE, "with MOONWATER_INPUT unset the claim is take");
+        ISCHECK(mwi_install(2, table, sizeof table, is_sdl_entry) == -1 && table[MWI_AT_POLL] == 0, "SDL 3's table (another API) is refused untouched");
+        ISCHECK(mwi_install(1, table, (MWI_AT_LAST) * sizeof(mwi_fn), is_sdl_entry) == -1, "a table too short for the places is refused");
+        is_version_major = 3;
+        memset(table, 0, sizeof table);
+        ISCHECK(mwi_install(1, table, sizeof table, is_sdl_entry) == -1 && table[MWI_AT_POLL] == (mwi_fn)is_poll,
+                "an SDL whose version place does not answer 2 is refused, and its table is its own");
+        is_version_major = 2, is_platform = "Windows";
+        ISCHECK(mwi_install(1, table, sizeof table, is_sdl_entry) == -1 && table[MWI_AT_POLL] == (mwi_fn)is_poll,
+                "an SDL whose platform place does not answer Linux is refused");
+        is_platform = "Linux", is_entry_refuses = 1;
+        ISCHECK(mwi_install(1, table, sizeof table, is_sdl_entry) == -1, "SDL's own entry refusing is a refusal");
+        is_entry_refuses = 0;
+}
+
+static void is_test_take(void)
+{
+        int x = 0, y = 0;
+        unsigned buttons;
+
+        is_reset();
+        ISCHECK(mwi_set_relative(1) == 0 && mwi_check_claim_count == 1 && mwi_check_claims[0] == (int)MWI_CLAIM_TAKE,
+                "relative mode on claims the page, take");
+        is_poll_all();
+        ISCHECK(is_pushes == 0, "a page not armed gives the game nothing (%u)", is_pushes);
+        is_arm(1);
+        // Written after the arm and before the game's next read: the game's, from the head the arm left.
+        is_put(SPARK_INPUT_KIND_REL, 0, 3, -2);
+        is_put(SPARK_INPUT_KIND_REL, 0, 5, 1);
+        is_put(SPARK_INPUT_KIND_KEY, 0x110, 1, 0);
+        is_put(SPARK_INPUT_KIND_KEY, 0x111, 1, 0);
+        is_poll_all();
+        ISCHECK(is_pushes == 4 && is_pushed[0].type == MWI_SDL_MOUSEMOTION && is_pushed[0].motion.xrel == 3 && is_pushed[0].motion.yrel == -2 &&
+                    is_pushed[1].motion.xrel == 5 && is_pushed[1].motion.yrel == 1 && is_pushed[0].motion.window == 7 && is_pushed[0].motion.x == 100,
+                "each motion after the arm is one SDL motion, with SDL's window and the pointer's place, none lost before the read saw the arm (%u)",
+                is_pushes);
+        ISCHECK(is_pushed[2].type == MWI_SDL_MOUSEBUTTONDOWN && is_pushed[2].button.button == 1 && is_pushed[2].button.state == 1 &&
+                    is_pushed[3].type == MWI_SDL_MOUSEBUTTONDOWN && is_pushed[3].button.button == 3,
+                "BTN_LEFT is SDL's left, BTN_RIGHT SDL's right (%u %u)", is_pushed[2].button.button, is_pushed[3].button.button);
+        is_rel_x = 1, is_rel_y = 1;
+        buttons = mwi_relative_state(&x, &y);
+        ISCHECK(x == 9 && y == 0 && buttons == 5, "the relative state is SDL's own and the page's motion, with the held buttons (%d %d %u)", x, y, buttons);
+        buttons = mwi_relative_state(&x, &y);
+        ISCHECK(x == 0 && y == 0, "the relative state is taken once");
+        ISCHECK(mwi_mouse_state(&x, &y) == 5 && x == 100, "the mouse state holds the page's buttons");
+        is_put(SPARK_INPUT_KIND_KEY, 0x111, 0, 0);
+        is_poll_all();
+        ISCHECK(is_pushed[4].type == MWI_SDL_MOUSEBUTTONUP && is_pushed[4].button.button == 3 && mwi.held == 1, "a release lets its button go");
+        is_put(SPARK_INPUT_KIND_REL, 0, 2, 2);
+        is_arm(0);
+        is_poll_all();
+        ISCHECK(is_count(MWI_SDL_MOUSEBUTTONUP) == 2 && mwi.held == 0 && is_pushes == 6,
+                "a page named no more lets every held button go, and its unread motion is not the game's (%u)", is_pushes);
+        mwi_set_relative(0);
+        ISCHECK(mwi_check_claim_count == 2 && mwi_check_claims[1] == (int)MWI_CLAIM_OFF, "relative mode off lets the claim go");
+        is_arm(1);
+        is_put(SPARK_INPUT_KIND_REL, 0, 4, 4);
+        is_poll_all();
+        ISCHECK(is_pushes == 6, "a page let go is not read");
+        mwi_quit();
+        ISCHECK(is_quits == 1, "SDL_Quit is SDL's after the shim's");
+}
+
+static void is_test_late(void)
+{
+        is_reset();
+        mwi_set_relative(1);
+        is_arm(1);
+        is_poll_all();
+        for (unsigned at = 0; at < 200; at++)
+                is_put(SPARK_INPUT_KIND_REL, 0, 1, 0);
+        is_page.buttons = 1u << 1; // BTN_RIGHT held by the page, its press among the lost
+        is_poll_all();
+        ISCHECK(mwi.lost == 73 && is_count(MWI_SDL_MOUSEMOTION) == 127,
+                "a reader 200 behind loses the oldest 73 (the one the kernel's next write lands on among them) and reads 127 (%u %u)", mwi.lost,
+                is_count(MWI_SDL_MOUSEMOTION));
+        ISCHECK(mwi.held == 4 && is_count(MWI_SDL_MOUSEBUTTONDOWN) == 1, "a late reader holds what the page says is held (%u)", mwi.held);
+}
+
+static void is_test_wheel(void)
+{
+        is_reset();
+        mwi_set_relative(1);
+        is_arm(1);
+        is_poll_all();
+        is_put(SPARK_INPUT_KIND_WHEEL, 11, 60, 0);
+        is_put(SPARK_INPUT_KIND_WHEEL, 11, 60, 0);
+        is_put(SPARK_INPUT_KIND_WHEEL, 8, -1, 0);
+        is_put(SPARK_INPUT_KIND_WHEEL, 6, 1, 0);
+        is_poll_all();
+        ISCHECK(is_pushes == 4 && is_pushed[0].wheel.y == 0 && is_pushed[0].wheel.precise_y == 0.5f && is_pushed[1].wheel.y == 1 &&
+                    is_pushed[1].wheel.precise_y == 0.5f,
+                "half notches are precise and a whole one counts (%d %d)", is_pushed[0].wheel.y, is_pushed[1].wheel.y);
+        ISCHECK(is_pushed[2].wheel.y == -1 && is_pushed[2].wheel.precise_y == -1.0f && is_pushed[3].wheel.x == 1 && is_pushed[3].wheel.y == 0,
+                "a notch toward the person is y -1, one to the right x 1");
+}
+
+static void is_test_observe(void)
+{
+        int x = 0, y = 0;
+
+        is_reset();
+        mwi.claim_wanted = (int)MWI_CLAIM_OBSERVE;
+        mwi.log_fd = 1; // records kept; this program's mwi_log_out writes none
+        mwi_set_relative(1);
+        ISCHECK(mwi_check_claims[0] == (int)MWI_CLAIM_OBSERVE, "observe is claimed as observe");
+        is_arm(1);
+        is_poll_all();
+        is_put(SPARK_INPUT_KIND_REL, 0, 6, 0);
+        is_put(SPARK_INPUT_KIND_KEY, 0x110, 1, 0);
+        is_x_event.type = MWI_SDL_MOUSEMOTION, is_x_event.motion.xrel = 6, is_x_pending = 1;
+        mwi_check_now = 5000;
+        is_poll_all();
+        mwi_relative_state(&x, &y);
+        ISCHECK(is_pushes == 0 && mwi.held == 0 && x == 0, "observe gives the game nothing of its own");
+        {
+                unsigned slots = 0, xs = 0;
+
+                for (unsigned at = 0; at < mwi.logged; at++)
+                        slots += mwi_log[at].what == 'S', xs += mwi_log[at].what == 'X' && mwi_log[at].a == 6;
+                ISCHECK(slots == 2 && xs == 1, "observe records the page's reports and X's motion (%u %u)", slots, xs);
+        }
+}
+
+static void is_test_wait(void)
+{
+        is_reset();
+        mwi_set_relative(1);
+        is_arm(1);
+        is_poll_all();
+        is_wait_calls = 0;
+        ISCHECK(mwi_wait_event_timeout(0, 3) == 0 && is_wait_calls == 3 && is_waits[0] == 1 && is_waits[2] == 1,
+                "an armed wait waits a millisecond at a time and ends with its time (%u)", is_wait_calls);
+        is_arm(0);
+        is_wait_calls = 0;
+        mwi_wait_event_timeout(0, 9);
+        ISCHECK(is_wait_calls == 1 && is_waits[0] == 9, "a wait with no page is SDL's own");
+}
+
+/* A writer as the kernel writes (each slot then its head; a disarm moves the generation, then wipes) racing the reader. */
+static volatile int is_race_done;
+static void *is_racer(void *unused)
+{
+        (void)unused;
+        for (int seq = 1; seq <= 300000; seq++)
+        {
+                if (seq % 997 == 0)
+                {
+                        is_page.state = SPARK_FOCUS_STATE_OFF;
+                        __atomic_store_n(&is_page.generation, is_page.generation + 1, __ATOMIC_RELEASE);
+                        __atomic_thread_fence(__ATOMIC_SEQ_CST);
+                        for (unsigned at = 0; at < SPARK_FOCUS_SLOTS; at++)
+                                __atomic_store_n(&is_page.slots[at].dx, 0, __ATOMIC_RELAXED),
+                                        __atomic_store_n(&is_page.slots[at].dy, 0, __ATOMIC_RELAXED);
+                        is_page.state = SPARK_FOCUS_STATE_ARMED;
+                        is_page.armed_head = is_page.head;
+                        __atomic_store_n(&is_page.generation, is_page.generation + 1, __ATOMIC_RELEASE);
+                }
+                {
+                        struct spark_input_slot *s = &is_page.slots[is_page.head & (SPARK_FOCUS_SLOTS - 1u)];
+
+                        __atomic_store_n(&s->dx, seq, __ATOMIC_RELAXED);
+                        __atomic_store_n(&s->dy, -seq, __ATOMIC_RELAXED);
+                        __atomic_store_n(&is_page.head, is_page.head + 1, __ATOMIC_RELEASE);
+                }
+        }
+        is_race_done = 1;
+        return 0;
+}
+
+static int is_race_bad, is_race_seen, is_race_last;
+static int is_race_push(union mwi_sdl_event *event)
+{
+        if (event->type != MWI_SDL_MOUSEMOTION)
+                return 1;
+        is_race_seen++;
+        if (event->motion.xrel <= 0 || event->motion.yrel != -event->motion.xrel || event->motion.xrel <= is_race_last)
+                is_race_bad++;
+        is_race_last = event->motion.xrel;
+        return 1;
+}
+
+static void is_test_race(void)
+{
+        pthread_t writer;
+
+        is_reset();
+        mwi.real[MWI_AT_PUSH] = (mwi_fn)is_race_push;
+        mwi_set_relative(1);
+        is_arm(1);
+        is_poll_all();
+        is_race_done = 0, is_race_bad = is_race_seen = is_race_last = 0;
+        if (pthread_create(&writer, 0, is_racer, 0) != 0)
+        {
+                ISCHECK(0, "the writer started");
+                return;
+        }
+        while (!is_race_done)
+                mwi_drain();
+        pthread_join(writer, 0);
+        mwi_drain();
+        ISCHECK(is_race_seen > 1000 && is_race_bad == 0,
+                "racing arms, disarms and wipes, every motion passed on was written whole and in order (%d seen, %d bad, %u lost)",
+                is_race_seen, is_race_bad, mwi.lost);
+}
+
+int main(void)
+{
+        is_test_layout();
+        is_test_entry();
+        is_test_take();
+        is_test_late();
+        is_test_wheel();
+        is_test_observe();
+        is_test_wait();
+        is_test_race();
+        printf("CHECK_input_shim: %u checks, %u failures\n", is_checks, is_failures);
+        return is_failures != 0;
+}
+#endif /* CHECK_input_shim */

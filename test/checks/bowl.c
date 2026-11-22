@@ -1502,6 +1502,15 @@ static fn steam_profile(void)
               overlay_gl && overlay_gl < wrapped && overlay_gl < run &&
                   strstr(steam->session[overlay_gl - 1], "[ -r " BOWL_ROOT_PREFIX "arch/usr/local/lib/steam-overlay-gl.so ] && "));
         {
+                positive input_shim = chrome_line(steam ? steam->session : null,
+                                                  "export LD_PRELOAD='/usr/local/$LIB/libmoonwater-input.so'${LD_PRELOAD:+:$LD_PRELOAD}");
+
+                check("The session preloads libmoonwater-input.so by $LIB when the bowl holds it, behind its workaround switch, before Steam starts",
+                      input_shim && input_shim < wrapped && input_shim < run &&
+                          strstr(steam->session[input_shim - 1],
+                                 "wa moonwater-input && [ -r " BOWL_ROOT_PREFIX "arch/usr/local/lib/libmoonwater-input.so ] && "));
+        }
+        {
                 const struct bowl_profile address_to chrome_profile = bowl_find_profile("chrome");
 
                 check("Only the steam profile holds the overlay library",
@@ -1531,6 +1540,28 @@ static fn steam_profile(void)
                         right &= bowl_check_elf_exports(image, sizes[which], "vkGetInstanceProcAddr") == 0;
                 }
                 check("The overlay libraries are i386 and x86_64 shared objects whose .dynsym exports the GL calls, glXGetCurrentContext, dlsym, eglSwapBuffers and XOpenDisplay as global functions, and not vkGetInstanceProcAddr",
+                      right);
+        }
+        {
+                // libmoonwater-input.so: the entry SDL looks for, and nothing of the C library's (the overlay's dlsym stays the one
+                // in front of it) nor any SDL function (SDL takes this library's through its table, never by name).
+                static const char *const absent[] = {"dlsym", "open", "mmap", "ioctl", "SDL_PollEvent", "SDL_GetRelativeMouseState"};
+                const p8 *const images[] = {bowl_moonwater_input_32, bowl_moonwater_input_64};
+                const positive sizes[] = {sizeof(bowl_moonwater_input_32), sizeof(bowl_moonwater_input_64)};
+                bool right = true;
+
+                for (positive which = 0; which < 2; which++)
+                {
+                        const p8 *image = images[which];
+
+                        right &= sizes[which] > 64 && image[0] == 0x7f && image[1] == 'E' && image[2] == 'L' &&
+                                 image[3] == 'F' && image[4] == which + 1 && image[16] == 3 &&
+                                 image[18] == (which ? 62 : 3) && image[19] == 0;
+                        right &= bowl_check_elf_exports(image, sizes[which], "SDL_DYNAPI_entry") == 1;
+                        for (positive name = 0; right && name < sizeof(absent) / sizeof(absent[0]); name++)
+                                right &= bowl_check_elf_exports(image, sizes[which], absent[name]) == 0;
+                }
+                check("The input libraries are i386 and x86_64 shared objects whose .dynsym exports SDL_DYNAPI_entry as a global function, and none of the C library's names or SDL's",
                       right);
         }
 #endif

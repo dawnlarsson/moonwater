@@ -6972,6 +6972,11 @@ lane_wayland()
                 wayland_row "xwm-checks-$wayland_cc" sh -c "$wayland_cc $wayland_warn -Wno-comment -D_GNU_SOURCE \
                         -DCHECK_xwm_wire test/checks.c -o '$work/xwm-check-$wayland_cc' && \
                         '$work/xwm-check-$wayland_cc'"
+                # A game's reader of the focused page (src/shim/input.c), against SDL played by fakes and a page written as the
+                # kernel writes it, a racing writer among them.
+                wayland_row "input-shim-checks-$wayland_cc" sh -c "$wayland_cc $wayland_warn -Wno-comment -pthread -D_GNU_SOURCE \
+                        -DCHECK_input_shim test/checks.c -o '$work/input-shim-check-$wayland_cc' && \
+                        '$work/input-shim-check-$wayland_cc'"
                 if $wayland_cc $wayland_warn -c src/canvas/wayland.c -o "$work/wayland-off.o" 2> /dev/null; then
                         tally "wayland-off-refused-$wayland_cc" 0 1
                         wayland_status=1
@@ -6980,6 +6985,16 @@ lane_wayland()
                         tally "wayland-off-refused-$wayland_cc" 1 1
                 fi
         done
+        # The reader itself, for the two machines Steam's games are (the bytes in src/bowl.c are a build of this), its flags
+        # the source's, with every warning an error.
+        if command -v clang > /dev/null 2>&1 && command -v ld.lld > /dev/null 2>&1; then
+                for input_target in i386 x86_64; do
+                        wayland_row "input-shim-$input_target" clang -target "$input_target-linux-gnu" -std=gnu11 -Os -fPIC -shared \
+                                -nostdlib -ffreestanding -fno-stack-protector -fvisibility=hidden -Wall -Wextra -Werror -fuse-ld=lld \
+                                -Wl,-soname,libmoonwater-input.so,-z,lazy,-z,undefs,--allow-shlib-undefined,-Bsymbolic \
+                                -o "$work/libmoonwater-input-$input_target.so" src/shim/input.c
+                done
+        fi
         if [ -r /usr/share/wayland/wayland.xml ] && command -v python3 > /dev/null 2>&1; then
                 wayland_row protocol-table python3 test/wayland_protocol.py --out src/canvas/wayland_protocol.inc --check
         fi
