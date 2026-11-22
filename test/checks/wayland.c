@@ -620,7 +620,7 @@ static const struct wayland_host fake_host = {
 
 /* ---- a client that builds its requests from the table ---- */
 
-#define EVENTS 8192 /* the frame row (4 * WAYLAND_CALLBACKS + 1 callbacks answered at once) needs more than the old 512 */
+#define EVENTS 16384 /* the frame row (4 * WAYLAND_CALLBACKS + 1 callbacks answered, each with a delete_id after it) needs more than 8192 */
 
 struct wl_event_seen
 {
@@ -2344,6 +2344,8 @@ static void test_pacing(void)
 
         timer = wlc_id(c, WLI_wp_commit_timer_v1, 1);
         wlc_send(c, timers, WLQ_wp_commit_timing_manager_v1_get_timer, timer, s.surface);
+        /* a stamp is held to one second from now at most (6aec4587e): the clock is pinned at 4.5 s, so 5 s is a second away and is kept */
+        fake.clock_still = 1, fake.now = 4500;
         wlc_send(c, timer, WLQ_wp_commit_timer_v1_set_timestamp, 0ul, 5ul, 7ul);
         WLCHECK(wayland_row_hint(0, WAYLAND_HINT_TIMESTAMP) == 0, "a timestamp is for the commit after it is set");
         wlc_send(c, s.surface, WLQ_wl_surface_commit);
@@ -2351,6 +2353,7 @@ static void test_pacing(void)
         fake.now = 5001;
         WLCHECK(wayland_resume(c->slot) == 0 && c->errors == 0 && wayland_row_hint(0, WAYLAND_HINT_TIMESTAMP) == 5000000007ul,
                 "and is made at its time, which is the commit's, in nanoseconds");
+        fake.clock_still = 0;
         wlc_send(c, s.surface, WLQ_wl_surface_commit);
         WLCHECK(wayland_row_hint(0, WAYLAND_HINT_TIMESTAMP) == 0, "and it is for that commit only");
         // With the vblank the next latch shows at known (wayland_target), a commit for that vblank is made now, to be shown at it, and one
@@ -2383,6 +2386,8 @@ static void test_pacing(void)
 
                 WLCHECK(wayland_stalled(c->slot) && due > 0 && due <= wayland_now() + 1100,
                         "a commit stamped far in the future is held one second at most (due %ld)", due);
+                /* the vblank target set above is in the past now: a stamp past it waits for that vblank, so the clock alone decides here */
+                wayland_target(0ul, 0ul);
                 fake.now += 2000;
                 WLCHECK(wayland_resume(c->slot) == 0 && !wayland_stalled(c->slot), "and is made once that second has passed");
         }
@@ -2753,7 +2758,7 @@ static void test_cursor_shape(void)
                 wlc_send(c, s.compositor, WLQ_wl_compositor_create_surface, drawn);
                 wlc_send(c, pointer, WLQ_wl_pointer_set_cursor, (unsigned long)serial, drawn, 0ul, 0ul);
         }
-        WLCHECK(c->errors == 0 && fake_cursor[0] == WAYLAND_CURSOR_ARROW, "a set_cursor with a surface gives the arrow until the surface is drawn");
+        WLCHECK(c->errors == 0 && fake_cursor[0] == WAYLAND_CURSOR_HIDDEN, "a set_cursor with a surface that has drawn nothing hides the pointer until it is drawn");
 
         wayland_pointer_to(-1, 0, 0);
         WLCHECK(fake_cursor[0] == -1, "a shape is none again when the pointer leaves the window");
@@ -4979,7 +4984,7 @@ static void test_tree_cost(void)
         struct wlc *c;
         unsigned long subcompositor, surface[64], buffer[64];
         double total = 0;
-        long count = 64 - 1, rounds = 3;
+        long count = WAYLAND_SUB_LEVELS, rounds = 3; /* the deepest chain the shim takes (5e73b8e0c): a 64 chain is a protocol error */
 
         wl_reset();
         wayland_start(&fake_host);
@@ -6465,8 +6470,8 @@ static void test_cursor_picture(void)
         WLCHECK(wayland_cursor_picture(0, &cur) == 0 && !cur.pixels, "no picture of the client's before set_cursor");
         was = cur.serial;
         wlc_send(c, pointer, WLQ_wl_pointer_set_cursor, (unsigned long)serial, cursor, 3L, 5L);
-        WLCHECK(wayland_cursor_picture(0, &cur) == 0 && cur.serial != was && fake_cursor[0] == WAYLAND_CURSOR_ARROW,
-                "a surface named that has drawn nothing is no picture yet, the arrow is worn, and the serial moved");
+        WLCHECK(wayland_cursor_picture(0, &cur) == 0 && cur.serial != was && fake_cursor[0] == WAYLAND_CURSOR_HIDDEN,
+                "a surface named that has drawn nothing is no picture yet, the pointer is hidden, and the serial moved");
         was = cur.serial;
         first = wl_buffer_of(&s, 8, 6, 0x80402010, WLN_wl_shm_format_argb8888);
         wlc_send(c, cursor, WLQ_wl_surface_attach, first, 0L, 0L);
@@ -6477,6 +6482,7 @@ static void test_cursor_picture(void)
                     ((const unsigned *)cur.pixels)[0] == 0x80402010u && ((const unsigned *)cur.pixels)[8 * 6 - 1] == 0x80402010u,
                 "the surface's commit is the picture: its pixels, 8 by 6, the hotspot named, and a new serial (%ld by %ld, hot %ld %ld)",
                 cur.width, cur.height, cur.hot_x, cur.hot_y);
+        WLCHECK(fake_cursor[0] == WAYLAND_CURSOR_ARROW, "once drawn, the surface is the arrow");
         WLCHECK(wayland_cursor_picture(1, &cur) == 0 && !cur.pixels, "it is the picture of the window under the pointer only");
         WLCHECK(releases_of(c, first) == 0, "the buffer is held while it is the picture");
         was = cur.serial;
@@ -9253,7 +9259,8 @@ static void test_ids_cap(void)
         for (n = 0; n < WAYLAND_IDS_MAX + 100 && c->errors == 0; n++)
                 wlc_send(c, seat, WLQ_wl_seat_get_pointer, wlc_id(c, WLI_wl_pointer, 1));
         wlc_pump(c);
-        WLCHECK(c->errors == 1 && n <= WAYLAND_IDS_MAX, "a seat's pointer list is capped at WAYLAND_IDS_MAX (refused after %ld)", n);
+        WLCHECK(c->errors == 1 && c->error_code == WLN_wl_display_error_no_memory && n == WAYLAND_IDS_MAX + 1,
+                "a seat's pointer list is capped at WAYLAND_IDS_MAX (the request after %ld is refused)", n - 1);
 }
 
 static void test_object_cap(void)
@@ -9823,6 +9830,8 @@ int main(int argc, char **argv)
 {
         long rounds = argc > 1 ? atol(argv[1]) : 20000;
 
+        /* unbuffered: stdout written to a file was kept only up to its first 4 KB block, so the gate saw one FAIL row of eight */
+        setvbuf(stdout, NULL, _IONBF, 0);
         test_damage_outside();
         test_cursor_serial();
         test_damage_many();
