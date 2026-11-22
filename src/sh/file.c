@@ -38678,7 +38678,7 @@ static bool file_copy_one(bipolar source_directory, string_address source,
                 mv_across_said |= moving;
                 return false;
         }
-        scope_exit(memory_give(walk_frame));
+        // Given back at the returns below: this function has gotos (to copied_without_metadata), so no scope_exit (lib.util.c)
 
         file_walk address_to walk = (file_walk address_to)walk_frame;
         p8 address_to from = walk_frame + sizeof(file_walk);
@@ -38944,6 +38944,7 @@ static bool file_copy_one(bipolar source_directory, string_address source,
         if (staged)
         {
                 if (!complete || attributed < 0 || published < 0 || closed < 0)
+                        memory_give(walk_frame);
                         return false;
                 if (moving && remove_source)
                         complete = file_move_remove(
@@ -38951,6 +38952,7 @@ static bool file_copy_one(bipolar source_directory, string_address source,
                             AT_REMOVEDIR, address_of facts);
         }
 
+        memory_give(walk_frame);
         return complete && attributed >= 0;
 
 copied_without_metadata:
