@@ -1277,6 +1277,7 @@ static void check_compositor_turn(void)
         compositor.output[0].turned = 1;
         check("turn: a screen the card turns reads nothing and keeps nothing", compositor_changed_ready() == 0 && !compositor.mirror);
         memory_copy(compositor.driver, "amdgpu", 7);
+        compositor.driver_flags = drm_driver_flags(compositor.driver); // what card_try sets: the list is read from the flags, not the name
         compositor.output[0].turned = 0;
         compositor.changed = 0;
         check("turn: a card of the apart list keeps its mirror as it did", compositor_changed_ready() == 1 && compositor.mirror != compositor.scanout);
