@@ -1965,3 +1965,61 @@ HOT static positive canvas_ext_import_cached(struct canvas_ext_import *restrict 
 #endif
 }
 
+
+/*
+        Step 3 (C2 glass on the card): a glass row's composed picture is a card address, so the card's op 3 writes it and the frame copy (op 4) reads it. It
+        is a memfd of the row's own, of want bytes rounded to a page, mapped shared and mapped for the card. Its card address is looked up at each use
+        (compositor_composed_va): a card reset or a forgotten map is a miss, and the map is made again then, so no card address is kept. Released the way
+        compositor_unmap_pixels releases a map: forgotten (the card keeps it until idle), unregistered, unmapped, closed, in that order.
+*/
+#ifdef MOONWATER_GPU_C
+static void compositor_composed_drop(unsigned int **pixels, unsigned long *bytes, int *fd)
+{
+        if (*pixels)
+                gpu_forget((const void *)*pixels, (positive)*bytes), gpu_unregister_memfd(*pixels), compositor_call(syscall(munmap), (positive)*pixels, *bytes, 0, 0, 0, 0);
+        if (*fd > 0)
+                system_close(*fd - 1);
+        *pixels = 0, *bytes = 0, *fd = 0;
+}
+
+static unsigned int *compositor_composed_make(unsigned int **pixels, unsigned long *bytes, int *fd, unsigned long want)
+{
+        unsigned long round = (want + 4095ul) & ~4095ul;
+        long memfd, mapped;
+
+        if (*pixels && *bytes == round)
+                return *pixels;
+        compositor_composed_drop(pixels, bytes, fd);
+        memfd = compositor_call(syscall(memfd_create), (positive) "moonwater-glass", 1 | 2, 0, 0, 0, 0);
+        if (memfd < 0)
+                return null;
+        if (system_truncate_handle((int)memfd, (positive)round) != 0)
+                return system_close((int)memfd), null;
+        mapped = compositor_call(syscall(mmap), 0, (positive)round, 3, 1, (positive)memfd, 0);
+        if (mapped < 0 && mapped > -4096)
+                return system_close((int)memfd), null;
+        *pixels = (unsigned int *)mapped, *bytes = round, *fd = (int)memfd + 1;
+        gpu_register_memfd((int)memfd, *pixels, (positive)round, 0);
+        return *pixels;
+}
+
+static positive compositor_composed_va(unsigned int *pixels, unsigned long bytes)
+{
+        return pixels && bytes ? gpu_host_va_written(pixels, (positive)bytes, (positive)bytes, 1) : 0;
+}
+#else
+static void compositor_composed_drop(unsigned int **pixels, unsigned long *bytes, int *fd)
+{
+        *pixels = 0, *bytes = 0, *fd = 0;
+}
+static unsigned int *compositor_composed_make(unsigned int **pixels, unsigned long *bytes, int *fd, unsigned long want)
+{
+        (void)pixels, (void)bytes, (void)fd, (void)want;
+        return null;
+}
+static positive compositor_composed_va(unsigned int *pixels, unsigned long bytes)
+{
+        (void)pixels, (void)bytes;
+        return 0;
+}
+#endif

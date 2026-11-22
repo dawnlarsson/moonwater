@@ -252,6 +252,9 @@ static struct taskbar_view compositor_taskbar_view(void);
 static unsigned int compositor_line_lit(void), compositor_line_unlit(void), compositor_ink_shadow(void);
 static unsigned int compositor_ink_selection(void), compositor_snap_ink(void), compositor_tab_target(b32 lit), compositor_ink_role(int role);
 static void compositor_preview(int row);
+static unsigned int *compositor_composed_make(unsigned int **pixels, unsigned long *bytes, int *fd, unsigned long want);
+static void compositor_composed_drop(unsigned int **pixels, unsigned long *bytes, int *fd);
+static positive compositor_composed_va(unsigned int *pixels, unsigned long bytes);
 
 struct compositor_target
 {
@@ -737,6 +740,8 @@ static struct
         unsigned long glass_bytes;
 
         unsigned int *glassy, *asks, **backdrop, **tinted, **composed, **boosted;
+        int *composed_fd; // step 3: the memfd of a glass row's composed picture, plus one (0: none), kept while it is mapped
+        unsigned long *composed_bytes;
         unsigned long (*glass_sum)[3];
         int (*glass_blocks)[4];
         unsigned long *glass_cut;
@@ -1635,6 +1640,7 @@ _Static_assert(COMPOSITOR_POLLS_OWN + COMPOSITOR_INPUTS_KEPT + COMPOSITOR_CLIP_H
         X(compositor.name, COMPOSITOR_ROWS_ROW) X(compositor.moved, COMPOSITOR_ROWS_ROW) X(compositor.stack, COMPOSITOR_ROWS_ROW) \
         X(compositor.listed, COMPOSITOR_ROWS_ROW) X(compositor.marks, COMPOSITOR_ROWS_ROW) X(compositor.lengths, COMPOSITOR_ROWS_ROW) \
         X(compositor.banded, COMPOSITOR_ROWS_ROW) X(compositor.glassy, COMPOSITOR_ROWS_ROW) X(compositor.asks, COMPOSITOR_ROWS_ROW) \
+        X(compositor.composed_fd, COMPOSITOR_ROWS_ROW) X(compositor.composed_bytes, COMPOSITOR_ROWS_ROW) \
         X(compositor.backdrop, COMPOSITOR_ROWS_ROW) X(compositor.tinted, COMPOSITOR_ROWS_ROW) X(compositor.composed, COMPOSITOR_ROWS_ROW) \
         X(compositor.boosted, COMPOSITOR_ROWS_ROW) X(compositor.glass_sum, COMPOSITOR_ROWS_ROW) X(compositor.glass_blocks, COMPOSITOR_ROWS_ROW) \
         X(compositor.glass_cut, COMPOSITOR_ROWS_ROW) X(compositor.glass_made, COMPOSITOR_ROWS_ROW) X(compositor.stale, COMPOSITOR_ROWS_ROW) \
