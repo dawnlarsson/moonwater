@@ -35,7 +35,7 @@ static struct
         unsigned int ground;
         int width, height, shown;
         struct ui_findbar find;
-        struct ui_control strip, wrap_btn, hex_btn;
+        struct ui_control strip;
         struct ui_view view;
         struct ui_rect find_box, text_box;
         int pill_box[4], pill_wrap[4], pill_text[4], pill_hex[4], pill_hover;
@@ -836,13 +836,6 @@ static positive editor_status_text(char address_to text, positive room, struct d
         return at;
 }
 
-static fn editor_btn_prep(struct ui_control address_to btn, b32 active, const char address_to label)
-{
-        if (btn->kind != UI_BUTTON)
-                btn->kind = UI_BUTTON, ui_control_start(btn);
-        btn->variant = active ? UI_BUTTON_PRIMARY : UI_BUTTON_TEXT, btn->label = label;
-}
-
 static fn editor_layout(void)
 {
         struct editor_tab address_to tab = editor_now();
@@ -856,8 +849,6 @@ static fn editor_layout(void)
                 strip->kind = UI_TABS, strip->variant = UI_TABS_SEGMENTED, strip->closable = strip->addable = true,
                 strip->close_item = strip->close_hover = strip->tab_right_click = -1, ui_control_start(strip);
         ui_tabs_fill(strip, editor.count, editor.tab, editor_tab_name, editor_tab_dirty);
-        editor_btn_prep(&editor.wrap_btn, tab->view.wrap, WORDS(editor_wrap_on));
-        editor_btn_prep(&editor.hex_btn, tab->view.hex, tab->view.hex ? WORDS(editor_mode_text) : WORDS(editor_mode_hex));
         ui_view_begin(&editor.view, &editor.ui, editor.width, -editor.height);
         ui_control(strip, .class = "filetabs", .on = editor_tabbed);
         ui_host(&editor.find_box, .h = UI_FINDBAR_H, .hidden = editor.find.mode == UI_FINDBAR_CLOSED);
