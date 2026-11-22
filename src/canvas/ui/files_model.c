@@ -1268,7 +1268,7 @@ struct files_devices
 {
         p32 disks, parts, mounts_used;
         b32 shut, stale;                  // the group is shut (its disks are no rows); the table changed and the rows are not made from it yet
-        p64 census, mounted, blocks;      // hashes: the list last read, the mounts its partitions have, the kernel's block devices
+        p64 census, mounted;              // hashes: the list last read, the mounts its partitions have
         p64 disk_bytes[FILES_DISKS_MOST];
         p16 disk_first[FILES_DISKS_MOST], disk_count[FILES_DISKS_MOST];
         b8 disk_external[FILES_DISKS_MOST], disk_shut[FILES_DISKS_MOST];
@@ -1665,22 +1665,42 @@ static b32 files_devices_mounted(struct files_devices address_to d, const p8 add
 
 static inline const p8 address_to files_part_mount(const struct files_devices address_to d, p32 p) { return p < d->parts && d->part_mount[p] ? d->mounts + d->part_mount[p] - 1 : null; }
 
-// The kernel's block devices by name (/sys/class/block, partitions too), hashed: a disk or a partition that came or went changes it.
-static p64 files_devices_blocks(void)
+// Whether a kernel uevent (its fields NUL apart: ACTION@DEVPATH, ACTION=, SUBSYSTEM=, ...) is a block device's: a disk or a
+// partition that came, went or changed (a card put in a reader), which the list is read again for.
+static b32 files_uevent_block(const p8 address_to message, positive length)
 {
-        file_walk walk = {.handle = -1};
-        struct linux_dirent64 address_to record;
-        p64 hash = 14695981039346656037ull;
-        if (!file_walk_open(&walk, AT_FDCWD, (string_address) "/sys/class/block"))
-                return 0;
-        while ((record = file_walk_next(&walk)))
+        static const char want[] = "SUBSYSTEM=block";
+        for (positive at = 0, field; at < length; at++)
         {
-                for (positive i = 0; record->d_name[i]; i++)
-                        hash = (hash ^ (p8)record->d_name[i]) * 1099511628211ull;
-                hash = (hash ^ 0xffu) * 1099511628211ull;
+                for (field = at; at < length && message[at];)
+                        at++;
+                if (at - field == sizeof(want) - 1 && !memory_compare(message + field, want, sizeof(want) - 1))
+                        return true;
         }
-        return file_walk_close(&walk), hash;
+        return false;
 }
+
+// The uevents waiting on a socket, taken (a burst at most): whether one of them was a block device's.
+static b32 files_devices_heard(bipolar events)
+{
+        p8 message[2048];
+        b32 heard = false;
+        for (int taken = 0; events >= 0 && taken < 64; taken++)
+        {
+                bipolar got = socket_receive((b32)events, message, sizeof(message), MSG_DONTWAIT, 0, 0);
+                if (got <= 0)
+                        break;
+                heard |= files_uevent_block(message, (positive)got);
+        }
+        return heard;
+}
+
+/*
+        Whether the list is read again now: a block device came, went or changed (heard on the uevent socket, which wakes the
+        window's wait: no timer looks for it), or at a look (once a second, while the window is not minimized) when the mounts
+        changed or the reading is due (FILES_CENSUS_NS after the last).
+*/
+static inline b32 files_census_due(b32 heard, b32 looked, b32 mounts, b64 now, b64 due) { return heard || (looked && (mounts || now >= due)); }
 
 /*
         The Devices group's rows, made again from the table: the group after This Machine's own rows and before any peer, its disks

@@ -109,6 +109,7 @@ static struct
         p32 seen, naming, armed_at, drag_place, carry_count, band_base_count, tree_at, tree_shown;
         b64 next_look, next_show, carry_at, flash_at, spring_at, next_progress, typed_at, next_census;
         b32 census_again;
+        int uevents; // the kernel's uevents: a block device that comes or goes wakes the window
         struct ui_job runner;
         string_address start;
         struct ui_rect path_box, head_box, side_box, nav_box[4];
@@ -2312,6 +2313,8 @@ static fn files_close_window(void)
         if (!files.big)
                 return;
         files_remote_read_abort();
+        if (files.uevents >= 0)
+                system_close(files.uevents), files.uevents = -1;
         for (p32 k = 0; k < files.big->peer_count; k++)
                 if (files.big->peers[k].used && files.big->peers[k].fs.used)
                         link_fs_close(&files.big->peers[k].fs);
@@ -2872,6 +2875,13 @@ static long files_tick(long timeout, long address_to other)
         struct ui_text address_to active = files.editing == FILES_EDIT_PATH ? &files.big->path.text : files.editing ? files_field() : files.finding && files.focus == FILES_FOCUS_FIND ? &files.finder : null;
         b64 now = (b64)ui_kit.now;
         files_remote_tick(&timeout, other);
+        if (files.uevents >= 0)
+        {
+                if (files_census_due(files_devices_heard(files.uevents), false, false, now, files.next_census))
+                        files_census();
+                if (other && *other < 0)
+                        *other = files.uevents;
+        }
         if (m->state == FILES_READY && m->listed != files.git_key)
                 files.git = files_model_is_remote(m) ? false : files_git_marks(m, files.big->git_state), files.git_key = m->listed, files.dirty = true;
         if (files.drop_over)
@@ -2975,13 +2985,10 @@ static long files_tick(long timeout, long address_to other)
                 int became = files_model_is_remote(m) ? FILES_FRESH : files_model_stale(m);
                 if (became == FILES_STALE)
                         files_model_reload(m);
-                b32 census = files_tree_sync_drives(&files.big->tree, (const p8 address_to)getenv((string_address) "HOME"), false);
-                p64 blocks = files_devices_blocks();
-                if (census)
+                b32 mounts = files_tree_sync_drives(&files.big->tree, (const p8 address_to)getenv((string_address) "HOME"), false);
+                if (mounts)
                         files_tree_follow(), files.dirty = true;
-                if (blocks != files.big->devices.blocks)
-                        files.big->devices.blocks = blocks, census = true;
-                if (census || now >= files.next_census)
+                if (files_census_due(false, true, mounts, now, files.next_census))
                         files_census();
                 files_peers_sync();
                 files.dirty |= became != FILES_FRESH, files.next_look = now + FILES_LOOK_NS;
@@ -3023,7 +3030,7 @@ static int files_open_window(void)
                 return 1;
         if (!files_tree_begin(&files.big->tree))
                 return 1;
-        files.big->tree.devices = &files.big->devices, files.big->devices.blocks = files_devices_blocks();
+        files.big->tree.devices = &files.big->devices, files.uevents = compositor_uevents_open();
         files_tree_populate_live(&files.big->tree, (const p8 address_to)getenv((string_address) "HOME"));
         files_census();
         files_peers_sync();
@@ -3063,7 +3070,7 @@ static struct ui_app files_app = {
 static b32 files_main()
 {
         memory_zero(&files, sizeof(files));
-        files.runner.output = -1;
+        files.runner.output = files.uevents = -1;
         files.start = getenv((string_address) "HOME");
         for (positive at = 1, took; at < (positive)program_argument_count(); at += took ? took : 1)
                 if (!(took = ui_app_option(&files_app, at)) && program_argument(at)[0] == '/')

@@ -4576,6 +4576,31 @@ static fn browser_devices(void)
                 shut = shut && tree.node[group].kind == FILES_NODE_MACHINE && tree.count == group + 1;
                 files_tree_end(&tree);
         }
+        {
+                // A uevent, as the kernel sends it on its socket: a block device's is heard, another subsystem's is not, and one heard
+                // makes the list due with no look and before its time (the wait woke for it; no timer looked).
+                static const char block[] = "add@/devices/pci0000:00/usb1/1-2/host6/target6:0:0/6:0:0:0/block/sdb/sdb1\0ACTION=add\0"
+                                            "DEVPATH=/devices/pci0000:00/usb1/1-2/host6/target6:0:0/6:0:0:0/block/sdb/sdb1\0SUBSYSTEM=block\0"
+                                            "DEVNAME=sdb1\0DEVTYPE=partition\0SEQNUM=4242";
+                static const char other[] = "change@/devices/LNXSYSTM:00/PNP0C0A:00/power_supply/BAT0\0ACTION=change\0SUBSYSTEM=power_supply\0"
+                                            "NOT_SUBSYSTEM=block\0SEQNUM=4243";
+                p32 ends[2] = {0, 0};
+                b32 heard = false, quiet = false, due;
+                if ((bipolar)system_call_4(syscall(socketpair), AF_UNIX, SOCK_DGRAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0, (positive)ends) >= 0)
+                {
+                        system_call_3(syscall(write), ends[1], (positive)other, sizeof(other));
+                        quiet = !files_devices_heard((bipolar)ends[0]);
+                        system_call_3(syscall(write), ends[1], (positive)other, sizeof(other));
+                        system_call_3(syscall(write), ends[1], (positive)block, sizeof(block));
+                        heard = files_devices_heard((bipolar)ends[0]) && !files_devices_heard((bipolar)ends[0]);
+                        system_call_1(syscall(close), ends[0]), system_call_1(syscall(close), ends[1]);
+                }
+                due = files_census_due(true, false, false, 100, 30000000100ll) && !files_census_due(false, false, false, 100, 30000000100ll) &&
+                      !files_census_due(false, true, false, 100, 30000000100ll) && files_census_due(false, true, true, 100, 30000000100ll) &&
+                      files_census_due(false, true, false, 30000000100ll, 30000000100ll);
+                check("browser: a block device's uevent is heard (another subsystem's is not) and makes the list due with no look and before its time",
+                      quiet && heard && due);
+        }
         check("browser: the Devices group is after This Machine's rows and before a peer: each disk, then its partitions", rows);
         check("browser: a disk or a partition has no path, is no folder to open and is never where a path is revealed", pathless);
         check("browser: a disk shut has no partitions under it, the group shut no disks, and with no disk there is no group", shut);
