@@ -616,94 +616,129 @@ static b32 compositor_gpu_spots(void)
 
 // The present's damage drawn by the GPU: why it is not, or COMPOSITOR_GPU_WHY_DRAWN when it is.
 /*
-        A frame drawn at less than its picture's size (a window landing, a snap assist's thumbnail: compositor_scaled) has the picture it would be at its own size made
-        first, by the card: the source cell whose centre is the point's (compositor_picture_at), by the tables of columns and rows the processor makes (the card divides
-        nothing), into memory of the compositor's own that the card may write (a pool of COMPOSITOR_GPU_SCALED pictures, each grown to the largest asked for and kept), and
-        the frame in the list the present is made from is then an ordinary frame of that picture. The caller's frames are not changed: the first scaled frame makes a copy of
-        the array, which the answer's pointer is then. COMPOSITOR_GPU_WHY_DRAWN when the frames are as they should be drawn, or the reason the card is refused them.
+        A frame drawn at less than its picture's size (a window landing, a snap assist's thumbnail, the Scenes overview's miniatures: compositor_scaled) has the
+        picture it would be at its own size made first, by the card: the source cell whose centre is the point's (compositor_picture_at), by the tables of columns
+        and rows the processor makes (the card divides nothing), into memory of the compositor's own that the card may write, and the frame in the list the present
+        is made from is then an ordinary frame of that picture. The card reads the source where it is (a client's lent picture at its import's address): nothing of
+        it is copied. The pictures are one buffer, a present's one after another (each 256 bytes aligned), grown to the most a present asked for and kept, so it is
+        one map of the card's however many there are; their tables are packed one after another after the bins. Up to COMPOSITOR_GPU_SCALED frames a present (the
+        overview of a desktop of many windows draws each twice, large and on its Scene's card). The caller's frames are not changed: the first scaled frame makes a
+        copy of the array, which the answer's pointer is then. COMPOSITOR_GPU_WHY_DRAWN when the frames are as they should be drawn, or the reason the card is refused them.
 */
-#define COMPOSITOR_GPU_SCALED 16
-#define COMPOSITOR_GPU_SCALED_MOST (128ul << 20)
+#define COMPOSITOR_GPU_SCALED 64
+#define COMPOSITOR_GPU_SCALED_MOST (128ul << 20) // a scaled picture, at the most
+#define COMPOSITOR_GPU_SCALED_ALL (256ul << 20)  // a present's scaled pictures together, at the most
 static struct compositor_frame *compositor_gpu_scaled_copy; // the rows' (compositor_rows_make), COMPOSITOR_FRAMES_FOR the rows in use
 static struct
 {
         unsigned int *memory;
         unsigned long bytes;
         int fd;
-} compositor_gpu_scaled_pool[COMPOSITOR_GPU_SCALED];
+} compositor_gpu_scaled_pool;
 
-#define COMPOSITOR_GPU_SCALE_TABLES (4ull * (16384 + 16384)) // a scaled frame's tables (its columns, then its rows), at the most
+#define COMPOSITOR_GPU_SCALE_TABLES (16 * 4ull * (16384 + 16384)) // the scaled frames' tables (each its columns, then its rows), packed: 2 MiB
 // The scenes' bins without a wait: after the scaled frames' tables, which a scene's job may be submitted after, and before the self-test's megabyte.
-#define COMPOSITOR_GPU_SCENE_BINS_AT (COMPOSITOR_GPU_BINS_AT + COMPOSITOR_GPU_SCALED * COMPOSITOR_GPU_SCALE_TABLES)
+#define COMPOSITOR_GPU_SCENE_BINS_AT (COMPOSITOR_GPU_BINS_AT + COMPOSITOR_GPU_SCALE_TABLES)
 typedef char compositor_card_steps_fit[COMPOSITOR_GPU_SCALED + COMPOSITOR_DAMAGE <= COMPOSITOR_CARD_STEPS ? 1 : -1];
 static b32 compositor_card_add(const struct compositor_card_step *step); // the present's jobs (below)
+
+// A frame of the present that is scaled and meets the damage, so the card makes its picture: 1; 0 for one that is not; -1 for one the card cannot make.
+static int compositor_gpu_scale_wanted(const struct compositor_frame *f, const int dmg[4])
+{
+        if (f->builtin || !f->pixels || !compositor_scaled(f) || (dmg && !compositor_frame_meets(f, dmg)))
+                return 0;
+        if (f->width <= 0 || f->height <= 0 || f->source_w <= 0 || f->source_h <= 0 || f->width > 16384 || f->height > 16384 || f->source_w > 16384 ||
+            f->source_h > 16384 || f->pitch < (unsigned long)f->source_w || 4ull * (positive)((f->width + 3) & ~3) * (positive)f->height > COMPOSITOR_GPU_SCALED_MOST)
+                return -1;
+        return 1;
+}
+
+// The pool as large as bytes: a sealed memfd the card maps whole (or the process's memory when there is none); false when there is no memory for it.
+static b32 compositor_gpu_scaled_room(positive bytes)
+{
+        unsigned long grown = ((unsigned long)bytes + (1ul << 20) - 1) & ~((1ul << 20) - 1);
+        long memfd, mapped;
+        void *old = compositor_gpu_scaled_pool.memory, *p = old;
+
+        if (compositor_gpu_scaled_pool.bytes >= (unsigned long)bytes)
+                return true;
+        mem_buf_free(&p, &compositor_gpu_scaled_pool.bytes, MEM_BUF_GPU_FORGET);
+        if (old)
+                gpu_unregister_memfd(old);
+        if (compositor_gpu_scaled_pool.fd > 0)
+                system_close(compositor_gpu_scaled_pool.fd - 1);
+        compositor_gpu_scaled_pool.memory = 0, compositor_gpu_scaled_pool.fd = 0, compositor_gpu_scaled_pool.bytes = 0;
+        memfd = compositor_call(syscall(memfd_create), (positive) "moonwater-scaled", 1 | 2, 0, 0, 0, 0);
+        if (memfd >= 0 && system_truncate_handle((int)memfd, (positive)grown) == 0 &&
+            compositor_call(syscall(fcntl), (positive)memfd, WINDOWS_F_ADD_SEALS, 2, 0, 0, 0) == 0) // F_SEAL_SHRINK
+        {
+                mapped = compositor_call(syscall(mmap), 0, (positive)grown, 3, 1, (positive)memfd, 0);
+                if (mapped < 0 && mapped > -4096)
+                {
+                        system_close((int)memfd);
+                        return false;
+                }
+                compositor_gpu_scaled_pool.memory = (unsigned int *)mapped, compositor_gpu_scaled_pool.bytes = grown;
+                compositor_gpu_scaled_pool.fd = (int)memfd + 1;
+                gpu_register_memfd((int)memfd, compositor_gpu_scaled_pool.memory, (positive)grown, 0);
+                return true;
+        }
+        if (memfd >= 0)
+                system_close((int)memfd);
+        p = 0;
+        if (!mem_buf_grow(&p, &compositor_gpu_scaled_pool.bytes, grown, 0))
+                return compositor_gpu_scaled_pool.bytes = 0, false;
+        compositor_gpu_scaled_pool.memory = (unsigned int *)p;
+        return true;
+}
 
 static enum compositor_gpu_why compositor_gpu_scale_frames(const struct compositor_frame **io, unsigned int count, unsigned int first, const int dmg[4])
 {
         const struct compositor_frame *frames = *io;
         unsigned int used = 0;
+        positive need = 0, tabled = 0, at = 0, dst_base;
 
         if (count > COMPOSITOR_FRAMES_FOR(compositor_rows_in_use))
                 return COMPOSITOR_GPU_WHY_OTHER;
+        // The room first: every picture to make and its tables, so the pool is grown once, before any frame names it.
+        for (unsigned int k = first; k < count; k++)
+        {
+                const struct compositor_frame *f = &frames[k];
+                int wanted = compositor_gpu_scale_wanted(f, dmg);
+
+                if (!wanted)
+                        continue;
+                if (wanted < 0 || used == COMPOSITOR_GPU_SCALED)
+                        return COMPOSITOR_GPU_WHY_SCALED;
+                need += (4ull * (positive)((f->width + 3) & ~3) * (positive)f->height + 255) & ~255ull;
+                tabled += (4ull * (positive)(f->width + f->height) + 255) & ~255ull;
+                used++;
+        }
+        if (!used)
+                return COMPOSITOR_GPU_WHY_DRAWN;
+        if (need > COMPOSITOR_GPU_SCALED_ALL || tabled > COMPOSITOR_GPU_SCALE_TABLES)
+                return COMPOSITOR_GPU_WHY_SCALED;
+        if (!compositor_gpu_scaled_room(need))
+                return COMPOSITOR_GPU_WHY_SCALED;
+        if (!(dst_base = gpu_host_va_written(compositor_gpu_scaled_pool.memory, need, compositor_gpu_scaled_pool.bytes, 1)))
+                return COMPOSITOR_GPU_WHY_PICTURE;
+        tabled = 0;
         for (unsigned int k = first; k < count; k++)
         {
                 const struct compositor_frame *f = &frames[k];
                 struct compositor_frame source;
                 // Each scaled frame's tables in a place of their own: a blit not waited for reads them when its turn comes.
-                positive tables_at = COMPOSITOR_GPU_BINS_AT + (positive)used * COMPOSITOR_GPU_SCALE_TABLES;
+                positive tables_at = COMPOSITOR_GPU_BINS_AT + tabled, bytes, src_va, dst_va = dst_base + at;
                 unsigned int address_to tables = (unsigned int address_to)((p8 address_to)gpu.at + tables_at);
-                positive bytes, src_va, dst_va;
                 unsigned int dp;
 
-                if (f->builtin || !f->pixels || !compositor_scaled(f) || (dmg && !compositor_frame_meets(f, dmg)))
+                if (compositor_gpu_scale_wanted(f, dmg) <= 0)
                         continue;
-                if (used == COMPOSITOR_GPU_SCALED || f->width <= 0 || f->height <= 0 || f->source_w <= 0 || f->source_h <= 0 || f->width > 16384 || f->height > 16384 ||
-                    f->source_w > 16384 || f->source_h > 16384 || f->pitch < (unsigned long)f->source_w)
-                        return COMPOSITOR_GPU_WHY_SCALED;
                 dp = ((unsigned int)f->width + 3u) & ~3u;
                 bytes = 4ull * (positive)dp * (positive)f->height;
-                if (bytes > COMPOSITOR_GPU_SCALED_MOST)
-                        return COMPOSITOR_GPU_WHY_SCALED;
                 source = *f;
                 source.width = f->source_w, source.height = f->source_h, source.source_w = source.source_h = 0;
                 if (!compositor_gpu_picture(&source) || !(src_va = compositor_gpu_va(&source)))
-                        return COMPOSITOR_GPU_WHY_PICTURE;
-                if (compositor_gpu_scaled_pool[used].bytes < (unsigned long)bytes)
-                {
-                        unsigned long grown = ((unsigned long)bytes + (1ul << 20) - 1) & ~((1ul << 20) - 1);
-                        long memfd, mapped;
-                        void *old = compositor_gpu_scaled_pool[used].memory, *p = old;
-
-                        mem_buf_free(&p, &compositor_gpu_scaled_pool[used].bytes, MEM_BUF_GPU_FORGET);
-                        if (old)
-                                gpu_unregister_memfd(old);
-                        if (compositor_gpu_scaled_pool[used].fd > 0)
-                                system_close(compositor_gpu_scaled_pool[used].fd - 1);
-                        compositor_gpu_scaled_pool[used].memory = 0, compositor_gpu_scaled_pool[used].fd = 0;
-                        memfd = compositor_call(syscall(memfd_create), (positive) "moonwater-scaled", 1 | 2, 0, 0, 0, 0);
-                        if (memfd >= 0 && system_truncate_handle((int)memfd, (positive)grown) == 0 &&
-                            compositor_call(syscall(fcntl), (positive)memfd, WINDOWS_F_ADD_SEALS, 2, 0, 0, 0) == 0) // F_SEAL_SHRINK
-                        {
-                                mapped = compositor_call(syscall(mmap), 0, (positive)grown, 3, 1, (positive)memfd, 0);
-                                if (mapped < 0 && mapped > -4096)
-                                {
-                                        system_close((int)memfd);
-                                        return COMPOSITOR_GPU_WHY_SCALED;
-                                }
-                                compositor_gpu_scaled_pool[used].memory = (unsigned int *)mapped, compositor_gpu_scaled_pool[used].bytes = grown;
-                                compositor_gpu_scaled_pool[used].fd = (int)memfd + 1;
-                                gpu_register_memfd((int)memfd, compositor_gpu_scaled_pool[used].memory, (positive)grown, 0);
-                        }
-                        else
-                        {
-                                if (memfd >= 0)
-                                        system_close((int)memfd);
-                                if (!mem_buf_grow(&p, &compositor_gpu_scaled_pool[used].bytes, grown, 0))
-                                        return COMPOSITOR_GPU_WHY_SCALED;
-                                compositor_gpu_scaled_pool[used].memory = (unsigned int *)p;
-                        }
-                }
-                if (!(dst_va = gpu_host_va_written(compositor_gpu_scaled_pool[used].memory, bytes, compositor_gpu_scaled_pool[used].bytes, 1)))
                         return COMPOSITOR_GPU_WHY_PICTURE;
                 {
                         positive step_x = ((positive)f->source_w << 24) / (positive)f->width, fx = ((positive)f->source_w << 23) / (positive)f->width;
@@ -730,10 +765,10 @@ static enum compositor_gpu_why compositor_gpu_scale_frames(const struct composit
                 }
                 if (*io == frames)
                         memory_copy(compositor_gpu_scaled_copy, frames, (positive)count * sizeof(*frames)), *io = compositor_gpu_scaled_copy;
-                compositor_gpu_scaled_copy[k].pixels = compositor_gpu_scaled_pool[used].memory, compositor_gpu_scaled_copy[k].pitch = (unsigned long)dp;
+                compositor_gpu_scaled_copy[k].pixels = compositor_gpu_scaled_pool.memory + at / 4, compositor_gpu_scaled_copy[k].pitch = (unsigned long)dp;
                 compositor_gpu_scaled_copy[k].gpu_base = dst_va;
                 compositor_gpu_scaled_copy[k].source_w = compositor_gpu_scaled_copy[k].source_h = 0;
-                used++;
+                at += (bytes + 255) & ~255ull, tabled += (4ull * (positive)(f->width + f->height) + 255) & ~255ull;
         }
         return COMPOSITOR_GPU_WHY_DRAWN;
 }

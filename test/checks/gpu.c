@@ -4106,6 +4106,74 @@ static void gpu_card_rows(void)
 }
 
 /*
+        The scaled pool (compositor_gpu_scale_frames): a present of more scaled frames than the sixteen it had room for (the Scenes overview draws every
+        window twice, large and on its Scene's card) stays on the card. On the fake card, 24 frames of one lent picture, each scaled to a size of its own,
+        are 24 blits of the present, and the present is the card's; each frame drawn is a picture of its own in the one pool, none over another, and each
+        blit reads the lent picture at its own address (nothing of it copied). Frames past COMPOSITOR_GPU_SCALED are refused as before.
+*/
+static unsigned int gpu_scaled_source[256 * 128];
+
+static void gpu_scaled_pool_rows(void)
+{
+        static unsigned char kept_comp[sizeof(compositor)], kept_gpu[sizeof(gpu)], kept_card[sizeof(compositor_card)], kept_map[sizeof(gpu_maps[0])];
+        enum { N = 24 };
+        static struct compositor_frame frames[COMPOSITOR_GPU_SCALED + 1];
+        const struct compositor_frame *drawn = frames;
+        const positive lent_va = 0x500000000000ull;
+        unsigned int kept_count = gpu_map_count, kept_tick = gpu_tick;
+        int kept_gpu_on = compositor_gpu, own = 1, in_place = 1;
+        enum compositor_gpu_why why;
+
+        memory_copy(kept_comp, &compositor, sizeof(compositor)), memory_copy(kept_gpu, &gpu, sizeof(gpu)), memory_copy(kept_card, &compositor_card, sizeof(compositor_card));
+        memory_copy(kept_map, &gpu_maps[0], sizeof(gpu_maps[0]));
+        gpu.fd = -1, gpu.ctx = 1, gpu.at = (unsigned int address_to)gpu_card_buffer, gpu.size = sizeof(gpu_card_buffer), gpu.imports = 0;
+        gpu_fake_card = 1, gpu_tick = 100, compositor_gpu = 1;
+        compositor_card_zero();
+        compositor_card.nowait = 1, compositor_card.looped = 1;
+        for (unsigned int k = 0; k <= COMPOSITOR_GPU_SCALED; k++)
+        {
+                memory_zero(&frames[k], sizeof(frames[k]));
+                frames[k].x = (int)(k % 8) * 100, frames[k].y = (int)(k / 8) * 60, frames[k].width = 80 + (int)k, frames[k].height = 40 + (int)(k % 5);
+                frames[k].scale = 100, frames[k].pixels = gpu_scaled_source, frames[k].pitch = 256, frames[k].gpu_base = lent_va;
+                frames[k].source_w = 256, frames[k].source_h = 128;
+        }
+        // The pool, and the card's map of it as a written map of the fake card (this check's user may not open udmabuf, which maps a memfd).
+        if (!compositor_gpu_scaled_room(1 << 20))
+        {
+                check("gpu scaled: the pool is made", false);
+                return;
+        }
+        gpu_maps[0].from = (positive)compositor_gpu_scaled_pool.memory, gpu_maps[0].to = gpu_maps[0].from + compositor_gpu_scaled_pool.bytes;
+        gpu_maps[0].va = GPU_VA_MAPS, gpu_maps[0].bytes = compositor_gpu_scaled_pool.bytes, gpu_maps[0].handle = 7, gpu_maps[0].used = gpu_tick;
+        gpu_maps[0].written = 1, gpu_maps[0].dma = 0, gpu_maps[0].handed = 0, gpu_map_count = 1;
+        why = compositor_gpu_scale_frames(&drawn, N, 0, 0);
+        check("gpu scaled: 24 scaled frames, more than the 16 a present had room for, are made by the card in 24 blits, the present the card's",
+              why == COMPOSITOR_GPU_WHY_DRAWN && drawn != frames && compositor_card.steps == N);
+        if (why == COMPOSITOR_GPU_WHY_DRAWN && drawn != frames)
+                for (unsigned int k = 0; k < N; k++)
+                {
+                        const unsigned int *pool = compositor_gpu_scaled_pool.memory;
+
+                        own &= drawn[k].pixels >= pool && drawn[k].pixels + drawn[k].pitch * (positive)drawn[k].height <= pool + compositor_gpu_scaled_pool.bytes / 4 &&
+                               !compositor_scaled(&drawn[k]) && drawn[k].width == frames[k].width && drawn[k].gpu_base != lent_va;
+                        if (k)
+                                own &= drawn[k].pixels >= drawn[k - 1].pixels + drawn[k - 1].pitch * (positive)drawn[k - 1].height;
+                        in_place &= compositor_card.step[k].src == lent_va && compositor_card.step[k].dst == drawn[k].gpu_base &&
+                                    frames[k].pixels == gpu_scaled_source && frames[k].gpu_base == lent_va;
+                }
+        check("gpu scaled: each frame drawn is a picture of its own in the one pool, none over another", own);
+        check("gpu scaled: each blit reads the lent picture at its own address, and the caller's frames are as they were (nothing copied)", in_place);
+        compositor_card_zero();
+        compositor_card.nowait = 1, compositor_card.looped = 1, drawn = frames;
+        check("gpu scaled: a frame past COMPOSITOR_GPU_SCALED is refused, the present the processor's",
+              compositor_gpu_scale_frames(&drawn, COMPOSITOR_GPU_SCALED + 1, 0, 0) == COMPOSITOR_GPU_WHY_SCALED);
+        gpu_fake_card = 0, gpu_lost = 0, gpu_handed_clear();
+        memory_copy(&compositor, kept_comp, sizeof(compositor)), memory_copy(&gpu, kept_gpu, sizeof(gpu)), memory_copy(&compositor_card, kept_card, sizeof(compositor_card));
+        memory_copy(&gpu_maps[0], kept_map, sizeof(gpu_maps[0]));
+        gpu_map_count = kept_count, gpu_tick = kept_tick, gpu_last_error = 0, gpu_end = GPU_END_NONE, compositor_gpu = kept_gpu_on;
+}
+
+/*
         A window's list drawn without a wait (compositor_card.lists_nowait, unless /run/moonwater/lists-wait), on the fake card and the fake fence, the list one
         box over a 64 by 4 picture held by a written map: a list's records are cut into their own half of the ops' megabyte and a present's into the other;
         its job is submitted and not waited for, the frame said drawn with its damage; the row's picture is the job's (compositor_card_reads, which the
@@ -6385,6 +6453,7 @@ b32 main(void)
         gpu_late_rows();
         gpu_async_rows();
         gpu_card_rows();
+        gpu_scaled_pool_rows();
         gpu_lists_nowait_rows();
         gpu_own_rows();
         gpu_round_rows();

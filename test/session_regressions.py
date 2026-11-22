@@ -1269,12 +1269,12 @@ def test_hardening_66_bug_families():
           "positive full_room = (top - bins_at) & ~4095ull;" in gpu_c and
           "#define GPU_GONE 64" in gpu_c)
 
-    check("Family 6: Compositor GPU recovery, 3-strike output settle, wide chip splitting, frost 16px pitch, dynamic scaled=16 & render_classify fd<0",
+    check("Family 6: Compositor GPU recovery, 3-strike output settle, wide chip splitting, frost 16px pitch, dynamic scaled=64 in one pool & render_classify fd<0",
           "return !gpu.pending || (gpu_done(gpu.pending) != 0 && !gpu.pending);" in gpu_c and
           "++compositor_gpu_state.output_fails >= 3" in gpu_host_c and
           "for (int sx = 0; sx < c->w; sx += 255)" in gpu_host_c and
-          "#define COMPOSITOR_GPU_SCALED 16" in gpu_host_c and
-          "#define COMPOSITOR_CARD_STEPS (16 + COMPOSITOR_DAMAGE)" in scan_c and
+          "#define COMPOSITOR_GPU_SCALED 64" in gpu_host_c and
+          "#define COMPOSITOR_CARD_STEPS (64 + COMPOSITOR_DAMAGE)" in scan_c and
           "fpitch = ((unsigned int)compositor.width + 15u) & ~15u;" in gpu_host_c and
           "return out->dev = 0, 0;" in kms_c and
           "compositor_gpu_state.hung_off = 0, compositor_gpu_state.hung_at = 0;" in manage_c)
