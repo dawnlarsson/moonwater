@@ -318,13 +318,16 @@ static p8 address_to build_text_take(positive want)
                                                 want, 1);
         if (!answer)
                 build_die("build: ran out of room for text");
-        answer[0] = end;
+        if (want)
+                answer[0] = end;
         return answer;
 }
 
 //      A terminated copy of a span out of a buffer the next read overwrites.
 static string_address build_text_keep(string_address text, positive length)
 {
+        if (length == positive_max)
+                build_die("build: ran out of room for text");
         p8 address_to into = build_text_take(length + 1);
 
         memory_copy(into, text, length);
@@ -357,7 +360,11 @@ static string_address build_join(string_address first, ...)
 
         while (piece)
         {
-                total += string_length(piece);
+                positive length = string_length(piece);
+
+                if (length >= BUILD_TEXT_ROOM || total >= BUILD_TEXT_ROOM - length)
+                        build_die("build: ran out of room for text");
+                total += length;
                 piece = var_list_get(measure, string_address);
         }
 
@@ -578,6 +585,25 @@ static string_address build_resolve_privileged(string_address name);
         "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 #define BUILD_PRIVILEGED_ENV_PATH "PATH=" BUILD_PRIVILEGED_PATH
 
+static bool build_env_privileged_drop(string_address entry)
+{
+        return string_has_prefix(entry, "PATH=") ||
+               string_has_prefix(entry, "LD_PRELOAD=") ||
+               string_has_prefix(entry, "LD_LIBRARY_PATH=") ||
+               string_has_prefix(entry, "LD_AUDIT=") ||
+               string_has_prefix(entry, "LD_CONFIG=") ||
+               string_has_prefix(entry, "ENV=") ||
+               string_has_prefix(entry, "BASH_ENV=") ||
+               string_has_prefix(entry, "CDPATH=") ||
+               string_has_prefix(entry, "IFS=") ||
+               string_has_prefix(entry, "SHELLOPTS=") ||
+               string_has_prefix(entry, "GCC_EXEC_PREFIX=") ||
+               string_has_prefix(entry, "COMPILER_PATH=") ||
+               string_has_prefix(entry, "CPATH=") ||
+               string_has_prefix(entry, "C_INCLUDE_PATH=") ||
+               string_has_prefix(entry, "LIBRARY_PATH=");
+}
+
 static string_address address_to build_environment_privileged(
     string_address address_to source)
 {
@@ -588,7 +614,7 @@ static string_address address_to build_environment_privileged(
         positive kept = 0;
 
         for (positive at = 0; at < have; at++)
-                if (!string_has_prefix(source[at], "PATH="))
+                if (!build_env_privileged_drop(source[at]))
                         answer[kept++] = source[at];
 
         answer[kept++] = BUILD_PRIVILEGED_ENV_PATH;
@@ -803,7 +829,8 @@ static bipolar build_capture_words(string_address address_to words,
 
         while (used + 1 < capacity)
         {
-                bipolar got = read(pair[0], into + used, capacity - used - 1);
+                bipolar got = system_read_retry((positive)pair[0], into + used,
+                                                capacity - used - 1);
 
                 if (got <= 0)
                         break;
@@ -1279,7 +1306,7 @@ static fn build_pair_sort(positive count)
 static positive build_symbol_end(string_address line, positive at,
                                  positive length)
 {
-        while (at < length && ((line[at] >= 'A' && line[at] <= 'Z') ||
+        while (at < length && (byte_is_upper(line[at]) ||
                                byte_is_digit(line[at]) || line[at] == '_'))
                 at++;
 
@@ -1312,12 +1339,8 @@ static fn build_write_field(string_address text, positive width)
         positive length = string_length(text);
 
         string_format(log, "%s", text);
-
-        while (length < width)
-        {
-                string_format(log, " ");
-                length++;
-        }
+        if (length < width)
+                writer_fill(log, width - length, ' ');
 }
 
 //      Whether the profile that has the last word on an option says, in a
@@ -1570,6 +1593,8 @@ static bool build_config_fragment(string_address from, string_address to)
                 if (later)
                         continue;
 
+                if (used + walk.length + 1 >= BUILD_FILE_ROOM)
+                        return false;
                 memory_copy(build_file_one + used, walk.line, walk.length);
                 used += walk.length;
                 build_file_one[used++] = '\n';
@@ -1808,13 +1833,32 @@ static bool build_profile_listed(string_address address_to list, positive count,
         return false;
 }
 
+static bool build_profile_name_valid(string_address name)
+{
+        if (!name || !*name || name[0] == '/')
+                return false;
+
+        for (string_address at = name; *at;)
+        {
+                string_address slash = string_first_of_or_end(at, '/');
+                positive piece = (positive)(slash - at);
+
+                if (!piece || (piece == 2 && at[0] == '.' && at[1] == '.'))
+                        return false;
+                at = *slash ? slash + 1 : slash;
+        }
+
+        return true;
+}
+
 static positive build_profile_add(string_address address_to into, positive count,
                                   string_address name, string_address architecture,
                                   positive depth)
 {
         string_address path;
 
-        if (build_profile_listed(into, count, name) || depth > BUILD_PROFILE_DEPTH)
+        if (!build_profile_name_valid(name) ||
+            build_profile_listed(into, count, name) || depth > BUILD_PROFILE_DEPTH)
                 return count;
 
         path = build_join(build_setting_get("profile_root"), "/", name, null);
@@ -1864,11 +1908,8 @@ static positive build_profiles_expand(string_address address_to profiles,
         for (positive at = 0; at < count && !architecture; at++)
                 if (string_has_prefix(profiles[at], "arch/"))
                 {
-                        positive length = 0;
                         string_address word = profiles[at] + 5;
-
-                        while (word[length] && word[length] != '.')
-                                length++;
+                        positive length = (positive)(string_first_of_or_end(word, '.') - word);
 
                         architecture = build_text_keep(word, length);
                 }
@@ -1937,6 +1978,8 @@ static b32 build_config(string_address address_to profiles, positive count)
 
                 if (got > 0)
                 {
+                        if (used + (positive)got + 1 >= BUILD_FILE_ROOM)
+                                return build_die("the composed configuration is too large");
                         memory_copy(build_file_one + used, build_file_two,
                                     (positive)got);
                         used += (positive)got;
@@ -2788,17 +2831,14 @@ static bool build_pad(b32 handle, positive from, positive to)
         while (from < to)
         {
                 positive want = to - from;
-                bipolar put;
 
                 if (want > sizeof(zeroes))
                         want = sizeof(zeroes);
 
-                put = write(handle, zeroes, want);
-
-                if (put <= 0)
+                if (system_write_all((positive)handle, zeroes, want) != want)
                         return false;
 
-                from += (positive)put;
+                from += want;
         }
 
         return true;
@@ -2821,7 +2861,8 @@ static bool build_append(b32 handle, string_address path, positive room, positiv
         bool good = true;
         for (;;)
         {
-                bipolar got = read(from, build_file_one, BUILD_FILE_ROOM);
+                bipolar got = system_read_retry((positive)from, build_file_one,
+                                                BUILD_FILE_ROOM);
 
                 if (got <= 0)
                 {
@@ -2829,7 +2870,9 @@ static bool build_append(b32 handle, string_address path, positive room, positiv
                         break;
                 }
                 address_to put += (positive)got;
-                if (address_to put > room || write(handle, build_file_one, (positive)got) != got)
+                if (address_to put > room ||
+                    system_write_all((positive)handle, build_file_one,
+                                     (positive)got) != (positive)got)
                 {
                         good = false;
                         break;
@@ -3321,11 +3364,11 @@ static b32 build_spark(string_address source, string_address output,
         //      The image is mapped from SPARK_HEADER_SIZE bytes before .text:
         //      that is where the header sits, and the linker script reserves
         //      exactly that much.
-        base = text_where - SPARK_HEADER_SIZE;
-
-        if (!text_where || !entry)
+        if (text_where < SPARK_HEADER_SIZE || !entry)
                 return string_report(log_error, 1,
                                      "spark: could not read base/entry from the linked image\n");
+
+        base = text_where - SPARK_HEADER_SIZE;
 
         //      A program need not have every section: duck has no .data at
         //      all. Text runs up to whichever region actually follows it, or
@@ -3337,6 +3380,7 @@ static b32 build_spark(string_address source, string_address output,
         else
                 text_end = text_where + text_bytes;
 
+        refuse_if(text_end <= base, 1, "spark: computed a non positive text size\n");
         text_size = build_page_up(text_end - base);
         data_size = build_page_up(data_bytes);
         bss_size = build_page_up(bss_bytes);
@@ -3371,7 +3415,9 @@ static b32 build_spark(string_address source, string_address output,
                 //      one was. close() is checked: it is where a full disk
                 //      on a network filesystem reports itself.
                 string_address temporary = build_join(output, ".tmp.", build_number((positive)system_call_1(syscall(getpid), 0)), null);
-                b32 handle = open(temporary, O_WRONLY | O_CREAT | O_TRUNC, 0755);
+                bipolar handle = system_open_at_mode(AT_FDCWD, temporary,
+                                                     O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW | O_CLOEXEC,
+                                                     0755);
                 positive got = 0;
                 bool good;
 
@@ -3380,19 +3426,19 @@ static b32 build_spark(string_address source, string_address output,
                 //      The header occupies the first SPARK_HEADER_SIZE bytes of
                 //      the text region itself, so the image carries no page
                 //      that nothing maps.
-                good = write(handle, address_of head, SPARK_HEADER_SIZE) ==
+                good = system_write_all((positive)handle, address_of head, SPARK_HEADER_SIZE) ==
                        SPARK_HEADER_SIZE;
-                good = good && build_append(handle, text_binary, text_size - SPARK_HEADER_SIZE,
+                good = good && build_append((b32)handle, text_binary, text_size - SPARK_HEADER_SIZE,
                                             address_of got);
-                good = good && build_pad(handle, got, text_size - SPARK_HEADER_SIZE);
+                good = good && build_pad((b32)handle, got, text_size - SPARK_HEADER_SIZE);
 
                 if (data_size > 0)
                 {
-                        good = good && build_append(handle, data_binary, data_size, address_of got);
-                        good = good && build_pad(handle, got, data_size);
+                        good = good && build_append((b32)handle, data_binary, data_size, address_of got);
+                        good = good && build_pad((b32)handle, got, data_size);
                 }
 
-                good = close(handle) == 0 && good;
+                good = system_close(handle) == 0 && good;
                 if (good && rename(temporary, output) < 0)
                         good = false;
                 if (!good)
@@ -3426,16 +3472,12 @@ static b32 build_spark(string_address source, string_address output,
 //      the default output name, which is the working directory's own.
 static string_address build_working_directory()
 {
-        p8 address_to into = build_text_take(4096);
-        bipolar got = (bipolar)system_call_2(syscall(getcwd), (positive)into,
-                                             4096);
+        string_address here = working_directory_get();
 
-        if (got <= 0)
+        if (!here || !*here)
                 return ".";
 
-        into[got ? got - 1 : 0] = end;
-
-        return (string_address)into;
+        return build_text_keep(here, string_length(here));
 }
 
 static string_address build_directory_of(string_address path)
@@ -4549,8 +4591,8 @@ static bool build_category_on(string_address category)
 static bool build_tool_switched(build_tool_entry address_to one)
 {
         return build_tool_fixed(one->name) ||
-               //      kind is "TOOL_" or "BUILTIN_", key the upper-case name.
-               build_switch_find(build_join("TOOL_", ((string_address)(build_upper(one->name))), null), word_is("TOOL_", "TOOL_") ? build_moon_tools_all : build_moon_builtins_all);
+               build_switch_find(build_join("TOOL_", build_upper(one->name), null),
+                                 build_moon_tools_all);
 }
 
 //      Whether a tools.inc row is in the program being built.
@@ -4603,7 +4645,7 @@ static string_address build_commit_shaped(string_address said, positive used,
 
         for (positive at = 0; at < used; at++)
         {
-                bool digit = said[at] >= '0' && said[at] <= '9';
+                bool digit = byte_is_digit(said[at]);
                 bool hex = digit || (said[at] >= 'a' && said[at] <= 'f');
                 bool stamp = digit || said[at] == '-' || said[at] == ':' ||
                              said[at] == '+' || said[at] == 'T' ||
@@ -4748,7 +4790,8 @@ static string_address build_config_header(string_address from,
                         build_builtin_entry address_to one =
                                 address_of build_builtin_table[at];
 
-                        if (build_switch_find(build_join("BUILTIN_", ((string_address)(one->key)), null), word_is("BUILTIN_", "TOOL_") ? build_moon_tools_all : build_moon_builtins_all))
+                        if (build_switch_find(build_join("BUILTIN_", one->key, null),
+                                              build_moon_builtins_all))
                                 builtins++;
                         else
                                 text = build_join(text,
@@ -4918,11 +4961,19 @@ static b32 build_gpu_kernels(string_address input, string_address output)
                         hash = (hash ^ (p8)build_gpu_source[k]) * 0x100000001b3ull;
                 network_store_64(raw, hash);
                 memory_into_hex(line + 31, raw, 8);
-                handle = system_open_at_mode(AT_FDCWD, temporary, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+                handle = system_open_at_mode(AT_FDCWD, temporary,
+                                             O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW | O_CLOEXEC,
+                                             0644);
                 refuse_if(handle < 0, 1, "gpu-kernels: cannot write %s\n", temporary);
-                refuse_if(system_write_once(handle, line, string_length((string_address)line)) < 0 ||
-                              system_write_once(handle, gpuasm_output, gpuasm_output_length) != (bipolar)gpuasm_output_length,
-                          1, "gpu-kernels: cannot write %s\n", temporary);
+                positive header_length = string_length((string_address)line);
+                bool ok = system_write_all((positive)handle, line, header_length) == header_length &&
+                          system_write_all((positive)handle, gpuasm_output, gpuasm_output_length) == gpuasm_output_length;
+                if (!ok)
+                {
+                        system_close(handle);
+                        unlink(temporary);
+                        return string_report(log_error, 1, "gpu-kernels: cannot write %s\n", temporary);
+                }
                 // Emit GFX11 (RDNA3/3.5) and GFX12 (RDNA4) kernel tables from the same gpu.asm source.
                 if (!gpuasm_assemble_isa(input, (string_address)build_gpu_source, GPUASM_GFX11, (string_address)"11_"))
                 {
@@ -4930,17 +4981,24 @@ static b32 build_gpu_kernels(string_address input, string_address output)
                         unlink(temporary);
                         return string_report(log_error, 1, "gpu-kernels (gfx11): %s\n", gpuasm_message);
                 }
-                refuse_if(system_write_once(handle, gpuasm_output, gpuasm_output_length) != (bipolar)gpuasm_output_length,
-                          1, "gpu-kernels: cannot write %s\n", temporary);
+                if (system_write_all((positive)handle, gpuasm_output, gpuasm_output_length) != gpuasm_output_length)
+                {
+                        system_close(handle);
+                        unlink(temporary);
+                        return string_report(log_error, 1, "gpu-kernels: cannot write %s\n", temporary);
+                }
                 if (!gpuasm_assemble_isa(input, (string_address)build_gpu_source, GPUASM_GFX12, (string_address)"12_"))
                 {
                         system_close(handle);
                         unlink(temporary);
                         return string_report(log_error, 1, "gpu-kernels (gfx12): %s\n", gpuasm_message);
                 }
-                refuse_if(system_write_once(handle, gpuasm_output, gpuasm_output_length) != (bipolar)gpuasm_output_length,
-                          1, "gpu-kernels: cannot write %s\n", temporary);
-                system_close(handle);
+                ok = system_write_all((positive)handle, gpuasm_output, gpuasm_output_length) == gpuasm_output_length;
+                if (system_close(handle) < 0 || !ok)
+                {
+                        unlink(temporary);
+                        return string_report(log_error, 1, "gpu-kernels: cannot write %s\n", temporary);
+                }
         }
 
         if (rename(temporary, output) < 0)
@@ -5026,16 +5084,13 @@ static b32 build_gpu_i915(string_address input, string_address output)
                 while (p < stop && *p != ';' && *p != '\n')
                         p++;
                 //      trim the blanks at the start of the line
-                p8 address_to start = line;
-                while (start < p && (*start == ' ' || *start == '\t'))
-                        start++;
+                p8 address_to start = line + string_span_max(line, (positive)(p - line), string_set_blanks);
                 if (start == p)
                         continue;
-                if (start[0] == 'k' && start + 7 <= p && start[1] == 'e' && start[2] == 'r' && start[3] == 'n' && start[4] == 'e' && start[5] == 'l' && start[6] == ' ')
+                if (start + 7 <= p && !memory_compare(start, "kernel ", 7))
                 {
                         p8 address_to name = start + 7;
-                        while (name < p && *name == ' ')
-                                name++;
+                        name += string_span_max(name, (positive)(p - name), string_set_blanks);
                         if (name >= p)
                                 return string_report(log_error, 1, "gpu-i915: a kernel with no name in %s, line %lu\n", input, (unsigned long)lines);
                         if (at + 256 >= sizeof(build_gpu_i915_made))
@@ -5052,17 +5107,15 @@ static b32 build_gpu_i915(string_address input, string_address output)
                 //      the words of this line: each 0x... token
                 while (start < p)
                 {
-                        if (start[0] == '0' && (start[1] == 'x' || start[1] == 'X'))
+                        if (start + 2 <= p && start[0] == '0' && (start[1] == 'x' || start[1] == 'X'))
                         {
-                                unsigned long v = 0;
-                                p8 address_to q = start + 2;
+                                positive used = 0;
+                                positive avail = (positive)(p - (start + 2));
                                 //      a word is 32 bits: at most eight digits (a longer literal is not a word, and is refused, not wrapped)
-                                while (q < p && q - (start + 2) < 8 && ((*q >= '0' && *q <= '9') || (*q >= 'a' && *q <= 'f') || (*q >= 'A' && *q <= 'F')))
-                                {
-                                        v = v * 16 + (unsigned long)(*q <= '9' ? *q - '0' : ((*q | 0x20) - 'a' + 10));
-                                        q++;
-                                }
-                                if (q == start + 2 || v > 0xffffffffUL || (q < p && *q != ',' && *q != ' ' && *q != '\t' && *q != '\r'))
+                                positive v = string_digits_hexadecimal_max(
+                                    (string_address)(start + 2), avail < 8 ? avail : 8, address_of used);
+                                p8 address_to q = start + 2 + used;
+                                if (!used || v > 0xffffffffUL || (q < p && *q != ',' && *q != ' ' && *q != '\t' && *q != '\r'))
                                         return string_report(log_error, 1, "gpu-i915: not a word in %s, line %lu\n", input, (unsigned long)lines);
                                 //      the output has a line's room of its own: a larger input is refused, never cut short
                                 if (at + 64 >= sizeof(build_gpu_i915_made))
@@ -5491,33 +5544,31 @@ static string_address build_kernel_tree_version(string_address tree)
                                                  "EXTRAVERSION"};
         string_address values[4] = {"", "", "", ""};
         p8 head[1024];
-        string_address line = head;
+        build_lines walk;
 
         if (file_slurp(build_join(tree, "/Makefile", null), head, sizeof(head)) < 0)
                 return "";
 
-        while (string_get(line))
+        build_lines_open(address_of walk, (string_address)head);
+        while (build_lines_next(address_of walk))
         {
-                string_address stop = line;
+                string_address line = walk.line;
+                string_address stop = walk.line + walk.length;
                 positive field;
-
-                while (string_get(stop) && !string_is(stop, '\n'))
-                        stop++;
 
                 for (field = 0; field < 4; field++)
                 {
                         positive named = string_length(fields[field]);
                         string_address value = line + named;
 
-                        if (string_compare_max(line, fields[field], named) ||
+                        if (walk.length <= named ||
+                            memory_compare(line, fields[field], named) ||
                             !(string_is(value, ' ') || string_is(value, '=')))
                                 continue;
                         while (value < stop && (string_is(value, ' ') || string_is(value, '=')))
                                 value++;
                         values[field] = build_text_keep(value, (positive)(stop - value));
                 }
-
-                line = string_get(stop) ? stop + 1 : stop;
         }
 
         if (!string_get(values[0]) || !string_get(values[1]))
@@ -5753,9 +5804,17 @@ static b32 build_kernel_source()
 
         {
                 string_address signature = build_setting_get("kernel_signature");
+                string_address sigfile = build_join(tarball, ".sign", null);
 
-                build_write_file(build_join(tarball, ".sign", null), signature,
-                                 string_length(signature));
+                if (!signature || !*signature ||
+                    !build_write_file(sigfile, signature, string_length(signature)))
+                {
+                        string_format(log_error,
+                                      BUILD_RED "ERROR: missing or unwritable kernel signature for %s"
+                                      BUILD_RESET "\n", tarball);
+                        build_tool("rm", "-f", tarball, null);
+                        exit(1);
+                }
         }
 
         if (build_run("gpg", "--verify", build_join(tarball, ".sign", null),
@@ -7392,12 +7451,8 @@ static b32 build_usb(string_address image)
         {
                 //      bootx64.efi, bootaa64.efi or bootriscv64.efi: the removable-media name
                 //      for the machine the image is for is its own, in capitals.
-                string_address name = build_join(build_name_of(image), null);
-
-                for (positive at = 0; name[at]; at++)
-                        if (name[at] >= 'a' && name[at] <= 'z')
-                                name[at] -= 'a' - 'A';
-                string_format(log, "  sudo cp %s /mnt/EFI/BOOT/%s\n", image, name);
+                string_format(log, "  sudo cp %s /mnt/EFI/BOOT/%s\n", image,
+                              build_upper(build_name_of(image)));
         }
         string_format(log, "  sudo umount /mnt\n");
         string_format(log, "\n");

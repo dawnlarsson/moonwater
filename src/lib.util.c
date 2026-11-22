@@ -3147,7 +3147,8 @@ static p8 address_to memory_arena_read_tail(
                 used += (positive)got;
         }
         bytes[used] = end;
-        arena->used = mark + ((used + alignment) & ~(alignment - 1));
+        arena->used = (positive)(bytes - arena->bytes) +
+                      ((used + alignment) & ~(alignment - 1));
         address_to length = used;
         return bytes;
 failed:
@@ -10404,7 +10405,7 @@ pub address_any memory_take_aligned(positive alignment, positive bytes)
         if (alignment <= ALLOCATOR_ALIGNMENT)
                 return memory_take(bytes);
 
-        if (alignment >= ALLOCATOR_LIMIT ||
+        if (alignment > ALLOCATOR_LIMIT - ALLOCATOR_HEADER_WIDE ||
             bytes >= ALLOCATOR_LIMIT - alignment - ALLOCATOR_HEADER_WIDE)
                 return null;
 
@@ -23829,7 +23830,7 @@ bool clock_zone_offset(string_address text, p8 address_to into,
                 return false;
         ahead = s[0] == '+';
         s++;
-        while (s[0] >= '0' && s[0] <= '9' && digits < 2)
+        while (byte_is_digit((p8)s[0]) && digits < 2)
         {
                 hours = hours * 10 + (positive)(s++[0] - '0');
                 digits++;
@@ -23929,9 +23930,7 @@ static bool clock_tz_name(const char address_to address_to at, p8 address_to int
         }
         else
         {
-                while (((s[0] >= 'A' && s[0] <= 'Z') ||
-                        (s[0] >= 'a' && s[0] <= 'z')) &&
-                       n + 1 < room)
+                while (byte_is_alpha((p8)s[0]) && n + 1 < room)
                         into[n++] = (p8)s++[0];
                 if (n < 3)
                         return false;
@@ -23966,9 +23965,9 @@ static bool clock_tz_offset(const char address_to address_to at,
                 sign = -1;
                 s++;
         }
-        if (s[0] < '0' || s[0] > '9')
+        if (!byte_is_digit((p8)s[0]))
                 return false;
-        while (s[0] >= '0' && s[0] <= '9' && hours <= most_hours)
+        while (byte_is_digit((p8)s[0]) && hours <= most_hours)
                 hours = hours * 10 + (s++[0] - '0');
         if (hours > most_hours)
                 return false;
