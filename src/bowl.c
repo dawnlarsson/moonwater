@@ -64,6 +64,7 @@ struct bowl_mount_point
         string_address target;
         string_address filesystem;
         positive flags;
+        string_address data;
 };
 
 /*
@@ -74,14 +75,14 @@ struct bowl_mount_point
         /sys/power and /sys/module are the host's.
 */
 static struct bowl_mount_point bowl_isolated_mounts[] = {
-    {"proc", "/proc", "proc", MS_NOSUID | MS_NOEXEC | MS_NODEV},
-    {"sysfs", "/sys", "sysfs", MS_NOSUID | MS_NOEXEC | MS_NODEV | MS_RDONLY},
-    {"devtmpfs", "/dev", "devtmpfs", MS_NOSUID},
-    {"devpts", "/dev/pts", "devpts", MS_NOSUID | MS_NOEXEC},
-    {"tmpfs", "/dev/shm", "tmpfs", MS_NOSUID | MS_NODEV},
-    {"tmpfs", "/run", "tmpfs", MS_NOSUID | MS_NODEV},
-    {"tmpfs", "/tmp", "tmpfs", MS_NOSUID | MS_NODEV},
-    {null, null, null, 0},
+    {"proc", "/proc", "proc", MS_NOSUID | MS_NOEXEC | MS_NODEV, 0},
+    {"sysfs", "/sys", "sysfs", MS_NOSUID | MS_NOEXEC | MS_NODEV | MS_RDONLY, 0},
+    {"devtmpfs", "/dev", "devtmpfs", MS_NOSUID, 0},
+    {"devpts", "/dev/pts", "devpts", MS_NOSUID | MS_NOEXEC, 0},
+    {"tmpfs", "/dev/shm", "tmpfs", MS_NOSUID | MS_NODEV, "mode=1777"},
+    {"tmpfs", "/run", "tmpfs", MS_NOSUID | MS_NODEV, 0},
+    {"tmpfs", "/tmp", "tmpfs", MS_NOSUID | MS_NODEV, "mode=1777"},
+    {null, null, null, 0, 0},
 };
 
 /*
@@ -1111,21 +1112,45 @@ static fn bowl_isolated_dir_grant(string_address dir, string_address prefix,
 
 static fn bowl_isolated_devices(void)
 {
-        bowl_isolated_dir_grant("/dev/dri", "renderD", 105);
-        bowl_isolated_dir_grant("/dev/dri", "card", 44);
-        bowl_isolated_dir_grant("/dev", "video", 44);
-        bowl_isolated_dir_grant("/dev", "media", 44);
-        bowl_isolated_node_grant("/dev/kfd", 105);
-        bowl_isolated_node_grant("/dev/udmabuf", 105);
-        if (system_access_at(AT_FDCWD, "/dev/ntsync", 0) >= 0)
-                system_change_mode_at(AT_FDCWD, "/dev/ntsync", 0666);
+        static const struct
+        {
+                string_address path;
+                string_address prefix;
+                positive gid;
+                p16 mode;
+                bool is_dir;
+        } grants[] = {
+            {"/dev/dri", "renderD", 105, 0, true},
+            {"/dev/dri", "card", 44, 0, true},
+            {"/dev", "video", 44, 0, true},
+            {"/dev", "media", 44, 0, true},
+            {"/dev/kfd", null, 105, 0, false},
+            {"/dev/udmabuf", null, 105, 0, false},
+            {"/dev/ntsync", null, 0, 0666, false},
 #if MOONWATER_STRICT_BOWL < STRICT_LOCKED
-        if (system_access_at(AT_FDCWD, "/dev/fuse", 0) >= 0)
-                system_change_mode_at(AT_FDCWD, "/dev/fuse", 0666);
-        bowl_isolated_node_grant("/dev/kvm", 105);
+            {"/dev/fuse", null, 0, 0666, false},
+            {"/dev/kvm", null, 105, 0, false},
 #endif
-        bowl_isolated_dir_grant("/dev/dma_heap", null, 105);
-        bowl_isolated_dir_grant("/dev", "nvidia", 105);
+            {"/dev/dma_heap", null, 105, 0, true},
+            {"/dev", "nvidia", 105, 0, true},
+        };
+
+        for (positive at = 0; at < array_count(grants); at++)
+        {
+                if (grants[at].is_dir)
+                        bowl_isolated_dir_grant(grants[at].path,
+                                                grants[at].prefix,
+                                                grants[at].gid);
+                else if (grants[at].mode)
+                {
+                        if (system_access_at(AT_FDCWD, grants[at].path, 0) >= 0)
+                                system_change_mode_at(AT_FDCWD, grants[at].path,
+                                                      grants[at].mode);
+                }
+                else
+                        bowl_isolated_node_grant(grants[at].path,
+                                                 grants[at].gid);
+        }
 }
 
 static bipolar bowl_isolated_populate(void)
@@ -1136,14 +1161,12 @@ static bipolar bowl_isolated_populate(void)
         {
                 struct bowl_mount_point address_to point =
                     bowl_isolated_mounts + i;
-                string_address data =
-                    (string_equals(point->target, "/dev/shm") || string_equals(point->target, "/tmp")) ? "mode=1777" : 0;
 
                 failed = bowl_mkdir(point->target);
                 if (!failed)
                         failed = system_mount(point->source, point->target,
                                               point->filesystem, point->flags,
-                                              data);
+                                              point->data);
 
                 if (failed)
                 {
@@ -1496,8 +1519,8 @@ static positive bowl_accounts_add(p8 address_to text, positive used,
 */
 static fn bowl_accounts_prepare(string_address root, bool every)
 {
-        p8 text[BOWL_ACCOUNTS_ROOM * 2];
-        p8 other[BOWL_ACCOUNTS_ROOM + 1];
+        static p8 text[BOWL_ACCOUNTS_ROOM * 2];
+        static p8 other[BOWL_ACCOUNTS_ROOM + 1];
         p8 path[BOWL_PATH_LIMIT];
 
         bowl_quiet = true;
@@ -2498,6 +2521,11 @@ static bipolar bowl_pad_next_process(void)
                 for (positive at = 0; number && entry->d_name[at]; at++)
                 {
                         number = byte_is_digit(entry->d_name[at]);
+                        if (pid > ((positive)0x7fffffff / 10))
+                        {
+                                number = false;
+                                break;
+                        }
                         pid = pid * 10 + (positive)(entry->d_name[at] - '0');
                 }
                 if (!number || pid == self ||
@@ -2510,6 +2538,24 @@ static bipolar bowl_pad_next_process(void)
         return found;
 }
 
+/* Detach a background helper from the caller's session and stdio descriptors. */
+static fn bowl_detach_stdio(void)
+{
+        bipolar nothing = system_open_at(AT_FDCWD, "/dev/null",
+                                         FILE_READ_WRITE | O_CLOEXEC);
+
+        system_call(syscall(setsid));
+        if (nothing >= 0)
+        {
+                for (positive at = 0; at < 3; at++)
+                        if ((positive)nothing != at)
+                                system_call_3(syscall(dup3), (positive)nothing,
+                                              at, 0);
+                if (nothing > 2)
+                        system_close((positive)nothing);
+        }
+}
+
 /*
         The keeper: told by go that the launch's namespace is made, it enters
         it, makes the view and says so on done, then follows the uevents until
@@ -2519,25 +2565,16 @@ static bipolar bowl_pad_next_process(void)
 static DEAD_END fn bowl_pad_keeper(positive launch, bipolar go, bipolar done, p32 owner)
 {
         p8 path[64] = "/proc/";
-        p8 message[8192];
+        static p8 message[8192];
         socket_address_netlink self = {.family = AF_NETLINK, .groups = 1};
         bipolar heard = socket_new(AF_NETLINK, SOCK_DGRAM | SOCK_CLOEXEC, 15 /* NETLINK_KOBJECT_UEVENT */);
-        bipolar nothing = system_open_at(AT_FDCWD, "/dev/null", FILE_READ_WRITE | O_CLOEXEC);
         bipolar space, watch;
         positive length = 6;
         p8 byte = 0;
 
         //      Of a session of its own and holding none of the launch's files open (a reader of the program's output
         //      would wait for the keeper too).
-        system_call(syscall(setsid));
-        if (nothing >= 0)
-        {
-                for (positive at = 0; at < 3; at++)
-                        if ((positive)nothing != at)
-                                system_call_3(syscall(dup3), (positive)nothing, at, 0);
-                if (nothing > 2)
-                        system_close((positive)nothing);
-        }
+        bowl_detach_stdio();
         if (system_read_once(go, &byte, 1) != 1)
                 exit(0);
         system_close(go);
@@ -2935,18 +2972,22 @@ static b32 bowl_session_unusable(string_address entry)
 static b32 bowl_session_default_missing(string_address name,
                                         string_address value)
 {
+        static const string_address empty_ok[] = {"IFS", "OPTIND"};
+        static const string_address path_vars[] = {"HOME", "XDG_RUNTIME_DIR",
+                                                   "TMPDIR"};
+
         if (!name)
                 return true;
 
-        if (string_equals(name, "IFS") || string_equals(name, "OPTIND"))
+        if (string_table_find(name, empty_ok, sizeof(empty_ok[0]),
+                              array_count(empty_ok)) < array_count(empty_ok))
                 return !value;
 
         if (!value || !value[0])
                 return true;
 
-        if (string_equals(name, "HOME") ||
-            string_equals(name, "XDG_RUNTIME_DIR") ||
-            string_equals(name, "TMPDIR"))
+        if (string_table_find(name, path_vars, sizeof(path_vars[0]),
+                              array_count(path_vars)) < array_count(path_vars))
                 return bowl_path_steps(value) ||
                        bowl_session_host_path(value);
 
@@ -3107,7 +3148,7 @@ static fn bowl_hosts_write_in(string_address root, string_address name,
                                   "::1 localhost ip6-localhost ip6-loopback\n";
         p8 hosts[BOWL_PATH_LIMIT];
         p8 hostname[BOWL_PATH_LIMIT];
-        p8 text[4096];
+        static p8 text[4096];
         positive used = 0;
         positive length = string_length(name);
 
@@ -3245,7 +3286,7 @@ static bipolar bowl_input_read(p8 address_to text)
 /* Whether the grants file names the bowl at root: a whole line, exactly. */
 static bool bowl_input_granted(string_address root)
 {
-        p8 text[BOWL_INPUT_GRANTS_LIMIT + 2];
+        static p8 text[BOWL_INPUT_GRANTS_LIMIT + 2];
         p8 want[BOWL_PATH_LIMIT];
         positive want_length = bowl_input_line(root, want, sizeof(want));
         bipolar got;
@@ -3275,7 +3316,7 @@ static bool bowl_input_granted(string_address root)
 */
 static b32 bowl_input_grant(string_address root, bool granted)
 {
-        p8 text[BOWL_INPUT_GRANTS_LIMIT + 2];
+        static p8 text[BOWL_INPUT_GRANTS_LIMIT + 2];
         p8 want[BOWL_PATH_LIMIT];
         positive want_length = bowl_input_line(root, want, sizeof(want));
         positive used = 0;
@@ -3731,10 +3772,11 @@ static fn bowl_workarounds_load(string_address program)
                                 slash = p + 1;
                 app = slash;
         }
-        fd = system_open_at(AT_FDCWD, BOWL_WORKAROUNDS_PATH, FILE_READ | O_CLOEXEC);
+        fd = system_open_at(AT_FDCWD, BOWL_WORKAROUNDS_PATH,
+                            FILE_READ | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
         if (fd < 0)
                 return;
-        got = system_call_3(syscall(read), (positive)fd, (positive)text, sizeof(text) - 1);
+        got = system_read_retry((positive)fd, text, sizeof(text) - 1);
         system_close((positive)fd);
         if (got <= 0)
                 return;
@@ -3743,26 +3785,68 @@ static fn bowl_workarounds_load(string_address program)
         bowl_wa_glthread = bowl_workaround_for(text, (positive)got, app, "mesa-glthread", false);
 }
 
+enum
+{
+        BOWL_OPT_BUS,
+        BOWL_OPT_SOUND,
+        BOWL_OPT_WAYLAND,
+        BOWL_OPT_LANGUAGE,
+        BOWL_OPT_MAILBOX,
+        BOWL_OPT_GLTHREAD,
+        BOWL_OPT_GATES
+};
+
 static string_address address_to bowl_environment(
     string_address address_to inherited)
 {
         static string_address mixed[BOWL_ENV_ROOM];
+        static const struct
+        {
+                string_address name;
+                string_address fallback;
+                p8 gate;
+                bool skip_if_display;
+        } optional_env[] = {
+            {BOWL_SESSION_BUS_VARIABLE,
+             BOWL_SESSION_BUS_VARIABLE "=unix:path=" BOWL_SESSION_BUS_SOCKET,
+             BOWL_OPT_BUS, false},
+            {BOWL_SOUND_VARIABLE,
+             BOWL_SOUND_VARIABLE "=unix:" BOWL_SOUND_SOCKET,
+             BOWL_OPT_SOUND, false},
+            {BOWL_WAYLAND_VARIABLE,
+             BOWL_WAYLAND_VARIABLE "=" BOWL_WAYLAND_SOCKET,
+             BOWL_OPT_WAYLAND, false},
+            {"XDG_CURRENT_DESKTOP", "XDG_CURRENT_DESKTOP=Moonwater",
+             BOWL_OPT_WAYLAND, false},
+            {BOWL_SESSION_TYPE_VARIABLE, BOWL_SESSION_TYPE_VARIABLE "=wayland",
+             BOWL_OPT_WAYLAND, true},
+            {"ELECTRON_OZONE_PLATFORM_HINT",
+             "ELECTRON_OZONE_PLATFORM_HINT=auto", BOWL_OPT_WAYLAND, true},
+            {"MOZ_ENABLE_WAYLAND", "MOZ_ENABLE_WAYLAND=1",
+             BOWL_OPT_WAYLAND, true},
+            {"QT_QPA_PLATFORM", "QT_QPA_PLATFORM=wayland;xcb",
+             BOWL_OPT_WAYLAND, true},
+            {BOWL_LANGUAGE_VARIABLE, null, BOWL_OPT_LANGUAGE, false},
+            {"MESA_VK_WSI_PRESENT_MODE", "MESA_VK_WSI_PRESENT_MODE=mailbox",
+             BOWL_OPT_MAILBOX, false},
+            {"mesa_glthread", "mesa_glthread=true", BOWL_OPT_GLTHREAD, false},
+        };
         bool have[BOWL_VARS] = {false};
-        bool have_bus = false, have_sound = false, have_wayland = false,
-             have_language = false, have_session_type = false, have_display = false,
-             have_desktop = false, have_electron_ozone = false, have_moz_wayland = false,
-             have_qt_platform = false, have_vk_present = false, have_glthread = false;
-        bool offer_bus = bowl_session_bus_offered(),
-             offer_sound = bowl_sound_offered(),
-             offer_wayland = bowl_wayland_offered();
-        bool offer_mailbox, offer_glthread;
-
-        bowl_workarounds_load(null);
-        offer_mailbox = bowl_wa_mailbox;
-        offer_glthread = bowl_wa_glthread;
-        string_address language = bowl_language_offered((string_address)BOWL_LANGUAGE_PATH);
+        bool have_opt[array_count(optional_env)] = {false};
+        bool have_display = false;
+        bool offer[BOWL_OPT_GATES];
+        string_address language;
         positive n = 0;
         b32 skipped = false;
+
+        bowl_workarounds_load(null);
+        language = bowl_language_offered((string_address)BOWL_LANGUAGE_PATH);
+        offer[BOWL_OPT_BUS] = bowl_session_bus_offered();
+        offer[BOWL_OPT_SOUND] = bowl_sound_offered();
+        offer[BOWL_OPT_WAYLAND] = bowl_wayland_offered();
+        offer[BOWL_OPT_LANGUAGE] = language != null;
+        offer[BOWL_OPT_MAILBOX] = bowl_wa_mailbox;
+        offer[BOWL_OPT_GLTHREAD] = bowl_wa_glthread;
 
         bowl_session_fill();
 
@@ -3779,30 +3863,11 @@ static string_address address_to bowl_environment(
                 which = bowl_variable_of(inherited[at]);
                 if (which < BOWL_VARS)
                         have[bowl_variables[which].counts_as] = true;
-                if (bowl_env_named(inherited[at], BOWL_SESSION_BUS_VARIABLE))
-                        have_bus = true;
-                if (bowl_env_named(inherited[at], BOWL_SOUND_VARIABLE))
-                        have_sound = true;
-                if (bowl_env_named(inherited[at], BOWL_WAYLAND_VARIABLE))
-                        have_wayland = true;
-                if (bowl_env_named(inherited[at], BOWL_SESSION_TYPE_VARIABLE))
-                        have_session_type = true;
                 if (bowl_env_named(inherited[at], BOWL_DISPLAY_VARIABLE))
                         have_display = true;
-                if (bowl_env_named(inherited[at], BOWL_LANGUAGE_VARIABLE))
-                        have_language = true;
-                if (bowl_env_named(inherited[at], "XDG_CURRENT_DESKTOP"))
-                        have_desktop = true;
-                if (bowl_env_named(inherited[at], "ELECTRON_OZONE_PLATFORM_HINT"))
-                        have_electron_ozone = true;
-                if (bowl_env_named(inherited[at], "MOZ_ENABLE_WAYLAND"))
-                        have_moz_wayland = true;
-                if (bowl_env_named(inherited[at], "QT_QPA_PLATFORM"))
-                        have_qt_platform = true;
-                if (bowl_env_named(inherited[at], "MESA_VK_WSI_PRESENT_MODE"))
-                        have_vk_present = true;
-                if (bowl_env_named(inherited[at], "mesa_glthread"))
-                        have_glthread = true;
+                for (positive k = 0; k < array_count(optional_env); k++)
+                        if (bowl_env_named(inherited[at], optional_env[k].name))
+                                have_opt[k] = true;
 
                 /*  Out of room. Handing back the block as it
                     arrived is only safe while nothing has been
@@ -3827,21 +3892,12 @@ static string_address address_to bowl_environment(
 
                 for (positive at = 0; at < BOWL_VAR_LC_ALL; at++)
                         missing += !have[at];
-                missing += offer_bus && !have_bus;
-                missing += offer_sound && !have_sound;
-                missing += offer_wayland && !have_wayland;
-                missing += offer_wayland && !have_desktop;
-                missing += offer_wayland && !have_session_type && !have_display;
-                missing += offer_wayland && !have_electron_ozone && !have_display;
-                missing += offer_wayland && !have_moz_wayland && !have_display;
-                missing += offer_wayland && !have_qt_platform && !have_display;
-                missing += language && !have_language;
-                missing += offer_mailbox && !have_vk_present;
-                missing += offer_glthread && !have_glthread;
+                for (positive k = 0; k < array_count(optional_env); k++)
+                        missing += offer[optional_env[k].gate] && !have_opt[k] &&
+                                   !(optional_env[k].skip_if_display && have_display);
                 if (!skipped && !missing)
                         return inherited;
-                if (n + BOWL_ENV_DEFAULTS + (offer_wayland ? 2 : 0) >=
-                    BOWL_ENV_ROOM)
+                if (n + missing + 1 > BOWL_ENV_ROOM)
                 {
                         if (!skipped)
                                 return inherited;
@@ -3853,28 +3909,12 @@ static string_address address_to bowl_environment(
         for (positive at = 0; at < BOWL_VAR_LC_ALL; at++)
                 if (!have[at])
                         mixed[n++] = (string_address)bowl_variables[at].fallback;
-        if (offer_bus && !have_bus)
-                mixed[n++] = (string_address)BOWL_SESSION_BUS_VARIABLE "=unix:path=" BOWL_SESSION_BUS_SOCKET;
-        if (offer_sound && !have_sound)
-                mixed[n++] = (string_address)BOWL_SOUND_VARIABLE "=unix:" BOWL_SOUND_SOCKET;
-        if (offer_wayland && !have_wayland)
-                mixed[n++] = (string_address)BOWL_WAYLAND_VARIABLE "=" BOWL_WAYLAND_SOCKET;
-        if (offer_wayland && !have_desktop)
-                mixed[n++] = (string_address) "XDG_CURRENT_DESKTOP=Moonwater";
-        if (offer_wayland && !have_session_type && !have_display)
-                mixed[n++] = (string_address)BOWL_SESSION_TYPE_VARIABLE "=wayland";
-        if (offer_wayland && !have_electron_ozone && !have_display)
-                mixed[n++] = (string_address) "ELECTRON_OZONE_PLATFORM_HINT=auto";
-        if (offer_wayland && !have_moz_wayland && !have_display)
-                mixed[n++] = (string_address) "MOZ_ENABLE_WAYLAND=1";
-        if (offer_wayland && !have_qt_platform && !have_display)
-                mixed[n++] = (string_address) "QT_QPA_PLATFORM=wayland;xcb";
-        if (language && !have_language)
-                mixed[n++] = language;
-        if (offer_mailbox && !have_vk_present)
-                mixed[n++] = (string_address) "MESA_VK_WSI_PRESENT_MODE=mailbox";
-        if (offer_glthread && !have_glthread)
-                mixed[n++] = (string_address) "mesa_glthread=true";
+        for (positive k = 0; k < array_count(optional_env); k++)
+                if (offer[optional_env[k].gate] && !have_opt[k] &&
+                    !(optional_env[k].skip_if_display && have_display))
+                        mixed[n++] = optional_env[k].fallback
+                                         ? optional_env[k].fallback
+                                         : language;
         mixed[n] = null;
         return mixed;
 }
@@ -4562,12 +4602,21 @@ static fn bowl_raise_rlimit(positive resource, p64 target)
 
 static fn bowl_resource_limits(void)
 {
-        bowl_raise_rlimit(BOWL_RLIMIT_NOFILE, BOWL_NOFILE_TARGET);
+        static const struct
+        {
+                positive resource;
+                p64 target;
+        } limits[] = {
+            {BOWL_RLIMIT_NOFILE, BOWL_NOFILE_TARGET},
 #if MOONWATER_STRICT_BOWL < STRICT_LOCKED
-        bowl_raise_rlimit(BOWL_RLIMIT_MEMLOCK, BOWL_MEMLOCK_TARGET);
-        bowl_raise_rlimit(BOWL_RLIMIT_NICE, BOWL_NICE_TARGET);
-        bowl_raise_rlimit(BOWL_RLIMIT_RTPRIO, BOWL_RTPRIO_TARGET);
+            {BOWL_RLIMIT_MEMLOCK, BOWL_MEMLOCK_TARGET},
+            {BOWL_RLIMIT_NICE, BOWL_NICE_TARGET},
+            {BOWL_RLIMIT_RTPRIO, BOWL_RTPRIO_TARGET},
 #endif
+        };
+
+        for (positive at = 0; at < array_count(limits); at++)
+                bowl_raise_rlimit(limits[at].resource, limits[at].target);
 }
 
 static b32 bowl_launch(string_address root, string_address program,
@@ -5326,8 +5375,8 @@ static bool bowl_resolv_compose(byte_store address_to out, p8 address_to host,
 static b32 bowl_write_resolv(string_address root)
 {
         p8 path[BOWL_PATH_LIMIT];
-        p8 host[4096];
-        p8 buffer[4096];
+        static p8 host[4096];
+        static p8 buffer[4096];
         byte_store out = {buffer, sizeof(buffer), 0};
         bipolar got;
         bipolar failed;
@@ -5471,12 +5520,14 @@ static positive bowl_write_localtime_all(positive address_to refused)
         return written;
 }
 
+/* Shared scratch for single-threaded distro config rewriting (avoids 256 KiB stack frames). */
+static p8 bowl_conf_text[BOWL_TEXT];
+static p8 bowl_conf_out[BOWL_TEXT];
+
 static b32 bowl_write_mirror(string_address root)
 {
         p8 path[BOWL_PATH_LIMIT];
-        p8 text[BOWL_TEXT];
-        p8 buffer[BOWL_TEXT];
-        byte_store out = {buffer, sizeof(buffer), 0};
+        byte_store out = {bowl_conf_out, sizeof(bowl_conf_out), 0};
         bipolar got;
         positive at = 0;
         bool live = false;
@@ -5484,20 +5535,24 @@ static b32 bowl_write_mirror(string_address root)
         if (!bowl_root_path(path, sizeof(path), root, "/etc/pacman.d/mirrorlist"))
                 return bowl_refuse("bowl path is too long\n");
 
-        got = bowl_slurp_in_root(root, "/etc/pacman.d/mirrorlist", text, sizeof(text));
+        got = bowl_slurp_in_root(root, "/etc/pacman.d/mirrorlist",
+                                 bowl_conf_text, sizeof(bowl_conf_text));
         return_if(got <= 0, bowl_fail(path, got < 0 ? got : -ERROR_NO_ENTRY));
 
-        return_if((positive)got >= sizeof(text) - 1, bowl_refuse("mirrorlist is too long\n"));
-        text[got] = end;
+        return_if((positive)got >= sizeof(bowl_conf_text) - 1,
+                  bowl_refuse("mirrorlist is too long\n"));
+        bowl_conf_text[got] = end;
 
         while (at < (positive)got)
         {
                 bool commented = false;
                 positive start = at;
 
-                at += memory_span_without_byte(text + at, '\n', (positive)got - at);
+                at += memory_span_without_byte(bowl_conf_text + at, '\n',
+                                               (positive)got - at);
 
-                if (bowl_keyword(bowl_line_word(text + start, address_of commented),
+                if (bowl_keyword(bowl_line_word(bowl_conf_text + start,
+                                                address_of commented),
                                  "Server") &&
                     !commented)
                         live = true;
@@ -5508,7 +5563,8 @@ static b32 bowl_write_mirror(string_address root)
         if ((!live &&
              !byte_store_append_exact(address_of out, BOWL_GEO_MIRROR,
                                       string_length(BOWL_GEO_MIRROR))) ||
-            !byte_store_append_exact(address_of out, text, (positive)got))
+            !byte_store_append_exact(address_of out, bowl_conf_text,
+                                     (positive)got))
                 return bowl_refuse("mirrorlist is too long\n");
 
         return bowl_write_bytes(path, out.bytes, out.used);
@@ -5547,6 +5603,16 @@ static b32 bowl_write_nix(string_address root);
 
 static b32 bowl_configure(string_address root)
 {
+        static const string_address locks[] = {
+            "/var/lib/pacman/db.lck",
+            "/lib/apk/db/lock",
+            "/var/lib/dpkg/lock",
+            "/var/lib/dpkg/lock-frontend",
+            "/var/lib/apt/lists/lock",
+            "/var/cache/apt/archives/lock",
+            "/run/dnf/dnf.conf.lock",
+            "/var/lib/rpm/.rpm.lock",
+        };
         b32 failed = bowl_write_resolv(root);
 
         if (!failed)
@@ -5560,21 +5626,16 @@ static b32 bowl_configure(string_address root)
                         failed = bowl_write_pacman(root);
                 if (!failed)
                         failed = bowl_write_multilib(root);
-                bowl_clear_lock(root, "/var/lib/pacman/db.lck");
         }
 
         if (!failed && bowl_has(root, "/etc/apk/repositories"))
                 failed = bowl_write_apk(root);
-        bowl_clear_lock(root, "/lib/apk/db/lock");
 
         if (!failed && bowl_has(root, "/etc/apt"))
                 failed = bowl_write_apt(root);
-        bowl_clear_lock(root, "/var/lib/dpkg/lock");
-        bowl_clear_lock(root, "/var/lib/dpkg/lock-frontend");
-        bowl_clear_lock(root, "/var/lib/apt/lists/lock");
-        bowl_clear_lock(root, "/var/cache/apt/archives/lock");
-        bowl_clear_lock(root, "/run/dnf/dnf.conf.lock");
-        bowl_clear_lock(root, "/var/lib/rpm/.rpm.lock");
+
+        for (positive at = 0; at < array_count(locks); at++)
+                bowl_clear_lock(root, locks[at]);
 
         if (!failed && bowl_has(root, "/nix/.reginfo"))
                 failed = bowl_write_nix(root);
@@ -5585,7 +5646,7 @@ static b32 bowl_configure(string_address root)
 static b32 bowl_write_apk(string_address root)
 {
         p8 path[BOWL_PATH_LIMIT];
-        p8 existing[4096];
+        static p8 existing[4096];
         bipolar got;
         positive at = 0;
         string_address text =
@@ -5640,9 +5701,7 @@ static b32 bowl_write_apt(string_address root)
 static b32 bowl_write_pacman(string_address root)
 {
         p8 path[BOWL_PATH_LIMIT];
-        p8 text[BOWL_TEXT];
-        p8 buffer[BOWL_TEXT];
-        byte_store out = {buffer, sizeof(buffer), 0};
+        byte_store out = {bowl_conf_out, sizeof(bowl_conf_out), 0};
         bipolar got;
         positive at = 0;
         bool seen_options = false;
@@ -5651,18 +5710,20 @@ static b32 bowl_write_pacman(string_address root)
         if (!bowl_root_path(path, sizeof(path), root, "/etc/pacman.conf"))
                 return bowl_refuse("bowl path is too long\n");
 
-        got = bowl_slurp_in_root(root, "/etc/pacman.conf", text, sizeof(text));
+        got = bowl_slurp_in_root(root, "/etc/pacman.conf", bowl_conf_text,
+                                 sizeof(bowl_conf_text));
         return_if(got <= 0, bowl_fail(path, got < 0 ? got : -ERROR_NO_ENTRY));
 
-        return_if((positive)got >= sizeof(text) - 1, bowl_refuse("pacman.conf is too long\n"));
-        text[got] = end;
+        return_if((positive)got >= sizeof(bowl_conf_text) - 1,
+                  bowl_refuse("pacman.conf is too long\n"));
+        bowl_conf_text[got] = end;
 
         /*
                 Pacman only reads these from [options]. Appending them after
                 [extra] is a no-op and prints "directive not recognized".
         */
-        if (bowl_options_keyword(text, "DisableSandboxFilesystem") &&
-            bowl_options_keyword(text, "DisableSandboxSyscalls"))
+        if (bowl_options_keyword(bowl_conf_text, "DisableSandboxFilesystem") &&
+            bowl_options_keyword(bowl_conf_text, "DisableSandboxSyscalls"))
                 return 0;
 
         while (at < (positive)got)
@@ -5670,10 +5731,12 @@ static b32 bowl_write_pacman(string_address root)
                 bool commented = false;
                 positive start = at;
                 positive stop = start + memory_span_without_byte(
-                                            text + start, '\n', (positive)got - start);
+                                            bowl_conf_text + start, '\n',
+                                            (positive)got - start);
                 string_address word;
 
-                word = bowl_line_word(text + start, address_of commented);
+                word = bowl_line_word(bowl_conf_text + start,
+                                      address_of commented);
 
                 if (!commented && word[0] == '[')
                 {
@@ -5705,7 +5768,8 @@ static b32 bowl_write_pacman(string_address root)
                                 return bowl_refuse("pacman.conf is too long\n");
                 }
 
-                if (!byte_store_append_exact(address_of out, text + start,
+                if (!byte_store_append_exact(address_of out,
+                                             bowl_conf_text + start,
                                              stop - start + (stop < (positive)got)))
                         return bowl_refuse("pacman.conf is too long\n");
 
@@ -5764,7 +5828,6 @@ static b32 bowl_write_multilib(string_address root)
 {
 #if X64
         p8 path[BOWL_PATH_LIMIT];
-        p8 text[BOWL_TEXT];
         bipolar got;
         bipolar handle;
         positive length;
@@ -5772,16 +5835,18 @@ static b32 bowl_write_multilib(string_address root)
         if (!bowl_root_path(path, sizeof(path), root, "/etc/pacman.conf"))
                 return bowl_refuse("bowl path is too long\n");
 
-        got = bowl_slurp_in_root(root, "/etc/pacman.conf", text, sizeof(text));
+        got = bowl_slurp_in_root(root, "/etc/pacman.conf", bowl_conf_text,
+                                 sizeof(bowl_conf_text));
         return_if(got <= 0, bowl_fail(path, got < 0 ? got : -ERROR_NO_ENTRY));
-        return_if((positive)got >= sizeof(text) - 1, bowl_refuse("pacman.conf is too long\n"));
-        text[got] = end;
-        if (bowl_multilib_has(text, (positive)got))
+        return_if((positive)got >= sizeof(bowl_conf_text) - 1,
+                  bowl_refuse("pacman.conf is too long\n"));
+        bowl_conf_text[got] = end;
+        if (bowl_multilib_has(bowl_conf_text, (positive)got))
                 return 0;
 
         handle = bowl_open_in_root(root, "/etc/pacman.conf", FILE_APPEND | O_CLOEXEC);
         return_if(handle < 0, bowl_fail(path, handle));
-        if (got > 0 && text[got - 1] != '\n' &&
+        if (got > 0 && bowl_conf_text[got - 1] != '\n' &&
             system_write_all((positive)handle, "\n", 1) != 1)
         {
                 system_close(handle);
@@ -8353,7 +8418,7 @@ static positive bowl_groups_add(p8 address_to text, positive used, positive room
 
 static fn bowl_udev_groups(void)
 {
-        p8 text[4096];
+        static p8 text[4096];
         bipolar got = file_read_once_at(AT_FDCWD, "/etc/group", text,
                                         sizeof(text) - 512);
         positive used = (positive)(got < 0 ? 0 : got);
@@ -8644,13 +8709,13 @@ static fn bowl_bus_service(string_address root, bipolar directory,
                            string_address name)
 {
         static const p8 ask[] = "Exec=/bowl bus run ";
-        p8 text[BOWL_BUS_REQUEST + 1];
-        p8 out[BOWL_BUS_REQUEST + BOWL_PATH_LIMIT + sizeof(ask) + 4];
+        static p8 text[BOWL_BUS_REQUEST + 1];
+        static p8 out_buf[BOWL_BUS_REQUEST + BOWL_PATH_LIMIT + sizeof(ask) + 4];
+        byte_store out = {out_buf, sizeof(out_buf), 0};
         p8 program[BOWL_PATH_LIMIT];
         p8 path[BOWL_PATH_LIMIT];
         positive exec_at = 0;
         positive exec_size = 0;
-        positive used = 0;
         positive root_size = string_length(root);
         bipolar got;
 
@@ -8679,8 +8744,7 @@ static fn bowl_bus_service(string_address root, bipolar directory,
                 at = stop + 1;
         }
 
-        if (!exec_size || text[exec_at] != '/' ||
-            root_size + exec_size + sizeof(ask) + 4 > sizeof(out))
+        if (!exec_size || text[exec_at] != '/')
                 return;
         {
                 positive word = 0;
@@ -8707,27 +8771,25 @@ static fn bowl_bus_service(string_address root, bipolar directory,
                         stop++;
                 if (at == exec_at - 5)
                 {
-                        memory_copy(out + used, ask, sizeof(ask) - 1);
-                        used += sizeof(ask) - 1;
-                        memory_copy(out + used, root, root_size);
-                        used += root_size;
-                        out[used++] = ' ';
-                        memory_copy(out + used, text + exec_at, exec_size);
-                        used += exec_size;
-                        out[used++] = '\n';
+                        if (!byte_store_append_exact(address_of out, ask, sizeof(ask) - 1) ||
+                            !byte_store_append_exact(address_of out, root, root_size) ||
+                            !byte_store_append_exact(address_of out, " ", 1) ||
+                            !byte_store_append_exact(address_of out, text + exec_at, exec_size) ||
+                            !byte_store_append_exact(address_of out, "\n", 1))
+                                return;
                 }
                 else if (stop - at < 15 ||
                          string_compare_max(text + at, "SystemdService=", 15))
                 {
-                        memory_copy(out + used, text + at, stop - at);
-                        used += stop - at;
-                        out[used++] = '\n';
+                        if (!byte_store_append_exact(address_of out, text + at, stop - at) ||
+                            !byte_store_append_exact(address_of out, "\n", 1))
+                                return;
                 }
                 at = stop + 1;
         }
 
         bowl_quiet = true;
-        bowl_write_bytes(path, (string_address)out, used);
+        bowl_write_bytes(path, out.bytes, out.used);
         bowl_quiet = false;
 }
 
@@ -8769,7 +8831,7 @@ static fn bowl_bus_services(string_address root)
 */
 static fn bowl_bus_accounts(string_address root)
 {
-        p8 text[BOWL_ACCOUNTS_ROOM * 2];
+        static p8 text[BOWL_ACCOUNTS_ROOM * 2];
         p8 chosen[BOWL_PATH_LIMIT];
         p8 pid_text[32];
         p8 path[BOWL_PATH_LIMIT];
@@ -8855,7 +8917,7 @@ static b32 bowl_bus_run(positive count, string_address address_to arguments)
 
         /* A bus gives a service no output; what it says is kept. */
         sink = system_open_at_mode(AT_FDCWD, BOWL_BUS_LOG,
-                                   FILE_APPEND | O_CLOEXEC, 0600);
+                                   FILE_APPEND | O_NOFOLLOW | O_CLOEXEC, 0600);
         if (sink >= 0)
         {
                 if (sink == 1)
@@ -8972,7 +9034,7 @@ static bool bowl_bus_say(bipolar client, bipolar upstream,
 static fn bowl_bus_relay(bipolar client, bipolar upstream, bool rooted)
 {
         p8 held[BOWL_BUS_LINE];
-        p8 chunk[8192];
+        static p8 chunk[8192];
         positive kept = 0;
         bool begun = false;
         bool owed = false;
@@ -9074,24 +9136,12 @@ static fn bowl_bus_relay(bipolar client, bipolar upstream, bool rooted)
 /* The socket the clients open, for as long as the machine is up. */
 static DEAD_END fn bowl_bus_accept(bipolar listener)
 {
-        bipolar nowhere = system_open_at_mode(AT_FDCWD, "/dev/null",
-                                              FILE_READ_WRITE | O_CLOEXEC, 0);
-
-        system_call(syscall(setsid));
-
         /* It outlives the command that started it, and it was started with
            that command's input and output: left on a pipe (bowl bus | tail
            -1) it holds the pipe open for good and the reader never sees the
            end, left on a terminal it holds the terminal. The daemon the
            configuration forks lets go of them the same way. */
-        if (nowhere >= 0)
-        {
-                for (positive at = 0; at < 3; at++)
-                        if ((positive)nowhere != at)
-                                system_duplicate(nowhere, at, 0);
-                if (nowhere > 2)
-                        system_close(nowhere);
-        }
+        bowl_detach_stdio();
 
         for (;;)
         {
@@ -14215,9 +14265,10 @@ static bool bowl_desktop_word_matches(p8 address_to text, positive length,
 static fn bowl_profile_clean_shortcuts(const struct bowl_profile address_to profile)
 {
         bipolar dir;
-        p8 buffer[4096];
+        static p8 buffer[4096];
 
-        dir = system_open_at(AT_FDCWD, BOWL_LOCAL_APPLICATIONS, FILE_READ | O_DIRECTORY | O_CLOEXEC);
+        dir = system_open_at(AT_FDCWD, BOWL_LOCAL_APPLICATIONS,
+                             FILE_READ | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
         if (dir < 0)
                 return;
         for (;;)
@@ -14231,7 +14282,7 @@ static fn bowl_profile_clean_shortcuts(const struct bowl_profile address_to prof
                         const struct linux_dirent64 address_to entry = (const struct linux_dirent64 address_to)(buffer + at);
                         positive name_len;
                         bipolar handle, read_bytes;
-                        p8 body[4096];
+                        static p8 body[4096];
                         bool match = false;
 
                         if (entry->d_reclen < 20 || at + entry->d_reclen > (positive)got)
@@ -14394,8 +14445,10 @@ static positive bowl_profile_words(
     positive count, string_address address_to arguments,
     const struct bowl_profile address_to address_to profile, bool address_to remove)
 {
+        static const string_address actions[] = {"install", "remove"};
         string_address name;
         string_address action = "install";
+        positive verb;
 
         if (count < 3 || count > 4)
                 return BOWL_PROFILE_WORDS_USAGE;
@@ -14404,17 +14457,20 @@ static positive bowl_profile_words(
         if (count == 4)
         {
                 action = arguments[3];
-                if (string_equals(name, "install") ||
-                    string_equals(name, "remove"))
+                if (string_table_find(name, actions, sizeof(actions[0]),
+                                      array_count(actions)) <
+                    array_count(actions))
                 {
                         action = name;
                         name = arguments[3];
                 }
         }
 
-        address_to remove = string_equals(action, "remove");
-        if (!address_to remove && !string_equals(action, "install"))
+        verb = string_table_find(action, actions, sizeof(actions[0]),
+                                 array_count(actions));
+        if (verb >= array_count(actions))
                 return BOWL_PROFILE_WORDS_USAGE;
+        address_to remove = verb == 1;
 
         address_to profile = bowl_find_profile(name);
         return address_to profile ? BOWL_PROFILE_WORDS_OK
@@ -14498,11 +14554,41 @@ static b32 bowl_uninstall(positive count, string_address address_to arguments)
         return 0;
 }
 
+static b32 bowl_udev_verb(positive count, string_address address_to arguments)
+{
+        (void)arguments;
+        return bowl_udev(count);
+}
+
 static b32 bowl_main()
 {
+        static const struct
+        {
+                string_address name;
+                b32 (*run)(positive, string_address address_to);
+        } verbs[] = {
+            {"setup", bowl_setup},
+            {"expose", bowl_expose},
+            {"profile", bowl_profile_main},
+            {"uninstall", bowl_uninstall},
+            {"udev", bowl_udev_verb},
+            {"bus", bowl_bus},
+        };
+        static const struct
+        {
+                string_address name;
+                bool isolated;
+                bool as_root;
+        } modes[] = {
+            {"--isolated", true, false},
+            {"--fast", false, false},
+            {"--root", false, true},
+        };
         string_address address_to arguments = program_argument_list();
         positive count = (positive)program_argument_count();
         positive root_at = 1;
+        positive verb;
+        positive mode;
         string_address root;
         string_address program = null;
         string_address address_to command_arguments = null;
@@ -14512,34 +14598,17 @@ static b32 bowl_main()
 
         return_if(!arguments || count < 2, bowl_usage());
 
-        if (string_equals(arguments[1], "setup"))
-                return bowl_setup(count, arguments);
+        verb = string_table_find(arguments[1], verbs, sizeof(verbs[0]),
+                                 array_count(verbs));
+        if (verb < array_count(verbs))
+                return verbs[verb].run(count, arguments);
 
-        if (string_equals(arguments[1], "expose"))
-                return bowl_expose(count, arguments);
-
-        if (string_equals(arguments[1], "profile"))
-                return bowl_profile_main(count, arguments);
-
-        if (string_equals(arguments[1], "uninstall"))
-                return bowl_uninstall(count, arguments);
-
-        if (string_equals(arguments[1], "udev"))
-                return bowl_udev(count);
-
-        if (string_equals(arguments[1], "bus"))
-                return bowl_bus(count, arguments);
-
-        if (string_equals(arguments[1], "--isolated"))
+        mode = string_table_find(arguments[1], modes, sizeof(modes[0]),
+                                 array_count(modes));
+        if (mode < array_count(modes))
         {
-                isolated = true;
-                isolated_told = true;
-                root_at++;
-        }
-        else if (string_equals(arguments[1], "--fast") ||
-                 string_equals(arguments[1], "--root"))
-        {
-                bowl_as_root = string_equals(arguments[1], "--root");
+                isolated = modes[mode].isolated;
+                bowl_as_root = modes[mode].as_root;
                 isolated_told = true;
                 root_at++;
         }
