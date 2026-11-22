@@ -1566,20 +1566,45 @@ static fn steam_profile(void)
         }
 #endif
         {
-                // Every profile's session, its lines joined as bowl_profile_session joins them, is under half of what it holds, so
-                // the next lines added are not the ones that stop the program from starting at all (the steam session passed 4 KiB).
-                b32 room = 1;
+                // Every profile's session script is held whole, however long it grows: its memfd reads back as its lines, each
+                // ended with a newline, sealed against any write; and a session of 300 KiB (past the 128 KiB of one argument
+                // and the 4 KiB buffer the steam session outgrew) is held whole too.
+                static string_address big[2];
+                static p8 line[300 * 1024];
+                struct bowl_profile made = {0};
+                b32 whole = 1;
 
-                for (positive p = 0; p < array_count(bowl_profiles); p++)
+                for (positive p = 0; p <= array_count(bowl_profiles); p++)
                 {
-                        positive used = 0;
+                        const struct bowl_profile address_to row = p < array_count(bowl_profiles) ? bowl_profiles + p : &made;
+                        bipolar handle;
+                        positive want = 0, got = 0;
+                        p8 piece[4096];
+                        bipolar read;
 
-                        for (string_address address_to line = bowl_profiles[p].session; line && *line; line++)
-                                used += string_length(*line) + 1;
-                        room &= used + 1 <= BOWL_SESSION_LIMIT / 2;
+                        if (row == &made)
+                        {
+                                for (positive at = 0; at + 1 < sizeof(line); at++)
+                                        line[at] = '#';
+                                line[sizeof(line) - 1] = end;
+                                big[0] = (string_address)line, big[1] = null, made.session = big;
+                        }
+                        if (!row->session)
+                                continue;
+                        for (string_address address_to each = row->session; *each; each++)
+                                want += string_length(*each) + 1;
+                        handle = bowl_session_script(row);
+                        whole &= handle >= 0;
+                        if (handle < 0)
+                                continue;
+                        system_call_3(syscall(lseek), (positive)handle, 0, 0);
+                        while ((read = system_read_once(handle, piece, sizeof(piece))) > 0)
+                                got += (positive)read;
+                        whole &= got == want && system_write_once(handle, "x", 1) < 0;
+                        system_close(handle);
                 }
-                check("Every profile's session script is under half of what bowl_profile_session holds (BOWL_SESSION_LIMIT), the steam one among them",
-                      room);
+                check("Every profile's session script is held whole in a sealed memfd, however long (a 300 KiB one too), and nothing writes it after",
+                      whole);
         }
         check("The session looks for Canvas's socket before it starts anything, and says how to turn the shim on",
               socket == 1 && chrome_count(steam->session[0], "echo ") == 1);
@@ -1680,12 +1705,8 @@ static fn steam_profile(void)
                 bowl_forget_path(bare_root);
         }
         {
-                positive session_bytes = 0;
                 const char address_to script = bowl_xwayland_script;
 
-                for (positive line = 0; steam && steam->session[line]; line++)
-                        session_bytes += string_length(steam->session[line]) + 1;
-                check("The steam session fits the buffer the launcher builds it in", session_bytes > 0 && session_bytes < BOWL_SHEBANG_LIMIT * 16);
                 check("The wrapper is a Python script, which connects to the socket Canvas listens on for the window manager",
                       string_has_prefix(script, "#!/usr/bin/python3\n") && strstr(script, "\"/run/moonwater/xwm/wm-0\"") &&
                           strstr(script, "socket.AF_UNIX") && strstr(script, "sizeof") == null);

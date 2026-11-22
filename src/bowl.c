@@ -56,10 +56,6 @@ static const p8 bowl_usage_text[] = bowl_label
 #define BOWL_PROGRAM "/bowl"
 #define BOWL_PATH_LIMIT 4096
 #define BOWL_SHEBANG_LIMIT 256
-// The most a profile's session script is, its lines joined (bowl_profile_session): 16 KiB, far under the kernel's 128 KiB for one
-// argument. It was 4 KiB, and the steam session outgrew it on 2026-11-22 (the input shim, DXVK's latency sleep, the CCD and the
-// shader warm): every `steam` then ended at once on "session script is too long". A check row holds each profile's under half of it.
-#define BOWL_SESSION_LIMIT (BOWL_SHEBANG_LIMIT * 64)
 #define BOWL_ACCESS_EXECUTE 1
 
 struct bowl_mount_point
@@ -15993,29 +15989,53 @@ static b32 bowl_profile_refresh(const struct bowl_profile address_to profile)
 
 static fn bowl_profile_keep(const struct bowl_profile address_to profile);
 
+/*
+        A profile's session script, its lines each ended with a newline, in a memfd sealed whole (F_SEAL_SEAL, SHRINK, GROW and
+        WRITE) before anything reads it: the descriptor, or a negative errno. It has no size of its own to outgrow. The session
+        was joined into a buffer of 4 KiB and handed to sh -c as one argument, and the steam session outgrew it on 2026-11-22
+        (the input shim, DXVK's latency sleep, the CCD and the shader warm), so every `steam` ended at once on "session script
+        is too long"; and one argument holds 128 KiB at most, a second cliff. The descriptor is not closed on exec, so the shell
+        the session is handed to reads it by its /proc/self/fd path.
+*/
+static bipolar bowl_session_script(const struct bowl_profile address_to profile)
+{
+        bipolar handle = system_call_2(syscall(memfd_create), (positive) "bowl-session", 2); // MFD_ALLOW_SEALING
+
+        if (handle < 0)
+                return handle;
+        for (positive line = 0; profile->session && profile->session[line]; line++)
+        {
+                positive length = string_length(profile->session[line]);
+
+                if (system_write_all((positive)handle, profile->session[line], length) != length ||
+                    system_write_all((positive)handle, "\n", 1) != 1)
+                        return system_close(handle), -5;
+        }
+        if (system_call_3(syscall(fcntl), (positive)handle, 1033, 15) != 0) // F_ADD_SEALS: F_SEAL_SEAL | SHRINK | GROW | WRITE
+                return system_close(handle), -1;
+        return handle;
+}
+
 /* `bowl profile NAME session [argument...]`: the profile's session, lines of
    a shell script, run by /bin/sh with the arguments as its own. What the
-   launcher the profile exposes under its name does. */
+   launcher the profile exposes under its name does. The script is read from
+   its memfd (bowl_session_script), and every argument is passed on, however
+   many there are. */
 static b32 __attribute__((__noinline__))
 bowl_profile_session(const struct bowl_profile address_to profile,
                      positive count, string_address address_to arguments)
 {
-        p8 text[BOWL_SESSION_LIMIT];
-        string_address argv[BOWL_PROFILE_ARGV];
-        positive used = 0;
-        positive at = 0;
+        static const p8 prefix[] = "/proc/self/fd/";
+        p8 path[sizeof(prefix) + 24];
+        string_address argv[count + 3];
+        bipolar script = bowl_session_script(profile);
+        positive at = 0, length = sizeof(prefix) - 1;
 
-        for (positive line = 0; profile->session[line]; line++)
-        {
-                positive length = string_length(profile->session[line]);
-
-                if (used + length + 2 > sizeof(text))
-                        return bowl_refuse("session script is too long\n");
-                memory_copy(text + used, profile->session[line], length);
-                used += length;
-                text[used++] = '\n';
-        }
-        text[used] = end;
+        if (script < 0)
+                return bowl_refuse("cannot hold the session script\n");
+        memory_copy(path, prefix, length);
+        length += positive_into_string(path + length, (positive)script);
+        path[length] = end;
         bowl_profile_keep(profile);
         if (profile->xwayland)
                 bowl_xwayland_install(profile);
@@ -16025,13 +16045,12 @@ bowl_profile_session(const struct bowl_profile address_to profile,
                 bowl_steam_overlay_gl_install(profile);
 
         argv[at++] = "/bin/sh";
-        argv[at++] = "-c";
-        argv[at++] = text;
-        argv[at++] = profile->name;
-        for (positive word = 0; word < count && at + 1 < BOWL_PROFILE_ARGV; word++)
+        argv[at++] = path;
+        for (positive word = 0; word < count; word++)
                 argv[at++] = arguments[word];
         argv[at] = null;
         system_execute("/bin/sh", argv, file_environment_all());
+        system_close(script);
         return bowl_refuse("cannot start /bin/sh\n");
 }
 
