@@ -2846,6 +2846,239 @@ Canvas first): `bowl_desktop_session`, its PAM line and the two check rows named
 above were removed with it. The row that holds every profile's session to no
 write into a bowl by the host's path stays, and covers the profiles left.
 
+### MW-2026-206: a terminal's reply to a query echoed the name the program asked for into the shell's input
+
+| | |
+|---|---|
+| Status | Fixed on main, 2026-11-22 (`d5961ebe7`) |
+| Class | A terminal reply that echoes program-chosen text into the input of the shell behind it (XTGETTCAP, DCS `+q`) |
+| Attacker | Any program whose output reaches a terminal window: a hostile file a person prints with `cat`, or a remote host over `ssh`. Output is enough; no input is needed |
+| Reachable | src/canvas/term.c `dcs_answer`, the `+q` branch, in the Canvas terminal. The reply is written to the shell's standard input, and `answering()` is only a room check on that buffer, so the branch is always reached |
+
+**What happened.** The reply to a DCS `+q` query was `ESC P 0 + r`, then the
+requested name raw, then ST. The name is bytes the program chose; `osc_finish`
+accepts printable bytes (0x20 to 0x7e) and bytes from 0x80. The reply reached
+the shell as typed input with no newline, so the text sat pre-typed at the
+prompt and ran only when the person pressed Enter. The echo was written in
+`69e8855bd` (2026-11-10, "terminal: answer XTVERSION, DECRQSS and XTGETTCAP").
+
+**The fix.** An unknown name gets the bare `ESC P 0 + r ESC \` reply the
+protocol defines, with no name in it (`d5961ebe7`, in `dcs_answer`).
+
+**Tests that fail without the fix.** `check_term_parameters` in
+test/checks/apps.c, the row "term hostile: an XTGETTCAP for a name we do not
+answer is 0+r with no echo of the name". It feeds `DCS +q rm -rf x ST` and
+requires the bytes to the shell to be exactly `ESC P 0 + r ESC \`. The row has
+not been run: CHECK_terminal does not build on main yet (the gate's repair is
+pending), so neither the fixed nor the unfixed result is measured.
+
+**Related.** `69e8855bd`, the commit that added the reply.
+
+### MW-2026-207: any process named osk was granted the on-screen keyboard's keys
+
+| | |
+|---|---|
+| Status | Fixed on main, 2026-11-22 (`dfc753acc`, with `b5fc4689e`) |
+| Class | Identity by name: the keyboard role went to a process whose executable inode and name matched the on-screen keyboard's, not to the keyboard the launcher started |
+| Attacker | Root only. The window table is mode 0600 (`WINDOWS_MODE`, src/canvas/window.c), and a process that can write it can already inject input through uinput. The role sends its keys into the focused window |
+| Reachable | src/canvas/compositor/manage.c `compositor_osk_is`, and `compositor_take_first`, which keeps `WINDOW_KEYBOARD` on a row only through it |
+
+**What happened.** `compositor_osk_is` accepted a row's pid when its
+`/proc/PID/exe` had the same inode and device as the compositor's own
+executable, and its `/proc/PID/comm` was `osk`. The on-screen keyboard is
+compiled into that same binary (src/sh/shell.c includes ui/osk.c), so both
+tests hold for any process that runs the moonwater binary under the name osk:
+a symlink named `osk` (Linux takes `comm` from the path given to execve), or
+`prctl(PR_SET_NAME, "osk")` from any moonwater process. The granted row then
+drained the key ring and posted each key to the focused window. Both routes
+were read from the code; neither was run on the box. The check was introduced
+by `e50cb36b2` (2026-11-04, "the keyboard flags count only from the on-screen
+keyboard's own process"). A Wayland or X client cannot reach it: the shim
+writes the table, not the client.
+
+**The fix.** The grant takes a row only when its pid is the one the launcher
+recorded at its fork (`osk_pid`) and `windows_owner_ok` holds for the claim the
+compositor took when the row opened (`dfc753acc`). `windows_owner_ok` refuses
+a pid that changed or was reused, since a new process has a new start time.
+The keyboard's child records its own pid in the table before it execs
+(`b5fc4689e`), so the recorded pid is on file before the keyboard can claim its
+row. The name and the inode are no longer read.
+
+**Tests that fail without the fix.** None. `dfc753acc` adds no check row, and
+the row the draft describes (a test process with comm `osk` and an exe symlink
+named osk must not get WINDOW_KEYBOARD) is not written. The compositor_hand
+section of the check suite segfaults at HEAD (exit 139), so the row could not
+run in any case.
+
+**Related.** MW-2026-202 (a key a program made was the same to a window as a
+key the person pressed), the class this grant fed. `e50cb36b2`.
+
+### MW-2026-208: a font's multiple substitution wrote the string it read, so a line showed the wrong glyphs
+
+| | |
+|---|---|
+| Status | Fixed on main, 2026-11-22 (`fb71920cd`) |
+| Class | Correctness on hostile input: a substitution with no output buffer wrote its results into the string it was reading. No write lands outside the string |
+| Attacker | Whoever supplies a font face that a program lays text with: a font file a person installs or opens |
+| Reachable | src/canvas/font.c `font_gsub_apply`, kinds 2 (multiple), 3 (alternate) and 4 (ligature), reached from the reverse branch of `font_apply_string` (a type 7 extension whose first subtable is a type 8 reverse chain) |
+
+**What happened.** A reverse-chain lookup runs its subtables with no output
+(`s->output` is false), so `font_output_glyph` wrote to `s->out`, which in that
+branch is the input `info[]`. A multiple substitution (kind 2) or a ligature
+(kind 4) overwrote glyphs it had yet to read. The writes are bounded by the
+string, so the damage is the wrong glyphs laid for that face. The path was
+introduced by `72ba74c80` (2026-11-04, the right-to-left text engine).
+
+**The fix.** Kinds 2, 3 and 4 are refused where there is no output
+(`if (!s->output || ...)`, `fb71920cd`), so a reverse chain takes only single
+substitutions, which replace one glyph in place.
+
+**Tests that fail without the fix.** CHECK_font in test/checks/font.c, the rows
+"reverse: a multiple substitution is refused where the string is not output"
+and "reverse: the glyph it reads is left alone". The draft's mutant run, with
+the guard taken out, failed 2 of the 321 font rows; I did not re-run it.
+
+**Related.** `72ba74c80`, the commit that added the reverse branch.
+
+### MW-2026-209: a text line with many combining marks overran its layout buffer
+
+| | |
+|---|---|
+| Status | Fixed on main, 2026-11-22 (`71b7829bf`) |
+| Class | Out-of-bounds write: a laid line's shown bytes were copied past the end of their buffer, over the layout's own fields |
+| Attacker | Whoever writes a text file that a person opens in an editor, a code view or a Files text view |
+| Reachable | src/canvas/ui/ui.c `ui_text_layout_line`, the copy of each cluster's shown bytes. Every text area and code view lays out its visible lines, and in wrap mode every line |
+
+**What happened.** The shown bytes of a laid line sit in `shown[UI_TEXT_CLUSTERS * 8]`
+inside the static `ui_text_lay` (the buffer was made in `3eab5d74a`,
+2026-10-30, "Text widgets over the engine"). A cluster can show up to 32 bytes,
+and a line lays out up to 2048 clusters. A line of 2048 clusters with four
+combining marks each shows 2048 times 9 bytes, which is 18432 against a buffer of
+16384. The copy ran on into `shown_length` and `count`, which follow the buffer
+in the same struct, so the copy corrupted its own write index.
+
+**The fix.** The layout stops before a cluster that would pass the buffer's end
+(`if (l->shown_length + shown_size >= sizeof(l->shown)) break;`), so the rest of
+a longer line is not laid out (`71b7829bf`).
+
+**Tests that fail without the fix.** `check_kit_text_lines` in test/checks/kit.c,
+called from test/checks/apps.c and added by `71b7829bf`. It lays out 2048
+clusters of an `e` and four U+0301 and requires `shown_length` below the
+buffer's size, `count` at most `UI_TEXT_CLUSTERS`, and a NUL after the shown
+bytes. The row has not been run: test/checks/settings.c does not compile on
+main (the gate owns it), so it was not run against the old ui.c either.
+
+**Related.** `3eab5d74a`, the commit that sized the buffer.
+
+### MW-2026-210: the touch trace log was created world-readable
+
+| | |
+|---|---|
+| Status | Fixed on main, 2026-11-22 (`53b9bc6d1`) |
+| Class | File permissions: a debug log of touch events and the kit's decisions was created mode 0644 |
+| Attacker | Any local account, while the trace switch file `/run/moonwater/touch-trace` exists (root creates it) |
+| Reachable | src/canvas/window.c `window_trace_write`, both `openat` calls that create `/run/moonwater/touch-trace.log` |
+
+**What happened.** The trace log was opened with `O_CREAT` and mode `0644` from
+`b5ce32101` (2026-11-04, "touch trace: a file switch writes the touch events and
+the kit's decisions to /run/moonwater/touch-trace.log"), so any local user could
+read the trace while the switch was there. The switch is a debug switch and is
+off by default.
+
+**The fix.** Both opens create the file with mode `0600` (`53b9bc6d1`). The mode
+applies only when the file is made, so a log already on disk keeps the mode it
+has.
+
+**Tests that fail without the fix.** None. `53b9bc6d1` adds no check row. The
+draft's check, a stat of the created log for mode 0600, is not written.
+
+**Related.** `b5ce32101`, the commit that added the trace.
+
+### MW-2026-211: a client past 65,536 syncobj timelines aliased timeline 0
+
+| | |
+|---|---|
+| Status | Fixed on main, 2026-11-22 (`02be8f63b`) |
+| Class | Integer truncation: a 16-bit slot index wrapped, so one timeline's points and releases were applied to another |
+| Attacker | Any program that can open `/run/moonwater/wayland-0`, which is mode 0666. Its effect reaches the client's own timelines and fences only |
+| Reachable | src/canvas/wayland.c `wayland_syncobj_request` (import_timeline), the surface's acquire and release point setters, `wayland_syncobj_check` and `wayland_syncobj_take`, and the buffer's release timeline |
+
+**What happened.** The timeline index was kept in `unsigned short` fields
+(`pending_sync_acq_slot`, `pending_sync_rel_slot` and `rel_timeline`, added in
+`488fe99ce`, 2026-11-14), and `import_timeline` allocated timelines with no cap.
+Past index 65535 the index wrapped to 0 in those fields, while the reference
+counts used the full index. A client's acquire or release point could then land
+on timeline 0, so a live handle could be dropped early or a release signalled
+on the wrong timeline. The reach was the client's own timelines and fences; the
+draft found no handle of another client reached.
+
+**The fix.** An import past index 0xffff is refused and its timeline freed
+(`02be8f63b`, in `wayland_syncobj_request`).
+
+**Tests that fail without the fix.** `test_syncobj_timeline_cap` in
+test/checks/wayland.c: 65536 imports must succeed and the 65537th must raise one
+client error. Without the cap the 65537th succeeds. The row has not been run:
+the wayland check build does not link on main (mremap and musl link errors in
+test/checks, which the gate owns).
+
+**Related.** `488fe99ce`, the commit that added the fields.
+
+### MW-2026-212: a chain of subsurfaces had no depth limit, so one client could overflow the compositor's stack
+
+| | |
+|---|---|
+| Status | Fixed on main, 2026-11-22 (`5e73b8e0c`) |
+| Class | Unbounded recursion over a client's object graph: flatten and the subsurface walks recurse once per level |
+| Attacker | Any program that can open `/run/moonwater/wayland-0`, which is mode 0666 |
+| Reachable | src/canvas/wayland.c `wayland_subcompositor_request` (get_subsurface, which refused only a cycle), `wayland_flatten`, `wayland_sub_apply_children`, and the layer walks (`wayland_layers_walk`, `pick_node`) |
+
+**What happened.** A subsurface could hang from any surface that was not a
+cycle, so a client could build a chain as deep as its surfaces allowed, and the
+walks that draw and route a window's picture recurse once per level. The
+recursion came in with subsurfaces, in `f8a5c5b8f` (2026-11-03, "Wayland
+subsurfaces: wl_subcompositor and wl_subsurface in the shim"): its
+`wayland_flatten` recurses, and its get_subsurface checked only for cycles. The
+draft named `e70ccdb13` (2026-11-14) as the introduction; that commit changed
+the recursion's arguments, but the recursion itself dates from `f8a5c5b8f`. A
+deep enough chain overflows the compositor thread's stack, and so takes the
+whole compositor down with one client. The draft did not drive a chain to that
+depth, so the depth at which the stack runs out was not measured.
+
+**The fix.** An attach is refused when the parent's level, plus one, plus the
+subtree's height, passes `WAYLAND_SUB_LEVELS` (32) (`5e73b8e0c`).
+
+**Tests that fail without the fix.** `test_subsurface_depth` in
+test/checks/wayland.c: a chain of 39 subsurfaces must give exactly one client
+error, at the 33rd attach. Without the cap there is no error. The row has not
+been run (the wayland check build does not link on main).
+
+**Related.** `f8a5c5b8f`, the commit that added the recursion.
+
+### MW-2026-213: a client's far-future commit stamp held its own stream for as long as it liked
+
+| | |
+|---|---|
+| Status | Fixed on main, 2026-11-22 (`6aec4587e`) |
+| Class | Unbounded client time: a commit stamp was stored as given and held the client's stream until that time |
+| Attacker | Any program that can open `/run/moonwater/wayland-0`. The effect is on its own surface and stream |
+| Reachable | src/canvas/wayland.c, the commit timer branch for `wp_commit_timing` `set_timestamp` (the stamp was stored with no bound), and `wayland_timing_wake`, which turns the stamp into a hold |
+
+**What happened.** `set_timestamp` stored any stamp, billions of seconds ahead,
+and the compositor held that client's commits until it. Only the client's own
+surface and stream froze, and its stash filled, so this is self-denial of
+service; the draft found no other client held. Introduced by `c51df5212`
+(2026-11-04, "wayland: wp_fifo and wp_commit_timing, each kept per window for
+the compositor to read").
+
+**The fix.** A stamp more than one second ahead is clamped to one second ahead
+(`6aec4587e`).
+
+**Tests that fail without the fix.** The hostile block in test/checks/wayland.c
+after the vblank check: a stamp 4.3e9 seconds away must be due within 1100 ms.
+The row has not been run (the wayland check build does not link on main).
+
+**Related.** `c51df5212`, the commit that added the stamp.
+
 ## Reviews with no exposure found
 
 Disclosures read against the code on 2026-10-23, each with the check that was
