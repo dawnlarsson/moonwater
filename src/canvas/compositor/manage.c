@@ -3506,6 +3506,9 @@ static void compositor_osk_read(int row)
                 return;
         head = __atomic_load_n(&table->osk_head[row], __ATOMIC_ACQUIRE);
         now = clock_monotonic_nanoseconds();
+        // The head is the client's: a ring it has run past is kept to its newest WINDOWS_OSK keys, not drained whole.
+        if (head - table->osk_tail[row] > WINDOWS_OSK)
+                __atomic_store_n(&table->osk_tail[row], head - WINDOWS_OSK, __ATOMIC_RELEASE);
         while (table->osk_tail[row] != head)
         {
                 unsigned int at = table->osk_tail[row] % WINDOWS_OSK;
@@ -3831,7 +3834,9 @@ static void compositor_dnd_take(int row)
 
         if (!compositor_dnd.active || row != compositor_dnd.target || compositor_dnd.dropped)
                 return;
-        compositor_dnd.take = table->drop_take[row] >= 0 && compositor_dnd_name(table->drop_take[row]) ? table->drop_take[row] : -1;
+        int take = table->drop_take[row];
+
+        compositor_dnd.take = take >= 0 && compositor_dnd_name(take) ? take : -1;
         compositor_dnd.take_actions = table->drop_take_actions[row] & 7u;
         compositor_dnd.take_preferred = table->drop_take_preferred[row] & 7u;
         allowed = compositor_dnd.source_actions ? compositor_dnd.source_actions : 7u;
