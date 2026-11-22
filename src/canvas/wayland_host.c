@@ -46,7 +46,7 @@ struct compositor_wl_transfer
 #define CANVAS_BUFFER_REF_FIELDS \
         union { \
                 struct canvas_ext_import imp; \
-                struct { const unsigned char *map; long fd, size; unsigned long dev, ino; positive import; unsigned int epoch; }; \
+                struct { const unsigned char *map; long fd, size; unsigned long dev, ino; positive import; unsigned int epoch, gen; }; \
         }; \
         positive va; \
         unsigned long modifier; \
@@ -102,6 +102,20 @@ static struct
         struct canvas_ext_import *source;
         struct { unsigned int fourcc, pitch, offset, width, height, count; unsigned long long modifier; int error; } scan_refused;
 } compositor_wl = {.listen = -1, .wake = -1, .syncobj_pool = {.drm_fd = -1}, .drag_reading = -1};
+
+/*
+        A release of an import this shim holds: by its card address and the generation the import had when it was placed (gpu_import_gen).
+        A generation that is no longer the import's at that address (the placer reused it) is a no-op on the card's side.
+*/
+static void wl_import_release(positive va, unsigned int epoch, unsigned int gen)
+{
+#ifdef MOONWATER_GPU_C
+        if (va && epoch == gpu_epoch)
+                gpu_release_import_gen(va, gen);
+#else
+        (void)va, (void)epoch, (void)gen;
+#endif
+}
 
 struct compositor_wl_layer
 {
@@ -861,7 +875,7 @@ static const unsigned int *wl_ext_lent_info(int row, unsigned long *pitch, posit
 
                         if (imp)
                         {
-                                compositor_wl.lent[row].import = imp;
+                                compositor_wl.lent[row].import = imp, compositor_wl.lent[row].gen = gpu_import_gen(imp);
                                 compositor_wl.lent[row].va = imp + (positive)((const unsigned char *)compositor_wl.lent[row].pixels - compositor_wl.lent[row].map);
                                 compositor_wl.lent[row].epoch = gpu_epoch;
                                 wl_ext_row_sync(row);
@@ -1328,7 +1342,7 @@ static void compositor_wl_layers_drop(int row)
                 return;
         for (unsigned int at = 0; at < compositor_wl_layers.count[row]; at++)
                 if (canvas_ext_import_live(compositor_wl_layers.layer[row][at].import, compositor_wl_layers.layer[row][at].epoch))
-                        gpu_release_import(compositor_wl_layers.layer[row][at].import);
+                        wl_import_release(compositor_wl_layers.layer[row][at].import, compositor_wl_layers.layer[row][at].epoch, compositor_wl_layers.layer[row][at].gen);
         compositor_wl_layers.total -= compositor_wl_layers.count[row];
         compositor_wl_layers.count[row] = 0;
         if (compositor_wl_layers.pending_row == row)
@@ -1480,7 +1494,7 @@ static void compositor_wl_unlend(int row)
         if (!wl_row_lent(row))
                 return;
         compositor_wl_lent_drop_fb(row);
-        canvas_ext_import_release(&compositor_wl.lent[row].imp);
+        wl_import_release(compositor_wl.lent[row].imp.va, compositor_wl.lent[row].imp.epoch, compositor_wl.lent[row].gen);
         memory_zero(&compositor_wl.lent[row], sizeof compositor_wl.lent[row]);
         wl_ext_row_sync(row);
 }
@@ -1595,18 +1609,23 @@ static void compositor_wl_pic_ident(const struct wayland_picture *picture, unsig
 }
 
 static positive compositor_gpu_import_layer(struct compositor_wl_layer *old, unsigned int olds, const unsigned char *map, long fd, long size,
-                                            unsigned long dev, unsigned long ino, int nv12, unsigned long extent)
+                                            unsigned long dev, unsigned long ino, int nv12, unsigned long extent, unsigned int *gen)
 {
+        positive got;
+
         for (unsigned int k = 0; k < olds; k++)
                 if (old[k].fd == fd && old[k].dev == dev && old[k].ino == ino &&
                     (nv12 ? (old[k].nv12 && old[k].extent == extent) : (old[k].map == map && old[k].size == size)) &&
                     canvas_ext_import_live(old[k].import, old[k].epoch))
                 {
-                        positive got = old[k].import;
+                        got = old[k].import;
+                        *gen = old[k].gen;
                         old[k].import = 0;
                         return got;
                 }
-        return gpu_import_fd((int)fd, (positive)(nv12 ? extent : (unsigned long)size));
+        got = gpu_import_fd((int)fd, (positive)(nv12 ? extent : (unsigned long)size));
+        *gen = got ? gpu_import_gen(got) : 0;
+        return got;
 }
 
 static void compositor_wl_gather_set(struct compositor_wl_layer *l, const struct wayland_picture *p, long tw, long th, long x1, long y1)
@@ -1788,6 +1807,7 @@ static int compositor_wl_lend(int row, const struct wayland_picture *picture, lo
         unsigned long stride = (unsigned long)picture->stride, dev = 0, ino = 0;
         const unsigned char *at;
         positive va = 0, import = 0;
+        unsigned int gen = 0;
         int same;
 
         // A buffer is the surface's whole picture at every commit, and the damage only where it differs from the last one (the protocol's
@@ -1858,7 +1878,7 @@ static int compositor_wl_lend(int row, const struct wayland_picture *picture, lo
         if (wl_row_lent(row) && !same)
         {
                 compositor_wl_lent_drop_fb(row);
-                canvas_ext_import_release(&compositor_wl.lent[row].imp);
+                wl_import_release(compositor_wl.lent[row].imp.va, compositor_wl.lent[row].imp.epoch, compositor_wl.lent[row].gen);
                 compositor_wl.lent[row].scan_failed = 0;
         }
         // The same buffer with the window at another place in it (its geometry moved, its size the same): the framebuffer was made at the old
@@ -1869,10 +1889,13 @@ static int compositor_wl_lend(int row, const struct wayland_picture *picture, lo
         compositor_wl.lent[row].pitch = stride / 4;
         compositor_wl.lent[row].width = width;
         compositor_wl.lent[row].height = height;
+        // The import's generation: the one the same buffer's import had, else the one it was placed with now (0 for none).
+        gen = same ? compositor_wl.lent[row].gen : import ? gpu_import_gen(import) : 0;
         compositor_wl.lent[row].imp = (struct canvas_ext_import){
                 .map = picture->map, .fd = picture->sync_fd, .size = picture->map_bytes,
                 .dev = dev, .ino = ino, .va = import, .epoch = gpu_epoch,
         };
+        compositor_wl.lent[row].gen = gen;
         compositor_wl.lent[row].va = va;
         compositor_wl.lent[row].modifier = picture->modifier;
         compositor_wl.lent[row].fourcc = picture->fourcc;
@@ -2446,7 +2469,7 @@ static int compositor_wl_layer_nv12(const struct wayland_picture *picture, long 
         if (x2 <= x1 || y2 <= y1)
                 return 1;
         if (compositor_wl_meets_corner((int)x1, (int)y1, (int)x2, (int)y2, (int)width, (int)height, radius, line) ||
-            !(out->import = compositor_gpu_import_layer(old, olds, picture->map, picture->sync_fd, picture->map_bytes, dev, ino, 1, extent)))
+            !(out->import = compositor_gpu_import_layer(old, olds, picture->map, picture->sync_fd, picture->map_bytes, dev, ino, 1, extent, &out->gen)))
                 return 0;
         out->va = out->import, out->pixels = (const unsigned int *)picture->pixels, out->pitch = 1;
         out->x = (int)x1, out->y = (int)y1, out->width = (int)(x2 - x1), out->height = (int)(y2 - y1);
@@ -2512,7 +2535,7 @@ static int compositor_wl_layer_make(const struct wayland_picture *picture, long 
         compositor_wl_pic_ident(picture, &dev, &ino);
         if (picture->sync_fd >= 0)
         {
-                if (!gpu_can_import() || !(out->import = compositor_gpu_import_layer(old, olds, picture->map, picture->sync_fd, picture->map_bytes, dev, ino, 0, 0)))
+                if (!gpu_can_import() || !(out->import = compositor_gpu_import_layer(old, olds, picture->map, picture->sync_fd, picture->map_bytes, dev, ino, 0, 0, &out->gen)))
                         return 0;
                 out->va = out->import + (positive)(at - picture->map);
         }
@@ -2635,14 +2658,14 @@ static int compositor_wl_row_layers(void *context, int row, const struct wayland
         {
                 for (unsigned int at = 0; at < kept; at++)
                         if (canvas_ext_import_live(made[at].import, made[at].epoch))
-                                gpu_release_import(made[at].import);
+                                wl_import_release(made[at].import, made[at].epoch, made[at].gen);
                 return compositor_wl_layers_lay(row), compositor_wl_layers_refused(why);
         }
         compositor_wl_layers_changes(old, olds, made, from, kept, rects, &changes, WAYLAND_DAMAGE, box);
         compositor_wl_gathers_take(row, made, kept, from, old, olds, root);
         for (unsigned int at = 0; at < olds; at++)
                 if (canvas_ext_import_live(old[at].import, old[at].epoch))
-                        gpu_release_import(old[at].import);
+                        wl_import_release(old[at].import, old[at].epoch, old[at].gen);
         memory_copy(old, made, (positive)kept * sizeof made[0]);
         compositor_wl_layers.total = compositor_wl_layers.total - olds + kept;
         compositor_wl_layers.count[row] = (unsigned char)kept;
@@ -2731,7 +2754,7 @@ static unsigned int wl_ext_layers_frames(int row, struct compositor_frame *frame
                         {
                                 l->import = imp;
                                 l->va = imp + (positive)((const unsigned char *)l->pixels - l->map);
-                                l->epoch = gpu_epoch;
+                                l->epoch = gpu_epoch, l->gen = gpu_import_gen(imp);
                         }
                 }
 #endif
@@ -3014,7 +3037,7 @@ static int compositor_wl_row_picture(void *context, int row, const struct waylan
                 memory_copy(over, compositor_wl_layers.layer[row], (positive)aside * sizeof over[0]);
                 for (unsigned int at = 0; at < aside; at++)
                         if (canvas_ext_import_live(over[at].import, over[at].epoch))
-                                gpu_release_import(over[at].import);
+                                wl_import_release(over[at].import, over[at].epoch, over[at].gen);
                 compositor_wl_layers.total -= aside, compositor_wl_layers.count[row] = 0;
                 compositor_wl_layers.pending_row = -1, compositor_wl_layers.root_refused[row] = 1;
         }
@@ -3800,7 +3823,7 @@ static void *compositor_wl_dmabuf_map(void *context, long fd, long size)
 
                 if (!import)
                         return 0;
-                gpu_release_import(import);
+                gpu_release_import_gen(import, gpu_import_gen(import));
                 return WAYLAND_DMABUF_UNMAPPED;
         }
         got = compositor_call(syscall(mmap), 0, (positive)size, 1, 1, (positive)fd, 0);
@@ -3812,7 +3835,7 @@ static void *compositor_wl_dmabuf_map(void *context, long fd, long size)
 
                         if (!import)
                                 return 0;
-                        gpu_release_import(import);
+                        gpu_release_import_gen(import, gpu_import_gen(import));
                         return WAYLAND_DMABUF_UNMAPPED;
                 }
                 if (compositor.card >= 0 && compositor_output_count() <= 1)
