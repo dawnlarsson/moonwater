@@ -403,6 +403,38 @@ static fn exec_run_nested(string_address text, bool lexer, positive start)
         }
 }
 
+/* Run an owned snapshot of text so traps, fc, and jobs -x cannot munmap or
+   overwrite the backing storage out from under run_lines() (CWE-416). */
+static COLD fn exec_run_nested_copy(string_address text, bool lexer,
+                                    positive start)
+{
+        if (!text)
+                return;
+
+        positive length = string_length(text);
+        p8 fast[256];
+
+        if (length < sizeof(fast))
+        {
+                memory_copy(fast, text, length + 1);
+                exec_run_nested((string_address)fast, lexer, start);
+                return;
+        }
+
+        if (length == positive_max)
+                return;
+
+        positive room = length + 1;
+        p8 address_to copy = (p8 address_to)shell_map(room);
+
+        if (!copy)
+                return;
+
+        memory_copy(copy, text, room);
+        exec_run_nested((string_address)copy, lexer, start);
+        memory_free(copy, room);
+}
+
 static COLD fn exec_trap_condition(positive number)
 {
         string_address action = trap_action(number);
@@ -428,7 +460,7 @@ static COLD fn exec_trap_condition(positive number)
                 shell_trap_signal = number == TRAP_DEBUG ? 65
                                     : number == TRAP_ERR ? 66
                                                          : 67;
-                exec_run_nested(action, false, line ? line - 1 : 0);
+                exec_run_nested_copy(action, false, line ? line - 1 : 0);
                 shell_trap_signal = kept_trapsig;
         }
         exec_condition_inside = false;
@@ -2827,7 +2859,7 @@ static COLD fn shell_jobs_replaced(positive at)
         //      the middle of the jobs that asked for this, and a line fed to
         //      it without its own lexer storage is a second sentence written
         //      over the first.
-        exec_run_nested((string_address)joined.bytes, true, 0);
+        exec_run_nested_copy((string_address)joined.bytes, true, 0);
 }
 
 /* A spec that names no job, or more than one. jobs and disown handed a bare
@@ -6447,6 +6479,30 @@ by_prefix:
 */
 static fn history_run_text(writer write, string_address text)
 {
+        //      Snapshot text before history_drop/exec_run_nested can munmap
+        //      the history slot or reuse fc's static replacement buffer.
+        positive length = string_length(text);
+        p8 fast[256];
+        p8 address_to owned = null;
+        positive owned_room = 0;
+
+        if (length < sizeof(fast))
+        {
+                memory_copy(fast, text, length + 1);
+                text = (string_address)fast;
+        }
+        else
+        {
+                if (length == positive_max)
+                        return;
+                owned_room = length + 1;
+                owned = (p8 address_to)shell_map(owned_room);
+                if (!owned)
+                        return;
+                memory_copy(owned, text, owned_room);
+                text = (string_address)owned;
+        }
+
         //      The line being run again is announced on the diagnostic
         //      channel, not among the answers: what the line writes is the
         //      answer, and a script reading it wants only that.
@@ -6462,10 +6518,13 @@ static fn history_run_text(writer write, string_address text)
 
                 history_drop(history_used - 1, 1);
                 history_first = kept;
-                history_hold(text, string_length(text));
+                history_hold(text, length);
         }
 
         exec_run_nested(text, true, 0);
+
+        if (owned)
+                memory_free(owned, owned_room);
 }
 
 /* A name another user cannot prepare before fc gets there.  Entropy failure
@@ -13010,7 +13069,7 @@ HOT fn exec_traps()
                 // never run.
                 // A signal's action counts its lines from one, as both
                 // references do.
-                exec_run_nested(action, false, 0);
+                exec_run_nested_copy(action, false, 0);
                 shell_trap_signal = kept_trapsig;
 
                 if (exec_line_aborted())
