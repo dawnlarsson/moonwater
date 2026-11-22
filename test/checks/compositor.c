@@ -3984,10 +3984,11 @@ static void check_taskbar_scale(void)
 }
 
 /* A bottom and a top band in the standard theme (dark, with white) are the bytes pinned here: three tabs, each the window
-   symbol and its title (pinned again when a tab took an icon before its title, and when the tabs became glass pills split about the
-   moon, the clock in it at a check's time; before that the tabs were their titles alone).
-   The unthemed table had a tint of its own, which no shell draws: the compositor themes its table at start. */
-#define BAND_UPRIGHT 0xc346e9c1c817ba4cull
+   symbol and its title (pinned again when a tab took an icon before its title, when the tabs became glass pills split about the
+   moon, and when 88b924b11 fitted the face's stems and bars, which moved 32 pixels of the titles by 4 levels at most; before
+   that the tabs were their titles alone). The rows redo the three tabs alone (7), so the moon, its clock and the tray are never
+   in these bytes. The unthemed table had a tint of its own, which no shell draws: the compositor themes its table at start. */
+#define BAND_UPRIGHT 0xc78a21a2e0bf3b20ull
 
 /* The cut of a title to room: what it gives fits, a cut ends in "..." after a whole character, the next character more
    would not fit, and what fits whole is not cut. */
@@ -5087,6 +5088,9 @@ static void check_taskbar_text(string_address face_path)
 
             taskbar_settings_set(words[position], "primary", "battery none\n");
             taskbar_text_set(0);
+            // The compositor's loop ticks the taskbar before it draws the band, so the draw finds its minute fresh and does not read
+            // the battery again (9ee96b67a), which would take away the battery set here.
+            taskbar_tick();
             taskbar.battery_item = 1, taskbar.battery_percent = 100, taskbar.battery_charging = 1;
             view = band_view(position, sides);
             taskbar_band(&view, &bx, &by, &bw, &bh);
