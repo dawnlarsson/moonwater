@@ -388,6 +388,7 @@ static fn settings_changed(int top, int bottom) { ui_page_damage(&settings.page,
 
 static int settings_section_start(int row);
 static fn settings_rebuild(void);
+static fn settings_sort_runs(void);
 static fn settings_say(string_address text);
 static struct settings_item address_to settings_item(int row);
 
@@ -1783,6 +1784,7 @@ static fn settings_rebuild(void)
         for (int w = 0; w < SETTINGS_ABOUT_COUNT; w++)
                 if ((filtered ? settings_matches(SETTINGS_ABOUT + w) : settings.page.chosen == settings_system_group()) && ui_list_add(&settings.list, SETTINGS_ABOUT + w))
                         count++;
+        settings_sort_runs();
         ui_list_end(&settings.list);
         if (settings_editing() >= 0 && settings_pos(settings_editing()) < 0)
                 settings_edit_end();
@@ -2867,26 +2869,38 @@ static int settings_list_compare(int list, int col, const struct settings_item a
 
 static b32 settings_item_sortable(int list, const struct settings_item address_to it) { return it->kind != SETTINGS_NOTE && it->kind != SETTINGS_ADD && (list != 2 || settings_device_section(it) == 1) && (list != 3 || it->where == 1); }
 
-static fn settings_list_sort(int list)
+/* The sort of a list's column: the kit orders the ids of each run of sortable items of one list (ui_list_order_range); the items
+   themselves do not move, so the rows keep their ids and the section adjacency the items keep. */
+static int settings_sort_list_now, settings_sort_col_now;
+static int settings_sort_by_id(int a, int b)
+{
+        const struct settings_item address_to x = settings_item(a), address_to y = settings_item(b);
+        return x && y ? settings_list_compare(settings_sort_list_now, settings_sort_col_now, x, y) : 0;
+}
+
+static fn settings_sort_run(int list, int from, int to)
 {
         struct ui_columns address_to c = settings_columns_for(list);
-        struct settings_item address_to items;
-        if (!c || c->sorted < 0 || list < 0 || list >= SETTINGS_LISTS)
+        if (!c || c->sorted < 0)
                 return;
-        items = settings.item[list];
-        for (int at = 1; at < settings.item_count[list]; at++)
-                if (settings_item_sortable(list, &items[at]))
-                        for (int back = at; back > 0 && settings_item_sortable(list, &items[back - 1]); back--)
-                        {
-                                int cmp = settings_list_compare(list, c->sorted, &items[back - 1], &items[back]);
-                                if ((c->descending ? -cmp : cmp) <= 0)
-                                        break;
-                                settings_item_swap(&items[back], &items[back - 1]);
-                        }
-        if (list == 2)
-                settings_drive_follow();
-        else if (list == 3)
-                settings_link_follow();
+        settings_sort_list_now = list, settings_sort_col_now = c->sorted;
+        ui_list_order_range(&settings.list, from, to, settings_sort_by_id, c->descending);
+}
+
+// Runs of sortable items of one list, in the list's ids as they were added: each run is sorted where it stands.
+static fn settings_sort_runs(void)
+{
+        int run = -1, run_list = -1;
+        for (int at = 0; at <= settings.list.count; at++)
+        {
+                int id = at < settings.list.count ? settings.list.id[at] : 0, list = at < settings.list.count ? settings_list_of(id) : -1;
+                const struct settings_item address_to it = list >= 0 ? settings_item(id) : null;
+                b32 here = it && settings_item_sortable(list, it);
+                if (run >= 0 && (!here || list != run_list))
+                        settings_sort_run(run_list, run, at), run = -1;
+                if (here && run < 0)
+                        run = at, run_list = list;
+        }
 }
 
 static fn settings_focus_keep(int list, char address_to keep, positive room)
@@ -2909,13 +2923,8 @@ static fn settings_focus_restore(int list, const char address_to keep, int fallb
 
 static fn settings_columns_sorted(struct ui_columns address_to hit)
 {
-        int list = -1;
-        char keep[SETTINGS_ITEM_LABEL];
-        for (int k = 0; settings_large && hit && k < SETTINGS_LISTS; k++)
-                if (&settings_large->columns[k] == hit) { list = k; break; }
-        if (list < 0)
-                return;
-        settings_focus_keep(list, keep, sizeof(keep)), settings_list_sort(list), settings_focus_restore(list, keep, -1), settings_rebuild();
+        (void)hit;
+        settings_rebuild();
 }
 
 static positive settings_list_sum(int list)
@@ -2961,7 +2970,6 @@ static fn settings_feed_read(b32 killed, b32 failed)
         settings_focus_keep(list, keep, sizeof(keep));
         at = settings.list.focus - SETTINGS_LIST_ID(list, 0);
         parsers[settings_feeds[feed].kind]();
-        settings_list_sort(list);
         settings_layout_check();
         if (settings_list_sum(list) == before && !changed)
                 return;
