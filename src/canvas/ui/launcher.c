@@ -1115,6 +1115,13 @@ static fn launcher_language(void)
                 launcher_layout();
 }
 
+// The launcher sits this far off the band, beside its button: half the button's thickness across the band (its height on a bottom or top band, its
+// width on a side one), so the gap scales with the button at every scale and on every edge.
+static int launcher_anchor_gap(const struct ui_anchor address_to anchor)
+{
+        return (anchor->edge == TASKBAR_BOTTOM || anchor->edge == TASKBAR_TOP ? anchor->button[3] : anchor->button[2]) / 2;
+}
+
 static int launcher_open(void)
 {
         struct windows address_to table = launcher.own.table;
@@ -1133,8 +1140,7 @@ static int launcher_open(void)
         ui_app_size(&launcher_app, (unsigned int)ui_px(&launcher.ui, LAUNCHER_WIDTH), 0);
         ui_anchor_take(&launcher.anchor, table, launcher.asked_beside);
         if (launcher.anchor.anchored)
-                launcher.anchor.gap = (launcher.anchor.edge == TASKBAR_BOTTOM || launcher.anchor.edge == TASKBAR_TOP)
-                                          ? launcher.anchor.button[3] : launcher.anchor.button[2];
+                launcher.anchor.gap = launcher_anchor_gap(&launcher.anchor);
         ui_apps_fresh(ui_kit_time());
         launcher_apps_make();
         launcher_recent_read();

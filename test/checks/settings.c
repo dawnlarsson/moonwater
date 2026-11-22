@@ -1157,6 +1157,17 @@ static fn check_launcher_anchor(void)
         launcher_changed();
         kept &= !launcher.moved;
         check("launcher beside the button: a bar above a bottom panel is put again when its height changes, once it is shown, and no other is", kept);
+        {
+                // The gap is half the button's thickness on every edge, at 1x and at 2x (launcher_anchor_gap): the old gap was the whole button.
+                struct ui_anchor g = {.anchored = true, .edge = TASKBAR_BOTTOM, .button = {600, 696, 24, 24}};
+                struct ui_anchor g2 = {.anchored = true, .edge = TASKBAR_BOTTOM, .button = {600, 672, 48, 48}};
+                struct ui_anchor s = {.anchored = true, .edge = TASKBAR_LEFT, .button = {0, 600, 24, 24}};
+                struct ui_anchor s2 = {.anchored = true, .edge = TASKBAR_RIGHT, .button = {1856, 600, 48, 48}};
+                check("launcher gap: half the button's thickness on a bottom panel, at 1x (12 of 24) and at 2x (24 of 48)",
+                      launcher_anchor_gap(&g) == 12 && launcher_anchor_gap(&g2) == 24);
+                check("launcher gap: half the button's width on a side panel, at 1x and at 2x, and the same for either side",
+                      launcher_anchor_gap(&s) == 12 && launcher_anchor_gap(&s2) == 24);
+        }
 }
 #endif
 
