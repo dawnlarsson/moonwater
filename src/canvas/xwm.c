@@ -2043,6 +2043,7 @@ static void compositor_xwm_out_property(struct compositor_xwm *x, const struct x
 }
 
 static long compositor_xwm_drag_types(const char **types);
+static int compositor_xwm_drag_hand(int *hx, int *hy);
 
 static long compositor_xwm_side_types(int which, const char **types, int *text)
 {
@@ -2703,7 +2704,13 @@ static void compositor_xwm_proxy_message(struct compositor_xwm *x, const struct 
                                 wayland_drag_x_actions(compositor_xwm_xdrag_actions(x));
                 }
                 if (!x->xdrag.naming && !x->xdrag.began && !x->xdrag.cancelled && !x->xdrag.dropped && !x->xdrag.escaped)
-                        compositor_xwm_xdrag_begin(x);
+                {
+                        /* A drag begins on the Wayland side only while the person's hand is down (a button or a finger):
+                           an X client's XdndPosition alone cannot make a drop land on a window (x11 finding S6). */
+                        int hx = 0, hy = 0;
+                        if (compositor_xwm_drag_hand(&hx, &hy))
+                                compositor_xwm_xdrag_begin(x);
+                }
                 if (x->xdrag.began)
                         wayland_drag_x_motion(under, under >= 0 ? rx - compositor.x[under] : 0, under >= 0 ? ry - compositor.y[under] : 0);
                 compositor_xwm_xdrag_status(x);

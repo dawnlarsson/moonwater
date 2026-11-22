@@ -4437,6 +4437,37 @@ static void xwm_atom_rows(void)
         compositor_xwm_at = kept;
 }
 
+// An X source's XdndPosition begins a drag on the Wayland side only while the person's hand is down (x11 finding S6): the gate reads the
+// button and the row it was pressed on, and a row of this server holds it. No button down: no drag; a button down on a row of the server: a drag.
+static void xwm_drag_gate_rows(void)
+{
+        __typeof__(compositor_xwm_slots[0]) *kept = compositor_xwm_at, *x = &compositor_xwm_slots[COMPOSITOR_XWM_SLOTS - 1];
+        __typeof__(compositor_xwm_slots[0]) saved = *x;
+        __typeof__(compositor.button_down) down0 = compositor.button_down;
+        __typeof__(compositor.button_row[0]) row0 = compositor.button_row[0];
+        __typeof__(compositor_xwm_slots[0].window) w;
+        int hx = 0, hy = 0, none, held;
+
+        *x = compositor_xwm_fresh;
+        compositor_xwm_at = x;
+        x->fd = 0;
+        w = compositor_xwm_find(78u, 1);
+        if (w)
+                w->row = 5;
+        compositor.button_down = 0;
+        none = compositor_xwm_drag_hand(&hx, &hy);
+        compositor.button_down = 1u, compositor.button_row[0] = 5;
+        held = compositor_xwm_drag_hand(&hx, &hy);
+        check("xwm drag gate: an X source's drag begins on the Wayland side only with a button down on a row of its server (no button: none)",
+              !none && held);
+        compositor.button_down = down0, compositor.button_row[0] = row0;
+        if (w)
+                compositor_xwm_release(w);
+        wayland_table_drop(&x->window_table), wayland_table_drop(&x->window_index), x->windows = 0, x->window = 0;
+        *x = saved;
+        compositor_xwm_at = kept;
+}
+
 // A Wayland client is asked for (its first window takes the keys) by the record root made for it or a forebear (windows_asked_record,
 // compositor_wl_asked, R-seams-13), never by its own environment: a child of this process is asked once this process records its ask, a record
 // of another start is no ask and is taken away, and a directory others may write is not read. Over a directory of the check's own.
@@ -5772,6 +5803,7 @@ b32 main(void)
         xwm_socket_rows();
         xwm_serial_state_rows();
         xwm_atom_rows();
+        xwm_drag_gate_rows();
         display_off_rows();
         reader_own_rows();
         clip_most_rows();
