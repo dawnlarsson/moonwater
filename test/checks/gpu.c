@@ -1622,11 +1622,11 @@ static void gpu_i915_rows(void)
         gpu_amd_va_max = 2ull << 30;
         check("gpu amd: a space under 3 GiB is refused", gpu_amd_window(130, &va, &maps, &top) == 28);
         gpu_amd_va_max = kept_va_max;
-        check("gpu amd: the classifier: ENODEV and ECANCELED the card lost, EINVAL a suspect (lost only the second time in a row), EAGAIN asked again, EFAULT refused",
+        check("gpu amd: the classifier: ENODEV, ECANCELED and EIO the card lost, EINVAL a suspect (lost only the second time in a row), EAGAIN and EINTR asked again, EFAULT refused",
               gpu_amd_classify(22) == GPU_ERR_SUSPECT && gpu_amd_classify(19) == GPU_ERR_LOST && gpu_amd_classify(125) == GPU_ERR_LOST && gpu_amd_classify(11) == GPU_ERR_AGAIN &&
-                  gpu_amd_classify(14) == GPU_ERR_REFUSED && gpu_amd_classify(5) == GPU_ERR_REFUSED);
-        check("gpu i915: the classifier: EINVAL, ENOSPC, ENOENT and EOPNOTSUPP our own job, EIO and ENODEV the card lost, EAGAIN and EINTR asked again, EFAULT refused",
-              gpu_i915_classify(22) == GPU_ERR_OURS && gpu_i915_classify(28) == GPU_ERR_OURS && gpu_i915_classify(2) == GPU_ERR_OURS && gpu_i915_classify(95) == GPU_ERR_OURS &&
+                  gpu_amd_classify(4) == GPU_ERR_AGAIN && gpu_amd_classify(14) == GPU_ERR_REFUSED && gpu_amd_classify(5) == GPU_ERR_LOST);
+        check("gpu i915: the classifier: EINVAL, ENOENT and EOPNOTSUPP our own job, ENOSPC a place refused, EIO and ENODEV the card lost, EAGAIN and EINTR asked again, EFAULT refused",
+              gpu_i915_classify(22) == GPU_ERR_OURS && gpu_i915_classify(28) == GPU_ERR_PLACE && gpu_i915_classify(2) == GPU_ERR_OURS && gpu_i915_classify(95) == GPU_ERR_OURS &&
                   gpu_i915_classify(5) == GPU_ERR_LOST && gpu_i915_classify(19) == GPU_ERR_LOST && gpu_i915_classify(11) == GPU_ERR_AGAIN && gpu_i915_classify(4) == GPU_ERR_AGAIN &&
                   gpu_i915_classify(14) == GPU_ERR_REFUSED);
 
@@ -2793,6 +2793,7 @@ static b32 gpu_bo_run(void)
                 if (gpu_maps[i].handed)
                         owed[owing++] = gpu_maps[i].handle;
         gpu_fake_cancel = 1, gpu_seen_count = 0;
+        GPU_ARGS->w = 64, GPU_ARGS->rows = 1; // a job of no columns or rows is refused as our own before the kernel is asked (gpu_amd_submit)
         gpu_run();
         gpu_fake_cancel = 0, gpu_lost = 0;
         for (unsigned int i = 0; i < owing; i++)
@@ -2845,10 +2846,10 @@ static void gpu_bo_rows(void)
 
         // 4. A map the compositor forgot (its pages are gone; the trim keeps it while a job given up on may run). Given to a record in an earlier tick, it is not named (the
         // kernel refuses a job that names pages that are gone, and the record of an earlier tick is not run again); given to one in this tick, it is (that job is refused).
-        gpu_maps[1].from = gpu_maps[1].to = 0, gpu_maps[1].handed = 1, gpu_maps[1].used = gpu_tick - 1;
+        gpu_maps[1].from = gpu_maps[1].to = 0, gpu_maps[1].handed = 1, gpu_maps[1].used = gpu_tick - 1, gpu_maps_handed[0] |= 2; // (the submit reads the marks' bits)
         gpu_bo_run();
         check("gpu bo: a forgotten map handed in an earlier tick is not in the list", !gpu_seen_has(8));
-        gpu_maps[1].handed = 1, gpu_maps[1].used = gpu_tick;
+        gpu_maps[1].handed = 1, gpu_maps[1].used = gpu_tick, gpu_maps_handed[0] |= 2;
         held = gpu_bo_run();
         check("gpu bo: a forgotten map handed in this tick is in the list (the kernel refuses that job)", gpu_seen_has(8) && held);
 
@@ -2877,7 +2878,8 @@ static void gpu_bo_rows(void)
                 check("gpu bo: a held import given to a record and one let go of since the last submit are in the list", gpu_seen_has(21) && gpu_seen_has(22));
                 check("gpu bo: an import let go of before the last submit is not (its client draws into it again)", !gpu_seen_has(23));
                 gpu_bo_run();
-                check("gpu bo: the job after in the same tick names the held import alone", gpu_seen_has(21) && !gpu_seen_has(22) && !gpu_seen_has(23) && gpu_seen_count == 1);
+                check("gpu bo: the job after in the same tick, given no import's address, names none of the client's (a8720e4ae: handed alone, not used in the tick)",
+                      !gpu_seen_has(21) && !gpu_seen_has(22) && !gpu_seen_has(23) && gpu_seen_count == 0);
 
                 // 7. A client's import no record of this tick was given is not named (a game's buffer it draws its next frame into, which amdgpu would make the
                 // job wait for and the game wait for the job: P-c1-1, G-g3-4); the compositor's own (a scanout) always is; gpu-imports-all names every live one.
@@ -2904,7 +2906,7 @@ static void gpu_bo_rows(void)
                 const struct gpu_backend *kept_backend = gpu_backend;
 
                 gpu_backend = &gpu_amd, gpu_map_count = 0, gpu.imports = 0, gpu_suspects = 0;
-                gpu_fake_invalid = 1, gpu_lost = 0;
+                gpu_fake_invalid = 1, gpu_lost = 0, GPU_ARGS->w = 64, GPU_ARGS->rows = 1;
                 gpu_run();
                 held = !gpu_lost && gpu_fake_invalid == 0;
                 gpu_fake_invalid = 2, gpu_lost = 0, gpu_suspects = 0;
@@ -3888,6 +3890,24 @@ static void gpu_round_rows(void)
         side of the bins while it runs; a third waits for the first, and nothing of the first's is written; a job is asked after without a wait; its sync_file is
         the kernel's answer to AMDGPU_FENCE_TO_HANDLE; and a pending job's deadline, its fence's error and a refused submit end it, or keep it, as gpu.c says.
 */
+// The value the last job's packets (the fake's copy) set a shader register to (SET_SH_REG, the last one that sets it): 0 when none does.
+static unsigned int gpu_fake_ib_reg(unsigned int reg)
+{
+        unsigned int value = 0;
+
+        for (unsigned int at = 0; at < gpu_fake_ib_words;)
+        {
+                unsigned int head = gpu_fake_ib[at], body = (head >> 16 & 0x3fff) + 1;
+
+                if (head >> 30 != 3 || at + 1 + body > gpu_fake_ib_words)
+                        break;
+                if ((head >> 8 & 255) == 0x76 && reg >= gpu_fake_ib[at + 1] && reg - gpu_fake_ib[at + 1] + 1 < body)
+                        value = gpu_fake_ib[at + 2 + reg - gpu_fake_ib[at + 1]];
+                at += 1 + body;
+        }
+        return value;
+}
+
 static void gpu_async_rows(void)
 {
         unsigned char kept_gpu[sizeof(gpu)], args0[sizeof(struct gpu_args)], bins0[4096];
@@ -3912,14 +3932,14 @@ static void gpu_async_rows(void)
         check("gpu async: a scene is submitted and not waited for: its sequence is the pending job's, built in slot 0, its bins in a side of the room",
               first && gpu.pending == first && gpu_pending_slot == 0 && gpu_fake_submits == 1 && gpu_fake_wait_calls == 0 && slot0->op == 6 &&
                   (first_g == GPU_VA + bins_at || first_g == GPU_VA + bins_at + room));
-        check("gpu async: the job's packets are slot 0's and name slot 0's arguments", gpu_fake_ib_words > 30 && gpu_fake_ib[32] == (unsigned int)(GPU_VA + GPU_ARGS_AT(0)));
+        check("gpu async: the job's packets are slot 0's and name slot 0's arguments", gpu_fake_ib_reg(0x244) == (unsigned int)(GPU_VA + GPU_ARGS_AT(0)));
 
         // 2. The next, while the first runs: the other slot, the other side, the first held as the job before it; still no wait.
         second = gpu_scene_submit(ops_at, 1, bins_at, d_at, 64, 64, 4, 0, 0, 64, 4);
         check("gpu async: the next scene is built while the first runs, in slot 1 and the other side of the bins, and the first is the job before it",
               second && second != first && gpu.pending == second && gpu_before.sequence == first && gpu_pending_slot == 1 && gpu_fake_submits == 2 &&
-                  gpu_fake_wait_calls == 0 && GPU_ARGS == (struct gpu_args address_to)((p8 address_to)gpu_late_buffer + GPU_ARGS_AT(1)) && GPU_ARGS->g != first_g &&
-                  (GPU_ARGS->g == GPU_VA + bins_at || GPU_ARGS->g == GPU_VA + bins_at + room) && gpu_fake_ib[32] == (unsigned int)(GPU_VA + GPU_ARGS_AT(1)));
+                  gpu_fake_wait_calls == 0 && gpu_slot == 1 && !memory_compare(GPU_ARGS, (p8 address_to)gpu_late_buffer + GPU_ARGS_AT(1), sizeof(struct gpu_args)) && GPU_ARGS->g != first_g &&
+                  (GPU_ARGS->g == GPU_VA + bins_at || GPU_ARGS->g == GPU_VA + bins_at + room) && gpu_fake_ib_reg(0x244) == (unsigned int)(GPU_VA + GPU_ARGS_AT(1)));
 
         // 3. A third while both run: refused as late, and nothing of the first's (its arguments, its bins) written.
         memory_copy(args0, slot0, sizeof(args0)), memory_copy(bins0, (p8 address_to)gpu_late_buffer + (first_g - GPU_VA), sizeof(bins0));
@@ -3974,6 +3994,8 @@ static void gpu_async_rows(void)
         gpu_fake_again = 0;
 
         // 8. The deadline: a pending job within it is nothing; past it, it is hung, said once; the oldest job the ring has not done is the one whose deadline counts.
+        gpu_fake_busy = 1, gpu_fake_idle = 0, gpu_last_error = 0;
+        check("gpu async: a job is pending for the deadline's rows", gpu_scene_submit(ops_at, 1, bins_at, d_at, 64, 64, 4, 0, 0, 64, 4) && gpu.pending);
         now = clock_monotonic_nanoseconds();
         gpu_end_said = 0, gpu_found = GPU_END_NONE, gpu_job_began = now - (GPU_HANG_NS - 500000000ull), gpu_fault_poll = now + 3600000000000ull, gpu_fake_fault = 0;
         check("gpu async: a pending job a second and a half old is within its deadline: nothing is said", gpu_late_end() == GPU_END_NONE && !gpu_end_said);
