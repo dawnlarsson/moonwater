@@ -108,7 +108,7 @@ static COLD fn net_kmsg_record(void)
         bipolar fresh = -1;
 
         if (system_call(syscall(getpid)) == net_kmsg_owner)
-                fresh = system_open_at(AT_FDCWD, "/dev/kmsg", 1 | O_CLOEXEC);
+                fresh = system_open_at(AT_FDCWD, "/dev/kmsg", 1 | O_CLOEXEC | O_NOFOLLOW);
         kmsg_write(fresh >= 0 ? fresh : net_kmsg_handle, net_kmsg_line, net_kmsg_used);
         if (fresh >= 0)
                 system_close((b32)fresh);

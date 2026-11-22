@@ -731,7 +731,7 @@ static fn radio_kernel_said(string_address address, radio_said address_to said)
                    (string_address) ": Direct firmware load for ", null, null, null);
         radio_line(probe, sizeof(probe), address,
                    (string_address) ": probe with driver ", null, null, null);
-        handle = system_open_at(AT_FDCWD, "/dev/kmsg", FILE_READ | O_NONBLOCK | O_CLOEXEC);
+        handle = system_open_at(AT_FDCWD, "/dev/kmsg", FILE_READ | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW);
         if (handle < 0)
                 return;
 

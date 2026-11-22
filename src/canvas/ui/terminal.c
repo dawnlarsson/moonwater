@@ -2597,7 +2597,7 @@ static int terminal_start(void)
         full_reset();
         if (terminal.reading)
                 cursor_visible = false,
-                terminal.master = (b32)system_open_at(AT_FDCWD, (string_address) "/dev/kmsg", FILE_READ | O_NONBLOCK | O_CLOEXEC),
+                terminal.master = (b32)system_open_at(AT_FDCWD, (string_address) "/dev/kmsg", FILE_READ | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW),
                 terminal.child = (bipolar)terminal.master;
         else
                 terminal.child = term_session(&terminal.master, &terminal.oom_kills);

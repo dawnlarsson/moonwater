@@ -1013,7 +1013,7 @@ static fn tune_kernel_lines(p8 address_to text)
         p8 record[2048];
         p8 ring[TUNE_LOG_LINES][TUNE_LOG_WIDTH];
         positive count = 0;
-        bipolar handle = system_open_at(AT_FDCWD, "/dev/kmsg", FILE_READ | O_NONBLOCK | O_CLOEXEC);
+        bipolar handle = system_open_at(AT_FDCWD, "/dev/kmsg", FILE_READ | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW);
 
         if (handle < 0)
                 return;
