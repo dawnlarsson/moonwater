@@ -402,20 +402,49 @@ static b32 text_operand_trouble(string_address what, string_address word,
         return file_try_help(text_name, 1);
 }
 
-// The tools this file stands for that say anything but "write error" and the
-// reason whichever stdio call it was: cmp and dd word their own, and awk, tee
-// and Moonwater's own have no reference to follow. Every other coreutils and
-// util-linux program ends through close_stdout, which words it so; the farm
-// was checked against GNU on /dev/full and a closed descriptor.
-static bool text_write_error_worded()
+enum
 {
-        static const char address_to const names[] = {
-            "cmp", "dd", "awk", "tee", "monitor", "bits", "line", "look",
-        };
+        TEXT_DONE_DEFAULT = 0,
+        TEXT_DONE_SILENT,
+        TEXT_DONE_GREP,
+        TEXT_DONE_SORT,
+        TEXT_DONE_SED,
+        TEXT_DONE_DIFF,
+        TEXT_DONE_REV,
+        TEXT_DONE_CAT,
+        TEXT_DONE_HEAD_TAIL,
+        TEXT_DONE_EXPR,
+};
 
-        return !array_any(i, sizeof(names) / sizeof(names[0]),
-                          string_equals(text_name, (string_address)names[i]));
-}
+typedef struct
+{
+        string_address name;
+        p8 kind;
+        p8 out_status;
+        p8 err_status;
+} text_done_policy;
+
+// Per-tool write-error wording and exit status policy: checked against GNU
+// coreutils/diffutils/grep/sed/util-linux on /dev/full and closed descriptors.
+static const text_done_policy text_done_policies[] = {
+    {(string_address) "grep", TEXT_DONE_GREP, 2, 2},
+    {(string_address) "sort", TEXT_DONE_SORT, 2, 2},
+    {(string_address) "sed", TEXT_DONE_SED, 4, 4},
+    {(string_address) "cmp", TEXT_DONE_DIFF, 2, 1},
+    {(string_address) "diff", TEXT_DONE_DIFF, 2, 1},
+    {(string_address) "rev", TEXT_DONE_REV, 1, 1},
+    {(string_address) "cat", TEXT_DONE_CAT, 1, 1},
+    {(string_address) "head", TEXT_DONE_HEAD_TAIL, 1, 1},
+    {(string_address) "tail", TEXT_DONE_HEAD_TAIL, 1, 1},
+    {(string_address) "expr", TEXT_DONE_EXPR, 3, 1},
+    {(string_address) "dd", TEXT_DONE_SILENT, 1, 1},
+    {(string_address) "awk", TEXT_DONE_SILENT, 1, 1},
+    {(string_address) "tee", TEXT_DONE_SILENT, 1, 1},
+    {(string_address) "monitor", TEXT_DONE_SILENT, 1, 1},
+    {(string_address) "bits", TEXT_DONE_SILENT, 1, 1},
+    {(string_address) "line", TEXT_DONE_SILENT, 1, 1},
+    {(string_address) "look", TEXT_DONE_SILENT, 1, 1},
+};
 
 static fn text_close();
 
@@ -423,6 +452,11 @@ static HOT b32 text_done(b32 code)
 {
         text_flush();
         text_close();
+
+        positive pi = string_table_lookup(text_name, text_done_policies);
+        const text_done_policy policy = pi < array_count(text_done_policies)
+                                            ? text_done_policies[pi]
+                                            : (text_done_policy){null, TEXT_DONE_DEFAULT, 1, 1};
 
         if (text_out_failed)
         {
@@ -435,20 +469,16 @@ static HOT b32 text_done(b32 code)
                                                         : TEXT_STDIO_PAGE;
                 bool buffered = text_out_error_offered < buffer;
 
-                if (string_equals(text_name, "grep"))
+                switch (policy.kind)
                 {
+                case TEXT_DONE_GREP:
                         if (standard)
                                 string_diagnostic(&text_diagnostic, 0,
                                                   (string_address) "write error",
                                                   file_reason(reason));
-                        return 2;
-                }
+                        break;
 
-                // sort names the stdio call that failed, then gnulib's close
-                // at exit says so again -- with the reason only when there
-                // was no descriptor for it to close.
-                if (string_equals(text_name, "sort"))
-                {
+                case TEXT_DONE_SORT:
                         if (standard)
                         {
                                 string_diagnostic(&text_diagnostic, 0,
@@ -463,74 +493,64 @@ static HOT b32 text_done(b32 code)
                                         string_diagnostic(&text_diagnostic, 0, null,
                                                           "write error");
                         }
-                        return 2;
-                }
+                        break;
 
-                if (string_equals(text_name, "sed"))
-                {
+                case TEXT_DONE_SED:
                         if (standard)
                                 sed_write_diagnostic(reason, buffer);
-                        return 4;
-                }
+                        break;
 
-                // diffutils names the stream and ends with its trouble
-                // status.
-                if (string_equals(text_name, "cmp") ||
-                    string_equals(text_name, "diff"))
-                {
+                case TEXT_DONE_DIFF:
                         if (standard)
                                 string_diagnostic(&text_diagnostic, 0,
                                                   (string_address) "standard output",
                                                   file_reason(reason));
-                        return 2;
-                }
+                        break;
 
-                // util-linux rev says nothing of a standard output it could
-                // not write at all, closed or reopened for reading, and exits
-                // as though it had (measured both ways).
-                if (string_equals(text_name, "rev"))
-                {
+                case TEXT_DONE_REV:
                         if (reason == -ERROR_BAD_DESCRIPTOR)
                                 return code;
-
                         if (standard)
                                 string_diagnostic(&text_diagnostic, 0,
                                                   (string_address) "write error",
                                                   file_reason(reason));
-                        return 1;
-                }
+                        break;
 
-                // GNU cat looks at standard output before it reads and names
-                // it when it cannot; after that a refused write is a write
-                // error. head and tail are worded by the buffer stdio had.
-                if (string_equals(text_name, "cat"))
+                case TEXT_DONE_CAT:
                         string_diagnostic(&text_diagnostic, 0,
                                           cat_output_known
                                               ? (string_address) "write error"
                                               : (string_address) "standard output",
                                           file_reason(reason));
-                else if (string_equals(text_name, "head") ||
-                         string_equals(text_name, "tail"))
+                        break;
+
+                case TEXT_DONE_HEAD_TAIL:
                         string_diagnostic(&text_diagnostic, 0,
                                           buffered
                                               ? (string_address) "write error"
                                               : (string_address) "error writing 'standard output'",
                                           file_reason(reason));
-                else if (standard && text_write_error_worded())
-                        string_diagnostic(&text_diagnostic, 0,
-                                          (string_address) "write error",
-                                          file_reason(reason));
+                        break;
 
-                return string_equals(text_name, "expr") ? 3 : 1;
+                case TEXT_DONE_SILENT:
+                        break;
+
+                default:
+                        if (standard)
+                                string_diagnostic(&text_diagnostic, 0,
+                                                  (string_address) "write error",
+                                                  file_reason(reason));
+                        break;
+                }
+
+                return (b32)policy.out_status;
         }
 
         //      A diagnostic the kernel would not take ends a GNU tool with
         //      its failure status, silently, when it closes standard error at
         //      exit: `od -w1 2>/dev/full` is 1 however well the dump went.
         if (!code && writer_stderr_failed)
-                return string_equals(text_name, "grep") || string_equals(text_name, "sort") ? 2
-                       : string_equals(text_name, "sed") ? 4
-                                                          : 1;
+                return (b32)policy.err_status;
 
         return code;
 }
@@ -583,7 +603,7 @@ static b32 text_done_closing(b32 code, bipolar output)
 static bipolar text_open_handle(string_address path, positive flags, positive mode)
 {
         return system_open_at_mode(AT_FDCWD,
-                             path, flags, mode);
+                             path, flags | O_CLOEXEC, mode);
 }
 
 typedef struct
@@ -727,14 +747,9 @@ static const text_failure_words text_failure_table[] = {
 
 static fn text_file_failed(string_address shown, bipolar reason, bool reading)
 {
-        const text_failure_words address_to words = 0;
-
-        for (positive i = 0; i < sizeof(text_failure_table) / sizeof(text_failure_table[0]); i++)
-                if (string_equals(text_name, (string_address)text_failure_table[i].program))
-                {
-                        words = text_failure_table + i;
-                        break;
-                }
+        positive wi = string_table_lookup(text_name, text_failure_table);
+        const text_failure_words address_to words =
+            wi < array_count(text_failure_table) ? text_failure_table + wi : 0;
         if (!words)
         {
                 if (string_equals(text_name, "grep") && (!shown || string_equals(shown, "-")))
@@ -3414,9 +3429,14 @@ static bool big_multiply(p64 address_to r, const p64 address_to a, positive an,
 {
         p64 address_to scratch = null;
 
-        if (min(an, bn) >= BIG_KARATSUBA &&
-            !(scratch = (p64 address_to)memory_take((8 * max(an, bn) + 2048) * sizeof(p64))))
-                return false;
+        if (min(an, bn) >= BIG_KARATSUBA)
+        {
+                positive hi = max(an, bn);
+
+                if (hi > (positive_max / sizeof(p64) - 2048) / 8 ||
+                    !(scratch = (p64 address_to)memory_take((8 * hi + 2048) * sizeof(p64))))
+                        return false;
+        }
         big_multiply_into(r, a, an, b, bn, scratch);
         if (scratch)
                 memory_give(scratch);
@@ -3641,6 +3661,8 @@ static p64 address_to base58_value(const p8 address_to digits, positive count,
         if (count <= BASE58_SMALL_DIGITS)
         {
                 // 58 < 2^6, so a digit is at most six bits of the number.
+                if (count > (positive_max - 63) / 6)
+                        return null;
                 p64 address_to limb = (p64 address_to)memory_take(
                     ((count * 6 + 63) / 64 + 1) * sizeof(p64));
                 positive made = 0;
@@ -7302,9 +7324,13 @@ static positive text_charset()
                 lower[have] = byte_to_lower(code[have]);
         lower[have] = end;
 
-        return string_equals(lower, "gb18030")                                ? TEXT_CHARSET_GB18030
-               : string_equals(lower, "euc-jp") || string_equals(lower, "eucjp") ? TEXT_CHARSET_EUCJP
-                                                                              : TEXT_CHARSET_BYTES;
+        static const named_byte charsets[] = {
+            {(string_address) "gb18030", TEXT_CHARSET_GB18030},
+            {(string_address) "euc-jp", TEXT_CHARSET_EUCJP},
+            {(string_address) "eucjp", TEXT_CHARSET_EUCJP},
+        };
+        positive ci = string_table_lookup((string_address)lower, charsets);
+        return ci < array_count(charsets) ? charsets[ci].value : TEXT_CHARSET_BYTES;
 }
 
 // How many bytes the character at the front of these is.
@@ -12248,8 +12274,12 @@ static bool nl_option_seen(p8 letter, string_address value)
         }
         else if (letter == 'n')
         {
-                if (!string_equals(value, "ln") && !string_equals(value, "rn") &&
-                    !string_equals(value, "rz"))
+                static const string_address formats[] = {
+                    (string_address) "ln",
+                    (string_address) "rn",
+                    (string_address) "rz",
+                };
+                if (string_table_lookup(value, formats) >= array_count(formats))
                         return nl_refused((string_address) "invalid line numbering format", value);
         }
         else if (letter == 'w')
@@ -21473,14 +21503,20 @@ static bool text_list_settle()
 
         // Past the highest listed position the marks are all nought; they
         // still answer a line's first few thousand bytes or fields in line.
+        // Both mark arrays share one contiguous slab (1 heap alloc, no partial-OOM leak).
+        memory_give(text_list);
+        text_list = null;
+        text_list_begins_map = null;
         text_list_room = max(min(text_list_used, (positive)TEXT_LIST_MARKS_MAX) + 1,
                              (positive)4096);
-        text_list = (p8 address_to)memory_take(text_list_room);
-        text_list_begins_map = (p8 address_to)memory_take(text_list_room);
-        if (!text_list || !text_list_begins_map)
+        text_list = (p8 address_to)memory_take(text_list_room * 2);
+        if (!text_list)
+        {
+                text_list_room = 0;
                 return false;
-        memory_fill(text_list, 0, text_list_room);
-        memory_fill(text_list_begins_map, 0, text_list_room);
+        }
+        text_list_begins_map = text_list + text_list_room;
+        memory_fill(text_list, 0, text_list_room * 2);
 
         for (positive i = 0; i < count; i++)
         {
@@ -21710,7 +21746,6 @@ static b32 text_list_trouble()
 static fn text_list_reset()
 {
         memory_give(text_list);
-        memory_give(text_list_begins_map);
         text_list = null;
         text_list_begins_map = null;
         text_list_room = 0;
@@ -23468,9 +23503,11 @@ static bool tr_complain(string_address format, p8 address_to from,
                         positive length, bool quoted)
 {
         p8 small[256];
-        p8 address_to shown = length * 4 < sizeof(small)
+        p8 address_to shown = length <= (sizeof(small) - 1) / 4
                                   ? small
-                                  : (p8 address_to)memory_take(length * 4 + 1);
+                                  : (length <= (positive_max - 1) / 4
+                                         ? (p8 address_to)memory_take(length * 4 + 1)
+                                         : null);
         positive made = 0;
 
         text_flush();
@@ -24473,19 +24510,26 @@ enum
 // refuses the spelling rather than reading it as separate.
 static bool uniq_grouping_of(string_address word, bool ends, positive address_to how)
 {
-        if (!ends && string_equals(word, "none"))
-                address_to how = UNIQ_GROUP_NONE;
-        else if (string_equals(word, "prepend"))
-                address_to how = UNIQ_GROUP_PREPEND;
-        else if (string_equals(word, "separate"))
-                address_to how = UNIQ_GROUP_SEPARATE;
-        else if (ends && string_equals(word, "append"))
-                address_to how = UNIQ_GROUP_APPEND;
-        else if (ends && string_equals(word, "both"))
-                address_to how = UNIQ_GROUP_BOTH;
-        else
+        typedef struct
+        {
+                string_address name;
+                p8 how;
+                p8 allow;
+        } uniq_group_rule;
+
+        static const uniq_group_rule rules[] = {
+            {(string_address) "none", UNIQ_GROUP_NONE, 1},
+            {(string_address) "prepend", UNIQ_GROUP_PREPEND, 3},
+            {(string_address) "separate", UNIQ_GROUP_SEPARATE, 3},
+            {(string_address) "append", UNIQ_GROUP_APPEND, 2},
+            {(string_address) "both", UNIQ_GROUP_BOTH, 2},
+        };
+
+        positive ri = string_table_lookup(word, rules);
+        if (ri >= array_count(rules) || !(rules[ri].allow & (ends ? 2 : 1)))
                 return false;
 
+        address_to how = rules[ri].how;
         return true;
 }
 
@@ -25277,12 +25321,34 @@ static fn grep_hold_release()
 {
         memory_give(grep_hold_pool);
         memory_give(grep_hold_at);
-        memory_give(grep_hold_size);
-        memory_give(grep_hold_number);
-        memory_give(grep_hold_color);
         grep_hold_pool = null;
         grep_hold_at = grep_hold_size = grep_hold_number = null;
         grep_hold_color = null;
+}
+
+static bool grep_hold_alloc(positive cap, positive room, bool need_color,
+                            p8 address_to address_to out_pool,
+                            p8 address_to address_to out_color,
+                            positive address_to address_to out_at)
+{
+        if (!cap || !room || cap > positive_max / (3 * sizeof(positive)) ||
+            (need_color && room > positive_max / 2))
+                return false;
+
+        p8 address_to pool = (p8 address_to)memory_take(need_color ? room * 2 : room);
+        positive address_to meta = pool ? (positive address_to)memory_take(3 * cap * sizeof(positive)) : null;
+
+        if (!pool || !meta)
+        {
+                memory_give(pool);
+                memory_give(meta);
+                return false;
+        }
+
+        address_to out_pool = pool;
+        address_to out_color = need_color ? pool + room : null;
+        address_to out_at = meta;
+        return true;
 }
 
 static bool grep_hold_make(positive lines)
@@ -25291,45 +25357,38 @@ static bool grep_hold_make(positive lines)
                 GNU's context is bounded by memory alone, and so is this: the
                 ring starts a megabyte and a thousand lines and grows to what
                 the lines it holds ask for, up to the -B given.
+                Byte storage (pool + optional color scratch) and slot metadata
+                (at, size, number) are packed into two contiguous SoA slabs.
         */
         grep_hold_release();
         grep_hold_slots = lines;
         grep_hold_cap = lines < GREP_HOLD_SLOTS_FIRST ? lines : GREP_HOLD_SLOTS_FIRST;
         grep_hold_room = GREP_HOLD_BYTES_FIRST;
-        grep_hold_pool = (p8 address_to)memory_take(grep_hold_room);
-        grep_hold_at = (positive address_to)memory_take(grep_hold_cap * sizeof(positive));
-        grep_hold_size = (positive address_to)memory_take(grep_hold_cap * sizeof(positive));
-        grep_hold_number = (positive address_to)memory_take(grep_hold_cap * sizeof(positive));
-        // Colour paints a held line whole, and a UTF-8 locale asks whether it
-        // is characters whole: either joins it across the ring's wrap here.
-        grep_hold_color = grep_coloring || grep_utf8
-                              ? (p8 address_to)memory_take(grep_hold_room)
-                              : null;
 
-        return grep_hold_pool && grep_hold_at && grep_hold_size &&
-               grep_hold_number &&
-               (!(grep_coloring || grep_utf8) || grep_hold_color);
+        if (!grep_hold_alloc(grep_hold_cap, grep_hold_room, grep_coloring || grep_utf8,
+                             address_of grep_hold_pool, address_of grep_hold_color,
+                             address_of grep_hold_at))
+                return false;
+
+        grep_hold_size = grep_hold_at + grep_hold_cap;
+        grep_hold_number = grep_hold_size + grep_hold_cap;
+        return true;
 }
 
 // More slots or more bytes for the ring, the held lines kept in order and
 // laid out again from the start of the new store.
 static bool grep_hold_grow(positive cap, positive room)
 {
-        positive address_to at = (positive address_to)memory_take(cap * sizeof(positive));
-        positive address_to size = (positive address_to)memory_take(cap * sizeof(positive));
-        positive address_to number = (positive address_to)memory_take(cap * sizeof(positive));
-        p8 address_to pool = (p8 address_to)memory_take(room);
-        p8 address_to color = grep_hold_color ? (p8 address_to)memory_take(room) : null;
+        p8 address_to pool = null;
+        p8 address_to color = null;
+        positive address_to at = null;
 
-        if (!at || !size || !number || !pool || (grep_hold_color && !color))
-        {
-                memory_give(at);
-                memory_give(size);
-                memory_give(number);
-                memory_give(pool);
-                memory_give(color);
+        if (!grep_hold_alloc(cap, room, grep_hold_color != null,
+                             address_of pool, address_of color, address_of at))
                 return false;
-        }
+
+        positive address_to size = at + cap;
+        positive address_to number = size + cap;
 
         positive write = 0;
 
@@ -25464,18 +25523,32 @@ static bool grep_hold_put(string_address line, positive length, positive number)
 
         if (grep_hold_count == grep_hold_cap)
         {
-                positive cap = grep_hold_cap * 2 < grep_hold_slots ? grep_hold_cap * 2 : grep_hold_slots;
+                positive cap = grep_hold_cap <= grep_hold_slots / 2
+                                   ? grep_hold_cap * 2
+                                   : grep_hold_slots;
 
                 if (!grep_hold_grow(cap, grep_hold_room))
                         return string_diagnostic(&text_diagnostic, 0, null, "memory exhausted");
         }
 
-        if (grep_hold_used + length > grep_hold_room)
+        if (length > positive_max - grep_hold_used)
+                return string_diagnostic(&text_diagnostic, 0, null, "memory exhausted");
+
+        positive need = grep_hold_used + length;
+
+        if (need > grep_hold_room)
         {
                 positive room = grep_hold_room;
 
-                while (room < grep_hold_used + length)
+                while (room < need)
+                {
+                        if (room > positive_max / 2)
+                        {
+                                room = need;
+                                break;
+                        }
                         room *= 2;
+                }
                 if (!grep_hold_grow(grep_hold_cap, room))
                         return string_diagnostic(&text_diagnostic, 0, null, "memory exhausted");
         }
@@ -26103,26 +26176,48 @@ static bool grep_option_seen(p8 letter, string_address value)
                 not whichever of the three a later pass would have looked at
                 first.
         */
-        if (letter == 'd' &&
-            !string_equals(value, "read") && !string_equals(value, "recurse") &&
-            !string_equals(value, "skip"))
+        static const named_byte dir_methods[] = {
+            {(string_address) "read", 'd'},
+            {(string_address) "recurse", 'r'},
+            {(string_address) "skip", 's'},
+        };
+        static const string_address dev_methods[] = {
+            (string_address) "read",
+            (string_address) "skip",
+        };
+        static const named_byte bin_methods[] = {
+            {(string_address) "binary", GREP_BINARY_DETECT},
+            {(string_address) "text", GREP_BINARY_TEXT},
+            {(string_address) "without-match", GREP_BINARY_WITHOUT},
+        };
+
+        positive dir_i = array_count(dir_methods);
+        positive bin_i = array_count(bin_methods);
+
+        if (letter == 'd')
         {
-                grep_option_status = 1;
-                text_argmatch((string_address) "--directories", value,
-                              grep_directories_list, grep_usage_line);
-                return false;
+                dir_i = string_table_lookup(value, dir_methods);
+                if (dir_i >= array_count(dir_methods))
+                {
+                        grep_option_status = 1;
+                        text_argmatch((string_address) "--directories", value,
+                                      grep_directories_list, grep_usage_line);
+                        return false;
+                }
         }
 
         if (letter == 'D' &&
-            !string_equals(value, "read") && !string_equals(value, "skip"))
+            string_table_lookup(value, dev_methods) >= array_count(dev_methods))
                 return string_diagnostic(&text_diagnostic, 0, null,
                                          "unknown devices method");
 
-        if (letter == 'N' &&
-            !string_equals(value, "binary") && !string_equals(value, "text") &&
-            !string_equals(value, "without-match"))
-                return string_diagnostic(&text_diagnostic, 0, null,
-                                         "unknown binary-files type");
+        if (letter == 'N')
+        {
+                bin_i = string_table_lookup(value, bin_methods);
+                if (bin_i >= array_count(bin_methods))
+                        return string_diagnostic(&text_diagnostic, 0, null,
+                                                 "unknown binary-files type");
+        }
 
         /*
                 Two languages for the pattern is refused at the second of
@@ -26168,17 +26263,13 @@ static bool grep_option_seen(p8 letter, string_address value)
         else if (letter == 'r' || letter == 'R')
                 grep_directories_last = 'r';
         else if (letter == 'd')
-                grep_directories_last = string_equals(value, "recurse") ? 'r'
-                                        : string_equals(value, "skip")  ? 's'
-                                                                        : 'd';
+                grep_directories_last = dir_methods[dir_i].value;
         else if (letter == 'a')
                 grep_binary_files = GREP_BINARY_TEXT;
         else if (letter == 'I')
                 grep_binary_files = GREP_BINARY_WITHOUT;
         else if (letter == 'N')
-                grep_binary_files = value[0] == 't'   ? GREP_BINARY_TEXT
-                                    : value[0] == 'w' ? GREP_BINARY_WITHOUT
-                                                      : GREP_BINARY_DETECT;
+                grep_binary_files = bin_methods[bin_i].value;
         else if (letter == 'Q')
         {
                 if (!grep_glob_add(address_of grep_file_globs, value,
@@ -26740,13 +26831,23 @@ static fn grep_many_refuse()
 
 static fn grep_many_put(string_address text, positive length)
 {
-        if (grep_many_used + length + 1 > grep_many_room)
+        if (length >= positive_max - grep_many_used)
         {
-                positive room = grep_many_room * 2;
+                grep_many_refuse();
+                return;
+        }
+
+        positive need = grep_many_used + length + 1;
+
+        if (need > grep_many_room)
+        {
+                positive room = grep_many_room <= positive_max / 2
+                                    ? grep_many_room * 2
+                                    : need;
                 p8 address_to grown;
 
-                if (room < grep_many_used + length + 1)
-                        room = grep_many_used + length + 1;
+                if (room < need)
+                        room = need;
 
                 if (room < 4096)
                         room = 4096;
@@ -27054,6 +27155,9 @@ static bool grep_many_build(bool icase, p8 boundary, p8 delimiter)
         while (((positive)1 << many->shift) < classes)
                 many->shift++;
 
+        if (total > positive_max / sizeof(positive))
+                goto done;
+
         norm = (p8 address_to)memory_take(bytes ? bytes : 1);
         start = (positive address_to)memory_take(total * sizeof(positive));
         size = (p32 address_to)memory_take(total * sizeof(p32));
@@ -27089,6 +27193,9 @@ static bool grep_many_build(bool icase, p8 boundary, p8 delimiter)
 
         grep_many_sort(norm, start, size, order, scratch, stack, total);
 
+        if (longest > positive_max / sizeof(positive) - 2)
+                goto done;
+
         count = (positive address_to)memory_take_zeroed(longest + 2, sizeof(positive));
         place = (positive address_to)memory_take((longest + 2) * sizeof(positive));
         path = (p32 address_to)memory_take((longest + 2) * sizeof(p32));
@@ -27107,8 +27214,8 @@ static bool grep_many_build(bool icase, p8 boundary, p8 delimiter)
                 {
                         positive before = size[order[i - 1]];
                         positive least = length < before ? length : before;
-                        const p8 address_to x = norm + start[order[i]];
-                        const p8 address_to y = norm + start[order[i - 1]];
+                        p8 address_to x = norm + start[order[i]];
+                        p8 address_to y = norm + start[order[i - 1]];
 
                         same = memory_common_prefix(x, y, least);
                 }
@@ -27231,6 +27338,18 @@ done:
         // The strings themselves are not asked for again.
         memory_give(grep_many_pool);
         grep_many_pool = null;
+
+        if (!good)
+        {
+                memory_give(many->first);
+                memory_give(many->fail);
+                memory_give(many->kids);
+                memory_give(many->edge);
+                memory_give(many->flags);
+                memory_give(many->rows);
+                memory_fill(many, 0, sizeof(*many));
+        }
+
         return good;
 }
 
@@ -30377,10 +30496,20 @@ static bool grep_leaf_add(grep_node address_to directory,
         if (!leaf || leaf->room - leaf->length < need)
         {
                 positive used = leaf ? leaf->length : 0;
-                positive room = leaf ? leaf->room * 2 : GREP_BATCH_FILES * 96;
 
-                if (room < used + need)
-                        room = used + need;
+                if (need > positive_max - used)
+                        return false;
+
+                positive min_room = used + need;
+                positive room = leaf
+                                    ? (leaf->room <= positive_max / 2 ? leaf->room * 2 : min_room)
+                                    : GREP_BATCH_FILES * 96;
+
+                if (room < min_room)
+                        room = min_room;
+
+                if (room > positive_max - sizeof(grep_node))
+                        return false;
 
                 grep_node address_to grown = memory_resize(leaf, sizeof(grep_node) + room);
 
@@ -30431,6 +30560,8 @@ static grep_node address_to grep_node_new(grep_node address_to parent,
                 have = 0;
 
         positive slash = have || above[0] == '/';
+        if (name_length > positive_max - sizeof(grep_node) - 1 - have - slash)
+                return null;
         positive length = have + slash + name_length;
         grep_node address_to node = memory_take(sizeof(grep_node) + length + 1);
 
@@ -32368,11 +32499,14 @@ static fn sed_write_diagnostic(bipolar reason, positive buffer)
                 return;
         }
 
-        p8 address_to at = string_copy_end(said, (string_address) "couldn't write ");
+        byte_cursor cursor = byte_cursor_on(said);
 
-        at += positive_into(at, items);
-        string_copy(at, items == 1 ? (string_address) " item to stdout"
-                                   : (string_address) " items to stdout");
+        byte_cursor_put_string(address_of cursor, (string_address) "couldn't write ");
+        byte_cursor_put_u64(address_of cursor, items);
+        byte_cursor_put_string(address_of cursor, items == 1
+                                                      ? (string_address) " item to stdout"
+                                                      : (string_address) " items to stdout");
+        byte_cursor_terminate(address_of cursor);
         string_diagnostic(&text_diagnostic, 0, (string_address)said, file_reason(reason));
 }
 
@@ -35409,7 +35543,7 @@ static b32 text_sed()
                         else
                                 input = file_open_same(
                                     directory, leaf, address_of replaced,
-                                    FILE_READ | O_NOFOLLOW);
+                                    FILE_READ | O_CLOEXEC | O_NOFOLLOW);
 
                         if (!text_reader_attach(
                                 address_of text_input, input, name))
@@ -36597,6 +36731,27 @@ static inline INLINE bool sort_looked_at(p8 character, positive how)
 static positive sort_translate(p8 address_to into, p8 address_to from, positive length,
                                positive how);
 
+// Shared stack-or-heap scratch for translating a pair of sort keys with
+// overflow-checked sizing.
+static p8 address_to sort_translate_room(p8 address_to small, positive small_cap,
+                                         positive la, positive lb)
+{
+        if (la > positive_max - lb)
+        {
+                sort_exhausted();
+                return null;
+        }
+
+        positive total = la + lb;
+        if (total <= small_cap)
+                return small;
+
+        p8 address_to room = (p8 address_to)memory_take(total);
+        if (!room)
+                sort_exhausted();
+        return room;
+}
+
 // A lexical comparison by the locale's collation, after -d, -i and -f have
 // taken out and folded what they do, as GNU translates a key and then hands
 // it to strcoll.
@@ -36607,15 +36762,10 @@ static bipolar sort_compare_collated(p8 address_to a, positive la, p8 address_to
                 return collate_compare(a, la, b, lb);
 
         p8 small[4000];
-        p8 address_to room = small;
+        p8 address_to room = sort_translate_room(small, sizeof(small), la, lb);
 
-        if (la + lb > sizeof(small) && !(room = memory_take(la + lb)))
-        {
-                //      A tie here would be a wrong order; a failed allocation
-                //      is the sort's, and the sort says so and exits 2.
-                sort_exhausted();
+        if (!room)
                 return 0;
-        }
 
         positive ta = sort_translate(room, a, la, how);
         positive tb = sort_translate(room + ta, b, lb, how);
@@ -36822,15 +36972,10 @@ static bipolar sort_compare_translated(p8 kind, positive how, p8 address_to a, p
                                        p8 address_to b, positive lb)
 {
         p8 small[4000];
-        p8 address_to room = small;
+        p8 address_to room = sort_translate_room(small, sizeof(small), la, lb);
 
-        if (la + lb > sizeof(small) && !(room = memory_take(la + lb)))
-        {
-                //      A tie here would be a wrong order; a failed allocation
-                //      is the sort's, and the sort says so and exits 2.
-                sort_exhausted();
+        if (!room)
                 return 0;
-        }
 
         positive ta = sort_translate(room, a, la, how);
         positive tb = sort_translate(room + ta, b, lb, how);
@@ -42288,6 +42433,21 @@ static string_address sort_sort_list =
     (string_address) "Valid arguments are:\n  - 'general-numeric'\n  - 'human-numeric'\n"
                      "  - 'month'\n  - 'numeric'\n  - 'random'\n  - 'version'\n";
 
+static const named_byte sort_check_modes[] = {
+    {(string_address) "quiet", 1},
+    {(string_address) "silent", 1},
+    {(string_address) "diagnose-first", 0},
+};
+
+static const named_byte sort_sort_kinds[] = {
+    {(string_address) "numeric", 'n'},
+    {(string_address) "human-numeric", 'h'},
+    {(string_address) "month", 'M'},
+    {(string_address) "version", 'V'},
+    {(string_address) "general-numeric", 'g'},
+    {(string_address) "random", 'R'},
+};
+
 static bool sort_key_seen(p8 letter, string_address value)
 {
         if (letter == 'o')
@@ -42305,8 +42465,8 @@ static bool sort_key_seen(p8 letter, string_address value)
                 disagree is a complaint about tabs and not about the second
                 one alone.
         */
-        if (letter == 'K' && value && !string_equals(value, "quiet") &&
-            !string_equals(value, "silent") && !string_equals(value, "diagnose-first"))
+        if (letter == 'K' && value &&
+            string_table_lookup(value, sort_check_modes) >= array_count(sort_check_modes))
         {
                 sort_option_status = 1;
                 text_argmatch((string_address) "--check", value, sort_check_list, null);
@@ -42444,14 +42604,16 @@ static bool sort_key_seen(p8 letter, string_address value)
                 sort_alone = number == 1;
         }
 
-        if (letter == 'W' && !string_equals(value, "numeric") &&
-            !string_equals(value, "human-numeric") && !string_equals(value, "month") &&
-            !string_equals(value, "version") && !string_equals(value, "general-numeric") &&
-            !string_equals(value, "random"))
+        positive sort_kind_i = array_count(sort_sort_kinds);
+        if (letter == 'W')
         {
-                sort_option_status = 1;
-                text_argmatch((string_address) "--sort", value, sort_sort_list, null);
-                return false;
+                sort_kind_i = string_table_lookup(value, sort_sort_kinds);
+                if (sort_kind_i >= array_count(sort_sort_kinds))
+                {
+                        sort_option_status = 1;
+                        text_argmatch((string_address) "--sort", value, sort_sort_list, null);
+                        return false;
+                }
         }
 
         if (letter == 'A')
@@ -42475,13 +42637,7 @@ static bool sort_key_seen(p8 letter, string_address value)
                 sort_random_source = value;
 
         if (letter == 'W')
-                sort_said_kinds |= sort_kind_bit(
-                    string_equals(value, "numeric")         ? 'n'
-                    : string_equals(value, "human-numeric") ? 'h'
-                    : string_equals(value, "month")         ? 'M'
-                    : string_equals(value, "version")       ? 'V'
-                    : string_equals(value, "random")        ? 'R'
-                                                            : 'g');
+                sort_said_kinds |= sort_kind_bit(sort_sort_kinds[sort_kind_i].value);
 
         if (letter != 'k')
                 return true;
@@ -43134,8 +43290,10 @@ static b32 text_sort()
         if (flags & FILE_FLAG('K'))
         {
                 string_address word = file_option_value(address_of taking, 'K');
+                positive ci = word ? string_table_lookup(word, sort_check_modes)
+                                   : array_count(sort_check_modes);
 
-                if (word && (string_equals(word, "quiet") || string_equals(word, "silent")))
+                if (ci < array_count(sort_check_modes) && sort_check_modes[ci].value)
                         check_quiet = true;
                 else
                         check_loud = true;

@@ -1477,16 +1477,16 @@ static b32 tools_logger()
         }
 
         string_address socket_errors = file_option_value(address_of taking, 'E');
-        if (socket_errors)
-        {
-                if (!string_compare(socket_errors, "on"))
-                        control.socket_errors = true;
-                else if (!string_compare(socket_errors, "off"))
-                        control.socket_errors = false;
-                else if (string_compare(socket_errors, "auto"))
-                        socket_errors = (string_address)"auto";
-        }
-        if (!socket_errors || !string_compare(socket_errors, "auto"))
+        static const named_byte socket_error_modes[] = {
+            {"on", 1}, {"off", 0}, {"auto", 2},
+        };
+        positive error_mode = socket_errors
+            ? string_table_lookup(socket_errors, socket_error_modes)
+            : array_count(socket_error_modes);
+        if (error_mode < array_count(socket_error_modes) &&
+            socket_error_modes[error_mode].value < 2)
+                control.socket_errors = socket_error_modes[error_mode].value != 0;
+        else
         {
                 // util-linux's auto: report when the journal's socket says a
                 // logging daemon is expected to be there.
@@ -3472,17 +3472,17 @@ static b32 tools_last()
         }
         if (format)
         {
-                if (string_equals(format, "short"))
-                        login_last.time_format = LOGIN_LAST_TIME_SHORT;
-                else if (string_equals(format, "full"))
-                        login_last.time_format = LOGIN_LAST_TIME_FULL;
-                else if (string_equals(format, "iso"))
-                        login_last.time_format = LOGIN_LAST_TIME_ISO;
-                else if (string_equals(format, "notime"))
-                        login_last.time_format = LOGIN_LAST_TIME_NONE;
-                else
+                static const named_byte time_formats[] = {
+                    {"short", LOGIN_LAST_TIME_SHORT},
+                    {"full", LOGIN_LAST_TIME_FULL},
+                    {"iso", LOGIN_LAST_TIME_ISO},
+                    {"notime", LOGIN_LAST_TIME_NONE},
+                };
+                positive hit = string_table_lookup(format, time_formats);
+                if (hit == array_count(time_formats))
                         return text_done(string_diagnostic(&text_diagnostic, 1, format,
                             "time format is unsupported (use notime, short, full, or iso)"));
+                login_last.time_format = time_formats[hit].value;
         }
         login_last.full_names = (taking.flags & FILE_FLAG('w')) != 0;
         login_last.no_host = (taking.flags & FILE_FLAG('R')) != 0;
@@ -4170,7 +4170,7 @@ static fn login_pinky_cat(string_address header, string_address home,
                 text_flush();
         system_write_all(1, header, string_length(header));
 
-        p8 block[4096];
+        static p8 block[4096];
         bipolar got;
 
         while ((got = system_read_once((positive)handle, (string_address)block,
@@ -4182,8 +4182,8 @@ static fn login_pinky_cat(string_address header, string_address home,
 static fn login_pinky_long(string_address name, bool home_and_shell,
                            bool project, bool plan)
 {
-        p8 directory[FILE_PATH_MAX];
-        p8 shell[FILE_PATH_MAX];
+        static p8 directory[FILE_PATH_MAX];
+        static p8 shell[FILE_PATH_MAX];
         p8 fullname[256];
 
         text_put_string("Login name: ");
@@ -7804,6 +7804,8 @@ static bool factor_huge_read(factor_huge address_to value, const p8 address_to d
 {
         value->room = length / 19 + 2;
         value->size = 0;
+        if (value->room > positive_max / sizeof(p64))
+                return false;
         value->limb = (p64 address_to)memory_take(value->room * sizeof(p64));
 
         if (!value->limb)
@@ -10044,16 +10046,17 @@ static b32 tools_dd(void)
                 bool address_to bytes, address_to seen;
                 // Where to keep the spelling, for the complaint that names it.
                 string_address address_to spelling;
+                bool sized;
         } numbers[] = {
-            {"ibs", &ibs, null, null, &input_size},
-            {"obs", &obs, null, null, &output_size},
-            {"bs", &bs, null, &bs_set, null},
-            {"count", &count, &count_bytes, &count_set, null},
-            {"skip", &skip, &skip_bytes, null, null},
-            {"iseek", &skip, &skip_bytes, null, null},
-            {"seek", &seek, &seek_bytes, null, null},
-            {"oseek", &seek, &seek_bytes, null, null},
-            {"cbs", &cbs, null, null, null},
+            {"ibs", &ibs, null, null, &input_size, true},
+            {"obs", &obs, null, null, &output_size, true},
+            {"bs", &bs, null, &bs_set, null, true},
+            {"count", &count, &count_bytes, &count_set, null, false},
+            {"skip", &skip, &skip_bytes, null, null, false},
+            {"iseek", &skip, &skip_bytes, null, null, false},
+            {"seek", &seek, &seek_bytes, null, null, false},
+            {"oseek", &seek, &seek_bytes, null, null, false},
+            {"cbs", &cbs, null, null, null, true},
         };
 
         text_begin("dd");
@@ -10089,10 +10092,6 @@ static b32 tools_dd(void)
                                 named. The counts and the offsets may be
                                 zero and mean it.
                         */
-                        bool sized = string_equals(numbers[n].name, "bs") ||
-                                     string_equals(numbers[n].name, "ibs") ||
-                                     string_equals(numbers[n].name, "obs") ||
-                                     string_equals(numbers[n].name, "cbs");
                         bool took = numbers[n].bytes
                                         ? dd_quantity(value, numbers[n].value, numbers[n].bytes)
                                         : dd_size(value, numbers[n].value);
@@ -10100,7 +10099,7 @@ static b32 tools_dd(void)
                         if (took)
                                 dd_zero_warnings(value);
 
-                        if (took && sized && !address_to numbers[n].value)
+                        if (took && numbers[n].sized && !address_to numbers[n].value)
                                 took = false;
 
                         if (!took)
@@ -10128,18 +10127,16 @@ static b32 tools_dd(void)
                         output = value;
                 else if (dd_operand(argument, "status", address_of value))
                 {
-                        progress = false;
-                        if (string_equals(value, "none"))
-                                dd_status_level = DD_STATUS_NONE;
-                        else if (string_equals(value, "noxfer"))
-                                dd_status_level = DD_STATUS_NOXFER;
-                        else if (string_equals(value, "progress"))
-                        {
-                                dd_status_level = DD_STATUS_ALL;
-                                progress = true;
-                        }
-                        else
+                        static const named_byte status_levels[] = {
+                            {"none", DD_STATUS_NONE},
+                            {"noxfer", DD_STATUS_NOXFER},
+                            {"progress", DD_STATUS_ALL},
+                        };
+                        positive hit = string_table_lookup(value, status_levels);
+                        if (hit == array_count(status_levels))
                                 return dd_complain((string_address)"invalid status level", value);
+                        dd_status_level = status_levels[hit].value;
+                        progress = dd_status_level == DD_STATUS_ALL;
                 }
                 else if (dd_operand(argument, "conv", address_of value))
                 {
@@ -11659,8 +11656,9 @@ static bool dump_od_seen(p8 letter, string_address value)
 
         if (letter == 'E')
         {
-                if (value && !string_equals(value, "little") &&
-                    !string_equals(value, "big"))
+                static const named_byte endians[] = {{"little", 0}, {"big", 1}};
+                positive hit = value ? string_table_lookup(value, endians) : 0;
+                if (hit == array_count(endians))
                 {
                         text_flush();
                         return string_report(writer_stderr, false,
@@ -11669,7 +11667,7 @@ static bool dump_od_seen(p8 letter, string_address value)
                                       writer_terminal_quoted_name, value);
                 }
 
-                dump_arguments.big_endian = value && string_equals(value, "big");
+                dump_arguments.big_endian = endians[hit].value != 0;
                 return true;
         }
 
@@ -15050,12 +15048,23 @@ static b32 diff_pair(string_address left, string_address right)
                 side->changed = room + 1;
         }
 
+        if (a->count > positive_max - 4 || b->count > positive_max - 4 - a->count)
+                return 2;
         positive total = a->count + b->count + 4;
+        if (total > positive_max / 2 ||
+            total > positive_max / sizeof(diff_class))
+                return 2;
 
         diff_bucket_count = 8;
 
         while (diff_bucket_count < total * 2)
+        {
+                if (diff_bucket_count > positive_max / 2)
+                        return 2;
                 diff_bucket_count <<= 1;
+        }
+        if (diff_bucket_count > positive_max / sizeof(b32))
+                return 2;
 
         diff_classes = (diff_class address_to)utility_arena_take(total * sizeof(diff_class));
         diff_buckets = (b32 address_to)utility_arena_take(diff_bucket_count * sizeof(b32));
@@ -16392,38 +16401,33 @@ static bool ps_format_list(string_address list,
                         header = (string_address)made;
                 }
 
+                static const struct {
+                        string_address name;
+                        string_address target;
+                        string_address header;
+                        positive field;
+                } ps_aliases[] = {
+                    {"cmd", null, "CMD", PS_FIELD_ARGS},
+                    {"command", null, "COMMAND", PS_FIELD_ARGS},
+                    {"ucmd", null, "CMD", PS_FIELD_COMM},
+                    {"ni", "nice", null, PS_FIELD_COUNT},
+                };
+                positive alias = string_table_lookup(name, ps_aliases);
                 positive which;
                 string_address alias_header = null;
 
-                if (string_equals(name, "cmd"))
+                if (alias < array_count(ps_aliases))
                 {
-                        which = PS_FIELD_ARGS;
-                        alias_header = "CMD";
-                }
-                else if (string_equals(name, "command"))
-                {
-                        which = PS_FIELD_ARGS;
-                        alias_header = "COMMAND";
-                }
-                else if (string_equals(name, "ucmd"))
-                {
-                        which = PS_FIELD_COMM;
-                        alias_header = "CMD";
-                }
-                else if (string_equals(name, "ni"))
-                {
-                        //      procps spells the nice column both ways, and
-                        //      its header is the same.
-                        which = string_table_find((string_address)"nice", ps_columns,
-                                                  sizeof(ps_columns[0]),
-                                                  PS_FIELD_COUNT);
+                        which = ps_aliases[alias].target
+                            ? string_table_find(ps_aliases[alias].target, ps_columns,
+                                                sizeof(ps_columns[0]), PS_FIELD_COUNT)
+                            : ps_aliases[alias].field;
+                        alias_header = ps_aliases[alias].header;
                 }
                 else
-                {
                         which = string_table_find(name, ps_columns,
                                                   sizeof(ps_columns[0]),
                                                   PS_FIELD_COUNT);
-                }
 
                 if (which == PS_FIELD_COUNT)
                         return string_diagnostic(&text_diagnostic, 0, name, "unknown user-defined format specifier");
@@ -17571,18 +17575,22 @@ static b32 tools_dmesg_main()
         string_address value = file_option_value(address_of taking, 'q');
         if (value)
         {
-                if (string_equals(value, "notime"))
-                        state.no_time = true;
-                else if (string_equals(value, "ctime"))
-                        state.ctime = true;
-                else if (string_equals(value, "reltime"))
-                        state.relative = true;
-                else if (string_equals(value, "delta"))
-                        state.delta = true;
-                else if (string_equals(value, "iso"))
-                        state.iso = true;
-                else if (!string_equals(value, "raw"))
+                static const named_byte time_formats[] = {
+                    {"notime", 0}, {"ctime", 1}, {"reltime", 2},
+                    {"delta", 3}, {"iso", 4}, {"raw", 5},
+                };
+                positive hit = string_table_lookup(value, time_formats);
+                if (hit == array_count(time_formats))
                         return text_done(string_diagnostic(&text_diagnostic, 1, value, "unsupported time format"));
+                switch (time_formats[hit].value)
+                {
+                case 0: state.no_time = true; break;
+                case 1: state.ctime = true; break;
+                case 2: state.relative = true; break;
+                case 3: state.delta = true; break;
+                case 4: state.iso = true; break;
+                default: break;
+                }
         }
 
         value = file_option_value(address_of taking, 'l');
@@ -18441,7 +18449,7 @@ static bipolar ul_path_write(string_address path, address_any bytes,
                              positive length)
 {
         bipolar handle = system_open_at_mode(AT_FDCWD,
-                                        path, FILE_WRITE, 0644);
+                                        path, FILE_WRITE | O_CLOEXEC, 0644);
         if (handle < 0)
                 return handle;
 
@@ -18769,31 +18777,26 @@ static b32 util_linux_renice()
         {
                 string_address word = program_argument((b32)at);
 
-                if (options && string_equals(word, "--"))
+                if (options)
                 {
-                        options = false;
-                        continue;
-                }
-                if (options &&
-                    (string_equals(word, "-p") || string_equals(word, "--pid")))
-                {
-                        which = UL_PRIO_PROCESS;
-                        identity_option = true;
-                        continue;
-                }
-                if (options &&
-                    (string_equals(word, "-g") || string_equals(word, "--pgrp")))
-                {
-                        which = UL_PRIO_PGRP;
-                        identity_option = true;
-                        continue;
-                }
-                if (options &&
-                    (string_equals(word, "-u") || string_equals(word, "--user")))
-                {
-                        which = UL_PRIO_USER;
-                        identity_option = true;
-                        continue;
+                        static const named_byte renice_kinds[] = {
+                            {"--", 0xff},
+                            {"-p", UL_PRIO_PROCESS}, {"--pid", UL_PRIO_PROCESS},
+                            {"-g", UL_PRIO_PGRP}, {"--pgrp", UL_PRIO_PGRP},
+                            {"-u", UL_PRIO_USER}, {"--user", UL_PRIO_USER},
+                        };
+                        positive hit = string_table_lookup(word, renice_kinds);
+                        if (hit < array_count(renice_kinds))
+                        {
+                                if (renice_kinds[hit].value == 0xff)
+                                        options = false;
+                                else
+                                {
+                                        which = renice_kinds[hit].value;
+                                        identity_option = true;
+                                }
+                                continue;
+                        }
                 }
 
                 failed |= ul_renice_one(word, which, priority, relative);
@@ -18872,6 +18875,52 @@ static fn ul_table_out_mode(address_any rows, positive row_size, positive count,
     p32 address_to columns, positive column_count, bool headings, bool raw,
     ul_table_field field_of, p8 layout);
 #define ul_table_out(...) ul_table_out_mode(__VA_ARGS__, 0)
+
+/*      Every listing tool reads its column list by the same rules: empty is a
+        silent refusal, an unknown name is named, `+` appends to the defaults,
+        and a repeated name is a repeated column. */
+static b32 ul_table_column_list(
+    string_address text, const ul_table_column address_to definitions,
+    positive definition_count, const p8 address_to defaults,
+    positive default_count, p32 address_to address_to columns,
+    positive address_to room, positive address_to count, p8 address_to unknown)
+{
+        bool append = text && string_is(text, '+');
+
+        address_to count = 0;
+        unknown[0] = 0;
+        if (!name_list_room(columns, room, 0,
+                            default_count + (text ? name_list_capacity(text) : 0)))
+                return UL_COLUMNS_NOROOM;
+        if (!text || append)
+        {
+                if (default_count > definition_count)
+                        return UL_COLUMNS_UNKNOWN;
+                name_list_fill(address_to columns, defaults, default_count);
+                address_to count = default_count;
+                if (!text)
+                        return UL_COLUMNS_OK;
+                text++;
+        }
+
+        return name_list_columns(text, definitions, sizeof(definitions[0]),
+            definition_count, address_to columns, count, address_to room,
+            unknown, UL_COLUMN_NAME);
+}
+
+#define ul_columns_take(program, definitions, maximum, defaults, \
+                        default_count, text) \
+        p32 address_to columns = null; \
+        positive columns_room = 0; \
+        positive column_count = 0; \
+        p8 unknown[UL_COLUMN_NAME]; \
+        { \
+                b32 fault = ul_table_column_list(text, definitions, maximum, \
+                    defaults, default_count, address_of columns, \
+                    address_of columns_room, address_of column_count, unknown); \
+                if (fault) \
+                        return ul_columns_refused(program, fault, unknown); \
+        }
 
 // prlimit ---------------------------------------------------------
 static bipolar ul_prlimit(b32 pid, positive resource,
@@ -18991,19 +19040,6 @@ static const ul_table_column ul_limit_definitions[] = {
     {"HARD", "HARD", 0, true, .printable = true},
     {"UNITS", "UNITS", 0, false, .printable = true},
 };
-
-/*      prlimit reads a column list by the same three rules as the listing
-        tools: empty is a silent refusal, an unknown name is named, and a
-        repeated name is a repeated column. */
-static b32 ul_limit_columns(string_address text, p32 address_to columns,
-                            positive room, positive address_to count,
-                            p8 address_to unknown)
-{
-        address_to count = 0;
-        return name_list_columns(text, ul_limit_definitions,
-            sizeof(ul_limit_definitions[0]), UL_LIMIT_COLUMNS, columns, count,
-            room, unknown, UL_COLUMN_NAME);
-}
 
 static positive ul_limit_text(p64 value, p8 address_to into)
 {
@@ -19130,25 +19166,9 @@ static b32 util_linux_prlimit()
             UL_LIMIT_RESOURCE, UL_LIMIT_DESCRIPTION, UL_LIMIT_SOFT,
             UL_LIMIT_HARD, UL_LIMIT_UNITS,
         };
-        string_address listed = file_option_value(address_of taking, 'o');
-        positive wanted = listed ? name_list_capacity(listed) : 0;
-        p32 address_to columns = null;
-        positive columns_room = 0;
-        positive column_count = UL_LIMIT_COLUMNS;
-        p8 unknown[UL_COLUMN_NAME];
-        if (wanted < UL_LIMIT_COLUMNS)
-                wanted = UL_LIMIT_COLUMNS;
-        if (!name_list_room(address_of columns, address_of columns_room, 0, wanted))
-                return ul_columns_refused("prlimit", UL_COLUMNS_NOROOM, unknown);
-        name_list_fill(columns, limit_defaults, array_count(limit_defaults));
-        if (listed)
-        {
-                b32 fault = ul_limit_columns(listed, columns, columns_room,
-                    address_of column_count, unknown);
-
-                if (fault)
-                        return ul_columns_refused("prlimit", fault, unknown);
-        }
+        ul_columns_take("prlimit", ul_limit_definitions, UL_LIMIT_COLUMNS,
+                        limit_defaults, array_count(limit_defaults),
+                        file_option_value(address_of taking, 'o'));
 
         ul_limit_row rows[UL_RESOURCES];
         positive shown = 0;
@@ -19562,7 +19582,7 @@ static b32 util_linux_uclampset()
                                               ? (at == 0 ? 0 : 1024)
                                               : value);
                                 bipolar handle = system_open_at_mode(
-                                    AT_FDCWD, paths[at], FILE_WRITE, 0);
+                                    AT_FDCWD, paths[at], FILE_WRITE | O_CLOEXEC, 0);
                                 if (handle < 0 ||
                                     system_write_once(handle, text, length) < 0)
                                 {
@@ -19573,11 +19593,12 @@ static b32 util_linux_uclampset()
                                 system_close(handle);
                         }
 
-                        positive parsed;
-                        positive used;
+                        positive parsed = 0;
+                        positive used = 0;
                         bipolar length = file_slurp(paths[at], text,
                                                     sizeof(text));
-                        parsed = string_digits_max(text, 1024, address_of used);
+                        if (length > 0)
+                                parsed = string_digits_max(text, 1024, address_of used);
                         if (length <= 0 || !used)
                                 values_out[at] = at ? 1024 : 0;
                         else
@@ -20108,39 +20129,36 @@ static b32 util_linux_flock()
 #define UL_STICKY_TIMEOUTS 0x4000000
 #define UL_ADDR_LIMIT_3GB 0x8000000
 
-typedef struct { p32 value; string_address name; } ul_named_number;
-typedef struct { string_address name; p32 personality; } ul_arch;
-
-static const ul_named_number ul_personalities[] = {
-    {0x0000, (string_address)"PER_LINUX"},
-    {UL_ADDR_LIMIT_32BIT, (string_address)"PER_LINUX_32BIT"},
-    {UL_FDPIC_FUNCPTRS, (string_address)"PER_LINUX_FDPIC"},
-    {0x0006, (string_address)"PER_BSD"},
-    {0x0006 | UL_STICKY_TIMEOUTS, (string_address)"PER_SUNOS"},
-    {0x0008, (string_address)"PER_LINUX32"},
-    {0x0008 | UL_ADDR_LIMIT_3GB, (string_address)"PER_LINUX32_3GB"},
-    {0x000c, (string_address)"PER_RISCOS"},
-    {0x000f, (string_address)"PER_OSF4"},
-    {0x0010, (string_address)"PER_HPUX"},
-    {0, null},
+static const named_flag ul_personalities[] = {
+    {(string_address)"PER_LINUX", 0x0000},
+    {(string_address)"PER_LINUX_32BIT", UL_ADDR_LIMIT_32BIT},
+    {(string_address)"PER_LINUX_FDPIC", UL_FDPIC_FUNCPTRS},
+    {(string_address)"PER_BSD", 0x0006},
+    {(string_address)"PER_SUNOS", 0x0006 | UL_STICKY_TIMEOUTS},
+    {(string_address)"PER_LINUX32", 0x0008},
+    {(string_address)"PER_LINUX32_3GB", 0x0008 | UL_ADDR_LIMIT_3GB},
+    {(string_address)"PER_RISCOS", 0x000c},
+    {(string_address)"PER_OSF4", 0x000f},
+    {(string_address)"PER_HPUX", 0x0010},
+    {null, 0},
 };
 
-static const ul_named_number ul_personality_flags[] = {
-    {UL_UNAME26, (string_address)"UNAME26"},
-    {UL_ADDR_NO_RANDOMIZE, (string_address)"ADDR_NO_RANDOMIZE"},
-    {UL_FDPIC_FUNCPTRS, (string_address)"FDPIC_FUNCPTRS"},
-    {UL_MMAP_PAGE_ZERO, (string_address)"MMAP_PAGE_ZERO"},
-    {UL_ADDR_COMPAT_LAYOUT, (string_address)"ADDR_COMPAT_LAYOUT"},
-    {UL_READ_IMPLIES_EXEC, (string_address)"READ_IMPLIES_EXEC"},
-    {UL_ADDR_LIMIT_32BIT, (string_address)"ADDR_LIMIT_32BIT"},
-    {UL_SHORT_INODE, (string_address)"SHORT_INODE"},
-    {UL_WHOLE_SECONDS, (string_address)"WHOLE_SECONDS"},
-    {UL_STICKY_TIMEOUTS, (string_address)"STICKY_TIMEOUTS"},
-    {UL_ADDR_LIMIT_3GB, (string_address)"ADDR_LIMIT_3GB"},
-    {0, null},
+static const named_flag ul_personality_flags[] = {
+    {(string_address)"UNAME26", UL_UNAME26},
+    {(string_address)"ADDR_NO_RANDOMIZE", UL_ADDR_NO_RANDOMIZE},
+    {(string_address)"FDPIC_FUNCPTRS", UL_FDPIC_FUNCPTRS},
+    {(string_address)"MMAP_PAGE_ZERO", UL_MMAP_PAGE_ZERO},
+    {(string_address)"ADDR_COMPAT_LAYOUT", UL_ADDR_COMPAT_LAYOUT},
+    {(string_address)"READ_IMPLIES_EXEC", UL_READ_IMPLIES_EXEC},
+    {(string_address)"ADDR_LIMIT_32BIT", UL_ADDR_LIMIT_32BIT},
+    {(string_address)"SHORT_INODE", UL_SHORT_INODE},
+    {(string_address)"WHOLE_SECONDS", UL_WHOLE_SECONDS},
+    {(string_address)"STICKY_TIMEOUTS", UL_STICKY_TIMEOUTS},
+    {(string_address)"ADDR_LIMIT_3GB", UL_ADDR_LIMIT_3GB},
+    {null, 0},
 };
 
-static const ul_arch ul_arches[] = {
+static const named_flag ul_arches[] = {
     {(string_address)"uname26", UL_UNAME26},
     {(string_address)"linux32", 0x0008},
     {(string_address)"linux64", 0x0000},
@@ -20367,10 +20385,11 @@ static b32 util_linux_setarch()
         if (!arch && !personality) return string_report(log_error, 1, "%s: %s\n", "setarch", "no architecture argument or personality flags specified");
         if (arch)
         {
-                positive i;
-                for (i = 0; ul_arches[i].name; i++)
-                        if (string_equals(arch, ul_arches[i].name)) { personality |= ul_arches[i].personality; break; }
-                refuse_if(!ul_arches[i].name, 1, "setarch: %s: Unrecognized architecture\n", arch);
+                positive i = string_table_find(arch, ul_arches,
+                    sizeof(ul_arches[0]), array_count(ul_arches) - 1);
+                refuse_if(i >= array_count(ul_arches) - 1, 1,
+                          "setarch: %s: Unrecognized architecture\n", arch);
+                personality |= (p32)ul_arches[i].value;
         }
 
         bipolar changed = system_call_1(syscall(personality), personality);
@@ -20734,7 +20753,7 @@ static COLD bool ul_cap_status(p64 sets[5])
         static const string_address names[] = {
             "CapEff:\t", "CapPrm:\t", "CapInh:\t", "CapAmb:\t", "CapBnd:\t",
         };
-        p8 text[4096];
+        static p8 text[4096];
         bipolar got = file_slurp("/proc/self/status", text, sizeof(text));
         if (got <= 0) return false;
         for (positive i = 0; i < 5; i++)
@@ -20752,12 +20771,12 @@ static COLD bool ul_cap_status(p64 sets[5])
 
 static COLD fn ul_setpriv_secure_say(b32 bits)
 {
-        static const ul_named_number names[] = {
-            {UL_SECBIT_NOROOT, "noroot"},
-            {UL_SECBIT_NOROOT_LOCKED, "noroot_locked"},
-            {UL_SECBIT_NO_SETUID_FIXUP, "no_setuid_fixup"},
-            {UL_SECBIT_NO_SETUID_FIXUP_LOCKED, "no_setuid_fixup_locked"},
-            {UL_SECBIT_KEEP_CAPS_LOCKED, "keep_caps_locked"}, {0, null},
+        static const named_flag names[] = {
+            {"noroot", UL_SECBIT_NOROOT},
+            {"noroot_locked", UL_SECBIT_NOROOT_LOCKED},
+            {"no_setuid_fixup", UL_SECBIT_NO_SETUID_FIXUP},
+            {"no_setuid_fixup_locked", UL_SECBIT_NO_SETUID_FIXUP_LOCKED},
+            {"keep_caps_locked", UL_SECBIT_KEEP_CAPS_LOCKED}, {null, 0},
         };
         bits &= ~UL_SECBIT_KEEP_CAPS;
         bool any = false;
@@ -21180,55 +21199,6 @@ static bool ul_table_column_add(p32 address_to columns, positive address_to coun
         twice is a column written twice -- `lsns -o TYPE,TYPE` prints TYPE
         beside TYPE.  The caller supplies UL_COLUMN_NAME bytes to be told
         which name it was, and reports through its own diagnostic. */
-static b32 ul_table_column_list(
-    string_address text, const ul_table_column address_to definitions,
-    positive definition_count, const p8 address_to defaults,
-    positive default_count, p32 address_to address_to columns,
-    positive address_to room, positive address_to count, p8 address_to unknown)
-{
-        bool append = text && string_is(text, '+');
-
-        address_to count = 0;
-        unknown[0] = 0;
-        if (!name_list_room(columns, room, 0,
-                            default_count + (text ? name_list_capacity(text) : 0)))
-                return UL_COLUMNS_NOROOM;
-        if (!text || append)
-        {
-                if (default_count > definition_count)
-                        return UL_COLUMNS_UNKNOWN;
-                name_list_fill(address_to columns, defaults, default_count);
-                address_to count = default_count;
-                if (!text)
-                        return UL_COLUMNS_OK;
-                text++;
-        }
-
-        return name_list_columns(text, definitions, sizeof(definitions[0]),
-            definition_count, address_to columns, count, address_to room,
-            unknown, UL_COLUMN_NAME);
-}
-
-/*      Every one of these programs asks for its columns the same way: room
-        for the selection, the count the reader fills in, and the bytes it
-        writes the name nobody knew into.  Declaring the three together
-        keeps one spelling of the request beside one spelling of the
-        refusal, so a program's own lines are the table it reads, the
-        defaults it falls back to and the name it complains as. */
-#define ul_columns_take(program, definitions, maximum, defaults, \
-                        default_count, text) \
-        p32 address_to columns = null; \
-        positive columns_room = 0; \
-        positive column_count = 0; \
-        p8 unknown[UL_COLUMN_NAME]; \
-        { \
-                b32 fault = ul_table_column_list(text, definitions, maximum, \
-                    defaults, default_count, address_of columns, \
-                    address_of columns_room, address_of column_count, unknown); \
-                if (fault) \
-                        return ul_columns_refused(program, fault, unknown); \
-        }
-
 static b32 ul_refuse_exclusive(file_taking address_to taking,
                                const argument_exclusive_pair address_to group,
                                positive count)
@@ -22939,8 +22909,10 @@ static b32 util_linux_lsfd()
         if (!failed && ul_lsfd_entry_count)
         {
                 ul_lsfd_entry address_to spare =
-                    (ul_lsfd_entry address_to)utility_arena_take(
-                        ul_lsfd_entry_count * sizeof(*spare));
+                    ul_lsfd_entry_count <= positive_max / sizeof(*spare)
+                        ? (ul_lsfd_entry address_to)utility_arena_take(
+                              ul_lsfd_entry_count * sizeof(*spare))
+                        : null;
                 if (!spare)
                         failed = true;
                 else
@@ -23471,11 +23443,12 @@ static const argument_option ul_unshare_options[] = {
 
 static positive ul_unshare_propagation(string_address text)
 {
-        if (string_equals(text, "private")) return MS_PRIVATE;
-        if (string_equals(text, "shared")) return MS_SHARED;
-        if (string_equals(text, "slave")) return MS_SLAVE;
-        if (string_equals(text, "unchanged")) return 0;
-        return positive_max;
+        static const named_flag modes[] = {
+            {"private", MS_PRIVATE}, {"shared", MS_SHARED},
+            {"slave", MS_SLAVE}, {"unchanged", 0},
+        };
+        positive hit = string_table_lookup(text, modes);
+        return hit < array_count(modes) ? (positive)modes[hit].value : positive_max;
 }
 
 static b32 ul_unshare_time(file_taking address_to taking, bool apply)
@@ -23581,11 +23554,16 @@ static b32 util_linux_unshare()
                         map.gid_single.inside = (p32)id;
                 }
 
-                if (setting && !string_equals(setting, "deny") &&
-                    !string_equals(setting, "allow"))
-                        return string_report(log_error, 1, "%s: %s\n", "unshare", "invalid setgroups mode");
-                map.deny_groups = setting ? string_equals(setting, "deny")
-                    : map.gid || map.gid_range_count;
+                if (setting)
+                {
+                        static const named_byte modes[] = {{"allow", 0}, {"deny", 1}};
+                        positive hit = string_table_lookup(setting, modes);
+                        if (hit == array_count(modes))
+                                return string_report(log_error, 1, "%s: %s\n", "unshare", "invalid setgroups mode");
+                        map.deny_groups = modes[hit].value != 0;
+                }
+                else
+                        map.deny_groups = map.gid || map.gid_range_count;
 
                 if ((map.uid_range_count && !ul_namespace_mapper_present(false)) ||
                     (map.gid_range_count && !ul_namespace_mapper_present(true)))
@@ -24204,7 +24182,7 @@ static b32 util_linux_fallocate()
         bool create = !(mode & ~UL_FALLOC_WRITE_ZEROES);
         bipolar handle = system_open_at_mode(
             AT_FDCWD, path,
-            FILE_READ_WRITE | (create ? FILE_CREATE : 0), 0666);
+            FILE_READ_WRITE | (create ? FILE_CREATE : 0) | O_CLOEXEC, 0666);
 
         refuse_if(handle < 0, 1, "fallocate: cannot open %s: %s\n", path, file_reason(handle));
 
@@ -24353,7 +24331,7 @@ static b32 util_linux_copyfilerange()
         string_address source = program_argument((b32)taking.first++);
         string_address destination = program_argument((b32)taking.first++);
         file_facts facts;
-        bipolar in = system_open_at(AT_FDCWD, source, FILE_READ);
+        bipolar in = system_open_at(AT_FDCWD, source, FILE_READ | O_CLOEXEC);
 
         refuse_if(in < 0, 1, "copyfilerange: cannot open source %s: %s\n", source, file_reason(in));
         if (!file_look(in, (string_address)"", AT_EMPTY_PATH,
@@ -24364,7 +24342,7 @@ static b32 util_linux_copyfilerange()
         }
 
         bipolar out = system_open_at_mode(
-            AT_FDCWD, destination, FILE_WRITE & ~O_TRUNC, 0666);
+            AT_FDCWD, destination, (FILE_WRITE & ~O_TRUNC) | O_CLOEXEC, 0666);
 
         if (out < 0)
         {
@@ -24496,7 +24474,7 @@ static b32 util_linux_fadvise()
                         return string_report(log_error, 1, "%s: %s\n", "fadvise", "too many files");
 
                 handle = system_open_at(
-                    AT_FDCWD, program_argument((b32)taking.first), FILE_READ);
+                    AT_FDCWD, program_argument((b32)taking.first), FILE_READ | O_CLOEXEC);
                 if (handle < 0)
                         return string_report(log_error, 1, "fadvise: %s: %s\n",
                                       program_argument((b32)taking.first),
@@ -26766,8 +26744,8 @@ static b32 util_linux_mkswap()
                 return string_report(log_error, 1, "%s: %s\n", "mkswap", "bad-block, file, offset, size and lock modes are not supported");
 
         string_address endian = file_option_value(address_of taking, 'e');
-        if (endian && !string_equals(endian, "native") &&
-            !string_equals(endian, "little"))
+        static const string_address swap_endians[] = {"native", "little"};
+        if (endian && string_table_lookup(endian, swap_endians) == array_count(swap_endians))
                 return string_report(log_error, 1, "%s: %s\n", "mkswap", "only little-endian swap is supported");
         string_address version = file_option_value(address_of taking, 'v');
         tools_refuse(version && !string_equals(version, "1"), "mkswap", "only swap version 1 is supported");
@@ -26914,7 +26892,7 @@ static b32 util_linux_swaplabel()
         refuse_if(handle < 0, 1, "swaplabel: cannot open %s: %s\n", path, file_reason(handle));
 
         file_facts facts;
-        p8 bytes[STORAGE_PROBE_ROOM];
+        static p8 bytes[STORAGE_PROBE_ROOM];
         storage_identity identity;
         positive have = storage_read(handle, bytes, sizeof(bytes), 0);
         memory_zero(address_of identity, sizeof(identity));
@@ -27398,7 +27376,8 @@ static bool ul_lscpu_take()
         ul_lscpu.online_count = ul_lscpu_set_count(ul_lscpu_online);
         if (!ul_lscpu.present_count ||
             ul_lscpu.present_count >
-                UTILITY_ARENA_BYTES / sizeof(ul_lscpu_cpu))
+                UTILITY_ARENA_BYTES / sizeof(ul_lscpu_cpu) ||
+            ul_lscpu.present_count > positive_max / UL_LSCPU_CACHE_MAX)
                 return false;
         ul_lscpu.cpus = utility_arena_take(
             ul_lscpu.present_count * sizeof(ul_lscpu_cpu));
@@ -27606,7 +27585,7 @@ static fn ul_lscpu_summary(bool json, bool hex, bool bytes)
         ul_lscpu_summary_add(address_of rows, "CPU(s):",
                              ul_lscpu_number(ul_lscpu.present_count));
 
-        p8 set[FILE_PATH_MAX];
+        static p8 set[FILE_PATH_MAX];
         ul_lscpu_set_text(set, sizeof(set), ul_lscpu_online, hex);
         ul_lscpu_summary_add(address_of rows,
                              "On-line CPU(s) list:", ul_lscpu_keep(set));
@@ -28521,13 +28500,20 @@ static b32 util_linux_lsmem()
         string_address summary = file_option_value(address_of taking, 'q');
         bool summary_requested =
             (taking.flags & FILE_FLAG('q')) != 0;
-        bool summary_only = summary_requested &&
-            (!summary || string_equals(summary, "only"));
-        bool summary_never = summary && string_equals(summary, "never");
-        bool summary_always = summary && string_equals(summary, "always");
-        if (summary && !summary_only && !summary_never &&
-            !summary_always)
-                return string_report(log_error, 1, "%s: %s\n", "lsmem", "invalid --summary mode");
+        static const named_byte summary_modes[] = {
+            {"only", 1}, {"never", 2}, {"always", 3},
+        };
+        p8 summary_mode = 0;
+        if (summary)
+        {
+                positive hit = string_table_lookup(summary, summary_modes);
+                if (hit == array_count(summary_modes))
+                        return string_report(log_error, 1, "%s: %s\n", "lsmem", "invalid --summary mode");
+                summary_mode = summary_modes[hit].value;
+        }
+        bool summary_only = summary_requested && (!summary || summary_mode == 1);
+        bool summary_never = summary_mode == 2;
+        bool summary_always = summary_mode == 3;
         bool json = (taking.flags & FILE_FLAG('J')) != 0;
         if (summary_only && (taking.flags & (FILE_FLAG('r') | FILE_FLAG('J') |
                                             FILE_FLAG('P'))))
@@ -30363,10 +30349,14 @@ static b32 util_linux_ipcrm()
         if (taking.first < count)
         {
                 string_address kind = program_argument((b32)taking.first);
-                p8 type = string_equals(kind, "msg") ? UL_IPC_MESSAGE
-                          : string_equals(kind, "shm") ? UL_IPC_SHARED
-                          : string_equals(kind, "sem") ? UL_IPC_SEMAPHORE
-                                                       : UL_IPC_TYPES;
+                static const named_byte ipc_kinds[] = {
+                    {"msg", UL_IPC_MESSAGE},
+                    {"shm", UL_IPC_SHARED},
+                    {"sem", UL_IPC_SEMAPHORE},
+                };
+                positive kind_hit = string_table_lookup(kind, ipc_kinds);
+                p8 type = kind_hit < array_count(ipc_kinds)
+                              ? ipc_kinds[kind_hit].value : UL_IPC_TYPES;
 
                 if (taking.first != 1 || type == UL_IPC_TYPES)
                 {
@@ -30864,8 +30854,7 @@ static ul_rfkill_view ul_rfkill_views[UL_RFKILL_MAX * UL_RFKILL_FILTER_MAX];
 
 static bipolar ul_rfkill_type_index(string_address name)
 {
-        positive at = string_table_find(name, ul_rfkill_types,
-            sizeof(ul_rfkill_types[0]), array_count(ul_rfkill_types));
+        positive at = string_table_lookup(name, ul_rfkill_types);
         return at < array_count(ul_rfkill_types) ? (bipolar)at : -1;
 }
 
@@ -31155,20 +31144,24 @@ static b32 util_linux_rfkill()
         string_address action = taking.first < arguments
             ? program_argument((b32)taking.first++)
             : (string_address)"list-table";
-        bool table = string_equals(action, "list-table");
-        bool explicit_list = string_equals(action, "list");
+        static const named_byte rfkill_actions[] = {
+            {"list-table", 0}, {"list", 1}, {"help", 2},
+            {"event", 3}, {"block", 4}, {"unblock", 5}, {"toggle", 6},
+        };
+        positive action_hit = string_table_lookup(action, rfkill_actions);
+        p8 action_code = action_hit < array_count(rfkill_actions)
+                             ? rfkill_actions[action_hit].value : 0xff;
+        bool table = action_code == 0;
+        bool explicit_list = action_code == 1;
 
-        if (string_equals(action, "help"))
+        if (action_code == 2)
         {
                 string_format(log, "Usage: %s %s\n", "rfkill", "[options] command [identifier ...]");
                 log_flush();
                 return 0;
         }
-        tools_refuse(string_equals(action, "event"), "rfkill", "unbounded event monitoring is not supported");
-        if (!table && !explicit_list &&
-            !string_equals(action, "block") &&
-            !string_equals(action, "unblock") &&
-            !string_equals(action, "toggle"))
+        tools_refuse(action_code == 3, "rfkill", "unbounded event monitoring is not supported");
+        if (action_code == 0xff)
         {
                 /* Treat a bare identifier as the default list action.  This
                    keeps the fast table form composable with output options
@@ -31689,20 +31682,25 @@ static const string_address tools_coreutils[] = {
     "unexpand", "uniq", "unlink", "users", "vdir", "wc", "who", "whoami", "yes",
     null};
 
+static const tools_meta_rule address_to tools_meta_rule_find(string_address name)
+{
+        positive hit = string_table_find(name, tools_meta_rules,
+            sizeof(tools_meta_rules[0]), array_count(tools_meta_rules) - 1);
+        return hit < array_count(tools_meta_rules) - 1 ? tools_meta_rules + hit : null;
+}
+
 static b32 tools_stderr_status(string_address name, b32 answered)
 {
         if (answered || !writer_stderr_failed)
                 return answered;
 
-        for (positive at = 0; tools_coreutils[at]; at++)
-                if (string_equals(name, tools_coreutils[at]))
-                {
-                        for (const tools_meta_rule address_to rule = tools_meta_rules;
-                             rule->name; rule++)
-                                if (string_equals(name, rule->name))
-                                        return rule->failure;
-                        return 1;
-                }
+        if (string_table_find(name, tools_coreutils, sizeof(tools_coreutils[0]),
+                              array_count(tools_coreutils) - 1) <
+            array_count(tools_coreutils) - 1)
+        {
+                const tools_meta_rule address_to rule = tools_meta_rule_find(name);
+                return rule ? rule->failure : 1;
+        }
         return answered;
 }
 
@@ -31720,11 +31718,8 @@ static b32 tools_write_told(string_address name)
         string_format(log_error, "%s: write error: %s\n", name,
                       file_reason(-(bipolar)log_failed()));
 
-        for (const tools_meta_rule address_to rule = tools_meta_rules;
-             rule->name; rule++)
-                if (string_equals(name, rule->name))
-                        return rule->failure;
-        return 1;
+        const tools_meta_rule address_to rule = tools_meta_rule_find(name);
+        return rule ? rule->failure : 1;
 }
 
 // Whether any word before a -- could be one of the two: most starts carry
@@ -33358,19 +33353,13 @@ static b32 tools_meta(string_address name, string_address address_to arguments,
         if (!tools_meta_asked(arguments, count))
                 return 256;
 
-        const tools_meta_rule address_to rule = null;
+        const tools_meta_rule address_to rule = tools_meta_rule_find(name);
         string_address valued = "";
         p8 stop = TOOLS_META_PERMUTE;
         p8 failure = 1;
         bool help = false;
         bool found = false;
 
-        for (const tools_meta_rule address_to at = tools_meta_rules; at->name; at++)
-                if (string_equals(name, at->name))
-                {
-                        rule = at;
-                        break;
-                }
         if (rule)
         {
                 valued = rule->valued;
@@ -33422,17 +33411,17 @@ static b32 tools_meta(string_address name, string_address address_to arguments,
         // One write, as stdio's one buffer gives GNU: a reader that leaves
         // after the first bytes cannot cut the text in two.
         const_string text = null;
-        tools_meta_output output;
+        static tools_meta_output output;
 
         output.length = 0;
         output.error = 0;
         if (help)
-                for (const tools_help_entry address_to entry = tools_help; entry->name; entry++)
-                        if (string_equals(name, entry->name))
-                        {
-                                text = entry->text;
-                                break;
-                        }
+        {
+                positive hit = string_table_find(name, tools_help,
+                    sizeof(tools_help[0]), array_count(tools_help) - 1);
+                if (hit < array_count(tools_help) - 1)
+                        text = tools_help[hit].text;
+        }
         if (text)
                 tools_meta_help(&output, name, text);
         else
