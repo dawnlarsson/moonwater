@@ -1,6 +1,6 @@
 #!/bin/sh
 #
-#       test/checks/apply_edits.sh: two edits of kernel/patch/apply, run from their own text.
+#       test/checks/apply_edits.sh: three edits of kernel/patch/apply, run from their own text.
 #
 #       fold     the header fold, which the two call sites now share through
 #                header_fold: the header tree is byte-identical to what the
@@ -8,6 +8,8 @@
 #       lttpr    the amdgpu lttpr edits: a failing sudo stops the script
 #                (every settings edit has its || die; these three did not),
 #                and a working sudo still makes the edit
+#       wave     the gfx10 wave limit: its three additions land in the compute
+#                ring's funcs and nowhere else, once, and a moved line stops it
 #
 #       The functions and call blocks are taken from kernel/patch/apply by
 #       sed, so the check runs what the script runs. Run from the repository
@@ -135,6 +137,77 @@ working=$?
 row "lttpr: a working sudo makes the edit and the script goes on" "$(
         if [ "$working" = 0 ] && grep -q 'DC_LOG_DC("lttpr_caps phy_repeater_cnt' "$cap" &&
            grep -q 'DC_LOG_DC("LTTPR count is nonzero' "$cap"
+        then echo yes; else echo no; fi)"
+
+#       ---- gfx10 wave limit ----------------------------------------------
+#       A gfx_v10_0.c of 7.4's shape where it counts: the gfx ring's funcs and
+#       the compute ring's end their frame sizes with the same line and share
+#       the mem_sync hook, so an edit placed by the first match lands in the
+#       wrong struct; only the compute ring has the reset_kcq hook.
+wave_dir=$work/wave
+mkdir -p "$wave_dir/linux/drivers/gpu/drm/amd/amdgpu" "$wave_dir/work"
+wave_c=$wave_dir/linux/drivers/gpu/drm/amd/amdgpu/gfx_v10_0.c
+tab=$(printf '\t')
+cat > "$wave_dir/shape.c" <<SOURCE
+static const struct amdgpu_ring_funcs gfx_v10_0_ring_funcs_gfx = {
+${tab}.emit_frame_size =
+${tab}${tab}8 + /* gfx_v10_0_emit_mem_sync */
+${tab}${tab}2, /* gfx_v10_0_ring_emit_cleaner_shader */
+${tab}.emit_mem_sync = gfx_v10_0_emit_mem_sync,
+};
+
+static const struct amdgpu_ring_funcs gfx_v10_0_ring_funcs_compute = {
+${tab}.emit_frame_size =
+${tab}${tab}8 + /* gfx_v10_0_emit_mem_sync */
+${tab}${tab}2, /* gfx_v10_0_ring_emit_cleaner_shader */
+${tab}.emit_mem_sync = gfx_v10_0_emit_mem_sync,
+${tab}.reset = gfx_v10_0_reset_kcq,
+${tab}.emit_cleaner_shader = gfx_v10_0_ring_emit_cleaner_shader,
+};
+SOURCE
+sed -n '/^settings_insert() {/,/^}/p' "$apply" > "$wave_dir/insert.sh"
+sed -n '/^gfx10=linux/,/^fi$/p' "$apply" > "$wave_dir/edit.sh"
+wave_run() {
+        (
+                cd "$wave_dir" || exit 1
+                settings_work=$wave_dir/work
+                sudo() { "$@"; }
+                . "$wave_dir/insert.sh"
+                . "$wave_dir/edit.sh"
+        )
+}
+cp "$wave_dir/shape.c" "$wave_c"
+wave_run > "$work/wave-1.out" 2>&1
+wave_first=$?
+cp "$wave_c" "$wave_dir/once.c"
+wave_run > "$work/wave-2.out" 2>&1
+wave_second=$?
+compute_at=$(grep -n '^static const struct amdgpu_ring_funcs gfx_v10_0_ring_funcs_compute = {' "$wave_dir/once.c" | cut -d: -f1)
+row "gfx10 wave limit: the function, its hook and forty dwords of frame are added" "$(
+        if [ "$wave_first" = 0 ] && grep -q '^static void gfx_v10_0_emit_wave_limit(struct amdgpu_ring \*ring, bool enable)$' "$wave_dir/once.c" &&
+           grep -q "^${tab}.emit_wave_limit = gfx_v10_0_emit_wave_limit,\$" "$wave_dir/once.c" &&
+           [ "$(grep -c "^${tab}${tab}40 + /\* Moonwater: gfx_v10_0_emit_wave_limit, twice \*/\$" "$wave_dir/once.c")" = 1 ]
+        then echo yes; else echo no; fi)"
+row "gfx10 wave limit: every addition is in the compute ring's funcs, the gfx ring's are untouched" "$(
+        func_at=$(grep -n '^static void gfx_v10_0_emit_wave_limit' "$wave_dir/once.c" | cut -d: -f1)
+        frame_at=$(grep -n 'Moonwater: gfx_v10_0_emit_wave_limit, twice' "$wave_dir/once.c" | cut -d: -f1)
+        hook_at=$(grep -n 'emit_wave_limit = gfx_v10_0_emit_wave_limit' "$wave_dir/once.c" | cut -d: -f1)
+        sed -n '1,/^};$/p' "$wave_dir/shape.c" > "$wave_dir/gfx.ref"
+        sed -n '1,/^};$/p' "$wave_dir/once.c" > "$wave_dir/gfx.now"
+        if [ -n "$compute_at" ] && [ -n "$func_at" ] && [ -n "$frame_at" ] && [ -n "$hook_at" ] &&
+           [ "$func_at" -lt "$compute_at" ] && [ "$frame_at" -gt "$compute_at" ] && [ "$hook_at" -gt "$compute_at" ] &&
+           cmp -s "$wave_dir/gfx.ref" "$wave_dir/gfx.now"
+        then echo yes; else echo no; fi)"
+row "gfx10 wave limit: a second run changes nothing" "$(
+        if [ "$wave_second" = 0 ] && cmp -s "$wave_dir/once.c" "$wave_c"; then echo yes; else echo no; fi)"
+#       The compute ring's frame no longer ends on the cleaner shader's line
+#       (the gfx ring's still does): the edit must stop, not land in the gfx ring.
+awk -v t="$tab" '/gfx_v10_0_ring_funcs_compute/ { c = 1 } c && index($0, t t "2, /* gfx_v10_0_ring_emit_cleaner_shader */") == 1 { print t t "2, /* moved */"; next } { print }' "$wave_dir/shape.c" > "$wave_c"
+wave_run > "$work/wave-moved.out" 2>&1
+wave_moved=$?
+row "gfx10 wave limit: a compute frame that no longer ends where the edit is placed stops the script" "$(
+        if [ "$wave_moved" != 0 ] && grep -q "the compute ring's frame size no longer ends where this edit is placed" "$work/wave-moved.out" &&
+           ! grep -q 'Moonwater: gfx_v10_0_emit_wave_limit, twice' "$wave_c"
         then echo yes; else echo no; fi)"
 
 exit "$failed"

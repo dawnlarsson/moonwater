@@ -1174,6 +1174,70 @@ if [ -f "$lttpr_cap" ]; then
         fi
 fi
 
+#       The compositor's card jobs run on the high-priority compute queue,
+#       which orders when its waves launch but not who holds the shader
+#       array meanwhile: on a two-CU APU a game at full load refills every
+#       slot the moment one frees, and the compositor's present took 1249 us
+#       on average and 3417 at worst under Half-Life 2, against 664 and 1734
+#       on an idle desktop. gfx9 already answers this: while an IB of a
+#       high-priority compute ring runs, amdgpu_ib_schedule has the ring cap
+#       the graphics pipe at about a quarter of the waves and the other
+#       compute pipes of its ME at one, and lifts the cap when the IB ends
+#       (gfx_v9_0_emit_wave_limit). gfx10 has no such hook, so RDNA2 gets
+#       the same one. GC 10.3's register is three fields (VALUE 6:0,
+#       HS_GRP 16:12, GS_GRP 26:22, reset 0x07c1f07f) where gfx9's is one,
+#       so the cap is a quarter of each and the lift writes the reset value
+#       back; GC 10.1 keeps going as it did. The work a job does is the
+#       same either way: what changes is who waits, and the compositor's
+#       job is the one a vblank waits on. The two calls a job makes are
+#       four register writes of five dwords each, so the compute ring's
+#       frame grows by forty.
+gfx10=linux/drivers/gpu/drm/amd/amdgpu/gfx_v10_0.c
+if [ -f "$gfx10" ]; then
+        cat > "$settings_work/wave" <<EOF
+/*
+ * Moonwater: while an IB of the high-priority compute queue runs, the
+ * graphics pipe gets about a quarter of the waves and the other compute
+ * pipes one, as gfx_v9_0_emit_wave_limit does; see kernel/patch/apply,
+ * the compositor's card jobs. GC 10.3 only: its register has three fields.
+ */
+static void gfx_v10_0_emit_wave_limit(struct amdgpu_ring *ring, bool enable)
+{
+${tab}struct amdgpu_device *adev = ring->adev;
+${tab}int i;
+
+${tab}if (amdgpu_ip_version(adev, GC_HWIP, 0) < IP_VERSION(10, 3, 0))
+${tab}${tab}return;
+${tab}amdgpu_ring_emit_wreg(ring, SOC15_REG_OFFSET(GC, 0, mmSPI_WCL_PIPE_PERCENT_GFX),
+${tab}${tab}${tab}      enable ? 0x01c0701f : 0x07c1f07f);
+${tab}for (i = 0; i < adev->gfx.mec.num_pipe_per_mec && i < 4; i++)
+${tab}${tab}if (i != ring->pipe)
+${tab}${tab}${tab}amdgpu_ring_emit_wreg(ring, SOC15_REG_OFFSET(GC, 0, mmSPI_WCL_PIPE_PERCENT_CS0) + i,
+${tab}${tab}${tab}${tab}${tab}      enable ? 0x1 : 0x7f);
+}
+
+EOF
+        settings_insert "$gfx10" "Moonwater: while an IB of the high-priority compute queue runs" \
+                "static const struct amdgpu_ring_funcs gfx_v10_0_ring_funcs_compute = {" before "$settings_work/wave" "gfx10 wave limit"
+        printf '%s\n' "${tab}.emit_wave_limit = gfx_v10_0_emit_wave_limit," > "$settings_work/wave-hook"
+        settings_insert "$gfx10" ".emit_wave_limit = gfx_v10_0_emit_wave_limit," \
+                "${tab}.reset = gfx_v10_0_reset_kcq," after "$settings_work/wave-hook" "gfx10 wave limit hook"
+        wave_frame="Moonwater: gfx_v10_0_emit_wave_limit, twice"
+        if ! grep -q -F -- "$wave_frame" "$gfx10"; then
+                awk -v start="static const struct amdgpu_ring_funcs gfx_v10_0_ring_funcs_compute = {" \
+                        -v last="${tab}${tab}2, /* gfx_v10_0_ring_emit_cleaner_shader */" \
+                        -v add="${tab}${tab}40 + /* $wave_frame */" '
+                        index($0, start) == 1 { inside = 1 }
+                        inside && index($0, last) == 1 { print add; inside = 0; placed = 1 }
+                        { print }
+                        END { if (!placed) exit 3 }
+                ' "$gfx10" > "$settings_work/edit" &&
+                        sudo cp "$settings_work/edit" "$gfx10" ||
+                        die "gfx10 wave limit: the compute ring's frame size no longer ends where this edit is placed in $gfx10"
+                echo "  gfx10 wave limit: $(basename "$gfx10") compute frame gains 40 dwords"
+        fi
+fi
+
 #       A kernel built without device coredump (ALLOW_DEV_COREDUMP is off in
 #       debug_none, as "for more sensitive systems ... not to have the code,
 #       nor keep any data") answers the MediaTek Bluetooth driver's registration
