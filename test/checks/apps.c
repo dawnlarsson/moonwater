@@ -1056,43 +1056,62 @@ static fn squiggle_check(struct ui address_to wui)
         and its release on the Wrap chip turn word wrap off, and on the Hex half of the switch show hex: both reach the kit through
         ui_kit_pointer, which sets the chip or the switch's item on the release.
 */
-static fn editor_pill_check(void)
+/*
+        One pill at one scale, in the window's device pixels (800 wide, 600 high): the Text | Hex switch and the Wrap chip lie inside the
+        pill's rectangle, the switch's Hex item too (its rectangle is the kit's, from ui_tab_left and ui_tab_width, not the pill's own
+        measure), and a press and a release at the centre of each control reach that control: the chip turns word wrap off, the Hex item
+        shows hex. Fill and ground as the reference rectangle takes them.
+*/
+static fn editor_pill_row(int scale)
 {
-        long pixels = ui_map(400 * 300 * 4);
+        long pixels = ui_map(800 * 600 * 4);
         unsigned int *shown = (unsigned int address_to)pixels, ground = 0x111113, expected = ui_tone(ui_role(UI_SURFACE_CONTAINER) & 0xffffffu, 236);
         unsigned int reference, inside, left, right;
         struct editor_tab address_to tab;
         struct ui_box box;
         struct window_event at = {WINDOW_EVENT_MOTION, 0, 0, 0, 0}, press = {WINDOW_EVENT_BUTTON, WINDOW_KEY_DOWN, UI_POINTER_LEFT, 0, 0};
         struct window_event release = {WINDOW_EVENT_BUTTON, 0, UI_POINTER_LEFT, 0, 0};
-        int px, py, pw, ph, centre_y;
+        int px, py, pw, ph, centre_y, hx, hy, hw, hh, wx, wy, ww, wh;
 
         editor.ui = terminal.ui;
-        ui_begin(&editor.ui, shown, 400, 400, 300);
-        editor.ui.scale = 100;
-        memory_fill_u32(shown, 400 * 300, ground);
-        editor.width = 400, editor.height = 300;
-        editor.text_box = (struct ui_rect){0, 0, 400, 300};
+        ui_begin(&editor.ui, shown, 800, 800, 600);
+        editor.ui.scale = scale;
+        memory_fill_u32(shown, 800 * 600, ground);
+        editor.width = 800, editor.height = 600;
+        editor.text_box = (struct ui_rect){0, 0, 800, 600};
         editor.wrap_shown = editor.mode_shown = false;
         editor.status[0] = 0;
+        editor.count = 0, editor.tab = 0;
         editor_open(null);
         tab = editor_now();
         editor_layout();
         editor_pill_draw(&editor.ui, tab);
         px = editor.pill_box[0], py = editor.pill_box[1], pw = editor.pill_box[2], ph = editor.pill_box[3];
         check("editor pill: it sits at the text box's bottom right, the margin and the pad from its edges",
-              px + pw == 400 - ui_dev(&editor.ui, UI_PAD) && py + ph == 300 - ui_dev(&editor.ui, 10));
-        centre_y = py + ph / 2;
+              px + pw == 800 - ui_dev(&editor.ui, UI_PAD) && py + ph == 600 - ui_dev(&editor.ui, 10));
+
+        // The switch as the kit lays it out: its own rectangle, in device pixels, must lie inside the pill.
+        hx = ui_dev(&editor.ui, editor.chips[0].x), hy = ui_dev(&editor.ui, editor.chips[0].y);
+        hw = ui_dev(&editor.ui, editor.chips[0].w), hh = ui_dev(&editor.ui, editor.chips[0].h);
+        check("editor pill: the Text | Hex switch lies inside the pill's rectangle at this scale",
+              hx >= px && hy >= py && hx + hw <= px + pw && hy + hh <= py + ph);
+        wx = ui_dev(&editor.ui, editor.chips[1].x), wy = ui_dev(&editor.ui, editor.chips[1].y);
+        ww = ui_dev(&editor.ui, editor.chips[1].w), wh = ui_dev(&editor.ui, editor.chips[1].h);
+        check("editor pill: the Wrap chip lies inside the pill's rectangle at this scale",
+              wx >= px && wy >= py && wx + ww <= px + pw && wy + wh <= py + ph);
+
+        centre_y = py + ph / 4 * 2;
         box = ui_box_px(200, 200, 20, 20, 0);
         ui_kit_fill(&editor.ui, &box, expected, null);
-        reference = shown[210 * 400 + 210];
-        inside = shown[centre_y * 400 + px + 3];
-        left = shown[centre_y * 400 + px - 1];
-        right = shown[centre_y * 400 + px + pw];
+        reference = shown[210 * 800 + 210];
+        inside = shown[centre_y * 800 + px + ph / 4];
+        left = shown[centre_y * 800 + px - 1];
+        right = shown[centre_y * 800 + px + pw];
         check("editor pill: its fill is the surface container at 236 of 255, as a reference rectangle of that tone", inside == reference);
         check("editor pill: the ground is a pixel to its left and to its right, so the pill is where it is drawn", left == ground && right == ground);
 
-        at.a = editor.chips[1].x + editor.chips[1].w / 2, at.b = editor.chips[1].y + editor.chips[1].h / 2;
+        // The Wrap chip's centre, in device pixels.
+        at.a = wx + ww / 2, at.b = wy + wh / 2;
         press.a = UI_POINTER_LEFT, release.a = UI_POINTER_LEFT;
         ui_kit.pointer_x = at.a, ui_kit.pointer_y = at.b;
         editor_pill_event(tab, &at);
@@ -1100,13 +1119,26 @@ static fn editor_pill_check(void)
         editor_pill_event(tab, &release);
         check("editor pill: a press and a release on the Wrap chip turn word wrap off", !tab->view.wrap);
 
-        at.a = editor.chips[0].x + editor.chips[0].w - 4, at.b = editor.chips[0].y + editor.chips[0].h / 2;
+        // The Hex item's centre, from the kit's own item rectangle, in device pixels: it must be inside the pill and must toggle hex.
+        centre_y = ui_dev(&editor.ui, editor.chips[0].y + editor.chips[0].h / 2);
+        at.a = ui_dev(&editor.ui, ui_tab_left(&editor.ui, &editor.chips[0], 1) + ui_tab_width(&editor.ui, &editor.chips[0], 1) / 2);
+        at.b = centre_y;
+        check("editor pill: the Hex item's centre is inside the pill", at.a >= px && at.a < px + pw && at.b >= py && at.b < py + ph);
+        check("editor pill: the Hex item's whole rectangle lies inside the pill, not only its centre",
+              ui_dev(&editor.ui, ui_tab_left(&editor.ui, &editor.chips[0], 1)) >= px &&
+                  ui_dev(&editor.ui, ui_tab_left(&editor.ui, &editor.chips[0], 1) + ui_tab_width(&editor.ui, &editor.chips[0], 1)) <= px + pw);
         ui_kit.pointer_x = at.a, ui_kit.pointer_y = at.b;
         editor_pill_event(tab, &at);
         editor_pill_event(tab, &press);
         editor_pill_event(tab, &release);
         check("editor pill: a press and a release on the Hex half of the switch show hex", tab->view.hex);
-        compositor_call(syscall(munmap), pixels, 400 * 300 * 4, 0, 0, 0, 0);
+        compositor_call(syscall(munmap), pixels, 800 * 600 * 4, 0, 0, 0, 0);
+}
+
+static fn editor_pill_check(void)
+{
+        editor_pill_row(100);
+        editor_pill_row(200);
 }
 
 /*

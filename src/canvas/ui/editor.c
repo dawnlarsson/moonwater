@@ -882,12 +882,16 @@ static fn editor_pill_draw(struct ui address_to ui, struct editor_tab address_to
         int margin_r = ui_dev(ui, UI_PAD), margin_b = ui_dev(ui, 10);
         int max_w = editor.text_box.w - 2 * margin_r;
         const char address_to wrap_lbl = WORDS(editor_wrap_on);
-        const char address_to text_lbl = WORDS(editor_mode_text);
-        const char address_to hex_lbl = WORDS(editor_mode_hex);
         const char address_to extra = tab->changed_on_disk ? WORDS(editor_changed_on_disk) : editor.status[0] ? editor.status : null;
-        int text_w = ui_kit_measure(ui, (string_address)text_lbl, UI_LABEL_MEDIUM) + 2 * chip_px;
-        int hex_w = ui_kit_measure(ui, (string_address)hex_lbl, UI_LABEL_MEDIUM) + 2 * chip_px;
-        int seg_w = text_w + hex_w + 2 * seg_pad;
+        struct ui_control address_to s = &editor.chips[0];
+        int seg_w;
+
+        // The switch is the kit's: its items are measured by the kit (its label size and its padding), so the pill is as wide as the
+        // kit draws the switch. The editor's own measure disagreed with the kit's, and the Hex item fell outside the pill.
+        if (s->kind != UI_TABS)
+                s->kind = UI_TABS, s->variant = UI_TABS_SEGMENTED, ui_control_start(s);
+        ui_tabs_fill(s, 2, tab->view.hex, editor_mode_name, editor_mode_marked);
+        seg_w = ui_dev(ui, ui_tabs_length(ui, s));
         int wrap_w = tab->view.hex ? 0 : ui_kit_measure(ui, (string_address)wrap_lbl, UI_LABEL_MEDIUM) + 2 * chip_px;
         int btns_w = seg_w + (wrap_w ? wrap_w + gap : 0);
         int extra_w = extra ? ui_kit_measure(ui, (string_address)extra, UI_LABEL_MEDIUM) : 0;
@@ -945,16 +949,9 @@ static fn editor_pill_draw(struct ui address_to ui, struct editor_tab address_to
         }
         // The Text | Hex switch is the kit's segmented tabs, placed by hand as the Wrap chip is.
         sy = py + (ph - seg_h) / 2;
-        {
-                struct ui_control address_to s = &editor.chips[0];
-
-                if (s->kind != UI_TABS)
-                        s->kind = UI_TABS, s->variant = UI_TABS_SEGMENTED, ui_control_start(s);
-                ui_tabs_fill(s, 2, tab->view.hex, editor_mode_name, editor_mode_marked);
-                s->x = cx * 100 / ui->scale, s->y = sy * 100 / ui->scale, s->w = seg_w * 100 / ui->scale, s->h = seg_h * 100 / ui->scale;
-                editor.mode_shown = true;
-                ui_control_draw(ui, s);
-        }
+        s->x = cx * 100 / ui->scale, s->y = sy * 100 / ui->scale, s->w = ui_tabs_length(ui, s), s->h = seg_h * 100 / ui->scale;
+        editor.mode_shown = true;
+        ui_control_draw(ui, s);
 }
 
 static b32 editor_pill_event(struct editor_tab address_to tab, const struct window_event address_to event)
