@@ -28076,24 +28076,38 @@ static int ui_text_slice_x(const struct ui_text_layout address_to l, p32 from, p
 }
 
 // How many rows a line takes: none hidden in a fold, one unless the widget wraps.
+// The rows of a laid line, one at a time from the top: each row is the clusters from..to (to is past its last). A line of no clusters has one row.
+struct ui_text_walk
+{
+        p32 from, to;
+        int room, indent;
+        b32 begun, last;
+};
+
+static b32 ui_text_walk_next(const struct ui_text_layout address_to l, struct ui_text_walk address_to w)
+{
+        if (w->last)
+                return false;
+        w->from = w->begun ? w->to : 0;
+        w->begun = true;
+        w->to = ui_text_wrap_to(l, w->from, w->room, w->indent);
+        w->last = w->to >= l->count;
+        return true;
+}
+
 static int ui_text_line_rows(struct ui address_to ui, struct ui_text address_to t, p64 line)
 {
-        int rows = 0, room = t->right - t->left, indent;
-        p32 from = 0, to;
+        struct ui_text_walk w = {0};
+        int rows = 0, room = t->right - t->left;
         if (t->mode != UI_TEXT_FIELD && doc_hidden(&t->doc, line))
                 return 0;
         if (!t->wrap || t->mode == UI_TEXT_FIELD)
                 return 1;
         ui_text_layout_line(ui, t, line, &ui_text_lay);
-        indent = ui_text_wrap_indent(&ui_text_lay, room);
-        for (;;)
-        {
-                to = ui_text_wrap_to(&ui_text_lay, from, room, indent);
+        w.room = room, w.indent = ui_text_wrap_indent(&ui_text_lay, room);
+        while (ui_text_walk_next(&ui_text_lay, &w))
                 rows++;
-                if (to >= ui_text_lay.count)
-                        return rows;
-                from = to;
-        }
+        return rows;
 }
 
 // One row of the view, a line as it is drawn:
@@ -28907,17 +28921,14 @@ static b32 ui_text_visual(struct ui address_to ui, struct ui_text address_to t, 
 
 static int ui_text_wrap_rows(int room, int indent, p32 address_to starts, p32 address_to ends, p64 active, int address_to cur)
 {
+        struct ui_text_walk w = {0, 0, room, indent, false, false};
         int rows = 0;
-        for (p32 from = 0; rows <= UI_TEXT_CLUSTERS;)
+        while (rows <= UI_TEXT_CLUSTERS && ui_text_walk_next(&ui_text_lay, &w))
         {
-                p32 to = ui_text_wrap_to(&ui_text_lay, from, room, indent);
-                starts[rows] = from, ends[rows] = to;
-                if (cur && active >= ui_text_lay.offset[from] && (active < ui_text_lay.offset[to] || to >= ui_text_lay.count))
+                starts[rows] = w.from, ends[rows] = w.to;
+                if (cur && active >= ui_text_lay.offset[w.from] && (active < ui_text_lay.offset[w.to] || w.to >= ui_text_lay.count))
                         *cur = rows;
                 rows++;
-                if (to >= ui_text_lay.count)
-                        break;
-                from = to;
         }
         return rows;
 }
