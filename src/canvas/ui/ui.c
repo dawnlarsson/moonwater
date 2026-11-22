@@ -17528,26 +17528,45 @@ static b32 ui_graph_meet(int ax, int ay, int aw, int ah, int bx, int by, int bw,
 }
 
 // Whether every node is held to node k at x, y across sides that meet: the desk is in one piece.
-static b32 ui_graph_held(const struct ui_graph address_to g, int k, int x, int y)
+// The nodes that meet each node, as a bit per node (for n up to UI_GRAPH_KEEP), each node's own bit aside; node k's place is its stored one here.
+static void ui_graph_adjacency(const struct ui_graph address_to g, unsigned long long address_to adj)
 {
-        unsigned char seen[UI_GRAPH_KEEP];
-        int queue[UI_GRAPH_KEEP], head = 0, tail = 0;
+        for (int i = 0; i < g->nodes; i++)
+        {
+                adj[i] = 0;
+                for (int j = 0; j < g->nodes; j++)
+                        if (j != i && ui_graph_meet(g->node[i].x, g->node[i].y, g->node[i].w, g->node[i].h, g->node[j].x, g->node[j].y, g->node[j].w, g->node[j].h))
+                                adj[i] |= 1ull << j;
+        }
+}
+
+// ui_graph_held with node k at x, y, and the others' meetings from adj (ui_graph_adjacency): the same answer, a bit walk instead of pairs.
+static b32 ui_graph_held_bits(const struct ui_graph address_to g, int k, int x, int y, const unsigned long long address_to adj)
+{
+        unsigned long long seen = 1ull << k, todo = seen, around = 0, all = g->nodes >= 64 ? ~0ull : (1ull << g->nodes) - 1;
         if (g->nodes > UI_GRAPH_KEEP)
                 return true;
-        memory_zero(seen, sizeof(seen));
-        seen[k] = 1, queue[tail++] = k;
-        while (head < tail)
+        for (int j = 0; j < g->nodes; j++)
+                if (j != k && ui_graph_meet(x, y, g->node[k].w, g->node[k].h, g->node[j].x, g->node[j].y, g->node[j].w, g->node[j].h))
+                        around |= 1ull << j;
+        while (todo)
         {
-                int at = queue[head++], ax = at == k ? x : g->node[at].x, ay = at == k ? y : g->node[at].y;
-                for (int j = 0; j < g->nodes; j++)
-                {
-                        int bx = j == k ? x : g->node[j].x, by = j == k ? y : g->node[j].y;
-                        if (seen[j] || !ui_graph_meet(ax, ay, g->node[at].w, g->node[at].h, bx, by, g->node[j].w, g->node[j].h))
-                                continue;
-                        seen[j] = 1, queue[tail++] = j;
-                }
+                int at = __builtin_ctzll(todo);
+                unsigned long long next = (at == k ? around : adj[at]) & ~seen;
+                todo &= todo - 1;
+                seen |= next, todo |= next;
         }
-        return tail == g->nodes;
+        return seen == all;
+}
+
+// Whether every node is held to node k at x, y across sides that meet (ui_graph_held_bits; the tests' form, which builds its own adjacency).
+static b32 ui_graph_held(const struct ui_graph address_to g, int k, int x, int y)
+{
+        unsigned long long adj[UI_GRAPH_KEEP];
+        if (g->nodes > UI_GRAPH_KEEP)
+                return true;
+        ui_graph_adjacency(g, adj);
+        return ui_graph_held_bits(g, k, x, y, adj);
 }
 
 // Whether node k at x, y is clear of every other node.
@@ -17566,8 +17585,11 @@ static b32 ui_graph_apart(const struct ui_graph address_to g, int k, int address
         b32 touch = (g->rules & UI_GRAPH_TOUCH) != 0, found = false, found_held = false;
         b64 best = 0;
         int best_x = *x, best_y = *y;
+        unsigned long long adj[UI_GRAPH_KEEP];
         if (g->nodes < 2 || (!touch && ui_graph_clear(g, k, *x, *y)))
                 return true;
+        if (touch && g->nodes <= UI_GRAPH_KEEP)
+                ui_graph_adjacency(g, adj);
         for (int j = 0; j < g->nodes; j++)
                 for (int side = 0; j != k && side < 4; side++)
                 {
@@ -17592,7 +17614,7 @@ static b32 ui_graph_apart(const struct ui_graph address_to g, int k, int address
                                 far = ((b64)cx - *x) * ((b64)cx - *x) + ((b64)cy - *y) * ((b64)cy - *y);
                                 if ((found && found_held && far >= best) || !ui_graph_clear(g, k, cx, cy))
                                         continue;
-                                held = !touch || ui_graph_held(g, k, cx, cy);
+                                held = !touch || ui_graph_held_bits(g, k, cx, cy, adj);
                                 if (!found || (held && !found_held) || (held == found_held && far < best))
                                         found = true, found_held = held, best = far, best_x = cx, best_y = cy;
                         }
