@@ -550,8 +550,10 @@ static fn installer_layout(void)
                    : installer.step == INSTALLER_STEP_NETWORK  ? (big->wifi_on ? big->net_count : 0)
                    : installer.step == INSTALLER_STEP_DISK     ? big->drive_count
                                                                : 0;
+        if (!ui_list_reserve(l, l->count))
+                l->count = 0;
         for (int k = 0; k < l->count; k++)
-                l->id[k] = (unsigned short)k;
+                l->id[k] = k;
         l->ids = l->count > 0 ? l->count : 1;
         l->empty = installer.step == INSTALLER_STEP_DISK      ? (installer.listed ? WORDS(installer_disk_none) : WORDS(installer_disk_looking))
                    : installer.step == INSTALLER_STEP_NETWORK ? (big->wifi_read ? WORDS(installer_wifi_none) : WORDS(installer_wifi_looking))

@@ -929,13 +929,13 @@ static const unsigned int address_to launcher_recent_picture(int id, int side)
 static fn launcher_tile_describe(const unsigned short address_to ids, int count, int id, struct ui_row address_to row,
                                  const unsigned int address_to (*pic)(int, int))
 {
-        static char names[2 * UI_LIST_MOST][UI_APP_NAME + 8];
+        static char names[1024][UI_APP_NAME + 8];
         static unsigned int next;
         char address_to label;
 
         if (id < 0 || id >= count)
                 return;
-        label = names[next++ % (2 * UI_LIST_MOST)];
+        label = names[next++ % 1024];
         launcher_app_safe_name(ids[id], label, UI_APP_NAME + 8);
         row->label = label;
         launcher_app_icon(ids[id], row);
@@ -958,8 +958,10 @@ static fn launcher_layout(void)
                 launcher.list.ids = LAUNCHER_ROWS, launcher.list.describe = launcher_describe,
                 launcher.list.damaged = launcher_damaged, launcher.list.hover = launcher.list.down = -1;
         launcher.list.count = (int)launcher.entries;
+        if (!ui_list_reserve(&launcher.list, launcher.list.count))
+                launcher.list.count = 0;
         for (int at = 0; at < launcher.list.count; at++)
-                launcher.list.id[at] = (unsigned short)at;
+                launcher.list.id[at] = at;
         launcher.list.lit = true;
         launcher_build(launcher.height);
 }

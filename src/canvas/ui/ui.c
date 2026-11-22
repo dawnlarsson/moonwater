@@ -21872,7 +21872,6 @@ static p32 ui_strips_event(struct ui address_to ui, struct ui_strips address_to 
 /* ---- a list of rows in sections ---- */
 // A list of rows in sections:
 
-#define UI_LIST_MOST 512 // the rows a list shows at once (the settings window's every row and list, 3 lists of 24 and All commands)
 #define UI_LIST_STARTS 1 // a row is its section's first
 #define UI_LIST_HEADED 2 // and its section has a header over it
 #define UI_LIST_COLUMNS 4 // and its section has a details column header (row.columns) over its rows
@@ -22048,7 +22047,7 @@ enum ui_list_grab
 struct ui_list
 {
         // The app's: the row (its own number) each place shows, in order, how it is described, and where a change must be...
-        unsigned short id[UI_LIST_MOST];
+        int address_to id;
         int count;
         int ids;                           // how many rows the app numbers: each has its controls while the window is open
         void (*describe)(int id, struct ui_row address_to row);
@@ -22065,10 +22064,12 @@ struct ui_list
         int total;
         // The kit's.
         int first;                         // a virtual list's row at place 0: the places are the rows in and near the view
-        int top[UI_LIST_MOST];             // each place's top, from the list's
-        int tall[UI_LIST_MOST];            // each place's height in device pixels: a row, or its share of one while it folds (ui_row.reveal)
-        int whole[UI_LIST_MOST];           // each place's line as tall as its words: a row, or more where they wrap (a tall row's line is a row)
-        unsigned char starts[UI_LIST_MOST]; // each place's first of a section, and with a header (UI_LIST_STARTS, _HEADED)
+        int address_to top;                // each place's top, from the list's
+        int address_to tall;               // each place's height in device pixels: a row, or its share of one while it folds (ui_row.reveal)
+        int address_to whole;              // each place's line as tall as its words: a row, or more where they wrap (a tall row's line is a row)
+        unsigned char address_to starts;   // each place's first of a section, and with a header (UI_LIST_STARTS, _HEADED)
+        positive room, slab_bytes;
+        void address_to slab;
         int content;
         int x, y, w, h;                    // where it is in the window, device pixels: the box its words and controls keep to
         int row_x, row_w;                  // how far across its rows run (hover, press, the row the keys are on), device pixels: 0 wide is x, w
@@ -22250,6 +22251,52 @@ static struct ui_control address_to ui_list_control(struct ui_list address_to l,
         }
 }
 
+static b32 ui_list_reserve(struct ui_list address_to l, int want)
+{
+        positive need = want > 0 ? (positive)want : 0, next, bytes;
+        long mapped;
+        p8 address_to mem;
+
+        if (need <= l->room)
+                return true;
+        next = l->room ? l->room : 64;
+        while (next < need)
+                next *= 2;
+        bytes = (next * (4 * sizeof(int) + 1) + 4095) & ~(positive)4095;
+        mapped = ui_map(bytes);
+        if (mapped < 0 && mapped > -4096)
+                return false;
+        mem = (p8 address_to)mapped;
+        {
+                int address_to nid = (int address_to)mem;
+                int address_to ntop = nid + next;
+                int address_to ntall = ntop + next;
+                int address_to nwhole = ntall + next;
+                unsigned char address_to nstarts = (unsigned char address_to)(nwhole + next);
+
+                if (l->room)
+                {
+                        memory_copy(nid, l->id, l->room * sizeof(int));
+                        memory_copy(ntop, l->top, l->room * sizeof(int));
+                        memory_copy(ntall, l->tall, l->room * sizeof(int));
+                        memory_copy(nwhole, l->whole, l->room * sizeof(int));
+                        memory_copy(nstarts, l->starts, l->room);
+                        system_call_2(syscall(munmap), (positive)l->slab, l->slab_bytes);
+                }
+                l->slab = mem, l->slab_bytes = bytes, l->room = next;
+                l->id = nid, l->top = ntop, l->tall = ntall, l->whole = nwhole, l->starts = nstarts;
+        }
+        return true;
+}
+
+static b32 ui_list_push(struct ui_list address_to l, int id)
+{
+        if (!ui_list_reserve(l, l->count + 1))
+                return false;
+        l->id[l->count++] = id;
+        return true;
+}
+
 // A virtual list's places for where it is scrolled to now:
 static fn ui_list_window(const struct ui address_to ui, struct ui_list address_to l)
 {
@@ -22262,9 +22309,13 @@ static fn ui_list_window(const struct ui address_to ui, struct ui_list address_t
         first = at_rest / row - margin;
         first = (first < 0 ? 0 : first) * per;
         count = ((l->scroll.view > 0 ? l->scroll.view : 0) / row + 2 + 2 * margin) * per;
-        count = count > UI_LIST_MOST ? UI_LIST_MOST / per * per : count;
         count = count > l->total - first ? l->total - first : count;
         count = count < 0 ? 0 : count;
+        if (!ui_list_reserve(l, count))
+        {
+                l->first = first, l->count = 0;
+                return;
+        }
         l->first = first, l->count = count;
         for (int at = 0; at < count; at++)
                 l->top[at] = (first + at) / per * row, l->tall[at] = l->whole[at] = row, l->starts[at] = 0;
@@ -22285,6 +22336,8 @@ static fn ui_list_layout(struct ui address_to ui, struct ui_list address_to l)
                 ui_list_window(ui, l);
                 return;
         }
+        if (l->count > 0 && !ui_list_reserve(l, l->count))
+                return;
         for (int at = 0; at < l->count; at++)
         {
                 struct ui_row row;
@@ -23097,6 +23150,20 @@ static int ui_list_least(struct ui address_to ui, struct ui_list address_to l)
         int most = 0;
         if (!l->wrap || !ui->regular || !l->describe)
                 return 0;
+        if (l->ids > 4096)
+        {
+                for (int at = 0; at < l->count; at++)
+                {
+                        struct ui_row row;
+                        int id = ui_list_id(l, at), least;
+                        ui_list_describe(l, id, &row);
+                        if (!row.label && !row.value && !row.kind)
+                                continue;
+                        least = ui_row_least(ui, l, id, &row);
+                        most = least > most ? least : most;
+                }
+                return most;
+        }
         for (int id = 0; id < l->ids; id++)
         {
                 struct ui_row row;

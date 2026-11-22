@@ -1163,7 +1163,10 @@ static unsigned int gpu_i915_submit(const struct gpu_job *job, p64 *bos, unsigne
                 gpu_i915.objects[n++].flags = GPU_I915_PINNED | wide | (gpu_i915.bound[handle].written ? GPU_I915_WRITTEN : 0);
         }
         memory_zero(&gpu_i915.objects[n], sizeof(gpu_i915.objects[n]));
-        gpu_i915.objects[n].handle = gpu_i915.main, gpu_i915.objects[n].offset = GPU_VA, gpu_i915.objects[n++].flags = GPU_I915_PINNED | wide | GPU_I915_WRITTEN;
+        // Gen7/7.5 (Ivy Bridge, Valleyview, Haswell): i915's command parser (eb_parse) rejects EXEC_OBJECT_WRITE on the
+        // batch BO itself with EINVAL; omit GPU_I915_WRITTEN on main for family < 800 (FENCE_OUT / GEM_WAIT still sync it).
+        gpu_i915.objects[n].handle = gpu_i915.main, gpu_i915.objects[n].offset = GPU_VA;
+        gpu_i915.objects[n++].flags = GPU_I915_PINNED | wide | (gpu.family < 800 ? 0 : GPU_I915_WRITTEN);
         run.buffers_ptr = (p64)gpu_i915.objects, run.buffer_count = n, run.batch_start_offset = (unsigned int)(job->packets - GPU_VA), run.batch_len = 4 * words;
         run.flags |= gpu_i915.fence ? GPU_I915_FENCE_OUT : 0, run.rsvd1 = gpu.ctx;
         if ((e = gpu_raw(gpu.fd, gpu_i915.fence ? GPU_I915_EXECBUFFER2_WR : GPU_I915_EXECBUFFER2, &run)) != 0)
