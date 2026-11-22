@@ -524,6 +524,8 @@ static void compositor_scale_fit(void)
 
 static void compositor_scale_set(int scale)
 {
+        // The desktop's scale is held to the range the settings take (25 to 800 percent): a divisor built from it is never zero.
+        scale = scale < 25 ? 25 : scale > 800 ? 800 : scale;
         compositor.scale = scale;
         if (compositor.table)
                 compositor.table->scale = (unsigned int)scale;
