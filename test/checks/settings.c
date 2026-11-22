@@ -5444,6 +5444,7 @@ static fn check_settings_device_strip(void)
                 settings_large->said[at] = text[at];
         settings.runner.length = length;
         settings_feed_hardware();
+        items = settings.item[2]; // the feed may grow the list: its rows are read where they are now
         check("settings: a drive's partitions are its strip, in order, with free room",
               settings.item_count[2] == 3 && items[0].kind == SETTINGS_NOTE && items[0].segment_count == 4 &&
                   items[0].segment_role[0] == 0 && items[0].segment_role[1] == 1 && items[0].segment_role[2] == 2 &&
