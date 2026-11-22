@@ -205,7 +205,8 @@ static b32 files_is_home(const p8 address_to path, const p8 address_to name, pos
         if (!home && !(home = getenv((string_address) "HOME")))
                 home = (string_address) "";
         at = at == 1 ? 0 : at;
-        return home[0] && !memory_compare(home, path, at) && home[at] == '/' && !memory_compare(home + at + 1, name, length) && !home[at + 1 + length];
+        return home[0] && string_length(home) > at && !memory_compare(home, path, at) && home[at] == '/' &&
+               string_length((string_address)(home + at + 1)) == length && !memory_compare(home + at + 1, name, length);
 }
 
 static unsigned int files_symbol(const struct files_model address_to m, const struct files_entry address_to e)
@@ -640,9 +641,11 @@ static fn files_undo(b32 again)
                 again_d.binned = d->kind == FILES_DEED_COPY ? (d->binned ? !done && d->binned : done > 0) : false;
                 files_unmap((address_any)pair, sizeof(*pair) * FILES_MOVE_MOST);
                 files_deed_free(&turned), files_deed_free(d), *d = again_d;
+                files.deed_done += again ? 1 : -1;
+                language_format(files.big->note, sizeof(files.big->note), again ? WORDS(files_redone) : WORDS(files_undone), done);
         }
-        files.deed_done += again ? 1 : -1;
-        language_format(files.big->note, sizeof(files.big->note), again ? WORDS(files_redone) : WORDS(files_undone), done);
+        else
+                files.said = LANGUAGE_files_failed;
         files_reload();
 }
 

@@ -2207,7 +2207,7 @@ static b32 files_bin_was(const p8 address_to bin, const p8 address_to name, p8 a
         p8 info[FILES_PATH], text[FILES_PATH * 3 + 128];
         bipolar got;
         positive at = 0, out = 0;
-        if (!files_bin_join(info, bin, "/info", name, ".trashinfo") ||
+        if (!files_name_good(name) || !files_bin_join(info, bin, "/info", name, ".trashinfo") ||
             (got = file_slurp_once_at(AT_FDCWD, (string_address)info, text, sizeof(text) - 1)) <= 0)
                 return false;
         text[got] = 0;
@@ -2231,6 +2231,8 @@ static int files_bin_restore(const p8 address_to bin, const p8 address_to name, 
         p8 from[FILES_PATH], info[FILES_PATH], folder_path[FILES_PATH], free[FILES_NAME];
         b32 numbered;
         bipolar folder, moved;
+        if (!files_name_good(name))
+                return FILES_DID_BAD;
         if (!files_bin_was(bin, name, back) || !files_bin_join(from, bin, "/files", name, null) ||
             !files_bin_join(info, bin, "/info", name, ".trashinfo") || !files_path_parent(back, folder_path, null) ||
             !files_bin_folders(folder_path) || (folder = files_open_dir(AT_FDCWD, folder_path, 0)) < 0)
