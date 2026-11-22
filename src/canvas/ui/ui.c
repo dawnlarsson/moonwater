@@ -8394,8 +8394,9 @@ static void ui_scene_plan(struct ui_scene address_to scene, const font_cell_plan
 }
 
 // A wide cell (one code point, two cells) of a code view, recorded for the GPU: the two cells' rectangle on the ground, then the glyph's translate.
-static void ui_scene_wide(struct ui address_to ui, const font_face address_to const address_to faces, p32 code, const font_metrics address_to grid, p32 em,
-                          const font_target address_to target, b32 ox, b32 oy, b32 x, b32 y, p32 colour, p32 background)
+static void ui_scene_wide(struct ui address_to ui, const font_face address_to const address_to faces, p32 count, p32 flags, p32 code,
+                          const font_metrics address_to grid, p32 em, const font_target address_to target, b32 ox, b32 oy, b32 x, b32 y, p32 colour,
+                          p32 background)
 {
         struct ui_scene address_to scene = ui->scene;
         font_cell_plan_t plan;
@@ -8404,7 +8405,7 @@ static void ui_scene_wide(struct ui address_to ui, const font_face address_to co
                 scene->lost = UI_LOST_ROOM;
                 return;
         }
-        font_cell_plan(ui->engine, faces, 2, code, 2, grid, em, 0, target, x, y, colour, background, &plan);
+        font_cell_plan(ui->engine, faces, count, code, 2, grid, em, flags, target, x, y, colour, background, &plan);
         ui_scene_plan(scene, &plan, colour, background, (p64)(unsigned long)plan.coverage, ui->engine->generation, ox, oy);
 }
 
@@ -30958,7 +30959,7 @@ static fn ui_text_draw_line(struct ui address_to ui, struct ui_text address_to t
                                                 if (doc_decode(l->shown + l->shown_at[k], size, &wide) == size && l->x[k + 1] - l->x[k] == 2 * t->cell)
                                                 {
                                                         if (ui->scene)
-                                                                ui_scene_wide(ui, faces, wide, &grid, ui_text_em(ui, t), &target, t->left, t->top, cell_x, cell_y, ink & 0xffffffu, paper);
+                                                                ui_scene_wide(ui, faces, 2, 0, wide, &grid, ui_text_em(ui, t), &target, t->left, t->top, cell_x, cell_y, ink & 0xffffffu, paper);
                                                         else
                                                                 font_cell(ui->engine, faces, 2, wide, 2, &grid, ui_text_em(ui, t), 0, &target, cell_x, cell_y, ink & 0xffffffu, paper);
                                                 }
