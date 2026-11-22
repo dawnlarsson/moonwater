@@ -3079,6 +3079,11 @@ static b32 doc_replace_in(struct doc address_to doc, p64 at, p64 removed, const 
                 return true;
         if (doc->recording && !array_store_reserve(doc->changes, doc->change_room, doc->change_count, doc->change_count + 1, 256))
                 return false;
+        // Every store the change needs is made room for before the tree is touched: the text added, the nodes its pieces
+        // take, and the history's pieces for what goes in. Then no step below can fail half way through.
+        if (length && (!array_store_reserve(doc->added, doc->added_room, doc->added_used, doc->added_used + length, 65536) ||
+                       !array_store_reserve(doc->nodes, doc->node_room, doc->node_used, doc->node_used + 4 + length / DOC_PIECE_MOST, 1024)))
+                return false;
         line = doc_line_of(doc, at);
         lines_before = doc_line_count(doc);
         change.removed_first = (p32)doc->piece_count;
@@ -3088,6 +3093,13 @@ static b32 doc_replace_in(struct doc address_to doc, p64 at, p64 removed, const 
                 return false;
         }
         change.removed_count = (p32)(doc->piece_count - change.removed_first);
+        // The history's pieces for the text put in (doc_keep below) have room too, now the removed ones are counted.
+        if (length && !array_store_reserve(doc->pieces, doc->piece_room, doc->piece_count,
+                                           doc->piece_count + length / DOC_PIECE_MOST + 4, 1024))
+        {
+                doc->piece_count = change.removed_first;
+                return false;
+        }
         if (!doc_split(doc, doc->root, at, &left, &middle_right))
         {
                 doc->root = doc_join(doc, left, middle_right);
@@ -3309,6 +3321,18 @@ static b32 doc_replay(struct doc address_to doc, b32 redo)
         if ((redo ? doc->done >= doc->group_count : !doc->done) || doc->depth)
                 return false;
         group = &doc->groups[redo ? doc->done : doc->done - 1];
+        // A swap takes at most two nodes for its splits and one for each piece it puts back. Room for all of them is made
+        // before the first swap, so a replay either happens whole or not at all.
+        {
+                p64 nodes = 0;
+                for (p32 i = 0; i < group->change_count; i++)
+                {
+                        const struct doc_change address_to ch = &doc->changes[group->change_first + i];
+                        nodes += 2 + (redo ? ch->inserted_count : ch->removed_count);
+                }
+                if (!array_store_reserve(doc->nodes, doc->node_room, doc->node_used, doc->node_used + nodes, 1024))
+                        return false;
+        }
         for (p32 i = 0; i < group->change_count; i++)
         {
                 const struct doc_change address_to ch = &doc->changes[group->change_first + (redo ? i : group->change_count - 1 - i)];
@@ -5321,25 +5345,15 @@ static b32 doc_replace_bulk(struct doc address_to doc, const struct doc_edit add
                 array_store_release(span, room, used);
                 return false;
         }
-        for (positive s = 0; s < doc->selection_count; s++)
-        {
-                struct doc_selection address_to sel = &doc->selections[s];
-                sel->anchor = doc_map(sel->anchor, edits, count, sel->anchor > sel->active);
-                sel->active = doc_map(sel->active, edits, count, sel->active >= sel->anchor);
-        }
-        {
-                struct doc_selection address_to kept = null;
-                positive kept_room = 0, n = doc->selection_count;
-                // The swap would move every selection inside the span to its end; they are put back where the map said.
-                if (array_store_reserve(kept, kept_room, 0, n, 16))
-                        memory_copy(kept, doc->selections, n * sizeof(*kept));
-                done = doc_replace_in(doc, start, finish - start, span, used);
-                if (kept)
+        done = doc_replace_in(doc, start, finish - start, span, used);
+        // The selections move with the text only when it changed: a replace that failed leaves them where they were.
+        if (done)
+                for (positive s = 0; s < doc->selection_count; s++)
                 {
-                        memory_copy(doc->selections, kept, n * sizeof(*kept));
-                        array_store_release(kept, kept_room, n);
+                        struct doc_selection address_to sel = &doc->selections[s];
+                        sel->anchor = doc_map(sel->anchor, edits, count, sel->anchor > sel->active);
+                        sel->active = doc_map(sel->active, edits, count, sel->active >= sel->anchor);
                 }
-        }
         doc_normalize(doc);
         doc_group_end(doc, 0);
         array_store_release(span, room, used);
