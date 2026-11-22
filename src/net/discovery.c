@@ -1097,8 +1097,9 @@ static fn discovery_stun_send(bipolar handle, discovery_found address_to found,
 }
 
 //      The answers that come until the monotonic clock reads until.
-static fn discovery_stun_wait(bipolar handle, discovery_found address_to found,
-                               p8 named, p8 transaction[2][12], p64 until)
+static fn discovery_stun_wait_from(bipolar handle, discovery_found address_to found,
+                                    const p32 address_to server, p8 named,
+                                    p8 transaction[2][12], p64 until)
 {
         positive discarded = 0;
 
@@ -1107,6 +1108,8 @@ static fn discovery_stun_wait(bipolar handle, discovery_found address_to found,
                 p64 now = clock_monotonic_nanoseconds();
                 timespec limit;
                 p8 answer[1500];
+                socket_address_internet peer;
+                p32 peer_size = sizeof peer;
                 bipolar got;
                 p8 matched = false;
 
@@ -1122,8 +1125,10 @@ static fn discovery_stun_wait(bipolar handle, discovery_found address_to found,
                         return;
                 if (ready <= 0)
                         continue;
+                memory_zero(address_of peer, sizeof peer);
                 got = socket_receive((b32)handle, answer, sizeof answer,
-                                     MSG_DONTWAIT | MSG_TRUNC, null, null);
+                                     MSG_DONTWAIT | MSG_TRUNC,
+                                     address_of peer, address_of peer_size);
                 if (got == NETWORK_TRY_AGAIN || got == NETWORK_INTERRUPTED)
                         continue;
                 if (got < 0)
@@ -1136,6 +1141,12 @@ static fn discovery_stun_wait(bipolar handle, discovery_found address_to found,
                                 p16 port = 0;
 
                                 if (!(found->answered & (1u << at)) &&
+                                    (!server ||
+                                     (peer_size == sizeof peer &&
+                                      peer.family == AF_INET &&
+                                      peer.host == network_order_32(server[at]) &&
+                                      peer.port == network_order_16(
+                                                       found->asked_of[at].port))) &&
                                     discovery_stun_read(answer, (positive)got,
                                                          transaction[at],
                                                          address, address_of port))
@@ -1150,6 +1161,12 @@ static fn discovery_stun_wait(bipolar handle, discovery_found address_to found,
                 if (!matched && discarded++ == NETWORK_DISCARD_MAX)
                         return;
         }
+}
+
+static fn discovery_stun_wait(bipolar handle, discovery_found address_to found,
+                               p8 named, p8 transaction[2][12], p64 until)
+{
+        discovery_stun_wait_from(handle, found, null, named, transaction, until);
 }
 
 /*      One socket, a request to each of the first two servers listed whose
@@ -1199,13 +1216,13 @@ static fn discovery_stun(discovery_found address_to found,
                 return;
         }
         discovery_stun_send(handle, found, server, named, transaction);
-        discovery_stun_wait(handle, found, named, transaction,
-                             start + (p64)settings->stun_ms * 500000ull);
+        discovery_stun_wait_from(handle, found, server, named, transaction,
+                                 start + (p64)settings->stun_ms * 500000ull);
         if ((found->answered & named) != named)
         {
                 discovery_stun_send(handle, found, server, named, transaction);
-                discovery_stun_wait(handle, found, named, transaction,
-                                     start + (p64)settings->stun_ms * 1000000ull);
+                discovery_stun_wait_from(handle, found, server, named, transaction,
+                                         start + (p64)settings->stun_ms * 1000000ull);
         }
         if (socket_name((b32)handle, address_of self, address_of self_size) >= 0)
                 found->local_port = network_order_16(self.port);

@@ -9895,6 +9895,91 @@ static COLD bool tls_spki_is_anchor(tls_cert address_to cert, p64 leaf_from)
         return false;
 }
 
+/* A served certificate matching a trust anchor by both subject Name and key:
+   populates anchor_out with the canonical anchor key (never the served
+   certificate's untrusted extensions, such as a stripped cRLSign KeyUsage)
+   and preserves the served SPKI span for CT verification. */
+static COLD bool tls_served_anchor(tls_cert address_to cert, p64 leaf_from,
+                                   tls_cert address_to anchor_out)
+{
+        p8 key[96];
+        p8 key_digest[32];
+        p8 name_digest[32];
+        positive coord = cert->curve == 1 ? 32 : 48;
+
+        if (cert->curve == 3)
+                crypto_sha256_of(cert->modulus, cert->modulus_length, key_digest);
+        else if (cert->curve == 1 || cert->curve == 2)
+        {
+                memory_copy(key, cert->qx + 48 - coord, coord);
+                memory_copy(key + coord, cert->qy + 48 - coord, coord);
+                crypto_sha256_of(key, coord * 2, key_digest);
+        }
+        else
+                return false;
+
+#ifdef TLS_BENCH_ANCHOR
+        if (cert->curve == 2 &&
+            !memory_compare(cert->qx, tls_bench_anchor_x, 48) &&
+            !memory_compare(cert->qy, tls_bench_anchor_y, 48))
+        {
+                if (tls_bench_distrusts(leaf_from) || tls_bench_refused())
+                        return false;
+                memory_fill(anchor_out, 0, sizeof(*anchor_out));
+                anchor_out->curve = 2;
+                memory_copy(anchor_out->qx, tls_bench_anchor_x, 48);
+                memory_copy(anchor_out->qy, tls_bench_anchor_y, 48);
+                anchor_out->spki = cert->spki;
+                anchor_out->spki_length = cert->spki_length;
+                return true;
+        }
+#endif
+
+        if (!cert->subject || !cert->subject_length)
+                return false;
+        crypto_sha256_of(cert->subject, cert->subject_length, name_digest);
+
+        for (positive i = 0; i < array_count(tls_anchors); i++)
+        {
+                tls_cert root;
+
+                if (tls_anchors[i].curve != cert->curve ||
+                    memory_compare(tls_anchors[i].name, name_digest, 8) ||
+                    memory_compare(tls_anchors[i].key_hash, key_digest, 8) ||
+                    tls_anchor_distrusts(tls_anchors + i, leaf_from) ||
+                    tls_anchor_refused(i) ||
+                    !tls_anchor_key(tls_anchors + i, address_of root))
+                        continue;
+                if (tls_same_key(address_of root, cert))
+                {
+                        root.spki = cert->spki;
+                        root.spki_length = cert->spki_length;
+                        address_to anchor_out = root;
+                        return true;
+                }
+        }
+
+        for (positive i = 0; i < tls_overlay_now.anchors && i < TLS_OVERLAY_ANCHORS; i++)
+        {
+                const tls_added_anchor address_to added = tls_overlay_now.anchor + i;
+                tls_cert root;
+
+                if (!added->refused && added->curve == cert->curve &&
+                    !memory_compare(added->name, name_digest, 32) &&
+                    tls_kept_key(added->curve, added->exponent, added->key,
+                                 added->key_length, address_of root) &&
+                    tls_same_key(address_of root, cert))
+                {
+                        root.spki = cert->spki;
+                        root.spki_length = cert->spki_length;
+                        address_to anchor_out = root;
+                        return true;
+                }
+        }
+
+        return false;
+}
+
 /* Whether a key is an EC key anyone can compute: k*G for a k up to
    TLS_SMALL_KEYS (tls_small_keys), which is how eMudhra's eight were made.
    The next CA to make that mistake is refused before anybody names its keys,
@@ -10540,8 +10625,9 @@ static COLD bool tls_verify_chain(p8 address_to body, positive body_length,
                         if (!(unusable >> next & 1) &&
                             tls_certificate_names_chain(certs + child,
                                                         certs + next) &&
-                            ((anchor = tls_spki_is_anchor(certs + next,
-                                                          leaf_from)) ||
+                            ((anchor = tls_served_anchor(certs + next,
+                                                         leaf_from,
+                                                         address_of root)) ||
                              tls_issuer_authorized(certs + next, depth, now)) &&
                             tls_verify_one(certs + child, certs + next) &&
                             tls_path_permitted(certs, path, depth + 1,
@@ -10577,8 +10663,9 @@ static COLD bool tls_verify_chain(p8 address_to body, positive body_length,
                         continue;
                 }
                 if (anchor)
-                        return tls_trust_holds(tls, certs, path, depth, certs + next,
-                                               staple, staple_length, now);
+                        return tls_trust_holds(tls, certs, path, depth,
+                                               address_of root, staple,
+                                               staple_length, now);
                 unusable |= (positive)1 << next;
                 child = next;
                 path[++depth] = next;
@@ -14776,6 +14863,7 @@ static COLD p8 tls_ocsp_answer(tls_cert address_to leaf, tls_cert address_to iss
                 if (!whole)
                         break;
                 if (tls_parse_cert(whole, size, address_of responder, null) ||
+                    tls_key_blocked(address_of responder) ||
                     responder.issuer_length != leaf->issuer_length ||
                     memory_compare(responder.issuer, leaf->issuer,
                                    leaf->issuer_length) ||
@@ -15125,11 +15213,19 @@ static COLD positive tls_plain_get(const p8 address_to url, positive length,
                 for (;;)
                 {
                         bipolar got;
-                        bool framed = !http_response_framing(into->bytes, into->used,
-                                                             address_of header,
-                                                             address_of response);
+                        bipolar framing = http_response_framing(
+                            into->bytes, into->used, address_of header,
+                            address_of response);
+                        bool framed = framing == HTTP_OK;
                         positive wanted;
 
+                        if (framing == HTTP_MALFORMED)
+                                break;
+                        if (framed &&
+                            (response.code != 200 ||
+                             (response.body_kind != HTTP_BODY_LENGTH &&
+                              response.body_kind != HTTP_BODY_CLOSE)))
+                                break;
                         if (framed && response.body_kind == HTTP_BODY_LENGTH &&
                             (response.body_length > most ||
                              into->used - header >= response.body_length))
@@ -18182,6 +18278,7 @@ static COLD bool dhcp_confine(b32 handle)
                             NET_APART_NOBODY, NET_APART_NOBODY) < 0 ||
               system_call_3(syscall(setresuid), NET_APART_NOBODY,
                             NET_APART_NOBODY, NET_APART_NOBODY) < 0)) ||
+            system_call_5(syscall(prctl), PR_SET_DUMPABLE, 0, 0, 0, 0) < 0 ||
             system_call_5(syscall(prctl), PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) < 0)
                 return false;
         dhcp_filter_build(address_of filter, handle);
