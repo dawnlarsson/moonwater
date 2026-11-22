@@ -5619,9 +5619,11 @@ static fn check_settings_device_strip(void)
                 settings.runner.length = length;
                 settings_feed_hardware();
                 items = settings.item[2]; // the feed may move the list: its rows are read where they are now
-                check("settings: a drive past the rows has no strip, the port before it keeps none, and a note says one is not shown",
-                      settings.item_count[2] == 24 && items[22].kind == SETTINGS_PORT && items[22].segment_count == 0 &&
-                          items[23].kind == SETTINGS_NOTE && string_equals((string_address)items[23].label, (string_address) "1 more not shown"));
+                // The feed lists the internal drive before the ports (the device sections), so the drive is the first row with its strip, and
+                // the 23 ports after it keep no strip; nothing is cut at this many rows.
+                check("settings: an internal drive is the first row with its strip, and the ports after it keep none",
+                      settings.item_count[2] == 24 && items[0].kind == SETTINGS_NOTE && items[0].segment_count == 1 &&
+                          items[1].kind == SETTINGS_PORT && items[1].segment_count == 0 && items[23].kind == SETTINGS_PORT && items[23].segment_count == 0);
                 length = 0;
                 for (const char address_to line = "  vdc drive 1024 MB view only\n"; *line; line++)
                         rows[length++] = *line;
