@@ -1399,6 +1399,14 @@ static int files_drives_parse(const p8 address_to text, positive length, struct 
 static p32 files_tree_after(const struct files_tree address_to t, p32 at);
 static fn files_tree_compact(struct files_tree address_to t);
 
+// A request a link never answered is given up after this long (nanoseconds); so is one a reopened link can no longer answer.
+#define FILES_RPC_WAIT_NS 15000000000ll
+
+static b32 files_rpc_overdue(p64 sent, p64 now)
+{
+        return now > sent && now - sent > FILES_RPC_WAIT_NS;
+}
+
 // A mount that holds the user's home (/home when the home is /home/u, or the home's own partition) is no drive of its own: the Home place is that folder.
 static b32 files_home_mount(const p8 address_to home, const p8 address_to mount)
 {

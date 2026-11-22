@@ -4443,6 +4443,8 @@ static fn browser_tree(void)
                 check("browser: a peer that left the list loses its node and its children; the local machine stays",
                       dropped);
         }
+        check("browser: a request a link never answered is given up after fifteen seconds, and not before; a clock that went back gives up nothing",
+              !files_rpc_overdue(0, 14999999999ll) && files_rpc_overdue(0, 15000000001ll) && !files_rpc_overdue(5, 3));
         {
                 static struct files_tree home_probe;
                 static const char mounts[] = "21 1 8:1 / / rw - ext4 /dev/sda1 rw\n26 21 8:3 / /home rw - ext4 /dev/sda3 rw\n";

@@ -1842,9 +1842,6 @@ static b32 files_rpc_free(void)
         return false;
 }
 
-// A request that a link never answered is given up after this long; so is one a reopened link can no longer answer.
-#define FILES_RPC_WAIT_NS 15000000000ll
-
 // Gives up one pending request: the node it was loading stops loading, and a navigation it was for fails.
 static fn files_rpc_forget(struct files_rpc address_to r)
 {
@@ -2189,7 +2186,7 @@ static fn files_remote_tick(long address_to timeout, long address_to other)
                 if (files.big->rpcs[r].kind != FILES_RPC_NONE)
                         busy = true;
         for (int r = 0; r < FILES_RPCS_MOST; r++)
-                if (files.big->rpcs[r].kind != FILES_RPC_NONE && (p64)ui_kit.now - files.big->rpcs[r].sent > FILES_RPC_WAIT_NS)
+                if (files.big->rpcs[r].kind != FILES_RPC_NONE && files_rpc_overdue(files.big->rpcs[r].sent, (p64)ui_kit.now))
                         files_rpc_forget(&files.big->rpcs[r]), files.dirty = true;
         if (busy)
                 *timeout = ui_timeout_min(*timeout, 50000000);
