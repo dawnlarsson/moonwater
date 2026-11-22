@@ -308,6 +308,9 @@ static p32 font_search(const font_face address_to face, positive table, p32 coun
 // Nearest integer division, halves away from zero, and 16.16 pixel scaling clamped to +-16384 px.
 static inline INLINE CONST b64 font_divide(b64 value, b64 denominator)
 {
+        //      A face that never loaded (or failed to load) has 0 units per em: its metrics are 0, not a divide error.
+        if (!denominator)
+                return 0;
         b64 half = denominator / 2;
         return value >= 0 ? (value + half) / denominator : -((half - value) / denominator);
 }
@@ -6280,6 +6283,8 @@ static b32 font_shape(font_engine address_to e, const font_face address_to face,
         *box = (font_bitmap){0};
         if (size >= FONT_SIZE_LIMIT)
                 return FONT_TOO_LARGE;
+        if (!face->units)
+                return FONT_BAD;
 
         b32 standard = style & 4 ? font_stem_standard(e, face) : 0;
         b32 zones[FONT_ZONES] = {0};

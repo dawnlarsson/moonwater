@@ -4598,6 +4598,20 @@ static fn reverse_put16(p8 address_to at, p32 value)
 //      Two overlapping rectangles (two contours, stems that cross: 0 to 10 px and 5 to 15 px) snapped on the x axis keep
 //      their order: a point left of another in the outline is not right of it after the snap. Without the fix the stems'
 //      map is not monotone, and points cross.
+//      A face that never loaded has 0 units per em: its metrics and advances are 0 and a glyph is refused, with no
+//      divide by its units (the mutant traps with SIGFPE here, which took the whole settings group down).
+static fn check_zero_face(void)
+{
+        static font_face zero;
+        static p8 coverage[64];
+        font_bitmap box;
+        font_metrics metrics = font_metrics_at(&zero, 18 * 64);
+        b32 refused = font_render(&engine, &zero, 3, 18 * 64, 0, 0, coverage, 8, 64, &box);
+
+        check("zero face: metrics, advance and a glyph are answered without a divide by the units",
+              metrics.cell_width >= 1 && font_advance(&zero, 3, 18 * 64) == 0 && refused < 0);
+}
+
 //      A lead byte that is interrupted: one U+FFFD for the lead, and the letter after it is read, not lost (the feed
 //      consumed the interrupting byte, so the letter was gone).
 static fn check_decode_bad_lead(void)
@@ -4976,6 +4990,7 @@ b32 main()
         check_reverse_multiple();
         check_cell_run(&two);
         check_decode_bad_lead();
+        check_zero_face();
         check_crossing_stems();
         //      Last: it loads faces until the 16-bit ids run out, and no face loads after it.
         check_edges(&one, &two);
