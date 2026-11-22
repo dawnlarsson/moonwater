@@ -9715,7 +9715,7 @@ static fn view_scroll_rest(void)
 static fn check_kit_view_scroll(void)
 {
         struct ui_scroll address_to s = &view_check.scroll[0];
-        const struct ui_node address_to box = &view_check.tree.node[2], address_to row = &view_check.tree.node[3];
+        const struct ui_node address_to box, address_to row; // the tree's nodes: taken after the first build, which makes them
         unsigned int wheel_off = ui_kit.wheel_off, scroll_off = ui_kit.scroll_off, speed = ui_kit.scroll_speed;
         int notch = UI_ROW * UI_WHEEL_TENTHS / 10, most = 12 * 60 - 150, outside = 0;
         b32 held = true, busy;
@@ -9728,6 +9728,7 @@ static fn check_kit_view_scroll(void)
         ui_kit.now = ui_kit.test_clock = 7000000000ll;
         view_scroll_nested = false;
         view_scroll_build();
+        box = &view_check.tree.node[2], row = &view_check.tree.node[3];
         check("kit view scroll: a column that scrolls has the room its window leaves it and its rows keep their size, and its scroller is the view's: what scrolls, what shows of it, and its bar down the trailing edge",
               view_check.scrolls == 1 && box->y == 40 && box->h == 150 && row[0].y == 40 && row[0].h == 60 && row[11].y == 40 + 11 * 60 && s->content == 12 * 60 &&
                   s->view == 150 && s->y == 40 && s->height == 150 && s->x == 200 - UI_SCROLL_WIDTH && s->scroll == 0);
