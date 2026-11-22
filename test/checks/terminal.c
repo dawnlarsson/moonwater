@@ -564,11 +564,13 @@ static long card_fake_node(unsigned int minor)
 static void card_fake_mode_at(struct compositor_mode address_to mode, unsigned int hz, unsigned int type)
 {
         memory_zero(mode, sizeof(*mode));
-        mode->clock = 100000 * hz / 60; // the panel's timings at hz
         mode->hdisplay = card_fake.width, mode->hsync_start = card_fake.width + 8, mode->hsync_end = card_fake.width + 16;
         mode->htotal = card_fake.width + 32;
         mode->vdisplay = card_fake.height, mode->vsync_start = card_fake.height + 2, mode->vsync_end = card_fake.height + 4;
         mode->vtotal = card_fake.height + 8;
+        // The panel's timings at hz: the clock in kHz that makes htotal by vtotal pixels hz times a second, so the mode's period from its
+        // timings (compositor_mode_period) is the frame of hz. (It was 100000 * hz / 60, which made a 3.4 ms frame at 144 Hz.)
+        mode->clock = (unsigned int)((unsigned long long)mode->htotal * mode->vtotal * hz / 1000);
         mode->vrefresh = hz;
         mode->type = type;
 }

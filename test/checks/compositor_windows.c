@@ -1564,8 +1564,15 @@ static void check_compositor_rate_fastest(void)
     struct windows *const table_at = windows_scratch_table(&table_scratch);
     static const unsigned int rates[3] = {60, 144, 120};
     struct windows address_to kept_kit = ui_kit_table;
-    positive period = 1000000000ull / 144, presented;
+    struct compositor_mode fixture;
+    positive period, period60, presented;
 
+    // The frame is the mode's period from its timings (compositor_mode_period, a295d2992), which the fake panel's are made to say (card_fake_mode_at):
+    // about 6.94 ms at 144 Hz and 16.7 ms at 60 Hz, not 1e9 over the refresh, which the timings' own period need not be to the nanosecond.
+    card_fake_mode_at(&fixture, 144, 0);
+    period = compositor_mode_period(&fixture, 144);
+    card_fake_mode_at(&fixture, 60, 0);
+    period60 = compositor_mode_period(&fixture, 60);
     if (!card_walk_begin(1ul << 0, 0, 0, 0))
     {
         check("rate: the fake card is made", false);
@@ -1629,7 +1636,7 @@ static void check_compositor_rate_fastest(void)
     compositor.retrain = 1;
     compositor_space_retake();
     check("rate: a take at another rate is the table's period too (it was the first take's for the session)",
-          compositor.output[0].mode.vrefresh == 60 && compositor.period == 1000000000ull / 60 && table_at->period == 1000000000u / 60);
+          compositor.output[0].mode.vrefresh == 60 && compositor.period == period60 && table_at->period == (unsigned int)period60);
     card_fake.rate_count = 3, memory_copy(card_fake.rates, rates, sizeof(rates)), card_fake.crtc_rate = 60;
     compositor.retrain = 1;
     compositor_space_retake();
