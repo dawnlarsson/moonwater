@@ -694,6 +694,20 @@ static void terminal_rec_glyphs(struct terminal_painter address_to painter, unsi
         painter->ui.scene = null;
 }
 
+/* A wide character's pair, recorded over two cells: the kit's wide record takes the face count and the style flags. */
+static void terminal_rec_wide(struct terminal_painter address_to painter, unsigned int address_to pixels, unsigned int from, b32 heavy,
+                              p32 flags, unsigned int code, int y, unsigned int ink, unsigned int paper)
+{
+        font_target target = {pixels, terminal.pitch, (b32)terminal.width, (b32)terminal.height};
+
+        if (pixels != terminal.rec_grid)
+                return (void)(terminal.ui.scene->lost = UI_LOST_TERM_FONT);
+        painter->ui.scene = terminal.ui.scene;
+        ui_scene_wide(&painter->ui, heavy ? terminal.bold : terminal.plain, heavy ? terminal.bold_count : terminal.plain_count, flags, code,
+                      &terminal.grid, terminal.size, &target, (b32)terminal.pad, (b32)terminal.pad_y, (b32)(from * terminal.cell_w), y, ink, paper);
+        painter->ui.scene = null;
+}
+
 static p32 terminal_style(const struct window_cell address_to cell)
 {
         return (cell->flags & WINDOW_CELL_ITALIC ? FONT_OBLIQUE : 0) |
@@ -860,14 +874,17 @@ static void terminal_row(struct terminal_painter address_to painter, unsigned in
                         continue;
                 if (cell->flags & WINDOW_CELL_DIM)
                         ink = terminal_mix(ink, paper);
-                if (pair && terminal_recording())
-                        terminal.ui.scene->lost = UI_LOST_TERM_WIDE;
                 if (glyph)
                 {
                         b32 heavy = (cell->flags & WINDOW_CELL_BOLD) && terminal.bold_count;
                         if (terminal_recording())
-                                painter->codes[0] = cell->character,
-                                terminal_rec_glyphs(painter, pixels, at, 1, heavy, terminal_style(cell), y, ink, paper);
+                        {
+                                if (pair)
+                                        terminal_rec_wide(painter, pixels, at, heavy, terminal_style(cell), cell->character, y, ink, paper);
+                                else
+                                        painter->codes[0] = cell->character,
+                                        terminal_rec_glyphs(painter, pixels, at, 1, heavy, terminal_style(cell), y, ink, paper);
+                        }
                         else
                                 font_cell(painter->ui.engine, heavy ? terminal.bold : terminal.plain,
                                           heavy ? terminal.bold_count : terminal.plain_count, cell->character,
