@@ -6,6 +6,7 @@
 # machine-made 2026-11-22 (the ids 8a55b4ad0 and the taskbar left out), not yet read by a person: files_remote_denied files_remote_offline files_remote_opening files_this_machine taskbar_tab_uninstall
 # machine-made 2026-11-22 (two registry texts that had no keyed line), not yet read by a person: =Purge unconnected links =The screen backlight, from 0 to 100 percent. ...
 # machine-made 2026-11-22 (a registry text that had no keyed line), not yet read by a person: =An experimental speed-up. ...
+# machine-made 2026-11-22 (the Waterlink words of Settings), not yet read by a person: settings_link_address settings_link_disabled settings_link_files settings_link_files_about settings_link_group settings_link_latency settings_link_log settings_link_log_about settings_link_mismatch settings_link_no_key settings_link_offline settings_link_online settings_link_run settings_link_run_about settings_link_self settings_link_shell settings_link_shell_about settings_link_traffic
 @language sv
 @name Svenska
 @translated machine
@@ -329,6 +330,24 @@ settings_item_open	4429	Enter ansluter och sparar
 settings_item_saved	3ffd	sparad: Enter frågar efter lösenordet igen, Delete glömmer den
 settings_joined	1050	ansluten
 settings_kept	4759	sparad
+settings_link_address	60f3	Adress
+settings_link_disabled	08dd	Avstängt globalt på den här maskinen
+settings_link_files	b058	Åtkomst till filsystemet
+settings_link_files_about	a65e	Bläddra, ladda upp och ladda ned filer
+settings_link_group	902c	Grupp
+settings_link_latency	5ef9	Latens
+settings_link_log	e57a	Kärnlogg
+settings_link_log_about	f0d9	Strömma systemloggar
+settings_link_mismatch	5778	Nyckeln stämmer inte
+settings_link_no_key	9963	ingen nyckel än
+settings_link_offline	37c8	Offline
+settings_link_online	88aa	Online
+settings_link_run	9874	Köra kommandon
+settings_link_run_about	ba14	Köra enstaka fjärrkommandon
+settings_link_self	bc70	den här maskinen
+settings_link_shell	0fbd	Interaktivt skal
+settings_link_shell_about	5034	Öppna en terminalsession på distans
+settings_link_traffic	9266	Trafik
 settings_map_drag	125f	Släpp för att placera skärmen
 settings_map_fit	797e	Visa alla skärmar
 settings_map_hint	0257	Dra en skärm för att flytta den. Dra rutnätet för att panorera, rulla för att zooma.

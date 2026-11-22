@@ -6,6 +6,7 @@
 # machine-made 2026-11-22 (the ids 8a55b4ad0 and the taskbar left out), not yet read by a person: files_remote_denied files_remote_offline files_remote_opening files_this_machine taskbar_tab_uninstall
 # machine-made 2026-11-22 (two registry texts that had no keyed line), not yet read by a person: =Purge unconnected links =The screen backlight, from 0 to 100 percent. ...
 # machine-made 2026-11-22 (a registry text that had no keyed line), not yet read by a person: =An experimental speed-up. ...
+# machine-made 2026-11-22 (the Waterlink words of Settings), not yet read by a person: settings_link_address settings_link_disabled settings_link_files settings_link_files_about settings_link_group settings_link_latency settings_link_log settings_link_log_about settings_link_mismatch settings_link_no_key settings_link_offline settings_link_online settings_link_run settings_link_run_about settings_link_self settings_link_shell settings_link_shell_about settings_link_traffic
 @language de
 @name Deutsch
 @translated machine
@@ -329,6 +330,24 @@ settings_item_open	4429	Enter verbindet und speichert es
 settings_item_saved	3ffd	gespeichert: Enter fragt das Passwort erneut, Delete vergisst es
 settings_joined	1050	verbunden
 settings_kept	4759	gemerkt
+settings_link_address	60f3	Adresse
+settings_link_disabled	08dd	Auf dieser Maschine global deaktiviert
+settings_link_files	b058	Zugriff auf das Dateisystem
+settings_link_files_about	a65e	Dateien durchsuchen, hochladen und herunterladen
+settings_link_group	902c	Gruppe
+settings_link_latency	5ef9	Latenz
+settings_link_log	e57a	Kernel-Protokoll
+settings_link_log_about	f0d9	Systemprotokolle streamen
+settings_link_mismatch	5778	Schlüssel passt nicht
+settings_link_no_key	9963	noch kein Schlüssel
+settings_link_offline	37c8	Offline
+settings_link_online	88aa	Online
+settings_link_run	9874	Befehle ausführen
+settings_link_run_about	ba14	Einzelne Befehle aus der Ferne ausführen
+settings_link_self	bc70	diese Maschine
+settings_link_shell	0fbd	Interaktive Shell
+settings_link_shell_about	5034	Eine Terminalsitzung aus der Ferne öffnen
+settings_link_traffic	9266	Datenverkehr
 settings_map_drag	125f	Loslassen, um den Bildschirm zu platzieren
 settings_map_fit	797e	Alle Bildschirme zeigen
 settings_map_hint	0257	Einen Bildschirm ziehen, um ihn zu verschieben. Das Raster ziehen, um die Ansicht zu bewegen, scrollen zum Zoomen.

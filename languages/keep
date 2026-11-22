@@ -32,6 +32,7 @@ src/canvas/ui/settings.c	Internal storage
 src/canvas/ui/settings.c	External devices
 src/canvas/ui/settings.c	Waterlink
 src/canvas/ui/settings.c	Linked machines
+src/canvas/ui/settings.c	This machine
 src/canvas/ui/settings.c	MB
 src/canvas/ui/ui.c	Ctrl
 src/canvas/ui/ui.c	Shift
@@ -61,6 +62,7 @@ src/canvas/ui/settings.c	link
 src/canvas/ui/settings.c	  next:
 src/canvas/ui/settings.c	  this machine  
 src/canvas/ui/settings.c	  allow 
+src/canvas/ui/settings.c	no key yet
 src/canvas/ui/settings.c	 from 
 src/canvas/ui/settings.c	from 
 src/canvas/ui/settings.c	last address 

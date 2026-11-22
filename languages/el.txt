@@ -6,6 +6,7 @@
 # machine-made 2026-11-22 (the ids 8a55b4ad0 and the taskbar left out), not yet read by a person: files_remote_denied files_remote_offline files_remote_opening files_this_machine taskbar_tab_uninstall
 # machine-made 2026-11-22 (two registry texts that had no keyed line), not yet read by a person: =Purge unconnected links =The screen backlight, from 0 to 100 percent. ...
 # machine-made 2026-11-22 (a registry text that had no keyed line), not yet read by a person: =An experimental speed-up. ...
+# machine-made 2026-11-22 (the Waterlink words of Settings), not yet read by a person: settings_link_address settings_link_disabled settings_link_files settings_link_files_about settings_link_group settings_link_latency settings_link_log settings_link_log_about settings_link_mismatch settings_link_no_key settings_link_offline settings_link_online settings_link_run settings_link_run_about settings_link_self settings_link_shell settings_link_shell_about settings_link_traffic
 @language el
 @name Ελληνικά
 @translated machine
@@ -329,6 +330,24 @@ settings_item_open	4429	το Enter συνδέεται και το αποθηκε
 settings_item_saved	3ffd	αποθηκευμένο: το Enter ζητά ξανά τον κωδικό, το Delete το ξεχνά
 settings_joined	1050	συνδεδεμένο
 settings_kept	4759	κρατημένο
+settings_link_address	60f3	Διεύθυνση
+settings_link_disabled	08dd	Απενεργοποιημένο καθολικά σε αυτό το μηχάνημα
+settings_link_files	b058	Πρόσβαση στο σύστημα αρχείων
+settings_link_files_about	a65e	Περιήγηση, μεταφόρτωση και λήψη αρχείων
+settings_link_group	902c	Ομάδα
+settings_link_latency	5ef9	Καθυστέρηση
+settings_link_log	e57a	Αρχείο καταγραφής πυρήνα
+settings_link_log_about	f0d9	Ροή αρχείων καταγραφής συστήματος
+settings_link_mismatch	5778	Το κλειδί δεν ταιριάζει
+settings_link_no_key	9963	δεν υπάρχει ακόμη κλειδί
+settings_link_offline	37c8	Εκτός σύνδεσης
+settings_link_online	88aa	Σε σύνδεση
+settings_link_run	9874	Εκτέλεση εντολών
+settings_link_run_about	ba14	Εκτέλεση μεμονωμένων απομακρυσμένων εντολών
+settings_link_self	bc70	αυτό το μηχάνημα
+settings_link_shell	0fbd	Διαδραστικό κέλυφος
+settings_link_shell_about	5034	Άνοιγμα απομακρυσμένης συνεδρίας τερματικού
+settings_link_traffic	9266	Κίνηση δικτύου
 settings_map_drag	125f	Αφήστε για να τοποθετηθεί η οθόνη
 settings_map_fit	797e	Εμφάνιση όλων των οθονών
 settings_map_hint	0257	Σύρετε μια οθόνη για να τη μετακινήσετε. Σύρετε το πλέγμα για μετατόπιση, κυλήστε για ζουμ.

@@ -6,6 +6,7 @@
 # machine-made 2026-11-22 (the ids 8a55b4ad0 and the taskbar left out), not yet read by a person: files_remote_denied files_remote_offline files_remote_opening files_this_machine taskbar_tab_uninstall
 # machine-made 2026-11-22 (two registry texts that had no keyed line), not yet read by a person: =Purge unconnected links =The screen backlight, from 0 to 100 percent. ...
 # machine-made 2026-11-22 (a registry text that had no keyed line), not yet read by a person: =An experimental speed-up. ...
+# machine-made 2026-11-22 (the Waterlink words of Settings), not yet read by a person: settings_link_address settings_link_disabled settings_link_files settings_link_files_about settings_link_group settings_link_latency settings_link_log settings_link_log_about settings_link_mismatch settings_link_no_key settings_link_offline settings_link_online settings_link_run settings_link_run_about settings_link_self settings_link_shell settings_link_shell_about settings_link_traffic
 @language es
 @name Español
 @translated machine
@@ -329,6 +330,24 @@ settings_item_open	4429	Enter se conecta y la guarda
 settings_item_saved	3ffd	guardada: Enter vuelve a pedir su contraseña, Delete la olvida
 settings_joined	1050	conectado
 settings_kept	4759	guardado
+settings_link_address	60f3	Dirección
+settings_link_disabled	08dd	Desactivado globalmente en esta máquina
+settings_link_files	b058	Acceso al sistema de archivos
+settings_link_files_about	a65e	Explorar, subir y descargar archivos
+settings_link_group	902c	Grupo
+settings_link_latency	5ef9	Latencia
+settings_link_log	e57a	Registro del kernel
+settings_link_log_about	f0d9	Transmitir los registros del sistema
+settings_link_mismatch	5778	La clave no coincide
+settings_link_no_key	9963	aún sin clave
+settings_link_offline	37c8	Sin conexión
+settings_link_online	88aa	En línea
+settings_link_run	9874	Ejecutar comandos
+settings_link_run_about	ba14	Ejecutar comandos remotos individuales
+settings_link_self	bc70	esta máquina
+settings_link_shell	0fbd	Shell interactivo
+settings_link_shell_about	5034	Abrir una sesión de terminal remota
+settings_link_traffic	9266	Tráfico
 settings_map_drag	125f	Suelte para colocar la pantalla
 settings_map_fit	797e	Mostrar todas las pantallas
 settings_map_hint	0257	Arrastre una pantalla para moverla. Arrastre la cuadrícula para desplazar la vista y use la rueda para hacer zoom.

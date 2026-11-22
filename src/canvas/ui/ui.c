@@ -6767,6 +6767,24 @@ LANGUAGE_ID(settings_item_open, "Enter joins it, and saves it") \
 LANGUAGE_ID(settings_item_saved, "saved: Enter types its passphrase again, Delete forgets it") \
 LANGUAGE_ID(settings_joined, "joined") \
 LANGUAGE_ID(settings_kept, "kept") \
+LANGUAGE_ID(settings_link_address, "Address") \
+LANGUAGE_ID(settings_link_disabled, "Disabled globally on this machine") \
+LANGUAGE_ID(settings_link_files, "Filesystem access") \
+LANGUAGE_ID(settings_link_files_about, "Browse, upload, and download files") \
+LANGUAGE_ID(settings_link_group, "Group") \
+LANGUAGE_ID(settings_link_latency, "Latency") \
+LANGUAGE_ID(settings_link_log, "Kernel log") \
+LANGUAGE_ID(settings_link_log_about, "Stream system logs") \
+LANGUAGE_ID(settings_link_mismatch, "Key mismatch") \
+LANGUAGE_ID(settings_link_no_key, "no key yet") \
+LANGUAGE_ID(settings_link_offline, "Offline") \
+LANGUAGE_ID(settings_link_online, "Online") \
+LANGUAGE_ID(settings_link_run, "Run commands") \
+LANGUAGE_ID(settings_link_run_about, "Execute single remote commands") \
+LANGUAGE_ID(settings_link_self, "this machine") \
+LANGUAGE_ID(settings_link_shell, "Interactive shell") \
+LANGUAGE_ID(settings_link_shell_about, "Open a remote terminal session") \
+LANGUAGE_ID(settings_link_traffic, "Traffic") \
 LANGUAGE_ID(settings_map_drag, "Let go to place the screen") \
 LANGUAGE_ID(settings_map_fit, "Show all screens") \
 LANGUAGE_ID(settings_map_hint, "Drag a screen to move it. Drag the grid to pan, scroll to zoom.") \

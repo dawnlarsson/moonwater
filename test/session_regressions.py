@@ -1439,7 +1439,7 @@ def test_hardening_66_bug_families():
           "SETTINGS_SUB_LINK_GRANT" in settings_c and
           "SETTINGS_SUB_LINK_INFO" in settings_c and
           "settings_link_global_grants" in settings_c and
-          "Disabled globally on this machine" in settings_c and
+          "WORDS(settings_link_disabled)" in settings_c and
           "settings_link_rows(" in settings_c and
           "settings_link_follow();" in settings_c and
           "settings_link_grant_toggle(" in settings_c and

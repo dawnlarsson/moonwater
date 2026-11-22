@@ -6,6 +6,7 @@
 # machine-made 2026-11-22 (the ids 8a55b4ad0 and the taskbar left out), not yet read by a person: files_remote_denied files_remote_offline files_remote_opening files_this_machine taskbar_tab_uninstall
 # machine-made 2026-11-22 (two registry texts that had no keyed line), not yet read by a person: =Purge unconnected links =The screen backlight, from 0 to 100 percent. ...
 # machine-made 2026-11-22 (a registry text that had no keyed line), not yet read by a person: =An experimental speed-up. ...
+# machine-made 2026-11-22 (the Waterlink words of Settings), not yet read by a person: settings_link_address settings_link_disabled settings_link_files settings_link_files_about settings_link_group settings_link_latency settings_link_log settings_link_log_about settings_link_mismatch settings_link_no_key settings_link_offline settings_link_online settings_link_run settings_link_run_about settings_link_self settings_link_shell settings_link_shell_about settings_link_traffic
 @language it
 @name Italiano
 @translated machine
@@ -329,6 +330,24 @@ settings_item_open	4429	Enter si connette e la salva
 settings_item_saved	3ffd	salvata: Enter chiede di nuovo la password, Delete la dimentica
 settings_joined	1050	connesso
 settings_kept	4759	conservato
+settings_link_address	60f3	Indirizzo
+settings_link_disabled	08dd	Disattivato globalmente su questa macchina
+settings_link_files	b058	Accesso al file system
+settings_link_files_about	a65e	Sfogliare, caricare e scaricare file
+settings_link_group	902c	Gruppo
+settings_link_latency	5ef9	Latenza
+settings_link_log	e57a	Registro del kernel
+settings_link_log_about	f0d9	Trasmettere i registri di sistema
+settings_link_mismatch	5778	Chiave non corrispondente
+settings_link_no_key	9963	ancora nessuna chiave
+settings_link_offline	37c8	Non in linea
+settings_link_online	88aa	In linea
+settings_link_run	9874	Eseguire comandi
+settings_link_run_about	ba14	Eseguire singoli comandi remoti
+settings_link_self	bc70	questa macchina
+settings_link_shell	0fbd	Shell interattiva
+settings_link_shell_about	5034	Aprire una sessione di terminale remota
+settings_link_traffic	9266	Traffico
 settings_map_drag	125f	Rilascia per posizionare lo schermo
 settings_map_fit	797e	Mostra tutti gli schermi
 settings_map_hint	0257	Trascina uno schermo per spostarlo. Trascina la griglia per spostare la vista, scorri per lo zoom.

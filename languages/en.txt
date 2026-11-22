@@ -321,6 +321,24 @@ settings_item_open	4429	Enter joins it, and saves it
 settings_item_saved	3ffd	saved: Enter types its passphrase again, Delete forgets it
 settings_joined	1050	joined
 settings_kept	4759	kept
+settings_link_address	60f3	Address
+settings_link_disabled	08dd	Disabled globally on this machine
+settings_link_files	b058	Filesystem access
+settings_link_files_about	a65e	Browse, upload, and download files
+settings_link_group	902c	Group
+settings_link_latency	5ef9	Latency
+settings_link_log	e57a	Kernel log
+settings_link_log_about	f0d9	Stream system logs
+settings_link_mismatch	5778	Key mismatch
+settings_link_no_key	9963	no key yet
+settings_link_offline	37c8	Offline
+settings_link_online	88aa	Online
+settings_link_run	9874	Run commands
+settings_link_run_about	ba14	Execute single remote commands
+settings_link_self	bc70	this machine
+settings_link_shell	0fbd	Interactive shell
+settings_link_shell_about	5034	Open a remote terminal session
+settings_link_traffic	9266	Traffic
 settings_map_drag	125f	Let go to place the screen
 settings_map_fit	797e	Show all screens
 settings_map_hint	0257	Drag a screen to move it. Drag the grid to pan, scroll to zoom.
