@@ -110,7 +110,7 @@ static struct
         b32 drag_chosen, carrying, cut_dim, band_add, carry_press, drop_over, sheet, sheet_folder, measuring, menu_view;
         p32 seen, naming, armed_at, drag_place, carry_count, band_base_count, tree_at, tree_shown;
         b64 next_look, next_show, carry_at, flash_at, spring_at, next_progress, typed_at, next_census;
-        b32 census_again;
+        b32 census_again, emptying; // emptying: the delete running is Empty the bin's
         int uevents; // the kernel's uevents: a block device that comes or goes wakes the window
         struct ui_job runner;
         struct ui_job device;  // moonwater device open, writable, eject or tidy, one at a time
@@ -410,15 +410,20 @@ static fn files_status_text(void)
         else if (m->state == FILES_READY && m->chosen_count > 1)
         {
                 p64 bytes = 0;
+                p32 files_chosen = 0;
                 char size[16];
                 for (p32 p = 0; p < files_model_count(m); p++)
                 {
                         const struct files_entry address_to e = files_model_entry(m, p);
                         if (e->kind == FILES_KIND_FILE && files_model_chosen(m, p))
-                                bytes += e->size;
+                                bytes += e->size, files_chosen++;
                 }
+                // Folders alone have no size said here (theirs is measured in the properties sheet): the count alone.
                 ui_size_text(size, sizeof(size), bytes);
-                language_format(into, room, WORDS(files_chosen_size), (int)m->chosen_count, (int)m->shown.count, size);
+                if (files_chosen)
+                        language_format(into, room, WORDS(files_chosen_size), (int)m->chosen_count, (int)m->shown.count, size);
+                else
+                        language_format(into, room, WORDS(files_chosen), (int)m->chosen_count, (int)m->shown.count);
         }
         else if (m->state == FILES_READY && m->filter_length)
                 language_format(into, room, WORDS(files_count_found), (int)files_model_count(m), (int)m->shown.count);
@@ -860,6 +865,7 @@ static fn files_bin_empty(void)
         b32 sure = files.armed && files.armed_at == m->revision;
         if (!sure)
                 files_select_all(m);
+        files.emptying = sure;
         if (sure)
                 for (p32 at = 0; at < files_model_count(m); at++)
                 {
@@ -3119,8 +3125,11 @@ static long files_tick(long timeout, long address_to other)
                         ui_label_foreign(at, 96, job->at, string_length(job->at));
                         if (job->state == FILES_JOB_FAILED)
                                 language_format(files.big->note, sizeof(files.big->note), WORDS(files_delete_stopped), (int)job->removed, at);
+                        else if (files.emptying && files_in_bin())
+                                files.big->note[0] = 0, files.said = LANGUAGE_files_bin_emptied; // Empty the bin ran to its end: the bin is empty
                         else
                                 language_format(files.big->note, sizeof(files.big->note), WORDS(files_deleted), (int)job->removed);
+                        files.emptying = false;
                         files_job_end(job), files_after_delete(m), files_model_reload(m);
                 }
                 if (!more || now >= files.next_show)
