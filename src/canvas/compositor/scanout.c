@@ -364,6 +364,10 @@ struct compositor_parts
 static struct compositor_parts compositor_front_parts, compositor_spare_parts;
 static unsigned int compositor_flip_refused; // presents the card refused a flip in a row (three: a modeset)
 static int compositor_plate_refused;                  // the card would not make the second buffer: none until the scanout changes
+// Screens two or more: the framebuffer each screen shows of each plate ([at][0] the one composed into and shown, [at][1] the spare; screen 0's
+// are compositor.fb and compositor_spare.fb, kept there). Made with the plates (compositor_plate_make), given back with them.
+static unsigned int compositor_plate_out[WINDOWS_OUTPUTS][2];
+static unsigned int compositor_flips_owed; // the card's flip events still to come for the flip in flight (one, or one per screen of an all-screens flip)
 static char compositor_scan_name[512], compositor_spare_name[512]; // headless: the scan image's file and its spare
 static int compositor_headless_flip(void);
 static positive compositor_present_lead(void); // after the metric rings it reads (compositor_metric_note)
@@ -417,6 +421,14 @@ static void compositor_plate_swap(void)
         compositor_spare_parts = parts;
         if (compositor.outputs && compositor.output[0].fb == fb)
                 compositor.output[0].fb = compositor.fb;
+        // The other screens go to the plate they now show, the one composed into (their framebuffers are the plates' own, not the scanout's alone).
+        for (unsigned int at = 1; at < compositor.outputs && at < WINDOWS_OUTPUTS; at++)
+        {
+                unsigned int shown = compositor_plate_out[at][0];
+
+                compositor_plate_out[at][0] = compositor_plate_out[at][1], compositor_plate_out[at][1] = shown;
+                compositor.output[at].fb = compositor_plate_out[at][0];
+        }
 }
 
 static void scanout_plate_replay_front(void)
@@ -1521,10 +1533,11 @@ static unsigned int drm_planes_list(unsigned int *planes, unsigned int room)
         return resources.count;
 }
 
+/* One plane's ten properties for each screen of a flip of every screen (compositor_flip_all): room for them all. */
 struct drm_atomic_req
 {
-        unsigned int objects[4], counts[4], props[32];
-        unsigned long values[32];
+        unsigned int objects[WINDOWS_OUTPUTS + 2], counts[WINDOWS_OUTPUTS + 2], props[WINDOWS_OUTPUTS * 10 + 8];
+        unsigned long values[WINDOWS_OUTPUTS * 10 + 8];
         unsigned int obj_count, prop_count;
 };
 
@@ -1799,6 +1812,44 @@ static unsigned int compositor_enums_of(unsigned int object, unsigned int type, 
         if (system_control(compositor.card, COMPOSITOR_GETPROPERTY, address_of property) != 0)
                 return 0;
         return property.count_enums < room ? property.count_enums : room;
+}
+
+_Static_assert(COMPOSITOR_PLANE_PROPS == 11, "compositor_out_props holds the plane's eleven properties");
+// Screens two or more: each screen's primary plane (type 1) and its properties, by the screen's crtc (compositor_out_planes_take). The flip of every
+// screen at once (compositor_flip_all) needs each of them; compositor_out_ok is 1 when every screen has one.
+static unsigned int compositor_out_plane[WINDOWS_OUTPUTS];
+static unsigned int compositor_out_props[WINDOWS_OUTPUTS][COMPOSITOR_PLANE_PROPS];
+static int compositor_out_ok;
+
+// Looks up each of the first count screens' primary plane (compositor_out_plane), by its crtc's index: compositor_out_ok says whether all have one.
+static void compositor_out_planes_take(unsigned int count)
+{
+        unsigned int planes[128], found = 0, listed = drm_planes_list(planes, 128);
+
+        compositor_out_ok = 0;
+        for (unsigned int at = 0; at < count && at < WINDOWS_OUTPUTS; at++)
+        {
+                compositor_out_plane[at] = 0;
+                for (unsigned int each = 0; each < listed && !compositor_out_plane[at]; each++)
+                {
+                        unsigned int formats[64], props[COMPOSITOR_PLANE_PROPS];
+                        unsigned long type = 3;
+                        struct drm_plane_info info;
+
+                        if (drm_plane_get(planes[each], compositor.output[at].crtc_index, &info, formats, 64, props, &type) && type == 1)
+                                compositor_out_plane[at] = planes[each], memory_copy(compositor_out_props[at], props, sizeof(props));
+                }
+                found += compositor_out_plane[at] != 0;
+        }
+        compositor_out_ok = count > 1 && found == count && count <= WINDOWS_OUTPUTS;
+}
+
+// Whether a present may compose into the spare plate and flip every screen to it: one screen always; two or more when each has a primary plane
+// and the card has not refused an all-screens flip for good (compositor_flip_all, which then composes in place again, as it did).
+static int compositor_multi_off;
+static int compositor_multi_ok(void)
+{
+        return compositor.outputs < 2 || (compositor_out_ok && !compositor_multi_off);
 }
 
 /*

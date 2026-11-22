@@ -11,6 +11,8 @@ static void compositor_arrange_rect(int row, unsigned int how, const int *rect);
 static void compositor_room_follow(void);
 static void compositor_vrr_forget(void);
 static int compositor_virtual(void);
+static unsigned int compositor_fb_over(unsigned int handle);
+static void compositor_plate_outs_drop(void);
 
 static struct windows_display compositor_display[WINDOWS_DISPLAYS];
 static unsigned int compositor_displays;
@@ -809,6 +811,18 @@ static void compositor_plate_make(void)
                         compositor_scanout_free(fb, handle, pixels, bytes);
                 return;
         }
+        // Screens two or more: each screen of its own shows the spare too, over the same buffer, as it shows the scanout.
+        for (unsigned int at = 1; at < compositor.outputs && at < WINDOWS_OUTPUTS; at++)
+        {
+                compositor_plate_out[at][1] = compositor_fb_over(handle);
+                if (!compositor_plate_out[at][1])
+                {
+                        compositor_plate_outs_drop();
+                        compositor_scanout_free(fb, handle, pixels, bytes);
+                        compositor_plate_refused = 1;
+                        return;
+                }
+        }
         compositor_spare.fb = fb, compositor_spare.handle = handle, compositor_spare.pixels = pixels;
         compositor_spare.bytes = bytes, compositor_spare.pitch = pitch;
         compositor_stale_all(compositor_spare.stale, &compositor_spare.stale_any, &compositor_spare_parts);
@@ -817,6 +831,7 @@ static void compositor_plate_make(void)
 // The spare given back (the scanout is replaced: a space of another size, or the second screen). Not shown: no flip is in flight then.
 static void compositor_plate_drop(void)
 {
+        compositor_plate_outs_drop();
         if (compositor_spare.fb && compositor.card >= 0)
                 compositor_scanout_free(compositor_spare.fb, compositor_spare.handle, compositor_spare.pixels, compositor_spare.bytes);
         memory_zero(&compositor_spare, sizeof(compositor_spare));
@@ -825,12 +840,28 @@ static void compositor_plate_drop(void)
 
 // Another framebuffer of the scanout, as large and over the same buffer, for a screen of its own; 0 when the card will
 // not make one, and that screen shares the scanout's.
-static unsigned int compositor_scanout_fb(void)
+static unsigned int compositor_fb_over(unsigned int handle)
 {
         struct compositor_fb fb = {0, (unsigned int)compositor.width, (unsigned int)compositor.height,
-                                   (unsigned int)compositor.scanout_pitch, 32, 24, compositor.scanout_handle};
+                                   (unsigned int)compositor.scanout_pitch, 32, 24, handle};
 
         return system_control(compositor.card, COMPOSITOR_ADDFB, address_of fb) == 0 ? fb.fb_id : 0;
+}
+
+static unsigned int compositor_scanout_fb(void)
+{
+        return compositor_fb_over(compositor.scanout_handle);
+}
+
+// The framebuffers of the spare plate that the screens of their own show (plate_out[at][1]), given back.
+static void compositor_plate_outs_drop(void)
+{
+        for (unsigned int at = 1; at < WINDOWS_OUTPUTS; at++)
+        {
+                if (compositor_plate_out[at][1] && compositor.card >= 0)
+                        system_control(compositor.card, COMPOSITOR_RMFB, address_of compositor_plate_out[at][1]);
+                compositor_plate_out[at][1] = 0;
+        }
 }
 
 /*
@@ -1123,8 +1154,9 @@ static b32 compositor_space_take(int first)
                         return 0;
                 }
 
-                // A space of another size is another scanout; the one before is given back once no crtc shows it.
-                if (first || box[2] != compositor.width || box[3] != compositor.height)
+                // A space of another size is another scanout; the one before is given back once no crtc shows it. So is a set of screens of another count
+                // (the spare's framebuffers of each screen are made for the count they had).
+                if (first || box[2] != compositor.width || box[3] != compositor.height || lit != compositor.outputs)
                 {
                         compositor_plate_drop();
                         status = compositor_scanout_make(box[2], box[3], &fb, &handle, &pixels, &bytes, &pitch);
@@ -1248,6 +1280,10 @@ static b32 compositor_space_take(int first)
                 for (unsigned int at = 0; at < lit; at++)
                         compositor.output[at].fb = compositor.output[at].turned == 2 ? compositor_turns[at].fb :
                                                    at ? compositor_scanout_fb() : compositor.fb;
+                // The plate each screen shows is the one composed into (compositor_plate_out); the spare's are kept while the plates are.
+                for (unsigned int at = 1; at < WINDOWS_OUTPUTS; at++)
+                        compositor_plate_out[at][0] = at < lit ? compositor.output[at].fb : 0;
+                compositor_out_planes_take(lit);
                 if (!first)
                 {
                         carried = 1;
