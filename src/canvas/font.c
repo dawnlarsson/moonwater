@@ -264,7 +264,7 @@ static inline INLINE PURE p32 font_u8(const font_face address_to face, positive 
 
 static inline INLINE PURE p32 font_u16(const font_face address_to face, positive at)
 {
-        return at + 2 <= face->size ? (p32)face->data[at] << 8 | face->data[at + 1] : 0;
+        return face->size >= 2 && at <= face->size - 2 ? (p32)face->data[at] << 8 | face->data[at + 1] : 0;
 }
 
 static inline INLINE PURE b32 font_i16(const font_face address_to face, positive at)
@@ -274,7 +274,7 @@ static inline INLINE PURE b32 font_i16(const font_face address_to face, positive
 
 static inline INLINE PURE p32 font_u32(const font_face address_to face, positive at)
 {
-        return at + 4 <= face->size
+        return face->size >= 4 && at <= face->size - 4
                    ? (p32)face->data[at] << 24 | (p32)face->data[at + 1] << 16 |
                          (p32)face->data[at + 2] << 8 | face->data[at + 3]
                    : 0;
@@ -410,6 +410,8 @@ b32 font_load(font_face address_to face, const p8 address_to bytes, positive siz
         positive at[TABLES] = {0}, length[TABLES] = {0}, sfnt = 0;
 
         *face = (font_face){.data = bytes, .size = size};
+        if (!bytes || size < 12)
+                return FONT_BAD;
         if (font_u32(face, 0) == FONT_TAG('t', 't', 'c', 'f'))
         {
                 if (index >= font_u32(face, 8))
@@ -2141,7 +2143,7 @@ static void font_set_class(font_shaper address_to s, font_item address_to it, p3
 */
 static inline p8 font_buffer_room(font_shaper address_to s, p32 more)
 {
-        if (s->out_len + more > s->cap || s->len + more > s->cap)
+        if (s->out_len > s->cap || more > s->cap - s->out_len || s->len > s->cap || more > s->cap - s->len)
                 s->failed = true;
         return !s->failed;
 }
@@ -2212,14 +2214,14 @@ static void font_move_to(font_shaper address_to s, p32 i)
 {
         if (!s->output)
         {
-                s->idx = i;
+                s->idx = i < s->len ? i : s->len;
                 return;
         }
         if (s->out_len < i)
         {
                 p32 count = i - s->out_len;
 
-                if (!font_buffer_room(s, count) || s->idx + count > s->len)
+                if (!font_buffer_room(s, count) || s->idx > s->len || count > s->len - s->idx)
                         return;
                 memory_copy(s->out + s->out_len, s->info + s->idx, count * sizeof(font_item));
                 s->idx += count;
@@ -2233,7 +2235,7 @@ static void font_move_to(font_shaper address_to s, p32 i)
                 {
                         p32 shift = count - s->idx;
 
-                        if (s->len + shift > s->cap)
+                        if (s->len > s->cap || shift > s->cap - s->len)
                         {
                                 s->failed = true;
                                 return;
@@ -2483,10 +2485,12 @@ static void font_apply_records(font_shaper address_to s, p32 count, p32 address_
                 p32 before = font_behind(s) + (s->len - s->idx);
                 b32 grew;
 
+                if (s->ops-- <= 0)
+                        break;
                 if (at >= count || positions[at] >= before)
                         continue;
                 font_move_to(s, positions[at]);
-                if (s->ops-- <= 0 || s->failed)
+                if (s->failed)
                         break;
                 if (!font_apply_nested(s, lookup))
                         continue;
@@ -2521,6 +2525,8 @@ static void font_apply_records(font_shaper address_to s, p32 count, p32 address_
                 for (; next < count; next++)
                         positions[next] = (p32)((b32)positions[next] + grew);
         }
+        if (stop < 0)
+                stop = 0;
         font_move_to(s, (p32)stop);
 }
 
@@ -2849,22 +2855,42 @@ static p8 font_anchor(const font_face address_to face, positive at, b32 address_
 }
 
 //      Cursive attachment's chain, turned round when a glyph already attached to another is attached to a new one.
-static void font_reverse_cursive(font_shift address_to shift, p32 i, p32 parent)
+static void font_reverse_cursive(font_shift address_to shift, p32 len, p32 i, p32 parent)
 {
-        b32 chain = shift[i].chain;
+        p32 steps = 0;
+        b32 prev_chain = 0, prev_y = 0;
+        p8 prev_attach = 0;
 
-        if (!chain || !(shift[i].attach & 2))
-                return;
-        shift[i].chain = 0;
+        while (i < len && steps++ < len)
+        {
+                b32 chain = shift[i].chain;
+                b32 y = shift[i].y;
+                p8 attach = shift[i].attach;
 
-        p32 j = (p32)((b32)i + chain);
+                if (prev_chain)
+                {
+                        shift[i].y = -prev_y;
+                        shift[i].chain = (b16)-prev_chain;
+                        shift[i].attach = prev_attach;
+                }
+                else
+                {
+                        if (!chain || !(attach & 2))
+                                return;
+                        shift[i].chain = 0;
+                }
+                if (!chain || !(attach & 2))
+                        return;
 
-        if (j == parent)
-                return;
-        font_reverse_cursive(shift, j, parent);
-        shift[j].y = -shift[i].y;
-        shift[j].chain = (b16)-chain;
-        shift[j].attach = shift[i].attach;
+                b32 next = (b32)i + chain;
+
+                if (next < 0 || (p32)next >= len || (p32)next == parent)
+                        return;
+                prev_chain = chain;
+                prev_y = y;
+                prev_attach = attach;
+                i = (p32)next;
+        }
 }
 
 //      A mark (the glyph the cursor is on) hung from the glyph at base by the anchors its class has there.
@@ -2999,7 +3025,7 @@ static p8 font_gpos_apply(font_shaper address_to s, p32 kind, positive t)
                         parent = i;
                         y = -y;
                 }
-                font_reverse_cursive(pos, child, parent);
+                font_reverse_cursive(pos, s->len, child, parent);
                 pos[child].attach = 2;
                 pos[child].chain = (b16)((b32)parent - (b32)child);
                 pos[child].y = y;
@@ -4025,6 +4051,8 @@ static b32 font_outline(font_engine address_to e, const font_face address_to fac
                         yy = font_i16(face, p + 6);
                         p += 8;
                 }
+                if (p > limit)
+                        return FONT_BAD;
 
                 p32 from = e->point_count;
                 b32 refused = font_outline(e, face, child, depth + 1);
@@ -5875,7 +5903,8 @@ static f64 font_chain_at(const font_scratch address_to s, p32 chain, p32 address
                 ++*at;
 
         const f64 address_to p = s->point[*at], address_to q = s->point[*at + 1];
-        return p[0] + (y - p[1]) * (q[0] - p[0]) / (q[1] - p[1]);
+        f64 dy = q[1] - p[1];
+        return dy > 0 ? p[0] + (y - p[1]) * (q[0] - p[0]) / dy : p[0];
 }
 
 //      One side of a run of nonzero winding across a slab of height h, the
@@ -5886,7 +5915,11 @@ static f64 font_chain_at(const font_scratch address_to s, p32 chain, p32 address
 static fn font_side(f64 address_to step, b32 width, f64 xa, f64 xb, f64 h, f64 sign)
 {
         f64 least = xa < xb ? xa : xb, most = xa < xb ? xb : xa, before = 0;
-        b32 first = least < 0 ? 0 : (b32)(least / FONT_ONE);
+
+        if (width <= 0 || most < 0 || least / FONT_ONE >= width)
+                return;
+
+        b32 first = least <= 0 ? 0 : (b32)(least / FONT_ONE);
         b32 last = most / FONT_ONE >= width ? width - 1 : (b32)(most / FONT_ONE);
 
         if (first > last)
@@ -6052,7 +6085,7 @@ static fn font_union_row(font_engine address_to e, b32 r, b32 width, p8 address_
 
                         if (s->point[first][1] >= middle || s->point[last][1] <= middle)
                                 continue;
-                        while (s->point[s->cursor[c] + 1][1] <= a)
+                        while (s->cursor[c] + 1 < last && s->point[s->cursor[c] + 1][1] <= a)
                                 s->cursor[c]++;
 
                         p32 at = s->cursor[c], j = count++;
@@ -6085,7 +6118,7 @@ static fn font_union_row(font_engine address_to e, b32 r, b32 width, p8 address_
                                         const f64 address_to p = s->point[at], address_to q = s->point[at + 1];
                                         f64 y0 = p[1] > a ? p[1] : a, y1 = q[1] < b ? q[1] : b;
 
-                                        if (y1 <= y0)
+                                        if (y1 <= y0 || q[1] <= p[1])
                                                 continue;
 
                                         f64 slope = (q[0] - p[0]) / (q[1] - p[1]);
@@ -6199,9 +6232,9 @@ static fn font_union(font_engine address_to e, b32 width, b32 from, b32 to, b32 
 static fn font_raster(font_engine address_to e, b32 width, b32 height,
                       p8 address_to out, positive stride)
 {
-        //      A row past the band's cells has no band of rows: the loop below would never advance. No caller asks
-        //      for one (font_shape caps a glyph at FONT_EDGE, the drawn cells at 2048), so this is a guard.
-        if (width + 2 > FONT_BAND)
+        //      A row past the band's cells has no band of rows: the loop below would never advance. Also cap both
+        //      dimensions at FONT_EDGE so e->shared and font_scratch.cover never overflow.
+        if (width <= 0 || height <= 0 || width > FONT_EDGE || height > FONT_EDGE || width + 2 > FONT_BAND)
                 return;
         e->width = width;
         e->stride = width + 2;
@@ -6480,10 +6513,10 @@ b32 font_render(font_engine address_to e, const font_face address_to face, p32 g
 {
         b32 refused = font_shape(e, face, glyph, size, phase % FONT_PHASES, font_style(e, size, flags), box);
 
-        if (refused < 0 || !box->width || !box->height)
+        if (refused < 0 || box->width <= 0 || box->height <= 0)
                 return refused;
-        if ((positive)box->width > stride ||
-            (positive)(box->height - 1) * stride + (positive)box->width > capacity)
+        if ((positive)box->width > stride || capacity < (positive)box->width ||
+            (positive)(box->height - 1) > (capacity - (positive)box->width) / stride)
                 return FONT_TOO_LARGE;
         box->coverage = coverage;
         box->stride = stride;
@@ -6674,6 +6707,8 @@ static const f32 font_drawn_centre[8][3] = {
 static fn font_stroke(font_engine address_to e, f32 ax, f32 ay, f32 bx, f32 by, f32 t, b32 height)
 {
         f32 dx = bx - ax, dy = by - ay, length = narrow_square_root(dx * dx + dy * dy);
+        if (length <= 0)
+                return;
         f32 nx = -dy / length * t / 2, ny = dx / length * t / 2;
 
         font_put(e, ax - nx, ay - ny, height, true);
@@ -6767,7 +6802,7 @@ static p8 font_draw_shape(font_engine address_to e, p32 code, b32 width, b32 hei
                                 font_put(e, corner[k][0], corner[k][1], height, true);
                         }
                         font_close(e);
-                        if (hollow)
+                        if (hollow && size * c[2] > 0)
                         {
                                 //      Each corner moved toward the incentre until the edges are t inside, from
                                 //      the corners as drawn, so the hole is inside the shape at any size.
