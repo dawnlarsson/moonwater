@@ -4443,6 +4443,25 @@ static fn browser_tree(void)
                 check("browser: a peer that left the list loses its node and its children; the local machine stays",
                       dropped);
         }
+        {
+                static struct files_tree home_probe;
+                static const char mounts[] = "21 1 8:1 / / rw - ext4 /dev/sda1 rw\n26 21 8:3 / /home rw - ext4 /dev/sda3 rw\n";
+                p8 home3[FILES_PATH];
+                int homes = 0, named = 0;
+                string_copy_bounded((string_address)home3, (string_address) "/home/alve", FILES_PATH);
+                if (files_tree_begin(&home_probe))
+                {
+                        files_tree_populate(&home_probe, home3, (const p8 address_to)mounts, sizeof(mounts) - 1);
+                        for (p32 k = 0; k < home_probe.count; k++)
+                        {
+                                homes += home_probe.node[k].kind == FILES_NODE_PLACE && home_probe.node[k].place == FILES_PLACE_HOME && home_probe.node[k].depth == 1;
+                                named += home_probe.node[k].kind == FILES_NODE_DRIVE && string_equals((string_address)files_tree_name(&home_probe, k), (string_address) "home");
+                        }
+                        files_tree_end(&home_probe);
+                }
+                check("browser: the mount that holds the home is no drive of its own; the Home place is listed once",
+                      homes == 1 && named == 0);
+        }
         files_tree_end(&tree);
         browser_remove_in((string_address) "tr");
 }

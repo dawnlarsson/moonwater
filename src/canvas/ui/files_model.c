@@ -1399,6 +1399,12 @@ static int files_drives_parse(const p8 address_to text, positive length, struct 
 static p32 files_tree_after(const struct files_tree address_to t, p32 at);
 static fn files_tree_compact(struct files_tree address_to t);
 
+// A mount that holds the user's home (/home when the home is /home/u, or the home's own partition) is no drive of its own: the Home place is that folder.
+static b32 files_home_mount(const p8 address_to home, const p8 address_to mount)
+{
+        return home && home[0] == '/' && string_length((string_address)mount) > 1 && files_path_under(home, (const char address_to)mount);
+}
+
 static b32 files_tree_load(struct files_tree address_to t, const p8 address_to home, const p8 address_to mountinfo, positive len, b32 force)
 {
         static const struct { const char address_to name; p8 place; } places[] = {{"Downloads", FILES_PLACE_DOWNLOADS}, {"Pictures", FILES_PLACE_PICTURES}};
@@ -1440,7 +1446,7 @@ static b32 files_tree_load(struct files_tree address_to t, const p8 address_to h
                         if (files_tree_insert_root(t, ins, (const p8 address_to) "/", (const p8 address_to) "/", FILES_NODE_DRIVE, FILES_PLACE_ROOT, 1, 0, true))
                                 ins++, added++;
                         for (int k = 0; k < n; k++)
-                                if (files_tree_insert_root(t, ins, drives[k].label, drives[k].path, FILES_NODE_DRIVE, FILES_PLACE_NONE, 1, 0, true))
+                                if (!files_home_mount(home, drives[k].path) && files_tree_insert_root(t, ins, drives[k].label, drives[k].path, FILES_NODE_DRIVE, FILES_PLACE_NONE, 1, 0, true))
                                         ins++, added++;
                         t->node[0].has = (p16)added, t->node[0].read = true;
                 }
@@ -1480,7 +1486,7 @@ static b32 files_tree_set_machine_children(struct files_tree address_to t, p32 a
         if (files_tree_insert_root(t, ins, (const p8 address_to) "/", (const p8 address_to) "/", FILES_NODE_DRIVE, FILES_PLACE_ROOT, 1, machine, false))
                 ins++, added++;
         for (int k = 0; k < n; k++)
-                if (files_tree_insert_root(t, ins, drives[k].label, drives[k].path, FILES_NODE_DRIVE, FILES_PLACE_NONE, 1, machine, false))
+                if (!files_home_mount(home, drives[k].path) && files_tree_insert_root(t, ins, drives[k].label, drives[k].path, FILES_NODE_DRIVE, FILES_PLACE_NONE, 1, machine, false))
                         ins++, added++;
         t->node[at].open = true, t->node[at].read = true, t->node[at].has = (p16)added, t->node[at].flags &= (p8)~FILES_NODE_LOADING;
         return files_unmap(drives, sizeof(struct files_drive) * FILES_DRIVES_MOST), true;
