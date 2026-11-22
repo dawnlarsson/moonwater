@@ -108,3 +108,14 @@ src/canvas/ui/ui.c	 MB
 src/canvas/ui/ui.c	 KB
 src/canvas/ui/ui.c	 B
 src/canvas/ui/ui.c	 TB
+src/canvas/ui/settings.c	 rotation 
+src/canvas/ui/settings.c	 scale 
+src/canvas/ui/settings.c	more 
+src/canvas/ui/settings.c	 place 
+src/canvas/ui/terminal.c	 cannot use the font 
+src/canvas/ui/terminal.c	 text size 
+src/canvas/ui/terminal.c	 px, cell 
+src/canvas/ui/terminal.c	 by 
+src/canvas/ui/terminal.c	 px
+src/canvas/ui/terminal.c	klog pid 
+src/canvas/ui/terminal.c	terminal pid 
