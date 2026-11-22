@@ -3543,7 +3543,7 @@ static int canvas_ext_xform_blit(const struct canvas_ext_blit *b, int out_box[4]
         as the painters are: the same pixels as compositor_fill and compositor_contents on the frame the record stands for.
 */
 static int __attribute__((unused)) compositor_records_run(const unsigned int *ops, unsigned int count, const struct compositor_target *t,
-                                                          const void *(*resolve)(positive va, positive bytes))
+                                                          const void *(*resolve)(positive va, positive bytes), const unsigned char *buffer)
 {
         for (unsigned int at = 0; at < count; at++)
         {
@@ -3577,6 +3577,66 @@ static int __attribute__((unused)) compositor_records_run(const unsigned int *op
                                         for (int px = x2; px < x3; px++, into++)
                                                 *into = compositor_over_pixel(*into, op[5]);
                                 }
+                        }
+                        continue;
+                }
+                if (kind == 5 || kind == 12 || kind == 13)
+                {
+                        // Mix by a cover table (5), the cover-weighted over (12) and the linear-light mix by a corner table (13). Word 0 holds the
+                        // cover table's pitch in bits 8 to 15 and the ink's pitch in bits 16 up (0: the ink is the colour in word 6); word 5 is the
+                        // cover byte offset from the card buffer's start, which is buffer here, and the ink, when it is a picture, is at the card
+                        // address in words 6 and 7; 0x80 swaps the picture's red and blue. Tiled and DCC (0x20, 0x40) are refused.
+                        unsigned int cover_pitch = (op[0] >> 8) & 0xffu, ink_pitch = op[0] >> 16;
+                        const unsigned char *cover = buffer ? buffer + op[5] : 0;
+                        const unsigned int *picture = 0;
+                        unsigned int colour_row[1024], swap_row[1024];
+                        int x2, y2, x3, y3;
+
+                        if ((op[0] & 0x60u) || (w > 0 && h > 0 && !cover))
+                                return -1;
+                        if (ink_pitch && w > 0 && h > 0)
+                        {
+                                positive va = (positive)op[6] | (positive)op[7] << 32;
+
+                                picture = resolve ? (const unsigned int *)resolve(va, 4 * ((positive)ink_pitch * (positive)(h - 1) + (positive)w)) : 0;
+                                if (!picture)
+                                        return -1;
+                        }
+                        if ((op[0] & 0x80u) && !picture)
+                                return -1;
+                        if (w > 0 && h > 0 && target_clip(t, x0, y0, w, h, &x2, &y2, &x3, &y3))
+                        {
+                                compositor_reading(t);
+                                for (int py = y2; py < y3; py++)
+                                        for (int px = x2; px < x3; px += 1024)
+                                        {
+                                                int n = x3 - px < 1024 ? x3 - px : 1024;
+                                                unsigned int *into = t->pixels + (unsigned long)(py - t->oy) * t->pitch + (unsigned long)(px - t->ox);
+                                                const unsigned char *mask = cover + (unsigned long)(py - y0) * cover_pitch + (unsigned long)(px - x0);
+                                                const unsigned int *ink;
+
+                                                if (picture)
+                                                {
+                                                        const unsigned int *from = picture + (unsigned long)(py - y0) * ink_pitch + (unsigned long)(px - x0);
+
+                                                        if (op[0] & 0x80u)
+                                                                memory_swizzle_rb_u32(swap_row, from, (positive)n, 0), ink = swap_row;
+                                                        else
+                                                                ink = from;
+                                                }
+                                                else
+                                                {
+                                                        memory_fill_u32(colour_row, (positive)n, op[6]);
+                                                        ink = colour_row;
+                                                }
+                                                if (kind == 5)
+                                                        memory_mix_u32_row(into, ink, mask, (positive)n);
+                                                else if (kind == 13)
+                                                        canvas_mix_linear_row(into, ink, mask, (positive)n);
+                                                else
+                                                        for (int k = 0; k < n; k++)
+                                                                into[k] = compositor_over_weighted(into[k], ink[k], mask[k]);
+                                        }
                         }
                         continue;
                 }

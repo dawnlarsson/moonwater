@@ -4069,6 +4069,7 @@ static int band_guard_glass(void *context, int x, int y, int width, int height)
 #define RECORDS_VA ((positive)0x700000000000ul)
 static const unsigned int *records_picture;
 static positive records_bytes;
+static const unsigned char *records_buffer; // the card buffer's processor pointer: the cover tables of kinds 5, 12 and 13 are at word 5 from it
 
 static const void *records_resolve(positive va, positive bytes)
 {
@@ -4090,6 +4091,83 @@ static unsigned int records_random(unsigned int *state)
         the compositor's record state is saved and restored. The row only exists where the card code does (MOONWATER_GPU_C). A mismatch is a
         difference between the lowered kind 1 and the painter's mix (the kernel's rounding and the painter's can differ by one), not a crash.
 */
+/*
+        Kinds 5, 12 and 13 (the cover-masked mixes): random rectangles inside a random target, a cover table in the card buffer at word 5, and an
+        ink that is a colour (word 6) or a picture at a card address (words 6 and 7, pitch in bits 16 up, 0x80 trading red and blue). Each record
+        is run by compositor_records_run and by its painter on a copy of the target, row by row: memory_mix_u32_row (5), compositor_over_weighted
+        (12), canvas_mix_linear_row (13). The arithmetic is the painters' own, so the row tests the addressing, the swap and the rectangle.
+*/
+static void records_covers(void)
+{
+        static unsigned char covers[16384];
+        static unsigned int picture[128 * 96], painted[160 * 120], executed[160 * 120], row[1024], swapped[1024];
+        unsigned int state = 0x7f4a7c15u, mismatches = 0;
+        int trials = 0;
+
+        for (int trial = 0; trial < 300; trial++)
+        {
+                int tw = 40 + (int)(records_random(&state) % 100), th = 30 + (int)(records_random(&state) % 80);
+                int rw = 1 + (int)(records_random(&state) % (unsigned int)tw), rh = 1 + (int)(records_random(&state) % (unsigned int)(th < 80 ? th : 80));
+                int rx = (int)(records_random(&state) % (unsigned int)(tw - rw + 1)), ry = (int)(records_random(&state) % (unsigned int)(th - rh + 1));
+                unsigned int pick = records_random(&state) % 3, kind = pick == 0 ? 5 : pick == 1 ? 12 : 13;
+                int picture_ink = (int)(records_random(&state) & 1), ip = rw + (int)(records_random(&state) % 8);
+                unsigned int swap = picture_ink && (records_random(&state) & 1) ? 0x80u : 0u, colour = records_random(&state);
+                unsigned int cover_at = 64, ops[8];
+                int count = tw * th;
+                struct compositor_target a, b;
+
+                for (int at = 0; at < 16384; at++)
+                        covers[at] = (unsigned char)records_random(&state);
+                for (int at = 0; at < 128 * 96; at++)
+                        picture[at] = records_random(&state);
+                for (int at = 0; at < count; at++)
+                        executed[at] = painted[at] = records_random(&state);
+                records_picture = picture, records_bytes = 4ul * ((unsigned long)ip * (unsigned long)(rh - 1) + (unsigned long)rw), records_buffer = covers;
+                a = (struct compositor_target){painted, (unsigned long)tw, tw, th, 0, 0, tw, th, 0, 0, null, 0};
+                b = (struct compositor_target){executed, (unsigned long)tw, tw, th, 0, 0, tw, th, 0, 0, null, 0};
+                memory_zero(ops, sizeof(ops));
+                ops[0] = kind | ((unsigned int)rw << 8) | (picture_ink ? (unsigned int)ip << 16 : 0u) | swap;
+                ops[1] = (unsigned int)rx, ops[2] = (unsigned int)ry, ops[3] = (unsigned int)(rx + rw), ops[4] = (unsigned int)(ry + rh);
+                ops[5] = cover_at;
+                if (picture_ink)
+                        ops[6] = (unsigned int)RECORDS_VA, ops[7] = (unsigned int)(RECORDS_VA >> 32);
+                else
+                        ops[6] = colour;
+                for (int py = ry; py < ry + rh; py++)
+                {
+                        const unsigned char *mask = covers + cover_at + (unsigned long)(py - ry) * (unsigned long)rw;
+                        const unsigned int *source;
+                        unsigned int *into = painted + (unsigned long)py * tw + rx;
+
+                        if (picture_ink)
+                        {
+                                source = picture + (unsigned long)(py - ry) * (unsigned long)ip;
+                                if (swap)
+                                        memory_swizzle_rb_u32(swapped, source, (positive)rw, 0), source = swapped;
+                        }
+                        else
+                        {
+                                for (int k = 0; k < rw; k++)
+                                        row[k] = colour;
+                                source = row;
+                        }
+                        if (kind == 5)
+                                memory_mix_u32_row(into, source, mask, (positive)rw);
+                        else if (kind == 13)
+                                canvas_mix_linear_row(into, source, mask, (positive)rw);
+                        else
+                                for (int k = 0; k < rw; k++)
+                                        into[k] = compositor_over_weighted(into[k], source[k], mask[k]);
+                }
+                if (compositor_records_run(ops, 1, &b, records_resolve, records_buffer) != 1 || memory_compare(painted, executed, (positive)count * 4))
+                        mismatches++;
+                trials++;
+        }
+        records_buffer = null;
+        check("records: 300 random cover mixes (kinds 5, 12 and 13, colour and picture inks, the 0x80 swap) match their painters, every pixel",
+              mismatches == 0 && trials == 300);
+}
+
 #ifdef MOONWATER_GPU_C
 static void records_lowering(void)
 {
@@ -4124,7 +4202,7 @@ static void records_lowering(void)
                         mismatches++;
                 else
                         lowered_ok++;
-                if (compositor_records_run(lowered, g->count, &card, records_resolve) != (int)g->count)
+                if (compositor_records_run(lowered, g->count, &card, records_resolve, records_buffer) != (int)g->count)
                         mismatches++;
                 // The painter: the same mix over the same rectangle, row by row, through the tint's routine.
                 for (int py = ry; py < ry + rh; py++)
@@ -4181,7 +4259,7 @@ static void check_compositor_records(void)
                         compositor_fill(&a, fx, fy, fw, fh, colour);
                 else
                         compositor_contents(&a, &frame);
-                ran = compositor_records_run(ops, 1, &b, records_resolve);
+                ran = compositor_records_run(ops, 1, &b, records_resolve, records_buffer);
                 trials++;
                 if (ran != 1 || memory_compare(painted, executed, (positive)count * 4))
                         mismatches++;
@@ -4209,7 +4287,7 @@ static void check_compositor_records(void)
                         for (int px = 0; px < tw; px++)
                                 if (px >= rx && px < rx + rw && py >= ry && py < ry + rh)
                                         painted[py * tw + px] = compositor_over_pixel(painted[py * tw + px], colour);
-                ran = compositor_records_run(ops, 1, &b, records_resolve);
+                ran = compositor_records_run(ops, 1, &b, records_resolve, records_buffer);
                 if (ran != 1 || memory_compare(painted, executed, (positive)count * 4))
                         mismatches++;
         }
@@ -4227,13 +4305,14 @@ static void check_compositor_records(void)
                 ops[0] = 4 | 0x20u, ops[1] = 0, ops[2] = 0, ops[3] = 16, ops[4] = 16, ops[5] = (unsigned int)RECORDS_VA, ops[6] = 0, ops[7] = 16;
                 t = (struct compositor_target){target, 64, 64, 64, 0, 0, 64, 64, 0, 0, null, 0};
                 records_picture = picture, records_bytes = 4ul * 16 * 16;
-                ran = compositor_records_run(ops, 1, &t, records_resolve);
+                ran = compositor_records_run(ops, 1, &t, records_resolve, records_buffer);
                 refused += ran == -1;
                 for (int at = 0; at < 64 * 64; at++)
                         if (target[at] != 0x5a5a5a5au + (unsigned int)at)
                                 mismatches++;
         }
         check("records: a record with the 0x20 tiled flag is refused and draws nothing", refused == 1 && mismatches == 0);
+        records_covers();
 #ifdef MOONWATER_GPU_C
         records_lowering();
 #endif
