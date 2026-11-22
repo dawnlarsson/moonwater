@@ -825,6 +825,10 @@ struct bind_handle {
         unsigned long rover_taken[BITS_TO_LONGS(KEY_CNT)];
 };
 
+// Spark's capability test (spark.c, its SPARK_KERNEL pass, which core.c includes after this file): declared here
+// for the machine's ioctls, which use it first.
+static inline bool spark_file_capable(struct file *file, int cap);
+
 static struct spark_input_ring *spark_input_page;
 static DECLARE_WAIT_QUEUE_HEAD(spark_input_wait);
 static DEFINE_SPINLOCK(spark_input_lock);
