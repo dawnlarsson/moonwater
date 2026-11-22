@@ -6987,7 +6987,11 @@ static unsigned int language_kinds(const char address_to format, char kind[LANGU
                 if (*++f == '%')
                         continue;
                 if (*f >= '1' && *f <= '9' && f[1] == '$')
-                        index = (unsigned int)(*f - '0'), f += 2;
+                {
+                        positive used = 0;
+
+                        index = (unsigned int)string_digits_max(f, 1, &used), f += used + 1;
+                }
                 else
                         index = ++implicit;
                 if (!*f)
