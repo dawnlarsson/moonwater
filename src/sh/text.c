@@ -7141,18 +7141,25 @@ static positive text_case_utf8(p8 address_to into, string_address from, positive
 
         for (positive at = 0; at < length;)
         {
+                positive ascii = memory_ascii_span(from + at, length - at);
+
+                if (ascii)
+                {
+                        memory_copy_apart(into + made, from + at, ascii);
+                        if (mode == UNICODE_CASE_UPPER)
+                                memory_to_upper_ascii(into + made, ascii);
+                        else
+                                memory_to_lower_ascii(into + made, ascii);
+                        made += ascii;
+                        at += ascii;
+                        continue;
+                }
+
                 p8 byte = (p8)from[at];
                 memory_utf8_state state = {0};
                 positive used = 0, size = 0;
                 b32 fed = 0;
 
-                if (byte < 0x80)
-                {
-                        into[made++] = (p8)(mode == UNICODE_CASE_UPPER ? byte_to_upper(byte)
-                                                                       : byte_to_lower(byte));
-                        at++;
-                        continue;
-                }
                 while (!fed && at + used < length)
                         fed = memory_utf8_feed(address_of state, (p8)from[at + used++]);
                 if (fed == 1)
@@ -15831,7 +15838,18 @@ static fn pr_store_columns()
 
 static fn pr_init_store_cols()
 {
-        positive total = (positive)pr_lines_per_body * (positive)pr_columns;
+        positive rows = (positive)pr_lines_per_body;
+        positive cols = (positive)pr_columns;
+
+        if (cols && rows > (positive_max / sizeof(b32) - 1) / cols)
+                text_die("memory exhausted");
+
+        positive total = rows * cols;
+        positive reserve = (positive)1 << 20;
+        positive row_bytes = ((positive)pr_chars_per_column + 1) * (pr_use_col_separator + 1);
+
+        if (row_bytes && total < reserve / row_bytes)
+                reserve = total * row_bytes;
 
         memory_give(pr_line_vector);
         memory_give(pr_end_vector);
@@ -15840,11 +15858,7 @@ static fn pr_init_store_cols()
         pr_buff.used = 0;
 
         if (!pr_line_vector || !pr_end_vector ||
-            !byte_store_reserve(address_of pr_buff,
-                                min(total * ((positive)pr_chars_per_column + 1) *
-                                        (pr_use_col_separator + 1),
-                                    (positive)1 << 20),
-                                1 << 12))
+            !byte_store_reserve(address_of pr_buff, reserve, 1 << 12))
                 text_die("memory exhausted");
 }
 
@@ -15910,10 +15924,12 @@ static fn pr_init_parameters(positive number_of_files)
                         chars_used_by_number = pr_number_width;
         }
 
-        bipolar sep_chars = (pr_columns - 1) * pr_col_sep_length;
-        bipolar useful = pr_chars_per_line - chars_used_by_number - sep_chars;
+        bipolar sep_chars = 0;
+        bool sep_over = pr_columns > 1 && pr_col_sep_length > 0 &&
+                        mul_overflow(pr_columns - 1, pr_col_sep_length, address_of sep_chars);
+        bipolar useful = sep_over ? -1 : pr_chars_per_line - chars_used_by_number - sep_chars;
 
-        if (sep_chars > b32_max || useful < 0)
+        if (sep_over || sep_chars > b32_max || useful < 0)
                 useful = 0;
         pr_chars_per_column = useful / pr_columns;
 
@@ -16021,6 +16037,8 @@ static bool pr_init_fps(positive number_of_files, string_address address_to name
 {
         pr_total_files = 0;
 
+        if ((positive)pr_columns > positive_max / sizeof(pr_column))
+                text_die("memory exhausted");
         memory_give(pr_column_vector);
         pr_column_vector = (pr_column address_to)memory_take((positive)pr_columns * sizeof(pr_column));
         if (!pr_column_vector)
@@ -27092,8 +27110,7 @@ static bool grep_many_build(bool icase, p8 boundary, p8 delimiter)
                         const p8 address_to x = norm + start[order[i]];
                         const p8 address_to y = norm + start[order[i - 1]];
 
-                        while (same < least && x[same] == y[same])
-                                same++;
+                        same = memory_common_prefix(x, y, least);
                 }
 
                 lcp[i] = (p32)same;
@@ -32634,15 +32651,20 @@ static bool sed_transfer(sed_buffer address_to into,
         G, N and x. The rest read it, and s builds its answer in the work
         store whichever it is.
 */
+static inline INLINE bool sed_buffer_own(sed_context address_to ctx)
+{
+        if (ctx->pattern.bytes == ctx->pattern.store->bytes)
+                return true;
+        if (!sed_store_fits(ctx, ctx->pattern.store, 0, ctx->pattern.length))
+                return false;
+        memory_copy_apart(ctx->pattern.store->bytes, ctx->pattern.bytes, ctx->pattern.length);
+        ctx->pattern.bytes = ctx->pattern.store->bytes;
+        return true;
+}
+
 static inline INLINE bool sed_pattern_own()
 {
-        if (sed_pattern.bytes == sed_pattern.store->bytes)
-                return true;
-        if (!sed_store_fits(address_of sed_serial, sed_pattern.store, 0, sed_pattern.length))
-                return false;
-        memory_copy_apart(sed_pattern.store->bytes, sed_pattern.bytes, sed_pattern.length);
-        sed_pattern.bytes = sed_pattern.store->bytes;
-        return true;
+        return sed_buffer_own(address_of sed_serial);
 }
 
 /*
@@ -34508,10 +34530,8 @@ static fn sed_gate_prepare(bool eligible)
             !command->printing && (sed_programs[program].flags & RX_LITERAL_PROVES) &&
             !sed_gate_icase)
         {
-                bool ascii = true;
-
-                for (positive i = 0; i < sed_gate_size; i++)
-                        ascii = ascii && sed_gate_text[i] < 0x80 && sed_gate_text[i] != '\n';
+                bool ascii = memory_ascii_span(sed_gate_text, sed_gate_size) == sed_gate_size &&
+                             !memory_first_of(sed_gate_text, '\n', sed_gate_size);
 
                 sed_gate_replacement = sed_text + command->text;
                 sed_gate_replacement_length = command->replacement_length;
@@ -34804,8 +34824,12 @@ static bool sed_pieces_emit(address_any context, positive index, p8 address_to l
                                 }
                         }
                         else if (kind == 'y')
+                        {
+                                if (!sed_buffer_own(address_of ctx))
+                                        goto done;
                                 memory_translate(ctx.pattern.bytes, ctx.pattern.length,
                                                  sed_maps[command->map]);
+                        }
                         else if (kind == 'p')
                         {
                                 if (!sed_pieces_put(output, ctx.pattern.bytes, ctx.pattern.length))
@@ -34856,11 +34880,16 @@ static bool sed_pieces_sink(address_any context, positive index, address_any dat
         while (length && unlikely(sed_output_state & (SED_OUTPUT_MODELLING | SED_OUTPUT_PENDING)))
         {
                 p8 address_to newline = memory_first_of(at, '\n', length);
-                positive line = (positive)(newline - at) + 1;
+                positive line = newline ? (positive)(newline - at) + 1 : length;
 
                 // A line and then its end, two checked writes to GNU's stdio.
-                sed_stdio(line - 1);
-                sed_stdio(1);
+                if (newline)
+                {
+                        sed_stdio(line - 1);
+                        sed_stdio(1);
+                }
+                else
+                        sed_stdio(line);
                 text_put(at, line);
                 at += line;
                 length -= line;
@@ -37547,8 +37576,7 @@ static p64 sort_number_window_text(p8 address_to text, positive length,
         while (at < length && (p8)(text[at] - '0') < 10)
                 at++;
 
-        while (first < at && text[first] == '0')
-                first++;
+        first += memory_span_byte(text + first, '0', at - first);
 
         positive digits = at - first;
         positive fraction = at;
