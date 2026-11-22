@@ -193,46 +193,54 @@ static int compositor_frost(const struct compositor_frame *frames, unsigned int 
                 {
                         if (has_tiled)
                                 compositor_wl_straight_pays(-1);
+                        compositor_wl_tiled_settle();
                         compositor_wl_lent_sync(1);
                 }
         }
-        for (int top = 0; top < ah; top += COMPOSITOR_GLASS_BAND)
+        else
+                compositor_wl_tiled_settle();
         {
-                int rows = ah - top < COMPOSITOR_GLASS_BAND ? ah - top : COMPOSITOR_GLASS_BAND;
-                int y0 = ay + top, vy0 = y0 > 0 ? y0 : 0, vy1 = y0 + rows < compositor.height ? y0 + rows : compositor.height, first, last;
-                struct compositor_target under;
+                int ox = cx0 < ax || cx0 >= ax + aw ? cx0 : ax;
+                int xfirst = ox == ax ? cx0 - ax : 0, xlast = ox == ax ? cx1 - ax : 1;
 
-                if (vy1 <= vy0)
-                        vy0 = y0 + rows <= 0 ? 0 : compositor.height - 1, vy1 = vy0 + 1;
-                under = (struct compositor_target){strip, (unsigned long)aw, compositor.width, compositor.height,
-                                                   cx0, vy0, cx1, vy1, ax, vy0 < y0 || vy0 >= y0 + rows ? vy0 : y0};
-                first = under.oy == y0 ? vy0 - y0 : 0, last = under.oy == y0 ? vy1 - y0 : 1;
-                if (gpu_pic)
-                        memory_copy_rect_u32(strip + (long)first * aw + (cx0 - ax), (unsigned long)aw,
-                                             gpu_pic + (unsigned long)vy0 * gpu_pitch + (unsigned long)cx0, gpu_pitch,
-                                             (unsigned long)(cx1 - cx0), (unsigned long)(vy1 - vy0));
-                else
-                        compositor_scene(&under, frames, count);
-                for (int row = first; row < last; row++)
+                for (int top = 0; top < ah; top += COMPOSITOR_GLASS_BAND)
                 {
-                        unsigned int *line = strip + (long)row * aw;
+                        int rows = ah - top < COMPOSITOR_GLASS_BAND ? ah - top : COMPOSITOR_GLASS_BAND;
+                        int y0 = ay + top, vy0 = y0 > 0 ? y0 : 0, vy1 = y0 + rows < compositor.height ? y0 + rows : compositor.height, first, last;
+                        struct compositor_target under;
 
-                        if (cx0 > ax)
-                                memory_fill_u32(line, (positive)(cx0 - ax), line[cx0 - ax]);
-                        if (cx1 < ax + aw)
-                                memory_fill_u32(line + (cx1 - ax), (positive)(ax + aw - cx1), line[cx1 - ax - 1]);
-                }
-                for (int row = rows; row-- > 0;)
-                {
-                        int from = row < first ? first : row >= last ? last - 1 : row;
+                        if (vy1 <= vy0)
+                                vy0 = y0 + rows <= 0 ? 0 : compositor.height - 1, vy1 = vy0 + 1;
+                        under = (struct compositor_target){strip, (unsigned long)aw, compositor.width, compositor.height,
+                                                           cx0, vy0, cx1, vy1, ox, vy0 < y0 || vy0 >= y0 + rows ? vy0 : y0};
+                        first = under.oy == y0 ? vy0 - y0 : 0, last = under.oy == y0 ? vy1 - y0 : 1;
+                        if (gpu_pic)
+                                memory_copy_rect_u32(strip + (long)first * aw + xfirst, (unsigned long)aw,
+                                                     gpu_pic + (unsigned long)vy0 * gpu_pitch + (unsigned long)cx0, gpu_pitch,
+                                                     (unsigned long)(cx1 - cx0), (unsigned long)(vy1 - vy0));
+                        else
+                                compositor_scene(&under, frames, count);
+                        for (int row = first; row < last; row++)
+                        {
+                                unsigned int *line = strip + (long)row * aw;
 
-                        if (from != row)
-                                memory_copy(strip + (long)row * aw, strip + (long)from * aw, (positive)aw * 4);
+                                if (xfirst > 0)
+                                        memory_fill_u32(line, (positive)xfirst, line[xfirst]);
+                                if (xlast < aw)
+                                        memory_fill_u32(line + xlast, (positive)(aw - xlast), line[xlast - 1]);
+                        }
+                        for (int row = rows; row-- > 0;)
+                        {
+                                int from = row < first ? first : row >= last ? last - 1 : row;
+
+                                if (from != row)
+                                        memory_copy(strip + (long)row * aw, strip + (long)from * aw, (positive)aw * 4);
+                        }
+                        for (int level = 1; level <= COMPOSITOR_GLASS_LEVELS; level++)
+                                memory_halve_u32(strip, (positive)aw, strip, (positive)aw, (positive)(aw >> level), (positive)(rows >> level));
+                        for (int row = 0; row < rows / block; row++)
+                                memory_copy(small + (long)(top / block + row) * tw, strip + (long)row * aw, (positive)tw * 4);
                 }
-                for (int level = 1; level <= COMPOSITOR_GLASS_LEVELS; level++)
-                        memory_halve_u32(strip, (positive)aw, strip, (positive)aw, (positive)(aw >> level), (positive)(rows >> level));
-                for (int row = 0; row < rows / block; row++)
-                        memory_copy(small + (long)(top / block + row) * tw, strip + (long)row * aw, (positive)tw * 4);
         }
         bytes = (unsigned long)tw * (unsigned long)th * 4;
         for (int round = 0; round < 2; round++)

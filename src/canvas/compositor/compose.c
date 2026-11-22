@@ -299,14 +299,17 @@ HOT static void compositor_over_ground(unsigned int *restrict into, unsigned lon
         fn (*over)(p32 address_to, positive, const p32 address_to, positive, const p32 address_to, positive, positive, positive) =
             out ? memory_over_under_out_u32_rect : memory_over_under_u32_rect;
 
+        int fs = compositor_space_all_fullscreen();
+        unsigned int fill = fs ? 0xff000000u : compositor_ground;
+
         // Over the wallpaper: its rows under the picture's, where the space has them.
-        if (compositor_wall && gx >= 0 && gy >= 0 && gx + (long)width <= compositor_wall_w && gy + (long)height <= compositor_wall_h)
+        if (!fs && compositor_wall && gx >= 0 && gy >= 0 && gx + (long)width <= compositor_wall_w && gy + (long)height <= compositor_wall_h)
         {
                 over(into, (positive)into_pitch, from, (positive)from_pitch, compositor_wall + (long)gy * compositor_wall_w + gx, (positive)compositor_wall_w,
                      (positive)width, (positive)height);
                 return;
         }
-        memory_fill_u32(ground, (positive)(width < COMPOSITOR_GROUND_RUN ? width : COMPOSITOR_GROUND_RUN), compositor_ground);
+        memory_fill_u32(ground, (positive)(width < COMPOSITOR_GROUND_RUN ? width : COMPOSITOR_GROUND_RUN), fill);
         for (unsigned long at = 0; at < width; at += COMPOSITOR_GROUND_RUN)
                 over(into + at, (positive)into_pitch, from + at, (positive)from_pitch, ground, 0,
                      (positive)(width - at < COMPOSITOR_GROUND_RUN ? width - at : COMPOSITOR_GROUND_RUN), (positive)height);
@@ -435,7 +438,7 @@ HOT static void compositor_blit_runs(const struct compositor_target *restrict t,
         24-bit fixed point, and the step is rounded down, so the position never reaches the picture's last column or row.
 */
 static void compositor_blit_scaled(const struct compositor_target *t, int x, int y, int width, int height,
-                                   const unsigned int *source, unsigned long pitch, int source_w, int source_h)
+                                   const unsigned int *source, unsigned long pitch, int source_w, int source_h, int swap)
 {
         int x1, y1, x2, y2;
 
@@ -445,6 +448,12 @@ static void compositor_blit_scaled(const struct compositor_target *t, int x, int
                                  (unsigned long)(x2 - x1), (unsigned long)(y2 - y1), source, pitch,
                                  (unsigned long)source_w, (unsigned long)source_h, (unsigned long)width,
                                  (unsigned long)height, (unsigned long)(x1 - x), (unsigned long)(y1 - y));
+        if (swap)
+                for (int py = y1; py < y2; py++)
+                {
+                        unsigned int *row = t->pixels + (unsigned long)(py - t->oy) * t->pitch + (unsigned long)(x1 - t->ox);
+                        memory_swizzle_rb_u32(row, row, (positive)(x2 - x1), 0);
+                }
 }
 
 // A frame whose contents are its picture at another size (a window landing), so they are scaled from it.
@@ -756,6 +765,8 @@ static void compositor_close_draw(const struct compositor_target *t, const struc
                         unsigned int under = picture ? picture[(unsigned long)(py - frame->y) * frame->pitch + (unsigned long)(px - frame->x)]
                                                      : compositor_picture_at(frame, px - frame->x, py - frame->y);
 
+                        if (frame->swap)
+                                under = (under & 0xff00ff00u) | ((under >> 16) & 0xffu) | ((under & 0xffu) << 16);
                         t->pixels[(unsigned long)(py - t->oy) * t->pitch + (unsigned long)(px - t->ox)] = compositor_mix(under, ink, cross * 255 / 16);
                 }
 }
@@ -785,6 +796,8 @@ static void compositor_blit_scaled_blend(const struct compositor_target *t, cons
                                                  (unsigned long)frame->source_w, (unsigned long)frame->source_h,
                                                  (unsigned long)width, (unsigned long)height,
                                                  (unsigned long)(x1 - x), (unsigned long)(py - y));
+                        if (frame->swap)
+                                memory_swizzle_rb_u32(scratch, scratch, (positive)w * (positive)rows, 0);
                         if (frame->blend == 2)
                                 compositor_over_ground(into, t->pitch, scratch, (unsigned long)w, (unsigned long)w, (unsigned long)rows, t->out, x1, py);
                         else
@@ -797,8 +810,12 @@ static void compositor_blit_scaled_blend(const struct compositor_target *t, cons
                 unsigned int *into = t->pixels + (unsigned long)(py - t->oy) * t->pitch + (unsigned long)(x1 - t->ox);
 
                 for (int px = x1; px < x2; px++)
-                        into[px - x1] = compositor_over_pixel(frame->blend == 2 ? compositor_ground_at(px, py) : into[px - x1],
-                                                              compositor_picture_at(frame, px - x, py - y));
+                {
+                        unsigned int src = compositor_picture_at(frame, px - x, py - y);
+                        if (frame->swap)
+                                src = (src & 0xff00ff00u) | ((src >> 16) & 0xffu) | ((src & 0xffu) << 16);
+                        into[px - x1] = compositor_over_pixel(frame->blend == 2 ? compositor_ground_at(px, py) : into[px - x1], src);
+                }
         }
 }
 
@@ -826,7 +843,7 @@ static void compositor_contents(const struct compositor_target *t, const struct 
         }
         else if (compositor_scaled(frame))
                 compositor_blit_scaled(t, frame->x, frame->y, frame->width, frame->height, frame->pixels, frame->pitch,
-                                       frame->source_w, frame->source_h);
+                                       frame->source_w, frame->source_h, frame->swap);
         else if (frame->runs)
                 compositor_blit_runs(t, frame->x, frame->y, frame->width, frame->height, frame->pixels, frame->pitch, frame->runs);
         else
@@ -1067,14 +1084,14 @@ static void compositor_corner_rows(const struct compositor_target *t, const stru
         sx2 = x2 < x + w ? x2 : x + w;
         if (b && x2 > x1)
                 memory_fill_u32(edge_row, (positive)(x2 - x1), edge & 0xffffffu);
-        if (frame->builtin && sx2 > sx1)
-                memory_fill_u32(tab_row, (positive)(sx2 - sx1), tab);
+        if ((frame->builtin || (!frame->pixels && frame->fill)) && sx2 > sx1)
+                memory_fill_u32(tab_row, (positive)(sx2 - sx1), frame->builtin ? tab : frame->fill);
         for (int py = y1; py < y2; py++)
         {
                 int my = down ? cy + r - 1 - py : py - cy;
                 unsigned int *at = t->pixels + (unsigned long)(py - t->oy) * t->pitch + (unsigned long)(x1 - t->ox);
 
-                if (b && !frame->builtin && !frame->pixels)
+                if (b && !frame->builtin && !frame->pixels && !frame->fill)
                 {
                         // A border only (a grid tile's): the line's cover is the outer shape's less the inner's, so the square
                         // inside the line is not painted; a picture is what covers it for a frame that has one.
@@ -1093,11 +1110,12 @@ static void compositor_corner_rows(const struct compositor_target *t, const stru
                 }
                 else if (b)
                         canvas_mix_linear_row(at, edge_row, outer + (unsigned long)my * r + (x1 - cx), (positive)(x2 - x1));
-                if (py >= y && py < y + h && ri && sx2 > sx1 && (frame->builtin || frame->pixels))
+                if (py >= y && py < y + h && ri && sx2 > sx1 && (frame->builtin || frame->pixels || frame->fill))
                 {
                         int kx = sx1 - cx;
                         const unsigned char *cover;
                         const unsigned int *row;
+                        unsigned int sw[COMPOSITOR_RADIUS_MOST];
 
                         if (!b)
                                 cover = outer + (unsigned long)my * r + kx;
@@ -1105,8 +1123,14 @@ static void compositor_corner_rows(const struct compositor_target *t, const stru
                                 cover = inner + (unsigned long)(my - b) * ri + kx;
                         else
                                 cover = inner + (unsigned long)(my - b) * ri + (kx - b);
-                        row = frame->builtin ? tab_row
-                                             : frame->pixels + (unsigned long)(py - y) * frame->pitch + (unsigned long)(sx1 - x);
+                        if (frame->builtin || !frame->pixels)
+                                row = tab_row;
+                        else
+                        {
+                                row = frame->pixels + (unsigned long)(py - y) * frame->pitch + (unsigned long)(sx1 - x);
+                                if (frame->swap)
+                                        memory_swizzle_rb_u32(sw, row, (positive)(sx2 - sx1), 0), row = sw;
+                        }
                         canvas_mix_linear_row(t->pixels + (unsigned long)(py - t->oy) * t->pitch + (unsigned long)(sx1 - t->ox),
                                               row, cover, (positive)(sx2 - sx1));
                 }
@@ -1154,17 +1178,23 @@ static int canvas_cpu_round_corner(void *ctx, const struct compositor_frame *f, 
                                 unsigned int *at = t->pixels + (unsigned long)(py - t->oy) * t->pitch + (unsigned long)(px - t->ox);
                                 unsigned int pixel = *at;
 
-                                if (cover)
-                                        pixel = b ? canvas_mix_linear(pixel, edge & 0xffffffu, cover) : pixel;
-                                if (px >= x && px < x + w && py >= y && py < y + h)
+                                int inside = px >= x && px < x + w && py >= y && py < y + h;
+                                unsigned int in = inside ? (!b ? cover : inner ? inner[(my - b) * ri + (mx - b)] : 0) : 0;
+
+                                if (cover && b)
                                 {
-                                        unsigned int in = inner ? inner[(my - b) * ri + (mx - b)] : 0;
+                                        unsigned int edge_cov = f->blend ? (cover > in ? cover - in : 0) : cover;
+                                        if (edge_cov)
+                                                pixel = canvas_mix_linear(pixel, edge & 0xffffffu, edge_cov);
+                                }
+                                if (inside)
+                                {
                                         unsigned int ink = f->builtin ? tab
                                                            : picture  ? picture[(unsigned long)(py - y) * f->pitch + (unsigned long)(px - x)]
                                                                       : compositor_picture_at(f, px - x, py - y);
 
-                                        if (!b)
-                                                in = cover;
+                                        if (f->swap && !f->builtin)
+                                                ink = (ink & 0xff00ff00u) | ((ink >> 16) & 0xffu) | ((ink & 0xffu) << 16);
                                         if (f->blend)
                                                 pixel = compositor_over_weighted(pixel, ink, in);
                                         else
@@ -1477,7 +1507,7 @@ static int canvas_gpu_round_corner(void *ctx, const struct compositor_frame *f, 
 {
         struct compositor_gscene *g = (struct compositor_gscene *)ctx;
         int picture = f->builtin || f->pixels != 0 || f->fill != 0;
-        unsigned int edge_table = b ? compositor_gpu_table(r, b, corner, picture ? 0 : 2) : 0;
+        unsigned int edge_table = b ? compositor_gpu_table(r, b, corner, (picture && !f->blend) ? 0 : 2) : 0;
         unsigned int content_table = picture && ri ? compositor_gpu_table(r, b, corner, 1) : 0;
 
         if ((b && !edge_table) || (picture && ri && !content_table))
@@ -2348,10 +2378,20 @@ static void compositor_scene_plan(const struct compositor_target *t, const struc
         const unsigned int *owner = plan->owner;
         unsigned int edges = 0, pieces = plan->pieces;
 
-        // A blended frame with a frame under it here: every frame drawn over the last, from the ground up. One with the ground
-        // alone under it is a piece of the plan, as an opaque one is, laid over the ground (blend 2 on the copy drawn).
+        // A blended frame with a frame under it, or a border-only frame (no picture/fill, e.g. snap grid): draw bottom-to-top so interiors are never left unwritten.
         for (unsigned int at = 0; at < count; at++)
-                if (frames[at].blend && !compositor_blend_alone(t, frames, at))
+        {
+                int border_only = !frames[at].builtin && !frames[at].pixels && !frames[at].fill && frames[at].line > 0;
+                int fall_back = (frames[at].blend && !compositor_blend_alone(t, frames, at));
+
+                if (border_only)
+                {
+                        int fx, fy, fw, fh;
+
+                        compositor_outline(&frames[at], &fx, &fy, &fw, &fh);
+                        fall_back |= fx + fw > t->x1 && fx < t->x2 && fy + fh > t->y1 && fy < t->y2;
+                }
+                if (fall_back)
                 {
                         compositor_ground_fill(t, t->x1, t->y1, t->x2 - t->x1, t->y2 - t->y1);
                         for (unsigned int each = 0; each < count; each++)
@@ -2359,6 +2399,7 @@ static void compositor_scene_plan(const struct compositor_target *t, const struc
                         compositor_preview_draw(t, frames, count, radii);
                         return;
                 }
+        }
 
         edge[edges++] = t->y1;
         for (unsigned int k = 0; k < plan->edges; k++)
@@ -2540,6 +2581,17 @@ static int compositor_scene_reads(const struct compositor_target *t, const struc
         {
                 if (frames[at].blend)
                         compositor_blend_under(t, frames, at, top, bottom);
+                if (!frames[at].builtin && !frames[at].pixels && !frames[at].fill && frames[at].line > 0)
+                {
+                        int fx, fy, fw, fh;
+
+                        compositor_outline(&frames[at], &fx, &fy, &fw, &fh);
+                        if (fx + fw > t->x1 && fx < t->x2 && fy + fh > t->y1 && fy < t->y2)
+                        {
+                                *top = fy < *top ? fy : *top;
+                                *bottom = fy + fh > *bottom ? fy + fh : *bottom;
+                        }
+                }
                 for (int k = 0; k < 2; k++)
                 {
                         const int *r = k ? frames[at].mark : frames[at].preview;
@@ -2679,12 +2731,28 @@ static void compositor_corner_masks_ready(const struct compositor_frame *frames,
         {
                 int r = compositor_radius(&frames[at]), ox, oy, ow, oh;
 
-                if (!r)
-                        continue;
-                compositor_outline(&frames[at], &ox, &oy, &ow, &oh);
-                compositor_corner_mask(r);
-                if (r > frames[at].x - ox)
-                        compositor_corner_mask(r - (frames[at].x - ox));
+                if (r)
+                {
+                        compositor_outline(&frames[at], &ox, &oy, &ow, &oh);
+                        compositor_corner_mask(r);
+                        if (r > frames[at].x - ox)
+                                compositor_corner_mask(r - (frames[at].x - ox));
+                        if (frames[at].lit && frames[at].lit_w > frames[at].x - ox && r > frames[at].lit_w)
+                                compositor_corner_mask(r - frames[at].lit_w);
+                }
+                if (frames[at].preview[2] > 0 && frames[at].preview[3] > 0 && frames[at].preview_radius > 0)
+                {
+                        int pr = 0, pl = 0;
+
+                        canvas_tint_clamp(frames[at].preview[2], frames[at].preview[3], frames[at].preview_radius,
+                                          frames[at].preview_line, frames[at].preview_edge, &pr, &pl);
+                        if (pr > 0)
+                        {
+                                compositor_corner_mask(pr);
+                                if (pl > 0 && pr > pl)
+                                        compositor_corner_mask(pr - pl);
+                        }
+                }
         }
 }
 

@@ -418,13 +418,13 @@ static void scanout_plate_replay_front(void)
                 struct compositor_parts parts = compositor_front_parts;
 
                 for (unsigned int at = 0; at < parts.d.count; at++)
-                        compositor_damage(parts.d.r[at].x1, parts.d.r[at].y1,
-                                          parts.d.r[at].x2 - parts.d.r[at].x1, parts.d.r[at].y2 - parts.d.r[at].y1);
+                        compositor_damage_from(parts.d.r[at].x1, parts.d.r[at].y1,
+                                               parts.d.r[at].x2 - parts.d.r[at].x1, parts.d.r[at].y2 - parts.d.r[at].y1, COMPOSITOR_OVER);
         }
         else if (compositor_front_stale_any)
-                compositor_damage(compositor_front_stale[0], compositor_front_stale[1],
-                                  compositor_front_stale[2] - compositor_front_stale[0],
-                                  compositor_front_stale[3] - compositor_front_stale[1]);
+                compositor_damage_from(compositor_front_stale[0], compositor_front_stale[1],
+                                       compositor_front_stale[2] - compositor_front_stale[0],
+                                       compositor_front_stale[3] - compositor_front_stale[1], COMPOSITOR_OVER);
 }
 
 static void scanout_plate_mark_spare(const int (*rects)[4], unsigned int count)

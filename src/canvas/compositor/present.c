@@ -1289,6 +1289,7 @@ static unsigned int present_bands_pass(struct compositor_frame *frames, unsigned
                 if (!solid)
                 {
 #ifdef CONFIG_MOONWATER_WAYLAND
+                        compositor_wl_tiled_settle();
                         compositor_wl_lent_sync(1);
 #endif
                         compositor_wl_straight_pays(-1);
@@ -1492,6 +1493,10 @@ static void compositor_present_frames(void)
         {
                 if (compositor.assist_armed)
                 {
+#ifdef CONFIG_MOONWATER_WAYLAND
+                        compositor_wl_tiled_settle();
+                        compositor_wl_lent_sync(1);
+#endif
                         compositor_assist_refresh();
                         for (int thumb = 0; thumb < compositor.assist_count; thumb++)
                                 compositor_damage(compositor.assist_rect[thumb][0], compositor.assist_rect[thumb][1],
@@ -1547,6 +1552,9 @@ static void compositor_present_frames(void)
                         scanout_plate_replay_front();
                 }
         }
+#ifdef CONFIG_MOONWATER_WAYLAND
+        compositor_wl_tiled_settle();
+#endif
         for (unsigned int at = 0; at < windows; at++)
                 compositor_close_mean(&frames[at]), compositor_close_ready(&frames[at]);
 #ifdef MOONWATER_GPU_C

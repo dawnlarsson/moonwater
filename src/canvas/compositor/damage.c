@@ -401,10 +401,15 @@ static void compositor_close_join(int *rectangle)
                         }
                         if (!compositor_close_box(&frame, &bx, &by, &side))
                                 continue;
-                        // The minimise button is left of the close one: its damage is the pair's, the close button's right edge kept.
+                        // Union the close and minimize button boxes (works in both LTR and RTL layouts).
                         right = bx + side;
                         if (compositor_minimize_box(&frame, &mx, &my, &mside))
-                                bx = mx;
+                        {
+                                if (mx < bx)
+                                        bx = mx;
+                                if (mx + mside > right)
+                                        right = mx + mside;
+                        }
                         box[0] = bx < 0 ? 0 : bx, box[1] = by < 0 ? 0 : by;
                         box[2] = right > compositor.width ? compositor.width : right;
                         box[3] = by + side > compositor.height ? compositor.height : by + side;

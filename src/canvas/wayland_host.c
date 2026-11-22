@@ -1492,7 +1492,7 @@ static void compositor_wl_layers_lay(int row)
                 unsigned int *to = (unsigned int *)((char *)compositor.table + compositor.pixels +
                                                     ((unsigned long)row * 2 + (compositor.front[row] & 1u)) * compositor.buffer);
                 if (!compositor_wl_card_lay(row, to, 0))
-                        compositor_wl_layers_put(row, to, (unsigned long)compositor_stride());
+                        wl_ext_tiled_settle(), compositor_wl_layers_put(row, to, (unsigned long)compositor_stride());
         }
         compositor_wl_layers_drop(row);
 }
@@ -2027,6 +2027,8 @@ static int compositor_wl_card_image(int row, const struct wayland_picture *pictu
                 return compositor_wl_tiled_refused(6);
         if (picture->last && !picture->blend)
         {
+                if (compositor_wl.tiled_seq && compositor_wl.tiled_row != row)
+                        wl_ext_tiled_settle();
                 positive sequence = gpu_image_go(desc, kind, (unsigned int)sx, (unsigned int)sy, dst_va + 4 * ((positive)dy * pitch + (positive)dx),
                                                  (unsigned int)pitch, (unsigned int)w, (unsigned int)h);
                 if (sequence)
@@ -2251,6 +2253,8 @@ static int compositor_wl_card_rect(int row, const struct wayland_picture *pictur
 #ifdef MOONWATER_GPU_C
         if (picture->last && !picture->blend && picture->sync_fd >= 0)
         {
+                if (compositor_wl.tiled_seq && compositor_wl.tiled_row != row)
+                        wl_ext_tiled_settle();
                 positive sequence = gpu_blit_go(src_va, (unsigned int)(stride / 4), dst_va + 4 * ((positive)dy * pitch + (positive)dx),
                                                 (unsigned int)pitch, 0, 0, (unsigned int)w, (unsigned int)h);
                 if (sequence)
@@ -2912,8 +2916,10 @@ static int compositor_wl_row_picture(void *context, int row, const struct waylan
         {
                 unsigned int shown = compositor.showing[row] ? compositor.front[row] & 1u : 0;
                 int pinned = compositor.showing[row] && (table->pinned[row] || compositor.direct_row == row);
-                int covers = has_content && !picture->blend && !picture->dest_x && !picture->dest_y && picture->width >= width &&
-                             picture->height >= height && (picture->full || !picture->damages);
+                long tw = picture->dst_width > 0 ? picture->dst_width : (picture->transform & 1 ? picture->height : picture->width);
+                long th = picture->dst_height > 0 ? picture->dst_height : (picture->transform & 1 ? picture->width : picture->height);
+                int covers = has_content && !picture->blend && !picture->dest_x && !picture->dest_y && tw >= width &&
+                             th >= height && (picture->full || !picture->damages) && (picture->pixels || !compositor_wl_tiled(picture));
 
                 compositor_wl.laying[row].open = 1, compositor_wl.laying[row].touched = 0, compositor_wl.parts[row].count = 0;
                 compositor_wl.laying[row].full = (unsigned char)pinned;
@@ -2923,7 +2929,7 @@ static int compositor_wl_row_picture(void *context, int row, const struct waylan
                         compositor_wl_table_copy(row, compositor_wl.laying[row].which, (unsigned int)(compositor_wl.laying[row].last - 1) & 1u,
                                                  table->width[row] < (unsigned int)width ? table->width[row] : (unsigned long)width,
                                                  table->height[row] < (unsigned int)height ? table->height[row] : (unsigned long)height);
-                else if (pinned && !covers)
+                else if (!compositor_lent(row) && pinned && !covers)
                         compositor_wl_table_copy(row, compositor_wl.laying[row].which, shown, (unsigned long)width, (unsigned long)height);
                 if (compositor_lent(row))
                 {
@@ -2941,12 +2947,20 @@ static int compositor_wl_row_picture(void *context, int row, const struct waylan
                 {
                         int xst;
                         if (!wl_pic_sync_begin(row, picture, &sync_started))
+                        {
+                                if (compositor_wl.tiled_lent)
+                                        wl_ext_tiled_settle();
                                 return 1;
-                        xst = compositor_wl_card_gather(row, picture, to, pitch, width, height) ? 2 : compositor_wl_blit_xform(row, picture, to, pitch, width, height);
+                        }
+                        xst = compositor_wl_card_gather(row, picture, to, pitch, width, height) ? 2 : (wl_ext_tiled_settle(), compositor_wl_blit_xform(row, picture, to, pitch, width, height));
                         if (sync_started)
                                 canvas_dmabuf_sync_read(picture->sync_fd, 1);
                         if (xst < 0)
+                        {
+                                if (compositor_wl.tiled_lent)
+                                        wl_ext_tiled_settle();
                                 return compositor_wl.laying[row].open = 0, -1;
+                        }
                         if (xst == 2)
                                 table->client_rects_card++, compositor_wl_copied(row, WINDOWS_COPY_CARD);
                         else if (xst > 0)
@@ -2992,7 +3006,12 @@ static int compositor_wl_row_picture(void *context, int row, const struct waylan
                                 if (picture->blend)
                                 {
                                         if (!wl_pic_sync_begin(row, picture, &sync_started))
+                                        {
+                                                if (compositor_wl.tiled_lent)
+                                                        wl_ext_tiled_settle();
                                                 return 1;
+                                        }
+                                        wl_ext_tiled_settle();
                                         memory_over_u32_rect(dst_p, pitch, src_p, sp, rw, rh);
                                 }
                                 else if (compositor_wl_card_rect(row, picture, to, pitch, x + left, y + top, left, top, right - left, bottom - top,
@@ -3001,29 +3020,47 @@ static int compositor_wl_row_picture(void *context, int row, const struct waylan
                                 else if (picture->sync_fd >= 0)
                                 {
                                         if (!wl_pic_sync_begin(row, picture, &sync_started))
+                                        {
+                                                if (compositor_wl.tiled_lent)
+                                                        wl_ext_tiled_settle();
                                                 return 1;
+                                        }
+                                        wl_ext_tiled_settle();
                                         table->client_rects_cpu++, compositor_wl_copied(row, WINDOWS_COPY_CPU);
                                         memory_copy_rect_stream_u32(dst_p, pitch, src_p, sp, rw, rh);
                                 }
                                 else
-                                        table->client_rects_cpu++, compositor_wl_copied(row, WINDOWS_COPY_CPU),
+                                {
+                                        wl_ext_tiled_settle();
+                                        table->client_rects_cpu++, compositor_wl_copied(row, WINDOWS_COPY_CPU);
                                         memory_copy_rect_u32(dst_p, pitch, src_p, sp, rw, rh);
+                                }
                                 compositor_wl_laid(row, x + left, y + top, x + right, y + bottom);
                         }
                         if (sync_started)
                                 canvas_dmabuf_sync_read(picture->sync_fd, 1);
                         if (picture->pixels && compositor_wl_cut(picture->pixels))
+                        {
+                                if (compositor_wl.tiled_lent)
+                                        wl_ext_tiled_settle();
                                 return compositor_wl.laying[row].open = 0, -1;
+                        }
                 }
         }
         if (aside)
         {
+                wl_ext_tiled_settle();
                 compositor_wl_layers_put_list(over, aside, to, pitch);
                 compositor_wl_copied(row, WINDOWS_COPY_WHOLE);
                 compositor_wl.laying[row].full = compositor_wl.laying[row].touched = 1;
         }
         if (!picture->last)
                 return 0;
+        if (has_content && !picture->pixels && !compositor_wl.laying[row].touched)
+        {
+                compositor_wl.laying[row].open = 0;
+                return 1;
+        }
         table->client_copied++, compositor_wl_copied(row, WINDOWS_COPY_TABLE);
         if (width != (long)table->width[row] || height != (long)table->height[row] || !compositor_wl.laying[row].touched)
                 compositor_wl.laying[row].full = 1;

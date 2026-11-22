@@ -9934,22 +9934,22 @@ static void ui_insets_a64(const int address_to dy, int rx, int ry, int address_t
         double rxd = (double)rx, ryd = (double)ry, scale = 65536.0, full = 4294967296.0, back = 1.0 / 65536.0;
         long i = 0;
         __asm__ volatile(
-                "ld1r {v14.2d}, [%[rxd]]\n\tld1r {v15.2d}, [%[ryd]]\n\tld1r {v13.2d}, [%[scale]]\n\t"
-                "ld1r {v12.2d}, [%[full]]\n\tld1r {v11.2d}, [%[back]]\n\t"
+                "ld1r {v3.2d}, [%[rxd]]\n\tld1r {v4.2d}, [%[ryd]]\n\tld1r {v5.2d}, [%[scale]]\n\t"
+                "ld1r {v6.2d}, [%[full]]\n\tld1r {v7.2d}, [%[back]]\n\t"
                 "1:\n\t"
-                "ldr d0, [%[dy], %[i], lsl #2]\n\t"
+                "ldr d0, [%[dy], %[i]]\n\t"
                 "sxtl v0.2d, v0.2s\n\tscvtf v0.2d, v0.2d\n\t"
-                "fmul v0.2d, v0.2d, v13.2d\n\tfdiv v0.2d, v0.2d, v15.2d\n\t"
+                "fmul v0.2d, v0.2d, v5.2d\n\tfdiv v0.2d, v0.2d, v4.2d\n\t"
                 "fcvtzs v1.2d, v0.2d\n\tscvtf v1.2d, v1.2d\n\tfmul v1.2d, v1.2d, v1.2d\n\t"
-                "fsub v2.2d, v12.2d, v1.2d\n\tfsqrt v2.2d, v2.2d\n\t"
+                "fsub v2.2d, v6.2d, v1.2d\n\tfsqrt v2.2d, v2.2d\n\t"
                 "fcvtzs v2.2d, v2.2d\n\tscvtf v2.2d, v2.2d\n\t"
-                "fmul v2.2d, v2.2d, v14.2d\n\tfmul v2.2d, v2.2d, v11.2d\n\t"
+                "fmul v2.2d, v2.2d, v3.2d\n\tfmul v2.2d, v2.2d, v7.2d\n\t"
                 "fcvtzs v2.2d, v2.2d\n\txtn v2.2s, v2.2d\n\t"
-                "str d2, [%[inset], %[i], lsl #2]\n\t"
-                "add %[i], %[i], #2\n\tcmp %[i], #16\n\tb.lo 1b\n\t"
+                "str d2, [%[inset], %[i]]\n\t"
+                "add %[i], %[i], #8\n\tcmp %[i], #64\n\tb.lo 1b\n\t"
                 : [i] "+r"(i)
                 : [dy] "r"(dy), [inset] "r"(inset), [rxd] "r"(&rxd), [ryd] "r"(&ryd), [scale] "r"(&scale), [full] "r"(&full), [back] "r"(&back)
-                : "v0", "v1", "v2", "v11", "v12", "v13", "v14", "v15", "memory", "cc");
+                : "v0", "v1", "v2", "v3", "v4", "v5", "v6", "v7", "memory", "cc");
 }
 #endif
 
@@ -19854,6 +19854,17 @@ static fn ui_icon_picture(struct ui address_to ui, int left, int top, int size, 
         }
         int y0 = top < ui->top ? ui->top : top;
         int y1 = top + size > ui->bottom ? ui->bottom : top + size;
+        if (y0 < 0)
+                y0 = 0;
+        if (y1 > ui->height)
+                y1 = ui->height;
+        if (ui->band_bottom > ui->band_top)
+        {
+                if (y0 < ui->band_top)
+                        y0 = ui->band_top;
+                if (y1 > ui->band_bottom)
+                        y1 = ui->band_bottom;
+        }
         if (y1 <= y0)
                 return;
         if (ui->opaque)
