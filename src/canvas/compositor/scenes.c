@@ -134,6 +134,7 @@ static struct
         // with a window under it (held: its miniature follows the hand) and the card it would be dropped on; the pointer they were made at.
         int hover_row, hover_card, hover_close, held, drop_card, at_x, at_y;
         int auto_opened; // opened by a window dragged to the band, which shuts it again when the drag ends
+        int room[4];     // the screen's room the overview was laid out in (the screen less the band)
         // The title under the window under the hand: its picture (the kit's, taskbar_scenes_title), the plate's width in it, and what it
         // was made of (the row, its title, the picture's size and inks), so it is made again only when one changes.
         unsigned int *title;
@@ -159,6 +160,7 @@ static int compositor_scenes_title_h(int scale)
         spring. Reduced motion has no spring: the share is its end at once, and a drag's progress.
 */
 #define COMPOSITOR_SCENES_FULL (1000 * UI_ONE) // the whole share, in units the spring rests within a quarter of (BODY_REST)
+#define COMPOSITOR_SCENES_DIM 77               // the desktop under the overview all the way open: black at 30 percent over it
 static inline b32 ui_body_spring_step(b64 address_to pos, b64 address_to vel, b64 rest, b64 dt); // ui.c, the kit's spring
 
 // The share shown, Q30 (0 to UI_ONE).
@@ -201,6 +203,7 @@ static void compositor_scenes_relayout(void)
         compositor_scenes_kept.stack_gen = compositor.stack_gen, compositor_scenes_kept.spaces_gen = compositor.spaces.gen;
         // The overview is laid out in the screen's room: the band keeps its place over it, on any edge.
         compositor_room(screens[screen], room);
+        memory_copy(compositor_scenes_kept.room, room, sizeof(room));
         strip_h = room[3] * 18 / 100;
         strip[0] = room[0] + gap, strip[1] = room[1] + gap, strip[2] = room[2] - 2 * gap, strip[3] = strip_h;
         win[0] = room[0] + 2 * gap, win[1] = room[1] + strip_h + 3 * gap, win[2] = room[2] - 4 * gap, win[3] = room[3] - strip_h - 5 * gap;
@@ -858,6 +861,18 @@ static unsigned int compositor_scenes_frames(struct compositor_frame *frames, un
         radius = UI_RADIUS * scale / 100, line = compositor_line_px(scale), lit_w = 2 * compositor_lit_px(scale);
         filler = compositor.scenes.windows ? (unsigned int)compositor.scenes.row[0] : 0;
         active = compositor_space_at(screen, compositor_spaces_active_index(screen));
+        // The desktop under the overview is dimmed by the share shown: the scene's tint over the room (the band keeps its look), which
+        // compositor_preview_lift takes to its own frame, and every frame after this one is drawn again over it, so the ground alone is dimmed.
+        if (t > 0 && at < room && compositor_scenes_kept.room[2] > 0 && compositor_scenes_kept.room[3] > 0)
+        {
+                struct compositor_frame *dim = &frames[at];
+
+                memory_zero(dim, sizeof(*dim));
+                dim->scale = scale, dim->layer = 1;
+                memory_copy(dim->preview, compositor_scenes_kept.room, sizeof(dim->preview));
+                dim->preview_ink = (unsigned int)((COMPOSITOR_SCENES_DIM * t) >> UI_Q) << 24;
+                rows[at++] = filler;
+        }
         // The current Scene's windows in the stack's order, each its own frames where it is (moved after the strip has its copies of them).
         for (unsigned int i = 0; i < compositor.scenes.windows; i++)
                 span[i][0] = span[i][1] = 0;

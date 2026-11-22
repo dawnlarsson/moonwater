@@ -1238,6 +1238,19 @@ static void check_compositor_scenes_more(void)
     }
     check("scenes more: the window under the hand has its ring lit in the accent", lit);
     {
+        unsigned int dim = count, first = count;
+
+        for (unsigned int k = 0; k < count; k++)
+        {
+            if (dim == count && scenes_frames[k].preview[2] > 0 && !memory_compare(scenes_frames[k].preview, compositor_scenes_kept.room, sizeof(int) * 4) &&
+                scenes_frames[k].preview_ink == (unsigned int)COMPOSITOR_SCENES_DIM << 24 && scenes_frames[k].width == 0)
+                dim = k;
+            if (first == count && scenes_rows[k] == 1 && scenes_frames[k].pixels)
+                first = k;
+        }
+        check("scenes more: the desktop under the overview is dimmed, black at 30 percent over the room, under every frame of it", dim < first && first < count);
+    }
+    {
         struct taskbar_view view = compositor_taskbar_view_for(0);
 
         if (view.engine && view.face)
