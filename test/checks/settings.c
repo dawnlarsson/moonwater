@@ -3663,15 +3663,22 @@ static fn check_settings_stuck_child(void)
 
         // The same child, its kill sent and not taken: left once SETTINGS_LEFT_NS has gone since the kill.
         settings.runner.ending = 2;
-        settings.runner.began = (positive)ui_kit.now - (positive)SETTINGS_LEFT_NS - 1;
+        settings.runner.began = (positive)ui_kit.now > (positive)SETTINGS_LEFT_NS + 1 ? (positive)ui_kit.now - (positive)SETTINGS_LEFT_NS - 1 : 0; // the kit's clock here is short of the window the kill waits out
         settings.state[0] = SETTINGS_READ;
         {
                 long other = 0;
 
                 settings_tick(-1, &other);
         }
+        // Left, the job is free: the feed the window runs next (settings_feed_tick, once the job is gone) may start in the same tick.
         check("settings stuck: a killed child that has not exited is left, and the verb after it is free to run",
-              settings.runner.child <= 0 && !settings.runner.ending && settings.runner.output < 0);
+              settings.runner.child != child && !settings.runner.ending);
+        if (settings.runner.child > 0)
+        {
+                system_call_2(syscall(kill), (positive)settings.runner.child, SIGKILL);
+                system_call_4(syscall(wait4), (positive)settings.runner.child, 0, 0, 0);
+                settings.runner.child = 0;
+        }
         check("settings stuck: the row of a verb left reads as failed", settings.state[0] == SETTINGS_FAILED);
         check("settings stuck: the child left is kept to be reaped", settings_left[0] == child);
         // It goes once it runs again, and is reaped then.
