@@ -77,9 +77,9 @@ struct bowl_mount_point
 static struct bowl_mount_point bowl_isolated_mounts[] = {
     {"proc", "/proc", "proc", MS_NOSUID | MS_NOEXEC | MS_NODEV, 0},
     {"sysfs", "/sys", "sysfs", MS_NOSUID | MS_NOEXEC | MS_NODEV | MS_RDONLY, 0},
-    {"devtmpfs", "/dev", "devtmpfs", MS_NOSUID, 0},
+    {"devtmpfs", "/dev", "devtmpfs", MS_NOSUID | MS_NOEXEC, 0},
     {"devpts", "/dev/pts", "devpts", MS_NOSUID | MS_NOEXEC, 0},
-    {"tmpfs", "/dev/shm", "tmpfs", MS_NOSUID | MS_NODEV, "mode=1777"},
+    {"tmpfs", "/dev/shm", "tmpfs", MS_NOSUID | MS_NODEV | MS_NOEXEC, "mode=1777"},
     {"tmpfs", "/run", "tmpfs", MS_NOSUID | MS_NODEV, 0},
     {"tmpfs", "/tmp", "tmpfs", MS_NOSUID | MS_NODEV, "mode=1777"},
     {null, null, null, 0, 0},
@@ -648,8 +648,8 @@ static bipolar bowl_bind_ro(string_address source, string_address target)
 
         bowl_doing("make read-only", target);
         return system_mount(0, target, 0,
-                            MS_BIND | MS_REMOUNT | MS_RDONLY |
-                                bowl_mount_kept(target), 0);
+                            MS_BIND | MS_REMOUNT | MS_RDONLY | MS_NOSUID |
+                                MS_NODEV | bowl_mount_kept(target), 0);
 }
 
 /*
@@ -747,7 +747,7 @@ static b32 bowl_expose_program(string_address root, string_address program,
                 if (ours &&
                     bowl_root_path(guest, sizeof(guest), existing_root,
                                    existing_program) &&
-                    system_access_at(AT_FDCWD, guest, BOWL_ACCESS_EXECUTE) >=
+                    bowl_executable_in_root(existing_root, existing_program) >=
                         0)
                 {
                         if (!bowl_quiet)
@@ -1338,10 +1338,7 @@ static bool bowl_real_directory(string_address root, string_address path,
 static bipolar bowl_fast_layer_source(string_address root, string_address layer,
                                       p8 address_to source, positive room)
 {
-        if (!bowl_root_path(source, room, root, layer))
-                return -ENAMETOOLONG;
-
-        if (system_access_at(AT_FDCWD, source, 0) >= 0)
+        if (bowl_real_directory(root, layer, source, room))
                 return 1;
 
         // Merged-/usr Arch has /usr/lib32/ld-linux.so.2 without a /lib32 symlink;
@@ -1349,10 +1346,7 @@ static bipolar bowl_fast_layer_source(string_address root, string_address layer,
         if (!string_equals(layer, "/lib32"))
                 return 0;
 
-        if (!bowl_root_path(source, room, root, "/usr/lib32"))
-                return -ENAMETOOLONG;
-
-        return system_access_at(AT_FDCWD, source, 0) >= 0 ? 1 : 0;
+        return bowl_real_directory(root, "/usr/lib32", source, room) ? 1 : 0;
 }
 
 static bipolar bowl_fast_layer(string_address root, string_address layer)
@@ -1634,15 +1628,13 @@ static bipolar bowl_fast_etc(string_address root)
         positive length = sizeof(lower) - 1;
         bipolar failed;
 
-        if (!bowl_root_path(options + length, sizeof(options) - length, root,
-                            "/etc"))
-                return -ENAMETOOLONG;
+        if (!bowl_real_directory(root, "/etc", options + length,
+                                 sizeof(options) - length))
+                return 0;
         /* A path with overlayfs option separators cannot be a lowerdir layer. */
         if (string_first_of(options + length, ',') ||
             string_first_of(options + length, ':') ||
             string_first_of(options + length, '\\'))
-                return 0;
-        if (system_access_at(AT_FDCWD, options + length, 0) < 0)
                 return 0;
 
         if (!bowl_overlaid("/etc"))
@@ -1717,7 +1709,8 @@ static bipolar bowl_fast_union(string_address root, string_address target,
                 return failed;
 
         bowl_doing("overlay a directory from", options + length);
-        failed = system_mount("overlay", target, "overlay", MS_RDONLY, options);
+        failed = system_mount("overlay", target, "overlay",
+                              MS_RDONLY | MS_NOSUID | MS_NODEV, options);
         if (!failed)
                 bowl_view_map(target);
         return failed;
@@ -1962,9 +1955,17 @@ static string_address address_to bowl_inputs_take(
                         bowl_input_refuse(name);
                         break;
                 }
-                handle = system_open_at(AT_FDCWD, full, FILE_READ | O_CLOEXEC);
+                handle = system_open_at(AT_FDCWD, full,
+                                        FILE_READ | O_NONBLOCK | O_CLOEXEC);
                 if (handle < 0)
                         continue;
+                if (file_look_code(handle, "", AT_EMPTY_PATH,
+                                   address_of facts) < 0 ||
+                    (facts.mode & 0170000) != 0100000)
+                {
+                        system_close(handle);
+                        continue;
+                }
                 /*  A detached copy of the file's mount: the view's old root
                     is detached once it is pivoted away, and a mount that
                     is not in the namespace cannot be bound from by name. */
@@ -2033,6 +2034,7 @@ static bipolar bowl_inputs_mount(void)
                         return failed;
                 failed = system_mount(0, bowl_input_entry[at].target, 0,
                                       MS_BIND | MS_REMOUNT | MS_RDONLY |
+                                          MS_NOSUID | MS_NODEV | MS_NOEXEC |
                                           bowl_mount_kept(bowl_input_entry[at].target), 0);
                 if (failed)
                         return failed;
@@ -2380,7 +2382,8 @@ static bool bowl_pad_make(string_address path, positive number, p32 owner)
         system_remove_at(AT_FDCWD, (string_address)made, 0);
         if (system_call_4(syscall(mknodat), AT_FDCWD, (positive)made, S_IFCHR | 0600, number) < 0)
                 return false;
-        if (system_change_owner_at(AT_FDCWD, (string_address)made, owner, owner, 0) < 0 ||
+        if (system_change_owner_at(AT_FDCWD, (string_address)made, owner, owner,
+                                   AT_SYMLINK_NOFOLLOW) < 0 ||
             system_rename_at(AT_FDCWD, made, AT_FDCWD, path, 0) < 0)
         {
                 system_remove_at(AT_FDCWD, (string_address)made, 0);
@@ -2408,7 +2411,8 @@ static fn bowl_pad_hidraw_add(string_address name, p32 owner)
         p8 path[BOWL_PATH_LIMIT];
         p8 staged[BOWL_PATH_LIMIT];
 
-        if (!path_join(path, sizeof(path), "/dev", name) ||
+        if (!string_has_prefix(name, "hidraw") || !byte_is_digit(name[6]) ||
+            !path_join(path, sizeof(path), "/dev", name) ||
             !path_join(staged, sizeof(staged), BOWL_PAD_STAGE, name) ||
             system_access_at(AT_FDCWD, (string_address)path, 0) < 0)
                 return;
@@ -2609,6 +2613,12 @@ static DEAD_END fn bowl_pad_keeper(positive launch, bipolar go, bipolar done, p3
         //      Of a session of its own and holding none of the launch's files open (a reader of the program's output
         //      would wait for the keeper too).
         bowl_detach_stdio();
+        {
+                p32 keep[3] = {(p32)go, (p32)done,
+                               heard >= 0 ? (p32)heard : descriptors_none};
+
+                descriptors_close_outside(3, keep, 3);
+        }
         if (system_read_once(go, &byte, 1) != 1)
                 exit(0);
         system_close(go);
@@ -2641,7 +2651,20 @@ static DEAD_END fn bowl_pad_keeper(positive launch, bipolar go, bipolar done, p3
                 }
                 if (!wanted[0].returned)
                         continue;
-                got = socket_receive((b32)heard, message, sizeof(message) - 1, MSG_DONTWAIT, 0, 0);
+                {
+                        socket_address_netlink source;
+                        p32 source_len = sizeof(source);
+
+                        memory_zero(address_of source, sizeof(source));
+                        got = socket_receive((b32)heard, message,
+                                             sizeof(message) - 1, MSG_DONTWAIT,
+                                             address_of source,
+                                             address_of source_len);
+                        if (got > 0 &&
+                            (source_len < sizeof(source) ||
+                             source.family != AF_NETLINK || source.port != 0))
+                                continue;
+                }
                 if (got == -ENOBUFS)
                 {
                         //      Uevents were lost: what is there now is looked at again.
@@ -4343,19 +4366,20 @@ static string_address address_to bowl_without_exposed_path(
         return clean;
 }
 
-static fn bowl_drop_ambient_capabilities(void)
+static bool bowl_drop_ambient_capabilities(void)
 {
         bowl_cap_header header = {BOWL_CAP_VERSION_3, 0};
         bowl_cap_data data[2] = {{0}};
 
-        ul_prctl(BOWL_PR_CAP_AMBIENT, BOWL_PR_CAP_AMBIENT_CLEAR_ALL, 0);
+        if (ul_prctl(BOWL_PR_CAP_AMBIENT, BOWL_PR_CAP_AMBIENT_CLEAR_ALL, 0) < 0)
+                return false;
         if (system_call_2(syscall(capget), (positive)address_of header,
                           (positive)data) < 0)
-                return;
+                return false;
         data[0].inheritable = 0;
         data[1].inheritable = 0;
-        system_call_2(syscall(capset), (positive)address_of header,
-                      (positive)data);
+        return system_call_2(syscall(capset), (positive)address_of header,
+                             (positive)data) >= 0;
 }
 
 static bool bowl_keep_capabilities(void)
@@ -4364,10 +4388,7 @@ static bool bowl_keep_capabilities(void)
         bowl_cap_data data[2] = {{0}};
 
         if (!bowl_capabilities_wanted(file_environment_all()))
-        {
-                bowl_drop_ambient_capabilities();
-                return true;
-        }
+                return bowl_drop_ambient_capabilities();
         if (system_call_2(syscall(capget), (positive)address_of header,
                           (positive)data) < 0)
                 return false;
@@ -6896,8 +6917,9 @@ static bipolar bowl_oci_merge(bipolar upper, bipolar lower, positive depth)
                                         failed = system_change_owner_at(onto, "",
                                             facts.owner, facts.group, AT_EMPTY_PATH);
                                 if (!failed)
-                                        failed = system_change_mode_at(lower, name,
-                                                                       facts.mode & 07777);
+                                        failed = system_call_2(syscall(fchmod),
+                                                               (positive)onto,
+                                                               facts.mode & 07777);
                                 if (from >= 0)
                                         system_close(from);
                                 if (onto >= 0)
@@ -8654,10 +8676,32 @@ static string_address bowl_bus_service_directories[] = {
     "/usr/local/share/dbus-1/system-services",
     "/run/current-system/sw/share/dbus-1/system-services", null};
 
+static bool bowl_bus_pid_is_daemon(positive pid)
+{
+        p8 path[48];
+        p8 comm[32];
+        positive used;
+        bipolar got;
+
+        if (pid < 2)
+                return false;
+        memory_copy(path, "/proc/", 6);
+        used = 6 + positive_into_string(path + 6, pid);
+        if (used + sizeof("/comm") > sizeof(path))
+                return false;
+        memory_copy(path + used, "/comm", sizeof("/comm"));
+        got = file_read_once_at(AT_FDCWD, path, comm, sizeof(comm) - 1);
+        if (got <= 0)
+                return false;
+        if (comm[got - 1] == '\n')
+                got--;
+        comm[got] = end;
+        return string_equals(comm, "dbus-daemon");
+}
+
 static bool bowl_bus_running(void)
 {
         p8 text[32];
-        p8 path[48];
         bipolar got = file_read_once_at(AT_FDCWD, BOWL_BUS_PIDFILE, text,
                                         sizeof(text) - 1);
         positive taken;
@@ -8667,12 +8711,10 @@ static bool bowl_bus_running(void)
                 return false;
         text[got] = end;
         pid = string_digits_max(text, (positive)got, address_of taken);
-        if (!taken || sizeof("/proc/") + 20 > sizeof(path))
+        if (!taken)
                 return false;
 
-        memory_copy(path, "/proc/", 6);
-        path[6 + positive_into_string(path + 6, pid)] = end;
-        return system_access_at(AT_FDCWD, path, 0) >= 0;
+        return bowl_bus_pid_is_daemon(pid);
 }
 
 /* The process a pidfile names, asked to finish, and the pidfile with it. */
@@ -8755,6 +8797,7 @@ static fn bowl_bus_service(string_address root, bipolar directory,
         p8 path[BOWL_PATH_LIMIT];
         positive exec_at = 0;
         positive exec_size = 0;
+        positive exec_count = 0;
         positive root_size = string_length(root);
         bipolar got;
 
@@ -8777,14 +8820,18 @@ static fn bowl_bus_service(string_address root, bipolar directory,
                         stop++;
                 if (stop - at > 5 && !string_compare_max(text + at, "Exec=", 5))
                 {
+                        exec_count++;
                         exec_at = at + 5;
                         exec_size = stop - at - 5;
                 }
                 at = stop + 1;
         }
 
-        if (!exec_size || text[exec_at] != '/')
+        if (exec_count != 1 || !exec_size || text[exec_at] != '/')
                 return;
+        for (positive i = 0; i < exec_size; i++)
+                if (text[exec_at + i] == '\r' || text[exec_at + i] == 0)
+                        return;
         {
                 positive word = 0;
 
@@ -8797,7 +8844,8 @@ static fn bowl_bus_service(string_address root, bipolar directory,
                 }
                 program[word] = end;
         }
-        if (string_equals(program, "/bin/false") ||
+        if (bowl_path_steps(program) ||
+            string_equals(program, "/bin/false") ||
             string_equals(program, "/usr/bin/false") ||
             bowl_executable_in_root(root, program) < 0)
                 return;
@@ -8893,7 +8941,7 @@ static fn bowl_bus_accounts(string_address root)
         }
         chosen[named] = end;
         pid = string_digits_max(pid_text, (positive)got, address_of taken);
-        if (!taken || pid < 2 || !bowl_named_root(chosen))
+        if (!taken || !bowl_bus_pid_is_daemon(pid) || !bowl_named_root(chosen))
                 return;
         bowl_accounts_made = 0;
         bowl_accounts_prepare(chosen, true);
@@ -9181,6 +9229,7 @@ static DEAD_END fn bowl_bus_accept(bipolar listener)
            end, left on a terminal it holds the terminal. The daemon the
            configuration forks lets go of them the same way. */
         bowl_detach_stdio();
+        descriptors_close_except(3, (p32)listener, descriptors_none);
 
         for (;;)
         {
@@ -9212,12 +9261,16 @@ static DEAD_END fn bowl_bus_accept(bipolar listener)
                                 bool rooted;
                                 bipolar upstream;
 
+                                socket_close((b32)listener);
                                 if (socket_option_get((b32)client, BOWL_BUS_SOL_SOCKET,
                                                       BOWL_BUS_SO_PEERCRED,
                                                       address_of peer,
-                                                      address_of peer_size) < 0)
+                                                      address_of peer_size) < 0 ||
+                                    peer_size != (b32)sizeof(peer))
                                         exit(0);
-                                rooted = peer[1] == 0 || peer[1] == BOWL_USER_ID;
+                                rooted = peer[1] == 0 ||
+                                         (MOONWATER_STRICT_BOWL < STRICT_TIGHT &&
+                                          peer[1] == BOWL_USER_ID);
                                 if (!rooted &&
                                     (system_call_2(syscall(setgroups), (positive)0,
                                                    (positive)0) < 0 ||
@@ -9226,12 +9279,14 @@ static DEAD_END fn bowl_bus_accept(bipolar listener)
                                                    (positive)peer[2]) < 0 ||
                                      system_call_3(syscall(setresuid), (positive)peer[1],
                                                    (positive)peer[1],
-                                                   (positive)peer[1]) < 0))
+                                                   (positive)peer[1]) < 0 ||
+                                     system_call_5(syscall(prctl),
+                                                   BOWL_PR_SET_NO_NEW_PRIVS, 1,
+                                                   0, 0, 0) < 0))
                                         exit(0);
 
                                 upstream = bowl_bus_open(BOWL_BUS_UPSTREAM, false);
 
-                                socket_close((b32)listener);
                                 if (upstream >= 0)
                                         bowl_bus_relay(client, upstream, rooted);
                         }
@@ -14549,7 +14604,7 @@ static bool bowl_desktop_path_ok(string_address path)
 
         if (length <= 8 || !memory_has_suffix(path, length, ".desktop"))
                 return false;
-        if (string_find(path, "/../") || memory_has_suffix(path, length, "/.."))
+        if (bowl_path_steps(path))
                 return false;
         if (string_has_prefix(path, BOWL_LOCAL_APPLICATIONS "/"))
                 return true;
@@ -14561,6 +14616,8 @@ static b32 bowl_uninstall(positive count, string_address address_to arguments)
 {
         string_address target;
         const struct bowl_profile address_to profile;
+        p8 leaf[BOWL_PATH_LIMIT];
+        bipolar parent;
         file_facts facts;
         bipolar failed;
 
@@ -14579,10 +14636,18 @@ static b32 bowl_uninstall(positive count, string_address address_to arguments)
                                    BOWL_LOCAL_APPLICATIONS " or " BOWL_ROOT_DIRECTORY "\n");
         if (bowl_setup_become_root("uninstall", target, null))
                 return 1;
-        if (file_look_code(AT_FDCWD, target, AT_SYMLINK_NOFOLLOW, address_of facts) < 0 ||
+        parent = system_open_parent_nofollow(AT_FDCWD, target, false, 0,
+                                             leaf, sizeof(leaf));
+        if (parent < 0)
+                return bowl_fail(target, parent);
+        if (file_look_code(parent, leaf, AT_SYMLINK_NOFOLLOW, address_of facts) < 0 ||
             (facts.mode & 0170000u) != 0100000u)
+        {
+                system_close(parent);
                 return bowl_refuse("desktop entry is not a regular file\n");
-        failed = system_remove_at(AT_FDCWD, target, 0);
+        }
+        failed = system_remove_at(parent, leaf, 0);
+        system_close(parent);
         if (failed < 0)
                 return bowl_fail(target, failed);
         return 0;
