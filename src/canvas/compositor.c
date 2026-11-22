@@ -1037,6 +1037,8 @@ static int compositor_mc_drag_motion(int row, int x, int y);
 static int compositor_mc_drag_drop(int row, int x, int y);
 static void compositor_row_mode(int row, unsigned int how, int fullscreen, int screen);
 static void compositor_pointer_press(unsigned int code, int down);
+static int compositor_grab_end(int how, int drop_row);
+static void compositor_assist_close(void);
 #ifdef CONFIG_MOONWATER_WAYLAND
 static int compositor_wl_started(void);
 #endif
@@ -1604,7 +1606,6 @@ _Static_assert(COMPOSITOR_POLLS_OWN + COMPOSITOR_INPUTS_KEPT + COMPOSITOR_CLIP_H
 #define COMPOSITOR_ROWS_PIECES(rows)  COMPOSITOR_PIECES_FOR(rows)
 #define COMPOSITOR_ROWS_EDGES(rows)   (2 * COMPOSITOR_PIECES_FOR(rows) + 2)
 #define COMPOSITOR_ROWS_SPANS(rows)   (COMPOSITOR_PIECES_FOR(rows) + 1)
-#define COMPOSITOR_ROWS_LAYERED(rows) ((unsigned long)(rows) + COMPOSITOR_LAYERS)
 #define COMPOSITOR_ROWS_LANE(X, i)    X(compositor_lane_edge[i], COMPOSITOR_ROWS_EDGES) X(compositor_lane_span[i], COMPOSITOR_ROWS_SPANS)
 
 #define COMPOSITOR_ROWS_OWN(X) \

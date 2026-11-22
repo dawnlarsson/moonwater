@@ -2552,8 +2552,13 @@ static DEAD_END fn bowl_pad_keeper(positive launch, bipolar go, bipolar done, p3
         //      would wait for the keeper too).
         system_call(syscall(setsid));
         if (nothing >= 0)
+        {
                 for (positive at = 0; at < 3; at++)
-                        system_call_3(syscall(dup3), (positive)nothing, at, 0);
+                        if ((positive)nothing != at)
+                                system_call_3(syscall(dup3), (positive)nothing, at, 0);
+                if (nothing > 2)
+                        system_close((positive)nothing);
+        }
         if (system_read_once(go, &byte, 1) != 1)
                 exit(0);
         system_close(go);
@@ -8870,9 +8875,16 @@ static b32 bowl_bus_run(positive count, string_address address_to arguments)
                                    FILE_APPEND | O_CLOEXEC, 0600);
         if (sink >= 0)
         {
-                system_duplicate(sink, 1, 0);
-                system_duplicate(sink, 2, 0);
-                system_close(sink);
+                if (sink == 1)
+                        system_call_3(syscall(fcntl), 1, 2 /* F_SETFD */, 0);
+                else
+                        system_duplicate(sink, 1, 0);
+                if (sink == 2)
+                        system_call_3(syscall(fcntl), 2, 2 /* F_SETFD */, 0);
+                else
+                        system_duplicate(sink, 2, 0);
+                if (sink > 2)
+                        system_close(sink);
         }
         bowl_as_root = true;
         bowl_accounts_prepare(arguments[3], false);

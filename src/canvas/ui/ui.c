@@ -27712,7 +27712,9 @@ static int ui_text_where(struct ui address_to ui, struct ui_text address_to t, p
 {
         b32 field = t->mode == UI_TEXT_FIELD, wrapped = t->wrap && !field;
         p64 target = doc_line_of(&t->doc, offset), line = field ? 0 : t->top_line;
-        int at = 0, rows = field ? 1 : ui_text_rows(t), room = t->right - t->left, indent, place;
+        int rem = field ? 0 : t->scroll_rem;
+        int at = 0, rows = field ? 1 : (t->line_height > 0 ? (t->bottom - t->top + rem + t->line_height - 1) / t->line_height : 0);
+        int room = t->right - t->left, indent, place;
         p32 k, from = 0, to;
         if (!field && (target < line || doc_hidden(&t->doc, target)))
                 return -1;
@@ -27739,18 +27741,28 @@ static int ui_text_where(struct ui address_to ui, struct ui_text address_to t, p
                 if (at >= rows)
                         return 1;
         }
-        *top = t->top + at * t->line_height;
+        *top = t->top - rem + at * t->line_height;
         *x = ui_text_origin(t, &ui_text_lay) + place;
         return *x < t->left ? -1 : *x > t->right ? 1 : 0;
 }
 
-static fn ui_text_scroll_sync(struct ui_text address_to t, int height)
+static fn ui_text_scroll_sync(struct ui address_to ui, struct ui_text address_to t, int height)
 {
         p64 rows, content;
 
         if (t->mode == UI_TEXT_FIELD || t->line_height <= 0)
                 return;
         rows = t->hex ? (doc_length(&t->doc) / 16 + 1) : doc_line_count(&t->doc);
+        // When line wrap is on and logical lines alone fit in the viewport, count actual wrapped visual rows so wheel scrolling stays active.
+        if (t->wrap && !t->hex && height > 0 && rows * (p64)t->line_height <= (p64)height && rows <= 256)
+        {
+                p64 vrows = 0;
+
+                for (p64 i = 0; i < rows; i++)
+                        vrows += (p64)ui_text_line_rows(ui, t, i);
+                if (vrows > rows)
+                        rows = vrows;
+        }
         content = rows * (p64)t->line_height;
         if (content > 0x3fffffff)
                 content = 0x3fffffff;
@@ -27795,7 +27807,7 @@ static fn ui_text_reveal(struct ui address_to ui, struct ui_text address_to t)
                         while (used > rows && t->top_line < line)
                                 used -= ui_text_line_rows(ui, t, t->top_line++);
                 }
-                if (t->top_line != was_top)
+                if (t->top_line != was_top || (line == t->top_line && t->scroll_rem > 0))
                         ui_text_scroll_jump(t);
         }
         if (t->wrap && t->mode != UI_TEXT_FIELD)
@@ -28511,6 +28523,7 @@ static fn ui_text_hex_toggle(struct ui address_to ui, struct ui_text address_to 
                 t->top_line = doc_line_of(&t->doc, caret);
                 ui_text_reveal(ui, t);
         }
+        ui_text_scroll_jump(t);
         ui_text_wake(t);
 }
 
@@ -28557,6 +28570,7 @@ static fn ui_text_hex_move(struct ui_text address_to t, b64 target, b32 extend)
         t->hex_nibble = false;
         doc_select_set(&t->doc, anchor, clamped);
         ui_text_hex_reveal(t);
+        ui_text_scroll_jump(t);
         ui_text_wake(t);
 }
 
@@ -29631,6 +29645,7 @@ static void ui_text_op_scroll(struct ui address_to ui, void address_to self, lon
         {
                 b64 to = (b64)t->top_line + lines;
                 t->top_line = to < 0 ? 0 : (p64)to >= doc_line_count(&t->doc) ? doc_line_count(&t->doc) - 1 : (p64)to;
+                ui_text_scroll_jump(t);
         }
 }
 
@@ -29708,10 +29723,11 @@ static fn ui_text_hex_layout(const struct ui_text address_to t, int x, int addre
         *ascii_x = *hex_x + 50 * cell;
 }
 
-static p64 ui_text_hex_hit(const struct ui_text address_to t, int x, int y, b32 address_to in_ascii)
+static p64 ui_text_hex_hit(const struct ui address_to ui, const struct ui_text address_to t, int x, int y, b32 address_to in_ascii)
 {
         int addr_w, hex_x, ascii_x, cell = t->cell > 0 ? t->cell : 8;
-        int dy = y - t->top + t->scroll_rem;
+        int uy = t->bottom > t->top ? ui_scroll_unpull(ui, &t->scroll, t->scroll.scroll, t->top, t->bottom - t->top, y) : y;
+        int dy = uy - t->top + t->scroll_rem;
         int row = dy > 0 && t->line_height > 0 ? dy / t->line_height : 0;
         p64 base = t->hex_top + (p64)row * 16, len = doc_length(&t->doc), col = 0;
         ui_text_hex_layout(t, t->well_left, &addr_w, &hex_x, &ascii_x);
@@ -29746,7 +29762,7 @@ static p32 ui_text_hex_pointer(struct ui address_to ui, struct ui_text address_t
                         return 0;
                 if (!(event->flags & WINDOW_WHEEL_STOP) && (event->flags & WINDOW_KEY_CONTROL))
                         return ui_text_hex_command(ui, t, event->a > 0 ? DOC_CMD_ZOOM_IN : DOC_CMD_ZOOM_OUT);
-                ui_text_scroll_sync(t, t->bottom - t->top);
+                ui_text_scroll_sync(ui, t, t->bottom - t->top);
                 return ui_wheel_turn(ui, &t->scroll, event) ? UI_TEXT_MOVED : 0;
         }
         if (event->type == WINDOW_EVENT_BUTTON)
@@ -29762,7 +29778,7 @@ static p32 ui_text_hex_pointer(struct ui address_to ui, struct ui_text address_t
                         return 0;
                 if (event->a == UI_POINTER_RIGHT)
                 {
-                        p64 at = ui_text_hex_hit(t, x, y, &in_ascii);
+                        p64 at = ui_text_hex_hit(ui, t, x, y, &in_ascii);
                         const struct doc_selection address_to sel = &t->doc.selections[t->doc.primary];
                         t->hex_ascii = in_ascii;
                         if (!(doc_any_selected(&t->doc) && at >= doc_sel_start(sel) && at < doc_sel_end(sel)))
@@ -29773,7 +29789,7 @@ static p32 ui_text_hex_pointer(struct ui address_to ui, struct ui_text address_t
                 if (event->a != UI_POINTER_LEFT)
                         return 0;
                 {
-                        p64 at = ui_text_hex_hit(t, x, y, &in_ascii);
+                        p64 at = ui_text_hex_hit(ui, t, x, y, &in_ascii);
                         t->hex_ascii = in_ascii;
                         t->hex_nibble = false;
                         doc_select_set(&t->doc, shift ? t->doc.selections[t->doc.primary].anchor : at, at);
@@ -29785,7 +29801,7 @@ static p32 ui_text_hex_pointer(struct ui address_to ui, struct ui_text address_t
         if (event->type == WINDOW_EVENT_MOTION && s->dragging)
         {
                 b32 in_ascii = t->hex_ascii;
-                p64 at = ui_text_hex_hit(t, x, y, &in_ascii);
+                p64 at = ui_text_hex_hit(ui, t, x, y, &in_ascii);
                 doc_select_set(&t->doc, t->doc.selections[t->doc.primary].anchor, at);
                 return UI_TEXT_MOVED;
         }
@@ -29860,7 +29876,7 @@ static p32 ui_text_pointer(struct ui address_to ui, struct ui_text address_to t,
                 long pixels;
                 if (event->flags & WINDOW_WHEEL_STOP)
                 {
-                        ui_text_scroll_sync(t, t->bottom - t->top);
+                        ui_text_scroll_sync(ui, t, t->bottom - t->top);
                         return ui_wheel_turn(ui, &t->scroll, event) ? UI_TEXT_MOVED : 0;
                 }
                 if (!well)
@@ -29883,7 +29899,7 @@ static p32 ui_text_pointer(struct ui address_to ui, struct ui_text address_to t,
                         t->scroll_x = to < 0 ? 0 : to > most ? most : to;
                         return UI_TEXT_MOVED;
                 }
-                ui_text_scroll_sync(t, t->bottom - t->top);
+                ui_text_scroll_sync(ui, t, t->bottom - t->top);
                 return ui_wheel_turn(ui, &t->scroll, event) ? UI_TEXT_MOVED : 0;
         }
         // A finger's: its left button (the press, the lift, the compositor taking it back), the right button of its long...
@@ -30753,7 +30769,7 @@ static fn ui_text_hex_draw(struct ui address_to ui, struct ui_text address_to t,
         if (t->laid_width > 0 && (width != t->laid_width || height != t->laid_height || t->line_height != t->laid_line))
                 ui_text_hex_reveal(t), ui_text_scroll_jump(t);
         t->laid_width = width, t->laid_height = height, t->laid_line = t->line_height;
-        ui_text_scroll_sync(t, height);
+        ui_text_scroll_sync(ui, t, height);
         if (t->hex_top / 16 != t->scroll_line)
                 ui_text_scroll_jump(t);
         ui_scroll_frame(ui, &t->scroll);
@@ -30762,6 +30778,8 @@ static fn ui_text_hex_draw(struct ui address_to ui, struct ui_text address_to t,
                 int rest = ui_scroll_rest(&t->scroll, drawn, height);
                 int old_top = ui->top, old_bottom = ui->bottom;
 
+                if (rest < 0)
+                        rest = 0;
                 t->scroll_line = (p64)(rest / t->line_height);
                 t->hex_top = t->scroll_line * 16;
                 t->scroll_rem = rest % t->line_height;
@@ -30881,7 +30899,7 @@ static fn ui_text_draw(struct ui address_to ui, struct ui_text address_to t, int
         int drawn_scroll = 0, old_top = ui->top, old_bottom = ui->bottom;
         if (t->mode != UI_TEXT_FIELD && t->line_height > 0)
         {
-                ui_text_scroll_sync(t, height);
+                ui_text_scroll_sync(ui, t, height);
                 if (t->top_line != t->scroll_line)
                         ui_text_scroll_jump(t);
                 ui_scroll_frame(ui, &t->scroll);
@@ -30889,6 +30907,8 @@ static fn ui_text_draw(struct ui address_to ui, struct ui_text address_to t, int
                 {
                         int rest = ui_scroll_rest(&t->scroll, drawn_scroll, height);
 
+                        if (rest < 0)
+                                rest = 0;
                         t->top_line = (p64)(rest / t->line_height);
                         if (t->top_line >= lines && lines > 0)
                                 t->top_line = lines - 1;

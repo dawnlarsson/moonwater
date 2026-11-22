@@ -1934,11 +1934,14 @@ static int compositor_tabs_rect(const struct compositor_frame *tabs, unsigned in
 
 static b32 compositor_present_overlaid(int row, const struct compositor_frame *frames, unsigned int count, unsigned int windows)
 {
-        unsigned int which = compositor.front[row], fb = compositor_client_scans(row) ? compositor_lent_fb(row) : compositor_window_fb(row, which),
+        unsigned int which = compositor.front[row],
+                     fb = compositor_client_scans(row)
+                              ? (compositor.fullscreen[row] ? compositor_lent_fb_opaque(row) : compositor_lent_fb(row))
+                              : compositor_window_fb(row, which),
                      buffer = compositor.overlay_back;
         int rect[4], shown = compositor_tabs_rect(frames + windows, count - windows, rect), drawn = 0;
 
-        if (!fb)
+        if (!fb || compositor.picture_w[row] != compositor.w[row] || compositor.picture_h[row] != compositor.h[row])
                 return 0;
         if (compositor.flip_pending)
                 return 1;
@@ -2027,7 +2030,7 @@ static int compositor_plane_candidate(const struct compositor_frame *frames, con
 
         if (compositor.card < 0) return *why = 1, -1;
         if (compositor_output_count() > 1) return *why = 13, -1;
-        if (compositor.cursor.soft) return *why = 3, -1;
+        if (compositor_cursor_in_scene() && compositor.cursor.drawn) return *why = 3, -1;
         if (compositor_planes_off()) return *why = 21, -1;
         if (!windows || compositor.drag >= 0 || compositor.resize >= 0 || compositor.preview_draw) return *why = 4, -1;
         if (compositor_spots_any(0)) return *why = 14, -1;

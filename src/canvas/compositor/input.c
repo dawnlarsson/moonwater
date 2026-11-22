@@ -4142,7 +4142,15 @@ static void compositor_input_gone(unsigned int at)
                 compositor.device_open[compositor.devices[at].number / 64] &= ~(1ul << (compositor.devices[at].number % 64));
         compositor.held[at] = 0;
         if (compositor.input_kinds[at] & WINDOWS_INPUT_KEYBOARD)
+        {
                 compositor.held[COMPOSITOR_INPUTS] = 0, compositor_keys_release();
+                if (compositor.cycle)
+                {
+                        compositor.cycle = 0;
+                        if (compositor.focus >= 0)
+                                compositor_reveal(compositor.focus);
+                }
+        }
         if (compositor.input_kinds[at] & (WINDOWS_INPUT_MOUSE | WINDOWS_INPUT_TABLET | WINDOWS_INPUT_BUTTONS |
                                           WINDOWS_INPUT_TOUCH | WINDOWS_INPUT_FINGERS | WINDOWS_INPUT_DIRECT))
         {
@@ -4150,7 +4158,19 @@ static void compositor_input_gone(unsigned int at)
                 for (unsigned int index = 1; index < 8; index++)
                         if (compositor.button_down >> index & 1)
                                 compositor_release(COMPOSITOR_BTN_LEFT + index, 0);
+                if (compositor.mc.press_card >= 0 || compositor.mc.press_row >= 0 || compositor.mc.dragging)
+                        compositor.mc.press_card = compositor.mc.press_row = compositor.mc.drop_target = COMPOSITOR_NONE,
+                        compositor.mc.dragging = 0, compositor.mc.dirty = 1;
+                if (compositor_edit_drag.held)
+                        compositor_edit_drag.held = 0, taskbar_edit_set(0), compositor_tabs_changed();
+                if (compositor.edge_right)
+                        compositor.edge_right = 0, compositor_lit(COMPOSITOR_NONE, 0, 0);
+                if (compositor.active_grab.kind == COMPOSITOR_GRAB_EDGE_CHORD ||
+                    compositor.active_grab.kind == COMPOSITOR_GRAB_MINIMIZE_BTN)
+                        compositor_grab_clear();
         }
+        if (compositor.swipe.state != COMPOSITOR_SWIPE_NONE && compositor.swipe.device == (int)at)
+                compositor.swipe.state = COMPOSITOR_SWIPE_NONE;
         if (compositor.touchscreen[at] && compositor.touch.gesture.mode != UI_TOUCH_NONE && compositor.touch.device == (int)at)
         {
                 if (compositor.touch.gesture.mode == UI_TOUCH_HELD && compositor.touch.hold_row >= 0)

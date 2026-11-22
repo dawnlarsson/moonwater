@@ -1281,6 +1281,8 @@ static unsigned int compositor_overlays(struct compositor_frame *frames, unsigne
                 int row = (int)compositor.assist_rows[t], sc = compositor_overlay_scale(compositor.assist_screen), line = compositor_line_px(sc);
                 struct compositor_frame *pic = &frames[at + added], *veil = &frames[at + added + 1];
 
+                if (row < 0 || row >= (int)compositor_rows_in_use || !compositor.showing[row] || !compositor.w[row] || !compositor.h[row])
+                        continue;
                 compositor_frame_of(row, pic);
                 pic->x = r[0], pic->y = r[1], pic->width = r[2], pic->height = r[3];
                 pic->source_w = (int)compositor.w[row], pic->source_h = (int)compositor.h[row];
@@ -2198,6 +2200,24 @@ static void compositor_leave(int row)
                 compositor_assist_close();
         else if (compositor.assist_on)
                 compositor_assist_refresh();
+        else if (compositor.assist_count > 0)
+        {
+                int keep = 0;
+
+                for (int t = 0; t < compositor.assist_count; t++)
+                        if ((int)compositor.assist_rows[t] != row)
+                        {
+                                if (keep != t)
+                                {
+                                        compositor.assist_rows[keep] = compositor.assist_rows[t];
+                                        memory_copy(compositor.assist_rect[keep], compositor.assist_rect[t], sizeof(compositor.assist_rect[keep]));
+                                }
+                                keep++;
+                        }
+                compositor.assist_count = keep;
+        }
+        if (compositor.mc.press_row == row)
+                compositor.mc.press_row = compositor.mc.drop_target = COMPOSITOR_NONE, compositor.mc.dragging = 0, compositor.mc.dirty = 1;
         if (compositor.keys_to == row)
                 compositor.keys_to = COMPOSITOR_NONE, memory_zero(compositor.keys_down, sizeof(compositor.keys_down));
         if (compositor.hover == row)
@@ -3629,14 +3649,25 @@ static void compositor_dnd_name_ext_types(void)
                 return;
         for (long at = 0; at < bytes; at++)
                 count += !types[at];
-        if (!(parts = count ? (struct windows_clip_part *)compositor_map_zeroed((unsigned long)count * sizeof(*parts)) : 0))
+        unsigned long alloc = (unsigned long)count * sizeof(*parts);
+        long alloc_count = count;
+        if (!(parts = alloc ? (struct windows_clip_part *)compositor_map_zeroed(alloc) : 0))
                 return;
         count = 0;
-        for (long at = 0; at < bytes; at += (long)string_length((string_address)(types + at)) + 1)
-                if (types[at])
+        for (long at = 0; at < bytes && count < alloc_count; )
+        {
+                long stop = at;
+
+                while (stop < bytes && types[stop])
+                        stop++;
+                if (stop >= bytes)
+                        break;
+                if (stop > at)
                         parts[count].name = types + at, parts[count].bytes = "", parts[count++].length = 0;
+                at = stop + 1;
+        }
         built = windows_clip_build(parts, (unsigned long)count);
-        compositor_call(syscall(munmap), (positive)parts, (positive)((unsigned long)count * sizeof(*parts)), 0, 0, 0, 0);
+        compositor_call(syscall(munmap), (positive)parts, (positive)alloc, 0, 0, 0, 0);
         opened = built >= 0 ? compositor_clip_open(compositor.table->clip_pid, (int)built, &length) : -1;
         if (built >= 0)
                 system_close((int)built);
@@ -4038,10 +4069,10 @@ static void compositor_clip_leave(int row)
         compositor_clip.ask_seen[row] = compositor.table->clip_ask_serial[row];
         if (compositor_dnd.active)
         {
-                if (row == compositor_dnd.source)
+                if (row == compositor_dnd.source || (row == compositor_dnd.target && compositor_dnd.dropped))
                         compositor_dnd_end(0);
-                else if (row == compositor_dnd.target && !compositor_dnd.dropped)
-                        compositor_dnd.target = -1, compositor_dnd.take = -1, compositor_dnd.action = 0;
+                else if (row == compositor_dnd.target)
+                        compositor_dnd.target = -1, compositor_dnd.target_bridge = 0, compositor_dnd.take = -1, compositor_dnd.action = 0;
         }
 }
 

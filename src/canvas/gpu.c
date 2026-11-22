@@ -1762,6 +1762,14 @@ static const struct gpu_backend *gpu_backend_of(const char *name)
 // A handle of the card's let go of (any DRM driver's request).
 static void gpu_close(unsigned int handle)
 {
+        if (handle & GPU_XE_USERPTR_TAG)
+        {
+                unsigned int idx = handle & ~GPU_XE_USERPTR_TAG;
+
+                if (idx < GPU_XE_USERPTRS)
+                        gpu_xe.userptrs[idx].used = false;
+                return;
+        }
         p64 close[1] = {handle};
 
         GPU_CONTROL(gpu.fd, GPU_GEM_CLOSE, close);
@@ -1883,10 +1891,10 @@ COLD static void gpu_stop(void)
         gpu_bin_stage = gpu_ops_stage = 0;
         if (gpu.at)
                 system_call_2(syscall(munmap), (positive)gpu.at, gpu.size);
+        gpu_xe_forget();
         if (gpu.fd >= 0)
                 system_close(gpu.fd);
         gpu_i915_forget();
-        gpu_xe_forget();
         gpu_i915.main = 0;
         if (gpu_i915.bound)
                 memory_zero(gpu_i915.bound, (positive)GPU_I915_HANDLES * sizeof(struct gpu_i915_bound));

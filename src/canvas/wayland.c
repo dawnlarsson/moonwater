@@ -2215,6 +2215,9 @@ static void wayland_surface_drop(struct wayland_client *c, struct wayland_surfac
         if (s->pending.sync_rel_set)
                 wayland_timeline_put(c, s->pending.sync_rel_slot);
         s->pending.sync_acq_set = s->pending.sync_rel_set = 0, s->pending.dx = s->pending.dy = 0;
+        for (long at = 0; at < c->tbl[WLT_SURFACE].count; at++)
+                if (c->surfaces[at].live && c->surfaces[at].parent == (unsigned int)(idx + 1))
+                        c->surfaces[at].parent = 0;
         s->syncobj_id = 0, s->live = 0, s->gen++, wayland_tbl_free(c, WLT_SURFACE, idx), wayland.surfaces--;
 }
 
@@ -4321,6 +4324,9 @@ static void wayland_drag_decide(void)
         long ver;
         struct wayland_offer *o = wayland_drag_offer(&t, &ver);
 
+        if (wayland.drag.dropped)
+                return;
+        wayland.drag.released = 0;
         if (wayland.drag.xtarget >= 0)
         {
                 struct wayland_source *s = wayland_drag_src(&sc);
@@ -4478,7 +4484,7 @@ static int wayland_data_request(struct wayland_client *c, struct wayland_object 
                         }
                         if (source >= 0) c->sources[source].state = 4;
                         wayland_drag_clear();
-                        wayland.drag.live = 1, wayland.drag.client = c->slot, wayland.drag.source = source, wayland.drag.origin = a[1].slot;
+                        wayland.drag.live = 1, wayland.drag.client = c->slot, wayland.drag.source = source, wayland.drag.origin = c->objects[a[1].slot].link;
                         wayland_drag_over(wayland.pointer_row, wayland.pointer_x, wayland.pointer_y);
                         return WAYLAND_OK;
                 }
@@ -6375,7 +6381,7 @@ static long wayland_idle_scan(int tick, long now)
 WAYLAND_API void wayland_idle_tick(void)
 {
         if (!wayland.host) return;
-        if (wayland.drag.live && wayland.drag.released && wayland_now() - wayland.drag.released_at >= WAYLAND_DRAG_ANSWER_MS)
+        if (wayland.drag.live && wayland.drag.released && !wayland.drag.dropped && wayland_now() - wayland.drag.released_at >= WAYLAND_DRAG_ANSWER_MS)
                 wayland_drag_decide();
         if (wayland.idle_notifies) wayland_idle_scan(1, wayland_now());
 }
@@ -6384,7 +6390,7 @@ WAYLAND_API long wayland_idle_due(void)
 {
         long due = wayland.host && wayland.idle_notifies ? wayland_idle_scan(0, 0) : 0;
 
-        if (wayland.host && wayland.drag.live && wayland.drag.released)
+        if (wayland.host && wayland.drag.live && wayland.drag.released && !wayland.drag.dropped)
         {
                 long drag_due = wayland.drag.released_at + WAYLAND_DRAG_ANSWER_MS;
 

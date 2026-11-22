@@ -898,7 +898,8 @@ static void compositor_space_carry(const int (*was)[4], const char (*names)[WIND
 
         compositor_pointer_sync();
         compositor_preview(COMPOSITOR_NONE);
-        compositor.drag = compositor.resize = COMPOSITOR_NONE;
+        compositor_grab_end(COMPOSITOR_GRAB_COMMIT, COMPOSITOR_NONE);
+        compositor_assist_close();
         for (int row = -1; row < (int)compositor_rows_in_use; row++)
         {
                 int x = row < 0 ? compositor.real_x : compositor.x[row], y = row < 0 ? compositor.real_y : compositor.y[row];

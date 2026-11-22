@@ -1228,7 +1228,7 @@ static unsigned int present_build_frames(struct compositor_frame *frames, unsign
 
                         if (compositor_fullscreen_fit(row, &dx, &dy, &dw, &dh) &&
                             (dw < (int)compositor.w[row] || dh < (int)compositor.h[row]) &&
-                            count + 1 < COMPOSITOR_FRAMES_FOR(compositor_rows_in_use))
+                            count + 1 < COMPOSITOR_ROWS_LAYERED(compositor_rows_in_use))
                         {
                                 struct compositor_frame *back = &frames[count];
 

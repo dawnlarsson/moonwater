@@ -1636,7 +1636,8 @@ static void audio_clients_pass(positive now)
         {
                 long slot = audio_service.live[k];
 
-                if (audio_service.fd[slot] >= 0 && (pulse_client_late(&audio_service.pulse, slot, (long)(now / 1000)) || !audio_client_write(slot, now)))
+                if (audio_service.fd[slot] >= 0 &&
+                    (!audio_service.pulse.client[slot] || pulse_client_late(&audio_service.pulse, slot, (long)(now / 1000)) || !audio_client_write(slot, now)))
                         audio_client_drop(slot);
         }
 }
@@ -2729,8 +2730,10 @@ static b32 audio_main()
                         if (audio_service.dirty && audio_service.dirty_since)
                         {
                                 positive at = clock_monotonic_nanoseconds(), due = audio_service.dirty_since + AUDIO_SAVE_NS;
+                                positive rem = due > at ? due - at : (audio_save.running ? 10000000ull : 0);
 
-                                wait[1] = due > at ? (long)(due - at) : 0;
+                                wait[0] = (long)(rem / 1000000000ull);
+                                wait[1] = (long)(rem % 1000000000ull);
                         }
                         else
                                 forever = 1; // the poll sleeps until a descriptor is ready
@@ -2817,7 +2820,8 @@ static b32 audio_main()
                                 {
                                         long slot = owner[at];
 
-                                        if ((wanted[at].returned & (AUDIO_POLLIN | AUDIO_POLLHUP | AUDIO_POLLERR)) && !audio_client_read(slot))
+                                        if (!audio_service.pulse.client[slot] ||
+                                            ((wanted[at].returned & (AUDIO_POLLIN | AUDIO_POLLHUP | AUDIO_POLLERR)) && !audio_client_read(slot)))
                                                 audio_client_drop(slot);
                                 }
                         }

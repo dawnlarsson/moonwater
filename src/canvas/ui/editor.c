@@ -39,6 +39,7 @@ static struct
         struct ui_view view;
         struct ui_rect find_box, text_box;
         int pill_box[4], pill_wrap[4], pill_hex[4], pill_hover;
+        b32 pill_down;
         char bar_text[256], status[160];
         struct ui_popup menu;
         int tab_menu_at;
@@ -950,8 +951,14 @@ static fn editor_pill_draw(struct ui address_to ui, struct editor_tab address_to
         }
 }
 
-static b32 editor_pill_event(const struct window_event address_to event)
+static b32 editor_pill_event(struct editor_tab address_to tab, const struct window_event address_to event)
 {
+        if (tab->view.sel.dragging || tab->view.gutter_drag || tab->view.drag.armed || tab->view.bar.held)
+        {
+                if (editor.pill_hover)
+                        editor.pill_hover = 0, editor.dirty = true;
+                return false;
+        }
         if (event->type == WINDOW_EVENT_MOTION)
         {
                 int hover = editor_pill_in(editor.pill_wrap, event->a, event->b) ? 1
@@ -963,16 +970,24 @@ static b32 editor_pill_event(const struct window_event address_to event)
                         editor.pill_hover = hover, editor.dirty = true;
                 return editor_pill_in(editor.pill_box, event->a, event->b);
         }
-        if (event->type == WINDOW_EVENT_BUTTON && (p32)event->a == UI_BTN_LEFT && editor_pill_in(editor.pill_box, ui_kit.pointer_x, ui_kit.pointer_y))
+        if (event->type == WINDOW_EVENT_BUTTON && (p32)event->a == UI_POINTER_LEFT)
         {
                 if (event->flags & WINDOW_KEY_DOWN)
                 {
+                        if (!editor_pill_in(editor.pill_box, ui_kit.pointer_x, ui_kit.pointer_y))
+                                return false;
+                        editor.pill_down = true;
                         if (editor_pill_in(editor.pill_wrap, ui_kit.pointer_x, ui_kit.pointer_y))
                                 editor_toggle((int)DOC_CMD_WRAP);
                         else if (editor_pill_in(editor.pill_hex, ui_kit.pointer_x, ui_kit.pointer_y))
                                 editor_toggle((int)DOC_CMD_HEX);
+                        return true;
                 }
-                return true;
+                if (editor.pill_down)
+                {
+                        editor.pill_down = false;
+                        return true;
+                }
         }
         return false;
 }
@@ -1036,15 +1051,16 @@ static b32 editor_event(const struct window_event address_to event)
               (editor_reload_key(event) ? EDITOR_RELOAD : ui_key_command(event)) != editor.confirm.what)))
                 ui_confirm_drop(&editor.confirm);
         editor_layout();
-        asks = (!ui_kit_held && (event->type == WINDOW_EVENT_BUTTON || event->type == WINDOW_EVENT_MOTION) &&
-                ui_text_inside(&tab->view, ui_kit.pointer_x, ui_kit.pointer_y))
-                   ? 0
-                   : ui_view_event(&editor.ui, &editor.view, event);
+        asks = ui_view_event(&editor.ui, &editor.view, event);
         if (asks & UI_VIEW_DRAW)
                 editor.dirty = true;
         if (asks & UI_VIEW_TAKEN)
+        {
+                if (editor.pill_hover)
+                        editor.pill_hover = 0, editor.dirty = true;
                 return true;
-        if (editor_pill_event(event))
+        }
+        if (editor_pill_event(tab, event))
                 return true;
         if (editor_reload_key(event) && (event->flags & WINDOW_KEY_DOWN) && tab->changed_on_disk)
         {

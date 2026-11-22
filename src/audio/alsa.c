@@ -1014,7 +1014,10 @@ static long audio_mixer_zero_db(int fd, const struct audio_ctl_info *info)
                 return -1;
         if (low >= 0)
                 return min;
-        return min + (0 - low) / step;
+        {
+                long zero = min + (0 - low) / step;
+                return zero > max ? max : zero;
+        }
 }
 
 // One control as it is wanted: written when it is not already so. Answers 1 when it is written, 0 when it was as wanted, -1 when it would not be written.

@@ -1973,8 +1973,8 @@ static b32 files_event(const struct window_event address_to event)
 
 static fn files_status_pill_draw(struct ui address_to ui, const struct ui_list address_to l)
 {
-        int pad_x = ui_dev(ui, 10), ph = ui_dev(ui, 26), margin_b = ui_dev(ui, 10);
-        int max_w = l->w - ui_dev(ui, 8);
+        int pad_x = ui_dev(ui, 10), ph = ui_dev(ui, 26), margin_r = ui_dev(ui, UI_PAD), margin_b = ui_dev(ui, 10);
+        int max_w = l->w - 2 * margin_r;
         char cut[192];
         string_address text;
         int tw, pw, px, py, baseline;
@@ -1987,7 +1987,7 @@ static fn files_status_pill_draw(struct ui address_to ui, const struct ui_list a
         pw = tw + 2 * pad_x;
         if (pw > max_w)
                 pw = max_w;
-        px = ui_mirror(l->x + l->w - pw, pw, l->x, l->w);
+        px = ui_mirror(l->x + l->w - margin_r - pw, pw, l->x, l->w);
         py = l->y + l->h - margin_b - ph;
         box = ui_box_px(px, py, pw, ph, ph / 2);
         ui_kit_fill(ui, &box, ui_tone(ui_role(UI_SURFACE_CONTAINER) & 0xffffffu, 236), null);

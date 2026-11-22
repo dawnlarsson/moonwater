@@ -651,7 +651,7 @@ static COLD fn system_zram_setup(void)
                 memory_copy(swap_page + 1028, address_of last_page, 4);
                 memory_copy(swap_page + 4086, "SWAPSPACE2", 10);
         }
-        fd = system_open_at(AT_FDCWD, "/dev/zram0", FILE_WRITE | O_CLOEXEC);
+        fd = system_open_at(AT_FDCWD, "/dev/zram0", 1 /* O_WRONLY */ | O_CLOEXEC);
         if (fd < 0)
                 return;
         got = system_call_3(syscall(write), (positive)fd, (positive)swap_page, sizeof(swap_page));

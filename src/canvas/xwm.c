@@ -2154,7 +2154,7 @@ static long compositor_xwm_out_begin(struct compositor_xwm *x, const struct xwm_
                 if (compositor_xwm_pipe(ours, 0) != 0)
                         return system_close(source[0]), system_close(source[1]), -1;
                 if (!compositor_xwm_drag_send(mime, source[1]))
-                        return system_close(source[0]), system_close(source[1]), system_close(ours[0]), system_close(ours[1]), -1;
+                        return system_close(source[0]), system_close(ours[0]), system_close(ours[1]), -1;
                 if ((pump_at = compositor_wl_pump(source[0], ours[1])) < 0)
                         return system_close(ours[0]), -1;
                 from = COMPOSITOR_XWM_FROM_PIPE, fd = ours[0];
@@ -2527,15 +2527,15 @@ static long xwm_xdrag_slot(struct compositor_xwm *x, long what, long row, long p
 static void compositor_xwm_wdrag_proxy(struct compositor_xwm *x, const struct xwm_property_reply *r, const struct compositor_xwm_pending *p)
 {
         unsigned int named = r && r->format == XWM_FORMAT_32 && r->value_len >= 4 ? xwm_get32(r->value) : 0, ask;
-        if (!x->wdrag.live || p->window != x->wdrag.target)
+        if (!x->wdrag.live || (p->what == COMPOSITOR_XWM_PROP_XDND_PROXIED ? p->slot : p->window) != x->wdrag.target)
                 return;
         if (p->what == COMPOSITOR_XWM_PROP_XDND_PROXY && named && named != p->window)
         {
-                xwm_wait_prop(x, named, x->atoms[COMPOSITOR_XWM_A_XDND_PROXY], COMPOSITOR_XWM_XA_WINDOW_TYPE, 1, COMPOSITOR_XWM_PROP_XDND_PROXIED, named);
+                xwm_wait_prop(x, named, x->atoms[COMPOSITOR_XWM_A_XDND_PROXY], COMPOSITOR_XWM_XA_WINDOW_TYPE, 1, COMPOSITOR_XWM_PROP_XDND_PROXIED, p->window);
                 return;
         }
-        x->wdrag.proxy = p->what == COMPOSITOR_XWM_PROP_XDND_PROXIED && named == p->slot ? named : 0;
-        ask = x->wdrag.proxy ? x->wdrag.proxy : p->window;
+        x->wdrag.proxy = p->what == COMPOSITOR_XWM_PROP_XDND_PROXIED && named == p->window ? named : 0;
+        ask = x->wdrag.proxy ? x->wdrag.proxy : x->wdrag.target;
         xwm_wait_prop(x, ask, x->atoms[COMPOSITOR_XWM_A_XDND_AWARE], COMPOSITOR_XWM_ATOM_TYPE, 1, COMPOSITOR_XWM_PROP_XDND_AWARE, ask);
 }
 
@@ -2565,7 +2565,7 @@ static void compositor_xwm_wdrag_actions(struct compositor_xwm *x, unsigned int 
 static void compositor_xwm_wdrag_aware(struct compositor_xwm *x, const struct xwm_property_reply *r, unsigned int window)
 {
         unsigned int atoms[256], data[5], count, version;
-        if (!x->wdrag.live || window != x->wdrag.target)
+        if (!x->wdrag.live || window != (x->wdrag.proxy ? x->wdrag.proxy : x->wdrag.target))
                 return;
         version = r && r->format == XWM_FORMAT_32 && r->value_len >= 4 ? xwm_get32(r->value) : 0;
         if (version < 3)
@@ -2862,7 +2862,11 @@ static long compositor_xwm_drag_types(const char **types) { unsigned int actions
 
 static int compositor_xwm_drag_send(const char *mime, long fd)
 {
-        return compositor_dnd.active == 1 && compositor_dnd.source >= 0 ? compositor_wl_drag_push(mime, fd) : wayland_drag_x_send(mime, fd);
+        if (compositor_dnd.active == 1 && compositor_dnd.source >= 0)
+                return compositor_wl_drag_push(mime, fd);
+        if (!wayland_drag_x_send(mime, fd))
+                return system_close((int)fd), 0;
+        return 1;
 }
 
 static void compositor_xwm_xdnd_owner(struct compositor_xwm *x, unsigned int owner)

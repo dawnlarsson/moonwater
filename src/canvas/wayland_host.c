@@ -5400,9 +5400,11 @@ static void compositor_wl_pass(const struct compositor_poll *wanted)
                         if (wayland_dead(slot))
                                 compositor_wl_flush(slot);
                 }
+        long polled = compositor_wl.polled < compositor_wl.slots ? compositor_wl.polled : compositor_wl.slots;
+
         if (wanted[0].returned)
                 compositor_wl_accept();
-        for (long slot = 0; slot < compositor_wl.slots; slot++)
+        for (long slot = 0; slot < polled; slot++)
         {
                 short returned = wanted[1 + slot].returned;
 
@@ -5419,7 +5421,7 @@ static void compositor_wl_pass(const struct compositor_poll *wanted)
                         compositor_wl_flush(slot);
         }
         // The transfers whose threads have ended: each thread ends itself at its deadline, so the loop waits on nothing else of them.
-        if (wanted[1 + compositor_wl.slots].returned)
+        if (wanted[1 + polled].returned)
                 compositor_wl_transfers_done();
 }
 

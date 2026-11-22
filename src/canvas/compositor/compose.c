@@ -1545,7 +1545,8 @@ static int canvas_gpu_round_corner(void *ctx, const struct compositor_frame *f, 
         if (b)
                 compositor_gpu_rect(13, cx, cy, cx + r, cy + r, edge & 0xffffffu, 0, edge_table, r);
         if (picture && ri && sx2 > sx1 && sy2 > sy1)
-                compositor_gpu_rect(f->blend ? 12 : 13, sx1, sy1, sx2, sy2, tab, f->builtin ? 0 : f,
+                compositor_gpu_rect(f->blend ? 12 : 13, sx1, sy1, sx2, sy2, f->builtin ? tab : f->fill,
+                                    (f->builtin || !f->pixels) ? 0 : f,
                                     content_table + (unsigned int)((sy1 - cy) * r + (sx1 - cx)), r);
         return 1;
 }
@@ -1764,8 +1765,9 @@ static unsigned int compositor_panel_tabs(const struct compositor_frame *band, s
 #define COMPOSITOR_LAYERS 64
 // The frames a present of `rows` rows may have: two a window (its picture and its line or shadow), the snap preview and the moon's menu a frame
 // each, the moon's glow one a band, the overlays and the layers. The arrays sized by it are the rows' (compositor_rows_make), as many as the rows in use.
-#define COMPOSITOR_FRAMES_FOR(rows) (2 * (unsigned long)(rows) + 4 + 3 * WINDOWS_OUTPUTS + COMPOSITOR_OVERLAYS + COMPOSITOR_LAYERS)
+#define COMPOSITOR_FRAMES_FOR(rows) ((1 + WINDOWS_OUTPUTS) * (unsigned long)(rows) + 4 + 12 * WINDOWS_OUTPUTS + COMPOSITOR_OVERLAYS + COMPOSITOR_LAYERS)
 #define COMPOSITOR_PIECES_FOR(rows) (3 * COMPOSITOR_FRAMES_FOR(rows))
+#define COMPOSITOR_ROWS_LAYERED(rows) ((unsigned long)(rows) + WINDOWS_OUTPUTS + COMPOSITOR_LAYERS)
 
 static unsigned int compositor_corner_scratch[COMPOSITOR_RADIUS_MOST * COMPOSITOR_RADIUS_MOST];
 
