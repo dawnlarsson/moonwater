@@ -4332,7 +4332,7 @@ static void compositor_wl_drag_pulled(long at, int ok)
 
         if (ok && windows_clip_record(t->index, 0, t->got, t->drop, string_length((string_address)t->drop)) &&
             windows_clip_seal(t->keep, t->index, t->got, 1))
-                kept = compositor_clip_open(compositor.table->clip_pid, t->keep, &length);
+                kept = compositor_clip_open(compositor_clip_self, t->keep, &length);
         compositor_wl_transfer_free(at);
         compositor_wl.drag_reading = -1;
         if (kept < 0)
