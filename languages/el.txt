@@ -16,24 +16,24 @@ editor_closes_unsaved	fcb8	κλείνει και απορρίπτει τις μ�
 editor_encoding_bom	c0d7	UTF-8 με BOM
 editor_find_hint	d17a	Εύρεση
 editor_find_replace_hint	3693	Εύρεση/Αντικατάσταση με
-editor_hex_status	35a5	Θέση %1$s / %2$s
+editor_hex_status	15d6	Θέση %1$s / %2$s
 editor_indent_spaces	9db9	Κενά: %d
 editor_indent_tab	d9a7	Tab: %d
 editor_line_hint	f547	Γραμμή
 editor_lock_stale	f9d8	το %s έμεινε από μια προηγούμενη αποθήκευση: διαγράψτε το και αποθηκεύστε
-editor_mode_hex	55d5	Hex
-editor_mode_text	134a	Κείμενο
+editor_mode_hex	34ea	Hex
+editor_mode_text	2d5e	Κείμενο
 editor_no_file_name	c863	χωρίς όνομα αρχείου: ξεκινήστε τον επεξεργαστή με ένα
 editor_no_match	7de7	καμία αντιστοιχία
 editor_not_regular	5955	όχι κανονικό αρχείο: απορρίφθηκε
-editor_open_hint	235f	Διαδρομή αρχείου
+editor_open_hint	3cb8	Διαδρομή αρχείου
 editor_pattern_bad	5d57	το μοτίβο δεν μεταγλωττίζεται
 editor_position	3696	Γρ %1$d, Στ %2$d
 editor_read_failed	5f78	το αρχείο δεν μπόρεσε να διαβαστεί: δεν ανοίγεται
 editor_reload_unsaved	85da	διαβάζει ξανά το αρχείο και πετά τις μη αποθηκευμένες αλλαγές
 editor_replace_usage	c677	η αντικατάσταση είναι ΑΝΑΖΗΤΗΣΗ/ΑΝΤΙΚΑΤΑΣΤΑΣΗ
 editor_replaced	1128	αντικαταστάθηκαν: %d
-editor_save_as_hint	c955	Αποθήκευση ως
+editor_save_as_hint	745f	Αποθήκευση ως
 editor_save_failed	069d	η αποθήκευση απέτυχε: το αρχείο είναι όπως ήταν
 editor_saved	9f44	αποθηκεύτηκε
 editor_selected	a686	(επιλέχθηκαν %d)
@@ -41,7 +41,7 @@ editor_selected_carets	7e02	(επιλέχθηκαν %d, δρομείς)
 editor_tabs_full	8ed9	και οι %d καρτέλες είναι ανοιχτές: κλείστε πρώτα μία
 editor_unsaved	c014	μη αποθηκευμένες αλλαγές: αποθηκεύστε τις ή κλείστε κάθε αρχείο με Ctrl+W δύο φορές
 editor_untitled	8b58	χωρίς τίτλο
-editor_wrap_on	40cd	Αναδίπλωση
+editor_wrap_on	40c5	Αναδίπλωση
 editor_write_beside	ec75	δεν ήταν δυνατή η εγγραφή δίπλα στο αρχείο
 editor_writes_over_changed	df15	αντικαθιστά την αλλαγή στον δίσκο (το Ctrl+R το διαβάζει ξανά)
 editor_writes_over_readonly	e22f	αντικαθιστά αρχείο μόνο για ανάγνωση
@@ -201,21 +201,21 @@ launcher_sleep_armed	bb08	αναστολή
 menu_bin_empty	1538	Άδειασμα κάδου
 menu_bin_open	8797	Άνοιγμα κάδου
 menu_bin_restore	4799	Επαναφορά
-menu_close_others	ec3e	Κλείσιμο άλλων καρτελών
-menu_close_tab	9753	Κλείσιμο καρτέλας
+menu_close_others	26f3	Κλείσιμο άλλων καρτελών
+menu_close_tab	eb40	Κλείσιμο καρτέλας
 menu_copy	43e0	Αντιγραφή
 menu_copy_row	f3c8	Αντιγραφή γραμμής
 menu_cut	5c17	Αποκοπή
 menu_delete	1e3e	Διαγραφή
 menu_find	1fa6	Εύρεση
 menu_go_to_line	bc96	Μετάβαση στη γραμμή
-menu_hex_mode	fd1b	Επεξεργαστής Hex
+menu_hex_mode	74bf	Επεξεργαστής Hex
 menu_new_folder	41cb	&Νέος φάκελος
-menu_new_tab	dad5	Νέα καρτέλα
-menu_new_window	2c79	Νέο παράθυρο
+menu_new_tab	ecfa	Νέα καρτέλα
+menu_new_window	c3db	Νέο παράθυρο
 menu_open	61a5	Ά&νοιγμα
 menu_open_editor	8ca0	Άνοιγμα στον &επεξεργαστή
-menu_open_file	098c	Άνοιγμα αρχείου...
+menu_open_file	af39	Άνοιγμα αρχείου...
 menu_open_terminal	6d2a	Άνοιγμα &τερματικού εδώ
 menu_paste	6854	Επικόλληση
 menu_properties	c780	&Ιδιότητες
@@ -223,7 +223,7 @@ menu_redo	ac45	Επανάληψη
 menu_remove	901d	Αφαίρεση
 menu_rename	9529	&Μετονομασία
 menu_reset_zoom	1b0f	Επαναφορά ζουμ
-menu_save_as	e18c	Αποθήκευση ως...
+menu_save_as	7bbe	Αποθήκευση ως...
 menu_select_all	f6f6	Επιλογή όλων
 menu_set_wallpaper	1a27	Ορισμός ως &ταπετσαρία
 menu_set_wallpaper_of	aa60	Ορισμός ως ταπετσαρία της %s
@@ -233,7 +233,7 @@ menu_undo	b9d3	Αναίρεση
 menu_view_details	d3a1	&Λεπτομέρειες
 menu_view_icons	57e8	Μεγάλα &εικονίδια
 menu_view_list	4cc5	&Λίστα
-menu_word_wrap	9ab3	Αναδίπλωση γραμμών
+menu_word_wrap	db6f	Αναδίπλωση γραμμών
 menu_zoom_in	5bcf	Μεγέθυνση
 menu_zoom_out	9234	Σμίκρυνση
 mixer_allow	19d2	Επιτρέπω

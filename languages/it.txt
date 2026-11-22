@@ -16,24 +16,24 @@ editor_closes_unsaved	fcb8	chiude scartando le modifiche non salvate
 editor_encoding_bom	c0d7	UTF-8 con BOM
 editor_find_hint	d17a	Trova
 editor_find_replace_hint	3693	Trova/Sostituisci con
-editor_hex_status	35a5	Offset %1$s / %2$s
+editor_hex_status	15d6	Offset %1$s / %2$s
 editor_indent_spaces	9db9	Spazi: %d
 editor_indent_tab	d9a7	Tab: %d
 editor_line_hint	f547	Riga
 editor_lock_stale	f9d8	%s è rimasto da un salvataggio precedente: eliminarlo, poi salvare
-editor_mode_hex	55d5	Hex
-editor_mode_text	134a	Testo
+editor_mode_hex	34ea	Hex
+editor_mode_text	2d5e	Testo
 editor_no_file_name	c863	nessun nome di file: avviare l'editor con uno
 editor_no_match	7de7	nessuna corrispondenza
 editor_not_regular	5955	non è un file normale: rifiutato
-editor_open_hint	235f	Percorso file da aprire
+editor_open_hint	3cb8	Percorso file da aprire
 editor_pattern_bad	5d57	il motivo non si compila
 editor_position	3696	Ri %1$d, Col %2$d
 editor_read_failed	5f78	impossibile leggere il file: non viene aperto
 editor_reload_unsaved	85da	rilegge il file e scarta le modifiche non salvate
 editor_replace_usage	c677	sostituire è TROVA/SOSTITUZIONE
 editor_replaced	1128	%d sostituiti
-editor_save_as_hint	c955	Salva con nome
+editor_save_as_hint	745f	Salva con nome
 editor_save_failed	069d	salvataggio non riuscito: il file è com'era
 editor_saved	9f44	salvato
 editor_selected	a686	(%d selezionati)
@@ -41,7 +41,7 @@ editor_selected_carets	7e02	(%d selezionati, cursori)
 editor_tabs_full	8ed9	tutte le %d schede sono aperte: chiudine prima una
 editor_unsaved	c014	modifiche non salvate: salvarle, oppure chiudere ognuna con Ctrl+W due volte
 editor_untitled	8b58	senza titolo
-editor_wrap_on	40cd	A capo
+editor_wrap_on	40c5	A capo
 editor_write_beside	ec75	impossibile scrivere accanto al file
 editor_writes_over_changed	df15	sovrascrive la modifica sul disco (Ctrl+R la rilegge)
 editor_writes_over_readonly	e22f	sovrascrive un file di sola lettura
@@ -201,21 +201,21 @@ launcher_sleep_armed	bb08	sospendere
 menu_bin_empty	1538	Svuota il cestino
 menu_bin_open	8797	Apri il cestino
 menu_bin_restore	4799	Ripristina
-menu_close_others	ec3e	Chiudi le altre schede
-menu_close_tab	9753	Chiudi scheda
+menu_close_others	26f3	Chiudi le altre schede
+menu_close_tab	eb40	Chiudi scheda
 menu_copy	43e0	&Copia
 menu_copy_row	f3c8	Copia riga
 menu_cut	5c17	&Taglia
 menu_delete	1e3e	&Elimina
 menu_find	1fa6	Tr&ova
 menu_go_to_line	bc96	&Vai alla riga
-menu_hex_mode	fd1b	Editor esadecimale
+menu_hex_mode	74bf	Editor esadecimale
 menu_new_folder	41cb	&Nuova cartella
-menu_new_tab	dad5	Nuova scheda
-menu_new_window	2c79	Nuova finestra
+menu_new_tab	ecfa	Nuova scheda
+menu_new_window	c3db	Nuova finestra
 menu_open	61a5	&Apri
 menu_open_editor	8ca0	Apri nell'&editor
-menu_open_file	098c	Apri file...
+menu_open_file	af39	Apri file...
 menu_open_terminal	6d2a	Apri un &terminale qui
 menu_paste	6854	&Incolla
 menu_properties	c780	P&roprietà
@@ -223,7 +223,7 @@ menu_redo	ac45	&Ripeti
 menu_remove	901d	Rimuovi
 menu_rename	9529	&Rinomina
 menu_reset_zoom	1b0f	Rei&mposta zoom
-menu_save_as	e18c	Salva con nome...
+menu_save_as	7bbe	Salva con nome...
 menu_select_all	f6f6	Seleziona t&utto
 menu_set_wallpaper	1a27	Imposta come &sfondo
 menu_set_wallpaper_of	aa60	Imposta come sfondo di %s
@@ -233,7 +233,7 @@ menu_undo	b9d3	&Annulla
 menu_view_details	d3a1	&Dettagli
 menu_view_icons	57e8	&Icone grandi
 menu_view_list	4cc5	&Elenco
-menu_word_wrap	9ab3	A capo automatico
+menu_word_wrap	db6f	A capo automatico
 menu_zoom_in	5bcf	I&ngrandisci
 menu_zoom_out	9234	&Riduci
 mixer_allow	19d2	Consenti

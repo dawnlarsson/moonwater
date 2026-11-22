@@ -17,24 +17,24 @@ editor_closes_unsaved	fcb8	بغیر محفوظ کیے بند کرتا ہے
 editor_encoding_bom	c0d7	BOM کے ساتھ UTF-8
 editor_find_hint	d17a	تلاش
 editor_find_replace_hint	3693	تلاش/متبادل
-editor_hex_status	35a5	آفسیٹ %1$s / %2$s
+editor_hex_status	15d6	آفسیٹ %1$s / %2$s
 editor_indent_spaces	9db9	اسپیسز: %d
 editor_indent_tab	d9a7	Tab: %d
 editor_line_hint	f547	لائن
 editor_lock_stale	f9d8	%s پچھلی محفوظ کاری سے رہ گیا ہے: اسے حذف کریں، پھر محفوظ کریں
-editor_mode_hex	55d5	ہیکس
-editor_mode_text	134a	متن
+editor_mode_hex	34ea	ہیکس
+editor_mode_text	2d5e	متن
 editor_no_file_name	c863	فائل کا نام نہیں ہے: ایڈیٹر کو فائل کے نام کے ساتھ شروع کریں
 editor_no_match	7de7	کوئی مطابقت نہیں
 editor_not_regular	5955	عام فائل نہیں ہے: مسترد
-editor_open_hint	235f	کھولنے کے لیے فائل کا راستہ
+editor_open_hint	3cb8	کھولنے کے لیے فائل کا راستہ
 editor_pattern_bad	5d57	پیٹرن درست نہیں ہے
 editor_position	3696	لائن %1$d، کالم %2$d
 editor_read_failed	5f78	فائل پڑھی نہیں جا سکی: وہ کھولی نہیں گئی
 editor_reload_unsaved	85da	فائل دوبارہ پڑھتا ہے اور غیر محفوظ تبدیلیاں ختم کر دیتا ہے
 editor_replace_usage	c677	تبدیلی کی شکل: تلاش/متبادل
 editor_replaced	1128	%d تبدیل کیے گئے
-editor_save_as_hint	c955	بطور محفوظ کریں
+editor_save_as_hint	745f	بطور محفوظ کریں
 editor_save_failed	069d	محفوظ کرنا ناکام رہا: فائل جیسی تھی ویسی ہی ہے
 editor_saved	9f44	محفوظ ہو گیا
 editor_selected	a686	(%d منتخب)
@@ -42,7 +42,7 @@ editor_selected_carets	7e02	(%d منتخب، کرسر)
 editor_tabs_full	8ed9	تمام %d ٹیبیں کھلی ہیں: پہلے ایک بند کریں
 editor_unsaved	c014	غیر محفوظ شدہ تبدیلیاں: انہیں محفوظ کریں، یا ہر فائل کو Ctrl+W دو بار دبا کر بند کریں
 editor_untitled	8b58	بلا عنوان
-editor_wrap_on	40cd	لپیٹیں
+editor_wrap_on	40c5	لپیٹیں
 editor_write_beside	ec75	فائل کے ساتھ لکھنا ممکن نہ ہوا
 editor_writes_over_changed	df15	ڈسک کی تبدیلی پر لکھتا ہے (Ctrl+R)
 editor_writes_over_readonly	e22f	صرف پڑھنے والی فائل پر لکھتا ہے
@@ -202,21 +202,21 @@ launcher_sleep_armed	bb08	سلیپ
 menu_bin_empty	1538	ردی کی ٹوکری خالی کریں
 menu_bin_open	8797	ردی کی ٹوکری کھولیں
 menu_bin_restore	4799	واپس رکھیں
-menu_close_others	ec3e	دوسرے ٹیب بند کریں
-menu_close_tab	9753	ٹیب بند کریں
+menu_close_others	26f3	دوسرے ٹیب بند کریں
+menu_close_tab	eb40	ٹیب بند کریں
 menu_copy	43e0	کاپی
 menu_copy_row	f3c8	قطار نقل کریں
 menu_cut	5c17	کٹ
 menu_delete	1e3e	حذف کریں
 menu_find	1fa6	تلاش
 menu_go_to_line	bc96	لائن پر جائیں
-menu_hex_mode	fd1b	ہیکس ایڈیٹر
+menu_hex_mode	74bf	ہیکس ایڈیٹر
 menu_new_folder	41cb	&نیا فولڈر
-menu_new_tab	dad5	نیا ٹیب
-menu_new_window	2c79	نئی ونڈو
+menu_new_tab	ecfa	نیا ٹیب
+menu_new_window	c3db	نئی ونڈو
 menu_open	61a5	&کھولیں
 menu_open_editor	8ca0	&ایڈیٹر میں کھولیں
-menu_open_file	098c	فائل کھولیں...
+menu_open_file	af39	فائل کھولیں...
 menu_open_terminal	6d2a	یہاں &ٹرمینل کھولیں
 menu_paste	6854	پیسٹ
 menu_properties	c780	&خصوصیات
@@ -224,7 +224,7 @@ menu_redo	ac45	دوبارہ کریں
 menu_remove	901d	ہٹائیں
 menu_rename	9529	نام &تبدیل کریں
 menu_reset_zoom	1b0f	زوم بحال کریں
-menu_save_as	e18c	بطور محفوظ کریں...
+menu_save_as	7bbe	بطور محفوظ کریں...
 menu_select_all	f6f6	سب منتخب کریں
 menu_set_wallpaper	1a27	&وال پیپر بنائیں
 menu_set_wallpaper_of	aa60	%s کا وال پیپر بنائیں
@@ -234,7 +234,7 @@ menu_undo	b9d3	کالعدم کریں
 menu_view_details	d3a1	&تفصیل
 menu_view_icons	57e8	بڑے &آئیکن
 menu_view_list	4cc5	&فہرست
-menu_word_wrap	9ab3	سطر لپیٹنا
+menu_word_wrap	db6f	سطر لپیٹنا
 menu_zoom_in	5bcf	بڑا کریں
 menu_zoom_out	9234	چھوٹا کریں
 mixer_allow	19d2	اجازت دیں

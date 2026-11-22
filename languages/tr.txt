@@ -16,24 +16,24 @@ editor_closes_unsaved	fcb8	kaydedilmemiş değişiklikleri atıp kapatır
 editor_encoding_bom	c0d7	BOM'lu UTF-8
 editor_find_hint	d17a	Bul
 editor_find_replace_hint	3693	Bul/Şununla değiştir
-editor_hex_status	35a5	Konum %1$s / %2$s
+editor_hex_status	15d6	Konum %1$s / %2$s
 editor_indent_spaces	9db9	Boşluk: %d
 editor_indent_tab	d9a7	Tab: %d
 editor_line_hint	f547	Satır
 editor_lock_stale	f9d8	%s önceki kaydetmeden kalmış: silin, sonra kaydedin
-editor_mode_hex	55d5	Hex
-editor_mode_text	134a	Metin
+editor_mode_hex	34ea	Hex
+editor_mode_text	2d5e	Metin
 editor_no_file_name	c863	dosya adı yok: düzenleyiciyi bir adla başlatın
 editor_no_match	7de7	eşleşme yok
 editor_not_regular	5955	normal bir dosya değil: reddedildi
-editor_open_hint	235f	Açılacak dosya yolu
+editor_open_hint	3cb8	Açılacak dosya yolu
 editor_pattern_bad	5d57	desen derlenmiyor
 editor_position	3696	Sat %1$d, Sütun %2$d
 editor_read_failed	5f78	dosya okunamadı: açılmadı
 editor_reload_unsaved	85da	dosyayı yeniden okur ve kaydedilmemiş değişiklikleri atar
 editor_replace_usage	c677	değiştirme ARANAN/YERİNE biçimindedir
 editor_replaced	1128	%d değiştirildi
-editor_save_as_hint	c955	Farklı kaydet yolu
+editor_save_as_hint	745f	Farklı kaydet yolu
 editor_save_failed	069d	kaydedilemedi: dosya eskisi gibi
 editor_saved	9f44	kaydedildi
 editor_selected	a686	(%d seçili)
@@ -41,7 +41,7 @@ editor_selected_carets	7e02	(%d seçili, imleçler)
 editor_tabs_full	8ed9	%d sekmenin tümü açık: önce birini kapatın
 editor_unsaved	c014	kaydedilmemiş değişiklikler: kaydedin veya her birini iki kez Ctrl+W ile kapatın
 editor_untitled	8b58	adsız
-editor_wrap_on	40cd	Kaydır
+editor_wrap_on	40c5	Kaydır
 editor_write_beside	ec75	dosyanın yanına yazılamadı
 editor_writes_over_changed	df15	diskteki değişikliğin üzerine yazar (Ctrl+R yeniden okur)
 editor_writes_over_readonly	e22f	salt okunur bir dosyanın üzerine yazar
@@ -201,21 +201,21 @@ launcher_sleep_armed	bb08	uyku moduna geç
 menu_bin_empty	1538	Çöp kutusunu boşalt
 menu_bin_open	8797	Çöp kutusunu aç
 menu_bin_restore	4799	Geri koy
-menu_close_others	ec3e	Diğer Sekmeleri Kapat
-menu_close_tab	9753	Sekmeyi Kapat
+menu_close_others	26f3	Diğer Sekmeleri Kapat
+menu_close_tab	eb40	Sekmeyi Kapat
 menu_copy	43e0	&Kopyala
 menu_copy_row	f3c8	Satırı kopyala
 menu_cut	5c17	K&es
 menu_delete	1e3e	&Sil
 menu_find	1fa6	&Bul
 menu_go_to_line	bc96	S&atıra Git
-menu_hex_mode	fd1b	Hex Düzenleyici
+menu_hex_mode	74bf	Hex Düzenleyici
 menu_new_folder	41cb	&Yeni klasör
-menu_new_tab	dad5	Yeni Sekme
-menu_new_window	2c79	Yeni Pencere
+menu_new_tab	ecfa	Yeni Sekme
+menu_new_window	c3db	Yeni Pencere
 menu_open	61a5	&Aç
 menu_open_editor	8ca0	&Düzenleyicide aç
-menu_open_file	098c	Dosya Aç...
+menu_open_file	af39	Dosya Aç...
 menu_open_terminal	6d2a	Burada &uçbirim aç
 menu_paste	6854	Ya&pıştır
 menu_properties	c780	Ö&zellikler
@@ -223,7 +223,7 @@ menu_redo	ac45	&Yinele
 menu_remove	901d	Kaldır
 menu_rename	9529	&Yeniden adlandır
 menu_reset_zoom	1b0f	Yakınlaştırmayı Sıfır&la
-menu_save_as	e18c	Farklı Kaydet...
+menu_save_as	7bbe	Farklı Kaydet...
 menu_select_all	f6f6	&Tümünü Seç
 menu_set_wallpaper	1a27	&Duvar kağıdı yap
 menu_set_wallpaper_of	aa60	%s için duvar kağıdı yap
@@ -233,7 +233,7 @@ menu_undo	b9d3	&Geri Al
 menu_view_details	d3a1	&Ayrıntılar
 menu_view_icons	57e8	Büyük &simgeler
 menu_view_list	4cc5	&Liste
-menu_word_wrap	9ab3	Sözcük Kaydırma
+menu_word_wrap	db6f	Sözcük Kaydırma
 menu_zoom_in	5bcf	&Yakınlaştır
 menu_zoom_out	9234	&Uzaklaştır
 mixer_allow	19d2	İzin ver

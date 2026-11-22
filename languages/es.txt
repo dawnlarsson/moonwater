@@ -16,24 +16,24 @@ editor_closes_unsaved	fcb8	cierra los cambios sin guardar
 editor_encoding_bom	c0d7	UTF-8 con BOM
 editor_find_hint	d17a	Buscar
 editor_find_replace_hint	3693	Buscar/Reemplazar por
-editor_hex_status	35a5	Desplazamiento %1$s / %2$s
+editor_hex_status	15d6	Desplazamiento %1$s / %2$s
 editor_indent_spaces	9db9	Espacios: %d
 editor_indent_tab	d9a7	Tab: %d
 editor_line_hint	f547	Línea
 editor_lock_stale	f9d8	%s quedó de un guardado anterior: bórrelo y guarde de nuevo
-editor_mode_hex	55d5	Hex
-editor_mode_text	134a	Texto
+editor_mode_hex	34ea	Hex
+editor_mode_text	2d5e	Texto
 editor_no_file_name	c863	sin nombre de archivo: inicie el editor con uno
 editor_no_match	7de7	sin coincidencias
 editor_not_regular	5955	no es un archivo normal: rechazado
-editor_open_hint	235f	Ruta del archivo a abrir
+editor_open_hint	3cb8	Ruta del archivo a abrir
 editor_pattern_bad	5d57	el patrón no se compila
 editor_position	3696	Ln %1$d, Col %2$d
 editor_read_failed	5f78	no se pudo leer el archivo: no se abre
 editor_reload_unsaved	85da	vuelve a leer el archivo y descarta los cambios sin guardar
 editor_replace_usage	c677	reemplazar es BUSCAR/REEMPLAZO
 editor_replaced	1128	%d reemplazados
-editor_save_as_hint	c955	Guardar como ruta
+editor_save_as_hint	745f	Guardar como ruta
 editor_save_failed	069d	no se pudo guardar: el archivo sigue como estaba
 editor_saved	9f44	guardado
 editor_selected	a686	(%d seleccionados)
@@ -41,7 +41,7 @@ editor_selected_carets	7e02	(%d seleccionados, cursores)
 editor_tabs_full	8ed9	las %d pestañas están abiertas: cierre primero una
 editor_unsaved	c014	cambios sin guardar: guardarlos, o cerrar cada uno con Ctrl+W dos veces
 editor_untitled	8b58	sin título
-editor_wrap_on	40cd	Ajuste
+editor_wrap_on	40c5	Ajuste
 editor_write_beside	ec75	no se pudo escribir junto al archivo
 editor_writes_over_changed	df15	sobrescribe el cambio del disco (Ctrl+R lo lee de nuevo)
 editor_writes_over_readonly	e22f	sobrescribe un archivo de solo lectura
@@ -201,21 +201,21 @@ launcher_sleep_armed	bb08	suspender
 menu_bin_empty	1538	Vaciar la papelera
 menu_bin_open	8797	Abrir la papelera
 menu_bin_restore	4799	Restaurar
-menu_close_others	ec3e	Cerrar otras pestañas
-menu_close_tab	9753	Cerrar pestaña
+menu_close_others	26f3	Cerrar otras pestañas
+menu_close_tab	eb40	Cerrar pestaña
 menu_copy	43e0	&Copiar
 menu_copy_row	f3c8	Copiar fila
 menu_cut	5c17	Cor&tar
 menu_delete	1e3e	&Eliminar
 menu_find	1fa6	&Buscar
 menu_go_to_line	bc96	&Ir a la línea
-menu_hex_mode	fd1b	Editor hexadecimal
+menu_hex_mode	74bf	Editor hexadecimal
 menu_new_folder	41cb	&Nueva carpeta
-menu_new_tab	dad5	Nueva pestaña
-menu_new_window	2c79	Nueva ventana
+menu_new_tab	ecfa	Nueva pestaña
+menu_new_window	c3db	Nueva ventana
 menu_open	61a5	&Abrir
 menu_open_editor	8ca0	Abrir en el &editor
-menu_open_file	098c	Abrir archivo...
+menu_open_file	af39	Abrir archivo...
 menu_open_terminal	6d2a	Abrir una &terminal aquí
 menu_paste	6854	&Pegar
 menu_properties	c780	&Propiedades
@@ -223,7 +223,7 @@ menu_redo	ac45	&Rehacer
 menu_remove	901d	Quitar
 menu_rename	9529	Cambiar &nombre
 menu_reset_zoom	1b0f	Re&establecer zoom
-menu_save_as	e18c	Guardar como...
+menu_save_as	7bbe	Guardar como...
 menu_select_all	f6f6	Seleccionar t&odo
 menu_set_wallpaper	1a27	Establecer como &fondo
 menu_set_wallpaper_of	aa60	Establecer como fondo de %s
@@ -233,7 +233,7 @@ menu_undo	b9d3	&Deshacer
 menu_view_details	d3a1	&Detalles
 menu_view_icons	57e8	&Iconos grandes
 menu_view_list	4cc5	&Lista
-menu_word_wrap	9ab3	Ajuste de línea
+menu_word_wrap	db6f	Ajuste de línea
 menu_zoom_in	5bcf	&Ampliar
 menu_zoom_out	9234	&Reducir
 mixer_allow	19d2	Permitir

@@ -16,24 +16,24 @@ editor_closes_unsaved	fcb8	zamyka i odrzuca niezapisane zmiany
 editor_encoding_bom	c0d7	UTF-8 z BOM
 editor_find_hint	d17a	Znajdź
 editor_find_replace_hint	3693	Znajdź/Zamień na
-editor_hex_status	35a5	Przesunięcie %1$s / %2$s
+editor_hex_status	15d6	Przesunięcie %1$s / %2$s
 editor_indent_spaces	9db9	Spacje: %d
 editor_indent_tab	d9a7	Tab: %d
 editor_line_hint	f547	Wiersz
 editor_lock_stale	f9d8	%s został po poprzednim zapisie: usuń go, potem zapisz
-editor_mode_hex	55d5	Hex
-editor_mode_text	134a	Tekst
+editor_mode_hex	34ea	Hex
+editor_mode_text	2d5e	Tekst
 editor_no_file_name	c863	brak nazwy pliku: uruchom edytor z nazwą
 editor_no_match	7de7	brak dopasowania
 editor_not_regular	5955	to nie jest zwykły plik: odrzucono
-editor_open_hint	235f	Ścieżka pliku do otwarcia
+editor_open_hint	3cb8	Ścieżka pliku do otwarcia
 editor_pattern_bad	5d57	wzorzec nie kompiluje się
 editor_position	3696	Wrs %1$d, Kol %2$d
 editor_read_failed	5f78	nie udało się odczytać pliku: nie zostaje otwarty
 editor_reload_unsaved	85da	wczytuje plik ponownie i odrzuca niezapisane zmiany
 editor_replace_usage	c677	zamiana to SZUKANE/ZAMIENNIK
 editor_replaced	1128	zamieniono: %d
-editor_save_as_hint	c955	Zapisz jako ścieżka
+editor_save_as_hint	745f	Zapisz jako ścieżka
 editor_save_failed	069d	zapis się nie udał: plik jest bez zmian
 editor_saved	9f44	zapisano
 editor_selected	a686	(zaznaczono: %d)
@@ -41,7 +41,7 @@ editor_selected_carets	7e02	(zaznaczono: %d, kursory)
 editor_tabs_full	8ed9	wszystkie %d karty są otwarte: najpierw zamknij jedną
 editor_unsaved	c014	niezapisane zmiany: zapisz je lub zamknij każdą dwukrotnie Ctrl+W
 editor_untitled	8b58	bez nazwy
-editor_wrap_on	40cd	Zawijaj
+editor_wrap_on	40c5	Zawijaj
 editor_write_beside	ec75	nie można zapisać obok pliku
 editor_writes_over_changed	df15	nadpisuje zmianę na dysku (Ctrl+R wczytuje ponownie)
 editor_writes_over_readonly	e22f	nadpisuje plik tylko do odczytu
@@ -201,21 +201,21 @@ launcher_sleep_armed	bb08	uśpić
 menu_bin_empty	1538	Opróżnij kosz
 menu_bin_open	8797	Otwórz kosz
 menu_bin_restore	4799	Przywróć
-menu_close_others	ec3e	Zamknij inne karty
-menu_close_tab	9753	Zamknij kartę
+menu_close_others	26f3	Zamknij inne karty
+menu_close_tab	eb40	Zamknij kartę
 menu_copy	43e0	&Kopiuj
 menu_copy_row	f3c8	Kopiuj wiersz
 menu_cut	5c17	&Wytnij
 menu_delete	1e3e	&Usuń
 menu_find	1fa6	Zna&jdź
 menu_go_to_line	bc96	Prz&ejdź do wiersza
-menu_hex_mode	fd1b	Edytor szesnastkowy
+menu_hex_mode	74bf	Edytor szesnastkowy
 menu_new_folder	41cb	&Nowy folder
-menu_new_tab	dad5	Nowa karta
-menu_new_window	2c79	Nowe okno
+menu_new_tab	ecfa	Nowa karta
+menu_new_window	c3db	Nowe okno
 menu_open	61a5	&Otwórz
 menu_open_editor	8ca0	Otwórz w &edytorze
-menu_open_file	098c	Otwórz plik...
+menu_open_file	af39	Otwórz plik...
 menu_open_terminal	6d2a	Otwórz &terminal tutaj
 menu_paste	6854	Wk&lej
 menu_properties	c780	Właś&ciwości
@@ -223,7 +223,7 @@ menu_redo	ac45	&Ponów
 menu_remove	901d	Usuń
 menu_rename	9529	Zmień &nazwę
 menu_reset_zoom	1b0f	&Resetuj powiększenie
-menu_save_as	e18c	Zapisz jako...
+menu_save_as	7bbe	Zapisz jako...
 menu_select_all	f6f6	&Zaznacz wszystko
 menu_set_wallpaper	1a27	Ustaw jako &tapetę
 menu_set_wallpaper_of	aa60	Ustaw jako tapetę %s
@@ -233,7 +233,7 @@ menu_undo	b9d3	&Cofnij
 menu_view_details	d3a1	&Szczegóły
 menu_view_icons	57e8	Duże &ikony
 menu_view_list	4cc5	&Lista
-menu_word_wrap	9ab3	Zawijanie wierszy
+menu_word_wrap	db6f	Zawijanie wierszy
 menu_zoom_in	5bcf	&Powiększ
 menu_zoom_out	9234	Pom&niejsz
 mixer_allow	19d2	Zezwól

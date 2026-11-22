@@ -10,24 +10,24 @@ editor_closes_unsaved	fcb8	closes the unsaved changes
 editor_encoding_bom	c0d7	UTF-8 with BOM
 editor_find_hint	d17a	Find
 editor_find_replace_hint	3693	Find/Replace with
-editor_hex_status	35a5	Offset %1$s / %2$s
+editor_hex_status	15d6	Offset %1$s / %2$s
 editor_indent_spaces	9db9	Spaces: %d
 editor_indent_tab	d9a7	Tab: %d
 editor_line_hint	f547	Line
 editor_lock_stale	f9d8	%s is left by an earlier save: remove it, then save
-editor_mode_hex	55d5	Hex
-editor_mode_text	134a	Text
+editor_mode_hex	34ea	Hex
+editor_mode_text	2d5e	Text
 editor_no_file_name	c863	no file name: start the editor with one
 editor_no_match	7de7	no match
 editor_not_regular	5955	not a regular file: refused
-editor_open_hint	235f	Open file path
+editor_open_hint	3cb8	Open file path
 editor_pattern_bad	5d57	the pattern does not compile
 editor_position	3696	Ln %1$d, Col %2$d
 editor_read_failed	5f78	the file could not be read: it is not opened
 editor_reload_unsaved	85da	reads the file again and drops the unsaved changes
 editor_replace_usage	c677	replace is FIND/REPLACEMENT
 editor_replaced	1128	%d replaced
-editor_save_as_hint	c955	Save as path
+editor_save_as_hint	745f	Save as path
 editor_save_failed	069d	the save failed: the file is as it was
 editor_saved	9f44	saved
 editor_selected	a686	(%d selected)
@@ -35,7 +35,7 @@ editor_selected_carets	7e02	(%d selected, carets)
 editor_tabs_full	8ed9	all %d tabs are open: close one first
 editor_unsaved	c014	unsaved changes: save them, or close each with Ctrl+W twice
 editor_untitled	8b58	untitled
-editor_wrap_on	40cd	Wrap
+editor_wrap_on	40c5	Wrap
 editor_write_beside	ec75	could not write beside the file
 editor_writes_over_changed	df15	writes over the change on disk (Ctrl+R reads it again)
 editor_writes_over_readonly	e22f	writes over a read-only file
@@ -195,21 +195,21 @@ launcher_sleep_armed	bb08	sleep
 menu_bin_empty	1538	Empty the bin
 menu_bin_open	8797	Open the bin
 menu_bin_restore	4799	Put back
-menu_close_others	ec3e	Close Other Tabs
-menu_close_tab	9753	Close Tab
+menu_close_others	26f3	Close Other Tabs
+menu_close_tab	eb40	Close Tab
 menu_copy	43e0	&Copy
 menu_copy_row	f3c8	Copy row
 menu_cut	5c17	Cu&t
 menu_delete	1e3e	&Delete
 menu_find	1fa6	&Find
 menu_go_to_line	bc96	&Go to Line
-menu_hex_mode	fd1b	Hex Editor
+menu_hex_mode	74bf	Hex Editor
 menu_new_folder	41cb	&New Folder
-menu_new_tab	dad5	New Tab
-menu_new_window	2c79	New Window
+menu_new_tab	ecfa	New Tab
+menu_new_window	c3db	New Window
 menu_open	61a5	&Open
 menu_open_editor	8ca0	Open in the &Editor
-menu_open_file	098c	Open File...
+menu_open_file	af39	Open File...
 menu_open_terminal	6d2a	Open a &Terminal Here
 menu_paste	6854	&Paste
 menu_properties	c780	P&roperties
@@ -217,7 +217,7 @@ menu_redo	ac45	&Redo
 menu_remove	901d	Remove
 menu_rename	9529	Re&name
 menu_reset_zoom	1b0f	&Reset Zoom
-menu_save_as	e18c	Save As...
+menu_save_as	7bbe	Save As...
 menu_select_all	f6f6	Select &All
 menu_set_wallpaper	1a27	Set as &Wallpaper
 menu_set_wallpaper_of	aa60	Set as Wallpaper of %s
@@ -227,7 +227,7 @@ menu_undo	b9d3	&Undo
 menu_view_details	d3a1	&Details
 menu_view_icons	57e8	Large &Icons
 menu_view_list	4cc5	&List
-menu_word_wrap	9ab3	Word Wrap
+menu_word_wrap	db6f	Word Wrap
 menu_zoom_in	5bcf	Zoom &In
 menu_zoom_out	9234	Zoom &Out
 mixer_allow	19d2	Allow

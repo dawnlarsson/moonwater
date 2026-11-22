@@ -16,24 +16,24 @@ editor_closes_unsaved	fcb8	закрывает, отбрасывая несохр
 editor_encoding_bom	c0d7	UTF-8 с BOM
 editor_find_hint	d17a	Найти
 editor_find_replace_hint	3693	Найти/Заменить на
-editor_hex_status	35a5	Смещение %1$s / %2$s
+editor_hex_status	15d6	Смещение %1$s / %2$s
 editor_indent_spaces	9db9	Пробелы: %d
 editor_indent_tab	d9a7	Таб: %d
 editor_line_hint	f547	Строка
 editor_lock_stale	f9d8	%s остался от прошлого сохранения: удалите его, затем сохраните
-editor_mode_hex	55d5	Hex
-editor_mode_text	134a	Текст
+editor_mode_hex	34ea	Hex
+editor_mode_text	2d5e	Текст
 editor_no_file_name	c863	нет имени файла: запустите редактор с именем
 editor_no_match	7de7	нет совпадений
 editor_not_regular	5955	не обычный файл: отказано
-editor_open_hint	235f	Путь к файлу
+editor_open_hint	3cb8	Путь к файлу
 editor_pattern_bad	5d57	шаблон не компилируется
 editor_position	3696	Стр %1$d, Стлб %2$d
 editor_read_failed	5f78	не удалось прочитать файл: он не открыт
 editor_reload_unsaved	85da	перечитывает файл и отбрасывает несохранённые изменения
 editor_replace_usage	c677	замена — НАЙТИ/ЗАМЕНА
 editor_replaced	1128	заменено: %d
-editor_save_as_hint	c955	Сохранить как путь
+editor_save_as_hint	745f	Сохранить как путь
 editor_save_failed	069d	не удалось сохранить: файл не изменился
 editor_saved	9f44	сохранено
 editor_selected	a686	(выделено: %d)
@@ -41,7 +41,7 @@ editor_selected_carets	7e02	(выделено: %d, курсоры)
 editor_tabs_full	8ed9	все %d вкладок открыты: сначала закройте одну
 editor_unsaved	c014	несохранённые изменения: сохраните их или закройте каждую, дважды нажав Ctrl+W
 editor_untitled	8b58	без имени
-editor_wrap_on	40cd	Перенос
+editor_wrap_on	40c5	Перенос
 editor_write_beside	ec75	не удалось записать рядом с файлом
 editor_writes_over_changed	df15	перезапишет изменение на диске (Ctrl+R читает заново)
 editor_writes_over_readonly	e22f	перезапишет файл только для чтения
@@ -201,21 +201,21 @@ launcher_sleep_armed	bb08	перейти в сон
 menu_bin_empty	1538	Очистить корзину
 menu_bin_open	8797	Открыть корзину
 menu_bin_restore	4799	Восстановить
-menu_close_others	ec3e	Закрыть другие вкладки
-menu_close_tab	9753	Закрыть вкладку
+menu_close_others	26f3	Закрыть другие вкладки
+menu_close_tab	eb40	Закрыть вкладку
 menu_copy	43e0	Копировать
 menu_copy_row	f3c8	Копировать строку
 menu_cut	5c17	Вырезать
 menu_delete	1e3e	Удалить
 menu_find	1fa6	Найти
 menu_go_to_line	bc96	Перейти к строке
-menu_hex_mode	fd1b	Hex-редактор
+menu_hex_mode	74bf	Hex-редактор
 menu_new_folder	41cb	&Новая папка
-menu_new_tab	dad5	Новая вкладка
-menu_new_window	2c79	Новое окно
+menu_new_tab	ecfa	Новая вкладка
+menu_new_window	c3db	Новое окно
 menu_open	61a5	&Открыть
 menu_open_editor	8ca0	Открыть в &редакторе
-menu_open_file	098c	Открыть файл...
+menu_open_file	af39	Открыть файл...
 menu_open_terminal	6d2a	Открыть &терминал здесь
 menu_paste	6854	Вставить
 menu_properties	c780	&Свойства
@@ -223,7 +223,7 @@ menu_redo	ac45	Повторить
 menu_remove	901d	Удалить
 menu_rename	9529	&Переименовать
 menu_reset_zoom	1b0f	Сбросить масштаб
-menu_save_as	e18c	Сохранить как...
+menu_save_as	7bbe	Сохранить как...
 menu_select_all	f6f6	Выделить всё
 menu_set_wallpaper	1a27	Сделать &обоями
 menu_set_wallpaper_of	aa60	Сделать обоями %s
@@ -233,7 +233,7 @@ menu_undo	b9d3	Отменить
 menu_view_details	d3a1	&Таблица
 menu_view_icons	57e8	Крупные &значки
 menu_view_list	4cc5	&Список
-menu_word_wrap	9ab3	Перенос строк
+menu_word_wrap	db6f	Перенос строк
 menu_zoom_in	5bcf	Увеличить
 menu_zoom_out	9234	Уменьшить
 mixer_allow	19d2	Разрешить

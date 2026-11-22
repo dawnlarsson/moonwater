@@ -16,24 +16,24 @@ editor_closes_unsaved	fcb8	schließt und verwirft die ungespeicherten Änderunge
 editor_encoding_bom	c0d7	UTF-8 mit BOM
 editor_find_hint	d17a	Suchen
 editor_find_replace_hint	3693	Suchen/Ersetzen durch
-editor_hex_status	35a5	Offset %1$s / %2$s
+editor_hex_status	15d6	Offset %1$s / %2$s
 editor_indent_spaces	9db9	Leerzeichen: %d
 editor_indent_tab	d9a7	Tab: %d
 editor_line_hint	f547	Zeile
 editor_lock_stale	f9d8	%s stammt von einem früheren Speichern: entfernen, dann speichern
-editor_mode_hex	55d5	Hex
-editor_mode_text	134a	Text
+editor_mode_hex	34ea	Hex
+editor_mode_text	2d5e	Text
 editor_no_file_name	c863	kein Dateiname: den Editor mit einem starten
 editor_no_match	7de7	kein Treffer
 editor_not_regular	5955	keine normale Datei: abgelehnt
-editor_open_hint	235f	Dateipfad öffnen
+editor_open_hint	3cb8	Dateipfad öffnen
 editor_pattern_bad	5d57	das Muster lässt sich nicht übersetzen
 editor_position	3696	Z %1$d, Sp %2$d
 editor_read_failed	5f78	die Datei ließ sich nicht lesen: sie wird nicht geöffnet
 editor_reload_unsaved	85da	liest die Datei neu und verwirft die ungespeicherten Änderungen
 editor_replace_usage	c677	Ersetzen heißt SUCHEN/ERSATZ
 editor_replaced	1128	%d ersetzt
-editor_save_as_hint	c955	Speichern unter
+editor_save_as_hint	745f	Speichern unter
 editor_save_failed	069d	Speichern fehlgeschlagen: die Datei ist unverändert
 editor_saved	9f44	gespeichert
 editor_selected	a686	(%d ausgewählt)
@@ -41,7 +41,7 @@ editor_selected_carets	7e02	(%d ausgewählt, Textcursor)
 editor_tabs_full	8ed9	alle %d Reiter sind offen: schließen Sie zuerst einen
 editor_unsaved	c014	ungespeicherte Änderungen: speichern, oder jede mit zweimal Ctrl+W schließen
 editor_untitled	8b58	unbenannt
-editor_wrap_on	40cd	Umbruch
+editor_wrap_on	40c5	Umbruch
 editor_write_beside	ec75	neben der Datei konnte nicht geschrieben werden
 editor_writes_over_changed	df15	überschreibt die Änderung auf dem Datenträger (Ctrl+R liest neu)
 editor_writes_over_readonly	e22f	überschreibt eine schreibgeschützte Datei
@@ -201,21 +201,21 @@ launcher_sleep_armed	bb08	in Standby gehen
 menu_bin_empty	1538	Papierkorb leeren
 menu_bin_open	8797	Papierkorb öffnen
 menu_bin_restore	4799	Zurücklegen
-menu_close_others	ec3e	Andere Tabs schließen
-menu_close_tab	9753	Tab schließen
+menu_close_others	26f3	Andere Tabs schließen
+menu_close_tab	eb40	Tab schließen
 menu_copy	43e0	&Kopieren
 menu_copy_row	f3c8	Zeile kopieren
 menu_cut	5c17	A&usschneiden
 menu_delete	1e3e	&Löschen
 menu_find	1fa6	&Suchen
 menu_go_to_line	bc96	&Gehe zu Zeile
-menu_hex_mode	fd1b	Hex-Editor
+menu_hex_mode	74bf	Hex-Editor
 menu_new_folder	41cb	&Neuer Ordner
-menu_new_tab	dad5	Neuer Tab
-menu_new_window	2c79	Neues Fenster
+menu_new_tab	ecfa	Neuer Tab
+menu_new_window	c3db	Neues Fenster
 menu_open	61a5	Ö&ffnen
 menu_open_editor	8ca0	Im &Editor öffnen
-menu_open_file	098c	Datei öffnen...
+menu_open_file	af39	Datei öffnen...
 menu_open_terminal	6d2a	&Terminal hier öffnen
 menu_paste	6854	&Einfügen
 menu_properties	c780	&Eigenschaften
@@ -223,7 +223,7 @@ menu_redo	ac45	&Wiederholen
 menu_remove	901d	Entfernen
 menu_rename	9529	&Umbenennen
 menu_reset_zoom	1b0f	&Zoom zurücksetzen
-menu_save_as	e18c	Speichern unter...
+menu_save_as	7bbe	Speichern unter...
 menu_select_all	f6f6	Alles &auswählen
 menu_set_wallpaper	1a27	Als &Hintergrundbild festlegen
 menu_set_wallpaper_of	aa60	Als Hintergrundbild von %s festlegen
@@ -233,7 +233,7 @@ menu_undo	b9d3	&Rückgängig
 menu_view_details	d3a1	&Details
 menu_view_icons	57e8	Große &Symbole
 menu_view_list	4cc5	&Liste
-menu_word_wrap	9ab3	Zeilenumbruch
+menu_word_wrap	db6f	Zeilenumbruch
 menu_zoom_in	5bcf	&Vergrößern
 menu_zoom_out	9234	Verk&leinern
 mixer_allow	19d2	Erlauben

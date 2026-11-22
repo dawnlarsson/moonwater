@@ -17,24 +17,24 @@ editor_closes_unsaved	fcb8	يغلق ويتجاهل التغييرات
 editor_encoding_bom	c0d7	UTF-8 مع BOM
 editor_find_hint	d17a	بحث
 editor_find_replace_hint	3693	بحث/البديل
-editor_hex_status	35a5	الإزاحة %1$s / %2$s
+editor_hex_status	15d6	الإزاحة %1$s / %2$s
 editor_indent_spaces	9db9	المسافات: %d
 editor_indent_tab	d9a7	Tab: %d
 editor_line_hint	f547	السطر
 editor_lock_stale	f9d8	%s بقي من حفظ سابق: احذفه ثم احفظ
-editor_mode_hex	55d5	سداسي عشري
-editor_mode_text	134a	نص
+editor_mode_hex	34ea	سداسي عشري
+editor_mode_text	2d5e	نص
 editor_no_file_name	c863	لا يوجد اسم ملف: ابدأ المحرر باسم ملف
 editor_no_match	7de7	لا يوجد تطابق
 editor_not_regular	5955	ليس ملفا عاديا: تم الرفض
-editor_open_hint	235f	مسار الملف للفتح
+editor_open_hint	3cb8	مسار الملف للفتح
 editor_pattern_bad	5d57	النمط غير صالح
 editor_position	3696	سطر %1$d، عمود %2$d
 editor_read_failed	5f78	تعذرت قراءة الملف: لم يُفتح
 editor_reload_unsaved	85da	يعيد قراءة الملف ويتجاهل التغييرات غير المحفوظة
 editor_replace_usage	c677	صيغة الاستبدال: البحث/البديل
 editor_replaced	1128	تم استبدال %d
-editor_save_as_hint	c955	حفظ باسم
+editor_save_as_hint	745f	حفظ باسم
 editor_save_failed	069d	فشل الحفظ: الملف كما كان
 editor_saved	9f44	تم الحفظ
 editor_selected	a686	(%d محدد)
@@ -42,7 +42,7 @@ editor_selected_carets	7e02	(%d محدد، مؤشرات)
 editor_tabs_full	8ed9	كل التبويبات الـ%d مفتوحة: أغلق واحدا أولا
 editor_unsaved	c014	تغييرات غير محفوظة: احفظها، أو أغلق كل ملف بالضغط على Ctrl+W مرتين
 editor_untitled	8b58	بدون عنوان
-editor_wrap_on	40cd	التفاف
+editor_wrap_on	40c5	التفاف
 editor_write_beside	ec75	تعذرت الكتابة بجوار الملف
 editor_writes_over_changed	df15	يكتب فوق تغيير القرص (Ctrl+R)
 editor_writes_over_readonly	e22f	يكتب فوق ملف للقراءة فقط
@@ -202,21 +202,21 @@ launcher_sleep_armed	bb08	السكون
 menu_bin_empty	1538	إفراغ سلة المهملات
 menu_bin_open	8797	فتح سلة المهملات
 menu_bin_restore	4799	استعادة
-menu_close_others	ec3e	إغلاق الألسنة الأخرى
-menu_close_tab	9753	إغلاق اللسان
+menu_close_others	26f3	إغلاق الألسنة الأخرى
+menu_close_tab	eb40	إغلاق اللسان
 menu_copy	43e0	نسخ
 menu_copy_row	f3c8	نسخ الصف
 menu_cut	5c17	قص
 menu_delete	1e3e	حذف
 menu_find	1fa6	بحث
 menu_go_to_line	bc96	الانتقال إلى سطر
-menu_hex_mode	fd1b	محرر سداسي عشري
+menu_hex_mode	74bf	محرر سداسي عشري
 menu_new_folder	41cb	مجلد &جديد
-menu_new_tab	dad5	لسان جديد
-menu_new_window	2c79	نافذة جديدة
+menu_new_tab	ecfa	لسان جديد
+menu_new_window	c3db	نافذة جديدة
 menu_open	61a5	&فتح
 menu_open_editor	8ca0	فتح في &المحرر
-menu_open_file	098c	فتح ملف...
+menu_open_file	af39	فتح ملف...
 menu_open_terminal	6d2a	فتح &طرفية هنا
 menu_paste	6854	لصق
 menu_properties	c780	&خصائص
@@ -224,7 +224,7 @@ menu_redo	ac45	إعادة
 menu_remove	901d	إزالة
 menu_rename	9529	إعادة &تسمية
 menu_reset_zoom	1b0f	إعادة تعيين التكبير
-menu_save_as	e18c	حفظ باسم...
+menu_save_as	7bbe	حفظ باسم...
 menu_select_all	f6f6	تحديد الكل
 menu_set_wallpaper	1a27	تعيين &خلفية لسطح المكتب
 menu_set_wallpaper_of	aa60	تعيين خلفية لـ %s
@@ -234,7 +234,7 @@ menu_undo	b9d3	تراجع
 menu_view_details	d3a1	&تفاصيل
 menu_view_icons	57e8	&أيقونات كبيرة
 menu_view_list	4cc5	&قائمة
-menu_word_wrap	9ab3	التفاف الأسطر
+menu_word_wrap	db6f	التفاف الأسطر
 menu_zoom_in	5bcf	تكبير
 menu_zoom_out	9234	تصغير
 mixer_allow	19d2	السماح

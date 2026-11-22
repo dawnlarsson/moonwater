@@ -17,24 +17,24 @@ editor_closes_unsaved	fcb8	بدون ذخیره می‌بندد
 editor_encoding_bom	c0d7	UTF-8 با BOM
 editor_find_hint	d17a	جستجو
 editor_find_replace_hint	3693	جستجو/جایگزین
-editor_hex_status	35a5	آفست %1$s / %2$s
+editor_hex_status	15d6	آفست %1$s / %2$s
 editor_indent_spaces	9db9	فاصله‌ها: %d
 editor_indent_tab	d9a7	Tab: %d
 editor_line_hint	f547	سطر
 editor_lock_stale	f9d8	%s از یک ذخیره‌سازی قبلی مانده است: آن را حذف کنید، سپس ذخیره کنید
-editor_mode_hex	55d5	هگز
-editor_mode_text	134a	متن
+editor_mode_hex	34ea	هگز
+editor_mode_text	2d5e	متن
 editor_no_file_name	c863	نام پرونده وجود ندارد: ویرایشگر را با نام پرونده اجرا کنید
 editor_no_match	7de7	موردی یافت نشد
 editor_not_regular	5955	پرونده عادی نیست: رد شد
-editor_open_hint	235f	مسیر فایل برای باز کردن
+editor_open_hint	3cb8	مسیر فایل برای باز کردن
 editor_pattern_bad	5d57	الگو معتبر نیست
 editor_position	3696	سطر %1$d، ستون %2$d
 editor_read_failed	5f78	پرونده خوانده نشد: باز نمی‌شود
 editor_reload_unsaved	85da	پرونده را دوباره می‌خواند و تغییرات ذخیره‌نشده را کنار می‌گذارد
 editor_replace_usage	c677	قالب جایگزینی: جستجو/جایگزین
 editor_replaced	1128	%d مورد جایگزین شد
-editor_save_as_hint	c955	ذخیره به نام
+editor_save_as_hint	745f	ذخیره به نام
 editor_save_failed	069d	ذخیره نشد: پرونده همان‌طور که بود مانده است
 editor_saved	9f44	ذخیره شد
 editor_selected	a686	(%d انتخاب‌شده)
@@ -42,7 +42,7 @@ editor_selected_carets	7e02	(%d انتخاب‌شده، مکان‌نما)
 editor_tabs_full	8ed9	هر %d زبانه باز است: ابتدا یکی را ببندید
 editor_unsaved	c014	تغییرات ذخیره‌نشده: آن‌ها را ذخیره کنید، یا هر پرونده را با دو بار فشردن Ctrl+W ببندید
 editor_untitled	8b58	بدون عنوان
-editor_wrap_on	40cd	شکست خط
+editor_wrap_on	40c5	شکست خط
 editor_write_beside	ec75	نوشتن در کنار پرونده ممکن نشد
 editor_writes_over_changed	df15	تغییر دیسک را بازنویسی می‌کند
 editor_writes_over_readonly	e22f	فقط‌خواندنی را بازنویسی می‌کند
@@ -202,21 +202,21 @@ launcher_sleep_armed	bb08	خواب
 menu_bin_empty	1538	خالی کردن سطل بازیافت
 menu_bin_open	8797	باز کردن سطل بازیافت
 menu_bin_restore	4799	بازگرداندن
-menu_close_others	ec3e	بستن زبانه‌های دیگر
-menu_close_tab	9753	بستن زبانه
+menu_close_others	26f3	بستن زبانه‌های دیگر
+menu_close_tab	eb40	بستن زبانه
 menu_copy	43e0	کپی
 menu_copy_row	f3c8	رونوشت ردیف
 menu_cut	5c17	برش
 menu_delete	1e3e	حذف
 menu_find	1fa6	جستجو
 menu_go_to_line	bc96	رفتن به سطر
-menu_hex_mode	fd1b	ویرایشگر هگز
+menu_hex_mode	74bf	ویرایشگر هگز
 menu_new_folder	41cb	پوشه &جدید
-menu_new_tab	dad5	زبانه جدید
-menu_new_window	2c79	پنجره جدید
+menu_new_tab	ecfa	زبانه جدید
+menu_new_window	c3db	پنجره جدید
 menu_open	61a5	&باز کردن
 menu_open_editor	8ca0	باز کردن در &ویرایشگر
-menu_open_file	098c	باز کردن فایل...
+menu_open_file	af39	باز کردن فایل...
 menu_open_terminal	6d2a	باز کردن &پایانه در اینجا
 menu_paste	6854	چسباندن
 menu_properties	c780	&ویژگی‌ها
@@ -224,7 +224,7 @@ menu_redo	ac45	انجام دوباره
 menu_remove	901d	حذف
 menu_rename	9529	&تغییر نام
 menu_reset_zoom	1b0f	بازنشانی بزرگ‌نمایی
-menu_save_as	e18c	ذخیره به نام...
+menu_save_as	7bbe	ذخیره به نام...
 menu_select_all	f6f6	انتخاب همه
 menu_set_wallpaper	1a27	تنظیم به عنوان &پس‌زمینه
 menu_set_wallpaper_of	aa60	تنظیم به عنوان پس‌زمینهٔ %s
@@ -234,7 +234,7 @@ menu_undo	b9d3	واگرد
 menu_view_details	d3a1	&جزئیات
 menu_view_icons	57e8	&نمادهای بزرگ
 menu_view_list	4cc5	&فهرست
-menu_word_wrap	9ab3	شکست خودکار خط
+menu_word_wrap	db6f	شکست خودکار خط
 menu_zoom_in	5bcf	بزرگ‌نمایی
 menu_zoom_out	9234	کوچک‌نمایی
 mixer_allow	19d2	اجازه

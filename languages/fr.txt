@@ -16,24 +16,24 @@ editor_closes_unsaved	fcb8	ferme en abandonnant les modifications non enregistr�
 editor_encoding_bom	c0d7	UTF-8 avec BOM
 editor_find_hint	d17a	Rechercher
 editor_find_replace_hint	3693	Rechercher/Remplacer par
-editor_hex_status	35a5	Position %1$s / %2$s
+editor_hex_status	15d6	Position %1$s / %2$s
 editor_indent_spaces	9db9	Espaces : %d
 editor_indent_tab	d9a7	Tab : %d
 editor_line_hint	f547	Ligne
 editor_lock_stale	f9d8	%s reste d'un enregistrement précédent : supprimez-le, puis enregistrez
-editor_mode_hex	55d5	Hex
-editor_mode_text	134a	Texte
+editor_mode_hex	34ea	Hex
+editor_mode_text	2d5e	Texte
 editor_no_file_name	c863	pas de nom de fichier : lancez l'éditeur avec l'un d'eux
 editor_no_match	7de7	aucune correspondance
 editor_not_regular	5955	pas un fichier ordinaire : refusé
-editor_open_hint	235f	Chemin du fichier à ouvrir
+editor_open_hint	3cb8	Chemin du fichier à ouvrir
 editor_pattern_bad	5d57	le motif ne se compile pas
 editor_position	3696	Ln %1$d, Col %2$d
 editor_read_failed	5f78	le fichier n'a pas pu être lu : il n'est pas ouvert
 editor_reload_unsaved	85da	relit le fichier et abandonne les modifications non enregistrées
 editor_replace_usage	c677	remplacer s'écrit RECHERCHE/REMPLACEMENT
 editor_replaced	1128	%d remplacés
-editor_save_as_hint	c955	Enregistrer sous
+editor_save_as_hint	745f	Enregistrer sous
 editor_save_failed	069d	l'enregistrement a échoué : le fichier est inchangé
 editor_saved	9f44	enregistré
 editor_selected	a686	(%d sélectionnés)
@@ -41,7 +41,7 @@ editor_selected_carets	7e02	(%d sélectionnés, curseurs)
 editor_tabs_full	8ed9	les %d onglets sont ouverts : fermez-en un d'abord
 editor_unsaved	c014	modifications non enregistrées : enregistrez-les, ou fermez chacun avec Ctrl+W deux fois
 editor_untitled	8b58	sans titre
-editor_wrap_on	40cd	Retour
+editor_wrap_on	40c5	Retour
 editor_write_beside	ec75	impossible d'écrire à côté du fichier
 editor_writes_over_changed	df15	écrase la modification sur le disque (Ctrl+R la relit)
 editor_writes_over_readonly	e22f	écrase un fichier en lecture seule
@@ -201,21 +201,21 @@ launcher_sleep_armed	bb08	mettre en veille
 menu_bin_empty	1538	Vider la corbeille
 menu_bin_open	8797	Ouvrir la corbeille
 menu_bin_restore	4799	Restaurer
-menu_close_others	ec3e	Fermer les autres onglets
-menu_close_tab	9753	Fermer l'onglet
+menu_close_others	26f3	Fermer les autres onglets
+menu_close_tab	eb40	Fermer l'onglet
 menu_copy	43e0	&Copier
 menu_copy_row	f3c8	Copier la ligne
 menu_cut	5c17	Co&uper
 menu_delete	1e3e	&Supprimer
 menu_find	1fa6	Rec&hercher
 menu_go_to_line	bc96	Aller à la l&igne
-menu_hex_mode	fd1b	Éditeur hexadécimal
+menu_hex_mode	74bf	Éditeur hexadécimal
 menu_new_folder	41cb	&Nouveau dossier
-menu_new_tab	dad5	Nouvel onglet
-menu_new_window	2c79	Nouvelle fenêtre
+menu_new_tab	ecfa	Nouvel onglet
+menu_new_window	c3db	Nouvelle fenêtre
 menu_open	61a5	&Ouvrir
 menu_open_editor	8ca0	Ouvrir dans l'&éditeur
-menu_open_file	098c	Ouvrir un fichier...
+menu_open_file	af39	Ouvrir un fichier...
 menu_open_terminal	6d2a	Ouvrir un &terminal ici
 menu_paste	6854	Co&ller
 menu_properties	c780	P&ropriétés
@@ -223,7 +223,7 @@ menu_redo	ac45	&Rétablir
 menu_remove	901d	Supprimer
 menu_rename	9529	Re&nommer
 menu_reset_zoom	1b0f	Réinitialiser le &zoom
-menu_save_as	e18c	Enregistrer sous...
+menu_save_as	7bbe	Enregistrer sous...
 menu_select_all	f6f6	&Tout sélectionner
 menu_set_wallpaper	1a27	Définir comme &fond d'écran
 menu_set_wallpaper_of	aa60	Définir comme fond d'écran de %s
@@ -233,7 +233,7 @@ menu_undo	b9d3	&Annuler
 menu_view_details	d3a1	&Détails
 menu_view_icons	57e8	Grandes &icônes
 menu_view_list	4cc5	&Liste
-menu_word_wrap	9ab3	Retour à la ligne
+menu_word_wrap	db6f	Retour à la ligne
 menu_zoom_in	5bcf	Zoom a&vant
 menu_zoom_out	9234	Zoom a&rrière
 mixer_allow	19d2	Autoriser

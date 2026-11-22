@@ -16,24 +16,24 @@ editor_closes_unsaved	fcb8	stänger och släpper de osparade ändringarna
 editor_encoding_bom	c0d7	UTF-8 med BOM
 editor_find_hint	d17a	Sök
 editor_find_replace_hint	3693	Sök/Ersätt med
-editor_hex_status	35a5	Position %1$s / %2$s
+editor_hex_status	15d6	Position %1$s / %2$s
 editor_indent_spaces	9db9	Mellanslag: %d
 editor_indent_tab	d9a7	Tab: %d
 editor_line_hint	f547	Rad
 editor_lock_stale	f9d8	%s blev kvar från en tidigare sparning: ta bort den och spara sedan
-editor_mode_hex	55d5	Hex
-editor_mode_text	134a	Text
+editor_mode_hex	34ea	Hex
+editor_mode_text	2d5e	Text
 editor_no_file_name	c863	inget filnamn: starta redigeraren med ett
 editor_no_match	7de7	ingen träff
 editor_not_regular	5955	ingen vanlig fil: avvisad
-editor_open_hint	235f	Öppna filsökväg
+editor_open_hint	3cb8	Öppna filsökväg
 editor_pattern_bad	5d57	mönstret går inte att kompilera
 editor_position	3696	Rad %1$d, Kol %2$d
 editor_read_failed	5f78	filen kunde inte läsas: den öppnas inte
 editor_reload_unsaved	85da	läser filen på nytt och kastar de osparade ändringarna
 editor_replace_usage	c677	ersätt är SÖK/ERSÄTTNING
 editor_replaced	1128	%d ersatta
-editor_save_as_hint	c955	Spara som sökväg
+editor_save_as_hint	745f	Spara som sökväg
 editor_save_failed	069d	sparandet misslyckades: filen är som den var
 editor_saved	9f44	sparad
 editor_selected	a686	(%d markerade)
@@ -41,7 +41,7 @@ editor_selected_carets	7e02	(%d markerade, markörer)
 editor_tabs_full	8ed9	alla %d flikar är öppna: stäng en först
 editor_unsaved	c014	osparade ändringar: spara dem, eller stäng var och en med Ctrl+W två gånger
 editor_untitled	8b58	namnlös
-editor_wrap_on	40cd	Radbryt
+editor_wrap_on	40c5	Radbryt
 editor_write_beside	ec75	kunde inte skriva bredvid filen
 editor_writes_over_changed	df15	skriver över ändringen på disken (Ctrl+R läser om den)
 editor_writes_over_readonly	e22f	skriver över en skrivskyddad fil
@@ -201,21 +201,21 @@ launcher_sleep_armed	bb08	försätt i vila
 menu_bin_empty	1538	Töm papperskorgen
 menu_bin_open	8797	Öppna papperskorgen
 menu_bin_restore	4799	Lägg tillbaka
-menu_close_others	ec3e	Stäng andra flikar
-menu_close_tab	9753	Stäng flik
+menu_close_others	26f3	Stäng andra flikar
+menu_close_tab	eb40	Stäng flik
 menu_copy	43e0	Ko&piera
 menu_copy_row	f3c8	Kopiera rad
 menu_cut	5c17	&Klipp ut
 menu_delete	1e3e	&Ta bort
 menu_find	1fa6	&Sök
 menu_go_to_line	bc96	Gå till &rad
-menu_hex_mode	fd1b	Hexredigerare
+menu_hex_mode	74bf	Hexredigerare
 menu_new_folder	41cb	&Ny mapp
-menu_new_tab	dad5	Ny flik
-menu_new_window	2c79	Nytt fönster
+menu_new_tab	ecfa	Ny flik
+menu_new_window	c3db	Nytt fönster
 menu_open	61a5	&Öppna
 menu_open_editor	8ca0	Öppna i &redigeraren
-menu_open_file	098c	Öppna fil...
+menu_open_file	af39	Öppna fil...
 menu_open_terminal	6d2a	Öppna en &terminal här
 menu_paste	6854	Kl&istra in
 menu_properties	c780	&Egenskaper
@@ -223,7 +223,7 @@ menu_redo	ac45	&Gör om
 menu_remove	901d	Ta bort
 menu_rename	9529	Byt &namn
 menu_reset_zoom	1b0f	Å&terställ zoom
-menu_save_as	e18c	Spara som...
+menu_save_as	7bbe	Spara som...
 menu_select_all	f6f6	&Markera allt
 menu_set_wallpaper	1a27	Använd som &skrivbordsbild
 menu_set_wallpaper_of	aa60	Använd som skrivbordsbild för %s
@@ -233,7 +233,7 @@ menu_undo	b9d3	Å&ngra
 menu_view_details	d3a1	&Detaljer
 menu_view_icons	57e8	Stora &ikoner
 menu_view_list	4cc5	&Lista
-menu_word_wrap	9ab3	Radbrytning
+menu_word_wrap	db6f	Radbrytning
 menu_zoom_in	5bcf	&Zooma in
 menu_zoom_out	9234	Zooma &ut
 mixer_allow	19d2	Tillåt

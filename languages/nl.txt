@@ -16,24 +16,24 @@ editor_closes_unsaved	fcb8	sluit en gooit de niet-opgeslagen wijzigingen weg
 editor_encoding_bom	c0d7	UTF-8 met BOM
 editor_find_hint	d17a	Zoeken
 editor_find_replace_hint	3693	Zoeken/Vervangen door
-editor_hex_status	35a5	Offset %1$s / %2$s
+editor_hex_status	15d6	Offset %1$s / %2$s
 editor_indent_spaces	9db9	Spaties: %d
 editor_indent_tab	d9a7	Tab: %d
 editor_line_hint	f547	Regel
 editor_lock_stale	f9d8	%s is overgebleven van een eerder opslaan: verwijder het, sla dan op
-editor_mode_hex	55d5	Hex
-editor_mode_text	134a	Tekst
+editor_mode_hex	34ea	Hex
+editor_mode_text	2d5e	Tekst
 editor_no_file_name	c863	geen bestandsnaam: start de editor met een naam
 editor_no_match	7de7	geen overeenkomst
 editor_not_regular	5955	geen gewoon bestand: geweigerd
-editor_open_hint	235f	Bestandspad openen
+editor_open_hint	3cb8	Bestandspad openen
 editor_pattern_bad	5d57	het patroon is ongeldig
 editor_position	3696	Rg %1$d, Kol %2$d
 editor_read_failed	5f78	het bestand kon niet worden gelezen: het wordt niet geopend
 editor_reload_unsaved	85da	leest het bestand opnieuw en verwerpt de niet-opgeslagen wijzigingen
 editor_replace_usage	c677	vervangen is ZOEK/VERVANGING
 editor_replaced	1128	%d vervangen
-editor_save_as_hint	c955	Opslaan als pad
+editor_save_as_hint	745f	Opslaan als pad
 editor_save_failed	069d	opslaan mislukt: het bestand is ongewijzigd
 editor_saved	9f44	opgeslagen
 editor_selected	a686	(%d geselecteerd)
@@ -41,7 +41,7 @@ editor_selected_carets	7e02	(%d geselecteerd, cursors)
 editor_tabs_full	8ed9	alle %d tabbladen zijn open: sluit eerst er een
 editor_unsaved	c014	niet-opgeslagen wijzigingen: sla ze op, of sluit elk met tweemaal Ctrl+W
 editor_untitled	8b58	naamloos
-editor_wrap_on	40cd	Omslag
+editor_wrap_on	40c5	Omslag
 editor_write_beside	ec75	kon niet naast het bestand schrijven
 editor_writes_over_changed	df15	overschrijft de wijziging op schijf (Ctrl+R leest opnieuw)
 editor_writes_over_readonly	e22f	overschrijft een alleen-lezen bestand
@@ -201,21 +201,21 @@ launcher_sleep_armed	bb08	in slaapstand zetten
 menu_bin_empty	1538	Prullenbak legen
 menu_bin_open	8797	Prullenbak openen
 menu_bin_restore	4799	Terugzetten
-menu_close_others	ec3e	Andere tabbladen sluiten
-menu_close_tab	9753	Tabblad sluiten
+menu_close_others	26f3	Andere tabbladen sluiten
+menu_close_tab	eb40	Tabblad sluiten
 menu_copy	43e0	Ko&piëren
 menu_copy_row	f3c8	Rij kopiëren
 menu_cut	5c17	&Knippen
 menu_delete	1e3e	&Verwijderen
 menu_find	1fa6	&Zoeken
 menu_go_to_line	bc96	&Ga naar regel
-menu_hex_mode	fd1b	Hex-editor
+menu_hex_mode	74bf	Hex-editor
 menu_new_folder	41cb	&Nieuwe map
-menu_new_tab	dad5	Nieuw tabblad
-menu_new_window	2c79	Nieuw venster
+menu_new_tab	ecfa	Nieuw tabblad
+menu_new_window	c3db	Nieuw venster
 menu_open	61a5	&Openen
 menu_open_editor	8ca0	Openen in de &editor
-menu_open_file	098c	Bestand openen...
+menu_open_file	af39	Bestand openen...
 menu_open_terminal	6d2a	Hier een &terminal openen
 menu_paste	6854	P&lakken
 menu_properties	c780	&Eigenschappen
@@ -223,7 +223,7 @@ menu_redo	ac45	Op&nieuw
 menu_remove	901d	Verwijderen
 menu_rename	9529	Naam &wijzigen
 menu_reset_zoom	1b0f	Zoom &herstellen
-menu_save_as	e18c	Opslaan als...
+menu_save_as	7bbe	Opslaan als...
 menu_select_all	f6f6	&Alles selecteren
 menu_set_wallpaper	1a27	Instellen als &achtergrond
 menu_set_wallpaper_of	aa60	Instellen als achtergrond van %s
@@ -233,7 +233,7 @@ menu_undo	b9d3	&Ongedaan maken
 menu_view_details	d3a1	&Details
 menu_view_icons	57e8	Grote &pictogrammen
 menu_view_list	4cc5	&Lijst
-menu_word_wrap	9ab3	Regelomslaan
+menu_word_wrap	db6f	Regelomslaan
 menu_zoom_in	5bcf	&Inzoomen
 menu_zoom_out	9234	&Uitzoomen
 mixer_allow	19d2	Toestaan
