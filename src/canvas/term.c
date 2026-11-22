@@ -1597,17 +1597,15 @@ static positive text_ascii(const p8 address_to bytes, positive count)
 
 static unsigned int term_utf8_decode(const p8 address_to bytes, positive count, unsigned int address_to character)
 {
-        memory_utf8_state state = {0, 0, 0};
+        p32 value;
+        positive used;
 
-        for (unsigned int at = 0; at < count && at < 4; at++)
-        {
-                b32 whole = memory_utf8_feed(address_of state, bytes[at]);
-                if (whole < 0)
-                        return 0;
-                if (whole > 0)
-                        return address_to character = state.value, at + 1;
-        }
-        return 0;
+        if (!count)
+                return 0;
+        used = memory_utf8_decode(bytes, count, &value);
+        if (value & MEMORY_UTF8_INVALID)
+                return 0;
+        return address_to character = value, used;
 }
 
 static unsigned int text_utf8(const p8 address_to bytes, positive count, unsigned int address_to character)
