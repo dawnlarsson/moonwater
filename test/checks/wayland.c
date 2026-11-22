@@ -349,9 +349,12 @@ static void fake_row_do(void *context, int row, long what, long a, long b)
 
 static int fake_row_facts(void *context, int row, struct wayland_facts *facts)
 {
-        struct fake_row *r = &fake.row[row];
+        struct fake_row *r;
 
         (void)context;
+        if (row < 0 || row >= FAKE_ROWS) /* the shim asks for rows it has not got (-1 in wayland_row_suspended): none is a row */
+                return -1;
+        r = &fake.row[row];
         if (!r->used)
                 return -1;
         facts->width = r->width_asked;
@@ -433,6 +436,16 @@ static long fake_seat(void *context)
 {
         (void)context;
         return fake.caps;
+}
+
+/* The store's selection owner for the shim (wayland_host.c's query): the fake keeps none, so a selection is never a Wayland client's here. */
+static long compositor_wl_selection_query(void *context, long which, unsigned long *serial)
+{
+        (void)context;
+        (void)which;
+        if (serial)
+                *serial = 0;
+        return -1;
 }
 
 static long fake_locks(void *context)
@@ -607,7 +620,7 @@ static const struct wayland_host fake_host = {
 
 /* ---- a client that builds its requests from the table ---- */
 
-#define EVENTS 512
+#define EVENTS 8192 /* the frame row (4 * WAYLAND_CALLBACKS + 1 callbacks answered at once) needs more than the old 512 */
 
 struct wl_event_seen
 {
@@ -2026,6 +2039,11 @@ static void test_frame_overflow(void)
         wlc_pump(c);
         WLCHECK(wlc_count(c, WLI_wl_callback, WLE_wl_callback_done) == 0,
                 "past the callbacks a surface holds in itself none is answered before its frame (%ld were)", wlc_count(c, WLI_wl_callback, WLE_wl_callback_done));
+        /* 4097 commits of one picture run past the surface's budget for a window: the commit the budget holds is stashed until the
+           window passes (the client resumes), and its callback is answered by the frame after that, not before it */
+        fake.now += 1000;
+        wayland_resume(c->slot);
+        wlc_pump(c);
         wayland_frame();
         wlc_pump(c);
         WLCHECK(wlc_count(c, WLI_wl_callback, WLE_wl_callback_done) == 4 * WAYLAND_CALLBACKS + 1,
