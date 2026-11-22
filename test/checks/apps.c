@@ -5791,7 +5791,7 @@ static fn settings_words_check(void)
 {
         char word[SETTINGS_VALUE], back[SETTINGS_VALUE];
         positive english_wrong = 0, round = 0, tabs = 0, blank = 0, checked = 0;
-        int theme = lcheck_row("Theme"), motion = lcheck_row("Motion"), name = lcheck_row("Name"), language_row = lcheck_row("Language");
+        int theme = lcheck_row("Theme"), motion = lcheck_row("Motion"), keyboard = lcheck_row("Keyboard"), language_row = lcheck_row("Language");
 
         language_take(0);
         for (positive at = 0; at < SETTINGS_ROWS; at++)
@@ -5810,7 +5810,7 @@ static fn settings_words_check(void)
                 english_wrong += settings_group_text(group) != settings_group_name(group);
         english_wrong += theme < 0 || motion < 0 || !string_equals((string_address)settings_tab_words(theme), (string_address) "light dark Automatic");
         check("settings words: in English a row's label, a group's name, a choice's word and the tabs' words are the registry's own",
-              !english_wrong && theme >= 0 && motion >= 0 && name >= 0 && language_row >= 0);
+              !english_wrong && theme >= 0 && motion >= 0 && keyboard >= 0 && language_row >= 0);
         for (positive l = 0; l < sizeof(lcheck_codes) / sizeof(lcheck_codes[0]); l++)
         {
                 const char address_to tabs_said;
@@ -5891,14 +5891,14 @@ static fn settings_words_check(void)
         language_take('d' | 'e' << 8);
         settings_word_of(theme, settings_label_of(theme, "dark"), back, sizeof(back));
         check("settings words: in German the groups, labels and choices are German, and the theme's dark is shown as Dunkel and taken as dark",
-              !string_compare_max((string_address)settings_group_text(0), (string_address) "Ger\xc3\xa4t", 8) &&
+              !string_compare_max((string_address)settings_group_text(settings_groups_named("Input")), (string_address) "Eingabe", 8) &&
                   !string_compare_max((string_address)settings_label_shown(language_row), (string_address) "Sprache", 8) &&
                   !string_compare_max((string_address)settings_label_of(theme, "dark"), (string_address) "Dunkel", 7) && !string_compare_max((string_address)back, (string_address) "dark", 5) &&
                   !string_compare_max((string_address)settings_tab_words(theme), (string_address) "Hell Dunkel Automatisch", 24));
-        check("settings words: the filter finds the Name row by its group's word in German and by the English one",
-              settings_matches_word(name, "ger\xc3\xa4t", 5) && settings_matches_word(name, "machine", 7) && !settings_matches_word(name, "xyzzy", 5));
+        check("settings words: the filter finds the Keyboard row by its group's word in German and by the English one",
+              settings_matches_word(keyboard, "eingabe", 7) && settings_matches_word(keyboard, "input", 5) && !settings_matches_word(keyboard, "xyzzy", 5));
         language_take(0);
-        check("settings words: back in English the German is gone from the filter and the labels", !settings_matches_word(name, "ger\xc3\xa4t", 5) &&
+        check("settings words: back in English the German is gone from the filter and the labels", !settings_matches_word(keyboard, "eingabe", 7) &&
                                                                                                       settings_label_shown(language_row) == settings_rows[language_row].label);
 }
 #endif
