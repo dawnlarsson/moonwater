@@ -4437,6 +4437,39 @@ static void xwm_atom_rows(void)
         compositor_xwm_at = kept;
 }
 
+// WM_NORMAL_HINTS (ICCCM): the minimum is the PMinSize pair at 20 and 24, and only with PMinSize set. A PBaseSize alone (256) sets no
+// minimum: offset 36 is width_inc, which the reader took for the minimum (x11 B1).
+static void xwm_hints_rows(void)
+{
+        __typeof__(compositor_xwm_slots[0]) *kept = compositor_xwm_at, *x = &compositor_xwm_slots[COMPOSITOR_XWM_SLOTS - 1];
+        __typeof__(compositor_xwm_slots[0]) saved = *x;
+        unsigned char r[32 + 72];
+        struct compositor_xwm_pending p = {0};
+        int base_only, pmin;
+
+        *x = compositor_xwm_fresh;
+        compositor_xwm_at = x;
+        memset(r, 0, sizeof r);
+        r[1] = 32, r[2] = 9, r[4] = 18, r[8] = 40, r[16] = 18;
+        r[32] = 0x00, r[33] = 0x01;            /* flags: PBaseSize (256) only */
+        r[32 + 36] = 7, r[32 + 40] = 9;        /* width_inc 7, height_inc 9: no minimum */
+        p.what = COMPOSITOR_XWM_PROP_NORMAL_HINTS, p.window = 91u;
+        compositor_xwm_find(91u, 1);
+        compositor_xwm_property(r, sizeof r, &p);
+        base_only = compositor_xwm_find(91u, 0) && compositor_xwm_find(91u, 0)->min_w == 0 && compositor_xwm_find(91u, 0)->min_h == 0;
+        r[32] = 0x10, r[33] = 0x01;            /* flags: PMinSize (16) and PBaseSize (256) */
+        r[32 + 20] = 44, r[32 + 21] = 1;       /* min_width 300 */
+        r[32 + 24] = 200, r[32 + 25] = 0;      /* min_height 200 */
+        compositor_xwm_property(r, sizeof r, &p);
+        pmin = compositor_xwm_find(91u, 0) && compositor_xwm_find(91u, 0)->min_w == 300 && compositor_xwm_find(91u, 0)->min_h == 200;
+        check("xwm hints: a PBaseSize alone sets no minimum (width_inc at 36 is none), and PMinSize at 20 and 24 does", base_only && pmin);
+        if (compositor_xwm_find(91u, 0))
+                compositor_xwm_release(compositor_xwm_find(91u, 0));
+        wayland_table_drop(&x->window_table), wayland_table_drop(&x->window_index), x->windows = 0, x->window = 0;
+        *x = saved;
+        compositor_xwm_at = kept;
+}
+
 // An X source's XdndPosition begins a drag on the Wayland side only while the person's hand is down (x11 finding S6): the gate reads the
 // button and the row it was pressed on, and a row of this server holds it. No button down: no drag; a button down on a row of the server: a drag.
 static void xwm_drag_gate_rows(void)
@@ -5804,6 +5837,7 @@ b32 main(void)
         xwm_serial_state_rows();
         xwm_atom_rows();
         xwm_drag_gate_rows();
+        xwm_hints_rows();
         display_off_rows();
         reader_own_rows();
         clip_most_rows();

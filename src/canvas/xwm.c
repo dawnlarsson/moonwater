@@ -981,7 +981,7 @@ static void xwm_property(struct compositor_xwm *x, const unsigned char *in, long
                 if (r.format == XWM_FORMAT_32 && r.value_len >= 4)
                 {
                         unsigned int flags = xwm_get32(r.value);
-                        unsigned long min_off = (flags & 16u) && r.value_len >= 28 ? 20ul : (flags & 256u) && r.value_len >= 44 ? 36ul : 0ul;
+                        unsigned long min_off = (flags & 16u) && r.value_len >= 28 ? 20ul : 0ul;
 
                         w->placed = (flags & 5u) != 0;
                         if (min_off)
