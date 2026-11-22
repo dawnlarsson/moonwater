@@ -2639,6 +2639,35 @@ static void check_taskbar_pins(void)
                   string_equals((string_address)ui_apps.app[game].args[0], (string_address) "steam://rungameid/362890") &&
                   ui_apps_has_picture(game) && ui_apps_pinnable(game));
     }
+    /* An app's picture is made off the draw: the first draw of its task reads no file and decodes nothing, so the task is the window
+       symbol's and the entry has no picture yet, the worker's job; when the worker is done, the loop's pass takes it and asks for the
+       band again (taskbar_starting_keep), and the next draw lays the task out with its picture and draws it. */
+    {
+        static unsigned int before[BAND_W * COMPOSITOR_PANEL];
+        struct taskbar_view view;
+        int rect[4], game, x, y, w, h, changed = 0;
+        b32 first, later;
+
+        ui_apps.read = false;
+        ui_apps_fresh((b64)clock_monotonic_nanoseconds());
+        game = ui_apps_find("steam_app_362890");
+        view = band_view(TASKBAR_BOTTOM, null);
+        view.apps[0] = "steam_app_362890";
+        taskbar_changed();
+        first = game >= 0 && taskbar_draw(&view, ~0ul, band_glass, null, rect) == 1 && !ui_apps.app[game].picture && ui_apps_picture_making() &&
+                !taskbar_tab_full(&view, 0);
+        memory_copy(before, band_pixels, sizeof(before));
+        ui_apps_picture_settle();
+        later = taskbar_starting_keep(clock_monotonic_nanoseconds()) && game >= 0 && ui_apps.app[game].picture && !ui_apps_picture_making();
+        view = band_view(TASKBAR_BOTTOM, null);
+        view.apps[0] = "steam_app_362890";
+        later = later && taskbar_draw(&view, ~0ul, band_glass, null, rect) == 1 && taskbar_tab_full(&view, 0) && taskbar_slot(&view, 0, &x, &y, &w, &h);
+        for (int row = 0; later && row < COMPOSITOR_PANEL; row++)
+            for (int column = x; column < x + w && column < BAND_W; column++)
+                changed += before[row * BAND_W + column] != band_pixels[row * BAND_W + column];
+        check("taskbar picture: the first draw of a new app's task reads no file: it has the window symbol, and the picture is the worker's to make", first);
+        check("taskbar picture: when the worker has made it, the loop asks for the band again and the next draw has the task with its picture", later && changed > 0);
+    }
     check_taskbar_pins_put("chromium /x /y ; settings /settings /settings ; nosuch /a /b ; Steam /usr/lib/steam/steam /bowls/bin/steam --x");
     check("taskbar pinned: a line's entries are the registry's apps they name, by id or by an older line's window key, titled by their names; one of no app is not shown",
           taskbar_pins.count == 3 && string_equals((string_address)taskbar_pins.pin[0].app, (string_address) "chromium") &&

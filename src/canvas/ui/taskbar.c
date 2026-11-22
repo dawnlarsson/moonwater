@@ -625,8 +625,9 @@ struct taskbar_key
         int tray_gen;
         unsigned int spaces_gen;
         int mc_push;
+        unsigned int apps_gen, pictures; // the registry read and the apps' pictures made: a task with a picture is laid out as one
 };
-_Static_assert(sizeof(struct taskbar_key) == 8 + 24 * 4, "a key is compared as bytes, so it has no padding");
+_Static_assert(sizeof(struct taskbar_key) == 8 + 26 * 4, "a key is compared as bytes, so it has no padding");
 
 struct taskbar_lit { struct ui_tween at, length, shown; int row; };
 
@@ -654,7 +655,8 @@ static struct ui_tree address_to taskbar_tree(const struct taskbar_view *view)
                                       taskbar.order[0] << 12 | taskbar.order[1] << 14 | taskbar.order[2] << 16,
                                   taskbar.editing | taskbar.clock_tray << 1 | taskbar.moon_ink << 2 | taskbar.clock_tab << 3 | taskbar.clock_none << 4 |
                                       taskbar.separate << 5 | (taskbar.edge_in + 64) << 6 | taskbar.clock_chars << 14, 0,
-                                  {taskbar_strip_from[0], taskbar_strip_from[1]}, taskbar_strip_follow, 0, taskbar_tray_items_gen(), taskbar_spaces_gen(), taskbar_mc_push_px()};
+                                  {taskbar_strip_from[0], taskbar_strip_from[1]}, taskbar_strip_follow, 0, taskbar_tray_items_gen(), taskbar_spaces_gen(), taskbar_mc_push_px(),
+                                  ui_apps.generation, ui_apps_pictures_made};
 
 #define TASKBAR_CELL(slot, shown, mark, paint) key.cells = key.cells << 1 | ((shown) != 0);
         TASKBAR_TRAY_CELLS(TASKBAR_CELL)
@@ -1506,7 +1508,7 @@ static struct ui_grown taskbar_pictures;
 
 static bool taskbar_tab_full(const struct taskbar_view *view, int at)
 {
-        return (view->apps && view->apps[at] && ui_apps_has_picture(ui_apps_match(view->apps[at]))) ||
+        return (view->apps && view->apps[at] && ui_apps_has_picture_kept(ui_apps_match(view->apps[at]))) ||
                (view->icons && view->icon_seqs && view->icons[at] && view->icon_seqs[at]);
 }
 
@@ -1579,7 +1581,7 @@ static void taskbar_tab_icon(const struct taskbar_view *view, const struct ui_tr
                                         : ((n->y <= tab->y ? 4u : 0u) | (n->y + n->h >= tab->y + tab->h ? 8u : 0u));
         if (!ends || (tab && n->w >= tab->w && n->h >= tab->h))
                 ends = 15u;
-        const unsigned int address_to picture = side <= UI_PICTURE_MOST ? ui_apps_picture(ui_apps_match(app), side) : null;
+        const unsigned int address_to picture = side <= UI_PICTURE_MOST ? ui_apps_picture_kept(ui_apps_match(app), side) : null;
         if (picture)
         {
                 taskbar_tab_rounded(&ui, x, y, side, picture, ends);
@@ -2567,10 +2569,21 @@ static bool taskbar_starting_take(positive now)
         return true;
 }
 
-static positive taskbar_starting_due(void) { return taskbar_starting.count ? taskbar_starting.drawn + TASKBAR_STARTING_FRAME : 0; }
+static positive taskbar_pictures_looked; // the loop's last pass while an app's picture was made off the draw (ui_apps_picture_kept)
+static positive taskbar_spin_due(void) { return taskbar_starting.count ? taskbar_starting.drawn + TASKBAR_STARTING_FRAME : 0; }
+// When the loop is to pass again: the next frame of a starting app's turn, and a frame on while an app's picture is being made.
+static positive taskbar_starting_due(void)
+{
+        positive due = taskbar_spin_due(), look = ui_apps_picture_making() ? taskbar_pictures_looked + TASKBAR_STARTING_FRAME : 0;
+        return !due || (look && look < due) ? look : due;
+}
+// Asked on every pass of the loop before a frame: true when the band is to be made again, for a start shown or turned, or for an
+// app's picture made off the draw and taken now (its task is laid out with it: the tree keys on ui_apps_pictures_made).
 static bool taskbar_starting_keep(positive now)
 {
-        if (!taskbar_starting_take(now) && !(taskbar_starting.count && now >= taskbar_starting_due()))
+        b32 picture = ui_apps_picture_take();
+        taskbar_pictures_looked = now;
+        if (!picture && !taskbar_starting_take(now) && !(taskbar_starting.count && now >= taskbar_spin_due()))
                 return false;
         return taskbar_starting.drawn = now, true;
 }

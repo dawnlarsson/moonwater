@@ -21187,26 +21187,25 @@ static inline b32 ui_apps_is_local(const struct ui_app_entry address_to app)
         return ui_apps_local && ui_apps_local[0] && string_equals((string_address)app->root, (string_address)ui_apps_local);
 }
 
-static p8 address_to ui_apps_picture_file(const struct ui_app_entry address_to app, positive address_to size)
+static p8 address_to ui_apps_picture_file(const char address_to root, const char address_to icon, b32 is_local, positive address_to size)
 {
         static const unsigned short sides[] = {512, 256, 192, 128, 96, 72, 64, 48, 32, 24, 22, 16};
         char path[UI_APP_PATH * 2], name[UI_APP_PATH];
         bipolar inside, handle = -1, got;
-        positive length = string_length((string_address)app->icon);
+        positive length = string_length((string_address)icon);
         p8 address_to bytes;
-        if (!app->root[0] || !length || (inside = system_open_at(AT_FDCWD, (string_address)app->root, FILE_READ | O_DIRECTORY | O_CLOEXEC)) < 0)
+        if (!root[0] || !length || (inside = system_open_at(AT_FDCWD, (string_address)root, FILE_READ | O_DIRECTORY | O_CLOEXEC)) < 0)
                 return null;
-        if (app->icon[0] == '/')
+        if (icon[0] == '/')
         {
-                if (length > 4 && !memory_compare(app->icon + length - 4, ".png", 4))
-                        handle = system_open_resolved(inside, (string_address)app->icon, FILE_READ | O_CLOEXEC | O_NONBLOCK,
+                if (length > 4 && !memory_compare(icon + length - 4, ".png", 4))
+                        handle = system_open_resolved(inside, (string_address)icon, FILE_READ | O_CLOEXEC | O_NONBLOCK,
                                                       SYSTEM_RESOLVE_IN_ROOT | SYSTEM_RESOLVE_NO_MAGICLINKS);
         }
-        else if (!string_first_of((string_address)app->icon, '/'))
+        else if (!string_first_of((string_address)icon, '/'))
         {
-                b32 is_local = ui_apps_is_local(app);
                 positive nlen;
-                string_copy_bounded((p8 address_to)name, (string_address)app->icon, sizeof(name));
+                string_copy_bounded((p8 address_to)name, (string_address)icon, sizeof(name));
                 nlen = string_length((string_address)name);
                 if (nlen > 4 && name[nlen - 4] == '.')
                         name[nlen - 4] = 0;
@@ -21246,45 +21245,102 @@ static p8 address_to ui_apps_picture_file(const struct ui_app_entry address_to a
         return bytes;
 }
 
-// An entry's picture at size each way (premultiplied, size * size pixels), made from its file the first time it is...
-static const unsigned int address_to ui_apps_picture(int which, int size)
+// A picture made from an icon's file: UI_APP_PICTURE each way at most, premultiplied, its side into *side; null none. It reads and
+// decodes a file (a PNG of up to UI_PNG_MOST a side: milliseconds), so a draw never calls it: ui_apps_picture_kept asks a worker.
+static unsigned int address_to ui_apps_picture_make(const char address_to root, const char address_to icon, b32 is_local, int address_to side_out)
 {
-        struct ui_app_entry address_to app;
-        if (which < 0 || which >= ui_apps.count || size <= 0 || size > UI_APP_PICTURE)
-                return null;
-        app = &ui_apps.app[which];
-        if (!app->tried)
+        positive bytes = 0;
+        p8 address_to file = ui_apps_picture_file(root, icon, is_local, &bytes);
+        unsigned int address_to decoded = null, address_to square = null, address_to picture = null;
+        int width = 0, height = 0;
+        if (file)
         {
-                positive bytes = 0;
-                p8 address_to file;
-                unsigned int address_to decoded = null, address_to square = null;
-                int width = 0, height = 0;
-                app->tried = true;
-                if ((file = ui_apps_picture_file(app, &bytes)))
-                {
-                        decoded = ui_png_decode(file, bytes, &width, &height);
-                        memory_free(file, UI_PNG_FILE_MOST);
-                }
-                if (decoded)
-                {
-                        int side = width > height ? width : height, kept = side > UI_APP_PICTURE ? UI_APP_PICTURE : side;
-                        square = (unsigned int address_to)memory_checked((positive)side * side * 4);
-                        app->picture = (unsigned int address_to)memory_checked((positive)UI_APP_PICTURE * UI_APP_PICTURE * 4);
-                        if (square && app->picture)
-                        {
-                                for (int y = 0; y < height; y++)
-                                        memory_copy(square + (positive)(y + (side - height) / 2) * side + (side - width) / 2, decoded + (positive)y * width,
-                                                    (positive)width * 4);
-                                ui_picture_scale(app->picture, kept, square, side);
-                                app->side = kept;
-                        }
-                        else if (app->picture)
-                                memory_free(app->picture, (positive)UI_APP_PICTURE * UI_APP_PICTURE * 4), app->picture = null;
-                        if (square)
-                                memory_free(square, (positive)side * side * 4);
-                        memory_free(decoded, (positive)width * height * 4);
-                }
+                decoded = ui_png_decode(file, bytes, &width, &height);
+                memory_free(file, UI_PNG_FILE_MOST);
         }
+        if (!decoded)
+                return null;
+        int side = width > height ? width : height, kept = side > UI_APP_PICTURE ? UI_APP_PICTURE : side;
+        square = (unsigned int address_to)memory_checked((positive)side * side * 4);
+        picture = (unsigned int address_to)memory_checked((positive)UI_APP_PICTURE * UI_APP_PICTURE * 4);
+        if (square && picture)
+        {
+                for (int y = 0; y < height; y++)
+                        memory_copy(square + (positive)(y + (side - height) / 2) * side + (side - width) / 2, decoded + (positive)y * width, (positive)width * 4);
+                ui_picture_scale(picture, kept, square, side);
+                *side_out = kept;
+        }
+        else if (picture)
+                memory_free(picture, (positive)UI_APP_PICTURE * UI_APP_PICTURE * 4), picture = null;
+        if (square)
+                memory_free(square, (positive)side * side * 4);
+        memory_free(decoded, (positive)width * height * 4);
+        return picture;
+}
+
+/* The worker that makes an entry's picture off the thread that draws (the compositor's taskbar): one entry at a time, from copies of
+   its id, root and icon, so a registry read again meanwhile changes nothing it reads. running is 1 from the ask until its picture
+   (or none) is ready; ui_apps_picture_take puts that into the entry of the id, if there still is one, and counts it in
+   ui_apps_pictures_made, which a layout that depends on the pictures keys on. */
+static struct
+{
+        thread address_to worker;
+        int running;
+        char id[WINDOWS_APP_ID], root[UI_APP_PATH], icon[UI_APP_PATH];
+        b32 is_local;
+        int side;
+        unsigned int address_to picture;
+} ui_apps_job;
+static unsigned int ui_apps_pictures_made;
+
+static fn ui_apps_picture_work(address_any unused)
+{
+        (void)unused;
+        ui_apps_job.picture = ui_apps_picture_make(ui_apps_job.root, ui_apps_job.icon, ui_apps_job.is_local, &ui_apps_job.side);
+        __atomic_store_n(&ui_apps_job.running, 0, __ATOMIC_RELEASE);
+}
+
+// Whether a picture is being made or is made and not yet taken.
+static inline b32 ui_apps_picture_making(void) { return ui_apps_job.worker != null; }
+
+// Waits for the worker's picture (a check's; a draw never waits).
+static fn ui_apps_picture_settle(void)
+{
+        while (ui_apps_job.worker && __atomic_load_n(&ui_apps_job.running, __ATOMIC_ACQUIRE))
+                system_call_2(syscall(nanosleep), (positive)(positive[2]){0, 1000000}, 0);
+}
+
+// The worker's picture, when it is done, into the entry of its id; true when an entry took one (the caller draws again).
+static b32 ui_apps_picture_take(void)
+{
+        b32 took = false;
+        if (!ui_apps_job.worker || __atomic_load_n(&ui_apps_job.running, __ATOMIC_ACQUIRE))
+                return false;
+        thread_join(ui_apps_job.worker), ui_apps_job.worker = null;
+        int which = ui_apps_find(ui_apps_job.id);
+        if (which >= 0 && !ui_apps.app[which].picture && ui_apps_job.picture)
+        {
+                struct ui_app_entry address_to app = &ui_apps.app[which];
+                app->picture = ui_apps_job.picture, app->side = ui_apps_job.side, app->tried = true, app->cached_side = 0;
+                ui_apps_job.picture = null, ui_apps_pictures_made++, took = true;
+        }
+        if (ui_apps_job.picture)
+                memory_free(ui_apps_job.picture, (positive)UI_APP_PICTURE * UI_APP_PICTURE * 4), ui_apps_job.picture = null;
+        return took;
+}
+
+// An entry's picture made at once, where nothing is drawn meanwhile (a window's own frame, a check): a worker's for it waited for first.
+static fn ui_apps_picture_now(struct ui_app_entry address_to app)
+{
+        if (ui_apps_job.worker)
+                ui_apps_picture_settle(), ui_apps_picture_take();
+        if (!app->tried)
+                app->tried = true, app->picture = ui_apps_picture_make(app->root, app->icon, ui_apps_is_local(app), &app->side);
+}
+
+// The picture kept at size each way, made again from the entry's when the size changed (a scale, no file).
+static const unsigned int address_to ui_apps_picture_sized(struct ui_app_entry address_to app, int size)
+{
         if (!app->picture)
                 return null;
         if (app->cached_side != size)
@@ -21297,13 +21353,53 @@ static const unsigned int address_to ui_apps_picture(int which, int size)
         return app->cached;
 }
 
+// An entry's picture at size each way (premultiplied, size * size pixels), made from its file the first time it is asked.
+static const unsigned int address_to ui_apps_picture(int which, int size)
+{
+        if (which < 0 || which >= ui_apps.count || size <= 0 || size > UI_APP_PICTURE)
+                return null;
+        ui_apps_picture_now(&ui_apps.app[which]);
+        return ui_apps_picture_sized(&ui_apps.app[which], size);
+}
+
+/* The same for a draw: no file is read and nothing is decoded here. An entry not tried is asked of the worker (when it is free;
+   else at a later draw) and has none until ui_apps_picture_take puts it in. */
+static const unsigned int address_to ui_apps_picture_kept(int which, int size)
+{
+        struct ui_app_entry address_to app;
+        if (which < 0 || which >= ui_apps.count || size <= 0 || size > UI_APP_PICTURE)
+                return null;
+        app = &ui_apps.app[which];
+        if (!app->tried && !ui_apps_job.worker)
+        {
+                string_copy_bounded((p8 address_to)ui_apps_job.id, (string_address)app->id, sizeof(ui_apps_job.id));
+                string_copy_bounded((p8 address_to)ui_apps_job.root, (string_address)app->root, sizeof(ui_apps_job.root));
+                string_copy_bounded((p8 address_to)ui_apps_job.icon, (string_address)app->icon, sizeof(ui_apps_job.icon));
+                ui_apps_job.is_local = ui_apps_is_local(app), ui_apps_job.side = 0, ui_apps_job.picture = null;
+                __atomic_store_n(&ui_apps_job.running, 1, __ATOMIC_RELEASE);
+                if ((ui_apps_job.worker = thread_start(ui_apps_picture_work, null)))
+                        app->tried = true;
+                else
+                        __atomic_store_n(&ui_apps_job.running, 0, __ATOMIC_RELEASE);
+        }
+        return ui_apps_picture_sized(app, size);
+}
+
 // Whether an entry has a picture of its own (made the first time this is asked, as ui_apps_picture makes it; the size kept is left as it was).
 static b32 ui_apps_has_picture(int which)
 {
         if (which < 0 || which >= ui_apps.count)
                 return false;
-        if (!ui_apps.app[which].tried)
-                ui_apps_picture(which, ui_apps.app[which].cached_side > 0 ? ui_apps.app[which].cached_side : UI_APP_PICTURE);
+        ui_apps_picture_now(&ui_apps.app[which]);
+        return ui_apps.app[which].picture != null;
+}
+
+// The same for a draw: whether it has one yet, its making asked of the worker as ui_apps_picture_kept asks it.
+static b32 ui_apps_has_picture_kept(int which)
+{
+        if (which < 0 || which >= ui_apps.count)
+                return false;
+        ui_apps_picture_kept(which, ui_apps.app[which].cached_side > 0 ? ui_apps.app[which].cached_side : UI_APP_PICTURE);
         return ui_apps.app[which].picture != null;
 }
 
