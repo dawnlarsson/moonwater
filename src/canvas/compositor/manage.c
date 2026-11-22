@@ -3380,6 +3380,19 @@ static void compositor_clip_broadcast(unsigned int which, int skip_owner)
                 compositor_clip_observers[i](which);
 }
 
+/* ---- the store, read by the protocol encoders (wayland_host.c, xwm.c) through these: they never read compositor_clip ---- */
+static int compositor_clip_slot_fd(unsigned int which) { return which < 3 ? compositor_clip.fd[which] : -1; }
+static b32 compositor_clip_gesture_recent(int row, positive now)
+{
+        return row >= 0 && row < COMPOSITOR_ROWS && now - compositor_clip.gesture[row] <= COMPOSITOR_CLIP_GESTURE_NS;
+}
+static const char *compositor_clip_offered(unsigned int which, unsigned long nth, unsigned long *length)
+{
+        if (which > WINDOWS_CLIP_DRAG || compositor_clip.fd[which] < 0 || !compositor.table)
+                return 0;
+        return windows_clip_offered(compositor_clip.map[which], compositor.table->clip_length[which], nth, 0, length);
+}
+
 static void compositor_clip_clear(unsigned int which)
 {
         compositor_clip_slot_clear(which);
