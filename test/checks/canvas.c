@@ -2004,6 +2004,20 @@ static fn te_clip_types(void)
         te_clip_event(0, &which);
 }
 
+// A client's clip is read only from a file sealed against write, grow and shrink: the same bytes unsealed are refused.
+static fn te_clip_seal_gate(void)
+{
+        static const p8 text[] = "sealed or not";
+        long sealed = windows_clip_memfd(text, sizeof(text) - 1), loose = te_clip_memfd(text, sizeof(text) - 1, 0);
+
+        te_check(sealed >= 0 && windows_clip_sealed(sealed), "a clip sealed against write, grow and shrink is read", sealed);
+        te_check(loose >= 0 && !windows_clip_sealed(loose), "a clip not sealed is refused before it is mapped", loose);
+        if (sealed >= 0)
+                window_call(WINDOW_SYS_CLOSE, sealed, 0, 0, 0, 0, 0);
+        if (loose >= 0)
+                window_call(WINDOW_SYS_CLOSE, loose, 0, 0, 0, 0, 0);
+}
+
 // A place as a drag's event carries it (the compositor's compositor_drag_place).
 static int te_drag_place(int x, int y)
 {
@@ -2157,6 +2171,7 @@ static fn te_clipboard(positive rounds)
                 }
         }
         te_clip_types();
+        te_clip_seal_gate();
         te_drag_drop();
         /*
                 A copy that names a descriptor which is no file to read: a FIFO its program holds open for reading with no
