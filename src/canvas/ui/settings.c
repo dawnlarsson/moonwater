@@ -508,55 +508,36 @@ static int settings_expander(int row)
         return settings_expanded[row] ? UI_ROW_EXPANDER_OPEN : UI_ROW_EXPANDER_SHUT;
 }
 
-static b32 settings_drive_is_open(const char address_to name)
+/* One set of names that are open (a drive's or a link's, by name), kept in a grown array. */
+static b32 settings_name_open(char (address_to set)[SETTINGS_ITEM_LABEL], positive room, const char address_to name)
 {
-        for (positive at = 0; at < settings_drives_open_room; at++)
-                if (settings_drives_open[at][0] && string_equals((string_address)settings_drives_open[at], (string_address)name)) return true;
+        for (positive at = 0; at < room; at++)
+                if (set[at][0] && string_equals((string_address)set[at], (string_address)name)) return true;
         return false;
 }
 
-static fn settings_drive_keep(const char address_to name, b32 open)
+static fn settings_name_keep(char (address_to address_to set)[SETTINGS_ITEM_LABEL], positive address_to room, const char address_to name, b32 open)
 {
-        positive free = settings_drives_open_room;
-        for (positive at = 0; at < settings_drives_open_room; at++)
-                if (settings_drives_open[at][0] && string_equals((string_address)settings_drives_open[at], (string_address)name)) settings_drives_open[at][0] = 0;
+        positive free = *room;
+        for (positive at = 0; at < *room; at++)
+                if ((*set)[at][0] && string_equals((string_address)(*set)[at], (string_address)name)) (*set)[at][0] = 0;
         if (!open) return;
-        for (positive at = settings_drives_open_room; at-- > 0;) free = settings_drives_open[at][0] ? free : at;
-        if (free >= settings_drives_open_room)
+        for (positive at = *room; at-- > 0;) free = (*set)[at][0] ? free : at;
+        if (free >= *room)
         {
-                positive was = settings_drives_open_room;
-                if (!array_store_reserve(settings_drives_open, settings_drives_open_room, was, was + 1, 16))
+                positive was = *room;
+                if (!array_store_reserve(*set, *room, was, was + 1, 16))
                         return;
-                memory_zero(settings_drives_open + was, (settings_drives_open_room - was) * sizeof(settings_drives_open[0]));
+                memory_zero(*set + was, (*room - was) * sizeof((*set)[0]));
                 free = was;
         }
-        string_copy_bounded((string_address)settings_drives_open[free], (string_address)name, sizeof(settings_drives_open[free]));
+        string_copy_bounded((string_address)(*set)[free], (string_address)name, sizeof((*set)[free]));
 }
 
-static b32 settings_link_is_open(const char address_to name)
-{
-        for (positive at = 0; at < settings_links_open_room; at++)
-                if (settings_links_open[at][0] && string_equals((string_address)settings_links_open[at], (string_address)name)) return true;
-        return false;
-}
-
-static fn settings_link_keep(const char address_to name, b32 open)
-{
-        positive free = settings_links_open_room;
-        for (positive at = 0; at < settings_links_open_room; at++)
-                if (settings_links_open[at][0] && string_equals((string_address)settings_links_open[at], (string_address)name)) settings_links_open[at][0] = 0;
-        if (!open) return;
-        for (positive at = settings_links_open_room; at-- > 0;) free = settings_links_open[at][0] ? free : at;
-        if (free >= settings_links_open_room)
-        {
-                positive was = settings_links_open_room;
-                if (!array_store_reserve(settings_links_open, settings_links_open_room, was, was + 1, 16))
-                        return;
-                memory_zero(settings_links_open + was, (settings_links_open_room - was) * sizeof(settings_links_open[0]));
-                free = was;
-        }
-        string_copy_bounded((string_address)settings_links_open[free], (string_address)name, sizeof(settings_links_open[free]));
-}
+static b32 settings_drive_is_open(const char address_to name) { return settings_name_open(settings_drives_open, settings_drives_open_room, name); }
+static fn settings_drive_keep(const char address_to name, b32 open) { settings_name_keep(&settings_drives_open, &settings_drives_open_room, name, open); }
+static b32 settings_link_is_open(const char address_to name) { return settings_name_open(settings_links_open, settings_links_open_room, name); }
+static fn settings_link_keep(const char address_to name, b32 open) { settings_name_keep(&settings_links_open, &settings_links_open_room, name, open); }
 
 static fn settings_fold_drop(int row) { for (positive k = 0; k < SETTINGS_FOLD_POOL; k++) if (settings_fold_pool[k].row == row + 1) settings_fold_pool[k].row = 0; }
 
@@ -641,10 +622,10 @@ static void settings_gpu_sample(void)
                 language_format(settings_status, sizeof(settings_status),
                                 settings_gpu_status == WINDOWS_GPU_STATUS_IN_USE ? WORDS(settings_status_in_use)
                                 : settings_gpu_status == WINDOWS_GPU_STATUS_PARTLY ? WORDS(settings_status_partly) : WORDS(settings_status_not),
-                                (long)drawn, (long)settings_gpu_shown_total, (long)(drawn * 100 / settings_gpu_shown_total));
+                                (long)drawn, (long)settings_gpu_shown_total, (long)((unsigned long long)drawn * 100 / settings_gpu_shown_total));
         settings_gpu_key = settings_gpu_status;
         if (settings_gpu_status != WINDOWS_GPU_STATUS_OFF && settings_gpu_status != WINDOWS_GPU_STATUS_NONE && settings_gpu_shown_total)
-                settings_gpu_key |= 1u << 8 | (drawn * 100 / settings_gpu_shown_total) << 9;
+                settings_gpu_key |= 1u << 8 | (unsigned int)((unsigned long long)drawn * 100 / settings_gpu_shown_total) << 9;
 }
 
 static int settings_sub_put(int section, b32 detail, const char address_to words, const char address_to text, int count)
