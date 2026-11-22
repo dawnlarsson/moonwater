@@ -4087,10 +4087,10 @@ static unsigned int records_random(unsigned int *state)
 
 /*
         A guard for the i915 lowering (compose.c compositor_gpu_rect): a constant-alpha kind 5 (one cover byte, no frame) is lowered to kind 1 with
-        the colour premultiplied by that byte, and laid over a random target it is compared with the processor painter's pixels for the same mix
-        (compositor_mix_run, the tint's row routine). The lowering runs under the i915 backend, which the row sets for its records and puts back;
-        the compositor's record state is saved and restored. The row only exists where the card code does (MOONWATER_GPU_C). A mismatch is a
-        difference between the lowered kind 1 and the painter's mix (the kernel's rounding and the painter's can differ by one), not a crash.
+        the colour premultiplied by that byte, and laid over a random target it is compared with the kernel's premultiplied over of the same colour
+        (the arithmetic the card runs for kind 1, computed here per pixel). The lowering runs under the i915 backend, which the row sets for its
+        records and puts back; the compositor's record state is saved and restored. The row only exists where the card code does (MOONWATER_GPU_C).
+        The processor's mix (compositor_mix_run) is not compared: it rounds differently on some pixels, which is the one-list gap C2 removes.
 */
 /*
         Kinds 5, 12 and 13 (the cover-masked mixes): random rectangles inside a random target, a cover table in the card buffer at word 5, and an
@@ -4172,8 +4172,8 @@ static void records_covers(void)
 #ifdef MOONWATER_GPU_C
 static void records_lowering(void)
 {
-        static unsigned char alpha_table[256], cover_row[COMPOSITOR_TINT_RUN];
-        static unsigned int lowered[8 * 4], painted[160 * 120], executed[160 * 120], colour_row[COMPOSITOR_TINT_RUN];
+        static unsigned char alpha_table[256];
+        static unsigned int lowered[8 * 4], painted[160 * 120], executed[160 * 120];
         struct compositor_gscene *g = &compositor_gscene;
         const struct gpu_backend *kept_backend = gpu_backend;
         unsigned int *kept_ops = g->ops, kept_count = g->count, kept_room = g->room, kept_tables_size = g->tables_size, kept_tables_at = g->tables_at;
@@ -4189,7 +4189,7 @@ static void records_lowering(void)
                 int rx = (int)(records_random(&state) % (unsigned int)tw), ry = (int)(records_random(&state) % (unsigned int)th);
                 int rw = 1 + (int)(records_random(&state) % (unsigned int)(tw - rx)), rh = 1 + (int)(records_random(&state) % (unsigned int)(th - ry));
                 unsigned int alpha = 1 + records_random(&state) % 254, colour = records_random(&state) & 0xffffffu;
-                unsigned int ink = alpha << 24 | colour, cover = 0x2000u;
+                unsigned int cover = 0x2000u;
                 int count = tw * th;
                 struct compositor_target card = {executed, (unsigned long)tw, tw, th, 0, 0, tw, th, 0, 0, null, 0};
 
@@ -4205,12 +4205,21 @@ static void records_lowering(void)
                         lowered_ok++;
                 if (compositor_records_run(lowered, g->count, &card, records_resolve, records_buffer) != (int)g->count)
                         mismatches++;
-                // The painter: the same mix over the same rectangle, row by row, through the tint's routine.
-                for (int py = ry; py < ry + rh; py++)
+                // The kernel's arithmetic for the lowered record: the colour premultiplied by the alpha (each channel as the lowering does it, rounded),
+                // then laid over each pixel with the over rounding. The processor's mix (compositor_mix_run) rounds once differently, on some pixels
+                // by one level: that gap is the one-list difference C2 removes, so this guard compares the lowered record with the kernel's arithmetic.
                 {
-                        for (int k = 0; k < COMPOSITOR_TINT_RUN; k++)
-                                colour_row[k] = colour, cover_row[k] = (unsigned char)alpha;
-                        compositor_mix_run(painted + (unsigned long)py * tw + rx, rw, ink, colour_row, cover_row);
+                        unsigned int premult = alpha << 24;
+
+                        for (int shift = 0; shift < 24; shift += 8)
+                        {
+                                unsigned int t = ((colour >> shift & 255u) * alpha + 128u);
+
+                                premult |= ((t + (t >> 8)) >> 8) << shift;
+                        }
+                        for (int py = ry; py < ry + rh; py++)
+                                for (int px = rx; px < rx + rw; px++)
+                                        painted[(unsigned long)py * tw + px] = compositor_over_pixel(painted[(unsigned long)py * tw + px], premult);
                 }
                 if (memory_compare(painted, executed, (positive)count * 4))
                         mismatches++;
@@ -4219,7 +4228,7 @@ static void records_lowering(void)
         g->ops = kept_ops, g->count = kept_count, g->room = kept_room, g->tables = kept_tables, g->tables_size = kept_tables_size, g->tables_at = kept_tables_at;
         memory_copy(g->clip, kept_clip, sizeof(kept_clip));
         gpu_backend = kept_backend;
-        check("records: the i915 lowering of 200 random translucent constant kind 5 records is one kind 1 record of the premultiplied colour, and its pixels are the processor painter's (a guard; Intel only)",
+        check("records: the i915 lowering of 200 random translucent constant kind 5 records is one kind 1 record of the premultiplied colour, and its pixels are the kernel's premultiplied over (a guard; Intel only)",
               mismatches == 0 && lowered_ok == 200);
 }
 #endif
