@@ -1801,6 +1801,28 @@ static void check_compositor_tab_reach(void)
     check("tab reach: a finger 20 and 30 px above a tab on the bottom band is on that tab (UI_TARGET reach, 48 px)",
           hit != TASKBAR_HIT_NONE && at20 == hit && at30 == hit);
     check("tab reach: a finger 50 px above it is not on that tab", at50 != hit);
+    {
+        // The reach claims a point only where no window is under it: a finger 20 px above the bar with no window there is the tab's.
+        int under_x = sx + sw / 2, under_y = sy - 20, rx, ry, rw, rh, pill = TASKBAR_HIT_NONE, row;
+
+        rx = compositor.x[1], ry = compositor.y[1], rw = (int)compositor.w[1], rh = (int)compositor.h[1];
+        compositor.touching = 1;
+        row = compositor_under(under_x, under_y, &pill);
+        check("tab reach: a finger in the reach with no window above is on the tab, and no window is pressed",
+              row == COMPOSITOR_NONE && pill == hit);
+        // A finger on the bar's own rows is the bar's even with a window over them: the window is moved over the bar.
+        compositor.x[1] = sx - 10, compositor.y[1] = sy - 10, compositor.w[1] = (unsigned int)sw + 20, compositor.h[1] = (unsigned int)sh + 20;
+        pill = TASKBAR_HIT_NONE;
+        row = compositor_under(sx + sw / 2, sy + sh / 2, &pill);
+        check("tab reach: a finger on the bar's own rows is the bar's, even under a window that overlaps them",
+              row == COMPOSITOR_NONE && pill == hit);
+        // And a finger in the reach over that window is the window's: no reach claims a point a window covers.
+        pill = TASKBAR_HIT_NONE;
+        row = compositor_under(sx + sw / 2, sy - 5, &pill);
+        check("tab reach: a finger in the reach over a window is that window's, not the tab's", row == 1 && pill == TASKBAR_HIT_NONE);
+        compositor.touching = 0;
+        compositor.x[1] = rx, compositor.y[1] = ry, compositor.w[1] = (unsigned int)rw, compositor.h[1] = (unsigned int)rh;
+    }
 }
 
 static void check_compositor_tray(void)

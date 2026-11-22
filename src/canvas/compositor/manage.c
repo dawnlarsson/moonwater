@@ -279,10 +279,11 @@ static unsigned int compositor_edge_zone(int row, int x, int y)
         return edges;
 }
 
-static int compositor_band_hit(int x, int y)
+// The band under (x, y): the bar's own pixels when reach_ok is 0, and with a finger's reach above the bar when it is 1.
+static int compositor_band_test(int x, int y, int reach_ok)
 {
         int hit = TASKBAR_HIT_NONE, bands = compositor_bands();
-        int reach = compositor.touching ? COMPOSITOR_FINGER_TARGET * compositor.scale / 100 : 0;
+        int reach = reach_ok && compositor.touching ? COMPOSITOR_FINGER_TARGET * compositor.scale / 100 : 0;
         unsigned int pos = taskbar_position();
 
         for (compositor.band_at = 0; compositor.band_at < bands && hit == TASKBAR_HIT_NONE; compositor.band_at++)
@@ -303,6 +304,11 @@ static int compositor_band_hit(int x, int y)
         }
         compositor.band_at = 0;
         return hit;
+}
+
+static int compositor_band_hit(int x, int y)
+{
+        return compositor_band_test(x, y, 1);
 }
 
 static int compositor_reach_most(void)
@@ -326,7 +332,9 @@ static int compositor_under(int x, int y, int *tab)
                 *tab = TASKBAR_HIT_NONE;
                 return COMPOSITOR_NONE;
         }
-        *tab = compositor_band_hit(x, y);
+        // The bar's own pixels come first, so a window never loses them; a finger's reach above the bar counts only where no
+        // window is under the point (below, after the windows).
+        *tab = compositor_band_test(x, y, 0);
         if (*tab != TASKBAR_HIT_NONE)
                 return COMPOSITOR_NONE;
         reach = (positive)compositor_reach_most();
@@ -344,6 +352,7 @@ static int compositor_under(int x, int y, int *tab)
                         return row;
                 count = (positive)at;
         }
+        *tab = compositor_band_hit(x, y);
         return COMPOSITOR_NONE;
 }
 
