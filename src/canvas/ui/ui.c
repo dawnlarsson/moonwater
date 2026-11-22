@@ -3357,7 +3357,7 @@ static fn doc_normalize(struct doc address_to doc)
 {
         p64 length = doc_length(doc);
         positive count = doc->selection_count, kept = 0;
-        p32 primary = doc->primary < count ? doc->primary : 0;
+        p32 primary = doc->primary < count ? doc->primary : 0, kept_primary = 0;
         if (!count)
         {
                 doc->selections[0] = (struct doc_selection){0, 0, -1};
@@ -3403,19 +3403,18 @@ static fn doc_normalize(struct doc address_to doc)
                                 last->active = forward ? finish : last_start;
                                 if (is_primary)
                                         last->goal = now.goal;
-                                if (is_primary || primary == kept - 1)
-                                        primary = (p32)(kept - 1);
-                                else if (primary > i)
-                                        primary--;
+                                // The primary is tracked by its sorted index (primary); where it lands is kept_primary.
+                                if (is_primary)
+                                        kept_primary = (p32)(kept - 1);
                                 continue;
                         }
                 }
                 if (primary == i)
-                        primary = (p32)kept;
+                        kept_primary = (p32)kept;
                 doc->selections[kept++] = now;
         }
         doc->selection_count = kept;
-        doc->primary = primary < kept ? primary : 0;
+        doc->primary = kept_primary < kept ? kept_primary : 0;
 }
 
 static fn doc_select_set(struct doc address_to doc, p64 anchor, p64 active)
