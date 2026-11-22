@@ -10592,6 +10592,7 @@ b32 main()
         GROUP("check_compositor_scenes_input", check_compositor_scenes_input());
         GROUP("check_compositor_scenes_drag", check_compositor_scenes_drag());
         GROUP("check_compositor_scenes_frames", check_compositor_scenes_frames());
+        GROUP("check_compositor_scenes_motion", check_compositor_scenes_motion());
         GROUP("check_screen_numbers", check_screen_numbers());
         GROUP("check_no_tab", check_no_tab());
         GROUP("check_identify_numbers", check_identify_numbers());

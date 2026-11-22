@@ -1102,3 +1102,85 @@ static void check_compositor_scenes_frames(void)
     compositor_wall = 0, compositor_wall_w = compositor_wall_h = 0;
     canvas_ext_row_clear(1);
 }
+
+/*
+        C8 Scenes, step 5: the motion. Opened, the share shown goes to all of it on the kit's spring: a frame on the way draws a window
+        between where it is and its rect, and the strip above where it rests; shut, the share goes back to none and the overview is not
+        drawn. A drag holds the share where the hand is; let go short of half at no speed it springs back to none, flung away it springs
+        open. With reduced motion the share is its end at once.
+*/
+static void check_compositor_scenes_motion(void)
+{
+    const positive t0 = 1000000000ull;
+    unsigned int count;
+    int r1[4], card[4], width = 0, s[4] = {0, 0, 512, 512};
+    b64 mid;
+
+    if (!layout_table_map(512))
+    {
+        check("scenes motion: the table is mapped", false);
+        return;
+    }
+    layout_setup(512, 1);
+    compositor.outputs = 1;
+    compositor.screen[0][0] = 0, compositor.screen[0][1] = 0, compositor.screen[0][2] = 512, compositor.screen[0][3] = 512;
+    compositor_spaces_ensure();
+    layout_show(1, 40, 150, 400, 240);
+    layout_show(2, 260, 200, 120, 80);
+    compositor.asks[1] = compositor.asks[2] = 0;
+    compositor_space_assign_new(1, 0);
+    compositor_space_assign_new(2, 0);
+    compositor.table->motion = 0; // motion on: the spring runs
+    compositor_scenes_kept.shown = 0, compositor_scenes_kept.speed = 0, compositor_scenes_kept.stepped = 0;
+
+    compositor_scenes_open(0);
+    scenes_rect_of(1, r1);
+    compositor_scenes_tick(t0);
+    compositor_scenes_tick(t0 + 40 * UI_MS);
+    mid = compositor_scenes_kept.shown;
+    count = present_build_frames(scenes_frames, scenes_rows);
+    for (unsigned int k = 0; k < count && !width; k++)
+        if (scenes_rows[k] == 1 && scenes_frames[k].pixels)
+            width = scenes_frames[k].width;
+    compositor_scenes_card_shown(0, s, compositor_scenes_gap(), compositor_scenes_t(), card);
+    check("scenes motion: 40 ms after it opens the overview is on its way, neither shut nor all of it shown", mid > 0 && mid < COMPOSITOR_SCENES_FULL);
+    check("scenes motion: on the way a window is drawn between its own size and its rect's", width < 400 && width > r1[2]);
+    check("scenes motion: and the strip is above where it rests", card[1] < compositor.scenes.card[0][1]);
+    compositor_scenes_tick(t0 + 1000 * UI_MS);
+    compositor_scenes_tick(t0 + 2000 * UI_MS);
+    check("scenes motion: the spring comes to rest all the way open", compositor_scenes_kept.shown == COMPOSITOR_SCENES_FULL && compositor_scenes_t() == UI_ONE);
+
+    compositor_scenes_close();
+    compositor_scenes_tick(t0 + 3000 * UI_MS);
+    compositor_scenes_tick(t0 + 3040 * UI_MS);
+    mid = compositor_scenes_kept.shown;
+    check("scenes motion: shut, it is on its way back and still drawn", mid > 0 && mid < COMPOSITOR_SCENES_FULL && compositor_scenes_shown());
+    compositor_scenes_tick(t0 + 4000 * UI_MS);
+    compositor_scenes_tick(t0 + 5000 * UI_MS);
+    check("scenes motion: and at rest it is not drawn", compositor_scenes_kept.shown == 0 && !compositor_scenes_shown());
+
+    compositor_scenes_drag(COMPOSITOR_SCENES_DRAG_BEGIN, 0, 0, 0);
+    compositor_scenes_drag(COMPOSITOR_SCENES_DRAG_MOVE, 0, 512, 0);
+    compositor_scenes_tick(t0 + 5100 * UI_MS);
+    check("scenes motion: a drag holds the share where the hand is (half the way, half shown)",
+          compositor_scenes_kept.shown == COMPOSITOR_SCENES_FULL / 2 && compositor_scenes_shown() && !compositor.scenes.open);
+    compositor_scenes_drag(COMPOSITOR_SCENES_DRAG_END, 0, 300, 0);
+    for (unsigned int ms = 5200; ms <= 7200; ms += 16)
+        compositor_scenes_tick(t0 + ms * UI_MS);
+    check("scenes motion: let go short of half it springs back to none", compositor_scenes_kept.shown == 0 && !compositor_scenes_shown());
+    compositor_scenes_drag(COMPOSITOR_SCENES_DRAG_BEGIN, 0, 0, 0);
+    compositor_scenes_drag(COMPOSITOR_SCENES_DRAG_MOVE, 0, 300, 1500);
+    compositor_scenes_drag(COMPOSITOR_SCENES_DRAG_END, 0, 300, 1500);
+    for (unsigned int ms = 7300; ms <= 9300; ms += 16)
+        compositor_scenes_tick(t0 + ms * UI_MS);
+    check("scenes motion: flung away from the band it springs open", compositor.scenes.open && compositor_scenes_kept.shown == COMPOSITOR_SCENES_FULL);
+    compositor_scenes_close();
+
+    compositor.table->motion = 1; // reduced motion
+    compositor_scenes_tick(t0 + 9400 * UI_MS);
+    compositor_scenes_open(0);
+    check("scenes motion: with reduced motion it is all the way open at once", compositor_scenes_t() == UI_ONE);
+    compositor_scenes_close();
+    compositor_scenes_tick(t0 + 9500 * UI_MS);
+    check("scenes motion: and shut at once", !compositor_scenes_shown());
+}

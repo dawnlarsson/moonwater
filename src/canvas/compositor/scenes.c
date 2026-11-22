@@ -128,7 +128,27 @@ static struct
         const unsigned int *wall_of;            // the wallpaper it was made from, at its turn, and the screen and card it was made for
         b64 wall_turn;
         int wall_screen[4], wall_w, wall_h;
+        b64 shown, speed; // how far the overview is shown, 0 to COMPOSITOR_SCENES_FULL, and its speed (the same units a second): the kit's spring
+        positive stepped; // when the spring was last stepped (0: at rest)
 } compositor_scenes_kept;
+
+/*
+        The overview's motion (C8 step 5). It is shown by a share, 0 closed to all of it open: the current Scene's windows go from where
+        they are to their rects by it, and the strip comes down from above the screen with it. Opened or closed, the share goes to its
+        end on the kit's spring home (ui_body_spring_step: critically damped, 90 percent of the way in 0.17 s, at the kit's pace), from
+        the speed it had; a drag from the globe sets it from the drag's progress, and its release carries the hand's speed into the
+        spring. Reduced motion has no spring: the share is its end at once, and a drag's progress.
+*/
+#define COMPOSITOR_SCENES_FULL (1000 * UI_ONE) // the whole share, in units the spring rests within a quarter of (BODY_REST)
+static inline b32 ui_body_spring_step(b64 address_to pos, b64 address_to vel, b64 rest, b64 dt); // ui.c, the kit's spring
+
+// The share shown, Q30 (0 to UI_ONE).
+static b64 compositor_scenes_t(void)
+{
+        if (!compositor_glides())
+                return compositor.scenes.open ? UI_ONE : compositor.scenes.drag ? (b64)compositor.scenes.progress * UI_ONE / COMPOSITOR_SCENES_PROGRESS_ONE : 0;
+        return compositor_scenes_kept.shown / 1000;
+}
 
 // Whether a window is one the overview lays out: shown, not minimised or closing, not a popup and in a Space.
 static int compositor_scenes_member(int row)
@@ -239,6 +259,21 @@ static void compositor_scenes_open(int screen)
         compositor_scenes_damage();
 }
 
+// Where the hand's drag is: its progress as the share, and its speed in the share's units (progress is a whole share across half the
+// screen from the band's edge, scenes.h).
+static void compositor_scenes_follow(int progress, int velocity)
+{
+        unsigned int count = 0;
+        const int (*screens)[4] = compositor_screens(&count);
+        unsigned int pos = taskbar_position();
+        int screen = compositor.scenes.screen, half = 1;
+
+        if (screen >= 0 && (unsigned int)screen < count)
+                half = (pos == TASKBAR_LEFT || pos == TASKBAR_RIGHT ? screens[screen][2] : screens[screen][3]) / 2;
+        compositor_scenes_kept.shown = (b64)progress * COMPOSITOR_SCENES_FULL / COMPOSITOR_SCENES_PROGRESS_ONE;
+        compositor_scenes_kept.speed = (b64)velocity * COMPOSITOR_SCENES_FULL / (half > 0 ? half : 1);
+}
+
 static void compositor_scenes_close(void)
 {
         if (!compositor.scenes.open)
@@ -265,6 +300,7 @@ static void compositor_scenes_click(int x, int y)
 
                 compositor_scenes_close();
                 compositor_space_switch_index(screen, card);
+                compositor_scenes_relayout(); // the Scene switched to goes home from the overview, its windows from their rects
                 return;
         }
         if (card >= 0)
@@ -361,12 +397,17 @@ void compositor_scenes_drag(unsigned int phase, int screen, int progress, int ve
                 if (!compositor.scenes.drag)
                         return;
                 compositor.scenes.progress = progress, compositor.scenes.velocity = velocity;
+                compositor_scenes_follow(progress, velocity);
+                compositor_scenes_damage();
         }
         else if (phase == COMPOSITOR_SCENES_DRAG_END)
         {
                 if (!compositor.scenes.drag)
                         return;
                 compositor.scenes.drag = 0;
+                compositor_scenes_follow(progress, velocity);
+                compositor_scenes_kept.stepped = 0;
+                compositor_scenes_damage();
                 if (velocity > COMPOSITOR_SCENES_SWIPE)
                         commit = 1;
                 else if (velocity < -COMPOSITOR_SCENES_SWIPE)
@@ -395,10 +436,10 @@ void compositor_scenes_drag(unsigned int phase, int screen, int progress, int ve
         it was made over), and none of them is the row's own (row_plus1 0: a close button's ink is the row's, kept for its return).
 */
 
-// Whether the overview is drawn.
+// Whether the overview is drawn: open, or on its way open or shut, or dragged out by the globe.
 static int compositor_scenes_shown(void)
 {
-        return compositor.scenes.open;
+        return compositor.scenes.open || compositor_scenes_t() > 0;
 }
 
 // Whether the overview draws a row in its own place or not at all: a window on its screen, but the desktop's ground (a
@@ -558,15 +599,26 @@ static unsigned int compositor_scenes_plain(struct compositor_frame *frames, uns
         return compositor_scenes_cut(f, clip) ? 1 : 0;
 }
 
+// Card i where it is drawn: its rect in the strip, lifted above the screen's top by the share not shown.
+static void compositor_scenes_card_shown(unsigned int i, const int s[4], int gap, b64 t, int out[4])
+{
+        const int *c = compositor.scenes.card[i];
+        long long lift = (long long)(c[1] + c[3] + gap - s[1]);
+
+        memory_copy(out, c, 4 * sizeof(int));
+        out[1] -= (int)((lift * (UI_ONE - t)) >> UI_Q);
+}
+
 // The overview's frames at frames[at], the rows' in rows (room of each at the most): the current Scene's windows at their
 // rects, then the strip, a card a Scene with its windows on the wallpaper's miniature, and the "+" card. Answers how many.
 static unsigned int compositor_scenes_frames(struct compositor_frame *frames, unsigned int *rows, unsigned int at, unsigned int room)
 {
         unsigned int count = 0, start = at, filler, span[COMPOSITOR_SCENES_WINDOWS][2];
         const int (*screens)[4] = compositor_screens(&count);
-        int screen = compositor.scenes.screen, scale, radius, line, s[4], clip[4];
+        int screen = compositor.scenes.screen, scale, radius, line, s[4], clip[4], gap = compositor_scenes_gap();
         struct compositor_space *active;
         const unsigned int *wall = 0;
+        b64 t = compositor_scenes_t();
 
         if (screen < 0 || (unsigned int)screen >= count || !compositor.row_space)
                 return 0;
@@ -592,9 +644,12 @@ static unsigned int compositor_scenes_frames(struct compositor_frame *frames, un
         // The strip: each Scene's card, its ground the wallpaper's miniature (a fullscreen Scene's black), its windows over it.
         for (unsigned int card = 0; card + 1 < compositor.scenes.cards && card < COMPOSITOR_SPACES_MAX; card++)
         {
-                const int *c = compositor.scenes.card[card];
+                int c[4];
                 struct compositor_space *sp = compositor_space_at(screen, (int)card);
-                int cut[4] = {c[0], c[1], c[0] + c[2], c[1] + c[3]};
+                int cut[4];
+
+                compositor_scenes_card_shown(card, s, gap, t, c);
+                cut[0] = c[0], cut[1] = c[1], cut[2] = c[0] + c[2], cut[3] = c[1] + c[3];
 
                 if (!sp || !compositor_scenes_plain(frames, rows, at, room, filler, c, clip, scale))
                         continue;
@@ -634,9 +689,13 @@ static unsigned int compositor_scenes_frames(struct compositor_frame *frames, un
                 }
         }
         // The "+" card: a plate of the kit's surface with a line, and a plus in its middle.
-        if (compositor.scenes.cards && compositor_scenes_plain(frames, rows, at, room, filler, compositor.scenes.card[compositor.scenes.cards - 1], clip, scale))
+        int plus[4];
+
+        if (compositor.scenes.cards)
+                compositor_scenes_card_shown(compositor.scenes.cards - 1, s, gap, t, plus);
+        if (compositor.scenes.cards && compositor_scenes_plain(frames, rows, at, room, filler, plus, clip, scale))
         {
-                const int *c = compositor.scenes.card[compositor.scenes.cards - 1];
+                const int *c = plus;
                 int arm = (c[2] < c[3] ? c[2] : c[3]) / 4, bar = compositor_px1(2 * scale), cx = c[0] + c[2] / 2, cy = c[1] + c[3] / 2;
                 int across[4] = {cx - arm, cy - bar / 2, 2 * arm, bar}, down[4] = {cx - bar / 2, cy - arm, bar, 2 * arm};
                 unsigned int ink = compositor_ink_role(UI_ON_SURFACE_VARIANT) | 0xff000000u;
@@ -654,12 +713,16 @@ static unsigned int compositor_scenes_frames(struct compositor_frame *frames, un
         for (unsigned int i = 0; i < compositor.scenes.windows; i++)
         {
                 unsigned int made = span[i][1] - span[i][0], left;
-                int from[4];
+                const struct compositor_frame *own = &frames[span[i][0]];
+                int from[4], to[4];
 
                 if (!made)
                         continue;
-                from[0] = frames[span[i][0]].x, from[1] = frames[span[i][0]].y, from[2] = frames[span[i][0]].width, from[3] = frames[span[i][0]].height;
-                left = compositor_scenes_put(&frames[span[i][0]], made, from, compositor.scenes.rect[i], clip, radius, line);
+                // From where it is, at its own corners and line, to its rect at the overview's, by the share shown.
+                from[0] = own->x, from[1] = own->y, from[2] = own->width, from[3] = own->height;
+                canvas_tween_rect(to, from, compositor.scenes.rect[i], t);
+                left = compositor_scenes_put(&frames[span[i][0]], made, from, to, clip, canvas_tween_lerp(compositor_radius(own), radius, t),
+                                             canvas_tween_lerp(own->line, line, t));
                 for (unsigned int k = left; k < made; k++)
                         memory_zero(&frames[span[i][0] + k], sizeof(frames[0])), frames[span[i][0] + k].layer = 1, frames[span[i][0] + k].scale = scale;
         }
@@ -698,10 +761,53 @@ static int compositor_scenes_took(int row)
         return compositor_scenes_hides(row);
 }
 
-// Before a frame, every pass of the loop: a change to the stack or the Spaces while the overview is open lays it out again.
+// The spring a step to its end (open or shut) over the time since its last step, in steps of a millisecond, at the kit's pace; a drag
+// holds it where the hand is. A share that moves draws the overview again, and so does each pass while it is still on its way.
+static void compositor_scenes_step(positive now)
+{
+        b64 goal = compositor.scenes.open ? COMPOSITOR_SCENES_FULL : 0, was = compositor_scenes_kept.shown;
+        positive gone;
+        b64 left;
+
+        if (compositor.scenes.drag || !compositor_glides())
+        {
+                if (!compositor.scenes.drag)
+                        compositor_scenes_kept.shown = goal, compositor_scenes_kept.speed = 0;
+                compositor_scenes_kept.stepped = 0;
+                if (compositor_scenes_kept.shown != was)
+                        compositor_scenes_damage();
+                return;
+        }
+        if (compositor_scenes_kept.shown == goal && !compositor_scenes_kept.speed)
+        {
+                compositor_scenes_kept.stepped = 0;
+                return;
+        }
+        gone = compositor_scenes_kept.stepped && now > compositor_scenes_kept.stepped ? now - compositor_scenes_kept.stepped : 0;
+        // A pass after a long stall steps half a second at the most: twelve of the spring's time constants, at rest from anywhere.
+        left = ui_paced_elapsed((b64)(gone > 500 * UI_MS ? 500 * UI_MS : gone));
+        while (left > 0)
+        {
+                b64 ns = left > UI_MS ? UI_MS : left;
+
+                left -= ns;
+                if (!ui_body_spring_step(&compositor_scenes_kept.shown, &compositor_scenes_kept.speed, goal, ns * UI_ONE / 1000000000))
+                        break;
+        }
+        // Past an end is past it: the share is never more than all of it, nor less than none.
+        if (compositor_scenes_kept.shown < 0)
+                compositor_scenes_kept.shown = 0, compositor_scenes_kept.speed = 0;
+        if (compositor_scenes_kept.shown > COMPOSITOR_SCENES_FULL)
+                compositor_scenes_kept.shown = COMPOSITOR_SCENES_FULL, compositor_scenes_kept.speed = 0;
+        compositor_scenes_kept.stepped = now;
+        compositor_scenes_damage();
+}
+
+// Before a frame, every pass of the loop: the motion's step, and a change to the stack or the Spaces while the overview is open lays it
+// out again.
 static void compositor_scenes_tick(positive now)
 {
-        (void)now;
+        compositor_scenes_step(now);
         if (!compositor.scenes.open)
                 return;
         if (compositor_scenes_kept.stack_gen != compositor.stack_gen || compositor_scenes_kept.spaces_gen != compositor.spaces.gen)
