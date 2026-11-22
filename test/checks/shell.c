@@ -187,16 +187,19 @@ static fn reuse_bulk_output(void)
 static fn reuse_stable_arena(void)
 {
         p8 held[160] __attribute__((aligned(32)));
+        //      A take pads its start to the alignment of the address and
+        //      moves the cursor by exactly what it took (b39059b46), from a
+        //      prefix the alignment divides or not.
         for (positive alignment = 1; alignment <= 32; alignment *= 2)
-        for (positive prefix = 0; prefix <= 128; prefix += alignment)
+        for (positive prefix = 0; prefix <= 128; prefix++)
         for (positive wanted = 0; wanted <= 129; wanted++)
         {
                 memory_fill(held, 0xa5, sizeof(held));
                 memory_arena arena = {held, 128, prefix};
-                positive rounded = (wanted + alignment - 1) & ~(alignment - 1);
+                positive pad = (alignment - (prefix & (alignment - 1))) & (alignment - 1);
                 p8 address_to answer = memory_arena_take(&arena, wanted, alignment);
-                p8 fits = rounded <= 128 - prefix;
-                p8 okay = fits ? answer == held + prefix && arena.used == prefix + rounded
+                p8 fits = pad <= 128 - prefix && wanted <= 128 - prefix - pad;
+                p8 okay = fits ? answer == held + prefix + pad && arena.used == prefix + pad + wanted
                                  : !answer && arena.used == prefix;
                 for (positive at = 0; at < sizeof(held); at++)
                         okay &= held[at] == 0xa5;
@@ -285,6 +288,236 @@ static fn reuse_stable_arena(void)
                       !memory_compare(answer, tail, length) &&
                       roomy_arena.used == 16 + 64);
         }
+
+        /*
+                A mark the alignment does not divide: the block the caller
+                took starts past it by the pad, and the read must land there
+                and stay there through every growth. Reading at the mark put
+                the first block pad bytes below the address growth then
+                held, so a read longer than its first block lost its first
+                pad bytes and held pad bytes nobody wrote: diff -a, whose
+                option words leave the mark at 4, lost twelve bytes of a
+                462 KB file's head and had twelve NUL bytes at 65524.
+        */
+        {
+                static p8 wide[1024] __attribute__((aligned(32)));
+                p8 input[300];
+                const positive starts[] = {1, 16, 20, 64};
+                const positive lengths[] = {0, 1, 15, 16, 17, 63, 64, 65, 200, 300};
+
+                for (positive at = 0; at < sizeof(input); at++)
+                        input[at] = (p8)(at * 7 + 1);
+                for (positive mark = 0; mark < 32; mark++)
+                for (positive first_at = 0; first_at < array_count(starts); first_at++)
+                for (positive length_at = 0; length_at < array_count(lengths); length_at++)
+                {
+                        positive length = lengths[length_at], first = starts[first_at];
+                        positive start = (mark + 15) & ~(positive)15, got = 0;
+                        p8 failed = false;
+                        b32 pipe[2];
+
+                        if (system_call_2(syscall(pipe2), (positive)pipe, 0) < 0)
+                        {
+                                check("arena fixture opens its pipe", false);
+                                return;
+                        }
+                        p8 sent = system_call_3(syscall(write), pipe[1],
+                                                (positive)input, length) == (bipolar)length;
+                        system_close(pipe[1]);
+                        memory_fill(wide, 0xa5, sizeof(wide));
+                        arena = (memory_arena){wide, 900, mark};
+                        p8 address_to block = memory_arena_take(&arena, first, 16);
+                        p8 address_to answer = memory_arena_read_tail(
+                            &arena, pipe[0], mark, first, 16, &got, &failed);
+                        system_close(pipe[0]);
+                        p8 okay = sent && block == wide + start && answer == block &&
+                                  !failed && got == length && !answer[length] &&
+                                  !memory_compare(answer, input, length) &&
+                                  arena.used == start + ((length + 16) & ~(positive)15);
+                        for (positive at = 0; at < start; at++)
+                                okay &= wide[at] == 0xa5;
+                        for (positive at = start + length + 1; at < sizeof(wide); at++)
+                                okay &= wide[at] == 0xa5;
+                        check("arena read from an unaligned mark keeps its bytes at the block's aligned start", okay);
+                }
+
+                /*
+                        The floor is of what is past the block's start, not
+                        past the mark: 95 bytes with the mark at 1 start the
+                        block at 16, so 64 fit and 80 do not. 50 bytes grow
+                        from 20 to 40 to the 64 that fit.
+                */
+                b32 pipe[2];
+                positive got = 0;
+                p8 failed = false;
+
+                if (system_call_2(syscall(pipe2), (positive)pipe, 0) < 0)
+                {
+                        check("arena fixture opens its pipe", false);
+                        return;
+                }
+                p8 sent = system_call_3(syscall(write), pipe[1],
+                                        (positive)input, 50) == 50;
+                system_close(pipe[1]);
+                memory_fill(wide, 0xa5, sizeof(wide));
+                arena = (memory_arena){wide, 95, 1};
+                memory_arena_take(&arena, 20, 16);
+                p8 address_to answer = memory_arena_read_tail(
+                    &arena, pipe[0], 1, 20, 16, &got, &failed);
+                system_close(pipe[0]);
+                check("arena read from an unaligned mark takes the aligned floor past its block's start",
+                      sent && answer == wide + 16 && !failed && got == 50 &&
+                      !answer[50] && !memory_compare(answer, input, 50) &&
+                      arena.used == 16 + 64);
+        }
+}
+
+/*
+        The whole of diff, in a child with its answer in a file, over files
+        longer than its first read (64 KiB), with a line across that read's
+        end, under option words that leave the arena's mark at 1, 4 (diff
+        -a, as reported), 11 and 16. Two files of the same bytes give no
+        hunk and status 0; two that differ only in their last line give that
+        one hunk and status 1, as GNU diff does. The mark under the first
+        three words is not 16-aligned, and the read that started at it gave
+        diff -a a hunk at line 1 with the head's first bytes gone and one
+        with NUL bytes at 65524, in lines that did not differ.
+*/
+static p8 reuse_diff_left[480000], reuse_diff_right[480000];
+
+// Lines of uneven length to size bytes; answers where the last line starts.
+static positive reuse_diff_text(p8 address_to into, positive size)
+{
+        static const p8 letters[] = "abcdefghijklmnopqrstuvwxyz";
+        positive used = 0;
+
+        for (positive line = 1; size - used > 64; line++)
+        {
+                memory_copy(into + used, "row ", 4);
+                used += 4;
+                used += positive_into_string(into + used, line);
+                into[used++] = ' ';
+                memory_copy(into + used, letters, line * 7 % 23);
+                used += line * 7 % 23;
+                into[used++] = '\n';
+        }
+        positive last = used;
+        memory_copy(into + used, "last L", 6);
+        memory_fill(into + used + 6, 'x', size - 1 - used - 6);
+        into[size - 1] = '\n';
+        return last;
+}
+
+static fn reuse_diff_path(p8 address_to into, string_address suffix)
+{
+        string_address prefix = (string_address) "/tmp/moonwater-reuse-diff-";
+        positive at = string_length(prefix);
+
+        memory_copy(into, prefix, at);
+        at += positive_into_string(into + at, (positive)system_call(syscall(getpid)));
+        memory_copy(into + at, suffix, string_length(suffix) + 1);
+}
+
+static p8 reuse_diff_write(string_address path, p8 address_to bytes, positive length)
+{
+        system_call_3(syscall(unlinkat), (positive)(bipolar)AT_FDCWD, (positive)path, 0);
+        bipolar handle = system_open_at_mode(AT_FDCWD, path, FILE_WRITE | O_CLOEXEC, 0600);
+        bipolar written = handle < 0 ? handle : system_write_all((positive)handle, bytes, length);
+
+        if (handle >= 0)
+                system_close(handle);
+        return handle >= 0 && written >= 0;
+}
+
+// diff with these words, its standard output in answer: its status, or -1.
+static b32 reuse_diff_run(string_address address_to words, positive count,
+                          string_address answer, p8 address_to into,
+                          positive room, positive address_to got)
+{
+        address_to got = 0;
+        system_call_3(syscall(unlinkat), (positive)(bipolar)AT_FDCWD, (positive)answer, 0);
+        bipolar out = system_open_at_mode(AT_FDCWD, answer, FILE_WRITE | O_CLOEXEC, 0600);
+
+        if (out < 0)
+                return -1;
+        log_flush();
+        bipolar child = system_fork();
+        if (!child)
+        {
+                system_call_3(syscall(dup3), (positive)out, 1, 0);
+                program_arguments_use(words, (b32)count);
+                exit(tools_diff());
+        }
+        system_close(out);
+        positive status = 0;
+        if (child < 0 || system_wait4_retry(child, address_of status, 0, null) < 0)
+                return -1;
+        bipolar read = file_read_once_at(AT_FDCWD, answer, into, room);
+        address_to got = read < 0 ? 0 : (positive)read;
+        return (b32)wait_status_code(status);
+}
+
+static fn reuse_diff_reads(void)
+{
+        static p8 answer[4096], wanted[4096];
+        p8 left[64], right[64], out[64];
+
+        reuse_diff_path(left, "-left");
+        reuse_diff_path(right, "-right");
+        reuse_diff_path(out, "-out");
+
+        string_address shapes[][9] = {
+            {"diff", left, right},
+            {"diff", "-a", left, right},
+            {"diff", "--text", "-a", left, right},
+            {"diff", "-a", "-a", "-a", "-a", "-a", left, right},
+        };
+        const positive counts[] = {3, 4, 5, 8};
+        const positive sizes[] = {65535, 65536, 65537, 65548, 131075, 462509};
+
+        for (positive s = 0; s < array_count(sizes); s++)
+        {
+                positive size = sizes[s], got = 0;
+                positive last = reuse_diff_text(reuse_diff_left, size);
+
+                memory_copy(reuse_diff_right, reuse_diff_left, size);
+                p8 wrote = reuse_diff_write(left, reuse_diff_left, size) &&
+                           reuse_diff_write(right, reuse_diff_right, size);
+                for (positive k = 0; k < array_count(shapes); k++)
+                {
+                        b32 status = reuse_diff_run(shapes[k], counts[k], out,
+                                                    answer, sizeof(answer), &got);
+                        check("diff of two files of the same bytes past its first read gives no hunk",
+                              wrote && status == 0 && !got);
+                }
+
+                reuse_diff_right[last + 5] = 'R';
+                wrote = reuse_diff_write(right, reuse_diff_right, size);
+                positive line = memory_count(reuse_diff_left, last, '\n') + 1, w = 0;
+                w += positive_into_string(wanted + w, line);
+                wanted[w++] = 'c';
+                w += positive_into_string(wanted + w, line);
+                memory_copy(wanted + w, "\n< ", 3);
+                w += 3;
+                memory_copy(wanted + w, reuse_diff_left + last, size - last);
+                w += size - last;
+                memory_copy(wanted + w, "---\n> ", 6);
+                w += 6;
+                memory_copy(wanted + w, reuse_diff_right + last, size - last);
+                w += size - last;
+                for (positive k = 0; k < array_count(shapes); k++)
+                {
+                        b32 status = reuse_diff_run(shapes[k], counts[k], out,
+                                                    answer, sizeof(answer), &got);
+                        check("diff of files past its first read that differ in their last line gives that hunk alone",
+                              wrote && status == 1 && got == w &&
+                              !memory_compare(answer, wanted, w));
+                }
+        }
+        string_address made[] = {left, right, out};
+        for (positive at = 0; at < array_count(made); at++)
+                system_call_3(syscall(unlinkat), (positive)(bipolar)AT_FDCWD,
+                              (positive)made[at], 0);
 }
 
 static p8 reuse_hex(p8 value)
@@ -969,6 +1202,7 @@ b32 main(void)
         reuse_arguments();
         reuse_bulk_output();
         reuse_stable_arena();
+        reuse_diff_reads();
         reuse_masks();
         reuse_lists();
         reuse_uuid();

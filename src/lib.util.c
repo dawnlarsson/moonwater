@@ -3247,20 +3247,29 @@ static p8 address_to memory_arena_read_tail(
     positive first, positive alignment, positive address_to length,
     bool address_to read_failed)
 {
-        positive room = first, used = 0;
-        p8 address_to bytes = arena->bytes + mark;
+        //      The block starts where memory_arena_take put it, which is past
+        //      an unaligned mark by the pad its alignment needs: taken again
+        //      from mark here, as each growth below takes it, so the first
+        //      read and every growth agree on one address. Reading at mark
+        //      itself put the first block pad bytes below where growth then
+        //      had it, so a read longer than first lost its first pad bytes
+        //      and held pad zero bytes at first - pad.
+        arena->used = mark;
+        p8 address_to bytes = memory_arena_take(arena, first, alignment);
+        if (!bytes)
+                goto failed;
+        positive start = (positive)(bytes - arena->bytes), room = first, used = 0;
         while (true)
         {
                 if (used == room)
                 {
                         positive larger = room < positive_max
                             ? memory_growth(room, room + 1, first) : 0;
-                        //      memory_arena_take rounds a size up to alignment,
-                        //      so the largest block that fits past the mark is
-                        //      the aligned floor of what is left; and a block
-                        //      no larger than the room already held is no
-                        //      progress.
-                        positive available = (arena->room - mark) & ~(alignment - 1);
+                        //      The largest block that fits past the start is
+                        //      the aligned floor of what is left, so the next
+                        //      allocation needs no pad; and a block no larger
+                        //      than the room already held is no progress.
+                        positive available = (arena->room - start) & ~(alignment - 1);
                         if (larger > available)
                                 larger = available;
                         if (larger <= room)
@@ -3284,7 +3293,7 @@ static p8 address_to memory_arena_read_tail(
         }
         bytes[used] = end;
         {
-                positive end_used = (positive)(bytes - arena->bytes) + used + 1;
+                positive end_used = start + used + 1;
                 positive align_pad = (alignment - (end_used & (alignment - 1))) & (alignment - 1);
 
                 arena->used = align_pad <= arena->room - end_used
