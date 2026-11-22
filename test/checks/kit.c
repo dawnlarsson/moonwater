@@ -4448,6 +4448,18 @@ static fn check_kit_arc(void)
         check("kit: a corner's root is the integer root at every place in the corner", !wrong);
 }
 
+/* The language table is searched by binary search: it must stay in byte order, and every id must be found where it is. */
+static fn check_kit_language_table(void)
+{
+        positive unsorted = 0, lost = 0;
+
+        for (positive id = 1; id < LANGUAGE_COUNT; id++)
+                unsorted += string_compare((string_address)language_table[id - 1].name, (string_address)language_table[id].name) >= 0;
+        for (positive id = 0; id < LANGUAGE_COUNT; id++)
+                lost += language_find(language_table[id].name) != (int)id;
+        check("kit: the language table is in byte order, and every id is found by language_find", !unsorted && !lost);
+}
+
 /*
         A text run's cover ramps (ui_ramp_for, kept for the frame) draw the picture a fresh ramp per run draws: runs in
         three inks, two alphas and both grounds (the surface and the glass), interleaved over a picture, drawn once with

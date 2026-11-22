@@ -10437,6 +10437,7 @@ b32 main()
         check_motion_pace();
         check_hand_settings();
         check_kit_arc();
+        check_kit_language_table();
         check_kit_ramps();
 #if X64
         check_kit_walk();
