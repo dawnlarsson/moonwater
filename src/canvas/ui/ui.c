@@ -21401,6 +21401,28 @@ static b32 ui_apps_pinned(const char address_to root, int which)
         return false;
 }
 
+// The registry entries the pins file names, in its order, into which (most at most); a pin naming no entry is skipped. Answers how many.
+static int ui_apps_pinned_list(const char address_to root, int address_to which, int most)
+{
+        char path[160], line[SETTING_PINS_MOST + 16], word[SETTING_PINS_WORD];
+        positive at = 0;
+        int kind, word_at = 0, count = 0;
+        if (!which || most <= 0 || !ui_apps_pins_read(root, path, sizeof(path), line, sizeof(line)))
+                return 0;
+        while ((kind = setting_pins_next(line, &at, word, sizeof(word))) == SETTING_PINS_WORD_NEXT || kind == SETTING_PINS_SEPARATOR)
+        {
+                if (kind == SETTING_PINS_SEPARATOR)
+                        word_at = 0;
+                else if (word_at++ == 0)
+                {
+                        int entry = ui_apps_match(word);
+                        if (entry >= 0 && count < most)
+                                which[count++] = entry;
+                }
+        }
+        return count;
+}
+
 /*
         A level meter's state, one channel's. What is fed it is the greatest sample since the last look (15 bits, the sound
         server's page), and what it shows is that on a scale of decibels from 60 under full scale to full scale, which rises
@@ -22164,6 +22186,7 @@ struct ui_list
         int menu_x, menu_y;
         int last_clicked;                  // id + 1 of the row last clicked (0 none; apps clear to reset double-click)
         struct ui_click click;             // double-click tracking (ui_click_same)
+        struct ui_list_typed { char word[16]; int length; positive at; } typed; // the typeahead's word and when its last key came (ui_list_type)
         // Folds (ui_list_fold): per row id its open byte and its share of the row shown (Q30; -1 where the app's describe says it), mapped at the first fold.
         b64 address_to fold_at;
         unsigned char address_to fold_open;
@@ -22678,6 +22701,40 @@ static b32 ui_list_move(const struct ui address_to ui, struct ui_list address_to
         ui_list_damage(ui, l, l->focus);
         ui_list_reveal(ui, l);
         return l->focus != before;
+}
+
+// Typeahead over a list's rows (a menu's and any list's): a key adds to a word that starts over after a second, and the first row whose
+// label starts with the word takes the focus (its place revealed). Answers the row's id, or -1 when none starts with it (the focus stays).
+#define UI_LIST_TYPE_WAIT 1000000000ull
+static int ui_list_type(const struct ui address_to ui, struct ui_list address_to l, int byte, positive now)
+{
+        struct ui_row row;
+        int found = -1, before = l->focus, n = l->virtual ? l->total : l->count;
+        if (byte <= ' ' || byte >= 127)
+                return -1;
+        if (now - l->typed.at > UI_LIST_TYPE_WAIT || l->typed.length >= (int)sizeof(l->typed.word) - 1)
+                l->typed.length = 0;
+        l->typed.word[l->typed.length++] = (char)byte_to_lower((b8)byte);
+        l->typed.at = now;
+        for (int at = 0; at < n && found < 0; at++)
+        {
+                int id = l->virtual ? at : l->id[at], k = 0;
+                ui_list_describe(l, id, &row);
+                if (!row.label)
+                        continue;
+                while (k < l->typed.length && row.label[k] && byte_to_lower((b8)row.label[k]) == (b8)l->typed.word[k])
+                        k++;
+                if (k == l->typed.length)
+                        found = id;
+        }
+        if (found >= 0 && found != before)
+        {
+                l->focus = found;
+                ui_list_damage(ui, l, before);
+                ui_list_damage(ui, l, found);
+                ui_list_reveal(ui, l);
+        }
+        return found;
 }
 
 // Up, Down, Home, End, Page Up and Page Down in a list (a page is a view of rows less one):
