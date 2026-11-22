@@ -432,7 +432,8 @@ static void compositor_game_slice(void)
         {
                 unsigned int pid = __atomic_load_n(&compositor.table->pid[rows[k]], __ATOMIC_ACQUIRE);
 
-                if (pid && pid != me && !compositor_pid_in(now, nows, pid))
+                // The table's pid is the client's word: its scheduling is changed only for the process that claimed the row (B2)
+                if (pid && pid != me && windows_owner_ok(&windows_owner_held[rows[k]], pid) && !compositor_pid_in(now, nows, pid))
                         now[nows++] = pid;
         }
         for (unsigned int k = 0; k < count; k++)
@@ -446,7 +447,8 @@ static void compositor_game_slice(void)
                 {
                         unsigned int pid = __atomic_load_n(&compositor.table->pid[r], __ATOMIC_ACQUIRE);
 
-                        if (pid && pid != me && !compositor_pid_in(now, nows, pid) && !compositor_pid_in(bg_now, bg_nows, pid))
+                        if (pid && pid != me && windows_owner_ok(&windows_owner_held[r], pid) && !compositor_pid_in(now, nows, pid) &&
+                            !compositor_pid_in(bg_now, bg_nows, pid))
                                 bg_now[bg_nows++] = pid;
                 }
         for (unsigned int k = 0; k < bg_count; k++)
