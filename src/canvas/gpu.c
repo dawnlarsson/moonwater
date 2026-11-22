@@ -1108,17 +1108,20 @@ static unsigned int gpu_i915_user(positive from, positive bytes, unsigned int ho
         unsigned int e;
 
         *handle = 0;
-        if (how == GPU_USER_READ)
-        {
-                if (gpu_i915.read_only_refused || gpu.family < 800 || gpu.family >= 1100)
-                        return 1;
+        // I915_USERPTR_READ_ONLY is only supported on Gen8-Gen9 full PPGTT; omit it on Gen7/7.5 and Gen11+
+        // (and fall back if the kernel returns ENODEV) instead of failing read-only maps with EPERM.
+        if (how == GPU_USER_READ && !gpu_i915.read_only_refused && gpu.family >= 800 && gpu.family < 1100)
                 up.flags |= 1; // I915_USERPTR_READ_ONLY
-        }
         if (how != GPU_USER_LATER && gpu_i915.probe)
                 up.flags |= 2; // I915_USERPTR_PROBE: the range is looked at now (EFAULT), where without it the pages are first taken at a submit
         e = gpu_call(3u, 0x33, 24, &up);
         if (e == 19 && (up.flags & 1))
-                return gpu_i915.read_only_refused = 1, 1;
+        {
+                gpu_i915.read_only_refused = 1;
+                up.flags &= ~1u;
+                up.handle = 0;
+                e = gpu_call(3u, 0x33, 24, &up);
+        }
         *handle = e ? 0 : up.handle;
         return e;
 }
