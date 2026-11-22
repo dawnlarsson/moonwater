@@ -14851,10 +14851,10 @@ static b32 ui_moon_project(const decimal p[3], decimal ct, decimal st, decimal c
 // The moon in ink (ui_moon_paper):
 #define UI_MOON_PAPER_DARK 1u  // the dark tones: a light ink on near black
 #define UI_MOON_PAPER_STARS 2u // the stars and their reflections
-#define UI_MOON_PAPER_DIM 4u   // in dark, the real arrangement dimmed: a grey disc, its maria a darker grey (ui_moon_dim_seas of it), lit as a sphere
+#define UI_MOON_PAPER_DIM 4u   // in dark, the real arrangement dimmed: a grey disc, its maria a darker grey (the seas' share, UI_MOON_SEAS), lit as a sphere
 
 // Dimmed (UI_MOON_PAPER_DIM), the maria's tone as a share of the highlands': the real moon's seas are about half as bright.
-static decimal ui_moon_dim_seas = 0.45;
+#define UI_MOON_SEAS 0.45
 
 // The ground's tone and the ink's: light (a soft dark ink on the kit's light neutral) and dark (a soft light ink on near black).
 static void ui_moon_paper_tones(unsigned int options, unsigned int address_to paper, unsigned int address_to ink)
@@ -15556,7 +15556,8 @@ static void ui_moon_parts(fn (address_to run)(address_any), address_any parts, p
 }
 
 // The disc in ink, its outline over it.
-static fn ui_moon_paper(struct ui address_to ui, int left, int top, int size, b64 turn, unsigned int options, unsigned int accent)
+// The disc in ink, its outline over it; seas is the maria's share of the highlands' tone when dimmed (UI_MOON_SEAS).
+static fn ui_moon_paper_seas(struct ui address_to ui, int left, int top, int size, b64 turn, unsigned int options, unsigned int accent, decimal seas)
 {
         int width = ui->width, height = ui->bottom - ui->top, small = size < 96, step = small ? 1 : (int)(2.0 * height / 1080.0 + 0.5) < 2 ? 2 : (int)(2.0 * height / 1080.0 + 0.5);
         decimal r = size / 2.0, cx = left + r, cy = top + r, scale = small ? 1 : height / 1080.0;
@@ -15575,7 +15576,7 @@ static fn ui_moon_paper(struct ui address_to ui, int left, int top, int size, b6
         // The moon's two tones: the ground (its highlands) and the ink (its maria); dimmed, a mid grey and a near black.
         bright = paper, deep = ink;
         if (options & UI_MOON_PAPER_DIM)
-                bright = 0x8e8d89u, deep = window_mix(0x000000u, bright, (unsigned int)(ui_moon_dim_seas * 256));
+                bright = 0x8e8d89u, deep = window_mix(0x000000u, bright, (unsigned int)(seas * 256));
         // The sun the craters' sides are read by: from the upper left and in front, in the eye's frame, then the body's.
         {
                 decimal vx = -0.55, vy = 0.45, vz = 0.70;
@@ -15688,9 +15689,14 @@ static fn ui_moon_paper(struct ui address_to ui, int left, int top, int size, b6
                 }
 }
 
-// The moon wallpaper (ui_moon_night):
+static fn ui_moon_paper(struct ui address_to ui, int left, int top, int size, b64 turn, unsigned int options, unsigned int accent)
+{
+        ui_moon_paper_seas(ui, left, top, size, turn, options, accent, UI_MOON_SEAS);
+}
+
+// The moon wallpaper (ui_moon_night); seas is the maria's share when dimmed (UI_MOON_SEAS is the moon's own):
 static fn ui_moon_night_part(struct ui address_to ui, b64 turn, unsigned int options, unsigned int accent, decimal glow, decimal edges, b32 moon_alone,
-                             int rect[4])
+                             int rect[4], decimal seas)
 {
         int width = ui->width, height = ui->bottom - ui->top, size = width * 95 / 100, left = (width - size) / 2, top = ui->top + height * 38 / 100;
         int from = moon_alone ? top : ui->top;
@@ -15698,13 +15704,13 @@ static fn ui_moon_night_part(struct ui address_to ui, b64 turn, unsigned int opt
         rect[0] = left < 0 ? 0 : left, rect[1] = top < ui->top ? ui->top : top;
         rect[2] = (left + size > width ? width : left + size) - rect[0], rect[3] = (top + size > ui->bottom ? ui->bottom : top + size) - rect[1];
         ui_moon_paper_ground(ui, options, accent, glow, edges, left + size / 2.0, top + size / 2.0, size / 2.0, from, ui->bottom);
-        ui_moon_paper(ui, left, top, size, turn, options, accent);
+        ui_moon_paper_seas(ui, left, top, size, turn, options, accent, seas);
 }
 
 static fn ui_moon_night(struct ui address_to ui, b64 turn, unsigned int options, unsigned int accent, decimal glow, decimal edges)
 {
         int rect[4];
-        ui_moon_night_part(ui, turn, options, accent, glow, edges, false, rect);
+        ui_moon_night_part(ui, turn, options, accent, glow, edges, false, rect, UI_MOON_SEAS);
 }
 
 // Words on the moon (ui_moon_label):

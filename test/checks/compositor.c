@@ -5440,13 +5440,12 @@ static void band_pictures(string_address face_path)
         {
             struct ui ui;
 
-            ui_moon_dim_seas = seas[k];
+            int rect[4];
             memory_zero(&ui, sizeof(ui));
             ui.pixels = pictures_wall, ui.pitch = 1920, ui.width = 1920, ui.height = 1080, ui.top = 0, ui.bottom = 1080, ui.scale = 100;
-            ui_moon_night(&ui, 0, UI_MOON_PAPER_DARK | UI_MOON_PAPER_STARS | UI_MOON_PAPER_DIM, 0x5b7fa6u, 1, 0);
+            ui_moon_night_part(&ui, 0, UI_MOON_PAPER_DARK | UI_MOON_PAPER_STARS | UI_MOON_PAPER_DIM, 0x5b7fa6u, 1, 0, false, rect, seas[k]);
             pictures_save((string_address)into, names[k], pictures_wall, 1920, 1080);
         }
-        ui_moon_dim_seas = 0.45;
     }
     {
         bipolar handle;

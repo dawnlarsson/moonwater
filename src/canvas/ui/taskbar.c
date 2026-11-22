@@ -1283,9 +1283,8 @@ static void taskbar_wall_draw(unsigned int *pixels, int pitch, int width, int he
 {
         struct ui ui = {0};
         ui.pixels = pixels, ui.pitch = (unsigned long)pitch, ui.width = width, ui.height = height, ui.bottom = height, ui.scale = 100;
-        ui_moon_dim_seas = maria / 100.0;
         ui_moon_night_part(&ui, turn, dark ? UI_MOON_PAPER_DARK | UI_MOON_PAPER_STARS | (dimmed ? UI_MOON_PAPER_DIM : 0) : 0, accent, glow ? 1 : 0,
-                           glow > 1 ? 1 : 0, moon_alone, rect);
+                           glow > 1 ? 1 : 0, moon_alone, rect, maria / 100.0);
 }
 
 static unsigned int taskbar_accent(void)
