@@ -10144,6 +10144,12 @@ b32 main()
                 ui_kit_theme(UI_THEME_DARK, UI_ACCENT_STANDARD, 0);
                 // The settings window's map (its item lists and the text pool, which check_settings makes first) and its engine and faces:
                 // the settings groups are children of this run and read them without check_settings in their own line.
+                // The product's own start (settings_main, which parses argv and runs the loop, so it is not called here): the command's
+                // path, the page's buffers, the runner's output and pane. Without the path a group that runs a command copies a null word.
+                settings.moonwater = (string_address) "/moonwater", ui_buffers_start(&settings.page.buffers);
+                settings.runner.output = -1, settings.page.pane = 1, settings.page.menu_row = -1, settings_runner_ready();
+                check("settings: the command's path is the product's (/moonwater) before any group runs a command",
+                      settings.moonwater && string_equals((string_address)settings.moonwater, (string_address) "/moonwater"));
                 if (settings_map())
                 {
                         settings.ui.engine = &band_engine, settings.ui.regular = &band_face, settings.ui.scale = 100;
