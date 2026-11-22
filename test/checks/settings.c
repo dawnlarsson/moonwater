@@ -60,7 +60,7 @@ static positive settings_options(const struct settings_row address_to row)
 static int settings_row_named(const char address_to label)
 {
         for (positive at = 0; at < SETTINGS_ROWS; at++)
-                if (string_equals((string_address)settings_rows[at].label, (string_address)label))
+                if (settings_rows[at].label && string_equals((string_address)settings_rows[at].label, (string_address)label))
                         return (int)at;
         return 0;
 }
