@@ -45,10 +45,12 @@
 
 #include "group.c"
 
+#ifndef LINK_PEERS_LOCK
 #if defined(MACOS)
 #define LINK_PEERS_LOCK link_state_path(LINK_LEAF_PEERS_LOCK)
 #else
 #define LINK_PEERS_LOCK HOST_STATE "/link.peers.lock"
+#endif
 #endif
 #define LINK_GROUPS_MAX 8
 #define LINK_GREETED 16
@@ -427,7 +429,10 @@ static struct waterlink_peer address_to link_peer_returned(
         if (!link_name_good((string_address)offered))
                 return null;
         peer = link_peer_named(peers, (string_address)offered);
-        if (!peer || (!once && (!mark || peer->group != mark)))
+        if (!peer || (peer->flags & WATERLINK_PEER_BLOCKED) ||
+            (!once && (!mark || peer->group != mark ||
+                       (peer->flags & WATERLINK_PEER_LABELLED) ||
+                       link_keep_has(peer->key))))
                 return null;
         memory_copy(peer->key, key, 32);
         peer->may &= may;
@@ -744,8 +749,10 @@ static p8 link_pair_keep(positive group, p8 address_to key,
         //      A machine back under its name with a new key keeps the name
         //      (link_peer_returned); another is named before it is in the
         //      list, or it meets itself, and with no name left that nobody
-        //      has, it is not kept.
-        if (!peer && open && !crypto_same(key, link_self.me.public, 32))
+        //      has, it is not kept. A blocked peer is refused outright.
+        if (peer && (peer->flags & WATERLINK_PEER_BLOCKED))
+                peer = null;
+        else if (!peer && open && !crypto_same(key, link_self.me.public, 32))
         {
                 peer = link_peer_returned(address_of peers, offered, key, once,
                                           keys->mark, held.may);

@@ -104,7 +104,7 @@ static struct
         positive closed_idle;
 } link_tcp_self;
 
-static fn link_datagram(p8 address_to datagram, positive length,
+static p8 link_datagram(p8 address_to datagram, positive length,
                         p8 address_to address, p16 port, p64 now);
 static fn link_watch(system_poll_descriptor address_to watch,
                      p8 address_to address_to quiet, positive address_to count,
@@ -536,8 +536,13 @@ static fn link_tcp_heard(address_any context, p8 address_to datagram,
 {
         struct link_tcp address_to c = context;
 
-        c->frames++;
-        link_datagram(datagram, length, c->address, c->port, link_self.now);
+        if (link_datagram(datagram, length, c->address, c->port, link_self.now))
+        {
+                c->frames++;
+                c->heard = link_self.now;
+        }
+        else if (!c->outgoing && !c->frames)
+                c->broken = true;
 }
 
 /*      A connect that finished: its error, or on through the proxy's CONNECT
@@ -605,13 +610,13 @@ static p8 link_tcp_read(struct link_tcp address_to c, p64 now)
                 if (got <= 0)
                         return false;
                 read += (positive)got;
-                c->heard = now;
                 if (c->state == LINK_TCP_PROXY)
                 {
                         positive room = LINK_PROXY_HEAD_MOST - c->head;
                         positive take = (positive)got < room ? (positive)got : room;
                         bipolar head;
 
+                        c->heard = now;
                         memory_copy(c->proxy_head + c->head, bytes, take);
                         c->head += take;
                         head = link_proxy_reply(c->proxy_head, c->head);
@@ -627,7 +632,7 @@ static p8 link_tcp_read(struct link_tcp address_to c, p64 now)
                         link_tcp_write(c, now);
                 }
                 if (link_tcp_take(c->hold, address_of c->held, from, (positive)got,
-                                  link_tcp_heard, c) < 0)
+                                  link_tcp_heard, c) < 0 || c->broken)
                         return false;
         }
         return true;
@@ -689,10 +694,28 @@ static fn link_tcp_accept(p64 now)
                         continue;
                 }
                 link_tcp_self.taken++;
-                if (link_tcp_for(address, port) || !link_tcp_adopt(fd, address, port, false, now))
                 {
-                        link_tcp_self.refused++;
-                        socket_close((b32)fd);
+                        positive unauth_all = 0;
+                        positive unauth_ip = 0;
+
+                        for (positive at = 0; at < LINK_TCP_MOST; at++)
+                        {
+                                struct link_tcp address_to cur = link_tcp_self.conn + at;
+
+                                if (cur->state != LINK_TCP_FREE && !cur->outgoing && !cur->frames)
+                                {
+                                        unauth_all++;
+                                        if (!memory_compare(cur->address, address, 16))
+                                                unauth_ip++;
+                                }
+                        }
+                        if (unauth_ip >= 2 || unauth_all >= LINK_TCP_MOST / 2 ||
+                            link_tcp_for(address, port) ||
+                            !link_tcp_adopt(fd, address, port, false, now))
+                        {
+                                link_tcp_self.refused++;
+                                socket_close((b32)fd);
+                        }
                 }
         }
 }

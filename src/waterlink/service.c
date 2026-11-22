@@ -119,7 +119,10 @@ extern int _NSGetExecutablePath(char *buffer, unsigned int *size);
 #define LINK_MODEM_PATH link_state_path(LINK_LEAF_MODEM)
 #define LINK_MODEM_SEQ_PATH link_state_path(LINK_LEAF_MODEM_SEQ)
 #define LINK_MODEM_RX_PATH link_state_path(LINK_LEAF_MODEM_RX)
+#define LINK_MODEM_ZIP_PATH link_state_path(LINK_LEAF_MODEM_ZIP)
+#define LINK_MODEM_STREAMS_PATH link_state_path(LINK_LEAF_MODEM_STREAMS)
 #define LINK_LOCK_PATH link_state_path(LINK_LEAF_LOCK)
+#define LINK_PEERS_LOCK link_state_path(LINK_LEAF_PEERS_LOCK)
 #define LINK_STATE_PATH link_state_path(LINK_LEAF_STATE)
 #define LINK_STAMPS_PATH link_state_path(LINK_LEAF_STAMPS)
 #define LINK_HOME_DIR link_run_home()
@@ -140,7 +143,10 @@ extern unsigned int geteuid(void);
 #define LINK_MODEM_PATH "/root/link.modem"
 #define LINK_MODEM_SEQ_PATH "/root/link.modem.seq"
 #define LINK_MODEM_RX_PATH "/root/link.modem.rx"
+#define LINK_MODEM_ZIP_PATH "/root/link.modem.gz"
+#define LINK_MODEM_STREAMS_PATH HOST_STATE "/link.modem.streams"
 #define LINK_LOCK_PATH HOST_STATE "/link.lock"
+#define LINK_PEERS_LOCK HOST_STATE "/link.peers.lock"
 #define LINK_STATE_PATH HOST_STATE "/link.state"
 #define LINK_STAMPS_PATH "/root/link.stamps"
 #define LINK_HOME_DIR "/root"
@@ -588,14 +594,19 @@ static bipolar link_peers_save(link_peers address_to peers)
 
 static p32 link_policy_load(void)
 {
-        p32 mask = LINK_POLICY_ALL;
+        p32 mask = 0;
         positive got = 0;
+        bipolar read = link_read_private_records(LINK_POLICY_PATH,
+                                                 (p8 address_to)address_of mask,
+                                                 sizeof mask, sizeof mask,
+                                                 address_of got);
 
-        if (link_read_private_records(LINK_POLICY_PATH, (p8 address_to)address_of mask,
-                                      sizeof mask, sizeof mask, address_of got) == 0 &&
-            got == sizeof mask)
+        if (read == -ENOENT)
+                return LINK_POLICY_ALL;
+        if (read == 0 && got == sizeof mask)
                 return mask & LINK_POLICY_ALL;
-        return LINK_POLICY_ALL;
+        // Fail closed if the policy file exists but is unreadable, tampered, or malformed.
+        return 0;
 }
 
 static p8 link_policy_save(p32 mask)
@@ -1425,8 +1436,9 @@ static p8 link_path_in_rules(string_address path)
 #define LINK_OWN_PATHS                                                        \
         LINK_KEY_PATH, LINK_PEERS_PATH, LINK_HWIDS_PATH, LINK_POLICY_PATH,    \
         LINK_GROUPS_PATH, LINK_STAMPS_PATH, LINK_STATE_PATH, LINK_LOCK_PATH,  \
-        HOST_MACHINE_SCRIPT, LINK_MODEM_PATH, LINK_MODEM_SEQ_PATH,            \
-        LINK_MODEM_RX_PATH, LINK_PLACES_PATH, LINK_SWITCH_PATH,               \
+        LINK_PEERS_LOCK, HOST_MACHINE_SCRIPT, LINK_MODEM_PATH,                \
+        LINK_MODEM_SEQ_PATH, LINK_MODEM_RX_PATH, LINK_MODEM_ZIP_PATH,         \
+        LINK_MODEM_STREAMS_PATH, LINK_PLACES_PATH, LINK_SWITCH_PATH,          \
         LINK_PORT_PATH, LINK_TRANSPORT_PATH
 
 static p8 link_facts_is_own(const file_facts address_to target)
@@ -2032,6 +2044,12 @@ static fn link_session_flush(struct link_session address_to s, p64 now)
                                       address_of alone);
                 if (!used)
                         break;
+                if (waterlink_session_spent(link_age(now, s->now.made),
+                                            s->now.counter))
+                {
+                        s->finished = true;
+                        break;
+                }
 
                 head.kind = WATERLINK_KIND_CARRY;
                 head.receiver = s->now.theirs;
@@ -2070,17 +2088,25 @@ static fn link_session_flush(struct link_session address_to s, p64 now)
 // A sealed datagram of nothing: a keepalive, or the end.
 static fn link_session_say(struct link_session address_to s, p32 kind)
 {
+        p64 now = link_now();
         p8 datagram[64];
-        struct waterlink_datagram head = {kind, s->now.theirs,
-                                          s->now.counter++};
+        struct waterlink_datagram head;
         positive length;
 
+        if (!s->now.live ||
+            waterlink_session_spent(link_age(now, s->now.made), s->now.counter))
+        {
+                s->finished = true;
+                return;
+        }
+        head = (struct waterlink_datagram){kind, s->now.theirs,
+                                           s->now.counter++};
         memory_copy(datagram, address_of head, 16);
         length = waterlink_seal(address_of s->now.send, datagram, 0);
         s->tx_packets++;
         s->tx_bytes += length;
         (void)link_send_to(datagram, length, s->address, s->port);
-        s->spoke = link_now();
+        s->spoke = now;
 }
 
 /*      A frame whose payload is made already, its type byte first: the link
@@ -2744,6 +2770,39 @@ static p8 link_start_push(struct link_session address_to s, p8 address_to path,
         return true;
 }
 
+/* Open a pulled file directly and validate the opened descriptor (regular file,
+   not an own state file, not inside protected trees) to avoid TOCTOU symlink
+   swaps and FIFO/device-file hangs. */
+static p8 link_start_pull(struct link_session address_to s,
+                          string_address path, p32 address_to mode,
+                          positive address_to carried)
+{
+        file_facts far;
+        bipolar fd;
+
+        if (!path[0])
+                return false;
+        fd = system_open_at(AT_FDCWD, path,
+                            FILE_READ | O_NONBLOCK | O_CLOEXEC);
+        if (fd < 0)
+                return false;
+        if (!file_look(fd, (string_address)"", AT_EMPTY_PATH,
+                       address_of far) ||
+            (far.mode & MODE_FORMAT) != MODE_FILE ||
+            link_facts_is_own(address_of far) ||
+            link_fd_in_rules(fd, true))
+        {
+                system_close(fd);
+                return false;
+        }
+        address_to mode = far.mode & 0777;
+        address_to carried = sizeof(p32);
+        link_stream_set(s->reads, fd, LINK_KEY_OUTPUT,
+                        WATERLINK_FRAME_DURABLE);
+        s->reads[1].key = LINK_KEY_ERROR;
+        return true;
+}
+
 static inline fn link_fs_put16(p8 address_to p, p16 v)
 {
         memory_store_unaligned(p16, p, v);
@@ -3103,7 +3162,7 @@ static fn link_fs_handle_read(struct link_fs_buf address_to out, p32 req_id,
                 link_fs_reply_err(out, req_id, FS_OP_READ, -21);
                 return;
         }
-        if (link_facts_is_own(address_of facts) || link_fd_in_rules(fd, false))
+        if (link_facts_is_own(address_of facts) || link_fd_in_rules(fd, true))
         {
                 system_close(fd);
                 link_fs_reply_err(out, req_id, FS_OP_READ, -13);
@@ -3293,11 +3352,9 @@ static fn link_request(struct link_session address_to s, p8 address_to payload,
         p8 text[LINK_REQUEST_MAX + 1];
         p32 mode = 0;
         positive carried = 0;
-        file_facts far;
         positive skip;
         positive grant;
         string_address run[] = {"sh", "-c", (string_address)text, null};
-        string_address pull[] = {"cat", "--", (string_address)text, null};
         string_address log[] = {"dmesg", "--follow", null};
 
         //      One request to a session: a second one, after an answer of
@@ -3308,7 +3365,7 @@ static fn link_request(struct link_session address_to s, p8 address_to payload,
         //      Grants as they are now, not as they were at the handshake.
         link_peers_load(address_of peers);
         peer = link_peer_keyed(address_of peers, s->peer);
-        if (peer)
+        if (peer && !(peer->flags & WATERLINK_PEER_BLOCKED))
                 may = peer->may;
 
         grant = link_grant_asked(payload[0]);
@@ -3405,14 +3462,8 @@ static fn link_request(struct link_session address_to s, p8 address_to payload,
                 started = text[0] && link_start_command(s, run, 3);
                 break;
         case LINK_KIND_PULL:
-                //      The file's mode goes with the yes, so what is pulled
-                //      is as private here as it was there.
-                if (file_look_at((string_address)text, address_of far))
-                {
-                        mode = far.mode & 0777;
-                        carried = sizeof mode;
-                }
-                started = text[0] && link_start_command(s, pull, 3);
+                started = link_start_pull(s, (string_address)text,
+                                          address_of mode, address_of carried);
                 break;
         case LINK_KIND_LOG:
                 started = link_start_command(s, log, 2);
@@ -3552,6 +3603,12 @@ static fn link_stream_read(struct link_session address_to s,
                                                 WATERLINK_FRAME_DURABLE |
                                                         WATERLINK_FRAME_LAST,
                                                 LINK_END, null, 0);
+                        else if (link_self.server && s->kind == LINK_KIND_PULL &&
+                                 stream == s->reads)
+                        {
+                                link_stream_close(s, stream);
+                                link_exited(s, got < 0 ? 1 : 0, link_self.now);
+                        }
                         return;
                 }
                 //      A read of more than a frame is a paste or a file and not
@@ -3854,31 +3911,31 @@ static fn link_hwid_heard(struct link_session address_to s,
         link_peers peers;
         p8 peers_ok = link_peers_for_change(address_of peers);
         p8 blocked = false, hwid_changed = false, peers_changed = false;
+        p8 owned_by_other = false;
         p32 prev_may = ~(p32)0;
         struct waterlink_peer address_to cur = peers_ok ? link_peer_keyed(address_of peers, s->peer) : null;
 
-        // Check if this hardware ID was previously seen under another key (reinstalled PC) or blocked.
+        // Check if this hardware ID was previously seen under another key or blocked.
+        // Never delete another peer's record based on a self-asserted HWID, and do not
+        // bind an HWID already owned by a different key (prevents peer eviction and
+        // cross-peer block poisoning).
         for (positive i = 0; i < count; i++)
         {
                 if (!crypto_same(entries[i].hwid, hwid, LINK_HWID_BYTES))
                         continue;
                 if (entries[i].flags & WATERLINK_PEER_BLOCKED)
                         blocked = true;
-                if (!crypto_same(entries[i].key, s->peer, 32) && peers_ok)
+                if (!crypto_same(entries[i].key, s->peer, 32))
                 {
-                        struct waterlink_peer address_to old = link_peer_keyed(address_of peers, entries[i].key);
-                        if (old)
+                        owned_by_other = true;
+                        if (peers_ok)
                         {
-                                if ((old->flags & WATERLINK_PEER_BLOCKED) || !old->may)
-                                        blocked = true;
-                                prev_may &= old->may;
-                                // If same group reinstall (and not blocked or online), deduplicate stale old record.
-                                if (!blocked && cur && cur != old && old->group &&
-                                    old->group == cur->group && !link_keep_has(old->key))
+                                struct waterlink_peer address_to old = link_peer_keyed(address_of peers, entries[i].key);
+                                if (old)
                                 {
-                                        *old = peers.peer[--peers.count];
-                                        cur = link_peer_keyed(address_of peers, s->peer);
-                                        peers_changed = true;
+                                        if ((old->flags & WATERLINK_PEER_BLOCKED) || !old->may)
+                                                blocked = true;
+                                        prev_may &= old->may;
                                 }
                         }
                 }
@@ -3894,27 +3951,30 @@ static fn link_hwid_heard(struct link_session address_to s,
                 else if (prev_may != ~(p32)0 && (cur->may & prev_may) != cur->may)
                         cur->may &= prev_may, peers_changed = true;
         }
-        // Upsert (s->peer, hwid) entry in link.hwids.
-        positive found = count;
-        for (positive i = 0; i < count; i++)
-                if (crypto_same(entries[i].key, s->peer, 32))
+        // Upsert (s->peer, hwid) entry in link.hwids only if not already claimed by another peer.
+        if (!owned_by_other)
+        {
+                positive found = count;
+                for (positive i = 0; i < count; i++)
+                        if (crypto_same(entries[i].key, s->peer, 32))
+                        {
+                                found = i;
+                                break;
+                        }
+                if (found < count)
                 {
-                        found = i;
-                        break;
+                        if (!crypto_same(entries[found].hwid, hwid, LINK_HWID_BYTES))
+                                memory_copy(entries[found].hwid, hwid, LINK_HWID_BYTES), hwid_changed = true;
+                        if (blocked && !(entries[found].flags & WATERLINK_PEER_BLOCKED))
+                                entries[found].flags |= WATERLINK_PEER_BLOCKED, hwid_changed = true;
                 }
-        if (found < count)
-        {
-                if (!crypto_same(entries[found].hwid, hwid, LINK_HWID_BYTES))
-                        memory_copy(entries[found].hwid, hwid, LINK_HWID_BYTES), hwid_changed = true;
-                if (blocked && !(entries[found].flags & WATERLINK_PEER_BLOCKED))
-                        entries[found].flags |= WATERLINK_PEER_BLOCKED, hwid_changed = true;
-        }
-        else if (count < LINK_HWIDS_MAX)
-        {
-                memory_copy(entries[count].key, s->peer, 32);
-                memory_copy(entries[count].hwid, hwid, LINK_HWID_BYTES);
-                entries[count].flags = blocked ? WATERLINK_PEER_BLOCKED : 0;
-                count++, hwid_changed = true;
+                else if (count < LINK_HWIDS_MAX)
+                {
+                        memory_copy(entries[count].key, s->peer, 32);
+                        memory_copy(entries[count].hwid, hwid, LINK_HWID_BYTES);
+                        entries[count].flags = blocked ? WATERLINK_PEER_BLOCKED : 0;
+                        count++, hwid_changed = true;
+                }
         }
         if (hwid_changed)
                 link_hwids_save(entries, count);
@@ -4260,7 +4320,7 @@ static fn link_stamp_keep(p8 address_to key, p8 address_to stamp)
 
 static fn link_sessions_granted(p64 now);
 
-static fn link_server_initiation(p8 address_to datagram, positive length,
+static p8 link_server_initiation(p8 address_to datagram, positive length,
                                  p8 address_to address, p16 port, p64 now)
 {
         struct waterlink_noise noise;
@@ -4280,6 +4340,7 @@ static fn link_server_initiation(p8 address_to datagram, positive length,
         p32 theirs;
         p32 ours;
         bipolar admitted;
+        p8 ok = false;
 
         //      To this machine's key, or a member's greeting to a group's.
         if (!waterlink_gate_passes(me, datagram, length))
@@ -4290,7 +4351,7 @@ static fn link_server_initiation(p8 address_to datagram, positive length,
                                datagram, length))
                         group++;
                 if (group == link_nearby.groups.count)
-                        return;
+                        return false;
                 me = address_of link_nearby.keys[group].identity;
                 psk = link_nearby.keys[group].psk;
         }
@@ -4311,6 +4372,7 @@ static fn link_server_initiation(p8 address_to datagram, positive length,
                                        answer);
                 (void)link_send_to(answer, WATERLINK_COOKIE_DATAGRAM, address,
                                    port);
+                ok = true;
         }
         if (admitted <= 0)
                 goto forget;
@@ -4320,7 +4382,10 @@ static fn link_server_initiation(p8 address_to datagram, positive length,
         {
                 if (link_stamp_new(who, hello) &&
                     link_pair_greeted(group, who, hello, address, port, now))
+                {
                         link_stamp_keep(who, hello);
+                        ok = true;
+                }
                 goto forget;
         }
 
@@ -4411,9 +4476,11 @@ static fn link_server_initiation(p8 address_to datagram, positive length,
         link_keep_linked(who);
         (void)link_send_to(answer, WATERLINK_DATAGRAM, address, port);
         link_self.state_dirty = true;
+        ok = true;
 forget:
         crypto_forget(address_of noise, sizeof noise);
         crypto_forget(ephemeral, sizeof ephemeral);
+        return ok;
 }
 
 // Receiving, at either end ----------------------------------------------------
@@ -4516,7 +4583,7 @@ static p8 link_carried(p8 address_to datagram, positive length,
         {
                 s->before = s->now;
                 s->now = s->next;
-                s->next.live = false;
+                crypto_forget(address_of s->next, sizeof s->next);
         }
 
         moved = !link_self.heard_modem &&
@@ -5132,14 +5199,15 @@ static p64 link_sessions_turn(p64 now)
                 /* Revoked, closed or expired sessions have no remaining
                    authority over their descriptors. In particular, a held
                    upload end must not publish its file after revocation. */
+                if (s->now.live &&
+                    waterlink_session_spent(link_age(now, s->now.made),
+                                            s->now.counter))
+                        s->finished = true;
                 if (link_self.server)
                 {
                         if (s->exit_sent && waterlink_idle(s->link))
                                 s->finished = true;
-                        if (link_age(now, s->heard) > LINK_DEAD ||
-                            (s->now.live &&
-                             waterlink_session_spent(link_age(now, s->now.made),
-                                                     s->now.counter)))
+                        if (link_age(now, s->heard) > LINK_DEAD)
                                 s->finished = true;
                         if (s->finished)
                         {
@@ -5200,8 +5268,8 @@ static positive link_sessions_watch(system_poll_descriptor address_to watch,
         return count;
 }
 
-static fn link_client_answered(p8 address_to datagram, positive length);
-static fn link_client_cookie(p8 address_to datagram, positive length, p64 now);
+static p8 link_client_answered(p8 address_to datagram, positive length);
+static p8 link_client_cookie(p8 address_to datagram, positive length, p64 now);
 
 typedef struct
 {
@@ -5225,41 +5293,46 @@ typedef struct
 
 static link_client_state link_client;
 
-static fn link_datagram(p8 address_to datagram, positive length,
+static p8 link_datagram(p8 address_to datagram, positive length,
                         p8 address_to address, p16 port, p64 now)
 {
         struct waterlink_datagram head;
 
         if (length < 16)
-                return;
+                return false;
         memory_copy(address_of head, datagram, 16);
         if (head.kind == WATERLINK_KIND_CARRY || head.kind == WATERLINK_KIND_CLOSE)
-                (void)link_carried(datagram, length, address, port, now,
-                                   link_hear);
+                return link_carried(datagram, length, address, port, now,
+                                    link_hear);
         /* An answer or a cookie is for the initiation this machine has out,
            if it has one: a client run's, or the listener's keeper's. With none
            out they are ignored, as they were. */
-        else if (head.kind == WATERLINK_KIND_RESPOND)
+        if (head.kind == WATERLINK_KIND_RESPOND)
         {
                 p8 pending = link_client.ours != 0;
                 struct link_session address_to s = link_client.session;
 
-                link_client_answered(datagram, length);
-                //      The answer proved the keys and says where the
-                //      peer is now: the session is heard and moved there.
-                if (pending && !link_client.ours)
+                if (link_client_answered(datagram, length))
                 {
-                        s->moved |= memory_compare(s->address, address, 16) ||
-                                    s->port != port;
-                        memory_copy(s->address, address, 16);
-                        s->port = port;
-                        s->heard = now;
+                        //      The answer proved the keys and says where the
+                        //      peer is now: the session is heard and moved there.
+                        if (pending && !link_client.ours)
+                        {
+                                s->moved |= memory_compare(s->address, address, 16) ||
+                                            s->port != port;
+                                memory_copy(s->address, address, 16);
+                                s->port = port;
+                                s->heard = now;
+                        }
+                        return true;
                 }
+                return false;
         }
-        else if (head.kind == WATERLINK_KIND_COOKIE)
-                link_client_cookie(datagram, length, now);
-        else if (link_self.server && head.kind == WATERLINK_KIND_INITIATE)
-                link_server_initiation(datagram, length, address, port, now);
+        if (head.kind == WATERLINK_KIND_COOKIE)
+                return link_client_cookie(datagram, length, now);
+        if (link_self.server && head.kind == WATERLINK_KIND_INITIATE)
+                return link_server_initiation(datagram, length, address, port, now);
+        return false;
 }
 
 static fn link_receive_all(p64 now)
@@ -5417,6 +5490,7 @@ static b32 link_serve(string_address ready_text)
         link_self.socket = -1;
         system_remove_at(AT_FDCWD, LINK_STATE_PATH, 0);
         system_close(lock);
+        link_secrets_forget();
         return 0;
 }
 
@@ -5599,7 +5673,7 @@ static p8 link_client_answer(struct link_session address_to s,
            DH and tag has verified. */
         candidate = *noise;
         if (!waterlink_answered(address_of candidate, address_of link_self.me,
-                                datagram, address_of theirs))
+                                datagram, address_of theirs) || !theirs)
         {
                 //      Addressed to this key and answering this initiation,
                 //      yet not made by the key the peer record names.
@@ -5619,7 +5693,7 @@ static p8 link_client_answer(struct link_session address_to s,
         return true;
 }
 
-static fn link_client_answered(p8 address_to datagram, positive length)
+static p8 link_client_answered(p8 address_to datagram, positive length)
 {
         //      Only for a session still open: one closed since its initiation
         //      left (a close from the far side, then its answer) has no keys
@@ -5630,23 +5704,26 @@ static fn link_client_answered(p8 address_to datagram, positive length)
         {
                 link_client.ours = 0;
                 link_client.unanswered_since = 0;
+                return true;
         }
+        return false;
 }
 
 /*      A cookie reply to the initiation out: kept, and asked again under it
         at once if that initiation carried none -- only then, so a forged
         reply cannot keep the client initiating; otherwise the next attempt
         carries it. Either way it is an attempt. */
-static fn link_client_cookie(p8 address_to datagram, positive length, p64 now)
+static p8 link_client_cookie(p8 address_to datagram, positive length, p64 now)
 {
         if (!link_client.ours || !link_client.session->used ||
             !waterlink_cookie_take(link_client.session->peer, link_client.mac1,
                                    datagram, length, link_client.cookie))
-                return;
+                return false;
         link_client.cookie_at = now ? now : 1;
         if (!link_client.cookied)
                 link_client.initiated = now > LINK_ATTEMPT ? now - LINK_ATTEMPT - 1
                                                            : 0;
+        return true;
 }
 
 static p64 link_rekey_after(void)
@@ -5742,7 +5819,8 @@ static fn link_keep_look(void)
                         entry->used = false;
         }
         for (positive at = 0; at < peers.count; at++)
-                if (peers.peer[at].group)
+                if (peers.peer[at].group &&
+                    !(peers.peer[at].flags & WATERLINK_PEER_BLOCKED))
                         (void)link_keep_for(peers.peer[at].key, true);
 }
 
@@ -5782,6 +5860,7 @@ static fn link_keep_fail(p64 now)
 
         link_keep_dial = null;
         link_client.ours = 0;
+        crypto_forget(address_of link_client.noise, sizeof link_client.noise);
         if (link_keep_rekey)
         {
                 link_keep_rekey = false;
@@ -5829,7 +5908,7 @@ static fn link_keep_dial_new(p64 now)
                         continue;
                 link_peers_load(address_of peers);
                 peer = link_peer_keyed(address_of peers, entry->key);
-                if (!peer)
+                if (!peer || (peer->flags & WATERLINK_PEER_BLOCKED))
                 {
                         entry->used = false;
                         continue;
@@ -5972,6 +6051,11 @@ static b32 link_client_run(string_address name, p8 kind,
         if (link_identity(address_of link_self.me, false) < 0)
                 return host_refuse("this machine has no link key; "
                                    "moonwater link on makes one\n");
+        scope_exit({
+                crypto_forget(address_of link_self.me, sizeof link_self.me);
+                crypto_forget(address_of link_client, sizeof link_client);
+                crypto_forget(link_inbound, sizeof link_inbound);
+        });
 
         link_peers_load(address_of peers);
         peer = link_peer_named(address_of peers, name);
@@ -6538,6 +6622,8 @@ static fn link_fs_close(struct link_fs_client address_to c)
                         link_client.ours = 0;
                         link_client.session = null;
                         link_client.attempts = 0;
+                        crypto_forget(address_of link_client.noise,
+                                      sizeof link_client.noise);
                 }
                 if (c->session->now.live)
                         link_session_end(c->session, true);

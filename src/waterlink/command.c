@@ -632,6 +632,7 @@ static b32 link_add_locked(string_address name, string_address text,
                         peer.may = found->may;
                         peer.group = found->group;
                         peer.seen = found->seen;
+                        peer.flags |= found->flags & WATERLINK_PEER_BLOCKED;
                         if (!where)
                         {
                                 memory_copy(peer.address, found->address,

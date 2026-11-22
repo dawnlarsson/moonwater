@@ -146,12 +146,18 @@ static FILE *rx_send_output(const char *base, unsigned send, char *name, sized s
         return fopen(name, "wb");
 }
 
+/* Caps against a hostile sender (the modem assumes the remote machine may be compromised):
+   bound gzip expansion and the number of output files created from one capture. */
+#define RX_GUNZIP_MAX (256u << 20)
+#define RX_MAX_SENDS 64u
+
 /* Inflates a gzip member from src to dst. Answers 1 when the whole member came through, 0 for a damaged or short one. */
 static int rx_gunzip(FILE *src, FILE *dst)
 {
         static unsigned char in_buf[65536], out_buf[65536];
         z_stream strm;
         int ret = Z_OK, ok = 0;
+        sized total_out = 0;
 
         memory_zero(&strm, sizeof strm);
         if (inflateInit2(&strm, 16 + MAX_WBITS) != Z_OK)
@@ -170,6 +176,11 @@ static int rx_gunzip(FILE *src, FILE *dst)
                         if (ret == Z_STREAM_ERROR || ret == Z_NEED_DICT || ret == Z_DATA_ERROR || ret == Z_MEM_ERROR)
                                 goto done;
                         have = sizeof out_buf - strm.avail_out;
+                        if (have > RX_GUNZIP_MAX - total_out) {
+                                fprintf(stderr, "modem_rx: gzip output exceeds %u bytes: refused\n", RX_GUNZIP_MAX);
+                                goto done;
+                        }
+                        total_out += have;
                         if (fwrite(out_buf, 1, have, dst) != have)
                                 goto done;
                 } while (strm.avail_out == 0);
@@ -378,7 +389,18 @@ int main(int argc, char **argv)
 
                                 /* A send starts at byte 0 of its own file: after data, a datagram at 0 begins the next send. */
                                 if (offset == 0 && expected > 0) {
+                                        if (sends >= RX_MAX_SENDS) {
+                                                rx_forget(&cr.rx.mac, sizeof cr.rx.mac);
+                                                fclose(out);
+                                                if (in != stdin)
+                                                        fclose(in);
+                                                fprintf(stderr, "modem_rx: too many sends (limit %u): stopped\n", RX_MAX_SENDS);
+                                                return 1;
+                                        }
                                         if (fclose(out) != 0) {
+                                                rx_forget(&cr.rx.mac, sizeof cr.rx.mac);
+                                                if (in != stdin)
+                                                        fclose(in);
                                                 fprintf(stderr, "modem_rx: cannot write %s\n", name);
                                                 return 1;
                                         }
@@ -386,6 +408,9 @@ int main(int argc, char **argv)
                                         sends++;
                                         out = rx_send_output(out_path, sends, name, sizeof name);
                                         if (!out) {
+                                                rx_forget(&cr.rx.mac, sizeof cr.rx.mac);
+                                                if (in != stdin)
+                                                        fclose(in);
                                                 fprintf(stderr, "modem_rx: cannot write %s\n", name);
                                                 return 1;
                                         }
@@ -422,6 +447,9 @@ int main(int argc, char **argv)
         }
 
         if (fclose(out) != 0) {
+                rx_forget(&cr.rx.mac, sizeof cr.rx.mac);
+                if (in != stdin)
+                        fclose(in);
                 fprintf(stderr, "modem_rx: cannot write %s\n", name);
                 return 1;
         }

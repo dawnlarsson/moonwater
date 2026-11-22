@@ -487,6 +487,8 @@ static p8 link_slot_text[LINK_LEAF_COUNT][LINK_STATE_ROOM];
         An existing directory is fine; any other failure leaves the name
         empty, which is what a missing HOME is.
 */
+extern unsigned int geteuid(void);
+
 static string_address link_state_dir(void)
 {
         string_address home;
@@ -507,11 +509,25 @@ static string_address link_state_dir(void)
                     AT_FDCWD, (string_address)link_dir_text, 0700);
                 file_facts facts;
 
-                if (made < 0 &&
-                    (made != -EEXIST ||
-                     !file_look(AT_FDCWD, (string_address)link_dir_text, 0x0020, address_of facts) ||
-                     (facts.mode & MODE_FORMAT) != MODE_DIRECTORY))
-                        link_dir_text[0] = end;
+                if (made < 0)
+                {
+                        bipolar dirfd = made == -EEXIST
+                                            ? system_open_at(AT_FDCWD,
+                                                             (string_address)link_dir_text,
+                                                             FILE_READ | O_DIRECTORY |
+                                                                 O_NOFOLLOW | O_CLOEXEC)
+                                            : -1;
+                        bool ok = dirfd >= 0 &&
+                                  file_look(dirfd, (string_address)"", 0, address_of facts) &&
+                                  (facts.mode & MODE_FORMAT) == MODE_DIRECTORY &&
+                                  facts.owner == (p32)geteuid() &&
+                                  (!(facts.mode & 077) || fchmod((int)dirfd, 0700) == 0);
+
+                        if (dirfd >= 0)
+                                system_close(dirfd);
+                        if (!ok)
+                                link_dir_text[0] = end;
+                }
         }
         return (string_address)link_dir_text;
 }
