@@ -3429,10 +3429,28 @@ static const char *compositor_clip_offered(unsigned int which, unsigned long nth
         return windows_clip_offered(compositor_clip.map[which], compositor.table->clip_length[which], nth, 0, length);
 }
 
+/*
+        The store's owner and change count, kept here: the table's clip_owner and clip_serial are written by clients too. The owner is the
+        row that installed the slot (-1 for none, or a native install); the serial moves on every install, clear and owner change.
+*/
+static int compositor_clip_owner_row_n[2] = {-1, -1};
+static unsigned long compositor_clip_serial_n[2];
+
+static int compositor_clip_owner_row(unsigned int which)
+{
+        return which < 2 ? compositor_clip_owner_row_n[which] : -1;
+}
+
+static unsigned long compositor_clip_serial(unsigned int which)
+{
+        return which < 2 ? compositor_clip_serial_n[which] : 0;
+}
+
 static void compositor_clip_clear(unsigned int which)
 {
         compositor_clip_slot_clear(which);
         compositor.table->clip_owner[which] = -1;
+        compositor_clip_owner_row_n[which] = -1, compositor_clip_serial_n[which]++;
         compositor_clip_broadcast(which, -1);
 }
 
@@ -3548,6 +3566,7 @@ static void compositor_clip_keep(unsigned int which, int opened, unsigned long l
         }
         compositor_clip_slot_install(which, opened, length);
         compositor.table->clip_owner[which] = owner;
+        compositor_clip_owner_row_n[which] = owner, compositor_clip_serial_n[which]++;
         compositor_clip_broadcast(which, owner);
 }
 
@@ -4333,8 +4352,8 @@ static int compositor_clip_start(void)
 static void compositor_clip_leave(int row)
 {
         for (unsigned int which = 0; which < 2; which++)
-                if (compositor.table->clip_owner[which] == row)
-                        compositor.table->clip_owner[which] = -1;
+                if (compositor_clip_owner_row_n[which] == row)
+                        compositor.table->clip_owner[which] = -1, compositor_clip_owner_row_n[which] = -1, compositor_clip_serial_n[which]++;
         compositor_clip.gesture[row] = 0;
         compositor_clip.offer_seen[row] = compositor.table->clip_offer_serial[row];
         compositor_clip.ask_seen[row] = compositor.table->clip_ask_serial[row];
