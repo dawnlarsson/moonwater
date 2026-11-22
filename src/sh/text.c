@@ -3453,7 +3453,8 @@ static bool base58_level_next(base58_level address_to level, bool inverse)
         base58_level address_to next = level + 1;
         positive dn = level->power_used;
 
-        if (!(next->power = (p64 address_to)memory_take(2 * dn * sizeof(p64))) ||
+        if (dn > positive_max / (2 * sizeof(p64)) ||
+            !(next->power = (p64 address_to)memory_take(2 * dn * sizeof(p64))) ||
             !big_multiply(next->power, level->power, dn, level->power, dn))
                 return false;
         next->power_used = big_trim(next->power, 2 * dn);
@@ -3462,7 +3463,8 @@ static bool base58_level_next(base58_level address_to level, bool inverse)
 
         positive rn = level->inverse_used;
 
-        if (!(next->inverse = (p64 address_to)memory_take((2 * rn + 1) * sizeof(p64))) ||
+        if (rn > (positive_max / sizeof(p64) - 1) / 2 ||
+            !(next->inverse = (p64 address_to)memory_take((2 * rn + 1) * sizeof(p64))) ||
             !big_multiply(next->inverse, level->inverse, rn, level->inverse, rn))
                 return false;
 
@@ -16690,7 +16692,11 @@ static b32 text_pr()
         pr_ended = false;
         pr_reset();
 
-        return_if(!text_took(address_of taking), text_done(1));
+        if (!text_took(address_of taking))
+        {
+                byte_store_release(address_of pr_column_digits);
+                return text_done(1);
+        }
 
         if (pr_column_digits_given && pr_column_digits.used)
                 pr_column_count((string_address)pr_column_digits.bytes);
@@ -16747,6 +16753,9 @@ static b32 text_pr()
                 pr_print_files(0, null);
         else
         {
+                if (files > positive_max / sizeof(string_address))
+                        return text_done(string_diagnostic(&text_diagnostic, 1, null, "memory exhausted"));
+
                 string_address address_to names =
                     (string_address address_to)memory_take(files * sizeof(string_address));
 
@@ -16763,14 +16772,19 @@ static b32 text_pr()
                 memory_give(names);
         }
 
-        if (pr_stdin)
-                memory_give(pr_stdin);
+        memory_give(pr_stdin);
+        pr_stdin = null;
         byte_store_release(address_of pr_buff);
         memory_give(pr_line_vector);
+        pr_line_vector = null;
         memory_give(pr_end_vector);
+        pr_end_vector = null;
         memory_give(pr_column_vector);
+        pr_column_vector = null;
         memory_give(pr_date_text);
+        pr_date_text = null;
         memory_give(pr_clump);
+        pr_clump = null;
 
         return text_done(pr_failed_opens ? 1 : 0);
 }
@@ -29220,6 +29234,57 @@ static bool grep_pieces_search(grep_pieces address_to task);
         is null, or a file a walk's job handed back. False when -q has its
         answer.
 */
+static fn grep_complex_report(positive count)
+{
+        for (; count; count--)
+        {
+                string_diagnostic(&text_diagnostic, 0, null,
+                                  "regular expression too complex");
+                text_status = 2;
+        }
+}
+
+static bool grep_binary_enter_tail(grep_plan address_to plan,
+                                   grep_state address_to state,
+                                   bool literal_only,
+                                   bool address_to binary_tail,
+                                   positive address_to binary_before,
+                                   bool address_to binary_zapping)
+{
+        if (grep_binary_files == GREP_BINARY_WITHOUT)
+        {
+                state->matches = 0;
+                return false;
+        }
+
+        address_to binary_tail = true;
+        address_to binary_before = state->matches;
+        plan->mode = GREP_SPAN_FIRST;
+        address_to binary_zapping = !literal_only;
+        plan->binary = literal_only ? null : plan->binary;
+        return true;
+}
+
+static fn grep_emit_line(bool grouped, string_address separator,
+                         bool address_to split, positive shown,
+                         bool check_encoding, bool address_to unprintable,
+                         string_address shown_name, positive shown_length,
+                         p8 mark, positive number, positive at,
+                         p8 address_to line, positive length,
+                         bool context, bool highlight)
+{
+        grep_group_gap(grouped, separator, split, shown, number);
+
+        if (check_encoding && !text_utf8_whole(line, length))
+                address_to unprintable = true;
+        else
+        {
+                grep_head(shown_name, shown_length, mark, number, at, grep_column);
+                grep_color_line(line, length, context, highlight);
+                text_put_character(text_delimiter);
+        }
+}
+
 static bool grep_one(grep_run address_to run, string_address name)
 {
         const rx_hints address_to literal = run->literal;
@@ -29539,19 +29604,12 @@ static bool grep_one(grep_run address_to run, string_address name)
                                                 left = (positive)(edge - at) + 1;
                                         else if (binary.from == positive_max)
                                                 probing = true;
-                                        else if (grep_binary_files == GREP_BINARY_WITHOUT)
-                                        {
-                                                state.matches = 0;
+                                        else if (!grep_binary_enter_tail(
+                                                     address_of plan, address_of state,
+                                                     literal_only, address_of binary_tail,
+                                                     address_of binary_before,
+                                                     address_of binary_zapping))
                                                 break;
-                                        }
-                                        else
-                                        {
-                                                binary_tail = true;
-                                                binary_before = state.matches;
-                                                plan.mode = GREP_SPAN_FIRST;
-                                                binary_zapping = !literal_only;
-                                                plan.binary = literal_only ? null : plan.binary;
-                                        }
                                 }
                         }
 
@@ -29621,17 +29679,12 @@ static bool grep_one(grep_run address_to run, string_address name)
                                         if (!spanned && binary.from != positive_max &&
                                             line_end >= binary.from)
                                         {
-                                                if (grep_binary_files == GREP_BINARY_WITHOUT)
-                                                {
-                                                        state.matches = 0;
+                                                if (!grep_binary_enter_tail(
+                                                        address_of plan, address_of state,
+                                                        literal_only, address_of binary_tail,
+                                                        address_of binary_before,
+                                                        address_of binary_zapping))
                                                         break;
-                                                }
-
-                                                binary_tail = true;
-                                                binary_before = state.matches;
-                                                plan.mode = GREP_SPAN_FIRST;
-                                                binary_zapping = !literal_only;
-                                                plan.binary = literal_only ? null : plan.binary;
 
                                                 if (binary_zapping)
                                                         grep_binary_zap(line, length);
@@ -29651,12 +29704,8 @@ static bool grep_one(grep_run address_to run, string_address name)
                         if (!spanned)
                                 grep_span(address_of plan, address_of state, line, size);
 
-                        for (; state.complex; state.complex--)
-                        {
-                                string_diagnostic(&text_diagnostic, 0, null,
-                                                  "regular expression too complex");
-                                text_status = 2;
-                        }
+                        grep_complex_report(state.complex);
+                        state.complex = 0;
                 }
 
                 matches = state.matches;
@@ -29850,12 +29899,7 @@ static bool grep_one(grep_run address_to run, string_address name)
                                                              offset, !literal_only,
                                                              address_of complex);
 
-                                for (; complex; complex--)
-                                {
-                                        string_diagnostic(&text_diagnostic, 0, null,
-                                                          "regular expression too complex");
-                                        text_status = 2;
-                                }
+                                grep_complex_report(complex);
 
                                 if (binary_matched)
                                 {
@@ -29871,20 +29915,10 @@ static bool grep_one(grep_run address_to run, string_address name)
                 {
                         if (pending)
                         {
-                                grep_group_gap(grouped, separator,
-                                               address_of split, shown,
-                                               number);
-
-                                if (check_encoding &&
-                                    !text_utf8_whole(line, text_line_length))
-                                        unprintable = true;
-                                else
-                                {
-                                        grep_head(shown_name, shown_length, '-', number, at, grep_column);
-                                        grep_color_line(line, text_line_length,
-                                                        true, invert);
-                                        text_put_character(text_delimiter);
-                                }
+                                grep_emit_line(grouped, separator, address_of split,
+                                               shown, check_encoding, address_of unprintable,
+                                               shown_name, shown_length, '-', number, at,
+                                               line, text_line_length, true, invert);
 
                                 shown = number;
                                 run->shown_any = true;
@@ -30011,21 +30045,10 @@ static bool grep_one(grep_run address_to run, string_address name)
                 if (plain_output)
                         text_put(line, text_line_length + 1);
                 else
-                {
-                        grep_group_gap(grouped, separator, address_of split,
-                                       shown, number);
-
-                        if (check_encoding &&
-                            !text_utf8_whole(line, text_line_length))
-                                unprintable = true;
-                        else
-                        {
-                                grep_head(shown_name, shown_length, ':', number, at, grep_column);
-                                grep_color_line(line, text_line_length, false,
-                                                !invert);
-                                text_put_character(text_delimiter);
-                        }
-                }
+                        grep_emit_line(grouped, separator, address_of split,
+                                       shown, check_encoding, address_of unprintable,
+                                       shown_name, shown_length, ':', number, at,
+                                       line, text_line_length, false, !invert);
 
                 shown = number;
                 run->shown_any = true;
@@ -33296,6 +33319,26 @@ static fn sed_stores_hold()
         }
 }
 
+static bool sed_parse_path(p8 kind, sed_command address_to command)
+{
+        p8 name[TEXT_PATH_MAX];
+        positive have = sed_rest_of_line(name, sizeof(name));
+
+        if (!have)
+        {
+                sed_broken = true;
+                return false;
+        }
+
+        if (kind == 'w' || kind == 'W')
+                command->writer = sed_name_of(sed_file_names, address_of sed_file_count, name, have);
+        else if (kind == 'R')
+                command->writer = sed_name_of(sed_reader_names, address_of sed_reader_count, name, have);
+        else
+                command->text = sed_text_add(name, have);
+        return true;
+}
+
 static fn sed_parse()
 {
         b32 open_count = 0;
@@ -33487,21 +33530,9 @@ static fn sed_parse()
 
                                 if (flag == 'w')
                                 {
-                                        p8 name[TEXT_PATH_MAX];
-                                        positive length;
-
                                         sed_at++;
-                                        length = sed_rest_of_line(name, sizeof(name));
-
-                                        // w without a name is the missing
-                                        // filename GNU refuses.
-                                        if (!length)
-                                        {
-                                                sed_broken = true;
+                                        if (!sed_parse_path('w', command))
                                                 return;
-                                        }
-
-                                        command->writer = sed_name_of(sed_file_names, address_of sed_file_count, name, length);
                                         break;
                                 }
 
@@ -33747,21 +33778,8 @@ static fn sed_parse()
 
                 if (kind == 'r' || kind == 'w' || kind == 'R' || kind == 'W')
                 {
-                        p8 name[TEXT_PATH_MAX];
-                        positive have = sed_rest_of_line(name, sizeof(name));
-
-                        if (!have)
-                        {
-                                sed_broken = true;
+                        if (!sed_parse_path(kind, command))
                                 return;
-                        }
-
-                        if (kind == 'w' || kind == 'W')
-                                command->writer = sed_name_of(sed_file_names, address_of sed_file_count, name, have);
-                        else if (kind == 'R')
-                                command->writer = sed_name_of(sed_reader_names, address_of sed_reader_count, name, have);
-                        else
-                                command->text = sed_text_add(name, have);
 
                         sed_command_count++;
                         continue;
@@ -33807,17 +33825,17 @@ static fn sed_parse()
                         continue;
                 }
 
-                if (kind == 'p' || kind == 'P' || kind == 'd' || kind == 'D' ||
-                    kind == '=' || kind == 'n' || kind == 'N' || kind == 'h' ||
-                    kind == 'H' || kind == 'g' || kind == 'G' || kind == 'x' ||
-                    kind == 'F' || kind == 'z')
+                switch (kind)
                 {
+                case 'p': case 'P': case 'd': case 'D': case '=':
+                case 'n': case 'N': case 'h': case 'H': case 'g':
+                case 'G': case 'x': case 'F': case 'z':
                         sed_command_count++;
                         continue;
+                default:
+                        sed_broken = true;
+                        return;
                 }
-
-                sed_broken = true;
-                return;
         }
 
         // A block that was opened and never closed is not a program.
@@ -35301,6 +35319,175 @@ static bool sed_line_next()
         return have;
 }
 
+static fn sed_emit_string(string_address text, p8 delimiter, bool split_delimiter)
+{
+        sed_output_start();
+        if (unlikely(sed_output_state & (SED_OUTPUT_MODELLING | SED_OUTPUT_PENDING)))
+        {
+                positive length = string_length(text);
+                if (split_delimiter)
+                {
+                        sed_stdio_follow(length, false);
+                        sed_stdio_follow(1, true);
+                }
+                else
+                        sed_stdio_follow(length + 1, true);
+        }
+        text_put_string(text);
+        text_put_character(delimiter);
+}
+
+static b32 sed_in_place_open(string_address address_to name_io,
+                             p8 address_to resolved, p8 address_to leaf,
+                             bipolar address_to directory_out,
+                             bipolar address_to original_out,
+                             bipolar address_to written_out,
+                             system_path_stage address_to output_stage,
+                             file_facts address_to replaced,
+                             file_facts address_to input_facts)
+{
+        string_address name = address_to name_io;
+
+        // A file named "-" is that file when sed is editing in
+        // place: there is no standard input to rewrite.
+        if (name && string_equals(name, "-"))
+                name = (string_address)"./-";
+
+        if (sed_follow_symlinks)
+        {
+                file_facts facts;
+
+                // A link is followed to what it names, and a name
+                // that leads nowhere is the readlink GNU could not
+                // do rather than a file it could not read.
+                if (!file_look_at(name, address_of facts))
+                {
+                        string_diagnostic(&text_diagnostic, 0, name,
+                                          "couldn't readlink");
+                        text_status = 4;
+                        return -1;
+                }
+
+                if (!file_resolve(name, resolved, true))
+                {
+                        string_diagnostic(&text_diagnostic, 0, name, "cannot follow symbolic link");
+                        text_status = 4;
+                        return 0;
+                }
+
+                name = (string_address)resolved;
+        }
+
+        address_to name_io = name;
+
+        bipolar directory = file_parent_open(name, leaf);
+        bipolar looked = directory < 0 ? directory
+            : file_look_code(directory, leaf, AT_SYMLINK_NOFOLLOW, replaced);
+
+        if (looked < 0)
+        {
+                text_file_failed(name, looked, false);
+                if (directory >= 0)
+                        system_close(directory);
+                text_status = 2;
+                return 0;
+        }
+
+        bipolar original = file_open_same(directory, leaf, replaced, O_PATH | O_NOFOLLOW);
+        if (original < 0)
+        {
+                text_file_failed(name, original, false);
+                system_close(directory);
+                text_status = 2;
+                return 0;
+        }
+
+        bipolar input;
+        if ((replaced->mode & MODE_FORMAT) == MODE_LINK)
+        {
+                p8 target[TEXT_PATH_MAX];
+                bipolar length = system_read_link_at(
+                    original, (string_address)"", target, sizeof(target));
+
+                if (length < 0 || (positive)length >= sizeof(target))
+                {
+                        string_diagnostic(
+                            &text_diagnostic, 0, name,
+                            length < 0 ? file_reason(length)
+                                       : (string_address)"symbolic link target too long");
+                        system_close(original);
+                        system_close(directory);
+                        text_status = 2;
+                        return 0;
+                }
+
+                target[length] = end;
+                input = system_open_at(directory, target, FILE_READ | O_CLOEXEC);
+        }
+        else
+                input = file_open_same(directory, leaf, replaced,
+                                       FILE_READ | O_CLOEXEC | O_NOFOLLOW);
+
+        if (!text_reader_attach(address_of text_input, input, name))
+        {
+                system_close(original);
+                system_close(directory);
+                text_status = 2;
+                return 0;
+        }
+
+        looked = file_look_code((bipolar)text_input.handle, (string_address)"",
+                                AT_EMPTY_PATH, input_facts);
+        if (looked < 0)
+        {
+                string_diagnostic(&text_diagnostic, 0, name, file_reason(looked));
+                text_close();
+                system_close(original);
+                system_close(directory);
+                text_status = 2;
+                return 0;
+        }
+
+        bipolar written = file_stage_file_open_at(output_stage, directory, leaf, 0600);
+
+        if (written < 0)
+        {
+                // GNU's template: the directory the file is in, then
+                // sed and six characters it fills in itself.
+                static const char prefix[] = "couldn't open temporary file ";
+                static const char stem[] = "sedXXXXXX";
+                p8 subject[TEXT_PATH_MAX + sizeof(prefix) + sizeof(stem)];
+                byte_cursor cursor = byte_cursor_open(subject, sizeof(subject) - 1);
+                positive name_length = string_length(name);
+                positive leaf_length = string_length(leaf);
+                positive directory_length = name_length >= leaf_length
+                                                ? name_length - leaf_length
+                                                : 0;
+
+                byte_cursor_put_bytes(address_of cursor, prefix, sizeof(prefix) - 1);
+                if (directory_length)
+                        byte_cursor_put_bytes(address_of cursor, name, directory_length);
+                else
+                        byte_cursor_put_bytes(address_of cursor, "./", 2);
+                byte_cursor_put_bytes(address_of cursor, stem, sizeof(stem) - 1);
+                subject[cursor.used] = '\0';
+
+                text_close();
+                system_close(original);
+                system_close(directory);
+                string_diagnostic(&text_diagnostic, 4, (string_address)subject,
+                                  file_reason(written));
+                return -2;
+        }
+
+        text_out_to((positive)written);
+        sed_output_state &= (p8)~SED_OUTPUT_UNTERMINATED;
+        address_to directory_out = directory;
+        address_to original_out = original;
+        address_to written_out = written;
+        return 1;
+}
+
 static b32 text_sed()
 {
         //      Held here, and ended here without them as GNU's xalloc_die
@@ -35455,157 +35642,19 @@ static b32 text_sed()
                 file_facts replaced;
                 file_facts input_facts;
 
-                // A file named "-" is that file when sed is editing in
-                // place: there is no standard input to rewrite.
-                if (sed_in_place && name && string_equals(name, "-"))
-                        name = (string_address)"./-";
-
-                if (sed_in_place && sed_follow_symlinks)
-                {
-                        file_facts facts;
-
-                        // A link is followed to what it names, and a name
-                        // that leads nowhere is the readlink GNU could not
-                        // do rather than a file it could not read.
-                        if (!file_look_at(name, address_of facts))
-                        {
-                                string_diagnostic(&text_diagnostic, 0, name,
-                                                  "couldn't readlink");
-                                text_status = 4;
-                                break;
-                        }
-
-                        if (!file_resolve(name, resolved, true))
-                        {
-                                string_diagnostic(&text_diagnostic, 0, name, "cannot follow symbolic link");
-                                text_status = 4;
-                                continue;
-                        }
-
-                        name = (string_address)resolved;
-                }
-
                 if (sed_in_place)
                 {
-                        directory = file_parent_open(name, leaf);
-                        bipolar looked = directory < 0 ? directory
-                            : file_look_code(
-                                  directory, leaf, AT_SYMLINK_NOFOLLOW,
-                                  address_of replaced);
-
-                        if (looked < 0)
-                        {
-                                text_file_failed(name, looked, false);
-                                if (directory >= 0)
-                                        system_close(directory);
-                                text_status = 2;
+                        b32 opened = sed_in_place_open(
+                            address_of name, resolved, leaf,
+                            address_of directory, address_of original,
+                            address_of written, address_of output_stage,
+                            address_of replaced, address_of input_facts);
+                        if (opened == -2)
+                                return text_done(4);
+                        if (opened < 0)
+                                break;
+                        if (!opened)
                                 continue;
-                        }
-
-                        original = file_open_same(
-                            directory, leaf, address_of replaced,
-                            O_PATH | O_NOFOLLOW);
-                        if (original < 0)
-                        {
-                                text_file_failed(name, original, false);
-                                system_close(directory);
-                                text_status = 2;
-                                continue;
-                        }
-
-                        bipolar input;
-                        if ((replaced.mode & MODE_FORMAT) == MODE_LINK)
-                        {
-                                p8 target[TEXT_PATH_MAX];
-                                bipolar length = system_read_link_at(
-                                    original, (string_address)"", target,
-                                    sizeof(target));
-
-                                if (length < 0 ||
-                                    (positive)length >= sizeof(target))
-                                {
-                                        string_diagnostic(
-                                            &text_diagnostic, 0, name,
-                                            length < 0 ? file_reason(length)
-                                                : (string_address)
-                                                      "symbolic link target too long");
-                                        system_close(original);
-                                        system_close(directory);
-                                        text_status = 2;
-                                        continue;
-                                }
-
-                                target[length] = end;
-                                input = system_open_at(
-                                    directory, target,
-                                    FILE_READ | O_CLOEXEC);
-                        }
-                        else
-                                input = file_open_same(
-                                    directory, leaf, address_of replaced,
-                                    FILE_READ | O_CLOEXEC | O_NOFOLLOW);
-
-                        if (!text_reader_attach(
-                                address_of text_input, input, name))
-                        {
-                                system_close(original);
-                                system_close(directory);
-                                text_status = 2;
-                                continue;
-                        }
-
-                        looked = file_look_code(
-                            (bipolar)text_input.handle, (string_address)"",
-                            AT_EMPTY_PATH, address_of input_facts);
-                        if (looked < 0)
-                        {
-                                string_diagnostic(&text_diagnostic, 0, name,
-                                                  file_reason(looked));
-                                text_close();
-                                system_close(original);
-                                system_close(directory);
-                                text_status = 2;
-                                continue;
-                        }
-
-                        written = file_stage_file_open_at(
-                            address_of output_stage, directory, leaf, 0600);
-
-                        if (written < 0)
-                        {
-                                // GNU's template: the directory the file is in, then
-                                // sed and six characters it fills in itself.
-                                static const char prefix[] = "couldn't open temporary file ";
-                                static const char stem[] = "sedXXXXXX";
-                                p8 subject[TEXT_PATH_MAX + sizeof(prefix) + sizeof(stem)];
-                                positive directory_length = string_length(name) - string_length(leaf);
-                                positive have = sizeof(prefix) - 1;
-
-                                memory_copy(subject, prefix, have);
-                                if (directory_length)
-                                {
-                                        memory_copy(subject + have, name, directory_length);
-                                        have += directory_length;
-                                }
-                                else
-                                {
-                                        subject[have++] = '.';
-                                        subject[have++] = '/';
-                                }
-                                memory_copy(subject + have, stem, sizeof(stem) - 1);
-                                have += sizeof(stem) - 1;
-                                subject[have] = '\0';
-
-                                text_close();
-                                system_close(original);
-                                system_close(directory);
-                                return text_done(string_diagnostic(
-                                    &text_diagnostic, 4, (string_address)subject,
-                                    file_reason(written)));
-                        }
-
-                        text_out_to((positive)written);
-                        sed_output_state &= (p8)~SED_OUTPUT_UNTERMINATED;
                 }
                 else if (!text_open(name))
                 {
@@ -35788,14 +35837,8 @@ static b32 text_sed()
                                                 sed_pattern.ended = true;
                                         goto cycle_done;
                                 case 'F':
-                                        sed_output_start();
-                                        if (unlikely(sed_output_state & (SED_OUTPUT_MODELLING | SED_OUTPUT_PENDING)))
-                                        {
-                                                sed_stdio_follow(string_length(called ? called : (string_address) "-"), false);
-                                                sed_stdio_follow(1, true);
-                                        }
-                                        text_put_string(called ? called : (string_address) "-");
-                                        text_put_character(text_delimiter);
+                                        sed_emit_string(called ? called : (string_address) "-",
+                                                        text_delimiter, true);
                                         break;
                                 case 'n':
                                 case 'N':
@@ -35859,15 +35902,8 @@ static b32 text_sed()
                                         // A range replaces once, when it closes.
                                         if (kind == 'i' || command->second_type == SED_ADDRESS_NONE ||
                                             !command->active)
-                                        {
-                                                sed_output_start();
-                                                if (unlikely(sed_output_state & (SED_OUTPUT_MODELLING | SED_OUTPUT_PENDING)))
-                                                        // A checked write of a whole string and its delimiter, whose length is only
-                                                        // worth taking while the model is followed.
-                                                        sed_stdio_follow(string_length(((string_address)(sed_text + command->text))) + 1, true);
-                                                text_put_string(sed_text + command->text);
-                                                text_put_character(text_delimiter);
-                                        }
+                                                sed_emit_string(sed_text + command->text,
+                                                                text_delimiter, false);
                                         if (kind == 'i')
                                                 break;
                                         // Fall through: replacement ends this cycle.
@@ -35902,11 +35938,7 @@ cycle_done:
                                         continue;
                                 }
 
-                                sed_output_start();
-                                if (unlikely(sed_output_state & (SED_OUTPUT_MODELLING | SED_OUTPUT_PENDING)))
-                                        sed_stdio_follow(string_length(((string_address)(sed_text + sed_append_which[c]))) + 1, true);
-                                text_put_string(sed_text + sed_append_which[c]);
-                                text_put_character('\n');
+                                sed_emit_string(sed_text + sed_append_which[c], '\n', false);
                         }
 
                         if (leaving >= 0 || sed_failed || sed_io_failed)
@@ -36761,7 +36793,7 @@ static bipolar sort_compare_collated(p8 address_to a, positive la, p8 address_to
         if (!how)
                 return collate_compare(a, la, b, lb);
 
-        p8 small[4000];
+        p8 small[1024];
         p8 address_to room = sort_translate_room(small, sizeof(small), la, lb);
 
         if (!room)
@@ -36783,21 +36815,11 @@ static bipolar sort_compare_bytes(p8 address_to a, positive la, p8 address_to b,
         if (sort_collating)
                 return sort_compare_collated(a, la, b, lb, how);
 
-        if (!how)
+        if (!how || how == SORT_FOLD)
         {
                 positive length = min(la, lb);
-                bipolar order = memory_compare(a, b, length);
-
-                if (order)
-                        return order < 0 ? -1 : 1;
-
-                return la == lb ? 0 : la < lb ? -1 : 1;
-        }
-
-        if (how == SORT_FOLD)
-        {
-                positive length = min(la, lb);
-                b32 order = memory_compare_ascii_case(a, b, length);
+                bipolar order = how ? memory_compare_ascii_case(a, b, length)
+                                    : memory_compare(a, b, length);
 
                 if (order)
                         return order < 0 ? -1 : 1;
@@ -36971,7 +36993,7 @@ static positive sort_translate(p8 address_to into, p8 address_to from, positive 
 static bipolar sort_compare_translated(p8 kind, positive how, p8 address_to a, positive la,
                                        p8 address_to b, positive lb)
 {
-        p8 small[4000];
+        p8 small[1024];
         p8 address_to room = sort_translate_room(small, sizeof(small), la, lb);
 
         if (!room)
@@ -42450,13 +42472,14 @@ static const named_byte sort_sort_kinds[] = {
 
 static bool sort_key_seen(p8 letter, string_address value)
 {
-        if (letter == 'o')
+        switch (letter)
         {
+        case 'o':
                 if (sort_output_said && !string_equals(sort_output_said, value))
                         return string_diagnostic(&text_diagnostic, 0, null,
                                                  "multiple output files specified");
                 sort_output_said = value;
-        }
+                return true;
 
         /*
                 --check reads its word where it is written and refuses a
@@ -42465,15 +42488,17 @@ static bool sort_key_seen(p8 letter, string_address value)
                 disagree is a complaint about tabs and not about the second
                 one alone.
         */
-        if (letter == 'K' && value &&
-            string_table_lookup(value, sort_check_modes) >= array_count(sort_check_modes))
-        {
-                sort_option_status = 1;
-                text_argmatch((string_address) "--check", value, sort_check_list, null);
-                return false;
-        }
+        case 'K':
+                if (value &&
+                    string_table_lookup(value, sort_check_modes) >= array_count(sort_check_modes))
+                {
+                        sort_option_status = 1;
+                        text_argmatch((string_address) "--check", value, sort_check_list, null);
+                        return false;
+                }
+                return true;
 
-        if (letter == 't')
+        case 't':
         {
                 p8 tab;
                 bool escaped = value[0] == '\\' && value[1] == '0' && !value[2];
@@ -42481,10 +42506,8 @@ static bool sort_key_seen(p8 letter, string_address value)
                 return_if(!value[0], string_diagnostic(&text_diagnostic, 0, null, "empty tab"));
 
                 if (value[1] && !escaped)
-                {
                         return text_complain("%s: multi-character tab '%w'\n",
-                                      text_name, writer_terminal_quoted_name, value);
-                }
+                                             text_name, writer_terminal_quoted_name, value);
 
                 tab = escaped ? 0 : value[0];
 
@@ -42493,9 +42516,10 @@ static bool sort_key_seen(p8 letter, string_address value)
 
                 sort_tab_seen = true;
                 sort_tab = tab;
+                return true;
         }
 
-        if (letter == 'S')
+        case 'S':
         {
                 positive bytes = 0;
 
@@ -42519,16 +42543,16 @@ static bool sort_key_seen(p8 letter, string_address value)
 
                 if (bytes > sort_size)
                         sort_size = bytes;
+                return true;
         }
 
-        if (letter == 'T' &&
-            !array_store_reserve(sort_directories, sort_directories_room,
-                                 sort_directories_count,
-                                 sort_directories_count + 1, 8))
-                return string_diagnostic(&text_diagnostic, 0, null, "out of memory");
-
-        if (letter == 'T')
+        case 'T':
+                if (!array_store_reserve(sort_directories, sort_directories_room,
+                                         sort_directories_count,
+                                         sort_directories_count + 1, 8))
+                        return string_diagnostic(&text_diagnostic, 0, null, "out of memory");
                 sort_directories[sort_directories_count++] = value;
+                return true;
 
         /*
                 --batch-size as GNU's specify_nmerge reads it: an unsigned
@@ -42539,61 +42563,52 @@ static bool sort_key_seen(p8 letter, string_address value)
                 soft limit is 2^32 - 4. A number too large for anything is
                 too large, not invalid.
         */
-        if (letter == 'B')
+        case 'B':
         {
                 string_address at = value + string_span(value, string_set_space);
                 positive number;
                 bool over;
                 positive limits[2];
-                b32 most = (b32)((system_call_4(syscall(prlimit64), 0, 7, 0,
-                                                (positive)limits) >= 0
-                                      ? limits[0]
-                                      : 1024) -
-                                 3);
+                positive rlim = system_call_4(syscall(prlimit64), 0, 7, 0,
+                                              (positive)limits) >= 0
+                                    ? limits[0]
+                                    : 1024;
+                p32 most = rlim >= 3 ? (p32)(rlim - 3) : 0;
 
                 if (string_is(at, '+'))
                         at++;
 
                 if (!byte_is_digit(at[0]))
-                {
                         return text_complain("%s: invalid --batch-size argument '%w'\n",
                                              text_name, writer_terminal_quoted_name, value);
-                }
 
                 number = string_decimal_saturated(address_of at, positive_max, address_of over);
 
                 if (at[0])
-                {
                         return text_complain("%s: invalid suffix in --batch-size argument '%w'\n",
                                              text_name, writer_terminal_quoted_name, value);
-                }
 
                 if (!over && number < 2)
-                {
                         return text_complain("%s: invalid --batch-size argument '%w'\n"
-                                      "%s: minimum --batch-size argument is '2'\n",
-                                      text_name, writer_terminal_quoted_name, value, text_name);
-                }
+                                             "%s: minimum --batch-size argument is '2'\n",
+                                             text_name, writer_terminal_quoted_name, value, text_name);
 
                 if (over || number > (positive)most)
-                {
                         return text_complain("%s: --batch-size argument '%w' too large\n"
                                              "%s: maximum --batch-size argument with current rlimit is %p\n",
                                              text_name, writer_terminal_quoted_name, value, text_name, (positive)most);
-                }
 
                 sort_batch = number;
+                return true;
         }
 
-        if (letter == 'p')
+        case 'p':
         {
                 positive number;
 
                 if (!text_unsigned_option(value, false, address_of number))
-                {
                         return text_complain("%s: invalid --parallel argument '%w'\n",
-                                      text_name, writer_terminal_quoted_name, value);
-                }
+                                             text_name, writer_terminal_quoted_name, value);
 
                 if (!number)
                         return string_diagnostic(&text_diagnostic, 0, null,
@@ -42602,47 +42617,46 @@ static bool sort_key_seen(p8 letter, string_address value)
                 // One worker is the caller alone. A larger number cannot
                 // change a byte, and the pool is as wide as the affinity.
                 sort_alone = number == 1;
+                return true;
         }
 
-        positive sort_kind_i = array_count(sort_sort_kinds);
-        if (letter == 'W')
+        case 'W':
         {
-                sort_kind_i = string_table_lookup(value, sort_sort_kinds);
+                positive sort_kind_i = string_table_lookup(value, sort_sort_kinds);
                 if (sort_kind_i >= array_count(sort_sort_kinds))
                 {
                         sort_option_status = 1;
                         text_argmatch((string_address) "--sort", value, sort_sort_list, null);
                         return false;
                 }
+                sort_said_kinds |= sort_kind_bit(sort_sort_kinds[sort_kind_i].value);
+                return true;
         }
 
-        if (letter == 'A')
-        {
+        case 'A':
                 sort_ambiguous_say(sort_ambiguous_word);
                 return false;
-        }
 
-        if (letter == 'D' && sort_compress && !string_equals(sort_compress, value))
-                return string_diagnostic(&text_diagnostic, 0, null,
-                                         "multiple compress programs specified");
-
-        if (letter == 'D')
+        case 'D':
+                if (sort_compress && !string_equals(sort_compress, value))
+                        return string_diagnostic(&text_diagnostic, 0, null,
+                                                 "multiple compress programs specified");
                 sort_compress = value;
-
-        if (letter == 'X' && sort_random_source && !string_equals(sort_random_source, value))
-                return string_diagnostic(&text_diagnostic, 0, null,
-                                         "multiple random sources specified");
-
-        if (letter == 'X')
-                sort_random_source = value;
-
-        if (letter == 'W')
-                sort_said_kinds |= sort_kind_bit(sort_sort_kinds[sort_kind_i].value);
-
-        if (letter != 'k')
                 return true;
 
-        return sort_parse_key(value);
+        case 'X':
+                if (sort_random_source && !string_equals(sort_random_source, value))
+                        return string_diagnostic(&text_diagnostic, 0, null,
+                                                 "multiple random sources specified");
+                sort_random_source = value;
+                return true;
+
+        case 'k':
+                return sort_parse_key(value);
+
+        default:
+                return true;
+        }
 }
 
 /*
@@ -44809,6 +44823,27 @@ static positive expr_size(expr_value address_to value)
 
 static expr_value expr_any();
 
+enum
+{
+        EXPR_PRIM_PLUS,
+        EXPR_PRIM_LPAREN,
+        EXPR_PRIM_RPAREN,
+        EXPR_PRIM_LENGTH,
+        EXPR_PRIM_MATCH,
+        EXPR_PRIM_INDEX,
+        EXPR_PRIM_SUBSTR,
+};
+
+static const named_flag expr_primaries[] = {
+    {(string_address) "+", EXPR_PRIM_PLUS},
+    {(string_address) "(", EXPR_PRIM_LPAREN},
+    {(string_address) ")", EXPR_PRIM_RPAREN},
+    {(string_address) "length", EXPR_PRIM_LENGTH},
+    {(string_address) "match", EXPR_PRIM_MATCH},
+    {(string_address) "index", EXPR_PRIM_INDEX},
+    {(string_address) "substr", EXPR_PRIM_SUBSTR},
+};
+
 static expr_value expr_primary()
 {
         expr_value made = expr_zero();
@@ -44817,11 +44852,20 @@ static expr_value expr_primary()
                 return made;
 
         string_address word = expr_word();
+        positive ki = string_table_lookup(word, expr_primaries);
 
+        if (ki >= array_count(expr_primaries))
+        {
+                expr_at++;
+                made.text = word;
+                return made;
+        }
+
+        switch (expr_primaries[ki].value)
+        {
         /* A leading plus quotes one otherwise-special operand. This is how
            GNU expr makes `expr + length` mean the literal word "length". */
-        if (!string_compare(word, "+"))
-        {
+        case EXPR_PRIM_PLUS:
                 expr_at++;
                 if (!expr_more())
                         return made;
@@ -44829,10 +44873,8 @@ static expr_value expr_primary()
                 made.text = expr_word();
                 expr_at++;
                 return made;
-        }
 
-        if (!string_compare(word, "("))
-        {
+        case EXPR_PRIM_LPAREN:
                 expr_at++;
                 made = expr_any();
 
@@ -44852,70 +44894,51 @@ static expr_value expr_primary()
                 }
 
                 expr_at++;
-
                 return made;
-        }
 
-        if (!string_compare(word, ")"))
-        {
+        case EXPR_PRIM_RPAREN:
                 expr_stop("syntax error: unexpected ')'");
                 return made;
-        }
 
-        if (!string_compare(word, "length"))
+        case EXPR_PRIM_LENGTH:
         {
-                expr_value of;
-
                 expr_at++;
-                of = expr_primary();
+                expr_value of = expr_primary();
                 if (expr_fault)
                         return made;
                 string_address said = expr_shown(address_of of);
 
                 made.number = (bipolar)expr_characters(said, string_length(said));
-
                 return made;
         }
 
-        if (!string_compare(word, "match"))
+        case EXPR_PRIM_MATCH:
         {
-                expr_value subject;
-                expr_value pattern;
-
                 expr_at++;
-                subject = expr_primary();
+                expr_value subject = expr_primary();
                 if (expr_fault)
                         return made;
-                pattern = expr_primary();
-
+                expr_value pattern = expr_primary();
                 if (expr_fault)
                         return made;
-
                 if (expr_dead)
                         return subject;
 
                 return expr_matched(address_of subject, address_of pattern);
         }
 
-        if (!string_compare(word, "index"))
+        case EXPR_PRIM_INDEX:
         {
-                expr_value of;
-                expr_value set;
-                string_address text;
-                string_address wanted;
-
                 expr_at++;
-                of = expr_primary();
+                expr_value of = expr_primary();
                 if (expr_fault)
                         return made;
-                set = expr_primary();
-
+                expr_value set = expr_primary();
                 if (expr_fault)
                         return made;
 
-                text = expr_shown(address_of of);
-                wanted = expr_shown(address_of set);
-
+                string_address text = expr_shown(address_of of);
+                string_address wanted = expr_shown(address_of set);
                 positive charset = text_charset();
 
                 if (charset == TEXT_CHARSET_BYTES)
@@ -44924,7 +44947,6 @@ static expr_value expr_primary()
 
                         if (string_get(text + before))
                                 made.number = (bipolar)(before + 1);
-
                         return made;
                 }
 
@@ -44952,25 +44974,19 @@ static expr_value expr_primary()
                         }
                         at += size;
                 }
-
                 return made;
         }
 
-        if (!string_compare(word, "substr"))
+        case EXPR_PRIM_SUBSTR:
         {
-                expr_value of;
-                expr_value from;
-                expr_value span;
-
                 expr_at++;
-                of = expr_primary();
+                expr_value of = expr_primary();
                 if (expr_fault)
                         return made;
-                from = expr_primary();
+                expr_value from = expr_primary();
                 if (expr_fault)
                         return made;
-                span = expr_primary();
-
+                expr_value span = expr_primary();
                 if (expr_fault)
                         return made;
 
@@ -45013,12 +45029,9 @@ static expr_value expr_primary()
                         stop += expr_step(charset, text + stop, bytes - stop);
 
                 made.text = expr_keep(text + at, stop - at);
-
                 return made;
         }
-
-        expr_at++;
-        made.text = word;
+        }
 
         return made;
 }
