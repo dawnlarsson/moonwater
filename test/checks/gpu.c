@@ -1324,7 +1324,7 @@ static void terminal_gpu_rows(string_address font, string_address bold)
         tg_case("gpu terminal: 200 percent, dark", 50, 14, styles, 0, 200, 0, 0, 0, 0, 0, 0);
         tg_case("gpu terminal: 300 percent", 40, 8, tall, 1, 300, 0, 0, 0, 0, 0, 0);
         tg_case("gpu terminal: the largest grid, 80 by 50", 80, 50, long_text, 1, 100, 0, 0, 0, 0, 0, 0);
-        tg_case("gpu terminal: a wide character is a named loss", 50, 14, wide, 1, 100, 0, 0, 0, 0, 0, 1);
+        tg_case("gpu terminal: a wide character is recorded and drawn by the card", 50, 14, wide, 1, 100, 0, 0, 0, 0, 0, 0);
         terminal_select_clear();
         terminal_text_set(-1, 16);
         window->columns = 50, window->rows = 14, regrid(-1), render_surface();
@@ -2040,7 +2040,13 @@ static void gpu_lent_rows(void)
         check("gpu lent: a client's dma-buf is lent to a row, its card address held by the card",
               compositor_wl_lend(row, &picture, 32, 32) && compositor_lent_va(row) != 0 && gpu_held_import(compositor_lent_va(row)));
         check("gpu lent: the card started again", gpu_recover());
-        check("gpu lent: the started card keeps no address of the lent picture (its import went with the old descriptor)", compositor_lent_va(row) == 0);
+        {
+                // The lent picture's address is asked again of the started card: imported into it (wl_ext_lent_info, by the epoch), never the old card's.
+                positive again = compositor_lent_va(row);
+
+                check("gpu lent: after the start the lent picture's address is the started card's, imported again when asked (not the old descriptor's)",
+                      again != 0 && gpu_held_import(again) && compositor_wl.lent[row].epoch == gpu_epoch);
+        }
         check("gpu lent: the picture lent again is imported into the started card, at an address that card holds",
               compositor_wl_lend(row, &picture, 32, 32) && compositor_lent_va(row) != 0 && gpu_held_import(compositor_lent_va(row)));
         compositor_wl_unlend(row);
@@ -2101,9 +2107,18 @@ static void gpu_scan_rows(void)
                       !compositor_lent_fb(ROW) && gpu_fake_addfb_calls == calls && compositor_wl.scan_refused.error == -1 &&
                               compositor_wl.scan_refused.pitch == 1000 && compositor_wl.scan_refused.count == refused + 1);
                 GPU_SCAN_LEND(0, 256, 3);
-                check("gpu scan: and so is an offset of none (the window three pixels in)",
-                      !compositor_lent_fb(ROW) && gpu_fake_addfb_calls == calls && compositor_wl.scan_refused.error == -2 &&
-                              compositor_wl.scan_refused.offset == 2 * 1024 + 12);
+                {
+                        // An offset of no whole block over an aligned base (the window three pixels and two rows in): made at the base, its origin the
+                        // window's place in it (canvas_scan_fb_make's realign on amdgpu, comp-display's contract), not refused.
+                        int ox = -1, oy = -1;
+                        unsigned int made = compositor_lent_fb(ROW);
+
+                        compositor_lent_fb_origin(ROW, &ox, &oy);
+                        memory_copy(&asked, gpu_fake_addfb, sizeof asked);
+                        check("gpu scan: an offset of no whole block over an aligned base is made at the base, with the window's origin in it (3, 2), not refused",
+                              made && ox == 3 && oy == 2 && gpu_fake_addfb_calls == calls + 1 && asked.offsets[0] == 0 && asked.width == 131 &&
+                                      compositor_wl.scan_refused.count == refused + 1);
+                }
         }
         GPU_SCAN_LEND(0, 256, 64);
         gpu_fake_addfb_answer = -22;
