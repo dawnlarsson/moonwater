@@ -56,6 +56,7 @@
 #define WAYLAND_TABLE_PAGE 4096L
 #define WAYLAND_TABLE_FIRST 64L
 #define WAYLAND_OBJECTS (1L << 17) /* live objects per client */
+#define WAYLAND_IDS_MAX 4096 /* one seat, device or relative-pointer list per client */
 #define WAYLAND_MIME_BYTES (64L << 10) /* all the mime types one source offers, NULs included */
 #define WAYLAND_SUB_LEVELS 32L /* subsurface nesting; flatten and the sub walks recurse once per level */
 
@@ -675,6 +676,8 @@ static void wayland_client_slots_drop(void)
 
 static int wayland_ids_add(struct wayland_ids *ids, unsigned int id)
 {
+        if (ids->count >= WAYLAND_IDS_MAX) /* a list of seat, device or relative objects: no client needs more; a refusal is NO_MEMORY */
+                return 0;
         ids->table.unit = sizeof(unsigned int);
         if (!wayland_table_reach(&ids->table, ids->count + 1))
                 return 0;

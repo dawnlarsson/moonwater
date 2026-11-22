@@ -9204,6 +9204,27 @@ static void fake_sync_signal(void *context, long handle, unsigned long long poin
         fake_sync.last_rel = point;
 }
 
+static void test_ids_cap(void)
+{
+        struct session s;
+        struct wlc *c;
+        unsigned long seat;
+        long n;
+
+        /* hostile: wl_pointer objects from one seat until the client is refused. A seat's pointer list holds WAYLAND_IDS_MAX ids; past it the
+           get_pointer is a NO_MEMORY error, not a list that grows with every request. */
+        wayland_stop();
+        memset(&fake, 0, sizeof fake);
+        wayland_start(&fake_host);
+        session_open(&s);
+        c = s.c;
+        seat = wl_global(c, s.registry, WLI_wl_seat, 9);
+        for (n = 0; n < WAYLAND_IDS_MAX + 100 && c->errors == 0; n++)
+                wlc_send(c, seat, WLQ_wl_seat_get_pointer, wlc_id(c, WLI_wl_pointer, 1));
+        wlc_pump(c);
+        WLCHECK(c->errors == 1 && n <= WAYLAND_IDS_MAX, "a seat's pointer list is capped at WAYLAND_IDS_MAX (refused after %ld)", n);
+}
+
 static void test_object_cap(void)
 {
         struct session s;
@@ -9827,6 +9848,7 @@ int main(int argc, char **argv)
         test_dmabuf();
         test_stall_dmabuf();
         test_dmabuf_feedbacks();
+        test_ids_cap();
         test_object_cap();
         test_token_expiry();
         test_mime_bytes_cap();
