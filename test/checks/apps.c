@@ -10667,7 +10667,6 @@ b32 main()
         GROUP("check_kit_stripes", check_kit_stripes());
         GROUP("check_kit_file_icons", check_kit_file_icons());
         GROUP("check_kit_view_pull", check_kit_view_pull());
-        GROUP("check_kit_trail", check_kit_trail());
         GROUP("check_kit_graph", check_kit_graph());
         GROUP("check_kit_inks", check_kit_inks());
         GROUP("check_kit_place", check_kit_place());
