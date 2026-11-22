@@ -211,6 +211,8 @@ static p8 waterlink_open_hash(struct waterlink_noise address_to noise,
                                   length, text + length);
         if (good)
                 waterlink_mix_hash(noise, sealed, length + 16);
+        else
+                memory_zero(plain, length);
         crypto_forget(address_of key, sizeof key);
         return good;
 }
@@ -298,8 +300,14 @@ p8 waterlink_gate_passes(struct waterlink_identity address_to me,
                 return false;
 
         memory_copy(address_of head, datagram, 16);
+        if (head.counter)
+                return false;
         if (head.kind == WATERLINK_KIND_INITIATE)
+        {
+                if (head.receiver)
+                        return false;
                 body = WATERLINK_INITIATE_BYTES;
+        }
         else if (head.kind == WATERLINK_KIND_RESPOND)
                 body = WATERLINK_RESPOND_BYTES;
         else

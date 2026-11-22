@@ -142,7 +142,7 @@ static bipolar link_tcp_take(p8 address_to hold, positive address_to held,
                         address_to held = have;
                         if (have < 2)
                                 continue;
-                        size = (positive)hold[0] << 8 | hold[1];
+                        size = network_load_16(hold);
                         if (!size || size > LINK_TCP_FRAME_MOST)
                                 return -1;
                         if (length >= size)
@@ -156,7 +156,9 @@ static bipolar link_tcp_take(p8 address_to hold, positive address_to held,
                         }
                         continue;
                 }
-                size = (positive)hold[0] << 8 | hold[1];
+                size = network_load_16(hold);
+                if (!size || size > LINK_TCP_FRAME_MOST || have > 2 + size)
+                        return -1;
                 take = 2 + size - have;
                 if (take > length)
                         take = length;
@@ -181,8 +183,7 @@ static positive link_tcp_frame(p8 address_to into, p8 address_to datagram,
 {
         if (!length || length > LINK_TCP_FRAME_MOST)
                 return 0;
-        into[0] = (p8)(length >> 8);
-        into[1] = (p8)length;
+        network_store_16(into, (p16)length);
         memory_copy(into + 2, datagram, length);
         return 2 + length;
 }
@@ -235,10 +236,13 @@ static bipolar link_proxy_reply(p8 address_to bytes, positive length)
         }
         if (length > 12 && bytes[12] != ' ' && bytes[12] != '\r')
                 return -1;
-        for (positive at = 12; at + 4 <= length; at++)
-                if (bytes[at] == '\r' && bytes[at + 1] == '\n' &&
-                    bytes[at + 2] == '\r' && bytes[at + 3] == '\n')
-                        return (bipolar)(at + 4);
+        if (length >= 16)
+        {
+                p8 address_to found = memory_search(bytes + 12, length - 12,
+                                                    "\r\n\r\n", 4);
+                if (found)
+                        return (bipolar)(found - bytes + 4);
+        }
         return length >= LINK_PROXY_HEAD_MOST ? -1 : 0;
 }
 
@@ -424,7 +428,7 @@ static fn link_tcp_write(struct link_tcp address_to c, p64 now)
 static p8 link_tcp_send(struct link_tcp address_to c, p8 address_to datagram,
                         positive length, p64 now)
 {
-        if (c->broken || length > LINK_TCP_FRAME_MOST ||
+        if (c->broken || !length || length > LINK_TCP_FRAME_MOST ||
             LINK_TCP_OUT - c->out_used < 2 + length)
                 return false;
         if (LINK_TCP_OUT - c->out_from - c->out_used < 2 + length)
@@ -671,13 +675,19 @@ static fn link_tcp_accept(p64 now)
                         memory_copy(address, from.host, 16);
                         port = network_order_16(from.port);
                 }
-                else
+                else if (from.family == AF_INET)
                 {
                         socket_address_internet address_to v4 =
                                 (socket_address_internet address_to)address_of from;
 
                         link_address_v4(address, network_order_32(v4->host));
                         port = network_order_16(v4->port);
+                }
+                else
+                {
+                        link_tcp_self.refused++;
+                        socket_close((b32)fd);
+                        continue;
                 }
                 link_tcp_self.taken++;
                 if (link_tcp_for(address, port) || !link_tcp_adopt(fd, address, port, false, now))
