@@ -8109,6 +8109,7 @@ b32 main(void)
                         gpu_trim(); // a present is over
                         system_call_2(syscall(munmap), (positive)gone, 1 << 20);
                         GPU_HOSTILE("a scene runs after pages the GPU was given are unmapped", grown, 256, 0);
+                        gpu_forget((const void address_to)gone, 1 << 20); // let go of after, as the compositor does before it maps those addresses anew (gpu_map_hit)
                         // The tick that used a map is the one that lets it go (a glass scratch grown after a present read it): compositor_scratch's gpu_forget and munmap, with no
                         // present between. The job that follows does not name it (the kernel refuses a job that names a buffer whose pages are gone, EFAULT, three times and
                         // gives the present to the processor), and it is not a hang.
@@ -8314,6 +8315,7 @@ b32 main(void)
                         unsigned int recovered = gpu_recovered;
                         int cooling, drew;
 
+                        gpu_fake_errno = 0, gpu_found = GPU_END_NONE, gpu_end_said = 0; // (a failed wait an earlier row left is not this job's)
                         gpu_fake_busy = 1, gpu_patient = 0;
                         check("gpu hang: a job still running at the late cap is the processor's present, held as pending, with no cool-down",
                               !compositor_gpu_present(&f, 1) && gpu.pending && compositor_gpu_state.cool_until == 0 && !compositor_gpu_state.restart_due);
@@ -8345,9 +8347,9 @@ b32 main(void)
                         gpu.pending = 1ull << 40;
                         gpu_idle();
                         compositor_gpu = 0;
-                        compositor_gpu_settings(); // turned off and on again: the session's give-up stays
-                        check("gpu hang: turning canvas gpu off and on does not bring a card given up for the session back", compositor_gpu && compositor_gpu_state.dead &&
-                              !compositor_gpu_present(&f, 1));
+                        compositor_gpu_settings(); // turned off and on again: the person's way back (compositor_gpu_word since ab935cd87)
+                        check("gpu hang: turning canvas gpu off and on brings back a card given up for the session after its hangs (the person asked)",
+                              compositor_gpu && !compositor_gpu_state.dead && !compositor_gpu_state.hung_off && !compositor_gpu_state.hung_at);
                         compositor_gpu_state.dead = 0, compositor_gpu_state.hung_off = 0, compositor_gpu_state.hung_at = 0, compositor_gpu_state.cool_until = 0;
                         compositor_gpu_state.restart_due = 0, compositor_gpu_state.cool_steps = 0;
                 }

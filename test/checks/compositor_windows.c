@@ -1745,6 +1745,24 @@ static void check_compositor_cadence(void)
               plain == compositor_present_due(flip - lead, p120, flip, lead, flip + 1000) && cadenced == flip + 3 * p120 - lead);
         check("cadence: a torn frame and another row's flip are not held", torn == flip + 1000 && other == plain);
     }
+    // The keep that ends it (the game gone a second) drops k to 1 in the same call, before the take it owes lands: a frame is never held k
+    // vblanks of the old period through the mode switch.
+    {
+        int was_owed = compositor.probe_owed;
+        unsigned int held_k;
+
+        memory_zero(&compositor_cadence, sizeof(compositor_cadence));
+        compositor_cadence.choice = 1, compositor_cadence.active = 1, compositor_cadence.hz = 40, compositor_cadence.k = 1;
+        compositor.direct_row = -1, compositor.period = p120, compositor.probe_owed = 0;
+        compositor_cadence_keep(); // the game not shown straight: the gap begins, the cadence is held, k on the 120 Hz screen is 3
+        held_k = compositor_cadence.k;
+        compositor_cadence.lost_at -= COMPOSITOR_CADENCE_LEAVE;
+        compositor_cadence_keep();
+        check("cadence: the keep that ends it drops k to 1 in the same call, before the take it owes",
+              held_k == 3 && compositor_cadence.active == 0 && compositor_cadence.k == 1 && compositor.probe_owed == 1);
+        compositor.probe_owed = was_owed;
+        memory_zero(&compositor_cadence, sizeof(compositor_cadence)), compositor_cadence.k = 1;
+    }
     compositor.direct_row = was_row, compositor.flip_row = was_flip_row, compositor.flip_when = was_when, compositor.period = was_period;
     compositor.presented = was_presented, compositor_cadence.k = 1;
     // The fake card at 144 with the screen's six rates: taken at 120 while a cadence of 40 is held, and at 144 when it is not.
