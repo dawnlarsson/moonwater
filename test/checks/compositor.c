@@ -2788,6 +2788,16 @@ static int fullscreen_covers(const int *rect)
     return 0;
 }
 
+/* Fullscreen is a Space now (ef704dddf, 11-21): the band is hidden while the screen's active Space is a fullscreen one of row 1. */
+static void band_fullscreen_set(int on)
+{
+    if (on)
+        compositor_space_enter_fullscreen(1, 0);
+    else
+        compositor_space_exit_fullscreen(1, 0);
+    compositor.fullscreen[1] = on != 0;
+}
+
 static void check_taskbar_fullscreen(void)
 {
     static const char *const words[4] = {"bottom", "top", "left", "right"};
@@ -2813,7 +2823,8 @@ static void check_taskbar_fullscreen(void)
         taskbar_settings_set(words[at], "primary", "battery none\n");
         taskbar_tray_set("");
         compositor.showing[1] = 1;
-        compositor.fullscreen[1] = 1;
+        compositor_spaces_ensure();
+        band_fullscreen_set(1);
         fullscreen_band(base);
 
         // Off: a fullscreen window leaves the band where it is, through a whole slide's time, and nothing is damaged.
@@ -2850,7 +2861,7 @@ static void check_taskbar_fullscreen(void)
 
         // Back: fullscreen is over, and the band slides to its place and is there.
         t2 = t1 + 2 * whole;
-        compositor.fullscreen[1] = 0;
+        band_fullscreen_set(0);
         compositor_taskbar_slide(t2);
         compositor_taskbar_slide(t2 + half);
         between &= taskbar_shift() > 0 && taskbar_shift() < UI_ONE;
@@ -2860,7 +2871,7 @@ static void check_taskbar_fullscreen(void)
 
         // A window put away is not fullscreen: the band stays.
         t3 = t2 + 2 * whole;
-        compositor.fullscreen[1] = 1;
+        band_fullscreen_set(1);
         compositor.state[1] = WINDOW_MINIMIZED;
         compositor_taskbar_slide(t3);
         compositor_taskbar_slide(t3 + whole);
