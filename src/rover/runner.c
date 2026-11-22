@@ -559,6 +559,26 @@ static fn rover_runner_gone_look(p64 now)
 
 //      A program started from words: its own session, standard input nothing, its output where it is told. extra is
 //      one more NAME=value for its environment (MOONWATER_ASKED=1 for what a person asked for). Answers its pid.
+// The on-screen keyboard is the program named osk: its child records its own pid in the window table before it runs, so the pid is on
+// record before the keyboard can claim its row (the compositor grants the keys only to that pid, manage.c compositor_osk_is).
+static bool rover_runner_osk_program(string_address path)
+{
+        string_address name = path;
+
+        for (string_address at = path; *at; at++)
+                if (*at == '/')
+                        name = at + 1;
+        return string_equals(name, (string_address)"osk");
+}
+
+static void rover_runner_osk_record(void)
+{
+        struct windows *table = windows_board_map();
+
+        if (table)
+                __atomic_store_n(&table->osk_pid, (unsigned int)system_call(syscall(getpid)), __ATOMIC_RELEASE);
+}
+
 static bipolar rover_runner_exec(string_address address_to argv, string_address log_path, string_address extra)
 {
         static string_address environment[256];
@@ -587,6 +607,8 @@ static bipolar rover_runner_exec(string_address address_to argv, string_address 
         if (extra && string_has_prefix(extra, WINDOW_ASKED_VARIABLE "=1"))
                 windows_asked_record();
 #endif
+        if (rover_runner_osk_program(argv[0]))
+                rover_runner_osk_record();
         bipolar null_handle = system_open_at(AT_FDCWD, "/dev/null", FILE_READ);
         bipolar out = system_open_at_mode(AT_FDCWD, log_path ? log_path : (string_address) "/dev/kmsg",
                                           FILE_WRITE | O_CREAT | O_APPEND | O_NOFOLLOW, 0600);
