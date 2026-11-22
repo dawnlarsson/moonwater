@@ -859,11 +859,12 @@ _Static_assert(sizeof(struct gpu_i915_param) == 16 && sizeof(struct gpu_i915_cre
 
 // Forward declaration for Intel Gen9/Gen9LP compute kernel set (defined below gpu_i915_gen9_batch).
 static const struct gpu_set gpu_i915_gen9_set;
-// Intel i915 kernel sets by family range: Gen8 (Broadwell/Cherry View), Gen9/Gen9LP (Skylake through Comet Lake,
-// Broxton/Apollo/Gemini Lake), and Gen11 (Ice Lake, Elkhart Lake, Jasper Lake) all active via deterministic EU patching
-// verified against intel-probe kern8/kern9/kern11 and bit-exact gpu_test_hash() at startup.
+// Intel i915 kernel sets by family range: Gen7/7.5 (Ivy Bridge/Valleyview/Haswell), Gen8 (Broadwell/Cherry View),
+// Gen9/Gen9LP (Skylake through Comet Lake, Broxton/Apollo/Gemini Lake), and Gen11 (Ice Lake, Elkhart Lake, Jasper Lake)
+// all active via deterministic EU binary patching verified against intel-probe kern7/kern8/kern9/kern11 and bit-exact
+// gpu_test_hash() at startup.
 static const struct { unsigned int from, to; const struct gpu_set *set; } gpu_i915_sets[] = {
-    {800, 801, &gpu_i915_gen9_set}, {900, 901, &gpu_i915_gen9_set}, {1100, 1101, &gpu_i915_gen9_set}, {0, 0, 0}};
+    {700, 750, &gpu_i915_gen9_set}, {800, 801, &gpu_i915_gen9_set}, {900, 901, &gpu_i915_gen9_set}, {1100, 1101, &gpu_i915_gen9_set}, {0, 0, 0}};
 
 /*
         The chips, by the PCI device id CHIPSET_ID / XE_DEVICE_QUERY answers (include/drm/intel/pciids.h): family is the
@@ -1266,25 +1267,170 @@ static const struct gpu_backend gpu_i915_row = {
 
 /*
         Intel Xe KMD backend ("xe" DRM driver, Linux 6.8+: Lunar Lake, Battlemage, Panther Lake, Meteor Lake, Arrow Lake,
-        Alchemist/DG2, and Xe-forced Gen12). Identifies the PCI device via DRM_IOCTL_XE_DEVICE_QUERY (CONFIG) so Xe-era
-        hardware is recognized and described cleanly; VM/exec/syncobj plumbing is wired for Xe compute kernel sets.
+        Alchemist/DG2, and Xe-forced Gen12). Full compute submission via XE_VM_CREATE / XE_VM_BIND / XE_EXEC_QUEUE_CREATE /
+        XE_EXEC + DRM syncobj wait/fence export, sharing Intel command-buffer builders and kernel sets with i915.
 */
-#define GPU_XE_DEVICE_QUERY GPU_IO(3u, 0x00, 32) // DRM_IOCTL_XE_DEVICE_QUERY (DRM_COMMAND_BASE + 0x00)
-struct gpu_xe_device_query { p64 extensions; unsigned int query, size; p64 data; p64 reserved[2]; };
-static struct { unsigned int va_bits; } gpu_xe;
+#define GPU_DRM_IO(dir, n, size) ((dir) << 30 | (size) << 16 | 0x6400u | (n))
+#define GPU_XE_DEVICE_QUERY GPU_IO(3u, 0x00, 40)
+#define GPU_XE_GEM_CREATE GPU_IO(3u, 0x01, 56)
+#define GPU_XE_GEM_MMAP_OFFSET GPU_IO(3u, 0x02, 40)
+#define GPU_XE_VM_CREATE GPU_IO(3u, 0x03, 32)
+#define GPU_XE_VM_DESTROY GPU_IO(1u, 0x04, 24)
+#define GPU_XE_VM_BIND GPU_IO(1u, 0x05, 136)
+#define GPU_XE_EXEC_QUEUE_CREATE GPU_IO(3u, 0x06, 48)
+#define GPU_XE_EXEC_QUEUE_DESTROY GPU_IO(1u, 0x07, 24)
+#define GPU_XE_EXEC_QUEUE_GET_PROP GPU_IO(3u, 0x08, 40)
+#define GPU_XE_EXEC GPU_IO(1u, 0x09, 56)
+#define GPU_DRM_SYNCOBJ_CREATE GPU_DRM_IO(3u, 0xbfu, 8)
+#define GPU_DRM_SYNCOBJ_DESTROY GPU_DRM_IO(3u, 0xc0u, 8)
+#define GPU_DRM_SYNCOBJ_HANDLE_TO_FD GPU_DRM_IO(3u, 0xc1u, 16)
+#define GPU_DRM_SYNCOBJ_WAIT GPU_DRM_IO(3u, 0xc3u, 32)
+#define GPU_DRM_SYNCOBJ_RESET GPU_DRM_IO(3u, 0xc4u, 16)
+_Static_assert(GPU_XE_DEVICE_QUERY == 0xc0286440u && GPU_XE_GEM_CREATE == 0xc0386441u && GPU_XE_GEM_MMAP_OFFSET == 0xc0286442u &&
+                   GPU_XE_VM_CREATE == 0xc0206443u && GPU_XE_VM_DESTROY == 0x40186444u && GPU_XE_VM_BIND == 0x40886445u &&
+                   GPU_XE_EXEC_QUEUE_CREATE == 0xc0306446u && GPU_XE_EXEC_QUEUE_DESTROY == 0x40186447u &&
+                   GPU_XE_EXEC_QUEUE_GET_PROP == 0xc0286448u && GPU_XE_EXEC == 0x40386449u,
+               "xe_drm.h ioctl numbers match Linux UAPI");
+_Static_assert(GPU_DRM_SYNCOBJ_CREATE == 0xc00864bfu && GPU_DRM_SYNCOBJ_DESTROY == 0xc00864c0u &&
+                   GPU_DRM_SYNCOBJ_HANDLE_TO_FD == 0xc01064c1u && GPU_DRM_SYNCOBJ_WAIT == 0xc02064c3u &&
+                   GPU_DRM_SYNCOBJ_RESET == 0xc01064c4u,
+               "drm.h syncobj ioctl numbers match Linux UAPI");
+
+struct gpu_xe_device_query { p64 extensions; unsigned int query, size; p64 data, reserved[2]; };
+struct gpu_xe_engine_ci { unsigned short engine_class, engine_instance, gt_id, pad; };
+struct gpu_xe_engine { struct gpu_xe_engine_ci instance; p64 reserved[3]; };
+struct gpu_xe_gem_create { p64 extensions, size; unsigned int placement, flags, vm_id, handle; unsigned short cpu_caching, pad[3]; p64 reserved[2]; };
+struct gpu_xe_gem_mmap { p64 extensions; unsigned int handle, flags; p64 offset, reserved[2]; };
+struct gpu_xe_vm_create { p64 extensions; unsigned int flags, vm_id; p64 reserved[2]; };
+struct gpu_xe_vm_destroy { unsigned int vm_id, pad; p64 reserved[2]; };
+struct gpu_xe_vm_bind_op { p64 extensions; unsigned int obj; unsigned short pat_index, pad; p64 obj_offset, range, addr; unsigned int op, flags, prefetch_region, pad2; p64 reserved[3]; };
+struct gpu_xe_vm_bind { p64 extensions; unsigned int vm_id, exec_queue_id, pad, num_binds; struct gpu_xe_vm_bind_op bind; unsigned int pad2, num_syncs; p64 syncs, reserved[2]; };
+struct gpu_xe_exec_queue_create { p64 extensions; unsigned short width, num_placements; unsigned int vm_id, flags, exec_queue_id; p64 instances, reserved[2]; };
+struct gpu_xe_exec_queue_destroy { unsigned int exec_queue_id, pad; p64 reserved[2]; };
+struct gpu_xe_exec_queue_prop { p64 extensions; unsigned int exec_queue_id, property; p64 value, reserved[2]; };
+struct gpu_xe_sync { p64 extensions; unsigned int type, flags; p64 handle, timeline_value, reserved[2]; };
+struct gpu_xe_exec { p64 extensions; unsigned int exec_queue_id, num_syncs; p64 syncs, address; unsigned short num_batch_buffer, pad[3]; p64 reserved[2]; };
+struct gpu_drm_syncobj_create { unsigned int handle, flags; };
+struct gpu_drm_syncobj_handle { unsigned int handle, flags; int fd; unsigned int pad; };
+struct gpu_drm_syncobj_wait { p64 handles; long long timeout_nsec; unsigned int count_handles, flags, first_signaled, pad; };
+struct gpu_drm_syncobj_array { p64 handles; unsigned int count_handles, pad; };
+_Static_assert(sizeof(struct gpu_xe_device_query) == 40 && sizeof(struct gpu_xe_engine_ci) == 8 && sizeof(struct gpu_xe_engine) == 32 &&
+                   sizeof(struct gpu_xe_gem_create) == 56 && sizeof(struct gpu_xe_gem_mmap) == 40 && sizeof(struct gpu_xe_vm_create) == 32 &&
+                   sizeof(struct gpu_xe_vm_destroy) == 24 && sizeof(struct gpu_xe_vm_bind_op) == 80 && sizeof(struct gpu_xe_vm_bind) == 136 &&
+                   sizeof(struct gpu_xe_exec_queue_create) == 48 && sizeof(struct gpu_xe_exec_queue_destroy) == 24 &&
+                   sizeof(struct gpu_xe_exec_queue_prop) == 40 && sizeof(struct gpu_xe_sync) == 48 && sizeof(struct gpu_xe_exec) == 56 &&
+                   sizeof(struct gpu_drm_syncobj_create) == 8 && sizeof(struct gpu_drm_syncobj_handle) == 16 &&
+                   sizeof(struct gpu_drm_syncobj_wait) == 32 && sizeof(struct gpu_drm_syncobj_array) == 16,
+               "xe_drm.h & drm_syncobj record sizes match Linux UAPI");
+
+#define GPU_XE_JOBS 4
+#define GPU_XE_USERPTR_TAG 0x80000000u
+#define GPU_XE_USERPTRS 72
+static void gpu_close(unsigned int handle);
+static struct
+{
+        unsigned int va_bits, has_vram, vm, main;
+        struct gpu_xe_engine_ci engine;
+        b32 engine_ok;
+        positive sequence, done;
+        struct { positive sequence; unsigned int syncobj; } jobs[GPU_XE_JOBS];
+        struct { positive from, bytes; b32 used; } userptrs[GPU_XE_USERPTRS];
+} gpu_xe;
+
+static void gpu_xe_forget_jobs(void)
+{
+        for (unsigned int i = 0; i < GPU_XE_JOBS; i++)
+        {
+                if (gpu_xe.jobs[i].syncobj && gpu.fd >= 0)
+                {
+                        struct gpu_drm_syncobj_create d = {gpu_xe.jobs[i].syncobj, 0};
+
+                        gpu_raw(gpu.fd, GPU_DRM_SYNCOBJ_DESTROY, &d);
+                }
+                gpu_xe.jobs[i].syncobj = 0, gpu_xe.jobs[i].sequence = 0;
+        }
+}
+
+static void gpu_xe_forget(void)
+{
+        gpu_xe_forget_jobs();
+        gpu_xe.vm = 0, gpu_xe.main = 0, gpu_xe.sequence = 0, gpu_xe.done = 0;
+        memory_zero(gpu_xe.userptrs, sizeof(gpu_xe.userptrs));
+}
+
+static unsigned short gpu_xe_pat_index(unsigned int family)
+{
+        if (family >= 2000)
+                return 1u; // Xe2/Xe3: L4 WB + L3 WB, 1-way coherent
+        if (family == 1270 || family == 1274)
+                return 3u; // MTL/ARL: WB, 1-way coherent
+        return 0u;         // Gen12/DG1/DG2: WB, 1-way coherent
+}
+
+static unsigned int gpu_xe_ensure_vm(void)
+{
+        if (gpu_xe.vm)
+                return 0;
+        struct gpu_xe_vm_create v = {0, 0, 0, {0, 0}};
+        unsigned int e = gpu_raw(gpu.fd, GPU_XE_VM_CREATE, &v);
+
+        if (!e)
+                gpu_xe.vm = v.vm_id;
+        return e;
+}
 
 static unsigned int gpu_xe_identify(int fd, unsigned int *family, unsigned int *device)
 {
         p64 cfg[16] = {0};
-        struct gpu_xe_device_query q = {0, 3u, sizeof(cfg), (p64)cfg, {0, 0}}; // DRM_XE_DEVICE_QUERY_CONFIG = 3
+        struct gpu_xe_device_query q = {0, 2u, 0, 0, {0, 0}}; // DRM_XE_DEVICE_QUERY_CONFIG = 2
         unsigned int e = gpu_raw(fd, GPU_XE_DEVICE_QUERY, &q);
 
+        if (e || !q.size || q.size > sizeof(cfg))
+                return *family = 0, *device = 0, e ? e : 22u;
+        q.data = (p64)cfg;
+        e = gpu_raw(fd, GPU_XE_DEVICE_QUERY, &q);
         if (e)
                 return *family = 0, *device = 0, e;
-        // drm_xe_query_config: num_params at cfg[0], info[0] = REV_AND_DEVICE_ID (low 16 = PCI device ID), info[2] = VA_BITS.
-        *device = cfg[0] >= 1 ? (unsigned int)(cfg[1] & 0xffffu) : 0u;
-        *family = gpu_i915_family_of(*device);
-        gpu_xe.va_bits = cfg[0] >= 3 ? (unsigned int)(cfg[3] & 0xffu) : 48u;
+        // drm_xe_query_config: { u32 num_params, pad; u64 info[]; } -> info[0]=REV_AND_DEVICE_ID, info[1]=FLAGS, info[3]=VA_BITS.
+        {
+                unsigned int nparams = (unsigned int)(cfg[0] & 0xffffffffu);
+
+                *device = nparams >= 1 ? (unsigned int)(cfg[1] & 0xffffu) : 0u;
+                *family = gpu_i915_family_of(*device);
+                gpu_xe.has_vram = nparams >= 2 ? (unsigned int)(cfg[2] & 1u) : 0u;
+                gpu_xe.va_bits = nparams >= 4 ? (unsigned int)(cfg[4] & 0xffu) : 48u;
+        }
+        // Discover compute/render engine instance via DRM_XE_DEVICE_QUERY_ENGINES (query = 0).
+        gpu_xe.engine_ok = false;
+        {
+                struct { unsigned int num_engines, pad; struct gpu_xe_engine engines[32]; } eng;
+                struct gpu_xe_device_query eq = {0, 0u, 0, 0, {0, 0}};
+
+                if (!gpu_raw(fd, GPU_XE_DEVICE_QUERY, &eq) && eq.size >= 8 && eq.size <= sizeof(eng))
+                {
+                        memory_zero(&eng, eq.size);
+                        eq.data = (p64)&eng;
+                        if (!gpu_raw(fd, GPU_XE_DEVICE_QUERY, &eq))
+                        {
+                                unsigned short want = *family >= 1255 ? 4u : 0u; // COMPUTE (4) on Xe-HPG/Xe2+, RENDER (0) on Gen12.0
+                                unsigned short alt = *family >= 1255 ? 0u : 4u;
+                                unsigned int count = eng.num_engines > 32 ? 32 : eng.num_engines;
+
+                                for (unsigned int pass = 0; pass < 2 && !gpu_xe.engine_ok; pass++)
+                                {
+                                        unsigned short cls = pass == 0 ? want : alt;
+
+                                        for (unsigned int i = 0; i < count; i++)
+                                                if (eng.engines[i].instance.engine_class == cls)
+                                                {
+                                                        gpu_xe.engine = eng.engines[i].instance;
+                                                        gpu_xe.engine_ok = true;
+                                                        break;
+                                                }
+                                }
+                        }
+                }
+        }
         return 0;
 }
 
@@ -1307,6 +1453,231 @@ static const struct gpu_set *gpu_xe_set(unsigned int family)
         return 0; // Xe-HPG/Xe-LPG/Xe2 COMPUTE_WALKER + LSC kernel sets plug in here
 }
 
+static enum gpu_err gpu_xe_classify(unsigned int error)
+{
+        if (error == 4 || error == 11)
+                return GPU_ERR_AGAIN;
+        if (error == 5 || error == 19 || error == 125) // EIO, ENODEV, ECANCELED (banned exec queue)
+                return GPU_ERR_LOST;
+        if (error == 2 || error == 22 || error == 95)
+                return GPU_ERR_OURS;
+        return GPU_ERR_REFUSED;
+}
+
+static unsigned int gpu_xe_bind(unsigned int handle, positive at, positive bytes, b32 written)
+{
+        struct gpu_xe_vm_bind b;
+        unsigned int e = gpu_xe_ensure_vm();
+
+        if (e)
+                return e;
+        memory_zero(&b, sizeof(b));
+        b.vm_id = gpu_xe.vm, b.num_binds = 1;
+        b.bind.pat_index = gpu_xe_pat_index(gpu.family);
+        b.bind.range = bytes, b.bind.addr = at;
+        b.bind.flags = written ? 0u : 1u; // DRM_XE_VM_BIND_FLAG_READONLY = 1
+        if (handle & GPU_XE_USERPTR_TAG)
+        {
+                unsigned int idx = handle & ~GPU_XE_USERPTR_TAG;
+
+                if (idx >= GPU_XE_USERPTRS || !gpu_xe.userptrs[idx].used)
+                        return 22u;
+                b.bind.op = 3u; // DRM_XE_VM_BIND_OP_MAP_USERPTR
+                b.bind.obj = 0;
+                b.bind.obj_offset = gpu_xe.userptrs[idx].from;
+        }
+        else
+        {
+                b.bind.op = 0u; // DRM_XE_VM_BIND_OP_MAP
+                b.bind.obj = handle;
+                b.bind.obj_offset = 0;
+        }
+        return gpu_raw(gpu.fd, GPU_XE_VM_BIND, &b);
+}
+
+static unsigned int gpu_xe_unbind(unsigned int handle, positive at, positive bytes)
+{
+        struct gpu_xe_vm_bind b;
+        unsigned int e = 0;
+
+        if (gpu_xe.vm)
+        {
+                memory_zero(&b, sizeof(b));
+                b.vm_id = gpu_xe.vm, b.num_binds = 1;
+                b.bind.op = 1u; // DRM_XE_VM_BIND_OP_UNMAP
+                b.bind.range = bytes, b.bind.addr = at;
+                e = gpu_raw(gpu.fd, GPU_XE_VM_BIND, &b);
+        }
+        if (handle & GPU_XE_USERPTR_TAG)
+        {
+                unsigned int idx = handle & ~GPU_XE_USERPTR_TAG;
+
+                if (idx < GPU_XE_USERPTRS)
+                        gpu_xe.userptrs[idx].used = false;
+        }
+        return e;
+}
+
+static unsigned int gpu_xe_buffer(positive size, positive at, unsigned int *handle, p64 *offset)
+{
+        struct gpu_xe_gem_create g = {0, size, 1u, 0, 0, 0, 1u, {0, 0, 0}, {0, 0}}; // system memory, WB
+        struct gpu_xe_gem_mmap m = {0, 0, 0, 0, {0, 0}};
+        unsigned int e = gpu_xe_ensure_vm();
+
+        if (e)
+                return e;
+        e = gpu_raw(gpu.fd, GPU_XE_GEM_CREATE, &g);
+        if (e == 22u) // retry WC if WB refused
+                g.cpu_caching = 2u, e = gpu_raw(gpu.fd, GPU_XE_GEM_CREATE, &g);
+        if (e)
+                return e;
+        m.handle = g.handle;
+        e = gpu_raw(gpu.fd, GPU_XE_GEM_MMAP_OFFSET, &m);
+        if (!e)
+                e = gpu_xe_bind(g.handle, at, size, true);
+        if (e)
+                return gpu_close(g.handle), e;
+        gpu_xe.main = g.handle;
+        *handle = g.handle, *offset = m.offset;
+        return 0;
+}
+
+static unsigned int gpu_xe_context(unsigned int *made, unsigned int before)
+{
+        struct gpu_xe_exec_queue_create c = {0, 1u, 1u, 0, 0, 0, (p64)&gpu_xe.engine, {0, 0}};
+        unsigned int e = gpu_xe_ensure_vm();
+
+        if (e)
+                return e;
+        if (!gpu_xe.engine_ok)
+                return 19u; // ENODEV
+        c.vm_id = gpu_xe.vm;
+        e = gpu_raw(gpu.fd, GPU_XE_EXEC_QUEUE_CREATE, &c);
+        if (e)
+                return e;
+        if (before)
+        {
+                struct gpu_xe_exec_queue_destroy d = {before, 0, {0, 0}};
+
+                gpu_raw(gpu.fd, GPU_XE_EXEC_QUEUE_DESTROY, &d);
+                gpu_xe_forget_jobs();
+        }
+        *made = c.exec_queue_id;
+        return 0;
+}
+
+static unsigned int gpu_xe_user(positive from, positive bytes, unsigned int how, unsigned int *handle)
+{
+        (void)how;
+        for (unsigned int i = 0; i < GPU_XE_USERPTRS; i++)
+        {
+                if (!gpu_xe.userptrs[i].used)
+                {
+                        gpu_xe.userptrs[i].from = from;
+                        gpu_xe.userptrs[i].bytes = bytes;
+                        gpu_xe.userptrs[i].used = true;
+                        *handle = GPU_XE_USERPTR_TAG | i;
+                        return 0;
+                }
+        }
+        return 12u; // ENOMEM
+}
+
+static unsigned int gpu_xe_submit(const struct gpu_job *job, p64 *bos, unsigned int named, positive *sequence)
+{
+        unsigned int words, slot;
+        struct gpu_xe_sync sync;
+        struct gpu_xe_exec ex;
+        unsigned int e;
+
+        (void)bos, (void)named;
+        if (!gpu_set->batch || !(words = gpu_set->batch(job, job->packets_at, GPU_PACKETS / 4)))
+                return 22u;
+        if (words & 1u)
+                job->packets_at[words++] = 0u; // MI_NOOP qword pad
+        slot = (unsigned int)((gpu_xe.sequence + 1) % GPU_XE_JOBS);
+        if (!gpu_xe.jobs[slot].syncobj)
+        {
+                struct gpu_drm_syncobj_create sc = {0, 0};
+
+                e = gpu_raw(gpu.fd, GPU_DRM_SYNCOBJ_CREATE, &sc);
+                if (e)
+                        return e;
+                gpu_xe.jobs[slot].syncobj = sc.handle;
+        }
+        else
+        {
+                unsigned int h = gpu_xe.jobs[slot].syncobj;
+                struct gpu_drm_syncobj_array rst = {(p64)&h, 1u, 0};
+
+                gpu_raw(gpu.fd, GPU_DRM_SYNCOBJ_RESET, &rst);
+        }
+        memory_zero(&sync, sizeof(sync));
+        sync.type = 0u;  // DRM_XE_SYNC_TYPE_SYNCOBJ
+        sync.flags = 1u; // DRM_XE_SYNC_FLAG_SIGNAL
+        sync.handle = gpu_xe.jobs[slot].syncobj;
+        memory_zero(&ex, sizeof(ex));
+        ex.exec_queue_id = gpu.ctx;
+        ex.num_syncs = 1u;
+        ex.syncs = (p64)&sync;
+        ex.address = job->packets;
+        ex.num_batch_buffer = 1u;
+        e = gpu_raw(gpu.fd, GPU_XE_EXEC, &ex);
+        if (e)
+                return e;
+        *sequence = ++gpu_xe.sequence;
+        gpu_xe.jobs[slot].sequence = *sequence;
+        return 0;
+}
+
+static int gpu_xe_wait(positive sequence, p64 until)
+{
+        unsigned int slot = (unsigned int)(sequence % GPU_XE_JOBS);
+        unsigned int h;
+        struct gpu_drm_syncobj_wait w;
+        unsigned int e;
+
+        if (!sequence || sequence <= gpu_xe.done)
+                return 1;
+        if (gpu_xe.jobs[slot].sequence != sequence || !gpu_xe.jobs[slot].syncobj)
+                return -1;
+        h = gpu_xe.jobs[slot].syncobj;
+        do
+        {
+                w.handles = (p64)&h, w.timeout_nsec = (long long)until, w.count_handles = 1u, w.flags = 1u, w.first_signaled = 0, w.pad = 0;
+                e = gpu_raw(gpu.fd, GPU_DRM_SYNCOBJ_WAIT, &w);
+        } while (e == 4u); // EINTR
+        if (e == 62u) // ETIME
+                return 0;
+        if (e)
+                return -1;
+        {
+                struct gpu_xe_exec_queue_prop prop = {0, gpu.ctx, 0u, 0, {0, 0}}; // DRM_XE_EXEC_QUEUE_GET_PROPERTY_BAN = 0
+
+                if (!gpu_raw(gpu.fd, GPU_XE_EXEC_QUEUE_GET_PROP, &prop) && prop.value)
+                        return -1;
+        }
+        gpu_xe.done = sequence;
+        return 1;
+}
+
+static unsigned int gpu_xe_fence(positive sequence, int *fd)
+{
+        unsigned int slot = (unsigned int)(sequence % GPU_XE_JOBS);
+        struct gpu_drm_syncobj_handle sh;
+        unsigned int e;
+
+        *fd = -1;
+        if (gpu_xe.jobs[slot].sequence != sequence || !gpu_xe.jobs[slot].syncobj)
+                return sequence && sequence <= gpu_xe.done ? 114u : 2u;
+        sh.handle = gpu_xe.jobs[slot].syncobj, sh.flags = 1u, sh.fd = -1, sh.pad = 0; // DRM_SYNCOBJ_HANDLE_TO_FD_FLAGS_EXPORT_SYNC_FILE = 1
+        e = gpu_raw(gpu.fd, GPU_DRM_SYNCOBJ_HANDLE_TO_FD, &sh);
+        if (e)
+                return e;
+        *fd = sh.fd;
+        return 0;
+}
+
 static unsigned int gpu_xe_describe(unsigned int family, unsigned int device, char *into, unsigned int at, unsigned int room)
 {
         const char *words = "an Intel Xe chip not yet in the tables";
@@ -1321,8 +1692,9 @@ static unsigned int gpu_xe_describe(unsigned int family, unsigned int device, ch
 }
 
 static const struct gpu_backend gpu_xe_row = {
-    .driver = "xe", .identify = gpu_xe_identify, .set = gpu_xe_set, .classify = gpu_i915_classify,
-    .window = gpu_xe_window, .describe = gpu_xe_describe, .lanes = 16, .packets = 1024, .state = 512};
+    .driver = "xe", .identify = gpu_xe_identify, .buffer = gpu_xe_buffer, .context = gpu_xe_context, .user = gpu_xe_user, .bind = gpu_xe_bind,
+    .unbind = gpu_xe_unbind, .submit = gpu_xe_submit, .wait = gpu_xe_wait, .fault = gpu_i915_fault, .fence = gpu_xe_fence, .set = gpu_xe_set,
+    .classify = gpu_xe_classify, .window = gpu_xe_window, .describe = gpu_xe_describe, .lanes = 16, .packets = 1024, .state = 512};
 
 /*
         NVIDIA Nouveau identification backend ("nouveau", Kepler 2012 through Blackwell 2026): queries chipset ID via
@@ -1514,6 +1886,7 @@ COLD static void gpu_stop(void)
         if (gpu.fd >= 0)
                 system_close(gpu.fd);
         gpu_i915_forget();
+        gpu_xe_forget();
         gpu_i915.main = 0;
         if (gpu_i915.bound)
                 memory_zero(gpu_i915.bound, (positive)GPU_I915_HANDLES * sizeof(struct gpu_i915_bound));
@@ -1844,12 +2217,36 @@ static b32 gpu_start(positive bytes)
                                 unsigned int address_to dst_k = (unsigned int address_to)((p8 address_to)gpu.at + here);
 
                                 memory_copy(dst_k, gpu_set->kernels[i].words + gpu_set->skip, bytes_k);
-                                // Cross-gen Intel EU binary patching from Gen9 words (verified word-for-word against intel-probe kern8/kern11):
+                                // Cross-gen Intel EU binary patching from Gen9 words (verified word-for-word against intel-probe kern7/kern8/kern9/kern11):
                                 if (gpu_backend == &gpu_i915_row)
                                 {
                                         unsigned int insns = bytes_k / 16u;
 
-                                        if (gpu.family == 800 || gpu.family == 801)
+                                        if (gpu.family < 800)
+                                        {
+                                                for (unsigned int k = 0; k < insns; k++)
+                                                {
+                                                        unsigned int *w = dst_k + 4 * k;
+                                                        unsigned int op = w[0] & 0x7fu;
+                                                        unsigned int fsub = w[1] & 1u, freg = (w[1] >> 1) & 1u, mctrl = (w[1] >> 2) & 1u;
+                                                        unsigned int drf = (w[1] >> 3) & 3u, dtype = (w[1] >> 5) & 7u;
+                                                        unsigned int s0rf = (w[1] >> 9) & 3u, s0type = (w[1] >> 11) & 7u;
+                                                        unsigned int s1rf = (w[2] >> 25) & 3u, s1type = (w[2] >> 27) & 7u;
+
+                                                        if (op == 0x31u)
+                                                        {
+                                                                if (((w[0] >> 24) & 0xfu) == 0xcu)
+                                                                        w[0] = (w[0] & ~0x0f000000u) | (0x5u << 24); // Gen7 Render Cache SFID = 5
+                                                                s1type = 1u; // Gen7 send Src1Type = :d
+                                                        }
+                                                        else if (op == 0x20u && gpu.family < 750)
+                                                                w[3] = (unsigned int)((int)w[3] >> 3); // Ivy Bridge/VLV jmpi JIP is in qwords (8B)
+                                                        w[0] = (w[0] & ~0x80000000u) | (mctrl << 31);
+                                                        w[1] = (w[1] & 0xffff8000u) | drf | (dtype << 2) | (s0rf << 5) | (s0type << 7) | (s1rf << 10) | (s1type << 12);
+                                                        w[2] = (w[2] & 0x01ffffffu) | (fsub << 25) | (freg << 26);
+                                                }
+                                        }
+                                        else if (gpu.family == 800 || gpu.family == 801)
                                         {
                                                 for (unsigned int k = 0; k < insns; k++)
                                                         if ((dst_k[4 * k] & 0x7fu) == 0x31u)
@@ -2638,7 +3035,7 @@ static unsigned int gpu_i915_mocs(void)
         if (gpu.family < 1200)
                 return 1u;
         if (gpu.family == 1200)
-                return gpu_i915.llc ? 2u : 3u;
+                return (gpu_backend == &gpu_i915_row ? gpu_i915.llc : 1) ? 2u : 3u;
         if (gpu.family == 1201)
                 return 5u;
         if (gpu.family == 1255)
@@ -2735,7 +3132,8 @@ static void gpu_i915_frame(unsigned int address_to words, unsigned int sbase, un
         {
                 unsigned int tpeu = (gpu.family >= 1100 && gpu.family < 1200) ? 8u : 7u;
                 unsigned int max_threads = gpu.family >= 1200 ? 671u : gpu.family >= 1100 ? 511u : 167u;
-                unsigned int threads = gpu_i915.eu_total ? gpu_i915.eu_total * tpeu - 1u : 63u;
+                unsigned int eu = gpu_backend == &gpu_i915_row ? gpu_i915.eu_total : 0u;
+                unsigned int threads = eu ? eu * tpeu - 1u : 63u;
 
                 if (threads > max_threads)
                         threads = max_threads;
@@ -2752,6 +3150,61 @@ static void gpu_i915_frame(unsigned int address_to words, unsigned int sbase, un
         words[n++] = 0; words[n++] = 0; words[n++] = 0; words[n++] = 0;
         words[n++] = 0x05000000u;
         memory_zero(words + n, (64 - n) * sizeof words[0]);
+}
+
+// Compute Front End batch emitter for Xe-HPG (1255), Xe-LPG (1270/1274), Xe2 (2000/2001), and Xe3 (3000), shared by i915 and xe:
+// PIPELINE_SELECT (< Xe2), 22-dw STATE_BASE_ADDRESS, STATE_COMPUTE_MODE, CFE_STATE (0x7002), COMPUTE_WALKER (0x7007) with inline
+// 8-dw INTERFACE_DESCRIPTOR_DATA + CURBE, PIPE_CONTROL (HDC/LSC flush), and MI_BATCH_BUFFER_END (padded to 96 dwords).
+static unsigned int gpu_intel_xehp_frame(unsigned int address_to words, unsigned int code_off, unsigned int sbase, unsigned int cols, unsigned int rows)
+{
+        unsigned int n = 0;
+
+        if (gpu.family < 2000)
+                words[n++] = 0x69040302u; // PIPELINE_SELECT (GPGPU, removed on Xe2+)
+        words[n++] = 0x61010014u; // 22-dw STATE_BASE_ADDRESS
+        words[n++] = 1; words[n++] = 0; words[n++] = 1;
+        words[n++] = (unsigned int)GPU_VA | 1; words[n++] = (unsigned int)(GPU_VA >> 32);
+        words[n++] = (unsigned int)GPU_VA | 1; words[n++] = (unsigned int)(GPU_VA >> 32);
+        words[n++] = 0; words[n++] = 0;
+        words[n++] = (unsigned int)GPU_VA | 1; words[n++] = (unsigned int)(GPU_VA >> 32);
+        words[n++] = 0xfffff000u | 1; words[n++] = 65536u | 1; words[n++] = 0xfffff000u | 1; words[n++] = 65536u | 1;
+        words[n++] = 1; words[n++] = 0; words[n++] = 0xfffff000u;
+        words[n++] = 1; words[n++] = 0; words[n++] = 0;
+        words[n++] = 0x61050000u; words[n++] = 0; // STATE_COMPUTE_MODE
+        words[n++] = 0x70020004u; words[n++] = 0; words[n++] = 0; words[n++] = (671u << 16); words[n++] = 0; words[n++] = 0; // CFE_STATE (6 dw)
+        // COMPUTE_WALKER: 39 dw on Xe-HPG/LPG (0x70070025), 40 dw on Xe2+ (0x70070026), SIMD16, inline 8-dw IDD + CURBE.
+        {
+                unsigned int wlen = gpu.family >= 2000 ? 40u : 39u;
+                unsigned int base = n;
+
+                memory_zero(words + base, wlen * sizeof(words[0]));
+                words[base + 0] = 0x70070000u | (wlen - 2u);
+                words[base + 2] = 64u;                  // IndirectDataLength (CURBE)
+                words[base + 3] = sbase + 192u;         // IndirectDataStartAddress
+                words[base + 4] = 1u << 30;             // SIMDSize = SIMD16
+                words[base + 6] = cols;                 // ThreadGroupIDXDimension
+                words[base + 7] = rows;                 // ThreadGroupIDYDimension
+                words[base + 8] = 1u;                   // ThreadGroupIDZDimension
+                words[base + 9] = 0xffffu;              // RightExecutionMask
+                words[base + 10] = 0xffffffffu;         // BottomExecutionMask
+                // Inline 8-dw INTERFACE_DESCRIPTOR_DATA at DW18..25 (Xe-HPG/LPG) or DW19..26 (Xe2+):
+                {
+                        unsigned int idd = base + (gpu.family >= 2000 ? 19u : 18u);
+
+                        words[idd + 0] = code_off;
+                        words[idd + 2] = 1u << 18; // SingleProgramFlow
+                        words[idd + 4] = sbase;    // BindingTablePointer
+                        words[idd + 5] = 1u;       // NumberOfThreadsInGPGPUThreadGroup = 1
+                }
+                n += wlen;
+        }
+        words[n++] = 0x7a000004u;
+        words[n++] = (1u << 12) | (1u << 20) | (1u << 9); // Render Target + CS Stall + HDC/LSC flush
+        words[n++] = 0; words[n++] = 0; words[n++] = 0; words[n++] = 0;
+        words[n++] = 0x05000000u; // MI_BATCH_BUFFER_END
+        if (n < 96u)
+                memory_zero(words + n, (96u - n) * sizeof(words[0]));
+        return 96u;
 }
 
 // A job's batch arguments, read through the state's mapping (their card address is the state's plus their distance from it), when the batch can be

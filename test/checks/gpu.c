@@ -49,9 +49,11 @@ static const unsigned int *gpu_grain(unsigned int light, int x, int y)
 
 static unsigned int gpu_want[1500 * 700];
 
-// The Intel set (Gen9, fill only, not registered): the edge split of a byte fill, and its batch, on the host (no card).
+// The Intel set (Gen7-Gen11 active, Gen12+ frame checks): the edge split of a byte fill, and its batch, on the host (no card).
 static void gpu_i915_set_rows(void)
 {
+        unsigned int kept_family = gpu.family;
+        gpu.family = 900;
         // The cp (op 4), the scene's batch: a picture 13 pixels by 9 rows on a pitch of 16 pixels, its destination at GPU_VA + 0x2000, its bins at
         // GPU_VA + 0x8000 (the table of one cell, then the lists). The walker's groups are the blocks of a row (4) and the rows (9); the CURBE holds the
         // width, the cells a row and the lists' offset (8 times the cells); the bins are binding table entry 1. A pitch that is not a multiple of 16
@@ -67,8 +69,8 @@ static void gpu_i915_set_rows(void)
                 a->d = GPU_VA + 0x2000, a->g = GPU_VA + 0x8000, a->dp = 16, a->sp = 13, a->gp = 9, a->w = 13, a->rows = 3, a->op = 4;
                 job.arguments = GPU_VA + 2048, job.state = GPU_VA + 2560, job.state_at = (unsigned int address_to)(buffer + 2560);
                 job.code = GPU_VA + 3584;
-                check("gpu i915 cp: a 13 by 9 scene on a pitch of 16 pixels is taken: the batch is the 56 dwords the walker takes",
-                      gpu_i915_gen9_batch(&job, words, 64) == 56 && words[0] == 0x69040302u);
+                check("gpu i915 cp: a 13 by 9 scene on a pitch of 16 pixels is taken: the batch is the 64 dwords the walker takes",
+                      gpu_i915_gen9_batch(&job, words, 64) == 64 && words[0] == 0x69040302u);
                 check("gpu i915 cp: the walker's groups are the 4 blocks of a row and the 9 rows", words[44] == 4 && words[47] == 9);
                 check("gpu i915 cp: the CURBE holds the width (13), the cells a row (1) and the lists' offset (8 * 1 cell = 8)",
                       state[48] == 13 && state[49] == 1 && state[50] == 8);
@@ -91,9 +93,9 @@ static void gpu_i915_set_rows(void)
                 check("gpu i915 cp: a width past 4096 pixels is refused whole", gpu_i915_gen9_batch(&job, words, 64) == 0);
                 a->w = 4096, a->dp = 4096;
                 check("gpu i915 cp: 4096 pixels (the surface's 16384 bytes) is the most a row can be and is taken",
-                      gpu_i915_gen9_batch(&job, words, 64) == 56 && words[44] == 1024);
+                      gpu_i915_gen9_batch(&job, words, 64) == 64 && words[44] == 1024);
                 a->w = 13, a->dp = 16;
-                check("gpu i915 cp: the scene is taken again at 13 by 9 after the refusals", gpu_i915_gen9_batch(&job, words, 64) == 56 && words[44] == 4);
+                check("gpu i915 cp: the scene is taken again at 13 by 9 after the refusals", gpu_i915_gen9_batch(&job, words, 64) == 64 && words[44] == 4);
         }
         // The Intel set (Gen9, fill only, not registered): the edge split of a byte fill, and its batch. The rules are measured on Gen9:
         // a 32-byte-aligned base and a span in multiples of 16. Here: d at 16 and 48, span 100 (the coordinator's rows), a pitch below the
@@ -145,7 +147,7 @@ static void gpu_i915_set_rows(void)
                         job.arguments = GPU_VA + 2048, job.state = GPU_VA + 2560, job.state_at = (unsigned int address_to)(buffer + 2560);
                         job.code = GPU_VA + 3584;
                         n = gpu_i915_gen9_batch(&job, words, 64);
-                        check("gpu i915: a whole fill's batch is the 56 dwords the Gen9 walker takes", n == 56 && words[0] == 0x69040302u && words[1] == 0x61010011u);
+                        check("gpu i915: a whole fill's batch is the 64 dwords the Gen9 walker takes", n == 64 && words[0] == 0x69040302u && words[1] == 0x61010011u);
                         check("gpu i915: the walker's columns are the span's 80 bytes over 16: five, and the rows are the fill's",
                               words[44] == 5u && words[47] == 4u && words[37] == 0x7105000du && words[51] == 0xffffffffu);
                         check("gpu i915: the colour dword is the CURBE's first dword, the CURBE reads 64 bytes from the state",
@@ -164,8 +166,8 @@ static void gpu_i915_set_rows(void)
                         check("gpu i915: a destination below GPU_VA (0) is refused (0 words)", gpu_i915_gen9_batch(&job, words, 64) == 0);
                         a->d = GPU_VA + 0x2020;
                         a->op = 3, a->s = GPU_VA + 0x4000, a->sp = 128, a->g = GPU_VA + 0x8000, a->gp = 128, a->v = 1, a->x0 = 3, a->y0 = 5;
-                        check("gpu i915: glass (op 3) takes its ground: the batch is the 56 dwords, the ground is entry 2 at state 320, its base and pitch are the ground's",
-                              gpu_i915_gen9_batch(&job, words, 64) == 56 && state[2] == 2560 + 320 && state[(320 + 32) / 4] == (unsigned int)(GPU_VA + 0x8000) &&
+                        check("gpu i915: glass (op 3) takes its ground: the batch is the 64 dwords, the ground is entry 2 at state 320, its base and pitch are the ground's",
+                              gpu_i915_gen9_batch(&job, words, 64) == 64 && state[2] == 2560 + 320 && state[(320 + 32) / 4] == (unsigned int)(GPU_VA + 0x8000) &&
                               state[(320 + 12) / 4] == 511u && state[(64 + 32) / 4] == (unsigned int)(GPU_VA + 0x2020));
                         check("gpu i915: glass's CURBE holds v, x0 and y0 at 192, 196 and 200 (the kernel's r1.0 to r1.2)",
                               state[48] == 1u && state[49] == 3u && state[50] == 5u && words[32] == 2560 + 192);
@@ -185,17 +187,17 @@ static void gpu_i915_set_rows(void)
                         check("gpu i915: a fill whose span ends inside a 16-byte group (a tail) is refused whole", gpu_i915_gen9_batch(&job, words, 64) == 0);
                         a->w = 4096, a->dp = 4096;
                         check("gpu i915: 4096 pixels is the most a row can be (16384 bytes: the surface's 14-bit width) and is taken",
-                              gpu_i915_gen9_batch(&job, words, 64) == 56);
+                              gpu_i915_gen9_batch(&job, words, 64) == 64);
                         a->w = 4097, a->dp = 4097;
                         check("gpu i915: 4097 pixels overflows the surface's width field, so it is refused, not wrapped",
                               gpu_i915_gen9_batch(&job, words, 64) == 0);
                         a->w = 20, a->dp = 128, a->rows = 16384;
                         check("gpu i915: 16384 rows is the most a surface can be (its height field is 14 bits) and is taken",
-                              gpu_i915_gen9_batch(&job, words, 64) == 56);
+                              gpu_i915_gen9_batch(&job, words, 64) == 64);
                         a->rows = 16385;
                         check("gpu i915: 16385 rows overflows the height field, so it is refused", gpu_i915_gen9_batch(&job, words, 64) == 0);
                         a->rows = 4, a->dp = 65536;
-                        check("gpu i915: a pitch of 256 KiB is the most the surface's 18-bit pitch holds and is taken", gpu_i915_gen9_batch(&job, words, 64) == 56);
+                        check("gpu i915: a pitch of 256 KiB is the most the surface's 18-bit pitch holds and is taken", gpu_i915_gen9_batch(&job, words, 64) == 64);
                         a->dp = 65537;
                         check("gpu i915: a pitch over 256 KiB is refused", gpu_i915_gen9_batch(&job, words, 64) == 0);
                         a->dp = 128;
@@ -204,8 +206,8 @@ static void gpu_i915_set_rows(void)
                               gpu_i915_gen9_batch(&job, words, 64) == 0);
                         job.code = GPU_VA + 3584;
                         a->op = 0, a->s = GPU_VA + 0x4000, a->sp = 128, a->w = 20, a->dp = 128, a->d = GPU_VA + 0x2020, a->rows = 4;
-                        check("gpu i915: a copy's batch is 56 dwords; the source is binding table entry 1, its surface state at 256",
-                              gpu_i915_gen9_batch(&job, words, 64) == 56 && state[1] == 2560 + 256 && state[0] == 2560 + 64);
+                        check("gpu i915: a copy's batch is 64 dwords; the source is binding table entry 1, its surface state at 256",
+                              gpu_i915_gen9_batch(&job, words, 64) == 64 && state[1] == 2560 + 256 && state[0] == 2560 + 64);
                         check("gpu i915: the source's surface state: base the source's address, 80 bytes wide, 4 rows, its own 512-byte pitch",
                               state[(256 + 32) / 4] == (unsigned int)(GPU_VA + 0x4000) && state[(256 + 8) / 4] == (79u | (3u << 16)) && state[(256 + 12) / 4] == 511u);
                         check("gpu i915: a copy's destination is the same as the fill's: the GPU writes the same five columns on 4 rows",
@@ -221,8 +223,8 @@ static void gpu_i915_set_rows(void)
                         a->sp = 128, a->s = 0;
                         check("gpu i915: a copy whose source is not in the card's buffer is refused (0 words)", gpu_i915_gen9_batch(&job, words, 64) == 0);
                         a->op = 2, a->v = 0x80402010u;
-                        check("gpu i915: a tone's batch is 56 dwords, one surface (the destination), its colour in the CURBE",
-                              gpu_i915_gen9_batch(&job, words, 64) == 56 && state[48] == 0x80402010u && state[0] == 2560 + 64 && state[(64 + 32) / 4] == (unsigned int)(GPU_VA + 0x2020));
+                        check("gpu i915: a tone's batch is 64 dwords, one surface (the destination), its colour in the CURBE",
+                              gpu_i915_gen9_batch(&job, words, 64) == 64 && state[48] == 0x80402010u && state[0] == 2560 + 64 && state[(64 + 32) / 4] == (unsigned int)(GPU_VA + 0x2020));
                         check("gpu i915: the tone walks the same five columns on 4 rows as the fill and the copy", words[44] == 5u && words[47] == 4u);
                         a->op = 9, a->v = 0;
                         check("gpu i915: an op without an Intel encoder (9, nv12) is refused (0 words)", gpu_i915_gen9_batch(&job, words, 64) == 0);
@@ -252,14 +254,14 @@ static void gpu_i915_set_rows(void)
                 job.arguments = GPU_VA + 2048, job.state = GPU_VA + 2560, job.state_at = (unsigned int address_to)(buffer + 2560);
                 job.code = GPU_VA + 3584;
                 n = gpu_i915_gen9_batch(&job, words, 64);
-                check("gpu i915 scene: two records make the 56 dwords of the walker, over 64 blocks by 32 rows",
-                      n == 56 && words[0] == 0x69040302u && words[29] == 0x70010002u && words[32] == 2560 + 192 && words[44] == 64u && words[47] == 32u);
+                check("gpu i915 scene: two records make the 64 dwords of the walker, over 64 blocks by 32 rows",
+                      n == 64 && words[0] == 0x69040302u && words[29] == 0x70010002u && words[32] == 2560 + 192 && words[44] == 64u && words[47] == 32u);
                 check("gpu i915 scene: the CURBE holds the count, then the first pixel's x and y (0 and 0)",
                       state[48] == 2u && state[49] == 0u && state[50] == 0u);
                 check("gpu i915 scene: entry 1 is the records (two a 64-byte row, so one row: height 0, width and pitch 63), based on the first record",
                       state[1] == 2560 + 256 && state[(256 + 8) / 4] == 63u && state[(256 + 12) / 4] == 63u && state[(256 + 32) / 4] == (unsigned int)(GPU_VA + 3072));
                 a->count = 3;
-                check("gpu i915 scene: three records are two rows (height 1)", gpu_i915_gen9_batch(&job, words, 64) == 56 && state[(256 + 8) / 4] == (63u | (1u << 16)));
+                check("gpu i915 scene: three records are two rows (height 1)", gpu_i915_gen9_batch(&job, words, 64) == 64 && state[(256 + 8) / 4] == (63u | (1u << 16)));
                 a->count = 2, recs[8] = 2;
                 check("gpu i915 scene: a record that is not a fill or a tone (kind 2, a box) is refused (0 words)", gpu_i915_gen9_batch(&job, words, 64) == 0);
                 recs[8] = 1, a->ops = GPU_VA + 3072 + 8;
@@ -282,10 +284,10 @@ static void gpu_i915_set_rows(void)
                         recs[16] = 4u | 0x80u, recs[17] = 4, recs[18] = 2, recs[19] = 68, recs[20] = 18;
                         recs[21] = (unsigned int)img_va, recs[22] = (unsigned int)(img_va >> 32), recs[23] = 128;
                         check("gpu i915 scene: image copy (4 | 0x80) binds BTI 2 (32-byte aligned base) and sets CURBE dword 3",
-                              gpu_i915_gen9_batch(&job, words, 64) == 56 && state[2] == 2560 + 320 &&
+                              gpu_i915_gen9_batch(&job, words, 64) == 64 && state[2] == 2560 + 320 &&
                                   state[51] == (unsigned int)(img_va & ~31ull) && state[(320 + 32) / 4] == (unsigned int)(img_va & ~31ull));
                         recs[16] = 11u;
-                        check("gpu i915 scene: image alpha-over (11) is accepted with BTI 2", gpu_i915_gen9_batch(&job, words, 64) == 56);
+                        check("gpu i915 scene: image alpha-over (11) is accepted with BTI 2", gpu_i915_gen9_batch(&job, words, 64) == 64);
                         recs[21] = (unsigned int)(img_va + 1); // unaligned (not multiple of 4)
                         check("gpu i915 scene: an image record with a non-4-byte-aligned VA is refused (0 words)", gpu_i915_gen9_batch(&job, words, 64) == 0);
                         recs[21] = (unsigned int)img_va, recs[23] = 0; // zero pitch
@@ -309,8 +311,8 @@ static void gpu_i915_set_rows(void)
                 job.arguments = GPU_VA + 2048, job.state = GPU_VA + 2560, job.state_at = (unsigned int address_to)(buffer + 2560);
                 job.code = GPU_VA + 3584;
                 n = gpu_i915_gen9_batch(&job, words, 64);
-                check("gpu i915 scale: a scale's batch is the 56 dwords the Gen9 walker takes: ceil(37 / 4) = 10 columns by 23 rows",
-                      n == 56 && words[0] == 0x69040302u && words[29] == 0x70010002u && words[32] == 2560 + 192 && words[44] == 10u && words[47] == 23u);
+                check("gpu i915 scale: a scale's batch is the 64 dwords the Gen9 walker takes: ceil(37 / 4) = 10 columns by 23 rows",
+                      n == 64 && words[0] == 0x69040302u && words[29] == 0x70010002u && words[32] == 2560 + 192 && words[44] == 10u && words[47] == 23u);
                 check("gpu i915 scale: the binding table is the destination (entry 0), the source (entry 1) and the tables (entry 2)",
                       state[0] == 2560 + 64 && state[1] == 2560 + 256 && state[2] == 2560 + 320);
                 check("gpu i915 scale: the CURBE holds the source's pitch (48), w (37) and the destination's pitch (48), in that order",
@@ -341,22 +343,23 @@ static void gpu_i915_set_rows(void)
                 a->rows = 16384, a->dp = 65536;
                 check("gpu i915 scale: a destination of 2^30 pixels is past the 2^26 the card's surfaces address, refused (0 words)", gpu_i915_gen9_batch(&job, words, 64) == 0);
                 a->dp = 4096;
-                check("gpu i915 scale: a destination of 2^26 pixels (4096 by 16384) is the most, and is taken", gpu_i915_gen9_batch(&job, words, 64) == 56);
+                check("gpu i915 scale: a destination of 2^26 pixels (4096 by 16384) is the most, and is taken", gpu_i915_gen9_batch(&job, words, 64) == 64);
                 a->dp = 48, a->rows = 23;
-                check("gpu i915 scale: a batch room under 56 dwords is refused (0 words)", gpu_i915_gen9_batch(&job, words, 55) == 0);
+                check("gpu i915 scale: a batch room under 64 dwords is refused (0 words)", gpu_i915_gen9_batch(&job, words, 63) == 0);
                 n = gpu_i915_gen9_batch(&job, words, 64); /* the last call: the dump's words and state */
 #ifdef CHECK_GPU_I915_DUMP
-                // The encoder's words and state for the hardware harness (team-kernels/scale/harness.c, --encdump): GPU_VA, then the 56 batch dwords and the
+                // The encoder's words and state for the hardware harness (team-kernels/scale/harness.c, --encdump): GPU_VA, then the 64 batch dwords and the
                 // state's 128 dwords (the state at GPU_VA + 2560 as the job lays it), one line each.
                 string_format(log, "DUMP scale va %p\n", (positive)GPU_VA);
-                for (unsigned int i = 0; i < 56; i++)
+                for (unsigned int i = 0; i < 64; i++)
                         string_format(log, "W %p\n", (positive)words[i]);
                 for (unsigned int i = 0; i < 128; i++)
                         string_format(log, "S %p %p\n", (positive)i, (positive)state[i]);
                 log_flush();
 #endif
-                check("gpu i915 scale: the last batch is 56 dwords", n == 56);
+                check("gpu i915 scale: the last batch is 64 dwords", n == 64);
         }
+        gpu.family = kept_family;
 }
 
 b32 main(void)
@@ -1343,10 +1346,10 @@ static void gpu_i915_rows(void)
         gpu_kernel.on = 1, gpu_kernel.i915_chip = 0x3e92, gpu_kernel.i915_ppgtt = 2, gpu_kernel.i915_gtt = 1ull << 48;
         string_copy_bounded((string_address)gpu_kernel.i915, (string_address) "i915", sizeof(gpu_kernel.i915));
 
-        // The chips: the families by the kernel's device tables, 0 for one before Ivy Bridge or of the xe era.
+        // The chips: the families by the kernel's device tables, 0 for one before Ivy Bridge.
         {
                 static const unsigned int ids[][2] = {{0x0152, 700}, {0x0F31, 701}, {0x041E, 750}, {0x1616, 800}, {0x22B0, 801}, {0x3E92, 900}, {0x3185, 901},
-                                                      {0x8A52, 1100}, {0x4E61, 1101}, {0x9A49, 1200}, {0xA7A0, 1200}, {0x0102, 0}, {0x56A0, 0}, {0x7D55, 0}};
+                                                      {0x8A52, 1100}, {0x4E61, 1101}, {0x9A49, 1200}, {0xA7A0, 1200}, {0x0102, 0}, {0x56A0, 1255}, {0x7D55, 1270}};
                 b32 all = true;
 
                 for (unsigned int i = 0; i < sizeof(ids) / sizeof(ids[0]); i++)
@@ -1354,20 +1357,21 @@ static void gpu_i915_rows(void)
                         gpu_kernel.i915_chip = ids[i][0];
                         all &= gpu_i915_identify(GPU_KERNEL_I915, &family, &device) == 0 && family == ids[i][1] && device == ids[i][0];
                 }
-                check("gpu i915: CHIPSET_ID's device is the chip's family (Ivy Bridge 700 to Raptor Lake 1200; Sandy Bridge and the xe era none)", all);
-                gpu_kernel.i915_chip = 0x3e92;
-                check("gpu i915: no chip has a kernel set yet: none is a card the path takes", !gpu_i915_set(700) && !gpu_i915_set(750) && !gpu_i915_set(900) && !gpu_i915_set(1200));
+                check("gpu i915: CHIPSET_ID's device is the chip's family (Ivy Bridge 700 through Meteor Lake 1270; Sandy Bridge 0)", all);
+                gpu_kernel.i915_chip = 0x9a49;
+                check("gpu i915: Gen7-Gen11 have registered kernel sets; Gen12+ not yet",
+                      gpu_i915_set(700) && gpu_i915_set(750) && gpu_i915_set(800) && gpu_i915_set(900) && gpu_i915_set(1100) && !gpu_i915_set(1200));
         }
-        // A start on the i915 node: the driver is known, the chip has no kernels, the start stops at the chip's step with nothing of a card made, and it is settled.
+        // A start on the i915 node: the driver is known, the chip (Gen12 0x9a49) has no kernels yet, the start stops at the chip's step with nothing of a card made, and it is settled.
         identified = gpu_kernel.i915_identifies;
         check("gpu i915: a start on an i915 node stops at the chip's step, with the driver and the chip kept",
-              !gpu_start(1 << 20) && gpu_req.first == GPU_REQ_FAMILY && (gpu_req.mask & (1u << GPU_REQ_DRIVER)) && gpu_req.family == 900 && gpu_req.device == 0x3e92 &&
+              !gpu_start(1 << 20) && gpu_req.first == GPU_REQ_FAMILY && (gpu_req.mask & (1u << GPU_REQ_DRIVER)) && gpu_req.family == 1200 && gpu_req.device == 0x9a49 &&
                   string_equals((string_address)gpu_req.name, (string_address) "i915"));
         check("gpu i915: and nothing of a card was made (no buffer, no context), the descriptor closed", gpu_kernel.i915_creates == 0 && gpu_kernel.i915_contexts == 0 && gpu.fd == -1 &&
               gpu_kernel.i915_identifies == identified + 1);
         check("gpu i915: a chip with no kernel set is settled, and the nodes it saw are kept", gpu_req.settled && gpu_req.nodes != 0 && gpu_req.nodes == gpu_nodes_seen());
         check("gpu i915: the notice's words name the driver and the chip",
-              gpu_req_words(words, sizeof(words)) && gpu_i915_has(words, "i915 Gen9 Skylake to Comet Lake") && gpu_i915_has(words, "0x3e92"));
+              gpu_req_words(words, sizeof(words)) && gpu_i915_has(words, "i915 Gen12 Tiger Lake to Raptor Lake") && gpu_i915_has(words, "0x9a49"));
         nodes = gpu_req.nodes;
         string_copy_bounded((string_address)gpu_kernel.i915, (string_address) "virtio_gpu", sizeof(gpu_kernel.i915));
         check("gpu i915: a driver loaded in the node's place is other nodes", gpu_nodes_seen() != nodes);

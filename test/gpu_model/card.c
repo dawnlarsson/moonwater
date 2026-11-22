@@ -14,7 +14,7 @@
 
 static void gpu_model_card_submit(positive ib_va, unsigned int ib_bytes, const p64 address_to bos, unsigned int named);
 static positive gpu_model_sequence; // the last job's sequence (a job is done when its submit returns)
-#define GPU_SUBMIT_FAKE(error, taken, sequence) (gpu_model_card_submit(job->packets, (unsigned int)sizeof(ib), bos, named), (sequence) = ++gpu_model_sequence, (taken) = true)
+#define GPU_SUBMIT_FAKE(error, taken, sequence) (gpu_model_card_submit(job->packets, n * 4u, bos, named), (sequence) = ++gpu_model_sequence, (taken) = true)
 #define GPU_WAIT_CS(wait) ((wait)[0] = 0, true)
 static p64 gpu_model_seen[1 + 64 + 256];
 static unsigned int gpu_model_seen_count;
@@ -100,7 +100,7 @@ static void gpu_model_card_dispatch(const p32 address_to grid)
         positive code = ((p64)sh[0x20d] << 32 | sh[0x20c]) << 8, room = 0;
         const p8 *host = null;
 
-        if (grid[2] != 1 || grid[3] != 0x45 || sh[0x207] != 64 || sh[0x208] != 1 || sh[0x209] != 1)
+        if (grid[2] != 1 || (grid[3] != 0x45 && !(gpu_amd_gfx_major == 6 && grid[3] == 0x05)) || sh[0x207] != 64 || sh[0x208] != 1 || sh[0x209] != 1)
         {
                 gpu_model_card_refuse("a dispatch the model does not take: its grid's z, its initiator or its group is not gpu_amd_submit's ", (p64)grid[3] << 32 | grid[2]);
                 return;
@@ -149,7 +149,7 @@ static void gpu_model_card_submit(positive ib_va, unsigned int ib_bytes, const p
                                 gpu_model_card.sh[ib[at + 1] + k - 1] = ib[at + 1 + k];
                 else if (op == 0x15 && count == 4) // DISPATCH_DIRECT: x, y, z, the initiator
                         gpu_model_card_dispatch(ib + at + 1);
-                else if (op != 0x58) // ACQUIRE_MEM: the caches emptied, which the model has none of
+                else if (op != 0x58 && op != 0x43) // ACQUIRE_MEM / SURFACE_SYNC: the caches emptied, which the model has none of
                         gpu_model_card_refuse("a packet the model does not take: ", head);
                 at += 1 + count;
         }

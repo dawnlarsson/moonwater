@@ -4995,12 +4995,12 @@ static void check_compositor_loop_wait(void)
         list[0] = (struct compositor_poll){a[0], COMPOSITOR_POLLIN, 0};
         list[1] = (struct compositor_poll){b[0], COMPOSITOR_POLLIN, 0};
         system_write_once(b[1], &byte, 1);
-        got = compositor_loop_wait(list, 2, none, 0);
+        got = compositor_loop_wait(list, 2, none, 0, 0);
         ready = got == 1 && list[0].returned == 0 && (list[1].returned & COMPOSITOR_POLLIN);
-        got = compositor_loop_wait(list, 2, none, 1); // the slingshot's wait of the very list again
+        got = compositor_loop_wait(list, 2, none, 1, 0); // the slingshot's wait of the very list again
         again = got == 1 && list[0].returned == 0 && (list[1].returned & COMPOSITOR_POLLIN);
         system_read_once(b[0], sink, sizeof sink);
-        got = compositor_loop_wait(list, 2, none, 0);
+        got = compositor_loop_wait(list, 2, none, 0, 0);
         read = got == 0 && list[0].returned == 0 && list[1].returned == 0;
         // b's number closed as the compositor's files close (system_close is compositor_epoll_close there) and another pipe opened under
         // it: the list is the same, entry for entry.
@@ -5009,21 +5009,21 @@ static void check_compositor_loop_wait(void)
         system_call_2(syscall(pipe2), (positive)c, O_NONBLOCK | O_CLOEXEC);
         system_write_once(c[1], &byte, 1);
         list[1].handle = c[0];
-        got = compositor_loop_wait(list, 2, none, 0);
+        got = compositor_loop_wait(list, 2, none, 0, 0);
         reused = c[0] == old && got == 1 && (list[1].returned & COMPOSITOR_POLLIN);
         list[0] = (struct compositor_poll){a[1], 4, 0}; // POLLOUT: a pipe's writing end with room
-        got = compositor_loop_wait(list, 2, none, 0);
+        got = compositor_loop_wait(list, 2, none, 0, 0);
         changed = got == 2 && (list[0].returned & 4) && (list[1].returned & COMPOSITOR_POLLIN);
         list[2] = list[1];
-        got = compositor_loop_wait(list, 3, none, 0);
+        got = compositor_loop_wait(list, 3, none, 0, 0);
         twice = got == 3 && (list[1].returned & COMPOSITOR_POLLIN) && (list[2].returned & COMPOSITOR_POLLIN);
         // d's reading end closed under the set's back (no close of the compositor's): ppoll's answer, POLLNVAL.
         system_call_1(syscall(close), (positive)d[0]);
         list[2] = (struct compositor_poll){d[0], COMPOSITOR_POLLIN, 0};
-        got = compositor_loop_wait(list, 3, none, 0);
+        got = compositor_loop_wait(list, 3, none, 0, 0);
         closed = got == 3 && list[2].returned == 32;
         // c no longer in the list, still ready: the one entry left, a's writing end, is all that is said.
-        got = compositor_loop_wait(list, 1, none, 0);
+        got = compositor_loop_wait(list, 1, none, 0, 0);
         dropped = got == 1 && (list[0].returned & 4);
         check("loop: the wait answers the ready entry only, and again for the same list", ready && again);
         check("loop: the wait says nothing once the entry is read", read);
