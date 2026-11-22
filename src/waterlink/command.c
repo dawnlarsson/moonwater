@@ -238,19 +238,21 @@ static b32 link_status(void)
                 p8 own[WATERLINK_NAME_MAX];
                 p8 hwid[LINK_HWID_BYTES];
                 p8 hwid_hex[33];
+                p8 allow_text[96];
 
                 link_key_text(me.public, key);
                 link_machine_name(own);
+                link_grants_text(link_policy_load(), allow_text, sizeof allow_text);
                 if (link_hardware_id(hwid))
                 {
                         link_hwid_text(hwid, hwid_hex);
                         hwid_hex[16] = 0;
-                        string_format(log, "  this machine  %s  %s  hwid %s  next: moonwater link pair\n",
-                                      (string_address)own, (string_address)key, (string_address)hwid_hex);
+                        string_format(log, "  this machine  %s  %s  hwid %s  allow %s  next: moonwater link pair\n",
+                                      (string_address)own, (string_address)key, (string_address)hwid_hex, (string_address)allow_text);
                 }
                 else
-                        string_format(log, "  this machine  %s  %s  next: moonwater link pair\n",
-                                      (string_address)own, (string_address)key);
+                        string_format(log, "  this machine  %s  %s  allow %s  next: moonwater link pair\n",
+                                      (string_address)own, (string_address)key, (string_address)allow_text);
                 crypto_forget(address_of me, sizeof me);
         }
         else
@@ -3250,6 +3252,33 @@ static b32 link_dispatch(string_address address_to arguments, positive count)
                 return link_doctor();
         if (string_equals(verb, "paths"))
                 return link_paths_verb();
+
+        if (string_equals(verb, "allow-all") || string_equals(verb, "deny-all"))
+        {
+                p8 allow = string_equals(verb, "allow-all");
+                p32 mask = link_policy_load();
+                p32 change = 0;
+                p8 grants[96];
+
+                if (count < 4)
+                        return host_usage();
+                for (positive at = 3; at < count; at++)
+                {
+                        p32 bit = link_grant_bit(arguments[at]);
+
+                        if (!bit)
+                                return host_refuse("unknown grant %s (expected shell, run, files, log, or all)\n",
+                                                   arguments[at]);
+                        change |= bit;
+                }
+                mask = allow ? (mask | change) : (mask & ~change);
+                if (!link_policy_save(mask))
+                        return host_refuse("%s could not be written\n", LINK_POLICY_PATH);
+                link_grants_text(mask, grants, sizeof grants);
+                string_format(log, "this machine allows %s\n", (string_address)grants);
+                log_flush();
+                return 0;
+        }
 
         //      The peers file has a second writer, the listener pairing
         //      members: each change made here happens under the same lock.

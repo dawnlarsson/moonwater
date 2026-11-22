@@ -102,6 +102,7 @@ struct settings_drive
 struct settings_item
 {
         char label[SETTINGS_ITEM_LABEL], security[12], state[SETTINGS_STATE], port[SETTINGS_PORT_ROOM], size[SETTINGS_SIZE_TEXT], access[48], detail[SETTINGS_ITEM_LABEL];
+        char link_addr[64], link_rtt[24], link_traffic[48], link_group[32];
         signed short dbm;
         unsigned char bars, flags, kind, where, segment_count, expanded, fold_live, grants;
         unsigned short segment_more;
@@ -416,7 +417,7 @@ enum { SETTINGS_ABOUT_BRAND = 0, SETTINGS_ABOUT_DISCORD = 1, SETTINGS_ABOUT_GITH
 #define SETTINGS_GPU_SAMPLES 10
 #define SETTINGS_FOLD_POOL 16
 #define SETTINGS_METRIC_NS 10000000000ll
-enum { SETTINGS_SUB_COPY = 0u, SETTINGS_SUB_DISMISS_ALL = 1u, SETTINGS_SUB_PARTITIONS = 2u, SETTINGS_SUB_PARTITION = 3u, SETTINGS_SUB_LINK_GRANT = 4u };
+enum { SETTINGS_SUB_COPY = 0u, SETTINGS_SUB_DISMISS_ALL = 1u, SETTINGS_SUB_PARTITIONS = 2u, SETTINGS_SUB_PARTITION = 3u, SETTINGS_SUB_LINK_GRANT = 4u, SETTINGS_SUB_LINK_INFO = 5u };
 static const struct { const char address_to word, address_to label, address_to note; } settings_link_grants[4] = {
     {"files", "Filesystem access", "Browse, upload, and download files"},
     {"run",   "Run commands",      "Execute single remote commands"},
@@ -451,6 +452,7 @@ static char (address_to settings_drives_open)[SETTINGS_ITEM_LABEL];
 static positive settings_drives_open_room;
 static char (address_to settings_links_open)[SETTINGS_ITEM_LABEL];
 static positive settings_links_open_room;
+static unsigned char settings_link_global_grants = 0x0fu;
 
 static unsigned char address_to settings_exp_ptr(int row)
 {
@@ -590,11 +592,11 @@ static fn settings_toggle(int row)
         b64 address_to at_p = settings_fold_at_ptr(row);
         b64 target;
         if (!exp_p || !live_p || !at_p ||
-            (row >= SETTINGS_ANY && !(item && ((item->flags & (SETTINGS_ITEM_DRIVE | SETTINGS_ITEM_DISK)) || (item->kind == SETTINGS_LINK && item->where == 1)))))
+            (row >= SETTINGS_ANY && !(item && ((item->flags & (SETTINGS_ITEM_DRIVE | SETTINGS_ITEM_DISK)) || item->kind == SETTINGS_LINK))))
                 return;
         *exp_p = !*exp_p;
-        if (item && item->kind == SETTINGS_LINK && item->where == 1)
-                settings_link_keep(item->label, *exp_p);
+        if (item && item->kind == SETTINGS_LINK)
+                settings_link_keep(item->where == 0 ? "__this_machine__" : item->label, *exp_p);
         else if (item)
                 settings_drive_keep(item->flags & SETTINGS_ITEM_DISK ? item->port : item->label, *exp_p);
         target = *exp_p ? UI_ONE : 0;
@@ -744,12 +746,25 @@ static fn settings_sub_describe(int at, struct ui_row address_to row)
         const struct settings_sub address_to sub = &settings_sub[at];
         if (sub->action == SETTINGS_SUB_PARTITIONS || sub->action == SETTINGS_SUB_PARTITION)
                 return settings_part_describe(sub, row);
+        if (sub->action == SETTINGS_SUB_LINK_INFO)
+        {
+                row->sub = 1, row->section = sub->section, row->label = sub->words, row->value = sub->text, row->dim = true;
+                row->reveal = settings_fold_at_get(sub->owner);
+                return;
+        }
         if (sub->action == SETTINGS_SUB_LINK_GRANT && sub->part >= 0 && sub->part < 4)
         {
                 const struct settings_item address_to item = settings_item(sub->owner);
+                unsigned char bit = (unsigned char)(1u << sub->part);
+                b32 global_on = (settings_link_global_grants & bit) != 0;
                 row->sub = 1, row->section = sub->section, row->kind = UI_ROW_SWITCH;
-                row->label = settings_link_grants[sub->part].label, row->note = settings_link_grants[sub->part].note;
-                row->on = item && (item->grants & (1u << sub->part)) != 0;
+                row->label = settings_link_grants[sub->part].label;
+                if (item && item->where == 0)
+                        row->note = settings_link_grants[sub->part].note, row->on = global_on;
+                else if (!global_on)
+                        row->note = "Disabled globally on this machine", row->on = false, row->dim = true;
+                else
+                        row->note = settings_link_grants[sub->part].note, row->on = item && (item->grants & bit) != 0;
                 row->reveal = settings_fold_at_get(sub->owner);
                 return;
         }
@@ -2059,6 +2074,7 @@ static const struct settings_act_spec { char code; b32 takes_pass, takes_arg; co
     {'j', true, false, "wifi", "add"}, {'f', false, false, "wifi", "remove"}, {'a', false, false, "bluetooth", "add"}, {'d', false, false, "bluetooth", "remove"},
     {'v', false, false, "device", "allow"}, {'x', false, false, "device", "deny"}, {'r', false, false, "link", "remove"},
     {'l', false, true, "link", "allow"}, {'n', false, true, "link", "deny"},
+    {'L', false, false, "link", "allow-all"}, {'N', false, false, "link", "deny-all"},
 };
 
 static const char address_to settings_act_words(string_address address_to words)
@@ -2503,9 +2519,20 @@ static int settings_link_rows(int row, int count)
 {
         const struct settings_item address_to item = settings_item(row);
         int section = settings_section_start(row), next;
-        if (!item || item->kind != SETTINGS_LINK || item->where != 1 || (!settings_exp_get(row) && !settings_fold_at_get(row)))
+        if (!item || item->kind != SETTINGS_LINK || (!settings_exp_get(row) && !settings_fold_at_get(row)))
                 return count;
         settings_sub_owner = row;
+        if (item->where == 1)
+        {
+                if (item->link_addr[0] && (next = settings_sub_add(section, true, "Address", item->link_addr, 0, SETTINGS_SUB_LINK_INFO, 0, count)) != count)
+                        count = next;
+                if (item->link_rtt[0] && (next = settings_sub_add(section, true, "Latency", item->link_rtt, 0, SETTINGS_SUB_LINK_INFO, 1, count)) != count)
+                        count = next;
+                if (item->link_traffic[0] && (next = settings_sub_add(section, true, "Traffic", item->link_traffic, 0, SETTINGS_SUB_LINK_INFO, 2, count)) != count)
+                        count = next;
+                if (item->link_group[0] && (next = settings_sub_add(section, true, "Group", item->link_group, 0, SETTINGS_SUB_LINK_INFO, 3, count)) != count)
+                        count = next;
+        }
         for (int k = 0; k < 4; k++)
         {
                 if ((next = settings_sub_add(section, false, null, settings_link_grants[k].label, 0, SETTINGS_SUB_LINK_GRANT, k, count)) == count)
@@ -2521,7 +2548,7 @@ static fn settings_link_follow(void)
         {
                 int row = SETTINGS_LIST_ID(3, at);
                 struct settings_item address_to it = &settings.item[3][at];
-                b32 open = it->kind == SETTINGS_LINK && it->where == 1 && settings_link_is_open(it->label);
+                b32 open = it->kind == SETTINGS_LINK && settings_link_is_open(it->where == 0 ? "__this_machine__" : it->label);
                 if (it->expanded != open)
                         it->expanded = (unsigned char)open, it->fold_at = open ? UI_ONE : 0, it->fold_live = 0, settings_fold_drop(row);
         }
@@ -2727,9 +2754,17 @@ static fn settings_feed_links(void)
                 else if (sc_eat(&c, "  this machine  ") && c.n)
                 {
                         struct settings_item address_to it = settings_item_slot(3, count);
+                        positive allow_at;
                         if (!it) continue;
                         sc_trim_at(&c, "  next:");
                         it->kind = SETTINGS_LINK, it->where = 0, it->flags = self_on ? SETTINGS_ITEM_JOINED : 0;
+                        it->grants = 0x0fu;
+                        if ((allow_at = settings_find_last(c.s, c.n, "  allow ")) < c.n)
+                        {
+                                it->grants = settings_link_parse_grants(c.s + allow_at + 8, c.n - allow_at - 8);
+                                c.n = allow_at;
+                        }
+                        settings_link_global_grants = it->grants;
                         settings_slice(it->access, sizeof(it->access), self_state, string_length((string_address)self_state));
                         if (sc_eat(&c, "no key yet"))
                         {
@@ -2769,12 +2804,66 @@ static fn settings_feed_links(void)
                 {
                         if (count && settings.item[3][count - 1].kind == SETTINGS_LINK && settings.item[3][count - 1].where == 1 && (sc_trim_at(&c, "  next:"), c.n))
                         {
+                                struct settings_item address_to it = &settings.item[3][count - 1];
                                 char piece[SETTINGS_ITEM_LABEL];
+                                positive pos;
                                 settings_slice(piece, sizeof(piece), c.s, c.n);
                                 if (c.n >= 8 && !memory_compare(c.s, "open now", 8))
-                                        settings.item[3][count - 1].flags |= SETTINGS_ITEM_JOINED;
-                                settings_cat_sep(settings.item[3][count - 1].detail, sizeof(settings.item[3][0].detail),
-                                                 string_length((string_address)settings.item[3][count - 1].detail), "; ", piece);
+                                {
+                                        it->flags |= SETTINGS_ITEM_JOINED;
+                                        settings_slice(it->state, sizeof(it->state), "Online", 6);
+                                }
+                                else if (c.n >= 20 && !memory_compare(c.s, "not heard since boot", 20))
+                                {
+                                        if (!it->state[0])
+                                                settings_slice(it->state, sizeof(it->state), "Offline", 7);
+                                }
+                                else if (c.n >= 22 && !memory_compare(c.s, "its key does not match", 22))
+                                {
+                                        settings_slice(it->state, sizeof(it->state), "Key mismatch", 12);
+                                        if (c.n > 24 && c.s[22] == ':' && c.s[23] == ' ')
+                                        {
+                                                positive s1 = 24;
+                                                while (s1 < c.n && c.s[s1] != ' ') s1++;
+                                                settings_slice(it->link_addr, sizeof(it->link_addr), c.s + 24, s1 - 24);
+                                        }
+                                }
+                                else if (c.n >= 6 && !memory_compare(c.s, "heard ", 6) && !it->state[0])
+                                {
+                                        struct settings_cursor hc = {c.s, c.n};
+                                        sc_trim_at(&hc, " from ");
+                                        settings_slice(it->state, sizeof(it->state), hc.s, hc.n);
+                                        if (it->state[0] == 'h') it->state[0] = 'H';
+                                }
+                                if ((pos = settings_find_last(c.s, c.n, "from ")) < c.n)
+                                {
+                                        positive s0 = pos + 5, s1 = s0;
+                                        while (s1 < c.n && c.s[s1] != ' ' && c.s[s1] != ';') s1++;
+                                        if (s1 > s0)
+                                                settings_slice(it->link_addr, sizeof(it->link_addr), c.s + s0, s1 - s0);
+                                }
+                                else if ((pos = settings_find_last(c.s, c.n, "last address ")) < c.n && !it->link_addr[0])
+                                {
+                                        positive s0 = pos + 13, s1 = s0;
+                                        while (s1 < c.n && c.s[s1] != ' ' && c.s[s1] != ';') s1++;
+                                        if (s1 > s0)
+                                                settings_slice(it->link_addr, sizeof(it->link_addr), c.s + s0, s1 - s0);
+                                }
+                                if ((pos = settings_find_last(c.s, c.n, "rtt ")) < c.n)
+                                {
+                                        positive s0 = pos + 4, s1 = s0;
+                                        while (s1 < c.n && !(c.s[s1] == ' ' && s1 + 1 < c.n && c.s[s1 + 1] == ' ')) s1++;
+                                        if (s1 > s0)
+                                                settings_slice(it->link_rtt, sizeof(it->link_rtt), c.s + s0, s1 - s0);
+                                }
+                                if ((pos = settings_find_last(c.s, c.n, "\xe2\x86\x91")) < c.n)
+                                {
+                                        positive s0 = pos, s1 = s0;
+                                        while (s1 < c.n && !(c.s[s1] == ' ' && s1 + 1 < c.n && c.s[s1 + 1] == ' ')) s1++;
+                                        if (s1 > s0)
+                                                settings_slice(it->link_traffic, sizeof(it->link_traffic), c.s + s0, s1 - s0);
+                                }
+                                settings_cat_sep(it->detail, sizeof(it->detail), string_length((string_address)it->detail), "; ", piece);
                         }
                 }
                 else if (sc_eat(&c, "  ") && c.n > 2 && c.s[0] != ' ')
@@ -2782,7 +2871,7 @@ static fn settings_feed_links(void)
                         positive may_at = settings_find_last(c.s, c.n, "...  may ");
                         if (may_at < c.n)
                         {
-                                positive cut = 0;
+                                positive cut = 0, grp_at;
                                 struct settings_cursor grants = {c.s + may_at + 9, c.n - may_at - 9};
                                 struct settings_item address_to it = settings_item_slot(3, count);
                                 if (!it) continue;
@@ -2790,6 +2879,11 @@ static fn settings_feed_links(void)
                                 sc_trim_at(&grants, "  next:");
                                 it->kind = SETTINGS_LINK, it->where = 1, it->flags = SETTINGS_ITEM_SAVED;
                                 it->grants = settings_link_parse_grants(grants.s, grants.n);
+                                if ((grp_at = settings_find_last(grants.s, grants.n, ", in group ")) < grants.n)
+                                {
+                                        settings_slice(it->link_group, sizeof(it->link_group), grants.s + grp_at + 11, grants.n - grp_at - 11);
+                                        grants.n = grp_at;
+                                }
                                 settings_slice(it->access, sizeof(it->access), grants.s, grants.n);
                                 settings_item_label(it, c.s, cut);
                                 count++;
@@ -2806,7 +2900,7 @@ static struct ui_columns address_to settings_columns_for(int list)
             {4, 3, {0, 84, 84, 72},   {LANGUAGE_files_column_name, LANGUAGE_settings_column_status, LANGUAGE_settings_column_security, LANGUAGE_settings_column_signal}},
             {2, 1, {0, 100, 0, 0},    {LANGUAGE_files_column_name, LANGUAGE_settings_column_status, 0, 0}},
             {4, 3, {0, 108, 84, 128}, {LANGUAGE_files_column_name, 0, LANGUAGE_settings_column_status, LANGUAGE_settings_column_access}},
-            {3, 0, {0, 140, 260, 0},  {LANGUAGE_files_column_name, LANGUAGE_settings_column_access, LANGUAGE_settings_column_status, 0}},
+            {3, 0, {0, 150, 140, 0},  {LANGUAGE_files_column_name, LANGUAGE_settings_column_access, LANGUAGE_settings_column_status, 0}},
         };
         struct ui_columns address_to c;
         if (!settings_large || list < 0 || list >= SETTINGS_LISTS)
@@ -3494,7 +3588,7 @@ static fn settings_item_activate(int row, const struct settings_item address_to 
                 settings_port_set(item, !(item->flags & SETTINGS_ITEM_JOINED));
         else if (item->kind == SETTINGS_ADD)
                 settings_edit_begin(row, "", false), settings_say((string_address)WORDS(settings_type_device));
-        else if (item->kind == SETTINGS_LINK && item->where == 1)
+        else if (item->kind == SETTINGS_LINK)
                 settings_toggle(row);
         else if (item->flags & SETTINGS_ITEM_DRIVE)
                 settings_say((string_address)WORDS(settings_item_drive));
@@ -3552,9 +3646,19 @@ static fn settings_link_grant_toggle(int at)
             settings_sub[at].part < 0 || settings_sub[at].part >= 4)
                 return;
         struct settings_item address_to item = settings_item(settings_sub[at].owner);
-        if (!item || item->kind != SETTINGS_LINK || item->where != 1)
+        if (!item || item->kind != SETTINGS_LINK)
                 return;
         unsigned char bit = (unsigned char)(1u << settings_sub[at].part);
+        if (item->where == 0)
+        {
+                b32 allow = (settings_link_global_grants & bit) == 0;
+                settings_link_global_grants ^= bit;
+                item->grants = settings_link_global_grants;
+                settings_act(allow ? 'L' : 'N', settings_link_grants[settings_sub[at].part].word, null);
+                return;
+        }
+        if (!(settings_link_global_grants & bit))
+                return;
         b32 allow = (item->grants & bit) == 0;
         item->grants ^= bit;
         settings_act(allow ? 'l' : 'n', item->label, settings_link_grants[settings_sub[at].part].word);
@@ -3793,7 +3897,7 @@ static b32 settings_key(const struct window_event address_to event)
                 const struct settings_item address_to lit = drive < 0 && row >= SETTINGS_ANY ? settings_item(row) : null;
                 int exp = drive >= 0 ? (settings_exp_get(drive) ? UI_ROW_EXPANDER_OPEN : UI_ROW_EXPANDER_SHUT)
                         : row < SETTINGS_ANY ? settings_expander(row)
-                        : (lit && lit->kind == SETTINGS_LINK && lit->where == 1) ? (lit->expanded ? UI_ROW_EXPANDER_OPEN : UI_ROW_EXPANDER_SHUT) : 0;
+                        : (lit && lit->kind == SETTINGS_LINK) ? (lit->expanded ? UI_ROW_EXPANDER_OPEN : UI_ROW_EXPANDER_SHUT) : 0;
                 if (exp && (event->a == UI_KEY_RIGHT) == (exp == UI_ROW_EXPANDER_SHUT))
                         return settings_toggle(row), ui_page_redraw(&settings.page), true;
         }
@@ -3942,11 +4046,15 @@ static fn settings_describe_item(int id, const struct settings_item address_to i
         {
                 row->mark = (item->flags & SETTINGS_ITEM_JOINED) != 0, row->mark_ink = ui_role(UI_SUCCESS);
                 if (item->where == 0)
+                        row->expander = item->expanded ? UI_ROW_EXPANDER_OPEN : UI_ROW_EXPANDER_SHUT, row->turn = item->fold_at,
                         row->note = item->detail[0] ? item->detail : null, row->value = item->access[0] ? item->access : null;
                 else
+                {
+                        const char address_to st = item->state[0] ? item->state : item->detail[0] ? item->detail : null;
                         row->expander = item->expanded ? UI_ROW_EXPANDER_OPEN : UI_ROW_EXPANDER_SHUT, row->turn = item->fold_at,
                         row->columns = settings_columns_for(3), row->cells[1] = item->access[0] ? item->access : null,
-                        row->cells[2] = item->detail[0] ? item->detail : null, row->value = row->cells[2] ? row->cells[2] : row->cells[1];
+                        row->cells[2] = st, row->value = st ? st : row->cells[1];
+                }
         }
         else if (item->kind == SETTINGS_NOTE)
         {

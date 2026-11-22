@@ -1452,13 +1452,22 @@ def test_hardening_66_bug_families():
     # --- Family 12: Waterlink Per-Machine Ability Settings & File Explorer Waterlink Display ---
     wl_svc_c = read_text("src/waterlink/service.c")
     files_model_c = read_text("src/canvas/ui/files_model.c")
-    check("Family 12: Waterlink per-machine ability toggles in Settings (files/run/shell/log allow/deny, persistent expansion) & handshake BLOCKED guard",
+    wl_cmd_c = read_text("src/waterlink/command.c")
+    check("Family 12: Waterlink per-machine ability toggles + global 'this machine' policy overrides in Settings (grayed out when globally off) & handshake BLOCKED guard",
           "SETTINGS_SUB_LINK_GRANT" in settings_c and
+          "SETTINGS_SUB_LINK_INFO" in settings_c and
+          "settings_link_global_grants" in settings_c and
+          "Disabled globally on this machine" in settings_c and
           "settings_link_rows(" in settings_c and
           "settings_link_follow();" in settings_c and
           "settings_link_grant_toggle(" in settings_c and
           "{'l', false, true, \"link\", \"allow\"}" in settings_c and
           "{'n', false, true, \"link\", \"deny\"}" in settings_c and
+          "{'L', false, false, \"link\", \"allow-all\"}" in settings_c and
+          "{'N', false, false, \"link\", \"deny-all\"}" in settings_c and
+          "link_policy_load()" in wl_svc_c and
+          "LINK_POLICY_PATH" in wl_svc_c and
+          "\"allow-all\"" in wl_cmd_c and
           "peer->flags & WATERLINK_PEER_BLOCKED" in wl_svc_c)
 
     check("Family 12: Waterlink remote FS RPC (LINK_ASK_FS gated by WATERLINK_MAY_FILES) & File Explorer This Machine + linked machine sidebar/browsing",

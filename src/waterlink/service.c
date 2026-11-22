@@ -112,6 +112,7 @@ extern int _NSGetExecutablePath(char *buffer, unsigned int *size);
 #define LINK_PEERS_PATH link_state_path(LINK_LEAF_PEERS)
 #define LINK_PLACES_PATH link_state_path(LINK_LEAF_PLACES)
 #define LINK_HWIDS_PATH link_state_path(LINK_LEAF_HWIDS)
+#define LINK_POLICY_PATH link_state_path(LINK_LEAF_POLICY)
 #define LINK_GROUPS_PATH link_state_path(LINK_LEAF_GROUPS)
 #define LINK_PORT_PATH link_state_path(LINK_LEAF_PORT)
 #define LINK_TRANSPORT_PATH link_state_path(LINK_LEAF_TRANSPORT)
@@ -132,6 +133,7 @@ extern unsigned int geteuid(void);
 #define LINK_PEERS_PATH "/root/link.peers"
 #define LINK_PLACES_PATH "/root/link.places"
 #define LINK_HWIDS_PATH "/root/link.hwids"
+#define LINK_POLICY_PATH "/root/link.policy"
 #define LINK_GROUPS_PATH "/root/link.groups"
 #define LINK_PORT_PATH "/root/link.port"
 #define LINK_TRANSPORT_PATH "/root/link.transport"
@@ -581,6 +583,27 @@ static bipolar link_peers_save(link_peers address_to peers)
         return link_file_replace(LINK_PEERS_PATH, peers->peer,
                                  peers->count * sizeof(struct waterlink_peer),
                                  true);
+}
+
+#define LINK_POLICY_ALL (WATERLINK_MAY_SHELL | WATERLINK_MAY_RUN | WATERLINK_MAY_FILES | WATERLINK_MAY_LOG)
+
+static p32 link_policy_load(void)
+{
+        p32 mask = LINK_POLICY_ALL;
+        positive got = 0;
+
+        if (link_read_private_records(LINK_POLICY_PATH, (p8 address_to)address_of mask,
+                                      sizeof mask, sizeof mask, address_of got) == 0 &&
+            got == sizeof mask)
+                return mask & LINK_POLICY_ALL;
+        return LINK_POLICY_ALL;
+}
+
+static p8 link_policy_save(p32 mask)
+{
+        p32 clean = mask & LINK_POLICY_ALL;
+
+        return link_file_replace(LINK_POLICY_PATH, address_of clean, sizeof clean, true) >= 0;
 }
 
 static struct waterlink_peer address_to link_peer_named(link_peers address_to peers,
@@ -1296,7 +1319,7 @@ static p8 link_path_is_own(string_address path)
         //      Not static: on Darwin each path is made at the call (link_state_path),
         //      so the table cannot be a constant.
         string_address own[] = {
-            LINK_KEY_PATH, LINK_PEERS_PATH, LINK_GROUPS_PATH, LINK_STAMPS_PATH,
+            LINK_KEY_PATH, LINK_PEERS_PATH, LINK_POLICY_PATH, LINK_GROUPS_PATH, LINK_STAMPS_PATH,
             LINK_STATE_PATH, LINK_LOCK_PATH, HOST_MACHINE_SCRIPT,
             LINK_MODEM_PATH, LINK_MODEM_SEQ_PATH, LINK_MODEM_RX_PATH,
             LINK_PLACES_PATH, LINK_SWITCH_PATH, LINK_PORT_PATH,
@@ -3125,6 +3148,15 @@ static fn link_request(struct link_session address_to s, p8 address_to payload,
                 may = peer->may;
 
         grant = link_grant_asked(payload[0]);
+        if (grant < array_count(link_grants) && !(link_policy_load() & link_grants[grant].bit))
+        {
+                string_copy_bounded((string_address)why,
+                                    link_grants[grant].name, sizeof why);
+                string_append_bounded((string_address)why,
+                                      " is disabled on this machine", sizeof why);
+                link_refuse(s, (string_address)why);
+                return;
+        }
         if (grant < array_count(link_grants) && !(may & link_grants[grant].bit))
         {
                 string_copy_bounded((string_address)why,
@@ -4863,7 +4895,7 @@ static fn link_sessions_granted(p64 now)
 
                 if (!peer || (peer->flags & WATERLINK_PEER_BLOCKED) ||
                     (need < array_count(link_grants) &&
-                     !(peer->may & link_grants[need].bit)))
+                     !((peer->may & link_policy_load()) & link_grants[need].bit)))
                         link_session_end(s, true);
         }
 }
