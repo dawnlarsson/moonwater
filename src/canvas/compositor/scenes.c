@@ -253,3 +253,16 @@ static void compositor_scenes_button(unsigned int code, int down)
         else if (compositor.scenes.press_row != COMPOSITOR_NONE)
                 compositor_scenes_drop(compositor.scenes.press_row, compositor.pointer_x, compositor.pointer_y);
 }
+
+// The overview takes a press while it is open, and the release of a press that began in it. The release of a button held
+// from before the overview opened goes to the normal path, so its button and grab are let go.
+static int compositor_scenes_takes(unsigned int code, int down)
+{
+        unsigned int index = code - COMPOSITOR_BTN_LEFT;
+
+        if (!compositor.scenes.open)
+                return 0;
+        if (down)
+                return 1;
+        return index < 8 && !((compositor.button_down >> index) & 1);
+}

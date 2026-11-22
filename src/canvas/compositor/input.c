@@ -2017,7 +2017,7 @@ static void compositor_button(unsigned int code, int down)
         int under, tab, alt = (compositor_modifiers() & WINDOW_KEY_ALT) != 0, up;
         struct compositor_rows roots;
 
-        if (compositor.scenes.open)
+        if (compositor_scenes_takes(code, down))
         {
                 compositor_scenes_button(code, down);
                 return;

@@ -909,4 +909,16 @@ static void check_compositor_scenes_input(void)
     compositor_scenes_open(0);
     compositor_button(COMPOSITOR_BTN_RIGHT, 1);
     check("scenes input: a right button leaves the overview", !compositor.scenes.open);
+
+
+    // A press begun before the overview opened, and let go while it is open, is let go by the normal path: the row holds a
+    // button and its grab as a press before the overview would, and the release must clear both.
+    compositor_scenes_close();
+    compositor.button_down = 1;
+    compositor.button_row[0] = 1;
+    compositor.grab = 1;
+    compositor_scenes_open(0);
+    compositor_button(COMPOSITOR_BTN_LEFT, 0);
+    check("scenes input: a press begun before the overview is let go by the normal path, and no button or grab stays held",
+          (compositor.button_down & 1) == 0 && compositor.grab == COMPOSITOR_NONE);
 }
