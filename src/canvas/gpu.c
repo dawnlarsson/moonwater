@@ -2555,6 +2555,17 @@ static positive gpu_va_written(const void *pointer, positive bytes)
         return gpu_va_lookup(pointer, bytes, true);
 }
 
+// The reverse of gpu_va_bytes: the processor's pointer to the card address va, for bytes, through a map that holds them (its from is the processor's address of
+// its va). 0 for none: an import has no processor address, and a map let go of (gpu_forget: from and to are 0) is none. It does not mark the map used.
+__attribute__((unused)) static const void *gpu_pointer_of_va(positive va, positive bytes)
+{
+        for (unsigned int i = 0; i < gpu_map_count; i++)
+                if ((gpu_maps[i].from || gpu_maps[i].to) && va >= gpu_maps[i].va && va - gpu_maps[i].va < gpu_maps[i].bytes &&
+                    bytes <= gpu_maps[i].bytes - (va - gpu_maps[i].va))
+                        return (const void *)(gpu_maps[i].from + (va - gpu_maps[i].va));
+        return 0;
+}
+
 static void gpu_unimport(positive at, enum gpu_gone_why why);
 static void gpu_release_import(positive at);
 
