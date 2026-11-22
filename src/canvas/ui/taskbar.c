@@ -809,9 +809,11 @@ static unsigned int taskbar_ink_on(unsigned int ground, unsigned int mark)
 
 static struct ui taskbar_cell_ui;
 
-static struct ui address_to taskbar_cell(const struct taskbar_view *view, int bw)
+// The band's pixels as a cell's ui: bw by bh, which ui_cell_line and ui_cell_turned hold a cell inside (b9ec9629c).
+static struct ui address_to taskbar_cell(const struct taskbar_view *view, int bw, int bh)
 {
         taskbar_cell_ui.pixels = view->pixels, taskbar_cell_ui.pitch = (unsigned long)bw, taskbar_cell_ui.scale = taskbar_scaled(view->scale);
+        taskbar_cell_ui.width = bw, taskbar_cell_ui.height = bh, taskbar_cell_ui.bottom = bh;
         taskbar_cell_ui.engine = view->engine, taskbar_cell_ui.regular = view->face;
         return &taskbar_cell_ui;
 }
@@ -827,9 +829,9 @@ static void taskbar_say(const struct taskbar_view *view, const struct ui_tree ad
         ui_tree_ready(t);
         const struct ui_node address_to band = &t->node[1];
         if (band->dir)
-                ui_cell_turned(taskbar_cell(view, band->w), n->x - band->x, n->y - band->y, n->w, n->h, text, taskbar_turn(view->position), ink, ground);
+                ui_cell_turned(taskbar_cell(view, band->w, band->h), n->x - band->x, n->y - band->y, n->w, n->h, text, taskbar_turn(view->position), ink, ground);
         else
-                ui_cell_line(taskbar_cell(view, band->w), n->x - band->x, n->y - band->y, n->w, n->h, text, ink, ground);
+                ui_cell_line(taskbar_cell(view, band->w, band->h), n->x - band->x, n->y - band->y, n->w, n->h, text, ink, ground);
 }
 
 static void taskbar_band_ui(struct ui *ui, const struct taskbar_view *view, const struct ui_tree address_to t)

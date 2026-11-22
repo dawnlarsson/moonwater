@@ -3997,7 +3997,7 @@ static int band_fit_ok(const struct taskbar_view *view, const char *title, int r
     const font_face address_to faces[1] = {view->face};
     p32 em = 11 << 6;
     char fitted[WINDOWS_TITLE + 4], longer[WINDOWS_TITLE + 4];
-    positive length = string_length((string_address)title), n = ui_cell_fit(taskbar_cell(view, view->width), faces, title, em, room, fitted, sizeof(fitted)), next;
+    positive length = string_length((string_address)title), n = ui_cell_fit(taskbar_cell(view, view->width, COMPOSITOR_PANEL), faces, title, em, room, fitted, sizeof(fitted)), next;
     int width = (int)(font_extent(view->engine, faces, 1, (const p8 address_to)fitted, n, em, 0) >> 16);
 
     if (n == length && !memory_compare(fitted, title, length))
@@ -4935,14 +4935,14 @@ static void check_taskbar_text(string_address face_path)
         const font_face address_to faces[1] = {view.face};
         p32 em = (p32)(20 * 11 / 20) << 6;
         char fitted[WINDOWS_TITLE + 4];
-        positive n = ui_cell_fit(taskbar_cell(&view, view.width), faces, title, em, 60, fitted, sizeof(fitted));
+        positive n = ui_cell_fit(taskbar_cell(&view, view.width, COMPOSITOR_PANEL), faces, title, em, 60, fitted, sizeof(fitted));
         bipolar same = 1;
 
         fitted[n] = 0;
         view.pixels = slot_long;
-        ui_cell_line(taskbar_cell(&view, 200), 0, 0, 60, 20, title, 0xffffffu, 0x202020u);
+        ui_cell_line(taskbar_cell(&view, 200, 20), 0, 0, 60, 20, title, 0xffffffu, 0x202020u);
         view.pixels = slot_fit;
-        ui_cell_line(taskbar_cell(&view, 200), 0, 0, 60, 20, fitted, 0xffffffu, 0x202020u);
+        ui_cell_line(taskbar_cell(&view, 200, 20), 0, 0, 60, 20, fitted, 0xffffffu, 0x202020u);
         for (int at = 0; at < 200 * 20; at++)
             same &= slot_long[at] == slot_fit[at];
         check("taskbar text: a bottom band's title too long for its tab is cut with dots, as a side band's is",
