@@ -2383,6 +2383,12 @@ static long long compositor_stream_turn(unsigned int at, long long value120, lon
                                     &compositor.wheel_rest[at][horizontal ? 1 : 0]);
 }
 
+// The natural-direction flip of a mouse's or a pad's turn (the table's FLIP): the one place it is made, by the loop and by the reader.
+static int compositor_wheel_turn(int v120)
+{
+        return compositor.table && (compositor.table->scroll_off & WINDOW_SCROLL_FLIP) ? -v120 : v120;
+}
+
 static void compositor_wheel(int v120, int horizontal, unsigned int flags)
 {
         int row = compositor.grab, wx = compositor.pointer_x, wy = compositor.pointer_y;
@@ -2411,10 +2417,14 @@ static void compositor_wheel(int v120, int horizontal, unsigned int flags)
         }
         if (row >= 0)
         {
+                // The one natural-direction flip: a mouse's or a pad's turn, never a touch's (compositor.touching), so the
+                // clients and the kit take the turn as the person made it.
+                int turn = compositor.touching ? v120 : compositor_wheel_turn(v120);
+
                 compositor_window_point(row, compositor.pointer_x, compositor.pointer_y, &wx, &wy);
                 if (!compositor_wl_locked() && (row != compositor.told_row || wx != compositor.told_x || wy != compositor.told_y))
                         compositor_pointer_to(row);
-                compositor_post(row, WINDOW_EVENT_WHEEL, flags, v120, horizontal)
+                compositor_post(row, WINDOW_EVENT_WHEEL, flags, turn, horizontal)
                     ? compositor.table->wheel_sent++ : compositor.table->wheel_full++;
         }
         else
@@ -3201,7 +3211,7 @@ static void compositor_touch_apply(unsigned int at, const struct ui_touch_out *o
                 case UI_TOUCH_RIGHT: compositor_touch_right(); break;
                 case UI_TOUCH_WHEEL:
                         compositor.touching = 1, wheel = 1;
-                        compositor_wheel(compositor.table && (compositor.table->scroll_off & WINDOW_SCROLL_FLIP) ? -e->v120 : e->v120, e->horizontal, WINDOW_WHEEL_PRECISE);
+                        compositor_wheel(e->v120, e->horizontal, WINDOW_WHEEL_PRECISE);
                         break;
                 case UI_TOUCH_TURN_END: compositor_wheel(0, 0, WINDOW_WHEEL_PRECISE | WINDOW_WHEEL_STOP); break;
                 case UI_TOUCH_HOLD:
@@ -3732,7 +3742,7 @@ HOT static int compositor_reader_direct(unsigned int at, const struct compositor
 
                         if (!fine && (compositor.hires[at] >> sideways & 1))
                                 continue;
-                        wheel_v120 = fine ? raw[k].value : raw[k].value * 120;
+                        wheel_v120 = compositor_wheel_turn(fine ? raw[k].value : raw[k].value * 120);
                         wheel_horiz = sideways;
                 }
                 else if (raw[k].type == COMPOSITOR_EV_KEY && raw[k].code >= COMPOSITOR_BTN_LEFT && raw[k].code <= COMPOSITOR_BTN_TASK && !btn)
@@ -3860,7 +3870,7 @@ HOT static unsigned int compositor_reader_spark_drain(struct spark_input_ring *r
                         {
                                 int fine = code == COMPOSITOR_REL_WHEEL_HI || code == COMPOSITOR_REL_HWHEEL_HI;
                                 int sideways = code == COMPOSITOR_REL_HWHEEL || code == COMPOSITOR_REL_HWHEEL_HI;
-                                int v120 = fine ? dx : dx * 120;
+                                int v120 = compositor_wheel_turn(fine ? dx : dx * 120);
 #ifdef CONFIG_MOONWATER_WAYLAND
                                 if (v120 && !__atomic_load_n(&compositor.dark, __ATOMIC_RELAXED) &&
                                     __atomic_load_n(&compositor_reader.taken, __ATOMIC_ACQUIRE) == compositor_reader.handed_out && !compositor_reader.dropped &&
