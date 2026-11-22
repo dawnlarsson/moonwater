@@ -1536,12 +1536,20 @@ static b32 terminal_alt_arrows(b32 master, int lines)
         return term_send(master);
 }
 
+/* Whole units out of a running amount: the rest stays in *left for the next turn (a zero unit takes none). */
+static int terminal_take(int address_to left, long amount, long unit)
+{
+        long total = (long)*left + amount, whole = unit ? total / unit : 0;
+
+        *left = (int)(total - whole * unit);
+        return (int)whole;
+}
+
 static b32 terminal_finger_scroll(b32 master, int pixels, b32 address_to dirty, b32 address_to moved)
 {
-        long total = (long)terminal.finger_left + pixels;
-        int lines = terminal.cell_h ? (int)(total / (long)terminal.cell_h) : 0;
+        int lines = terminal_take(&terminal.finger_left, pixels, terminal.cell_h);
 
-        *moved = true, terminal.finger_left = (int)(total - (long)lines * (long)terminal.cell_h);
+        *moved = true;
         lines = lines > (int)ROWS ? (int)ROWS : lines < -(int)ROWS ? -(int)ROWS : lines;
         if (!lines)
                 return true;
@@ -2179,11 +2187,9 @@ static b32 terminal_receive(b32 master, const struct window_event address_to eve
                 if (!alternate)
                         return terminal_bar_turn(event, dirty), true;
                 {
-                        long scaled = (long)steps * (long)terminal_wheel_lines() + terminal.wheel_remainder;
-                        int lines = (int)(scaled / 120);
+                        int lines = terminal_take(&terminal.wheel_remainder, (long)steps * (long)terminal_wheel_lines(), 120);
 
                         lines = lines > (int)ROWS ? (int)ROWS : lines < -(int)ROWS ? -(int)ROWS : lines;
-                        terminal.wheel_remainder = (int)(scaled % 120);
                         return lines ? terminal_alt_arrows(master, lines) : true;
                 }
         }
