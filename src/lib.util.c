@@ -3360,7 +3360,7 @@ static inline bool string_join_bounded(p8 address_to into, positive room,
 static inline fn alphabet_values(p8 address_to values, string_address alphabet,
                                  positive symbols)
 {
-        memory_fill(values, 255, 256);
+        memory_fill(values, (b8)0xff, 256);
         for (positive at = 0; at < symbols; at++)
                 values[(p8)alphabet[at]] = (p8)at;
 }
@@ -9316,7 +9316,8 @@ static inline INLINE positive digits_max_known(string_address source,
 #define memory_common_prefix(first, second, size)                             \
         (LIBRARY_EXPAND(COMPARE, (size), KNOWN_PREFIX_MAX)                    \
                  ? common_prefix_known((first), (second), (size))             \
-                 : memory_common_prefix((first), (second), (size)))
+                 : memory_common_prefix((address_any)(first),                 \
+                                        (address_any)(second), (size)))
 
 #define memory_compare_ascii_case(first, second, size)                        \
         (LIBRARY_EXPAND(COMPARE, (size), KNOWN_ASCII_CASE_MAX)                \
@@ -24472,8 +24473,8 @@ static bool clock_history_load(string_address path, p8 address_to footer, positi
 {
         //      Nonblocking, as clock_zone_load is: a FIFO at a zone file's name
         //      reads as no file and does not hold every program that prints a time.
-        bipolar handle = system_call_4(syscall(openat), AT_FDCWD, (positive)path,
-                                       O_RDONLY | O_NONBLOCK | O_CLOEXEC, 0);
+        bipolar handle = system_open_at(AT_FDCWD, path,
+                                        O_RDONLY | O_NONBLOCK | O_CLOEXEC);
         positive used = 0;
 
         clock_zone_epoch++;
@@ -24494,7 +24495,7 @@ static bool clock_history_load(string_address path, p8 address_to footer, positi
                 if (used == sizeof(clock_history_file))
                         break;
         }
-        system_call_1(syscall(close), (positive)handle);
+        system_close(handle);
 
         p8 address_to file = clock_history_file;
 
@@ -24683,9 +24684,8 @@ static fn clock_tz_load_localtime(void)
 
         //      Nonblocking: a FIFO at the name held every program that asks
         //      what time it is here, until somebody wrote to it.
-        handle = system_call_4(syscall(openat), AT_FDCWD,
-                               (positive)(string_address)CLOCK_LOCALTIME_PATH,
-                               O_RDONLY | O_NONBLOCK | O_CLOEXEC, 0);
+        handle = system_open_at(AT_FDCWD, (string_address)CLOCK_LOCALTIME_PATH,
+                                O_RDONLY | O_NONBLOCK | O_CLOEXEC);
         if (handle < 0)
                 return;
         do
@@ -24713,7 +24713,7 @@ static fn clock_tz_load_localtime(void)
                         used += (positive)got;
                 }
         }
-        system_call_1(syscall(close), (positive)handle);
+        system_close(handle);
         if (used < 3 || used != (positive)(size - start) ||
             text[used - 1] != '\n')
                 return;
@@ -24738,16 +24738,17 @@ static bipolar clock_zone_load(p8 address_to into, positive room)
         bipolar handle;
         bipolar got;
 
-        handle = system_call_4(syscall(openat), AT_FDCWD,
-                               (positive)(string_address)CLOCK_ZONE_PATH,
-                               O_RDONLY | O_NONBLOCK | O_CLOEXEC, 0);
+        if (!room)
+                return -22;
+        handle = system_open_at(AT_FDCWD, (string_address)CLOCK_ZONE_PATH,
+                                O_RDONLY | O_NONBLOCK | O_CLOEXEC);
         if (handle < 0)
                 return handle;
         do
                 got = system_call_3(syscall(read), (positive)handle,
                                     (positive)into, room - 1);
         while (got == -4);
-        system_call_1(syscall(close), (positive)handle);
+        system_close(handle);
         if (got < 0)
                 return got;
         got -= (bipolar)memory_trailing(into, (positive)got, byte_is_line_end);
@@ -29710,7 +29711,8 @@ static bool stream_pushback_push(stream address_to handle, p8 byte)
         {
                 positive spill_at = at - stream_pushback_bytes;
 
-                if (!memory_resize_reserve(address_of handle->pushback_spill,
+                if (spill_at == positive_max ||
+                    !memory_resize_reserve(address_of handle->pushback_spill,
                                            address_of handle->pushback_spill_room,
                                            spill_at + 1, 16))
                         return false;
@@ -30471,19 +30473,19 @@ sized stream_write(address_any from, sized size, sized count,
         if (handle == null || size == 0 || count == 0)
                 return 0;
 
-        if ((positive)count > positive_max / (positive)size)
-        {
-                handle->flags |= STREAM_FAILED;
-                return 0;
-        }
-
         //      A byte is an item for most callers, and a division by a
         //      register is the slowest instruction on the path.
         if (size == 1)
                 return (sized)stream_put_bytes_inline(handle, from,
                                                       (positive)count);
 
-        total = (positive)size * (positive)count;
+        if (__builtin_mul_overflow((positive)size, (positive)count,
+                                   address_of total))
+        {
+                handle->flags |= STREAM_FAILED;
+                return 0;
+        }
+
         done = stream_put_bytes_inline(handle, from, total);
         return (sized)(done / (positive)size);
 }
@@ -30520,13 +30522,12 @@ sized stream_read(address_any into, sized size, sized count,
                 return 0;
         }
 
-        if ((positive)count > positive_max / (positive)size)
+        if (__builtin_mul_overflow((positive)size, (positive)count,
+                                   address_of total))
         {
                 handle->flags |= STREAM_FAILED;
                 return 0;
         }
-
-        total = (positive)size * (positive)count;
 
         stream_ready(handle);
         stream_face_reading(handle);
@@ -30927,6 +30928,9 @@ bipolar stream_get_delimited(address_any line, sized address_to capacity,
         {
                 positive room;
                 positive taken;
+
+                if (filled >= positive_max - 1)
+                        return -1;
 
                 if (filled + 1 >= (positive)address_to capacity)
                 {
