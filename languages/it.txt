@@ -5,6 +5,7 @@
 # machine-made 2026-11-22 (the devices pass), not yet read by a person: files_device_eject files_device_live files_device_write
 # machine-made 2026-11-22 (the ids 8a55b4ad0 and the taskbar left out), not yet read by a person: files_remote_denied files_remote_offline files_remote_opening files_this_machine taskbar_tab_uninstall
 # machine-made 2026-11-22 (two registry texts that had no keyed line), not yet read by a person: =Purge unconnected links =The screen backlight, from 0 to 100 percent. ...
+# machine-made 2026-11-22 (a registry text that had no keyed line), not yet read by a person: =An experimental speed-up. ...
 @language it
 @name Italiano
 @translated machine
@@ -484,6 +485,7 @@ ui_field_full	fe02	non ce ne sta di più
 =Allow recording	f7e5	Consenti registrazione
 =Always off	48b1	Sempre disattivato
 =Always on	fab5	Sempre attivato
+=An experimental speed-up. If the screen tears or shows garbage, turn it off	802f	Un'accelerazione sperimentale. Se lo schermo si strappa o mostra artefatti, disattivala
 =Animation speed (percent, or default)	49c2	Velocità delle animazioni (percentuale o default)
 =Arrows, or a dot that turns into a bar over text	78cc	Frecce, o un punto che sul testo diventa una barra
 =Audio	1439	Audio

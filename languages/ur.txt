@@ -6,6 +6,7 @@
 # machine-made 2026-11-22 (the devices pass), not yet read by a person: files_device_eject files_device_live files_device_write
 # machine-made 2026-11-22 (the ids 8a55b4ad0 and the taskbar left out), not yet read by a person: files_remote_denied files_remote_offline files_remote_opening files_this_machine taskbar_tab_uninstall
 # machine-made 2026-11-22 (two registry texts that had no keyed line), not yet read by a person: =Purge unconnected links =The screen backlight, from 0 to 100 percent. ...
+# machine-made 2026-11-22 (a registry text that had no keyed line), not yet read by a person: =An experimental speed-up. ...
 @language ur
 @name اردو
 @translated machine
@@ -485,6 +486,7 @@ ui_field_full	fe02	اس میں اس سے زیادہ نہیں سماتا
 =Allow recording	f7e5	ریکارڈنگ کی اجازت دیں
 =Always off	48b1	ہمیشہ بند
 =Always on	fab5	ہمیشہ آن
+=An experimental speed-up. If the screen tears or shows garbage, turn it off	802f	ایک تجرباتی تیزی۔ اگر اسکرین پھٹے یا گڑبڑ دکھائے تو اسے بند کریں
 =Animation speed (percent, or default)	49c2	اینیمیشن کی رفتار (فیصد یا default)
 =Arrows, or a dot that turns into a bar over text	78cc	تیر، یا ایک نقطہ جو متن پر پٹی بن جاتا ہے
 =Audio	1439	آڈیو
@@ -682,7 +684,7 @@ ui_field_full	fe02	اس میں اس سے زیادہ نہیں سماتا
 =The page glides with each notch instead of jumping	0357	صفحہ ہر نوچ پر اچھلنے کے بجائے پھسلتا ہے
 =The pointer goes further when the mouse moves fast	d21b	ماؤس تیز چلے تو پوائنٹر زیادہ دور جاتا ہے
 =The pointer shrinks while a button is held down	574c	بٹن دبا رہے تو پوائنٹر سکڑ جاتا ہے
-=The screen backlight, from 0 to 100 percent. A display with no backlight control has none to set, and this row is greyed out.	cf18	اسکرین کی بیک لائٹ، 0 سے 100 فیصد تک۔ جس ڈسپلے میں بیک لائٹ کنٹرول نہ ہو اس میں سیٹ کرنے کو کچھ نہیں، اور یہ قطار مدھم ہوتی ہے۔
+=The screen backlight, from 0 to 100 percent. A display with no backlight control has none to set, and this row is greyed out.	cf18	اسکرین کی بیک لائٹ، 0 سے 100 فیصد۔ بیک لائٹ کنٹرول کے بغیر کچھ سیٹ نہیں ہوتا، اور یہ قطار مدھم ہوتی ہے۔
 =The wait before a held key repeats	e3e9	دبی کلید کے دہرانے سے پہلے کا وقفہ
 =Their server	4072	ان کا سرور
 =Their suffixes (or default)	244b	ان کے لاحقے (یا default)

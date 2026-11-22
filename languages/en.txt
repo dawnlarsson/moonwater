@@ -477,6 +477,7 @@ ui_field_full	fe02	that is as much as it holds
 =Allow recording	f7e5	Allow recording
 =Always off	48b1	Always off
 =Always on	fab5	Always on
+=An experimental speed-up. If the screen tears or shows garbage, turn it off	802f	An experimental speed-up. If the screen tears or shows garbage, turn it off
 =Animation speed (percent, or default)	49c2	Animation speed (percent, or default)
 =Arrows, or a dot that turns into a bar over text	78cc	Arrows, or a dot that turns into a bar over text
 =Audio	1439	Audio

@@ -5,6 +5,7 @@
 # machine-made 2026-11-22 (the devices pass), not yet read by a person: files_device_eject files_device_live files_device_write
 # machine-made 2026-11-22 (the ids 8a55b4ad0 and the taskbar left out), not yet read by a person: files_remote_denied files_remote_offline files_remote_opening files_this_machine taskbar_tab_uninstall
 # machine-made 2026-11-22 (two registry texts that had no keyed line), not yet read by a person: =Purge unconnected links =The screen backlight, from 0 to 100 percent. ...
+# machine-made 2026-11-22 (a registry text that had no keyed line), not yet read by a person: =An experimental speed-up. ...
 @language ru
 @name Русский
 @translated machine
@@ -484,6 +485,7 @@ ui_field_full	fe02	больше не помещается
 =Allow recording	f7e5	Разрешить запись
 =Always off	48b1	Всегда выключена
 =Always on	fab5	Всегда включена
+=An experimental speed-up. If the screen tears or shows garbage, turn it off	802f	Экспериментальное ускорение. Если изображение рвётся или искажено, выключите его
 =Animation speed (percent, or default)	49c2	Скорость анимации (проценты или default)
 =Arrows, or a dot that turns into a bar over text	78cc	Стрелки или точка, которая над текстом становится полоской
 =Audio	1439	Звук
@@ -681,7 +683,7 @@ ui_field_full	fe02	больше не помещается
 =The page glides with each notch instead of jumping	0357	Страница плавно скользит с каждым щелчком колеса, а не прыгает
 =The pointer goes further when the mouse moves fast	d21b	Указатель уходит дальше, когда мышь движется быстро
 =The pointer shrinks while a button is held down	574c	Указатель сжимается, пока кнопка нажата
-=The screen backlight, from 0 to 100 percent. A display with no backlight control has none to set, and this row is greyed out.	cf18	Подсветка экрана, от 0 до 100 процентов. У дисплея без управления подсветкой её нечего настраивать, и эта строка неактивна.
+=The screen backlight, from 0 to 100 percent. A display with no backlight control has none to set, and this row is greyed out.	cf18	Подсветка экрана, от 0 до 100 процентов. Без управления подсветкой здесь нечего задать, и строка неактивна.
 =The wait before a held key repeats	e3e9	Пауза перед повтором удерживаемой клавиши
 =Their server	4072	Их сервер
 =Their suffixes (or default)	244b	Их суффиксы (или default)
