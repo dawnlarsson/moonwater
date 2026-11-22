@@ -4047,7 +4047,10 @@ static void compositor_clip_cli_read(void)
         if ((serial = __atomic_load_n(&table->cli_serial, __ATOMIC_ACQUIRE)) != compositor_clip.cli_seen)
         {
                 compositor_clip.cli_seen = serial;
-                compositor_clip_take_offer(table->clip_on, table->cli_pid, (int)table->cli_fd, table->cli_which & 1u, -2, serial, &table->cli_answer);
+                // The same policy as a window's offer: the focused window had a key or button from the person lately (a CLI write
+                // from any same-user process is otherwise a silent clipboard replacement).
+                compositor_clip_take_offer(compositor.focus >= 0 && compositor_clip_may_access(compositor.focus, clock_monotonic_nanoseconds()),
+                                           table->cli_pid, (int)table->cli_fd, table->cli_which & 1u, -2, serial, &table->cli_answer);
         }
 }
 
