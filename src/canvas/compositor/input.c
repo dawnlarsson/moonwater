@@ -4237,6 +4237,10 @@ static b32 compositor_reader_owed(void)
 }
 
 static unsigned int compositor_spark_want;
+// The reader's /dev/spark, the direct ring's owner, and that ring: the loop names the focused page's thread group on it
+// (compositor_wl_focus_name) and reads the reports the page took (focus_seen) as input seen.
+static int compositor_spark_fd = -1;
+static struct spark_input_ring *compositor_spark_ring;
 
 HOT static unsigned int compositor_reader_spark_drain(struct spark_input_ring *ring, positive *last_ns)
 {
@@ -4339,7 +4343,12 @@ static struct spark_input_ring *compositor_reader_spark_open(void)
             ((struct spark_input_ring *)mapped)->version == SPARK_INPUT_VERSION &&
             ((struct spark_input_ring *)mapped)->mask == SPARK_INPUT_SLOTS - 1u &&
             system_call_4(syscall(epoll_ctl), (positive)compositor_reader.set, 1, (positive)fd, (positive)&ev) == 0)
-                return __atomic_store_n(&((struct spark_input_ring *)mapped)->active, 1u, __ATOMIC_RELEASE), (struct spark_input_ring *)mapped;
+        {
+                __atomic_store_n(&((struct spark_input_ring *)mapped)->active, 1u, __ATOMIC_RELEASE);
+                __atomic_store_n(&compositor_spark_ring, (struct spark_input_ring *)mapped, __ATOMIC_RELEASE);
+                __atomic_store_n(&compositor_spark_fd, fd, __ATOMIC_RELEASE);
+                return (struct spark_input_ring *)mapped;
+        }
         if (!(mapped < 0 && mapped > -4096))
                 system_call_2(syscall(munmap), (positive)mapped, SPARK_INPUT_PAGE_BYTES);
         return system_close(fd), (struct spark_input_ring *)0;

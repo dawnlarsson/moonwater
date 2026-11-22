@@ -4949,7 +4949,13 @@ static struct
         int pub_locked, pub_hold_row, pub_key_row, pub_kb_row, pub_ptr_row, pub_focus, pub_drag, pub_resize, pub_chip, pub_fs, pub_ov, pub_keys_to;
         unsigned int pub_mods, pub_stack_gen, pub_binds, pub_assist, pub_cycle, pub_keys_any;
         int pub_ax, pub_ay, pub_aw, pub_ah;
-} compositor_wl_direct = {.slot = -1, .fd = -1, .row = -1, .abs_slot = -1, .abs_fd = -1, .abs_row = -1, .rest_slot = -1, .keys_slot = -1, .keys_fd = -1, .keys_row = -1};
+        // The focused page (compositor_wl_focus_name): the row whose owner's page the pointer's reports may go to (the window that
+        // holds the pointer locked, as the reader's own sends take it), and the thread group named for it now, with the row it was
+        // named for and the reports the pages had taken when the loop last looked.
+        int focus_row, focus_named_row;
+        unsigned int focus_claim, focus_named, focus_seen;
+} compositor_wl_direct = {.slot = -1, .fd = -1, .row = -1, .abs_slot = -1, .abs_fd = -1, .abs_row = -1, .rest_slot = -1, .keys_slot = -1, .keys_fd = -1, .keys_row = -1,
+                          .focus_row = -1, .focus_named_row = -1};
 
 static void compositor_wl_direct_hold(void)
 {
@@ -4973,6 +4979,7 @@ static void compositor_wl_direct_make(void)
         long slot;
 
         compositor_wl_direct.valid = compositor_wl_direct.ptr_valid = compositor_wl_direct.abs_valid = 0;
+        compositor_wl_direct.focus_row = -1;
         if (!compositor_reader.on || !compositor_wl.started)
                 goto sync_spark;
         if (compositor_wl_locked())
@@ -4996,6 +5003,10 @@ static void compositor_wl_direct_make(void)
                                         compositor_wl_direct.ptr_valid = 1;
                         }
                 }
+                // The page follows the lock and the hand, not the socket: a client with words still queued keeps its page.
+                if (slot >= 0 && slot < compositor_wl.slots && compositor_wl.fd[slot] >= 0 && compositor.drag < 0 && compositor.resize < 0 &&
+                    !compositor.assist_armed && !compositor.cycle && !compositor_input_override_query(row))
+                        compositor_wl_direct.focus_row = row;
         }
         else if (compositor.focus >= 0 && compositor.fullscreen[compositor.focus] && compositor.focus == wayland.pointer_row &&
                  compositor.drag < 0 && compositor.resize < 0 && !compositor.assist_armed && !compositor.cycle &&
@@ -5084,6 +5095,51 @@ static void compositor_wl_direct_keys_make(void)
         compositor_wl_direct.keys_valid = 1;
 }
 
+/*
+        The focused page's name (moonwater.c, SPARK_IOCTL_FOCUS on the reader's /dev/spark, which owns the direct ring): the owner of
+        the row the pointer's reports may go to (focus_row, made with the reader's target), as the compositor took the row's claim
+        (windows_owner_ok, the pid and its start time), named by a pidfd that is opened and then checked again, so a pid reused between
+        the check and the open is never named. None while the screens are dark: a move has to light them, so it is the loop's. Run
+        every turn; a row and a claim the loop already judged cost two compares. Also the reports the page took (the ring's
+        focus_seen), which no device read here showed: input seen, for the idle clock and the processor's hold.
+*/
+static void compositor_wl_focus_name(void)
+{
+        int fd = __atomic_load_n(&compositor_spark_fd, __ATOMIC_ACQUIRE), row = compositor_wl_direct.focus_row;
+        struct spark_input_ring *ring = __atomic_load_n(&compositor_spark_ring, __ATOMIC_ACQUIRE);
+        unsigned int claim = 0, named = 0;
+
+        if (fd < 0)
+                return;
+        if (ring && __atomic_load_n(&ring->focus_seen, __ATOMIC_RELAXED) != compositor_wl_direct.focus_seen)
+        {
+                compositor_wl_direct.focus_seen = __atomic_load_n(&ring->focus_seen, __ATOMIC_RELAXED);
+                compositor_wl_input();
+                compositor_hold_touch(clock_monotonic_nanoseconds());
+        }
+        if (__atomic_load_n(&compositor.dark, __ATOMIC_RELAXED) || !compositor.table || row < 0 || row >= (int)compositor_rows_in_use)
+                row = -1;
+        else if ((claim = __atomic_load_n(&compositor.table->pid[row], __ATOMIC_ACQUIRE)) == WINDOWS_TAKING)
+                claim = 0;
+        if (row == compositor_wl_direct.focus_named_row && claim == compositor_wl_direct.focus_claim)
+                return;
+        if (claim && windows_owner_ok(&windows_owner_held[row], claim))
+        {
+                long pidfd = compositor_call(syscall(pidfd_open), claim, 0, 0, 0, 0, 0);
+
+                if (pidfd >= 0)
+                {
+                        if (windows_owner_ok(&windows_owner_held[row], claim) &&
+                            compositor_call(syscall(ioctl), (positive)fd, SPARK_IOCTL_FOCUS, (positive)pidfd, 0, 0, 0) == 0)
+                                named = claim;
+                        system_close((int)pidfd);
+                }
+        }
+        if (!named && compositor_wl_direct.focus_named)
+                compositor_call(syscall(ioctl), (positive)fd, SPARK_IOCTL_FOCUS, (positive)-1l, 0, 0, 0);
+        compositor_wl_direct.focus_named_row = row, compositor_wl_direct.focus_claim = claim, compositor_wl_direct.focus_named = named;
+}
+
 static void compositor_wl_direct_publish(void)
 {
         int locked, hold_row, key_row, kb_row, ptr_row, focus, drag, resize, chip, fs, ov, keys_to, ax = 0, ay = 0, aw = 0, ah = 0;
@@ -5119,7 +5175,10 @@ static void compositor_wl_direct_publish(void)
             compositor_wl_direct.pub_assist == compositor.assist_armed && compositor_wl_direct.pub_cycle == (unsigned int)compositor.cycle &&
             compositor_wl_direct.pub_ax == ax && compositor_wl_direct.pub_ay == ay &&
             compositor_wl_direct.pub_aw == aw && compositor_wl_direct.pub_ah == ah)
+        {
+                compositor_wl_focus_name();
                 return;
+        }
         compositor_wl_direct_hold();
         compositor_wl_direct_make();
         compositor_wl_direct_keys_make();
@@ -5133,6 +5192,7 @@ static void compositor_wl_direct_publish(void)
         compositor_wl_direct.pub_assist = compositor.assist_armed, compositor_wl_direct.pub_cycle = (unsigned int)compositor.cycle;
         compositor_wl_direct.pub_ax = ax, compositor_wl_direct.pub_ay = ay, compositor_wl_direct.pub_aw = aw, compositor_wl_direct.pub_ah = ah;
         compositor_wl_direct_release();
+        compositor_wl_focus_name();
 }
 
 /*
