@@ -747,7 +747,15 @@ static enum compositor_gpu_why compositor_gpu_scale_frames(const struct composit
                         for (int y = 0; y < f->height; y++, fy += step_y)
                                 tables[f->width + y] = (unsigned int)(fy >> 24);
                 }
-                if (compositor_card.nowait && compositor_card.looped && gpu_backend != &gpu_i915_row)
+                // A client's tiled or DCC picture is scaled in place with its descriptor (gpu_image_scaled, C2 op 8's scale bit), gated on
+                // gpu_scaled_ready: the processor cannot read a tiled picture either, so a card without it refuses the frame.
+                if (f->tiled_kind)
+                {
+                        if (!gpu_scaled_ready() || !gpu_image_scaled(f->tiled_desc, f->tiled_kind, GPU_VA + tables_at, 0, 0, dst_va, dp,
+                                                                     (unsigned int)f->width, (unsigned int)f->height))
+                                return COMPOSITOR_GPU_WHY_SCALED;
+                }
+                else if (compositor_card.nowait && compositor_card.looped && gpu_backend != &gpu_i915_row)
                 {
                         // A job of the present's, submitted with the scenes (compositor_card_go): the scene that reads this picture runs after it on the ring.
                         const struct compositor_card_step blit = {COMPOSITOR_CARD_SCALE, (unsigned int)f->width, (unsigned int)f->height, (unsigned int)f->pitch,
@@ -765,6 +773,7 @@ static enum compositor_gpu_why compositor_gpu_scale_frames(const struct composit
                         memory_copy(compositor_gpu_scaled_copy, frames, (positive)count * sizeof(*frames)), *io = compositor_gpu_scaled_copy;
                 compositor_gpu_scaled_copy[k].pixels = compositor_gpu_scaled_pool.memory + at / 4, compositor_gpu_scaled_copy[k].pitch = (unsigned long)dp;
                 compositor_gpu_scaled_copy[k].gpu_base = dst_va;
+                compositor_gpu_scaled_copy[k].tiled_kind = 0; // the copy is in the linear pool: its descriptor is no longer its picture's
                 compositor_gpu_scaled_copy[k].source_w = compositor_gpu_scaled_copy[k].source_h = 0;
                 at += (bytes + 255) & ~255ull, tabled += (4ull * (positive)(f->width + f->height) + 255) & ~255ull;
         }
