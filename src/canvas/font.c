@@ -2685,7 +2685,9 @@ static p8 font_gsub_apply(font_shaper address_to s, p32 kind, positive t)
         case 2:
         case 3:
         {
-                if (!font_subtable_set(face, t, format, glyph, &set, &count))
+                //      Multiple and alternate write the output: outside an output (the reverse branch, which takes
+                //      single substitutions) they would write into the string they read, so they are refused there.
+                if (!s->output || !font_subtable_set(face, t, format, glyph, &set, &count))
                         return false;
                 if (!count)
                 {
@@ -2715,7 +2717,7 @@ static p8 font_gsub_apply(font_shaper address_to s, p32 kind, positive t)
                 return true;
         }
         case 4:
-                if (!font_subtable_set(face, t, format, glyph, &set, &count))
+                if (!s->output || !font_subtable_set(face, t, format, glyph, &set, &count))
                         return false;
                 for (p32 i = 0; i < count && i < 4096; i++)
                         if (font_ligature(s, set, i))
@@ -6183,6 +6185,10 @@ static fn font_union(font_engine address_to e, b32 width, b32 from, b32 to, b32 
 static fn font_raster(font_engine address_to e, b32 width, b32 height,
                       p8 address_to out, positive stride)
 {
+        //      A row past the band's cells has no band of rows: the loop below would never advance. No caller asks
+        //      for one (font_shape caps a glyph at FONT_EDGE, the drawn cells at 2048), so this is a guard.
+        if (width + 2 > FONT_BAND)
+                return;
         e->width = width;
         e->stride = width + 2;
         for (e->grain = 3; (width + 1) >> e->grain >= 64;)

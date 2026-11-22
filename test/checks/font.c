@@ -4540,6 +4540,43 @@ static __attribute__((noinline)) fn font_check_dots(font_engine address_to e, co
         is run here alone straight after the stack is written with extremes, a stem and a dot, and the trap build
         (MW_UBSAN=1) stopped there; a plain build answers the same either way. Then a dotted letter, hinted.
 */
+//      Big-endian 16-bit store for a hand-built table.
+static fn reverse_put16(p8 address_to at, p32 value)
+{
+        at[0] = (p8)(value >> 8), at[1] = (p8)value;
+}
+
+//      A multiple substitution offered to a string that is not being output (the reverse branch's) is refused and
+//      leaves the glyph it reads alone. Without the refusal it wrote its first glyph into info[0] in place.
+static fn check_reverse_multiple(void)
+{
+        static p8 table[32];
+        static font_item info[4], spare[4];
+        static font_shift shift[4];
+        font_face fake = {.data = table, .size = 32};
+        font_shaper s = {.face = &fake, .info = info, .out = info, .spare = spare, .shift = shift, .cap = 4, .len = 1};
+        b32 answer;
+
+        //      Multiple 1: coverage at 10 (glyph 5), sequence at 16 (glyphs 7 and 8).
+        reverse_put16(table, 1), reverse_put16(table + 2, 10), reverse_put16(table + 4, 1), reverse_put16(table + 6, 16);
+        reverse_put16(table + 10, 1), reverse_put16(table + 12, 1), reverse_put16(table + 14, 5);
+        reverse_put16(table + 16, 2), reverse_put16(table + 18, 7), reverse_put16(table + 20, 8);
+        info[0] = (font_item){.glyph = 5};
+        answer = font_gsub_apply(&s, 2, 0);
+        check("reverse: a multiple substitution is refused where the string is not output", !answer);
+        check("reverse: the glyph it reads is left alone", info[0].glyph == 5 && !s.output);
+}
+
+//      A raster asked for a row past the band's cells returns; without the guard its band loop never advances (the
+//      mutant hangs here, and the run times out).
+static fn check_raster_ceiling(void)
+{
+        static p8 scratch[8];
+
+        font_raster(&engine, 70000, 1, scratch, 70002);
+        check("raster: a row wider than the band's cells is refused, and the call returns", true);
+}
+
 static fn check_hostile_arithmetic(void)
 {
         {
@@ -4852,6 +4889,8 @@ b32 main()
         check_hostile(font_one, font_one_size, 20000);
         check_hostile(font_two, font_two_size, 20000);
         check_hostile_arithmetic();
+        check_raster_ceiling();
+        check_reverse_multiple();
         //      Last: it loads faces until the 16-bit ids run out, and no face loads after it.
         check_edges(&one, &two);
         check_generation_wrap();
