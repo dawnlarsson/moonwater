@@ -29,6 +29,7 @@
 #define FILES_TILE_LIST 232
 #define FILES_WALL_SCREENS 8
 #define FILES_SHEET_LINES 10
+#define FILES_GROUP_GAP 14 // logical px of space above the first row of a sidebar group (in place of a divider line)
 #define FILES_DEEDS 32
 #define FILES_DROP_MOST (FILES_MOVE_MOST * FILES_PATH / 4)
 #define FILES_CLIP_CUT "application/x-moonwater-cut"
@@ -290,7 +291,7 @@ static fn files_tree_describe(int id, struct ui_row address_to row)
                 icon = UI_FILE_MACHINE;
                 row->indent = n->depth, row->file = 1 + icon;
                 row->expander = n->open ? UI_ROW_EXPANDER_OPEN : UI_ROW_EXPANDER_SHUT;
-                row->separator = id > 0 && n->machine == 1;
+                row->gap = id > 0 && n->machine != 0 ? FILES_GROUP_GAP : 0;
                 return;
         }
         if (n->depth == 1 && n->place > FILES_PLACE_NONE && n->place <= FILES_PLACE_ROOT)
@@ -303,7 +304,7 @@ static fn files_tree_describe(int id, struct ui_row address_to row)
         }
         row->indent = n->depth, row->file = 1 + icon;
         row->expander = n->open ? UI_ROW_EXPANDER_OPEN : n->read && !n->has ? 0 : UI_ROW_EXPANDER_SHUT;
-        row->separator = id > 0 && n->kind == FILES_NODE_DRIVE && t->node[id - 1].kind != FILES_NODE_DRIVE && t->node[id - 1].kind != FILES_NODE_MACHINE;
+        row->gap = id > 0 && n->kind == FILES_NODE_DRIVE && t->node[id - 1].kind != FILES_NODE_DRIVE && t->node[id - 1].kind != FILES_NODE_MACHINE ? FILES_GROUP_GAP : 0;
 }
 
 static fn files_tree_follow(void)
