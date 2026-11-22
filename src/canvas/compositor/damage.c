@@ -1330,6 +1330,26 @@ static int compositor_fullscreen_fit(int row, int *dx, int *dy, int *dw, int *dh
         return 1;
 }
 
+/*
+        A fullscreen window whose client shows a smaller buffer at its surface's size (a Wayland viewport scaling the whole buffer, the screen's
+        shape: Xwayland's mode for a game at a lower resolution, 1280x720 shown at 1920x1080) is taken as a picture of the buffer's size
+        (wayland_host.c, compositor_wl_view_take), which the display's plane scales to the screen straight from the client's buffer, or the
+        card's compose does, read in place, where each frame was copied and scaled into the table first. Its client is still spoken to in its
+        surface's size, which the shim keeps for the row and the picture size it was taken at (compositor_wl_client_size).
+*/
+#ifdef CONFIG_MOONWATER_WAYLAND
+static void compositor_wl_client_size(int row, unsigned int *cw, unsigned int *ch); // wayland_host.c: the surface's size for that picture
+#endif
+
+// The size a row's client is spoken to in, for a fullscreen picture fitted to the screen: its surface's, or the picture's.
+static void compositor_client_size(int row, unsigned int *cw, unsigned int *ch)
+{
+        *cw = compositor.picture_w[row], *ch = compositor.picture_h[row];
+#ifdef CONFIG_MOONWATER_WAYLAND
+        compositor_wl_client_size(row, cw, ch);
+#endif
+}
+
 static void compositor_window_point(int row, int sx, int sy, int *wx, int *wy)
 {
         int dx, dy, dw, dh;
@@ -1337,10 +1357,12 @@ static void compositor_window_point(int row, int sx, int sy, int *wx, int *wy)
         if (compositor_fullscreen_fit(row, &dx, &dy, &dw, &dh))
         {
                 int rx = sx - dx, ry = sy - dy;
+                unsigned int cw, ch;
 
+                compositor_client_size(row, &cw, &ch);
                 rx = rx < 0 ? 0 : rx >= dw ? dw - 1 : rx, ry = ry < 0 ? 0 : ry >= dh ? dh - 1 : ry;
-                *wx = (int)((long)rx * (long)compositor.picture_w[row] / (long)dw);
-                *wy = (int)((long)ry * (long)compositor.picture_h[row] / (long)dh);
+                *wx = (int)((long)rx * (long)cw / (long)dw);
+                *wy = (int)((long)ry * (long)ch / (long)dh);
                 return;
         }
         *wx = sx - compositor.x[row], *wy = sy - compositor.y[row];
@@ -1352,10 +1374,13 @@ static int compositor_screen_point(int row, int wx, int wy, int *sx, int *sy)
 
         if (compositor_fullscreen_fit(row, &dx, &dy, &dw, &dh))
         {
-                if (wx < 0 || wx >= (int)compositor.picture_w[row] || wy < 0 || wy >= (int)compositor.picture_h[row])
+                unsigned int cw, ch;
+
+                compositor_client_size(row, &cw, &ch);
+                if (wx < 0 || wx >= (int)cw || wy < 0 || wy >= (int)ch)
                         return 0;
-                *sx = dx + (int)((long)wx * (long)dw / (long)compositor.picture_w[row]);
-                *sy = dy + (int)((long)wy * (long)dh / (long)compositor.picture_h[row]);
+                *sx = dx + (int)((long)wx * (long)dw / (long)cw);
+                *sy = dy + (int)((long)wy * (long)dh / (long)ch);
                 return 1;
         }
         if (wx < 0 || wx >= (int)compositor.w[row] || wy < 0 || wy >= (int)compositor.h[row])

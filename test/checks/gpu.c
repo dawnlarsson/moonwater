@@ -4948,6 +4948,43 @@ static void input_core_rows(void)
         compositor_ccd = kept_ccd, compositor_qos = kept_qos, compositor_input_core = kept_core, compositor_qos_root = kept_root;
 }
 
+/*
+        A fullscreen game at a lower resolution through Xwayland: a 1280x720 buffer its viewport shows at 1920x1080 needed a transform
+        (compositor_wl_needs_xform), so every frame was copied and scaled into the table (a waited card job or a processor loop) and the copy
+        scanned out. It is taken as a picture of the buffer's size (compositor_wl_view_take), which the plane scales, and its client is still
+        spoken to at 1920x1080 (compositor_wl.view, compositor_window_point).
+*/
+static void view_rows(void)
+{
+        const int row = 6;
+        struct wayland_picture p = {0}, scaled;
+        int kept_full = compositor.fullscreen[row], kept_x = compositor.x[row], kept_y = compositor.y[row];
+        unsigned int kept_w = compositor.w[row], kept_h = compositor.h[row], kept_pw = compositor.picture_w[row], kept_ph = compositor.picture_h[row];
+        int wx = 0, wy = 0, sx = 0, sy = 0;
+        b32 taken, spoken, back, shape, windowed;
+
+        p.width = 1280, p.height = 720, p.dst_width = 1920, p.dst_height = 1080, p.row_width = 1920, p.row_height = 1080, p.sync_fd = 3;
+        p.opaque_x = 0, p.opaque_y = 0, p.opaque_w = 1920, p.opaque_h = 1080;
+        compositor.fullscreen[row] = 1, compositor.x[row] = 0, compositor.y[row] = 0, compositor.w[row] = 1920, compositor.h[row] = 1080;
+        taken = compositor_wl_view_take(row, &p, &scaled) && scaled.row_width == 1280 && scaled.row_height == 720 && !scaled.dst_width &&
+                scaled.full && !compositor_wl_needs_xform(&scaled, scaled.row_width, scaled.row_height) && scaled.opaque_w == 1280 && scaled.opaque_h == 720;
+        compositor.picture_w[row] = 1280, compositor.picture_h[row] = 720;
+        compositor_window_point(row, 960, 540, &wx, &wy);
+        spoken = wx == 960 && wy == 540;
+        back = compositor_screen_point(row, 1919, 1079, &sx, &sy) && sx == 1919 && sy == 1079;
+        p.width = 1280, p.height = 1024; // 5:4 shown at 16:9: a stretch, which the plane's fit does not do
+        shape = !compositor_wl_view_take(row, &p, &scaled) && !compositor_wl.view[row].view_w;
+        compositor_window_point(row, 960, 540, &wx, &wy);
+        p.height = 720, compositor.fullscreen[row] = 0;
+        windowed = !compositor_wl_view_take(row, &p, &scaled);
+        check("view: a fullscreen 1280x720 buffer shown at 1920x1080 is taken at its own size, with no transform and its opaque part in its units, and its client is spoken to at 1920x1080",
+              taken && spoken && back);
+        check("view: one that changes the shape, or a window not fullscreen, is not, and its client's points are the picture's again",
+              shape && windowed && wx == 640 && wy == 360);
+        compositor.fullscreen[row] = kept_full, compositor.x[row] = kept_x, compositor.y[row] = kept_y, compositor.w[row] = kept_w, compositor.h[row] = kept_h;
+        compositor.picture_w[row] = kept_pw, compositor.picture_h[row] = kept_ph, compositor_wl.view[row].view_w = compositor_wl.view[row].view_h = 0;
+}
+
 // The X window manager's atoms by their numbers (compositor_xwm_atom_index, H-c3-1): every atom of a list of thousands found by the index as the walk
 // found it, the first record of an atom two records have, none for one not there, and an interned name's atom found once its reply gives it.
 static void xwm_atom_rows(void)
@@ -6600,6 +6637,7 @@ b32 main(void)
         game_pids_rows();
         qos_rows();
         input_core_rows();
+        view_rows();
         reader_own_rows();
         clip_most_rows();
         asked_record_rows();

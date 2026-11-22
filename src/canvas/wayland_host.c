@@ -80,6 +80,7 @@ static struct
         unsigned int direct_gen;
         struct { unsigned int format; unsigned long modifier; } dmabuf_entries[WAYLAND_DMABUF_ENTRIES];
         struct compositor_wl_opaque { short x1, y1, x2, y2; } *row_opaque;
+        struct compositor_wl_view { unsigned short buffer_w, buffer_h, view_w, view_h; } *view; // a viewport's surface size for the buffer's (compositor_wl_view_take)
         char render_path[64];
         struct canvas_syncobj_pool syncobj_pool;
         struct compositor_wl_mapping *map;
@@ -696,6 +697,7 @@ static void compositor_wl_row_close(void *context, int row)
                 compositor_wl.wc_reads[row] = 0;
                 compositor_wl.wc_copy[row] = 0;
                 memory_zero(&compositor_wl.row_opaque[row], sizeof compositor_wl.row_opaque[row]);
+                memory_zero(&compositor_wl.view[row], sizeof compositor_wl.view[row]);
                 compositor_wl_unlend(row);
                 compositor_wl_straight_drop(row);
                 compositor_wl_source_drop(row);
@@ -3011,12 +3013,61 @@ static int wl_pic_commit_lent(struct windows *table, int row, const struct wayla
         return WAYLAND_PICTURE_LENT;
 }
 
+/*
+        A fullscreen row's picture whose viewport scales the whole buffer up to the surface, keeping its shape to a pixel (compositor_client_size,
+        damage.c): taken as a picture of the buffer's own size, whole, into `scaled`, and the row's surface size kept for its client's points.
+        Any other picture of the row ends that. 0 for a picture that is not one.
+*/
+static int compositor_wl_view_take(int row, const struct wayland_picture *picture, struct wayland_picture *scaled)
+{
+        long w = picture->width, h = picture->height, vw = picture->dst_width, vh = picture->dst_height, cross = w * vh - h * vw;
+
+        if (row < 0 || row >= COMPOSITOR_ROWS || !compositor_wl.view)
+                return 0;
+        if (!compositor.fullscreen[row] || vw <= 0 || vh <= 0 || w <= 0 || h <= 0 || (vw == w && vh == h) || w > vw || h > vh ||
+            vw > 65535 || vh > 65535 || vw > w * 8 || vh > h * 8 || (cross < 0 ? -cross : cross) > (vw > vh ? vw : vh) ||
+            picture->transform || picture->y_invert || picture->blend || picture->dest_x || picture->dest_y || picture->row_width != vw ||
+            picture->row_height != vh || (picture->src_width > 0 && (picture->src_x || picture->src_y || picture->src_width != w * 256 ||
+                                                                     picture->src_height != h * 256)))
+        {
+                compositor_wl.view[row].view_w = compositor_wl.view[row].view_h = 0;
+                return 0;
+        }
+        *scaled = *picture;
+        scaled->dst_width = scaled->dst_height = 0, scaled->src_x = scaled->src_y = scaled->src_width = scaled->src_height = 0;
+        scaled->row_width = w, scaled->row_height = h, scaled->full = 1;
+        // The opaque part is the surface's: in the buffer's units, rounded inward.
+        if (picture->opaque_w > 0 && picture->opaque_h > 0)
+        {
+                long x1 = (picture->opaque_x * w + vw - 1) / vw, y1 = (picture->opaque_y * h + vh - 1) / vh;
+                long x2 = (picture->opaque_x + picture->opaque_w) * w / vw, y2 = (picture->opaque_y + picture->opaque_h) * h / vh;
+
+                scaled->opaque_x = x1, scaled->opaque_y = y1, scaled->opaque_w = x2 > x1 ? x2 - x1 : 0, scaled->opaque_h = y2 > y1 ? y2 - y1 : 0;
+        }
+        compositor_wl.view[row].buffer_w = (unsigned short)w, compositor_wl.view[row].buffer_h = (unsigned short)h;
+        compositor_wl.view[row].view_w = (unsigned short)vw, compositor_wl.view[row].view_h = (unsigned short)vh;
+        return 1;
+}
+
+static void compositor_wl_client_size(int row, unsigned int *cw, unsigned int *ch)
+{
+        const struct compositor_wl_view *v = row >= 0 && row < COMPOSITOR_ROWS && compositor_wl.view ? &compositor_wl.view[row] : 0;
+
+        if (v && v->view_w && v->buffer_w == *cw && v->buffer_h == *ch)
+                *cw = v->view_w, *ch = v->view_h;
+}
+
 static int compositor_wl_row_picture(void *context, int row, const struct wayland_picture *picture)
 {
         compositor_wl.tiled_lent = 0;
         struct windows *table = compositor.table;
         unsigned long pitch = (unsigned long)compositor_stride();
-        long width = picture->row_width, height = picture->row_height;
+        struct wayland_picture scaled;
+        long width, height;
+
+        if ((picture->pixels != 0 || picture->sync_fd >= 0) && compositor_wl_view_take(row, picture, &scaled))
+                picture = &scaled;
+        width = picture->row_width, height = picture->row_height;
         long count = picture->full || !picture->damages ? 1 : picture->damages;
         unsigned int *to, aside = 0;
         int was_lent, sync_started = 0, has_content = picture->pixels != 0 || picture->sync_fd >= 0;

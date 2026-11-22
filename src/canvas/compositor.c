@@ -1691,7 +1691,7 @@ _Static_assert(COMPOSITOR_POLLS_OWN + COMPOSITOR_INPUTS_KEPT + COMPOSITOR_CLIP_H
 #ifdef CONFIG_MOONWATER_WAYLAND
 #define COMPOSITOR_ROWS_WL(X) \
         X(compositor_wl.laying, COMPOSITOR_ROWS_ROW) X(compositor_wl.parts, COMPOSITOR_ROWS_ROW) X(compositor_wl.cursor_asked, COMPOSITOR_ROWS_ROW) \
-        X(compositor_wl.row_blend, COMPOSITOR_ROWS_ROW) X(compositor_wl.row_opaque, COMPOSITOR_ROWS_ROW) X(compositor_wl.lent, COMPOSITOR_ROWS_ROW) \
+        X(compositor_wl.row_blend, COMPOSITOR_ROWS_ROW) X(compositor_wl.row_opaque, COMPOSITOR_ROWS_ROW) X(compositor_wl.view, COMPOSITOR_ROWS_ROW) X(compositor_wl.lent, COMPOSITOR_ROWS_ROW) \
         X(compositor_wl.straight, COMPOSITOR_ROWS_ROW) X(compositor_wl.source, COMPOSITOR_ROWS_ROW) X(compositor_wl.wc_reads, COMPOSITOR_ROWS_ROW) \
         X(compositor_wl.wc_copy, COMPOSITOR_ROWS_ROW) X(compositor_wl_layers.layer, COMPOSITOR_ROWS_ROW) X(compositor_wl_layers.gathered, COMPOSITOR_ROWS_ROW) \
         X(compositor_wl_layers.count, COMPOSITOR_ROWS_ROW) X(compositor_wl_layers.root_refused, COMPOSITOR_ROWS_ROW)
