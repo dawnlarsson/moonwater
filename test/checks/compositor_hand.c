@@ -2408,6 +2408,7 @@ static void check_taskbar_pins(void)
     struct windows address_to table;
     struct taskbar_view view;
     int x, y, w, h, tab, ghost, pids = 0;
+    unsigned int fixture_pid = (unsigned int)system_call(syscall(getppid)); // the parent is a real process, not this one (taskbar_proc_kind calls the checker itself SYSTEM): its owner is taken from /proc
 
     for (unsigned int each = 0; each < sizeof(good) / sizeof(good[0]); each++)
         grammar &= setting_pins_valid(good[each], null);
@@ -2514,7 +2515,7 @@ static void check_taskbar_pins(void)
             string_copy((string_address)path, (string_address)bowls), string_append_bounded((string_address)path, (string_address)(each ? "/bin/htop" : "/bin/chromium-browser"), sizeof(path));
             tab_make_file(path, text, string_length((string_address)text));
         }
-        tab_fake_process(proc_root, 61, "chromium", 40, "/usr/lib/chromium/chromium", "chromium\0--type=x\0", 18, "mnt:[1]");
+        tab_fake_process(proc_root, fixture_pid, "chromium", 40, "/usr/lib/chromium/chromium", "chromium\0--type=x\0", 18, "mnt:[1]");
     }
     // The registry was read by the pins checks above, before these files existed, and ui_apps_fresh looks again only after two seconds: read it now.
     ui_apps.read = false;
@@ -2572,7 +2573,8 @@ static void check_taskbar_pins(void)
     table->height[1] = 60;
     glass_paint(1, 0, 0, 50, 60, 0x404041u, true);
     windows_app_id_set(table, 1, "chromium");
-    table->pid[1] = 61;
+    table->pid[1] = fixture_pid;
+    windows_owner_take(&windows_owner_held[1], fixture_pid);
     compositor_identity_take(1);
     compositor_present();
     compositor_focus(1);
@@ -2744,7 +2746,7 @@ static void check_taskbar_pins(void)
     }
     if (taskbar_menu.open && taskbar_menu.menu.count == 5 && taskbar_menu.menu.items[3].id == TASKBAR_MENU_PIN)
         compositor_menu_chose(TASKBAR_MENU_PIN);
-    check_taskbar_pins_put("none");
+    taskbar_pins.count = 0;
     taskbar_settings_set("bottom", "primary", "");
     check("taskbar pinned: an X window of Steam's class pins Steam's app, and the pin is read back from the file as the settings are (a restart)",
           taskbar_pins.count == 1 && string_equals((string_address)taskbar_pins.pin[0].app, (string_address) "steam") && compositor_band_view().count == 1);
