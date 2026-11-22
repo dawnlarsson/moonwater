@@ -1343,6 +1343,101 @@ static b32 list_check_selected_row(int id)
           - side-pane seam drags widen/narrow (RTL too) and double-click resets;
           - ui_size_text always emits an explicit unit (B, KB, MB, GB, TB) and ui_file_type omits trailing "file".
 */
+/* A tree's rows, as the Files sidebar shows them: a root row starts at the kit's margin (UI_INSET in from the list's edge), each level in is
+   one UI_INDENT more, and a row that can expand has its chevron in the inset before its own level's label. The mutant is the same rows as
+   a column list, whose chevron has a slot after the indent: that must not pass. --dump-tree DIR (the check's argv 5 and 6, given by hand)
+   writes the rendered rows as a PPM for a person to look at. */
+static const struct { int depth, expander; const char *label; } tree_geometry_rows[] = {
+    {0, UI_ROW_EXPANDER_OPEN, "This Machine"}, {1, UI_ROW_EXPANDER_SHUT, "Home"}, {1, 0, "Work"},
+    {0, 0, "Root"}, {1, 0, "Child"}, {2, 0, "Grandchild"}};
+static struct ui_list tree_geometry_list;
+
+static void tree_geometry_describe(int id, struct ui_row address_to row)
+{
+    row->label = tree_geometry_rows[id].label, row->indent = tree_geometry_rows[id].depth, row->expander = tree_geometry_rows[id].expander;
+}
+
+/* Renders the rows into a tree list (or a column list, for the mutant) and measures each row's first ink from the list's edge. */
+static b32 tree_geometry_measure(struct ui address_to wui, b32 tree, int address_to ink, const char *dump)
+{
+    enum { TREE_W = 260, TREE_H = 260, TREE_ROWS = 6 };
+    long mapped = ui_map(TREE_W * TREE_H * 4);
+    unsigned int address_to pixels = mapped < 0 && mapped > -4096 ? null : (unsigned int address_to)mapped;
+    unsigned int background;
+    b32 found = true;
+
+    if (!pixels)
+        return false;
+    ui_begin(wui, pixels, TREE_W, TREE_W, TREE_H);
+    memory_zero(&tree_geometry_list, sizeof(tree_geometry_list));
+    tree_geometry_list.tree = tree, tree_geometry_list.describe = tree_geometry_describe, tree_geometry_list.hover = tree_geometry_list.down = -1;
+    tree_geometry_list.focus = -1, tree_geometry_list.empty = "";
+    ui_list_begin(&tree_geometry_list);
+    for (int k = 0; k < TREE_ROWS; k++)
+        ui_list_add(&tree_geometry_list, k);
+    ui_list_end(&tree_geometry_list);
+    ui_list_place(wui, &tree_geometry_list, 16, 4, 200, 250);
+    ui_list_layout(wui, &tree_geometry_list);
+    ui_clear(wui);
+    ui_list_draw(wui, &tree_geometry_list);
+    background = pixels[2 * TREE_W + 4];
+    for (int k = 0; k < TREE_ROWS; k++)
+    {
+        int y = tree_geometry_list.y + tree_geometry_list.top[k] + tree_geometry_list.tall[k] / 2, first = -1;
+        for (int x = tree_geometry_list.x; x < tree_geometry_list.x + tree_geometry_list.w && first < 0; x++)
+            for (int dy = -6; dy <= 6 && first < 0; dy++)
+                if (pixels[(y + dy) * TREE_W + x] != background)
+                    first = x - tree_geometry_list.x;
+        ink[k] = first;
+        found = found && first >= 0;
+    }
+    if (dump)
+    {
+        static unsigned char bytes[TREE_W * TREE_H * 3];
+        char path[512], head[48];
+        unsigned int length = 3;
+        bipolar handle;
+
+        string_copy_bounded((string_address)path, (string_address)dump, sizeof(path));
+        string_append_bounded((string_address)path, (string_address) "/sidebar-tree.ppm", sizeof(path));
+        for (unsigned int at = 0; at < TREE_W * TREE_H; at++)
+            bytes[3 * at] = (unsigned char)(pixels[at] >> 16), bytes[3 * at + 1] = (unsigned char)(pixels[at] >> 8), bytes[3 * at + 2] = (unsigned char)pixels[at];
+        string_copy((string_address)head, (string_address) "P6\n");
+        length += (unsigned int)positive_into_string((p8 address_to)head + length, TREE_W);
+        head[length++] = ' ';
+        length += (unsigned int)positive_into_string((p8 address_to)head + length, TREE_H);
+        string_copy((string_address)head + length, (string_address) "\n255\n");
+        length += 5;
+        handle = system_open_at_mode(AT_FDCWD, (string_address)path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+        if (handle >= 0)
+            system_write_once(handle, head, length), system_write_once(handle, bytes, sizeof(bytes)), system_close(handle);
+    }
+    return found;
+}
+
+/* The chevron of a row is the first ink of its row, in the inset before its level's label; the label of a row is 16 more for each level in. */
+static b32 tree_geometry_ok(const int address_to ink)
+{
+    return ink[0] >= 0 && ink[0] < 14 && ink[1] >= 16 && ink[1] < 30 && ink[2] >= 30 && ink[2] < 34 && ink[3] >= 14 && ink[3] < 18 &&
+           ink[4] >= 30 && ink[4] < 34 && ink[5] >= 46 && ink[5] < 50;
+}
+
+static fn tree_geometry_check(struct ui address_to wui, const char *dump)
+{
+    int ink[6], mutant[6];
+    b32 tree = tree_geometry_measure(wui, true, ink, dump);
+    int left;
+
+    check("tree rows: a root row starts at the kit's margin (its chevron in the inset, its label 14 in), and each level in is 16 more",
+          tree && tree_geometry_ok(ink));
+    left = tree_geometry_list.x;
+    check("tree rows: a chevron is hit in the inset before its own level, and a label is not",
+          ui_list_tree_chevron_at(wui, &tree_geometry_list, 0, left + 5) && !ui_list_tree_chevron_at(wui, &tree_geometry_list, 0, left + 15) &&
+              ui_list_tree_chevron_at(wui, &tree_geometry_list, 1, left + 21) && !ui_list_tree_chevron_at(wui, &tree_geometry_list, 1, left + 10));
+    tree_geometry_measure(wui, false, mutant, null);
+    check("tree rows: the mutant (the chevron's slot after the indent, as a column list has it) does not pass", !tree_geometry_ok(mutant));
+}
+
 static fn list_interaction_check(struct ui address_to wui)
 {
         static struct ui_list l;
@@ -1504,6 +1599,7 @@ static fn list_interaction_check(struct ui address_to wui)
                 check("list: ui_view_list_click delivers cross-pane releases to the active list", routed);
         }
 
+        tree_geometry_check(wui, program_argument_count() > 6 && string_equals(program_argument(5), (string_address) "--dump-tree") ? (const char *)program_argument(6) : null);
         // 5d. ui_columns_event ignores clicks horizontally outside the header box (e.g. in the sidebar at the same y).
         {
                 struct ui_columns cols;

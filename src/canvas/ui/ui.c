@@ -23631,7 +23631,10 @@ static fn ui_row_label_about(struct ui address_to ui, struct ui_row_parts addres
 static fn ui_list_cells(struct ui address_to ui, const struct ui_list address_to l, const struct ui_columns address_to c,
                         const struct ui_row address_to row, int y, int height, unsigned int ink, unsigned int quiet, int trailing_w)
 {
-        int pad = ui_dev(ui, UI_INSET), gap = ui_dev(ui, 8), set_in = ui_dev(ui, UI_INDENT) * row->indent + (row->expander ? ui_dev(ui, UI_INDENT) : 0);
+        int pad = ui_dev(ui, UI_INSET), gap = ui_dev(ui, 8);
+        // A tree's row is set in one UI_INDENT a level, and its chevron sits in the inset before its own level's label (no slot of its own):
+        // a root row starts at the kit's margin, and a folder one level in. A column list keeps the chevron's slot after the indent.
+        int set_in = ui_dev(ui, UI_INDENT) * row->indent + (!l->tree && row->expander ? ui_dev(ui, UI_INDENT) : 0);
         int baseline = ui_kit_baseline(ui, y + (height - ui_dev(ui, 20)) / 2, UI_BODY_MEDIUM), count = c ? c->count : 1;
         int left = c ? c->x : l->x, span = c ? c->w : l->w;
         b32 span_all = c != null && row->kind == UI_ROW_PLAIN && row->bars <= 0;
@@ -23641,7 +23644,7 @@ static fn ui_list_cells(struct ui address_to ui, const struct ui_list address_to
                         span_all = false;
         if (row->expander)
         {
-                int size = ui_dev(ui, 4), x = l->x + pad + ui_dev(ui, UI_INDENT) * row->indent + ui_dev(ui, 3);
+                int size = ui_dev(ui, 4), x = l->x + (l->tree ? 0 : pad) + ui_dev(ui, UI_INDENT) * row->indent + ui_dev(ui, 3);
                 ui_chevron_turn(ui, ui_mirror(x, 2 * size + 1, l->x, l->w) + size, y + height / 2, size, quiet,
                                 row->expander == UI_ROW_EXPANDER_OPEN ? UI_ONE : 0, ui_rtl());
         }
@@ -23691,8 +23694,8 @@ static fn ui_list_cells(struct ui address_to ui, const struct ui_list address_to
 // Whether a press at px (device pixels) on a tree's row of this indent is on its expander's chevron (the room before its label).
 static b32 ui_list_tree_chevron_at(const struct ui address_to ui, const struct ui_list address_to l, int indent, int px)
 {
-        int x = ui_point(px, l->x, l->w) - l->x - ui_dev(ui, UI_INSET) - ui_dev(ui, UI_INDENT) * indent;
-        return x >= -ui_dev(ui, 4) && x < ui_dev(ui, UI_INDENT);
+        int x = ui_point(px, l->x, l->w) - l->x - (l->tree ? 0 : ui_dev(ui, UI_INSET)) - ui_dev(ui, UI_INDENT) * indent;
+        return l->tree ? x >= -ui_dev(ui, 2) && x < ui_dev(ui, UI_INSET) : x >= -ui_dev(ui, 4) && x < ui_dev(ui, UI_INDENT);
 }
 
 #define UI_COLUMNS_MIN_L(c, k) ((k) == (c)->count - 1 && (c)->trailing_min > UI_COLUMNS_LEAST ? (c)->trailing_min : UI_COLUMNS_LEAST)
