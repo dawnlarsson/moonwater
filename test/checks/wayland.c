@@ -9204,6 +9204,36 @@ static void fake_sync_signal(void *context, long handle, unsigned long long poin
         fake_sync.last_rel = point;
 }
 
+static void test_token_expiry(void)
+{
+        struct session s;
+        struct wlc *c;
+        unsigned long act, tok;
+        long i;
+
+        /* hostile: 100 activation tokens made and never committed or destroyed. Eleven seconds on, they have expired, so 50 more reuse their
+           slots: the table holds 100, not 150 (an uncommitted token used to stay live for ever). */
+        wayland_stop();
+        memset(&fake, 0, sizeof fake);
+        wayland_start(&fake_host);
+        session_open(&s);
+        c = s.c;
+        act = wl_global(c, s.registry, WLI_xdg_activation_v1, 1);
+        for (i = 0; i < 100; i++)
+        {
+                tok = wlc_id(c, WLI_xdg_activation_token_v1, 1);
+                wlc_send(c, act, WLQ_xdg_activation_v1_get_activation_token, tok);
+        }
+        fake.now += 11000;
+        for (i = 0; i < 50; i++)
+        {
+                tok = wlc_id(c, WLI_xdg_activation_token_v1, 1);
+                wlc_send(c, act, WLQ_xdg_activation_v1_get_activation_token, tok);
+        }
+        wlc_pump(c);
+        WLCHECK(c->errors == 0 && wayland.tokens == 100, "uncommitted activation tokens expire and their slots are reused (%ld tokens)", wayland.tokens);
+}
+
 static void test_mime_bytes_cap(void)
 {
         struct session s;
@@ -9778,6 +9808,7 @@ int main(int argc, char **argv)
         test_dmabuf();
         test_stall_dmabuf();
         test_dmabuf_feedbacks();
+        test_token_expiry();
         test_mime_bytes_cap();
         test_callback_queue_cap();
         test_subsurface_depth();

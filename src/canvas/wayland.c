@@ -5277,7 +5277,8 @@ static int wayland_token_free(void)
         long now = wayland_now(), free_at = -1;
         for (long at = 0; at < wayland.tokens; at++)
         {
-                if (wayland.token[at].live && wayland.token[at].committed && now - wayland.token[at].when >= WAYLAND_TOKEN_MS)
+                /* a token expires WAYLAND_TOKEN_MS after it was made, committed or not: an uncommitted one never did, and grew the table */
+                if (wayland.token[at].live && now - wayland.token[at].when >= WAYLAND_TOKEN_MS)
                         wayland.token[at].live = 0;
                 if (!wayland.token[at].live && free_at < 0) free_at = at;
         }
@@ -5313,7 +5314,7 @@ static int wayland_activation_request(struct wayland_client *c, struct wayland_o
                 if (op == WLQ_xdg_activation_v1_get_activation_token)
                 {
                         if ((at = wayland_token_free()) < 0) return wayland_fail(c, self->id, WAYLAND_NO_MEMORY, "no memory for an activation token");
-                        wayland.token[at] = (struct wayland_token){.live = 1, .client = (int)c->slot, .gen = wayland.token[at].gen};
+                        wayland.token[at] = (struct wayland_token){.live = 1, .client = (int)c->slot, .gen = wayland.token[at].gen, .when = wayland_now()};
                         c->objects[a[0].slot].link = at, c->objects[a[0].slot].aux = wayland.token[at].gen;
                         return WAYLAND_OK;
                 }
