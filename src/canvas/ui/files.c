@@ -1,6 +1,6 @@
 /*
         The file browser (src/canvas/ui/files.c): desktop view on files_model.c.
-        Two-pane layout (sidebar folder/drive tree + breadcrumb/path band + virtual details/icons/list rows + foot/find bar),
+        Two-pane layout (sidebar folder/drive tree + path band (the kit's token field) + virtual details/icons/list rows + foot/find bar),
         drag-and-drop, Tab carrying, trash bin & undo/redo deeds, context menus, properties sheet, and git worktree marks.
         All disk names go through ui_label_foreign; all UI copy goes through WORDS(...)/LANGUAGE_*.
         Starts: files [PATH] [-f FONT] [-b BOLD].
@@ -21,7 +21,6 @@
 #define FILES_SPRING_NODE 0x10000
 #define FILES_EDGE 28
 #define FILES_EDGE_STEP 14
-#define FILES_PART_PAD 6
 #define FILES_ASK_NAMES 3
 #define FILES_BAND 32
 #define FILES_ROW UI_ROW_DENSE
@@ -37,9 +36,9 @@
 enum { FILES_KEY_1 = 2, FILES_KEY_R = 19, FILES_KEY_Y = 21, FILES_KEY_A = 30, FILES_KEY_F = 33, FILES_KEY_H = 35,
        FILES_KEY_L = 38, FILES_KEY_Z = 44, FILES_KEY_X = 45, FILES_KEY_C = 46, FILES_KEY_V = 47, FILES_KEY_N = 49,
        FILES_KEY_F2 = 60, FILES_KEY_F5 = 63, FILES_KEY_F6 = 64, FILES_KEY_F10 = 68, FILES_KEY_MENU = 127 };
-enum { FILES_EDIT_PATH = 1, FILES_EDIT_NAME = 2, FILES_EDIT_PART = 3 };
+enum { FILES_EDIT_PATH = 1, FILES_EDIT_NAME = 2 };
 enum { FILES_VIEW_DETAILS, FILES_VIEW_ICONS, FILES_VIEW_LIST };
-enum { FILES_FOCUS_ROWS, FILES_FOCUS_CRUMBS, FILES_FOCUS_TREE, FILES_FOCUS_FIND };
+enum { FILES_FOCUS_ROWS, FILES_FOCUS_TREE, FILES_FOCUS_FIND };
 enum { FILES_DEED_MOVE, FILES_DEED_COPY, FILES_DEED_RENAME, FILES_DEED_BIN };
 enum { FILES_MENU_OPEN = 16, FILES_MENU_EDITOR, FILES_MENU_TERMINAL, FILES_MENU_CUT, FILES_MENU_COPY, FILES_MENU_PASTE,
        FILES_MENU_RENAME, FILES_MENU_DELETE, FILES_MENU_NEW_FOLDER, FILES_MENU_PROPERTIES, FILES_MENU_HIDDEN, FILES_MENU_ALL,
@@ -91,8 +90,8 @@ struct files_big
         p32 peer_count;
         struct files_rpc rpcs[FILES_RPCS_MOST];
         struct files_remote_read remote_read;
-        char peer_crumb[WATERLINK_NAME_MAX * 3 + 4];
-        char crumb_words[FILES_TRAIL][FILES_NAME * 3 + 4], note[256], status[192], sheet[FILES_SHEET_LINES][FILES_NAME * 3 + 64];
+        struct ui_tokens path;     // the path band: the kit's token field, a chip a folder of the trail
+        char note[256], status[192], sheet[FILES_SHEET_LINES][FILES_NAME * 3 + 64];
         p8 band_base[FILES_MOST / 8], git_state[FILES_MOST];
 };
 
@@ -103,17 +102,16 @@ static struct
         struct window_row own;
         struct ui ui;
         struct files_big address_to big;
-        int width, height, shown, crumb_hover, editing, part, focus, crumb_focus, crumb_clicked, crumb_from, view;
+        int width, height, shown, editing, focus, view;
         int carry_px, carry_py, deed_count, deed_done, drop_row, drop_node, spring, sheet_x, sheet_y;
         unsigned int ground, said, carry_kind;
         b32 focused, dirty, reseat, armed, git, moving, tree_reseat, pasting, finding;
         b32 drag_chosen, carrying, cut_dim, band_add, carry_press, drop_over, sheet, sheet_folder, measuring;
         p32 seen, naming, armed_at, drag_place, carry_count, band_base_count, tree_at, tree_shown;
-        b64 next_look, next_show, crumb_clicked_at, carry_at, flash_at, spring_at, next_progress, typed_at;
+        b64 next_look, next_show, carry_at, flash_at, spring_at, next_progress, typed_at;
         string_address start;
-        struct ui_rect crumbs_box, head_box, side_box;
+        struct ui_rect path_box, head_box, side_box;
         struct files_trail trail;
-        struct ui_trail crumbs;
         struct ui_text field, finder;
         struct ui_control path, finder_field;
         struct ui_popup menu;
@@ -373,7 +371,7 @@ static fn files_status_text(void)
                 language_format(into, room, m->shown.cut ? WORDS(files_count_cut) : m->shown.count == 1 ? WORDS(files_count_one) : WORDS(files_count), (int)m->shown.count);
 }
 
-/* ---- fields, crumbs, layout ---- */
+/* ---- fields, the path band, layout ---- */
 
 static struct ui_text address_to files_field_init(struct ui_text address_to f, positive most)
 {
@@ -382,62 +380,29 @@ static struct ui_text address_to files_field_init(struct ui_text address_to f, p
         return f;
 }
 
-static inline struct ui_text address_to files_field(void) { return files_field_init(&files.field, FILES_PATH - 1); }
+static inline struct ui_text address_to files_field(void) { return files_field_init(&files.field, FILES_NAME - 1); }
 static inline positive files_field_read(struct ui_text address_to t, p8 address_to into, positive room) { positive n = ui_text_string(t, into, room); return into[n < room ? n : room - 1] = end, n; }
-static inline int files_crumb_at(int x, int y) { return files.editing ? -1 : ui_trail_hit(&files.ui, &files.crumbs, x, y); }
 
-static fn files_crumbs_lay(void)
+// The path band at rest: its text is the trail (the folders deeper than the one shown stay as chips after it), the caret at the end of
+// the folder shown, so that folder is the field's own text and every other is a chip. Set only when it differs.
+static fn files_path_sync(void)
 {
-        struct ui_trail address_to t = &files.crumbs;
-        const struct files_trail address_to trail = &files.trail;
-        const struct files_model address_to m = &files.big->model;
-        if (files_model_is_remote(m))
-        {
-                ui_label_foreign(files.big->peer_crumb, sizeof(files.big->peer_crumb), m->peer, string_length((string_address)m->peer));
-                t->label[0] = files.big->peer_crumb;
-                t->count = trail->count > 0 ? trail->count : 1;
-                t->current = trail->current < t->count ? trail->current : t->count - 1;
-                t->separator = "/", t->rooted = false;
-                for (int k = 1; k < trail->count; k++)
-                        ui_label_foreign(files.big->crumb_words[k], sizeof(files.big->crumb_words[k]), trail->path + trail->from[k], (positive)(trail->to[k] - trail->from[k])),
-                            t->label[k] = files.big->crumb_words[k];
-        }
-        else
-        {
-                t->count = trail->count, t->current = trail->current;
-                t->separator = "/", t->rooted = trail->count && trail->from[0] == 0 && trail->to[0] == 1;
-                for (int k = 0; k < trail->count; k++)
-                        ui_label_foreign(files.big->crumb_words[k], sizeof(files.big->crumb_words[k]), trail->path + trail->from[k], (positive)(trail->to[k] - trail->from[k])),
-                            t->label[k] = files.big->crumb_words[k];
-        }
-        for (int k = 0; k < UI_TRAIL_MOST; k++)
-                t->lost[k] = k < trail->count && trail->lost[k];
-        t->x = files.crumbs_box.x, t->y = files.crumbs_box.y, t->w = files.crumbs_box.w, t->h = files.crumbs_box.h;
-        t->hover = files.crumb_hover, t->keys = files.focus == FILES_FOCUS_CRUMBS && files.focused && !files.editing;
-        t->focus = files.crumb_focus, t->edit = files.part, t->edit_wide = 0;
-        if (files.editing == FILES_EDIT_PART)
-        {
-                static p8 typed[FILES_NAME * 2];
-                static char shown[FILES_NAME * 6 + 4];
-                positive len = ui_text_string(files_field(), typed, sizeof(typed));
-                int wide, lo = ui_dev(&files.ui, 56);
-                ui_label_foreign(shown, sizeof(shown), typed, len);
-                wide = ui_kit_measure(&files.ui, (string_address)shown, UI_BODY_LARGE) + ui_dev(&files.ui, 2 * FILES_PART_PAD + 8);
-                t->edit_wide = wide < lo ? lo : wide > t->w / 2 ? t->w / 2 : wide, t->current = files.part;
-        }
-        ui_trail_layout(&files.ui, t), t->current = trail->current;
-}
-
-static fn files_crumbs_draw(void)
-{
-        struct ui_trail address_to t = &files.crumbs;
-        t->hover = files.crumb_hover, ui_trail_draw(&files.ui, t);
-        if (files.editing == FILES_EDIT_PART && t->edit_wide && t->edit >= t->first && t->edit <= t->last)
-        {
-                int x = ui_trail_flip(t, t->at[t->edit], t->wide[t->edit]), pad = ui_dev(&files.ui, FILES_PART_PAD);
-                ui_text_field_draw(&files.ui, &files.path, x + pad, x + t->wide[t->edit] - pad, t->y, t->y + t->h);
-                files_field()->well_left = x, files_field()->well_right = x + t->wide[t->edit];
-        }
+        struct ui_tokens address_to k = &files.big->path;
+        const struct files_trail address_to t = &files.trail;
+        const p8 address_to want = t->count ? t->path : files.big->model.path;
+        positive length = string_length((string_address)want), caret = t->count ? t->to[t->current] : length;
+        static p8 had[UI_TOKENS_TEXT];
+        const struct doc_selection address_to sel;
+        if (!k->text.doc.selections || files.editing == FILES_EDIT_PATH)
+                return;
+        if (length >= UI_TOKENS_TEXT)
+                length = UI_TOKENS_TEXT - 1, caret = caret < length ? caret : length;
+        if (doc_length(&k->text.doc) != length || doc_read(&k->text.doc, 0, had, length) != length || memory_compare(had, want, length))
+                ui_text_set(&k->text, want, length);
+        sel = &k->text.doc.selections[k->text.doc.primary];
+        if (k->text.doc.selection_count != 1 || sel->active != caret || sel->anchor != caret)
+                doc_select_set(&k->text.doc, caret, caret);
+        k->invalid = false;
 }
 
 static fn files_layout(void)
@@ -453,7 +418,7 @@ static fn files_layout(void)
         files.big->tree_list.total = (int)files.big->tree.count;
         files.big->tree_list.focus = files.focus == FILES_FOCUS_TREE ? (int)files.tree_at : files.tree_shown != FILES_NO ? (int)files.tree_shown : -1;
         files_status_text();
-        files.path.focused = files.editing && files.focused;
+        files.path.focused = files.editing == FILES_EDIT_NAME && files.focused;
         files.finder_field.focused = files.finding && files.focus == FILES_FOCUS_FIND && files.focused;
         files.finder_field.items[0] = WORDS(files_find_hint);
         files.path.items[0] = files.editing == FILES_EDIT_NAME ? WORDS(files_rename_hint) : null;
@@ -473,10 +438,10 @@ static fn files_layout(void)
                         {
                                 for (int k = 0; k < 3; k++)
                                         ui_button(nav[k], .class = "ghost", .on = files_act, .arg = k);
-                                if (files.editing && files.editing != FILES_EDIT_PART)
+                                if (files.editing == FILES_EDIT_NAME)
                                         ui_control(&files.path, .grow = 1, .h = FILES_BAND);
                                 else
-                                        ui_host(&files.crumbs_box, .grow = 1, .h = FILES_BAND);
+                                        ui_host(&files.path_box, .grow = 1, .h = FILES_BAND);
                         }
                         ui_col(.class = "rows", .grow = 1)
                         {
@@ -497,8 +462,7 @@ static fn files_layout(void)
         ui_columns_layout(ui, &files.columns, l->x, files.head_box.y, l->w);
         if (files.tree_reseat && files.big->tree_list.h > 0)
                 files.big->tree_list.focus = (int)files.tree_shown, ui_list_reveal(ui, &files.big->tree_list), files.tree_reseat = false;
-        if (!files.editing || files.editing == FILES_EDIT_PART)
-                files_crumbs_lay();
+        files_path_sync();
 }
 
 static fn files_show_cursor(void) { if (files.big->model.cursor != FILES_NO) files_layout(), ui_list_reveal(&files.ui, &files.big->list), files.dirty = true; }
@@ -653,24 +617,21 @@ static fn files_undo(b32 again)
 
 /* ---- user actions: edit, delete, new folder, bin ---- */
 
+// Editing begun (FILES_EDIT_NAME: the cursor's name; FILES_EDIT_PATH: the path band, the folder shown its text, all of it selected) or ended (0).
 static fn files_edit(int how)
 {
         const struct files_model address_to m = &files.big->model;
         const struct files_entry address_to e = files_model_entry(m, m->cursor);
+        struct ui_tokens address_to k = &files.big->path;
         if (how == FILES_EDIT_NAME && !e)
                 return;
-        if (how == FILES_EDIT_PART && (files.part <= 0 || files.part >= files.trail.count))
-                how = FILES_EDIT_PATH;
-        files.editing = how, files_field()->most = how == FILES_EDIT_NAME ? FILES_NAME - 1 : FILES_PATH - 1;
-        if (how == FILES_EDIT_PATH)
-                ui_text_set(files_field(), m->path, string_length((string_address)m->path));
-        else if (how == FILES_EDIT_NAME)
+        files.editing = how;
+        if (how == FILES_EDIT_NAME)
                 ui_text_set(files_field(), files_model_name(m, e), e->length), files.naming = m->cursor;
-        else if (how == FILES_EDIT_PART)
-                ui_text_set(files_field(), files.trail.path + files.trail.from[files.part], (positive)(files.trail.to[files.part] - files.trail.from[files.part]));
-        if (how == FILES_EDIT_PATH || how == FILES_EDIT_PART)
-                doc_select_set(&files_field()->doc, 0, doc_length(&files_field()->doc));
-        files.focus = FILES_FOCUS_ROWS, files.crumb_hover = -1, files.armed = false, files_clear_msg(), files.dirty = true;
+        if (how == FILES_EDIT_PATH)
+                ui_text_set(&k->text, m->path, string_length((string_address)m->path));
+        ui_tokens_focus(k, how == FILES_EDIT_PATH, true), k->invalid = false;
+        files.focus = FILES_FOCUS_ROWS, files.armed = false, files_clear_msg(), files.dirty = true;
 }
 
 static p32 files_ask_names(char address_to into, positive room)
@@ -1151,7 +1112,7 @@ static b32 files_drag_event(const struct window_event address_to event)
         return files.dirty = true, true;
 }
 
-/* ---- navigation, crumbs, completion, band ---- */
+/* ---- navigation, the trail, completion, band ---- */
 
 static fn files_lost_say(int which, unsigned int said)
 {
@@ -1174,72 +1135,36 @@ static b32 files_try_go(const p8 address_to path)
 
 static fn files_edit_go(void)
 {
-        static p8 typed[FILES_PATH], path[FILES_PATH], before[FILES_PATH];
+        static p8 typed[FILES_NAME], path[FILES_PATH], before[FILES_PATH];
         struct files_model address_to m = &files.big->model;
-        positive length = files_field_read(files_field(), typed, sizeof(typed));
-        if (files.editing == FILES_EDIT_NAME)
+        const struct files_entry address_to e = files_model_entry(m, files.naming);
+        int did;
+        (void)files_field_read(files_field(), typed, sizeof(typed));
+        before[0] = 0;
+        if (e)
+                files_path_join(before, FILES_PATH, m->path, files_model_name(m, e)), files_path_join(path, FILES_PATH, m->path, typed);
+        if ((did = files_model_rename(m, files.naming, typed)) != FILES_DID)
         {
-                const struct files_entry address_to e = files_model_entry(m, files.naming);
-                int did;
-                before[0] = 0;
-                if (e)
-                        files_path_join(before, FILES_PATH, m->path, files_model_name(m, e)), files_path_join(path, FILES_PATH, m->path, typed);
-                if ((did = files_model_rename(m, files.naming, typed)) != FILES_DID)
-                {
-                        files.said = files_did_said(did), files.dirty = true;
-                        return;
-                }
-                if (before[0])
-                {
-                        struct files_deed address_to d = files_deed_new(FILES_DEED_RENAME);
-                        files_deed_add(d, before, path), files_deed_keep(d);
-                }
-                files_edit(0), files_model_reload(m), string_copy_bounded(m->came, typed, FILES_NAME);
+                files.said = files_did_said(did), files.dirty = true;
                 return;
         }
-        if (files.editing == FILES_EDIT_PART)
+        if (before[0])
         {
-                int why;
-                string_copy_bounded(before, m->path, FILES_PATH);
-                if (string_length(typed) != length || !files_trail_spell(&files.trail, files.part, typed, path) ||
-                    (why = files_trail_resolve(m, &files.trail, path)) == FILES_NONE)
-                {
-                        files.said = LANGUAGE_files_name_bad, files.dirty = true;
-                        return;
-                }
-                files_edit(0);
-                if (!string_equals((string_address)before, (string_address)m->path))
-                        files_moved();
-                else
-                        files_keep_trim(m, &files.trail);
-                if (why != FILES_READY)
-                        files_lost_say(files.trail.current + 1, files_state_said(why));
-                files.dirty = true;
-                return;
+                struct files_deed address_to d = files_deed_new(FILES_DEED_RENAME);
+                files_deed_add(d, before, path), files_deed_keep(d);
         }
-        if (files_try_go(typed))
-                files_edit(0), files_moved();
+        files_edit(0), files_model_reload(m), string_copy_bounded(m->came, typed, FILES_NAME);
 }
 
+// Tab in the path band: the name after the last stroke finished from the folders listed, when what is before it is the folder shown.
 static fn files_complete(void)
 {
         static p8 typed[FILES_PATH], aux[FILES_PATH], name[FILES_NAME];
+        struct ui_text address_to t = &files.big->path.text;
         const struct files_model address_to m = &files.big->model;
         positive length, cut, folder;
         p32 found;
-        (void)files_field_read(files_field(), typed, sizeof(typed)), length = string_length(typed);
-        if (files.editing == FILES_EDIT_PART)
-        {
-                for (positive at = 0; at < length; at++)
-                        if (typed[at] == '/')
-                                return;
-                if (files.part <= 0 || length >= FILES_NAME)
-                        return;
-                files_trail_path(&files.trail, files.part - 1, aux);
-                if (files_model_complete_in(m, aux, typed, length, name, sizeof(name)) && string_length(name) != length)
-                        ui_text_set(files_field(), name, string_length(name)), files.dirty = true;
-                return;
-        }
+        (void)files_field_read(t, typed, sizeof(typed)), length = string_length(typed);
         for (cut = length; cut > 0 && typed[cut - 1] != '/'; cut--)
                 ;
         folder = cut > 1 ? cut - 1 : cut;
@@ -1250,7 +1175,7 @@ static fn files_complete(void)
         memory_copy(aux, typed, cut), memory_copy(aux + cut, name, string_length(name) + 1);
         if (found == 1)
                 string_append_bounded(aux, (string_address) "/", sizeof(aux));
-        ui_text_set(files_field(), aux, string_length(aux)), files.dirty = true;
+        ui_text_set(t, aux, string_length(aux)), files.dirty = true;
 }
 
 static fn files_crumb_go(int which)
@@ -1290,52 +1215,113 @@ static fn files_crumb_go(int which)
         }
 }
 
-static inline fn files_part_edit(int which, b32 pressed)
-{
-        if (pressed && files.trail.current == which && files.crumb_from != which && files_model_back(&files.big->model, false))
-                files_moved();
-        files.part = which, files_edit(FILES_EDIT_PART);
-}
-
-static b32 files_crumb_key(const struct window_event address_to event)
-{
-        int key = (int)event->a, to;
-        if ((event->flags & WINDOW_KEY_CONTROL) && key == FILES_KEY_C)
-        {
-                positive len = string_length(files.trail.path), room = 0;
-                p8 address_to text = null;
-                if (len && array_store_reserve(text, room, 0, len + 1, 256))
-                        memory_copy(text, files.trail.path, len), ui_clip_offer(&files.own, WINDOWS_CLIP_CLIPBOARD, text, room, len);
-                return true;
-        }
-        if (event->flags & (WINDOW_KEY_CONTROL | WINDOW_KEY_ALT))
-                return false;
-        switch (key)
-        {
-        case UI_KEY_LEFT:
-        case UI_KEY_RIGHT: to = files.crumb_focus + ui_arrow(key); files.crumb_focus = to < 0 ? 0 : to >= files.trail.count ? files.trail.count - 1 : to; break;
-        case UI_KEY_HOME: files.crumb_focus = 0; break;
-        case UI_KEY_END: files.crumb_focus = files.trail.count - 1; break;
-        case UI_KEY_ENTER:
-        case UI_KEY_ENTER_PAD:
-                if (!(event->flags & WINDOW_KEY_REPEAT))
-                        to = files.crumb_focus, files_crumb_go(to), files.focus = FILES_FOCUS_CRUMBS, files.crumb_focus = to;
-                break;
-        case FILES_KEY_F2: files_part_edit(files.crumb_focus, false); break;
-        case UI_KEY_ESCAPE:
-        case UI_KEY_DOWN: files.focus = FILES_FOCUS_ROWS; break;
-        default: return false;
-        }
-        return files.dirty = true, true;
-}
-
 static fn files_moved(void)
 {
         struct files_model address_to m = &files.big->model;
-        files.editing = 0, files.crumb_hover = -1, files.armed = false, files_clear_msg();
+        if (files.editing == FILES_EDIT_PATH)
+                ui_tokens_focus(&files.big->path, false, false);
+        files.editing = 0, files.armed = false, files_clear_msg();
         files_trail_note(&files.trail, m->path, m->handle >= 0 ? &m->folder : null);
-        files_keep_trim(m, &files.trail), files.crumb_focus = files.trail.current, files_tree_follow();
+        files_keep_trim(m, &files.trail), files_tree_follow();
         files.big->list.last_clicked = 0, files.reseat = true, files.next_look = (b64)ui_kit.now + (m->restored ? 0 : FILES_LOOK_NS), files.dirty = true;
+}
+
+// A chip of the path band pressed, or picked from its … menu: the folder its prefix names. A folder of the trail is gone to as the trail
+// goes (a deeper one only while it is the folder it was); any other, as a typed path is.
+static fn files_path_pressed(void)
+{
+        static p8 to[FILES_PATH];
+        struct ui_tokens address_to k = &files.big->path;
+        struct files_model address_to m = &files.big->model;
+        positive length = k->prefix_length < FILES_PATH ? k->prefix_length : FILES_PATH - 1;
+        int crumb;
+        memory_copy(to, k->prefix, length), to[length] = end;
+        crumb = files_trail_index(&files.trail, to, length);
+        if (files.editing == FILES_EDIT_PATH)
+                files_edit(0);
+        if (crumb >= 0)
+                files_crumb_go(crumb);
+        else if (files_model_is_remote(m) ? files_model_go_remote(m, m->peer, (string_address)to, true) : files_try_go(to))
+        {
+                files_moved();
+                if (files_model_is_remote(m))
+                        files_remote_nav();
+        }
+        files.dirty = true;
+}
+
+// Enter in the path band: the path typed is gone to (on the peer, when the folder shown is a peer's), or the band keeps the keys and
+// its text and draws its error outline, the reason said.
+static fn files_path_submit(void)
+{
+        static p8 typed[FILES_PATH];
+        struct ui_tokens address_to k = &files.big->path;
+        struct files_model address_to m = &files.big->model;
+        int came;
+        (void)files_field_read(&k->text, typed, sizeof(typed));
+        if (files_model_is_remote(m))
+        {
+                if (files_model_go_remote(m, m->peer, (string_address)typed, true))
+                        files_moved(), files_remote_nav();
+                else
+                        k->invalid = true, files.said = LANGUAGE_files_not_folder;
+        }
+        else if ((came = files_model_try(m, (string_address)typed)) == FILES_READING)
+                files_moved();
+        else
+                k->invalid = true, files.said = files_state_said(came);
+        files.dirty = true;
+}
+
+static inline b32 files_path_chip(int x, int y)
+{
+        const struct ui_tokens address_to k = &files.big->path;
+        return files.editing != FILES_EDIT_NAME && (ui_tokens_chip_at(k, x, y) >= 0 || (k->overflow > 0 && x >= k->overflow_left && x < k->overflow_right && y >= k->top && y < k->bottom));
+}
+
+// The path band's events. A press on a chip goes to its folder; a press on its text (or past its chips) gives it the keys, the folder shown
+// its text. With the keys the events are the kit's token field's: Enter goes, Escape (or a press outside it) puts the trail back, Tab
+// finishes a name, F6 goes on to the sidebar; Control+L gives it the keys with all of it selected.
+static b32 files_path_event(const struct window_event address_to event, b32 down)
+{
+        struct ui address_to ui = &files.ui;
+        struct ui_tokens address_to k = &files.big->path;
+        int x = event->type == WINDOW_EVENT_MOTION ? (int)event->a : ui_kit.pointer_x, y = event->type == WINDOW_EVENT_MOTION ? (int)event->b : ui_kit.pointer_y;
+        b32 editing = files.editing == FILES_EDIT_PATH, press = event->type == WINDOW_EVENT_BUTTON && down;
+        b32 inside = files.editing != FILES_EDIT_NAME && files_in_rect(x, y, files.path_box.x, files.path_box.y, files.path_box.w, files.path_box.h);
+        p32 asks;
+        if (event->type == WINDOW_EVENT_KEY)
+        {
+                p32 mods = event->flags & (WINDOW_KEY_CONTROL | WINDOW_KEY_ALT | WINDOW_KEY_SHIFT);
+                if (!editing)
+                        return down && mods == WINDOW_KEY_CONTROL && event->a == FILES_KEY_L ? (files_edit(FILES_EDIT_PATH), true) : false;
+                if (down && !mods && event->a == UI_KEY_TAB)
+                        return files_complete(), true;
+                if (down && !mods && event->a == FILES_KEY_F6)
+                        return files_edit(0), files.focus = FILES_FOCUS_TREE, files.tree_at = files.tree_shown != FILES_NO ? files.tree_shown : 0, true;
+        }
+        else if (press && editing && !inside)
+                return files_edit(0), false;
+        if (!editing && !(press && inside && event->a == UI_POINTER_LEFT))
+                return false;
+        if (!editing && !files_path_chip(x, y))
+        {
+                files_edit(FILES_EDIT_PATH);
+                doc_select_set(&k->text.doc, doc_length(&k->text.doc), doc_length(&k->text.doc));
+                if (!ui_text_reach(ui, &k->text, x, y))
+                        return true;
+        }
+        asks = ui_tokens_event(ui, k, &files.menu, event, x, y);
+        if (asks & UI_TOKENS_PRESSED)
+                return files_path_pressed(), true;
+        if (asks & UI_TOKENS_SUBMIT)
+                return files_path_submit(), true;
+        if (asks & UI_TOKENS_CANCEL)
+                return files_edit(0), true;
+        if (asks & UI_TOKENS_CHANGED)
+                files.said = 0;
+        files.dirty |= asks != 0;
+        return asks != 0 || event->type == WINDOW_EVENT_KEY;
 }
 
 static fn files_open(p32 place)
@@ -2393,18 +2379,10 @@ static b32 files_key(const struct window_event address_to event)
         }
         if (alt && (key == UI_KEY_UP || key == UI_KEY_DOWN))
                 return files_crumb_go(files.trail.current + (key == UI_KEY_UP ? -1 : 1)), true;
-        if (files.focus == FILES_FOCUS_CRUMBS && files_crumb_key(event))
-                return true;
         if (files.focus == FILES_FOCUS_TREE && files_tree_key(event))
                 return true;
-        if ((key == UI_KEY_TAB || key == FILES_KEY_F6) && !shift && !control && !alt)
-        {
-                if (files.focus == FILES_FOCUS_CRUMBS)
-                        files.focus = FILES_FOCUS_TREE, files.tree_at = files.tree_shown != FILES_NO ? files.tree_shown : 0;
-                else
-                        files.focus = FILES_FOCUS_CRUMBS, files.crumb_focus = files.trail.current;
-                return files.dirty = true, true;
-        }
+        if (key == FILES_KEY_F6 && !shift && !control && !alt)
+                return files_edit(FILES_EDIT_PATH), true;
         for (int k = 0; k < FILES_COUNT(shortcuts); k++)
                 if (key == shortcuts[k].key && (event->flags & shortcuts[k].req) == shortcuts[k].req)
                         return files_menu_do(shortcuts[k].act), files.dirty = true, true;
@@ -2444,7 +2422,7 @@ static b32 files_field_event(const struct window_event address_to event, b32 dow
         struct ui address_to ui = &files.ui;
         struct files_model address_to m = &files.big->model;
         p32 asks;
-        if (files.editing)
+        if (files.editing == FILES_EDIT_NAME)
         {
                 asks = ui_field_send(ui, files_field(), &files.menu, event);
                 if (asks & UI_TEXT_SUBMIT)
@@ -2458,18 +2436,11 @@ static b32 files_field_event(const struct window_event address_to event, b32 dow
                 }
                 if (asks)
                         return files.said = 0, files.dirty = true, true;
-                if (event->type == WINDOW_EVENT_KEY)
-                {
-                        if (down && event->a == UI_KEY_TAB && !(event->flags & WINDOW_KEY_SHIFT) &&
-                            (files.editing == FILES_EDIT_PATH || files.editing == FILES_EDIT_PART))
-                                files_complete();
-                        return true;
-                }
-                return false;
+                return event->type == WINDOW_EVENT_KEY;
         }
-        if (event->type == WINDOW_EVENT_KEY && down && (event->flags & WINDOW_KEY_CONTROL) && event->a == FILES_KEY_L)
-                return files_edit(FILES_EDIT_PATH), true;
-        if (!files.finding || (files.focus != FILES_FOCUS_FIND && event->type != WINDOW_EVENT_BUTTON))
+        if (files_path_event(event, down))
+                return true;
+        if (files.editing || !files.finding || (files.focus != FILES_FOCUS_FIND && event->type != WINDOW_EVENT_BUTTON))
                 return false;
         if (event->type == WINDOW_EVENT_BUTTON && down &&
             files_in_rect(ui_kit.pointer_x, ui_kit.pointer_y, files.finder.well_left, files.finder.well_top,
@@ -2501,21 +2472,6 @@ static fn files_button_event(const struct window_event address_to event, b32 dow
         files.dirty = true;
         if (down && event->a != UI_POINTER_RIGHT)
                 files.armed = false, files.big->note[0] = 0;
-        if (down && event->a == UI_POINTER_LEFT && !files.editing &&
-            files_in_rect(ui_kit.pointer_x, ui_kit.pointer_y, files.crumbs_box.x, files.crumbs_box.y, files.crumbs_box.w, files.crumbs_box.h))
-        {
-                int crumb = files_crumb_at(ui_kit.pointer_x, ui_kit.pointer_y);
-                files.focus = FILES_FOCUS_ROWS;
-                if (crumb >= 0 && crumb == files.crumb_clicked && (b64)ui_kit.now - files.crumb_clicked_at <= ui_click_ns)
-                        files.crumb_clicked = -1, files_part_edit(crumb, true);
-                else if (crumb >= 0)
-                        files.crumb_from = files.trail.current, files.crumb_clicked = crumb, files.crumb_clicked_at = (b64)ui_kit.now, files_crumb_go(crumb);
-                else
-                        files_edit(FILES_EDIT_PATH);
-                return;
-        }
-        if (down)
-                files.focus = files.focus == FILES_FOCUS_CRUMBS ? FILES_FOCUS_ROWS : files.focus, files.crumb_clicked = -1;
         if (event->a == UI_POINTER_LEFT && down && files.carrying)
         {
                 files.carry_press = true, files.carry_px = ui_kit.pointer_x, files.carry_py = ui_kit.pointer_y;
@@ -2644,7 +2600,7 @@ static b32 files_event(const struct window_event address_to event)
                         files_band_apply();
                 if (l->drag_began)
                         files_drag_start((p32)l->drag_row);
-                if ((files.crumb_hover = files_crumb_at(event->a, event->b)) >= 0)
+                if (files_path_chip((int)event->a, (int)event->b))
                         ui_kit_shape = WINDOW_POINTER_HAND;
                 files.dirty = true;
                 break;
@@ -2680,6 +2636,14 @@ static fn files_status_pill_draw(struct ui address_to ui, const struct ui_list a
         ui_kit_text(ui, px + pad_x, baseline, text, UI_LABEL_MEDIUM, ui_text_colour(ui, UI_ON_SURFACE_VARIANT), 0);
 }
 
+// The band across the top, over the view's drawing: the path field (the rename field, while there is one, is a control of the view's).
+static fn files_bar_draw(struct ui address_to ui)
+{
+        const struct ui_rect address_to b = &files.path_box;
+        if (files.editing != FILES_EDIT_NAME)
+                ui_tokens_draw(ui, &files.big->path, b->x, b->y, b->x + b->w, b->y + b->h);
+}
+
 static fn files_draw(unsigned int address_to pixels)
 {
         struct ui address_to ui = &files.ui;
@@ -2692,11 +2656,10 @@ static fn files_draw(unsigned int address_to pixels)
         ui_view_draw(ui, &files.big->view, files.focused);
         if (files.view == FILES_VIEW_DETAILS)
                 ui_columns_draw(ui, &files.columns);
-        if (!files.editing || files.editing == FILES_EDIT_PART)
-                files_crumbs_draw();
+        files_bar_draw(ui);
         files_status_pill_draw(ui, l);
         if (files.editing)
-                ui_text_overlay(ui, files_field());
+                ui_text_overlay(ui, files.editing == FILES_EDIT_PATH ? &files.big->path.text : files_field());
         if (files.finding)
                 ui_text_overlay(ui, &files.finder);
         files_carry_draw();
@@ -2706,7 +2669,7 @@ static fn files_draw(unsigned int address_to pixels)
 static long files_tick(long timeout, long address_to other)
 {
         struct files_model address_to m = &files.big->model;
-        struct ui_text address_to active = files.editing ? files_field() : files.finding && files.focus == FILES_FOCUS_FIND ? &files.finder : null;
+        struct ui_text address_to active = files.editing == FILES_EDIT_PATH ? &files.big->path.text : files.editing ? files_field() : files.finding && files.focus == FILES_FOCUS_FIND ? &files.finder : null;
         b64 now = (b64)ui_kit.now;
         files_remote_tick(&timeout, other);
         if (m->state == FILES_READY && m->listed != files.git_key)
@@ -2823,24 +2786,35 @@ static long files_tick(long timeout, long address_to other)
         return timeout == 0 ? 1 : timeout;
 }
 
-static int files_open_window(void)
+// The window's parts that need no window of the compositor's: the lists, the columns, the fields and the path band (the browser's check rows
+// open them so too).
+static b32 files_parts_open(void)
 {
-        struct ui_list address_to lists[2];
-        if (!(files.big = ui_app_map(&files_app, sizeof(struct files_big))))
-                return 1;
-        if (!files_model_open(&files.big->model))
-                return compositor_kmsg((string_address) "files: no memory, pid ", (positive)compositor_call(syscall(getpid), 0, 0, 0, 0, 0, 0), (string_address) ""), 1;
-        lists[0] = &files.big->list, lists[1] = &files.big->tree_list;
+        struct ui_list address_to lists[2] = {&files.big->list, &files.big->tree_list};
         for (int k = 0; k < 2; k++)
                 lists[k]->virtual = lists[k]->beside = true, lists[k]->row_h = FILES_ROW, lists[k]->damaged = files_damaged, lists[k]->hover = lists[k]->down = -1;
         files.big->list.describe = files_describe, files.big->list.selected = files_row_selected;
         files.big->tree_list.tree = true, files.big->tree_list.describe = files_tree_describe;
         files.path.kind = files.finder_field.kind = UI_INPUT, files.path.variant = files.finder_field.variant = UI_FIELD_BARE;
         files.path.edit = files_field(), files.finder_field.edit = &files.finder;
-        files.crumb_hover = files.crumb_clicked = files.drop_row = files.drop_node = files.spring = -1;
+        files.drop_row = files.drop_node = files.spring = -1;
         files.columns.count = 4, files.columns.at_end[1] = true, files.columns.sorted = 0, files.columns.hover = files.columns.held = -1;
         files.columns.width[1] = 90, files.columns.width[2] = 110, files.columns.width[3] = 140;
+        if (!ui_tokens_open(&files.big->path, &files.own, "", '/'))
+                return false;
+        ui_tokens_focus(&files.big->path, false, false);
+        return true;
+}
+
+static int files_open_window(void)
+{
+        if (!(files.big = ui_app_map(&files_app, sizeof(struct files_big))))
+                return 1;
+        if (!files_model_open(&files.big->model))
+                return compositor_kmsg((string_address) "files: no memory, pid ", (positive)compositor_call(syscall(getpid), 0, 0, 0, 0, 0, 0), (string_address) ""), 1;
         files_app.view = &files.big->view, files_move_end(&files.big->move);
+        if (!files_parts_open())
+                return 1;
         if (!files_tree_begin(&files.big->tree))
                 return 1;
         files_tree_populate_live(&files.big->tree, (const p8 address_to)getenv((string_address) "HOME"));
@@ -2855,7 +2829,12 @@ static int files_open_window(void)
 
 static fn files_chose(int id)
 {
-        if (id >= FILES_MENU_OPEN)
+        if (id >= UI_TOKENS_ITEM && id < UI_TOKENS_ITEM + UI_TOKENS_MOST)
+        {
+                if (ui_tokens_menu_do(&files.ui, &files.big->path, id) & UI_TOKENS_PRESSED)
+                        files_path_pressed();
+        }
+        else if (id >= FILES_MENU_OPEN)
                 files_menu_do(id), files.dirty = true;
         else if (files.menu.field && ui_text_menu_do(&files.ui, files.menu.field, id))
                 files.dirty = true;

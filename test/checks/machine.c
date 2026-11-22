@@ -4636,6 +4636,163 @@ static fn browser_asks(void)
         files_model_close(m);
 }
 
+/*
+        The Files window's top bar (src/canvas/ui/files.c): the path band laid out and drawn as the window lays it out and draws it, in a
+        frame of its own with the kit's UI face, and sent events as the compositor sends them (files_field_event, which the window's
+        events go through first). Not run where the face is not (run from the tree's root).
+*/
+static unsigned int browser_bar_pixels[1200 * 480], browser_bar_scratch[1200 * UI_SCRATCH_ROWS];
+
+static fn browser_bar_frame(void)
+{
+        files_layout();
+        files_bar_draw(&files.ui);
+}
+
+static b32 browser_bar_send(unsigned int type, int a, int b, unsigned int flags)
+{
+        struct window_event event = {.type = type, .flags = flags, .a = a, .b = b};
+        b32 took = files_field_event(&event, (flags & WINDOW_KEY_DOWN) != 0);
+
+        browser_bar_frame();
+        return took;
+}
+
+// A press and its letting go at x, y (device pixels), as the hand makes them.
+static b32 browser_bar_press(int x, int y)
+{
+        b32 took;
+
+        ui_kit.pointer_x = x, ui_kit.pointer_y = y;
+        took = browser_bar_send(WINDOW_EVENT_BUTTON, UI_POINTER_LEFT, 0, WINDOW_KEY_DOWN);
+        browser_bar_send(WINDOW_EVENT_BUTTON, UI_POINTER_LEFT, 0, 0);
+        return took;
+}
+
+static fn browser_bar_type(const char address_to text)
+{
+        for (; *text; text++)
+                browser_bar_send(WINDOW_EVENT_KEY, 0, (p8)*text, WINDOW_KEY_DOWN);
+}
+
+// The band's raw text is the browser's folder relative (with what follows it, the trail's deeper folders, after it).
+static b32 browser_bar_says(string_address relative, string_address deeper)
+{
+        p8 want[FILES_PATH], had[FILES_PATH];
+        positive length;
+
+        browser_path(want, relative);
+        string_append_bounded(want, deeper, FILES_PATH);
+        length = files_field_read(&files.big->path.text, had, sizeof(had));
+        return length == string_length(want) && string_equals(had, want);
+}
+
+static b32 browser_bar_at(string_address relative)
+{
+        p8 want[FILES_PATH];
+
+        browser_path(want, relative);
+        return string_equals(files.big->model.path, want);
+}
+
+static fn browser_bar(void)
+{
+        struct ui address_to ui = &files.ui;
+        struct ui_tokens address_to k;
+        struct files_model address_to m;
+        long mapped = ui_map(sizeof(struct files_big));
+        b32 chips, trail, deeper, keys, typed, refused, restored, taken;
+        int count, x, y;
+
+        if (mapped < 0 && mapped > -4096)
+        {
+                check("browser: the window's memory is mapped", false);
+                return;
+        }
+        if (!ui_engine_open_sized(ui, 512) || !ui_face_load(&ui->faces[0], (string_address) "fonts/inter/Inter-Regular.ttf"))
+        {
+                log_direct(str("  browser: the kit's UI face is not here (run from the tree's root): the top bar's rows NOT RUN\n"));
+                return;
+        }
+        ui->regular = &ui->faces[0];
+        ui->pixels = browser_bar_pixels, ui->pitch = 1200, ui->width = 1200, ui->height = 480, ui->top = 0, ui->bottom = 480, ui->scale = 100, ui->scene = null;
+        ui->scratch = browser_bar_scratch, ui->scratch_width = 1200, ui->band_top = ui->band_bottom = 0;
+        ui_kit_theme(UI_THEME_LIGHT, UI_ACCENT_DAWN, 0);
+        files.big = (struct files_big address_to)mapped, files.width = 1200, files.height = 480;
+        m = &files.big->model, k = &files.big->path;
+        files_model_open(m);
+        if (!files_parts_open())
+        {
+                check("browser: the top bar's path field opens", false);
+                return;
+        }
+        browser_folder((string_address) "bar");
+        browser_folder((string_address) "bar/one");
+        browser_folder((string_address) "bar/one/two");
+        browser_go(m, (string_address) "bar/one/two");
+        files_moved(), browser_bar_frame();
+        // The browser's base is /tmp/mw-browser.PID: the root, tmp, mw-browser.PID, bar, one and two.
+        count = k->count;
+        chips = browser_bar_says((string_address) "bar/one/two", (string_address) "") && count == 6 && k->active == 5 && k->overflow == 0 &&
+                k->chip_left[5] < 0 && k->active_left >= 0 && !files.editing;
+        for (int t = 0; t < 5; t++)
+                chips = chips && k->chip_left[t] >= files.path_box.x && k->chip_right[t] <= files.path_box.x + files.path_box.w;
+        check("browser: the path band is the kit's token field over the folder shown: a chip for the root and for each folder above it, the folder shown its text",
+              chips);
+
+        // A press on the chip one goes up to it; two, the deeper folder, stays on the trail as the chip after it.
+        x = (k->chip_left[4] + k->chip_right[4]) / 2, y = files.path_box.y + files.path_box.h / 2;
+        browser_bar_press(x, y), browser_read(m, 64), browser_bar_frame();
+        trail = browser_bar_at((string_address) "bar/one") && browser_bar_says((string_address) "bar/one", (string_address) "/two") && k->active == 4 &&
+                k->chip_left[5] >= 0 && !files.editing;
+        x = (k->chip_left[5] + k->chip_right[5]) / 2;
+        browser_bar_press(x, y), browser_read(m, 64), browser_bar_frame();
+        deeper = browser_bar_at((string_address) "bar/one/two") && k->active == 5;
+        check("browser: a press on a chip goes to the folder its prefix names, and the folder come up out of stays a chip of the trail after it",
+              trail);
+        check("browser: a press on the trail's deeper chip goes down to it again", deeper);
+
+        // Control+L: the band has the keys, all of its text selected, its text the folder shown; a press on its text does the same with the caret there.
+        browser_bar_press((k->chip_left[4] + k->chip_right[4]) / 2, y), browser_read(m, 64), browser_bar_frame();
+        browser_bar_send(WINDOW_EVENT_KEY, FILES_KEY_L, 'l', WINDOW_KEY_DOWN | WINDOW_KEY_CONTROL);
+        keys = files.editing == FILES_EDIT_PATH && k->text.focused && browser_bar_says((string_address) "bar/one", (string_address) "") &&
+               k->text.doc.selection_count == 1 && k->text.doc.selections[0].anchor == 0 && k->text.doc.selections[0].active == doc_length(&k->text.doc);
+        check("browser: Control+L gives the path band the keys with all of its text selected, and its text is the folder shown, not the trail's deeper folders",
+              keys);
+
+        // Typed at the end, /two goes on the path; Enter goes to it.
+        browser_bar_send(WINDOW_EVENT_KEY, UI_KEY_END, 0, WINDOW_KEY_DOWN);
+        browser_bar_type("/two");
+        typed = files.editing == FILES_EDIT_PATH && browser_bar_says((string_address) "bar/one/two", (string_address) "");
+        browser_bar_send(WINDOW_EVENT_KEY, UI_KEY_ENTER, '\r', WINDOW_KEY_DOWN), browser_read(m, 64), browser_bar_frame();
+        typed = typed && browser_bar_at((string_address) "bar/one/two") && !files.editing && !k->invalid && !k->text.focused;
+        check("browser: what is typed in the path band is its text, and Enter goes to the path typed and gives the keys back", typed);
+
+        // A path that names nothing: the band keeps the keys and the text and draws its error; Escape puts the folder shown back.
+        browser_bar_send(WINDOW_EVENT_KEY, FILES_KEY_L, 'l', WINDOW_KEY_DOWN | WINDOW_KEY_CONTROL);
+        browser_bar_type("/nowhere/at/all");
+        browser_bar_send(WINDOW_EVENT_KEY, UI_KEY_ENTER, '\r', WINDOW_KEY_DOWN);
+        refused = files.editing == FILES_EDIT_PATH && k->invalid && k->text.focused && browser_bar_at((string_address) "bar/one/two") &&
+                  files.said == LANGUAGE_files_gone;
+        {
+                p8 had[64];
+                refused = refused && files_field_read(&k->text, had, sizeof(had)) == 15 && string_equals(had, (string_address) "/nowhere/at/all");
+        }
+        check("browser: Enter on a path that names nothing keeps the path band's keys and its text, draws its error and says why, and goes nowhere", refused);
+        browser_bar_send(WINDOW_EVENT_KEY, UI_KEY_ESCAPE, 0x1b, WINDOW_KEY_DOWN);
+        restored = !files.editing && !k->invalid && !k->text.focused && browser_bar_says((string_address) "bar/one/two", (string_address) "") &&
+                   browser_bar_at((string_address) "bar/one/two");
+        check("browser: Escape in the path band puts the folder shown back as its text and gives the keys back", restored);
+
+        // A press on the band's own text (the folder shown) gives it the keys, the caret where the press is.
+        browser_bar_press(k->active_left + 2, y);
+        taken = files.editing == FILES_EDIT_PATH && k->text.focused && k->text.doc.selections[0].anchor == k->text.doc.selections[0].active &&
+                k->text.doc.selections[0].active < doc_length(&k->text.doc);
+        check("browser: a press on the path band's text gives it the keys, the caret where the press is", taken);
+        browser_bar_send(WINDOW_EVENT_KEY, UI_KEY_ESCAPE, 0x1b, WINDOW_KEY_DOWN);
+        files_model_close(m);
+}
+
 // The model names nothing of the kit and nothing of a window: outside its comments, its source has none of their words.
 static fn browser_apart(void)
 {
@@ -4720,6 +4877,7 @@ b32 main(void)
         browser_tree();
         browser_filter(address_of model);
         browser_asks();
+        browser_bar();
         browser_apart();
         files_model_close(address_of model);
         browser_remove(browser_base);
