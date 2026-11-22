@@ -95,11 +95,17 @@ static positive discovery_sent;
 static const string_address discovery_kind_names[] = {
     "other", "ethernet", "wifi", "vpn", "virtual", "loopback"};
 
-//      Whether a name starts with a prefix a table holds (string_has_prefix
-//      is for a literal).
-static p8 discovery_starts(string_address text, string_address prefix)
+//      Whether text matches any entry of table, exact or as a prefix.
+static p8 discovery_in_table(string_address text, const string_address address_to table,
+                             positive count, p8 prefix)
 {
-        return text && !string_compare_max(text, prefix, string_length(prefix));
+        if (!text)
+                return false;
+        for (positive at = 0; at < count; at++)
+                if (prefix ? !string_compare_max(text, table[at], string_length(table[at]))
+                           : string_equals(text, table[at]))
+                        return true;
+        return false;
 }
 
 /*      An interface's kind, from its name, its hardware type (ARPHRD_*), the
@@ -122,23 +128,16 @@ static positive discovery_interface_kind(string_address name, p16 type,
 
         if (type == 772 || (name && string_equals(name, "lo")))
                 return DISCOVERY_KIND_LOOPBACK;
-        for (positive at = 0; driver && at < array_count(vpn_drivers); at++)
-                if (string_equals(driver, vpn_drivers[at]))
-                        return DISCOVERY_KIND_VPN;
-        for (positive at = 0; at < array_count(vpn_names); at++)
-                if (discovery_starts(name, vpn_names[at]))
-                        return DISCOVERY_KIND_VPN;
-        if (type == 65534 || type == 512 || type == 768 || type == 776 ||
+        if (discovery_in_table(driver, vpn_drivers, array_count(vpn_drivers), false) ||
+            discovery_in_table(name, vpn_names, array_count(vpn_names), true) ||
+            type == 65534 || type == 512 || type == 768 || type == 776 ||
             type == 778)
                 return DISCOVERY_KIND_VPN;
         if (wireless)
                 return DISCOVERY_KIND_WIFI;
-        for (positive at = 0; driver && at < array_count(virtual_drivers); at++)
-                if (string_equals(driver, virtual_drivers[at]))
-                        return DISCOVERY_KIND_VIRTUAL;
-        for (positive at = 0; at < array_count(virtual_names); at++)
-                if (discovery_starts(name, virtual_names[at]))
-                        return DISCOVERY_KIND_VIRTUAL;
+        if (discovery_in_table(driver, virtual_drivers, array_count(virtual_drivers), false) ||
+            discovery_in_table(name, virtual_names, array_count(virtual_names), true))
+                return DISCOVERY_KIND_VIRTUAL;
         if (type == 1)
                 return DISCOVERY_KIND_ETHERNET;
         return DISCOVERY_KIND_OTHER;
@@ -783,16 +782,16 @@ typedef struct
 
 typedef struct
 {
-        p8 switched[array_count(discovery_switches)]; // each switch's own word
         positive ask; // DISCOVERY_ASK_*: what they allow together, nothing while discovery is off
-        discovery_stun_server server[DISCOVERY_STUN_SERVERS];
         positive servers;
-        p8 servers_kept; // the list is one kept, not the default
-        p8 url[DISCOVERY_URL_ROOM];
-        p8 url_kept;
         positive stun_ms;       // a STUN binding's wait, all its servers at once
         positive https_seconds; // the trace's, the whole fetch
-        p8 proxy;               // the proxy the environment names is taken
+        discovery_stun_server server[DISCOVERY_STUN_SERVERS];
+        p8 url[DISCOVERY_URL_ROOM];
+        p8 switched[array_count(discovery_switches)]; // each switch's own word
+        p8 servers_kept; // the list is one kept, not the default
+        p8 url_kept;
+        p8 proxy; // the proxy the environment names is taken
 } discovery_settings;
 
 //      The file a setting is kept in: the directory, a slash and its leaf.
@@ -952,6 +951,8 @@ static bipolar discovery_kept_line(string_address directory, string_address leaf
         p8 path[DISCOVERY_PATH_ROOM];
         bipolar got;
 
+        if (!room)
+                return -1;
         discovery_kept_path(directory, leaf, path);
         got = host_read_word((string_address)path, text, room);
         return got >= (bipolar)room - 1 ? -1 : got;
@@ -1167,7 +1168,7 @@ static fn discovery_stun(discovery_found address_to found,
         positive seconds = (settings->stun_ms + 999) / 1000;
         bipolar handle;
         socket_address_internet self = {0};
-        b32 self_size = sizeof self;
+        p32 self_size = sizeof self;
         p64 start;
 
         for (positive at = 0; at < settings->servers && slot < 2; at++)
@@ -1491,7 +1492,7 @@ static fn discovery_ago(p64 then, p8 address_to text)
 static fn discovery_when(p64 when, p8 address_to text)
 {
         if (!when)
-                string_copy((string_address)text, "never");
+                string_copy_bounded((string_address)text, "never", 32);
         else
                 discovery_ago(when, text);
 }
@@ -1500,27 +1501,28 @@ static fn discovery_when(p64 when, p8 address_to text)
 static string_address discovery_https_reason(b32 status)
 {
 #if !defined(MACOS)
-        switch (status)
+        static const struct
         {
-        case HTTP_NO_HOST:
-                return (string_address) "its host did not resolve";
-        case HTTP_NO_ROUTE:
-                return (string_address) "no route to it";
-        case HTTP_UNTRUSTED:
-                return (string_address) "its certificate is not one Moonwater trusts: "
-                                        "something on the way answers TLS for it";
-        case HTTP_TLS:
-        case HTTP_EXPIRED:
-        case HTTP_NOT_YET:
-        case HTTP_MISMATCH:
-        case HTTP_UNCHECKED:
-        case HTTP_CLOCK:
-                return (string_address) "TLS failed -- is the clock right?";
-        case HTTP_STATUS:
-                return (string_address) "it answered with an error";
-        case HTTP_MALFORMED:
-                return (string_address) "the answer named no address";
-        }
+                b32 status;
+                string_address reason;
+        } reasons[] = {
+            {HTTP_NO_HOST, "its host did not resolve"},
+            {HTTP_NO_ROUTE, "no route to it"},
+            {HTTP_UNTRUSTED, "its certificate is not one Moonwater trusts: "
+                             "something on the way answers TLS for it"},
+            {HTTP_TLS, "TLS failed -- is the clock right?"},
+            {HTTP_EXPIRED, "TLS failed -- is the clock right?"},
+            {HTTP_NOT_YET, "TLS failed -- is the clock right?"},
+            {HTTP_MISMATCH, "TLS failed -- is the clock right?"},
+            {HTTP_UNCHECKED, "TLS failed -- is the clock right?"},
+            {HTTP_CLOCK, "TLS failed -- is the clock right?"},
+            {HTTP_STATUS, "it answered with an error"},
+            {HTTP_MALFORMED, "the answer named no address"},
+        };
+
+        for (positive at = 0; at < array_count(reasons); at++)
+                if (reasons[at].status == status)
+                        return reasons[at].reason;
 #else
         (void)status;
 #endif
@@ -1531,7 +1533,8 @@ static string_address discovery_https_reason(b32 status)
 static fn discovery_server_text(const discovery_stun_server address_to server,
                                 p8 address_to text)
 {
-        positive used = string_length((string_address)server->name);
+        positive used = min(string_length((string_address)server->name),
+                            (positive)(DISCOVERY_NAME_ROOM - 1));
 
         memory_copy(text, server->name, used);
         text[used++] = ':';
@@ -2873,6 +2876,7 @@ static bipolar discovery_lan_receive(discovery_lan address_to lan, p8 address_to
         if (got < 0)
                 return -1;
         if ((positive)got > DISCOVERY_MDNS_MAX ||
+            (message.msg_flags & MSG_CTRUNC) ||
             message.msg_namelen < sizeof from || from.sin_family != AF_INET)
                 return 0;
 
@@ -2924,6 +2928,7 @@ static bipolar discovery_lan_receive(discovery_lan address_to lan, p8 address_to
         if (got < 0)
                 return -1;
         if ((positive)got > DISCOVERY_MDNS_MAX ||
+            (message.flags & 0x8) || /* MSG_CTRUNC */
             message.name_length < (b32)sizeof from || from.family != AF_INET)
                 return 0;
         if (socket_control_int((p8 address_to)control, message.control_length,

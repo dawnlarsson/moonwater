@@ -6150,12 +6150,12 @@ _Static_assert(TLS_OVERLAY_LIST == SPARK_SETTINGS_SECURITY &&
    refused too, which wins. */
 typedef struct
 {
-        p8 curve;
         p32 exponent;
         p16 key_length;
+        p8 curve;
+        bool refused;
         p8 name[32];
         p8 spki[32];
-        bool refused;
         p8 key[512];
 } tls_added_anchor;
 
@@ -6220,36 +6220,7 @@ static const p8 tls_oid_sha256[9] = {0x60, 0x86, 0x48, 0x01, 0x65,
 typedef struct
 {
         bipolar handle;
-        bool check_cert;
-        bool encrypted;
-        bool application;
-        bool named;
         string_address host;
-        crypto_sha256 transcript;
-        /* The one key share on offer: its group and secret scalar. */
-        p16 group;
-        p8 scalar[48];
-        p8 client_random[32];
-        p8 hs_secret[32];
-        p8 c_hs_traffic[32];
-        p8 s_hs_traffic[32];
-        /* Kept past the handshake: KeyUpdate derives the next from each. */
-        p8 c_ap_traffic[32];
-        p8 s_ap_traffic[32];
-        bool update_asked;
-        bool cert_requested;
-        /* The server's Certificate was refused while checking it, and when
-           the reason was the leaf's name or its validity dates against the
-           clock (which side of them the clock is on), that reason. */
-        bool untrusted;
-        p8 fault;
-        /* status_request went in the hello (only when the chain is checked:
-           a staple is read for revocation and nothing else); a TLS 1.2
-           server echoed it, so a CertificateStatus may follow its
-           Certificate, whose check then waits for it (chain_pending). */
-        bool status_requested;
-        bool status_echoed;
-        bool chain_pending;
         /* The handshake's deadline while it runs: a revocation fetch nests
            in it. */
         const network_deadline address_to deadline;
@@ -6263,32 +6234,13 @@ typedef struct
            cannot yet be asked: see tls_verify_chain. */
         const p8 address_to alpn;
         positive alpn_length;
-        bool clock_bootstrap;
-        p8 exporter[32];
-        /* TLS 1.2 (RFC 5246, 5288, 7627): the suite, the server's random,
-           the master secret -- the premaster until the client's flight --
-           and the client's key exchange point, made when the server's
-           arrives. */
-        bool tls12;
-        p16 suite;
-        p8 server_random[32];
-        p8 master[48];
-        p8 share[97];
-        p8 c_iv[12];
-        p8 s_iv[12];
+        crypto_sha256 transcript;
         crypto_aesgcm_key c_gcm;
         crypto_aesgcm_key s_gcm;
         p64 seq_read;
         p64 seq_write;
-        p8 leaf_qx[48];
-        p8 leaf_qy[48];
-        p8 leaf_n[CRYPTO_RSA_BYTES];
         positive leaf_n_length;
         p64 leaf_e;
-        p8 leaf_curve;
-        /* A post-handshake message may span records and reads; close_notify,
-           once read, answers every later read. */
-        bool closed;
         positive post_handshake_used;
         /* Socket bytes. Records not yet opened lie in
            [receive_start, receive_end); application data is decrypted where
@@ -6302,6 +6254,54 @@ typedef struct
         positive receive_high;
         positive plain_at;
         positive plain_used;
+        /* The one key share on offer: its group and secret scalar. */
+        p16 group;
+        p16 suite;
+        p8 scalar[48];
+        p8 client_random[32];
+        p8 hs_secret[32];
+        p8 c_hs_traffic[32];
+        p8 s_hs_traffic[32];
+        /* Kept past the handshake: KeyUpdate derives the next from each. */
+        p8 c_ap_traffic[32];
+        p8 s_ap_traffic[32];
+        p8 exporter[32];
+        /* TLS 1.2 (RFC 5246, 5288, 7627): the suite, the server's random,
+           the master secret -- the premaster until the client's flight --
+           and the client's key exchange point, made when the server's
+           arrives. */
+        p8 server_random[32];
+        p8 master[48];
+        p8 share[97];
+        p8 c_iv[12];
+        p8 s_iv[12];
+        p8 leaf_qx[48];
+        p8 leaf_qy[48];
+        p8 leaf_n[CRYPTO_RSA_BYTES];
+        p8 leaf_curve;
+        /* The server's Certificate was refused while checking it, and when
+           the reason was the leaf's name or its validity dates against the
+           clock (which side of them the clock is on), that reason. */
+        p8 fault;
+        bool check_cert;
+        bool encrypted;
+        bool application;
+        bool named;
+        bool update_asked;
+        bool cert_requested;
+        bool untrusted;
+        /* status_request went in the hello (only when the chain is checked:
+           a staple is read for revocation and nothing else); a TLS 1.2
+           server echoed it, so a CertificateStatus may follow its
+           Certificate, whose check then waits for it (chain_pending). */
+        bool status_requested;
+        bool status_echoed;
+        bool chain_pending;
+        bool clock_bootstrap;
+        bool tls12;
+        /* A post-handshake message may span records and reads; close_notify,
+           once read, answers every later read. */
+        bool closed;
         /* The two buffers stay last and are neither zeroed on the way in nor
            wiped past what was used on the way out: they are 272 KiB of a
            connection that fetches a few kilobytes, and filling them whole
@@ -6345,7 +6345,7 @@ static COLD fn tls_expand_label(p8 address_to secret, string_address label,
 
         // HkdfLabel is 2 + 1 + 6 + label + 1 + context. The copies below
         // use the full lengths, so a truncated length byte is not a bound.
-        if (label_length > 249 || context_length > 255 ||
+        if (out_length > 0xffffu || label_length > 249 || context_length > 255 ||
             used + 1 + 6 + label_length + 1 + context_length > sizeof info)
         {
                 crypto_forget(out, out_length);
@@ -7981,7 +7981,6 @@ typedef struct
         positive crl_names_length;
         p8 address_to authority_key;
         positive authority_key_length;
-        bool must_staple;
         /* Certificate Transparency: the SubjectPublicKeyInfo whole (what an
            SCT's issuer_key_hash hashes), the extensions' [3] and the SCT list
            extension whole, which the precertificate an SCT signed lacks
@@ -7993,15 +7992,16 @@ typedef struct
         positive sct_extension_length;
         p8 address_to scts;
         positive scts_length;
-        p8 curve;
-        p8 qx[48];
-        p8 qy[48];
-        p8 modulus[CRYPTO_RSA_BYTES];
         positive modulus_length;
         p64 exponent;
         p64 not_before;
         p64 not_after;
         positive path_length;
+        p8 qx[48];
+        p8 qy[48];
+        p8 modulus[CRYPTO_RSA_BYTES];
+        p8 curve;
+        bool must_staple;
         bool basic_constraints;
         bool ca;
         bool path_length_present;
@@ -8517,33 +8517,54 @@ static COLD bipolar tls_parse_extensions(p8 address_to der, positive tbs_stop,
                     value_stop != extension_stop)
                         return TLS_FAIL;
 
-                if (tls_oid_is(der + oid_at, oid_stop - oid_at,
-                               tls_oid_basic_constraints, 3))
+                static const struct
                 {
+                        const p8 address_to oid;
+                        p8 length;
+                } ext_oids[] = {
+                    {tls_oid_basic_constraints, 3},
+                    {tls_oid_key_usage, 3},
+                    {tls_oid_extended_key_usage, 3},
+                    {tls_oid_san, 3},
+                    {tls_oid_name_constraints, 3},
+                    {tls_oid_authority_info, 8},
+                    {tls_oid_crl_points, 3},
+                    {tls_oid_authority_key, 3},
+                    {tls_oid_tls_feature, 8},
+                    {tls_oid_scts, 10},
+                };
+                positive kind = array_count(ext_oids);
+
+                for (positive k = 0; k < array_count(ext_oids); k++)
+                        if (tls_oid_is(der + oid_at, oid_stop - oid_at,
+                                       ext_oids[k].oid, ext_oids[k].length))
+                        {
+                                kind = k;
+                                break;
+                        }
+                switch (kind)
+                {
+                case 0:
                         if (cert->basic_constraints ||
                             tls_parse_basic_constraints(der + at, value_stop - at,
                                                         cert))
                                 return TLS_FAIL;
                         cert->basic_constraints = true;
-                }
-                else if (tls_oid_is(der + oid_at, oid_stop - oid_at,
-                                    tls_oid_key_usage, 3))
-                {
+                        break;
+                case 1:
                         if (cert->key_usage ||
                             tls_parse_key_usage(der + at, value_stop - at, cert))
                                 return TLS_FAIL;
                         cert->key_usage = true;
-                }
-                else if (tls_oid_is(der + oid_at, oid_stop - oid_at,
-                                    tls_oid_extended_key_usage, 3))
-                {
+                        break;
+                case 2:
                         if (cert->extended_key_usage ||
                             tls_parse_extended_key_usage(der + at, value_stop - at,
                                                          cert))
                                 return TLS_FAIL;
                         cert->extended_key_usage = true;
-                }
-                else if (tls_oid_is(der + oid_at, oid_stop - oid_at, tls_oid_san, 3))
+                        break;
+                case 3:
                 {
                         bool matched = false;
 
@@ -8554,10 +8575,9 @@ static COLD bipolar tls_parse_extensions(p8 address_to der, positive tbs_stop,
                         cert->san = der + at;
                         cert->san_length = value_stop - at;
                         cert->san_match = matched;
+                        break;
                 }
-                else if (tls_oid_is(der + oid_at, oid_stop - oid_at,
-                                    tls_oid_name_constraints, 3))
-                {
+                case 4:
                         /* Namespace limits bind whether or not the issuer
                            marks them critical, and a form this client
                            cannot evaluate fails closed where it is used
@@ -8568,53 +8588,55 @@ static COLD bipolar tls_parse_extensions(p8 address_to der, positive tbs_stop,
                                 return TLS_FAIL;
                         cert->name_constraints = der + at;
                         cert->name_constraints_length = value_stop - at;
-                }
-                else if (!critical &&
-                         tls_oid_is(der + oid_at, oid_stop - oid_at,
-                                    tls_oid_authority_info, 8))
-                        tls_parse_ca_issuers(der + at, value_stop - at, cert);
-                else if (tls_oid_is(der + oid_at, oid_stop - oid_at,
-                                    tls_oid_crl_points, 3))
-                {
+                        break;
+                case 5:
+                        if (!critical)
+                                tls_parse_ca_issuers(der + at, value_stop - at, cert);
+                        else
+                                cert->unsupported_critical = true;
+                        break;
+                case 6:
                         if (tls_parse_crl_points(der + at, value_stop - at, cert))
                                 return TLS_FAIL;
-                }
-                else if (tls_oid_is(der + oid_at, oid_stop - oid_at,
-                                    tls_oid_authority_key, 3))
-                {
+                        break;
+                case 7:
                         if (tls_parse_authority_key(der + at, value_stop - at,
                                                     address_of cert->authority_key,
                                                     address_of cert->authority_key_length))
                                 return TLS_FAIL;
-                }
-                else if (tls_oid_is(der + oid_at, oid_stop - oid_at,
-                                    tls_oid_tls_feature, 8))
-                {
+                        break;
+                case 8:
                         if (tls_parse_tls_feature(der + at, value_stop - at, cert))
                                 return TLS_FAIL;
-                }
-                else if (!critical &&
-                         tls_oid_is(der + oid_at, oid_stop - oid_at, tls_oid_scts, 10))
-                {
-                        /* An OCTET STRING of the TLS-encoded list. One that is
-                           not is no list: it counts for nothing where CT is
-                           asked and is ignored where it is not, as any other
-                           client ignores it. */
-                        positive list_at = at;
-                        positive list_stop = 0;
-
-                        if (!tls_asn1_enter(der, value_stop, 0x04, address_of list_at,
-                                            address_of list_stop) &&
-                            list_stop == value_stop)
+                        break;
+                case 9:
+                        if (critical)
+                                cert->unsupported_critical = true;
+                        else
                         {
-                                cert->scts = der + list_at;
-                                cert->scts_length = list_stop - list_at;
-                                cert->sct_extension = der + extension_at;
-                                cert->sct_extension_length = extension_stop - extension_at;
+                                /* An OCTET STRING of the TLS-encoded list. One that is
+                                   not is no list: it counts for nothing where CT is
+                                   asked and is ignored where it is not, as any other
+                                   client ignores it. */
+                                positive list_at = at;
+                                positive list_stop = 0;
+
+                                if (!tls_asn1_enter(der, value_stop, 0x04, address_of list_at,
+                                                    address_of list_stop) &&
+                                    list_stop == value_stop)
+                                {
+                                        cert->scts = der + list_at;
+                                        cert->scts_length = list_stop - list_at;
+                                        cert->sct_extension = der + extension_at;
+                                        cert->sct_extension_length = extension_stop - extension_at;
+                                }
                         }
+                        break;
+                default:
+                        if (critical)
+                                cert->unsupported_critical = true;
+                        break;
                 }
-                else if (critical)
-                        cert->unsupported_critical = true;
 
                 at = extension_stop;
         }
@@ -8915,9 +8937,6 @@ static COLD bool tls_crl_reason(bipolar code, bool whole)
 
 typedef struct
 {
-        /* The hash the CertID names its issuer by: 1 SHA-1, 2 SHA-256. */
-        p8 hash;
-        p8 status;
         positive hash_length;
         const p8 address_to name_hash;
         const p8 address_to key_hash;
@@ -8926,6 +8945,9 @@ typedef struct
         p64 this_update;
         /* 0 when it names none. */
         p64 next_update;
+        /* The hash the CertID names its issuer by: 1 SHA-1, 2 SHA-256. */
+        p8 hash;
+        p8 status;
 } tls_ocsp_single;
 
 typedef struct
@@ -9406,10 +9428,22 @@ static COLD bipolar tls_parse_crl(p8 address_to bytes, positive length,
                 memory_fill(address_of seen, 0, sizeof seen);
                 if (!v2 || !byte_reader_end(&holder) || !byte_reader_left(&extensions))
                         return TLS_FAIL;
+                static const p8 address_to crl_ext_oids[] = {
+                    tls_oid_authority_key, tls_oid_crl_number,
+                    tls_oid_crl_scope, tls_oid_delta_crl};
+
                 while (tls_der_extension(&extensions, address_of seen, address_of oid,
                                          address_of critical, address_of value))
                 {
-                        if (tls_der_is(oid, tls_oid_authority_key, 3))
+                        positive kind = array_count(crl_ext_oids);
+
+                        for (positive k = 0; k < array_count(crl_ext_oids); k++)
+                                if (tls_der_is(oid, crl_ext_oids[k], 3))
+                                {
+                                        kind = k;
+                                        break;
+                                }
+                        if (kind == 0)
                         {
                                 if (tls_parse_authority_key(
                                         (p8 address_to)byte_reader_here(&value),
@@ -9418,7 +9452,7 @@ static COLD bipolar tls_parse_crl(p8 address_to bytes, positive length,
                                         address_of crl->authority_key_length))
                                         return TLS_FAIL;
                         }
-                        else if (tls_der_is(oid, tls_oid_crl_number, 3))
+                        else if (kind == 1)
                         {
                                 byte_reader number = tls_der_value(&value, 0x02);
 
@@ -9428,14 +9462,14 @@ static COLD bipolar tls_parse_crl(p8 address_to bytes, positive length,
                                     !byte_reader_end(&value))
                                         return TLS_FAIL;
                         }
-                        else if (tls_der_is(oid, tls_oid_crl_scope, 3))
+                        else if (kind == 2)
                         {
                                 if (tls_parse_crl_scope(byte_reader_here(&value),
                                                         byte_reader_left(&value),
                                                         address_of crl->scope))
                                         return TLS_FAIL;
                         }
-                        else if (critical || tls_der_is(oid, tls_oid_delta_crl, 3))
+                        else if (critical || kind == 3)
                                 return TLS_FAIL;
                 }
                 if (!byte_reader_end(&extensions))
@@ -10748,7 +10782,8 @@ static COLD bipolar tls_server_hello_keys(p8 address_to hello, positive length,
                                      const p8 address_to address_to cookie,
                                      positive address_to cookie_length)
 {
-        static const p8 kinds[] = {0x2b, 0x33, 0x2c, 0x17, 0x0b, 0x00};
+        static const p16 kinds[] = {0x002b, 0x0033, 0x002c, 0x0017,
+                                    0x000b, 0x0000, 0xff01, 0x0005};
         byte_reader message = byte_reader_open(hello, length);
         byte_reader body;
         byte_reader extensions = byte_reader_open(null, 0);
@@ -10797,24 +10832,25 @@ static COLD bipolar tls_server_hello_keys(p8 address_to hello, positive length,
                 /* One bit a kind this client offered, in kinds' order,
                    renegotiation_info and then status_request last; any
                    other kind, or one twice, fails. */
-                for (positive kind = 0; kind < sizeof kinds; kind++)
-                        if (id == kinds[kind])
+                for (positive kind = 0; kind < array_count(kinds); kind++)
+                        if (id == kinds[kind] &&
+                            (kind != 7 || tls->status_requested))
+                        {
                                 bit = kind;
-                if (id == 0xff01)
-                        bit = 6;
-                if (id == 0x0005 && tls->status_requested)
-                        bit = 7;
+                                break;
+                        }
                 if (bit == 8 || seen >> bit & 1)
                         return TLS_FAIL;
                 seen |= (positive)1 << bit;
 
-                if (id == 0x002b)
+                switch (bit)
                 {
+                case 0:
                         if ((p16)byte_reader_uint(&data, 2, true) != 0x0304 ||
                             !byte_reader_end(&data))
                                 return TLS_FAIL;
-                }
-                else if (id == 0x0033)
+                        break;
+                case 1:
                 {
                         positive named = (p16)byte_reader_uint(&data, 2, true);
                         positive klen = tls_share_length(named);
@@ -10836,8 +10872,9 @@ static COLD bipolar tls_server_hello_keys(p8 address_to hello, positive length,
                         memory_copy(peer, share, klen);
                         address_to share_length = klen;
                         address_to group = named;
+                        break;
                 }
-                else if (id == 0x002c)
+                case 2:
                 {
                         byte_reader whole = data;
                         positive inner;
@@ -10849,8 +10886,9 @@ static COLD bipolar tls_server_hello_keys(p8 address_to hello, positive length,
                                 return TLS_FAIL;
                         address_to cookie = byte_reader_here(&whole);
                         address_to cookie_length = byte_reader_left(&whole);
+                        break;
                 }
-                else if (id == 0x000b)
+                case 4:
                 {
                         /* The formats list has to hold uncompressed. */
                         bool uncompressed = false;
@@ -10860,14 +10898,22 @@ static COLD bipolar tls_server_hello_keys(p8 address_to hello, positive length,
                                 uncompressed |= !byte_reader_u8(&formats);
                         if (!uncompressed || !byte_reader_end(&data))
                                 return TLS_FAIL;
+                        break;
                 }
-                else if ((id == 0x0000 &&
-                          (byte_reader_left(&data) || !tls->named)) ||
-                         ((id == 0x0017 || id == 0x0005) &&
-                          byte_reader_left(&data)) ||
-                         (id == 0xff01 &&
-                          (byte_reader_u8(&data) || !byte_reader_end(&data))))
-                        return TLS_FAIL;
+                case 5:
+                        if (byte_reader_left(&data) || !tls->named)
+                                return TLS_FAIL;
+                        break;
+                case 3:
+                case 7:
+                        if (byte_reader_left(&data))
+                                return TLS_FAIL;
+                        break;
+                case 6:
+                        if (byte_reader_u8(&data) || !byte_reader_end(&data))
+                                return TLS_FAIL;
+                        break;
+                }
         }
 
         if (seen & 1)
@@ -11715,6 +11761,7 @@ static COLD bipolar tls12_client_flight(tls_conn address_to tls,
         memory_copy(tls->c_iv, keys + 32, 4);
         memory_copy(tls->s_iv, keys + 36, 4);
         crypto_forget(keys, sizeof keys);
+        crypto_forget(hash, sizeof hash);
         crypto_forget(address_of copy, sizeof copy);
 
         tls12_verify_data(tls, "client finished", finished + 4);
@@ -13190,16 +13237,26 @@ static fn http_link_close(http_link address_to link)
 //      tls_connect's refusal as the HTTP client says it.
 static bipolar http_tls_status(bipolar verdict)
 {
-        return verdict == TLS_UNTRUSTED ? HTTP_UNTRUSTED
-               : verdict == TLS_EXPIRED ? HTTP_EXPIRED
-               : verdict == TLS_NOT_YET ? HTTP_NOT_YET
-               : verdict == TLS_MISMATCH ? HTTP_MISMATCH
-               : verdict == TLS_REVOKED ? HTTP_REVOKED
-               : verdict == TLS_UNCHECKED ? HTTP_UNCHECKED
-               : verdict == TLS_CLOCK ? HTTP_CLOCK
-               : verdict == TLS_UNLOGGED ? HTTP_UNLOGGED
-               : verdict == TLS_OVERLAY ? HTTP_OVERLAY
-                                        : HTTP_TLS;
+        static const struct
+        {
+                b8 tls;
+                b8 http;
+        } map[] = {
+            {TLS_UNTRUSTED, HTTP_UNTRUSTED},
+            {TLS_EXPIRED, HTTP_EXPIRED},
+            {TLS_NOT_YET, HTTP_NOT_YET},
+            {TLS_MISMATCH, HTTP_MISMATCH},
+            {TLS_REVOKED, HTTP_REVOKED},
+            {TLS_UNCHECKED, HTTP_UNCHECKED},
+            {TLS_CLOCK, HTTP_CLOCK},
+            {TLS_UNLOGGED, HTTP_UNLOGGED},
+            {TLS_OVERLAY, HTTP_OVERLAY},
+        };
+
+        for (positive at = 0; at < array_count(map); at++)
+                if (verdict == map[at].tls)
+                        return map[at].http;
+        return HTTP_TLS;
 }
 
 static bipolar http_link_open(http_link address_to link, p32 ip, p16 port,
@@ -16157,7 +16214,7 @@ static bipolar http_run(string_address start, const http_manners address_to how,
 
         if (string_length(start) >= sizeof url)
                 return HTTP_BAD_URL;
-        string_copy(url, start);
+        string_copy_bounded(url, start, sizeof url);
         tls_overlay_refresh();
         if (how->chain_seconds &&
             !network_deadline_begin(address_of chain, how->chain_seconds, 0))
@@ -16290,7 +16347,8 @@ static bipolar http_run(string_address start, const http_manners address_to how,
                                 //      The next hop, or the Location a failure
                                 //      names; both terminate inside a buffer
                                 //      exactly as large as url.
-                                string_copy(url, status ? placed : next);
+                                string_copy_bounded(url, status ? placed : next,
+                                                    sizeof url);
                         }
                         http_link_close(address_of link);
                         if (status)
@@ -16354,7 +16412,7 @@ static bipolar http_run(string_address start, const http_manners address_to how,
 done:
         //      Where it ended: the URL a failure names.
         if (where)
-                string_copy(where, url);
+                string_copy_bounded(where, url, HTTP_URL_MAX);
         //      The store path of http_copy terminates what it appends.
         if (into && !status)
         {
@@ -17199,8 +17257,10 @@ typedef struct
 static COLD bool dns_apart_task(address_any context, bipolar answer)
 {
         dns_apart_ask address_to ask = context;
-        dns_apart_said said = {0};
+        dns_apart_said said;
         p32 found = 0;
+
+        memory_zero(address_of said, sizeof said);
 
         said.status =
             ask->plain ? net_resolve_v4(ask->name, address_of found, ask->seconds)
