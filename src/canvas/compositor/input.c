@@ -1389,7 +1389,7 @@ static int compositor_row_write(const char *path, const char *word)
         string_append_bounded((p8 *)where, (string_address)path, sizeof(where));
         string_copy_bounded((p8 *)line, kept, sizeof(line) - 1);
         length = string_length((string_address)line), line[length++] = '\n';
-        if ((handle = system_open_at_mode(AT_FDCWD, (string_address)where, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644)) < 0)
+        if ((handle = system_open_at_mode(AT_FDCWD, (string_address)where, O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW | O_CLOEXEC, 0644)) < 0)
                 return 0;
         system_write_all((b32)handle, line, length);
         system_close(handle);
@@ -2954,6 +2954,8 @@ static int compositor_overlay_compose(const struct compositor_target *t, const s
         compositor_meet(box, clip);
         if (box[2] <= box[0] || box[3] <= box[1])
                 return 1;
+        if ((unsigned long)(box[2] - box[0]) * (unsigned long)(box[3] - box[1]) > COMPOSITOR_OVERLAY_PIXELS)
+                return 0;
         if (!compositor_overlay_scratch)
                 compositor_overlay_scratch = (unsigned int *)compositor_map_zeroed(4ul * COMPOSITOR_OVERLAY_PIXELS);
         if (!compositor_overlay_scratch)
@@ -3676,7 +3678,7 @@ HOT static int compositor_reader_key(unsigned int at, unsigned int code, int val
 
 static void compositor_reader_direct_stat(positive now_us, positive micro)
 {
-        positive late = now_us - micro;
+        positive late = now_us > micro ? now_us - micro : 0;
 
         __atomic_add_fetch(&compositor_reader.direct, 1, __ATOMIC_RELEASE);
         if (late > compositor_reader.late_most && late < 1000000000ull)
