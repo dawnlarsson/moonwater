@@ -154,6 +154,7 @@ static struct
         struct ui_view view;
         unsigned int power_runs;
         unsigned int session;
+        b32 kept_start; // -k: started put away (the rules at the desktop's start), to be shown by its button with no program started
 } launcher;
 
 /* ---- model: ranking, search, and launch argv ---- */
@@ -1122,22 +1123,13 @@ static int launcher_anchor_gap(const struct ui_anchor address_to anchor)
         return (anchor->edge == TASKBAR_BOTTOM || anchor->edge == TASKBAR_TOP ? anchor->button[3] : anchor->button[2]) / 2;
 }
 
-static int launcher_open(void)
+// The launcher as it opens: anchored to the button pressed (or under the screen's middle), the registry read again when it changed, its
+// apps and its recents made again.
+static fn launcher_fresh(void)
 {
         struct windows address_to table = launcher.own.table;
         unsigned int row = launcher.own.row;
-        positive names = (positive)LAUNCHER_NAMES * LAUNCHER_NAME, from = LAUNCHER_NAMES,
-                 hashed = (positive)LAUNCHER_HASH * sizeof(unsigned short);
-        char address_to mapped;
 
-        if (ui_lift_other(&launcher.own, (string_address) "launcher", launcher.toggle))
-                return 0;
-        if (!(mapped = ui_app_map(&launcher_app, names + from + hashed + LAUNCHER_DIRENTS)))
-                return 1;
-        launcher.names = mapped;
-        launcher.from = (unsigned char address_to)(mapped + names);
-        launcher.hashed = (unsigned short address_to)(mapped + names + from);
-        ui_app_size(&launcher_app, (unsigned int)ui_px(&launcher.ui, LAUNCHER_WIDTH), 0);
         ui_anchor_take(&launcher.anchor, table, launcher.asked_beside);
         if (launcher.anchor.anchored)
                 launcher.anchor.gap = launcher_anchor_gap(&launcher.anchor);
@@ -1161,9 +1153,66 @@ static int launcher_open(void)
                 place.screen = 0;
                 windows_place_set(table, row, &place);
         }
+}
+
+// Another launcher up: a program named launcher with a row that has shown a picture.
+static b32 launcher_other(void)
+{
+        struct windows address_to table = launcher.own.table;
+
+        for (unsigned int row = 0; row < windows_rows(table); row++)
+        {
+                unsigned int pid = __atomic_load_n(&table->pid[row], __ATOMIC_ACQUIRE);
+
+                if (row != launcher.own.row && pid && __atomic_load_n(&table->frame[row], __ATOMIC_ACQUIRE) && ui_is_program(pid, (string_address) "launcher"))
+                        return true;
+        }
+        return false;
+}
+
+static int launcher_open(void)
+{
+        positive names = (positive)LAUNCHER_NAMES * LAUNCHER_NAME, from = LAUNCHER_NAMES,
+                 hashed = (positive)LAUNCHER_HASH * sizeof(unsigned short);
+        char address_to mapped;
+
+        // A start put away (-k) with a launcher up already leaves it be; another start shows the one up (or puts it away with -x).
+        if (launcher.kept_start ? launcher_other() : ui_lift_other(&launcher.own, (string_address) "launcher", launcher.toggle))
+                return 0;
+        if (!(mapped = ui_app_map(&launcher_app, names + from + hashed + LAUNCHER_DIRENTS)))
+                return 1;
+        launcher.names = mapped;
+        launcher.from = (unsigned char address_to)(mapped + names);
+        launcher.hashed = (unsigned short address_to)(mapped + names + from);
+        ui_app_size(&launcher_app, (unsigned int)ui_px(&launcher.ui, LAUNCHER_WIDTH), 0);
+        // Put away before its first picture: the compositor takes the row minimized, and its button shows it (compositor_launcher_kept).
+        if (launcher.kept_start)
+                launcher.own.table->state[launcher.own.row] = WINDOW_MINIMIZED, launcher_app.put_away = true;
+        launcher_fresh();
         ui_app_frame(&launcher_app);
         launcher_scan(launcher_path_variable());
         return -1;
+}
+
+/* The launcher kept up (WINDOW_RESIDENT): put away where it would end, and shown again by its button with no program started. Put away,
+   its search is emptied and its lists are at their starts, so the picture made then is the one the next show starts with; once that is
+   drawn, the pictures' copies at their sizes are let go (launcher_tick). Shown again, it is anchored to the button pressed and its
+   registry and recents are read again, as an open does. */
+static fn launcher_away(void)
+{
+        ui_text_set(launcher_field(), (const p8 address_to) "", 0);
+        launcher_take();
+        launcher.in_recents = false, launcher.menu_app = -1;
+        launcher.list.focus = launcher.grid.focus = launcher.recents.focus = -1;
+        launcher.list.hover = launcher.grid.hover = launcher.recents.hover = -1;
+        launcher.list.scroll.scroll = launcher.grid.scroll.scroll = launcher.recents.scroll.scroll = 0;
+        launcher_changed();
+}
+
+static fn launcher_back(void)
+{
+        launcher_fresh();
+        launcher.moved = true; // the compositor moves the window to its anchor with the next picture (launcher_paint)
 }
 
 /* The apps' pictures are made off the draw (ui_apps_picture_kept): a tile takes its picture from the kept file (mapped with the
@@ -1192,6 +1241,9 @@ static long launcher_tick(long timeout, long address_to other)
         timeout = ui_text_timeout(&launcher.ui, launcher_field(), timeout, &redraw);
         if (redraw || ui_view_moved(&launcher.view, &top, &bottom))
                 launcher.dirty = true;
+        // Put away and its picture made: the pictures' copies at their sizes let go (the next draw scales them again).
+        if (launcher_app.put_away && !launcher.dirty)
+                ui_apps_pictures_trim();
         return launcher_pictures(timeout);
 }
 
@@ -1200,7 +1252,7 @@ static struct ui_app launcher_app = {
     .ui = &launcher.ui,
     .missing = (string_address) "launcher: no window: the compositor's desktop is not up\n",
     .title = (string_address) "Launcher",
-    .glass = WINDOW_GLASS | WINDOW_NO_CLOSE | WINDOW_DISMISS,
+    .glass = WINDOW_GLASS | WINDOW_NO_CLOSE | WINDOW_DISMISS | WINDOW_RESIDENT,
     .no_bold = true,
     .nofont = (string_address) "launcher: no font to draw with (-f FONT.ttf), pid ",
     .dirty = &launcher.dirty,
@@ -1210,6 +1262,9 @@ static struct ui_app launcher_app = {
     .language = launcher_language,
     .event = launcher_event,
     .dismiss = true,
+    .resident = true,
+    .away = launcher_away,
+    .back = launcher_back,
     .tick = launcher_tick,
     .popup = &launcher.menu,
     .chose = launcher_chose,
@@ -1234,7 +1289,9 @@ static b32 launcher_main()
                 if ((took = ui_app_option(&launcher_app, at)))
                         continue;
                 took = 1;
-                if (string_equals(option, (string_address) "-x"))
+                if (string_equals(option, (string_address) "-k"))
+                        launcher.kept_start = true;
+                else if (string_equals(option, (string_address) "-x"))
                         launcher.toggle = true;
                 else if ((value = ui_argument(at, (string_address) "-m")))
                         launcher.mono = (const char address_to)value, took = 2;

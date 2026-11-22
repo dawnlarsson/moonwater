@@ -14,6 +14,12 @@ rule onscreen-keyboard
 	if setting.keyboard.onscreen != off
 	do open osk
 
+# The launcher kept up: started put away once the desktop is up, so its button shows it at once with no program started, and put
+# away again when it is dismissed. One that ends is started by its button, as before.
+rule launcher-kept
+	on service up compositor
+	do open launcher -k -a
+
 # The installer on a boot from the stick: a verdict of live, or ask (a disk holds another build); never on an
 # installed boot (desktop_installer).
 rule installer
