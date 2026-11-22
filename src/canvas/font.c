@@ -7798,7 +7798,7 @@ static fn font_flow_unit(font_flow address_to f, p32 first, p32 stop, p32 face, 
                 if (face == FONT_DRAWN)
                 {
                         if (!f->cell)
-                                f->cell = (b64)font_metrics_at(f->faces[0], f->size).cell_width << 16;
+                                f->cell = (b64)font_cell_width(f->faces[0], f->size) << 16;
                         advance = f->cell;
                 }
                 else
@@ -8128,7 +8128,7 @@ static inline p8 font_run_next(struct font_run_iter address_to it)
         if (face != FONT_DRAWN && it->last_face == face && !(it->flags & FONT_UNKERNED))
                 it->pen += font_kern(it->e, it->faces[face], it->last_glyph, glyph, it->size);
         it->x = it->pen;
-        it->advance = face == FONT_DRAWN ? (b64)font_metrics_at(it->faces[0], it->size).cell_width << 16
+        it->advance = face == FONT_DRAWN ? (b64)font_cell_width(it->faces[0], it->size) << 16
                                          : font_advance(it->faces[face], glyph, it->size);
         it->glyph = glyph;
         it->face = face;
