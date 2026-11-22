@@ -140,6 +140,7 @@
 #define SETTING_PREDICT_TOUCH_PATH "/root/canvas.predict.touch"
 #define SETTING_CLIPBOARD_PATH "/root/canvas.clipboard"
 #define SETTING_GPU_PATH "/root/canvas.gpu"
+#define SETTING_GPU_TILED_PATH "/root/canvas.gpu.tiled"
 #define SETTING_VRR_PATH "/root/canvas.vrr"
 #define SETTING_CADENCE_PATH "/root/canvas.cadence"
 #define SETTING_CLIPBOARD_HISTORY_PATH "/root/canvas.clipboard.history"
@@ -467,6 +468,11 @@ static const struct settings_row settings_rows[] = {
                       .help = "draw and compose on the GPU where Canvas has a driver for it, on the processor elsewhere; alpha [on]",
                       .part = "Graphics",
                       .about = "Where Canvas draws: on the GPU, or the processor. What the card does now is under it"),
+    SETTING_PLAIN_ROW(null, "GPU samples tiled client buffers", SETTINGS_SWITCH, 0, ("canvas", "gpu", "tiled"), "gpu tiled ", null,
+                      .path = SETTING_GPU_TILED_PATH, .standard = "off",
+                      .usage = "canvas gpu tiled [on|off]",
+                      .help = "sample tiled and compressed client pictures in place on the GPU, an experimental speed-up [off]",
+                      .about = "An experimental speed-up. If the screen tears or shows garbage, turn it off"),
 #endif
     //  The menu names each layout once; gb, sv and nb, which the help names as well, are the same layouts as uk, se
     //  and no (locale_keyboards in host.c, the compositor's table), kept as typed, so the menu leaves them out.

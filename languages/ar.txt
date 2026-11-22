@@ -527,6 +527,7 @@ ui_field_full	fe02	هذا أقصى ما يتسع له
 =External devices	5769	الأجهزة الخارجية
 =Files	1b30	الملفات
 =GPU rendering (alpha)	e5e6	التصيير على GPU (ألفا)
+=GPU samples tiled client buffers	783a	تقرأ وحدة GPU مخازن التطبيقات المبلّطة
 =Gallery	4cdd	المعرض
 =Game frame cadence	fb65	إيقاع إطارات الألعاب
 =Graphics	9fa8	الرسوميات

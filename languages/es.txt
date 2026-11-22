@@ -526,6 +526,7 @@ ui_field_full	fe02	no cabe más
 =External devices	5769	Dispositivos externos
 =Files	1b30	Archivos
 =GPU rendering (alpha)	e5e6	Renderizado por GPU (alfa)
+=GPU samples tiled client buffers	783a	La GPU muestrea los búferes en mosaico de los clientes
 =Gallery	4cdd	Galería
 =Game frame cadence	fb65	Cadencia de fotogramas en juegos
 =Graphics	9fa8	Gráficos

@@ -526,6 +526,7 @@ ui_field_full	fe02	daha fazlası sığmaz
 =External devices	5769	Harici aygıtlar
 =Files	1b30	Dosyalar
 =GPU rendering (alpha)	e5e6	GPU ile oluşturma (alfa)
+=GPU samples tiled client buffers	783a	GPU, istemcilerin döşemeli arabelleklerini okur
 =Gallery	4cdd	Galeri
 =Game frame cadence	fb65	Oyun kare temposu
 =Graphics	9fa8	Grafik

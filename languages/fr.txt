@@ -526,6 +526,7 @@ ui_field_full	fe02	c'est tout ce que ce champ peut contenir
 =External devices	5769	Périphériques externes
 =Files	1b30	Fichiers
 =GPU rendering (alpha)	e5e6	Rendu par GPU (alpha)
+=GPU samples tiled client buffers	783a	Le GPU lit les tampons en mosaïque des clients
 =Gallery	4cdd	Galerie
 =Game frame cadence	fb65	Cadence d'images des jeux
 =Graphics	9fa8	Graphismes

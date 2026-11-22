@@ -526,6 +526,7 @@ ui_field_full	fe02	δεν χωράει περισσότερο
 =External devices	5769	Εξωτερικές συσκευές
 =Files	1b30	Αρχεία
 =GPU rendering (alpha)	e5e6	Απόδοση με GPU (άλφα)
+=GPU samples tiled client buffers	783a	Η GPU διαβάζει τα πλακωτά buffers των εφαρμογών
 =Gallery	4cdd	Συλλογή
 =Game frame cadence	fb65	Ρυθμός καρέ παιχνιδιών
 =Graphics	9fa8	Γραφικά

@@ -526,6 +526,7 @@ ui_field_full	fe02	більше не вміщається
 =External devices	5769	Зовнішні пристрої
 =Files	1b30	Файли
 =GPU rendering (alpha)	e5e6	Рендеринг на GPU (альфа)
+=GPU samples tiled client buffers	783a	GPU читає мозаїчні буфери клієнтів
 =Gallery	4cdd	Галерея
 =Game frame cadence	fb65	Ритм кадрів в іграх
 =Graphics	9fa8	Графіка

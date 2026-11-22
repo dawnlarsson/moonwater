@@ -527,6 +527,7 @@ ui_field_full	fe02	זה המקסימום שהוא מכיל
 =External devices	5769	התקנים חיצוניים
 =Files	1b30	קבצים
 =GPU rendering (alpha)	e5e6	רינדור ב-GPU (אלפא)
+=GPU samples tiled client buffers	783a	ה-GPU קורא מאגרי יישומים משובצים-אריחים
 =Gallery	4cdd	גלריה
 =Game frame cadence	fb65	קצב פריימים במשחקים
 =Graphics	9fa8	גרפיקה

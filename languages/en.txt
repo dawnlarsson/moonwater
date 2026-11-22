@@ -520,6 +520,7 @@ ui_field_full	fe02	that is as much as it holds
 =External devices	5769	External devices
 =Files	1b30	Files
 =GPU rendering (alpha)	e5e6	GPU rendering (alpha)
+=GPU samples tiled client buffers	783a	GPU samples tiled client buffers
 =Gallery	4cdd	Gallery
 =Game frame cadence	fb65	Game frame cadence
 =Graphics	9fa8	Graphics

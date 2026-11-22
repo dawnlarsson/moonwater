@@ -527,6 +527,7 @@ ui_field_full	fe02	بیش از این جا ندارد
 =External devices	5769	دستگاه‌های خارجی
 =Files	1b30	پرونده‌ها
 =GPU rendering (alpha)	e5e6	رندر با GPU (آلفا)
+=GPU samples tiled client buffers	783a	GPU بافرهای کاشی‌شده‌ی برنامه را می‌خواند
 =Gallery	4cdd	گالری
 =Game frame cadence	fb65	آهنگ فریم بازی
 =Graphics	9fa8	گرافیک

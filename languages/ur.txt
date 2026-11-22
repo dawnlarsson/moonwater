@@ -527,6 +527,7 @@ ui_field_full	fe02	اس میں اس سے زیادہ نہیں سماتا
 =External devices	5769	بیرونی ڈیوائسز
 =Files	1b30	فائلیں
 =GPU rendering (alpha)	e5e6	GPU رینڈرنگ (الفا)
+=GPU samples tiled client buffers	783a	GPU کلائنٹ کے ٹائل والے بفرز پڑھتا ہے
 =Gallery	4cdd	گیلری
 =Game frame cadence	fb65	کھیلوں میں فریم کی رفتار
 =Graphics	9fa8	گرافکس

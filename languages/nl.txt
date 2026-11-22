@@ -526,6 +526,7 @@ ui_field_full	fe02	meer past er niet in
 =External devices	5769	Externe apparaten
 =Files	1b30	Bestanden
 =GPU rendering (alpha)	e5e6	GPU-rendering (alpha)
+=GPU samples tiled client buffers	783a	GPU leest getegelde buffers van programma's
 =Gallery	4cdd	Galerij
 =Game frame cadence	fb65	Beeldritme voor games
 =Graphics	9fa8	Graphics

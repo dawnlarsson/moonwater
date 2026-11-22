@@ -526,6 +526,7 @@ ui_field_full	fe02	więcej się nie zmieści
 =External devices	5769	Urządzenia zewnętrzne
 =Files	1b30	Pliki
 =GPU rendering (alpha)	e5e6	Renderowanie przez GPU (alfa)
+=GPU samples tiled client buffers	783a	GPU czyta kafelkowane bufory klientów
 =Gallery	4cdd	Galeria
 =Game frame cadence	fb65	Kadencja klatek w grach
 =Graphics	9fa8	Grafika

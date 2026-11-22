@@ -526,6 +526,7 @@ ui_field_full	fe02	mer ryms inte
 =External devices	5769	Externa enheter
 =Files	1b30	Filer
 =GPU rendering (alpha)	e5e6	GPU-rendering (alfa)
+=GPU samples tiled client buffers	783a	GPU läser klienters kakelbuffertar
 =Gallery	4cdd	Galleri
 =Game frame cadence	fb65	Bildtakt i spel
 =Graphics	9fa8	Grafik
