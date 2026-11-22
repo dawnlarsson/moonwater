@@ -10668,6 +10668,7 @@ b32 main()
         GROUP("check_kit_graph", check_kit_graph());
         GROUP("check_kit_inks", check_kit_inks());
         GROUP("check_kit_place", check_kit_place());
+        GROUP("check_kit_globe", check_kit_globe());
         GROUP("check_kit_controls", check_kit_controls());
         GROUP("check_kit_states", check_kit_states());
         GROUP("check_kit_strips", check_kit_strips());

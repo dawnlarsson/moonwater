@@ -6474,6 +6474,40 @@ static fn check_kit_graph(void)
         }
 }
 
+// The taskbar globe's press (ui.c taskbar_globe_*): a tap opens on release, a drag away past the slop drives the scenes and opens nothing,
+// a back-drag is an ordinary press, and Escape (up with cancelled) drops it. The mutants of these rows are in the commit message.
+static fn check_kit_globe(void)
+{
+        int tap, drag, back, esc_drag, esc_tap, held_down, held_up;
+        b32 latched;
+
+        taskbar_globe_down(100, 100, 100, 1);
+        taskbar_globe_move(100, 101, 101, 100);
+        held_down = taskbar_globe_held();
+        tap = taskbar_globe_up(0);
+        held_up = taskbar_globe_held();
+        check("kit globe: a tap (no drag past the slop) releases as a tap, which opens the launcher", tap == 0 && held_down && !held_up);
+
+        taskbar_globe_down(100, 100, 100, 1);
+        drag = taskbar_globe_move(100, 130, 130, 100);
+        latched = drag == 1;
+        drag = taskbar_globe_move(100, 150, 150, 100);
+        drag = taskbar_globe_up(0);
+        check("kit globe: a drag away past the slop drives the scenes (1 on release) and opens nothing", latched && drag == 1);
+
+        taskbar_globe_down(100, 100, 100, 1);
+        back = taskbar_globe_move(100, 20, 20, 100);
+        back = taskbar_globe_up(0);
+        check("kit globe: a back-drag past the slop is an ordinary press: it opens nothing and drives nothing (-1)", back == -1);
+
+        taskbar_globe_down(100, 100, 100, 1);
+        taskbar_globe_move(100, 130, 130, 100);
+        esc_drag = taskbar_globe_up(1);
+        taskbar_globe_down(100, 100, 100, 1);
+        esc_tap = taskbar_globe_up(1);
+        check("kit globe: Escape cancels: a latched drag returns 1 so the caller ends it, and a tap returns -1 (nothing opens)", esc_drag == 1 && esc_tap == -1);
+}
+
 static fn check_kit_place(void)
 {
         static unsigned int pixels[600 * 300], scratch[600 * UI_SCRATCH_ROWS];

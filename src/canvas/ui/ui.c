@@ -8801,6 +8801,60 @@ static b32 ui_pressed(const struct ui_press address_to press, int target)
         return press->down && !press->dragged && target >= 0 && press->target == target;
 }
 
+// The taskbar globe's press (C8): the kit's one press. A press that goes past the kit slop away from the band is a drag (the scenes
+// drag); a press released without a drag is a tap (the launcher); one that goes past the slop back toward the band is an ordinary press,
+// which opens nothing. axis_at is the coordinate along the band's normal, away is +1 where it grows away from the band, else -1.
+static struct ui_press taskbar_globe_press;
+static int taskbar_globe_axis, taskbar_globe_away, taskbar_globe_drag;
+
+static void taskbar_globe_down(int x, int y, int axis_at, int away)
+{
+        ui_press_begin(&taskbar_globe_press, x, y, 0, ui_kit_touch);
+        ui_press_track_start(&taskbar_globe_press, axis_at);
+        taskbar_globe_axis = axis_at, taskbar_globe_away = away < 0 ? -1 : 1, taskbar_globe_drag = 0;
+}
+
+// The globe's motion while held: 1 once it is a drag away from the band (latched past the slop), else 0. Every report is a sample.
+static int taskbar_globe_move(int x, int y, int axis_at, int scale)
+{
+        if (!taskbar_globe_press.down)
+                return 0;
+        ui_press_track(&taskbar_globe_press, axis_at);
+        if (!taskbar_globe_press.dragged && ui_touch_past(taskbar_globe_press.x, taskbar_globe_press.y, x, y, ui_touch_slop(scale)))
+                taskbar_globe_press.dragged = true;
+        if (taskbar_globe_press.dragged && (axis_at - taskbar_globe_axis) * taskbar_globe_away > 0)
+                taskbar_globe_drag = 1;
+        return taskbar_globe_drag;
+}
+
+// The axis velocity of the globe's press, px/s, positive as the axis grows (the caller takes away from the band with away).
+static long taskbar_globe_velocity(void)
+{
+        return ui_press_velocity(&taskbar_globe_press, ui_press_now());
+}
+
+// The globe's release, or its cancel: 1 a drag away (the scenes END decides), 0 a tap (the launcher opens on release), -1 nothing.
+static int taskbar_globe_up(b32 cancelled)
+{
+        int drag = taskbar_globe_drag, tap = taskbar_globe_press.down && !taskbar_globe_press.dragged && !cancelled;
+
+        ui_press_end(&taskbar_globe_press, cancelled);
+        taskbar_globe_drag = 0;
+        return drag ? 1 : tap ? 0 : -1;
+}
+
+static int taskbar_globe_held(void)
+{
+        return taskbar_globe_press.down;
+}
+
+// Escape, or any press that takes the globe's press away: the press is dropped and nothing opens.
+static void taskbar_globe_cancel(void)
+{
+        ui_press_end(&taskbar_globe_press, 1);
+        taskbar_globe_drag = 0;
+}
+
 /* ---- kit: motion ---- */
 // The motion, in Q30 (see the motion above).
 
