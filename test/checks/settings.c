@@ -6211,6 +6211,12 @@ static fn check_settings_actions(void)
         check("settings actions: a pairing that waits says Stop, not greyed, and the clock says its reading before its button", stops && clocked);
 
         // The right button on an info row opens its copies at the pointer; Copy value puts its line on the clipboard as it is.
+        // The copies go to the window the row is in: the table names the process that owns the row, and a forked group is another process.
+        if (settings.own.table->capacity <= settings.own.row)
+                settings.own.table->capacity = 8; // the scratch table has room for no row until it is given some, as canvas.c gives its clip table eight
+        if (settings.own.table->rows <= settings.own.row)
+                settings.own.table->rows = 8;
+        settings.own.table->pid[settings.own.row] = (unsigned int)window_call(WINDOW_SYS_GETPID, 0, 0, 0, 0, 0, 0);
         settings.state[info] = SETTINGS_READ;
         string_copy_bounded((string_address)settings.value[info], (string_address) "203.0.113.7 via stun, 2 min ago", SETTINGS_VALUE);
         actions_show(info);
@@ -6298,6 +6304,12 @@ static fn check_settings_actions(void)
                 unsigned short saved_c2 = settings.item_count[2], saved_c3 = settings.item_count[3];
                 int ext_row = (int)SETTINGS_LIST_ID(2, 0);
                 int link_row = (int)SETTINGS_LIST_ID(3, 0);
+                // The copies go to the window the row is in: as the copies block above gives its scratch table room, a row and the process that owns it.
+                if (settings.own.table->capacity <= settings.own.row)
+                        settings.own.table->capacity = 8;
+                if (settings.own.table->rows <= settings.own.row)
+                        settings.own.table->rows = 8;
+                settings.own.table->pid[settings.own.row] = (unsigned int)window_call(WINDOW_SYS_GETPID, 0, 0, 0, 0, 0, 0);
                 b32 ext_table = false, ext_sort = false, ext_menu = false;
                 b32 link_table = false, link_menu = false, link_remove = false, link_del = false;
 
@@ -6324,8 +6336,22 @@ static fn check_settings_actions(void)
                                 int hy = ui_list_row_y(&settings.list, at) - ui_dev(&settings.ui, UI_COLUMNS_H) / 2;
 
                                 actions_press(UI_POINTER_LEFT, hx, hy, 0);
-                                ext_sort = settings_large->columns[2].sorted == 0 && !settings_large->columns[2].descending &&
-                                           string_equals((string_address)settings.item[2][0].label, (string_address) "Alpha");
+                                // The sort orders the rows in view (the kit's ids); the items stay as the feed gave them, so Alpha is the first row shown.
+                                int alpha = -1, first = -1;
+                                for (int k = 0; k < settings.item_count[2]; k++)
+                                        if (string_equals((string_address)settings.item[2][k].label, (string_address) "Alpha"))
+                                                alpha = k;
+                                ext_sort = settings_large->columns[2].sorted == 0 && !settings_large->columns[2].descending && alpha >= 0;
+                                for (int k = 0; k < settings.item_count[2] && ext_sort; k++)
+                                {
+                                        int pos = settings_pos(SETTINGS_LIST_ID(2, k));
+                                        if (k != alpha && settings.item[2][k].where == 1 && pos >= 0)
+                                                ext_sort = settings_pos(SETTINGS_LIST_ID(2, alpha)) < pos;
+                                }
+                                first = alpha;
+                                ext_sort = ext_sort && first >= 0;
+                                if (alpha >= 0)
+                                        ext_row = (int)SETTINGS_LIST_ID(2, alpha); // the menu is on the row the sort shows first, Alpha (the items stay in the feed's order)
                         }
                 }
                 actions_show(ext_row);
@@ -6386,7 +6412,7 @@ static fn check_settings_actions(void)
                 actions_press(UI_POINTER_RIGHT, x, y, 0);
                 serial = settings.own.table->clip_offer_serial[settings.own.row];
                 actions_pick(1, 0);
-                link_menu = link_menu && actions_clipboard(serial, "zeta: heard 5s ago from 10.0.0.2:41900");
+                link_menu = link_menu && actions_clipboard(serial, "zeta: Heard 5s ago");
                 settings.queued = 0;
                 actions_press(UI_POINTER_RIGHT, x, y, 0);
                 actions_pick(3, 0);
