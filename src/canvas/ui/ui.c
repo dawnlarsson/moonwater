@@ -22111,6 +22111,7 @@ struct ui_row
 #define UI_LIST_MENU_COPY 0x100
 #define UI_LIST_MENU_COPY_ROW 0x101
 #define UI_LIST_MENU_REMOVE 0x102
+#define UI_LIST_MENU_EXTRA 0x103 // the first id an app gives its own menu item (ui_list_menu.extra); the base items are below it
 
 #define UI_LIST_MENU_HAS_COPY 1u      // row has copyable text (else Copy / Copy row are disabled)
 #define UI_LIST_MENU_HAS_COPY_ROW 2u  // include the second copy item (Copy row / Copy label and value)
@@ -24889,7 +24890,7 @@ static b32 ui_list_menu_do(struct ui_popup address_to p, struct window_row addre
                 }
                 return true;
         }
-        if (id == UI_LIST_MENU_REMOVE || (!p->field && id > UI_LIST_MENU_REMOVE))
+        if (id == UI_LIST_MENU_REMOVE || (!p->field && id >= UI_LIST_MENU_EXTRA))
         {
                 if (l->menu->act)
                         l->menu->act(row, id);
