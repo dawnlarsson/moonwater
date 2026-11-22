@@ -60,8 +60,16 @@
 #define GPUASM_TEXT (1 << 20)
 #define GPUASM_NOP 0xbf800000u
 #define GPUASM_RSRC1 0xe0ac0000u
+#define GPUASM_RSRC1_GFX12 0xe00c0000u
 #define GPUASM_RSRC2 0x0000018cu
 #define GPUASM_TARGET "\"amdgcn-amd-amdhsa--gfx1036\""
+
+enum gpuasm_isa
+{
+        GPUASM_GFX10 = 0,
+        GPUASM_GFX11 = 1,
+        GPUASM_GFX12 = 2
+};
 
 enum
 {
@@ -109,107 +117,108 @@ typedef struct gpuasm_op
         string_address name;
         p8 form;
         p16 code;
+        p16 code11;
         string_address shape;
 } gpuasm_op;
 
 static const gpuasm_op gpuasm_ops[] = {
-        {"s_mov_b32", GPUASM_SOP1, 0x03, "p1i1"},
-        {"s_mov_b64", GPUASM_SOP1, 0x04, "p2i2"},
-        {"s_and_saveexec_b64", GPUASM_SOP1, 0x24, "p2i2"},
-        {"s_add_u32", GPUASM_SOP2, 0x00, "p1i1i1"},
-        {"s_sub_u32", GPUASM_SOP2, 0x01, "p1i1i1"},
-        {"s_add_i32", GPUASM_SOP2, 0x02, "p1i1i1"},
-        {"s_sub_i32", GPUASM_SOP2, 0x03, "p1i1i1"},
-        {"s_addc_u32", GPUASM_SOP2, 0x04, "p1i1i1"},
-        {"s_min_i32", GPUASM_SOP2, 0x06, "p1i1i1"},
-        {"s_min_u32", GPUASM_SOP2, 0x07, "p1i1i1"},
-        {"s_and_b32", GPUASM_SOP2, 0x0e, "p1i1i1"},
-        {"s_or_b32", GPUASM_SOP2, 0x10, "p1i1i1"},
-        {"s_lshl_b32", GPUASM_SOP2, 0x1e, "p1i1i1"},
-        {"s_lshr_b32", GPUASM_SOP2, 0x20, "p1i1i1"},
-        {"s_mul_i32", GPUASM_SOP2, 0x26, "p1i1i1"},
-        {"s_bfe_u32", GPUASM_SOP2, 0x27, "p1i1i1"},
-        {"s_and_b64", GPUASM_SOP2, 0x0f, "p2i2i2"},
-        {"s_or_b64", GPUASM_SOP2, 0x11, "p2i2i2"},
-        {"s_andn2_b64", GPUASM_SOP2, 0x15, "p2i2i2"},
-        {"s_cmp_eq_u32", GPUASM_SOPC, 0x06, "i1i1"},
-        {"s_cmp_lg_u32", GPUASM_SOPC, 0x07, "i1i1"},
-        {"s_cmp_gt_u32", GPUASM_SOPC, 0x08, "i1i1"},
-        {"s_cmp_ge_u32", GPUASM_SOPC, 0x09, "i1i1"},
-        {"s_cmp_lt_u32", GPUASM_SOPC, 0x0a, "i1i1"},
-        {"s_cmp_le_u32", GPUASM_SOPC, 0x0b, "i1i1"},
-        {"s_cmp_eq_i32", GPUASM_SOPC, 0x00, "i1i1"},
-        {"s_cmp_gt_i32", GPUASM_SOPC, 0x02, "i1i1"},
-        {"s_cmp_ge_i32", GPUASM_SOPC, 0x03, "i1i1"},
-        {"s_cmp_lt_i32", GPUASM_SOPC, 0x04, "i1i1"},
-        {"s_cmp_le_i32", GPUASM_SOPC, 0x05, "i1i1"},
-        {"s_bitcmp0_b32", GPUASM_SOPC, 0x0c, "i1i1"},
-        {"s_bitcmp1_b32", GPUASM_SOPC, 0x0d, "i1i1"},
-        {"s_endpgm", GPUASM_SOPP, 0x01, ""},
-        {"s_waitcnt", GPUASM_SOPP, 0x0c, "w1"},
-        {"s_branch", GPUASM_SOPP, 0x02, "l1"},
-        {"s_cbranch_scc0", GPUASM_SOPP, 0x04, "l1"},
-        {"s_cbranch_scc1", GPUASM_SOPP, 0x05, "l1"},
-        {"s_cbranch_execz", GPUASM_SOPP, 0x08, "l1"},
-        {"s_load_dword", GPUASM_SMEM, 0x00, "p1b2o1"},
-        {"s_load_dwordx2", GPUASM_SMEM, 0x01, "p2b2o1"},
-        {"s_load_dwordx4", GPUASM_SMEM, 0x02, "p4b2o1"},
-        {"s_load_dwordx8", GPUASM_SMEM, 0x03, "p8b2o1"},
-        {"v_mov_b32", GPUASM_VOP1, 0x01, "d1s1"},
-        {"v_cvt_f32_u32", GPUASM_VOP1, 0x06, "d1s1"},
-        {"v_cvt_u32_f32", GPUASM_VOP1, 0x07, "d1s1"},
-        {"v_rcp_f32", GPUASM_VOP1, 0x2a, "d1s1"},
-        {"v_sqrt_f32", GPUASM_VOP1, 0x33, "d1s1"},
-        {"v_add_nc_u32", GPUASM_VOP2, 0x25, "d1s1v1"},
-        {"v_sub_nc_u32", GPUASM_VOP2, 0x26, "d1s1v1"},
-        {"v_subrev_nc_u32", GPUASM_VOP2, 0x27, "d1s1v1"},
-        {"v_and_b32", GPUASM_VOP2, 0x1b, "d1s1v1"},
-        {"v_xor_b32", GPUASM_VOP2, 0x1d, "d1s1v1"},
-        {"v_lshrrev_b32", GPUASM_VOP2, 0x16, "d1s1v1"},
-        {"v_lshlrev_b32", GPUASM_VOP2, 0x1a, "d1s1v1"},
-        {"v_max_i32", GPUASM_VOP2, 0x12, "d1s1v1"},
-        {"v_min_i32", GPUASM_VOP2, 0x11, "d1s1v1"},
-        {"v_mul_u32_u24", GPUASM_VOP2, 0x0b, "d1s1v1"},
-        {"v_mul_f32", GPUASM_VOP2, 0x08, "d1s1v1"},
-        {"v_ashrrev_i32", GPUASM_VOP2, 0x18, "d1s1v1"},
-        {"v_max_u32", GPUASM_VOP2, 0x14, "d1s1v1"},
-        {"v_min_u32", GPUASM_VOP2, 0x13, "d1s1v1"},
-        {"v_cmp_eq_u32", GPUASM_VOPC, 0xc2, "m2s1v1"},
-        {"v_cmp_ne_u32", GPUASM_VOPC, 0xc5, "m2s1v1"},
-        {"v_cmp_gt_u32", GPUASM_VOPC, 0xc4, "m2s1v1"},
-        {"v_cmp_le_u32", GPUASM_VOPC, 0xc3, "m2s1v1"},
-        {"v_cmp_lt_u32", GPUASM_VOPC, 0xc1, "m2s1v1"},
-        {"v_cmp_ge_u32", GPUASM_VOPC, 0xc6, "m2s1v1"},
-        {"v_cmp_gt_i32", GPUASM_VOPC, 0x84, "m2s1v1"},
-        {"v_cmp_le_i32", GPUASM_VOPC, 0x83, "m2s1v1"},
-        {"v_cmp_lt_i32", GPUASM_VOPC, 0x81, "m2s1v1"},
-        {"v_cmp_ge_i32", GPUASM_VOPC, 0x86, "m2s1v1"},
-        {"v_cmp_gt_u64", GPUASM_VOPC, 0xe4, "m2s2v2"},
-        {"v_cmp_le_u64", GPUASM_VOPC, 0xe3, "m2s2v2"},
-        {"v_cndmask_b32_e64", GPUASM_VOP3, 0x101, "d1s1s1k2"},
-        {"v_mad_i32_i24", GPUASM_VOP3, 0x142, "d1s1s1s1"},
-        {"v_mad_u32_u24", GPUASM_VOP3, 0x143, "d1s1s1s1"},
-        {"v_med3_i32", GPUASM_VOP3, 0x158, "d1s1s1s1"},
-        {"v_add3_u32", GPUASM_VOP3, 0x36d, "d1s1s1s1"},
-        {"v_lshl_or_b32", GPUASM_VOP3, 0x36f, "d1s1s1s1"},
-        {"v_lshl_add_u32", GPUASM_VOP3, 0x346, "d1s1s1s1"},
-        {"v_alignbit_b32", GPUASM_VOP3, 0x14e, "d1s1s1s1"},
-        {"v_perm_b32", GPUASM_VOP3, 0x344, "d1s1s1s1"},
-        {"v_bfe_u32", GPUASM_VOP3, 0x148, "d1s1s1s1"},
-        {"v_mul_lo_u32", GPUASM_VOP3, 0x169, "d1s1s1"},
-        {"v_mad_u64_u32", GPUASM_VOP3B, 0x176, "d2n2s1s1s2"},
-        {"v_add_co_u32", GPUASM_VOP3B, 0x30f, "d1n2s1s1"},
-        {"v_add_co_ci_u32", GPUASM_VOP2C, 0x28, "d1m2s1v1k2"},
-        {"v_pk_min_u16", GPUASM_VOP3P, 0x0d, "d1s1s1"},
-        {"v_pk_sub_u16", GPUASM_VOP3P, 0x0b, "d1s1s1"},
-        {"ds_bpermute_b32", GPUASM_DS, 0xb3, "d1v1v1"},
-        {"global_load_ubyte", GPUASM_GLD, 0x08, "d1v1b2"},
-        {"global_load_ushort", GPUASM_GLD, 0x0a, "d1v1b2"},
-        {"global_load_dword", GPUASM_GLD, 0x0c, "d1v1b2"},
-        {"global_load_dwordx4", GPUASM_GLD, 0x0e, "d4v1b2"},
-        {"global_store_dword", GPUASM_GST, 0x1c, "v1v1b2"},
-        {"global_store_dwordx4", GPUASM_GST, 0x1e, "v1v4b2"},
-        {"image_load", GPUASM_MIMG, 0x00, "d4v2r8"},
+        {"s_mov_b32", GPUASM_SOP1, 0x03, 0x00, "p1i1"},
+        {"s_mov_b64", GPUASM_SOP1, 0x04, 0x01, "p2i2"},
+        {"s_and_saveexec_b64", GPUASM_SOP1, 0x24, 0x21, "p2i2"},
+        {"s_add_u32", GPUASM_SOP2, 0x00, 0x00, "p1i1i1"},
+        {"s_sub_u32", GPUASM_SOP2, 0x01, 0x01, "p1i1i1"},
+        {"s_add_i32", GPUASM_SOP2, 0x02, 0x02, "p1i1i1"},
+        {"s_sub_i32", GPUASM_SOP2, 0x03, 0x03, "p1i1i1"},
+        {"s_addc_u32", GPUASM_SOP2, 0x04, 0x04, "p1i1i1"},
+        {"s_min_i32", GPUASM_SOP2, 0x06, 0x12, "p1i1i1"},
+        {"s_min_u32", GPUASM_SOP2, 0x07, 0x13, "p1i1i1"},
+        {"s_and_b32", GPUASM_SOP2, 0x0e, 0x16, "p1i1i1"},
+        {"s_or_b32", GPUASM_SOP2, 0x10, 0x18, "p1i1i1"},
+        {"s_lshl_b32", GPUASM_SOP2, 0x1e, 0x08, "p1i1i1"},
+        {"s_lshr_b32", GPUASM_SOP2, 0x20, 0x0a, "p1i1i1"},
+        {"s_mul_i32", GPUASM_SOP2, 0x26, 0x2c, "p1i1i1"},
+        {"s_bfe_u32", GPUASM_SOP2, 0x27, 0x26, "p1i1i1"},
+        {"s_and_b64", GPUASM_SOP2, 0x0f, 0x17, "p2i2i2"},
+        {"s_or_b64", GPUASM_SOP2, 0x11, 0x19, "p2i2i2"},
+        {"s_andn2_b64", GPUASM_SOP2, 0x15, 0x23, "p2i2i2"},
+        {"s_cmp_eq_u32", GPUASM_SOPC, 0x06, 0x06, "i1i1"},
+        {"s_cmp_lg_u32", GPUASM_SOPC, 0x07, 0x07, "i1i1"},
+        {"s_cmp_gt_u32", GPUASM_SOPC, 0x08, 0x08, "i1i1"},
+        {"s_cmp_ge_u32", GPUASM_SOPC, 0x09, 0x09, "i1i1"},
+        {"s_cmp_lt_u32", GPUASM_SOPC, 0x0a, 0x0a, "i1i1"},
+        {"s_cmp_le_u32", GPUASM_SOPC, 0x0b, 0x0b, "i1i1"},
+        {"s_cmp_eq_i32", GPUASM_SOPC, 0x00, 0x00, "i1i1"},
+        {"s_cmp_gt_i32", GPUASM_SOPC, 0x02, 0x02, "i1i1"},
+        {"s_cmp_ge_i32", GPUASM_SOPC, 0x03, 0x03, "i1i1"},
+        {"s_cmp_lt_i32", GPUASM_SOPC, 0x04, 0x04, "i1i1"},
+        {"s_cmp_le_i32", GPUASM_SOPC, 0x05, 0x05, "i1i1"},
+        {"s_bitcmp0_b32", GPUASM_SOPC, 0x0c, 0x0c, "i1i1"},
+        {"s_bitcmp1_b32", GPUASM_SOPC, 0x0d, 0x0d, "i1i1"},
+        {"s_endpgm", GPUASM_SOPP, 0x01, 0x30, ""},
+        {"s_waitcnt", GPUASM_SOPP, 0x0c, 0x09, "w1"},
+        {"s_branch", GPUASM_SOPP, 0x02, 0x20, "l1"},
+        {"s_cbranch_scc0", GPUASM_SOPP, 0x04, 0x21, "l1"},
+        {"s_cbranch_scc1", GPUASM_SOPP, 0x05, 0x22, "l1"},
+        {"s_cbranch_execz", GPUASM_SOPP, 0x08, 0x25, "l1"},
+        {"s_load_dword", GPUASM_SMEM, 0x00, 0x00, "p1b2o1"},
+        {"s_load_dwordx2", GPUASM_SMEM, 0x01, 0x01, "p2b2o1"},
+        {"s_load_dwordx4", GPUASM_SMEM, 0x02, 0x02, "p4b2o1"},
+        {"s_load_dwordx8", GPUASM_SMEM, 0x03, 0x03, "p8b2o1"},
+        {"v_mov_b32", GPUASM_VOP1, 0x01, 0x01, "d1s1"},
+        {"v_cvt_f32_u32", GPUASM_VOP1, 0x06, 0x06, "d1s1"},
+        {"v_cvt_u32_f32", GPUASM_VOP1, 0x07, 0x07, "d1s1"},
+        {"v_rcp_f32", GPUASM_VOP1, 0x2a, 0x2a, "d1s1"},
+        {"v_sqrt_f32", GPUASM_VOP1, 0x33, 0x33, "d1s1"},
+        {"v_add_nc_u32", GPUASM_VOP2, 0x25, 0x25, "d1s1v1"},
+        {"v_sub_nc_u32", GPUASM_VOP2, 0x26, 0x26, "d1s1v1"},
+        {"v_subrev_nc_u32", GPUASM_VOP2, 0x27, 0x27, "d1s1v1"},
+        {"v_and_b32", GPUASM_VOP2, 0x1b, 0x1b, "d1s1v1"},
+        {"v_xor_b32", GPUASM_VOP2, 0x1d, 0x1d, "d1s1v1"},
+        {"v_lshrrev_b32", GPUASM_VOP2, 0x16, 0x19, "d1s1v1"},
+        {"v_lshlrev_b32", GPUASM_VOP2, 0x1a, 0x18, "d1s1v1"},
+        {"v_max_i32", GPUASM_VOP2, 0x12, 0x12, "d1s1v1"},
+        {"v_min_i32", GPUASM_VOP2, 0x11, 0x11, "d1s1v1"},
+        {"v_mul_u32_u24", GPUASM_VOP2, 0x0b, 0x0b, "d1s1v1"},
+        {"v_mul_f32", GPUASM_VOP2, 0x08, 0x08, "d1s1v1"},
+        {"v_ashrrev_i32", GPUASM_VOP2, 0x18, 0x1a, "d1s1v1"},
+        {"v_max_u32", GPUASM_VOP2, 0x14, 0x14, "d1s1v1"},
+        {"v_min_u32", GPUASM_VOP2, 0x13, 0x13, "d1s1v1"},
+        {"v_cmp_eq_u32", GPUASM_VOPC, 0xc2, 0x4a, "m2s1v1"},
+        {"v_cmp_ne_u32", GPUASM_VOPC, 0xc5, 0x4d, "m2s1v1"},
+        {"v_cmp_gt_u32", GPUASM_VOPC, 0xc4, 0x4c, "m2s1v1"},
+        {"v_cmp_le_u32", GPUASM_VOPC, 0xc3, 0x4b, "m2s1v1"},
+        {"v_cmp_lt_u32", GPUASM_VOPC, 0xc1, 0x49, "m2s1v1"},
+        {"v_cmp_ge_u32", GPUASM_VOPC, 0xc6, 0x4e, "m2s1v1"},
+        {"v_cmp_gt_i32", GPUASM_VOPC, 0x84, 0x44, "m2s1v1"},
+        {"v_cmp_le_i32", GPUASM_VOPC, 0x83, 0x43, "m2s1v1"},
+        {"v_cmp_lt_i32", GPUASM_VOPC, 0x81, 0x41, "m2s1v1"},
+        {"v_cmp_ge_i32", GPUASM_VOPC, 0x86, 0x46, "m2s1v1"},
+        {"v_cmp_gt_u64", GPUASM_VOPC, 0xe4, 0x5c, "m2s2v2"},
+        {"v_cmp_le_u64", GPUASM_VOPC, 0xe3, 0x5b, "m2s2v2"},
+        {"v_cndmask_b32_e64", GPUASM_VOP3, 0x101, 0x101, "d1s1s1k2"},
+        {"v_mad_i32_i24", GPUASM_VOP3, 0x142, 0x20a, "d1s1s1s1"},
+        {"v_mad_u32_u24", GPUASM_VOP3, 0x143, 0x20b, "d1s1s1s1"},
+        {"v_med3_i32", GPUASM_VOP3, 0x158, 0x220, "d1s1s1s1"},
+        {"v_add3_u32", GPUASM_VOP3, 0x36d, 0x255, "d1s1s1s1"},
+        {"v_lshl_or_b32", GPUASM_VOP3, 0x36f, 0x256, "d1s1s1s1"},
+        {"v_lshl_add_u32", GPUASM_VOP3, 0x346, 0x246, "d1s1s1s1"},
+        {"v_alignbit_b32", GPUASM_VOP3, 0x14e, 0x216, "d1s1s1s1"},
+        {"v_perm_b32", GPUASM_VOP3, 0x344, 0x244, "d1s1s1s1"},
+        {"v_bfe_u32", GPUASM_VOP3, 0x148, 0x210, "d1s1s1s1"},
+        {"v_mul_lo_u32", GPUASM_VOP3, 0x169, 0x32c, "d1s1s1"},
+        {"v_mad_u64_u32", GPUASM_VOP3B, 0x176, 0x2fe, "d2n2s1s1s2"},
+        {"v_add_co_u32", GPUASM_VOP3B, 0x30f, 0x300, "d1n2s1s1"},
+        {"v_add_co_ci_u32", GPUASM_VOP2C, 0x28, 0x20, "d1m2s1v1k2"},
+        {"v_pk_min_u16", GPUASM_VOP3P, 0x0d, 0x0d, "d1s1s1"},
+        {"v_pk_sub_u16", GPUASM_VOP3P, 0x0b, 0x0b, "d1s1s1"},
+        {"ds_bpermute_b32", GPUASM_DS, 0xb3, 0xb3, "d1v1v1"},
+        {"global_load_ubyte", GPUASM_GLD, 0x08, 0x10, "d1v1b2"},
+        {"global_load_ushort", GPUASM_GLD, 0x0a, 0x12, "d1v1b2"},
+        {"global_load_dword", GPUASM_GLD, 0x0c, 0x14, "d1v1b2"},
+        {"global_load_dwordx4", GPUASM_GLD, 0x0e, 0x17, "d4v1b2"},
+        {"global_store_dword", GPUASM_GST, 0x1c, 0x1a, "v1v1b2"},
+        {"global_store_dwordx4", GPUASM_GST, 0x1e, 0x1d, "v1v4b2"},
+        {"image_load", GPUASM_MIMG, 0x00, 0x00, "d4v2r8"},
 };
 
 //      The instructions that take clamp, which LLVM says instruction by instruction.
@@ -327,6 +336,8 @@ static p8 gpuasm_message[512];
 static struct
 {
         string_address file;
+        string_address prefix;
+        enum gpuasm_isa isa;
         positive line;
         positive depth;
         gpuasm_span macro;
@@ -591,7 +602,7 @@ static b32 gpuasm_register(gpuasm_span text, p32 address_to kind, p32 address_to
         if (gpuasm_is(text, "null"))
         {
                 *kind = GPUASM_NULL;
-                *first = 125;
+                *first = gpuasm.isa == GPUASM_GFX10 ? 125 : 124;
                 return 1;
         }
         if (text.length < 2 || (text.at[0] != 's' && text.at[0] != 'v'))
@@ -813,7 +824,12 @@ static bool gpuasm_waitcnt(gpuasm_span text, p32 address_to bits)
                         text.length--;
                 }
         }
-        *bits = (vm & 15) | exp << 4 | lgkm << 8 | (vm >> 4) << 14;
+        if (gpuasm.isa == GPUASM_GFX10)
+                *bits = (vm & 15) | exp << 4 | lgkm << 8 | (vm >> 4) << 14;
+        else if (gpuasm.isa == GPUASM_GFX11)
+                *bits = (vm << 10) | (lgkm << 4) | exp;
+        else
+                *bits = ((p32)seen << 24) | (vm & 63u) | ((exp & 7u) << 8) | ((lgkm & 63u) << 16);
         return true;
 }
 
@@ -877,8 +893,11 @@ static bool gpuasm_instruction(gpuasm_span mnemonic, gpuasm_span rest)
         b64 written = 0;
         p32 w0;
         p32 w1 = 0;
+        p32 w2 = 0;
+        bool has_w2 = false;
         p32 src[3] = {128, 128, 128};
         positive form;
+        p32 opc;
 
         if (!gpuasm.text)
                 return gpuasm_fail_span("an instruction outside .text", mnemonic);
@@ -906,6 +925,7 @@ static bool gpuasm_instruction(gpuasm_span mnemonic, gpuasm_span rest)
         if (!op)
                 return gpuasm_fail_span("unknown instruction", mnemonic);
         form = op->form;
+        opc = gpuasm.isa == GPUASM_GFX10 ? op->code : op->code11;
         wanted = string_length(op->shape) / 2;
 
         //      The modifiers after the operands: clamp, and offset:N on a memory instruction.
@@ -1005,7 +1025,7 @@ static bool gpuasm_instruction(gpuasm_span mnemonic, gpuasm_span rest)
                                 ok = gpuasm_fail_span("eight scalar registers from a multiple of four are wanted", part[at]);
                 }
                 else if (kind == 'b' && off)
-                        o[at].code = 125;
+                        o[at].code = gpuasm.isa == GPUASM_GFX10 ? 125 : 124;
                 else if (kind == 'b')
                 {
                         ok = gpuasm_destination(part[at], 'p', size, o + at);
@@ -1064,16 +1084,16 @@ static bool gpuasm_instruction(gpuasm_span mnemonic, gpuasm_span rest)
                         src[0] = o[1].code;
                         if (form != GPUASM_VOP1)
                                 src[1] = o[2].code;
-                        w0 = 0xd4000000u | (base + op->code) << 16 | (clamp ? 1u << 15 : 0) | o[0].code;
+                        w0 = 0xd4000000u | (base + opc) << 16 | (clamp ? 1u << 15 : 0) | o[0].code;
                         w1 = src[0] | src[1] << 9 | src[2] << 18;
                         form = GPUASM_VOP3;
                 }
                 else if (form == GPUASM_VOP1)
-                        w0 = 0x7e000000u | o[0].code << 17 | (p32)op->code << 9 | o[1].code;
+                        w0 = 0x7e000000u | o[0].code << 17 | opc << 9 | o[1].code;
                 else if (form == GPUASM_VOP2)
-                        w0 = (p32)op->code << 25 | o[0].code << 17 | (o[2].code - 256) << 9 | o[1].code;
+                        w0 = opc << 25 | o[0].code << 17 | (o[2].code - 256) << 9 | o[1].code;
                 else
-                        w0 = 0x7c000000u | (p32)op->code << 17 | (o[2].code - 256) << 9 | o[1].code;
+                        w0 = 0x7c000000u | opc << 17 | (o[2].code - 256) << 9 | o[1].code;
                 if (form != GPUASM_VOP3)
                         w1 = 0;
         }
@@ -1085,39 +1105,56 @@ static bool gpuasm_instruction(gpuasm_span mnemonic, gpuasm_span rest)
                         return gpuasm_fail_span("operands that do not fit the 32-bit encoding of", mnemonic);
                 if (force == 64 || !fits)
                 {
-                        w0 = 0xd4000000u | (0x100u + op->code) << 16 | o[1].code << 8 | o[0].code;
+                        w0 = 0xd4000000u | (0x100u + opc) << 16 | o[1].code << 8 | o[0].code;
                         w1 = o[2].code | o[3].code << 9 | (wanted < 5 ? 128u : o[4].code) << 18;
                         form = GPUASM_VOP3B;
                 }
                 else
-                        w0 = (p32)op->code << 25 | o[0].code << 17 | (o[3].code - 256) << 9 | o[2].code;
+                        w0 = opc << 25 | o[0].code << 17 | (o[3].code - 256) << 9 | o[2].code;
         }
         else if (form == GPUASM_VOP3)
         {
                 for (positive at = 1; at < wanted; at++)
                         src[at - 1] = o[at].code;
-                w0 = 0xd4000000u | (p32)op->code << 16 | (clamp ? 1u << 15 : 0) | o[0].code;
+                w0 = 0xd4000000u | opc << 16 | (clamp ? 1u << 15 : 0) | o[0].code;
                 w1 = src[0] | src[1] << 9 | src[2] << 18;
         }
         else if (form == GPUASM_VOP3B)
         {
-                w0 = 0xd4000000u | (p32)op->code << 16 | (clamp ? 1u << 15 : 0) | o[1].code << 8 | o[0].code;
+                w0 = 0xd4000000u | opc << 16 | (clamp ? 1u << 15 : 0) | o[1].code << 8 | o[0].code;
                 w1 = o[2].code | o[3].code << 9 | (wanted < 5 ? 128u : o[4].code) << 18;
         }
         else if (form == GPUASM_VOP3P)
         {
-                w0 = 0xcc000000u | (p32)op->code << 16 | (clamp ? 1u << 15 : 0) | 1u << 14 | o[0].code;
+                w0 = 0xcc000000u | opc << 16 | (clamp ? 1u << 15 : 0) | 1u << 14 | o[0].code;
                 w1 = o[1].code | o[2].code << 9 | 128u << 18 | 3u << 27;
         }
         else if (form == GPUASM_SOP1)
-                w0 = 0xbe800000u | o[0].code << 16 | (p32)op->code << 8 | o[1].code;
+                w0 = 0xbe800000u | o[0].code << 16 | opc << 8 | o[1].code;
         else if (form == GPUASM_SOP2)
-                w0 = 0x80000000u | (p32)op->code << 23 | o[0].code << 16 | o[2].code << 8 | o[1].code;
+                w0 = 0x80000000u | opc << 23 | o[0].code << 16 | o[2].code << 8 | o[1].code;
         else if (form == GPUASM_SOPC)
-                w0 = 0xbf000000u | (p32)op->code << 16 | o[1].code << 8 | o[0].code;
+                w0 = 0xbf000000u | opc << 16 | o[1].code << 8 | o[0].code;
         else if (form == GPUASM_SOPP)
         {
-                w0 = GPUASM_NOP | (p32)op->code << 16 | immediate;
+                if (gpuasm.isa == GPUASM_GFX12 && wanted && op->shape[0] == 'w')
+                {
+                        p32 seen = immediate >> 24;
+
+                        if ((seen & 1u) && !gpuasm_emit(0xbfc00000u | (immediate & 63u)))
+                                return false;
+                        if ((seen & 2u) && !gpuasm_emit(0xbfc40000u | ((immediate >> 8) & 7u)))
+                                return false;
+                        if (seen & 4u)
+                        {
+                                p32 n = (immediate >> 16) & 63u;
+
+                                if (!gpuasm_emit(0xbfc70000u | n) || !gpuasm_emit(0xbfc60000u | n))
+                                        return false;
+                        }
+                        return true;
+                }
+                w0 = GPUASM_NOP | opc << 16 | immediate;
                 if (wanted && op->shape[0] == 'l')
                 {
                         gpuasm_fixup *fix;
@@ -1134,30 +1171,53 @@ static bool gpuasm_instruction(gpuasm_span mnemonic, gpuasm_span rest)
         }
         else if (form == GPUASM_SMEM)
         {
-                w0 = 0xf4000000u | (p32)op->code << 18 | o[0].code << 6 | o[1].code >> 1;
-                w1 = 0xfa000000u | o[2].literal;
+                w0 = 0xf4000000u | (gpuasm.isa == GPUASM_GFX12 ? opc << 13 : opc << 18) | o[0].code << 6 | o[1].code >> 1;
+                w1 = (gpuasm.isa == GPUASM_GFX10 ? 0xfa000000u : 0xf8000000u) | o[2].literal;
         }
         else if (form == GPUASM_DS)
         {
-                w0 = 0xd8000000u | (p32)op->code << 18;
+                w0 = 0xd8000000u | opc << 18;
                 w1 = (o[1].code - 256) | (o[2].code - 256) << 8 | o[0].code << 24;
         }
         else if (form == GPUASM_MIMG)
         {
-                // MIMG: the dimension at bit 3 (1: 2D), dmask at 8, unorm at 12, the opcode at 18; the address, the data and the resource
-                // (in fours of scalar registers) in the second word.
-                w0 = 0xf0000000u | (p32)op->code << 18 | 1u << 12 | image_dmask << 8 | 1u << 3;
-                w1 = (o[1].code - 256) | o[0].code << 8 | (o[2].code >> 2) << 16;
+                if (gpuasm.isa == GPUASM_GFX12)
+                {
+                        w0 = 0xd0000000u | image_dmask << 22 | 1u;
+                        w1 = o[0].code | (o[2].code >> 2) << 11;
+                        w2 = (o[1].code - 256) | ((o[1].code - 256) + 1) << 8;
+                        has_w2 = true;
+                }
+                else if (gpuasm.isa == GPUASM_GFX11)
+                {
+                        w0 = 0xf0000000u | opc << 18 | image_dmask << 8 | 1u << 7 | 1u << 2;
+                        w1 = (o[1].code - 256) | o[0].code << 8 | (o[2].code >> 2) << 16;
+                }
+                else
+                {
+                        w0 = 0xf0000000u | opc << 18 | 1u << 12 | image_dmask << 8 | 1u << 3;
+                        w1 = (o[1].code - 256) | o[0].code << 8 | (o[2].code >> 2) << 16;
+                }
         }
-        else if (form == GPUASM_GLD)
+        else if (form == GPUASM_GLD || form == GPUASM_GST)
         {
-                w0 = 0xdc008000u | (p32)op->code << 18 | ((p32)offset & 0xfff);
-                w1 = (o[1].code - 256) | o[2].code << 16 | o[0].code << 24;
-        }
-        else
-        {
-                w0 = 0xdc008000u | (p32)op->code << 18 | ((p32)offset & 0xfff);
-                w1 = (o[0].code - 256) | (o[1].code - 256) << 8 | o[2].code << 16;
+                if (gpuasm.isa == GPUASM_GFX12)
+                {
+                        p32 vaddr = (form == GPUASM_GLD ? o[1].code : o[0].code) - 256;
+
+                        w0 = 0xee000000u | opc << 14 | o[2].code;
+                        w1 = form == GPUASM_GLD ? o[0].code : (o[1].code - 256) << 23;
+                        w2 = vaddr | (((p32)offset & 0xffffffu) << 8);
+                        has_w2 = true;
+                }
+                else
+                {
+                        w0 = (gpuasm.isa == GPUASM_GFX11 ? 0xdc020000u | ((p32)offset & 0x1fff) : 0xdc008000u | ((p32)offset & 0xfff)) | opc << 18;
+                        if (form == GPUASM_GLD)
+                                w1 = (o[1].code - 256) | o[2].code << 16 | o[0].code << 24;
+                        else
+                                w1 = (o[0].code - 256) | (o[1].code - 256) << 8 | o[2].code << 16;
+                }
         }
 
         //      The long encodings read two scalar values at most: distinct registers, and a literal as one.
@@ -1188,6 +1248,8 @@ static bool gpuasm_instruction(gpuasm_span mnemonic, gpuasm_span rest)
             form == GPUASM_DS || form == GPUASM_GLD || form == GPUASM_GST || form == GPUASM_MIMG)
                 if (!gpuasm_emit(w1))
                         return false;
+        if (has_w2 && !gpuasm_emit(w2))
+                return false;
         if (literal && !gpuasm_emit(value))
                 return false;
         return true;
@@ -1672,9 +1734,12 @@ static bool gpuasm_finish(void)
         if (!gpuasm_kernel_count)
                 return gpuasm_fail("no .amdhsa_kernel in the file", null, 0);
 
-        GPUASM_OUT("// Generated by build gpu-kernels from ");
-        gpuasm_out(gpuasm.file, string_length(gpuasm.file));
-        GPUASM_OUT(". Do not edit; edit the .asm and build again.\n");
+        if (!gpuasm.prefix || !*gpuasm.prefix)
+        {
+                GPUASM_OUT("// Generated by build gpu-kernels from ");
+                gpuasm_out(gpuasm.file, string_length(gpuasm.file));
+                GPUASM_OUT(". Do not edit; edit the .asm and build again.\n");
+        }
         for (positive at = 0; at < gpuasm_kernel_count; at++)
         {
                 gpuasm_kernel *kernel = gpuasm_kernels + at;
@@ -1683,6 +1748,7 @@ static bool gpuasm_finish(void)
                 positive first;
                 positive last;
                 positive total;
+                p32 rsrc1 = gpuasm.isa == GPUASM_GFX12 ? GPUASM_RSRC1_GFX12 : GPUASM_RSRC1;
 
                 gpuasm.line = kernel->line;
                 if (label >= GPUASM_LABELS || !gpuasm_labels[label].defined)
@@ -1695,6 +1761,8 @@ static bool gpuasm_finish(void)
                         return gpuasm_fail_span("a kernel with no code:", name);
                 total = last - first + 2;
                 GPUASM_OUT("static const unsigned int gpu_k_");
+                if (gpuasm.prefix && *gpuasm.prefix)
+                        gpuasm_out(gpuasm.prefix, string_length(gpuasm.prefix));
                 gpuasm_out(name.at, name.length);
                 GPUASM_OUT("[] = {\n");
                 for (positive word = 0; word < total; word += 10)
@@ -1702,7 +1770,7 @@ static bool gpuasm_finish(void)
                         GPUASM_OUT("    ");
                         for (positive in = word; in < word + 10 && in < total; in++)
                         {
-                                p32 value = in == 0   ? GPUASM_RSRC1 | ((kernel->vgprs + 3) / 4 - 1)
+                                p32 value = in == 0   ? rsrc1 | ((kernel->vgprs + 3) / 4 - 1)
                                             : in == 1 ? GPUASM_RSRC2
                                                       : gpuasm_words[first + in - 2];
 
@@ -1724,10 +1792,11 @@ static bool gpuasm_finish(void)
 
 /*
         Assemble a file's text (terminated) under the name its messages
-        give. True with the arrays in gpuasm_output, or false with the line
-        that says why in gpuasm_message.
+        give for a target AMD ISA (GFX10, GFX11, or GFX12). True with the
+        arrays in gpuasm_output, or false with the line that says why in
+        gpuasm_message.
 */
-static bool gpuasm_assemble(string_address file, string_address source)
+static bool gpuasm_assemble_isa(string_address file, string_address source, enum gpuasm_isa isa, string_address prefix)
 {
         memory_zero(address_of gpuasm, sizeof(gpuasm));
         gpuasm_position = 0;
@@ -1741,7 +1810,14 @@ static bool gpuasm_assemble(string_address file, string_address source)
         gpuasm_output_length = 0;
         gpuasm_message[0] = end;
         gpuasm.file = file;
+        gpuasm.prefix = prefix;
+        gpuasm.isa = isa;
         gpuasm.text = true;
 
         return gpuasm_run(source, source + string_length(source), 0) && gpuasm_finish();
+}
+
+static bool gpuasm_assemble(string_address file, string_address source)
+{
+        return gpuasm_assemble_isa(file, source, GPUASM_GFX10, (string_address)"");
 }

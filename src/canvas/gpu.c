@@ -271,6 +271,14 @@ static const struct gpu_code gpu_kernels[] = {
     {gpu_k_copy, sizeof(gpu_k_copy)}, {gpu_k_fill, sizeof(gpu_k_fill)}, {gpu_k_tone, sizeof(gpu_k_tone)}, {gpu_k_glass, sizeof(gpu_k_glass)},
     {gpu_cp, sizeof(gpu_cp)}, {gpu_bx, sizeof(gpu_bx)}, {gpu_k_scene, sizeof(gpu_k_scene)}, {gpu_k_scale, sizeof(gpu_k_scale)},
     {gpu_k_image, sizeof(gpu_k_image)}, {gpu_k_nv12, sizeof(gpu_k_nv12)}};
+static const struct gpu_code gpu_kernels_gfx11[] = {
+    {gpu_k_11_copy, sizeof(gpu_k_11_copy)}, {gpu_k_11_fill, sizeof(gpu_k_11_fill)}, {gpu_k_11_tone, sizeof(gpu_k_11_tone)}, {gpu_k_11_glass, sizeof(gpu_k_11_glass)},
+    {0, 0}, {0, 0}, {gpu_k_11_scene, sizeof(gpu_k_11_scene)}, {gpu_k_11_scale, sizeof(gpu_k_11_scale)},
+    {gpu_k_11_image, sizeof(gpu_k_11_image)}, {gpu_k_11_nv12, sizeof(gpu_k_11_nv12)}};
+static const struct gpu_code gpu_kernels_gfx12[] = {
+    {gpu_k_12_copy, sizeof(gpu_k_12_copy)}, {gpu_k_12_fill, sizeof(gpu_k_12_fill)}, {gpu_k_12_tone, sizeof(gpu_k_12_tone)}, {gpu_k_12_glass, sizeof(gpu_k_12_glass)},
+    {0, 0}, {0, 0}, {gpu_k_12_scene, sizeof(gpu_k_12_scene)}, {gpu_k_12_scale, sizeof(gpu_k_12_scale)},
+    {gpu_k_12_image, sizeof(gpu_k_12_image)}, {gpu_k_12_nv12, sizeof(gpu_k_12_nv12)}};
 #define GPU_KERNELS (sizeof(gpu_kernels) / sizeof(gpu_kernels[0]))
 #define GPU_KERNEL_OF(op) (op) // the table is in the order of the ops
 static unsigned int gpu_kernel_at[GPU_KERNELS];
@@ -315,6 +323,8 @@ struct gpu_set
         unsigned int (*batch)(const struct gpu_job *job, unsigned int address_to words, unsigned int room);
 };
 static const struct gpu_set gpu_amd_rdna2 = {gpu_kernels, GPU_KERNELS, 2, GPU_TEST_HASH, 0};
+static const struct gpu_set gpu_amd_rdna3 = {gpu_kernels_gfx11, GPU_KERNELS, 2, GPU_TEST_HASH, 0};
+static const struct gpu_set gpu_amd_rdna4 = {gpu_kernels_gfx12, GPU_KERNELS, 2, GPU_TEST_HASH, 0};
 static const struct gpu_set *gpu_set = &gpu_amd_rdna2; // the started card's (amdgpu's until a start says otherwise: a check's fake card is one)
 // The prerequisites of the path, in the order it needs them. gpu_start stops at the first that fails and keeps it: the code, the kernel's error (its
 // errno; 0 where the step failed by what it found, not by a call), and a bit in gpu_req.mask for each that passed. The node the checks looked at (its path,
@@ -554,6 +564,10 @@ static unsigned int gpu_amd_window(unsigned int family, positive *va, positive *
 
 static const struct gpu_set *gpu_amd_set(unsigned int family)
 {
+        if (gpu_amd_gfx_major == 12)
+                return &gpu_amd_rdna4;
+        if (gpu_amd_gfx_major == 11)
+                return &gpu_amd_rdna3;
         return gpu_family_ok(family) ? &gpu_amd_rdna2 : 0;
 }
 
@@ -654,7 +668,7 @@ static unsigned int gpu_amd_submit(const struct gpu_job *job, p64 *bos, unsigned
 {
         const positive code = job->code, args = job->arguments;
         const unsigned int address_to k = job->kernel;
-        unsigned int ib[48], n = 0;
+        unsigned int ib[64], n = 0;
         // Per-generation cache invalidate + SH register setup (GFX6 SI through GFX12 RDNA4; default GFX10 when ip_major == 0).
         const unsigned int gfx = gpu_amd_gfx_major ? gpu_amd_gfx_major : 10u;
 
@@ -1871,7 +1885,7 @@ static b32 gpu_start(positive bytes)
                         break;
                 }
                 gpu_image_ok = gpu_set == &gpu_amd_rdna2 && gpu_image_test();
-                gpu_nv12_ok = gpu_set == &gpu_amd_rdna2 && gpu_nv12_test();
+                gpu_nv12_ok = gpu_backend == &gpu_amd && gpu_nv12_test();
                 if ((gpu_req.mask & (1u << GPU_REQ_UDMABUF | 1u << GPU_REQ_PRIME)) != (1u << GPU_REQ_UDMABUF | 1u << GPU_REQ_PRIME))
                         gpu_route_probe();
                 gpu_kmsg_drain();
@@ -3734,7 +3748,7 @@ HOT static int gpu_scene_build(positive ops_at, unsigned int n, positive bins_at
                                 hand |= kind > 2;
                         i += m;
                 }
-                if (hand || partial)
+                if (hand || partial || !gpu_set->kernels[scene_op].words)
                         return -1;
         }
         dx0 &= ~63u, dy0 &= ~3u, dx1 = (dx1 + 63) & ~63u, dy1 = (dy1 + 3) & ~3u; // the kernel draws whole patches: so the ops are binned for them
@@ -3910,7 +3924,7 @@ static b32 gpu_nv12(positive luma, unsigned int luma_pitch, positive chroma, uns
         struct gpu_args address_to a;
 
         gpu_last_error = 0, gpu_end = GPU_END_NONE;
-        if (!w || !h || !gpu_idle() || gpu_set != &gpu_amd_rdna2 || (!gpu_nv12_ok && !gpu_nv12_trying))
+        if (!w || !h || !gpu_idle() || gpu_backend != &gpu_amd || (!gpu_nv12_ok && !gpu_nv12_trying))
                 return false;
         gpu_slot_take(), a = GPU_ARGS;
         a->s = luma, a->d = dst, a->g = tab, a->sp = luma_pitch, a->dp = dp, a->gp = chroma_pitch, a->w = w, a->op = 9, a->v = 0, a->x0 = a->y0 = 0, a->rows = h;

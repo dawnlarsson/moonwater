@@ -4923,6 +4923,23 @@ static b32 build_gpu_kernels(string_address input, string_address output)
                 refuse_if(system_write_once(handle, line, string_length((string_address)line)) < 0 ||
                               system_write_once(handle, gpuasm_output, gpuasm_output_length) != (bipolar)gpuasm_output_length,
                           1, "gpu-kernels: cannot write %s\n", temporary);
+                // Emit GFX11 (RDNA3/3.5) and GFX12 (RDNA4) kernel tables from the same gpu.asm source.
+                if (!gpuasm_assemble_isa(input, (string_address)build_gpu_source, GPUASM_GFX11, (string_address)"11_"))
+                {
+                        system_close(handle);
+                        unlink(temporary);
+                        return string_report(log_error, 1, "gpu-kernels (gfx11): %s\n", gpuasm_message);
+                }
+                refuse_if(system_write_once(handle, gpuasm_output, gpuasm_output_length) != (bipolar)gpuasm_output_length,
+                          1, "gpu-kernels: cannot write %s\n", temporary);
+                if (!gpuasm_assemble_isa(input, (string_address)build_gpu_source, GPUASM_GFX12, (string_address)"12_"))
+                {
+                        system_close(handle);
+                        unlink(temporary);
+                        return string_report(log_error, 1, "gpu-kernels (gfx12): %s\n", gpuasm_message);
+                }
+                refuse_if(system_write_once(handle, gpuasm_output, gpuasm_output_length) != (bipolar)gpuasm_output_length,
+                          1, "gpu-kernels: cannot write %s\n", temporary);
                 system_close(handle);
         }
 

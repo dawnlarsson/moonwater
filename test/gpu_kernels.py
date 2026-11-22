@@ -58,12 +58,42 @@ def tool(name):
     return found
 
 
+def _rewrite_gfx12_waitcnt(m):
+    parts = [p.strip() for p in re.split(r'[&,\s]+', m.group(1).strip()) if p.strip()]
+    out = []
+    for p in parts:
+        km = re.fullmatch(r'(\w+)\((\d+)\)', p)
+        if not km:
+            return m.group(0)
+        name, val = km.group(1), km.group(2)
+        if name == 'vmcnt':
+            out.append('\ts_wait_loadcnt %s' % val)
+        elif name == 'expcnt':
+            out.append('\ts_wait_expcnt %s' % val)
+        elif name == 'lgkmcnt':
+            out.append('\ts_wait_kmcnt %s' % val)
+            out.append('\ts_wait_dscnt %s' % val)
+    return '\n'.join(out)
+
+
+def _rewrite_gfx12_image(m):
+    v0 = int(m.group(2))
+    rest = re.sub(r'\s+unorm\b', '', m.group(3))
+    return '%s, [v%d, v%d], %s' % (m.group(1), v0, v0 + 1, rest)
+
+
 def build(asm, chip=None):
     work = pathlib.Path(tempfile.mkdtemp())
     mc = MC
     if chip:
-        #   the same text for another chip: the target line and the processor name it, nothing else does
-        (work / 'k.asm').write_text(pathlib.Path(asm).read_text().replace('--gfx1036"', '--%s"' % chip))
+        #   the same text for another chip: the target line and the processor name it, plus GFX11+/12 directive & waitcnt lowering
+        src = pathlib.Path(asm).read_text().replace('--gfx1036"', '--%s"' % chip)
+        if chip.startswith('gfx11') or chip.startswith('gfx12'):
+            src = src.replace('.amdhsa_user_sgpr_private_segment_buffer 1', '.amdhsa_user_sgpr_count 6')
+        if chip.startswith('gfx12'):
+            src = re.sub(r'^[ \t]*s_waitcnt[ \t]+(.+)$', _rewrite_gfx12_waitcnt, src, flags=re.M)
+            src = re.sub(r'(image_load[ \t]+v(?:\[\d+:\d+\]|\d+)),[ \t]*v\[(\d+):\d+\],[ \t]*(s\[\d+:\d+\].*)', _rewrite_gfx12_image, src)
+        (work / 'k.asm').write_text(src)
         asm, mc = work / 'k.asm', [w.replace('gfx1036', chip) for w in MC]
     subprocess.run([tool('llvm-mc')] + mc + ['-filetype=obj', str(asm), '-o', str(work / 'k.o')], check=True)
     subprocess.run([tool('ld.lld'), '-shared', str(work / 'k.o'), '-o', str(work / 'k.so')], check=True)
@@ -160,9 +190,12 @@ def kernels(d):
     return out
 
 
-def arrays(text):
+def arrays(text, prefix=''):
+    if prefix:
+        return [(name, [int(w, 16) for w in re.findall(r'0x[0-9a-f]+', body)])
+                for name, body in re.findall(r'static const unsigned int gpu_k_' + re.escape(prefix) + r'(\w+)\[\] = \{(.*?)\};', text, re.S)]
     return [(name, [int(w, 16) for w in re.findall(r'0x[0-9a-f]+', body)])
-            for name, body in re.findall(r'static const unsigned int gpu_k_(\w+)\[\] = \{(.*?)\};', text, re.S)]
+            for name, body in re.findall(r'static const unsigned int gpu_k_(?!11_|12_)(\w+)\[\] = \{(.*?)\};', text, re.S)]
 
 
 def asm_hash(asm):
@@ -172,10 +205,10 @@ def asm_hash(asm):
     return h
 
 
-def text(made, asm=None):
+def text(made, asm=None, prefix=''):
     lines = ['#define GPU_KERNELS_ASM_HASH 0x%016xull // the FNV-1a 64 of the gpu.asm these were made of (gpu.c holds it to gpu_asm.hash)\n' % asm_hash(asm)] if asm else []
     for name, words in made:
-        lines.append('static const unsigned int gpu_k_%s[] = {\n' % name)
+        lines.append('static const unsigned int gpu_k_%s%s[] = {\n' % (prefix, name))
         for i in range(0, len(words), 10):
             lines.append('    ' + ', '.join('0x%08x' % w for w in words[i:i + 10]) + (',' if i + 10 < len(words) else '};') + '\n')
     return ''.join(lines)
@@ -848,6 +881,8 @@ def main():
         return
     if len(sys.argv) == 3 and sys.argv[1] == '--print':
         sys.stdout.write(text(kernels(build(sys.argv[2])), sys.argv[2]))
+        sys.stdout.write(text(kernels(build(sys.argv[2], 'gfx1100')), None, '11_'))
+        sys.stdout.write(text(kernels(build(sys.argv[2], 'gfx1200')), None, '12_'))
         return
     if len(sys.argv) == 3 and sys.argv[1] == '--hash':
         sys.stdout.write('// src/canvas/gpu.asm\'s FNV-1a 64: what artifacts/gpu_kernels.inc is held to (gpu.c). Made again with\n'
@@ -859,21 +894,25 @@ def main():
     asm, inc = sys.argv[1], sys.argv[2]
     if pathlib.Path(asm).name != 'gpu_stress.asm':
         check_regs(asm)
-    llvm = kernels(build(asm))
-    ours = arrays(pathlib.Path(inc).read_text())
-    if [n for n, _ in llvm] != [n for n, _ in ours]:
-        sys.exit('%s: the kernels are %s, LLVM has %s' % (inc, [n for n, _ in ours], [n for n, _ in llvm]))
-    words = 0
-    for (name, theirs), (_, mine) in zip(llvm, ours):
-        if len(theirs) != len(mine):
-            sys.exit('%s: kernel %s is %d words, LLVM makes %d' % (inc, name, len(mine), len(theirs)))
-        bad = [i for i in range(len(mine)) if mine[i] != theirs[i]]
-        if bad:
-            i = bad[0]
-            sys.exit('%s: kernel %s differs from LLVM in %d of %d words, the first at word %d (code word %d): %08x, LLVM %08x'
-                     % (inc, name, len(bad), len(mine), i, i - 2, mine[i], theirs[i]))
-        words += len(mine)
-    print('gpu kernels: %s, %d kernels and %d words, the same as LLVM makes' % (asm, len(llvm), words))
+    inc_text = pathlib.Path(inc).read_text()
+    for label, chip, prefix in [('gfx1036', None, ''), ('gfx1100', 'gfx1100', '11_'), ('gfx1200', 'gfx1200', '12_')]:
+        ours = arrays(inc_text, prefix)
+        if prefix and not ours:
+            continue
+        llvm = kernels(build(asm, chip))
+        if [n for n, _ in llvm] != [n for n, _ in ours]:
+            sys.exit('%s (%s): the kernels are %s, LLVM has %s' % (inc, label, [n for n, _ in ours], [n for n, _ in llvm]))
+        words = 0
+        for (name, theirs), (_, mine) in zip(llvm, ours):
+            if len(theirs) != len(mine):
+                sys.exit('%s (%s): kernel %s is %d words, LLVM makes %d' % (inc, label, name, len(mine), len(theirs)))
+            bad = [i for i in range(len(mine)) if mine[i] != theirs[i]]
+            if bad:
+                i = bad[0]
+                sys.exit('%s (%s): kernel %s differs from LLVM in %d of %d words, the first at word %d (code word %d): %08x, LLVM %08x'
+                         % (inc, label, name, len(bad), len(mine), i, i - 2, mine[i], theirs[i]))
+            words += len(mine)
+        print('gpu kernels (%s): %s, %d kernels and %d words, the same as LLVM makes' % (label, asm, len(llvm), words))
 
 
 main()
