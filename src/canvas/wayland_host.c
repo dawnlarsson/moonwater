@@ -5096,10 +5096,10 @@ static void compositor_wl_direct_keys_make(void)
 }
 
 /*
-        The focused page's name (moonwater.c, SPARK_IOCTL_FOCUS on the reader's /dev/spark, which owns the direct ring): the owner of
-        the row the pointer's reports may go to (focus_row, made with the reader's target), as the compositor took the row's claim
-        (windows_owner_ok, the pid and its start time), named by a pidfd that is opened and then checked again, so a pid reused between
-        the check and the open is never named. None while the screens are dark: a move has to light them, so it is the loop's. Run
+        The focused page's name (moonwater.c, SPARK_IOCTL_FOCUS on the reader's /dev/spark, which owns the direct ring): the program
+        behind the row the pointer's reports may go to (focus_row, made with the reader's target), as game mode vouches for it
+        (compositor_row_pids: a Wayland row's claim, held with its start time; an X row's client, as the X server that claimed the row
+        named it), named by a pidfd that is opened and then checked again, so a pid reused between the check and the open is never named. None while the screens are dark: a move has to light them, so it is the loop's. Run
         every turn; a row and a claim the loop already judged cost two compares. Also the reports the page took (the ring's
         focus_seen), which no device read here showed: input seen, for the idle clock and the processor's hold.
 */
@@ -5107,7 +5107,7 @@ static void compositor_wl_focus_name(void)
 {
         int fd = __atomic_load_n(&compositor_spark_fd, __ATOMIC_ACQUIRE), row = compositor_wl_direct.focus_row;
         struct spark_input_ring *ring = __atomic_load_n(&compositor_spark_ring, __ATOMIC_ACQUIRE);
-        unsigned int claim = 0, named = 0;
+        unsigned int claim = 0, named = 0, me, got[2];
 
         if (fd < 0)
                 return;
@@ -5123,13 +5123,14 @@ static void compositor_wl_focus_name(void)
                 claim = 0;
         if (row == compositor_wl_direct.focus_named_row && claim == compositor_wl_direct.focus_claim)
                 return;
-        if (claim && windows_owner_ok(&windows_owner_held[row], claim))
+        me = (unsigned int)compositor_call(syscall(getpid), 0, 0, 0, 0, 0, 0);
+        if (claim && compositor_row_pids(row, me, 0, got) && got[0] == claim)
         {
                 long pidfd = compositor_call(syscall(pidfd_open), claim, 0, 0, 0, 0, 0);
 
                 if (pidfd >= 0)
                 {
-                        if (windows_owner_ok(&windows_owner_held[row], claim) &&
+                        if (compositor_row_pids(row, me, 0, got) && got[0] == claim &&
                             compositor_call(syscall(ioctl), (positive)fd, SPARK_IOCTL_FOCUS, (positive)pidfd, 0, 0, 0) == 0)
                                 named = claim;
                         system_close((int)pidfd);
