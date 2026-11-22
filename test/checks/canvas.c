@@ -1803,11 +1803,16 @@ static fn te_tokens(positive rounds)
         bracketed paste one end marker, the last bytes.
 */
 static struct windows *te_clip_table_scratch; // the table, mapped at its first use (windows_scratch_table)
+// The clip tests' table: eight rows, each claimed by this program as a live window's rows are (a row is offered only when claimed).
+static struct windows *te_clip_scratch(void)
+{
+        return windows_scratch_table(&te_clip_table_scratch);
+}
 
 // The next clipboard event of a row, or 0: its what.
 static int te_clip_event(unsigned int row, unsigned int address_to which)
 {
-        struct window_row own = {windows_scratch_table(&te_clip_table_scratch), row, -1, -1, 0, 0, 0, 0, 0};
+        struct window_row own = {te_clip_scratch(), row, -1, -1, 0, 0, 0, 0, 0};
         struct window_event event;
         int found = 0;
 
@@ -1825,16 +1830,16 @@ static b32 te_clip_recent(unsigned int row)
 
 static fn te_clip_offer(unsigned int row, unsigned int which, long fd)
 {
-        windows_scratch_table(&te_clip_table_scratch)->clip_offer_fd[row] = (int)fd;
-        windows_scratch_table(&te_clip_table_scratch)->clip_offer_which[row] = which;
-        windows_scratch_table(&te_clip_table_scratch)->clip_offer_serial[row]++;
+        te_clip_scratch()->clip_offer_fd[row] = (int)fd;
+        te_clip_scratch()->clip_offer_which[row] = which;
+        te_clip_scratch()->clip_offer_serial[row]++;
         compositor_clip_door((int)row);
 }
 
 static fn te_clip_ask(unsigned int row, unsigned int which)
 {
-        windows_scratch_table(&te_clip_table_scratch)->clip_ask_which[row] = which;
-        windows_scratch_table(&te_clip_table_scratch)->clip_ask_serial[row]++;
+        te_clip_scratch()->clip_ask_which[row] = which;
+        te_clip_scratch()->clip_ask_serial[row]++;
         compositor_clip_door((int)row);
 }
 
@@ -1895,7 +1900,7 @@ static fn te_clip_types(void)
         static const p8 png[] = "\x89PNG\r\n\x1a\n-not-text-\0-", uris[] = "file:///root/a.txt\r\nfile:///root/b.png\r\n", text[] = "two files";
         struct windows_clip_part parts[3] = {{WINDOWS_CLIP_TEXT, text, sizeof(text) - 1}, {WINDOWS_CLIP_PNG, png, sizeof(png) - 1},
                                              {WINDOWS_CLIP_URIS, uris, sizeof(uris) - 1}};
-        struct window_row own = {windows_scratch_table(&te_clip_table_scratch), 1, -1, -1, 0, 0, 0, 0, 0};
+        struct window_row own = {te_clip_scratch(), 1, -1, -1, 0, 0, 0, 0, 0};
         unsigned int which;
         p8 address_to bytes;
         unsigned long length;
@@ -2018,6 +2023,24 @@ static fn te_clip_seal_gate(void)
                 window_call(WINDOW_SYS_CLOSE, loose, 0, 0, 0, 0, 0);
 }
 
+// A text field can offer a clip from a row it does not own (no window yet, or a window let go): refused, not written.
+static fn te_clip_unowned_refused(void)
+{
+        static const p8 text[] = "unowned";
+        struct window_row none = {0}, claimed = {.door = -1, .wake = -1};
+        struct windows address_to table = te_clip_scratch();
+        unsigned int me = (unsigned int)window_call(WINDOW_SYS_GETPID, 0, 0, 0, 0, 0, 0);
+
+        table->capacity = 8, table->rows = 8;
+        te_check(windows_clip_offer(&none, WINDOWS_CLIP_CLIPBOARD, text, sizeof(text) - 1) < 0, "a row with no table offers nothing", 0);
+        claimed.table = table, claimed.row = 5;
+        table->pid[5] = 0;
+        te_check(windows_clip_offer(&claimed, WINDOWS_CLIP_CLIPBOARD, text, sizeof(text) - 1) < 0, "a row this program has not claimed offers nothing", 0);
+        table->pid[5] = me;
+        te_check(windows_clip_offer(&claimed, WINDOWS_CLIP_CLIPBOARD, text, sizeof(text) - 1) == 0, "a row this program claimed offers its clip", 0);
+        table->pid[5] = 0;
+}
+
 // A place as a drag's event carries it (the compositor's compositor_drag_place).
 static int te_drag_place(int x, int y)
 {
@@ -2033,7 +2056,7 @@ static fn te_drag_drop(void)
 {
         static const p8 uris[] = "file:///root/a.txt\r\n", text[] = "/root/a.txt";
         struct windows_clip_part parts[2] = {{WINDOWS_CLIP_URIS, uris, sizeof(uris) - 1}, {WINDOWS_CLIP_TEXT, text, sizeof(text) - 1}};
-        struct windows address_to table = windows_scratch_table(&te_clip_table_scratch);
+        struct windows address_to table = te_clip_scratch();
         struct window_row own = {table, 1, -1, -1, 0, 0, 0, 0, 0};
         static const char address_to const want[2] = {"image/png", WINDOWS_CLIP_URIS};
         struct ui u;
@@ -2101,26 +2124,26 @@ static fn te_clipboard(positive rounds)
         unsigned long length;
         long fd;
 
-        compositor.table = windows_scratch_table(&te_clip_table_scratch);
+        compositor.table = te_clip_scratch();
         compositor_rows_make(compositor_rows_in_use); // the compositor's rows, made before any check reads one
-        windows_scratch_table(&te_clip_table_scratch)->clip_pid = me;
-        windows_scratch_table(&te_clip_table_scratch)->clip_on = 1;
-        windows_scratch_table(&te_clip_table_scratch)->clip_owner[0] = windows_scratch_table(&te_clip_table_scratch)->clip_owner[1] = -1;
+        te_clip_scratch()->clip_pid = me;
+        te_clip_scratch()->clip_on = 1;
+        te_clip_scratch()->clip_owner[0] = te_clip_scratch()->clip_owner[1] = -1;
         for (unsigned int row = 0; row < 4; row++)
-                windows_scratch_table(&te_clip_table_scratch)->pid[row] = me;
+                te_clip_scratch()->pid[row] = me;
         compositor.focus = 1;
 
         // Taken after a gesture, read back by the row with the keys.
         compositor_clip_gesture(0);
         te_clip_offer(0, WINDOWS_CLIP_CLIPBOARD, windows_clip_memfd(hello, sizeof(hello) - 1));
-        te_check(te_clip_event(0, &which) == WINDOWS_CLIP_TAKEN && windows_scratch_table(&te_clip_table_scratch)->clip_length[0] > sizeof(hello) - 1 &&
-                     windows_scratch_table(&te_clip_table_scratch)->clip_owner[0] == 0,
-                 "a copy after a gesture is taken", windows_scratch_table(&te_clip_table_scratch)->clip_length[0]);
+        te_check(te_clip_event(0, &which) == WINDOWS_CLIP_TAKEN && te_clip_scratch()->clip_length[0] > sizeof(hello) - 1 &&
+                     te_clip_scratch()->clip_owner[0] == 0,
+                 "a copy after a gesture is taken", te_clip_scratch()->clip_length[0]);
         compositor_clip_gesture(1);
         te_clip_ask(1, WINDOWS_CLIP_CLIPBOARD);
         te_check(te_clip_event(1, &which) == WINDOWS_CLIP_READY, "a paste by the window with the keys", 0);
         {
-                struct window_row own = {windows_scratch_table(&te_clip_table_scratch), 1, -1, -1, 0, 0, 0, 0, 0};
+                struct window_row own = {te_clip_scratch(), 1, -1, -1, 0, 0, 0, 0, 0};
 
                 te_check(windows_clip_read(&own, WINDOWS_CLIP_CLIPBOARD, &bytes, &length) == sizeof(hello) - 1 &&
                              !memory_compare(bytes, hello, length),
@@ -2132,12 +2155,12 @@ static fn te_clipboard(positive rounds)
         te_clip_ask(2, WINDOWS_CLIP_CLIPBOARD);
         te_check(te_clip_event(2, &which) == WINDOWS_CLIP_REFUSED, "a window without the keys is refused", 0);
         // One that says in the table it is a popup of the window with the keys, which the compositor never took it for, too.
-        windows_scratch_table(&te_clip_table_scratch)->popup_parent[2] = 1 + 1;
+        te_clip_scratch()->popup_parent[2] = 1 + 1;
         compositor_clip_gesture(2);
         te_clip_ask(2, WINDOWS_CLIP_CLIPBOARD);
         te_check(te_clip_event(2, &which) == WINDOWS_CLIP_REFUSED,
                  "a window that writes the focused window as its popup parent, and is none, is refused", 0);
-        windows_scratch_table(&te_clip_table_scratch)->popup_parent[2] = 0;
+        te_clip_scratch()->popup_parent[2] = 0;
         compositor_clip.gesture[1] = 0;
         te_clip_ask(1, WINDOWS_CLIP_CLIPBOARD);
         te_check(te_clip_event(1, &which) == WINDOWS_CLIP_REFUSED, "a paste with nobody at the keys is refused", 0);
@@ -2158,20 +2181,21 @@ static fn te_clipboard(positive rounds)
 
                 for (p32 c = 0; c < sizeof(cases) / sizeof(cases[0]); c++)
                 {
-                        unsigned int before = windows_scratch_table(&te_clip_table_scratch)->clip_serial[0];
+                        unsigned int before = te_clip_scratch()->clip_serial[0];
 
                         compositor_clip.gesture[3] = 0;
                         if (cases[c].gesture)
                                 compositor_clip_gesture(3);
                         fd = te_clip_memfd(cases[c].bytes, cases[c].length, cases[c].sealed);
                         te_clip_offer(3, WINDOWS_CLIP_CLIPBOARD, fd);
-                        te_check(te_clip_event(3, &which) == WINDOWS_CLIP_DECLINED && windows_scratch_table(&te_clip_table_scratch)->clip_serial[0] == before,
+                        te_check(te_clip_event(3, &which) == WINDOWS_CLIP_DECLINED && te_clip_scratch()->clip_serial[0] == before,
                                  cases[c].what, c);
                         window_call(WINDOW_SYS_CLOSE, fd, 0, 0, 0, 0, 0);
                 }
         }
         te_clip_types();
         te_clip_seal_gate();
+        te_clip_unowned_refused();
         te_drag_drop();
         /*
                 A copy that names a descriptor which is no file to read: a FIFO its program holds open for reading with no
@@ -2219,13 +2243,13 @@ static fn te_clipboard(positive rounds)
         }
         // A window gone leaves its copy, owned by nobody; off empties everything and refuses.
         compositor_clip_leave(0);
-        te_check(windows_scratch_table(&te_clip_table_scratch)->clip_owner[0] == -1 && windows_scratch_table(&te_clip_table_scratch)->clip_length[0] > sizeof(hello) - 1, "a copy outlives its window", 0);
-        windows_scratch_table(&te_clip_table_scratch)->clip_on = 0;
+        te_check(te_clip_scratch()->clip_owner[0] == -1 && te_clip_scratch()->clip_length[0] > sizeof(hello) - 1, "a copy outlives its window", 0);
+        te_clip_scratch()->clip_on = 0;
         compositor_clip_wipe();
         compositor_clip_gesture(1);
         te_clip_ask(1, WINDOWS_CLIP_CLIPBOARD);
-        te_check(te_clip_event(1, &which) == WINDOWS_CLIP_REFUSED && !windows_scratch_table(&te_clip_table_scratch)->clip_length[0], "off empties and refuses", 0);
-        windows_scratch_table(&te_clip_table_scratch)->clip_on = 1;
+        te_check(te_clip_event(1, &which) == WINDOWS_CLIP_REFUSED && !te_clip_scratch()->clip_length[0], "off empties and refuses", 0);
+        te_clip_scratch()->clip_on = 1;
 
         // A random stream with the rules held at every step.
         {
@@ -2273,7 +2297,7 @@ static fn te_clipboard(positive rounds)
                                 te_check(what == (may ? WINDOWS_CLIP_READY : WINDOWS_CLIP_REFUSED), "a paste in the stream", step * 10 + (positive)may);
                                 if (what == WINDOWS_CLIP_READY)
                                 {
-                                        struct window_row own = {windows_scratch_table(&te_clip_table_scratch), row, -1, -1, 0, 0, 0, 0, 0};
+                                        struct window_row own = {te_clip_scratch(), row, -1, -1, 0, 0, 0, 0, 0};
 
                                         te_check(windows_clip_read(&own, pick, &bytes, &length) == (long)last_length[pick] &&
                                                      !memory_compare(bytes, last[pick], length),

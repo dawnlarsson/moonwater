@@ -3353,10 +3353,22 @@ static void windows_fd_replace(long *slot, long fd)
         *slot = fd;
 }
 
+/* A row this process may write to: its table is set (windows_leave clears it), the row is inside the table, and this
+   process claimed it. A text field can outlive its window, or run before one exists; both are refused here. */
+static int windows_row_owned(const struct window_row *own)
+{
+        if (!own || !own->table || own->row >= windows_rows(own->table))
+                return 0;
+        return __atomic_load_n(&own->table->pid[own->row], __ATOMIC_ACQUIRE) == (unsigned int)window_call(WINDOW_SYS_GETPID, 0, 0, 0, 0, 0, 0);
+}
+
 static long windows_clip_offer_parts(const struct window_row *own, unsigned int which, const struct windows_clip_part *parts, unsigned long count)
 {
-        long fd = count ? windows_clip_build(parts, count) : -22;
+        long fd;
 
+        if (!windows_row_owned(own))
+                return -9;
+        fd = count ? windows_clip_build(parts, count) : -22;
         which &= 1u;
         if (fd < 0)
                 return fd;
