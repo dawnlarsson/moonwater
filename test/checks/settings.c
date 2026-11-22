@@ -3121,7 +3121,7 @@ static fn check_settings(string_address regular, string_address bold)
                         int wifi = settings_row_named("Wi-Fi"), bt = settings_row_named("Bluetooth"), battery = settings_row_named("Battery"),
                             clock_row = settings_row_named("Clock"), wifi_group = settings_group_of(wifi),
                             bt_group = settings_group_of(bt);
-                        struct settings_item address_to items = settings_large->item[0], address_to devices = settings_large->item[1];
+                        struct settings_item address_to items = settings.item[0], address_to devices = settings.item[1];
                         struct windows address_to table = (struct windows address_to)compositor_call(
                             syscall(mmap), 0, (sizeof(struct windows) + 4095) & ~(positive)4095, 3, 0x4022, (positive)-1, 0);
                         int row_of;
@@ -3328,7 +3328,7 @@ static fn check_settings(string_address regular, string_address bold)
                               settings.item_count[1] == 3 && string_equals((string_address)devices[0].label, (string_address) "Keyboard K1") &&
                                   devices[0].kind == SETTINGS_DEVICE && devices[2].kind == SETTINGS_ADD &&
                                   string_equals((string_address)settings.value[bt], (string_address) "on"));
-                        settings.list.focus = (int)SETTINGS_LIST + SETTINGS_LIST_ROWS + 2;
+                        settings.list.focus = (int)SETTINGS_LIST_ID(1, 2);
                         settings_press(UI_KEY_ENTER);
                         for (const char address_to letter = "Pen"; *letter; letter++)
                                 settings_type_code((unsigned int)*letter);
@@ -3336,7 +3336,7 @@ static fn check_settings(string_address regular, string_address bold)
                         check("settings: Enter on it opens a field, and the name typed is kept by bluetooth add", settings.queued == 1 &&
                                   string_equals((string_address)settings.queue[0].value, (string_address) "a\nPen") && settings_editing() < 0);
                         settings.queued = 0;
-                        settings.list.focus = (int)SETTINGS_LIST + SETTINGS_LIST_ROWS + 1;
+                        settings.list.focus = (int)SETTINGS_LIST_ID(1, 1);
                         settings_press(UI_KEY_DELETE);
                         settings_press(UI_KEY_DELETE);
                         check("settings: and Delete twice on a device forgets it", settings.queued == 1 &&
@@ -5191,15 +5191,16 @@ static struct drive_part
 
 static int drive_parts_of(int row)
 {
-        static unsigned short ids[UI_LIST_MOST];
-        static struct settings_sub subs[SETTINGS_SUBS];
-        int subs_count = settings_sub_count, count;
-        unsigned char expanded = settings_expanded[row];
-        b64 fold = settings_fold_at[row];
+        static int ids[CHECK_LIST_MOST];
+        static struct settings_sub subs[CHECK_SUBS_MOST];
+        int ids_count = settings.list.count < CHECK_LIST_MOST ? settings.list.count : CHECK_LIST_MOST;
+        int subs_count = settings_sub_count < CHECK_SUBS_MOST ? settings_sub_count : CHECK_SUBS_MOST, count;
+        unsigned char expanded = (*settings_exp_ptr(row));
+        b64 fold = (*settings_fold_at_ptr(row));
 
-        memory_copy(ids, settings.list.id, sizeof(ids)), memory_copy(subs, settings_sub, sizeof(subs));
+        memory_copy(ids, settings.list.id, sizeof(int) * (positive)ids_count), memory_copy(subs, settings_sub, sizeof(*subs) * (positive)subs_count);
         memory_zero(drive_parts, sizeof(drive_parts));
-        settings_expanded[row] = 1, settings_fold_at[row] = UI_ONE, settings_sub_count = 0;
+        (*settings_exp_ptr(row)) = 1, (*settings_fold_at_ptr(row)) = UI_ONE, settings_sub_count = 0;
         count = settings_drive_rows(row, 0);
         for (int at = 0; at < count && at < DRIVE_PARTS; at++)
         {
@@ -5214,8 +5215,8 @@ static int drive_parts_of(int row)
                 part->kind = described.kind, part->swatch = described.swatch, part->expander = described.expander, part->dim = described.dim;
                 part->reveal = described.reveal;
         }
-        memory_copy(settings.list.id, ids, sizeof(ids)), memory_copy(settings_sub, subs, sizeof(subs));
-        settings_sub_count = subs_count, settings_expanded[row] = expanded, settings_fold_at[row] = fold;
+        memory_copy(settings.list.id, ids, sizeof(int) * (positive)ids_count), memory_copy(settings_sub, subs, sizeof(*subs) * (positive)subs_count);
+        settings_sub_count = subs_count, (*settings_exp_ptr(row)) = expanded, (*settings_fold_at_ptr(row)) = fold;
         return count;
 }
 
@@ -5416,7 +5417,7 @@ static fn check_settings_device_strip(void)
                 "  sdb drive 512 MB view only\n"
                 "    part 0 536870912 unpartitioned -\n"
                 "  1-1 usb 0627:0001 Stick allowed\n";
-        struct settings_item address_to items = settings_large->item[2];
+        struct settings_item address_to items = settings.item[2];
         positive length = sizeof(text) - 1;
 
         for (positive at = 0; at < length; at++)
@@ -5432,7 +5433,7 @@ static fn check_settings_device_strip(void)
                 struct ui_row line;
 
                 memory_zero(&line, sizeof(line));
-                settings_describe((int)SETTINGS_LIST + 2 * SETTINGS_LIST_ROWS, &line);
+                settings_describe((int)SETTINGS_LIST_ID(2, 0), &line);
                 check("settings: a drive's line is its name and after the word drive what the line says of it, its size (in GB from 1000 MB) in its heading",
                       string_equals((string_address)items[0].label, (string_address) "vda") && string_equals((string_address)items[0].size, (string_address) "2 GB") &&
                           line.note && string_equals((string_address)line.note, (string_address) "drive, view only") && !line.value && line.tall &&
@@ -5447,7 +5448,7 @@ static fn check_settings_device_strip(void)
                 struct ui_row line;
 
                 memory_zero(&line, sizeof(line));
-                settings_describe((int)SETTINGS_LIST + 2 * SETTINGS_LIST_ROWS + 2, &line);
+                settings_describe((int)SETTINGS_LIST_ID(2, 2), &line);
                 check("settings: a USB device's line is its name, then USB and its port, its state the tab chosen and not said again, and its port is what a press allows or blocks",
                       string_equals((string_address)items[2].label, (string_address) "Stick") && string_equals((string_address)items[2].port, (string_address) "1-1") &&
                           line.kind == UI_ROW_TABS && line.at == 0 && line.note && string_equals((string_address)line.note, (string_address) "USB 1-1"));
@@ -5455,13 +5456,13 @@ static fn check_settings_device_strip(void)
                 string_copy_bounded((string_address)items[2].state, (string_address) "waiting", sizeof(items[2].state));
                 items[2].flags &= ~SETTINGS_ITEM_JOINED;
                 memory_zero(&line, sizeof(line));
-                settings_describe((int)SETTINGS_LIST + 2 * SETTINGS_LIST_ROWS + 2, &line);
+                settings_describe((int)SETTINGS_LIST_ID(2, 2), &line);
                 check("settings: a USB device waiting to be allowed has deny chosen and says waiting, which the tabs cannot tell from blocked",
                       line.kind == UI_ROW_TABS && line.at == 1 && line.note && string_equals((string_address)line.note, (string_address) "USB 1-1, waiting"));
         }
         {
                 // The rows under the drive: the disclosure, then each partition, then the free room; a disk with no table has none.
-                int bare = drive_parts_of((int)SETTINGS_LIST + 2 * SETTINGS_LIST_ROWS + 1), count = drive_parts_of((int)SETTINGS_LIST + 2 * SETTINGS_LIST_ROWS);
+                int bare = drive_parts_of((int)SETTINGS_LIST_ID(2, 1)), count = drive_parts_of((int)SETTINGS_LIST_ID(2, 0));
 
                 check("settings: a drive's partitions are rows under it: the disclosure says Partitions and how many, then each partition its role's word where it has no name, its size and its share, and the free room last",
                       count == 5 && bare == 0 && drive_part_says(0, "Partitions", "", "", "3") && drive_parts[0].expander == UI_ROW_EXPANDER_OPEN &&
@@ -5485,10 +5486,10 @@ static fn check_settings_device_strip(void)
                 settings_feed_hardware();
                 memory_zero(&line, sizeof(line)), memory_zero(&bare, sizeof(bare));
                 // The heading's words are made as the row is described, so each row's are read before the next is described.
-                settings_describe((int)SETTINGS_LIST + 2 * SETTINGS_LIST_ROWS, &line);
+                settings_describe((int)SETTINGS_LIST_ID(2, 0), &line);
                 said = line.share && line.amount && string_equals((string_address)line.share, (string_address) "75% partitioned") &&
                        string_equals((string_address)line.amount, (string_address) "750 MB / 1 GB");
-                settings_describe((int)SETTINGS_LIST + 2 * SETTINGS_LIST_ROWS + 1, &bare);
+                settings_describe((int)SETTINGS_LIST_ID(2, 1), &bare);
                 check("settings: a drive's heading says the share its partitions take and USED / TOTAL; one with no table says so and its size",
                       items[0].total == 1000000000ull && items[1].total == 999999999ull && said && bare.share && bare.amount &&
                           string_equals((string_address)bare.share, (string_address) "No partition table") && string_equals((string_address)bare.amount, (string_address) "999 MB"));
@@ -5503,7 +5504,7 @@ static fn check_settings_device_strip(void)
                         settings_large->said[at] = more[at];
                 settings.said_length = length;
                 settings_feed_hardware();
-                count = drive_parts_of((int)SETTINGS_LIST + 2 * SETTINGS_LIST_ROWS);
+                count = drive_parts_of((int)SETTINGS_LIST_ID(2, 0));
                 check("settings: the partitions the host did not show are a quiet row after the drive's partitions",
                       settings.item_count[2] == 1 && items[0].segment_more == 3 && items[0].segment_count == 1 && count == 3 &&
                           drive_part_says(0, "Partitions", "", "", "1") && drive_part_says(1, "Linux data", "", "1 MB", "100.0%") &&
@@ -5566,7 +5567,7 @@ static fn check_settings_device_strip(void)
                 settings.said_length = length;
                 settings_feed_hardware();
                 {
-                        int count = drive_parts_of((int)SETTINGS_LIST + 2 * SETTINGS_LIST_ROWS);
+                        int count = drive_parts_of((int)SETTINGS_LIST_ID(2, 0));
 
                         check("settings: a partition's row is the partition's name, and its role's word after a name that does not say it",
                               count == 4 && string_equals((string_address)items[0].segment_name[0], (string_address) "EFI system partition") &&
@@ -5597,7 +5598,7 @@ static fn check_settings_device_strip(void)
                         struct ui_row described;
 
                         memory_zero(&described, sizeof(described));
-                        settings_describe((int)SETTINGS_LIST + 2 * SETTINGS_LIST_ROWS, &described);
+                        settings_describe((int)SETTINGS_LIST_ID(2, 0), &described);
                         check("settings: a device line too long for its label keeps its state, which deny chosen shows, and its port",
                               settings.item_count[2] == 1 && items[0].kind == SETTINGS_PORT && string_length((string_address)items[0].label) == 80 &&
                                   string_equals((string_address)items[0].state, (string_address) "blocked") &&
@@ -5722,7 +5723,7 @@ static fn check_settings_kept(void)
 }
 
 static struct settings_kept drive_settings_kept;
-static p8 drive_kit_kept[sizeof(ui_kit)], drive_items_kept[sizeof(settings_large->item[2])];
+static p8 drive_kit_kept[sizeof(ui_kit)], drive_items_kept[sizeof(settings.item[2])];
 static unsigned char drive_expanded_kept[SETTINGS_ALL], drive_live_kept[SETTINGS_ALL];
 static b64 drive_fold_kept[SETTINGS_ALL];
 
@@ -5864,8 +5865,8 @@ static fn drive_open_all(const char address_to text, b32 open)
         memory_zero(settings_drives_open, sizeof(settings_drives_open));
         drive_feed(text);
         for (int at = 0; open && at < settings.item_count[2]; at++)
-                if (settings_item_storage(&settings_large->item[2][at]))
-                        settings_drive_keep(settings_drive_name(&settings_large->item[2][at]), true);
+                if (settings_item_storage(&settings.item[2][at]))
+                        settings_drive_keep(settings_drive_name(&settings.item[2][at]), true);
         drive_feed(text);
 }
 
@@ -6207,8 +6208,8 @@ static fn check_settings_actions(void)
                     "  alpha  a1b2c3d4...  may run terminal files log\n"
                     "      open now from 192.168.1.5:41900  next: moonwater link alpha\n";
                 unsigned short saved_c2 = settings.item_count[2], saved_c3 = settings.item_count[3];
-                int ext_row = (int)SETTINGS_LIST + 2 * SETTINGS_LIST_ROWS;
-                int link_row = (int)SETTINGS_LIST + 3 * SETTINGS_LIST_ROWS;
+                int ext_row = (int)SETTINGS_LIST_ID(2, 0);
+                int link_row = (int)SETTINGS_LIST_ID(3, 0);
                 b32 ext_table = false, ext_sort = false, ext_menu = false;
                 b32 link_table = false, link_menu = false, link_remove = false, link_del = false;
 
@@ -6236,7 +6237,7 @@ static fn check_settings_actions(void)
 
                                 actions_press(UI_POINTER_LEFT, hx, hy, 0);
                                 ext_sort = settings_large->columns[2].sorted == 0 && !settings_large->columns[2].descending &&
-                                           string_equals((string_address)settings_large->item[2][0].label, (string_address) "Alpha");
+                                           string_equals((string_address)settings.item[2][0].label, (string_address) "Alpha");
                         }
                 }
                 actions_show(ext_row);
@@ -6278,9 +6279,9 @@ static fn check_settings_actions(void)
                         link_table = at >= 0 && (settings.list.starts[at] & UI_LIST_COLUMNS) != 0 &&
                                      described.columns == &settings_large->columns[3] &&
                                      settings.list.tall[at] == ui_dev(&settings.ui, UI_ROW_DENSE) &&
-                                     string_equals((string_address)settings_large->item[3][0].label, (string_address) "zeta") &&
-                                     string_equals((string_address)settings_large->item[3][0].access, (string_address) "run files") &&
-                                     string_equals((string_address)settings_large->item[3][0].detail, (string_address) "heard 5s ago from 10.0.0.2:41900");
+                                     string_equals((string_address)settings.item[3][0].label, (string_address) "zeta") &&
+                                     string_equals((string_address)settings.item[3][0].access, (string_address) "run files") &&
+                                     string_equals((string_address)settings.item[3][0].detail, (string_address) "heard 5s ago from 10.0.0.2:41900");
                 }
                 actions_middle(link_row, &x, &y);
                 actions_press(UI_POINTER_RIGHT, x, y, 0);
@@ -6357,7 +6358,7 @@ static fn check_settings_drive_rows(string_address regular, string_address bold)
         }
         settings_record_keep(&drive_settings_kept);
         memory_copy(drive_kit_kept, &ui_kit, sizeof(ui_kit));
-        memory_copy(drive_items_kept, settings_large->item[2], sizeof(drive_items_kept));
+        memory_copy(drive_items_kept, settings.item[2], sizeof(drive_items_kept));
         memory_copy(drive_expanded_kept, settings_expanded, sizeof(drive_expanded_kept));
         memory_copy(drive_fold_kept, settings_fold_at, sizeof(drive_fold_kept));
         memory_copy(drive_live_kept, settings_fold_live, sizeof(drive_live_kept));
@@ -6547,11 +6548,11 @@ static fn check_settings_drive_rows(string_address regular, string_address bold)
         // The shares of the rows under a drive add up to the whole, to within a twentieth of a percent a row: the 16 partitions with those
         // not shown and the free room, and a disk of 1 TB.
         {
-                int count = drive_parts_of((int)SETTINGS_LIST + 2 * SETTINGS_LIST_ROWS), sum = drive_tenths(count);
+                int count = drive_parts_of((int)SETTINGS_LIST_ID(2, 0)), sum = drive_tenths(count);
 
                 sums &= count == 19 && sum >= 1000 - (count - 1) / 2 && sum <= 1000 + (count - 1) / 2;
                 drive_open_all(nvme, false);
-                count = drive_parts_of((int)SETTINGS_LIST + 2 * SETTINGS_LIST_ROWS), sum = drive_tenths(count);
+                count = drive_parts_of((int)SETTINGS_LIST_ID(2, 0)), sum = drive_tenths(count);
                 sums &= count == 6 && sum >= 1000 - (count - 1) / 2 && sum <= 1000 + (count - 1) / 2;
         }
         check("settings drive rows: the shares of a drive's rows add up to 100 percent, to within the rounding of each", sums);
@@ -6564,7 +6565,7 @@ static fn check_settings_drive_rows(string_address regular, string_address bold)
 
                 ui_list_describe(&settings.list, drive.part_id[0], &row);
                 shut = row.expander == UI_ROW_EXPANDER_SHUT && string_equals((string_address)row.label, (string_address) "Partitions") && row.share &&
-                       string_equals((string_address)row.share, (string_address) "4") && !settings_expanded[drive.id] && settings_fold_at[drive.id] == 0;
+                       string_equals((string_address)row.share, (string_address) "4") && !(*settings_exp_ptr(drive.id)) && (*settings_fold_at_ptr(drive.id)) == 0;
         }
         check("settings drive rows: a drive's partitions are shut when the window starts: the disclosure alone, Partitions and how many", shut);
 
@@ -6584,34 +6585,34 @@ static fn check_settings_drive_rows(string_address regular, string_address bold)
                 drive_click(settings.list.x + settings.list.w / 2, tops);
                 drive_fold_run(0);
                 drive_show(SETTINGS_WIDTH, 1, false), ui_kit.now = 6000000000ull;
-                hits += settings_expanded[drive.id] && drive_lay() && drive.parts == 6 && drive.part_height[1] == 0;
+                hits += (*settings_exp_ptr(drive.id)) && drive_lay() && drive.parts == 6 && drive.part_height[1] == 0;
                 drive_fold_run(100000000);
-                mid = settings_fold_at[drive.id];
+                mid = (*settings_fold_at_ptr(drive.id));
                 hits += mid > 0 && mid < UI_ONE;
                 drive_fold_run(2000000000);
                 drive_show(SETTINGS_WIDTH, 1, false);
-                hits += drive_lay() && drive.parts == 6 && settings_fold_at[drive.id] == UI_ONE &&
+                hits += drive_lay() && drive.parts == 6 && (*settings_fold_at_ptr(drive.id)) == UI_ONE &&
                         drive.part_height[5] == ui_dev(&settings.ui, UI_ROW) * UI_ROW_SHARE_HIGH / UI_ROW_LEAST;
                 ui_kit.now = 9000000000ull;
                 drive_click(settings.list.x + settings.list.w / 2, tops);
                 drive_fold_run(2000000000);
                 drive_show(SETTINGS_WIDTH, 1, false);
-                hits += !settings_expanded[drive.id] && drive_lay() && drive.parts == 1;
+                hits += !(*settings_exp_ptr(drive.id)) && drive_lay() && drive.parts == 1;
                 pressed = hits == 4;
                 // The keys: on the disclosure, with the rows the window's pane.
                 ui_kit.motion = 1, settings.page.pane = 1, settings.focused = 1;
                 settings.list.focus = disclosure;
                 hits = 0;
                 settings_press(UI_KEY_ENTER), drive_fold_run(0);
-                hits += settings_expanded[drive.id] && settings_fold_at[drive.id] == UI_ONE;
+                hits += (*settings_exp_ptr(drive.id)) && (*settings_fold_at_ptr(drive.id)) == UI_ONE;
                 settings_press(UI_KEY_SPACE), drive_fold_run(0);
-                hits += !settings_expanded[drive.id] && settings_fold_at[drive.id] == 0;
+                hits += !(*settings_exp_ptr(drive.id)) && (*settings_fold_at_ptr(drive.id)) == 0;
                 settings_press(UI_KEY_RIGHT), drive_fold_run(0);
-                hits += settings_expanded[drive.id];
+                hits += (*settings_exp_ptr(drive.id));
                 settings_press(UI_KEY_RIGHT), drive_fold_run(0);
-                hits += settings_expanded[drive.id];
+                hits += (*settings_exp_ptr(drive.id));
                 settings_press(UI_KEY_LEFT), drive_fold_run(0);
-                hits += !settings_expanded[drive.id] && settings.list.focus == disclosure;
+                hits += !(*settings_exp_ptr(drive.id)) && settings.list.focus == disclosure;
                 keyed = hits == 5;
                 ui_kit.motion = 0, settings.page.pane = 0, settings.focused = 0;
         }
@@ -6650,8 +6651,8 @@ static fn check_settings_drive_rows(string_address regular, string_address bold)
         string_append_bounded((string_address)moved, (string_address)nvme, sizeof(moved));
         drive_feed(moved);
         drive_show(SETTINGS_WIDTH, 1, false);
-        kept = drive_lay() && drive.id == (int)SETTINGS_LIST + 2 * SETTINGS_LIST_ROWS + 1 && settings_expanded[drive.id] && drive.parts == 6 &&
-               !settings_expanded[(int)SETTINGS_LIST + 2 * SETTINGS_LIST_ROWS];
+        kept = drive_lay() && drive.id == (int)SETTINGS_LIST_ID(2, 1) && (*settings_exp_ptr(drive.id)) && drive.parts == 6 &&
+               !(*settings_exp_ptr((int)SETTINGS_LIST_ID(2, 0)));
         check("settings drive rows: a drive's partitions stay open by its name when the list is read again and its row moves", kept);
 
         // Free room is the bar's track: a free segment of the least width is the track's colour at its middle, as the gap beside it is,
@@ -6813,7 +6814,7 @@ static fn check_settings_drive_rows(string_address regular, string_address bold)
         ui_kit.rtl = 0;
         if (ui_cuts)
                 memory_zero(ui_cuts, sizeof(struct ui_cut) * UI_CUTS);
-        memory_copy(settings_large->item[2], drive_items_kept, sizeof(drive_items_kept));
+        memory_copy(settings.item[2], drive_items_kept, sizeof(drive_items_kept));
         settings_record_put_back(&drive_settings_kept);
         memory_copy(&ui_kit, drive_kit_kept, sizeof(ui_kit));
 }
@@ -7066,7 +7067,7 @@ static fn check_settings_clicks(void)
         struct windows *const click_table_at = windows_scratch_table(&click_table_scratch);
         int before = settings.page.chosen, scroll_before = list->scroll.scroll, seen = 0, wrong = 0, strips = 0;
         int gpu = settings_row_named("GPU rendering (alpha)"), keyboard = settings_row_named("Keyboard");
-        unsigned char gpu_fold = gpu >= 0 ? settings_expanded[gpu] : 0;
+        unsigned char gpu_fold = gpu >= 0 ? (*settings_exp_ptr(gpu)) : 0;
         positive queued = settings.queued;
         b32 gpu_pressed = false, gpu_ok = false, arrow_ok = false, value_ok = false, hover_ok = false;
 
@@ -7135,8 +7136,8 @@ static fn check_settings_clicks(void)
                         py = ui_list_row_y(list, at) + list->tall[at] / 2;
                         check_settings_press(px, py);
                         gpu_pressed = true;
-                        gpu_ok = settings_expanded[gpu] == gpu_fold && settings.queued == queued + 1;
-                        if (settings_expanded[gpu] != gpu_fold)
+                        gpu_ok = (*settings_exp_ptr(gpu)) == gpu_fold && settings.queued == queued + 1;
+                        if ((*settings_exp_ptr(gpu)) != gpu_fold)
                                 settings_toggle(gpu);
                         settings.queued = queued;
                 }
@@ -7154,7 +7155,7 @@ static fn check_settings_clicks(void)
                 struct ui_row row;
                 struct ui_control measure;
                 struct window_event event;
-                unsigned char keyboard_fold = settings_expanded[keyboard];
+                unsigned char keyboard_fold = (*settings_exp_ptr(keyboard));
 
                 windows_issue_set(click_table_at, "keyboard", WINDOWS_ISSUE_WARNING, WINDOWS_ISSUE_GPU_LISTS, 0, 0, "");
                 windows_issues_read(click_table_at, &settings_board);
@@ -7235,38 +7236,36 @@ static fn check_settings_queue_rows(void)
 static fn check_settings_board_lines(void)
 {
         int saved = settings_sub_count, count = 0;
-        char expect[SETTINGS_SUB_TEXT];
 
         settings_sub_count = 0, settings_sub_owner = 0;
         for (int k = 0; k < 90; k++)
                 count = settings_sub_put(0, false, null, "a line", count);
-        language_format(expect, sizeof(expect), WORDS(settings_not_shown), 11L);
-        check("settings board: 90 lines fill the window's 80 and the last says that 11 are not shown (79 kept, 11 left out)",
-              settings_sub_count == SETTINGS_SUBS && string_equals((string_address)settings_sub[SETTINGS_SUBS - 1].text, (string_address)expect));
+        check("settings board: the board grows with its lines, so 90 lines are all kept (none left out, the last is the last)",
+              settings_sub_count == 90 && string_equals((string_address)settings_sub[89].text, (string_address) "a line"));
         settings_sub_count = saved;
 }
 
 static fn check_settings_layout_press(void)
 {
         const int list = 0;
-        static struct settings_item kept_items[SETTINGS_LIST_ROWS];
+        static struct settings_item kept_items[CHECK_LIST_ROWS];
         int kept_count = settings.item_count[list];
 
-        memory_copy(kept_items, settings_large->item[list], sizeof(kept_items));
+        memory_copy(kept_items, settings.item[list], sizeof(*kept_items) * (positive)(kept_count < CHECK_LIST_ROWS ? kept_count : CHECK_LIST_ROWS));
         settings.item_count[list] = 5;
         for (int at = 0; at < 5; at++)
-                string_copy_bounded((string_address)settings_large->item[list][at].label, (string_address) "device", sizeof(settings_large->item[list][at].label));
+                string_copy_bounded((string_address)settings.item[list][at].label, (string_address) "device", sizeof(settings.item[list][at].label));
         settings_rebuild();
         ui_press_begin(&settings.page.press, 10, 10, 3, false);
         // A device comes in at the top while the press on position 3 is held: the rows move down one.
         for (int at = settings.item_count[list]; at > 0; at--)
-                settings_large->item[list][at] = settings_large->item[list][at - 1];
-        string_copy_bounded((string_address)settings_large->item[list][0].label, (string_address) "new device", sizeof(settings_large->item[list][0].label));
+                settings.item[list][at] = settings.item[list][at - 1];
+        string_copy_bounded((string_address)settings.item[list][0].label, (string_address) "new device", sizeof(settings.item[list][0].label));
         settings.item_count[list]++;
         settings_rebuild();
         check("settings list: a row that comes in under a held press lets the press go, so its release clicks nothing (the new row is not clicked)",
               !settings.page.press.down && ui_press_release(&settings.page.press, false, 3) == -1);
-        memory_copy(settings_large->item[list], kept_items, sizeof(kept_items));
+        memory_copy(settings.item[list], kept_items, sizeof(*kept_items) * (positive)(kept_count < CHECK_LIST_ROWS ? kept_count : CHECK_LIST_ROWS));
         settings.item_count[list] = kept_count;
         ui_press_end(&settings.page.press, true);
         settings_rebuild();
@@ -8818,12 +8817,12 @@ static fn check_rtl_mirror(void)
         // The Devices group with drives in it, their partitions open: a disk of Windows and Linux, and one with more partitions than its
         // strip shows.
         {
-                static p8 kept[sizeof(settings_large->item[2])];
+                static p8 kept[sizeof(settings.item[2])];
                 unsigned short count = settings.item_count[2];
                 int devices = settings_groups_named("Devices");
                 b32 drives;
 
-                memory_copy(kept, settings_large->item[2], sizeof(kept));
+                memory_copy(kept, settings.item[2], sizeof(kept));
                 drive_open_all("  1-1 usb 0781:5581 SanDisk Ultra allowed\n"
                            "  nvme0n1 drive 1000204 MB view only\n    part 1048576 536870912 efi EFI_system_partition\n"
                            "    part 537919488 16777216 other Microsoft_reserved_partition\n    part 554696704 900000000000 other Basic_data_partition\n"
@@ -8833,7 +8832,7 @@ static fn check_rtl_mirror(void)
                            "    part 8544016640 40000000000 linux Linux_root\n    part 48544016640 15000000000 other Media\n    more 2\n",
                                true);
                 drives = rtl_view("a drive's strip and its partitions", devices, 1) && rtl_view("a drive's strip and its partitions", devices, 2);
-                memory_copy(settings_large->item[2], kept, sizeof(kept));
+                memory_copy(settings.item[2], kept, sizeof(kept));
                 settings.item_count[2] = count;
                 memory_zero(settings_drives_open, sizeof(settings_drives_open));
                 settings_drive_follow();

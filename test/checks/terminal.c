@@ -60,13 +60,18 @@ static fn bowl_session_prepare(string_address home, string_address runtime) { (v
 static string_address address_to bowl_environment(string_address address_to inherited) { return inherited; }
 #include "../../src/canvas/screen.c"
 #include "../../src/canvas/font.c"
-#ifndef CHECK_gpu_kit // the GPU rows hold a client's dma-buf lent to a row, which is the shim's (gpu_lent_rows)
-#define SHELL_NO_WAYLAND 1 // the shim is on in a build, and these lanes are without the shell's signals it needs; CHECK_wayland holds it
-#else
-// The shim's signal macros (shell.c's, which these lanes do not include): the gpu rows install no handler, so none is caught here.
+// The shim's signal macros (shell.c's, which these lanes do not include): gpu.c and wayland_host.c name them in every build that
+// has them, and no row installs a handler here, so none is caught.
 #define SIGNAL_RESTART 0x10000000
 #define SIGNAL_CATCH_RESTORER 0
 #define SIGNAL_CATCH_FLAGS SIGNAL_RESTART
+// The sizes the rows save and restore by. Lists and the settings board grow now (ui_list_reserve, array_store_reserve), so a row
+// that copies one whole keeps its own bound: 512 list rows (the old UI_LIST_MOST), 24 settings items per list, 256 board lines.
+#define CHECK_LIST_MOST 512
+#define CHECK_LIST_ROWS 24
+#define CHECK_SUBS_MOST 256
+#ifndef CHECK_gpu_kit // the GPU rows hold a client's dma-buf lent to a row, which is the shim's (gpu_lent_rows)
+#define SHELL_NO_WAYLAND 1 // the shim is on in a build, and these lanes are without the shell's signals it needs; CHECK_wayland holds it
 #endif
 #ifdef CHECK_gpu_kit
 static int gpu_fake_busy, gpu_fake_idle; // the check's fake fence: while gpu_fake_busy is set, every job waited for is answered as still running (nothing on the card is held); gpu_fake_idle answers done

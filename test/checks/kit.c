@@ -5816,11 +5816,11 @@ static fn check_kit_virtual(void)
                 at_lit = pixels[y * 400 + 300] & 0xffffffu;
                 kept = lit != ground && at_lit == lit && (pixels[(y + row) * 400 + 300] & 0xffffffu) == ground;
                 // Far away: the rows at these places are others, and none of them is lit.
-                ui_scroll_set(&big.scroll, (UI_LIST_MOST + 0) * row);
+                ui_scroll_set(&big.scroll, (CHECK_LIST_MOST + 0) * row);
                 ui_list_layout(&ui, &big);
                 virtual_clear();
                 virtual_settle(&ui, &big, pixels, ground, 4);
-                y = ui_list_row_y(&big, ui_list_at(&big, UI_LIST_MOST + 2)) + 2;
+                y = ui_list_row_y(&big, ui_list_at(&big, CHECK_LIST_MOST + 2)) + 2;
                 at_other = pixels[y * 400 + 300] & 0xffffffu;
                 kept = kept && at_other == ground && virtual_seen.least > 2 && ui_list_at(&big, 2) < 0 && big.focus == 2;
                 // And back.

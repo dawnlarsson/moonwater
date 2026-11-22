@@ -365,14 +365,27 @@ static void pointer_row_reference(const struct compositor_pointer *p, int row, i
     long long step = (32768ll << 16) / (all * p->scale);
     long long ox = hot_x * 65536ll / p->scale + (p->dyn ? 128 : -256 * compositor_cursor_hot[p->shape][0]);
     long long oy = hot_y * 65536ll / p->scale + (p->dyn ? 128 : -256 * compositor_cursor_hot[p->shape][1]);
+    struct compositor_dyn_pre pre = {0};
 
+    if (p->dyn)
+    {
+        /* the dynamic shape's constants, worked out as the pointer's own pass does (pointer.c) */
+        pre.a = 256 + p->grow;
+        pre.half = 32768 / p->scale + 1;
+        pre.reach = pre.half * pre.a / 256 + 1;
+        pre.line = p->scale < 256 ? 256 : p->scale;
+        pre.lined = pre.line * 256 / p->scale;
+        pre.bound = (p->hw + p->hh) * pre.a / 256 + pre.half;
+        pre.tip = p->hw > p->hh ? p->hw : p->hh;
+        pre.leg = p->lens && pre.tip > p->hh ? (long long)compositor_isqrt((unsigned long long)(pre.tip * pre.tip - (long long)p->hh * p->hh)) : 0;
+    }
     for (int column = 0; column < span; column++)
     {
         int inks[3] = {0, 0, 0};
 
         if (p->dyn)
         {
-            compositor_dyn_cover(p, ((2ll * column + 1) * step >> 16) - ox, ((2ll * row + 1) * step >> 16) - oy, &fill[column], &edge[column]);
+            compositor_dyn_cover(p, &pre, ((2ll * column + 1) * step >> 16) - ox, ((2ll * row + 1) * step >> 16) - oy, &fill[column], &edge[column]);
             continue;
         }
         for (int j = 0; j < n; j++)

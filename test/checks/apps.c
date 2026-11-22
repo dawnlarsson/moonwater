@@ -7387,9 +7387,9 @@ static fn inputs_open(const struct inputs_input address_to in)
                 if (row >= (int)SETTINGS_LIST)
                 {
                         // The devices list as a feed of no devices leaves it: its one row is the Add row, which is what this is.
-                        struct settings_item address_to items = settings_large->item[1];
+                        struct settings_item address_to items = settings.item[1];
 
-                        memory_zero(items, sizeof(settings_large->item[1]));
+                        memory_zero(items, sizeof(settings.item[1]));
                         items[0].kind = SETTINGS_ADD;
                         settings_item_label(&items[0], "Keep a device by its name", string_length((string_address) "Keep a device by its name"));
                         settings.item_count[1] = 1;
@@ -8041,7 +8041,7 @@ static const struct inputs_input inputs_table[] = {
      .fill = 'a', .single = true, .words = true, .spaces = true, .first_space = true, .unicode = true, .limited = true},
     {.name = "the settings passphrase (masked, a network's)", .kind = INPUTS_ROW, .label = "Time server (auto for the pool)", .masked = true,
      .sample = "one two", .fill = 'a', .single = true, .spaces = true, .first_space = true, .unicode = true, .limited = true},
-    {.name = "the settings add-a-device field", .kind = INPUTS_ROW, .arg = SETTINGS_LIST + SETTINGS_LIST_ROWS, .sample = "one two", .fill = 'a', .single = true,
+    {.name = "the settings add-a-device field", .kind = INPUTS_ROW, .arg = SETTINGS_LIST_ID(1, 0), .sample = "one two", .fill = 'a', .single = true,
      .words = true, .spaces = true, .first_space = true, .unicode = true, .limited = true},
     {.name = "the settings gallery node name", .kind = INPUTS_GALLERY, .arg = 0, .sample = "one-two", .fill = 'a', .refuse = ' ',
      .app_vertical = true, .single = true, .limited = true},
