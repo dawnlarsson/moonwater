@@ -1663,7 +1663,7 @@ static fn check_settings(string_address regular, string_address bold)
                   string_equals((string_address)value, (string_address) "off"));
 
         // Changes made through the rows, with a verb running: each waits for it, and no verb is started (child is a stand-in).
-        settings.child = 1;
+        settings.runner.child = 1;
         settings.queued = 0;
         ui_field_close(&settings.edit);
         settings.job = clock;
@@ -1790,7 +1790,7 @@ static fn check_settings(string_address regular, string_address bold)
                 check("settings: and asks nothing more", settings.queued == 1);
                 settings.queued = 0;
         }
-        settings.child = 0;
+        settings.runner.child = 0;
         settings.queued = 0;
 
         settings_next(&settings_rows[ntp], "on", 1, next, sizeof(next));
@@ -2264,7 +2264,7 @@ static fn check_settings(string_address regular, string_address bold)
 
                 // The second Enter: the first says so and runs nothing, a key between asks again, the same Enter after it runs.
                 // The command's row is in view, as it is for whoever types in it (settings_show).
-                settings.child = 1;
+                settings.runner.child = 1;
                 settings.queued = 0;
                 settings.job = clock;
                 settings.job_sets = false;
@@ -2329,7 +2329,7 @@ static fn check_settings(string_address regular, string_address bold)
                               hidden && settings.queued == 0 && settings_editing() < 0);
                 }
                 settings.queued = 0;
-                settings.child = 0;
+                settings.runner.child = 0;
 
                 // The filter: letters typed with no field open, Backspace, and Escape clearing before it closes.
                 settings.ui.scale = 100;
@@ -2386,7 +2386,7 @@ static fn check_settings(string_address regular, string_address bold)
                 settings.page.chosen = 0;
                 settings.page.pane = 1;
                 ui_field_close(&settings.edit);
-                settings.child = 1;
+                settings.runner.child = 1;
                 settings.queued = 0;
                 settings_refilter();
                 {
@@ -2445,7 +2445,7 @@ static fn check_settings(string_address regular, string_address bold)
                                       settings.page.pane == 0 && settings.queued == 0);
                         }
                         settings.queued = 0;
-                        settings.child = 0;
+                        settings.runner.child = 0;
                         settings.page.pane = 1;
                         settings_group_choose(0);
                         settings.ui.scale = 100;
@@ -2477,7 +2477,7 @@ static fn check_settings(string_address regular, string_address bold)
                         settings.width = SETTINGS_WIDTH;
                         settings_layout();
                 }
-                settings.child = 0;
+                settings.runner.child = 0;
         }
 
         // The pieces, drawn.
@@ -2561,7 +2561,7 @@ static fn check_settings(string_address regular, string_address bold)
                 settings_type_code('x');
                 check("settings: Left steps over a whole character of several bytes", settings_holds("\xc3\xa9x\xc3\xbc"));
                 // A field kept as it is, or typed to what it is, sends nothing; a change does.
-                settings.child = 1;
+                settings.runner.child = 1;
                 settings.queued = 0;
                 settings.state[zone] = SETTINGS_READ;
                 string_copy_bounded((string_address)settings.value[zone], (string_address) "Europe/Stockholm", SETTINGS_VALUE);
@@ -2584,7 +2584,7 @@ static fn check_settings(string_address regular, string_address bold)
                 settings_press(UI_KEY_ENTER);
                 check("settings: blanks typed at either end of a value are typed, and are no part of the value it is set to",
                       settings.queued == 0 && settings_editing() < 0);
-                settings.child = 0;
+                settings.runner.child = 0;
                 settings.queued = 0;
                 settings_hold(zone, "");
                 settings_press(FIELD_KEY_ESCAPE);
@@ -2668,14 +2668,14 @@ static fn check_settings(string_address regular, string_address bold)
                         settings.height = 160; // the card runs to the window's bottom, so this keeps its view at the 100 px it had
                         settings.page.card = false;
                         memory_copy(settings_large->said, said, sizeof(said) - 1);
-                        settings.said_length = sizeof(said) - 1;
+                        settings.runner.length = sizeof(said) - 1;
                         settings_card_fill();
                         check("settings: a card keeps the lines, without the label or the escapes or the blanks that end them",
                               settings.card_text.length == sizeof("Canvas is on: the kernel desktop, 2 windows\n  HDMI-1: 1920 by 1080, 60 Hz") - 1 &&
                                   !memory_compare(settings_large->card, "Canvas is on: the kernel desktop, 2 windows\n  HDMI-1: 1920 by 1080, 60 Hz",
                                                   settings.card_text.length));
                         memory_copy(settings_large->said, wide, sizeof(wide) - 1);
-                        settings.said_length = sizeof(wide) - 1;
+                        settings.runner.length = sizeof(wide) - 1;
                         settings_card_fill();
                         ui_lines_wrap(&settings.ui, &settings.card_text, settings.width);
                         room = settings.width - 2 * ui_px(&settings.ui, UI_PAD) - 2 * ui_px(&settings.ui, 14);
@@ -2705,7 +2705,7 @@ static fn check_settings(string_address regular, string_address bold)
                                 for (int again = 0; again < 24; again++, length += 6)
                                         memory_copy(tall + length, "\xd0\xa8\xd0\x96\xd0\xa9", 6);
                                 memory_copy(settings_large->said, tall, length);
-                                settings.said_length = length;
+                                settings.runner.length = length;
                                 settings_card_fill();
                                 // At each of 24 widths, one pixel apart: a character a pixel too wide for a line is where a cut inside it was made.
                                 for (int extra = 0; extra < 24; extra++)
@@ -2720,7 +2720,7 @@ static fn check_settings(string_address regular, string_address bold)
                                 ui_lines_wrap(&settings.ui, &settings.card_text, settings.width);
                                 check("settings: a word wider than the window is cut between characters, never inside one, at any width", whole);
                                 memory_copy(settings_large->said, wide, sizeof(wide) - 1);
-                                settings.said_length = sizeof(wide) - 1;
+                                settings.runner.length = sizeof(wide) - 1;
                                 settings_card_fill();
                                 ui_lines_wrap(&settings.ui, &settings.card_text, settings.width);
                         }
@@ -2734,7 +2734,7 @@ static fn check_settings(string_address regular, string_address bold)
                                 for (; length + 40 < sizeof(long_line); length += 40)
                                         memory_copy(long_line + length, "alpha beta gamma delta epsilon zeta eta theta iota ", 40);
                                 memory_copy(settings_large->said, long_line, length);
-                                settings.said_length = length;
+                                settings.runner.length = length;
                                 settings.width = 300;
                                 settings_card_fill();
                                 ui_lines_wrap(&settings.ui, &settings.card_text, settings.width);
@@ -2772,7 +2772,7 @@ static fn check_settings(string_address regular, string_address bold)
                         settings_filter_clear();
                         settings.page.chosen = settings_group_of(kb);
                         settings.page.pane = 1;
-                        settings.child = 1;
+                        settings.runner.child = 1;
                         settings.queued = 0;
                         settings_refilter();
                         settings.list.focus = kb;
@@ -2923,7 +2923,7 @@ static fn check_settings(string_address regular, string_address bold)
                                 settings.height = 220;
                                 settings_refilter();
                                 settings_layout();
-                                ui_page_scroll(&settings.page,0);
+                                ui_scroll_set(settings.page.body, 0);
                                 finger.a = (settings.page.left + settings.page.right) / 2;
                                 finger.b = settings.page.top + ui_px(&settings.ui, 60);
                                 settings_event_real(&finger);
@@ -2947,7 +2947,7 @@ static fn check_settings(string_address regular, string_address bold)
                                 {
                                         int over = -1, focus;
 
-                                        ui_page_scroll(&settings.page, 0);
+                                        ui_scroll_set(settings.page.body, 0);
                                         finger.b = settings.page.top + ui_px(&settings.ui, 60);
                                         settings_event_real(&finger);
                                         settings_event_real(&land);
@@ -2981,7 +2981,7 @@ static fn check_settings(string_address regular, string_address bold)
                                 }
                                 settings.height = SETTINGS_HEIGHT;
                                 settings_refilter();
-                                ui_page_scroll(&settings.page,0);
+                                ui_scroll_set(settings.page.body, 0);
                         }
 #endif
 
@@ -3094,7 +3094,7 @@ static fn check_settings(string_address regular, string_address bold)
                                 settings_refilter();
                         }
                         popup_fake.screen = 0;
-                        settings.child = 0;
+                        settings.runner.child = 0;
                         settings.queued = 0;
                 }
 
@@ -3145,7 +3145,7 @@ static fn check_settings(string_address regular, string_address bold)
                         settings.page.chosen = wifi_group;
                         settings.list.focus = wifi;
                         memory_copy(settings_large->said, air, sizeof(air) - 1);
-                        settings.said_length = sizeof(air) - 1;
+                        settings.runner.length = sizeof(air) - 1;
                         settings_feed_wifi();
                         check("settings: the networks heard are rows, strongest first as the verb says, then a saved one not heard",
                               settings.item_count[0] == 5 && string_equals((string_address)items[0].label, (string_address) "HomeNet") &&
@@ -3163,7 +3163,7 @@ static fn check_settings(string_address regular, string_address bold)
                         check("settings: what moonwater cannot join is marked, and so is what it can", (items[3].flags & SETTINGS_ITEM_CANNOT) &&
                                   !(items[0].flags & SETTINGS_ITEM_CANNOT) && !(items[1].flags & SETTINGS_ITEM_CANNOT) && !(items[2].flags & SETTINGS_ITEM_CANNOT));
                         memory_copy(settings_large->said, silent, sizeof(silent) - 1);
-                        settings.said_length = sizeof(silent) - 1;
+                        settings.runner.length = sizeof(silent) - 1;
                         settings_feed_wifi();
                         check("settings: a line that is about no network is a row of its own, after the saved ones",
                               settings.item_count[0] == 2 && items[0].kind == SETTINGS_NETWORK && items[1].kind == SETTINGS_NOTE &&
@@ -3177,7 +3177,7 @@ static fn check_settings(string_address regular, string_address bold)
                         settings.feed_list = 0;
                         settings.value[wifi][0] = 0;
                         memory_copy(settings_large->said, air, sizeof(air) - 1);
-                        settings.said_length = sizeof(air) - 1;
+                        settings.runner.length = sizeof(air) - 1;
                         settings_feed_read(false, false);
                         check("settings: a feed read puts its rows in the group, after the group's own, and sets its switch from the same words",
                               settings.item_count[0] == 5 && settings.state[wifi] == SETTINGS_READ &&
@@ -3189,7 +3189,7 @@ static fn check_settings(string_address regular, string_address bold)
                         check("settings: a reading that says what the last said changes nothing and draws nothing", !settings.page.dirty && settings.list.focus == (int)SETTINGS_LIST + 1);
                         settings.list.scroll.scroll = 0;
                         memory_copy(settings_large->said, again, sizeof(again) - 1);
-                        settings.said_length = sizeof(again) - 1;
+                        settings.runner.length = sizeof(again) - 1;
                         settings_feed_read(false, false);
                         row_of = settings.list.focus;
                         check("settings: a list that moves under the keys does not move them: they stay on the network of that name",
@@ -3197,7 +3197,7 @@ static fn check_settings(string_address regular, string_address bold)
                                   row_of != (int)SETTINGS_LIST + 1 && settings.page.dirty && settings_pos(row_of) >= 0 && settings.page.pane == 1);
                         check("settings: and the switch follows what the verb says now", string_equals((string_address)settings.value[wifi], (string_address) "off"));
                         memory_copy(settings_large->said, silent, sizeof(silent) - 1);
-                        settings.said_length = sizeof(silent) - 1;
+                        settings.runner.length = sizeof(silent) - 1;
                         settings_feed_read(false, false);
                         check("settings: a network gone from under the keys leaves them on a row of the list", settings_item(settings.list.focus) != null &&
                                   settings_pos(settings.list.focus) >= 0);
@@ -3206,23 +3206,23 @@ static fn check_settings(string_address regular, string_address bold)
                         check("settings: a reading that was stopped changes no row, and the next is later", settings.item_count[0] == 2 &&
                                   settings.feed_due > (positive)ui_kit.now);
                         memory_copy(settings_large->said, air, sizeof(air) - 1);
-                        settings.said_length = sizeof(air) - 1;
+                        settings.runner.length = sizeof(air) - 1;
                         settings_feed_read(false, false);
                         ui_field_begin(&settings.edit, &settings.own, (const char address_to) "", (int)SETTINGS_LIST + 2);
                         settings.page.dirty = false;
                         memory_copy(settings_large->said, again, sizeof(again) - 1);
-                        settings.said_length = sizeof(again) - 1;
+                        settings.runner.length = sizeof(again) - 1;
                         settings_feed_read(false, false);
                         check("settings: nothing is changed under a passphrase being typed", settings.item_count[0] == 5 &&
                                   string_equals((string_address)items[1].label, (string_address) "Guest") && !settings.page.dirty);
                         ui_field_close(&settings.edit);
 
                         // What a person does to a row of the list.
-                        settings.child = 1;
+                        settings.runner.child = 1;
                         settings.queued = 0;
                         settings.page.pane = 1;
                         memory_copy(settings_large->said, air, sizeof(air) - 1);
-                        settings.said_length = sizeof(air) - 1;
+                        settings.runner.length = sizeof(air) - 1;
                         settings_feed_read(false, false);
                         settings.list.focus = (int)SETTINGS_LIST + 1; // Guest, open
                         settings_press(UI_KEY_ENTER);
@@ -3322,7 +3322,7 @@ static fn check_settings(string_address regular, string_address bold)
                         settings.item_count[1] = 0;
                         settings.feed_list = 1;
                         memory_copy(settings_large->said, tooth, sizeof(tooth) - 1);
-                        settings.said_length = sizeof(tooth) - 1;
+                        settings.runner.length = sizeof(tooth) - 1;
                         settings_feed_read(false, false);
                         check("settings: the devices kept are rows, and a last row keeps one more",
                               settings.item_count[1] == 3 && string_equals((string_address)devices[0].label, (string_address) "Keyboard K1") &&
@@ -3342,7 +3342,7 @@ static fn check_settings(string_address regular, string_address bold)
                         check("settings: and Delete twice on a device forgets it", settings.queued == 1 &&
                                   string_equals((string_address)settings.queue[0].value, (string_address) "d\nMouse"));
                         settings.queued = 0;
-                        settings.child = 0;
+                        settings.runner.child = 0;
 
                         // The rows that change by themselves, and when a feed is run.
                         {
@@ -3390,13 +3390,13 @@ static fn check_settings(string_address regular, string_address bold)
                         settings_filter_clear();
                         settings.queued = 0;
                         settings.help = 2;
-                        settings.child = 0;
+                        settings.runner.child = 0;
                         memory_zero(settings.unread, sizeof(settings.unread));
                         ui_kit.now = 2000000000ull, settings.feed_due = ui_kit.now + 5000000000ull;
                         {
                                 long wait = settings_feed_tick();
 
-                                check("settings: a feed not yet due waits the time that is left", wait > 4000000000l && wait <= 5000000000l && settings.child == 0);
+                                check("settings: a feed not yet due waits the time that is left", wait > 4000000000l && wait <= 5000000000l && settings.runner.child == 0);
                         }
                         table->state[settings.own.row] = WINDOW_MINIMIZED;
                         check("settings: a feed is not run, and not waited for, while the window is put away", settings_feed_tick() == -1);
@@ -3416,9 +3416,9 @@ static fn check_settings(string_address regular, string_address bold)
                         settings.queued = 1;
                         check("settings: nor while a change waits", settings_feed_tick() == -1);
                         settings.queued = 0;
-                        settings.child = 1;
+                        settings.runner.child = 1;
                         check("settings: nor while another verb runs", settings_feed_tick() == -1);
-                        settings.child = 0;
+                        settings.runner.child = 0;
                         settings_unread_set(0, 1);
                         check("settings: nor while rows are still to be asked", settings_feed_tick() == -1);
                         memory_zero(settings.unread, sizeof(settings.unread));
@@ -3426,11 +3426,11 @@ static fn check_settings(string_address regular, string_address bold)
                         settings.moonwater = (string_address) "/nonexistent/moonwater-check";
                         settings_feed_tick();
                         check("settings: a feed due is run: its verb is started, as a reading and not a change",
-                              settings.child > 0 && settings.job == SETTINGS_JOB_FEED && !settings.job_sets && settings.feed_list == 1);
+                              settings.runner.child > 0 && settings.job == SETTINGS_JOB_FEED && !settings.job_sets && settings.feed_list == 1);
                         settings_feed_drop();
                         // The killed child is not waited for by the drop: it is reaped by settings_reap when it has gone, polled here as the
                         // window's timers poll it (settings_tick), so the check polls too.
-                        for (int tries = 0; settings.child > 0 && tries < 200; tries++)
+                        for (int tries = 0; settings.runner.child > 0 && tries < 200; tries++)
                         {
                                 timespec nap = {0, 10000000};
 
@@ -3439,7 +3439,7 @@ static fn check_settings(string_address regular, string_address bold)
                                 system_call_2(syscall(nanosleep), (positive)&nap, 0);
                         }
                         check("settings: a change that arrives drops a reading under way, which is reaped once it has gone and had again later",
-                              settings.child <= 0 && !settings.ending && settings.feed_due > (positive)ui_kit.now);
+                              settings.runner.child <= 0 && !settings.runner.ending && settings.feed_due > (positive)ui_kit.now);
                         settings.moonwater = (string_address) "/moonwater";
                         compositor_call(syscall(munmap), (positive)table, (sizeof(struct windows) + 4095) & ~(positive)4095, 0, 0, 0, 0);
                         settings.own.table = null, settings.page.buffers.shown = -1;
@@ -3494,7 +3494,7 @@ static fn check_settings_edges(void)
         ui_field_close(&settings.edit);
         settings.page.menu_row = -1;
         settings.page.card = 0;
-        settings.child = 1;
+        settings.runner.child = 1;
         settings.job = 0;
         settings.job_sets = false;
         settings.queued = 0;
@@ -3536,7 +3536,7 @@ static fn check_settings_edges(void)
 
         ui_field_close(&settings.edit);
         settings.queued = 0;
-        settings.child = 0;
+        settings.runner.child = 0;
         settings_filter_clear();
         settings_refilter();
 }
@@ -3568,9 +3568,9 @@ static fn check_settings_stuck_child(void)
         system_close(ends[1]);
         // The child is stopped before the close is asked of it (WUNTRACED 2).
         system_call_4(syscall(wait4), (positive)child, (positive)&status, 2, 0);
-        settings.child = child;
-        settings.output = ends[0];
-        settings.ending = 0;
+        settings.runner.child = child;
+        settings.runner.output = ends[0];
+        settings.runner.ending = 0;
         settings.job = 0;
         settings.job_sets = false;
         settings_pair_on = true;
@@ -3582,8 +3582,8 @@ static fn check_settings_stuck_child(void)
               took < 1000000000ull);
 
         // The same child, its kill sent and not taken: left once SETTINGS_LEFT_NS has gone since the kill.
-        settings.ending = 2;
-        settings.began = (positive)ui_kit.now - (positive)SETTINGS_LEFT_NS - 1;
+        settings.runner.ending = 2;
+        settings.runner.began = (positive)ui_kit.now - (positive)SETTINGS_LEFT_NS - 1;
         settings.state[0] = SETTINGS_READ;
         {
                 long other = 0;
@@ -3591,7 +3591,7 @@ static fn check_settings_stuck_child(void)
                 settings_tick(-1, &other);
         }
         check("settings stuck: a killed child that has not exited is left, and the verb after it is free to run",
-              settings.child <= 0 && !settings.ending && settings.output < 0);
+              settings.runner.child <= 0 && !settings.runner.ending && settings.runner.output < 0);
         check("settings stuck: the row of a verb left reads as failed", settings.state[0] == SETTINGS_FAILED);
         check("settings stuck: the child left is kept to be reaped", settings_left[0] == child);
         // It goes once it runs again, and is reaped then.
@@ -3604,8 +3604,8 @@ static fn check_settings_stuck_child(void)
                 system_call_2(syscall(nanosleep), (positive)&nap, 0);
         }
         check("settings stuck: a child left is reaped when it exits", settings_left[0] <= 0);
-        settings.child = 0;
-        settings.output = -1;
+        settings.runner.child = 0;
+        settings.runner.output = -1;
 }
 
 static fn check_settings_keys(void)
@@ -3621,7 +3621,7 @@ static fn check_settings_keys(void)
         settings.page.menu_row = -1;
         settings.page.card = 0;
         //      A feed left running by an earlier check would be finished by a change: this one is not a feed.
-        settings.child = 1;
+        settings.runner.child = 1;
         settings.job = 0;
         settings.job_sets = false;
         settings.queued = 0;
@@ -3674,7 +3674,7 @@ static fn check_settings_keys(void)
 
         //      Commands are not states: a join, a forget and a command typed in the Run any row, each waiting behind a
         //      verb that is running, are all kept and run in order; a change to a row waiting replaces it, as it did.
-        settings.child = 1;
+        settings.runner.child = 1;
         settings.job = 0;
         settings.job_sets = false;
         settings.queued = 0;
@@ -3693,7 +3693,7 @@ static fn check_settings_keys(void)
               string_equals((string_address)settings.queue[5].value, (string_address)"mw-two"));
         settings.queued = 0;
 
-        settings.child = 0;
+        settings.runner.child = 0;
         settings.queued = 0;
         settings.page.chosen = 0;
         settings.page.pane = 1;
@@ -3856,7 +3856,7 @@ static fn settings_frames_scenario(string_address name, b32 switches_only, b32 c
         settings_frames.scenario = name;
         settings_frames.wrong = false;
         settings_filter_clear(), (void)0, ui_field_close(&settings.edit), (void)0, settings.page.menu_row = -1, settings.page.card = 0;
-        settings.page.pane = 1, settings.queued = 0, settings.child = 1, settings.job = 0, settings.job_sets = false, ui_confirm_drop(&settings.confirm);
+        settings.page.pane = 1, settings.queued = 0, settings.runner.child = 1, settings.job = 0, settings.job_sets = false, ui_confirm_drop(&settings.confirm);
         for (positive at = 0; at < SETTINGS_ROWS; at++)
                 if (settings_rows[at].kind == SETTINGS_SWITCH)
                         settings.state[at] = SETTINGS_READ,
@@ -3923,7 +3923,7 @@ static fn settings_frames_scenario(string_address name, b32 switches_only, b32 c
                 settings_frames.wrong = !settings_frames_same(settings.page.buffers.shown, (string_address)(again ? "at rest, the first again" : "at rest, the other"));
         }
         check("settings frames: every buffer shown is the whole picture drawn at its time", !settings_frames.wrong);
-        settings.child = 0;
+        settings.runner.child = 0;
         settings.queued = 0;
 }
 
@@ -3970,7 +3970,7 @@ static fn settings_frames_play(string_address name, int group, const struct sett
         settings_frames.scenario = name;
         settings_frames.wrong = false;
         settings_filter_clear(), (void)0, ui_field_close(&settings.edit), (void)0, settings.page.menu_row = -1, settings.page.card = 0;
-        settings.page.pane = 1, settings.queued = 0, settings.child = 1, settings.job = 0, settings.job_sets = false, ui_confirm_drop(&settings.confirm);
+        settings.page.pane = 1, settings.queued = 0, settings.runner.child = 1, settings.job = 0, settings.job_sets = false, ui_confirm_drop(&settings.confirm);
         settings.list.hover = settings.list.down = -1;
         settings.page.chosen = group;
         settings.list.scroll.scroll = 0;
@@ -4047,7 +4047,7 @@ static fn settings_frames_play(string_address name, int group, const struct sett
                         length = sizeof(card) - 1;
                         for (int at = 0; at < 40 && length + sizeof(entry) < sizeof(settings_large->said); at++)
                                 memory_copy(settings_large->said + length, entry, sizeof(entry) - 1), length += sizeof(entry) - 1;
-                        settings.said_length = length;
+                        settings.runner.length = length;
                         settings_card_open("Scan");
                         break;
                 }
@@ -4078,7 +4078,7 @@ static fn settings_frames_play(string_address name, int group, const struct sett
         // The pointer leaves, and nothing is held down.
         settings_frames_event(WINDOW_EVENT_MOTION, 0, -100, -100);
         settings_frames_until(settings_frames.now + 1000 * SETTINGS_FRAMES_MS);
-        settings.child = 0;
+        settings.runner.child = 0;
         settings.queued = 0;
 }
 
@@ -4175,7 +4175,7 @@ static fn settings_fit_check(void)
         b32 still = true;
 
         settings_filter_clear(), (void)0, ui_field_close(&settings.edit), (void)0, settings.page.menu_row = -1, settings.page.card = 0;
-        settings.page.pane = 1, settings.queued = 0, settings.child = 1, settings.job = 0, settings.job_sets = false, ui_confirm_drop(&settings.confirm);
+        settings.page.pane = 1, settings.queued = 0, settings.runner.child = 1, settings.job = 0, settings.job_sets = false, ui_confirm_drop(&settings.confirm);
         settings.list.hover = settings.list.down = -1;
         for (int g = 0; g < settings_groups(); g++)
         {
@@ -4281,7 +4281,7 @@ static fn settings_column_check(void)
         b32 wheel_ok = false, pull_bottom_ok = false, pull_top_ok = false, items_ok = false;
 
         settings_filter_clear(), (void)0, ui_field_close(&settings.edit), (void)0, settings.page.menu_row = -1, settings.page.card = 0;
-        settings.page.pane = 1, settings.queued = 0, settings.child = 1, settings.job = 0, settings.job_sets = false, ui_confirm_drop(&settings.confirm);
+        settings.page.pane = 1, settings.queued = 0, settings.runner.child = 1, settings.job = 0, settings.job_sets = false, ui_confirm_drop(&settings.confirm);
         settings.ui.scale = 100;
         ui_kit_settle();
         settings_size(SETTINGS_WIDTH, 300);
@@ -4326,7 +4326,7 @@ static fn settings_end_check(void)
         b32 wheel_ok = true, bar_ok = true, finger_ok = true, clear_ok = true, rows_ok = true;
 
         settings_filter_clear(), (void)0, ui_field_close(&settings.edit), (void)0, settings.page.menu_row = -1, settings.page.card = 0;
-        settings.page.pane = 1, settings.queued = 0, settings.child = 1, settings.job = 0, settings.job_sets = false, ui_confirm_drop(&settings.confirm);
+        settings.page.pane = 1, settings.queued = 0, settings.runner.child = 1, settings.job = 0, settings.job_sets = false, ui_confirm_drop(&settings.confirm);
         settings.list.hover = settings.list.down = -1;
         for (int g = 0; g < settings_groups(); g++)
         {
@@ -4355,7 +4355,7 @@ static fn settings_end_check(void)
                 x = settings.list.x + settings.list.w / 2, y = settings.list.y + settings.list.scroll.view / 2;
 
                 // The wheel: notches down, a frame between each, until it settles past the end.
-                ui_page_scroll(&settings.page,0);
+                ui_scroll_set(settings.page.body, 0);
                 settings_frames_until(settings_frames.now + 1000 * SETTINGS_FRAMES_MS);
                 settings_frames_event(WINDOW_EVENT_MOTION, 0, x, y);
                 for (int k = 0; k < 400; k++)
@@ -4367,7 +4367,7 @@ static fn settings_end_check(void)
                 wheel_ok = wheel_ok && settings.list.scroll.scroll == expected && !scroll_gliding(&settings.list.scroll) && !scroll_back(&settings.list.scroll);
 
                 // The bar: presses on its track below the thumb, each pages a view, until it reaches the end.
-                ui_page_scroll(&settings.page,0);
+                ui_scroll_set(settings.page.body, 0);
                 settings_frames_until(settings_frames.now + 1000 * SETTINGS_FRAMES_MS);
                 ui_scroll_track(&settings.ui, &settings.list.scroll, &track_top, &track_height);
                 bar_x = settings.list.scroll.x + UI_SCROLL_WIDTH * scale / 2;
@@ -4387,7 +4387,7 @@ static fn settings_end_check(void)
                 // A finger: down on the list, dragged up past the end in steps, and let go; the list settles at the end. The pull is
                 // ten views long (60 steps of 40 px), so the list is put eight views above its end first: the pull ends two views
                 // past the end however many rows the longest group has, and the row says so (pulled) before it looks where it rests.
-                ui_page_scroll(&settings.page, expected > 8 * settings.list.scroll.view ? expected - 8 * settings.list.scroll.view : 0);
+                ui_scroll_set(settings.page.body, expected > 8 * settings.list.scroll.view ? expected - 8 * settings.list.scroll.view : 0);
                 settings_frames_until(settings_frames.now + 1000 * SETTINGS_FRAMES_MS);
                 settings_frames_event(WINDOW_EVENT_MOTION, WINDOW_KEY_TOUCH, x, y);
                 settings_frames_event(WINDOW_EVENT_BUTTON, WINDOW_KEY_DOWN | WINDOW_KEY_TOUCH, UI_POINTER_LEFT, 0);
@@ -4418,7 +4418,7 @@ static fn settings_wheel_end_check(string_address name, positive gap, int notche
         b32 settled;
 
         settings_filter_clear(), (void)0, ui_field_close(&settings.edit), (void)0, settings.page.menu_row = -1, settings.page.card = 0;
-        settings.page.pane = 1, settings.queued = 0, settings.child = 1, settings.job = 0, settings.job_sets = false, ui_confirm_drop(&settings.confirm);
+        settings.page.pane = 1, settings.queued = 0, settings.runner.child = 1, settings.job = 0, settings.job_sets = false, ui_confirm_drop(&settings.confirm);
         settings.list.hover = settings.list.down = -1;
         for (int g = 0; g < settings_groups(); g++)
         {
@@ -4429,7 +4429,7 @@ static fn settings_wheel_end_check(string_address name, positive gap, int notche
         }
         settings.page.chosen = group;
         settings_refilter();
-        ui_page_scroll(&settings.page,0);
+        ui_scroll_set(settings.page.body, 0);
         settings_frames_until(settings_frames.now + 1000 * SETTINGS_FRAMES_MS);
         most = ui_scroll_most(&settings.list.scroll);
         settings_frames_event(WINDOW_EVENT_MOTION, 0, (settings.page.left + settings.page.right) / 2, (settings.page.top + settings.page.bottom) / 2);
@@ -4465,7 +4465,7 @@ static b32 settings_flick_check(string_address name, int start, int step, int st
         int most, group = 0, best = -1, x, y, turned = 0;
 
         settings_filter_clear(), (void)0, ui_field_close(&settings.edit), (void)0, settings.page.menu_row = -1, settings.page.card = 0;
-        settings.page.pane = 1, settings.queued = 0, settings.child = 1, settings.job = 0, settings.job_sets = false, ui_confirm_drop(&settings.confirm);
+        settings.page.pane = 1, settings.queued = 0, settings.runner.child = 1, settings.job = 0, settings.job_sets = false, ui_confirm_drop(&settings.confirm);
         settings.list.hover = settings.list.down = -1;
         for (int g = 0; g < settings_groups(); g++)
         {
@@ -4476,10 +4476,10 @@ static b32 settings_flick_check(string_address name, int start, int step, int st
         }
         settings.page.chosen = group;
         settings_refilter();
-        ui_page_scroll(&settings.page,0);
+        ui_scroll_set(settings.page.body, 0);
         settings_frames_until(settings_frames.now + 1000 * SETTINGS_FRAMES_MS);
         most = ui_scroll_most(&settings.list.scroll);
-        ui_page_scroll(&settings.page,most - start);
+        ui_scroll_set(settings.page.body, most - start);
         settings_frames_until(settings_frames.now + 100 * SETTINGS_FRAMES_MS);
         x = (settings.page.left + settings.page.right) / 2, y = (settings.page.top + settings.page.bottom) / 2;
         settings_frames_event(WINDOW_EVENT_MOTION, WINDOW_KEY_TOUCH, x, y);
@@ -4784,10 +4784,10 @@ static fn check_display_section(void)
                           ui_graph_clear(&settings.map.graph, 1, settings.map.graph.at_x, settings.map.graph.at_y) &&
                           ui_graph_held(&settings.map.graph, 1, settings.map.graph.at_x, settings.map.graph.at_y));
                 check("display section: while a screen is dragged the caption says to let it go", string_equals((string_address)settings_map_hint(4), (string_address) "Let go to place the screen"));
-                child_before = settings.child;
+                child_before = settings.runner.child;
                 touch = (struct window_event){WINDOW_EVENT_BUTTON, WINDOW_KEY_TOUCH | WINDOW_KEY_CANCEL, UI_POINTER_LEFT, 0};
                 settings_event_at(&touch);
-                check("display section: a drag taken back writes nothing", settings.map.graph.held < 0 && settings.child == child_before && !settings.map.sent);
+                check("display section: a drag taken back writes nothing", settings.map.graph.held < 0 && settings.runner.child == child_before && !settings.map.sent);
 
                 // A mouse on the top right screen (table index 2): the same press chooses and takes it, and a press on a screen is no press
                 // of the identify button (which would run the verb, a child process; none is started).
@@ -4797,7 +4797,7 @@ static fn check_display_section(void)
                 touch = (struct window_event){WINDOW_EVENT_BUTTON, WINDOW_KEY_DOWN, UI_POINTER_LEFT, 0};
                 taken = settings_event_at(&touch);
                 check("display section: a mouse's press on a screen of the map chooses it and takes it, and runs no verb",
-                      taken && settings.map.display == 2 && settings.map.graph.held == 2 && settings.child == child_before);
+                      taken && settings.map.display == 2 && settings.map.graph.held == 2 && settings.runner.child == child_before);
                 touch = (struct window_event){WINDOW_EVENT_BUTTON, 0, UI_POINTER_LEFT, 0};
                 settings_event_at(&touch);
                 check("display section: a press let go where it went down writes nothing", settings.map.graph.held < 0 && !settings.map.sent);
@@ -5347,7 +5347,7 @@ static fn check_display_modes(void)
         table_at->output_mode_w[1] = 1024, table_at->output_mode_h[1] = 768;
         settings.own.table = table_at;
         settings.map.display = 0;
-        settings.child = 1, settings.queued = 0, settings_resize.on = false;
+        settings.runner.child = 1, settings.queued = 0, settings_resize.on = false;
         check("display modes: the Resolution and Primary display rows are rows of the Display section", size_row >= 0 && primary_row >= 0 &&
               settings_group_of(size_row) == settings_group_of(settings_output_row(SETTINGS_OUT_SCREEN)) &&
               settings_group_of(primary_row) == settings_group_of(size_row));
@@ -5402,7 +5402,7 @@ static fn check_display_modes(void)
         settings_output_apply(primary_row, "Not primary");
         check("display modes: the primary is not made less than primary on its own: another is made the primary", settings.queued == 0);
 
-        settings.child = 0, settings.queued = 0, settings_resize.on = false;
+        settings.runner.child = 0, settings.queued = 0, settings_resize.on = false;
         settings.map.display = -1;
         settings.own.table = saved;
 }
@@ -5422,7 +5422,7 @@ static fn check_settings_device_strip(void)
 
         for (positive at = 0; at < length; at++)
                 settings_large->said[at] = text[at];
-        settings.said_length = length;
+        settings.runner.length = length;
         settings_feed_hardware();
         check("settings: a drive's partitions are its strip, in order, with free room",
               settings.item_count[2] == 3 && items[0].kind == SETTINGS_NOTE && items[0].segment_count == 4 &&
@@ -5482,7 +5482,7 @@ static fn check_settings_device_strip(void)
 
                 for (positive at = 0; at < length; at++)
                         settings_large->said[at] = quarter[at];
-                settings.said_length = length;
+                settings.runner.length = length;
                 settings_feed_hardware();
                 memory_zero(&line, sizeof(line)), memory_zero(&bare, sizeof(bare));
                 // The heading's words are made as the row is described, so each row's are read before the next is described.
@@ -5502,7 +5502,7 @@ static fn check_settings_device_strip(void)
 
                 for (positive at = 0; at < length; at++)
                         settings_large->said[at] = more[at];
-                settings.said_length = length;
+                settings.runner.length = length;
                 settings_feed_hardware();
                 count = drive_parts_of((int)SETTINGS_LIST_ID(2, 0));
                 check("settings: the partitions the host did not show are a quiet row after the drive's partitions",
@@ -5525,7 +5525,7 @@ static fn check_settings_device_strip(void)
                         rows[length++] = *line;
                 for (positive at = 0; at < length; at++)
                         settings_large->said[at] = rows[at];
-                settings.said_length = length;
+                settings.runner.length = length;
                 settings_feed_hardware();
                 check("settings: a drive past the rows has no strip, the port before it keeps none, and a note says one is not shown",
                       settings.item_count[2] == 24 && items[22].kind == SETTINGS_PORT && items[22].segment_count == 0 &&
@@ -5538,7 +5538,7 @@ static fn check_settings_device_strip(void)
                                 rows[length++] = *line;
                 for (positive at = 0; at < length; at++)
                         settings_large->said[at] = rows[at];
-                settings.said_length = length;
+                settings.runner.length = length;
                 settings_feed_hardware();
                 check("settings: a drive with thirteen segments keeps every one of them",
                       settings.item_count[2] == 1 && items[0].kind == SETTINGS_NOTE && items[0].segment_count == 13 &&
@@ -5551,7 +5551,7 @@ static fn check_settings_device_strip(void)
                         rows[length++] = *line;
                 for (positive at = 0; at < length; at++)
                         settings_large->said[at] = rows[at];
-                settings.said_length = length;
+                settings.runner.length = length;
                 settings_feed_hardware();
                 check("settings: free room no bigger than a MiB, the alignment a partition table keeps, is no segment, and free room larger than that is one",
                       settings.item_count[2] == 1 && items[0].segment_count == 2 && items[0].segment_role[0] == 0 && items[0].segment_role[1] == 4 &&
@@ -5564,7 +5564,7 @@ static fn check_settings_device_strip(void)
                         rows[length++] = *line;
                 for (positive at = 0; at < length; at++)
                         settings_large->said[at] = rows[at];
-                settings.said_length = length;
+                settings.runner.length = length;
                 settings_feed_hardware();
                 {
                         int count = drive_parts_of((int)SETTINGS_LIST_ID(2, 0));
@@ -5576,7 +5576,7 @@ static fn check_settings_device_strip(void)
                                   string_equals((string_address)drive_parts[3].label, (string_address) "Linux data") && !drive_parts[3].aside[0]);
                 }
                 // A reading that lists nothing is a note that says so.
-                settings.said_length = 0;
+                settings.runner.length = 0;
                 settings_feed_hardware();
                 check("settings: a device list with nothing in it is one note that says no drive or USB device was found",
                       settings.item_count[2] == 1 && items[0].kind == SETTINGS_NOTE &&
@@ -5590,7 +5590,7 @@ static fn check_settings_device_strip(void)
                         rows[length++] = *line;
                 for (positive at = 0; at < length; at++)
                         settings_large->said[at] = rows[at];
-                settings.said_length = length;
+                settings.runner.length = length;
                 settings_feed_hardware();
                 // The state is the line's last word and a field of its own, which the row shows beside its allow and deny: the label
                 // is what comes before it, cut to its room, and no cut of the label reaches the state.
@@ -5734,7 +5734,7 @@ static fn drive_feed(const char address_to text)
 
         for (positive at = 0; at < length; at++)
                 settings_large->said[at] = text[at];
-        settings.said_length = length;
+        settings.runner.length = length;
         settings_feed_hardware();
 }
 
@@ -6034,7 +6034,7 @@ static fn check_settings_actions(void)
                 check("settings actions: the table has an action, a clock, an info row and a deliberate switch", false);
                 return;
         }
-        settings.child = 1, settings.job = SETTINGS_JOB_HELP, settings.job_sets = false, settings.queued = 0; // a stand-in: no verb is started
+        settings.runner.child = 1, settings.job = SETTINGS_JOB_HELP, settings.job_sets = false, settings.queued = 0; // a stand-in: no verb is started
         popup_fake.screen = SETTINGS_HEIGHT, popup_fake.themed = ui_kit.themed;
         ui_confirm_drop(&settings.confirm);
 
@@ -6215,7 +6215,7 @@ static fn check_settings_actions(void)
 
                 // External devices: details columns, dense rows, column sort, right-click Allow/Deny + Copy + Copy row.
                 memory_copy(settings_large->said, ext_out, sizeof(ext_out) - 1);
-                settings.said_length = sizeof(ext_out) - 1;
+                settings.runner.length = sizeof(ext_out) - 1;
                 settings_feed_hardware();
                 settings.page.chosen = settings_group_of(ext_row);
                 settings_rebuild();
@@ -6266,7 +6266,7 @@ static fn check_settings_actions(void)
 
                 // Waterlink linked machines: structured Name/Access/Status details table, dense 28px rows, Copy / Copy row / Remove + Delete twice.
                 memory_copy(settings_large->said, link_out, sizeof(link_out) - 1);
-                settings.said_length = sizeof(link_out) - 1;
+                settings.runner.length = sizeof(link_out) - 1;
                 settings_feed_links();
                 settings.page.chosen = settings_group_of(link_row);
                 settings_rebuild();
@@ -6333,7 +6333,7 @@ static fn check_settings_actions(void)
                 settings.popup.list = null, settings.popup.list_row = -1;
         }
         popup_fake.screen = 0;
-        settings.queued = 0, settings.child = 0, settings.job_sets = false;
+        settings.queued = 0, settings.runner.child = 0, settings.job_sets = false;
 }
 
 static fn check_settings_drive_rows(string_address regular, string_address bold)
@@ -6760,7 +6760,7 @@ static fn check_settings_drive_rows(string_address regular, string_address bold)
                 // list's top, and drawn there (its tabs are placed as they are drawn); a change of a row (not a feed's reading, which a change
                 // would end) is running, so a change waits in the queue.
                 {
-                        int queued = (settings.child = 1, settings.job = SETTINGS_JOB_ACT, settings.queued), at = drive_place_of("SanDisk Ultra"), y;
+                        int queued = (settings.runner.child = 1, settings.job = SETTINGS_JOB_ACT, settings.queued), at = drive_place_of("SanDisk Ultra"), y;
                         struct ui_control address_to tabs = at >= 0 ? ui_list_control(&settings.list, settings.list.id[at], 1) : null;
 
                         if (at >= 0)
@@ -6779,7 +6779,7 @@ static fn check_settings_drive_rows(string_address regular, string_address bold)
                                 held = settings.queued == queued + 1 && settings.queue[queued].row == SETTINGS_JOB_ACT &&
                                        string_equals((string_address)settings.queue[queued].value, (string_address) "x\n1-1");
                         }
-                        settings.queued = 0, settings.child = 0;
+                        settings.queued = 0, settings.runner.child = 0;
                 }
                 check("settings devices: a press on a USB stick's strip allows or blocks nothing, and one on its deny tab blocks it", held);
                 // A section with no rows has no header: drives alone, and USB devices alone.
@@ -7047,13 +7047,13 @@ static fn check_settings_press(int x, int y)
 {
         struct window_event event = {WINDOW_EVENT_MOTION, 0, x, y};
 
-        settings.child = 1; // a press that changes a setting queues it: no job starts here
+        settings.runner.child = 1; // a press that changes a setting queues it: no job starts here
         settings_event_at(&event);
         event = (struct window_event){WINDOW_EVENT_BUTTON, WINDOW_KEY_DOWN, UI_POINTER_LEFT, 0};
         settings_event_at(&event);
         event = (struct window_event){WINDOW_EVENT_BUTTON, 0, UI_POINTER_LEFT, 0};
         settings_event_at(&event);
-        settings.child = 0;
+        settings.runner.child = 0;
 }
 
 static fn check_settings_clicks(void)
@@ -7215,7 +7215,7 @@ static fn check_settings_queue_rows(void)
         int rows[9], found = 0, waiting = 0;
         b32 in_order = true;
 
-        settings.child = 1; // a verb runs: each change waits for it, and none starts
+        settings.runner.child = 1; // a verb runs: each change waits for it, and none starts
         settings.queued = 0;
         for (int row = 0; row < SETTINGS_ROWS && found < 9; row++)
                 if (!settings_rows[row].deliberate)
@@ -7229,7 +7229,7 @@ static fn check_settings_queue_rows(void)
         settings_change(rows[0], "y");
         check("settings queue: a second change to a row that waits replaces its value and takes no place",
               settings.queued == 9 && settings.queue[0].row == rows[0] && string_equals((string_address)settings.queue[0].value, (string_address) "y"));
-        settings.child = 0;
+        settings.runner.child = 0;
         settings.queued = 0;
 }
 
@@ -7652,7 +7652,7 @@ static fn settings_tries_check(void)
                 }
         }
         settings_click_try.at = 0, settings_click_try.apart = 0;
-        settings.child = 1;
+        settings.runner.child = 1;
         settings_activate(click, 1), settings_activate(click, 1);
         keyed = !settings_click_try.apart && !settings_click_try.at;
         check("settings tries: the double-click row lights its time apart when two clicks on it come within the double-click time, and not after it",
@@ -7663,7 +7663,7 @@ static fn settings_tries_check(void)
         {
                 positive queued = settings.queued;
 
-                settings.child = 1;
+                settings.runner.child = 1;
                 settings_activate(repeat, 1);
                 field = settings_editing() == repeat;
                 ui_text_set(&settings.edit, (const p8 address_to) "kkkk", 4);
@@ -8434,7 +8434,7 @@ static fn rtl_draw(int group, int scale, b32 rtl)
 
                 settings_size((unsigned int)(SETTINGS_WIDTH * scale), (unsigned int)(SETTINGS_HEIGHT * scale));
                 memory_copy(settings_large->said, said, sizeof(said) - 1);
-                settings.said_length = sizeof(said) - 1;
+                settings.runner.length = sizeof(said) - 1;
                 settings_card_fill();
                 settings_card_open("moonwater status");
         }

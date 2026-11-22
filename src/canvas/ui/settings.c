@@ -622,14 +622,13 @@ static int settings_sub_put(int section, b32 detail, const char address_to words
         if ((positive)settings_sub_count >= settings_sub_room)
                 if (!array_store_reserve(settings_sub, settings_sub_room, (positive)settings_sub_count, (positive)settings_sub_count + 1, 32))
                         return count;
-        if (!ui_list_reserve(&settings.list, count + 1))
+        if (!ui_list_add(&settings.list, SETTINGS_SUB_BASE + settings_sub_count))
                 return count;
-        sub = &settings_sub[settings_sub_count];
+        sub = &settings_sub[settings_sub_count++];
         memory_zero(sub, sizeof(*sub));
         sub->section = section, sub->owner = settings_sub_owner;
         sub->detail = detail, sub->words = words;
         string_copy_bounded((string_address)sub->text, (string_address)text, sizeof(sub->text));
-        settings.list.id[count] = SETTINGS_SUB_BASE + settings_sub_count++;
         return count + 1;
 }
 
@@ -1784,8 +1783,8 @@ static fn settings_layout_check(void)
 static int settings_try_emit(int row, b32 before, int count)
 {
         for (int w = 0; w < SETTINGS_TRIES && !settings_filter_length(); w++)
-                if (settings_tries[w].before == before && settings_row_is(row, settings_tries[w].path) && ui_list_reserve(&settings.list, count + 1))
-                        settings.list.id[count++] = SETTINGS_TRY + w;
+                if (settings_tries[w].before == before && settings_row_is(row, settings_tries[w].path) && ui_list_add(&settings.list, SETTINGS_TRY + w))
+                        count++;
         return count;
 }
 
@@ -1795,12 +1794,13 @@ static fn settings_rebuild(void)
         b32 filtered = settings_filter_length() != 0;
         string_copy_bounded((string_address)settings_metric_shown, (string_address)settings_metric_line, sizeof(settings_metric_shown));
         settings_sub_count = 0, settings_sub_cut = 0;
+        ui_list_begin(&settings.list);
         for (positive row = 0; row < settings_rows_count(); row++)
                 if (filtered ? settings_matches((int)row) : settings_group_of((int)row) == settings.page.chosen)
                 {
                         count = settings_try_emit((int)row, true, count);
-                        if (ui_list_reserve(&settings.list, count + 1))
-                                settings.list.id[count++] = (int)row;
+                        if (ui_list_add(&settings.list, (int)row))
+                                count++;
                         count = settings_try_emit((int)row, false, settings_sub_rows((int)row, count));
                 }
         for (int list = 0; list < SETTINGS_LISTS; list++)
@@ -1809,20 +1809,18 @@ static fn settings_rebuild(void)
                 for (int at = 0; at < settings.item_count[list]; at++)
                 {
                         int row = SETTINGS_LIST_ID(list, at);
-                        if ((filtered ? settings_matches(row) : group == settings.page.chosen) && ui_list_reserve(&settings.list, count + 1))
-                                settings.list.id[count++] = row, count = settings_link_rows(row, settings_drive_rows(row, count));
+                        if ((filtered ? settings_matches(row) : group == settings.page.chosen) && ui_list_add(&settings.list, row))
+                                count = settings_link_rows(row, settings_drive_rows(row, count + 1));
                 }
         }
         for (int w = 0; w < SETTINGS_ABOUT_COUNT; w++)
-                if ((filtered ? settings_matches(SETTINGS_ABOUT + w) : settings.page.chosen == settings_system_group()) && ui_list_reserve(&settings.list, count + 1))
-                        settings.list.id[count++] = SETTINGS_ABOUT + w;
-        settings.list.count = count;
+                if ((filtered ? settings_matches(SETTINGS_ABOUT + w) : settings.page.chosen == settings_system_group()) && ui_list_add(&settings.list, SETTINGS_ABOUT + w))
+                        count++;
+        ui_list_end(&settings.list);
         if (settings_editing() >= 0 && settings_pos(settings_editing()) < 0)
                 settings_edit_end();
         if (settings.page.menu_row >= 0 && settings_pos(settings.page.menu_row) < 0)
                 settings.page.menu_row = -1, ui_popmenu_close(&settings.popup);
-        if (settings_pos(settings.list.focus) < 0 && count)
-                settings.list.focus = settings.list.id[0];
         settings_layout();
         settings_layout_check();
         ui_page_redraw(&settings.page);

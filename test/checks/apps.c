@@ -7110,7 +7110,7 @@ static fn check_field_hands(string_address regular)
                 settings.width = 800, settings.height = 520;
                 settings.ui.pitch = 800, settings.ui.width = 800, settings.ui.height = 520;
                 settings.focused = 1, settings.page.pane = 1, settings.page.menu_row = -1, settings.page.card = 0;
-                settings.child = 1, settings.queued = 0, settings.job = 0, settings.job_sets = false;
+                settings.runner.child = 1, settings.queued = 0, settings.job = 0, settings.job_sets = false;
                 settings_edit_end();
                 settings_group_choose(0);
                 settings_layout();
@@ -7264,7 +7264,7 @@ static fn check_field_hands(string_address regular)
                         settings_event_at(&release);
                         check("settings: a press let go off its row does nothing", settings_editing() < 0 && settings.queued == 0);
                 }
-                settings.queued = 0, settings.child = 0;
+                settings.queued = 0, settings.runner.child = 0;
                 settings_group_choose(0);
         }
         check_input_matrix(&ui, (unsigned int address_to)pixels, table_at);
