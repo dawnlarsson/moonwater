@@ -1952,6 +1952,7 @@ static positive compositor_timers_arm(positive now, unsigned int fence_at, int h
                         compositor_soon(&until, now - compositor.presented < period ? compositor.presented + period : now);
                 compositor_soon(&until, compositor_wl_due());
                 compositor_soon(&until, compositor_wl_frame_at);
+                compositor_soon(&until, compositor_wl_callbacks_due());
         }
 #endif
 #ifdef MOONWATER_GPU_C
@@ -2385,6 +2386,7 @@ static b32 compositor_main()
                 if (compositor.band && minute_tick && taskbar_tick()) compositor_tabs_changed();
                 if (compositor.band && now >= compositor_volume.look_at) compositor_volume_look(now);
 #ifdef CONFIG_MOONWATER_WAYLAND
+                compositor_wl_flip_overdue(now), compositor_wl_callbacks_watch(now);
                 if (compositor_wl_frame_at && (now >= compositor_wl_frame_at || compositor_wl_jit_row() < 0))
                         compositor_wl_frame_at = 0, compositor_wl_jit_sent(now), compositor_wl_frame();
                 compositor_wl_wake();

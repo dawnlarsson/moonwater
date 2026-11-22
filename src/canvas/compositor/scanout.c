@@ -935,12 +935,39 @@ static positive compositor_flip_wait(positive now)
         (EBUSY): the frame is then composed again a period on, never sooner (the loop presents once a period), and the third refusal in a row sets the
         crtc with a mode set (compositor_present), so a card that stays busy costs a compose a period and no more. The event of the flip given up on,
         if it comes after all, is not the next flip's (compositor_card_events).
+
+        A second was a game frozen a second: no present is made while a flip is pending, and a fullscreen game's callbacks wait for its flip
+        (compositor_wl_frame_owed), so each lost event (gamebench: every mode set a wake made froze fullscreen HL2 for exactly 1.0 s) was a second
+        of nothing. A flip lands within a vblank or two (a client's buffer is latched only once ready, a plate's job is done in milliseconds), so it
+        is given up on after COMPOSITOR_FLIP_LOST_PERIODS periods, never less than COMPOSITOR_FLIP_LOST_LEAST: 111 ms at 144 Hz, 267 ms at 60 Hz;
+        and the callbacks owed to it are answered once its wait is over (compositor_wl_flip_overdue), so the game and Xwayland's Present behind
+        an X game draw on meanwhile.
 */
-#define COMPOSITOR_FLIP_LOST 1000000000ull
+#define COMPOSITOR_FLIP_LOST_PERIODS 16
+#define COMPOSITOR_FLIP_LOST_LEAST 100000000ull
+#define COMPOSITOR_FLIP_LOST compositor_flip_lost_ns()
+static positive compositor_flip_lost_ns(void)
+{
+        positive lost = (compositor.period ? compositor.period : 16666667ull) * COMPOSITOR_FLIP_LOST_PERIODS;
+
+        return lost > COMPOSITOR_FLIP_LOST_LEAST ? lost : COMPOSITOR_FLIP_LOST_LEAST;
+}
+
 static int compositor_flip_lost(positive now)
 {
         return compositor.flip_pending && now >= compositor.flip_issued && now - compositor.flip_issued >= COMPOSITOR_FLIP_LOST;
 }
+
+#ifdef CONFIG_MOONWATER_WAYLAND
+// A flip pending past its wait (COMPOSITOR_FLIP_PERIODS): its event is late, or lost. The callbacks a fullscreen game's frame owes to the flip are
+// answered now, not when it is given up on: the game draws on, and Xwayland's Present, which waits a second for a callback before it gives up
+// on one, completes. The buffers the flip holds stay held until it lands or is let go of.
+static void compositor_wl_flip_overdue(positive now)
+{
+        if (compositor_wl_frame_owed && compositor.flip_pending && !compositor_flip_wait(now))
+                compositor_wl_frame_owed = 0, compositor_wl_frame_at = 0, compositor_wl_jit_sent(now), compositor_wl_frame();
+}
+#endif
 
 /*
         The card's events, as read: a flip's completion is the one asked for, and it is the flip in flight's only when it carries that

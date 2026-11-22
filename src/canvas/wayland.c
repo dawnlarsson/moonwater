@@ -388,7 +388,7 @@ static struct
         long syncobj_ok;
         char drm_node[64];
         long constraints, hold_row, hold_mode, unheld_row, hint_row, hint_x, hint_y, heard, quiet;
-        long counts_row, counts[4], counts_micro, input_at, bells, icons, frames, latches;
+        long counts_row, counts[4], counts_micro, input_at, bells, icons, frames, latches, answered;
         int framing, calling;
         unsigned long target, target_period;
         struct wayland_touch touch[WAYLAND_TOUCHES];
@@ -6125,6 +6125,7 @@ WAYLAND_API void wayland_row_wake(long row)
 
 static void wayland_callbacks_due(long now)
 {
+        wayland.answered = now;
         for (long row = 0; row < wayland.row_made; row++)
         {
                 struct wayland_client *c;
@@ -6170,6 +6171,32 @@ WAYLAND_API void wayland_latch_defer(int defer_callbacks)
 }
 
 WAYLAND_API void wayland_latch(void) { wayland_latch_defer(0); }
+
+/*
+        The frame callbacks waiting on a shown window: the time (ms, the host's clock) they were last answered, or -1 when none waits. Every
+        present answers them (at its latch, its flip or its job's end) and an idle frame does; one no present answered (a flip whose event is
+        late, a mode set, screens being taken again, a card job held) kept Xwayland's Present waiting for its msc to move, which it does on a
+        frame callback or after a second (gamebench: every wake's mode set froze fullscreen HL2 for exactly 1.0 s). The host answers them late
+        (wayland_callbacks_late) past a few periods of that.
+*/
+WAYLAND_API long wayland_callbacks_waiting(void)
+{
+        for (long row = 0; wayland.host && row < wayland.row_made; row++)
+        {
+                struct wayland_client *c;
+                struct wayland_surface *s = wayland_row_surface(row, &c);
+
+                if (s && c->waiting && wayland_tree_has_cb(c, s, WLCB_READY) && !wayland_row_suspended(row))
+                        return wayland.answered;
+        }
+        return -1;
+}
+
+WAYLAND_API void wayland_callbacks_late(void)
+{
+        if (wayland.host)
+                wayland_callbacks_due(wayland_now());
+}
 
 static void wayland_presentings_done(struct wayland_client *c, struct wayland_surface *s, unsigned long when, unsigned long refresh,
                                      unsigned long seq, unsigned long flags)

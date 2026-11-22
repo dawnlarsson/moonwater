@@ -1865,6 +1865,23 @@ static void test_frames(void)
         wlc_pump(c);
         WLCHECK(wlc_count(c, WLI_wl_callback, WLE_wl_callback_done) == 1, "and the next one when it is shown again");
 
+        /* a frame the latch deferred that no present answered (a flip whose event is lost, a mode set): the host is told it waits and since when,
+           and answers it late (Xwayland's Present otherwise waited a second for its msc to move) */
+        callback = wlc_id(c, WLI_wl_callback, 1);
+        wlc_forget(c);
+        wlc_send(c, s.surface, WLQ_wl_surface_frame, callback);
+        wlc_send(c, s.surface, WLQ_wl_surface_commit);
+        fake.clock_still = 1, fake.now = 7000;
+        wayland_latch_defer(1);
+        wlc_pump(c);
+        WLCHECK(wlc_count(c, WLI_wl_callback, WLE_wl_callback_done) == 0 && wayland_callbacks_waiting() >= 0,
+                "a frame deferred by the latch waits, and the host is told so");
+        wayland_callbacks_late();
+        wlc_pump(c);
+        WLCHECK(wlc_count(c, WLI_wl_callback, WLE_wl_callback_done) == 1 && wayland_callbacks_waiting() < 0 && wayland.answered == 7000,
+                "answered late, at the host's time, and none waits after it");
+        fake.clock_still = 0;
+
         /* a surface with no window has no frame to wait for */
         {
                 unsigned long plain = wlc_id(c, WLI_wl_surface, 6), cb = wlc_id(c, WLI_wl_callback, 1);

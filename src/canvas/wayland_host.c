@@ -6203,6 +6203,27 @@ static void compositor_wl_latch(void)
                 compositor_wl_flush_all();
 }
 
+/*
+        Frame callbacks no present answered for COMPOSITOR_WL_CALLBACK_PERIODS periods are answered now (wayland_callbacks_waiting): a window is
+        never kept from drawing by a frame the screen did not show. 0 when none waits (the time of the loop's wake otherwise, compositor_timers_arm).
+*/
+#define COMPOSITOR_WL_CALLBACK_PERIODS 3
+static positive compositor_wl_callbacks_due(void)
+{
+        long answered = compositor_wl.started ? wayland_callbacks_waiting() : -1;
+        positive period = compositor.period ? compositor.period : 16666667ull;
+
+        return answered < 0 ? 0 : (positive)answered * 1000000ull + COMPOSITOR_WL_CALLBACK_PERIODS * period;
+}
+
+static void compositor_wl_callbacks_watch(positive now)
+{
+        positive due = compositor_wl_callbacks_due();
+
+        if (due && now >= due)
+                wayland_callbacks_late(), compositor_wl_flush_all();
+}
+
 /* Resume clients whose frame-barrier hold cleared when wayland_frame() advanced the frame count. */
 static void compositor_wl_resume_stalled(void)
 {

@@ -5452,9 +5452,31 @@ static void flip_wait_rows(void)
         check("flip: a flip in flight is waited for, to a deadline of four periods", compositor_flip_wait(1000000000ull + 16666666ull) == 1000000000ull + 4 * 16666666ull);
         check("flip: the wait holds until its deadline", compositor_flip_wait(1000000000ull + 4 * 16666666ull - 1) == 1000000000ull + 4 * 16666666ull);
         check("flip: past the deadline it is no wait (an event that never comes)", compositor_flip_wait(1000000000ull + 4 * 16666666ull) == 0);
-        check("flip: a flip is not lost while its wait runs, or a moment short of a second", !compositor_flip_lost(1000000000ull + 4 * 16666666ull) &&
+        check("flip: a flip is not lost while its wait runs, or a moment short of its sixteen periods", !compositor_flip_lost(1000000000ull + 4 * 16666666ull) &&
               !compositor_flip_lost(1000000000ull + COMPOSITOR_FLIP_LOST - 1));
-        check("flip: a second on with no event it is lost, and is let go of", compositor_flip_lost(1000000000ull + COMPOSITOR_FLIP_LOST) == 1);
+        check("flip: sixteen periods on with no event it is lost, and is let go of", compositor_flip_lost(1000000000ull + COMPOSITOR_FLIP_LOST) == 1);
+        // A lost event froze a fullscreen game for the whole give-up, a second; it is sixteen periods now, never less than 100 ms.
+        check("flip: at 60 Hz a flip is given up on after 267 ms, not a second", COMPOSITOR_FLIP_LOST == 16 * 16666666ull &&
+              compositor_flip_lost(1000000000ull + 266666656ull) && !compositor_flip_lost(1000000000ull + 266666655ull));
+        compositor.period = 6944444ull;
+        check("flip: at 144 Hz after 111 ms", compositor_flip_lost(1000000000ull + 111111104ull) && !compositor_flip_lost(1000000000ull + 111111103ull));
+        compositor.period = 2000000ull;
+        check("flip: and at 500 Hz never sooner than 100 ms", compositor_flip_lost(1000000000ull + 100000000ull) && !compositor_flip_lost(1000000000ull + 99999999ull));
+        {
+                // A fullscreen game's callbacks owed to a flip whose event is late are answered once the flip's wait is over, the flip still pending.
+                positive kept_sent = compositor_wl_frame_sent_at, kept_at = compositor_wl_frame_at;
+                int kept_owed = compositor_wl_frame_owed, kept_started = compositor_wl.started;
+                b32 waits, answered;
+
+                compositor.period = 6944444ull, compositor_wl.started = 0, compositor_wl_frame_owed = 1, compositor_wl_frame_at = 0, compositor_wl_jit_sent(5);
+                compositor_wl_flip_overdue(1000000000ull + 4 * 6944444ull - 1);
+                waits = compositor_wl_frame_owed == 1 && compositor_wl_frame_sent_at == 5;
+                compositor_wl_flip_overdue(1000000000ull + 4 * 6944444ull);
+                answered = compositor_wl_frame_owed == 0 && compositor_wl_frame_sent_at == 1000000000ull + 4 * 6944444ull && compositor.flip_pending;
+                check("flip: a game's callbacks owed to a late flip wait its four periods, then are answered, the flip still pending", waits && answered);
+                compositor_wl_frame_sent_at = kept_sent, compositor_wl_frame_at = kept_at, compositor_wl_frame_owed = kept_owed, compositor_wl.started = kept_started;
+                compositor.period = 16666666ull;
+        }
         check("flip: a clock read before the flip was asked loses nothing", !compositor_flip_lost(999999999ull));
         compositor.flip_pending = 0;
         check("flip: no flip in flight, no wait", compositor_flip_wait(1000000000ull + 1) == 0);
