@@ -186,6 +186,88 @@ static void compositor_pin_ccd0(void)
                 compositor_call(syscall(sched_setaffinity), 0, sizeof(compositor_ccd.ccd0), (positive)compositor_ccd.ccd0, 0, 0, 0);
 }
 
+// The input core: one CCD0 core takes the USB controllers' interrupts and the reader thread, and that core and its SMT sibling are the
+// only ones held out of the deep C-states (resume latency 2 us: polling or C1). A report after a quiet spell then wakes one shallow core
+// where it woke two (the interrupt's CPU and the reader's, each anywhere in CCD0 and each possibly in C3, 350 us declared), with a
+// cross-core wake between them, and the rest of the machine may sleep. The game's threads are kept off it, so the reader at FIFO 50
+// never preempts one. cpu0 is skipped: the loop and the boot's housekeeping start there. The hold is sysfs, so it outlives a
+// compositor that dies, as the game mode's EPP does; the next start writes it again.
+static struct
+{
+        int cpu, sibling;
+        unsigned long mask[2];
+        char hex[10];
+} compositor_input_core = {-1, -1, {0, 0}, {0}};
+static const char *compositor_qos_root = "/sys/devices/system/cpu"; // the CPUs' files (the checks' own tree in their place)
+
+// A CPU's file under compositor_qos_root: cpuN/`leaf`.
+static void compositor_cpu_path(char *path, unsigned int room, unsigned int cpu, const char *leaf)
+{
+        unsigned int at = 0;
+
+        windows_buf_str(path, room, &at, compositor_qos_root), windows_buf_kv(path, room, &at, "/cpu", (long)cpu), windows_buf_str(path, room, &at, leaf);
+}
+
+// Taken once, by the display's start only (compositor_pin_irqs_ccd0; a headless compositor writes nothing of the machine's).
+static void compositor_input_core_take(void)
+{
+        static const char digits[] = "0123456789abcdef";
+        char path[96];
+        unsigned long siblings[2];
+        int cpu = -1, sibling = -1;
+
+        if (compositor_input_core.cpu >= 0 || !compositor_multi_ccd())
+                return;
+        for (int c = 1; c < 32 && cpu < 0; c++)
+                if (compositor_ccd.ccd0[0] >> c & 1)
+                        cpu = c;
+        if (cpu < 0)
+                return;
+        compositor_input_core.mask[0] = 1ul << cpu;
+        for (int i = 7; i >= 0; i--)
+                compositor_input_core.hex[7 - i] = digits[(compositor_input_core.mask[0] >> (i * 4)) & 15u];
+        compositor_input_core.hex[8] = '\n', compositor_input_core.hex[9] = 0;
+        compositor_cpu_path(path, sizeof path, (unsigned int)cpu, "/topology/thread_siblings_list");
+        if (compositor_cpu_list_mask(path, siblings))
+                for (int c = 0; c < 64 && sibling < 0; c++)
+                        if (c != cpu && (siblings[0] >> c & 1) && (compositor_ccd.ccd0[0] >> c & 1))
+                                sibling = c, compositor_input_core.mask[0] |= 1ul << c;
+        for (unsigned int at = 0; at < 2; at++)
+        {
+                int c = at ? sibling : cpu;
+
+                if (c < 0)
+                        continue;
+                compositor_cpu_path(path, sizeof path, (unsigned int)c, "/power/pm_qos_resume_latency_us");
+                compositor_write_sysfs(path, "2\n", 2);
+        }
+        compositor_input_core.sibling = sibling, compositor_input_core.cpu = cpu;
+}
+
+// Where a game's threads go: CCD0, less the input core and its sibling (the reader at FIFO 50 never preempts one). 0 on a one-CCD machine.
+static int compositor_game_mask(unsigned long mask[2])
+{
+        if (!compositor_ccd0_mask(mask))
+                return 0;
+        if (compositor_input_core.cpu >= 0 && (mask[0] & ~compositor_input_core.mask[0]))
+                mask[0] &= ~compositor_input_core.mask[0];
+        return 1;
+}
+
+// The reader goes to the input core when the display's start took one, else to CCD0 as before.
+static void compositor_pin_input_core(void)
+{
+        unsigned long one[2] = {0, 0};
+
+        if (compositor_input_core.cpu < 0)
+        {
+                compositor_pin_ccd0();
+                return;
+        }
+        one[0] = 1ul << compositor_input_core.cpu;
+        compositor_call(syscall(sched_setaffinity), 0, sizeof(one), (positive)one, 0, 0, 0);
+}
+
 static void compositor_pin_irqs_ccd0(void)
 {
         static char buf[65536];
@@ -193,6 +275,7 @@ static void compositor_pin_irqs_ccd0(void)
 
         if (!compositor_multi_ccd() || (fd = system_open_at(AT_FDCWD, (string_address) "/proc/interrupts", FILE_READ | O_CLOEXEC)) < 0)
                 return;
+        compositor_input_core_take();
         while (got < (long)sizeof(buf) - 1 &&
                (n = (long)compositor_call(syscall(read), (positive)fd, (positive)(buf + got), (positive)(sizeof(buf) - 1 - (unsigned long)got), 0, 0, 0)) > 0)
                 got += n;
@@ -216,7 +299,8 @@ static void compositor_pin_irqs_ccd0(void)
 
                         if (used > 0 && buf[p + (long)used] == ':' && irq > 0 && irq < 4096)
                         {
-                                memory_copy(mask, compositor_ccd.ccd0_hex, 8);
+                                memory_copy(mask, compositor_input_core.cpu >= 0 && string_find((string_address)buf + line, (string_address) "xhci_hcd")
+                                                      ? compositor_input_core.hex : compositor_ccd.ccd0_hex, 8);
                                 mask[8] = '\n', mask[9] = 0;
                                 windows_num_path(path, sizeof(path), "/proc/irq/", (unsigned int)irq, "/smp_affinity");
                                 compositor_write_sysfs(path, mask, 9);
@@ -237,7 +321,6 @@ static void compositor_pin_irqs_ccd0(void)
 */
 #define COMPOSITOR_QOS_HOLD_US "20"
 #define COMPOSITOR_QOS_CPUS 128
-static const char *compositor_qos_root = "/sys/devices/system/cpu"; // the checks' own tree in their place
 static struct
 {
         int ready, count, held, global;      // the files found (count of them, open in fd), the hold written, and the fallback's fd (-1: none)
@@ -255,15 +338,13 @@ static void compositor_qos_open(void)
         for (unsigned int cpu = 0; cpu < COMPOSITOR_QOS_CPUS && compositor_qos.count < COMPOSITOR_QOS_CPUS; cpu++)
         {
                 char path[128];
-                unsigned int at = 0;
                 bipolar handle, got;
                 int slot = compositor_qos.count;
+                unsigned int limit = 0;
 
                 if (!(mask[cpu >> 6] >> (cpu & 63) & 1))
                         continue;
-                windows_buf_str(path, sizeof path, &at, compositor_qos_root);
-                windows_buf_kv(path, sizeof path, &at, "/cpu", (long)cpu);
-                windows_buf_str(path, sizeof path, &at, "/power/pm_qos_resume_latency_us");
+                compositor_cpu_path(path, sizeof path, cpu, "/power/pm_qos_resume_latency_us");
                 if ((handle = system_open_at(AT_FDCWD, (string_address)path, O_RDWR | O_CLOEXEC | O_NOFOLLOW)) < 0)
                         continue;
                 got = system_read_once(handle, compositor_qos.saved[slot], sizeof compositor_qos.saved[slot] - 1);
@@ -271,6 +352,14 @@ static void compositor_qos_open(void)
                         got--;
                 if (got <= 0 || (got == 2 && !memory_compare(compositor_qos.saved[slot], COMPOSITOR_QOS_HOLD_US, 2)))
                         compositor_qos.saved[slot][0] = '0', got = 1; // "0" is no limit (and "n/a" none at all)
+                for (bipolar k = 0; k < got && compositor_qos.saved[slot][k] >= '0' && compositor_qos.saved[slot][k] <= '9'; k++)
+                        limit = limit * 10 + (unsigned int)(compositor_qos.saved[slot][k] - '0');
+                // A limit stricter than the hold's (the input core's 2 us, compositor_input_core_take; "n/a", none at all) is left as it is.
+                if (compositor_qos.saved[slot][0] == 'n' || (limit && limit < 20))
+                {
+                        system_close(handle);
+                        continue;
+                }
                 compositor_qos.saved_length[slot] = (unsigned char)got, compositor_qos.fd[slot] = (int)handle, compositor_qos.count++;
         }
 }
@@ -359,7 +448,7 @@ static unsigned int compositor_game_slice_of(unsigned int pid, unsigned long lon
         bipolar handle, got;
         unsigned int asked = 0;
         unsigned long ccd_mask[2] = {0, 0}, all_mask[2] = {~0ul, ~0ul};
-        int pin_ccd = compositor_ccd0_mask(ccd_mask);
+        int pin_ccd = compositor_game_mask(ccd_mask);
 
         windows_num_path(path, sizeof(path), "/proc/", pid, "/task");
         if ((handle = system_open_at(AT_FDCWD, (string_address)path, FILE_READ | O_DIRECTORY | O_CLOEXEC)) < 0)
@@ -4267,7 +4356,7 @@ HOT static fn compositor_reader_run(address_any context)
 
         (void)context;
         compositor_call(syscall(sched_setscheduler), 0, 1, (positive)&priority, 0, 0, 0);
-        compositor_pin_ccd0();
+        compositor_pin_input_core();
         for (unsigned int at = 0; at < COMPOSITOR_INPUTS; at++)
                 watched[at] = -1;
         spark_ring = compositor_reader_spark_open();

@@ -4630,6 +4630,57 @@ static void qos_rows(void)
         compositor.hold = kept_hold, compositor.game = kept_game, compositor.holds = kept_holds, compositor.hold_until = kept_until;
 }
 
+/*
+        The input core (compositor_input_core_take): CCD0's first core after cpu0 and its SMT sibling take the USB interrupts and the reader and are
+        held at 2 us; a game's threads go to the rest of CCD0 (compositor_game_mask); and the hold of a game or an input (compositor_qos_keep, 20 us)
+        leaves their stricter 2 us as it is, where it wrote its 20 over it and put the 2 back only at its end.
+*/
+static void qos_file(const char *dir, unsigned int cpu, const char *leaf, const char *text)
+{
+        char path[128];
+        unsigned int at = 0;
+        bipolar handle;
+
+        windows_buf_str(path, sizeof path, &at, dir), windows_buf_kv(path, sizeof path, &at, "/cpu", (long)cpu);
+        compositor_call(syscall(mkdirat), (positive)AT_FDCWD, (positive)path, 0700, 0, 0, 0);
+        windows_buf_str(path, sizeof path, &at, leaf);
+        compositor_call(syscall(mkdirat), (positive)AT_FDCWD, (positive)path, 0700, 0, 0, 0);
+        windows_buf_str(path, sizeof path, &at, leaf[1] == 'p' ? "/pm_qos_resume_latency_us" : "/thread_siblings_list");
+        handle = system_open_at_mode(AT_FDCWD, (string_address)path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
+        if (handle >= 0)
+                system_write_once(handle, text, (positive)string_length((string_address)text)), system_close(handle);
+}
+
+static void input_core_rows(void)
+{
+        static const char dir[] = "/run/moonwater/check-core";
+        __typeof__(compositor_ccd) kept_ccd = compositor_ccd;
+        __typeof__(compositor_qos) kept_qos = compositor_qos;
+        __typeof__(compositor_input_core) kept_core = compositor_input_core;
+        const char *kept_root = compositor_qos_root;
+        unsigned long mask[2] = {0, 0};
+        b32 took, game, held, left;
+
+        compositor_call(syscall(mkdirat), (positive)AT_FDCWD, (positive)dir, 0700, 0, 0, 0);
+        qos_file(dir, 0, "/power", "0\n"), qos_file(dir, 1, "/power", "0\n"), qos_file(dir, 17, "/power", "0\n"), qos_file(dir, 1, "/topology", "1,17\n");
+        compositor_ccd.ready = 1, compositor_ccd.multi = 1, compositor_ccd.ccd0[0] = 1ul | 1ul << 1 | 1ul << 17, compositor_ccd.ccd0[1] = 0;
+        compositor_input_core.cpu = compositor_input_core.sibling = -1, compositor_input_core.mask[0] = compositor_input_core.mask[1] = 0;
+        memory_zero(&compositor_qos, sizeof compositor_qos), compositor_qos.global = -1, compositor_qos_root = dir;
+        compositor_input_core_take();
+        took = compositor_input_core.cpu == 1 && compositor_input_core.sibling == 17 && qos_value(dir, 1) == 2 && qos_value(dir, 17) == 2 && qos_value(dir, 0) == 0;
+        game = compositor_game_mask(mask) && mask[0] == 1ul && mask[1] == 0;
+        compositor_qos_keep(0, 1);
+        held = qos_value(dir, 0) == 20 && qos_value(dir, 1) == 2 && qos_value(dir, 17) == 2;
+        compositor_qos_keep(0, 0);
+        left = qos_value(dir, 0) == 0 && qos_value(dir, 1) == 2 && qos_value(dir, 17) == 2;
+        check("qos: the input core is CCD0's first core after cpu0 and its sibling, held at 2 us, and a game's threads go to the rest of CCD0",
+              took && game);
+        check("qos: a game's 20 us hold leaves the input core's 2 us as it is, and its end too", held && left);
+        for (int at = 0; at < compositor_qos.count; at++)
+                system_close(compositor_qos.fd[at]);
+        compositor_ccd = kept_ccd, compositor_qos = kept_qos, compositor_input_core = kept_core, compositor_qos_root = kept_root;
+}
+
 // The X window manager's atoms by their numbers (compositor_xwm_atom_index, H-c3-1): every atom of a list of thousands found by the index as the walk
 // found it, the first record of an atom two records have, none for one not there, and an interned name's atom found once its reply gives it.
 static void xwm_atom_rows(void)
@@ -6258,6 +6309,7 @@ b32 main(void)
         reader_residue_rows();
         game_pids_rows();
         qos_rows();
+        input_core_rows();
         reader_own_rows();
         clip_most_rows();
         asked_record_rows();
