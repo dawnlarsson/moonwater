@@ -2119,17 +2119,12 @@ static void compositor_present_pass(void)
                                     (compositor.direct_row < 0 || compositor.flip_row == compositor.direct_row) &&
                                     !compositor_wl_row_async(jit))
                                 {
-                                        if (compositor_wl_frame_sent_at && stamp > compositor_wl_frame_sent_at)
-                                        {
-                                                positive sample = stamp - compositor_wl_frame_sent_at;
-                                                if (sample < compositor.period)
-                                                        compositor_wl_game_render_ns = sample > compositor_wl_game_render_ns ? sample : (compositor_wl_game_render_ns * 7 + sample) / 8;
-                                        }
+                                        compositor_wl_jit_measure(stamp);
                                         compositor_wl_frame_owed = 1;
                                 }
                                 else if (!compositor_card.on)
                                 {
-                                        if (jit < 0) compositor_wl_game_render_ns = compositor_wl_frame_sent_at = 0;
+                                        if (jit < 0) compositor_wl_game_render_ns = 0, compositor_wl_jit_sent(0);
                                         compositor_wl_frame();
                                 }
                         }
@@ -2428,7 +2423,7 @@ static b32 compositor_main()
                 if (compositor.band && now >= compositor_volume.look_at) compositor_volume_look(now);
 #ifdef CONFIG_MOONWATER_WAYLAND
                 if (compositor_wl_frame_at && (now >= compositor_wl_frame_at || compositor_wl_jit_row() < 0))
-                        compositor_wl_frame_at = 0, compositor_wl_frame_sent_at = now, compositor_wl_frame();
+                        compositor_wl_frame_at = 0, compositor_wl_jit_sent(now), compositor_wl_frame();
                 compositor_wl_wake();
 #endif
                 compositor_taskbar_slide(now), compositor_moon_keep(now), compositor_starting_keep(now);

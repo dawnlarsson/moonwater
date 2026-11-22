@@ -606,6 +606,7 @@ static int compositor_wl_frame_owed;             // a frame shown straight whose
 static positive compositor_wl_frame_at;          // Reflex/Anti-Lag: next just-in-time wl_surface.frame deadline (0 = none armed)
 static positive compositor_wl_frame_sent_at;     // timestamp of last wl_surface.frame sent to a direct-scanout game
 static positive compositor_wl_game_render_ns;    // smoothed game render duration (fast-attack / slow-decay)
+static positive compositor_wl_game_ready_at;     // the JIT row's first commit with content since its callback (its render's end; = sent_at once taken)
 static void compositor_wl_dmabuf_refresh(void); // wayland_host.c: re-probe render node after late GPU init or drm uevents
 static int compositor_wl_dmabuf_missing(void);
 static void compositor_wl_scan_retry(int row);
@@ -620,9 +621,74 @@ static inline int compositor_wl_jit_row(void)
         fs = compositor_fullscreen_top();
         return fs >= 0 && compositor_visible(fs) ? fs : -1;
 }
+
+// The JIT row's frame callback went at `now`: its render is timed from here to its next commit with content (compositor_wl_jit_ready).
+static inline void compositor_wl_jit_sent(positive now)
+{
+        compositor_wl_frame_sent_at = now, compositor_wl_game_ready_at = 0;
+}
+
+// A commit with content for `row` is taken now (after its fence: wayland_commit stalls an unready one): the JIT row's first since its
+// callback is where the render that callback began ended.
+static inline void compositor_wl_jit_ready(int row)
+{
+        if (compositor_wl_frame_sent_at && !compositor_wl_game_ready_at && row == compositor_wl_jit_row())
+                compositor_wl_game_ready_at = clock_monotonic_nanoseconds();
+}
+
+/*
+        A present begun at `stamp` that shows the JIT row's frame: its render is the time from its callback to its commit. Not to the present's
+        start: that is pinned to the slot (the lead before the vblank) the callback's time is set back from (compositor_wl_jit_owed), so its
+        sample was the render and the margin, the fast attack took it, and the estimate climbed a margin a frame until the budget passed the
+        period, about nine frames in, and the JIT turned itself off for good (a callback at the flip then sampled the period less the lead).
+        A commit after `stamp` is the next frame's, sampled by the present that shows it. A sample of a period or more (a frame that took
+        longer) is no render time to aim by. Fast attack, slow decay: a frame landed late was a sample past the estimate, and sets it.
+*/
+static inline void compositor_wl_jit_measure(positive stamp)
+{
+        positive sent = compositor_wl_frame_sent_at, ready = compositor_wl_game_ready_at;
+
+        if (!sent || ready <= sent || ready > stamp)
+                return;
+        if (ready - sent < compositor.period)
+        {
+                positive sample = ready - sent;
+
+                compositor_wl_game_render_ns = sample > compositor_wl_game_render_ns ? sample : (compositor_wl_game_render_ns * 7 + sample) / 8;
+        }
+        compositor_wl_game_ready_at = sent; // taken: another present before the next callback samples nothing
+}
 #endif
 
 static positive compositor_present_lead(void); // after the metric rings it reads (compositor_metric_note)
+#ifdef CONFIG_MOONWATER_WAYLAND
+// The flip that showed the JIT row's frame landed at `vblank`: its next callback is armed the render estimate and a margin before the next
+// vblank's slot (compositor.c's loop sends it then), or sent now when that does not fit (no estimate yet, or a render that fills the period).
+static void compositor_wl_jit_owed(positive vblank, positive now)
+{
+        int jit = compositor_wl_jit_row();
+        positive lead = compositor_present_lead();
+        // Direct-scanout games flip in ~25 us (no GPU compose), so a 0.6 ms safety margin suffices vs 1.0 ms + lead when GPU-composed.
+        positive margin = (jit >= 0 && (jit == compositor.direct_row || compositor_space_is_fs_row(jit)) ? 600000ull : 1000000ull) + lead;
+        positive budget = compositor_wl_game_render_ns + margin;
+
+        compositor_wl_frame_owed = 0;
+        if (jit >= 0 && compositor_wl_game_render_ns > 0 && compositor.period > budget + 300000ull && !compositor_wl_row_async(jit))
+        {
+                positive target = vblank + compositor.period - budget;
+
+                if (target > now + 200000ull)
+                {
+                        compositor_wl_frame_at = target;
+                        return;
+                }
+        }
+        compositor_wl_frame_at = 0;
+        compositor_wl_jit_sent(now);
+        compositor_wl_frame();
+}
+#endif
+
 static void compositor_flip_done(void)
 {
         positive now = clock_monotonic_nanoseconds();
@@ -660,31 +726,7 @@ static void compositor_flip_done(void)
         // The feedbacks of the frame this flip showed are answered with the card's time for it.
         compositor_wl_flip_presented();
         if (compositor_wl_frame_owed)
-        {
-                positive vblank = stamped;
-                int jit = compositor_wl_jit_row();
-                positive lead = compositor_present_lead();
-                // Direct-scanout games flip in ~25 us (no GPU compose), so a 0.6 ms safety margin suffices vs 1.0 ms + lead when GPU-composed.
-                positive margin = (jit >= 0 && (jit == compositor.direct_row || compositor_space_is_fs_row(jit)) ? 600000ull : 1000000ull) + lead;
-                positive budget = compositor_wl_game_render_ns + margin;
-
-                compositor_wl_frame_owed = 0;
-                if (jit >= 0 && compositor_wl_game_render_ns > 0 && compositor.period > budget + 300000ull &&
-                    !compositor_wl_row_async(jit))
-                {
-                        positive target = vblank + compositor.period - budget;
-
-                        if (target > now + 200000ull)
-                        {
-                                compositor_wl_frame_at = target;
-                                goto reflex_armed;
-                        }
-                }
-                compositor_wl_frame_at = 0;
-                compositor_wl_frame_sent_at = now;
-                compositor_wl_frame();
-        reflex_armed:;
-        }
+                compositor_wl_jit_owed(stamped, now);
 #endif
 }
 

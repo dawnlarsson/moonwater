@@ -3020,7 +3020,7 @@ static int compositor_wl_row_picture(void *context, int row, const struct waylan
             compositor.resize != row && compositor.shared_row != row)
                 compositor.asking[row] = 0;
         if (has_content)
-                compositor_keytrace_commit(row);
+                compositor_keytrace_commit(row), compositor_wl_jit_ready(row);
         if (has_content && !compositor_wl.laying[row].open)
         {
                 compositor_wl.row_blend[row] = (unsigned char)(picture->transparent != 0);

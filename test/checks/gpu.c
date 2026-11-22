@@ -5931,6 +5931,101 @@ static void gpu_engine_and_render_regressions(void)
         gpu.fd = kept_fd, gpu.at = kept_at, compositor.card = kept_card, compositor_gpu_state.up = kept_up;
 }
 
+/*
+        The just-in-time frame callback (Reflex-style) for a fullscreen game shown straight: armed at each flip the render estimate and a margin
+        before the next vblank's slot. Its sample was the present's start less the callback's time, and the present's start is pinned to that
+        slot, so every sample was the render plus the margin: the fast attack took it, the estimate climbed 0.6 ms a frame, and about nine
+        frames in the budget passed the period and the JIT turned itself off for good (the box's game sessions ran with it off). The sample is
+        the callback to the row's commit (compositor_wl_jit_ready, stamped as wayland_host takes the picture).
+*/
+static void jit_ready_rows(void)
+{
+        const int row = 2;
+        const positive period = 6944444ull, render = 2000000ull;
+        positive vblank = 9000000000ull, slot, target = 0;
+        unsigned int armed = 0, frame;
+        b32 stamped = 1, sent_ok = 1;
+        positive kept_period = compositor.period;
+        int kept_card = compositor.card, kept_plane = compositor.plane_row, kept_on = compositor_card.on, kept_direct = compositor.direct_row;
+        int kept_flip_row = compositor.flip_row, kept_ready = compositor.spaces.ready, kept_started = compositor_wl.started;
+        unsigned int kept_state = compositor.state[row];
+        unsigned int kept_showing = compositor.showing[row];
+
+        compositor.period = period, compositor.card = -1, compositor.plane_row = -1, compositor_card.on = 0;
+        compositor.direct_row = row, compositor.flip_row = row, compositor.showing[row] = 1, compositor.state[row] = 0;
+        compositor.spaces.ready = 0, compositor_wl.started = 0;
+        compositor_wl_game_render_ns = 0, compositor_wl_jit_sent(0), compositor_wl_frame_at = 0;
+        check("jit: the game's row is the JIT row", compositor_wl_jit_row() == row);
+        // The first flip has no estimate: the callback goes at the flip.
+        compositor_wl_frame_owed = 1;
+        compositor_wl_jit_owed(vblank, vblank + 30000);
+        sent_ok &= !compositor_wl_frame_at && compositor_wl_frame_sent_at == vblank + 30000;
+        for (frame = 0; frame < 40; frame++)
+        {
+                positive sent = compositor_wl_frame_sent_at;
+
+                // The game renders for 2 ms and commits; wayland_host stamps the commit (the clock's now), and the timeline's time is put in its place.
+                compositor_wl_jit_ready(row);
+                stamped &= compositor_wl_game_ready_at != 0;
+                compositor_wl_game_ready_at = sent + render;
+                compositor_wl_jit_ready(row);
+                stamped &= compositor_wl_game_ready_at == sent + render; // the first commit since the callback is the one that counts
+                // The present for the next vblank starts at its slot, the lead (none here: no card) before it, and shows the frame.
+        slot = vblank + period;
+                compositor_wl_jit_measure(slot);
+                vblank += period;
+                compositor_wl_frame_owed = 1;
+                compositor_wl_jit_owed(vblank, vblank + 30000);
+                if (compositor_wl_frame_at)
+                {
+                        armed++, target = compositor_wl_frame_at;
+                        compositor_wl_frame_at = 0, compositor_wl_jit_sent(target); // the loop sends the callback at the time armed
+                }
+        }
+        check("jit: each commit after the callback is stamped, the first one only", stamped && sent_ok);
+        check("jit: a steady 2 ms render keeps the callback armed every frame, not off after about nine",
+                    armed == 40 && target == vblank + period - (compositor_wl_game_render_ns + 600000ull));
+        check("jit: the estimate is the render, not the render and the margin", compositor_wl_game_render_ns >= render && compositor_wl_game_render_ns < render + 10000);
+        // A present before the game's commit (another row's damage) samples nothing, and the commit after it is sampled by the present that shows it.
+        {
+                positive sent = compositor_wl_frame_sent_at;
+
+                compositor_wl_jit_measure(sent + 1000000);
+                compositor_wl_jit_ready(row);
+                compositor_wl_game_ready_at = sent + 5000000;
+                compositor_wl_jit_measure(sent + 4000000);
+                check("jit: a present begun before the commit does not take it", compositor_wl_game_ready_at == sent + 5000000 && compositor_wl_game_render_ns < render + 10000);
+                compositor_wl_jit_measure(sent + 5500000);
+                check("jit: a slow frame raises the estimate at once (it landed late)", compositor_wl_game_render_ns == 5000000ull);
+                compositor_wl_jit_measure(sent + 6000000);
+                check("jit: and a second present before the next callback samples it again not", compositor_wl_game_render_ns == 5000000ull);
+        }
+        // A render that fills the period turns the JIT off; light frames after it, sampled from the flip's callback, turn it on again.
+        compositor_wl_game_render_ns = period - 400000ull;
+        compositor_wl_frame_owed = 1;
+        compositor_wl_jit_owed(vblank, vblank + 30000);
+        {
+                b32 off = !compositor_wl_frame_at && compositor_wl_frame_sent_at == vblank + 30000;
+
+                for (frame = 0; frame < 40 && !compositor_wl_frame_at; frame++)
+                {
+                        positive sent = compositor_wl_frame_sent_at;
+
+                        compositor_wl_jit_ready(row);
+                        compositor_wl_game_ready_at = sent + render;
+                        compositor_wl_jit_measure(vblank + period - 500000ull);
+                        vblank += period;
+                        compositor_wl_frame_owed = 1;
+                        compositor_wl_jit_owed(vblank, vblank + 30000);
+                }
+                check("jit: a render that fills the period sends the callback at the flip, and light frames arm it again", off && compositor_wl_frame_at != 0);
+        }
+        compositor_wl_frame_at = 0, compositor_wl_game_render_ns = 0, compositor_wl_jit_sent(0);
+        compositor.period = kept_period, compositor.card = kept_card, compositor.plane_row = kept_plane, compositor_card.on = kept_on;
+        compositor.direct_row = kept_direct, compositor.flip_row = kept_flip_row, compositor.showing[row] = kept_showing, compositor.state[row] = kept_state;
+        compositor.spaces.ready = kept_ready, compositor_wl.started = kept_started;
+}
+
 b32 main(void)
 {
         compositor_rows_make(compositor_rows_in_use); // the compositor's rows, made before any check reads one
@@ -5957,6 +6052,7 @@ b32 main(void)
         descriptor_rows();
         frame_dated_rows();
         present_due_rows();
+        jit_ready_rows();
         vrr_rows();
         under_ready_rows();
         plate_wanted_rows();
