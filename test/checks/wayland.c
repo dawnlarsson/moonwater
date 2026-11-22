@@ -1880,6 +1880,22 @@ static void test_frames(void)
         wlc_pump(c);
         WLCHECK(wlc_count(c, WLI_wl_callback, WLE_wl_callback_done) == 1 && wayland_callbacks_waiting() < 0 && wayland.answered == 7000,
                 "answered late, at the host's time, and none waits after it");
+        /* a window put away: its frame is not answered late either, and once a late answer found nothing to answer it is quiet */
+        wlc_forget(c);
+        wlc_send(c, s.surface, WLQ_wl_surface_frame, wlc_id(c, WLI_wl_callback, 1));
+        wlc_send(c, s.surface, WLQ_wl_surface_commit);
+        fake.row[0].states |= WAYLAND_STATE_SUSPENDED;
+        wayland_latch_defer(1);
+        wlc_pump(c);
+        WLCHECK(wayland_callbacks_waiting() >= 0 && wayland.waiting == 1, "a window put away with a frame asked is counted waiting");
+        wayland_callbacks_late();
+        wlc_pump(c);
+        WLCHECK(wlc_count(c, WLI_wl_callback, WLE_wl_callback_done) == 0 && wayland_callbacks_waiting() < 0,
+                "its late answer answers nothing, and the host is not asked again until the count changes");
+        fake.row[0].states &= ~(long)WAYLAND_STATE_SUSPENDED;
+        wayland_frame();
+        wlc_pump(c);
+        WLCHECK(wlc_count(c, WLI_wl_callback, WLE_wl_callback_done) == 1 && wayland.waiting == 0, "shown again, its frame is answered");
         fake.clock_still = 0;
 
         /* a surface with no window has no frame to wait for */

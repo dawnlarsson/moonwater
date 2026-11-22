@@ -388,7 +388,7 @@ static struct
         long syncobj_ok;
         char drm_node[64];
         long constraints, hold_row, hold_mode, unheld_row, hint_row, hint_x, hint_y, heard, quiet;
-        long counts_row, counts[4], counts_micro, input_at, bells, icons, frames, latches, answered;
+        long counts_row, counts[4], counts_micro, input_at, bells, icons, frames, latches, answered, waiting, late_quiet;
         int framing, calling;
         unsigned long target, target_period;
         struct wayland_touch touch[WAYLAND_TOUCHES];
@@ -1412,7 +1412,7 @@ static void wayland_callback_answer(struct wayland_client *c, unsigned int id, l
 
 static void wayland_callbacks_done(struct wayland_client *c, struct wayland_surface *s, long time)
 {
-        if (s->cbq[WLCB_READY].count) c->waiting--;
+        if (s->cbq[WLCB_READY].count) c->waiting--, wayland.waiting--;
         while (s->cbq[WLCB_READY].count)
                 wayland_callback_answer(c, wayland_cb_pop(c, &s->cbq[WLCB_READY]), time);
 }
@@ -1421,7 +1421,7 @@ static void wayland_callbacks_take(struct wayland_client *c, struct wayland_surf
 {
         if (!s->cbq[WLCB_CALLBACK].count)
                 return;
-        if (!s->cbq[WLCB_READY].count) c->waiting++;
+        if (!s->cbq[WLCB_READY].count) c->waiting++, wayland.waiting++;
         wayland_cb_splice(c, &s->cbq[WLCB_READY], &s->cbq[WLCB_CALLBACK]);
 }
 
@@ -2213,7 +2213,7 @@ static void wayland_surface_drop(struct wayland_client *c, struct wayland_surfac
         wayland_constraints_drop(c, idx), wayland_sub_drop(c, s), wayland_row_release(c, s);
         for (int q = 0; q < 4; q++)
         {
-                if (q == WLCB_READY && s->cbq[q].count) c->waiting--;
+                if (q == WLCB_READY && s->cbq[q].count) c->waiting--, wayland.waiting--;
                 if (q == WLCB_PRESENTING && s->cbq[q].count) c->presenting_surfaces--;
                 while (s->cbq[q].count)
                 {
@@ -5839,6 +5839,7 @@ WAYLAND_API void wayland_drop(long slot)
 {
         struct wayland_client *c = wayland_client_of(slot);
         if (!c) return;
+        wayland.waiting -= c->waiting;
         wayland_touch_forget(slot), wayland_token_forget(slot);
         if (wayland.drag.live && wayland.drag.client == slot) wayland.drag.source = -1, wayland_drag_end(1);
         else if (wayland.drag.live && wayland.drag.target == slot)
@@ -6125,7 +6126,7 @@ WAYLAND_API void wayland_row_wake(long row)
 
 static void wayland_callbacks_due(long now)
 {
-        wayland.answered = now;
+        wayland.answered = now, wayland.late_quiet = 0;
         for (long row = 0; row < wayland.row_made; row++)
         {
                 struct wayland_client *c;
@@ -6177,25 +6178,23 @@ WAYLAND_API void wayland_latch(void) { wayland_latch_defer(0); }
         present answers them (at its latch, its flip or its job's end) and an idle frame does; one no present answered (a flip whose event is
         late, a mode set, screens being taken again, a card job held) kept Xwayland's Present waiting for its msc to move, which it does on a
         frame callback or after a second (gamebench: every wake's mode set froze fullscreen HL2 for exactly 1.0 s). The host answers them late
-        (wayland_callbacks_late) past a few periods of that.
+        (wayland_callbacks_late) past a few periods of that. The surfaces waiting are counted as they change (wayland.waiting), so the
+        loop's look each turn walks nothing; a late answer that answered none (every one waiting is a window put away, told of no frame)
+        is quiet until the count changes, so a minimized window's callback does not wake the loop every few periods.
 */
 WAYLAND_API long wayland_callbacks_waiting(void)
 {
-        for (long row = 0; wayland.host && row < wayland.row_made; row++)
-        {
-                struct wayland_client *c;
-                struct wayland_surface *s = wayland_row_surface(row, &c);
-
-                if (s && c->waiting && wayland_tree_has_cb(c, s, WLCB_READY) && !wayland_row_suspended(row))
-                        return wayland.answered;
-        }
-        return -1;
+        return wayland.host && wayland.waiting > 0 && wayland.waiting != wayland.late_quiet ? wayland.answered : -1;
 }
 
 WAYLAND_API void wayland_callbacks_late(void)
 {
-        if (wayland.host)
-                wayland_callbacks_due(wayland_now());
+        long before = wayland.waiting;
+
+        if (!wayland.host)
+                return;
+        wayland_callbacks_due(wayland_now());
+        wayland.late_quiet = before > 0 && wayland.waiting == before ? before : 0;
 }
 
 static void wayland_presentings_done(struct wayland_client *c, struct wayland_surface *s, unsigned long when, unsigned long refresh,
