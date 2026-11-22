@@ -380,13 +380,19 @@ static COLD fn shell_name_refused(string_address command, string_address word,
 */
 static COLD string_address shell_declare_usage(string_address name)
 {
-        if (word_is(name, "local"))
-                return (string_address) "local [option] name[=value] ...";
+        static const struct
+        {
+                string_address name;
+                string_address usage;
+        } usages[] = {
+            {"local", "local [option] name[=value] ..."},
+            {"typeset", "typeset [-aAfFgiIlnrtux] name[=value] ... or "
+                        "typeset -p [-aAfFilnrtux] [name ...]"},
+        };
+        positive at = string_table_lookup(name, usages);
 
-        if (word_is(name, "typeset"))
-                return (string_address) "typeset [-aAfFgiIlnrtux] "
-                    "name[=value] ... or typeset -p [-aAfFilnrtux] "
-                    "[name ...]";
+        if (at < array_count(usages))
+                return usages[at].usage;
 
         return (string_address) "declare [-aAfFgiIlnrtux] [name[=value] ...] "
             "or declare -p [-aAfFilnrtux] [name ...]";
@@ -3478,26 +3484,36 @@ static PURE bool shell_privileged_on();
 
 static HOT bool env_write_noted(const_string name, positive length, bool written)
 {
+        static const named_flag hooks[] = {
+            {"POSIXLY_CORRECT", 1}, {"OPTIND", 2},
+            {"FUNCNEST", 3},        {"HISTSIZE", 4},
+            {"HISTFILESIZE", 5},    {"GLOBIGNORE", 6},
+        };
+
         if (written)
                 env_locale_touch(name, length);
         if (!shell_bash_compat || !written)
                 return written;
 
-        if (memory_is_word((address_any)name, length, "POSIXLY_CORRECT"))
-                shell_posix_changed(true);
-        else if (memory_is_word((address_any)name, length, "OPTIND"))
-                shell_getopts_index_changed();
-        else if (memory_is_word((address_any)name, length, "FUNCNEST"))
-                shell_funcnest_seen = true;
-        else if (memory_is_word((address_any)name, length, "HISTSIZE"))
-                history_size_changed();
-        else if (memory_is_word((address_any)name, length, "HISTFILESIZE"))
-                history_file_size_changed();
+        positive at = memory_table_lookup((const p8 address_to)name, length,
+                                          hooks);
+        if (at >= array_count(hooks))
+                return written;
+
+        switch (hooks[at].value)
+        {
+        case 1: shell_posix_changed(true); break;
+        case 2: shell_getopts_index_changed(); break;
+        case 3: shell_funcnest_seen = true; break;
+        case 4: history_size_changed(); break;
+        case 5: history_file_size_changed(); break;
         //      From here the list filters globs; one imported never did,
         //      and one assigned under -p does not (sv_globignore asks).
-        else if (memory_is_word((address_any)name, length, "GLOBIGNORE") &&
-                 !shell_privileged_on())
-                glob_ignore_assigned = true;
+        case 6:
+                if (!shell_privileged_on())
+                        glob_ignore_assigned = true;
+                break;
+        }
         return written;
 }
 
@@ -5363,9 +5379,75 @@ static COLD string_address shell_bash_path()
         return path;
 }
 
+enum
+{
+        SHELL_DYN_LITERAL,
+        SHELL_DYN_UID,
+        SHELL_DYN_BASH,
+        SHELL_DYN_EUID,
+        SHELL_DYN_PPID,
+        SHELL_DYN_RANDOM,
+        SHELL_DYN_LINENO,
+        SHELL_DYN_SECONDS,
+        SHELL_DYN_SRANDOM,
+        SHELL_DYN_BASHPID,
+        SHELL_DYN_HOSTNAME,
+        SHELL_DYN_BASHOPTS,
+        SHELL_DYN_SHELLOPTS,
+        SHELL_DYN_BASH_ARGV0,
+        SHELL_DYN_MONOSECONDS,
+        SHELL_DYN_EXECUTION_STRING,
+        SHELL_DYN_BASH_COMMAND,
+        SHELL_DYN_BASH_TRAPSIG,
+        SHELL_DYN_EPOCHSECONDS,
+        SHELL_DYN_BASH_SUBSHELL,
+        SHELL_DYN_EPOCHREALTIME,
+};
+
+#define SHELL_DYN_ANY 0
+#define SHELL_DYN_BASH_ONLY 1
+#define SHELL_DYN_NOT_DASH 2
+
 static COLD string_address shell_dynamic_compute(const_string name, positive length,
                                                  positive address_to value_length)
 {
+        static const struct
+        {
+                string_address name;
+                p8 kind;
+                p8 mode;
+                string_address literal;
+        } table[] = {
+            {"UID", SHELL_DYN_UID, SHELL_DYN_NOT_DASH, null},
+            {"BASH", SHELL_DYN_BASH, SHELL_DYN_BASH_ONLY, null},
+            {"EUID", SHELL_DYN_EUID, SHELL_DYN_ANY, null},
+            {"PPID", SHELL_DYN_PPID, SHELL_DYN_ANY, null},
+            {"RANDOM", SHELL_DYN_RANDOM, SHELL_DYN_ANY, null},
+            {"LINENO", SHELL_DYN_LINENO, SHELL_DYN_ANY, null},
+            {"OSTYPE", SHELL_DYN_LITERAL, SHELL_DYN_ANY, "linux-gnu"},
+            {"SECONDS", SHELL_DYN_SECONDS, SHELL_DYN_ANY, null},
+            {"SRANDOM", SHELL_DYN_SRANDOM, SHELL_DYN_ANY, null},
+            {"HISTCMD", SHELL_DYN_LITERAL, SHELL_DYN_BASH_ONLY, "0"},
+            {"BASHPID", SHELL_DYN_BASHPID, SHELL_DYN_ANY, null},
+            {"HOSTNAME", SHELL_DYN_HOSTNAME, SHELL_DYN_ANY, null},
+            {"HOSTTYPE", SHELL_DYN_LITERAL, SHELL_DYN_ANY, MOONWATER_HOSTTYPE},
+            {"MACHTYPE", SHELL_DYN_LITERAL, SHELL_DYN_ANY, MOONWATER_MACHTYPE},
+            {"BASHOPTS", SHELL_DYN_BASHOPTS, SHELL_DYN_BASH_ONLY, null},
+            {"SHELLOPTS", SHELL_DYN_SHELLOPTS, SHELL_DYN_BASH_ONLY, null},
+            {"BASH_ARGV0", SHELL_DYN_BASH_ARGV0, SHELL_DYN_BASH_ONLY, null},
+            {"COMP_WORDBREAKS", SHELL_DYN_LITERAL, SHELL_DYN_BASH_ONLY, " \t\n\"'@><=;|&(:"},
+            {"BASH_MONOSECONDS", SHELL_DYN_MONOSECONDS, SHELL_DYN_BASH_ONLY, null},
+            {"BASH_LOADABLES_PATH", SHELL_DYN_LITERAL, SHELL_DYN_BASH_ONLY,
+             "/usr/local/lib/bash:/usr/lib/bash:/opt/local/lib/bash:"
+             "/usr/pkg/lib/bash:/opt/pkg/lib/bash:."},
+            {"BASH_EXECUTION_STRING", SHELL_DYN_EXECUTION_STRING, SHELL_DYN_BASH_ONLY, null},
+            {"BASH_COMMAND", SHELL_DYN_BASH_COMMAND, SHELL_DYN_BASH_ONLY, null},
+            {"BASH_TRAPSIG", SHELL_DYN_BASH_TRAPSIG, SHELL_DYN_BASH_ONLY, null},
+            {"BASH_VERSION", SHELL_DYN_LITERAL, SHELL_DYN_BASH_ONLY, "5.3.20(1)-release"},
+            {"EPOCHSECONDS", SHELL_DYN_EPOCHSECONDS, SHELL_DYN_ANY, null},
+            {"BASH_SUBSHELL", SHELL_DYN_BASH_SUBSHELL, SHELL_DYN_ANY, null},
+            {"EPOCHREALTIME", SHELL_DYN_EPOCHREALTIME, SHELL_DYN_ANY, null},
+        };
         string_address text = env_reading(name);
 
         if (length == 1)
@@ -5382,207 +5464,103 @@ static COLD string_address shell_dynamic_compute(const_string name, positive len
         if (shell_dynamic_removed(text, length))
                 return null;
 
-        // Grouped by length first: every one of these is a miss for almost
-        // every name that reaches here, and a length that matches nothing
-        // leaves without looking at a byte.
-        switch (length)
+        positive at = memory_table_lookup((const p8 address_to)text, length,
+                                          table);
+        if (at >= array_count(table))
+                return null;
+
+        if ((table[at].mode == SHELL_DYN_BASH_ONLY && !shell_bash_compat) ||
+            (table[at].mode == SHELL_DYN_NOT_DASH && shell_dash_compat))
+                return null;
+
+        if (table[at].literal)
+                return shell_dynamic_said(table[at].literal, value_length);
+
+        switch (table[at].kind)
         {
-        case 3:
-                if (!shell_dash_compat &&
-                    !memory_compare((address_any)text, "UID", 3))
-                        return shell_dynamic_number(
-                            (positive)system_call_1(syscall(getuid), 0),
-                            value_length);
-                break;
+        case SHELL_DYN_UID:
+                return shell_dynamic_number(
+                    (positive)system_call_1(syscall(getuid), 0), value_length);
+        case SHELL_DYN_BASH:
+                return shell_dynamic_said(shell_bash_path(), value_length);
+        case SHELL_DYN_EUID:
+                return shell_dynamic_number(
+                    (positive)system_call_1(syscall(geteuid), 0), value_length);
+        case SHELL_DYN_PPID:
+                return shell_dynamic_number(
+                    (positive)system_call_1(syscall(getppid), 0), value_length);
+        case SHELL_DYN_RANDOM:
+                return shell_dynamic_number(shell_random_next(), value_length);
+        case SHELL_DYN_LINENO:
+                return shell_dynamic_number(shell_lineno_reported(),
+                                            value_length);
+        case SHELL_DYN_SECONDS:
+                return shell_dynamic_number((positive)shell_seconds_now(),
+                                            value_length);
+        case SHELL_DYN_SRANDOM:
+        {
+                p32 value = 0;
 
-        case 4:
-                if (shell_bash_compat &&
-                    !memory_compare((address_any)text, "BASH", 4))
-                        return shell_dynamic_said(shell_bash_path(),
+                if (system_random_fill(address_of value, sizeof(value), 0) < 0)
+                        value = (p32)(shell_random_next() << 16) ^
+                                (p32)shell_random_next();
+                return shell_dynamic_number((positive)value, value_length);
+        }
+        case SHELL_DYN_BASHPID:
+                return shell_bashpid_cleared
+                           ? null
+                           : shell_dynamic_number(
+                                 (positive)system_call_1(syscall(getpid), 0),
+                                 value_length);
+        case SHELL_DYN_HOSTNAME:
+                return shell_dynamic_said(shell_machine_name(), value_length);
+        case SHELL_DYN_BASHOPTS:
+                return shell_optlist_value(true, value_length);
+        case SHELL_DYN_SHELLOPTS:
+                return shell_optlist_value(false, value_length);
+        case SHELL_DYN_BASH_ARGV0:
+                return shell_dynamic_said(shell_script_name, value_length);
+        case SHELL_DYN_MONOSECONDS:
+                return shell_dynamic_number(
+                    (positive)shell_clock_seconds(CLOCK_MONOTONIC, null),
+                    value_length);
+        case SHELL_DYN_EXECUTION_STRING:
+                return shell_execution_string
+                           ? shell_dynamic_said(shell_execution_string,
+                                                value_length)
+                           : null;
+        case SHELL_DYN_BASH_COMMAND:
+                return exec_bash_command_now(value_length);
+        case SHELL_DYN_BASH_TRAPSIG:
+                return shell_trap_signal < 0
+                           ? null
+                           : shell_dynamic_number((positive)shell_trap_signal,
                                                   value_length);
+        case SHELL_DYN_EPOCHSECONDS:
+                return shell_dynamic_number(
+                    (positive)shell_clock_seconds(CLOCK_REALTIME, null),
+                    value_length);
+        case SHELL_DYN_BASH_SUBSHELL:
+                return shell_dynamic_number(shell_subshell_depth, value_length);
+        case SHELL_DYN_EPOCHREALTIME:
+        {
+                p64 nanoseconds = 0;
+                p64 seconds = shell_clock_seconds(CLOCK_REALTIME,
+                                                  address_of nanoseconds);
+                positive used = positive_into_string(shell_dynamic_text,
+                                                     (positive)seconds);
 
-                if (!memory_compare((address_any)text, "EUID", 4))
-                        return shell_dynamic_number(
-                            (positive)system_call_1(syscall(geteuid), 0),
-                            value_length);
-
-                if (!memory_compare((address_any)text, "PPID", 4))
-                        return shell_dynamic_number(
-                            (positive)system_call_1(syscall(getppid), 0),
-                            value_length);
-                break;
-
-        case 6:
-                if (!memory_compare((address_any)text, "RANDOM", 6))
-                        return shell_dynamic_number(shell_random_next(),
-                                                    value_length);
-
-                /* The line the running command was written on, which the
-                   executor keeps, and not the line the reader has reached:
-                   inside a function body those are different, and bash
-                   answers with the first. */
-                if (!memory_compare((address_any)text, "LINENO", 6))
-                        return shell_dynamic_number(shell_lineno_reported(),
-                                                    value_length);
-
-                if (!memory_compare((address_any)text, "OSTYPE", 6))
-                        return shell_dynamic_said("linux-gnu", value_length);
-                break;
-
-        case 7:
-                if (!memory_compare((address_any)text, "SECONDS", 7))
-                        return shell_dynamic_number(
-                            (positive)shell_seconds_now(), value_length);
-
-                if (!memory_compare((address_any)text, "SRANDOM", 7))
-                {
-                        p32 value = 0;
-
-                        if (system_random_fill(address_of value,
-                                               sizeof(value), 0) < 0)
-                                value = (p32)(shell_random_next() << 16) ^
-                                        (p32)shell_random_next();
-
-                        return shell_dynamic_number((positive)value,
-                                                    value_length);
-                }
-
-                if (shell_bash_compat &&
-                    !memory_compare((address_any)text, "HISTCMD", 7))
-                        return shell_dynamic_said("0", value_length);
-
-                if (!memory_compare((address_any)text, "BASHPID", 7))
-                {
-                        if (shell_bashpid_cleared)
-                                return null;
-
-                        return shell_dynamic_number(
-                            (positive)system_call_1(syscall(getpid), 0),
-                            value_length);
-                }
-                break;
-
-        case 8:
-                if (!memory_compare((address_any)text, "HOSTNAME", 8))
-                        return shell_dynamic_said(shell_machine_name(),
-                                                  value_length);
-
-                if (!memory_compare((address_any)text, "HOSTTYPE", 8))
-                        return shell_dynamic_said(MOONWATER_HOSTTYPE,
-                                                  value_length);
-
-                if (!memory_compare((address_any)text, "MACHTYPE", 8))
-                        return shell_dynamic_said(MOONWATER_MACHTYPE,
-                                                  value_length);
-
-                if (shell_bash_compat &&
-                    !memory_compare((address_any)text, "BASHOPTS", 8))
-                        return shell_optlist_value(true, value_length);
-                break;
-
-        case 9:
-                if (shell_bash_compat &&
-                    !memory_compare((address_any)text, "SHELLOPTS", 9))
-                        return shell_optlist_value(false, value_length);
-                break;
-
-        case 10:
-                if (shell_bash_compat &&
-                    !memory_compare((address_any)text, "BASH_ARGV0", 10))
-                        return shell_dynamic_said(shell_script_name,
-                                                  value_length);
-                break;
-
-        case 15:
-                if (shell_bash_compat &&
-                    !memory_compare((address_any)text, "COMP_WORDBREAKS", 15))
-                        return shell_dynamic_said(" \t\n\"'@><=;|&(:",
-                                                  value_length);
-                break;
-
-        case 16:
-                if (shell_bash_compat &&
-                    !memory_compare((address_any)text, "BASH_MONOSECONDS", 16))
-                        return shell_dynamic_number(
-                            (positive)shell_clock_seconds(CLOCK_MONOTONIC,
-                                                          null),
-                            value_length);
-                break;
-
-        case 19:
-                if (shell_bash_compat &&
-                    !memory_compare((address_any)text, "BASH_LOADABLES_PATH", 19))
-                        return shell_dynamic_said(
-                            "/usr/local/lib/bash:/usr/lib/bash:"
-                            "/opt/local/lib/bash:/usr/pkg/lib/bash:"
-                            "/opt/pkg/lib/bash:.",
-                            value_length);
-                break;
-
-        case 21:
-                if (shell_bash_compat && shell_execution_string &&
-                    !memory_compare((address_any)text, "BASH_EXECUTION_STRING", 21))
-                        return shell_dynamic_said(shell_execution_string,
-                                                  value_length);
-                break;
-
-        case 12:
-                if (shell_bash_compat &&
-                    !memory_compare((address_any)text, "BASH_COMMAND", 12))
-                        return exec_bash_command_now(value_length);
-
-                if (shell_bash_compat &&
-                    !memory_compare((address_any)text, "BASH_TRAPSIG", 12))
-                        return shell_trap_signal < 0
-                                   ? null
-                                   : shell_dynamic_number(
-                                         (positive)shell_trap_signal,
-                                         value_length);
-
-                if (shell_bash_compat &&
-                    !memory_compare((address_any)text, "BASH_VERSION", 12))
-                        return shell_dynamic_said("5.3.20(1)-release",
-                                                  value_length);
-
-                if (!memory_compare((address_any)text, "EPOCHSECONDS", 12))
-                        return shell_dynamic_number(
-                            (positive)shell_clock_seconds(CLOCK_REALTIME,
-                                                          null),
-                            value_length);
-                break;
-
-        case 13:
-                if (!memory_compare((address_any)text, "BASH_SUBSHELL", 13))
-                        return shell_dynamic_number(shell_subshell_depth,
-                                                    value_length);
-
-                if (!memory_compare((address_any)text, "EPOCHREALTIME", 13))
-                {
-                        p64 nanoseconds = 0;
-                        p64 seconds = shell_clock_seconds(
-                            CLOCK_REALTIME, address_of nanoseconds);
-                        positive used = positive_into_string(
-                            shell_dynamic_text, (positive)seconds);
-
-                        // Six digits after the point, zero-filled, which is
-                        // what a script cutting on the dot is measuring in.
-                        shell_dynamic_text[used++] = '.';
-
-                        used += positive_into_padded(shell_dynamic_text + used,
-                                                     (positive)(nanoseconds / 1000 % 1000000),
-                                                     6, '0');
-
-                        shell_dynamic_text[used] = end;
-
-                        if (value_length)
-                                address_to value_length = used;
-
-                        return shell_dynamic_text;
-                }
-                break;
-
-        default:
-                break;
+                // Six digits after the point, zero-filled, which is
+                // what a script cutting on the dot is measuring in.
+                shell_dynamic_text[used++] = '.';
+                used += positive_into_padded(
+                    shell_dynamic_text + used,
+                    (positive)(nanoseconds / 1000 % 1000000), 6, '0');
+                shell_dynamic_text[used] = end;
+                if (value_length)
+                        address_to value_length = used;
+                return shell_dynamic_text;
+        }
         }
 
         return null;
@@ -7547,7 +7525,6 @@ static bool shell_pwd_failed;
 
 COLD fn shell_pwd(writer write)
 {
-        p8 out_buffer[4096];
         shell_option_walk walk = {1};
         p8 letter;
         bool physical = shell_physical_on();
@@ -7573,7 +7550,12 @@ COLD fn shell_pwd(writer write)
                 return shell_answer(0);
         }
 
-        if (!shell_here(out_buffer, sizeof(out_buffer)))
+        p8 address_to out_buffer = (p8 address_to)memory_checked(4096);
+        if (!out_buffer)
+                return shell_answer(1);
+        scope_exit(memory_free(out_buffer, 4096));
+
+        if (!shell_here(out_buffer, 4096))
         {
                 //      The directory is gone from under the shell. Both
                 //      references still answer with the one they last
@@ -8664,16 +8646,13 @@ static PURE bool env_optlist_name(const_string name, positive length)
 */
 static PURE bool env_bash_readonly_name(const_string name, positive length)
 {
-        if (env_optlist_name(name, length))
-                return true;
-        if (!shell_bash_compat || !name)
-                return false;
-        if (memory_is_word((address_any)name, length, "UID") ||
-            memory_is_word((address_any)name, length, "EUID") ||
-            memory_is_word((address_any)name, length, "PPID") ||
-            memory_is_word((address_any)name, length, "BASH_VERSINFO"))
-                return true;
-        return false;
+        static const string_address readonly_names[] = {
+            "SHELLOPTS", "BASHOPTS", "UID", "EUID", "PPID", "BASH_VERSINFO",
+        };
+
+        return shell_bash_compat && name &&
+               memory_table_lookup((const p8 address_to)name, length,
+                                   readonly_names) < array_count(readonly_names);
 }
 
 static COLD fn shell_optlist_append(positive address_to used, string_address name)
@@ -8743,19 +8722,12 @@ static COLD fn shell_optlist_apply(string_address list, bool shopts)
                         }
                         else
                         {
-                                bool known = false;
-
-                                for (positive at = 0; at < array_count(shell_setopt_names);
-                                     at++)
-                                        if (word_is(name, shell_setopt_names[at]))
-                                                known = true;
-                                if (known)
+                                if (string_table_lookup(name, shell_setopt_names) <
+                                    array_count(shell_setopt_names))
                                         shell_option_named(name, true);
                                 else
-                                {
                                         shell_told("%s: invalid option name\n",
-                                            name);
-                                }
+                                                   name);
                         }
                 }
                 else if (length && !shopts)
@@ -13892,12 +13864,11 @@ static COLD fn shell_zone_enter()
         if (!shell_bash_compat ||
             (want ? have && string_equals(want, have) : !have))
                 return;
-        if (have)
-        {
-                if (string_length(have) >= sizeof(shell_zone_saved))
-                        return;
-                string_copy(shell_zone_saved, have);
-        }
+        if (have &&
+            string_copy_bounded(shell_zone_saved, have,
+                                sizeof(shell_zone_saved)) >=
+                sizeof(shell_zone_saved))
+                return;
         shell_zone_swapped = have ? 1 : 2;
         if (want)
                 setenv((string_address) "TZ", want, 1);
@@ -14179,7 +14150,7 @@ fn printf_one(writer write, string_address format)
                                 positive length;
 
                                 if (!kept)
-                                        string_copy(shape, (string_address) "%X");
+                                        string_copy_bounded(shape, (string_address) "%X", sizeof(shape));
                                 printf_hold.used = 0;
                                 shell_zone_enter();
                                 date_shape(printf_holder, (b64)when, 0, shape);
@@ -15189,7 +15160,7 @@ COLD fn shell_read(writer write)
            are one per line instead of one per byte. A pipe or a terminal
            cannot be put back, so it stays byte for byte, as does a timed
            read, which waits before every byte. */
-        p8 block[4096];
+        p8 block[1024];
         positive block_at = 0;
         positive block_used = 0;
         bool seekable = false;
@@ -17421,14 +17392,15 @@ fn alias_written(writer write, positive index)
         string_address name = alias_table[index].name;
         string_address value = alias_table[index].value;
         positive name_length = string_length(name);
-        positive room = name_length + string_length(value) + 2;
+        positive value_length = string_length(value);
+        positive room = name_length + value_length + 2;
         p8 address_to word = shell_bash_compat ? null : shell_map(room);
 
         if (word)
         {
                 memory_copy(word, name, name_length);
                 word[name_length] = '=';
-                string_copy(word + name_length + 1, value);
+                memory_copy_end(word + name_length + 1, value, value_length);
                 shell_quoted(write, word);
                 memory_free(word, room);
         }
@@ -22501,52 +22473,56 @@ static COLD fn comp_printed(writer write, comp_spec address_to spec)
                               string_length(comp_action_table[at].name));
                 }
 
-        if (spec->glob)
         {
-                write(" -G ", 4);
-                comp_quoted(write, spec->glob);
-        }
-        if (spec->words)
-        {
-                write(" -W ", 4);
-                comp_quoted(write, spec->words);
-        }
-        if (spec->prefix)
-        {
-                write(" -P ", 4);
-                comp_quoted(write, spec->prefix);
-        }
-        if (spec->suffix)
-        {
-                write(" -S ", 4);
-                comp_quoted(write, spec->suffix);
-        }
-        if (spec->filter)
-        {
-                write(" -X ", 4);
-                comp_quoted(write, spec->filter);
-        }
-        if (spec->command)
-        {
-                write(" -C ", 4);
-                comp_quoted(write, spec->command);
-        }
-        if (spec->function)
-        {
-                write(" -F ", 4);
-                write(spec->function, string_length(spec->function));
+                static const struct
+                {
+                        string_address flag;
+                        positive offset;
+                        bool quoted;
+                } fields[] = {
+                    {" -G ", __builtin_offsetof(comp_spec, glob), true},
+                    {" -W ", __builtin_offsetof(comp_spec, words), true},
+                    {" -P ", __builtin_offsetof(comp_spec, prefix), true},
+                    {" -S ", __builtin_offsetof(comp_spec, suffix), true},
+                    {" -X ", __builtin_offsetof(comp_spec, filter), true},
+                    {" -C ", __builtin_offsetof(comp_spec, command), true},
+                    {" -F ", __builtin_offsetof(comp_spec, function), false},
+                };
+
+                for (positive at = 0; at < array_count(fields); at++)
+                {
+                        string_address value = *(const string_address address_to)(
+                            (const p8 address_to)spec + fields[at].offset);
+
+                        if (!value)
+                                continue;
+                        write(fields[at].flag, 4);
+                        if (fields[at].quoted)
+                                comp_quoted(write, value);
+                        else
+                                write(value, string_length(value));
+                }
         }
 
-        if (!string_compare(spec->name, COMP_DEFAULT))
-                write(" -D", 3);
-        else if (!string_compare(spec->name, COMP_EMPTY))
-                write(" -E", 3);
-        else if (!string_compare(spec->name, COMP_INITIAL))
-                write(" -I", 3);
-        else
         {
-                write(" ", 1);
-                write(spec->name, string_length(spec->name));
+                static const struct
+                {
+                        string_address name;
+                        string_address flag;
+                } specials[] = {
+                    {COMP_DEFAULT, " -D"},
+                    {COMP_EMPTY, " -E"},
+                    {COMP_INITIAL, " -I"},
+                };
+                positive at = string_table_lookup(spec->name, specials);
+
+                if (at < array_count(specials))
+                        write(specials[at].flag, 3);
+                else
+                {
+                        write(" ", 1);
+                        write(spec->name, string_length(spec->name));
+                }
         }
 
         write("\n", 1);
@@ -22585,26 +22561,22 @@ static COLD fn comp_listed(writer write)
 
 static COLD bool comp_option_index(string_address name, positive address_to at)
 {
-        for (positive index = 0; index < COMP_OPTIONS; index++)
-                if (word_is(name, comp_option_names[index]))
-                {
-                        address_to at = index;
-                        return true;
-                }
+        positive index = string_table_lookup(name, comp_option_names);
 
-        return false;
+        if (index >= COMP_OPTIONS)
+                return false;
+        address_to at = index;
+        return true;
 }
 
 static COLD bool comp_action_index(string_address name, positive address_to at)
 {
-        for (positive index = 0; index < COMP_ACTIONS; index++)
-                if (word_is(name, comp_action_table[index].name))
-                {
-                        address_to at = index;
-                        return true;
-                }
+        positive index = string_table_lookup(name, comp_action_table);
 
-        return false;
+        if (index >= COMP_ACTIONS)
+                return false;
+        address_to at = index;
+        return true;
 }
 
 /*
@@ -22617,6 +22589,29 @@ static COLD bool comp_action_index(string_address name, positive address_to at)
 static COLD bool comp_read(string_address command, comp_request address_to want,
                            bool compopt)
 {
+        static const struct
+        {
+                p8 letter;
+                positive offset;
+        } string_fields[] = {
+            {'G', __builtin_offsetof(comp_request, glob)},
+            {'W', __builtin_offsetof(comp_request, words)},
+            {'F', __builtin_offsetof(comp_request, function)},
+            {'C', __builtin_offsetof(comp_request, command)},
+            {'X', __builtin_offsetof(comp_request, filter)},
+            {'P', __builtin_offsetof(comp_request, prefix)},
+            {'S', __builtin_offsetof(comp_request, suffix)},
+            {'V', __builtin_offsetof(comp_request, variable)},
+        };
+        static const struct
+        {
+                p8 letter;
+                string_address name;
+        } special_flags[] = {
+            {'D', COMP_DEFAULT},
+            {'E', COMP_EMPTY},
+            {'I', COMP_INITIAL},
+        };
         shell_option_walk walk = {1, null, 0, compopt};
         p8 which;
 
@@ -22643,44 +22638,51 @@ static COLD bool comp_read(string_address command, comp_request address_to want,
                                 else
                                         want->options_on |= 1u << at;
                         }
+                        continue;
                 }
-                else if (which == 'A')
+                if (which == 'A')
                 {
                         if (comp_action_index(value, address_of at))
                                 want->actions |= 1u << at;
+                        continue;
                 }
-                else if (which == 'G')
-                        want->glob = value;
-                else if (which == 'W')
-                        want->words = value;
-                else if (which == 'F')
-                        want->function = value;
-                else if (which == 'C')
-                        want->command = value;
-                else if (which == 'X')
-                        want->filter = value;
-                else if (which == 'P')
-                        want->prefix = value;
-                else if (which == 'S')
-                        want->suffix = value;
-                else if (which == 'V')
-                        want->variable = value;
-                else if (which == 'p')
-                        want->print = true;
-                else if (which == 'r')
-                        want->remove = true;
-                else if (which == 'D')
-                        want->special = COMP_DEFAULT;
-                else if (which == 'E')
-                        want->special = COMP_EMPTY;
-                else if (which == 'I')
-                        want->special = COMP_INITIAL;
-                else
+                if (which == 'p')
                 {
-                        for (at = 0; at < COMP_ACTIONS; at++)
-                                if (comp_action_table[at].letter == which)
-                                        want->actions |= 1u << at;
+                        want->print = true;
+                        continue;
                 }
+                if (which == 'r')
+                {
+                        want->remove = true;
+                        continue;
+                }
+
+                bool handled = false;
+                for (at = 0; at < array_count(string_fields); at++)
+                        if (string_fields[at].letter == which)
+                        {
+                                *(string_address address_to)(
+                                    (p8 address_to)want +
+                                    string_fields[at].offset) = value;
+                                handled = true;
+                                break;
+                        }
+                if (handled)
+                        continue;
+
+                for (at = 0; at < array_count(special_flags); at++)
+                        if (special_flags[at].letter == which)
+                        {
+                                want->special = special_flags[at].name;
+                                handled = true;
+                                break;
+                        }
+                if (handled)
+                        continue;
+
+                for (at = 0; at < COMP_ACTIONS; at++)
+                        if (comp_action_table[at].letter == which)
+                                want->actions |= 1u << at;
         }
 
         want->first = walk.index;
@@ -26577,8 +26579,8 @@ static COLD fn compgen_signals()
         compgen_offer((string_address) "EXIT");
         for (positive number = 1; number < 32; number++)
         {
-                string_copy(name, (string_address) "SIG");
-                string_copy(name + 3, kill_canonical(number));
+                string_join(name, sizeof(name), (string_address) "SIG",
+                            kill_canonical(number));
                 compgen_offer(name);
         }
         compgen_offer((string_address) "SIGJUNK(32)");
@@ -26588,11 +26590,12 @@ static COLD fn compgen_signals()
                 bool low = number <= KILL_LEAST_REAL + 15;
                 positive offset = low ? number - KILL_LEAST_REAL : KILL_MOST - number;
 
-                string_copy(name, (string_address)(low ? "SIGRTMIN" : "SIGRTMAX"));
+                string_copy_bounded(name, (string_address)(low ? "SIGRTMIN" : "SIGRTMAX"),
+                                    sizeof(name));
                 if (offset)
                 {
                         name[8] = low ? '+' : '-';
-                        positive_into_string(name + 9, offset);
+                        name[9 + positive_into_string(name + 9, offset)] = end;
                 }
                 compgen_offer(name);
         }
@@ -26710,9 +26713,13 @@ static COLD fn compgen_file_names(string_address path, bool every_word,
 static COLD fn compgen_entries(string_address word, bool directories,
                                bool executables)
 {
-        p8 path[FILE_PATH_MAX];
-        p8 candidate[FILE_PATH_MAX];
-        p8 block[2048];
+        typedef struct
+        {
+                p8 path[FILE_PATH_MAX];
+                p8 candidate[FILE_PATH_MAX];
+                p8 full[FILE_PATH_MAX];
+                p8 block[2048];
+        } compgen_entries_scratch;
         positive length = string_length(word);
         string_address slash = length ? string_last_of(word, '/') : null;
         positive head = slash ? (positive)(slash - word) + 1 : 0;
@@ -26723,35 +26730,40 @@ static COLD fn compgen_entries(string_address word, bool directories,
         bipolar directory;
         struct linux_dirent64 address_to entry;
 
-        if (length + 2 >= sizeof(path))
+        if (length + 2 >= FILE_PATH_MAX)
                 return;
+
+        compgen_entries_scratch address_to scratch =
+            (compgen_entries_scratch address_to)memory_checked(sizeof(*scratch));
+        if (!scratch)
+                return;
+        scope_exit(memory_free(scratch, sizeof(*scratch)));
 
         positive path_length;
 
         if (head)
         {
-                memory_copy(path, word, head);
-                path[head] = end;
+                memory_copy_end(scratch->path, word, head);
                 path_length = head;
         }
         else
         {
-                string_copy(path, (string_address) ".");
+                memory_copy_end(scratch->path, ".", 1);
                 path_length = 1;
         }
 
-        directory = system_open_at(AT_FDCWD, path,
+        directory = system_open_at(AT_FDCWD, scratch->path,
                                    FILE_READ | O_DIRECTORY | O_CLOEXEC);
 
         while (directory >= 0 &&
-               (entry = file_directory_next(directory, block, sizeof(block),
+               (entry = file_directory_next(directory, scratch->block,
+                                            sizeof(scratch->block),
                                             address_of have, address_of at,
                                             address_of error)))
         {
                 string_address name = (string_address)entry->d_name;
                 positive name_length = string_length(name);
                 file_facts facts;
-                p8 full[FILE_PATH_MAX];
 
                 if (file_is_dot(name) && !string_is(stem, '.'))
                         continue;
@@ -26760,32 +26772,33 @@ static COLD fn compgen_entries(string_address word, bool directories,
                     memory_compare(name, stem, stem_length))
                         continue;
 
-                if (head + name_length + 1 >= sizeof(candidate) ||
-                    path_length + name_length + 2 >= sizeof(full))
+                if (head + name_length + 1 >= sizeof(scratch->candidate) ||
+                    path_length + name_length + 2 >= sizeof(scratch->full))
                         continue;
 
-                memory_copy(candidate, word, head);
-                memory_copy_end(candidate + head, name, name_length);
+                memory_copy(scratch->candidate, word, head);
+                memory_copy_end(scratch->candidate + head, name, name_length);
 
                 if (directories || executables)
                 {
-                        memory_copy(full, path, path_length);
-                        full[path_length] = '/';
-                        memory_copy_end(full + path_length + 1, name,
+                        memory_copy(scratch->full, scratch->path, path_length);
+                        scratch->full[path_length] = '/';
+                        memory_copy_end(scratch->full + path_length + 1, name,
                                         name_length);
 
-                        if (!test_facts(full, address_of facts, true))
+                        if (!test_facts(scratch->full, address_of facts, true))
                                 continue;
                         if (directories &&
                             (facts.mode & MODE_FORMAT) != MODE_DIRECTORY)
                                 continue;
                         if (executables &&
                             ((facts.mode & MODE_FORMAT) == MODE_DIRECTORY ||
-                             system_access_at(AT_FDCWD, full, ACCESS_EXECUTE)))
+                             system_access_at(AT_FDCWD, scratch->full,
+                                              ACCESS_EXECUTE)))
                                 continue;
                 }
 
-                compgen_offer(candidate);
+                compgen_offer(scratch->candidate);
         }
 
         if (directory >= 0)
@@ -26796,62 +26809,74 @@ static COLD fn compgen_entries(string_address word, bool directories,
 //      executable of every directory of PATH, once each.
 static COLD fn compgen_programs(string_address word)
 {
+        typedef struct
+        {
+                p8 search[4096];
+                p8 room[FILE_PATH_MAX];
+                p8 full[FILE_PATH_MAX];
+                p8 block[2048];
+        } compgen_programs_scratch;
         string_address value = env_get("PATH");
-        p8 search[4096];
         path_walk walk;
         positive length = string_length(word);
 
         if (string_first_of(word, '/') || !value)
                 return compgen_entries(word, false, true);
 
-        string_copy_max_end(search, value, sizeof(search) - 1);
-        walk = (path_walk){search, null, 0, false};
+        compgen_programs_scratch address_to scratch =
+            (compgen_programs_scratch address_to)memory_checked(
+                sizeof(*scratch));
+        if (!scratch)
+                return;
+        scope_exit(memory_free(scratch, sizeof(*scratch)));
+
+        string_copy_max_end(scratch->search, value, sizeof(scratch->search) - 1);
+        walk = (path_walk){scratch->search, null, 0, false};
 
         while (path_walk_next(address_of walk))
         {
-                p8 room[FILE_PATH_MAX];
-                p8 block[2048];
                 positive have = 0, at = 0;
                 bipolar error = 0;
                 bipolar directory;
                 struct linux_dirent64 address_to entry;
 
-                if (walk.length + 2 >= sizeof(room))
+                if (walk.length + 2 >= sizeof(scratch->room))
                         continue;
                 if (walk.length)
-                        memory_copy_end(room, walk.segment, walk.length);
+                        memory_copy_end(scratch->room, walk.segment, walk.length);
                 else
-                        string_copy(room, (string_address) ".");
+                        memory_copy_end(scratch->room, ".", 1);
 
-                directory = system_open_at(AT_FDCWD, room,
+                directory = system_open_at(AT_FDCWD, scratch->room,
                                            FILE_READ | O_DIRECTORY | O_CLOEXEC);
 
                 while (directory >= 0 &&
-                       (entry = file_directory_next(directory, block,
-                                                    sizeof(block),
+                       (entry = file_directory_next(directory, scratch->block,
+                                                    sizeof(scratch->block),
                                                     address_of have,
                                                     address_of at,
                                                     address_of error)))
                 {
                         string_address name = (string_address)entry->d_name;
                         positive name_length = string_length(name);
-                        positive base = string_length(room);
-                        p8 full[FILE_PATH_MAX];
+                        positive base = string_length(scratch->room);
                         file_facts facts;
 
                         if (name_length < length ||
                             memory_compare(name, word, length))
                                 continue;
-                        if (base + name_length + 2 >= sizeof(full))
+                        if (base + name_length + 2 >= sizeof(scratch->full))
                                 continue;
 
-                        memory_copy(full, room, base);
-                        full[base] = '/';
-                        memory_copy_end(full + base + 1, name, name_length);
+                        memory_copy(scratch->full, scratch->room, base);
+                        scratch->full[base] = '/';
+                        memory_copy_end(scratch->full + base + 1, name,
+                                        name_length);
 
-                        if (!test_facts(full, address_of facts, true) ||
+                        if (!test_facts(scratch->full, address_of facts, true) ||
                             (facts.mode & MODE_FORMAT) == MODE_DIRECTORY ||
-                            system_access_at(AT_FDCWD, full, ACCESS_EXECUTE))
+                            system_access_at(AT_FDCWD, scratch->full,
+                                             ACCESS_EXECUTE))
                                 continue;
 
                         compgen_offer(name);

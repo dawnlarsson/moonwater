@@ -7004,15 +7004,21 @@ static bool expand_slice_bounds(expand_reference reference, string_address expre
         if (kind == SLICE_ARRAY)
         {
                 limit = shell_array_highest(reference.name, origin);
-                origin = limit + 1;
+                origin = limit < positive_max ? limit + 1 : positive_max;
         }
 
         if (offset < 0)
         {
-                positive back = (positive)(-(offset + 1)) + 1;
-                if (back > origin)
-                        return false;
-                address_to begin = origin - back;
+                positive back = (positive)(-(offset + 1));
+
+                if (kind == SLICE_ARRAY && limit == positive_max)
+                        address_to begin = limit - back;
+                else
+                {
+                        if (back >= origin)
+                                return false;
+                        address_to begin = origin - back - 1;
+                }
         }
         else
                 address_to begin = (positive)offset;
@@ -8298,8 +8304,17 @@ COLD string_address shell_subscript_index(string_address base,
                 //      one: an empty array has no end, and bash refuses it.
                 if (!arith_bad && index < 0 &&
                     shell_array_length(base, base_length))
-                        index += (bipolar)shell_array_highest(base,
-                                                              base_length) + 1;
+                {
+                        positive highest = shell_array_highest(base,
+                                                               base_length);
+                        positive back = (positive)(-(index + 1));
+
+                        if (back <= highest &&
+                            highest - back <= (positive)bipolar_max)
+                                index = (bipolar)(highest - back);
+                        else
+                                index = -1;
+                }
 
                 if (arith_bad)
                 {
@@ -11003,14 +11018,32 @@ static bool glob_ignore_assigned;
 static bool glob_ignore_component(string_address pattern, positive pattern_length,
                                   string_address name, positive name_length)
 {
-        p8 one[GLOB_PATH];
-        p8 two[GLOB_PATH];
+        p8 one_local[256];
+        p8 two_local[256];
 
         if (pattern_length >= GLOB_PATH || name_length >= GLOB_PATH)
                 return false;
-        memory_copy_end(one, pattern, pattern_length);
-        memory_copy_end(two, name, name_length);
-        return shell_match(one, two);
+
+        p8 address_to one = pattern_length < sizeof(one_local)
+                                ? one_local
+                                : (p8 address_to)memory_checked(pattern_length + 1);
+        p8 address_to two = name_length < sizeof(two_local)
+                                ? two_local
+                                : (p8 address_to)memory_checked(name_length + 1);
+        bool matched = false;
+
+        if (one && two)
+        {
+                memory_copy_end(one, pattern, pattern_length);
+                memory_copy_end(two, name, name_length);
+                matched = shell_match(one, two);
+        }
+
+        if (one && one != one_local)
+                memory_free(one, pattern_length + 1);
+        if (two && two != two_local)
+                memory_free(two, name_length + 1);
+        return matched;
 }
 
 static bool glob_ignored_whole(string_address list, string_address path);
@@ -11024,23 +11057,44 @@ static bool glob_ignored(string_address list, string_address path)
 {
         string_address last = string_last_of(path, '/');
         string_address base = last ? last + 1 : path;
-        p8 prefix[GLOB_PATH];
+        p8 prefix_local[256];
+        p8 address_to prefix = prefix_local;
+        positive prefix_room = sizeof(prefix_local);
 
         if (string_is(base, '.') &&
             (!string_get(base + 1) ||
              (string_is(base + 1, '.') && !string_get(base + 2))))
                 return true;
 
+        if (last)
+        {
+                positive need = (positive)(last - path) + 1;
+
+                if (need > prefix_room && need <= GLOB_PATH)
+                {
+                        prefix = (p8 address_to)memory_checked(need);
+                        if (!prefix)
+                                return false;
+                        prefix_room = need;
+                }
+        }
+
         for (string_address at = path; last && at <= last; at++)
         {
                 positive length = (positive)(at - path);
 
-                if (!string_is(at, '/') || !length || length >= GLOB_PATH)
+                if (!string_is(at, '/') || !length || length >= prefix_room)
                         continue;
                 memory_copy_end(prefix, path, length);
                 if (glob_ignored_whole(list, prefix))
+                {
+                        if (prefix != prefix_local)
+                                memory_free(prefix, prefix_room);
                         return true;
+                }
         }
+        if (prefix != prefix_local)
+                memory_free(prefix, prefix_room);
         return glob_ignored_whole(list, path);
 }
 

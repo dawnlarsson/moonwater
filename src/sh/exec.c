@@ -2156,18 +2156,24 @@ static string_address job_signal_words[] = {
 
 #define JOB_SIGNAL_WORDS (array_count(job_signal_words))
 
-static positive job_signal_named(positive number, p8 address_to into)
+static positive job_signal_named(positive number, p8 address_to into,
+                                 positive room)
 {
+        if (!room)
+                return 0;
+
         if (number < JOB_SIGNAL_WORDS && job_signal_words[number])
         {
-                positive length = string_length(job_signal_words[number]);
+                positive copied = string_copy_bounded(
+                    into, job_signal_words[number], room);
 
-                memory_copy_end(into, job_signal_words[number], length);
-                return length;
+                return copied < room ? copied : room - 1;
         }
 
-        memory_copy_apart(into, "Signal ", 7);
-        return 7 + positive_into_string(into + 7, number);
+        p8 digits[32];
+        digits[positive_into_string(digits, number)] = end;
+        string_join(into, room, "Signal ", digits);
+        return string_length(into);
 }
 
 /*
@@ -2213,7 +2219,7 @@ static string_address job_death_command(bipolar child)
 static fn job_death_short(positive number, bool dumped)
 {
         p8 name[64];
-        positive length = job_signal_named(number, name);
+        positive length = job_signal_named(number, name, sizeof(name));
 
         log_error(name, length);
 
@@ -2228,7 +2234,7 @@ static fn job_death_long(bipolar child, positive number, bool dumped,
 {
         p8 name[64];
         p8 digits[32];
-        positive length = job_signal_named(number, name);
+        positive length = job_signal_named(number, name, sizeof(name));
         positive width = positive_into_string(digits, (positive)child);
 
         name[length] = end;
@@ -2378,13 +2384,17 @@ fn shell_child_death(bipolar child, positive raw, bool foreground)
         when the two commands are put side by side.
 */
 static fn job_status_text(job_entry address_to entry, bool detailed,
-                          p8 address_to into)
+                          p8 address_to into, positive room)
 {
         positive code;
+        p8 digits[32];
+
+        if (!room)
+                return;
 
         if (entry->state == JOB_RUNNING)
         {
-                string_copy(into, "Running");
+                string_copy_bounded(into, "Running", room);
                 return;
         }
 
@@ -2394,11 +2404,11 @@ static fn job_status_text(job_entry address_to entry, bool detailed,
 
                 if (detailed && by && by != JOB_SIGNAL_STOP_KEY)
                 {
-                        job_signal_named(by, into);
+                        job_signal_named(by, into, room);
                         return;
                 }
 
-                string_copy(into, "Stopped");
+                string_copy_bounded(into, "Stopped", room);
 
                 /*
                         POSIX asks for the signal that stopped the job, and
@@ -2409,24 +2419,17 @@ static fn job_status_text(job_entry address_to entry, bool detailed,
                 */
                 if (shell_bash_compat && shell_posix_on() && by &&
                     by < TRAP_NAMED && trap_name(by))
-                {
-                        positive at = string_length(into);
-
-                        string_copy(into + at, "(SIG");
-                        at += 4;
-                        string_copy(into + at, trap_name(by));
-                        at += string_length(trap_name(by));
-                        string_copy(into + at, ")");
-                }
+                        string_join(into, room, into, "(SIG", trap_name(by),
+                                    ")");
                 return;
         }
 
         if ((entry->status & 0x7f) && (entry->status & 0xff) != 0x7f)
         {
-                positive length = job_signal_named(entry->status & 0x7f, into);
+                job_signal_named(entry->status & 0x7f, into, room);
 
                 if (entry->status & 0x80)
-                        string_copy(into + length, " (core dumped)");
+                        string_append_bounded(into, " (core dumped)", room);
 
                 return;
         }
@@ -2435,25 +2438,18 @@ static fn job_status_text(job_entry address_to entry, bool detailed,
 
         if (!code)
         {
-                string_copy(into, "Done");
+                string_copy_bounded(into, "Done", room);
                 return;
         }
+
+        digits[positive_into_string(digits, code)] = end;
 
         /* Dash and bash --posix write Done(7) against bash's Exit 7.
            The parentheses are the whole of the difference. */
         if (shell_dash_columns() || shell_posix_on())
-        {
-                positive at;
-
-                memory_copy_apart(into, "Done(", 5);
-                at = 5 + positive_into_string(into + 5, code);
-                into[at] = ')';
-                into[at + 1] = 0;
-                return;
-        }
-
-        string_copy(into, "Exit ");
-        positive_into_string(into + 5, code);
+                string_join(into, room, "Done(", digits, ")");
+        else
+                string_join(into, room, "Exit ", digits);
 }
 
 static bool job_died_signaled(job_entry address_to entry)
@@ -2529,7 +2525,7 @@ static fn job_line(writer write, job_entry address_to entry, bool detailed)
                         column += positive_digits((positive)child) + 1;
                 }
 
-                job_status_text(entry, detailed, status);
+                job_status_text(entry, detailed, status, sizeof(status));
                 write(status, string_length(status));
                 column += string_length(status);
 
@@ -2555,7 +2551,7 @@ static fn job_line(writer write, job_entry address_to entry, bool detailed)
         else
                 string_format(write, "  ");
 
-        job_status_text(entry, detailed, status);
+        job_status_text(entry, detailed, status, sizeof(status));
         string_to_field_bulk(write, status, JOB_STATUS_WIDTH, ' ', true);
 
         /*
@@ -6459,11 +6455,14 @@ static fn history_run_text(writer write, string_address text)
 #define HISTORY_EDIT_PREFIX "/tmp/mw-fc."
 #define HISTORY_EDIT_FILE "/commands"
 
-static bool history_edit_directory(p8 address_to path)
+static bool history_edit_directory(p8 address_to path, positive room)
 {
         p8 random[HISTORY_EDIT_RANDOM];
 
-        string_copy(path, HISTORY_EDIT_PREFIX);
+        if (room < sizeof(HISTORY_EDIT_PREFIX) + HISTORY_EDIT_RANDOM * 2)
+                return false;
+
+        string_copy_bounded(path, HISTORY_EDIT_PREFIX, room);
 
         for (positive attempt = 0; attempt < 64; attempt++)
         {
@@ -6576,7 +6575,7 @@ static b32 history_edit(writer write, string_address editor, positive first,
         b32 editor_status;
         bool wrote = true;
 
-        refuse_if(!history_edit_directory(path), 1, "fc: cannot make private edit directory\n");
+        refuse_if(!history_edit_directory(path, sizeof(path)), 1, "fc: cannot make private edit directory\n");
 
         directory = system_open_at(
             AT_FDCWD, path,
@@ -9273,7 +9272,7 @@ static b32 exec_define(b32 index)
                                            name_length + 1, 32))
                         return (shell_status = string_report(log_error, 1, "No room for function: %s\n", name));
 
-                string_copy(exec_functions[slot].name, name);
+                memory_copy_end(exec_functions[slot].name, name, name_length);
                 exec_functions[slot].name_hash = named.x;
                 exec_functions[slot].name_length = named.y;
                 exec_functions[slot].readonly = false;
