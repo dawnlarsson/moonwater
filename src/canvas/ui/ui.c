@@ -24166,7 +24166,7 @@ static void ui_list_fold(struct ui_list address_to l, int id, b32 open)
         from = l->fold_at[id] < 0 ? (open ? 0 : UI_ONE) : l->fold_at[id];
         l->fold_open[id] = open != 0;
         slot = ui_list_fold_slot(l, id, true);
-        if (!ui_kit.motion || from == target || slot < 0)
+        if (ui_kit.motion || from == target || slot < 0)
         {
                 if (slot >= 0)
                         l->fold_pool[slot].id = 0;
