@@ -1707,6 +1707,29 @@ static void check_terminal_select_stale(void)
 }
 
 /*
+        A selection whose start has scrolled out of the ring copies what is kept, the same bytes as a selection that starts at the
+        oldest line the ring holds: the walk starts there, not at a line the ring no longer has.
+*/
+static void check_terminal_select_ancient(void)
+{
+    p8 address_to text = null;
+    positive room = 0, whole, recent;
+
+    terminal_view_live();
+    for (int line = 0; line < 3 * (int)ROWS; line++)
+        term_bytes("ancient\r\n", 9);
+    terminal_select_set(terminal_place(0, 0), terminal_place(window->head - 1, window->stride));
+    whole = terminal_select_text(&text, &room);
+    array_store_release(text, room, whole);
+    terminal_select_set(terminal_place(window->head - window->history, 0), terminal_place(window->head - 1, window->stride));
+    recent = terminal_select_text(&text, &room);
+    check("terminal: a selection from a line the ring has let go copies as many bytes as one from the oldest kept line",
+          whole && whole == recent);
+    array_store_release(text, room, recent);
+    terminal_select_clear();
+}
+
+/*
         The kit's edge scroll (ui_edge_steps) owes what the speed says and keeps the rest: 25 pixels past an edge at scale 100 is 270
         pixels a second, 4320 thousandths a 16 ms step, so 40 steps owe 172800 thousandths, which is ten rows of 17000 and 2800 over.
         The first call after the drag starts owes none, and a time before the last step restarts it.

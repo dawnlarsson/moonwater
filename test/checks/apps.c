@@ -10278,6 +10278,7 @@ b32 main()
         check_terminal_select_scroll();
         check_terminal_select_speed();
         check_terminal_select_stale();
+        check_terminal_select_ancient();
         check_edge_steps();
         check_term_parameters();
         check_kit_zoom_key();

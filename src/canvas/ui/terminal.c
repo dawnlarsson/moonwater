@@ -1685,6 +1685,10 @@ static positive terminal_select_text(p8 address_to address_to into, positive add
         if (!terminal_selecting())
                 return 0;
         terminal_select_span(&fl, &fc, &ll, &lc);
+        if (window->head - ll > window->history)
+                return 0;
+        if (window->head - fl > window->history)
+                fl = window->head - window->history;
         for (unsigned int line = fl;; line++)
         {
                 unsigned int slot = line % window->history, stored = min(window_lengths(window)[slot], window->stride), start, stop, finish;
