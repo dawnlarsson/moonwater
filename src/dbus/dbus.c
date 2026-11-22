@@ -335,16 +335,35 @@ static void dbus_copy(void *to, const void *from, long n)
         dbus_bytes(to, from, n);
 }
 
+static void dbus_zero(void *to, unsigned long n)
+{
+#if DBUS_LIBRARY
+        memory_zero(to, (positive)n);
+#else
+        unsigned char *d = (unsigned char *)to;
+
+        for (unsigned long k = 0; k < n; k++)
+                d[k] = 0;
+#endif
+}
+
 static void dbus_text(char *to, long room, const char *from)
 {
+#if DBUS_LIBRARY
+        if (room > 0)
+                string_copy_bounded((p8 *)to, (string_address)from, (positive)room);
+#else
         long at = 0;
 
+        if (room <= 0)
+                return;
         while (from[at] && at + 1 < room)
         {
                 to[at] = from[at];
                 at++;
         }
         to[at] = 0;
+#endif
 }
 
 static unsigned long dbus_get32(const unsigned char *p)
@@ -552,7 +571,7 @@ static long dbus_variant_sig(const unsigned char *p, long *at, long limit)
 
 /* ---- a body, valid down to its padding ---- */
 
-static int dbus_value(const unsigned char *p, long *at, long limit, const char *sig, long sig_length, long *s, int depth);
+static int dbus_value(const unsigned char *p, long *at, long limit, const char *sig, long sig_length, long *s, int depth, unsigned long fds);
 
 static long dbus_fixed_size(char c)
 {
@@ -573,7 +592,7 @@ static int dbus_pad_zero(const unsigned char *p, long *at, long limit, long alig
 }
 
 // One value of the type at sig[*s] from p[*at] on, within limit; both cursors move past it. 1 when it is whole and valid.
-static int dbus_value(const unsigned char *p, long *at, long limit, const char *sig, long sig_length, long *s, int depth)
+static int dbus_value(const unsigned char *p, long *at, long limit, const char *sig, long sig_length, long *s, int depth, unsigned long fds)
 {
         char c = sig[(*s)++];
         long size = dbus_fixed_size(c), length;
@@ -585,6 +604,8 @@ static int dbus_value(const unsigned char *p, long *at, long limit, const char *
                 if (!dbus_pad_zero(p, at, limit, size) || *at + size > limit)
                         return 0;
                 if (c == 'b' && dbus_get32(p + *at) > 1)
+                        return 0;
+                if (c == 'h' && fds > 0 && dbus_get32(p + *at) >= fds)
                         return 0;
                 *at += size;
                 return 1;
@@ -615,7 +636,7 @@ static int dbus_value(const unsigned char *p, long *at, long limit, const char *
                 long inner = 0, start = *at + 1;
 
                 length = dbus_variant_sig(p, at, limit);
-                return length >= 0 && dbus_value(p, at, limit, (const char *)p + start, length, &inner, depth + 1);
+                return length >= 0 && dbus_value(p, at, limit, (const char *)p + start, length, &inner, depth + 1, fds);
         }
         case 'a':
         {
@@ -647,11 +668,11 @@ static int dbus_value(const unsigned char *p, long *at, long limit, const char *
                                 if (!dbus_pad_zero(p, at, stop, 8))
                                         return 0;
                                 each++;
-                                if (!dbus_value(p, at, stop, sig, sig_length, &each, depth + 2) ||
-                                    !dbus_value(p, at, stop, sig, sig_length, &each, depth + 2))
+                                if (!dbus_value(p, at, stop, sig, sig_length, &each, depth + 2, fds) ||
+                                    !dbus_value(p, at, stop, sig, sig_length, &each, depth + 2, fds))
                                         return 0;
                         }
-                        else if (!dbus_value(p, at, stop, sig, sig_length, &each, depth + 1))
+                        else if (!dbus_value(p, at, stop, sig, sig_length, &each, depth + 1, fds))
                                 return 0;
                 }
                 /*
@@ -674,7 +695,7 @@ static int dbus_value(const unsigned char *p, long *at, long limit, const char *
                 if (!dbus_pad_zero(p, at, limit, 8))
                         return 0;
                 while (*s < sig_length && sig[*s] != ')')
-                        if (!dbus_value(p, at, limit, sig, sig_length, s, depth + 1))
+                        if (!dbus_value(p, at, limit, sig, sig_length, s, depth + 1, fds))
                                 return 0;
                 (*s)++;
                 return 1;
@@ -683,12 +704,12 @@ static int dbus_value(const unsigned char *p, long *at, long limit, const char *
         }
 }
 
-static int dbus_body_valid(const unsigned char *body, long length, const char *sig)
+static int dbus_body_valid(const unsigned char *body, long length, const char *sig, unsigned long fds)
 {
         long at = 0, s = 0, n = dbus_length(sig);
 
         while (s < n)
-                if (!dbus_value(body, &at, length, sig, n, &s, 0))
+                if (!dbus_value(body, &at, length, sig, n, &s, 0, fds))
                         return 0;
         return at == length;
 }
@@ -759,7 +780,7 @@ static int dbus_parse(const unsigned char *b, long size, struct dbus_message *m)
                 length = dbus_variant_sig(b, &at, limit);
                 // a field this bus does not know is valid as its type says and is not passed on (the stamp writes only the
                 // fields below); code 0 is INVALID, which no message carries, and no branch below takes it
-                if (length < 0 || !dbus_value(b, &at, limit, (const char *)b + type_at, length, &inner, 3))
+                if (length < 0 || !dbus_value(b, &at, limit, (const char *)b + type_at, length, &inner, 3, 0))
                         return -1;
                 if (code > 9)
                         continue;
@@ -812,7 +833,7 @@ static int dbus_parse(const unsigned char *b, long size, struct dbus_message *m)
         m->body_length = body;
         if (body > 0 && !*m->signature)
                 return -1;
-        if (!dbus_body_valid(b + pos, body, m->signature))
+        if (!dbus_body_valid(b + pos, body, m->signature, m->fds))
                 return -1;
         return 0;
 }
@@ -1101,17 +1122,26 @@ static long dbus_resolve(const char *name)
 
 static void dbus_unique_text(char *into, long id)
 {
-        char digits[12];
-        long n = 0, at = 3;
+        long at = 3;
 
         into[0] = ':';
         into[1] = '1';
         into[2] = '.';
-        do
-                digits[n++] = (char)('0' + id % 10);
-        while ((id /= 10) > 0);
-        while (n)
-                into[at++] = digits[--n];
+#if DBUS_LIBRARY
+        at += (long)positive_into_string((p8 *)(into + at), (positive)(id > 0 ? id : 0));
+#else
+        {
+                char digits[24];
+                long n = 0;
+                unsigned long u = id > 0 ? (unsigned long)id : 0;
+
+                do
+                        digits[n++] = (char)('0' + u % 10);
+                while ((u /= 10) > 0);
+                while (n)
+                        into[at++] = digits[--n];
+        }
+#endif
         into[at] = 0;
 }
 
@@ -1190,6 +1220,8 @@ static long dbus_arg_string(const struct dbus_message *m, long index, char *into
                 if (size)
                 {
                         at = DBUS_ALIGN(at, size) + size;
+                        if (at > limit)
+                                return -1;
                         continue;
                 }
                 if (c == 's' || c == 'o')
@@ -1214,7 +1246,11 @@ static long dbus_arg_string(const struct dbus_message *m, long index, char *into
                 }
                 if (c == 'g')
                 {
+                        if (at >= limit)
+                                return -1;
                         length = body[at];
+                        if (at + 1 + length + 1 > limit)
+                                return -1;
                         at += 1 + length + 1;
                         continue;
                 }
@@ -1293,8 +1329,7 @@ static int dbus_rule_parse(const char *text, struct dbus_rule *r)
 {
         long at = 0, n = dbus_length(text);
 
-        for (unsigned long k = 0; k < sizeof *r; k++)
-                ((unsigned char *)r)[k] = 0;
+        dbus_zero(r, sizeof *r);
         while (at < n)
         {
                 char key[24], value[160];
@@ -2146,7 +2181,7 @@ static long dbus_arg_at(const struct dbus_message *m, long index, long *s)
 
         *s = 0;
         for (long k = 0; k < index; k++)
-                if (*s >= n || !dbus_value(p, &at, m->body_length, m->signature, n, s, 0))
+                if (*s >= n || !dbus_value(p, &at, m->body_length, m->signature, n, s, 0, 0))
                         return -1;
         return *s < n ? at : -1;
 }
@@ -2187,10 +2222,10 @@ static long dbus_option_at(const struct dbus_message *m, long index, const char 
 
                 at = DBUS_ALIGN(at, 8);
                 key_at = at;
-                if (!dbus_value(p, &at, stop, "s", 1, &ks, 0))
+                if (!dbus_value(p, &at, stop, "s", 1, &ks, 0, 0))
                         return -1;
                 sig_at = at;
-                if (!dbus_value(p, &at, stop, "v", 1, &vs, 0))
+                if (!dbus_value(p, &at, stop, "v", 1, &vs, 0, 0))
                         return -1;
                 if (p[sig_at] != 1 || p[sig_at + 1] != (unsigned char)type || !dbus_equal((const char *)p + key_at + 4, key))
                         continue;
@@ -2441,8 +2476,7 @@ static void dbus_notice_end(struct dbus_notice *n, unsigned long reason)
                 if (!w.bad)
                         dbus_deliver(dbus.client[slot], w.at, w.length, DBUS_ASKED_FOR);
         }
-        for (unsigned long k = 0; k < sizeof *n; k++)
-                ((unsigned char *)n)[k] = 0;
+        dbus_zero(n, sizeof *n);
 }
 
 // Whether a client may post one more now: its span's count and the bus's, each started again when its span is over.
@@ -2578,6 +2612,8 @@ static void dbus_notify_call(struct dbus_client *from, const struct dbus_message
                 long urgency_at = dbus_option_at(m, 6, "urgency", 'y'), expire_at = dbus_arg_at(m, 7, &s), replaces_at = dbus_arg_at(m, 1, &s);
                 unsigned long id;
 
+                if (replaces_at < 0 || expire_at < 0)
+                        return;
                 id = dbus_notice_post(from, dbus_get32(m->bytes + m->body_at + DBUS_ALIGN(replaces_at, 4)), 0, app, app_n, summary, summary_n, text, text_n,
                                       urgency_at < 0 ? 1 : m->bytes[m->body_at + urgency_at],
                                       (long)(int)dbus_get32(m->bytes + m->body_at + DBUS_ALIGN(expire_at, 4)));
@@ -3032,6 +3068,9 @@ static int dbus_external_ok(struct dbus_client *c, const char *hex)
 
         {
                 unsigned long id = (unsigned long)(unsigned int)c->uid;
+#if DBUS_LIBRARY
+                n = (long)positive_into_string((p8 *)digits, (positive)id);
+#else
                 char rev[12];
                 long k = 0;
 
@@ -3041,6 +3080,7 @@ static int dbus_external_ok(struct dbus_client *c, const char *hex)
                 while (k)
                         digits[n++] = rev[--k];
                 digits[n] = 0;
+#endif
         }
         if (!hex[0])
                 return 1;
@@ -3160,8 +3200,7 @@ DBUS_API int dbus_start(const struct dbus_host *host)
 
         if (dbus.host || !host || !host->alloc || !host->release || !host->now || !host->random)
                 return -1;
-        for (unsigned long k = 0; k < sizeof dbus; k++)
-                ((unsigned char *)&dbus)[k] = 0;
+        dbus_zero(&dbus, sizeof dbus);
         dbus.host = host;
         dbus.next_id = 2;
         for (long at = 0; at < DBUS_NAMES; at++)
@@ -3170,11 +3209,15 @@ DBUS_API int dbus_start(const struct dbus_host *host)
                 dbus.bucket[at] = -1;
         dbus.recent = -1;
         host->random(host->context, random, 16);
+#if DBUS_LIBRARY
+        memory_into_hex((p8 *)dbus.guid, random, 16);
+#else
         for (long k = 0; k < 16; k++)
         {
                 dbus.guid[2 * k] = "0123456789abcdef"[random[k] >> 4];
                 dbus.guid[2 * k + 1] = "0123456789abcdef"[random[k] & 15];
         }
+#endif
         dbus.service.slot = DBUS_SERVICE;
         dbus.service.hello = 1;
         dbus.service.id = 1;
@@ -3690,8 +3733,7 @@ DBUS_API int dbus_setting_set(const char *ns, const char *key, unsigned kind, lo
                 if (!s)
                         return -1;
         }
-        for (unsigned long k = 0; k < sizeof fresh; k++)
-                ((unsigned char *)&fresh)[k] = 0;
+        dbus_zero(&fresh, sizeof fresh);
         dbus_text(fresh.ns, sizeof fresh.ns, ns);
         dbus_text(fresh.key, sizeof fresh.key, key);
         fresh.used = 1;

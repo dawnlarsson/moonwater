@@ -250,7 +250,7 @@ static void sessionbus_word(const char *path, char *word, unsigned room)
         full[length] = 0;
         word[0] = 0;
         // not blocking: a FIFO (or a link to a device) where a setting is opens and reads at once with nothing, never holding the bus
-        handle = system_open_at(AT_FDCWD, (string_address)full, FILE_READ | O_NONBLOCK | O_CLOEXEC);
+        handle = system_open_at(AT_FDCWD, (string_address)full, FILE_READ | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW);
         if (handle >= 0)
         {
                 got = system_read_once(handle, word, room - 1);
@@ -399,6 +399,8 @@ static int sessionbus_listen(void)
                 address[2 + length] = (unsigned char)sessionbus.path[length];
                 length++;
         }
+        if (sessionbus.path[length])
+                return -1;
         sessionbus_call(syscall(unlinkat), (positive)AT_FDCWD, (positive)sessionbus.path, 0, 0, 0, 0);
         got = sessionbus_call(syscall(socket), 1, 1 | 0x800 | 0x80000, 0, 0, 0, 0); // SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC
         if (got < 0)
@@ -416,31 +418,16 @@ static int sessionbus_listen(void)
 
 static long sessionbus_peer_uid(long pid, long uid)
 {
-        char path[48], digits[24], text[4096];
-        long pos = 0, d = 0, got = 0;
+        char path[48], text[4096];
+        long pos = 0, got = 0;
         bipolar handle;
 
         if (pid <= 0)
                 return uid;
-        {
-                const char *head = "/proc/";
-                const char *tail = "/uid_map";
-                unsigned long n = (unsigned long)pid;
-
-                for (long k = 0; head[k]; k++)
-                        path[pos++] = head[k];
-                do
-                {
-                        digits[d++] = (char)('0' + (n % 10u));
-                        n /= 10u;
-                }
-                while (n && d < (long)sizeof digits);
-                while (d > 0)
-                        path[pos++] = digits[--d];
-                for (long k = 0; tail[k]; k++)
-                        path[pos++] = tail[k];
-                path[pos] = 0;
-        }
+        memory_copy_apart(path, "/proc/", 6);
+        pos = 6;
+        pos += (long)positive_into_string((p8 *)(path + pos), (positive)pid);
+        memory_copy_apart(path + pos, "/uid_map", 9);
         handle = system_open_at(AT_FDCWD, (string_address)path, FILE_READ | O_NONBLOCK | O_CLOEXEC);
         if (handle < 0)
                 return uid;
@@ -510,7 +497,7 @@ static void sessionbus_read(long slot)
                 msg.pad1 = 0;
                 // MSG_DONTWAIT | MSG_CMSG_CLOEXEC
                 got = sessionbus_call(syscall(recvmsg), (positive)sessionbus.fd[slot], (positive)&msg, 0x40 | 0x40000000, 0, 0, 0);
-                if (got == -11)
+                if (got == -11 || got == -4)
                         return;
                 if (got <= 0)
                 {
@@ -521,7 +508,7 @@ static void sessionbus_read(long slot)
                 {
                         const struct sessionbus_cmsghdr *cm = (const struct sessionbus_cmsghdr *)(ctrl + off);
 
-                        if (cm->len < sizeof *cm || off + cm->len > msg.controllen)
+                        if (cm->len < sizeof *cm || cm->len > msg.controllen - off)
                                 break;
                         if (cm->level == 1 && cm->type == 1)
                         {
@@ -531,6 +518,11 @@ static void sessionbus_read(long slot)
                                 dbus_in_fds(slot, fds, nfds);
                         }
                         off += (cm->len + 7ul) & ~7ul;
+                }
+                if (msg.flags & 0x8) // MSG_CTRUNC: control data (fds) was truncated by the kernel
+                {
+                        sessionbus_drop(slot);
+                        return;
                 }
                 dbus_in_done(slot, got);
                 // a read that came short has emptied the socket: asking again would only be told EAGAIN (the poll says when there is more)
@@ -562,16 +554,20 @@ static void sessionbus_flush(long slot)
                 struct sessionbus_cmsghdr *cm = (struct sessionbus_cmsghdr *)ctrl;
                 struct sessionbus_iovec iov;
                 struct sessionbus_msghdr msg;
-                unsigned long clen = sizeof(struct sessionbus_cmsghdr) + (unsigned long)nfds * sizeof(int);
+                unsigned long clen;
                 int *dst = (int *)(ctrl + sizeof(struct sessionbus_cmsghdr));
 
-                for (unsigned long k = 0; k < sizeof ctrl; k++)
-                        ctrl[k] = 0;
+                if (nfds > DBUS_FDS)
+                {
+                        sessionbus_drop(slot);
+                        return;
+                }
+                clen = sizeof(struct sessionbus_cmsghdr) + (unsigned long)nfds * sizeof(int);
+                memory_zero(ctrl, sizeof ctrl);
                 cm->len = clen;
                 cm->level = 1;
                 cm->type = 1;
-                for (long k = 0; k < nfds; k++)
-                        dst[k] = fds[k];
+                memory_copy_apart(dst, fds, (unsigned long)nfds * sizeof(int));
                 iov.base = (void *)bytes;
                 iov.length = (unsigned long)length;
                 msg.name = 0;
@@ -590,7 +586,7 @@ static void sessionbus_flush(long slot)
                         dbus_sent_fds(slot);
                         dbus_sent(slot, got);
                 }
-                else if (got != -11)
+                else if (got != -11 && got != -4)
                         sessionbus_drop(slot);
                 return;
         }
@@ -598,7 +594,7 @@ static void sessionbus_flush(long slot)
         got = sessionbus_call(syscall(sendto), (positive)sessionbus.fd[slot], (positive)bytes, (positive)length, 0x40 | 0x4000, 0, 0);
         if (got > 0)
                 dbus_sent(slot, got);
-        else if (got != -11)
+        else if (got != -11 && got != -4)
                 sessionbus_drop(slot);
 }
 
