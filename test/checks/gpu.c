@@ -676,12 +676,59 @@ static b32 gpu_scene_taken(b32 ok, string_address label)
         return ok;
 }
 
-// A pixel of a kit block that differs from the processor's: a check, and the first five of a block named with their round.
+/*
+        A picture held to the processor's, pixel by pixel, is one check, as CHECK_gpu_model_kit counts it: the pixels that differ are counted
+        and the first kept (gpu_px), and the picture's end (gpu_px_end) counts the check, a failure when any differed, and gives their number
+        for its FAIL line, which says the picture and then the count and the first (gpu_px_tail). Counted pixel by pixel, one block's wrong
+        corners read as 71470 failures of 2686261682 checks, and no two runs' totals could be read against each other.
+*/
+static struct
+{
+        positive bad, x, y;
+        unsigned int got, want;
+        string_address label;
+        positive round;
+} gpu_px_first;
+
+static inline void gpu_px(b32 differs, positive x, positive y, unsigned int got, unsigned int want)
+{
+        if (differs && !gpu_px_first.bad++)
+                gpu_px_first.x = x, gpu_px_first.y = y, gpu_px_first.got = got, gpu_px_first.want = want;
+}
+
+static positive gpu_px_end(void)
+{
+        positive bad = gpu_px_first.bad;
+
+        checks++;
+        failures += bad != 0;
+        gpu_px_first.bad = 0;
+        return bad;
+}
+
+static void gpu_px_tail(positive bad)
+{
+        string_format(log, ": %p pixels differ, the first %p,%p is %p, wanted %p\n", bad, gpu_px_first.x, gpu_px_first.y, (positive)gpu_px_first.got,
+                      (positive)gpu_px_first.want);
+        log_flush();
+}
+
+// A pixel of a kit block's picture against the processor's (its round's picture is one check, gpu_kit_picture); *bad counts the block's.
 static void gpu_kit_pixel(positive *bad, string_address label, positive round, positive x, positive y, unsigned int got, unsigned int want)
 {
-        checks++;
-        if (got != want && (++failures, ++*bad) < 6)
-                string_format(log, "  FAIL %s round %p: pixel %p,%p is %p, wanted %p\n", label, round, x, y, (positive)got, (positive)want);
+        gpu_px(got != want, x, y, got, want);
+        *bad += got != want;
+        gpu_px_first.label = label, gpu_px_first.round = round;
+}
+
+// The end of a kit block's picture: one check, its FAIL line the block, the round, how many pixels differ and the first.
+static void gpu_kit_picture(void)
+{
+        string_address label = gpu_px_first.label;
+        positive round = gpu_px_first.round, bad = gpu_px_end();
+
+        if (bad)
+                string_format(log, "  FAIL %s round %p", label, round), gpu_px_tail(bad);
 }
 #endif
 
@@ -979,11 +1026,17 @@ static void app_rows(int which, positive pic_at, positive ops_at, positive bins_
                         for (int y = 0; y < H; y++)
                                 for (int x = 0; x < W; x++)
                                 {
-                                        checks++;
-                                        if (pic[(positive)y * pitch + x] != cpu[(positive)y * pitch + x] && (++failures, ++bad) < 6)
-                                                string_format(log, "  FAIL gpu app %p %p%% %p: pixel %p,%p is %p, wanted %p\n", (positive)which, (positive)s, (positive)mode,
-                                                              (positive)x, (positive)y, (positive)pic[(positive)y * pitch + x], (positive)cpu[(positive)y * pitch + x]);
+                                        b32 differs = pic[(positive)y * pitch + x] != cpu[(positive)y * pitch + x];
+
+                                        gpu_px(differs, (positive)x, (positive)y, pic[(positive)y * pitch + x], cpu[(positive)y * pitch + x]);
+                                        bad += differs;
                                 }
+                        {
+                                positive wrong = gpu_px_end();
+
+                                if (wrong)
+                                        string_format(log, "  FAIL gpu app %p %p%% %p", (positive)which, (positive)s, (positive)mode), gpu_px_tail(wrong);
+                        }
                         if (which == 8)
                                 check("gpu apps: the editor replays bit for bit", bad == 0);
                         else if (which == 7)
@@ -1052,11 +1105,17 @@ static void gpu_kit_recorded_controls(positive pic_at, positive ops_at, positive
                         for (int y = 0; y < CH; y++)
                                 for (int x = 0; x < CW; x++)
                                 {
-                                        checks++;
-                                        if (pic[(positive)y * CP + x] != gpu_ctl_want[(positive)y * CP + x] && (++failures, ++bad) < 6)
-                                                string_format(log, "  FAIL gpu spinner scale %p size %p: pixel %p,%p is %p, wanted %p\n", (positive)scales[k], (positive)sizes[s],
-                                                              (positive)x, (positive)y, (positive)pic[(positive)y * CP + x], (positive)gpu_ctl_want[(positive)y * CP + x]);
+                                        b32 differs = pic[(positive)y * CP + x] != gpu_ctl_want[(positive)y * CP + x];
+
+                                        gpu_px(differs, (positive)x, (positive)y, pic[(positive)y * CP + x], gpu_ctl_want[(positive)y * CP + x]);
+                                        bad += differs;
                                 }
+                        {
+                                positive wrong = gpu_px_end();
+
+                                if (wrong)
+                                        string_format(log, "  FAIL gpu spinner scale %p size %p", (positive)scales[k], (positive)sizes[s]), gpu_px_tail(wrong);
+                        }
                 }
         check("gpu controls: the spinner's arc and ring replay bit for bit at 100, 150, 200 and 300 percent", bad == 0);
         string_format(log, "  spinner pixels painted by the processor over 12 spinners: %p\n", (positive)arc_pixels);
@@ -1183,11 +1242,17 @@ static void tg_case(const char address_to label, unsigned int columns, unsigned 
         for (unsigned int y = 0; y < terminal.height; y++)
                 for (unsigned int x = 0; x < terminal.width; x++)
                 {
-                        checks++;
-                        if (tg_picture[(positive)y * TG_PITCH + x] != tg_cpu[(positive)y * terminal.pitch + x] && (++failures, ++bad) < 6)
-                                string_format(log, "  FAIL %s: pixel %p,%p is %p, wanted %p\n", (positive)label, (positive)x, (positive)y,
-                                              (positive)tg_picture[(positive)y * TG_PITCH + x], (positive)tg_cpu[(positive)y * terminal.pitch + x]);
+                        b32 differs = tg_picture[(positive)y * TG_PITCH + x] != tg_cpu[(positive)y * terminal.pitch + x];
+
+                        gpu_px(differs, x, y, tg_picture[(positive)y * TG_PITCH + x], tg_cpu[(positive)y * terminal.pitch + x]);
+                        bad += differs;
                 }
+        {
+                positive wrong = gpu_px_end();
+
+                if (wrong)
+                        string_format(log, "  FAIL %s", (positive)label), gpu_px_tail(wrong);
+        }
         gpu_trim();
 }
 
@@ -6689,6 +6754,7 @@ b32 main(void)
                         {
                                 gpu_kit_pixel(&bad, "gpu kit", round, x, y, pic[(positive)y * PP + x], gpu_kit_want[(positive)y * PP + x]);
                         }
+                gpu_kit_picture();
         }
 
         gpu_kit_recorded_controls(pic_at, ops_at, bins_at);
@@ -6757,6 +6823,7 @@ b32 main(void)
                                         {
                                                 gpu_kit_pixel(&text_bad, "gpu text", round, x, y, tpic[(positive)y * TP + x], want_text[(positive)y * TP + x]);
                                         }
+                                gpu_kit_picture();
                                 // The same runs as a program's list: the ops read by the compositor's cut (compositor_gpu_list_ops), the cover bytes being the list's, its base
                                 // the buffer's start (base number 3) and its cover bytes [tcover_at, tcover_at + scene.used), and drawn from what the cut wrote.
                                 {
@@ -6778,6 +6845,7 @@ b32 main(void)
                                                 {
                                                         gpu_kit_pixel(&text_bad, "gpu list", round, x, y, tpic[(positive)y * TP + x], want_text[(positive)y * TP + x]);
                                                 }
+                                        gpu_kit_picture();
                                 }
                                 // The same runs as a program's published list in a memfd of its own, drawn by compositor_gpu_list_render_bytes into a picture in another memfd: the
                                 // reader, the cut, the map of the cover bytes and the number of their base, the map of the picture the card writes, the damage; against the processor's pixels.
@@ -6831,6 +6899,7 @@ b32 main(void)
                                                 {
                                                         gpu_kit_pixel(&text_bad, "gpu list render", round, x, y, list_picture[(positive)y * TP + x], want_text[(positive)y * TP + x]);
                                                 }
+                                        gpu_kit_picture();
                                         // The same list again (the next frame of a window whose cover bytes are the same, or a few less): its cover bytes are in the map the
                                         // first frame made, and no map is made for them (a map a frame was a userptr and a mapping of the card's each time).
                                         {
@@ -6871,6 +6940,7 @@ b32 main(void)
                                                 {
                                                         gpu_kit_pixel(&text_bad, "gpu text bases", round, x, y, tpic[(positive)y * TP + x], want_text[(positive)y * TP + x]);
                                                 }
+                                        gpu_kit_picture();
                                 }
                         }
                 }
@@ -7034,6 +7104,7 @@ b32 main(void)
                                 {
                                         gpu_kit_pixel(&translate_bad, "gpu translate", round, x, y, tpic[(positive)y * TRP + x], want_t[(positive)y * TRP + x]);
                                 }
+                        gpu_kit_picture();
                 }
         }
 
@@ -7104,6 +7175,7 @@ b32 main(void)
                                 {
                                         gpu_kit_pixel(&ring_bad, "gpu rings", round, x, y, pic[(positive)y * PP + x], gpu_kit_want[(positive)y * PP + x]);
                                 }
+                        gpu_kit_picture();
                 }
                 ui.top = 0, ui.bottom = PH, ui.width = PW, ui.band_top = ui.band_bottom = 0, ui.opaque = 0;
         }
@@ -7164,6 +7236,7 @@ b32 main(void)
                                 {
                                         gpu_kit_pixel(&image_bad, "gpu images", round, x, y, pic[(positive)y * PP + x], gpu_kit_want[(positive)y * PP + x]);
                                 }
+                        gpu_kit_picture();
                 }
                 // Mixes: memory_mix_u32_row over rectangles (a corner's square or a line's end), the ink a colour or a picture, the covers a table of bytes in the
                 // buffer with a pitch of its own, a quarter of them none and a quarter whole.
@@ -7229,6 +7302,7 @@ b32 main(void)
                                         {
                                                 gpu_kit_pixel(&mix_bad, "gpu mixes", round, x, y, pic[(positive)y * PP + x], gpu_kit_want[(positive)y * PP + x]);
                                         }
+                                gpu_kit_picture();
                         }
                 }
                 // Turns: a screen's rectangle of a picture turned a quarter, a half and three quarters into a panel's buffer (windows_rotate_u32, which Canvas turns a
@@ -7281,11 +7355,15 @@ b32 main(void)
                                                         int inside = x >= rx0 && x < rx1 && y >= ry0 && y < ry1;
                                                         unsigned int want_pixel = inside ? turned_want[(positive)y * DP + x] : 0;
 
-                                                        checks++;
-                                                        if (tdst[(positive)y * DP + x] != want_pixel && (++failures, ++turn_bad) < 6)
-                                                                string_format(log, "  FAIL gpu turns %p (%p degrees): pixel %p,%p is %p, wanted %p\n", (positive)round, (positive)degrees, (positive)x, (positive)y,
-                                                                              (positive)tdst[(positive)y * DP + x], (positive)want_pixel);
+                                                        gpu_px(tdst[(positive)y * DP + x] != want_pixel, x, y, tdst[(positive)y * DP + x], want_pixel);
+                                                        turn_bad += tdst[(positive)y * DP + x] != want_pixel;
                                                 }
+                                        {
+                                                positive wrong = gpu_px_end();
+
+                                                if (wrong)
+                                                        string_format(log, "  FAIL gpu turns %p (%p degrees)", (positive)round, (positive)degrees), gpu_px_tail(wrong);
+                                        }
                                 }
                         }
                 }
@@ -7459,11 +7537,17 @@ b32 main(void)
                         for (int y = 0; y < PH; y++)
                                 for (int x = 0; x < 696; x++)
                                 {
-                                        checks++;
-                                        if (((pic[(positive)y * PP + x] ^ gpu_kit_want[(positive)y * PP + x]) & frame_mask) && (++failures, ++frame_bad) < 6)
-                                                string_format(log, "  FAIL gpu frames round %p: pixel %p,%p is %p, wanted %p\n", (positive)round, (positive)x, (positive)y,
-                                                              (positive)pic[(positive)y * PP + x], (positive)gpu_kit_want[(positive)y * PP + x]);
+                                        b32 differs = ((pic[(positive)y * PP + x] ^ gpu_kit_want[(positive)y * PP + x]) & frame_mask) != 0;
+
+                                        gpu_px(differs, (positive)x, (positive)y, pic[(positive)y * PP + x], gpu_kit_want[(positive)y * PP + x]);
+                                        frame_bad += differs;
                                 }
+                        {
+                                positive wrong = gpu_px_end();
+
+                                if (wrong)
+                                        string_format(log, "  FAIL gpu frames round %p", (positive)round), gpu_px_tail(wrong);
+                        }
                         if (frame_bad && frame_bad != frame_dumped)
                         {
                                 frame_dumped = frame_bad;
@@ -7494,10 +7578,17 @@ b32 main(void)
                                         {
                                                 int inside = x >= rx0 && x < rx1 && y >= ry0 && y < ry1;
 
-                                                checks++;
-                                                if (((pic[(positive)y * PP + x] ^ (inside ? gpu_kit_want[(positive)y * PP + x] : 0)) & frame_mask) && (++failures, ++frame_bad) < 6)
-                                                        string_format(log, "  FAIL gpu frames part %p: pixel %p,%p is %p\n", (positive)round, (positive)x, (positive)y, (positive)pic[(positive)y * PP + x]);
+                                                b32 differs = ((pic[(positive)y * PP + x] ^ (inside ? gpu_kit_want[(positive)y * PP + x] : 0)) & frame_mask) != 0;
+
+                                                gpu_px(differs, x, y, pic[(positive)y * PP + x], inside ? gpu_kit_want[(positive)y * PP + x] : 0);
+                                                frame_bad += differs;
                                         }
+                                {
+                                        positive wrong = gpu_px_end();
+
+                                        if (wrong)
+                                                string_format(log, "  FAIL gpu frames part %p", (positive)round), gpu_px_tail(wrong);
+                                }
                         }
                 }
                 // A card started again has a new buffer, which holds none of the tables the scene remembers (gpu_start makes it): compositor_gpu_layout lets
@@ -7595,7 +7686,6 @@ b32 main(void)
                                                                         for (int y = 0; y < PH; y++)
                                                                                 for (int x = 0; x < 696; x++)
                                                                                 {
-                                                                                        checks++;
                                                                                         if (((pic[(positive)y * PP + x] ^ gpu_kit_want[(positive)y * PP + x]) & 0x00ffffffu) && ++bad)
                                                                                         {
                                                                                                 if (bad == 1)
@@ -7651,9 +7741,14 @@ b32 main(void)
                 check("gpu kit: the 8K scene finishes", gpu_scene(kops_at, M, kbins_at, big_at, KW, KW, KH, 0, 0, KW, KH));
                 for (positive i = 0; i < (positive)KW * KH; i++)
                 {
-                        checks++;
-                        if (big[i] != want[i] && (++failures, ++bad) < 6)
-                                string_format(log, "  FAIL gpu kit 8K: pixel %p,%p is %p, wanted %p\n", i % KW, i / KW, (positive)big[i], (positive)want[i]);
+                        gpu_px(big[i] != want[i], i % KW, i / KW, big[i], want[i]);
+                        bad += big[i] != want[i];
+                }
+                {
+                        positive wrong = gpu_px_end();
+
+                        if (wrong)
+                                string_format(log, "  FAIL gpu kit 8K"), gpu_px_tail(wrong);
                 }
                 // Damage: a rectangle drawn alone is what the whole drawing makes in it (rounded out to the kernel's patches) and leaves everything outside as it was (the scene's first op
                 // is the window's clear, so its patches do not need what was under them); 24 rectangles, one the size of a line of typing.
@@ -7676,21 +7771,29 @@ b32 main(void)
                                         for (unsigned int y = ry0; y < ry1; y++)
                                                 for (unsigned int x = rx0; x < rx1; x++)
                                                 {
-                                                        checks++;
-                                                        if (big[(positive)y * KW + x] != want[(positive)y * KW + x] && (++failures, ++part_bad) < 6)
-                                                                string_format(log, "  FAIL gpu kit part %p: pixel %p,%p is %p, wanted %p\n", (positive)d, (positive)x, (positive)y,
-                                                                              (positive)big[(positive)y * KW + x], (positive)want[(positive)y * KW + x]);
+                                                        gpu_px(big[(positive)y * KW + x] != want[(positive)y * KW + x], x, y, big[(positive)y * KW + x], want[(positive)y * KW + x]);
+                                                        part_bad += big[(positive)y * KW + x] != want[(positive)y * KW + x];
                                                 }
+                                        {
+                                                positive wrong = gpu_px_end();
+
+                                                if (wrong)
+                                                        string_format(log, "  FAIL gpu kit part %p", (positive)d), gpu_px_tail(wrong);
+                                        }
                                         for (int i = 0; i < 20000; i++)
                                         {
                                                 unsigned int x = gpu_random() % KW, y = gpu_random() % KH;
 
                                                 if (x >= rx0 && x < rx1 && y >= ry0 && y < ry1)
                                                         continue;
-                                                checks++;
-                                                if (big[(positive)y * KW + x] && (++failures, ++part_bad) < 6)
-                                                        string_format(log, "  FAIL gpu kit part %p: pixel %p,%p outside was touched: %p\n", (positive)d, (positive)x, (positive)y,
-                                                                      (positive)big[(positive)y * KW + x]);
+                                                gpu_px(big[(positive)y * KW + x] != 0, x, y, big[(positive)y * KW + x], 0);
+                                                part_bad += big[(positive)y * KW + x] != 0;
+                                        }
+                                        {
+                                                positive wrong = gpu_px_end();
+
+                                                if (wrong)
+                                                        string_format(log, "  FAIL gpu kit part %p outside its rectangle", (positive)d), gpu_px_tail(wrong);
                                         }
                                 }
                         }
