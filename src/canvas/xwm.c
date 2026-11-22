@@ -3843,7 +3843,7 @@ static int compositor_xwm_steam_scale(int at, int across, unsigned int x_across)
         return across <= 0 || x_across <= 1 || x_across == (unsigned int)across ? at : (int)((long long)at * (long long)x_across / (long long)across);
 }
 
-static int compositor_xwm_steam_pointer(unsigned int pid, unsigned int type, unsigned int flags, int a, int b, int width, int height, int flip, int notch)
+static int compositor_xwm_steam_pointer(unsigned int pid, unsigned int type, unsigned int flags, int a, int b, int width, int height, int notch)
 {
         struct compositor_xwm *x = 0;
         struct compositor_xwm_window *w = compositor_xwm_steam_window(pid, &x);
@@ -3865,7 +3865,7 @@ static int compositor_xwm_steam_pointer(unsigned int pid, unsigned int type, uns
                 compositor_xwm_steam.wheel[0] = compositor_xwm_steam.wheel[1] = 0;
         else if (type == WINDOW_EVENT_WHEEL && a)
         {
-                int axis = b != 0, turn = flip ? -a : a, *left = &compositor_xwm_steam.wheel[axis];
+                int axis = b != 0, turn = a, *left = &compositor_xwm_steam.wheel[axis];
                 notch = notch > 0 ? notch : 120;
                 if ((*left > 0 && turn < 0) || (*left < 0 && turn > 0))
                         *left = 0;
@@ -3895,9 +3895,8 @@ static int xwm_steam_input_override(void *ctx, const struct compositor_input_ove
                 return compositor_xwm_steam_key(ev->pid, (unsigned int)ev->a, ev->b, ev->flags);
         if (ev->kind == COMPOSITOR_OVERRIDE_POINTER)
         {
-                int flip = compositor.table && (compositor.table->scroll_off & WINDOW_SCROLL_FLIP) != 0;
                 int notch = (ev->flags & WINDOW_WHEEL_PRECISE) && !(ev->flags & WINDOW_WHEEL_STREAM) ? UI_NOTCH : 120;
-                return compositor_xwm_steam_pointer(ev->pid, ev->ev_type, ev->flags, ev->a, ev->b, ev->width, ev->height, flip, notch);
+                return compositor_xwm_steam_pointer(ev->pid, ev->ev_type, ev->flags, ev->a, ev->b, ev->width, ev->height, notch);
         }
         return 0;
 }
