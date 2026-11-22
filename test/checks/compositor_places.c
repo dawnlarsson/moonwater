@@ -729,3 +729,62 @@ static fn check_glass(void)
         compositor_zero();
 }
 
+
+/*
+        C8 Scenes, step 1: the overview's layout is pure. A Scene's windows are laid out in a grid with no overlap, inside
+        the area, each in its own aspect; the Scene strip is one card per Scene at the screen's aspect with "+" last; the hit
+        test takes the first rect that holds the point.
+*/
+static void check_compositor_scenes_layout(void)
+{
+    static const int sizes[7][2] = {{1920, 1080}, {800, 600}, {600, 900}, {1024, 768}, {1280, 720}, {500, 500}, {1600, 900}};
+    const int area[4] = {0, 40, 1000, 600};
+    int out[7][4];
+    int all_placed = 1, inside = 1, disjoint = 1, aspect = 1;
+
+    for (unsigned int n = 1; n <= 7; n++)
+    {
+        unsigned int placed = compositor_scenes_grid(sizes, n, area, 16, out);
+
+        all_placed &= placed == n;
+        for (unsigned int i = 0; i < n; i++)
+        {
+            long long w = sizes[i][0], h = sizes[i][1], ow = out[i][2], oh = out[i][3];
+
+            inside &= out[i][0] >= area[0] && out[i][1] >= area[1] && out[i][0] + out[i][2] <= area[0] + area[2] &&
+                      out[i][1] + out[i][3] <= area[1] + area[3] && out[i][2] > 0 && out[i][3] > 0;
+            // One pixel of the rect's height or width is w or h in these units: the cross product is within that of the ratio.
+            aspect &= (ow * h - oh * w < 0 ? -(ow * h - oh * w) : ow * h - oh * w) <= w + h;
+            for (unsigned int j = i + 1; j < n; j++)
+                disjoint &= out[i][0] + out[i][2] <= out[j][0] || out[j][0] + out[j][2] <= out[i][0] ||
+                            out[i][1] + out[i][3] <= out[j][1] || out[j][1] + out[j][3] <= out[i][1];
+        }
+    }
+    check("scenes: a Scene of 1 to 7 windows places every window", all_placed);
+    check("scenes: every window's rect is inside the area and has a size", inside);
+    check("scenes: no two windows of a Scene overlap", disjoint);
+    check("scenes: each window keeps its own aspect within a pixel of ratio", aspect);
+
+    {
+        const int strip_area[4] = {0, 0, 1000, 80};
+        int cards[4][4];
+        unsigned int count = compositor_scenes_strip(3, strip_area, 16, 9, 8, cards);
+        int in = 1, order = 1, disjoint_cards = 1;
+
+        for (unsigned int i = 0; i < count; i++)
+        {
+            in &= cards[i][0] >= 0 && cards[i][1] >= 0 && cards[i][0] + cards[i][2] <= 1000 && cards[i][1] + cards[i][3] <= 80;
+            if (i)
+                order &= cards[i][0] > cards[i - 1][0];
+            for (unsigned int j = i + 1; j < count; j++)
+                disjoint_cards &= cards[i][0] + cards[i][2] <= cards[j][0] || cards[j][0] + cards[j][2] <= cards[i][0];
+        }
+        check("scenes strip: one card per Scene and a \"+\" card last", count == 4);
+        check("scenes strip: the cards are inside the strip, left to right, and do not overlap", in && order && disjoint_cards);
+        check("scenes strip: a card is the screen's aspect within a pixel", cards[0][2] * 9 - cards[0][3] * 16 <= cards[0][2] + cards[0][3] &&
+              cards[0][3] * 16 - cards[0][2] * 9 <= cards[0][2] + cards[0][3]);
+        check("scenes hit: the centre of a card is that card, and a point off the strip is none",
+              compositor_scenes_hit(cards, count, cards[1][0] + cards[1][2] / 2, cards[1][1] + cards[1][3] / 2) == 1 &&
+              compositor_scenes_hit(cards, count, -5, -5) == -1);
+    }
+}

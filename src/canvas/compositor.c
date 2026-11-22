@@ -1063,6 +1063,7 @@ static struct windows_owner windows_owner_held[WINDOWS];
 #include "compositor/kms.c" // the card: the displays and their modes, the scanouts and plates, the space taken, the card found and opened, the cursor plane
 #include "compositor/session.c" // the session: a machine that slept, the settings read and published, the input devices found, the doors and their threads
 #include "compositor/manage.c" // the windows: the stack and the keys, grips and dividers, tiles and the grid, places, a row taken and let go, the keyboard on the screen, the clipboard, popups
+#include "compositor/scenes.c" // the Scenes overview's layout: a Scene's windows in a grid (no overlap), the strip of Scene cards, the hit test
 #include "compositor/input.c" // what a person does: the keys and the chords, the volume, the hand's motion and buttons, the prediction, the wheel and the pad, the marks and touch
 
 /* Sealed memfd for the window table (udmabuf zero-copy scanout; symlinked at WINDOWS_TABLE). */

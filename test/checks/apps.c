@@ -10462,6 +10462,7 @@ b32 main()
         GROUP("check_land", check_land());
         GROUP("check_glass", check_glass());
         GROUP("check_glass_lift", check_glass_lift());
+        GROUP("check_compositor_scenes_layout", check_compositor_scenes_layout());
         GROUP("check_screen_numbers", check_screen_numbers());
         GROUP("check_no_tab", check_no_tab());
         GROUP("check_identify_numbers", check_identify_numbers());
