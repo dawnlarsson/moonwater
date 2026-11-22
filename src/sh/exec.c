@@ -2347,7 +2347,10 @@ fn shell_child_death(bipolar child, positive raw, bool foreground)
                 {
                         string_address text = job_death_command(child);
                         positive length = string_length(text);
-                        p8 address_to copy = (p8 address_to)memory_take(length + 1);
+                        p8 address_to copy =
+                            length < positive_max
+                                ? (p8 address_to)memory_take(length + 1)
+                                : null;
 
                         if (!shell_array_room(child_death_queue, child_death_room,
                                               child_death_queued + 1))
@@ -3727,10 +3730,17 @@ static fn job_prune()
         positive slots = 16;
         bipolar address_to seen = null;
 
-        while (slots < 2 * shell_wait_count)
-                slots <<= 1;
-        if (job_count > 8)
-                seen = (bipolar address_to)memory_take(slots * sizeof(bipolar));
+        if (job_count > 8 &&
+            shell_wait_count <= positive_max / (2 * sizeof(bipolar)))
+        {
+                positive need = 2 * shell_wait_count;
+
+                while (slots < need && slots <= (positive_max >> 1))
+                        slots <<= 1;
+                if (slots >= need && slots <= positive_max / sizeof(bipolar))
+                        seen = (bipolar address_to)memory_take(
+                            slots * sizeof(bipolar));
+        }
 
         if (!seen)
         {
@@ -5513,25 +5523,29 @@ static bool history_wanted(string_address text, positive length)
         if (!length || history_secret_line(text, length))
                 return false;
 
+        static const named_flag controls[] = {
+            {"ignorespace", 1},
+            {"ignoredups", 2},
+            {"erasedups", 4},
+            {"ignoreboth", 3},
+        };
+        p64 control_flags = 0;
+
         for (string_address at = control; at && string_get(at);)
         {
                 string_address stop = string_first_of_or_end(at, ':');
                 positive span = (positive)(stop - at);
+                positive hit = memory_table_lookup(
+                    (const p8 address_to)at, span, controls);
 
-                if (memory_is_word(at, span, "ignorespace"))
-                        space = true;
-                else if (memory_is_word(at, span, "ignoredups"))
-                        dedupe = true;
-                else if (memory_is_word(at, span, "erasedups"))
-                        erase = true;
-                else if (memory_is_word(at, span, "ignoreboth"))
-                {
-                        space = true;
-                        dedupe = true;
-                }
+                if (hit < array_count(controls))
+                        control_flags |= controls[hit].value;
 
                 at = string_get(stop) ? stop + 1 : stop;
         }
+        space = (control_flags & 1) != 0;
+        dedupe = (control_flags & 2) != 0;
+        erase = (control_flags & 4) != 0;
 
         if (space && byte_is_blank(string_get(text)))
                 return false;
@@ -5832,7 +5846,10 @@ static bipolar history_destination_open(string_address path,
 
 static bipolar history_append(string_address path, positive from)
 {
-        p8 leaf[FILE_PATH_MAX];
+        p8 address_to leaf = (p8 address_to)memory_checked(FILE_PATH_MAX);
+        if (!leaf)
+                return -ERROR_NO_MEMORY;
+        scope_exit(memory_free(leaf, FILE_PATH_MAX));
         file_facts existing;
         bool exists;
         bipolar directory = history_destination_open(
@@ -5895,7 +5912,10 @@ static bipolar history_write_direct_at(bipolar directory,
    semantics, while a final-component symlink fails closed. */
 static bipolar history_replace(string_address path, positive from)
 {
-        p8 leaf[FILE_PATH_MAX];
+        p8 address_to leaf = (p8 address_to)memory_checked(FILE_PATH_MAX);
+        if (!leaf)
+                return -ERROR_NO_MEMORY;
+        scope_exit(memory_free(leaf, FILE_PATH_MAX));
         file_facts existing;
         bool exists;
         bipolar directory = history_destination_open(
@@ -9826,9 +9846,11 @@ COLD bool shell_frames_wanted(const_string name, positive length)
             (!exec_frame_count && !exec_frames_main()))
                 return false;
 
-        if (!memory_is_word((address_any)name, length, "FUNCNAME") &&
-            !memory_is_word((address_any)name, length, "BASH_SOURCE") &&
-            !memory_is_word((address_any)name, length, "BASH_LINENO"))
+        static const string_address frame_names[] = {
+            "FUNCNAME", "BASH_SOURCE", "BASH_LINENO"};
+
+        if (memory_table_lookup((const p8 address_to)name, length, frame_names) >=
+            array_count(frame_names))
                 return false;
 
         exec_frames_publish();
@@ -12414,9 +12436,11 @@ static COLD __attribute__((noinline)) bool exec_dash_declaring(string_address ad
                         at++;
         }
 
-        return at < n && (word_is(words[at], "export") ||
-                          word_is(words[at], "readonly") ||
-                          word_is(words[at], "local"));
+        static const string_address decls[] = {
+            "export", "readonly", "local"};
+
+        return at < n && words[at] &&
+               string_table_lookup(words[at], decls) < array_count(decls);
 }
 
 static PURE b32 exec_declaration_from(parse_node address_to node)
@@ -15069,16 +15093,19 @@ static bool conditional_binary_ready()
 
 static PURE bool conditional_unary_op(string_address word)
 {
-        return test_is_unary(word) || word_is(word, "-a") ||
-               word_is(word, "-v") || word_is(word, "-o") ||
-               word_is(word, "-R");
+        static const string_address extra[] = {"-a", "-v", "-o", "-R"};
+
+        return test_is_unary(word) ||
+               (word && string_table_lookup(word, extra) < array_count(extra));
 }
 
 static PURE bool conditional_unary_operand(string_address word)
 {
-        return !word_is(word, "&&") && !word_is(word, "||") &&
-               !word_is(word, "(") && !word_is(word, ")") &&
-               !word_is(word, "<") && !word_is(word, ">");
+        static const string_address forbidden[] = {
+            "&&", "||", "(", ")", "<", ">"};
+
+        return !word ||
+               string_table_lookup(word, forbidden) >= array_count(forbidden);
 }
 
 // [[ == ]] and case read extended groups whether or not extglob is on, and
@@ -15902,13 +15929,16 @@ static COLD bool exec_pretty_cond_primary(exec_function_text address_to made)
                 return true;
         }
 
+        static const string_address cond_binary_ops[] = {
+            "==", "=~", "<", ">"};
+
         if (conditional_at + 1 < conditional_word_count &&
             !conditional_is("&&") &&
             (test_is_binary(conditional_word[conditional_at + 1]) ||
-             word_is(conditional_word[conditional_at + 1], "==") ||
-             word_is(conditional_word[conditional_at + 1], "=~") ||
-             word_is(conditional_word[conditional_at + 1], "<") ||
-             word_is(conditional_word[conditional_at + 1], ">")))
+             (conditional_word[conditional_at + 1] &&
+              string_table_lookup(conditional_word[conditional_at + 1],
+                                  cond_binary_ops) <
+                  array_count(cond_binary_ops))))
         {
                 exec_pretty_cond_operand(made);
                 exec_function_text_literal(made, " ");

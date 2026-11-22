@@ -624,11 +624,8 @@ static bool lex_command_word(string_address word, positive length)
         static const string_address words[] = {
             "if", "then", "else", "elif", "do", "while", "until", "!", "time", "{"};
 
-        for (positive at = 0; at < sizeof(words) / sizeof(words[0]); at++)
-                if (length == string_length(words[at]) &&
-                    !memory_compare(word, (address_any)words[at], length))
-                        return true;
-        return false;
+        return memory_table_lookup((const p8 address_to)word, length, words) <
+               array_count(words);
 }
 
 /*

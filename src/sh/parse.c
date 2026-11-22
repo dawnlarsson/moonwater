@@ -379,19 +379,21 @@ static positive parse_want_over HOT_STATE;
 //      is what bash names when the input ends before it is closed.
 static HOT fn parse_want_push_for(string_address word, b32 index)
 {
-        string_address opener = null;
-
-        switch (parse_nodes[index].kind)
-        {
-        case NODE_IF: opener = "if"; break;
-        case NODE_WHILE: opener = "while"; break;
-        case NODE_UNTIL: opener = "until"; break;
-        case NODE_FOR: case NODE_CFOR: opener = "for"; break;
-        case NODE_SELECT: opener = "select"; break;
-        case NODE_CASE: opener = "case"; break;
-        case NODE_GROUP: opener = "{"; break;
-        default: break;
-        }
+        static const string_address openers[] = {
+            [NODE_IF] = "if",
+            [NODE_WHILE] = "while",
+            [NODE_UNTIL] = "until",
+            [NODE_FOR] = "for",
+            [NODE_CFOR] = "for",
+            [NODE_SELECT] = "select",
+            [NODE_CASE] = "case",
+            [NODE_GROUP] = "{",
+        };
+        b32 kind = parse_nodes[index].kind;
+        string_address opener =
+            kind >= 0 && (positive)kind < array_count(openers)
+                ? openers[kind]
+                : null;
 
         //      Full, the oldest construct goes, not the newest: the held
         //      entries are always the innermost ones, so the top is the

@@ -5286,15 +5286,26 @@ COLD bool shell_dynamic_wanted(const_string name, positive length)
                 return true;
         }
 
-        if (shell_bash_compat &&
-            memory_is_word((address_any)name, length, "BASH_VERSINFO"))
-                which = SHELL_DYNAMIC_VERSINFO;
-        else if (memory_is_word((address_any)name, length, "GROUPS"))
-                which = SHELL_DYNAMIC_GROUPS;
-        else if (memory_is_word((address_any)name, length, "DIRSTACK"))
-                which = SHELL_DYNAMIC_DIRSTACK;
-        else
+        static const struct
+        {
+                string_address name;
+                positive which;
+                bool bash_only;
+                fn (*build)(void);
+        } arrays[] = {
+            {"BASH_VERSINFO", SHELL_DYNAMIC_VERSINFO, true,
+             shell_dynamic_versinfo},
+            {"GROUPS", SHELL_DYNAMIC_GROUPS, false, shell_dynamic_groups},
+            {"DIRSTACK", SHELL_DYNAMIC_DIRSTACK, false, shell_dynamic_dirstack},
+        };
+        positive at = memory_table_lookup(
+            (const p8 address_to)name, length, arrays);
+
+        if (at >= array_count(arrays) ||
+            (arrays[at].bash_only && !shell_bash_compat))
                 return false;
+
+        which = arrays[at].which;
 
         // DIRSTACK is remade every time, because pushd and popd change it and
         // the array is the answer rather than a cache of one.
@@ -5302,13 +5313,7 @@ COLD bool shell_dynamic_wanted(const_string name, positive length)
                 return true;
 
         shell_dynamic_arrays[which] = true;
-
-        if (which == SHELL_DYNAMIC_VERSINFO)
-                shell_dynamic_versinfo();
-        else if (which == SHELL_DYNAMIC_GROUPS)
-                shell_dynamic_groups();
-        else
-                shell_dynamic_dirstack();
+        arrays[at].build();
 
         return true;
 }
@@ -6186,8 +6191,9 @@ bool shell_cd_walk(bool physical, bool address_to say,
                                                 address_to say = true;
                                                 /* cd says the CDPATH spelling,
                                                    not getcwd's physical answer. */
-                                                string_copy_end(shell_cd_target,
-                                                                base);
+                                                string_copy_max_end(
+                                                    shell_cd_target, base,
+                                                    sizeof(shell_cd_target) - 1);
                                         }
 
                                         return true;
@@ -6267,7 +6273,8 @@ COLD fn shell_cd(writer write)
                 if (shell_here(shell_directory_was,
                                sizeof(shell_directory_was)))
                 {
-                        string_copy_end(shell_directory, shell_directory_was);
+                        string_copy_max_end(shell_directory, shell_directory_was,
+                                            SHELL_DIRECTORY_MAX - 1);
                         env_assign("PWD", shell_directory);
                 }
         }
@@ -6766,12 +6773,15 @@ static COLD bool shell_dirstack_move(string_address where)
 
 COLD fn shell_pushd(writer write)
 {
+        typedef struct
+        {
+                p8 wanted[SHELL_DIRECTORY_MAX];
+                p8 previous[SHELL_DIRECTORY_MAX];
+                p8 top[SHELL_DIRECTORY_MAX];
+        } shell_pushd_scratch;
         positive count;
         string_address address_to list = shell_dirstack_entries(
             address_of count);
-        p8 wanted[SHELL_DIRECTORY_MAX];
-        p8 previous[SHELL_DIRECTORY_MAX];
-        p8 top[SHELL_DIRECTORY_MAX];
         string_address address_to rotated;
         positive index;
         //      -n moves the stack and leaves the shell where it is; the
@@ -6818,11 +6828,17 @@ COLD fn shell_pushd(writer write)
         if (!rotated)
                 return shell_answered(1, "pushd: directory stack full\n");
 
+        shell_pushd_scratch address_to scratch =
+            (shell_pushd_scratch address_to)memory_checked(sizeof(*scratch));
+        return_if(!scratch, shell_answered(1, "pushd: directory stack full\n"));
+        scope_exit(memory_free(scratch, sizeof(*scratch)));
+
         //      cd writes the shell's directory in place, so a move rewrites
         //      the buffer list[0] points at. Every rotation built from the top
         //      reads this copy instead, taken before anything moves.
-        string_copy_max_end(top, shell_directory, sizeof(top) - 1);
-        list[0] = top;
+        string_copy_max_end(scratch->top, shell_directory,
+                            sizeof(scratch->top) - 1);
+        list[0] = scratch->top;
 
         //      A lone "-" is the directory OLDPWD names, as cd reads it, and
         //      that is the name the push goes under. As with cd -, the
@@ -6867,17 +6883,18 @@ COLD fn shell_pushd(writer write)
                 //      makes one as surely; -n above only edits the stack.
                 return_if(shell_restricted, shell_refuse(1, "pushd: restricted\n"));
 
-                string_copy_max_end(previous, shell_directory,
-                                    sizeof(previous) - 1);
-                string_copy_max_end(wanted, named, sizeof(wanted) - 1);
+                string_copy_max_end(scratch->previous, shell_directory,
+                                    sizeof(scratch->previous) - 1);
+                string_copy_max_end(scratch->wanted, named,
+                                    sizeof(scratch->wanted) - 1);
 
-                rotated[0] = previous;
+                rotated[0] = scratch->previous;
 
                 if (count > 1)
                         memory_copy_apart(rotated + 1, list + 1,
                                           (count - 1) * sizeof(list[0]));
 
-                if (!shell_dirstack_move(wanted))
+                if (!shell_dirstack_move(scratch->wanted))
                 {
                         return shell_refuse(1,
                             "pushd: %s: No such file or directory\n", named);
@@ -6887,7 +6904,7 @@ COLD fn shell_pushd(writer write)
                         return shell_answered(1, "pushd: directory stack full\n");
 
                 if (said_previous)
-                        string_format(write, "%s\n", wanted);
+                        string_format(write, "%s\n", scratch->wanted);
 
                 shell_dirstack_listed(write, false, false, false);
 
@@ -6944,7 +6961,8 @@ COLD fn shell_pushd(writer write)
         //      before the stack is touched.
         return_if(!stack_only && shell_restricted, shell_refuse(1, "pushd: restricted\n"));
 
-        string_copy_max_end(wanted, rotated[0], sizeof(wanted) - 1);
+        string_copy_max_end(scratch->wanted, rotated[0],
+                            sizeof(scratch->wanted) - 1);
 
         //      -n rotates and stays: the shell keeps the directory it is in,
         //      which is still the top of what is listed, so the entry the
@@ -6952,7 +6970,7 @@ COLD fn shell_pushd(writer write)
         //      The move comes first, so a move that fails writes nothing
         //      the shell did not do; the move does not touch the pool the
         //      kept part is read from.
-        if (!stack_only && !shell_dirstack_move(wanted))
+        if (!stack_only && !shell_dirstack_move(scratch->wanted))
         {
                 //      Bash takes the directory it could not enter out of the
                 //      rotation and keeps the rest of it, in the order the
@@ -6961,7 +6979,7 @@ COLD fn shell_pushd(writer write)
                         return shell_answered(1, "pushd: directory stack full\n");
 
                 return shell_refuse(1,
-                    "pushd: %s: No such file or directory\n", wanted);
+                    "pushd: %s: No such file or directory\n", scratch->wanted);
         }
 
         if (!shell_dirstack_write(rotated + 1, count - 1))
@@ -6978,12 +6996,15 @@ COLD fn shell_pushd(writer write)
 
 COLD fn shell_popd(writer write)
 {
+        typedef struct
+        {
+                p8 wanted[SHELL_DIRECTORY_MAX];
+                p8 top[SHELL_DIRECTORY_MAX];
+        } shell_popd_scratch;
         positive count;
         string_address address_to list = shell_dirstack_entries(
             address_of count);
         string_address address_to kept;
-        p8 wanted[SHELL_DIRECTORY_MAX];
-        p8 top[SHELL_DIRECTORY_MAX];
         positive index = 0;
         positive used = 0;
         //      -n asks for the stack to lose an entry and the shell to stay
@@ -7040,10 +7061,16 @@ COLD fn shell_popd(writer write)
         if (!kept)
                 return shell_answered(1, "popd: directory stack full\n");
 
+        shell_popd_scratch address_to scratch =
+            (shell_popd_scratch address_to)memory_checked(sizeof(*scratch));
+        return_if(!scratch, shell_answered(1, "popd: directory stack full\n"));
+        scope_exit(memory_free(scratch, sizeof(*scratch)));
+
         //      The top is copied out before a move can rewrite it, as pushd
         //      does; a removal of the top keeps nothing of it.
-        string_copy_max_end(top, shell_directory, sizeof(top) - 1);
-        list[0] = top;
+        string_copy_max_end(scratch->top, shell_directory,
+                            sizeof(scratch->top) - 1);
+        list[0] = scratch->top;
 
         //      With -n the top is never the one that goes.
         if (stack_only && !index)
@@ -7059,10 +7086,11 @@ COLD fn shell_popd(writer write)
         {
                 return_if(shell_restricted, shell_refuse(1, "popd: restricted\n"));
 
-                string_copy_max_end(wanted, kept[0], sizeof(wanted) - 1);
+                string_copy_max_end(scratch->wanted, kept[0],
+                                    sizeof(scratch->wanted) - 1);
 
-                if (!shell_dirstack_move(wanted))
-                        return shell_answered(1, "popd: %s: No such file or directory\n", wanted);
+                if (!shell_dirstack_move(scratch->wanted))
+                        return shell_answered(1, "popd: %s: No such file or directory\n", scratch->wanted);
         }
 
         if (!shell_dirstack_write(kept + 1, used - 1))
@@ -21675,10 +21703,22 @@ static bool shell_background_reserve(positive count)
 static fn shell_wait_slots_build()
 {
         positive want = 16;
+        positive need;
         positive mask;
 
-        while (want < 2 * shell_wait_count)
+        if (shell_wait_count > positive_max / (2 * sizeof(positive)))
+        {
+                shell_wait_slots_valid = false;
+                return;
+        }
+        need = 2 * shell_wait_count;
+        while (want < need && want <= (positive_max >> 1))
                 want <<= 1;
+        if (want < need || want > positive_max / sizeof(positive))
+        {
+                shell_wait_slots_valid = false;
+                return;
+        }
         if (want > shell_wait_slot_room)
         {
                 if (shell_wait_slots)
@@ -23369,17 +23409,19 @@ static COLD positive bind_keys_bytes(string_address spelling, p8 address_to out,
                         continue;
                 }
 
+                static const p8 simple_escapes[128] = {
+                    ['e'] = 27, ['E'] = 27, ['a'] = 7, ['b'] = 8,
+                    ['d'] = 127, ['f'] = 12, ['n'] = 10, ['r'] = 13,
+                    ['t'] = 9, ['v'] = 11,
+                };
+                if (value < 128 && simple_escapes[value])
+                {
+                        out[used++] = simple_escapes[value];
+                        continue;
+                }
+
                 switch (value)
                 {
-                case 'e': case 'E': out[used++] = 27; break;
-                case 'a': out[used++] = 7; break;
-                case 'b': out[used++] = 8; break;
-                case 'd': out[used++] = 127; break;
-                case 'f': out[used++] = 12; break;
-                case 'n': out[used++] = 10; break;
-                case 'r': out[used++] = 13; break;
-                case 't': out[used++] = 9; break;
-                case 'v': out[used++] = 11; break;
                 case '0': case '1': case '2': case '3': case '4': case '5':
                 case '6': case '7':
                 {
@@ -23780,25 +23822,36 @@ static COLD bool bind_line(string_address line, positive keymap)
         return true;
 }
 
-static COLD fn bind_list_all_functions(writer write, positive keymap, bool where)
+typedef struct
 {
         bind_entry entries[BIND_ENTRIES];
-        positive count = bind_effective(entries, keymap == 0);
+        string_address keys[BIND_ENTRIES];
+} bind_work_scratch;
+
+static COLD fn bind_list_all_functions(writer write, positive keymap, bool where)
+{
+        bind_work_scratch address_to scratch =
+            (bind_work_scratch address_to)memory_checked(sizeof(*scratch));
+        if (!scratch)
+                return;
+        scope_exit(memory_free(scratch, sizeof(*scratch)));
+
+        positive count = bind_effective(scratch->entries, keymap == 0);
 
         write("\n", 1);
 
         for (positive at = 0; at < BIND_FUNCTIONS; at++)
         {
-                string_address keys[BIND_ENTRIES];
-                positive found = bind_keys_of(bind_functions[at], entries, count,
-                                              keys);
+                positive found = bind_keys_of(bind_functions[at],
+                                              scratch->entries, count,
+                                              scratch->keys);
 
                 if (!where)
                 {
                         if (!found)
                                 string_format(write, "# %s (not bound)\n", bind_functions[at]);
                         for (positive each = 0; each < found; each++)
-                                string_format(write, "\"%s\": %s\n", keys[each], bind_functions[at]);
+                                string_format(write, "\"%s\": %s\n", scratch->keys[each], bind_functions[at]);
                         continue;
                 }
                 if (!found)
@@ -23808,13 +23861,65 @@ static COLD fn bind_list_all_functions(writer write, positive keymap, bool where
                 }
                 string_format(write, "%s can be found on ", bind_functions[at]);
                 for (positive each = 0; each < found && each < 5; each++)
-                        string_format(write, "%s\"%s\"", each ? ", " : "", keys[each]);
+                        string_format(write, "%s\"%s\"", each ? ", " : "", scratch->keys[each]);
                 //      Only the first five, and a mark that there are more.
                 write(found > 5 ? ", ...\n" : ".\n", found > 5 ? 6 : 2);
         }
 }
 #define bind_list_functions(write, keymap) bind_list_all_functions((write), (keymap), false)
 #define bind_list_where(write, keymap) bind_list_all_functions((write), (keymap), true)
+
+static COLD fn bind_query_or_unbind(writer write, string_address value,
+                                    positive keymap, bool unbind,
+                                    b32 address_to status)
+{
+        if (!bind_function_known(value))
+        {
+                shell_told("bind: `%s': unknown function name\n", value);
+                address_to status = 1;
+                return;
+        }
+
+        bind_work_scratch address_to scratch =
+            (bind_work_scratch address_to)memory_checked(sizeof(*scratch));
+        if (!scratch)
+        {
+                address_to status = 1;
+                return;
+        }
+        scope_exit(memory_free(scratch, sizeof(*scratch)));
+
+        positive count = bind_effective(scratch->entries, keymap == 0);
+        positive found = bind_keys_of(value, scratch->entries, count,
+                                      scratch->keys);
+        if (unbind)
+        {
+                for (positive each = 0; each < found; each++)
+                        bind_remove(scratch->keys[each], keymap);
+                return;
+        }
+
+        write(value, string_length(value));
+        if (!found)
+        {
+                write(" is not bound to any keys.\n", string_length(" is not bound to any keys.\n"));
+                address_to status = 1;
+                return;
+        }
+        write(" can be invoked via ", string_length(" can be invoked via "));
+        for (positive each = 0; each < found && each < 5; each++)
+        {
+                if (each)
+                        write(", ", string_length(", "));
+                write("\"", 1);
+                write(scratch->keys[each], string_length(scratch->keys[each]));
+                write("\"", 1);
+        }
+        if (found > 5)
+                write(", ...\n", string_length(", ...\n"));
+        else
+                write(".\n", string_length(".\n"));
+}
 
 static COLD fn bind_list_kind(writer write, positive keymap, p8 kind, bool spoken)
 {
@@ -23956,65 +24061,13 @@ static COLD fn shell_bind(writer write)
                         }
                         break;
                 case 'q':
-                {
-                        bind_entry entries[BIND_ENTRIES];
-                        string_address keys[BIND_ENTRIES];
-                        positive count;
-                        positive found;
-
-                        if (!bind_function_known(value))
-                        {
-                                shell_told("bind: `%s': unknown function name\n",
-                                           value);
-                                status = 1;
-                                break;
-                        }
-
-                        count = bind_effective(entries, keymap == 0);
-                        found = bind_keys_of(value, entries, count, keys);
-                        write(value, string_length(value));
-                        if (!found)
-                        {
-                                write(" is not bound to any keys.\n", string_length(" is not bound to any keys.\n"));
-                                status = 1;
-                                break;
-                        }
-                        write(" can be invoked via ", string_length(" can be invoked via "));
-                        for (positive each = 0; each < found && each < 5; each++)
-                        {
-                                if (each)
-                                        write(", ", string_length(", "));
-                                write("\"", 1);
-                                write(keys[each], string_length(keys[each]));
-                                write("\"", 1);
-                        }
-                        if (found > 5)
-                                write(", ...\n", string_length(", ...\n"));
-                        else
-                                write(".\n", string_length(".\n"));
+                        bind_query_or_unbind(write, value, keymap, false,
+                                             address_of status);
                         break;
-                }
                 case 'u':
-                {
-                        bind_entry entries[BIND_ENTRIES];
-                        string_address keys[BIND_ENTRIES];
-                        positive count;
-                        positive found;
-
-                        if (!bind_function_known(value))
-                        {
-                                shell_told("bind: `%s': unknown function name\n",
-                                           value);
-                                status = 1;
-                                break;
-                        }
-
-                        count = bind_effective(entries, keymap == 0);
-                        found = bind_keys_of(value, entries, count, keys);
-                        for (positive each = 0; each < found; each++)
-                                bind_remove(keys[each], keymap);
+                        bind_query_or_unbind(write, value, keymap, true,
+                                             address_of status);
                         break;
-                }
                 case 'r':
                         bind_remove(value, keymap);
                         break;
@@ -25699,10 +25752,11 @@ fn shell_command_builtin(writer write)
         return_if(!shell_bash_compat && word_is(shell_argv[0], "local"), shell_answer(0));
 
         {
+                static const string_address readers[] = {"eval", ".", "source"};
                 bool tail = shell_tail_command;
-                bool reader = word_is(shell_argv[0], "eval") ||
-                              word_is(shell_argv[0], ".") ||
-                              word_is(shell_argv[0], "source");
+                bool reader = shell_argv[0] &&
+                              string_table_lookup(shell_argv[0], readers) <
+                                  array_count(readers);
 
                 if (reader)
                         shell_command_reader_depth++;

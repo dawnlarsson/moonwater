@@ -1661,15 +1661,18 @@ static positive shell_flatten_strings(string_address address_to strings,
                 return 0;
         }
 
-        used = 0;
+        byte_cursor cursor = byte_cursor_open(address_to block, used + 1);
 
         for (positive at = 0; at < count; at++)
-                used = (positive)(string_copy_end(address_to block + used,
-                                                  strings[at]) -
-                                    address_to block) + 1;
+                if (!byte_cursor_put_string(address_of cursor, strings[at]) ||
+                    !byte_cursor_put_byte(address_of cursor, end))
+                {
+                        address_to count_out = positive_max;
+                        return 0;
+                }
 
         address_to count_out = count;
-        return used;
+        return cursor.used;
 }
 
 //      The environment, flattened into a block that is made to fit it.
