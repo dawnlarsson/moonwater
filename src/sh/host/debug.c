@@ -52,6 +52,7 @@ static fn host_debug_inputs(const struct windows address_to table)
                 string_append_bounded(what, (kinds & WINDOWS_INPUT_FINGERS) && !(kinds & WINDOWS_INPUT_DIRECT) ? ", a touchpad" : "", sizeof(what));
                 string_append_bounded(what, kinds & WINDOWS_INPUT_DIRECT ? ", a touch screen" : "", sizeof(what));
                 string_append_bounded(what, kinds & WINDOWS_INPUT_WAKES ? ", read to wake" : "", sizeof(what));
+                string_append_bounded(what, kinds & WINDOWS_INPUT_CONTROLLER ? ", a controller (the pointer while no game reads it)" : "", sizeof(what));
                 string_append_bounded(what, kinds & WINDOWS_INPUT_WHEEL_HI ? "; its wheel in 120ths of a notch" : kinds & WINDOWS_INPUT_WHEEL ? "; its wheel in notches" : "", sizeof(what));
                 string_append_bounded(what, kinds & WINDOWS_INPUT_HWHEEL_HI ? ", sideways in 120ths" : kinds & WINDOWS_INPUT_HWHEEL ? ", sideways in notches" : "", sizeof(what));
                 host_say(log, "                  %s\n", what[0] ? (string_address)what + 2 : (string_address) "taken for nothing it says it is");

@@ -22,6 +22,7 @@ static inline INLINE PURE int compositor_in_row(int row, int x, int y)
 }
 
 static int compositor_qos_keep(int input, int game); // below: the wakeup latency held for an input or a game
+static void compositor_access_let_go(void);      // access.c: a mouse, a pen or a touch moved the pointer, not a controller
 
 static void compositor_hold_touch(positive now)
 {
@@ -2722,7 +2723,7 @@ static int compositor_report(positive now, positive stamp)
                 moved = 1;
         }
         if (moved)
-                compositor.touch.hidden = 0;
+                compositor.touch.hidden = 0, compositor_access_let_go();
         return moved;
 }
 
@@ -3598,7 +3599,7 @@ static void compositor_touch_apply(unsigned int at, const struct ui_touch_out *o
                 case UI_TOUCH_START:
                         compositor.touch.device = (int)at;
                         compositor.touch.physical = at < COMPOSITOR_INPUTS && compositor_input_physical[at];
-                        compositor.touch.hidden = 1, compositor.touch.closing = compositor.touch.hold_row = COMPOSITOR_NONE;
+                        compositor.touch.hidden = 1, compositor_access_let_go(), compositor.touch.closing = compositor.touch.hold_row = COMPOSITOR_NONE;
                         compositor_touch_grab_clear(COMPOSITOR_GRAB_TOUCH_CLOSE), compositor_touch_grab_clear(COMPOSITOR_GRAB_TOUCH_HOLD);
                         compositor_touch_motion(e->x, e->y, now);
                         break;
@@ -3902,6 +3903,12 @@ static void compositor_touch_tick(positive now)
 }
 
 /* ---- SYN_DROPPED recovery, real-time reader thread, and evdev dispatch ---- */
+
+// access.c: a controller's slot, its read, and its going
+struct compositor_access_pad;
+static struct compositor_access_pad *compositor_access_pad_of(unsigned int at);
+static void compositor_access_take(unsigned int at, const struct compositor_input_event *raw, bipolar got);
+static void compositor_access_close(unsigned int at);
 
 #define COMPOSITOR_INPUT_READS 16
 #define COMPOSITOR_EVIOCGKEY(bytes) (0x80000000u | (bytes) << 16 | 0x4518u)
@@ -4598,6 +4605,7 @@ static void compositor_input_read_device(unsigned int at)
 static void compositor_input_gone(unsigned int at)
 {
         compositor_sling_only = 0;
+        compositor_access_close(at);
         system_close(compositor.inputs[at]), compositor.inputs[at] = -1, compositor.table->input_number[at] = -1;
         if ((unsigned int)compositor.devices[at].number < COMPOSITOR_DEVICES)
                 compositor.device_open[compositor.devices[at].number / 64] &= ~(1ul << (compositor.devices[at].number % 64));
@@ -4690,6 +4698,9 @@ static int compositor_input_take(unsigned int at, const struct compositor_input_
         positive count;
         int is_spark = at >= COMPOSITOR_INPUTS;
 
+        // A controller's events are access.c's, which wakes the card and the screen only when they do something.
+        if (!is_spark && compositor_access_pad_of(at))
+                return compositor_access_take(at, raw, got), moved;
 #ifdef MOONWATER_GPU_C
         if (is_spark || !compositor.devices[at].wakeonly)
                 compositor_gpu_wake();
@@ -4828,6 +4839,6 @@ static void compositor_input_end(unsigned int at, int moved)
         if (moved)
                 compositor_motion();
         compositor_stamp_now = 0;
-        if (at >= COMPOSITOR_INPUTS || !compositor.devices[at].wakeonly)
+        if (at >= COMPOSITOR_INPUTS || (!compositor.devices[at].wakeonly && !compositor_access_pad_of(at)))
                 compositor_hold_touch(clock_monotonic_nanoseconds());
 }

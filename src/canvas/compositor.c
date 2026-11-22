@@ -1045,6 +1045,7 @@ static struct windows_owner windows_owner_held[WINDOWS];
 #include "compositor/manage.c" // the windows: the stack and the keys, grips and dividers, tiles and the grid, places, a row taken and let go, the keyboard on the screen, the clipboard, popups
 #include "compositor/scenes.c" // the Scenes overview's layout: a Scene's windows in a grid (no overlap), the strip of Scene cards, the hit test
 #include "compositor/input.c" // what a person does: the keys and the chords, the volume, the hand's motion and buttons, the prediction, the wheel and the pad, the marks and touch
+#include "compositor/access.c" // the desktop with no mouse to hand: a controller (and next a switch, the keys as a pointer, dwell) as the pointer and the actions
 
 /* Sealed memfd for the window table (udmabuf zero-copy scanout; symlinked at WINDOWS_TABLE). */
 static long compositor_table_memfd(unsigned long bytes)
@@ -1998,6 +1999,7 @@ static positive compositor_timers_arm(positive now, unsigned int fence_at, int h
         }
         compositor_soon(&until, compositor_predict_due());
         compositor_soon(&until, compositor_touch_due());
+        compositor_soon(&until, compositor_access_due());
         compositor_soon(&until, compositor_snap_due());
         if (compositor_spots_any(1)) compositor_soon(&until, compositor.presented + period > now ? compositor.presented + period : now);
         compositor_soon(&until, compositor_wall_due(now));
@@ -2441,6 +2443,7 @@ static b32 compositor_main()
                 if (compositor_predict_due()) compositor_predict_expire(now);
                 compositor_owed_pass();
                 if (compositor_touch_due()) compositor_touch_tick(now);
+                { positive due = compositor_access_due(); if (due && now >= due) compositor_access_tick(now); }
                 if (compositor_snap_due()) compositor_snap_tick(now);
                 if (compositor_spots_any(1)) compositor_spots_tick(now);
                 if (compositor_notices_look() && compositor.band) compositor_tabs_changed();

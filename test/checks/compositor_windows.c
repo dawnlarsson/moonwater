@@ -5402,6 +5402,206 @@ static void check_compositor_wheel(void)
 }
 
 /*
+        A controller as the desktop reads it (access.c), from a pipe that stands for a pad in slot 0, made by hand as
+        compositor_access_open makes an Xbox pad's (its sticks -32768..32767, its triggers 0..1023, its cross a hat): the curve
+        a stick's push is a speed on, an axis read from its middle whatever its range, the face buttons named by where they sit,
+        the bottom face button and the right trigger as one left button (the trigger with a gap between press and let go), the
+        cross as the arrow keys and the right face button as Escape, the left stick moving the pointer at its share of the
+        screen's height a second, a pad held when a program takes it let go, and a pad that goes letting go what it held.
+*/
+static void access_pad_hand(unsigned char xbox)
+{
+    struct compositor_access_pad *pad = &compositor_access.pad[0];
+
+    for (unsigned int each = 0; each < COMPOSITOR_ACCESS_PADS; each++)
+        compositor_access.pad[each].at = -1;
+    memory_zero(compositor_access.down, sizeof compositor_access.down);
+    memory_zero(pad, sizeof *pad);
+    compositor_access.ticked = 0, compositor_access.left_x = compositor_access.left_y = 0, compositor_access.repeat = 0;
+    compositor_access.yields = compositor_access.reads = 0, compositor_access.asked_row = -1, compositor_access.scrolled = 0;
+    pad->at = 0, pad->xbox_letters = xbox, pad->physical = 1;
+    for (unsigned int axis = ACCESS_LX; axis <= ACCESS_RY; axis++)
+        pad->low[axis] = -32768, pad->high[axis] = 32767;
+    pad->low[ACCESS_LT] = pad->low[ACCESS_RT] = 0, pad->high[ACCESS_LT] = pad->high[ACCESS_RT] = 1023;
+    pad->low[ACCESS_HX] = pad->low[ACCESS_HY] = -1, pad->high[ACCESS_HX] = pad->high[ACCESS_HY] = 1;
+    compositor_access.of[0] = 0;
+}
+
+// The ring of row from its tail: how many events of type, and how many of them pressed (WINDOW_KEY_DOWN), with a of `code`.
+static unsigned int access_unread(int row, unsigned int type, int code, unsigned int *down)
+{
+    struct windows address_to table = compositor.table;
+    unsigned int count = 0;
+
+    *down = 0;
+    for (unsigned int at = table->event_tail[row]; at != table->event_head[row]; at++)
+        if (table->event_type[row][at % WINDOWS_EVENTS] == type && (code < 0 || table->event_a[row][at % WINDOWS_EVENTS] == code))
+            count++, *down += (table->event_flags[row][at % WINDOWS_EVENTS] & WINDOW_KEY_DOWN) != 0;
+    return count;
+}
+
+static void access_report(unsigned short type, unsigned short code, int value)
+{
+    wheel_feed(type, code, value);
+    wheel_feed(COMPOSITOR_EV_SYN, 0, 0);
+    compositor_input_read(0);
+}
+
+static void check_compositor_access(void)
+{
+    static unsigned int screen[GLASS_SIDE * GLASS_SIDE];
+    struct compositor_access_pad *pad = &compositor_access.pad[0];
+    struct windows address_to table;
+    unsigned int r, down, count;
+    b32 all;
+    int x0, y0;
+
+    /* The curve: nothing in the middle, all of it at the rim and past, and a quarter of the way across under a tenth of the speed. */
+    all = compositor_access_share(0, 0, &r) == 0 && compositor_access_share(COMPOSITOR_ACCESS_DEAD, 0, &r) == 0 &&
+          compositor_access_share(0, -COMPOSITOR_ACCESS_FULL, &r) == 65536 && compositor_access_share(32767, 32767, &r) == 65536;
+    {
+        int quarter = COMPOSITOR_ACCESS_DEAD + (COMPOSITOR_ACCESS_FULL - COMPOSITOR_ACCESS_DEAD) / 4;
+        long long last = 0, now;
+
+        all &= compositor_access_share(quarter, 0, &r) > 0 && compositor_access_share(quarter, 0, &r) < 65536 / 10;
+        for (int at = 0; at <= 32767; at += 512)
+            all &= (now = compositor_access_share(at, 0, &r)) >= last, last = now;
+    }
+    check("access: a stick's middle moves nothing, its rim is all the speed, a quarter push is under a tenth of it, and none of it goes back", all);
+
+    access_pad_hand(1);
+    pad->value[ACCESS_LX] = 0, pad->value[ACCESS_LT] = 1023, pad->value[ACCESS_RT] = 0;
+    all = compositor_access_axis(pad, ACCESS_LX) == 0 && compositor_access_axis(pad, ACCESS_LT) == 32767 && compositor_access_axis(pad, ACCESS_RT) == 0;
+    pad->low[ACCESS_LX] = 0, pad->high[ACCESS_LX] = 255, pad->value[ACCESS_LX] = 255;
+    all &= compositor_access_axis(pad, ACCESS_LX) == 32767;
+    pad->value[ACCESS_LX] = 0;
+    all &= compositor_access_axis(pad, ACCESS_LX) == -32767;
+    pad->value[ACCESS_LX] = 128;
+    all &= compositor_access_axis(pad, ACCESS_LX) >= 0 && compositor_access_axis(pad, ACCESS_LX) < 512;
+    pad->low[ACCESS_LX] = pad->high[ACCESS_LX] = 0;
+    all &= compositor_access_axis(pad, ACCESS_LX) == 0;
+    check("access: an axis is read from its middle whatever its range (an Xbox stick's, a PlayStation stick's 0..255, a trigger's), and one it lacks is 0", all);
+
+    access_pad_hand(1);
+    all = compositor_access_button(pad, 0x133) == ACCESS_WEST && compositor_access_button(pad, 0x134) == ACCESS_NORTH &&
+          compositor_access_button(pad, 0x130) == ACCESS_SOUTH && compositor_access_button(pad, 0x220) == ACCESS_UP;
+    pad->xbox_letters = 0;
+    all &= compositor_access_button(pad, 0x133) == ACCESS_NORTH && compositor_access_button(pad, 0x134) == ACCESS_WEST &&
+           compositor_access_button(pad, 0x2c0) < 0;
+    check("access: the face buttons are named by where they sit: an Xbox-lettered driver's BTN_X is the left one, a PlayStation's BTN_NORTH the top", all);
+
+    compositor_zero();
+    compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
+    compositor.resize = compositor.press = compositor.keys_to = COMPOSITOR_NONE;
+    compositor.width = compositor.height = GLASS_SIDE;
+    compositor.scale = 100;
+    compositor.card = -1;
+    compositor.hold = -1;
+    compositor.holds = ~0ul;
+    compositor.told_row = COMPOSITOR_NONE;
+    compositor.scanout = screen;
+    compositor.scanout_pitch = GLASS_SIDE * 4;
+    compositor.period = 10000000ull;
+    if (!glass_table_map() || system_call_2(syscall(pipe2), (positive)wheel_pipe, O_NONBLOCK))
+    {
+        check("access: the table and the device are made", false);
+        return;
+    }
+    table = compositor.table;
+    table->x[1] = 50, table->y[1] = 30, table->width[1] = 120, table->height[1] = 80;
+    glass_paint(1, 0, 0, 120, 80, 0x404040u, true);
+    compositor_present();
+    compositor.inputs[0] = wheel_pipe[0];
+    compositor.input_count = 1;
+    /* The pointer in the window's middle, away from its edges (a press at an edge is a resize, not the window's). */
+    compositor.pointer_x = 110, compositor.pointer_y = 70;
+    compositor.focus = 1;
+    compositor_input_physical[0] = 1;
+    access_pad_hand(1);
+
+    table->event_tail[1] = table->event_head[1];
+    access_report(COMPOSITOR_EV_KEY, 0x130, 1);
+    count = access_unread(1, WINDOW_EVENT_BUTTON, COMPOSITOR_BTN_LEFT, &down);
+    all = count == 1 && down == 1 && compositor_access_drives();
+    access_report(COMPOSITOR_EV_KEY, 0x130, 0);
+    count = access_unread(1, WINDOW_EVENT_BUTTON, COMPOSITOR_BTN_LEFT, &down);
+    check("access: the bottom face button is the left button pressed and let go on the window under the pointer, and the pointer is the pad's",
+          all && count == 2 && down == 1);
+
+    table->event_tail[1] = table->event_head[1];
+    access_report(COMPOSITOR_EV_ABS, 0x05, 512);
+    count = access_unread(1, WINDOW_EVENT_BUTTON, COMPOSITOR_BTN_LEFT, &down);
+    all = count == 1 && down == 1;
+    access_report(COMPOSITOR_EV_ABS, 0x05, 300);
+    all &= access_unread(1, WINDOW_EVENT_BUTTON, COMPOSITOR_BTN_LEFT, &down) == 1;
+    access_report(COMPOSITOR_EV_KEY, 0x130, 1);
+    all &= access_unread(1, WINDOW_EVENT_BUTTON, COMPOSITOR_BTN_LEFT, &down) == 1;
+    access_report(COMPOSITOR_EV_ABS, 0x05, 200);
+    all &= access_unread(1, WINDOW_EVENT_BUTTON, COMPOSITOR_BTN_LEFT, &down) == 1;
+    access_report(COMPOSITOR_EV_KEY, 0x130, 0);
+    count = access_unread(1, WINDOW_EVENT_BUTTON, COMPOSITOR_BTN_LEFT, &down);
+    check("access: the right trigger is the left button from two fifths of its travel and let go under a quarter (not at 29 in a hundred), and held with the bottom button it is one press, let go by the last",
+          all && count == 2 && down == 1);
+
+    table->event_tail[1] = table->event_head[1];
+    access_report(COMPOSITOR_EV_ABS, 0x11, -1);
+    all = access_unread(1, WINDOW_EVENT_KEY, 103, &down) == 1 && down == 1 && compositor_access.repeat == ACCESS_KEY_UP;
+    access_report(COMPOSITOR_EV_ABS, 0x11, 0);
+    all &= access_unread(1, WINDOW_EVENT_KEY, 103, &down) == 2 && down == 1 && !compositor_access.repeat;
+    access_report(COMPOSITOR_EV_KEY, 0x131, 1);
+    access_report(COMPOSITOR_EV_KEY, 0x131, 0);
+    all &= access_unread(1, WINDOW_EVENT_KEY, CK_KEY_ESC, &down) == 2 && down == 1;
+    check("access: the cross (a hat) is the arrow keys, held repeating, and the right face button is Escape, each pressed and let go", all);
+
+    table->event_tail[1] = table->event_head[1];
+    x0 = compositor.pointer_x, y0 = compositor.pointer_y;
+    access_report(COMPOSITOR_EV_ABS, 0x00, 32767);
+    compositor_access_tick(1000000000ull);
+    compositor_access_tick(1050000000ull);
+    /* A frame's worth (10 ms) and then 50 ms at the rim: 1.7 of the 256-pixel screen's height a second over 60 ms, 26 pixels. */
+    all = compositor.pointer_x - x0 >= 24 && compositor.pointer_x - x0 <= 27 && compositor.pointer_y == y0 &&
+          access_unread(1, WINDOW_EVENT_MOTION, -1, &down) >= 1;
+    access_report(COMPOSITOR_EV_ABS, 0x00, 0);
+    compositor_access_tick(1060000000ull);
+    check("access: the left stick at its rim moves the pointer 1.7 screen heights a second, a frame's worth on its first tick, and back at rest owes no tick",
+          all && compositor.pointer_x - x0 <= 27 && compositor_access_due() == 0);
+
+    table->event_tail[1] = table->event_head[1];
+    access_report(COMPOSITOR_EV_KEY, 0x130, 1);
+    compositor_access.asked_row = 1, compositor_access.asked_pid = table->pid[1], compositor_access.asked_at = clock_monotonic_nanoseconds();
+    compositor_access.reads = 1;
+    access_report(COMPOSITOR_EV_KEY, 0x131, 1);
+    count = access_unread(1, WINDOW_EVENT_BUTTON, COMPOSITOR_BTN_LEFT, &down);
+    all = count == 2 && down == 1 && access_unread(1, WINDOW_EVENT_KEY, CK_KEY_ESC, &down) == 0 && compositor_access.yields;
+    access_report(COMPOSITOR_EV_ABS, 0x00, 32767);
+    all &= compositor_access_due() == 0;
+    access_report(COMPOSITOR_EV_ABS, 0x00, 0);
+    access_report(COMPOSITOR_EV_KEY, 0x131, 0);
+    access_report(COMPOSITOR_EV_KEY, 0x130, 0);
+    check("access: a pad a program reads is the program's: the left button held is let go, its buttons do nothing here, and a pushed stick owes the loop no tick",
+          all && access_unread(1, WINDOW_EVENT_BUTTON, -1, &down) == 2);
+
+    compositor_access.reads = 0, compositor_access.asked_row = -1;
+    table->event_tail[1] = table->event_head[1];
+    access_report(COMPOSITOR_EV_KEY, 0x130, 1);
+    compositor_input_gone(0);
+    count = access_unread(1, WINDOW_EVENT_BUTTON, COMPOSITOR_BTN_LEFT, &down);
+    check("access: a press in the report that hands the pad back from a program acts, and a pad that goes lets go of the left button it held, its slot no pad's any more",
+          count == 2 && down == 1 && compositor_access.of[0] == -1 && compositor_access.pad[0].at == -1);
+
+    compositor_access.hand = 1;
+    compositor.raw_x = 3;
+    compositor_report(1, 1);
+    check("access: a mouse's move takes the pointer back from the pad (it is no longer the dynamic one for that)", !compositor_access_drives());
+
+    compositor.focus = COMPOSITOR_NONE;
+    compositor_input_physical[0] = 0;
+    system_close(wheel_pipe[1]);
+    compositor.inputs[0] = -1;
+    compositor.input_count = 0;
+}
+
+/*
         A game's device is no pointer (window_input_game): a pad (BTN_SOUTH), a joystick (BTN_TRIGGER), one with trigger-happy
         buttons alone and an accelerometer (a DualSense's motion sensors) are; a mouse, a touchpad, a pen tablet and a touch screen
         are not, nor a pad's buttons on a device that is also a mouse or marked a pointer.

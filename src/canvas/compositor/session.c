@@ -221,6 +221,10 @@ static void compositor_wake_pass(positive now)
 #define COMPOSITOR_SETTING_OPEN (FILE_READ | O_CLOEXEC | O_NONBLOCK | O_NOFOLLOW)
 
 static void compositor_osk_sync(void);
+// access.c: a game device's minor kept, and a controller opened at a slot as the desktop's
+static void compositor_access_note(unsigned int minor, b32 game);
+static b32 compositor_access_open(unsigned int at, bipolar handle, const p8 *keys, unsigned long absolute, unsigned int properties,
+                                  const char *link, unsigned int number);
 static void compositor_osk_unpan(int row);
 static int compositor_osk_row(void);
 
@@ -963,23 +967,32 @@ static int compositor_input_path_physical(const char *resolved)
 }
 
 // The device of an open input node, classified (compositor_input_path_physical): 1 the machine's own, 0 not or not known.
-static int compositor_input_handle_physical(bipolar handle)
+// Where a device's descriptor hangs: the link /sys/dev/char/MAJOR:MINOR resolves to, into resolved (NUL-ended), and its minor; false when unread.
+static b32 compositor_input_handle_link(bipolar handle, p8 *resolved, unsigned int room, unsigned int *minor)
 {
-        p8 statx[256] = {0}, link[48], resolved[512];
-        unsigned int major, minor;
+        p8 statx[256] = {0}, link[48];
+        unsigned int major;
         long got;
 
         // STATX_TYPE, AT_EMPTY_PATH: stx_rdev_major and stx_rdev_minor at 128 and 132.
         if (compositor_call(syscall(statx), (positive)handle, (positive) "", 0x1000, 1, (positive)statx, 0) != 0)
                 return 0;
         memory_copy(address_of major, statx + 128, 4);
-        memory_copy(address_of minor, statx + 132, 4);
-        windows_num2_path((char *)link, sizeof(link), "/sys/dev/char/", major, ":", minor);
-        got = compositor_call(syscall(readlinkat), (positive)AT_FDCWD, (positive)link, (positive)resolved, sizeof(resolved) - 1, 0, 0);
+        memory_copy(minor, statx + 132, 4);
+        windows_num2_path((char *)link, sizeof(link), "/sys/dev/char/", major, ":", *minor);
+        got = compositor_call(syscall(readlinkat), (positive)AT_FDCWD, (positive)link, (positive)resolved, room - 1, 0, 0);
         if (got <= 0)
                 return 0;
         resolved[got] = 0;
-        return compositor_input_path_physical((const char *)resolved);
+        return 1;
+}
+
+static int compositor_input_handle_physical(bipolar handle)
+{
+        p8 resolved[512];
+        unsigned int minor;
+
+        return compositor_input_handle_link(handle, resolved, sizeof(resolved), &minor) && compositor_input_path_physical((const char *)resolved);
 }
 
 // Resets all per-device state for slot at (unified struct, pad/touch pool slots, and Wave 1 mirror arrays).
@@ -1043,23 +1056,34 @@ static void compositor_input_add(unsigned int number)
         */
         int slotted = (kinds >> COMPOSITOR_EV_ABS & 1) && (absolute >> COMPOSITOR_ABS_MT_POSITION_X & 1) &&
                       (absolute >> COMPOSITOR_ABS_MT_POSITION_Y & 1);
-        int touchscreen;
+        int touchscreen, game, stick;
+        p8 link[512];
+        unsigned int minor = 0;
 
+        link[0] = 0;
         system_control(handle, COMPOSITOR_EVIOCGPROP(4), address_of properties);
-        // A pad, a joystick or an accelerometer has ABS_X and ABS_Y and is no tablet: the game reads it, and it is not opened here.
-        if (window_input_game(keys, properties))
+        /*
+                A pad, a joystick or an accelerometer has ABS_X and ABS_Y and is no tablet. A game reads it, and the desktop reads a
+                controller among them too (access.c: the pointer and the actions while no game holds it); an accelerometer, or a pad
+                a program made, is not opened here. Every game device's minor is kept, so a program holding one open is known to read pads.
+        */
+        game = window_input_game(keys, properties);
+        if (game)
                 tablet = 0;
+        if (compositor_input_handle_link(handle, link, sizeof(link), &minor))
+                compositor_access_note(minor, game);
+        stick = game && compositor_access_open(at, handle, keys, absolute, properties, (const char *)link, number);
         touchscreen = (properties & 2) && !(keys[COMPOSITOR_BTN_TOOL_PEN / 8] >> (COMPOSITOR_BTN_TOOL_PEN % 8) & 1) &&
                       (slotted || (tablet && (keys[COMPOSITOR_BTN_TOUCH / 8] >> (COMPOSITOR_BTN_TOUCH % 8) & 1)));
 
-        if (!keyboard && !mouse && !tablet && !wakes && !touchscreen)
+        if (!keyboard && !mouse && !tablet && !wakes && !touchscreen && !stick)
         {
                 system_close(handle);
                 return;
         }
 
         compositor_device_reset(at);
-        compositor.devices[at].wakeonly = (unsigned char)(!keyboard && !mouse && !tablet && !touchscreen);
+        compositor.devices[at].wakeonly = (unsigned char)(!keyboard && !mouse && !tablet && !touchscreen && !stick);
         // A wheel that reports in 120ths says so, and its detents are then not counted twice.
         compositor.hires[at] = (unsigned char)((relative >> COMPOSITOR_REL_WHEEL_HI & 1) |
                                                (relative >> COMPOSITOR_REL_HWHEEL_HI & 1) << 1);
@@ -1074,7 +1098,7 @@ static void compositor_input_add(unsigned int number)
                 compositor_touch_screen_open(at, handle, slotted);
                 kinds = (keyboard ? WINDOWS_INPUT_KEYBOARD : 0) | (mouse ? WINDOWS_INPUT_MOUSE : 0) |
                         (tablet && !compositor.touchpad[at] && !touchscreen ? WINDOWS_INPUT_TABLET : 0) |
-                        (compositor.devices[at].wakeonly ? WINDOWS_INPUT_WAKES : 0);
+                        (compositor.devices[at].wakeonly ? WINDOWS_INPUT_WAKES : 0) | (stick ? WINDOWS_INPUT_CONTROLLER : 0);
                 kinds |= (relative >> COMPOSITOR_REL_WHEEL & 1 ? WINDOWS_INPUT_WHEEL : 0) |
                          (relative >> COMPOSITOR_REL_WHEEL_HI & 1 ? WINDOWS_INPUT_WHEEL_HI : 0) |
                          (relative >> COMPOSITOR_REL_HWHEEL & 1 ? WINDOWS_INPUT_HWHEEL : 0) |
