@@ -365,7 +365,7 @@ static struct
         unsigned int seat_gen;
         unsigned long mods[4];
         unsigned char keys[16];
-        long selection_owner[2], selection_source[2], buttons;
+        long buttons;
         struct
         {
                 int live, dropped, released;
@@ -377,7 +377,6 @@ static struct
                 struct wayland_table x_types;
                 long x_bytes;
         } drag;
-        unsigned long selection_serial[2];
         struct wayland_dmabuf_info dmabuf;
         long dmabufs;
         struct wayland_syncobj_host syncobj;
@@ -4055,6 +4054,21 @@ static const char *wayland_mime_buf_nth(const unsigned char *buf, long bytes, lo
         return 0;
 }
 
+/* The store's owner of a selection and its change count (wayland_host.c): the owning Wayland client's slot, or -1 for native or none. */
+static long compositor_wl_selection_query(void *context, long which, unsigned long *serial);
+static long wayland_selection_owner(long which, unsigned long *serial)
+{
+        return wayland.host ? compositor_wl_selection_query(wayland.host->context, which, serial) : -1;
+}
+
+static unsigned long wayland_selection_serial(long which)
+{
+        unsigned long serial = 0;
+
+        (void)wayland_selection_owner(which, &serial);
+        return serial;
+}
+
 static unsigned long wayland_offer_create_and_send(struct wayland_client *c, long device_slot, long which, int is_drag,
                                                    const unsigned char *types, long type_bytes, unsigned int src_actions, long *out_index)
 {
@@ -4066,7 +4080,7 @@ static unsigned long wayland_offer_create_and_send(struct wayland_client *c, lon
         if (offer < 0)
                 return index >= 0 ? (wayland_tbl_free(c, WLT_OFFER, index), 0UL) : 0UL;
         c->offers[index] = (struct wayland_offer){.id = (unsigned int)id, .live = 1, .which = (unsigned char)which,
-                                                  .serial = is_drag ? 0 : wayland.selection_serial[which], .drag = (unsigned char)is_drag};
+                                                  .serial = is_drag ? 0 : wayland_selection_serial(which), .drag = (unsigned char)is_drag};
         c->objects[offer].link = (int)index;
         if (out_index) *out_index = index;
         wayland_ev(c, c->objects[device_slot].id, which ? WLE_zwp_primary_selection_device_v1_data_offer : WLE_wl_data_device_data_offer, (unsigned int)id);
@@ -4122,8 +4136,6 @@ static void wayland_source_drop(struct wayland_client *c, long index)
         if (!s->live) return;
         if (s->state == 1 && c->pending[which] == index + 1)
                 c->pending[which] = 0, wayland.host->clip_abort(wayland.host->context, c->slot, which);
-        if (wayland.selection_owner[which] == c->slot + 1 && wayland.selection_source[which] == index)
-                wayland.selection_owner[which] = 0;
         if (wayland.drag.live && wayland.drag.client == c->slot && wayland.drag.source == index)
                 wayland_drag_end(0);
         wayland_table_drop(&s->mime_table), s->mime_bytes = 0, s->live = 0, wayland_tbl_free(c, WLT_SOURCE, index);
@@ -4133,11 +4145,13 @@ WAYLAND_API void wayland_selection_changed(long which)
 {
         struct wayland_client *c;
         if (!wayland.host || which < 0 || which > 1) return;
-        wayland.selection_serial[which]++;
-        if (wayland.selection_owner[which] > 0 && (c = wayland.client[wayland.selection_owner[which] - 1]) &&
-            c->sources[wayland.selection_source[which]].live && c->sources[wayland.selection_source[which]].state == 2)
-                wayland_source_cancel(c, wayland.selection_source[which]);
-        wayland.selection_owner[which] = 0;
+        /* The store changed hands (the observer runs before the pull that follows an install): every pulled source of this selection
+           (state 2) has lost it. A pending one (state 1) has not been pulled yet, so it is left alone. */
+        for (long slot = 0; slot < wayland.client_slots; slot++)
+                if ((c = wayland.client[slot]))
+                        for (long at = 0; at < c->tbl[WLT_SOURCE].count; at++)
+                                if (c->sources[at].live && c->sources[at].which == which && c->sources[at].state == 2)
+                                        wayland_source_cancel(c, at);
         if (wayland.keyboard_row >= 0 && wayland.row[wayland.keyboard_row].client >= 0 && (c = wayland.client[wayland.row[wayland.keyboard_row].client]))
                 wayland_selection_client(c, which);
 }
@@ -4176,7 +4190,7 @@ WAYLAND_API void wayland_clip_pulled(long client, long which, long ok)
         long index = c->pending[which] - 1;
         c->pending[which] = 0;
         if (!ok) { wayland_source_cancel(c, index); return; }
-        s->state = 2, wayland.selection_owner[which] = c->slot + 1, wayland.selection_source[which] = index;
+        s->state = 2; /* the store holds the owner now: the observer ran before this */
 }
 
 static int wayland_set_selection(struct wayland_client *c, struct wayland_object *self, long which, const struct wayland_arg *a)
@@ -4186,7 +4200,7 @@ static int wayland_set_selection(struct wayland_client *c, struct wayland_object
 
         if (index < 0)
         {
-                if (wayland.selection_owner[which] == c->slot + 1) wayland.host->clip_clear(wayland.host->context, c->slot, which);
+                if (wayland_selection_owner(which, 0) == c->slot) wayland.host->clip_clear(wayland.host->context, c->slot, which);
                 return WAYLAND_OK;
         }
         s = &c->sources[index];
@@ -4543,7 +4557,7 @@ static int wayland_data_request(struct wayland_client *c, struct wayland_object 
                                 else if (a[0].length > 1 && wayland_source_send_fd(sc, s, (const char *)a[0].text, a[1].fd, 0))
                                         a[1].fd = -1;
                         }
-                        else if (o->serial == wayland.selection_serial[o->which] && wayland_has_keys(c) && a[0].text && a[0].length > 0)
+                        else if (o->serial == wayland_selection_serial(o->which) && wayland_has_keys(c) && a[0].text && a[0].length > 0)
                                 wayland.host->clip_push(wayland.host->context, wayland.keyboard_row, o->which, (const char *)a[0].text, a[1].fd), wayland.fds--, a[1].fd = -1;
                         return WAYLAND_OK;
                 }
@@ -5855,7 +5869,6 @@ WAYLAND_API void wayland_drop(long slot)
         wayland_out_fds_drop(c, c->out_fd_count, 0);
         for (long which = 0; which < 2; which++)
         {
-                if (wayland.selection_owner[which] == c->slot + 1) wayland.selection_owner[which] = 0;
                 if (c->pending[which]) wayland.host->clip_abort(wayland.host->context, c->slot, which);
         }
         for (long at = 0; at < c->tbl[WLT_NOTIFY].count; at++) wayland_notify_free(c, at);

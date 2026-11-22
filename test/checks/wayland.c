@@ -84,6 +84,7 @@ static struct fake_host_state
         struct wayland_screen extra[4]; // the screens after the first, as a check has set them: a width of 0 is the default one
         // the clipboard the compositor holds: the bytes of each selection, and what the shim asked of it
         long clip_size[2], pull_refuse, pulls, aborts, pushes, clears, pull_client, pull_which, push_row, push_which;
+        long sel_owner[2], sel_serial[2]; // the store's owner of each selection (a Wayland slot + 1, 0 for none or native) and its change count
         char clip_types[2][256];  // the selection's types past its text, each with its NUL, as the host names them (clip_type)
         long clip_types_bytes[2];
         char push_mime[64];       // the type the last paste asked for
@@ -438,14 +439,13 @@ static long fake_seat(void *context)
         return fake.caps;
 }
 
-/* The store's selection owner for the shim (wayland_host.c's query): the fake keeps none, so a selection is never a Wayland client's here. */
+/* The store's selection owner and change count for the shim (wayland_host.c's query), kept by the fake store (fake_store_changed). */
 static long compositor_wl_selection_query(void *context, long which, unsigned long *serial)
 {
         (void)context;
-        (void)which;
         if (serial)
-                *serial = 0;
-        return -1;
+                *serial = which >= 0 && which < 2 ? (unsigned long)fake.sel_serial[which] : 0;
+        return which >= 0 && which < 2 ? fake.sel_owner[which] - 1 : -1;
 }
 
 static long fake_locks(void *context)
@@ -535,6 +535,15 @@ static void fake_clip_clear(void *context, long client, long which)
         fake.clears++;
         fake.clip_size[which] = 0;
         fake.clip_types_bytes[which] = 0;
+        fake.sel_owner[which] = 0, fake.sel_serial[which]++;
+}
+
+/* The store changes hands: its owner (a Wayland client's slot, or -1 for native) and change count move, then the shim hears of it, as the
+   host's observer does (before the pull that follows an install). */
+static void fake_store_changed(long which, long owner)
+{
+        fake.sel_owner[which] = owner + 1, fake.sel_serial[which]++;
+        wayland_selection_changed(which);
 }
 
 /* A GPU that says what fake.pattern says each time it is asked, and done after it. */
@@ -5238,7 +5247,7 @@ static void clip_finish(struct clipc *k, int primary, const char *text)
 {
         snprintf(fake.clip_text[primary], sizeof fake.clip_text[primary], "%s", text);
         fake.clip_size[primary] = (long)strlen(text);
-        wayland_selection_changed(primary);
+        fake_store_changed(primary, k->s.c->slot);
         wayland_clip_pulled(k->s.c->slot, primary, 1);
         wlc_pump(k->s.c);
 }
@@ -5248,7 +5257,7 @@ static void clip_other(int primary, const char *text)
 {
         snprintf(fake.clip_text[primary], sizeof fake.clip_text[primary], "%s", text);
         fake.clip_size[primary] = (long)strlen(text);
-        wayland_selection_changed(primary);
+        fake_store_changed(primary, -1);
 }
 
 static long wl_pipe(int *reader)
@@ -5768,14 +5777,14 @@ static void test_bridge(void)
                 "its text is the compositor's, as any copy's");
         wlc_forget(a.s.c);
         fake.clip_size[0] = 0;
-        wayland_selection_changed(0);
+        fake_store_changed(0, -1);
         wlc_pump(a.s.c);
         offer = clip_offer_of(a.s.c, 0, &chosen);
         WLCHECK(offer && wlc_count(a.s.c, WLI_wl_data_offer, WLE_wl_data_offer_offer) == 2 && wl_offered(a.s.c, "image/png") == 1,
                 "a copy with no text is offered as its own types alone");
         wlc_forget(a.s.c);
         fake.clip_types_bytes[0] = 0;
-        wayland_selection_changed(0);
+        fake_store_changed(0, -1);
         wlc_pump(a.s.c);
         offer = clip_offer_of(a.s.c, 0, &chosen);
         WLCHECK(!offer && chosen && chosen->u[0] == 0, "and none at all once there is no copy");
