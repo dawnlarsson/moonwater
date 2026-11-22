@@ -1555,7 +1555,7 @@ static long report_machine(struct file *file, struct machine_control __user *out
                 return -EINVAL;
         if (request.op > MOONWATER_END)
                 return -EINVAL;
-        if (bind_machine_admin[request.op] && !capable(CAP_SYS_ADMIN))
+        if (bind_machine_admin[request.op] && !spark_file_capable(file, CAP_SYS_ADMIN))
                 return -EPERM;
 
         switch (request.op) {
@@ -1617,7 +1617,8 @@ static long report_machine(struct file *file, struct machine_control __user *out
         return copy_to_user(out, &request, sizeof(request)) ? -EFAULT : 0;
 }
 
-static long report_machine_script(struct machine_script __user *out)
+static long report_machine_script(struct file *file,
+                                  struct machine_script __user *out)
 {
         struct machine_script request;
 
@@ -1644,7 +1645,7 @@ static long report_machine_script(struct machine_script __user *out)
                         the overlay, the length and the origin -- the answer
                         moonwater status is made from -- which is the request
                         that names no address. */
-                if (request.address && !capable(CAP_SYS_ADMIN))
+                if (request.address && !spark_file_capable(file, CAP_SYS_ADMIN))
                         return -EPERM;
 
                 mutex_lock(&machine_script_lock);
@@ -1695,7 +1696,7 @@ static long report_machine_script(struct machine_script __user *out)
                         first means a refused SET changes nothing at all. */
                 char *fresh = null;
 
-                if (!capable(CAP_SYS_ADMIN))
+                if (!spark_file_capable(file, CAP_SYS_ADMIN))
                         return -EPERM;
                 if (request.length > MOONWATER_SCRIPT_BYTES)
                         return -EINVAL;
@@ -2203,11 +2204,12 @@ static void bind_answer(struct bind_control *request, struct bind_row *row,
                 request->flags |= SPARK_BIND_BOOT;
 }
 
-static long report_bind(struct bind_control __user *out)
+static long report_bind(struct file *file, struct bind_control __user *out)
 {
         struct bind_control request;
         struct bind_row *row;
         unsigned long flags;
+        bool admin;
 
         if (copy_from_user(&request, out, sizeof(request)))
                 return -EFAULT;
@@ -2219,13 +2221,14 @@ static long report_bind(struct bind_control __user *out)
         if (!row)
                 return -EINVAL;
 
+        admin = spark_file_capable(file, CAP_SYS_ADMIN);
         if (request.op == SPARK_BIND_SET) {
-                if (!capable(CAP_SYS_ADMIN) ||
-                    ((row->flags & BIND_BOOT) && !capable(CAP_SYS_BOOT))) {
+                if (!admin ||
+                    ((row->flags & BIND_BOOT) && !spark_file_capable(file, CAP_SYS_BOOT))) {
                         /* CAP_SYS_BOOT alone is not the capability that
                            reads a line, and the answer to a refusal is a
                            read like any other. */
-                        bind_answer(&request, row, capable(CAP_SYS_ADMIN));
+                        bind_answer(&request, row, admin);
                         return copy_to_user(out, &request, sizeof(request))
                                        ? -EFAULT
                                        : -EPERM;
@@ -2242,7 +2245,7 @@ static long report_bind(struct bind_control __user *out)
                 spin_unlock_irqrestore(&bind_lock, flags);
         }
 
-        bind_answer(&request, row, capable(CAP_SYS_ADMIN));
+        bind_answer(&request, row, admin);
         return copy_to_user(out, &request, sizeof(request)) ? -EFAULT : 0;
 }
 

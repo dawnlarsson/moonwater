@@ -3127,12 +3127,14 @@ static b32 file_write_atomic_at(b32 dir, string_address path, const void *bytes,
         bipolar handle;
         b32 ok;
 
-        if (path_len + 5 > sizeof(stage))
+        if (path_len > sizeof(stage) - 5)
                 return false;
         memory_copy(stage, path, path_len), memory_copy(stage + path_len, ".new", 5);
-        if ((handle = system_open_at_mode(dir, (string_address)stage, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC | O_NOFOLLOW, mode)) < 0)
+        (void)system_remove_at(dir, (string_address)stage, 0);
+        if ((handle = system_open_at_mode(dir, (string_address)stage, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, mode)) < 0)
                 return false;
-        ok = !length || system_write_all((positive)handle, bytes, length) == (bipolar)length;
+        ok = system_call_2(syscall(fchmod), (positive)handle, mode) >= 0 &&
+             (!length || system_write_all((positive)handle, bytes, length) == (bipolar)length);
         system_close(handle);
         if (!ok || system_rename_at(dir, (string_address)stage, dir, path, 0) < 0)
                 return system_remove_at(dir, (string_address)stage, 0), false;

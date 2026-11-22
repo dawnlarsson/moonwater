@@ -241,7 +241,7 @@ static const struct
 */
 static u64 latency_since;
 
-static long report_latency(struct latency_stats __user *out)
+static long report_latency(struct file *file, struct latency_stats __user *out)
 {
         struct latency_stats request, stats;
         struct handler_cost bound = {};
@@ -251,7 +251,7 @@ static long report_latency(struct latency_stats __user *out)
         if (request.request > SPARK_LATENCY_RESET || request.elapsed_ns ||
             request.reserved)
                 return -EINVAL;
-        if (!capable(CAP_SYS_ADMIN))
+        if (!spark_file_capable(file, CAP_SYS_ADMIN))
                 return -EPERM;
 
         memset(&stats, 0, sizeof(stats));
@@ -297,19 +297,19 @@ static long device_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
         case SPARK_IOCTL_SNAPSHOT:
                 return report_snapshot((struct snapshot_request __user *)arg);
         case SPARK_IOCTL_BIND:
-                return report_bind((struct bind_control __user *)arg);
+                return report_bind(file, (struct bind_control __user *)arg);
         case SPARK_IOCTL_LATENCY:
-                return report_latency((struct latency_stats __user *)arg);
+                return report_latency(file, (struct latency_stats __user *)arg);
         case MOONWATER_IOCTL_MACHINE:
                 return report_machine(file, (struct machine_control __user *)arg);
         case MOONWATER_IOCTL_SCRIPT:
-                return report_machine_script((struct machine_script __user *)arg);
+                return report_machine_script(file, (struct machine_script __user *)arg);
         case ROVER_IOCTL:
-                return report_rover((struct rover_control __user *)arg);
+                return report_rover(file, (struct rover_control __user *)arg);
         case SPARK_IOCTL_SETTINGS_GET:
-                return settings_get((struct spark_settings_request __user *)arg);
+                return settings_get(file, (struct spark_settings_request __user *)arg);
         case SPARK_IOCTL_SETTINGS_SET:
-                return settings_set((struct spark_settings_request __user *)arg);
+                return settings_set(file, (struct spark_settings_request __user *)arg);
         }
 
         // The compositor's requests: -ENOTTY from the client is what the

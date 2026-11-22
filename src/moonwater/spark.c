@@ -2204,13 +2204,19 @@ unsigned int moonwater_settings_flags(void)
         return flags;
 }
 
-static long settings_get(struct spark_settings_request __user *request)
+static inline bool spark_file_capable(struct file *file, int cap)
+{
+        return file_ns_capable(file, &init_user_ns, cap) && capable(cap);
+}
+
+static long settings_get(struct file *file,
+                         struct spark_settings_request __user *request)
 {
         struct spark_settings_request asked;
         struct spark_settings *held = null;
         long answer = 0;
 
-        if (!capable(CAP_SYS_ADMIN))
+        if (!spark_file_capable(file, CAP_SYS_ADMIN))
                 return -EPERM;
         if (copy_from_user(&asked, request, sizeof(asked)))
                 return -EFAULT;
@@ -2239,13 +2245,14 @@ static long settings_get(struct spark_settings_request __user *request)
         return answer;
 }
 
-static long settings_set(struct spark_settings_request __user *request)
+static long settings_set(struct file *file,
+                         struct spark_settings_request __user *request)
 {
         struct spark_settings_request asked;
         struct spark_settings *settings;
         struct spark_settings *before;
 
-        if (!capable(CAP_SYS_ADMIN))
+        if (!spark_file_capable(file, CAP_SYS_ADMIN))
                 return -EPERM;
         if (copy_from_user(&asked, request, sizeof(asked)))
                 return -EFAULT;

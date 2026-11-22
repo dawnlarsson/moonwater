@@ -1671,7 +1671,7 @@ static void rules_status(struct rover_control *request)
 }
 
 //      DO: a userspace rule's kernel primitive, through the same queue a kernel rule's goes through.
-static long rules_do_asked(struct rover_control *request)
+static long rules_do_asked(struct file *file, struct rover_control *request)
 {
         const struct rover_primitive_row *primitive = rover_primitive_find(request->primitive);
         struct rules_job *job;
@@ -1684,7 +1684,7 @@ static long rules_do_asked(struct rover_control *request)
         if ((request->primitive == rules_prim[RP_POWEROFF] ||
              request->primitive == rules_prim[RP_REBOOT] ||
              request->primitive == rules_prim[RP_SUSPEND]) &&
-            !capable(CAP_SYS_BOOT))
+            !spark_file_capable(file, CAP_SYS_BOOT))
                 return -EPERM;
         //      Held to the schema's range as a table's constant is by the loader: latency at most a day, a backlight
         //      0 to 100%, an enum one of its words.
@@ -1720,16 +1720,18 @@ static long rules_do_asked(struct rover_control *request)
         return 0;
 }
 
-static long report_rover(struct rover_control __user *out)
+static long report_rover(struct file *file, struct rover_control __user *out)
 {
         struct rover_control request;
+        bool admin;
         long ret = 0;
 
         if (copy_from_user(&request, out, sizeof(request)))
                 return -EFAULT;
         if (request.flags || request.op >= ROVER_OP_COUNT)
                 return -EINVAL;
-        if (request.op != ROVER_OP_STATUS && !capable(CAP_SYS_ADMIN))
+        admin = spark_file_capable(file, CAP_SYS_ADMIN);
+        if (request.op != ROVER_OP_STATUS && !admin)
                 return -EPERM;
         if (!rules_map)
                 return -ENODEV;
@@ -1744,7 +1746,7 @@ static long report_rover(struct rover_control __user *out)
                 ret = rules_unload();
                 break;
         case ROVER_OP_DO:
-                ret = rules_do_asked(&request);
+                ret = rules_do_asked(file, &request);
                 break;
         }
         if (ret && ret != -EINVAL)
@@ -1752,7 +1754,7 @@ static long report_rover(struct rover_control __user *out)
         rules_status(&request);
         //      The counts are root's: with a key rule loaded, events and hits are keystrokes counted, and the
         //      timings when they came. Anyone may ask which table is live and how many rules it has.
-        if (!capable(CAP_SYS_ADMIN))
+        if (!admin)
         {
                 request.events = request.hits = request.taken = request.floor = request.queued = request.lost = 0;
                 request.posted = request.decide_ns = request.decide_worst = request.decide_count = 0;

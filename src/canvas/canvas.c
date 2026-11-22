@@ -2461,7 +2461,12 @@ void canvas_latency(struct latency_stats *out, unsigned int request)
                 out->quiet += READ_ONCE(*per_cpu_ptr(&canvas_quiet, cpu));
 }
 
-static long report_canvas(struct canvas_control __user *out)
+static inline bool canvas_file_admin(struct file *file)
+{
+        return file_ns_capable(file, &init_user_ns, CAP_SYS_ADMIN) && capable(CAP_SYS_ADMIN);
+}
+
+static long report_canvas(struct file *file, struct canvas_control __user *out)
 {
         struct canvas_control control;
         unsigned int request, asked_scale, asked_modes;
@@ -2474,7 +2479,7 @@ static long report_canvas(struct canvas_control __user *out)
         asked_modes = control.modes;
         if (request > SPARK_CANVAS_SET_MODES || (request >= 3u && request <= 5u))
                 return -EINVAL;
-        if (request != SPARK_CANVAS_STATUS && !capable(CAP_SYS_ADMIN))
+        if (request != SPARK_CANVAS_STATUS && !canvas_file_admin(file))
                 return -EPERM;
 
         memory_zero(&control, sizeof(control));
@@ -2503,10 +2508,12 @@ static long windows_table_set(struct file *giver, unsigned long arg)
 {
         struct file *table = null, *old;
 
-        if (!capable(CAP_SYS_ADMIN))
+        if (!canvas_file_admin(giver))
                 return -EPERM;
         if ((long)arg >= 0)
         {
+                if ((long)arg > INT_MAX)
+                        return -EBADF;
                 table = fget((unsigned int)arg);
                 if (!table)
                         return -EBADF;
@@ -2526,12 +2533,12 @@ static long windows_table_set(struct file *giver, unsigned long arg)
         return 0;
 }
 
-static long windows_table_get(void)
+static long windows_table_get(struct file *file)
 {
         struct file *table;
         int fd;
 
-        if (!capable(CAP_SYS_ADMIN))
+        if (!canvas_file_admin(file))
                 return -EPERM;
         spin_lock(&windows_table_lock);
         table = windows_table ? get_file(windows_table) : null;
@@ -2571,9 +2578,9 @@ long canvas_client_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 {
         switch (cmd)
         {
-        case SPARK_IOCTL_CANVAS: return report_canvas((struct canvas_control __user *)arg);
+        case SPARK_IOCTL_CANVAS: return report_canvas(file, (struct canvas_control __user *)arg);
         case WINDOWS_IOCTL_TABLE_SET: return windows_table_set(file, arg);
-        case WINDOWS_IOCTL_TABLE_GET: return windows_table_get();
+        case WINDOWS_IOCTL_TABLE_GET: return windows_table_get(file);
         }
         return -ENOTTY;
 }
