@@ -1938,8 +1938,10 @@ static fn taskbar_menu_ui(const struct taskbar_view *view, unsigned int address_
         unsigned int themed = table && table->themed;
         unsigned int address_to scratch = ui->scratch;
         int sw = ui->scratch_width, ss = ui->scratch_scale;
+        b32 motion = ui_kit.motion;
 
         ui_kit_theme(themed ? table->theme : UI_THEME_LIGHT, themed ? table->accent : UI_ACCENT_STANDARD, 1);
+        ui_kit.motion = motion;
         memory_zero(ui, sizeof(*ui));
         ui->engine = view->engine, ui->regular = view->face, ui->bold = view->bold ? view->bold : view->face;
         ui->scale = taskbar_scaled(view->scale), ui->opaque = 1;
