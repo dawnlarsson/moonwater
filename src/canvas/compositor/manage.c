@@ -4156,6 +4156,79 @@ static b32 compositor_clip_set_memfd(unsigned int which, int fd, int owner)
         return 1;
 }
 
+/*
+        One incremental transfer into a store slot: the Wayland pull, the X selection's INCR and MULTIPLE, and a drop's read all record
+        their chunks here. Only the compositor's loop calls these (the record table is not thread-safe); a worker that reads a pipe
+        hands its bytes to the loop, which calls compositor_xfer_record. The cap is WINDOWS_CLIP_MOST, checked here for every caller.
+*/
+#define COMPOSITOR_XFER_MAX 4
+
+struct compositor_xfer
+{
+        int live, keep, index, owner;   // the data memfd, the record memfd, and the row that asked
+        unsigned int which;             // the store slot it fills when closed (0 clipboard, 1 primary)
+        unsigned long total, count;     // bytes and records so far
+};
+
+static struct compositor_xfer compositor_xfer_table[COMPOSITOR_XFER_MAX];
+
+// A transfer for a store slot, or -1 when the slot is not one, no entry is free, or a memfd cannot be made.
+static int compositor_xfer_open(unsigned int which, int owner)
+{
+        long keep, index;
+
+        if (which > 1)
+                return -1;
+        for (int h = 0; h < COMPOSITOR_XFER_MAX; h++)
+                if (!compositor_xfer_table[h].live)
+                {
+                        keep = compositor_call(syscall(memfd_create), (positive) "moonwater-xfer", 3, 0, 0, 0, 0);
+                        index = keep >= 0 ? compositor_call(syscall(memfd_create), (positive) "moonwater-index", 1, 0, 0, 0, 0) : -1;
+                        if (index < 0)
+                        {
+                                if (keep >= 0)
+                                        system_close((int)keep);
+                                return -1;
+                        }
+                        compositor_xfer_table[h] = (struct compositor_xfer){.live = 1, .keep = (int)keep, .index = (int)index, .owner = owner, .which = which};
+                        return h;
+                }
+        return -1;
+}
+
+// One chunk of a transfer: written to its data memfd and recorded under mime (text: the text alias, the bytes checked as text).
+// 0 when the transfer is not live, the chunk would pass the cap, the text is not text, or the write fails.
+static int compositor_xfer_record(int h, const char *mime, int text, const unsigned char *bytes, unsigned long length)
+{
+        struct compositor_xfer *x = h >= 0 && h < COMPOSITOR_XFER_MAX ? &compositor_xfer_table[h] : 0;
+        unsigned long name_length;
+
+        if (!x || !x->live || !length || length > WINDOWS_CLIP_MOST - x->total || (text && !windows_clip_text(bytes, length)))
+                return 0;
+        if (!windows_clip_put(x->keep, bytes, length))
+                return 0;
+        name_length = text ? sizeof(WINDOWS_CLIP_TEXT) - 1 : string_length((string_address)mime);
+        if (!windows_clip_record(x->index, x->total, length, text ? WINDOWS_CLIP_TEXT : mime, name_length))
+                return 0;
+        x->total += length, x->count++;
+        return 1;
+}
+
+// The end of a transfer: sealed and installed into its slot when ok and it has records; otherwise it is dropped. 1 when installed.
+static int compositor_xfer_close(int h, int ok)
+{
+        struct compositor_xfer *x = h >= 0 && h < COMPOSITOR_XFER_MAX ? &compositor_xfer_table[h] : 0;
+        int installed = 0;
+
+        if (!x || !x->live)
+                return 0;
+        if (ok && x->count && windows_clip_seal(x->keep, x->index, x->total, x->count))
+                installed = compositor_clip_set_memfd(x->which, x->keep, x->owner);
+        system_close(x->keep), system_close(x->index);
+        *x = (struct compositor_xfer){0};
+        return installed;
+}
+
 static int compositor_clip_take_offer(b32 allowed, unsigned int pid, int fd, unsigned int which, int owner, unsigned int serial, unsigned int *answer)
 {
         unsigned long length = 0;
