@@ -4407,12 +4407,6 @@ static int wl_dnd_ext_action(void *ctx)
         (void)ctx; return compositor_wl.started && (wayland_dragging() || wayland_x_dragging()) ? (int)wayland.drag.action : -1;
 }
 
-static const struct compositor_drag_ops compositor_wl_drag_ops = {
-        .active = wl_dnd_active, .begin = wl_dnd_begin, .target_owns = wl_dnd_target_owns, .target_event = wl_dnd_target_event,
-        .status = wl_dnd_status, .read_drop = wl_dnd_read_drop, .finished = wl_dnd_finished, .cancel = wl_dnd_cancel,
-        .ext_types = wl_dnd_ext_types, .ext_action = wl_dnd_ext_action,
-};
-
 static long compositor_wl_drag_host(long what, long row, long x, long y)
 {
         if (what == WAYLAND_XDRAG_END)
@@ -4446,7 +4440,7 @@ static long compositor_wl_drag_host(long what, long row, long x, long y)
         {
                 const char *types = 0; unsigned int actions = 0;
                 wayland_drag_x_types(&types, &actions);
-                compositor_dnd_ext_begin(&compositor_wl_drag_ops, actions);
+                compositor_dnd_ext_begin_arm(COMPOSITOR_DND_ARM_WL, actions);
         }
         if (compositor_dnd.active == 2)
         {
@@ -4596,7 +4590,6 @@ static const struct canvas_ext_ops compositor_wl_ext_ops = {
 static void compositor_wl_register_hooks(void)
 {
         canvas_ext_register(&compositor_wl_ext_ops);
-        compositor_dnd_register(&compositor_wl_drag_ops);
         compositor_clip_observer_register(compositor_wl_selection);
 }
 
