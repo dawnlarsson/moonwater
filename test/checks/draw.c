@@ -1184,7 +1184,7 @@ static void dl_wide_rows(void)
                                 font_cell(&dl_engine, faces, 2, codes[c], 2, &grid, em, 0, &ref, x, y, inks[light], grounds[light]);
                                 dl_probe_reset();
                                 dl_probe_ui(&probe_ui, 1);
-                                ui_scene_wide(&probe_ui, faces, codes[c], &grid, em, &probe, 0, 0, x, y, inks[light], grounds[light]);
+                                ui_scene_wide(&probe_ui, faces, 2, 0, codes[c], &grid, em, &probe, 0, 0, x, y, inks[light], grounds[light]);
                                 cases++;
                                 recorded += !dl_probe_scene.lost && dl_probe_scene.count > 0;
                                 if (dl_probe_scene.lost)
