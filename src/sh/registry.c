@@ -442,7 +442,9 @@ static const struct settings_row settings_rows[] = {
                       .refusal = "vrr is on, games or off, not %s\n",
                       .usage = "canvas vrr [on|games|off]",
                       .help = "a screen that can waits for each frame, so it is shown when drawn; games: only a fullscreen window [on]"),
-    {null, "Brightness", SETTINGS_STEP, 1, 0, {"brightness"}, "brightness ", null, {"brightness"}, "-10 +10", 0,
+    {null, "Brightness", SETTINGS_SLIDER, 1, 0, {"brightness"}, "brightness ", null, {"brightness"}, null, 0,
+     .type = SETTING_NUMBER, .unit = "percent", .low = 0, .high = 100,
+     .about = "The screen backlight, from 0 to 100 percent. A display with no backlight control has none to set, and this row is greyed out.",
      .usage = "brightness [N%|+N|-N]", .help = "the screen backlight"},
 #ifndef SHELL_NO_GPU
     //  In the Display group, as its Graphics part: the card that draws the screens, its status and why it is off (the board's

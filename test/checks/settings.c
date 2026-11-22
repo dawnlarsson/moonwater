@@ -1656,6 +1656,51 @@ static fn check_settings(string_address regular, string_address bold)
         check("settings: a brightness is its percent",
               settings_parsed(bright, "[Moonwater] brightness 50% (50 of 100)\n", value) == SETTINGS_READ &&
                   string_equals((string_address)value, (string_address) "50%"));
+        // The brightness is a kit slider over 0 to 100 percent: the keys step it, a drag writes each value it holds, a release writes the
+        // value it was left at, and a display with no backlight is greyed out with its reason.
+        {
+                struct ui_row described;
+                unsigned char was = settings.state[bright];
+                bipolar child_was = settings.runner.child;
+                settings.runner.child = 1; // a job that is running keeps the changes queued, as the window has them while one runs
+                char had[SETTINGS_VALUE];
+
+                memory_copy(had, settings.value[bright], SETTINGS_VALUE);
+                settings.state[bright] = SETTINGS_READ;
+                string_copy_bounded((string_address)settings.value[bright], (string_address) "40%", SETTINGS_VALUE);
+                memory_zero(&described, sizeof(described));
+                settings_describe(bright, &described);
+                check("settings: brightness is a slider over 0 to 100 percent, at its number, in percent",
+                      settings_rows[bright].kind == SETTINGS_SLIDER && described.kind == UI_ROW_SLIDER && described.at == 40 && described.low == 0 &&
+                          described.high == 100 && described.words && string_equals((string_address)described.words, (string_address) "%"));
+                settings_activate(bright, 1);
+                check("settings: the keys step brightness a step up, and write it", settings.queued == 1 && settings.queue[0].row == bright &&
+                          string_equals((string_address)settings.queue[0].value, (string_address) "45"));
+                settings.queued = 0;
+                settings.list.slide = bright + 1, settings.list.slid_value = 60;
+                settings_slid();
+                check("settings: a drag writes brightness live, the value it holds", settings.queued == 1 && settings.queue[0].row == bright &&
+                          string_equals((string_address)settings.queue[0].value, (string_address) "60"));
+                settings_slid();
+                check("settings: and holding the same value writes it once", settings.queued == 1);
+                settings.list.slide = 0, settings.list.slid = bright + 1, settings.list.slid_value = 70;
+                settings_slid();
+                check("settings: a release writes the value it was left at", settings.queued == 1 && string_equals((string_address)settings.queue[0].value, (string_address) "70"));
+                settings.queued = 0;
+                settings_live_sent = -1;
+                settings.state[bright] = SETTINGS_ABSENT;
+                memory_zero(&described, sizeof(described));
+                settings_describe(bright, &described);
+                check("settings: a display with no backlight has brightness greyed out, with the reason, and no slider",
+                      described.dim && described.kind != UI_ROW_SLIDER && described.about && described.about[0]);
+                check("settings: a machine with no backlight says so, and the row is absent",
+                      settings_parsed(bright, "[Moonwater] this machine has no backlight\n", value) == SETTINGS_ABSENT);
+                settings.state[bright] = was;
+                memory_copy(settings.value[bright], had, SETTINGS_VALUE);
+                settings.queued = 0;
+                settings.list.slide = 0, settings.list.slid = 0;
+                settings.runner.child = child_was;
+        }
         check("settings: boost is after a semicolon, and a machine without one has none",
               settings_parsed(boost, "[Moonwater] cpu: 8 online; boost off; smt on\n", value) == SETTINGS_READ &&
                   string_equals((string_address)value, (string_address) "off") &&

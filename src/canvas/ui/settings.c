@@ -4283,13 +4283,29 @@ static b32 settings_map_event(const struct window_event address_to event)
         return event->type == WINDOW_EVENT_MOTION ? had : (did & UI_GRAPH_TAKEN) != 0;
 }
 
+// A slider is written while the hand moves it: each value the kit reports while a drag holds it goes out once (the queue keeps one
+// change per row), and the release writes the value it was left at.
+static int settings_live_sent = -1;
 static void settings_slid(void)
 {
-        int row = settings.list.slid - 1;
+        int row = settings.list.slide > 0 ? settings.list.slide - 1 : settings.list.slid - 1;
         char word[SETTINGS_VALUE];
+        b32 dragging = settings.list.slide > 0;
+        if (dragging)
+        {
+                if (row < 0 || row >= SETTINGS_ANY || settings_rows[row].kind != SETTINGS_SLIDER || settings.state[row] != SETTINGS_READ ||
+                    settings.list.slid_value == settings_live_sent)
+                        return;
+                settings_live_sent = settings.list.slid_value;
+                positive_into_string((p8 address_to)word, (positive)settings.list.slid_value);
+                if (!string_equals((string_address)word, (string_address)settings.value[row]))
+                        settings_change(row, word);
+                return;
+        }
         if (settings.list.slid <= 0)
                 return;
         settings.list.slid = 0;
+        settings_live_sent = -1;
         if (row < 0 || row >= SETTINGS_ANY || settings_rows[row].kind != SETTINGS_SLIDER || settings.state[row] != SETTINGS_READ)
                 return;
         positive_into_string((p8 address_to)word, (positive)settings.list.slid_value);
