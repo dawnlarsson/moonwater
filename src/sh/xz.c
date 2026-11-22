@@ -5906,6 +5906,8 @@ static bipolar xz_cli_option(file_codec_cli address_to codec, string_address at,
                         xz_cli_count = 0;
                         return 1;
                 }
+                if (*at == 'v')
+                        return 1;
                 if (*at != 'C' && *at != 'T' && *at != 'M')
                         return 0;
 
@@ -5922,7 +5924,7 @@ static bipolar xz_cli_option(file_codec_cli address_to codec, string_address at,
                 return at[1] ? (bipolar)string_length(at) : 1;
         }
         static const struct { string_address name; b8 level; } long_flags[] = {
-            {"--extreme", -1}, {"--fast", 0}, {"--best", 9}, {"--no-adjust", -2}};
+            {"--extreme", -1}, {"--fast", 0}, {"--best", 9}, {"--no-adjust", -2}, {"--verbose", -2}};
         for (positive i = 0; i < array_count(long_flags); i++)
                 if (string_equals(at, long_flags[i].name))
                 {
@@ -6031,20 +6033,36 @@ static bool xz_cli_setup(void)
 static const file_codec_suffix xz_suffixes[] = {
     {".xz", ""}, {".txz", ".tar"}};
 
+static fn xz_cli_reset(void)
+{
+        xz_encode_check = XZ_CHECK_CRC64;
+        xz_encode_custom = false;
+        xz_block_size = 0;
+        xz_cli_extreme = false;
+        xz_serial = false;
+        xz_threads = 0;
+        xz_cli_count = 0;
+}
+
 static b32 file_xz(void)
 {
         file_codec_cli codec = {
             .name = "xz", .decode_name = "unxz", .cat_name = "xzcat",
-            .usage = "Usage: xz [-cdefkqt0123456789] [-C CHECK] [-T N] [--x86|--arm|--delta|--lzma2[=OPTS]...] [FILE...]",
+            .usage = "Usage: xz [-cdefkqtvz0123456789] [-C CHECK] [-T N] [--x86|--arm|--delta|--lzma2[=OPTS]...] [FILE...]",
             .version = "xz from moonwater",
             .status = address_of xz_status,
             .suffixes = xz_suffixes, .suffix_count = array_count(xz_suffixes),
             .decode_suffix_error = "unknown suffix; use -c",
             .encode_suffix_error = "cannot guess output name",
-            .features = FILE_CODEC_LEVEL_ZERO,
+            .features = FILE_CODEC_LEVEL_ZERO | FILE_CODEC_COMPRESS_OPTION |
+                        FILE_CODEC_LONG_QUIET | FILE_CODEC_SHORT_VERSION,
             .remove_source = true, .level = 6,
             .run = xz_stream_cli, .option = xz_cli_option};
-        return file_codec_main(address_of codec);
+        xz_cli_reset();
+        b32 status = file_codec_main(address_of codec);
+
+        xz_cli_reset();
+        return status;
 }
 
 #endif /* XZ_CORE_ONLY */

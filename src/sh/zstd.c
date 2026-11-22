@@ -874,28 +874,19 @@ static bool zstd_emit(p8 address_to p, positive n)
                 return true;
         }
 
+        if (zstd_hashing)
+                hash_xxh64_add(address_of zstd_hash, p, n);
+        zstd_decoded += n;
         while (n)
         {
                 positive room = ZSTD_OUT - zstd_out_fill;
-                positive chunk;
+                positive chunk = n < room ? n : room;
 
-                if (zstd_pull && !room)
-                {
-                        zstd_rest = p;
-                        zstd_rest_n = n;
-                        zstd_paused = true;
-                        return true;
-                }
-
-                chunk = n < room ? n : room;
-                if (zstd_hashing)
-                        hash_xxh64_add(address_of zstd_hash, p, chunk);
-                zstd_decoded += chunk;
-                memory_copy(zstd_out_buf + zstd_out_fill, p, chunk);
+                memory_copy_apart(zstd_out_buf + zstd_out_fill, p, chunk);
                 zstd_out_fill += chunk;
                 p += chunk;
                 n -= chunk;
-                if (!zstd_pull && zstd_out_fill == ZSTD_OUT && !zstd_flush())
+                if (zstd_out_fill == ZSTD_OUT && !zstd_flush())
                         return false;
         }
 
@@ -1177,6 +1168,7 @@ static bool zstd_sequences(p8 address_to src, positive src_len, p8 address_to li
                 return_if(lit_len > zstd_block_limit, zstd_fail("zstd block output is too large"));
                 return zstd_put(lit, false, 0, lit_len);
         }
+        return_if(!zstd_block_limit || !zstd_window, zstd_fail("zstd sequence input or output overrun"));
 
         return_if(p >= stop, zstd_fail("zstd truncated sequence tables"));
         modes = p[0];
@@ -7535,6 +7527,8 @@ static bipolar zstd_cli_option(file_codec_cli address_to codec,
                         zstd_cli_no_check = false;
                 else if (*at == 'q')
                         zstd_cli_quiet = true;
+                else if (*at == 'v')
+                        zstd_cli_quiet = false;
                 else
                         return 0;
                 return 1;
@@ -7553,6 +7547,7 @@ static bipolar zstd_cli_option(file_codec_cli address_to codec,
             {"--no-dictID", address_of zstd_cli_no_dict_id, null, null, 1},
             {"--check", address_of zstd_cli_no_check, null, null, 0},
             {"--quiet", address_of zstd_cli_quiet, null, null, 1},
+            {"--verbose", address_of zstd_cli_quiet, null, null, 0},
             {"--fast", null, address_of zstd_cli_fast, null, 1},
             {"--long", null, null, address_of zstd_cli_long, 27}};
         for (positive i = 0; i < array_count(flags); i++)
@@ -7566,6 +7561,20 @@ static bipolar zstd_cli_option(file_codec_cli address_to codec,
                                 address_to flags[i].u8val = flags[i].set;
                         return 1;
                 }
+        if (string_equals(at, "--threads"))
+        {
+                string_address const number = codec->next_argument;
+
+                if (!number || !(taken = zstd_cli_number(number, address_of value)) || number[taken])
+                {
+                        string_format(log_error, "zstd: incorrect parameter: %s\n", at);
+                        return -1;
+                }
+                zstd_job_limit = value;
+                zstd_single_job = false;
+                codec->took_next = true;
+                return 1;
+        }
         static const struct { string_address prefix; p8 len; p8 kind; } keyed[] = {
             {"--fast=", 7, 0}, {"--long=", 7, 1}, {"--threads=", 10, 2}};
         for (positive i = 0; i < array_count(keyed); i++)
@@ -8130,18 +8139,27 @@ static b32 zstd_cli_train(void)
         {
                 string_address const word = program_argument((b32)i);
                 positive value = 0;
+                static const named_byte train_flags[] = {
+                    {"--", '-'}, {"-o", 'o'}, {"-q", 'q'}, {"--quiet", 'q'}};
+                positive flag = string_table_lookup(word, train_flags);
 
-                if (string_equals(word, "--"))
+                if (flag < array_count(train_flags))
                 {
-                        for (i++; i < count && nfiles < 4096; i++)
-                                paths[nfiles++] = program_argument((b32)i);
-                        break;
+                        if (train_flags[flag].value == '-')
+                        {
+                                for (i++; i < count && nfiles < 4096; i++)
+                                        paths[nfiles++] = program_argument((b32)i);
+                                break;
+                        }
+                        if (train_flags[flag].value == 'o' && i + 1 < count)
+                                output = program_argument((b32)++i);
+                        else if (train_flags[flag].value == 'q')
+                                quiet = true;
+                        continue;
                 }
                 if (string_has_prefix(word, "--train"))
                         continue;
-                if (string_equals(word, "-o") && i + 1 < count)
-                        output = program_argument((b32)++i);
-                else if (word[0] == '-' && word[1] == 'o' && word[2])
+                if (word[0] == '-' && word[1] == 'o' && word[2])
                         output = word + 2;
                 else if (string_has_prefix(word, "--maxdict=") &&
                          zstd_cli_number(word + 10, address_of value))
@@ -8149,8 +8167,6 @@ static b32 zstd_cli_train(void)
                 else if (string_has_prefix(word, "--dictID=") &&
                          zstd_cli_number(word + 9, address_of value))
                         forced_id = (p32)value;
-                else if (string_equals(word, "-q") || string_equals(word, "--quiet"))
-                        quiet = true;
                 else if (word[0] == '-' && word[1])
                         continue;
                 else if (nfiles < 4096)
@@ -8276,6 +8292,20 @@ next_attempt:
         return 0;
 }
 
+static fn zstd_cli_reset(void)
+{
+        zstd_cli_dict_clear();
+        zstd_cli_ultra = false;
+        zstd_cli_no_check = false;
+        zstd_cli_warned = false;
+        zstd_cli_quiet = false;
+        zstd_cli_fast = 0;
+        zstd_cli_long = 0;
+        zstd_single_job = false;
+        zstd_job_limit = 0;
+        zstd_cli_no_dict_id = false;
+}
+
 static b32 file_zstd(void)
 {
         for (positive i = 1; i < (positive)program_argument_count(); i++)
@@ -8287,11 +8317,11 @@ static b32 file_zstd(void)
                 if (string_has_prefix(word, "--train"))
                         return zstd_cli_train();
         }
-        zstd_cli_dict_clear();
+        zstd_cli_reset();
         file_codec_cli codec = {
             .name = "zstd", .decode_name = "unzstd", .cat_name = "zstdcat",
             .usage =
-                "Usage: zstd [-cdfkqzC#] [-T#] [--ultra] [--fast[=#]] [--long[=#]]\n"
+                "Usage: zstd [-cdfkqtvzC#] [-T#] [--ultra] [--fast[=#]] [--long[=#]]\n"
                 "            [--single-thread] [--no-check] [-D DICT] [--no-dictID]\n"
                 "            [-o FILE] [--rm] [FILE...]\n"
                 "       zstd --train FILE... [-o DICT] [--maxdict=#] [--dictID=#]",
@@ -8308,7 +8338,7 @@ static b32 file_zstd(void)
             .option = zstd_cli_option};
         b32 status = file_codec_main(address_of codec);
 
-        zstd_cli_dict_clear();
+        zstd_cli_reset();
         return status;
 }
 

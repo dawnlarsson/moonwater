@@ -653,36 +653,27 @@ static b32 net_fetch(void)
         //      to be written here.
         status = http_get_apart(net_word(1), address_of body, address_of code);
 
-        if (status == HTTP_CONFINE)
-                string_format(net_out, "fetch: cannot confine the download "
-                                   "from %w here; nothing was fetched\n",
-                              writer_terminal_quoted_name, name);
-        else if (status == HTTP_APART)
-                string_format(net_out, "fetch: the confined download from %w "
-                                   "died\n",
-                              writer_terminal_quoted_name, name);
-        else if (status == HTTP_NO_HOST)
-                string_format(net_out, "fetch: cannot resolve %w\n",
-                              writer_terminal_quoted_name, name);
-        else if (status == HTTP_NO_ROUTE)
-                string_format(net_out, "fetch: cannot reach %w\n",
-                              writer_terminal_quoted_name, name);
-        else if (status == HTTP_NO_REPLY)
-                string_format(net_out, "fetch: no reply from %w\n",
-                              writer_terminal_quoted_name, name);
-        else if (status == HTTP_REBOUND)
-                string_format(net_out, "fetch: refused %w: the name resolved to this "
-                                   "machine or its link-local network\n",
-                              writer_terminal_quoted_name, name);
-        else if (status == HTTP_PLAIN)
-                string_format(net_out, "fetch: refused %w: plain http is off "
-                                   "(moonwater security http)\n",
-                              writer_terminal_quoted_name, name);
-        else if (status == HTTP_STATUS && http_response_is_redirect(code))
-                string_format(net_out, "fetch: %p, which is a redirect this does not "
-                                   "follow\n", (positive)code);
-        else if (status == HTTP_STATUS)
-                string_format(net_out, "fetch: the server answered %p\n", (positive)code);
+        static const struct { bipolar code; string_address fmt; } fetch_errors[] = {
+            {HTTP_CONFINE, "fetch: cannot confine the download from %w here; nothing was fetched\n"},
+            {HTTP_APART, "fetch: the confined download from %w died\n"},
+            {HTTP_NO_HOST, "fetch: cannot resolve %w\n"},
+            {HTTP_NO_ROUTE, "fetch: cannot reach %w\n"},
+            {HTTP_NO_REPLY, "fetch: no reply from %w\n"},
+            {HTTP_REBOUND, "fetch: refused %w: the name resolved to this machine or its link-local network\n"},
+            {HTTP_PLAIN, "fetch: refused %w: plain http is off (moonwater security http)\n"},
+        };
+        for (positive at = 0; at < array_count(fetch_errors); at++)
+                if (status == fetch_errors[at].code)
+                {
+                        string_format(net_out, fetch_errors[at].fmt,
+                                      writer_terminal_quoted_name, name);
+                        goto failed;
+                }
+        if (status == HTTP_STATUS)
+                string_format(net_out, http_response_is_redirect(code)
+                                           ? "fetch: %p, which is a redirect this does not follow\n"
+                                           : "fetch: the server answered %p\n",
+                              (positive)code);
         else if (status < 0)
                 string_format(net_out, "fetch: the reply made no sense\n");
         else
@@ -761,7 +752,7 @@ static COLD bipolar net_wget_stream_link(string_address output)
             (target.owner && target.owner != me))
                 return -1;
         return file_open_same(AT_FDCWD, output, address_of target,
-                              O_WRONLY | O_NOCTTY);
+                              O_WRONLY | O_NOCTTY | O_CLOEXEC);
 }
 
 //      Why a download failed, in GNU wget's words where it has them.
@@ -3845,16 +3836,17 @@ static COLD b32 net_ip(void)
                     net_word_is(verb, "list", 1);
         b32 status = 0;
 
-        if (!object || net_word_is(object, "help", 4))
+        if (!object || net_word_is(object, "help", 4) ||
+            string_equals(object, "-h") || string_equals(object, "--help"))
         {
                 string_format(log, "usage: ip auto | link | addr | route\n"
                                    "       ip auto   find a link, bring it up, "
                                    "take a lease\n"
                                    "       ip watch  the same, now and whenever "
                                    "a cable changes\n"
-                                   "       ip link set NAME up\n"
-                                   "       ip addr add A.B.C.D/N dev NAME\n"
-                                   "       ip route add default via A.B.C.D [dev NAME]\n");
+                                   "       ip link set NAME up|down\n"
+                                   "       ip addr add|del A.B.C.D/N dev NAME\n"
+                                   "       ip route add|del default|A.B.C.D/N via A.B.C.D [dev NAME]\n");
                 log_flush();
                 return object ? 0 : 1;
         }
@@ -3882,25 +3874,29 @@ static COLD b32 net_ip(void)
                                  : net_show((b32)handle, RTM_GETLINK, sizeof(netlink_link),
                                             AF_UNSPEC, net_link_line, "link show");
                 else if (net_word_is(verb, "set", 3) && net_words() == 5 &&
-                         net_word_is(net_word(4), "up", 2))
+                         (net_word_is(net_word(4), "up", 2) ||
+                          net_word_is(net_word(4), "down", 4)))
                 {
+                        bool up = net_word_is(net_word(4), "up", 2);
                         bipolar index = net_index_of((b32)handle, net_word(3));
 
                         status = net_done("link set", index < 0 ? index
-                                          : netlink_link_up((b32)handle, (p32)index));
+                                          : netlink_link_flag_up((b32)handle, (p32)index, up));
                 }
                 else
                         status = net_ip_refused(
-                            "link: only 'show' and 'set NAME up'");
+                            "link: only 'show' and 'set NAME up|down'");
         }
         //      addr ------------------------------------------------------
         else if (net_word_is(object, "address", 1))
         {
+                bool del = verb && net_word_is(verb, "delete", 3);
+
                 if (show)
                         status = net_show_device((b32)handle) ? 1
                                  : net_show((b32)handle, RTM_GETADDR, sizeof(netlink_address),
                                             AF_INET, net_address_line, "addr show");
-                else if (net_word_is(verb, "add", 1) && net_words() == 6 &&
+                else if ((net_word_is(verb, "add", 1) || del) && net_words() == 6 &&
                          net_word_is(net_word(4), "dev", 3))
                 {
                         p32 host = 0;
@@ -3910,49 +3906,66 @@ static COLD b32 net_ip(void)
                         if (!net_split_prefix(net_word(3), address_of host,
                                               address_of bits))
                                 status = net_ip_refused(
-                                    "addr add: not an address");
+                                    del ? "addr del: not an address"
+                                        : "addr add: not an address");
                         else
                         {
                                 index = net_index_of((b32)handle, net_word(5));
-                                status = net_done("addr add", index < 0 ? index
-                                    : netlink_address_add((b32)handle, (p32)index,
-                                                          host, bits));
+                                status = net_done(del ? "addr del" : "addr add",
+                                    index < 0 ? index
+                                    : del ? netlink_address_delete((b32)handle, (p32)index, host, bits)
+                                          : netlink_address_add((b32)handle, (p32)index, host, bits));
                         }
                 }
                 else
                         status = net_ip_refused(
-                            "addr: only 'show' and 'add A.B.C.D/N dev NAME'");
+                            "addr: only 'show' and 'add|del A.B.C.D/N dev NAME'");
         }
         //      route -----------------------------------------------------
         else if (net_word_is(object, "route", 1))
         {
+                bool del = verb && net_word_is(verb, "delete", 3);
+
                 if (show)
                         status = net_show((b32)handle, RTM_GETROUTE, sizeof(netlink_route),
                                           AF_INET, net_route_line, "route show");
-                else if (net_word_is(verb, "add", 1) &&
-                         (net_words() == 6 || (net_words() == 8 &&
-                          net_word_is(net_word(6), "dev", 3))) &&
-                         net_word_is(net_word(3), "default", 3) &&
-                         net_word_is(net_word(4), "via", 3))
+                else if ((net_word_is(verb, "add", 1) || del) && net_words() >= 4)
                 {
-                        bipolar gateway = string_to_host(net_word(5));
+                        p32 dest = 0;
+                        p8 bits = 0;
+                        bipolar gateway = 0;
                         bipolar index = 0;
+                        bool ok = net_word_is(net_word(3), "default", 3) ||
+                                  net_split_prefix(net_word(3), address_of dest, address_of bits);
+                        positive at = 4;
 
-                        if (gateway < 0)
-                                status = net_ip_refused(
-                                    "route add: not an address");
-                        else
+                        if (ok && at + 1 < net_words() && net_word_is(net_word(at), "via", 3))
                         {
-                                if (net_words() == 8)
-                                        index = net_index_of((b32)handle, net_word(7));
-                                status = net_done("route add", index < 0 ? index
-                                    : netlink_route_add((b32)handle, 0, 0,
-                                                        (p32)gateway, (p32)index));
+                                gateway = string_to_host(net_word(at + 1));
+                                at += 2;
                         }
+                        if (ok && gateway >= 0 && at + 1 < net_words() &&
+                            net_word_is(net_word(at), "dev", 3))
+                        {
+                                index = net_index_of((b32)handle, net_word(at + 1));
+                                at += 2;
+                        }
+                        if (!ok || gateway < 0)
+                                status = net_ip_refused(
+                                    del ? "route del: not an address"
+                                        : "route add: not an address");
+                        else if (at != net_words() || (!del && !gateway && !index))
+                                status = net_ip_refused(
+                                    "route: only 'show' and 'add|del default|A.B.C.D/N via A.B.C.D [dev NAME]'");
+                        else
+                                status = net_done(del ? "route del" : "route add",
+                                    index < 0 ? index
+                                    : del ? netlink_route_delete((b32)handle, dest, bits, (p32)gateway, (p32)index)
+                                          : netlink_route_add((b32)handle, dest, bits, (p32)gateway, (p32)index));
                 }
                 else
                         status = net_ip_refused(
-                            "route: only 'show' and 'add default via A.B.C.D'");
+                            "route: only 'show' and 'add|del default|A.B.C.D/N via A.B.C.D [dev NAME]'");
         }
         else
                 status = net_ip_refused(

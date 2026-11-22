@@ -5016,6 +5016,8 @@ static fn gzip_say(string_address why)
                 string_format(log_error, "gzip: %s: %s\n", file_codec_display, why + (!string_compare_max(why, "gzip ", 5) ? 5 : 0));
 }
 
+static bool gzip_quiet;
+
 static b32 gzip_stream(bipolar in, bipolar out, bool decode, p8 level)
 {
         bool ok;
@@ -5048,22 +5050,40 @@ static b32 gzip_stream(bipolar in, bipolar out, bool decode, p8 level)
         }
         if (decode && gzip_garbage)
         {
-                gzip_say(GZIP_WHY_GARBAGE);
+                if (!gzip_quiet)
+                        gzip_say(GZIP_WHY_GARBAGE);
                 gzip_warned = true;
         }
         return 0;
 }
 
 static const file_codec_suffix gzip_suffixes[] = {
-    {".gz", ""}, {".Z", ""}, {".tgz", ".tar"}};
+    {".gz", ""}, {".Z", ""}, {".tgz", ".tar"}, {".taz", ".tar"},
+    {".z", ""}, {"-gz", ""}, {"-z", ""}, {"_z", ""}};
 
 /* --ultra: the optimal parser, past -9. GNU gzip refuses the word, so no
    GNU spelling changes meaning; -10 and up still read as their last digit. */
 static bipolar gzip_option(file_codec_cli address_to codec, string_address at, bool word)
 {
-        if (!word || !string_equals(at, "--ultra"))
+        if (!word)
+        {
+                if (*at == 'q')
+                {
+                        gzip_quiet = true;
+                        return 1;
+                }
                 return 0;
-        codec->level = GZIP_ULTRA;
+        }
+        static const named_byte long_opts[] = {
+            {"--ultra", 'u'}, {"--quiet", 'q'}, {"--no-name", 'n'}};
+        positive found = string_table_lookup(at, long_opts);
+
+        if (found == array_count(long_opts))
+                return 0;
+        if (long_opts[found].value == 'u')
+                codec->level = GZIP_ULTRA;
+        else if (long_opts[found].value == 'q')
+                gzip_quiet = true;
         return 1;
 }
 
@@ -5083,6 +5103,7 @@ static b32 file_gzip(void)
             .remove_source = true, .level = 6,
             .run = gzip_stream, .option = gzip_option};
         gzip_warned = false;
+        gzip_quiet = false;
         b32 status = file_codec_main(address_of codec);
 
         /* A warning ends the run with 2 unless something failed. */

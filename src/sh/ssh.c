@@ -1230,7 +1230,7 @@ static bool ssh_elf_needed(bipolar handle, ssh_needed address_to needed, bool ad
         {
                 p64 tag = memory_load_unaligned(p64, dynamic + at);
                 p64 value = memory_load_unaligned(p64, dynamic + at + 8);
-                positive room = sizeof(name);
+                positive room = sizeof(name) - 1;
                 positive length;
 
                 if (!tag)
@@ -3089,10 +3089,10 @@ static b32 ssh_key_read(string_address label)
         {
                 while (*at == ' ' || *at == '\t')
                         at++;
-                if (!*at || *at == '\n')
+                if (!*at || *at == '\n' || *at == '\r')
                         break;
                 words[count++] = at;
-                while (*at && *at != ' ' && *at != '\t' && *at != '\n')
+                while (*at && *at != ' ' && *at != '\t' && *at != '\n' && *at != '\r')
                         at++;
                 if (*at)
                         *at++ = end;
