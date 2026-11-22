@@ -1543,6 +1543,7 @@ static long rules_load(struct rover_control *request)
         struct rover_refusal why;
         unsigned long flags;
         bool posted = false, queued = false;
+        p32 table_id, rule_count, kernel_rules;
 
         if (!request->length || request->length > ROVER_TABLE_MOST)
                 return -EINVAL;
@@ -1604,10 +1605,6 @@ static long rules_load(struct rover_control *request)
                                 set[rule->event >> 6] |= 1ull << (rule->event & 63);
                 }
         }
-
-        p32 table_id;
-        p32 rule_count;
-        p32 kernel_rules;
 
         mutex_lock(&rules_load_lock);
         live->table = ++rules_loads;
