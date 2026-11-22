@@ -372,6 +372,9 @@ struct windows
         unsigned int lift[WINDOWS], field[WINDOWS], body_state[WINDOWS];
         int body_raw[WINDOWS], body_drawn[WINDOWS], body_speed[WINDOWS];
         unsigned int osk_setting, osk_shown, osk_input, osk_physical, osk_start, osk_layout, osk_purpose, osk_caret;
+        /* The on-screen keyboard's own process, written when it is started. The compositor grants keyboard keys to a row only
+           when that row's recorded owner is this process (windows_owner_ok). A global, not a per-row column: 0 is none. */
+        unsigned int osk_pid;
         unsigned int osk_head[WINDOWS], osk_tail[WINDOWS];
         int osk_code[WINDOWS][WINDOWS_OSK], osk_character[WINDOWS][WINDOWS_OSK];
         unsigned int osk_flags[WINDOWS][WINDOWS_OSK], hover_off[WINDOWS], pinch_wanted[WINDOWS], pinned[WINDOWS];
