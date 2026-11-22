@@ -1076,7 +1076,7 @@ static int popmenu_row(const struct ui_popmenu address_to m)
 #if MOONWATER_UI_EDITOR
 #include "../../src/canvas/ui/editor.c"
 #endif
-#if MOONWATER_UI_TASKBAR
+#if 1 // the taskbar is always built
 #include "../../src/canvas/ui/taskbar.c"
 #endif
 #if MOONWATER_UI_MIXER
@@ -1109,7 +1109,7 @@ static int popmenu_row(const struct ui_popmenu address_to m)
 #include "../../src/audio/pulse.c"
 #include "../../src/canvas/ui/mixer.c"
 #endif
-#if MOONWATER_UI_NOTICES && MOONWATER_UI_TASKBAR
+#if MOONWATER_UI_NOTICES
 #include "../../src/canvas/ui/notices.c"
 #endif
 

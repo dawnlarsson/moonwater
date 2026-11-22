@@ -5272,7 +5272,7 @@ static fn check_apps_registry(void)
 }
 #endif
 
-#if MOONWATER_UI_TASKBAR
+#if 1 // the taskbar is always built
 /*
         The tray's words: the weekday, the month, AM or PM and the battery's state, which a format of the person's puts in the
         tray. English is the three-letter names it always had (written out here), and a language taken says them in its own.
@@ -5814,7 +5814,7 @@ static fn language_check(void)
 #if MOONWATER_UI_LAUNCHER
         launcher_words_check();
 #endif
-#if MOONWATER_UI_TASKBAR
+#if 1 // the taskbar is always built
         taskbar_words_check();
 #endif
         terminal_words_check();
@@ -10513,7 +10513,7 @@ b32 main()
         check_kit_turn();
         check_kit_tab_ripple();
 #endif
-#if MOONWATER_UI_TASKBAR
+#if 1 // the taskbar is always built
         check_taskbar_text(program_argument_count() > 3 ? program_argument(3) : null);
         check_moon_bench();
         check_taskbar_edit();
@@ -10527,7 +10527,7 @@ b32 main()
         check_scene_damage_cut();
         check_compositor_volume(); // after the band's face is loaded: the cell is drawn with it
         check_taskbar_scale();
-#if MOONWATER_UI_NOTICES && MOONWATER_UI_TASKBAR
+#if MOONWATER_UI_NOTICES
         check_notices_dot();
 #endif
 #endif

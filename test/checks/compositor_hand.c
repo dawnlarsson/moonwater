@@ -4033,7 +4033,7 @@ static int mic_cell(unsigned int capture, unsigned int muted, unsigned int flags
         holds a notice, the cells after it move over, a look at a board that has not moved answers 0, a press on the dot leaves its rectangle
         for the popup, and the popup lists the errors first, then the warnings, and then the two rows; Dismiss all takes the kernel notices off.
 */
-#if MOONWATER_UI_NOTICES && MOONWATER_UI_TASKBAR
+#if MOONWATER_UI_NOTICES
 #define NOTICES_SHOT_W 480
 #define NOTICES_SHOT_H 240
 static unsigned int notices_shot[NOTICES_SHOT_W * NOTICES_SHOT_H];
@@ -4741,7 +4741,7 @@ static void check_compositor_chrome(void)
         hash = (hash ^ (screen[at] & 0xffffffu)) * 16777619u;
     string_format(log, "  chrome: the default scene hashes to %p\n", (positive)hash);
     check("chrome: the default scene, desktop, lines, close and minimise buttons, is the picture pinned by its hash", hash == CHROME_SCENE_HASH);
-#if MOONWATER_UI_TASKBAR
+#if 1 // the taskbar is always built
     check("chrome: a tab drawn without a font is black, the panel's ink when away and 38383c when lit",
           taskbar_tab_ink(-1, 0) == 0u && taskbar_tab_ink(0, 0) == 0u && taskbar_tab_ink(0, COMPOSITOR_TAB_AWAY) == 0x141416u &&
               taskbar_tab_ink(0, COMPOSITOR_TAB_LIT) == 0x38383cu);

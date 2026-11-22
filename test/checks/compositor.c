@@ -697,7 +697,7 @@ static void check_compositor_screens(void)
           compositor.x[1] == SCREENS_A_W && compositor.y[1] == 0 && table->want_width[1] == SCREENS_B_W &&
               table->want_height[1] == SCREENS_H);
 
-#if MOONWATER_UI_TASKBAR
+#if 1 // the taskbar is always built
     // The band is the primary's.
     compositor_band_frame(&band);
     check("screens: the band is along the primary screen's bottom",
@@ -917,7 +917,7 @@ static void check_compositor_scales(void)
     check("scales: and back to 100 percent it is again, the table with it", compositor.scale == 100 && table->scale == 100 &&
                                                                                 compositor_row_scale(1) == 100);
 
-#if MOONWATER_UI_TASKBAR
+#if 1 // the taskbar is always built
     {
         struct compositor_frame band;
         int room[4];
