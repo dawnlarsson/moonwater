@@ -159,8 +159,16 @@ static positive link_listener_state(bipolar owner, b32 on, b32 switched)
 /*      The session the listener has open with this name, if one is open now:
         its entry, whose address is where it is heard from now. */
 static link_open_entry address_to link_open_of(link_state address_to state,
+                                               const p8 address_to key,
                                                string_address name)
 {
+        for (positive at = 0; at < state->open_count && at < LINK_SESSIONS; at++)
+        {
+                link_open_entry address_to open = state->open + at;
+
+                if (key && crypto_same(open->key, (p8 address_to)key, 32))
+                        return open;
+        }
         for (positive at = 0; at < state->open_count && at < LINK_SESSIONS; at++)
         {
                 link_open_entry address_to open = state->open + at;
@@ -228,11 +236,21 @@ static b32 link_status(void)
         if (link_identity(address_of me, false) >= 0)
         {
                 p8 own[WATERLINK_NAME_MAX];
+                p8 hwid[LINK_HWID_BYTES];
+                p8 hwid_hex[33];
 
                 link_key_text(me.public, key);
                 link_machine_name(own);
-                string_format(log, "  this machine  %s  %s  next: moonwater link pair\n",
-                              (string_address)own, (string_address)key);
+                if (link_hardware_id(hwid))
+                {
+                        link_hwid_text(hwid, hwid_hex);
+                        hwid_hex[16] = 0;
+                        string_format(log, "  this machine  %s  %s  hwid %s  next: moonwater link pair\n",
+                                      (string_address)own, (string_address)key, (string_address)hwid_hex);
+                }
+                else
+                        string_format(log, "  this machine  %s  %s  next: moonwater link pair\n",
+                                      (string_address)own, (string_address)key);
                 crypto_forget(address_of me, sizeof me);
         }
         else
@@ -378,18 +396,26 @@ static b32 link_status(void)
 
                 //      Each line says how it was known: a session open now, a
                 //      greeting heard since boot, or nothing heard, and why.
-                open_now = link_open_of(address_of state, (string_address)peer->name);
+                open_now = link_open_of(address_of state, peer->key, (string_address)peer->name);
                 if (open_now)
                 {
                         link_place_text(open_now->address, open_now->port, place);
                         if (!peer->may)
-                                string_format(log, "      open now from %s  next: "
+                                string_format(log, "      open now  \xe2\x86\x91%p \xe2\x86\x93%p pkts  rtt %p.%p ms  from %s  next: "
                                                    "moonwater link allow %s run\n",
+                                              (positive)open_now->tx_packets,
+                                              (positive)open_now->rx_packets,
+                                              (positive)(open_now->rtt / 1000),
+                                              (positive)(open_now->rtt % 1000 / 100),
                                               (string_address)place,
                                               (string_address)peer->name);
                         else
-                                string_format(log, "      open now from %s  next: "
+                                string_format(log, "      open now  \xe2\x86\x91%p \xe2\x86\x93%p pkts  rtt %p.%p ms  from %s  next: "
                                                    "moonwater link %s\n",
+                                              (positive)open_now->tx_packets,
+                                              (positive)open_now->rx_packets,
+                                              (positive)(open_now->rtt / 1000),
+                                              (positive)(open_now->rtt % 1000 / 100),
                                               (string_address)place,
                                               (string_address)peer->name);
                 }
@@ -472,12 +498,14 @@ static b32 link_status(void)
                 link_place_text(open->address, open->port, place);
                 if (!shown++)
                         string_format(log, "  open\n");
-                string_format(log, "    %s  %s  %ps  rtt %p.%p ms  from %s\n",
+                string_format(log, "    %s  %s  %ps  \xe2\x86\x91%p \xe2\x86\x93%p pkts  rtt %p.%p ms  from %s\n",
                               (string_address)open->name,
                               link_kind_names[open->kind < array_count(link_kind_names)
                                                       ? open->kind
                                                       : 0],
                               (positive)open->seconds,
+                              (positive)open->tx_packets,
+                              (positive)open->rx_packets,
                               (positive)(open->rtt / 1000),
                               (positive)(open->rtt % 1000 / 100),
                               (string_address)place);
@@ -641,6 +669,45 @@ static b32 link_remove_locked(string_address name)
         return 0;
 }
 
+static b32 link_purge_locked(void)
+{
+        link_peers peers;
+        link_state state;
+        positive state_length = 0, kept = 0, removed = 0;
+        bipolar owner = host_lock_owner(LINK_LOCK_PATH);
+
+        if (owner <= 0 ||
+            link_read_private_records(LINK_STATE_PATH, (p8 address_to)address_of state,
+                                      sizeof state, sizeof state,
+                                      address_of state_length) < 0 ||
+            state_length != sizeof state)
+                return host_refuse("the listener is not running; start it first with moonwater link on\n");
+        if (!link_peers_for_change(address_of peers))
+                return host_refuse("%s could not be read\n", LINK_PEERS_PATH);
+
+        for (positive at = 0; at < peers.count; at++)
+        {
+                struct waterlink_peer address_to peer = peers.peer + at;
+
+                peer->name[WATERLINK_NAME_MAX - 1] = 0;
+                if ((peer->flags & WATERLINK_PEER_BLOCKED) ||
+                    link_open_of(address_of state, peer->key, (string_address)peer->name) != null)
+                        peers.peer[kept++] = *peer;
+                else
+                        removed++;
+        }
+        peers.count = kept;
+        if (removed && link_peers_save(address_of peers) < 0)
+                return host_refuse("%s could not be written\n", LINK_PEERS_PATH);
+
+        if (!removed)
+                host_say(log, host_label "nothing to purge\n");
+        else
+                host_say(log, host_label "purged %p unconnected machine%s\n",
+                         removed, removed == 1 ? "" : "s");
+        return 0;
+}
+
 static b32 link_grant_locked(string_address name, p8 allow,
                              string_address address_to words, positive count)
 {
@@ -667,6 +734,11 @@ static b32 link_grant_locked(string_address name, p8 allow,
                 else
                         found->may &= ~bit;
         }
+        if (!allow && !found->may)
+                found->flags |= WATERLINK_PEER_BLOCKED;
+        else if (allow && found->may)
+                found->flags &= (unsigned short)~WATERLINK_PEER_BLOCKED;
+        link_hwid_set_block(found->key, (found->flags & WATERLINK_PEER_BLOCKED) != 0);
 
         if (link_peers_save(address_of peers) < 0)
                 return host_refuse("%s could not be written\n", LINK_PEERS_PATH);
@@ -3087,7 +3159,7 @@ static const struct
 } link_shapes[] = {
     {"on", 3, 3},   {"off", 3, 3},   {"key", 3, 3},  {"serve", 3, 4},
     {"port", 3, 4},  {"transport", 3, 4}, {"modem", 4, 5},
-    {"pair", 3, 4}, {"add", 5, 6},   {"remove", 4, 4},
+    {"pair", 3, 4}, {"add", 5, 6},   {"remove", 4, 4}, {"purge", 3, 3},
     {"allow", 5, ~(positive)0},      {"deny", 5, ~(positive)0},
     {"shell", 4, 4}, {"run", 5, ~(positive)0},
     {"push", 6, 6}, {"pull", 6, 6}, {"log", 4, 4},
@@ -3182,6 +3254,7 @@ static b32 link_dispatch(string_address address_to arguments, positive count)
         //      The peers file has a second writer, the listener pairing
         //      members: each change made here happens under the same lock.
         if (string_equals(verb, "add") || string_equals(verb, "remove") ||
+            string_equals(verb, "purge") ||
             string_equals(verb, "allow") || string_equals(verb, "deny"))
         {
                 struct waterlink_peer where;
@@ -3208,6 +3281,8 @@ static b32 link_dispatch(string_address address_to arguments, positive count)
                                                              : null)
                         : string_equals(verb, "remove")
                                 ? link_remove_locked(arguments[3])
+                        : string_equals(verb, "purge")
+                                ? link_purge_locked()
                                 : link_grant_locked(arguments[3],
                                                     string_equals(verb, "allow"),
                                                     arguments + 4, count - 4);

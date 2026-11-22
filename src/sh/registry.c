@@ -947,6 +947,8 @@ static const struct settings_row settings_rows[] = {
      .help = "the listener: linked machines reach this one, and it them, while it is on [off]"},
     {null, "Pair a machine", SETTINGS_ACTION, 0, SETTINGS_WAITS, {null}, null, null, {"link", "pair"}, null, 0,
      .help = "shows a code, and waits up to five minutes for the other machine to type it with this machine's name"},
+    {null, "Purge unconnected links", SETTINGS_ACTION, 0, 0, {null}, null, null, {"link", "purge"}, null, 0,
+     .help = "removes saved machines that are not currently connected (blocked machines stay blocked)"},
     {null, "Name and code of another machine", SETTINGS_FIELD, 0, SETTINGS_LINE | SETTINGS_SPLIT | SETTINGS_WAITS, {null}, null, null,
      {"link"}, null, 0,
      .help = "the other machine's name and the code it shows, which pair the two of them"},

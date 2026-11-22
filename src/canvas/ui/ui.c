@@ -21977,6 +21977,7 @@ struct ui_row
         b32 on;                            // a switch's
         b32 dim;                           // the label and the value quiet: a note, a value that is not there
         b32 mark;                          // a dot before the label: the one in use
+        unsigned int mark_ink;             // optional colour for the mark dot (0 defaults to UI_PRIMARY)
         b32 separator;                     // a subtle hairline rule above this row (e.g. between sidebar sections)
         b32 head;                          // a field right after the label, to the row's end (the words after a verb)
         int badge;                         // UI_ROW_BADGE_* at the row's right (left of a switch): the worst issue its option has, 0 none
@@ -23380,7 +23381,7 @@ static fn ui_list_cells(struct ui address_to ui, const struct ui_list address_to
                 {
                         int dot = ui_dev(ui, 6), dx = ui_mirror(x, dot, left, span), dy = y + (height - dot) / 2;
                         ui_kit_fill(ui, &(struct ui_box){dx * 256, dy * 256, (dx + dot) * 256, (dy + dot) * 256, dot * 128, dot * 128},
-                                    ui_role(UI_PRIMARY), null);
+                                    row->mark_ink ? row->mark_ink : ui_role(UI_PRIMARY), null);
                         x += dot + ui_dev(ui, 8), w -= dot + ui_dev(ui, 8);
                 }
                 // A folder's entry has its symbol before its label, 16 pixels a side, the label after it.
@@ -23826,7 +23827,7 @@ static fn ui_list_row(struct ui address_to ui, struct ui_list address_to l, int 
         baseline = ui_row_baseline(ui, p->label, UI_BODY_MEDIUM);
         if ((n = p->mark) && !cols && !l->tree)
                 ui_kit_fill(ui, &(struct ui_box){n->x * 256, (n->y + (n->h - n->w) / 2) * 256, (n->x + n->w) * 256, (n->y + (n->h + n->w) / 2) * 256, n->w * 128, n->w * 128},
-                            ui_role(UI_PRIMARY), null);
+                            row.mark_ink ? row.mark_ink : ui_role(UI_PRIMARY), null);
         if ((n = p->icon) && !cols && !l->tree && seen)
         {
                 int icon_side = n->w < n->h ? n->w : n->h;

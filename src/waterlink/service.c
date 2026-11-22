@@ -111,6 +111,7 @@ extern int _NSGetExecutablePath(char *buffer, unsigned int *size);
 #define LINK_KEY_PATH link_state_path(LINK_LEAF_KEY)
 #define LINK_PEERS_PATH link_state_path(LINK_LEAF_PEERS)
 #define LINK_PLACES_PATH link_state_path(LINK_LEAF_PLACES)
+#define LINK_HWIDS_PATH link_state_path(LINK_LEAF_HWIDS)
 #define LINK_GROUPS_PATH link_state_path(LINK_LEAF_GROUPS)
 #define LINK_PORT_PATH link_state_path(LINK_LEAF_PORT)
 #define LINK_TRANSPORT_PATH link_state_path(LINK_LEAF_TRANSPORT)
@@ -130,6 +131,7 @@ extern unsigned int geteuid(void);
 #define LINK_KEY_PATH "/root/link.key"
 #define LINK_PEERS_PATH "/root/link.peers"
 #define LINK_PLACES_PATH "/root/link.places"
+#define LINK_HWIDS_PATH "/root/link.hwids"
 #define LINK_GROUPS_PATH "/root/link.groups"
 #define LINK_PORT_PATH "/root/link.port"
 #define LINK_TRANSPORT_PATH "/root/link.transport"
@@ -210,6 +212,8 @@ static p64 link_keepalive = 10000000ull;
         there was one takes the frame as every key it does not know and does
         nothing with it, and says nothing, so the two stay as they were. */
 #define LINK_KEY_NAME 6
+#define LINK_KEY_HWID 9
+#define LINK_HWID_BYTES 16
 #define LINK_NAME_SAY 'M'
 #define LINK_NAMES_MOST 8 // names one session may change its record by: a peer can rename itself, and a file is written for each
 
@@ -345,7 +349,7 @@ static p8 link_key_parse(string_address text, p8 address_to key)
         terminal on the one, and link log is not. */
 static const string_address link_words[] = {
     "on",   "off",   "key",   "serve", "port", "pair", "add",  "remove",
-    "allow", "deny",  "group", "leave", "push", "pull", "log",  "shell",
+    "purge", "allow", "deny",  "group", "leave", "push", "pull", "log",  "shell",
     "run",  "help",  "transport", "modem", "cancel", "doctor", "paths",
     //  The network's, which were the link's once: `link discovery` is
     //  `network discovery` now, and neither word is a machine's to take.
@@ -959,6 +963,11 @@ struct link_session {
         p64 heard;
         p64 spoke;
         p64 noted; // the second the state file last had it seen
+        p64 tx_packets;
+        p64 rx_packets;
+        p64 tx_bytes;
+        p64 rx_bytes;
+        p8 hwid_sent;
         struct waterlink_link address_to link;
 
         //      The streams, and the command behind them at the machine.
@@ -1008,12 +1017,17 @@ typedef struct
 
 typedef struct
 {
+        p8 key[32];
         p8 name[WATERLINK_NAME_MAX];
         p8 kind;
         p8 address[16];
         p16 port;
         p64 seconds; // open for
         p64 rtt;     // microseconds, smoothed
+        p64 tx_packets;
+        p64 rx_packets;
+        p64 tx_bytes;
+        p64 rx_bytes;
         p8 carrier[24]; // udp, tcp, tcp through the proxy, or modem (link_tcp_carrier_word)
 } link_open_entry;
 
@@ -1731,6 +1745,10 @@ static fn link_session_flush(struct link_session address_to s, p64 now)
                 s->spoke = now;
 
                 length = waterlink_seal(address_of s->now.send, datagram, used);
+                s->tx_packets++;
+                s->tx_bytes += length;
+                if (link_self.server)
+                        link_self.state_dirty = true;
                 if (alone || length < WATERLINK_DATAGRAM)
                 {
                         //      What was filled before it leaves before it: a
@@ -1764,6 +1782,8 @@ static fn link_session_say(struct link_session address_to s, p32 kind)
 
         memory_copy(datagram, address_of head, 16);
         length = waterlink_seal(address_of s->now.send, datagram, 0);
+        s->tx_packets++;
+        s->tx_bytes += length;
         (void)link_send_to(datagram, length, s->address, s->port);
         s->spoke = link_now();
 }
@@ -2847,6 +2867,245 @@ static p8 link_stream_take(struct link_session address_to s,
         return true;
 }
 
+typedef struct
+{
+        p8 key[32];
+        p8 hwid[LINK_HWID_BYTES];
+        p32 flags;
+} link_hwid_entry;
+
+#define LINK_HWIDS_MAX 128
+
+static p8 link_hwid_cached[LINK_HWID_BYTES];
+static p8 link_hwid_ready;
+static p8 link_hwid_valid;
+
+static p8 link_hwid_placeholder(const p8 address_to s, positive n)
+{
+        static const string_address bad[] = {
+            "none", "default string", "to be filled by o.e.m.",
+            "not specified", "not available", "unknown", "system serial number",
+            "00000000-0000-0000-0000-000000000000",
+            "ffffffff-ffff-ffff-ffff-ffffffffffff",
+        };
+        if (!n)
+                return true;
+        for (positive i = 0; i < array_count(bad); i++)
+        {
+                positive bl = string_length(bad[i]);
+                if (n == bl && !memory_compare_ascii_case((address_any)s, (address_any)bad[i], bl))
+                        return true;
+        }
+        return false;
+}
+
+static p8 link_hardware_id(p8 out[LINK_HWID_BYTES])
+{
+        if (link_hwid_ready)
+        {
+                if (link_hwid_valid)
+                        memory_copy(out, link_hwid_cached, LINK_HWID_BYTES);
+                return link_hwid_valid;
+        }
+        link_hwid_ready = true;
+        crypto_sha256 hash;
+        p8 full[32];
+        positive added = 0;
+
+        crypto_sha256_open(address_of hash);
+        crypto_sha256_write(address_of hash, (p8 address_to) "moonwater-hwid-v1", 18);
+#if defined(MACOS)
+        {
+                extern int gethostuuid(unsigned char *, const void *);
+                p8 uuid[16];
+                struct { long sec, nsec; } ts = {5, 0};
+
+                if (gethostuuid(uuid, address_of ts) == 0)
+                        crypto_sha256_write(address_of hash, uuid, sizeof uuid), added++;
+        }
+#else
+        {
+                static const string_address paths[] = {
+                    "/sys/class/dmi/id/product_uuid",
+                    "/sys/class/dmi/id/board_serial",
+                    "/sys/class/dmi/id/product_serial",
+                    "/sys/class/dmi/id/chassis_serial",
+                    "/proc/device-tree/serial-number",
+                    "/sys/firmware/devicetree/base/serial-number",
+                };
+                p8 buf[128];
+
+                for (positive i = 0; i < array_count(paths); i++)
+                {
+                        bipolar fd = system_open_at(AT_FDCWD, paths[i], FILE_READ | O_CLOEXEC);
+                        if (fd < 0)
+                                continue;
+                        bipolar got = system_read_once(fd, buf, sizeof buf - 1);
+                        system_close(fd);
+                        if (got <= 0)
+                                continue;
+                        positive start = 0, len = (positive)got;
+                        while (len > 0 && (buf[len - 1] <= ' ' || buf[len - 1] == 0))
+                                len--;
+                        while (start < len && buf[start] <= ' ')
+                                start++;
+                        len -= start;
+                        if (len > 0 && !link_hwid_placeholder(buf + start, len))
+                        {
+                                p8 tag = (p8)i;
+                                crypto_sha256_write(address_of hash, address_of tag, 1);
+                                crypto_sha256_write(address_of hash, buf + start, len);
+                                added++;
+                        }
+                }
+        }
+#endif
+        if (!added)
+                return false;
+        crypto_sha256_close(address_of hash, full);
+        memory_copy(link_hwid_cached, full, LINK_HWID_BYTES);
+        memory_copy(out, full, LINK_HWID_BYTES);
+        link_hwid_valid = true;
+        return true;
+}
+
+static fn link_hwid_text(const p8 hwid[LINK_HWID_BYTES], p8 out[33])
+{
+        static const p8 hex[] = "0123456789abcdef";
+        for (positive i = 0; i < LINK_HWID_BYTES; i++)
+                out[2 * i] = hex[hwid[i] >> 4], out[2 * i + 1] = hex[hwid[i] & 15];
+        out[32] = 0;
+}
+
+static positive link_hwids_load(link_hwid_entry entries[LINK_HWIDS_MAX])
+{
+        positive length = 0;
+        if (link_read_private_records(LINK_HWIDS_PATH, (p8 address_to)entries,
+                                      LINK_HWIDS_MAX * sizeof(link_hwid_entry),
+                                      sizeof(link_hwid_entry), address_of length) < 0)
+                return 0;
+        return length / sizeof(link_hwid_entry);
+}
+
+static fn link_hwids_save(link_hwid_entry entries[LINK_HWIDS_MAX], positive count)
+{
+        (void)link_file_replace(LINK_HWIDS_PATH, entries,
+                                count * sizeof(link_hwid_entry), true);
+}
+
+static fn link_hwid_set_block(const p8 key[32], p8 blocked)
+{
+        link_hwid_entry entries[LINK_HWIDS_MAX];
+        positive count = link_hwids_load(entries);
+        p8 changed = false;
+
+        for (positive i = 0; i < count; i++)
+                if (crypto_same(entries[i].key, (p8 address_to)key, 32))
+                {
+                        p32 next = blocked ? (entries[i].flags | WATERLINK_PEER_BLOCKED)
+                                           : (entries[i].flags & ~WATERLINK_PEER_BLOCKED);
+                        if (next != entries[i].flags)
+                                entries[i].flags = next, changed = true;
+                }
+        if (changed)
+                link_hwids_save(entries, count);
+}
+
+static fn link_hwid_post(struct link_session address_to s)
+{
+        p8 hwid[LINK_HWID_BYTES];
+
+        s->hwid_sent = true;
+        if (!link_hardware_id(hwid))
+                return;
+        (void)link_post(s, LINK_KEY_HWID, WATERLINK_FRAME_DURABLE, 'H', hwid, LINK_HWID_BYTES);
+}
+
+static bipolar link_peers_lock(void);
+static fn link_peers_unlock(bipolar handle);
+
+static fn link_hwid_heard(struct link_session address_to s,
+                          p8 address_to payload, positive length)
+{
+        if (length != 1 + LINK_HWID_BYTES || payload[0] != 'H')
+                return;
+        p8 address_to hwid = payload + 1;
+        bipolar lock = link_peers_lock();
+        if (lock < 0)
+                return;
+        link_hwid_entry entries[LINK_HWIDS_MAX];
+        positive count = link_hwids_load(entries);
+        link_peers peers;
+        p8 peers_ok = link_peers_for_change(address_of peers);
+        p8 blocked = false, hwid_changed = false, peers_changed = false;
+        p32 prev_may = ~(p32)0;
+        struct waterlink_peer address_to cur = peers_ok ? link_peer_keyed(address_of peers, s->peer) : null;
+
+        // Check if this hardware ID was previously seen under another key (reinstalled PC) or blocked.
+        for (positive i = 0; i < count; i++)
+        {
+                if (!crypto_same(entries[i].hwid, hwid, LINK_HWID_BYTES))
+                        continue;
+                if (entries[i].flags & WATERLINK_PEER_BLOCKED)
+                        blocked = true;
+                if (!crypto_same(entries[i].key, s->peer, 32) && peers_ok)
+                {
+                        struct waterlink_peer address_to old = link_peer_keyed(address_of peers, entries[i].key);
+                        if (old)
+                        {
+                                if ((old->flags & WATERLINK_PEER_BLOCKED) || !old->may)
+                                        blocked = true;
+                                prev_may &= old->may;
+                                // If same group reinstall (and not blocked), deduplicate stale old record.
+                                if (!blocked && cur && cur != old && old->group && old->group == cur->group)
+                                {
+                                        *old = peers.peer[--peers.count];
+                                        cur = link_peer_keyed(address_of peers, s->peer);
+                                        peers_changed = true;
+                                }
+                        }
+                }
+        }
+        if (cur)
+        {
+                if (blocked)
+                {
+                        if (cur->may || !(cur->flags & WATERLINK_PEER_BLOCKED))
+                                cur->may = 0, cur->flags |= WATERLINK_PEER_BLOCKED, peers_changed = true;
+                        s->finished = true;
+                }
+                else if (prev_may != ~(p32)0 && (cur->may & prev_may) != cur->may)
+                        cur->may &= prev_may, peers_changed = true;
+        }
+        // Upsert (s->peer, hwid) entry in link.hwids.
+        positive found = count;
+        for (positive i = 0; i < count; i++)
+                if (crypto_same(entries[i].key, s->peer, 32))
+                {
+                        found = i;
+                        break;
+                }
+        if (found < count)
+        {
+                if (!crypto_same(entries[found].hwid, hwid, LINK_HWID_BYTES))
+                        memory_copy(entries[found].hwid, hwid, LINK_HWID_BYTES), hwid_changed = true;
+                if (blocked && !(entries[found].flags & WATERLINK_PEER_BLOCKED))
+                        entries[found].flags |= WATERLINK_PEER_BLOCKED, hwid_changed = true;
+        }
+        else if (count < LINK_HWIDS_MAX)
+        {
+                memory_copy(entries[count].key, s->peer, 32);
+                memory_copy(entries[count].hwid, hwid, LINK_HWID_BYTES);
+                entries[count].flags = blocked ? WATERLINK_PEER_BLOCKED : 0;
+                count++, hwid_changed = true;
+        }
+        if (hwid_changed)
+                link_hwids_save(entries, count);
+        if (peers_changed && peers_ok)
+                (void)link_peers_save(address_of peers);
+        link_peers_unlock(lock);
+}
+
 static fn link_name_heard(struct link_session address_to s,
                          p8 address_to payload, positive length);
 
@@ -2916,6 +3175,9 @@ static p8 link_hear(address_any context, struct waterlink_frame address_to head,
                 break;
         case LINK_KEY_NAME:
                 link_name_heard(s, payload, length);
+                break;
+        case LINK_KEY_HWID:
+                link_hwid_heard(s, payload, length);
                 break;
         case LINK_KEY_SIGNAL:
                 if (length == 2 && payload[0] == 'K' && s->pid > 0 &&
@@ -3433,6 +3695,8 @@ static p8 link_carried(p8 address_to datagram, positive length,
         //      is told where, so the next attempt starts there.
         s->moved |= moved;
         s->heard = now;
+        s->rx_packets++;
+        s->rx_bytes += length;
         //      Seen, to the second and from where: once a second a session,
         //      or when it moves, and not every datagram -- a walk of every
         //      peer seen, 180 ticks a datagram with 64 of them.
@@ -3617,6 +3881,7 @@ static fn link_state_write(p64 now)
                 if (!s->used || !s->now.live)
                         continue;
                 peer = link_peer_keyed(address_of peers, s->peer);
+                memory_copy(open->key, s->peer, 32);
                 memory_copy(open->name,
                             peer ? (address_any)peer->name : (address_any)s->name,
                             WATERLINK_NAME_MAX);
@@ -3625,6 +3890,10 @@ static fn link_state_write(p64 now)
                 open->port = s->port;
                 open->seconds = link_age(now, s->opened) / 1000000;
                 open->rtt = s->link->smoothed;
+                open->tx_packets = s->tx_packets;
+                open->rx_packets = s->rx_packets;
+                open->tx_bytes = s->tx_bytes;
+                open->rx_bytes = s->rx_bytes;
                 string_copy_bounded((string_address)open->carrier,
                                     link_tcp_carrier_word(s->address, s->port),
                                     sizeof open->carrier);
@@ -4057,6 +4326,8 @@ static p64 link_sessions_turn(p64 now)
                         link_session_streams(s, now);
                 if (s->now.live && s->named != link_nearby.name_gen)
                         link_name_post(s);
+                if (s->now.live && !s->hwid_sent)
+                        link_hwid_post(s);
                 if (s->now.live)
                 {
                         link_session_flush(s, now);

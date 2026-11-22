@@ -331,6 +331,7 @@ struct waterlink_peer {
         what the machine calls itself, and so has one that link add named
         after a code or a group had paired it, which LABELLED says. */
 #define WATERLINK_PEER_LABELLED 0x0001u
+#define WATERLINK_PEER_BLOCKED  0x0002u
 
 _Static_assert(sizeof(struct waterlink_peer) == 96,
                "waterlink peer record must be exactly 96 bytes");

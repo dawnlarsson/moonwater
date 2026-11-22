@@ -2610,6 +2610,8 @@ static fn settings_feed_links(void)
                         {
                                 char piece[SETTINGS_ITEM_LABEL];
                                 settings_slice(piece, sizeof(piece), c.s, c.n);
+                                if (c.n >= 8 && !memory_compare(c.s, "open now", 8))
+                                        settings.item[3][count - 1].flags |= SETTINGS_ITEM_JOINED;
                                 settings_cat_sep(settings.item[3][count - 1].detail, sizeof(settings.item[3][0].detail),
                                                  string_length((string_address)settings.item[3][count - 1].detail), "; ", piece);
                         }
@@ -2642,7 +2644,7 @@ static struct ui_columns address_to settings_columns_for(int list)
             {4, 3, {0, 84, 84, 72},   {LANGUAGE_files_column_name, LANGUAGE_settings_column_status, LANGUAGE_settings_column_security, LANGUAGE_settings_column_signal}},
             {2, 1, {0, 100, 0, 0},    {LANGUAGE_files_column_name, LANGUAGE_settings_column_status, 0, 0}},
             {4, 3, {0, 108, 84, 128}, {LANGUAGE_files_column_name, 0, LANGUAGE_settings_column_status, LANGUAGE_settings_column_access}},
-            {3, 0, {0, 140, 180, 0},  {LANGUAGE_files_column_name, LANGUAGE_settings_column_access, LANGUAGE_settings_column_status, 0}},
+            {3, 0, {0, 140, 260, 0},  {LANGUAGE_files_column_name, LANGUAGE_settings_column_access, LANGUAGE_settings_column_status, 0}},
         };
         struct ui_columns address_to c;
         if (!settings_large || list < 0 || list >= SETTINGS_LISTS)
@@ -3751,7 +3753,8 @@ static fn settings_describe_item(int id, const struct settings_item address_to i
                 settings_drive_strip(item, row);
         }
         else if (item->kind == SETTINGS_LINK)
-                row->columns = settings_columns_for(3), row->cells[1] = item->access[0] ? item->access : null,
+                row->columns = settings_columns_for(3), row->mark = (item->flags & SETTINGS_ITEM_JOINED) != 0,
+                row->mark_ink = ui_role(UI_SUCCESS), row->cells[1] = item->access[0] ? item->access : null,
                 row->cells[2] = item->detail[0] ? item->detail : null, row->value = row->cells[2] ? row->cells[2] : row->cells[1];
         else if (item->kind == SETTINGS_NOTE)
         {
