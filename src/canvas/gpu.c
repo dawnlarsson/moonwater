@@ -579,6 +579,16 @@ static const struct gpu_set *gpu_amd_set(unsigned int family)
         return gpu_family_ok(family) ? &gpu_amd_rdna2 : 0;
 }
 
+// The signal flags the watchdog installs with: shell.c's values where the shell is built; a check build that has no shell gets the same bits here.
+#ifndef SIGNAL_RESTART
+#define SIGNAL_RESTART 0x10000000
+#endif
+#ifndef SIGNAL_CATCH_RESTORER
+#define SIGNAL_CATCH_RESTORER 0
+#endif
+#ifndef SIGNAL_CATCH_FLAGS
+#define SIGNAL_CATCH_FLAGS SIGNAL_RESTART
+#endif
 static void gpu_submit_alarm(int sig);
 
 static void gpu_alarm_arm(unsigned int sec)
@@ -3026,7 +3036,7 @@ static unsigned int gpu_i915_scale_batch(const struct gpu_job *job, unsigned int
 {
         const struct gpu_args address_to a = gpu_i915_args(job, room);
 
-        if (!a || !a->w || a->w > 65535u || !a->rows || a->rows > 16384u || !a->sp || a->sp > 65535u || !a->dp || a->dp > 65535u || (a->dp & 3) || a->dp < a->w ||
+        if (!a || !a->w || a->w > 65535u || !a->rows || a->rows > 16384u || !a->sp || a->sp > 65535u || !a->dp || a->dp > 65535u || (a->dp & 15) || (a->sp & 15) || a->dp < a->w ||
             (positive)a->dp * a->rows > (1ull << 26) || a->s < GPU_VA || a->d < GPU_VA || a->g < GPU_VA || (a->s & 15) || (a->d & 15) || (a->g & 15))
                 return 0;
         {

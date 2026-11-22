@@ -49,6 +49,61 @@ static const unsigned int *gpu_grain(unsigned int light, int x, int y)
 
 static unsigned int gpu_want[1500 * 700];
 
+// The glass kernel's (op 3, gpu.asm glass) arithmetic as a C model: each of blue, green and red of the ground plus the grain level (dark) or minus it (light),
+// clamped; then the ground's times (255 - the picture's alpha) rounded as the over does (x = g * (255 - a) + 127, q = (x + (x >> 8) + 1) >> 8) plus the picture's
+// channel, clamped at 255. Alpha takes the over too, with no grain.
+static unsigned int gpu_glass_model(unsigned int picture, unsigned int ground, unsigned int level, unsigned int light)
+{
+        unsigned int out = 0, inverse = 255u - (picture >> 24);
+
+        for (unsigned int shift = 0; shift < 32; shift += 8)
+        {
+                unsigned int c = (ground >> shift) & 255u, q, v;
+
+                if (shift < 24)
+                        c = light ? (c > level ? c - level : 0u) : (c + level > 255u ? 255u : c + level);
+                q = (c * inverse + 127u + ((c * inverse + 127u) >> 8) + 1u) >> 8;
+                v = ((picture >> shift) & 255u) + q;
+                out |= (v > 255u ? 255u : v) << shift;
+        }
+        return out;
+}
+
+// Op 3 (gpu.asm glass): the grain the kernel adds is 2 * ((x ^ y) & 1) + (y & 1) for the absolute x and y, and that is the processor's 4x4 Bayer table of
+// glass.c, order >> 2, at every position (checked here); and the kernel's arithmetic (gpu_glass_model) is bit-exact to memory_glass_over_u32 over random
+// pictures and grounds, dark and light, at every origin mod 4. The fake card runs no kernel, so this holds the model, which is the kernel's text; the card's own
+// result is a box run (step 5's card half).
+static void gpu_glass_rows(void)
+{
+        static const unsigned int order[4][4] = {{0, 8, 2, 10}, {12, 4, 14, 6}, {3, 11, 1, 9}, {15, 7, 13, 5}};
+        unsigned int seed = 99991u, mismatches = 0, table_mismatches = 0, n = 0;
+
+        for (unsigned int y = 0; y < 4; y++)
+                for (unsigned int x = 0; x < 4; x++)
+                        if ((order[y][x] >> 2) != 2u * ((x ^ y) & 1u) + (y & 1u))
+                                table_mismatches++;
+        for (unsigned int side = 0; side < 2; side++)
+                for (unsigned int x0 = 0; x0 < 4; x0++)
+                        for (unsigned int y0 = 0; y0 < 4; y0++)
+                                for (unsigned int y = 0; y < 4; y++)
+                                        for (unsigned int x = 0; x < 16; x++)
+                                        {
+                                                unsigned int grain[96], picture, ground, got = 0, level = 2u * (((x0 + x) ^ (y0 + y)) & 1u) + ((y0 + y) & 1u);
+
+                                                seed = seed * 1664525u + 1013904223u, picture = seed;
+                                                seed = seed * 1664525u + 1013904223u, ground = seed;
+                                                memory_zero(grain, sizeof grain);
+                                                grain[side ? 64 : 0] = level * 0x010101u;
+                                                memory_glass_over_u32(&got, &picture, &ground, 1, grain);
+                                                if (got != gpu_glass_model(picture, ground, level, side))
+                                                        mismatches++;
+                                                n++;
+                                        }
+        check("gpu glass (op 3): the kernel's grain formula is the processor's 4x4 Bayer table (order >> 2) at every position", table_mismatches == 0);
+        check("gpu glass (op 3): the kernel's arithmetic is bit-exact to memory_glass_over_u32 over random pictures and grounds, dark and light, every origin mod 4",
+              mismatches == 0 && n == 2 * 4 * 4 * 4 * 16);
+}
+
 // The Intel set (Gen7-Gen11 active, Gen12+ frame checks): the edge split of a byte fill, and its batch, on the host (no card).
 static void gpu_i915_set_rows(void)
 {
@@ -373,6 +428,7 @@ b32 main(void)
         unsigned int tones[5] = {0x80402010u, 0u, 0xff112233u, 0x01ffffffu, 0};
         positive began, cpu[4], gpu_time[4];
 
+        gpu_glass_rows();
         gpu_i915_set_rows(); // on the host: no card needed, so before the prerequisites can return
         if (!gpu_start(((positive)BW * BH * 2 + (positive)SW * SH + (positive)7680 * 4320) * 4 + (33 << 20)))
         {
