@@ -1157,11 +1157,148 @@ static fn tabs_default_check(void)
               ui_tab_natural_width(&ui, &tabs, 0) == ui_kit_measure(&ui, (string_address)tabs.items[0], UI_LABEL_LARGE) * 100 / 100 + 28);
 }
 
+/* MOONWATER_DUMP_PILL=DIR in the check's environment (given by hand): the pill as it was drawn, a PPM of its corner of the window, for a
+   person to look at. Nothing is written unless it is set. An argument would be read as one more face to load by the section's main. */
+static fn editor_pill_dump(const char address_to name, const unsigned int address_to pixels, int stride, int x, int y, int w, int h)
+{
+        static unsigned char bytes[1200 * 200 * 3];
+        string_address address_to env = program_environment_list();
+        const char address_to dir = null;
+        char path[512], head[48];
+        unsigned int length = 0;
+        bipolar handle;
+
+        for (unsigned int at = 0; env && env[at] && !dir; at++)
+                dir = windows_env_value((char address_to)env[at], "MOONWATER_DUMP_PILL", 19);
+        if (!dir || !dir[0])
+                return;
+        if (x < 0)
+                w += x, x = 0;
+        if (y < 0)
+                h += y, y = 0;
+        if (w <= 0 || h <= 0 || w > 1200 || h > 200)
+                return;
+        string_copy_bounded((string_address)path, (string_address)dir, sizeof(path));
+        string_append_bounded((string_address)path, (string_address) "/", sizeof(path));
+        string_append_bounded((string_address)path, (string_address)name, sizeof(path));
+        for (int row = 0; row < h; row++)
+                for (int col = 0; col < w; col++)
+                {
+                        unsigned int pixel = pixels[(y + row) * stride + x + col];
+                        unsigned char address_to at = &bytes[3 * (row * w + col)];
+
+                        at[0] = (unsigned char)(pixel >> 16), at[1] = (unsigned char)(pixel >> 8), at[2] = (unsigned char)pixel;
+                }
+        handle = system_open_at_mode(AT_FDCWD, (string_address)path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+        if (handle < 0)
+                return;
+        string_copy((string_address)head, (string_address) "P6\n");
+        length = 3;
+        length += (unsigned int)positive_into_string((p8 address_to)head + length, (positive)w);
+        head[length++] = ' ';
+        length += (unsigned int)positive_into_string((p8 address_to)head + length, (positive)h);
+        string_copy((string_address)head + length, (string_address) "\n255\n");
+        length += 5;
+        system_write_once((b32)handle, head, length);
+        system_write_once((b32)handle, bytes, 3 * (positive)w * (positive)h);
+        system_close(handle);
+}
+
+// An event as ui_app_run hands the compositor's on: the kit's context first, then the app; the loop draws after its events.
+static fn editor_pill_send(unsigned int address_to shown, int type, unsigned int flags, int a, int b)
+{
+        struct window_event event = {(unsigned int)type, flags, a, b, 0};
+
+        ui_event_context(&event);
+        editor_event(&event);
+        editor_draw(shown);
+}
+
+// A mouse's click at x, y: the motion there, the left button's press and its release.
+static fn editor_pill_click(unsigned int address_to shown, int x, int y)
+{
+        editor_pill_send(shown, WINDOW_EVENT_MOTION, 0, x, y);
+        editor_pill_send(shown, WINDOW_EVENT_BUTTON, WINDOW_KEY_DOWN, UI_POINTER_LEFT, 0);
+        editor_pill_send(shown, WINDOW_EVENT_BUTTON, 0, UI_POINTER_LEFT, 0);
+}
+
+/*
+        The owner's case, by the whole path. The editor as it opens on the screen it was seen on (1920 by 1080 at scale: editor_start makes
+        it three fifths by three quarters, 1152 by 810), drawn whole by editor_draw, and a mouse's clicks sent as ui_app_run hands the
+        compositor's events on (ui_event_context, then editor_event, then a draw). editor_event gives every event to the view first, and the
+        view routes its button group through the kit even when it has none: that call's release let go of the switch the pill's press held,
+        the kit chose Hex for it, the pill's own call found nothing held, and the next draw set the switch back to the text it shows. The
+        Wrap chip went the same way. Its rows: a click on the Wrap chip turns wrap off, a click on Hex shows hex and the switch stays on it.
+*/
+static fn editor_pill_owner_row(int scale, const char address_to text_name, const char address_to hex_name)
+{
+        int width = 1920 * 3 / 5, height = 1080 * 3 / 4;
+        long pixels = ui_map((positive)width * (positive)height * 4);
+        unsigned int address_to shown = (unsigned int address_to)pixels;
+        struct ui_control address_to s = &editor.chips[0], address_to w = &editor.chips[1];
+        struct editor_tab address_to tab;
+        int px, py, pw, ph;
+
+        editor.ui = terminal.ui;
+        editor.ui.scale = scale;
+        // The kit's text line is the app's own, as wide as the screen (editor_start): the terminal's is the terminal's.
+        editor.ui.scratch = null, editor.ui.scratch_width = 0;
+        ui_scratch_fit(&editor.ui, 1920);
+        editor.width = width, editor.height = height, editor.own.stride = width;
+        editor.count = 0, editor.tab = 0, editor.status[0] = 0;
+        editor.find.mode = UI_FINDBAR_CLOSED;
+        memory_zero(editor.chips, sizeof(editor.chips));
+        editor.wrap_shown = editor.mode_shown = editor.pill_down = false;
+        ui_kit_held = null;
+        editor_open(null);
+        tab = editor_now();
+        editor_draw(shown);
+        px = editor.pill_box[0], py = editor.pill_box[1], pw = editor.pill_box[2], ph = editor.pill_box[3];
+        editor_pill_dump(text_name, shown, width, px - 24, py - 24, pw + 48, ph + 34);
+        check("editor pill: as it opens on the owner's screen, a click on the Wrap chip through editor_event turns word wrap off",
+              editor.wrap_shown && tab->view.wrap &&
+                  (editor_pill_click(shown, ui_dev(&editor.ui, w->x + w->w / 2), ui_dev(&editor.ui, w->y + w->h / 2)), !tab->view.wrap));
+        editor_pill_click(shown, ui_dev(&editor.ui, ui_tab_left(&editor.ui, s, 1) + ui_tab_width(&editor.ui, s, 1) / 2),
+                          ui_dev(&editor.ui, s->y + s->h / 2));
+        check("editor pill: as it opens on the owner's screen, a click on Hex through editor_event shows hex, and the switch stays on Hex",
+              tab->view.hex && s->at == 1 && ui_kit_held == null);
+        px = editor.pill_box[0], py = editor.pill_box[1], pw = editor.pill_box[2], ph = editor.pill_box[3];
+        editor_pill_dump(hex_name, shown, width, px - 24, py - 24, pw + 48, ph + 34);
+        editor.count = 0;
+        compositor_call(syscall(munmap), pixels, (positive)width * (positive)height * 4, 0, 0, 0, 0);
+}
+
+/*
+        The kit's press is its own call's: a press held through one call's controls is let go, and its click reported, only by a call
+        that has that control. A release routed through a call for other controls (an empty group, as a view's is) leaves it held.
+*/
+static fn kit_release_owner_check(void)
+{
+        static struct ui_control mine[1], none[1];
+        struct ui ui = terminal.ui;
+        struct ui_control address_to other, address_to own;
+
+        ui.scale = 100;
+        memory_zero(mine, sizeof(mine));
+        mine[0].kind = UI_BUTTON, mine[0].variant = UI_BUTTON_CHIP, ui_control_start(&mine[0]);
+        mine[0].label = "Wrap", mine[0].x = 10, mine[0].y = 10, mine[0].w = 80, mine[0].h = 20;
+        ui_kit_held = null;
+        ui_kit_pointer(&ui, mine, 1, WINDOW_EVENT_BUTTON, 20, 20, true, 0);
+        other = ui_kit_pointer(&ui, none, 0, WINDOW_EVENT_BUTTON, 20, 20, false, 0);
+        check("kit: a release routed through a call for other controls reports nothing and leaves the press held", other == null && ui_kit_held == &mine[0]);
+        own = ui_kit_pointer(&ui, mine, 1, WINDOW_EVENT_BUTTON, 20, 20, false, 0);
+        check("kit: and the call that has the held control gets its click", own == &mine[0] && ui_kit_held == null);
+        ui_kit_held = null;
+}
+
 static fn editor_pill_check(void)
 {
         tabs_default_check();
+        kit_release_owner_check();
         editor_pill_row(100);
         editor_pill_row(200);
+        editor_pill_owner_row(100, "pill-1x-text.ppm", "pill-1x-hex.ppm");
+        editor_pill_owner_row(200, "pill-2x-text.ppm", "pill-2x-hex.ppm");
 }
 
 /*

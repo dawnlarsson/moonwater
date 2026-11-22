@@ -13154,9 +13154,11 @@ static struct ui_control address_to ui_kit_pointer(struct ui address_to ui, stru
         }
         {
                 struct ui_control address_to c = ui_kit_held;
-                ui_kit_held = null;
-                if (!c)
+                // The release is the call's whose controls hold the press: a call for other controls (a view's empty button group, which
+                // the editor's view routes before its pill) leaves it held, or it would take the click and the owner's call find nothing.
+                if (!c || count <= 0 || c < controls || c >= controls + count)
                         return null;
+                ui_kit_held = null;
                 if (!ui_control_live(c))
                         return ui_kit_let_go_held(c), c->hover = 0, c->item = -1, null;
                 return ui_kit_pointer_release(ui, c, x, y);
