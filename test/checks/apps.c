@@ -6182,7 +6182,7 @@ static fn check_one_digits(void)
         {
                 const char address_to file;
                 positive reads, ones; // the calls of string_digits_max, and the single digits named below
-        } files[] = {{"src/canvas/ui/identify.c", 1, 0}, {"src/canvas/ui/ui.c", 2, 3}, {"src/canvas/ui/terminal.c", 1, 0}};
+        } files[] = {{"src/canvas/ui/identify.c", 1, 0}, {"src/canvas/ui/ui.c", 3, 3}, {"src/canvas/ui/terminal.c", 1, 0}};
         static const char address_to const one[] = {"(positive)(next - '0')", "index = (unsigned int)(*f - '0'), f += 2;"};
         positive read = 0, folds = 0;
         b32 as_said = true;
