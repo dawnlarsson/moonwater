@@ -2526,12 +2526,29 @@ retry_slice:
 #define GPU_MAP_REGISTERED 2
 #define GPU_MAP_OTHER 3
 static struct { positive at, bytes; unsigned int kind, why, tick; } gpu_map_refusal;
+// Whether a live map already holds [addr, addr + bytes) (one to read, or one the card may write when written): the map is kept, marked used in this tick, and no
+// new one is made. A map let go of (gpu_forget: from and to are 0) is not one. Without this a present's map of the same picture was made again each present,
+// and a written map over a written map of the same range dropped the old one (gpu_map_try's overlap rule): 3,610 userptr and 7,206 dma-buf maps a minute.
+static b32 gpu_map_hit(const void *addr, positive bytes, b32 written)
+{
+        positive p = (positive)addr;
+
+        for (unsigned int i = 0; i < gpu_map_count; i++)
+                if ((!written || gpu_maps[i].written) && (gpu_maps[i].from || gpu_maps[i].to) && p >= gpu_maps[i].from && p < gpu_maps[i].to &&
+                    bytes <= gpu_maps[i].to - p)
+                {
+                        gpu_maps[i].used = gpu_tick;
+                        return true;
+                }
+        return false;
+}
+
 static b32 gpu_map_as(const void *addr, positive size, b32 written)
 {
         struct gpu_region region;
         positive from = (positive)addr & ~4095ull, to = ((positive)addr + size + 4095) & ~4095ull;
 
-        if (gpu_map_try(addr, size, written))
+        if (gpu_map_hit(addr, size, written) || gpu_map_try(addr, size, written))
                 return true;
         gpu_map_refusal.at = (positive)addr, gpu_map_refusal.bytes = size, gpu_map_refusal.why = gpu_map_why, gpu_map_refusal.tick = gpu_tick;
         gpu_map_refusal.kind = !gpu_region_of(from, to, &region) ? GPU_MAP_OTHER : region.whole ? GPU_MAP_REGISTERED : GPU_MAP_TABLE;
