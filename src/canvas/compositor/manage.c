@@ -3607,7 +3607,8 @@ static struct
         int active, source, target, dropped, named, place;
         long take;
         unsigned int source_actions, take_actions, take_preferred, action, told_action, bridge_count;
-        const struct compositor_drag_ops *ext_bridge, *bridges[COMPOSITOR_DND_BRIDGES];
+        int ext_wl; // the external source is the Wayland arm's (COMPOSITOR_DND_ARM_WL): its offer, status, drop and finish go there
+        const struct compositor_drag_ops *bridges[COMPOSITOR_DND_BRIDGES];
         int target_wl; // the target row is the Wayland arm's (its drag events go there); the arm is the only target side
         unsigned int *offer_seen, *take_seen, *done_seen;
 } compositor_dnd = {.source = -1, .target = -1, .take = -1};
@@ -3623,12 +3624,16 @@ static int compositor_dnd_register(const struct compositor_drag_ops *ops)
         return 0;
 }
 
-static void compositor_dnd_reset(int active, int source, unsigned int actions, const struct compositor_drag_ops *ext)
+// The arms an external drag can come from: the Wayland arm (wayland_host.c) is the only source; X's drags run through it.
+#define COMPOSITOR_DND_ARM_NONE 0
+#define COMPOSITOR_DND_ARM_WL 1
+
+static void compositor_dnd_reset(int active, int source, unsigned int actions, int ext)
 {
         compositor_dnd.active = active, compositor_dnd.source = source, compositor_dnd.target = -1, compositor_dnd.take = -1;
         compositor_dnd.source_actions = actions, compositor_dnd.action = compositor_dnd.told_action = 0;
         compositor_dnd.dropped = compositor_dnd.named = 0;
-        compositor_dnd.ext_bridge = ext, compositor_dnd.target_wl = 0;
+        compositor_dnd.ext_wl = ext, compositor_dnd.target_wl = 0;
 }
 
 /*
@@ -3815,7 +3820,7 @@ static void compositor_dnd_leave_target(void)
 
 static void compositor_dnd_name_ext_types(void)
 {
-        const struct compositor_drag_ops *b = compositor_dnd.ext_bridge;
+        int b = compositor_dnd.ext_wl;
         const char *types = 0;
         long bytes = 0, count = 0, built, opened;
         struct windows_clip_part *parts;
@@ -3867,7 +3872,7 @@ static void compositor_dnd_end(int ok)
                 compositor_dnd_tell(target, WINDOWS_DRAG_DONE, ok);
         if (source >= 0)
                 compositor_dnd_tell(source, WINDOWS_DRAG_ACTION, (int)action), compositor_dnd_tell(source, WINDOWS_DRAG_ENDED, ok);
-        if (compositor_dnd.ext_bridge && !ok)
+        if (compositor_dnd.ext_wl && !ok)
                 compositor_dnd_arm_finished(0);
         compositor_dnd_reset(0, -1, 0, 0);
         if (source >= 0)
@@ -3898,7 +3903,7 @@ static void compositor_dnd_motion(int under)
         }
         if (nb)
         {
-                if (compositor_dnd.active == 2 && compositor_dnd.ext_bridge)
+                if (compositor_dnd.active == 2 && compositor_dnd.ext_wl)
                 {
                         compositor_dnd_leave_target();
                         goto done;
@@ -3918,7 +3923,7 @@ static void compositor_dnd_motion(int under)
         if (under < 0 || under >= COMPOSITOR_ROWS || !table || !table->drop_ok[under] || !table->pid[under])
         {
                 compositor_dnd_leave_target();
-                if (compositor_dnd.ext_bridge)
+                if (compositor_dnd.ext_wl)
                         compositor_dnd_arm_status(0, 0);
                 goto done;
         }
@@ -4000,7 +4005,7 @@ static void compositor_dnd_take(int row)
         both = compositor_dnd.take_actions & allowed;
         action = (both & compositor_dnd.take_preferred) ? compositor_dnd.take_preferred : (both & (~both + 1u));
         compositor_dnd.action = compositor_dnd.take >= 0 ? action : 0;
-        if (compositor_dnd.ext_bridge)
+        if (compositor_dnd.ext_wl)
                 compositor_dnd_arm_status(compositor_dnd.action != 0, compositor_dnd.action);
         compositor_chip_drag(compositor_dnd_action());
 }
@@ -4055,7 +4060,7 @@ static void compositor_dnd_door(int row)
                 if (compositor_dnd.active && row == compositor_dnd.target && compositor_dnd.dropped)
                 {
                         int ok = table->drop_done[row] == 1;
-                        if (compositor_dnd.ext_bridge)
+                        if (compositor_dnd.ext_wl)
                                 compositor_dnd_arm_finished(ok);
                         compositor_dnd_end(ok);
                 }
@@ -4068,9 +4073,9 @@ static int compositor_dnd_escape(int value)
                 return 0;
         if (value == 1)
         {
-                if (compositor_dnd.ext_bridge)
+                if (compositor_dnd.ext_wl)
                         compositor_dnd_arm_cancel_source();
-                compositor_dnd_arm_cancel(compositor_dnd.ext_bridge != 0);
+                compositor_dnd_arm_cancel(compositor_dnd.ext_wl != 0);
                 compositor_dnd_end(0);
         }
         return 1;
@@ -4082,12 +4087,19 @@ static void compositor_dnd_keys(void)
                 compositor_dnd_tell(compositor_dnd.target, WINDOWS_DRAG_MOTION, compositor_dnd.place);
 }
 
+// An external drag begins from an arm: only the Wayland arm starts one. Refused while a drag is already going.
+static int compositor_dnd_ext_begin_arm(int arm, unsigned int actions)
+{
+        if (arm != COMPOSITOR_DND_ARM_WL || compositor_dnd.active)
+                return 0;
+        compositor_dnd_reset(2, -1, actions & 7u, 1);
+        return 1;
+}
+
+// The bridge form, until wayland_host.c passes its arm (the next step), then it goes.
 static int compositor_dnd_ext_begin(const struct compositor_drag_ops *bridge, unsigned int actions)
 {
-        if (!bridge || compositor_dnd.active)
-                return 0;
-        compositor_dnd_reset(2, -1, actions & 7u, bridge);
-        return 1;
+        return bridge ? compositor_dnd_ext_begin_arm(COMPOSITOR_DND_ARM_WL, actions) : 0;
 }
 
 static void compositor_dnd_ext_drop(void)
@@ -4104,7 +4116,7 @@ static void compositor_dnd_ext_drop(void)
         }
         compositor_dnd.dropped = 1;
         compositor_dnd_tell(compositor_dnd.target, WINDOWS_DRAG_DROP, (int)compositor_dnd.action);
-        if (!compositor_dnd.ext_bridge || !compositor_dnd_arm_read(name, compositor_dnd.target))
+        if (!compositor_dnd.ext_wl || !compositor_dnd_arm_read(name, compositor_dnd.target))
                 compositor_dnd_end(0);
 }
 
