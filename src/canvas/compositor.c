@@ -1942,7 +1942,8 @@ static positive compositor_timers_arm(positive now, unsigned int fence_at, int h
         compositor_soon(&until, compositor_snap_due());
         if (compositor_spots_any(1)) compositor_soon(&until, compositor.presented + period > now ? compositor.presented + period : now);
         compositor_soon(&until, compositor_wall_due(now));
-        if (rows_any(&compositor.list_later)) compositor_soon(&until, now + 1000000ull);
+        // A list waiting on a busy card wakes the loop when the card's fence does; a card with no fence to wait on is looked at each millisecond.
+        if (rows_any(&compositor.list_later) && !fence_at) compositor_soon(&until, now + 1000000ull);
         if (compositor.screens_gone) compositor_soon(&until, compositor.screens_look);
 #ifdef CONFIG_MOONWATER_WAYLAND
         if (compositor_wl.started)
@@ -2369,7 +2370,7 @@ static b32 compositor_main()
                 if (slots.card_at && wanted[slots.card_at].returned) compositor_card_read();
 #ifdef MOONWATER_GPU_C
                 if (slots.fence_at) compositor_card_tick();
-                if (rows_any(&compositor.list_later) && !compositor_card.on && gpu_idle()) compositor_lists_later();
+                if (rows_any(&compositor.list_later)) compositor_lists_later();
 #endif
                 if (slots.clip_at && wanted[slots.clip_at].returned) compositor_clip_cli();
                 if (slots.uevents_at && wanted[slots.uevents_at].returned) compositor_uevents_read();

@@ -702,6 +702,8 @@ static void compositor_card_lists_settle(b32 hung)
 static void compositor_take(int row);
 
 // The rows whose list waited for the card taken again, now that it is idle (compositor_lists_take).
+static b32 compositor_list_wait_turn(int row);
+
 static void compositor_lists_later(void)
 {
         struct compositor_rows later;
@@ -711,11 +713,11 @@ static void compositor_lists_later(void)
         rows_take(&later, &compositor.list_later);
         for (int row = rows_next(&later, 0); row >= 0; row = rows_next(&later, row + 1))
         {
-                if (compositor_card.on || !gpu_idle())
+                // Still busy: a turn it waited (counted toward COMPOSITOR_LIST_WAITS), kept in list_later; at the bound the take refuses it.
+                if ((compositor_card.on || !gpu_idle()) && compositor_list_wait_turn(row))
                 {
-                        for (; row >= 0; row = rows_next(&later, row + 1))
-                                rows_add(&compositor.list_later, row);
-                        break;
+                        rows_add(&compositor.list_later, row);
+                        continue;
                 }
                 compositor_take(row);
         }

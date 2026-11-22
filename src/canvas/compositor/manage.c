@@ -1876,6 +1876,15 @@ static int compositor_gpu_list_render(int row, const unsigned int *list, unsigne
 #define COMPOSITOR_LIST_WAITS 4
 static unsigned char *compositor_listed;
 static unsigned char *compositor_list_waits;
+
+// A turn a list of a busy card waited (compositor_lists_later): true while it may wait on, false at the bound (the take then refuses it).
+static b32 compositor_list_wait_turn(int row)
+{
+        if (compositor_list_waits[row] >= COMPOSITOR_LIST_WAITS)
+                return false;
+        compositor_list_waits[row]++;
+        return true;
+}
 static unsigned int compositor_list_invalids[WINDOW_LIST_REASONS];
 
 static void compositor_list_count(struct windows *table, unsigned int why)
