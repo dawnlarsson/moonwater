@@ -157,7 +157,7 @@ static bool memory_process(string_address directory, string_address name, addres
         positive length;
 
         (void)directory;
-        if (name[0] < '0' || name[0] > '9')
+        if (!byte_is_digit(name[0]))
                 return true;
         string_copy_bounded(path, "/proc/", sizeof(path));
         string_append_bounded(path, name, sizeof(path));

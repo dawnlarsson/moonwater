@@ -1852,11 +1852,24 @@ static bool host_files_alike(string_address left, string_address right, p64 hole
                 if (storage_read(first, one, want, offset) != want ||
                     storage_read(second, two, want, offset) != want)
                         alike = false;
-
-                for (positive at = 0; alike && at < want; at++)
-                        if ((offset + at < hole || offset + at >= hole_end) &&
-                            one[at] != two[at])
+                else if (offset + want <= hole || offset >= hole_end)
+                {
+                        if (memory_compare(one, two, want))
                                 alike = false;
+                }
+                else
+                {
+                        if (offset < hole &&
+                            memory_compare(one, two, (positive)(hole - offset)))
+                                alike = false;
+                        if (alike && offset + want > hole_end)
+                        {
+                                positive tail = (positive)(hole_end - offset);
+
+                                if (memory_compare(one + tail, two + tail, want - tail))
+                                        alike = false;
+                        }
+                }
 
                 offset += want;
         }

@@ -2509,11 +2509,6 @@ typedef struct
         b32 unknown;                   // a partition whose place could not be read: no room is free
 } usb_parts;
 
-static unsigned long long usb_decimal(p8 address_to text)
-{
-        return string_digits(text, null);
-}
-
 static fn usb_list_segment(unsigned long long start, unsigned long long bytes, unsigned int role, string_address name)
 {
         host_say(log, "    part %p %p %s %s\n", (positive)start, (positive)bytes, usb_role_words[role], name ? name : (string_address)"-");
@@ -2568,12 +2563,12 @@ static bool usb_part_visit(string_address directory, string_address name, addres
         if (string_length(name) <= dlen || string_compare_max(name, parts->disk, dlen))
                 return true;
         rest = name + dlen;
-        if (*rest == 'p' && parts->disk[dlen - 1] >= '0' && parts->disk[dlen - 1] <= '9')
+        if (*rest == 'p' && byte_is_digit(parts->disk[dlen - 1]))
                 rest++;
         if (!*rest)
                 return true;
         for (string_address at = rest; *at; at++)
-                if (*at < '0' || *at > '9')
+                if (!byte_is_digit(*at))
                         return true;
         memory_zero(&one, sizeof(one));
         // A partition whose start or size cannot be read is not shown, and where it is is not known: no room is free.
@@ -2584,7 +2579,7 @@ static bool usb_part_visit(string_address directory, string_address name, addres
                 parts->unknown = 1;
                 return true;
         }
-        one.start = usb_decimal(text) * 512ull;
+        one.start = string_digits(text, null) * 512ull;
         if (!host_join(path, sizeof(path), "/sys/block/", parts->disk, "/", name, "/size") ||
             host_read_kernel(path, text, sizeof(text)) <= 0)
         {
@@ -2592,16 +2587,14 @@ static bool usb_part_visit(string_address directory, string_address name, addres
                 parts->unknown = 1;
                 return true;
         }
-        one.bytes = usb_decimal(text) * 512ull;
+        one.bytes = string_digits(text, null) * 512ull;
         if (host_join(path, sizeof(path), "/sys/block/", parts->disk, "/", name, "/uevent") &&
             host_read_kernel(path, text, sizeof(text)) > 0)
                 for (p8 address_to line = text; *line;)
                 {
-                        p8 address_to stop = line;
+                        p8 address_to stop = (p8 address_to)string_first_of_or_end((string_address)line, '\n');
                         positive room = 0;
 
-                        while (*stop && *stop != '\n')
-                                stop++;
                         if (stop - line > 9 && !string_compare_max(line, "PARTNAME=", 9))
                         {
                                 for (p8 address_to at = line + 9; at < stop && room + 1 < sizeof(one.name); at++, room++)
@@ -2709,7 +2702,7 @@ static unsigned long long usb_disk_sectors(string_address name)
 {
         p8 sysfs[HOST_PATH_ROOM], text[32];
 
-        return host_join(sysfs, sizeof(sysfs), "/sys/block/", name, "/size") && host_read_kernel(sysfs, text, sizeof(text)) > 0 ? usb_decimal(text) : 0;
+        return host_join(sysfs, sizeof(sysfs), "/sys/block/", name, "/size") && host_read_kernel(sysfs, text, sizeof(text)) > 0 ? string_digits(text, null) : 0;
 }
 
 // A drive's segments, as its strip says them (usb_list_strip): its partitions and the room between them.

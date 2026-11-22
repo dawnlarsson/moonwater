@@ -537,15 +537,6 @@ static p32 radio_hex(p8 address_to text)
         return (p32)string_digits_hexadecimal_max(text, (positive)-1, null);
 }
 
-static fn radio_hex4(p8 address_to into, p32 value)
-{
-        p8 wire[2];
-
-        network_store_16(wire, (p16)value);
-        memory_into_hex(into, wire, sizeof(wire));
-        into[4] = end;
-}
-
 static bipolar radio_sys_read(string_address directory, string_address name,
                               string_address leaf, p8 address_to into, positive room)
 {
@@ -598,9 +589,9 @@ static fn radio_card_name(radio_card address_to card, p32 vendor, p32 device,
         for (positive at = 0; at < array_count(radio_vendors); at++)
                 if (radio_vendors[at].vendor == vendor)
                         maker = radio_vendors[at].name;
-        radio_hex4(ids, vendor);
+        host_hex4(ids, vendor);
         ids[4] = ':';
-        radio_hex4(ids + 5, device);
+        host_hex4(ids + 5, device);
         radio_line(card->name, sizeof(card->name), maker ? maker : (string_address) "",
                    maker ? (string_address) " " : (string_address) "", kind,
                    (string_address) " ", ids);

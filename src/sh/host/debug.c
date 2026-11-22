@@ -6,15 +6,6 @@
         of src/sh/host.c, names the function each verb runs.
 */
 
-// Four hexadecimal digits of a number of a device's identity, as lsusb spells a vendor and a product.
-static fn host_debug_hex(p8 address_to into, unsigned short number)
-{
-        p8 bytes[2] = {(p8)(number >> 8), (p8)number};
-
-        memory_into_hex(into, bytes, 2);
-        into[4] = end;
-}
-
 /*
         The input devices the compositor reads, for moonwater debug: what each
         is and what it was taken for, its wheel as it was read, and what became
@@ -41,8 +32,8 @@ static fn host_debug_inputs(const struct windows address_to table)
                 memory_copy(said, table->input_name[at], sizeof(said));
                 said[sizeof(said) - 1] = end;
                 usb_shown(name, sizeof(name), said, string_length((string_address)said));
-                host_debug_hex(vendor, table->input_id[at][1]);
-                host_debug_hex(product, table->input_id[at][2]);
+                host_hex4(vendor, table->input_id[at][1]);
+                host_hex4(product, table->input_id[at][2]);
                 host_say(log, "  event%b%s%s (%s %s:%s)\n", (bipolar)table->input_number[at],
                          table->input_number[at] < 10 ? (string_address) "          " : (string_address) "         ",
                          name[0] ? (string_address)name : (string_address) "no name",
@@ -273,22 +264,24 @@ static b32 host_power_stat(struct host_power_stat address_to stat)
                 b32 cpu = at + 3 < got && text[at] == 'c' && text[at + 1] == 'p' && text[at + 2] == 'u';
                 positive index = 0, values[8] = {0, 0, 0, 0, 0, 0, 0, 0}, field = 0;
 
-                if (cpu && text[at + 3] >= '0' && text[at + 3] <= '9')
+                if (cpu && byte_is_digit(text[at + 3]))
                 {
-                        for (at += 3; at < got && text[at] >= '0' && text[at] <= '9'; at++)
-                                index = index * 10 + (positive)(text[at] - '0');
-                        index++;
+                        positive used = 0;
+
+                        at += 3;
+                        index = string_digits_max(text + at, (positive)(got - at), address_of used) + 1;
+                        at += (bipolar)used;
                 }
                 else if (cpu)
                         at += 3;
                 while (at < got && text[at] != '\n')
                 {
-                        if (text[at] >= '0' && text[at] <= '9')
+                        if (byte_is_digit(text[at]))
                         {
-                                positive value = 0;
+                                positive used = 0;
+                                positive value = string_digits_max(text + at, (positive)(got - at), address_of used);
 
-                                while (at < got && text[at] >= '0' && text[at] <= '9')
-                                        value = value * 10 + (positive)(text[at] - '0'), at++;
+                                at += (bipolar)used;
                                 if (field < 8)
                                         values[field] = value;
                                 field++;

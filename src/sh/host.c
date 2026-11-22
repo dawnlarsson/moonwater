@@ -316,6 +316,16 @@ static fn host_pause(p64 nanoseconds)
         process_nap_ns(nanoseconds);
 }
 
+/* Four lowercase hexadecimal digits of a 16-bit value (e.g. USB/PCI vendor or device id). */
+static fn host_hex4(p8 address_to into, p32 value)
+{
+        p8 wire[2];
+
+        network_store_16(wire, (p16)value);
+        memory_into_hex(into, wire, sizeof(wire));
+        into[4] = end;
+}
+
 #include "host/disk.c" // the disk: the state directory and boot's verdict, the lock, the census of disks, images and their builds, the place steps an image is written by (host_place_*), the splash an install lays, a disk taken, boot's settle and its question, and setup install's work (host_install_locked); the setup verbs are page.c's
 #include "host/image.c" // the settings an image carries and a disk keeps (host_settings_*): read, written, carried and applied; and spark's bind
 #include "host/boot.c" // boot's service, its events and the shells it starts; the verbs canvas, latency and bios
@@ -344,16 +354,24 @@ static long host_windows_map(bool writable);
         window is (host_detach), and this returns at once. The desktop must be up, as `moonwater settings` needs: the
         compositor's pid alive and its table there.
 */
+/* Whether the compositor is alive and its window table exists. */
+static bool host_desktop_up(positive address_to pid_out)
+{
+        positive pid = desktop_pid_of((string_address)DESKTOP_COMPOSITOR);
+
+        if (pid_out)
+                *pid_out = pid;
+        return desktop_alive(pid) &&
+               system_access_at(AT_FDCWD, (string_address)WINDOWS_TABLE, 0) == 0;
+}
+
 static b32 host_canvas_identify(positive count)
 {
         const struct windows address_to table;
         unsigned int numbers[WINDOWS_OUTPUTS], screens;
-        positive pid;
 
         return_if(count != 3, host_usage());
-        pid = desktop_pid_of((string_address)DESKTOP_COMPOSITOR);
-        return_if(!pid || system_call_2(syscall(kill), pid, 0) != 0 ||
-                      system_access_at(AT_FDCWD, (string_address)WINDOWS_TABLE, 0) != 0,
+        return_if(!host_desktop_up(null),
                   host_refuse("the compositor's desktop is not up, and the identify windows are its windows: "
                               "moonwater desktop on starts it\n"));
         table = host_windows_header();
@@ -404,9 +422,7 @@ static b32 host_settings_window(string_address address_to arguments, positive co
         // moonwater settings gallery: the same window on the kit's gallery, every control of it, to see them move.
         return_if(count != 2 && (count != 3 || !string_equals(arguments[2], (string_address) "gallery")), host_usage());
 
-        pid = desktop_pid_of((string_address)DESKTOP_COMPOSITOR);
-        return_if(!pid || system_call_2(syscall(kill), pid, 0) != 0 ||
-                      system_access_at(AT_FDCWD, (string_address)WINDOWS_TABLE, 0) != 0,
+        return_if(!host_desktop_up(address_of pid),
                   host_refuse("the compositor's desktop is not up, and the settings window is one of its "
                               "windows: moonwater desktop on starts it\n"));
 
@@ -613,7 +629,7 @@ static b32 host_window(string_address address_to arguments, positive count)
         static p8 entry[sizeof(WINDOW_PLACE_VARIABLE) + WINDOW_PLACE_TEXT];
         string_address address_to inherited;
         struct window_place place;
-        positive pid, at, used = 0, length = sizeof(WINDOW_PLACE_VARIABLE);
+        positive at, used = 0, length = sizeof(WINDOW_PLACE_VARIABLE);
         int words = count > 2 ? window_place_parse(&place, (const char *const *)(arguments + 2), (unsigned int)(count - 2)) : 0;
 
         if (count > 2 && string_equals(arguments[2], "move"))
@@ -624,9 +640,7 @@ static b32 host_window(string_address address_to arguments, positive count)
         //      A word that is wrong, words and no command, or a command with no words: the verb's page.
         return_if(count > 2 && (words <= 0 || at >= count), host_usage());
         host_need_root();
-        pid = desktop_pid_of((string_address)DESKTOP_COMPOSITOR);
-        return_if(!pid || system_call_2(syscall(kill), pid, 0) != 0 ||
-                      system_access_at(AT_FDCWD, (string_address)WINDOWS_TABLE, 0) != 0,
+        return_if(!host_desktop_up(null),
                   host_refuse("the compositor's desktop is not up, so there is no window to put: moonwater desktop "
                               "on starts it\n"));
         if (count == 2)
@@ -750,11 +764,9 @@ static b32 host_clip_knock(const struct windows address_to table, b32 (*done)(co
         system_close(door);
         for (positive waited = 0; waited < HOST_CLIP_WAIT_MS; waited += 10)
         {
-                timespec nap = {0, 10000000};
-
                 if (done(table, want))
                         return true;
-                system_call_2(syscall(nanosleep), (positive)address_of nap, 0);
+                host_pause(10000000);
         }
         return done(table, want);
 }

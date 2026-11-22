@@ -184,13 +184,12 @@ static fn profile_read_maps(p32 process, p8 address_to text)
         text[got] = end;
         while (at < (positive)got && profile.mapping_count < PROFILE_MAPPINGS)
         {
-                positive line = at, stop = at;
+                p8 address_to nl = memory_first_of(text + at, '\n', (positive)got - at);
+                positive line = at, stop = nl ? (positive)(nl - text) : (positive)got;
                 p64 from = 0, to = 0;
-                string_address name;
+                string_address name, slash;
                 positive name_length;
 
-                while (stop < (positive)got && text[stop] != '\n')
-                        stop++;
                 at = stop + 1;
                 text[stop] = end;
                 // from-to perms offset dev inode path
@@ -207,8 +206,8 @@ static fn profile_read_maps(p32 process, p8 address_to text)
                         name--;
                 if (!name[0])
                         name = "[anonymous code]";
-                else if (string_last_of(name, '/'))
-                        name = string_last_of(name, '/') + 1;
+                else if ((slash = string_last_of(name, '/')))
+                        name = slash + 1;
                 name_length = string_length(name);
                 if (profile.names_used + name_length + 1 > profile.names_room)
                         return;
@@ -244,8 +243,7 @@ static fn profile_read_symbols(void)
         if (got != (bipolar)facts.size)
                 return;
         profile.symbol_text[got] = end;
-        for (positive i = 0; i < (positive)got; i++)
-                lines += profile.symbol_text[i] == '\n';
+        lines = memory_count(profile.symbol_text, (positive)got, '\n');
         profile.symbol_at = memory_take((lines + 1) * sizeof(p64));
         profile.symbol_name = memory_take((lines + 1) * sizeof(p32));
         if (!profile.symbol_at || !profile.symbol_name)

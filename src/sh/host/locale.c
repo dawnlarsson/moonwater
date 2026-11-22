@@ -3106,19 +3106,19 @@ static positive locale_nts_lines(const p8 address_to text, positive length,
 
         if (!complete)
         {
-                while (length && text[length - 1] != '\n')
-                        length--;
+                const p8 address_to last = memory_last_of((address_any)text, '\n', length);
+
+                length = last ? (positive)(last - text) + 1 : 0;
         }
         while (at < length && count < LOCALE_NTS_SERVERS_MOST)
         {
-                positive stop = at;
+                const p8 address_to nl = memory_first_of((const address_any)(text + at), '\n', length - at);
+                positive stop = nl ? (positive)(nl - text) : length;
                 positive size;
                 p8 line[LOCALE_NTS_ENTRY_ROOM];
                 p8 host[NTS_SERVER_MAX];
                 p16 port;
 
-                while (stop < length && text[stop] != '\n')
-                        stop++;
                 size = stop - at;
                 while (size && (text[at + size - 1] == '\r' || text[at + size - 1] == ' '))
                         size--;

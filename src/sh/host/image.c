@@ -1056,12 +1056,11 @@ static string_address host_plain(string_address text)
         while (text[at] && used + 8 < sizeof(shown))
         {
                 positive start = at;
+                string_address next = string_first_of_either_or_end(text + at, '\n', '\t');
 
-                while (text[at] && text[at] != '\n' && text[at] != '\t')
-                        at++;
-                radio_display(shown + used, sizeof(shown) - used, (p8 address_to)text + start,
-                              at - start);
-                used += string_length((string_address)shown + used);
+                at = (positive)(next - text);
+                used += radio_display(shown + used, sizeof(shown) - used, (p8 address_to)text + start,
+                                      at - start);
                 if (text[at] && used + 8 < sizeof(shown))
                         shown[used++] = (p8)text[at++];
         }
