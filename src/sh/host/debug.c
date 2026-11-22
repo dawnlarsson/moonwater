@@ -190,9 +190,11 @@ static b32 host_notices(string_address address_to arguments, positive count)
                 if (board.issue[at].used && windows_issue_kernel(board.issue[at].code))
                 {
                         shown++;
-                        host_say(log, "%s: %s, %p records, last %p s ago: %s\n", board.issue[at].key,
+                        host_say(log, "%w: %s, %p records, last %p s ago: %w\n",
+                                 writer_terminal_name, (string_address)board.issue[at].key,
                                  board.issue[at].severity == WINDOWS_ISSUE_ERROR ? (string_address) "error" : (string_address) "warning",
-                                 (positive)board.issue[at].a, (positive)board.issue[at].b, board.issue[at].detail);
+                                 (positive)board.issue[at].a, (positive)board.issue[at].b,
+                                 writer_terminal_name, (string_address)board.issue[at].detail);
                 }
         if (!shown)
                 host_say(log, "no kernel notices\n");
@@ -614,7 +616,8 @@ static b32 host_debug(string_address address_to arguments, positive count)
                 char card_driver[9];
 
                 memory_copy(card_driver, table->gpu_req_driver, 8), card_driver[8] = 0;
-                host_say(log, "  gpu card        %s family %p, device id %p\n", card_driver[0] ? (string_address)card_driver : (string_address) "-",
+                host_say(log, "  gpu card        %w family %p, device id %p\n",
+                         writer_terminal_name, card_driver[0] ? (string_address)card_driver : (string_address) "-",
                          (positive)table->gpu_family, (positive)table->gpu_device);
         }
         //      The card's prerequisites in the order the path needs them (gpu.c's gpu_req): each one ok, failed (with its error and the fix in words) or not reached.
@@ -627,10 +630,10 @@ static b32 host_debug(string_address address_to arguments, positive count)
                 memory_copy(driver, table->gpu_req_driver, 8), driver[8] = 0;
                 memory_copy(node, table->gpu_req_node, 20), node[20] = 0;
                 host_say(log, "  gpu requirements %s\n", table->gpu_req_first ? (string_address) "stopped at the first that failed, below" : (string_address) "all passed");
-                host_say(log, "    node          %s %s, mode %p owner %p\n", table->gpu_req_mask & 2 ? (string_address) "ok    " : (string_address) "failed",
-                         node[0] ? (string_address)node : (string_address) "-", (positive)table->gpu_req_mode, (positive)table->gpu_req_owner);
-                host_say(log, "    driver        %s %s\n", table->gpu_req_mask & 4 ? (string_address) "ok    " : table->gpu_req_first == 2 ? (string_address) "failed" : (string_address) "not reached",
-                         driver[0] ? (string_address)driver : (string_address) "-");
+                host_say(log, "    node          %s %w, mode %p owner %p\n", table->gpu_req_mask & 2 ? (string_address) "ok    " : (string_address) "failed",
+                         writer_terminal_name, node[0] ? (string_address)node : (string_address) "-", (positive)table->gpu_req_mode, (positive)table->gpu_req_owner);
+                host_say(log, "    driver        %s %w\n", table->gpu_req_mask & 4 ? (string_address) "ok    " : table->gpu_req_first == 2 ? (string_address) "failed" : (string_address) "not reached",
+                         writer_terminal_name, driver[0] ? (string_address)driver : (string_address) "-");
                 for (unsigned int step = 3; step < WINDOWS_GPU_REQS; step++)
                 {
                         if (table->gpu_req_mask & 1u << step)
@@ -650,12 +653,13 @@ static b32 host_debug(string_address address_to arguments, positive count)
 
                 memory_copy(node_bus, table->gpu_node_bus, 32), node_bus[32] = 0;
                 memory_copy(display_bus, table->gpu_display_bus, 32), display_bus[32] = 0;
-                host_say(log, "  gpu node        the card is %s: %s (the display is on %s)\n", node_bus[0] ? (string_address)node_bus : (string_address) "-",
+                host_say(log, "  gpu node        the card is %w: %s (the display is on %w)\n",
+                         writer_terminal_name, node_bus[0] ? (string_address)node_bus : (string_address) "-",
                          !node_bus[0]              ? (string_address) "none (no chip with kernels)" :
                          table->gpu_node_pick == 1 ? (string_address) "the display's own device" :
                          table->gpu_node_pick == 2 ? (string_address) "another device than the display's: it composes only if its PRIME import of the scanout works" :
                                                      (string_address) "the first node of a chip with kernels (no display's bus known)",
-                         display_bus[0] ? (string_address)display_bus : (string_address) "-");
+                         writer_terminal_name, display_bus[0] ? (string_address)display_bus : (string_address) "-");
         }
         if (table->gpu_priority)
                 host_say(log, "  gpu priority    %s\n", table->gpu_priority == 2 ? (string_address) "high: the compositor's jobs run on the card's high-priority compute queue, ahead of a game's drawing"
@@ -680,7 +684,7 @@ static b32 host_debug(string_address address_to arguments, positive count)
 
                 memory_copy(said, (const char *)table->gpu_said, 256);
                 said[256] = 0;
-                host_say(log, "  gpu kernel said %s\n", (string_address)said);
+                host_say(log, "  gpu kernel said %w\n", writer_terminal_name, (string_address)said);
         }
         // The card's last fault: the first page fault the kernel's log had since the job that failed was submitted, and what its address was in (gpu.c).
         if (table->gpu_fault[0])
@@ -689,7 +693,7 @@ static b32 host_debug(string_address address_to arguments, positive count)
 
                 memory_copy(fault, (const char *)table->gpu_fault, sizeof(table->gpu_fault));
                 fault[sizeof(table->gpu_fault)] = 0;
-                host_say(log, "  gpu fault       %s (%p jobs found one)\n", (string_address)fault, (positive)table->gpu_faults);
+                host_say(log, "  gpu fault       %w (%p jobs found one)\n", writer_terminal_name, (string_address)fault, (positive)table->gpu_faults);
         }
         if (table->gpu_map_why)
                 host_say(log, "  gpu map         the last map of a picture for the card was refused: %s (error %p)\n",
@@ -743,12 +747,13 @@ static b32 host_debug(string_address address_to arguments, positive count)
                 if (windows_issues_read(table, &board))
                         for (int at = 0; at < WINDOWS_ISSUES; at++)
                                 if (board.issue[at].used)
-                                        host_say(log, "  issue           %s: %s, %s (%p, %p)%s%s\n", board.issue[at].key,
+                                        host_say(log, "  issue           %w: %s, %s (%p, %p)%s%w\n",
+                                                 writer_terminal_name, (string_address)board.issue[at].key,
                                                  board.issue[at].severity == WINDOWS_ISSUE_ERROR ? (string_address) "error" : (string_address) "warning",
                                                  board.issue[at].code < WINDOWS_ISSUE_COUNT ? windows_issue_names[board.issue[at].code] : (string_address) "an unnamed code",
                                                  (positive)board.issue[at].a, (positive)board.issue[at].b,
                                                  board.issue[at].detail[0] ? (string_address) ": " : (string_address) "",
-                                                 board.issue[at].detail);
+                                                 writer_terminal_name, (string_address)board.issue[at].detail);
                 if (board.refused)
                         host_say(log, "  issue           %p more not shown: the board is full\n", (positive)board.refused);
         }

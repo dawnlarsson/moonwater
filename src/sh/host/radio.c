@@ -379,6 +379,9 @@ static COLD bipolar radio_rules_put(p8 address_to ssid, positive ssid_length, p8
                                            what);
                 return 0;
         }
+        if (!ssid || !ssid_length || ssid_length > 32 ||
+            !radio_text_plain((string_address)ssid, ssid_length))
+                return -EINVAL;
         count = radio_wifi_load(networks, RADIO_WIFI_MOST, null);
         //      A saved list that is there but does not read is not known to
         //      be empty, so the rules are kept as they are; a list that is
@@ -1492,6 +1495,9 @@ static fn radio_scan_note(p8 address_to ssid, positive ssid_length)
                 (void)radio_station_number(RADIO_ASK_SCAN_NOTE, ssid, ssid_length, null, 0, 0);
                 return;
         }
+        if (!ssid || !ssid_length || ssid_length > 32 ||
+            !radio_text_plain((string_address)ssid, ssid_length))
+                return;
 
         bipolar_into_string(number, (bipolar)now);
         string_copy_bounded(text, number, sizeof(text));
@@ -2212,24 +2218,41 @@ static CONST COLD bool radio_join_status(b64 status)
 }
 
 /* What the broker does for one question, with checks on every field: a name
-   no longer than a name, a line to log only as a number it has a line for. */
-static COLD fn radio_broker_answer(radio_ask address_to ask, radio_answer address_to answer)
+   no longer than a name, pinned to the network the broker launched the station
+   for, a line to log only as a number it has a line for, and rule updates
+   restricted to learning stronger protections (PMF / SAE) only. */
+static COLD fn radio_broker_answer(radio_ask address_to ask, radio_answer address_to answer,
+                                   p8 address_to broker_ssid, positive broker_ssid_length)
 {
-        p8 address_to ssid = ask->named ? ask->ssid : null;
-        positive ssid_length = ask->named ? ask->ssid_length : 0;
+        p8 address_to ssid = null;
+        positive ssid_length = 0;
 
         memory_fill(answer, 0, sizeof(*answer));
-        if (ssid_length > sizeof(ask->ssid))
-                return;
+        if (ask->named)
+        {
+                if (ask->ssid_length > sizeof(ask->ssid) ||
+                    ask->ssid_length != broker_ssid_length ||
+                    memory_compare(ask->ssid, broker_ssid, broker_ssid_length))
+                        return;
+                ssid = broker_ssid;
+                ssid_length = broker_ssid_length;
+        }
         switch (ask->what)
         {
         case RADIO_ASK_RULES_GET:
                 answer->answer = ssid ? radio_rules_get(ssid, ssid_length) : 0;
                 break;
         case RADIO_ASK_RULES_PUT:
-                if (ssid)
-                        (void)radio_rules_put(ssid, ssid_length, ask->mask, ask->rules);
+        {
+                //      A confined station may only ratchet downgrade protection
+                //      upward (learning PMF or SAE), never clear rules or allow
+                //      WPA2 on a strict network.
+                p8 learned = (p8)(ask->mask & ask->rules & (WIFI_RULE_PMF | WIFI_RULE_SAE));
+
+                if (ssid && learned)
+                        (void)radio_rules_put(ssid, ssid_length, learned, learned);
                 break;
+        }
         case RADIO_ASK_AVOID_LOAD:
                 answer->count = radio_avoid_load((radio_avoid address_to)answer->avoid);
                 break;
@@ -2341,7 +2364,7 @@ static DEAD_END COLD fn radio_broker(b32 told, p8 address_to ssid, positive ssid
                 else if (ask.what == RADIO_ASK_JOINED)
                         break;
                 else
-                        radio_broker_answer(address_of ask, address_of answer);
+                        radio_broker_answer(address_of ask, address_of answer, ssid, ssid_length);
                 if (socket_send(ends[0], address_of answer, sizeof(answer), MSG_NOSIGNAL, null,
                                 0) != (bipolar)sizeof(answer))
                         break;

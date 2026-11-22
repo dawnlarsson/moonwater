@@ -916,6 +916,13 @@ static COLD bipolar nl80211_station(nl80211 address_to session, p32 index,
         return wifi_mac_set(mac) ? 1 : 0;
 }
 
+static COLD fn nl80211_forget_secret(netlink_buffer address_to buffer)
+{
+        if (buffer->bytes && buffer->used)
+                crypto_forget(buffer->bytes, buffer->used);
+        netlink_forget(buffer);
+}
+
 static COLD bipolar nl80211_new_key(nl80211 address_to session, p32 index, p8 idx,
                                p32 type, p8 address_to mac, p8 address_to key,
                                positive key_length, p8 address_to seq,
@@ -924,6 +931,7 @@ static COLD bipolar nl80211_new_key(nl80211 address_to session, p32 index, p8 id
         netlink_buffer request = {0};
         p32 sequence = netlink_sequence_take();
 
+        scope_exit(nl80211_forget_secret(address_of request));
         if (!nl80211_begin(address_of request, session->family, NL80211_CMD_NEW_KEY,
                            NLM_REQUEST | NLM_ACK, sequence))
                 return -1;
@@ -1221,7 +1229,7 @@ static COLD fn wifi_rekey_offload(wifi_link address_to link)
             {NL80211_REKEY_DATA_REPLAY_CTR, link->replay, 8},
         };
 
-        scope_exit(netlink_forget(address_of request));
+        scope_exit(nl80211_forget_secret(address_of request));
         if (!nl80211_begin(address_of request, link->session.family,
                            NL80211_CMD_SET_REKEY_OFFLOAD, NLM_REQUEST | NLM_ACK, sequence))
                 return;
@@ -2019,7 +2027,7 @@ static COLD bipolar nl80211_connect(nl80211 address_to session, p32 index,
         p32 mfp = NL80211_MFP_REQUIRED;
         bipolar sent;
 
-        scope_exit(netlink_forget(address_of request));
+        scope_exit(nl80211_forget_secret(address_of request));
         if (!nl80211_begin(address_of request, session->family,
                            NL80211_CMD_CONNECT, NLM_REQUEST | NLM_ACK, sequence))
                 return -1;
@@ -2379,40 +2387,45 @@ static COLD bool wifi_sae_take(wifi_sae address_to sae, const p8 address_to scal
         p8 shared[64], sum_point[64], term[64], keyseed[32], zeros[32], sum[32], keys[64];
         crypto_point first, second, total;
         p64 x[CRYPTO_FE_MAX], y[CRYPTO_FE_MAX];
-        bool good;
+        bool good = false;
 
         memory_fill(zeros, 0, sizeof(zeros));
         memory_copy(sae->peer_scalar, scalar, 32);
         memory_copy(sae->peer_element, element, 64);
-        if (!wifi_sae_multiply(term, scalar, sae->pwe))
-                return false;
-        crypto_fe_load_be(x, term, 4);
-        crypto_fe_load_be(y, term + 32, 4);
-        crypto_point_set_xy(&first, x, y, &crypto_p256_field);
-        crypto_fe_load_be(x, element, 4);
-        crypto_fe_load_be(y, element + 32, 4);
-        crypto_point_set_xy(&second, x, y, &crypto_p256_field);
-        crypto_point_add(&total, &first, &second);
-        if (crypto_fe_is_zero(total.z, 4))
-                return false;
-        crypto_point_affine(&total);
-        crypto_fe_store_be(sum_point, total.x, 4);
-        crypto_fe_store_be(sum_point + 32, total.y, 4);
-        good = wifi_sae_multiply(shared, sae->rand, sum_point);
-        if (good)
+        if (wifi_sae_multiply(term, scalar, sae->pwe))
         {
-                crypto_hmac_sha256(zeros, 32, shared, 32, keyseed);
-                wifi_sae_scalar_add(sum, sae->scalar, scalar);
-                wifi_sae_kdf(keyseed, 32, "SAE KCK and PMK", sum, 32, keys, 512);
-                memory_copy(sae->kck, keys, 32);
-                memory_copy(sae->pmk, keys + 32, 32);
-                memory_copy(sae->pmkid, sum, 16);
+                crypto_fe_load_be(x, term, 4);
+                crypto_fe_load_be(y, term + 32, 4);
+                crypto_point_set_xy(&first, x, y, &crypto_p256_field);
+                crypto_fe_load_be(x, element, 4);
+                crypto_fe_load_be(y, element + 32, 4);
+                crypto_point_set_xy(&second, x, y, &crypto_p256_field);
+                crypto_point_add(&total, &first, &second);
+                if (!crypto_fe_is_zero(total.z, 4))
+                {
+                        crypto_point_affine(&total);
+                        crypto_fe_store_be(sum_point, total.x, 4);
+                        crypto_fe_store_be(sum_point + 32, total.y, 4);
+                        good = wifi_sae_multiply(shared, sae->rand, sum_point);
+                        if (good)
+                        {
+                                crypto_hmac_sha256(zeros, 32, shared, 32, keyseed);
+                                wifi_sae_scalar_add(sum, sae->scalar, scalar);
+                                wifi_sae_kdf(keyseed, 32, "SAE KCK and PMK", sum, 32, keys, 512);
+                                memory_copy(sae->kck, keys, 32);
+                                memory_copy(sae->pmk, keys + 32, 32);
+                                memory_copy(sae->pmkid, sum, 16);
+                        }
+                }
         }
         crypto_forget(shared, sizeof(shared));
         crypto_forget(sum_point, sizeof(sum_point));
         crypto_forget(term, sizeof(term));
         crypto_forget(keyseed, sizeof(keyseed));
+        crypto_forget(sum, sizeof(sum));
         crypto_forget(keys, sizeof(keys));
+        crypto_forget(x, sizeof(x));
+        crypto_forget(y, sizeof(y));
         crypto_forget(&first, sizeof(first));
         crypto_forget(&second, sizeof(second));
         crypto_forget(&total, sizeof(total));
@@ -3388,6 +3401,11 @@ static COLD bipolar nl80211_join_once(p8 address_to ssid, positive ssid_length,
                                 link->pending_set = link->nonce_used = false;
                                 link->gtk_installed = link->igtk_installed = 0;
                                 memory_fill(link->replay, 0, sizeof(link->replay));
+                                crypto_forget(link->pmk, sizeof(link->pmk));
+                                crypto_forget(link->ptk, sizeof(link->ptk));
+                                crypto_forget(link->pending, sizeof(link->pending));
+                                crypto_forget(link->gtk, sizeof(link->gtk));
+                                crypto_forget(link->igtk, sizeof(link->igtk));
                                 if (link->eapol >= 0)
                                         socket_close(link->eapol);
                                 link->eapol = -1;

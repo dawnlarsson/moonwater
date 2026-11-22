@@ -3608,7 +3608,8 @@ static fn locale_nts_status(bool label)
                                       (string_address)servers + at * LOCALE_NTS_ENTRY_ROOM);
         }
         host_read_word(LOCALE_NTP_LAST_PATH, last, sizeof(last));
-        host_say(log, "; the clock was last set by %s\n",
+        host_say(log, "; the clock was last set by %w\n",
+                 writer_terminal_name,
                  last[0] ? (string_address)last
                          : (string_address) "nothing this boot");
 }
@@ -3771,7 +3772,7 @@ static b32 locale_ntp_server_status(void)
         p8 server[LOCALE_NTP_SERVER_ROOM];
         string_address said = locale_ntp_server_say(server, sizeof(server));
 
-        host_say(log, host_label "ntp server %s\n", said);
+        host_say(log, host_label "ntp server %w\n", writer_terminal_name, said);
         return 0;
 }
 

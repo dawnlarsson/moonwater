@@ -147,7 +147,13 @@ static bool memory_descriptor(string_address directory, string_address name, add
         length = (bipolar)string_length(census.top[at].name);
         if (length > 10 && !string_compare_max(census.top[at].name + length - 10, " (deleted)", 10))
                 census.top[at].name[length - 10] = end;
+        for (positive i = 0; census.top[at].name[i]; i++)
+                if (census.top[at].name[i] < 0x20 || census.top[at].name[i] >= 0x7f)
+                        census.top[at].name[i] = '?';
         string_copy_bounded(census.top[at].owner, census.owner, sizeof(census.top[at].owner));
+        for (positive i = 0; census.top[at].owner[i]; i++)
+                if (census.top[at].owner[i] < 0x20 || census.top[at].owner[i] >= 0x7f)
+                        census.top[at].owner[i] = '?';
         return true;
 }
 
@@ -198,12 +204,11 @@ static fn memory_line(p8 address_to line, positive room)
 {
         p8 text[4096];
         p64 installed = 0, total, available, shared;
+        bipolar got;
 
         memory_zero(&census, sizeof(census));
-        if (file_slurp_once_at(AT_FDCWD, "/proc/meminfo", text, sizeof(text) - 1) <= 0)
-                text[0] = end;
-        else
-                text[sizeof(text) - 1] = end;
+        got = file_slurp_once_at(AT_FDCWD, "/proc/meminfo", text, sizeof(text) - 1);
+        text[got > 0 ? (positive)got : 0] = end;
         total = memory_meminfo((string_address)text, "MemTotal:");
         available = memory_meminfo((string_address)text, "MemAvailable:");
         shared = memory_meminfo((string_address)text, "Shmem:");

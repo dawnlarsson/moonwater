@@ -1113,7 +1113,8 @@ static b32 locale_audio_status(string_address address_to arguments)
 
                 if (stream->index == 0xffffffffu)
                         continue;
-                host_say(log, "  %s  %p percent%s%s\n", (string_address)(stream->app[0] ? stream->app : stream->media[0] ? stream->media : "?"),
+                host_say(log, "  %w  %p percent%s%s\n", writer_terminal_name,
+                         (string_address)(stream->app[0] ? stream->app : stream->media[0] ? stream->media : "?"),
                          locale_audio_percent(stream->volume), (stream->flags & AUDIO_STATE_MUTED) ? (string_address) ", muted" : (string_address) "",
                          (stream->flags & AUDIO_STATE_PLAYING) && !(stream->flags & AUDIO_STATE_CORKED) ? (string_address) ", playing" : (string_address) "");
         }
@@ -1136,7 +1137,8 @@ static b32 locale_audio_status(string_address address_to arguments)
 
                 if (record->index == 0xffffffffu || (record->flags & AUDIO_STATE_MONITOR))
                         continue;
-                host_say(log, "  %s  recording, %p percent%s%s\n", (string_address)(record->app[0] ? record->app : record->media[0] ? record->media : "?"),
+                host_say(log, "  %w  recording, %p percent%s%s\n", writer_terminal_name,
+                         (string_address)(record->app[0] ? record->app : record->media[0] ? record->media : "?"),
                          locale_audio_percent(record->volume), (record->flags & AUDIO_STATE_MUTED) ? (string_address) ", muted" : (string_address) "",
                          (record->flags & AUDIO_STATE_CORKED) ? (string_address) ", paused" : (string_address) "");
         }

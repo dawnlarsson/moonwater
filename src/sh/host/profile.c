@@ -440,7 +440,8 @@ static fn profile_say_thread(positive index, positive seconds, p64 address_to co
         bool shell = profile.shell[thread->process] && profile.symbol_count;
         p64 user = thread->samples - thread->kernel;
 
-        host_say(log, "  thread %p %s: %p%% of a core, %p%% of it in the kernel\n", (positive)thread->tid,
+        host_say(log, "  thread %p %w: %p%% of a core, %p%% of it in the kernel\n", (positive)thread->tid,
+                 writer_terminal_name,
                  thread->name[0] ? (string_address)thread->name : (string_address) "?",
                  (positive)(thread->samples * 100 / (PROFILE_HZ * seconds)),
                  (positive)(thread->samples ? thread->kernel * 100 / thread->samples : 0));
@@ -484,7 +485,8 @@ static fn profile_say_thread(positive index, positive seconds, p64 address_to co
                                 most = counts[at], best = at;
                 if (!most || most * 200 < user)
                         break;
-                host_say(log, "    %p%%  %s\n", (positive)(most * 100 / user),
+                host_say(log, "    %p%%  %w\n", (positive)(most * 100 / user),
+                         writer_terminal_name,
                          shell ? (string_address)profile.symbol_text + profile.symbol_name[best]
                                : (string_address)profile.names + profile.mappings[best].name);
                 counts[best] = 0;
