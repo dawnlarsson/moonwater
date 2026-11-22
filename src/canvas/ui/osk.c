@@ -122,7 +122,7 @@ static const unsigned short osk_letter_start[3] = {16, 30, 44};
 // The accents a long press of a letter shows: each row is the lower-case letter and the characters it takes (code points), in the
 // order they are shown. They cover the Latin-script languages of the Settings list (Español, Français, Deutsch, Português, Italiano,
 // Nederlands, Polski, Türkçe, Svenska; English has none, and the Cyrillic, Greek, Arabic, Hebrew, Persian and Urdu keyboards are not
-// Latin letters). The layout does not change them. Capitals come from osk_upper (Shift on the key makes the capital of each).
+// Latin letters). The layout does not change them. Capitals come from unicode_case (Shift on the key makes the capital of each).
 static const unsigned int osk_accents[][10] = {
     {'a', 0xe0, 0xe1, 0xe2, 0xe4, 0xe3, 0xe5, 0xe6, 0x105},          // à á â ä ã å æ ą
     {'c', 0xe7, 0x107, 0x10d},                                       // ç ć č
@@ -137,21 +137,6 @@ static const unsigned int osk_accents[][10] = {
     {'y', 0xff},                                                     // ÿ
     {'z', 0x17a, 0x17c, 0x17e},                                      // ź ż ž
 };
-
-// The capital of an accent in the table: Latin-1's small letters are 0x20 above their capitals (ÿ is Ÿ), the Latin Extended-A letters
-// in the table are the code after their capital, and ı is I. ß has no capital here and stays.
-static unsigned int osk_upper(unsigned int ch)
-{
-        if (ch == 0x131)
-                return 'I';
-        if (ch >= 0xe0 && ch <= 0xfe && ch != 0xf7)
-                return ch - 0x20;
-        if (ch == 0xff)
-                return 0x178;
-        if (ch >= 0x100 && ch <= 0x17f)
-                return ch - 1;
-        return ch;
-}
 
 // The pages: the letters (built for the layout, osk_letters_build), the numbers and the common symbols, the second symbols page. A row
 // of keys is the kit's buttons in a line, each as wide as its span of the row's halves says, and the row fills the keyboard's width.
@@ -581,7 +566,7 @@ static void osk_alts_open(void)
         if (!accents)
                 return;
         for (unsigned int n = 1; n < sizeof(osk_accents[0]) / sizeof(osk_accents[0][0]) && accents[n] && count < OSK_ALT_MOST; n++)
-                osk.alt_chars[count++] = osk.long_capital ? osk_upper(accents[n]) : accents[n];
+                osk.alt_chars[count++] = osk.long_capital ? (unsigned int)unicode_case(accents[n], UNICODE_CASE_UPPER) : accents[n];
         k = &osk.keys[letter];
         width = k->w, total = count * width + (count - 1) * gap;
         most = osk.width * 100 / ui->scale;
