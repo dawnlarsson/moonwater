@@ -21667,6 +21667,14 @@ static fn ui_apps_picture_tend(b32 all)
                 ui_apps_job.flush = true, ui_apps_picture_start();
 }
 
+// The pictures made again at their sizes put away (a resident window's, while it is hidden): the kept ones stay, so the next draw scales again.
+static fn ui_apps_pictures_trim(void)
+{
+        for (int at = 0; at < ui_apps.count; at++)
+                if (ui_apps.app[at].cached)
+                        memory_free(ui_apps.app[at].cached, (positive)UI_APP_PICTURE * UI_APP_PICTURE * 4), ui_apps.app[at].cached = null, ui_apps.app[at].cached_side = 0;
+}
+
 // Whether an entry has a picture of its own (made the first time this is asked, as ui_apps_picture makes it; the size kept is left as it was).
 static b32 ui_apps_has_picture(int which)
 {
@@ -26859,6 +26867,12 @@ struct ui_app
         b32 mono;                       // the kit's mono face is loaded too (a tag, a code well, a key)
         b32 own_title;                  // the app names its window itself as it runs (the terminal): the kit sets the title once, at the start
         b32 dismiss;                    // a popup: the loop ends when the keys go elsewhere after they have been its (had_keys is the kit's)
+        // A resident popup (WINDOW_RESIDENT: the launcher): where a dismiss would end the loop, the window is put away (the compositor keeps
+        // it minimized) and the program stays up; a press on its button shows it again at once. away runs as it is put away (drop what is
+        // cheap to make again, make the picture the next show starts with), back as it is shown again (look fresh: refresh, anchor).
+        b32 resident, put_away;
+        void (*away)(void);
+        void (*back)(void);
         b32 had_keys;
         void (*page)(unsigned int page); // optional: a second start asked for this page (ui_lift_row), the one a tab press would show
         void (*language)(void);         // optional: run when the language changes; the kit listens for it, once, as the app starts
@@ -26872,12 +26886,28 @@ struct ui_app
         struct ui_job address_to job;   // optional: async piped child job, auto-wired into tick/ready/close by ui_app_run
 };
 
-// The keys came or went: whether the app goes on. A popup (dismiss) that has had the keys and loses them is done, as is an app whose focus hook says so.
+// A resident popup asks the compositor to put it away: a close of its own row, which the compositor takes for a put away (it minimizes it).
+static fn ui_app_put_away(struct ui_app address_to app)
+{
+        struct windows address_to table = app->own->table;
+        unsigned int row = app->own->row;
+        app->had_keys = false;
+        __atomic_store_n(&table->close_target[row], row + 1, __ATOMIC_RELEASE);
+        __atomic_add_fetch(&table->close_target_serial[row], 1, __ATOMIC_RELEASE);
+}
+
+// The keys came or went: whether the app goes on. A popup (dismiss) that has had the keys and loses them is done (a resident one is put
+// away), as is an app whose focus hook says so.
 static b32 ui_app_keys(struct ui_app address_to app, b32 focused)
 {
         app->had_keys |= focused;
         if (app->dismiss && app->had_keys && !focused)
-                return false;
+        {
+                if (!app->resident)
+                        return false;
+                ui_app_put_away(app);
+                return true;
+        }
         return !app->focus || app->focus(focused);
 }
 
@@ -27487,7 +27517,8 @@ static int ui_app_run(struct ui_app address_to app)
                                 ui_app_changed(app);
                         if (app->popup)
                                 ui_app_popup_done(app, ui_popmenu_scroll(app->popup, &event));
-                        running &= app->event(&event);
+                        if (!app->event(&event))
+                                app->resident ? ui_app_put_away(app) : (void)(running = false);
                 }
                 ui_kit_pass();
                 if (app->popup && app->popup->open)
@@ -27510,6 +27541,20 @@ static int ui_app_run(struct ui_app address_to app)
                         }
                         ui_app_changed(app);
                         running &= ui_app_keys(app, *app->focused);
+                }
+                // A resident window put away by the compositor (minimized) or shown again: the app's away and back.
+                if (app->resident)
+                {
+                        b32 away = (__atomic_load_n(&table->state[row], __ATOMIC_ACQUIRE) & WINDOW_MINIMIZED) != 0;
+                        if (away != app->put_away)
+                        {
+                                app->put_away = away;
+                                if (away && app->away)
+                                        app->away();
+                                else if (!away && app->back)
+                                        app->back();
+                                ui_app_changed(app);
+                        }
                 }
                 if (table->ground[row] && table->ground[row] != *app->ground)
                 {

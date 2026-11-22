@@ -2020,7 +2020,7 @@ static void compositor_take_first(int row, unsigned int width, unsigned int heig
         compositor.row_space[row] = compositor.row_space_prev[row] = 0;
         compositor.lifted[row] = table->lift[row], compositor.moved[row] = table->moved[row];
         compositor.glassy[row] = table->glass[row] & WINDOW_GLASS;
-        compositor.asks[row] = table->glass[row] & (WINDOW_NO_CLOSE | WINDOW_DISMISS | WINDOW_NO_TAB | WINDOW_NO_GRAB | WINDOW_NO_KEYS | WINDOW_KEYBOARD);
+        compositor.asks[row] = table->glass[row] & (WINDOW_NO_CLOSE | WINDOW_DISMISS | WINDOW_NO_TAB | WINDOW_NO_GRAB | WINDOW_NO_KEYS | WINDOW_KEYBOARD | WINDOW_RESIDENT);
         if ((compositor.asks[row] & (WINDOW_NO_KEYS | WINDOW_KEYBOARD)) && !compositor_osk_is(row))
                 compositor.asks[row] &= ~(WINDOW_NO_KEYS | WINDOW_KEYBOARD);
         compositor.layer[row] = compositor_layer_clamp(table->layer[row]);
@@ -2069,6 +2069,7 @@ static void compositor_damage_clipped(int row, const int r[4], unsigned int widt
 */
 static unsigned int compositor_close_seen[WINDOWS];
 static void compositor_close(int row);
+static void compositor_put_away(int row);
 
 static void compositor_close_request(int row)
 {
@@ -2083,6 +2084,13 @@ static void compositor_close_request(int row)
         if (!target || target > COMPOSITOR_ROWS)
                 return;
         want = (int)target - 1;
+        // A resident window's close of its own row is its put away (the kit's ui_app_put_away: the launcher dismissed).
+        if (want == row && (compositor.asks[row] & WINDOW_RESIDENT) && compositor.showing[row] &&
+            windows_owner_ok(&windows_owner_held[row], __atomic_load_n(&table->pid[row], __ATOMIC_ACQUIRE)))
+        {
+                compositor_put_away(row);
+                return;
+        }
         if (want == row || want >= (int)compositor_rows_in_use || !compositor.showing[want] || !compositor.showing[row] || !compositor.app_id[row][0])
                 return;
         if (!windows_owner_ok(&windows_owner_held[row], __atomic_load_n(&table->pid[row], __ATOMIC_ACQUIRE)) ||
@@ -3323,10 +3331,31 @@ static void compositor_osk_setting_read(void)
         compositor_osk_sync();
 }
 
+/* A resident window (WINDOW_RESIDENT: the launcher) is put away where another would be closed: minimized with its program up, so a press on
+   its button shows it at once (compositor_reveal) where the button would start the program again. */
+static void compositor_put_away(int row)
+{
+        if (row < 0 || !compositor.showing[row] || (compositor.state[row] & (WINDOW_MINIMIZED | WINDOW_CLOSING)))
+                return;
+        compositor_damage_row(row);
+        compositor.state[row] |= WINDOW_MINIMIZED;
+        compositor.table->state[row] = compositor.state[row];
+        compositor.stack_gen++;
+        if (row == compositor.focus)
+                compositor_refocus();
+        compositor_tabs_changed();
+        rows_add(&compositor.woken, row);
+}
+
 static void compositor_close(int row)
 {
         if (row < 0 || !compositor.showing[row] || (compositor_popup_parent[row] >= 0 && (compositor.state[row] & WINDOW_CLOSING)))
                 return;
+        if (compositor.asks[row] & WINDOW_RESIDENT)
+        {
+                compositor_put_away(row);
+                return;
+        }
         compositor_close_count(row, compositor.close_asks[row] == 255 ? 1u : compositor.close_asks[row] + 1u);
         compositor.state[row] |= WINDOW_CLOSING;
         compositor.table->state[row] = compositor.state[row];

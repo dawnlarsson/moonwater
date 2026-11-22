@@ -1183,13 +1183,26 @@ static void compositor_settings_open(void)
 
 static void compositor_menu_close(void);
 
+// The launcher asked for (its button, the logo key, a swipe; the button's square already in the table): the one kept up and put away
+// (WINDOW_RESIDENT) is shown at once, and its program anchors it again to the square; with none, the rules are told and start it.
+static void compositor_launcher_show(void)
+{
+        int kept = compositor_launcher_kept();
+
+        compositor.launcher_asked++;
+        if (kept >= 0)
+                compositor_reveal(kept);
+        else
+                compositor_script_say("launcher_button");
+}
+
 static void compositor_launcher_open(int x, int y)
 {
         compositor_menu_close();
         compositor_scenes_close();
         compositor_popups_close(-1, -1);
-        compositor.launcher_asked++;
-        compositor_popup_trigger(null, "launcher_button", x, y, TASKBAR_LAUNCHER);
+        compositor_button_rect(x, y, TASKBAR_LAUNCHER);
+        compositor_launcher_show();
 }
 
 static int compositor_logo_tap(unsigned char *alone, unsigned int bit, int value, int others)
@@ -3751,7 +3764,7 @@ static void compositor_swipe_act(unsigned int at, positive now, const struct ui_
         }
         else if (swipe->side == UI_EDGE_BOTTOM)
                 compositor_table_button_set(swipe->x0 - span / 2, swipe->rect[1] + swipe->rect[3] - thick, span, thick, TASKBAR_BOTTOM, (unsigned int)swipe->screen),
-                compositor.launcher_asked++, compositor_script_say("launcher_button");
+                compositor_launcher_show();
         else if ((swipe->side == UI_EDGE_LEFT ? compositor.side_left : compositor.side_right) == COMPOSITOR_SIDE_WINDOWS)
                 compositor_focus_step(), compositor_focus_commit();
         else
@@ -3759,9 +3772,10 @@ static void compositor_swipe_act(unsigned int at, positive now, const struct ui_
                 int right = swipe->side == UI_EDGE_RIGHT;
                 compositor_table_button_set(right ? swipe->rect[0] + swipe->rect[2] - thick : swipe->rect[0], swipe->y0 - span / 2, thick, span,
                                             right ? TASKBAR_RIGHT : TASKBAR_LEFT, (unsigned int)swipe->screen);
-                if (!right)
-                        compositor.launcher_asked++;
-                compositor_script_say(right ? "volume_button" : "launcher_button");
+                if (right)
+                        compositor_script_say("volume_button");
+                else
+                        compositor_launcher_show();
         }
         swipe->state = COMPOSITOR_SWIPE_SWIPED;
 }

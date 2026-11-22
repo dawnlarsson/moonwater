@@ -2304,6 +2304,8 @@ static b32 compositor_main()
 #endif
         compositor_settings_apply(COMPOSITOR_SET_THEME | COMPOSITOR_SET_SCROLL | COMPOSITOR_SET_VRR | COMPOSITOR_SET_HAND | COMPOSITOR_SET_OSK);
         for (unsigned int at = 0; at < COMPOSITOR_INPUTS; at++) compositor_input_publish(at);
+        // The launcher's button's square, there before any press: a launcher kept up and put away from the start (launcher -k) anchors to it.
+        compositor_button_rect(-1, -1, TASKBAR_LAUNCHER);
         if (!headless) compositor_reader_start();
         compositor_up_say(up);
 

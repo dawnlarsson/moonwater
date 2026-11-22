@@ -317,6 +317,7 @@ enum
 {
         WINDOW_GLASS = 1u, WINDOW_NO_CLOSE = 2u, WINDOW_DISMISS = 4u, WINDOW_NO_TAB = 8u,
         WINDOW_NO_GRAB = 16u, WINDOW_NO_KEYS = 32u, WINDOW_KEYBOARD = 64u, WINDOWS_OSK = 16,
+        WINDOW_RESIDENT = 128u, // a dismissed window (the launcher) is put away, not closed: it stays up, and a press on its button shows it at once
         WINDOW_POINTER_ARROW = 0u, WINDOW_POINTER_RESIZE = 1u, WINDOW_POINTER_TEXT = 5u, WINDOW_POINTER_HAND = 8u,
         WINDOWS_REFUSED_RATE = 1u, WINDOWS_REFUSED_TURN = 2u, WINDOWS_REFUSED_PLACE = 4u, WINDOWS_REFUSED_SIZE = 8u,
         WINDOWS_LOOP_SOURCES = 10,

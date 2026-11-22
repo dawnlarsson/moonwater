@@ -2489,6 +2489,85 @@ static void check_taskbar_pins_put(const char *line)
     taskbar_pins_read();
 }
 
+/*
+        The launcher kept up (WINDOW_RESIDENT). The compositor puts it away where it would close it (the logo key while it is up, a press
+        outside it) and on its program's own ask (a close of its own row: the kit's ui_app_put_away), minimized with its program up; it is
+        then no launcher that is up (the moon's lit test) but the one kept, and its button shows it at once, with nothing said to the
+        rules (no program started), its keys given. A window that is not resident is closed as before, and with no launcher kept the
+        button is said to the rules. The kit: a resident popup that loses the keys asks to be put away and runs on.
+*/
+static void check_launcher_kept(void)
+{
+    static unsigned int screen[GLASS_SIDE * GLASS_SIDE];
+    static const unsigned int fake[] = {1, 2};
+    struct windows address_to table;
+    unsigned int owner, asked;
+    b32 away, kept, shown, own_ask, closes, kit;
+
+    compositor_zero();
+    compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
+    compositor.resize = compositor.press = compositor.keys_to = COMPOSITOR_NONE;
+    compositor.width = compositor.height = GLASS_SIDE, compositor.scale = 100, compositor.card = -1;
+    compositor.scanout = screen, compositor.scanout_pitch = GLASS_SIDE * 4;
+    if (!glass_table_map())
+    {
+        check("launcher kept: the table is mapped", false);
+        return;
+    }
+    table = compositor.table;
+    for (int row = 1; row <= 2; row++)
+    {
+        table->x[row] = 20 + 60 * row, table->y[row] = 20, table->width[row] = 50, table->height[row] = 60;
+        table->glass[row] = WINDOW_GLASS | WINDOW_NO_CLOSE | WINDOW_DISMISS | (row == 1 ? WINDOW_RESIDENT : 0u);
+        glass_paint(row, 0, 0, 50, 60, 0x404040u + (unsigned int)row, true);
+    }
+    compositor_present();
+    owner = tab_owner_start(fake, 2);
+    tab_claim(table, 1, owner);
+    compositor_focus(1);
+    // The logo key's close of the launcher up: put away, not closed.
+    compositor_close(1);
+    away = (compositor.state[1] & WINDOW_MINIMIZED) && !(compositor.state[1] & WINDOW_CLOSING) && (table->state[1] & WINDOW_MINIMIZED) &&
+           compositor_launcher_row() != 1 && compositor.focus != 1;
+    kept = compositor_launcher_kept() == 1;
+    asked = compositor.launcher_asked;
+    compositor_launcher_show();
+    shown = !(compositor.state[1] & WINDOW_MINIMIZED) && compositor.focus == 1 && compositor_launcher_row() == 1 && compositor.launcher_asked == asked + 1 &&
+            compositor_launcher_kept() < 0;
+    // Its program's own ask: a close of its own row.
+    __atomic_store_n(&table->close_target[1], 2u, __ATOMIC_RELEASE);
+    __atomic_add_fetch(&table->close_target_serial[1], 1, __ATOMIC_RELEASE);
+    compositor_close_request(1);
+    own_ask = (compositor.state[1] & WINDOW_MINIMIZED) && !(compositor.state[1] & WINDOW_CLOSING) && compositor_launcher_kept() == 1;
+    // A dismissed window that is not resident is closed.
+    compositor_close(2);
+    closes = (compositor.state[2] & WINDOW_CLOSING) && !(compositor.state[2] & WINDOW_MINIMIZED);
+    check("launcher kept: closed, a resident launcher is put away (minimized, its program up), no launcher up but the one kept", away && kept);
+    check("launcher kept: its button shows it at once, its keys given, with nothing said to the rules", shown);
+    check("launcher kept: its program's close of its own row puts it away", own_ask);
+    check("launcher kept: a dismissed window that is not resident is closed as before", closes);
+    // The kit: a resident popup that had the keys and loses them asks to be put away and runs on; one that is not resident ends.
+    {
+        static struct window_row row_own;
+        static struct ui_app app;
+        unsigned int serial;
+        b32 runs, ends;
+
+        row_own.table = table, row_own.row = 2;
+        memory_zero(&app, sizeof(app));
+        app.own = &row_own, app.dismiss = true, app.resident = true;
+        serial = __atomic_load_n(&table->close_target_serial[2], __ATOMIC_ACQUIRE);
+        runs = ui_app_keys(&app, true) && ui_app_keys(&app, false) && table->close_target[2] == 3u &&
+               __atomic_load_n(&table->close_target_serial[2], __ATOMIC_ACQUIRE) == serial + 1 && !app.had_keys;
+        app.resident = false;
+        ends = ui_app_keys(&app, true) && !ui_app_keys(&app, false);
+        kit = runs && ends;
+    }
+    check("launcher kept: the kit's resident popup that loses the keys asks to be put away and runs on; one not resident ends", kit);
+    tab_owners_end();
+    windows_owner_held[1] = (struct windows_owner){0, 0};
+}
+
 static char pins_cache[200]; // the kept pictures' file of check_taskbar_pins: its directory's
 
 static void check_taskbar_pins(void)

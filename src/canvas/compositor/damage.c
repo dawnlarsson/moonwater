@@ -1562,8 +1562,18 @@ static void compositor_popup_leave(int row);
 static int compositor_launcher_row(void)
 {
         for (int row = 0; row < (int)compositor_rows_in_use; row++)
-                if (compositor.showing[row] && compositor_popup_parent[row] < 0 && !(compositor.state[row] & WINDOW_CLOSING) &&
+                if (compositor.showing[row] && compositor_popup_parent[row] < 0 && !(compositor.state[row] & (WINDOW_CLOSING | WINDOW_MINIMIZED)) &&
                     (compositor.asks[row] & (WINDOW_DISMISS | WINDOW_NO_CLOSE)) == (WINDOW_DISMISS | WINDOW_NO_CLOSE))
+                        return row;
+        return COMPOSITOR_NONE;
+}
+
+// The launcher kept up and put away (WINDOW_RESIDENT, minimized): its button shows it at once, with no program started.
+static int compositor_launcher_kept(void)
+{
+        for (int row = 0; row < (int)compositor_rows_in_use; row++)
+                if (compositor.showing[row] && compositor_popup_parent[row] < 0 && (compositor.state[row] & (WINDOW_CLOSING | WINDOW_MINIMIZED)) == WINDOW_MINIMIZED &&
+                    (compositor.asks[row] & (WINDOW_DISMISS | WINDOW_NO_CLOSE | WINDOW_RESIDENT)) == (WINDOW_DISMISS | WINDOW_NO_CLOSE | WINDOW_RESIDENT))
                         return row;
         return COMPOSITOR_NONE;
 }

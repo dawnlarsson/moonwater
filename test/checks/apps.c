@@ -11004,6 +11004,7 @@ b32 main()
         GROUP("check_taskbar_tab_menu", check_taskbar_tab_menu());
         GROUP("check_apps_registry", check_apps_registry());
         GROUP("check_taskbar_pins", check_taskbar_pins());
+        GROUP("check_launcher_kept", check_launcher_kept());
         GROUP("check_wallpaper_turn", check_wallpaper_turn());
         GROUP("check_icons", check_icons());
         GROUP("check_taskbar_identity", check_taskbar_identity());
