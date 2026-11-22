@@ -57,6 +57,10 @@
 #define AUDIO_LOW_MS 20               // the buffer of a stream (tlength) at most this many ms makes its output low-latency
 #define AUDIO_STALL_NS 10000000000ull // a client that has taken none of what it was sent for this long is dropped
 #define AUDIO_RESCAN_NS 2000000000ull
+#define AUDIO_GAME_LOOK_NS 250000000ull   // how often a playing output reads whether a game is fullscreen (the compositor's game slice)
+#define AUDIO_GAME_HOLD_NS 1000000000ull  // how long that has to hold before the output's periods follow it (an Alt-Tab reopens no card)
+#define AUDIO_GAME_XRUNS 3                // underruns in AUDIO_GAME_XRUN_NS of a game's low periods that send it back to the normal ones
+#define AUDIO_GAME_XRUN_NS 10000000000ull
 #define AUDIO_SETTINGS "/root"
 #define AUDIO_APPS 64
 #define AUDIO_STATE_NS 16000000ull       // the page is written this often while anything plays
@@ -137,6 +141,12 @@ static struct
                 char app[48], media[48], icon[32];
         } *text, *record_text;
         positive state_at, settings_at, devices_at, save_at, dirty_since;
+        // A fullscreen game's low-latency periods (audio_game_pass): the last look and what it saw since when, whether the output's low
+        // periods are the game's (not a stream's own ask), and the underruns counted from game_xrun_at, after which game_backed holds the
+        // normal periods until no game is fullscreen.
+        positive game_at, game_since, game_xrun_at;
+        int game_seen, game_forced, game_backed;
+        unsigned long game_xruns;
         int dirty;                      // a volume, a mute or a program's volume changed and is to be kept
         unsigned long applied_volume;   // what the settings files last said (or the server last wrote), so its own write is not read as a change
         int applied_mute;
@@ -601,6 +611,24 @@ static long audio_rate_target(int takes, long stream, long fallback)
         return takes && stream > 0 ? stream : fallback;
 }
 
+// Whether a game is fullscreen: the compositor writes the pids of the fullscreen games it gave the game slice to
+// /run/moonwater/game-slice, and empties it when there are none (a check points this at a file of its own).
+static const char *audio_game_slice = "/run/moonwater/game-slice";
+
+static int audio_game_now(void)
+{
+        char byte;
+        long fd = audio_call(syscall(openat), (positive)AT_FDCWD, (positive)audio_game_slice, O_RDONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW, 0, 0, 0);
+        int game = 0;
+
+        if (fd >= 0)
+        {
+                game = audio_call(syscall(read), (positive)fd, (positive)&byte, 1, 0, 0, 0) > 0;
+                audio_call(syscall(close), (positive)fd, 0, 0, 0, 0, 0);
+        }
+        return game;
+}
+
 // The first playback stream that plays now: its rate (0 when none plays), and in *low whether the latency it asked for (its tlength
 // before the card's share is taken off) is no more than AUDIO_LOW_MS, which asks the output for the low-latency periods.
 static long audio_playing_stream(int *low)
@@ -618,21 +646,7 @@ static long audio_playing_stream(int *low)
                         continue;
                 frames = s->voice.frame ? (long)(s->asked / s->voice.frame) : 0;
                 if (low)
-                {
                         *low = frames > 0 && (long long)frames * 1000 <= (long long)s->rate * AUDIO_LOW_MS;
-                        if (!*low)
-                        {
-                                char byte;
-                                long gfd = audio_call(syscall(openat), (positive)AT_FDCWD, (positive) "/run/moonwater/game-slice", O_RDONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW, 0, 0, 0);
-
-                                if (gfd >= 0)
-                                {
-                                        if (audio_call(syscall(read), (positive)gfd, (positive)&byte, 1, 0, 0, 0) > 0)
-                                                *low = 1;
-                                        audio_call(syscall(close), (positive)gfd, 0, 0, 0, 0, 0);
-                                }
-                        }
-                }
                 return s->rate;
         }
         return 0;
@@ -663,6 +677,59 @@ static void audio_rate_choose(long stream, int low)
         }
         audio_output_open(target, low);
         string_format(log, "audio: a stream at %p Hz begins on an idle output: the output runs at %p Hz\n", (positive)stream, (positive)audio_service.rate);
+        log_flush();
+}
+
+/*
+        A fullscreen game plays with the low-latency periods (64 frames, four ahead: 5.3 ms of card against 8) for as long as it is
+        one, and the output goes back to the periods its stream asked for when none is: looked at every AUDIO_GAME_LOOK_NS while a
+        stream plays, followed once it has held AUDIO_GAME_HOLD_NS, so an Alt-Tab and back reopens no card. The underruns of a game's
+        low periods are counted; AUDIO_GAME_XRUNS of them within AUDIO_GAME_XRUN_NS send it back to the normal periods, said in the log,
+        until no game is fullscreen.
+*/
+static void audio_game_pass(positive now)
+{
+        int game, stream_low = 0, want;
+
+        if (now - audio_service.game_at < AUDIO_GAME_LOOK_NS)
+                return;
+        audio_service.game_at = now;
+        game = audio_game_now();
+        if (!game)
+                audio_service.game_backed = 0;
+        if (game != audio_service.game_seen)
+                audio_service.game_seen = game, audio_service.game_since = now;
+        if (!audio_service.played_rate || audio_service.suspended || now - audio_service.game_since < AUDIO_GAME_HOLD_NS)
+                return;
+        if (audio_service.game_forced && audio_service.low && !audio_service.game_backed)
+        {
+                if (!audio_service.game_xrun_at || now - audio_service.game_xrun_at >= AUDIO_GAME_XRUN_NS)
+                        audio_service.game_xrun_at = now, audio_service.game_xruns = audio_service.pcm.xruns;
+                else if (audio_service.pcm.xruns - audio_service.game_xruns >= AUDIO_GAME_XRUNS)
+                {
+                        audio_service.game_backed = 1;
+                        string_format(log, "audio: %p underruns in a game's low-latency periods: the output goes back to its normal periods while a game is fullscreen\n",
+                                      (positive)(audio_service.pcm.xruns - audio_service.game_xruns));
+                        log_flush();
+                }
+        }
+        audio_playing_stream(&stream_low);
+        want = stream_low || (game && !audio_service.game_backed);
+        if (want == audio_service.low)
+                return;
+        if (audio_service.pcm.fd >= 0)
+        {
+                audio_pcm_close(&audio_service.pcm);
+                audio_service.pcm.fd = -1;
+        }
+        audio_service.asked = audio_service.rate, audio_service.asked_low = want;
+        audio_service.game_forced = want && !stream_low;
+        audio_service.game_xrun_at = 0;
+        audio_output_open(audio_service.rate, want);
+        if (want)
+                string_format(log, "audio: a game is fullscreen: the output takes the low-latency periods\n");
+        else
+                string_format(log, "audio: no game is fullscreen: the output goes back to the periods its stream asked for\n");
         log_flush();
 }
 
@@ -2889,9 +2956,15 @@ static b32 audio_main()
                         long playing = audio_playing_stream(audio_service.played_rate ? 0 : &low);
 
                         if (playing && !audio_service.played_rate)
-                                audio_rate_choose(playing, low);
+                        {
+                                int game = !low && audio_game_now() && !audio_service.game_backed;
+
+                                audio_rate_choose(playing, low || game);
+                                audio_service.game_forced = game;
+                        }
                         audio_service.played_rate = playing;
                 }
+                audio_game_pass(now);
                 audio_power_apply(audio_power_decide(now, audio_playing_now()));
                 audio_resume_said();
                 // Whatever the pass queued is sent, the drains are answered, and a client that never says who it is, or never reads, is dropped.

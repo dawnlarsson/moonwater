@@ -11071,6 +11071,46 @@ static void sv_test_spin(void)
         audio_service.notify = -1;
 }
 
+/* A fullscreen game's low periods (audio_game_pass): followed once held a second, given back when no game is, and three underruns
+   in ten seconds send the game back to the normal periods until it is no game. The game slice is a file of this check's own. */
+static void sv_test_game(void)
+{
+        static char slice[300];
+        positive t = 1000000000000ull;
+
+        sv_path(slice, sizeof slice, "game-slice");
+        audio_game_slice = slice;
+        audio_service.suspended = 0, audio_service.played_rate = 48000, audio_service.game_at = 0;
+        audio_service.game_seen = audio_service.game_forced = audio_service.game_backed = 0;
+        audio_output_open(48000, 0);
+        sv_write_file("game-slice", "4242\n");
+        audio_game_pass(t);
+        SVCHECK(audio_service.low == 0, "a game just fullscreen does not reopen the output yet");
+        audio_game_pass(t + 1250000000ull);
+        SVCHECK(audio_service.low == 1 && audio_service.period == AUDIO_PERIOD_LOW && audio_service.game_forced,
+                "a game fullscreen for a second plays with the low-latency periods");
+        audio_game_pass(t + 1500000000ull);
+        audio_service.pcm.xruns += AUDIO_GAME_XRUNS;
+        audio_game_pass(t + 1750000000ull);
+        SVCHECK(audio_service.low == 0 && audio_service.game_backed, "three underruns of a game's low periods send it back to the normal ones");
+        audio_game_pass(t + 4000000000ull);
+        SVCHECK(audio_service.low == 0, "a game sent back stays on the normal periods while it is fullscreen");
+        sv_write_file("game-slice", "");
+        audio_game_pass(t + 4250000000ull);
+        audio_game_pass(t + 5500000000ull);
+        SVCHECK(audio_service.low == 0 && !audio_service.game_backed, "no game fullscreen: the normal periods, and the back-off forgotten");
+        sv_write_file("game-slice", "4242\n");
+        audio_game_pass(t + 5750000000ull);
+        audio_game_pass(t + 7000000000ull);
+        SVCHECK(audio_service.low == 1, "the next fullscreen game takes the low periods again");
+        sv_write_file("game-slice", "");
+        audio_game_pass(t + 7250000000ull);
+        audio_game_pass(t + 8500000000ull);
+        SVCHECK(audio_service.low == 0 && audio_service.period == AUDIO_PERIOD, "the game gone, the output goes back to its own periods");
+        audio_service.played_rate = 0;
+        audio_game_slice = "/run/moonwater/game-slice";
+}
+
 static int sv_main_checks(void)
 {
         sv_setup();
@@ -11089,6 +11129,7 @@ static int sv_main_checks(void)
         sv_test_socket();
         sv_test_card();
         sv_test_rate();
+        sv_test_game();
         sv_test_file();
         sv_test_page();
         sv_test_page_rows();
