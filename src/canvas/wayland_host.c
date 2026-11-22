@@ -401,22 +401,41 @@ static void *compositor_wl_map(void *context, long fd, long size)
 
 static void *compositor_wl_remap(void *context, void *at, long old_size, long new_size)
 {
-        long got;
+        long got, reserved = -1;
+        int noted = canvas_htab_find(&compositor_wl.map_index, &compositor_wl.map_table, (unsigned long)at, 0, 0, 1) >= 0;
 
         (void)context;
+        // The slot the moved range is noted in is taken before the pages move: mremap moves them, so nothing that can fail may come after it
+        // (a refusal after the move left the old address unmapped, and the pool's later unmap of it hit whatever was mapped there since).
+        if (noted)
+        {
+                if (!canvas_htab_grow(&compositor_wl.map_index, &compositor_wl.map_table, compositor_wl.map_live, -1, 1))
+                        return 0;
+                reserved = wayland_table_take(&compositor_wl.map_table);
+                if (reserved < 0)
+                        return 0;
+        }
         // The card's maps of the old pages are let go of: the pages move (a map of them would be the old ones).
         gpu_forget(at, (positive)old_size);
         got = compositor_call(syscall(mremap), (positive)at, (positive)old_size, (positive)new_size, 1, 0, 0);
         if (got < 0 && got > -4096)
-                return 0;
-        if (canvas_htab_find(&compositor_wl.map_index, &compositor_wl.map_table, (unsigned long)at, 0, 0, 1) >= 0)
         {
+                if (reserved >= 0)
+                        wayland_table_give(&compositor_wl.map_table, reserved);
+                return 0;
+        }
+        if (noted)
+        {
+                struct compositor_wl_mapping *m;
+
                 compositor_wl_map_forget((unsigned long)at);
-                if (!compositor_wl_map_note((unsigned long)got, (unsigned long)new_size))
-                {
-                        compositor_call(syscall(munmap), (positive)got, (positive)new_size, 0, 0, 0, 0);
-                        return 0;
-                }
+                m = (struct compositor_wl_mapping *)compositor_wl.map_table.at;
+                compositor_wl.map = m;
+                m[reserved].bad = 0;
+                m[reserved].size = (unsigned long)new_size;
+                __atomic_store_n(&m[reserved].at, (unsigned long)got, __ATOMIC_RELEASE);
+                compositor_wl.map_live++;
+                canvas_htab_put(&compositor_wl.map_index, (unsigned long)got, reserved, 1);
         }
         // Update lent, damage-source, and layer references whose pool moved on mremap.
         for (int row = 0; row < (int)compositor_rows_in_use; row++)
