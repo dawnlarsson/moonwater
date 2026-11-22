@@ -1073,6 +1073,29 @@ static int files_trail_resolve(struct files_model address_to m, struct files_tra
         return files_trail_lose(t, deepest + 1), why;
 }
 
+/* ---- what a person asks of the folder shown ---- */
+
+// The acts, by number: a menu's items and a key's shortcut name them, and the view gives each its words.
+enum { FILES_MENU_OPEN = 16, FILES_MENU_EDITOR, FILES_MENU_TERMINAL, FILES_MENU_CUT, FILES_MENU_COPY, FILES_MENU_PASTE,
+       FILES_MENU_RENAME, FILES_MENU_DELETE, FILES_MENU_NEW_FOLDER, FILES_MENU_PROPERTIES, FILES_MENU_HIDDEN, FILES_MENU_ALL,
+       FILES_MENU_SHEET, FILES_MENU_DETAILS, FILES_MENU_ICONS, FILES_MENU_LIST, FILES_MENU_SORT = 32,
+       FILES_MENU_UNDO = 40, FILES_MENU_REDO, FILES_MENU_BIN, FILES_MENU_BIN_EMPTY, FILES_MENU_RESTORE,
+       FILES_MENU_WALLPAPER, FILES_MENU_WALLPAPER_OF,
+       FILES_ACT_BACK = 64, FILES_ACT_FWD, FILES_ACT_UP, FILES_ACT_RELOAD, FILES_ACT_FIND, FILES_ACT_CTX, FILES_ACT_SHEET };
+
+// The folder's own acts, in their order, 0 a line between two groups: the menu of the folder's empty space and the View menu are both this
+// one table, so neither has an act the other has not (a full folder has no empty space to press, and View reaches them all the same).
+// How the folder is shown first (its layout, its order, what it lists), then what is done in it.
+static const p8 files_folder_acts[] = {
+        FILES_MENU_DETAILS, FILES_MENU_ICONS, FILES_MENU_LIST, 0,
+        FILES_MENU_SORT, FILES_MENU_SORT + 1, FILES_MENU_SORT + 2, FILES_MENU_SORT + 3, 0,
+        FILES_MENU_HIDDEN, FILES_ACT_RELOAD, 0,
+        FILES_MENU_UNDO, FILES_MENU_REDO, 0,
+        FILES_MENU_PASTE, FILES_MENU_NEW_FOLDER, FILES_MENU_ALL, 0,
+        FILES_MENU_TERMINAL, FILES_MENU_BIN, 0,
+        FILES_MENU_PROPERTIES,
+};
+
 /* ---- folder mutations & recursive delete ---- */
 
 #define FILES_JOB_DEEP 64

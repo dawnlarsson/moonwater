@@ -4873,6 +4873,77 @@ static fn browser_bar_buttons(struct files_model address_to m)
         check("browser: read from the right, the navigation buttons go from the right, back first, and back's arrow and forward's swap", mirrored);
 }
 
+// The ids of a menu's items, separators left out: how many.
+static int browser_menu_ids(const struct ui_popmenu address_to menu, int address_to ids, int room)
+{
+        int count = 0;
+
+        for (int at = 0; at < menu->count && count < room; at++)
+                if (!(menu->items[at].flags & UI_MENU_SEPARATOR))
+                        ids[count++] = menu->items[at].id;
+        return count;
+}
+
+static b32 browser_has(const int address_to ids, int count, int id)
+{
+        for (int at = 0; at < count; at++)
+                if (ids[at] == id)
+                        return true;
+        return false;
+}
+
+// The View button and its menu: the folder's acts, from the model's one table, as the menu of the folder's empty space has them.
+static fn browser_bar_view(struct files_model address_to m)
+{
+        static const int shown[] = {FILES_MENU_DETAILS, FILES_MENU_ICONS, FILES_MENU_LIST, FILES_MENU_SORT, FILES_MENU_SORT + 1, FILES_MENU_SORT + 2,
+                                    FILES_MENU_SORT + 3, FILES_MENU_HIDDEN};
+        const struct ui_menubutton address_to v = &files.view_button;
+        int view[UI_MENU_ITEMS], ground[UI_MENU_ITEMS], views, grounds, acts = 0;
+        b32 placed, opened, same = true, refresh;
+
+        browser_bar_frame();
+        placed = v->label == WORDS(files_view) && v->w > 0 && v->h > 0 && v->x >= files.path_box.x + files.path_box.w && !files.menu_view;
+        check("browser: the View button is the top bar's last, after the path band, and its words are View", placed);
+
+        // A folder chosen, then View pressed: its menu is under the button's bottom-left corner, it has how the folder is shown, and the folder
+        // stays chosen (what View does is the folder's, its Properties the folder's).
+        files_model_choose(m, browser_at(m, "two"), FILES_CHOOSE_ONLY);
+        ui_kit.pointer_x = v->x + v->w / 2, ui_kit.pointer_y = v->y + v->h / 2;
+        browser_bar_button_send(WINDOW_EVENT_BUTTON, UI_POINTER_LEFT, 0, WINDOW_KEY_DOWN);
+        browser_bar_button_send(WINDOW_EVENT_BUTTON, UI_POINTER_LEFT, 0, 0);
+        views = browser_menu_ids(&files.menu.menu, view, UI_MENU_ITEMS);
+        opened = files.menu_view && files.sheet_folder && files.sheet_x == v->x && files.sheet_y == v->y + v->h && m->chosen_count == 1 &&
+                 m->cursor == browser_at(m, "two");
+        for (int at = 0; at < (int)(sizeof(shown) / sizeof(shown[0])); at++)
+                opened = opened && browser_has(view, views, shown[at]);
+        check("browser: a press on View opens its menu under the button's bottom-left corner, with the layouts, the orders and hidden files, and what is chosen stays chosen",
+              opened);
+
+        // The menu of the empty space: the same acts as View's, item for item, and both the model's table's.
+        files_menu_open(false, 10, 10);
+        grounds = browser_menu_ids(&files.menu.menu, ground, UI_MENU_ITEMS);
+        for (int at = 0; at < FILES_COUNT(files_folder_acts); at++)
+                acts += files_folder_acts[at] != 0;
+        for (int at = 0; at < grounds; at++)
+                same = same && browser_has(view, views, ground[at]);
+        for (int at = 0; at < views; at++)
+                same = same && browser_has(ground, grounds, view[at]);
+        same = same && grounds == acts && views == acts && browser_has(view, views, FILES_ACT_RELOAD) && browser_has(view, views, FILES_MENU_PASTE) &&
+               browser_has(view, views, FILES_MENU_NEW_FOLDER) && browser_has(view, views, FILES_MENU_PROPERTIES);
+        check("browser: the View menu has every act of the menu of the folder's empty space and that menu every act of View's: both are the model's one table",
+              same);
+
+        // Refresh, new in the folder's menus, reads the folder again.
+        {
+                p32 reads = m->reads;
+
+                files_chose(FILES_ACT_RELOAD);
+                refresh = m->walking || m->reads != reads;
+                browser_read(m, 64);
+        }
+        check("browser: Refresh in the folder's menus reads the folder again", refresh);
+}
+
 static fn browser_bar(void)
 {
         struct ui address_to ui = &files.ui;
@@ -4969,6 +5040,7 @@ static fn browser_bar(void)
         check("browser: a press on the path band's text gives it the keys, the caret where the press is", taken);
         browser_bar_send(WINDOW_EVENT_KEY, UI_KEY_ESCAPE, 0x1b, WINDOW_KEY_DOWN);
         browser_bar_buttons(m);
+        browser_bar_view(m);
         files_model_close(m);
 }
 

@@ -43,12 +43,6 @@ enum { FILES_EDIT_PATH = 1, FILES_EDIT_NAME = 2 };
 enum { FILES_VIEW_DETAILS, FILES_VIEW_ICONS, FILES_VIEW_LIST };
 enum { FILES_FOCUS_ROWS, FILES_FOCUS_TREE, FILES_FOCUS_FIND };
 enum { FILES_DEED_MOVE, FILES_DEED_COPY, FILES_DEED_RENAME, FILES_DEED_BIN };
-enum { FILES_MENU_OPEN = 16, FILES_MENU_EDITOR, FILES_MENU_TERMINAL, FILES_MENU_CUT, FILES_MENU_COPY, FILES_MENU_PASTE,
-       FILES_MENU_RENAME, FILES_MENU_DELETE, FILES_MENU_NEW_FOLDER, FILES_MENU_PROPERTIES, FILES_MENU_HIDDEN, FILES_MENU_ALL,
-       FILES_MENU_SHEET, FILES_MENU_DETAILS, FILES_MENU_ICONS, FILES_MENU_LIST, FILES_MENU_SORT = 32,
-       FILES_MENU_UNDO = 40, FILES_MENU_REDO, FILES_MENU_BIN, FILES_MENU_BIN_EMPTY, FILES_MENU_RESTORE,
-       FILES_MENU_WALLPAPER, FILES_MENU_WALLPAPER_OF,
-       FILES_ACT_BACK = 64, FILES_ACT_FWD, FILES_ACT_UP, FILES_ACT_RELOAD, FILES_ACT_FIND, FILES_ACT_CTX, FILES_ACT_SHEET };
 
 #define FILES_PEERS_MOST 16
 #define FILES_RPCS_MOST 16
@@ -111,7 +105,7 @@ static struct
         int carry_px, carry_py, deed_count, deed_done, drop_row, drop_node, spring, sheet_x, sheet_y;
         unsigned int ground, said, carry_kind;
         b32 focused, dirty, reseat, armed, git, moving, tree_reseat, pasting, finding;
-        b32 drag_chosen, carrying, cut_dim, band_add, carry_press, drop_over, sheet, sheet_folder, measuring;
+        b32 drag_chosen, carrying, cut_dim, band_add, carry_press, drop_over, sheet, sheet_folder, measuring, menu_view;
         p32 seen, naming, armed_at, drag_place, carry_count, band_base_count, tree_at, tree_shown;
         b64 next_look, next_show, carry_at, flash_at, spring_at, next_progress, typed_at, next_census;
         b32 census_again;
@@ -119,6 +113,8 @@ static struct
         string_address start;
         struct ui_rect path_box, head_box, side_box, nav_box[4];
         struct ui_iconbutton nav[4];
+        struct ui_rect view_box;
+        struct ui_menubutton view_button;
         struct files_trail trail;
         struct ui_text field, finder;
         struct ui_control path, finder_field;
@@ -462,6 +458,13 @@ static const struct { int glyph, act; unsigned int words; } files_navs[] = {
 #define FILES_NAVS FILES_COUNT(files_navs)
 _Static_assert(sizeof(files_navs) / sizeof(files_navs[0]) == sizeof(files.nav) / sizeof(files.nav[0]), "a button of the bar for each of the table's");
 
+// The View button's width (logical px): its words and the kit's menu button's padding either side, the gap and the chevron (ui_menubutton_draw).
+static int files_view_wide(struct ui address_to ui)
+{
+        int words = ui->regular ? ui_kit_measure(ui, (string_address)WORDS(files_view), UI_LABEL_LARGE) : 0, scale = ui->scale > 0 ? ui->scale : 100;
+        return (words * 100 + scale - 1) / scale + 2 * UI_MENUBUTTON_PAD + 18;
+}
+
 // The buttons where the view laid them out: back with no way back, forward with none forward and up at a root do nothing, and say so.
 static fn files_bar_lay(void)
 {
@@ -476,6 +479,8 @@ static fn files_bar_lay(void)
                 if (b->disabled)
                         b->hover = b->down = false;
         }
+        files.view_button.label = WORDS(files_view), files.view_button.open = files.menu.open && files.menu_view;
+        files.view_button.x = files.view_box.x, files.view_button.y = files.view_box.y, files.view_button.w = files.view_box.w, files.view_button.h = files.view_box.h;
 }
 
 static fn files_layout(void)
@@ -514,6 +519,7 @@ static fn files_layout(void)
                                         ui_control(&files.path, .grow = 1, .h = FILES_BAND);
                                 else
                                         ui_host(&files.path_box, .grow = 1, .h = FILES_BAND);
+                                ui_host(&files.view_box, .w = files_view_wide(ui), .h = FILES_BAND);
                         }
                         ui_col(.class = "rows", .grow = 1)
                         {
@@ -1488,7 +1494,7 @@ static fn files_sheet_escape(char address_to into, positive room, const p8 addre
         ui_label_foreign(words, sizeof(words), raw, length), ui_menu_escape(into, room, words);
 }
 
-static inline fn files_popup_open(int x, int y) { files.menu.field = null, ui_popmenu_open(&files.menu, &files.own, &files.ui, x, y, 0, 0, WINDOW_POPUP_POINT, false); }
+static inline fn files_popup_open(int x, int y) { files.menu.field = null, files.menu_view = false, ui_popmenu_open(&files.menu, &files.own, &files.ui, x, y, 0, 0, WINDOW_POPUP_POINT, false); }
 
 static fn files_cursor_pos(int address_to x, int address_to y, b32 mid)
 {
@@ -1623,7 +1629,7 @@ static fn files_open_with(b32 editor)
         }
         {
                 string_address words[2] = {(string_address) "/terminal", null};
-                bipolar folder = files_drop_folder(e && e->kind == FILES_KIND_DIRECTORY ? (int)m->cursor : -1);
+                bipolar folder = files_drop_folder(!files.sheet_folder && e && e->kind == FILES_KIND_DIRECTORY ? (int)m->cursor : -1);
                 if (folder < 0)
                         files.said = LANGUAGE_files_changed;
                 else
@@ -1643,6 +1649,54 @@ static fn files_wallpaper(int screen)
 }
 
 #define FILES_SEP {null, null, UI_MENU_SEPARATOR, 0, false}
+
+// The words of the folder's acts (the model's files_folder_acts), and the keys that do them.
+static const struct { p8 act; unsigned int words; const char address_to keys; } files_folder_words[] = {
+    {FILES_MENU_DETAILS, LANGUAGE_menu_view_details, "Ctrl+1"}, {FILES_MENU_ICONS, LANGUAGE_menu_view_icons, "Ctrl+2"},
+    {FILES_MENU_LIST, LANGUAGE_menu_view_list, "Ctrl+3"}, {FILES_MENU_HIDDEN, LANGUAGE_menu_show_hidden, "Ctrl+H"},
+    {FILES_ACT_RELOAD, LANGUAGE_files_refresh, "F5"}, {FILES_MENU_UNDO, LANGUAGE_menu_undo, "Ctrl+Z"}, {FILES_MENU_REDO, LANGUAGE_menu_redo, "Ctrl+Y"},
+    {FILES_MENU_PASTE, LANGUAGE_menu_paste, "Ctrl+V"}, {FILES_MENU_NEW_FOLDER, LANGUAGE_menu_new_folder, "Ctrl+Shift+N"},
+    {FILES_MENU_ALL, LANGUAGE_menu_select_all, "Ctrl+A"}, {FILES_MENU_TERMINAL, LANGUAGE_menu_open_terminal, null},
+    {FILES_MENU_BIN, LANGUAGE_menu_bin_open, null}, {FILES_MENU_PROPERTIES, LANGUAGE_menu_properties, null},
+};
+
+// The folder's acts as a menu, item for item of the model's one table: the menu of the folder's empty space and the View menu. A sort is its
+// column's title, the order it goes in its keys; in the bin, its Open is Empty.
+static fn files_folder_menu(struct ui_popmenu address_to menu)
+{
+        const struct files_model address_to m = &files.big->model;
+        b32 any = files_model_count(m) != 0, bin = files_in_bin(), line = false;
+        menu->count = 0;
+        for (int at = 0; at < FILES_COUNT(files_folder_acts); at++)
+        {
+                int act = files_folder_acts[at], col = act - FILES_MENU_SORT;
+                const char address_to label = null, address_to keys = null;
+                p32 flags = 0;
+                if (!act)
+                {
+                        line = menu->count > 0;
+                        continue;
+                }
+                for (int w = 0; w < FILES_COUNT(files_folder_words); w++)
+                        if (files_folder_words[w].act == act)
+                                label = language_text(files_folder_words[w].words), keys = files_folder_words[w].keys;
+                if (col >= 0 && col < 4)
+                        label = files.columns.title[col], keys = col == files.columns.sorted ? (files.columns.descending ? "\xe2\x86\x93" : "\xe2\x86\x91") : null,
+                        flags = UI_MENU_RADIO | (col == files.columns.sorted ? UI_MENU_ON : 0);
+                if (act >= FILES_MENU_DETAILS && act <= FILES_MENU_LIST)
+                        flags = UI_MENU_RADIO | (files.view == act - FILES_MENU_DETAILS ? UI_MENU_ON : 0);
+                if (act == FILES_MENU_HIDDEN)
+                        flags = UI_MENU_CHECK | (m->hidden ? UI_MENU_ON : 0);
+                if ((act == FILES_MENU_UNDO && files.deed_done <= 0) || (act == FILES_MENU_REDO && files.deed_done >= files.deed_count) ||
+                    (act == FILES_MENU_ALL && !any) || (act == FILES_MENU_BIN && bin && !any))
+                        flags |= UI_MENU_DISABLED;
+                if (act == FILES_MENU_BIN && bin)
+                        label = WORDS(menu_bin_empty), act = FILES_MENU_BIN_EMPTY;
+                if (line)
+                        ui_popmenu_add(menu, null, null, UI_MENU_SEPARATOR, 0), line = false;
+                ui_popmenu_add(menu, label, keys, flags, act);
+        }
+}
 
 static fn files_menu_open(b32 on, int x, int y)
 {
@@ -1683,32 +1737,21 @@ static fn files_menu_open(b32 on, int x, int y)
         }
         else
         {
-                b32 any = files_model_count(m) != 0;
-                const struct ui_menu_spec top[] = {
-                    {WORDS(menu_undo), "Ctrl+Z", files.deed_done > 0 ? 0 : UI_MENU_DISABLED, FILES_MENU_UNDO, false},
-                    {WORDS(menu_redo), "Ctrl+Y", files.deed_done < files.deed_count ? 0 : UI_MENU_DISABLED, FILES_MENU_REDO, false}, FILES_SEP,
-                    {WORDS(menu_paste), "Ctrl+V", 0, FILES_MENU_PASTE, false},
-                    {WORDS(menu_new_folder), "Ctrl+Shift+N", 0, FILES_MENU_NEW_FOLDER, false},
-                    {WORDS(menu_select_all), "Ctrl+A", any ? 0 : UI_MENU_DISABLED, FILES_MENU_ALL, false},
-                    {WORDS(menu_show_hidden), "Ctrl+H", UI_MENU_CHECK | (m->hidden ? UI_MENU_ON : 0), FILES_MENU_HIDDEN, false}, FILES_SEP,
-                    {WORDS(menu_view_details), "Ctrl+1", UI_MENU_RADIO | (files.view == FILES_VIEW_DETAILS ? UI_MENU_ON : 0), FILES_MENU_DETAILS, false},
-                    {WORDS(menu_view_icons), "Ctrl+2", UI_MENU_RADIO | (files.view == FILES_VIEW_ICONS ? UI_MENU_ON : 0), FILES_MENU_ICONS, false},
-                    {WORDS(menu_view_list), "Ctrl+3", UI_MENU_RADIO | (files.view == FILES_VIEW_LIST ? UI_MENU_ON : 0), FILES_MENU_LIST, false}, FILES_SEP,
-                };
-                const struct ui_menu_spec foot[] = {
-                    FILES_SEP, {WORDS(menu_open_terminal), null, 0, FILES_MENU_TERMINAL, false},
-                    {bin ? WORDS(menu_bin_empty) : WORDS(menu_bin_open), null, bin && !any ? UI_MENU_DISABLED : 0, bin ? FILES_MENU_BIN_EMPTY : FILES_MENU_BIN, false},
-                    FILES_SEP, {WORDS(menu_properties), null, 0, FILES_MENU_PROPERTIES, false},
-                };
-                ui_popmenu_build(menu, top, FILES_COUNT(top));
-                for (int col = 0; col < 4; col++)
-                        ui_popmenu_add(menu, files.columns.title[col], col == files.columns.sorted ? (files.columns.descending ? "\xe2\x86\x93" : "\xe2\x86\x91") : null,
-                                       UI_MENU_RADIO | (col == files.columns.sorted ? UI_MENU_ON : 0), FILES_MENU_SORT + col);
-                ui_popmenu_build(menu, foot, FILES_COUNT(foot));
+                files_folder_menu(menu);
                 if (m->chosen_count || m->cursor != FILES_NO)
                         files_model_choose_none(m), m->cursor = FILES_NO, m->revision++;
         }
         files.sheet_folder = !on, files.sheet_x = x, files.sheet_y = y, files_popup_open(x, y), files.dirty = true;
+}
+
+// The View menu: the folder's acts (files_folder_menu), under the View button's bottom-left corner. What is chosen stays chosen, and what the
+// menu does is the folder's, as the menu of its empty space does (its Properties are the folder's, its terminal opens in it).
+static fn files_view_open(void)
+{
+        const struct ui_menubutton address_to v = &files.view_button;
+        files.sheet = false, files_folder_menu(&files.menu.menu);
+        files.sheet_folder = true, files.sheet_x = v->x, files.sheet_y = v->y + v->h;
+        files_popup_open(files.sheet_x, files.sheet_y), files.menu_view = true, files.dirty = true;
 }
 
 static fn files_find(b32 on)
@@ -2660,6 +2703,14 @@ static b32 files_bar_event(const struct window_event address_to event)
                 took |= event->type == WINDOW_EVENT_BUTTON && files_in_rect(x, y, b->x, b->y, b->w, b->h);
                 files.dirty |= hover != b->hover || took;
         }
+        {
+                struct ui_menubutton address_to v = &files.view_button;
+                b32 hover = v->hover;
+                if (ui_menubutton_event(&files.ui, v, event, x, y))
+                        files_view_open();
+                took |= event->type == WINDOW_EVENT_BUTTON && files_in_rect(x, y, v->x, v->y, v->w, v->h);
+                files.dirty |= hover != v->hover || took;
+        }
         return took;
 }
 
@@ -2754,6 +2805,7 @@ static fn files_bar_draw(struct ui address_to ui)
         const struct ui_rect address_to b = &files.path_box;
         for (int k = 0; k < FILES_NAVS; k++)
                 ui_iconbutton_draw(ui, &files.nav[k]);
+        ui_menubutton_draw(ui, &files.view_button);
         if (files.editing != FILES_EDIT_NAME)
                 ui_tokens_draw(ui, &files.big->path, b->x, b->y, b->x + b->w, b->y + b->h);
 }
