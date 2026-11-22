@@ -9959,6 +9959,39 @@ static void record_rows(void)
         compositor.scanout = saved_scanout, compositor.width = saved_width, compositor.height = saved_height, compositor.scanout_pitch = saved_pitch;
 }
 
+/* Each top-level group of this run is a child of its own: a group that dies by a signal is one CRASHED line and the run goes on,
+   and a group that fails counts once in the report. The children share the run's state as it stood at their fork, so a group that
+   passed only because an earlier group set something up shows up as a finding. */
+#define GROUP(name, call) do { \
+        positive group_before = failures; \
+        bipolar group_pid; \
+        log_flush(); \
+        group_pid = system_fork(); \
+        if (group_pid == 0) \
+        { \
+                string_format(log, "GROUP " name "\n"); \
+                log_flush(); \
+                call; \
+                log_flush(); \
+                system_call_3(syscall(exit_group), failures != group_before, 0, 0); \
+        } \
+        else if (group_pid < 0) \
+                call; \
+        else \
+        { \
+                int group_status = 0; \
+                (void)system_wait4_retry(group_pid, address_of(group_status), 0, null); \
+                if ((group_status & 0x7f) == 0) \
+                        failures += ((group_status >> 8) & 0xff) != 0; \
+                else \
+                { \
+                        string_format(log, "CRASHED: " name " (signal %d)\n", group_status & 0x7f); \
+                        log_flush(); \
+                        failures++; \
+                } \
+        } \
+} while (0)
+
 b32 main()
 {
         compositor_rows_make(compositor_rows_in_use); // the compositor's rows, made before any check reads one
@@ -9989,8 +10022,6 @@ b32 main()
         check("fonts: the face loads", terminal_fonts(paths, 1, program_argument_count() > 2 ? program_argument(2) : null, 16));
         check("fonts: the kit's own text is set in the UI faces (Inter), and the grid stays in the mono face",
               terminal.ui.regular == &terminal.ui.faces[0] && terminal.ui.bold == &terminal.ui.faces[1] && terminal.plain[0] != terminal.ui.regular);
-        if (failures)
-                return test_report(null);
         record_rows();
 
         {
@@ -10026,7 +10057,7 @@ b32 main()
                 text_bidi_check(program_argument(3));
         if (program_argument_count() > 3)
                 kit_bidi_check(program_argument(3));
-        text_menu_keys_check();
+        GROUP("text_menu_keys_check", text_menu_keys_check());
         for (unsigned int at = 0; at < 256; at++)
                 terminal_colour[at] = window_cell_colour(at);
         term_palette = terminal_palette;
@@ -10043,8 +10074,8 @@ b32 main()
         full_reset();
         render_surface();
         cursor_show();
-        terminal_selection_check();
-        terminal_gutter_check();
+        GROUP("terminal_selection_check", terminal_selection_check());
+        GROUP("terminal_gutter_check", terminal_gutter_check());
         cursor_show();
 
         //      The glyphs a program prints, btop's among them, each in its own cell of a
@@ -10114,7 +10145,7 @@ b32 main()
                 }
                 check("glyphs: every printable ASCII character, and each shape, braille, box and block glyph btop draws, lights its cell", every);
         }
-        terminal_edge_check();
+        GROUP("terminal_edge_check", terminal_edge_check());
 
         for (positive step = 0; step < 40000; step++)
                 if (!render_step(&compared, &wrong, step))
@@ -10268,327 +10299,327 @@ b32 main()
         render_surface();
         cursor_show();
 
-        check_forced();
-        check_frames_refused();
-        check_killed();
-        check_fold();
-        check_keys();
-        check_pointer();
-        check_terminal_select_scroll();
-        check_terminal_select_speed();
-        check_terminal_select_stale();
-        check_terminal_select_ancient();
-        check_terminal_region_stream();
-        check_edge_steps();
-        check_term_parameters();
-        check_kit_zoom_key();
-        check_kit_clip_chord();
-        check_kit_select_rule();
-        check_take();
-        check_land();
-        check_glass();
-        check_glass_lift();
-        check_screen_numbers();
-        check_no_tab();
-        check_identify_numbers();
-        check_screen_arrangements();
-        check_identify_picture();
-        check_identify_frame();
-        check_identify_events();
-        check_identify_timing();
-        check_compositor_partial();
-        check_compositor_runs();
-        check_compositor_held();
-        check_compositor_screens();
-        check_compositor_scales();
-        check_compositor_corner_scales();
-        check_compositor_turn();
-        check_compositor_refresh();
-        check_compositor_preview();
-        check_compositor_snap_tint();
-        check_compositor_preview_held();
-        check_compositor_aside();
-        check_compositor_ground();
-        check_compositor_chip_clip();
-        check_compositor_shared();
-        check_compositor_cycle();
-        check_compositor_hover();
-        check_compositor_lit();
-        check_compositor_border();
-        check_compositor_chrome();
-        check_compositor_focus_line();
-        check_compositor_minimise();
-        check_compositor_glyphs();
-        check_compositor_predict();
-        check_compositor_predict_drag();
-        check_compositor_predict_model();
-        check_compositor_predict_table();
-        check_compositor_loop_wait();
-        check_compositor_picture();
-        check_compositor_pointer_aside();
-        check_compositor_lifecycle();
-        check_compositor_lifecycle_seam();
-        check_compositor_lifecycle_more();
-        check_compositor_least_scale();
-        check_compositor_touch_hold_gone();
-        check_compositor_card_lists();
-        check_compositor_card_turn();
-        check_compositor_space_sizes();
-        check_compositor_record_look();
-        check_compositor_card_edid();
-        check_compositor_card_walk();
-        check_compositor_wake();
-        check_compositor_rate_fastest();
-        check_compositor_screen_wait();
-        check_compositor_start_room();
-        check_compositor_setting_opens();
-        check_compositor_pipe_ignored();
+        GROUP("check_forced", check_forced());
+        GROUP("check_frames_refused", check_frames_refused());
+        GROUP("check_killed", check_killed());
+        GROUP("check_fold", check_fold());
+        GROUP("check_keys", check_keys());
+        GROUP("check_pointer", check_pointer());
+        GROUP("check_terminal_select_scroll", check_terminal_select_scroll());
+        GROUP("check_terminal_select_speed", check_terminal_select_speed());
+        GROUP("check_terminal_select_stale", check_terminal_select_stale());
+        GROUP("check_terminal_select_ancient", check_terminal_select_ancient());
+        GROUP("check_terminal_region_stream", check_terminal_region_stream());
+        GROUP("check_edge_steps", check_edge_steps());
+        GROUP("check_term_parameters", check_term_parameters());
+        GROUP("check_kit_zoom_key", check_kit_zoom_key());
+        GROUP("check_kit_clip_chord", check_kit_clip_chord());
+        GROUP("check_kit_select_rule", check_kit_select_rule());
+        GROUP("check_take", check_take());
+        GROUP("check_land", check_land());
+        GROUP("check_glass", check_glass());
+        GROUP("check_glass_lift", check_glass_lift());
+        GROUP("check_screen_numbers", check_screen_numbers());
+        GROUP("check_no_tab", check_no_tab());
+        GROUP("check_identify_numbers", check_identify_numbers());
+        GROUP("check_screen_arrangements", check_screen_arrangements());
+        GROUP("check_identify_picture", check_identify_picture());
+        GROUP("check_identify_frame", check_identify_frame());
+        GROUP("check_identify_events", check_identify_events());
+        GROUP("check_identify_timing", check_identify_timing());
+        GROUP("check_compositor_partial", check_compositor_partial());
+        GROUP("check_compositor_runs", check_compositor_runs());
+        GROUP("check_compositor_held", check_compositor_held());
+        GROUP("check_compositor_screens", check_compositor_screens());
+        GROUP("check_compositor_scales", check_compositor_scales());
+        GROUP("check_compositor_corner_scales", check_compositor_corner_scales());
+        GROUP("check_compositor_turn", check_compositor_turn());
+        GROUP("check_compositor_refresh", check_compositor_refresh());
+        GROUP("check_compositor_preview", check_compositor_preview());
+        GROUP("check_compositor_snap_tint", check_compositor_snap_tint());
+        GROUP("check_compositor_preview_held", check_compositor_preview_held());
+        GROUP("check_compositor_aside", check_compositor_aside());
+        GROUP("check_compositor_ground", check_compositor_ground());
+        GROUP("check_compositor_chip_clip", check_compositor_chip_clip());
+        GROUP("check_compositor_shared", check_compositor_shared());
+        GROUP("check_compositor_cycle", check_compositor_cycle());
+        GROUP("check_compositor_hover", check_compositor_hover());
+        GROUP("check_compositor_lit", check_compositor_lit());
+        GROUP("check_compositor_border", check_compositor_border());
+        GROUP("check_compositor_chrome", check_compositor_chrome());
+        GROUP("check_compositor_focus_line", check_compositor_focus_line());
+        GROUP("check_compositor_minimise", check_compositor_minimise());
+        GROUP("check_compositor_glyphs", check_compositor_glyphs());
+        GROUP("check_compositor_predict", check_compositor_predict());
+        GROUP("check_compositor_predict_drag", check_compositor_predict_drag());
+        GROUP("check_compositor_predict_model", check_compositor_predict_model());
+        GROUP("check_compositor_predict_table", check_compositor_predict_table());
+        GROUP("check_compositor_loop_wait", check_compositor_loop_wait());
+        GROUP("check_compositor_picture", check_compositor_picture());
+        GROUP("check_compositor_pointer_aside", check_compositor_pointer_aside());
+        GROUP("check_compositor_lifecycle", check_compositor_lifecycle());
+        GROUP("check_compositor_lifecycle_seam", check_compositor_lifecycle_seam());
+        GROUP("check_compositor_lifecycle_more", check_compositor_lifecycle_more());
+        GROUP("check_compositor_least_scale", check_compositor_least_scale());
+        GROUP("check_compositor_touch_hold_gone", check_compositor_touch_hold_gone());
+        GROUP("check_compositor_card_lists", check_compositor_card_lists());
+        GROUP("check_compositor_card_turn", check_compositor_card_turn());
+        GROUP("check_compositor_space_sizes", check_compositor_space_sizes());
+        GROUP("check_compositor_record_look", check_compositor_record_look());
+        GROUP("check_compositor_card_edid", check_compositor_card_edid());
+        GROUP("check_compositor_card_walk", check_compositor_card_walk());
+        GROUP("check_compositor_wake", check_compositor_wake());
+        GROUP("check_compositor_rate_fastest", check_compositor_rate_fastest());
+        GROUP("check_compositor_screen_wait", check_compositor_screen_wait());
+        GROUP("check_compositor_start_room", check_compositor_start_room());
+        GROUP("check_compositor_setting_opens", check_compositor_setting_opens());
+        GROUP("check_compositor_pipe_ignored", check_compositor_pipe_ignored());
 #ifdef CONFIG_MOONWATER_WAYLAND
-        check_compositor_utf8_split();
+        GROUP("check_compositor_utf8_split", check_compositor_utf8_split());
 #endif
-        check_compositor_signal_again();
-        check_compositor_table_sealed();
-        check_compositor_table_taken();
-        check_compositor_cursor_probe();
-        check_compositor_input_origin();
-        check_window_input_game();
-        check_compositor_doors_held();
-        check_compositor_asked();
-        check_compositor_tiling();
-        check_compositor_layout();
-        check_compositor_push();
-        check_compositor_seam();
-        check_compositor_assist();
-        check_compositor_grid_seam();
-        check_compositor_tile_line();
-        check_compositor_snap_cover();
-        check_compositor_snap_closing();
-        check_compositor_glide();
-        check_compositor_preview_at_once();
-        check_compositor_snap_trigger();
-        check_compositor_snap_edges();
-        check_compositor_restore();
-        check_compositor_cancel();
-        check_compositor_screen_chord();
-        check_compositor_preview_motion();
-        check_compositor_tile_square();
-        check_compositor_preview_over();
-        check_compositor_restore_glide();
-        check_compositor_tile_resize();
-        check_compositor_least();
-        check_compositor_divider();
-        check_compositor_divider_scales();
-        check_compositor_touch_hold();
-        check_compositor_snap_frames();
-        check_compositor_overlay_fade();
-        check_compositor_grid_drag();
-        check_compositor_wheel();
+        GROUP("check_compositor_signal_again", check_compositor_signal_again());
+        GROUP("check_compositor_table_sealed", check_compositor_table_sealed());
+        GROUP("check_compositor_table_taken", check_compositor_table_taken());
+        GROUP("check_compositor_cursor_probe", check_compositor_cursor_probe());
+        GROUP("check_compositor_input_origin", check_compositor_input_origin());
+        GROUP("check_window_input_game", check_window_input_game());
+        GROUP("check_compositor_doors_held", check_compositor_doors_held());
+        GROUP("check_compositor_asked", check_compositor_asked());
+        GROUP("check_compositor_tiling", check_compositor_tiling());
+        GROUP("check_compositor_layout", check_compositor_layout());
+        GROUP("check_compositor_push", check_compositor_push());
+        GROUP("check_compositor_seam", check_compositor_seam());
+        GROUP("check_compositor_assist", check_compositor_assist());
+        GROUP("check_compositor_grid_seam", check_compositor_grid_seam());
+        GROUP("check_compositor_tile_line", check_compositor_tile_line());
+        GROUP("check_compositor_snap_cover", check_compositor_snap_cover());
+        GROUP("check_compositor_snap_closing", check_compositor_snap_closing());
+        GROUP("check_compositor_glide", check_compositor_glide());
+        GROUP("check_compositor_preview_at_once", check_compositor_preview_at_once());
+        GROUP("check_compositor_snap_trigger", check_compositor_snap_trigger());
+        GROUP("check_compositor_snap_edges", check_compositor_snap_edges());
+        GROUP("check_compositor_restore", check_compositor_restore());
+        GROUP("check_compositor_cancel", check_compositor_cancel());
+        GROUP("check_compositor_screen_chord", check_compositor_screen_chord());
+        GROUP("check_compositor_preview_motion", check_compositor_preview_motion());
+        GROUP("check_compositor_tile_square", check_compositor_tile_square());
+        GROUP("check_compositor_preview_over", check_compositor_preview_over());
+        GROUP("check_compositor_restore_glide", check_compositor_restore_glide());
+        GROUP("check_compositor_tile_resize", check_compositor_tile_resize());
+        GROUP("check_compositor_least", check_compositor_least());
+        GROUP("check_compositor_divider", check_compositor_divider());
+        GROUP("check_compositor_divider_scales", check_compositor_divider_scales());
+        GROUP("check_compositor_touch_hold", check_compositor_touch_hold());
+        GROUP("check_compositor_snap_frames", check_compositor_snap_frames());
+        GROUP("check_compositor_overlay_fade", check_compositor_overlay_fade());
+        GROUP("check_compositor_grid_drag", check_compositor_grid_drag());
+        GROUP("check_compositor_wheel", check_compositor_wheel());
 #ifdef COMPOSITOR_LINE
-        check_compositor_touch();
-        check_compositor_edges();
+        GROUP("check_compositor_touch", check_compositor_touch());
+        GROUP("check_compositor_edges", check_compositor_edges());
 #endif
 #if MOONWATER_UI_ANY && defined(UI_TARGET)
-        check_ui_press();
-        check_kit_wide_span();
-        check_icon_tone_tail();
+        GROUP("check_ui_press", check_ui_press());
+        GROUP("check_kit_wide_span", check_kit_wide_span());
+        GROUP("check_icon_tone_tail", check_icon_tone_tail());
 #endif
-        check_compositor_dismiss();
-        check_compositor_close_over_control();
-        check_compositor_popup();
-        check_compositor_popup_press(0);
-        check_compositor_popup_press(1);
-        check_popup_reopen();
-        check_popup_ground_steady();
-        check_dropdown_labels();
-        check_dropdown_selected();
-        check_dropdown_scroll();
-        check_wheel_modifiers();
-        check_compositor_popup_grip(0);
-        check_compositor_popup_grip(1);
-        check_compositor_popup_holds();
-        check_compositor_glass_popup();
-        check_compositor_tray();
-        check_compositor_tab_reach();
-        check_compositor_launcher();
-        check_compositor_place();
-        check_compositor_remember();
+        GROUP("check_compositor_dismiss", check_compositor_dismiss());
+        GROUP("check_compositor_close_over_control", check_compositor_close_over_control());
+        GROUP("check_compositor_popup", check_compositor_popup());
+        GROUP("check_compositor_popup_press", check_compositor_popup_press(0));
+        GROUP("check_compositor_popup_press", check_compositor_popup_press(1));
+        GROUP("check_popup_reopen", check_popup_reopen());
+        GROUP("check_popup_ground_steady", check_popup_ground_steady());
+        GROUP("check_dropdown_labels", check_dropdown_labels());
+        GROUP("check_dropdown_selected", check_dropdown_selected());
+        GROUP("check_dropdown_scroll", check_dropdown_scroll());
+        GROUP("check_wheel_modifiers", check_wheel_modifiers());
+        GROUP("check_compositor_popup_grip", check_compositor_popup_grip(0));
+        GROUP("check_compositor_popup_grip", check_compositor_popup_grip(1));
+        GROUP("check_compositor_popup_holds", check_compositor_popup_holds());
+        GROUP("check_compositor_glass_popup", check_compositor_glass_popup());
+        GROUP("check_compositor_tray", check_compositor_tray());
+        GROUP("check_compositor_tab_reach", check_compositor_tab_reach());
+        GROUP("check_compositor_launcher", check_compositor_launcher());
+        GROUP("check_compositor_place", check_compositor_place());
+        GROUP("check_compositor_remember", check_compositor_remember());
 #if MOONWATER_UI_LAUNCHER
-        check_launcher();
-        check_launcher_anchor();
+        GROUP("check_launcher", check_launcher());
+        GROUP("check_launcher_anchor", check_launcher_anchor());
 #endif
-        check_compositor_records();
-        check_compositor_look();
-        check_compositor_click();
-        check_compositor_cursor_style();
-        check_compositor_pointer_table();
-        check_taskbar_geometry();
-        check_rtl_chrome();
-        check_taskbar_tray();
-        check_taskbar_launcher();
-        check_taskbar_centre();
-        check_taskbar_highlight();
-        check_launcher_centred();
-        check_clock_places();
-        check_moon_motion();
-        check_wallpaper_ground();
-        check_bar_options();
-        check_taskbar_tree();
-        check_taskbar_fullscreen();
+        GROUP("check_compositor_records", check_compositor_records());
+        GROUP("check_compositor_look", check_compositor_look());
+        GROUP("check_compositor_click", check_compositor_click());
+        GROUP("check_compositor_cursor_style", check_compositor_cursor_style());
+        GROUP("check_compositor_pointer_table", check_compositor_pointer_table());
+        GROUP("check_taskbar_geometry", check_taskbar_geometry());
+        GROUP("check_rtl_chrome", check_rtl_chrome());
+        GROUP("check_taskbar_tray", check_taskbar_tray());
+        GROUP("check_taskbar_launcher", check_taskbar_launcher());
+        GROUP("check_taskbar_centre", check_taskbar_centre());
+        GROUP("check_taskbar_highlight", check_taskbar_highlight());
+        GROUP("check_launcher_centred", check_launcher_centred());
+        GROUP("check_clock_places", check_clock_places());
+        GROUP("check_moon_motion", check_moon_motion());
+        GROUP("check_wallpaper_ground", check_wallpaper_ground());
+        GROUP("check_bar_options", check_bar_options());
+        GROUP("check_taskbar_tree", check_taskbar_tree());
+        GROUP("check_taskbar_fullscreen", check_taskbar_fullscreen());
 #if MOONWATER_UI_ANY
-        check_kit_motion();
-        check_kit_theme();
-        check_motion_pace();
-        check_hand_settings();
-        check_kit_arc();
-        check_kit_language_table();
-        check_kit_ramps();
+        GROUP("check_kit_motion", check_kit_motion());
+        GROUP("check_kit_theme", check_kit_theme());
+        GROUP("check_motion_pace", check_motion_pace());
+        GROUP("check_hand_settings", check_hand_settings());
+        GROUP("check_kit_arc", check_kit_arc());
+        GROUP("check_kit_language_table", check_kit_language_table());
+        GROUP("check_kit_ramps", check_kit_ramps());
 #if X64
-        check_kit_walk();
+        GROUP("check_kit_walk", check_kit_walk());
 #endif
-        check_kit_fills();
-        check_kit_corners();
-        check_kit_slider_below();
-        check_kit_lit();
-        check_kit_focus();
-        check_kit_virtual();
-        check_kit_pull_hit();
-        check_kit_pull_parts();
-        check_kit_text_lines();
-        check_kit_stripes();
-        check_kit_file_icons();
-        check_kit_view_pull();
-        check_kit_trail();
-        check_kit_graph();
-        check_kit_inks();
-        check_kit_place();
-        check_kit_controls();
-        check_kit_states();
-        check_kit_strips();
-        check_kit_buttons();
-        check_kit_scroll_ends();
-        check_kit_scroll_robust();
-        check_kit_ripple_pace();
-        check_kit_ripple_centre();
-        check_kit_ripple_cover();
-        check_kit_event_context();
-        check_kit_buffers();
-        check_kit_page_pointer();
-        check_kit_slider_row();
-        check_kit_finger_pull();
-        check_kit_confirm_repeat();
-        check_kit_layout();
-        check_kit_view();
-        check_kit_view_scroll();
-        check_kit_mouse_drag();
-        check_kit_view_controls();
-        check_kit_view_wrap();
-        check_kit_list_wrap();
-        check_kit_hand();
-        check_kit_wheel_near_end();
-        check_kit_notch_take();
-        check_kit_double_press();
-        check_kit_cell_rules();
-        check_kit_touch_gestures();
-        check_kit_pinch_zoom();
-        check_pinch_delivery();
-        check_kit_axis_swipe();
-        check_pad_pinch();
-        check_pad_scroll();
-        check_pad_gain();
-        check_wheel_stream();
-        check_wheel_mouse();
-        check_scroll_bits();
-        check_logo_tap();
-        check_wheel_memory();
-        check_kit_precise_stream();
-        check_stream_notch();
-        check_trackpad_speed();
-        check_wheel_report();
-        check_stream_gain();
-        check_stream_smooth();
-        check_stream_fling();
-        check_kit_anchor_flip();
-        check_kit_spring_fresh();
-        check_kit_wheel_flood();
-        check_kit_body();
-        check_terminal_wheel_curve();
-        check_kit_turn();
-        check_kit_tab_ripple();
+        GROUP("check_kit_fills", check_kit_fills());
+        GROUP("check_kit_corners", check_kit_corners());
+        GROUP("check_kit_slider_below", check_kit_slider_below());
+        GROUP("check_kit_lit", check_kit_lit());
+        GROUP("check_kit_focus", check_kit_focus());
+        GROUP("check_kit_virtual", check_kit_virtual());
+        GROUP("check_kit_pull_hit", check_kit_pull_hit());
+        GROUP("check_kit_pull_parts", check_kit_pull_parts());
+        GROUP("check_kit_text_lines", check_kit_text_lines());
+        GROUP("check_kit_stripes", check_kit_stripes());
+        GROUP("check_kit_file_icons", check_kit_file_icons());
+        GROUP("check_kit_view_pull", check_kit_view_pull());
+        GROUP("check_kit_trail", check_kit_trail());
+        GROUP("check_kit_graph", check_kit_graph());
+        GROUP("check_kit_inks", check_kit_inks());
+        GROUP("check_kit_place", check_kit_place());
+        GROUP("check_kit_controls", check_kit_controls());
+        GROUP("check_kit_states", check_kit_states());
+        GROUP("check_kit_strips", check_kit_strips());
+        GROUP("check_kit_buttons", check_kit_buttons());
+        GROUP("check_kit_scroll_ends", check_kit_scroll_ends());
+        GROUP("check_kit_scroll_robust", check_kit_scroll_robust());
+        GROUP("check_kit_ripple_pace", check_kit_ripple_pace());
+        GROUP("check_kit_ripple_centre", check_kit_ripple_centre());
+        GROUP("check_kit_ripple_cover", check_kit_ripple_cover());
+        GROUP("check_kit_event_context", check_kit_event_context());
+        GROUP("check_kit_buffers", check_kit_buffers());
+        GROUP("check_kit_page_pointer", check_kit_page_pointer());
+        GROUP("check_kit_slider_row", check_kit_slider_row());
+        GROUP("check_kit_finger_pull", check_kit_finger_pull());
+        GROUP("check_kit_confirm_repeat", check_kit_confirm_repeat());
+        GROUP("check_kit_layout", check_kit_layout());
+        GROUP("check_kit_view", check_kit_view());
+        GROUP("check_kit_view_scroll", check_kit_view_scroll());
+        GROUP("check_kit_mouse_drag", check_kit_mouse_drag());
+        GROUP("check_kit_view_controls", check_kit_view_controls());
+        GROUP("check_kit_view_wrap", check_kit_view_wrap());
+        GROUP("check_kit_list_wrap", check_kit_list_wrap());
+        GROUP("check_kit_hand", check_kit_hand());
+        GROUP("check_kit_wheel_near_end", check_kit_wheel_near_end());
+        GROUP("check_kit_notch_take", check_kit_notch_take());
+        GROUP("check_kit_double_press", check_kit_double_press());
+        GROUP("check_kit_cell_rules", check_kit_cell_rules());
+        GROUP("check_kit_touch_gestures", check_kit_touch_gestures());
+        GROUP("check_kit_pinch_zoom", check_kit_pinch_zoom());
+        GROUP("check_pinch_delivery", check_pinch_delivery());
+        GROUP("check_kit_axis_swipe", check_kit_axis_swipe());
+        GROUP("check_pad_pinch", check_pad_pinch());
+        GROUP("check_pad_scroll", check_pad_scroll());
+        GROUP("check_pad_gain", check_pad_gain());
+        GROUP("check_wheel_stream", check_wheel_stream());
+        GROUP("check_wheel_mouse", check_wheel_mouse());
+        GROUP("check_scroll_bits", check_scroll_bits());
+        GROUP("check_logo_tap", check_logo_tap());
+        GROUP("check_wheel_memory", check_wheel_memory());
+        GROUP("check_kit_precise_stream", check_kit_precise_stream());
+        GROUP("check_stream_notch", check_stream_notch());
+        GROUP("check_trackpad_speed", check_trackpad_speed());
+        GROUP("check_wheel_report", check_wheel_report());
+        GROUP("check_stream_gain", check_stream_gain());
+        GROUP("check_stream_smooth", check_stream_smooth());
+        GROUP("check_stream_fling", check_stream_fling());
+        GROUP("check_kit_anchor_flip", check_kit_anchor_flip());
+        GROUP("check_kit_spring_fresh", check_kit_spring_fresh());
+        GROUP("check_kit_wheel_flood", check_kit_wheel_flood());
+        GROUP("check_kit_body", check_kit_body());
+        GROUP("check_terminal_wheel_curve", check_terminal_wheel_curve());
+        GROUP("check_kit_turn", check_kit_turn());
+        GROUP("check_kit_tab_ripple", check_kit_tab_ripple());
 #endif
 #if 1 // the taskbar is always built
-        check_taskbar_text(program_argument_count() > 3 ? program_argument(3) : null);
-        check_moon_bench();
-        check_taskbar_edit();
-        check_taskbar_tab_menu();
-        check_apps_registry();
-        check_taskbar_pins();
-        check_wallpaper_turn();
-        check_icons();
-        check_taskbar_identity();
-        check_taskbar_guard();
-        check_scene_damage_cut();
-        check_compositor_volume(); // after the band's face is loaded: the cell is drawn with it
-        check_taskbar_scale();
+        GROUP("check_taskbar_text", check_taskbar_text(program_argument_count() > 3 ? program_argument(3) : null));
+        GROUP("check_moon_bench", check_moon_bench());
+        GROUP("check_taskbar_edit", check_taskbar_edit());
+        GROUP("check_taskbar_tab_menu", check_taskbar_tab_menu());
+        GROUP("check_apps_registry", check_apps_registry());
+        GROUP("check_taskbar_pins", check_taskbar_pins());
+        GROUP("check_wallpaper_turn", check_wallpaper_turn());
+        GROUP("check_icons", check_icons());
+        GROUP("check_taskbar_identity", check_taskbar_identity());
+        GROUP("check_taskbar_guard", check_taskbar_guard());
+        GROUP("check_scene_damage_cut", check_scene_damage_cut());
+        GROUP("check_compositor_volume", check_compositor_volume()); // after the band's face is loaded: the cell is drawn with it
+        GROUP("check_taskbar_scale", check_taskbar_scale());
 #if MOONWATER_UI_NOTICES
-        check_notices_dot();
+        GROUP("check_notices_dot", check_notices_dot());
 #endif
 #endif
 #if MOONWATER_UI_SETTINGS
-        check_settings(program_argument_count() > 3 ? program_argument(3) : program_argument(1),
-                       program_argument_count() > 4 ? program_argument(4) : null);
-        check_settings_groups();
-        check_settings_device_strip();
-        check_settings_kept();
-        check_settings_drive_rows(program_argument_count() > 3 ? program_argument(3) : program_argument(1),
-                                  program_argument_count() > 4 ? program_argument(4) : null);
-        check_settings_keys();
-        check_settings_frames(program_argument_count() > 3 ? program_argument(3) : program_argument(1),
-                              program_argument_count() > 4 ? program_argument(4) : null);
-        check_rtl_mirror();
-        check_display_section();
-        check_display_modes();
-        check_battery();
+        GROUP("check_settings", check_settings(program_argument_count() > 3 ? program_argument(3) : program_argument(1),
+                       program_argument_count() > 4 ? program_argument(4) : null));
+        GROUP("check_settings_groups", check_settings_groups());
+        GROUP("check_settings_device_strip", check_settings_device_strip());
+        GROUP("check_settings_kept", check_settings_kept());
+        GROUP("check_settings_drive_rows", check_settings_drive_rows(program_argument_count() > 3 ? program_argument(3) : program_argument(1),
+                                  program_argument_count() > 4 ? program_argument(4) : null));
+        GROUP("check_settings_keys", check_settings_keys());
+        GROUP("check_settings_frames", check_settings_frames(program_argument_count() > 3 ? program_argument(3) : program_argument(1),
+                              program_argument_count() > 4 ? program_argument(4) : null));
+        GROUP("check_rtl_mirror", check_rtl_mirror());
+        GROUP("check_display_section", check_display_section());
+        GROUP("check_display_modes", check_display_modes());
+        GROUP("check_battery", check_battery());
 #endif
 #if MOONWATER_UI_SETTINGS && MOONWATER_UI_LAUNCHER
         if (program_argument_count() > 3)
-                check_field_hands(program_argument(3));
+                GROUP("check_field_hands", check_field_hands(program_argument(3)));
 #endif
 #if MOONWATER_UI_LAUNCHER
         if (program_argument_count() > 3)
-                check_glass_pieces(program_argument(3));
+                GROUP("check_glass_pieces", check_glass_pieces(program_argument(3)));
 #endif
-        check_no_hand_typing();
-        check_kit_standard();
-        check_kit_clock();
-        check_one_blink();
+        GROUP("check_no_hand_typing", check_no_hand_typing());
+        GROUP("check_kit_standard", check_kit_standard());
+        GROUP("check_kit_clock", check_kit_clock());
+        GROUP("check_one_blink", check_one_blink());
 #if MOONWATER_UI_ANY
         language_directory = "languages/";
-        language_check();
+        GROUP("language_check", language_check());
 #endif
-        check_one_cut();
-        check_one_digits();
+        GROUP("check_one_cut", check_one_cut());
+        GROUP("check_one_digits", check_one_digits());
 #if MOONWATER_UI_ANY
-        check_caret_blink();
-        check_caret_terminal();
-        check_terminal_stretch();
-        check_terminal_stretch_edges();
-        check_terminal_cell_hit();
-        check_terminal_stretch_cost();
+        GROUP("check_caret_blink", check_caret_blink());
+        GROUP("check_caret_terminal", check_caret_terminal());
+        GROUP("check_terminal_stretch", check_terminal_stretch());
+        GROUP("check_terminal_stretch_edges", check_terminal_stretch_edges());
+        GROUP("check_terminal_cell_hit", check_terminal_cell_hit());
+        GROUP("check_terminal_stretch_cost", check_terminal_stretch_cost());
 #endif
-        check_no_input_codes();
-        check_no_shapes_by_hand();
-        check_no_element_by_hand();
+        GROUP("check_no_input_codes", check_no_input_codes());
+        GROUP("check_no_shapes_by_hand", check_no_shapes_by_hand());
+        GROUP("check_no_element_by_hand", check_no_element_by_hand());
 #if MOONWATER_UI_ANY
-        check_kit_defaults(&terminal.ui);
+        GROUP("check_kit_defaults", check_kit_defaults(&terminal.ui));
 #endif
 #if MOONWATER_UI_EDITOR
-        check_editor_comments();
-        check_editor_lines_put();
+        GROUP("check_editor_comments", check_editor_comments());
+        GROUP("check_editor_lines_put", check_editor_lines_put());
 #endif
 
         // What the terminal says its paper and ink are is what it paints them with: the theme's pair, and the palette's.
-        terminal_theme_check();
-        check_bar_cells();
+        GROUP("terminal_theme_check", terminal_theme_check());
+        GROUP("check_bar_cells", check_bar_cells());
         check("frames: a buffer is refused only while the compositor may still be reading it", !refused);
         check("frames: some were drawn", compared > 1000);
         check("frames: the screen and the buffer are always the full draw", !wrong);
