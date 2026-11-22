@@ -1395,8 +1395,14 @@ static unsigned int compositor_glass_tint(unsigned int blurred, unsigned int sid
 
 static int compositor_glass_compose(int row, const int *c)
 {
-        const unsigned int *picture = compositor_pixels(row);
+        // A lent buffer is a client's, with the client's pitch; the table's own picture is the compositor's stride (wl-host: no lent row
+        // carries WINDOW_GLASS today, so this is the guard, not a fix of a reachable read).
+        unsigned long picture_pitch = (unsigned long)compositor_stride();
+        const unsigned int *picture = compositor_lent_pixels(row, &picture_pitch);
         int *blocks = compositor.glass_blocks[row], width = c[2] - c[0];
+
+        if (!picture)
+                picture = compositor_pixels(row), picture_pitch = (unsigned long)compositor_stride();
 
         for (int y0 = c[1]; y0 < c[3]; y0 += COMPOSITOR_GLASS_BAND)
         {
@@ -1409,7 +1415,7 @@ static int compositor_glass_compose(int row, const int *c)
                         return 0;
                 for (int y = y0; y < y1; y++)
                         memory_glass_over_u32(compositor.composed[row] + (unsigned long)(y - compositor.y[row]) * compositor.w[row] + (unsigned long)(c[0] - compositor.x[row]),
-                                              picture + (unsigned long)(y - compositor.y[row]) * (unsigned long)compositor_stride() + (unsigned long)(c[0] - compositor.x[row]),
+                                              picture + (unsigned long)(y - compositor.y[row]) * picture_pitch + (unsigned long)(c[0] - compositor.x[row]),
                                               ground + (unsigned long)(y - y0) * pitch, (positive)width,
                                               compositor_grain_row(compositor.glass_side[row], c[0], y));
         }
