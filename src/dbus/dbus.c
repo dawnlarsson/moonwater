@@ -1399,12 +1399,12 @@ static int dbus_rule_parse(const char *text, struct dbus_rule *r)
                                 unsigned short offset, room;
                                 unsigned char bit;
                         } rule_fields[] = {
-                            {"sender", (unsigned short)__builtin_offsetof(struct dbus_rule, sender), DBUS_NAME_TEXT, 1},
-                            {"interface", (unsigned short)__builtin_offsetof(struct dbus_rule, interface), DBUS_NAME_TEXT, 2},
-                            {"member", (unsigned short)__builtin_offsetof(struct dbus_rule, member), 64, 4},
-                            {"path", (unsigned short)__builtin_offsetof(struct dbus_rule, path), 128, 8},
-                            {"path_namespace", (unsigned short)__builtin_offsetof(struct dbus_rule, path_namespace), 128, 16},
-                            {"destination", (unsigned short)__builtin_offsetof(struct dbus_rule, destination), DBUS_NAME_TEXT, 32},
+                            {"sender", (unsigned short)offset_of(struct dbus_rule, sender), DBUS_NAME_TEXT, 1},
+                            {"interface", (unsigned short)offset_of(struct dbus_rule, interface), DBUS_NAME_TEXT, 2},
+                            {"member", (unsigned short)offset_of(struct dbus_rule, member), 64, 4},
+                            {"path", (unsigned short)offset_of(struct dbus_rule, path), 128, 8},
+                            {"path_namespace", (unsigned short)offset_of(struct dbus_rule, path_namespace), 128, 16},
+                            {"destination", (unsigned short)offset_of(struct dbus_rule, destination), DBUS_NAME_TEXT, 32},
                         };
                         long fi = DBUS_TABLE_LOOKUP(key, rule_fields);
 
