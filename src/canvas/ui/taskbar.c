@@ -1845,7 +1845,7 @@ static void taskbar_edit_set(int on) { taskbar.editing = on != 0, taskbar.stale 
 
 static void taskbar_bytes(int width, int height, int scale, unsigned long *band, unsigned long *glass)
 {
-        int px = (scale + 99) / 100, thick = COMPOSITOR_PANEL * ((taskbar_scaled(scale) + 99) / 100);
+        int px = (scale + 99) / 100, thick = taskbar_thick(scale);
         int across = COMPOSITOR_GLASS_ACROSS * px, down = COMPOSITOR_GLASS_DOWN * px;
         long wide = (long)(width + 2 * across) * (long)(thick + 2 * down), tall = (long)(thick + 2 * across) * (long)(height + 2 * down);
         *band = (unsigned long)(width > height ? width : height) * (unsigned long)thick * 4;
@@ -2327,8 +2327,6 @@ static int taskbar_stop_root_for(const struct taskbar_proc *t, int n, int pid, c
         return t[at].pid;
 }
 
-static int taskbar_stop_root(const struct taskbar_proc *t, int n, int pid) { return taskbar_stop_root_for(t, n, pid, null); }
-
 static int taskbar_stop_has(const int *members, int count, unsigned int pid)
 {
         for (int i = 0; i < count; i++)
@@ -2336,6 +2334,8 @@ static int taskbar_stop_has(const int *members, int count, unsigned int pid)
                         return 1;
         return 0;
 }
+
+static int taskbar_stop_root(const struct taskbar_proc *t, int n, int pid) { return taskbar_stop_root_for(t, n, pid, null); }
 
 static int taskbar_stop_tree_for(const struct taskbar_proc *t, int n, int root, int target_pid, const char *target_app, int *members, int most)
 {
@@ -2391,8 +2391,11 @@ static int taskbar_proc_read(struct taskbar_proc *into, int most)
                         if (!ok || !pid)
                                 continue;
                         taskbar_path_num(path, (int)sizeof(path), taskbar_proc_root, "/", (positive)pid, "/stat");
-                        if (file_slurp_once_at(AT_FDCWD, (string_address)path, (p8 address_to)text, sizeof(text)) <= 0)
+                        bipolar slurped = file_slurp_once_at(AT_FDCWD, (string_address)path, (p8 address_to)text, sizeof(text) - 1);
+
+                        if (slurped <= 0)
                                 continue;
+                        text[slurped] = 0;
                         for (int i = 0; text[i]; i++)
                                 open = open < 0 && text[i] == '(' ? i : open, close = text[i] == ')' ? i : close;
                         if (open < 0 || close < open || !text[close + 1] || !text[close + 2] || !text[close + 3])
