@@ -24944,12 +24944,6 @@ static fn ui_page_fit(struct ui address_to ui, struct ui_page address_to p, stru
         ui_scroll_clamp(&l->scroll);
 }
 
-static fn ui_page_scroll(struct ui_page address_to p, int scroll)
-{
-        if (ui_scroll_set(p->body, scroll))
-                ui_page_changed(p);
-}
-
 static fn ui_page_reveal(const struct ui address_to ui, const struct ui_page address_to p, struct ui_list address_to l)
 {
         if (!p->card)
