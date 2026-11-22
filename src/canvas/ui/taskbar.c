@@ -2503,12 +2503,18 @@ static int taskbar_pin_find(const char *app)
         return -1;
 }
 
-/* The pins file is read by the kit's registry (ui_apps_pinned_list): each pinned entry, in the file's order, once. */
+/* The pins file is read by the kit's registry (ui_apps_pinned_list): each pinned entry, in the file's order, once. The registry is
+   looked at only when the file names something, as it was before the parse was the registry's: a file of none or none at all leaves it
+   as it is. */
 static void taskbar_pins_read(void)
 {
+        char path[160], line[SETTING_PINS_MOST + 16];
         int which[SETTING_PINS_ENTRIES], listed;
 
         taskbar_pins.count = 0, taskbar.stale = 1;
+        if (!ui_apps_pins_read(compositor_settings_root, path, sizeof(path), line, sizeof(line)) || !line[0] ||
+            string_equals((string_address)line, (string_address) "none"))
+                return;
         ui_apps_fresh((b64)ui_kit_time());
         listed = ui_apps_pinned_list(compositor_settings_root, which, SETTING_PINS_ENTRIES);
         for (int i = 0; i < listed; i++)
