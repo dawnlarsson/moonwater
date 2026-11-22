@@ -7372,22 +7372,19 @@ static inline INLINE positive font_decode(const p8 address_to restrict text, pos
                 *code = text[at];
                 return at + 1;
         }
-        memory_utf8_state state = {0};
-
-        while (at < length)
+        if (at >= length)
         {
-                b32 said = memory_utf8_feed(&state, text[at++]);
-
-                if (said > 0)
-                {
-                        *code = state.value;
-                        return at;
-                }
-                if (said < 0)
-                        break;
+                *code = 0xfffd;
+                return at;
         }
-        *code = 0xfffd;
-        return at;
+        {
+                // A byte that is not UTF-8 is one U+FFFD, and the bytes after it are read as they come (lib's decoder).
+                positive used = memory_utf8_decode(text + at, length - at, code);
+
+                if (*code & MEMORY_UTF8_INVALID)
+                        *code = 0xfffd;
+                return at + used;
+        }
 }
 
 static inline INLINE CONST p8 font_is_drawn(p32 code)

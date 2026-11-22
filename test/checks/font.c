@@ -626,10 +626,25 @@ static p8 same_glyphs(const font_face address_to face, p32 one, p32 two)
         return same;
 }
 
+/* A byte that is not UTF-8 is one U+FFFD, and the byte after it is read as it comes: the letter after a truncated E2 is drawn. */
+static fn check_decode(void)
+{
+        static const p8 text[] = {0xe2, 'A', 0xc3, 0xa9};
+        p32 code = 0;
+        positive at = font_decode(text, 4, 0, &code);
+
+        check("font: a truncated sequence is one U+FFFD, and the letter after it is not lost", code == 0xfffd && at == 1);
+        at = font_decode(text, 4, at, &code);
+        check("font: the letter after a truncated sequence is decoded", code == 'A' && at == 2);
+        at = font_decode(text, 4, at, &code);
+        check("font: a valid two-byte sequence after it is decoded", code == 0xe9 && at == 4);
+}
+
 static fn check_outlines(const font_face address_to one, const font_face address_to two)
 {
         font_bitmap box;
 
+        check_decode();
         check_square(one);
         check_circle(one, 2, circle_one, 1024);
         check_circle(two, 3, circle_two, 2048);
