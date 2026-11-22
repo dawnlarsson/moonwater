@@ -27243,7 +27243,9 @@ static b32 ui_lift_row(const struct window_row address_to own, string_address na
                         continue;
                 if (put_away)
                 {
-                        system_call_2(syscall(kill), (positive)pid, SIGTERM);
+                        // The close is the compositor's: this row writes a request for the other row, which the compositor checks (owner and target).
+                        __atomic_store_n(&table->close_target[own->row], row + 1, __ATOMIC_RELEASE);
+                        __atomic_add_fetch(&table->close_target_serial[own->row], 1, __ATOMIC_RELEASE);
                         return true;
                 }
                 if (!shown)
