@@ -9998,6 +9998,22 @@ b32 main()
         string_address paths[1];
         positive compared = 0, wrong = 0, refused = 0;
 
+        // The setup every group inherits, once, before the first fork: the band's face and engine (the taskbar rows draw with them,
+        // and compositor.face and compositor.engine are the compositor's own), and the kit's theme. A group that needs more sets it up.
+        {
+                static p8 shared_bytes[1 << 19];
+                string_address shared_path = program_argument_count() > 1 ? program_argument(1) : null;
+                bipolar shared_got = shared_path ? file_slurp_regular_at(AT_FDCWD, shared_path, shared_bytes, sizeof(shared_bytes), 0) : -1;
+
+                if (shared_got > 0 && font_load(&band_face, shared_bytes, (positive)shared_got, 0) == 0)
+                {
+                        font_start(&band_engine, band_atlas, 128, 128);
+                        compositor.face = band_face, compositor.engine = &band_engine;
+                }
+                ui_kit_theme(UI_THEME_DARK, UI_ACCENT_STANDARD, 1);
+                ui_kit_theme(UI_THEME_DARK, UI_ACCENT_STANDARD, 0);
+        }
+
         // The transitions run as designed in every check (ui_paced at 100): the durations the rows pin are the designed ones.
         ui_pace = UI_PACE_DESIGNED;
 
