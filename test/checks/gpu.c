@@ -11,6 +11,10 @@
 
 #ifdef CHECK_gpu
 #include "../../src/lib.util.c"
+/* The shim's signal macros, as terminal.c names them for gpu.c in its own lanes (shell.c's are not included here). */
+#define SIGNAL_RESTART 0x10000000
+#define SIGNAL_CATCH_RESTORER 0
+#define SIGNAL_CATCH_FLAGS SIGNAL_RESTART
 #include "../../src/canvas/gpu.c"
 /*
         The GPU's four operations against the CPU's own routines (memory_copy, memory_fill_u32_rect, memory_over_tone_u32,
