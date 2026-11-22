@@ -8950,9 +8950,6 @@ static b32 tools_mcookie()
 #define DD_SIGNAL_INFO 10
 #define DD_NO_SUCH_CALL 38
 
-// More than one of a set of conversions that exclude each other.
-#define dd_several(bits) (((bits) & ((bits) - 1)) != 0)
-
 static positive dd_in_full;
 // Records conv=block cut at cbs, which the summary counts.
 static positive dd_truncated;
@@ -9386,32 +9383,34 @@ static bool dd_flags(string_address value, p8 group, positive address_to flags)
         static const struct {
                 string_address name;
                 positive flag;
-                p8 group;
+                p8 groups; /* bit 0=conv, bit 1=iflag, bit 2=oflag */
         } words[] = {
-            {"notrunc", DD_NOTRUNC, 0}, {"sync", DD_SYNC, 0},
-            {"noerror", DD_NOERROR, 0}, {"fdatasync", DD_FDATASYNC, 0},
-            {"fsync", DD_FSYNC, 0}, {"excl", DD_EXCL, 0},
-            {"nocreat", DD_NOCREAT, 0}, {"lcase", DD_LCASE, 0},
-            {"ucase", DD_UCASE, 0}, {"swab", DD_SWAB, 0},
-            {"sparse", DD_SPARSE, 0},
-            {"ascii", DD_ASCII | DD_UNBLOCK, 0},
-            {"ebcdic", DD_EBCDIC | DD_BLOCK, 0},
-            {"ibm", DD_IBM | DD_BLOCK, 0},
-            {"block", DD_BLOCK, 0}, {"unblock", DD_UNBLOCK, 0},
-            {"fullblock", DD_FULLBLOCK, 1}, {"count_bytes", DD_COUNT_BYTES, 1},
-            {"skip_bytes", DD_SKIP_BYTES, 1},
-            {"append", DD_APPEND, 2}, {"seek_bytes", DD_SEEK_BYTES, 2},
+            {"notrunc", DD_NOTRUNC, 1}, {"sync", DD_SYNC, 1},
+            {"noerror", DD_NOERROR, 1}, {"fdatasync", DD_FDATASYNC, 1},
+            {"fsync", DD_FSYNC, 1}, {"excl", DD_EXCL, 1},
+            {"nocreat", DD_NOCREAT, 1}, {"lcase", DD_LCASE, 1},
+            {"ucase", DD_UCASE, 1}, {"swab", DD_SWAB, 1},
+            {"sparse", DD_SPARSE, 1},
+            {"ascii", DD_ASCII | DD_UNBLOCK, 1},
+            {"ebcdic", DD_EBCDIC | DD_BLOCK, 1},
+            {"ibm", DD_IBM | DD_BLOCK, 1},
+            {"block", DD_BLOCK, 1}, {"unblock", DD_UNBLOCK, 1},
+            {"fullblock", DD_FULLBLOCK, 2}, {"count_bytes", DD_COUNT_BYTES, 2},
+            {"skip_bytes", DD_SKIP_BYTES, 2},
+            {"append", DD_APPEND, 4}, {"seek_bytes", DD_SEEK_BYTES, 4},
             // The open(2) flags, meaningful for either side.
-            {"direct", DD_DIRECT, 1}, {"direct", DD_DIRECT, 2},
-            {"directory", DD_DIRECTORY, 1}, {"directory", DD_DIRECTORY, 2},
-            {"dsync", DD_DSYNC, 1}, {"dsync", DD_DSYNC, 2},
-            {"sync", DD_SYNC_IO, 1}, {"sync", DD_SYNC_IO, 2},
-            {"nonblock", DD_NONBLOCK, 1}, {"nonblock", DD_NONBLOCK, 2},
-            {"noatime", DD_NOATIME, 1}, {"noatime", DD_NOATIME, 2},
-            {"nocache", DD_NOCACHE, 1}, {"nocache", DD_NOCACHE, 2},
-            {"noctty", DD_NOCTTY, 1}, {"noctty", DD_NOCTTY, 2},
-            {"nofollow", DD_NOFOLLOW, 1}, {"nofollow", DD_NOFOLLOW, 2},
+            {"direct", DD_DIRECT, 6}, {"directory", DD_DIRECTORY, 6},
+            {"dsync", DD_DSYNC, 6}, {"sync", DD_SYNC_IO, 6},
+            {"nonblock", DD_NONBLOCK, 6}, {"noatime", DD_NOATIME, 6},
+            {"nocache", DD_NOCACHE, 6}, {"noctty", DD_NOCTTY, 6},
+            {"nofollow", DD_NOFOLLOW, 6},
         };
+        static const string_address group_errors[3] = {
+            (string_address)"invalid conversion",
+            (string_address)"invalid input flag",
+            (string_address)"invalid output flag",
+        };
+        p8 group_bit = (p8)(1u << group);
 
         //      A word ends at a comma, so an empty one, before, between or after
         //      the others, is refused by its empty name like any unknown word.
@@ -9421,7 +9420,7 @@ static bool dd_flags(string_address value, p8 group, positive address_to flags)
                                                            string_length(value));
                 positive word = 0;
                 while (word < array_count(words) &&
-                       (words[word].group != group ||
+                       (!(words[word].groups & group_bit) ||
                         string_length(words[word].name) != length ||
                         memory_compare(value, words[word].name, length)))
                         word++;
@@ -9432,10 +9431,7 @@ static bool dd_flags(string_address value, p8 group, positive address_to flags)
 
                         memory_copy(named, value, kept);
                         named[kept] = end;
-                        dd_complain(group == 0 ? (string_address)"invalid conversion" :
-                                    group == 1 ? (string_address)"invalid input flag" :
-                                                 (string_address)"invalid output flag",
-                                    named);
+                        dd_complain(group_errors[group], named);
                         return false;
                 }
                 *flags |= words[word].flag;
@@ -10015,6 +10011,13 @@ static p8 address_to dd_swab(p8 address_to buffer, positive address_to length,
         return buffer;
 }
 
+static fn dd_emit_bytes(positive conv, const p8 address_to start, positive length)
+{
+        if (conv & DD_BLOCK) dd_copy_block(start, length);
+        else if (conv & DD_UNBLOCK) dd_copy_unblock(start, length);
+        else dd_copy_simple(start, length);
+}
+
 // A short read is not the end of the input, and a partial record is not an
 // error: both are counted and the next block is asked for.
 static b32 tools_dd(void)
@@ -10138,23 +10141,24 @@ static b32 tools_dd(void)
                         dd_status_level = status_levels[hit].value;
                         progress = dd_status_level == DD_STATUS_ALL;
                 }
-                else if (dd_operand(argument, "conv", address_of value))
-                {
-                        if (!dd_flags(value, 0, address_of conv))
-                                return 1;
-                }
-                else if (dd_operand(argument, "iflag", address_of value))
-                {
-                        if (!dd_flags(value, 1, address_of iflags))
-                                return 1;
-                }
-                else if (dd_operand(argument, "oflag", address_of value))
-                {
-                        if (!dd_flags(value, 2, address_of oflags))
-                                return 1;
-                }
                 else
                 {
+                        struct { string_address name; positive address_to target; p8 group; } flag_ops[] = {
+                            {"conv", address_of conv, 0},
+                            {"iflag", address_of iflags, 1},
+                            {"oflag", address_of oflags, 2},
+                        };
+                        positive f = 0;
+                        while (f < array_count(flag_ops) &&
+                               !dd_operand(argument, flag_ops[f].name, address_of value))
+                                f++;
+                        if (f < array_count(flag_ops))
+                        {
+                                if (!dd_flags(value, flag_ops[f].group, flag_ops[f].target))
+                                        return 1;
+                                continue;
+                        }
+
                         //      dd takes operands, not options, but a word
                         //      beginning with two dashes is still answered
                         //      as the option it is not.
@@ -10206,19 +10210,21 @@ static b32 tools_dd(void)
         if (!cbs)
                 conv &= ~(positive)(DD_BLOCK | DD_UNBLOCK);
 
-        if (dd_several(conv & (DD_ASCII | DD_EBCDIC | DD_IBM)))
-                return string_diagnostic(&text_diagnostic, 1, null, "cannot combine any two of {ascii,ebcdic,ibm}");
-        if (dd_several(conv & (DD_BLOCK | DD_UNBLOCK)))
-                return string_diagnostic(&text_diagnostic, 1, null, "cannot combine block and unblock");
-        if ((conv & DD_LCASE) && (conv & DD_UCASE))
-                return string_diagnostic(&text_diagnostic, 1, null, "cannot combine lcase and ucase");
-        if ((conv & DD_EXCL) && (conv & DD_NOCREAT))
-                return string_diagnostic(&text_diagnostic, 1, null, "cannot combine excl and nocreat");
+        static const struct { p64 mask; string_address message; } conv_conflicts[] = {
+            {DD_ASCII | DD_EBCDIC | DD_IBM, "cannot combine any two of {ascii,ebcdic,ibm}"},
+            {DD_BLOCK | DD_UNBLOCK, "cannot combine block and unblock"},
+            {DD_LCASE | DD_UCASE, "cannot combine lcase and ucase"},
+            {DD_EXCL | DD_NOCREAT, "cannot combine excl and nocreat"},
+        };
+        for (positive c = 0; c < array_count(conv_conflicts); c++)
+                if (flags_exclusive_conflict(conv, address_of conv_conflicts[c].mask, 1))
+                        return string_diagnostic(&text_diagnostic, 1, null, conv_conflicts[c].message);
 
         // nocache asks the page cache to let go and direct never used it;
         // each side is asked on its own.
-        if (dd_several(iflags & (DD_DIRECT | DD_NOCACHE)) ||
-            dd_several(oflags & (DD_DIRECT | DD_NOCACHE)))
+        const p64 direct_nocache = DD_DIRECT | DD_NOCACHE;
+        if (flags_exclusive_conflict(iflags, address_of direct_nocache, 1) ||
+            flags_exclusive_conflict(oflags, address_of direct_nocache, 1))
                 return string_diagnostic(&text_diagnostic, 1, null, "cannot combine direct and nocache");
 
         if (!ibs || ibs > positive_max - 31)
@@ -10354,6 +10360,8 @@ static b32 tools_dd(void)
 
                 if (opened < 0)
                 {
+                        if (in_handle != 0)
+                                system_close(in_handle);
                         text_flush();
                         return string_report(writer_stderr, 1, "dd: failed to open %w: %s\n",
                                              writer_shell_quoted_name, output, file_reason(opened));
@@ -10368,13 +10376,22 @@ static b32 tools_dd(void)
 
                         if (refused < 0 &&
                             dd_truncate_failed(out_handle, output, size, refused))
+                        {
+                                system_close(out_handle);
+                                if (in_handle != 0)
+                                        system_close(in_handle);
                                 return 1;
+                        }
                 }
         }
         else if (!dd_flags_set(1, dd_open_flags(oflags) |
                                       ((oflags & DD_APPEND) ? DD_O_APPEND : 0),
                                (string_address) "standard output"))
+        {
+                if (in_handle != 0)
+                        system_close(in_handle);
                 return 1;
+        }
 
         /*
                 One buffer or two, which is coreutils' rule and not a size
@@ -10440,7 +10457,9 @@ static b32 tools_dd(void)
                             (bipolar)facts.size - input_start < (bipolar)want)
                         {
                                 left = ((bipolar)want - (bipolar)facts.size) / (bipolar)ibs;
-                                consumed = (positive)((bipolar)facts.size - input_start);
+                                consumed = (bipolar)facts.size <= input_start
+                                               ? 0
+                                               : (positive)((bipolar)facts.size - input_start);
                         }
                 }
                 else if (system_seek(in_handle, 0, 2) >= 0)
@@ -10587,10 +10606,6 @@ static b32 tools_dd(void)
         //      coreutils' allocation failure does: no statistics.
         if (!dd_alloc_ibuf() || !dd_alloc_obuf())
         {
-                if (out_handle != 1)
-                        system_close(out_handle);
-                if (in_handle != 0)
-                        system_close(in_handle);
                 result = 1;
                 goto release;
         }
@@ -10620,7 +10635,7 @@ static b32 tools_dd(void)
 
                 positive records = dd_in_full + dd_in_partial;
 
-                if (records >= max_records + (max_bytes != 0) && max_records != positive_max)
+                if (max_records != positive_max && records >= max_records + (max_bytes != 0))
                         break;
 
                 if ((conv & DD_SYNC) && (conv & DD_NOERROR))
@@ -10728,12 +10743,7 @@ static b32 tools_dd(void)
                 if (conv & DD_SWAB)
                         start = dd_swab(dd_ibuf, address_of read_bytes, address_of saved_byte);
 
-                if (conv & DD_BLOCK)
-                        dd_copy_block(start, read_bytes);
-                else if (conv & DD_UNBLOCK)
-                        dd_copy_unblock(start, read_bytes);
-                else
-                        dd_copy_simple(start, read_bytes);
+                dd_emit_bytes(conv, start, read_bytes);
 
                 if (dd_quit)
                 {
@@ -10750,12 +10760,7 @@ static b32 tools_dd(void)
         {
                 p8 held = (p8)saved_byte;
 
-                if (conv & DD_BLOCK)
-                        dd_copy_block(address_of held, 1);
-                else if (conv & DD_UNBLOCK)
-                        dd_copy_unblock(address_of held, 1);
-                else
-                        dd_put(held);
+                dd_emit_bytes(conv, address_of held, 1);
         }
 
         if ((conv & DD_BLOCK) && dd_col > 0 && dd_col < cbs)
@@ -10891,19 +10896,30 @@ finish:
                         (void)system_call_4(syscall(fadvise64), out_handle, 0, 0, 4);
         }
 
-        if (out_handle != 1 && system_close(out_handle) < 0)
+        if (out_handle != 1)
         {
-                string_diagnostic(&text_diagnostic, 0, output, "close failed");
-                result = 1;
+                if (system_close(out_handle) < 0)
+                {
+                        string_diagnostic(&text_diagnostic, 0, output, "close failed");
+                        result = 1;
+                }
+                out_handle = 1;
         }
 
         if (in_handle != 0)
+        {
                 system_close(in_handle);
+                in_handle = 0;
+        }
 
         text_flush();
         dd_summary();
 
 release:
+        if (out_handle != 1)
+                system_close(out_handle);
+        if (in_handle != 0)
+                system_close(in_handle);
         if (dd_obuf && dd_obuf != dd_ibuf)
                 memory_free(dd_obuf, dd_obuf_size);
         if (dd_ibuf)
@@ -15746,7 +15762,7 @@ typedef struct
 {
         string_address name;
         string_address header;
-        positive width;
+        p8 width;
         bool right;
 } ps_column;
 
@@ -15940,23 +15956,26 @@ static fn ps_put_tty(positive tty)
                 up, and the hypervisor and USB drivers a process is likely
                 to be sitting on. Anything else is a tty of its minor.
         */
-        if (major >= 136 && major <= 143)
+        static const struct {
+                string_address prefix;
+                p16 major_min, major_max, minor_min, major_stride;
+                b16 minor_offset;
+        } tty_map[] = {
+            {"pts/", 136, 143, 0, 256, 0},
+            {"ttyS", 4, 4, 64, 0, -64},
+            {"hvc", 229, 229, 0, 0, 0},
+            {"ttyUSB", 188, 188, 0, 0, 0},
+        };
+        for (positive i = 0; i < array_count(tty_map); i++)
         {
-                name = "pts/";
-                minor += (major - 136) * 256;
-        }
-        else if (major == 4 && minor >= 64)
-        {
-                name = "ttyS";
-                minor -= 64;
-        }
-        else if (major == 229)
-        {
-                name = "hvc";
-        }
-        else if (major == 188)
-        {
-                name = "ttyUSB";
+                if (major >= tty_map[i].major_min && major <= tty_map[i].major_max &&
+                    minor >= tty_map[i].minor_min)
+                {
+                        name = tty_map[i].prefix;
+                        minor = (positive)((bipolar)minor + tty_map[i].minor_offset) +
+                                (major - tty_map[i].major_min) * tty_map[i].major_stride;
+                        break;
+                }
         }
 
         ps_text(name);
@@ -16025,7 +16044,8 @@ static byte_span ps_draw(struct snapshot_process address_to process,
                 string_address format =
                     field == PS_FIELD_LSTART ? "%a %b %e %H:%M:%S %Y"
                     : field == PS_FIELD_START
-                        ? (ps_wall - (positive)began < 86400 ? "%H:%M:%S" : "%b %e")
+                        ? ((b64)ps_wall >= began && (positive)((b64)ps_wall - began) < 86400
+                               ? "%H:%M:%S" : "%b %e")
                     : this_year && then.tm_yday == today.tm_yday ? "%H:%M"
                     : this_year ? "%b%d" : "%Y";
                 p8 moment[32];
@@ -16083,8 +16103,8 @@ borrowed:
 
 typedef struct
 {
-        positive field;
         string_address header;
+        p8 field;
         bool custom_header;
 } ps_selected;
 
@@ -16120,7 +16140,7 @@ static bool ps_field_add(ps_selected address_to address_to fields,
                              address_to count + 1, sizeof(ps_selected), 16))
                 return false;
 
-        (address_to fields)[address_to count].field = value;
+        (address_to fields)[address_to count].field = (p8)value;
         (address_to fields)[address_to count].header = header;
         (address_to fields)[address_to count].custom_header = custom_header;
         address_to count += 1;
@@ -16318,14 +16338,11 @@ static bool ps_sort_pid(string_address list, bool address_to reverse,
                 }
 
                 //      The two keys this listing can be put in order by.
-                bool named = length == 4 &&
-                             !string_compare_max(from, (string_address)"comm", 4);
-
-                if (!named &&
-                    (length != 3 ||
-                     string_compare_max(from, (string_address)"pid", 3)))
+                static const named_byte ps_sort_keys[] = {{"pid", 0}, {"comm", 1}};
+                positive hit = memory_table_lookup(from, length, ps_sort_keys);
+                if (hit == array_count(ps_sort_keys))
                         return false;
-                if (named)
+                if (ps_sort_keys[hit].value)
                         address_to by_command = true;
 
                 if (!any)
@@ -16403,31 +16420,20 @@ static bool ps_format_list(string_address list,
 
                 static const struct {
                         string_address name;
-                        string_address target;
                         string_address header;
-                        positive field;
+                        p8 field;
                 } ps_aliases[] = {
-                    {"cmd", null, "CMD", PS_FIELD_ARGS},
-                    {"command", null, "COMMAND", PS_FIELD_ARGS},
-                    {"ucmd", null, "CMD", PS_FIELD_COMM},
-                    {"ni", "nice", null, PS_FIELD_COUNT},
+                    {"cmd", "CMD", PS_FIELD_ARGS},
+                    {"command", "COMMAND", PS_FIELD_ARGS},
+                    {"ucmd", "CMD", PS_FIELD_COMM},
+                    {"ni", null, PS_FIELD_NICE},
                 };
                 positive alias = string_table_lookup(name, ps_aliases);
-                positive which;
-                string_address alias_header = null;
-
-                if (alias < array_count(ps_aliases))
-                {
-                        which = ps_aliases[alias].target
-                            ? string_table_find(ps_aliases[alias].target, ps_columns,
-                                                sizeof(ps_columns[0]), PS_FIELD_COUNT)
-                            : ps_aliases[alias].field;
-                        alias_header = ps_aliases[alias].header;
-                }
-                else
-                        which = string_table_find(name, ps_columns,
-                                                  sizeof(ps_columns[0]),
-                                                  PS_FIELD_COUNT);
+                positive which = alias < array_count(ps_aliases)
+                    ? ps_aliases[alias].field
+                    : string_table_lookup(name, ps_columns);
+                string_address alias_header = alias < array_count(ps_aliases)
+                    ? ps_aliases[alias].header : null;
 
                 if (which == PS_FIELD_COUNT)
                         return string_diagnostic(&text_diagnostic, 0, name, "unknown user-defined format specifier");
@@ -16509,15 +16515,10 @@ static b32 tools_ps(void)
                 }
                 if (long_option)
                 {
-                        option = 0;
-                        for (positive at = 0; at < array_count(ps_long_options); at++)
-                                if (string_length(ps_long_options[at].name) == cursor.name_length &&
-                                    !memory_compare(ps_long_options[at].name, cursor.word + 2,
-                                                    cursor.name_length))
-                                {
-                                        option = ps_long_options[at].value;
-                                        break;
-                                }
+                        positive hit = memory_table_lookup(
+                            cursor.word + 2, cursor.name_length, ps_long_options);
+                        option = hit < array_count(ps_long_options)
+                                     ? ps_long_options[hit].value : 0;
                 }
                 bool valued = option == 'o' || option == 'p' || option == 'P' ||
                               option == 's' || option == 'C';
@@ -16610,33 +16611,38 @@ static b32 tools_ps(void)
                 // carries: field, header, and whether the header overrides
                 // the column table's.
                 static const ps_selected ps_full_preset[] = {
-                    {PS_FIELD_USER, "UID", true},  {PS_FIELD_PID, null, false},
-                    {PS_FIELD_PPID, null, false},  {PS_FIELD_CPU, null, false},
-                    {PS_FIELD_STIME, null, false}, {PS_FIELD_TTY, null, false},
-                    {PS_FIELD_TIME, null, false},  {PS_FIELD_ARGS, "CMD", true},
+                    {"UID", PS_FIELD_USER, true},  {null, PS_FIELD_PID, false},
+                    {null, PS_FIELD_PPID, false},  {null, PS_FIELD_CPU, false},
+                    {null, PS_FIELD_STIME, false}, {null, PS_FIELD_TTY, false},
+                    {null, PS_FIELD_TIME, false},  {"CMD", PS_FIELD_ARGS, true},
                 };
                 static const ps_selected ps_plain_preset[] = {
-                    {PS_FIELD_PID, null, false},   {PS_FIELD_TTY, null, false},
-                    {PS_FIELD_TIME, null, false},  {PS_FIELD_COMM, "CMD", true},
+                    {null, PS_FIELD_PID, false},   {null, PS_FIELD_TTY, false},
+                    {null, PS_FIELD_TIME, false},  {"CMD", PS_FIELD_COMM, true},
                 };
                 // -j adds the process group and session: after the parent
                 // in the full listing, ahead of the terminal otherwise.
                 static const ps_selected ps_full_jobs_preset[] = {
-                    {PS_FIELD_USER, "UID", true},  {PS_FIELD_PID, null, false},
-                    {PS_FIELD_PPID, null, false},  {PS_FIELD_PGID, null, false},
-                    {PS_FIELD_SID, null, false},   {PS_FIELD_CPU, null, false},
-                    {PS_FIELD_STIME, null, false}, {PS_FIELD_TTY, null, false},
-                    {PS_FIELD_TIME, null, false},  {PS_FIELD_ARGS, "CMD", true},
+                    {"UID", PS_FIELD_USER, true},  {null, PS_FIELD_PID, false},
+                    {null, PS_FIELD_PPID, false},  {null, PS_FIELD_PGID, false},
+                    {null, PS_FIELD_SID, false},   {null, PS_FIELD_CPU, false},
+                    {null, PS_FIELD_STIME, false}, {null, PS_FIELD_TTY, false},
+                    {null, PS_FIELD_TIME, false},  {"CMD", PS_FIELD_ARGS, true},
                 };
                 static const ps_selected ps_jobs_preset[] = {
-                    {PS_FIELD_PID, null, false},   {PS_FIELD_PGID, null, false},
-                    {PS_FIELD_SID, null, false},   {PS_FIELD_TTY, null, false},
-                    {PS_FIELD_TIME, null, false},  {PS_FIELD_COMM, "CMD", true},
+                    {null, PS_FIELD_PID, false},   {null, PS_FIELD_PGID, false},
+                    {null, PS_FIELD_SID, false},   {null, PS_FIELD_TTY, false},
+                    {null, PS_FIELD_TIME, false},  {"CMD", PS_FIELD_COMM, true},
                 };
-                const ps_selected address_to preset =
-                    full ? (jobs ? ps_full_jobs_preset : ps_full_preset)
-                         : (jobs ? ps_jobs_preset : ps_plain_preset);
-                positive presets = full ? (jobs ? 10 : 8) : (jobs ? 6 : 4);
+                static const struct { const ps_selected address_to items; p8 count; } ps_presets[4] = {
+                    {ps_plain_preset, (p8)array_count(ps_plain_preset)},
+                    {ps_jobs_preset, (p8)array_count(ps_jobs_preset)},
+                    {ps_full_preset, (p8)array_count(ps_full_preset)},
+                    {ps_full_jobs_preset, (p8)array_count(ps_full_jobs_preset)},
+                };
+                positive mode = ((positive)full << 1) | (positive)jobs;
+                const ps_selected address_to preset = ps_presets[mode].items;
+                positive presets = ps_presets[mode].count;
 
                 ps_columns[PS_FIELD_TTY].header = "TTY";
                 ps_columns[PS_FIELD_TTY].width = 8;
@@ -16659,7 +16665,8 @@ static b32 tools_ps(void)
         bool selectors = pids.count || parents.count || command_count;
         bool alternate_selectors = parents.count || command_count;
         bool filter_owner = !every && !selectors;
-        bool names = wanted & ((positive)1 << PS_FIELD_USER);
+        bool names = (wanted & (((positive)1 << PS_FIELD_USER) |
+                                ((positive)1 << PS_FIELD_RUSER))) != 0;
         bool owners = filter_owner || names ||
                       (wanted & ((positive)1 << PS_FIELD_UID));
         if (!system_snapshot_take_selected(
@@ -16671,7 +16678,9 @@ static b32 tools_ps(void)
         ps_now_ns = ps_snapshot.header.uptime_ns;
         ps_wall = ps_snapshot.header.realtime_seconds;
         ps_boot = (b64)ps_wall - (b64)ps_now;
-        if ((wanted & ((positive)1 << PS_FIELD_STIME)) &&
+        if ((wanted & (((positive)1 << PS_FIELD_STIME) |
+                       ((positive)1 << PS_FIELD_LSTART) |
+                       ((positive)1 << PS_FIELD_START))) &&
             file_store_slurp("/proc/stat", address_of ps_snapshot.input))
         {
                 // Separately rounded wall time and uptime can move STIME
@@ -18729,15 +18738,16 @@ static b32 util_linux_renice()
         tools_refuse(at >= count, "renice", "not enough arguments");
 
         string_address first = program_argument((b32)at++);
-        if (string_equals(first, "-h") || string_equals(first, "--help"))
+        static const named_byte renice_meta[] = {
+            {"-h", 1}, {"--help", 1}, {"-V", 2}, {"--version", 2},
+        };
+        positive meta_hit = string_table_lookup(first, renice_meta);
+        if (meta_hit < array_count(renice_meta))
         {
-                string_format(log, "Usage: %s %s\n", "renice", "priority [-p|-g|-u] ID ...");
-                log_flush();
-                return 0;
-        }
-        if (string_equals(first, "-V") || string_equals(first, "--version"))
-        {
-                string_format(log, "renice from moonwater\n");
+                if (renice_meta[meta_hit].value == 1)
+                        string_format(log, "Usage: %s %s\n", "renice", "priority [-p|-g|-u] ID ...");
+                else
+                        string_format(log, "renice from moonwater\n");
                 log_flush();
                 return 0;
         }
@@ -18983,8 +18993,11 @@ static bool ul_limit_value(string_address text, p64 current,
                 address_to value = current;
                 return true;
         }
-        if (string_equals(text, "-1") || string_equals(text, "unlimited") ||
-            string_equals(text, "infinity"))
+        static const named_byte ul_limit_infinities[] = {
+            {"-1", 1}, {"unlimited", 1}, {"infinity", 1},
+        };
+        if (string_table_lookup(text, ul_limit_infinities) <
+            array_count(ul_limit_infinities))
         {
                 address_to value = UL_LIMIT_INFINITE;
                 return true;
@@ -20516,6 +20529,8 @@ static b32 util_linux_waitpid()
                                       operand);
                 }
 
+                /* pidfd_open sets O_CLOEXEC unconditionally in the kernel;
+                   pid is validated in 1..b32_max by ul_wait_operand. */
                 bipolar descriptor =
                     system_call_2(syscall(pidfd_open), (positive)(p32)pid, 0);
                 if (descriptor < 0)
@@ -20954,19 +20969,30 @@ static b32 util_linux_setpriv()
         }
         if (taking.flags & FILE_FLAG('p'))
         {
+                static const named_byte pdeathsig_modes[] = {
+                    {"clear", 1}, {"keep", 2},
+                };
                 string_address value = file_option_value(address_of taking, 'p');
+                positive hit = string_table_lookup(value, pdeathsig_modes);
                 set.death_set = true;
-                if (string_equals(value, "clear")) set.death = 0;
-                else if (string_equals(value, "keep")) {
-                        if (ul_prctl(UL_PR_GET_PDEATHSIG, (positive)address_of set.death, 0) < 0) return 127;
-                } else if ((set.death = (b32)ul_signal_number(value)) <= 0) return string_report(log_error, 1, "%s: %s\n", "setpriv", "unknown signal");
+                if (hit < array_count(pdeathsig_modes))
+                {
+                        if (pdeathsig_modes[hit].value == 1) set.death = 0;
+                        else if (ul_prctl(UL_PR_GET_PDEATHSIG, (positive)address_of set.death, 0) < 0) return 127;
+                }
+                else if ((set.death = (b32)ul_signal_number(value)) <= 0)
+                        return string_report(log_error, 1, "%s: %s\n", "setpriv", "unknown signal");
         }
         if (taking.flags & FILE_FLAG('P'))
         {
+                static const named_byte ptracer_modes[] = {
+                    {"any", 1}, {"none", 2},
+                };
                 string_address value = file_option_value(address_of taking, 'P');
+                positive hit = string_table_lookup(value, ptracer_modes);
                 set.ptracer_set = true;
-                if (string_equals(value, "any")) set.ptracer = -1;
-                else if (string_equals(value, "none")) set.ptracer = 0;
+                if (hit < array_count(ptracer_modes))
+                        set.ptracer = ptracer_modes[hit].value == 1 ? -1 : 0;
                 else { b32 pid; if (!ul_pid(value, "setpriv", "PID", address_of pid) || !pid) return 1; set.ptracer = pid; }
         }
 
@@ -21058,18 +21084,15 @@ static bipolar ul_namespace_open(string_address program, bipolar target_handle,
 
         if (!path)
         {
-                if (target_handle >= 0)
-                {
-                        string_copy_end(made, "ns/");
-                        string_copy_end(made + 3, space->name);
-                        relative = made;
-                }
-                else
-                {
-                        string_copy_end(made, "/proc/self/ns/");
-                        string_copy_end(made + 14, space->name);
-                        path = made;
-                }
+                byte_cursor out = byte_cursor_on(made);
+                byte_cursor_put_string(address_of out,
+                                       target_handle >= 0 ? (string_address)"ns/"
+                                                          : (string_address)"/proc/self/ns/");
+                byte_cursor_put_string(address_of out, space->name);
+                if (!byte_cursor_terminate(address_of out))
+                        return -ERROR_INVALID;
+                if (target_handle >= 0) relative = made;
+                else path = made;
         }
 
         bipolar handle = system_open_at(
@@ -21708,9 +21731,13 @@ static bool ul_lsclock_offsets(p8 address_to monotonic,
                         positive length = (positive)(end_at - value);
                         if (length && length < 31)
                         {
-                                p8 address_to destination = string_equals(line, "monotonic")
-                                    ? monotonic : string_equals(line, "boottime") ? boottime : null;
-                                if (destination) memory_copy_apart_end(destination, value, length);
+                                static const named_byte offset_clocks[] = {
+                                    {"monotonic", 0}, {"boottime", 1},
+                                };
+                                p8 address_to targets[2] = {monotonic, boottime};
+                                positive hit = string_table_lookup(line, offset_clocks);
+                                if (hit < array_count(offset_clocks))
+                                        memory_copy_apart_end(targets[offset_clocks[hit].value], value, length);
                         }
                 }
         }
@@ -24822,6 +24849,8 @@ static b32 util_linux_getino()
                                       "getino: invalid PID argument '%s'\n",
                                       operand);
 
+                /* pidfd_open sets O_CLOEXEC unconditionally in the kernel;
+                   pid is validated in 1..b32_max by ul_wait_operand. */
                 bipolar handle = system_call_2(
                     syscall(pidfd_open), (positive)(p32)pid, 0);
                 file_facts facts;
@@ -24881,10 +24910,14 @@ static const argument_option ul_getopt_options[] = {
    getopt(3) rejects as a quoted word in the output. */
 typedef struct { string_address address_to lists; positive count, room; bool keep_unknown; } ul_getopt_state;
 
+static const named_byte ul_getopt_shells[] = {
+    {"sh", 0}, {"bash", 0}, {"csh", 1}, {"tcsh", 1},
+};
+
 static bool ul_getopt_shell_known(string_address shell)
 {
-        return string_equals(shell, "sh") || string_equals(shell, "bash") ||
-               string_equals(shell, "csh") || string_equals(shell, "tcsh");
+        return string_table_lookup(shell, ul_getopt_shells) <
+               array_count(ul_getopt_shells);
 }
 
 static bool ul_getopt_seen(p8 letter, string_address value, address_any context)
@@ -25333,8 +25366,11 @@ static b32 util_linux_getopt()
 
                 string_address shell = file_option_value(address_of taking, 's');
                 if (shell)
-                        csh = string_equals(shell, "csh") ||
-                              string_equals(shell, "tcsh");
+                {
+                        positive hit = string_table_lookup(shell, ul_getopt_shells);
+                        csh = hit < array_count(ul_getopt_shells) &&
+                              ul_getopt_shells[hit].value != 0;
+                }
         }
 
         bool address_to deferred = count
@@ -29319,10 +29355,11 @@ static string_address ul_lsblk_field(address_any row, p8 column,
         }
         case UL_LSBLK_MAJMIN:
         {
-                positive used = positive_into_string(scratch, device->major);
-                scratch[used++] = ':';
-                used += positive_into_string(scratch + used, device->minor);
-                scratch[used] = end;
+                byte_cursor out = byte_cursor_open(scratch, 96);
+                byte_cursor_put_u64(address_of out, device->major);
+                byte_cursor_put_byte(address_of out, ':');
+                byte_cursor_put_u64(address_of out, device->minor);
+                byte_cursor_terminate(address_of out);
                 return scratch;
         }
         case UL_LSBLK_SIZE:
@@ -29338,10 +29375,14 @@ static string_address ul_lsblk_field(address_any row, p8 column,
                 return ul_lscpu_cache_size(device->fs_available,
                                             ul_lsblk_bytes, false);
         case UL_LSBLK_FSUSE:
+        {
                 if (!device->fs_measured) return blank;
-                positive_into_string(scratch, device->fs_use);
-                string_copy_end(scratch + string_length(scratch), "%");
+                byte_cursor out = byte_cursor_open(scratch, 96);
+                byte_cursor_put_u64(address_of out, device->fs_use);
+                byte_cursor_put_byte(address_of out, '%');
+                byte_cursor_terminate(address_of out);
                 return scratch;
+        }
         case UL_LSBLK_WSAME:
                 return ul_lscpu_cache_size(device->write_same,
                                             ul_lsblk_bytes, false);
@@ -33385,10 +33426,13 @@ static b32 tools_meta(string_address name, string_address address_to arguments,
                 {
                         if (!word[2])
                                 break;
-                        if (string_equals(word, "--help") ||
-                            string_equals(word, "--version"))
+                        static const named_byte meta_flags[] = {
+                            {"--help", 1}, {"--version", 0},
+                        };
+                        positive hit = string_table_lookup(word, meta_flags);
+                        if (hit < array_count(meta_flags))
                         {
-                                help = word[2] == 'h';
+                                help = meta_flags[hit].value != 0;
                                 found = true;
                                 break;
                         }
