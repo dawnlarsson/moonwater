@@ -660,7 +660,7 @@ static unsigned int windows_issue_clear(struct windows *table, const char *key, 
                 return 0;
         for (int i = 0; i < WINDOWS_ISSUES; i++)
                 if (table->issues[i].used && (code == WINDOWS_ISSUE_ANY || table->issues[i].code == code) && windows_issue_same(table->issues[i].key, key))
-                        memory_zero(&table->issues[i], sizeof(table->issues[i])), table->issue_count--, cleared++;
+                        memory_zero(&table->issues[i], sizeof(table->issues[i])), table->issue_count -= table->issue_count != 0, cleared++;
         if (table->issue_count < WINDOWS_ISSUES)
                 table->issue_refused = 0;
         windows_issue_unlock(table, seq);
@@ -3101,7 +3101,7 @@ static b32 file_write_atomic_at(b32 dir, string_address path, const void *bytes,
 }
 #endif
 
-enum { WINDOWS_MFD_CLOEXEC = 1u, WINDOWS_MFD_SEALING = 2u, WINDOWS_F_ADD_SEALS = 1033, WINDOWS_F_GET_SEALS = 1034, WINDOWS_SEALS = 15, WINDOWS_CLIP_TRAILER = 20 };
+enum { WINDOWS_MFD_CLOEXEC = 1u, WINDOWS_MFD_SEALING = 2u, WINDOWS_F_ADD_SEALS = 1033, WINDOWS_F_GET_SEALS = 1034, WINDOWS_SEALS = 15, WINDOWS_CLIP_SEALS = 14, WINDOWS_CLIP_TRAILER = 20 };
 #define WINDOWS_CLIP_MAGIC 0x317650494c43574dull
 #define WINDOWS_CLIP_TEXT "text/plain;charset=utf-8"
 #define WINDOWS_CLIP_URIS "text/uri-list"
@@ -3352,11 +3352,18 @@ static const unsigned char *windows_clip_map(unsigned int pid, unsigned int whic
         char path[48];
         long fd, mapped;
 
-        if (!pid || !want)
+        if (!pid || !want || want > WINDOWS_CLIP_MOST)
                 return 0;
         windows_proc_fd(path, pid, WINDOWS_CLIP_FD + (which < 3 ? which : 0));
         if ((fd = window_call(WINDOW_SYS_OPENAT, -100, (long)path, 0x80000, 0, 0, 0)) < 0)
                 return 0;
+        /* Only a file sealed against write, grow and shrink is read: its bytes cannot change after this check,
+           so the validation and every later read of the mapping see the same clip. */
+        if (window_call(WINDOW_SYS_FCNTL, fd, WINDOWS_F_GET_SEALS, 0, 0, 0, 0) != WINDOWS_CLIP_SEALS)
+        {
+                window_call(WINDOW_SYS_CLOSE, fd, 0, 0, 0, 0, 0);
+                return 0;
+        }
         mapped = window_call(WINDOW_SYS_LSEEK, fd, 0, 2, 0, 0, 0) == (long)want ? window_call(WINDOW_SYS_MMAP, 0, (long)want, 1, 1, fd, 0) : -22;
         window_call(WINDOW_SYS_CLOSE, fd, 0, 0, 0, 0, 0);
         if (WINDOWS_MAP_ERR(mapped))
