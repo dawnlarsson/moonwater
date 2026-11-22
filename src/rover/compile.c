@@ -1359,7 +1359,8 @@ static bool rover_read_action(struct rover_build address_to build, struct rover_
                 }
         if (action.kind == ROVER_RUN)
         {
-                struct rover_table pool_view = {.pool = rover_pool(build)};
+                struct rover_head pool_head = {.pool = build->pool};
+                struct rover_table pool_view = {.head = &pool_head, .pool = rover_pool(build)};
 
                 if (!rover_script_ok(&pool_view, build->argument[action.argument].index))
                         return rover_refused(build, "", &build->word[1],

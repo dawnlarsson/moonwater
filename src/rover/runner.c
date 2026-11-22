@@ -2074,13 +2074,16 @@ static b32 rover_runner_run(bipolar device)
                 rover_runner_reap();
                 rover_runner_gone_look(now);
 
+                positive poll_services = rover_runner.view.head->services;
+                p32 poll_table = rover_runner.table;
+
                 wait[count].descriptor = (b32)rover_runner.kernel_pipe[0];
                 wait[count++].events = SYSTEM_POLL_READ;
                 wait[count].descriptor = (b32)rover_runner.fire;
                 wait[count++].events = SYSTEM_POLL_READ;
                 wait[count].descriptor = (b32)rover_runner.watch;
                 wait[count++].events = SYSTEM_POLL_READ;
-                for (positive at = 0; at < rover_runner.view.head->services; at++)
+                for (positive at = 0; at < poll_services; at++)
                 {
                         wait[count].descriptor = (b32)rover_runner.service[at].pidfd;
                         wait[count++].events = SYSTEM_POLL_READ;
@@ -2134,9 +2137,10 @@ static b32 rover_runner_run(bipolar device)
                         rover_runner_fire_lines();
                 if (wait[2].returned & SYSTEM_POLL_READ)
                         rover_runner_watched();
-                for (positive at = 0; at < rover_runner.view.head->services; at++)
-                        if (wait[3 + at].returned & SYSTEM_POLL_READ)
-                                rover_runner_ended(at);
+                if (rover_runner.table == poll_table)
+                        for (positive at = 0; at < poll_services; at++)
+                                if (wait[3 + at].returned & SYSTEM_POLL_READ)
+                                        rover_runner_ended(at);
                 rover_runner_drain();
         }
         for (positive at = 0; at < rover_runner.view.head->services; at++)
