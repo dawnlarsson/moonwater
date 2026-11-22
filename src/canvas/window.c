@@ -2464,6 +2464,34 @@ static unsigned long windows_proc_stat(unsigned int pid, unsigned int *parent)
         return start;
 }
 
+/* A row's owner as the compositor saw it: the pid a client claimed and that process's start time (/proc stat, field 22).
+   The compositor keeps these in its own memory, one per row, never in the shared table, so a client cannot rewrite them.
+   The table's pid is only a claim: every use of it goes through windows_owner_ok, which refuses a pid that changed or that
+   was reused (a new process has a new start time). */
+struct windows_owner
+{
+        unsigned int pid;
+        unsigned long long start;
+};
+
+/* Compositor: record the owner of a row when it is claimed (the table's pid is read once, here). */
+static int windows_owner_take(struct windows_owner *held, unsigned int pid)
+{
+        unsigned int parent = 0;
+        unsigned long long start = pid ? windows_proc_stat(pid, &parent) : 0;
+
+        held->pid = start ? pid : 0, held->start = start;
+        return start != 0;
+}
+
+/* Compositor: may the row's claimed pid be used? True only for the process taken for that row and still the same one. */
+static int windows_owner_ok(const struct windows_owner *held, unsigned int pid)
+{
+        unsigned int parent = 0;
+
+        return held->pid && held->start && pid == held->pid && windows_proc_stat(pid, &parent) == held->start;
+}
+
 static const char *windows_asked_dir = WINDOWS_ASKED_DIR;
 
 static void windows_asked_path(char *path, unsigned int pid)
