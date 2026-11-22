@@ -4220,7 +4220,23 @@ static int compositor_xfer_close(int h, int ok)
         return installed;
 }
 
-static int compositor_clip_take_offer(b32 allowed, unsigned int pid, int fd, unsigned int which, int owner, unsigned int serial, unsigned int *answer)
+// A type that fails while its chunks are open: its data is cut back to where it began and its record dropped, so only that type
+// goes. The transfer goes on, and its earlier types (already written to the index) are kept. 1 when the transfer is live.
+static int compositor_xfer_type_fail(int h)
+{
+        struct compositor_xfer *x = h >= 0 && h < COMPOSITOR_XFER_MAX ? &compositor_xfer_table[h] : 0;
+        unsigned long keep_to;
+
+        if (!x || !x->live)
+                return 0;
+        keep_to = x->pend ? x->pend_offset : x->total;
+        compositor_call(syscall(ftruncate), (positive)x->keep, (positive)keep_to, 0, 0, 0, 0);
+        compositor_call(syscall(lseek), (positive)x->keep, (positive)keep_to, 0, 0, 0, 0);
+        x->total = keep_to, x->pend = 0;
+        return 1;
+}
+
+static int compositor_clip_take_offer(b32 allowed,unsigned int pid, int fd, unsigned int which, int owner, unsigned int serial, unsigned int *answer)
 {
         unsigned long length = 0;
         int opened = allowed ? compositor_clip_open(pid, fd, &length) : -1;
