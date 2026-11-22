@@ -18019,7 +18019,7 @@ static const struct ui_class ui_classes[] = {
         {"spread", .justify = UI_BETWEEN, .align = UI_CENTER},                           // a row's children at its two ends, on its middle line
         {"map", .pad = {UI_GAP2, UI_GAP2, 0, UI_GAP2}},                                  // a panel with a strip of actions across its top: what is in it is in from its sides and its foot
         {"search", .w = UI_SEARCH_W, .margin = {0, UI_SEARCH_RIGHT + UI_PAD, 0, 0}},     // a page's search field at the end of its title's band: clear of the window's buttons
-        {"pathbar", .h = UI_PAD + UI_TARGET, .pad = {UI_PAD, UI_SEARCH_RIGHT + UI_PAD, 0, 0}, .gap = UI_GAP2, .align = UI_CENTER}, // a band across a window's top: where it is, and the ways from there; clear of the window's buttons
+        {"pathbar", .h = UI_PAD + UI_TARGET, .pad = {UI_PAD, UI_SEARCH_RIGHT, 0, 0}, .gap = UI_GAP2, .align = UI_CENTER}, // a band across a window's top: where it is, and the ways from there; clear of the window's buttons
         {"rows", .pad = {UI_PAD, UI_PAD, 0, 0}, .shrink = 1},                            // a list's own box in from the window's margin at either side: its rows run to the edges (the list's row_x, row_w), its words keep to the box
         // Text.
         {"pagetitle", .type = UI_ROLE(UI_TITLE_LARGE), .ink = UI_ROLE(UI_ON_SURFACE), .margin = {UI_PAD + UI_PAGE_INSET, 0, 8, 0}, .grow = 1, .cut = 1}, // a page's title: in from the margin, in the middle of its band under the window's edge, as wide as what follows leaves it, one line
@@ -19423,6 +19423,7 @@ enum
         UI_ICON_HOME,      // a roof over a house: home
         UI_ICON_NEW_FOLDER, // a folder's outline with a plus in it: new folder
         UI_ICON_KEYBOARD,   // a keyboard: a frame, a row of keys and the space bar (the tray's keyboard on the screen)
+        UI_ICON_COG,        // a cog: a ring, six teeth and its hub: how a view is shown (Files' View menu)
         UI_ICON_COUNT
 };
 
@@ -19445,6 +19446,9 @@ static const struct ui_icon_part ui_icon_parts[UI_ICON_COUNT][UI_ICON_PARTS] = {
         [UI_ICON_NOTE] = {{UI_ICON_RING, 6, 8, 42, 40, 4}, {UI_ICON_LINE, 12, 18, 36, 18, 0}, {UI_ICON_LINE, 12, 24, 36, 24, 0}, {UI_ICON_LINE, 12, 30, 28, 30, 0}},
         [UI_ICON_GLOBE] = {{UI_ICON_RING, 6, 6, 42, 42, 18}, {UI_ICON_RING, 15, 6, 33, 42, 9}, {UI_ICON_LINE, 7, 24, 41, 24, 0}, {UI_ICON_LINE, 11, 15, 37, 15, 0},
                            {UI_ICON_LINE, 11, 33, 37, 33, 0}},
+        [UI_ICON_COG] = {{UI_ICON_RING, 13, 13, 35, 35, 11}, {UI_ICON_RING, 20, 20, 28, 28, 4}, {UI_ICON_LINE, 37, 24, 42, 24, 0},
+                         {UI_ICON_LINE, 31, 35, 33, 40, 0}, {UI_ICON_LINE, 17, 35, 15, 40, 0}, {UI_ICON_LINE, 11, 24, 6, 24, 0},
+                         {UI_ICON_LINE, 17, 13, 15, 8, 0}, {UI_ICON_LINE, 31, 13, 33, 8, 0}},
         [UI_ICON_KEYBOARD] = {{UI_ICON_RING, 4, 12, 44, 36, 4}, {UI_ICON_BOX, 10, 18, 15, 22, 1}, {UI_ICON_BOX, 18, 18, 23, 22, 1},
                               {UI_ICON_BOX, 26, 18, 31, 22, 1}, {UI_ICON_BOX, 34, 18, 38, 22, 1}, {UI_ICON_LINE, 14, 29, 34, 29, 0}},
         [UI_ICON_GAMEPAD] = {{UI_ICON_RING, 4, 13, 44, 37, 11}, {UI_ICON_LINE, 11, 25, 21, 25, 0}, {UI_ICON_LINE, 16, 20, 16, 30, 0}, {UI_ICON_BOX, 29, 19, 35, 25, 3},
@@ -19457,7 +19461,11 @@ static const struct ui_icon_part ui_icon_parts[UI_ICON_COUNT][UI_ICON_PARTS] = {
         [UI_ICON_BACK] = {{UI_ICON_LINE, 8, 24, 40, 24, 0}, {UI_ICON_LINE, 8, 24, 20, 12, 0}, {UI_ICON_LINE, 8, 24, 20, 36, 0}},
         [UI_ICON_FORWARD] = {{UI_ICON_LINE, 8, 24, 40, 24, 0}, {UI_ICON_LINE, 40, 24, 28, 12, 0}, {UI_ICON_LINE, 40, 24, 28, 36, 0}},
         [UI_ICON_UP] = {{UI_ICON_LINE, 24, 40, 24, 10, 0}, {UI_ICON_LINE, 24, 10, 13, 21, 0}, {UI_ICON_LINE, 24, 10, 35, 21, 0}},
-        [UI_ICON_REFRESH] = {{UI_ICON_RING, 8, 8, 40, 40, 16}, {UI_ICON_LINE, 32, 4, 42, 4, 0}, {UI_ICON_LINE, 42, 4, 42, 14, 0}},
+        // An arc of five sixths of a turn (six strokes on a circle of 14 round the middle), open at the top, and the arrowhead at its end
+        // pointing into the gap, the way it turns: a whole ring with a hook beside it read as no arrow at all.
+        [UI_ICON_REFRESH] = {{UI_ICON_LINE, 31, 12, 38, 22, 0}, {UI_ICON_LINE, 38, 22, 35, 33, 0}, {UI_ICON_LINE, 35, 33, 24, 38, 0},
+                             {UI_ICON_LINE, 24, 38, 13, 33, 0}, {UI_ICON_LINE, 13, 33, 10, 22, 0}, {UI_ICON_LINE, 10, 22, 17, 12, 0},
+                             {UI_ICON_LINE, 17, 12, 10, 7, 0}, {UI_ICON_LINE, 17, 12, 11, 19, 0}},
         [UI_ICON_HOME] = {{UI_ICON_LINE, 6, 24, 24, 8, 0}, {UI_ICON_LINE, 24, 8, 42, 24, 0}, {UI_ICON_LINE, 12, 22, 12, 40, 0},
                           {UI_ICON_LINE, 36, 22, 36, 40, 0}, {UI_ICON_LINE, 12, 40, 36, 40, 0}, {UI_ICON_LINE, 21, 40, 21, 30, 0}, {UI_ICON_LINE, 27, 40, 27, 30, 0}},
         [UI_ICON_NEW_FOLDER] = {{UI_ICON_RING, 6, 12, 42, 38, 4}, {UI_ICON_LINE, 24, 20, 24, 30, 0}, {UI_ICON_LINE, 19, 25, 29, 25, 0}},
@@ -20026,6 +20034,10 @@ static unsigned int ui_iconbutton_event(struct ui address_to ui, struct ui_iconb
 {
         b32 inside = x >= b->x && x < b->x + b->w && y >= b->y && y < b->y + b->h;
         (void)ui;
+        // Over the button the pointer is the hand (a disabled one's, not allowed): a press there is the button's and never the window's
+        // grab band, which the compositor gives a press only where the pointer is the arrow (compositor_button_window).
+        if (event->type == WINDOW_EVENT_MOTION && inside)
+                ui_kit_shape = b->disabled ? WINDOW_POINTER_NOT_ALLOWED : WINDOW_POINTER_HAND;
         if (b->disabled)
                 return 0;
         if (event->type == WINDOW_EVENT_MOTION)
@@ -20048,23 +20060,30 @@ static unsigned int ui_iconbutton_event(struct ui address_to ui, struct ui_iconb
 
 // A menu button (ui_menubutton): a compact label with a chevron, that opens its popup menu under its bottom-left corner.
 #define UI_MENUBUTTON_PAD 12  // logical px either side of the label
+#define UI_MENUBUTTON_ICON 20 // logical px: the side of the symbol a menu button shows in place of its words
 struct ui_menubutton
 {
-        const char address_to label;   // the words: also its accessible name
+        const char address_to label;   // the words: also its accessible name (and its tooltip when it shows a symbol)
         int x, y, w, h;               // device pixels
         b32 hover, down, focus, open;  // open: the app's menu is up for it
+        int icon;                     // the symbol it shows in place of its words (UI_ICON_ + 1), 0 for the words (last, so a button made by its words alone has none)
 };
 
 // The label and the chevron, in the button's box; the focus is a round ring of the primary.
 static fn ui_menubutton_draw(struct ui address_to ui, const struct ui_menubutton address_to m)
 {
-        int pad = ui_px(ui, UI_MENUBUTTON_PAD), chev = ui_px(ui, 4), label = ui_kit_measure(ui, (string_address)m->label, UI_LABEL_LARGE);
+        int pad = ui_px(ui, UI_MENUBUTTON_PAD), chev = ui_px(ui, 4), side = ui_px(ui, UI_MENUBUTTON_ICON);
+        int label = m->icon ? side : ui_kit_measure(ui, (string_address)m->label, UI_LABEL_LARGE);
         int cy = m->y + m->h / 2;
         unsigned int fill = m->open || m->hover ? ui_role(UI_SURFACE_HIGHEST) | 0xff000000u : 0;
         if (fill)
                 ui_round(ui, m->x, m->y, m->w, m->h, ui_px(ui, UI_RADIUS), fill);
-        ui_kit_text(ui, m->x + pad, ui_kit_baseline(ui, m->y + (m->h - ui_types[UI_LABEL_LARGE].line) / 2, UI_LABEL_LARGE), (string_address)m->label,
-                    UI_LABEL_LARGE, ui_text_colour(ui, UI_ON_SURFACE), 0);
+        // Its symbol in the text's ink, or its words.
+        if (m->icon)
+                ui_icon(ui, m->icon - 1, m->x + pad, cy - side / 2, side, 0, ui_text_colour(ui, UI_ON_SURFACE) | 0xff000000u);
+        else
+                ui_kit_text(ui, m->x + pad, ui_kit_baseline(ui, m->y + (m->h - ui_types[UI_LABEL_LARGE].line) / 2, UI_LABEL_LARGE), (string_address)m->label,
+                            UI_LABEL_LARGE, ui_text_colour(ui, UI_ON_SURFACE), 0);
         ui_chevron(ui, m->x + pad + label + ui_px(ui, 10) + chev, cy, chev, ui_text_colour(ui, UI_ON_SURFACE_VARIANT));
         if (m->focus)
                 ui_kit_ring(ui, &(struct ui_box){m->x * 256, m->y * 256, (m->x + m->w) * 256, (m->y + m->h) * 256, ui_px(ui, UI_RADIUS) * 256, ui_px(ui, UI_RADIUS) * 256},
@@ -20078,6 +20097,9 @@ static b32 ui_menubutton_event(struct ui address_to ui, struct ui_menubutton add
         (void)ui;
         if (event->type == WINDOW_EVENT_MOTION)
                 m->hover = inside;
+        // The hand over it, so a press is the button's and not the window's grab band (as an icon button's).
+        if (event->type == WINDOW_EVENT_MOTION && inside)
+                ui_kit_shape = WINDOW_POINTER_HAND;
         if (event->type == WINDOW_EVENT_BUTTON && event->a == UI_POINTER_LEFT)
         {
                 if (event->flags & WINDOW_KEY_DOWN)
@@ -32162,6 +32184,8 @@ static b32 ui_tokens_open(struct ui_tokens address_to k, const struct window_row
         k->separator = separator, k->chip = -1, k->active = -1;
         if (!ui_field_open(&k->text, own, text ? text : ""))
                 return false;
+        // A token field opens not typed in: its chips (ui_tokens_focus gives it the keys).
+        ui_field_focus(&k->text, false);
         memory_copy(k->before, text ? text : "", length);
         k->before_length = length;
         return true;
@@ -32191,6 +32215,21 @@ static void ui_tokens_lay(struct ui address_to ui, struct ui_tokens address_to k
         for (int t = 0; t < k->count; t++)
                 if (caret >= (p64)k->start[t] && (caret < (p64)k->finish[t] || t + 1 == k->count))
                         k->active = t;
+        /*
+                Typed in, the field is its whole line as a field's text across the box, scrolled by the field to keep its caret in view;
+                not typed in, every token is a chip, the caret's token among them (drawn as the one shown, ui_tokens_draw), and the
+                leading ones go behind the … chip so it stays in view. The caret's token was the field's own text in a chip's room,
+                scrolled to the token's start, which the field's own scroll undid: the text drew from the line's start, squeezed into
+                the token's width.
+        */
+        if (k->text.focused)
+        {
+                for (int t = 0; t < k->count; t++)
+                        k->chip_left[t] = k->chip_right[t] = -1;
+                k->overflow = 0, k->overflow_left = k->overflow_right = -1;
+                k->active_left = k->left, k->active_right = k->right;
+                return;
+        }
         // A chip's text is the field's own: its width is the plain text's width in the field, so a token keeps its width when the caret enters it.
         ui_text_layout_line(ui, &k->text, 0, &ui_text_lay);
         for (int t = 0; t < k->count; t++)
@@ -32227,10 +32266,7 @@ static void ui_tokens_lay(struct ui address_to ui, struct ui_tokens address_to k
                         continue;
                 if (at + width[t] > k->right && t != k->active)
                         break;
-                if (t == k->active)
-                        k->active_left = at, k->active_right = at + width[t];
-                else
-                        k->chip_left[t] = at, k->chip_right[t] = at + width[t];
+                k->chip_left[t] = at, k->chip_right[t] = at + (at + width[t] > k->right ? k->right - at : width[t]);
                 at += width[t] + gap;
         }
 }
@@ -32244,6 +32280,8 @@ static fn ui_tokens_draw(struct ui address_to ui, struct ui_tokens address_to k,
         static char words[UI_TOKENS_TEXT * 3 + 4];
         int height = bottom - top, pad = ui_dev(ui, 8), baseline = top + (height - ui_capital(ui, 14)) / 2 + ui_capital(ui, 14);
         unsigned int chip = ui_role(UI_SECONDARY_CONTAINER) & 0xffffffu, ink = ui_role(UI_ON_SECONDARY_CONTAINER) & 0xffffffu;
+        unsigned int shown = ui_role(UI_PRIMARY_CONTAINER) & 0xffffffu, shown_ink = ui_role(UI_ON_PRIMARY_CONTAINER) & 0xffffffu;
+        unsigned int after = ui_role(UI_ON_SURFACE_VARIANT) & 0xffffffu;
         k->left = left, k->top = top, k->right = right, k->bottom = bottom;
         doc_read(&k->text.doc, 0, bytes, n);
         ui_tokens_lay(ui, k, bytes, n);
@@ -32256,8 +32294,12 @@ static fn ui_tokens_draw(struct ui address_to ui, struct ui_tokens address_to k,
                 // A name off a disk is the words of its label, never the bytes: a control or a bidi mark is its picture, not a reorder.
                 ui_label_foreign(words, sizeof(words), bytes + k->start[t], length);
                 const font_face address_to faces[2] = {ui_text_face(ui, &k->text), ui->regular};
-                ui_round(ui, x0, top + ui_dev(ui, 4), x1 - x0, height - 2 * ui_dev(ui, 4), ui_dev(ui, 8), 0xff000000u | chip);
-                ui_run_in(ui, faces, x0 + pad, baseline, (string_address)words, k->text.size + k->text.zoom, ink, 255, x0, x1, 0);
+                // The caret's token is the one shown (the folder a browser is in): the primary container. The tokens past it are a trail
+                // kept to go back down (no fill, the quiet ink); the ones before it, the way up.
+                if (t <= k->active || k->active < 0)
+                        ui_round(ui, x0, top + ui_dev(ui, 4), x1 - x0, height - 2 * ui_dev(ui, 4), ui_dev(ui, 8), 0xff000000u | (t == k->active ? shown : chip));
+                ui_run_in(ui, faces, x0 + pad, baseline, (string_address)words, k->text.size + k->text.zoom,
+                          t == k->active ? shown_ink : t > k->active && k->active >= 0 ? after : ink, 255, x0, x1, 0);
         }
         if (k->overflow > 0)
         {
@@ -32268,12 +32310,8 @@ static fn ui_tokens_draw(struct ui address_to ui, struct ui_tokens address_to k,
                           k->overflow_right, 0);
         }
         if (k->active_left >= 0 && k->active_right > k->active_left)
-        {
-                // The caret's token: the field draws the whole line, scrolled so that the token starts at its box's left edge, clipped to the box.
-                ui_text_layout_line(ui, &k->text, 0, &ui_text_lay);
-                k->text.scroll_x = ui_text_x_of(&ui_text_lay, (p64)k->start[k->active]);
+                // Typed in: the field's whole line across the box, the field keeping its own scroll.
                 ui_text_draw(ui, &k->text, k->active_left, top, k->active_right - k->active_left, height, ui_role(UI_SURFACE) & 0xffffffu);
-        }
         if (k->invalid)
         {
                 unsigned int error = ui_role(UI_ERROR) & 0xffffffu;

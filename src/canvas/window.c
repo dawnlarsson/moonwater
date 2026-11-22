@@ -319,6 +319,7 @@ enum
         WINDOW_NO_GRAB = 16u, WINDOW_NO_KEYS = 32u, WINDOW_KEYBOARD = 64u, WINDOWS_OSK = 16,
         WINDOW_RESIDENT = 128u, // a dismissed window (the launcher) is put away, not closed: it stays up, and a press on its button shows it at once
         WINDOW_POINTER_ARROW = 0u, WINDOW_POINTER_RESIZE = 1u, WINDOW_POINTER_TEXT = 5u, WINDOW_POINTER_HAND = 8u,
+        WINDOW_POINTER_NOT_ALLOWED = 10u, // a control that does nothing now (a disabled button): never the window's grab band either
         WINDOWS_REFUSED_RATE = 1u, WINDOWS_REFUSED_TURN = 2u, WINDOWS_REFUSED_PLACE = 4u, WINDOWS_REFUSED_SIZE = 8u,
         WINDOWS_LOOP_SOURCES = 10,
         WINDOW_LIST_VALID = 0u, WINDOW_LIST_NONE, WINDOW_LIST_PUBLISHING, WINDOW_LIST_HEADER, WINDOW_LIST_TORN,

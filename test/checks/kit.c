@@ -5714,8 +5714,9 @@ static fn check_kit_cells(void)
         check("kit cells: a ui with no width draws nothing", memory_compare(buffer, before, sizeof(buffer)) == 0);
 }
 
-// The token field: '/home/alice/docs' is the root and three names, the last under the caret; a press on a chip gives its prefix; the caret's
-// token is edited in place; an invalid field draws its error outline.
+// The token field: '/home/alice/docs' is the root and three names, the last under the caret; not typed in, every token is a chip (the caret's
+// the one shown, the ones past it a trail); a press on a chip gives its prefix; typed in, the field is its whole line across the box, edited in
+// place; an invalid field draws its error outline.
 static fn check_kit_tokens(void)
 {
         static unsigned int pixels[400 * 60], scratch[400 * UI_SCRATCH_ROWS];
@@ -5733,9 +5734,9 @@ static fn check_kit_tokens(void)
                 check("token field: opens over its text", false);
                 return;
         }
-        ui_tokens_focus(&k, 1, 0);
         ui_tokens_draw(&ui, &k, 0, 0, 400, 60);
-        check("token field: '/home/alice/docs' is a root and three names, the last under the caret", k.count == 4 && k.active == 3);
+        check("token field: '/home/alice/docs' is a root and three names, the last under the caret, and not typed in each is a chip, that one too",
+              k.count == 4 && k.active == 3 && k.chip_left[0] >= 0 && k.chip_left[3] > k.chip_left[2] && k.active_left < 0);
 
         x = (k.chip_left[1] + k.chip_right[1]) / 2;
         event.type = WINDOW_EVENT_BUTTON, event.a = UI_POINTER_LEFT, event.flags = WINDOW_KEY_DOWN;
@@ -5749,10 +5750,21 @@ static fn check_kit_tokens(void)
 
         doc_select_set(&k.text.doc, 8, 8);
         ui_tokens_draw(&ui, &k, 0, 0, 400, 60);
-        check("token field: the caret in 'alice' makes that token the one under the caret, the rest stay chips", k.active == 2 && k.chip_left[2] < 0 && k.chip_left[3] >= 0);
+        check("token field: the caret in 'alice' makes that token the one shown, and 'docs' past it stays a chip of the trail",
+              k.active == 2 && k.chip_left[2] >= 0 && k.chip_left[3] >= 0 && k.active_left < 0);
+
+        ui_tokens_focus(&k, 1, 0);
+        ui_tokens_draw(&ui, &k, 0, 0, 400, 60);
+        {
+                b32 none = 1;
+                for (int t = 0; t < k.count; t++)
+                        none &= k.chip_left[t] < 0;
+                check("token field: typed in, the field is its whole line across the box and draws no chip", none && k.active_left == 0 && k.active_right == 400);
+        }
 
         doc_type(&k.text.doc, "x", 1);
-        check("token field: a letter typed in the caret's token edits the raw text in place", doc_length(&k.text.doc) == 17);
+        check("token field: a letter typed edits the raw text in place", doc_length(&k.text.doc) == 17);
+        ui_tokens_focus(&k, 0, 0);
 
         k.invalid = true;
         ui_tokens_draw(&ui, &k, 0, 0, 400, 60);
@@ -5789,11 +5801,10 @@ static fn check_kit_tokens(void)
                 static struct ui_tokens narrow;
                 static char longer[] = "/home/alice/docs/projects/app";
                 ui_tokens_open(&narrow, null, longer, '/');
-                ui_tokens_focus(&narrow, 1, 0);
                 ui.width = 400;
                 ui_tokens_draw(&ui, &narrow, 0, 0, 120, 60);
-                check("token field: a narrow field collapses the leading tokens behind the … chip and keeps the caret's token in view",
-                      narrow.overflow > 0 && narrow.active_left >= 0 && narrow.overflow_right > narrow.overflow_left);
+                check("token field: a narrow field collapses the leading tokens behind the … chip and keeps the caret's token in view as its chip",
+                      narrow.overflow > 0 && narrow.active >= 0 && narrow.chip_left[narrow.active] >= 0 && narrow.overflow_right > narrow.overflow_left);
                 check("token field: a pick of the hidden token 'home' (the root is token 0) names the prefix '/home'",
                       (ui_tokens_menu_do(&ui, &narrow, UI_TOKENS_ITEM + 1) & UI_TOKENS_PRESSED) && narrow.prefix_length == 5 &&
                               memory_compare(narrow.prefix, "/home", 5) == 0);

@@ -474,11 +474,12 @@ static const struct { int glyph, act; unsigned int words; } files_navs[] = {
 #define FILES_NAVS FILES_COUNT(files_navs)
 _Static_assert(sizeof(files_navs) / sizeof(files_navs[0]) == sizeof(files.nav) / sizeof(files.nav[0]), "a button of the bar for each of the table's");
 
-// The View button's width (logical px): its words and the kit's menu button's padding either side, the gap and the chevron (ui_menubutton_draw).
+// The View button's width (logical px): its cog (it shows the symbol, its words are its name and tooltip), the kit's menu button's
+// padding either side, the gap and the chevron (ui_menubutton_draw).
 static int files_view_wide(struct ui address_to ui)
 {
-        int words = ui->regular ? ui_kit_measure(ui, (string_address)WORDS(files_view), UI_LABEL_LARGE) : 0, scale = ui->scale > 0 ? ui->scale : 100;
-        return (words * 100 + scale - 1) / scale + 2 * UI_MENUBUTTON_PAD + 18;
+        (void)ui;
+        return UI_MENUBUTTON_ICON + 2 * UI_MENUBUTTON_PAD + 18;
 }
 
 // The buttons where the view laid them out: back with no way back, forward with none forward and up at a root do nothing, and say so.
@@ -495,7 +496,7 @@ static fn files_bar_lay(void)
                 if (b->disabled)
                         b->hover = b->down = false;
         }
-        files.view_button.label = WORDS(files_view), files.view_button.open = files.menu.open && files.menu_view;
+        files.view_button.label = WORDS(files_view), files.view_button.icon = UI_ICON_COG + 1, files.view_button.open = files.menu.open && files.menu_view;
         files.view_button.x = files.view_box.x, files.view_button.y = files.view_box.y, files.view_button.w = files.view_box.w, files.view_button.h = files.view_box.h;
 }
 
@@ -1405,13 +1406,10 @@ static b32 files_path_event(const struct window_event address_to event, b32 down
                 return files_edit(0), false;
         if (!editing && !(press && inside && event->a == UI_POINTER_LEFT))
                 return false;
+        // A press in the band's room past its chips gives it the keys with all of its path selected, as Control+L does: the path is then
+        // the field's whole line, to type over or move in.
         if (!editing && !files_path_chip(x, y))
-        {
-                files_edit(FILES_EDIT_PATH);
-                doc_select_set(&k->text.doc, doc_length(&k->text.doc), doc_length(&k->text.doc));
-                if (!ui_text_reach(ui, &k->text, x, y))
-                        return true;
-        }
+                return files_edit(FILES_EDIT_PATH), true;
         asks = ui_tokens_event(ui, k, &files.menu, event, x, y);
         if (asks & UI_TOKENS_PRESSED)
                 return files_path_pressed(), true;
@@ -2819,8 +2817,12 @@ static b32 files_event(const struct window_event address_to event)
                         files_band_apply();
                 if (l->drag_began)
                         files_drag_start((p32)l->drag_row);
+                // A chip is the hand's and the rest of the path the I-beam's: either way a press there is the path's, never the window's grab band.
                 if (files_path_chip((int)event->a, (int)event->b))
                         ui_kit_shape = WINDOW_POINTER_HAND;
+                else if (files.editing != FILES_EDIT_NAME &&
+                         files_in_rect((int)event->a, (int)event->b, files.path_box.x, files.path_box.y, files.path_box.w, files.path_box.h))
+                        ui_kit_shape = WINDOW_POINTER_TEXT;
                 files.dirty = true;
                 break;
         case WINDOW_EVENT_BUTTON: files_button_event(event, down); break;

@@ -4765,6 +4765,17 @@ static b32 browser_bar_button_send(unsigned int type, int a, int b, unsigned int
         return took;
 }
 
+// The pointer's shape the window asks for at x, y: a motion there through the window's own handler, from the arrow the kit starts each motion at.
+static unsigned int browser_bar_shape(int x, int y)
+{
+        struct window_event event = {.type = WINDOW_EVENT_MOTION, .a = x, .b = y};
+
+        ui_kit.pointer_x = x, ui_kit.pointer_y = y, ui_kit_shape = WINDOW_POINTER_ARROW;
+        files_event(&event);
+        browser_bar_frame();
+        return ui_kit_shape;
+}
+
 static fn browser_bar_click(const struct ui_iconbutton address_to b)
 {
         ui_kit.pointer_x = b->x + b->w / 2, ui_kit.pointer_y = b->y + b->h / 2;
@@ -4878,8 +4889,23 @@ static fn browser_bar_view(struct files_model address_to m)
         b32 placed, opened, same = true, refresh;
 
         browser_bar_frame();
-        placed = v->label == WORDS(files_view) && v->w > 0 && v->h > 0 && v->x >= files.path_box.x + files.path_box.w && !files.menu_view;
-        check("browser: the View button is the top bar's last, after the path band, and its words are View", placed);
+        placed = v->label == WORDS(files_view) && v->icon == UI_ICON_COG + 1 && v->w > 0 && v->h > 0 && v->x >= files.path_box.x + files.path_box.w &&
+                 !files.menu_view;
+        check("browser: the View button is the top bar's last, after the path band: it shows the cog, and View is its name", placed);
+        {
+                // The pointer over the bar's controls is never the arrow, the one shape the compositor takes a press in a window's top band as
+                // a move of the window for: the hand over View and over a button, not allowed over a button that does nothing now, and the
+                // I-beam over the path's room past its chips.
+                const struct ui_iconbutton address_to up = &files.nav[2], address_to back = &files.nav[0];
+                b32 hands;
+
+                hands = browser_bar_shape(v->x + v->w / 2, v->y + v->h / 2) == WINDOW_POINTER_HAND;
+                hands &= browser_bar_shape(up->x + up->w / 2, up->y + up->h / 2) == (up->disabled ? WINDOW_POINTER_NOT_ALLOWED : WINDOW_POINTER_HAND);
+                hands &= browser_bar_shape(back->x + back->w / 2, back->y + back->h / 2) == (back->disabled ? WINDOW_POINTER_NOT_ALLOWED : WINDOW_POINTER_HAND);
+                hands &= browser_bar_shape(files.path_box.x + files.path_box.w - 4, files.path_box.y + files.path_box.h / 2) == WINDOW_POINTER_TEXT;
+                check("browser: over the top bar's View and buttons the pointer is the hand (not allowed over one that does nothing), over the path's room the I-beam: never the window's grab",
+                      hands);
+        }
 
         // A folder chosen, then View pressed: its menu is under the button's bottom-left corner, it has how the folder is shown, and the folder
         // stays chosen (what View does is the folder's, its Properties the folder's).
@@ -4997,10 +5023,10 @@ static fn browser_bar(void)
         // The browser's base is /tmp/mw-browser.PID: the root, tmp, mw-browser.PID, bar, one and two.
         count = k->count;
         chips = browser_bar_says((string_address) "bar/one/two", (string_address) "") && count == 6 && k->active == 5 && k->overflow == 0 &&
-                k->chip_left[5] < 0 && k->active_left >= 0 && !files.editing;
-        for (int t = 0; t < 5; t++)
+                k->chip_left[5] >= 0 && k->active_left < 0 && !files.editing;
+        for (int t = 0; t < 6; t++)
                 chips = chips && k->chip_left[t] >= files.path_box.x && k->chip_right[t] <= files.path_box.x + files.path_box.w;
-        check("browser: the path band is the kit's token field over the folder shown: a chip for the root and for each folder above it, the folder shown its text",
+        check("browser: the path band is the kit's token field over the folder shown: a chip for the root, for each folder above it and for the folder shown",
               chips);
 
         // A press on the chip one goes up to it; two, the deeper folder, stays on the trail as the chip after it.
@@ -5047,11 +5073,11 @@ static fn browser_bar(void)
                    browser_bar_at((string_address) "bar/one/two");
         check("browser: Escape in the path band puts the folder shown back as its text and gives the keys back", restored);
 
-        // A press on the band's own text (the folder shown) gives it the keys, the caret where the press is.
-        browser_bar_press(k->active_left + 2, y);
-        taken = files.editing == FILES_EDIT_PATH && k->text.focused && k->text.doc.selections[0].anchor == k->text.doc.selections[0].active &&
-                k->text.doc.selections[0].active < doc_length(&k->text.doc);
-        check("browser: a press on the path band's text gives it the keys, the caret where the press is", taken);
+        // A press on the band's room past its chips gives it the keys with all of its path selected, as Control+L does.
+        browser_bar_press(k->chip_right[k->count - 1] + 20, y);
+        taken = files.editing == FILES_EDIT_PATH && k->text.focused && k->text.doc.selections[0].anchor == 0 &&
+                k->text.doc.selections[0].active == doc_length(&k->text.doc);
+        check("browser: a press on the path band's room past its chips gives it the keys with all of its path selected", taken);
         browser_bar_send(WINDOW_EVENT_KEY, UI_KEY_ESCAPE, 0x1b, WINDOW_KEY_DOWN);
         browser_bar_buttons(m);
         browser_bar_view(m);

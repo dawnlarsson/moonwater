@@ -176,7 +176,8 @@ static int compositor_shake(struct compositor_shake *shake, int delta, unsigned 
 #define CP_WAIT 9               // the hourglass: busy
 #define CP_NOTALLOWED 10        // the circle and slash: no drop, not allowed
 #define CP_SHAPES 11
-_Static_assert(WINDOW_POINTER_ARROW == CP_ARROW && WINDOW_POINTER_TEXT == CP_TEXT && WINDOW_POINTER_HAND == CP_HAND && WINDOW_POINTER_RESIZE == CP_RESIZE_H,
+_Static_assert(WINDOW_POINTER_ARROW == CP_ARROW && WINDOW_POINTER_TEXT == CP_TEXT && WINDOW_POINTER_HAND == CP_HAND && WINDOW_POINTER_RESIZE == CP_RESIZE_H &&
+                   WINDOW_POINTER_NOT_ALLOWED == CP_NOTALLOWED,
                "a program's pointer shapes are the compositor's CP_ codes");
 // The cursor plane is as large as the smallest a driver makes, and CP_SPAN_MOST the side of the largest picture drawn into a scene.
 #define CP_PLANE 64
