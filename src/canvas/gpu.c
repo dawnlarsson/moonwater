@@ -579,9 +579,31 @@ static const struct gpu_set *gpu_amd_set(unsigned int family)
         return gpu_family_ok(family) ? &gpu_amd_rdna2 : 0;
 }
 
+static void gpu_submit_alarm(int sig);
+
+static void gpu_alarm_arm(unsigned int sec)
+{
+        static b32 gpu_alarm_installed;
+        positive wtimer[4] = {0, 0, sec ? sec : 2u, 0};
+
+        if (unlikely(!gpu_alarm_installed))
+        {
+                gpu_alarm_installed = 1;
+                system_signal_install(14, (positive)gpu_submit_alarm, SIGNAL_CATCH_FLAGS & ~SIGNAL_RESTART, SIGNAL_CATCH_RESTORER, null);
+        }
+        system_call_3(syscall(setitimer), 0, (positive)wtimer, 0);
+}
+
+static void gpu_alarm_disarm(void)
+{
+        positive woff[4] = {0, 0, 0, 0};
+
+        system_call_3(syscall(setitimer), 0, (positive)woff, 0);
+}
+
 static enum gpu_err gpu_amd_classify(unsigned int error)
 {
-        return error == 11 ? GPU_ERR_AGAIN : error == 125 || error == 19 ? GPU_ERR_LOST : error == 22 ? GPU_ERR_SUSPECT : GPU_ERR_REFUSED;
+        return error == 11 || error == 4 ? GPU_ERR_AGAIN : error == 125 || error == 19 || error == 5 ? GPU_ERR_LOST : error == 22 ? GPU_ERR_SUSPECT : GPU_ERR_REFUSED;
 }
 
 static unsigned int gpu_amd_describe(unsigned int family, unsigned int device, char *into, unsigned int at, unsigned int room)
@@ -657,13 +679,13 @@ static unsigned int gpu_amd_user(positive from, positive bytes, unsigned int how
 {
         const p64 flags = how == GPU_USER_READ ? 0xdull : how == GPU_USER_WRITTEN ? 0xcull : 0x8ull;
         p64 up[3] = {from, bytes, flags};
-        unsigned int e, again = 0;
+        unsigned int e, again = 0, eintr = 0;
 
         for (;;)
         {
                 up[0] = from, up[1] = bytes, up[2] = flags;
                 e = gpu_call(3u, 0x11, 24, up);
-                if (e == 4)
+                if (e == 4 && eintr++ < 16)
                         continue;
                 if (e == 11 && again++ < 8)
                 {
@@ -761,11 +783,11 @@ static unsigned int gpu_amd_submit(const struct gpu_job *job, p64 *bos, unsigned
 static b32 gpu_wait_asked(p64 *wait)
 {
         p64 asked[4];
-        unsigned int e;
+        unsigned int e, eintr = 0;
 
         do
                 memory_copy(asked, wait, sizeof(asked)), e = gpu_call(3u, 9, 32, asked);
-        while (e == 4);
+        while (e == 4 && ++eintr < 32 && (!wait[1] || clock_monotonic_nanoseconds() < wait[1]));
         wait[0] = asked[0];
         return e == 0;
 }
@@ -1006,10 +1028,7 @@ static unsigned int gpu_i915_window(unsigned int family, positive *va, positive 
 
 static const struct gpu_set *gpu_i915_set(unsigned int family)
 {
-        // Require Full PPGTT (ppgtt >= 2, Gen8+): on Aliasing PPGTT (Gen7/7.5 IVB/VLV/HSW), KMS display scanout BOs
-        // are pinned in the single shared GGTT, so softpinning (EXEC_OBJECT_PINNED) an imported scanout BO livelocks
-        // i915_gem_execbuffer2_ioctl (eb_reserve) at 100% kernel CPU.
-        if (gpu_i915.ppgtt < 2 || !gpu_i915.softpin || !gpu_i915.no_reloc)
+        if (!gpu_i915.softpin || !gpu_i915.no_reloc)
                 return 0;
         for (unsigned int i = 0; gpu_i915_sets[i].set; i++)
                 if (family >= gpu_i915_sets[i].from && family <= gpu_i915_sets[i].to)
@@ -1250,6 +1269,7 @@ static int gpu_i915_ended(positive sequence)
 static int gpu_i915_wait(positive sequence, positive until)
 {
         const unsigned int slot = (unsigned int)(sequence % GPU_I915_JOBS);
+        unsigned int tries = 0;
 
         for (;;)
         {
@@ -1266,7 +1286,11 @@ static int gpu_i915_wait(positive sequence, positive until)
                         long r = (long)system_call_5(syscall(ppoll), (positive)&watch, 1, (positive)wait, 0, 8);
 
                         if (r == -4)
+                        {
+                                if (!left || ++tries >= 16)
+                                        return 0;
                                 continue;
+                        }
                         if (r < 0 || (watch.returned & 0x38)) // POLLERR, POLLHUP, POLLNVAL
                                 return -1;
                         return r == 0 ? 0 : gpu_i915_ended(sequence);
@@ -1276,7 +1300,16 @@ static int gpu_i915_wait(positive sequence, positive until)
 
                         e = gpu_call(3u, 0x2c, 16, &wait);
                         if (e == 4 || e == 11)
+                        {
+                                if (!left || ++tries >= 16)
+                                        return 0;
+                                if (e == 11)
+                                {
+                                        positive ts[2] = {0, 100000};
+                                        system_call_2(syscall(nanosleep), (positive)ts, 0);
+                                }
                                 continue;
+                        }
                         if (e == 62)
                                 return 0;
                         return e ? -1 : gpu_i915_ended(gpu_i915.sequence);
@@ -1379,7 +1412,7 @@ _Static_assert(sizeof(struct gpu_xe_device_query) == 40 && sizeof(struct gpu_xe_
 static void gpu_close(unsigned int handle);
 static struct
 {
-        unsigned int va_bits, has_vram, vm, main;
+        unsigned int va_bits, has_vram, min_align, vm, main;
         struct gpu_xe_engine_ci engine;
         b32 engine_ok;
         positive sequence, done;
@@ -1432,7 +1465,7 @@ static unsigned int gpu_xe_ensure_vm(void)
 
 static unsigned int gpu_xe_identify(int fd, unsigned int *family, unsigned int *device)
 {
-        p64 cfg[16] = {0};
+        p64 cfg[64] = {0};
         struct gpu_xe_device_query q = {0, 2u, 0, 0, {0, 0}}; // DRM_XE_DEVICE_QUERY_CONFIG = 2
         unsigned int e = gpu_raw(fd, GPU_XE_DEVICE_QUERY, &q);
 
@@ -1442,19 +1475,20 @@ static unsigned int gpu_xe_identify(int fd, unsigned int *family, unsigned int *
         e = gpu_raw(fd, GPU_XE_DEVICE_QUERY, &q);
         if (e)
                 return *family = 0, *device = 0, e;
-        // drm_xe_query_config: { u32 num_params, pad; u64 info[]; } -> info[0]=REV_AND_DEVICE_ID, info[1]=FLAGS, info[3]=VA_BITS.
+        // drm_xe_query_config: { u32 num_params, pad; u64 info[]; } -> info[0]=REV_AND_DEVICE_ID, info[1]=FLAGS, info[2]=MIN_ALIGNMENT, info[3]=VA_BITS.
         {
                 unsigned int nparams = (unsigned int)(cfg[0] & 0xffffffffu);
 
                 *device = nparams >= 1 ? (unsigned int)(cfg[1] & 0xffffu) : 0u;
                 *family = gpu_i915_family_of(*device);
                 gpu_xe.has_vram = nparams >= 2 ? (unsigned int)(cfg[2] & 1u) : 0u;
+                gpu_xe.min_align = nparams >= 3 && cfg[3] >= 4096u ? (unsigned int)cfg[3] : 4096u;
                 gpu_xe.va_bits = nparams >= 4 ? (unsigned int)(cfg[4] & 0xffu) : 48u;
         }
         // Discover compute/render engine instance via DRM_XE_DEVICE_QUERY_ENGINES (query = 0).
         gpu_xe.engine_ok = false;
         {
-                struct { unsigned int num_engines, pad; struct gpu_xe_engine engines[32]; } eng;
+                struct { unsigned int num_engines, pad; struct gpu_xe_engine engines[64]; } eng;
                 struct gpu_xe_device_query eq = {0, 0u, 0, 0, {0, 0}};
 
                 if (!gpu_raw(fd, GPU_XE_DEVICE_QUERY, &eq) && eq.size >= 8 && eq.size <= sizeof(eng))
@@ -1465,7 +1499,7 @@ static unsigned int gpu_xe_identify(int fd, unsigned int *family, unsigned int *
                         {
                                 unsigned short want = *family >= 1255 ? 4u : 0u; // COMPUTE (4) on Xe-HPG/Xe2+, RENDER (0) on Gen12.0
                                 unsigned short alt = *family >= 1255 ? 0u : 4u;
-                                unsigned int count = eng.num_engines > 32 ? 32 : eng.num_engines;
+                                unsigned int count = eng.num_engines > 64 ? 64 : eng.num_engines;
 
                                 for (unsigned int pass = 0; pass < 2 && !gpu_xe.engine_ok; pass++)
                                 {
@@ -1519,13 +1553,14 @@ static unsigned int gpu_xe_bind(unsigned int handle, positive at, positive bytes
 {
         struct gpu_xe_vm_bind b;
         unsigned int e = gpu_xe_ensure_vm();
+        positive align = (!(handle & GPU_XE_USERPTR_TAG) && gpu_xe.min_align > 4096u) ? (positive)gpu_xe.min_align : 4096ull;
 
         if (e)
                 return e;
         memory_zero(&b, sizeof(b));
         b.vm_id = gpu_xe.vm, b.num_binds = 1;
         b.bind.pat_index = gpu_xe_pat_index(gpu.family);
-        b.bind.range = bytes, b.bind.addr = at;
+        b.bind.range = (bytes + align - 1ull) & ~(align - 1ull), b.bind.addr = at;
         b.bind.flags = written ? 0u : 1u; // DRM_XE_VM_BIND_FLAG_READONLY = 1
         if (handle & GPU_XE_USERPTR_TAG)
         {
@@ -1550,13 +1585,14 @@ static unsigned int gpu_xe_unbind(unsigned int handle, positive at, positive byt
 {
         struct gpu_xe_vm_bind b;
         unsigned int e = 0;
+        positive align = (!(handle & GPU_XE_USERPTR_TAG) && gpu_xe.min_align > 4096u) ? (positive)gpu_xe.min_align : 4096ull;
 
         if (gpu_xe.vm)
         {
                 memory_zero(&b, sizeof(b));
                 b.vm_id = gpu_xe.vm, b.num_binds = 1;
                 b.bind.op = 1u; // DRM_XE_VM_BIND_OP_UNMAP
-                b.bind.range = bytes, b.bind.addr = at;
+                b.bind.range = (bytes + align - 1ull) & ~(align - 1ull), b.bind.addr = at;
                 e = gpu_raw(gpu.fd, GPU_XE_VM_BIND, &b);
         }
         if (handle & GPU_XE_USERPTR_TAG)
@@ -1651,6 +1687,8 @@ static unsigned int gpu_xe_submit(const struct gpu_job *job, p64 *bos, unsigned 
         if (words > GPU_PACKETS / 4 || (words & 1u))
                 return 22u;
         slot = (unsigned int)((gpu_xe.sequence + 1) % GPU_XE_JOBS);
+        if (gpu_xe.jobs[slot].sequence > gpu_xe.done)
+                return 11u; // EAGAIN: in-flight job still owns this syncobj slot
         if (!gpu_xe.jobs[slot].syncobj)
         {
                 struct gpu_drm_syncobj_create sc = {0, 0};
@@ -1659,13 +1697,6 @@ static unsigned int gpu_xe_submit(const struct gpu_job *job, p64 *bos, unsigned 
                 if (e)
                         return e;
                 gpu_xe.jobs[slot].syncobj = sc.handle;
-        }
-        else
-        {
-                unsigned int h = gpu_xe.jobs[slot].syncobj;
-                struct gpu_drm_syncobj_array rst = {(p64)&h, 1u, 0};
-
-                gpu_raw(gpu.fd, GPU_DRM_SYNCOBJ_RESET, &rst);
         }
         memory_zero(&sync, sizeof(sync));
         sync.type = 0u;  // DRM_XE_SYNC_TYPE_SYNCOBJ
@@ -1688,7 +1719,7 @@ static unsigned int gpu_xe_submit(const struct gpu_job *job, p64 *bos, unsigned 
 static int gpu_xe_wait(positive sequence, p64 until)
 {
         unsigned int slot = (unsigned int)(sequence % GPU_XE_JOBS);
-        unsigned int h;
+        unsigned int h, tries = 0;
         struct gpu_drm_syncobj_wait w;
         unsigned int e;
 
@@ -1701,8 +1732,8 @@ static int gpu_xe_wait(positive sequence, p64 until)
         {
                 w.handles = (p64)&h, w.timeout_nsec = (long long)until, w.count_handles = 1u, w.flags = 1u, w.first_signaled = 0, w.pad = 0;
                 e = gpu_raw(gpu.fd, GPU_DRM_SYNCOBJ_WAIT, &w);
-        } while (e == 4u); // EINTR
-        if (e == 62u) // ETIME
+        } while (e == 4u && until && clock_monotonic_nanoseconds() < until && ++tries < 16); // EINTR
+        if (e == 62u || e == 4u) // ETIME or interrupted past deadline/cap
                 return 0;
         if (e)
                 return -1;
@@ -2266,7 +2297,9 @@ static b32 gpu_start(positive bytes)
                                 {
                                         long page = system_call_6(syscall(mmap), 0, 4096, 3, 0x22, (positive)-1, 0);
 
+                                        gpu_alarm_arm(3u);
                                         e = page < 0 && page > -4096 ? 12 : gpu_userptr_error((positive)page, GPU_USER_WRITTEN);
+                                        gpu_alarm_disarm();
                                         gpu_userptr_ok = e == 0;
                                         if (!(page < 0 && page > -4096))
                                                 system_call_2(syscall(munmap), (positive)page, 4096);
@@ -2280,9 +2313,11 @@ static b32 gpu_start(positive bytes)
                                                 break;
                                 }
                                 // The buffer, its VM map and the compute context: all of the card's own memory.
+                                gpu_alarm_arm(3u);
                                 e = gpu_backend->buffer(size, GPU_VA, &gpu.handle, &offset);
                                 if (!e)
                                         e = gpu_backend->context(&ctx, 0);
+                                gpu_alarm_disarm();
                                 if (!e)
                                 {
                                         at = system_call_6(syscall(mmap), 0, size, 3, 1, (positive)gpu.fd, offset);
@@ -3026,10 +3061,21 @@ static positive gpu_import_again(unsigned int i, positive bytes)
 // A GEM handle of a buffer on the GPU's own node that no import holds yet, mapped read and written and never run, for bytes, at an address of its own: the
 // address, 0 for a refusal (no room in the table, no address, a map the kernel refuses), and the handle is closed then. The handle is the GPU's: gpu_import and
 // gpu_import_fd make it, and gpu_unimport closes it.
+// Aliasing PPGTT (Gen7/7.5 IVB/VLV/HSW, ppgtt < 2) shares a single GGTT with KMS display scanout BOs:
+// softpinning a KMS-pinned scanout BO livelocks i915_gem_execbuffer2_ioctl, so these GPUs render into
+// an anonymous userptr shadow target and never PRIME-import KMS/foreign BOs.
+static b32 gpu_needs_shadow_output(void)
+{
+        return gpu_backend == &gpu_i915_row && gpu_i915.ppgtt < 2;
+}
+
 static positive gpu_import_at(unsigned int handle, positive bytes)
 {
-        positive whole = (bytes + 4095) & ~4095ull, at;
-        positive align = gpu_set == &gpu_amd_rdna3 ? 262144ull : GPU_IMPORT_ALIGN;
+        if (gpu_needs_shadow_output())
+                return gpu_close(handle), 0;
+        positive min_sz = (gpu_backend == &gpu_xe_row && gpu_xe.has_vram) ? (gpu_xe.min_align > 65536u ? (positive)gpu_xe.min_align : 65536ull) : 4096ull;
+        positive whole = (bytes + min_sz - 1ull) & ~(min_sz - 1ull), at;
+        positive align = gpu_set == &gpu_amd_rdna3 ? 262144ull : (min_sz > GPU_IMPORT_ALIGN ? min_sz : GPU_IMPORT_ALIGN);
 
         // Room for one more import: the table grown (the memory refuses, and the import is refused as a full table's was).
         at = gpu_imports_room(gpu.imports + 1) ? gpu_place_aligned(whole, align, GPU_IMPORT_GUARD) : 0;
@@ -3596,7 +3642,7 @@ static const struct gpu_set gpu_i915_gen9_set = {gpu_i915_gen9_kernels, 8, 0, GP
 
 // The bins sides of the scenes built without a wait (gpu_scene_submit): the last job that reads each (0 none), the side and the place of the last scene
 // binned, and what it was binned for (its width and height, and the damage its lists hold), which gpu_scene_more_submit draws more of.
-static struct { positive job[2], at, ops_at; unsigned int side, w, h, dx0, dy0, dx1, dy1, count; } gpu_bins;
+static struct { positive job[2], at, ops_at; unsigned int side, w, h, dx0, dy0, dx1, dy1, count; b32 full; } gpu_bins;
 static void gpu_bins_forget(void)
 {
         memory_zero(&gpu_bins, sizeof(gpu_bins));
@@ -3995,13 +4041,22 @@ static b32 gpu_wait_job(positive cap)
 
                 // One wait, to the cap: the kernel wakes it when the job ends, so a job is one request to wait for however long it runs (in slices of four
                 // milliseconds a job of 5.5 ms, the heaviest measured, was two).
-                ended = gpu_backend->wait(gpu.pending, until);
+                {
+                        unsigned int wsec = (unsigned int)(cap / 1000000000ull) + 2u;
+
+                        gpu_alarm_arm(wsec > 6u ? 6u : wsec);
+                        ended = gpu_backend->wait(gpu.pending, until);
+                        gpu_alarm_disarm();
+                }
                 if (ended < 0)
                         gpu_end = GPU_END_WAIT, gpu_last_error = 5; // EIO: the wait itself failed
                 else if (ended)
                         return gpu.pending = 0, gpu_before.sequence = 0, gpu_last_job = clock_monotonic_nanoseconds(), true;
                 else if (clock_monotonic_nanoseconds() < until)
+                {
+                        system_call_2(syscall(sched_yield), 0, 0);
                         continue;
+                }
                 else if (cap >= GPU_HANG_NS)
                         gpu_end = GPU_END_HUNG, gpu_last_error = 62; // ETIME: still running at its deadline
                 else
@@ -4184,19 +4239,9 @@ HOT static positive gpu_submit(void)
                                 bos[named++] = gpu_maps[i].handle, gpu_maps[i].listed = gpu_submit_serial;
                 GPU_SUBMIT_SEEN(bos, named);
                 gpu_end = GPU_END_NONE;
-                {
-                        static b32 gpu_alarm_installed;
-                        positive wtimer[4] = {0, 0, 2, 0}, woff[4] = {0, 0, 0, 0};
-
-                        if (unlikely(!gpu_alarm_installed))
-                        {
-                                gpu_alarm_installed = 1;
-                                system_signal_install(14, (positive)gpu_submit_alarm, SIGNAL_CATCH_FLAGS & ~SIGNAL_RESTART, SIGNAL_CATCH_RESTORER, null);
-                        }
-                        system_call_3(syscall(setitimer), 0, (positive)wtimer, 0);
-                        gpu_last_error = gpu_backend->submit(&job, bos, named, &sequence);
-                        system_call_3(syscall(setitimer), 0, (positive)woff, 0);
-                }
+                gpu_alarm_arm(2u);
+                gpu_last_error = gpu_backend->submit(&job, bos, named, &sequence);
+                gpu_alarm_disarm();
                 if (likely(gpu_last_error == 0))
                         break;
                 // Hard submit watchdog: if a kernel DRM ioctl stalled >= 1s (interrupted by SIGALRM -> EINTR),
@@ -4360,7 +4405,8 @@ HOT static int gpu_scene_build(positive ops_at, unsigned int n, positive bins_at
                            unsigned int dx0, unsigned int dy0, unsigned int dx1, unsigned int dy1, unsigned int binned[4])
 {
         unsigned int address_to ops = (unsigned int address_to)((p8 address_to)gpu.at + ops_at), address_to tab = (unsigned int address_to)((p8 address_to)gpu.at + bins_at);
-        unsigned int cw = (w + 63) >> 6, ch = (h + 63) >> 6, at = 0, hand = 0, scene_op = 4, i, address_to list = tab + 2 * cw * ch, record[16 * 8], held[4];
+        unsigned int cw = (w + 63) >> 6, ch = (h + 63) >> 6, hand = 0, scene_op = 4, i, address_to list = tab + 2 * cw * ch, record[16 * 8], held[4];
+        positive at = 0;
         struct gpu_args address_to a = GPU_ARGS;
         b32 aligned = !(w & 3) && !(pitch & 3) && !(d_at & 15), partial, cut;
 
@@ -4416,7 +4462,7 @@ HOT static int gpu_scene_build(positive ops_at, unsigned int n, positive bins_at
                 // The three steps of the bins are the library's (bins_count, bins_starts, bins_place: lib.c, in assembly on each machine): a record's squares counted,
                 // the counts made starts, and the record put in each square's list.
                 GPU_RECORDS(bins_count(tab + 2 * (ty0 * cw + tx0), cw, tx1 - tx0 + 1, ty1 - ty0 + 1, 1 + (positive)m);)
-                at = (unsigned int)bins_starts(tab, (positive)cw * ch);
+                at = bins_starts(tab, (positive)cw * ch);
                 need = tab_bytes + 32ull * at;
                 if (need > room) // the lists must fit the room they have
                         return gpu_end = GPU_END_OVERFLOW, -1;
@@ -4513,7 +4559,7 @@ static positive gpu_scene_submit(positive ops_at, unsigned int n, positive bins_
                         built = gpu_scene_build(ops_at, n, at, full_room, d_at, pitch, w, h, dx0, dy0, dx1, dy1, binned);
                         if (built > 0 && (sequence = gpu_go()) != 0)
                         {
-                                gpu_bins.job[0] = gpu_bins.job[1] = sequence, gpu_bins.side = side, gpu_bins.at = at, gpu_bins.ops_at = ops_at, gpu_bins.count = n;
+                                gpu_bins.job[0] = gpu_bins.job[1] = sequence, gpu_bins.full = 1, gpu_bins.side = side, gpu_bins.at = at, gpu_bins.ops_at = ops_at, gpu_bins.count = n;
                                 gpu_bins.w = w, gpu_bins.h = h;
                                 gpu_bins.dx0 = binned[0], gpu_bins.dy0 = binned[1], gpu_bins.dx1 = binned[2], gpu_bins.dy1 = binned[3];
                                 return sequence;
@@ -4523,7 +4569,7 @@ static positive gpu_scene_submit(positive ops_at, unsigned int n, positive bins_
         }
         if (built <= 0 || !(sequence = gpu_go()))
                 return 0;
-        gpu_bins.job[side] = sequence, gpu_bins.side = side, gpu_bins.at = at, gpu_bins.ops_at = ops_at, gpu_bins.count = n, gpu_bins.w = w, gpu_bins.h = h;
+        gpu_bins.job[side] = sequence, gpu_bins.full = 0, gpu_bins.side = side, gpu_bins.at = at, gpu_bins.ops_at = ops_at, gpu_bins.count = n, gpu_bins.w = w, gpu_bins.h = h;
         gpu_bins.dx0 = binned[0], gpu_bins.dy0 = binned[1], gpu_bins.dx1 = binned[2], gpu_bins.dy1 = binned[3];
         return sequence;
 }
@@ -4544,7 +4590,10 @@ static positive gpu_scene_more_submit(positive d_at, unsigned int pitch, unsigne
                 return gpu_end = gpu_lost ? GPU_END_NONE : GPU_END_LATE, 0;
         if (!gpu_scene_rect(gpu_bins.at, d_at, pitch, w, h, dx0, dy0, dx1, dy1, clip) || !(sequence = gpu_go()))
                 return 0;
-        gpu_bins.job[gpu_bins.side] = sequence;
+        if (gpu_bins.full)
+                gpu_bins.job[0] = gpu_bins.job[1] = sequence;
+        else
+                gpu_bins.job[gpu_bins.side] = sequence;
         return sequence;
 }
 
@@ -4665,7 +4714,7 @@ static unsigned int gpu_amd_image(unsigned int desc[8], positive va, positive me
                         if ((va & 262143) || (width & 255) || (dcc && (!meta || (meta & 255) || block > 1)))
                                 return 0;
                 }
-                else if ((tile != 9 && tile != 10 && tile != 25 && tile != 27) || (width & 127) || (dcc && (!meta || (meta & 255) || block > 1)))
+                else if ((tile != 9 && tile != 10 && tile != 25 && tile != 27) || (va & 65535) || (width & 127) || (dcc && (!meta || (meta & 255) || block > 1)))
                         return 0;
         }
         else if (width & 63)
@@ -4720,15 +4769,18 @@ static void gpu_wake(void)
 {
         positive now = clock_monotonic_nanoseconds(), ops_at, bins_at, d_at;
         unsigned int address_to ops;
+        b32 kept_hold;
 
-        if (!gpu.at || !gpu_last_job || now - gpu_last_job < GPU_WAKE_IDLE || !gpu_idle())
+        if (gpu_lost || !gpu.at || !gpu_last_job || now - gpu_last_job < GPU_WAKE_IDLE || !gpu_idle())
                 return;
         gpu_wakes++;
         ops_at = gpu.size - GPU_WAKE_AT, bins_at = ops_at + 4096, d_at = ops_at + 8192;
         ops = (unsigned int address_to)((p8 address_to)gpu.at + ops_at);
         ops[0] = 0, ops[1] = 0, ops[2] = 0, ops[3] = 64, ops[4] = 4, ops[5] = 0, ops[6] = ops[7] = 0;
-        // Submit asynchronously so input forwarding never stalls ~2.2 ms on GPU clock ramp.
+        // Submit asynchronously so input forwarding never stalls ~2.2 ms on GPU clock ramp; preserve handed marks.
+        kept_hold = gpu_handed_hold, gpu_handed_hold = 1;
         gpu_scene_submit(ops_at, 1, bins_at, d_at, 64, 64, 4, 0, 0, 64, 4);
+        gpu_handed_hold = kept_hold;
 }
 
 /*

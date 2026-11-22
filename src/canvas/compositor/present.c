@@ -851,7 +851,7 @@ static struct
 static struct compositor_wall_job
 {
         thread *worker;          // the thread making it, or null
-        int done;                // the thread has made it (written last, with release)
+        b32 done;                // the thread has made it (written last, with release)
         unsigned int *pixels;    // what it makes into, as large as the space
         positive bytes;
         int width, height, count, dark, dimmed, maria, glow;
@@ -1068,6 +1068,7 @@ static fn compositor_wall_run(address_any context)
         compositor_wall_make(job);
         job->took = clock_monotonic_nanoseconds() - job->began;
         __atomic_store_n(&job->done, 1, __ATOMIC_RELEASE);
+        thread_wake(&job->done, 1);
         if (compositor_wall_knock >= 0)
                 compositor_call(syscall(write), (positive)compositor_wall_knock, (positive)&one, sizeof one, 0, 0, 0);
 }
@@ -1221,7 +1222,7 @@ static void compositor_wall_finish(void)
         if (!compositor_wall_job.pixels)
                 return;
         while (!__atomic_load_n(&compositor_wall_job.done, __ATOMIC_ACQUIRE))
-                compositor_call(syscall(sched_yield), 0, 0, 0, 0, 0, 0);
+                thread_wait(&compositor_wall_job.done, 0);
         compositor_wall_take();
 }
 

@@ -1913,11 +1913,15 @@ static positive compositor_timers_arm(positive now, unsigned int fence_at, int h
                         compositor_soon(&until, compositor_minute_due);
         }
         if (compositor.screens_gone && !compositor.screens_look) compositor.screens_look = now + COMPOSITOR_SCREEN_LOOK;
-        if ((compositor.damages || compositor.vrr_kick) && !compositor.dark && !compositor_card_holds())
+        if (compositor.flip_pending)
         {
                 positive waiting = compositor_flip_wait(now);
+                compositor_soon(&until, waiting ? waiting : compositor.flip_issued + COMPOSITOR_FLIP_LOST);
+        }
+        else if ((compositor.damages || compositor.vrr_kick) && !compositor.dark && !compositor_card_holds())
+        {
                 int tear = compositor_tearing();
-                compositor_soon(&until, waiting ? waiting : compositor_present_at(tear, tear ? 0 : compositor_present_lead(), now));
+                compositor_soon(&until, compositor_present_at(tear, tear ? 0 : compositor_present_lead(), now));
         }
         if (compositor.wake_stage) compositor_soon(&until, compositor.wake_at);
         if (compositor.hold >= 0) compositor_soon(&until, compositor.hold_until);

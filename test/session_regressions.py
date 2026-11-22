@@ -1288,13 +1288,16 @@ def test_hardening_66_bug_families():
     check("Family 7: RDNA3/3.5 (GFX11) gpu_image enabled with version 4 & 256K_R_X (256KiB aligned), O(1) i915 BO dedup (retry-safe), 32-way VA hint & O(M) gpu_trim",
           "gpu_image_ok = (gpu_set == &gpu_amd_rdna2 || gpu_set == &gpu_amd_rdna3) && gpu_image_test();" in gpu_c and
           "tile == 31 && gfx11" in gpu_c and
-          "gpu_set == &gpu_amd_rdna3 ? 262144ull : GPU_IMPORT_ALIGN" in gpu_c and
+          "gpu_set == &gpu_amd_rdna3 ? 262144ull :" in gpu_c and
           "gpu_i915.bound[handle].seen_serial == dedup_serial" in gpu_c and
           "static unsigned int gpu_map_hint[32];" in gpu_c and
           "gpu_unimport(gpu.imported_va[i], GPU_GONE_RELEASE), i--;" in gpu_c)
 
-    check("Family 7: Anti-freeze shield: i915 requires Full PPGTT (ppgtt>=2), 2s setitimer submit watchdog, tiled small-rect guard & secondary scale layout++",
-          "if (gpu_i915.ppgtt < 2 || !gpu_i915.softpin || !gpu_i915.no_reloc)" in gpu_c and
+    check("Family 7: Anti-freeze shield: Aliasing-PPGTT shadow userptr output (no KMS softpin), 2s setitimer submit watchdog, tiled small-rect guard & secondary scale layout++",
+          "static b32 gpu_needs_shadow_output(void)" in gpu_c and
+          "if (gpu_needs_shadow_output())" in gpu_c and
+          "if (gpu_needs_shadow_output())" in gpu_host_c and
+          "compositor_gpu_shadow.pixels" in gpu_host_c and
           "system_call_3(syscall(setitimer), 0, (positive)wtimer, 0);" in gpu_c and
           "clock_monotonic_nanoseconds() - began >= (GPU_HANG_NS / 2)" in gpu_c and
           "compositor_wl_tiled(picture) || (card_wanted && (right - left) * (bottom - top) >= 32768)" in read_text("src/canvas/wayland_host.c") and
@@ -1323,6 +1326,50 @@ def test_hardening_66_bug_families():
           "if (first >= last || !ui_rows_seen(ui, top, top + rows))" in ui_c and
           "int mid = lo + ((hi - lo) >> 1);" in ui_c and
           "p64 primary_line = doc_line_of(&t->doc, t->doc.selections[t->doc.primary].active);" in ui_c)
+
+    # --- Family 8: Cross-GPU Anti-Freeze, Bounded Wait, Priority-Inversion & Driver Invariants ---
+    comp_c = read_text("src/canvas/compositor.c")
+    present_c = read_text("src/canvas/compositor/present.c")
+    wl_host_c = read_text("src/canvas/wayland_host.c")
+
+    check("Family 8: Unified setitimer watchdog (gpu_alarm_arm/disarm) brackets gpu_submit, gpu_wait_job & gpu_start ioctls",
+          "static void gpu_alarm_arm(unsigned int sec)" in gpu_c and
+          "static void gpu_alarm_disarm(void)" in gpu_c and
+          "gpu_alarm_arm(2u);" in gpu_c and
+          "gpu_alarm_arm(3u);" in gpu_c and
+          "gpu_alarm_arm(wsec > 6u ? 6u : wsec);" in gpu_c)
+
+    check("Family 8: Bounded EINTR/EAGAIN retries in AMD/i915/Xe waits & userptr (no SCHED_FIFO livelock)",
+          "if (e == 4 && eintr++ < 16)" in gpu_c and
+          "while (e == 4 && ++eintr < 32 && (!wait[1] || clock_monotonic_nanoseconds() < wait[1]));" in gpu_c and
+          "if (!left || ++tries >= 16)" in gpu_c and
+          "while (e == 4u && until && clock_monotonic_nanoseconds() < until && ++tries < 16);" in gpu_c)
+
+    check("Family 8: AMD classify EINTR/EIO, 64K tile VA alignment, 64-bit bins_starts, full-buffer bin fence & gpu_wake hold/lost guard",
+          "error == 11 || error == 4 ? GPU_ERR_AGAIN : error == 125 || error == 19 || error == 5 ? GPU_ERR_LOST" in gpu_c and
+          "(tile != 9 && tile != 10 && tile != 25 && tile != 27) || (va & 65535)" in gpu_c and
+          "at = bins_starts(tab, (positive)cw * ch);" in gpu_c and
+          "if (gpu_bins.full)\n                gpu_bins.job[0] = gpu_bins.job[1] = sequence;" in gpu_c and
+          "if (gpu_lost || !gpu.at || !gpu_last_job || now - gpu_last_job < GPU_WAKE_IDLE || !gpu_idle())" in gpu_c and
+          "kept_hold = gpu_handed_hold, gpu_handed_hold = 1;" in gpu_c)
+
+    check("Family 8: Xe discrete VRAM 64KiB min_align, syncobj in-flight guard & no pre-exec reset, 64-entry query buffers",
+          "gpu_xe.min_align = nparams >= 3 && cfg[3] >= 4096u ? (unsigned int)cfg[3] : 4096u;" in gpu_c and
+          "p64 cfg[64] = {0};" in gpu_c and
+          "struct gpu_xe_engine engines[64];" in gpu_c and
+          "if (gpu_xe.jobs[slot].sequence > gpu_xe.done)\n                return 11u;" in gpu_c and
+          "GPU_DRM_SYNCOBJ_RESET" not in gpu_c[gpu_c.find("static unsigned int gpu_xe_submit("):gpu_c.find("static int gpu_xe_wait(")] and
+          "gpu_backend == &gpu_xe_row && gpu_xe.has_vram" in gpu_c)
+
+    check("Family 8: Slow page-flip SCHED_FIFO spin fix, dead-GPU recovery guard, priority-inversion & explicit-sync/cursor-lock fixes",
+          "if (compositor.flip_pending)\n        {\n                positive waiting = compositor_flip_wait(now);\n                compositor_soon(&until, waiting ? waiting : compositor.flip_issued + COMPOSITOR_FLIP_LOST);\n        }" in comp_c and
+          "!compositor_gpu_state.dead && gpu_lost" in gpu_host_c and
+          "if (!compositor_gpu_awake_wanted() || compositor_gpu_held())" in gpu_host_c and
+          "compositor_call(syscall(nanosleep), (positive)ts, 0, 0, 0, 0, 0);" in gpu_host_c[gpu_host_c.find("static void compositor_gpu_clocks_lock("):gpu_host_c.find("static void compositor_gpu_clocks_unlock(")] and
+          "thread_wait(&compositor_wall_job.done, 0);" in present_c and
+          "thread_wake(&job->done, 1);" in present_c and
+          "if (!compositor_wl_sync_start(wayland_row_owner(row), (int)picture->sync_fd, 0))" in wl_host_c and
+          "compositor_cursor_lock_take();\n        compositor_cursor_async_sync(0, 0, 0, 0, 0, 0);\n        compositor_cursor_lock_drop();" in kms_c)
 
 
 def test_build_and_audit_gates():

@@ -334,7 +334,7 @@ static void compositor_gpu_fail(unsigned int flags)
                         gpu_handed_clear();
         }
         compositor_gpu_job_failed();
-        if (gpu_lost && (!compositor_gpu_state.cool_until || clock_monotonic_nanoseconds() >= compositor_gpu_state.cool_until))
+        if (!compositor_gpu_state.dead && gpu_lost && (!compositor_gpu_state.cool_until || clock_monotonic_nanoseconds() >= compositor_gpu_state.cool_until))
                 compositor_gpu_recover();
 }
 
@@ -348,10 +348,39 @@ static positive gpu_host_va_written(const void *ptr, positive bytes, positive ma
         return at;
 }
 
+// Anonymous userptr shadow render target for Aliasing-PPGTT GPUs (Intel Gen7/7.5 IVB/VLV/HSW):
+// keeps KMS-pinned scanout BOs out of EXEC_OBJECT_PINNED so i915 eb_reserve can never livelock.
+static struct
+{
+        unsigned int *pixels;
+        unsigned long bytes;
+} compositor_gpu_shadow;
+
 static positive compositor_gpu_output(void)
 {
         positive key = compositor.card < 0 ? (positive)compositor.scanout : compositor.scanout_handle;
 
+        if (gpu_needs_shadow_output())
+        {
+                unsigned long need = (unsigned long)compositor.scanout_bytes;
+
+                if (!need)
+                        return compositor_gpu_state.out = 0;
+                if (need > compositor_gpu_shadow.bytes)
+                {
+                        void *p = compositor_gpu_shadow.pixels;
+                        unsigned long cap = compositor_gpu_shadow.bytes;
+
+                        if (p && cap)
+                                gpu_forget(p, cap);
+                        if (!mem_buf_grow(&p, &cap, need, 0))
+                                return compositor_gpu_state.out = 0;
+                        compositor_gpu_shadow.pixels = (unsigned int *)p, compositor_gpu_shadow.bytes = cap;
+                }
+                compositor_gpu_state.out = gpu_host_va_written(compositor_gpu_shadow.pixels, need, compositor_gpu_shadow.bytes, 0);
+                compositor_gpu_state.out_key = (positive)compositor_gpu_shadow.pixels;
+                return compositor_gpu_state.out;
+        }
         if (compositor.card < 0)
                 compositor_gpu_state.out = gpu_host_va_written(compositor.scanout, compositor.scanout_bytes, compositor.scanout_bytes, 0);
         else
@@ -861,7 +890,7 @@ static enum compositor_gpu_why compositor_gpu_draw(const struct compositor_frame
                         gpu_handed_clear();
                 return g->why;
         }
-        if (compositor_card.nowait && compositor_card.looped)
+        if (compositor_card.nowait && compositor_card.looped && !gpu_needs_shadow_output())
         {
                 // The scenes after the scaled pictures, a rectangle each, submitted as the card has room for them; the present is the card's from the first.
                 for (unsigned int at = 0; at < rects.count; at++)
@@ -907,6 +936,20 @@ static enum compositor_gpu_why compositor_gpu_draw(const struct compositor_frame
                 gpu_handed_hold = 0;
                 if (!gpu.pending)
                         gpu_handed_clear();
+                if (gpu_needs_shadow_output() && compositor_gpu_shadow.pixels && compositor.scanout)
+                {
+                        unsigned long pitch = (unsigned long)(compositor.scanout_pitch / 4);
+
+                        for (unsigned int at = 0; at < rects.count; at++)
+                        {
+                                unsigned long x0 = (unsigned long)rects.r[at].x1, y0 = (unsigned long)rects.r[at].y1;
+                                unsigned long cw = (unsigned long)(rects.r[at].x2 - rects.r[at].x1);
+                                unsigned long ch = (unsigned long)(rects.r[at].y2 - rects.r[at].y1);
+
+                                memory_copy_rect_u32(compositor.scanout + y0 * pitch + x0, pitch,
+                                                     compositor_gpu_shadow.pixels + y0 * pitch + x0, pitch, cw, ch);
+                        }
+                }
         }
         if (!compositor_gpu_state.failures && !compositor_gpu_state.told)
                 compositor_gpu_state.told = 1, compositor_say("the GPU composes the desktop, frame records", g->count);
@@ -1480,8 +1523,11 @@ static struct
 static void compositor_gpu_clocks_lock(void)
 {
         while (__atomic_exchange_n(&compositor_gpu_clocks.want_lock, 1u, __ATOMIC_ACQUIRE))
-                while (__atomic_load_n(&compositor_gpu_clocks.want_lock, __ATOMIC_RELAXED))
-                        ;
+        {
+                positive ts[2] = {0, 50000};
+
+                compositor_call(syscall(nanosleep), (positive)ts, 0, 0, 0, 0, 0);
+        }
 }
 
 static void compositor_gpu_clocks_unlock(void)
@@ -1576,7 +1622,7 @@ static void compositor_gpu_input_turn(positive now)
         if (!compositor_gpu_clocks.input)
                 return;
         compositor_gpu_clocks.input = 0;
-        if (!compositor_gpu_awake_wanted())
+        if (!compositor_gpu_awake_wanted() || compositor_gpu_held())
                 return;
         if (compositor_gpu_clocks.refused && compositor_gpu_clocks.epoch != gpu_epoch)
                 compositor_gpu_clocks.refused = 0; // a card started again: asked again

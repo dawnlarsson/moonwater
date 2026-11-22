@@ -1031,6 +1031,8 @@ static int compositor_scales_take(void)
 }
 
 // Probe connected outputs, lay out the desktop scanout, and commit each CRTC (dropping refused outputs).
+static void compositor_cursor_lock_take(void);
+static void compositor_cursor_lock_drop(void);
 static void compositor_cursor_async_sync(int active, int hot_x, int hot_y, int inset, int left, int top);
 
 static b32 compositor_space_take(int first)
@@ -1045,7 +1047,9 @@ static b32 compositor_space_take(int first)
 
         if (!first && (compositor.flip_pending || compositor_card.on || rows_any(&compositor_card.list_rows)))
                 return compositor.space_wanted = 1, 0;
+        compositor_cursor_lock_take();
         compositor_cursor_async_sync(0, 0, 0, 0, 0, 0);
+        compositor_cursor_lock_drop();
         compositor_displays_read(1);
         status = compositor_connected_read(&found);
         if (status < 0 || !found.count)

@@ -1415,11 +1415,7 @@ static int compositor_wl_card_lay(int row, unsigned int *to, int root)
                 return 0;
         if (!gpu_scene(COMPOSITOR_GPU_OPS_AT, n, COMPOSITOR_GPU_BINS_AT, to_va, (unsigned int)pitch, w4, h, 0, 0, w4, h))
         {
-                if (gpu.pending)
-                        gpu_finish();
-                if (gpu_lost)
-                        compositor_gpu_recover();
-                compositor_gpu_job_failed();
+                compositor_gpu_fail(GPU_FAIL_FINISH);
                 return 0;
         }
         if (compositor.table)
@@ -2747,10 +2743,9 @@ static int compositor_wl_card_gather(int row, const struct wayland_picture *pict
                         if (gpu_scene(COMPOSITOR_GPU_OPS_AT, 1, COMPOSITOR_GPU_BINS_AT, dst, (unsigned int)pitch, w4, (unsigned int)height, (unsigned int)x1,
                                       (unsigned int)y1, (unsigned int)x2, (unsigned int)y2))
                                 return compositor_wl_laid(row, x1, y1, x2, y2), 1;
-                        if (gpu.pending)
-                                gpu_finish();
-                        if (gpu_lost)
-                                compositor_gpu_recover();
+                        gpu_handed_hold = 0;
+                        compositor_gpu_fail(GPU_FAIL_FINISH);
+                        return 0;
                 }
                 gpu_handed_hold = 0;
         }
@@ -2758,8 +2753,8 @@ static int compositor_wl_card_gather(int row, const struct wayland_picture *pict
                  (gpu_end == GPU_END_LATE && gpu_finish()))
                 return compositor_wl_laid(row, x1, y1, x2, y2), 1;
         if (gpu_end != GPU_END_NONE)
-                compositor_gpu_job_failed();
-        if (!gpu_idle())
+                compositor_gpu_fail(GPU_FAIL_FINISH);
+        else if (!gpu_idle())
                 gpu_finish();
         return 0;
 #else
@@ -2857,9 +2852,9 @@ static int wl_pic_sync_begin(int row, const struct wayland_picture *picture, int
 {
         if (picture->sync_fd >= 0 && !*sync_started)
         {
-                // Always issue DMA_BUF_SYNC_START|READ before CPU mmap reads (explicit sync only covers GPU fence completion,
-                // not CPU cache invalidation on Intel i915/non-coherent DMA-BUFs). ready=1 never sleeps or arms setitimer.
-                if (!compositor_wl_sync_start(wayland_row_owner(row), (int)picture->sync_fd, 1))
+                // Always issue DMA_BUF_SYNC_START|READ under the setitimer guard (ready=0) so a wedged implicit fence
+                // on a client DMA-BUF can never hang the compositor even when explicit_sync is advertised.
+                if (!compositor_wl_sync_start(wayland_row_owner(row), (int)picture->sync_fd, 0))
                         return compositor_wl.laying[row].open = 0, 0;
                 *sync_started = 1;
         }
