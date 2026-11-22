@@ -2140,8 +2140,6 @@ static b32 terminal_receive(b32 master, const struct window_event address_to eve
                 int steps = event->b ? 0 : event->a, cap = (int)ROWS * 120;
 
                 steps = steps > cap ? cap : steps < -cap ? -cap : steps;
-                if (ui_kit.scroll_off & WINDOW_SCROLL_FLIP)
-                        steps = -steps;
                 if (mouse_mode && !(!alternate && (event->flags & WINDOW_KEY_SHIFT)))
                 {
                         b32 sent = true;
