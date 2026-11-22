@@ -1976,6 +1976,55 @@ static int tab_signalled(int pid, unsigned int signal)
     return count;
 }
 
+/* A window the menu may stop is owned by a process that runs: Force stop is for the process the compositor took for the row
+   (944e89149), whose start time windows_owner_take reads from the real /proc. Such an owner is a child that waits until the check
+   ends it, with a pid none of the fake tree's (avoid); the check's own parent will not do, for in the gate's pid namespace it is
+   pid 1, which the fake tree calls init, and pids 1 and 2 are the system's to taskbar_proc_kind. */
+#define TAB_OWNERS 8
+static unsigned int tab_owners[TAB_OWNERS];
+static int tab_owner_count;
+
+static unsigned int tab_owner_start(const unsigned int *avoid, int count)
+{
+    while (tab_owner_count < TAB_OWNERS)
+    {
+        bipolar child = system_fork();
+        b32 clash = false;
+
+        if (child == 0)
+            for (;;)
+                system_call_4(syscall(ppoll), 0, 0, 0, 0);
+        if (child < 0)
+            return 0;
+        tab_owners[tab_owner_count++] = (unsigned int)child;
+        for (int at = 0; at < count; at++)
+            clash |= (unsigned int)child == avoid[at];
+        if (!clash)
+            return (unsigned int)child;
+    }
+    return 0;
+}
+
+static void tab_owners_end(void)
+{
+    for (int at = 0; at < tab_owner_count; at++)
+    {
+        int status = 0;
+
+        system_call_2(syscall(kill), (positive)tab_owners[at], 9);
+        system_call_4(syscall(wait4), (positive)tab_owners[at], (positive)&status, 0, 0);
+    }
+    tab_owner_count = 0;
+}
+
+// A row claimed by pid as the compositor takes a claim: the table's pid, and its owner taken afresh from /proc.
+static void tab_claim(struct windows address_to table, int row, unsigned int pid)
+{
+    table->pid[row] = pid;
+    windows_owner_held[row] = (struct windows_owner){0, 0};
+    windows_owner_take(&windows_owner_held[row], pid);
+}
+
 static void check_taskbar_tab_menu(void)
 {
     static unsigned int screen[GLASS_SIDE * GLASS_SIDE];
@@ -1991,6 +2040,10 @@ static void check_taskbar_tab_menu(void)
     struct windows address_to table;
     struct taskbar_view view;
     int x, y, w, h, tab, opened, two, labelled, exited, forced, kept, gone, finger;
+    // The fake tree's pids, and 2, which taskbar_proc_kind calls the system's as it does 1: the real owners of the windows are none of them.
+    static const unsigned int fake[] = {1, 2, 33, 40, 50, 51, 60, 63, 70, 77, 92, 99, 101, 102, 103, 105, 106, 107, 109, 110, 111, 112, 113};
+    const int n_fake = (int)(sizeof(fake) / sizeof(fake[0]));
+    unsigned int own1, own2, web, hl2;
 
     // The walk over tables.
     root_ok = taskbar_stop_root(walk, all, 63) == 60 && taskbar_stop_root(walk, all, 60) == 60 && taskbar_stop_root(walk, all, 70) == 70 &&
@@ -2005,7 +2058,8 @@ static void check_taskbar_tab_menu(void)
     // A table that loops on itself (a table made by hand) ends, and the members are bounded by the room given.
     loop_ok = taskbar_stop_root(walk, all, 96) != 0 && taskbar_stop_tree(walk, all, 60, members, 2) == 2;
 
-    // The menu, on the tray's fixture: two windows of the program under 60 (the processes 61 and 62).
+    // The menu, on the tray's fixture: two windows of the program under 60, owned by own1 and own2 (real processes: the owner of a
+    // row is taken from /proc).
     compositor_zero();
     taskbar_classic();
     compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
@@ -2034,15 +2088,16 @@ static void check_taskbar_tab_menu(void)
     }
     compositor_present();
     compositor_focus(1);
-    table->pid[1] = 61, table->pid[2] = 62; // 62 is the program's second window
+    own1 = tab_owner_start(fake, n_fake), own2 = tab_owner_start(fake, n_fake), web = tab_owner_start(fake, n_fake), hl2 = tab_owner_start(fake, n_fake);
+    tab_claim(table, 1, own1), tab_claim(table, 2, own2); // own2 is the program's second window
 
     string_copy((string_address)root, (string_address) "/tmp/moonwater-check-tabs-");
     positive_into_string((p8 *)root + string_length((string_address)root), (positive)system_call(syscall(getpid)));
     system_call_3(syscall(mkdirat), (positive)AT_FDCWD, (positive)root, 0700);
     taskbar_proc_root = root;
     tab_signal_write(root, 1, "init", 0), tab_signal_write(root, 40, "moonwater", 1), tab_signal_write(root, 50, "terminal", 1);
-    tab_signal_write(root, 51, "sh", 50), tab_signal_write(root, 60, "start.sh", 51), tab_signal_write(root, 61, "firefox", 60);
-    tab_signal_write(root, 62, "firefox", 61), tab_signal_write(root, 63, "gpu (x)", 62), tab_signal_write(root, 70, "vim", 51);
+    tab_signal_write(root, 51, "sh", 50), tab_signal_write(root, 60, "start.sh", 51), tab_signal_write(root, (int)own1, "firefox", 60);
+    tab_signal_write(root, (int)own2, "firefox", (int)own1), tab_signal_write(root, 63, "gpu (x)", (int)own2), tab_signal_write(root, 70, "vim", 51);
     tab_signal_write(root, 33, "Xwayland", 40), tab_signal_write(root, 92, "helper", 63);
     taskbar_signal = tab_signal_note;
 
@@ -2060,7 +2115,7 @@ static void check_taskbar_tab_menu(void)
         compositor_button(COMPOSITOR_BTN_RIGHT, 1);
         compositor_button(COMPOSITOR_BTN_RIGHT, 0);
     }
-    two = opened && taskbar_menu.open && taskbar_menu.row == 1 && taskbar_menu.pid == 61 && taskbar_menu.menu.count == 2 &&
+    two = opened && taskbar_menu.open && taskbar_menu.row == 1 && taskbar_menu.pid == own1 && taskbar_menu.menu.count == 2 &&
           taskbar_menu.menu.items[0].id == TASKBAR_MENU_EXIT && taskbar_menu.menu.items[1].id == TASKBAR_MENU_STOP;
     labelled = two && string_equals((string_address)taskbar_menu.menu.items[1].label, (string_address) "Force stop (2 windows)") &&
                string_equals((string_address)taskbar_menu.menu.items[0].label, (string_address) "Exit");
@@ -2110,13 +2165,13 @@ static void check_taskbar_tab_menu(void)
     {
         compositor_menu_chose(TASKBAR_MENU_STOP);
     }
-    forced = two && tab_signalled(60, TASKBAR_SIGSTOP) == 1 && tab_signalled(61, TASKBAR_SIGSTOP) == 1 && tab_signalled(62, TASKBAR_SIGSTOP) == 1 &&
+    forced = two && tab_signalled(60, TASKBAR_SIGSTOP) == 1 && tab_signalled((int)own1, TASKBAR_SIGSTOP) == 1 && tab_signalled((int)own2, TASKBAR_SIGSTOP) == 1 &&
              tab_signalled(63, TASKBAR_SIGSTOP) == 1 && tab_signalled(92, TASKBAR_SIGSTOP) == 1 && tab_signalled(99, TASKBAR_SIGSTOP) == 1 &&
-             tab_signalled(60, TASKBAR_SIGKILL) == 1 && tab_signalled(61, TASKBAR_SIGKILL) == 1 && tab_signalled(62, TASKBAR_SIGKILL) == 1 &&
+             tab_signalled(60, TASKBAR_SIGKILL) == 1 && tab_signalled((int)own1, TASKBAR_SIGKILL) == 1 && tab_signalled((int)own2, TASKBAR_SIGKILL) == 1 &&
              tab_signalled(63, TASKBAR_SIGKILL) == 1 && tab_signalled(92, TASKBAR_SIGKILL) == 1 && tab_signalled(99, TASKBAR_SIGKILL) == 1;
     kept = true;
     for (int at2 = 0; at2 < tab_signal_count; at2++)
-        kept &= tab_signals[at2][0] == 60 || tab_signals[at2][0] == 61 || tab_signals[at2][0] == 62 || tab_signals[at2][0] == 63 ||
+        kept &= tab_signals[at2][0] == 60 || tab_signals[at2][0] == (int)own1 || tab_signals[at2][0] == (int)own2 || tab_signals[at2][0] == 63 ||
                 tab_signals[at2][0] == 92 || tab_signals[at2][0] == 99;
     check("tab menu: Force stop stops every process of the program, those it forks while the walk is under way too, and then ends them", forced);
     check("tab menu: and no process of the shell, its other jobs, the terminal or the machine is sent a signal", kept && tab_signal_count == 12);
@@ -2147,7 +2202,7 @@ static void check_taskbar_tab_menu(void)
         {
             static const unsigned int pids[3] = {1, 33, 0};
 
-            table->pid[row] = pids[pick];
+            tab_claim(table, row, pids[pick]); // pid 1 is a real process: its owner is taken, and the walk alone refuses it
             if (taskbar_slot(&view, (int)at2, &x, &y, &w, &h))
             {
                 compositor.pointer_x = x + w / 2, compositor.pointer_y = y + h / 2;
@@ -2162,7 +2217,7 @@ static void check_taskbar_tab_menu(void)
     check("tab menu: the machine's own process (pid 1, the X server's, none) has Exit and no Force stop", gone);
 
     // A row that has another pid than the menu was opened for takes neither.
-    table->pid[1] = 61, table->pid[2] = 62;
+    tab_claim(table, 1, own1), tab_claim(table, 2, own2);
     for (int row = 1; row <= 2; row++)
         compositor.state[row] &= ~(unsigned int)WINDOW_CLOSING, compositor.close_asks[row] = 0;
     view = compositor_band_view();
@@ -2183,8 +2238,24 @@ static void check_taskbar_tab_menu(void)
     check("tab menu: a row that is another program's than when the menu opened is neither stopped nor asked to close",
           tab_signal_count == 0 && !(compositor.state[1] & WINDOW_CLOSING));
 
+    // A pid the row's client wrote over its claim, a running process the walk would stop but not the one the compositor took for
+    // the row (944e89149): Exit and no Force stop.
+    compositor_menu_close();
+    tab_claim(table, 1, own1);
+    table->pid[1] = own2;
+    if (taskbar_slot(&view, tab, &x, &y, &w, &h))
+    {
+        compositor.pointer_x = x + w / 2, compositor.pointer_y = y + h / 2;
+        compositor_pointer_clamp();
+        compositor_button(COMPOSITOR_BTN_RIGHT, 1);
+        compositor_button(COMPOSITOR_BTN_RIGHT, 0);
+    }
+    check("tab menu: a pid written over the row's claim, though a process the walk would stop, has Exit and no Force stop",
+          taskbar_menu.open && taskbar_menu.row == 1 && taskbar_menu.menu.count == 1 && taskbar_menu.menu.items[0].id == TASKBAR_MENU_EXIT);
+    compositor_menu_close();
+
     // A finger's long press is the right button there too: a point above the tab, within the finger's reach, opens the menu.
-    table->pid[1] = 61;
+    tab_claim(table, 1, own1);
     if (taskbar_slot(&view, tab, &x, &y, &w, &h))
     {
         compositor.pointer_x = x + w / 2, compositor.pointer_y = y - 20;
@@ -2214,19 +2285,19 @@ static void check_taskbar_tab_menu(void)
         tab_signal_write(root, 101, "bowl", 1);
         tab_signal_write(root, 102, "steam.sh", 101);
         tab_signal_write(root, 103, "steam", 102);
-        tab_signal_write(root, 104, "steamwebhelper", 103);
-        tab_signal_write(root, 105, "steamwebhelper", 104);
+        tab_signal_write(root, (int)web, "steamwebhelper", 103);
+        tab_signal_write(root, 105, "steamwebhelper", (int)web);
         tab_signal_write(root, 106, "reaper", 103);
         tab_signal_write(root, 107, "steam-launch-wr", 106);
-        tab_signal_write(root, 108, "hl2_linux", 107);
+        tab_signal_write(root, (int)hl2, "hl2_linux", 107);
         tab_signal_write(root, 109, "direct_game", 103);
         tab_signal_write(root, 110, "my_launcher", 1);
         tab_signal_write(root, 111, "my_helper", 110);
         tab_signal_write(root, 112, "child_game", 110);
         tab_signal_write(root, 113, "child_worker", 112);
 
-        table->pid[1] = 104;
-        table->pid[2] = 108;
+        tab_claim(table, 1, web);
+        tab_claim(table, 2, hl2);
         string_copy_bounded((p8 *)compositor.app_id[1], (string_address) "steamwebhelper", WINDOWS_APP_ID);
         string_copy_bounded((p8 *)compositor.app_id[2], (string_address) "hl2_linux", WINDOWS_APP_ID);
         view = compositor_band_view();
@@ -2248,8 +2319,8 @@ static void check_taskbar_tab_menu(void)
             tab_signal_count = 0;
             compositor_menu_chose(TASKBAR_MENU_STOP);
             game_stop_ok = tab_signalled(106, TASKBAR_SIGKILL) == 1 && tab_signalled(107, TASKBAR_SIGKILL) == 1 &&
-                           tab_signalled(108, TASKBAR_SIGKILL) == 1 && !tab_signalled(102, TASKBAR_SIGKILL) &&
-                           !tab_signalled(103, TASKBAR_SIGKILL) && !tab_signalled(104, TASKBAR_SIGKILL) &&
+                           tab_signalled((int)hl2, TASKBAR_SIGKILL) == 1 && !tab_signalled(102, TASKBAR_SIGKILL) &&
+                           !tab_signalled(103, TASKBAR_SIGKILL) && !tab_signalled((int)web, TASKBAR_SIGKILL) &&
                            !tab_signalled(105, TASKBAR_SIGKILL) && !tab_signalled(109, TASKBAR_SIGKILL) && tab_signal_count == 6;
         }
         compositor_menu_close();
@@ -2266,9 +2337,9 @@ static void check_taskbar_tab_menu(void)
             tab_signal_count = 0;
             compositor_menu_chose(TASKBAR_MENU_STOP);
             steam_stop_ok = tab_signalled(102, TASKBAR_SIGKILL) == 1 && tab_signalled(103, TASKBAR_SIGKILL) == 1 &&
-                            tab_signalled(104, TASKBAR_SIGKILL) == 1 && tab_signalled(105, TASKBAR_SIGKILL) == 1 &&
+                            tab_signalled((int)web, TASKBAR_SIGKILL) == 1 && tab_signalled(105, TASKBAR_SIGKILL) == 1 &&
                             !tab_signalled(106, TASKBAR_SIGKILL) && !tab_signalled(107, TASKBAR_SIGKILL) &&
-                            !tab_signalled(108, TASKBAR_SIGKILL);
+                            !tab_signalled((int)hl2, TASKBAR_SIGKILL);
         }
         compositor_menu_close();
         // Direct child game under Steam (no reaper, even with empty app_id): stops below Steam, and Steam's stop spares it.
@@ -2279,9 +2350,9 @@ static void check_taskbar_tab_menu(void)
             int g_n = taskbar_stop_plan_for(109, "", &g_root);
             b32 g_only = g_root == 109 && g_n == 1 && taskbar_stop_has(taskbar_stop_members, g_n, 109) &&
                          !taskbar_stop_has(taskbar_stop_members, g_n, 103);
-            int s_n = taskbar_stop_plan_for(104, "steamwebhelper", &s_root);
+            int s_n = taskbar_stop_plan_for(web, "steamwebhelper", &s_root);
             b32 s_only = s_root == 102 && taskbar_stop_has(taskbar_stop_members, s_n, 103) &&
-                         taskbar_stop_has(taskbar_stop_members, s_n, 104) && !taskbar_stop_has(taskbar_stop_members, s_n, 109);
+                         taskbar_stop_has(taskbar_stop_members, s_n, (int)web) && !taskbar_stop_has(taskbar_stop_members, s_n, 109);
 
             direct_ok = g_only && s_only;
         }
@@ -2310,10 +2381,13 @@ static void check_taskbar_tab_menu(void)
         check("tab menu: any launcher app and a spawned child app with a distinct app_id stop independently", generic_ok);
     }
 
-    // Put the check's directory away.
+    // Put the check's directory and its owners away.
     for (int pid = 1; pid < 130; pid++)
         tab_signal_remove(root, pid);
+    tab_signal_remove(root, (int)own1), tab_signal_remove(root, (int)own2), tab_signal_remove(root, (int)web), tab_signal_remove(root, (int)hl2);
     system_call_3(syscall(unlinkat), (positive)AT_FDCWD, (positive)root, 0x200);
+    tab_owners_end();
+    windows_owner_held[1] = windows_owner_held[2] = (struct windows_owner){0, 0};
     taskbar_proc_root = "/proc";
     taskbar_signal = taskbar_signal_send;
     taskbar_standard();
@@ -2430,7 +2504,10 @@ static void check_taskbar_pins(void)
     struct windows address_to table;
     struct taskbar_view view;
     int x, y, w, h, tab, ghost, pids = 0;
-    unsigned int fixture_pid = (unsigned int)system_call(syscall(getppid)); // the parent is a real process, not this one (taskbar_proc_kind calls the checker itself SYSTEM): its owner is taken from /proc
+    // The window's owner is a real process, not this one (taskbar_proc_kind calls the checker itself SYSTEM) and not its parent (pid 1
+    // in the gate's pid namespace, which the fake tree calls init): its owner is taken from /proc (tab_owner_start).
+    static const unsigned int fake[] = {1, 2, 40};
+    unsigned int fixture_pid = tab_owner_start(fake, 3);
 
     for (unsigned int each = 0; each < sizeof(good) / sizeof(good[0]); each++)
         grammar &= setting_pins_valid(good[each], null);
@@ -2585,6 +2662,7 @@ static void check_taskbar_pins(void)
     {
         check("taskbar pinned: the table is mapped", false);
         taskbar_standard();
+        tab_owners_end();
         return;
     }
     table = compositor.table;
@@ -2628,6 +2706,7 @@ static void check_taskbar_pins(void)
         if (chromium < 0)
         {
             check("taskbar pinned: the registry lists chromium (the fixture bowl)", false);
+            tab_owners_end();
             return;
         }
         ui_apps_pins_path(compositor_settings_root, path, sizeof(path));
@@ -2779,6 +2858,8 @@ static void check_taskbar_pins(void)
     check_taskbar_pins_put("none");
 
     tab_remove_tree(root);
+    tab_owners_end();
+    windows_owner_held[1] = (struct windows_owner){0, 0};
     taskbar_proc_root = "/proc", taskbar_run_root = "/run/moonwater", compositor_settings_root = "";
     ui_apps_bowls = UI_APPS_BOWLS, ui_apps_local = UI_APPS_LOCAL, ui_apps_owner = 0, ui_apps.read = false;
     taskbar_signal = taskbar_signal_send;
