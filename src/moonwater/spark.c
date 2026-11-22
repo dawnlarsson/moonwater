@@ -144,12 +144,67 @@ struct spark_input_ring
         unsigned long long head;
         unsigned long long tail;
         unsigned long long drops;
-        unsigned int reserved[6];
+        unsigned int focus_seen; // counts the reports a focused page took (below), so the compositor still sees the hand move
+        unsigned int reserved[5];
         struct spark_input_slot slots[SPARK_INPUT_SLOTS];
 };
 
 _Static_assert(sizeof(struct spark_input_slot) == 24, "spark_input_slot must be 24 bytes");
 _Static_assert(sizeof(struct spark_input_ring) <= SPARK_INPUT_PAGE_BYTES, "spark_input_ring must fit in one 4 KiB page");
+
+/*
+        The focused page (/dev/spark mmap at offset SPARK_FOCUS_MMAP_PGOFF * 4096, read only):
+        the pointer's reports for one program, the game the person is playing, read in that
+        program's own process with no hop. Any program may map one, one per thread group, and
+        gets its own page, bound to the thread group that mapped it first. The page stays empty
+        until the compositor, the ring's owner, names that thread group with SPARK_IOCTL_FOCUS
+        (a pidfd: the owner of the window that holds the pointer locked) and the program claims
+        it with SPARK_IOCTL_FOCUS_CLAIM. Then the filter writes each report into it as it writes
+        the compositor's ring: OBSERVE, a copy, the report still goes where it went; TAKE, the
+        report goes to the page alone. A release goes where its press went. When the compositor
+        names another thread group or none, or the claim is let go, the page's generation moves,
+        its slots are wiped and nothing more is written. Keys are never written here.
+
+        Every word a reader reads is 32 bits, so a 32-bit program reads each whole: head counts
+        slots modulo 2^32, the reader keeps its own count and reads slots [count, head); a slot
+        more than SPARK_FOCUS_SLOTS behind head may have been written again. A read is good when
+        generation is the same before and after it.
+*/
+#define SPARK_FOCUS_MAGIC 0x53434f46u // "FOCS"
+#define SPARK_FOCUS_VERSION 1u
+#define SPARK_FOCUS_SLOTS 128u
+#define SPARK_FOCUS_MMAP_PGOFF 17ul
+#define SPARK_FOCUS_CLAIM_OFF 0u
+#define SPARK_FOCUS_CLAIM_OBSERVE 1u
+#define SPARK_FOCUS_CLAIM_TAKE 2u
+#define SPARK_FOCUS_STATE_OFF 0u
+#define SPARK_FOCUS_STATE_ARMED 1u // named and claimed: reports are written
+
+struct spark_focus_page
+{
+        unsigned int magic;
+        unsigned int version;
+        unsigned int mask;
+        unsigned int state;      // SPARK_FOCUS_STATE_*
+        unsigned int generation; // moves at every arm and every disarm
+        unsigned int claim;      // the reader's claim, as the kernel holds it
+        unsigned int head;       // slots written, modulo 2^32
+        unsigned int buttons;    // BTN_LEFT + n held into this page, bit n (to make good what a slow reader lost)
+        unsigned int drops;      // reports the page could not take (none today: a slow reader loses the oldest instead)
+        unsigned int armed_ms;   // CLOCK_MONOTONIC, ms, at the last arm
+        unsigned int armed_head; // head at the last arm: a reader that sees the generation move reads on from here
+        unsigned int reserved[5];
+        struct spark_input_slot slots[SPARK_FOCUS_SLOTS];
+};
+
+_Static_assert(offset_of(struct spark_focus_page, slots) == 64, "spark_focus_page header must be 64 bytes");
+_Static_assert(sizeof(struct spark_focus_page) <= SPARK_INPUT_PAGE_BYTES, "spark_focus_page must fit in one 4 KiB page");
+
+// _IO('s', 20): the ring's owner names the thread group a focused page is written for; the
+// argument is a pidfd, or -1 for none.
+#define SPARK_IOCTL_FOCUS 0x00007314u
+// _IO('s', 21): a focused page's own thread group claims it; the argument is SPARK_FOCUS_CLAIM_*.
+#define SPARK_IOCTL_FOCUS_CLAIM 0x00007315u
 
 // _IOW('s', 1, struct spawn) -- spelled out so userspace does not need
 // the kernel ioctl macros to talk to it. The size is part of the encoding, so

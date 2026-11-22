@@ -822,6 +822,7 @@ struct bind_handle {
         // not the machine's own: a program's (uinput, uhid), heard by no rule and by no stop key's binding
         bool rover_virtual;
         int rel_x, rel_y; // pending REL_X / REL_Y accumulated for the current HID report (spark_input_ring)
+        int focus_x, focus_y; // the same for the focused page (spark_focus_page), which hears virtual devices too
         unsigned long rover_taken[BITS_TO_LONGS(KEY_CNT)];
 };
 
@@ -910,9 +911,228 @@ static __poll_t spark_input_poll(struct file *file, poll_table *wait)
         return smp_load_acquire(&page->head) != READ_ONCE(page->tail) ? EPOLLIN | EPOLLRDNORM : 0;
 }
 
+/*
+        The focused pages (spark.c, spark_focus_page): one per thread group that mapped one, on a
+        list kept under spark_focus_mutex for adding and taking away and spark_input_lock for the
+        filter's walk. spark_focus_pid is the thread group the ring's owner named; the page whose
+        thread group it is and whose claim is not off is the live one, the only page the filter
+        writes. spark_focus_mode is the live page's claim, read by the filter before it takes the
+        lock; spark_focus_down holds the buttons pressed into a page, whose releases go there
+        (or, the page gone, nowhere), never to a reader that saw no press.
+*/
+struct spark_focus_reader
+{
+        struct list_head link;
+        struct spark_focus_page *page;
+        struct file *file;
+        struct pid *pid;   // the thread group that mapped it
+        unsigned int claim;
+        unsigned int head; // the slots written, the kernel's own count: the page's is never read back
+};
+
+static LIST_HEAD(spark_focus_readers);
+static DEFINE_MUTEX(spark_focus_mutex);
+static struct spark_focus_reader *spark_focus_live;
+static struct pid *spark_focus_pid;
+static unsigned int spark_focus_mode;
+static unsigned int spark_focus_down;
+
+// spark_input_lock held: the page the filter writes made again from the name and the claims.
+// A page that stops being written is wiped after its generation moves, so a reader that read
+// across the wipe sees the move and throws away what it read.
+static void spark_focus_relive(void)
+{
+        struct spark_focus_reader *reader, *live = NULL;
+
+        if (spark_focus_pid)
+                list_for_each_entry(reader, &spark_focus_readers, link)
+                        if (reader->pid == spark_focus_pid && reader->claim != SPARK_FOCUS_CLAIM_OFF)
+                        {
+                                live = reader;
+                                break;
+                        }
+        if (live != spark_focus_live)
+        {
+                struct spark_focus_reader *was = spark_focus_live;
+
+                if (was)
+                {
+                        WRITE_ONCE(was->page->state, SPARK_FOCUS_STATE_OFF);
+                        smp_store_release(&was->page->generation, was->page->generation + 1);
+                        smp_wmb();
+                        memset(was->page->slots, 0, sizeof(was->page->slots));
+                        WRITE_ONCE(was->page->buttons, 0);
+                }
+                if (live)
+                {
+                        WRITE_ONCE(live->page->armed_ms, (unsigned int)(ktime_get_ns() / 1000000ull));
+                        WRITE_ONCE(live->page->armed_head, live->head);
+                        WRITE_ONCE(live->page->state, SPARK_FOCUS_STATE_ARMED);
+                        smp_store_release(&live->page->generation, live->page->generation + 1);
+                }
+                spark_focus_live = live;
+        }
+        WRITE_ONCE(spark_focus_mode, live ? live->claim : SPARK_FOCUS_CLAIM_OFF);
+}
+
+// The ring's owner names the thread group a page is written for: a pidfd, or -1 for none.
+static long spark_focus_arm(struct file *file, unsigned long arg)
+{
+        struct pid *pid = NULL, *was;
+        unsigned long flags;
+        int fd = (int)arg;
+
+        if (!spark_input_is_owner(file))
+                return -EPERM;
+        if (fd >= 0)
+        {
+                unsigned int fd_flags;
+
+                pid = pidfd_get_pid((unsigned int)fd, &fd_flags);
+                if (IS_ERR(pid))
+                        return PTR_ERR(pid);
+        }
+        else if (fd != -1)
+                return -EINVAL;
+        spin_lock_irqsave(&spark_input_lock, flags);
+        if (!spark_input_is_owner(file))
+        {
+                spin_unlock_irqrestore(&spark_input_lock, flags);
+                put_pid(pid);
+                return -EPERM;
+        }
+        was = spark_focus_pid;
+        spark_focus_pid = pid;
+        spark_focus_relive();
+        spin_unlock_irqrestore(&spark_input_lock, flags);
+        put_pid(was);
+        return 0;
+}
+
+static struct spark_focus_reader *spark_focus_find(struct file *file)
+{
+        struct spark_focus_reader *reader;
+
+        list_for_each_entry(reader, &spark_focus_readers, link)
+                if (reader->file == file)
+                        return reader;
+        return NULL;
+}
+
+// A page's own thread group claims it, or lets it go.
+static long spark_focus_claim(struct file *file, unsigned long arg)
+{
+        struct spark_focus_reader *reader;
+        unsigned long flags;
+        long err = 0;
+
+        if (arg > SPARK_FOCUS_CLAIM_TAKE)
+                return -EINVAL;
+        mutex_lock(&spark_focus_mutex);
+        reader = spark_focus_find(file);
+        if (!reader)
+                err = -ENODEV;
+        else if (reader->pid != task_tgid(current))
+                err = -EPERM;
+        else
+        {
+                spin_lock_irqsave(&spark_input_lock, flags);
+                reader->claim = (unsigned int)arg;
+                WRITE_ONCE(reader->page->claim, (unsigned int)arg);
+                spark_focus_relive();
+                spin_unlock_irqrestore(&spark_input_lock, flags);
+        }
+        mutex_unlock(&spark_focus_mutex);
+        return err;
+}
+
+// A page for the caller's thread group: read only, never inherited by a fork, one per group.
+static int spark_focus_mmap(struct file *file, struct vm_area_struct *vma)
+{
+        struct spark_focus_reader *reader, *other;
+        struct pid *me = task_tgid(current);
+        unsigned long flags;
+        int err;
+
+        if (vma->vm_end - vma->vm_start != SPARK_INPUT_PAGE_BYTES || (vma->vm_flags & (VM_WRITE | VM_EXEC)))
+                return -EINVAL;
+        vm_flags_clear(vma, VM_MAYWRITE | VM_MAYEXEC);
+        vm_flags_set(vma, VM_DONTCOPY);
+        mutex_lock(&spark_focus_mutex);
+        reader = spark_focus_find(file);
+        if (reader && reader->pid != me)
+        {
+                mutex_unlock(&spark_focus_mutex);
+                return -EPERM;
+        }
+        if (!reader)
+        {
+                list_for_each_entry(other, &spark_focus_readers, link)
+                        if (other->pid == me)
+                        {
+                                mutex_unlock(&spark_focus_mutex);
+                                return -EBUSY;
+                        }
+                reader = kzalloc(sizeof(*reader), GFP_KERNEL);
+                if (reader)
+                        reader->page = vmalloc_user(SPARK_INPUT_PAGE_BYTES);
+                if (!reader || !reader->page)
+                {
+                        kfree(reader);
+                        mutex_unlock(&spark_focus_mutex);
+                        return -ENOMEM;
+                }
+                reader->page->magic = SPARK_FOCUS_MAGIC;
+                reader->page->version = SPARK_FOCUS_VERSION;
+                reader->page->mask = SPARK_FOCUS_SLOTS - 1u;
+                reader->file = file;
+                reader->pid = get_pid(me);
+                spin_lock_irqsave(&spark_input_lock, flags);
+                list_add(&reader->link, &spark_focus_readers);
+                spin_unlock_irqrestore(&spark_input_lock, flags);
+        }
+        err = remap_vmalloc_range(vma, reader->page, 0);
+        mutex_unlock(&spark_focus_mutex);
+        return err;
+}
+
+// The last close of a descriptor (every mapping holds it open, so none is left): its page goes.
+static void spark_focus_release(struct file *file)
+{
+        struct spark_focus_reader *reader;
+        unsigned long flags;
+
+        //      Every close of /dev/spark comes here, and almost none mapped a
+        //      page: a page this file has was put on the list while the file
+        //      was still open, so an empty list is no page of its.
+        if (list_empty(&spark_focus_readers))
+                return;
+        mutex_lock(&spark_focus_mutex);
+        reader = spark_focus_find(file);
+        if (reader)
+        {
+                spin_lock_irqsave(&spark_input_lock, flags);
+                list_del(&reader->link);
+                if (spark_focus_live == reader)
+                {
+                        spark_focus_live = NULL;
+                        WRITE_ONCE(spark_focus_mode, SPARK_FOCUS_CLAIM_OFF);
+                }
+                spin_unlock_irqrestore(&spark_input_lock, flags);
+        }
+        mutex_unlock(&spark_focus_mutex);
+        if (reader)
+        {
+                vfree(reader->page);
+                put_pid(reader->pid);
+                kfree(reader);
+        }
+}
+
 static void spark_input_release(struct file *file)
 {
         struct spark_input_ring *page = READ_ONCE(spark_input_page);
+        struct pid *named = NULL;
         unsigned long flags;
 
         spin_lock_irqsave(&spark_input_lock, flags);
@@ -921,8 +1141,14 @@ static void spark_input_release(struct file *file)
                 spark_input_owner = NULL;
                 if (page)
                         WRITE_ONCE(page->active, 0);
+                // No owner is left to take the name back at the next change of focus: none is named.
+                named = spark_focus_pid;
+                spark_focus_pid = NULL;
+                spark_focus_relive();
         }
         spin_unlock_irqrestore(&spark_input_lock, flags);
+        put_pid(named);
+        spark_focus_release(file);
 }
 
 static struct bind_row bind_table[SPARK_BIND_EVENTS];
@@ -1896,6 +2122,76 @@ static bool spark_input_push(struct spark_input_ring *ring, unsigned short kind,
         return pushed;
 }
 
+// spark_input_lock held: one report into the live page, if there is one. The compositor's ring
+// counts it (focus_seen), as a report it would have read, for the idle clocks.
+static bool spark_focus_put(unsigned short kind, unsigned short code, int dx, int dy)
+{
+        struct spark_focus_reader *reader = spark_focus_live;
+        struct spark_input_ring *ring = READ_ONCE(spark_input_page);
+        struct spark_input_slot *s;
+
+        if (!reader)
+                return false;
+        s = &reader->page->slots[reader->head & (SPARK_FOCUS_SLOTS - 1u)];
+        s->dx = dx;
+        s->dy = dy;
+        s->time_us = ktime_get_ns() / 1000ull;
+        s->kind = kind;
+        s->code = code;
+        s->flags = 0;
+        WRITE_ONCE(reader->page->buttons, spark_focus_down);
+        smp_store_release(&reader->page->head, ++reader->head);
+        if (ring)
+                WRITE_ONCE(ring->focus_seen, ring->focus_seen + 1);
+        return true;
+}
+
+static bool spark_focus_push(unsigned short kind, unsigned short code, int dx, int dy)
+{
+        unsigned long flags;
+        bool pushed;
+
+        spin_lock_irqsave(&spark_input_lock, flags);
+        pushed = spark_focus_put(kind, code, dx, dy);
+        spin_unlock_irqrestore(&spark_input_lock, flags);
+        return pushed;
+}
+
+/*
+        A button and the focused page: a press under TAKE goes to the page alone and is held
+        there; a release goes where its press went, so a reader never holds a button the person
+        let go and the compositor never holds one it did not see pressed (a press held into a
+        page that is gone is released nowhere). Under OBSERVE the page is given a copy. True when
+        the filter takes the event from everything after it.
+*/
+static bool spark_focus_button(unsigned int code, int value)
+{
+        unsigned int bit = 1u << (code - BTN_LEFT);
+        unsigned long flags;
+        bool taken = false;
+
+        if (value == 2)
+                return false;
+        spin_lock_irqsave(&spark_input_lock, flags);
+        if (!value && (spark_focus_down & bit))
+        {
+                spark_focus_down &= ~bit;
+                spark_focus_put(SPARK_INPUT_KIND_KEY, (unsigned short)code, 0, 0);
+                taken = true;
+        }
+        else if (value && spark_focus_mode == SPARK_FOCUS_CLAIM_TAKE)
+        {
+                spark_focus_down |= bit;
+                taken = spark_focus_put(SPARK_INPUT_KIND_KEY, (unsigned short)code, 1, 0);
+                if (!taken)
+                        spark_focus_down &= ~bit;
+        }
+        else if (spark_focus_mode == SPARK_FOCUS_CLAIM_OBSERVE)
+                spark_focus_put(SPARK_INPUT_KIND_KEY, (unsigned short)code, value ? 1 : 0, 0);
+        spin_unlock_irqrestore(&spark_input_lock, flags);
+        return taken;
+}
+
 static _Bool bind_filter(struct input_handle *handle, unsigned int type,
                          unsigned int code, int value)
 {
@@ -1903,8 +2199,58 @@ static _Bool bind_filter(struct input_handle *handle, unsigned int type,
         u64 started = moonwater_cost_begin(&bind_cost);
         bool taken = false;
         struct spark_input_ring *ring = READ_ONCE(spark_input_page);
-        bool spark_ok = ring && READ_ONCE(ring->active) && !bind->rover_virtual &&
-                        !test_bit(BTN_TOOL_FINGER, handle->dev->keybit) && !test_bit(ABS_MT_POSITION_X, handle->dev->absbit);
+        bool pointer = !test_bit(BTN_TOOL_FINGER, handle->dev->keybit) && !test_bit(ABS_MT_POSITION_X, handle->dev->absbit);
+        bool spark_ok = ring && READ_ONCE(ring->active) && !bind->rover_virtual && pointer;
+        unsigned int focus = pointer ? READ_ONCE(spark_focus_mode) : SPARK_FOCUS_CLAIM_OFF;
+
+        //      The focused page first (spark_focus_page): under TAKE what it is
+        //      given is taken from the compositor's ring and from evdev; under
+        //      OBSERVE it is a copy and the event goes on as it would have.
+        if (focus != SPARK_FOCUS_CLAIM_OFF)
+        {
+                bool take = focus == SPARK_FOCUS_CLAIM_TAKE;
+
+                if (type == EV_REL && (code == REL_X || code == REL_Y))
+                {
+                        if (code == REL_X)
+                                bind->focus_x = (int)((unsigned int)bind->focus_x + (unsigned int)value);
+                        else
+                                bind->focus_y = (int)((unsigned int)bind->focus_y + (unsigned int)value);
+                        if (take)
+                        {
+                                taken = true;
+                                goto counted;
+                        }
+                }
+                else if (type == EV_REL && (code == REL_WHEEL || code == REL_HWHEEL || code == REL_WHEEL_HI_RES || code == REL_HWHEEL_HI_RES))
+                {
+                        bool coarse = (code == REL_WHEEL && test_bit(REL_WHEEL_HI_RES, handle->dev->relbit)) ||
+                                      (code == REL_HWHEEL && test_bit(REL_HWHEEL_HI_RES, handle->dev->relbit));
+
+                        if (!coarse)
+                        {
+                                if (bind->focus_x || bind->focus_y)
+                                {
+                                        spark_focus_push(SPARK_INPUT_KIND_REL, 0, bind->focus_x, bind->focus_y);
+                                        bind->focus_x = bind->focus_y = 0;
+                                }
+                                if (!spark_focus_push(SPARK_INPUT_KIND_WHEEL, (unsigned short)code, value, 0))
+                                        take = false;
+                        }
+                        if (take)
+                        {
+                                taken = true;
+                                goto counted;
+                        }
+                }
+                else if (type == EV_SYN && code == SYN_REPORT && (bind->focus_x || bind->focus_y))
+                {
+                        spark_focus_push(SPARK_INPUT_KIND_REL, 0, bind->focus_x, bind->focus_y);
+                        bind->focus_x = bind->focus_y = 0;
+                }
+        }
+        else if (unlikely(bind->focus_x || bind->focus_y))
+                bind->focus_x = bind->focus_y = 0;
 
         if (spark_ok)
         {
@@ -1961,6 +2307,19 @@ static _Bool bind_filter(struct input_handle *handle, unsigned int type,
                 //      counts them for every event it is given).
                 else if (type == EV_KEY)
                         bind_mods(bind, code, value);
+                //      A button, after the rules and the bindings heard it: the
+                //      focused page's (spark_focus_button), whose releases follow
+                //      their presses even after the page is gone.
+                if (!taken && pointer && type == EV_KEY && code >= BTN_LEFT && code <= BTN_TASK &&
+                    (focus != SPARK_FOCUS_CLAIM_OFF || READ_ONCE(spark_focus_down)))
+                {
+                        if (bind->focus_x || bind->focus_y)
+                        {
+                                spark_focus_push(SPARK_INPUT_KIND_REL, 0, bind->focus_x, bind->focus_y);
+                                bind->focus_x = bind->focus_y = 0;
+                        }
+                        taken = spark_focus_button(code, value);
+                }
                 if (!taken && spark_ok && type == EV_KEY &&
                     ((code >= BTN_LEFT && code <= BTN_TASK) || (code > 0 && code < 256)))
                 {

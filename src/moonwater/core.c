@@ -281,6 +281,8 @@ IOCTL_IS(SPARK_IOCTL_SETTINGS_GET, IOCTL_READ, 12, sizeof(struct spark_settings_
 IOCTL_IS(SPARK_IOCTL_SETTINGS_SET, IOCTL_WRITE, 13, sizeof(struct spark_settings_request));
 IOCTL_IS(MOONWATER_IOCTL_MACHINE, IOCTL_BOTH, 14, sizeof(struct machine_control));
 IOCTL_IS(MOONWATER_IOCTL_SCRIPT, IOCTL_BOTH, 15, sizeof(struct machine_script));
+IOCTL_IS(SPARK_IOCTL_FOCUS, IOCTL_NONE, 20, 0);
+IOCTL_IS(SPARK_IOCTL_FOCUS_CLAIM, IOCTL_NONE, 21, 0);
 
 static long device_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 {
@@ -310,6 +312,10 @@ static long device_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
                 return settings_get(file, (struct spark_settings_request __user *)arg);
         case SPARK_IOCTL_SETTINGS_SET:
                 return settings_set(file, (struct spark_settings_request __user *)arg);
+        case SPARK_IOCTL_FOCUS:
+                return spark_focus_arm(file, arg);
+        case SPARK_IOCTL_FOCUS_CLAIM:
+                return spark_focus_claim(file, arg);
         }
 
         // The compositor's requests: -ENOTTY from the client is what the
@@ -352,11 +358,14 @@ static int device_close(struct inode *inode, struct file *file)
         return 0;
 }
 
-// Rover's state page and ring (rules.c, pgoff 0) and direct input ring (moonwater.c, pgoff SPARK_INPUT_MMAP_PGOFF).
+// Rover's state page and ring (rules.c, pgoff 0), the direct input ring (moonwater.c, pgoff SPARK_INPUT_MMAP_PGOFF) and
+// a program's focused page (moonwater.c, pgoff SPARK_FOCUS_MMAP_PGOFF).
 static int device_mmap(struct file *file, struct vm_area_struct *vma)
 {
         if (vma->vm_pgoff == SPARK_INPUT_MMAP_PGOFF)
                 return spark_input_mmap(file, vma);
+        if (vma->vm_pgoff == SPARK_FOCUS_MMAP_PGOFF)
+                return spark_focus_mmap(file, vma);
         return rules_mmap(file, vma);
 }
 
