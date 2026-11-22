@@ -1544,6 +1544,25 @@ static fn check_settings(string_address regular, string_address bold)
                 check("settings: the buffers map", false);
                 return;
         }
+        // The window's own engine and faces: a row that measures its words (a key that moves the column, a list's rows) has to find
+        // them. Without them font_extent is given a null engine.
+        {
+                static font_face faces[2];
+                static p8 atlas[1024 * 1024];
+                positive size = 0, bytes = compositor_map_file(regular, &size), bold_size = 0, bold_bytes = bold ? compositor_map_file(bold, &bold_size) : 0;
+                long engine = compositor_call(syscall(mmap), 0, sizeof(font_engine), 3, 0x4022, (positive)-1, 0);
+
+                if (!bytes || (engine < 0 && engine > -4096) || font_load(&faces[0], (const p8 address_to)bytes, size, 0) != 0)
+                {
+                        check("settings: the window's face loads", false);
+                        return;
+                }
+                settings.ui.engine = (font_engine address_to)engine;
+                font_start(settings.ui.engine, atlas, 1024, 1024);
+                settings.ui.regular = &faces[0];
+                settings.ui.bold = bold_bytes && font_load(&faces[1], (const p8 address_to)bold_bytes, bold_size, 0) == 0 ? &faces[1] : null;
+                settings.ui.scale = 100;
+        }
         // After the map: a list typed is split in the window's own buffers.
         check_autostart();
         char value[SETTINGS_VALUE], next[SETTINGS_VALUE];

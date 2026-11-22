@@ -459,6 +459,17 @@ static bipolar space_guard_call_6(positive number, positive a, positive b, posit
 #define system_call_6(number, a, b, c, d, e, f) space_guard_call_6(number, a, b, c, d, e, f)
 #include "../../src/canvas/compositor.c"
 #undef system_call_6
+// The rows zero the compositor between one another (compositor_zero), which clears the font engine its own setup gave it, and a frame
+// presented after that measures with no engine. A zero keeps the engine the rows had: the row's own font setup is what stays.
+static void (*check_compositor_zero_real)(void) = compositor_zero;
+static void check_compositor_zero(void)
+{
+        font_engine *engine = compositor.engine;
+
+        check_compositor_zero_real();
+        compositor.engine = engine;
+}
+#define compositor_zero check_compositor_zero
 #undef system_control
 #define system_control(handle, request, argument)                            \
         system_call_3(syscall(ioctl), (positive)(handle),                    \
