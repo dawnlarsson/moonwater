@@ -10844,18 +10844,70 @@ fn shell_prompt_command()
         {
                 shell_mark mark = shell_store_mark(address_of expand_store);
                 shell_array_item address_to items =
-                    (shell_array_item address_to)shell_store_take(
-                        address_of expand_store,
-                        (count ? count : 1) * sizeof(items[0]));
+                    count <= positive_max / sizeof(items[0])
+                        ? (shell_array_item address_to)shell_store_take_aligned(
+                              address_of expand_store,
+                              (count ? count : 1) * sizeof(items[0]))
+                        : null;
+                p8 address_to snapshot = null;
+                positive snapshot_room = 0;
 
-                if (items)
+                if (items && count)
                 {
+                        positive total = 0;
+                        bool fits = true;
+
                         shell_array_items("PROMPT_COMMAND", 14, items, count);
                         for (positive at = 0; at < count; at++)
-                                if (items[at].value && string_get(items[at].value))
-                                        shell_prompt_run(items[at].value);
+                        {
+                                positive len = items[at].value
+                                                   ? items[at].value_length
+                                                   : 0;
+                                if (len >= positive_max - total)
+                                {
+                                        fits = false;
+                                        break;
+                                }
+                                total += len + 1;
+                        }
+                        if (fits && total &&
+                            (snapshot = (p8 address_to)shell_map(total)))
+                        {
+                                positive used = 0;
+
+                                snapshot_room = total;
+                                for (positive at = 0; at < count; at++)
+                                {
+                                        positive len = items[at].value
+                                                           ? items[at].value_length
+                                                           : 0;
+                                        if (len)
+                                                memory_copy(snapshot + used,
+                                                            items[at].value,
+                                                            len);
+                                        snapshot[used + len] = end;
+                                        used += len + 1;
+                                }
+                        }
                 }
                 shell_store_rewind(address_of expand_store, mark);
+
+                if (snapshot)
+                {
+                        positive used = 0;
+
+                        for (positive at = 0; at < count; at++)
+                        {
+                                string_address entry =
+                                    (string_address)(snapshot + used);
+                                positive len = string_length(entry);
+
+                                if (len)
+                                        shell_prompt_run(entry);
+                                used += len + 1;
+                        }
+                        memory_free(snapshot, snapshot_room);
+                }
         }
         else if (text && string_get(text))
                 shell_prompt_run(text);

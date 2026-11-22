@@ -8865,6 +8865,27 @@ static COLD fn expand_array_sequence(string_address name, positive length,
         if (begin == finish)
                 goto empty;
 
+        if (transform)
+        {
+                // A modifier's word on an earlier element may unset or
+                // reallocate the array; snapshot every key up front so later
+                // iterations never read freed element storage.
+                for (positive at = begin; at < finish; at++)
+                {
+                        if (!items[at].key)
+                                continue;
+                        string_address copy = shell_store_copy(
+                            address_of expand_store, items[at].key,
+                            items[at].key_length);
+                        if (!copy)
+                        {
+                                expand_fail_state();
+                                goto done;
+                        }
+                        items[at].key = copy;
+                }
+        }
+
         for (positive at = begin; at < finish && !expand_failed; at++)
         {
                 if (at > begin)
@@ -8891,12 +8912,15 @@ static COLD fn expand_array_sequence(string_address name, positive length,
                         continue;
                 }
 
-                // A modifier's word may replace the cell that owns this key.
-                key = shell_store_copy(address_of expand_store, key, key_length);
-                if (!key)
+                if (key == written)
                 {
-                        expand_fail_state();
-                        break;
+                        key = shell_store_copy(address_of expand_store, key,
+                                               key_length);
+                        if (!key)
+                        {
+                                expand_fail_state();
+                                break;
+                        }
                 }
                 expand_modifier((expand_reference){.name = name, .name_length = length,
                     .key = key, .key_length = key_length}, operation, doubled, word, quoted, 0);
@@ -11327,7 +11351,7 @@ static fn glob_level(p8 address_to prefix, positive used, string_address pattern
         prefix[used] = end;
         bipolar directory = system_open_at(
             AT_FDCWD, used ? prefix : (string_address)".",
-            FILE_READ | O_DIRECTORY | O_CLOEXEC);
+            FILE_READ | O_DIRECTORY | O_CLOEXEC | (from_star ? O_NOFOLLOW : 0));
         if (directory < 0)
                 return;
 

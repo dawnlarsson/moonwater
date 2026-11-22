@@ -1041,9 +1041,9 @@ b32 main()
 
         /* Startup -p preserves entry IDs. Its absence resets both credentials
            before the environment can become shell state; either form keeps
-           attacker-controlled startup files suppressed for this invocation. */
-        if (shell_bash_compat)
-                shell_privilege_started();
+           attacker-controlled startup files and environment hooks suppressed
+           for this invocation across every shell personality. */
+        shell_privilege_started();
 
         /* environ is the live process environment. Ordinarily it is the
            kernel vector published by the startup shim; clone-and-reentry can

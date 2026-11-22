@@ -2789,6 +2789,8 @@ static COLD bool env_borrow_plain(string_address entry)
         return true;
 }
 
+static bool shell_startup_privileged HOT_STATE;
+
 static PURE bool env_function_assignment(string_address entry)
 {
         static const p8 prefix[] = "BASH_FUNC_";
@@ -2880,11 +2882,17 @@ HOT fn shell_env_init(string_address address_to process_environment)
                 if (shell_dash_compat &&
                     string_has_prefix(process_environment[at], "PPID="))
                         continue;
-                /* Nor does a shell running as root take PS4 from whoever
-                   started it, as bash has not since 4.4: its $(...) ran as
-                   root on the first line set -x traced. */
+                /* Nor does a shell running as root or under mismatched
+                   credentials take PS4 or PROMPT_COMMAND from whoever
+                   started it: PS4's $(...) ran on the first line set -x
+                   traced, and PROMPT_COMMAND ran before the first prompt. */
                 if (string_has_prefix(process_environment[at], "PS4=") &&
-                    !system_call_1(syscall(geteuid), 0))
+                    (shell_startup_privileged ||
+                     !system_call_1(syscall(geteuid), 0)))
+                        continue;
+                if (string_has_prefix(process_environment[at],
+                                      "PROMPT_COMMAND=") &&
+                    shell_startup_privileged)
                         continue;
                 // Duplicate names are legal; keep the old last-one-wins
                 // behavior without creating a second index entry.
@@ -8154,7 +8162,6 @@ static p32 shell_real_uid, shell_real_gid;
 static bool shell_privilege_known;
 static bool shell_privilege_resettable;
 static bool shell_privilege_mismatched HOT_STATE;
-static bool shell_startup_privileged HOT_STATE;
 
 static fn shell_privilege_prepare()
 {
@@ -14134,15 +14141,33 @@ fn printf_one(writer write, string_address format)
                     (conversion == 'Q' && shell_bash_compat))
                 {
                         string_address value = printf_next();
-                        p8 address_to cut = null;
-                        p8 kept = 0;
+                        p8 local_cut[256];
+                        p8 address_to heap_cut = null;
+                        positive heap_room = 0;
 
                         if (conversion == 'Q' && precision >= 0 &&
                             (positive)precision < string_length(value))
                         {
-                                cut = (p8 address_to)value + precision;
-                                kept = address_to cut;
-                                address_to cut = end;
+                                positive take = (positive)precision;
+
+                                if (take < sizeof(local_cut))
+                                {
+                                        memory_copy_end(local_cut, value, take);
+                                        value = (string_address)local_cut;
+                                }
+                                else if (take < positive_max &&
+                                         (heap_cut = (p8 address_to)shell_map(
+                                              take + 1)))
+                                {
+                                        heap_room = take + 1;
+                                        memory_copy_end(heap_cut, value, take);
+                                        value = (string_address)heap_cut;
+                                }
+                                else
+                                {
+                                        printf_format_failed();
+                                        continue;
+                                }
                         }
 
                         if (!width && (conversion == 'Q' || precision < 0))
@@ -14161,8 +14186,8 @@ fn printf_one(writer write, string_address format)
                                                   length, width, ' ', left);
                         }
 
-                        if (cut)
-                                address_to cut = kept;
+                        if (heap_cut)
+                                memory_free(heap_cut, heap_room);
                         continue;
                 }
 

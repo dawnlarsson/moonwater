@@ -20,6 +20,7 @@ typedef struct
 #define PTY_TIOCSPTLCK 0x40045431u
 #define PTY_TIOCGPTN 0x80045430u
 #define PTY_TIOCSCTTY 0x540eu
+#define PTY_TIOCGPTPEER 0x5441u
 
 static bipolar process_pty_open(b32 address_to master_out,
                                 b32 address_to slave_out,
@@ -34,30 +35,53 @@ static bipolar process_pty_open(b32 address_to master_out,
                 return master;
 
         b32 unlock = 0;
-        p32 number = 0;
         bipolar answer = system_control((b32)master, PTY_TIOCSPTLCK,
                                         address_of unlock);
-        if (answer >= 0)
-                answer = system_control((b32)master, PTY_TIOCGPTN,
-                                        address_of number);
         if (answer < 0)
         {
                 system_close((positive)master);
                 return answer;
         }
 
-        p8 path[32] = "/dev/pts/";
-        positive used = 9;
-        used += positive_into(path + used, number);
-        path[used] = end;
+        /* Prefer TIOCGPTPEER to open the slave directly from the master
+           descriptor without a /dev/pts/<N> path lookup race; fall back to
+           TIOCGPTN + openat(O_NOFOLLOW) only on kernels lacking it. */
+        positive slave_flags = FILE_READ_WRITE | O_NOCTTY | O_CLOEXEC;
+        bipolar slave = system_control((b32)master, PTY_TIOCGPTPEER,
+                                       (address_any)slave_flags);
+        if (slave < 0 && (slave == -25 || slave == -22))
+        {
+                p32 number = 0;
+                answer = system_control((b32)master, PTY_TIOCGPTN,
+                                        address_of number);
+                if (answer < 0)
+                {
+                        system_close((positive)master);
+                        return answer;
+                }
 
-        bipolar slave = system_open_at(AT_FDCWD, path,
-                                       FILE_READ_WRITE | O_NOCTTY |
-                                           O_CLOEXEC | O_NOFOLLOW);
+                p8 path[32] = "/dev/pts/";
+                positive used = 9;
+                used += positive_into(path + used, number);
+                path[used] = end;
+
+                slave = system_open_at(AT_FDCWD, path,
+                                       slave_flags | O_NOFOLLOW);
+        }
         if (slave < 0)
         {
                 system_close((positive)master);
                 return slave;
+        }
+
+        /* Restrict slave permissions to owner read/write (0600) so other
+           users or tty-group members cannot inject or snoop terminal I/O. */
+        bipolar moded = system_call_2(syscall(fchmod), (positive)slave, 0600);
+        if (moded < 0)
+        {
+                system_close((positive)slave);
+                system_close((positive)master);
+                return moded;
         }
 
         address_to master_out = (b32)master;
