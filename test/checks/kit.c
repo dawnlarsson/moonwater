@@ -5660,6 +5660,51 @@ static fn check_kit_text_lines(void)
         ui_text_close(&t);
 }
 
+// The token field: '/home/alice/docs' is the root and three names, the last under the caret; a press on a chip gives its prefix; the caret's
+// token is edited in place; an invalid field draws its error outline.
+static fn check_kit_tokens(void)
+{
+        static unsigned int pixels[400 * 60], scratch[400 * UI_SCRATCH_ROWS];
+        static struct ui_tokens k;
+        struct ui ui = terminal.ui;
+        struct window_event event = {0};
+        p32 asks;
+        int x, y = 30;
+
+        ui.pixels = pixels, ui.pitch = 400, ui.width = 400, ui.height = 60, ui.top = 0, ui.bottom = 60, ui.scale = 100, ui.scene = null;
+        ui.scratch = scratch, ui.scratch_width = 400, ui.band_top = ui.band_bottom = 0;
+        ui_kit_theme(UI_THEME_LIGHT, UI_ACCENT_DAWN, 0);
+        if (!ui_tokens_open(&k, null, "/home/alice/docs", '/'))
+        {
+                check("token field: opens over its text", false);
+                return;
+        }
+        ui_tokens_focus(&k, 1, 0);
+        ui_tokens_draw(&ui, &k, 0, 0, 400, 60);
+        check("token field: '/home/alice/docs' is a root and three names, the last under the caret", k.count == 4 && k.active == 3);
+
+        x = (k.chip_left[1] + k.chip_right[1]) / 2;
+        event.type = WINDOW_EVENT_BUTTON, event.a = UI_POINTER_LEFT, event.flags = WINDOW_KEY_DOWN;
+        asks = ui_tokens_event(&ui, &k, null, &event, x, y);
+        check("token field: a press on the chip 'home' reports its prefix, '/home'",
+              (asks & UI_TOKENS_PRESSED) && k.prefix_length == 5 && memory_compare(k.prefix, "/home", 5) == 0);
+
+        x = (k.chip_left[0] + k.chip_right[0]) / 2;
+        asks = ui_tokens_event(&ui, &k, null, &event, x, y);
+        check("token field: a press on the root chip reports '/'", (asks & UI_TOKENS_PRESSED) && k.prefix_length == 1 && k.prefix[0] == '/');
+
+        doc_select_set(&k.text.doc, 8, 8);
+        ui_tokens_draw(&ui, &k, 0, 0, 400, 60);
+        check("token field: the caret in 'alice' makes that token the one under the caret, the rest stay chips", k.active == 2 && k.chip_left[2] < 0 && k.chip_left[3] >= 0);
+
+        doc_type(&k.text.doc, "x", 1);
+        check("token field: a letter typed in the caret's token edits the raw text in place", doc_length(&k.text.doc) == 17);
+
+        k.invalid = true;
+        ui_tokens_draw(&ui, &k, 0, 0, 400, 60);
+        check("token field: an invalid field draws its error outline across the top", pixels[0] != 0 && pixels[399] == pixels[0] && pixels[0] == (0xff000000u | (ui_role(UI_ERROR) & 0xffffffu)));
+}
+
 static fn check_kit_pull_parts(void)
 {
         static unsigned int pixels[400 * 200], picture[400 * 200], scratch[400 * UI_SCRATCH_ROWS];

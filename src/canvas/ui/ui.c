@@ -31667,6 +31667,190 @@ static fn ui_text_field_draw(struct ui address_to ui, struct ui_control address_
         t->well_left = ui_dev(ui, c->x), t->well_right = ui_dev(ui, c->x + c->w);
 }
 
+// ---- token field: the kit's text field whose separator splits it into chips (a path's '/', a list's ','); the caret's token is plain text ----
+#define UI_TOKENS_PRESSED 1u // a chip was pressed: k->chip, and k->prefix (the text up to and including it; the root '/' alone) are its
+#define UI_TOKENS_SUBMIT 2u  // Enter in the field: k->text holds the whole raw text
+#define UI_TOKENS_CANCEL 4u  // Escape: the value from before the editing is back
+#define UI_TOKENS_CHANGED 8u // the text changed: an edit clears k->invalid
+#define UI_TOKENS_MOVED 16u  // the caret or the view moved
+#define UI_TOKENS_TEXT 2048  // the most bytes of raw text a token field holds
+#define UI_TOKENS_MOST 64    // the tokens a field lays out
+
+struct ui_tokens
+{
+        struct ui_text text;                 // the kit's field over the raw text: caret, selection, edits, undo, IME, RTL
+        p8 separator;                        // the byte that ends a token: '/' or ','
+        b32 invalid;                         // set by the app: the error outline, cleared by an edit
+        int chip, count, active;             // the chip a press named; the tokens of the last draw; the caret's token (-1 none)
+        p8 prefix[UI_TOKENS_TEXT];           // the chip's prefix, as the press named it
+        positive prefix_length;
+        p8 before[UI_TOKENS_TEXT];           // the value before editing (Escape restores it)
+        positive before_length;
+        int left, top, right, bottom;        // the box of the last draw, device pixels
+        positive start[UI_TOKENS_MOST], label[UI_TOKENS_MOST], finish[UI_TOKENS_MOST]; // a token's start, its label's end (the separator is not in the label), its end
+        int chip_left[UI_TOKENS_MOST], chip_right[UI_TOKENS_MOST];                 // where each chip is drawn, device pixels (-1: not drawn)
+        int active_left, active_right;                                             // where the caret's token is drawn as the field's text
+};
+
+// The end of the token that starts at at: past its separator, or the text's end.
+static positive ui_tokens_end(const p8 address_to s, positive n, p8 sep, positive at)
+{
+        while (at < n && s[at] != sep)
+                at++;
+        return at < n ? at + 1 : n;
+}
+
+// Splits the text (bytes s, length n) into tokens in k. A leading separator is the root's token, its label the separator alone.
+static int ui_tokens_split(const p8 address_to s, positive n, p8 sep, struct ui_tokens address_to k)
+{
+        int count = 0;
+        for (positive at = 0; at < n && count < UI_TOKENS_MOST; count++)
+        {
+                positive stop = ui_tokens_end(s, n, sep, at);
+                k->start[count] = at, k->finish[count] = stop;
+                k->label[count] = stop > at + 1 && s[stop - 1] == sep ? stop - 1 : stop;
+                at = stop;
+        }
+        return count;
+}
+
+// Opens the token field over text (raw) with its separator: the caret at its end, nothing invalid.
+static b32 ui_tokens_open(struct ui_tokens address_to k, const struct window_row address_to own, const char address_to text, p8 separator)
+{
+        positive length = text ? string_length((string_address)text) : 0;
+        memory_zero(k, sizeof(*k));
+        if (length >= UI_TOKENS_TEXT)
+                length = UI_TOKENS_TEXT - 1;
+        k->separator = separator, k->chip = -1, k->active = -1;
+        if (!ui_field_open(&k->text, own, text ? text : ""))
+                return false;
+        memory_copy(k->before, text ? text : "", length);
+        k->before_length = length;
+        return true;
+}
+
+// Focus for the field: all of its text selected when select_all; the value before this editing is kept for Escape.
+static void ui_tokens_focus(struct ui_tokens address_to k, b32 on, b32 select_all)
+{
+        positive length = doc_length(&k->text.doc);
+        ui_field_focus(&k->text, on);
+        if (!on)
+                return;
+        k->before_length = doc_read(&k->text.doc, 0, k->before, length < UI_TOKENS_TEXT - 1 ? length : UI_TOKENS_TEXT - 1);
+        if (select_all)
+                doc_select_set(&k->text.doc, 0, length);
+}
+
+// Lays the chips out in the box: every token but the caret's is a chip, left to right; the chips that do not fit are not drawn (chip_left -1).
+static void ui_tokens_lay(struct ui address_to ui, struct ui_tokens address_to k, const p8 address_to bytes, positive n)
+{
+        int pad = ui_dev(ui, 8), gap = k->separator == '/' ? ui_dev(ui, 12) : ui_dev(ui, 4), at = k->left;
+        p64 caret = k->text.doc.selections[k->text.doc.primary].active;
+        char label[UI_TOKENS_TEXT];
+        k->count = ui_tokens_split(bytes, n, k->separator, k);
+        k->active = -1;
+        for (int t = 0; t < k->count; t++)
+                if (caret >= (p64)k->start[t] && (caret < (p64)k->finish[t] || t + 1 == k->count))
+                        k->active = t;
+        k->active_left = k->active_right = -1;
+        for (int t = 0; t < k->count; t++)
+        {
+                positive length = k->label[t] - k->start[t];
+                int w;
+                k->chip_left[t] = k->chip_right[t] = -1;
+                if (!length)
+                        continue;
+                memory_copy(label, bytes + k->start[t], length), label[length] = 0;
+                w = ui_kit_measure(ui, (string_address)label, UI_BODY_MEDIUM) + 2 * pad;
+                if (at + w > k->right)
+                        break;
+                if (t == k->active)
+                        k->active_left = at, k->active_right = at + w;
+                else
+                        k->chip_left[t] = at, k->chip_right[t] = at + w;
+                at += w + gap;
+        }
+}
+
+// The token field in its box: the chips, the caret's token as the field's own text (clipped to its box), and the error outline when invalid.
+static fn ui_tokens_draw(struct ui address_to ui, struct ui_tokens address_to k, int left, int top, int right, int bottom)
+{
+        UI_CALL();
+        positive n = doc_length(&k->text.doc) < UI_TOKENS_TEXT - 1 ? doc_length(&k->text.doc) : UI_TOKENS_TEXT - 1;
+        p8 bytes[UI_TOKENS_TEXT];
+        char label[UI_TOKENS_TEXT];
+        int height = bottom - top, pad = ui_dev(ui, 8), baseline = top + (height - ui_capital(ui, 14)) / 2 + ui_capital(ui, 14);
+        unsigned int chip = ui_role(UI_SECONDARY_CONTAINER) & 0xffffffu, ink = ui_role(UI_ON_SECONDARY_CONTAINER) & 0xffffffu;
+        k->left = left, k->top = top, k->right = right, k->bottom = bottom;
+        doc_read(&k->text.doc, 0, bytes, n);
+        ui_tokens_lay(ui, k, bytes, n);
+        for (int t = 0; t < k->count; t++)
+        {
+                positive length = k->label[t] - k->start[t];
+                int x0 = k->chip_left[t], x1 = k->chip_right[t], text_w;
+                if (x0 < 0 || !length)
+                        continue;
+                memory_copy(label, bytes + k->start[t], length), label[length] = 0;
+                text_w = ui_kit_measure(ui, (string_address)label, UI_BODY_MEDIUM);
+                ui_round(ui, x0, top + ui_dev(ui, 4), x1 - x0, height - 2 * ui_dev(ui, 4), ui_dev(ui, 8), 0xff000000u | chip);
+                ui_kit_text(ui, x0 + pad + (x1 - x0 - 2 * pad - text_w) / 2, baseline, (string_address)label, UI_BODY_MEDIUM, 0xff000000u | ink, 0);
+        }
+        if (k->active_left >= 0 && k->active_right > k->active_left)
+        {
+                // The caret's token: the field draws the whole line, scrolled so that the token starts at its box's left edge, clipped to the box.
+                ui_text_layout_line(ui, &k->text, 0, &ui_text_lay);
+                k->text.scroll_x = ui_text_x_of(&ui_text_lay, (p64)k->start[k->active]);
+                ui_text_draw(ui, &k->text, k->active_left, top, k->active_right - k->active_left, height, ui_role(UI_SURFACE) & 0xffffffu);
+        }
+        if (k->invalid)
+        {
+                unsigned int error = ui_role(UI_ERROR) & 0xffffffu;
+                ui_fill(ui, left, top, right - left, ui_px(ui, 1), 0xff000000u | error);
+                ui_fill(ui, left, bottom - ui_px(ui, 1), right - left, ui_px(ui, 1), 0xff000000u | error);
+        }
+}
+
+// The chip under x, y in the last draw, or -1.
+static int ui_tokens_chip_at(const struct ui_tokens address_to k, int x, int y)
+{
+        if (y < k->top || y >= k->bottom)
+                return -1;
+        for (int t = 0; t < k->count; t++)
+                if (k->chip_left[t] >= 0 && x >= k->chip_left[t] && x < k->chip_right[t])
+                        return t;
+        return -1;
+}
+
+// The token field's events: a press on a chip is UI_TOKENS_PRESSED with its prefix; the rest is the kit's field's, whose bits it maps.
+static p32 ui_tokens_event(struct ui address_to ui, struct ui_tokens address_to k, struct ui_popup address_to menu, const struct window_event address_to event, int x, int y)
+{
+        int chip = event->type == WINDOW_EVENT_BUTTON && (event->flags & WINDOW_KEY_DOWN) && event->a == UI_POINTER_LEFT ? ui_tokens_chip_at(k, x, y) : -1;
+        p32 asks;
+        if (chip >= 0)
+        {
+                positive n = doc_length(&k->text.doc) < UI_TOKENS_TEXT - 1 ? doc_length(&k->text.doc) : UI_TOKENS_TEXT - 1;
+                k->chip = chip;
+                k->prefix_length = k->label[chip] < n ? k->label[chip] : n;
+                doc_read(&k->text.doc, 0, k->prefix, k->prefix_length);
+                return UI_TOKENS_PRESSED | UI_TOKENS_MOVED;
+        }
+        asks = ui_field_event(ui, &k->text, menu, event, x, y);
+        if (asks & UI_TEXT_SUBMIT)
+                return UI_TOKENS_SUBMIT;
+        if (asks & UI_TEXT_CANCEL)
+        {
+                positive length = doc_length(&k->text.doc);
+                doc_select_set(&k->text.doc, 0, length);
+                doc_replace(&k->text.doc, 0, length, k->before, k->before_length);
+                doc_select_set(&k->text.doc, k->before_length, k->before_length);
+                k->invalid = false;
+                return UI_TOKENS_CANCEL | UI_TOKENS_CHANGED;
+        }
+        if (asks & UI_TEXT_CHANGED)
+                k->invalid = false;
+        return (asks & UI_TEXT_CHANGED ? UI_TOKENS_CHANGED : 0) | (asks & (UI_TEXT_MOVED | UI_TEXT_COMMIT) ? UI_TOKENS_MOVED : 0);
+}
+
 // The battery reader (the sysfs files): the settings window and the taskbar read it.
 // The machine's batteries, as the kernel's power supply class shows them (Documentation/ABI/testing/sysfs-class-power):
 
