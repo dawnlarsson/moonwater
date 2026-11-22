@@ -20751,9 +20751,9 @@ static bool ul_setpriv_take(p8 letter, string_address value, address_any context
 
 static bool ul_setpriv_id(string_address text, bool group, p32 address_to id)
 {
-        bipolar value = ul_identity(text, p32_max, group);
+        bipolar value = ul_identity(text, (positive)p32_max - 1, group);
 
-        if (value < 0)
+        if (value < 0 || (positive)value >= p32_max)
                 return false;
 
         address_to id = (p32)value;
@@ -23822,16 +23822,7 @@ static b32 util_linux_nsenter()
         {
                 root_handle = ul_directory_open("nsenter", root);
         }
-        if (root_handle >= 0)
-        {
-                if (old_cwd < 0)
-                {
-                        old_cwd = ul_directory_open("nsenter", ".");
-                        if (old_cwd < 0)
-                                goto nsenter_failed;
-                }
-        }
-        else if (target_root || root)
+        if (root_handle < 0 && (target_root || root))
                 goto nsenter_failed;
         if (target_wd)
         {
@@ -23873,7 +23864,7 @@ static b32 util_linux_nsenter()
         bool explicit_user =
             (taking.flags & ((positive)1 << ul_namespaces[UL_NS_USER].option_bit)) != 0;
         bipolar cleared = gid ? system_call_2(syscall(setgroups), 0, 0) : 0;
-        bool groups_cleared = gid && (cleared >= 0 || preserve);
+        bool groups_cleared = gid && cleared >= 0;
         if (cleared < 0 && !preserve)
         {
                 string_report(log_error, 1, "%s: %s\n", "nsenter", "setgroups failed");
@@ -23945,8 +23936,7 @@ static b32 util_linux_nsenter()
         if (root_handle >= 0 &&
             (system_call_1(syscall(fchdir), root_handle) < 0 ||
              system_call_1(syscall(chroot), (positive)".") < 0 ||
-             (wd_handle < 0 && (caller_wd || !wdns) &&
-              system_call_1(syscall(fchdir), old_cwd) < 0)))
+             system_change_directory("/") < 0))
         {
                 string_report(log_error, 1, "%s: %s\n", "nsenter", "cannot change root");
                 goto nsenter_failed;

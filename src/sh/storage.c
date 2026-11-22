@@ -1146,7 +1146,7 @@ static bool storage_swap_magic(bipolar handle, p8 address_to bytes,
                         /* Modern swap carries version 1 in the fixed header.
                            Gate the extra page-size probes on it so every
                            ordinary unknown device does not pay four preads. */
-                        if (have < 1068 || storage_le32(bytes + 1024) != 1)
+                        if (!bytes || have < 1068 || storage_le32(bytes + 1024) != 1)
                         {
                                 p8 header[4];
 

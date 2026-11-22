@@ -559,6 +559,18 @@ static b32 process_chroot_credentials(string_address userspec, string_address gr
         bipolar uid = -1;
         bipolar gid = -1;
         positive listed = 0;
+        p8 user_name[128];
+        bool has_user_name = false;
+
+        /* Re-read /etc/passwd and /etc/group inside the new root rather than
+           reusing entries cached before chroot(2). */
+        if (file_accounts_held)
+        {
+                file_accounts[FILE_ACCOUNT_USER].read = false;
+                file_accounts[FILE_ACCOUNT_USER].seen_set = false;
+                file_accounts[FILE_ACCOUNT_GROUP].read = false;
+                file_accounts[FILE_ACCOUNT_GROUP].seen_set = false;
+        }
 
         if (userspec && userspec[0])
         {
@@ -573,51 +585,108 @@ static b32 process_chroot_credentials(string_address userspec, string_address gr
                 if (user_length)
                 {
                         uid = file_identity_of((string_address)text, false);
-                        refuse_if(uid < 0, 125, "chroot: invalid user\n");
+                        refuse_if(uid < 0 || (positive)uid >= p32_max, 125, "chroot: invalid user\n");
                 }
                 if (group && group[0])
                 {
                         gid = file_identity_of(group, true);
-                        refuse_if(gid < 0, 125, "chroot: invalid group\n");
+                        refuse_if(gid < 0 || (positive)gid >= p32_max, 125, "chroot: invalid group\n");
+                }
+                if (uid >= 0)
+                {
+                        bipolar primary = file_account_id(
+                            file_account_text(FILE_ACCOUNT_USER),
+                            (string_address)text, 3);
+                        if (primary >= 0 && (positive)primary < p32_max)
+                        {
+                                memory_copy(user_name, text, user_length + 1);
+                                has_user_name = true;
+                        }
+                        else if (file_account_name(
+                                     file_account_text(FILE_ACCOUNT_USER),
+                                     (positive)uid, 2, user_name,
+                                     sizeof(user_name)))
+                        {
+                                primary = file_account_id(
+                                    file_account_text(FILE_ACCOUNT_USER),
+                                    (string_address)user_name, 3);
+                                has_user_name = true;
+                        }
+                        if (gid < 0)
+                        {
+                                refuse_if(primary < 0 || (positive)primary >= p32_max, 125,
+                                          "chroot: no group specified for unknown uid\n");
+                                gid = primary;
+                        }
                 }
         }
-        if (groups && groups[0])
+        if (groups)
         {
-                //      The list is as long as the names given. The kernel is
-                //      what refuses more groups than it keeps, as it does for
-                //      the reference, and a name is looked up at its own length.
-                positive entries = 1;
-                for (string_address at = groups; *at; at++)
-                        entries += *at == ',';
-                if (entries > positive_max / sizeof(p32))
-                        return string_report(log_error, 125, "chroot: out of memory\n");
-                p32 address_to list = utility_arena_take(entries * sizeof(p32));
-
-                if (!list)
-                        return string_report(log_error, 125, "chroot: out of memory\n");
-                for (string_address at = groups; *at;)
+                if (!groups[0])
                 {
-                        string_address comma = string_first_of(at, ',');
-                        positive length = comma ? (positive)(comma - at) : string_length(at);
+                        bipolar grouped = system_call_2(syscall(setgroups), 0, 0);
 
-                        if (length)
-                        {
-                                p8 address_to text = utility_arena_take(length + 1);
-
-                                if (!text)
-                                        return string_report(log_error, 125, "chroot: out of memory\n");
-                                memory_copy(text, at, length);
-                                text[length] = end;
-                                bipolar id = file_identity_of((string_address)text, true);
-
-                                if (id < 0 || (positive)id > 0xffffffffu)
-                                        return string_report(log_error, 125, "chroot: invalid group '%s'\n",
-                                                             (string_address)text);
-                                list[listed++] = (p32)id;
-                        }
-                        at += length + (comma != null);
+                        if (grouped < 0)
+                                return string_report(log_error, 125, "chroot: failed to set supplemental groups: %s\n",
+                                                     file_reason(grouped));
                 }
-                bipolar grouped = system_call_2(syscall(setgroups), listed, (positive)list);
+                else
+                {
+                        //      The list is as long as the names given. The kernel is
+                        //      what refuses more groups than it keeps, as it does for
+                        //      the reference, and a name is looked up at its own length.
+                        positive entries = 1;
+                        for (string_address at = groups; *at; at++)
+                                entries += *at == ',';
+                        if (entries > positive_max / sizeof(p32))
+                                return string_report(log_error, 125, "chroot: out of memory\n");
+                        p32 address_to list = utility_arena_take(entries * sizeof(p32));
+
+                        if (!list)
+                                return string_report(log_error, 125, "chroot: out of memory\n");
+                        for (string_address at = groups; *at;)
+                        {
+                                string_address comma = string_first_of(at, ',');
+                                positive length = comma ? (positive)(comma - at) : string_length(at);
+
+                                if (length)
+                                {
+                                        p8 address_to text = utility_arena_take(length + 1);
+
+                                        if (!text)
+                                                return string_report(log_error, 125, "chroot: out of memory\n");
+                                        memory_copy(text, at, length);
+                                        text[length] = end;
+                                        bipolar id = file_identity_of((string_address)text, true);
+
+                                        if (id < 0 || (positive)id >= p32_max)
+                                                return string_report(log_error, 125, "chroot: invalid group '%s'\n",
+                                                                     (string_address)text);
+                                        list[listed++] = (p32)id;
+                                }
+                                at += length + (comma != null);
+                        }
+                        bipolar grouped = system_call_2(syscall(setgroups), listed, (positive)list);
+
+                        if (grouped < 0)
+                                return string_report(log_error, 125, "chroot: failed to set supplemental groups: %s\n",
+                                                     file_reason(grouped));
+                }
+        }
+        else if (uid >= 0 || gid >= 0)
+        {
+                bipolar grouped;
+
+                if (has_user_name && gid >= 0)
+                {
+                        positive have = 0;
+
+                        if (!id_groups_named((string_address)user_name, (positive)gid, address_of have))
+                                return string_report(log_error, 125, "chroot: out of memory\n");
+                        grouped = system_call_2(syscall(setgroups), have, (positive)file_id_scratch);
+                }
+                else
+                        grouped = system_call_2(syscall(setgroups), 0, 0);
 
                 if (grouped < 0)
                         return string_report(log_error, 125, "chroot: failed to set supplemental groups: %s\n",
@@ -625,9 +694,11 @@ static b32 process_chroot_credentials(string_address userspec, string_address gr
         }
         bipolar set = 0;
 
-        if (gid >= 0 && (set = system_call_1(syscall(setgid), (positive)gid)) < 0)
+        if (gid >= 0 && (set = system_call_3(syscall(setresgid), (positive)gid,
+                                             (positive)gid, (positive)gid)) < 0)
                 return string_report(log_error, 125, "chroot: failed to set group-ID: %s\n", file_reason(set));
-        if (uid >= 0 && (set = system_call_1(syscall(setuid), (positive)uid)) < 0)
+        if (uid >= 0 && (set = system_call_3(syscall(setresuid), (positive)uid,
+                                             (positive)uid, (positive)uid)) < 0)
                 return string_report(log_error, 125, "chroot: failed to set user-ID: %s\n", file_reason(set));
         return 0;
 }

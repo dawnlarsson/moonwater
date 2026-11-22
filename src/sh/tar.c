@@ -713,12 +713,14 @@ static bool tar_pax_apply(tar_pax_state address_to state,
                         switch (pax_keys[pax_hit].value)
                         {
                         case 'p':
-                                if (!tar_text_copy(address_of state->path, equal + 1, value))
+                                if (memory_first_of(equal + 1, 0, value) ||
+                                    !tar_text_copy(address_of state->path, equal + 1, value))
                                         return false;
                                 state->has_path = true;
                                 break;
                         case 'l':
-                                if (!tar_text_copy(address_of state->link, equal + 1, value))
+                                if (memory_first_of(equal + 1, 0, value) ||
+                                    !tar_text_copy(address_of state->link, equal + 1, value))
                                         return false;
                                 state->has_link = true;
                                 break;
@@ -764,7 +766,7 @@ static bool tar_pax_apply(tar_pax_state address_to state,
                         {
                                 p64 number = 0;
                                 bool good = memory_digits_whole((p8 *)(equal + 1), value,
-                                                                0xffffffffull,
+                                                                (positive)p32_max - 1,
                                                                 (p64 *)(address_of number));
 
                                 if (pax_keys[pax_hit].value == 'U')
@@ -785,7 +787,8 @@ static bool tar_pax_apply(tar_pax_state address_to state,
                 else if (state != address_of tar_pax_global && key > 13 &&
                          !memory_compare(mark + 1, "SCHILY.xattr.", 13))
                 {
-                        if (!tar_pax_attr_add(1, mark + 14, key - 13, equal + 1, value))
+                        if (memory_first_of(mark + 14, 0, key - 13) ||
+                            !tar_pax_attr_add(1, mark + 14, key - 13, equal + 1, value))
                                 return false;
                 }
                 else if (state != address_of tar_pax_global && key == 17 &&
@@ -823,7 +826,8 @@ static bool tar_pax_apply(tar_pax_state address_to state,
                                 switch (sparse_keys[hit].value)
                                 {
                                 case 'n':
-                                        if (!tar_text_copy(address_of state->sparse_name, equal + 1, value))
+                                        if (memory_first_of(equal + 1, 0, value) ||
+                                            !tar_text_copy(address_of state->sparse_name, equal + 1, value))
                                                 return false;
                                         state->has_sparse_name = true;
                                         break;
@@ -2269,23 +2273,24 @@ static bool tar_acl_binary(string_address text, positive length,
                 if (size[1])
                 {
                         p8 word[FILE_NAME_MAX];
-                        positive digits;
-                        positive number = 0;
+                        p64 parsed = 0;
 
                         if (mask || other || size[1] >= sizeof(word))
                                 return false;
                         memory_copy(word, part[1], size[1]);
                         word[size[1]] = end;
-                        number = string_digits_max((string_address)word, positive_max,
-                                                   address_of digits);
-                        if (digits == size[1])
-                                item.id = (p32)number;
+                        if (memory_digits_whole(word, size[1],
+                                                (positive)p32_max - 1,
+                                                address_of parsed))
+                                item.id = (p32)parsed;
+                        else if (string_digits_exact((string_address)word, null))
+                                return false;
                         else
                         {
                                 bipolar found = user ? file_user_id((string_address)word)
                                                      : file_group_id((string_address)word);
 
-                                if (found < 0)
+                                if (found < 0 || (positive)found >= p32_max)
                                         return false;
                                 item.id = (p32)found;
                         }
@@ -4886,7 +4891,7 @@ static fn tar_diff_file(bipolar archive, p8 address_to block, p8 type,
 
         bipolar file = system_open_at(AT_FDCWD, name,
                                       FILE_READ | O_CLOEXEC | O_NOCTTY |
-                                          O_NONBLOCK);
+                                          O_NOFOLLOW | O_NONBLOCK);
         if (file < 0)
         {
                 string_format(log_error, "tar: %w: Cannot open: %s\n",
@@ -5458,6 +5463,15 @@ static fn tar_read_members(tar_members address_to run)
                         if (!trailing ||
                             !tar_spell_directory(kept, shown, sizeof(shown)))
                                 string_copy_max_end(shown, kept, TAR_PATH - 1);
+                }
+
+                if (tar_restore_owner &&
+                    (user >= (p64)p32_max || group >= (p64)p32_max))
+                {
+                        tar_refuse("owner id is out of range");
+                        tar_skip(handle, tar_padded(size), seekable);
+                        tar_pax_clear(address_of tar_pax_local);
+                        continue;
                 }
 
                 {
