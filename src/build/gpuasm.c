@@ -533,7 +533,7 @@ static bool gpuasm_emit(p32 word)
 */
 static bool gpuasm_keep(gpuasm_span name, positive address_to at)
 {
-        if (gpuasm_pool_used + name.length > GPUASM_POOL)
+        if (name.length > GPUASM_POOL || gpuasm_pool_used > GPUASM_POOL - name.length)
                 return gpuasm_fail("too many names", null, 0);
         memory_copy(gpuasm_pool + gpuasm_pool_used, name.at, name.length);
         *at = gpuasm_pool_used;
@@ -1360,7 +1360,7 @@ static bool gpuasm_expand(gpuasm_span body, const gpuasm_span *names, const gpua
                                                 break;
                                         }
                         }
-                        if (gpuasm_arena_used + put.length + 1 >= GPUASM_ARENA)
+                        if (put.length >= GPUASM_ARENA || gpuasm_arena_used + 1 >= GPUASM_ARENA - put.length)
                         {
                                 gpuasm_arena_used = mark;
                                 return gpuasm_fail("expansions past the room for them", null, 0);
@@ -1368,6 +1368,11 @@ static bool gpuasm_expand(gpuasm_span body, const gpuasm_span *names, const gpua
                         memory_copy(gpuasm_arena + gpuasm_arena_used, put.at, put.length);
                         gpuasm_arena_used += put.length;
                         at += taken - 1;
+                }
+                if (gpuasm_arena_used >= GPUASM_ARENA)
+                {
+                        gpuasm_arena_used = mark;
+                        return gpuasm_fail("expansions past the room for them", null, 0);
                 }
                 gpuasm_arena[gpuasm_arena_used++] = '\n';
         }
@@ -1691,7 +1696,7 @@ static bool gpuasm_run(string_address from, string_address stop, positive line)
 
 static void gpuasm_out(string_address text, positive length)
 {
-        if (gpuasm_output_length + length < GPUASM_TEXT)
+        if (length < GPUASM_TEXT && gpuasm_output_length < GPUASM_TEXT - length)
                 memory_copy(gpuasm_output + gpuasm_output_length, text, length);
         gpuasm_output_length += length;
 }
