@@ -6534,6 +6534,7 @@ LANGUAGE_ID(files_place_home, "Home") \
 LANGUAGE_ID(files_place_pictures, "Pictures") \
 LANGUAGE_ID(files_reading, "Reading the folder") \
 LANGUAGE_ID(files_redone, "%d done again") \
+LANGUAGE_ID(files_refresh, "Refresh") \
 LANGUAGE_ID(files_remote_denied, "Files access is not granted") \
 LANGUAGE_ID(files_remote_offline, "Machine is offline") \
 LANGUAGE_ID(files_remote_opening, "Opening %s...") \
@@ -6558,6 +6559,7 @@ LANGUAGE_ID(files_type_other, "Special") \
 LANGUAGE_ID(files_undone, "%d undone") \
 LANGUAGE_ID(files_unreadable, "This folder may not be read") \
 LANGUAGE_ID(files_up, "Up") \
+LANGUAGE_ID(files_view, "View") \
 LANGUAGE_ID(installer_apps_about, "They are installed on the new system once it is written.") \
 LANGUAGE_ID(installer_apps_head, "Add apps") \
 LANGUAGE_ID(installer_apps_offline, "Connect to the internet to add apps.") \

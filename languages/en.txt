@@ -88,6 +88,7 @@ files_place_home	0eae	Home
 files_place_pictures	feae	Pictures
 files_reading	64a4	Reading the folder
 files_redone	6fd0	%d done again
+files_refresh	aad4	Refresh
 files_rename_hint	ad88	New name
 files_restored	4c30	%d put back where they were
 files_sheet_created	59ac	Made %s
@@ -108,6 +109,7 @@ files_type_other	80d0	Special
 files_undone	4da3	%d undone
 files_unreadable	986c	This folder may not be read
 files_up	5940	Up
+files_view	aa18	View
 installer_apps_about	af1b	They are installed on the new system once it is written.
 installer_apps_head	0024	Add apps
 installer_apps_offline	ff16	Connect to the internet to add apps.

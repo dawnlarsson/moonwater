@@ -110,7 +110,8 @@ static struct
         p32 seen, naming, armed_at, drag_place, carry_count, band_base_count, tree_at, tree_shown;
         b64 next_look, next_show, carry_at, flash_at, spring_at, next_progress, typed_at;
         string_address start;
-        struct ui_rect path_box, head_box, side_box;
+        struct ui_rect path_box, head_box, side_box, nav_box[4];
+        struct ui_iconbutton nav[4];
         struct files_trail trail;
         struct ui_text field, finder;
         struct ui_control path, finder_field;
@@ -405,12 +406,36 @@ static fn files_path_sync(void)
         k->invalid = false;
 }
 
+// The top bar's navigation buttons, in their order across it (the view mirrors the order in RTL, where the kit swaps back's and forward's
+// arrows): a symbol, what it does, and its words, the label it had as a button of text, now its tooltip and its accessible name.
+static const struct { int glyph, act; unsigned int words; } files_navs[] = {
+    {UI_ICON_BACK, FILES_ACT_BACK, LANGUAGE_files_back}, {UI_ICON_FORWARD, FILES_ACT_FWD, LANGUAGE_files_forward},
+    {UI_ICON_UP, FILES_ACT_UP, LANGUAGE_files_up}, {UI_ICON_REFRESH, FILES_ACT_RELOAD, LANGUAGE_files_refresh},
+};
+#define FILES_NAVS FILES_COUNT(files_navs)
+_Static_assert(sizeof(files_navs) / sizeof(files_navs[0]) == sizeof(files.nav) / sizeof(files.nav[0]), "a button of the bar for each of the table's");
+
+// The buttons where the view laid them out: back with no way back, forward with none forward and up at a root do nothing, and say so.
+static fn files_bar_lay(void)
+{
+        const struct files_model address_to m = &files.big->model;
+        const b32 off[FILES_NAVS] = {!m->back_count, !m->forward_count, m->path[0] == '/' && !m->path[1], false};
+        for (int k = 0; k < FILES_NAVS; k++)
+        {
+                struct ui_iconbutton address_to b = &files.nav[k];
+                const struct ui_rect address_to r = &files.nav_box[k];
+                b->glyph = files_navs[k].glyph, b->name = b->tip = language_text(files_navs[k].words);
+                b->x = r->x, b->y = r->y, b->w = r->w, b->h = r->h, b->disabled = off[k];
+                if (b->disabled)
+                        b->hover = b->down = false;
+        }
+}
+
 static fn files_layout(void)
 {
         static const struct { int stripe, tiles, tile_h; } modes[3] = {
             [FILES_VIEW_DETAILS] = {2, 0, 0}, [FILES_VIEW_ICONS] = {0, FILES_TILE_ICON, 0}, [FILES_VIEW_LIST] = {0, FILES_TILE_LIST, FILES_ROW},
         };
-        const char address_to nav[3] = {WORDS(files_back), WORDS(files_forward), WORDS(files_up)};
         const char address_to cols[4] = {WORDS(files_column_name), WORDS(files_column_size), WORDS(files_column_type), WORDS(files_column_modified)};
         struct ui address_to ui = &files.ui;
         struct files_model address_to m = &files.big->model;
@@ -436,8 +461,8 @@ static fn files_layout(void)
                 {
                         ui_row(.class = "pathbar", .h = FILES_BAND + UI_GAP2 * 2)
                         {
-                                for (int k = 0; k < 3; k++)
-                                        ui_button(nav[k], .class = "ghost", .on = files_act, .arg = k);
+                                for (int k = 0; k < FILES_NAVS; k++)
+                                        ui_host(&files.nav_box[k], .w = FILES_BAND, .h = FILES_BAND);
                                 if (files.editing == FILES_EDIT_NAME)
                                         ui_control(&files.path, .grow = 1, .h = FILES_BAND);
                                 else
@@ -462,7 +487,7 @@ static fn files_layout(void)
         ui_columns_layout(ui, &files.columns, l->x, files.head_box.y, l->w);
         if (files.tree_reseat && files.big->tree_list.h > 0)
                 files.big->tree_list.focus = (int)files.tree_shown, ui_list_reveal(ui, &files.big->tree_list), files.tree_reseat = false;
-        files_path_sync();
+        files_bar_lay(), files_path_sync();
 }
 
 static fn files_show_cursor(void) { if (files.big->model.cursor != FILES_NO) files_layout(), ui_list_reveal(&files.ui, &files.big->list), files.dirty = true; }
@@ -2551,6 +2576,23 @@ static fn files_button_event(const struct window_event address_to event, b32 dow
         }
 }
 
+// The bar's buttons: one pressed (let go on) does what it does; a press on one is the bar's, and the hover is each button's to keep (its tip).
+static b32 files_bar_event(const struct window_event address_to event)
+{
+        int x = event->type == WINDOW_EVENT_MOTION ? (int)event->a : ui_kit.pointer_x, y = event->type == WINDOW_EVENT_MOTION ? (int)event->b : ui_kit.pointer_y;
+        b32 took = false;
+        for (int k = 0; k < FILES_NAVS; k++)
+        {
+                struct ui_iconbutton address_to b = &files.nav[k];
+                b32 hover = b->hover;
+                if (ui_iconbutton_event(&files.ui, b, event, x, y) & UI_ICONBUTTON_PRESSED)
+                        files_menu_do(files_navs[k].act);
+                took |= event->type == WINDOW_EVENT_BUTTON && files_in_rect(x, y, b->x, b->y, b->w, b->h);
+                files.dirty |= hover != b->hover || took;
+        }
+        return took;
+}
+
 static b32 files_event(const struct window_event address_to event)
 {
         struct ui address_to ui = &files.ui;
@@ -2563,7 +2605,7 @@ static b32 files_event(const struct window_event address_to event)
         if (event->type == WINDOW_EVENT_DRAG && files.drag.live &&
             (event->a == WINDOWS_DRAG_ACTION || event->a == WINDOWS_DRAG_ENDED || event->a == WINDOWS_DRAG_DECLINED))
                 return files_drag_event(event);
-        if (files_field_event(event, down))
+        if (files_field_event(event, down) || files_bar_event(event))
                 return true;
         asks = ui_view_event(ui, &files.big->view, event);
         if (asks & UI_VIEW_QUIT)
@@ -2640,8 +2682,17 @@ static fn files_status_pill_draw(struct ui address_to ui, const struct ui_list a
 static fn files_bar_draw(struct ui address_to ui)
 {
         const struct ui_rect address_to b = &files.path_box;
+        for (int k = 0; k < FILES_NAVS; k++)
+                ui_iconbutton_draw(ui, &files.nav[k]);
         if (files.editing != FILES_EDIT_NAME)
                 ui_tokens_draw(ui, &files.big->path, b->x, b->y, b->x + b->w, b->y + b->h);
+}
+
+// The tip of the button the pointer is on, over everything else the window draws.
+static fn files_bar_tips(struct ui address_to ui)
+{
+        for (int k = 0; k < FILES_NAVS; k++)
+                ui_iconbutton_tip(ui, &files.nav[k]);
 }
 
 static fn files_draw(unsigned int address_to pixels)
@@ -2663,6 +2714,7 @@ static fn files_draw(unsigned int address_to pixels)
         if (files.finding)
                 ui_text_overlay(ui, &files.finder);
         files_carry_draw();
+        files_bar_tips(ui);
         files.seen = files.big->model.revision;
 }
 

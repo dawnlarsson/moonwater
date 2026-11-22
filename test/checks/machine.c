@@ -4695,6 +4695,100 @@ static b32 browser_bar_at(string_address relative)
         return string_equals(files.big->model.path, want);
 }
 
+// An event to the bar as the window sends it: the fields first, then the bar's buttons (files_event's order).
+static b32 browser_bar_button_send(unsigned int type, int a, int b, unsigned int flags)
+{
+        struct window_event event = {.type = type, .flags = flags, .a = a, .b = b};
+        b32 took = files_field_event(&event, (flags & WINDOW_KEY_DOWN) != 0) || files_bar_event(&event);
+
+        browser_bar_frame();
+        return took;
+}
+
+static fn browser_bar_click(const struct ui_iconbutton address_to b)
+{
+        ui_kit.pointer_x = b->x + b->w / 2, ui_kit.pointer_y = b->y + b->h / 2;
+        browser_bar_button_send(WINDOW_EVENT_BUTTON, UI_POINTER_LEFT, 0, WINDOW_KEY_DOWN);
+        browser_bar_button_send(WINDOW_EVENT_BUTTON, UI_POINTER_LEFT, 0, 0);
+        browser_read(&files.big->model, 64), browser_bar_frame();
+}
+
+// The pixels under a button that its tip draws in, the frame's ground cleared first: how many the tips (files_bar_tips) drew.
+static positive browser_bar_tip_ink(const struct ui_iconbutton address_to b)
+{
+        positive inked = 0;
+        int x0 = b->x - 48 < 0 ? 0 : b->x - 48, x1 = b->x + b->w + 48 > 1200 ? 1200 : b->x + b->w + 48;
+
+        for (int y = b->y + b->h; y < b->y + b->h + 40; y++)
+                for (int x = x0; x < x1; x++)
+                        browser_bar_pixels[y * 1200 + x] = 0;
+        files_bar_tips(&files.ui);
+        for (int y = b->y + b->h; y < b->y + b->h + 40; y++)
+                for (int x = x0; x < x1; x++)
+                        inked += browser_bar_pixels[y * 1200 + x] != 0;
+        return inked;
+}
+
+// The navigation buttons: the kit's icon buttons in the bar's order, each with the words it had as a button of text.
+static fn browser_bar_buttons(struct files_model address_to m)
+{
+        static const int glyphs[4] = {UI_ICON_BACK, UI_ICON_FORWARD, UI_ICON_UP, UI_ICON_REFRESH};
+        const char address_to words[4] = {WORDS(files_back), WORDS(files_forward), WORDS(files_up), WORDS(files_refresh)};
+        struct ui_iconbutton address_to nav = files.nav;
+        b32 laid = true, acts, off, tip, mirrored;
+
+        browser_bar_frame();
+        for (int k = 0; k < 4; k++)
+                laid = laid && nav[k].glyph == glyphs[k] && nav[k].name == words[k] && nav[k].tip == words[k] && nav[k].w > 0 && nav[k].h > 0 &&
+                       (k == 3 ? nav[k].x + nav[k].w <= files.path_box.x : nav[k].x + nav[k].w <= nav[k + 1].x);
+        check("browser: the top bar's navigation buttons are the kit's icon buttons, back, forward, up and refresh before the path band, each named and tipped by the words it had as a button of text",
+              laid);
+
+        // At bar/one/two, come to by a typed path from bar/one: back is bar/one, forward bar/one/two again, up bar/one, refresh reads it again.
+        browser_bar_click(&nav[0]);
+        acts = browser_bar_at((string_address) "bar/one");
+        browser_bar_click(&nav[1]);
+        acts = acts && browser_bar_at((string_address) "bar/one/two");
+        browser_bar_click(&nav[2]);
+        acts = acts && browser_bar_at((string_address) "bar/one");
+        {
+                p32 reads = m->reads;
+
+                browser_folder((string_address) "bar/one/three");
+                ui_kit.pointer_x = nav[3].x + nav[3].w / 2, ui_kit.pointer_y = nav[3].y + nav[3].h / 2;
+                browser_bar_button_send(WINDOW_EVENT_BUTTON, UI_POINTER_LEFT, 0, WINDOW_KEY_DOWN);
+                browser_bar_button_send(WINDOW_EVENT_BUTTON, UI_POINTER_LEFT, 0, 0);
+                acts = acts && (m->walking || m->reads != reads);
+                browser_read(m, 64);
+                acts = acts && browser_bar_at((string_address) "bar/one") && browser_is(m, (string_address) "three two ");
+        }
+        check("browser: a navigation button pressed does what its button of text did: back, forward, up, and refresh reads the folder again", acts);
+
+        // Up just now cleared the way forward; at the root there is no folder above.
+        off = nav[1].disabled && !nav[0].disabled && !nav[2].disabled && !nav[3].disabled;
+        files_model_go(m, (string_address) "/"), browser_read(m, 64), files_moved(), browser_bar_frame();
+        off = off && nav[2].disabled && !nav[0].disabled;
+        check("browser: a navigation button with nothing to do is disabled: forward with no way forward, up at the root", off);
+        browser_go(m, (string_address) "bar/one"), files_moved(), browser_bar_frame();
+
+        // The pointer on up: its tip is drawn under it; off it, no tip.
+        browser_bar_button_send(WINDOW_EVENT_MOTION, nav[2].x + nav[2].w / 2, nav[2].y + nav[2].h / 2, 0);
+        tip = nav[2].hover && browser_bar_tip_ink(&nav[2]) > 50;
+        browser_bar_button_send(WINDOW_EVENT_MOTION, 2, files.path_box.y + files.path_box.h + 200, 0);
+        tip = tip && !nav[2].hover && browser_bar_tip_ink(&nav[2]) == 0;
+        check("browser: the pointer on a navigation button shows its tip under it, and off the button no tip", tip);
+
+        // Read from the right: the bar's order turns over, back at the start (the right), and back's arrow and forward's swap.
+        ui_kit.rtl = 1;
+        browser_bar_frame();
+        mirrored = nav[0].x > nav[1].x && nav[1].x > nav[2].x && nav[2].x > nav[3].x && files.path_box.x + files.path_box.w <= nav[3].x &&
+                   ui_iconbutton_glyph(nav[0].glyph) == UI_ICON_FORWARD && ui_iconbutton_glyph(nav[1].glyph) == UI_ICON_BACK &&
+                   ui_iconbutton_glyph(nav[2].glyph) == UI_ICON_UP;
+        ui_kit.rtl = 0;
+        browser_bar_frame();
+        check("browser: read from the right, the navigation buttons go from the right, back first, and back's arrow and forward's swap", mirrored);
+}
+
 static fn browser_bar(void)
 {
         struct ui address_to ui = &files.ui;
@@ -4790,6 +4884,7 @@ static fn browser_bar(void)
                 k->text.doc.selections[0].active < doc_length(&k->text.doc);
         check("browser: a press on the path band's text gives it the keys, the caret where the press is", taken);
         browser_bar_send(WINDOW_EVENT_KEY, UI_KEY_ESCAPE, 0x1b, WINDOW_KEY_DOWN);
+        browser_bar_buttons(m);
         files_model_close(m);
 }
 

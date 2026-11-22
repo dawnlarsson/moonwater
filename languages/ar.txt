@@ -1,6 +1,7 @@
 # machine-made 2026-11-18 (the files pass), not yet read by a person: files_bin_cross files_bin_emptied files_binned files_carry_here files_carrying files_delete_for_good files_done files_nothing_to_redo files_nothing_to_undo files_redone files_restored files_selecting files_undone menu_bin_empty menu_bin_open menu_bin_restore text_copy_too_large
 # machine-made 2026-11-19 (the displays pass), not yet read by a person: settings_no_sizes settings_primary_no settings_primary_other settings_primary_yes settings_refused_size settings_size_ask settings_size_back settings_size_best settings_size_keep settings_size_kept settings_size_own settings_size_plain settings_size_refused =Resolution =Primary display =Graphics
 # machine-made 2026-11-19 (the apps pass), not yet read by a person: launcher_recent
+# machine-made 2026-11-22 (the files top bar), not yet read by a person: files_refresh files_view
 @direction rtl
 @language ar
 @name العربية
@@ -92,6 +93,7 @@ files_place_home	0eae	المنزل
 files_place_pictures	feae	الصور
 files_reading	64a4	قراءة المجلد
 files_redone	6fd0	أعيد %d
+files_refresh	aad4	تحديث
 files_rename_hint	ad88	اسم جديد
 files_restored	4c30	أعيد %d إلى مكانه
 files_sheet_created	59ac	أُنشئ %s
@@ -112,6 +114,7 @@ files_type_other	80d0	خاص
 files_undone	4da3	تراجع عن %d
 files_unreadable	986c	لا يُسمح بقراءة هذا المجلد
 files_up	5940	للأعلى
+files_view	aa18	عرض
 installer_apps_about	af1b	تُثبَّت على النظام الجديد بعد كتابته.
 installer_apps_head	0024	إضافة تطبيقات
 installer_apps_offline	ff16	اتصل بالإنترنت لإضافة التطبيقات.
