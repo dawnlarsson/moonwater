@@ -126,10 +126,7 @@ static awk_text address_to awk_text_room(positive length)
 static awk_text address_to awk_text_new(string_address from, positive length)
 {
         if (!length)
-        {
-                awk_empty_text.refs++;
                 return address_of awk_empty_text;
-        }
 
         awk_text address_to made = awk_text_room(length);
 
@@ -139,7 +136,7 @@ static awk_text address_to awk_text_new(string_address from, positive length)
 
 static awk_text address_to awk_text_hold(awk_text address_to which)
 {
-        if (which)
+        if (which && which != address_of awk_empty_text)
                 which->refs++;
 
         return which;
@@ -147,7 +144,7 @@ static awk_text address_to awk_text_hold(awk_text address_to which)
 
 static fn awk_text_drop(awk_text address_to which)
 {
-        if (!which)
+        if (!which || which == address_of awk_empty_text)
                 return;
 
         if (--which->refs > 0)
@@ -1290,14 +1287,19 @@ static bool awk_fields_settled;
 // Room for `more` pieces past the ones there are, once, for a loop that stores them.
 static fn awk_pieces_room(positive more)
 {
-        if (unlikely(awk_piece_count + more > awk_piece_room))
+        if (more > positive_max - awk_piece_count)
+                awk_leave(string_diagnostic(&text_diagnostic, 2, null, "out of memory"));
+
+        positive want = awk_piece_count + more;
+
+        if (unlikely(want > awk_piece_room))
         {
                 positive bytes = awk_piece_room * sizeof(awk_piece);
 
-                if (awk_piece_count + more >= positive_max / sizeof(awk_piece) ||
+                if (want >= positive_max / sizeof(awk_piece) ||
                     !memory_resize_reserve(
                         address_of awk_pieces, address_of bytes,
-                        (awk_piece_count + more + 1) * sizeof(awk_piece),
+                        (want + 1) * sizeof(awk_piece),
                         64 * sizeof(awk_piece)))
                         awk_leave(string_diagnostic(&text_diagnostic, 2, null, "out of memory"));
 
@@ -1308,18 +1310,7 @@ static fn awk_pieces_room(positive more)
 static HOT fn awk_piece_add(positive start, positive length)
 {
         if (unlikely(awk_piece_count >= awk_piece_room))
-        {
-                positive bytes = awk_piece_room * sizeof(awk_piece);
-
-                if (awk_piece_count >= positive_max / sizeof(awk_piece) ||
-                    !memory_resize_reserve(
-                        address_of awk_pieces, address_of bytes,
-                        (awk_piece_count + 1) * sizeof(awk_piece),
-                        64 * sizeof(awk_piece)))
-                        awk_leave(string_diagnostic(&text_diagnostic, 2, null, "out of memory"));
-
-                awk_piece_room = bytes / sizeof(awk_piece);
-        }
+                awk_pieces_room(1);
 
         awk_pieces[awk_piece_count++] = (awk_piece){start, length};
 }
@@ -2113,8 +2104,10 @@ static fn awk_writer_open_file(awk_writer address_to which, string_address name)
 {
         for (;;)
         {
-                bipolar handle = text_open_handle(name, which->kind == AWK_TO_APPEND ? TEXT_APPEND : TEXT_WRITE,
-                                                  0666);
+                bipolar handle = text_open_handle(
+                    name,
+                    (which->kind == AWK_TO_APPEND ? TEXT_APPEND : TEXT_WRITE) | O_CLOEXEC,
+                    0666);
 
                 if (handle >= 0)
                 {
@@ -2304,7 +2297,7 @@ static awk_reader address_to awk_reader_for(awk_text address_to name, bool pipe)
                 return made;
         }
 
-        bipolar handle = text_open_handle(name->text, FILE_READ, 0);
+        bipolar handle = text_open_handle(name->text, FILE_READ | O_CLOEXEC, 0);
 
         if (handle < 0)
         {
@@ -3088,6 +3081,8 @@ static awk_text address_to awk_sprintf(string_address format, positive length,
                 if (group && !from_string && body &&
                     string_first_of((string_address) "diufFgGeE", conversion))
                 {
+                        if (body > (positive_max - 16) / 4)
+                                awk_leave(string_diagnostic(&text_diagnostic, 2, null, "out of memory"));
                         positive room_spread = body * 4 + 16;
 
                         text_number_locale();
@@ -3339,11 +3334,14 @@ _Static_assert(AWK_WORD_COUNT == 42, "update the AWK keyword ranges");
         the second argument of substr without looking and there is nothing
         there to reach for.
 */
-static p8 awk_builtin_least[] = {0, 2, 2, 2, 2, 2, 2, 1, 1, 1, 2,
-                                 1, 1, 1, 1, 0, 0, 1, 1, 1, 1, 0};
-
-static p8 awk_builtin_most[] = {1, 3, 2, 3, 3, 3, 2, 255, 1, 1, 2,
-                                1, 1, 1, 1, 0, 1, 1, 1, 1, 1, 1};
+static const struct
+{
+        p8 least;
+        p8 most;
+} awk_builtin_arity[] = {
+    {0, 1}, {2, 3}, {2, 2}, {2, 3}, {2, 3}, {2, 3}, {2, 2}, {1, 255},
+    {1, 1}, {1, 1}, {2, 2}, {1, 1}, {1, 1}, {1, 1}, {1, 1}, {0, 0},
+    {0, 1}, {1, 1}, {1, 1}, {1, 1}, {1, 1}, {0, 1}};
 
 typedef struct
 {
@@ -4383,7 +4381,7 @@ static awk_node address_to awk_primary()
 
                 if (awk_token != T_OPEN)
                 {
-                        if (awk_builtin_least[which])
+                        if (awk_builtin_arity[which].least)
                                 awk_syntax("expected ( after a function name");
 
                         return node;
@@ -4400,8 +4398,8 @@ static awk_node address_to awk_primary()
                 awk_print_depth = kept;
                 awk_expect(T_CLOSE, "expected ) after arguments");
 
-                if (node->count < awk_builtin_least[which] ||
-                    node->count > awk_builtin_most[which])
+                if (node->count < awk_builtin_arity[which].least ||
+                    node->count > awk_builtin_arity[which].most)
                         awk_syntax("wrong number of arguments to a function");
 
                 if (which == B_SPLIT && node->a->next->kind != N_VARIABLE)
@@ -5019,11 +5017,12 @@ static awk_node address_to awk_statement_list(b32 stop)
 // The variables awk itself defines: no function or parameter may be one.
 static bool awk_special_name(awk_text address_to name)
 {
-        static string_address specials[] = {
+        static const string_address specials[] = {
             "FS", "OFS", "ORS", "RS", "NR", "NF", "FNR", "FILENAME", "SUBSEP",
             "RSTART", "RLENGTH", "CONVFMT", "OFMT", "ENVIRON", "ARGV", "ARGC"};
 
-        return array_any(i, array_count(specials), awk_name_is(name, specials[i]));
+        return memory_table_lookup(name->text, name->length, specials) <
+               array_count(specials);
 }
 
 static fn awk_parse_function()
@@ -6354,7 +6353,8 @@ static fn awk_builtin(awk_node address_to node, awk_value address_to out)
                 // Characters past ASCII change case too where the locale is UTF-8.
                 if (awk_text_wide(text))
                 {
-                        awk_text address_to cased = awk_text_room(2 * text->length);
+                        awk_text address_to cased =
+                            awk_text_room(awk_size_add(text->length, text->length));
                         positive size = text_case_utf8(cased->text, text->text, text->length,
                                                        node->index == B_TOLOWER
                                                            ? UNICODE_CASE_LOWER
@@ -6423,8 +6423,12 @@ static fn awk_builtin(awk_node address_to node, awk_value address_to out)
                         awk_text address_to name = awk_eval_text(first);
                         b32 found = -1;
 
-                        if (awk_name_is(name, "/dev/stdout") || awk_name_is(name, "-") ||
-                            awk_name_is(name, "/dev/stderr"))
+                        static const string_address standard_flush[] = {
+                            "/dev/stdout", "-", "/dev/stderr"};
+
+                        if (memory_table_lookup(name->text, name->length,
+                                                standard_flush) <
+                            array_count(standard_flush))
                         {
                                 awk_writer_flush(address_of awk_standard_out);
                                 found = 0;
@@ -6615,6 +6619,8 @@ static awk_text address_to awk_format_list(awk_text address_to format,
                                            b32 want)
 {
         awk_value few[16];
+        if (want < 0 || (positive)want > positive_max / sizeof(awk_value))
+                awk_leave(string_diagnostic(&text_diagnostic, 2, null, "out of memory"));
         awk_value address_to room = want <= 16 ? few
                                                : (awk_value address_to)awk_take(
                                                      (positive)want * sizeof(awk_value));
@@ -6762,6 +6768,9 @@ static b32 awk_run(awk_node address_to node)
 
                         if (!array->count)
                                 break;
+
+                        if (array->count > positive_max / sizeof(address_any))
+                                awk_leave(string_diagnostic(&text_diagnostic, 2, null, "out of memory"));
 
                         keys = (awk_text address_to address_to)awk_take(array->count *
                                                                         sizeof(address_any));
@@ -7036,7 +7045,7 @@ static bool awk_open_next_input()
                                 continue;
                         }
 
-                        bipolar handle = text_open_handle(name->text, FILE_READ, 0);
+                        bipolar handle = text_open_handle(name->text, FILE_READ | O_CLOEXEC, 0);
 
                         if (handle < 0)
                         {
@@ -7604,7 +7613,7 @@ static bool awk_option_seen(p8 letter, string_address value)
 
         bipolar handle = value[0] == '-' && !value[1]
                              ? 0
-                             : text_open_handle(value, FILE_READ, 0);
+                             : text_open_handle(value, FILE_READ | O_CLOEXEC, 0);
 
         if (handle < 0)
                 awk_die(value, "cannot open the program file");

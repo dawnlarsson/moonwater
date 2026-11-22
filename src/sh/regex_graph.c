@@ -210,6 +210,8 @@ static bool rx_room(rx_compiler *c, positive nodes)
 
         if (nodes <= pool->node_room)
                 return true;
+        if (nodes > RX_NODE_LIMIT)
+                return false;
 
         positive room = pool->node_room ? 2 * pool->node_room : RX_NODE_FIRST;
 
@@ -218,8 +220,6 @@ static bool rx_room(rx_compiler *c, positive nodes)
 
         if (room > RX_NODE_LIMIT)
                 room = RX_NODE_LIMIT;
-        if (nodes > room)
-                return false;
 
         rx_node *grown = memory_resize(pool->nodes, room * sizeof(rx_node));
 
@@ -1459,8 +1459,13 @@ static fn rx_required_flush(rx_required_state *state)
         state->run_length = 0;
 }
 
-static fn rx_required_walk(const rx_node *nodes, rx_ref first, rx_required_state *state)
+static fn rx_required_walk(const rx_node *nodes, rx_ref first, rx_required_state *state, b32 depth)
 {
+        if (depth > RX_PARSE_MAX)
+        {
+                rx_required_flush(state);
+                return;
+        }
         for (rx_ref at = first; at; at = nodes[at].next)
         {
                 const rx_node *node = nodes + at;
@@ -1472,13 +1477,13 @@ static fn rx_required_walk(const rx_node *nodes, rx_ref first, rx_required_state
                         state->run[state->run_length++] = (p8)node->argument;
                 }
                 else if (node->kind == RX_CAPTURE)
-                        rx_required_walk(nodes, node->left, state);
+                        rx_required_walk(nodes, node->left, state, depth + 1);
                 else
                 {
                         rx_required_flush(state);
                         if (node->kind == RX_COUNT && node->minimum > 0)
                         {
-                                rx_required_walk(nodes, node->left, state);
+                                rx_required_walk(nodes, node->left, state, depth + 1);
                                 rx_required_flush(state);
                         }
                 }
@@ -1491,7 +1496,7 @@ static fn rx_required_two(const rx_node *nodes, rx_ref first, p8 *literal, posit
         rx_required_state state = {.literal = literal, .literal_length = literal_length,
                                    .extra = extra, .extra_length = extra_length};
 
-        rx_required_walk(nodes, first, &state);
+        rx_required_walk(nodes, first, &state, 0);
         rx_required_flush(&state);
 }
 
@@ -1506,8 +1511,10 @@ static fn rx_required(const rx_node *nodes, rx_ref first, p8 *literal, positive 
 /* A deterministic graph can reuse the prepared literal search when its
    captures are not observed. Bound both the expansion and interpreter work;
    the graph itself stays compact and remains the resource-limited fallback. */
-static bool rx_fixed(const rx_node *nodes, rx_ref first, rx_hints *hints, positive *work)
+static bool rx_fixed(const rx_node *nodes, rx_ref first, rx_hints *hints, positive *work, b32 depth)
 {
+        if (depth > RX_PARSE_MAX)
+                return false;
         for (rx_ref at = first; at; at = nodes[at].next)
         {
                 const rx_node *node = nodes + at;
@@ -1520,9 +1527,10 @@ static bool rx_fixed(const rx_node *nodes, rx_ref first, rx_hints *hints, positi
                         child_work = 1;
                 }
                 else if (node->kind == RX_CAPTURE ||
-                         (node->kind == RX_COUNT && node->minimum == node->maximum))
+                         (node->kind == RX_COUNT && node->minimum >= 0 &&
+                          node->minimum == node->maximum))
                 {
-                        if (!rx_fixed(nodes, node->left, hints, &child_work))
+                        if (!rx_fixed(nodes, node->left, hints, &child_work, depth + 1))
                                 return false;
                         if (node->kind == RX_CAPTURE)
                                 child_work += 2;
@@ -1768,7 +1776,7 @@ static bool rx_compile_length(rx_pool *pool, regex_program *out, string_address 
                 }
         }
         positive fixed_work = 0;
-        if (!literal && rx_fixed(pool->nodes, root.first, hints, &fixed_work) &&
+        if (!literal && rx_fixed(pool->nodes, root.first, hints, &fixed_work, 0) &&
             hints->fixed_length)
         {
                 hints->fixed_work = fixed_work + 1;
@@ -3485,8 +3493,10 @@ static bool rx_keep(rx_pool *pool, const regex_program *program, regex_program *
                 return false;
 
         memory_copy_apart(block, program->hints, hints_copy);
-        memory_copy_apart(block + hints, program->nodes, nodes);
-        memory_copy_apart(block + hints + nodes, program->sets, sets);
+        if (nodes)
+                memory_copy_apart(block + hints, program->nodes, nodes);
+        if (sets)
+                memory_copy_apart(block + hints + nodes, program->sets, sets);
 
         *into = *program;
         into->hints = (const rx_hints *)block;

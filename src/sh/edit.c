@@ -236,13 +236,23 @@ static p8 address_to edit_emitted;
 static positive edit_emitted_length;
 static positive edit_emitted_room;
 
+static inline bool edit_bytes_reserve(p8 address_to address_to buf,
+                                      positive address_to room,
+                                      positive have, positive add,
+                                      positive first)
+{
+        if (add > positive_max - have)
+                return false;
+        return memory_resize_reserve(buf, room, have + add, first);
+}
+
 static fn edit_say(address_any text, positive length)
 {
         if (!length)
                 return;
 
-        if (!memory_resize_reserve(address_of edit_emitted, address_of edit_emitted_room,
-                       edit_emitted_length + length, 4096))
+        if (!edit_bytes_reserve(address_of edit_emitted, address_of edit_emitted_room,
+                                edit_emitted_length, length, 4096))
                 return;
 
         memory_copy_apart(edit_emitted + edit_emitted_length, text, length);
@@ -259,14 +269,15 @@ static fn edit_say(address_any text, positive length)
 #define edit_say_at(screen_row, screen_column) \
         shell_set_cursor(edit_say, (screen_column) + 1, (screen_row) + 1)
 
-#define edit_table_room_for(table, room, want)                               \
-        memory_resize_reserve((p8 address_to address_to)address_of (table),              \
-                  address_of (room), (want) * sizeof((table)[0]),             \
-                  EDIT_TABLE_FIRST * sizeof((table)[0]))
+#define edit_array_reserve(table, room, want, first)                         \
+        ((want) <= positive_max / sizeof((table)[0]) &&                      \
+         memory_resize_reserve((p8 address_to address_to)address_of (table), \
+                   address_of (room), (want) * sizeof((table)[0]),           \
+                   (first) * sizeof((table)[0])))
 #define edit_lines_room_for(want)                                            \
-        edit_table_room_for(edit_lines, edit_line_room, (want))
+        edit_array_reserve(edit_lines, edit_line_room, (want), EDIT_TABLE_FIRST)
 #define edit_cursors_room_for(want)                                          \
-        edit_table_room_for(edit_cursors, edit_cursor_room, (want))
+        edit_array_reserve(edit_cursors, edit_cursor_room, (want), EDIT_TABLE_FIRST)
 
 /*
         Bytes taken out of one line and bytes put in, in one call.
@@ -300,9 +311,9 @@ static bool edit_line_splice(positive which, positive from, positive to,
         struct edit_line address_to line = edit_lines + which;
         to = min(to, line->length);
         from = min(from, to);
-        if (!memory_resize_reserve(address_of line->text,
-                                   address_of line->room,
-                                   from + length + line->length - to, EDIT_LINE_FIRST))
+        if (!edit_bytes_reserve(address_of line->text,
+                                address_of line->room,
+                                from + (line->length - to), length, EDIT_LINE_FIRST))
                 return false;
         edit_line_splice_ready(line, from, to, text, length);
         return true;
@@ -312,7 +323,8 @@ static bool edit_line_splice(positive which, positive from, positive to,
 //      pushed down. One copy of the table, which is sixteen bytes a line.
 static bool edit_line_open(positive at)
 {
-        if (!edit_lines_room_for(edit_line_count + 1))
+        if (at > edit_line_count || edit_line_count == positive_max ||
+            !edit_lines_room_for(edit_line_count + 1))
                 return false;
 
         if (at < edit_line_count)
@@ -565,15 +577,25 @@ static PURE positive edit_span_length(struct edit_place from,
 {
         positive total;
 
+        if (from.line > to.line)
+                return 0;
         if (from.line == to.line)
                 return to.column > from.column ? to.column - from.column : 0;
 
-        total = edit_lines[from.line].length - from.column + 1;
+        total = edit_lines[from.line].length - from.column;
+        if (total == positive_max)
+                return positive_max;
+        total++;
 
         for (positive at = from.line + 1; at < to.line; at++)
-                total += edit_lines[at].length + 1;
+        {
+                positive line_len = edit_lines[at].length;
+                if (line_len >= positive_max - total)
+                        return positive_max;
+                total += line_len + 1;
+        }
 
-        return total + to.column;
+        return to.column > positive_max - total ? positive_max : total + to.column;
 }
 
 static fn edit_span_copy(struct edit_place from, struct edit_place to,
@@ -614,6 +636,11 @@ static p8 address_to edit_span_take(struct edit_place from,
                                                               length)
 {
         positive size = edit_span_length(from, to);
+        if (size == positive_max)
+        {
+                address_to length = 0;
+                return null;
+        }
         p8 address_to block = (p8 address_to)memory_take(size + 1);
 
         if (!block)
@@ -911,6 +938,9 @@ static fn edit_steps_truncate()
 static bool edit_cursors_remember(struct edit_cursor address_to address_to into,
                                   positive address_to count)
 {
+        if (edit_cursor_count > (positive_max - 1) / sizeof(struct edit_cursor))
+                return false;
+
         positive size = edit_cursor_count * sizeof(struct edit_cursor);
 
         struct edit_cursor address_to saved = address_to into;
@@ -970,10 +1000,8 @@ static bool edit_step_start(p8 kind)
                         return false;
         }
 
-        if (!memory_resize_reserve((p8 address_to address_to)address_of edit_steps,
-                       address_of edit_step_room,
-                       (edit_step_count + 1) * sizeof(struct edit_step),
-                       32 * sizeof(struct edit_step)))
+        if (edit_step_count == positive_max ||
+            !edit_array_reserve(edit_steps, edit_step_room, edit_step_count + 1, 32))
                 return false;
 
         step = edit_steps + edit_step_count;
@@ -1077,9 +1105,9 @@ static struct edit_place edit_change_mode(struct edit_place from,
             !memory_first_of(patch->inserted, '\n', patch->inserted_length) &&
             !memory_first_of((address_any)text, '\n', length))
         {
-                if (memory_resize_reserve(address_of patch->inserted,
+                if (edit_bytes_reserve(address_of patch->inserted,
                               address_of patch->inserted_room,
-                              patch->inserted_length + length, 32))
+                              patch->inserted_length, length, 32))
                 {
                         if (!edit_raw_replace(from, to, text, length,
                                               address_of after))
@@ -1102,9 +1130,9 @@ static struct edit_place edit_change_mode(struct edit_place from,
             patch->column == to.column && from.line == to.line &&
             !memory_first_of(patch->removed, '\n', patch->removed_length))
         {
-                if (memory_resize_reserve(address_of patch->removed,
+                if (edit_bytes_reserve(address_of patch->removed,
                               address_of patch->removed_room,
-                              patch->removed_length + removed_length, 32))
+                              patch->removed_length, removed_length, 32))
                 {
                         if (!edit_raw_replace(from, to, null, 0,
                                               address_of after))
@@ -1127,10 +1155,9 @@ static struct edit_place edit_change_mode(struct edit_place from,
                 }
         }
 
-        if (!memory_resize_reserve((p8 address_to address_to)address_of step->patches,
-                       address_of step->patch_room,
-                       (step->patch_count + 1) * sizeof(struct edit_patch),
-                       4 * sizeof(struct edit_patch)))
+        if (step->patch_count == positive_max ||
+            !edit_array_reserve(step->patches, step->patch_room,
+                                step->patch_count + 1, 4))
         {
                 memory_give(removed);
                 return from;
@@ -1146,7 +1173,8 @@ static struct edit_place edit_change_mode(struct edit_place from,
 
         if (length)
         {
-                patch->inserted = (p8 address_to)memory_take(length + 1);
+                patch->inserted = length == positive_max
+                    ? null : (p8 address_to)memory_take(length + 1);
 
                 if (!patch->inserted)
                 {
@@ -2072,10 +2100,8 @@ static fn edit_clips_empty()
 
 static bool edit_clip_add(p8 address_to text, positive length)
 {
-        if (!memory_resize_reserve((p8 address_to address_to)address_of edit_clips,
-                       address_of edit_clip_room,
-                       (edit_clip_count + 1) * sizeof(struct edit_clip),
-                       4 * sizeof(struct edit_clip)))
+        if (edit_clip_count == positive_max ||
+            !edit_array_reserve(edit_clips, edit_clip_room, edit_clip_count + 1, 4))
                 return false;
 
         edit_clips[edit_clip_count].text = text;
@@ -2919,8 +2945,7 @@ static PURE string_address edit_comment_marker()
             ".c", ".h", ".cc", ".cpp", ".hpp", ".js", ".ts", ".go",
             ".rs", ".inc", ".java", ".lua", ".sql"};
         string_address tail = edit_path ? string_last_of(edit_path, '.') : null;
-        positive which = tail ? string_table_find(tail, names, sizeof(names[0]),
-                                                   array_count(names))
+        positive which = tail ? string_table_lookup(tail, names)
                               : array_count(names);
         return (string_address)(which < 11 ? "// "
                                 : which < array_count(names) ? "-- " : "# ");
@@ -3169,6 +3194,8 @@ static fn edit_paste()
 
                 if (edit_clip_lines)
                 {
+                        if (edit_clips[which].length > positive_max - 2)
+                                continue;
                         p8 address_to built =
                             (p8 address_to)memory_take(edit_clips[which].length + 2);
 
@@ -3464,9 +3491,9 @@ static fn edit_input_deliver(positive key)
 
 static bool edit_input_paste_append(string_address bytes, positive length)
 {
-        if (!memory_resize_reserve(address_of edit_input_paste,
-                       address_of edit_input_paste_room,
-                       edit_input_paste_length + length, 4096))
+        if (!edit_bytes_reserve(address_of edit_input_paste,
+                                address_of edit_input_paste_room,
+                                edit_input_paste_length, length, 4096))
         {
                 edit_input_paste_failed = true;
                 return false;
@@ -3856,6 +3883,11 @@ static p8 address_to EDIT_SPARE edit_bytes_take(positive address_to length)
         struct edit_place from = {0, 0};
         struct edit_place to = edit_place_last();
         positive size = edit_span_length(from, to);
+        if (size > positive_max - 2)
+        {
+                address_to length = 0;
+                return null;
+        }
         p8 address_to block = (p8 address_to)memory_take(size + 2);
 
         if (!block)
@@ -4456,7 +4488,7 @@ static bipolar edit_read_file(string_address path,
 
         edit_file_original = file_open_same(
             edit_file_directory, edit_file_leaf,
-            address_of edit_file_facts, FILE_READ | O_NOFOLLOW);
+            address_of edit_file_facts, FILE_READ | O_NOFOLLOW | O_CLOEXEC);
         if (edit_file_original < 0)
         {
                 result = edit_file_original;
