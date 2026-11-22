@@ -3166,6 +3166,7 @@ static fn check_settings(string_address regular, string_address bold)
                         memory_copy(settings_large->said, air, sizeof(air) - 1);
                         settings.runner.length = sizeof(air) - 1;
                         settings_feed_wifi();
+                        items = settings.item[0], devices = settings.item[1]; // a feed may grow a list: its rows are read where they are now
                         check("settings: the networks heard are rows, strongest first as the verb says, then a saved one not heard",
                               settings.item_count[0] == 5 && string_equals((string_address)items[0].label, (string_address) "HomeNet") &&
                                   string_equals((string_address)items[1].label, (string_address) "Guest") &&
