@@ -4598,6 +4598,17 @@ static fn reverse_put16(p8 address_to at, p32 value)
 //      Two overlapping rectangles (two contours, stems that cross: 0 to 10 px and 5 to 15 px) snapped on the x axis keep
 //      their order: a point left of another in the outline is not right of it after the snap. Without the fix the stems'
 //      map is not monotone, and points cross.
+//      A lead byte that is interrupted: one U+FFFD for the lead, and the letter after it is read, not lost (the feed
+//      consumed the interrupting byte, so the letter was gone).
+static fn check_decode_bad_lead(void)
+{
+        static const p8 bytes[2] = {0xe2, 'A'};
+        p32 code = 0, again = 0;
+        positive next = font_decode(bytes, 2, 0, &code), after = font_decode(bytes, 2, next, &again);
+
+        check("decode: a bad lead is one U+FFFD, and the letter after it is read", code == 0xfffd && next == 1 && again == 'A' && after == 2);
+}
+
 static fn check_crossing_stems(void)
 {
         //      The stems 410 to 2458 and 1331 to 3379 (1024ths of a pixel) cross. The point at 1800 is between the second's
@@ -4964,6 +4975,7 @@ b32 main()
         check_raster_ceiling();
         check_reverse_multiple();
         check_cell_run(&two);
+        check_decode_bad_lead();
         check_crossing_stems();
         //      Last: it loads faces until the 16-bit ids run out, and no face loads after it.
         check_edges(&one, &two);
