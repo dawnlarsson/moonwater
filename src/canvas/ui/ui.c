@@ -14586,7 +14586,11 @@ static b32 ui_moon_bake(struct ui_moon_map address_to map, int width)
         {
                 long got_texels = ui_map((positive)texels * 4 * sizeof(unsigned short));
                 if (got_texels < 0 && got_texels > -4096)
+                {
+                        compositor_call(syscall(munmap), (positive)got, (positive)room, 0, 0, 0, 0);
+                        map->albedo = null, map->height = null;
                         return false;
+                }
                 map->texel = (unsigned short address_to)got_texels;
         }
         for (int l = 0; l < levels; l++)
