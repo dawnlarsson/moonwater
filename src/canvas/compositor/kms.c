@@ -2389,7 +2389,7 @@ static int canvas_drm_render_classify(const char *path, unsigned long prev_dev, 
         }
         fd = compositor_call(syscall(openat), (positive)AT_FDCWD, (positive)path, 0x80002, 0, 0, 0);
         if (fd < 0)
-                return 1;
+                return out->dev = 0, 0;
         memory_zero(name, sizeof(name));
         memory_zero(&ver, sizeof(ver));
         ver.name_len = sizeof(name) - 1, ver.name = name;

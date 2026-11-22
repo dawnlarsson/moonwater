@@ -696,7 +696,15 @@ static void compositor_lists_later(void)
                 return;
         rows_take(&later, &compositor.list_later);
         for (int row = rows_next(&later, 0); row >= 0; row = rows_next(&later, row + 1))
+        {
+                if (compositor_card.on || !gpu_idle())
+                {
+                        for (; row >= 0; row = rows_next(&later, row + 1))
+                                rows_add(&compositor.list_later, row);
+                        break;
+                }
                 compositor_take(row);
+        }
 }
 
 static void compositor_card_tick(void)

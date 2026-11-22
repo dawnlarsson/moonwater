@@ -3403,8 +3403,10 @@ static void compositor_gpu_settings(void)
 #ifdef MOONWATER_GPU_C
         if (compositor_gpu && !was)
         {
-                if (!compositor_gpu_state.hung_off && (compositor_gpu_state.up || compositor_gpu_state.dead_why != COMPOSITOR_GPU_WHY_UNTRUSTED))
+                if (compositor_gpu_state.up || compositor_gpu_state.dead_why != COMPOSITOR_GPU_WHY_UNTRUSTED)
                         compositor_gpu_state.dead = 0;
+                compositor_gpu_state.hung_off = 0, compositor_gpu_state.hung_at = 0;
+                compositor_gpu_state.output_fails = 0;
                 compositor_gpu_state.settled = compositor_gpu_state.said = 0;
                 compositor_gpu_state.failures = 0, compositor_gpu_state.cool_until = 0, compositor_gpu_state.cool_steps = 0;
         }

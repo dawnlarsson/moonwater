@@ -1151,10 +1151,11 @@ def test_hardening_66_bug_families():
           "b32 scratch = bins_at >= top && bins_at + 4096 <= gpu.size;" in gpu_c and
           "at = scratch ? bins_at : bins_at + side * room;" in gpu_c)
 
-    check("Family 2: compositor_gpu_spots rejects invalid chip dimensions (w<=0, w>255, h<=0) before computing cells",
-          "if (c->w <= 0 || c->w > 255 || c->h <= 0)" in gpu_host_c and
-          gpu_host_c.find("if (c->w <= 0 || c->w > 255 || c->h <= 0)") <
-          gpu_host_c.find("cells = (unsigned long)c->w * (unsigned long)c->h;"))
+    check("Family 2: compositor_gpu_spots rejects invalid chip dimensions (w<=0, h<=0) before computing cells & splits >255px chips",
+          "if (c->w <= 0 || c->h <= 0)" in gpu_host_c and
+          gpu_host_c.find("if (c->w <= 0 || c->h <= 0)") <
+          gpu_host_c.find("cells = (unsigned long)c->w * (unsigned long)c->h;") and
+          "int sw = c->w - sx > 255 ? 255 : c->w - sx;" in gpu_host_c)
 
     check("Family 2: compositor_gpu_list_render_bytes rejects OOB cover bounds (returns 0 instead of stale bases[slot])",
           "if (view.cover_at < COMPOSITOR_GPU_LIST_REACH || view.cover_at > list_bytes ||" in gpu_host_c and
@@ -1240,6 +1241,48 @@ def test_hardening_66_bug_families():
           "if (osk.alt_key >= 0)" in osk_c and
           m_osk_pt is not None and "osk_release();" in m_osk_pt.group(1) and
           m_ed_ev is not None and "editor.pill_down = false;" in m_ed_ev.group(1))
+
+    # --- Family 6: Multi-GPU, Intel/AMD Robustness & Fallback Invariants ---
+    check("Family 6: Intel/Xe/AMD intentional refusal returns EOPNOTSUPP (95), never triggers hang/cooldown, and Intel gates list mode",
+          "if (!words)\n                return 95;" in gpu_c and
+          "if (!(words = gpu_set->batch(job, job->packets_at, GPU_PACKETS / 4)))\n                return 95u;" in gpu_c and
+          "if (!k || !job->columns || !job->rows)\n                return 95;" in gpu_c and
+          "gpu_end == GPU_END_NONE && gpu_last_error == 95" in gpu_host_c and
+          "gpu_backend == &gpu_amd && compositor_lists_switch()" in gpu_host_c)
+
+    check("Family 6: Intel Gen7 MaskCtrl bit 9, Xe-HPG/Xe2 COMPUTE_WALKER & MOCS, Xe userptr/forget_jobs, ultrawide scene & scale pitch",
+          "w[0] = (w[0] & ~0x00000200u) | (mctrl << 9);" in gpu_c and
+          "words[base + 7] = cols;" in gpu_c and
+          "words[base + 10] = 0xffffu;" in gpu_c and
+          "if (gpu.family >= 2000)\n                return 4u;" in gpu_c and
+          "#define GPU_XE_USERPTRS 264" in gpu_c and
+          "gpu_xe.done = gpu_xe.sequence;" in gpu_c and
+          "(px1 - px0) > 4096u" in gpu_c)
+
+    check("Family 6: AMD identify preserves live state & checks available_rings, userptr retries EINTR/EAGAIN, image/nv12 tests use gpu_patient",
+          "if (!ip[6])" in gpu_c and
+          "if (e == 11 && again++ < 8)" in gpu_c and
+          "gpu_gfx103 = kept_103, gpu_amd_gfx_major = kept_maj" in gpu_c and
+          "0x0ec00000u" in gpu_c[gpu_c.find("if (gfx == 6u)"):gpu_c.find("else if (gfx >= 7u && gfx <= 9u)")] and
+          gpu_c[gpu_c.find("static b32 gpu_image_test("):].count("gpu_patient = gpu_recovered ? 2 : 1;") >= 2)
+
+    check("Family 6: Hybrid-GPU multi-candidate fallback in gpu_start, VA wrap-around, >64MiB slice retry, guard-band fault blame & 15MiB bin fallback",
+          "if (step > 0)" in gpu_c[gpu_c.find("for (unsigned int step = 0; step < candidates; step++)"):gpu_c.find("gpu_req.settled =")] and
+          "for (unsigned int pass = 0; pass < 2; pass++)" in gpu_c[gpu_c.find("static positive gpu_place_aligned("):gpu_c.find("#define GPU_IMPORT_ALIGN")] and
+          "from = orig_from, to = orig_to;" in gpu_c and
+          "guard band of held import, handle " in gpu_c and
+          "positive full_room = (top - bins_at) & ~4095ull;" in gpu_c and
+          "#define GPU_GONE 64" in gpu_c)
+
+    check("Family 6: Compositor GPU recovery, 3-strike output settle, wide chip splitting, frost 16px pitch, dynamic scaled=16 & render_classify fd<0",
+          "return !gpu.pending || (gpu_done(gpu.pending) != 0 && !gpu.pending);" in gpu_c and
+          "++compositor_gpu_state.output_fails >= 3" in gpu_host_c and
+          "for (int sx = 0; sx < c->w; sx += 255)" in gpu_host_c and
+          "#define COMPOSITOR_GPU_SCALED 16" in gpu_host_c and
+          "#define COMPOSITOR_CARD_STEPS (16 + COMPOSITOR_DAMAGE)" in scan_c and
+          "fpitch = ((unsigned int)compositor.width + 15u) & ~15u;" in gpu_host_c and
+          "return out->dev = 0, 0;" in kms_c and
+          "compositor_gpu_state.hung_off = 0, compositor_gpu_state.hung_at = 0;" in manage_c)
 
 
 def test_build_and_audit_gates():

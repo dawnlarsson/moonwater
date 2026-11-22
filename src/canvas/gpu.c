@@ -534,17 +534,25 @@ static unsigned int gpu_amd_identify(int fd, unsigned int *family, unsigned int 
         p64 ask[4] = {(p64)who, sizeof(who) | 0x16ull << 32}; // AMDGPU_INFO_DEV_INFO: the 160 bytes up to virtual_address_max
         p64 ip_ask[4] = {(p64)ip, sizeof(ip) | 0x02ull << 32, 1ull, 0}; // AMDGPU_INFO_HW_IP_INFO (AMDGPU_HW_IP_COMPUTE = 1)
 
-        gpu_gfx103 = 0, gpu_amd_gfx_major = 0, gpu_amd_gfx_minor = 0;
         e = gpu_raw(fd, GPU_IO(1u, 5, 32), ask);
         *family = e ? 0 : who[4], *device = e ? 0 : who[0];
-        gpu_amd_va_max = e ? 0 : (positive)who[39] << 32 | who[38];
-        if (!e && !gpu_raw(fd, GPU_IO(1u, 5, 32), ip_ask))
+        if (e)
+                return e;
+        gpu_gfx103 = 0, gpu_amd_gfx_major = 0, gpu_amd_gfx_minor = 0;
+        gpu_amd_va_max = (positive)who[39] << 32 | who[38];
+        if (!gpu_raw(fd, GPU_IO(1u, 5, 32), ip_ask))
         {
+                if (!ip[6]) // available_rings == 0: compute-disabled/harvested node
+                        return *family = 0, 19u;
                 gpu_amd_gfx_major = ip[0], gpu_amd_gfx_minor = ip[1];
                 if (ip[0] == 10 && ip[1] == 3 && (who[4] != 143 || who[2] >= 0x28))
                         gpu_gfx103 = 1;
         }
-        return e;
+        else if (who[4] == 145 || who[4] == 148 || who[4] == 150)
+                gpu_amd_gfx_major = 11;
+        else if (who[4] == 152)
+                gpu_amd_gfx_major = 12;
+        return 0;
 }
 
 // The card's address space. amdgpu's is the VM the kernel sized (amdgpu_vm_adjust_size): gmc v6 to v8 (SI to Polaris) ask for at least 64 GiB and at most 2^40, as
@@ -598,6 +606,10 @@ static unsigned int gpu_amd_describe(unsigned int family, unsigned int device, c
                 arch = ", RDNA3.5 (GFX11.5)";
         else if (family == 152)
                 arch = ", RDNA4 (GFX12.0)";
+        else if (gpu_amd_gfx_major == 11)
+                arch = ", RDNA3 (GFX11)";
+        else if (gpu_amd_gfx_major == 12)
+                arch = ", RDNA4 (GFX12)";
         at = gpu_text_put(into, at, room, "amdgpu family "), at = gpu_text_num(into, at, room, family, 10);
         at = gpu_text_put(into, at, room, ", device 0x"), at = gpu_text_num(into, at, room, device, 16);
         return gpu_text_put(into, at, room, arch);
@@ -643,9 +655,23 @@ static unsigned int gpu_amd_context(unsigned int *made, unsigned int before)
 // mapped read-only by the compositor, and a writable registration of them is refused (EPERM). Without VALIDATE (0x8) the kernel takes the pages later.
 static unsigned int gpu_amd_user(positive from, positive bytes, unsigned int how, unsigned int *handle)
 {
-        p64 up[3] = {from, bytes, how == GPU_USER_READ ? 0xdull : how == GPU_USER_WRITTEN ? 0xcull : 0x8ull};
-        unsigned int e = gpu_call(3u, 0x11, 24, up);
+        const p64 flags = how == GPU_USER_READ ? 0xdull : how == GPU_USER_WRITTEN ? 0xcull : 0x8ull;
+        p64 up[3] = {from, bytes, flags};
+        unsigned int e, again = 0;
 
+        for (;;)
+        {
+                up[0] = from, up[1] = bytes, up[2] = flags;
+                e = gpu_call(3u, 0x11, 24, up);
+                if (e == 4)
+                        continue;
+                if (e == 11 && again++ < 8)
+                {
+                        system_call_2(syscall(sched_yield), 0, 0);
+                        continue;
+                }
+                break;
+        }
         *handle = e ? 0 : (unsigned int)(up[2] >> 32); // the kernel wrote the handle into the high half of up[2]
         return e;
 }
@@ -672,10 +698,12 @@ static unsigned int gpu_amd_submit(const struct gpu_job *job, p64 *bos, unsigned
         // Per-generation cache invalidate + SH register setup (GFX6 SI through GFX12 RDNA4; default GFX10 when ip_major == 0).
         const unsigned int gfx = gpu_amd_gfx_major ? gpu_amd_gfx_major : 10u;
 
+        if (!k || !job->columns || !job->rows)
+                return 95;
         if (gfx == 6u)
         {
                 // GFX6 (SI): SURFACE_SYNC (0x43) with CP_COHER_CNTL (TC | TCL1 | ICACHE | KCACHE)
-                ib[n++] = GPU_PKT(0x43, 3), ib[n++] = 0x0e800000u, ib[n++] = 0xffffffffu, ib[n++] = 0, ib[n++] = 10;
+                ib[n++] = GPU_PKT(0x43, 3), ib[n++] = 0x0ec00000u, ib[n++] = 0xffffffffu, ib[n++] = 0, ib[n++] = 10;
         }
         else if (gfx >= 7u && gfx <= 9u)
         {
@@ -871,8 +899,8 @@ static const struct { unsigned int from, to; const struct gpu_set *set; } gpu_i9
         graphics version times 100, with a variant in the units where the chip differs in what the path stands on (no LLC,
         discrete LMEM, a smaller address space). A device in none of them is family 0 (older than Ivy Bridge or unknown).
 */
-static const unsigned short gpu_i915_ivb[] = {0x0156, 0x0166, 0x0152, 0x015A, 0x0162, 0x016A};
-static const unsigned short gpu_i915_vlv[] = {0x0F30, 0x0F31, 0x0F32, 0x0F33};
+static const unsigned short gpu_i915_ivb[] = {0x0156, 0x0166, 0x0152, 0x015A, 0x015E, 0x0162, 0x016A, 0x016E};
+static const unsigned short gpu_i915_vlv[] = {0x0155, 0x0157, 0x0F30, 0x0F31, 0x0F32, 0x0F33};
 static const unsigned short gpu_i915_hsw[] = {
     0x0A02, 0x0A06, 0x0A0A, 0x0A0B, 0x0A0E, 0x0402, 0x0406, 0x040A, 0x040B, 0x040E, 0x0C02, 0x0C06, 0x0C0A, 0x0C0B, 0x0C0E, 0x0D02, 0x0D06, 0x0D0A, 0x0D0B, 0x0D0E,
     0x0A12, 0x0A16, 0x0A1A, 0x0A1B, 0x0A1E, 0x0412, 0x0416, 0x041A, 0x041B, 0x041E, 0x0C12, 0x0C16, 0x0C1A, 0x0C1B, 0x0C1E, 0x0D12, 0x0D16, 0x0D1A, 0x0D1B, 0x0D1E,
@@ -883,7 +911,7 @@ static const unsigned short gpu_i915_chv[] = {0x22B0, 0x22B1, 0x22B2, 0x22B3};
 static const unsigned short gpu_i915_gen9[] = {
     0x1906, 0x1913, 0x190E, 0x1915, 0x1902, 0x190A, 0x190B, 0x1917, 0x1916, 0x1921, 0x191E, 0x1912, 0x191A, 0x191B, 0x191D, 0x1923, 0x1926, 0x1927, 0x192A,
     0x192B, 0x192D, 0x1932, 0x193A, 0x193B, 0x193D, 0x5906, 0x5913, 0x590E, 0x5915, 0x5902, 0x5908, 0x590A, 0x590B, 0x5916, 0x5921, 0x591E, 0x5912, 0x5917,
-    0x591A, 0x591B, 0x591D, 0x5926, 0x5923, 0x5927, 0x593B, 0x591C, 0x87C0, 0x3E90, 0x3E93, 0x3E99, 0x3E91, 0x3E92, 0x3E96, 0x3E98, 0x3E9A, 0x3E9C, 0x3E94,
+    0x591A, 0x591B, 0x591D, 0x5926, 0x5923, 0x5927, 0x593B, 0x591C, 0x87C0, 0x3E90, 0x3E93, 0x3E99, 0x3E91, 0x3E92, 0x3E95, 0x3E96, 0x3E98, 0x3E9A, 0x3E9C, 0x3E94,
     0x3E9B, 0x3EA9, 0x3EA5, 0x3EA6, 0x3EA7, 0x3EA8, 0x3EA1, 0x3EA4, 0x3EA0, 0x3EA3, 0x3EA2, 0x87CA, 0x9BA0, 0x9BA2, 0x9BA4, 0x9BA5, 0x9BA8, 0x9BC0, 0x9BC2,
     0x9BC4, 0x9BC5, 0x9BC6, 0x9BC8, 0x9BE6, 0x9BF6, 0x9B21, 0x9BAA, 0x9BAC, 0x9B41, 0x9BCA, 0x9BCC};
 static const unsigned short gpu_i915_gen9lp[] = {0x0A84, 0x1A84, 0x1A85, 0x5A84, 0x5A85, 0x3184, 0x3185};
@@ -896,13 +924,13 @@ static const unsigned short gpu_i915_gen12[] = {
     0xA7A1, 0xA7A9, 0xA7AC, 0xA7AD, 0xA720, 0xA7A0, 0xA7A8, 0xA7AA, 0xA7AB};
 static const unsigned short gpu_i915_dg1[] = {0x4905, 0x4906, 0x4907, 0x4908, 0x4909};
 static const unsigned short gpu_i915_dg2[] = {
-    0x5690, 0x5691, 0x5692, 0x5693, 0x5694, 0x5695, 0x5696, 0x5697, 0x56A0, 0x56A1, 0x56A2, 0x56A3, 0x56A4, 0x56A5, 0x56A6,
-    0x56B0, 0x56B1, 0x56B2, 0x56B3, 0x56BA, 0x56BB, 0x56BC, 0x56BD, 0x56C0, 0x56C1, 0x56C2};
+    0x5690, 0x5691, 0x5692, 0x5693, 0x5694, 0x5695, 0x5696, 0x5697, 0x5698, 0x56A0, 0x56A1, 0x56A2, 0x56A3, 0x56A4, 0x56A5, 0x56A6,
+    0x56B0, 0x56B1, 0x56B2, 0x56B3, 0x56BA, 0x56BB, 0x56BC, 0x56BD, 0x56BE, 0x56BF, 0x56C0, 0x56C1, 0x56C2};
 static const unsigned short gpu_i915_mtl[] = {0x7D40, 0x7D45, 0x7D55, 0x7D60, 0x7DD5};
 static const unsigned short gpu_i915_arl[] = {0x7D41, 0x7D51, 0x7D67, 0x7DD1, 0xB640};
 static const unsigned short gpu_i915_lnl[] = {0x6420, 0x64A0, 0x64B0};
-static const unsigned short gpu_i915_bmg[] = {0xE202, 0xE20B, 0xE20C, 0xE20D, 0xE212, 0xE220, 0xE221, 0xE222, 0xE223};
-static const unsigned short gpu_i915_ptl[] = {0xB080, 0xB081, 0xB082, 0xB083, 0xB08F, 0xB090, 0xB0A0, 0xB0B0};
+static const unsigned short gpu_i915_bmg[] = {0xE202, 0xE209, 0xE20B, 0xE20C, 0xE20D, 0xE210, 0xE211, 0xE212, 0xE215, 0xE216, 0xE220, 0xE221, 0xE222, 0xE223};
+static const unsigned short gpu_i915_ptl[] = {0xB080, 0xB081, 0xB082, 0xB083, 0xB084, 0xB085, 0xB086, 0xB087, 0xB08F, 0xB090, 0xB0A0, 0xB0B0};
 #define GPU_I915_CHIPS(X) X(gpu_i915_ivb, 700, "Gen7 Ivy Bridge") X(gpu_i915_vlv, 701, "Gen7 Valleyview") X(gpu_i915_hsw, 750, "Gen7.5 Haswell") \
         X(gpu_i915_bdw, 800, "Gen8 Broadwell") X(gpu_i915_chv, 801, "Gen8 Cherry View") X(gpu_i915_gen9, 900, "Gen9 Skylake to Comet Lake")       \
         X(gpu_i915_gen9lp, 901, "Gen9 Broxton or Gemini Lake") X(gpu_i915_icl, 1100, "Gen11 Ice Lake") X(gpu_i915_ehl, 1101, "Gen11 Elkhart Lake or Jasper Lake") \
@@ -1136,9 +1164,11 @@ static unsigned int gpu_i915_submit(const struct gpu_job *job, p64 *bos, unsigne
         if (!gpu_set || !gpu_set->batch)
                 return 95;
         words = gpu_set->batch(job, job->packets_at, GPU_PACKETS / 4);
+        if (!words)
+                return 95;
         if ((words & 1) && words < GPU_PACKETS / 4) // the batch's length is of whole quadwords (a length that is not is EINVAL): an MI_NOOP ends it
                 job->packets_at[words++] = 0;
-        if (!words || words > GPU_PACKETS / 4 || (words & 1) || !gpu_i915_room() || !gpu_i915.main)
+        if (words > GPU_PACKETS / 4 || (words & 1) || !gpu_i915_room() || !gpu_i915.main)
                 return 22;
         if (named >= GPU_I915_HANDLES)
                 return 28;
@@ -1331,7 +1361,7 @@ _Static_assert(sizeof(struct gpu_xe_device_query) == 40 && sizeof(struct gpu_xe_
 
 #define GPU_XE_JOBS 4
 #define GPU_XE_USERPTR_TAG 0x80000000u
-#define GPU_XE_USERPTRS 72
+#define GPU_XE_USERPTRS 264
 static void gpu_close(unsigned int handle);
 static struct
 {
@@ -1355,6 +1385,7 @@ static void gpu_xe_forget_jobs(void)
                 }
                 gpu_xe.jobs[i].syncobj = 0, gpu_xe.jobs[i].sequence = 0;
         }
+        gpu_xe.done = gpu_xe.sequence;
 }
 
 static void gpu_xe_forget(void)
@@ -1597,10 +1628,14 @@ static unsigned int gpu_xe_submit(const struct gpu_job *job, p64 *bos, unsigned 
         unsigned int e;
 
         (void)bos, (void)named;
-        if (!gpu_set->batch || !(words = gpu_set->batch(job, job->packets_at, GPU_PACKETS / 4)))
-                return 22u;
-        if (words & 1u)
+        if (!gpu_set || !gpu_set->batch)
+                return 95u;
+        if (!(words = gpu_set->batch(job, job->packets_at, GPU_PACKETS / 4)))
+                return 95u;
+        if ((words & 1u) && words < GPU_PACKETS / 4)
                 job->packets_at[words++] = 0u; // MI_NOOP qword pad
+        if (words > GPU_PACKETS / 4 || (words & 1u))
+                return 22u;
         slot = (unsigned int)((gpu_xe.sequence + 1) % GPU_XE_JOBS);
         if (!gpu_xe.jobs[slot].syncobj)
         {
@@ -2118,9 +2153,20 @@ static b32 gpu_start(positive bytes)
                 system_close((int)fd);
         }
         gpu_req.nodes = seen | 1;
-        if (candidates)
+        if (!candidates)
+        {
+                gpu.family = gpu_req.family, gpu.device = gpu_req.device;
+                if (gpu_req_step(GPU_REQ_NODE, !named, open_error) && gpu_req_step(GPU_REQ_DRIVER, !known, 0))
+                        gpu_req_step(GPU_REQ_FAMILY, true, 0);
+        }
+        else
         {
                 int pick = gpu_pick(candidate_bus, candidates, gpu_display, &gpu_req.pick);
+                int kept_fd = gpu_shared.fd;
+                unsigned char *kept_at = gpu_shared.at;
+                positive kept_bytes = gpu_shared.bytes;
+                void (*kept_pin)(positive offset, b32 on) = gpu_shared.pin;
+
                 // When no candidate matches the display bus, honor gpu_backends[] priority order (amdgpu > i915 > xe).
                 if (gpu_req.pick != 1 && candidates > 1)
                 {
@@ -2131,12 +2177,22 @@ static b32 gpu_start(positive bytes)
                                         if (candidate_backend[ci] == gpu_backends[bi] && bi < best_rank)
                                                 best_rank = bi, pick = (int)ci;
                 }
-                // Try the preferred candidate first, then fall back to any remaining supported candidates.
-                for (unsigned int step = 0; step < candidates && gpu.fd < 0; step++)
+                // Try the preferred candidate first; if any bring-up step (open, window, userptr, context, self-test) fails,
+                // cleanly tear down and fall back to any remaining supported candidates before giving up.
+                for (unsigned int step = 0; step < candidates; step++)
                 {
                         unsigned int ci = step == 0 ? (unsigned int)pick : (step <= (unsigned int)pick ? step - 1 : step);
                         long picked;
 
+                        if (step > 0)
+                        {
+                                gpu_stop();
+                                gpu_shared.fd = kept_fd, gpu_shared.at = kept_at, gpu_shared.bytes = kept_bytes, gpu_shared.pin = kept_pin;
+                                memory_zero(&gpu_req, sizeof(gpu_req));
+                                gpu_req.nodes = seen | 1;
+                                gpu_userptr_ok = 0, gpu_userptr_gone = 0;
+                        }
+                        gpu_req.pick = gpu_display[0] ? (candidate_bus[ci][0] && string_equals((string_address)candidate_bus[ci], (string_address)gpu_display) ? 1u : 2u) : 0u;
                         path[17] = (char)('0' + (28 + candidate_node[ci]) / 10), path[18] = (char)('0' + (28 + candidate_node[ci]) % 10);
                         picked = system_open_at(AT_FDCWD, (string_address)path, 2 | O_CLOEXEC);
                         if (picked >= 0)
@@ -2152,156 +2208,161 @@ static b32 gpu_start(positive bytes)
                         }
                         else if (step == 0)
                                 open_error = (unsigned int)-picked & 255;
+                        gpu.family = gpu_req.family, gpu.device = gpu_req.device;
+                        do
+                        {
+                                if (!gpu_req_step(GPU_REQ_NODE, !named, open_error))
+                                        break;
+                                if (!gpu_req_step(GPU_REQ_DRIVER, !known, 0))
+                                        break;
+                                if (!gpu_req_step(GPU_REQ_FAMILY, gpu.fd < 0, 0))
+                                        break;
+                                // The picked chip's kernel set, address space and slots: the window every address is placed in, the room of each slot's command words, and where
+                                // the kernels go after the slots' arguments. A space too small for the path is the context's step (its errno).
+                                {
+                                        positive va = 0, maps = 0, top = 0;
+                                        unsigned int room = gpu_backend->packets, code;
+
+                                        gpu_set = gpu_backend->set(gpu.family);
+                                        e = gpu_backend->window(gpu.family, &va, &maps, &top);
+                                        // The slots' state (struct gpu_backend's state) after their arguments, 64-aligned; the kernels after it.
+                                        unsigned int state = (GPU_SLOTS * room + 256 * GPU_SLOTS + 63) & ~63u;
+
+                                        code = (state + GPU_SLOTS * gpu_backend->state + 255) & ~255u;
+                                        code = code < 1024 ? 1024 : code;
+                                        if (!e && (!gpu_set || gpu_set->count > GPU_KERNELS || (room & 255) || (gpu_backend->state & 63) || va + size > maps || maps >= top ||
+                                                   top > GPU_VA_RECORD))
+                                                e = 22;
+                                        for (unsigned int i = 0, reach = code; !e && i < gpu_set->count; i++)
+                                        {
+                                                unsigned int bk = gpu_set->kernels[i].size > 4 * gpu_set->skip ? gpu_set->kernels[i].size - 4 * gpu_set->skip : 0;
+
+                                                if ((reach = (reach + bk + 255) & ~255u) > GPU_BASES_AT)
+                                                        e = 28; // the kernels end before the bases begin
+                                        }
+                                        if (!e)
+                                                gpu_window.va = va, gpu_window.maps = maps, gpu_window.top = top, gpu_map_next = maps,
+                                                gpu_layout.packets = room, gpu_layout.args = GPU_SLOTS * room, gpu_layout.state = gpu_backend->state ? state : 0,
+                                                gpu_layout.code = code;
+                                        if (e && !gpu_req_step(GPU_REQ_CONTEXT, true, e))
+                                                break;
+                                }
+                                // Userptr: an anonymous page the kernel takes for the card; if userptr is refused, try udmabuf+PRIME fallback before aborting init.
+                                {
+                                        long page = system_call_6(syscall(mmap), 0, 4096, 3, 0x22, (positive)-1, 0);
+
+                                        e = page < 0 && page > -4096 ? 12 : gpu_userptr_error((positive)page, GPU_USER_WRITTEN);
+                                        gpu_userptr_ok = e == 0;
+                                        if (!(page < 0 && page > -4096))
+                                                system_call_2(syscall(munmap), (positive)page, 4096);
+                                        if (e != 0)
+                                        {
+                                                gpu_route_probe();
+                                                if ((gpu_req.mask & (1u << GPU_REQ_UDMABUF | 1u << GPU_REQ_PRIME)) == (1u << GPU_REQ_UDMABUF | 1u << GPU_REQ_PRIME))
+                                                        gpu_userptr_gone = 1, e = 0;
+                                        }
+                                        if (!gpu_req_step(GPU_REQ_USERPTR, e != 0, e))
+                                                break;
+                                }
+                                // The buffer, its VM map and the compute context: all of the card's own memory.
+                                e = gpu_backend->buffer(size, GPU_VA, &gpu.handle, &offset);
+                                if (!e)
+                                        e = gpu_backend->context(&ctx, 0);
+                                if (!e)
+                                {
+                                        at = system_call_6(syscall(mmap), 0, size, 3, 1, (positive)gpu.fd, offset);
+                                        if (at < 0 && at > -4096)
+                                                e = (unsigned int)-at & 255;
+                                        else
+                                                gpu.at = (unsigned int address_to)at, gpu.size = size;
+                                }
+                                if (!gpu_req_step(GPU_REQ_CONTEXT, e != 0, e))
+                                        break;
+                                gpu.ctx = ctx;
+                                for (unsigned int i = 0, here = gpu_layout.code; i < gpu_set->count; i++)
+                                {
+                                        unsigned int bytes_k = gpu_set->kernels[i].size > 4 * gpu_set->skip ? gpu_set->kernels[i].size - 4 * gpu_set->skip : 0;
+
+                                        gpu_kernel_at[i] = here;
+                                        if (gpu_set->kernels[i].words && bytes_k)
+                                        {
+                                                unsigned int address_to dst_k = (unsigned int address_to)((p8 address_to)gpu.at + here);
+
+                                                memory_copy(dst_k, gpu_set->kernels[i].words + gpu_set->skip, bytes_k);
+                                                // Cross-gen Intel EU binary patching from Gen9 words (verified word-for-word against intel-probe kern7/kern8/kern9/kern11):
+                                                if (gpu_backend == &gpu_i915_row)
+                                                {
+                                                        unsigned int insns = bytes_k / 16u;
+
+                                                        if (gpu.family < 800)
+                                                        {
+                                                                for (unsigned int k = 0; k < insns; k++)
+                                                                {
+                                                                        unsigned int *w = dst_k + 4 * k;
+                                                                        unsigned int op = w[0] & 0x7fu;
+                                                                        unsigned int fsub = w[1] & 1u, freg = (w[1] >> 1) & 1u, mctrl = (w[1] >> 2) & 1u;
+                                                                        unsigned int drf = (w[1] >> 3) & 3u, dtype = (w[1] >> 5) & 7u;
+                                                                        unsigned int s0rf = (w[1] >> 9) & 3u, s0type = (w[1] >> 11) & 7u;
+                                                                        unsigned int s1rf = (w[2] >> 25) & 3u, s1type = (w[2] >> 27) & 7u;
+
+                                                                        if (op == 0x31u)
+                                                                        {
+                                                                                if (((w[0] >> 24) & 0xfu) == 0xcu)
+                                                                                        w[0] = (w[0] & ~0x0f000000u) | (0x5u << 24); // Gen7 Render Cache SFID = 5
+                                                                                s1type = 1u; // Gen7 send Src1Type = :d
+                                                                        }
+                                                                        else if (op == 0x20u && gpu.family < 750)
+                                                                                w[3] = (unsigned int)((int)w[3] >> 3); // Ivy Bridge/VLV jmpi JIP is in qwords (8B)
+                                                                        w[0] = (w[0] & ~0x00000200u) | (mctrl << 9);
+                                                                        w[1] = (w[1] & 0xffff8000u) | drf | (dtype << 2) | (s0rf << 5) | (s0type << 7) | (s1rf << 10) | (s1type << 12);
+                                                                        w[2] = (w[2] & 0x01ffffffu) | (fsub << 25) | (freg << 26);
+                                                                }
+                                                        }
+                                                        else if (gpu.family == 800 || gpu.family == 801)
+                                                        {
+                                                                for (unsigned int k = 0; k < insns; k++)
+                                                                        if ((dst_k[4 * k] & 0x7fu) == 0x31u)
+                                                                                dst_k[4 * k + 2] |= 0x08000000u; // Gen8 send Src1Type = :d
+                                                        }
+                                                        else if (gpu.family == 1100 || gpu.family == 1101)
+                                                        {
+                                                                for (unsigned int k = 0; k < insns; k++)
+                                                                {
+                                                                        unsigned int *w = dst_k + 4 * k;
+
+                                                                        if (w[0] == 0x00000041u && w[1] == 0x20400208u && w[2] == 0x06000004u && w[3] == 0x00000010u)
+                                                                                w[0] = 0x00000009u, w[3] = 0x00000004u; // Gen11: mul ..., 0x10 -> shl ..., 4
+                                                                        else if ((w[0] & 0x7fu) == 0x31u && w[3] == 0x060a8000u)
+                                                                                w[3] = 0x040a8000u; // Gen11: Media Block Write MLen 3 -> 2
+                                                                }
+                                                        }
+                                                }
+                                        }
+                                        here = (here + bytes_k + 255) & ~255u;
+                                }
+                                gpu_srgb_upload();
+                                // The self-test: the card must finish its job (RING) and draw the picture the kernels draw (SELFTEST).
+                                hash = gpu_test_hash();
+                                if (!gpu_req_step(GPU_REQ_RING, hash == 0, gpu_last_error))
+                                {
+                                        gpu_say_kernel();
+                                        break;
+                                }
+                                if (!gpu_req_step(GPU_REQ_SELFTEST, hash != gpu_set->hash, 0))
+                                {
+                                        if (!gpu_recovered)
+                                                gpu.broken = 1;
+                                        break;
+                                }
+                                gpu_image_ok = gpu_set == &gpu_amd_rdna2 && gpu_image_test();
+                                gpu_nv12_ok = gpu_backend == &gpu_amd && gpu_nv12_test();
+                                if ((gpu_req.mask & (1u << GPU_REQ_UDMABUF | 1u << GPU_REQ_PRIME)) != (1u << GPU_REQ_UDMABUF | 1u << GPU_REQ_PRIME))
+                                        gpu_route_probe();
+                                gpu_kmsg_drain();
+                                return true;
+                        } while (0);
                 }
         }
-        gpu.family = gpu_req.family, gpu.device = gpu_req.device;
-        do
-        {
-                if (!gpu_req_step(GPU_REQ_NODE, !named, open_error))
-                        break;
-                if (!gpu_req_step(GPU_REQ_DRIVER, !known, 0))
-                        break;
-                if (!gpu_req_step(GPU_REQ_FAMILY, gpu.fd < 0, 0))
-                        break;
-                // The picked chip's kernel set, address space and slots: the window every address is placed in, the room of each slot's command words, and where
-                // the kernels go after the slots' arguments. A space too small for the path is the context's step (its errno).
-                {
-                        positive va = 0, maps = 0, top = 0;
-                        unsigned int room = gpu_backend->packets, code;
-
-                        gpu_set = gpu_backend->set(gpu.family);
-                        e = gpu_backend->window(gpu.family, &va, &maps, &top);
-                        // The slots' state (struct gpu_backend's state) after their arguments, 64-aligned; the kernels after it.
-                        unsigned int state = (GPU_SLOTS * room + 256 * GPU_SLOTS + 63) & ~63u;
-
-                        code = (state + GPU_SLOTS * gpu_backend->state + 255) & ~255u;
-                        code = code < 1024 ? 1024 : code;
-                        if (!e && (!gpu_set || gpu_set->count > GPU_KERNELS || (room & 255) || (gpu_backend->state & 63) || va + size > maps || maps >= top ||
-                                   top > GPU_VA_RECORD))
-                                e = 22;
-                        for (unsigned int i = 0, reach = code; !e && i < gpu_set->count; i++)
-                                if ((reach = (reach + gpu_set->kernels[i].size - 4 * gpu_set->skip + 255) & ~255u) > GPU_BASES_AT)
-                                        e = 28; // the kernels end before the bases begin
-                        if (!e)
-                                gpu_window.va = va, gpu_window.maps = maps, gpu_window.top = top, gpu_map_next = maps,
-                                gpu_layout.packets = room, gpu_layout.args = GPU_SLOTS * room, gpu_layout.state = gpu_backend->state ? state : 0,
-                                gpu_layout.code = code;
-                        if (e && !gpu_req_step(GPU_REQ_CONTEXT, true, e))
-                                break;
-                }
-                // Userptr: an anonymous page the kernel takes for the card; if userptr is refused, try udmabuf+PRIME fallback before aborting init.
-                {
-                        long page = system_call_6(syscall(mmap), 0, 4096, 3, 0x22, (positive)-1, 0);
-
-                        e = page < 0 && page > -4096 ? 12 : gpu_userptr_error((positive)page, GPU_USER_WRITTEN);
-                        gpu_userptr_ok = e == 0;
-                        if (!(page < 0 && page > -4096))
-                                system_call_2(syscall(munmap), (positive)page, 4096);
-                        if (e != 0)
-                        {
-                                gpu_route_probe();
-                                if ((gpu_req.mask & (1u << GPU_REQ_UDMABUF | 1u << GPU_REQ_PRIME)) == (1u << GPU_REQ_UDMABUF | 1u << GPU_REQ_PRIME))
-                                        gpu_userptr_gone = 1, e = 0;
-                        }
-                        if (!gpu_req_step(GPU_REQ_USERPTR, e != 0, e))
-                                break;
-                }
-                // The buffer, its VM map and the compute context: all of the card's own memory.
-                e = gpu_backend->buffer(size, GPU_VA, &gpu.handle, &offset);
-                if (!e)
-                        e = gpu_backend->context(&ctx, 0);
-                if (!e)
-                {
-                        at = system_call_6(syscall(mmap), 0, size, 3, 1, (positive)gpu.fd, offset);
-                        if (at < 0 && at > -4096)
-                                e = (unsigned int)-at & 255;
-                        else
-                                gpu.at = (unsigned int address_to)at;
-                }
-                if (!gpu_req_step(GPU_REQ_CONTEXT, e != 0, e))
-                        break;
-                gpu.ctx = ctx, gpu.size = size;
-                for (unsigned int i = 0, here = gpu_layout.code; i < gpu_set->count; i++)
-                {
-                        unsigned int bytes_k = gpu_set->kernels[i].size > 4 * gpu_set->skip ? gpu_set->kernels[i].size - 4 * gpu_set->skip : 0;
-
-                        gpu_kernel_at[i] = here;
-                        if (gpu_set->kernels[i].words && bytes_k)
-                        {
-                                unsigned int address_to dst_k = (unsigned int address_to)((p8 address_to)gpu.at + here);
-
-                                memory_copy(dst_k, gpu_set->kernels[i].words + gpu_set->skip, bytes_k);
-                                // Cross-gen Intel EU binary patching from Gen9 words (verified word-for-word against intel-probe kern7/kern8/kern9/kern11):
-                                if (gpu_backend == &gpu_i915_row)
-                                {
-                                        unsigned int insns = bytes_k / 16u;
-
-                                        if (gpu.family < 800)
-                                        {
-                                                for (unsigned int k = 0; k < insns; k++)
-                                                {
-                                                        unsigned int *w = dst_k + 4 * k;
-                                                        unsigned int op = w[0] & 0x7fu;
-                                                        unsigned int fsub = w[1] & 1u, freg = (w[1] >> 1) & 1u, mctrl = (w[1] >> 2) & 1u;
-                                                        unsigned int drf = (w[1] >> 3) & 3u, dtype = (w[1] >> 5) & 7u;
-                                                        unsigned int s0rf = (w[1] >> 9) & 3u, s0type = (w[1] >> 11) & 7u;
-                                                        unsigned int s1rf = (w[2] >> 25) & 3u, s1type = (w[2] >> 27) & 7u;
-
-                                                        if (op == 0x31u)
-                                                        {
-                                                                if (((w[0] >> 24) & 0xfu) == 0xcu)
-                                                                        w[0] = (w[0] & ~0x0f000000u) | (0x5u << 24); // Gen7 Render Cache SFID = 5
-                                                                s1type = 1u; // Gen7 send Src1Type = :d
-                                                        }
-                                                        else if (op == 0x20u && gpu.family < 750)
-                                                                w[3] = (unsigned int)((int)w[3] >> 3); // Ivy Bridge/VLV jmpi JIP is in qwords (8B)
-                                                        w[0] = (w[0] & ~0x80000000u) | (mctrl << 31);
-                                                        w[1] = (w[1] & 0xffff8000u) | drf | (dtype << 2) | (s0rf << 5) | (s0type << 7) | (s1rf << 10) | (s1type << 12);
-                                                        w[2] = (w[2] & 0x01ffffffu) | (fsub << 25) | (freg << 26);
-                                                }
-                                        }
-                                        else if (gpu.family == 800 || gpu.family == 801)
-                                        {
-                                                for (unsigned int k = 0; k < insns; k++)
-                                                        if ((dst_k[4 * k] & 0x7fu) == 0x31u)
-                                                                dst_k[4 * k + 2] |= 0x08000000u; // Gen8 send Src1Type = :d
-                                        }
-                                        else if (gpu.family == 1100 || gpu.family == 1101)
-                                        {
-                                                for (unsigned int k = 0; k < insns; k++)
-                                                {
-                                                        unsigned int *w = dst_k + 4 * k;
-
-                                                        if (w[0] == 0x00000041u && w[1] == 0x20400208u && w[2] == 0x06000004u && w[3] == 0x00000010u)
-                                                                w[0] = 0x00000009u, w[3] = 0x00000004u; // Gen11: mul ..., 0x10 -> shl ..., 4
-                                                        else if ((w[0] & 0x7fu) == 0x31u && w[3] == 0x060a8000u)
-                                                                w[3] = 0x040a8000u; // Gen11: Media Block Write MLen 3 -> 2
-                                                }
-                                        }
-                                }
-                        }
-                        here = (here + bytes_k + 255) & ~255u;
-                }
-                gpu_srgb_upload();
-                // The self-test: the card must finish its job (RING) and draw the picture the kernels draw (SELFTEST).
-                hash = gpu_test_hash();
-                if (!gpu_req_step(GPU_REQ_RING, hash == 0, gpu_last_error))
-                {
-                        gpu_say_kernel();
-                        break;
-                }
-                if (!gpu_req_step(GPU_REQ_SELFTEST, hash != gpu_set->hash, 0))
-                {
-                        gpu.broken = 1;
-                        break;
-                }
-                gpu_image_ok = gpu_set == &gpu_amd_rdna2 && gpu_image_test();
-                gpu_nv12_ok = gpu_backend == &gpu_amd && gpu_nv12_test();
-                if ((gpu_req.mask & (1u << GPU_REQ_UDMABUF | 1u << GPU_REQ_PRIME)) != (1u << GPU_REQ_UDMABUF | 1u << GPU_REQ_PRIME))
-                        gpu_route_probe();
-                gpu_kmsg_drain();
-                return true;
-        } while (0);
         // Settled: no node of a driver this file has, or every one of them answered with a chip that has no kernel set. The same nodes answer the same.
         gpu_req.settled = gpu_req.first == GPU_REQ_DRIVER || (gpu_req.first == GPU_REQ_FAMILY && !candidates && !unasked);
         // A card that drew the self-test wrong is kept broken past the stop (which zeroes the card's state): the compositor gives it up as untrusted and does
@@ -2372,7 +2433,7 @@ enum gpu_gone_why
 static const string_address gpu_gone_words[GPU_GONE_WHY_COUNT] = {
     "never", "by the 120-tick trim", "with its pages let go of", "by overlap with a written map", "to make room (every map held)",
     "as its pages were gone (msync)", "by the card's restart", "as a released import", "as an unimported buffer"};
-#define GPU_GONE 16
+#define GPU_GONE 64
 static struct { positive va, bytes, from, to; unsigned int handle, why, tick, listed; b32 written, dma, import; } gpu_gone[GPU_GONE];
 static unsigned int gpu_gone_at; // the ring's next slot is gpu_gone_at % GPU_GONE (the ones before it are the last)
 static void gpu_gone_put(positive va, positive bytes, positive from, positive to, unsigned int handle, enum gpu_gone_why why, b32 written, b32 dma, b32 import,
@@ -2485,20 +2546,30 @@ static void gpu_bo_va_range(unsigned int idx, positive *va, positive *bytes, pos
 
 static positive gpu_place_aligned(positive bytes, positive align, positive guard)
 {
-        positive at = gpu_map_next + guard + bytes <= GPU_VA_END ? gpu_map_next + guard : GPU_VA_MAPS + guard;
         unsigned int total = gpu_bo_count();
+        b32 wrapped = gpu_map_next + guard + bytes > GPU_VA_END;
 
-        at = (at + align - 1) & ~(align - 1);
-        for (unsigned int i = 0; i < total; i++)
+        for (unsigned int pass = 0; pass < 2; pass++)
         {
-                positive from, span, extra, gap;
+                positive at = (pass == 0 && !wrapped) ? gpu_map_next + guard : GPU_VA_MAPS + guard;
 
-                gpu_bo_va_range(i, &from, &span, &extra);
-                gap = guard + extra;
-                if (at < from + span + gap && from < at + bytes + gap)
-                        at = (from + span + gap + align - 1) & ~(align - 1), i = ~0u; // past it, and each held one looked at again
+                at = (at + align - 1) & ~(align - 1);
+                for (unsigned int i = 0; i < total; i++)
+                {
+                        positive from, span, extra, gap;
+
+                        gpu_bo_va_range(i, &from, &span, &extra);
+                        gap = guard + extra;
+                        if (at < from + span + gap && from < at + bytes + gap)
+                                at = (from + span + gap + align - 1) & ~(align - 1), i = ~0u; // past it, and each held one looked at again
+                }
+                if (at + bytes + guard <= GPU_VA_END)
+                        return at;
+                if (wrapped)
+                        break;
+                wrapped = true;
         }
-        return at + bytes + guard <= GPU_VA_END ? at : 0;
+        return 0;
 }
 
 // Where an import is placed: at a whole 64 KiB. A client's tiled buffer is laid out in blocks of 64 KiB whose pipe and bank bits are the address's own
@@ -2627,8 +2698,14 @@ static void gpu_map_refused(positive from)
                 if (!(made < 0 && made > -4096))
                         page = (unsigned char *)made, page[0] = 1;
         }
-        gpu_map_probe = (gpu_backend->identify(gpu.fd, &family, &device) == 0 ? 1u : 0u) | (page ? gpu_userptr_error((positive)page, GPU_USER_WRITTEN) : 255u) << 8 |
-                        gpu_userptr_error(from, GPU_USER_WRITTEN) << 16 | gpu_userptr_error(from, GPU_USER_LATER) << 24;
+        {
+                unsigned int kept_103 = gpu_gfx103, kept_maj = gpu_amd_gfx_major, kept_min = gpu_amd_gfx_minor;
+                positive kept_va = gpu_amd_va_max;
+
+                gpu_map_probe = (gpu_backend->identify(gpu.fd, &family, &device) == 0 ? 1u : 0u) | (page ? gpu_userptr_error((positive)page, GPU_USER_WRITTEN) : 255u) << 8 |
+                                gpu_userptr_error(from, GPU_USER_WRITTEN) << 16 | gpu_userptr_error(from, GPU_USER_LATER) << 24;
+                gpu_gfx103 = kept_103, gpu_amd_gfx_major = kept_maj, gpu_amd_gfx_minor = kept_min, gpu_amd_va_max = kept_va;
+        }
         gpu_say_kernel();
 }
 
@@ -2699,14 +2776,14 @@ static b32 gpu_map_dmabuf(const struct gpu_region address_to r, positive from, p
 
 static b32 gpu_map_try(const void *addr, positive size, b32 written)
 {
-        positive from = (positive)addr & ~4095ull, to = ((positive)addr + size + 4095) & ~4095ull, at;
+        positive from = (positive)addr & ~4095ull, to = ((positive)addr + size + 4095) & ~4095ull, orig_from = from, orig_to = to, at;
         unsigned int handle = 0, e, old = 0;
         long taken = 0;
         struct gpu_region region;
-        b32 own = gpu_region_of(from, to, &region), first = own && !gpu_own_userptr && gpu_memfd_sealed(region.fd);
+        b32 own = gpu_region_of(from, to, &region), first = own && !gpu_own_userptr && gpu_memfd_sealed(region.fd), widened = false;
 
         if (first && region.whole && region.base + (region.bytes & ~4095ull) >= to && !(region.base & 4095))
-                from = region.base, to = region.base + (region.bytes & ~4095ull);
+                from = region.base, to = region.base + (region.bytes & ~4095ull), widened = (from != orig_from || to != orig_to);
         for (unsigned int i = 0; i < gpu_map_count; i++)
                 if ((written || gpu_maps[i].written) && from < gpu_maps[i].to && gpu_maps[i].from < to && gpu_maps[i].handed && gpu_maps[i].used == gpu_tick)
                         return gpu_map_why = 9, false;
@@ -2717,6 +2794,18 @@ static b32 gpu_map_try(const void *addr, positive size, b32 written)
                                 return gpu_map_why = 10, false;
                         gpu_drop(i--, GPU_GONE_OVERLAP);
                 }
+        if (gpu_map_count == GPU_MAPS)
+        {
+                // Reclaim forgotten unhanded slots (even from this tick) before LRU eviction.
+                for (unsigned int i = 0; i < gpu_map_count; i++)
+                        if (!gpu_maps[i].from && !gpu_maps[i].to && !gpu_maps[i].handed)
+                        {
+                                if (!gpu_idle())
+                                        return gpu_map_why = 10, false;
+                                gpu_drop(i, GPU_GONE_FORGET);
+                                break;
+                        }
+        }
         for (unsigned int i = 1; gpu_map_count == GPU_MAPS && i < GPU_MAPS; i++)
                 old = gpu_tick - gpu_maps[i].used > gpu_tick - gpu_maps[old].used ? i : old;
         if (gpu_map_count == GPU_MAPS && gpu_maps[old].used != gpu_tick)
@@ -2731,6 +2820,13 @@ static b32 gpu_map_try(const void *addr, positive size, b32 written)
                 return gpu_map_why = 2, false;
         if (first && gpu_map_dmabuf(&region, from, to, at, written))
                 return true;
+        if (widened)
+        {
+                // Whole-memfd udmabuf failed (e.g. >64 MiB default udmabuf size_limit_mb); retry the exact requested slice.
+                from = orig_from, to = orig_to;
+                if (first && gpu_map_dmabuf(&region, from, to, at, written))
+                        return true;
+        }
         if (!gpu_userptr_off && !gpu_userptr_gone)
         {
                 taken = -(long)gpu_backend->user(from, to - from, written ? GPU_USER_WRITTEN : GPU_USER_READ, &handle);
@@ -2738,15 +2834,22 @@ static b32 gpu_map_try(const void *addr, positive size, b32 written)
                 if (taken == 0)
                 {
                         if ((e = gpu_backend->bind(handle, at, to - from, written)) != 0)
-                                return gpu_close(handle), gpu_map_why = 4 | e << 8, false;
+                        {
+                                gpu_close(handle), gpu_map_why = 4 | e << 8;
+                                if (own && !first)
+                                        return gpu_map_dmabuf(&region, from, to, at, written);
+                                return false;
+                        }
                         gpu_map_record(from, to, at, handle, written, 0, 0, 0);
                         gpu_maps_user++;
                         if (first)
                                 gpu_maps_own_user++, gpu_maps_own_errno = gpu_map_why >> 8;
                         return true;
                 }
-                if (taken == -19 || taken == -95 || taken == -38 ||
-                    (!gpu_maps_user && !gpu_userptr_ok && (taken == -22 || taken == -14 || taken == -1)))
+                if (taken == -19 && gpu_userptr_ok)
+                        return gpu_lost = 1, gpu_map_why = 3 | (unsigned int)-taken << 8, false;
+                if (taken == -95 || taken == -38 ||
+                    (!gpu_maps_user && !gpu_userptr_ok && (taken == -19 || taken == -22 || taken == -14 || taken == -1)))
                         gpu_userptr_gone = 1;
                 else if (taken != -22 && taken != -14 && taken != -1)
                         return gpu_map_why = 3 | (unsigned int)-taken << 8, gpu_map_refused(from), false;
@@ -3054,6 +3157,8 @@ static unsigned int gpu_i915_mocs(void)
                 return 5u;
         if (gpu.family == 1255)
                 return 3u;
+        if (gpu.family >= 2000)
+                return 4u;
         return 2u;
 }
 
@@ -3114,7 +3219,7 @@ static void gpu_i915_frame(unsigned int address_to words, unsigned int sbase, un
 
         if (gpu.family < 800)
         {
-                unsigned int threads = gpu_i915.eu_total ? gpu_i915.eu_total * 7u - 1u : 63u;
+                unsigned int threads = gpu_i915.eu_total ? gpu_i915.eu_total * 7u - 1u : (gpu.family == 701 ? 31u : 47u);
 
                 if (threads > 139u)
                         threads = 139u;
@@ -3144,8 +3249,8 @@ static void gpu_i915_frame(unsigned int address_to words, unsigned int sbase, un
         if (gpu.family >= 1200)
                 words[n++] = 1, words[n++] = 0, words[n++] = 0; // Bindless Sampler State Base Address + Size (Gen12+)
         {
-                unsigned int tpeu = (gpu.family >= 1100 && gpu.family < 1200) ? 8u : 7u;
-                unsigned int max_threads = gpu.family >= 1200 ? 671u : gpu.family >= 1100 ? 511u : 167u;
+                unsigned int tpeu = 7u;
+                unsigned int max_threads = gpu.family >= 1200 ? 671u : gpu.family >= 1100 ? 447u : 167u;
                 unsigned int eu = gpu_backend == &gpu_i915_row ? gpu_i915.eu_total : 0u;
                 unsigned int threads = eu ? eu * tpeu - 1u : 63u;
 
@@ -3184,7 +3289,10 @@ static unsigned int gpu_intel_xehp_frame(unsigned int address_to words, unsigned
         words[n++] = 0xfffff000u | 1; words[n++] = 65536u | 1; words[n++] = 0xfffff000u | 1; words[n++] = 65536u | 1;
         words[n++] = 1; words[n++] = 0; words[n++] = 0xfffff000u;
         words[n++] = 1; words[n++] = 0; words[n++] = 0;
-        words[n++] = 0x61050000u; words[n++] = 0; // STATE_COMPUTE_MODE
+        if (gpu.family >= 2000)
+                words[n++] = 0x61050001u, words[n++] = 0, words[n++] = 0; // STATE_COMPUTE_MODE (3 dw on Xe2+)
+        else
+                words[n++] = 0x61050000u, words[n++] = 0; // STATE_COMPUTE_MODE (2 dw on Xe-HPG/LPG)
         words[n++] = 0x70020004u; words[n++] = 0; words[n++] = 0; words[n++] = (671u << 16); words[n++] = 0; words[n++] = 0; // CFE_STATE (6 dw)
         // COMPUTE_WALKER: 39 dw on Xe-HPG/LPG (0x70070025), 40 dw on Xe2+ (0x70070026), SIMD16, inline 8-dw IDD + CURBE.
         {
@@ -3196,11 +3304,10 @@ static unsigned int gpu_intel_xehp_frame(unsigned int address_to words, unsigned
                 words[base + 2] = 64u;                  // IndirectDataLength (CURBE)
                 words[base + 3] = sbase + 192u;         // IndirectDataStartAddress
                 words[base + 4] = 1u << 30;             // SIMDSize = SIMD16
-                words[base + 6] = cols;                 // ThreadGroupIDXDimension
-                words[base + 7] = rows;                 // ThreadGroupIDYDimension
-                words[base + 8] = 1u;                   // ThreadGroupIDZDimension
-                words[base + 9] = 0xffffu;              // RightExecutionMask
-                words[base + 10] = 0xffffffffu;         // BottomExecutionMask
+                words[base + 7] = cols;                 // ThreadGroupIDXDimension
+                words[base + 8] = rows;                 // ThreadGroupIDYDimension
+                words[base + 9] = 1u;                   // ThreadGroupIDZDimension
+                words[base + 10] = 0xffffu;             // ExecutionMask
                 // Inline 8-dw INTERFACE_DESCRIPTOR_DATA at DW18..25 (Xe-HPG/LPG) or DW19..26 (Xe2+):
                 {
                         unsigned int idd = base + (gpu.family >= 2000 ? 19u : 18u);
@@ -3268,8 +3375,8 @@ static unsigned int gpu_i915_scale_batch(const struct gpu_job *job, unsigned int
 {
         const struct gpu_args address_to a = gpu_i915_args(job, room);
 
-        if (!a || !a->w || a->w > 65535u || !a->rows || a->rows > 16384u || !a->sp || a->sp > 65535u || !a->dp || a->dp > 65535u || (a->dp & 15) || a->dp < a->w ||
-            (a->sp & 15) || (positive)a->dp * a->rows > (1ull << 26) || a->s < GPU_VA || a->d < GPU_VA || a->g < GPU_VA || (a->s & 15) || (a->d & 15) || (a->g & 15))
+        if (!a || !a->w || a->w > 65535u || !a->rows || a->rows > 16384u || !a->sp || a->sp > 65535u || !a->dp || a->dp > 65535u || (a->dp & 3) || a->dp < a->w ||
+            (positive)a->dp * a->rows > (1ull << 26) || a->s < GPU_VA || a->d < GPU_VA || a->g < GPU_VA || (a->s & 15) || (a->d & 15) || (a->g & 15))
                 return 0;
         {
                 const struct gpu_i915_surf surfs[3] = {{a->d, 16384, 16384, 16384}, {a->s, 16384, 16384, 16384}, {a->g, 16384, 16384, 16384}};
@@ -3318,7 +3425,7 @@ static unsigned int gpu_i915_scene_batch(const struct gpu_job *job, unsigned int
         positive base, img_base = 0, img_min = 0, img_max = 0;
         int has_img = 0;
 
-        if (!a || !a->count || a->count > 16384u || a->ops < GPU_VA || (a->ops & 63) || !a->sp || (a->sp & 3) || a->sp > 4096u || !a->gp || a->gp > 16384u ||
+        if (!a || !a->count || a->count > 16384u || a->ops < GPU_VA || (a->ops & 63) || !a->sp || (a->sp & 3) || !a->gp || a->gp > 16384u ||
             !a->dp || a->dp > 65536u || (a->dp & 15) || a->dp < a->sp || a->x0 > 65535u || a->y0 > 65535u || !a->w || !a->rows || a->d < GPU_VA)
                 return 0;
         // The records (8 words, 32 bytes each) are read through the CPU mapping of the buffer: they must lie inside it.
@@ -3327,7 +3434,7 @@ static unsigned int gpu_i915_scene_batch(const struct gpu_job *job, unsigned int
         px0 = a->x0 << 6, py0 = a->y0 << 2;
         px1 = (positive)px0 + (positive)a->w < a->sp ? px0 + a->w : a->sp;
         py1 = (positive)py0 + 4 * (positive)a->rows < a->gp ? py0 + 4 * a->rows : a->gp; // in 64 bits: 4 * a->rows wraps at 2^30 rows
-        if (px0 >= px1 || py0 >= py1 || ((px1 - px0) & 3))
+        if (px0 >= px1 || py0 >= py1 || (px1 - px0) > 4096u || ((px1 - px0) & 3))
                 return 0;
         base = a->d + 4 * ((positive)py0 * a->dp + px0);
         if (base & 31)
@@ -3493,7 +3600,7 @@ static int gpu_done(positive sequence)
 // Whether the buffer is the processor's again: no job is pending (the last one submitted is done, or over with its context).
 static b32 gpu_idle(void)
 {
-        return !gpu.pending || gpu_done(gpu.pending) > 0;
+        return !gpu.pending || (gpu_done(gpu.pending) != 0 && !gpu.pending);
 }
 
 // The slot the next job is built in: the first when no job is pending, else the one the pending job is not in, once the job before it (in that slot) is
@@ -3564,6 +3671,16 @@ static void gpu_fault_say(positive at)
                         return;
                 }
         }
+        for (unsigned int i = 0; i < gpu.imports; i++)
+                if (gpu.imported_bytes[i] &&
+                    at >= (gpu.imported_va[i] > GPU_IMPORT_GUARD ? gpu.imported_va[i] - GPU_IMPORT_GUARD : 0) &&
+                    at < gpu.imported_va[i] + gpu.imported_bytes[i] + GPU_IMPORT_GUARD)
+                {
+                        gpu_fault_import = gpu.imported_va[i];
+                        n = gpu_text_num(gpu_fault, gpu_text_put(gpu_fault, n, room, "guard band of held import, handle "), room, gpu.imported[i], 10);
+                        gpu_text_put(gpu_fault, n, room, gpu.imported_dead[i] ? ", released" : ", live");
+                        return;
+                }
         gpu_text_put(gpu_fault, n, room, "in no map or import the table ever made");
 }
 
@@ -4323,6 +4440,25 @@ static positive gpu_scene_submit(positive ops_at, unsigned int n, positive bins_
                 return gpu_end = gpu_lost ? GPU_END_NONE : GPU_END_LATE, 0;
         at = scratch ? bins_at : bins_at + side * room;
         built = gpu_scene_build(ops_at, n, at, room, d_at, pitch, w, h, dx0, dy0, dx1, dy1, binned);
+        if (built < 0 && gpu_end == GPU_END_OVERFLOW && !scratch && bins_at < top && gpu_done(gpu_bins.job[side ^ 1u]) != 0)
+        {
+                positive full_room = (top - bins_at) & ~4095ull;
+
+                if (full_room > room)
+                {
+                        gpu_end = GPU_END_NONE;
+                        at = bins_at;
+                        built = gpu_scene_build(ops_at, n, at, full_room, d_at, pitch, w, h, dx0, dy0, dx1, dy1, binned);
+                        if (built > 0 && (sequence = gpu_go()) != 0)
+                        {
+                                gpu_bins.job[0] = gpu_bins.job[1] = sequence, gpu_bins.side = side, gpu_bins.at = at, gpu_bins.ops_at = ops_at, gpu_bins.count = n;
+                                gpu_bins.w = w, gpu_bins.h = h;
+                                gpu_bins.dx0 = binned[0], gpu_bins.dy0 = binned[1], gpu_bins.dx1 = binned[2], gpu_bins.dy1 = binned[3];
+                                return sequence;
+                        }
+                        return 0;
+                }
+        }
         if (built <= 0 || !(sequence = gpu_go()))
                 return 0;
         gpu_bins.job[side] = sequence, gpu_bins.side = side, gpu_bins.at = at, gpu_bins.ops_at = ops_at, gpu_bins.count = n, gpu_bins.w = w, gpu_bins.h = h;
@@ -4784,8 +4920,10 @@ static b32 gpu_image_test(void)
         positive base = gpu.size - (1 << 20), src_at = base + 131072, dst_at = base + 262144;
         unsigned int address_to src = (unsigned int address_to)((p8 address_to)gpu.at + src_at), address_to dst = (unsigned int address_to)((p8 address_to)gpu.at + dst_at);
         unsigned int desc[8], seed = 777u, kind;
+        int was_patient = gpu_patient;
         b32 ok = true;
 
+        gpu_patient = gpu_recovered ? 2 : 1;
         for (unsigned int i = 0; i < 64 * 4; i++)
                 seed = seed * 1664525u + 1013904223u, src[i] = seed;
         // Each way the kernel reads: the word as it is (32_UINT), and the four channels as UNORM bytes (DCC's way); each straight, then swapped from (3, 1).
@@ -4793,11 +4931,17 @@ static b32 gpu_image_test(void)
         {
                 memory_zero(dst, 64 * 4 * 4);
                 if (!(kind = gpu_amd_image(desc, GPU_VA + src_at, 0, 64, 4, 0, false, unorm)) || !gpu_image(desc, kind, 0, 0, GPU_VA + dst_at, 64, 64, 4))
-                        return false;
+                {
+                        ok = false;
+                        break;
+                }
                 ok = !memory_compare(dst, src, 64 * 4 * 4);
                 memory_zero(dst, 64 * 4 * 4);
                 if (!ok || !(kind = gpu_amd_image(desc, GPU_VA + src_at, 0, 64, 4, 0, true, unorm)) || !gpu_image(desc, kind, 3, 1, GPU_VA + dst_at, 64, 50, 3))
-                        return false;
+                {
+                        ok = false;
+                        break;
+                }
                 for (unsigned int y = 0; y < 3 && ok; y++)
                         for (unsigned int x = 0; x < 50 && ok; x++)
                         {
@@ -4806,6 +4950,9 @@ static b32 gpu_image_test(void)
                                 ok = dst[y * 64 + x] == ((c & 0xff00ff00u) | (c >> 16 & 0xff) | (c & 0xff) << 16);
                         }
         }
+        if (gpu.pending)
+                gpu_finish();
+        gpu_patient = was_patient;
         return ok;
 }
 
@@ -4830,8 +4977,10 @@ static b32 gpu_nv12_test(void)
         p8 address_to luma = (p8 address_to)gpu.at + luma_at, address_to chroma = (p8 address_to)gpu.at + chroma_at;
         unsigned int address_to dst = (unsigned int address_to)((p8 address_to)gpu.at + dst_at), address_to tab = (unsigned int address_to)((p8 address_to)gpu.at + tab_at);
         unsigned int seed = 4242u;
+        int was_patient = gpu_patient;
         b32 ok, done;
 
+        gpu_patient = gpu_recovered ? 2 : 1;
         for (unsigned int i = 0; i < 64 * 4; i++)
                 seed = seed * 1664525u + 1013904223u, luma[i] = (p8)(seed >> 24);
         for (unsigned int i = 0; i < 64 * 2; i++)
@@ -4844,6 +4993,9 @@ static b32 gpu_nv12_test(void)
         gpu_nv12_trying = 1;
         done = gpu_nv12(GPU_VA + luma_at, 64, GPU_VA + chroma_at, 64, GPU_VA + dst_at, 64, GPU_VA + tab_at, 64, 4);
         gpu_nv12_trying = 0;
+        if (gpu.pending)
+                gpu_finish();
+        gpu_patient = was_patient;
         ok = done;
         for (unsigned int y = 0; y < 4 && ok; y++)
                 for (unsigned int x = 0; x < 64 && ok; x++)

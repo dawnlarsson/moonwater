@@ -15,7 +15,7 @@ static struct
 {
         int up, dead, force, told, hung_off, cache_next;
         enum compositor_gpu_why dead_why;
-        unsigned int failures, cool_steps, blamed;
+        unsigned int failures, cool_steps, blamed, output_fails;
         b64 cool_until, hung_at, blamed_at, late_first, late_next;
         positive out, out_key, cache[2], cache_key[2], turn_va[WINDOWS_OUTPUTS], turn_key[WINDOWS_OUTPUTS];
         b32 restart_due;
@@ -206,6 +206,7 @@ static void compositor_gpu_recover(void)
         compositor_gpu_state.cache[0] = compositor_gpu_state.cache[1] = compositor_gpu_state.cache_key[0] = compositor_gpu_state.cache_key[1] = 0;
         memory_zero(compositor_gpu_state.turn_va, sizeof(compositor_gpu_state.turn_va));
         memory_zero(compositor_gpu_state.turn_key, sizeof(compositor_gpu_state.turn_key));
+        compositor_gpu_state.restart_due = 0, compositor_gpu_state.output_fails = 0;
         if (compositor.card >= 0)
                 gpu_bus_of(compositor.card, gpu_display, sizeof(gpu_display));
         else
@@ -223,7 +224,8 @@ static void compositor_gpu_recover(void)
 // and the next one on the new card. Nothing else recovers the card on a present that refused before the scene (a picture, a scanout).
 static void compositor_gpu_lost_check(void)
 {
-        if (gpu_lost && !compositor_gpu_state.dead)
+        if (gpu_lost && !compositor_gpu_state.dead &&
+            (!compositor_gpu_state.cool_until || clock_monotonic_nanoseconds() >= compositor_gpu_state.cool_until))
                 compositor_gpu_recover();
 }
 
@@ -273,7 +275,7 @@ static void compositor_gpu_job_failed(void)
         b64 now = clock_monotonic_nanoseconds();
         b32 blamed;
 
-        if (gpu_end == GPU_END_LATE || gpu_end == GPU_END_OVERFLOW)
+        if (gpu_end == GPU_END_LATE || gpu_end == GPU_END_OVERFLOW || (gpu_end == GPU_END_NONE && gpu_last_error == 95))
                 return;
         if (gpu_end != GPU_END_HUNG && gpu_end != GPU_END_WAIT)
         {
@@ -309,6 +311,8 @@ static void compositor_gpu_job_failed(void)
 // Why a job the card did not finish is the present's loss: it was late (a job that may still run: busy), overflowed the bin pool, or hung/was refused.
 static enum compositor_gpu_why compositor_gpu_job_why(void)
 {
+        if (gpu_end == GPU_END_NONE && gpu_last_error == 95)
+                return COMPOSITOR_GPU_WHY_OTHER;
         return gpu_end == GPU_END_LATE ? COMPOSITOR_GPU_WHY_BUSY : gpu_end == GPU_END_OVERFLOW ? COMPOSITOR_GPU_WHY_POOL : COMPOSITOR_GPU_WHY_HANG;
 }
 
@@ -329,9 +333,9 @@ static void compositor_gpu_fail(unsigned int flags)
                 if (!gpu.pending)
                         gpu_handed_clear();
         }
-        if (gpu_lost)
-                compositor_gpu_recover();
         compositor_gpu_job_failed();
+        if (gpu_lost && (!compositor_gpu_state.cool_until || clock_monotonic_nanoseconds() >= compositor_gpu_state.cool_until))
+                compositor_gpu_recover();
 }
 
 // Look up or create a writable GPU mapping for ptr[0..bytes) (mapping map_bytes on miss); recovers on gpu_lost if requested.
@@ -362,14 +366,21 @@ static positive compositor_gpu_output(void)
                                 gpu_unimport(compositor_gpu_state.cache[at], GPU_GONE_UNIMPORT);
                         compositor_gpu_state.cache[at] = gpu_import(compositor.card, compositor.scanout_handle, compositor.scanout_bytes);
                         compositor_gpu_state.cache_key[at] = key;
+                        if (compositor_gpu_state.cache[at])
+                                compositor_gpu_state.output_fails = 0;
                         // On hybrid/cross-GPU setups (e.g. simpledrm/nouveau display + iGPU render node), a failed scanout
-                        // PRIME import would otherwise repeat PRIME_HANDLE_TO_FD/FD_TO_HANDLE on every frame forever; settle onto CPU.
-                        if (!compositor_gpu_state.cache[at] && gpu_req.pick == 2)
+                        // PRIME import would otherwise repeat PRIME_HANDLE_TO_FD/FD_TO_HANDLE on every frame forever; settle after 3 consecutive failures.
+                        else if (gpu_req.pick == 2 && ++compositor_gpu_state.output_fails >= 3)
                         {
                                 gpu_stop();
                                 compositor_gpu_state.up = 0, compositor_gpu_state.dead = 1;
                                 compositor_gpu_state.dead_why = COMPOSITOR_GPU_WHY_OUTPUT;
                                 compositor_gpu_state.settled = gpu_req.nodes;
+                                compositor_gpu_state.out = 0, compositor_gpu_state.out_key = 0;
+                                compositor_gpu_state.cache[0] = compositor_gpu_state.cache[1] = 0;
+                                compositor_gpu_state.cache_key[0] = compositor_gpu_state.cache_key[1] = 0;
+                                memory_zero(compositor_gpu_state.turn_va, sizeof(compositor_gpu_state.turn_va));
+                                memory_zero(compositor_gpu_state.turn_key, sizeof(compositor_gpu_state.turn_key));
                                 return 0;
                         }
                 }
@@ -488,7 +499,7 @@ static b32 compositor_gpu_spots(void)
                 int box[4], layers = c->kind == COMPOSITOR_CHIP_HINT ? 1 : 2;
                 unsigned long cells;
 
-                if (c->w <= 0 || c->w > 255 || c->h <= 0)
+                if (c->w <= 0 || c->h <= 0)
                         return g->why = COMPOSITOR_GPU_WHY_OTHER, false;
                 cells = (unsigned long)c->w * (unsigned long)c->h;
 
@@ -496,21 +507,40 @@ static b32 compositor_gpu_spots(void)
                 for (int layer = 0; layer < layers; layer++)
                 {
                         const unsigned char *cover = c->cover + (unsigned long)layer * cells;
-                        unsigned char *table = 0;
-                        unsigned int at, ink = c->kind == COMPOSITOR_CHIP_HINT || layer ? COMPOSITOR_CHIP_GLYPH : COMPOSITOR_CHIP_BODY;
+                        unsigned int ink = c->kind == COMPOSITOR_CHIP_HINT || layer ? COMPOSITOR_CHIP_GLYPH : COMPOSITOR_CHIP_BODY;
                         unsigned long tag = (unsigned long)memory_hash_33((address_any)cover, (positive)cells) ^ ((unsigned long)c->kind << 56);
+
                         if (!tag)
                                 tag = 1;
-                        if (g->count + 8 > g->room - 400)
-                                return g->why = COMPOSITOR_GPU_WHY_POOL, false;
-                        at = compositor_gpu_slot_tag(c->w, c->h, 20 + layer + (c->kind == COMPOSITOR_CHIP_HINT ? 2 : 0), (int)c->alpha,
-                                                     tag, (unsigned int)cells, &table);
-                        if (!at)
-                                return g->why = COMPOSITOR_GPU_WHY_POOL, false;
-                        // A table kept from an earlier present has this key's coverage already (the key is the size, the layer and the alpha).
-                        if (table)
-                                memory_scale_u8(table, cover, (positive)cells, c->alpha);
-                        compositor_gpu_rect(5, box[0], box[1], box[0] + box[2], box[1] + box[3], ink, 0, at, (unsigned int)c->w);
+                        // Split wide chips (>255 px) into horizontal strips <= 255 px wide so op 5's 8-bit pitch never forces a full-frame CPU fallback.
+                        for (int sx = 0; sx < c->w; sx += 255)
+                        {
+                                int sw = c->w - sx > 255 ? 255 : c->w - sx;
+                                unsigned long scells = (unsigned long)sw * (unsigned long)c->h;
+                                unsigned char *table = 0;
+                                unsigned int at;
+                                unsigned long stag = tag ^ ((unsigned long)sx << 40);
+
+                                if (!stag)
+                                        stag = 1;
+                                if (g->count + 8 > g->room - 400)
+                                        return g->why = COMPOSITOR_GPU_WHY_POOL, false;
+                                at = compositor_gpu_slot_tag(sw, c->h, 20 + layer + (c->kind == COMPOSITOR_CHIP_HINT ? 2 : 0), (int)c->alpha,
+                                                             stag, (unsigned int)scells, &table);
+                                if (!at)
+                                        return g->why = COMPOSITOR_GPU_WHY_POOL, false;
+                                if (table)
+                                {
+                                        if (sw == c->w)
+                                                memory_scale_u8(table, cover, (positive)scells, c->alpha);
+                                        else
+                                                for (int ry = 0; ry < c->h; ry++)
+                                                        memory_scale_u8(table + (unsigned long)ry * (unsigned long)sw,
+                                                                        cover + (unsigned long)ry * (unsigned long)c->w + (unsigned long)sx,
+                                                                        (positive)sw, c->alpha);
+                                }
+                                compositor_gpu_rect(5, box[0] + sx, box[1], box[0] + sx + sw, box[1] + box[3], ink, 0, at, (unsigned int)sw);
+                        }
                 }
         }
         return true;
@@ -524,7 +554,7 @@ static b32 compositor_gpu_spots(void)
         the frame in the list the present is made from is then an ordinary frame of that picture. The caller's frames are not changed: the first scaled frame makes a copy of
         the array, which the answer's pointer is then. COMPOSITOR_GPU_WHY_DRAWN when the frames are as they should be drawn, or the reason the card is refused them.
 */
-#define COMPOSITOR_GPU_SCALED 8
+#define COMPOSITOR_GPU_SCALED 16
 #define COMPOSITOR_GPU_SCALED_MOST (128ul << 20)
 static struct compositor_frame *compositor_gpu_scaled_copy; // the rows' (compositor_rows_make), COMPOSITOR_FRAMES_FOR the rows in use
 static struct
@@ -555,13 +585,15 @@ static enum compositor_gpu_why compositor_gpu_scale_frames(const struct composit
                 positive tables_at = COMPOSITOR_GPU_BINS_AT + (positive)used * COMPOSITOR_GPU_SCALE_TABLES;
                 unsigned int address_to tables = (unsigned int address_to)((p8 address_to)gpu.at + tables_at);
                 positive bytes, src_va, dst_va;
+                unsigned int dp;
 
                 if (f->builtin || !f->pixels || !compositor_scaled(f))
                         continue;
                 if (used == COMPOSITOR_GPU_SCALED || f->width <= 0 || f->height <= 0 || f->source_w <= 0 || f->source_h <= 0 || f->width > 16384 || f->height > 16384 ||
                     f->source_w > 16384 || f->source_h > 16384 || f->pitch < (unsigned long)f->source_w)
                         return COMPOSITOR_GPU_WHY_SCALED;
-                bytes = 4ull * (positive)f->width * (positive)f->height;
+                dp = ((unsigned int)f->width + 3u) & ~3u;
+                bytes = 4ull * (positive)dp * (positive)f->height;
                 if (bytes > COMPOSITOR_GPU_SCALED_MOST)
                         return COMPOSITOR_GPU_WHY_SCALED;
                 source = *f;
@@ -618,19 +650,19 @@ static enum compositor_gpu_why compositor_gpu_scale_frames(const struct composit
                 {
                         // A job of the present's, submitted with the scenes (compositor_card_go): the scene that reads this picture runs after it on the ring.
                         const struct compositor_card_step blit = {COMPOSITOR_CARD_SCALE, (unsigned int)f->width, (unsigned int)f->height, (unsigned int)f->pitch,
-                                                                  (unsigned int)f->width, src_va, dst_va, GPU_VA + tables_at, {0, 0, 0, 0}};
+                                                                  dp, src_va, dst_va, GPU_VA + tables_at, {0, 0, 0, 0}};
 
                         if (!compositor_card_add(&blit))
                                 return COMPOSITOR_GPU_WHY_SCALED;
                 }
-                else if (!gpu_blit(src_va, (unsigned int)f->pitch, dst_va, (unsigned int)f->width, GPU_VA + tables_at, 7, (unsigned int)f->width, (unsigned int)f->height))
+                else if (!gpu_blit(src_va, (unsigned int)f->pitch, dst_va, dp, GPU_VA + tables_at, 7, (unsigned int)f->width, (unsigned int)f->height))
                 {
                         compositor_gpu_fail(0);
                         return compositor_gpu_job_why();
                 }
                 if (*io == frames)
                         memory_copy(compositor_gpu_scaled_copy, frames, (positive)count * sizeof(*frames)), *io = compositor_gpu_scaled_copy;
-                compositor_gpu_scaled_copy[k].pixels = compositor_gpu_scaled_pool[used].memory, compositor_gpu_scaled_copy[k].pitch = (unsigned long)f->width;
+                compositor_gpu_scaled_copy[k].pixels = compositor_gpu_scaled_pool[used].memory, compositor_gpu_scaled_copy[k].pitch = (unsigned long)dp;
                 compositor_gpu_scaled_copy[k].gpu_base = dst_va;
                 compositor_gpu_scaled_copy[k].source_w = compositor_gpu_scaled_copy[k].source_h = 0;
                 used++;
@@ -745,8 +777,8 @@ static enum compositor_gpu_why compositor_gpu_draw(const struct compositor_frame
         compositor_gpu_lost_check();
         if (compositor_gpu_state.dead)
                 return compositor_gpu_state.dead_why ? compositor_gpu_state.dead_why : COMPOSITOR_GPU_WHY_DEAD;
-        if (compositor_gpu_state.cool_until && clock_monotonic_nanoseconds() < compositor_gpu_state.cool_until)
-                return COMPOSITOR_GPU_WHY_DEAD; // cooling down after hangs: the processor draws until the card is tried again
+        if (compositor_gpu_state.restart_due || (compositor_gpu_state.cool_until && clock_monotonic_nanoseconds() < compositor_gpu_state.cool_until))
+                return COMPOSITOR_GPU_WHY_DEAD; // cooling down or awaiting restart after hangs/resume: the processor draws until the card is tried again
         if (compositor.card < 0 && !compositor_gpu_state.force)
                 return COMPOSITOR_GPU_WHY_HEADLESS;
         // A width not a multiple of 4 is drawn to the multiple below it, the columns past it by the processor (compositor_present's strip); a pitch
@@ -776,7 +808,7 @@ static enum compositor_gpu_why compositor_gpu_draw(const struct compositor_frame
                 damage_add(&rects, r, COMPOSITOR_GPU_MERGE_SLACK);
         }
         if (!any_nonempty)
-                return COMPOSITOR_GPU_WHY_OTHER;
+                return COMPOSITOR_GPU_WHY_DRAWN;
         // The card draws the columns below g->width; a damage wholly past them is the processor's strip alone (compositor_present_frames), and drawn.
         if (!rects.count)
                 return COMPOSITOR_GPU_WHY_DRAWN;
@@ -787,24 +819,48 @@ static enum compositor_gpu_why compositor_gpu_draw(const struct compositor_frame
                 enum compositor_gpu_why scaled = compositor_gpu_scale_frames(&frames, count); // the landings made pictures of their own size, and the frames those
 
                 if (scaled != COMPOSITOR_GPU_WHY_DRAWN)
+                {
+                        if (!gpu.pending)
+                                gpu_handed_clear();
                         return scaled;
+                }
         }
         for (unsigned int k = 0; k < count; k++)
                 if (!compositor_gpu_picture(&frames[k]))
+                {
+                        if (!gpu.pending)
+                                gpu_handed_clear();
                         return COMPOSITOR_GPU_WHY_PICTURE;
+                }
         // The wallpaper, the ground the scene is laid on: mapped once and kept while it is (compositor_wall_take forgets the one let go of).
         {
                 struct compositor_frame wall;
 
                 if (compositor_gpu_wall_frame(&wall) && !compositor_gpu_picture(&wall))
+                {
+                        if (!gpu.pending)
+                                gpu_handed_clear();
                         return COMPOSITOR_GPU_WHY_PICTURE;
+                }
         }
         if (!compositor_gpu_frames(frames, count, compositor_ground))
+        {
+                if (!gpu.pending)
+                        gpu_handed_clear();
                 return g->why;
+        }
         if (!compositor_gpu_spots()) // the fingers' marks over the scene, and the pointer over them
+        {
+                if (!gpu.pending)
+                        gpu_handed_clear();
                 return g->why;
+        }
         if (compositor.cursor.drawn && !compositor_gpu_cursor(compositor.cursor.x, compositor.cursor.y, &compositor.cursor.drawn_as, compositor_cursor_ink(0, 0), compositor_cursor_ink(1, 0)))
+        {
+                if (!gpu.pending)
+                        gpu_handed_clear();
                 return g->why;
+        }
         if (compositor_card.nowait && compositor_card.looped)
         {
                 // The scenes after the scaled pictures, a rectangle each, submitted as the card has room for them; the present is the card's from the first.
@@ -814,7 +870,11 @@ static enum compositor_gpu_why compositor_gpu_draw(const struct compositor_frame
                                                                    {rects.r[at].x1, rects.r[at].y1, rects.r[at].x2, rects.r[at].y2}};
 
                         if (!compositor_card_add(&scene))
+                        {
+                                if (!gpu.pending)
+                                        gpu_handed_clear();
                                 return COMPOSITOR_GPU_WHY_OTHER;
+                        }
                 }
                 compositor_card.records = g->count, compositor_card.out = out, compositor_card.pitch = (unsigned int)(compositor.scanout_pitch / 4);
                 compositor_card.width = g->width, compositor_card.height = (unsigned int)compositor.height;
@@ -822,8 +882,8 @@ static enum compositor_gpu_why compositor_gpu_draw(const struct compositor_frame
                 if (compositor_card_go() < 0)
                 {
                         compositor_gpu_fail(0);
-                        // Refused before a job of it ran: the processor draws the present. Refused after: the frame is drawn again once those are done.
-                        if (!compositor_card.submitted)
+                        // Refused before a job of it ran (or after a recovery cleared gpu.pending): the processor draws the present.
+                        if (!compositor_card.submitted || !gpu.pending)
                                 return compositor_gpu_job_why();
                         compositor_card.failed = 1;
                 }
@@ -902,7 +962,8 @@ static void compositor_gpu_able_count(enum compositor_gpu_why why)
 static void compositor_gpu_lists_sync(void)
 {
         static int was;
-        int want = compositor_gpu && compositor_gpu_state.up && !compositor_gpu_state.dead && compositor_gpu_able && compositor_lists_switch();
+        int want = compositor_gpu && compositor_gpu_state.up && !compositor_gpu_state.dead && compositor_gpu_able &&
+                   gpu_backend == &gpu_amd && compositor_lists_switch();
 
         if (compositor.table && want != was)
                 was = want, compositor_lists_set(want);
@@ -1000,17 +1061,24 @@ static const unsigned int *compositor_gpu_frost_scene(const struct compositor_fr
         struct compositor_gscene *g = &compositor_gscene;
         struct compositor_frame wall;
         positive bytes, dst_va;
+        unsigned int fpitch, fw;
         b32 was_hold, ok;
 
         if (!compositor_gpu || !compositor_gpu_state.up || compositor_gpu_state.dead || compositor_gpu_held() ||
-            !gpu_idle() || compositor_card.on || compositor.width <= 0 || compositor.height <= 0 || (compositor.width & 3))
+            !gpu_idle() || compositor_card.on || compositor.width < 4 || compositor.height <= 0)
                 return null;
+        fw = (unsigned int)(compositor.width & ~3);
+        fpitch = ((unsigned int)compositor.width + 15u) & ~15u;
         if (x0 < 0)
                 x0 = 0;
         if (y0 < 0)
                 y0 = 0;
-        if (x1 > compositor.width)
-                x1 = compositor.width;
+        if (x1 > (int)fw)
+        {
+                if (compositor.width & 3)
+                        return null;
+                x1 = (int)fw;
+        }
         if (y1 > compositor.height)
                 y1 = compositor.height;
         if (x1 <= x0 || y1 <= y0)
@@ -1018,10 +1086,10 @@ static const unsigned int *compositor_gpu_frost_scene(const struct compositor_fr
         for (unsigned int k = 0; k < count; k++)
                 if (compositor_scaled(&frames[k]) || !compositor_gpu_picture(&frames[k]))
                         return null;
-        g->width = (unsigned int)compositor.width, g->height = (unsigned int)compositor.height;
+        g->width = fw, g->height = (unsigned int)compositor.height;
         if (compositor_gpu_wall_frame(&wall) && !compositor_gpu_picture(&wall))
                 return null;
-        bytes = 4ull * (positive)compositor.width * (positive)compositor.height;
+        bytes = 4ull * (positive)fpitch * (positive)compositor.height;
         if (compositor_gpu_frost_buf.bytes < (unsigned long)bytes)
         {
                 unsigned long grown = ((unsigned long)bytes + (1ul << 20) - 1) & ~((1ul << 20) - 1);
@@ -1063,7 +1131,7 @@ static const unsigned int *compositor_gpu_frost_scene(const struct compositor_fr
                 return null;
         was_hold = gpu_handed_hold;
         gpu_handed_hold = 1;
-        ok = gpu_scene(COMPOSITOR_GPU_OPS_AT, g->count, COMPOSITOR_GPU_BINS_AT, dst_va, (unsigned int)compositor.width,
+        ok = gpu_scene(COMPOSITOR_GPU_OPS_AT, g->count, COMPOSITOR_GPU_BINS_AT, dst_va, fpitch,
                        g->width, g->height, (unsigned int)x0, (unsigned int)y0, (unsigned int)x1, (unsigned int)y1);
         gpu_handed_hold = was_hold;
         if (!ok)
@@ -1071,7 +1139,7 @@ static const unsigned int *compositor_gpu_frost_scene(const struct compositor_fr
                 compositor_gpu_fail(0);
                 return null;
         }
-        *pitch = (unsigned long)compositor.width;
+        *pitch = (unsigned long)fpitch;
         return compositor_gpu_frost_buf.memory;
 }
 
@@ -1113,7 +1181,7 @@ static void compositor_gpu_restart_check(void)
 static positive compositor_gpu_late_at(positive now)
 {
         b32 gpu_want = compositor_gpu && !compositor_gpu_state.up && compositor_gpu_state.dead &&
-                       compositor_gpu_state.dead_why == COMPOSITOR_GPU_WHY_NO_CARD;
+                       (compositor_gpu_state.dead_why == COMPOSITOR_GPU_WHY_NO_CARD || compositor_gpu_state.dead_why == COMPOSITOR_GPU_WHY_OUTPUT);
 #ifdef CONFIG_MOONWATER_WAYLAND
         b32 wl_want = compositor_wl_dmabuf_missing() != 0;
 #else
@@ -1137,9 +1205,10 @@ static void compositor_gpu_late_tick(positive now)
         if (!compositor_gpu_late_at(now) || !compositor_gpu_late_due(now, &compositor_gpu_state.late_first, &compositor_gpu_state.late_next))
                 return;
         if (compositor_gpu && !compositor_gpu_state.up && compositor_gpu_state.dead &&
-            compositor_gpu_state.dead_why == COMPOSITOR_GPU_WHY_NO_CARD && (!compositor_gpu_state.settled || gpu_nodes_seen() != compositor_gpu_state.settled))
+            (compositor_gpu_state.dead_why == COMPOSITOR_GPU_WHY_NO_CARD || compositor_gpu_state.dead_why == COMPOSITOR_GPU_WHY_OUTPUT) &&
+            (!compositor_gpu_state.settled || gpu_nodes_seen() != compositor_gpu_state.settled))
         {
-                compositor_gpu_state.dead = 0;
+                compositor_gpu_state.dead = 0, compositor_gpu_state.output_fails = 0;
                 if (compositor_gpu_up())
                 {
                         compositor_gpu_lists_sync();
@@ -1325,13 +1394,17 @@ static int compositor_gpu_list_render_bytes(int row, unsigned char *list, unsign
 
         damage[0] = damage[1] = damage[2] = damage[3] = 0;
         compositor_list_why = COMPOSITOR_LIST_DRAWN;
-        if (row < 0 || row >= COMPOSITOR_ROWS || width <= 0 || height <= 0 || !picture || pitch < w4 || (pitch & 3))
+        if (row < 0 || row >= COMPOSITOR_ROWS || width <= 0 || height <= 0 || !picture || ((positive)picture & 15) || pitch < w4 || (pitch & 3))
                 return compositor_list_why = COMPOSITOR_LIST_OPEN, 0;
         // Not while a present's jobs are on the card (compositor_card): its records and tables are the card's until they are done. Nor while any job runs, a
         // list's drawn without a wait among them: its records, its row's base and its picture are that job's.
         compositor_list_busy = false;
-        if (!compositor_gpu || compositor_gpu_state.dead || compositor_gpu_held() || !compositor_gpu_up())
+        compositor_gpu_restart_check();
+        compositor_gpu_lost_check();
+        if (!compositor_gpu || compositor_gpu_state.dead || !compositor_gpu_up())
                 return compositor_list_why = COMPOSITOR_LIST_CARD, 0;
+        if (compositor_gpu_held())
+                return compositor_list_busy = true, compositor_list_why = COMPOSITOR_LIST_CARD, 0;
         // Busy, which passes: the take waits for the card (compositor_lists_take), where off or gone it refuses.
         if (compositor_card.on || !gpu_idle())
                 return compositor_list_busy = true, compositor_list_why = COMPOSITOR_LIST_CARD, 0;

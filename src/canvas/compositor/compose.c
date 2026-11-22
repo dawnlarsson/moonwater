@@ -1299,7 +1299,7 @@ static unsigned int compositor_list_counts[COMPOSITOR_LIST_COUNT];
         (compositor_corner_rows' own arithmetic, made once and kept in the GPU's buffer). A frame it cannot draw as the processor does
         (the panel, a picture scaled, a line lit, a close button, a preview) makes the whole answer none, and the frames are drawn by the processor.
 */
-#define COMPOSITOR_GPU_TABLES 128
+#define COMPOSITOR_GPU_TABLES 256
 
 // Why the GPU did not compose a present (compositor_gpu_present), one code each: the presents the card drew and the presents it was refused are
 // counted (compositor_gpu_counts, moonwater canvas's gpu lines), and each reason is said in the log. The names are host.c's (the same order).
@@ -1487,13 +1487,8 @@ static b32 compositor_gpu_buttons(const struct compositor_frame *f)
 
         if (!compositor_close_box(f, &bx, &by, &side))
                 return true;
-        if (!f->builtin && !f->pixels) // a close button is drawn over a picture, and a frame with none has no pixels under it
-        {
-                compositor_gscene.why = COMPOSITOR_GPU_WHY_BUTTON;
-                return false;
-        }
         // A button past the picture's edge is cut by compositor_gpu_rect, which moves the cover table's start with the cut, as the processor draws it cut.
-        if (side <= 0 || side > 255 || f->pitch > 65535)
+        if (side <= 0 || side > 255)
         {
                 compositor_gscene.why = COMPOSITOR_GPU_WHY_BUTTON;
                 return false;

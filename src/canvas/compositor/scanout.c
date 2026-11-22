@@ -277,7 +277,7 @@ enum
         COMPOSITOR_CARD_SCALE, // a frame's picture at the size it is drawn (gpu.asm's op 7)
         COMPOSITOR_CARD_SCENE  // a rectangle of the scene (op 6)
 };
-#define COMPOSITOR_CARD_STEPS (8 + COMPOSITOR_DAMAGE) // the scaled frames' blits (COMPOSITOR_GPU_SCALED of them) and a scene a rectangle
+#define COMPOSITOR_CARD_STEPS (16 + COMPOSITOR_DAMAGE) // the scaled frames' blits (COMPOSITOR_GPU_SCALED of them) and a scene a rectangle
 struct compositor_card_step
 {
         unsigned int kind, w, h, sp, dp;
