@@ -604,6 +604,7 @@ ui_field_full	fe02	that is as much as it holds
 =Public IPv6	0b39	Public IPv6
 =Public address discovery (HTTPS)	937e	Public address discovery (HTTPS)
 =Public address discovery (STUN)	7691	Public address discovery (STUN)
+=Purge unconnected links	5c67	Purge unconnected links
 =Refresh rate	bf6e	Refresh rate
 =Remembered devices	abbc	Remembered devices
 =Remove a program from the start (its path)	1013	Remove a program from the start (its path)
@@ -673,6 +674,7 @@ ui_field_full	fe02	that is as much as it holds
 =The page glides with each notch instead of jumping	0357	The page glides with each notch instead of jumping
 =The pointer goes further when the mouse moves fast	d21b	The pointer goes further when the mouse moves fast
 =The pointer shrinks while a button is held down	574c	The pointer shrinks while a button is held down
+=The screen backlight, from 0 to 100 percent. A display with no backlight control has none to set, and this row is greyed out.	cf18	The screen backlight, from 0 to 100 percent. A display with no backlight control has none to set, and this row is greyed out.
 =The wait before a held key repeats	e3e9	The wait before a held key repeats
 =Their server	4072	Their server
 =Their suffixes (or default)	244b	Their suffixes (or default)

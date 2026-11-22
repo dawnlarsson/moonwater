@@ -4,6 +4,7 @@
 # machine-made 2026-11-22 (the files top bar), not yet read by a person: files_refresh files_view
 # machine-made 2026-11-22 (the devices pass), not yet read by a person: files_device_eject files_device_live files_device_write
 # machine-made 2026-11-22 (the ids 8a55b4ad0 and the taskbar left out), not yet read by a person: files_remote_denied files_remote_offline files_remote_opening files_this_machine taskbar_tab_uninstall
+# machine-made 2026-11-22 (two registry texts that had no keyed line), not yet read by a person: =Purge unconnected links =The screen backlight, from 0 to 100 percent. ...
 @language nl
 @name Nederlands
 @translated machine
@@ -610,6 +611,7 @@ ui_field_full	fe02	meer past er niet in
 =Public IPv6	0b39	Publiek IPv6
 =Public address discovery (HTTPS)	937e	Detectie van het publieke adres (HTTPS)
 =Public address discovery (STUN)	7691	Detectie van het publieke adres (STUN)
+=Purge unconnected links	5c67	Niet-verbonden machines verwijderen
 =Refresh rate	bf6e	Vernieuwingsfrequentie
 =Remembered devices	abbc	Onthouden apparaten
 =Remove a program from the start (its path)	1013	Programma uit de start verwijderen (zijn pad)
@@ -679,6 +681,7 @@ ui_field_full	fe02	meer past er niet in
 =The page glides with each notch instead of jumping	0357	De pagina glijdt bij elke klik van het wiel in plaats van te springen
 =The pointer goes further when the mouse moves fast	d21b	De aanwijzer gaat verder als de muis snel beweegt
 =The pointer shrinks while a button is held down	574c	De aanwijzer krimpt zolang een knop is ingedrukt
+=The screen backlight, from 0 to 100 percent. A display with no backlight control has none to set, and this row is greyed out.	cf18	De achtergrondverlichting van het scherm, van 0 tot 100 procent. Een scherm zonder regeling van de achtergrondverlichting heeft er geen om in te stellen, en deze rij is grijs.
 =The wait before a held key repeats	e3e9	De wachttijd voordat een vastgehouden toets herhaalt
 =Their server	4072	Hun server
 =Their suffixes (or default)	244b	Hun achtervoegsels (of default)

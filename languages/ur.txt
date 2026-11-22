@@ -5,6 +5,7 @@
 @direction rtl
 # machine-made 2026-11-22 (the devices pass), not yet read by a person: files_device_eject files_device_live files_device_write
 # machine-made 2026-11-22 (the ids 8a55b4ad0 and the taskbar left out), not yet read by a person: files_remote_denied files_remote_offline files_remote_opening files_this_machine taskbar_tab_uninstall
+# machine-made 2026-11-22 (two registry texts that had no keyed line), not yet read by a person: =Purge unconnected links =The screen backlight, from 0 to 100 percent. ...
 @language ur
 @name اردو
 @translated machine
@@ -611,6 +612,7 @@ ui_field_full	fe02	اس میں اس سے زیادہ نہیں سماتا
 =Public IPv6	0b39	عوامی IPv6
 =Public address discovery (HTTPS)	937e	عوامی پتے کی دریافت (HTTPS)
 =Public address discovery (STUN)	7691	عوامی پتے کی دریافت (STUN)
+=Purge unconnected links	5c67	غیر منسلک مشینیں ہٹائیں
 =Refresh rate	bf6e	ریفریش ریٹ
 =Remembered devices	abbc	محفوظ ڈیوائسز
 =Remove a program from the start (its path)	1013	شروع سے پروگرام ہٹائیں (اس کا راستہ)
@@ -680,6 +682,7 @@ ui_field_full	fe02	اس میں اس سے زیادہ نہیں سماتا
 =The page glides with each notch instead of jumping	0357	صفحہ ہر نوچ پر اچھلنے کے بجائے پھسلتا ہے
 =The pointer goes further when the mouse moves fast	d21b	ماؤس تیز چلے تو پوائنٹر زیادہ دور جاتا ہے
 =The pointer shrinks while a button is held down	574c	بٹن دبا رہے تو پوائنٹر سکڑ جاتا ہے
+=The screen backlight, from 0 to 100 percent. A display with no backlight control has none to set, and this row is greyed out.	cf18	اسکرین کی بیک لائٹ، 0 سے 100 فیصد تک۔ جس ڈسپلے میں بیک لائٹ کنٹرول نہ ہو اس میں سیٹ کرنے کو کچھ نہیں، اور یہ قطار مدھم ہوتی ہے۔
 =The wait before a held key repeats	e3e9	دبی کلید کے دہرانے سے پہلے کا وقفہ
 =Their server	4072	ان کا سرور
 =Their suffixes (or default)	244b	ان کے لاحقے (یا default)

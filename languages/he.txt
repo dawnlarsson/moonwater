@@ -5,6 +5,7 @@
 @direction rtl
 # machine-made 2026-11-22 (the devices pass), not yet read by a person: files_device_eject files_device_live files_device_write
 # machine-made 2026-11-22 (the ids 8a55b4ad0 and the taskbar left out), not yet read by a person: files_remote_denied files_remote_offline files_remote_opening files_this_machine taskbar_tab_uninstall
+# machine-made 2026-11-22 (two registry texts that had no keyed line), not yet read by a person: =Purge unconnected links =The screen backlight, from 0 to 100 percent. ...
 @language he
 @name עברית
 @translated machine
@@ -611,6 +612,7 @@ ui_field_full	fe02	זה המקסימום שהוא מכיל
 =Public IPv6	0b39	IPv6 ציבורי
 =Public address discovery (HTTPS)	937e	גילוי הכתובת הציבורית (HTTPS)
 =Public address discovery (STUN)	7691	גילוי הכתובת הציבורית (STUN)
+=Purge unconnected links	5c67	הסר מכונות שאינן מחוברות
 =Refresh rate	bf6e	קצב רענון
 =Remembered devices	abbc	התקנים שמורים
 =Remove a program from the start (its path)	1013	הסרת תוכנית מההפעלה (הנתיב שלה)
@@ -680,6 +682,7 @@ ui_field_full	fe02	זה המקסימום שהוא מכיל
 =The page glides with each notch instead of jumping	0357	הדף גולש בכל שנת גלגלת במקום לקפוץ
 =The pointer goes further when the mouse moves fast	d21b	המצביע מגיע רחוק יותר כשהעכבר זז מהר
 =The pointer shrinks while a button is held down	574c	המצביע מתכווץ כל עוד לחצן מוחזק
+=The screen backlight, from 0 to 100 percent. A display with no backlight control has none to set, and this row is greyed out.	cf18	התאורה האחורית של המסך, מ-0 עד 100 אחוז. במסך ללא שליטה בתאורה אחורית אין מה לכוון, והשורה הזו מעומעמת.
 =The wait before a held key repeats	e3e9	ההמתנה עד שמקש מוחזק חוזר
 =Their server	4072	השרת שלהם
 =Their suffixes (or default)	244b	הסיומות שלהם (או default)

@@ -4,6 +4,7 @@
 # machine-made 2026-11-22 (the files top bar), not yet read by a person: files_refresh files_view
 # machine-made 2026-11-22 (the devices pass), not yet read by a person: files_device_eject files_device_live files_device_write
 # machine-made 2026-11-22 (the ids 8a55b4ad0 and the taskbar left out), not yet read by a person: files_remote_denied files_remote_offline files_remote_opening files_this_machine taskbar_tab_uninstall
+# machine-made 2026-11-22 (two registry texts that had no keyed line), not yet read by a person: =Purge unconnected links =The screen backlight, from 0 to 100 percent. ...
 @language fr
 @name Français
 @translated machine
@@ -610,6 +611,7 @@ ui_field_full	fe02	c'est tout ce que ce champ peut contenir
 =Public IPv6	0b39	IPv6 publique
 =Public address discovery (HTTPS)	937e	Découverte de l'adresse publique (HTTPS)
 =Public address discovery (STUN)	7691	Découverte de l'adresse publique (STUN)
+=Purge unconnected links	5c67	Retirer les machines non connectées
 =Refresh rate	bf6e	Fréquence de rafraîchissement
 =Remembered devices	abbc	Appareils mémorisés
 =Remove a program from the start (its path)	1013	Retirer un programme du démarrage (son chemin)
@@ -679,6 +681,7 @@ ui_field_full	fe02	c'est tout ce que ce champ peut contenir
 =The page glides with each notch instead of jumping	0357	La page glisse à chaque cran au lieu de sauter
 =The pointer goes further when the mouse moves fast	d21b	Le pointeur va plus loin quand la souris bouge vite
 =The pointer shrinks while a button is held down	574c	Le pointeur rétrécit tant qu'un bouton est enfoncé
+=The screen backlight, from 0 to 100 percent. A display with no backlight control has none to set, and this row is greyed out.	cf18	Le rétroéclairage de l'écran, de 0 à 100 pour cent. Un écran sans contrôle du rétroéclairage n'en a aucun à régler, et cette ligne est grisée.
 =The wait before a held key repeats	e3e9	L'attente avant qu'une touche tenue se répète
 =Their server	4072	Leur serveur
 =Their suffixes (or default)	244b	Leurs suffixes (ou default)

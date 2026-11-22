@@ -4,6 +4,7 @@
 # machine-made 2026-11-22 (the files top bar), not yet read by a person: files_refresh files_view
 # machine-made 2026-11-22 (the devices pass), not yet read by a person: files_device_eject files_device_live files_device_write
 # machine-made 2026-11-22 (the ids 8a55b4ad0 and the taskbar left out), not yet read by a person: files_remote_denied files_remote_offline files_remote_opening files_this_machine taskbar_tab_uninstall
+# machine-made 2026-11-22 (two registry texts that had no keyed line), not yet read by a person: =Purge unconnected links =The screen backlight, from 0 to 100 percent. ...
 @language el
 @name Ελληνικά
 @translated machine
@@ -610,6 +611,7 @@ ui_field_full	fe02	δεν χωράει περισσότερο
 =Public IPv6	0b39	Δημόσια IPv6
 =Public address discovery (HTTPS)	937e	Ανακάλυψη δημόσιας διεύθυνσης (HTTPS)
 =Public address discovery (STUN)	7691	Ανακάλυψη δημόσιας διεύθυνσης (STUN)
+=Purge unconnected links	5c67	Αφαίρεση μη συνδεδεμένων μηχανημάτων
 =Refresh rate	bf6e	Ρυθμός ανανέωσης
 =Remembered devices	abbc	Συσκευές που θυμάται
 =Remove a program from the start (its path)	1013	Αφαίρεση προγράμματος από την εκκίνηση (η διαδρομή του)
@@ -679,6 +681,7 @@ ui_field_full	fe02	δεν χωράει περισσότερο
 =The page glides with each notch instead of jumping	0357	Η σελίδα γλιστρά σε κάθε εγκοπή αντί να πηδά
 =The pointer goes further when the mouse moves fast	d21b	Ο δείκτης πηγαίνει πιο μακριά όταν το ποντίκι κινείται γρήγορα
 =The pointer shrinks while a button is held down	574c	Ο δείκτης μικραίνει όσο ένα κουμπί είναι πατημένο
+=The screen backlight, from 0 to 100 percent. A display with no backlight control has none to set, and this row is greyed out.	cf18	Ο οπίσθιος φωτισμός της οθόνης, από 0 έως 100 τοις εκατό. Μια οθόνη χωρίς έλεγχο οπίσθιου φωτισμού δεν έχει κάτι να ρυθμιστεί, και αυτή η γραμμή είναι αχνή.
 =The wait before a held key repeats	e3e9	Η αναμονή πριν επαναληφθεί ένα πατημένο πλήκτρο
 =Their server	4072	Ο διακομιστής τους
 =Their suffixes (or default)	244b	Οι καταλήξεις τους (ή default)

@@ -4,6 +4,7 @@
 # machine-made 2026-11-22 (the files top bar), not yet read by a person: files_refresh files_view
 # machine-made 2026-11-22 (the devices pass), not yet read by a person: files_device_eject files_device_live files_device_write
 # machine-made 2026-11-22 (the ids 8a55b4ad0 and the taskbar left out), not yet read by a person: files_remote_denied files_remote_offline files_remote_opening files_this_machine taskbar_tab_uninstall
+# machine-made 2026-11-22 (two registry texts that had no keyed line), not yet read by a person: =Purge unconnected links =The screen backlight, from 0 to 100 percent. ...
 @language it
 @name Italiano
 @translated machine
@@ -610,6 +611,7 @@ ui_field_full	fe02	non ce ne sta di più
 =Public IPv6	0b39	IPv6 pubblico
 =Public address discovery (HTTPS)	937e	Rilevamento dell'indirizzo pubblico (HTTPS)
 =Public address discovery (STUN)	7691	Rilevamento dell'indirizzo pubblico (STUN)
+=Purge unconnected links	5c67	Rimuovi le macchine non connesse
 =Refresh rate	bf6e	Frequenza di aggiornamento
 =Remembered devices	abbc	Dispositivi ricordati
 =Remove a program from the start (its path)	1013	Rimuovi un programma dall'avvio (il suo percorso)
@@ -679,6 +681,7 @@ ui_field_full	fe02	non ce ne sta di più
 =The page glides with each notch instead of jumping	0357	La pagina scorre fluida a ogni scatto invece di saltare
 =The pointer goes further when the mouse moves fast	d21b	Il puntatore va più lontano quando il mouse si muove veloce
 =The pointer shrinks while a button is held down	574c	Il puntatore si restringe mentre un pulsante è premuto
+=The screen backlight, from 0 to 100 percent. A display with no backlight control has none to set, and this row is greyed out.	cf18	La retroilluminazione dello schermo, da 0 a 100 percento. Uno schermo senza controllo della retroilluminazione non ne ha da impostare, e questa riga è disattivata.
 =The wait before a held key repeats	e3e9	L'attesa prima che un tasto tenuto si ripeta
 =Their server	4072	Il loro server
 =Their suffixes (or default)	244b	I loro suffissi (o default)

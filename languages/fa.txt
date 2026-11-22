@@ -5,6 +5,7 @@
 @direction rtl
 # machine-made 2026-11-22 (the devices pass), not yet read by a person: files_device_eject files_device_live files_device_write
 # machine-made 2026-11-22 (the ids 8a55b4ad0 and the taskbar left out), not yet read by a person: files_remote_denied files_remote_offline files_remote_opening files_this_machine taskbar_tab_uninstall
+# machine-made 2026-11-22 (two registry texts that had no keyed line), not yet read by a person: =Purge unconnected links =The screen backlight, from 0 to 100 percent. ...
 @language fa
 @name فارسی
 @translated machine
@@ -611,6 +612,7 @@ ui_field_full	fe02	بیش از این جا ندارد
 =Public IPv6	0b39	IPv6 عمومی
 =Public address discovery (HTTPS)	937e	کشف نشانی عمومی (HTTPS)
 =Public address discovery (STUN)	7691	کشف نشانی عمومی (STUN)
+=Purge unconnected links	5c67	حذف دستگاه‌های وصل‌نشده
 =Refresh rate	bf6e	نرخ تازه‌سازی
 =Remembered devices	abbc	دستگاه‌های ذخیره‌شده
 =Remove a program from the start (its path)	1013	حذف برنامه از شروع (مسیر آن)
@@ -680,6 +682,7 @@ ui_field_full	fe02	بیش از این جا ندارد
 =The page glides with each notch instead of jumping	0357	صفحه با هر ضامن چرخ نرم می‌لغزد نه پرشی
 =The pointer goes further when the mouse moves fast	d21b	وقتی ماوس تند حرکت کند نشانگر دورتر می‌رود
 =The pointer shrinks while a button is held down	574c	نشانگر تا وقتی دکمه‌ای نگه داشته شده کوچک می‌شود
+=The screen backlight, from 0 to 100 percent. A display with no backlight control has none to set, and this row is greyed out.	cf18	نور پس‌زمینهٔ صفحه، از 0 تا 100 درصد. صفحه‌ای که کنترل نور پس‌زمینه ندارد چیزی برای تنظیم ندارد و این ردیف کم‌رنگ است.
 =The wait before a held key repeats	e3e9	مکث پیش از تکرار کلید نگه‌داشته
 =Their server	4072	سرور آن‌ها
 =Their suffixes (or default)	244b	پسوندهای آن‌ها (یا default)
