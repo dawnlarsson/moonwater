@@ -55,6 +55,7 @@
 #define WAYLAND_TABLE_FALLBACK (1L << 26)
 #define WAYLAND_TABLE_PAGE 4096L
 #define WAYLAND_TABLE_FIRST 64L
+#define WAYLAND_OBJECTS (1L << 17) /* live objects per client */
 #define WAYLAND_MIME_BYTES (64L << 10) /* all the mime types one source offers, NULs included */
 #define WAYLAND_SUB_LEVELS 32L /* subsurface nesting; flatten and the sub walks recurse once per level */
 
@@ -899,6 +900,9 @@ static long wayland_object_new(struct wayland_client *c, unsigned long id, long 
         long slot;
 
         if (iface <= WLI_NONE || iface >= WLI_COUNT || wayland_slot_of(c, id) >= 0)
+                return -1;
+        /* live objects (the table's count less its free slots) are bounded per client: a refused new_id is a client error */
+        if (c->tbl[WLT_OBJECT].count - c->tbl[WLT_OBJECT].frees >= WAYLAND_OBJECTS)
                 return -1;
         if (!(id >= 1 && id < WAYLAND_IDS) && !(id >= WAYLAND_SERVER_BASE && id - WAYLAND_SERVER_BASE < WAYLAND_SERVER_IDS))
                 return -1;

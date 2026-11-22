@@ -9204,6 +9204,25 @@ static void fake_sync_signal(void *context, long handle, unsigned long long poin
         fake_sync.last_rel = point;
 }
 
+static void test_object_cap(void)
+{
+        struct session s;
+        struct wlc *c;
+        long n;
+
+        /* hostile: regions created until the client is refused. Live objects are bounded per client at WAYLAND_OBJECTS, so the refusal comes
+           before the table passes that many (it was unbounded: the object table grew with every new_id). */
+        wayland_stop();
+        memset(&fake, 0, sizeof fake);
+        wayland_start(&fake_host);
+        session_open(&s);
+        c = s.c;
+        for (n = 0; n < WAYLAND_OBJECTS + 1000 && c->errors == 0; n++)
+                wlc_send(c, s.compositor, WLQ_wl_compositor_create_region, wlc_id(c, WLI_wl_region, 1));
+        wlc_pump(c);
+        WLCHECK(c->errors == 1 && n <= WAYLAND_OBJECTS, "a client's live objects are capped at WAYLAND_OBJECTS (refused after %ld)", n);
+}
+
 static void test_token_expiry(void)
 {
         struct session s;
@@ -9808,6 +9827,7 @@ int main(int argc, char **argv)
         test_dmabuf();
         test_stall_dmabuf();
         test_dmabuf_feedbacks();
+        test_object_cap();
         test_token_expiry();
         test_mime_bytes_cap();
         test_callback_queue_cap();
