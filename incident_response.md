@@ -3079,6 +3079,72 @@ The row has not been run (the wayland check build does not link on main).
 
 **Related.** `c51df5212`, the commit that added the stamp.
 
+### MW-2026-214: the compositor drained an on-screen keyboard's key ring up to a head the writer set, with no bound
+
+| | |
+|---|---|
+| Status | Fixed on main, 2026-11-22 (`12211a8ae`) |
+| Class | Unbounded loop over a table field: the drain of the keyboard's key ring ran from the tail to the head, one key per step, and the head was whatever the writer last stored |
+| Attacker | A writer of the window table: the keyboard row's own process, or a process with CAP_SYS_ADMIN that maps the table (root; the table is mode 0600 and TABLE_GET needs CAP_SYS_ADMIN, MW-2026-050). The same trust as MW-2026-207 |
+| Reachable | src/canvas/compositor/manage.c `compositor_osk_read`, the drain, which runs on the compositor thread. The writer's own bound is in src/canvas/window.c `windows_keyboard_send`, which a writer that skips it does not have |
+
+**What happened.** `compositor_osk_read` drained `while (osk_tail != osk_head)`,
+posting each key to the focused window. The head is an unsigned counter the
+writer stores, so a head far ahead made the compositor thread post as many
+keys as the distance before it did anything else. A well-behaved writer never
+gets more than `WINDOWS_OSK` keys ahead: `windows_keyboard_send` refuses a key
+when `head - tail >= WINDOWS_OSK`. Only a writer that skips that check can make
+the distance large. The drain was introduced by `bc336a207` (2026-11-04, the
+on-screen keyboard as a kit app).
+
+**The fix.** When the ring is more than `WINDOWS_OSK` keys ahead, the tail is
+moved to `head - WINDOWS_OSK`, so only the newest keys are drained
+(`12211a8ae`, two statements in `compositor_osk_read`).
+
+**Tests that fail without the fix.** None. `12211a8ae` adds no check row.
+
+**Related.** MW-2026-207 (the keyboard role whose ring this is). `bc336a207`,
+the commit that added the drain.
+
+### MW-2026-215: the compositor opened a clipboard offer's fd through a pid the window table holds, which a table writer sets
+
+| | |
+|---|---|
+| Status | Fixed on main, 2026-11-22 for the compositor's opens (`16e74328d`, `c8678e509`). The client-side and host reads listed below are still open |
+| Class | Confused deputy: the compositor opened `/proc/PID/fd/N` for a clipboard offer or a drag, with PID read from the table rather than the compositor's own |
+| Attacker | A writer of the window table: root, or a process with CAP_SYS_ADMIN that maps the table (MW-2026-050). The file it names must be a regular file that passes the clipboard seal and trailer checks |
+| Reachable | src/canvas/compositor/manage.c `compositor_clip_open`, called from `compositor_clip_set_memfd` (a client's clipboard offer by fd) and `compositor_dnd_name_ext_types` (a drag's offered type); src/canvas/wayland_host.c, the drag pull |
+
+**What happened.** `compositor_clip_open(pid, fd)` took `pid` from
+`table->clip_pid`. The compositor writes that field itself when it starts
+(manage.c `compositor_clip_start`), but any writer of the table can change it.
+An offer that named fd N then opened `/proc/<pid>/fd/N` of another process: the
+compositor, as root, took that process's regular file and kept it as the
+clipboard if it had the clip seals and held valid UTF-8 text with the trailer.
+So the reach is another program's clipboard copy, not an arbitrary file. The
+open was introduced by `76914efe6` (2026-10-30, the clipboard as an OS service
+of the compositor's).
+
+**The fix.** The compositor keeps its own pid in `compositor_clip_self`, set in
+the same statement that writes the table's copy, and opens its offers and its
+drag pull through it (`16e74328d`, `c8678e509`). The table's copy is still
+written, for the clients that read it.
+
+**Still open.** Four reads still take `table->clip_pid` and open
+`/proc/<pid>/fd/900` and up, so a table writer can point them at another
+process's clipboard copy:
+
+- src/canvas/window.c `windows_clip_read_type` (the paste read, in a client's own process) and `windows_drag_types` (the drag read);
+- src/sh/host.c `host_clip_types`, and two calls in `host_clipboard` (the `moonwater clipboard` path, run as root).
+
+They get their own entry when they are fixed.
+
+**Tests that fail without the fix.** None. `16e74328d` and `c8678e509` add no
+check row.
+
+**Related.** MW-2026-050 (who may map the table). `76914efe6`, the commit that
+added the open through the table's pid.
+
 ## Reviews with no exposure found
 
 Disclosures read against the code on 2026-10-23, each with the check that was
