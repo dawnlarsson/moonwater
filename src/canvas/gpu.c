@@ -4274,7 +4274,9 @@ HOT static positive gpu_submit(void)
                 // job wrong as it is (not asked again, the card is not lost), or the third refusal (or the maps that are gone were read).
                 if (kind == GPU_ERR_LOST || kind == GPU_ERR_PLACE || kind == GPU_ERR_OURS || ++tries == 3 || gpu_drop_unmapped())
                 {
-                        gpu_job_error = gpu_last_error, gpu_fault_note(false);
+                        gpu_job_error = gpu_last_error;
+                        if (gpu_last_error != 95)
+                                gpu_fault_note(false);
                         if (kind == GPU_ERR_LOST)
                                 gpu_lost = 1;
                         else if (kind == GPU_ERR_PLACE)

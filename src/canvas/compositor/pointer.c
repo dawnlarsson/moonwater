@@ -1028,17 +1028,30 @@ static b32 compositor_gpu_cursor(int x, int y, const struct compositor_pointer *
 
                 if (p->picture != compositor_picture.made || pw <= 0 || ph <= 0)
                         return true;
-                pic_at = compositor_gpu_slot_tag(pw, ph, 6, 0, p->picture, (unsigned int)(pw * ph * 4), &slot);
-                if (!pic_at)
-                {
-                        compositor_gscene.why = COMPOSITOR_GPU_WHY_POOL;
-                        return false;
-                }
-                if (slot)
-                        memory_copy_rect_u32((unsigned int *)slot, (positive)pw, compositor_picture.premultiplied, CP_PLANE, (positive)pw, (positive)ph);
                 memory_zero(&cur, sizeof(cur));
                 cur.x = px, cur.y = py, cur.width = pw, cur.height = ph, cur.pitch = (unsigned long)pw;
-                cur.gpu_base = GPU_VA + pic_at;
+                if (gpu_backend == &gpu_i915_row)
+                {
+                        positive tile_va = 0;
+                        unsigned int *tile = compositor_gpu_i915_tile_alloc((unsigned long)pw * (unsigned long)ph, &tile_va);
+
+                        if (!tile)
+                                return compositor_gscene.why = COMPOSITOR_GPU_WHY_POOL, false;
+                        memory_copy_rect_u32(tile, (positive)pw, compositor_picture.premultiplied, CP_PLANE, (positive)pw, (positive)ph);
+                        cur.gpu_base = tile_va;
+                }
+                else
+                {
+                        pic_at = compositor_gpu_slot_tag(pw, ph, 6, 0, p->picture, (unsigned int)(pw * ph * 4), &slot);
+                        if (!pic_at)
+                        {
+                                compositor_gscene.why = COMPOSITOR_GPU_WHY_POOL;
+                                return false;
+                        }
+                        if (slot)
+                                memory_copy_rect_u32((unsigned int *)slot, (positive)pw, compositor_picture.premultiplied, CP_PLANE, (positive)pw, (positive)ph);
+                        cur.gpu_base = GPU_VA + pic_at;
+                }
                 compositor_gpu_rect(11, px, py, px + pw, py + ph, 0, &cur, 0, 0);
                 return true;
         }

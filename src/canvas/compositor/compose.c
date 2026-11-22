@@ -1445,6 +1445,53 @@ static unsigned int compositor_gpu_desc(const unsigned int desc[8])
         return g->tables_at + off;
 }
 
+// Scratch userptr tile pool for Intel i915: materializes cover-masked ops (5/12/13) and custom RGBA cursors
+// as premultiplied op 11 tiles inside GPU_VA_MAPS so every desktop frame stays within i915's 256 MiB surface span.
+static struct
+{
+        unsigned int *pixels;
+        unsigned long bytes, used;
+        positive va;
+} compositor_gpu_i915_tiles;
+
+static unsigned int *compositor_gpu_i915_tile_alloc(unsigned long words, positive *va_out)
+{
+        unsigned long bytes = (words * 4ul + 31ul) & ~31ul;
+        positive base;
+
+        if (!words || bytes > (2ul << 20))
+                return 0;
+        if (!compositor_gpu_i915_tiles.pixels)
+        {
+                void *p = 0;
+                positive cap = 0;
+
+                if (!gpu_buf_grow(&p, &cap, 2ull << 20, 0))
+                        return 0;
+                compositor_gpu_i915_tiles.pixels = (unsigned int *)p, compositor_gpu_i915_tiles.bytes = (unsigned long)cap;
+        }
+        if (bytes > compositor_gpu_i915_tiles.bytes - compositor_gpu_i915_tiles.used)
+                return 0;
+        base = gpu_va_bytes(compositor_gpu_i915_tiles.pixels, compositor_gpu_i915_tiles.bytes);
+        if (!base && (!gpu_map(compositor_gpu_i915_tiles.pixels, compositor_gpu_i915_tiles.bytes) ||
+                      !(base = gpu_va_bytes(compositor_gpu_i915_tiles.pixels, compositor_gpu_i915_tiles.bytes))))
+                return 0;
+        compositor_gpu_i915_tiles.va = base;
+        *va_out = base + compositor_gpu_i915_tiles.used;
+        {
+                unsigned int *dst = (unsigned int *)((unsigned char *)compositor_gpu_i915_tiles.pixels + compositor_gpu_i915_tiles.used);
+
+                compositor_gpu_i915_tiles.used += bytes;
+                return dst;
+        }
+}
+
+static inline unsigned int compositor_gpu_mul255(unsigned int c, unsigned int a)
+{
+        unsigned int t = c * a + 128u;
+        return (t + (t >> 8)) >> 8;
+}
+
 // One record: the rectangle cut to the picture, none when nothing is left. A fill writes the colour; a copy takes the picture's pixels from the frame, at the
 // rectangle's own corner; a mix (5) is memory_mix_u32_row by the cover table at cover (pitch r), the ink the colour or, with a frame, the picture; 12 is the
 // same words with the premultiplied picture laid over by the cover (compositor_over_weighted), a blended picture's round corner.
@@ -1456,6 +1503,90 @@ static void compositor_gpu_rect(unsigned int kind, int x0, int y0, int x1, int y
 
         if (cx1 <= cx0 || cy1 <= cy0)
                 return;
+        // Intel i915 scene shader supports ops 0 (fill), 1 (tone), 4 (image copy), and 11 (premultiplied image over).
+        // Lower cover-masked ops (5, 12, 13) into op 1 (constant alpha) or op 11 (premultiplied RGBA tile in GPU_VA_MAPS).
+        if (gpu_backend == &gpu_i915_row && (kind == 5 || kind == 12 || kind == 13) && cover >= g->tables_at)
+        {
+                unsigned int cov_off = cover - g->tables_at;
+
+                if (kind == 5 && !frame && r == 0 && cov_off < g->tables_size)
+                {
+                        unsigned int a = g->tables[cov_off];
+                        unsigned int pr = compositor_gpu_mul255((colour >> 16) & 255u, a);
+                        unsigned int pg = compositor_gpu_mul255((colour >> 8) & 255u, a);
+                        unsigned int pb = compositor_gpu_mul255(colour & 255u, a);
+
+                        op[0] = 1u, op[1] = (unsigned int)cx0, op[2] = (unsigned int)cy0, op[3] = (unsigned int)cx1, op[4] = (unsigned int)cy1;
+                        op[5] = (a << 24) | (pr << 16) | (pg << 8) | pb, op[6] = op[7] = 0;
+                        g->count++;
+                        return;
+                }
+                if (r > 0 && (!frame || (!frame->tiled_kind && frame->pixels)))
+                {
+                        int w = cx1 - cx0, h = cy1 - cy0;
+                        positive tile_va = 0;
+                        unsigned int *tile = compositor_gpu_i915_tile_alloc((unsigned long)w * (unsigned long)h, &tile_va);
+
+                        if (tile)
+                        {
+                                const unsigned char *cov = g->tables + cov_off + (cy0 - y0) * r + (cx0 - x0);
+
+                                if (!frame)
+                                {
+                                        unsigned int cr = (colour >> 16) & 255u, cg = (colour >> 8) & 255u, cb = colour & 255u;
+
+                                        for (int row = 0; row < h; row++)
+                                        {
+                                                const unsigned char *crow = cov + row * r;
+                                                unsigned int *drow = tile + row * w;
+
+                                                for (int col = 0; col < w; col++)
+                                                {
+                                                        unsigned int a = crow[col];
+                                                        drow[col] = a ? ((a << 24) | (compositor_gpu_mul255(cr, a) << 16) |
+                                                                         (compositor_gpu_mul255(cg, a) << 8) | compositor_gpu_mul255(cb, a)) : 0u;
+                                                }
+                                        }
+                                }
+                                else
+                                {
+                                        const unsigned int *src = frame->pixels + (unsigned long)(cy0 - frame->y) * frame->pitch + (unsigned long)(cx0 - frame->x);
+                                        unsigned long sp = frame->pitch;
+                                        int premul = kind == 12, sw = frame->swap;
+
+                                        for (int row = 0; row < h; row++)
+                                        {
+                                                const unsigned char *crow = cov + row * r;
+                                                const unsigned int *srow = src + (unsigned long)row * sp;
+                                                unsigned int *drow = tile + row * w;
+
+                                                for (int col = 0; col < w; col++)
+                                                {
+                                                        unsigned int a = crow[col];
+
+                                                        if (!a)
+                                                                drow[col] = 0u;
+                                                        else
+                                                        {
+                                                                unsigned int px = srow[col];
+                                                                unsigned int cr = sw ? (px & 255u) : ((px >> 16) & 255u);
+                                                                unsigned int cg = (px >> 8) & 255u;
+                                                                unsigned int cb = sw ? ((px >> 16) & 255u) : (px & 255u);
+                                                                unsigned int pa = premul ? compositor_gpu_mul255(px >> 24, a) : a;
+
+                                                                drow[col] = (pa << 24) | (compositor_gpu_mul255(cr, a) << 16) |
+                                                                            (compositor_gpu_mul255(cg, a) << 8) | compositor_gpu_mul255(cb, a);
+                                                        }
+                                                }
+                                        }
+                                }
+                                op[0] = 11u, op[1] = (unsigned int)cx0, op[2] = (unsigned int)cy0, op[3] = (unsigned int)cx1, op[4] = (unsigned int)cy1;
+                                op[5] = (unsigned int)tile_va, op[6] = (unsigned int)(tile_va >> 32), op[7] = (unsigned int)w;
+                                g->count++;
+                                return;
+                        }
+                }
+        }
         op[0] = kind, op[1] = (unsigned int)cx0, op[2] = (unsigned int)cy0, op[3] = (unsigned int)cx1, op[4] = (unsigned int)cy1;
         op[5] = colour, op[6] = op[7] = 0;
         if (frame && frame->tiled_kind)
@@ -1631,6 +1762,7 @@ static b32 compositor_gpu_frames(const struct compositor_frame *frames, unsigned
         struct compositor_gscene *g = &compositor_gscene;
 
         g->count = 0, g->why = COMPOSITOR_GPU_WHY_DRAWN;
+        compositor_gpu_i915_tiles.used = 0;
         // The tables of the last scenes let go when the pool is half full, by count or by bytes: a scene is under that, so it never finds the pool shut.
         if (g->kept > COMPOSITOR_GPU_TABLES / 2 || g->tables_used > g->tables_size / 2)
                 g->kept = 0, g->tables_used = 0;

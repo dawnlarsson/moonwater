@@ -1371,6 +1371,13 @@ def test_hardening_66_bug_families():
           "if (!compositor_wl_sync_start(wayland_row_owner(row), (int)picture->sync_fd, 0))" in wl_host_c and
           "compositor_cursor_lock_take();\n        compositor_cursor_async_sync(0, 0, 0, 0, 0, 0);\n        compositor_cursor_lock_drop();" in kms_c)
 
+    check("Family 8: Intel i915 full desktop compositing (ops 5/12/13 lowered to op 1/11 in GPU_VA_MAPS tile pool, EOPNOTSUPP not logged as fault)",
+          "compositor_gpu_i915_tile_alloc(" in read_text("src/canvas/compositor/compose.c") and
+          "if (gpu_backend == &gpu_i915_row && (kind == 5 || kind == 12 || kind == 13) && cover >= g->tables_at)" in read_text("src/canvas/compositor/compose.c") and
+          "compositor_gpu_i915_tiles.used = 0;" in read_text("src/canvas/compositor/compose.c") and
+          "compositor_gpu_i915_tile_alloc((unsigned long)pw * (unsigned long)ph, &tile_va)" in read_text("src/canvas/compositor/pointer.c") and
+          "if (gpu_last_error != 95)\n                                gpu_fault_note(false);" in gpu_c)
+
 
 def test_build_and_audit_gates():
     print("\n=== 4. Build & Audit Gates ===")
