@@ -543,11 +543,13 @@ static positive tar_pax_attr_used;
 static bool tar_pax_attr_add(p8 kind, string_address name, positive name_length,
                              string_address value, positive value_length)
 {
+        if (name_length > ((positive)1 << 22) || value_length > ((positive)1 << 22))
+                return false;
         positive need = 9 + name_length + value_length;
         p32 name_size = (p32)name_length;
         p32 value_size = (p32)value_length;
 
-        if (tar_pax_attr_used + need > (positive)1 << 22)
+        if (need > ((positive)1 << 22) - tar_pax_attr_used)
                 return false;
         if (!shell_array_room(tar_pax_attr, tar_pax_attr_room,
                               tar_pax_attr_used + need))
@@ -699,67 +701,84 @@ static bool tar_pax_apply(tar_pax_state address_to state,
                 value = (positive)((body + at + record - 1) - (equal + 1));
                 rest = record;
 
-                if (key == 4 && !memory_compare(mark + 1, "path", 4))
-                {
-                        if (!tar_text_copy(address_of state->path, equal + 1, value))
-                                return false;
-                        state->has_path = true;
-                }
-                else if (key == 8 && !memory_compare(mark + 1, "linkpath", 8))
-                {
-                        if (!tar_text_copy(address_of state->link, equal + 1, value))
-                                return false;
-                        state->has_link = true;
-                }
-                else if (key == 4 && !memory_compare(mark + 1, "size", 4))
-                {
-                        p8 keep[32];
-                        positive parsed;
-                        string_address cursor = keep;
+                static const named_byte pax_keys[] = {
+                    {"path", 'p'},  {"linkpath", 'l'}, {"size", 's'},
+                    {"mtime", 'm'}, {"uname", 'u'},    {"gname", 'g'},
+                    {"uid", 'U'},   {"gid", 'G'},
+                };
+                positive pax_hit = memory_table_lookup(mark + 1, key, pax_keys);
 
-                        if (value >= sizeof(keep))
-                                return false;
-
-                        memory_copy(keep, equal + 1, value);
-                        keep[value] = end;
-                        if (!string_digits_checked(address_of cursor, 10,
-                                                    address_of parsed) ||
-                            *cursor || !tar_size_fits(parsed))
-                                return false;
-                        state->size = parsed;
-                        state->has_size = true;
-                }
-                else if (key == 5 && !memory_compare(mark + 1, "mtime", 5))
-                        state->has_time = tar_pax_time(
-                            equal + 1, value, address_of state->seconds,
-                            address_of state->nanoseconds);
-                else if (key == 5 && (!memory_compare(mark + 1, "uname", 5) ||
-                                      !memory_compare(mark + 1, "gname", 5)))
+                if (pax_hit < array_count(pax_keys))
                 {
-                        p8 address_to name = mark[1] == 'u' ? state->uname
-                                                            : state->gname;
-
-                        if (value < sizeof(state->uname))
+                        switch (pax_keys[pax_hit].value)
                         {
-                                memory_copy(name, equal + 1, value);
-                                name[value] = end;
+                        case 'p':
+                                if (!tar_text_copy(address_of state->path, equal + 1, value))
+                                        return false;
+                                state->has_path = true;
+                                break;
+                        case 'l':
+                                if (!tar_text_copy(address_of state->link, equal + 1, value))
+                                        return false;
+                                state->has_link = true;
+                                break;
+                        case 's':
+                        {
+                                p8 keep[32];
+                                positive parsed;
+                                string_address cursor = keep;
+
+                                if (value >= sizeof(keep))
+                                        return false;
+
+                                memory_copy(keep, equal + 1, value);
+                                keep[value] = end;
+                                if (!string_digits_checked(address_of cursor, 10,
+                                                            address_of parsed) ||
+                                    *cursor || !tar_size_fits(parsed))
+                                        return false;
+                                state->size = parsed;
+                                state->has_size = true;
+                                break;
                         }
-                }
-                else if (key == 3 && (!memory_compare(mark + 1, "uid", 3) ||
-                                      !memory_compare(mark + 1, "gid", 3)))
-                {
-                        p64 number = 0;
-                        bool good = memory_digits_whole((p8 *)(equal + 1), value, 0xffffffffull, (p64 *)(address_of number));
+                        case 'm':
+                                state->has_time = tar_pax_time(
+                                    equal + 1, value, address_of state->seconds,
+                                    address_of state->nanoseconds);
+                                break;
+                        case 'u':
+                        case 'g':
+                        {
+                                p8 address_to name = pax_keys[pax_hit].value == 'u'
+                                                         ? state->uname : state->gname;
 
-                        if (mark[1] == 'u')
-                        {
-                                state->user = (p32)number;
-                                state->has_user = good;
+                                if (value < sizeof(state->uname))
+                                {
+                                        memory_copy(name, equal + 1, value);
+                                        name[value] = end;
+                                }
+                                break;
                         }
-                        else
+                        case 'U':
+                        case 'G':
                         {
-                                state->group = (p32)number;
-                                state->has_group = good;
+                                p64 number = 0;
+                                bool good = memory_digits_whole((p8 *)(equal + 1), value,
+                                                                0xffffffffull,
+                                                                (p64 *)(address_of number));
+
+                                if (pax_keys[pax_hit].value == 'U')
+                                {
+                                        state->user = (p32)number;
+                                        state->has_user = good;
+                                }
+                                else
+                                {
+                                        state->group = (p32)number;
+                                        state->has_group = good;
+                                }
+                                break;
+                        }
                         }
                 }
 
@@ -6594,14 +6613,21 @@ static b32 tar_add_directory(bipolar archive, bipolar directory,
         return tar_add_directory_walk(archive, address_of walk, member, facts, verbose);
 }
 
+static fn tar_say_member(string_address member, bool directory)
+{
+        static p8 spelled[TAR_PATH];
+
+        tar_name_line(tar_listing,
+                      directory && tar_spell_directory(member, spelled, sizeof(spelled))
+                          ? (string_address)spelled : member);
+}
+
 static b32 tar_add_directory_walk(bipolar archive, file_walk address_to walk_in,
                                   string_address member,
                                   file_facts address_to facts, bool verbose)
 {
         file_walk walk = *walk_in;
-
-        p8 spelled[TAR_PATH];
-
+        static p8 spelled[TAR_PATH];
         bipolar put;
 
         tar_attr_fd = walk.handle;
@@ -6669,7 +6695,7 @@ static b32 tar_add_named(bipolar archive, bipolar directory,
                          bool verbose, bool selected, p8 kind)
 {
         file_facts facts;
-        p8 link[TAR_PATH];
+        static p8 link[TAR_PATH];
         bipolar handle = -1;
         bipolar looked = -1;
         string_address prior;
@@ -6726,13 +6752,7 @@ static b32 tar_add_named(bipolar archive, bipolar directory,
                                         return tar_status;
                                 }
                                 if (verbose)
-                                {
-                                        p8 spelled[TAR_PATH];
-
-                                        tar_name_line(tar_listing,
-                                                      tar_spell_directory(member, spelled, sizeof(spelled))
-                                                          ? (string_address)spelled : member);
-                                }
+                                        tar_say_member(member, true);
                                 file_walk walk = {.handle = followed, .error = 0, .have = 0, .at = 0};
                                 b32 result = tar_add_directory_walk(archive, address_of walk, member,
                                                                     address_of target, verbose);
@@ -6823,15 +6843,7 @@ dereferenced:;
         }
 
         if (verbose)
-        {
-                p8 spelled[TAR_PATH];
-
-                tar_name_line(tar_listing,
-                              (facts.mode & MODE_FORMAT) == MODE_DIRECTORY &&
-                                      tar_spell_directory(member, spelled,
-                                                          sizeof(spelled))
-                                  ? (string_address)spelled : member);
-        }
+                tar_say_member(member, (facts.mode & MODE_FORMAT) == MODE_DIRECTORY);
 
         if ((facts.mode & MODE_FORMAT) == MODE_DIRECTORY)
                 return tar_add_directory(archive, directory, name, member,
@@ -7483,6 +7495,28 @@ static bool tar_take(struct tar_options address_to options, p8 letter,
         return true;
 }
 
+static bool tar_words_push(string_address address_to address_to list,
+                           positive address_to have, positive address_to room,
+                           string_address word)
+{
+        if (*have + 2 >= *room)
+        {
+                if (*room > positive_max / 2 / sizeof(**list))
+                        return tar_refuse("out of memory"), false;
+                positive more = *room * 2;
+                string_address address_to bigger = memory_take(more * sizeof(*bigger));
+
+                if (!bigger)
+                        return tar_refuse("out of memory"), false;
+                memory_copy(bigger, *list, *have * sizeof(**list));
+                memory_give(*list);
+                *list = bigger;
+                *room = more;
+        }
+        (*list)[(*have)++] = word;
+        return true;
+}
+
 static bool tar_parse(struct tar_options address_to options)
 {
         argument_cursor cursor = {.argc = (positive)program_argument_count(),
@@ -7583,9 +7617,9 @@ static bool tar_parse(struct tar_options address_to options)
                         {
                                 if (tar_words[at][0] != 1)
                                 {
-                                        if (have + 1 >= room)
-                                                break;
-                                        grown[have++] = tar_words[at];
+                                        if (!tar_words_push(address_of grown, address_of have,
+                                                            address_of room, tar_words[at]))
+                                                return false;
                                         continue;
                                 }
                                 if (!tar_read_list(tar_words[at] + 1, address_of list))
@@ -7610,20 +7644,9 @@ static bool tar_parse(struct tar_options address_to options)
                                                 return tar_refuse("out of memory"), false;
                                         memory_copy(copy, name, stop);
                                         copy[stop] = end;
-                                        if (have + 2 >= room)
-                                        {
-                                                if (room > positive_max / 2 / sizeof(*grown))
-                                                        return tar_refuse("out of memory"), false;
-                                                positive more = room * 2;
-                                                string_address address_to bigger = memory_take(more * sizeof(*bigger));
-
-                                                if (!bigger)
-                                                        return tar_refuse("out of memory"), false;
-                                                memory_copy(bigger, grown, have * sizeof(*grown));
-                                                grown = bigger;
-                                                room = more;
-                                        }
-                                        grown[have++] = (string_address)copy;
+                                        if (!tar_words_push(address_of grown, address_of have,
+                                                            address_of room, (string_address)copy))
+                                                return false;
                                 }
                         }
                         if (!grown)

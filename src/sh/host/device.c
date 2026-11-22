@@ -1473,7 +1473,7 @@ static b32 usb_watch_run(void)
         //      No USB here, or the sysfs it was walking is gone: nothing to hold.
         while (system_access_at(AT_FDCWD, USB_DEVICES, 0) >= 0)
         {
-                usb_policy policy;
+                static usb_policy policy;
                 bipolar lock = usb_lock_take(false);
 
                 //      A verb that has held the lock this long, or no lock to be had: the pass is
@@ -1651,7 +1651,7 @@ static positive usb_configure_held(usb_policy address_to policy, usb_census addr
 static b32 usb_lock_held(bool say, p8 how, usb_settle address_to settle)
 {
         static usb_census census;
-        usb_policy policy;
+        static usb_policy policy;
         bool stay;
         bool write;
         positive kept = 0;
@@ -1783,7 +1783,7 @@ static b32 usb_lock_now(void)
 static b32 usb_unlock_now(void)
 {
         bipolar lock = usb_lock_take(true);
-        usb_policy policy;
+        static usb_policy policy;
         b32 failed;
 
         if (lock < 0)
@@ -1891,7 +1891,7 @@ static b32 usb_rule_verb(string_address word, p8 kind)
         static usb_census census;
         usb_rule rule;
         usb_device address_to device;
-        usb_policy policy;
+        static usb_policy policy;
         p8 text[USB_RULE_ROOM];
         bipolar lock = usb_lock_take(true);
         bool configured = false;
@@ -1961,7 +1961,7 @@ static b32 usb_forget(string_address word)
         static usb_census census;
         usb_rule rule;
         usb_device address_to device = null;
-        usb_policy policy;
+        static usb_policy policy;
         p8 text[USB_RULE_ROOM];
         bipolar lock;
         positive matched = 0;
@@ -2034,7 +2034,7 @@ static fn usb_classes_say(usb_policy address_to policy)
 static b32 usb_class(string_address address_to arguments, positive count)
 {
         bipolar kind = count > 3 ? usb_kind_named(arguments[3]) : -1;
-        usb_policy policy;
+        static usb_policy policy;
         bipolar lock;
         b32 failed;
         bool allow;
@@ -2183,7 +2183,7 @@ static b32 usb_watcher_owner(bool address_to known)
 static b32 usb_status(void)
 {
         static usb_census census;
-        usb_policy policy;
+        static usb_policy policy;
         p8 line[USB_LOG_LINE];
         bool known;
         b32 watcher = usb_watcher_owner(address_of known);
@@ -2265,7 +2265,7 @@ static b32 usb_status(void)
 static b32 usb_apply_verb(void)
 {
         bipolar lock = usb_lock_take(true);
-        usb_policy policy;
+        static usb_policy policy;
         b32 failed;
 
         if (lock < 0)
@@ -2314,7 +2314,7 @@ static fn usb_restore(void)
 {
         static usb_census before;
         bool first = !host_lock_owner(USB_WATCHER_PATH);
-        usb_policy policy;
+        static usb_policy policy;
         bipolar lock = usb_lock_take(false);
 
         //      The policy is put in force at boot whether or not the lock can be had.
@@ -2386,7 +2386,7 @@ static fn usb_first_lock(void)
         p64 still = 0;
         p64 uptime = 0;
         p64 began = 0;
-        usb_policy policy;
+        static usb_policy policy;
         bipolar settling;
         bipolar lock;
         bool carried;
@@ -2451,7 +2451,7 @@ static fn usb_first_lock(void)
 // The watcher again, if it ended while the policy still holds something.
 static fn usb_recover(void)
 {
-        usb_policy policy;
+        static usb_policy policy;
 
         if (host_lock_owner(USB_WATCHER_PATH))
                 return;
@@ -2780,7 +2780,7 @@ static bool usb_list_device_disk(string_address directory, string_address name, 
 static b32 usb_list_show(void)
 {
         static usb_census census;
-        usb_policy policy;
+        static usb_policy policy;
 
         usb_policy_load(address_of policy);
         usb_census_take(address_of census);

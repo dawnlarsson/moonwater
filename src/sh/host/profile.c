@@ -193,9 +193,13 @@ static fn profile_read_maps(p32 process, p8 address_to text)
                 // from-to perms offset dev inode path
                 while (line < stop && text[line] != '-')
                         from = from * 16 + (p64)(text[line] <= '9' ? text[line] - '0' : (text[line] | 0x20) - 'a' + 10), line++;
+                if (line >= stop)
+                        continue;
                 line++;
                 while (line < stop && text[line] != ' ')
                         to = to * 16 + (p64)(text[line] <= '9' ? text[line] - '0' : (text[line] | 0x20) - 'a' + 10), line++;
+                if (line >= stop)
+                        continue;
                 line++;
                 if (line + 4 > stop || text[line + 2] != 'x')
                         continue;
@@ -302,7 +306,6 @@ static bool profile_task(string_address directory, string_address name, address_
         struct profile_thread address_to thread;
         struct profile_attr attr;
         p8 path[64];
-        positive length;
         bipolar fd, mapped;
 
         (void)directory;
@@ -311,6 +314,8 @@ static bool profile_task(string_address directory, string_address name, address_
         thread = &profile.threads[profile.thread_count];
         memory_zero(thread, sizeof(*thread));
         thread->tid = (b32)string_digits_max(name, 10, null);
+        if (!thread->tid)
+                return true;
         thread->process = process;
         memory_zero(&attr, sizeof(attr));
         attr.type = PROFILE_TYPE_SOFTWARE;
@@ -352,19 +357,23 @@ static fn profile_drain(positive index)
 
         if (!offset)
                 offset = 4096, size = PROFILE_RING_PAGES * 4096;
+        if (!size || offset > thread->ring_bytes || size > thread->ring_bytes - offset)
+                return;
         while (tail < head)
         {
                 p16 bytes;
                 p32 type;
 
+                if (head - tail < 8)
+                        break;
                 // A record may wrap past the end of the ring: it is copied out a byte at a time over the edge.
                 for (positive at = 0; at < 8; at++)
                         record[at] = page[offset + (tail + at) % size];
                 type = *(p32 address_to)record;
                 bytes = *(p16 address_to)(record + 6);
-                if (bytes < 8)
+                if (bytes < 8 || (p64)bytes > head - tail)
                         break;
-                if (type == PROFILE_RECORD_SAMPLE && bytes <= sizeof(record))
+                if (type == PROFILE_RECORD_SAMPLE && bytes >= 16 && bytes <= sizeof(record))
                 {
                         p16 misc = *(p16 address_to)(record + 4);
                         p64 ip;

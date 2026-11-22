@@ -1179,6 +1179,8 @@ static bool host_setup_version(bipolar handle, p8 address_to into, positive room
 {
         p8 header[0x210];
 
+        if (room < 2)
+                return false;
         if (file_transfer_exact(syscall(pread64), handle, header, sizeof(header),
                                 0) == (bipolar)sizeof(header) &&
             header[0] == 'M' && header[1] == 'Z' &&
@@ -1828,8 +1830,8 @@ static b32 host_copy_file(string_address from, string_address to)
 static bool host_files_alike(string_address left, string_address right, p64 hole,
                              p64 hole_end)
 {
-        p8 one[16384];
-        p8 two[16384];
+        static p8 one[16384];
+        static p8 two[16384];
         file_facts first_facts;
         file_facts second_facts;
         bipolar first = system_open_at(AT_FDCWD, left, FILE_READ | O_CLOEXEC);

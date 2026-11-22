@@ -182,7 +182,7 @@ static bool host_line_next(p8 address_to text, positive size, positive address_t
 static bipolar radio_wifi_read(radio_network address_to into, positive room,
                                bool address_to cut)
 {
-        p8 text[8192];
+        static p8 text[8192];
         bipolar got = host_read_state(NET_WIFI_LIST, text, sizeof(text));
         positive count = 0;
         positive at = 0;
@@ -277,7 +277,7 @@ static positive radio_saved_index(const radio_network address_to networks, posit
 
 static bipolar radio_wifi_save(radio_network address_to networks, positive count)
 {
-        p8 text[8192];
+        static p8 text[8192];
         positive used = 0;
         positive at;
 
@@ -337,7 +337,7 @@ static p8 radio_rule_of(const p8 address_to line, positive length, const p8 addr
 
 static COLD p8 radio_rules_get(p8 address_to ssid, positive ssid_length)
 {
-        p8 text[RADIO_RULES_ROOM];
+        static p8 text[RADIO_RULES_ROOM];
         bipolar got;
         positive at = 0;
         positive start;
@@ -361,8 +361,8 @@ static COLD p8 radio_rules_get(p8 address_to ssid, positive ssid_length)
    to give it. */
 static COLD bipolar radio_rules_put(p8 address_to ssid, positive ssid_length, p8 mask, p8 what)
 {
-        p8 text[RADIO_RULES_ROOM];
-        p8 kept[RADIO_RULES_ROOM];
+        static p8 text[RADIO_RULES_ROOM];
+        static p8 kept[RADIO_RULES_ROOM];
         radio_network networks[RADIO_WIFI_MOST];
         positive count;
         bipolar got;
@@ -1192,6 +1192,14 @@ static positive radio_ies_element(p8 address_to elements, positive size, p8 id,
         return 0;
 }
 
+static p32 radio_bss_u32(p8 address_to bss, positive length, p16 type, p32 missing)
+{
+        positive size = 0;
+        p8 address_to value = (p8 address_to)netlink_find_span(bss, length, type, address_of size);
+
+        return value && size >= 4 ? memory_load_unaligned(p32, value) : missing;
+}
+
 /* One access point of a scan dump: false for a message that is not one. seen,
    when asked for, is the access point's RSN element and RSN extension element
    as each of its two frames showed them (wifi_seen), from the same message. */
@@ -1217,33 +1225,19 @@ static bool radio_bss_read(netlink_header address_to header, radio_heard address
                 return false;
 
         memory_fill(one, 0, sizeof(*one));
-        one->mbm = -10000;
-        one->seen = ~(p32)0;
         one->security = RADIO_OPEN;
         value = (p8 address_to)netlink_find_span(bss, length, NL80211_BSS_BSSID,
                                                  address_of size);
         if (value && size >= 6)
                 memory_copy(one->bssid, value, 6);
-        value = (p8 address_to)netlink_find_span(bss, length, NL80211_BSS_SIGNAL_MBM,
-                                                 address_of size);
-        if (value && size >= 4)
-                one->mbm = memory_load_unaligned(b32, value);
-        value = (p8 address_to)netlink_find_span(bss, length, NL80211_BSS_FREQUENCY,
-                                                 address_of size);
-        if (value && size >= 4)
-                one->frequency = memory_load_unaligned(p32, value);
-        value = (p8 address_to)netlink_find_span(bss, length, NL80211_BSS_STATUS,
-                                                 address_of size);
-        one->joined = value && size >= 4 &&
-                      memory_load_unaligned(p32, value) == NL80211_BSS_STATUS_ASSOCIATED;
+        one->mbm = (b32)radio_bss_u32(bss, length, NL80211_BSS_SIGNAL_MBM, (p32)-10000);
+        one->frequency = radio_bss_u32(bss, length, NL80211_BSS_FREQUENCY, 0);
+        one->joined = radio_bss_u32(bss, length, NL80211_BSS_STATUS, 0) == NL80211_BSS_STATUS_ASSOCIATED;
         value = (p8 address_to)netlink_find_span(bss, length, NL80211_BSS_CAPABILITY,
                                                  address_of size);
         if (value && size >= 2)
                 capability = memory_load_unaligned(p16, value);
-        value = (p8 address_to)netlink_find_span(bss, length, NL80211_BSS_SEEN_MS_AGO,
-                                                 address_of size);
-        if (value && size >= 4)
-                one->seen = memory_load_unaligned(p32, value);
+        one->seen = radio_bss_u32(bss, length, NL80211_BSS_SEEN_MS_AGO, ~(p32)0);
 
         elements = (p8 address_to)netlink_find_span(bss, length,
                                                     NL80211_BSS_INFORMATION_ELEMENTS,
@@ -3498,8 +3492,8 @@ static b32 radio_bluetooth_power(bool on, bool report)
    cannot lose each other's names. */
 static b32 radio_bluetooth_edit(string_address identity, bool add)
 {
-        p8 text[4096];
-        p8 kept[sizeof(text) + 1];
+        static p8 text[4096];
+        static p8 kept[sizeof(text) + 1];
         positive length = string_length(identity);
         positive used = 0;
         positive at = 0;
@@ -3552,6 +3546,11 @@ static b32 radio_bluetooth_edit(string_address identity, bool add)
                         if (!add)
                                 continue;
                 }
+                if (used + size + 1 >= sizeof(kept))
+                {
+                        failed = 4;
+                        break;
+                }
                 memory_copy(kept + used, text + start, size);
                 kept[used += size] = '\n';
                 used++;
@@ -3594,7 +3593,7 @@ static b32 radio_bluetooth_edit(string_address identity, bool add)
 
 static b32 radio_bluetooth_status(void)
 {
-        p8 text[4096];
+        static p8 text[4096];
         bipolar got = host_read_state(NET_BLUETOOTH_LIST, text, sizeof(text));
         bool off = radio_kept(NET_BLUETOOTH_POWER) == 0;
         positive at = 0;
@@ -4027,13 +4026,16 @@ static fn radio_share_stop(void)
 // The first thing the image lacks for a sharing, named for the refusal; null when all of it is there.
 static string_address radio_share_missing(void)
 {
-        if (system_access_at(AT_FDCWD, RADIO_SHARE_TOOL, 0) < 0)
-                return "bt-network (the bluez-tools package)";
-        if (system_access_at(AT_FDCWD, RADIO_SHARE_DAEMON, 0) < 0 &&
-            system_access_at(AT_FDCWD, RADIO_SHARE_DAEMON_OTHER, 0) < 0)
-                return "bluetoothd (BlueZ)";
-        if (system_access_at(AT_FDCWD, RADIO_SHARE_BRIDGE, 0) < 0)
-                return "the bridge " NET_BLUETOOTH_SHARE_BRIDGE;
+        static const struct { string_address path, alt, label; } needs[] = {
+            {RADIO_SHARE_TOOL, null, "bt-network (the bluez-tools package)"},
+            {RADIO_SHARE_DAEMON, RADIO_SHARE_DAEMON_OTHER, "bluetoothd (BlueZ)"},
+            {RADIO_SHARE_BRIDGE, null, "the bridge " NET_BLUETOOTH_SHARE_BRIDGE},
+        };
+
+        for (positive at = 0; at < array_count(needs); at++)
+                if (system_access_at(AT_FDCWD, needs[at].path, 0) < 0 &&
+                    (!needs[at].alt || system_access_at(AT_FDCWD, needs[at].alt, 0) < 0))
+                        return needs[at].label;
         return null;
 }
 

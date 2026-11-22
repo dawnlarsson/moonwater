@@ -1873,7 +1873,7 @@ typedef struct
 static bool locale_network(p8 address_to into, positive room)
 {
         bool any = false;
-        p8 table[4096];
+        static p8 table[4096];
         p8 gateway[16] = {0};
         p8 device[20] = {0};
         bipolar got;
@@ -1954,7 +1954,7 @@ static bool locale_network(p8 address_to into, positive room)
                                                         row, span, ":", 1)
                                                   : null;
 
-                        if (colon && colon + 15 <= row + span &&
+                        if (colon && colon >= row + 2 && colon + 15 <= row + span &&
                             memory_compare(colon - 2, "00:00:00:00:00:00", 17))
                         {
                                 p8 mac[18];

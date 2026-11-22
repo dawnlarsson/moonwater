@@ -1215,18 +1215,22 @@ static COLD fn wifi_rekey_offload(wifi_link address_to link)
         netlink_buffer request = {0};
         p32 sequence = netlink_sequence_take();
         positive nest;
+        const nl80211_attr_spec rekey[] = {
+            {NL80211_REKEY_DATA_KEK, link->ptk + 16, 16},
+            {NL80211_REKEY_DATA_KCK, link->ptk, 16},
+            {NL80211_REKEY_DATA_REPLAY_CTR, link->replay, 8},
+        };
 
+        scope_exit(netlink_forget(address_of request));
         if (!nl80211_begin(address_of request, link->session.family,
                            NL80211_CMD_SET_REKEY_OFFLOAD, NLM_REQUEST | NLM_ACK, sequence))
                 return;
         nl80211_attribute_u32(address_of request, NL80211_ATTR_IFINDEX, link->index);
         nest = netlink_nested_begin(address_of request, NL80211_ATTR_REKEY_DATA);
-        netlink_attribute_add(address_of request, NL80211_REKEY_DATA_KEK, link->ptk + 16, 16);
-        netlink_attribute_add(address_of request, NL80211_REKEY_DATA_KCK, link->ptk, 16);
-        netlink_attribute_add(address_of request, NL80211_REKEY_DATA_REPLAY_CTR,
-                              link->replay, 8);
+        nl80211_put_attrs(address_of request, rekey, array_count(rekey));
         netlink_nested_end(address_of request, nest);
-        netlink_transact(link->session.handle, address_of request, sequence, null, null);
+        if (!request.failed)
+                netlink_transact(link->session.handle, address_of request, sequence, null, null);
 }
 
 /*
@@ -2020,10 +2024,12 @@ static COLD bipolar nl80211_connect(nl80211 address_to session, p32 index,
                            NL80211_CMD_CONNECT, NLM_REQUEST | NLM_ACK, sequence))
                 return -1;
 
-        nl80211_attribute_u32(address_of request, NL80211_ATTR_IFINDEX, index);
-        netlink_attribute_add(address_of request, NL80211_ATTR_SSID, ssid,
-                              ssid_length);
-        nl80211_attribute_u32(address_of request, NL80211_ATTR_AUTH_TYPE, open);
+        const nl80211_attr_spec base[] = {
+            {NL80211_ATTR_IFINDEX, address_of index, 4},
+            {NL80211_ATTR_SSID, ssid, ssid_length},
+            {NL80211_ATTR_AUTH_TYPE, address_of open, 4},
+        };
+        nl80211_put_attrs(address_of request, base, array_count(base));
         //      The access point chosen from a fresh scan, rather than
         //      whichever the kernel's cache holds by this name.
         if (bssid)
@@ -2036,16 +2042,6 @@ static COLD bipolar nl80211_connect(nl80211 address_to session, p32 index,
 
         if (pmk)
         {
-                netlink_attribute_add(address_of request, NL80211_ATTR_PRIVACY, null,
-                                      0);
-                nl80211_attribute_u32(address_of request, NL80211_ATTR_WPA_VERSIONS,
-                                      version);
-                nl80211_attribute_u32(address_of request,
-                                      NL80211_ATTR_CIPHER_SUITES_PAIRWISE, ccmp);
-                nl80211_attribute_u32(address_of request,
-                                      NL80211_ATTR_CIPHER_SUITE_GROUP, ccmp);
-                nl80211_attribute_u32(address_of request, NL80211_ATTR_AKM_SUITES,
-                                      psk);
                 /* The RSN element for the association request, which a
                    driver whose station management is mac80211's builds from
                    what it is handed and nothing else. Without it the access
@@ -2053,8 +2049,15 @@ static COLD bipolar nl80211_connect(nl80211 address_to session, p32 index,
                    security at all: hostapd took it, then started 802.1X on
                    it, and the four-way handshake never began. The same bytes
                    go in message 2, which the access point compares to these. */
-                netlink_attribute_add(address_of request, NL80211_ATTR_IE,
-                                      (address_any)link->rsn, link->rsn_length);
+                const nl80211_attr_spec wpa[] = {
+                    {NL80211_ATTR_PRIVACY, null, 0},
+                    {NL80211_ATTR_WPA_VERSIONS, address_of version, 4},
+                    {NL80211_ATTR_CIPHER_SUITES_PAIRWISE, address_of ccmp, 4},
+                    {NL80211_ATTR_CIPHER_SUITE_GROUP, address_of ccmp, 4},
+                    {NL80211_ATTR_AKM_SUITES, address_of psk, 4},
+                    {NL80211_ATTR_IE, link->rsn, link->rsn_length},
+                };
+                nl80211_put_attrs(address_of request, wpa, array_count(wpa));
                 /* Management frame protection, which the kernel takes as
                    required or not at all: a driver with no connect of its
                    own (mac80211's kind) refuses the optional form outright.
@@ -2952,13 +2955,15 @@ static COLD bipolar nl80211_authenticate(nl80211 address_to session, p32 index,
         if (!nl80211_begin(address_of request, session->family, NL80211_CMD_AUTHENTICATE,
                            NLM_REQUEST, sequence))
                 return -1;
-        nl80211_attribute_u32(address_of request, NL80211_ATTR_IFINDEX, index);
-        nl80211_attribute_u32(address_of request, NL80211_ATTR_WIPHY_FREQ, frequency);
-        netlink_attribute_add(address_of request, NL80211_ATTR_MAC, bssid, 6);
-        netlink_attribute_add(address_of request, NL80211_ATTR_SSID, ssid, ssid_length);
-        nl80211_attribute_u32(address_of request, NL80211_ATTR_AUTH_TYPE, type);
-        netlink_attribute_add(address_of request, NL80211_ATTR_AUTH_DATA, data, data_length);
-        if (request.failed)
+        const nl80211_attr_spec attrs[] = {
+            {NL80211_ATTR_IFINDEX, address_of index, 4},
+            {NL80211_ATTR_WIPHY_FREQ, address_of frequency, 4},
+            {NL80211_ATTR_MAC, bssid, 6},
+            {NL80211_ATTR_SSID, ssid, ssid_length},
+            {NL80211_ATTR_AUTH_TYPE, address_of type, 4},
+            {NL80211_ATTR_AUTH_DATA, data, data_length},
+        };
+        if (!nl80211_put_attrs(address_of request, attrs, array_count(attrs)) || request.failed)
                 return -1;
         sent = socket_send(session->handle, request.bytes, request.used, 0, 0, 0);
         return sent < 0 ? sent : 0;
@@ -3130,20 +3135,21 @@ static COLD bipolar nl80211_associate(nl80211 address_to session, p32 index, p8 
         if (!nl80211_begin(address_of request, session->family, NL80211_CMD_ASSOCIATE,
                            NLM_REQUEST, sequence))
                 return -1;
-        nl80211_attribute_u32(address_of request, NL80211_ATTR_IFINDEX, index);
-        netlink_attribute_add(address_of request, NL80211_ATTR_MAC, bssid, 6);
-        netlink_attribute_add(address_of request, NL80211_ATTR_SSID, ssid, ssid_length);
-        nl80211_attribute_u32(address_of request, NL80211_ATTR_WIPHY_FREQ, frequency);
-        netlink_attribute_add(address_of request, NL80211_ATTR_IE, (address_any)link->rsn,
-                              link->rsn_length);
-        netlink_attribute_add(address_of request, NL80211_ATTR_PRIVACY, null, 0);
-        nl80211_attribute_u32(address_of request, NL80211_ATTR_WPA_VERSIONS, version);
-        nl80211_attribute_u32(address_of request, NL80211_ATTR_CIPHER_SUITES_PAIRWISE, ccmp);
-        nl80211_attribute_u32(address_of request, NL80211_ATTR_CIPHER_SUITE_GROUP, ccmp);
-        nl80211_attribute_u32(address_of request, NL80211_ATTR_AKM_SUITES, akm);
-        nl80211_attribute_u32(address_of request, NL80211_ATTR_USE_MFP, mfp);
-        netlink_attribute_add(address_of request, NL80211_ATTR_CONTROL_PORT, null, 0);
-        if (request.failed)
+        const nl80211_attr_spec attrs[] = {
+            {NL80211_ATTR_IFINDEX, address_of index, 4},
+            {NL80211_ATTR_MAC, bssid, 6},
+            {NL80211_ATTR_SSID, ssid, ssid_length},
+            {NL80211_ATTR_WIPHY_FREQ, address_of frequency, 4},
+            {NL80211_ATTR_IE, link->rsn, link->rsn_length},
+            {NL80211_ATTR_PRIVACY, null, 0},
+            {NL80211_ATTR_WPA_VERSIONS, address_of version, 4},
+            {NL80211_ATTR_CIPHER_SUITES_PAIRWISE, address_of ccmp, 4},
+            {NL80211_ATTR_CIPHER_SUITE_GROUP, address_of ccmp, 4},
+            {NL80211_ATTR_AKM_SUITES, address_of akm, 4},
+            {NL80211_ATTR_USE_MFP, address_of mfp, 4},
+            {NL80211_ATTR_CONTROL_PORT, null, 0},
+        };
+        if (!nl80211_put_attrs(address_of request, attrs, array_count(attrs)) || request.failed)
                 return -1;
         sent = socket_send(session->handle, request.bytes, request.used, 0, 0, 0);
         if (sent < 0 || !network_deadline_begin(address_of deadline, NL80211_CONNECT_SECONDS, 0))
