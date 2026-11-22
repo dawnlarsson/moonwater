@@ -476,10 +476,40 @@ static void compositor_dirty(unsigned int fb, const unsigned short (*clip)[4], u
         }
 }
 
+/*
+        The card's answer to the last flip or commit it refused (negative errno, 0 when none was given). A refusal that says the card is busy
+        (EBUSY, EAGAIN: the one before is still on) is transient: the direct and overlay paths back off for 2^n periods (n the busy refusals in a
+        row, at most 6) and then try again. Any other refusal is taken as the card's answer for the feature, which is then off for the session.
+*/
+static long compositor_refused_error;
+static unsigned int compositor_busy_run;
+static positive compositor_busy_until;
+
+// Whether the last refusal is the card being busy: it backs off, and is not taken as the feature refused for good (false then).
+static int compositor_refusal_fatal(void)
+{
+        if (compositor_refused_error == -(long)COMPOSITOR_EBUSY || compositor_refused_error == -(long)COMPOSITOR_EAGAIN)
+        {
+                unsigned int shift = compositor_busy_run < 6 ? compositor_busy_run : 6;
+
+                compositor_busy_run++;
+                compositor_busy_until = clock_monotonic_nanoseconds() + ((compositor.period ? compositor.period : 16666667ull) << shift);
+                return 0;
+        }
+        return 1;
+}
+
+// Whether the direct and overlay paths are backing off a busy card.
+static int compositor_busy_wait(void)
+{
+        return compositor_busy_until && clock_monotonic_nanoseconds() < compositor_busy_until;
+}
+
 // Common flip/atomic commit bookkeeping after the kernel accepts a page flip.
 static void compositor_flip_arm(unsigned int fb, int row, unsigned int which, int async)
 {
         compositor_flip_refused = 0;
+        compositor_busy_run = 0;
         compositor.flip_pending = 1;
         compositor.vrr_kick = 0; // the pointer's place goes up with this flip
         compositor.flip_async = async != 0;
@@ -501,6 +531,7 @@ static int compositor_flip(unsigned int fb, int row, unsigned int which)
                 unsigned long user_data;
         } flip = {compositor.crtc, fb, COMPOSITOR_FLIP_EVENT, 0, 0};
 
+        compositor_refused_error = 0;
         // Leaving hardware-scaled direct scanout: restore 1:1 primary plane geometry atomically in this flip.
         if (compositor.scaled_direct && compositor.card >= 0)
         {
@@ -525,12 +556,12 @@ static int compositor_flip(unsigned int fb, int row, unsigned int which)
                 return 1;
         }
         flip.user_data = ++compositor.flip_serial;
-        if (system_control(compositor.card, COMPOSITOR_PAGE_FLIP, address_of flip) != 0)
+        if ((compositor_refused_error = system_control(compositor.card, COMPOSITOR_PAGE_FLIP, address_of flip)) != 0)
         {
                 if (!(flip.flags & COMPOSITOR_FLIP_ASYNC))
                         return 0;
                 flip.flags &= ~COMPOSITOR_FLIP_ASYNC;
-                if (system_control(compositor.card, COMPOSITOR_PAGE_FLIP, address_of flip) != 0)
+                if ((compositor_refused_error = system_control(compositor.card, COMPOSITOR_PAGE_FLIP, address_of flip)) != 0)
                         return 0;
         }
         compositor_flip_arm(fb, row, which, (flip.flags & COMPOSITOR_FLIP_ASYNC) != 0);
@@ -1149,7 +1180,7 @@ static int compositor_direct_candidate(const struct compositor_frame *frames, co
 {
         int row;
 
-        if (!windows)
+        if (!windows || compositor_busy_wait())
                 return -1;
         row = rows[windows - 1];
         if (!compositor_client_scans(row) &&
@@ -1192,7 +1223,8 @@ static b32 compositor_present_direct(int row, const struct compositor_frame *tab
                         if (lent)
                                 return compositor_lent_fb_fail(row), 0;
                         compositor_direct_unpatch_at(row, which);
-                        compositor.direct_refused = 1, compositor.table->refused = 5;
+                        if (compositor_refusal_fatal())
+                                compositor.direct_refused = 1, compositor.table->refused = 5;
                         return 0;
                 }
         }
@@ -1847,6 +1879,7 @@ static int compositor_atomic_primary(unsigned int fb, int row, unsigned int whic
         int want_async = same_geom && row >= 0 && compositor_wl_row_async(row);
         int async = 0;
 
+        compositor_refused_error = 0;
         (void)compositor_overlay_ready();
         if (!compositor.primary || src_w <= 0 || src_h <= 0 || dw <= 0 || dh <= 0)
                 return 0;
@@ -1862,9 +1895,10 @@ static int compositor_atomic_primary(unsigned int fb, int row, unsigned int whic
                 if (compositor.overlay_on && compositor.overlay)
                         drm_atomic_set_plane(&req, compositor.overlay, compositor.overlay_props, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
         }
-        if (want_async && drm_atomic_commit(&req, COMPOSITOR_FLIP_EVENT | COMPOSITOR_ATOMIC_NONBLOCK | COMPOSITOR_FLIP_ASYNC, ++compositor.flip_serial) == 0)
+        if (want_async && (compositor_refused_error = drm_atomic_commit(&req, COMPOSITOR_FLIP_EVENT | COMPOSITOR_ATOMIC_NONBLOCK | COMPOSITOR_FLIP_ASYNC,
+                                                                        ++compositor.flip_serial)) == 0)
                 async = 1;
-        else if (drm_atomic_commit(&req, COMPOSITOR_FLIP_EVENT | COMPOSITOR_ATOMIC_NONBLOCK, ++compositor.flip_serial) != 0)
+        else if ((compositor_refused_error = drm_atomic_commit(&req, COMPOSITOR_FLIP_EVENT | COMPOSITOR_ATOMIC_NONBLOCK, ++compositor.flip_serial)) != 0)
                 return 0;
         compositor_flip_arm(fb, row, which, async);
         compositor.scaled_direct = scaled;
@@ -1889,6 +1923,7 @@ static int compositor_atomic_to(unsigned int fb, int row, unsigned int which, in
 {
         struct drm_atomic_req req = {0};
 
+        compositor_refused_error = 0;
         if (compositor.scaled_direct)
         {
                 unsigned int scount;
@@ -1909,7 +1944,7 @@ static int compositor_atomic_to(unsigned int fb, int row, unsigned int which, in
                                      rect ? rect[2] - rect[0] : 0, rect ? rect[3] - rect[1] : 0,
                                      rect ? rect[0] : 0, rect ? rect[1] : 0,
                                      rect ? rect[2] - rect[0] : 0, rect ? rect[3] - rect[1] : 0);
-        if (drm_atomic_commit(&req, COMPOSITOR_FLIP_EVENT | COMPOSITOR_ATOMIC_NONBLOCK, ++compositor.flip_serial) != 0)
+        if ((compositor_refused_error = drm_atomic_commit(&req, COMPOSITOR_FLIP_EVENT | COMPOSITOR_ATOMIC_NONBLOCK, ++compositor.flip_serial)) != 0)
                 return 0;
         compositor_flip_arm(fb, row, which, 0);
         compositor_scaled_reset();
@@ -2060,7 +2095,12 @@ static b32 compositor_present_overlaid(int row, const struct compositor_frame *f
         if (flipped)
         {
                 if (!compositor_atomic(fb, row, which, drawn || (!shown && compositor.overlay_on), shown ? rect : 0, buffer))
-                        return compositor.overlay_state = -1, compositor_overlay_off(), 0;
+                {
+                        if (compositor_refusal_fatal())
+                                compositor.overlay_state = -1;
+                        compositor_overlay_off();
+                        return 0;
+                }
                 if (drawn)
                         compositor.overlay_back ^= 1;
         }
@@ -2118,6 +2158,7 @@ static int compositor_plane_candidate(const struct compositor_frame *frames, con
         const struct compositor_frame *frame;
 
         if (compositor.card < 0) return *why = 1, -1;
+        if (compositor_busy_wait()) return -1; // the card was busy with the last commit: backing off (compositor_refusal_fatal)
         if (compositor_output_count() > 1) return *why = 13, -1;
         if (compositor_cursor_in_scene() && compositor.cursor.drawn) return *why = 3, -1;
         if (compositor_planes_off()) return *why = 21, -1;

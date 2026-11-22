@@ -1404,7 +1404,12 @@ static int present_overlay_plane(int plane, const int planed[4], int turning, in
                         if (lent)
                                 compositor_lent_fb_fail(plane);
                         else
-                                compositor_unscanned(12), compositor.overlay_state = -1, compositor_overlay_off();
+                        {
+                                compositor_unscanned(12);
+                                if (compositor_refusal_fatal())
+                                        compositor.overlay_state = -1;
+                                compositor_overlay_off();
+                        }
                         compositor.plane_row = compositor.direct_row = -1;
                         compositor_damage(planed[0], planed[1], planed[2] - planed[0], planed[3] - planed[1]);
                         compositor_wl_straight_pays(-1);
@@ -1489,7 +1494,7 @@ static void compositor_present_frames(void)
         {
                 int row = compositor.direct_row, menu[4];
 
-                if (!taskbar_menu_rect(menu) && compositor_client_scans(row) &&
+                if (!taskbar_menu_rect(menu) && compositor_client_scans(row) && !compositor_busy_wait() &&
                     compositor_direct_eligible(row, compositor_row_opaque_fs(row) ? 0 : compositor_wl_row_blend(row)) &&
                     compositor_present_direct(row, 0, 0))
                         return present_direct_cleared();
