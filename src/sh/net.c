@@ -3469,7 +3469,7 @@ static COLD b32 net_watch(void)
         //      O_WRONLY. A failure leaves the handle at -1 and net_out at
         //      log, which is exactly the old behaviour.
         net_kmsg_handle = (b32)system_open_at(
-            AT_FDCWD, "/dev/kmsg", 1 | O_CLOEXEC);
+            AT_FDCWD, "/dev/kmsg", 1 | O_CLOEXEC | O_NOFOLLOW);
 
         if (net_kmsg_handle >= 0)
         {

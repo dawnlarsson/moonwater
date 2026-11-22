@@ -17780,6 +17780,7 @@ COLD fn shell_unalias(writer write)
         is asked to echo only under bash.
 */
 static bool shell_verbose_eval_lines;
+static positive shell_eval_depth;
 static bool shell_argv_joined(positive from, byte_store address_to store);
 
 COLD fn shell_eval(writer write)
@@ -17790,6 +17791,14 @@ COLD fn shell_eval(writer write)
         positive syntax = shell_syntax_generation;
 
         return_if(shell_argc < 2, shell_answer(0));
+
+        if (shell_eval_depth >= 1024 ||
+            (shell_eval_depth >= 64 && !shell_stack_within(75)))
+                return shell_answered(
+                    1, "eval: maximum eval nesting level exceeded (%p)\n",
+                    shell_eval_depth);
+        shell_eval_depth++;
+        scope_exit(shell_eval_depth--);
 
         //      Bash reads eval's words for options first, so "eval --"
         //      runs nothing and "eval -x" is a usage error fatal to a
@@ -21518,6 +21527,12 @@ COLD fn shell_dot(writer write)
         bipolar got;
         positive filled;
         bool no_room = false;
+
+        if (shell_source_depth >= 1024 ||
+            (shell_source_depth >= 64 && !shell_stack_within(75)))
+                return shell_answered(
+                    1, "%s: maximum source nesting level exceeded (%p)\n",
+                    shell_argv[0], shell_source_depth);
         bipolar handle;
         positive first = 1;
 
