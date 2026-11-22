@@ -8975,8 +8975,6 @@ static inline b64 ui_qsqrt(b64 x)
         return (b64)(ui_isqrt((p64)x << shift) << ((UI_Q - shift) / 2));
 }
 
-static const struct ui_bezier ui_ease_rise = UI_BEZIER(UI_Q2(40), UI_Q2(65), UI_Q2(30), UI_ONE); // --rb-ease-rise
-static const struct ui_bezier ui_ease_out = UI_BEZIER(0, 0, UI_Q2(58), UI_ONE);              // CSS ease-out
 static const struct ui_bezier ui_ease_ripple = UI_BEZIER(UI_Q2(40), 0, UI_Q2(20), UI_ONE);   // ui.js i()
 
 // ui.js's i(): the ripple's cubic-bezier(.4,0,.2,1) by five of Newton's steps from t = x, no bracket.
@@ -10900,7 +10898,6 @@ struct ui_control
         b32 hover, down, moved, focused;
         int item;                          // the item under the pointer or pressed
         int press_x, press_y, pointer_x, pointer_y; // device pixels in the window
-        b64 pressed_at;
         // Motion.
         struct ui_squish squish;
         struct ui_chase drawn;
@@ -10964,12 +10961,6 @@ static fn ui_control_row(const struct ui_control address_to c, int address_to x,
                 return;
         }
         *x = c->x - 24, *y = c->y - 8, *w = c->w + 48, *h = c->h + 16;
-}
-
-// A control to be placed at its next frame, as if it had just appeared: a page shown again, a list rebuilt, a row scrolled in.
-static inline fn ui_control_forget(struct ui_control address_to c)
-{
-        c->placed = 0;
 }
 
 // The pieces a control needs in device pixels.
@@ -13086,7 +13077,7 @@ static struct ui_control address_to ui_kit_pointer_press(struct ui address_to ui
         const struct ui_control_desc address_to d = ui_control_desc_of(c);
         ui_kit_held = c;
         c->down = 1, c->moved = 0, c->hover = 1, c->item = hit;
-        c->press_x = c->pointer_x = x, c->press_y = c->pointer_y = y, c->pressed_at = ui_kit.now;
+        c->press_x = c->pointer_x = x, c->press_y = c->pointer_y = y;
         ui_squish_press(&c->squish);
         return d && d->press ? d->press(ui, c, x, y, hit, hit_kind) : null;
 }
@@ -13190,7 +13181,6 @@ static struct ui_control address_to ui_kit_pointer(struct ui address_to ui, stru
 #define BODY_RUBBER_C (UI_ONE * 36 / 100)    // the rubber band's stiffness c (fit 0.36 to the top dip, for a view of 772 px: it scales with the view)
 #define BODY_SPRING_OMEGA 24                 // the spring home is critically damped at this rate, per second: 90 percent home in 0.17 s, 98 in 0.25 (11, the Mac's fit, was 0.55 s: slow motion)
 #define BODY_STILL (UI_ONE * 20)             // a coast under 20 units a second has stopped
-#define BODY_VIEW_FACTOR (UI_ONE * 22 / 100) // the share of an OS momentum delta the view moves (fit: 0.22 median over 698 events)
 #define BODY_STEP_NS 1000000ll               // a step integrates at most this long (a millisecond)
 #define BODY_HELD_NS 2000000000ll            // a hold the hand has not moved in this long is let go where it is (ui_body_step): its release was lost
 #define BODY_REST (UI_ONE / 4)               // the spring is at rest within a quarter unit, moving under a quarter unit a second
@@ -13210,7 +13200,6 @@ static struct ui_control address_to ui_kit_pointer(struct ui address_to ui, stru
 
 #define BODY_IDLE 0     // nothing moves it
 #define BODY_TRACK 1    // a finger holds it: one for one, drawn as the rubber band past an end
-#define BODY_DRIVEN 2   // the OS's momentum deltas move it: the view's share of each, nothing held
 #define BODY_COAST 3    // a release's speed carries it, falling
 #define BODY_SPRING 4   // it is past an end and springs home
 #define BODY_NOTCH 5    // a wheel's notches have moved the target, and the position follows it
@@ -13350,17 +13339,6 @@ static void ui_body_track(struct ui_body address_to b, b64 delta, b64 at)
         ui_body_pin(b);
         b->state = BODY_TRACK, b->tracked = b->at = at;
         b->vel = b->bounce = b->bounce_v = b->drive = 0;
-        ui_body_note(b);
-}
-
-static void ui_body_driven(struct ui_body address_to b, b64 delta, b64 at)
-{
-        if (ui_kit.scroll_off & WINDOW_SCROLL_STOPS)
-                return;
-        ui_body_step(b, at);
-        b->raw += ui_qmul(delta, BODY_VIEW_FACTOR);
-        ui_body_pin(b);
-        b->state = BODY_DRIVEN, b->vel = 0, b->at = at;
         ui_body_note(b);
 }
 
