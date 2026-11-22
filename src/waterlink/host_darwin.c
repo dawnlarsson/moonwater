@@ -113,6 +113,7 @@ extern char *strerror(int number);
 extern char **environ;
 extern int mkstemp(char *template_name);
 extern int fsync(int handle);
+extern int link(const char *from, const char *to);
 extern int rename(const char *from, const char *to);
 extern int unlink(const char *path);
 extern long pwrite(int handle, const void *data, unsigned long length, long long offset);
@@ -123,10 +124,10 @@ static bool file_look(bipolar directory, string_address path, positive flags,
                       file_facts address_to out)
 {
         struct stat facts;
-        int result = path[0] ? fstatat((int)directory, (const char *)path, &facts, (int)flags)
-                             : fstat((int)directory, &facts);
+        int result = (path && path[0]) ? fstatat((int)directory, (const char *)path, &facts, (int)flags)
+                                       : fstat((int)directory, &facts);
 
-        memory_fill(out, 0, sizeof(file_facts));
+        memory_zero(out, sizeof(file_facts));
         if (result != 0)
                 return false;
         out->mode = facts.st_mode;
@@ -226,6 +227,8 @@ static bipolar file_publish_with(string_address path, address_any bytes,
         bipolar written;
         file_facts there;
 
+        if (!used)
+                return -ENOENT;
         if (used + 16 > sizeof(stage))
                 return -ERROR_NAME_TOO_LONG;
         if ((behavior & FILE_STAGED_NO_REPLACE) && file_look_at(path, address_of there))
@@ -244,6 +247,18 @@ static bipolar file_publish_with(string_address path, address_any bytes,
                 return written < 0 ? written : -ERROR_INPUT_OUTPUT;
         }
         (void)close(handle);
+        if (behavior & FILE_STAGED_NO_REPLACE)
+        {
+                if (link((const char *)stage, (const char *)path) != 0)
+                {
+                        bipolar error = -(bipolar)*__error();
+
+                        (void)unlink((const char *)stage);
+                        return error;
+                }
+                (void)unlink((const char *)stage);
+                return 0;
+        }
         if (rename((const char *)stage, (const char *)path) != 0)
         {
                 bipolar error = -(bipolar)*__error();
@@ -286,8 +301,8 @@ bipolar shell_exec_file(string_address path, string_address address_to arguments
 
         if (count >= array_count(words))
                 return -E2BIG;
-        for (positive at = 0; at < count; at++)
-                words[at] = arguments[at];
+        if (count)
+                memory_copy(words, arguments, count * sizeof(string_address));
         words[count] = null;
         (void)execve((const char *)path, (char *const *)words, (char *const *)environment);
         return -darwin_errno();
@@ -302,7 +317,7 @@ static bipolar process_pty_open(b32 address_to master_out, b32 address_to slave_
 
         if (master < 0)
                 return -darwin_errno();
-        name = master >= 0 && grantpt(master) == 0 && unlockpt(master) == 0
+        name = grantpt(master) == 0 && unlockpt(master) == 0
                    ? ptsname(master) : null;
         slave = name ? open(name, O_RDWR | O_NOCTTY) : -1;
         if (slave < 0)
@@ -315,7 +330,12 @@ static bipolar process_pty_open(b32 address_to master_out, b32 address_to slave_
         (void)fcntl(master, F_SETFD, FD_CLOEXEC);
         (void)fcntl(slave, F_SETFD, FD_CLOEXEC);
         if (nonblocking)
-                (void)fcntl(master, F_SETFL, fcntl(master, F_GETFL) | O_NONBLOCK);
+        {
+                int flags = fcntl(master, F_GETFL);
+
+                if (flags >= 0)
+                        (void)fcntl(master, F_SETFL, flags | O_NONBLOCK);
+        }
         address_to master_out = master;
         address_to slave_out = slave;
         return 0;
@@ -475,7 +495,7 @@ static string_address link_state_dir(void)
         link_dir_ready = true;
         link_dir_text[0] = end;
         home = file_environment((string_address)"HOME");
-        if (!home || !home[0] || string_length(home) > (positive)(LINK_STATE_ROOM - 64))
+        if (!home || home[0] != '/' || string_length(home) > (positive)(LINK_STATE_ROOM - 64))
                 return (string_address)link_dir_text;
         string_copy((string_address)link_dir_text, home);
         string_append_bounded((string_address)link_dir_text,
@@ -484,8 +504,12 @@ static string_address link_state_dir(void)
         {
                 bipolar made = system_make_directory_exact_at(
                     AT_FDCWD, (string_address)link_dir_text, 0700);
+                file_facts facts;
 
-                if (made < 0 && made != -EEXIST)
+                if (made < 0 &&
+                    (made != -EEXIST ||
+                     !file_look(AT_FDCWD, (string_address)link_dir_text, 0x0020, address_of facts) ||
+                     (facts.mode & MODE_FORMAT) != MODE_DIRECTORY))
                         link_dir_text[0] = end;
         }
         return (string_address)link_dir_text;
@@ -497,8 +521,13 @@ static string_address link_state_dir(void)
 */
 static string_address link_state_path(positive leaf)
 {
-        p8 address_to slot = link_slot_text[leaf];
-        string_address dir = link_state_dir();
+        p8 address_to slot;
+        string_address dir;
+
+        if (leaf >= LINK_LEAF_COUNT)
+                return (string_address)"";
+        slot = link_slot_text[leaf];
+        dir = link_state_dir();
 
         slot[0] = end;
         if (dir[0])
@@ -534,6 +563,8 @@ static string_address link_executable(void)
         path[0] = end;
         if (_NSGetExecutablePath((char *)path, &size) != 0)
                 path[0] = end;
+        else
+                path[sizeof path - 1] = end;
         return (string_address)path;
 }
 
@@ -673,6 +704,8 @@ static bool host_detach(p32 keep, p32 keep_too)
 
         system_call(syscall(setsid));
         quiet = system_open_at(AT_FDCWD, "/dev/null", FILE_READ_WRITE | O_CLOEXEC);
+        if (quiet >= 0 && quiet < 3)
+                (void)fcntl((int)quiet, F_SETFD, 0);
         for (positive at = 0; quiet >= 0 && at < 3; at++)
                 if ((positive)quiet != at)
                         system_call_2(syscall(dup2), (positive)quiet, at);
@@ -732,6 +765,8 @@ static bipolar radio_password_read(p8 address_to into, positive room,
         positive used = 0;
         bipolar result = 0;
 
+        if (!room)
+                return -1;
         into[0] = end;
         if (only_asked && !terminal)
                 return 0;

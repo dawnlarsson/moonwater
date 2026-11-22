@@ -100,13 +100,12 @@ static p8 link_script_names_secret(string_address script,
 {
         positive length = string_length(namespace);
 
-        for (string_address at = script; at && *at; at++)
+        for (string_address at = script;
+             at && (at = string_search(at, "link group ")) != null;
+             at += 11)
         {
-                string_address word;
+                string_address word = at + 11;
 
-                if (!string_has_prefix(at, "link group "))
-                        continue;
-                word = at + 11;
                 word += string_span_of_set(word, " ");
                 if (!host_starts(word, namespace) || word[length] != ' ')
                         continue;
@@ -194,6 +193,23 @@ static b32 link_any_open(link_state address_to state)
         return false;
 }
 
+/*      The listener's state file when the listener is running and the file is
+        whole; false and zeroed otherwise. */
+static p8 link_state_read(bipolar owner, link_state address_to state)
+{
+        positive state_length = 0;
+
+        if (owner > 0 &&
+            link_read_private_records(LINK_STATE_PATH, (p8 address_to)state,
+                                      sizeof(address_to state),
+                                      sizeof(address_to state),
+                                      address_of state_length) >= 0 &&
+            state_length == sizeof(address_to state))
+                return true;
+        memory_zero(state, sizeof(address_to state));
+        return false;
+}
+
 static b32 link_status(void)
 {
         struct waterlink_identity me;
@@ -201,7 +217,6 @@ static b32 link_status(void)
         link_groups groups;
         p32 marks[LINK_GROUPS_MAX] = {0};
         link_state state;
-        positive state_length = 0;
         bipolar owner = host_lock_owner(LINK_LOCK_PATH);
         p8 key[48];
         p8 word[16];
@@ -212,12 +227,7 @@ static b32 link_status(void)
         //      A listener that is off, or older than this, left no state. One
         //      that was killed left its state behind, and it says nothing of
         //      sessions or peers heard now: a clean stop removes the file.
-        if (owner <= 0 ||
-            link_read_private_records(LINK_STATE_PATH, (p8 address_to)address_of state,
-                                      sizeof state, sizeof state,
-                                      address_of state_length) < 0 ||
-            state_length != sizeof state)
-                memory_zero(address_of state, sizeof state);
+        (void)link_state_read(owner, address_of state);
 
         //      The first line is the listener, and the switch and the process
         //      are two things: its state is one of five, each with the command
@@ -370,10 +380,12 @@ static b32 link_status(void)
                         for (positive g = 0; peer->group && g < groups.count; g++)
                                 if (marks[g] == peer->group)
                                 {
-                                        string_copy((string_address)in_group,
-                                                    ", in group ");
-                                        string_copy((string_address)in_group + 11,
-                                                    groups.record[g].namespace);
+                                        string_copy_bounded((string_address)in_group,
+                                                            ", in group ",
+                                                            sizeof in_group);
+                                        string_append_bounded((string_address)in_group,
+                                                              groups.record[g].namespace,
+                                                              sizeof in_group);
                                         how = (string_address)in_group;
                                 }
                         string_format(log, "  %s  %s...  may %s%s\n",
@@ -402,24 +414,16 @@ static b32 link_status(void)
                 if (open_now)
                 {
                         link_place_text(open_now->address, open_now->port, place);
-                        if (!peer->may)
-                                string_format(log, "      open now  \xe2\x86\x91%p \xe2\x86\x93%p pkts  rtt %p.%p ms  from %s  next: "
-                                                   "moonwater link allow %s run\n",
-                                              (positive)open_now->tx_packets,
-                                              (positive)open_now->rx_packets,
-                                              (positive)(open_now->rtt / 1000),
-                                              (positive)(open_now->rtt % 1000 / 100),
-                                              (string_address)place,
-                                              (string_address)peer->name);
-                        else
-                                string_format(log, "      open now  \xe2\x86\x91%p \xe2\x86\x93%p pkts  rtt %p.%p ms  from %s  next: "
-                                                   "moonwater link %s\n",
-                                              (positive)open_now->tx_packets,
-                                              (positive)open_now->rx_packets,
-                                              (positive)(open_now->rtt / 1000),
-                                              (positive)(open_now->rtt % 1000 / 100),
-                                              (string_address)place,
-                                              (string_address)peer->name);
+                        string_format(log, "      open now  \xe2\x86\x91%p \xe2\x86\x93%p pkts  rtt %p.%p ms  from %s  next: "
+                                           "moonwater link %s%s%s\n",
+                                      (positive)open_now->tx_packets,
+                                      (positive)open_now->rx_packets,
+                                      (positive)(open_now->rtt / 1000),
+                                      (positive)(open_now->rtt % 1000 / 100),
+                                      (string_address)place,
+                                      !peer->may ? "allow " : "",
+                                      (string_address)peer->name,
+                                      !peer->may ? " run" : "");
                 }
                 else if (seen)
                 {
@@ -427,18 +431,13 @@ static b32 link_status(void)
 
                         discovery_ago(seen->seen, when);
                         link_place_text(seen->address, seen->port, place);
-                        if (!peer->may)
-                                string_format(log, "      heard %s from %s  next: "
-                                                   "moonwater link allow %s run\n",
-                                              (string_address)when,
-                                              (string_address)place,
-                                              (string_address)peer->name);
-                        else
-                                string_format(log, "      heard %s from %s  next: "
-                                                   "moonwater link %s\n",
-                                              (string_address)when,
-                                              (string_address)place,
-                                              (string_address)peer->name);
+                        string_format(log, "      heard %s from %s  next: "
+                                           "moonwater link %s%s%s\n",
+                                      (string_address)when,
+                                      (string_address)place,
+                                      !peer->may ? "allow " : "",
+                                      (string_address)peer->name,
+                                      !peer->may ? " run" : "");
                         if (seen->changed)
                         {
                                 p8 moved_when[32];
@@ -675,14 +674,10 @@ static b32 link_purge_locked(void)
 {
         link_peers peers;
         link_state state;
-        positive state_length = 0, kept = 0, removed = 0;
+        positive kept = 0, removed = 0;
         bipolar owner = host_lock_owner(LINK_LOCK_PATH);
 
-        if (owner <= 0 ||
-            link_read_private_records(LINK_STATE_PATH, (p8 address_to)address_of state,
-                                      sizeof state, sizeof state,
-                                      address_of state_length) < 0 ||
-            state_length != sizeof state)
+        if (!link_state_read(owner, address_of state))
                 return host_refuse("the listener is not running; start it first with moonwater link on\n");
         if (!link_peers_for_change(address_of peers))
                 return host_refuse("%s could not be read\n", LINK_PEERS_PATH);
@@ -949,6 +944,8 @@ static const char link_base32[] = "abcdefghijklmnopqrstuvwxyz234567";
 #define LINK_SECRET_LEAST 8
 
 static p8 link_group_name_good(string_address name);
+static struct link_group_record address_to link_group_named(
+    link_groups address_to groups, string_address namespace);
 
 static b32 link_group_join(string_address address_to words, positive count)
 {
@@ -1048,10 +1045,7 @@ static b32 link_group_join(string_address address_to words, positive count)
                         link_peers_unlock(lock);
                         return host_refuse("%s could not be read\n", LINK_GROUPS_PATH);
                 }
-                for (positive look = 0; look < groups.count; look++)
-                        if (string_equals(groups.record[look].namespace, namespace) &&
-                            !(groups.record[look].flags & LINK_GROUP_ONCE))
-                                record = groups.record + look;
+                record = link_group_named(address_of groups, namespace);
 
                 if (!secret && !record)
                 {
@@ -1190,6 +1184,8 @@ static b32 link_group_join(string_address address_to words, positive count)
         //      from the file, so a join made while it runs takes at once.
         if (!link_switch_is_on())
                 host_say(log, host_label "the listener is off: moonwater link on starts it\n");
+        else
+                log_flush();
         return 0;
 }
 
@@ -1360,28 +1356,34 @@ static b32 link_group_store(string_address namespace, p8 address_to key,
         return 0;
 }
 
-//      The machines a group paired, forgotten, and how many.
-static positive link_group_forget_members(p32 mark)
+//      The machines a group paired, forgotten: count removed, -1 if peers
+//      could not be locked or read, -2 if peers could not be written.
+static bipolar link_group_forget_members(p32 mark)
 {
         link_peers peers;
         bipolar lock = link_peers_lock();
         positive dropped = 0;
 
         if (lock < 0)
-                return 0;
-        if (link_peers_for_change(address_of peers))
+                return -1;
+        if (!link_peers_for_change(address_of peers))
         {
-                for (positive at = 0; at < peers.count; at++)
-                        if (peers.peer[at].group == mark)
-                        {
-                                peers.peer[at--] = peers.peer[--peers.count];
-                                dropped++;
-                        }
-                if (dropped && link_peers_save(address_of peers) < 0)
-                        dropped = 0;
+                link_peers_unlock(lock);
+                return -1;
+        }
+        for (positive at = 0; at < peers.count; at++)
+                if (peers.peer[at].group == mark)
+                {
+                        peers.peer[at--] = peers.peer[--peers.count];
+                        dropped++;
+                }
+        if (dropped && link_peers_save(address_of peers) < 0)
+        {
+                link_peers_unlock(lock);
+                return -2;
         }
         link_peers_unlock(lock);
-        return dropped;
+        return (bipolar)dropped;
 }
 
 #if defined(MACOS)
@@ -1417,6 +1419,7 @@ static string_address link_group_entry_put(host_settings address_to settings,
         p16 id = 0;
         p8 have = false;
 
+        scope_exit(crypto_forget(text, sizeof text));
         memory_zero(taken, sizeof taken);
         while (host_settings_next(settings, address_of at, address_of setting))
         {
@@ -1661,24 +1664,11 @@ static b32 link_group_leave(string_address namespace, p8 forget)
 
         if (forget)
         {
-                link_peers peers;
-                bipolar held = link_peers_lock();
-                positive dropped = 0;
-                p8 read = held >= 0 && link_peers_for_change(address_of peers);
-                p8 wrote = false;
+                bipolar dropped = link_group_forget_members(keys.mark);
 
-                for (positive at = 0; read && at < peers.count; at++)
-                        if (peers.peer[at].group == keys.mark)
-                        {
-                                peers.peer[at--] = peers.peer[--peers.count];
-                                dropped++;
-                        }
-                if (read)
-                        wrote = link_peers_save(address_of peers) >= 0;
-                link_peers_unlock(held);
                 //      The group is gone from its file already; a peers file
                 //      that did not take the forget is said, not reported as done.
-                if (read && !wrote)
+                if (dropped == -2)
                 {
                         crypto_forget(address_of keys, sizeof keys);
                         return host_refuse("left group %s, but %s could not be "
@@ -1686,20 +1676,17 @@ static b32 link_group_leave(string_address namespace, p8 forget)
                                            "kept\n",
                                            namespace, LINK_PEERS_PATH);
                 }
-                if (read)
-                        host_say(log, host_label "left group %s and removed the "
-                                                 "%p machines it linked\n",
-                                 namespace, dropped);
-                else
+                if (dropped < 0)
                 {
-                        //      Asked to forget them and did not: a refusal,
-                        //      with its status, where this said so and left 0.
                         crypto_forget(address_of keys, sizeof keys);
                         return host_refuse("left group %s; %s could not be "
                                            "locked or read, so the machines "
                                            "it linked are kept\n",
                                            namespace, LINK_PEERS_PATH);
                 }
+                host_say(log, host_label "left group %s and removed the "
+                                         "%p machines it linked\n",
+                         namespace, (positive)dropped);
         }
         else
                 host_say(log, host_label "left group %s; the machines it "
@@ -1836,7 +1823,9 @@ static b32 link_group_new(string_address address_to words, positive count)
                 return refused;
         if (replaced)
         {
-                dropped = link_group_forget_members(link_group_mark(namespace));
+                bipolar forgot = link_group_forget_members(link_group_mark(namespace));
+
+                dropped = forgot > 0 ? (positive)forgot : 0;
                 host_say(log, host_label "group %s has a new key, and the %p machines "
                                          "the old one paired are forgotten here: "
                                          "anything that carries the old key is out of "
@@ -2489,12 +2478,10 @@ static b32 link_pair_start(string_address namespace, p8 address_to code,
 //      be put among them, which are not counted.
 static positive link_code_symbols(string_address text)
 {
-        positive used = 0;
+        positive length = string_length(text);
 
-        for (positive at = 0; text[at]; at++)
-                if (text[at] != '-' && text[at] != ' ')
-                        used++;
-        return used;
+        return length - memory_count(text, '-', length) -
+               memory_count(text, ' ', length);
 }
 
 static p8 link_has_route(void)
@@ -2512,6 +2499,7 @@ static b32 link_pair_here(string_address expect)
         link_pair_made made;
         link_before before;
 
+        scope_exit(crypto_forget(code, sizeof code); crypto_forget(said, sizeof said));
         //      Names are lowercase on both machines. One too long for a name
         //      is refused, and not cut to its first 31 characters and paired
         //      as those: the code would then admit the machine with that
@@ -2579,6 +2567,7 @@ static b32 link_pair_there(string_address typed_name, string_address typed)
         b32 refused;
         link_before before;
 
+        scope_exit(crypto_forget(code, sizeof code));
         //      The name, the code and the route are judged here, before
         //      anything goes on the air: a refusal that comes after the wait
         //      says nothing of what was wrong with them.
@@ -2847,11 +2836,7 @@ static fn link_doctor_carriers(bipolar owner, positive port)
         else
                 string_format(log, "        proxy: none, a tcp dial goes straight there\n");
 
-        if (owner <= 0 ||
-            link_read_private_records(LINK_STATE_PATH, (p8 address_to)address_of state,
-                                      sizeof state, sizeof state,
-                                      address_of state_length) < 0 ||
-            state_length != sizeof state)
+        if (!link_state_read(owner, address_of state))
                 return;
         for (positive at = 0; at < state.open_count && at < LINK_SESSIONS; at++)
         {
@@ -3084,7 +3069,7 @@ static b32 link_modem_key_verb(void)
         p8 text[65];
         bipolar got = link_secret_at(LINK_MODEM_PATH, key, true);
 
-        scope_exit(crypto_forget(key, sizeof key));
+        scope_exit(crypto_forget(key, sizeof key); crypto_forget(text, sizeof text));
         if (got == -EPERM)
                 return host_refuse("%s is not a modem key: it must be a 32-byte "
                                    "file only root can read\n", LINK_MODEM_PATH);
@@ -3163,6 +3148,7 @@ static const struct
     {"port", 3, 4},  {"transport", 3, 4}, {"modem", 4, 5},
     {"pair", 3, 4}, {"add", 5, 6},   {"remove", 4, 4}, {"purge", 3, 3},
     {"allow", 5, ~(positive)0},      {"deny", 5, ~(positive)0},
+    {"allow-all", 4, ~(positive)0},  {"deny-all", 4, ~(positive)0},
     {"shell", 4, 4}, {"run", 5, ~(positive)0},
     {"push", 6, 6}, {"pull", 6, 6}, {"log", 4, 4},
     {"cancel", 3, 3}, {"doctor", 3, 3}, {"paths", 3, 3},
@@ -3394,17 +3380,18 @@ static b32 link_dispatch(string_address address_to arguments, positive count)
 */
 static b32 link_main(string_address address_to arguments, positive count)
 {
-        static const string_address changes[] = {"on",  "off",    "port", "pair", "add",
-                                                 "remove", "allow", "deny", "group",
-                                                 "cancel"};
+        static const string_address changes[] = {"on",     "off",       "port",
+                                                 "pair",   "add",       "remove",
+                                                 "purge",  "allow",     "deny",
+                                                 "allow-all", "deny-all", "transport",
+                                                 "group",  "cancel"};
         string_address verb = count > 2 ? arguments[2] : null;
         positive previous[4];
         p8 ignored = false;
         b32 answer;
 
-        for (positive at = 0; verb && at < array_count(changes); at++)
-                ignored |= string_equals(verb, changes[at]);
-        if (ignored)
+        if (verb && string_table_find(verb, changes, sizeof changes[0],
+                                      array_count(changes)) < array_count(changes))
                 ignored = system_signal_install(13, 1, 0, 0, previous);
         answer = link_dispatch(arguments, count);
         if (ignored)

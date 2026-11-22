@@ -323,14 +323,22 @@ fn link_machine_name(p8 address_to name)
         memory_zero(host, sizeof host);
         if (system_call_6(syscall(sysctl), (positive)mib, 2, (positive)host,
                           (positive)address_of hostlen, 0, 0) >= 0)
-                for (positive at = 0;
-                     at < WATERLINK_NAME_MAX - 1 && host[at]; at++)
-                        name[at] = byte_to_lower(host[at]);
+        {
+                positive len = string_length_max((string_address)host,
+                                                 WATERLINK_NAME_MAX - 1);
+
+                memory_copy(name, host, len);
+                memory_to_lower_ascii(name, len);
+        }
 #else
         if (system_call_1(syscall(uname), (positive)uts) >= 0)
-                for (positive at = 0;
-                     at < WATERLINK_NAME_MAX - 1 && uts[65 + at]; at++)
-                        name[at] = byte_to_lower(uts[65 + at]);
+        {
+                positive len = string_length_max((string_address)(uts + 65),
+                                                 WATERLINK_NAME_MAX - 1);
+
+                memory_copy(name, uts + 65, len);
+                memory_to_lower_ascii(name, len);
+        }
 #endif
         used = string_span_of_set((string_address)name,
                                   "abcdefghijklmnopqrstuvwxyz0123456789-_");
@@ -466,9 +474,7 @@ static p8 link_peer_follow(link_peers address_to peers,
         if (!peer)
                 return false;
         offered[WATERLINK_NAME_MAX - 1] = 0;
-        for (positive at = 0; offered[at]; at++)
-                if (offered[at] >= 'A' && offered[at] <= 'Z')
-                        offered[at] += 'a' - 'A';
+        memory_to_lower_ascii(offered, string_length((string_address)offered));
         if (!peer->group || (peer->flags & WATERLINK_PEER_LABELLED) ||
             !link_name_good((string_address)offered) ||
             string_equals(peer->name, (string_address)offered))
@@ -1037,7 +1043,7 @@ static positive link_sweep_fill(void)
                 p32 network;
                 p32 last;
 
-                if (!mask)
+                if (!mask || mask >= 0xfffffffeu)
                         continue;
                 if (mask < 0xffffff00u)
                         mask = 0xffffff00u;
@@ -1051,10 +1057,10 @@ static positive link_sweep_fill(void)
         return count;
 }
 
-/* The greeting a sweep sends, made once for the group, as link_pair_begin
-   makes one: the first message to the group's key, from this machine's key
-   and with its name. False when it could not be made. */
-static p8 link_sweep_make(positive group)
+/* A group greeting datagram: the first message to the group's key, from this
+   machine's key and with its name. Shared by sweeps and unicast greetings.
+   False when it could not be made. */
+static p8 link_greeting_make(positive group, p8 address_to datagram)
 {
         struct waterlink_group_keys address_to keys = link_nearby.keys + group;
         struct waterlink_noise noise;
@@ -1071,7 +1077,7 @@ static p8 link_sweep_make(positive group)
                     WATERLINK_NAME_MAX);
         made = waterlink_initiate(address_of noise, address_of link_self.me,
                                   keys->identity.public, keys->psk, ephemeral,
-                                  hello, link_nearby.sweep_datagram);
+                                  hello, datagram);
         crypto_forget(ephemeral, sizeof ephemeral);
         crypto_forget(address_of noise, sizeof noise);
         return made;
@@ -1118,7 +1124,7 @@ static p64 link_sweep_turn(p64 now)
                         return link_nearby.sweep_next;
                 link_nearby.sweep_left--;
                 link_nearby.sweep_count = link_sweep_fill();
-                if (!link_nearby.sweep_count || !link_sweep_make(group))
+                if (!link_nearby.sweep_count || !link_greeting_make(group, link_nearby.sweep_datagram))
                         return link_sweep_later(now);
                 link_nearby.sweeping = true;
                 link_nearby.sweep_group = group;
@@ -1201,6 +1207,7 @@ static fn link_nearby_reload(p64 now)
         }
         link_nearby.groups = fresh;
         crypto_forget(address_of fresh, sizeof fresh);
+        crypto_forget(link_nearby.keys, sizeof link_nearby.keys);
         for (positive at = 0; at < link_nearby.groups.count; at++)
                 waterlink_group_keys_from(link_nearby.keys + at,
                                           link_nearby.groups.record[at].key,
@@ -1367,25 +1374,14 @@ static fn link_pair_begin(positive group, p8 address_to address, p16 port,
                           p64 now, p8 answer)
 {
         struct waterlink_group_keys address_to keys = link_nearby.keys + group;
-        struct waterlink_noise noise;
         p8 datagram[WATERLINK_DATAGRAM];
-        p8 hello[WATERLINK_HELLO_BYTES];
-        p8 ephemeral[32];
-        p64 wall = system_clock_ns(0);
 
-        if ((!answer && link_greeted_recent(address, keys->mark, port, true, now)) ||
-            system_random_fill(ephemeral, 32, 0) < 0)
+        if (!answer && link_greeted_recent(address, keys->mark, port, true, now))
                 return;
-        waterlink_stamp(hello, wall / 1000000000ull,
-                        (p32)(wall % 1000000000ull));
-        memory_copy(hello + WATERLINK_STAMP_BYTES, link_nearby.name,
-                    WATERLINK_NAME_MAX);
         //      Counted whether or not it could be sent: the curve work is
         //      done, and a place that refuses it is neither greeted again at
         //      once nor outside the budget.
-        if (waterlink_initiate(address_of noise, address_of link_self.me,
-                               keys->identity.public, keys->psk, ephemeral,
-                               hello, datagram))
+        if (link_greeting_make(group, datagram))
         {
                 struct link_greeted address_to next =
                         link_nearby.greeted + link_nearby.greeted_next;
@@ -1398,8 +1394,6 @@ static fn link_pair_begin(positive group, p8 address_to address, p16 port,
                 next->group = keys->mark;
                 next->at = now ? now : 1;
         }
-        crypto_forget(ephemeral, sizeof ephemeral);
-        crypto_forget(address_of noise, sizeof noise);
 }
 
 /*
@@ -1562,7 +1556,8 @@ static fn link_nearby_heard(p8 address_to packet, positive length,
                 //      questions is a stream of answers four times their size
                 //      at somebody else.
                 if (source_port && source_port != DISCOVERY_MDNS_PORT &&
-                    found.question_length)
+                    found.question_length &&
+                    link_age(now, link_nearby.last_reply) >= LINK_ANSWER_AGAIN)
                 {
                         //      A one-shot asker gets the answer back to
                         //      itself, its ID and question with it.
@@ -1578,8 +1573,7 @@ static fn link_nearby_heard(p8 address_to packet, positive length,
                                 10, found.id, found.question,
                                 found.question_length);
 
-                        if (reply_length &&
-                            link_age(now, link_nearby.last_reply) >= LINK_ANSWER_AGAIN)
+                        if (reply_length)
                         {
                                 /* Charge the shared amplification budget only
                                    when a reply actually left.  Source port
