@@ -603,8 +603,13 @@ static bool build_env_privileged_drop(string_address entry)
             BUILD_ENV_PREFIX("LD_LIBRARY_PATH="),
             BUILD_ENV_PREFIX("LD_AUDIT="),
             BUILD_ENV_PREFIX("LD_CONFIG="),
+            BUILD_ENV_PREFIX("LD_DYNAMIC_WEAK="),
+            BUILD_ENV_PREFIX("LD_ORIGIN_PATH="),
+            BUILD_ENV_PREFIX("GCONV_PATH="),
             BUILD_ENV_PREFIX("ENV="),
             BUILD_ENV_PREFIX("BASH_ENV="),
+            BUILD_ENV_PREFIX("BASH_FUNC_"),
+            BUILD_ENV_PREFIX("PROMPT_COMMAND="),
             BUILD_ENV_PREFIX("CDPATH="),
             BUILD_ENV_PREFIX("IFS="),
             BUILD_ENV_PREFIX("SHELLOPTS="),
@@ -612,7 +617,44 @@ static bool build_env_privileged_drop(string_address entry)
             BUILD_ENV_PREFIX("COMPILER_PATH="),
             BUILD_ENV_PREFIX("CPATH="),
             BUILD_ENV_PREFIX("C_INCLUDE_PATH="),
+            BUILD_ENV_PREFIX("CPLUS_INCLUDE_PATH="),
+            BUILD_ENV_PREFIX("OBJC_INCLUDE_PATH="),
             BUILD_ENV_PREFIX("LIBRARY_PATH="),
+            BUILD_ENV_PREFIX("CC="),
+            BUILD_ENV_PREFIX("CXX="),
+            BUILD_ENV_PREFIX("CLANG="),
+            BUILD_ENV_PREFIX("HOSTCC="),
+            BUILD_ENV_PREFIX("HOSTCXX="),
+            BUILD_ENV_PREFIX("HOSTCFLAGS="),
+            BUILD_ENV_PREFIX("HOSTLDFLAGS="),
+            BUILD_ENV_PREFIX("CFLAGS="),
+            BUILD_ENV_PREFIX("LDFLAGS="),
+            BUILD_ENV_PREFIX("CPPFLAGS="),
+            BUILD_ENV_PREFIX("KCFLAGS="),
+            BUILD_ENV_PREFIX("KCPPFLAGS="),
+            BUILD_ENV_PREFIX("KAFLAGS="),
+            BUILD_ENV_PREFIX("LD="),
+            BUILD_ENV_PREFIX("AS="),
+            BUILD_ENV_PREFIX("AR="),
+            BUILD_ENV_PREFIX("MAKEFLAGS="),
+            BUILD_ENV_PREFIX("GNUMAKEFLAGS="),
+            BUILD_ENV_PREFIX("MFLAGS="),
+            BUILD_ENV_PREFIX("SPARK_CPPFLAGS="),
+            BUILD_ENV_PREFIX("GNUPGHOME="),
+            BUILD_ENV_PREFIX("GPG_AGENT_INFO="),
+            BUILD_ENV_PREFIX("GIT_EXEC_PATH="),
+            BUILD_ENV_PREFIX("GIT_SSH="),
+            BUILD_ENV_PREFIX("GIT_SSH_COMMAND="),
+            BUILD_ENV_PREFIX("GIT_TEMPLATE_DIR="),
+            BUILD_ENV_PREFIX("GIT_CONFIG="),
+            BUILD_ENV_PREFIX("GIT_CONFIG_GLOBAL="),
+            BUILD_ENV_PREFIX("GIT_CONFIG_SYSTEM="),
+            BUILD_ENV_PREFIX("GIT_CONFIG_PARAMETERS="),
+            BUILD_ENV_PREFIX("GIT_CONFIG_COUNT="),
+            BUILD_ENV_PREFIX("GIT_EXTERNAL_DIFF="),
+            BUILD_ENV_PREFIX("TMPDIR="),
+            BUILD_ENV_PREFIX("TEMP="),
+            BUILD_ENV_PREFIX("TMP="),
         };
 #undef BUILD_ENV_PREFIX
 
@@ -2673,11 +2715,15 @@ static bool build_asm_pass(string_address text, string_address target,
         return true;
 }
 
+static bipolar build_open_temp(string_address output, string_address suffix,
+                               positive mode, string_address address_to made);
+
 static b32 build_asm(string_address arch, string_address input,
                      string_address output)
 {
         string_address target;
-        string_address temporary = build_join(output, ".asm_tmp", null);
+        string_address temporary = null;
+        bipolar handle;
         positive used = 0;
 
         if (!arch || !*arch)
@@ -2740,11 +2786,21 @@ static b32 build_asm(string_address arch, string_address input,
                             build_file_two, address_of used, BUILD_FILE_ROOM))
                 return 1;
 
-        //      Written beside the output so the rename is atomic and a failed
-        //      run leaves the previous .S alone rather than a half written one
-        //      the build would trust.
-        if (!build_write_file(temporary, (string_address)build_file_two, used))
+        //      Written beside the output under a random exclusive name so a
+        //      symlink or pre-created file cannot redirect the write, and a
+        //      failed run leaves the previous .S alone.
+        handle = build_open_temp(output, ".asm_tmp.", 0644, address_of temporary);
+        if (handle < 0)
+                return string_report(log_error, 1, "asm: cannot write %s\n",
+                                     temporary ? temporary : output);
+        if (system_write_all((positive)handle, (string_address)build_file_two, used) != used ||
+            system_close(handle) < 0)
+        {
+                if (handle >= 0)
+                        system_close(handle);
+                unlink(temporary);
                 return string_report(log_error, 1, "asm: cannot write %s\n", temporary);
+        }
 
         if (rename(temporary, output) < 0)
         {
@@ -2789,6 +2845,35 @@ static bool build_random_marks(p8 address_to marks)
         memory_translate(marks, SPOOL_TEMPLATE_MARKS,
                          (address_any)spool_name_table);
         return true;
+}
+
+static bipolar build_open_temp(string_address output, string_address suffix,
+                               positive mode, string_address address_to made)
+{
+        string_address path = build_join(output, suffix, "XXXXXX", null);
+        p8 address_to marks = (p8 address_to)path + string_length(path) -
+                              SPOOL_TEMPLATE_MARKS;
+
+        address_to made = null;
+        for (positive attempt = 0; attempt < TMP_MAX; attempt++)
+        {
+                bipolar handle;
+
+                if (!build_random_marks(marks))
+                        return -EIO;
+                handle = system_open_at_mode(
+                    AT_FDCWD, path,
+                    O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC,
+                    mode);
+                if (handle >= 0)
+                {
+                        address_to made = path;
+                        return handle;
+                }
+                if (handle != -EEXIST)
+                        return handle;
+        }
+        return -EEXIST;
 }
 
 //      A working directory nobody else has. Privileged execution ignores
@@ -2950,7 +3035,8 @@ static string_address build_compiler()
         if (named && *named)
                 return named;
 
-        named = string_get_environment(environ, "CC");
+        if (!build_root())
+                named = string_get_environment(environ, "CC");
 
         return named && *named ? named : (string_address)"gcc";
 }
@@ -3308,11 +3394,14 @@ static b32 build_spark(string_address source, string_address output,
                         words[count++] = i915;
         }
         //      The nine words below and the null that ends the vector have
-        //      to fit: the split keeps that room.
-        count = build_add_split((string_address address_to)words, count,
-                                BUILD_ARGUMENT_ROOM - 9,
-                                string_get_environment(environ,
-                                                       "SPARK_CPPFLAGS"));
+        //      to fit: the split keeps that room. Root ignores caller
+        //      SPARK_CPPFLAGS so an inherited env var cannot inject compiler
+        //      flags such as -wrapper or -B.
+        if (!build_root())
+                count = build_add_split((string_address address_to)words, count,
+                                        BUILD_ARGUMENT_ROOM - 9,
+                                        string_get_environment(environ,
+                                                               "SPARK_CPPFLAGS"));
 
         //      -no-pie as well: a gcc built with --enable-default-pie that makes
         //      -static a static PIE (Alpine's) links the -fno-pie objects as
@@ -3438,18 +3527,18 @@ static b32 build_spark(string_address source, string_address output,
         head.reserved[1] = 0;
 
         {
-                //      Written beside the output and renamed over it, so a
-                //      failed write never leaves a truncated image where a good
-                //      one was. close() is checked: it is where a full disk
-                //      on a network filesystem reports itself.
-                string_address temporary = build_join(output, ".tmp.", build_number((positive)system_call_1(syscall(getpid), 0)), null);
-                bipolar handle = system_open_at_mode(AT_FDCWD, temporary,
-                                                     O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW | O_CLOEXEC,
-                                                     0755);
+                //      Written beside the output under a random exclusive name
+                //      and renamed over it, so a symlink or pre-created file
+                //      cannot redirect the write and a failed write never
+                //      leaves a truncated image.
+                string_address temporary = null;
+                bipolar handle = build_open_temp(output, ".tmp.", 0755,
+                                                 address_of temporary);
                 positive got = 0;
                 bool good;
 
-                refuse_if(handle < 0, 1, "spark: cannot write %s\n", temporary);
+                refuse_if(handle < 0, 1, "spark: cannot write %s\n",
+                          temporary ? temporary : output);
 
                 //      The header occupies the first SPARK_HEADER_SIZE bytes of
                 //      the text region itself, so the image carries no page
@@ -3907,7 +3996,9 @@ static b32 build_floor(string_address arch)
                 //      locations; an empty translation unit separates an
                 //      unavailable target from a real failure to compile.
                 string_address tries[4];
-                string_address named = string_get_environment(environ, "CLANG");
+                string_address named = build_root()
+                                           ? null
+                                           : string_get_environment(environ, "CLANG");
                 positive which = 0;
 
                 tries[which++] = named && *named ? named : (string_address)"clang";
@@ -4973,9 +5064,7 @@ static p8 build_gpu_source[1 << 20];
 */
 static b32 build_gpu_kernels(string_address input, string_address output)
 {
-        //      One temporary a process (its pid in the name): builds that run together (the gate's shells) wrote the one file and one renamed it
-        //      from under the other.
-        string_address temporary = build_join(output, ".gpu_tmp.", build_number((positive)system_call_1(syscall(getpid), 0)), null);
+        string_address temporary = null;
         bipolar got;
 
         refuse_if(!build_is_type(input, S_IFREG), 1, "gpu-kernels: no such file: %s\n", input);
@@ -5003,10 +5092,9 @@ static b32 build_gpu_kernels(string_address input, string_address output)
                         hash = (hash ^ (p8)build_gpu_source[k]) * 0x100000001b3ull;
                 network_store_64(raw, hash);
                 memory_into_hex(line + 31, raw, 8);
-                handle = system_open_at_mode(AT_FDCWD, temporary,
-                                             O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW | O_CLOEXEC,
-                                             0644);
-                refuse_if(handle < 0, 1, "gpu-kernels: cannot write %s\n", temporary);
+                handle = build_open_temp(output, ".gpu_tmp.", 0644, address_of temporary);
+                refuse_if(handle < 0, 1, "gpu-kernels: cannot write %s\n",
+                          temporary ? temporary : output);
                 positive header_length = string_length((string_address)line);
                 bool ok = system_write_all((positive)handle, line, header_length) == header_length &&
                           system_write_all((positive)handle, gpuasm_output, gpuasm_output_length) == gpuasm_output_length;
@@ -5102,8 +5190,9 @@ static positive build_gpu_i915_open(positive at, p8 address_to name, p8 address_
 
 static b32 build_gpu_i915(string_address input, string_address output)
 {
-        string_address temporary = build_join(output, ".gpu_i915_tmp.", build_number((positive)system_call_1(syscall(getpid), 0)), null);
+        string_address temporary = null;
         bipolar got;
+        bipolar handle;
         positive at = 0, lines = 0, in_kernel = 0, column = 0;
         p8 address_to line, address_to stop;
 
@@ -5193,8 +5282,18 @@ static b32 build_gpu_i915(string_address input, string_address output)
         at = build_gpu_i915_put(at, "\n};\n");
 
         build_tool("mkdir", "-p", build_directory_of(output), null);
-        if (!build_write_file(temporary, (string_address)build_gpu_i915_made, at))
+        handle = build_open_temp(output, ".gpu_i915_tmp.", 0644, address_of temporary);
+        if (handle < 0)
+                return string_report(log_error, 1, "gpu-i915: cannot write %s\n",
+                                     temporary ? temporary : output);
+        if (system_write_all((positive)handle, (string_address)build_gpu_i915_made, at) != at ||
+            system_close(handle) < 0)
+        {
+                if (handle >= 0)
+                        system_close(handle);
+                unlink(temporary);
                 return string_report(log_error, 1, "gpu-i915: cannot write %s\n", temporary);
+        }
         if (rename(temporary, output) < 0)
         {
                 unlink(temporary);
@@ -5638,7 +5737,8 @@ static b32 build_kernel_source_tag(string_address tree, string_address version)
         string_address tag = build_join("v", version, null);
         string_address want_tag = build_setting_get("kernel_tag_object");
         string_address want_commit = build_setting_get("kernel_tag_commit");
-        string_address words[BUILD_ARGUMENT_ROOM] = {"gpg", "--locate-keys"};
+        string_address gnupg_home;
+        string_address words[BUILD_ARGUMENT_ROOM];
         positive at;
         p8 said[128];
 
@@ -5647,7 +5747,15 @@ static b32 build_kernel_source_tag(string_address tree, string_address version)
                 string_format(log_error, "git is required to fetch the release candidate %s.\n", version);
                 exit(1);
         }
-        at = build_add_split((string_address address_to)words, 2, BUILD_ARGUMENT_ROOM, build_setting_get("kernel_keys"));
+        gnupg_home = build_temporary_directory("gnupg");
+        return_if(!gnupg_home, build_die("cannot make a private GPG home directory"));
+        scope_exit(build_tool("rm", "-rf", (string_address)(gnupg_home), null));
+
+        words[0] = "gpg";
+        words[1] = "--homedir";
+        words[2] = gnupg_home;
+        words[3] = "--locate-keys";
+        at = build_add_split((string_address address_to)words, 4, BUILD_ARGUMENT_ROOM, build_setting_get("kernel_keys"));
         words[at] = null;
         if (build_run_words((string_address address_to)words))
         {
@@ -5691,7 +5799,8 @@ static b32 build_kernel_source_tag(string_address tree, string_address version)
 
         string_format(log, "%s Checking the signature of %s %s\n", BUILD_BOLD, tag, BUILD_RESET);
         log_flush();
-        if (build_run("git", "-C", bare, "verify-tag", tag, null))
+        if (build_run("env", build_join("GNUPGHOME=", gnupg_home, null),
+                      "git", "-C", bare, "verify-tag", tag, null))
         {
                 string_format(log_error, BUILD_RED "ERROR: SIGNATURE VERIFICATION FAILED for %s\n"
                                          "Refusing to extract or build it." BUILD_RESET "\n", tag);
@@ -5818,12 +5927,18 @@ static b32 build_kernel_source()
                 Every step below gates the next one. None of these exit
                 statuses were checked before, so a failed download, a failed
                 key fetch or a failed signature verification all still ended in
-                a compiled kernel.
+                a compiled kernel. Verify against an isolated private keyring
+                so unrelated keys in the ambient ~/.gnupg cannot sign a kernel.
         */
+        string_address gnupg_home = build_temporary_directory("gnupg");
+
+        return_if(!gnupg_home, build_die("cannot make a private GPG home directory"));
+        scope_exit(build_tool("rm", "-rf", (string_address)(gnupg_home), null));
+
         {
                 string_address keys = build_setting_get("kernel_keys");
-                string_address words[BUILD_ARGUMENT_ROOM] = {"gpg", "--locate-keys"};
-                positive at = build_add_split((string_address address_to)words, 2,
+                string_address words[BUILD_ARGUMENT_ROOM] = {"gpg", "--homedir", gnupg_home, "--locate-keys"};
+                positive at = build_add_split((string_address address_to)words, 4,
                                               BUILD_ARGUMENT_ROOM, keys);
 
                 words[at] = null;
@@ -5863,8 +5978,8 @@ static b32 build_kernel_source()
                 }
         }
 
-        if (build_run("gpg", "--verify", build_join(tarball, ".sign", null),
-                      tarball, null))
+        if (build_run("gpg", "--homedir", gnupg_home, "--verify",
+                      build_join(tarball, ".sign", null), tarball, null))
         {
                 string_format(log_error,
                               BUILD_RED "ERROR: SIGNATURE VERIFICATION FAILED for %s\n",
@@ -6375,6 +6490,9 @@ static b32 build_local(string_address address_to profiles, positive count,
                         if (build_tool_words((string_address address_to)words))
                                 return build_die("filesystem ownership");
                 }
+
+                (void)build_tool("chmod", "0700", build_join(image, "/root", null), null);
+                (void)build_tool("chmod", "01777", build_join(image, "/tmp", null), null);
         }
 
         {
@@ -7535,16 +7653,19 @@ static b32 build_usb(string_address image)
         return 0;
 }
 
-/* Whether directory is where a FAT filesystem is mounted, its root and not a
-   directory inside one: what the machine looks at is the stick's root. */
-static bool build_fat_root(string_address directory)
+/* Whether an open directory descriptor is where a FAT filesystem is mounted,
+   its root and not a directory inside one: what the machine looks at is the
+   stick's root. */
+static bool build_fat_root_fd(bipolar dirfd)
 {
         storage_mount_table table;
         error_stat at;
         error_stat mounted;
         bool fat = false;
 
-        if (stat(directory, address_of at) < 0 || !storage_mount_table_load(address_of table, null))
+        if (dirfd < 0 || fstat((b32)dirfd, address_of at) < 0 ||
+            (at.st_mode & S_IFMT) != S_IFDIR ||
+            !storage_mount_table_load(address_of table, null))
                 return false;
 
         for (positive one = 0; one < table.count; one++)
@@ -7593,6 +7714,8 @@ static b32 build_usb_update(string_address image, string_address directory)
         string_address summed_stage;
         p16 named;
         positive length;
+        bipolar dirfd;
+        bipolar folderfd;
         bipolar handle;
         bipolar failed;
         bool read;
@@ -7608,11 +7731,17 @@ static b32 build_usb_update(string_address image, string_address directory)
         if (!host_image_whole(image))
                 return build_die(build_join(image, " ends before its own sections do", null));
 
-        if (!build_is_type(directory, S_IFDIR) || !build_fat_root(directory))
+        dirfd = system_open_at(AT_FDCWD, directory,
+                               FILE_READ | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+        if (dirfd < 0 || !build_fat_root_fd(dirfd))
+        {
+                if (dirfd >= 0)
+                        system_close(dirfd);
                 return build_die(build_join(directory, " is not where a FAT stick is mounted: mount "
                                                        "the stick and name its mount point, or "
                                                        "format it FAT32 first",
                                             null));
+        }
 
         folder = build_join(directory, "/moonwater", null);
         target = build_join(folder, "/", name, null);
@@ -7621,7 +7750,13 @@ static b32 build_usb_update(string_address image, string_address directory)
         summed_stage = build_join(summed, ".new", null);
 
         build_say(build_join("Writing ", target, null));
-        system_make_directory_at(AT_FDCWD, folder, 0755);
+        system_make_directory_at(dirfd, "moonwater", 0755);
+        folderfd = system_open_at(dirfd, "moonwater",
+                                  FILE_READ | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+        system_close(dirfd);
+        if (folderfd < 0)
+                return build_die(build_join("cannot open ", folder, null));
+        system_close(folderfd);
         unlink(stage);
         unlink(summed_stage);
         if (host_copy_file(image, stage) || !host_files_alike(image, stage, 0, 0))
@@ -7654,7 +7789,7 @@ static b32 build_usb_update(string_address image, string_address directory)
         if (!failed)
         {
                 handle = system_open_at_mode(AT_FDCWD, summed_stage,
-                                             FILE_WRITE | O_CLOEXEC | O_NOFOLLOW, 0644);
+                                             FILE_WRITE | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0644);
                 failed = handle < 0 ? handle : storage_format_write(handle, line, length, 0);
                 if (handle >= 0)
                 {

@@ -299,6 +299,7 @@ static fn host_state_directory(string_address path, positive mode)
                                 FILE_READ | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
         if (opened >= 0)
         {
+                (void)system_call_2(syscall(fchmod), (positive)opened, mode);
                 system_close(opened);
                 return;
         }
@@ -1346,14 +1347,18 @@ static bool host_image_version(bipolar handle, p8 address_to into, positive room
 static bool host_image_build(string_address path, p8 address_to into,
                              positive room)
 {
-        bipolar handle = system_open_at(AT_FDCWD, path, FILE_READ | O_CLOEXEC);
+        file_facts facts;
+        bipolar handle = system_open_at(AT_FDCWD, path,
+                                        FILE_READ | O_CLOEXEC | O_NONBLOCK | O_NOFOLLOW);
         bool found = false;
 
         into[0] = end;
         if (handle < 0)
                 return false;
 
-        found = host_image_version(handle, into, room);
+        if (file_look_code(handle, (string_address) "", AT_EMPTY_PATH, address_of facts) >= 0 &&
+            (facts.mode & MODE_FORMAT) == MODE_FILE)
+                found = host_image_version(handle, into, room);
         system_close(handle);
         if (found)
                 host_plain_line(into);
@@ -1797,12 +1802,20 @@ static bool host_medium_whole(void)
 
 static b32 host_copy_file(string_address from, string_address to)
 {
-        bipolar source = system_open_at(AT_FDCWD, from, FILE_READ | O_CLOEXEC);
+        file_facts facts;
+        bipolar source = system_open_at(AT_FDCWD, from,
+                                        FILE_READ | O_CLOEXEC | O_NONBLOCK | O_NOFOLLOW);
         bipolar target;
         bool copied;
         bipolar synced = 0;
 
         return_if(source < 0, host_fail(from, source));
+        if (file_look_code(source, (string_address) "", AT_EMPTY_PATH, address_of facts) < 0 ||
+            (facts.mode & MODE_FORMAT) != MODE_FILE)
+        {
+                system_close(source);
+                return host_fail(from, -ERROR_INVALID);
+        }
 
         target = system_open_at_mode(AT_FDCWD, to, FILE_WRITE | O_NOFOLLOW | O_CLOEXEC, 0644);
         if (target < 0)
@@ -1834,11 +1847,15 @@ static bool host_files_alike(string_address left, string_address right, p64 hole
         static p8 two[16384];
         file_facts first_facts;
         file_facts second_facts;
-        bipolar first = system_open_at(AT_FDCWD, left, FILE_READ | O_CLOEXEC);
-        bipolar second = system_open_at(AT_FDCWD, right, FILE_READ | O_CLOEXEC);
+        bipolar first = system_open_at(AT_FDCWD, left,
+                                       FILE_READ | O_CLOEXEC | O_NONBLOCK | O_NOFOLLOW);
+        bipolar second = system_open_at(AT_FDCWD, right,
+                                        FILE_READ | O_CLOEXEC | O_NONBLOCK | O_NOFOLLOW);
         bool alike = first >= 0 && second >= 0 &&
                      file_look_code(first, (string_address) "", AT_EMPTY_PATH, address_of first_facts) >= 0 &&
                      file_look_code(second, (string_address) "", AT_EMPTY_PATH, address_of second_facts) >= 0 &&
+                     (first_facts.mode & MODE_FORMAT) == MODE_FILE &&
+                     (second_facts.mode & MODE_FORMAT) == MODE_FILE &&
                      first_facts.size == second_facts.size;
         p64 offset = 0;
 
@@ -1933,7 +1950,8 @@ static bool host_image_sum(string_address path, bool masked, p8 address_to sum)
         static p8 block[16384];
         digest_state digest;
         file_facts facts;
-        bipolar handle = system_open_at(AT_FDCWD, path, FILE_READ | O_CLOEXEC);
+        bipolar handle = system_open_at(AT_FDCWD, path,
+                                        FILE_READ | O_CLOEXEC | O_NONBLOCK | O_NOFOLLOW);
         p64 hole;
         p64 offset = 0;
         bool read;
@@ -1941,8 +1959,9 @@ static bool host_image_sum(string_address path, bool masked, p8 address_to sum)
         if (handle < 0)
                 return false;
 
-        hole = masked ? host_settings_section(handle) : 0;
-        read = file_look_code(handle, (string_address) "", AT_EMPTY_PATH, address_of facts) >= 0;
+        read = file_look_code(handle, (string_address) "", AT_EMPTY_PATH, address_of facts) >= 0 &&
+               (facts.mode & MODE_FORMAT) == MODE_FILE;
+        hole = read && masked ? host_settings_section(handle) : 0;
         digest_open(address_of digest, DIGEST_SHA256, 32);
         while (read && offset < facts.size)
         {
@@ -2754,6 +2773,14 @@ static b32 host_attach(host_install address_to install)
         return_if(failed < 0, host_refuse("%s is the Moonwater data partition of %s, and it could "
                                           "not be mounted: %s\n",
                                           install->data, install->disk, file_reason(failed)));
+
+        if (!host_mounted_is(HOST_DATA, install->data_partuuid, install->disk))
+        {
+                host_unmount(HOST_DATA);
+                return host_refuse("%s is not the data partition of %s it was asked about, so "
+                                   "nothing was mounted\n",
+                                   install->data, install->disk);
+        }
 
         for (at = 0; at < array_count(host_kept); at++)
         {
@@ -3750,7 +3777,7 @@ static fn host_install_abandon(host_install address_to target)
         if (host_install_refresh(target) &&
             host_join(device, sizeof(device), "/dev/", target->disk))
                 handle = system_open_at(AT_FDCWD, device,
-                                        FILE_READ_WRITE | FILE_EXCLUSIVE | O_CLOEXEC);
+                                        FILE_READ_WRITE | FILE_EXCLUSIVE | O_NOFOLLOW | O_CLOEXEC);
 
         if (handle >= 0)
         {
@@ -3782,7 +3809,7 @@ static bool host_install_place(p64 bytes, b32 sector, storage_format_partition a
         p64 align;
         p64 most;
 
-        if (bytes < HOST_SMALLEST || sector < 512 ||
+        if (bytes < HOST_SMALLEST || sector < 512 || (p64)sector > HOST_ALIGN_BYTES ||
             !storage_gpt_span(bytes / (p64)sector, (p32)sector, address_of first,
                               address_of last))
                 return false;
@@ -3793,6 +3820,9 @@ static bool host_install_place(p64 bytes, b32 sector, storage_format_partition a
         parts[0].last = align + HOST_SYSTEM_BYTES / (p64)sector - 1;
         parts[1].first = parts[0].last + 1;
         parts[1].last = (last + 1) / align * align - 1;
+        if (parts[0].first < first || parts[0].last < parts[0].first ||
+            parts[1].last < parts[1].first || parts[1].last > last)
+                return false;
         if (parts[1].last - parts[1].first + 1 > most)
                 parts[1].last = parts[1].first + most - 1;
 
@@ -3961,7 +3991,7 @@ static b32 host_install_locked(string_address asked, bool removable, bool said_y
                 disk receives the partition table.
         */
         handle = system_open_at(AT_FDCWD, device,
-                                FILE_READ_WRITE | FILE_EXCLUSIVE | O_CLOEXEC);
+                                FILE_READ_WRITE | FILE_EXCLUSIVE | O_NOFOLLOW | O_CLOEXEC);
         if (handle < 0)
         {
                 host_unmount(HOST_MEDIUM);
@@ -4110,9 +4140,12 @@ static b32 host_install_locked(string_address asked, bool removable, bool said_y
                 and none, and is asked about.
         */
         failed = host_mount(target.data, HOST_DATA, "ext4", HOST_DATA_MOUNT);
-        if (failed < 0)
+        if (failed < 0 || !host_mounted_is(HOST_DATA, target.data_partuuid, target.disk))
         {
-                b32 said = host_fail(target.data, failed);
+                b32 said = failed < 0
+                               ? host_fail(target.data, failed)
+                               : host_refuse("%s is not the data partition of %s it was made as\n",
+                                             target.data, target.disk);
 
                 host_install_abandon(address_of target);
                 return said;
@@ -4151,9 +4184,12 @@ static b32 host_install_locked(string_address asked, bool removable, bool said_y
         }
 
         failed = host_mount(target.system, HOST_SYSTEM, "vfat", HOST_WRITABLE);
-        if (failed < 0)
+        if (failed < 0 || !host_mounted_is(HOST_SYSTEM, target.system_partuuid, target.disk))
         {
-                b32 said = host_fail(target.system, failed);
+                b32 said = failed < 0
+                               ? host_fail(target.system, failed)
+                               : host_refuse("%s is not the system partition of %s it was made as\n",
+                                             target.system, target.disk);
 
                 host_install_abandon(address_of target);
                 return said;

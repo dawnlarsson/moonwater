@@ -80,9 +80,18 @@ if [ "$bootstrap_uid" = 0 ]; then
         export PATH
         umask 022
         unset LD_PRELOAD LD_LIBRARY_PATH LD_AUDIT LD_CONFIG \
-                ENV BASH_ENV CDPATH IFS SHELLOPTS \
+                LD_DYNAMIC_WEAK LD_ORIGIN_PATH GCONV_PATH \
+                ENV BASH_ENV CDPATH IFS SHELLOPTS PROMPT_COMMAND \
                 GCC_EXEC_PREFIX COMPILER_PATH CPATH C_INCLUDE_PATH \
-                LIBRARY_PATH CFLAGS LDFLAGS TMPDIR
+                CPLUS_INCLUDE_PATH OBJC_INCLUDE_PATH LIBRARY_PATH \
+                CC CXX CLANG HOSTCC HOSTCXX HOSTCFLAGS HOSTLDFLAGS \
+                CFLAGS LDFLAGS CPPFLAGS KCFLAGS KCPPFLAGS KAFLAGS \
+                MAKEFLAGS GNUMAKEFLAGS MFLAGS SPARK_CPPFLAGS \
+                GNUPGHOME GPG_AGENT_INFO \
+                GIT_EXEC_PATH GIT_SSH GIT_SSH_COMMAND GIT_TEMPLATE_DIR \
+                GIT_CONFIG GIT_CONFIG_GLOBAL GIT_CONFIG_SYSTEM \
+                GIT_CONFIG_PARAMETERS GIT_CONFIG_COUNT GIT_EXTERNAL_DIFF \
+                TMPDIR TEMP TMP
 fi
 
 # Sourced and compiled by this file's own path rather than a relative one, so
@@ -174,8 +183,8 @@ if [ "$(uname)" = "Linux" ]; then
                                 -fno-stack-protector -fno-builtin -w $defer \
                                 -MMD -MT "$tool" -MF "$tool_stage/build.d" \
                                 -o "$tool_stage/build" "$source" &&
-                        mv -f "$tool_stage/build.d" "$depfile" &&
-                        mv -f "$tool_stage/build" "$tool" &&
+                        mv -fT "$tool_stage/build.d" "$depfile" &&
+                        mv -fT "$tool_stage/build" "$tool" &&
                         rmdir "$tool_stage" ||
                         {
                                 rm -rf "$tool_stage"

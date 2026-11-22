@@ -342,13 +342,32 @@ static fn mount_shm()
 #ifndef SHELL_NO_INPUT_GROUP
 static COLD fn system_input_group(void)
 {
-        if (system_access_at(AT_FDCWD, "/dev/uinput", 0) < 0)
+        system_path_identity facts;
+
+        if (system_path_identity_at(AT_FDCWD, "/dev/uinput",
+                                    AT_SYMLINK_NOFOLLOW, SYSTEM_PATH_STATX_TYPE,
+                                    address_of facts) < 0 ||
+            (facts.mode & 0170000) != 0020000)
                 return;
 
-        system_change_owner_at(AT_FDCWD, "/dev/uinput", 0, MOONWATER_INPUT_GID, 0);
+        system_change_owner_at(AT_FDCWD, "/dev/uinput", 0, MOONWATER_INPUT_GID,
+                               AT_SYMLINK_NOFOLLOW);
         system_change_mode_at(AT_FDCWD, "/dev/uinput", 0660);
 }
 #endif
+
+static COLD fn system_ensure_directory(string_address path, positive mode)
+{
+        bipolar opened;
+
+        (void)system_make_directory_at(AT_FDCWD, path, mode);
+        opened = system_open_at(AT_FDCWD, path,
+                                FILE_READ | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+        if (opened < 0)
+                return;
+        (void)system_call_2(syscall(fchmod), (positive)opened, mode);
+        system_close((positive)opened);
+}
 
 /*
         /dev/dri/renderD* in the render group (105, matching src/bowl.c's
@@ -366,10 +385,8 @@ static COLD fn system_render_group(void)
 
 static COLD fn system_x11_directory(void)
 {
-        if (system_make_directory_at(AT_FDCWD, "/tmp", 01777) >= 0)
-                system_change_mode_at(AT_FDCWD, "/tmp", 01777);
-        if (system_make_directory_at(AT_FDCWD, "/tmp/.X11-unix", 01777) >= 0)
-                system_change_mode_at(AT_FDCWD, "/tmp/.X11-unix", 01777);
+        system_ensure_directory("/tmp", 01777);
+        system_ensure_directory("/tmp/.X11-unix", 01777);
 }
 #endif
 
@@ -595,6 +612,8 @@ static COLD fn system_zram_setup(void)
         mem_kb = string_digits_max(info + at, 18, address_of used);
         if (!used || mem_kb < 262144)
                 return; // skip tiny <256 MiB VMs
+        if (mem_kb > 32ull * 1024ull * 1024ull)
+                mem_kb = 32ull * 1024ull * 1024ull;
 
         bytes = (mem_kb * 1024ull) / 2ull;
         if (bytes > 16ull * 1024ull * 1024ull * 1024ull)
@@ -702,6 +721,8 @@ static DEAD_END b32 system_init()
                                    MS_NOSUID | MS_NOEXEC | MS_NODEV, 0);
 #endif
         link_dev_fd();
+        system_ensure_directory("/root", 0700);
+        system_ensure_directory("/tmp", 01777);
 #ifndef SHELL_NO_INPUT_GROUP
         system_input_group();
 #endif

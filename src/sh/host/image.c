@@ -122,9 +122,11 @@ static bool host_settings_next(host_settings address_to settings,
                           SPARK_SETTINGS_ENTRY);
         //      Every caller copies the text into a buffer of the most an
         //      entry may hold, so an entry that says more is the end of the
-        //      list, whoever checked the block before it got here.
+        //      list, whoever checked the block before it got here. Check the
+        //      padded span too so host_settings_drop cannot underflow.
         if (into->entry.length > SPARK_SETTINGS_TEXT_MOST ||
-            into->entry.length > settings->length - (address_to at + SPARK_SETTINGS_ENTRY))
+            spark_settings_padded(into->entry.length) >
+                settings->length - (address_to at + SPARK_SETTINGS_ENTRY))
                 return false;
         into->text = settings->payload + into->at + SPARK_SETTINGS_ENTRY;
         address_to at += SPARK_SETTINGS_ENTRY +
@@ -236,6 +238,11 @@ static fn host_settings_drop(host_settings address_to settings,
 {
         positive size = SPARK_SETTINGS_ENTRY +
                         spark_settings_padded(setting->entry.length);
+
+        if (settings->length > SPARK_SETTINGS_PAYLOAD ||
+            setting->at > settings->length ||
+            size > settings->length - setting->at)
+                return;
 
         memory_copy(settings->payload + setting->at,
                     settings->payload + setting->at + size,
@@ -388,7 +395,8 @@ static bool host_image_whole(string_address path)
 {
         p8 head[HOST_SETTINGS_PAGE];
         file_facts facts;
-        bipolar handle = system_open_at(AT_FDCWD, path, FILE_READ | O_CLOEXEC);
+        bipolar handle = system_open_at(AT_FDCWD, path,
+                                        FILE_READ | O_CLOEXEC | O_NONBLOCK | O_NOFOLLOW);
         positive table;
         positive count;
         bool whole = false;
@@ -396,8 +404,9 @@ static bool host_image_whole(string_address path)
         if (handle < 0)
                 return false;
 
-        if (host_pe_table(handle, head, address_of table, address_of count) && count &&
-            file_look_code(AT_FDCWD, path, 0, address_of facts) >= 0)
+        if (file_look_code(handle, (string_address) "", AT_EMPTY_PATH, address_of facts) >= 0 &&
+            (facts.mode & MODE_FORMAT) == MODE_FILE &&
+            host_pe_table(handle, head, address_of table, address_of count) && count)
         {
                 whole = true;
                 for (positive at = 0; at < count; at++)
@@ -442,7 +451,8 @@ enum
 static b32 host_image_shape(string_address path, p16 expected, p16 address_to machine)
 {
         p8 head[HOST_SETTINGS_PAGE];
-        bipolar handle = system_open_at(AT_FDCWD, path, FILE_READ | O_CLOEXEC | O_NONBLOCK);
+        bipolar handle = system_open_at(AT_FDCWD, path,
+                                        FILE_READ | O_CLOEXEC | O_NONBLOCK | O_NOFOLLOW);
         file_facts facts;
         positive table;
         positive count;
@@ -454,7 +464,7 @@ static b32 host_image_shape(string_address path, p16 expected, p16 address_to ma
                 return HOST_FIT_NONE;
 
         //      A file, and no FIFO or device a stick might put at the name.
-        if (file_look_code(AT_FDCWD, path, 0, address_of facts) < 0 ||
+        if (file_look_code(handle, (string_address) "", AT_EMPTY_PATH, address_of facts) < 0 ||
             (facts.mode & MODE_FORMAT) != MODE_FILE)
                 fit = HOST_FIT_NONE;
         else if (host_pe_table(handle, head, address_of table, address_of count) && count)
@@ -588,7 +598,8 @@ static bool host_settings_slots(bipolar handle, host_settings address_to slots,
 static b32 host_settings_image(string_address path, host_settings address_to into)
 {
         host_settings slots[2];
-        bipolar handle = system_open_at(AT_FDCWD, path, FILE_READ | O_CLOEXEC);
+        bipolar handle = system_open_at(AT_FDCWD, path,
+                                        FILE_READ | O_CLOEXEC | O_NONBLOCK | O_NOFOLLOW);
         p64 offset;
         bool read;
         b32 newest;
@@ -746,7 +757,7 @@ static bool host_settings_visit(storage_identity address_to identity,
 */
 static fn host_settings_untrusted(host_settings address_to settings)
 {
-        memory_zero(settings->payload, settings->length);
+        memory_zero(settings->payload, sizeof(settings->payload));
         settings->length = 0;
         settings->flags &= ~SPARK_SETTINGS_STARTUP_SET;
         memory_zero(settings->next, sizeof(settings->next));
@@ -811,7 +822,8 @@ static bool host_settings_map_visit(string_address path, address_any opaque)
 {
         host_settings_place address_to place = (host_settings_place address_to)opaque;
         string_address failed = null;
-        bipolar handle = system_open_at(AT_FDCWD, path, FILE_READ | O_CLOEXEC);
+        bipolar handle = system_open_at(AT_FDCWD, path,
+                                        FILE_READ | O_CLOEXEC | O_NONBLOCK | O_NOFOLLOW);
         b32 size = 0;
 
         if (handle < 0)
@@ -857,7 +869,8 @@ static string_address host_settings_map(string_address name,
 static bool host_settings_read_back(string_address path, address_any opaque)
 {
         host_settings_place address_to place = (host_settings_place address_to)opaque;
-        bipolar handle = system_open_at(AT_FDCWD, path, FILE_READ | O_CLOEXEC);
+        bipolar handle = system_open_at(AT_FDCWD, path,
+                                        FILE_READ | O_CLOEXEC | O_NONBLOCK | O_NOFOLLOW);
 
         place->seen = 0;
         if (handle >= 0)
@@ -947,7 +960,7 @@ static string_address host_settings_write(string_address name, string_address pa
         host_settings_seal(address_of slot);
 
         handle = system_open_at(AT_FDCWD, device,
-                                FILE_READ_WRITE | FILE_EXCLUSIVE | O_CLOEXEC);
+                                FILE_READ_WRITE | FILE_EXCLUSIVE | O_NOFOLLOW | O_CLOEXEC);
         if (handle < 0)
                 return handle == -ERROR_BUSY ? "is in use; unmount it and try again"
                        : handle == -ERROR_READ_ONLY || handle == -ERROR_ACCESS
