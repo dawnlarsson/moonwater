@@ -55,6 +55,7 @@
 #define WAYLAND_TABLE_FALLBACK (1L << 26)
 #define WAYLAND_TABLE_PAGE 4096L
 #define WAYLAND_TABLE_FIRST 64L
+#define WAYLAND_MIME_BYTES (64L << 10) /* all the mime types one source offers, NULs included */
 #define WAYLAND_SUB_LEVELS 32L /* subsurface nesting; flatten and the sub walks recurse once per level */
 
 enum
@@ -3389,9 +3390,8 @@ static int wayland_toplevel_request(struct wayland_client *c, struct wayland_obj
                 else s->u.top.min_width = a[0].i, s->u.top.min_height = a[1].i;
                 if (row >= 0)
                 {
-                        long unit = wayland_surface_unit(s);
-                        wayland_row_do(row, op == WLQ_xdg_toplevel_set_max_size ? WAYLAND_DO_MAX_SIZE : WAYLAND_DO_MIN_SIZE,
-                                       a[0].i ? wayland_pixels(a[0].i, unit) : 0, a[1].i ? wayland_pixels(a[1].i, unit) : 0);
+                        /* logical units, as the configure path stores them (the table scales them itself) */
+                        wayland_row_do(row, op == WLQ_xdg_toplevel_set_max_size ? WAYLAND_DO_MAX_SIZE : WAYLAND_DO_MIN_SIZE, a[0].i, a[1].i);
                 }
                 break;
         case WLQ_xdg_toplevel_set_maximized:
@@ -4029,7 +4029,7 @@ static unsigned long wayland_server_id(struct wayland_client *c)
 
 static int wayland_mime_buf_append(struct wayland_table *tbl, long *bytes, const unsigned char *text, long len)
 {
-        if (!text || len < 1 || (tbl->unit = 1, !wayland_table_reach(tbl, *bytes + len + 1)))
+        if (!text || len < 1 || *bytes + len + 1 > WAYLAND_MIME_BYTES || (tbl->unit = 1, !wayland_table_reach(tbl, *bytes + len + 1)))
                 return 0;
         wayland_copy(tbl->at + *bytes, text, len), tbl->at[*bytes + len] = 0, *bytes += len + 1;
         return 1;

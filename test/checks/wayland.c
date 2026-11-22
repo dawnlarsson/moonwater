@@ -9204,6 +9204,32 @@ static void fake_sync_signal(void *context, long handle, unsigned long long poin
         fake_sync.last_rel = point;
 }
 
+static void test_mime_bytes_cap(void)
+{
+        struct session s;
+        struct wlc *c;
+        unsigned long mgr, src;
+        const char *type = "application/x-moonwater-type-0000000000000000000000000000";
+        long i, each = (long)strlen(type) + 1, held;
+
+        /* hostile: 2000 offers of one long type on a source. A source keeps at most WAYLAND_MIME_BYTES of types; the rest are dropped
+           quietly (the offer is an unbounded client input otherwise). */
+        wayland_stop();
+        memset(&fake, 0, sizeof fake);
+        wayland_start(&fake_host);
+        session_open(&s);
+        c = s.c;
+        mgr = wl_global(c, s.registry, WLI_wl_data_device_manager, 3);
+        src = wlc_id(c, WLI_wl_data_source, 1);
+        wlc_send(c, mgr, WLQ_wl_data_device_manager_create_data_source, src);
+        for (i = 0; i < 2000; i++)
+                wlc_send(c, src, WLQ_wl_data_source_offer, type);
+        wlc_pump(c);
+        held = wayland.client[c->slot]->sources[0].mime_bytes;
+        WLCHECK(c->errors == 0 && held <= WAYLAND_MIME_BYTES && held > WAYLAND_MIME_BYTES - each,
+                "a source keeps at most WAYLAND_MIME_BYTES of offered types, and no more (%ld bytes)", held);
+}
+
 static void test_callback_queue_cap(void)
 {
         struct session s;
@@ -9752,6 +9778,7 @@ int main(int argc, char **argv)
         test_dmabuf();
         test_stall_dmabuf();
         test_dmabuf_feedbacks();
+        test_mime_bytes_cap();
         test_callback_queue_cap();
         test_subsurface_depth();
         test_syncobj_timeline_cap();
