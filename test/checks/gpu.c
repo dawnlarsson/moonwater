@@ -4812,20 +4812,32 @@ static void game_pids_rows(void)
         __typeof__(compositor_xwm_slots[0]) *kept_at = compositor_xwm_at, *x = &compositor_xwm_slots[COMPOSITOR_XWM_SLOTS - 1];
         __typeof__(compositor_xwm_slots[0]) saved = *x;
         struct windows *kept_table = compositor.table;
-        unsigned int self = (unsigned int)compositor_call(syscall(getpid), 0, 0, 0, 0, 0, 0);
-        unsigned int parent = (unsigned int)compositor_call(syscall(getppid), 0, 0, 0, 0, 0, 0), got[2], n;
+        unsigned int self = (unsigned int)compositor_call(syscall(getpid), 0, 0, 0, 0, 0, 0), parent, got[2], n;
+        int ends[2] = {-1, -1};
+        bipolar child;
         const int wl_row = 4, x_row = 5;
         struct windows_owner kept_wl = windows_owner_held[wl_row], kept_x = windows_owner_held[x_row];
         char value[64];
         b32 wayland_ok, x_ok, x_alone, forged, other_server, environ_ok;
 
+        // The game stands as a child of this process, held until the rows are done (the runner's parent may be outside its pid namespace: 0).
+        compositor_call(syscall(pipe2), (positive)ends, 0x80000, 0, 0, 0, 0);
+        child = (bipolar)system_fork();
+        if (child == 0)
+        {
+                char byte;
+
+                system_close(ends[1]), system_read_once(ends[0], &byte, 1);
+                system_call_3(syscall(exit_group), 0, 0, 0);
+        }
+        parent = child > 0 ? (unsigned int)child : 0;
         compositor.table = windows_scratch_table(&game_pids_table);
         windows_scratch_zero(compositor.table);
         // A Wayland game: its claim.
         windows_owner_take(&windows_owner_held[wl_row], parent), compositor.table->pid[wl_row] = parent;
         n = compositor_row_pids(wl_row, 0, 1, got);
         wayland_ok = n == 1 && got[0] == parent;
-        // An X game: the claim is the X server's (this process stands for Xwayland), the table's pid the client's (the parent for the game).
+        // An X game: the claim is the X server's (this process stands for Xwayland), the table's pid the client's (the child for the game).
         compositor_xwm_at = x, x->fd = 0, x->peer_pid = (int)self;
         {
                 __typeof__(compositor_xwm_slots[0].window) w = compositor_xwm_find(0x400123u, 1);
@@ -4855,6 +4867,9 @@ static void game_pids_rows(void)
         wayland_table_drop(&x->window_table), wayland_table_drop(&x->window_index), x->windows = 0, x->window = 0;
         *x = saved, compositor_xwm_at = kept_at, compositor.table = kept_table;
         windows_owner_held[wl_row] = kept_wl, windows_owner_held[x_row] = kept_x;
+        system_close(ends[0]), system_close(ends[1]);
+        if (child > 0)
+                (void)system_wait4_retry(child, 0, 0, null);
 }
 
 /*
