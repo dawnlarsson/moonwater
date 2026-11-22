@@ -58,6 +58,12 @@ static bipolar shell_exec_file(string_address path, string_address address_to ar
 static fn kill_name(positive number, p8 address_to into) { positive_into_string(into, number); }
 static fn bowl_session_prepare(string_address home, string_address runtime) { (void)home, (void)runtime; }
 static string_address address_to bowl_environment(string_address address_to inherited) { return inherited; }
+// src/sh/file.c's file_is_dot, which the shell build has before the apps and this build does not include
+// (bc404508b's settings.c and editor.c call it): the same test, "." or "..".
+static PURE bool file_is_dot(string_address name)
+{
+        return string_is(name, '.') && (name[1] == end || (string_is(name + 1, '.') && name[2] == end));
+}
 #include "../../src/canvas/screen.c"
 #include "../../src/canvas/font.c"
 // The shim's signal macros (shell.c's, which these lanes do not include): gpu.c and wayland_host.c name them in every build that
