@@ -368,7 +368,7 @@ static struct
         long buttons;
         struct
         {
-                int live, dropped, released;
+                int live, wl_drop_sent, released; /* wl_drop_sent: the shim has sent the wl drop to its target (not the engine's dropped, which is the native release) */
                 long released_at, client, source, origin, target, surface, offer;
                 unsigned int action;
                 long xtarget;
@@ -4303,7 +4303,7 @@ static void wayland_drag_end(int how)
         unsigned int action = wayland.drag.action;
 
         if (!wayland.drag.live) return;
-        if (!wayland.drag.dropped)
+        if (!wayland.drag.wl_drop_sent)
         {
                 if (wayland_drag_cli(wayland.drag.target)) wayland_drag_leave();
                 wayland_drag_xleave();
@@ -4323,7 +4323,7 @@ static void wayland_drag_over(long row, long x, long y)
         long sx = 0, sy = 0, device = -1, index = -1;
         unsigned long id = 0;
 
-        if ((!c && !wayland.drag.xsource) || wayland.drag.dropped) return;
+        if ((!c && !wayland.drag.xsource) || wayland.drag.wl_drop_sent) return;
         if (root) is = wayland_pick(t, root, x, y, &sx, &sy);
         if (is && wayland.drag.source < 0 && !wayland.drag.xsource && t != c) is = 0;
         if (is) device = wayland_drag_device(t);
@@ -4375,7 +4375,7 @@ static void wayland_drag_decide(void)
         long ver;
         struct wayland_offer *o = wayland_drag_offer(&t, &ver);
 
-        if (wayland.drag.dropped)
+        if (wayland.drag.wl_drop_sent)
                 return;
         wayland.drag.released = 0;
         if (wayland.drag.xtarget >= 0)
@@ -4383,7 +4383,7 @@ static void wayland_drag_decide(void)
                 struct wayland_source *s = wayland_drag_src(&sc);
                 if (!wayland.drag.x_accepted || (!wayland.drag.action && (wayland.drag.xsource || (s && wayland_obj_ver(sc, s->id) >= 3))))
                         return wayland_drag_end(0);
-                wayland.drag.dropped = 1, wayland_xdrag(WAYLAND_XDRAG_DROP, wayland.drag.xtarget, 0, 0);
+                wayland.drag.wl_drop_sent = 1, wayland_xdrag(WAYLAND_XDRAG_DROP, wayland.drag.xtarget, 0, 0);
         }
         else
         {
@@ -4391,16 +4391,16 @@ static void wayland_drag_decide(void)
                 long device = t ? wayland_drag_device(t) : -1;
                 if (device < 0 || (carry && (!o || !o->accepted || (ver >= 3 && !wayland.drag.action))))
                         return wayland_drag_end(0);
-                wayland_ev0(t, t->objects[device].id, WLE_wl_data_device_drop), wayland.drag.dropped = 1;
+                wayland_ev0(t, t->objects[device].id, WLE_wl_data_device_drop), wayland.drag.wl_drop_sent = 1;
                 if (!carry) return wayland_drag_end(1);
         }
         wayland_drag_tell_source(WLE_wl_data_source_dnd_drop_performed, 0);
 }
 
 static inline void wayland_drag_move(long row, long x, long y) { wayland.pointer_x = x, wayland.pointer_y = y; wayland_drag_over(row, x, y); }
-WAYLAND_API int wayland_dragging(void) { return wayland.drag.live && !wayland.drag.dropped && !wayland.drag.released && (!wayland.drag.xsource || wayland.drag.held); }
-WAYLAND_API int wayland_x_dragging(void) { return wayland.drag.live && wayland.drag.xsource && !wayland.drag.held && !wayland.drag.dropped; }
-WAYLAND_API void wayland_drag_x_finished(long ok) { if (wayland.drag.live && wayland.drag.dropped && wayland.drag.xtarget >= 0) wayland_drag_end(ok ? 2 : 0); }
+WAYLAND_API int wayland_dragging(void) { return wayland.drag.live && !wayland.drag.wl_drop_sent && !wayland.drag.released && (!wayland.drag.xsource || wayland.drag.held); }
+WAYLAND_API int wayland_x_dragging(void) { return wayland.drag.live && wayland.drag.xsource && !wayland.drag.held && !wayland.drag.wl_drop_sent; }
+WAYLAND_API void wayland_drag_x_finished(long ok) { if (wayland.drag.live && wayland.drag.wl_drop_sent && wayland.drag.xtarget >= 0) wayland_drag_end(ok ? 2 : 0); }
 WAYLAND_API void wayland_drag_host_release(void) { if (wayland.drag.held && wayland_dragging()) wayland_drag_release(); }
 WAYLAND_API void wayland_drag_x_motion(long row, long x, long y) { if (wayland_x_dragging() && !wayland.drag.released) wayland_drag_move(row, x, y); }
 WAYLAND_API void wayland_drag_x_leave(void) { if (wayland_x_dragging()) wayland_drag_end(0); }
@@ -4421,7 +4421,7 @@ WAYLAND_API long wayland_drag_x_types(const char **types, unsigned int *actions)
 WAYLAND_API void wayland_drag_x_status(long accepted, unsigned long action)
 {
         struct wayland_source *s = wayland_drag_source();
-        if (!wayland.drag.live || wayland.drag.xtarget < 0 || wayland.drag.dropped || (!s && !wayland.drag.xsource)) return;
+        if (!wayland.drag.live || wayland.drag.xtarget < 0 || wayland.drag.wl_drop_sent || (!s && !wayland.drag.xsource)) return;
         action = accepted ? wayland_drag_pick((unsigned int)action & (s ? (s->actions ? s->actions : WAYLAND_DRAG_ACTIONS) : wayland.drag.x_actions), 0) : 0;
         if (!!accepted != wayland.drag.x_accepted)
                 wayland.drag.x_accepted = !!accepted, wayland_drag_send_target(accepted && s && s->mime_bytes ? (const char *)s->mime_table.at : 0);
@@ -4434,7 +4434,7 @@ WAYLAND_API int wayland_drag_x_send(const char *mime, long fd)
 {
         struct wayland_client *sc;
         struct wayland_source *s = wayland_drag_src(&sc);
-        return (wayland.drag.live && (wayland.drag.dropped || wayland.drag.xtarget >= 0)) ? wayland_source_send_fd(sc, s, mime, fd, 1) : 0;
+        return (wayland.drag.live && (wayland.drag.wl_drop_sent || wayland.drag.xtarget >= 0)) ? wayland_source_send_fd(sc, s, mime, fd, 1) : 0;
 }
 
 WAYLAND_API int wayland_drag_x_begin(const char *types, long bytes, unsigned long actions)
@@ -4454,7 +4454,7 @@ WAYLAND_API void wayland_drag_x_actions(unsigned long actions)
         struct wayland_offer *o = wayland_drag_offer(&t, &ver);
 
         actions &= WAYLAND_DRAG_ACTIONS;
-        if (!wayland.drag.live || !wayland.drag.xsource || wayland.drag.dropped || !actions || actions == wayland.drag.x_actions) return;
+        if (!wayland.drag.live || !wayland.drag.xsource || wayland.drag.wl_drop_sent || !actions || actions == wayland.drag.x_actions) return;
         wayland.drag.x_actions = (unsigned int)actions;
         if (ver >= 3) wayland_ev(t, o->id, WLE_wl_data_offer_source_actions, (unsigned int)actions);
         wayland_drag_actions();
@@ -4568,7 +4568,7 @@ static int wayland_data_request(struct wayland_client *c, struct wayland_object 
                                 o->live = 0;
                                 if (!pri && wayland_drag_is_offer(c, self->link))
                                 {
-                                        if (!wayland.drag.dropped) wayland.drag.offer = -1;
+                                        if (!wayland.drag.wl_drop_sent) wayland.drag.offer = -1;
                                         else
                                         {
                                                 long ver = wayland_obj_ver(c, o->id);
@@ -4580,14 +4580,14 @@ static int wayland_data_request(struct wayland_client *c, struct wayland_object 
                 }
                 else if (op == WLQ_wl_data_offer_finish)
                 {
-                        if (!o->drag || !wayland.drag.dropped || !wayland_drag_is_offer(c, self->link))
+                        if (!o->drag || !wayland.drag.wl_drop_sent || !wayland_drag_is_offer(c, self->link))
                                 return wayland_fail(c, self->id, WLN_wl_data_offer_error_invalid_finish, "finish is for a dropped drag's offer");
                         o->finished = 1, wayland_drag_end(2);
                 }
                 else if (op == WLQ_wl_data_offer_accept && o->drag)
                 {
                         const char *type = a[1].length > 0 ? (const char *)a[1].text : 0;
-                        if (wayland_drag_is_offer(c, self->link) && !wayland.drag.dropped)
+                        if (wayland_drag_is_offer(c, self->link) && !wayland.drag.wl_drop_sent)
                         {
                                 o->accepted = type != 0, wayland_drag_send_target(type);
                                 if (wayland.drag.released)
@@ -5853,7 +5853,7 @@ WAYLAND_API void wayland_drop(long slot)
         if (wayland.drag.live && wayland.drag.client == slot) wayland.drag.source = -1, wayland_drag_end(1);
         else if (wayland.drag.live && wayland.drag.target == slot)
         {
-                if (wayland.drag.dropped) wayland.drag.target = -1, wayland_drag_end(0);
+                if (wayland.drag.wl_drop_sent) wayland.drag.target = -1, wayland_drag_end(0);
                 else wayland.drag.target = wayland.drag.surface = wayland.drag.offer = -1;
         }
         if (wayland.cursor_client == slot) wayland.cursor_client = wayland.cursor_surface = -1, wayland.cursor_serial++;
@@ -6439,7 +6439,7 @@ static long wayland_idle_scan(int tick, long now)
 WAYLAND_API void wayland_idle_tick(void)
 {
         if (!wayland.host) return;
-        if (wayland.drag.live && wayland.drag.released && !wayland.drag.dropped && wayland_now() - wayland.drag.released_at >= WAYLAND_DRAG_ANSWER_MS)
+        if (wayland.drag.live && wayland.drag.released && !wayland.drag.wl_drop_sent && wayland_now() - wayland.drag.released_at >= WAYLAND_DRAG_ANSWER_MS)
                 wayland_drag_decide();
         if (wayland.idle_notifies) wayland_idle_scan(1, wayland_now());
 }
@@ -6448,7 +6448,7 @@ WAYLAND_API long wayland_idle_due(void)
 {
         long due = wayland.host && wayland.idle_notifies ? wayland_idle_scan(0, 0) : 0;
 
-        if (wayland.host && wayland.drag.live && wayland.drag.released && !wayland.drag.dropped)
+        if (wayland.host && wayland.drag.live && wayland.drag.released && !wayland.drag.wl_drop_sent)
         {
                 long drag_due = wayland.drag.released_at + WAYLAND_DRAG_ANSWER_MS;
 

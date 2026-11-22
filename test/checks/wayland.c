@@ -5992,7 +5992,7 @@ static void test_bridge(void)
                 wayland_drag_x_status(1, 1);
                 before = fx.drags[WAYLAND_XDRAG_DROP];
                 wayland_drag_host_release();
-                WLCHECK(fx.drags[WAYLAND_XDRAG_DROP] == before + 1 && wayland.drag.dropped, "the program's take and the release are its drop, told to the host");
+                WLCHECK(fx.drags[WAYLAND_XDRAG_DROP] == before + 1 && wayland.drag.wl_drop_sent, "the program's take and the release are its drop, told to the host");
                 before = fx.drags[WAYLAND_XDRAG_END];
                 wayland_drag_x_finished(1);
                 WLCHECK(fx.drags[WAYLAND_XDRAG_END] == before + 1 && fx.end_ok == 1 && !wayland.drag.live, "and its done the drag's end, finished");
