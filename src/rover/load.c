@@ -46,14 +46,14 @@ static bool rover_load_forced_safe; // the image's alone from here: the set with
 static p8 rover_load_asked;         // 0: safe mode as the command line and the count say; 1 the person's files too; 2 the image's alone
 
 //      A person's file into rover_load_file: regular, root's, written by root alone, at most 64 KiB, not a link (as the
-//      machine script was read). Its length, or -1.
-static bipolar rover_load_read(string_address path)
+//      machine script was read). Opened relative to the already-validated directory fd to avoid path TOCTOU. Its length, or -1.
+static bipolar rover_load_read_at(bipolar directory, string_address name)
 {
         file_facts facts;
         bipolar handle, got;
         positive used = 0;
 
-        handle = system_open_at(AT_FDCWD, path, FILE_READ | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW);
+        handle = system_open_at(directory, name, FILE_READ | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW);
         if (handle < 0)
                 return -1;
         if (!file_look(handle, (string_address) "", AT_EMPTY_PATH, address_of facts) ||
@@ -185,10 +185,11 @@ static bool rover_load_add(const p8 address_to text, positive length, string_add
 static bipolar rover_load_compile(bool say)
 {
         static p8 names[ROVER_FILES_MOST][ROVER_FILE_NAME_MOST];
+        bool from_person[ROVER_FILES_MOST];
         positive count = 0, files = 0;
         bipolar handle;
-        bool person;
 
+        memory_zero(from_person, sizeof(from_person));
         rover_load_was_safe = rover_load_safe();
         rover_load_used = 0;
         if (rover_load_was_safe && say)
@@ -206,7 +207,6 @@ static bipolar rover_load_compile(bool say)
                                      : system_open_at(AT_FDCWD, ROVER_PERSON_RULES, FILE_READ | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
         //      The person's directory, root's and written by root alone: a writer of it could take a person's file away (the
         //      image's then stands) or forge the count of loads, so a directory that is not is read for nothing.
-        person = !rover_load_was_safe;
         if (handle >= 0)
         {
                 file_facts facts;
@@ -219,7 +219,6 @@ static bipolar rover_load_compile(bool say)
                                                          "root alone): its files are left out\n");
                         system_close(handle);
                         handle = -1;
-                        person = false;
                 }
         }
         if (handle >= 0)
@@ -241,24 +240,35 @@ static bipolar rover_load_compile(bool say)
 
                                 at += reclen;
                                 if (size == room || size < 7 || size >= ROVER_FILE_NAME_MOST || name[0] == '.' ||
-                                    memory_compare(name + size - 6, ".rover", 6) || count == ROVER_FILES_MOST)
+                                    memory_compare(name + size - 6, ".rover", 6))
                                         continue;
                                 for (positive k = 0; k < count; k++)
-                                        known = known || string_equals((string_address)names[k], name);
-                                if (!known && string_copy_bounded(names[count], name, ROVER_FILE_NAME_MOST) < ROVER_FILE_NAME_MOST)
+                                        if (string_equals((string_address)names[k], name))
+                                        {
+                                                from_person[k] = true;
+                                                known = true;
+                                                break;
+                                        }
+                                if (!known && count < ROVER_FILES_MOST &&
+                                    string_copy_bounded(names[count], name, ROVER_FILE_NAME_MOST) < ROVER_FILE_NAME_MOST)
+                                {
+                                        from_person[count] = true;
                                         count++;
+                                }
                         }
-                system_close(handle);
         }
         //      One order whatever the directory's: by name.
         for (positive at = 1; at < count; at++)
                 for (positive k = at; k && string_compare(names[k - 1], names[k]) > 0; k--)
                 {
                         p8 swap[ROVER_FILE_NAME_MOST];
+                        bool swap_person = from_person[k];
 
                         memory_copy(swap, names[k], sizeof(swap));
                         memory_copy(names[k], names[k - 1], sizeof(swap));
                         memory_copy(names[k - 1], swap, sizeof(swap));
+                        from_person[k] = from_person[k - 1];
+                        from_person[k - 1] = swap_person;
                 }
         //      The image's files first and the person's after, each pass by name, so a person's file that clashes with
         //      the image's is the one left out, and the image's stand.
@@ -266,10 +276,7 @@ static bipolar rover_load_compile(bool say)
         for (positive at = 0; at < count; at++)
         {
                 const char address_to image = null;
-                p8 path[160];
-                file_facts facts;
-                bool mine = person && string_join(path, sizeof(path), ROVER_PERSON_RULES "/", (string_address)names[at]) &&
-                            file_look(AT_FDCWD, path, AT_SYMLINK_NOFOLLOW, address_of facts);
+                bool mine = handle >= 0 && from_person[at];
 
                 if (mine != (pass == 1))
                         continue;
@@ -284,8 +291,10 @@ static bipolar rover_load_compile(bool say)
                 }
                 if (mine)
                 {
-                        bipolar length = rover_load_read((string_address)path);
+                        p8 path[160];
+                        bipolar length = rover_load_read_at(handle, (string_address)names[at]);
 
+                        string_join(path, sizeof(path), ROVER_PERSON_RULES "/", (string_address)names[at]);
                         if (!length)
                                 continue; // an empty file masks the image's
                         if (length > 0 && rover_load_add(rover_load_file, (positive)length, (string_address)path, say))
@@ -304,6 +313,8 @@ static bipolar rover_load_compile(bool say)
                                             (string_address)names[at], say))
                         files++;
         }
+        if (handle >= 0)
+                system_close(handle);
         rover_load_all.merge = true;
         bool made = rover_compile(&rover_load_all, rover_load_set, rover_load_used);
         rover_load_all.merge = false;

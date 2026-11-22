@@ -1287,46 +1287,102 @@ static const struct
     {"/run/moonwater", "/run", "moonwater"},
 };
 
-static p8 link_path_in_tree(string_address path, positive which)
+#if !defined(MACOS)
+static p8 link_dir_in_tree(bipolar at, const p8 address_to leaf, positive which,
+                           p8 close_first)
 {
-        p8 leaf[256];
         file_facts tree, above, step, up;
         p8 has_tree = file_look(AT_FDCWD, (string_address)link_root_trees[which].tree, 0, address_of tree);
         p8 has_above = file_look(AT_FDCWD, (string_address)link_root_trees[which].parent, 0, address_of above);
-        bipolar at = system_open_parent_pinned(AT_FDCWD, path, leaf, sizeof leaf);
+        bipolar cur = at;
 
-        if (at < 0)
-                return at != -2; // no parent at all is nothing to write into
         for (positive depth = 0; depth < 4096; depth++)
         {
                 bipolar parent;
 
-                if (!file_look(at, (string_address) "", AT_EMPTY_PATH, address_of step))
+                if (!file_look(cur, (string_address) "", AT_EMPTY_PATH, address_of step))
                         break;
                 // The directory itself named, or the name it would take in its parent.
-                if (depth == 0 && has_above && file_same_identity(address_of step, address_of above) &&
+                if (depth == 0 && leaf && has_above &&
+                    file_same_identity(address_of step, address_of above) &&
                     !string_compare((string_address)leaf, (string_address)link_root_trees[which].leaf))
                         break;
                 if (has_tree && file_same_identity(address_of step, address_of tree))
                         break;
-                parent = system_open_at(at, "..", O_PATH | O_DIRECTORY | O_CLOEXEC);
+                parent = system_open_at(cur, "..", O_PATH | O_DIRECTORY | O_CLOEXEC);
                 if (parent < 0 || !file_look(parent, (string_address) "", AT_EMPTY_PATH, address_of up))
                 {
                         if (parent >= 0)
                                 system_close(parent);
                         break;
                 }
-                system_close(at);
-                at = parent;
+                if (cur != at || close_first)
+                        system_close(cur);
+                cur = parent;
                 if (file_same_identity(address_of step, address_of up))
                 {
-                        system_close(at);
+                        if (cur != at || close_first)
+                                system_close(cur);
                         return false; // the top, and the tree was nowhere above
                 }
         }
-        system_close(at);
+        if (cur != at || close_first)
+                system_close(cur);
         return true;
 }
+
+static p8 link_dir_in_rules(bipolar dir_fd)
+{
+        for (positive which = 0; which < array_count(link_root_trees); which++)
+                if (link_dir_in_tree(dir_fd, null, which, false))
+                        return true;
+        return false;
+}
+
+static p8 link_path_in_tree(string_address path, positive which)
+{
+        p8 leaf[256];
+        bipolar at = system_open_parent_pinned(AT_FDCWD, path, leaf, sizeof leaf);
+
+        if (at < 0)
+                return at != -2; // no parent at all is nothing to write into
+        return link_dir_in_tree(at, leaf, which, true);
+}
+
+static p8 link_fd_in_rules(bipolar fd, p8 fail_closed)
+{
+        p8 proc[32];
+        p8 resolved[4096];
+        positive used = 14;
+        bipolar got;
+
+        memory_copy(proc, "/proc/self/fd/", 14);
+        used += positive_into(proc + used, (positive)fd);
+        proc[used] = 0;
+        got = system_read_link_at(AT_FDCWD, (string_address)proc,
+                                  (string_address)resolved, sizeof resolved - 1);
+        if (got <= 0 || resolved[0] != '/')
+                return fail_closed;
+        resolved[got] = 0;
+        for (positive which = 0; which < array_count(link_root_trees); which++)
+                if (link_path_in_tree((string_address)resolved, which))
+                        return true;
+        return false;
+}
+#else
+static p8 link_dir_in_rules(bipolar dir_fd)
+{
+        (void)dir_fd;
+        return false;
+}
+
+static p8 link_fd_in_rules(bipolar fd, p8 fail_closed)
+{
+        (void)fd;
+        (void)fail_closed;
+        return false;
+}
+#endif
 
 static p8 link_path_in_rules(string_address path)
 {
@@ -1334,21 +1390,48 @@ static p8 link_path_in_rules(string_address path)
         (void)path; // a Mac runs no rules
         return false;
 #else
+        file_facts lf;
+
         for (positive which = 0; which < array_count(link_root_trees); which++)
                 if (link_path_in_tree(path, which))
                         return true;
+        //      A symlink outside the protected trees may point into one:
+        //      resolve its target and check the directory or resolved path.
+        if (file_look(AT_FDCWD, path, AT_SYMLINK_NOFOLLOW, address_of lf) &&
+            (lf.mode & MODE_FORMAT) == MODE_LINK)
+        {
+                bipolar target = system_open_at(AT_FDCWD, path, O_PATH | O_CLOEXEC);
+
+                if (target >= 0)
+                {
+                        file_facts tf;
+                        p8 hit = file_look(target, (string_address) "", AT_EMPTY_PATH,
+                                           address_of tf) &&
+                                         (tf.mode & MODE_FORMAT) == MODE_DIRECTORY
+                                     ? link_dir_in_rules(target)
+                                     : link_fd_in_rules(target, true);
+
+                        system_close(target);
+                        if (hit)
+                                return true;
+                }
+        }
         return false;
 #endif
 }
 
+//      Not static: on Darwin each path is made at the call (link_state_path),
+//      so the table cannot be a constant. One list for both checks.
+#define LINK_OWN_PATHS                                                        \
+        LINK_KEY_PATH, LINK_PEERS_PATH, LINK_HWIDS_PATH, LINK_POLICY_PATH,    \
+        LINK_GROUPS_PATH, LINK_STAMPS_PATH, LINK_STATE_PATH, LINK_LOCK_PATH,  \
+        HOST_MACHINE_SCRIPT, LINK_MODEM_PATH, LINK_MODEM_SEQ_PATH,            \
+        LINK_MODEM_RX_PATH, LINK_PLACES_PATH, LINK_SWITCH_PATH,               \
+        LINK_PORT_PATH, LINK_TRANSPORT_PATH
+
 static p8 link_facts_is_own(const file_facts address_to target)
 {
-        string_address own[] = {
-            LINK_KEY_PATH, LINK_PEERS_PATH, LINK_HWIDS_PATH, LINK_POLICY_PATH,
-            LINK_GROUPS_PATH, LINK_STAMPS_PATH, LINK_STATE_PATH, LINK_LOCK_PATH,
-            HOST_MACHINE_SCRIPT, LINK_MODEM_PATH, LINK_MODEM_SEQ_PATH,
-            LINK_MODEM_RX_PATH, LINK_PLACES_PATH, LINK_SWITCH_PATH,
-            LINK_PORT_PATH, LINK_TRANSPORT_PATH};
+        string_address own[] = {LINK_OWN_PATHS};
 
         for (positive at = 0; at < array_count(own); at++)
         {
@@ -1363,14 +1446,7 @@ static p8 link_facts_is_own(const file_facts address_to target)
 
 static p8 link_path_is_own(string_address path)
 {
-        //      Not static: on Darwin each path is made at the call (link_state_path),
-        //      so the table cannot be a constant.
-        string_address own[] = {
-            LINK_KEY_PATH, LINK_PEERS_PATH, LINK_HWIDS_PATH, LINK_POLICY_PATH,
-            LINK_GROUPS_PATH, LINK_STAMPS_PATH, LINK_STATE_PATH, LINK_LOCK_PATH,
-            HOST_MACHINE_SCRIPT, LINK_MODEM_PATH, LINK_MODEM_SEQ_PATH,
-            LINK_MODEM_RX_PATH, LINK_PLACES_PATH, LINK_SWITCH_PATH,
-            LINK_PORT_PATH, LINK_TRANSPORT_PATH};
+        string_address own[] = {LINK_OWN_PATHS};
         p8 clean[4096];
         positive len = string_length(path);
         file_facts target;
@@ -1639,23 +1715,30 @@ static p8 link_fs_buf_reserve(struct link_fs_buf address_to b, positive need)
         return true;
 }
 
-static p8 link_fs_buf_append(struct link_fs_buf address_to b,
-                             const p8 address_to src, positive n)
+static fn link_fs_buf_compact(struct link_fs_buf address_to b, positive n)
 {
-        if (n > LINK_FS_MSG_MAX + 65536u)
-                return false;
         if (b->pos && b->pos == b->len)
                 b->pos = b->len = 0;
-        if (b->len > LINK_FS_MSG_MAX + 65536u - n)
-                return false;
-        if (b->len + n > b->cap && b->pos)
+        else if (b->pos &&
+                 (b->len > LINK_FS_MSG_MAX + 65536u - n || b->len + n > b->cap))
         {
                 positive rem = b->len - b->pos;
+
                 if (rem)
                         memory_copy(b->data, b->data + b->pos, rem);
                 b->pos = 0;
                 b->len = rem;
         }
+}
+
+static p8 link_fs_buf_append(struct link_fs_buf address_to b,
+                             const p8 address_to src, positive n)
+{
+        if (n > LINK_FS_MSG_MAX + 65536u)
+                return false;
+        link_fs_buf_compact(b, n);
+        if (b->len > LINK_FS_MSG_MAX + 65536u - n)
+                return false;
         if (!link_fs_buf_reserve(b, b->len + n))
                 return false;
         if (n)
@@ -2704,16 +2787,7 @@ static p8 link_fs_put_frame(struct link_fs_buf address_to out, p32 req_id,
 
         if (body_len > LINK_FS_MSG_MAX)
                 return false;
-        if (out->pos && out->pos == out->len)
-                out->pos = out->len = 0;
-        if (out->len + LINK_FS_HEAD + body_len > out->cap && out->pos)
-        {
-                positive rem = out->len - out->pos;
-                if (rem)
-                        memory_copy(out->data, out->data + out->pos, rem);
-                out->pos = 0;
-                out->len = rem;
-        }
+        link_fs_buf_compact(out, LINK_FS_HEAD + body_len);
         link_fs_put32(head, req_id);
         head[4] = op;
         link_fs_put32(head + 5, (p32)body_len);
@@ -2848,6 +2922,12 @@ static fn link_fs_handle_list(struct link_fs_buf address_to out, p32 req_id,
                 {
                         link_fs_reply_err(out, req_id, FS_OP_LIST,
                                           (b32)(walk.error < 0 ? walk.error : -13));
+                        return;
+                }
+                if (link_dir_in_rules(walk.handle))
+                {
+                        file_walk_close(address_of walk);
+                        link_fs_reply_err(out, req_id, FS_OP_LIST, -13);
                         return;
                 }
                 memory_zero(hdr, sizeof hdr);
@@ -3023,7 +3103,7 @@ static fn link_fs_handle_read(struct link_fs_buf address_to out, p32 req_id,
                 link_fs_reply_err(out, req_id, FS_OP_READ, -21);
                 return;
         }
-        if (link_facts_is_own(address_of facts))
+        if (link_facts_is_own(address_of facts) || link_fd_in_rules(fd, false))
         {
                 system_close(fd);
                 link_fs_reply_err(out, req_id, FS_OP_READ, -13);
@@ -3150,6 +3230,9 @@ static p8 link_fs_server_take(struct link_session address_to s,
                         }
                 }
                 fs->in.pos += LINK_FS_HEAD + (positive)plen;
+                link_fs_flush_buf(s, LINK_KEY_OUTPUT, address_of fs->out);
+                if (fs->out.len - fs->out.pos > (2u << 20))
+                        break;
         }
         if (fs->in.pos == fs->in.len)
                 fs->in.pos = fs->in.len = 0;

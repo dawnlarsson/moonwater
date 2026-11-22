@@ -347,14 +347,29 @@ sized modem_encode_samples(sized len)
         return syms * MODEM_SYM + 2 * MODEM_LEAD;
 }
 
+static b16 modem_tone_table[MODEM_TONES + 1][MODEM_SYM];
+static int modem_tone_ready;
+
+static void modem_tone_build(void)
+{
+        int c, k;
+
+        if (modem_tone_ready)
+                return;
+        /* One symbol per tone, computed once: a symbol is a copy of its tone's samples, so no sample is computed twice.
+           Tone c is c whole cycles. */
+        for (c = 1; c <= MODEM_TONES; c++)
+                for (k = 0; k < MODEM_SYM; k++)
+                        modem_tone_table[c][k] = (b16)((MODEM_AMP * modem_sin_tab[(c * k) % MODEM_SYM]) / MODEM_SCALE);
+        modem_tone_ready = 1;
+}
+
 static sized modem_encode_mac(const modem_mac *mac, p32 seq, const p8 *payload, sized len,
                                b16 *pcm, sized cap)
 {
         static const p8 sync[MODEM_SYNC_BYTES] = {0xA7, 0x3D, 0x69, 0xC5}; /* MODEM_SYNC_WORD, bytes in order */
         p8 fb[MODEM_PRE + MODEM_SYNC_BYTES + MODEM_HDR + MODEM_PAYLOAD_MAX + MODEM_TAG];
         sized nb, at, total, body, bit, nbits;
-        b16 tone[MODEM_TONES + 1][MODEM_SYM];
-        int c, k;
 
         if (!mac->ok || !pcm || (len > 0 && !payload) || len > MODEM_PAYLOAD_MAX)
                 return 0;
@@ -382,11 +397,7 @@ static sized modem_encode_mac(const modem_mac *mac, p32 seq, const p8 *payload, 
            padded with zero bits. */
         nbits = nb * 8;
         memory_zero(pcm, total * sizeof(b16));
-        /* One symbol per tone, computed once for this frame: a symbol is a copy of its tone's samples, so the frame's
-           samples are written by one copy per symbol and no sample is computed twice. Tone c is c whole cycles. */
-        for (c = 1; c <= MODEM_TONES; c++)
-                for (k = 0; k < MODEM_SYM; k++)
-                        tone[c][k] = (b16)((MODEM_AMP * modem_sin_tab[(c * k) % MODEM_SYM]) / MODEM_SCALE);
+        modem_tone_build();
         at = MODEM_LEAD;
         for (bit = 0; bit < nbits; bit += MODEM_SYM_BITS)
         {
@@ -399,7 +410,7 @@ static sized modem_encode_mac(const modem_mac *mac, p32 seq, const p8 *payload, 
                         if (b < nbits && ((fb[b / 8] >> (b % 8)) & 1))
                                 v |= 1u << j;
                 }
-                memory_copy(pcm + at, tone[(int)v + 1], sizeof tone[0]);
+                memory_copy(pcm + at, modem_tone_table[(int)v + 1], sizeof modem_tone_table[0]);
                 at += MODEM_SYM;
         }
         return at + MODEM_LEAD;

@@ -1070,7 +1070,7 @@ static bipolar bowl_kernel_settings_seal(void)
         return 0;
 }
 
-static fn bowl_isolated_node_grant(string_address path, positive gid)
+static fn bowl_isolated_node_grant_mode(string_address path, positive gid, p16 mode)
 {
         p8 held[256];
 
@@ -1080,17 +1080,30 @@ static fn bowl_isolated_node_grant(string_address path, positive gid)
             (((unsigned)held[28] | ((unsigned)held[29] << 8)) & 0170000) !=
                 0020000)
                 return;
-        system_change_owner_at(AT_FDCWD, path, 0, gid, AT_SYMLINK_NOFOLLOW);
-        system_change_mode_at(AT_FDCWD, path, 0660);
+        if (gid)
+                system_change_owner_at(AT_FDCWD, path, 0, gid, AT_SYMLINK_NOFOLLOW);
+        system_change_mode_at(AT_FDCWD, path, mode ? mode : 0660);
 }
 
-static fn bowl_isolated_dir_grant(string_address dir, string_address prefix,
-                                  positive gid)
+static fn bowl_isolated_node_grant(string_address path, positive gid)
+{
+        bowl_isolated_node_grant_mode(path, gid, 0660);
+}
+
+typedef struct
+{
+        string_address prefix;
+        positive prefix_len;
+        positive gid;
+} bowl_dir_grant_rule;
+
+static fn bowl_dir_grant_rules(string_address dir,
+                               const bowl_dir_grant_rule address_to rules,
+                               positive count)
 {
         file_walk walk;
         struct linux_dirent64 address_to entry;
         p8 path[BOWL_PATH_LIMIT];
-        positive prefix_len = prefix ? string_length(prefix) : 0;
 
         if (!file_walk_open(address_of walk, AT_FDCWD, dir))
                 return;
@@ -1100,56 +1113,63 @@ static fn bowl_isolated_dir_grant(string_address dir, string_address prefix,
 
                 if (file_is_dot(name))
                         continue;
-                if (prefix_len &&
-                    string_compare_max(name, prefix, prefix_len))
-                        continue;
-                if (path_join(path, sizeof(path), dir, name))
-                        bowl_isolated_node_grant(path, gid);
+                for (positive r = 0; r < count; r++)
+                {
+                        if (rules[r].prefix_len &&
+                            string_compare_max(name, rules[r].prefix,
+                                               rules[r].prefix_len))
+                                continue;
+                        if (path_join(path, sizeof(path), dir, name))
+                                bowl_isolated_node_grant_mode(path, rules[r].gid, 0660);
+                        break;
+                }
         }
         file_walk_close(address_of walk);
 }
 
-static fn bowl_isolated_devices(void)
+static fn bowl_grant_devices(bool include_unrestricted)
 {
+        static const bowl_dir_grant_rule dri_rules[] = {
+            {"renderD", 7, 105},
+            {"card", 4, 44},
+        };
+        static const bowl_dir_grant_rule dev_rules[] = {
+            {"video", 5, 44},
+            {"media", 5, 44},
+            {"nvidia", 6, 105},
+        };
+        static const bowl_dir_grant_rule heap_rules[] = {
+            {null, 0, 105},
+        };
         static const struct
         {
                 string_address path;
-                string_address prefix;
                 positive gid;
                 p16 mode;
-                bool is_dir;
-        } grants[] = {
-            {"/dev/dri", "renderD", 105, 0, true},
-            {"/dev/dri", "card", 44, 0, true},
-            {"/dev", "video", 44, 0, true},
-            {"/dev", "media", 44, 0, true},
-            {"/dev/kfd", null, 105, 0, false},
-            {"/dev/udmabuf", null, 105, 0, false},
-            {"/dev/ntsync", null, 0, 0666, false},
-#if MOONWATER_STRICT_BOWL < STRICT_LOCKED
-            {"/dev/fuse", null, 0, 0666, false},
-            {"/dev/kvm", null, 105, 0, false},
-#endif
-            {"/dev/dma_heap", null, 105, 0, true},
-            {"/dev", "nvidia", 105, 0, true},
+                bool unrestricted;
+        } nodes[] = {
+            {"/dev/kfd", 105, 0660, false},
+            {"/dev/udmabuf", 105, 0660, false},
+            {"/dev/ntsync", 0, 0666, false},
+            {"/dev/fuse", 0, 0666, true},
+            {"/dev/kvm", 105, 0660, true},
         };
 
-        for (positive at = 0; at < array_count(grants); at++)
+        bowl_dir_grant_rules("/dev/dri", dri_rules, array_count(dri_rules));
+        bowl_dir_grant_rules("/dev", dev_rules, array_count(dev_rules));
+        bowl_dir_grant_rules("/dev/dma_heap", heap_rules, array_count(heap_rules));
+        for (positive at = 0; at < array_count(nodes); at++)
         {
-                if (grants[at].is_dir)
-                        bowl_isolated_dir_grant(grants[at].path,
-                                                grants[at].prefix,
-                                                grants[at].gid);
-                else if (grants[at].mode)
-                {
-                        if (system_access_at(AT_FDCWD, grants[at].path, 0) >= 0)
-                                system_change_mode_at(AT_FDCWD, grants[at].path,
-                                                      grants[at].mode);
-                }
-                else
-                        bowl_isolated_node_grant(grants[at].path,
-                                                 grants[at].gid);
+                if (nodes[at].unrestricted && !include_unrestricted)
+                        continue;
+                bowl_isolated_node_grant_mode(nodes[at].path, nodes[at].gid,
+                                              nodes[at].mode);
         }
+}
+
+static fn bowl_isolated_devices(void)
+{
+        bowl_grant_devices(MOONWATER_STRICT_BOWL < STRICT_LOCKED);
 }
 
 static bipolar bowl_isolated_populate(void)
@@ -1617,6 +1637,11 @@ static bipolar bowl_fast_etc(string_address root)
         if (!bowl_root_path(options + length, sizeof(options) - length, root,
                             "/etc"))
                 return -ENAMETOOLONG;
+        /* A path with overlayfs option separators cannot be a lowerdir layer. */
+        if (string_first_of(options + length, ',') ||
+            string_first_of(options + length, ':') ||
+            string_first_of(options + length, '\\'))
+                return 0;
         if (system_access_at(AT_FDCWD, options + length, 0) < 0)
                 return 0;
 
@@ -1632,7 +1657,8 @@ static bipolar bowl_fast_etc(string_address root)
 
         memory_copy(options, lower, length);
         bowl_doing("overlay /etc from", options + length);
-        failed = system_mount("overlay", "/etc", "overlay", MS_RDONLY, options);
+        failed = system_mount("overlay", "/etc", "overlay",
+                              MS_RDONLY | MS_NOSUID | MS_NODEV, options);
         if (!failed && bowl_accounts_made)
                 bowl_accounts_bind();
         return failed;
@@ -2001,6 +2027,8 @@ static bipolar bowl_inputs_mount(void)
                                        (positive)"", AT_FDCWD,
                                        (positive)bowl_input_entry[at].target,
                                        BOWL_MOVE_MOUNT_EMPTY);
+                system_close(bowl_input_entry[at].handle);
+                bowl_input_entry[at].handle = -1;
                 if (failed)
                         return failed;
                 failed = system_mount(0, bowl_input_entry[at].target, 0,
@@ -4713,7 +4741,11 @@ static b32 bowl_launch(string_address root, string_address program,
 
         if (child == 0)
         {
-                bipolar unshared = system_call_1(syscall(unshare), CLONE_NEWNS);
+                bipolar unshared;
+
+                if (room >= 0)
+                        system_close(room);
+                unshared = system_call_1(syscall(unshare), CLONE_NEWNS);
 
                 if (unshared < 0)
                 {

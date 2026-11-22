@@ -1297,22 +1297,32 @@ static b32 tune_battery_verb(string_address address_to arguments, positive count
                 return host_usage();
 
         name = arguments[2];
-        if (string_equals(name, (string_address) "auto"))
-                stored = (string_address) "";
-        else if (string_equals(name, (string_address) "none"))
-                stored = (string_address) "none";
-        else
         {
-                positive at = 0;
+                static const struct
+                {
+                        string_address word;
+                        string_address stored;
+                } specials[] = {
+                    {"auto", ""},
+                    {"none", "none"},
+                };
+                positive hit = string_table_lookup(name, specials);
 
-                // A name is one directory entry: no slash, no dot-name, and a battery or a UPS under the kernel's power_supply.
-                while (name[at] && name[at] != '/' && at < 64)
-                        at++;
-                if (!at || name[0] == '.' || name[at] || at >= 64 ||
-                    !(tune_says((string_address)TUNE_SYS_BATTERY, name, (string_address) "/type", (string_address) "Battery") ||
-                      tune_says((string_address)TUNE_SYS_BATTERY, name, (string_address) "/type", (string_address) "UPS")))
-                        return host_refuse("this machine has no battery called %s\n", name);
-                stored = name;
+                if (hit < array_count(specials))
+                        stored = specials[hit].stored;
+                else
+                {
+                        positive at = 0;
+
+                        // A name is one directory entry: no slash, no dot-name, and a battery or a UPS under the kernel's power_supply.
+                        while (name[at] && name[at] != '/' && at < 64)
+                                at++;
+                        if (!at || name[0] == '.' || name[at] || at >= 64 ||
+                            !(tune_says((string_address)TUNE_SYS_BATTERY, name, (string_address) "/type", (string_address) "Battery") ||
+                              tune_says((string_address)TUNE_SYS_BATTERY, name, (string_address) "/type", (string_address) "UPS")))
+                                return host_refuse("this machine has no battery called %s\n", name);
+                        stored = name;
+                }
         }
         host_need_root();
         if (tune_remember("battery", stored))
@@ -1468,7 +1478,8 @@ static b32 host_workarounds(string_address address_to arguments, positive count)
 
                 if (string_table_lookup(name, host_workaround_rows) == array_count(host_workaround_rows))
                         return host_refuse("unknown workaround %s (run `moonwater workarounds` to list them)\n", name);
-                if (!alen || alen + 1 + nlen >= sizeof(key) || memory_first_of(app, ' ', alen) || memory_first_of(app, ':', alen) || memory_first_of(app, '/', alen))
+                if (!alen || alen + 1 + nlen >= sizeof(key) || !radio_text_plain(app, alen) ||
+                    memory_first_of(app, ' ', alen) || memory_first_of(app, ':', alen) || memory_first_of(app, '/', alen))
                         return host_refuse("invalid app name %s (use executable basename without / or :)\n", app);
                 if (!string_equals(mode, "on") && !string_equals(mode, "off") && !string_equals(mode, "default"))
                         return host_usage();

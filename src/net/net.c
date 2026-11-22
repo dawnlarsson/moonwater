@@ -3127,12 +3127,45 @@ static fn crypto_pbkdf2(positive algorithm, positive size,
                 //      prepared key, which for SHA-256 is lib.c's body: two
                 //      compressions from the two kept states, where this
                 //      copied a digest state and fed and closed it twice.
-                for (positive round = 1; round < rounds; round++)
+                //      Ping-pong block/next so no copy runs inside the loop,
+                //      and XOR in 64-bit or 32-bit words.
                 {
-                        crypto_hmac_prepared(address_of key, block, size, next);
-                        memory_copy(block, next, size);
-                        for (positive at = 0; at < size; at++)
-                                mix[at] ^= block[at];
+                        p8 address_to cur = block;
+                        p8 address_to nxt = next;
+
+                        for (positive round = 1; round < rounds; round++)
+                        {
+                                p8 address_to swap;
+
+                                crypto_hmac_prepared(address_of key, cur, size,
+                                                     nxt);
+                                swap = cur;
+                                cur = nxt;
+                                nxt = swap;
+                                if (size == 32)
+                                {
+                                        for (positive w = 0; w < 4; w++)
+                                                memory_store_unaligned(
+                                                    p64, mix + w * 8,
+                                                    memory_load_unaligned(
+                                                        p64, mix + w * 8) ^
+                                                        memory_load_unaligned(
+                                                            p64, cur + w * 8));
+                                }
+                                else if ((size & 3) == 0)
+                                {
+                                        for (positive w = 0; w < size; w += 4)
+                                                memory_store_unaligned(
+                                                    p32, mix + w,
+                                                    memory_load_unaligned(
+                                                        p32, mix + w) ^
+                                                        memory_load_unaligned(
+                                                            p32, cur + w));
+                                }
+                                else
+                                        for (positive at = 0; at < size; at++)
+                                                mix[at] ^= cur[at];
+                        }
                 }
                 memory_copy(out + done, mix, take);
                 done += take;
@@ -3171,27 +3204,48 @@ static bool crypto_hkdf_expand(p8 address_to prk, p8 address_to info,
                 crypto_forget(out, out_length);
                 return false;
         }
-        while (have < out_length)
+        if (out_length > 32)
+        {
+                crypto_hmac_key key;
+                digest_state work;
+
+                crypto_hmac_prepare(DIGEST_SHA256, 32, prk, 32, address_of key);
+                while (have < out_length)
+                {
+                        positive take = out_length - have;
+
+                        //      T(1) has no predecessor; every later block is keyed
+                        //      by the one before it, which is what chains them.
+                        work = key.inner;
+                        if (counter > 1)
+                                digest_write(address_of work, previous, 32);
+                        digest_write(address_of work, info, info_length);
+                        digest_write(address_of work, address_of counter, 1);
+                        digest_close(address_of work, block);
+                        work = key.outer;
+                        digest_write(address_of work, block, 32);
+                        digest_close(address_of work, block);
+
+                        if (take > 32)
+                                take = 32;
+                        memory_copy(out + have, block, take);
+                        have += take;
+
+                        memory_copy(previous, block, 32);
+                        counter++;
+                }
+                crypto_forget(address_of key, sizeof key);
+                crypto_forget(address_of work, sizeof work);
+        }
+        else if (out_length)
         {
                 crypto_mac mac;
-                positive take = out_length - have;
 
-                //      T(1) has no predecessor; every later block is keyed
-                //      by the one before it, which is what chains them.
                 crypto_hmac_open(address_of mac, DIGEST_SHA256, 32, prk, 32);
-                if (counter > 1)
-                        crypto_hmac_write(address_of mac, previous, 32);
                 crypto_hmac_write(address_of mac, info, info_length);
                 crypto_hmac_write(address_of mac, address_of counter, 1);
                 crypto_hmac_close(address_of mac, block);
-
-                if (take > 32)
-                        take = 32;
-                memory_copy(out + have, block, take);
-                have += take;
-
-                memory_copy(previous, block, 32);
-                counter++;
+                memory_copy(out, block, out_length);
         }
 
         crypto_forget(previous, sizeof previous);
@@ -3467,7 +3521,8 @@ static fn crypto_ghash_span(p8 address_to state, p8 address_to table,
         positive whole = length / 16;
         p8 padded[16];
 
-        ghash_blocks(state, table, bytes, whole);
+        if (whole)
+                ghash_blocks(state, table, bytes, whole);
 
         if (length % 16)
         {
@@ -3535,7 +3590,8 @@ static fn crypto_aesgcm_crypt(crypto_aesgcm_key address_to key,
         if (!encrypt)
                 crypto_ghash_span(s, key->table, text, text_length);
 
-        aes128_ctr_blocks(key->round, counter, text, text, whole);
+        if (whole)
+                aes128_ctr_blocks(key->round, counter, text, text, whole);
         if (rest)
         {
                 memory_fill(padded, 0, 16);
@@ -3752,7 +3808,8 @@ static fn crypto_siv_ctr(const crypto_siv_key address_to key,
         memory_copy(counter, v, 16);
         counter[8] &= 0x7f;
         counter[12] &= 0x7f;
-        aes128_ctr_blocks(key->round, counter, text, text, whole);
+        if (whole)
+                aes128_ctr_blocks(key->round, counter, text, text, whole);
         if (rest)
         {
                 memory_fill(padded, 0, 16);

@@ -294,25 +294,30 @@ static HOT bool system_snapshot_system(system_snapshot address_to sample)
         sample->header.swap_total = system_scaled(information.totalswap, unit);
         sample->header.swap_free = system_scaled(information.freeswap, unit);
 
-        if (!file_store_slurp("/proc/meminfo", address_of sample->input))
-                return false;
+        p8 meminfo_head[512];
+        bipolar meminfo_got = file_slurp_once_at(AT_FDCWD, "/proc/meminfo",
+                                                 meminfo_head,
+                                                 sizeof(meminfo_head));
+        string_address at = null;
 
-        string_address at = sample->input.bytes;
+        if (meminfo_got > 0)
+                at = (string_address)meminfo_head;
+        else
+        {
+                if (!file_store_slurp("/proc/meminfo", address_of sample->input))
+                        return false;
+                at = sample->input.bytes;
+        }
         while (string_get(at))
         {
                 string_address next = string_first_of_or_end(at, '\n');
 
                 if (!string_compare_max(at, "MemAvailable:", 13))
                 {
-                        string_address value_at = string_first_of_or_end(at, ':');
+                        string_address value_at = at + 13;
 
-                        if (string_get(value_at))
-                        {
-                                value_at++;
-                                sample->header.memory_available = system_scaled(
-                                    system_field_unsigned(address_of value_at),
-                                    1024);
-                        }
+                        sample->header.memory_available = system_scaled(
+                            system_field_unsigned(address_of value_at), 1024);
                         break;
                 }
 
@@ -577,8 +582,15 @@ static HOT bool system_snapshot_take_selected(
                 sample->header.version = SPARK_SNAPSHOT_VERSION;
                 sample->header.page_size = (unsigned int)system_page_size();
                 sample->header.monotonic_ns = system_clock_ns(1);
-                sample->header.realtime_seconds = system_clock_ns(0) /
-                                                   SYSTEM_NANOSECONDS;
+                {
+                        p64 realtime[2] = {0, 0};
+
+                        sample->header.realtime_seconds =
+                            system_call_2(syscall(clock_gettime), 0,
+                                          (positive)realtime) < 0
+                                ? 0
+                                : realtime[0];
+                }
                 sample->header.uptime_ns = system_clock_ns(7);
         }
 

@@ -63,7 +63,8 @@ static fn host_splash_vendor(string_address path, p8 address_to into)
         bipolar got = file_slurp_once_at(AT_FDCWD, path, bytes, sizeof(bytes));
         positive length = 0;
 
-        for (positive at = 0; got > 0 && at < (positive)got && bytes[at] != '\n' && bytes[at] != '\r' && bytes[at]; at++)
+        for (positive at = 0; got > 0 && at < (positive)got && length < HOST_SPLASH_VENDOR &&
+                              bytes[at] != '\n' && bytes[at] != '\r' && bytes[at]; at++)
                 into[length++] = bytes[at] >= 0x20 && bytes[at] < 0x7f ? bytes[at] : '?';
         while (length && into[length - 1] == ' ')
                 length--;

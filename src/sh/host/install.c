@@ -207,17 +207,34 @@ static b32 host_install_verb(string_address address_to arguments, positive count
         if (count == 3 && string_equals(arguments[2], "list"))
                 return host_install_list(true);
         name = host_disk_word(arguments[2]);
-        if (count > words && string_equals(arguments[words], "update"))
-                mode = INSTALLER_UPDATE, words++;
-        else if (count > words && string_equals(arguments[words], "overwrite"))
-                mode = INSTALLER_OVERWRITE, words++;
-        else if (count > words && string_equals(arguments[words], "use"))
-                mode = INSTALLER_USE, words++;
+        if (count > words)
+        {
+                static const struct
+                {
+                        string_address word;
+                        int mode;
+                } modes[] = {
+                    {"update", INSTALLER_UPDATE},
+                    {"overwrite", INSTALLER_OVERWRITE},
+                    {"use", INSTALLER_USE},
+                };
+                positive hit = string_table_lookup(arguments[words], modes);
+
+                if (hit < array_count(modes))
+                        mode = modes[hit].mode, words++;
+        }
         if (count > words && string_equals(arguments[words], HOST_YES))
                 yes = true, words++;
         //      The window's plan says the size the listing showed: the install refuses a drive that has changed since.
         if (count > words && arguments[words][0] >= '0' && arguments[words][0] <= '9')
-                sized = true, size_want = (unsigned long long)string_to_number_unsigned(arguments[words], null, 10), words++;
+        {
+                string_address tail = null;
+
+                sized = true;
+                size_want = (unsigned long long)string_to_number_unsigned(arguments[words], address_of tail, 10);
+                return_if(tail && *tail, host_usage());
+                words++;
+        }
         return_if(count != words || !host_name_valid(name), host_usage());
         host_need_root();
         interactive = host_asks();

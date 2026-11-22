@@ -614,10 +614,10 @@ static bipolar rover_runner_exec(string_address address_to argv, string_address 
         if (rover_runner_osk_program(argv[0]))
                 rover_runner_osk_record();
         bipolar null_handle = system_open_at(AT_FDCWD, "/dev/null", FILE_READ);
-        bipolar out = system_open_at_mode(AT_FDCWD, log_path ? log_path : (string_address) "/dev/kmsg",
-                                          FILE_WRITE | O_CREAT | O_APPEND | O_NOFOLLOW, 0600);
         if (null_handle > 0)
                 system_descriptor_move(null_handle, 0);
+        bipolar out = system_open_at_mode(AT_FDCWD, log_path ? log_path : (string_address) "/dev/kmsg",
+                                          FILE_WRITE | O_CREAT | O_APPEND | O_NOFOLLOW, 0600);
         if (out >= 0)
         {
                 if (out != 1)

@@ -3999,10 +3999,12 @@ static positive radio_share_pid(void)
         p8 text[24];
         positive pid = 0;
 
+        positive used = 0;
+
         if (host_read_word(NET_BLUETOOTH_SHARE_PID, text, sizeof(text)) < 0)
                 return 0;
-        pid = string_digits_max(text, 10, null);
-        return pid > 1 && pid <= 0x7fffffff && radio_share_is(pid) ? pid : 0;
+        pid = string_digits_max(text, 10, address_of used);
+        return used && !text[used] && pid > 1 && pid <= 0x7fffffff && radio_share_is(pid) ? pid : 0;
 }
 
 // Whether the process the sharing was started as is still there.

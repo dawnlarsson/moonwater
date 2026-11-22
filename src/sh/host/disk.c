@@ -1942,7 +1942,7 @@ static bool host_image_sum(string_address path, bool masked, p8 address_to sum)
                 return false;
 
         hole = masked ? host_settings_section(handle) : 0;
-        read = file_look_code(AT_FDCWD, path, 0, address_of facts) >= 0;
+        read = file_look_code(handle, (string_address) "", AT_EMPTY_PATH, address_of facts) >= 0;
         digest_open(address_of digest, DIGEST_SHA256, 32);
         while (read && offset < facts.size)
         {
@@ -2441,29 +2441,35 @@ static b32 host_place_image(string_address name, string_address system,
 static p8 host_splash_bytes[SPLASH_FILE_MOST + 1]; // a picture as its file: the header and the pixels
 static p8 host_splash_seen[SPLASH_FILE_MOST + 1];  // one read back, to hold against it
 
-// The file at path read whole into into: its count, or the negative reason, -2 when it is larger than the most.
-static bipolar host_splash_read(string_address path, p8 address_to into)
+// An open splash file read whole into into: its count, or the negative reason, -2 when it is larger than the most.
+static bipolar host_splash_read_handle(bipolar handle, p8 address_to into)
 {
-        bipolar handle = system_open_at(AT_FDCWD, path, FILE_READ | O_CLOEXEC | O_NONBLOCK);
         positive length = 0;
 
-        if (handle < 0)
-                return handle;
         while (length <= SPLASH_FILE_MOST)
         {
-                bipolar got = system_read_once(handle, into + length, SPLASH_FILE_MOST + 1 - length);
+                bipolar got = system_read_retry((positive)handle, into + length, SPLASH_FILE_MOST + 1 - length);
 
                 if (got < 0)
-                {
-                        system_close(handle);
                         return got;
-                }
                 if (!got)
                         break;
                 length += (positive)got;
         }
-        system_close(handle);
         return length > SPLASH_FILE_MOST ? -2 : (bipolar)length;
+}
+
+// The file at path read whole into into: its count, or the negative reason, -2 when it is larger than the most.
+static bipolar host_splash_read(string_address path, p8 address_to into)
+{
+        bipolar handle = system_open_at(AT_FDCWD, path, FILE_READ | O_CLOEXEC | O_NONBLOCK);
+        bipolar got;
+
+        if (handle < 0)
+                return handle;
+        got = host_splash_read_handle(handle, into);
+        system_close(handle);
+        return got;
 }
 
 /*
@@ -2530,15 +2536,14 @@ static bool host_splash_is_legacy_dark(const p8 address_to bytes, positive lengt
 // Whether the file at path is these bytes and no more, as the disk has them: its pages are dropped before it is read.
 static bool host_splash_file_is(string_address path, const p8 address_to bytes, positive length)
 {
-        bipolar handle = system_open_at(AT_FDCWD, path, FILE_READ | O_CLOEXEC);
+        bipolar handle = system_open_at(AT_FDCWD, path, FILE_READ | O_CLOEXEC | O_NONBLOCK);
         bipolar seen;
 
         if (handle < 0)
                 return false;
         (void)system_call_4(syscall(fadvise64), (positive)handle, 0, 0, HOST_FADVISE_DONTNEED);
+        seen = host_splash_read_handle(handle, host_splash_seen);
         system_close(handle);
-
-        seen = host_splash_read(path, host_splash_seen);
         return seen == (bipolar)length && !memory_compare(host_splash_seen, bytes, length);
 }
 

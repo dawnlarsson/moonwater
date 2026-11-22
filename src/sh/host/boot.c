@@ -774,11 +774,13 @@ static bool host_canvas_shot_newest(string_address directory, string_address nam
         p8 address_to newest = context;
         positive length = string_length(name);
 
+        positive newest_len = string_length((string_address)newest);
+
         (void)directory;
         //      The frame's number has no leading zeros: a longer name is a later frame.
         if (length > 9 && length < 96 && string_equals(name + length - 9, "-shot.ppm") &&
-            (length > string_length((string_address)newest) ||
-             (length == string_length((string_address)newest) && string_compare(name, (string_address)newest) > 0)))
+            (length > newest_len ||
+             (length == newest_len && string_compare(name, (string_address)newest) > 0)))
                 string_copy_bounded(newest, name, 96);
         return true;
 }
@@ -1050,7 +1052,8 @@ static bipolar host_efi_setup_offered(void)
         //      ask, a status read included.
         if (failed < 0 && !host_efi_mounted())
         {
-                system_mount("efivarfs", HOST_EFI_DIRECTORY, "efivarfs", 0, 0);
+                system_mount("efivarfs", HOST_EFI_DIRECTORY, "efivarfs",
+                             MS_NOSUID | MS_NOEXEC | MS_NODEV, 0);
                 failed = host_efi_get(HOST_EFI_SUPPORTED, address_of value);
         }
         if (failed < 0)

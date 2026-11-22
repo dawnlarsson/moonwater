@@ -728,23 +728,25 @@ static fn host_sticks_said(string_address running, string_address shown,
                         if (!said)
                                 string_format(log, "  %s is held by the device policy, so what "
                                                    "it carries is not read\n", stick->disk);
+                        continue;
                 }
-                else if (stick->fit)
+                if (stick->fit)
+                {
                         string_format(log, "  %s carries an image this machine cannot start: %s\n",
                                       stick->name, host_fit_said(stick->fit, stick->machine));
-                else if (string_equals(stick->build, running))
+                        continue;
+                }
+                if (string_equals(stick->build, running))
                 {
                         if (!shown || !string_equals(stick->name, shown))
                                 string_format(log, "  the same build on %s\n", stick->name);
+                        continue;
                 }
-                else
-                {
-                        string_format(log, "  %s on %s: %s\n",
-                                      host_build_named(stick->build, running), stick->name,
-                                      stick->build);
-                        other |= install && (!install->readable ||
-                                             !string_equals(stick->build, install->build));
-                }
+                string_format(log, "  %s on %s: %s\n",
+                              host_build_named(stick->build, running), stick->name,
+                              stick->build);
+                other |= install && (!install->readable ||
+                                     !string_equals(stick->build, install->build));
         }
 
         if (other)
@@ -1266,18 +1268,18 @@ static fn host_setup_state(void)
                 host_install_read(install);
                 //      Only root can mount an image to read it: for anybody else
                 //      the build is not unreadable, it is not looked at.
-                if (!bowl_is_root())
-                        string_format(log, "  installed on %s, its build is read as root\n",
-                                      install->disk);
-                else if (!install->readable)
-                        string_format(log, "  installed on %s, image unreadable\n",
-                                      install->disk);
-                else if (string_equals(install->build, running))
-                        string_format(log, "  installed on %s, this build\n",
-                                      install->disk);
-                else
-                        string_format(log, "  installed on %s, another build: %s\n",
-                                      install->disk, install->build);
+                static const string_address install_lines[] = {
+                    "  installed on %s, its build is read as root\n",
+                    "  installed on %s, image unreadable\n",
+                    "  installed on %s, this build\n",
+                    "  installed on %s, another build: %s\n",
+                };
+                positive kind = !bowl_is_root()                    ? 0
+                                : !install->readable               ? 1
+                                : string_equals(install->build, running) ? 2
+                                                                   : 3;
+
+                string_format(log, install_lines[kind], install->disk, install->build);
         }
 
         if (!census.count)

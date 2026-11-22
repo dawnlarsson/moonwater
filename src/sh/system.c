@@ -359,52 +359,9 @@ static COLD fn system_input_group(void)
         /tmp/.X11-unix owned by user instead of root.
 */
 #ifndef SHELL_NO_CANVAS
-#define SYSTEM_VIDEO_GID 44
-#define SYSTEM_RENDER_GID 105
-#define system_device_grant bowl_isolated_node_grant
-#define system_directory_grant bowl_isolated_dir_grant
-
 static COLD fn system_render_group(void)
 {
-        p8 path[32];
-
-        for (positive number = 128; number < 192; number++)
-        {
-                positive at = sizeof("/dev/dri/renderD") - 1;
-
-                memory_copy(path, "/dev/dri/renderD", at);
-                at += positive_into_string(path + at, number);
-                path[at] = end;
-                if (system_access_at(AT_FDCWD, path, 0) < 0)
-                        continue;
-                system_change_owner_at(AT_FDCWD, path, 0, SYSTEM_RENDER_GID, 0);
-                system_change_mode_at(AT_FDCWD, path, 0660);
-        }
-        for (positive number = 0; number < 64; number++)
-        {
-                positive at = sizeof("/dev/dri/card") - 1;
-
-                memory_copy(path, "/dev/dri/card", at);
-                at += positive_into_string(path + at, number);
-                path[at] = end;
-                if (system_access_at(AT_FDCWD, path, 0) < 0)
-                        continue;
-                system_change_owner_at(AT_FDCWD, path, 0, SYSTEM_VIDEO_GID, 0);
-                system_change_mode_at(AT_FDCWD, path, 0660);
-        }
-        system_device_grant("/dev/kfd", SYSTEM_RENDER_GID);
-        system_device_grant("/dev/udmabuf", SYSTEM_RENDER_GID);
-        system_directory_grant("/dev", "video", SYSTEM_VIDEO_GID);
-        system_directory_grant("/dev", "media", SYSTEM_VIDEO_GID);
-        if (system_access_at(AT_FDCWD, "/dev/ntsync", 0) >= 0)
-                system_change_mode_at(AT_FDCWD, "/dev/ntsync", 0666);
-#if MOONWATER_STRICT_HOST < STRICT_LOCKED
-        if (system_access_at(AT_FDCWD, "/dev/fuse", 0) >= 0)
-                system_change_mode_at(AT_FDCWD, "/dev/fuse", 0666);
-        system_device_grant("/dev/kvm", SYSTEM_RENDER_GID);
-#endif
-        system_directory_grant("/dev/dma_heap", null, SYSTEM_RENDER_GID);
-        system_directory_grant("/dev", "nvidia", SYSTEM_RENDER_GID);
+        bowl_grant_devices(MOONWATER_STRICT_HOST < STRICT_LOCKED);
 }
 
 static COLD fn system_x11_directory(void)
