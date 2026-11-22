@@ -4558,6 +4558,78 @@ static void game_pids_rows(void)
         windows_owner_held[wl_row] = kept_wl, windows_owner_held[x_row] = kept_x;
 }
 
+/*
+        The wakeup latency game mode and an input hold (compositor_qos_keep): 20 us on each CPU of the compositor's CCD, its own resume-latency file,
+        not /dev/cpu_dma_latency at 0 for the whole machine (every idle CPU spinning in POLL, 75 W against 52-63 W). The files are a tree of the
+        check's own (compositor_qos_root): CPUs 0 and 1 are the CCD, 2 is the other one's; CPU 1 holds a 20 a compositor that died left.
+*/
+static unsigned int qos_value(const char *dir, unsigned int cpu)
+{
+        char path[128], text[16];
+        unsigned int at = 0, value = 0;
+        bipolar handle, got;
+
+        windows_buf_str(path, sizeof path, &at, dir), windows_buf_kv(path, sizeof path, &at, "/cpu", (long)cpu);
+        windows_buf_str(path, sizeof path, &at, "/power/pm_qos_resume_latency_us");
+        if ((handle = system_open_at(AT_FDCWD, (string_address)path, FILE_READ | O_CLOEXEC)) < 0)
+                return ~0u;
+        got = system_read_once(handle, text, sizeof text);
+        system_close(handle);
+        for (bipolar k = 0; k < got && text[k] >= '0' && text[k] <= '9'; k++)
+                value = value * 10 + (unsigned int)(text[k] - '0');
+        return value;
+}
+
+static void qos_rows(void)
+{
+        static const char dir[] = "/run/moonwater/check-qos";
+        __typeof__(compositor_ccd) kept_ccd = compositor_ccd;
+        __typeof__(compositor_qos) kept_qos = compositor_qos;
+        const char *kept_root = compositor_qos_root;
+        int kept_hold = compositor.hold, kept_game = compositor.game;
+        unsigned long kept_holds = compositor.holds;
+        positive kept_until = compositor.hold_until, now = 5000000000ull;
+        b32 made = true, input, dropped, game, kept, left;
+
+        compositor_call(syscall(mkdirat), (positive)AT_FDCWD, (positive)dir, 0700, 0, 0, 0);
+        for (unsigned int cpu = 0; cpu < 3; cpu++)
+        {
+                char path[128];
+                unsigned int at = 0;
+                bipolar handle;
+
+                windows_buf_str(path, sizeof path, &at, dir), windows_buf_kv(path, sizeof path, &at, "/cpu", (long)cpu);
+                compositor_call(syscall(mkdirat), (positive)AT_FDCWD, (positive)path, 0700, 0, 0, 0);
+                windows_buf_str(path, sizeof path, &at, "/power");
+                compositor_call(syscall(mkdirat), (positive)AT_FDCWD, (positive)path, 0700, 0, 0, 0);
+                windows_buf_str(path, sizeof path, &at, "/pm_qos_resume_latency_us");
+                handle = system_open_at_mode(AT_FDCWD, (string_address)path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
+                made &= handle >= 0 && system_write_once(handle, cpu == 1 ? "20\n" : "0\n", cpu == 1 ? 3 : 2) > 0;
+                if (handle >= 0)
+                        system_close(handle);
+        }
+        compositor_ccd.ready = 1, compositor_ccd.multi = 1, compositor_ccd.ccd0[0] = 3, compositor_ccd.ccd0[1] = 0;
+        memory_zero(&compositor_qos, sizeof compositor_qos), compositor_qos.global = -1, compositor_qos_root = dir;
+        compositor.hold = -1, compositor.holds = 0, compositor.game = -1;
+        compositor_hold_touch(now);
+        input = compositor.hold >= 0 && qos_value(dir, 0) == 20 && qos_value(dir, 1) == 20 && qos_value(dir, 2) == 0 && compositor_qos.global < 0;
+        compositor_hold_drop(now + UI_HOLD_NS);
+        dropped = compositor.hold < 0 && qos_value(dir, 0) == 0 && qos_value(dir, 1) == 0 && qos_value(dir, 2) == 0;
+        check("qos: an input holds 20 us on the compositor's CCD alone, and its end puts each CPU back (a dead compositor's 20 as no limit)",
+              made && input && dropped);
+        game = compositor_qos_keep(0, 1) && qos_value(dir, 0) == 20 && qos_value(dir, 1) == 20 && qos_value(dir, 2) == 0;
+        compositor.game = 1;
+        compositor_hold_touch(now), compositor_hold_drop(now + UI_HOLD_NS);
+        kept = qos_value(dir, 0) == 20 && qos_value(dir, 1) == 20;
+        compositor.game = -1, compositor_qos_keep(0, 0);
+        left = qos_value(dir, 0) == 0 && qos_value(dir, 1) == 0 && qos_value(dir, 2) == 0;
+        check("qos: a game holds the same, an input's end while it is up keeps it, and the game's end lets it go", game && kept && left);
+        for (int at = 0; at < compositor_qos.count; at++)
+                system_close(compositor_qos.fd[at]);
+        compositor_ccd = kept_ccd, compositor_qos = kept_qos, compositor_qos_root = kept_root;
+        compositor.hold = kept_hold, compositor.game = kept_game, compositor.holds = kept_holds, compositor.hold_until = kept_until;
+}
+
 // The X window manager's atoms by their numbers (compositor_xwm_atom_index, H-c3-1): every atom of a list of thousands found by the index as the walk
 // found it, the first record of an atom two records have, none for one not there, and an interned name's atom found once its reply gives it.
 static void xwm_atom_rows(void)
@@ -6143,7 +6215,8 @@ static void jit_ready_rows(void)
 b32 main(void)
 {
         compositor_rows_make(compositor_rows_in_use); // the compositor's rows, made before any check reads one
-        gpu_imports_room(64);                         // and the import table's first room, which the rows that set an import by hand write in
+        gpu_imports_room(64);        compositor_qos_root = "/run/moonwater/check-no-cpus"; // no row's input hold writes the machine's own CPU files (they outlive the check)
+                         // and the import table's first room, which the rows that set an import by hand write in
         enum { PH = 419, PP = 700, N = 64, ROUNDS = 40 };
         // The transitions run as designed in every check (ui_paced at 100): the durations the rows pin are the designed ones.
         ui_pace = UI_PACE_DESIGNED;
@@ -6184,6 +6257,7 @@ b32 main(void)
         display_off_rows();
         reader_residue_rows();
         game_pids_rows();
+        qos_rows();
         reader_own_rows();
         clip_most_rows();
         asked_record_rows();

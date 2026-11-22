@@ -21,23 +21,23 @@ static inline INLINE PURE int compositor_in_row(int row, int x, int y)
                y >= compositor.y[row] && y < compositor.y[row] + (int)compositor.h[row];
 }
 
+static int compositor_qos_keep(int input, int game); // below: the wakeup latency held for an input or a game
+
 static void compositor_hold_touch(positive now)
 {
-        int zero = 0;
-
         compositor.hold_until = now + UI_HOLD_NS;
         if (compositor.hold >= 0 || compositor.holds == ~0ul)
                 return;
-        if ((compositor.hold = (int)system_open_at(AT_FDCWD, (string_address) "/dev/cpu_dma_latency", O_WRONLY | O_CLOEXEC | O_NOFOLLOW)) < 0)
-                { compositor.hold = -1, compositor.holds = ~0ul; return; }
-        system_write_once(compositor.hold, &zero, sizeof(zero));
+        if (!compositor_qos_keep(1, compositor.game >= 0))
+                { compositor.holds = ~0ul; return; }
+        compositor.hold = 1;
         compositor.holds++;
 }
 
 static void compositor_hold_drop(positive now)
 {
         if (compositor.hold >= 0 && now >= compositor.hold_until)
-                system_close(compositor.hold), compositor.hold = -1;
+                compositor.hold = -1, compositor_qos_keep(0, compositor.game >= 0);
 }
 
 static int compositor_write_sysfs(const char *path, const void *data, unsigned long len)
@@ -226,29 +226,106 @@ static void compositor_pin_irqs_ccd0(void)
         }
 }
 
+/*
+        The wakeup latency held while a fullscreen game is up and for UI_HOLD_NS after an input: COMPOSITOR_QOS_HOLD_US on each CPU of the
+        compositor's CCD (its loop, its reader, the input and card interrupts and the game are all pinned there; every CPU where there is one
+        CCD), each CPU's own resume-latency QoS, and the rest of the machine idles as deep as it likes. It was /dev/cpu_dma_latency at 0, the whole
+        machine's: every idle CPU of 32 spun in POLL for the whole game (75 W against 52-63 W on the box), the SMT siblings of the game's cores
+        too. 20 us keeps C1 and C2 (18 us out) and forbids C3 (350 us), the one that matters at frame scale. The files keep their value after
+        the compositor, so each is put back as it was at the start (a value of ours, left by a compositor that died holding it, as no limit);
+        with no such files (a kernel without them) the whole machine's QoS is held at the same 20 us.
+*/
+#define COMPOSITOR_QOS_HOLD_US "20"
+#define COMPOSITOR_QOS_CPUS 128
+static const char *compositor_qos_root = "/sys/devices/system/cpu"; // the checks' own tree in their place
+static struct
+{
+        int ready, count, held, global;      // the files found (count of them, open in fd), the hold written, and the fallback's fd (-1: none)
+        int fd[COMPOSITOR_QOS_CPUS];
+        unsigned char saved_length[COMPOSITOR_QOS_CPUS];
+        char saved[COMPOSITOR_QOS_CPUS][12]; // each file's value at the start, put back when nothing holds
+} compositor_qos = {.global = -1};
+
+static void compositor_qos_open(void)
+{
+        unsigned long mask[2] = {~0ul, ~0ul};
+
+        compositor_qos.ready = 1, compositor_qos.count = 0;
+        compositor_ccd0_mask(mask); // one CCD: every CPU
+        for (unsigned int cpu = 0; cpu < COMPOSITOR_QOS_CPUS && compositor_qos.count < COMPOSITOR_QOS_CPUS; cpu++)
+        {
+                char path[128];
+                unsigned int at = 0;
+                bipolar handle, got;
+                int slot = compositor_qos.count;
+
+                if (!(mask[cpu >> 6] >> (cpu & 63) & 1))
+                        continue;
+                windows_buf_str(path, sizeof path, &at, compositor_qos_root);
+                windows_buf_kv(path, sizeof path, &at, "/cpu", (long)cpu);
+                windows_buf_str(path, sizeof path, &at, "/power/pm_qos_resume_latency_us");
+                if ((handle = system_open_at(AT_FDCWD, (string_address)path, O_RDWR | O_CLOEXEC | O_NOFOLLOW)) < 0)
+                        continue;
+                got = system_read_once(handle, compositor_qos.saved[slot], sizeof compositor_qos.saved[slot] - 1);
+                while (got > 0 && (compositor_qos.saved[slot][got - 1] == '\n' || compositor_qos.saved[slot][got - 1] == ' '))
+                        got--;
+                if (got <= 0 || (got == 2 && !memory_compare(compositor_qos.saved[slot], COMPOSITOR_QOS_HOLD_US, 2)))
+                        compositor_qos.saved[slot][0] = '0', got = 1; // "0" is no limit (and "n/a" none at all)
+                compositor_qos.saved_length[slot] = (unsigned char)got, compositor_qos.fd[slot] = (int)handle, compositor_qos.count++;
+        }
+}
+
+// Hold for an input, for a game, both or neither: 0 where nothing can be held (no files and no /dev/cpu_dma_latency).
+static int compositor_qos_keep(int input, int game)
+{
+        int want = input || game;
+
+        if (!want && !compositor_qos.ready)
+                return 1;
+        if (!compositor_qos.ready)
+                compositor_qos_open();
+        if (want == compositor_qos.held)
+                return compositor_qos.count || compositor_qos.global >= 0 || !want;
+        for (int at = 0; at < compositor_qos.count; at++)
+                compositor_call(syscall(pwrite64), (positive)compositor_qos.fd[at], (positive)(want ? COMPOSITOR_QOS_HOLD_US : compositor_qos.saved[at]),
+                                want ? sizeof COMPOSITOR_QOS_HOLD_US - 1 : compositor_qos.saved_length[at], 0, 0, 0);
+        if (!compositor_qos.count && want)
+        {
+                int us = 20;
+
+                if ((compositor_qos.global = (int)system_open_at(AT_FDCWD, (string_address) "/dev/cpu_dma_latency", O_WRONLY | O_CLOEXEC | O_NOFOLLOW)) < 0)
+                        return compositor_qos.global = -1, 0;
+                system_write_once(compositor_qos.global, &us, sizeof us);
+        }
+        else if (!want && compositor_qos.global >= 0)
+                system_close(compositor_qos.global), compositor_qos.global = -1;
+        compositor_qos.held = want;
+        return 1;
+}
+
 static void compositor_game_watch(void)
 {
         static const char *const batteries[] = {"/sys/class/power_supply/BAT0/status", "/sys/class/power_supply/BAT1/status",
                                                 "/sys/class/power_supply/battery/status"};
-        int game = compositor.games != ~0ul && compositor_fullscreen_up(), us = 0;
+        int game = compositor.games != ~0ul && compositor_fullscreen_up(), battery = 0;
 
         if (game == (compositor.game >= 0))
                 return;
         if (game)
                 compositor_late_reset();
         if (!game)
-                { compositor_gpu_game_clocks(0), compositor_game_epp(0), system_close(compositor.game), compositor.game = -1; return; }
-        if ((compositor.game = (int)system_open_at(AT_FDCWD, (string_address) "/dev/cpu_dma_latency", O_WRONLY | O_CLOEXEC | O_NOFOLLOW)) < 0)
+                { compositor_gpu_game_clocks(0), compositor_game_epp(0), compositor.game = -1, compositor_qos_keep(compositor.hold >= 0, 0); return; }
+        if (!compositor_qos_keep(compositor.hold >= 0, 1))
                 { compositor.game = -1, compositor.games = ~0ul; return; }
+        compositor.game = 1;
         for (unsigned int at = 0; at < 3; at++)
         {
                 char status[16];
 
                 compositor_word(batteries[at], status, sizeof(status));
-                us |= string_equals((string_address)status, (string_address) "Discharging");
+                battery |= string_equals((string_address)status, (string_address) "Discharging");
         }
-        system_write_once(compositor.game, &us, sizeof(us));
-        if (!us)
+        if (!battery)
                 compositor_game_epp(1), compositor_gpu_game_clocks(1);
         compositor.games++;
 }

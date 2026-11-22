@@ -483,6 +483,7 @@ static void display_rows_frames(void)
 b32 main()
 {
         compositor_rows_make(compositor_rows_in_use); // the compositor's rows, made before any check reads one
+        compositor_qos_root = "/run/moonwater/check-no-cpus"; // no row's input hold writes the machine's own CPU files (they outlive the check)
         positive size = 0, bytes;
         long engine;
 
@@ -10125,6 +10126,7 @@ static void group_catch(void)
 b32 main()
 {
         compositor_rows_make(compositor_rows_in_use); // the compositor's rows, made before any check reads one
+        compositor_qos_root = "/run/moonwater/check-no-cpus"; // no row's input hold writes the machine's own CPU files (they outlive the check)
         string_address paths[1];
         positive compared = 0, wrong = 0, refused = 0;
 

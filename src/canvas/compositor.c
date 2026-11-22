@@ -2435,7 +2435,7 @@ static b32 compositor_main()
 #ifdef CONFIG_MOONWATER_WAYLAND
         compositor_xwm_stop(), compositor_wl_stop();
 #endif
-        compositor_vrr_off(), compositor_table_drop(), compositor_stats_log();
+        compositor_vrr_off(), compositor_qos_keep(0, 0), compositor_table_drop(), compositor_stats_log();
         if (!headless) compositor_hand_back();
         return 0;
 }
