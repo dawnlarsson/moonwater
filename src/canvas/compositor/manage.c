@@ -3340,6 +3340,7 @@ static struct
 
 static void (*compositor_clip_observers[COMPOSITOR_CLIP_OBSERVERS_MAX])(unsigned int which);
 static unsigned int compositor_clip_observer_count;
+static unsigned int compositor_clip_self; // the compositor's pid, which an fd of a clipboard offer is opened through (never the table's copy)
 
 static void compositor_clip_slot_map(unsigned int which, unsigned long size)
 {
@@ -3746,7 +3747,7 @@ static void compositor_dnd_name_ext_types(void)
         }
         built = windows_clip_build(parts, (unsigned long)count);
         compositor_call(syscall(munmap), (positive)parts, (positive)alloc, 0, 0, 0, 0);
-        opened = built >= 0 ? compositor_clip_open(compositor.table->clip_pid, (int)built, &length) : -1;
+        opened = built >= 0 ? compositor_clip_open(compositor_clip_self, (int)built, &length) : -1;
         if (built >= 0)
                 system_close((int)built);
         if (opened >= 0)
@@ -4044,7 +4045,7 @@ static b32 compositor_clip_set_memfd(unsigned int which, int fd, int owner)
         unsigned long length = 0;
         int opened;
 
-        if (!compositor.table || which > 1 || fd < 0 || (opened = compositor_clip_open(compositor.table->clip_pid, fd, &length)) < 0)
+        if (!compositor.table || which > 1 || fd < 0 || (opened = compositor_clip_open(compositor_clip_self, fd, &length)) < 0)
                 return 0;
         compositor_clip_keep(which, opened, length, owner);
         return 1;
@@ -4133,7 +4134,9 @@ static int compositor_clip_start(void)
         compositor_call(syscall(fchmodat), (positive)AT_FDCWD, (positive)WINDOWS_CLIP_DOOR, WINDOWS_MODE, 0, 0, 0);
         compositor_clip.door = (int)system_open_at(AT_FDCWD, (string_address)WINDOWS_CLIP_DOOR, FILE_READ_WRITE | O_NONBLOCK | O_CLOEXEC);
         compositor_clip_reserve();
-        compositor.table->clip_pid = (unsigned int)compositor_call(syscall(getpid), 0, 0, 0, 0, 0, 0);
+        // The compositor's own pid is kept here, not read back from the table: the table's copy is written by clients too, and an
+        // fd named through a pid another process wrote would be that process's file.
+        compositor_clip_self = compositor.table->clip_pid = (unsigned int)compositor_call(syscall(getpid), 0, 0, 0, 0, 0, 0);
         compositor.table->clip_owner[0] = compositor.table->clip_owner[1] = -1;
         compositor_clip_settings();
 #ifndef SHELL_NO_GPU
