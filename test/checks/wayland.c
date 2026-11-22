@@ -20,6 +20,7 @@
 
         The library is linked beside it: the engine's head, id and damage routines are src/lib.c's.
 */
+#define _GNU_SOURCE 1 /* mremap, for fake_remap, is a GNU extension in the libc the box builds against */
 #include <errno.h>
 #include <fcntl.h>
 #include <stdarg.h>
@@ -3141,7 +3142,7 @@ static void test_presentation(void)
 
         /* more than the surface holds in itself: kept, none discarded (the list grows past them) */
         wlc_forget(c);
-        for (int at = 0; at < 4 * WAYLAND_PRESENTATIONS + 1; at++)
+        for (int at = 0; at < 17; at++) /* four times the old per-surface bound (WAYLAND_PRESENTATIONS, now gone), plus one */
                 wlc_send(c, presentation, WLQ_wp_presentation_feedback, s.surface, wlc_id(c, WLI_wp_presentation_feedback, 1));
         wlc_pump(c);
         WLCHECK(wlc_count(c, WLI_wp_presentation_feedback, WLE_wp_presentation_feedback_discarded) == 0,
@@ -3160,7 +3161,7 @@ static void test_presentation(void)
         wlc_forget(c);
         wlc_send(c, s.surface, WLQ_wl_surface_destroy);
         wlc_pump(c);
-        WLCHECK(wlc_count(c, WLI_wp_presentation_feedback, WLE_wp_presentation_feedback_discarded) == 4 * WAYLAND_PRESENTATIONS + 1,
+        WLCHECK(wlc_count(c, WLI_wp_presentation_feedback, WLE_wp_presentation_feedback_discarded) == 17,
                 "destroying a surface discards the feedbacks it holds, every one");
         WLCHECK(c->errors == 0, "none of it is a protocol error");
         wlc_end(c);
