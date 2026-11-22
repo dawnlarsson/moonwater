@@ -17556,7 +17556,7 @@ static b32 ui_graph_held_bits(const struct ui_graph address_to g, int k, int x, 
                         around |= 1ull << j;
         while (todo)
         {
-                int at = __builtin_ctzll(todo);
+                int at = (int)bits_trailing_zeros(todo);
                 unsigned long long next = (at == k ? around : adj[at]) & ~seen;
                 todo &= todo - 1;
                 seen |= next, todo |= next;
