@@ -22433,6 +22433,24 @@ static void ui_list_end(struct ui_list address_to l)
                 l->focus = l->id[0];
 }
 
+// The rows of a list in the order a comparator says of their ids (less than 0: a before b; descending reverses it). The ids move, the app's
+// data stays where it is; the caller lays the list out again. Insertion sort: stable, and a list is a few hundred rows.
+static void ui_list_order(struct ui_list address_to l, int (*compare)(int a, int b), b32 descending)
+{
+        if (l->virtual || !compare)
+                return;
+        for (int at = 1; at < l->count; at++)
+                for (int back = at; back > 0; back--)
+                {
+                        int cmp = compare(l->id[back - 1], l->id[back]), held = l->id[back];
+                        if (descending)
+                                cmp = -cmp;
+                        if (cmp <= 0)
+                                break;
+                        l->id[back] = l->id[back - 1], l->id[back - 1] = held;
+                }
+}
+
 // A virtual list's places for where it is scrolled to now:
 static fn ui_list_window(const struct ui address_to ui, struct ui_list address_to l)
 {
