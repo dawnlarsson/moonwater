@@ -159,9 +159,7 @@ static void fold_setup(int scale, b32 dark, unsigned int language_code)
 {
         language_directory = "languages/"; // the tree's files, as the language checks read them (the rig runs in the tree)
         language_take(language_code);
-        memory_zero(settings_expanded, sizeof(settings_expanded));
-        memory_zero(settings_fold_at, sizeof(settings_fold_at));
-        memory_zero(settings_fold_live, sizeof(settings_fold_live));
+        memory_zero(&settings.list, sizeof(settings.list)); // the folds are the list's: a zeroed list maps its own (ui_list_fold)
         windows_scratch_zero(windows_scratch_table(&fold_table_scratch));
         windows_scratch_table(&fold_table_scratch)->stride = GALLERY_W, windows_scratch_table(&fold_table_scratch)->output_width = 1920, windows_scratch_table(&fold_table_scratch)->output_height = 1080;
         settings.own.table = windows_scratch_table(&fold_table_scratch);
@@ -206,7 +204,7 @@ static void fold_frame(b64 at)
 {
         ui_kit.now = at;
         ui_kit.busy = 0;
-        settings_fold_step();
+        ui_list_fold_step(&settings.ui, &settings.list);
 }
 
 static void fold_run(b64 from, b64 until)
@@ -243,9 +241,9 @@ static void fold_checks(void)
         settings_toggle(fold_row);
         fold_frame(base);
         lines = settings_sub_count;
-        check("settings fold: opening lists its lines, and the first frame has them at no height", lines > 0 && settings_fold_at[fold_row] == 0 && settings.list.content == closed);
+        check("settings fold: opening lists its lines, and the first frame has them at no height", lines > 0 && settings_fold_reveal(fold_row) == 0 && settings.list.content == closed);
         fold_run(base + fold_frame_ns, base + 100 * ms);
-        mid = settings_fold_at[fold_row];
+        mid = settings_fold_reveal(fold_row);
         mid_content = settings.list.content;
         check("settings fold: 100 ms in, the lines are part way open on the kit's spring", mid > 0 && mid < UI_ONE);
         ui_list_describe(&settings.list, fold_row, &row);
@@ -257,24 +255,24 @@ static void fold_checks(void)
                 tall_lines += settings.list.id[at] >= (int)SETTINGS_ALL ? settings.list.whole[at] : 0;
         string_format(log, "  settings fold: %b lines open, %b tall (a row each would be %b)\n", (bipolar)lines, (bipolar)tall_lines, (bipolar)(lines * (int)unit));
         check("settings fold: at rest the lines are open at their height, and the rows under them moved down by it",
-              settings_fold_at[fold_row] == UI_ONE && tall_lines > lines * (int)unit && open == closed + tall_lines);
+              settings_fold_reveal(fold_row) == UI_ONE && tall_lines > lines * (int)unit && open == closed + tall_lines);
         check("settings fold: part way the rows under the lines were between shut and open (they move each frame)", mid_content > closed && mid_content < open);
-        check("settings fold: at rest the board has no fold running", !settings_fold_live[fold_row] && !(ui_kit.busy));
+        check("settings fold: at rest the board has no fold running", !(ui_kit.busy));
 
         // Shutting: the lines fold away, and are no longer listed at rest.
         ui_kit.now = base + 3000 * ms;
         settings_toggle(fold_row);
         fold_run(base + 3000 * ms + fold_frame_ns, base + 3100 * ms);
-        check("settings fold: shutting goes part way on the spring, the lines still listed", settings_fold_at[fold_row] > 0 && settings_fold_at[fold_row] < UI_ONE && settings_sub_count > 0);
+        check("settings fold: shutting goes part way on the spring, the lines still listed", settings_fold_reveal(fold_row) > 0 && settings_fold_reveal(fold_row) < UI_ONE && settings_sub_count > 0);
         fold_run(base + 3100 * ms + fold_frame_ns, base + 5000 * ms);
-        check("settings fold: at rest shut, with no lines listed and the list as it was shut", settings_fold_at[fold_row] == 0 && settings_sub_count == 0 && settings.list.content == closed);
+        check("settings fold: at rest shut, with no lines listed and the list as it was shut", settings_fold_reveal(fold_row) == 0 && settings_sub_count == 0 && settings.list.content == closed);
 
         // Reduced motion: at once, no spring.
         ui_kit.motion = 1;
         settings_toggle(fold_row);
-        check("settings fold: with reduced motion the lines are open at once, and no spring runs", settings_fold_at[fold_row] == UI_ONE && !settings_fold_live[fold_row] && settings.list.content == closed + tall_lines);
+        check("settings fold: with reduced motion the lines are open at once, and no spring runs", settings_fold_reveal(fold_row) == UI_ONE && settings.list.content == closed + tall_lines);
         settings_toggle(fold_row);
-        check("settings fold: with reduced motion they shut at once", settings_fold_at[fold_row] == 0 && settings_sub_count == 0 && settings.list.content == closed);
+        check("settings fold: with reduced motion they shut at once", settings_fold_reveal(fold_row) == 0 && settings_sub_count == 0 && settings.list.content == closed);
         ui_kit.motion = 0;
 
         // An option with an error, and one with none: the empty state is unchanged.
@@ -897,7 +895,7 @@ b32 main()
                                                            "[Moonwater] + neighbour     -77 dBm #... WPA3-SAE 2.4GHz 1\n[Moonwater]   office\n";
 
                                 memory_copy(settings_large->said, said, sizeof(said) - 1);
-                                settings.said_length = sizeof(said) - 1;
+                                settings.runner.length = sizeof(said) - 1;
                                 settings.feed_list = 0;
                                 settings_feed_read(false, false);
                         }

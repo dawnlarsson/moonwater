@@ -438,22 +438,34 @@ static char (address_to settings_links_open)[SETTINGS_ITEM_LABEL];
 static positive settings_links_open_room;
 static unsigned char settings_link_global_grants = 0x0fu;
 
-/* The folds are the kit's (ui_list_fold): it keeps each row's open state and its share, by a row id below UI_LIST_FOLD_MOST. Settings
-   maps its rows to those keys: a row by its id, a drive by SETTINGS_FOLD_DRIVE_AT + its index, a link by SETTINGS_FOLD_LINK_AT + its index. */
+/* The folds are the kit's (ui_list_fold): it keeps a key's open state and share, below UI_LIST_FOLD_MOST. A fold's share is applied by the
+   kit to the row whose id is the key, so Settings' folds are keys that no row has: the lines under a row (its children) fold on the key of the
+   row, and the row keeps its own height. A row's key is SETTINGS_FOLD_ROW_AT + its id, a drive's SETTINGS_FOLD_DRIVE_AT + its index, a link's
+   SETTINGS_FOLD_LINK_AT + its index (the first 64 of each). */
 static int settings_domain_of(int id, int address_to offset);
-#define SETTINGS_FOLD_DRIVE_AT SETTINGS_ANY
-#define SETTINGS_FOLD_LINK_AT (SETTINGS_ANY + 256)
-_Static_assert(SETTINGS_FOLD_LINK_AT + 256 <= UI_LIST_FOLD_MOST, "the fold keys of drives and links fit the list's folds");
+#define SETTINGS_FOLD_ROW_AT 600
+#define SETTINGS_FOLD_DRIVE_AT (SETTINGS_FOLD_ROW_AT + SETTINGS_ANY)
+#define SETTINGS_FOLD_LINK_AT (SETTINGS_FOLD_DRIVE_AT + 64)
+_Static_assert(SETTINGS_ANY + 128 <= SETTINGS_FOLD_ROW_AT, "the command rows' ids stay below the fold keys");
+_Static_assert(SETTINGS_FOLD_LINK_AT + 64 <= UI_LIST_FOLD_MOST, "the fold keys fit the list's folds");
 
 static int settings_fold_key(int row);
 static b32 settings_exp_get(int row) { int key = settings_fold_key(row); return key >= 0 && ui_list_folded(&settings.list, key); }
-// A row's share of its fold (the kit's, which animates it): children show while it is above 0, and a row that is not folded by the kit follows its open state.
+// A row's share of its fold (the kit's, which animates it), or its open state where the kit has no share yet.
 static b64 settings_fold_reveal(int row)
 {
         int key = settings_fold_key(row);
         b64 share = key >= 0 ? ui_list_fold_share(&settings.list, key) : -1;
         return share >= 0 ? share : settings_exp_get(row) ? UI_ONE : 0;
 }
+// The chevron's turn while the fold moves (ui_row.turn), or -1 where the kit does not fold the row.
+static b64 settings_fold_turn(int row)
+{
+        int key = settings_fold_key(row);
+        return key >= 0 ? ui_list_fold_share(&settings.list, key) : -1;
+}
+// The lines under a row are listed while the row is open or its lines are still folding shut.
+static b32 settings_lines_listed(int row) { return settings_exp_get(row) || settings_fold_reveal(row) > 0; }
 
 static b32 settings_key_of(int row, char address_to key, positive room)
 {
@@ -642,7 +654,7 @@ static int settings_sub_rows(int row, int count)
         char key[WINDOWS_ISSUE_KEY], text[SETTINGS_SUB_TEXT];
         const struct settings_row address_to which = row < SETTINGS_ANY ? &settings_rows[row] : null;
         int section;
-        if (!settings_key_of(row, key, sizeof(key)) || (!settings_always_open(row) && (settings_fold_reveal(row) <= 0 || !settings_expander(row))))
+        if (!settings_key_of(row, key, sizeof(key)) || (!settings_always_open(row) && (!settings_lines_listed(row) || !settings_expander(row))))
                 return count;
         settings_sub_owner = row, section = settings_section_start(row);
         if (string_equals((string_address)key, (string_address)WINDOWS_KEY_GPU) && which && which->kind == SETTINGS_SWITCH)
@@ -730,11 +742,11 @@ static int settings_fold_key(int row)
 {
         int offset, list, at;
         if (row >= 0 && row < SETTINGS_ANY)
-                return row;
+                return SETTINGS_FOLD_ROW_AT + row;
         if (settings_domain_of(row, &offset) != SETTINGS_DOM_LIST)
                 return -1;
         list = offset / SETTINGS_LIST_STEP, at = offset % SETTINGS_LIST_STEP;
-        if (at >= 256)
+        if (at >= 64)
                 return -1;
         return list == 2 ? SETTINGS_FOLD_DRIVE_AT + at : list == 3 ? SETTINGS_FOLD_LINK_AT + at : -1;
 }
@@ -2379,7 +2391,7 @@ static int settings_drive_rows(int row, int count)
         if ((next = settings_sub_add(section, false, null, "", 0, SETTINGS_SUB_PARTITIONS, 0, count)) == count)
                 return count;
         count = next;
-        if (settings_fold_reveal(row) <= 0)
+        if (!settings_lines_listed(row))
                 return count;
         for (int at = 0; at <= (int)item->segment_count + 1; at++)
         {
@@ -2450,7 +2462,7 @@ static int settings_link_rows(int row, int count)
 {
         const struct settings_item address_to item = settings_item(row);
         int section = settings_section_start(row), next;
-        if (!item || item->kind != SETTINGS_LINK || (settings_fold_reveal(row) <= 0))
+        if (!item || item->kind != SETTINGS_LINK || (!settings_lines_listed(row)))
                 return count;
         settings_sub_owner = row;
         if (item->where == 1)
@@ -3983,12 +3995,12 @@ static fn settings_describe_item(int id, const struct settings_item address_to i
         {
                 row->mark = (item->flags & SETTINGS_ITEM_JOINED) != 0, row->mark_ink = ui_role(UI_SUCCESS);
                 if (item->where == 0)
-                        row->expander = settings_exp_get(id) ? UI_ROW_EXPANDER_OPEN : UI_ROW_EXPANDER_SHUT,
+                        row->turn = settings_fold_turn(id), row->expander = settings_exp_get(id) ? UI_ROW_EXPANDER_OPEN : UI_ROW_EXPANDER_SHUT,
                         row->note = item->detail[0] ? item->detail : null, row->value = item->access[0] ? item->access : null;
                 else
                 {
                         const char address_to st = item->state[0] ? item->state : item->detail[0] ? item->detail : null;
-                        row->expander = settings_exp_get(id) ? UI_ROW_EXPANDER_OPEN : UI_ROW_EXPANDER_SHUT,
+                        row->turn = settings_fold_turn(id), row->expander = settings_exp_get(id) ? UI_ROW_EXPANDER_OPEN : UI_ROW_EXPANDER_SHUT,
                         row->columns = settings_columns_for(3), row->cells[1] = item->access[0] ? item->access : null,
                         row->cells[2] = st, row->value = st ? st : row->cells[1];
                 }
@@ -4016,7 +4028,7 @@ static fn settings_describe(int id, struct ui_row address_to row)
         row->section = settings_section_start(id), header = settings_header(id);
         row->header = header && !header[0] ? null : language_of(header), row->label = settings_label_window(id);
         if (w)
-                row->about = language_of(w->about), settings_badge(id, row), row->expander = settings_expander(id);
+                row->about = language_of(w->about), settings_badge(id, row), row->expander = settings_expander(id), row->turn = settings_fold_turn(id);
         if (id == settings_editing())
         {
                 const struct settings_generic address_to g = settings_generic_of(id);
