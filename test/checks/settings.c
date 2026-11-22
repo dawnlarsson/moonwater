@@ -7648,7 +7648,6 @@ static fn settings_least_check(void)
                                 for (int at = 0; at < settings.list.count; at++)
                                         if (!settings_least_row(settings.list.id[at]))
                                         {
-                                                string_format(log, "  TRACE least row %b label %s width %b\n", (bipolar)settings.list.id[at], settings_label(settings.list.id[at]), (bipolar)settings.width); log_flush();
                                                 if (rows)
                                                         string_format(log, "  settings least: at scale %b, group %b, row %b overlaps or runs past its end\n", (bipolar)scale,
                                                                       (bipolar)group, (bipolar)settings.list.id[at]);
