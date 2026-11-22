@@ -2540,12 +2540,16 @@ static void gpu_held_rows(void)
         compositor_gpu_state.cool_until = clock_monotonic_nanoseconds() + 1000000000ull;
         compositor_gpu_list_render_bytes(0, (unsigned char *)list, sizeof(list), pixels, 4, 4, 4, damage);
         check("gpu held: a list is not drawn on the card while the card cools after a hang", compositor_list_why == COMPOSITOR_LIST_CARD);
-        compositor_gpu_state.cool_until = 0, compositor_gpu_state.restart_due = 1;
+        // A list looks for a due restart and a lost card first (compositor_gpu_restart_check, compositor_gpu_lost_check): a restart waits for a job given up
+        // on that may still run, and while it waits the list is not the card's; a lost card is started again at once, and the list is then looked at.
+        compositor_gpu_state.cool_until = 0, compositor_gpu_state.restart_due = 1, gpu.pending = 1ull << 40, gpu_fake_busy = 1;
         compositor_gpu_list_render_bytes(0, (unsigned char *)list, sizeof(list), pixels, 4, 4, 4, damage);
-        check("gpu held: nor while a restart is due (the context and the maps are the old ones)", compositor_list_why == COMPOSITOR_LIST_CARD);
-        compositor_gpu_state.restart_due = 0, gpu_lost = 1;
+        check("gpu held: nor while a restart is due and waits for a job that may still run (the context and the maps are the old ones)",
+              compositor_list_why == COMPOSITOR_LIST_CARD && compositor_gpu_state.restart_due);
+        gpu_fake_busy = 0, gpu.pending = 0, compositor_gpu_state.restart_due = 0, gpu_lost = 1, recovered = gpu_recovered;
         compositor_gpu_list_render_bytes(0, (unsigned char *)list, sizeof(list), pixels, 4, 4, 4, damage);
-        check("gpu held: nor after a submit said the card lost its state", compositor_list_why == COMPOSITOR_LIST_CARD);
+        check("gpu held: after a submit said the card lost its state the card is started again before the list is looked at (an empty one is not open)",
+              !gpu_lost && gpu_recovered == recovered + 1 && compositor_list_why == COMPOSITOR_LIST_OPEN && gpu.fd >= 0);
         gpu_lost = 0;
         compositor_gpu_list_render_bytes(0, (unsigned char *)list, sizeof(list), pixels, 4, 4, 4, damage);
         check("gpu held: with nothing held the list is looked at (an empty list is refused as not open)", compositor_list_why == COMPOSITOR_LIST_OPEN);
