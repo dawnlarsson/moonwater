@@ -1050,12 +1050,9 @@ def test_canvas_spaces_invariants():
           "{700, 750, &gpu_i915_gen9_set}" in gpu_c and
           "{800, 801, &gpu_i915_gen9_set}" in gpu_c and
           "{900, 901, &gpu_i915_gen9_set}" in gpu_c and
-          "{1100, 1101, &gpu_i915_gen9_set}" in gpu_c and
-          "0x70020004u" in gpu_c and "0x70070000u" in gpu_c and
-          "GPU_XE_VM_BIND == 0x40886445u" in gpu_c and "GPU_XE_EXEC == 0x40386449u" in gpu_c and
-          "gpu_xe_submit" in gpu_c and "gpu_xe_wait" in gpu_c and "gpu_xe_fence" in gpu_c)
-    check("GPU 2012-2026: hybrid-GPU priority order (amdgpu > i915 > xe > nouveau) & pick==2 PRIME settle guard",
-          "&gpu_amd, &gpu_i915_row, &gpu_xe_row, &gpu_nouveau_row" in gpu_c and
+          "{1100, 1101, &gpu_i915_gen9_set}" in gpu_c)
+    check("GPU 2012-2026: hybrid-GPU priority order (amdgpu > i915 > nouveau) & pick==2 PRIME settle guard",
+          "&gpu_amd, &gpu_i915_row, &gpu_nouveau_row" in gpu_c and
           "gpu_req.pick == 2" in gpu_host and
           "COMPOSITOR_GPU_WHY_OUTPUT" in gpu_host)
     compose_c = read_text("src/canvas/compositor/compose.c")
@@ -1255,8 +1252,6 @@ def test_hardening_66_bug_families():
           "words[base + 7] = cols;" in gpu_c and
           "words[base + 10] = 0xffffu;" in gpu_c and
           "if (gpu.family >= 2000)\n                return 4u;" in gpu_c and
-          "#define GPU_XE_USERPTRS 264" in gpu_c and
-          "gpu_xe.done = gpu_xe.sequence;" in gpu_c and
           "(px1 - px0) > 4096u" in gpu_c)
 
     check("Family 6: AMD identify preserves live state & checks available_rings, userptr retries EINTR/EAGAIN, image/nv12 tests use gpu_patient",
@@ -1353,13 +1348,6 @@ def test_hardening_66_bug_families():
           "if (gpu_lost || !gpu.at || !gpu_last_job || now - gpu_last_job < GPU_WAKE_IDLE || !gpu_idle())" in gpu_c and
           "kept_hold = gpu_handed_hold, gpu_handed_hold = 1;" in gpu_c)
 
-    check("Family 8: Xe discrete VRAM 64KiB min_align, syncobj in-flight guard & no pre-exec reset, 64-entry query buffers",
-          "gpu_xe.min_align = nparams >= 3 && cfg[3] >= 4096u ? (unsigned int)cfg[3] : 4096u;" in gpu_c and
-          "p64 cfg[64] = {0};" in gpu_c and
-          "struct gpu_xe_engine engines[64];" in gpu_c and
-          "if (gpu_xe.jobs[slot].sequence > gpu_xe.done)\n                return 11u;" in gpu_c and
-          "GPU_DRM_SYNCOBJ_RESET" not in gpu_c[gpu_c.find("static unsigned int gpu_xe_submit("):gpu_c.find("static int gpu_xe_wait(")] and
-          "gpu_backend == &gpu_xe_row && gpu_xe.has_vram" in gpu_c)
 
     check("Family 8: Slow page-flip SCHED_FIFO spin fix, dead-GPU recovery guard, priority-inversion & explicit-sync/cursor-lock fixes",
           "if (compositor.flip_pending)\n        {\n                positive waiting = compositor_flip_wait(now);\n                compositor_soon(&until, waiting ? waiting : compositor.flip_issued + COMPOSITOR_FLIP_LOST);\n        }" in comp_c and
