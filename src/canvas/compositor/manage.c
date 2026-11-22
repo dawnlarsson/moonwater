@@ -293,7 +293,7 @@ static int compositor_band_test(int x, int y, int reach_ok)
                 compositor_output_rect(compositor.band_at, &sx, &sy, &sw, &sh);
                 if (x < sx || x >= sx + sw || y < sy || y >= sy + sh)
                         continue;
-                strip = taskbar_thick(scale) + reach + 24 * scale / 100 + compositor_mc_push_for(compositor.band_at);
+                strip = taskbar_thick(scale) + reach + 24 * scale / 100;
                 if ((pos == TASKBAR_BOTTOM && y < sy + sh - strip) || (pos == TASKBAR_TOP && y >= sy + strip) ||
                     (pos == TASKBAR_LEFT && x >= sx + strip) || (pos == TASKBAR_RIGHT && x < sx + sw - strip))
                         continue;
@@ -327,7 +327,7 @@ static int compositor_under(int x, int y, int *tab)
         const address_any columns[4] = {compositor.x, compositor.y, compositor.w, compositor.h};
         positive reach, count = compositor.stacked;
 
-        if (compositor_mc_point(x, y))
+        if (compositor_scenes_point(x, y))
         {
                 *tab = TASKBAR_HIT_NONE;
                 return COMPOSITOR_NONE;
@@ -2277,8 +2277,7 @@ static void compositor_leave(int row)
                         }
                 compositor.assist_count = keep;
         }
-        if (compositor.mc.press_row == row)
-                compositor.mc.press_row = compositor.mc.drop_target = COMPOSITOR_NONE, compositor.mc.dragging = 0, compositor.mc.dirty = 1;
+        compositor_scenes_let_go(row);
         if (compositor.keys_to == row)
                 compositor.keys_to = COMPOSITOR_NONE, memory_zero(compositor.keys_down, sizeof(compositor.keys_down));
         if (compositor.hover == row)
@@ -2923,7 +2922,6 @@ static unsigned int compositor_space_add_id(int screen, int activate)
                 compositor_space_activate(screen, sp->id);
         else
                 compositor_tabs_changed();
-        compositor.mc.dirty = 1;
         return sp->id;
 }
 
@@ -3187,7 +3185,7 @@ static void compositor_spaces_on_outputs_changed(const char (*was_names)[WINDOWS
                         compositor_wl_settle(row);
         if (compositor.focus >= 0 && !compositor_visible(compositor.focus))
                 compositor_refocus();
-        compositor_mc_close();
+        compositor_scenes_shut();
 }
 
 /* ---- on-screen keyboard ---- */

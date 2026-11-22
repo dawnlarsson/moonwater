@@ -1081,8 +1081,8 @@ static int taskbar_anchor(const struct taskbar_view *view, int which, int *x, in
 static int taskbar_volume_set(int present, int percent, int muted, int flash);
 static int taskbar_mic_set(int present, int muted);
 static int taskbar_notices_set(int present, unsigned int severity);
-static int taskbar_mc_tick(int open, int animate, int depth, int *moving);
-static void taskbar_mc_draw(const struct taskbar_view *view, unsigned int *pixels, int buf_w, int buf_h, int screen, int scale);
+static int taskbar_scenes_title(const struct taskbar_view *view, unsigned int *pixels, int width, int height, const char *title, unsigned int ink,
+                                unsigned int ground);
 
 
 // The panel's cells and what a press on one does:

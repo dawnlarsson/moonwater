@@ -148,17 +148,10 @@ static int taskbar_edge_px(const struct taskbar_view *view)
         return edge < least ? least : edge;
 }
 
-#ifdef COMPOSITOR_ROWS
-#define taskbar_mc_push_px() compositor_mc_push_for(compositor.band_at)
-#else
-#define taskbar_mc_push_px() 0
-#endif
-
 static int taskbar_off(const struct taskbar_view *view, b64 shift)
 {
         int thick = taskbar_thick(view->scale), in = taskbar_edge_px(view);
         int off = (int)(((long long)(thick + in) * (long long)shift) / (long long)UI_ONE) - in;
-        off -= taskbar_mc_push_px();
         return view->position == TASKBAR_BOTTOM || view->position == TASKBAR_RIGHT ? off : -off;
 }
 
@@ -624,7 +617,7 @@ struct taskbar_key
         unsigned int marks;
         int tray_gen;
         unsigned int spaces_gen;
-        int mc_push;
+        int spare; // none: the key stays whole words, with no padding
         unsigned int apps_gen, pictures; // the registry read and the apps' pictures made: a task with a picture is laid out as one
 };
 _Static_assert(sizeof(struct taskbar_key) == 8 + 26 * 4, "a key is compared as bytes, so it has no padding");
@@ -655,7 +648,7 @@ static struct ui_tree address_to taskbar_tree(const struct taskbar_view *view)
                                       taskbar.order[0] << 12 | taskbar.order[1] << 14 | taskbar.order[2] << 16,
                                   taskbar.editing | taskbar.clock_tray << 1 | taskbar.moon_ink << 2 | taskbar.clock_tab << 3 | taskbar.clock_none << 4 |
                                       taskbar.separate << 5 | (taskbar.edge_in + 64) << 6 | taskbar.clock_chars << 14, 0,
-                                  {taskbar_strip_from[0], taskbar_strip_from[1]}, taskbar_strip_follow, 0, taskbar_tray_items_gen(), taskbar_spaces_gen(), taskbar_mc_push_px(),
+                                  {taskbar_strip_from[0], taskbar_strip_from[1]}, taskbar_strip_follow, 0, taskbar_tray_items_gen(), taskbar_spaces_gen(), 0,
                                   ui_apps.generation, ui_apps_pictures_made};
 
 #define TASKBAR_CELL(slot, shown, mark, paint) key.cells = key.cells << 1 | ((shown) != 0);
@@ -2042,168 +2035,29 @@ static int taskbar_menu_rect(int r[4]) { r[0] = taskbar_menu.x, r[1] = taskbar_m
 static int taskbar_menu_redraw(void) { return taskbar_menu.dirty; }
 static void taskbar_menu_shut(void) { taskbar_menu.open = 0; }
 
-/* Mission Control drawer slide tween and canvas painting (declared in ui.c, driven by compositor/glass.c). */
-#define TASKBAR_MC_SLIDE_MS 220
-
-static struct ui_tween taskbar_mc_slide;
-
-static int taskbar_mc_tick(int open, int animate, int depth, int *moving)
+/* The Scenes overview's title of the window under the hand (declared in ui.c, drawn by compositor/scenes.c): the title in the band's face,
+   centred and fitted (its ellipsis past width), on the ground, height high, into pixels whose pitch is width. Answers the width of the
+   plate that holds it (the title's and half the height each side, width at the most), which the overview draws round at half its height;
+   0 with no face or no title. */
+static int taskbar_scenes_title(const struct taskbar_view *view, unsigned int *pixels, int width, int height, const char *title, unsigned int ink,
+                                unsigned int ground)
 {
-        b32 motion = ui_kit.motion, live = 0;
-        b64 want = open ? UI_ONE : 0, share;
-        int push;
-
-        ui_kit.now = ui_kit_clock(), ui_kit.motion = !animate;
-        if (!taskbar_mc_slide.placed)
-                ui_tween_put(&taskbar_mc_slide, 0, UI_TWEEN_NUMBER);
-        if (want != taskbar_tween_goal(&taskbar_mc_slide))
-                ui_kit_number_to(&taskbar_mc_slide, want, TASKBAR_MC_SLIDE_MS, &ui_ease);
-        share = ui_tween_at(&taskbar_mc_slide, &live);
-        if (moving)
-                *moving = live || taskbar_tween_moving(&taskbar_mc_slide, ui_kit.now);
-        ui_kit.motion = motion;
-        if (share < 0)
-                share = 0;
-        if (share > UI_ONE)
-                share = UI_ONE;
-        push = (int)(((long long)depth * (long long)share + UI_ONE / 2) / (long long)UI_ONE);
-        if (!open && !live)
-                push = 0;
-        return push;
-}
-
-static void taskbar_mc_draw(const struct taskbar_view *view, unsigned int *pixels, int buf_w, int buf_h, int screen, int scale)
-{
-#ifdef COMPOSITOR_ROWS
         struct ui ui;
-        unsigned int pos = view->position;
-        unsigned int base = compositor_tab_target(0) & 0xffffffu;
-        int light = window_light(base);
-        unsigned int accent = taskbar_accent() & 0xffffffu;
-        unsigned int drawer_bg = light ? window_mix(base, 0xe8e8f0u, 190) : window_mix(base, 0x10131au, 210);
-        unsigned int divider = window_mix(drawer_bg, window_contrast(drawer_bg) & 0xffffffu, 44);
-        unsigned int ink = window_contrast(drawer_bg);
-        int active_idx = compositor_spaces_active_index(screen);
-        int radius = 6 * scale / 100;
-        int label_h = (pos == TASKBAR_LEFT || pos == TASKBAR_RIGHT ? 18 : 20) * scale / 100;
-        int border = 2 * scale / 100;
+        const font_face *faces[1];
+        int plate, pad = height / 2;
 
-        if (!pixels || buf_w <= 0 || buf_h <= 0)
-                return;
-        if (!accent)
-                accent = 0x5894f6u;
-        if (radius < 4)
-                radius = 4;
-        if (border < 2)
-                border = 2;
+        if (!pixels || width <= 0 || height <= 0 || !title || !title[0] || !view->engine || !view->face)
+                return 0;
+        faces[0] = view->face;
+        plate = (int)(font_extent(view->engine, faces, 1, (const p8 address_to)title, string_length((string_address)title), (p32)(height * 11 / 20) << 6, 0) >> 16) +
+                2 * pad;
+        plate = plate > width ? width : plate;
         memory_zero(&ui, sizeof(ui));
-        ui.pixels = pixels, ui.pitch = (unsigned long)buf_w;
-        ui.width = buf_w, ui.height = buf_h, ui.bottom = buf_h;
-        ui.scale = scale, ui.engine = view->engine, ui.regular = view->face;
-        ui_fill(&ui, 0, 0, buf_w, buf_h, 0xff000000u | drawer_bg);
-        if (pos == TASKBAR_TOP)
-                ui_fill(&ui, 0, buf_h - 1, buf_w, 1, 0xff000000u | divider);
-        else if (pos == TASKBAR_LEFT)
-                ui_fill(&ui, buf_w - 1, 0, 1, buf_h, 0xff000000u | divider);
-        else if (pos == TASKBAR_RIGHT)
-                ui_fill(&ui, 0, 0, 1, buf_h, 0xff000000u | divider);
-        else
-                ui_fill(&ui, 0, 0, buf_w, 1, 0xff000000u | divider);
-
-        for (int ci = 0; ci < compositor.mc.card_count; ci++)
-        {
-                const struct compositor_mc_card *c = &compositor.mc.cards[ci];
-                int is_active = !c->is_add && c->space_idx == active_idx;
-                int is_hover = compositor.mc.hover_card == ci;
-                int is_drop = compositor.mc.drop_target == ci;
-                int is_fs = !c->is_add && compositor_spaces_kind_at(screen, c->space_idx) == COMPOSITOR_SPACE_FULLSCREEN;
-                unsigned int frame_col, card_bg;
-
-                if (is_drop || is_active)
-                        frame_col = accent;
-                else if (is_hover)
-                        frame_col = window_mix(drawer_bg, ink & 0xffffffu, 110);
-                else
-                        frame_col = window_mix(drawer_bg, ink & 0xffffffu, 48);
-
-                if (c->is_add)
-                        card_bg = is_drop ? window_mix(drawer_bg, accent, 80) : is_hover ? window_mix(drawer_bg, ink & 0xffffffu, 36) : window_mix(drawer_bg, ink & 0xffffffu, 18);
-                else if (is_fs)
-                        card_bg = is_drop ? window_mix(0x141720u, accent, 64) : (light ? 0x262a34u : 0x0c0e14u);
-                else
-                        card_bg = is_drop ? window_mix(drawer_bg, accent, 72) : window_mix(light ? 0xd8dce6u : 0x1d222eu, accent, is_active ? 32 : 14);
-
-                ui_round(&ui, c->x, c->y, c->w, c->h, radius, 0xff000000u | frame_col);
-                {
-                        int b = (is_active || is_drop) ? border : 1;
-                        if (c->w > 2 * b && c->h > 2 * b)
-                                ui_round(&ui, c->x + b, c->y + b, c->w - 2 * b, c->h - 2 * b, radius > b ? radius - b : 2, 0xff000000u | card_bg);
-                }
-
-                if (c->is_add)
-                {
-                        if (ui.engine && ui.regular)
-                                ui_cell_line(&ui, c->x, c->y, c->w, c->h, "+", is_drop ? (0xff000000u | window_contrast(card_bg)) : ink, card_bg);
-                        continue;
-                }
-
-                for (int ti = 0; ti < compositor.mc.thumb_count; ti++)
-                {
-                        const struct compositor_mc_thumb *tm = &compositor.mc.thumbs[ti];
-                        int focused = tm->row == compositor.focus;
-                        int dragged_now = (compositor.mc.dragging && tm->row == compositor.mc.press_row) ||
-                                          (compositor.drag >= 0 && tm->row == compositor.drag);
-                        unsigned int win_bg = focused ? window_mix(light ? 0xf6f7fau : 0x303748u, accent, 56)
-                                                      : (light ? 0xebedf2u : 0x282e3cu);
-                        unsigned int win_edge = focused ? accent : window_mix(win_bg, window_contrast(win_bg) & 0xffffffu, 72);
-                        unsigned int bar_bg = window_mix(win_bg, focused ? accent : (window_contrast(win_bg) & 0xffffffu), focused ? 80 : 28);
-                        int bar_h = 4 * scale / 100;
-
-                        if (tm->card_idx != ci)
-                                continue;
-                        if (dragged_now)
-                                win_bg = window_mix(card_bg, accent, 48), win_edge = accent;
-                        if (bar_h < 2)
-                                bar_h = 2;
-                        if (bar_h > tm->h / 3)
-                                bar_h = tm->h / 3;
-                        ui_round(&ui, tm->x, tm->y, tm->w, tm->h, 2, 0xff000000u | win_edge);
-                        if (tm->w > 2 && tm->h > 2)
-                                ui_fill(&ui, tm->x + 1, tm->y + 1, tm->w - 2, tm->h - 2, 0xff000000u | win_bg);
-                        if (tm->w > 2 && bar_h > 0)
-                                ui_fill(&ui, tm->x + 1, tm->y + 1, tm->w - 2, bar_h, 0xff000000u | bar_bg);
-                        if (ui.engine && ui.regular && tm->w >= 28 * scale / 100 && tm->h >= 16 * scale / 100 && compositor.title[tm->row][0])
-                                ui_cell_line(&ui, tm->x + 2, tm->y + bar_h + 1, tm->w - 4, tm->h - bar_h - 2,
-                                             compositor.title[tm->row], window_contrast(win_bg), win_bg);
-                }
-
-                if (c->removable)
-                {
-                        int close_hot = compositor.mc.hover_close == ci;
-                        unsigned int cbg = close_hot ? 0xd94848u : window_mix(card_bg, window_contrast(card_bg) & 0xffffffu, is_hover ? 52 : 28);
-                        ui_round(&ui, c->close_x, c->close_y, c->close_w, c->close_h, c->close_w / 2, 0xff000000u | cbg);
-                        if (ui.engine && ui.regular)
-                                ui_cell_line(&ui, c->close_x, c->close_y, c->close_w, c->close_h, "\xc3\x97",
-                                             close_hot ? 0xffffffffu : window_contrast(cbg), cbg);
-                }
-
-                if (ui.engine && ui.regular)
-                {
-                        char label[8] = {0};
-                        unsigned int l_ink = is_active || is_drop ? (0xff000000u | accent) : ink;
-
-                        if (is_fs)
-                                label[0] = 'F';
-                        else if (c->space_idx + 1 < 10)
-                                label[0] = (char)('1' + c->space_idx);
-                        else
-                                label[0] = (char)('0' + (c->space_idx + 1) / 10), label[1] = (char)('0' + (c->space_idx + 1) % 10);
-                        ui_cell_line(&ui, c->x, c->y + c->h + 2, c->w, label_h - 2, label, l_ink, drawer_bg);
-                }
-        }
-#else
-        (void)view, (void)pixels, (void)buf_w, (void)buf_h, (void)screen, (void)scale;
-#endif
+        ui.pixels = pixels, ui.pitch = (unsigned long)width, ui.width = plate, ui.height = height, ui.bottom = height;
+        ui.scale = view->scale, ui.engine = view->engine, ui.regular = view->face;
+        ui_fill(&ui, 0, 0, plate, height, 0xff000000u | ground);
+        ui_cell_line(&ui, pad, 0, plate - 2 * pad, height, title, 0xff000000u | ink, 0xff000000u | ground);
+        return plate;
 }
 
 /* Force stop: process-tree discovery and SIGSTOP/SIGKILL sweep. */

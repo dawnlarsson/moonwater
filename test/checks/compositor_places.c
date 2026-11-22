@@ -1184,3 +1184,135 @@ static void check_compositor_scenes_motion(void)
     compositor_scenes_tick(t0 + 9500 * UI_MS);
     check("scenes motion: and shut at once", !compositor_scenes_shown());
 }
+
+/*
+        C8 Scenes, step 6: the overview in the drawer's place. Super+Up (the Space chords' Up) opens and shuts it; the window under the hand
+        has its ring lit in the accent and its title under it; a Scene card under the hand has its close button when the Scene can go, and
+        a click on it takes the Scene away; a window dropped on "+" is a Scene of its own; a window's miniature on another Scene's card is
+        dragged to a card too; a window dragged to the band opens the overview, stays where the hand has it, and let go over a card goes to
+        that Scene, the overview shut after it. While it is drawn a point on its screen is the overview's.
+*/
+static void check_compositor_scenes_more(void)
+{
+    const positive t0 = 2000000000ull;
+    unsigned int count, scenes, second;
+    int r1[4], lit = 0, titled = -1, x, y, side;
+
+    if (!layout_table_map(512))
+    {
+        check("scenes more: the table is mapped", false);
+        return;
+    }
+    layout_setup(512, 1);
+    compositor.table->motion = 1; // reduced motion: the overview is all there at once
+    compositor.outputs = 1;
+    compositor.screen[0][0] = 0, compositor.screen[0][1] = 0, compositor.screen[0][2] = 512, compositor.screen[0][3] = 512;
+    compositor_spaces_ensure();
+    layout_show(1, 40, 150, 400, 240);
+    layout_show(2, 260, 200, 120, 80);
+    layout_show(3, 100, 100, 160, 100);
+    compositor.asks[1] = compositor.asks[2] = compositor.asks[3] = 0;
+    compositor_space_assign_new(1, 0);
+    compositor_space_assign_new(2, 0);
+    compositor_space_assign_new(3, 0);
+    second = compositor_space_add_id(0, 0);
+    compositor_space_move_row(3, second, 0);
+    memory_copy(compositor.title[1], "Notes", 6);
+
+    compositor_key(0, CK_KEY_UP, 1, 0), compositor_key(0, CK_KEY_UP, 0, 0);
+    check("scenes more: Super+Up opens the overview", compositor.scenes.open);
+    check("scenes more: while it is drawn a point on its screen is the overview's, so no window under it takes it",
+          compositor_scenes_point(250, 250) && compositor_under(250, 250, &(int){0}) == COMPOSITOR_NONE);
+
+    scenes_rect_of(1, r1);
+    scenes_at(r1[0] + r1[2] / 2, r1[1] + r1[3] / 2);
+    compositor_scenes_tick(t0);
+    count = present_build_frames(scenes_frames, scenes_rows);
+    for (unsigned int k = 0; k < count; k++)
+    {
+        if (scenes_rows[k] == 1 && scenes_frames[k].x == r1[0] && scenes_frames[k].width == r1[2] && scenes_frames[k].lit == COMPOSITOR_LIT_ALL)
+            lit = scenes_frames[k].lit_ink == (compositor_ink_role(UI_ACCENT_BRIGHT) & 0xffffffu);
+        if (compositor_scenes_kept.title && scenes_frames[k].pixels >= compositor_scenes_kept.title &&
+            scenes_frames[k].pixels < compositor_scenes_kept.title + compositor_scenes_kept.title_bytes / 4)
+            titled = scenes_frames[k].y >= r1[1] + r1[3] && scenes_frames[k].radius == scenes_frames[k].height / 2;
+    }
+    check("scenes more: the window under the hand has its ring lit in the accent", lit);
+    {
+        struct taskbar_view view = compositor_taskbar_view_for(0);
+
+        if (view.engine && view.face)
+            check("scenes more: and its title on a round plate under it", titled == 1);
+        else
+            string_format(log, "  scenes more: the title's row NOT RUN, the band has no face here\n");
+    }
+
+    // The second Scene's card under the hand: its close button, and a click on it takes the Scene away.
+    {
+        const int *c = compositor.scenes.card[1];
+        int closed = 0;
+
+        scenes_at(c[0] + c[2] / 2, c[1] + c[3] / 2);
+        compositor_scenes_tick(t0 + 16 * UI_MS);
+        count = present_build_frames(scenes_frames, scenes_rows);
+        for (unsigned int k = 0; k < count; k++)
+            closed |= scenes_frames[k].close && scenes_frames[k].x == c[0] && scenes_frames[k].width == c[2];
+        check("scenes more: a Scene card under the hand that can be taken away has its close button", closed);
+        scenes = compositor_spaces_count_on(0);
+        if (compositor_scenes_card_close(1, &x, &y, &side))
+            scenes_click(x + side / 2, y + side / 2);
+        check("scenes more: a click on it takes the Scene away, its window to the one left, and the overview stays",
+              compositor_spaces_count_on(0) == scenes - 1 && compositor.scenes.open && compositor.row_space[3] == compositor_scenes_sid(0));
+    }
+
+    // A window dropped on "+" is a Scene of its own.
+    {
+        int b[4], plus[4];
+
+        scenes_rect_of(2, b);
+        memory_copy(plus, compositor.scenes.card[compositor.scenes.cards - 1], sizeof(plus));
+        scenes = compositor_spaces_count_on(0);
+        scenes_at(b[0] + b[2] / 2, b[1] + b[3] / 2);
+        compositor_button(COMPOSITOR_BTN_LEFT, 1);
+        scenes_at(plus[0] + plus[2] / 2, plus[1] + plus[3] / 2);
+        compositor_scenes_tick(t0 + 32 * UI_MS);
+        check("scenes more: a window pressed and moved past the slop is held, its miniature following the hand", compositor_scenes_held());
+        compositor_button(COMPOSITOR_BTN_LEFT, 0);
+        check("scenes more: a window dropped on \"+\" is a Scene of its own", compositor_spaces_count_on(0) == scenes + 1 &&
+              compositor.row_space[2] == compositor_scenes_sid(compositor_spaces_count_on(0) - 1) && !compositor_scenes_held());
+    }
+
+    // A window's miniature on another Scene's card, dragged to a card: row 2 is alone on the last Scene's card now.
+    {
+        int at = compositor_spaces_count_on(0) - 1, r[4] = {compositor.x[2], compositor.y[2], (int)compositor.w[2], (int)compositor.h[2]}, in[4], dest[4];
+
+        compositor_scenes_in_card(compositor.screen[0], compositor.scenes.card[at], r, in);
+        memory_copy(dest, compositor.scenes.card[0], sizeof(dest));
+        scenes_at(in[0] + in[2] / 2, in[1] + in[3] / 2);
+        compositor_button(COMPOSITOR_BTN_LEFT, 1);
+        scenes_at(dest[0] + dest[2] / 2, dest[1] + dest[3] / 2);
+        compositor_button(COMPOSITOR_BTN_LEFT, 0);
+        check("scenes more: a window's miniature on a Scene's card dragged to another card goes to that Scene", compositor.row_space[2] == compositor_scenes_sid(0));
+    }
+
+    compositor_key(0, CK_KEY_UP, 1, 0), compositor_key(0, CK_KEY_UP, 0, 0);
+    check("scenes more: Super+Up again shuts it", !compositor.scenes.open && !compositor_scenes_shown() && !compositor_scenes_point(250, 250));
+
+    // A window dragged to the band's edge: the overview opens, the window is where the hand has it, and let go on a card it goes there.
+    {
+        unsigned int target;
+        int c[4];
+
+        compositor_space_add_id(0, 0);
+        target = compositor_scenes_sid(1);
+        compositor.drag = 1;
+        compositor_scenes_drag_motion(1, 250, 510);
+        check("scenes more: a window dragged to the band's edge opens the overview, and the window is drawn where the hand has it",
+              compositor.scenes.open && !compositor_scenes_hides(1) && !compositor_scenes_member(1));
+        target = compositor_scenes_sid(1);
+        memory_copy(c, compositor.scenes.card[1], sizeof(c));
+        compositor_scenes_drag_motion(1, c[0] + c[2] / 2, c[1] + c[3] / 2);
+        check("scenes more: let go over a Scene card it goes to that Scene, and the overview the drag opened shuts",
+              compositor_scenes_drag_drop(1, c[0] + c[2] / 2, c[1] + c[3] / 2) && compositor.row_space[1] == target && !compositor.scenes.open);
+        compositor.drag = COMPOSITOR_NONE;
+    }
+}

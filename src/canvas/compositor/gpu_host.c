@@ -493,8 +493,6 @@ static int compositor_gpu_picture(const struct compositor_frame *f)
                         if (band && f->pixels >= band && f->pixels < band + had / 4)
                                 gpu_map(band, had), va = compositor_gpu_va(f);
                 }
-                if (!va && compositor.mc.pixels && f->pixels >= compositor.mc.pixels && f->pixels < compositor.mc.pixels + compositor.mc.bytes / 4)
-                        gpu_map(compositor.mc.pixels, compositor.mc.bytes), va = compositor_gpu_va(f);
                 return va || (gpu_map(f->pixels, bytes) && compositor_gpu_va(f));
         }
 }

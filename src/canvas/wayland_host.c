@@ -6084,7 +6084,7 @@ static void compositor_wl_wake(void)
         {
                 int keys = compositor_wl_key_row();
 
-                wayland_unhold_row(keys >= 0 && (compositor_mc_shown() || compositor_input_override_query(keys) == 2) ? keys : -1);
+                wayland_unhold_row(keys >= 0 && (compositor_scenes_shown() || compositor_input_override_query(keys) == 2) ? keys : -1);
         }
         if (stats.rows > 0 || stats.clients > 0)
         {

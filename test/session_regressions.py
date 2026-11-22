@@ -733,8 +733,8 @@ def test_compositor_and_xwm_invariants():
           "launcher.anchor.gap =" in ln_src and
           "anchor->button[1] - anchor->gap - anchor->screen[1]" in ln_src and
           "windows_place_set(table, row, &place);" in ln_src and
-          "compositor.mc.push = 0;" in inp and
-          "if (compositor.mc.open)\n                compositor_mc_close();" in inp)
+          "compositor.mc.push" not in inp and
+          "compositor_menu_close();\n        compositor_scenes_close();\n        compositor_popups_close(-1, -1);" in inp)
     wlh_src = read_text("src/canvas/wayland_host.c")
     check("GPU copy stalls eliminated: async gpu_blit_go for DMA-BUF & CPU lib.c SIMD for WB table/SHM copies",
           "static positive gpu_blit_go(" in read_text("src/canvas/gpu.c") and
@@ -1001,41 +1001,36 @@ def test_canvas_spaces_invariants():
           "int nav = mods4 == WINDOW_KEY_SUPER ||" in inp)
 
     glass = read_text("src/canvas/compositor/glass.c")
-    check("Mission Control: taskbar-edge-attached sliding drawer pushes taskbar inward via ui_tween & taskbar_key.mc_push",
-          "compositor_mc_push_for(" in glass and
-          "ui_kit_number_to(&taskbar_mc_slide" in tbar and
-          "off -= taskbar_mc_push_px();" in tbar and
-          "int mc_push;" in tbar and
-          "_Static_assert(sizeof(struct taskbar_key) == 8 + 24 * 4" in tbar)
-    check("Mission Control: visual Space preview cards, miniature windows, close button & '+' card for horizontal & vertical edges",
-          all(s in glass for s in (
-              "compositor_mc_layout(",
-              "compositor_mc_draw(",
-              "compositor_mc_frame(",
-              "TASKBAR_LEFT || pos == TASKBAR_RIGHT",
-              "c->removable",
-              "c->is_add",
-              "compositor.mc.thumbs",
-          )) and "taskbar_mc_draw(" in tbar)
-    check("Mission Control: drag-and-drop window sorting, taskbar-edge auto-open, shortcuts & 3/4-finger vertical swipe",
-          all(s in inp for s in (
-              "compositor_mc_toggle(compositor_space_current_screen())",
-              "compositor_mc_close()",
-              "compositor_mc_hand(code, down)",
-              "compositor_mc_motion(",
-              "compositor_mc_drag_motion(",
-              "compositor_mc_drag_drop(",
-              "compositor_abs64(pad->swipe_dy) >= thresh_y",
-              "compositor_mc_open(compositor_space_current_screen(), 0)",
+    scenes_c = read_text("src/canvas/compositor/scenes.c")
+    check("Scenes replaced the Mission Control drawer: no drawer, no band push, and its painter is the overview's title",
+          "compositor_mc_" not in glass and "compositor.mc." not in inp and "taskbar_mc_" not in tbar and
+          "int spare;" in tbar and "_Static_assert(sizeof(struct taskbar_key) == 8 + 26 * 4" in tbar and
+          "static int taskbar_scenes_title(" in tbar)
+    check("Scenes: Scene cards of the wallpaper's miniature and live windows, a close button on a card that can go, and the '+' card",
+          all(x in scenes_c for x in (
+              "compositor_scenes_wall_of(",
+              "compositor_scenes_card_close(",
+              "frames[at].close = 1;",
+              "The \"+\" card",
+              "compositor_scenes_put(",
           )))
-    check("Mission Control: direct-scanout fast path, pointer-unhold, single GPU map & input-leak guards",
-          "!compositor_mc_shown()" in pres and
-          "compositor_mc_frame(&frames[count])" in pres and
+    check("Scenes: window drops on a card, band-edge auto-open, the shortcuts, the Space tab and the 3/4-finger vertical swipe",
+          all(x in inp for x in (
+              "compositor_scenes_toggle(compositor_space_current_screen())",
+              "compositor_scenes_toggle(compositor.band_hit)",
+              "compositor_scenes_close()",
+              "compositor_scenes_drag_motion(",
+              "compositor_scenes_drag_drop(",
+              "compositor_abs64(pad->swipe_dy) >= thresh_y",
+              "compositor_scenes_open(compositor_space_current_screen())",
+          )))
+    check("Scenes: direct scanout off while shown, pointer-unhold, and the overview's points taken from the windows under it",
+          "!compositor_scenes_shown()" in pres and
+          "compositor_scenes_frames(frames, rows, count, room)" in pres and
           "compositor_space_add_id(" in manage and
-          "compositor_mc_shown() || compositor_input_override_query(keys) == 2" in read_text("src/canvas/wayland_host.c") and
-          "gpu_map(compositor.mc.pixels, compositor.mc.bytes)" in read_text("src/canvas/compositor/gpu_host.c") and
-          "if (compositor_mc_point(x, y))" in manage and
-          "compositor_mc_point(x, y) || compositor_band_hit(x, y)" in inp)
+          "compositor_scenes_shown() || compositor_input_override_query(keys) == 2" in read_text("src/canvas/wayland_host.c") and
+          "if (compositor_scenes_point(x, y))" in manage and
+          "compositor_scenes_point(x, y) || compositor_band_hit(x, y)" in inp)
 
     gpu_c = read_text("src/canvas/gpu.c")
     gpu_host = read_text("src/canvas/compositor/gpu_host.c")

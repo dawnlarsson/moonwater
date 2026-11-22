@@ -958,13 +958,11 @@ static void compositor_button_rect(int x, int y, int which)
         for (compositor.band_at = 0; compositor.table && compositor.band_at < compositor_bands(); compositor.band_at++)
         {
                 struct taskbar_view view = compositor_band_view();
-                int rect[4], saved_push;
+                int rect[4];
 
                 if (taskbar_hit_reach(&view, x, y, reach) != which)
                         continue;
-                saved_push = compositor.mc.push, compositor.mc.push = 0;
                 found = taskbar_anchor(&view, which, &rect[0], &rect[1], &rect[2], &rect[3]);
-                compositor.mc.push = saved_push;
                 if (!found)
                         continue;
                 compositor_table_button_set(rect[0], rect[1], rect[2], rect[3], view.position, (unsigned int)compositor.band_at);
@@ -973,8 +971,6 @@ static void compositor_button_rect(int x, int y, int which)
         // Fallback so stale popup/window coordinates never offset the launcher when invoked via Super or edge hit.
         if (!found && which == TASKBAR_LAUNCHER && compositor.table)
         {
-                int saved_push = compositor.mc.push;
-                compositor.mc.push = 0;
                 for (compositor.band_at = 0; compositor.band_at < compositor_bands(); compositor.band_at++)
                 {
                         struct taskbar_view view = compositor_band_view();
@@ -986,7 +982,6 @@ static void compositor_button_rect(int x, int y, int which)
                                 break;
                         }
                 }
-                compositor.mc.push = saved_push;
         }
         compositor.band_at = 0;
 }
@@ -1191,8 +1186,7 @@ static void compositor_menu_close(void);
 static void compositor_launcher_open(int x, int y)
 {
         compositor_menu_close();
-        if (compositor.mc.open)
-                compositor_mc_close();
+        compositor_scenes_close();
         compositor_popups_close(-1, -1);
         compositor.launcher_asked++;
         compositor_popup_trigger(null, "launcher_button", x, y, TASKBAR_LAUNCHER);
@@ -1440,9 +1434,9 @@ static int compositor_space_chord(unsigned int code, int value, unsigned int mod
         int screen_move = mods4 == (WINDOW_KEY_CONTROL | WINDOW_KEY_ALT | WINDOW_KEY_SUPER);
 
         if (nav && code == CK_KEY_UP)
-                return value == 1 ? compositor_mc_toggle(compositor_space_current_screen()) : (void)0, 1;
-        if (nav && code == CK_KEY_DOWN && compositor.mc.open)
-                return value == 1 ? compositor_mc_close() : (void)0, 1;
+                return value == 1 ? compositor_scenes_toggle(compositor_space_current_screen()) : (void)0, 1;
+        if (nav && code == CK_KEY_DOWN && compositor.scenes.open)
+                return value == 1 ? compositor_scenes_close() : (void)0, 1;
         if (nav && (code == CK_KEY_LEFT || code == CK_KEY_RIGHT))
                 return value == 1 ? compositor_space_step(compositor_space_current_screen(), code == CK_KEY_RIGHT ? 1 : -1) : (void)0, 1;
         if (mods4 != WINDOW_KEY_SUPER && nav && code >= 2 && code <= 10)
@@ -1511,8 +1505,7 @@ static void compositor_key(unsigned int at, unsigned int code, int value, positi
         }
         if (code == CK_KEY_ESC && value)
         {
-                if (compositor.drag >= 0 || compositor.resize >= 0) { if (value == 1) { compositor_hold_cancel(); if (compositor.mc.auto_opened) compositor_mc_close(); } return; }
-                if (compositor.mc.open) { if (value == 1) compositor_mc_close(); return; }
+                if (compositor.drag >= 0 || compositor.resize >= 0) { if (value == 1) { compositor_hold_cancel(); compositor_scenes_auto_close(); } return; }
                 if (compositor_dnd_escape(value))
                         return;
         }
@@ -1883,8 +1876,6 @@ static int compositor_band_hand(unsigned int code, int down)
                 if (down)
                         return compositor_menu_close(), 1;
         }
-        if (compositor_mc_hand(code, down))
-                return 1;
         if (!down && code == COMPOSITOR_BTN_LEFT && taskbar_globe_held())
                 return compositor_globe_release(x, y), 1;
         if (!down && code == COMPOSITOR_BTN_LEFT && !taskbar_editing())
@@ -1925,8 +1916,6 @@ static void compositor_motion(void)
         if (taskbar_menu_rect(rect))
                 taskbar_menu_hand(WINDOW_EVENT_MOTION, 0, 0, 0, compositor.pointer_x, compositor.pointer_y),
                 compositor_damage(rect[0], rect[1], rect[2], rect[3]);
-        if (compositor_mc_shown() && compositor.drag < 0)
-                compositor_mc_motion(compositor.pointer_x, compositor.pointer_y);
         held = compositor.resize < 0 && compositor.drag < 0 ? compositor.grab : COMPOSITOR_NONE;
         zone = compositor.resize >= 0 || compositor.drag >= 0 || under < 0 || held >= 0 ? 0
                : compositor_edge_zone(under, compositor.pointer_x, compositor.pointer_y);
@@ -1934,7 +1923,7 @@ static void compositor_motion(void)
         asked = of >= 0 ? compositor_asked_shape(of) : -1;
         compositor.cursor.shape = compositor.resize >= 0 ? compositor_cursor_by_edges[compositor.edges[compositor.resize] & 15]
                                   : compositor.drag >= 0 ? CP_ARROW
-                                  : compositor.mc.dragging ? CP_HAND
+                                  : compositor_scenes_held() ? CP_HAND
                                   : zone ? compositor_cursor_by_edges[zone & 15]
                                   : asked >= 0 ? (unsigned int)asked : CP_ARROW;
         if (compositor_dnd_active())
@@ -1958,7 +1947,7 @@ static void compositor_motion(void)
         if (compositor.resize >= 0) { compositor_cursor_move(); compositor_resize_move(); return; }
         if (compositor.drag >= 0)
         {
-                int row = compositor.drag, over_mc;
+                int row = compositor.drag, over_scenes;
 
                 compositor_cursor_move();
                 if (compositor.arranged[row] != COMPOSITOR_FLOATING)
@@ -1971,8 +1960,8 @@ static void compositor_motion(void)
                 compositor.drag_moved = 1;
                 compositor_damage_row(row);
                 compositor_place(row, compositor.pointer_x - compositor.drag_x, compositor.pointer_y - compositor.drag_y);
-                over_mc = compositor_mc_drag_motion(row, compositor.pointer_x, compositor.pointer_y);
-                compositor_damage_row(row), compositor_preview(over_mc ? COMPOSITOR_NONE : row);
+                over_scenes = compositor_scenes_drag_motion(row, compositor.pointer_x, compositor.pointer_y);
+                compositor_damage_row(row), compositor_preview(over_scenes ? COMPOSITOR_NONE : row);
                 return;
         }
         compositor_shared_hover(under), compositor.hover = under;
@@ -2112,21 +2101,20 @@ static void compositor_drag_stop(int row) { (void)compositor_grab_end(COMPOSITOR
 
 static void compositor_release_as(unsigned int code, int snap, unsigned int flags)
 {
-        int dragged = compositor.drag, to = COMPOSITOR_NONE, resized = compositor.resize, drop_screen = 0, drop_box[4], mc_dropped = 0;
+        int dragged = compositor.drag, to = COMPOSITOR_NONE, resized = compositor.resize, drop_screen = 0, drop_box[4], scenes_dropped = 0;
         unsigned int index = code - COMPOSITOR_BTN_LEFT, drop_how = COMPOSITOR_FLOATING, drop_touch = 0;
 
         compositor_pointer_press(code, 0);
-        if (dragged >= 0 && snap && compositor.drag_moved && compositor_mc_shown())
+        if (dragged >= 0 && snap && compositor.drag_moved && compositor_scenes_shown())
         {
-                if (compositor_mc_point(compositor.pointer_x, compositor.pointer_y))
+                if (compositor_scenes_point(compositor.pointer_x, compositor.pointer_y))
                 {
                         compositor_set_rect(dragged, COMPOSITOR_FLOATING, compositor.drag_keep);
-                        mc_dropped = compositor_mc_drag_drop(dragged, compositor.pointer_x, compositor.pointer_y);
+                        scenes_dropped = compositor_scenes_drag_drop(dragged, compositor.pointer_x, compositor.pointer_y);
                 }
-                else if (compositor.mc.auto_opened)
-                        compositor_mc_close();
+                compositor_scenes_auto_close();
         }
-        if (dragged >= 0 && snap && compositor.drag_moved && !mc_dropped)
+        if (dragged >= 0 && snap && compositor.drag_moved && !scenes_dropped)
                 compositor_box_of(dragged, drop_box),
                 drop_how = compositor_target(dragged, compositor.pointer_x, compositor.pointer_y, drop_box, &drop_screen, &drop_touch);
         compositor_grab_end(COMPOSITOR_GRAB_COMMIT, COMPOSITOR_NONE);
@@ -2286,7 +2274,7 @@ static int compositor_button_band(int tab, unsigned int code, int up)
                 if (code == COMPOSITOR_BTN_LEFT)
                 {
                         if (idx == compositor_spaces_active_index(compositor.band_hit))
-                                compositor_mc_toggle(compositor.band_hit);
+                                compositor_scenes_toggle(compositor.band_hit);
                         else
                                 compositor_space_switch_index(compositor.band_hit, idx);
                 }
@@ -2428,8 +2416,7 @@ static void compositor_button(unsigned int code, int down)
                 { int row = compositor.resize; compositor_hold_cancel(), compositor_edge_drag_start(row); return; }
         if (code == COMPOSITOR_BTN_RIGHT && compositor_hold_cancel())
         {
-                if (compositor.mc.auto_opened)
-                        compositor_mc_close();
+                compositor_scenes_auto_close();
                 return;
         }
         if (under >= 0 && compositor_popup_parent[under] >= 0)
@@ -2728,7 +2715,7 @@ static int compositor_report(positive now, positive stamp)
 
 static int compositor_picture_under(int x, int y)
 {
-        if (compositor_mc_point(x, y) || compositor_band_hit(x, y) != TASKBAR_HIT_NONE)
+        if (compositor_scenes_point(x, y) || compositor_band_hit(x, y) != TASKBAR_HIT_NONE)
                 return COMPOSITOR_NONE;
         for (unsigned int at = compositor.stacked; at--;)
                 if (compositor_visible(compositor.stack[at]) && compositor_in_row(compositor.stack[at], x, y))
@@ -2941,9 +2928,9 @@ static void compositor_pad_apply(unsigned int at, positive now)
         {
                 int flip = compositor.table && (compositor.table->scroll_off & WINDOW_SCROLL_FLIP) ? -1 : 1;
                 if (y * flip < 0)
-                        compositor_mc_open(compositor_space_current_screen(), 0);
+                        compositor_scenes_open(compositor_space_current_screen());
                 else
-                        compositor_mc_close();
+                        compositor_scenes_close();
         }
         else if (kind == 2 && !pinch)
         {
@@ -4618,9 +4605,7 @@ static void compositor_input_gone(unsigned int at)
                 for (unsigned int index = 1; index < 8; index++)
                         if (compositor.button_down >> index & 1)
                                 compositor_release(COMPOSITOR_BTN_LEFT + index, 0);
-                if (compositor.mc.press_card >= 0 || compositor.mc.press_row >= 0 || compositor.mc.dragging)
-                        compositor.mc.press_card = compositor.mc.press_row = compositor.mc.drop_target = COMPOSITOR_NONE,
-                        compositor.mc.dragging = 0, compositor.mc.dirty = 1;
+                compositor_scenes_let_go(COMPOSITOR_NONE);
                 if (compositor_edit_drag.held)
                         compositor_edit_drag.held = 0, taskbar_edit_set(0), compositor_tabs_changed();
                 if (compositor.edge_right)
