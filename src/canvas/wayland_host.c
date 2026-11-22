@@ -5068,8 +5068,7 @@ HOT static int compositor_wl_direct_send_packet(long dx, long dy, unsigned int b
                 unsigned int fixed;
                 int notches;
 
-                if (compositor.table && (compositor.table->scroll_off & WINDOW_SCROLL_FLIP))
-                        v = -v;
+                // The natural-direction flip is made in input.c (compositor_wheel_turn) before the reader sends the turn.
                 fixed = (unsigned int)((long long)v * 15 * 256 / 120);
                 notches = v / 120;
 
