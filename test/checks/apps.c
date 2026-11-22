@@ -1353,9 +1353,9 @@ static fn list_interaction_check(struct ui address_to wui)
                 ui_scroll_extent(&l.scroll);
                 ui_body_notch(&l.scroll.body, (b64)row << UI_Q, (b64)ui_kit.now);
                 ui_event_context(&ldown);
-                ui_list_click(wui, &l, &ldown, 20, 100 + 4 * row + 5);
+                ui_list_click(wui, &l, &ldown, 20, l.y + 4 * row + 5);
                 ui_event_context(&lup);
-                notch_clicked = ui_list_click(wui, &l, &lup, 20, 100 + 4 * row + 5) == 4;
+                notch_clicked = ui_list_click(wui, &l, &lup, 20, l.y + 4 * row + 5) == 4;
                 check("list: mouse click on a gliding list still clicks the row", notch_clicked);
         }
 
@@ -1367,8 +1367,8 @@ static fn list_interaction_check(struct ui address_to wui)
 
                 memory_zero(&side, sizeof(side));
                 memory_zero(&main, sizeof(main));
-                side.virtual = true, side.total = 10, side.hover = side.down = -1, side.describe = stripe_row, side.empty = "";
-                main.virtual = true, main.total = 20, main.hover = main.down = -1, main.describe = stripe_row, main.selected = list_check_selected_row, main.empty = "";
+                side.virtual = side.beside = true, side.total = 10, side.hover = side.down = -1, side.describe = stripe_row, side.empty = "";
+                main.virtual = main.beside = true, main.total = 20, main.hover = main.down = -1, main.describe = stripe_row, main.selected = list_check_selected_row, main.empty = "";
                 memory_zero(&v, sizeof(v));
                 ui_view_begin(&v, wui, 800, -480);
                 ui_side_frame()
