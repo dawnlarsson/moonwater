@@ -365,6 +365,110 @@ static void compositor_bg_throttle_of(unsigned int pid, int throttle)
         system_close(handle);
 }
 
+#ifdef CONFIG_MOONWATER_WAYLAND
+static unsigned int compositor_xwm_row_owner(int row, unsigned int *server); // xwm.c: the X client behind a row (XRes), and its X server
+#endif
+
+/*
+        The processes a row's frames are made by, as the compositor can vouch for them, into out (room for two): the row's claim (windows_owner_ok);
+        or, for an X window, the X client its X server named for it (XRes), and, with `server`, that X server, which every frame and every input of
+        the client goes through. compositor_xwm_owned rewrites an X window's table pid to the client's, which the claim (the X server's, the Wayland
+        client's) then refused: no X game (HL2, every Proton game) ever had the game's slice, nor Xwayland. The client is taken where the table's
+        pid is the one the X window manager has and the claim is the very server it heard it from.
+*/
+static unsigned int compositor_row_pids(int row, unsigned int me, int server, unsigned int *out)
+{
+        const struct windows_owner *held = &windows_owner_held[row];
+        unsigned int pid = __atomic_load_n(&compositor.table->pid[row], __ATOMIC_ACQUIRE), n = 0;
+
+        if (!pid || pid == me)
+                return 0;
+        if (windows_owner_ok(held, pid))
+                out[n++] = pid;
+#ifdef CONFIG_MOONWATER_WAYLAND
+        else
+        {
+                unsigned int x_server = 0, client = compositor_xwm_row_owner(row, &x_server);
+
+                if (client == pid && x_server == held->pid && x_server != me && windows_owner_ok(held, x_server))
+                {
+                        out[n++] = client;
+                        if (server)
+                                out[n++] = x_server;
+                }
+        }
+#endif
+        return n;
+}
+
+// The value of `key` (its name and the '=') in a process's environment, into value (NUL-terminated, at most room - 1 bytes): its length, 0 for none.
+static unsigned int compositor_environ_word(unsigned int pid, const char *key, char *value, unsigned int room)
+{
+        static char text[1 << 17]; // an environment read whole (Steam's are some tens of KiB)
+        char path[40];
+        unsigned int length = (unsigned int)string_length((string_address)key), got = 0;
+        bipolar handle, step;
+
+        windows_num_path(path, sizeof(path), "/proc/", pid, "/environ");
+        if (!room || (handle = system_open_at(AT_FDCWD, (string_address)path, FILE_READ | O_CLOEXEC)) < 0)
+                return 0;
+        while (got < sizeof text && (step = system_read_once(handle, text + got, sizeof text - got)) > 0)
+                got += (unsigned int)step;
+        system_close(handle);
+        for (unsigned int at = 0; at < got;)
+        {
+                unsigned int stop = at;
+
+                while (stop < got && text[stop])
+                        stop++;
+                if (stop - at > length && !memory_compare(text + at, key, length))
+                {
+                        unsigned int size = stop - at - length < room - 1 ? stop - at - length : room - 1;
+
+                        memory_copy(value, text + at + length, size), value[size] = 0;
+                        return size;
+                }
+                at = stop + 1;
+        }
+        return 0;
+}
+
+/*
+        A Wine game's wineserver: every one of the game's waits, messages and window calls goes through it, so it is the game's as Xwayland is. It
+        is the process named wineserver whose environment has the game's SteamGameId (Steam sets it for the launch, and the server, started by the
+        game's first Wine process, inherits it). 0 for a game that is not Steam's or has none.
+*/
+static unsigned int compositor_game_wineserver(unsigned int pid)
+{
+        char game[24], other[24], path[40], comm[32];
+        p8 buffer[4096];
+        bipolar handle, got;
+        unsigned int found = 0;
+
+        if (!compositor_environ_word(pid, "SteamGameId=", game, sizeof game) ||
+            (handle = system_open_at(AT_FDCWD, (string_address) "/proc", FILE_READ | O_DIRECTORY | O_CLOEXEC)) < 0)
+                return 0;
+        while (!found && (got = system_call_3(syscall(getdents64), (positive)handle, (positive)buffer, sizeof(buffer))) > 0)
+                for (bipolar at = 0; at < got && !found;)
+                {
+                        string_address name = (string_address)(buffer + at + 19);
+                        unsigned int other_pid = 0;
+
+                        at += memory_load_unaligned(p16, buffer + at + 16);
+                        for (; *name >= '0' && *name <= '9'; name++)
+                                other_pid = other_pid * 10 + (unsigned int)(*name - '0');
+                        if (!other_pid || *name || other_pid == pid)
+                                continue;
+                        windows_num_path(path, sizeof(path), "/proc/", other_pid, "/comm");
+                        compositor_word(path, comm, sizeof(comm));
+                        if (string_equals((string_address)comm, (string_address) "wineserver") &&
+                            compositor_environ_word(other_pid, "SteamGameId=", other, sizeof other) && string_equals((string_address)other, (string_address)game))
+                                found = other_pid;
+                }
+        system_close(handle);
+        return found;
+}
+
 static void compositor_game_slice_note(const unsigned int *pids, unsigned int count)
 {
         char text[COMPOSITOR_GAME_SLICES * 12];
@@ -396,6 +500,8 @@ static void compositor_game_slice(void)
         static unsigned int bg_pids[COMPOSITOR_BG_SLICES], bg_count;
         static unsigned int last_stack_gen;
         static b32 started;
+        static unsigned int servers_game[COMPOSITOR_GAME_SLICES], servers_of[COMPOSITOR_GAME_SLICES], servers_count; // each game pid's wineserver (0: none)
+        unsigned int next_game[COMPOSITOR_GAME_SLICES], next_of[COMPOSITOR_GAME_SLICES], servers_next = 0;
         unsigned int now[COMPOSITOR_GAME_SLICES], nows = 0, me;
         unsigned int bg_now[COMPOSITOR_BG_SLICES], bg_nows = 0;
         int rows[COMPOSITOR_GAME_SLICES];
@@ -437,12 +543,30 @@ static void compositor_game_slice(void)
         }
         for (unsigned int k = 0; k < tops && compositor.table; k++)
         {
-                unsigned int pid = __atomic_load_n(&compositor.table->pid[rows[k]], __ATOMIC_ACQUIRE);
+                unsigned int got[2], n = compositor_row_pids(rows[k], me, 1, got);
 
-                // The table's pid is the client's word: its scheduling is changed only for the process that claimed the row (B2)
-                if (pid && pid != me && windows_owner_ok(&windows_owner_held[rows[k]], pid) && !compositor_pid_in(now, nows, pid))
-                        now[nows++] = pid;
+                // The table's pid is the client's word: its scheduling is changed only for a process the compositor can vouch for (B2)
+                for (unsigned int j = 0; j < n && nows < COMPOSITOR_GAME_SLICES; j++)
+                        if (!compositor_pid_in(now, nows, got[j]))
+                                now[nows++] = got[j];
+                // A Wine game's wineserver (looked for once a game pid, when it first goes fullscreen: a walk of /proc)
+                if (n && nows < COMPOSITOR_GAME_SLICES)
+                {
+                        unsigned int server = 0, cached = 0;
+
+                        for (unsigned int c = 0; c < servers_count; c++)
+                                if (servers_game[c] == got[0])
+                                        server = servers_of[c], cached = 1;
+                        if (!cached)
+                                server = compositor_game_wineserver(got[0]);
+                        if (servers_next < COMPOSITOR_GAME_SLICES)
+                                next_game[servers_next] = got[0], next_of[servers_next++] = server;
+                        if (server && server != me && !compositor_pid_in(now, nows, server))
+                                now[nows++] = server;
+                }
         }
+        memory_copy(servers_game, next_game, sizeof next_game[0] * servers_next);
+        memory_copy(servers_of, next_of, sizeof next_of[0] * servers_next), servers_count = servers_next;
         for (unsigned int k = 0; k < count; k++)
                 if (!compositor_pid_in(now, nows, pids[k]))
                         compositor_game_slice_of(pids[k], 0), changed = true;
@@ -452,10 +576,9 @@ static void compositor_game_slice(void)
         if (nows > 0 && compositor.table)
                 for (int r = 0; r < (int)compositor_rows_in_use && bg_nows < COMPOSITOR_BG_SLICES; r++)
                 {
-                        unsigned int pid = __atomic_load_n(&compositor.table->pid[r], __ATOMIC_ACQUIRE);
+                        unsigned int got[2], pid = compositor_row_pids(r, me, 0, got) ? got[0] : 0;
 
-                        if (pid && pid != me && windows_owner_ok(&windows_owner_held[r], pid) && !compositor_pid_in(now, nows, pid) &&
-                            !compositor_pid_in(bg_now, bg_nows, pid))
+                        if (pid && !compositor_pid_in(now, nows, pid) && !compositor_pid_in(bg_now, bg_nows, pid))
                                 bg_now[bg_nows++] = pid;
                 }
         for (unsigned int k = 0; k < bg_count; k++)

@@ -4502,6 +4502,62 @@ static void reader_residue_rows(void)
         compositor_reader.taken = kept_taken, compositor_reader.handed_out = kept_out, compositor.dark = kept_dark;
 }
 
+/*
+        The processes game mode takes for a fullscreen row (compositor_row_pids). An X window's table pid is the X client's (XRes), rewritten from the
+        claim, which is the X server's (Xwayland, the Wayland client): the claim refused it, so no X game (HL2, every Proton game) had the game's slice,
+        nor Xwayland. The client is taken where the X window manager heard it from the very server that claimed the row, and the server with it.
+*/
+static struct windows *game_pids_table;
+static void game_pids_rows(void)
+{
+        __typeof__(compositor_xwm_slots[0]) *kept_at = compositor_xwm_at, *x = &compositor_xwm_slots[COMPOSITOR_XWM_SLOTS - 1];
+        __typeof__(compositor_xwm_slots[0]) saved = *x;
+        struct windows *kept_table = compositor.table;
+        unsigned int self = (unsigned int)compositor_call(syscall(getpid), 0, 0, 0, 0, 0, 0);
+        unsigned int parent = (unsigned int)compositor_call(syscall(getppid), 0, 0, 0, 0, 0, 0), got[2], n;
+        const int wl_row = 4, x_row = 5;
+        struct windows_owner kept_wl = windows_owner_held[wl_row], kept_x = windows_owner_held[x_row];
+        char value[64];
+        b32 wayland_ok, x_ok, x_alone, forged, other_server, environ_ok;
+
+        compositor.table = windows_scratch_table(&game_pids_table);
+        windows_scratch_zero(compositor.table);
+        // A Wayland game: its claim.
+        windows_owner_take(&windows_owner_held[wl_row], parent), compositor.table->pid[wl_row] = parent;
+        n = compositor_row_pids(wl_row, 0, 1, got);
+        wayland_ok = n == 1 && got[0] == parent;
+        // An X game: the claim is the X server's (this process stands for Xwayland), the table's pid the client's (the parent for the game).
+        compositor_xwm_at = x, x->fd = 0, x->peer_pid = (int)self;
+        {
+                __typeof__(compositor_xwm_slots[0].window) w = compositor_xwm_find(0x400123u, 1);
+
+                if (w)
+                        xwm_row_bind(x, w, x_row), w->owner = parent;
+                windows_owner_take(&windows_owner_held[x_row], self), compositor.table->pid[x_row] = parent;
+                n = compositor_row_pids(x_row, 0, 1, got);
+                x_ok = w && n == 2 && got[0] == parent && got[1] == self;
+                n = compositor_row_pids(x_row, 0, 0, got);
+                x_alone = n == 1 && got[0] == parent;
+                compositor.table->pid[x_row] = 0x7ffffff0u; // a pid the X window manager never heard: refused
+                forged = compositor_row_pids(x_row, 0, 1, got) == 0;
+                compositor.table->pid[x_row] = parent, x->peer_pid = (int)parent; // the window's server is not the row's claim: refused
+                other_server = compositor_row_pids(x_row, 0, 1, got) == 0;
+                if (w)
+                        compositor_xwm_release(w);
+        }
+        check("game: a Wayland game is its claim; an X game is its X client and its X server (Xwayland), the client alone for the background",
+              wayland_ok && x_ok && x_alone);
+        check("game: an X row's pid the X window manager did not name, or a window of another server than the row's claim, is refused", forged && other_server);
+        // The wineserver is found by the game's SteamGameId (compositor_environ_word): a key the environment has, and one it has not.
+        environ_ok = compositor_environ_word(self, "PATH=", value, sizeof value) > 0 && value[0] == '/' &&
+                     compositor_environ_word(self, "MOONWATER_NO_SUCH_KEY=", value, sizeof value) == 0;
+        check("game: a process's environment is read for a key's value, and a key it has not is none", environ_ok);
+        x->fd = -1;
+        wayland_table_drop(&x->window_table), wayland_table_drop(&x->window_index), x->windows = 0, x->window = 0;
+        *x = saved, compositor_xwm_at = kept_at, compositor.table = kept_table;
+        windows_owner_held[wl_row] = kept_wl, windows_owner_held[x_row] = kept_x;
+}
+
 // The X window manager's atoms by their numbers (compositor_xwm_atom_index, H-c3-1): every atom of a list of thousands found by the index as the walk
 // found it, the first record of an atom two records have, none for one not there, and an interned name's atom found once its reply gives it.
 static void xwm_atom_rows(void)
@@ -6127,6 +6183,7 @@ b32 main(void)
         xwm_incr_cap_rows();
         display_off_rows();
         reader_residue_rows();
+        game_pids_rows();
         reader_own_rows();
         clip_most_rows();
         asked_record_rows();

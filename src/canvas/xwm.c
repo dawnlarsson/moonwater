@@ -1076,6 +1076,19 @@ HOT static struct compositor_xwm_window *xwm_row_lookup(const struct compositor_
         return &sx->window[wi];
 }
 
+// The X client behind a row, as the X server named it (XRes, compositor_xwm_owned), and that server's pid in *server: 0 for a row no X window
+// has, or whose client the server has not named.
+static unsigned int compositor_xwm_row_owner(int row, unsigned int *server)
+{
+        struct compositor_xwm *sx = 0;
+        const struct compositor_xwm_window *w = xwm_row_lookup(0, row, &sx);
+
+        if (!w || !w->owner || !sx || sx->peer_pid <= 0)
+                return 0;
+        *server = (unsigned int)sx->peer_pid;
+        return w->owner;
+}
+
 static void xwm_release(struct compositor_xwm *x, struct compositor_xwm_window *w)
 {
         long slot;
