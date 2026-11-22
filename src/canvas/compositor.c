@@ -1731,6 +1731,8 @@ static void compositor_zero(void)
 {
         memory_zero(&compositor, sizeof(compositor));
         compositor.active_grab.row = COMPOSITOR_NONE;
+        compositor.mc.hover_card = compositor.mc.hover_close = compositor.mc.drop_target = COMPOSITOR_NONE;
+        compositor.mc.press_card = compositor.mc.press_row = COMPOSITOR_NONE;
         compositor_rows_point();
         compositor_rows_make(compositor_rows_in_use);
         COMPOSITOR_ROWS_OWN(COMPOSITOR_ROWS_ZERO)
