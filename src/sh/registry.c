@@ -1375,11 +1375,8 @@ static int setting_tray_name(const char *name, positive length)
 {
         for (int at = 0; setting_tray_names[at]; at++)
         {
-                positive same = 0;
-
-                while (same < length && setting_tray_names[at][same] == name[same])
-                        same++;
-                if (same == length && !setting_tray_names[at][same])
+                if (string_length((string_address)setting_tray_names[at]) == length &&
+                    !memory_compare((address_any)setting_tray_names[at], (address_any)name, length))
                         return at;
         }
         return -1;
@@ -1388,10 +1385,8 @@ static int setting_tray_name(const char *name, positive length)
 // Whether text is a format the tray takes. When it is not and bad is given, bad is where the fault starts.
 static bool setting_tray_valid(const char *text, positive *bad)
 {
-        positive at = 0, length = 0;
+        positive at = 0, length = string_length((string_address)text);
 
-        while (text[length])
-                length++;
         if (bad)
                 *bad = 0;
         if (length > SETTING_TRAY_MOST)
@@ -1434,10 +1429,9 @@ static bool setting_tray_valid(const char *text, positive *bad)
                         at += 2;
                 else if (byte == '{')
                 {
-                        positive close = at + 1;
+                        string_address end_brace = string_first_of_or_end((string_address)(text + at + 1), '}');
+                        positive close = (positive)(end_brace - (string_address)text);
 
-                        while (text[close] && text[close] != '}')
-                                close++;
                         if (!text[close] || setting_tray_name(text + at + 1, close - at - 1) < 0)
                                 goto wrong;
                         at = close + 1;
@@ -1472,7 +1466,7 @@ wrong:
 
 static bool setting_pins_bare(unsigned char byte)
 {
-    return (byte >= 'a' && byte <= 'z') || (byte >= 'A' && byte <= 'Z') || (byte >= '0' && byte <= '9') || byte == '_' || byte == '.' ||
+    return byte_is_alnum(byte) || byte == '_' || byte == '.' ||
            byte == '/' || byte == ':' || byte == '=' || byte == '@' || byte == '%' || byte == '+' || byte == ',' || byte == '-';
 }
 
@@ -1526,11 +1520,9 @@ static int setting_pins_next(const char *line, positive *at, char *word, positiv
 static bool setting_pins_valid(const char *line, positive *bad)
 {
     char word[SETTING_PINS_WORD];
-    positive at = 0, length = 0, words = 0, entries = 0, here;
+    positive at = 0, length = string_length((string_address)line), words = 0, entries = 0, here;
     int kind;
 
-    while (line[length])
-        length++;
     if (bad)
         *bad = 0;
     if (length > SETTING_PINS_MOST)
@@ -1598,12 +1590,12 @@ static bool setting_pins_quote(char *into, positive *at, positive room, const ch
     }
     if (bare)
     {
-        for (positive each = 0; word[each]; each++)
-        {
-            if (used + 1 >= room)
-                return false;
-            into[used++] = word[each];
-        }
+        positive length = string_length((string_address)word);
+
+        if (length >= room - used)
+            return false;
+        memory_copy_apart(into + used, (address_any)word, length);
+        used += length;
     }
     else
     {
@@ -1638,7 +1630,7 @@ static bool setting_pins_quote(char *into, positive *at, positive room, const ch
 */
 static bool setting_autostart_bare(unsigned char byte)
 {
-    return (byte >= 'a' && byte <= 'z') || (byte >= 'A' && byte <= 'Z') || (byte >= '0' && byte <= '9') || byte == '_' || byte == '.' ||
+    return byte_is_alnum(byte) || byte == '_' || byte == '.' ||
            byte == '/' || byte == '+' || byte == '-';
 }
 
@@ -1660,12 +1652,7 @@ static const char *setting_autostart_next(const char *line, positive *at, positi
 // Whether two words, each where it starts and its length, are the same.
 static bool setting_autostart_same(const char *one, positive one_length, const char *other, positive other_length)
 {
-    if (one_length != other_length)
-        return false;
-    for (positive at = 0; at < one_length; at++)
-        if (one[at] != other[at])
-            return false;
-    return true;
+    return one_length == other_length && !memory_compare((address_any)one, (address_any)other, one_length);
 }
 
 // Whether the part of a path from after one slash to before the next (from, to) is empty, . or ..
@@ -1698,21 +1685,15 @@ static bool setting_autostart_span(const char *word, positive length)
 // Whether word, a string, is a path a line may name.
 static bool setting_autostart_path(const char *word)
 {
-    positive length = 0;
-
-    while (word[length])
-        length++;
-    return setting_autostart_span(word, length);
+    return setting_autostart_span(word, string_length((string_address)word));
 }
 
 // Whether line names word.
 static bool setting_autostart_has(const char *line, const char *word)
 {
-    positive at = 0, length, want = 0;
+    positive at = 0, length, want = string_length((string_address)word);
     const char *each;
 
-    while (word[want])
-        want++;
     while ((each = setting_autostart_next(line, &at, &length)))
         if (setting_autostart_same(each, length, word, want))
             return true;

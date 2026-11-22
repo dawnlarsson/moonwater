@@ -265,7 +265,7 @@ static bool storage_header_word(p8 address_to word, positive room)
 
         while (at < room && word[at])
         {
-                if (word[at] < 0x21 || word[at] > 0x7e)
+                if (!byte_is_graphic(word[at]))
                         return false;
                 at++;
         }
@@ -287,7 +287,7 @@ static bool storage_uuid_header(p8 address_to uuid, positive room)
                         if (byte != '-')
                                 return false;
                 }
-                else if (digit_known(byte, 16) >= 16)
+                else if (!byte_is_hexadecimal(byte))
                         return false;
         }
 
@@ -926,7 +926,7 @@ static bool storage_udf_metadata(bipolar handle,
                                 bool hexadecimal = true;
 
                                 for (positive at = 0; at < 16; at++)
-                                        if (digit_known(volume_set[at], 16) == 16)
+                                        if (!byte_is_hexadecimal(volume_set[at]))
                                                 hexadecimal = false;
 
                                 if (hexadecimal)
@@ -3691,16 +3691,12 @@ b32 storage_mountpoint(positive argc, string_address address_to argv,
                 refused after the path has been reached and only where it
                 would have been the answer: --devno asks about a block device
                 instead, and --nofollow takes the older path that never
-                consults the mount table by name. */
-        bool symlink_kept = false;
-        if (nofollow)
-        {
-                file_facts itself;
-
-                symlink_kept = file_look(AT_FDCWD, path, AT_SYMLINK_NOFOLLOW,
-                                         address_of itself) &&
-                               (itself.mode & MODE_FORMAT) == MODE_LINK;
-        }
+                consults the mount table by name.  Stat the already-opened
+                handle once via AT_EMPTY_PATH to avoid a TOCTOU race. */
+        bool have_here = file_look(handle, (string_address) "",
+                                   AT_EMPTY_PATH, address_of here);
+        bool symlink_kept = nofollow && have_here &&
+                            (here.mode & MODE_FORMAT) == MODE_LINK;
         if (show && !devno && !symlink_kept)
         {
                 system_close(handle);
@@ -3714,8 +3710,6 @@ b32 storage_mountpoint(positive argc, string_address address_to argv,
                 positive resolved_room = 0;
                 p8 address_to resolved = storage_fd_path(handle,
                                                          address_of resolved_room);
-                bool have_here = file_look(handle, (string_address) "",
-                                           AT_EMPTY_PATH, address_of here);
 
                 if (resolved && !string_compare(resolved,
                                                 (string_address) "/"))
@@ -3723,7 +3717,7 @@ b32 storage_mountpoint(positive argc, string_address address_to argv,
                         mounted = true;
                         inspected = have_here;
                 }
-                else if (resolved)
+                else if (resolved && resolved[0])
                 {
                         positive length = string_length(resolved);
 
