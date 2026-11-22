@@ -1113,7 +1113,7 @@ static b32 files_drag_event(const struct window_event address_to event)
                 int spring = node >= 0 ? FILES_SPRING_NODE + node : row;
                 b32 none = (files.drag.live && row == -1) || (node < 0 && files.big->model.state != FILES_READY);
                 p32 pref = files.drop.keys & WINDOW_KEY_CONTROL ? WINDOWS_DRAG_COPY
-                           : files.drop.keys & WINDOW_KEY_SHIFT ? WINDOWS_DRAG_MOVE : files_drop_near() ? WINDOWS_DRAG_MOVE : WINDOWS_DRAG_COPY;
+                           : files.drop.keys & WINDOW_KEY_SHIFT ? WINDOWS_DRAG_MOVE : files.drag.live && files_drop_near() ? WINDOWS_DRAG_MOVE : WINDOWS_DRAG_COPY;
                 files.drop_over = true, tl->drop = node >= 0 ? node + 1 : 0;
                 if (spring != files.spring)
                         files.spring = spring, files.spring_at = (b64)ui_kit_time();
@@ -1868,6 +1868,29 @@ static fn files_remote_nav(void)
         files_remote_request_list(p, m->path, false, FILES_RPC_NAV_LIST);
 }
 
+// The folder a peer's files land in: ~/.cache/moonwater/files/PEER, made 0700, and refused unless it is a folder of ours that nobody else can write.
+static b32 files_remote_dir(p8 address_to into, const p8 address_to peer)
+{
+        string_address home = getenv((string_address) "HOME");
+        bipolar folder;
+        file_facts facts;
+        if (!home || home[0] != '/')
+                return false;
+        string_copy_bounded((string_address)into, home, FILES_PATH);
+        string_append_bounded((string_address)into, (string_address) "/.cache/moonwater/files/", FILES_PATH);
+        string_append_bounded((string_address)into, (string_address)peer, FILES_PATH);
+        if (!files_bin_folders(into) || (folder = files_open_dir(AT_FDCWD, into, O_NOFOLLOW)) < 0)
+                return false;
+        if (files_look_fd(folder, &facts) < 0 || (facts.mode & MODE_FORMAT) != MODE_DIRECTORY || (facts.mode & 0022) ||
+            facts.owner != (p32)compositor_call(syscall(getuid), 0, 0, 0, 0, 0, 0))
+        {
+                system_close(folder);
+                return false;
+        }
+        system_close(folder);
+        return true;
+}
+
 static fn files_remote_read_chunk(struct files_peer address_to p)
 {
         struct files_remote_read address_to rr = &files.big->remote_read;
@@ -1900,16 +1923,15 @@ static fn files_remote_open_file(struct files_peer address_to p, const p8 addres
         if (!files_peer_ensure(p) || !nlen || nlen >= FILES_NAME)
                 return;
         files_remote_read_abort();
-        string_copy_bounded((string_address)dir, (string_address) "/tmp/files-wl-", sizeof(dir));
-        string_append_bounded((string_address)dir, (string_address)p->name, sizeof(dir));
-        if (!files_bin_folders(dir))
+        if (!files_remote_dir(dir, p->name))
                 return;
         for (positive k = 0; k < nlen; k++)
                 safe[k] = name[k] == '/' ? '_' : name[k];
         safe[nlen] = 0;
         if (!files_path_join(rr->local_path, sizeof(rr->local_path), dir, safe))
                 return;
-        rr->fd = system_open_at_mode(AT_FDCWD, (string_address)rr->local_path, FILE_WRITE | FILE_CREATE | FILE_TRUNCATE | O_CLOEXEC, 0600);
+        system_remove_at(AT_FDCWD, (string_address)rr->local_path, 0);
+        rr->fd = system_open_at_mode(AT_FDCWD, (string_address)rr->local_path, FILE_WRITE | FILE_CREATE | FILE_EXCLUSIVE | O_NOFOLLOW | O_CLOEXEC, 0600);
         if (rr->fd < 0)
                 return;
         rr->active = true, rr->machine = p->machine, rr->offset = 0;
