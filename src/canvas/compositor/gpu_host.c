@@ -200,8 +200,10 @@ static int compositor_gpu_up(void)
 // The card lost its state: started again (gpu.c's gpu_recover). Everything the compositor kept of the card's addresses is forgotten with it: the scanout's
 // import and the turned screens' maps (their addresses are the old maps'). A card that does not start again is given up for now (dead, no card: the late
 // probe starts it again when it is due). The failures of a present are counted by the caller, so repeated losses cool the card down as hangs do.
+static void compositor_card_fence_close(void);
 static void compositor_gpu_recover(void)
 {
+        compositor_card_fence_close();
         compositor_gpu_state.out = 0, compositor_gpu_state.out_key = 0;
         compositor_gpu_state.cache[0] = compositor_gpu_state.cache[1] = compositor_gpu_state.cache_key[0] = compositor_gpu_state.cache_key[1] = 0;
         memory_zero(compositor_gpu_state.turn_va, sizeof(compositor_gpu_state.turn_va));
@@ -401,6 +403,7 @@ static positive compositor_gpu_output(void)
                         // PRIME import would otherwise repeat PRIME_HANDLE_TO_FD/FD_TO_HANDLE on every frame forever; settle after 3 consecutive failures.
                         else if (gpu_req.pick == 2 && ++compositor_gpu_state.output_fails >= 3)
                         {
+                                compositor_card_fence_close();
                                 gpu_stop();
                                 compositor_gpu_state.up = 0, compositor_gpu_state.dead = 1;
                                 compositor_gpu_state.dead_why = COMPOSITOR_GPU_WHY_OUTPUT;
@@ -675,7 +678,7 @@ static enum compositor_gpu_why compositor_gpu_scale_frames(const struct composit
                         for (int y = 0; y < f->height; y++, fy += step_y)
                                 tables[f->width + y] = (unsigned int)(fy >> 24);
                 }
-                if (compositor_card.nowait && compositor_card.looped)
+                if (compositor_card.nowait && compositor_card.looped && gpu_backend != &gpu_i915_row)
                 {
                         // A job of the present's, submitted with the scenes (compositor_card_go): the scene that reads this picture runs after it on the ring.
                         const struct compositor_card_step blit = {COMPOSITOR_CARD_SCALE, (unsigned int)f->width, (unsigned int)f->height, (unsigned int)f->pitch,
@@ -816,6 +819,8 @@ static enum compositor_gpu_why compositor_gpu_draw(const struct compositor_frame
                 return COMPOSITOR_GPU_WHY_ALIGN;
         if (!compositor_gpu_up())
                 return compositor_gpu_state.dead_why;
+        if (gpu_backend == &gpu_i915_row && (compositor.scanout_pitch & 63))
+                return COMPOSITOR_GPU_WHY_ALIGN;
         if (!gpu_idle()) // a job given up on may still read the buffer: no record is written into it until it is done
                 return COMPOSITOR_GPU_WHY_BUSY;
         // A present is a tick of the maps' (gpu_trim) whether the GPU draws it or not: a run of presents the processor draws (a window landing, scaled) made
@@ -845,8 +850,11 @@ static enum compositor_gpu_why compositor_gpu_draw(const struct compositor_frame
                 return COMPOSITOR_GPU_WHY_OUTPUT;
         compositor_card.steps = compositor_card.next = compositor_card.submitted = 0, compositor_card.failed = compositor_card.fenced = 0, compositor_card.last = 0;
         {
-                enum compositor_gpu_why scaled = compositor_gpu_scale_frames(&frames, count); // the landings made pictures of their own size, and the frames those
+                enum compositor_gpu_why scaled;
 
+                gpu_handed_hold = 1;
+                scaled = compositor_gpu_scale_frames(&frames, count); // the landings made pictures of their own size, and the frames those
+                gpu_handed_hold = 0;
                 if (scaled != COMPOSITOR_GPU_WHY_DRAWN)
                 {
                         if (!gpu.pending)
@@ -893,16 +901,31 @@ static enum compositor_gpu_why compositor_gpu_draw(const struct compositor_frame
         if (compositor_card.nowait && compositor_card.looped && !gpu_needs_shadow_output())
         {
                 // The scenes after the scaled pictures, a rectangle each, submitted as the card has room for them; the present is the card's from the first.
+                // Intel i915 RENDER_SURFACE_STATE is capped at 4096 px wide, and isolating the bottom taskbar band lets top desktop rows cull ~100 taskbar ops.
+                int band_y = gpu_backend == &gpu_i915_row && compositor.height > 256 ? ((compositor.height - 96) & ~3) : compositor.height;
+
                 for (unsigned int at = 0; at < rects.count; at++)
                 {
-                        const struct compositor_card_step scene = {COMPOSITOR_CARD_SCENE, 0, 0, 0, 0, 0, 0, 0,
-                                                                   {rects.r[at].x1, rects.r[at].y1, rects.r[at].x2, rects.r[at].y2}};
+                        int rx0 = rects.r[at].x1, rx1 = rects.r[at].x2, ry0 = rects.r[at].y1, ry1 = rects.r[at].y2;
 
-                        if (!compositor_card_add(&scene))
+                        for (int sy0 = ry0; sy0 < ry1; )
                         {
-                                if (!gpu.pending)
-                                        gpu_handed_clear();
-                                return COMPOSITOR_GPU_WHY_OTHER;
+                                int sy1 = (sy0 < band_y && ry1 > band_y) ? band_y : ry1;
+
+                                for (int sx0 = rx0; sx0 < rx1; )
+                                {
+                                        int sx1 = gpu_backend == &gpu_i915_row && ((sx0 & ~63) + 4096) < rx1 ? ((sx0 & ~63) + 4096) : rx1;
+                                        const struct compositor_card_step scene = {COMPOSITOR_CARD_SCENE, 0, 0, 0, 0, 0, 0, 0, {sx0, sy0, sx1, sy1}};
+
+                                        if (!compositor_card_add(&scene))
+                                        {
+                                                if (!gpu.pending)
+                                                        gpu_handed_clear();
+                                                return COMPOSITOR_GPU_WHY_OTHER;
+                                        }
+                                        sx0 = sx1;
+                                }
+                                sy0 = sy1;
                         }
                 }
                 compositor_card.records = g->count, compositor_card.out = out, compositor_card.pitch = (unsigned int)(compositor.scanout_pitch / 4);
@@ -920,17 +943,31 @@ static enum compositor_gpu_why compositor_gpu_draw(const struct compositor_frame
         }
         else
         {
+                int band_y = gpu_backend == &gpu_i915_row && compositor.height > 256 ? ((compositor.height - 96) & ~3) : compositor.height;
+
                 gpu_handed_hold = 1;
                 for (unsigned int at = 0; at < rects.count; at++)
                 {
-                        b32 ok = gpu_scene(COMPOSITOR_GPU_OPS_AT, g->count, COMPOSITOR_GPU_BINS_AT, out,
-                                           (unsigned int)(compositor.scanout_pitch / 4), g->width, (unsigned int)compositor.height,
-                                           (unsigned int)rects.r[at].x1, (unsigned int)rects.r[at].y1, (unsigned int)rects.r[at].x2,
-                                           (unsigned int)rects.r[at].y2);
-                        if (!ok)
+                        int rx0 = rects.r[at].x1, rx1 = rects.r[at].x2, ry0 = rects.r[at].y1, ry1 = rects.r[at].y2;
+
+                        for (int sy0 = ry0; sy0 < ry1; )
                         {
-                                compositor_gpu_fail(GPU_FAIL_UNHOLD);
-                                return compositor_gpu_job_why();
+                                int sy1 = (sy0 < band_y && ry1 > band_y) ? band_y : ry1;
+
+                                for (int sx0 = rx0; sx0 < rx1; )
+                                {
+                                        int sx1 = gpu_backend == &gpu_i915_row && ((sx0 & ~63) + 4096) < rx1 ? ((sx0 & ~63) + 4096) : rx1;
+                                        b32 ok = gpu_scene(COMPOSITOR_GPU_OPS_AT, g->count, COMPOSITOR_GPU_BINS_AT, out,
+                                                           (unsigned int)(compositor.scanout_pitch / 4), g->width, (unsigned int)compositor.height,
+                                                           (unsigned int)sx0, (unsigned int)sy0, (unsigned int)sx1, (unsigned int)sy1);
+                                        if (!ok)
+                                        {
+                                                compositor_gpu_fail(GPU_FAIL_UNHOLD);
+                                                return compositor_gpu_job_why();
+                                        }
+                                        sx0 = sx1;
+                                }
+                                sy0 = sy1;
                         }
                 }
                 gpu_handed_hold = 0;

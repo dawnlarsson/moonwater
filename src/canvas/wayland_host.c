@@ -820,6 +820,7 @@ static unsigned int wl_ext_row_flags(int row, unsigned int mask)
         return f & mask;
 }
 
+static void wl_ext_row_sync(int row);
 static const unsigned int *wl_ext_lent_info(int row, unsigned long *pitch, positive *va)
 {
         if (!wl_row_lent(row))
@@ -827,7 +828,23 @@ static const unsigned int *wl_ext_lent_info(int row, unsigned long *pitch, posit
         if (pitch)
                 *pitch = compositor_wl.lent[row].pitch;
         if (va)
+        {
+#ifdef MOONWATER_GPU_C
+                if (compositor_wl.lent[row].fd >= 0 && compositor_wl.lent[row].epoch != gpu_epoch && gpu_ready() && !compositor_wl_card_barred(row))
+                {
+                        positive imp = gpu_import_fd((int)compositor_wl.lent[row].fd, (positive)compositor_wl.lent[row].size);
+
+                        if (imp)
+                        {
+                                compositor_wl.lent[row].import = imp;
+                                compositor_wl.lent[row].va = imp + (positive)((const unsigned char *)compositor_wl.lent[row].pixels - compositor_wl.lent[row].map);
+                                compositor_wl.lent[row].epoch = gpu_epoch;
+                                wl_ext_row_sync(row);
+                        }
+                }
+#endif
                 *va = canvas_ext_import_live(compositor_wl.lent[row].va, compositor_wl.lent[row].epoch);
+        }
         return compositor_wl.lent[row].pixels;
 }
 
@@ -2635,10 +2652,23 @@ static unsigned int wl_ext_layers_frames(int row, struct compositor_frame *frame
         }
         for (unsigned int k = 0; k < count; k++)
         {
-                const struct compositor_wl_layer *l = &compositor_wl_layers.layer[row][k];
+                struct compositor_wl_layer *l = &compositor_wl_layers.layer[row][k];
                 struct compositor_frame *f = &frames[at + k];
                 memory_zero(f, sizeof *f);
                 f->x = window->x + l->x, f->y = window->y + l->y, f->width = l->width, f->height = l->height, f->scale = window->scale;
+#ifdef MOONWATER_GPU_C
+                if (!l->gather && l->fd >= 0 && l->epoch != gpu_epoch && gpu_ready() && !compositor_wl_card_barred(row))
+                {
+                        positive imp = gpu_import_fd((int)l->fd, (positive)l->size);
+
+                        if (imp)
+                        {
+                                l->import = imp;
+                                l->va = imp + (positive)((const unsigned char *)l->pixels - l->map);
+                                l->epoch = gpu_epoch;
+                        }
+                }
+#endif
                 f->pixels = l->pixels, f->pitch = l->pitch, f->gpu_base = canvas_ext_import_live(l->va, l->epoch);
                 if (l->gather)
                 {

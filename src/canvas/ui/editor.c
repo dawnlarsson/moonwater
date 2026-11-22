@@ -38,7 +38,7 @@ static struct
         struct ui_control strip, wrap_btn, hex_btn;
         struct ui_view view;
         struct ui_rect find_box, text_box;
-        int pill_box[4], pill_wrap[4], pill_hex[4], pill_hover;
+        int pill_box[4], pill_wrap[4], pill_text[4], pill_hex[4], pill_hover;
         b32 pill_down;
         char bar_text[256], status[160];
         struct ui_popup menu;
@@ -872,26 +872,31 @@ static b32 editor_pill_in(const int r[4], int x, int y)
         return r[2] > 0 && r[3] > 0 && x >= r[0] && x < r[0] + r[2] && y >= r[1] && y < r[1] + r[3];
 }
 
-// Compact floating bottom-right status overlay pill (clear of the scrollbar and rounded window corner, with measured toggle chips).
+// Compact floating bottom-right status overlay pill (fully rounded, with Wrap toggle and fixed-width Text | Hex tab switcher).
 static fn editor_pill_draw(struct ui address_to ui, struct editor_tab address_to tab)
 {
-        int pad_x = ui_dev(ui, 10), gap = ui_dev(ui, 6), chip_px = ui_dev(ui, 8), chip_h = ui_dev(ui, 20), ph = ui_dev(ui, 26);
+        int pad_x = ui_dev(ui, 10), gap = ui_dev(ui, 6), chip_px = ui_dev(ui, 8), chip_h = ui_dev(ui, 20), ph = ui_dev(ui, 28);
+        int seg_pad = ui_dev(ui, 2), seg_h = chip_h + 2 * seg_pad;
         int margin_r = ui_dev(ui, UI_PAD), margin_b = ui_dev(ui, 10);
         int max_w = editor.text_box.w - 2 * margin_r;
         const char address_to wrap_lbl = WORDS(editor_wrap_on);
-        const char address_to hex_lbl = tab->view.hex ? WORDS(editor_mode_text) : WORDS(editor_mode_hex);
+        const char address_to text_lbl = WORDS(editor_mode_text);
+        const char address_to hex_lbl = WORDS(editor_mode_hex);
         const char address_to extra = tab->changed_on_disk ? WORDS(editor_changed_on_disk) : editor.status[0] ? editor.status : null;
+        int text_w = ui_kit_measure(ui, (string_address)text_lbl, UI_LABEL_MEDIUM) + 2 * chip_px;
         int hex_w = ui_kit_measure(ui, (string_address)hex_lbl, UI_LABEL_MEDIUM) + 2 * chip_px;
+        int seg_w = text_w + hex_w + 2 * seg_pad;
         int wrap_w = tab->view.hex ? 0 : ui_kit_measure(ui, (string_address)wrap_lbl, UI_LABEL_MEDIUM) + 2 * chip_px;
-        int btns_w = hex_w + (wrap_w ? wrap_w + gap : 0);
+        int btns_w = seg_w + (wrap_w ? wrap_w + gap : 0);
         int extra_w = extra ? ui_kit_measure(ui, (string_address)extra, UI_LABEL_MEDIUM) : 0;
         char cut[256];
         string_address info = (string_address)editor.bar_text;
-        int info_room, info_w, pw, px, py, cx, cy, baseline;
-        struct ui_box box;
+        int info_room, info_w, pw, px, py, cx, cy, sy, baseline;
+        struct ui_box box, seg_box;
 
         memory_zero(editor.pill_box, sizeof(editor.pill_box));
         memory_zero(editor.pill_wrap, sizeof(editor.pill_wrap));
+        memory_zero(editor.pill_text, sizeof(editor.pill_text));
         memory_zero(editor.pill_hex, sizeof(editor.pill_hex));
         if (max_w < btns_w + 2 * pad_x || editor.text_box.h < ph + 2 * margin_b)
                 return;
@@ -908,7 +913,7 @@ static fn editor_pill_draw(struct ui address_to ui, struct editor_tab address_to
         px = ui_rtl() ? editor.text_box.x + margin_r : editor.text_box.x + editor.text_box.w - margin_r - pw;
         py = editor.text_box.y + editor.text_box.h - margin_b - ph;
         editor.pill_box[0] = px, editor.pill_box[1] = py, editor.pill_box[2] = pw, editor.pill_box[3] = ph;
-        box = ui_box_px(px, py, pw, ph, ph / 2);
+        box = ui_box_px(px, py, pw, ph, ph * 128);
         ui_kit_fill(ui, &box, ui_tone(ui_role(UI_SURFACE_CONTAINER) & 0xffffffu, 236), null);
         ui_kit_ring(ui, &box, ui_q8(ui, 1), ui_tone(ui_role(UI_OUTLINE_VARIANT) & 0xffffffu, 110));
         baseline = ui_kit_baseline(ui, py + (ph - ui_dev(ui, ui_types[UI_LABEL_MEDIUM].line)) / 2, UI_LABEL_MEDIUM);
@@ -927,7 +932,7 @@ static fn editor_pill_draw(struct ui address_to ui, struct editor_tab address_to
         cy = py + (ph - chip_h) / 2;
         if (wrap_w > 0)
         {
-                struct ui_box wb = ui_box_px(cx, cy, wrap_w, chip_h, chip_h / 2);
+                struct ui_box wb = ui_box_px(cx, cy, wrap_w, chip_h, chip_h * 128);
                 unsigned int wfill = tab->view.wrap ? ui_role(UI_PRIMARY)
                                                     : editor.pill_hover == 1 ? ui_tone(ui_role(UI_ON_SURFACE) & 0xffffffu, 26) : 0;
                 unsigned int wink = tab->view.wrap ? ui_role(UI_ON_PRIMARY) : ui_text_colour(ui, UI_ON_SURFACE_VARIANT);
@@ -938,10 +943,27 @@ static fn editor_pill_draw(struct ui address_to ui, struct editor_tab address_to
                 ui_kit_text(ui, cx + chip_px, baseline, (string_address)wrap_lbl, UI_LABEL_MEDIUM, wink, 0);
                 cx += wrap_w + gap;
         }
+        // Fixed-position segmented [ Text | Hex ] tab switcher pinned to the right edge of the pill.
+        sy = py + (ph - seg_h) / 2;
+        seg_box = ui_box_px(cx, sy, seg_w, seg_h, seg_h * 128);
+        ui_kit_fill(ui, &seg_box, ui_tone(ui_role(UI_ON_SURFACE) & 0xffffffu, 18), null);
+        cx += seg_pad;
         {
-                struct ui_box hb = ui_box_px(cx, cy, hex_w, chip_h, chip_h / 2);
+                struct ui_box tb = ui_box_px(cx, cy, text_w, chip_h, chip_h * 128);
+                unsigned int tfill = !tab->view.hex ? ui_role(UI_PRIMARY)
+                                                    : editor.pill_hover == 2 ? ui_tone(ui_role(UI_ON_SURFACE) & 0xffffffu, 26) : 0;
+                unsigned int tink = !tab->view.hex ? ui_role(UI_ON_PRIMARY) : ui_text_colour(ui, UI_ON_SURFACE_VARIANT);
+
+                editor.pill_text[0] = cx, editor.pill_text[1] = cy, editor.pill_text[2] = text_w, editor.pill_text[3] = chip_h;
+                if (tfill)
+                        ui_kit_fill(ui, &tb, tfill, null);
+                ui_kit_text(ui, cx + chip_px, baseline, (string_address)text_lbl, UI_LABEL_MEDIUM, tink, 0);
+                cx += text_w;
+        }
+        {
+                struct ui_box hb = ui_box_px(cx, cy, hex_w, chip_h, chip_h * 128);
                 unsigned int hfill = tab->view.hex ? ui_role(UI_PRIMARY)
-                                                   : editor.pill_hover == 2 ? ui_tone(ui_role(UI_ON_SURFACE) & 0xffffffu, 26) : 0;
+                                                   : editor.pill_hover == 3 ? ui_tone(ui_role(UI_ON_SURFACE) & 0xffffffu, 26) : 0;
                 unsigned int hink = tab->view.hex ? ui_role(UI_ON_PRIMARY) : ui_text_colour(ui, UI_ON_SURFACE_VARIANT);
 
                 editor.pill_hex[0] = cx, editor.pill_hex[1] = cy, editor.pill_hex[2] = hex_w, editor.pill_hex[3] = chip_h;
@@ -962,7 +984,8 @@ static b32 editor_pill_event(struct editor_tab address_to tab, const struct wind
         if (event->type == WINDOW_EVENT_MOTION)
         {
                 int hover = editor_pill_in(editor.pill_wrap, event->a, event->b) ? 1
-                            : editor_pill_in(editor.pill_hex, event->a, event->b) ? 2 : 0;
+                            : editor_pill_in(editor.pill_text, event->a, event->b) ? 2
+                            : editor_pill_in(editor.pill_hex, event->a, event->b) ? 3 : 0;
 
                 if (hover)
                         ui_kit_shape = WINDOW_POINTER_HAND;
@@ -979,7 +1002,9 @@ static b32 editor_pill_event(struct editor_tab address_to tab, const struct wind
                         editor.pill_down = true;
                         if (editor_pill_in(editor.pill_wrap, ui_kit.pointer_x, ui_kit.pointer_y))
                                 editor_toggle((int)DOC_CMD_WRAP);
-                        else if (editor_pill_in(editor.pill_hex, ui_kit.pointer_x, ui_kit.pointer_y))
+                        else if (editor_pill_in(editor.pill_text, ui_kit.pointer_x, ui_kit.pointer_y) && tab->view.hex)
+                                editor_toggle((int)DOC_CMD_HEX);
+                        else if (editor_pill_in(editor.pill_hex, ui_kit.pointer_x, ui_kit.pointer_y) && !tab->view.hex)
                                 editor_toggle((int)DOC_CMD_HEX);
                         return true;
                 }

@@ -1951,6 +1951,21 @@ static _Bool bind_filter(struct input_handle *handle, unsigned int type,
                                 bind->rel_x = bind->rel_y = 0;
                         }
                         taken = spark_input_push(ring, SPARK_INPUT_KIND_KEY, (unsigned short)code, value, 0);
+                        // Returning taken=true from input_handler.filter strips EV_KEY from vals[] before
+                        // input_pass_values() runs its post-handler autorepeat loop: mirror input_start/stop_autorepeat
+                        // here (dev->event_lock is held) so kernel key repeat keeps firing for all native UI apps.
+                        if (taken && value != 2 && test_bit(EV_REP, handle->dev->evbit) &&
+                            handle->dev->rep[REP_PERIOD] && handle->dev->rep[REP_DELAY] &&
+                            handle->dev->timer.function)
+                        {
+                                if (value)
+                                {
+                                        handle->dev->repeat_key = code;
+                                        mod_timer(&handle->dev->timer, jiffies + msecs_to_jiffies(handle->dev->rep[REP_DELAY]));
+                                }
+                                else if (handle->dev->repeat_key == code)
+                                        timer_delete(&handle->dev->timer);
+                        }
                 }
         }
 counted:

@@ -27305,7 +27305,9 @@ struct ui_text
         p64 bracket_a, bracket_b;
         struct ui_bar bar;
         struct ui_scroll scroll;
-        p64 scroll_line;
+        p64 scroll_line, scroll_vrow;
+        p64 wrap_cache_rev, wrap_cache_rows;
+        int wrap_cache_room, wrap_cache_lh, wrap_cache_zoom;
         int scroll_rem;
         b32 gutter_drag;
         p64 gutter_anchor;
@@ -27854,17 +27856,27 @@ static b32 ui_text_nth_row(struct ui address_to ui, struct ui_text address_to t,
                 }
                 ui_text_layout_line(ui, t, line, l);
                 indent = ui_text_wrap_indent(l, room);
-                for (from = 0;;)
+                for (from = 0; ; )
                 {
-                        to = ui_text_wrap_to(l, from, room, indent);
-                        row->line = line, row->from = from, row->to = to, row->last = to >= l->count;
-                        row->shift = l->bidi ? 0 : l->x[from] - (from ? indent : 0);
-                        if (at == index)
-                                return true;
-                        at++;
-                        if (to >= l->count)
-                                break;
-                        from = to;
+                        int sub = 0;
+
+                        for (;;)
+                        {
+                                to = ui_text_wrap_to(l, from, room, indent);
+                                row->line = line, row->from = from, row->to = to, row->last = to >= l->count;
+                                row->shift = l->bidi ? 0 : l->x[from] - (from ? indent : 0);
+                                if (!(line == t->top_line && sub < t->top_row))
+                                {
+                                        if (at == index)
+                                                return true;
+                                        at++;
+                                }
+                                sub++;
+                                if (to >= l->count)
+                                        break;
+                                from = to;
+                        }
+                        break;
                 }
         }
         if (wrapped)
@@ -27886,7 +27898,7 @@ static int ui_text_where(struct ui address_to ui, struct ui_text address_to t, p
         if (!field && (target < line || doc_hidden(&t->doc, target)))
                 return -1;
         for (; line < target && at < rows; line++)
-                at += ui_text_line_rows(ui, t, line);
+                at += ui_text_line_rows(ui, t, line) - (wrapped && line == t->top_line ? t->top_row : 0);
         if (at >= rows)
                 return 1;
         ui_text_layout_line(ui, t, target, &ui_text_lay);
@@ -27895,6 +27907,8 @@ static int ui_text_where(struct ui address_to ui, struct ui_text address_to t, p
         place = ui_text_lay.x[k];
         if (wrapped && !ui_text_lay.bidi)
         {
+                int sub = 0;
+
                 indent = ui_text_wrap_indent(&ui_text_lay, room);
                 for (;;)
                 {
@@ -27902,8 +27916,16 @@ static int ui_text_where(struct ui address_to ui, struct ui_text address_to t, p
                         if (k < to || to >= ui_text_lay.count)
                                 break;
                         from = to;
-                        at++;
+                        sub++;
                 }
+                if (target == t->top_line)
+                {
+                        if (sub < t->top_row)
+                                return -1;
+                        at += sub - t->top_row;
+                }
+                else
+                        at += sub;
                 place -= ui_text_lay.x[from] - (from ? indent : 0);
                 if (at >= rows)
                         return 1;
@@ -27913,6 +27935,17 @@ static int ui_text_where(struct ui address_to ui, struct ui_text address_to t, p
         return *x < t->left ? -1 : *x > t->right ? 1 : 0;
 }
 
+static p64 ui_text_wrap_vrow_of(struct ui address_to ui, struct ui_text address_to t, p64 target)
+{
+        p64 lines = doc_line_count(&t->doc), limit = target < lines ? target : lines, cap = limit < 4096 ? limit : 4096, vrow = 0;
+
+        for (p64 i = 0; i < cap; i++)
+                vrow += (p64)ui_text_line_rows(ui, t, i);
+        if (limit > cap)
+                vrow += limit - cap;
+        return vrow;
+}
+
 static fn ui_text_scroll_sync(struct ui address_to ui, struct ui_text address_to t, int height)
 {
         p64 rows, content;
@@ -27920,16 +27953,27 @@ static fn ui_text_scroll_sync(struct ui address_to ui, struct ui_text address_to
         if (t->mode == UI_TEXT_FIELD || t->line_height <= 0)
                 return;
         rows = t->hex ? (doc_length(&t->doc) / 16 + 1) : doc_line_count(&t->doc);
-        // When line wrap is on and logical lines alone fit in the viewport, count actual wrapped visual rows so wheel scrolling stays active.
-        if (t->wrap && !t->hex && height > 0 && rows * (p64)t->line_height <= (p64)height && rows <= 256)
+        if (t->wrap && !t->hex)
         {
-                p64 vrows = 0;
+                int room = t->right - t->left;
 
-                for (p64 i = 0; i < rows; i++)
-                        vrows += (p64)ui_text_line_rows(ui, t, i);
-                if (vrows > rows)
-                        rows = vrows;
+                if (room > 0 && (t->wrap_cache_rows == 0 || t->wrap_cache_rev != t->doc.version ||
+                                 t->wrap_cache_room != room || t->wrap_cache_lh != t->line_height || t->wrap_cache_zoom != t->zoom))
+                {
+                        p64 cap = rows < 4096 ? rows : 4096, vrows = 0;
+
+                        for (p64 i = 0; i < cap; i++)
+                                vrows += (p64)ui_text_line_rows(ui, t, i);
+                        if (rows > cap)
+                                vrows += rows - cap;
+                        t->wrap_cache_rev = t->doc.version, t->wrap_cache_room = room, t->wrap_cache_lh = t->line_height;
+                        t->wrap_cache_zoom = t->zoom, t->wrap_cache_rows = vrows > rows ? vrows : rows;
+                }
+                if (t->wrap_cache_rows > rows)
+                        rows = t->wrap_cache_rows;
         }
+        else
+                t->wrap_cache_rows = 0, t->top_row = 0;
         content = rows * (p64)t->line_height;
         if (content > 0x3fffffff)
                 content = 0x3fffffff;
@@ -27945,7 +27989,7 @@ static fn ui_text_scroll_jump(struct ui_text address_to t)
         if (t->mode == UI_TEXT_FIELD || t->line_height <= 0)
                 return;
         line = t->hex ? t->hex_top / 16 : t->top_line;
-        t->scroll_line = line, t->scroll_rem = 0;
+        t->scroll_line = line, t->top_row = 0, t->scroll_vrow = line, t->scroll_rem = 0;
         pos = line * (p64)t->line_height;
         if (pos > 0x3fffffff)
                 pos = 0x3fffffff;
@@ -29873,8 +29917,8 @@ static p32 ui_text_pinch(struct ui address_to ui, struct ui_text address_to t, c
 // Vertical scrollbar placement for multi-line text / code / hex views via the unified ui_bar primitive.
 static b32 ui_text_bar_rect(const struct ui address_to ui, const struct ui_text address_to t, struct ui_bar_rect address_to r)
 {
-        p64 total = t->hex ? ui_text_hex_rows_total(t) : doc_line_count(&t->doc);
-        p64 cur = t->hex ? t->hex_top / 16 : t->top_line;
+        p64 total = t->hex ? ui_text_hex_rows_total(t) : (t->wrap && t->wrap_cache_rows > 0 ? t->wrap_cache_rows : doc_line_count(&t->doc));
+        p64 cur = t->hex ? t->hex_top / 16 : (t->wrap && t->wrap_cache_rows > 0 ? t->scroll_vrow : t->top_line);
         int rows = ui_text_rows(t);
         if (t->mode == UI_TEXT_FIELD || rows <= 0)
                 return false;
@@ -31082,7 +31126,20 @@ static fn ui_text_draw(struct ui address_to ui, struct ui_text address_to t, int
         {
                 ui_text_scroll_sync(ui, t, height);
                 if (t->top_line != t->scroll_line)
-                        ui_text_scroll_jump(t);
+                {
+                        if (t->wrap && !t->hex)
+                        {
+                                p64 vrow = ui_text_wrap_vrow_of(ui, t, t->top_line);
+                                p64 pos = vrow * (p64)t->line_height;
+
+                                t->scroll_line = t->top_line, t->top_row = 0, t->scroll_vrow = vrow, t->scroll_rem = 0;
+                                if (pos > 0x3fffffff)
+                                        pos = 0x3fffffff;
+                                ui_scroll_set(&t->scroll, (int)pos);
+                        }
+                        else
+                                ui_text_scroll_jump(t);
+                }
                 ui_scroll_frame(ui, &t->scroll);
                 drawn_scroll = t->scroll.scroll;
                 {
@@ -31090,12 +31147,70 @@ static fn ui_text_draw(struct ui address_to ui, struct ui_text address_to t, int
 
                         if (rest < 0)
                                 rest = 0;
-                        t->top_line = (p64)(rest / t->line_height);
-                        if (t->top_line >= lines && lines > 0)
-                                t->top_line = lines - 1;
-                        t->scroll_line = t->top_line;
-                        t->scroll_rem = rest % t->line_height;
-                        line = t->top_line;
+                        if (t->wrap && !t->hex)
+                        {
+                                p64 target_vrow = (p64)(rest / t->line_height);
+
+                                if (t->top_line >= lines && lines > 0)
+                                        t->top_line = lines - 1, t->top_row = 0;
+                                while (t->scroll_vrow < target_vrow && t->top_line < lines)
+                                {
+                                        int lr = ui_text_line_rows(ui, t, t->top_line);
+                                        p64 rem_line;
+
+                                        if (lr < 1)
+                                                lr = 1;
+                                        if (t->top_row >= lr)
+                                                t->top_row = lr - 1;
+                                        rem_line = (p64)(lr - t->top_row);
+                                        if (target_vrow - t->scroll_vrow < rem_line)
+                                                t->top_row += (int)(target_vrow - t->scroll_vrow), t->scroll_vrow = target_vrow;
+                                        else if (t->top_line + 1 < lines)
+                                                t->scroll_vrow += rem_line, t->top_line++, t->top_row = 0;
+                                        else
+                                        {
+                                                t->top_row = lr - 1, t->scroll_vrow = target_vrow;
+                                                break;
+                                        }
+                                }
+                                while (t->scroll_vrow > target_vrow)
+                                {
+                                        if (t->top_row > 0)
+                                        {
+                                                p64 diff = t->scroll_vrow - target_vrow;
+                                                int step = diff < (p64)t->top_row ? (int)diff : t->top_row;
+
+                                                t->top_row -= step, t->scroll_vrow -= (p64)step;
+                                        }
+                                        else if (t->top_line > 0)
+                                        {
+                                                int lr;
+
+                                                t->top_line--;
+                                                lr = ui_text_line_rows(ui, t, t->top_line);
+                                                if (lr < 1)
+                                                        lr = 1;
+                                                t->top_row = lr - 1, t->scroll_vrow--;
+                                        }
+                                        else
+                                        {
+                                                t->scroll_vrow = 0;
+                                                break;
+                                        }
+                                }
+                                t->scroll_line = t->top_line;
+                                t->scroll_rem = rest % t->line_height;
+                                line = t->top_line;
+                        }
+                        else
+                        {
+                                t->top_line = (p64)(rest / t->line_height);
+                                if (t->top_line >= lines && lines > 0)
+                                        t->top_line = lines - 1;
+                                t->top_row = 0, t->scroll_line = t->top_line, t->scroll_vrow = t->top_line;
+                                t->scroll_rem = rest % t->line_height;
+                                line = t->top_line;
+                        }
                 }
                 ui->top = y > old_top ? y : old_top;
                 ui->bottom = y + height < old_bottom ? y + height : old_bottom;
@@ -31142,7 +31257,7 @@ static fn ui_text_draw(struct ui address_to ui, struct ui_text address_to t, int
                         }
                         if (line == single_caret_line)
                                 line_ground = window_mix(line_ground, ui_role(UI_ON_SURFACE) & 0xffffffu, 10);
-                        if (t->numbers && t->gutter > 0)
+                        if (t->numbers && t->gutter > 0 && !(t->wrap && line == t->top_line && t->top_row > 0))
                         {
                                 char number[24];
                                 positive digits = positive_into_string((string_address)number, (positive)(line + 1));
@@ -31161,17 +31276,22 @@ static fn ui_text_draw(struct ui address_to ui, struct ui_text address_to t, int
                                 b32 wrap = t->wrap && t->mode != UI_TEXT_FIELD && !ui_text_lay.bidi;
                                 p32 from = 0;
                                 int room = t->right - t->left, indent = wrap && room > 0 ? ui_text_wrap_indent(&ui_text_lay, room) : 0;
+                                int sub = 0;
                                 do
                                 {
                                         p32 to = wrap && room > 0 ? ui_text_wrap_to(&ui_text_lay, from, room, indent) : ui_text_lay.count;
                                         int offset_x = wrap ? ui_text_lay.x[from] - (from ? indent : 0) : 0;
-                                        if (line_ground != ground && room > 0)
-                                                ui_fill(ui, t->left, row_y, room, t->line_height, 0xff000000u | line_ground);
-                                        if (room > 0)
-                                                ui_text_draw_line(ui, t, &ui_text_lay, from, to, offset_x, line, row_y,
-                                                                  row_y + (t->line_height - (int)m.cell_height) / 2 + (int)m.baseline, line_ground,
-                                                                  !wrap || to >= ui_text_lay.count);
-                                        row_y += t->line_height;
+                                        if (!(wrap && line == t->top_line && sub < t->top_row))
+                                        {
+                                                if (line_ground != ground && room > 0)
+                                                        ui_fill(ui, t->left, row_y, room, t->line_height, 0xff000000u | line_ground);
+                                                if (room > 0)
+                                                        ui_text_draw_line(ui, t, &ui_text_lay, from, to, offset_x, line, row_y,
+                                                                          row_y + (t->line_height - (int)m.cell_height) / 2 + (int)m.baseline, line_ground,
+                                                                          !wrap || to >= ui_text_lay.count);
+                                                row_y += t->line_height;
+                                        }
+                                        sub++;
                                         from = to;
                                 } while (wrap && from < ui_text_lay.count && row_y < t->bottom);
                         }

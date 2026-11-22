@@ -2598,7 +2598,7 @@ static void gpu_bo_va_range(unsigned int idx, positive *va, positive *bytes, pos
 static positive gpu_place_aligned(positive bytes, positive align, positive guard)
 {
         unsigned int total = gpu_bo_count();
-        b32 wrapped = gpu_map_next + guard + bytes > GPU_VA_END;
+        b32 wrapped = gpu_backend == &gpu_i915_row || gpu_map_next + guard + bytes > GPU_VA_END;
 
         for (unsigned int pass = 0; pass < 2; pass++)
         {
@@ -3527,58 +3527,95 @@ static unsigned int gpu_i915_scene_batch(const struct gpu_job *job, unsigned int
                 return 0;
         {
                 // The records are in the same mapped buffer as the state: every one must be fill (0), tone (1), image copy (4), or image over (11),
-                // with optional 0x80 R/B swap on 4 and 11. This is a strided scan (every 8th word), which the library's routines do not cover.
+                // with optional 0x80 R/B swap on 4 and 11. Cull records outside [px0, py0, px1, py1) and drop anything fully occluded by a later
+                // opaque record (op 0 or 4) covering the entire damage rect; pack surviving records into the unused per-side bin buffer (a->g).
                 const unsigned int address_to rec = (const unsigned int address_to)((p8 address_to)job->state_at + ((long)a->ops - (long)job->state));
+                positive pack_va = a->g + (gpu_slot ? (256ull << 10) : 0ull);
+                b32 can_pack = a->count > 1u && a->g >= GPU_VA && !(a->g & 63) && a->g != a->ops &&
+                               (pack_va - GPU_VA) < gpu.size && 32ull * a->count <= gpu.size - (pack_va - GPU_VA);
+                unsigned int address_to dst_rec = can_pack ? (unsigned int address_to)((p8 address_to)job->state_at + ((long)pack_va - (long)job->state)) : 0;
+                unsigned int kept = 0;
 
                 for (i = 0; i < a->count; i++)
                 {
                         unsigned int raw = rec[8 * i], k = raw & ~0x80u;
+                        int rx0 = (int)rec[8 * i + 1], ry0 = (int)rec[8 * i + 2], rx1 = (int)rec[8 * i + 3], ry1 = (int)rec[8 * i + 4];
 
-                        if (raw <= 1u)
+                        if (raw > 1u && k != 4u && k != 11u)
+                                return 0;
+                        if (rx1 <= rx0 || ry1 <= ry0)
+                                continue;
+                        if (rx1 <= (int)px0 || rx0 >= (int)px1 || ry1 <= (int)py0 || ry0 >= (int)py1)
                                 continue;
                         if (k == 4u || k == 11u)
                         {
-                                int rx0 = (int)rec[8 * i + 1], ry0 = (int)rec[8 * i + 2], rx1 = (int)rec[8 * i + 3], ry1 = (int)rec[8 * i + 4];
                                 positive va = (positive)rec[8 * i + 5] | ((positive)rec[8 * i + 6] << 32);
                                 unsigned int rp = rec[8 * i + 7];
                                 positive span;
 
-                                if (rx1 <= rx0 || ry1 <= ry0 || !rp || rp > 65535u || va < GPU_VA || (va & 3))
+                                if (!rp || rp > 65535u || va < GPU_VA || (va & 3))
                                         return 0;
                                 span = 4ull * ((positive)(ry1 - ry0 - 1) * (positive)rp + (positive)(rx1 - rx0));
                                 if (span > (16384ull * 16384ull) || va + span < va)
                                         return 0;
-                                if (!has_img || va < img_min)
-                                        img_min = va;
-                                if (!has_img || va + span > img_max)
-                                        img_max = va + span;
-                                has_img = 1;
-                                continue;
                         }
-                        return 0;
+                        if (can_pack && (raw == 0u || k == 4u) && rx0 <= (int)px0 && ry0 <= (int)py0 && rx1 >= (int)px1 && ry1 >= (int)py1)
+                                kept = 0;
+                        if (can_pack)
+                                memory_copy(dst_rec + 8 * kept, rec + 8 * i, 32);
+                        kept++;
                 }
-        }
-        if (has_img)
-        {
-                positive img_bytes;
+                if (!kept)
+                {
+                        words[0] = 0x05000000u, words[1] = 0u;
+                        return 2;
+                }
+                {
+                        const unsigned int address_to use_rec = can_pack ? dst_rec : rec;
+                        unsigned int use_count = can_pack ? kept : a->count;
+                        positive use_ops = can_pack ? pack_va : a->ops;
 
-                img_base = img_min & ~31ull;
-                img_bytes = img_max - img_base;
-                if (img_bytes > (16384ull * 16384ull))
-                        return 0;
-                img_rows = (unsigned int)((img_bytes + 16383ull) >> 14);
-                if (!img_rows)
-                        img_rows = 1;
-        }
-        rows = py1 - py0;
-        {
-                const struct gpu_i915_surf surfs[3] = {
-                    {base, 4u * (px1 - px0), rows, 4u * a->dp},
-                    {a->ops, 64, (a->count + 1) >> 1, 64},
-                    {img_base, has_img ? 16384u : 0u, img_rows, 16384u}};
-                const unsigned int curbe[4] = {a->count, px0, py0, (unsigned int)img_base};
+                        for (i = 0; i < use_count; i++)
+                        {
+                                unsigned int k = use_rec[8 * i] & ~0x80u;
 
-                return gpu_i915_emit_batch(job, words, surfs, has_img ? 3u : 2u, curbe, has_img ? 4u : 3u, (px1 - px0) / 4, rows);
+                                if (k == 4u || k == 11u)
+                                {
+                                        int rx0 = (int)use_rec[8 * i + 1], ry0 = (int)use_rec[8 * i + 2], rx1 = (int)use_rec[8 * i + 3], ry1 = (int)use_rec[8 * i + 4];
+                                        positive va = (positive)use_rec[8 * i + 5] | ((positive)use_rec[8 * i + 6] << 32);
+                                        unsigned int rp = use_rec[8 * i + 7];
+                                        positive span = 4ull * ((positive)(ry1 - ry0 - 1) * (positive)rp + (positive)(rx1 - rx0));
+
+                                        if (!has_img || va < img_min)
+                                                img_min = va;
+                                        if (!has_img || va + span > img_max)
+                                                img_max = va + span;
+                                        has_img = 1;
+                                }
+                        }
+                        if (has_img)
+                        {
+                                positive img_bytes;
+
+                                img_base = img_min & ~31ull;
+                                img_bytes = img_max - img_base;
+                                if (img_bytes > (16384ull * 16384ull))
+                                        return 0;
+                                img_rows = (unsigned int)((img_bytes + 16383ull) >> 14);
+                                if (!img_rows)
+                                        img_rows = 1;
+                        }
+                        rows = py1 - py0;
+                        {
+                                const struct gpu_i915_surf surfs[3] = {
+                                    {base, 4u * (px1 - px0), rows, 4u * a->dp},
+                                    {use_ops, 64, (use_count + 1) >> 1, 64},
+                                    {img_base, has_img ? 16384u : 0u, img_rows, 16384u}};
+                                const unsigned int curbe[4] = {use_count, px0, py0, (unsigned int)img_base};
+
+                                return gpu_i915_emit_batch(job, words, surfs, has_img ? 3u : 2u, curbe, has_img ? 4u : 3u, (px1 - px0) / 4, rows);
+                        }
+                }
         }
 }
 
@@ -4162,7 +4199,7 @@ static b32 gpu_import_named(unsigned int i, unsigned int before)
 {
         if (gpu.imported_dead[i])
                 return gpu.imported_dead_after[i] == before;
-        return gpu_imports_all || gpu.imported_handed[i];
+        return gpu_imports_all || gpu.imported_own[i] || gpu.imported_handed[i];
 }
 
 // Whether the job's bo list (the submit's buffers) names the map at i. The invariant: every map a record of the job refers to is in the list. A record gets a map's address
@@ -4451,6 +4488,8 @@ HOT static int gpu_scene_build(positive ops_at, unsigned int n, positive bins_at
         cut = aligned && !gpu_cut_off; // (the kernels by hand: the hidden records are passed over in the lists of the cells a later record covers whole)
         if (bins_at >= gpu.size || room > gpu.size - bins_at || 8ull * cw * ch > room)
                 return gpu_end = GPU_END_OVERFLOW, -1;
+        // Intel i915 op 6 (gpu_i915_scene) reads culled ops directly instead of 64x64 bins: skip CPU binning completely.
+        if (!(aligned && gpu_backend == &gpu_i915_row))
         {
                 positive tab_bytes = (positive)cw * ch * 8, need;
                 void *stage = gpu_bin_stage;
@@ -4546,7 +4585,7 @@ static positive gpu_scene_submit(positive ops_at, unsigned int n, positive bins_
         int built;
 
         gpu_last_error = 0, gpu_end = GPU_END_NONE;
-        if (gpu_lost || gpu_done(gpu_bins.job[side]) == 0 || gpu_slot_take() < 0)
+        if (gpu_lost || gpu_done(gpu_bins.job[side]) == 0 || gpu_lost || gpu_slot_take() < 0)
                 return gpu_end = gpu_lost ? GPU_END_NONE : GPU_END_LATE, 0;
         at = scratch ? bins_at : bins_at + side * room;
         built = gpu_scene_build(ops_at, n, at, room, d_at, pitch, w, h, dx0, dy0, dx1, dy1, binned);

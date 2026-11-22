@@ -757,7 +757,7 @@ def test_compositor_and_xwm_invariants():
     gpu_c = read_text("src/canvas/gpu.c")
     check("GPU async wake & strict BO-list hygiene: gpu_wake uses gpu_scene_submit and gpu_import_named/gpu_map_named require handed",
           "gpu_scene_submit(ops_at, 1, bins_at, d_at, 64, 64, 4, 0, 0, 64, 4);" in gpu_c and
-          "return gpu_imports_all || gpu.imported_handed[i];" in gpu_c and
+          "return gpu_imports_all || gpu.imported_own[i] || gpu.imported_handed[i];" in gpu_c and
           "return pages ? gpu_maps[i].handed : gpu_maps[i].handed && now;" in gpu_c and
           "gpu_import_handed(compositor_gpu_state.out);" in read_text("src/canvas/compositor/gpu_host.c"))
     kms_c = read_text("src/canvas/compositor/kms.c")
@@ -1377,6 +1377,47 @@ def test_hardening_66_bug_families():
           "compositor_gpu_i915_tiles.used = 0;" in read_text("src/canvas/compositor/compose.c") and
           "compositor_gpu_i915_tile_alloc((unsigned long)pw * (unsigned long)ph, &tile_va)" in read_text("src/canvas/compositor/pointer.c") and
           "if (gpu_last_error != 95)\n                                gpu_fault_note(false);" in gpu_c)
+
+    # --- Family 9: Intel 15x Scene Culling, Cross-GPU Host Fixes & Editor/UI Polish ---
+    editor_c = read_text("src/canvas/ui/editor.c")
+    check("Family 9: Intel i915 15x scene culling + opaque occlusion + skip binning + 4096px/taskbar band split + first-fit VA + sync scale blit + 64B pitch",
+          "if (!(aligned && gpu_backend == &gpu_i915_row))" in gpu_c and
+          "positive pack_va = a->g + (gpu_slot ? (256ull << 10) : 0ull);" in gpu_c and
+          "b32 wrapped = gpu_backend == &gpu_i915_row || gpu_map_next + guard + bytes > GPU_VA_END;" in gpu_c and
+          "if (compositor_card.nowait && compositor_card.looped && gpu_backend != &gpu_i915_row)" in gpu_host_c and
+          "if (gpu_backend == &gpu_i915_row && (compositor.scanout_pitch & 63))" in gpu_host_c and
+          "int band_y = gpu_backend == &gpu_i915_row && compositor.height > 256 ? ((compositor.height - 96) & ~3) : compositor.height;" in gpu_host_c)
+
+    check("Family 9: Post-recover DMA-BUF re-import, scaled_direct fenced-flip guard, card_tick done<0, BO-list own/scale hold, gpu_lost re-check & fence close",
+          "compositor_wl.lent[row].fd >= 0 && compositor_wl.lent[row].epoch != gpu_epoch && gpu_ready()" in wl_host_c and
+          "if (!l->gather && l->fd >= 0 && l->epoch != gpu_epoch && gpu_ready() && !compositor_wl_card_barred(row))" in wl_host_c and
+          "compositor.flip_pending || compositor.scaled_direct || !compositor_in_fence()" in present_c and
+          "int done = gpu_done(compositor_card.last);" in present_c and
+          "int strip_damage = 0;" in present_c and
+          "return gpu_imports_all || gpu.imported_own[i] || gpu.imported_handed[i];" in gpu_c and
+          "if (gpu_lost || gpu_done(gpu_bins.job[side]) == 0 || gpu_lost || gpu_slot_take() < 0)" in gpu_c and
+          "compositor_card_fence_close();" in gpu_host_c[gpu_host_c.find("static void compositor_gpu_recover("):gpu_host_c.find("static void compositor_gpu_lost_check(")])
+
+    check("Family 9: Editor Q8 rounded stats pill, fixed-position [Text|Hex] segmented switcher & smooth wrapped-line scrolling",
+          "box = ui_box_px(px, py, pw, ph, ph * 128);" in editor_c and
+          "seg_box = ui_box_px(cx, sy, seg_w, seg_h, seg_h * 128);" in editor_c and
+          "editor.pill_text[0] = cx" in editor_c and
+          "ui_text_wrap_vrow_of(" in ui_c and
+          "p64 target_vrow = (p64)(rest / t->line_height);" in ui_c and
+          "!(wrap && line == t->top_line && sub < t->top_row)" in ui_c)
+
+    # --- Family 10: Kernel Spark Key-Repeat & UI Kit Repeat Invariants ---
+    mw_c = read_text("src/moonwater/moonwater.c")
+    term_c = read_text("src/canvas/ui/terminal.c")
+    inp_c = read_text("src/canvas/compositor/input.c")
+    check("Family 10: Spark bind_filter arms/cancels kernel EV_REP autorepeat timer when consuming EV_KEY (restores repeat in terminal & all UI apps)",
+          "test_bit(EV_REP, handle->dev->evbit)" in mw_c and
+          "handle->dev->repeat_key = code;" in mw_c and
+          "mod_timer(&handle->dev->timer, jiffies + msecs_to_jiffies(handle->dev->rep[REP_DELAY]));" in mw_c and
+          "timer_delete(&handle->dev->timer);" in mw_c and
+          "flags = modifiers | (value ? WINDOW_KEY_DOWN : 0) | (value == 2 ? WINDOW_KEY_REPEAT : 0);" in inp_c and
+          "WINDOW_KEY_REPEAT" not in term_c[term_c.find("static void terminal_key("):term_c.find("static void terminal_pointer_key(")] and
+          "WINDOW_KEY_REPEAT" not in ui_c[ui_c.find("static p32 ui_text_key("):ui_c.find("static p32 ui_text_key(") + 2500])
 
 
 def test_build_and_audit_gates():

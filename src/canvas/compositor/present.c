@@ -602,7 +602,7 @@ static void compositor_card_commit(void)
 
         if (compositor_card.fenced || compositor_card.failed || compositor_card.next < compositor_card.steps || !compositor_card.flip_own || compositor_card.turning ||
             ((compositor_card.back || compositor_card.plane_off) && compositor.overlay_on) || compositor.card < 0 || compositor.on_screen == compositor.fb ||
-            compositor.flip_pending || !compositor_in_fence())
+            compositor.flip_pending || compositor.scaled_direct || !compositor_in_fence())
                 return;
         fence = compositor_card_fence_for(compositor_card.last);
         compositor_card.fenced = fence >= 0 && compositor_flip_fenced(compositor.fb, fence);
@@ -745,8 +745,20 @@ static void compositor_card_tick(void)
                 }
                 compositor_card_commit();
         }
-        if (compositor_card.on && compositor_card.next == compositor_card.steps && gpu_done(compositor_card.last) != 0)
-                compositor_card_done();
+        if (compositor_card.on && compositor_card.next == compositor_card.steps)
+        {
+                int done = gpu_done(compositor_card.last);
+
+                if (done < 0)
+                {
+                        compositor_card.failed = 1;
+                        if (gpu_late_end() != GPU_END_NONE)
+                                compositor_gpu_job_failed();
+                        compositor_card_done();
+                }
+                else if (done > 0)
+                        compositor_card_done();
+        }
         else if (!compositor_card.on && gpu_idle())
                 compositor_card_fence_close();
 }
@@ -1589,8 +1601,22 @@ static void compositor_present_frames(void)
 #endif
         for (unsigned int at = 0; at < windows; at++)
                 compositor_close_mean(&frames[at]), compositor_close_ready(&frames[at]);
+        int strip_damage = 0;
+
+        if (compositor.width & 3)
+        {
+                int cut = compositor.width & ~3;
+
+                for (unsigned int at = 0; at < compositor.damages; at++)
+                        if (compositor.damage[at][2] > cut)
+                                strip_damage = 1;
+        }
+#ifdef CONFIG_MOONWATER_WAYLAND
+        if (strip_damage)
+                compositor_wl_straight_pays(-1), compositor_wl_tiled_settle();
+#endif
 #ifdef MOONWATER_GPU_C
-        int gpu_drawn = compositor_gpu_present(frames, count), gpu_composed = gpu_drawn && !(compositor.width & 3);
+        int gpu_drawn = compositor_gpu_present(frames, count), gpu_composed = gpu_drawn && !strip_damage;
 
         if (gpu_drawn)
                 compositor_wl_count_card(rows, windows);
@@ -1601,8 +1627,10 @@ static void compositor_present_frames(void)
         int gpu_drawn = 0, apart = !flip_own && compositor_changed_ready(), gpu_composed = 0;
 #endif
 #ifdef CONFIG_MOONWATER_WAYLAND
-        if (!gpu_composed)
+        if (!gpu_drawn)
                 compositor_wl_straight_pays(-1), compositor_wl_tiled_settle(), compositor_wl_lent_sync(1);
+        else if (strip_damage)
+                compositor_wl_lent_sync(1);
 #endif
         if (!compositor.mirror_bytes && compositor.changed > 0)
                 compositor.mirror = compositor.scanout, compositor.mirror_pitch = compositor.scanout_pitch / 4;
