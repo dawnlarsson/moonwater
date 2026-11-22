@@ -1483,9 +1483,14 @@ static unsigned int gpu_userptr_error(positive at, unsigned int how)
 }
 
 // A dma-buf of [offset, offset + size) of a sealed memfd, through /dev/udmabuf: its descriptor, or -errno.
+// The udmabuf device's descriptor, opened once per start (gpu_stop forgets it). File scope, not function-local: a check's fake open answers a number that is not a
+// descriptor, and a cache that outlives the fake handed that number to the real-card rows (EBADF, 19 rows of CHECK_gpu_kit). Forgotten, not closed: a fake
+// number must not be closed.
+static int gpu_udmabuf_fd = -1;
+
 static long gpu_dmabuf_make(int memfd, positive offset, positive size)
 {
-        static int udmabuf_fd = -1;
+        int udmabuf_fd = gpu_udmabuf_fd;
         struct { unsigned int memfd, flags; unsigned long offset, size; } create = {(unsigned int)memfd, 1, offset, size}; // UDMABUF_FLAGS_CLOEXEC
 
         if (udmabuf_fd < 0)
@@ -1493,7 +1498,7 @@ static long gpu_dmabuf_make(int memfd, positive offset, positive size)
                 long opened = GPU_UDMABUF_OPEN();
                 if (opened < 0)
                         return opened;
-                udmabuf_fd = (int)opened;
+                udmabuf_fd = gpu_udmabuf_fd = (int)opened;
         }
         return GPU_CONTROL(udmabuf_fd, 0x40187542u, &create); // _IOW('u', 0x42, struct udmabuf_create)
 }
@@ -1566,6 +1571,8 @@ static void gpu_bins_forget(void);
 COLD static void gpu_stop(void)
 {
         void *stage = gpu_bin_stage, *ostage = gpu_ops_stage;
+
+        gpu_udmabuf_fd = -1; // forgotten, not closed (see gpu_dmabuf_make): the next start opens the device again
 
         gpu_maps_reset();
         gpu_shared.fd = -1, gpu_shared.at = 0, gpu_shared.bytes = 0, gpu_shared.pin = 0;
