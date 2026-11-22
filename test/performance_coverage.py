@@ -304,6 +304,9 @@ cover('direct_benchmark', 'test/checks.c#BENCH_fill_rect', 'memory_fill_u32_rect
 cover('direct_benchmark', 'test/checks.c#BENCH_resample', 'memory_resample_u32_rect',
       'paired timing against resample_reference, the walk compositor_blit_scaled made, over a landing of a 1000 by 600 '
       'picture at 96%, 98% and 100%, with AVX-512, with AVX2 and with neither; the scalar walk on arm64 and riscv64')
+cover('correctness_only', 'test/checks.c#CHECK_font', 'memory_box_u32_rect',
+      'the box-filtered scale of the Scenes overview\'s miniatures, the oracle of the card\'s op 7 with taps: every tap pair, '
+      'sizes to 67 and random tables, against box_reference on each architecture; not yet timed (the card draws the overview)')
 cover('direct_benchmark', 'test/checks.c#BENCH_over_tone', 'memory_over_tone_u32',
       'paired timing against the ui_over loop it replaced in ui_kit_run and ui_fill, '
       'one tone over runs of 8, 64 and 1024 pixels, in the tier each machine has')

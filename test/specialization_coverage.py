@@ -465,6 +465,9 @@ cover('nothing_to_fold', None, 'memory_copy_rect_nt_row_ymm',
 cover('folds_already', 'width', 'memory_runs_u32',
       'compositor_runs_learn hands it the width of a window'"'"'s picture, which the program sets at run time; no reachable '
       'call site passes a literal, and the height is the same kind of value')
+cover('folds_already', 'width', 'memory_box_u32_rect',
+      'a miniature\'s width and height are a window\'s size at the overview\'s scale and its taps the shrink\'s, all set at run '
+      'time; no reachable call site passes a literal')
 cover('folds_already', 'width', 'memory_resample_u32_rect',
       'compositor_blit_scaled hands it the width of a landing window, which its size sets at run time, and the clip '
       'of that rectangle, which the damage sets; no reachable call site passes a literal, and the height is the same '

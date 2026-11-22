@@ -3789,6 +3789,86 @@ static fn check_resample_rect()
 }
 
 /*
+        The box mean memory_box_u32_rect is written out as, and the card's op 7 with taps is held to: each pixel the mean of tx by
+        ty pixels of the picture, the columns and the rows from the tables, each channel's sum plus half the count shifted down by
+        the count's power of two.
+*/
+static void box_reference(unsigned int address_to into, positive into_stride, positive width, positive height, const unsigned int address_to from,
+                          positive from_stride, const unsigned int address_to columns, const unsigned int address_to rows, positive taps)
+{
+        positive tx = taps & 255, ty = taps >> 8 & 255, n = tx * ty, shift = 0;
+
+        if (!width || !height || !n)
+                return;
+        while (!((n >> shift) & 1))
+                shift++;
+        for (positive y = 0; y < height; y++)
+                for (positive x = 0; x < width; x++)
+                {
+                        unsigned int sum[4] = {0, 0, 0, 0}, out = 0;
+
+                        for (positive j = 0; j < ty; j++)
+                                for (positive i = 0; i < tx; i++)
+                                {
+                                        unsigned int pixel = from[(positive)rows[y * ty + j] * from_stride + columns[x * tx + i]];
+
+                                        for (unsigned int c = 0; c < 4; c++)
+                                                sum[c] += pixel >> (8 * c) & 255;
+                                }
+                        for (unsigned int c = 0; c < 4; c++)
+                                out |= ((sum[c] + (unsigned int)(n / 2)) >> shift) << (8 * c);
+                        into[y * into_stride + x] = out;
+                }
+}
+
+/*
+        memory_box_u32_rect against box_reference: every pair of taps (1, 2 and 4 each way), widths and heights to 67, random tables
+        over a picture of random words of every alpha, rows strided past their width, the words around the picture held to a
+        canary; one tap is a copy of the pixel the tables name; a zero size or tap count touches nothing.
+*/
+static fn check_box_rect()
+{
+        static const positive sides[] = {1, 2, 3, 5, 8, 13, 31, 64, 67};
+        static unsigned int picture[256 * 160], into_asm[80 * 80 + 64], into_ref[80 * 80 + 64], columns[67 * 4], rows[67 * 4];
+        unsigned int seed = 2463534242u;
+        p8 fine = true, copies = true;
+
+        for (positive word = 0; word < sizeof(picture) / sizeof(picture[0]); word++)
+                seed ^= seed << 13, seed ^= seed >> 17, seed ^= seed << 5, picture[word] = seed;
+        for (positive t = 0; t < 9; t++)
+                for (positive a = 0; a < sizeof(sides) / sizeof(sides[0]); a++)
+                        for (positive b = 0; b < sizeof(sides) / sizeof(sides[0]); b++)
+                        {
+                                positive tx = (positive)1 << (t % 3), ty = (positive)1 << (t / 3), width = sides[a], height = sides[b];
+                                positive into_stride = width + (a & 1) * 5, from_stride = 256;
+
+                                for (positive k = 0; k < width * tx; k++)
+                                        seed ^= seed << 13, seed ^= seed >> 17, seed ^= seed << 5, columns[k] = seed % 250;
+                                for (positive k = 0; k < height * ty; k++)
+                                        seed ^= seed << 13, seed ^= seed >> 17, seed ^= seed << 5, rows[k] = seed % 160;
+                                for (positive i = 0; i < sizeof(into_asm) / sizeof(into_asm[0]); i++)
+                                        into_asm[i] = into_ref[i] = 0xdeadbeefu;
+                                box_reference(into_ref + 8, into_stride, width, height, picture, from_stride, columns, rows, tx | ty << 8);
+                                memory_box_u32_rect(into_asm + 8, into_stride, width, height, picture, from_stride, columns, rows, tx | ty << 8);
+                                for (positive i = 0; i < sizeof(into_asm) / sizeof(into_asm[0]); i++)
+                                        fine = fine && into_asm[i] == into_ref[i];
+                                if (tx == 1 && ty == 1)
+                                        for (positive y = 0; y < height; y++)
+                                                for (positive x = 0; x < width; x++)
+                                                        copies = copies && into_asm[8 + y * into_stride + x] == picture[rows[y] * from_stride + columns[x]];
+                        }
+        check("box: every pixel the mean the reference makes, at every pair of taps, and nothing past the picture touched", fine);
+        check("box: with one tap each way a pixel is the one the tables name", copies);
+        check("box: a zero size or tap count touches nothing", ({
+                      static unsigned int canary[4] = {7, 7, 7, 7};
+                      memory_box_u32_rect(canary, 2, 0, 3, picture, 4, columns, rows, 1 | 1 << 8);
+                      memory_box_u32_rect(canary, 2, 3, 0, picture, 4, columns, rows, 1 | 1 << 8);
+                      memory_box_u32_rect(canary, 2, 2, 2, picture, 4, columns, rows, 0);
+                      canary[0] == 7 && canary[1] == 7 && canary[2] == 7 && canary[3] == 7;
+              }));
+}
+
+/*
         memory_copy_changed_u32: every count to 80 words and rows of 127 to
         1000, differences none, one at each place and everywhere; the answer
         against chunks counted from the front, mirror equal to from after,
@@ -4976,6 +5056,7 @@ b32 main()
         check_copy_rect_stream();
         check_runs();
         check_resample_rect();
+        check_box_rect();
         check_copy_changed();
         check_first_differs();
         check_sweep();

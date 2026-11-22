@@ -64,7 +64,7 @@
         A .set is a second label on the same address, so there is no wrapper
         and no jump, and which names get one depends on who is linking.
 
-        517 routines (490 public, 27 local), 505 of them on all three and 12 local to one.
+        520 routines (493 public, 27 local), 508 of them on all three and 12 local to one.
         Raw C purity: 0 function bodies, 0 object definitions, 0 body macros, and 0 object macros (all forbidden).
 
           routine                        scope   x86_64  arm64   riscv64
@@ -244,6 +244,7 @@
           memory_average_ahead           public  yes     yes     yes
           memory_blend_u32_rect          public  yes     yes     yes
           memory_blend_u32_rect_baseline public  yes     yes     yes
+          memory_box_u32_rect            public  yes     yes     yes
           memory_checksum_bsd16          public  yes     yes     yes
           memory_common_prefix           public  yes     yes     yes
           memory_compare                 public  yes     yes     yes
@@ -314,6 +315,7 @@
           memory_mix_u32_row             public  yes     yes     yes
           memory_nth_last_of             public  yes     yes     yes
           memory_nth_of                  public  yes     yes     yes
+          memory_nv12_to_xrgb_row        public  yes     yes     yes
           memory_offsets_between         public  yes     yes     yes
           memory_offsets_fields          public  yes     yes     yes
           memory_offsets_fields_arm64    local   --      yes     --
@@ -330,6 +332,7 @@
           memory_over_u32_rect           public  yes     yes     yes
           memory_over_under_out_u32_rect public  yes     yes     yes
           memory_over_under_u32_rect     public  yes     yes     yes
+          memory_pack_2101010_u32        public  yes     yes     yes
           memory_paste_lines__room_64    public  yes     yes     yes
           memory_ramp_dither_u32         public  yes     yes     yes
           memory_release                 public  yes     yes     yes
@@ -357,8 +360,6 @@
           memory_sum_swap_u32            public  yes     yes     yes
           memory_sweep_coverage          public  yes     yes     yes
           memory_swizzle_rb_u32          public  yes     yes     yes
-          memory_pack_2101010_u32        public  yes     yes     yes
-          memory_nv12_to_xrgb_row        public  yes     yes     yes
           memory_take                    public  yes     yes     yes
           memory_text_clean              public  yes     yes     yes
           memory_text_span               public  yes     yes     yes
@@ -17784,6 +17785,45 @@ __asm__(
     "add $48, %rsp\n   pop %r15\n   pop %r14\n   pop %r13\n   pop %r12\n   pop %rbp\n   pop %rbx\n" ASM_RET
     ASM_END(memory_resample_u32_rect)
 
+    //
+    //       memory_box_u32_rect -- rdi into, rsi into_stride in words, rdx width, rcx height, r8 from, r9 from_stride in
+    //       words, and on the stack columns, rows, taps. A width by height picture each pixel of which is the mean of tx by ty
+    //       pixels of from (tx = taps & 255, ty = taps >> 8 & 255, each 1, 2 or 4): target column x takes the source columns
+    //       columns[x tx] to columns[x tx + tx - 1], target row y the source rows rows[y ty] to rows[y ty + ty - 1]. Each
+    //       channel, alpha with the others, is the taps' sum plus half their count, shifted down by the count's power of two,
+    //       which is the card's op 7 with its taps (gpu.asm) bit for bit, and with one tap a copy of that pixel. Two channels a
+    //       register in 16-bit lanes (sixteen taps of 255 are 4080), blue with red and green with alpha. A zero size or a zero
+    //       tap count touches nothing. Stack after the pushes: 0 into's row, 8 into_stride in bytes, 16 width, 24 rows left,
+    //       32 from_stride in bytes, 40 the half in both lanes, 48 tx in bytes, 56 the shift; the arguments at 120, 128, 136.
+    //
+    ASM_FUNC(memory_box_u32_rect)
+    "push %rbx\n   push %rbp\n   push %r12\n   push %r13\n   push %r14\n   push %r15\n   sub $64, %rsp\n"
+    "test %rdx, %rdx\n   jz " ASM_LABEL(box_out) "\n   test %rcx, %rcx\n   jz " ASM_LABEL(box_out) "\n"
+    "mov %rdi, (%rsp)\n   shl $2, %rsi\n   mov %rsi, 8(%rsp)\n   mov %rdx, 16(%rsp)\n   mov %rcx, 24(%rsp)\n"
+    "shl $2, %r9\n   mov %r9, 32(%rsp)\n   mov 120(%rsp), %r12\n   mov 128(%rsp), %r13\n   mov 136(%rsp), %rax\n"
+    "movzbl %al, %r10d\n   shr $8, %eax\n   movzbl %al, %r11d\n   mov %r10d, %eax\n   imul %r11d, %eax\n"
+    "test %eax, %eax\n   jz " ASM_LABEL(box_out) "\n   bsf %eax, %ecx\n   mov %rcx, 56(%rsp)\n"
+    "shr $1, %eax\n   mov %eax, %edx\n   shl $16, %edx\n   or %edx, %eax\n   mov %rax, 40(%rsp)\n"
+    "lea (,%r10,4), %rax\n   mov %rax, 48(%rsp)\n"
+    "" ASM_LABEL(box_row) ":\n"
+    "mov (%rsp), %r14\n   mov %r12, %r15\n   mov 16(%rsp), %rbx\n"
+    "" ASM_LABEL(box_pixel) ":\n"
+    "xor %eax, %eax\n   xor %ebp, %ebp\n   xor %esi, %esi\n"
+    "" ASM_LABEL(box_tap_row) ":\n"
+    "mov (%r13,%rsi,4), %edx\n   imul 32(%rsp), %rdx\n   add %r8, %rdx\n   xor %edi, %edi\n"
+    "" ASM_LABEL(box_tap) ":\n"
+    "mov (%r15,%rdi,4), %ecx\n   mov (%rdx,%rcx,4), %ecx\n   mov %ecx, %r9d\n   and $0x00ff00ff, %ecx\n"
+    "   shr $8, %r9d\n   and $0x00ff00ff, %r9d\n   add %ecx, %eax\n   add %r9d, %ebp\n"
+    "   inc %edi\n   cmp %r10d, %edi\n   jb " ASM_LABEL(box_tap) "\n"
+    "inc %esi\n   cmp %r11d, %esi\n   jb " ASM_LABEL(box_tap_row) "\n"
+    "mov 40(%rsp), %edx\n   add %edx, %eax\n   add %edx, %ebp\n   mov 56(%rsp), %ecx\n   shr %cl, %eax\n   shr %cl, %ebp\n"
+    "and $0x00ff00ff, %eax\n   and $0x00ff00ff, %ebp\n   shl $8, %ebp\n   or %ebp, %eax\n"
+    "mov %eax, (%r14)\n   add $4, %r14\n   add 48(%rsp), %r15\n   dec %rbx\n   jnz " ASM_LABEL(box_pixel) "\n"
+    "mov 8(%rsp), %rax\n   add %rax, (%rsp)\n   lea (%r13,%r11,4), %r13\n   decq 24(%rsp)\n   jnz " ASM_LABEL(box_row) "\n"
+    "" ASM_LABEL(box_out) ":\n"
+    "add $64, %rsp\n   pop %r15\n   pop %r14\n   pop %r13\n   pop %r12\n   pop %rbp\n   pop %rbx\n" ASM_RET
+    ASM_END(memory_box_u32_rect)
+
     /* Deflate primary-table decode. job (88 bytes): bits, bit count <64,
        input cursor/limit, output cursor/limit, valid history before output,
        literal[512], distance[64], length info[29], distance info[30]. Cells
@@ -28902,6 +28942,40 @@ __asm__(
     "ldp x19, x20, [sp, #16]\n   ldp x29, x30, [sp], #112\n" ASM_RET
     ASM_END(memory_resample_u32_rect)
 
+    //
+    //       memory_box_u32_rect -- x0 into, x1 into_stride in words, x2 width, x3 height, x4 from, x5 from_stride in words,
+    //       x6 columns, x7 rows, and on the stack taps. The x86_64 block carries the contract: two channels a register in
+    //       16-bit lanes, the taps a pixel in two loops (a row of from, its columns), the sum rounded by half the count and
+    //       shifted down by its power of two.
+    //
+    ASM_FUNC(memory_box_u32_rect)
+    "ldr x8, [sp]\n"
+    "stp x29, x30, [sp, #-80]!\n   mov x29, sp\n   stp x19, x20, [sp, #16]\n   stp x21, x22, [sp, #32]\n"
+    "stp x23, x24, [sp, #48]\n   stp x25, x26, [sp, #64]\n"
+    "cbz x2, " ASM_LABEL(box_out_a) "\n   cbz x3, " ASM_LABEL(box_out_a) "\n"
+    "and x9, x8, #255\n   ubfx x10, x8, #8, #8\n   mul x11, x9, x10\n   cbz x11, " ASM_LABEL(box_out_a) "\n"
+    "rbit x12, x11\n   clz x12, x12\n   lsr x13, x11, #1\n   orr x13, x13, x13, lsl #16\n"
+    "lsl x1, x1, #2\n   lsl x5, x5, #2\n"
+    "" ASM_LABEL(box_row_a) ":\n"
+    "mov x15, x0\n   mov x16, x6\n   mov x17, x2\n"
+    "" ASM_LABEL(box_pixel_a) ":\n"
+    "mov w19, wzr\n   mov w20, wzr\n   mov x21, #0\n"
+    "" ASM_LABEL(box_tap_row_a) ":\n"
+    "ldr w22, [x7, x21, lsl #2]\n   madd x22, x22, x5, x4\n   mov x23, #0\n"
+    "" ASM_LABEL(box_tap_a) ":\n"
+    "ldr w24, [x16, x23, lsl #2]\n   ldr w24, [x22, x24, lsl #2]\n   and w25, w24, #0x00ff00ff\n   lsr w26, w24, #8\n"
+    "   and w26, w26, #0x00ff00ff\n   add w19, w19, w25\n   add w20, w20, w26\n"
+    "   add x23, x23, #1\n   cmp x23, x9\n   b.lo " ASM_LABEL(box_tap_a) "\n"
+    "add x21, x21, #1\n   cmp x21, x10\n   b.lo " ASM_LABEL(box_tap_row_a) "\n"
+    "add w19, w19, w13\n   add w20, w20, w13\n   lsr w19, w19, w12\n   lsr w20, w20, w12\n"
+    "and w19, w19, #0x00ff00ff\n   and w20, w20, #0x00ff00ff\n   orr w19, w19, w20, lsl #8\n   str w19, [x15], #4\n"
+    "add x16, x16, x9, lsl #2\n   subs x17, x17, #1\n   b.ne " ASM_LABEL(box_pixel_a) "\n"
+    "add x0, x0, x1\n   add x7, x7, x10, lsl #2\n   subs x3, x3, #1\n   b.ne " ASM_LABEL(box_row_a) "\n"
+    "" ASM_LABEL(box_out_a) ":\n"
+    "ldp x25, x26, [sp, #64]\n   ldp x23, x24, [sp, #48]\n   ldp x21, x22, [sp, #32]\n   ldp x19, x20, [sp, #16]\n"
+    "ldp x29, x30, [sp], #80\n" ASM_RET
+    ASM_END(memory_box_u32_rect)
+
     /* See the x86_64 body. */
     /* See the x86_64 range encoder contract. */
     /* See the x86_64 backwards Huffman encoder contract. */
@@ -39707,6 +39781,43 @@ __asm__(
     "ld s6, 40(sp)\n   ld s7, 48(sp)\n   ld s8, 56(sp)\n   ld s9, 64(sp)\n   ld s10, 72(sp)\n   ld s11, 80(sp)\n"
     "addi sp, sp, 112\n" ASM_RET
     ASM_END(memory_resample_u32_rect)
+
+    //
+    //       memory_box_u32_rect -- a0 into, a1 into_stride in words, a2 width, a3 height, a4 from, a5 from_stride in words,
+    //       a6 columns, a7 rows, and on the stack taps. The x86_64 block carries the contract: two channels a register in
+    //       16-bit lanes, the taps a pixel in two loops, the sum rounded by half the count and shifted down by its power of
+    //       two (found by a walk: the count is 1, 2, 4, 8 or 16, and there may be no Zbb).
+    //
+    ASM_FUNC(memory_box_u32_rect)
+    "ld t0, 0(sp)\n"
+    "addi sp, sp, -64\n   sd s1, 0(sp)\n   sd s2, 8(sp)\n   sd s3, 16(sp)\n   sd s4, 24(sp)\n   sd s5, 32(sp)\n"
+    "sd s6, 40(sp)\n   sd s7, 48(sp)\n   sd s8, 56(sp)\n"
+    "beqz a2, " ASM_LABEL(box_out_r) "\n   beqz a3, " ASM_LABEL(box_out_r) "\n"
+    "andi t1, t0, 255\n   srli t2, t0, 8\n   andi t2, t2, 255\n   mul t3, t1, t2\n   beqz t3, " ASM_LABEL(box_out_r) "\n"
+    "srli s1, t3, 1\n   slli t5, s1, 16\n   or s1, s1, t5\n   li t4, 0\n"
+    "" ASM_LABEL(box_shift_r) ":\n"
+    "andi t5, t3, 1\n   bnez t5, " ASM_LABEL(box_shifted_r) "\n   srli t3, t3, 1\n   addi t4, t4, 1\n   j " ASM_LABEL(box_shift_r) "\n"
+    "" ASM_LABEL(box_shifted_r) ":\n"
+    "li s2, 0x00ff00ff\n   slli a1, a1, 2\n   slli a5, a5, 2\n"
+    "" ASM_LABEL(box_row_r) ":\n"
+    "mv t5, a0\n   mv t6, a6\n   mv s3, a2\n"
+    "" ASM_LABEL(box_pixel_r) ":\n"
+    "li s4, 0\n   li s5, 0\n   li t0, 0\n"
+    "" ASM_LABEL(box_tap_row_r) ":\n"
+    "slli t3, t0, 2\n   add t3, a7, t3\n   lwu t3, 0(t3)\n   mul t3, t3, a5\n   add t3, a4, t3\n   li s6, 0\n"
+    "" ASM_LABEL(box_tap_r) ":\n"
+    "slli s7, s6, 2\n   add s7, t6, s7\n   lwu s7, 0(s7)\n   slli s7, s7, 2\n   add s7, t3, s7\n   lwu s7, 0(s7)\n"
+    "   and s8, s7, s2\n   add s4, s4, s8\n   srli s7, s7, 8\n   and s7, s7, s2\n   add s5, s5, s7\n"
+    "   addi s6, s6, 1\n   bltu s6, t1, " ASM_LABEL(box_tap_r) "\n"
+    "addi t0, t0, 1\n   bltu t0, t2, " ASM_LABEL(box_tap_row_r) "\n"
+    "add s4, s4, s1\n   add s5, s5, s1\n   srl s4, s4, t4\n   srl s5, s5, t4\n   and s4, s4, s2\n   and s5, s5, s2\n"
+    "slli s5, s5, 8\n   or s4, s4, s5\n   sw s4, 0(t5)\n"
+    "addi t5, t5, 4\n   slli s8, t1, 2\n   add t6, t6, s8\n   addi s3, s3, -1\n   bnez s3, " ASM_LABEL(box_pixel_r) "\n"
+    "add a0, a0, a1\n   slli s8, t2, 2\n   add a7, a7, s8\n   addi a3, a3, -1\n   bnez a3, " ASM_LABEL(box_row_r) "\n"
+    "" ASM_LABEL(box_out_r) ":\n"
+    "ld s1, 0(sp)\n   ld s2, 8(sp)\n   ld s3, 16(sp)\n   ld s4, 24(sp)\n   ld s5, 32(sp)\n   ld s6, 40(sp)\n   ld s7, 48(sp)\n"
+    "ld s8, 56(sp)\n   addi sp, sp, 64\n" ASM_RET
+    ASM_END(memory_box_u32_rect)
 
     /* See the x86_64 body. Unaligned loads go through bytes: no unaligned ld. */
     /* See the x86_64 range encoder contract. */
@@ -55755,6 +55866,13 @@ fn memory_transpose_u8(p8 address_to into, positive into_pitch, const p8 address
 fn memory_resample_u32_rect(p32 address_to into, positive into_stride, positive visible_width, positive visible_height,
                             const p32 address_to from, positive from_stride, positive from_width, positive from_height,
                             positive width, positive height, positive left, positive top);
+// A width by height picture into into (into_stride words a row), each pixel the mean of tx by ty pixels of from (from_stride
+// words a row), taps = tx | ty << 8 with tx and ty 1, 2 or 4: target column x reads the source columns columns[x tx] to
+// columns[x tx + tx - 1], target row y the source rows rows[y ty] to rows[y ty + ty - 1], every one inside from. Each channel,
+// alpha too, is the taps' sum plus half their count, shifted down by the count's power of two: the card's op 7 with the same
+// taps and tables, bit for bit (one tap is a copy). Zero sizes or taps touch nothing.
+fn memory_box_u32_rect(p32 address_to into, positive into_stride, positive width, positive height, const p32 address_to from,
+                       positive from_stride, const p32 address_to columns, const p32 address_to rows, positive taps);
 // count 32-bit words of from copied to into and to mirror wherever they differ from mirror, in 64-byte chunks from
 // the front, the count's rest past its last whole chunk being one more: a chunk whose words all equal mirror's is
 // stored to neither. Answers how many chunks were stored. into is only written, never read (a card's memory, where
