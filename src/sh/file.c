@@ -5524,6 +5524,8 @@ static string_address file_operand_at(positive index)
         return program_argument(file_operand_list[index]);
 }
 
+static bool file_output_told(string_address program);
+
 static fn file_change_paths(positive first, positive count, bool recursive,
                             string_address program, b32 address_to status,
                             file_visit visit,
@@ -5549,7 +5551,8 @@ static fn file_change_paths(positive first, positive count, bool recursive,
                 }
         }
 
-        log_flush();
+        if (!file_output_told(program))
+                address_to status = 1;
 }
 
 // Arguments -------------------------------------------------
@@ -9485,9 +9488,8 @@ static bool file_source_destination(string_address program, positive first,
                 }
 
                 pair(file_operand_at(first), last);
-                log_flush();
 
-                return true;
+                return file_output_told(program);
         }
 
         //      One look: GNU cp/mv name a -t directory as "target directory"
@@ -9549,9 +9551,7 @@ static bool file_source_destination(string_address program, positive first,
         }
         system_state_held = false;
 
-        log_flush();
-
-        return complete;
+        return file_output_told(program) && complete;
 }
 
 /*
@@ -16668,17 +16668,20 @@ static fn plain_stream_write(positive which, writer through, address_any data,
 
         for (positive at = 0; at < length; at++)
         {
-                p8 byte = bytes[at];
-
                 if (!stream->used)
                 {
-                        if (byte != 0x1b)
-                                continue;
+                        p8 address_to esc = memory_first_of(bytes + at, 0x1b, length - at);
+
+                        if (!esc)
+                                break;
+                        at = (positive)(esc - bytes);
                         if (at > start)
                                 through((address_any)(bytes + start), at - start);
-                        stream->held[stream->used++] = byte;
+                        stream->held[stream->used++] = 0x1b;
                         continue;
                 }
+
+                p8 byte = bytes[at];
 
                 stream->held[stream->used++] = byte;
                 if ((stream->used == 2 && byte == '[') ||
@@ -19863,15 +19866,28 @@ static b32 file_stat()
         stat_terse_quoted = !format && terse;
         if (format)
         {
-                for (string_address at = format; (at = string_first_of(at, '%'));
-                     at += (string_get(at + 1) == '%') + 1)
+                for (string_address at = format; (at = string_first_of(at, '%'));)
                 {
-                        if (string_get(at + 1) != 'N')
-                                continue;
+                        string_address code = at + 1;
 
-                        ls_quoting = 'e';
-                        ls_quoting_from_environment((string_address) "stat");
-                        break;
+                        if (string_get(code) == '%')
+                        {
+                                at = code + 1;
+                                continue;
+                        }
+                        code += string_span_of_set(code, STAT_FLAGS);
+                        while (byte_is_digit(string_get(code)))
+                                code++;
+                        if (string_get(code) == '.')
+                                for (code++; byte_is_digit(string_get(code));)
+                                        code++;
+                        if (string_get(code) == 'N')
+                        {
+                                ls_quoting = 'e';
+                                ls_quoting_from_environment((string_address) "stat");
+                                break;
+                        }
+                        at = string_get(code) ? code + 1 : code;
                 }
         }
 
@@ -20835,11 +20851,12 @@ static bool du_exclude_file(string_address path)
 
         positive start = 0;
 
-        for (positive at = 0; at <= length; at++)
+        while (start <= length)
         {
-                if (at < length && text[at] != '\n')
-                        continue;
-
+                p8 address_to newline = start < length
+                                            ? memory_first_of(text + start, '\n', length - start)
+                                            : null;
+                positive at = newline ? (positive)(newline - text) : length;
                 positive stop = at;
 
                 stop -= memory_trailing(text + start, stop - start, byte_is_space);
@@ -20849,6 +20866,8 @@ static bool du_exclude_file(string_address path)
                         if (!du_exclude_add((string_address)text + start))
                                 return false;
                 }
+                if (!newline)
+                        break;
                 start = at + 1;
         }
         return true;
@@ -21126,13 +21145,16 @@ static bool du_files_from(string_address list)
 
                 positive start = 0;
 
-                for (positive at = 0; at < have; at++)
+                while (start < have)
                 {
-                        //      The last name need not end in a zero byte.
-                        if (held.bytes[at] && !(done && at + 1 == have))
-                                continue;
+                        p8 address_to zero = memory_first_of(held.bytes + start, 0, have - start);
 
-                        positive stop = held.bytes[at] ? at + 1 : at;
+                        //      The last name need not end in a zero byte.
+                        if (!zero && !done)
+                                break;
+
+                        positive at = zero ? (positive)(zero - held.bytes) : have - 1;
+                        positive stop = zero ? at : have;
                         p8 keep = held.bytes[stop];
 
                         held.bytes[stop] = end;
@@ -24172,7 +24194,7 @@ static b32 file_chown_common(string_address program, bool groups_only)
                 chown_has_new_group = chown_group >= 0;
                 if (chown_has_new_group)
                 {
-                        if (!string_digits_exact(who, null) &&
+                        if (!string_digits_exact(who, null) && who[0] != '+' &&
                             string_length(who) < FILE_NAME_MAX)
                                 memory_copy_apart_end(chown_new_group, who,
                                                       string_length(who));
@@ -24792,10 +24814,11 @@ static b32 file_ln()
                 if (!file_backup_taken(address_of taking, (string_address) "ln"))
                         return 1;
 
-                return ln_make(file_operand_at(first),
-                               file_operand_at(first + 1))
-                           ? 0
-                           : 1;
+                b32 made = ln_make(file_operand_at(first),
+                                   file_operand_at(first + 1))
+                               ? 0
+                               : 1;
+                return file_output_told((string_address) "ln") ? made : 1;
         }
 
         // -n is about the destination and not the target: a link that already
@@ -24819,7 +24842,8 @@ static b32 file_ln()
                 if (!file_backup_taken(address_of taking, (string_address) "ln"))
                         return 1;
 
-                return ln_make(target, name) ? 0 : 1;
+                b32 made = ln_make(target, name) ? 0 : 1;
+                return file_output_told((string_address) "ln") ? made : 1;
         }
 
         string_address last = into ? into : file_operand_at(count - 1);
@@ -24884,7 +24908,8 @@ static b32 file_ln()
                         return 1;
                 }
 
-                return ln_make(file_operand_at(first), last) ? 0 : 1;
+                b32 made = ln_make(file_operand_at(first), last) ? 0 : 1;
+                return file_output_told((string_address) "ln") ? made : 1;
         }
 
         if (!file_backup_taken(address_of taking, (string_address) "ln"))
@@ -24917,9 +24942,7 @@ static b32 file_ln()
                         status = 1;
         }
 
-        log_flush();
-
-        return status;
+        return file_output_told((string_address) "ln") ? status : 1;
 }
 
 // link / unlink ------------------------------------------------------
@@ -27861,32 +27884,20 @@ static bool split_output_write(split_output address_to output,
         //      meant for it is passed over, as GNU's EPIPE is.
         if (output->dead)
                 return true;
-        if (output->filter)
-        {
-                system_write_result wrote = system_write_all_checked(
-                    (positive)output->stage.handle, bytes, length);
+        system_write_result wrote = system_write_all_checked(
+            (positive)output->stage.handle, bytes, length);
 
-                if (wrote.bytes == length)
-                        return true;
-                if (wrote.error == -32)
-                {
-                        output->dead = true;
-                        return true;
-                }
-                file_shell_name_reason(log_error, (string_address)"split: ", output->name,
-                                       (string_address)": ", wrote.error ? wrote.error : -5);
-                return false;
-        }
+        if (wrote.bytes == length)
+                return true;
+        if (output->filter && wrote.error == -ERROR_BROKEN_PIPE)
         {
-                system_write_result wrote = system_write_all_checked(
-                    (positive)output->stage.handle, bytes, length);
-
-                if (wrote.bytes == length)
-                        return true;
-                file_shell_name_reason(log_error, (string_address)"split: ", output->name,
-                                       (string_address)": ", wrote.error ? wrote.error : -5);
-                return false;
+                output->dead = true;
+                return true;
         }
+        file_shell_name_reason(log_error, (string_address)"split: ", output->name,
+                               (string_address)": ",
+                               wrote.error ? wrote.error : -ERROR_INPUT_OUTPUT);
+        return false;
 }
 
 static bool split_output_close(split_output address_to output)
@@ -28092,6 +28103,7 @@ static bool split_line_bytes_memory(p8 address_to input, positive length,
                                     split_output address_to output)
 {
         positive at = 0;
+        positive piece_start = 0;
         positive used = 0;
 
         while (at < length)
@@ -28111,27 +28123,32 @@ static bool split_line_bytes_memory(p8 address_to input, positive length,
                 if (used && (record > piece - used ||
                              (!found && record == piece - used)))
                 {
-                        if (!split_output_close(output))
+                        if (!split_output_write(output, input + piece_start, used) ||
+                            !split_output_close(output))
                                 return false;
                         used = 0;
                 }
                 while (record)
                 {
                         positive here = min(record, piece - used);
-                        if (!split_output_write(output, input + at, here))
-                                return false;
+
+                        if (!used)
+                                piece_start = at;
                         used += here;
                         at += here;
                         record -= here;
                         if (used == piece)
                         {
-                                if (!split_output_close(output))
+                                if (!split_output_write(output, input + piece_start, used) ||
+                                    !split_output_close(output))
                                         return false;
                                 used = 0;
                         }
                 }
         }
 
+        if (used && !split_output_write(output, input + piece_start, used))
+                return false;
         return split_output_close(output);
 }
 
@@ -35408,9 +35425,7 @@ static b32 file_rmdir()
                 }
         }
 
-        log_flush();
-
-        return status;
+        return file_output_told((string_address) "rmdir") ? status : 1;
 }
 
 // cp ------------------------------------------------------------
@@ -40119,7 +40134,7 @@ static bool install_unchanged(bipolar source, file_facts address_to from,
             to->group != (positive)system_call(syscall(getgid)))
                 return false;
 
-        dest = file_open_same(parent, leaf, to, FILE_READ);
+        dest = file_open_same(parent, leaf, to, FILE_READ | O_CLOEXEC);
         if (dest < 0)
                 return false;
 
@@ -40759,8 +40774,7 @@ static b32 file_install()
                         }
                 }
 
-                log_flush();
-                return install_status;
+                return file_output_told((string_address) "install") ? install_status : 1;
         }
 
         return_if(taking.first >= count, file_need_file((string_address) "install", 1));
@@ -42904,9 +42918,7 @@ static b32 file_rm()
                         rm_tree(AT_FDCWD, path, path, RM_TREE_DEPTH);
         }
 
-        log_flush();
-
-        return rm_status;
+        return file_output_told((string_address) "rm") ? rm_status : 1;
 }
 
 // touch ------------------------------------------------------------
@@ -48460,26 +48472,33 @@ static fn mktemp_failed(bool directory, string_address shown,
 static fn mktemp_letters_into(p8 address_to at, positive count)
 {
         p8 raw[64];
-        positive have = count > sizeof(raw) ? sizeof(raw) : count;
+        positive done = 0;
 
-        if (system_random_fill(raw, have, 0) < 0)
+        while (done < count)
         {
-                p64 now[2] = {0, 0};
+                positive have = min(count - done, sizeof(raw));
 
-                system_call_2(syscall(clock_gettime), 0, (positive)now);
+                if (system_random_fill(raw, have, 0) < 0)
+                {
+                        p64 now[2] = {0, 0};
 
-                positive mixed = (positive)now[1] ^ ((positive)now[0] << 20) ^
-                                 ((positive)system_call_1(syscall(getpid), 0) << 40);
+                        system_call_2(syscall(clock_gettime), 0, (positive)now);
+
+                        positive mixed = (positive)now[1] ^ ((positive)now[0] << 20) ^
+                                         ((positive)system_call_1(syscall(getpid), 0) << 40) ^
+                                         done;
+
+                        for (positive i = 0; i < have; i++)
+                        {
+                                mixed = mixed * 6364136223846793005u + 1442695040888963407u;
+                                raw[i] = (p8)(mixed >> 33);
+                        }
+                }
 
                 for (positive i = 0; i < have; i++)
-                {
-                        mixed = mixed * 6364136223846793005u + 1442695040888963407u;
-                        raw[i] = (p8)(mixed >> 33);
-                }
+                        at[done + i] = mktemp_letters[raw[i] % 62];
+                done += have;
         }
-
-        for (positive i = 0; i < count; i++)
-                at[i] = mktemp_letters[raw[i % have] % 62];
 }
 
 // --tmpdir is the one option here spelled without a letter, and T is a letter
@@ -48695,7 +48714,7 @@ static b32 file_mktemp()
                                 continue;
 
                         if (looked == -ERROR_NO_ENTRY)
-                                break;
+                                return mktemp_told(path, directory, false, quiet);
 
                         if (!quiet)
                                 mktemp_failed(directory, shown, looked);
@@ -48727,8 +48746,6 @@ static b32 file_mktemp()
                         return 1;
                 }
         }
-
-        return_if(dry, mktemp_told(path, directory, false, quiet));
 
         if (!quiet)
                 mktemp_failed(directory, shown, -ERROR_EXISTS);
@@ -49431,6 +49448,9 @@ static b32 file_kill()
                     {(string_address)"--pid", 'p'},
                     {(string_address)"-s", 's'},
                     {(string_address)"--signal", 's'},
+                    {(string_address)"-q", 'q'},
+                    {(string_address)"--queue", 'q'},
+                    {(string_address)"--timeout", 'T'},
                 };
                 positive kill_arg = string_table_lookup(argument, kill_arg_table);
                 p8 kill_kind = kill_arg < array_count(kill_arg_table)
@@ -49470,8 +49490,7 @@ static b32 file_kill()
                 if (kill_kind == 'L')
                 {
                         kill_table_written(log);
-                        log_flush();
-                        return 0;
+                        return file_output_told((string_address) "kill") ? 0 : 1;
                 }
                 if (kill_kind == 'd')
                 {
@@ -49538,8 +49557,7 @@ static b32 file_kill()
                         continue;
                 }
 
-                if (!string_compare(argument, "-q") ||
-                    !string_compare(argument, "--queue"))
+                if (kill_kind == 'q')
                 {
                         if (index + 1 >= count)
                                 return string_report(log_error, 2,
@@ -49569,7 +49587,7 @@ static b32 file_kill()
                         continue;
                 }
 
-                if (!string_compare(argument, "--timeout"))
+                if (kill_kind == 'T')
                 {
                         if (index + 2 >= count)
                                 return string_report(log_error, 2,
@@ -49770,7 +49788,8 @@ static b32 file_kill()
                         system_close(handle);
         }
 
-        log_flush();
+        if (!file_output_told((string_address) "kill"))
+                return 1;
 
         if (!kill_err)
                 return kill_ok ? 0 : 1;
@@ -50868,8 +50887,7 @@ static b32 file_cal()
                 cal_emit_group(first + (b64)shown, across, !yflag, monday,
                                julian, proleptic, separation);
         }
-        log_flush();
-        return 0;
+        return file_output_told((string_address) "cal") ? 0 : 1;
 }
 
 // date ------------------------------------------------------------
@@ -53129,8 +53147,7 @@ static bool xargs_option_seen(p8 letter, string_address value)
         {
                 positive unused;
 
-                if (!xargs_count_value(value, letter == 'l' ? 'L' : letter,
-                                       address_of unused))
+                if (!xargs_count_value(value, letter, address_of unused))
                         return false;
 
                 if (letter == 'P' || letter == 's')
@@ -53368,17 +53385,6 @@ static b32 file_xargs()
                 if (!xargs_count_value(file_option_value(address_of taking, 'P'), 'P',
                                        address_of xargs_parallel))
                         return 1;
-        }
-
-        if (xargs_slot_name)
-        {
-                if (!string_get(xargs_slot_name))
-                        return string_report(log_error, 1,
-                                      "xargs: --process-slot-var requires a nonempty name\n");
-
-                if (string_first_of(xargs_slot_name, '='))
-                        return string_report(log_error, 1,
-                                      "xargs: option --process-slot-var may not be set to a value which includes `='\n");
         }
 
         if (taking.flags & FILE_FLAG('s'))
