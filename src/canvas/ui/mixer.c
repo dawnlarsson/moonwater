@@ -453,9 +453,9 @@ static b32 mixer_event(const struct window_event address_to event)
                 return true;
         }
         mixer_layout();
-        // The view's: the tabs (a press on one and its release show its page), Allow (recording is off) and the popup's Mixer row. It is not asked
-        // for the motions and the release of a strip's control that is held (the kit hands a release to whoever asks first); a press it always is.
-        asks = ui_kit_held >= mixer.big->strips.control && ui_kit_held < mixer.big->strips.control + 2 * mixer.big->strips.count && !(event->type == WINDOW_EVENT_BUTTON && down) ? 0 : ui_view_event(ui, &mixer.big->view, event);
+        // The view's: the tabs (a press on one and its release show its page), Allow (recording is off) and the popup's Mixer row. A strip's held
+        // control is released by the strips' own call below: the kit reports a release only to the call whose controls hold the press.
+        asks = ui_view_event(ui, &mixer.big->view, event);
         if (asks & UI_VIEW_QUIT)
                 return false;
         mixer.dirty |= (asks & UI_VIEW_DRAW) != 0;
