@@ -3375,6 +3375,12 @@ static void windows_proc_fd(char *path, unsigned int pid, unsigned int number)
         windows_num2_path(path, 48, "/proc/", pid, "/fd/", number);
 }
 
+/* A clip file is read only when it is sealed against write, grow and shrink (the compositor's own rule, manage.c). */
+static int windows_clip_sealed(long fd)
+{
+        return window_call(WINDOW_SYS_FCNTL, fd, WINDOWS_F_GET_SEALS, 0, 0, 0, 0) == WINDOWS_CLIP_SEALS;
+}
+
 static const unsigned char *windows_clip_map(unsigned int pid, unsigned int which, unsigned long want)
 {
         char path[48];
@@ -3387,7 +3393,7 @@ static const unsigned char *windows_clip_map(unsigned int pid, unsigned int whic
                 return 0;
         /* Only a file sealed against write, grow and shrink is read: its bytes cannot change after this check,
            so the validation and every later read of the mapping see the same clip. */
-        if (window_call(WINDOW_SYS_FCNTL, fd, WINDOWS_F_GET_SEALS, 0, 0, 0, 0) != WINDOWS_CLIP_SEALS)
+        if (!windows_clip_sealed(fd))
         {
                 window_call(WINDOW_SYS_CLOSE, fd, 0, 0, 0, 0, 0);
                 return 0;
