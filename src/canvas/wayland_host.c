@@ -3212,7 +3212,12 @@ static int wl_ext_asked_shape(int row)
 
 static void compositor_wl_field(int row, long delta, long purpose)
 {
-        unsigned int *count = &compositor.table->field[row];
+        unsigned int *count;
+
+        // Before the compositor has its table there is no field to count (the text purpose is then not told).
+        if (!compositor.table)
+                return;
+        count = &compositor.table->field[row];
         if (delta > 0)
                 (*count)++;
         else if (delta < 0 && *count)
