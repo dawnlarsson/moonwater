@@ -20526,6 +20526,7 @@ static fn ui_apps_entry(const char address_to root, bipolar directory, const cha
         bipolar handle, got;
         p8 address_to text;
         int count, first = 0;
+        positive room;
         if (ui_apps.count >= UI_APPS_MOST || length <= 8 || !memory_has_suffix((string_address)file, length, ".desktop"))
                 return;
         // Root's alone, a regular file, read through the directory and never through a link.
@@ -20535,13 +20536,15 @@ static fn ui_apps_entry(const char address_to root, bipolar directory, const cha
         handle = system_open_at(directory, (string_address)file, FILE_READ | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK);
         if (handle < 0)
                 return;
-        text = (p8 address_to)memory_checked(UI_APPS_ENTRY_MOST);
-        got = text ? system_read_retry((positive)handle, text, UI_APPS_ENTRY_MOST) : -1;
+        // A buffer the file's size (a byte over, to see a file that grew): a desktop file is a few KiB, not the 96 KiB cap.
+        room = (positive)facts.size + 1;
+        text = (p8 address_to)memory_checked(room);
+        got = text ? system_read_retry((positive)handle, text, room) : -1;
         system_close(handle);
         if (got > 0 && !ui_desktop_parse((const char address_to)text, (positive)got, code, &desktop))
                 got = -1;
         if (text)
-                memory_free(text, UI_APPS_ENTRY_MOST);
+                memory_free(text, room);
         if (got <= 0 || !desktop.application || desktop.hidden || desktop.no_display || !desktop.shown || !desktop.name[0] || !desktop.exec[0])
                 return;
         count = ui_desktop_exec(desktop.exec, words, (int)(sizeof(words) / sizeof(words[0])));
@@ -22080,6 +22083,8 @@ struct ui_list_menu
 
 // Compact LRU row animation pool for ui_list: replaces 2 * ids * sizeof(ui_control) (~2.5 MiB/list) with ~65 KiB/list.
 #define UI_LIST_POOL 32
+#define UI_LIST_FOLD_MOST 1024 // the row ids a list folds: one open byte and one share each, mapped at its first fold (ui_list_fold)
+#define UI_LIST_FOLDS 16       // the folds that move at once: a fold past them snaps to its share
 struct ui_list_slot
 {
         int id;                    // row id owning this pair, or -1 if free
@@ -22159,6 +22164,11 @@ struct ui_list
         int menu_x, menu_y;
         int last_clicked;                  // id + 1 of the row last clicked (0 none; apps clear to reset double-click)
         struct ui_click click;             // double-click tracking (ui_click_same)
+        // Folds (ui_list_fold): per row id its open byte and its share of the row shown (Q30; -1 where the app's describe says it), mapped at the first fold.
+        b64 address_to fold_at;
+        unsigned char address_to fold_open;
+        struct ui_list_fold_slot { int id; struct ui_spring spring; } fold_pool[UI_LIST_FOLDS]; // the springs of the rows moving (id + 1; 0 free)
+        void (*shut)(void);                // a fold closed: its rows leave the list, so the app lists them again
 };
 
 #define UI_LIST_STRIPE_INK 0x0d       // the alpha of the ink a striped row is tinted with in dark mode (about 5 percent)
@@ -22411,6 +22421,8 @@ static fn ui_list_layout(struct ui address_to ui, struct ui_list address_to l)
         {
                 struct ui_row row;
                 ui_list_describe(l, l->id[at], &row);
+                if (l->fold_at && l->id[at] >= 0 && l->id[at] < UI_LIST_FOLD_MOST && l->fold_at[l->id[at]] >= 0)
+                        row.reveal = l->fold_at[l->id[at]];
                 l->starts[at] = !at || row.section != section
                                     ? UI_LIST_STARTS | (row.header ? UI_LIST_HEADED : 0) | (row.columns ? UI_LIST_COLUMNS : 0)
                                     : 0;
@@ -24017,6 +24029,96 @@ static fn ui_side_rows(const struct ui address_to ui, struct ui_list address_to 
         l->row_x = x, l->row_w = stop - x > 0 ? stop - x : 0;
 }
 
+// The folds of a list: the open byte and the share of each row id, mapped the first time one is asked (-1 share: the app's, as its describe says).
+static b32 ui_list_fold_map(struct ui_list address_to l)
+{
+        long mapped;
+        if (l->fold_at)
+                return true;
+        mapped = ui_map((positive)UI_LIST_FOLD_MOST * (sizeof(b64) + 1));
+        if (mapped < 0 && mapped > -4096)
+                return false;
+        l->fold_at = (b64 address_to)mapped;
+        l->fold_open = (unsigned char address_to)(l->fold_at + UI_LIST_FOLD_MOST);
+        for (int k = 0; k < UI_LIST_FOLD_MOST; k++)
+                l->fold_at[k] = -1, l->fold_open[k] = 0;
+        return true;
+}
+
+// Whether a row is folded open (the app's ui_list_fold said so last).
+static b32 ui_list_folded(const struct ui_list address_to l, int id)
+{
+        return l->fold_at && id >= 0 && id < UI_LIST_FOLD_MOST && l->fold_open[id];
+}
+
+// Whether a row's fold has a spring running in the pool, and the pool's slot for it or a free one (-1 none).
+static int ui_list_fold_slot(const struct ui_list address_to l, int id, b32 want)
+{
+        int free_at = -1;
+        for (int k = 0; k < UI_LIST_FOLDS; k++)
+        {
+                if (l->fold_pool[k].id == id + 1)
+                        return k;
+                if (!l->fold_pool[k].id && free_at < 0)
+                        free_at = k;
+        }
+        return want ? free_at : -1;
+}
+
+// The app's word that a row folds open or shut. Its share moves from where it is to the new one, on a spring where motion is on (the list's
+// rows are laid out again as it moves); with no free spring the fold snaps to its share.
+static void ui_list_fold(struct ui_list address_to l, int id, b32 open)
+{
+        b64 target = open ? UI_ONE : 0, from;
+        int slot;
+        if (id < 0 || id >= UI_LIST_FOLD_MOST || !ui_list_fold_map(l))
+                return;
+        from = l->fold_at[id] < 0 ? (open ? 0 : UI_ONE) : l->fold_at[id];
+        l->fold_open[id] = open != 0;
+        slot = ui_list_fold_slot(l, id, true);
+        if (!ui_kit.motion || from == target || slot < 0)
+        {
+                if (slot >= 0)
+                        l->fold_pool[slot].id = 0;
+                l->fold_at[id] = target;
+                return;
+        }
+        l->fold_at[id] = from;
+        l->fold_pool[slot].id = id + 1;
+        ui_spring_go(&l->fold_pool[slot].spring, from - target, 0);
+}
+
+// The folds' springs are stepped (in the list's frame): each share, the layout again where one moved, and the shut hook where a fold closed.
+static void ui_list_fold_step(struct ui address_to ui, struct ui_list address_to l)
+{
+        b32 moved = false, shut = false;
+        if (!l->fold_at)
+                return;
+        for (int k = 0; k < UI_LIST_FOLDS; k++)
+        {
+                struct ui_list_fold_slot address_to f = &l->fold_pool[k];
+                int id = f->id - 1;
+                b64 target, was, now;
+                b32 live;
+                if (!f->id)
+                        continue;
+                target = l->fold_open[id] ? UI_ONE : 0, was = l->fold_at[id];
+                live = ui_spring_at(&f->spring);
+                now = live ? target + f->spring.value[0] : target;
+                now = now < 0 ? 0 : now > UI_ONE ? UI_ONE : now;
+                l->fold_at[id] = now;
+                if (!live)
+                        f->id = 0;
+                ui_kit.busy |= live;
+                shut |= !live && !target;
+                moved |= now != was;
+        }
+        if (moved)
+                ui_list_layout(ui, l);
+        if (shut && l->shut)
+                l->shut();
+}
+
 // The list drawn: the headers of the sections in view and their rows, cut to the list's band, and its scrollbar.
 static fn ui_list_draw(struct ui address_to ui, struct ui_list address_to l)
 {
@@ -24026,6 +24128,7 @@ static fn ui_list_draw(struct ui address_to ui, struct ui_list address_to l)
         int drawn, rest, pointer_y;
         ui_scroll_frame(ui, &l->scroll);
         ui_side_rows(ui, l);
+        ui_list_fold_step(ui, l);
         // A virtual list's places are the rows near where this frame has it scrolled to.
         if (l->virtual)
                 ui_list_window(ui, l);
