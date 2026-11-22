@@ -20136,6 +20136,10 @@ struct ui_app_entry
         // The last size it was asked at, and that picture.
         int cached_side;
         unsigned int address_to cached;
+        // The picture came from the kept file (UI_APPS_CACHE) and is not checked yet against its icon: that file's modification and size.
+        b32 from_cache;
+        b64 key_modified;
+        p64 key_size;
 };
 
 static struct
@@ -20736,6 +20740,7 @@ static fn ui_apps_scan_folder(const char address_to base, const char address_to 
         system_close(directory);
 }
 
+static fn ui_apps_cache_map(void);
 static fn ui_apps_read(void)
 {
         static const char address_to const folders[] = {"/usr/share/applications", "/usr/local/share/applications"};
@@ -20786,6 +20791,7 @@ static fn ui_apps_read(void)
                 ui_apps_scan_folder(ui_apps_local, "applications", "", entries, room, entry_order);
         }
         memory_free(bowls, room * 2);
+        ui_apps_cache_map(); // the pictures kept by an earlier process, before any is drawn
 }
 
 // The list read again when one of its directories has changed since it was read, looked at no more than once in...
@@ -21193,15 +21199,15 @@ static inline b32 ui_apps_is_local(const struct ui_app_entry address_to app)
         return ui_apps_local && ui_apps_local[0] && string_equals((string_address)app->root, (string_address)ui_apps_local);
 }
 
-static p8 address_to ui_apps_picture_file(const char address_to root, const char address_to icon, b32 is_local, positive address_to size)
+// The icon's file opened (FILE_READ), -1 none.
+static bipolar ui_apps_picture_open(const char address_to root, const char address_to icon, b32 is_local)
 {
         static const unsigned short sides[] = {512, 256, 192, 128, 96, 72, 64, 48, 32, 24, 22, 16};
         char path[UI_APP_PATH * 2], name[UI_APP_PATH];
-        bipolar inside, handle = -1, got;
+        bipolar inside, handle = -1;
         positive length = string_length((string_address)icon);
-        p8 address_to bytes;
         if (!root[0] || !length || (inside = system_open_at(AT_FDCWD, (string_address)root, FILE_READ | O_DIRECTORY | O_CLOEXEC)) < 0)
-                return null;
+                return -1;
         if (icon[0] == '/')
         {
                 if (length > 4 && !memory_compare(icon + length - 4, ".png", 4))
@@ -21236,34 +21242,38 @@ static p8 address_to ui_apps_picture_file(const char address_to root, const char
                 }
         }
         system_close(inside);
-        if (handle < 0)
-                return null;
-        bytes = (p8 address_to)memory_checked(UI_PNG_FILE_MOST);
-        got = bytes ? system_read_retry((positive)handle, bytes, UI_PNG_FILE_MOST) : -1;
-        system_close(handle);
-        if (got <= 0)
-        {
-                if (bytes)
-                        memory_free(bytes, UI_PNG_FILE_MOST);
-                return null;
-        }
-        *size = (positive)got;
-        return bytes;
+        return handle;
 }
 
-// A picture made from an icon's file: UI_APP_PICTURE each way at most, premultiplied, its side into *side; null none. It reads and
-// decodes a file (a PNG of up to UI_PNG_MOST a side: milliseconds), so a draw never calls it: ui_apps_picture_kept asks a worker.
-static unsigned int address_to ui_apps_picture_make(const char address_to root, const char address_to icon, b32 is_local, int address_to side_out)
+// An icon file's modification (ns) and size: what a kept picture of it is checked against.
+struct ui_apps_picture_key
 {
-        positive bytes = 0;
-        p8 address_to file = ui_apps_picture_file(root, icon, is_local, &bytes);
+        b64 modified;
+        p64 size;
+};
+
+static b32 ui_apps_picture_keyed(bipolar handle, struct ui_apps_picture_key address_to key)
+{
+        struct ui_apps_facts facts;
+        memory_zero(&facts, sizeof(facts));
+        if (system_stat_at(handle, (string_address) "", AT_EMPTY_PATH, 0x7ff, &facts) != 0 || (facts.mode & 0170000u) != 0100000u)
+                return false;
+        key->modified = facts.modified.seconds * 1000000000ll + (b64)facts.modified.nanoseconds, key->size = facts.size;
+        return true;
+}
+
+// A picture made from an icon's open file: UI_APP_PICTURE each way at most, premultiplied, its side into *side; null none. It reads
+// and decodes a file (a PNG of up to UI_PNG_MOST a side: milliseconds), so a draw never calls it: ui_apps_picture_kept asks a worker.
+static unsigned int address_to ui_apps_picture_decode(bipolar handle, int address_to side_out)
+{
+        p8 address_to file = (p8 address_to)memory_checked(UI_PNG_FILE_MOST);
+        bipolar got = file ? system_read_retry((positive)handle, file, UI_PNG_FILE_MOST) : -1;
         unsigned int address_to decoded = null, address_to square = null, address_to picture = null;
         int width = 0, height = 0;
+        if (got > 0)
+                decoded = ui_png_decode(file, (positive)got, &width, &height);
         if (file)
-        {
-                decoded = ui_png_decode(file, bytes, &width, &height);
                 memory_free(file, UI_PNG_FILE_MOST);
-        }
         if (!decoded)
                 return null;
         int side = width > height ? width : height, kept = side > UI_APP_PICTURE ? UI_APP_PICTURE : side;
@@ -21284,64 +21294,325 @@ static unsigned int address_to ui_apps_picture_make(const char address_to root, 
         return picture;
 }
 
-/* The worker that makes an entry's picture off the thread that draws (the compositor's taskbar): one entry at a time, from copies of
-   its id, root and icon, so a registry read again meanwhile changes nothing it reads. running is 1 from the ask until its picture
-   (or none) is ready; ui_apps_picture_take puts that into the entry of the id, if there still is one, and counts it in
-   ui_apps_pictures_made, which a layout that depends on the pictures keys on. */
+static unsigned int address_to ui_apps_picture_make(const char address_to root, const char address_to icon, b32 is_local, int address_to side_out,
+                                                    struct ui_apps_picture_key address_to key)
+{
+        bipolar handle = ui_apps_picture_open(root, icon, is_local);
+        unsigned int address_to picture = null;
+        if (handle < 0)
+                return null;
+        if (ui_apps_picture_keyed(handle, key))
+                picture = ui_apps_picture_decode(handle, side_out);
+        system_close(handle);
+        return picture;
+}
+
+/* ---- apps: their pictures kept across processes ----
+   The pictures made are kept in one file, so a launcher that opens again (a process of each open) has every tile's picture on its
+   first frame with nothing decoded: UI_APPS_CACHE, under /run/moonwater (tmpfs, made again at each boot). Its layout is mapped as it
+   is: a head (magic, version, the records), the records (an app's id, its icon file's modification and size, the picture's side and
+   where its pixels are), then the pixels, premultiplied, side * side words each, 16-aligned. The worker writes it whole, to a new file
+   (O_EXCL, O_NOFOLLOW, 0644) that it renames over the old, so a reader has the old file or the new one. A reader takes it only as a
+   regular file of the registry's owner (root) that no one else may write, no larger than UI_APPS_CACHE_MOST, and takes a record only
+   when its id ends inside it and its pixels lie inside the file. A kept picture is used at once and checked by the worker afterwards
+   (from_cache): an icon changed since is made again and replaces it. */
+#define UI_APPS_CACHE "/run/moonwater/app-pictures"
+#define UI_APPS_CACHE_MAGIC 0x5041574du // "MWAP"
+#define UI_APPS_CACHE_VERSION 1u
+#define UI_APPS_CACHE_MOST (64u << 20)
+
+struct ui_apps_cache_head
+{
+        p32 magic, version, count, spare;
+};
+struct ui_apps_cache_record
+{
+        char id[WINDOWS_APP_ID];
+        b64 modified;
+        p64 size;
+        p32 side, offset;
+};
+_Static_assert(sizeof(struct ui_apps_cache_head) == 16 && sizeof(struct ui_apps_cache_record) == WINDOWS_APP_ID + 24, "the kept file is mapped as it is");
+
+/* The worker that makes an entry's picture off the thread that draws: one job at a time, from copies of the entry's id, root and icon,
+   so a registry read again meanwhile changes nothing it reads. A job makes a picture, or checks a kept one (expect: its key; the same
+   key is no picture to make), or writes the kept file (flush). running is 1 from the ask until the job is done; ui_apps_picture_take
+   puts a picture into the entry of the id, if there still is one, and counts it in ui_apps_pictures_made, which a layout that depends
+   on the pictures keys on. Each picture made is also kept for the file (fresh) until a flush writes it. */
 static struct
 {
         thread address_to worker;
         int running;
+        b32 flush, expect, same;
         char id[WINDOWS_APP_ID], root[UI_APP_PATH], icon[UI_APP_PATH];
         b32 is_local;
         int side;
+        struct ui_apps_picture_key key, expected;
         unsigned int address_to picture;
+        struct { char id[WINDOWS_APP_ID]; struct ui_apps_picture_key key; int side; unsigned int address_to pixels; } fresh[UI_APPS_MOST];
+        int fresh_count;
+        unsigned int written; // flushes done
 } ui_apps_job;
 static unsigned int ui_apps_pictures_made;
+
+static const char address_to ui_apps_cache_path = UI_APPS_CACHE; // a check points it into its own directory
+
+static struct
+{
+        const p8 address_to bytes; // the file mapped read-only, null none
+        positive length;
+        p32 count;
+} ui_apps_cache;
+
+// A record of the mapped file, held inside it: its pixels, side and key; null when it is not one.
+static const unsigned int address_to ui_apps_cache_record_at(const p8 address_to bytes, positive length, p32 at, const struct ui_apps_cache_record address_to address_to out)
+{
+        const struct ui_apps_cache_record address_to record = (const struct ui_apps_cache_record address_to)(bytes + sizeof(struct ui_apps_cache_head)) + at;
+        p64 pixels;
+        if (string_length_max((string_address)record->id, sizeof(record->id)) >= sizeof(record->id) || !record->id[0] || !record->side || record->side > UI_APP_PICTURE || (record->offset & 15))
+                return null;
+        pixels = (p64)record->side * record->side * 4;
+        if ((p64)record->offset < sizeof(struct ui_apps_cache_head) || (p64)record->offset + pixels > length)
+                return null;
+        *out = record;
+        return (const unsigned int address_to)(bytes + record->offset);
+}
+
+// The kept file, mapped again (at a registry read): none while the worker may be reading the mapping it has (it is kept as it was).
+static fn ui_apps_cache_map(void)
+{
+        struct ui_apps_facts facts;
+        bipolar handle;
+        long mapped;
+        if (ui_apps_job.worker)
+                return;
+        if (ui_apps_cache.bytes)
+                system_call_2(syscall(munmap), (positive)ui_apps_cache.bytes, ui_apps_cache.length);
+        ui_apps_cache.bytes = null, ui_apps_cache.length = 0, ui_apps_cache.count = 0;
+        if ((handle = system_open_at(AT_FDCWD, (string_address)ui_apps_cache_path, FILE_READ | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK)) < 0)
+                return;
+        memory_zero(&facts, sizeof(facts));
+        if (system_stat_at(handle, (string_address) "", AT_EMPTY_PATH, 0x7ff, &facts) == 0 && (facts.mode & 0170000u) == 0100000u &&
+            facts.owner == ui_apps_owner && !(facts.mode & 0022) && facts.size >= sizeof(struct ui_apps_cache_head) && facts.size <= UI_APPS_CACHE_MOST)
+        {
+                mapped = (long)system_call_6(syscall(mmap), 0, facts.size, 1, 2, (positive)handle, 0); // PROT_READ, MAP_PRIVATE
+                if (!(mapped < 0 && mapped > -4096))
+                {
+                        const struct ui_apps_cache_head address_to head = (const struct ui_apps_cache_head address_to)mapped;
+                        if (head->magic == UI_APPS_CACHE_MAGIC && head->version == UI_APPS_CACHE_VERSION && head->count <= UI_APPS_MOST &&
+                            sizeof(*head) + (p64)head->count * sizeof(struct ui_apps_cache_record) <= facts.size)
+                                ui_apps_cache.bytes = (const p8 address_to)mapped, ui_apps_cache.length = facts.size, ui_apps_cache.count = head->count;
+                        else
+                                system_call_2(syscall(munmap), (positive)mapped, facts.size);
+                }
+        }
+        system_close(handle);
+}
+
+// An entry's picture from the kept file, when it has one of its id: taken at once (no file read, nothing decoded) and to be checked.
+static b32 ui_apps_cache_take(struct ui_app_entry address_to app)
+{
+        const struct ui_apps_cache_record address_to record;
+        for (p32 at = 0; at < ui_apps_cache.count; at++)
+        {
+                const unsigned int address_to pixels = ui_apps_cache_record_at(ui_apps_cache.bytes, ui_apps_cache.length, at, &record);
+                if (!pixels || !string_equals((string_address)record->id, (string_address)app->id))
+                        continue;
+                if (!(app->picture = (unsigned int address_to)memory_checked((positive)UI_APP_PICTURE * UI_APP_PICTURE * 4)))
+                        return false;
+                memory_copy(app->picture, pixels, (positive)record->side * record->side * 4);
+                app->side = (int)record->side, app->cached_side = 0, app->tried = true;
+                app->from_cache = true, app->key_modified = record->modified, app->key_size = record->size;
+                return true;
+        }
+        return false;
+}
+
+
+// The worker's flush: the kept file written anew from the pictures made here and those of the mapped file not made again.
+static fn ui_apps_cache_write(void)
+{
+        static const struct ui_apps_cache_record address_to olds[UI_APPS_MOST];
+        static const unsigned int address_to old_pixels[UI_APPS_MOST];
+        struct ui_apps_cache_record address_to records;
+        struct ui_apps_cache_head head = {UI_APPS_CACHE_MAGIC, UI_APPS_CACHE_VERSION, 0, 0};
+        char temp[UI_APP_PATH + 48];
+        p32 count = 0, olds_count = 0;
+        p64 offset;
+        bipolar handle;
+        positive at;
+        for (p32 old = 0; old < ui_apps_cache.count && olds_count < UI_APPS_MOST; old++)
+        {
+                const struct ui_apps_cache_record address_to record;
+                const unsigned int address_to pixels = ui_apps_cache_record_at(ui_apps_cache.bytes, ui_apps_cache.length, old, &record);
+                b32 newer = false;
+                for (int k = 0; pixels && k < ui_apps_job.fresh_count && !newer; k++)
+                        newer = string_equals((string_address)ui_apps_job.fresh[k].id, (string_address)record->id);
+                if (pixels && !newer)
+                        olds[olds_count] = record, old_pixels[olds_count++] = pixels;
+        }
+        count = olds_count + (p32)ui_apps_job.fresh_count;
+        if (count > UI_APPS_MOST || !(records = (struct ui_apps_cache_record address_to)memory_checked((positive)count * sizeof(*records) + 1)))
+                return;
+        offset = (sizeof(head) + (p64)count * sizeof(*records) + 15) & ~(p64)15;
+        for (p32 k = 0; k < count; k++)
+        {
+                b32 fresh = k >= olds_count;
+                int side = fresh ? ui_apps_job.fresh[k - olds_count].side : (int)olds[k]->side;
+                if (fresh)
+                        string_copy_bounded((p8 address_to)records[k].id, (string_address)ui_apps_job.fresh[k - olds_count].id, sizeof(records[k].id)),
+                            records[k].modified = ui_apps_job.fresh[k - olds_count].key.modified, records[k].size = ui_apps_job.fresh[k - olds_count].key.size;
+                else
+                        records[k] = *olds[k];
+                records[k].side = (p32)side, records[k].offset = (p32)offset;
+                offset = (offset + (p64)side * side * 4 + 15) & ~(p64)15;
+        }
+        head.count = count;
+        at = string_length((string_address)ui_apps_cache_path);
+        if (offset <= UI_APPS_CACHE_MOST && at + 40 < sizeof(temp))
+        {
+                memory_copy(temp, ui_apps_cache_path, at);
+                memory_copy(temp + at, ".new.", 5), at += 5;
+                at += positive_into_string((p8 address_to)temp + at, (positive)system_call(syscall(getpid)));
+                temp[at++] = '.', at += positive_into_string((p8 address_to)temp + at, ui_apps_job.written), temp[at] = 0;
+                if ((handle = system_open_at_mode(AT_FDCWD, (string_address)temp, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0644)) >= 0)
+                {
+                        static const p8 zeros[16];
+                        p64 written = sizeof(head) + (p64)count * sizeof(*records);
+                        b32 whole = system_call_2(syscall(fchmod), (positive)handle, 0644) == 0 && system_write_all((positive)handle, &head, sizeof(head)) == sizeof(head) &&
+                                    system_write_all((positive)handle, records, (positive)count * sizeof(*records)) == (positive)count * sizeof(*records);
+                        for (p32 k = 0; whole && k < count; k++)
+                        {
+                                const unsigned int address_to pixels = k >= olds_count ? ui_apps_job.fresh[k - olds_count].pixels : old_pixels[k];
+                                positive bytes = (positive)records[k].side * records[k].side * 4;
+                                whole = (written >= records[k].offset || system_write_all((positive)handle, zeros, (positive)(records[k].offset - written)) == records[k].offset - written) &&
+                                        system_write_all((positive)handle, pixels, bytes) == bytes;
+                                written = records[k].offset + bytes;
+                        }
+                        system_close(handle);
+                        if (!whole || system_rename_at(AT_FDCWD, (string_address)temp, AT_FDCWD, (string_address)ui_apps_cache_path, 0) != 0)
+                                system_call_3(syscall(unlinkat), (positive)AT_FDCWD, (positive)temp, 0);
+                }
+        }
+        memory_free(records, (positive)count * sizeof(*records) + 1);
+        for (int k = 0; k < ui_apps_job.fresh_count; k++)
+                memory_free(ui_apps_job.fresh[k].pixels, (positive)ui_apps_job.fresh[k].side * ui_apps_job.fresh[k].side * 4);
+        ui_apps_job.fresh_count = 0, ui_apps_job.written++;
+}
 
 static fn ui_apps_picture_work(address_any unused)
 {
         (void)unused;
-        ui_apps_job.picture = ui_apps_picture_make(ui_apps_job.root, ui_apps_job.icon, ui_apps_job.is_local, &ui_apps_job.side);
+        if (ui_apps_job.flush)
+                ui_apps_cache_write();
+        else
+        {
+                bipolar handle = ui_apps_picture_open(ui_apps_job.root, ui_apps_job.icon, ui_apps_job.is_local);
+                if (handle >= 0 && ui_apps_picture_keyed(handle, &ui_apps_job.key))
+                {
+                        ui_apps_job.same = ui_apps_job.expect && ui_apps_job.key.modified == ui_apps_job.expected.modified && ui_apps_job.key.size == ui_apps_job.expected.size;
+                        if (!ui_apps_job.same)
+                                ui_apps_job.picture = ui_apps_picture_decode(handle, &ui_apps_job.side);
+                }
+                if (handle >= 0)
+                        system_close(handle);
+                // A picture made is kept for the file too (a copy: the entry's may be put away by a registry read before a flush).
+                if (ui_apps_job.picture && ui_apps_job.fresh_count < UI_APPS_MOST)
+                {
+                        positive bytes = (positive)ui_apps_job.side * ui_apps_job.side * 4;
+                        unsigned int address_to copy = (unsigned int address_to)memory_checked(bytes);
+                        if (copy)
+                        {
+                                int k = ui_apps_job.fresh_count++;
+                                memory_copy(copy, ui_apps_job.picture, bytes);
+                                string_copy_bounded((p8 address_to)ui_apps_job.fresh[k].id, (string_address)ui_apps_job.id, sizeof(ui_apps_job.fresh[k].id));
+                                ui_apps_job.fresh[k].key = ui_apps_job.key, ui_apps_job.fresh[k].side = ui_apps_job.side, ui_apps_job.fresh[k].pixels = copy;
+                        }
+                }
+        }
         __atomic_store_n(&ui_apps_job.running, 0, __ATOMIC_RELEASE);
 }
 
-// Whether a picture is being made or is made and not yet taken.
+// Whether a job is under way or done and not yet taken.
 static inline b32 ui_apps_picture_making(void) { return ui_apps_job.worker != null; }
 
-// Waits for the worker's picture (a check's; a draw never waits).
+// Waits for the worker's job (a check's; a draw never waits).
 static fn ui_apps_picture_settle(void)
 {
         while (ui_apps_job.worker && __atomic_load_n(&ui_apps_job.running, __ATOMIC_ACQUIRE))
                 system_call_2(syscall(nanosleep), (positive)(positive[2]){0, 1000000}, 0);
 }
 
-// The worker's picture, when it is done, into the entry of its id; true when an entry took one (the caller draws again).
+// The worker's job, when it is done: its picture into the entry of its id (in place of a kept one it checked and found changed), or
+// the kept one marked checked; true when an entry took a picture (the caller draws again).
 static b32 ui_apps_picture_take(void)
 {
         b32 took = false;
         if (!ui_apps_job.worker || __atomic_load_n(&ui_apps_job.running, __ATOMIC_ACQUIRE))
                 return false;
         thread_join(ui_apps_job.worker), ui_apps_job.worker = null;
-        int which = ui_apps_find(ui_apps_job.id);
-        if (which >= 0 && !ui_apps.app[which].picture && ui_apps_job.picture)
+        int which = ui_apps_job.flush ? -1 : ui_apps_find(ui_apps_job.id);
+        if (which >= 0 && ui_apps_job.picture && (!ui_apps.app[which].picture || ui_apps.app[which].from_cache || ui_apps_job.expect))
         {
                 struct ui_app_entry address_to app = &ui_apps.app[which];
-                app->picture = ui_apps_job.picture, app->side = ui_apps_job.side, app->tried = true, app->cached_side = 0;
+                if (app->picture)
+                        memory_free(app->picture, (positive)UI_APP_PICTURE * UI_APP_PICTURE * 4);
+                app->picture = ui_apps_job.picture, app->side = ui_apps_job.side, app->tried = true, app->cached_side = 0, app->from_cache = false;
                 ui_apps_job.picture = null, ui_apps_pictures_made++, took = true;
         }
         if (ui_apps_job.picture)
                 memory_free(ui_apps_job.picture, (positive)UI_APP_PICTURE * UI_APP_PICTURE * 4), ui_apps_job.picture = null;
+        ui_apps_job.flush = ui_apps_job.expect = ui_apps_job.same = false;
         return took;
 }
 
-// An entry's picture made at once, where nothing is drawn meanwhile (a window's own frame, a check): a worker's for it waited for first.
+// A job handed to the worker (its fields set): false when no thread could be started.
+static b32 ui_apps_picture_start(void)
+{
+        __atomic_store_n(&ui_apps_job.running, 1, __ATOMIC_RELEASE);
+        if ((ui_apps_job.worker = thread_start(ui_apps_picture_work, null)))
+                return true;
+        __atomic_store_n(&ui_apps_job.running, 0, __ATOMIC_RELEASE);
+        ui_apps_job.flush = ui_apps_job.expect = false;
+        return false;
+}
+
+// The worker given an entry: to make its picture, or with expect to check its kept one.
+static b32 ui_apps_picture_give(const struct ui_app_entry address_to app, b32 expect)
+{
+        string_copy_bounded((p8 address_to)ui_apps_job.id, (string_address)app->id, sizeof(ui_apps_job.id));
+        string_copy_bounded((p8 address_to)ui_apps_job.root, (string_address)app->root, sizeof(ui_apps_job.root));
+        string_copy_bounded((p8 address_to)ui_apps_job.icon, (string_address)app->icon, sizeof(ui_apps_job.icon));
+        ui_apps_job.is_local = ui_apps_is_local(app), ui_apps_job.side = 0, ui_apps_job.picture = null, ui_apps_job.flush = false;
+        ui_apps_job.expect = expect, ui_apps_job.same = false, ui_apps_job.expected.modified = app->key_modified, ui_apps_job.expected.size = app->key_size;
+        return ui_apps_picture_start();
+}
+
+/* An entry's picture asked for: true when the entry is tried (its kept picture taken, asked of the worker now or before, or with no
+   file to read, which has no picture and needs no worker), false while the worker is busy (it is asked again later). */
+static b32 ui_apps_picture_ask(struct ui_app_entry address_to app)
+{
+        if (app->tried)
+                return true;
+        if (!app->root[0] || !app->icon[0])
+                return app->tried = true; // ui_apps_picture_open finds no file for these
+        if (ui_apps_cache_take(app))
+                return true;
+        if (ui_apps_job.worker)
+                return false;
+        if (ui_apps_picture_give(app, false))
+                app->tried = true;
+        return app->tried;
+}
+
+// An entry's picture made at once, where nothing is drawn meanwhile (a window's own frame, a check): a worker's job waited for first.
 static fn ui_apps_picture_now(struct ui_app_entry address_to app)
 {
+        struct ui_apps_picture_key key;
         if (ui_apps_job.worker)
                 ui_apps_picture_settle(), ui_apps_picture_take();
-        if (!app->tried)
-                app->tried = true, app->picture = ui_apps_picture_make(app->root, app->icon, ui_apps_is_local(app), &app->side);
+        if (!app->tried && !ui_apps_cache_take(app))
+                app->tried = true, app->picture = ui_apps_picture_make(app->root, app->icon, ui_apps_is_local(app), &app->side, &key);
 }
 
 // The picture kept at size each way, made again from the entry's when the size changed (a scale, no file).
@@ -21368,30 +21639,8 @@ static const unsigned int address_to ui_apps_picture(int which, int size)
         return ui_apps_picture_sized(&ui_apps.app[which], size);
 }
 
-/* An entry's picture asked of the worker: true when the entry is tried (asked now, or before, or with no file to read, which has
-   no picture and needs no worker), false while the worker makes another's (it is asked again later). */
-static b32 ui_apps_picture_ask(struct ui_app_entry address_to app)
-{
-        if (app->tried)
-                return true;
-        if (!app->root[0] || !app->icon[0])
-                return app->tried = true; // ui_apps_picture_file finds no file for these
-        if (ui_apps_job.worker)
-                return false;
-        string_copy_bounded((p8 address_to)ui_apps_job.id, (string_address)app->id, sizeof(ui_apps_job.id));
-        string_copy_bounded((p8 address_to)ui_apps_job.root, (string_address)app->root, sizeof(ui_apps_job.root));
-        string_copy_bounded((p8 address_to)ui_apps_job.icon, (string_address)app->icon, sizeof(ui_apps_job.icon));
-        ui_apps_job.is_local = ui_apps_is_local(app), ui_apps_job.side = 0, ui_apps_job.picture = null;
-        __atomic_store_n(&ui_apps_job.running, 1, __ATOMIC_RELEASE);
-        if ((ui_apps_job.worker = thread_start(ui_apps_picture_work, null)))
-                app->tried = true;
-        else
-                __atomic_store_n(&ui_apps_job.running, 0, __ATOMIC_RELEASE);
-        return app->tried;
-}
-
-/* The same for a draw: no file is read and nothing is decoded here. An entry not tried is asked of the worker (when it is free;
-   else at a later draw) and has none until ui_apps_picture_take puts it in. */
+/* The same for a draw: no file is read and nothing is decoded here. An entry not tried takes its kept picture (UI_APPS_CACHE) or is
+   asked of the worker (when it is free; else at a later draw) and has none until ui_apps_picture_take puts it in. */
 static const unsigned int address_to ui_apps_picture_kept(int which, int size)
 {
         if (which < 0 || which >= ui_apps.count || size <= 0 || size > UI_APP_PICTURE)
@@ -21400,12 +21649,22 @@ static const unsigned int address_to ui_apps_picture_kept(int which, int size)
         return ui_apps_picture_sized(&ui_apps.app[which], size);
 }
 
-// At a pass with nothing else to do: the first entry not tried yet asked of the worker, so a window that shows every app (the
-// launcher) has their pictures soon after it opens, one after another and none on the draw's thread.
-static fn ui_apps_picture_warm(void)
+/* At a pass with nothing to draw, one job for the worker when it is free: with all, the first entry not tried yet (a window that shows
+   every app, the launcher, so it has every picture soon after it opens); then a kept picture used here checked against its icon; then,
+   with nothing else to do, the pictures made here written to the kept file, so the next process has them. */
+static fn ui_apps_picture_tend(b32 all)
 {
-        for (int at = 0; at < ui_apps.count && !ui_apps_job.worker; at++)
+        for (int at = 0; all && at < ui_apps.count && !ui_apps_job.worker; at++)
                 ui_apps_picture_ask(&ui_apps.app[at]);
+        for (int at = 0; at < ui_apps.count && !ui_apps_job.worker; at++)
+                if (ui_apps.app[at].from_cache && ui_apps.app[at].root[0] && ui_apps.app[at].icon[0])
+                {
+                        if (ui_apps_picture_give(&ui_apps.app[at], true))
+                                ui_apps.app[at].from_cache = false;
+                        break;
+                }
+        if (!ui_apps_job.worker && ui_apps_job.fresh_count)
+                ui_apps_job.flush = true, ui_apps_picture_start();
 }
 
 // Whether an entry has a picture of its own (made the first time this is asked, as ui_apps_picture makes it; the size kept is left as it was).
@@ -21417,12 +21676,12 @@ static b32 ui_apps_has_picture(int which)
         return ui_apps.app[which].picture != null;
 }
 
-// The same for a draw: whether it has one yet, its making asked of the worker as ui_apps_picture_kept asks it.
+// The same for a draw: whether it has one yet, taken from the kept file or asked of the worker as ui_apps_picture_kept asks.
 static b32 ui_apps_has_picture_kept(int which)
 {
         if (which < 0 || which >= ui_apps.count)
                 return false;
-        ui_apps_picture_kept(which, ui_apps.app[which].cached_side > 0 ? ui_apps.app[which].cached_side : UI_APP_PICTURE);
+        ui_apps_picture_ask(&ui_apps.app[which]);
         return ui_apps.app[which].picture != null;
 }
 

@@ -2489,6 +2489,8 @@ static void check_taskbar_pins_put(const char *line)
     taskbar_pins_read();
 }
 
+static char pins_cache[200]; // the kept pictures' file of check_taskbar_pins: its directory's
+
 static void check_taskbar_pins(void)
 {
     static unsigned int screen[GLASS_SIDE * GLASS_SIDE];
@@ -2587,6 +2589,9 @@ static void check_taskbar_pins(void)
         string_copy((string_address)local_dir, (string_address)root), string_append_bounded((string_address)local_dir, (string_address) "/root/.local/share", sizeof(local_dir));
         taskbar_proc_root = proc_root, taskbar_run_root = run_root, compositor_settings_root = settings_root;
         ui_apps_bowls = bowls, ui_apps_local = local_dir, ui_apps_owner = (unsigned int)system_call(syscall(getuid)), ui_apps.read = false;
+        // The pictures kept across processes, in the check's directory too (never the system's /run/moonwater).
+        string_copy((string_address)pins_cache, (string_address)root), string_append_bounded((string_address)pins_cache, (string_address) "/app-pictures", sizeof(pins_cache));
+        ui_apps_cache_path = pins_cache;
         check_taskbar_pins_put("a /b /c ; a b");
         check("taskbar pinned: a line with a fault is none of them, and so is none", !taskbar_pins.count);
         check_taskbar_pins_put("none");
@@ -2658,7 +2663,8 @@ static void check_taskbar_pins(void)
                 !taskbar_tab_full(&view, 0);
         memory_copy(before, band_pixels, sizeof(before));
         ui_apps_picture_settle();
-        later = taskbar_starting_keep(clock_monotonic_nanoseconds()) && game >= 0 && ui_apps.app[game].picture && !ui_apps_picture_making();
+        later = taskbar_starting_keep(clock_monotonic_nanoseconds()) && game >= 0 && ui_apps.app[game].picture;
+        ui_apps_picture_settle(), ui_apps_picture_take(); // the kept file the pass began writing (ui_apps_picture_tend)
         view = band_view(TASKBAR_BOTTOM, null);
         view.apps[0] = "steam_app_362890";
         later = later && taskbar_draw(&view, ~0ul, band_glass, null, rect) == 1 && taskbar_tab_full(&view, 0) && taskbar_slot(&view, 0, &x, &y, &w, &h);
@@ -2674,6 +2680,7 @@ static void check_taskbar_pins(void)
         int game;
         b32 first, then;
 
+        system_call_3(syscall(unlinkat), (positive)AT_FDCWD, (positive)pins_cache, 0); // no picture kept yet: a launcher's first start
         ui_apps.read = false;
         ui_apps_fresh((b64)clock_monotonic_nanoseconds());
         game = ui_apps_find("steam_app_362890");
@@ -2683,7 +2690,94 @@ static void check_taskbar_pins(void)
         then = launcher_pictures(-1) == 0 && launcher.dirty && launcher_grid_picture(0, 32) != null;
         check("launcher picture: the launcher's first frame reads no icon file: a tile asks the worker and is its symbol meanwhile", first);
         check("launcher picture: its pass takes the picture the worker made and draws again at once, and the tile has it", then);
-        ui_apps_picture_settle(), ui_apps_picture_take(); // the next app the pass asked for (ui_apps_picture_warm), put away
+        ui_apps_picture_settle(), ui_apps_picture_take(); // the next job the pass gave (ui_apps_picture_tend), put away
+        launcher.app_count = 0, launcher.dirty = false;
+    }
+    /* The pictures kept across processes (UI_APPS_CACHE, here in the check's directory). A launcher that ran its passes until the worker
+       had nothing left wrote the kept file: its owner's, 0644. A second start (the registry read again, as a new process reads it) maps
+       it before its first frame, and every tile that had a picture has it on that frame, none decoded and no worker asked. An icon
+       changed since is made again by the worker's check. A kept file cut short is not taken: each tile falls back to the worker. */
+    {
+        char cache[200], cut[200];
+        int with[UI_APPS_MOST], with_count = 0, game;
+        b32 written, all_first = true, checked = false, refused = true;
+        struct ui_apps_facts facts;
+        unsigned int made;
+
+        string_copy((string_address)cache, (string_address)root), string_append_bounded((string_address)cache, (string_address) "/app-pictures", sizeof(cache));
+        ui_apps.read = false;
+        ui_apps_fresh((b64)clock_monotonic_nanoseconds());
+        for (int pass = 0; pass < 4 * UI_APPS_MOST && (ui_apps_picture_making() || pass == 0 || ui_apps_job.fresh_count); pass++)
+            ui_apps_picture_settle(), launcher_pictures(-1);
+        memory_zero(&facts, sizeof(facts));
+        written = ui_apps_look(AT_FDCWD, cache, false, &facts) && (facts.mode & 0170000u) == 0100000u && (facts.mode & 0777) == 0644 &&
+                  facts.owner == (p32)system_call(syscall(getuid));
+        for (int at = 0; at < ui_apps.count; at++)
+            if (ui_apps.app[at].picture)
+                with[with_count++] = at;
+        // The second start.
+        ui_apps.read = false;
+        ui_apps_fresh((b64)clock_monotonic_nanoseconds());
+        launcher.app_count = 0;
+        for (int k = 0; k < with_count; k++)
+            launcher.apps[launcher.app_count++] = (unsigned short)with[k];
+        for (int k = 0; k < with_count; k++)
+            all_first &= launcher_grid_picture(k, 32) != null && ui_apps.app[with[k]].from_cache;
+        all_first &= !ui_apps_picture_making();
+        check("kept pictures: a launcher's passes write the kept file, its owner's and 0644", written && with_count > 0);
+        check("kept pictures: a second start of the launcher has every tile's picture on its first frame, none decoded and the worker not asked",
+              written && with_count > 0 && all_first);
+        // The game's icon changed since (its modification moved): the worker's check makes it again.
+        game = ui_apps_find("steam_app_362890");
+        if (game >= 0)
+        {
+            static const positive times[4] = {1, 0, 1, 0};
+            char icon[240];
+
+            string_copy((string_address)icon, (string_address)root);
+            string_append_bounded((string_address)icon, (string_address) "/root/.local/share/icons/hicolor/16x16/apps/steam_icon_362890.png", sizeof(icon));
+            system_call_4(syscall(utimensat), (positive)AT_FDCWD, (positive)icon, (positive)times, 0);
+            made = ui_apps_pictures_made;
+            for (int pass = 0; pass < 4 * UI_APPS_MOST && !checked; pass++)
+            {
+                ui_apps_picture_settle(), launcher_pictures(-1);
+                checked = ui_apps_pictures_made != made && !ui_apps.app[game].from_cache && ui_apps.app[game].picture;
+            }
+        }
+        check("kept pictures: a kept picture whose icon changed since is made again by the worker and replaces it", game >= 0 && checked);
+        for (int pass = 0; pass < 4 * UI_APPS_MOST && (ui_apps_picture_making() || ui_apps_job.fresh_count); pass++)
+            ui_apps_picture_settle(), launcher_pictures(-1);
+        // A kept file cut short (its last picture past its end) is not taken for that record.
+        string_copy((string_address)cut, (string_address)cache), string_append_bounded((string_address)cut, (string_address) ".cut", sizeof(cut));
+        memory_zero(&facts, sizeof(facts));
+        if (ui_apps_look(AT_FDCWD, cache, false, &facts) && facts.size > 64)
+        {
+            bipolar handle = system_open_at(AT_FDCWD, (string_address)cache, FILE_READ | O_CLOEXEC);
+            static p8 bytes[UI_APPS_CACHE_MOST >> 8];
+            bipolar got = handle >= 0 ? system_read_retry((positive)handle, bytes, sizeof(bytes)) : -1;
+
+            if (handle >= 0)
+                system_close(handle);
+            if (got > 64)
+            {
+                tab_make_file(cut, (const char *)bytes, (unsigned long)got - 4);
+                system_rename_at(AT_FDCWD, (string_address)cut, AT_FDCWD, (string_address)cache, 0);
+                ui_apps.read = false;
+                ui_apps_fresh((b64)clock_monotonic_nanoseconds());
+                for (p32 at = 0; at < ui_apps_cache.count; at++)
+                {
+                    const struct ui_apps_cache_record address_to record;
+                    const struct ui_apps_cache_head address_to head = (const struct ui_apps_cache_head address_to)ui_apps_cache.bytes;
+                    const struct ui_apps_cache_record address_to last = (const struct ui_apps_cache_record address_to)(ui_apps_cache.bytes + sizeof(*head)) + at;
+
+                    if (last->offset + (p64)last->side * last->side * 4 > ui_apps_cache.length)
+                        refused &= ui_apps_cache_record_at(ui_apps_cache.bytes, ui_apps_cache.length, at, &record) == null;
+                }
+            }
+        }
+        check("kept pictures: a record whose pixels lie past the kept file's end is not taken", refused && ui_apps_cache.count > 0);
+        ui_apps_picture_settle(), ui_apps_picture_take();
+        ui_apps.read = false;
         launcher.app_count = 0, launcher.dirty = false;
     }
     check_taskbar_pins_put("chromium /x /y ; settings /settings /settings ; nosuch /a /b ; Steam /usr/lib/steam/steam /bowls/bin/steam --x");
@@ -2909,6 +3003,7 @@ static void check_taskbar_pins(void)
     windows_owner_held[1] = (struct windows_owner){0, 0};
     taskbar_proc_root = "/proc", taskbar_run_root = "/run/moonwater", compositor_settings_root = "";
     ui_apps_bowls = UI_APPS_BOWLS, ui_apps_local = UI_APPS_LOCAL, ui_apps_owner = 0, ui_apps.read = false;
+    ui_apps_cache_path = UI_APPS_CACHE;
     taskbar_signal = taskbar_signal_send;
     taskbar_standard();
 }

@@ -2582,6 +2582,7 @@ static positive taskbar_starting_due(void)
 static bool taskbar_starting_keep(positive now)
 {
         b32 picture = ui_apps_picture_take();
+        ui_apps_picture_tend(false); // a kept picture the band used checked against its icon, and the pictures made written for the next process
         taskbar_pictures_looked = now;
         if (!picture && !taskbar_starting_take(now) && !(taskbar_starting.count && now >= taskbar_spin_due()))
                 return false;

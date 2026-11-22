@@ -1166,17 +1166,18 @@ static int launcher_open(void)
         return -1;
 }
 
-/* The apps' pictures are made off the draw (ui_apps_picture_kept): a tile is its symbol or its lettered tile until its picture is
-   made. A picture the worker has finished is taken here and the launcher drawn again at once; then the next app not tried is asked
-   (ui_apps_picture_warm), so every tile has its picture soon after the launcher opens, and while one is made the loop looks again a
-   frame on. */
+/* The apps' pictures are made off the draw (ui_apps_picture_kept): a tile takes its picture from the kept file (mapped with the
+   registry at the launcher's open, before its first frame), else is its symbol or its lettered tile until the worker has made it. A
+   picture the worker has finished is taken here and the launcher drawn again at once; then the worker is given the next job
+   (ui_apps_picture_tend: an app not tried, a kept picture to check, the kept file to write), and while one is under way the loop
+   looks again a frame on. */
 #define LAUNCHER_PICTURE_LOOK 33000000l
 
 static long launcher_pictures(long timeout)
 {
         if (ui_apps_picture_take())
                 launcher.dirty = true, timeout = 0;
-        ui_apps_picture_warm();
+        ui_apps_picture_tend(true);
         if (timeout && ui_apps_picture_making() && (timeout < 0 || timeout > LAUNCHER_PICTURE_LOOK))
                 timeout = LAUNCHER_PICTURE_LOOK;
         return timeout;
