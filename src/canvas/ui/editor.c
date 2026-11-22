@@ -437,7 +437,7 @@ static b32 editor_save(struct editor_tab address_to tab)
             ((tab->owner != (p32)-1 && made.st_uid != tab->owner) || (tab->group != (p32)-1 && made.st_gid != tab->group)) &&
             system_call_3(syscall(fchown), (positive)handle, (positive)tab->owner, (positive)tab->group) != 0)
                 mode &= ~06000u;
-        system_call_2(syscall(fchmod), (positive)handle, (positive)mode);
+        ok &= system_call_2(syscall(fchmod), (positive)handle, (positive)mode) == 0;
         ok &= system_call_1(syscall(fsync), (positive)handle) == 0;
         ok &= fstat((b32)handle, address_of facts) == 0;
         system_close(handle);

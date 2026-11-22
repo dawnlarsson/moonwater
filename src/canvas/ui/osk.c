@@ -508,9 +508,10 @@ static int osk_trace_line(char address_to into, int room, const int address_to p
         {
                 int n = values[v];
 
+                positive mag = n < 0 ? (positive)(-(b64)n) : (positive)n;
                 if (n < 0)
-                        into[length++] = '-', n = -n;
-                length += (int)positive_into_string((string_address)(into + length), (positive)n);
+                        into[length++] = '-';
+                length += (int)positive_into_string((string_address)(into + length), mag);
                 into[length++] = ' ';
         }
         // A key's word is a few bytes ("Space", ".com"): 24 keeps the worst line (3 small numbers, 4 ten-digit ones, the word) inside OSK_TRACE_LINE.

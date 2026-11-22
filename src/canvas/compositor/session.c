@@ -79,7 +79,7 @@ static void compositor_kmsg(string_address text, positive value, string_address 
                 line[length++] = tail[at];
         line[length++] = '\n';
 
-        handle = system_open_at(AT_FDCWD, (string_address) "/dev/kmsg", O_WRONLY | O_CLOEXEC);
+        handle = system_open_at(AT_FDCWD, (string_address) "/dev/kmsg", O_WRONLY | O_CLOEXEC | O_NOFOLLOW);
         if (handle < 0)
                 return;
         system_write_once(handle, line, length);
@@ -1018,7 +1018,7 @@ static void compositor_input_add(unsigned int number)
 
         windows_num_path(path, sizeof(path), "/dev/input/event", number, "");
 
-        handle = system_open_at(AT_FDCWD, (string_address)path, FILE_READ | O_CLOEXEC | O_NONBLOCK);
+        handle = system_open_at(AT_FDCWD, (string_address)path, FILE_READ | O_CLOEXEC | O_NONBLOCK | O_NOFOLLOW);
         if (handle < 0)
                 return;
 

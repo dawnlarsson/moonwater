@@ -28,7 +28,7 @@ static void compositor_hold_touch(positive now)
         compositor.hold_until = now + UI_HOLD_NS;
         if (compositor.hold >= 0 || compositor.holds == ~0ul)
                 return;
-        if ((compositor.hold = (int)system_open_at(AT_FDCWD, (string_address) "/dev/cpu_dma_latency", O_WRONLY | O_CLOEXEC)) < 0)
+        if ((compositor.hold = (int)system_open_at(AT_FDCWD, (string_address) "/dev/cpu_dma_latency", O_WRONLY | O_CLOEXEC | O_NOFOLLOW)) < 0)
                 { compositor.hold = -1, compositor.holds = ~0ul; return; }
         system_write_once(compositor.hold, &zero, sizeof(zero));
         compositor.holds++;
@@ -238,7 +238,7 @@ static void compositor_game_watch(void)
                 compositor_late_reset();
         if (!game)
                 { compositor_gpu_game_clocks(0), compositor_game_epp(0), system_close(compositor.game), compositor.game = -1; return; }
-        if ((compositor.game = (int)system_open_at(AT_FDCWD, (string_address) "/dev/cpu_dma_latency", O_WRONLY | O_CLOEXEC)) < 0)
+        if ((compositor.game = (int)system_open_at(AT_FDCWD, (string_address) "/dev/cpu_dma_latency", O_WRONLY | O_CLOEXEC | O_NOFOLLOW)) < 0)
                 { compositor.game = -1, compositor.games = ~0ul; return; }
         for (unsigned int at = 0; at < 3; at++)
         {
@@ -373,7 +373,9 @@ static void compositor_game_slice_note(const unsigned int *pids, unsigned int co
 
         if (handle < 0)
                 return;
-        for (unsigned int k = 0; k < count; k++)
+        if (count > COMPOSITOR_GAME_SLICES)
+                count = COMPOSITOR_GAME_SLICES;
+        for (unsigned int k = 0; k < count && at + 12 <= sizeof(text); k++)
                 at += positive_into_string((string_address)text + at, (positive)pids[k]), text[at++] = '\n';
         if (at)
                 system_write_once(handle, text, at);
@@ -419,10 +421,13 @@ static void compositor_game_slice(void)
                                 got = system_read_once(handle, text, sizeof text - 1), system_close(handle);
                         for (bipolar k = 0; k < got; k++)
                                 if (text[k] >= '0' && text[k] <= '9')
-                                        value = value * 10 + (unsigned int)(text[k] - '0');
+                                {
+                                        unsigned int d = (unsigned int)(text[k] - '0');
+                                        value = value <= (0x7fffffffu - d) / 10u ? value * 10u + d : 0x80000000u;
+                                }
                                 else
                                 {
-                                        if (value && value != me)
+                                        if (value && value <= 0x7fffffffu && value != me)
                                                 compositor_game_slice_of(value, 0);
                                         value = 0;
                                 }
@@ -1391,7 +1396,6 @@ static int compositor_row_write(const char *path, const char *word)
         p8 kept[32];
         long value;
         char where[160], line[40];
-        bipolar handle;
         positive length;
 
         if (!row || !setting_parse(row, (string_address)word, kept, sizeof(kept) - 1, &value))
@@ -1400,11 +1404,7 @@ static int compositor_row_write(const char *path, const char *word)
         string_append_bounded((p8 *)where, (string_address)path, sizeof(where));
         string_copy_bounded((p8 *)line, kept, sizeof(line) - 1);
         length = string_length((string_address)line), line[length++] = '\n';
-        if ((handle = system_open_at_mode(AT_FDCWD, (string_address)where, O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW | O_CLOEXEC, 0644)) < 0)
-                return 0;
-        system_write_all((b32)handle, line, length);
-        system_close(handle);
-        return 1;
+        return file_write_atomic_at(AT_FDCWD, (string_address)where, line, length, 0644) ? 1 : 0;
 }
 
 static struct { int which, band, held; } compositor_edit_drag;
