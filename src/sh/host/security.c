@@ -641,21 +641,18 @@ static bipolar security_switches_read_at(string_address path, p32 owner)
 */
 static bool security_switch_on(string_address name)
 {
+        positive at = string_table_lookup(name, security_switches);
         bipolar kept = -1;
 
-        for (positive at = 0; at < array_count(security_switches); at++)
-                if (string_equals(name, security_switches[at].word))
-                {
-                        if (security_switches[at].tier < STRICT_TIGHT ||
-                            security_switches[at].tight == SECURITY_TIGHT_NONE)
-                                kept = security_switches_read_at(
-                                    (string_address)TLS_OVERLAY_PATH, 0);
-                        return string_equals(security_switch_turned(at, kept < 0 ? 0 : (p32)kept)
-                                                 ? security_switches[at].turned
-                                                 : security_switches[at].standard,
-                                             "on");
-                }
-        return false;
+        if (at == array_count(security_switches))
+                return false;
+        if (security_switches[at].tier < STRICT_TIGHT ||
+            security_switches[at].tight == SECURITY_TIGHT_NONE)
+                kept = security_switches_read_at((string_address)TLS_OVERLAY_PATH, 0);
+        return string_equals(security_switch_turned(at, kept < 0 ? 0 : (p32)kept)
+                                 ? security_switches[at].turned
+                                 : security_switches[at].standard,
+                             "on");
 }
 
 /*
@@ -725,7 +722,7 @@ static string_address security_kind(p8 curve, positive length)
                 return (string_address) "P-256   ";
         if (curve == 2)
                 return (string_address) "P-384   ";
-        string_copy(text, "RSA-");
+        string_copy_bounded(text, "RSA-", sizeof(text));
         used = 4 + positive_into_string(text + 4, length * 8);
         while (used < 8)
                 text[used++] = ' ';
@@ -1034,11 +1031,15 @@ static b32 security_say(string_address which)
         //      The lines name the anchors this process's overlay refuses.
         memory_copy_apart(address_of tls_overlay_now, address_of security_shown,
                           sizeof tls_overlay_now);
-        for (positive at = 0; which && at < array_count(security_switches); at++)
-                if (string_equals(which, security_switches[at].word))
+        if (which)
+        {
+                positive at = string_table_lookup(which, security_switches);
+                if (at < array_count(security_switches))
                         security_switch_line(at, true);
-        for (positive at = 0; !which && at < array_count(security_switches); at++)
-                security_switch_line(at, false);
+        }
+        else
+                for (positive at = 0; at < array_count(security_switches); at++)
+                        security_switch_line(at, false);
         if (!which || string_equals(which, "trust"))
                 security_trust_lines(which != null);
         if (!which || string_equals(which, "block"))
@@ -1265,13 +1266,15 @@ static b32 host_security(string_address address_to arguments, positive count)
 
         if (count == 2)
                 return security_say(null);
-        for (positive at = 0; at < array_count(security_switches); at++)
-                if (string_equals(arguments[2], security_switches[at].word))
+        {
+                positive at = string_table_lookup(arguments[2], security_switches);
+                if (at < array_count(security_switches))
                 {
                         return_if(count > 4, host_usage());
                         return count == 3 ? security_say(arguments[2])
                                           : security_switch(at, arguments[3]);
                 }
+        }
         return_if(!trust && !string_equals(arguments[2], "block"), host_usage());
         if (count == 3)
                 return security_say(arguments[2]);

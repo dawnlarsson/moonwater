@@ -3988,10 +3988,8 @@ static bool radio_share_kept(void)
 static bool radio_share_is(positive pid)
 {
         p8 path[32] = "/proc/", text[32];
-        positive length = positive_into_string(path + 6, pid) + 6;
-
-        string_copy(path + length, "/comm");
-        if (host_read_kernel((string_address)path, text, sizeof(text)) < 0)
+        if (!host_proc_path(path, sizeof(path), pid, "/comm") ||
+            host_read_kernel((string_address)path, text, sizeof(text)) < 0)
                 return false;
         return string_equals((string_address)text, "bt-network");
 }

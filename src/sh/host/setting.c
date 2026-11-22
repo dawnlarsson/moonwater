@@ -127,7 +127,7 @@ static string_address host_splash_partition(p8 address_to name)
                                    !string_equals(current, search.name)))
                 return "the disk this session started from is no longer the partition it was found as";
 
-        string_copy(name, search.name);
+        string_copy_bounded(name, search.name, HOST_NAME_ROOM);
         return null;
 }
 
@@ -521,7 +521,7 @@ static b32 locale_canvas_wallpaper_picture(string_address address_to arguments, 
         if (!every && !windows_display_name((const char *)arguments[5], string_length(arguments[5]), name))
                 return host_refuse("\"%s\" is not a screen's name: letters, digits and dashes, 1 to %p bytes (Virtual-1, HDMI-A-1, eDP-1)\n",
                                    arguments[5], (positive)(WINDOWS_OUTPUT_NAME - 1));
-        string_copy((string_address)target, (string_address)LOCALE_WALLPAPER_DIR "/");
+        string_copy_bounded((string_address)target, (string_address)LOCALE_WALLPAPER_DIR "/", sizeof(target));
         string_append_bounded((string_address)target, every ? (string_address) "all" : (string_address)name, sizeof(target));
         string_append_bounded((string_address)target, (string_address) ".png", sizeof(target));
         if (!none)
@@ -566,10 +566,10 @@ static b32 locale_canvas_wallpaper_picture(string_address address_to arguments, 
         // The wallpaper row written again (picture for every screen's, moon when it is taken away), which the compositor hears.
         kept[0] = end;
         if (host_read_state(SETTING_WALLPAPER_PATH, kept, sizeof(kept) - 1) <= 0)
-                string_copy(kept, (string_address) "moon\n");
+                string_copy_bounded(kept, (string_address) "moon\n", sizeof(kept));
         kept[sizeof(kept) - 1] = end;
         if (every)
-                string_copy(kept, none ? (string_address) "moon\n" : (string_address) "picture\n");
+                string_copy_bounded(kept, none ? (string_address) "moon\n" : (string_address) "picture\n", sizeof(kept));
         failed = host_write_file((string_address)SETTING_WALLPAPER_PATH, kept, string_length(kept), 0644, true);
         if (failed < 0)
                 return host_fail("canvas wallpaper", failed);
@@ -866,7 +866,7 @@ static b32 locale_taskbar_pinned(string_address address_to arguments, positive c
         }
         text[at] = end;
         if (string_equals((string_address)text, "default"))
-                string_copy((string_address)text, (string_address) "none"), at = 4;
+                string_copy_bounded((string_address)text, (string_address) "none", sizeof(text)), at = 4;
         if (!string_equals((string_address)text, "none") && !setting_pins_valid((const char *)text, &bad))
                 return host_refuse("pinned is a line of at most %p bytes with at most %p programs, each an app_id, the executable it ran as and the words it "
                                    "is started with (the first of them a path from /), a program ended by a lone ; and a word in single quotes where it "

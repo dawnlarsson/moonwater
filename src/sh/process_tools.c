@@ -746,7 +746,7 @@ static bipolar process_nohup_output(p8 address_to path)
 
         if (answer >= 0)
         {
-                string_copy(path, (string_address) "nohup.out");
+                string_copy_bounded(path, (string_address) "nohup.out", FILE_PATH_MAX);
                 return answer;
         }
 
@@ -1089,17 +1089,24 @@ static bool process_coresched_pid(string_address text,
                address_to process <= b32_max;
 }
 
+static const named_flag process_coresched_scopes[] = {
+    {(string_address)"tgid", PROCESS_SCHED_CORE_THREAD_GROUP},
+    {(string_address)"pid", PROCESS_SCHED_CORE_THREAD},
+    {(string_address)"pgid", PROCESS_SCHED_CORE_PROCESS_GROUP},
+};
+
 static bool process_coresched_scope(string_address text,
                                     positive address_to scope)
 {
-        if (!text || string_equals(text, (string_address)"tgid"))
+        if (!text)
+        {
                 address_to scope = PROCESS_SCHED_CORE_THREAD_GROUP;
-        else if (string_equals(text, (string_address)"pid"))
-                address_to scope = PROCESS_SCHED_CORE_THREAD;
-        else if (string_equals(text, (string_address)"pgid"))
-                address_to scope = PROCESS_SCHED_CORE_PROCESS_GROUP;
-        else
+                return true;
+        }
+        positive at = string_table_lookup(text, process_coresched_scopes);
+        if (at == array_count(process_coresched_scopes))
                 return false;
+        address_to scope = (positive)process_coresched_scopes[at].value;
         return true;
 }
 
@@ -1128,17 +1135,15 @@ static b32 process_coresched()
         positive first_word = 0;
         if (file_operand_count)
         {
-                string_address word = file_operand_at(0);
-                if (string_equals(word, (string_address)"get"))
-                        first_word = 1;
-                else if (string_equals(word, (string_address)"new"))
+                static const named_flag ops[] = {
+                    {(string_address)"get", CORE_GET},
+                    {(string_address)"new", CORE_NEW},
+                    {(string_address)"copy", CORE_COPY},
+                };
+                positive at = string_table_lookup(file_operand_at(0), ops);
+                if (at < array_count(ops))
                 {
-                        operation = CORE_NEW;
-                        first_word = 1;
-                }
-                else if (string_equals(word, (string_address)"copy"))
-                {
-                        operation = CORE_COPY;
+                        operation = ops[at].value;
                         first_word = 1;
                 }
         }
@@ -1538,8 +1543,11 @@ static bool process_timeout_duration(string_address text,
                         address_to duration = 0;
                 return true;
         }
-        if (string_equals(text, "inf") || string_equals(text, "INF") ||
-            string_equals(text, "infinity") || string_equals(text, "+inf"))
+        static const string_address inf_names[] = {
+            (string_address)"inf", (string_address)"INF",
+            (string_address)"infinity", (string_address)"+inf",
+        };
+        if (string_table_lookup(text, inf_names) < array_count(inf_names))
         {
                 address_to duration = 0;
                 return true;
@@ -2610,26 +2618,29 @@ static b32 process_script()
         bool classic_asked = false;
         if (format)
         {
-                if (string_equals(format, (string_address)"advanced"))
-                        state.advanced = true;
-                else if (string_equals(format, (string_address)"classic"))
-                {
-                        classic_asked = true;
-                        state.advanced = false;
-                }
-                else
+                static const named_byte formats[] = {
+                    {(string_address)"advanced", 1},
+                    {(string_address)"classic", 0},
+                };
+                positive at = string_table_lookup(format, formats);
+                if (at == array_count(formats))
                         return string_report(log_error, 1, "%s: %s\n", "script", "unknown logging format");
+                state.advanced = formats[at].value != 0;
+                classic_asked = !state.advanced;
         }
 
         string_address echo = file_option_value(address_of taking, 'E');
         if (echo)
         {
-                if (string_equals(echo, (string_address)"always"))
-                        state.echo = 1;
-                else if (string_equals(echo, (string_address)"never"))
-                        state.echo = 2;
-                else if (!string_equals(echo, (string_address)"auto"))
+                static const named_byte echo_modes[] = {
+                    {(string_address)"auto", 0},
+                    {(string_address)"always", 1},
+                    {(string_address)"never", 2},
+                };
+                positive at = string_table_lookup(echo, echo_modes);
+                if (at == array_count(echo_modes))
                         return string_report(log_error, 1, "%s: %s\n", "script", "unknown echo mode");
+                state.echo = echo_modes[at].value;
         }
 
         string_address output_path = null;
@@ -3071,6 +3082,19 @@ static bool process_replay_say(string_address text, bool padded)
         the reference reads it inside its own option loop: a later good value
         does not rescue an earlier bad one, so the check cannot wait until
         the last value of each letter is known. */
+static const named_byte process_replay_streams[] = {
+    {(string_address)"out", 'O'},
+    {(string_address)"in", 'I'},
+    {(string_address)"signal", 'S'},
+    {(string_address)"info", 'H'},
+};
+
+static const named_byte process_replay_cr_modes[] = {
+    {(string_address)"auto", 0},
+    {(string_address)"never", 1},
+    {(string_address)"always", 2},
+};
+
 static bool process_replay_number(p8 letter, string_address value)
 {
         positive scratch;
@@ -3087,18 +3111,15 @@ static bool process_replay_number(p8 letter, string_address value)
         }
         if (letter == 'x')
         {
-                if (string_equals(value, (string_address)"out") ||
-                    string_equals(value, (string_address)"in") ||
-                    string_equals(value, (string_address)"signal") ||
-                    string_equals(value, (string_address)"info"))
+                if (string_table_lookup(value, process_replay_streams) <
+                    array_count(process_replay_streams))
                         return true;
                 return string_report(log_error, false, "scriptreplay: unsupported stream name: '%s'\n", value);
         }
         if (letter == 'c')
         {
-                if (string_equals(value, (string_address)"auto") ||
-                    string_equals(value, (string_address)"never") ||
-                    string_equals(value, (string_address)"always"))
+                if (string_table_lookup(value, process_replay_cr_modes) <
+                    array_count(process_replay_cr_modes))
                         return true;
                 return string_report(log_error, false, "scriptreplay: unsupported mode name: '%s'\n", value);
         }
@@ -3202,16 +3223,10 @@ static b32 process_scriptreplay()
         string_address stream = file_option_value(address_of taking, 'x');
         if (stream)
         {
-                if (string_equals(stream, (string_address)"out"))
-                        selected = 'O';
-                else if (string_equals(stream, (string_address)"in"))
-                        selected = 'I';
-                else if (string_equals(stream, (string_address)"signal"))
-                        selected = 'S';
-                else if (string_equals(stream, (string_address)"info"))
-                        selected = 'H';
-                else
+                positive at = string_table_lookup(stream, process_replay_streams);
+                if (at == array_count(process_replay_streams))
                         return string_report(log_error, 1, "scriptreplay: unsupported stream name: '%s'\n", stream);
+                selected = process_replay_streams[at].value;
         }
         else if (!out_path && in_path)
                 selected = 'I';
@@ -3223,12 +3238,10 @@ static b32 process_scriptreplay()
         string_address cr = file_option_value(address_of taking, 'c');
         if (cr)
         {
-                if (string_equals(cr, (string_address)"never"))
-                        cr_mode = 1;
-                else if (string_equals(cr, (string_address)"always"))
-                        cr_mode = 2;
-                else if (!string_equals(cr, (string_address)"auto"))
+                positive at = string_table_lookup(cr, process_replay_cr_modes);
+                if (at == array_count(process_replay_cr_modes))
                         return string_report(log_error, 1, "%s: %s\n", "scriptreplay", "invalid CR mode");
+                cr_mode = process_replay_cr_modes[at].value;
         }
 
         process_replay_reader timing, output, input;
@@ -3426,15 +3439,15 @@ static b32 process_ctrlaltdel()
                 log_flush();
                 return 0;
         }
+        static const named_flag cad_modes[] = {
+            {(string_address)"hard", PROCESS_REBOOT_CAD_ON},
+            {(string_address)"soft", PROCESS_REBOOT_CAD_OFF},
+        };
         string_address mode = program_argument(1);
-        positive command;
-
-        if (string_equals(mode, (string_address)"hard"))
-                command = PROCESS_REBOOT_CAD_ON;
-        else if (string_equals(mode, (string_address)"soft"))
-                command = PROCESS_REBOOT_CAD_OFF;
-        else
+        positive mode_at = string_table_lookup(mode, cad_modes);
+        if (mode_at == array_count(cad_modes))
                 return string_report(log_error, 1, "ctrlaltdel: unknown argument: %s\n", mode);
+        positive command = (positive)cad_modes[mode_at].value;
 
         bipolar changed = system_call_4(syscall(reboot), PROCESS_REBOOT_MAGIC,
                                         PROCESS_REBOOT_MAGIC_SECOND, command,

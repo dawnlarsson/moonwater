@@ -36,10 +36,7 @@ static bool host_install_boot_drive(p8 address_to into, positive room)
             !host_medium_find(address_of search, running, null))
                 return false;
         host_unmount(HOST_MEDIUM);
-        if (string_length(search.disk) >= room)
-                return false;
-        string_copy(into, search.disk);
-        return true;
+        return string_copy_bounded(into, search.disk, room) < room;
 }
 
 /*

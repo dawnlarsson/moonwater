@@ -425,7 +425,7 @@ static bool host_data_disk(p8 address_to into, positive room)
 
         memory_zero(address_of look, sizeof(look));
         host_each_entry("/sys/class/block", host_data_visit, address_of look);
-        return look.found && string_length(look.disk) < room && (string_copy(into, look.disk), true);
+        return look.found && string_copy_bounded(into, look.disk, room) < room;
 }
 
 #define RADIO_LOCK_EX 2
@@ -852,8 +852,8 @@ static bool host_session_disk(p8 address_to into, positive room)
         p8 verdict[HOST_NAME_ROOM + 16];
 
         return host_read_word(HOST_VERDICT, verdict, sizeof(verdict)) >= 0 &&
-               string_has_prefix(verdict, "disk ") && string_length(verdict + 5) < room &&
-               (string_copy(into, verdict + 5), true);
+               string_has_prefix(verdict, "disk ") &&
+               string_copy_bounded(into, verdict + 5, room) < room;
 }
 
 static bool host_name_valid(string_address name)
@@ -896,8 +896,7 @@ static bool host_parent(string_address name, p8 address_to into, positive room)
                 return false;
 
         if (system_access_at(AT_FDCWD, partition, 0) < 0)
-                return string_length(name) < room &&
-                       (string_copy(into, name), true);
+                return string_copy_bounded(into, name, room) < room;
 
         if (file_link_text(sysfs, link, sizeof(link)) <= 0)
                 return false;
@@ -958,12 +957,12 @@ static bool host_census_visit(storage_identity address_to identity,
 
                 install = census->found + census->count++;
                 memory_zero(install, sizeof(address_to install));
-                string_copy(install->disk, parent);
+                string_copy_bounded(install->disk, parent, sizeof(install->disk));
         }
 
-        string_copy(system ? install->system : install->data, name);
-        string_copy(system ? install->system_partuuid : install->data_partuuid,
-                    identity->partuuid);
+        string_copy_bounded(system ? install->system : install->data, name, HOST_NAME_ROOM);
+        string_copy_bounded(system ? install->system_partuuid : install->data_partuuid,
+                            identity->partuuid, STORAGE_PARTUUID_ROOM);
         return true;
 }
 
@@ -1010,7 +1009,7 @@ static bool host_prefix_visit(string_address directory, string_address name,
         if (!host_starts(name, look->prefix) || string_length(name) >= HOST_NAME_ROOM)
                 return true;
 
-        string_copy(look->name, name);
+        string_copy_bounded(look->name, name, sizeof(look->name));
         look->seen = true;
         return false;
 }
@@ -1025,7 +1024,7 @@ static bool host_has_entry(string_address directory, string_address prefix,
         host_each_entry(directory, host_prefix_visit, address_of look);
 
         if (name && look.seen)
-                string_copy(name, look.name);
+                string_copy_bounded(name, look.name, HOST_NAME_ROOM);
 
         return look.seen;
 }
@@ -1522,7 +1521,7 @@ static bool host_partition_uuid_resolve(string_address uuid,
             !host_name_valid(path + sizeof("/dev/") - 1))
                 return false;
 
-        string_copy(name, path + sizeof("/dev/") - 1);
+        string_copy_bounded(name, path + sizeof("/dev/") - 1, HOST_NAME_ROOM);
         return true;
 }
 
@@ -1557,9 +1556,9 @@ static bool host_install_refresh(host_install address_to install)
         if (install->disk[0] && !string_equals(install->disk, system_disk))
                 return false;
 
-        string_copy(install->disk, system_disk);
-        string_copy(install->system, system);
-        string_copy(install->data, data);
+        string_copy_bounded(install->disk, system_disk, sizeof(install->disk));
+        string_copy_bounded(install->system, system, sizeof(install->system));
+        string_copy_bounded(install->data, data, sizeof(install->data));
         install->resolved = system_clock_ns(HOST_CLOCK_BOOTTIME);
         return true;
 }
@@ -1736,8 +1735,8 @@ static bool host_medium_visit(storage_identity address_to identity,
             host_image_build(path, build, sizeof(build)) &&
             string_equals(build, search->build))
         {
-                string_copy(search->name, name);
-                string_copy(search->disk, parent);
+                string_copy_bounded(search->name, name, sizeof(search->name));
+                string_copy_bounded(search->disk, parent, sizeof(search->disk));
                 search->found = true;
                 return false;
         }
@@ -3422,7 +3421,7 @@ static fn host_question(string_address disk)
 
         host_install_read(install);
         if (!host_running_build(running, sizeof(running)))
-                string_copy(running, "a build whose version cannot be read");
+                string_copy_bounded(running, "a build whose version cannot be read", sizeof(running));
 
         string_format(log, "\n" host_label "%s already has Moonwater on it:\n\n    %s\n\n"
                            host_label "and this is\n\n    %s\n\n",
@@ -4010,7 +4009,7 @@ static b32 host_install_locked(string_address asked, bool removable, bool said_y
 
         if (!host_join(path, sizeof(path), sysfs, "/device/model") ||
             host_read_kernel(path, text, sizeof(text)) <= 0)
-                string_copy(text, "a disk");
+                string_copy_bounded(text, "a disk", sizeof(text));
         host_plain_line(text);
 
         host_say(log, host_label "Installing erases everything on %s: %s, %p GiB.\n",
@@ -4085,7 +4084,7 @@ static b32 host_install_locked(string_address asked, bool removable, bool said_y
         system_close(handle);
 
         memory_zero(address_of target, sizeof(target));
-        string_copy(target.disk, name);
+        string_copy_bounded(target.disk, name, sizeof(target.disk));
 
         if (failed || !host_partitions_wait(address_of target, parts))
         {

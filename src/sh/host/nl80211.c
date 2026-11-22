@@ -177,6 +177,25 @@ static COLD bool nl80211_begin(netlink_buffer address_to buffer, p16 family, p8 
         return true;
 }
 
+typedef struct
+{
+        p16 type;
+        const address_any data;
+        positive length;
+} nl80211_attr_spec;
+
+static COLD bool nl80211_put_attrs(netlink_buffer address_to buffer,
+                                   const nl80211_attr_spec address_to specs,
+                                   positive count)
+{
+        for (positive i = 0; i < count; i++)
+                if (!netlink_attribute_add(buffer, specs[i].type,
+                                           (address_any)specs[i].data,
+                                           specs[i].length))
+                        return false;
+        return true;
+}
+
 static COLD bool nl80211_attribute_u32(netlink_buffer address_to buffer, p16 type,
                                   p32 value)
 {
@@ -840,11 +859,15 @@ static COLD bool nl80211_psk_offload(nl80211 address_to session, p32 wiphy)
                            NL80211_CMD_GET_WIPHY, NLM_REQUEST | NLM_DUMP,
                            sequence))
                 return false;
-        nl80211_attribute_u32(address_of request, NL80211_ATTR_WIPHY, wiphy);
         //      A dump that is not split is the wiphy as the first nl80211 told
         //      it, and has none of its extended features: iw asks for split
         //      too, and a driver's offload was never heard of without it.
-        netlink_attribute_add(address_of request, NL80211_ATTR_SPLIT_WIPHY_DUMP, null, 0);
+        const nl80211_attr_spec attrs[] = {
+            {NL80211_ATTR_WIPHY, address_of wiphy, sizeof(wiphy)},
+            {NL80211_ATTR_SPLIT_WIPHY_DUMP, null, 0},
+        };
+        if (!nl80211_put_attrs(address_of request, attrs, array_count(attrs)))
+                return false;
         if (netlink_transact(session->handle, address_of request, sequence,
                              nl80211_wiphy_seen, address_of query) < 0)
                 return false;
@@ -904,21 +927,23 @@ static COLD bipolar nl80211_new_key(nl80211 address_to session, p32 index, p8 id
         if (!nl80211_begin(address_of request, session->family, NL80211_CMD_NEW_KEY,
                            NLM_REQUEST | NLM_ACK, sequence))
                 return -1;
-        nl80211_attribute_u32(address_of request, NL80211_ATTR_IFINDEX, index);
-        netlink_attribute_add(address_of request, NL80211_ATTR_KEY_DATA, key,
-                              key_length);
-        netlink_attribute_add(address_of request, NL80211_ATTR_KEY_IDX, address_of idx,
-                              1);
-        nl80211_attribute_u32(address_of request, NL80211_ATTR_KEY_CIPHER, cipher);
-        nl80211_attribute_u32(address_of request, NL80211_ATTR_KEY_TYPE, type);
-        if (mac)
-                netlink_attribute_add(address_of request, NL80211_ATTR_MAC, mac, 6);
-        if (seq && seq_length)
-                netlink_attribute_add(address_of request, NL80211_ATTR_KEY_SEQ, seq,
-                                      seq_length);
-        if (group_default)
-                netlink_attribute_add(address_of request, NL80211_ATTR_KEY_DEFAULT,
-                                      null, 0);
+        const nl80211_attr_spec base_attrs[] = {
+            {NL80211_ATTR_IFINDEX, address_of index, sizeof(index)},
+            {NL80211_ATTR_KEY_DATA, key, key_length},
+            {NL80211_ATTR_KEY_IDX, address_of idx, 1},
+            {NL80211_ATTR_KEY_CIPHER, address_of cipher, sizeof(cipher)},
+            {NL80211_ATTR_KEY_TYPE, address_of type, sizeof(type)},
+        };
+        if (!nl80211_put_attrs(address_of request, base_attrs, array_count(base_attrs)))
+                return -1;
+        if (mac && !netlink_attribute_add(address_of request, NL80211_ATTR_MAC, mac, 6))
+                return -1;
+        if (seq && seq_length &&
+            !netlink_attribute_add(address_of request, NL80211_ATTR_KEY_SEQ, seq, seq_length))
+                return -1;
+        if (group_default &&
+            !netlink_attribute_add(address_of request, NL80211_ATTR_KEY_DEFAULT, null, 0))
+                return -1;
         return netlink_transact(session->handle, address_of request, sequence,
                                 null, null);
 }
@@ -936,10 +961,13 @@ static COLD bipolar nl80211_authorize(nl80211 address_to session, p32 index,
                            NL80211_CMD_SET_STATION, NLM_REQUEST | NLM_ACK,
                            sequence))
                 return -1;
-        nl80211_attribute_u32(address_of request, NL80211_ATTR_IFINDEX, index);
-        netlink_attribute_add(address_of request, NL80211_ATTR_MAC, mac, 6);
-        netlink_attribute_add(address_of request, NL80211_ATTR_STA_FLAGS2, flags,
-                              sizeof(flags));
+        const nl80211_attr_spec attrs[] = {
+            {NL80211_ATTR_IFINDEX, address_of index, sizeof(index)},
+            {NL80211_ATTR_MAC, mac, 6},
+            {NL80211_ATTR_STA_FLAGS2, flags, sizeof(flags)},
+        };
+        if (!nl80211_put_attrs(address_of request, attrs, array_count(attrs)))
+                return -1;
         return netlink_transact(session->handle, address_of request, sequence,
                                 null, null);
 }

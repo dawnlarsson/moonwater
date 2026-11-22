@@ -3806,8 +3806,8 @@ static b32 locale_ntp_server_set(string_address name)
 //      uk is gb there, and the country codes sv and nb are se and no.
 static const struct
 {
-        char name[8];
-        char xkb[4];
+        string_address name;
+        string_address xkb;
 } locale_keyboards[] = {
         {"us", "us"}, {"uk", "gb"}, {"gb", "gb"}, {"de", "de"}, {"se", "se"},
         {"sv", "se"}, {"no", "no"}, {"nb", "no"}, {"dk", "dk"}, {"fi", "fi"},
@@ -3816,12 +3816,7 @@ static const struct
 
 static bool locale_keyboard_ok(string_address name)
 {
-        positive at;
-
-        for (at = 0; at < array_count(locale_keyboards); at++)
-                if (string_equals(name, (string_address)locale_keyboards[at].name))
-                        return true;
-        return false;
+        return string_table_lookup(name, locale_keyboards) < array_count(locale_keyboards);
 }
 
 //      The layout that is kept: us when none is, and nothing when it is not

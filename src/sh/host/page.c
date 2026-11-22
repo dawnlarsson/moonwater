@@ -660,8 +660,8 @@ static bool host_sticks_visit(storage_identity address_to identity, address_any 
 
         stick = sticks->found + sticks->count;
         memory_zero(stick, sizeof(address_to stick));
-        string_copy(stick->name, name);
-        string_copy(stick->disk, parent);
+        string_copy_bounded(stick->name, name, sizeof(stick->name));
+        string_copy_bounded(stick->disk, parent, sizeof(stick->disk));
         stick->fit = HOST_FIT_NONE;
 
         if (!host_stick_let(parent))
@@ -1139,7 +1139,7 @@ static b32 host_rollback_locked(host_install address_to install, bool said_yes)
                 //      the one the question was about or nothing is written.
                 if (!said_yes)
                 {
-                        string_copy(asked, back);
+                        string_copy_bounded(asked, back, sizeof(asked));
                         host_unmount(HOST_SYSTEM);
                         if (!host_said_yes(false, install->readable
                                                       ? "Starting that one again keeps the data, "

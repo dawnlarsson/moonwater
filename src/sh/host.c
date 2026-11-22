@@ -326,6 +326,18 @@ static fn host_hex4(p8 address_to into, p32 value)
         into[4] = end;
 }
 
+/* Build "/proc/<pid><suffix>" with a byte_cursor; false if it does not fit. */
+static bool host_proc_path(p8 address_to into, positive room, positive pid,
+                           string_address suffix)
+{
+        byte_cursor cursor = byte_cursor_open(into, room);
+
+        byte_cursor_put_bytes(address_of cursor, "/proc/", 6);
+        byte_cursor_put_u64(address_of cursor, (p64)pid);
+        byte_cursor_put_string(address_of cursor, suffix);
+        return byte_cursor_terminate(address_of cursor);
+}
+
 #include "host/disk.c" // the disk: the state directory and boot's verdict, the lock, the census of disks, images and their builds, the place steps an image is written by (host_place_*), the splash an install lays, a disk taken, boot's settle and its question, and setup install's work (host_install_locked); the setup verbs are page.c's
 #include "host/image.c" // the settings an image carries and a disk keeps (host_settings_*): read, written, carried and applied; and spark's bind
 #include "host/boot.c" // boot's service, its events and the shells it starts; the verbs canvas, latency and bios
@@ -427,10 +439,10 @@ static b32 host_settings_window(string_address address_to arguments, positive co
                               "windows: moonwater desktop on starts it\n"));
 
         // Its -f, from its command line, words a zero apart.
-        string_copy(face, (string_address)HOST_SETTINGS_FACE);
-        length = positive_into_string(path + 6, pid) + 6;
-        string_copy(path + length, (string_address) "/cmdline");
-        handle = system_open_at(AT_FDCWD, path, FILE_READ | O_CLOEXEC);
+        string_copy_bounded(face, (string_address)HOST_SETTINGS_FACE, sizeof(face));
+        handle = host_proc_path((p8 address_to)path, sizeof(path), pid, (string_address) "/cmdline")
+                     ? system_open_at(AT_FDCWD, path, FILE_READ | O_CLOEXEC)
+                     : -1;
         if (handle >= 0)
         {
                 got = system_read_once((b32)handle, line, sizeof(line) - 1);
@@ -820,23 +832,33 @@ static fn host_clip_owner(const struct windows address_to table, unsigned int wh
 static b32 host_clipboard(string_address address_to arguments, positive count)
 {
         static const char address_to const names[2] = {"clipboard", "primary"};
+        static const named_byte clip_verbs[] = {
+            {(string_address) "", 0},
+            {(string_address) "get", 1},
+            {(string_address) "set", 2},
+            {(string_address) "clear", 3},
+            {(string_address) "watch", 4},
+        };
         struct windows address_to table;
         string_address verb = count > 2 ? arguments[2] : (string_address) "";
         positive at = 3;
+        positive verb_at = string_table_lookup(verb, clip_verbs);
+        p8 action;
         unsigned int which = WINDOWS_CLIP_CLIPBOARD;
         long mapped;
         b32 status = 0;
 
-        if (!string_equals(verb, "get") && !string_equals(verb, "set") && !string_equals(verb, "clear") &&
-            !string_equals(verb, "watch") && count > 2)
+        if (verb_at == array_count(clip_verbs) && count > 2)
         {
                 if (!string_equals(verb, "primary"))
                         return host_usage();
-                verb = (string_address) "", at = 2;
+                verb_at = 0;
+                at = 2;
         }
+        action = clip_verbs[verb_at].value;
         if (at < count && string_equals(arguments[at], "primary"))
                 which = WINDOWS_CLIP_PRIMARY, at++;
-        return_if(at < count && !string_equals(verb, "set"), host_usage());
+        return_if(at < count && action != 2, host_usage());
         host_need_root();
         mapped = host_windows_map(true);
         return_if(mapped < 0 && mapped > -4096,
@@ -848,7 +870,7 @@ static b32 host_clipboard(string_address address_to arguments, positive count)
                 return host_refuse("this compositor keeps no clipboard\n");
         }
 
-        if (!verb[0])
+        if (action == 0)
         {
                 for (unsigned int each = 0; each < 2; each++)
                 {
@@ -864,7 +886,7 @@ static b32 host_clipboard(string_address address_to arguments, positive count)
                 }
                 host_say(log, "  service %s\n", table->clip_on ? (string_address) "on" : (string_address) "off");
         }
-        else if (string_equals(verb, "get"))
+        else if (action == 1)
         {
                 p8 address_to bytes;
                 positive length;
@@ -885,7 +907,7 @@ static b32 host_clipboard(string_address address_to arguments, positive count)
                         windows_clip_free(bytes, length);
                 }
         }
-        else if (string_equals(verb, "set"))
+        else if (action == 2)
         {
                 static p8 input[65536];
                 positive length = 0;
@@ -936,7 +958,7 @@ static b32 host_clipboard(string_address address_to arguments, positive count)
                 if (fd >= 0)
                         window_call(WINDOW_SYS_CLOSE, fd, 0, 0, 0, 0, 0);
         }
-        else if (string_equals(verb, "clear"))
+        else if (action == 3)
         {
                 __atomic_store_n(&table->cli_clear, 1u, __ATOMIC_RELEASE);
                 if (!host_clip_knock(table, host_clip_cleared, 0))

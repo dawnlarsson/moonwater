@@ -385,6 +385,18 @@ static b32 host_power_ends(string_address name, string_address suffix)
 
 static bool host_power_file(string_address directory, string_address name, address_any context)
 {
+        static const struct
+        {
+                string_address prefix;
+                positive prefix_len;
+                positive divisor;
+                string_address unit;
+        } kinds[] = {
+            {"temp", 4, 1000, "degrees"},
+            {"fan", 3, 1, "rpm"},
+            {"freq", 4, 1000000, "MHz"},
+            {"power", 5, 1000, "mW"},
+        };
         char path[320];
         positive value = 0;
         string_address chip = (string_address)context;
@@ -393,14 +405,13 @@ static bool host_power_file(string_address directory, string_address name, addre
                 return true;
         if (!host_join(path, sizeof(path), directory, "/") || !host_join(path, sizeof(path), path, name) || !host_power_number(path, &value))
                 return true;
-        if (name[0] == 't' && name[1] == 'e' && name[2] == 'm' && name[3] == 'p')
-                host_say(log, "  power           %s %s: %p degrees\n", chip, name, value / 1000);
-        else if (name[0] == 'f' && name[1] == 'a' && name[2] == 'n')
-                host_say(log, "  power           %s %s: %p rpm\n", chip, name, value);
-        else if (name[0] == 'f' && name[1] == 'r' && name[2] == 'e' && name[3] == 'q')
-                host_say(log, "  power           %s %s: %p MHz\n", chip, name, value / 1000000);
-        else if (name[0] == 'p' && name[1] == 'o' && name[2] == 'w' && name[3] == 'e' && name[4] == 'r')
-                host_say(log, "  power           %s %s: %p mW\n", chip, name, value / 1000);
+        for (positive i = 0; i < array_count(kinds); i++)
+                if (!string_compare_max(name, kinds[i].prefix, kinds[i].prefix_len))
+                {
+                        host_say(log, "  power           %s %s: %p %s\n", chip, name,
+                                 value / kinds[i].divisor, kinds[i].unit);
+                        break;
+                }
         return true;
 }
 
@@ -421,7 +432,7 @@ static bool host_power_chip(string_address directory, string_address name, addre
                 if (label[at] == '\n')
                         label[at] = 0;
         label[sizeof(label) - 1] = 0;
-        string_copy(chip, label);
+        string_copy_bounded(chip, label, sizeof(chip));
         if (!host_join(path, sizeof(path), directory, "/") || !host_join(path, sizeof(path), path, name))
                 return true;
         host_each_entry(path, host_power_file, (address_any)chip);

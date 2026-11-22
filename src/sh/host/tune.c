@@ -61,7 +61,7 @@ static fn tune_choose(tune_choice address_to choice, string_address name, positi
         if (rank > choice->rank && string_length(name) < sizeof(choice->name))
         {
                 choice->rank = rank;
-                string_copy(choice->name, name);
+                string_copy_bounded(choice->name, name, sizeof(choice->name));
         }
 }
 
@@ -406,7 +406,7 @@ static b32 tune_brightness(string_address address_to arguments, positive count)
         tune_choice panel = {.rank = 0};
 
         host_each_entry(TUNE_SYS_BACKLIGHT, tune_backlight_visit, address_of panel);
-        string_copy(name, panel.name);
+        string_copy_bounded(name, panel.name, sizeof(name));
         if (!panel.rank ||
             !string_join(maximum_path, sizeof(maximum_path), TUNE_SYS_BACKLIGHT "/",
                          (string_address)name, "/max_brightness") ||
@@ -476,8 +476,7 @@ static bool tune_battery(p8 address_to name, positive room)
         tune_choice battery = {.rank = 0};
 
         host_each_entry(TUNE_SYS_BATTERY, tune_battery_visit, address_of battery);
-        return battery.rank && string_length(battery.name) < room &&
-               (string_copy(name, battery.name), true);
+        return battery.rank && string_copy_bounded(name, battery.name, room) < room;
 }
 
 static bipolar tune_charge_apply(string_address percent_text)
@@ -920,7 +919,7 @@ static bool tune_source_visit(string_address directory, string_address name, add
         sources->seen++;
         if (sources->kept == TUNE_WAKE_MOST || string_length(name) >= sizeof(source->name))
                 return true;
-        string_copy(source->name, name);
+        string_copy_bounded(source->name, name, sizeof(source->name));
         if (!string_join(path, sizeof(path), directory, "/", name, "/event_count") ||
             !tune_number(path, address_of source->count))
                 source->count = 0;
@@ -995,7 +994,7 @@ static fn tune_suspend_failure(positive failures)
         if (!tune_word(TUNE_SYS_POWER "/suspend_stats/last_failed_step", step, sizeof(step)))
                 step[0] = 0;
         if (!tune_word(TUNE_SYS_POWER "/suspend_stats/last_failed_errno", errno_text, sizeof(errno_text)) || !errno_text[0])
-                string_copy(errno_text, "0");
+                string_copy_bounded(errno_text, "0", sizeof(errno_text));
         host_say(log, host_label "the kernel stopped at %s (%s), last error %s\n",
                  (string_address)device, (string_address)step, (string_address)errno_text);
 }
@@ -1103,7 +1102,7 @@ static bool tune_light_visit(string_address directory, string_address name, addr
 
         if (lights->kept == TUNE_BACKLIGHTS || string_length(name) >= sizeof(light->name))
                 return true;
-        string_copy(light->name, name);
+        string_copy_bounded(light->name, name, sizeof(light->name));
         if (!string_join(path, sizeof(path), directory, "/", name, "/brightness") ||
             !tune_number(path, address_of light->level))
                 light->level = TUNE_NO_LEVEL;
@@ -1465,13 +1464,9 @@ static b32 host_workarounds(string_address address_to arguments, positive count)
                 string_address mode = arguments[5];
                 p8 key[96];
                 positive alen = string_length(app), nlen = string_length(name);
-                bool valid = false;
                 bipolar lock, failed;
 
-                for (positive i = 0; i < array_count(host_workaround_rows); i++)
-                        if (string_equals(name, host_workaround_rows[i].name))
-                                valid = true;
-                if (!valid)
+                if (string_table_lookup(name, host_workaround_rows) == array_count(host_workaround_rows))
                         return host_refuse("unknown workaround %s (run `moonwater workarounds` to list them)\n", name);
                 if (!alen || alen + 1 + nlen >= sizeof(key) || memory_first_of(app, ' ', alen) || memory_first_of(app, ':', alen) || memory_first_of(app, '/', alen))
                         return host_refuse("invalid app name %s (use executable basename without / or :)\n", app);
@@ -1494,19 +1489,18 @@ static b32 host_workarounds(string_address address_to arguments, positive count)
         }
         if (count == 3)
         {
+                positive hit = string_table_lookup(arguments[2], host_workaround_rows);
+
+                if (hit == array_count(host_workaround_rows))
+                        return host_refuse("unknown workaround %s (run `moonwater workarounds` to list them)\n", arguments[2]);
                 got = host_read_state(WORKAROUNDS_KEPT, text, sizeof(text));
                 if (got < 0)
                         got = 0;
-                for (positive i = 0; i < array_count(host_workaround_rows); i++)
-                        if (string_equals(arguments[2], host_workaround_rows[i].name))
-                        {
-                                bool on = workarounds_state(text, (positive)got, host_workaround_rows + i);
-
-                                host_say(log, host_label "workarounds %s %s\n", host_workaround_rows[i].name,
-                                         on ? (string_address) "on" : (string_address) "off");
-                                return 0;
-                        }
-                return host_refuse("unknown workaround %s (run `moonwater workarounds` to list them)\n", arguments[2]);
+                host_say(log, host_label "workarounds %s %s\n", host_workaround_rows[hit].name,
+                         workarounds_state(text, (positive)got, host_workaround_rows + hit)
+                             ? (string_address) "on"
+                             : (string_address) "off");
+                return 0;
         }
         if (count != 4)
                 return host_usage();
@@ -1522,14 +1516,11 @@ static b32 host_workarounds(string_address address_to arguments, positive count)
                         return host_usage();
                 if (!all)
                 {
-                        for (positive i = 0; i < array_count(host_workaround_rows); i++)
-                                if (string_equals(arguments[2], host_workaround_rows[i].name))
-                                {
-                                        match = host_workaround_rows + i;
-                                        break;
-                                }
-                        if (!match)
+                        positive hit = string_table_lookup(arguments[2], host_workaround_rows);
+
+                        if (hit == array_count(host_workaround_rows))
                                 return host_refuse("unknown workaround %s (run `moonwater workarounds` to list them)\n", arguments[2]);
+                        match = host_workaround_rows + hit;
                 }
                 host_need_root();
                 lock = radio_lock(true);

@@ -136,9 +136,9 @@ static bool host_settings_next(host_settings address_to settings,
 static fn host_settings_text(p8 address_to into, host_setting address_to setting)
 {
         if (setting->entry.kind == SPARK_SETTINGS_SHELL)
-                string_copy(into, "shell");
+                string_copy_bounded(into, "shell", SPARK_SETTINGS_TEXT_MOST + 1);
         else if (setting->entry.kind == SPARK_SETTINGS_KERNEL_SHELL)
-                string_copy(into, "kernel_shell");
+                string_copy_bounded(into, "kernel_shell", SPARK_SETTINGS_TEXT_MOST + 1);
         else
         {
                 memory_copy_apart(into, setting->text, setting->entry.length);
@@ -699,13 +699,13 @@ static bool host_settings_image_visit(string_address path, address_any opaque)
 
         if (!search->count)
         {
-                string_copy(search->name, look->name);
-                string_copy(search->partuuid, look->partuuid);
+                string_copy_bounded(search->name, look->name, sizeof(search->name));
+                string_copy_bounded(search->partuuid, look->partuuid, sizeof(search->partuuid));
                 memory_copy_apart(address_of search->found, address_of newest,
                                   SPARK_SETTINGS_SLOT);
         }
         else if (search->count == 1)
-                string_copy(search->other, look->name);
+                string_copy_bounded(search->other, look->name, sizeof(search->other));
 
         search->count++;
         return true;

@@ -131,10 +131,8 @@ static bool profile_named(string_address directory, string_address name, address
         if (profile.process_count == PROFILE_PROCESSES || length > 10)
                 return profile.process_count < PROFILE_PROCESSES;
         pid = string_digits_max(name, 10, null);
-        if (!pid)
+        if (!pid || !string_join(path, sizeof(path), "/proc/", name, "/comm"))
                 return true;
-        string_copy(path + 6, name);
-        string_copy(path + 6 + length, "/comm");
         if (host_read_kernel((string_address)path, comm, sizeof(comm)) >= 0 &&
             string_equals((string_address)comm, wanted))
                 profile.processes[profile.process_count++] = (b32)pid;
@@ -144,11 +142,11 @@ static bool profile_named(string_address directory, string_address name, address
 //      Whether the process runs /shell: its exe link says so.
 static bool profile_is_shell(b32 pid)
 {
-        p8 path[48] = "/proc/", target[64];
-        positive length = positive_into_string(path + 6, (positive)pid) + 6;
+        p8 path[48], target[64];
         bipolar got;
 
-        string_copy(path + length, "/exe");
+        if (!host_proc_path(path, sizeof(path), (positive)pid, "/exe"))
+                return false;
         got = system_call_4(syscall(readlinkat), (positive)(bipolar)AT_FDCWD, (positive)path, (positive)target,
                             sizeof(target) - 1);
         if (got <= 0)
@@ -160,12 +158,12 @@ static bool profile_is_shell(b32 pid)
 //      A process's file mappings that can run (r-xp), each with the file's name.
 static fn profile_read_maps(p32 process, p8 address_to text)
 {
-        p8 path[48] = "/proc/";
-        positive length = positive_into_string(path + 6, (positive)profile.processes[process]) + 6;
+        p8 path[48];
         bipolar got;
         positive at = 0;
 
-        string_copy(path + length, "/maps");
+        if (!host_proc_path(path, sizeof(path), (positive)profile.processes[process], "/maps"))
+                return;
         //      Read to its end: the kernel hands /proc/PID/maps out a page or so a read, so one read is its first few mappings.
         {
                 bipolar handle = system_open_at(AT_FDCWD, (string_address)path, FILE_READ | O_CLOEXEC);
@@ -335,12 +333,8 @@ static bool profile_task(string_address directory, string_address name, address_
         }
         thread->fd = (b32)fd;
         thread->ring = (p8 address_to)mapped;
-        string_copy(path, directory);
-        length = string_length(path);
-        path[length++] = '/';
-        string_copy(path + length, name);
-        string_append_bounded(path, "/comm", sizeof(path));
-        if (host_read_kernel((string_address)path, (p8 address_to)thread->name, sizeof(thread->name)) < 0)
+        if (!string_join(path, sizeof(path), directory, "/", name, "/comm") ||
+            host_read_kernel((string_address)path, (p8 address_to)thread->name, sizeof(thread->name)) < 0)
                 thread->name[0] = end;
         profile.thread_count++;
         return true;
@@ -397,18 +391,21 @@ static fn profile_drain(positive index)
 static fn profile_call_note(positive index)
 {
         struct profile_thread address_to thread = &profile.threads[index];
-        p8 path[64] = "/proc/", text[32];
-        positive length, number;
+        p8 path[64], text[32];
+        positive number;
         bipolar got;
+        byte_cursor cursor = byte_cursor_on(path);
 
         if (thread->kernel == thread->kernel_before)
                 return;
         thread->kernel_before = thread->kernel;
-        length = positive_into_string(path + 6, (positive)profile.processes[thread->process]) + 6;
-        string_copy(path + length, "/task/");
-        length += 6;
-        length += positive_into_string(path + length, (positive)thread->tid);
-        string_copy(path + length, "/syscall");
+        byte_cursor_put_bytes(address_of cursor, "/proc/", 6);
+        byte_cursor_put_u64(address_of cursor, (p64)profile.processes[thread->process]);
+        byte_cursor_put_bytes(address_of cursor, "/task/", 6);
+        byte_cursor_put_u64(address_of cursor, (p64)thread->tid);
+        byte_cursor_put_bytes(address_of cursor, "/syscall", 8);
+        if (!byte_cursor_terminate(address_of cursor))
+                return;
         got = host_read_kernel((string_address)path, text, sizeof(text));
         if (got <= 0 || text[0] < '0' || text[0] > '9')
                 return;
@@ -557,16 +554,15 @@ static b32 host_profile(string_address address_to arguments, positive count)
 
         for (positive at = 0; at < profile.process_count; at++)
         {
-                p8 path[48] = "/proc/";
-                positive length = positive_into_string(path + 6, (positive)profile.processes[at]) + 6;
+                p8 path[48];
 
                 profile.shell[at] = profile_is_shell(profile.processes[at]);
                 if (profile.shell[at] && !profile.symbol_count)
                         profile_read_symbols();
                 if (!profile.shell[at])
                         profile_read_maps((p32)at, maps_text);
-                string_copy(path + length, "/task");
-                host_each_entry((string_address)path, profile_task, (address_any)at);
+                if (host_proc_path(path, sizeof(path), (positive)profile.processes[at], "/task"))
+                        host_each_entry((string_address)path, profile_task, (address_any)at);
         }
         if (!profile.thread_count)
         {

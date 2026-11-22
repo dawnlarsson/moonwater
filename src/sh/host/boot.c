@@ -795,7 +795,7 @@ static b32 host_canvas_shot(positive count)
         for (positive wait = 0; wait < 50; wait++)
         {
                 host_pause(100000000);
-                string_copy(after, before);
+                string_copy_bounded(after, before, sizeof(after));
                 host_each_entry((string_address)HOST_RECORD_DIR, host_canvas_shot_newest, after);
                 if (!string_equals((string_address)after, (string_address)before))
                 {

@@ -236,7 +236,7 @@ static fn usb_key(p8 address_to into, p8 address_to serial, bipolar length)
         positive skip = length > 0 && serial[0] == '-';
         positive2 spelled;
 
-        string_copy(into, "-");
+        string_copy_bounded(into, "-", USB_KEY_ROOM);
         if (length <= 0)
                 return;
         if (skip)
@@ -349,8 +349,8 @@ static bool usb_id_parse(string_address text, usb_rule address_to rule)
         {
                 if (!usb_port_valid(rest + 2) && !usb_place_valid(rest + 2))
                         return false;
-                string_copy(rule->key, "-");
-                string_copy(rule->port, rest + 2);
+                string_copy_bounded(rule->key, "-", sizeof(rule->key));
+                string_copy_bounded(rule->port, rest + 2, sizeof(rule->port));
                 return true;
         }
         //      A serial too long to keep, as usb_key spells it.
@@ -358,12 +358,12 @@ static bool usb_id_parse(string_address text, usb_rule address_to rule)
         {
                 if (string_length(rest) != 18 || string_span_of_set(rest + 2, "0123456789abcdef") != 16)
                         return false;
-                string_copy(rule->key, rest);
+                string_copy_bounded(rule->key, rest, sizeof(rule->key));
                 return true;
         }
         if (!usb_key_typed(rest))
                 return false;
-        string_copy(rule->key, rest);
+        string_copy_bounded(rule->key, rest, sizeof(rule->key));
         return true;
 }
 
@@ -561,7 +561,7 @@ static bool usb_census_visit(string_address directory, string_address name, addr
                 }
                 one = census->interface + census->interfaces++;
                 memory_zero(one, sizeof(*one));
-                string_copy(one->name, name);
+                string_copy_bounded(one->name, name, sizeof(one->name));
                 usb_read(name, "bInterfaceClass", word, sizeof(word));
                 class = radio_hex(word);
                 usb_read(name, "bInterfaceSubClass", word, sizeof(word));
@@ -594,7 +594,7 @@ static bool usb_census_visit(string_address directory, string_address name, addr
                 return true;
         device = census->device + census->count++;
         memory_zero(device, sizeof(*device));
-        string_copy(device->port, name);
+        string_copy_bounded(device->port, name, sizeof(device->port));
         (void)string_join(device->id, sizeof(device->id), (string_address)vendor, ":",
                           (string_address)product);
         device->root = host_starts(name, "usb");
@@ -674,7 +674,7 @@ static fn usb_census_take(usb_census address_to census)
                 p8 up[USB_PORT_ROOM];
 
                 device->fixed = !device->root && device->says_fixed;
-                string_copy(up, device->port);
+                string_copy_bounded(up, device->port, sizeof(up));
                 while (device->fixed)
                 {
                         p8 address_to dot = memory_last_of(up, '.', string_length((string_address)up));
@@ -1054,7 +1054,8 @@ static fn usb_interfaces(usb_policy address_to policy, usb_census address_to cen
                 one->authorized = let;
                 one->fresh = let && !one->bound;
                 if (one->fresh && usb_probe_count < USB_INTERFACES_MOST)
-                        string_copy(usb_probes[usb_probe_count++], (string_address)one->name);
+                        string_copy_bounded(usb_probes[usb_probe_count++], (string_address)one->name,
+                                            sizeof(usb_probes[0]));
                 usb_tell_interface(say, let ? "allowed" : "held", one, why, let);
         }
 }
@@ -1369,11 +1370,12 @@ static fn usb_rule_from(usb_rule address_to rule, p8 kind, usb_device address_to
         for (positive at = 0; kind == USB_ALLOW && at < census->interfaces; at++)
                 if (usb_owns(device, census->interface + at) && (every || census->interface[at].authorized))
                         rule->kinds |= (p8)(1u << census->interface[at].kind);
-        string_copy(rule->id, (string_address)device->id);
-        string_copy(rule->key, (string_address)device->key);
-        string_copy(rule->port, !string_equals((string_address)device->key, "-") ? (string_address) ""
-                                : device->place[0]                              ? (string_address)device->place
-                                                                                : (string_address)device->port);
+        string_copy_bounded(rule->id, (string_address)device->id, sizeof(rule->id));
+        string_copy_bounded(rule->key, (string_address)device->key, sizeof(rule->key));
+        string_copy_bounded(rule->port, !string_equals((string_address)device->key, "-") ? (string_address) ""
+                                        : device->place[0]                              ? (string_address)device->place
+                                                                                        : (string_address)device->port,
+                            sizeof(rule->port));
 }
 
 static bool usb_rule_same(usb_rule address_to one, usb_rule address_to other)
@@ -1682,11 +1684,11 @@ static b32 usb_lock_held(bool say, p8 how, usb_settle address_to settle)
                 {
                         if (!string_equals((string_address)device->key, "-"))
                         {
-                                string_copy(had->key, (string_address)device->key);
+                                string_copy_bounded(had->key, (string_address)device->key, sizeof(had->key));
                                 had->port[0] = end;
                         }
                         else if (device->place[0])
-                                string_copy(had->port, (string_address)device->place);
+                                string_copy_bounded(had->port, (string_address)device->place, sizeof(had->port));
                 }
                 if (device->root || device->fixed || had)
                         continue;
@@ -1910,8 +1912,8 @@ static b32 usb_rule_verb(string_address word, p8 kind)
                 p8 devnum[sizeof(device->devnum)];
 
                 usb_tell(true, "allowed", device, USB_WHY_RULE);
-                string_copy(port, (string_address)device->port);
-                string_copy(devnum, (string_address)device->devnum);
+                string_copy_bounded(port, (string_address)device->port, sizeof(port));
+                string_copy_bounded(devnum, (string_address)device->devnum, sizeof(devnum));
                 usb_census_take(address_of census);
                 device = usb_find(address_of census, (string_address)port);
                 //      Its rule is written from what it shows now, so it has to be the same device.
@@ -2413,16 +2415,16 @@ static fn usb_first_lock(void)
                         if (device->root)
                                 continue;
                         age = next.age + next.count++;
-                        string_copy(age->port, (string_address)device->port);
-                        string_copy(age->id, (string_address)device->id);
-                        string_copy(age->key, (string_address)device->key);
+                        string_copy_bounded(age->port, (string_address)device->port, sizeof(age->port));
+                        string_copy_bounded(age->id, (string_address)device->id, sizeof(age->id));
+                        string_copy_bounded(age->key, (string_address)device->key, sizeof(age->key));
                         age->since = was ? was->since : uptime;
                 }
                 memory_copy(address_of settle, address_of next, sizeof(settle));
                 usb_ports(address_of census, now, sizeof(now));
                 if (!string_equals((string_address)now, (string_address)seen) || !still)
                 {
-                        string_copy(seen, (string_address)now);
+                        string_copy_bounded(seen, (string_address)now, sizeof(seen));
                         still = uptime;
                 }
                 if (uptime >= USB_UP_MOST_NS || (uptime >= USB_UP_LEAST_NS && uptime - still >= USB_STILL_NS))
@@ -2811,39 +2813,53 @@ static b32 usb_list_show(void)
 */
 static b32 host_device(string_address address_to arguments, positive count)
 {
-        string_address word = count > 2 ? arguments[2] : null;
+        enum
+        {
+                DEV_CLASS, DEV_LIST, DEV_LOCK, DEV_UNLOCK, DEV_ALLOW,
+                DEV_DENY, DEV_FORGET, DEV_LOG, DEV_APPLY, DEV_WATCH
+        };
+        static const named_byte verbs[] = {
+            {"class", DEV_CLASS},   {"list", DEV_LIST},     {"lock", DEV_LOCK},
+            {"unlock", DEV_UNLOCK}, {"allow", DEV_ALLOW},   {"deny", DEV_DENY},
+            {"forget", DEV_FORGET}, {"log", DEV_LOG},       {"apply", DEV_APPLY},
+            {"watch", DEV_WATCH},
+        };
 
         if (count == 2)
                 return usb_status();
-        if (string_equals(word, "class"))
-                return usb_class(arguments, count);
-        if (count == 3 && string_equals(word, "list"))
-                return usb_list_show();
-        if (count == 3 && string_equals(word, "lock"))
+        positive at = string_table_lookup(arguments[2], verbs);
+        if (at == array_count(verbs))
+                return host_usage();
+        switch (verbs[at].value)
         {
+        case DEV_CLASS:
+                return usb_class(arguments, count);
+        case DEV_LIST:
+                return_if(count != 3, host_usage());
+                return usb_list_show();
+        case DEV_LOCK:
+                return_if(count != 3, host_usage());
                 host_need_root();
                 return usb_lock_now();
-        }
-        if (count == 3 && string_equals(word, "unlock"))
-        {
+        case DEV_UNLOCK:
+                return_if(count != 3, host_usage());
                 host_need_root();
                 return usb_unlock_now();
-        }
-        if (count == 4 && (string_equals(word, "allow") || string_equals(word, "deny")))
-        {
+        case DEV_ALLOW:
+        case DEV_DENY:
+                return_if(count != 4, host_usage());
                 host_need_root();
-                return usb_rule_verb(arguments[3], word[0] == 'a' ? USB_ALLOW : USB_DENY);
-        }
-        if (count == 4 && string_equals(word, "forget"))
-        {
+                return usb_rule_verb(arguments[3], verbs[at].value == DEV_ALLOW ? USB_ALLOW : USB_DENY);
+        case DEV_FORGET:
+                return_if(count != 4, host_usage());
                 host_need_root();
                 return usb_forget(arguments[3]);
-        }
-        if (string_equals(word, "log") && count <= 4)
+        case DEV_LOG:
         {
                 positive asked = USB_LOG_SHOWN;
                 positive used = 0;
 
+                return_if(count > 4, host_usage());
                 if (count == 4)
                         asked = string_digits_max(arguments[3], 4, address_of used);
                 return_if(count == 4 && (!used || arguments[3][used] || !asked || asked > USB_LOG_ASKED),
@@ -2851,22 +2867,23 @@ static b32 host_device(string_address address_to arguments, positive count)
                 host_need_root();
                 return usb_log_show(asked);
         }
-        if (count == 3 && string_equals(word, "apply"))
-        {
+        case DEV_APPLY:
+                return_if(count != 3, host_usage());
                 host_need_root();
                 return usb_apply_verb();
-        }
-        //      device watch is the watcher itself, which lock, apply, allow, deny and boot start in a process of
-        //      its own (usb_watch_start): not a verb for a person, so it is on neither the help page nor in
-        //      the README. By hand it runs in the foreground, and a second one is refused.
-        if (count == 3 && string_equals(word, "watch"))
+        case DEV_WATCH:
         {
+                //      device watch is the watcher itself, which lock, apply, allow, deny and boot start in a process of
+                //      its own (usb_watch_start): not a verb for a person, so it is on neither the help page nor in
+                //      the README. By hand it runs in the foreground, and a second one is refused.
                 b32 owner;
 
+                return_if(count != 3, host_usage());
                 host_need_root();
                 owner = host_lock_owner(USB_WATCHER_PATH);
                 return_if(owner, host_refuse("the device watcher is already running, pid %p\n", (positive)owner));
                 return usb_watch_run();
+        }
         }
         return host_usage();
 }

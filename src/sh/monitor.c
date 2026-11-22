@@ -300,45 +300,49 @@ static fn monitor_chip(monitor_hardware address_to hardware,
             !monitor_word(path, chip, sizeof(chip)))
                 return;
 
+        static const struct
+        {
+                string_address chip;
+                string_address label;
+                string_address want_a;
+                string_address want_b;
+                bool slow;
+        } chips[] = {
+            {"k10temp", "cpu", "Tctl", "Tdie", false},
+            {"zenpower", "cpu", "Tctl", "Tdie", false},
+            {"coretemp", "cpu", "Package id", null, false},
+            {"cpu_thermal", "cpu", null, null, false},
+            {"cpu0_thermal", "cpu", null, null, false},
+            {"amdgpu", "gpu", null, null, false},
+            {"radeon", "gpu", null, null, false},
+            {"nouveau", "gpu", null, null, false},
+            {"i915", "gpu", null, null, false},
+            {"xe", "gpu", null, null, false},
+            {"nvme", "nvme", null, null, true},
+            {"drivetemp", "disk", null, null, true},
+            {"acpitz", "acpi", null, null, true},
+        };
         string_address label = null;
         positive index = 1;
         bool slow = false;
+        positive hit = string_table_lookup(chip, chips);
 
-        if (string_equals(chip, "k10temp") || string_equals(chip, "zenpower"))
+        if (hit < array_count(chips))
         {
-                label = "cpu";
-                for (positive at = 1; at <= 4; at++)
-                        if (monitor_label_is(directory, at, "Tctl") ||
-                            monitor_label_is(directory, at, "Tdie"))
-                        {
-                                index = at;
-                                break;
-                        }
+                label = chips[hit].label;
+                slow = chips[hit].slow;
+                if (chips[hit].want_a)
+                {
+                        for (positive at = 1; at <= 4; at++)
+                                if (monitor_label_is(directory, at, chips[hit].want_a) ||
+                                    (chips[hit].want_b &&
+                                     monitor_label_is(directory, at, chips[hit].want_b)))
+                                {
+                                        index = at;
+                                        break;
+                                }
+                }
         }
-        else if (string_equals(chip, "coretemp"))
-        {
-                label = "cpu";
-                for (positive at = 1; at <= 4; at++)
-                        if (monitor_label_is(directory, at, "Package id"))
-                        {
-                                index = at;
-                                break;
-                        }
-        }
-        else if (string_equals(chip, "cpu_thermal") ||
-                 string_equals(chip, "cpu0_thermal"))
-                label = "cpu";
-        else if (string_equals(chip, "amdgpu") ||
-                 string_equals(chip, "radeon") ||
-                 string_equals(chip, "nouveau") || string_equals(chip, "i915") ||
-                 string_equals(chip, "xe"))
-                label = "gpu";
-        else if (string_equals(chip, "nvme"))
-                label = "nvme", slow = true;
-        else if (string_equals(chip, "drivetemp"))
-                label = "disk", slow = true;
-        else if (string_equals(chip, "acpitz"))
-                label = "acpi", slow = true;
 
         if (label && string_equals(label, "cpu"))
         {
@@ -499,8 +503,8 @@ static fn monitor_visit_supply(monitor_find_context address_to context,
                     context->hardware, MONITOR_BATTERY, "battery", true);
 
                 if (sensor)
-                        memory_copy_apart(sensor->path, directory,
-                                          string_length(directory) + 1);
+                        string_copy_bounded(sensor->path, directory,
+                                            sizeof(sensor->path));
         }
         else if (string_equals(word, "Mains"))
                 monitor_sensor_file(context->hardware, directory, "online",
