@@ -1436,8 +1436,9 @@ static void compositor_frame_of(int row, struct compositor_frame *frame)
                         frame->runs = 0;
                 }
         }
-        if (!compositor_scaled(frame))
-                frame->tiled_kind = compositor_straight_desc(row, frame->tiled_desc);
+        // A scaled frame keeps its descriptor too: gpu_host's scaled pre-pass reads a tiled picture in place (gpu_image_scaled), and a linear
+        // read of it would be garbage.
+        frame->tiled_kind = compositor_straight_desc(row, frame->tiled_desc);
         // The edge or corner the hand holds or is over, or all of the line of a window being moved.
         if (row == compositor.lit_row && line)
         {
