@@ -2128,9 +2128,10 @@ static fn te_clipboard(positive rounds)
         compositor_rows_make(compositor_rows_in_use); // the compositor's rows, made before any check reads one
         te_clip_scratch()->clip_pid = me;
         te_clip_scratch()->clip_on = 1;
+        compositor_clip.on = 1; // the setting the compositor reads (compositor_clip_settings), not the table's copy of it
         te_clip_scratch()->clip_owner[0] = te_clip_scratch()->clip_owner[1] = -1;
         for (unsigned int row = 0; row < 4; row++)
-                te_clip_scratch()->pid[row] = me;
+                te_clip_scratch()->pid[row] = me, windows_owner_take(&windows_owner_held[row], me);
         compositor.focus = 1;
 
         // Taken after a gesture, read back by the row with the keys.
@@ -2142,6 +2143,25 @@ static fn te_clipboard(positive rounds)
         compositor_clip_gesture(1);
         te_clip_ask(1, WINDOWS_CLIP_CLIPBOARD);
         te_check(te_clip_event(1, &which) == WINDOWS_CLIP_READY, "a paste by the window with the keys", 0);
+        {
+                // A row's length word is the client's: the compositor reads the copy at the length it mapped, so a hostile
+                // word is not what the paste is given (clip_given_length is the mapped length).
+                unsigned long kept = te_clip_scratch()->clip_length[0];
+
+                te_clip_scratch()->clip_length[0] = 1u << 30;
+                compositor_clip_gesture(1);
+                te_clip_ask(1, WINDOWS_CLIP_CLIPBOARD);
+                te_check(te_clip_event(1, &which) == WINDOWS_CLIP_READY && te_clip_scratch()->clip_given_length[1] == kept,
+                         "a hostile length word in the table is not the length a paste is given", kept);
+        }
+        {
+                // A copy from a row the compositor never took a claim for (no owner held) is declined, not read.
+                windows_owner_held[0].pid = 0;
+                compositor_clip_gesture(0);
+                te_clip_offer(0, WINDOWS_CLIP_CLIPBOARD, windows_clip_memfd(hello, sizeof(hello) - 1));
+                te_check(te_clip_event(0, &which) == WINDOWS_CLIP_DECLINED, "a copy from a row with no owner claim is declined", 0);
+                windows_owner_take(&windows_owner_held[0], me);
+        }
         {
                 struct window_row own = {te_clip_scratch(), 1, -1, -1, 0, 0, 0, 0, 0};
 
