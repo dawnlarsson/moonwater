@@ -5704,6 +5704,20 @@ static fn check_kit_tokens(void)
         ui_tokens_draw(&ui, &k, 0, 0, 400, 60);
         check("token field: an invalid field draws its error outline across the top", pixels[0] != 0 && pixels[399] == pixels[0] && pixels[0] == (0xff000000u | (ui_role(UI_ERROR) & 0xffffffu)));
 
+        // A name off a disk: a bidi override is no control and no reorder (its picture), and a '&' in a menu label is not a mnemonic.
+        {
+                static char words[64 * 3 + 4], escaped[64 * 3 + 4];
+                static const p8 spoof[] = {'g', 0xe2, 0x80, 0xae, 'e', 'x', 'e'};
+                static const p8 amp[] = {'a', '&', 'b'};
+                ui_label_foreign(words, sizeof(words), spoof, sizeof(spoof));
+                ui_menu_escape(escaped, sizeof(escaped), words);
+                check("token field: a name's right-to-left override is its picture, not the mark (no U+202E in the chip's words)",
+                      string_search((string_address)words, (string_address) "\xe2\x80\xae") == null);
+                ui_label_foreign(words, sizeof(words), amp, sizeof(amp));
+                ui_menu_escape(escaped, sizeof(escaped), words);
+                check("token field: a '&' in a menu label is doubled, so it is not a mnemonic", string_search(escaped, (string_address) "a&&b") != null);
+        }
+
         // A chip's text is the field's: its width less the chip's padding is the plain text's width in the field, so a token keeps its width.
         {
                 static struct ui_text_layout plain;

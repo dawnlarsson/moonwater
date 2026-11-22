@@ -31680,7 +31680,7 @@ static fn ui_text_field_draw(struct ui address_to ui, struct ui_control address_
 #define UI_TOKENS_CANCEL 4u  // Escape: the value from before the editing is back
 #define UI_TOKENS_CHANGED 8u // the text changed: an edit clears k->invalid
 #define UI_TOKENS_MOVED 16u  // the caret or the view moved
-#define UI_TOKENS_TEXT 2048  // the most bytes of raw text a token field holds
+#define UI_TOKENS_TEXT 4097  // the most bytes of raw text a token field holds: a path of FILES_PATH (4096) and its NUL, so a path is never cut
 #define UI_TOKENS_MOST 64    // the tokens a field lays out
 
 struct ui_tokens
@@ -31814,8 +31814,8 @@ static fn ui_tokens_draw(struct ui address_to ui, struct ui_tokens address_to k,
 {
         UI_CALL();
         positive n = doc_length(&k->text.doc) < UI_TOKENS_TEXT - 1 ? doc_length(&k->text.doc) : UI_TOKENS_TEXT - 1;
-        p8 bytes[UI_TOKENS_TEXT];
-        char label[UI_TOKENS_TEXT];
+        static p8 bytes[UI_TOKENS_TEXT];
+        static char words[UI_TOKENS_TEXT * 3 + 4];
         int height = bottom - top, pad = ui_dev(ui, 8), baseline = top + (height - ui_capital(ui, 14)) / 2 + ui_capital(ui, 14);
         unsigned int chip = ui_role(UI_SECONDARY_CONTAINER) & 0xffffffu, ink = ui_role(UI_ON_SECONDARY_CONTAINER) & 0xffffffu;
         k->left = left, k->top = top, k->right = right, k->bottom = bottom;
@@ -31827,10 +31827,11 @@ static fn ui_tokens_draw(struct ui address_to ui, struct ui_tokens address_to k,
                 int x0 = k->chip_left[t], x1 = k->chip_right[t];
                 if (x0 < 0 || !length)
                         continue;
-                memory_copy(label, bytes + k->start[t], length), label[length] = 0;
+                // A name off a disk is the words of its label, never the bytes: a control or a bidi mark is its picture, not a reorder.
+                ui_label_foreign(words, sizeof(words), bytes + k->start[t], length);
                 const font_face address_to faces[2] = {ui_text_face(ui, &k->text), ui->regular};
                 ui_round(ui, x0, top + ui_dev(ui, 4), x1 - x0, height - 2 * ui_dev(ui, 4), ui_dev(ui, 8), 0xff000000u | chip);
-                ui_run_in(ui, faces, x0 + pad, baseline, (string_address)label, k->text.size + k->text.zoom, ink, 255, x0, x1, 0);
+                ui_run_in(ui, faces, x0 + pad, baseline, (string_address)words, k->text.size + k->text.zoom, ink, 255, x0, x1, 0);
         }
         if (k->overflow > 0)
         {
@@ -31878,10 +31879,17 @@ static p32 ui_tokens_event(struct ui address_to ui, struct ui_tokens address_to 
                 int t;
                 if (!menu)
                         return 0;
+                // The popup keeps each label's pointer, so the labels are static: a name off a disk, its controls as pictures, and its '&' not a mnemonic.
+                static char words[UI_TOKENS_MOST][64 * 3 + 4], escaped[UI_TOKENS_MOST][64 * 3 + 4];
                 menu->menu.count = 0;
                 for (t = 0; t < k->overflow; t++)
                         if (k->hidden[t][0])
-                                ui_popmenu_add(&menu->menu, k->hidden[t], null, 0, UI_TOKENS_ITEM + t);
+                        {
+                                positive length = string_length((string_address)k->hidden[t]);
+                                ui_label_foreign(words[t], sizeof(words[t]), (const p8 address_to)k->hidden[t], length);
+                                ui_menu_escape(escaped[t], sizeof(escaped[t]), words[t]);
+                                ui_popmenu_add(&menu->menu, escaped[t], null, 0, UI_TOKENS_ITEM + t);
+                        }
                 menu->field = null, menu->list = null, menu->list_row = -1;
                 ui_popmenu_open(menu, k->text.own, ui, x, y, 0, 0, WINDOW_POPUP_POINT, (event->flags & WINDOW_KEY_TOUCH) != 0);
                 return UI_TOKENS_MENU | UI_TOKENS_MOVED;
