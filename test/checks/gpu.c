@@ -4503,15 +4503,18 @@ static void dirty_rows(void)
         {
                 asks = card_fake.dirty_asks; // the card made afresh counts from nothing
                 string_copy((string_address)compositor.driver, (string_address) "virtio_gpu");
+        compositor.driver_flags = drm_driver_flags(compositor.driver);
                 compositor_dirty(100, clip, 1), compositor_dirty(100, clip, 1);
                 check("dirty: a card that takes it is told every time", card_fake.dirty_asks == asks + 2);
                 compositor_dirty(100, clip, 0);
                 check("dirty: and nothing with nothing changed", card_fake.dirty_asks == asks + 2);
                 string_copy((string_address)compositor.driver, (string_address) "amdgpu");
+        compositor.driver_flags = drm_driver_flags(compositor.driver);
                 card_fake.dirty_errno = 38;
                 compositor_dirty(100, clip, 1), compositor_dirty(100, clip, 1), compositor_dirty(100, clip, 1);
                 check("dirty: a card that answers ENOSYS is asked once, and not again", card_fake.dirty_asks == asks + 3);
                 string_copy((string_address)compositor.driver, (string_address) "virtio_gpu");
+        compositor.driver_flags = drm_driver_flags(compositor.driver);
                 card_fake.dirty_errno = 0;
                 compositor_dirty(100, clip, 1);
                 check("dirty: another driver on the same descriptor is asked again", card_fake.dirty_asks == asks + 4);
@@ -4520,7 +4523,7 @@ static void dirty_rows(void)
         else
                 check("dirty: the fake card is made", false);
         memory_zero(&compositor_dirty_none, sizeof(compositor_dirty_none)), compositor_dirty_none.card = -1;
-        compositor.card = kept_card, memory_copy(compositor.driver, kept_driver, sizeof(kept_driver));
+        compositor.card = kept_card, memory_copy(compositor.driver, kept_driver, sizeof(kept_driver)); compositor.driver_flags = drm_driver_flags(compositor.driver);
 }
 
 /*
@@ -4596,6 +4599,7 @@ static void scanout_refused_rows(void)
         memory_copy(kept_driver, compositor.driver, sizeof(kept_driver));
         windows_scratch_zero(table_at), compositor.table = table_at, table_at->gpu_on = 1; // the board's GPU issues are judged with canvas gpu on
         string_copy((string_address)compositor.driver, (string_address) "i915");
+        compositor.driver_flags = drm_driver_flags(compositor.driver);
         compositor_window_fb_refused(4, -22);
         count = windows_gpu_wanted(table_at, want, WINDOWS_GPU_CODES), warned = 0;
         for (unsigned int at = 0; at < count; at++)
@@ -4604,13 +4608,14 @@ static void scanout_refused_rows(void)
               table_at->refused_error == 22 && warned);
         windows_scratch_zero(table_at), table_at->gpu_on = 1, compositor.direct_refused = 0;
         string_copy((string_address)compositor.driver, (string_address) "amdgpu");
+        compositor.driver_flags = drm_driver_flags(compositor.driver);
         compositor_window_fb_refused(4, -22);
         count = windows_gpu_wanted(table_at, want, WINDOWS_GPU_CODES), warned = 0;
         for (unsigned int at = 0; at < count; at++)
                 warned |= want[at].code == WINDOWS_ISSUE_GPU_SCANOUT;
         check("scanout: on amdgpu the step is said and no warning is raised (amdgpu shows no imported buffer)", compositor.direct_refused && table_at->refused == 4 &&
               table_at->refused_error == 0 && !warned);
-        compositor.table = kept_table, compositor.direct_refused = kept_refused, memory_copy(compositor.driver, kept_driver, sizeof(kept_driver));
+        compositor.table = kept_table, compositor.direct_refused = kept_refused, memory_copy(compositor.driver, kept_driver, sizeof(kept_driver)); compositor.driver_flags = drm_driver_flags(compositor.driver);
 }
 
 /*
@@ -4629,21 +4634,26 @@ static void plate_wanted_rows(void)
         check("plate: headless, the frame goes into the scan image's other name", compositor_plate_wanted(0));
         compositor.card = 7;
         string_copy((string_address)compositor.driver, (string_address) "amdgpu");
+        compositor.driver_flags = drm_driver_flags(compositor.driver);
         check("plate: a card that shows what its buffer holds composes into the second plate", compositor_plate_wanted(0) && !compositor_copies_damage());
         string_copy((string_address)compositor.driver, (string_address) "i915");
+        compositor.driver_flags = drm_driver_flags(compositor.driver);
         check("plate: and so does one whose buffer is the machine's memory scanned as it is", compositor_plate_wanted(0));
         string_copy((string_address)compositor.driver, (string_address) "virtio_gpu");
+        compositor.driver_flags = drm_driver_flags(compositor.driver);
         check("plate: a card that copies its damage to its host has none: in place, told what changed", !compositor_plate_wanted(0) && compositor_copies_damage());
         string_copy((string_address)compositor.driver, (string_address) "simpledrm");
+        compositor.driver_flags = drm_driver_flags(compositor.driver);
         check("plate: nor the firmware's", !compositor_plate_wanted(0));
         string_copy((string_address)compositor.driver, (string_address) "amdgpu");
+        compositor.driver_flags = drm_driver_flags(compositor.driver);
         check("plate: a screen turned has none", !compositor_plate_wanted(1));
         compositor.plane_row = 2;
         check("plate: and a window on a plane has the desktop under it composed into the second plate too", compositor_plate_wanted(0));
         compositor.plane_row = -1, compositor.outputs = 2;
         check("plate: nor two screens", !compositor_plate_wanted(0));
         compositor.card = kept_card, compositor.plane_row = kept_plane, compositor.outputs = kept_outputs;
-        memory_copy(compositor.driver, kept_driver, sizeof(kept_driver));
+        memory_copy(compositor.driver, kept_driver, sizeof(kept_driver)); compositor.driver_flags = drm_driver_flags(compositor.driver);
 }
 
 /*
@@ -5110,7 +5120,7 @@ static void xwm_hints_rows(void)
         *x = compositor_xwm_fresh;
         compositor_xwm_at = x;
         memset(r, 0, sizeof r);
-        r[1] = 32, r[2] = 9, r[4] = 18, r[8] = 40, r[16] = 18;
+        r[0] = 1, r[1] = 32, r[2] = 9, r[4] = 18, r[8] = 40, r[16] = 18; // a reply (its first byte 1, which xwm_reply_head asks)
         r[32] = 0x00, r[33] = 0x01;            /* flags: PBaseSize (256) only */
         r[32 + 36] = 7, r[32 + 40] = 9;        /* width_inc 7, height_inc 9: no minimum */
         p.what = COMPOSITOR_XWM_PROP_NORMAL_HINTS, p.window = 91u;
@@ -5901,20 +5911,26 @@ static void present_due_rows(void)
                 for (unsigned int back = 1; back <= COMPOSITOR_LEAD_FRAMES; back++)
                         compositor_metric_card[(40 + WINDOWS_METRIC_RUN - back) % WINDOWS_METRIC_RUN] = back == 17 ? 2000000ull : 1000000ull;
                 compositor_metric_paths = ~0u, compositor_metric_paths_count = 32;
+                compositor_metric_worst_dirty = 1; // (the rings written by hand: the worst is cached until a present is noted)
                 check("present: after 32 of the card's presents the lead is the worst of them, half again and a millisecond", compositor_present_lead() == 4000000ull);
                 compositor_metric_paths = 0, compositor_metric_paths_count = 3;
+                compositor_metric_worst_dirty = 1; // (the rings written by hand: the worst is cached until a present is noted)
                 check("present: after three of the processor's, with no more timed, none (the old rule)", compositor_present_lead() == 0);
                 compositor_metric_processor_count = 4, compositor_metric_processor_at = 4, compositor_metric_processor[3] = 6000000ull, compositor_metric_paths_count = 4;
+                compositor_metric_worst_dirty = 1; // (the rings written by hand: the worst is cached until a present is noted)
                 check("present: and after four the worst of them", compositor_present_lead() == 9000000ull + 4500000ull + COMPOSITOR_LEAD_SPARE);
                 for (unsigned int at = 0; at < WINDOWS_METRIC_RUN; at++)
                         compositor_metric_processor[at] = 3000000ull;
                 compositor_metric_processor_at = 8, compositor_metric_processor_count = 500, compositor_metric_processor[7] = 2500000ull;
                 compositor_metric_paths = 0x55555555u, compositor_metric_paths_count = 32; // the card and the processor taking turns: 16 of each
+                compositor_metric_worst_dirty = 1; // (the rings written by hand: the worst is cached until a present is noted)
                 check("present: with the card and the processor taking turns, the worse of the two (the processor's 3 ms over the card's 1)",
                       compositor_present_lead() == 3000000ull + 1500000ull + COMPOSITOR_LEAD_SPARE);
                 compositor_metric_paths = 0xfffffffeu; // one of the processor's among 31 of the card's: its last one, 2.5 ms
+                compositor_metric_worst_dirty = 1; // (the rings written by hand: the worst is cached until a present is noted)
                 check("present: and one of the processor's among the card's is its last one, not its older ones", compositor_present_lead() == 2500000ull + 1250000ull + COMPOSITOR_LEAD_SPARE);
                 compositor_metric_paths = ~0u, compositor_late.composed.widen = period / 4;
+                compositor_metric_worst_dirty = 1; // (the rings written by hand: the worst is cached until a present is noted)
                 check("present: a miss's widening is in it", compositor_present_lead() == 4000000ull + period / 4);
                 compositor_late.early = 1;
                 check("present: the owner's present-early is the old rule", compositor_present_lead() == 0);
@@ -6050,7 +6066,7 @@ static void fullscreen_rows(void)
         w.width = 1920, w.transient = 0x77u;
         check("fullscreen: nor a transient one", compositor_xwm_covers(&w) == -1);
         w.transient = 0, w.state = COMPOSITOR_XWM_OVERRIDE;
-        check("fullscreen: nor an override-redirect one", compositor_xwm_covers(&w) == -1);
+        check("fullscreen: but an override-redirect one over the whole screen is (Proton's fullscreen windows: 832723dd0)", compositor_xwm_covers(&w) == 0);
 
         memory_copy(compositor.driver, kept_driver, sizeof kept_driver);
         compositor_popup_parent[0] = kept_parent[0], compositor_popup_parent[1] = kept_parent[1];
