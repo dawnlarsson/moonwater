@@ -2041,21 +2041,29 @@ static fn files_remote_tick(long address_to timeout, long address_to other)
                 if (st < 0)
                 {
                         p32 node = files_tree_machine_node(&files.big->tree, p->machine);
-                        p->online = false;
+                        b32 refused = p->fs.refusal[0] != 0;
+                        if (!refused)
+                                p->online = false;
                         if (node != FILES_NO)
-                                files.big->tree.node[node].flags &= (p8)~(FILES_NODE_ONLINE | FILES_NODE_LOADING);
+                                files.big->tree.node[node].flags &= (p8)~(refused ? FILES_NODE_LOADING : (FILES_NODE_ONLINE | FILES_NODE_LOADING));
                         for (int r = 0; r < FILES_RPCS_MOST; r++)
                                 if (files.big->rpcs[r].kind != FILES_RPC_NONE && files.big->rpcs[r].machine == p->machine)
                                 {
                                         if (files.big->rpcs[r].kind == FILES_RPC_NAV_LIST &&
                                             files_model_is_remote(&files.big->model) &&
                                             string_equals((string_address)files.big->model.peer, (string_address)p->name))
-                                                files_model_fail(&files.big->model, -5, true);
+                                                files_model_fail(&files.big->model, refused ? -13 : -5, true);
                                         files.big->rpcs[r].kind = FILES_RPC_NONE;
                                 }
                         if (files.big->remote_read.active && files.big->remote_read.machine == p->machine)
                                 files_remote_read_abort(), files.big->note[0] = 0;
-                        files.said = LANGUAGE_files_remote_offline;
+                        if (refused)
+                        {
+                                string_copy_bounded((string_address)files.big->note, (string_address)p->fs.refusal, sizeof(files.big->note));
+                                files.said = LANGUAGE_files_remote_denied;
+                        }
+                        else
+                                files.said = LANGUAGE_files_remote_offline;
                         link_fs_close(&p->fs);
                         files.dirty = true;
                         continue;
@@ -2536,7 +2544,7 @@ static b32 files_event(const struct window_event address_to event)
 
 static fn files_status_pill_draw(struct ui address_to ui, const struct ui_list address_to l)
 {
-        int pad_x = ui_dev(ui, 10), ph = ui_dev(ui, 26), margin_r = ui_dev(ui, UI_PAD), margin_b = ui_dev(ui, 10);
+        int pad_x = ui_dev(ui, 10), ph = ui_dev(ui, 28), margin_r = ui_dev(ui, UI_PAD), margin_b = ui_dev(ui, 10);
         int max_w = l->w - 2 * margin_r;
         char cut[192];
         string_address text;
@@ -2552,7 +2560,7 @@ static fn files_status_pill_draw(struct ui address_to ui, const struct ui_list a
                 pw = max_w;
         px = ui_mirror(l->x + l->w - margin_r - pw, pw, l->x, l->w);
         py = l->y + l->h - margin_b - ph;
-        box = ui_box_px(px, py, pw, ph, ph / 2);
+        box = ui_box_px(px, py, pw, ph, ph * 128);
         ui_kit_fill(ui, &box, ui_tone(ui_role(UI_SURFACE_CONTAINER) & 0xffffffu, 236), null);
         ui_kit_ring(ui, &box, ui_q8(ui, 1), ui_tone(ui_role(UI_OUTLINE_VARIANT) & 0xffffffu, 110));
         baseline = ui_kit_baseline(ui, py + (ph - ui_dev(ui, ui_types[UI_LABEL_MEDIUM].line)) / 2, UI_LABEL_MEDIUM);

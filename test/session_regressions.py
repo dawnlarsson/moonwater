@@ -1465,12 +1465,15 @@ def test_hardening_66_bug_families():
           "LINK_ASK_FS" in wl_svc_c and
           "LINK_KIND_FS" in wl_svc_c and
           "link_fs_open(" in wl_svc_c and
+          "p16 listen_port = peer->port ? peer->port : link_port();" in wl_svc_c and
           "link_fs_handle_info(" in wl_svc_c and
           "link_fs_handle_list(" in wl_svc_c and
           "FILES_NODE_MACHINE" in files_model_c and
           "files_tree_set_machine_children(" in files_model_c and
           "files_peers_sync(" in files_c and
           "files_remote_tick(" in files_c and
+          "b32 refused = p->fs.refusal[0] != 0;" in files_c and
+          "box = ui_box_px(px, py, pw, ph, ph * 128);" in files_c and
           "UI_FILE_MACHINE" in ui_c)
 
 

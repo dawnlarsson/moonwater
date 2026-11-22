@@ -6221,6 +6221,9 @@ static b32 link_fs_open(struct link_fs_client address_to c,
                         string_address peer_name)
 {
         link_peers peers;
+        link_state st;
+        link_places saved;
+        positive st_got = 0;
         struct waterlink_peer address_to peer;
         struct link_session address_to s = null;
 
@@ -6229,7 +6232,56 @@ static b32 link_fs_open(struct link_fs_client address_to c,
                 return false;
         link_peers_load(address_of peers);
         peer = link_peer_named(address_of peers, peer_name);
-        if (!peer || !peer->port || (peer->flags & WATERLINK_PEER_BLOCKED))
+        if (!peer || (peer->flags & WATERLINK_PEER_BLOCKED))
+                return false;
+        // Collect candidate endpoints: live IP at peer's listen port first, then peer record, then saved link_places.
+        {
+                p16 listen_port = peer->port ? peer->port : link_port();
+
+                if (peer->port && c->place_count < LINK_PLACES_PER_PEER)
+                {
+                        struct link_place cand;
+                        memory_zero(address_of cand, sizeof cand);
+                        memory_copy(cand.key, peer->key, 32);
+                        memory_copy(cand.address, peer->address, 16);
+                        cand.port = peer->port;
+                        c->places[c->place_count++] = cand;
+                }
+                memory_zero(address_of st, sizeof st);
+                if (link_read_private_records(LINK_STATE_PATH, (p8 address_to)address_of st, sizeof st, sizeof st, address_of st_got) == 0 && st_got == sizeof st)
+                {
+                        for (p32 j = 0; j < st.open_count && j < LINK_SESSIONS && c->place_count < LINK_PLACES_PER_PEER; j++)
+                        {
+                                struct link_place cand;
+                                if (memory_compare(st.open[j].key, peer->key, 32) || !st.open[j].port)
+                                        continue;
+                                memory_zero(address_of cand, sizeof cand);
+                                memory_copy(cand.key, peer->key, 32);
+                                memory_copy(cand.address, st.open[j].address, 16);
+                                cand.port = listen_port;
+                                if (!link_place_known(c->places, c->place_count, address_of cand))
+                                        c->places[c->place_count++] = cand;
+                        }
+                        for (p32 j = 0; j < st.seen_count && j < LINK_PEERS_MAX && c->place_count < LINK_PLACES_PER_PEER; j++)
+                        {
+                                struct link_place cand;
+                                if (memory_compare(st.seen[j].key, peer->key, 32) || !st.seen[j].port)
+                                        continue;
+                                memory_zero(address_of cand, sizeof cand);
+                                memory_copy(cand.key, peer->key, 32);
+                                memory_copy(cand.address, st.seen[j].address, 16);
+                                cand.port = listen_port;
+                                if (!link_place_known(c->places, c->place_count, address_of cand))
+                                        c->places[c->place_count++] = cand;
+                        }
+                }
+        }
+        link_places_load(address_of saved);
+        for (positive at = 0; at < saved.count && c->place_count < LINK_PLACES_PER_PEER; at++)
+                if (!memory_compare(saved.place[at].key, peer->key, 32) && saved.place[at].port &&
+                    !link_place_known(c->places, c->place_count, saved.place + at))
+                        c->places[c->place_count++] = saved.place[at];
+        if (!c->place_count)
                 return false;
         for (positive at = 0; at < LINK_SESSIONS; at++)
                 if (!link_self.session[at].used)
@@ -6241,8 +6293,8 @@ static b32 link_fs_open(struct link_fs_client address_to c,
                 return false;
         memory_copy(s->peer, peer->key, 32);
         memory_copy(s->name, peer->name, WATERLINK_NAME_MAX);
-        memory_copy(s->address, peer->address, 16);
-        s->port = peer->port;
+        memory_copy(s->address, c->places[0].address, 16);
+        s->port = c->places[0].port;
         s->kind = LINK_KIND_FS;
         s->fs_client = c;
         if (system_random_fill(address_of s->conversation, 8, 0) < 0)
@@ -6256,8 +6308,6 @@ static b32 link_fs_open(struct link_fs_client address_to c,
         c->next_req_id = 1;
         memory_copy(c->peer_name, peer->name, WATERLINK_NAME_MAX);
         memory_copy(c->peer_key, peer->key, 32);
-        c->place_count = link_places_for(peer->key, peer->address, peer->port,
-                                         c->places);
         c->tried = 0;
         return true;
 }
@@ -6357,6 +6407,11 @@ static int link_fs_step(struct link_fs_client address_to c,
         {
                 if (!link_client.ours || link_client.session == s)
                 {
+                        if (!link_client.ours && link_client.session != s)
+                        {
+                                link_client.attempts = 0;
+                                link_client.unanswered_since = 0;
+                        }
                         if (!link_client.ours ||
                             link_age(now, link_client.initiated) >= LINK_ATTEMPT)
                         {
