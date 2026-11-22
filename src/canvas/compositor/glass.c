@@ -1393,6 +1393,21 @@ static unsigned int compositor_glass_tint(unsigned int blurred, unsigned int sid
         return compositor_glass_tone(compositor_vivid(blurred), side);
 }
 
+#ifdef MOONWATER_GPU_C
+/*
+        A glass row's ground (compositor_rise's output, bytes long) as the card reads it (C2-glass-op3, step 2): a read map of its pages, and the
+        card address of its first byte. Anonymous memory maps as a read userptr (gpu_map), so the scratch needs no memfd. 0 when the card cannot
+        have it (no card, or a family whose read map is refused: Intel outside Gen8 and Gen9); the processor then composes the row, as it does now.
+        Unused until step 4 calls it: the card's op 3 is gpu_glass.
+*/
+static positive __attribute__((unused)) compositor_glass_ground_va(const unsigned int *ground, unsigned long bytes)
+{
+        if (!ground || !bytes || !gpu_map(ground, (positive)bytes))
+                return 0;
+        return gpu_va_bytes(ground, (positive)bytes);
+}
+#endif
+
 static int compositor_glass_compose(int row, const int *c)
 {
         // A lent buffer is a client's, with the client's pitch; the table's own picture is the compositor's stride (wl-host: no lent row
