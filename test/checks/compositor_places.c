@@ -764,6 +764,14 @@ static void check_compositor_scenes_layout(void)
     check("scenes: every window's rect is inside the area and has a size", inside);
     check("scenes: no two windows of a Scene overlap", disjoint);
     check("scenes: each window keeps its own aspect within a pixel of ratio", aspect);
+    {
+        static const int small[2][2] = {{200, 100}, {120, 90}};
+        int put[2][4];
+
+        compositor_scenes_grid(small, 2, area, 16, put);
+        check("scenes: a window smaller than its cell is drawn at its own size, not enlarged",
+              put[0][2] == 200 && put[0][3] == 100 && put[1][2] == 120 && put[1][3] == 90);
+    }
 
     {
         const int strip_area[4] = {0, 0, 1000, 80};
@@ -980,4 +988,117 @@ static void check_compositor_scenes_drag(void)
     compositor_scenes_drag(COMPOSITOR_SCENES_DRAG_BEGIN, 0, 0, 0);
     check("scenes drag: a BEGIN while the overview is open does nothing", !compositor.scenes.drag);
     compositor_scenes_close();
+}
+
+/*
+        C8 Scenes, step 4: the overview drawn. While it is open the rows of its screen are not drawn where they are. A window of
+        the current Scene is drawn once at its overview rect, scaled from its own picture: a picture the client lends is read where
+        it lends it (the frame's pixels and the card's address are the lent ones; nothing is copied), and so is its miniature on
+        its Scene's card, inside the card. A card's ground is the wallpaper's miniature. A window's new picture draws its places
+        in the overview again. Closed, every window is drawn where it is again.
+*/
+static unsigned int scenes_lent[400 * 240];
+static unsigned int scenes_wall[512 * 512];
+static struct compositor_frame scenes_frames[512];
+static unsigned int scenes_rows[512];
+
+static int scenes_holds(const int r[4], int x, int y)
+{
+    return x >= r[0] && x < r[0] + r[2] && y >= r[1] && y < r[1] + r[3];
+}
+
+static int scenes_damaged(int x, int y)
+{
+    for (unsigned int at = 0; at < compositor.damages; at++)
+        if (x >= compositor.damage[at][0] && x < compositor.damage[at][2] && y >= compositor.damage[at][1] && y < compositor.damage[at][3])
+            return 1;
+    return 0;
+}
+
+static void check_compositor_scenes_frames(void)
+{
+    const positive va = 0x7f0000000000ull;
+    struct canvas_ext_row_state *lent;
+    unsigned int count, own = 0, big = 0, strip = 0, other = 0, inside = 1, wall = 0, second;
+    int r1[4];
+
+    if (!layout_table_map(512))
+    {
+        check("scenes frames: the table is mapped", false);
+        return;
+    }
+    layout_setup(512, 1);
+    if (COMPOSITOR_ROWS_LAYERED(compositor_rows_in_use) > 512)
+    {
+        check("scenes frames: the rows in use fit the check's frames", false);
+        return;
+    }
+    compositor.table->motion = 1;
+    compositor.outputs = 1;
+    compositor.screen[0][0] = 0, compositor.screen[0][1] = 0, compositor.screen[0][2] = 512, compositor.screen[0][3] = 512;
+    compositor_spaces_ensure();
+    layout_show(1, 40, 150, 400, 240);
+    layout_show(2, 260, 200, 120, 80);
+    layout_show(3, 100, 100, 160, 100);
+    compositor.asks[1] = compositor.asks[2] = compositor.asks[3] = 0;
+    compositor_space_assign_new(1, 0);
+    compositor_space_assign_new(2, 0);
+    compositor_space_assign_new(3, 0);
+    second = compositor_space_add_id(0, 0);
+    compositor_space_move_row(3, second, 0);
+    // Row 1 is lent: its picture is the client's, at the card's address va.
+    lent = canvas_ext_row_at(1);
+    lent->flags = CANVAS_EXT_LENT, lent->pixels = scenes_lent, lent->pitch = 400, lent->gpu_va = va;
+    // The wallpaper: its left half one colour, its right half another.
+    for (unsigned int at = 0; at < 512 * 512; at++)
+        scenes_wall[at] = at % 512 < 256 ? 0xff102030u : 0xff405060u;
+    compositor_wall = scenes_wall, compositor_wall_w = compositor_wall_h = 512;
+
+    compositor_scenes_open(0);
+    scenes_rect_of(1, r1);
+    count = present_build_frames(scenes_frames, scenes_rows);
+    for (unsigned int k = 0; k < count; k++)
+    {
+        const struct compositor_frame *f = &scenes_frames[k];
+        const int *card0 = compositor.scenes.card[0], *card1 = compositor.scenes.card[1];
+        int in0 = f->x >= card0[0] && f->y >= card0[1] && f->x + f->width <= card0[0] + card0[2] && f->y + f->height <= card0[1] + card0[3];
+        int in1 = f->x >= card1[0] && f->y >= card1[1] && f->x + f->width <= card1[0] + card1[2] && f->y + f->height <= card1[1] + card1[3];
+
+        inside &= f->x >= 0 && f->y >= 0 && f->x + f->width <= 512 && f->y + f->height <= 512;
+        if (f->pixels == compositor_scenes_kept.wall && f->x == card0[0] && f->y == card0[1] && f->width == card0[2] && f->height == card0[3])
+            wall = f->pixels[0] == 0xff102030u && f->pixels[card0[2] - 1] == 0xff405060u;
+        if (scenes_rows[k] == 1 && f->pixels && f->x == 40 && f->y == 150 && f->width == 400 && f->height == 240)
+            own++;
+        if (scenes_rows[k] == 1 && f->pixels == scenes_lent && f->gpu_base == va && f->x == r1[0] && f->y == r1[1] && f->width == r1[2] &&
+            f->height == r1[3] && f->source_w == 400 && f->source_h == 240 && f->width < 400)
+            big++;
+        if (scenes_rows[k] == 1 && in0 && f->pixels >= scenes_lent && f->pixels < scenes_lent + 400 * 240 &&
+            f->gpu_base == va + 4ull * (positive)(f->pixels - scenes_lent) && f->width < 400 && f->source_w > 0)
+            strip++;
+        if (scenes_rows[k] == 3 && f->pixels && f->width < 160 && in1)
+            other++;
+    }
+    check("scenes frames: no window of the overview's screen is drawn at its own place and size while it is open", own == 0);
+    check("scenes frames: a window of the current Scene is drawn once at its rect, scaled from the picture its client lends (its pixels and the card's address, no copy)",
+          big == 1);
+    check("scenes frames: the window is drawn on its Scene's card too, inside the card, from the same lent picture", strip == 1);
+    check("scenes frames: a window of another Scene is drawn on that Scene's card", other == 1);
+    check("scenes frames: every frame of the overview is on its screen", inside);
+    check("scenes frames: a card's ground is the wallpaper's miniature, each pixel the mean of the wallpaper under it", wall);
+
+    compositor.damages = 0;
+    check("scenes frames: a window's new picture draws its card and its rect again, and the overview takes it",
+          compositor_scenes_took(1) && scenes_damaged(compositor.scenes.card[0][0] + 1, compositor.scenes.card[0][1] + 1) &&
+              scenes_damaged(r1[0] + r1[2] / 2, r1[1] + r1[3] / 2));
+
+    compositor_scenes_close();
+    count = present_build_frames(scenes_frames, scenes_rows);
+    own = 0;
+    for (unsigned int k = 0; k < count; k++)
+        own += scenes_rows[k] == 1 && scenes_frames[k].x == 40 && scenes_frames[k].y == 150 && scenes_frames[k].width == 400 &&
+               !compositor_scaled(&scenes_frames[k]) && scenes_frames[k].pixels == scenes_lent;
+    check("scenes frames: closed, a window is drawn where it is, at its size, from its lent picture", own == 1 && !compositor_scenes_took(1));
+
+    compositor_wall = 0, compositor_wall_w = compositor_wall_h = 0;
+    canvas_ext_row_clear(1);
 }

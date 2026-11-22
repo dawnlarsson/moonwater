@@ -1257,18 +1257,33 @@ static void present_direct_cleared(void)
         compositor.plane_row = -1, compositor.plane_fb = 0, compositor.plane_gone = 0;
 }
 
+// The Scenes overview (scenes.c): whether it is drawn, the rows it draws itself or hides, and its frames.
+static int compositor_scenes_shown(void);
+static int compositor_scenes_hides(int row);
+static unsigned int compositor_scenes_frames(struct compositor_frame *frames, unsigned int *rows, unsigned int at, unsigned int room);
+
+// The stack's frames, a window's picture and its layers each (a fullscreen window fitted to its screen with the black round it first).
+// While the Scenes overview is drawn, the rows on its screen are not drawn where they are: the overview's frames are put where the
+// first of them would have been, and draw them at the overview's places.
 static unsigned int present_build_frames(struct compositor_frame *frames, unsigned int *rows)
 {
-        unsigned int count = 0;
+        unsigned int count = 0, room = (unsigned int)COMPOSITOR_ROWS_LAYERED(compositor_rows_in_use);
+        int scenes = compositor_scenes_shown(); // 1: the overview's frames are still to come; 2: they are in
 
         for (unsigned int at = 0; at < compositor.stacked; at++)
                 if (compositor_visible(compositor.stack[at]))
                 {
                         int row = (int)compositor.stack[at], dx, dy, dw, dh;
 
+                        if (scenes && compositor_scenes_hides(row))
+                        {
+                                if (scenes == 1)
+                                        count += compositor_scenes_frames(frames, rows, count, room), scenes = 2;
+                                continue;
+                        }
                         if (compositor_fullscreen_fit(row, &dx, &dy, &dw, &dh) &&
                             (dw < (int)compositor.w[row] || dh < (int)compositor.h[row]) &&
-                            count + 1 < COMPOSITOR_ROWS_LAYERED(compositor_rows_in_use))
+                            count + 1 < room)
                         {
                                 struct compositor_frame *back = &frames[count];
 
@@ -1283,6 +1298,8 @@ static unsigned int present_build_frames(struct compositor_frame *frames, unsign
                         compositor_frame_of(compositor.stack[at], &frames[count++]);
                         count += compositor_wl_layers_frames(compositor.stack[at], frames, rows, count);
                 }
+        if (scenes == 1)
+                count += compositor_scenes_frames(frames, rows, count, room);
         return count;
 }
 
@@ -1495,7 +1512,8 @@ static void compositor_present_frames(void)
         if (compositor.direct_row >= 0 && compositor_visible(compositor.direct_row) && !compositor_turning() &&
             (compositor_space_is_fs_row(compositor.direct_row) ||
              (compositor.stacked > 0 && (int)compositor.stack[compositor.stacked - 1] == compositor.direct_row)) &&
-            !compositor.overlay_on && !compositor_overlays_shown() && !compositor_mc_shown() && taskbar_shift() >= UI_ONE && !compositor_record_until)
+            !compositor.overlay_on && !compositor_overlays_shown() && !compositor_mc_shown() && !compositor_scenes_shown() && taskbar_shift() >= UI_ONE &&
+            !compositor_record_until)
         {
                 int row = compositor.direct_row, menu[4];
 
@@ -1516,7 +1534,7 @@ static void compositor_present_frames(void)
         compositor_record_scene(frames, windows);
         tinted = compositor_preview_lift(frames, windows, &preview);
         turning = compositor_turning();
-        direct = turning || compositor_mc_shown() ? -1 : compositor_direct_candidate(frames, rows, windows);
+        direct = turning || compositor_mc_shown() || compositor_scenes_shown() ? -1 : compositor_direct_candidate(frames, rows, windows);
         stay_live_direct = direct >= 0 && !compositor_client_scans(direct) && direct == compositor.direct_row && !compositor_overlay_ready() &&
                            compositor.patched[direct][compositor.front[direct] & 1u] &&
                            compositor_window_fb(direct, compositor.front[direct]) == compositor.on_screen &&
@@ -1579,7 +1597,7 @@ static void compositor_present_frames(void)
                 compositor_damage(0, 0, compositor.width, compositor.height);
         compositor.screen_stale = 0;
 
-        plane = !back && !turning ? compositor_plane_candidate(frames, rows, windows, count, planed) : -1;
+        plane = !back && !turning && !compositor_scenes_shown() ? compositor_plane_candidate(frames, rows, windows, count, planed) : -1;
         if (back || turning || !compositor_gpu_tiled_ready())
                 compositor_wl_straight_pays(plane >= 0 && planed[0] == compositor.x[plane] &&
                                             planed[2] == compositor.x[plane] + (int)compositor.w[plane] &&

@@ -2095,6 +2095,8 @@ static void compositor_close_request(int row)
 
 static unsigned int compositor_clip_self;
 
+static int compositor_scenes_took(int row); // scenes.c
+
 static void compositor_take(int row)
 {
         struct windows *table = compositor.table;
@@ -2191,6 +2193,9 @@ static void compositor_take(int row)
         }
         if (width != compositor.w[row] || height != compositor.h[row])
                 compositor_stretch(row), damage[2] = 0;
+        // The Scenes overview draws the row at its own places (or hides it): those are drawn again, and not the row's.
+        if (compositor_scenes_took(row))
+                return;
         if (!compositor_visible(row))
                 return;
         {

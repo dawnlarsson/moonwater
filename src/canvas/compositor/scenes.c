@@ -3,37 +3,58 @@
 // The Scenes overview's model and layout (C8, comp-manage): pure arithmetic from rects in, rects out. The overview draws
 // nothing here; the drawing and the input sit on these rects. Rects are {x, y, w, h}.
 
-// The windows of one Scene, laid out large and without overlap in the area, each in its own aspect (Exposé). Returns the
-// number placed (all of them). The grid is the column count that fits every window's rect the largest, ties to fewer columns.
-static unsigned int compositor_scenes_grid(const int (*size)[2], unsigned int count, const int area[4], int gap, int (*out)[4])
+// The fit of count windows in cols columns of the area: the scale, in 1/1024 of a window, that every window's rect takes to fit
+// its cell (the least of them), never more than its own size (1024); -1 when a cell has no room.
+static long long compositor_scenes_fit(const int (*size)[2], unsigned int count, const int area[4], int gap, unsigned int cols)
 {
-        unsigned int best_cols = 1;
+        unsigned int rows = (count + cols - 1) / cols;
+        long long cw = ((long long)area[2] - (long long)(cols - 1) * gap) / cols, ch = ((long long)area[3] - (long long)(rows - 1) * gap) / rows;
+        long long fit = -1;
+
+        if (cw <= 0 || ch <= 0)
+                return -1;
+        for (unsigned int at = 0; at < count; at++)
+        {
+                long long w = size[at][0] > 0 ? size[at][0] : 1, h = size[at][1] > 0 ? size[at][1] : 1;
+                long long s = cw * h <= ch * w ? cw * 1024 / w : ch * 1024 / h;
+
+                s = s > 1024 ? 1024 : s;
+                if (fit < 0 || s < fit)
+                        fit = s;
+        }
+        return fit;
+}
+
+// The column count that fits every window the largest, ties to fewer columns (0 for none).
+static unsigned int compositor_scenes_cols(const int (*size)[2], unsigned int count, const int area[4], int gap)
+{
+        unsigned int best_cols = 0;
         long long best = -1;
 
         if (!count || area[2] <= 0 || area[3] <= 0)
                 return 0;
         for (unsigned int cols = 1; cols <= count; cols++)
         {
-                unsigned int rows = (count + cols - 1) / cols;
-                long long cw = ((long long)area[2] - (long long)(cols - 1) * gap) / cols, ch = ((long long)area[3] - (long long)(rows - 1) * gap) / rows;
-                long long fit = -1;
+                long long fit = compositor_scenes_fit(size, count, area, gap, cols);
 
-                if (cw <= 0 || ch <= 0)
-                        continue;
-                for (unsigned int at = 0; at < count; at++)
-                {
-                        long long w = size[at][0] > 0 ? size[at][0] : 1, h = size[at][1] > 0 ? size[at][1] : 1;
-                        long long s = cw * h <= ch * w ? cw * 1024 / w : ch * 1024 / h; // the fit's scale in 1/1024 of the window
-
-                        if (fit < 0 || s < fit)
-                                fit = s;
-                }
                 if (fit > best)
                         best = fit, best_cols = cols;
         }
+        return best < 0 ? 0 : best_cols;
+}
+
+// The windows of one Scene, laid out large and without overlap in the area, each in its own aspect and never larger than it is
+// (Exposé). Returns the number placed (all of them). Window `at` takes cell `at`, row by row, in the grid of the column count
+// that fits every window's rect the largest.
+static unsigned int compositor_scenes_grid(const int (*size)[2], unsigned int count, const int area[4], int gap, int (*out)[4])
+{
+        unsigned int cols = compositor_scenes_cols(size, count, area, gap);
+
+        if (!cols)
+                return 0;
         for (unsigned int at = 0; at < count; at++)
         {
-                unsigned int cols = best_cols, rows = (count + cols - 1) / cols, col = at % cols, row = at / cols;
+                unsigned int rows = (count + cols - 1) / cols, col = at % cols, row = at / cols;
                 long long cw = ((long long)area[2] - (long long)(cols - 1) * gap) / cols, ch = ((long long)area[3] - (long long)(rows - 1) * gap) / rows;
                 long long w = size[at][0] > 0 ? size[at][0] : 1, h = size[at][1] > 0 ? size[at][1] : 1;
                 long long fw, fh;
@@ -42,6 +63,8 @@ static unsigned int compositor_scenes_grid(const int (*size)[2], unsigned int co
                         fw = cw, fh = h * cw / w;
                 else
                         fh = ch, fw = w * ch / h;
+                if (fw > w || fh > h)
+                        fw = w, fh = h;
                 out[at][0] = area[0] + (int)(col * (cw + gap) + (cw - fw) / 2);
                 out[at][1] = area[1] + (int)(row * (ch + gap) + (ch - fh) / 2);
                 out[at][2] = (int)fw;
@@ -51,11 +74,11 @@ static unsigned int compositor_scenes_grid(const int (*size)[2], unsigned int co
 }
 
 // The Scene strip along the top: one card per Scene at the screen's aspect, and a "+" card last. Cards are the same height and
-// shrink together to fit the width. Returns the number of cards (scenes + 1).
+// shrink together to fit the width; the row of them is centred in the strip. Returns the number of cards (scenes + 1).
 static unsigned int compositor_scenes_strip(unsigned int scenes, const int area[4], int screen_w, int screen_h, int gap, int (*out)[4])
 {
         unsigned int cards = scenes + 1;
-        long long ch = area[3], cw = ch * screen_w / (screen_h > 0 ? screen_h : 1);
+        long long ch = area[3], cw = ch * screen_w / (screen_h > 0 ? screen_h : 1), left;
 
         if (!cards || area[2] <= 0 || area[3] <= 0 || screen_w <= 0 || screen_h <= 0)
                 return 0;
@@ -64,9 +87,10 @@ static unsigned int compositor_scenes_strip(unsigned int scenes, const int area[
                 cw = ((long long)area[2] - (long long)(cards - 1) * gap) / cards;
                 ch = cw * screen_h / screen_w;
         }
+        left = ((long long)area[2] - (long long)cards * cw - (long long)(cards - 1) * gap) / 2;
         for (unsigned int at = 0; at < cards; at++)
         {
-                out[at][0] = area[0] + (int)(at * (cw + gap));
+                out[at][0] = area[0] + (int)(left + at * (cw + gap));
                 out[at][1] = area[1] + (int)((area[3] - ch) / 2);
                 out[at][2] = (int)cw;
                 out[at][3] = (int)ch;
@@ -93,6 +117,26 @@ static int compositor_scenes_gap(void)
         return gap < 4 ? 4 : gap;
 }
 
+// What the overview draws, kept between presents (C8 step 4): the layout's sizes, the generations it was made at, and the
+// wallpaper's miniature every Scene card is drawn on.
+static struct
+{
+        int size[COMPOSITOR_SCENES_WINDOWS][2]; // each laid out window's size when it was laid out: a new size lays them out again
+        unsigned int stack_gen, spaces_gen;     // the stack and the Spaces the layout was made from
+        unsigned int *wall;                     // the wallpaper's miniature, a card's size (its pitch the card's width)
+        unsigned long wall_bytes;
+        const unsigned int *wall_of;            // the wallpaper it was made from, at its turn, and the screen and card it was made for
+        b64 wall_turn;
+        int wall_screen[4], wall_w, wall_h;
+} compositor_scenes_kept;
+
+// Whether a window is one the overview lays out: shown, not minimised or closing, not a popup and in a Space.
+static int compositor_scenes_member(int row)
+{
+        return row >= 0 && row < COMPOSITOR_ROWS && compositor.showing[row] && !(compositor.state[row] & (WINDOW_MINIMIZED | WINDOW_CLOSING)) &&
+               (!compositor_popup_parent || compositor_popup_parent[row] < 0) && !compositor_row_space_exempt(row) && compositor.row_space;
+}
+
 static void compositor_scenes_damage(void)
 {
         unsigned int count = 0;
@@ -107,34 +151,57 @@ static void compositor_scenes_relayout(void)
 {
         unsigned int count = 0;
         const int (*screens)[4] = compositor_screens(&count);
-        int screen = compositor.scenes.screen, gap = compositor_scenes_gap(), strip_h, strip[4], win[4];
-        int sizes[COMPOSITOR_SCENES_WINDOWS][2];
-        unsigned int n = 0;
+        int screen = compositor.scenes.screen, gap = compositor_scenes_gap(), strip_h, strip[4], win[4], room[4];
+        int sizes[COMPOSITOR_SCENES_WINDOWS][2], centre[COMPOSITOR_SCENES_WINDOWS][2];
+        unsigned int n = 0, cols;
         struct compositor_space *active;
-        const int *s;
 
         if (screen < 0 || (unsigned int)screen >= count)
                 return;
-        s = screens[screen];
-        strip_h = s[3] * 22 / 100;
-        strip[0] = s[0] + gap, strip[1] = s[1] + gap, strip[2] = s[2] - 2 * gap, strip[3] = strip_h;
-        win[0] = s[0] + gap, win[1] = s[1] + strip_h + 2 * gap, win[2] = s[2] - 2 * gap, win[3] = s[3] - strip_h - 3 * gap;
-        compositor.scenes.cards = compositor_scenes_strip((unsigned int)compositor_spaces_count_on(screen), strip, s[2], s[3], gap,
-                                                          compositor.scenes.card);
+        compositor_scenes_kept.stack_gen = compositor.stack_gen, compositor_scenes_kept.spaces_gen = compositor.spaces.gen;
+        // The overview is laid out in the screen's room: the band keeps its place over it, on any edge.
+        compositor_room(screens[screen], room);
+        strip_h = room[3] * 18 / 100;
+        strip[0] = room[0] + gap, strip[1] = room[1] + gap, strip[2] = room[2] - 2 * gap, strip[3] = strip_h;
+        win[0] = room[0] + 2 * gap, win[1] = room[1] + strip_h + 3 * gap, win[2] = room[2] - 4 * gap, win[3] = room[3] - strip_h - 5 * gap;
+        compositor.scenes.cards = compositor_scenes_strip((unsigned int)compositor_spaces_count_on(screen), strip, screens[screen][2],
+                                                          screens[screen][3], gap, compositor.scenes.card);
         active = compositor_space_at(screen, compositor_spaces_active_index(screen));
-        for (unsigned int at = 0; at < compositor.stacked && n < COMPOSITOR_SCENES_WINDOWS && active && compositor.row_space; at++)
+        for (unsigned int at = 0; at < compositor.stacked && n < COMPOSITOR_SCENES_WINDOWS && active; at++)
         {
                 int row = (int)compositor.stack[at];
 
-                if (row < 0 || row >= COMPOSITOR_ROWS || !compositor.showing[row] ||
-                    (compositor.state[row] & (WINDOW_MINIMIZED | WINDOW_CLOSING)) || compositor_popup_parent[row] >= 0 ||
-                    compositor_row_space_exempt(row) || compositor.row_space[row] != active->id)
+                if (!compositor_scenes_member(row) || compositor.row_space[row] != active->id)
                         continue;
                 compositor.scenes.row[n] = row;
                 sizes[n][0] = (int)compositor.w[row], sizes[n][1] = (int)compositor.h[row];
+                centre[n][0] = compositor.x[row] + sizes[n][0] / 2, centre[n][1] = compositor.y[row] + sizes[n][1] / 2;
                 n++;
         }
-        compositor.scenes.windows = compositor_scenes_grid(sizes, n, win, gap, compositor.scenes.rect);
+        // Each window takes the cell nearest where it is: the windows by their centre's height, a grid row of them at a time, and
+        // each row left to right; so the overview moves every window the least it can.
+        cols = compositor_scenes_cols((const int (*)[2])sizes, n, win, gap);
+        for (unsigned int i = 1; i < n; i++)
+                for (unsigned int j = i; j > 0 && centre[j][1] < centre[j - 1][1]; j--)
+                {
+                        int r = compositor.scenes.row[j], s0 = sizes[j][0], s1 = sizes[j][1], c0 = centre[j][0], c1 = centre[j][1];
+
+                        compositor.scenes.row[j] = compositor.scenes.row[j - 1], sizes[j][0] = sizes[j - 1][0], sizes[j][1] = sizes[j - 1][1];
+                        centre[j][0] = centre[j - 1][0], centre[j][1] = centre[j - 1][1];
+                        compositor.scenes.row[j - 1] = r, sizes[j - 1][0] = s0, sizes[j - 1][1] = s1, centre[j - 1][0] = c0, centre[j - 1][1] = c1;
+                }
+        for (unsigned int first = 0; cols && first < n; first += cols)
+                for (unsigned int i = first + 1; i < n && i < first + cols; i++)
+                        for (unsigned int j = i; j > first && centre[j][0] < centre[j - 1][0]; j--)
+                        {
+                                int r = compositor.scenes.row[j], s0 = sizes[j][0], s1 = sizes[j][1], c0 = centre[j][0], c1 = centre[j][1];
+
+                                compositor.scenes.row[j] = compositor.scenes.row[j - 1], sizes[j][0] = sizes[j - 1][0], sizes[j][1] = sizes[j - 1][1];
+                                centre[j][0] = centre[j - 1][0], centre[j][1] = centre[j - 1][1];
+                                compositor.scenes.row[j - 1] = r, sizes[j - 1][0] = s0, sizes[j - 1][1] = s1, centre[j - 1][0] = c0, centre[j - 1][1] = c1;
+                        }
+        memory_copy(compositor_scenes_kept.size, sizes, (positive)n * sizeof(sizes[0]));
+        compositor.scenes.windows = compositor_scenes_grid((const int (*)[2])sizes, n, win, gap, compositor.scenes.rect);
 }
 
 // The Scene card or window rect under (x, y). A window is an index into rect, a card an index into card; -1 is none.
@@ -309,4 +376,334 @@ void compositor_scenes_drag(unsigned int phase, int screen, int progress, int ve
                 if (commit)
                         compositor_scenes_open(compositor.scenes.screen);
         }
+}
+
+/*
+        The overview drawn (C8 step 4). present.c's present_build_frames leaves the rows of the overview's screen out of the
+        stack's frames (compositor_scenes_hides) and puts the overview's own frames in their place, under the band. So a window is
+        not drawn at its size under the overview, and nothing has to cover it: the ground is the wallpaper, drawn under the
+        overview's frames as under the desktop's, and the overview costs the screen no more than the desktop does, with no frame
+        in which a window and a cover over it are both drawn.
+
+        A window is its own frame (compositor_frame_of: its picture read where the client lends it, the card's address with it)
+        moved to the overview's rect and scaled from its picture (source_w by source_h), and its layers (a client's subsurfaces,
+        compositor_wl_layers_frames, made while the frame is still at its own size) are moved and scaled with it. The card scales
+        each from the client's own picture (compositor_gpu_scale_frames); nothing of it is copied. A Scene card is the wallpaper's
+        miniature (compositor_scenes_wall_of, made once and kept) with that Scene's windows over it, cut to the card.
+
+        The frames are drawn by the overview, not the windows (layer: the glass pass leaves them, a glass window's picture is what
+        it was made over), and none of them is the row's own (row_plus1 0: a close button's ink is the row's, kept for its return).
+*/
+
+// Whether the overview is drawn.
+static int compositor_scenes_shown(void)
+{
+        return compositor.scenes.open;
+}
+
+// Whether the overview draws a row in its own place or not at all: a window on its screen, but the desktop's ground (a
+// background layer) and the keyboard on the screen, which stay where they are.
+static int compositor_scenes_hides(int row)
+{
+        return compositor_scenes_shown() && row >= 0 && row < COMPOSITOR_ROWS && compositor.layer[row] != WINDOW_LAYER_BACKGROUND &&
+               !(compositor.asks[row] & WINDOW_KEYBOARD) && compositor_screen_of(row) == compositor.scenes.screen;
+}
+
+// The wallpaper's miniature for a card of w by h of the screen s: each pixel the mean of up to 4 by 4 of the wallpaper's under
+// it. Made when the wallpaper, its turn, the screen or the card's size changes, and kept; 0 with no wallpaper kept.
+static const unsigned int *compositor_scenes_wall_of(const int s[4], int w, int h)
+{
+        unsigned long bytes = (unsigned long)w * (unsigned long)h * 4;
+
+        if (!compositor_wall || w <= 0 || h <= 0 || s[2] <= 0 || s[3] <= 0 || s[0] < 0 || s[1] < 0 || s[0] + s[2] > compositor_wall_w ||
+            s[1] + s[3] > compositor_wall_h)
+                return 0;
+        if (compositor_scenes_kept.wall && compositor_scenes_kept.wall_of == compositor_wall && compositor_scenes_kept.wall_turn == compositor_wall_turn &&
+            compositor_scenes_kept.wall_w == w && compositor_scenes_kept.wall_h == h && !memory_compare(compositor_scenes_kept.wall_screen, s, 4 * sizeof(int)))
+                return compositor_scenes_kept.wall;
+        if (compositor_scenes_kept.wall_bytes < bytes)
+        {
+                void *p = compositor_scenes_kept.wall;
+
+                if (!mem_buf_grow(&p, &compositor_scenes_kept.wall_bytes, bytes, MEM_BUF_GPU_FORGET))
+                        return compositor_scenes_kept.wall = 0, compositor_scenes_kept.wall_bytes = 0, (const unsigned int *)0;
+                compositor_scenes_kept.wall = (unsigned int *)p;
+        }
+        for (int y = 0; y < h; y++)
+        {
+                long long y0 = s[1] + (long long)y * s[3] / h, y1 = s[1] + ((long long)y + 1) * s[3] / h;
+
+                for (int x = 0; x < w; x++)
+                {
+                        long long x0 = s[0] + (long long)x * s[2] / w, x1 = s[0] + ((long long)x + 1) * s[2] / w;
+                        long long cx = x1 - x0 > 4 ? 4 : x1 - x0 < 1 ? 1 : x1 - x0, cy = y1 - y0 > 4 ? 4 : y1 - y0 < 1 ? 1 : y1 - y0;
+                        unsigned int red = 0, green = 0, blue = 0, taps = 0;
+
+                        for (long long j = 0; j < cy; j++)
+                                for (long long i = 0; i < cx; i++)
+                                {
+                                        long long px = x0 + (x1 - x0) * (2 * i + 1) / (2 * cx), py = y0 + (y1 - y0) * (2 * j + 1) / (2 * cy);
+                                        unsigned int c = compositor_wall[py * compositor_wall_w + px];
+
+                                        red += c >> 16 & 255, green += c >> 8 & 255, blue += c & 255, taps++;
+                                }
+                        compositor_scenes_kept.wall[(unsigned long)y * (unsigned long)w + (unsigned long)x] =
+                            0xff000000u | (red / taps) << 16 | (green / taps) << 8 | blue / taps;
+                }
+        }
+        compositor_scenes_kept.wall_of = compositor_wall, compositor_scenes_kept.wall_turn = compositor_wall_turn;
+        compositor_scenes_kept.wall_w = w, compositor_scenes_kept.wall_h = h;
+        memory_copy(compositor_scenes_kept.wall_screen, s, 4 * sizeof(int));
+        return compositor_scenes_kept.wall;
+}
+
+// A frame cut to clip (x0, y0, x1, y1): its rect, its picture's part (a scaled frame's source cut by the same share) and the card's
+// address with it; a corner cut through is square. False when nothing of it is in the clip.
+static int compositor_scenes_cut(struct compositor_frame *f, const int clip[4])
+{
+        int x0 = f->x > clip[0] ? f->x : clip[0], y0 = f->y > clip[1] ? f->y : clip[1];
+        int x1 = f->x + f->width < clip[2] ? f->x + f->width : clip[2], y1 = f->y + f->height < clip[3] ? f->y + f->height : clip[3];
+        long long sw = f->source_w > 0 ? f->source_w : f->width, sh = f->source_h > 0 ? f->source_h : f->height, px0, py0, px1, py1;
+
+        if (x1 <= x0 || y1 <= y0 || f->width <= 0 || f->height <= 0)
+                return 0;
+        if (x0 == f->x && y0 == f->y && x1 == f->x + f->width && y1 == f->y + f->height)
+                return 1;
+        px0 = (long long)(x0 - f->x) * sw / f->width, py0 = (long long)(y0 - f->y) * sh / f->height;
+        px1 = ((long long)(x1 - f->x) * sw + f->width - 1) / f->width, py1 = ((long long)(y1 - f->y) * sh + f->height - 1) / f->height;
+        px1 = px1 > sw ? sw : px1 <= px0 ? px0 + 1 : px1, py1 = py1 > sh ? sh : py1 <= py0 ? py0 + 1 : py1;
+        if (f->pixels)
+        {
+                f->pixels += py0 * (long long)f->pitch + px0;
+                if (f->gpu_base)
+                        f->gpu_base += 4ull * (positive)(py0 * (long long)f->pitch + px0);
+        }
+        f->square |= (x0 > f->x || y0 > f->y ? 1 : 0) | (x1 < f->x + f->width || y0 > f->y ? 2 : 0) | (x0 > f->x || y1 < f->y + f->height ? 4 : 0) |
+                     (x1 < f->x + f->width || y1 < f->y + f->height ? 8 : 0);
+        f->x = x0, f->y = y0, f->width = x1 - x0, f->height = y1 - y0;
+        f->source_w = (int)(px1 - px0), f->source_h = (int)(py1 - py0);
+        return 1;
+}
+
+// A window's frames (its own, then its layers) moved from the rect `from` to `to` and each scaled from its picture by the same
+// share, then cut to clip. The window's own keeps its corners (radius, in device pixels) and its line (line, 0 for none); a frame
+// left with no area is dropped. Answers how many are left, in place.
+static unsigned int compositor_scenes_put(struct compositor_frame *span, unsigned int count, const int from[4], const int to[4], const int clip[4],
+                                          int radius, int line)
+{
+        unsigned int kept = 0;
+
+        if (from[2] <= 0 || from[3] <= 0)
+                return 0;
+        for (unsigned int at = 0; at < count; at++)
+        {
+                struct compositor_frame f = span[at];
+                long long fx0 = f.x - from[0], fy0 = f.y - from[1];
+                int x0 = to[0] + (int)(fx0 * to[2] / from[2]), y0 = to[1] + (int)(fy0 * to[3] / from[3]);
+                int x1 = to[0] + (int)((fx0 + f.width) * to[2] / from[2]), y1 = to[1] + (int)((fy0 + f.height) * to[3] / from[3]);
+
+                if (!f.source_w || !f.source_h)
+                        f.source_w = f.width, f.source_h = f.height;
+                f.x = x0, f.y = y0, f.width = x1 - x0, f.height = y1 - y0;
+                f.tiled_kind = 0, f.runs = 0;
+                f.close = f.minimize = 0, f.lit = 0, f.row_plus1 = 0, f.layer = 1;
+                f.preview[2] = f.preview[3] = 0, f.preview_under = 0, f.mark[2] = f.mark[3] = 0;
+                if (!at)
+                        f.radius = radius, f.line = line, f.square = 0, f.edge = compositor_line_unlit();
+                if (f.width <= 0 || f.height <= 0 || (f.pitch && f.pitch < (unsigned long)f.source_w) || !compositor_scenes_cut(&f, clip))
+                        continue;
+                span[kept++] = f;
+        }
+        return kept;
+}
+
+// Room for a window and as many layers as a window may have (wayland.c's WAYLAND_LAYERS) at frames[at].
+#define COMPOSITOR_SCENES_LAYERS 8
+
+// A window's own frame and its layers where it is, at frames[at]: answers how many.
+static unsigned int compositor_scenes_own(int row, struct compositor_frame *frames, unsigned int *rows, unsigned int at, unsigned int room)
+{
+        if (at + 1 > room)
+                return 0;
+        compositor_row_prepare(row);
+        compositor_frame_of(row, &frames[at]);
+        rows[at] = (unsigned int)row;
+        // A client's tiled picture is read by the card at its own size only (the scene's image op, tiled_kind): the overview draws the
+        // row's own picture, which the card brings up to date from it first (compositor_wl_straight_settle: one read of the client's).
+        if (frames[at].tiled_kind)
+                compositor_wl_straight_settle(row, 0, (long)compositor.h[row]), frames[at].tiled_kind = 0;
+        return 1 + (at + 1 + COMPOSITOR_SCENES_LAYERS <= room ? compositor_wl_layers_frames(row, frames, rows, at + 1) : 0);
+}
+
+// A rect of the screen s mapped into the card c.
+static void compositor_scenes_in_card(const int s[4], const int c[4], const int r[4], int out[4])
+{
+        long long x0 = c[0] + (long long)(r[0] - s[0]) * c[2] / s[2], y0 = c[1] + (long long)(r[1] - s[1]) * c[3] / s[3];
+        long long x1 = c[0] + (long long)(r[0] + r[2] - s[0]) * c[2] / s[2], y1 = c[1] + (long long)(r[1] + r[3] - s[1]) * c[3] / s[3];
+
+        out[0] = (int)x0, out[1] = (int)y0, out[2] = (int)(x1 - x0), out[3] = (int)(y1 - y0);
+}
+
+// A plain frame of the overview's own (a card's ground, the "+"), at frames[at] if there is room: answers how many (0 or 1).
+static unsigned int compositor_scenes_plain(struct compositor_frame *frames, unsigned int *rows, unsigned int at, unsigned int room, unsigned int filler,
+                                            const int r[4], const int clip[4], int scale)
+{
+        struct compositor_frame *f = &frames[at];
+
+        if (at >= room)
+                return 0;
+        memory_zero(f, sizeof(*f));
+        f->x = r[0], f->y = r[1], f->width = r[2], f->height = r[3], f->scale = scale, f->layer = 1;
+        rows[at] = filler;
+        return compositor_scenes_cut(f, clip) ? 1 : 0;
+}
+
+// The overview's frames at frames[at], the rows' in rows (room of each at the most): the current Scene's windows at their
+// rects, then the strip, a card a Scene with its windows on the wallpaper's miniature, and the "+" card. Answers how many.
+static unsigned int compositor_scenes_frames(struct compositor_frame *frames, unsigned int *rows, unsigned int at, unsigned int room)
+{
+        unsigned int count = 0, start = at, filler, span[COMPOSITOR_SCENES_WINDOWS][2];
+        const int (*screens)[4] = compositor_screens(&count);
+        int screen = compositor.scenes.screen, scale, radius, line, s[4], clip[4];
+        struct compositor_space *active;
+        const unsigned int *wall = 0;
+
+        if (screen < 0 || (unsigned int)screen >= count || !compositor.row_space)
+                return 0;
+        memory_copy(s, screens[screen], sizeof(s));
+        if (s[2] <= 0 || s[3] <= 0)
+                return 0;
+        clip[0] = s[0], clip[1] = s[1], clip[2] = s[0] + s[2], clip[3] = s[1] + s[3];
+        scale = compositor_output_scale(screen) > 0 ? compositor_output_scale(screen) : compositor.scale;
+        radius = UI_RADIUS * scale / 100, line = compositor_line_px(scale);
+        filler = compositor.scenes.windows ? (unsigned int)compositor.scenes.row[0] : 0;
+        active = compositor_space_at(screen, compositor_spaces_active_index(screen));
+        // The current Scene's windows in the stack's order, each its own frames where it is (moved after the strip has its copies of them).
+        for (unsigned int i = 0; i < compositor.scenes.windows; i++)
+                span[i][0] = span[i][1] = 0;
+        for (unsigned int k = 0; k < compositor.stacked; k++)
+                for (unsigned int i = 0; i < compositor.scenes.windows; i++)
+                        if ((unsigned int)compositor.scenes.row[i] == compositor.stack[k] && compositor_scenes_member(compositor.scenes.row[i]))
+                        {
+                                span[i][0] = at;
+                                at += compositor_scenes_own(compositor.scenes.row[i], frames, rows, at, room);
+                                span[i][1] = at;
+                        }
+        // The strip: each Scene's card, its ground the wallpaper's miniature (a fullscreen Scene's black), its windows over it.
+        for (unsigned int card = 0; card + 1 < compositor.scenes.cards && card < COMPOSITOR_SPACES_MAX; card++)
+        {
+                const int *c = compositor.scenes.card[card];
+                struct compositor_space *sp = compositor_space_at(screen, (int)card);
+                int cut[4] = {c[0], c[1], c[0] + c[2], c[1] + c[3]};
+
+                if (!sp || !compositor_scenes_plain(frames, rows, at, room, filler, c, clip, scale))
+                        continue;
+                if (sp->kind != COMPOSITOR_SPACE_FULLSCREEN && !wall)
+                        wall = compositor_scenes_wall_of(s, c[2], c[3]);
+                if (sp->kind != COMPOSITOR_SPACE_FULLSCREEN && wall)
+                        frames[at].pixels = wall + (frames[at].y - c[1]) * c[2] + (frames[at].x - c[0]), frames[at].pitch = (unsigned long)c[2];
+                else
+                        frames[at].fill = sp->kind == COMPOSITOR_SPACE_FULLSCREEN ? 0xff000000u : compositor_ground | 0xff000000u;
+                frames[at].radius = radius, frames[at].line = line;
+                frames[at].edge = active && sp->id == active->id ? compositor_ink_role(UI_ACCENT_BRIGHT) & 0xffffffu : compositor_line_unlit();
+                at++;
+                cut[0] = cut[0] > clip[0] ? cut[0] : clip[0], cut[1] = cut[1] > clip[1] ? cut[1] : clip[1];
+                cut[2] = cut[2] < clip[2] ? cut[2] : clip[2], cut[3] = cut[3] < clip[3] ? cut[3] : clip[3];
+                for (unsigned int k = 0; k < compositor.stacked && at < room; k++)
+                {
+                        int row = (int)compositor.stack[k], from[4], to[4];
+                        unsigned int own = at, made = 0;
+
+                        if (!compositor_scenes_member(row) || compositor.row_space[row] != sp->id)
+                                continue;
+                        // A window of the current Scene is copied from its frames above, which are still where it is.
+                        for (unsigned int i = 0; i < compositor.scenes.windows && !made; i++)
+                                if (compositor.scenes.row[i] == row && span[i][1] > span[i][0] && at + (span[i][1] - span[i][0]) <= room)
+                                {
+                                        memory_copy(&frames[at], &frames[span[i][0]], (positive)(span[i][1] - span[i][0]) * sizeof(frames[0]));
+                                        memory_copy(&rows[at], &rows[span[i][0]], (positive)(span[i][1] - span[i][0]) * sizeof(rows[0]));
+                                        made = span[i][1] - span[i][0];
+                                }
+                        if (!made && !(active && sp->id == active->id))
+                                made = compositor_scenes_own(row, frames, rows, at, room);
+                        if (!made)
+                                continue;
+                        from[0] = frames[own].x, from[1] = frames[own].y, from[2] = frames[own].width, from[3] = frames[own].height;
+                        compositor_scenes_in_card(s, c, from, to);
+                        at = own + compositor_scenes_put(&frames[own], made, from, to, cut, radius * c[2] / s[2], 0);
+                }
+        }
+        // The "+" card: a plate of the kit's surface with a line, and a plus in its middle.
+        if (compositor.scenes.cards && compositor_scenes_plain(frames, rows, at, room, filler, compositor.scenes.card[compositor.scenes.cards - 1], clip, scale))
+        {
+                const int *c = compositor.scenes.card[compositor.scenes.cards - 1];
+                int arm = (c[2] < c[3] ? c[2] : c[3]) / 4, bar = compositor_px1(2 * scale), cx = c[0] + c[2] / 2, cy = c[1] + c[3] / 2;
+                int across[4] = {cx - arm, cy - bar / 2, 2 * arm, bar}, down[4] = {cx - bar / 2, cy - arm, bar, 2 * arm};
+                unsigned int ink = compositor_ink_role(UI_ON_SURFACE_VARIANT) | 0xff000000u;
+
+                frames[at].fill = compositor_ink_role(UI_SURFACE_CONTAINER) | 0xff000000u;
+                frames[at].radius = radius, frames[at].line = line, frames[at].edge = compositor_line_unlit();
+                at++;
+                if (compositor_scenes_plain(frames, rows, at, room, filler, across, clip, scale))
+                        frames[at++].fill = ink;
+                if (compositor_scenes_plain(frames, rows, at, room, filler, down, clip, scale))
+                        frames[at++].fill = ink;
+        }
+        // The current Scene's windows moved to their rects, in place. A frame dropped (no area left) leaves the window's others moved
+        // down over it, and a frame of nothing at the span's end.
+        for (unsigned int i = 0; i < compositor.scenes.windows; i++)
+        {
+                unsigned int made = span[i][1] - span[i][0], left;
+                int from[4];
+
+                if (!made)
+                        continue;
+                from[0] = frames[span[i][0]].x, from[1] = frames[span[i][0]].y, from[2] = frames[span[i][0]].width, from[3] = frames[span[i][0]].height;
+                left = compositor_scenes_put(&frames[span[i][0]], made, from, compositor.scenes.rect[i], clip, radius, line);
+                for (unsigned int k = left; k < made; k++)
+                        memory_zero(&frames[span[i][0] + k], sizeof(frames[0])), frames[span[i][0] + k].layer = 1, frames[span[i][0] + k].scale = scale;
+        }
+        return at - start;
+}
+
+// A window's new picture while the overview is drawn: where the overview draws it is drawn again (its card, and its rect in the
+// current Scene), and not its own place, where it is not drawn. True when the overview draws the row or hides it.
+static int compositor_scenes_took(int row)
+{
+        unsigned int count = 0;
+        const int (*screens)[4] = compositor_screens(&count);
+        int screen = compositor.scenes.screen;
+
+        if (!compositor_scenes_shown() || row < 0 || row >= COMPOSITOR_ROWS || screen < 0 || (unsigned int)screen >= count)
+                return 0;
+        for (unsigned int i = 0; i < compositor.scenes.windows; i++)
+                if (compositor.scenes.row[i] == row)
+                {
+                        const int *r = compositor.scenes.rect[i];
+
+                        // A new size is a new aspect: the Scene is laid out again (and all of it drawn).
+                        if ((int)compositor.w[row] != compositor_scenes_kept.size[i][0] || (int)compositor.h[row] != compositor_scenes_kept.size[i][1])
+                                return compositor_scenes_relayout(), compositor_scenes_damage(), 1;
+                        compositor_damage(r[0] - 8, r[1] - 8, r[2] + 16, r[3] + 16); // with its line and a lit ring round it
+                }
+        if (compositor_scenes_member(row))
+                for (unsigned int card = 0; card + 1 < compositor.scenes.cards; card++)
+                        if (compositor_scenes_sid((int)card) == compositor.row_space[row])
+                        {
+                                const int *c = compositor.scenes.card[card];
+
+                                compositor_damage(c[0], c[1], c[2], c[3]);
+                                return 1;
+                        }
+        return compositor_scenes_hides(row);
+}
+
+// Before a frame, every pass of the loop: a change to the stack or the Spaces while the overview is open lays it out again.
+static void compositor_scenes_tick(positive now)
+{
+        (void)now;
+        if (!compositor.scenes.open)
+                return;
+        if (compositor_scenes_kept.stack_gen != compositor.stack_gen || compositor_scenes_kept.spaces_gen != compositor.spaces.gen)
+                compositor_scenes_relayout(), compositor_scenes_damage();
 }
