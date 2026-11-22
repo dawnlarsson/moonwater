@@ -3867,6 +3867,11 @@ static int compositor_xwm_steam_pointer(unsigned int pid, unsigned int type, uns
         {
                 int axis = b != 0, turn = a, *left = &compositor_xwm_steam.wheel[axis];
                 notch = notch > 0 ? notch : 120;
+                /* the turn is a client-sized input number: at most 16 notches count, so the accumulator cannot overflow (x11 S5) */
+                if (turn > 16 * notch)
+                        turn = 16 * notch;
+                else if (turn < -16 * notch)
+                        turn = -16 * notch;
                 if ((*left > 0 && turn < 0) || (*left < 0 && turn > 0))
                         *left = 0;
                 *left += turn;
