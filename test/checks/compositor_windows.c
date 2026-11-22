@@ -4881,6 +4881,12 @@ static void check_compositor_wheel(void)
         compositor_input_read(0);
         check("pad: after the kernel dropped reports, the finger's next place is no jump of the pointer",
               compositor.pointer_x == 100 && compositor.pointer_y == 40);
+        // The finger is still on the pad: the drop read the keys (EVIOCGKEY), which this pipe answers with none down, so the touch is
+        // given again as the kernel's next BTN_TOUCH would give it (a finger that stays is not resent after a drop by the kernel's own
+        // state). The wheel rows below are the pad's touch, as the rows before the drop were.
+        wheel_feed(COMPOSITOR_EV_KEY, COMPOSITOR_BTN_TOUCH, 1);
+        wheel_feed(COMPOSITOR_EV_SYN, 0, 0);
+        compositor_input_read(0);
         compositor.pointer_x = compositor.kept_x = 100;
         // A second finger, and the two ten millimetres up (12 of the wheel's 120ths a millimetre): a notch of the wheel up, and no move
         // of the pointer.
