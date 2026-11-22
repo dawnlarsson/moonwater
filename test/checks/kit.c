@@ -5020,10 +5020,10 @@ static fn check_kit_lit(void)
         ground = 0xffe0e0e2u;
         glass_light = ui_kit_light(&ui) && ui_luminance(window_mix(ground, ui_kit_lit(&ui) & 0xffffffu, ui_kit_lit(&ui) >> 24)) > ui_luminance(ground & 0xffffffu) &&
                       lit_lay(&ui, pixels, ground, 6) > ui_luminance(ground & 0xffffffu) && lit_lay(&ui, pixels, ground, 10) > lit_lay(&ui, pixels, ground, 6);
-        menu_light = ui_kit_lift(&ui, 100) == ui_kit_lit(&ui) && ui_popmenu_hot_fill(&ui) == ui_kit_lit(&ui);
+        menu_light = ui_kit_lift(&ui, 100) == ui_kit_lit(&ui);
         // A dark glass keeps the well of its ink, which is lighter than its tint there.
         ui_inks(&ui, 0x2b2b2eu);
-        glass_dark = !ui_kit_light(&ui) && ui_kit_lit(&ui) == ui_well(&ui, UI_SECONDARY_CONTAINER, 36) && ui_popmenu_hot_fill(&ui) == ui_kit_lit(&ui);
+        glass_dark = !ui_kit_light(&ui) && ui_kit_lit(&ui) == ui_well(&ui, UI_SECONDARY_CONTAINER, 36);
         ui.glass = 0;
         ui_kit_theme(UI_THEME_DARK, UI_ACCENT_STANDARD, 1);
         ground = ui_role(UI_SURFACE) | 0xff000000u;

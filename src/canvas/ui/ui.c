@@ -15545,26 +15545,6 @@ static fn ui_moon_disc_run(address_any context)
         ui_moon_disc_rows((const struct ui_moon_disc address_to)context);
 }
 
-// What the wallpaper's last making took a stage (ui_moon_night):
-enum { UI_MOON_STAGE_SKY, UI_MOON_STAGE_GRID, UI_MOON_STAGE_DISC, UI_MOON_STAGE_CRATERS, UI_MOON_STAGES };
-static positive ui_moon_stage_wall[UI_MOON_STAGES], ui_moon_stage_cpu[UI_MOON_STAGES];
-
-static void ui_moon_stage_clock(positive at[2])
-{
-        timespec cpu = {0, 0};
-        clock_gettime(2, address_of cpu); // CLOCK_PROCESS_CPUTIME_ID
-        at[0] = clock_monotonic_nanoseconds(), at[1] = (positive)cpu.tv_sec * 1000000000ull + (positive)cpu.tv_nsec;
-}
-
-// A stage's time from `from` to now, and now kept as the next stage's start.
-static void ui_moon_stage_done(int stage, positive from[2])
-{
-        positive now[2];
-        ui_moon_stage_clock(now);
-        ui_moon_stage_wall[stage] = now[0] - from[0], ui_moon_stage_cpu[stage] = now[1] - from[1];
-        from[0] = now[0], from[1] = now[1];
-}
-
 #define UI_MOON_DISC_THREADS 4 // the threads a large moon's grid and disc are shared among, this one with them
 
 // Each part run on a thread of its own, the last on this one, and all of them waited for (a part with no thread run here).
@@ -15593,7 +15573,7 @@ static fn ui_moon_paper(struct ui address_to ui, int left, int top, int size, b6
         int gw = (x1 - x0) / step + 2, gh = (y1 - y0) / step + 2, parts = small ? 1 : UI_MOON_DISC_THREADS;
         unsigned int paper, ink, bright, deep, address_to light, address_to heavy;
         decimal sun[3];
-        positive bytes, clock[2];
+        positive bytes;
         long got;
         float address_to grid = null;
         ui_moon_paper_tones(options, &paper, &ink);
@@ -15633,14 +15613,12 @@ static fn ui_moon_paper(struct ui address_to ui, int left, int top, int size, b6
                 light[x - x0] = ui_moon_fresnel_target(accent, side, options, 0);
                 heavy[x - x0] = ui_moon_fresnel_target(accent, side, options, 1);
         }
-        ui_moon_stage_clock(clock);
         {
                 struct ui_moon_grid part[UI_MOON_DISC_THREADS];
                 for (int at = 0; at < parts; at++)
                         part[at] = (struct ui_moon_grid){grid, gw, gh, step, small, x0, y0, at, parts, cx, cy, r, ct, st, &rayed};
                 ui_moon_parts(ui_moon_grid_run, part, sizeof(part[0]), parts);
         }
-        ui_moon_stage_done(UI_MOON_STAGE_GRID, clock);
         // The disc: per pixel, the maria's mass and its broken shore, the rays through it, the fresnel; a large one's rows shared among threads.
         {
                 struct ui_moon_disc part[UI_MOON_DISC_THREADS];
@@ -15653,7 +15631,6 @@ static fn ui_moon_paper(struct ui address_to ui, int left, int top, int size, b6
                         ui_moon_parts(ui_moon_disc_run, part, sizeof(part[0]), parts);
         }
         compositor_call(syscall(munmap), (positive)got, bytes, 0, 0, 0, 0);
-        ui_moon_stage_done(UI_MOON_STAGE_DISC, clock);
         if (!small)
         {
                 decimal stroke = (9.0 * scale) / r; // a crescent's weight at its middle where the surface faces the eye, as an angle of the sphere: a shore's
@@ -15722,18 +15699,11 @@ static fn ui_moon_night_part(struct ui address_to ui, b64 turn, unsigned int opt
 {
         int width = ui->width, height = ui->bottom - ui->top, size = width * 95 / 100, left = (width - size) / 2, top = ui->top + height * 38 / 100;
         int from = moon_alone ? top : ui->top;
-        positive clock[2];
         // The moon's square on the picture: all a turn's step changes.
         rect[0] = left < 0 ? 0 : left, rect[1] = top < ui->top ? ui->top : top;
         rect[2] = (left + size > width ? width : left + size) - rect[0], rect[3] = (top + size > ui->bottom ? ui->bottom : top + size) - rect[1];
-        ui_moon_stage_clock(clock);
         ui_moon_paper_ground(ui, options, accent, glow, edges, left + size / 2.0, top + size / 2.0, size / 2.0, from, ui->bottom);
-        ui_moon_stage_done(UI_MOON_STAGE_SKY, clock);
         ui_moon_paper(ui, left, top, size, turn, options, accent);
-        ui_moon_stage_done(UI_MOON_STAGE_CRATERS, clock);
-        // (the moon's whole time less its grid and its disc, which ui_moon_paper clocks itself)
-        ui_moon_stage_wall[UI_MOON_STAGE_CRATERS] -= ui_moon_stage_wall[UI_MOON_STAGE_GRID] + ui_moon_stage_wall[UI_MOON_STAGE_DISC];
-        ui_moon_stage_cpu[UI_MOON_STAGE_CRATERS] -= ui_moon_stage_cpu[UI_MOON_STAGE_GRID] + ui_moon_stage_cpu[UI_MOON_STAGE_DISC];
 }
 
 static fn ui_moon_night(struct ui address_to ui, b64 turn, unsigned int options, unsigned int accent, decimal glow, decimal edges)
@@ -16167,7 +16137,7 @@ struct ui_popmenu
         char typed[16];
         int typed_length;
         positive typed_at;
-        int wheel_rest, wheel_left;  // a wheel's turn under a whole pixel (120ths, ui_wheel_pixels) and under a whole item (pixels), kept for the next turn
+        int wheel_rest;              // a wheel's turn under a whole pixel (120ths, ui_wheel_pixels), kept for the next turn
 };
 _Static_assert(1 + 3 * UI_MENU_ITEMS <= UI_TREE_NODES, "a menu's tree: its root, and a row, a label and its keys for each item");
 
@@ -16566,7 +16536,13 @@ static int ui_popmenu_event(struct ui address_to ui, struct ui_popmenu address_t
                         return UI_MENU_NOTHING;
                 if (m->scroll.content <= m->scroll.view || event->b)
                         return UI_MENU_GONE;
-                ui_popmenu_to(m, ui_popmenu_top(m) + (int)ui_wheel_step(ui, event, row, 3, &m->wheel_rest, &m->wheel_left, null));
+                // A notch is two and a half rows (the kit's notch), in pixels; the whole pixels move the menu's one scroll.
+                {
+                        int left = 0, most = ui_scroll_most(&m->scroll), at = m->tree.node[0].offset + (int)ui_wheel_step(ui, event, 1, row * 5 / 2, &m->wheel_rest, &left, null);
+                        m->tree.node[0].offset = at < 0 ? 0 : at > most ? most : at;
+                        ui_tree_run(&m->tree, 0, 0);
+                        ui_scroll_set(&m->scroll, m->tree.node[0].offset);
+                }
                 return UI_MENU_NOTHING;
         }
         if (event->type == WINDOW_EVENT_BUTTON && event->a >= UI_POINTER_LEFT && event->a <= UI_POINTER_MIDDLE)
@@ -16695,8 +16671,6 @@ static b32 ui_popmenu_shows(struct ui_popup address_to p, const struct window_ro
         ui_popmenu_present(p);
         return true;
 }
-
-static unsigned int ui_popmenu_hot_fill(const struct ui address_to u) { return ui_kit_lit(u); }
 
 static b32 ui_popmenu_open(struct ui_popup address_to p, const struct window_row address_to parent, const struct ui address_to parent_ui,
                          int x, int y, int width, int height, unsigned int flags, b32 touch)

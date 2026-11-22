@@ -1579,7 +1579,7 @@ static fn popmenu_bar_check(struct ui address_to wui)
                 int one, two, up, closed_fits;
 
                 ui_popmenu_size(wui, &m, 300);
-                ui_popmenu_to(&m, 0), m.wheel_rest = m.wheel_left = 0;
+                ui_popmenu_to(&m, 0), m.wheel_rest = 0;
                 one = ui_popmenu_event(wui, &m, &notch, 5, 5) == UI_MENU_NOTHING && ui_popmenu_top(&m) == 3;
                 two = ui_popmenu_event(wui, &m, &notch, 5, 5) == UI_MENU_NOTHING && ui_popmenu_top(&m) == 6;
                 up = ui_popmenu_event(wui, &m, &back, 5, 5) == UI_MENU_NOTHING && ui_popmenu_top(&m) == 3;
