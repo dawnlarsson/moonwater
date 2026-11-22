@@ -2328,7 +2328,7 @@ static void compositor_cursor_move(void)
 #define CANVAS_DRM_IOCTL_VERSION 0xc0406400UL
 #define CANVAS_DRM_IOCTL_GET_CAP 0xc010640cUL
 #define CANVAS_DRM_IOCTL_VIRTGPU_GETPARAM 0xc0106443UL
-#define CANVAS_DRM_IOCTL_SYNCOBJ_DESTROY 0xc00864bfUL
+#define CANVAS_DRM_IOCTL_SYNCOBJ_DESTROY 0xc00864c0UL // DRM_IOWR(0xC0); 0xbf is SYNCOBJ_CREATE, which the old number asked for (a leak)
 #define CANVAS_DRM_IOCTL_SYNCOBJ_FD_TO_HANDLE 0xc01064c2UL
 #define CANVAS_DRM_IOCTL_SYNCOBJ_TIMELINE_WAIT 0xc03064caUL
 #define CANVAS_DRM_IOCTL_SYNCOBJ_TIMELINE_SIGNAL 0xc01864cdUL
@@ -2394,7 +2394,7 @@ static int canvas_drm_render_classify(const char *path, unsigned long prev_dev, 
                 return 0;
         if (dev != prev_dev)
         {
-                compositor_call(syscall(fchownat), (positive)AT_FDCWD, (positive)path, 0, CANVAS_DRM_RENDER_GID, 0, 0);
+                compositor_call(syscall(fchownat), (positive)AT_FDCWD, (positive)path, 0, CANVAS_DRM_RENDER_GID, 0x100 /* AT_SYMLINK_NOFOLLOW */, 0);
                 compositor_call(syscall(fchmodat), (positive)AT_FDCWD, (positive)path, 0660, 0, 0, 0);
         }
         fd = compositor_call(syscall(openat), (positive)AT_FDCWD, (positive)path, 0x80002, 0, 0, 0);
@@ -2523,7 +2523,8 @@ static unsigned int canvas_drm_plane_formats(int card_fd, unsigned int plane_id,
                 const unsigned int *fmts = (const unsigned int *)(buf + foff);
                 const unsigned char *mods = buf + moff;
 
-                if (foff + nf * 4u > blob.length || moff + nm * 24u > blob.length)
+                // 64-bit sums: the offsets and counts are the driver's, and a 32-bit sum of a large count wraps past the blob.
+                if ((unsigned long)foff + (unsigned long)nf * 4ul > blob.length || (unsigned long)moff + (unsigned long)nm * 24ul > blob.length)
                         return 0;
                 for (unsigned int m = 0; m < nm; m++)
                 {
@@ -2630,21 +2631,23 @@ static int canvas_syncobj_ready(const struct canvas_syncobj_pool *p, long slot, 
 {
         unsigned int handle;
         unsigned long long pt = point;
+        // struct drm_syncobj_timeline_wait, 48 bytes (the uapi's; DRM_IOWR copies all 48 back out, so a shorter struct is overwritten past its end).
         struct
         {
-                unsigned long long handles;
+                unsigned long long handles, points;
                 long long timeout_nsec;
                 unsigned int count_handles, flags, first_signaled, pad;
-                unsigned long long points;
+                unsigned long long deadline_nsec;
         } arg;
 
+        _Static_assert(sizeof(arg) == 48, "drm_syncobj_timeline_wait is 48 bytes (uapi drm.h)");
         if (!p || slot < 0 || slot >= p->count || !p->slots[slot].used || p->drm_fd < 0)
                 return 1;
         handle = p->slots[slot].handle;
         memory_zero(&arg, sizeof(arg));
         arg.handles = (unsigned long long)(unsigned long)&handle;
         arg.points = (unsigned long long)(unsigned long)&pt;
-        arg.count_handles = 1, arg.flags = 1; // DRM_SYNCOBJ_WAIT_FLAGS_WAIT_ALL
+        arg.count_handles = 1, arg.flags = 1; // DRM_SYNCOBJ_WAIT_FLAGS_WAIT_ALL; timeout 0 is a poll, deadline 0 none
         return compositor_call(syscall(ioctl), (positive)p->drm_fd, CANVAS_DRM_IOCTL_SYNCOBJ_TIMELINE_WAIT, (positive)&arg, 0, 0, 0) == 0;
 }
 
