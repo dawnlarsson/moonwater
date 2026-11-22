@@ -636,7 +636,6 @@ static awk_text address_to awk_to_text(awk_value address_to which)
 
         if (which->state & AWK_UNSET)
         {
-                awk_empty_text.refs++;
                 which->text = address_of awk_empty_text;
                 which->state |= AWK_HAS_TEXT;
                 return which->text;
@@ -807,6 +806,13 @@ static PURE awk_slot address_to awk_array_find_hash(awk_array address_to which,
                         return slot;
 
         return null;
+}
+
+static inline INLINE awk_slot address_to awk_array_find(awk_array address_to which,
+                                                        string_address key,
+                                                        positive length)
+{
+        return awk_array_find_hash(which, key, length, awk_hash(key, length));
 }
 
 
@@ -1448,13 +1454,19 @@ static fn awk_split_pieces(string_address text, positive length, string_address 
                         {
                                 cut = TEXT_UNSET;
 
-                                for (positive scan = at; scan < length && cut == TEXT_UNSET; scan++)
-                                        if (regex_find(REGEX_LONGEST, text, length, scan) &&
-                                            regex_slots[1] > regex_slots[0])
+                                for (positive scan = stop + 1; scan < length; scan++)
+                                {
+                                        if (!regex_find(REGEX_LONGEST, text, length, scan))
+                                                break;
+                                        if (regex_slots[1] > regex_slots[0])
                                         {
                                                 cut = regex_slots[0];
                                                 stop = regex_slots[1];
+                                                break;
                                         }
+                                        if (regex_slots[0] > scan)
+                                                scan = regex_slots[0];
+                                }
                         }
                 }
 
@@ -3235,6 +3247,7 @@ enum
         B_SPLIT,
         B_SUB,
         B_GSUB,
+        B_GENSUB,
         B_MATCH,
         B_SPRINTF,
         B_SIN,
@@ -3277,6 +3290,7 @@ static awk_word awk_words[] = {
     {"func", T_FUNCTION, 0},
     {"for", T_FOR, 0},
     {"fflush", T_BUILTIN, B_FFLUSH},
+    {"gensub", T_BUILTIN, B_GENSUB},
     {"getline", T_GETLINE, 0},
     {"gsub", T_BUILTIN, B_GSUB},
     {"if", T_IF, 0},
@@ -3319,13 +3333,13 @@ static const p16 awk_word_range[128] = {
     ['a'] = AWK_WORD_RANGE(2, 1),  ['b'] = AWK_WORD_RANGE(3, 1),
     ['c'] = AWK_WORD_RANGE(4, 3),  ['d'] = AWK_WORD_RANGE(7, 2),
     ['e'] = AWK_WORD_RANGE(9, 3),  ['f'] = AWK_WORD_RANGE(12, 4),
-    ['g'] = AWK_WORD_RANGE(16, 2), ['i'] = AWK_WORD_RANGE(18, 4),
-    ['l'] = AWK_WORD_RANGE(22, 2), ['m'] = AWK_WORD_RANGE(24, 1),
-    ['n'] = AWK_WORD_RANGE(25, 2), ['p'] = AWK_WORD_RANGE(27, 2),
-    ['r'] = AWK_WORD_RANGE(29, 2), ['s'] = AWK_WORD_RANGE(31, 8),
-    ['t'] = AWK_WORD_RANGE(39, 2), ['w'] = AWK_WORD_RANGE(41, 1)};
+    ['g'] = AWK_WORD_RANGE(16, 3), ['i'] = AWK_WORD_RANGE(19, 4),
+    ['l'] = AWK_WORD_RANGE(23, 2), ['m'] = AWK_WORD_RANGE(25, 1),
+    ['n'] = AWK_WORD_RANGE(26, 2), ['p'] = AWK_WORD_RANGE(28, 2),
+    ['r'] = AWK_WORD_RANGE(30, 2), ['s'] = AWK_WORD_RANGE(32, 8),
+    ['t'] = AWK_WORD_RANGE(40, 2), ['w'] = AWK_WORD_RANGE(42, 1)};
 
-_Static_assert(AWK_WORD_COUNT == 42, "update the AWK keyword ranges");
+_Static_assert(AWK_WORD_COUNT == 43, "update the AWK keyword ranges");
 
 /*
         How many arguments each of them takes.
@@ -3339,7 +3353,7 @@ static const struct
         p8 least;
         p8 most;
 } awk_builtin_arity[] = {
-    {0, 1}, {2, 3}, {2, 2}, {2, 3}, {2, 3}, {2, 3}, {2, 2}, {1, 255},
+    {0, 1}, {2, 3}, {2, 2}, {2, 3}, {2, 3}, {2, 3}, {3, 4}, {2, 3}, {1, 255},
     {1, 1}, {1, 1}, {2, 2}, {1, 1}, {1, 1}, {1, 1}, {1, 1}, {0, 0},
     {0, 1}, {1, 1}, {1, 1}, {1, 1}, {1, 1}, {0, 1}};
 
@@ -3446,6 +3460,14 @@ static awk_text address_to awk_regex_escapes(string_address pattern, positive le
                 }
 
                 p8 next = pattern[i + 1];
+                // GNU awk spells word boundary as \y in regexes.
+                if (next == 'y')
+                {
+                        awk_builder_char(address_of build, '\\');
+                        awk_builder_char(address_of build, 'b');
+                        i += 2;
+                        continue;
+                }
                 bool simple = next == 'a' || next == 'b' || next == 'f' || next == 'n' ||
                               next == 'r' || next == 't' || next == 'v' || next == '/' ||
                               next == '"';
@@ -4405,6 +4427,10 @@ static awk_node address_to awk_primary()
                 if (which == B_SPLIT && node->a->next->kind != N_VARIABLE)
                         awk_syntax("split wants an array");
 
+                if (which == B_MATCH && node->count == 3 &&
+                    node->a->next->next->kind != N_VARIABLE)
+                        awk_syntax("match wants an array");
+
                 return node;
         }
 
@@ -5087,6 +5113,8 @@ static fn awk_parse_function()
         awk_expect(T_CLOSE_BRACE, "expected } after a function body");
 
         awk_inside_function = false;
+        for (b32 i = 0; i < awk_local_count; i++)
+                awk_text_drop(awk_local_names[i]);
         awk_local_count = 0;
 }
 
@@ -5283,7 +5311,8 @@ static inline INLINE awk_value address_to awk_borrowed(awk_node address_to node)
                 return address_of awk_cell_of(node->index)->value;
         }
 
-        if (node->kind == N_FIELD && node->sub && node->index > 0 && node->index <= awk_nf)
+        if (node->kind == N_FIELD && node->sub && node->index > 0 && node->index <= awk_nf &&
+            awk_fields[node->index].epoch == awk_record_epoch)
                 return address_of awk_fields[node->index];
 
         return null;
@@ -5331,7 +5360,10 @@ static bool awk_eval_truth(awk_node address_to node)
         if (node->kind == N_COMPARE)
                 return awk_eval_compare(node);
         if (node->kind == N_VARIABLE)
+        {
+                awk_read_scalar(node->index);
                 return awk_truth(address_of awk_cell_of(node->index)->value);
+        }
         if (node->kind == N_NUMBER)
                 return node->number != 0;
 
@@ -5383,7 +5415,8 @@ static decimal awk_eval_number(awk_node address_to node)
                 awk_read_scalar(node->index);
                 return awk_to_number(address_of awk_cell_of(node->index)->value);
         case N_FIELD:
-                if (node->sub && node->index > 0 && node->index <= awk_nf)
+                if (node->sub && node->index > 0 && node->index <= awk_nf &&
+                    awk_fields[node->index].epoch == awk_record_epoch)
                         return awk_to_number(address_of awk_fields[node->index]);
                 return awk_to_number(awk_field(awk_whole(awk_eval_number(node->a))));
         case N_NEGATE:
@@ -5538,7 +5571,8 @@ static awk_value address_to awk_target_slot(awk_target address_to which)
         switch (which->kind)
         {
         case LV_FIELD:
-                if (which->index && which->field > 0 && which->field <= awk_nf)
+                if (which->index && which->field > 0 && which->field <= awk_nf &&
+                    awk_fields[which->field].epoch == awk_record_epoch)
                         return address_of awk_fields[which->field];
 
                 return awk_field(which->field);
@@ -5571,6 +5605,58 @@ static fn awk_do_assign(awk_node address_to node, awk_value address_to out)
 
         if (!node->sub)
         {
+                // s = s expr: grow the variable's text buffer exponentially so
+                // loop-accumulated string concatenation stays O(n) instead of O(n^2).
+                if (node->a->kind == N_VARIABLE && node->b->kind == N_CONCAT &&
+                    node->b->a->kind == N_VARIABLE && node->a->index == node->b->a->index &&
+                    (node->a->index < 0 || awk_global_meaning[node->a->index] == AWK_PLAIN))
+                {
+                        awk_write_scalar(node->a->index);
+                        awk_cell address_to cell = awk_cell_of(node->a->index);
+                        awk_text address_to right = awk_eval_text(node->b->b);
+                        awk_text address_to left = awk_to_text(address_of cell->value);
+
+                        if (right->length)
+                        {
+                                positive total = awk_size_add(left->length, right->length);
+
+                                if (left != address_of awk_empty_text && left->refs == 1 &&
+                                    left->room >= total)
+                                {
+                                        memory_copy_apart(left->text + left->length,
+                                                          right->text, right->length);
+                                        left->length = total;
+                                        left->text[total] = end;
+                                        left->shape = 0;
+                                        cell->value.state = AWK_HAS_TEXT;
+                                        cell->value.number = 0;
+                                }
+                                else if (!left->length)
+                                        awk_set_text(address_of cell->value, awk_text_hold(right));
+                                else
+                                {
+                                        positive cap = memory_growth(left->room, total, 64);
+                                        awk_text address_to made = awk_text_room(cap ? cap : total);
+
+                                        memory_copy_apart(made->text, left->text, left->length);
+                                        memory_copy_apart(made->text + left->length,
+                                                          right->text, right->length);
+                                        made->length = total;
+                                        made->text[total] = end;
+                                        awk_set_text(address_of cell->value, made);
+                                }
+                        }
+                        else
+                        {
+                                cell->value.state = AWK_HAS_TEXT;
+                                cell->value.number = 0;
+                        }
+
+                        awk_text_drop(right);
+                        awk_value_copy(out, address_of cell->value);
+                        return;
+                }
+
                 awk_value right;
                 awk_value_start(right);
                 awk_eval(node->b, address_of right);
@@ -5659,7 +5745,8 @@ static fn awk_eval(awk_node address_to node, awk_value address_to out)
                 return;
 
         case N_FIELD:
-                if (node->sub && node->index > 0 && node->index <= awk_nf)
+                if (node->sub && node->index > 0 && node->index <= awk_nf &&
+                    awk_fields[node->index].epoch == awk_record_epoch)
                         awk_value_copy(out, address_of awk_fields[node->index]);
                 else
                         awk_value_copy(out, awk_field(awk_whole(awk_eval_number(node->a))));
@@ -5712,7 +5799,7 @@ static fn awk_eval(awk_node address_to node, awk_value address_to out)
 
                 awk_array address_to array = awk_cell_array(awk_cell_of(node->index));
 
-                awk_set_number(out, awk_array_find_hash(array, key->text, key->length, awk_hash(((string_address)(key->text)), ((positive)(key->length)))) ? 1 : 0);
+                awk_set_number(out, awk_array_find(array, key->text, key->length) ? 1 : 0);
                 awk_text_drop(key);
                 return;
         }
@@ -5912,18 +5999,21 @@ static fn awk_call(awk_node address_to node, awk_value address_to out)
 }
 
 static awk_text address_to awk_replace(awk_text address_to subject, regex_program address_to program,
-                                       awk_text address_to with, bool every, b32 address_to made)
+                                       awk_text address_to with, b32 occurrence, bool gensub_mode,
+                                       b32 address_to made)
 {
         awk_builder build;
         positive done = 0;
         positive at = 0;
         positive last = TEXT_UNSET;
+        b32 seen = 0;
         // Past an empty match the next attempt is one character on, which in
         // a UTF-8 locale is a whole sequence and not its first byte.
         bool wide = awk_text_wide(subject);
 
         bool plain_with = !memory_first_of(with->text, '\\', with->length) &&
                           !memory_first_of(with->text, '&', with->length);
+        p8 mode = gensub_mode ? (REGEX_LONGEST | REGEX_CAPTURES) : REGEX_LONGEST;
 
         address_to made = 0;
         awk_builder_start(address_of build);
@@ -5932,7 +6022,7 @@ static awk_text address_to awk_replace(awk_text address_to subject, regex_progra
         {
                 regex_current = *program;
 
-                if (!regex_find(REGEX_LONGEST, subject->text, subject->length, at))
+                if (!regex_find(mode, subject->text, subject->length, at))
                         break;
 
                 positive start = regex_slots[0];
@@ -5951,6 +6041,19 @@ static awk_text address_to awk_replace(awk_text address_to subject, regex_progra
                         continue;
                 }
 
+                seen++;
+                if (occurrence > 0 && seen < occurrence)
+                {
+                        last = stop;
+                        at = start == stop
+                                 ? start + (wide && start < subject->length
+                                                ? memory_utf8_span(subject->text + start,
+                                                                   subject->length - start, 1).x
+                                                : 1)
+                                 : stop;
+                        continue;
+                }
+
                 awk_builder_put(address_of build, subject->text + done, start - done);
 
                 /*
@@ -5960,7 +6063,8 @@ static awk_text address_to awk_replace(awk_text address_to subject, regex_progra
                         which is not what the standard says and is what the
                         awk this is measured against does. The one place two
                         of them collapse is directly before an ampersand that
-                        is meant to be the match.
+                        is meant to be the match. In gensub(), \0..\9 expand
+                        capture groups and \\ is a literal backslash.
                 */
                 if (plain_with)
                 {
@@ -5970,7 +6074,38 @@ static awk_text address_to awk_replace(awk_text address_to subject, regex_progra
                 {
                         if (with->text[i] == '\\' && i + 1 < with->length)
                         {
-                                if (with->text[i + 1] == '&')
+                                p8 next = with->text[i + 1];
+
+                                if (gensub_mode)
+                                {
+                                        if (next >= '0' && next <= '9')
+                                        {
+                                                b32 g = next - '0';
+                                                if (g <= regex_group_count)
+                                                {
+                                                        positive gstart = regex_slots[g * 2];
+                                                        positive gstop = regex_slots[g * 2 + 1];
+                                                        if (gstart != positive_max && gstop != positive_max &&
+                                                            gstop >= gstart)
+                                                                awk_builder_put(address_of build,
+                                                                                subject->text + gstart,
+                                                                                gstop - gstart);
+                                                }
+                                                i++;
+                                                continue;
+                                        }
+                                        if (next == '&' || next == '\\')
+                                        {
+                                                awk_builder_char(address_of build, next);
+                                                i++;
+                                                continue;
+                                        }
+                                        awk_builder_char(address_of build, next);
+                                        i++;
+                                        continue;
+                                }
+
+                                if (next == '&')
                                 {
                                         awk_builder_char(address_of build, '&');
                                         i++;
@@ -5983,7 +6118,7 @@ static awk_text address_to awk_replace(awk_text address_to subject, regex_progra
                                 // reference awk's table; asked after the
                                 // two-backslash case they read as that case
                                 // and the match.
-                                if (with->text[i + 1] == '\\' && i + 3 < with->length &&
+                                if (next == '\\' && i + 3 < with->length &&
                                     with->text[i + 2] == '\\' &&
                                     (with->text[i + 3] == '&' || with->text[i + 3] == '\\'))
                                 {
@@ -5993,7 +6128,7 @@ static awk_text address_to awk_replace(awk_text address_to subject, regex_progra
                                         continue;
                                 }
 
-                                if (with->text[i + 1] == '\\' && i + 2 < with->length &&
+                                if (next == '\\' && i + 2 < with->length &&
                                     with->text[i + 2] == '&')
                                 {
                                         awk_builder_char(address_of build, '\\');
@@ -6025,7 +6160,7 @@ static awk_text address_to awk_replace(awk_text address_to subject, regex_progra
                                         : 1)
                          : stop;
 
-                if (!every)
+                if (occurrence > 0)
                         break;
         }
 
@@ -6240,7 +6375,8 @@ static fn awk_builtin(awk_node address_to node, awk_value address_to out)
                         program = awk_regex_dynamic(pattern);
 
                 awk_text address_to subject = awk_text_hold(awk_to_text(awk_target_slot(address_of target)));
-                awk_text address_to made = awk_replace(subject, program, with, node->index == B_GSUB,
+                awk_text address_to made = awk_replace(subject, program, with,
+                                                       node->index == B_GSUB ? 0 : 1, false,
                                                        address_of count);
 
                 if (count)
@@ -6265,21 +6401,116 @@ static fn awk_builtin(awk_node address_to node, awk_value address_to out)
                 return;
         }
 
+        case B_GENSUB:
+        {
+                regex_program address_to program = null;
+                awk_text address_to pattern = null;
+
+                if (first->kind == N_REGEX && first->program)
+                        program = first->program;
+                else if (first->kind == N_REGEX)
+                        pattern = awk_text_hold(first->text);
+                else
+                        pattern = awk_eval_text(first);
+
+                awk_text address_to with = awk_eval_text(second);
+                awk_value how;
+                awk_value_start(how);
+                awk_eval(third, address_of how);
+
+                awk_node address_to fourth = third->next;
+                awk_text address_to subject = fourth
+                    ? awk_eval_text(fourth)
+                    : awk_text_hold(awk_to_text(awk_field(0)));
+
+                b32 occurrence = 1;
+                if (!awk_numeric_side(address_of how))
+                {
+                        awk_text address_to htext = awk_to_text(address_of how);
+                        if (htext->length && (htext->text[0] == 'g' || htext->text[0] == 'G'))
+                                occurrence = 0;
+                        else
+                        {
+                                occurrence = awk_whole(awk_to_number(address_of how));
+                                if (occurrence <= 0)
+                                        occurrence = 1;
+                        }
+                }
+                else
+                {
+                        occurrence = awk_whole(awk_to_number(address_of how));
+                        if (occurrence <= 0)
+                                occurrence = 1;
+                }
+                awk_value_done(address_of how);
+
+                if (!program)
+                        program = awk_regex_dynamic(pattern);
+
+                b32 count = 0;
+                awk_text address_to made = awk_replace(subject, program, with,
+                                                       occurrence, true, address_of count);
+
+                awk_set_text(out, made);
+                awk_text_drop(subject);
+                awk_text_drop(with);
+                awk_text_drop(pattern);
+                return;
+        }
+
         case B_MATCH:
         {
                 awk_text address_to text = awk_eval_text(first);
+                awk_array address_to groups = third ? awk_cell_array(awk_cell_of(third->index)) : null;
+
+                if (groups)
+                        awk_array_empty(groups);
 
                 regex_current = *awk_program_of(second);
 
-                if (regex_find(REGEX_LONGEST, text->text, text->length, 0))
+                if (regex_find(groups ? (REGEX_LONGEST | REGEX_CAPTURES) : REGEX_LONGEST,
+                               text->text, text->length, 0))
                 {
+                        bool wide = awk_text_wide(text);
                         positive begin = regex_slots[0];
                         positive length = regex_slots[1] - regex_slots[0];
 
-                        if (awk_text_wide(text))
+                        if (wide)
                         {
                                 length = awk_characters(text->text + begin, length);
                                 begin = awk_characters(text->text, begin);
+                        }
+
+                        if (groups)
+                        {
+                                awk_text address_to sep = awk_special_text(awk_where_subsep);
+                                for (b32 g = 0; g <= regex_group_count; g++)
+                                {
+                                        positive gs = regex_slots[g * 2];
+                                        positive ge = regex_slots[g * 2 + 1];
+                                        if (gs == positive_max || ge == positive_max || ge < gs)
+                                                continue;
+                                        p8 num[24];
+                                        positive nlen = positive_into(num, (positive)g);
+                                        awk_slot address_to s = awk_array_place(groups, num, nlen);
+                                        awk_set_bytes(address_of s->value, text->text + gs, ge - gs);
+
+                                        positive cstart = wide ? awk_characters(text->text, gs) : gs;
+                                        positive clen = wide ? awk_characters(text->text + gs, ge - gs) : (ge - gs);
+                                        awk_builder kbuf;
+                                        awk_builder_start(address_of kbuf);
+                                        awk_builder_put(address_of kbuf, num, nlen);
+                                        awk_builder_put(address_of kbuf, sep->text, sep->length);
+                                        awk_builder_put(address_of kbuf, (string_address)"start", 5);
+                                        awk_slot address_to ss = awk_array_place(groups, kbuf.data, kbuf.used);
+                                        awk_set_number(address_of ss->value, (decimal)(cstart + 1));
+                                        kbuf.used = nlen + sep->length;
+                                        awk_builder_put(address_of kbuf, (string_address)"length", 6);
+                                        awk_slot address_to sl = awk_array_place(groups, kbuf.data, kbuf.used);
+                                        awk_set_number(address_of sl->value, (decimal)clen);
+                                        if (kbuf.heap)
+                                                memory_give(kbuf.data);
+                                }
                         }
 
                         awk_set_global_number(awk_where_rstart, (decimal)(begin + 1));
@@ -6533,16 +6764,21 @@ static fn awk_do_print(awk_node address_to node)
         string_address ors;
         awk_writer address_to where;
 
-        awk_builder_start(address_of build);
-
         if (!node->a)
         {
                 awk_text address_to record = awk_to_text(awk_field(0));
 
-                awk_builder_put(address_of build, record->text, record->length);
+                ors = awk_separator(awk_where_ors, address_of ors_length);
+                where = awk_output_of(node);
+                if (!awk_writer_put(where, record->text, record->length) ||
+                    !awk_writer_put(where, ors, ors_length))
+                        awk_write_refused(where, "print");
+                return;
         }
-        else
-                for (awk_node address_to one = node->a; one; one = one->next)
+
+        awk_builder_start(address_of build);
+
+        for (awk_node address_to one = node->a; one; one = one->next)
                 {
                         awk_value value;
                         awk_text address_to ofs = one == node->a
@@ -6866,6 +7102,9 @@ static b32 awk_run(awk_node address_to node)
                         return RUN_RETURN;
                 }
 
+                if (awk_exiting)
+                        return RUN_EXIT;
+
                 if (awk_skipping)
                 {
                         b32 skip = awk_skipping;
@@ -6998,7 +7237,7 @@ static bool awk_open_next_input()
                 }
 
                 awk_text address_to key = awk_number_key((positive)awk_argv_at++);
-                awk_slot address_to slot = awk_array_find_hash(argv, key->text, key->length, awk_hash(((string_address)(key->text)), ((positive)(key->length))));
+                awk_slot address_to slot = awk_array_find(argv, key->text, key->length);
 
                 awk_text_drop(key);
 

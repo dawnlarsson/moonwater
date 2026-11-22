@@ -338,19 +338,6 @@ static bool edit_line_open(positive at)
         return true;
 }
 
-//      One line taken out of the table, its bytes released with it. The store
-//      is the line's own, so a line that goes has to give it back or a file
-//      that is edited for an hour holds every line it ever had.
-static fn edit_line_close(positive at)
-{
-        if (at >= edit_line_count)
-                return;
-
-        memory_give(edit_lines[at].text);
-
-        array_remove(edit_lines, edit_line_count, at);
-}
-
 //      Somewhere inside the file, whatever was asked for. Everything that
 //      takes a position from the outside -- a mouse click, a go to line, a
 //      cursor restored from an undo step -- comes through here, so no other
@@ -1445,12 +1432,48 @@ static PURE positive edit_display_column(positive line, positive column)
         if (column > text->length)
                 column = text->length;
 
-        for (positive at = 0; at < column; at = edit_step_forward(line, at))
+        // Every ASCII byte other than tab is one byte and one cell.
+        if (column && memory_ascii_span(text->text, column) == column)
         {
-                if (text->text[at] == '\t')
+                positive at = 0;
+
+                while (at < column)
+                {
+                        p8 address_to tab = (p8 address_to)memory_first_of(
+                            text->text + at, '\t', column - at);
+
+                        if (!tab)
+                                return width + (column - at);
+
+                        positive run = (positive)(tab - (text->text + at));
+
+                        width += run;
                         width += EDIT_TAB - width % EDIT_TAB;
+                        at += run + 1;
+                }
+
+                return width;
+        }
+
+        for (positive at = 0; at < column;)
+        {
+                p8 byte = text->text[at];
+
+                if (byte == '\t')
+                {
+                        width += EDIT_TAB - width % EDIT_TAB;
+                        at++;
+                }
+                else if (byte < 0x80)
+                {
+                        width++;
+                        at++;
+                }
                 else
+                {
                         width += edit_cells_at(line, at);
+                        at = edit_step_forward(line, at);
+                }
         }
 
         return width;
@@ -1465,16 +1488,38 @@ static PURE positive edit_column_at_display(positive line, positive wanted)
         struct edit_line address_to text = edit_lines + line;
         positive width = 0;
 
-        for (positive at = 0; at < text->length; at = edit_step_forward(line, at))
+        if (text->length &&
+            memory_ascii_span(text->text, text->length) == text->length &&
+            !memory_first_of(text->text, '\t', text->length))
+                return min(wanted, text->length);
+
+        for (positive at = 0; at < text->length;)
         {
-                positive cells = text->text[at] == '\t'
-                                     ? EDIT_TAB - width % EDIT_TAB
-                                     : edit_cells_at(line, at);
+                p8 byte = text->text[at];
+                positive cells;
+                positive next;
+
+                if (byte == '\t')
+                {
+                        cells = EDIT_TAB - width % EDIT_TAB;
+                        next = at + 1;
+                }
+                else if (byte < 0x80)
+                {
+                        cells = 1;
+                        next = at + 1;
+                }
+                else
+                {
+                        cells = edit_cells_at(line, at);
+                        next = edit_step_forward(line, at);
+                }
 
                 if (width >= wanted && cells)
                         return at;
 
                 width += cells;
+                at = next;
         }
 
         return text->length;
@@ -1765,29 +1810,31 @@ static fn edit_row_build(positive screen_row)
         edit_row_put_literal(TERM_RESET);
         edit_row_put((string_address)" ", 1);
 
-        for (positive at = 0; at <= edit_lines[line].length && drawn < width;)
-        {
-                p8 character = at < edit_lines[line].length
-                                   ? edit_lines[line].text[at]
-                                   : ' ';
-                positive cells = 1;
-                bool wanted = edit_selected(line, at) ||
-                              edit_extra_caret(line, at);
+        bool any_mark = edit_cursor_count > 1 ||
+                        (edit_cursor_count && edit_cursor_has_selection(0));
+        positive line_length = edit_lines[line].length;
+        p8 address_to line_text = edit_lines[line].text;
 
-                if (at >= edit_lines[line].length)
+        for (positive at = 0; at <= line_length && drawn < width;)
+        {
+                p8 character = at < line_length ? line_text[at] : ' ';
+                positive cells = 1;
+                bool wanted = any_mark &&
+                              (edit_selected(line, at) || edit_extra_caret(line, at));
+
+                if (at >= line_length)
                 {
                         // The newline itself is shown as one selected space,
                         // which is how a selection that swallows a line end
                         // announces that it did.
-                        if (!edit_selected(line, at) &&
-                            !edit_extra_caret(line, at))
+                        if (!wanted)
                                 break;
 
                         cells = 1;
                 }
                 else if (character == '\t')
                         cells = EDIT_TAB - display % EDIT_TAB;
-                else
+                else if (character >= 0x80)
                         cells = edit_cells_at(line, at);
 
                 if (wanted != marked)
@@ -1799,7 +1846,19 @@ static fn edit_row_build(positive screen_row)
                         marked = wanted;
                 }
 
-                if (at < edit_lines[line].length && character != '\t' &&
+                if (at < line_length && character >= 0x20 && character < 0x7f)
+                {
+                        if (display >= edit_left)
+                        {
+                                edit_row_put(line_text + at, 1);
+                                drawn++;
+                        }
+                        display++;
+                        at++;
+                        continue;
+                }
+
+                if (at < line_length && character != '\t' &&
                     cells != 1)
                 {
                         positive next = edit_step_forward(line, at);
@@ -1811,12 +1870,12 @@ static fn edit_row_build(positive screen_row)
                         if (!cells)
                         {
                                 if (drawn && display > edit_left)
-                                        edit_row_put_character(edit_lines[line].text + at,
+                                        edit_row_put_character(line_text + at,
                                                                next - at);
                         }
                         else if (display >= edit_left && drawn + cells <= width)
                         {
-                                edit_row_put_character(edit_lines[line].text + at,
+                                edit_row_put_character(line_text + at,
                                                        next - at);
                                 drawn += cells;
                         }
@@ -1841,11 +1900,11 @@ static fn edit_row_build(positive screen_row)
                         if (drawn >= width)
                                 break;
 
-                        if (character == '\t' || at >= edit_lines[line].length)
+                        if (character == '\t' || at >= line_length)
                                 edit_row_put((string_address)" ", 1);
                         else
                         {
-                                edit_row_put_character(edit_lines[line].text + at,
+                                edit_row_put_character(line_text + at,
                                                        edit_step_forward(line, at) - at);
                         }
 
@@ -1854,10 +1913,10 @@ static fn edit_row_build(positive screen_row)
 
                 display += cells;
 
-                if (at >= edit_lines[line].length)
+                if (at >= line_length)
                         break;
 
-                at = edit_step_forward(line, at);
+                at = character < 0x80 ? at + 1 : edit_step_forward(line, at);
         }
 
         if (marked)
@@ -2041,9 +2100,11 @@ static fn edit_draw()
 
                 if (edit_prompt_active)
                 {
-                        edit_say_at(edit_rows - 1,
-                                    1 + string_length(edit_prompt_label) +
-                                        edit_prompt_length);
+                        positive col = 1 + string_length(edit_prompt_label) +
+                                       edit_prompt_length;
+                        if (col >= edit_columns)
+                                col = edit_columns - 1;
+                        edit_say_at(edit_rows - 1, col);
                         edit_say_literal(TERM_SHOW_CURSOR);
                         return;
                 }
@@ -2787,8 +2848,9 @@ static fn edit_tab(bool back)
 
                 edit_step_seal();
 
-                for (positive cursor = 0; cursor < edit_cursor_count; cursor++)
+                for (positive at = edit_cursor_count; at; at--)
                 {
+                        positive cursor = at - 1;
                         p8 spaces[EDIT_TAB];
                         struct edit_place from = edit_cursor_caret(cursor);
                         struct edit_place to = from;
@@ -3786,8 +3848,8 @@ static bool edit_empty()
         edit_prompt_kind = EDIT_PROMPT_NONE;
         edit_prompt_length = 0;
 
-        while (edit_line_count)
-                edit_line_close(edit_line_count - 1);
+        edit_lines_give(edit_lines, edit_line_count);
+        edit_line_count = 0;
 
         if (!edit_lines_room_for(1) || !edit_cursors_room_for(1))
                 return false;
@@ -3815,8 +3877,8 @@ static fn edit_document_release()
         while (edit_step_count)
                 edit_step_forget(edit_steps + --edit_step_count);
 
-        while (edit_line_count)
-                edit_line_close(edit_line_count - 1);
+        edit_lines_give(edit_lines, edit_line_count);
+        edit_line_count = 0;
 
         memory_give(edit_steps);
         memory_give(edit_lines);
@@ -3852,6 +3914,14 @@ static bool edit_load(string_address text, positive length)
         //      the newline every other one has.
         edit_final_newline = length ? text[length - 1] == '\n' : true;
         edit_empty_file = length == 0;
+
+        if (length)
+        {
+                positive total_lines = memory_count(text, length, '\n') +
+                                       (text[length - 1] != '\n');
+                if (total_lines > 1 && !edit_lines_room_for(total_lines))
+                        return false;
+        }
 
         while (at < length)
         {
@@ -4141,7 +4211,7 @@ static fn edit_key(positive key)
                         //      Ctrl+Shift+Z is redo where a terminal can say
                         //      so, and Ctrl+Z is undo everywhere.
                         edit_step_move(plain == 'z' && !shift);
-                        edit_primary_from(edit_cursor_count - 1);
+                        edit_primary_from(edit_cursor_count ? edit_cursor_count - 1 : 0);
                         edit_repaint_all();
                         return;
                 case 'c':

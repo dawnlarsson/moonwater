@@ -756,7 +756,13 @@ static b32 rx_parse_set(rx_compiler *c, rx_set_facts *facts)
                 if (rx_peek(c, 0) == '-' && rx_peek(c, 1) && rx_peek(c, 1) != ']')
                 {
                         bipolar stop = strict ? rx_named(c, 1) : -1;
-                        p8 last = stop >= 0 ? (p8)stop : rx_peek(c, 1);
+                        bool escaped_stop = stop < 0 && c->escapes &&
+                                            rx_peek(c, 1) == '\\' && rx_peek(c, 2);
+                        p8 last = stop >= 0 ? (p8)stop : rx_peek(c, escaped_stop ? 2 : 1);
+
+                        if (escaped_stop)
+                                last = last == 'n' ? '\n' : last == 't' ? '\t' :
+                                       last == 'r' ? '\r' : last;
 
                         //      A range that runs backwards is refused, as
                         //      grep, sed and awk refuse it. The strict policy
@@ -765,7 +771,7 @@ static b32 rx_parse_set(rx_compiler *c, rx_set_facts *facts)
                         if (byte > last && !strict)
                                 return rx_refuse(c, REGEX_FAILED_RANGE), set;
 
-                        c->at += stop >= 0 ? 6 : 2;
+                        c->at += stop >= 0 ? 6 : escaped_stop ? 3 : 2;
                         for (b32 i = byte; i <= last; i++)
                                 rx_set_add(c, set, (p8)i);
                 }
@@ -785,7 +791,6 @@ static rx_fragment rx_atom(rx_compiler *c)
         // can number.
         b32 index = 0;
         rx_fragment child = {0};
-        bool anchor = false;
 
         c->bare = false;
         if (c->extended && (c->program.policy & REGEX_STRICT_INTERVALS) &&
@@ -982,10 +987,13 @@ static rx_fragment rx_atom(rx_compiler *c)
                                 bool space = byte == 's' || byte == 'S';
                                 bool negate = byte == 'W' || byte == 'S';
                                 b32 set = rx_new_set(c);
+                                b32 limit = (wide && negate) ? 0x80 : 256;
                                 if (set >= 0)
-                                        for (b32 i = 0; i < 256; i++)
+                                        for (b32 i = 0; i < limit; i++)
                                                 if ((space ? byte_is_space((p8)i) : text_word((p8)i)) != negate)
                                                         rx_set_add(c, set, (p8)i);
+                                if (wide && negate && set >= 0)
+                                        return rx_character(c, set);
                                 kind = RX_SET;
                                 index = set < 0 ? 0 : set;
                         }
@@ -995,10 +1003,14 @@ static rx_fragment rx_atom(rx_compiler *c)
                                 byte = byte == 'b' ? REGEX_EDGE_WORD : byte == 'B' ?
                                        REGEX_EDGE_NOT_WORD : byte == '<' ? REGEX_EDGE_START : REGEX_EDGE_STOP;
                         }
+                        else if (byte == '`' || byte == '\'')
+                        {
+                                // GNU buffer-start and buffer-end anchors.
+                                kind = byte == '`' ? RX_BEGIN : RX_END;
+                                byte = 1;
+                        }
                         else if (c->escapes)
                                 byte = byte == 'n' ? '\n' : byte == 't' ? '\t' : byte;
-                        //      The buffer edges are anchors to regcomp too.
-                        anchor = kind == RX_BYTE && (byte == '`' || byte == '\'');
                 }
                 else if (byte == '\\' && (c->program.policy & REGEX_STRICT_INTERVALS))
                         rx_refuse(c, REGEX_FAILED_ESCAPE);
@@ -1008,7 +1020,7 @@ static rx_fragment rx_atom(rx_compiler *c)
         rx_ref at = rx_emit(c, (rx_node){.kind = kind,
                                          .argument = kind == RX_SET ? (p16)index : byte,
                                          .left = child.first, .right = child.last});
-        c->bare = anchor || kind == RX_BEGIN || kind == RX_END || kind == RX_EDGE;
+        c->bare = kind == RX_BEGIN || kind == RX_END || kind == RX_EDGE;
         return (rx_fragment){at, at};
 }
 
@@ -2133,13 +2145,15 @@ static bool rx_run(rx_match *match, positive start)
                         position++;
                         break;
                 case RX_BEGIN:
-                        if (position && (!(program->policy & REGEX_LINE_ANCHORS) ||
+                        if (position && (instruction->argument ||
+                                         !(program->policy & REGEX_LINE_ANCHORS) ||
                                          bytes[position - 1] != '\n'))
                                 goto backtrack;
                         break;
                 case RX_END:
-                        if (position != length && (!(program->policy & REGEX_LINE_ANCHORS) ||
-                                                         bytes[position] != '\n'))
+                        if (position != length && (instruction->argument ||
+                                                   !(program->policy & REGEX_LINE_ANCHORS) ||
+                                                   bytes[position] != '\n'))
                                 goto backtrack;
                         break;
                 case RX_EDGE:
@@ -2642,7 +2656,8 @@ typedef struct
         p8 representative[256];
         p8 name[256];
         rx_ref order[RX_DFA_ORDER_MAX];
-        positive nfa_count, set_count, class_count, order_top, work;
+        positive nfa_count, set_count, class_count, order_top, work, bit_words;
+        p64 class_rcp;
         p16 start;
         p8 boundary, delimiter, delimiter_class;
         // Starts after the first position: every one, only after a byte that
@@ -2653,6 +2668,7 @@ typedef struct
         // A longest machine reads on past a match, which its states' accept
         // bits (rx_dfa_cache.accept) say where it was, and is anchored.
         bool longest;
+        bool uses_word;
 } rx_dfa;
 
 typedef struct
@@ -2675,6 +2691,7 @@ typedef struct
         p16 found[RX_DFA_NFA_MAX];
         positive pool_used, state_count, state_cap, hash_slots, generation, resets;
         b32 start;
+        b32 start_rows[3];
         bool failed;
 } rx_dfa_cache;
 
@@ -2759,6 +2776,7 @@ static p16 rx_nfa_build(rx_dfa *dfa, const regex_program *program, rx_ref first,
                         follow = rx_nfa_new(dfa, RX_NFA_END, 0, follow, 0);
                         break;
                 case RX_EDGE:
+                        dfa->uses_word = true;
                         follow = rx_nfa_new(dfa, RX_NFA_EDGE, node->argument, follow, 0);
                         break;
                 case RX_CAPTURE:
@@ -2766,9 +2784,19 @@ static p16 rx_nfa_build(rx_dfa *dfa, const regex_program *program, rx_ref first,
                         break;
                 case RX_ALT:
                 {
-                        p16 left = rx_nfa_build(dfa, program, node->left, follow, depth + 1);
-                        p16 right = rx_nfa_build(dfa, program, node->right, follow, depth + 1);
-                        follow = rx_nfa_new(dfa, RX_NFA_SPLIT, 0, left, right);
+                        // Iterate down rx_alternation's left-leaning spine so
+                        // hundreds of alternatives do not hit RX_DFA_DEPTH_MAX.
+                        p16 acc = rx_nfa_build(dfa, program, node->right, follow, depth + 1);
+                        rx_ref cur = node->left;
+                        while (cur && dfa->usable && nodes[cur].kind == RX_ALT &&
+                               !nodes[cur].next && !nodes[cur].previous)
+                        {
+                                p16 right = rx_nfa_build(dfa, program, nodes[cur].right, follow, depth + 1);
+                                acc = rx_nfa_new(dfa, RX_NFA_SPLIT, 0, right, acc);
+                                cur = nodes[cur].left;
+                        }
+                        p16 left = rx_nfa_build(dfa, program, cur, follow, depth + 1);
+                        follow = rx_nfa_new(dfa, RX_NFA_SPLIT, 0, left, acc);
                         break;
                 }
                 case RX_COUNT:
@@ -2825,6 +2853,7 @@ static bool rx_dfa_compile(rx_dfa *dfa, const regex_program *program, p8 boundar
 {
         dfa->usable = !(program->flags & RX_HAS_BACKREF);
         dfa->longest = false;
+        dfa->uses_word = boundary == REGEX_BOUNDARY_WORD;
         dfa->nfa_count = 1;
         dfa->set_count = 0;
         dfa->order_top = 0;
@@ -2841,15 +2870,18 @@ static bool rx_dfa_compile(rx_dfa *dfa, const regex_program *program, p8 boundar
         dfa->start = rx_nfa_build(dfa, program, program->first, match, 0);
         if (!dfa->usable)
                 return false;
+        dfa->bit_words = (dfa->nfa_count + 63) / 64;
         memory_fill(dfa->classes, 0, 256);
         dfa->class_count = 1;
         for (positive i = 0; i < dfa->set_count; i++)
                 rx_dfa_refine(dfa, dfa->sets[i]);
-        rx_dfa_refine(dfa, (const p8 *)string_set_name);
+        if (dfa->uses_word)
+                rx_dfa_refine(dfa, (const p8 *)string_set_name);
         p8 alone[256];
         memory_fill(alone, 0, 256);
         alone[delimiter] = 1;
         rx_dfa_refine(dfa, alone);
+        dfa->class_rcp = ((1ull << 32) + dfa->class_count - 1) / dfa->class_count;
         for (b32 byte = 255; byte >= 0; byte--)
         {
                 dfa->representative[dfa->classes[byte]] = (p8)byte;
@@ -2870,7 +2902,7 @@ static b32 rx_dfa_intern(rx_dfa_cache *cache, p8 flags, bool *reset)
         const rx_dfa *dfa = cache->dfa;
         positive size = 0;
         p64 hash = 1469598103934665603ull ^ flags;
-        for (positive word = 0; word < RX_DFA_NFA_MAX / 64; word++)
+        for (positive word = 0; word < dfa->bit_words; word++)
                 for (p64 bits = cache->bits[word]; bits; bits &= bits - 1)
                 {
                         p16 id = (p16)(word * 64 + bottom_bit_known(bits));
@@ -2942,20 +2974,24 @@ static b32 rx_dfa_intern(rx_dfa_cache *cache, p8 flags, bool *reset)
 
 static fn rx_dfa_begin(rx_dfa_cache *cache)
 {
+        positive bit_bytes = cache->dfa->bit_words * sizeof(p64);
         cache->state_count = 0;
         cache->pool_used = 0;
         cache->hash_slots = RX_DFA_HASH;
         cache->state_cap = min((positive)RX_DFA_STATE_MAX,
                                (positive)RX_DFA_CELLS / cache->dfa->class_count);
+        cache->start_rows[0] = cache->start_rows[1] = cache->start_rows[2] = RX_DFA_UNKNOWN;
         memory_fill(cache->hash, 0, RX_DFA_HASH * sizeof(p32));
         // The start is the one set a caller holds across a reset.
         p64 saved[RX_DFA_NFA_MAX / 64];
-        memory_copy_apart(saved, cache->bits, sizeof(saved));
-        memory_fill(cache->bits, 0, sizeof(cache->bits));
+        memory_copy_apart(saved, cache->bits, bit_bytes);
+        memory_fill(cache->bits, 0, bit_bytes);
         cache->bits[cache->dfa->start / 64] |= 1ull << (cache->dfa->start % 64);
         bool reset = true;
         cache->start = rx_dfa_intern(cache, RX_DFA_BEGINNING, &reset);
-        memory_copy_apart(cache->bits, saved, sizeof(saved));
+        if (cache->start >= 0)
+                cache->start_rows[2] = cache->start * (b32)cache->dfa->class_count;
+        memory_copy_apart(cache->bits, saved, bit_bytes);
 }
 
 static fn rx_dfa_attach(rx_dfa_cache *cache, const rx_dfa *dfa)
@@ -2981,7 +3017,7 @@ static bool rx_dfa_close(rx_dfa_cache *cache, b32 state, bool before, bool after
         bool beginning = (cache->flags[state] & RX_DFA_BEGINNING) != 0;
         bool matched = false;
         positive top = 0, count = 0;
-        if (++cache->generation == 0)
+        if ((p32)++cache->generation == 0)
         {
                 memory_fill(cache->mark, 0, sizeof(cache->mark));
                 cache->generation = 1;
@@ -3053,7 +3089,7 @@ static bool rx_dfa_close(rx_dfa_cache *cache, b32 state, bool before, bool after
 static b32 rx_dfa_step(rx_dfa_cache *cache, b32 row, p8 class)
 {
         const rx_dfa *dfa = cache->dfa;
-        b32 state = row / (b32)dfa->class_count;
+        b32 state = (b32)(((p64)row * dfa->class_rcp) >> 32);
         bool before = (cache->flags[state] & RX_DFA_PREVIOUS_NAME) != 0;
         positive cell = (positive)row + class;
         positive consuming;
@@ -3076,7 +3112,7 @@ static b32 rx_dfa_step(rx_dfa_cache *cache, b32 row, p8 class)
                 return RX_DFA_HIT;
         }
         p8 byte = dfa->representative[class];
-        memory_fill(cache->bits, 0, sizeof(cache->bits));
+        memory_fill(cache->bits, 0, dfa->bit_words * sizeof(p64));
         bool any = false;
         for (positive i = 0; i < consuming; i++)
         {
@@ -3102,7 +3138,7 @@ static b32 rx_dfa_step(rx_dfa_cache *cache, b32 row, p8 class)
                 return RX_DFA_DEAD;
         }
         bool reset = false;
-        next = rx_dfa_intern(cache, after ? RX_DFA_PREVIOUS_NAME : 0, &reset);
+        next = rx_dfa_intern(cache, (dfa->uses_word && after) ? RX_DFA_PREVIOUS_NAME : 0, &reset);
         if (next < 0)
                 return next;
         // A row, not a state: the scan adds a class to it and never multiplies.
@@ -3614,10 +3650,14 @@ static bool regex_anchor_holds(const regex_program *program, rx_hints *hints)
    byte). Null when the machine has no room for it. */
 static b32 rx_dfa_row_at(rx_dfa_cache *cache, string_address text, positive at, bool *failed)
 {
+        const rx_dfa *dfa = cache->dfa;
         p8 flags = at == 0 ? RX_DFA_BEGINNING
-                 : string_set_name[text[at - 1]] ? RX_DFA_PREVIOUS_NAME : 0;
-        memory_fill(cache->bits, 0, sizeof(cache->bits));
-        cache->bits[cache->dfa->start / 64] |= 1ull << (cache->dfa->start % 64);
+                 : (dfa->uses_word && string_set_name[text[at - 1]]) ? RX_DFA_PREVIOUS_NAME : 0;
+        b32 slot = flags == RX_DFA_BEGINNING ? 2 : flags == RX_DFA_PREVIOUS_NAME ? 1 : 0;
+        if (cache->start_rows[slot] != RX_DFA_UNKNOWN)
+                return cache->start_rows[slot];
+        memory_fill(cache->bits, 0, dfa->bit_words * sizeof(p64));
+        cache->bits[dfa->start / 64] |= 1ull << (dfa->start % 64);
         bool reset = false;
         b32 state = rx_dfa_intern(cache, flags, &reset);
         if (state < 0)
@@ -3625,7 +3665,9 @@ static b32 rx_dfa_row_at(rx_dfa_cache *cache, string_address text, positive at, 
                 *failed = true;
                 return 0;
         }
-        return state * (b32)cache->dfa->class_count;
+        b32 row = state * (b32)dfa->class_count;
+        cache->start_rows[slot] = row;
+        return row;
 }
 
 /* The earliest end of a match that starts at or after `at`, or -1 for none;
@@ -3665,7 +3707,7 @@ static positive rx_dfa_longest_end(rx_dfa_cache *cache, b32 row, string_address 
         positive last = (positive)-1;
         for (positive p = at;; p++)
         {
-                b32 state = row / (b32)dfa->class_count;
+                b32 state = (b32)(((p64)row * dfa->class_rcp) >> 32);
                 if (p == length)
                 {
                         if (cache->accept[state] & RX_ACCEPT_END)
