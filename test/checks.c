@@ -10059,7 +10059,7 @@ static AUDIO_C_UNUSED long audio_c_window_peaks(float *out0, float *out1, const 
 #include "checks/tensor.c" // the tensor routines
 #include "checks/font.c" // the font engine and shaping
 
-#if defined(CHECK_terminal) || defined(CHECK_kit_frames) || defined(CHECK_gpu_kit) || defined(CHECK_draw_list) || defined(CHECK_gpu_model_kit)
+#if defined(CHECK_terminal) || defined(CHECK_kit_frames) || defined(CHECK_gpu_kit) || defined(CHECK_draw_list) || defined(CHECK_gpu_model_kit) || defined(CHECK_doc)
 #include "checks/terminal.c" // that program's fakes (the kernel's DRM and the GPU model's hook, the card, a popup's row, what the kit hands the font engine) and the terminal's rows: its frames, the selection and its scroll, the kit's keys, the pointer a program asked for
 #include "checks/compositor.c" // the compositor's rows: a first show, glass, partial presents and runs, scanout, screens and scales, corners and turns, the snap preview, shared edges, Alt-Tab, the desktop, the taskbar and its launcher, bands
 #include "checks/compositor_hand.c" // the compositor and the hand: a held button, the cursor, close buttons, popups and menus, dropdowns, the tray, a tab's reach, the launcher button, the pointer's motion, prediction, the wheel, volume, notices, the chrome
@@ -10092,6 +10092,104 @@ static AUDIO_C_UNUSED long audio_c_window_peaks(float *out0, float *out1, const 
 #include "checks/gpu_model.c" // the model of the card held to the card and to itself, and the GPU kit's rows drawn on it
 #include "checks/routine.c" // the routine driver's benchmark
 #include "checks/rover.c" // rover, the rules: its schema, the round trip, refusals, the load-time check and the evaluator, and its nanoseconds per event
+#endif
+
+#if defined(CHECK_doc) && !defined(SHARED_counted)
+/*
+        The document model (ui.c's struct doc, under the kit): the rows for the fixes of the selections, the replace-all, the
+        failure paths and the word breaks, and a bench of carets and of opening a 100 MB file. The bench prints its numbers;
+        the rows are counted. Run as gate.sh kit-doc check doc.
+*/
+static long doc_clock_ns(void)
+{
+        struct { long sec, nsec; } now;
+        system_call_2(syscall(clock_gettime), CLOCK_MONOTONIC, (positive)address_of now);
+        return now.sec * 1000000000L + now.nsec;
+}
+
+static void doc_selections_set(struct doc address_to doc, const p64 address_to pairs, positive count, p32 primary)
+{
+        array_store_reserve(doc->selections, doc->selection_room, 0, count, 16);
+        for (positive s = 0; s < count; s++)
+                doc->selections[s] = (struct doc_selection){pairs[2 * s], pairs[2 * s + 1], -1};
+        doc->selection_count = count;
+        doc->primary = primary;
+        doc_normalize(doc);
+}
+
+static void cdoc_rows(void)
+{
+        struct doc d;
+        struct doc_find find = {0};
+        static p16 props[200000];
+        static p8 breaks[200001];
+
+        /* F1: the primary survives an overlap merge: A [0,3) and B [2,4) merge, C and D stay, D is the primary. */
+        {
+                const p64 pairs[] = {0, 3, 2, 4, 5, 6, 6, 7};
+                doc_open(&d, (const p8 address_to) "abcdefghijklmnop", 16);
+                doc_selections_set(&d, pairs, 4, 3);
+                check("doc: an overlap merge keeps the primary on its own selection",
+                      d.selection_count == 3 && d.selections[d.primary].anchor == 6);
+                doc_close(&d);
+        }
+
+        /* F23: select next passes over a selected match and takes the next one: matches at 0, 4, 8; 0 and 8 selected. */
+        {
+                const p64 pairs[] = {0, 1, 8, 9};
+                doc_open(&d, (const p8 address_to) "a x a x a", 9);
+                doc_selections_set(&d, pairs, 2, 1);
+                doc_select_next(&d);
+                check("doc: select next takes the unselected match between two selected ones",
+                      d.selection_count == 3 && d.selections[1].anchor == 4 && d.selections[1].active == 5);
+                doc_close(&d);
+        }
+
+        /* F22 (replace-all of group references) and F3, F4, F21 (failure paths) have no row yet: the regex header chain and a fault-injected allocator are needed (see the ledger). */
+}
+
+static void cdoc_bench(void)
+{
+        const positive megabytes = 100, size = megabytes << 20;
+        p8 address_to bytes = (p8 address_to)system_call_6(syscall(mmap), 0, size, 3, 0x22, -1, 0);
+        long started, finished;
+        positive at = 0;
+        struct doc d;
+        if ((long)bytes < 0)
+        {
+                string_format(log, "  bench: no memory for the 100 MB file\n");
+                return;
+        }
+        for (positive i = 0; i < size; i++)
+                bytes[i] = i % 61 == 60 ? '\n' : 'a' + i % 26;
+        started = doc_clock_ns();
+        doc_open(&d, bytes, size);
+        finished = doc_clock_ns();
+        string_format(log, "  bench: open 100 MB: %p ms, %p lines\n", (positive)((finished - started) / 1000000), (positive)doc_line_count(&d));
+        for (positive carets = 1; carets <= 10000; carets = carets == 1 ? 100 : carets * 100)
+        {
+                p64 pairs[20000];
+                positive count = carets;
+                for (positive s = 0; s < count; s++)
+                        pairs[2 * s] = pairs[2 * s + 1] = (p64)(s * (size / count)) + 1;
+                doc_selections_set(&d, pairs, count, 0);
+                started = doc_clock_ns();
+                doc_type(&d, (const p8 address_to) "x", 1);
+                finished = doc_clock_ns();
+                string_format(log, "  bench: %p carets, one insert: %p us\n", (positive)count, (positive)((finished - started) / 1000));
+        }
+        doc_close(&d);
+        system_call_2(syscall(munmap), (positive)bytes, size);
+        (void)at;
+}
+
+int main(void)
+{
+        cdoc_rows();
+        cdoc_bench();
+        log_flush();
+        return failures != 0;
+}
 #endif
 
 #include "checks/libdiff.c" // the library's memory routines held to C (libdiff)
