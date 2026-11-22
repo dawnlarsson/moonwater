@@ -4580,6 +4580,32 @@ static fn reverse_put16(p8 address_to at, p32 value)
         at[0] = (p8)(value >> 8), at[1] = (p8)value;
 }
 
+//      Two overlapping rectangles (two contours, stems that cross: 0 to 10 px and 5 to 15 px) snapped on the x axis keep
+//      their order: a point left of another in the outline is not right of it after the snap. Without the fix the stems'
+//      map is not monotone, and points cross.
+static fn check_crossing_stems(void)
+{
+        //      The stems 410 to 2458 and 1331 to 3379 (1024ths of a pixel) cross. The point at 1800 is between the second's
+        //      left edge and the first's right edge, so it maps along the segment from (1331, 1024) to (2458, 2048) in the
+        //      edges sorted by where they were: 1450. Taken in stem order the segment is (410, 410) to (2458, 2048): 1521.
+        static const b64 xs[9] = {410, 2458, 2458, 410, 1331, 3379, 3379, 1331, 1800};
+        static const b64 ys[9] = {0, 0, 20480, 20480, 0, 0, 20480, 20480, 10240};
+        p8 monotone = true;
+        const b64 want = 1450;
+
+        engine.point_count = 9, engine.contour_count = 3, engine.still = 0, engine.snap_widest = 1024;
+        engine.contour[0].last = 3, engine.contour[1].last = 7, engine.contour[2].last = 8;
+        for (p32 i = 0; i < 9; i++)
+                engine.points[i] = (font_point){xs[i], ys[i], 1};
+        font_snap_axis(&engine, 1434, 0, 2048, 3072, null, 0, 768, false, null, null, 0);
+        for (p32 i = 0; i < 9; i++)
+                for (p32 j = 0; j < 9; j++)
+                        monotone = monotone && (xs[i] >= xs[j] || engine.points[i].x <= engine.points[j].x || xs[i] == xs[j]);
+        check("snap: overlapping contours' stems keep the outline's order on the x axis", monotone);
+        check("snap: a point between crossing stems' edges maps along the sorted segment",
+              engine.points[8].x >= want - 2 && engine.points[8].x <= want + 2);
+}
+
 //      A multiple substitution offered to a string that is not being output (the reverse branch's) is refused and
 //      leaves the glyph it reads alone. Without the refusal it wrote its first glyph into info[0] in place.
 static fn check_reverse_multiple(void)
@@ -4923,6 +4949,7 @@ b32 main()
         check_raster_ceiling();
         check_reverse_multiple();
         check_cell_run(&two);
+        check_crossing_stems();
         //      Last: it loads faces until the 16-bit ids run out, and no face loads after it.
         check_edges(&one, &two);
         check_generation_wrap();
