@@ -1194,6 +1194,8 @@ static bool xz_dec_lzma(xz_decoder address_to d)
 
                 p8 address_to at = d->in_buf + d->input.at;
                 p8 address_to top = d->dict + d->dict_size;
+                if (d->in_abs - d->pack_from > d->pack_want)
+                        return xz_dec_fail(d, "xz LZMA2 compressed size");
                 positive pack_left = (positive)(d->pack_want - (d->in_abs - d->pack_from));
                 bool tail = d->input.eof && have < XZ_PACKET_READ;
 
@@ -1365,6 +1367,8 @@ static bool xz_dec_lzma2(xz_decoder address_to d)
                 lo = xz_dec_byte(d);
                 return_if(hi < 0 || lo < 0, xz_dec_fail(d, "xz truncated LZMA2 sizes"));
                 d->pack_want = ((p64)hi << 8) + (p64)lo + 1;
+                if (d->pack_want < 5)
+                        return xz_dec_fail(d, "xz LZMA2 compressed size");
                 if (control >= 0xc0)
                 {
                         bipolar prop = xz_dec_byte(d);
@@ -5319,11 +5323,14 @@ static bipolar xz_par_walk(xz_par address_to r, positive batch_output)
                                             address_of uncompressed);
                         if (got < 0)
                                 return -1;
-                        if (!got)
+                        if (!got || compressed > ((p64)256 << 20) ||
+                            uncompressed > ((p64)256 << 20))
                         {
                                 /* Serial from this block on: what is decoded so
                                    far is written first, then the stream header
-                                   (only for a first block) and this header. */
+                                   (only for a first block) and this header.
+                                   Oversized headers also stream serially so a
+                                   crafted block cannot pre-allocate gigabytes. */
                                 if (!xz_par_run_batch(r))
                                         return -1;
                                 r->prefix_n = 0;

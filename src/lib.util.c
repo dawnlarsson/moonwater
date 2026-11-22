@@ -10325,7 +10325,7 @@ pub fn allocator_give_slow(address_any block)
         {
                 address_any inner = (address_any)address_to allocator_extra(block);
 
-                address_to allocator_tag(block) = 0;
+                address_to allocator_tag(block) = ALLOCATOR_FREED;
                 memory_give(inner);
                 return;
         }

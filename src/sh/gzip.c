@@ -1768,6 +1768,8 @@ scanned:
                 if (take > z->count)
                         return gzip_inflate_fail(z, GZIP_WHY_EOF), -1;
                 code = root + ((cell >> 8) & 255);
+                if (code > take || take - code >= 32)
+                        return gzip_inflate_fail(z, GZIP_WHY_FORMAT), -1;
                 distance = (cell >> 16) + ((z->bits >> code) & (((positive)1 << (take - code)) - 1));
                 z->bits >>= take;
                 z->count -= take;

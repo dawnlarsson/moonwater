@@ -6766,12 +6766,15 @@ static fn awk_do_print(awk_node address_to node)
 
         if (!node->a)
         {
-                awk_text address_to record = awk_to_text(awk_field(0));
+                awk_text address_to record = awk_text_hold(awk_to_text(awk_field(0)));
+                awk_text address_to ors_text = awk_text_hold(awk_special_text(awk_where_ors));
 
-                ors = awk_separator(awk_where_ors, address_of ors_length);
                 where = awk_output_of(node);
-                if (!awk_writer_put(where, record->text, record->length) ||
-                    !awk_writer_put(where, ors, ors_length))
+                bool wrote = awk_writer_put(where, record->text, record->length) &&
+                             awk_writer_put(where, ors_text->text, ors_text->length);
+                awk_text_drop(ors_text);
+                awk_text_drop(record);
+                if (!wrote)
                         awk_write_refused(where, "print");
                 return;
         }
