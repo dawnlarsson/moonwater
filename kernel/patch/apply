@@ -1288,6 +1288,55 @@ if [ -f "$xhci_c" ]; then
         fi
 fi
 
+#       A HID device's interrupt-IN endpoint polled every millisecond on xHCI.
+#       usbhid.mousepoll, kbpoll and jspoll (the gpu profile's command line)
+#       change only the URB's interval, and xHCI takes an endpoint's interval
+#       from its descriptor when the endpoint is added and overwrites the URB's
+#       (xhci-ring.c, check_interval): on every xHCI they did nothing. The box's
+#       Dell MS116 says 10 ms, which xHCI rounds to 8: a mouse heard at 125 Hz,
+#       3.5 ms late on the average and 7 at worst, and at 144 Hz one frame in
+#       eight with no motion in it. usbcore.hid_interval=N shortens the
+#       descriptor of every HID interface's interrupt-IN endpoint, and of an
+#       Xbox pad's (xpad drives those vendor interfaces, which jspoll never
+#       reached either), to N ms as it is parsed (2^(n-1) microframes at high speed and above), before any host
+#       reads it; a device that already asks for less keeps its own, and 0 (the
+#       default) leaves every device as it says. A device with nothing to say
+#       answers the controller's poll with a NAK in hardware, so the CPU hears
+#       only reports, as before.
+usb_config_c=linux/drivers/usb/core/config.c
+if [ -f "$usb_config_c" ]; then
+        cat > "$settings_work/hid-interval-param" <<EOF
+/* Moonwater: usbcore.hid_interval, see usb_parse_endpoint. */
+static unsigned int usb_hid_interval;
+module_param_named(hid_interval, usb_hid_interval, uint, 0444);
+MODULE_PARM_DESC(hid_interval, "poll HID interrupt-IN endpoints every N ms, 0 = as the device says");
+EOF
+        settings_insert "$usb_config_c" "Moonwater: usbcore.hid_interval, see" \
+                '#include "usb.h"' after "$settings_work/hid-interval-param" "hid interval"
+        cat > "$settings_work/hid-interval" <<EOF
+${tab}/*
+${tab} * Moonwater: a HID interface's interrupt-IN endpoint is polled every
+${tab} * usbcore.hid_interval ms, and an Xbox pad's (xpad's vendor interfaces:
+${tab} * 360, subclass 0x5d protocol 1; One and Series, 0x47 and 0xd0). xHCI
+${tab} * takes the interval from this descriptor and not from the URB, so
+${tab} * usbhid.mousepoll did nothing there.
+${tab} */
+${tab}if (usb_hid_interval && usb_hid_interval <= 255 && usb_endpoint_xfer_int(d) &&
+${tab}    usb_endpoint_dir_in(d) && (ifp->desc.bInterfaceClass == USB_CLASS_HID ||
+${tab}    (ifp->desc.bInterfaceClass == USB_CLASS_VENDOR_SPEC &&
+${tab}     ((ifp->desc.bInterfaceSubClass == 0x5d && ifp->desc.bInterfaceProtocol == 0x01) ||
+${tab}      (ifp->desc.bInterfaceSubClass == 0x47 && ifp->desc.bInterfaceProtocol == 0xd0))))) {
+${tab}${tab}n = udev->speed >= USB_SPEED_HIGH ?
+${tab}${tab}${tab}min(fls(usb_hid_interval * 8), 16) : (int)usb_hid_interval;
+${tab}${tab}if (n < endpoint->desc.bInterval)
+${tab}${tab}${tab}endpoint->desc.bInterval = n;
+${tab}}
+
+EOF
+        settings_insert "$usb_config_c" "Moonwater: a HID interface's interrupt-IN endpoint is polled every" \
+                "${tab}/* Some buggy low-speed devices have Bulk endpoints, which is" before "$settings_work/hid-interval" "hid interval"
+fi
+
 rm -rf "$settings_work"
 
 #       So: where does it actually point, and is that here.

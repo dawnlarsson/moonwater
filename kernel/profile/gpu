@@ -53,6 +53,14 @@ CONFIG_MOONWATER_CANVAS=y
 # interval says `#> cmdline -usbhid.mousepoll=1 -usbhid.kbpoll=1
 # -usbhid.jspoll=1`.
 #
+# Those three set the URB's interval only, which xHCI does not read: it takes
+# an endpoint's interval from the descriptor (kernel/patch/apply), so on every
+# xHCI, which is every machine of the last ten years, they did nothing, and
+# the box's mouse, whose descriptor says 10 ms, was heard every 8.
+# usbcore.hid_interval=1 sets every HID interface's interrupt-IN descriptor to
+# 1 ms as the kernel parses it (a device that asks for less keeps its own), on
+# every host: `#> cmdline -usbcore.hid_interval=1` leaves the devices as they say.
+#
 # The command line for the image is every profile's `#> cmdline` words, in the
 # order the profiles are composed (build.c writes the one CONFIG_CMDLINE from
 # them). A profile that wants one of these words gone says `#> cmdline -WORD`
@@ -93,7 +101,7 @@ CONFIG_CMDLINE_BOOL=y
 # above 4 GiB; with SWIOTLB_DYNAMIC, in the any profile, a device that runs
 # the pool dry gets another made for it.
 #
-#> cmdline drm_client_lib.active= quiet loglevel=0 vt.global_cursor_default=0 usbhid.mousepoll=1 usbhid.kbpoll=1 usbhid.jspoll=1 intel_pstate=active amd_pstate=active intel_pstate.hwp_dynamic_boost=1 thash_entries=4096 uhash_entries=1024 mhash_entries=4096 mphash_entries=4096 swiotlb=1024
+#> cmdline drm_client_lib.active= quiet loglevel=0 vt.global_cursor_default=0 usbhid.mousepoll=1 usbhid.kbpoll=1 usbhid.jspoll=1 usbcore.hid_interval=1 intel_pstate=active amd_pstate=active intel_pstate.hwp_dynamic_boost=1 thash_entries=4096 uhash_entries=1024 mhash_entries=4096 mphash_entries=4096 swiotlb=1024
 
 #
 # Core modesetting

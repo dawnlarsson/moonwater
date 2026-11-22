@@ -10,6 +10,9 @@
 #                and a working sudo still makes the edit
 #       wave     the gfx10 wave limit: its three additions land in the compute
 #                ring's funcs and nowhere else, once, and a moved line stops it
+#       hid      usbcore.hid_interval: the parameter and the interval edit land in
+#                usb_parse_endpoint's file once, and the gpu profile's command line
+#                asks for 1 ms
 #       start    the scheduler's new-task edit leaves new threads out
 #                (thread_group_leader), in a fresh tree and in one patched
 #                with the text from before, which gets the line and is then
@@ -252,6 +255,30 @@ stale=$?
 row "start: a tree patched with the old text gets the line, and the edit (run twice) is then found applied" "$(
         if [ "$had_old" = 1 ] && [ "$stale" = 0 ] && [ "$(grep -c -F -- "$new_line" "$fair")" = 1 ] && ! grep -q -F -- "$old_line" "$fair" &&
            [ "$(grep -c -F 'Moonwater: a new task starts on the CPU' "$fair")" = 1 ]
+        then echo yes; else echo no; fi)"
+
+#       ---- hid -----------------------------------------------------------
+hid_dir=$work/hid
+mkdir -p "$hid_dir/linux/drivers/usb/core" "$hid_dir/work"
+cd "$hid_dir" || exit 1
+settings_work=$hid_dir/work
+sed -n '/^settings_insert() {/,/^}/p' "$apply" > "$hid_dir/insert.sh"
+sed -n '/^usb_config_c=/,/^fi$/p' "$apply" > "$hid_dir/edit.sh"
+usb_c=linux/drivers/usb/core/config.c
+printf '#include <linux/module.h>\n#include "usb.h"\n\nstatic int usb_parse_endpoint(void)\n{\n%s/* Some buggy low-speed devices have Bulk endpoints, which is\n%s * explicitly forbidden.\n%s */\n}\n' "$tab" "$tab" "$tab" > "$usb_c"
+(
+        . "$hid_dir/insert.sh"
+        . "$hid_dir/edit.sh"
+        . "$hid_dir/edit.sh"
+) > "$work/hid.out" 2>&1
+hid=$?
+row "hid: usbcore.hid_interval's parameter and its edit (HID and Xbox pads) go in once each, before the bulk-endpoint fix, and the profile asks for 1 ms" "$(
+        if [ "$hid" = 0 ] && [ "$(grep -c '^module_param_named(hid_interval, usb_hid_interval, uint, 0444);$' "$usb_c")" = 1 ] &&
+           [ "$(grep -c -F 'ifp->desc.bInterfaceClass == USB_CLASS_HID' "$usb_c")" = 1 ] &&
+           [ "$(grep -c -F 'ifp->desc.bInterfaceSubClass == 0x47 && ifp->desc.bInterfaceProtocol == 0xd0' "$usb_c")" = 1 ] &&
+           [ "$(grep -c -F 'ifp->desc.bInterfaceSubClass == 0x47 && ifp->desc.bInterfaceProtocol == 0xd0' "$usb_c")" = 1 ] &&
+           [ "$(grep -n -F 'usb_endpoint_dir_in(d)' "$usb_c" | cut -d: -f1)" -lt "$(grep -n -F 'Some buggy low-speed' "$usb_c" | cut -d: -f1)" ] &&
+           grep -q '^#> cmdline .* usbcore.hid_interval=1 ' "$root/kernel/profile/gpu"
         then echo yes; else echo no; fi)"
 
 exit "$failed"
