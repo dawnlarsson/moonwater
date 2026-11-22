@@ -25608,6 +25608,8 @@ static fn ui_page_fit(struct ui address_to ui, struct ui_page address_to p, stru
 {
         const struct ui_rect address_to bar = &p->column_bar, address_to box = &p->list_box;
         struct ui_scroll address_to bars[2] = {&p->column_scroll, card};
+        // The list's own least is the one this fit reserves: the list's rows now, not the last least the page was asked (ui_page_least keeps its own).
+        p->list_least = ui_list_least(ui, l);
         p->width = width, p->height = height;
         ui_page_view(ui, p);
         p->top = p->body_bar.y, p->bottom = p->top + p->body_bar.h;
