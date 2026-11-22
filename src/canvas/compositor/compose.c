@@ -1206,7 +1206,9 @@ static int canvas_cpu_round_corner(void *ctx, const struct compositor_frame *f, 
 
                                 if (cover && b)
                                 {
-                                        unsigned int edge_cov = f->blend ? (cover > in ? cover - in : 0) : cover;
+                                        unsigned int edge_cov = !f->blend ? cover
+                                                                          : (in >= 255u || cover <= in) ? 0u
+                                                                                                        : ((cover - in) * 255u + (255u - in) / 2u) / (255u - in);
                                         if (edge_cov)
                                                 pixel = canvas_mix_linear(pixel, edge & 0xffffffu, edge_cov);
                                 }
@@ -1387,13 +1389,18 @@ static unsigned int compositor_gpu_table(int r, int b, int corner, int content)
                         int my = down ? r - 1 - row : row;
                         unsigned char cover = outer[my * r + col];
 
-                        // Content 2 is the ring of the line at b (the outside less the inside), a lit corner drawn over the contents.
-                        if (content == 2)
+                        // Content 2 is the raw ring (outer - inner) for border-only frames / lit-over corners; content 3 is the
+                        // pre-compensated ring (outer - inner) / (1 - inner) for blended windows so Pass 2's over_weighted(inner)
+                        // cancels (1 - inner) with zero wallpaper halo on opaque content (e.g. Chrome) and zero bleed inside translucent corners.
+                        if (content == 2 || content == 3)
                         {
                                 int iy = my - b, ix = right ? col : col - b;
                                 unsigned int in = inner && iy >= 0 && iy < ri && ix >= 0 && ix < ri ? inner[iy * ri + ix] : 0;
 
-                                cover = cover > in ? (unsigned char)(cover - in) : 0;
+                                if (content == 2)
+                                        cover = cover > in ? (unsigned char)(cover - in) : 0;
+                                else
+                                        cover = (in >= 255u || cover <= in) ? 0 : (unsigned char)(((unsigned int)(cover - in) * 255u + (255u - in) / 2u) / (255u - in));
                         }
                         else if (content && b)
                         {
@@ -1530,7 +1537,7 @@ static int canvas_gpu_round_corner(void *ctx, const struct compositor_frame *f, 
 {
         struct compositor_gscene *g = (struct compositor_gscene *)ctx;
         int picture = f->builtin || f->pixels != 0 || f->fill != 0;
-        unsigned int edge_table = b ? compositor_gpu_table(r, b, corner, (picture && !f->blend) ? 0 : 2) : 0;
+        unsigned int edge_table = b ? compositor_gpu_table(r, b, corner, !picture ? 2 : f->blend ? 3 : 0) : 0;
         unsigned int content_table = picture && ri ? compositor_gpu_table(r, b, corner, 1) : 0;
 
         if ((b && !edge_table) || (picture && ri && !content_table))

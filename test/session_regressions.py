@@ -1058,6 +1058,10 @@ def test_canvas_spaces_invariants():
           "&gpu_amd, &gpu_i915_row, &gpu_xe_row, &gpu_nouveau_row" in gpu_c and
           "gpu_req.pick == 2" in gpu_host and
           "COMPOSITOR_GPU_WHY_OUTPUT" in gpu_host)
+    compose_c = read_text("src/canvas/compositor/compose.c")
+    check("Blended rounded corner uses pre-compensated ring (outer-inner)/(1-inner) on CPU & GPU (no double AA border on Chrome)",
+          "((cover - in) * 255u + (255u - in) / 2u) / (255u - in)" in compose_c and
+          "!picture ? 2 : f->blend ? 3 : 0" in compose_c)
 
 
 def test_build_and_audit_gates():
