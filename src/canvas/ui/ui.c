@@ -22361,12 +22361,14 @@ static void ui_list_end(struct ui_list address_to l)
 
 // The rows of a list in the order a comparator says of their ids (less than 0: a before b; descending reverses it). The ids move, the app's
 // data stays where it is; the caller lays the list out again. Insertion sort: stable, and a list is a few hundred rows.
-static void ui_list_order(struct ui_list address_to l, int (*compare)(int a, int b), b32 descending)
+// The places [from, to) of a list ordered the same way; the places outside them stay where they are (a list of several segments).
+static void ui_list_order_range(struct ui_list address_to l, int from, int to, int (*compare)(int a, int b), b32 descending)
 {
         if (l->virtual || !compare)
                 return;
-        for (int at = 1; at < l->count; at++)
-                for (int back = at; back > 0; back--)
+        from = from < 0 ? 0 : from, to = to > l->count ? l->count : to;
+        for (int at = from + 1; at < to; at++)
+                for (int back = at; back > from; back--)
                 {
                         int cmp = compare(l->id[back - 1], l->id[back]), held = l->id[back];
                         if (descending)
@@ -22375,6 +22377,11 @@ static void ui_list_order(struct ui_list address_to l, int (*compare)(int a, int
                                 break;
                         l->id[back] = l->id[back - 1], l->id[back - 1] = held;
                 }
+}
+
+static void ui_list_order(struct ui_list address_to l, int (*compare)(int a, int b), b32 descending)
+{
+        ui_list_order_range(l, 0, l->count, compare, descending);
 }
 
 // A virtual list's places for where it is scrolled to now:
