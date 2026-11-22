@@ -531,10 +531,12 @@ static void compositor_flip_arm(unsigned int fb, int row, unsigned int which, in
         compositor.flip_row = row;
         compositor.flip_buffer = which;
         compositor.on_screen = fb;
+        compositor_flips_owed = 1;
 }
 
 static int compositor_atomic_primary(unsigned int fb, int row, unsigned int which, int src_w, int src_h, int dx, int dy, int dw, int dh);
 
+static int compositor_flip_all(unsigned int fb);
 static int compositor_flip(unsigned int fb, int row, unsigned int which)
 {
         struct
@@ -544,6 +546,9 @@ static int compositor_flip(unsigned int fb, int row, unsigned int which)
         } flip = {compositor.crtc, fb, COMPOSITOR_FLIP_EVENT, 0, 0};
 
         compositor_refused_error = 0;
+        // The plate composed into is shown on every screen at once (two or more: compositor_flip_all); a window straight on the first is not a plate.
+        if (row < 0 && compositor.card >= 0 && compositor.outputs > 1)
+                return compositor_flip_all(fb);
         // Leaving hardware-scaled direct scanout: restore 1:1 primary plane geometry atomically in this flip.
         if (compositor.scaled_direct && compositor.card >= 0)
         {
@@ -949,6 +954,13 @@ static unsigned int compositor_card_events(const p8 *events, long got)
                                 at += length;
                                 continue;
                         }
+                        // An all-screens flip sends one event per screen with the same serial: the flip is done with the last of them.
+                        if (compositor_flips_owed > 1)
+                        {
+                                compositor_flips_owed--;
+                                at += length;
+                                continue;
+                        }
                         landed++;
                         /*
                                 An asynchronous flip (a window that allows tearing, shown straight) lands mid-frame, and its event's stamp is
@@ -1346,11 +1358,13 @@ static int compositor_copies_damage(void)
 
 static int compositor_modesetting; // 1 while painting the initial buffer before COMPOSITOR_SETCRTC (skip spare-plate swap & page-flip)
 
-// Whether this present composes into the second plate and flips to it: one screen, no screen turned, and a card that shows
-// what its buffer holds (a headless scan image's names are exchanged the same way); never one that copies its damage.
+// Whether this present composes into the second plate and flips to it: no screen turned, and a card that shows what its buffer holds (a headless
+// scan image's names are exchanged the same way); never one that copies its damage. Two or more screens: when each has its primary plane
+// (compositor_multi_ok), and every one is flipped at once (compositor_flip_all).
+static int compositor_multi_ok(void);
 static int compositor_plate_wanted(int turning)
 {
-        return !compositor_modesetting && !turning && compositor_output_count() < 2 && !compositor_copies_damage();
+        return !compositor_modesetting && !turning && compositor_multi_ok() && !compositor_copies_damage();
 }
 
 static int compositor_changed_ready(void)
@@ -2034,6 +2048,59 @@ static void compositor_plane_carry_add(struct drm_atomic_req *req)
 }
 
 static void compositor_unscanned(unsigned int why);
+
+/*
+        Every screen to the plate composed into, in one atomic commit: each screen's primary plane shows its own framebuffer of the plate at the
+        screen's rectangle of it, nonblocking, with the flip event. Each screen sends its own flip event at its vblank, so compositor_flips_owed
+        counts them (compositor_card_events) and the flip is done once the last one has come. A refusal that says the card is busy backs off as
+        one screen's does (the present counts it and composes again); any other refusal turns the all-screens flip off for the session, and each
+        screen is set to the plate it shows (compositor_set_outputs, a modeset as compositor_crtc_sync is for one screen), so the frame is shown.
+*/
+static void compositor_set_outputs(void)
+{
+        for (unsigned int at = 0; at < compositor.outputs && at < WINDOWS_OUTPUTS; at++)
+        {
+                struct compositor_crtc set = {(unsigned long)address_of compositor.output[at].connector, 1, compositor.output[at].crtc,
+                                              at ? compositor.output[at].fb : compositor.fb, (unsigned int)compositor.screen[at][0], (unsigned int)compositor.screen[at][1],
+                                              0, 1, compositor.output[at].mode};
+
+                system_control(compositor.card, COMPOSITOR_SETCRTC, address_of set);
+        }
+}
+
+static int compositor_flip_all(unsigned int fb)
+{
+        struct drm_atomic_req req = {0};
+        unsigned int count = compositor.outputs < WINDOWS_OUTPUTS ? compositor.outputs : WINDOWS_OUTPUTS;
+        long refused;
+
+        if (!compositor_out_ok || compositor_multi_off)
+                return 0;
+        for (unsigned int at = 0; at < count; at++)
+        {
+                unsigned int shown = at ? compositor.output[at].fb : fb;
+
+                drm_atomic_set_plane(&req, compositor_out_plane[at], compositor_out_props[at], compositor.output[at].crtc, shown,
+                                     compositor.screen[at][0], compositor.screen[at][1], compositor.screen[at][2], compositor.screen[at][3],
+                                     0, 0, compositor.output[at].mode.hdisplay, compositor.output[at].mode.vdisplay);
+        }
+        refused = compositor_refused_error = drm_atomic_commit(&req, COMPOSITOR_FLIP_EVENT | COMPOSITOR_ATOMIC_NONBLOCK, ++compositor.flip_serial);
+        if (!refused)
+        {
+                compositor_flip_arm(fb, -1, 0, 0);
+                compositor_flips_owed = count;
+                compositor_scaled_reset();
+                return 1;
+        }
+        if (!compositor_refusal_fatal())
+                return 0;
+        // Refused for good: the screens are set to the plates they show, and the frame is shown as a modeset shows it.
+        compositor_multi_off = 1;
+        compositor_set_outputs();
+        compositor_scaled_reset();
+        compositor_flip_done();
+        return 1;
+}
 
 // The carried overlay taken by a commit (shown), or not (none): carried no more either way.
 static void compositor_plane_carried(int shown)

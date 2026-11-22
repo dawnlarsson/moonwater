@@ -289,7 +289,10 @@ static void compositor_crtc_sync(void)
         struct compositor_crtc set = {(unsigned long)address_of compositor.connector, 1, compositor.crtc, compositor.fb,
                                       0, 0, 0, 1, compositor.mode};
 
-        system_control(compositor.card, COMPOSITOR_SETCRTC, address_of set);
+        if (compositor.outputs > 1)
+                compositor_set_outputs(); // every screen, to the plate it shows
+        else
+                system_control(compositor.card, COMPOSITOR_SETCRTC, address_of set);
         compositor_scaled_reset();
         compositor_dark_set();
         compositor.on_screen = compositor.fb;
@@ -606,7 +609,7 @@ static void compositor_card_commit(void)
 
         if (compositor_card.fenced || compositor_card.failed || compositor_card.next < compositor_card.steps || !compositor_card.flip_own || compositor_card.turning ||
             ((compositor_card.back || compositor_card.plane_off) && compositor.overlay_on) || compositor.card < 0 || compositor.on_screen == compositor.fb ||
-            compositor.flip_pending || compositor.scaled_direct || !compositor_in_fence())
+            compositor.flip_pending || compositor.scaled_direct || compositor.outputs > 1 || !compositor_in_fence())
                 return;
         fence = compositor_card_fence_for(compositor_card.last);
         compositor_card.fenced = fence >= 0 && compositor_flip_fenced(compositor.fb, fence);
