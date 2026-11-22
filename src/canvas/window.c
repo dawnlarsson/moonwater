@@ -176,7 +176,8 @@ static const string_address windows_gpu_reasons[WINDOWS_GPU_REASONS] = {
     "the scanout is not one the card can draw into", "a window's picture is not mapped for the card", "a landing (scaled)", "a snap preview or a shared edge",
     "the records or the cover tables are full", "a close button not wholly in its picture", "the scene did not finish", "a turned screen (the processor turned it)",
     "other frames, or empty damage", "a window with alpha and round corners (the file gpu-round-off is there)",
-    "a client's own pointer picture drawn into the scene"};
+    "a client's own pointer picture drawn into the scene", "card path off by default on this GPU generation: slower than the processor, measured"};
+#define WINDOWS_GPU_WHY_GENERATION 19u // the last: a default, not a fault (no warning on the board; moonwater canvas says it)
 
 #define WINDOWS_GPU_REQS 10
 static const string_address windows_gpu_req_names[WINDOWS_GPU_REQS] = {"none", "render node", "driver", "family", "userptr", "context", "ring", "self-test",
@@ -765,6 +766,7 @@ static const unsigned int windows_gpu_codes[] = {
 enum
 {
         WINDOWS_GPU_UP = 0u, WINDOWS_GPU_UNTRUSTED, WINDOWS_GPU_NO_CARD, WINDOWS_GPU_COOLING, WINDOWS_GPU_HUNG,
+        WINDOWS_GPU_SLOWER, // the card's path off by default on its generation (canvas gpu on turns it on)
         WINDOWS_GPU_STATUS_OFF = 0u, WINDOWS_GPU_STATUS_NONE, WINDOWS_GPU_STATUS_IN_USE, WINDOWS_GPU_STATUS_PARTLY, WINDOWS_GPU_STATUS_NOT,
         WINDOWS_GPU_REFUSAL_MIN = 8u, WINDOWS_GPU_REFUSAL_SHARE = 20u, WINDOWS_GPU_LOST_MIN = 8u
 };
@@ -823,7 +825,7 @@ static unsigned int windows_gpu_wanted(const struct windows *table, struct windo
         if (table->gpu_fault[0])
                 windows_want_push(want, &count, room, WINDOWS_ISSUE_ERROR, WINDOWS_ISSUE_GPU_FAULT, table->gpu_faults, 0, table->gpu_fault);
         for (unsigned int why = 5; why < WINDOWS_GPU_REASONS; why++)
-                if (table->gpu_refused[why] > refused_top)
+                if (why != WINDOWS_GPU_WHY_GENERATION && table->gpu_refused[why] > refused_top)
                         refused_top = table->gpu_refused[why], refused_why = why;
         total = table->gpu_drawn + table->gpu_processor;
         if (refused_top >= WINDOWS_GPU_REFUSAL_MIN && refused_top * WINDOWS_GPU_REFUSAL_SHARE >= total && refused_why)

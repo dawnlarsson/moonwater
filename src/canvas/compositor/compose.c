@@ -1357,9 +1357,11 @@ enum compositor_gpu_why
         // the pointer drawn into the scene wears a window's client's own picture (compositor_picture); slot 17, after OTHER, is the
         // round corners' that window.c names already
         COMPOSITOR_GPU_WHY_POINTER = COMPOSITOR_GPU_WHY_OTHER + 2,
+        COMPOSITOR_GPU_WHY_GENERATION = COMPOSITOR_GPU_WHY_OTHER + 3, // a generation the processor outdraws, and canvas gpu not said on (gpu.c's gpu_slower)
         COMPOSITOR_GPU_WHY_COUNT
 };
 typedef char compositor_gpu_why_fits[COMPOSITOR_GPU_WHY_COUNT <= WINDOWS_GPU_REASONS ? 1 : -1];
+typedef char compositor_gpu_why_generation_named[COMPOSITOR_GPU_WHY_GENERATION == WINDOWS_GPU_WHY_GENERATION ? 1 : -1];
 
 // A frame's picture's address for the GPU: in the map that holds all of it, 0 for none. A map that holds only its first byte (made when the window was
 // smaller) would have the card read its rows below from the addresses after that map's end, which are another buffer's: another window's pixels.

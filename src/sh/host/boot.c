@@ -509,6 +509,17 @@ static fn host_canvas_write(bool label,
                 string_format(log, "the display is held by the desktop or another "
                                    "program; Control-Alt-Backspace ends it\n");
         }
+        //      The card's path off by default on its generation (the compositor's compositor_gpu_slower), and the way to turn it on.
+        {
+                const struct windows address_to table = host_windows_header();
+
+                if (table && table->gpu_on && table->gpu_state == WINDOWS_GPU_SLOWER)
+                {
+                        host_prefix(label);
+                        string_format(log, "%s; moonwater canvas gpu on turns it on\n", windows_gpu_reasons[WINDOWS_GPU_WHY_GENERATION]);
+                }
+                host_windows_unmap(table);
+        }
 
         host_prefix(label);
         string_format(log, "the desktop is drawn at %p times the size, modes %s\n",

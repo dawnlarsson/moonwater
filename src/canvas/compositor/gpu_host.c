@@ -3,6 +3,7 @@ static int compositor_present_on_card;
 
 #ifdef MOONWATER_GPU_C
 static int compositor_gpu;
+static int compositor_gpu_asked; // canvas gpu said on (the word "on"), not the default: the card composes on every generation (compositor_gpu_slower)
 static positive compositor_slept_clock(void);
 static void compositor_gpu_restart_check(void);
 static void compositor_say(string_address what, bipolar value);
@@ -100,9 +101,10 @@ static void compositor_gpu_refuse(enum compositor_gpu_why why, int processor)
 
         compositor_gpu_refuse_gen++;
         compositor_gpu_counts.processor += (unsigned int)processor;
-        // Off, headless, no-card and untrusted are session-level states already logged once at startup (compositor_gpu_failed); do not spam per-minute refusal lines.
+        // Off, headless, no-card, untrusted and a slower generation are session-level states already logged once (compositor_gpu_failed,
+        // compositor_gpu_give_up); do not spam per-minute refusal lines.
         if (why == COMPOSITOR_GPU_WHY_OFF || why == COMPOSITOR_GPU_WHY_HEADLESS ||
-            why == COMPOSITOR_GPU_WHY_NO_CARD || why == COMPOSITOR_GPU_WHY_UNTRUSTED)
+            why == COMPOSITOR_GPU_WHY_NO_CARD || why == COMPOSITOR_GPU_WHY_UNTRUSTED || why == COMPOSITOR_GPU_WHY_GENERATION)
         {
                 compositor_gpu_publish();
                 return;
@@ -167,9 +169,46 @@ static void compositor_gpu_failed(void)
         log_flush();
 }
 
-// The GPU started once, on a card it has kernels for, with the pools laid out in its buffer.
+// The card let go of for now (gpu_stop) and given up as why: its descriptor, buffer and maps closed, and everything the compositor kept of its addresses
+// (the scanout's imports, the turned screens' maps) forgotten. The processor draws until a turn of canvas gpu, or the late look for a why it retries.
+static void compositor_card_fence_close(void);
+static void compositor_gpu_give_up(enum compositor_gpu_why why)
+{
+        compositor_card_fence_close();
+        gpu_stop();
+        compositor_gpu_state.up = 0, compositor_gpu_state.dead = 1, compositor_gpu_state.dead_why = why;
+        compositor_gpu_state.out = 0, compositor_gpu_state.out_key = 0;
+        compositor_gpu_state.cache[0] = compositor_gpu_state.cache[1] = 0;
+        compositor_gpu_state.cache_key[0] = compositor_gpu_state.cache_key[1] = 0;
+        memory_zero(compositor_gpu_state.turn_va, sizeof(compositor_gpu_state.turn_va));
+        memory_zero(compositor_gpu_state.turn_key, sizeof(compositor_gpu_state.turn_key));
+}
+
+// A card of a generation the processor outdraws (gpu.c's gpu_slower), with canvas gpu at its default: not the card's path. Said on, it is.
+static b32 compositor_gpu_slower(void)
+{
+        return !compositor_gpu_asked && gpu_slower(gpu_backend, gpu.family ? gpu.family : gpu_req.family);
+}
+
+// The card that is up let go of for its generation, said once in the log with the chip: the default on Gen7 and Gen7.5 is the processor.
+static void compositor_gpu_generation_off(void)
+{
+        char chip[96] = "";
+
+        if (gpu_backend->describe)
+                gpu_backend->describe(gpu.family, gpu.device, chip, 0, sizeof(chip));
+        compositor_gpu_give_up(COMPOSITOR_GPU_WHY_GENERATION);
+        compositor_gpu_requirements();
+        string_format(log, "compositor: %s, the processor composes (%s); canvas gpu on turns the card's path on\n",
+                      windows_gpu_reasons[COMPOSITOR_GPU_WHY_GENERATION], (string_address)chip);
+        log_flush();
+}
+
+// The GPU started once, on a card it has kernels for, with the pools laid out in its buffer; none on a generation the processor outdraws, unless asked.
 static int compositor_gpu_up(void)
 {
+        if (compositor_gpu_state.up && compositor_gpu_slower()) // canvas gpu put back to its default under a card it had turned on
+                return compositor_gpu_generation_off(), 0;
         if (compositor_gpu_state.up || compositor_gpu_state.dead)
                 return compositor_gpu_state.up;
         // The display's device: the render node on the same device is the card (gpu.c's gpu_pick); a headless compositor has none.
@@ -187,6 +226,8 @@ static int compositor_gpu_up(void)
                 compositor_gpu_failed();
                 return 0;
         }
+        if (compositor_gpu_slower())
+                return compositor_gpu_generation_off(), 0;
         compositor_gpu_state.settled = 0, compositor_gpu_state.said = 0; // (a card that is up again says its next failure, whatever the last was)
         compositor_gpu_requirements();
         if (gpu_req.route)
@@ -406,16 +447,8 @@ static positive compositor_gpu_output(void)
                         // PRIME import would otherwise repeat PRIME_HANDLE_TO_FD/FD_TO_HANDLE on every frame forever; settle after 3 consecutive failures.
                         else if (gpu_req.pick == 2 && ++compositor_gpu_state.output_fails >= 3)
                         {
-                                compositor_card_fence_close();
-                                gpu_stop();
-                                compositor_gpu_state.up = 0, compositor_gpu_state.dead = 1;
-                                compositor_gpu_state.dead_why = COMPOSITOR_GPU_WHY_OUTPUT;
+                                compositor_gpu_give_up(COMPOSITOR_GPU_WHY_OUTPUT);
                                 compositor_gpu_state.settled = gpu_req.nodes;
-                                compositor_gpu_state.out = 0, compositor_gpu_state.out_key = 0;
-                                compositor_gpu_state.cache[0] = compositor_gpu_state.cache[1] = 0;
-                                compositor_gpu_state.cache_key[0] = compositor_gpu_state.cache_key[1] = 0;
-                                memory_zero(compositor_gpu_state.turn_va, sizeof(compositor_gpu_state.turn_va));
-                                memory_zero(compositor_gpu_state.turn_key, sizeof(compositor_gpu_state.turn_key));
                                 return 0;
                         }
                 }
@@ -1127,6 +1160,7 @@ static void compositor_gpu_issues(void)
         table->gpu_faults = gpu_faults;
         memory_copy(table->gpu_fault, gpu_fault, sizeof(gpu_fault));
         table->gpu_state = compositor_gpu_state.dead ? (compositor_gpu_state.dead_why == COMPOSITOR_GPU_WHY_UNTRUSTED ? WINDOWS_GPU_UNTRUSTED
+                                                       : compositor_gpu_state.dead_why == COMPOSITOR_GPU_WHY_GENERATION ? WINDOWS_GPU_SLOWER
                                                        : compositor_gpu_state.hung_off ? WINDOWS_GPU_HUNG : WINDOWS_GPU_NO_CARD)
                            : compositor_gpu_state.cool_until && clock_monotonic_nanoseconds() < compositor_gpu_state.cool_until ? WINDOWS_GPU_COOLING
                            : compositor_gpu_state.up ? WINDOWS_GPU_UP : WINDOWS_GPU_NO_CARD;

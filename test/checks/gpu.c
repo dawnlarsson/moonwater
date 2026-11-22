@@ -1682,6 +1682,109 @@ static void gpu_i915_rows(void)
 }
 
 /*
+        The card's path by generation (gpu.c's gpu_slower, the compositor's compositor_gpu_slower): i915's Gen7 and Gen7.5 (Ivy Bridge, Valleyview, Haswell)
+        compose on the processor while canvas gpu is at its default (no word, or "default"), since there the card measured slower than the processor at every
+        size (a Haswell HD 4600, 0x0412, two screens: the card's present 21.6 to 44.9 ms and up to 180, the processor's 0.27 to 0.34 ms). Gen8, Gen9 and later,
+        and amdgpu, keep the card. canvas gpu said on puts the card back on any generation, and put back to its default lets it go again. The chips are the
+        fake i915 node's device ids; the card that is up is the compositor's state as a start leaves it (the start itself is gpu_i915_rows').
+*/
+static void gpu_generation_rows(void)
+{
+        static unsigned char kept_kernel[sizeof(gpu_kernel)];
+        static const unsigned int slower[][2] = {{0x0412, 750}, {0x041E, 750}, {0x0152, 700}, {0x0166, 700}, {0x0F31, 701}};
+        static const unsigned int faster[][2] = {{0x1616, 800}, {0x3E92, 900}, {0x3185, 901}, {0x8A52, 1100}, {0x9A49, 1200}};
+        unsigned char kept_gpu[sizeof(gpu)], kept_req[sizeof(gpu_req)], kept_state[sizeof(compositor_gpu_state)], kept_i915[sizeof(gpu_i915)];
+        unsigned char kept_shared[sizeof(gpu_shared)];
+        const struct gpu_backend *kept_backend = gpu_backend;
+        struct windows *kept_table = compositor.table;
+        int kept_on = compositor_gpu, kept_asked = compositor_gpu_asked, kept_card = compositor.card;
+        unsigned int kept_maps = gpu_map_count, family = 0, device = 0, identified;
+        positive kept_next = gpu_map_next;
+        b32 off = true, on = true;
+
+        memory_copy(kept_kernel, &gpu_kernel, sizeof(gpu_kernel)), memory_copy(kept_gpu, &gpu, sizeof(gpu)), memory_copy(kept_req, &gpu_req, sizeof(gpu_req));
+        memory_copy(kept_state, &compositor_gpu_state, sizeof(compositor_gpu_state)), memory_copy(kept_i915, &gpu_i915, sizeof(gpu_i915));
+        memory_copy(kept_shared, &gpu_shared, sizeof(gpu_shared));
+        memory_zero(&gpu_kernel, sizeof(gpu_kernel));
+        gpu_kernel.on = 1, gpu_kernel.i915_ppgtt = 1, gpu_kernel.i915_gtt = 1ull << 31;
+        string_copy_bounded((string_address)gpu_kernel.i915, (string_address) "i915", sizeof(gpu_kernel.i915));
+        for (unsigned int i = 0; i < sizeof(slower) / sizeof(slower[0]); i++)
+        {
+                gpu_kernel.i915_chip = slower[i][0];
+                off &= gpu_i915_identify(GPU_KERNEL_I915, &family, &device) == 0 && family == slower[i][1] && gpu_slower(&gpu_i915_row, family);
+        }
+        for (unsigned int i = 0; i < sizeof(faster) / sizeof(faster[0]); i++)
+        {
+                gpu_kernel.i915_chip = faster[i][0];
+                on &= gpu_i915_identify(GPU_KERNEL_I915, &family, &device) == 0 && family == faster[i][1] && !gpu_slower(&gpu_i915_row, family);
+        }
+        check("gpu generation: a Gen7.5 device (Haswell 0x0412, 0x041e) and Gen7's (Ivy Bridge 0x0152, 0x0166, Valleyview 0x0f31) are the processor's by default", off);
+        check("gpu generation: Gen8, Gen9, Gen9 LP, Gen11 and Gen12 devices keep the card, and so does amdgpu", on && !gpu_slower(&gpu_amd, 144) && !gpu_slower(&gpu_amd, 750));
+
+        // The compositor with a card up as a start leaves it (no descriptor, no buffer, no maps of the rows': the let-go closes and unmaps nothing of theirs).
+        gpu.at = 0, gpu.fd = -1, gpu.size = 0, gpu.imports = 0, gpu.pending = 0, gpu_map_count = 0, compositor.table = 0, compositor.card = -1;
+        memory_zero(&compositor_gpu_state, sizeof(compositor_gpu_state));
+        compositor_gpu_word("");
+        check("gpu generation: no word is the default: the card on, not said on", compositor_gpu && !compositor_gpu_asked);
+        gpu_backend = &gpu_i915_row, gpu.family = 750, gpu.device = 0x0412, gpu_req.family = 750, gpu_req.device = 0x0412, compositor_gpu_state.up = 1;
+        check("gpu generation: at the default a Haswell card that is up is let go of, its reason a slower generation",
+              compositor_gpu_up() == 0 && !compositor_gpu_state.up && compositor_gpu_state.dead && compositor_gpu_state.dead_why == COMPOSITOR_GPU_WHY_GENERATION &&
+                  gpu.fd == -1);
+        identified = gpu_kernel.i915_identifies;
+        check("gpu generation: and it is not started again while canvas gpu stays at its default (no chip asked)",
+              compositor_gpu_up() == 0 && compositor_gpu_state.dead_why == COMPOSITOR_GPU_WHY_GENERATION && gpu_kernel.i915_identifies == identified);
+        check("gpu generation: its reason's words are the default's, not a fault's",
+              string_find((string_address)windows_gpu_reasons[COMPOSITOR_GPU_WHY_GENERATION], (string_address) "off by default on this GPU generation") != 0);
+        memory_zero(&compositor_gpu_state, sizeof(compositor_gpu_state));
+        gpu_backend = &gpu_i915_row, gpu.family = 900, gpu.device = 0x3e92, gpu_req.family = 900, compositor_gpu_state.up = 1;
+        check("gpu generation: at the default a Gen9 card that is up stays up", compositor_gpu_up() == 1 && compositor_gpu_state.up && !compositor_gpu_state.dead);
+        compositor_gpu_state.up = 0, compositor_gpu_state.dead = 1, compositor_gpu_state.dead_why = COMPOSITOR_GPU_WHY_GENERATION;
+        compositor_gpu_word("on");
+        check("gpu generation: canvas gpu said on is the setting's, and tries the card again at once", compositor_gpu && compositor_gpu_asked && !compositor_gpu_state.dead);
+        gpu.family = 750, gpu.device = 0x0412, gpu_req.family = 750, compositor_gpu_state.up = 1;
+        check("gpu generation: said on, a Haswell card that is up composes", compositor_gpu_up() == 1 && compositor_gpu_state.up && !compositor_gpu_state.dead);
+        compositor_gpu_word("default");
+        check("gpu generation: put back to its default, the Haswell card it turned on is let go of again",
+              !compositor_gpu_asked && compositor_gpu_up() == 0 && compositor_gpu_state.dead_why == COMPOSITOR_GPU_WHY_GENERATION);
+        compositor_gpu_word("off");
+        check("gpu generation: off is off", !compositor_gpu && !compositor_gpu_asked);
+
+        // What the table and the board say of it: the state for moonwater canvas's line, and no warning (a default, not a refusal of the card's).
+        {
+                struct windows *table = windows_scratch_table(&app_table_scratch);
+                struct windows_issue want[WINDOWS_GPU_CODES];
+                unsigned int count;
+                b32 warned = false;
+
+                windows_scratch_zero(table);
+                compositor.table = table, compositor_gpu = 1;
+                compositor_gpu_state.up = 0, compositor_gpu_state.dead = 1, compositor_gpu_state.dead_why = COMPOSITOR_GPU_WHY_GENERATION;
+                compositor_gpu_issues();
+                table->gpu_processor = 200, table->gpu_refused[COMPOSITOR_GPU_WHY_GENERATION] = 200;
+                count = windows_gpu_wanted(table, want, WINDOWS_GPU_CODES);
+                for (unsigned int k = 0; k < count; k++)
+                        warned |= want[k].code == WINDOWS_ISSUE_GPU_REFUSED;
+                check("gpu generation: the table says the card's path is off for its generation, and the board warns of no refused presents",
+                      table->gpu_on && table->gpu_state == WINDOWS_GPU_SLOWER && !warned);
+                windows_scratch_zero(table);
+                compositor.table = 0;
+        }
+
+        gpu_i915_forget();
+        {
+                struct gpu_i915_bound *bound = gpu_i915.bound;
+                struct gpu_i915_object *list = gpu_i915.objects;
+
+                memory_copy(&gpu_i915, kept_i915, sizeof(gpu_i915));
+                gpu_i915.bound = bound, gpu_i915.objects = list;
+        }
+        memory_copy(&gpu_kernel, kept_kernel, sizeof(gpu_kernel)), memory_copy(&gpu, kept_gpu, sizeof(gpu)), memory_copy(&gpu_req, kept_req, sizeof(gpu_req));
+        memory_copy(&compositor_gpu_state, kept_state, sizeof(compositor_gpu_state)), memory_copy(&gpu_shared, kept_shared, sizeof(gpu_shared));
+        gpu_backend = kept_backend, compositor_gpu = kept_on, compositor_gpu_asked = kept_asked, compositor.table = kept_table, compositor.card = kept_card;
+        gpu_map_count = kept_maps, gpu_map_next = kept_next;
+}
+
+/*
         The card's prerequisites beyond the start: the node the card is (gpu_pick, the display's own device first), the late probe's schedule (compositor_gpu_late_due:
         a look at once, then every five seconds for the first minute, then every minute), and the card's losses on the real card: a submit that answers ECANCELED is
         a lost card (gpu_lost), recovered by gpu_recover (the maps let go, the card started again, its self-test drawn right), and a card whose node is absent
@@ -6316,6 +6419,7 @@ b32 main(void)
         grab_protocol_rows();
         fullscreen_rows();
         gpu_i915_rows();
+        gpu_generation_rows();
         int PW = 696; // even rounds the kernel by hand (a width of a multiple of 4), odd rounds clang's (any width)
         positive pic_at = GPU_DATA, ops_at = pic_at + (positive)PP * PH * 4, bins_at = ops_at + (1 << 20);
         unsigned int address_to pic, address_to ops;

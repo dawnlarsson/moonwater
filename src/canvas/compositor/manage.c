@@ -3499,16 +3499,18 @@ static void compositor_clip_wipe(void)
 #ifndef SHELL_NO_GPU
 static int compositor_gpu = 0;
 
-static void compositor_gpu_settings(void)
+// The setting's word taken: on (said: the card composes on every generation), off, or the default (no word, or "default": the card composes, but not on a
+// generation the processor outdraws, gpu.c's gpu_slower). A turn to on, from off or from the default, tries the card again at once.
+static void compositor_gpu_word(const char *word)
 {
-        char word[16];
 #ifdef MOONWATER_GPU_C
-        int was = compositor_gpu;
+        int was = compositor_gpu, was_asked = compositor_gpu_asked;
+
+        compositor_gpu_asked = string_equals((string_address)word, (string_address) "on");
 #endif
-        compositor_word(SETTING_GPU_PATH, word, sizeof(word));
         compositor_gpu = !word[0] || string_equals((string_address)word, (string_address) "on") || string_equals((string_address)word, (string_address) "default");
 #ifdef MOONWATER_GPU_C
-        if (compositor_gpu && !was)
+        if (compositor_gpu && (!was || (compositor_gpu_asked && !was_asked)))
         {
                 if (compositor_gpu_state.up || compositor_gpu_state.dead_why != COMPOSITOR_GPU_WHY_UNTRUSTED)
                         compositor_gpu_state.dead = 0;
@@ -3518,6 +3520,14 @@ static void compositor_gpu_settings(void)
                 compositor_gpu_state.failures = 0, compositor_gpu_state.cool_until = 0, compositor_gpu_state.cool_steps = 0;
         }
 #endif
+}
+
+static void compositor_gpu_settings(void)
+{
+        char word[16];
+
+        compositor_word(SETTING_GPU_PATH, word, sizeof(word));
+        compositor_gpu_word(word);
 }
 #endif
 
