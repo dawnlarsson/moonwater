@@ -1096,6 +1096,7 @@ static fn check_launcher_anchor(void)
                 launcher.anchor.screen[2] == 1280 && launcher.anchor.screen[3] == 720;
         check("launcher beside the button: what the table says is taken once, with the screen it names, and only when it says something whole", kept);
 
+        launcher.asked_beside = true; // the beside launcher: its power row is under the list (ad788933c)
         // The room: a bar beside a top or bottom panel is held to what the panel leaves, a side panel's to the output.
         launcher.height = 0;
         launcher.width = 560;
