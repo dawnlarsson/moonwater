@@ -1187,12 +1187,14 @@ static unsigned int gpu_i915_user(positive from, positive bytes, unsigned int ho
         unsigned int e;
 
         *handle = 0;
-        // I915_USERPTR_READ_ONLY is only supported on Gen8-Gen9 full PPGTT; omit it on Gen7/7.5 and Gen11+
-        // (and fall back if the kernel returns ENODEV) instead of failing read-only maps with EPERM.
         // A map to read that the kernel cannot make read-only is refused (EPERM), never made writable: the card would then write a client's pages through it.
+        // I915_USERPTR_READ_ONLY is Gen8 and Gen9's alone (full PPGTT), so on Gen7/7.5 and Gen11+ such a map is refused at once, before the kernel is asked,
+        // as on a Gen8/9 kernel that answers it ENODEV; the compositor's own memory then goes by the dma-buf route and a client's pool to the processor (gpu_map_as).
+        if (how == GPU_USER_READ && !(gpu.family >= 800 && gpu.family < 1100))
+                gpu_i915.read_only_refused = 1;
         if (how == GPU_USER_READ && gpu_i915.read_only_refused)
                 return 1;
-        if (how == GPU_USER_READ && gpu.family >= 800 && gpu.family < 1100)
+        if (how == GPU_USER_READ)
                 up.flags |= 1; // I915_USERPTR_READ_ONLY
         if (how != GPU_USER_LATER && gpu_i915.probe)
                 up.flags |= 2; // I915_USERPTR_PROBE: the range is looked at now (EFAULT), where without it the pages are first taken at a submit

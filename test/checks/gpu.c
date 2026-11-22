@@ -1661,7 +1661,7 @@ static void gpu_i915_rows(void)
                       gpu_i915_user(0x10000000ull, 4096, GPU_USER_READ, &h) == 1 && h == 0 && gpu_kernel.i915_userptrs == calls);
                 gpu.family = 1200;
                 check("gpu i915: and on Gen12", gpu_i915_user(0x10000000ull, 4096, GPU_USER_READ, &h) == 1 && gpu_kernel.i915_userptrs == calls);
-                gpu.family = 900, gpu_kernel.i915_userptr_error = 19;
+                gpu.family = 900, gpu_kernel.i915_userptr_error = 19, gpu_i915.read_only_refused = 0; // another chip: its own card's state
                 check("gpu i915: a chip that answers read-only with ENODEV is refused (EPERM) and not asked read-only again",
                       gpu_i915_user(0x10000000ull, 4096, GPU_USER_READ, &h) == 1 && gpu_i915.read_only_refused &&
                           gpu_i915_user(0x10000000ull, 4096, GPU_USER_READ, &h) == 1 && gpu_kernel.i915_userptrs == calls + 1);
