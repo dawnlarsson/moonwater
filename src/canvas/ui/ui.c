@@ -31697,7 +31697,12 @@ struct ui_tokens
         positive start[UI_TOKENS_MOST], label[UI_TOKENS_MOST], finish[UI_TOKENS_MOST]; // a token's start, its label's end (the separator is not in the label), its end
         int chip_left[UI_TOKENS_MOST], chip_right[UI_TOKENS_MOST];                 // where each chip is drawn, device pixels (-1: not drawn)
         int active_left, active_right;                                             // where the caret's token is drawn as the field's text
+        int overflow, overflow_left, overflow_right;                               // the leading tokens 0..overflow-1 are behind the … chip, drawn where overflow_left..right is
+        char hidden[UI_TOKENS_MOST][64];                                           // each token's name for the … menu (cut to 63 bytes)
 };
+
+#define UI_TOKENS_MENU 32u  // the … chip was pressed: its menu is up (the popup's items are the hidden tokens, id UI_TOKENS_ITEM + token)
+#define UI_TOKENS_ITEM 1000 // a menu item's id: the hidden token it names, added to this
 
 // The end of the token that starts at at: past its separator, or the text's end.
 static positive ui_tokens_end(const p8 address_to s, positive n, p8 sep, positive at)
@@ -31751,7 +31756,8 @@ static void ui_tokens_focus(struct ui_tokens address_to k, b32 on, b32 select_al
 // Lays the chips out in the box: every token but the caret's is a chip, left to right; the chips that do not fit are not drawn (chip_left -1).
 static void ui_tokens_lay(struct ui address_to ui, struct ui_tokens address_to k, const p8 address_to bytes, positive n)
 {
-        int pad = ui_dev(ui, 8), gap = k->separator == '/' ? ui_dev(ui, 12) : ui_dev(ui, 4), at = k->left;
+        int pad = ui_dev(ui, 8), gap = k->separator == '/' ? ui_dev(ui, 12) : ui_dev(ui, 4), room = k->right - k->left, at, first = 0, overflow_w;
+        int width[UI_TOKENS_MOST], rest[UI_TOKENS_MOST + 1];
         p64 caret = k->text.doc.selections[k->text.doc.primary].active;
         char label[UI_TOKENS_TEXT];
         k->count = ui_tokens_split(bytes, n, k->separator, k);
@@ -31759,23 +31765,42 @@ static void ui_tokens_lay(struct ui address_to ui, struct ui_tokens address_to k
         for (int t = 0; t < k->count; t++)
                 if (caret >= (p64)k->start[t] && (caret < (p64)k->finish[t] || t + 1 == k->count))
                         k->active = t;
-        k->active_left = k->active_right = -1;
         for (int t = 0; t < k->count; t++)
         {
                 positive length = k->label[t] - k->start[t];
-                int w;
                 k->chip_left[t] = k->chip_right[t] = -1;
+                width[t] = 0;
                 if (!length)
                         continue;
                 memory_copy(label, bytes + k->start[t], length), label[length] = 0;
-                w = ui_kit_measure(ui, (string_address)label, UI_BODY_MEDIUM) + 2 * pad;
-                if (at + w > k->right)
+                string_copy_bounded((string_address)k->hidden[t], (string_address)label, sizeof(k->hidden[t]));
+                width[t] = ui_kit_measure(ui, (string_address)label, UI_BODY_MEDIUM) + 2 * pad;
+        }
+        // The room from each token on, gaps included: when they do not all fit, the leading tokens before the caret's go behind the … chip.
+        overflow_w = ui_kit_measure(ui, (string_address) "\xe2\x80\xa6", UI_BODY_MEDIUM) + 2 * pad;
+        rest[k->count] = 0;
+        for (int t = k->count - 1; t >= 0; t--)
+                rest[t] = rest[t + 1] + (width[t] ? width[t] + gap : 0);
+        if (rest[0] > room)
+                while (first < k->active && rest[first] + overflow_w + gap > room)
+                        first++;
+        k->overflow = first;
+        k->overflow_left = k->overflow_right = -1;
+        k->active_left = k->active_right = -1;
+        at = k->left;
+        if (first > 0)
+                k->overflow_left = at, k->overflow_right = at + overflow_w, at += overflow_w + gap;
+        for (int t = first; t < k->count; t++)
+        {
+                if (!width[t])
+                        continue;
+                if (at + width[t] > k->right && t != k->active)
                         break;
                 if (t == k->active)
-                        k->active_left = at, k->active_right = at + w;
+                        k->active_left = at, k->active_right = at + width[t];
                 else
-                        k->chip_left[t] = at, k->chip_right[t] = at + w;
-                at += w + gap;
+                        k->chip_left[t] = at, k->chip_right[t] = at + width[t];
+                at += width[t] + gap;
         }
 }
 
@@ -31801,6 +31826,12 @@ static fn ui_tokens_draw(struct ui address_to ui, struct ui_tokens address_to k,
                 text_w = ui_kit_measure(ui, (string_address)label, UI_BODY_MEDIUM);
                 ui_round(ui, x0, top + ui_dev(ui, 4), x1 - x0, height - 2 * ui_dev(ui, 4), ui_dev(ui, 8), 0xff000000u | chip);
                 ui_kit_text(ui, x0 + pad + (x1 - x0 - 2 * pad - text_w) / 2, baseline, (string_address)label, UI_BODY_MEDIUM, 0xff000000u | ink, 0);
+        }
+        if (k->overflow > 0)
+        {
+                // The … chip that stands for the leading tokens behind it.
+                ui_round(ui, k->overflow_left, top + ui_dev(ui, 4), k->overflow_right - k->overflow_left, height - 2 * ui_dev(ui, 4), ui_dev(ui, 8), 0xff000000u | chip);
+                ui_kit_text(ui, k->overflow_left + pad, baseline, (string_address) "\xe2\x80\xa6", UI_BODY_MEDIUM, 0xff000000u | ink, 0);
         }
         if (k->active_left >= 0 && k->active_right > k->active_left)
         {
@@ -31833,6 +31864,21 @@ static p32 ui_tokens_event(struct ui address_to ui, struct ui_tokens address_to 
 {
         int chip = event->type == WINDOW_EVENT_BUTTON && (event->flags & WINDOW_KEY_DOWN) && event->a == UI_POINTER_LEFT ? ui_tokens_chip_at(k, x, y) : -1;
         p32 asks;
+        if (event->type == WINDOW_EVENT_BUTTON && (event->flags & WINDOW_KEY_DOWN) && event->a == UI_POINTER_LEFT && k->overflow > 0 &&
+            x >= k->overflow_left && x < k->overflow_right && y >= k->top && y < k->bottom)
+        {
+                // The … chip: its menu lists the hidden tokens; a pick is ui_tokens_menu_do.
+                int t;
+                if (!menu)
+                        return 0;
+                menu->menu.count = 0;
+                for (t = 0; t < k->overflow; t++)
+                        if (k->hidden[t][0])
+                                ui_popmenu_add(&menu->menu, k->hidden[t], null, 0, UI_TOKENS_ITEM + t);
+                menu->field = null, menu->list = null, menu->list_row = -1;
+                ui_popmenu_open(menu, k->text.own, ui, x, y, 0, 0, WINDOW_POPUP_POINT, (event->flags & WINDOW_KEY_TOUCH) != 0);
+                return UI_TOKENS_MENU | UI_TOKENS_MOVED;
+        }
         if (chip >= 0)
         {
                 positive n = doc_length(&k->text.doc) < UI_TOKENS_TEXT - 1 ? doc_length(&k->text.doc) : UI_TOKENS_TEXT - 1;
@@ -31856,6 +31902,20 @@ static p32 ui_tokens_event(struct ui address_to ui, struct ui_tokens address_to 
         if (asks & UI_TEXT_CHANGED)
                 k->invalid = false;
         return (asks & UI_TEXT_CHANGED ? UI_TOKENS_CHANGED : 0) | (asks & (UI_TEXT_MOVED | UI_TEXT_COMMIT) ? UI_TOKENS_MOVED : 0);
+}
+
+// The … menu's pick: the hidden token id names (UI_TOKENS_ITEM + token) is pressed, as a chip is: UI_TOKENS_PRESSED with its prefix. Other ids are none.
+static p32 ui_tokens_menu_do(struct ui address_to ui, struct ui_tokens address_to k, int id)
+{
+        int t = id - UI_TOKENS_ITEM;
+        positive n = doc_length(&k->text.doc) < UI_TOKENS_TEXT - 1 ? doc_length(&k->text.doc) : UI_TOKENS_TEXT - 1;
+        (void)ui;
+        if (t < 0 || t >= k->overflow || t >= k->count)
+                return 0;
+        k->chip = t;
+        k->prefix_length = k->label[t] < n ? k->label[t] : n;
+        doc_read(&k->text.doc, 0, k->prefix, k->prefix_length);
+        return UI_TOKENS_PRESSED | UI_TOKENS_MOVED;
 }
 
 // The battery reader (the sysfs files): the settings window and the taskbar read it.

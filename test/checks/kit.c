@@ -5703,6 +5703,33 @@ static fn check_kit_tokens(void)
         k.invalid = true;
         ui_tokens_draw(&ui, &k, 0, 0, 400, 60);
         check("token field: an invalid field draws its error outline across the top", pixels[0] != 0 && pixels[399] == pixels[0] && pixels[0] == (0xff000000u | (ui_role(UI_ERROR) & 0xffffffu)));
+
+        // Overflow: a narrow box holds the caret's token and the last ones; the leading tokens go behind the … chip, which a menu pick names.
+        {
+                static struct ui_tokens narrow;
+                static char longer[] = "/home/alice/docs/projects/app";
+                ui_tokens_open(&narrow, null, longer, '/');
+                ui_tokens_focus(&narrow, 1, 0);
+                ui.width = 400;
+                ui_tokens_draw(&ui, &narrow, 0, 0, 120, 60);
+                check("token field: a narrow field collapses the leading tokens behind the … chip and keeps the caret's token in view",
+                      narrow.overflow > 0 && narrow.active_left >= 0 && narrow.overflow_right > narrow.overflow_left);
+                check("token field: a pick of the hidden token 'home' (the root is token 0) names the prefix '/home'",
+                      (ui_tokens_menu_do(&ui, &narrow, UI_TOKENS_ITEM + 1) & UI_TOKENS_PRESSED) && narrow.prefix_length == 5 &&
+                              memory_compare(narrow.prefix, "/home", 5) == 0);
+                ui_tokens_focus(&narrow, 1, 0);
+                // Escape restores the value from before the editing; Enter submits.
+                doc_select_set(&narrow.text.doc, 12, 12);
+                doc_type(&narrow.text.doc, "zz", 2);
+                event.type = WINDOW_EVENT_KEY, event.a = UI_KEY_ESCAPE, event.b = 0, event.flags = WINDOW_KEY_DOWN;
+                asks = ui_tokens_event(&ui, &narrow, null, &event, 0, 0);
+                check("token field: Escape gives cancel and puts the value from before the editing back",
+                      (asks & UI_TOKENS_CANCEL) && doc_length(&narrow.text.doc) == 29 &&
+                              narrow.before_length == 29 && memory_compare(narrow.before, "/home/alice/docs/projects/app", 29) == 0);
+                event.a = UI_KEY_ENTER, event.b = '\r';
+                asks = ui_tokens_event(&ui, &narrow, null, &event, 0, 0);
+                check("token field: Enter gives submit, with the whole raw text in the field", (asks & UI_TOKENS_SUBMIT) && doc_length(&narrow.text.doc) == 29);
+        }
 }
 
 static fn check_kit_pull_parts(void)
