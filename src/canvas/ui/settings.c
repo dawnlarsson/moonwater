@@ -1451,21 +1451,46 @@ static fn settings_size(unsigned int width, unsigned int height);
 static const struct ui_list_menu settings_list_menu;
 static fn settings_columns_sorted(struct ui_columns address_to hit);
 
+static fn settings_refilter(void);
+static b32 settings_least_busy;
+static unsigned int settings_least_key_of(const struct ui address_to ui)
+{
+        unsigned int key = 2166136261u;
+
+        key = (((((key ^ (unsigned int)ui->scale) * 16777619u ^ ui_text_percent) * 16777619u ^ (unsigned int)ui_rtl()) * 16777619u ^ language.code) * 16777619u ^ settings.list.revision) * 16777619u;
+        return key;
+}
+
+// The window's least width is the widest of the groups: each group is laid out in turn (its rows, its title and column), so the window
+// fits the widest one and switching groups at the least size squeezes nothing. The layout a group makes inside this is not a new least.
 static int settings_least(void)
 {
         struct ui address_to ui = &settings.ui;
-        unsigned int key = 2166136261u;
-        const char address_to shown;
+        unsigned int key;
         b32 column;
-        if (gallery.on || !ui->regular || !settings.list.ids || !settings.page.view || ui->scale <= 0)
+        const char address_to shown;
+        int chosen, most = 0;
+        if (gallery.on || !ui->regular || !settings.list.ids || !settings.page.view || ui->scale <= 0 || settings_least_busy)
                 return 0;
-        key = (((((key ^ (unsigned int)ui->scale) * 16777619u ^ ui_text_percent) * 16777619u ^ (unsigned int)ui_rtl()) * 16777619u ^ language.code) * 16777619u ^ settings.list.revision) * 16777619u;
+        key = settings_least_key_of(ui);
         if (key == settings.least_key && settings.least_w > 0)
                 return 1;
-        settings.least_key = key, column = settings.page.column_on, shown = settings.page.title;
-        settings.page.column_on = true, settings.page.title = language_of("Settings");
-        settings.least_w = ui_page_least(ui, &settings.page, &settings.list, settings.page.title);
-        settings.page.column_on = column, settings.page.title = shown;
+        settings_least_busy = true;
+        chosen = settings.page.chosen, column = settings.page.column_on, shown = settings.page.title;
+        for (int group = 0; group < settings_groups(); group++)
+        {
+                int w;
+                settings.page.chosen = group;
+                settings_refilter();
+                settings.page.column_on = true, settings.page.title = language_of("Settings");
+                w = ui_page_least(ui, &settings.page, &settings.list, settings.page.title);
+                most = w > most ? w : most;
+        }
+        settings.page.chosen = chosen, settings.page.column_on = column, settings.page.title = shown;
+        settings_refilter();
+        settings_least_busy = false;
+        settings.least_w = most;
+        settings.least_key = settings_least_key_of(ui); // the key after the layout above: the rebuilds moved the list's revision
         settings.least_h = ui_px(ui, UI_PAGE_TOP + SETTINGS_MAP_PANEL + 2 * UI_GAP2 + 2 * ui_types[UI_LABEL_MEDIUM].line) + ui_dev(ui, UI_ROW);
         if (settings.own.table && settings.own.row < WINDOWS)
                 settings.own.table->least_width[settings.own.row] = (unsigned int)((settings.least_w * 100 + ui->scale - 1) / ui->scale),
