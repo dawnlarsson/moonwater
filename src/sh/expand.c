@@ -12221,7 +12221,9 @@ static bool expand_brace_range(string_address word, string_address open,
                         expand_brace_made(word, open, close, address_of made, 1,
                                           out, split);
 
-                        if (expand_failed || current == last)
+                        if (expand_failed || current == last ||
+                            (step > 0 && current > bipolar_max - step) ||
+                            (step < 0 && current < bipolar_min - step))
                                 break;
                 }
 

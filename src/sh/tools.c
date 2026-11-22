@@ -17471,7 +17471,7 @@ static b32 tools_dmesg_follow(tools_dmesg_state address_to state,
 {
 #if defined(LINUX)
         bipolar handle = system_open_at(AT_FDCWD, "/dev/kmsg",
-                                        FILE_READ | O_CLOEXEC);
+                                        FILE_READ | O_CLOEXEC | O_NOFOLLOW);
         if (handle < 0)
                 return text_done(string_diagnostic(&text_diagnostic, 1, "read kernel buffer failed", file_reason(handle)));
         if (only_new && system_seek(handle, 0, FILE_SEEK_END) < 0)

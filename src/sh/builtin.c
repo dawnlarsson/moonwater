@@ -15848,6 +15848,40 @@ COLD fn shell_mapfile(writer write)
             (!append && !shell_array_clear(name, name_length)))
                 return shell_answered(2, "%s: no room\n", "mapfile");
 
+        //      When -C is active, the callback executes arbitrary shell
+        //      commands that rewind expand_store and clobber shell_argv,
+        //      so snapshot both name and callback before entering the loop
+        //      (CWE-416).
+        p8 address_to owned_name = null;
+        positive owned_name_room = 0;
+        p8 address_to owned_callback = null;
+        positive owned_callback_room = 0;
+
+        if (callback)
+        {
+                positive callback_length = string_length(callback);
+
+                if (name_length == positive_max ||
+                    callback_length == positive_max)
+                        return shell_answered(2, "%s: no room\n", "mapfile");
+                owned_name_room = name_length + 1;
+                owned_callback_room = callback_length + 1;
+                owned_name = (p8 address_to)shell_map(owned_name_room);
+                owned_callback = (p8 address_to)shell_map(owned_callback_room);
+                if (!owned_name || !owned_callback)
+                {
+                        if (owned_name)
+                                memory_free(owned_name, owned_name_room);
+                        if (owned_callback)
+                                memory_free(owned_callback, owned_callback_room);
+                        return shell_answered(2, "%s: no room\n", "mapfile");
+                }
+                memory_copy_apart(owned_name, name, owned_name_room);
+                memory_copy_apart(owned_callback, callback, owned_callback_room);
+                name = (string_address)owned_name;
+                callback = (string_address)owned_callback;
+        }
+
         bool seekable = wanted && system_seek(from, 0, FILE_SEEK_CUR) >= 0;
         positive amount = wanted && !seekable ? 1 : 4096;
         bool failed = false;
@@ -15908,6 +15942,10 @@ COLD fn shell_mapfile(writer write)
                 if (failed)
                         break;
         }
+        if (owned_name)
+                memory_free(owned_name, owned_name_room);
+        if (owned_callback)
+                memory_free(owned_callback, owned_callback_room);
         //      What -n read past its count goes back, as read's does, and a
         //      descriptor that refuses it is said and answers 1: the next
         //      reader would start past lines nobody has had.

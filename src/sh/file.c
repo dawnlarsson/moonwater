@@ -48468,37 +48468,26 @@ static fn mktemp_failed(bool directory, string_address shown,
                       file_reason(reason));
 }
 
-// The kernel's randomness, and the clock when there is none to be had.
-static fn mktemp_letters_into(p8 address_to at, positive count)
+// The kernel's CSPRNG with rejection sampling; entropy failure fails closed
+// rather than falling back to a predictable pid/clock LCG (CWE-338/CWE-377).
+static bool mktemp_letters_into(p8 address_to at, positive count)
 {
         p8 raw[64];
         positive done = 0;
 
         while (done < count)
         {
-                positive have = min(count - done, sizeof(raw));
+                if (system_random_fill(raw, sizeof(raw), 0) < 0)
+                        return false;
 
-                if (system_random_fill(raw, have, 0) < 0)
+                for (positive i = 0; i < sizeof(raw) && done < count; i++)
                 {
-                        p64 now[2] = {0, 0};
-
-                        system_call_2(syscall(clock_gettime), 0, (positive)now);
-
-                        positive mixed = (positive)now[1] ^ ((positive)now[0] << 20) ^
-                                         ((positive)system_call_1(syscall(getpid), 0) << 40) ^
-                                         done;
-
-                        for (positive i = 0; i < have; i++)
-                        {
-                                mixed = mixed * 6364136223846793005u + 1442695040888963407u;
-                                raw[i] = (p8)(mixed >> 33);
-                        }
+                        if (raw[i] >= 248)
+                                continue;
+                        at[done++] = mktemp_letters[raw[i] % 62];
                 }
-
-                for (positive i = 0; i < have; i++)
-                        at[done + i] = mktemp_letters[raw[i] % 62];
-                done += have;
         }
+        return true;
 }
 
 // --tmpdir is the one option here spelled without a letter, and T is a letter
@@ -48694,7 +48683,12 @@ static b32 file_mktemp()
         {
                 bipolar answer;
 
-                mktemp_letters_into(path + marks_at, marks);
+                if (!mktemp_letters_into(path + marks_at, marks))
+                {
+                        if (!quiet)
+                                mktemp_failed(directory, shown, -ERROR_INPUT_OUTPUT);
+                        return 1;
+                }
 
                 /*
                         -u makes nothing, but it does not promise a name
