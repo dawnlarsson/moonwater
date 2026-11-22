@@ -3,6 +3,7 @@
 # machine-made 2026-11-19 (the apps pass), not yet read by a person: launcher_recent
 # machine-made 2026-11-22 (the files top bar), not yet read by a person: files_refresh files_view
 # machine-made 2026-11-22 (the devices pass), not yet read by a person: files_device_eject files_device_live files_device_write
+# machine-made 2026-11-22 (the ids 8a55b4ad0 and the taskbar left out), not yet read by a person: files_remote_denied files_remote_offline files_remote_opening files_this_machine taskbar_tab_uninstall
 @language nl
 @name Nederlands
 @translated machine
@@ -98,6 +99,9 @@ files_place_pictures	feae	Afbeeldingen
 files_reading	64a4	De map wordt gelezen
 files_redone	6fd0	%d opnieuw gedaan
 files_refresh	aad4	Vernieuwen
+files_remote_denied	81a0	Toegang tot bestanden is niet verleend
+files_remote_offline	3c65	De machine is offline
+files_remote_opening	99bd	%s openen...
 files_rename_hint	ad88	Nieuwe naam
 files_restored	4c30	%d teruggezet waar ze waren
 files_sheet_created	59ac	Gemaakt %s
@@ -113,6 +117,7 @@ files_sheet_other	3921	Apparaat, pijp of socket
 files_sheet_owner	8b0c	Eigenaar %1$d, groep %2$d
 files_sheet_size	eca5	Grootte %1$s (%2$s bytes)
 files_sheet_size_in	31a1	Grootte %1$s in %2$d items
+files_this_machine	d630	Deze machine
 files_type_link	e589	Koppeling
 files_type_other	80d0	Speciaal
 files_undone	4da3	%d ongedaan gemaakt
@@ -428,6 +433,7 @@ taskbar_tab_exit	44a5	Afsluiten
 taskbar_tab_pin	d57f	Aan taakbalk vastmaken
 taskbar_tab_stop	3684	Geforceerd stoppen
 taskbar_tab_stop_windows	3c5f	Geforceerd stoppen (%d vensters)
+taskbar_tab_uninstall	1839	Verwijderen
 taskbar_tab_unpin	6771	Van taakbalk losmaken
 terminal_exited_press_to_close	a8cf	beëindigd met status %d, druk op een toets om te sluiten
 terminal_press_to_close	080d	druk op een toets om te sluiten

@@ -3,6 +3,7 @@
 # machine-made 2026-11-19 (the apps pass), not yet read by a person: launcher_recent
 # machine-made 2026-11-22 (the files top bar), not yet read by a person: files_refresh files_view
 # machine-made 2026-11-22 (the devices pass), not yet read by a person: files_device_eject files_device_live files_device_write
+# machine-made 2026-11-22 (the ids 8a55b4ad0 and the taskbar left out), not yet read by a person: files_remote_denied files_remote_offline files_remote_opening files_this_machine taskbar_tab_uninstall
 @language es
 @name Español
 @translated machine
@@ -98,6 +99,9 @@ files_place_pictures	feae	Imágenes
 files_reading	64a4	Leyendo la carpeta
 files_redone	6fd0	%d rehechos
 files_refresh	aad4	Actualizar
+files_remote_denied	81a0	No se concede acceso a los archivos
+files_remote_offline	3c65	La máquina no está conectada
+files_remote_opening	99bd	Abriendo %s...
 files_rename_hint	ad88	Nombre nuevo
 files_restored	4c30	%d devueltos a su sitio
 files_sheet_created	59ac	Creado %s
@@ -113,6 +117,7 @@ files_sheet_other	3921	Dispositivo, tubería o socket
 files_sheet_owner	8b0c	Propietario %1$d, grupo %2$d
 files_sheet_size	eca5	Tamaño %1$s (%2$s bytes)
 files_sheet_size_in	31a1	Tamaño %1$s en %2$d elementos
+files_this_machine	d630	Este equipo
 files_type_link	e589	Enlace
 files_type_other	80d0	Especial
 files_undone	4da3	%d deshechos
@@ -428,6 +433,7 @@ taskbar_tab_exit	44a5	Salir
 taskbar_tab_pin	d57f	Anclar a la barra de tareas
 taskbar_tab_stop	3684	Forzar detención
 taskbar_tab_stop_windows	3c5f	Forzar detención (%d ventanas)
+taskbar_tab_uninstall	1839	Desinstalar
 taskbar_tab_unpin	6771	Desanclar de la barra de tareas
 terminal_exited_press_to_close	a8cf	terminó con estado %d, pulse una tecla para cerrar
 terminal_press_to_close	080d	pulse una tecla para cerrar

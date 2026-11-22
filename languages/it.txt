@@ -3,6 +3,7 @@
 # machine-made 2026-11-19 (the apps pass), not yet read by a person: launcher_recent
 # machine-made 2026-11-22 (the files top bar), not yet read by a person: files_refresh files_view
 # machine-made 2026-11-22 (the devices pass), not yet read by a person: files_device_eject files_device_live files_device_write
+# machine-made 2026-11-22 (the ids 8a55b4ad0 and the taskbar left out), not yet read by a person: files_remote_denied files_remote_offline files_remote_opening files_this_machine taskbar_tab_uninstall
 @language it
 @name Italiano
 @translated machine
@@ -98,6 +99,9 @@ files_place_pictures	feae	Immagini
 files_reading	64a4	Lettura della cartella
 files_redone	6fd0	%d ripetuti
 files_refresh	aad4	Aggiorna
+files_remote_denied	81a0	Accesso ai file non concesso
+files_remote_offline	3c65	La macchina non è in linea
+files_remote_opening	99bd	Apertura di %s...
 files_rename_hint	ad88	Nuovo nome
 files_restored	4c30	%d rimessi al loro posto
 files_sheet_created	59ac	Creato %s
@@ -113,6 +117,7 @@ files_sheet_other	3921	Dispositivo, pipe o socket
 files_sheet_owner	8b0c	Proprietario %1$d, gruppo %2$d
 files_sheet_size	eca5	Dimensione %1$s (%2$s byte)
 files_sheet_size_in	31a1	Dimensione %1$s in %2$d elementi
+files_this_machine	d630	Questa macchina
 files_type_link	e589	Collegamento
 files_type_other	80d0	Speciale
 files_undone	4da3	%d annullati
@@ -428,6 +433,7 @@ taskbar_tab_exit	44a5	Esci
 taskbar_tab_pin	d57f	Blocca sulla barra delle applicazioni
 taskbar_tab_stop	3684	Forza arresto
 taskbar_tab_stop_windows	3c5f	Forza arresto (%d finestre)
+taskbar_tab_uninstall	1839	Disinstalla
 taskbar_tab_unpin	6771	Sblocca dalla barra delle applicazioni
 terminal_exited_press_to_close	a8cf	terminato con stato %d, premere un tasto per chiudere
 terminal_press_to_close	080d	premere un tasto per chiudere

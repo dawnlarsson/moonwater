@@ -4,6 +4,7 @@
 # machine-made 2026-11-22 (the files top bar), not yet read by a person: files_refresh files_view
 @direction rtl
 # machine-made 2026-11-22 (the devices pass), not yet read by a person: files_device_eject files_device_live files_device_write
+# machine-made 2026-11-22 (the ids 8a55b4ad0 and the taskbar left out), not yet read by a person: files_remote_denied files_remote_offline files_remote_opening files_this_machine taskbar_tab_uninstall
 @language fa
 @name فارسی
 @translated machine
@@ -99,6 +100,9 @@ files_place_pictures	feae	تصویرها
 files_reading	64a4	خواندن پوشه
 files_redone	6fd0	%d دوباره انجام شد
 files_refresh	aad4	بازخوانی
+files_remote_denied	81a0	دسترسی به پرونده‌ها داده نشده است
+files_remote_offline	3c65	دستگاه برون‌خط است
+files_remote_opening	99bd	در حال باز کردن %s...
 files_rename_hint	ad88	نام تازه
 files_restored	4c30	%d به جای خود برگشت
 files_sheet_created	59ac	ساخته %s
@@ -114,6 +118,7 @@ files_sheet_other	3921	دستگاه، لوله یا سوکت
 files_sheet_owner	8b0c	مالک %1$d، گروه %2$d
 files_sheet_size	eca5	اندازه %1$s (%2$s بایت)
 files_sheet_size_in	31a1	اندازه %1$s در %2$d مورد
+files_this_machine	d630	این دستگاه
 files_type_link	e589	پیوند
 files_type_other	80d0	ویژه
 files_undone	4da3	%d واگرد شد
@@ -429,6 +434,7 @@ taskbar_tab_exit	44a5	خروج از برنامه
 taskbar_tab_pin	d57f	سنجاق به نوار وظیفه
 taskbar_tab_stop	3684	توقف اجباری
 taskbar_tab_stop_windows	3c5f	توقف اجباری (%d پنجره)
+taskbar_tab_uninstall	1839	حذف نصب
 taskbar_tab_unpin	6771	برداشتن سنجاق از نوار وظیفه
 terminal_exited_press_to_close	a8cf	با کد خروج %d پایان یافت؛ برای بستن یک کلید را فشار دهید
 terminal_press_to_close	080d	برای بستن یک کلید را فشار دهید

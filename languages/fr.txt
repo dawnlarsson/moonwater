@@ -3,6 +3,7 @@
 # machine-made 2026-11-19 (the apps pass), not yet read by a person: launcher_recent
 # machine-made 2026-11-22 (the files top bar), not yet read by a person: files_refresh files_view
 # machine-made 2026-11-22 (the devices pass), not yet read by a person: files_device_eject files_device_live files_device_write
+# machine-made 2026-11-22 (the ids 8a55b4ad0 and the taskbar left out), not yet read by a person: files_remote_denied files_remote_offline files_remote_opening files_this_machine taskbar_tab_uninstall
 @language fr
 @name Français
 @translated machine
@@ -98,6 +99,9 @@ files_place_pictures	feae	Images
 files_reading	64a4	Lecture du dossier
 files_redone	6fd0	%d rétablis
 files_refresh	aad4	Actualiser
+files_remote_denied	81a0	L'accès aux fichiers n'est pas accordé
+files_remote_offline	3c65	La machine est hors ligne
+files_remote_opening	99bd	Ouverture de %s...
 files_rename_hint	ad88	Nouveau nom
 files_restored	4c30	%d remis à leur place
 files_sheet_created	59ac	Créé %s
@@ -113,6 +117,7 @@ files_sheet_other	3921	Périphérique, tube ou socket
 files_sheet_owner	8b0c	Propriétaire %1$d, groupe %2$d
 files_sheet_size	eca5	Taille %1$s (%2$s octets)
 files_sheet_size_in	31a1	Taille %1$s en %2$d éléments
+files_this_machine	d630	Cette machine
 files_type_link	e589	Lien
 files_type_other	80d0	Spécial
 files_undone	4da3	%d annulés
@@ -428,6 +433,7 @@ taskbar_tab_exit	44a5	Quitter
 taskbar_tab_pin	d57f	Épingler à la barre des tâches
 taskbar_tab_stop	3684	Forcer l'arrêt
 taskbar_tab_stop_windows	3c5f	Forcer l'arrêt (%d fenêtres)
+taskbar_tab_uninstall	1839	Désinstaller
 taskbar_tab_unpin	6771	Détacher de la barre des tâches
 terminal_exited_press_to_close	a8cf	terminé avec le code %d, appuyez sur une touche pour fermer
 terminal_press_to_close	080d	appuyez sur une touche pour fermer
