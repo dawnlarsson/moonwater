@@ -38,9 +38,9 @@ static struct
         struct ui_control strip;
         struct ui_view view;
         struct ui_rect find_box, text_box;
-        int pill_box[4], pill_text[4], pill_hex[4], pill_hover;
-        struct ui_control wrap_chip;
-        b32 wrap_shown;
+        int pill_box[4];
+        struct ui_control wrap_chip, mode_switch;
+        b32 wrap_shown, mode_shown;
         b32 pill_down;
         char bar_text[256], status[160];
         struct ui_popup menu;
@@ -858,6 +858,17 @@ static fn editor_layout(void)
         ui_view_end(&editor.view);
 }
 
+static const char address_to editor_mode_name(int at)
+{
+        return at ? WORDS(editor_mode_hex) : WORDS(editor_mode_text);
+}
+
+static b32 editor_mode_marked(int at)
+{
+        (void)at;
+        return false;
+}
+
 static b32 editor_pill_in(const int r[4], int x, int y)
 {
         return r[2] > 0 && r[3] > 0 && x >= r[0] && x < r[0] + r[2] && y >= r[1] && y < r[1] + r[3];
@@ -883,12 +894,10 @@ static fn editor_pill_draw(struct ui address_to ui, struct editor_tab address_to
         char cut[256];
         string_address info = (string_address)editor.bar_text;
         int info_room, info_w, pw, px, py, cx, cy, sy, baseline;
-        struct ui_box box, seg_box;
+        struct ui_box box;
 
         memory_zero(editor.pill_box, sizeof(editor.pill_box));
-        editor.wrap_shown = false;
-        memory_zero(editor.pill_text, sizeof(editor.pill_text));
-        memory_zero(editor.pill_hex, sizeof(editor.pill_hex));
+        editor.wrap_shown = editor.mode_shown = false;
         if (max_w < btns_w + 2 * pad_x || editor.text_box.h < ph + 2 * margin_b)
                 return;
         info_room = max_w - 2 * pad_x - btns_w - gap - (extra_w ? extra_w + gap : 0);
@@ -934,56 +943,33 @@ static fn editor_pill_draw(struct ui address_to ui, struct editor_tab address_to
                 ui_control_draw(ui, c);
                 cx += wrap_w + gap;
         }
-        // Fixed-position segmented [ Text | Hex ] tab switcher pinned to the right edge of the pill.
+        // The Text | Hex switch is the kit's segmented tabs, placed by hand as the Wrap chip is.
         sy = py + (ph - seg_h) / 2;
-        seg_box = ui_box_px(cx, sy, seg_w, seg_h, seg_h * 128);
-        ui_kit_fill(ui, &seg_box, ui_tone(ui_role(UI_ON_SURFACE) & 0xffffffu, 18), null);
-        cx += seg_pad;
         {
-                struct ui_box tb = ui_box_px(cx, cy, text_w, chip_h, chip_h * 128);
-                unsigned int tfill = !tab->view.hex ? ui_role(UI_PRIMARY)
-                                                    : editor.pill_hover == 2 ? ui_tone(ui_role(UI_ON_SURFACE) & 0xffffffu, 26) : 0;
-                unsigned int tink = !tab->view.hex ? ui_role(UI_ON_PRIMARY) : ui_text_colour(ui, UI_ON_SURFACE_VARIANT);
+                struct ui_control address_to s = &editor.mode_switch;
 
-                editor.pill_text[0] = cx, editor.pill_text[1] = cy, editor.pill_text[2] = text_w, editor.pill_text[3] = chip_h;
-                if (tfill)
-                        ui_kit_fill(ui, &tb, tfill, null);
-                ui_kit_text(ui, cx + chip_px, baseline, (string_address)text_lbl, UI_LABEL_MEDIUM, tink, 0);
-                cx += text_w;
-        }
-        {
-                struct ui_box hb = ui_box_px(cx, cy, hex_w, chip_h, chip_h * 128);
-                unsigned int hfill = tab->view.hex ? ui_role(UI_PRIMARY)
-                                                   : editor.pill_hover == 3 ? ui_tone(ui_role(UI_ON_SURFACE) & 0xffffffu, 26) : 0;
-                unsigned int hink = tab->view.hex ? ui_role(UI_ON_PRIMARY) : ui_text_colour(ui, UI_ON_SURFACE_VARIANT);
-
-                editor.pill_hex[0] = cx, editor.pill_hex[1] = cy, editor.pill_hex[2] = hex_w, editor.pill_hex[3] = chip_h;
-                if (hfill)
-                        ui_kit_fill(ui, &hb, hfill, null);
-                ui_kit_text(ui, cx + chip_px, baseline, (string_address)hex_lbl, UI_LABEL_MEDIUM, hink, 0);
+                if (s->kind != UI_TABS)
+                        s->kind = UI_TABS, s->variant = UI_TABS_SEGMENTED, ui_control_start(s);
+                ui_tabs_fill(s, 2, tab->view.hex, editor_mode_name, editor_mode_marked);
+                s->x = cx * 100 / ui->scale, s->y = sy * 100 / ui->scale, s->w = seg_w * 100 / ui->scale, s->h = seg_h * 100 / ui->scale;
+                editor.mode_shown = true;
+                ui_control_draw(ui, s);
         }
 }
 
 static b32 editor_pill_event(struct editor_tab address_to tab, const struct window_event address_to event)
 {
         if (tab->view.sel.dragging || tab->view.gutter_drag || tab->view.drag.armed || tab->view.bar.held)
-        {
-                if (editor.pill_hover)
-                        editor.pill_hover = 0, editor.dirty = true;
                 return false;
-        }
         if (event->type == WINDOW_EVENT_MOTION)
         {
-                int hover = editor_pill_in(editor.pill_text, event->a, event->b) ? 2
-                            : editor_pill_in(editor.pill_hex, event->a, event->b) ? 3 : 0;
-
                 if (editor.wrap_shown)
                         ui_kit_pointer(&editor.ui, &editor.wrap_chip, 1, WINDOW_EVENT_MOTION, event->a, event->b, false, event->flags);
-                if (hover)
-                        ui_kit_shape = WINDOW_POINTER_HAND;
-                if (hover != editor.pill_hover)
-                        editor.pill_hover = hover, editor.dirty = true;
-                return editor_pill_in(editor.pill_box, event->a, event->b);
+                if (editor.mode_shown)
+                        ui_kit_pointer(&editor.ui, &editor.mode_switch, 1, WINDOW_EVENT_MOTION, event->a, event->b, false, event->flags);
+                if (editor_pill_in(editor.pill_box, event->a, event->b))
+                        return editor.dirty = true, true;
+                return false;
         }
         if (event->type == WINDOW_EVENT_BUTTON && (p32)event->a == UI_POINTER_LEFT)
         {
@@ -991,15 +977,20 @@ static b32 editor_pill_event(struct editor_tab address_to tab, const struct wind
                 if (editor.wrap_shown && ui_kit_pointer(&editor.ui, &editor.wrap_chip, 1, WINDOW_EVENT_BUTTON, ui_kit.pointer_x,
                                                         ui_kit.pointer_y, (event->flags & WINDOW_KEY_DOWN) != 0, event->flags) == &editor.wrap_chip)
                         return editor.pill_down = false, editor_toggle((int)DOC_CMD_WRAP);
+                if (editor.mode_shown && ui_kit_pointer(&editor.ui, &editor.mode_switch, 1, WINDOW_EVENT_BUTTON, ui_kit.pointer_x,
+                                                        ui_kit.pointer_y, (event->flags & WINDOW_KEY_DOWN) != 0, event->flags) == &editor.mode_switch)
+                {
+                        // The kit has set the item on the release: switch when it is not the mode already shown.
+                        editor.pill_down = false;
+                        if ((editor.mode_switch.at == 1) != tab->view.hex)
+                                editor_toggle((int)DOC_CMD_HEX);
+                        return true;
+                }
                 if (event->flags & WINDOW_KEY_DOWN)
                 {
                         if (!editor_pill_in(editor.pill_box, ui_kit.pointer_x, ui_kit.pointer_y))
                                 return false;
                         editor.pill_down = true;
-                        if (editor_pill_in(editor.pill_text, ui_kit.pointer_x, ui_kit.pointer_y) && tab->view.hex)
-                                editor_toggle((int)DOC_CMD_HEX);
-                        else if (editor_pill_in(editor.pill_hex, ui_kit.pointer_x, ui_kit.pointer_y) && !tab->view.hex)
-                                editor_toggle((int)DOC_CMD_HEX);
                         return true;
                 }
                 if (editor.pill_down)
@@ -1075,8 +1066,6 @@ static b32 editor_event(const struct window_event address_to event)
                 editor.dirty = true;
         if (asks & UI_VIEW_TAKEN)
         {
-                if (editor.pill_hover)
-                        editor.pill_hover = 0, editor.dirty = true;
                 if (event->type == WINDOW_EVENT_BUTTON && (p32)event->a == UI_POINTER_LEFT && !(event->flags & WINDOW_KEY_DOWN))
                         editor.pill_down = false;
                 return true;
