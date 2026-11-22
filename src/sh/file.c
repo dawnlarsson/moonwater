@@ -4626,10 +4626,12 @@ static bool pd_parse(string_address text, b64 now, positive now_ns, bool debug,
                 {
                         if (own_zone)
                                 string_format(log_error, "TZ=\"%s\" in date string", tzstring);
-                        else if (string_equals(tzstring, "UTC0"))
-                                log_error("TZ=\"UTC0\" environment value or -u", 0);
                         else
-                                string_format(log_error, "TZ=\"%s\" environment value", tzstring);
+                                string_format(log_error,
+                                              string_equals(tzstring, "UTC0")
+                                                  ? "TZ=\"%s\" environment value or -u"
+                                                  : "TZ=\"%s\" environment value",
+                                              tzstring);
                 }
                 else
                         log_error("system default", 0);
@@ -5067,10 +5069,13 @@ static bool pd_parse(string_address text, b64 now, positive now_ns, bool debug,
 
                 if (!tzstring)
                         pd_say("timezone: system default\n");
-                else if (string_equals(tzstring, "UTC0"))
-                        pd_say("timezone: Universal Time\n");
                 else
-                        string_format(log_error, "date: timezone: TZ=\"%s\" environment value\n", tzstring);
+                {
+                        if (string_equals(tzstring, "UTC0"))
+                                pd_say("timezone: Universal Time\n");
+                        else
+                                string_format(log_error, "date: timezone: TZ=\"%s\" environment value\n", tzstring);
+                }
 
                 pd_say("final: ");
                 pd_padded(log_error, address_to out, 1);
@@ -11684,6 +11689,28 @@ static ls_suffix_color address_to ls_extension_of(string_address name)
         orphans are coloured or ln=target asks, and a link's target that is
         missing is the missing colour where that is set. Null is no colour.
 */
+static p8 ls_mode_color(positive kind)
+{
+        static const struct
+        {
+                positive kind;
+                p8 color;
+        } table[] = {
+            {MODE_FILE, LS_FI},
+            {MODE_DIRECTORY, LS_DI},
+            {MODE_LINK, LS_LN},
+            {MODE_PIPE, LS_PI},
+            {MODE_SOCKET, LS_SO},
+            {MODE_BLOCK, LS_BD},
+            {MODE_CHARACTER, LS_CD},
+        };
+
+        for (positive i = 0; i < array_count(table); i++)
+                if (table[i].kind == kind)
+                        return table[i].color;
+        return LS_OR;
+}
+
 static bool ls_full_path(p8 address_to full, string_address directory, string_address name);
 
 static file_color_span address_to ls_color_for(ls_entry address_to entry, string_address name,
@@ -11709,18 +11736,7 @@ static file_color_span address_to ls_color_for(ls_entry address_to entry, string
         if (link_ok == -1 && ls_colored(LS_MI))
                 which = LS_MI;
         else if (!entry->known && !target)
-        {
-                positive given = entry->mode & MODE_FORMAT;
-
-                which = given == MODE_FILE        ? LS_FI
-                        : given == MODE_DIRECTORY ? LS_DI
-                        : given == MODE_LINK      ? LS_LN
-                        : given == MODE_PIPE      ? LS_PI
-                        : given == MODE_SOCKET    ? LS_SO
-                        : given == MODE_BLOCK     ? LS_BD
-                        : given == MODE_CHARACTER ? LS_CD
-                                                  : LS_OR;
-        }
+                which = ls_mode_color(entry->mode & MODE_FORMAT);
         else if (kind == MODE_FILE)
         {
                 which = LS_FI;
@@ -11746,12 +11762,7 @@ static file_color_span address_to ls_color_for(ls_entry address_to entry, string
                         which = LS_ST;
         }
         else
-                which = kind == MODE_LINK        ? LS_LN
-                        : kind == MODE_PIPE      ? LS_PI
-                        : kind == MODE_SOCKET    ? LS_SO
-                        : kind == MODE_BLOCK     ? LS_BD
-                        : kind == MODE_CHARACTER ? LS_CD
-                                                 : LS_OR;
+                which = ls_mode_color(kind);
 
         ls_suffix_color address_to extension = which == LS_FI ? ls_extension_of(name) : null;
 
@@ -13154,15 +13165,16 @@ static fn ls_below(string_address path, positive depth)
         //      so one buffer holds all of them, each level putting its name on
         //      the end and taking it off again: a tree nested a thousand deep
         //      is a thousand names and not a thousand copies of the path.
-        bool fits = string_length(path) < FILE_PATH_MAX;
+        positive path_length = string_length(path);
+        bool fits = path_length < FILE_PATH_MAX;
 
         if (fits && path != ls_path_shared)
         {
-                string_copy_end(ls_path_shared, path);
+                memory_copy_apart_end(ls_path_shared, path, path_length);
                 path = ls_path_shared;
         }
 
-        positive here = fits ? string_length(path) : 0;
+        positive here = fits ? path_length : 0;
         positive at = 0;
 
         for (positive i = 0; i < found; i++)
@@ -13417,6 +13429,23 @@ static const file_word ls_quoting_words[] = {
     {"locale", 'o'}, {"clocale", 'C'}};
 static const file_word ls_indicator_words[] = {
     {"none", 'N'}, {"slash", '/'}, {"file-type", 'f'}, {"classify", 'F'}};
+
+static fn ls_quoting_from_environment(string_address program)
+{
+        string_address style = file_environment((string_address) "QUOTING_STYLE");
+
+        if (!style)
+                return;
+
+        positive word = string_table_lookup(style, ls_quoting_words);
+
+        if (word < array_count(ls_quoting_words))
+                ls_quoting = ls_quoting_words[word].answer;
+        else
+                string_format(log_error,
+                              "%s: ignoring invalid value of environment variable QUOTING_STYLE: '%w'\n",
+                              program, writer_terminal_quoted_name, style);
+}
 
 /*
         Every option argument is read where the option is, not where the
@@ -14013,31 +14042,15 @@ static b32 file_ls_as(string_address program, p8 default_format, p8 default_quot
         // a style (and a warning when it does not), or the default.
         ls_quoting = default_quoting ? default_quoting : ls_terminal ? 'e' : 'L';
         if (!ls_selected.quote)
+                ls_quoting_from_environment(program);
+        switch (ls_selected.quote)
         {
-                string_address style = file_environment((string_address) "QUOTING_STYLE");
-
-                if (style)
-                {
-                        positive word = string_table_lookup(style, ls_quoting_words);
-
-                        if (word < array_count(ls_quoting_words))
-                                ls_quoting = ls_quoting_words[word].answer;
-                        else
-                                string_format(log_error,
-                                              "%s: ignoring invalid value of environment variable QUOTING_STYLE: '%w'\n",
-                                              program, writer_terminal_quoted_name, style);
-                }
+        case 'z': ls_quoting = ls_quote_word; break;
+        case 'N':
+        case '6': ls_quoting = 'L'; break;
+        case 'Q': ls_quoting = 'c'; break;
+        case 'b': ls_quoting = 'b'; break;
         }
-        if (ls_selected.quote == 'z')
-                ls_quoting = ls_quote_word;
-        else if (ls_selected.quote == 'N')
-                ls_quoting = 'L';
-        else if (ls_selected.quote == 'Q')
-                ls_quoting = 'c';
-        else if (ls_selected.quote == 'b')
-                ls_quoting = 'b';
-        if (ls_selected.quote == '6')
-                ls_quoting = 'L';
 
         ls_hide_controls = ls_selected.control ? ls_selected.control == 'q'
                                              : ls_terminal && !(flags & FILE_FLAG('6'));
@@ -14045,16 +14058,14 @@ static b32 file_ls_as(string_address program, p8 default_format, p8 default_quot
 
         // The letter after a name.
         ls_indicator = 0;
-        if (ls_selected.indicator == 'Y')
-                ls_indicator = ls_indicator_word == 'N' ? 0 : ls_indicator_word;
-        else if (ls_selected.indicator == 'E')
-                ls_indicator = 'F';
-        else if (ls_selected.indicator == 'p')
-                ls_indicator = '/';
-        else if (ls_selected.indicator == 'j')
-                ls_indicator = 'f';
-        else if (ls_selected.indicator == 'F')
-                ls_indicator = 'F';
+        switch (ls_selected.indicator)
+        {
+        case 'Y': ls_indicator = ls_indicator_word == 'N' ? 0 : ls_indicator_word; break;
+        case 'E':
+        case 'F': ls_indicator = 'F'; break;
+        case 'p': ls_indicator = '/'; break;
+        case 'j': ls_indicator = 'f'; break;
+        }
 
         // What is followed.
         ls_dereference = ls_selected.deref == 'L'   ? 'L'
@@ -14110,13 +14121,7 @@ static b32 file_ls_as(string_address program, p8 default_format, p8 default_quot
 
                 if (!wanted || !string_get(wanted))
                         wanted = file_environment((string_address) "BLOCK_SIZE");
-                if (wanted && (string_equals(wanted, "human-readable") ||
-                               string_equals(wanted, "si")))
-                {
-                        ls_size_human = ls_block_human = true;
-                        ls_size_si = ls_block_si = string_equals(wanted, "si");
-                }
-                else if (wanted && string_get(wanted) &&
+                if (wanted && string_get(wanted) &&
                     ls_block_size_read(wanted, address_of unit, address_of human,
                                        address_of si, suffix))
                 {
@@ -15503,11 +15508,14 @@ static b32 find_parse_primary(positive depth)
                 return -1;
         }
 
-        if (find_is(word, (string_address) "-o") ||
-            find_is(word, (string_address) "-or") ||
-            find_is(word, (string_address) "-a") ||
-            find_is(word, (string_address) "-and") ||
-            find_is(word, (string_address) ","))
+        static const named_byte find_binary_ops[] = {
+            {(string_address) ",", FIND_PARSE_COMMA},
+            {(string_address) "-o", FIND_PARSE_OR},
+            {(string_address) "-or", FIND_PARSE_OR},
+            {(string_address) "-a", FIND_PARSE_AND},
+            {(string_address) "-and", FIND_PARSE_AND},
+        };
+        if (string_table_lookup(word, find_binary_ops) < array_count(find_binary_ops))
         {
                 string_format(log_error,
                               "find: binary operator `%w' with nothing before it\n",
@@ -15596,9 +15604,7 @@ static b32 find_parse_primary(positive depth)
                 return index;
         }
 
-        positive selected = string_table_find(
-            word, find_predicates, sizeof(find_predicates[0]),
-            array_count(find_predicates));
+        positive selected = string_table_lookup(word, find_predicates);
         if (selected == array_count(find_predicates))
         {
                 //      findutils quotes the predicate the way it quotes
@@ -15758,15 +15764,7 @@ static b32 find_parse_primary(positive depth)
                             (string_address) "posix-minimal-basic",
                             (string_address) "sed",
                         };
-                        bool known = false;
-
-                        for (positive i = 0; i < array_count(types); i++)
-                                if (string_equals(value, types[i]))
-                                {
-                                        known = true;
-                                        break;
-                                }
-                        if (!known)
+                        if (string_table_lookup(value, types) == array_count(types))
                         {
                                 string_format(
                                     log_error,
@@ -18650,21 +18648,43 @@ static b32 file_find()
         find_device = 0;
         find_moment = file_now();
 
+        static const named_byte find_leading[] = {
+            {(string_address) "-H", 'H'},
+            {(string_address) "-L", 'L'},
+            {(string_address) "-P", 'P'},
+            {(string_address) "-D", 'D'},
+            {(string_address) "--", '-'},
+        };
+
         while (index < count)
         {
                 string_address word = program_argument((b32)index);
+                positive found = string_table_lookup(word, find_leading);
 
-                if (find_is(word, (string_address) "-H"))
+                if (found < array_count(find_leading))
                 {
-                        find_follow_named = true;
-                        find_follow = false;
-                }
-                else if (find_is(word, (string_address) "-L"))
-                        find_follow = true;
-                else if (find_is(word, (string_address) "-P"))
-                {
-                        find_follow = false;
-                        find_follow_named = false;
+                        p8 code = find_leading[found].value;
+
+                        if (code == 'H')
+                                find_follow_named = true, find_follow = false;
+                        else if (code == 'L')
+                                find_follow = true;
+                        else if (code == 'P')
+                                find_follow = false, find_follow_named = false;
+                        else if (code == 'D')
+                        {
+                                if (index + 1 >= count)
+                                        return string_report(log_error, 1,
+                                                             "find: -D needs a list of debug options\n");
+                                index++;
+                        }
+                        else
+                        {
+                                // Two dashes close the leading options and are
+                                // not a root: the roots begin after them.
+                                index++;
+                                break;
+                        }
                 }
                 else if (!string_compare_max(word, "-O", 2))
                 {
@@ -18675,26 +18695,6 @@ static b32 file_find()
                                 return string_report(
                                     log_error, 1,
                                     "find: The -O option must be immediately followed by a decimal integer\n");
-                }
-                else if (find_is(word, (string_address) "-D"))
-                {
-                        if (index + 1 >= count)
-                        {
-                                return string_report(log_error, 1,
-                                                     "find: -D needs a list of debug options\n");
-                        }
-
-                        index++;
-                }
-                else if (string_equals(word, (string_address) "--"))
-                {
-                        //      Two dashes close the leading options and are
-                        //      not a root: the roots begin after them. Later
-                        //      in the line the word is a predicate that does
-                        //      not exist, which is what the reference calls
-                        //      it, so this is only recognised here.
-                        index++;
-                        break;
                 }
                 else
                         break;
@@ -19869,23 +19869,8 @@ static b32 file_stat()
                         if (string_get(at + 1) != 'N')
                                 continue;
 
-                        string_address style = file_environment((string_address) "QUOTING_STYLE");
-
                         ls_quoting = 'e';
-                        if (style)
-                        {
-                                positive word = 0;
-
-                                while (word < array_count(ls_quoting_words) &&
-                                       !string_equals(style, ls_quoting_words[word].word))
-                                        word++;
-                                if (word < array_count(ls_quoting_words))
-                                        ls_quoting = ls_quoting_words[word].answer;
-                                else
-                                        string_format(log_error,
-                                                      "stat: ignoring invalid value of environment variable QUOTING_STYLE: '%w'\n",
-                                                      writer_terminal_quoted_name, style);
-                        }
+                        ls_quoting_from_environment((string_address) "stat");
                         break;
                 }
         }
@@ -21598,13 +21583,7 @@ static bool df_output_read(string_address list)
         {
                 string_address comma = string_first_of_or_end(at, ',');
                 positive length = (positive)(comma - at);
-                p8 word[16];
-                p8 field = DF_FIELDS;
-
-                string_copy_max_end(word, at, min(length, sizeof(word) - 1));
-                for (p8 each = 0; each < DF_FIELDS && length < sizeof(word); each++)
-                        if (string_equals(word, df_fields[each].word))
-                                field = each;
+                p8 field = (p8)memory_table_lookup(at, length, df_fields);
 
                 if (field == DF_FIELDS)
                 {
@@ -25130,7 +25109,7 @@ static bool namei_walk(string_address path, string_address base,
 
         if (absolute)
         {
-                string_copy_end(current, "/");
+                memory_copy_apart_end(current, (string_address) "/", 1);
                 namei_row address_to root = namei_add("/", 1, depth);
                 if (!root)
                         return false;
@@ -38704,8 +38683,11 @@ static bool file_copy_one(bipolar source_directory, string_address source,
 
         /*      A directory cp made in its own stage is filled in batches; the
                 ones below it, and every other kind of copy, name by name. */
-        if (!unreadable && (staged || in_place) && !moving && !cp_symbolic && !cp_attributes_only &&
-            !file_debug && cp_reflink_policy != 'A' && !cp_memory_bounded())
+        bool parallel_eligible = (staged || in_place) && !moving && !cp_symbolic &&
+                                 !cp_attributes_only && !file_debug &&
+                                 cp_reflink_policy != 'A' && !cp_memory_bounded();
+
+        if (!unreadable && parallel_eligible)
         {
                 complete = cp_tree_parallel(walk->handle, source_shown,
                                             destination_handle, destination_shown,
@@ -38726,9 +38708,7 @@ static bool file_copy_one(bipolar source_directory, string_address source,
         //      A copy that goes name by name takes them in inode order too,
         //      as GNU's savedir gives them to copy_dir, so what it says of
         //      them comes in that order and not the file system's.
-        bool serial_walk = !((staged || in_place) && !moving && !cp_hard && !cp_symbolic &&
-                             !cp_attributes_only && !file_debug && cp_reflink_policy != 'A' &&
-                             !cp_memory_bounded());
+        bool serial_walk = !parallel_eligible || cp_hard;
 
         if ((moving || serial_walk) && !unreadable)
                 listed = file_listing_by_inode(walk,
@@ -38740,9 +38720,7 @@ static bool file_copy_one(bipolar source_directory, string_address source,
         //      what a directory hands its parent is whether any name did.
         bool created_in = cp_created_valid;
         bool created_out = false;
-        while (!unreadable &&
-               !((staged || in_place) && !moving && !cp_hard && !cp_symbolic && !cp_attributes_only &&
-                 !file_debug && cp_reflink_policy != 'A' && !cp_memory_bounded()) &&
+        while (!unreadable && serial_walk &&
                (child = listed ? (listed_at < listed_count ? listed[listed_at++] : null)
                                : file_walk_next(walk)))
         {
@@ -47834,7 +47812,7 @@ static b32 file_hostname()
         string_address name = null;
         positive length;
         bipolar failed;
-        p8 line[4096];
+        static p8 line[4096];
 
         file_taking taking = {
             .program = (string_address) "hostname",
@@ -50757,10 +50735,17 @@ static b32 file_cal()
                         positive nanoseconds;
                         bool digit_in_it = false;
 
+                        static const string_address cal_moment_words[] = {
+                            (string_address) "now",
+                            (string_address) "today",
+                            (string_address) "yesterday",
+                            (string_address) "tomorrow",
+                        };
+
                         for (string_address at = word; *at; at++)
                                 digit_in_it |= byte_is_digit(*at);
-                        if ((digit_in_it || string_equals(word, "now") || string_equals(word, "today") ||
-                             string_equals(word, "yesterday") || string_equals(word, "tomorrow")) &&
+                        if ((digit_in_it ||
+                             string_table_lookup(word, cal_moment_words) < array_count(cal_moment_words)) &&
                             file_moment_read_exact(word, (b64)now, address_of stamp,
                                                    address_of nanoseconds))
                         {
@@ -51031,7 +51016,7 @@ static positive date_shape_wide(writer write, b64 when, positive nanoseconds,
                 positive pad = width > date_wide_text.used ? width - date_wide_text.used : 0;
                 p8 fill = date_wide_probe.used > date_wide_text.used && date_wide_probe.bytes
                               ? date_wide_probe.bytes[0] : ' ';
-                p8 block[4096];
+                p8 block[256];
 
                 memory_fill(block, fill, sizeof(block));
                 while (!none && pad && !log_failed())
