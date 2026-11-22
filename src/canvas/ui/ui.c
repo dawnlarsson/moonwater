@@ -26315,7 +26315,7 @@ static b32 ui_apps_uninstall(const char address_to root, int which, const char a
         ui_apps_pin(root, which, false);
         if (!ui_apps_is_local(app) && app->profile[0])
         {
-                string_address words[10];
+                string_address words[12];
                 positive count = 0;
                 words[count++] = (string_address) "/terminal";
                 if (mono && mono[0])
