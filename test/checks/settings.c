@@ -3647,7 +3647,6 @@ static fn check_settings_stuck_child(void)
                 system_call_1(syscall(exit), 0);
         }
         system_close(ends[1]);
-        // The child is stopped before the close is asked of it (WUNTRACED 2).
         system_call_4(syscall(wait4), (positive)child, (positive)&status, 2, 0);
         settings.runner.child = child;
         settings.runner.output = ends[0];
@@ -5282,6 +5281,8 @@ static int drive_parts_of(int row)
         memory_copy(ids, settings.list.id, sizeof(int) * (positive)ids_count), memory_copy(subs, settings_sub, sizeof(*subs) * (positive)subs_count);
         memory_zero(drive_parts, sizeof(drive_parts));
         ui_list_fold(&settings.list, settings_fold_key(row), true), settings_sub_count = 0;
+        int list_count = settings.list.count;
+        ui_list_begin(&settings.list); // the rows are listed from the list's first id, as a rebuild lists them (ui_list_add appends)
         count = settings_drive_rows(row, 0);
         for (int at = 0; at < count && at < DRIVE_PARTS; at++)
         {
@@ -5296,6 +5297,7 @@ static int drive_parts_of(int row)
                 part->kind = described.kind, part->swatch = described.swatch, part->expander = described.expander, part->dim = described.dim;
                 part->reveal = described.reveal;
         }
+        settings.list.count = list_count;
         memory_copy(settings.list.id, ids, sizeof(int) * (positive)ids_count), memory_copy(settings_sub, subs, sizeof(*subs) * (positive)subs_count);
         settings_sub_count = subs_count, ui_list_fold(&settings.list, settings_fold_key(row), expanded);
         return count;
@@ -5942,6 +5944,7 @@ static const char address_to drive_section_of(const char address_to label, struc
 }
 
 // Every drive of the list shut (the window as it starts), or open, by their names, as a press leaves them; the reading then shows them so.
+static fn drive_fold_run(b64 for_ns);
 static fn drive_open_all(const char address_to text, b32 open)
 {
         // The open names are a list that grows on its first keep (settings_drives_open is null until then): zero what it holds, if it holds any.
@@ -5952,6 +5955,7 @@ static fn drive_open_all(const char address_to text, b32 open)
                 if (settings_item_storage(&settings.item[2][at]))
                         settings_drive_keep(settings_drive_name(&settings.item[2][at]), true);
         drive_feed(text);
+        drive_fold_run(2000000000); // the kit's fold follows the name, and its spring runs to rest before the rows are laid out
 }
 
 // The shares of the rows under a drive (drive_parts_of), in tenths of a percent, added up: each as its row says it, 42.2% being 422.
@@ -5994,6 +5998,7 @@ static fn drive_fold_run(b64 for_ns)
         {
                 ui_kit.now = (positive)at;
                 ui_kit.busy = 0;
+                ui_list_fold_step(&settings.ui, &settings.list); // the frame steps the folds (settings_frame does, once a frame)
         }
 }
 
@@ -6651,7 +6656,7 @@ static fn check_settings_drive_rows(string_address regular, string_address bold)
 
         // The heading: the share at the strip's start and the amount at its end, saying 97% partitioned and USED / TOTAL.
         headed = drive_lay() && drive.row.share && drive.row.amount && string_equals((string_address)drive.row.share, (string_address) "97% partitioned") &&
-                 string_equals((string_address)drive.row.amount, (string_address) "969 GB / 1000 GB") && drive.share.x == drive.strip_x &&
+                 string_equals((string_address)drive.row.amount, (string_address) "969 GB / 1.0 TB") && drive.share.x == drive.strip_x &&
                  drive.amount.x + drive.amount.w == drive.strip_x + drive.strip_w && drive.amount.w > 0;
         check("settings drive rows: the heading says the share partitioned at the strip's start and USED / TOTAL at its end", headed);
 
@@ -6665,10 +6670,10 @@ static fn check_settings_drive_rows(string_address regular, string_address bold)
                 drive_click(settings.list.x + settings.list.w / 2, tops);
                 drive_fold_run(0);
                 drive_show(SETTINGS_WIDTH, 1, false), ui_kit.now = 6000000000ull;
-                hits += settings_exp_get(drive.id) && drive_lay() && drive.parts == 6 && drive.part_height[1] == 0;
+                                hits += settings_exp_get(drive.id) && drive_lay() && drive.parts == 6 && drive.part_height[1] == 0;
                 drive_fold_run(100000000);
                 mid = settings_fold_reveal(drive.id);
-                hits += mid > 0 && mid < UI_ONE;
+                                hits += mid > 0 && mid < UI_ONE;
                 drive_fold_run(2000000000);
                 drive_show(SETTINGS_WIDTH, 1, false);
                 hits += drive_lay() && drive.parts == 6 && settings_fold_reveal(drive.id) == UI_ONE &&
@@ -6678,7 +6683,7 @@ static fn check_settings_drive_rows(string_address regular, string_address bold)
                 drive_fold_run(2000000000);
                 drive_show(SETTINGS_WIDTH, 1, false);
                 hits += !settings_exp_get(drive.id) && drive_lay() && drive.parts == 1;
-                pressed = hits == 4;
+                                pressed = hits == 4;
                 // The keys: on the disclosure, with the rows the window's pane.
                 ui_kit.motion = 1, settings.page.pane = 1, settings.focused = 1;
                 settings.list.focus = disclosure;
