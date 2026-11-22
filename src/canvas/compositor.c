@@ -749,7 +749,7 @@ static struct
         unsigned int *glass_side, *glass_told, *lifted, theme_word, theme_side;
         unsigned int *blur, *frost, *rise;
         unsigned long blur_bytes, frost_bytes, rise_bytes;
-        positive blurred, recomposed;
+        positive blurred, recomposed, glass_band_card; // glass_band_card: glass bands composed on the card (gpu_glass), counted by glass.c
         int damage_by;
         font_face face, bold;
         int bold_ok;
@@ -2149,7 +2149,7 @@ static void compositor_stats_log(void)
         if (!compositor_late.early)
                 string_format(log, "compositor: %p presents were made late in their period, and %p of them missed the vblank they were for\n",
                               compositor_late.made, compositor_late.missed);
-        string_format(log, "compositor: glass blurred again %p pixels and composed again %p\n", compositor.blurred, compositor.recomposed);
+        string_format(log, "compositor: glass blurred again %p pixels, composed again %p, and %p bands composed on the card\n", compositor.blurred, compositor.recomposed, compositor.glass_band_card);
         if (compositor_reader.on)
                 string_format(log, "compositor: the input thread sent %p reports itself (%p of them 100 us or more after the device's stamp, the "
                                    "latest %p us) and %p keys, and handed %p records to the loop\n",
