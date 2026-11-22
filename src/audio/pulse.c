@@ -70,6 +70,10 @@
 #define PULSE_SAMPLE_USER (4ul << 20)   // and of what a user who is not root holds of them
 #define PULSE_UPLOADS 8                 // sounds being uploaded, all clients together
 #define PULSE_UPLOADS_PER_CLIENT 2
+#define PULSE_CLIENTS_PER_UID 96        // connections of one non-root uid
+#define PULSE_STREAMS_PER_UID 64        // active playback/sample streams of one non-root uid
+#define PULSE_RECORDS_PER_UID 32        // active record streams of one non-root uid
+#define PULSE_TABLE_MAX 4096            // hard ceiling on dynamic client/stream/record tables
 #define PULSE_FRAME_COMMAND 16384    // the most a command frame may carry
 #define PULSE_FRAME_DATA 131072      // and a data frame
 #define PULSE_IN (PULSE_FRAME_DATA + 20)
@@ -818,9 +822,11 @@ static int pulse_table_grow(struct pulse *p, void **table, long *slots, long siz
         long next;
         void *memory;
 
-        if (*slots < 0 || *slots >= (1l << 18) || size <= 0)
+        if (*slots < 0 || *slots >= PULSE_TABLE_MAX || size <= 0)
                 return 0;
         next = *slots ? *slots * 2 : 8;
+        if (next > PULSE_TABLE_MAX)
+                next = PULSE_TABLE_MAX;
         memory = p->host.alloc(p->host.context, next * size);
 
         if (!memory)
@@ -1606,7 +1612,7 @@ static void pulse_drop(struct pulse *p, long slot)
         for (int i = 0; i < PULSE_UPLOADS; i++)
                 if (p->upload[i].used && p->upload[i].client == slot)
                         pulse_upload_free(p, p->upload + i);
-        pulse_event(p, PULSE_FACILITY_CLIENT, PULSE_EVENT_REMOVE, c->index);
+        pulse_event_to(p, PULSE_FACILITY_CLIENT, PULSE_EVENT_REMOVE, c->index, c->uid);
         p->client[slot] = 0;
         p->clients_dropped++;
         p->host.release(p->host.context, c, (long)sizeof(*c));
@@ -1914,6 +1920,19 @@ static struct pulse_stream *pulse_stream_make(struct pulse *p, long slot, long f
         struct pulse_stream *s = 0;
         unsigned long frame, ring;
 
+        if (!c->root)
+        {
+                long same = 0;
+
+                for (long i = 0; i < p->stream_slots; i++)
+                        if (p->stream[i].used && !p->stream[i].dying && p->stream[i].uid == c->uid)
+                                same++;
+                if (same >= PULSE_STREAMS_PER_UID)
+                {
+                        *error = PULSE_ERR_TOOLARGE;
+                        return 0;
+                }
+        }
         s = pulse_stream_free_slot(p);
         if (!s)
         {
@@ -2432,6 +2451,16 @@ static int pulse_command_create_record(struct pulse *p, long slot, struct wire_r
                 return pulse_error(p, c, tag, PULSE_ERR_ACCESS);
         if (source < 0)
                 return pulse_error(p, c, tag, PULSE_ERR_NOENTITY);
+        if (!c->root)
+        {
+                long same = 0;
+
+                for (long i = 0; i < p->record_slots; i++)
+                        if (p->record[i].used && p->record[i].uid == c->uid)
+                                same++;
+                if (same >= PULSE_RECORDS_PER_UID)
+                        return pulse_error(p, c, tag, PULSE_ERR_TOOLARGE);
+        }
         rec = pulse_record_free_slot(p);
         if (!rec)
                 return pulse_error(p, c, tag, PULSE_ERR_INTERNAL);
@@ -2980,8 +3009,18 @@ static int pulse_command_play_sample(struct pulse *p, long slot, struct wire_r *
         else
                 sink = p->default_sink;
         sample = pulse_sample_named(p, name);
-        if (!sample || sink < 0)
+        if (!sample || !pulse_may(c, sample->uid) || sink < 0)
                 return pulse_error(p, c, tag, PULSE_ERR_NOENTITY);
+        if (!c->root)
+        {
+                long same = 0;
+
+                for (long i = 0; i < p->stream_slots; i++)
+                        if (p->stream[i].used && !p->stream[i].dying && p->stream[i].uid == c->uid)
+                                same++;
+                if (same >= PULSE_STREAMS_PER_UID)
+                        return pulse_error(p, c, tag, PULSE_ERR_TOOLARGE);
+        }
         s = pulse_stream_free_slot(p);
         if (!s)
                 return pulse_error(p, c, tag, PULSE_ERR_INTERNAL);
@@ -3487,7 +3526,7 @@ static int pulse_command(struct pulse *p, long slot, const unsigned char *payloa
                         // The pid the system says it is, over whatever the program says.
                         pulse_props_set(&c->props, "application.process.id", (const unsigned char *)pid, n + 1);
                 }
-                pulse_event(p, PULSE_FACILITY_CLIENT, PULSE_EVENT_NEW, c->index);
+                pulse_event_to(p, PULSE_FACILITY_CLIENT, PULSE_EVENT_NEW, c->index, c->uid);
                 pulse_reply_begin(p, &w, tag);
                 if (c->version >= 13)
                         wire_w_u32(&w, c->index);
@@ -3518,14 +3557,14 @@ static int pulse_command(struct pulse *p, long slot, const unsigned char *payloa
                                 pulse_props_update(&c->props, &pid, 2);
                         }
                 }
-                pulse_event(p, PULSE_FACILITY_CLIENT, PULSE_EVENT_CHANGE, c->index);
+                pulse_event_to(p, PULSE_FACILITY_CLIENT, PULSE_EVENT_CHANGE, c->index, c->uid);
                 return pulse_ack(p, c, tag);
         }
         case PULSE_COMMAND_REMOVE_CLIENT_PROPLIST:
                 PULSE_NEED_AUTH();
                 if (!pulse_r_props_remove(&r, &c->props, "application.process.id"))
                         return PULSE_DEAD;
-                pulse_event(p, PULSE_FACILITY_CLIENT, PULSE_EVENT_CHANGE, c->index);
+                pulse_event_to(p, PULSE_FACILITY_CLIENT, PULSE_EVENT_CHANGE, c->index, c->uid);
                 return pulse_ack(p, c, tag);
         case PULSE_COMMAND_EXIT:
                 if (!pulse_r_eof(&r))
@@ -3945,9 +3984,19 @@ static int pulse_data(struct pulse *p, long slot, unsigned long channel, long lo
 */
 AUDIO_API long pulse_client_open(struct pulse *p, long uid, long pid)
 {
-        long i;
+        long i, same = 0;
         struct pulse_client *c;
 
+        if (uid < 0)
+                return -1;
+        if (uid != 0)
+        {
+                for (long k = 0; k < p->client_slots; k++)
+                        if (p->client[k] && p->client[k]->uid == uid)
+                                same++;
+                if (same >= PULSE_CLIENTS_PER_UID)
+                        return -1;
+        }
         for (i = 0; i < p->client_slots && p->client[i]; i++)
                 ;
         if (i == p->client_slots && !pulse_table_grow(p, (void **)&p->client, &p->client_slots, (long)sizeof(struct pulse_client *)))

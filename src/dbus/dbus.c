@@ -3171,9 +3171,11 @@ static int dbus_auth_line(struct dbus_client *c, char *line, long n)
         switch (ci < (long)(sizeof(auth_cmds) / sizeof(auth_cmds[0])) ? auth_cmds[ci].op : 0)
         {
         case 1: // AUTH
+                c->want_data = 0;
                 if (count == 1 || (count >= 2 && !dbus_equal(word[1], "EXTERNAL") && !dbus_equal(word[1], "ANONYMOUS")))
                 {
                         c->uid_ok = 0;
+                        c->unix_fds = 0;
                         dbus_say(c, "REJECTED EXTERNAL ANONYMOUS\r\n");
                         return 0;
                 }
@@ -3190,11 +3192,12 @@ static int dbus_auth_line(struct dbus_client *c, char *line, long n)
                         // EXTERNAL with nothing after it: the client answers DATA with its data, or with none (sd-bus sends
                         // that line without waiting) to say that the credentials of the socket are enough.
                         c->uid_ok = 0;
+                        c->unix_fds = 0;
                         c->want_data = 1;
                         dbus_say(c, "DATA\r\n");
                         return 0;
                 }
-                if (dbus_external_ok(c, word[2]))
+                if (count == 3 && dbus_external_ok(c, word[2]))
                 {
                         c->uid_ok = 1;
                         dbus_say(c, "OK ");
@@ -3204,6 +3207,7 @@ static int dbus_auth_line(struct dbus_client *c, char *line, long n)
                 else
                 {
                         c->uid_ok = 0;
+                        c->unix_fds = 0;
                         dbus_say(c, "REJECTED EXTERNAL ANONYMOUS\r\n");
                 }
                 return 0;
@@ -3212,7 +3216,7 @@ static int dbus_auth_line(struct dbus_client *c, char *line, long n)
                 int asked = c->want_data;
 
                 c->want_data = 0;
-                if (asked && dbus_external_ok(c, count >= 2 ? word[1] : ""))
+                if (asked && count <= 2 && dbus_external_ok(c, count == 2 ? word[1] : ""))
                 {
                         c->uid_ok = 1;
                         dbus_say(c, "OK ");
@@ -3222,6 +3226,7 @@ static int dbus_auth_line(struct dbus_client *c, char *line, long n)
                 else
                 {
                         c->uid_ok = 0;
+                        c->unix_fds = 0;
                         dbus_say(c, "REJECTED EXTERNAL ANONYMOUS\r\n");
                 }
                 return 0;
@@ -3242,6 +3247,8 @@ static int dbus_auth_line(struct dbus_client *c, char *line, long n)
                 return 1;
         case 5: // CANCEL, ERROR
                 c->uid_ok = 0;
+                c->want_data = 0;
+                c->unix_fds = 0;
                 dbus_say(c, "REJECTED EXTERNAL ANONYMOUS\r\n");
                 return 0;
         default:
@@ -3541,6 +3548,14 @@ DBUS_API void dbus_in_done(long slot, long count)
                                 break;
                         if (c->in[at] == 'l' && c->in[at + 3] == 1 && c->in[at + 1] > DBUS_SIGNAL)
                         {
+                                // An unknown message type cannot safely be skipped while queued FDs are pending: it could
+                                // shift those FDs onto a following message.
+                                if (c->in_fds > 0)
+                                {
+                                        c->dead = 1;
+                                        c->why = "a message that is not valid";
+                                        break;
+                                }
                                 // a type of message this bus does not know is ignored, as the specification asks; it goes nowhere
                                 at += total;
                                 continue;

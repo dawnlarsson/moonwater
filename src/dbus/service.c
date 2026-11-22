@@ -395,7 +395,7 @@ static void sessionbus_drop(long slot)
 static int sessionbus_listen(void)
 {
         unsigned char address[110];
-        long length = 0, got;
+        long length = 0, got, old_mask, bound;
 
         memory_zero(address, sizeof address);
         address[0] = 1; // AF_UNIX
@@ -410,13 +410,15 @@ static int sessionbus_listen(void)
         got = sessionbus_call(syscall(socket), 1, 1 | 0x800 | 0x80000, 0, 0, 0, 0); // SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC
         if (got < 0)
                 return -1;
-        if (sessionbus_call(syscall(bind), (positive)got, (positive)address, (positive)(2 + length + 1), 0, 0, 0) < 0 ||
-            sessionbus_call(syscall(listen), (positive)got, SESSIONBUS_BACKLOG, 0, 0, 0, 0) < 0)
+        // Set the socket mode atomically at bind() via umask instead of a post-bind fchmodat() symlink race.
+        old_mask = sessionbus_call(syscall(umask), 0111, 0, 0, 0, 0, 0);
+        bound = sessionbus_call(syscall(bind), (positive)got, (positive)address, (positive)(2 + length + 1), 0, 0, 0);
+        sessionbus_call(syscall(umask), (positive)old_mask, 0, 0, 0, 0, 0);
+        if (bound < 0 || sessionbus_call(syscall(listen), (positive)got, SESSIONBUS_BACKLOG, 0, 0, 0, 0) < 0)
         {
                 system_close((int)got);
                 return -1;
         }
-        sessionbus_call(syscall(fchmodat), (positive)AT_FDCWD, (positive)sessionbus.path, 0666, 0, 0, 0);
         sessionbus.listen = (int)got;
         return 0;
 }
@@ -454,14 +456,15 @@ static void sessionbus_accept(void)
 {
         for (int tries = 0; tries < SESSIONBUS_ACCEPTS; tries++)
         {
-                int credentials[3] = {0, 0, 0};
+                int credentials[3] = {-1, -1, -1};
                 unsigned int size = sizeof credentials;
                 long fd = sessionbus_call(syscall(accept4), (positive)sessionbus.listen, 0, 0, 0x800 | 0x80000, 0, 0), slot;
 
                 if (fd < 0)
                         return;
                 // SOL_SOCKET, SO_PEERCRED: the kernel's word for who is on the other end.
-                if (sessionbus_call(syscall(getsockopt), (positive)fd, 1, 17, (positive)credentials, (positive)&size, 0) < 0)
+                if (sessionbus_call(syscall(getsockopt), (positive)fd, 1, 17, (positive)credentials, (positive)&size, 0) < 0 ||
+                    size != sizeof credentials || credentials[1] == -1)
                 {
                         system_close((int)fd);
                         continue;

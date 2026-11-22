@@ -609,7 +609,7 @@ static long audio_playing_stream(int *low)
 
         if (low)
                 *low = 0;
-        for (long i = 0; i < audio_service.pulse.stream_slots; i++)
+        for (long i = 0; i < audio_service.pulse.stream_slots && i < audio_service.slots; i++)
         {
                 struct pulse_stream *s = &p->stream[i];
                 long frames;
@@ -1242,7 +1242,7 @@ static void audio_page_write(void)
                 memory_zero(build.device_list + i, sizeof(build.device_list[0]));
         devices = audio_service.device_count;
         build.devices = (unsigned int)devices;
-        for (long i = 0; i < audio_service.pulse.stream_slots; i++)
+        for (long i = 0; i < audio_service.pulse.stream_slots && i < audio_service.slots; i++)
         {
                 struct pulse_stream *s = p->stream + i;
                 struct pulse_client *c;
@@ -1309,7 +1309,7 @@ static void audio_page_write(void)
                 for (long i = inputs; i < (long)build.inputs; i++)
                         memory_zero(build.input_list + i, sizeof(build.input_list[0]));
                 build.inputs = (unsigned int)inputs;
-                for (long i = 0; i < audio_service.pulse.record_slots; i++)
+                for (long i = 0; i < audio_service.pulse.record_slots && i < audio_service.slots; i++)
                 {
                         struct pulse_record *r = p->record + i;
                         struct pulse_client *c;
@@ -1369,10 +1369,13 @@ static void audio_page_write(void)
 static void audio_page_open(void)
 {
         audio_service.page_whole = 1;
-        long fd = audio_call(syscall(openat), (positive)AT_FDCWD, (positive)audio_service.page_path, O_RDWR | O_CREAT | O_NOFOLLOW | O_CLOEXEC, 0600, 0, 0), got;
+        // Replace any pre-existing state file so we never reuse a stale inode with looser permissions or an external open handle.
+        audio_call(syscall(unlinkat), (positive)AT_FDCWD, (positive)audio_service.page_path, 0, 0, 0, 0);
+        long fd = audio_call(syscall(openat), (positive)AT_FDCWD, (positive)audio_service.page_path, O_RDWR | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600, 0, 0), got;
 
         if (fd < 0)
                 return;
+        audio_call(syscall(fchmod), (positive)fd, 0600, 0, 0, 0, 0);
         if (audio_call(syscall(ftruncate), (positive)fd, AUDIO_STATE_BYTES, 0, 0, 0, 0) < 0)
         {
                 audio_call(syscall(close), (positive)fd, 0, 0, 0, 0, 0);
@@ -1559,19 +1562,20 @@ static void audio_accept(void)
 {
         for (int tries = 0; tries < AUDIO_ACCEPTS; tries++)
         {
-                int credentials[3] = {0, 0, 0};
+                int credentials[3] = {-1, -1, -1};
                 unsigned int size = sizeof credentials;
                 long fd = audio_call(syscall(accept4), (positive)audio_service.listen, 0, 0, 0x800 | 0x80000, 0, 0), slot;
 
                 if (fd < 0)
                         return;
                 // SOL_SOCKET, SO_PEERCRED: the kernel's word for who is on the other limit.
-                if (audio_call(syscall(getsockopt), (positive)fd, 1, 17, (positive)credentials, (positive)&size, 0) < 0)
+                if (audio_call(syscall(getsockopt), (positive)fd, 1, 17, (positive)credentials, (positive)&size, 0) < 0 ||
+                    size != sizeof credentials || credentials[1] == -1)
                 {
                         system_close((int)fd);
                         continue;
                 }
-                slot = pulse_client_open(&audio_service.pulse, credentials[1], credentials[0]);
+                slot = pulse_client_open(&audio_service.pulse, (unsigned int)credentials[1], credentials[0]);
                 if (slot < 0)
                 {
                         // No memory for the client: it is told so (an error to its first command, which is its AUTH) and let go.
@@ -1597,9 +1601,13 @@ static int audio_client_read(long slot)
                 if (got < 0)
                         return got == -11 || got == -4; // EAGAIN, EINTR
                 audio_service.budget -= got;
-                if (pulse_client_feed(&audio_service.pulse, slot, audio_service.read, got) < 0)
-                        return 0;
-                audio_slots_fit();
+                {
+                        int fed = pulse_client_feed(&audio_service.pulse, slot, audio_service.read, got);
+
+                        audio_slots_fit();
+                        if (fed < 0)
+                                return 0;
+                }
                 if (got < AUDIO_READ)
                         break;
         }
@@ -2472,7 +2480,7 @@ static void audio_start(void)
 static void audio_listen(void)
 {
         unsigned char address[110];
-        long length = 0, got;
+        long length = 0, got, old_mask, bound;
 
         memory_zero(address, sizeof address);
         address[0] = 1; // AF_UNIX
@@ -2491,14 +2499,16 @@ static void audio_listen(void)
         got = audio_call(syscall(socket), 1, 1 | 0x800 | 0x80000, 0, 0, 0, 0);
         if (got < 0)
                 return;
-        if (audio_call(syscall(bind), (positive)got, (positive)address, (positive)(2 + length + 1), 0, 0, 0) < 0 ||
-            audio_call(syscall(listen), (positive)got, AUDIO_BACKLOG, 0, 0, 0, 0) < 0)
+        // Set the socket mode atomically at bind() via umask instead of a post-bind fchmodat() symlink race.
+        old_mask = audio_call(syscall(umask), 0111, 0, 0, 0, 0, 0);
+        bound = audio_call(syscall(bind), (positive)got, (positive)address, (positive)(2 + length + 1), 0, 0, 0);
+        audio_call(syscall(umask), (positive)old_mask, 0, 0, 0, 0, 0);
+        if (bound < 0 || audio_call(syscall(listen), (positive)got, AUDIO_BACKLOG, 0, 0, 0, 0) < 0)
         {
                 system_close((int)got);
                 audio_say_text("cannot listen on", audio_service.socket_path);
                 return;
         }
-        audio_call(syscall(fchmodat), (positive)AT_FDCWD, (positive)audio_service.socket_path, 0666, 0, 0, 0);
         audio_service.listen = (int)got;
 }
 
@@ -2580,7 +2590,7 @@ static int audio_playing_now(void)
                 return 1;
         if (p->streams_made == p->streams_freed)
                 return 0;
-        for (long i = 0; i < audio_service.pulse.stream_slots; i++)
+        for (long i = 0; i < audio_service.pulse.stream_slots && i < audio_service.slots; i++)
                 if (p->stream[i].used && !p->stream[i].dying && !p->stream[i].corked)
                         return 1;
         return 0;
