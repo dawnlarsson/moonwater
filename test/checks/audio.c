@@ -10155,6 +10155,10 @@ int main(void)
 
             cc -std=gnu11 -O2 -Wall -DCHECK_audio_service test/checks.c -lm
 */
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE 1 // cpu_set_t and CPU_SET (the bench pins its runs)
+#endif
+#include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <math.h>
@@ -10197,6 +10201,43 @@ typedef struct timespec timespec;
 #define log_flush() ((void)0)
 static long program_argument_count(void) { return 0; }
 static string_address program_argument(long at) { (void)at; return (string_address)""; }
+// The search and decimal routines the server calls (src/audio/service.c, alsa.c), as the library spells them: the same answers.
+typedef unsigned char p8;
+static string_address string_search(string_address haystack, string_address needle) { return (string_address)strstr((const char *)haystack, (const char *)needle); }
+static string_address string_search_folded(string_address haystack, string_address needle)
+{
+        for (; *haystack; haystack++)
+        {
+                const unsigned char *h = haystack, *n = needle;
+
+                while (*n && tolower(*h) == tolower(*n))
+                        h++, n++;
+                if (!*n)
+                        return haystack;
+        }
+        return needle[0] ? null : haystack;
+}
+static address_any memory_search(const address_any block, positive size, const address_any needle, positive needle_size)
+{
+        const unsigned char *b = block, *n = needle;
+
+        for (positive at = 0; needle_size && size >= needle_size && at <= size - needle_size; at++)
+                if (!memcmp(b + at, n, needle_size))
+                        return (address_any)(b + at);
+        return null;
+}
+static positive positive_into_string(p8 *into, positive value)
+{
+        char digits[24];
+        positive count = 0, length = 0;
+
+        do
+                digits[count++] = (char)('0' + value % 10), value /= 10;
+        while (value);
+        while (count)
+                into[length++] = (p8)digits[--count];
+        return length;
+}
 static int string_equals(string_address a, string_address b) { return strcmp((const char *)a, (const char *)b) == 0; }
 static positive clock_monotonic_nanoseconds(void)
 {

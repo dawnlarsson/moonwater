@@ -5236,9 +5236,15 @@ static fn settings_codes(void)
         host_settings address_to slot = address_of settings_block_slot;
         host_settings address_to into = address_of settings_block_next;
         p8 path[64];
-        bipolar handle = system_call_2(syscall(memfd_create),
-                                       (positive)(string_address)"codes", 0);
-        p8 held = handle >= 0;
+        // A real file, not a memfd named through /proc/self/fd: the reader opens its image with O_NOFOLLOW (df81078c8), and that
+        // refuses a /proc link, which no product caller passes (every caller hands a path it looked up).
+        static const char image_name[] = "/tmp/mw-settings-image-check";
+        bipolar handle;
+        p8 held;
+
+        system_call_3(syscall(unlinkat), AT_FDCWD, (positive)image_name, 0);
+        handle = system_open_at_mode(AT_FDCWD, image_name, FILE_READ_WRITE | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
+        held = handle >= 0;
         b32 kinds[4] = {0, 0, 0, 0};
         bipolar stamps[4] = {0, 0, 0, 0};
         p8 whole = true;
@@ -5248,8 +5254,7 @@ static fn settings_codes(void)
         if (handle < 0)
                 return;
 
-        memory_copy(path, "/proc/self/fd/", 14);
-        positive_into_string(path + 14, (positive)handle);
+        memory_copy(path, image_name, sizeof(image_name));
 
         //      An image with a block, both slots never written.
         settings_build(".mwset\0\0", 0x2000, 0x8000, true);
@@ -5308,6 +5313,7 @@ static fn settings_codes(void)
         kinds[3] = host_settings_image("/proc/self/fd/none/image", into);
         stamps[3] = host_settings_stamp("/proc/self/fd/none/image", slot);
         system_close(handle);
+        system_call_3(syscall(unlinkat), AT_FDCWD, (positive)image_name, 0);
 
         check("an image with a block gives its settings, and stamping puts new ones in both slots",
               held && kinds[0] == 1 && stamps[0] == 0);
