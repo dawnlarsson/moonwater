@@ -823,6 +823,17 @@ static void check_compositor_popup(void)
         check("popup layer: raising the launcher keeps its open context menu stacked above it",
               launcher_pos >= 0 && popup_pos > launcher_pos);
     }
+    // A popup whose parent's chain leads back to the row being taken is refused: a 2-cycle (9 is a popup of 8) and a 3-cycle
+    // (9 of 7, 7 of 8). Row 8 is taken with parent 9, which is showing, so the old code made the cycle and kept it.
+    compositor_popup_parent[9] = 8;
+    compositor.showing[9] = 1;
+    table->popup_parent[8] = 10;
+    check("popup cycle: a popup whose parent is its own popup is refused (2-cycle)", !compositor_popup_first(8) && compositor_popup_parent[8] < 0);
+    compositor_popup_parent[9] = 7;
+    compositor_popup_parent[7] = 8;
+    compositor.showing[7] = 1;
+    check("popup cycle: a popup whose parent chain returns to it is refused (3-cycle)", !compositor_popup_first(8) && compositor_popup_parent[8] < 0);
+    compositor.showing[7] = compositor.showing[9] = 0;
     compositor_popup_leave(1);
     for (int row = 0; row < COMPOSITOR_ROWS; row++)
         compositor_popup_parent[row] = -1;

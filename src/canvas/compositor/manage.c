@@ -2509,11 +2509,9 @@ static int compositor_space_row_active(int row)
                 return 1;
         if (compositor.layer[row] == WINDOW_LAYER_BACKGROUND)
                 return !compositor_space_screen_fullscreen(compositor_screen_of(row));
+        // A popup answers for its root: the walk is bounded (compositor_popup_root), and the root is not a popup, so no recursion.
         if (compositor_popup_parent && compositor_popup_parent[row] >= 0)
-        {
-                int root = compositor_popup_root(row);
-                return root == row ? 1 : compositor_space_row_active(root);
-        }
+                row = compositor_popup_root(row);
         if (compositor_row_space_exempt(row))
         {
                 if (compositor_owner && compositor_owner[row] > 0)
@@ -4164,7 +4162,8 @@ static b32 compositor_popup_first(int row)
         int parent = named >= 1 && named <= (unsigned int)COMPOSITOR_ROWS ? (int)named - 1 : -1, ax, ay, x, y, at;
         const int (*screens)[4];
 
-        if (parent < 0 || parent == row || !compositor.showing[parent])
+        // A parent that is the row, or one of its own popups, would make a cycle in the chain every walk follows.
+        if (parent < 0 || parent == row || !compositor.showing[parent] || compositor_popup_in_chain(parent, row))
                 return false;
         compositor_popup_parent[row] = parent;
         ax = compositor.x[parent] + compositor_fit(table->popup_x[row], -WINDOW_PLACE_MOST, WINDOW_PLACE_MOST);
