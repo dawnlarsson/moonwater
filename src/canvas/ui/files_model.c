@@ -2153,7 +2153,16 @@ static inline positive files_uri_byte(p8 address_to into, p8 c)
         return into[0] = '%', into[1] = (p8)hex[c >> 4], into[2] = (p8)hex[c & 15], 3;
 }
 
-static inline int files_hex_nibble(p8 c) { return c <= '9' ? c - '0' : (c | 32) - 'a' + 10; }
+static inline int files_hex_nibble(p8 c)
+{
+        if (c >= '0' && c <= '9')
+                return c - '0';
+        if (c >= 'a' && c <= 'f')
+                return c - 'a' + 10;
+        if (c >= 'A' && c <= 'F')
+                return c - 'A' + 10;
+        return -1;
+}
 
 static int files_bin_put(const p8 address_to bin, const p8 address_to path, const char address_to when, p8 address_to named)
 {
@@ -2197,7 +2206,7 @@ static b32 files_bin_was(const p8 address_to bin, const p8 address_to name, p8 a
         bipolar got;
         positive at = 0, out = 0;
         if (!files_name_good(name) || !files_bin_join(info, bin, "/info", name, ".trashinfo") ||
-            (got = file_slurp_once_at(AT_FDCWD, (string_address)info, text, sizeof(text) - 1)) <= 0)
+            (got = file_slurp_regular_at(AT_FDCWD, (string_address)info, text, sizeof(text), O_NOFOLLOW)) <= 0)
                 return false;
         text[got] = 0;
         for (; at + 5 < (positive)got; at++)
@@ -2205,14 +2214,36 @@ static b32 files_bin_was(const p8 address_to bin, const p8 address_to name, p8 a
                         break;
         if (at + 5 >= (positive)got)
                 return false;
-        for (at += 5; text[at] && text[at] != '\n' && out + 1 < FILES_PATH; at++)
+        for (at += 5; text[at] && text[at] != '\n' && text[at] != '\r' && out + 1 < FILES_PATH; at++)
         {
                 p8 c = text[at];
-                if (c == '%' && text[at + 1] && text[at + 2])
-                        c = (p8)(files_hex_nibble(text[at + 1]) << 4 | files_hex_nibble(text[at + 2])), at += 2;
+                if (c == '%')
+                {
+                        int hi = text[at + 1] ? files_hex_nibble(text[at + 1]) : -1;
+                        int lo = text[at + 1] && text[at + 2] ? files_hex_nibble(text[at + 2]) : -1;
+                        if (hi < 0 || lo < 0)
+                                return false;
+                        c = (p8)(hi << 4 | lo), at += 2;
+                }
+                if (!c)
+                        return false;
                 path[out++] = c;
         }
-        return path[out] = 0, out > 1 && path[0] == '/';
+        path[out] = 0;
+        if (out <= 1 || path[0] != '/' || path[out - 1] == '/')
+                return false;
+        for (positive pos = 1; pos < out;)
+        {
+                positive stop = pos;
+                while (stop < out && path[stop] != '/')
+                        stop++;
+                if (stop == pos || stop - pos >= FILES_NAME ||
+                    (stop - pos == 1 && path[pos] == '.') ||
+                    (stop - pos == 2 && path[pos] == '.' && path[pos + 1] == '.'))
+                        return false;
+                pos = stop + 1;
+        }
+        return true;
 }
 
 static int files_bin_restore(const p8 address_to bin, const p8 address_to name, p8 address_to back)
@@ -2222,9 +2253,10 @@ static int files_bin_restore(const p8 address_to bin, const p8 address_to name, 
         bipolar folder, moved;
         if (!files_name_good(name))
                 return FILES_DID_BAD;
-        if (!files_bin_was(bin, name, back) || !files_bin_join(from, bin, "/files", name, null) ||
+        if (!files_bin_was(bin, name, back) || !files_name_good(files_base_name(back)) ||
+            !files_bin_join(from, bin, "/files", name, null) ||
             !files_bin_join(info, bin, "/info", name, ".trashinfo") || !files_path_parent(back, folder_path, null) ||
-            !files_bin_folders(folder_path) || (folder = files_open_dir(AT_FDCWD, folder_path, 0)) < 0)
+            !files_bin_folders(folder_path) || (folder = files_open_dir(AT_FDCWD, folder_path, O_NOFOLLOW)) < 0)
                 return FILES_DID_FAILED;
         moved = files_move_free_name(folder, files_base_name(back), free, &numbered) ? files_rename_nr(AT_FDCWD, from, folder, free) : -1;
         system_close(folder);
@@ -2384,8 +2416,11 @@ static b32 files_git_marks(const struct files_model address_to m, p8 address_to 
         for (positive at = 12, k = 0; k < count && at + 62 < size; k++)
         {
                 p16 flags = (p16)(mapped[at + 60] << 8 | mapped[at + 61]);
-                positive fixed = 62 + (version >= 3 && (flags & 0x4000) ? 2 : 0), name_at = at + fixed, end_at = name_at, first, stop;
+                positive fixed = 62 + (version >= 3 && (flags & 0x4000) ? 2 : 0), name_at, end_at, first, stop;
                 p32 h, found;
+                if (at + fixed >= size)
+                        break;
+                name_at = at + fixed, end_at = name_at;
                 while (end_at < size && mapped[end_at])
                         end_at++;
                 at += (fixed + (end_at - name_at) + 8) & ~(positive)7;
@@ -2413,7 +2448,7 @@ static b32 files_git_marks(const struct files_model address_to m, p8 address_to 
         {
                 bipolar read;
                 files_path_join(at_path, FILES_PATH, which ? m->path : s->root, (const p8 address_to) ".gitignore");
-                read = file_slurp_once_at(AT_FDCWD, (string_address)at_path, s->ignore[which], sizeof(s->ignore[which]));
+                read = file_slurp_regular_at(AT_FDCWD, (string_address)at_path, s->ignore[which], sizeof(s->ignore[which]), O_NOFOLLOW);
                 files_git_rules_add(&s->rules, s->ignore[which], read > 0 ? (positive)read : 0, which ? true : at_root);
                 if (at_root)
                         break;

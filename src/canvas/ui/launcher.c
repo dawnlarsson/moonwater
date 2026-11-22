@@ -496,7 +496,7 @@ static fn launcher_scan(const char address_to variable)
                 launcher.path[stop] = 0;
                 for (positive which = 0; which < launcher.dir_count && !seen; which++)
                         seen = string_equals((string_address)launcher.dirs[which], (string_address)launcher.path + at);
-                if (stop > at && !seen)
+                if (stop > at && launcher.path[at] == '/' && !seen)
                         launcher.dirs[launcher.dir_count++] = launcher.path + at;
                 at = next;
         }

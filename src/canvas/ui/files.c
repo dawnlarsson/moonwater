@@ -1547,9 +1547,9 @@ static fn files_open_with(b32 editor)
         }
         if (editor)
         {
-                string_address words[5] = {(string_address) "/editor", (string_address) "-f", files_app.font ? files_app.font : (string_address)UI_FONT_REGULAR, (string_address)path, null};
+                string_address words[6] = {(string_address) "/editor", (string_address) "-f", files_app.font ? files_app.font : (string_address)UI_FONT_REGULAR, (string_address) "--", (string_address)path, null};
                 if (e && e->kind != FILES_KIND_DIRECTORY && files_path_join(path, sizeof(path), m->path, files_model_name(m, e)))
-                        (void)ui_start_apart(words, 4);
+                        (void)ui_start_apart(words, 5);
                 return;
         }
         {
@@ -1872,26 +1872,25 @@ static fn files_remote_nav(void)
 }
 
 // The folder a peer's files land in: ~/.cache/moonwater/files/PEER, made 0700, and refused unless it is a folder of ours that nobody else can write.
-static b32 files_remote_dir(p8 address_to into, const p8 address_to peer)
+static bipolar files_remote_dir(p8 address_to into, const p8 address_to peer)
 {
         string_address home = getenv((string_address) "HOME");
         bipolar folder;
         file_facts facts;
-        if (!home || home[0] != '/')
-                return false;
+        if (!home || home[0] != '/' || !peer || !files_name_good(peer))
+                return -1;
         string_copy_bounded((string_address)into, home, FILES_PATH);
         string_append_bounded((string_address)into, (string_address) "/.cache/moonwater/files/", FILES_PATH);
         string_append_bounded((string_address)into, (string_address)peer, FILES_PATH);
         if (!files_bin_folders(into) || (folder = files_open_dir(AT_FDCWD, into, O_NOFOLLOW)) < 0)
-                return false;
+                return -1;
         if (files_look_fd(folder, &facts) < 0 || (facts.mode & MODE_FORMAT) != MODE_DIRECTORY || (facts.mode & 0022) ||
             facts.owner != (p32)compositor_call(syscall(getuid), 0, 0, 0, 0, 0, 0))
         {
                 system_close(folder);
-                return false;
+                return -1;
         }
-        system_close(folder);
-        return true;
+        return folder;
 }
 
 static fn files_remote_read_chunk(struct files_peer address_to p)
@@ -1923,18 +1922,23 @@ static fn files_remote_open_file(struct files_peer address_to p, const p8 addres
         p8 dir[FILES_PATH], safe[FILES_NAME];
         char shown[FILES_NAME * 3 + 4];
         positive nlen = string_length((string_address)name);
-        if (!files_peer_ensure(p) || !nlen || nlen >= FILES_NAME)
+        bipolar folder;
+        if (!files_peer_ensure(p) || !files_peer_name_ok(name, nlen))
                 return;
         files_remote_read_abort();
-        if (!files_remote_dir(dir, p->name))
-                return;
         for (positive k = 0; k < nlen; k++)
                 safe[k] = name[k] == '/' ? '_' : name[k];
         safe[nlen] = 0;
-        if (!files_path_join(rr->local_path, sizeof(rr->local_path), dir, safe))
+        if (!files_name_good(safe) || (folder = files_remote_dir(dir, p->name)) < 0)
                 return;
-        system_remove_at(AT_FDCWD, (string_address)rr->local_path, 0);
-        rr->fd = system_open_at_mode(AT_FDCWD, (string_address)rr->local_path, FILE_WRITE | FILE_CREATE | FILE_EXCLUSIVE | O_NOFOLLOW | O_CLOEXEC, 0600);
+        if (!files_path_join(rr->local_path, sizeof(rr->local_path), dir, safe))
+        {
+                system_close(folder);
+                return;
+        }
+        system_remove_at(folder, (string_address)safe, 0);
+        rr->fd = system_open_at_mode(folder, (string_address)safe, FILE_WRITE | FILE_CREATE | FILE_EXCLUSIVE | O_NOFOLLOW | O_CLOEXEC, 0600);
+        system_close(folder);
         if (rr->fd < 0)
                 return;
         rr->active = true, rr->machine = p->machine, rr->offset = 0;
@@ -1965,7 +1969,7 @@ static fn files_remote_handle_reply(struct files_peer address_to p, const struct
                                 p32 mlen = link_fs_get32(rep->data + 7 + hlen);
                                 positive copy = hlen < FILES_PATH - 1 ? hlen : FILES_PATH - 1;
                                 memory_copy(home, rep->data + 7, copy), home[copy] = 0;
-                                if (11u + hlen + mlen <= rep->length)
+                                if (mlen <= rep->length - (11u + hlen))
                                         files_tree_set_machine_children(&files.big->tree, node, home, hflags, mlen ? rep->data + 11 + hlen : null, mlen);
                                 p->info_loaded = true;
                         }
@@ -2032,7 +2036,7 @@ static fn files_remote_handle_reply(struct files_peer address_to p, const struct
                 {
                         p8 eof = rep->data[12];
                         p32 dlen = link_fs_get32(rep->data + 13);
-                        if (17u + dlen > rep->length)
+                        if (dlen > rep->length - 17u || (!eof && !dlen) || rr->offset + (p64)dlen > (64u << 20))
                         {
                                 files_remote_read_abort(), files.big->note[0] = 0, files.said = LANGUAGE_files_failed, files.dirty = true;
                                 return;
@@ -2045,11 +2049,11 @@ static fn files_remote_handle_reply(struct files_peer address_to p, const struct
                         rr->offset += dlen;
                         if (eof)
                         {
-                                string_address words[5] = {(string_address) "/editor", (string_address) "-f",
+                                string_address words[6] = {(string_address) "/editor", (string_address) "-f",
                                                            files_app.font ? files_app.font : (string_address)UI_FONT_REGULAR,
-                                                           (string_address)rr->local_path, null};
+                                                           (string_address) "--", (string_address)rr->local_path, null};
                                 files_close(&rr->fd), rr->active = false, files.big->note[0] = 0, files.dirty = true;
-                                (void)ui_start_apart(words, 4);
+                                (void)ui_start_apart(words, 5);
                         }
                         else
                                 files_remote_read_chunk(p);

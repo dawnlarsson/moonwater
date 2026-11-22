@@ -111,7 +111,7 @@ static b32 mixer_map(void)
 
         if (mixer.page)
                 return true;
-        fd = compositor_call(syscall(openat), (positive)AT_FDCWD, (positive)mixer.page_path, 0x80000, 0, 0, 0);
+        fd = compositor_call(syscall(openat), (positive)AT_FDCWD, (positive)mixer.page_path, FILE_READ | O_NOFOLLOW | O_CLOEXEC, 0, 0, 0);
         if (fd < 0)
                 return false;
         size = compositor_call(syscall(lseek), (positive)fd, 0, 2, 0, 0, 0);
@@ -314,7 +314,7 @@ static fn mixer_flush(void)
                         if (answer >= 0 && (big->send[k] & 2))
                                 answer = ctl_set_source_mute(&big->ctl, big->source, strip->muted);
                 }
-                else
+                else if (k >= big->device && k - big->device < UI_STRIPS_MOST)
                         for (int member = 0; member < big->group[k - big->device].count && answer >= 0; member++)
                         {
                                 unsigned long number = big->group[k - big->device].member[member];
@@ -462,10 +462,13 @@ static b32 mixer_event(const struct window_event address_to event)
         if (asks & UI_VIEW_TAKEN)
                 return true;
         bits = ui_strips_event(ui, &mixer.big->strips, event);
-        if (bits & UI_STRIPS_VOLUME)
-                mixer.big->send[mixer.big->strips.changed] |= 1;
-        if (bits & UI_STRIPS_MUTE)
-                mixer.big->send[mixer.big->strips.changed] |= 2;
+        if (mixer.big->strips.changed >= 0 && mixer.big->strips.changed < UI_STRIPS_MOST)
+        {
+                if (bits & UI_STRIPS_VOLUME)
+                        mixer.big->send[mixer.big->strips.changed] |= 1;
+                if (bits & UI_STRIPS_MUTE)
+                        mixer.big->send[mixer.big->strips.changed] |= 2;
+        }
         if (bits & UI_STRIPS_DRAW)
                 mixer.dirty = true;
         return true;

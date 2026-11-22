@@ -144,6 +144,15 @@ static const char address_to const settings_asks[][3] = {
 
 /* ---- model & string helpers ---- */
 
+static inline fn settings_wipe(address_any secret, positive length)
+{
+        if (secret && length)
+        {
+                memory_fill(secret, 0, length);
+                __asm__ __volatile__("" : : "r"(secret) : "memory");
+        }
+}
+
 static fn settings_slice(char address_to into, positive room, const char address_to text, positive size) { positive t = size >= room ? room - 1 : size; memory_copy(into, text, t); into[t] = 0; }
 static positive settings_cat(char address_to into, positive room, positive at, const char address_to text) { for (positive n = 0; text[n] && at + 1 < room; n++) into[at++] = text[n]; into[at] = 0; return at; }
 static positive settings_cat_sep(char address_to into, positive room, positive at, const char address_to sep, const char address_to part) { return !part || !part[0] ? at : settings_cat(into, room, at ? settings_cat(into, room, at, sep) : 0, part); }
@@ -1068,7 +1077,8 @@ static fn settings_wall_word(const char address_to path, char address_to word, p
 
 static b32 settings_wall_own(const char address_to name, char address_to path, positive room)
 {
-        if (!name || !name[0] || string_length((string_address)SETTINGS_WALL_DIR "/") + string_length((string_address)name) + 5 > room)
+        if (!name || !name[0] || file_is_dot((string_address)name) || string_first_of((string_address)name, '/') != null ||
+            string_length((string_address)SETTINGS_WALL_DIR "/") + string_length((string_address)name) + 5 > room)
                 return false;
         settings_cat(path, room, settings_cat(path, room, settings_cat(path, room, 0, SETTINGS_WALL_DIR "/"), name), ".png");
         return settings_wall_look(path, null) == 0100000u;
@@ -1623,6 +1633,8 @@ static const char address_to settings_about_label(int w) { return w < 0 || w >= 
 
 static const char address_to settings_about_sub(int w, char address_to into, positive room)
 {
+        if (!room)
+                return into;
         if (w < 0 || w >= SETTINGS_ABOUT_COUNT)
                 into[0] = 0;
         else if (settings_about_specs[w].sub_id)
@@ -2085,7 +2097,7 @@ static fn settings_next_job(void)
                         settings.job = settings.queue[0].row, settings.job_sets = true;
                         memory_copy(settings.job_value, settings.queue[0].value, sizeof(settings.job_value));
                         memory_copy(settings.queue, settings.queue + 1, (--settings.queued) * sizeof(settings.queue[0]));
-                        memory_zero(&settings.queue[settings.queued], sizeof(settings.queue[0]));
+                        settings_wipe(&settings.queue[settings.queued], sizeof(settings.queue[0]));
                 }
                 else if (settings_unread_any())
                 {
@@ -2106,7 +2118,7 @@ static fn settings_next_job(void)
                 {
                         const char address_to pass = settings_act_words(words);
                         b32 started = words[0] && settings_start(words, words[4] ? 5 : 4, pass);
-                        memory_zero(settings.job_value, sizeof(settings.job_value));
+                        settings_wipe(settings.job_value, sizeof(settings.job_value));
                         if (started) return;
                         count = 0;
                 }
@@ -3131,6 +3143,7 @@ static fn settings_complete(b32 killed, positive status)
                 if (settings_pair_on)
                 {
                         settings_pair_on = false;
+                        settings_wipe(settings_pair_code, sizeof(settings_pair_code));
                         if (settings.page.card)
                                 settings_card_fill(), ui_lines_wrap(&settings.ui, &settings.card_text, settings.width), settings_layout();
                         ui_page_redraw(&settings.page);
@@ -3483,13 +3496,18 @@ static fn settings_menu_apply(int at)
 static fn settings_act(char what, const char address_to name, const char address_to pass)
 {
         char value[SETTINGS_TYPED];
-        positive sz = settings_cat(value, sizeof(value) - 1, 2, name);
+        positive sz;
+        if (!name || !name[0] || string_first_of((string_address)name, '\n') != null)
+                return;
+        if (pass && string_first_of((string_address)pass, '\n') != null)
+                return;
+        sz = settings_cat(value, sizeof(value) - 1, 2, name);
         value[0] = what, value[1] = '\n';
         if (pass && pass[0])
                 value[sz++] = '\n', sz = settings_cat(value, sizeof(value), sz, pass);
         value[sz] = 0;
         settings_change(SETTINGS_JOB_ACT, value);
-        memory_zero(value, sizeof(value));
+        settings_wipe(value, sizeof(value));
 }
 
 static const char address_to settings_name_accepts(p32 code) { return (code >= '0' && code <= '9') || ((code | 32) >= 'a' && (code | 32) <= 'z') || code == '-' ? null : WORDS(settings_name_chars); }
@@ -3664,19 +3682,21 @@ static fn settings_edit_commit(void)
         typed[length] = 0, length -= start;
         switch (settings_domain_of(row, null))
         {
-        case SETTINGS_DOM_TRY: memory_zero(typed, sizeof(typed)); break;
+        case SETTINGS_DOM_TRY: break;
         case SETTINGS_DOM_LIST:
         {
                 const struct settings_item address_to it = settings_item(row);
                 if (!length) settings_say((string_address)WORDS(settings_nothing_typed));
                 else if (it && it->kind == SETTINGS_NETWORK) settings_act('j', it->label, typed + start);
                 else if (it && it->kind == SETTINGS_ADD) settings_act('a', typed + start, null);
-                memory_zero(typed, sizeof(typed));
                 break;
         }
         case SETTINGS_DOM_COMMAND:
                 if (!settings_run(row, typed + start))
+                {
+                        settings_wipe(typed, sizeof(typed));
                         return;
+                }
                 break;
         case SETTINGS_DOM_ROW:
                 if (!length) settings_say((string_address)WORDS(settings_nothing_kept));
@@ -3684,6 +3704,7 @@ static fn settings_edit_commit(void)
                         settings_change(row, typed + start);
                 break;
         }
+        settings_wipe(typed, sizeof(typed));
         settings_edit_end();
 }
 
@@ -4522,6 +4543,11 @@ static long settings_tick(long timeout, long address_to other)
 static fn settings_close(void)
 {
         settings_wall_free();
+        settings_wipe(settings_pair_code, sizeof(settings_pair_code));
+        settings_wipe(settings.job_value, sizeof(settings.job_value));
+        if (settings.queue && settings.queue_room)
+                settings_wipe(settings.queue, settings.queue_room * sizeof(settings.queue[0]));
+        ui_field_close(&settings.edit);
         if (settings.runner.child > 0)
         {
                 positive status = 0;

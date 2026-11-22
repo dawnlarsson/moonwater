@@ -124,7 +124,7 @@ static int editor_folder(const char address_to path, const error_stat address_to
         bipolar folder;
         error_stat there;
 
-        if (!path[slash] || slash >= EDITOR_PATH)
+        if (!path[slash] || slash >= EDITOR_PATH || file_is_dot((string_address)(path + slash)))
                 return -1;
         memory_copy(directory, slash ? path : ".", slash ? slash : 1);
         directory[slash ? slash : 1] = 0;
@@ -266,14 +266,14 @@ static fn editor_title_sync(void)
 
 static fn editor_new_window(const char address_to path)
 {
-        string_address words[6];
+        string_address words[7];
         positive count = 0;
 
         words[count++] = (string_address) "/editor";
         if (editor_app.font)
                 words[count++] = (string_address) "-f", words[count++] = editor_app.font;
         if (path && path[0])
-                words[count++] = (string_address)path;
+                words[count++] = (string_address) "--", words[count++] = (string_address)path;
         words[count] = null;
         (void)ui_start_apart(words, count);
 }
@@ -1208,10 +1208,24 @@ static struct ui_app editor_app = {
 
 static b32 editor_main()
 {
+        b32 end_opts = false;
+
         editor.start_count = 0;
         for (positive at = 1, took; at < (positive)program_argument_count(); at += took ? took : 1)
-                if (!(took = ui_app_option(&editor_app, at)) && editor.start_count < EDITOR_TABS)
-                        editor.start_files[editor.start_count++] = program_argument(at);
+        {
+                string_address arg = program_argument(at);
+
+                took = 0;
+                if (!end_opts && string_equals(arg, (string_address) "--"))
+                {
+                        end_opts = true;
+                        continue;
+                }
+                if (!end_opts && (took = ui_app_option(&editor_app, at)))
+                        continue;
+                if (editor.start_count < EDITOR_TABS)
+                        editor.start_files[editor.start_count++] = arg;
+        }
         return ui_app_run(&editor_app);
 }
 

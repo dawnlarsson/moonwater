@@ -65,8 +65,16 @@ static b32 installer_skipped(const char address_to name)
 {
         static const char address_to const prefixes[] = {"loop", "ram", "zram", "sr", "fd", "nbd", "dm-", "md"};
 
-        if (!name || !name[0] || name[0] == '.')
+        if (!name || !name[0] || name[0] == '.' || name[0] == '-')
                 return true;
+        for (positive at = 0; name[at]; at++)
+        {
+                char c = name[at];
+
+                if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '-' || c == '.') ||
+                    (c == '.' && name[at + 1] == '.'))
+                        return true;
+        }
         for (positive at = 0; at < sizeof(prefixes) / sizeof(prefixes[0]); at++)
         {
                 positive length = string_length((string_address)prefixes[at]);

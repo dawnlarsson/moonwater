@@ -153,6 +153,8 @@ static b32 installer_run_at(int at)
                         p++;
         }
         words[count] = null;
+        if (!count)
+                return false;
         if (string_equals(words[0], (string_address) "/moonwater") && installer.moonwater)
                 words[0] = installer.moonwater;
         return installer_start(words, count, INSTALLER_JOB_PLAN, null);
@@ -334,6 +336,8 @@ static fn installer_go(int step)
                 return;
         installer.step = step;
         installer.big->note[0] = 0, installer.big->net_chosen = -1;
+        if (step != INSTALLER_STEP_NETWORK)
+                ui_field_close(&installer.big->pass);
         l->hover = l->down = -1, l->scroll.scroll = 0, l->focus = 0;
         if (step == INSTALLER_STEP_LANGUAGE)
                 for (positive k = 0; k < INSTALLER_LANGUAGES; k++)
@@ -420,9 +424,10 @@ static fn installer_join(void)
                 string_address words[6] = {installer.moonwater, (string_address) "wifi", (string_address) "add",
                                            (string_address)big->nets[big->net_chosen].name, (string_address) "-", null};
                 if (length && installer_start(words, 5, INSTALLER_JOB_JOIN, secret))
-                        big->net_chosen = -1, ui_field_focus(&big->pass, false);
+                        big->net_chosen = -1, ui_field_close(&big->pass);
         }
-        memory_zero(secret, sizeof(secret));
+        memory_fill(secret, 0, sizeof(secret));
+        __asm__ __volatile__("" : : "r"(secret) : "memory");
 }
 
 static fn installer_toggle(unsigned int bit)
