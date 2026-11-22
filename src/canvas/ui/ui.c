@@ -2175,9 +2175,14 @@ static positive doc_wb_before(const p16 address_to props, positive i)
 
 static fn doc_word_breaks(const p16 address_to props, positive count, p8 address_to breaks)
 {
+        // How many regional indicators end the run before the point (ignorables transparent, any other break resets it):
+        // WB15 and WB16 need its parity, and it is kept as the walk goes, so a long run costs one step a code point.
+        positive ri_run = 0;
         breaks[0] = 1;
         if (count)
                 breaks[count] = 1;
+        if (count && DOC_WB(props[0]) == WB_RI)
+                ri_run = 1;
         for (positive i = 1; i < count; i++)
         {
                 p32 now = DOC_WB(props[i]), raw = DOC_WB(props[i - 1]), before, bb = WB_OTHER, after = WB_OTHER;
@@ -2218,20 +2223,11 @@ static fn doc_word_breaks(const p16 address_to props, positive count, p8 address
                             (before == WB_EXTENDNUMLET && (DOC_BM(now) & DOC_WB_ALNUMK)))
                                 cut = false;
                         else if (before == WB_RI && now == WB_RI)
-                        {
-                                positive run = 0;
-                                for (positive k = b + 1; k-- > 0;)
-                                {
-                                        p32 wb = DOC_WB(props[k]);
-                                        if (wb == WB_RI)
-                                                run++;
-                                        else if (!(DOC_BM(wb) & DOC_WB_IGN))
-                                                break;
-                                }
-                                cut = !(run & 1);
-                        }
+                                cut = !(ri_run & 1);
                 }
                 breaks[i] = (p8)cut;
+                if (!(DOC_BM(now) & DOC_WB_IGN))
+                        ri_run = now == WB_RI ? ri_run + 1 : 0;
         }
 }
 
