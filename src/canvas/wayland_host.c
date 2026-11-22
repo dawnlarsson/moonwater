@@ -15,6 +15,7 @@
 #define COMPOSITOR_WL_SIGPIPE 13
 #define COMPOSITOR_WL_SIGALRM 14
 #define COMPOSITOR_WL_TRANSFERS_MOST (1l << 20)
+#define COMPOSITOR_WL_PULLS 8
 #define COMPOSITOR_WL_PULL_NS 3000000000ull
 #define COMPOSITOR_WL_PUSH_NS 5000000000ull
 #define COMPOSITOR_WL_CHUNK 4096
@@ -36,6 +37,10 @@ struct compositor_wl_transfer
         long reading, text, nth;
         const char *drop;
         thread *worker;
+        int h;                  // a clipboard pull's transfer in the engine (manage.c compositor_xfer_*), -1 for none
+        positive deadline;      // a clipboard pull's: when its pipe is given up for want of bytes
+        unsigned char carry[4]; // a text type's incomplete last character, checked with the next chunk
+        unsigned int carried;
 };
 
 #define CANVAS_BUFFER_REF_FIELDS \
@@ -3953,6 +3958,7 @@ static long compositor_wl_transfer_place(void)
         long slot = compositor_wl.transfers++;
         memory_zero(&compositor_wl.transfer[slot], sizeof compositor_wl.transfer[slot]);
         compositor_wl.transfer[slot].in = compositor_wl.transfer[slot].out = compositor_wl.transfer[slot].keep = compositor_wl.transfer[slot].index = -1;
+        compositor_wl.transfer[slot].h = -1;
         return slot;
 }
 
@@ -4171,7 +4177,62 @@ fail:
         return 0;
 }
 
-static void compositor_wl_pull_whole(long at);
+static void compositor_wl_drag_pulled(long at, int ok);
+
+/*
+        A clipboard pull is read by the loop, not by a thread: the pipe a client writes its type into is non-blocking, the loop polls it
+        (compositor_wl_poll) and reads it here, a chunk at a time, into the transfer engine (compositor_xfer_record, one record per type).
+        A pull ends at its type's end of file (the next type), or fails at its deadline or at a record the engine refuses, which drops
+        the whole paste. A drop keeps its worker thread (wl_dnd_read_drop): it is a drag's, not the clipboard's.
+*/
+static void compositor_wl_pull_next(long at);
+
+// Whether a transfer is a clipboard pull the loop reads (has its pipe, and no worker).
+static int compositor_wl_pull_loop(const struct compositor_wl_transfer *t)
+{
+        return t->state == COMPOSITOR_WL_PULL && !t->drop && !t->worker && t->in >= 0;
+}
+
+// Whether a transfer is a clipboard pull (loop-driven or not yet at its pipe): what the drop and the stop let go of through the engine.
+static int compositor_wl_pull_clip(const struct compositor_wl_transfer *t)
+{
+        return t->state == COMPOSITOR_WL_PULL && !t->drop && !t->worker;
+}
+
+// A clipboard pull let go of with nothing installed: its engine entry is dropped, and its pipe with the transfer's slot.
+static void compositor_wl_pull_drop(long at)
+{
+        struct compositor_wl_transfer *t = &compositor_wl.transfer[at];
+
+        if (t->h >= 0)
+                compositor_xfer_close(t->h, 0);
+        t->h = -1;
+        compositor_wl_transfer_free(at);
+}
+
+// The paste is over with the types it had: sealed and installed when it has records, and the shim is told.
+static void compositor_wl_pull_whole(long at)
+{
+        struct compositor_wl_transfer *t = &compositor_wl.transfer[at];
+        long client = t->client;
+        unsigned int which = t->which;
+        int installed = t->h >= 0 ? compositor_xfer_close(t->h, 1) : 0;
+
+        t->h = -1;
+        compositor_wl_transfer_free(at);
+        wayland_clip_pulled(client, (long)which, installed != 0);
+}
+
+// A paste that failed: nothing of it is kept, and the shim is told it failed.
+static void compositor_wl_pull_abort(long at)
+{
+        struct compositor_wl_transfer *t = &compositor_wl.transfer[at];
+        long client = t->client;
+        unsigned int which = t->which;
+
+        compositor_wl_pull_drop(at);
+        wayland_clip_pulled(client, (long)which, 0);
+}
 
 static void compositor_wl_pull_next(long at)
 {
@@ -4194,7 +4255,8 @@ static void compositor_wl_pull_next(long at)
                                         best_rank = rank, t->text = nth;
                         }
                         nth = t->text, t->nth = -1;
-                        if (nth < 0) continue;
+                        if (nth < 0)
+                                continue;
                 }
                 else
                 {
@@ -4219,19 +4281,93 @@ static void compositor_wl_pull_next(long at)
                         system_close(fds[0]);
                         continue;
                 }
-                t->in = fds[0];
-                if (!compositor_wl_transfer_start(at))
-                        wayland_clip_pulled(t->client, t->which, 0);
+                t->in = fds[0], t->got = 0, t->deadline = clock_monotonic_nanoseconds() + COMPOSITOR_WL_PULL_NS;
                 return;
         }
+}
+
+/*
+        The bytes at the end of a chunk that are the start of a UTF-8 character whose rest is not in the chunk yet: 0 to 3 of them, held back
+        and checked with the next chunk (a character may straddle a chunk's end). Only what can still complete is held; an invalid lead or
+        a run of continuation bytes is not held, and the engine refuses it when it is checked.
+*/
+static long compositor_wl_utf8_hold(const unsigned char *bytes, long count)
+{
+        for (long k = 1; k <= 3 && k <= count; k++)
+        {
+                unsigned char c = bytes[count - k];
+                long need;
+
+                if ((c & 0xc0) == 0x80)
+                        continue;
+                if (c < 0xc0)
+                        return 0;
+                need = c >= 0xf0 ? 4 : c >= 0xe0 ? 3 : 2;
+                return need > k ? k : 0;
+        }
+        return 0;
+}
+
+/*
+        One pass of a clipboard pull: what its pipe holds now, read and recorded. A text type's last incomplete character is held back for
+        the next chunk. A type that fails (the engine refuses its record, its deadline passes with no bytes, or its pipe ends mid-character)
+        is dropped alone (compositor_xfer_type_fail): the paste goes on with the types after it.
+*/
+static void compositor_wl_pull_step(long at)
+{
+        struct compositor_wl_transfer *t = &compositor_wl.transfer[at];
+        static unsigned char bytes[65536 + 4];
+        positive now = clock_monotonic_nanoseconds();
+        const char *type;
+        int text, ended = 0;
+
+        if (!compositor_wl_pull_loop(t))
+                return;
+        type = wayland_clip_type(t->client, t->which, t->reading);
+        text = t->reading == t->text;
+        for (;;)
+        {
+                long got;
+                unsigned long count;
+                long hold;
+
+                memory_copy(bytes, t->carry, t->carried);
+                got = compositor_call(syscall(read), (positive)t->in, (positive)(bytes + t->carried), 65536, 0, 0, 0);
+                if (got == -11)
+                        break;
+                if (got <= 0)
+                {
+                        ended = got == 0 && !t->carried ? 1 : -1;
+                        break;
+                }
+                count = t->carried + (unsigned long)got;
+                hold = text ? compositor_wl_utf8_hold(bytes, (long)count) : 0;
+                if (!type || (count > (unsigned long)hold && !compositor_xfer_record(t->h, type, text, bytes, count - (unsigned long)hold)))
+                {
+                        ended = -1;
+                        break;
+                }
+                memory_copy(t->carry, bytes + count - (unsigned long)hold, (positive)hold);
+                t->carried = (unsigned int)hold;
+                t->got += (unsigned long)got, t->deadline = now + COMPOSITOR_WL_PULL_NS;
+        }
+        if (!ended && now >= t->deadline)
+                ended = -1;
+        if (!ended)
+                return;
+        system_close(t->in), t->in = -1;
+        if (ended < 0)
+                compositor_xfer_type_fail(t->h);
+        t->carried = 0;
+        compositor_wl_pull_next(at);
 }
 
 static long compositor_wl_clip_pull(void *context, long client, long which)
 {
         struct windows *table = compositor.table;
         positive now = clock_monotonic_nanoseconds();
-        int row = -1, keep = -1, index = -1;
-        long slot;
+        int row = -1, h = -1;
+        long slot, live = 0;
 
         (void)context;
         if (!table || which < 0 || which > 1 || !table->clip_on)
@@ -4240,12 +4376,20 @@ static long compositor_wl_clip_pull(void *context, long client, long which)
                 if (wayland_row_owner(at) == client && now - compositor_clip.gesture[at] <= COMPOSITOR_CLIP_GESTURE_NS &&
                     (row < 0 || at == compositor.focus))
                         row = at;
-        slot = row >= 0 ? compositor_wl_transfer_place() : -1;
-        if (slot < 0 || compositor_wl.wake < 0 || !compositor_wl_pull_open("moonwater-copy", &keep, &index))
+        for (long at = 0; at < compositor_wl.transfers; at++)
+                live += compositor_wl.transfer[at].state == COMPOSITOR_WL_PULL && !compositor_wl.transfer[at].drop;
+        if (row >= 0 && live < COMPOSITOR_WL_PULLS)
+                h = compositor_xfer_open((unsigned int)which, row);
+        slot = h >= 0 ? compositor_wl_transfer_place() : -1;
+        if (slot < 0)
+        {
+                if (h >= 0)
+                        compositor_xfer_close(h, 0);
                 return 0;
+        }
         struct compositor_wl_transfer *t = &compositor_wl.transfer[slot];
-        t->state = COMPOSITOR_WL_PULL, t->which = (unsigned char)which, t->client = (int)client, t->row = row;
-        t->keep = keep, t->index = index, t->total = t->count = 0, t->text = -2;
+        t->state = COMPOSITOR_WL_PULL, t->which = (unsigned char)which, t->client = (int)client, t->row = row, t->h = h;
+        t->in = t->out = t->keep = t->index = -1, t->total = t->count = 0, t->text = -2, t->drop = 0, t->worker = 0, t->carried = 0;
         compositor_wl_pull_next(slot);
         return 1;
 }
@@ -4257,49 +4401,19 @@ static void compositor_wl_clip_abort(void *context, long client, long which)
                 if (compositor_wl.transfer[at].state == COMPOSITOR_WL_PULL && compositor_wl.transfer[at].client == client &&
                     compositor_wl.transfer[at].which == which)
                 {
-                        if (compositor_wl.transfer[at].worker)
+                        if (compositor_wl_pull_clip(&compositor_wl.transfer[at]))
+                                compositor_wl_pull_drop(at);
+                        else if (compositor_wl.transfer[at].worker)
                                 compositor_wl_transfer_cancel(at);
                         else
                                 compositor_wl_transfer_free(at);
                 }
 }
 
-static void compositor_wl_drag_pulled(long at, int ok);
-
+// A drop's end (the worker's): the clipboard pulls do not come here, the loop reads them (compositor_wl_pull_step).
 static void compositor_wl_pull_end(long at, int ok)
 {
-        struct compositor_wl_transfer *t = &compositor_wl.transfer[at];
-        const char *type = t->drop ? 0 : wayland_clip_type(t->client, t->which, t->reading);
-        unsigned long got = t->got;
-
-        if (t->drop) { compositor_wl_drag_pulled(at, ok); return; }
-        system_close(t->in), t->in = -1;
-        if (t->total + got > WINDOWS_CLIP_MOST)
-                ok = 0;
-        if (ok && type && t->reading == t->text)
-        {
-                long mapped = got ? compositor_call(syscall(mmap), 0, (positive)(t->total + got), 1, 1, (positive)t->keep, 0) : -22;
-                ok = !(mapped < 0 && mapped > -4096) && windows_clip_text((const unsigned char *)mapped + t->total, got);
-                if (!(mapped < 0 && mapped > -4096))
-                        compositor_call(syscall(munmap), (positive)mapped, (positive)(t->total + got), 0, 0, 0, 0);
-        }
-        if (ok && type && windows_clip_record(t->index, t->total, got, t->reading == t->text ? WINDOWS_CLIP_TEXT : type,
-                                              t->reading == t->text ? sizeof(WINDOWS_CLIP_TEXT) - 1 : string_length((string_address)type)))
-                t->total += got, t->count++;
-        else
-                compositor_call(syscall(ftruncate), (positive)t->keep, (positive)t->total, 0, 0, 0, 0),
-                compositor_call(syscall(lseek), (positive)t->keep, (positive)t->total, 0, 0, 0, 0);
-        compositor_wl_pull_next(at);
-}
-
-static void compositor_wl_pull_whole(long at)
-{
-        struct compositor_wl_transfer *t = &compositor_wl.transfer[at];
-        long client = t->client;
-        unsigned int which = t->which;
-        b32 ok = t->count && windows_clip_seal(t->keep, t->index, t->total, t->count) && compositor_clip_set_memfd(which, t->keep, t->row);
-        compositor_wl_transfer_free(at);
-        wayland_clip_pulled(client, (long)which, ok != 0);
+        compositor_wl_drag_pulled(at, ok);
 }
 
 static void compositor_wl_clip_push(void *context, long row, long which, const char *mime, long fd)
@@ -4490,7 +4604,12 @@ static void compositor_wl_transfers_drop(long client)
 {
         for (long at = 0; at < compositor_wl.transfers; at++)
                 if (compositor_wl.transfer[at].state && compositor_wl.transfer[at].client == client)
-                        compositor_wl_transfer_cancel(at);
+                {
+                        if (compositor_wl_pull_clip(&compositor_wl.transfer[at]))
+                                compositor_wl_pull_drop(at);
+                        else
+                                compositor_wl_transfer_cancel(at);
+                }
 }
 
 static positive compositor_wl_due(void)
@@ -4506,6 +4625,15 @@ static positive compositor_wl_due(void)
         }
         if (idle > 0 && (!first || (positive)(idle + 1) * 1000000ull < first))
                 first = (positive)(idle + 1) * 1000000ull;
+        // A clipboard pull's deadline: the loop wakes then to give its pipe up if no bytes came.
+        for (long at = 0; at < compositor_wl.transfers; at++)
+                if (compositor_wl_pull_loop(&compositor_wl.transfer[at]))
+                {
+                        positive now = clock_monotonic_nanoseconds(), left = compositor_wl.transfer[at].deadline > now ? compositor_wl.transfer[at].deadline - now : 1;
+
+                        if (!first || left < first)
+                                first = left;
+                }
         return first;
 }
 
@@ -5415,9 +5543,15 @@ HOT static void compositor_wl_flush_all(void)
 /* Where the polls for the clients go in the loop's list, and what comes of them. COMPOSITOR_WL_POLLS is the most this adds, which
    the loop's list is sized by (COMPOSITOR_POLLS): the socket, every client, the transfers' knock, the dma-buf of every client
    stalled on one, and the X window manager's. An entry added here is added to it. */
-#define COMPOSITOR_WL_POLLS (1 + compositor_wl.slots + 1 + compositor_wl.slots)
+#define COMPOSITOR_WL_POLLS (1 + compositor_wl.slots + 1 + compositor_wl.slots + COMPOSITOR_WL_PULLS)
+static unsigned int compositor_wl_pulls_n, compositor_wl_pulls_base;
+static long compositor_wl_pulls_slot[COMPOSITOR_WL_PULLS];
+
 static unsigned int compositor_wl_poll(struct compositor_poll *wanted, unsigned int count)
 {
+        unsigned int entry = count;
+
+        compositor_wl_pulls_n = 0;
         if (!compositor_wl.started)
                 return count;
         wanted[count++] = (struct compositor_poll){compositor_wl.listen, COMPOSITOR_POLLIN, 0};
@@ -5446,6 +5580,14 @@ static unsigned int compositor_wl_poll(struct compositor_poll *wanted, unsigned 
                 if (compositor_wl.fd[slot] >= 0 && wayland_stall_due(slot, &fd) && fd >= 0)
                         wanted[count++] = (struct compositor_poll){(int)fd, COMPOSITOR_POLLIN, 0};
         }
+        // The clipboard pulls the loop reads: each one's pipe, readable when a client has written.
+        compositor_wl_pulls_base = count - entry; // relative to the poll's first entry: compositor_wl_pass gets the list from there
+        for (long at = 0; at < compositor_wl.transfers && compositor_wl_pulls_n < COMPOSITOR_WL_PULLS; at++)
+                if (compositor_wl_pull_loop(&compositor_wl.transfer[at]))
+                {
+                        compositor_wl_pulls_slot[compositor_wl_pulls_n++] = at;
+                        wanted[count++] = (struct compositor_poll){compositor_wl.transfer[at].in, COMPOSITOR_POLLIN, 0};
+                }
         return count;
 }
 
@@ -5530,6 +5672,14 @@ static void compositor_wl_pass(const struct compositor_poll *wanted)
         // The transfers whose threads have ended: each thread ends itself at its deadline, so the loop waits on nothing else of them.
         if (wanted[1 + polled].returned)
                 compositor_wl_transfers_done();
+        // The clipboard pulls the loop reads: a pipe readable, or a pull past its deadline, is read now.
+        for (unsigned int at = 0; at < compositor_wl_pulls_n; at++)
+        {
+                long slot = compositor_wl_pulls_slot[at];
+
+                if (wanted[compositor_wl_pulls_base + at].returned || clock_monotonic_nanoseconds() >= compositor_wl.transfer[slot].deadline)
+                        compositor_wl_pull_step(slot);
+        }
 }
 
 /* ---- input: the pointer and the keys, as a client is told of them ---- */
@@ -6069,7 +6219,9 @@ static void compositor_wl_stop(void)
         // Each transfer's thread is joined before the knock descriptor it writes to is closed: a thread that outlived it would knock on whatever
         // number the next descriptor was given.
         for (long at = 0; at < compositor_wl.transfers; at++)
-                if (compositor_wl.transfer[at].state && !compositor_wl.transfer[at].worker)
+                if (compositor_wl_pull_clip(&compositor_wl.transfer[at]))
+                        compositor_wl_pull_drop(at);
+                else if (compositor_wl.transfer[at].state && !compositor_wl.transfer[at].worker)
                         compositor_wl_transfer_free(at);
                 else if (compositor_wl.transfer[at].state)
                 {

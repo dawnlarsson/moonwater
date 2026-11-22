@@ -10345,6 +10345,9 @@ b32 main()
         check_compositor_start_room();
         check_compositor_setting_opens();
         check_compositor_pipe_ignored();
+#ifdef CONFIG_MOONWATER_WAYLAND
+        check_compositor_utf8_split();
+#endif
         check_compositor_signal_again();
         check_compositor_table_sealed();
         check_compositor_table_taken();

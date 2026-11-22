@@ -538,6 +538,32 @@ static void check_compositor_signal_again(void)
           child > 0 && waited == child && (status & 0xffff) == 0);
 }
 
+/*
+        A clipboard paste read a chunk at a time: a character that straddles a chunk's end is held back and checked with the rest
+        (compositor_wl_utf8_hold), so the chunks each pass the text check and the whole character is accepted; an invalid sequence is
+        refused by the text check whatever chunk it is in, and a character cut off at the end of the pipe is held, not accepted.
+*/
+#ifdef CONFIG_MOONWATER_WAYLAND
+static void check_compositor_utf8_split(void)
+{
+    static const unsigned char head[4] = {'a', 'b', 0xe2, 0x82};
+    static const unsigned char tail[2] = {0xac, 'c'};
+    static const unsigned char bad[3] = {0xe2, 0x28, 0xa1};
+    unsigned char joined[4] = {0xe2, 0x82, 0xac, 'c'};
+
+    check("utf-8 split: a 3-byte character cut at a chunk's end is held back, two bytes of it",
+          compositor_wl_utf8_hold(head, 4) == 2);
+    check("utf-8 split: the chunk before the held bytes passes the text check",
+          windows_clip_text(head, 2) == 1);
+    check("utf-8 split: the held bytes with the next chunk are the whole character and pass the text check",
+          compositor_wl_utf8_hold(joined, 4) == 0 && windows_clip_text(joined, 4) == 1 && windows_clip_text(tail, 2) == 0);
+    check("utf-8 split: an invalid sequence is not held and is refused by the text check",
+          compositor_wl_utf8_hold(bad, 3) == 0 && windows_clip_text(bad, 3) == 0);
+    check("utf-8 split: a character cut off at the end of the pipe is held (the pipe's end refuses it)",
+          compositor_wl_utf8_hold((const unsigned char *)"\xe2\x82", 2) == 2);
+}
+#endif
+
 static void check_compositor_pipe_ignored(void)
 {
     bipolar child = (bipolar)system_call_5(syscall(clone), 17, 0, 0, 0, 0), waited = -1;
