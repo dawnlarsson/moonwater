@@ -809,8 +809,9 @@ static fn editor_hex_status_text(char address_to text, positive room, struct ui_
         if (selected)
                 at = editor_status_put(text, room, at, "  "),
                 at += language_format(text + at, room - at, WORDS(editor_selected), (long)selected);
-        at = editor_status_put(text, room, at, "    ");
-        at = editor_status_put(text, room, at, view->hex_ascii ? "ASCII" : WORDS(editor_mode_hex));
+        // The pane the caret edits, when it is the ASCII one: the hex pane is what the switch beside the status already says.
+        if (view->hex_ascii)
+                at = editor_status_put(text, room, at, "    "), at = editor_status_put(text, room, at, "ASCII");
         text[at] = 0;
 }
 

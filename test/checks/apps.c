@@ -1268,6 +1268,20 @@ static fn editor_pill_owner_row(int scale, const char address_to text_name, cons
                           ui_dev(&editor.ui, s->y + s->h / 2));
         check("editor pill: as it opens on the owner's screen, a click on Hex through editor_event shows hex, and the switch stays on Hex",
               tab->view.hex && s->at == 1 && ui_kit_held == null);
+        {
+                // In hex the status does not end in the switch's Hex beside it; with the caret in the ASCII pane it ends in ASCII.
+                positive length = string_length((string_address)editor.bar_text), hex_length = string_length((string_address)WORDS(editor_mode_hex));
+                b32 says_hex = length >= hex_length && string_equals((string_address)editor.bar_text + length - hex_length, (string_address)WORDS(editor_mode_hex)), says_ascii;
+
+                tab->view.hex_ascii = true;
+                editor_layout();
+                length = string_length((string_address)editor.bar_text);
+                says_ascii = length >= 5 && string_equals((string_address)editor.bar_text + length - 5, (string_address) "ASCII");
+                tab->view.hex_ascii = false;
+                editor_draw(shown);
+                check("editor pill: in hex the status does not say Hex again beside the switch, and says ASCII when the caret edits that pane",
+                      !says_hex && says_ascii);
+        }
         px = editor.pill_box[0], py = editor.pill_box[1], pw = editor.pill_box[2], ph = editor.pill_box[3];
         editor_pill_dump(hex_name, shown, width, px - 24, py - 24, pw + 48, ph + 34);
         editor.count = 0;
