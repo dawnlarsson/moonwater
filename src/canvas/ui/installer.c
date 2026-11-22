@@ -302,8 +302,7 @@ static fn installer_choose_drive(int at)
                 return;
         installer.chosen = at;
         string_copy_bounded((string_address)installer.choice.drive, (string_address)installer.big->drives[at].name, sizeof(installer.choice.drive));
-        if (!installer.big->drives[at].moonwater)
-                installer.choice.mode = INSTALLER_OVERWRITE;
+        installer.choice.mode = installer.big->drives[at].moonwater ? INSTALLER_UPDATE : INSTALLER_OVERWRITE;
         installer.dirty = true;
 }
 
