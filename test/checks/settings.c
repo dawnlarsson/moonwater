@@ -5883,7 +5883,9 @@ static const char address_to drive_section_of(const char address_to label, struc
 // Every drive of the list shut (the window as it starts), or open, by their names, as a press leaves them; the reading then shows them so.
 static fn drive_open_all(const char address_to text, b32 open)
 {
-        memory_zero(settings_drives_open, sizeof(settings_drives_open));
+        // The open names are a list that grows on its first keep (settings_drives_open is null until then): zero what it holds, if it holds any.
+        if (settings_drives_open)
+                memory_zero(settings_drives_open, sizeof(*settings_drives_open) * settings_drives_open_room);
         drive_feed(text);
         for (int at = 0; open && at < settings.item_count[2]; at++)
                 if (settings_item_storage(&settings.item[2][at]))
