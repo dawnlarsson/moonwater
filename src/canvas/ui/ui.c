@@ -8367,19 +8367,23 @@ static void ui_scene_cells(struct ui address_to ui, const font_face address_to c
         }
         if (left < right && top < bottom)
                 ui_scene_record(scene, ox + left, oy + top, ox + right, oy + bottom, background & 0xffffff, true);
-        for (p32 i = 0; i < run; i++)
+        // A run's plans come from one font call, which owns the tones pointer until the next font_tones call: each plan is recorded (its tones and coverage copied) before the next run.
+        for (p32 at = 0; at < run;)
         {
-                font_cell_plan_t plan;
-                font_cell_plan(ui->engine, faces, count, codes[i], 1, grid, em, flags, target, x + (b32)i * width, y, colour, background, &plan);
-                if (plan.unknown || scene->count >= scene->room)
+                static font_cell_plan_t plans[256];
+                p32 take = run - at < 256 ? run - at : 256;
+                font_cell_run(ui->engine, faces, count, codes + at, take, 1, grid, em, flags, target, x + (b32)at * width, y, colour, background, plans);
+                for (p32 i = 0; i < take; i++)
                 {
-                        scene->lost = plan.unknown ? UI_LOST_GROUND : UI_LOST_ROOM;
-                        return;
+                        if (plans[i].unknown || scene->count >= scene->room)
+                        {
+                                scene->lost = plans[i].unknown ? UI_LOST_GROUND : UI_LOST_ROOM;
+                                return;
+                        }
+                        if (plans[i].translate && !ui_scene_translate(scene, &plans[i], colour, background, (p64)(unsigned long)plans[i].coverage, ui->engine->generation, ox, oy))
+                                return;
                 }
-                if (!plan.translate)
-                        continue;
-                if (!ui_scene_translate(scene, &plan, colour, background, (p64)(unsigned long)plan.coverage, ui->engine->generation, ox, oy))
-                        return;
+                at += take;
         }
 }
 
