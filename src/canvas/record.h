@@ -27,7 +27,7 @@ struct compositor_record
 {
         unsigned long long when, compose_ns, flip_at, vblank_at;
         int damage[4];
-        unsigned int path, damaged, held, flipped, vblanked, refused, late, lists, lists_refused;
+        unsigned int path, damaged, held, flipped, vblanked, refused, backoffs, late, lists, lists_refused;
 };
 
 static struct compositor_record compositor_records[COMPOSITOR_RECORD_SIZE];
@@ -37,6 +37,7 @@ static unsigned long long compositor_records_all; // presents in all, since the 
 static unsigned int compositor_records_flip;   // the slot of a flip waiting for its vblank, plus one (0: none)
 static unsigned int compositor_record_polls;
 static unsigned int compositor_record_refusals; // flips the card refused, counted as they happen (the refusal's own counter is reset at three)
+static unsigned int compositor_record_backoffs; // refusals that were the card busy (a back-off, scanout.c compositor_refusal_fatal), counted as they happen
 static unsigned long long compositor_record_until; // the end of a recording (0: none running)
 static unsigned int compositor_record_seconds, compositor_record_frames, compositor_record_late, compositor_record_refused, compositor_record_held,
     compositor_record_flips;
@@ -50,7 +51,7 @@ static unsigned int compositor_record_text_at;
 static struct
 {
         int damage[4];
-        unsigned int damaged, pending, refusals, lists, lists_refused, screen;
+        unsigned int damaged, pending, refusals, backoffs, lists, lists_refused, screen;
 } compositor_record_mark;
 
 static void compositor_record_begin(void)
@@ -71,6 +72,7 @@ static void compositor_record_begin(void)
         compositor_record_mark.pending = compositor.flip_pending != 0;
         compositor_record_mark.screen = compositor.on_screen;
         compositor_record_mark.refusals = compositor_record_refusals;
+        compositor_record_mark.backoffs = compositor_record_backoffs;
         compositor_record_mark.lists = compositor_list_counts[COMPOSITOR_LIST_DRAWN];
         compositor_record_mark.lists_refused = compositor.table ? compositor.table->list_refused : 0;
 }
@@ -104,6 +106,7 @@ static void compositor_record_end(unsigned long long began, unsigned long long e
                 compositor_records_flip = compositor_records_at + 1;
         }
         r->refused = compositor_record_refusals - compositor_record_mark.refusals;
+        r->backoffs = compositor_record_backoffs - compositor_record_mark.backoffs;
         r->lists = (unsigned int)(compositor_list_counts[COMPOSITOR_LIST_DRAWN] - compositor_record_mark.lists);
         r->lists_refused = compositor.table ? compositor.table->list_refused - compositor_record_mark.lists_refused : 0;
         if (compositor_records_kept && began > compositor_records[prev].when && began - compositor_records[prev].when > COMPOSITOR_RECORD_LATE_NS)
@@ -536,7 +539,7 @@ static void compositor_record_report(void)
 {
         unsigned int first, count, paths[3] = {0, 0, 0};
         unsigned long long longest = 0, origin;
-        unsigned int refused = 0, late = 0, held = 0, flips = 0, vblanks = 0, lists = 0, lists_refused = 0;
+        unsigned int refused = 0, backoffs = 0, late = 0, held = 0, flips = 0, vblanks = 0, lists = 0, lists_refused = 0;
 
         compositor_record_text_at = 0;
         count = compositor_records_kept;
@@ -547,7 +550,7 @@ static void compositor_record_report(void)
                 const struct compositor_record *r = &compositor_records[(first + at) % COMPOSITOR_RECORD_SIZE];
 
                 paths[r->path < 3 ? r->path : 0]++;
-                refused += r->refused, late += r->late, held += r->held, flips += r->flipped, lists += r->lists, lists_refused += r->lists_refused;
+                refused += r->refused, backoffs += r->backoffs, late += r->late, held += r->held, flips += r->flipped, lists += r->lists, lists_refused += r->lists_refused;
                 if (r->vblanked && r->vblank_at - r->flip_at > longest)
                         longest = r->vblank_at - r->flip_at;
                 vblanks += r->vblanked;
@@ -561,6 +564,7 @@ static void compositor_record_report(void)
         compositor_record_put_text(", processor "), compositor_record_put_number(paths[COMPOSITOR_RECORD_PROCESSOR]), compositor_record_put_text("\n");
         compositor_record_put_text("flips        "), compositor_record_put_number(flips), compositor_record_put_text(" issued, ");
         compositor_record_put_number(refused), compositor_record_put_text(" refused, ");
+        compositor_record_put_number(backoffs), compositor_record_put_text(" of them backed off (the card busy), ");
         compositor_record_put_number(vblanks), compositor_record_put_text(" answered by a vblank, longest ");
         compositor_record_put_number(longest / 1000), compositor_record_put_text(" us\n");
         compositor_record_put_text("held         "), compositor_record_put_number(held), compositor_record_put_text(" presents kept their damage for the next\n");
