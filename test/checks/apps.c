@@ -10032,6 +10032,15 @@ b32 main()
                 if (settings_map())
                 {
                         settings.ui.engine = &band_engine, settings.ui.regular = &band_face, settings.ui.scale = 100;
+                        {
+                                // The drive and device lists are filled by the hardware feed's reader, which the groups call with their own
+                                // text. The parent makes the lists once, from one drive and one port, so the groups inherit them.
+                                static const char hardware[] = "  vda drive 2048 MB view only\n    part 2048 536870912 efi -\n"
+                                                               "  1-1 usb 0627:0001 Stick allowed\n";
+                                memory_copy(settings_large->said, hardware, sizeof(hardware) - 1);
+                                settings.runner.length = sizeof(hardware) - 1;
+                                settings_feed_hardware();
+                        }
                         settings_layout(); // the list's callbacks and the page's wiring, once (settings.list.ids is their guard)
                 }
         }
