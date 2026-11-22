@@ -4060,6 +4060,94 @@ static int band_guard_glass(void *context, int x, int y, int width, int height)
 }
 
 /*
+        The record executor against the painters it replaces (C2 S6a, compose.c compositor_records_run): random frames of kind 0 (fill),
+        kind 4 (copy) and kind 11 (over), each with and without the 0x80 red-blue swap, run as one record on one copy of a random target
+        and as the painter (compositor_fill, compositor_contents) on another. Every pixel of the two targets is compared. A flag the
+        executor does not take (0x20) is refused and the target is left as it was. A card address is a number the row maps to its own
+        picture, so the decoding of words 5 to 7 is tested too.
+*/
+#define RECORDS_VA ((positive)0x700000000000ul)
+static const unsigned int *records_picture;
+static positive records_bytes;
+
+static const void *records_resolve(positive va, positive bytes)
+{
+        if (va < RECORDS_VA || va - RECORDS_VA + bytes > records_bytes)
+                return null;
+        return (const unsigned char *)records_picture + (va - RECORDS_VA);
+}
+
+static unsigned int records_random(unsigned int *state)
+{
+        *state ^= *state << 13, *state ^= *state >> 17, *state ^= *state << 5;
+        return *state;
+}
+
+static void check_compositor_records(void)
+{
+        static unsigned int picture[128 * 96], before[160 * 120], painted[160 * 120], executed[160 * 120];
+        unsigned int state = 0x2545f491u, mismatches = 0, refused = 0, trials = 0;
+
+        for (int trial = 0; trial < 600; trial++)
+        {
+                int tw = 40 + (int)(records_random(&state) % 100), th = 30 + (int)(records_random(&state) % 80);
+                int fw = 1 + (int)(records_random(&state) % 90), fh = 1 + (int)(records_random(&state) % 70);
+                int fx = (int)(records_random(&state) % (unsigned int)(tw + 40)) - 20, fy = (int)(records_random(&state) % (unsigned int)(th + 40)) - 20;
+                unsigned int kind = (records_random(&state) % 3) == 0 ? 0 : (records_random(&state) & 1) ? 4 : 11;
+                unsigned int swap = kind != 0 && (records_random(&state) & 1) ? 0x80u : 0u;
+                unsigned int pitch = (unsigned int)fw + records_random(&state) % 8, colour = records_random(&state);
+                unsigned int ops[8];
+                struct compositor_target a, b;
+                struct compositor_frame frame;
+                int count = (int)((unsigned long)tw * (unsigned long)th);
+                int ran;
+
+                for (int at = 0; at < 128 * 96; at++)
+                        picture[at] = records_random(&state);
+                for (int at = 0; at < count; at++)
+                        before[at] = executed[at] = painted[at] = records_random(&state);
+                records_picture = picture, records_bytes = 4ul * (pitch * (unsigned long)(fh - 1) + (unsigned long)fw);
+                a = (struct compositor_target){painted, (unsigned long)tw, tw, th, 0, 0, tw, th, 0, 0, null, 0};
+                b = (struct compositor_target){executed, (unsigned long)tw, tw, th, 0, 0, tw, th, 0, 0, null, 0};
+                memory_zero(ops, sizeof(ops));
+                ops[0] = kind | swap, ops[1] = (unsigned int)fx, ops[2] = (unsigned int)fy, ops[3] = (unsigned int)(fx + fw), ops[4] = (unsigned int)(fy + fh);
+                ops[5] = kind == 0 ? colour : (unsigned int)RECORDS_VA, ops[6] = kind == 0 ? 0 : (unsigned int)(RECORDS_VA >> 32), ops[7] = kind == 0 ? 0 : pitch;
+                memory_zero(&frame, sizeof(frame));
+                frame.x = fx, frame.y = fy, frame.width = fw, frame.height = fh, frame.pixels = picture, frame.pitch = pitch;
+                frame.blend = kind == 11, frame.swap = swap != 0;
+                if (kind == 0)
+                        compositor_fill(&a, fx, fy, fw, fh, colour);
+                else
+                        compositor_contents(&a, &frame);
+                ran = compositor_records_run(ops, 1, &b, records_resolve);
+                trials++;
+                if (ran != 1 || memory_compare(painted, executed, (positive)count * 4))
+                        mismatches++;
+        }
+        check("records: 600 random frames of kind 0, 4 and 11 (with and without the 0x80 swap) are the painters' pixels, every one", mismatches == 0 && trials == 600);
+        // A tiled record is refused, and the target it was given is left as it was.
+        {
+                static unsigned int target[64 * 64];
+                unsigned int ops[8];
+                struct compositor_target t;
+                int ran;
+
+                for (int at = 0; at < 64 * 64; at++)
+                        target[at] = 0x5a5a5a5au + (unsigned int)at;
+                memory_zero(ops, sizeof(ops));
+                ops[0] = 4 | 0x20u, ops[1] = 0, ops[2] = 0, ops[3] = 16, ops[4] = 16, ops[5] = (unsigned int)RECORDS_VA, ops[6] = 0, ops[7] = 16;
+                t = (struct compositor_target){target, 64, 64, 64, 0, 0, 64, 64, 0, 0, null, 0};
+                records_picture = picture, records_bytes = 4ul * 16 * 16;
+                ran = compositor_records_run(ops, 1, &t, records_resolve);
+                refused += ran == -1;
+                for (int at = 0; at < 64 * 64; at++)
+                        if (target[at] != 0x5a5a5a5au + (unsigned int)at)
+                                mismatches++;
+        }
+        check("records: a record with the 0x20 tiled flag is refused and draws nothing", refused == 1 && mismatches == 0);
+}
+
+/*
         A frame recorded into a window's list says what changed (the header's damage) inside its picture: a box whose columns run
         past the window's edges (a shadow, a ripple, a lit row's reach) is drawn cut to the picture, and the damage is cut with it, so
         the compositor's reader (window_list_valid) takes the list. The owner's machine refused 31 lists for damage outside the picture.

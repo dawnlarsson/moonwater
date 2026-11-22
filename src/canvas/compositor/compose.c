@@ -3534,5 +3534,71 @@ static int canvas_ext_xform_blit(const struct canvas_ext_blit *b, int out_box[4]
         return 1;
 }
 
+/*
+        The record executor (C2 S6a): scene records of 8 words, run on the processor with lib.c's loops into the target, as the card
+        runs them. Kind 0 (fill), 4 (copy) and 11 (over), with the red-blue swap 0x80 on 4 and 11. Any other kind, and any flag but 0x80
+        (0x20 tiled, 0x40 DCC: the processor has no detiler), is refused: -1, with the records before it run and the rest not. A
+        copy's or an over's picture is at the card address in words 5 and 6, and its pitch in pixels in word 7; resolve gives the
+        processor's pointer to a card address (gpu_pointer_of_va in production), 0 for none. Each record is clipped to the target,
+        as the painters are: the same pixels as compositor_fill and compositor_contents on the frame the record stands for.
+*/
+static int __attribute__((unused)) compositor_records_run(const unsigned int *ops, unsigned int count, const struct compositor_target *t,
+                                                          const void *(*resolve)(positive va, positive bytes))
+{
+        for (unsigned int at = 0; at < count; at++)
+        {
+                const unsigned int *op = ops + 8 * (unsigned long)at;
+                unsigned int kind = op[0] & 0x1fu;
+                int x0 = (int)op[1], y0 = (int)op[2], x1 = (int)op[3], y1 = (int)op[4], w = x1 - x0, h = y1 - y0;
+
+                if (kind == 0)
+                {
+                        if (op[0] & ~0x1fu)
+                                return -1;
+                        if (w > 0 && h > 0)
+                                compositor_fill(t, x0, y0, w, h, op[5]);
+                        continue;
+                }
+                if ((kind != 4 && kind != 11) || (op[0] & ~0x9fu))
+                        return -1;
+                if (w > 0 && h > 0)
+                {
+                        positive va = (positive)op[5] | (positive)op[6] << 32;
+                        const unsigned int *picture = resolve ? (const unsigned int *)resolve(va, 4 * ((positive)op[7] * (positive)(h - 1) + (positive)w)) : 0;
+                        int x2, y2, x3, y3;
+
+                        if (!picture)
+                                return -1;
+                        if (!(op[0] & 0x80u))
+                        {
+                                if (kind == 4)
+                                        compositor_blit(t, x0, y0, w, h, picture, op[7]);
+                                else
+                                        compositor_blit_blend(t, x0, y0, w, h, picture, op[7], 0);
+                                continue;
+                        }
+                        // The swapped copy and over: each run of the picture's red and blue traded, then copied or laid over, as the card loads it.
+                        if (!target_clip(t, x0, y0, w, h, &x2, &y2, &x3, &y3))
+                                continue;
+                        if (kind == 11)
+                                compositor_reading(t);
+                        for (int py = y2; py < y3; py++)
+                                for (int px = x2; px < x3; px += 1024)
+                                {
+                                        int n = x3 - px < 1024 ? x3 - px : 1024;
+                                        unsigned int run[1024];
+                                        unsigned int *into = t->pixels + (unsigned long)(py - t->oy) * t->pitch + (unsigned long)(px - t->ox);
+
+                                        memory_swizzle_rb_u32(run, picture + (unsigned long)(py - y0) * op[7] + (unsigned long)(px - x0), (positive)n, 0);
+                                        if (kind == 11)
+                                                memory_over_u32_rect(into, t->pitch, run, (positive)n, (positive)n, 1);
+                                        else
+                                                (t->out ? memory_copy_rect_out_u32 : memory_copy_rect_u32)(into, t->pitch, run, (positive)n, (positive)n, 1);
+                                }
+                }
+        }
+        return (int)count;
+}
+
 /* ---- end of the backend ---- */
 

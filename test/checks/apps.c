@@ -10414,6 +10414,7 @@ b32 main()
         check_launcher();
         check_launcher_anchor();
 #endif
+        check_compositor_records();
         check_compositor_look();
         check_compositor_click();
         check_compositor_cursor_style();
