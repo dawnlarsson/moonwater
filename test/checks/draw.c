@@ -1028,7 +1028,7 @@ static font_engine dl_engine;
 static p8 dl_atlas[512 * 512];
 static unsigned int dl_scratch[1200 * UI_SCRATCH_ROWS], dl_probe_pixels[DL_W * DL_H], dl_replay[DL_W * DL_H];
 static unsigned int dl_probe_ops[DL_ROOM * 8];
-static unsigned char dl_probe_cover[4096];
+static unsigned char dl_probe_cover[65536]; // the probe's pool: a 300 percent wide cell's tones and coverage (about 3 KiB) and more, as a window's half holds them
 static struct ui_scene dl_probe_scene;
 
 static void dl_probe_reset(void)
@@ -1036,6 +1036,7 @@ static void dl_probe_reset(void)
         memory_zero(dl_probe_pixels, sizeof(dl_probe_pixels));
         memory_zero(&dl_probe_scene, sizeof(dl_probe_scene));
         dl_probe_scene.ops = dl_probe_ops, dl_probe_scene.room = DL_ROOM, dl_probe_scene.cover = dl_probe_cover, dl_probe_scene.size = sizeof(dl_probe_cover);
+        dl_probe_scene.slot_gen = 1; // as ui_scene_begin leaves it: a slot is used when its generation is this one, and a zeroed table is all used at generation 0
 }
 
 static unsigned long dl_probe_writes(void)
@@ -1166,7 +1167,7 @@ static void dl_wide_rows(void)
         const unsigned int scales[4] = {100, 150, 200, 300};
         const p32 codes[3] = {0x4e2d, 0xff21, 0x1f600};
         const p32 grounds[2] = {0xf6f6f6u, 0x111113u}, inks[2] = {0x1d1d1fu, 0xdfe7efu};
-        long bad = 0, cases = 0, recorded = 0;
+        long bad = 0, cases = 0, recorded = 0, rec_code[3] = {0, 0, 0};
 
         for (int k = 0; k < 4; k++)
                 for (int light = 0; light < 2; light++)
@@ -1187,6 +1188,7 @@ static void dl_wide_rows(void)
                                 ui_scene_wide(&probe_ui, faces, 2, 0, codes[c], &grid, em, &probe, 0, 0, x, y, inks[light], grounds[light]);
                                 cases++;
                                 recorded += !dl_probe_scene.lost && dl_probe_scene.count > 0;
+                                rec_code[c] += !dl_probe_scene.lost && dl_probe_scene.count > 0;
                                 if (dl_probe_scene.lost)
                                 {
                                         bad++;
@@ -1200,7 +1202,9 @@ static void dl_wide_rows(void)
                                                 break;
                                         }
                         }
-        check("draw list: a wide cell records (no loss) at 100, 150, 200 and 300 percent, on a light and a dark ground", recorded == cases && cases == 24);
+        check("draw list: a wide CJK cell records (no loss) at 100, 150, 200 and 300 percent, on a light and a dark ground", rec_code[0] == 8);
+        check("draw list: a wide fullwidth cell records (no loss) at 100, 150, 200 and 300 percent, on a light and a dark ground", rec_code[1] == 8);
+        check("draw list: a wide emoji cell records (no loss) at 100, 150, 200 and 300 percent, on a light and a dark ground", rec_code[2] == 8);
         check("draw list: a wide cell's replay is font_cell's two cells, bit for bit, at four scales, light and dark, CJK, fullwidth and an emoji (no colour glyphs: an unknown glyph)", bad == 0);
 }
 
@@ -1343,7 +1347,8 @@ static void dl_probes(void)
         dl_wide_rows();
         dl_cluster_rows();
 
-        // The spinner: its ring and arc are recorded (the arc as coalesced tone rects), nothing is painted.
+        // The spinner: its ring and arc are recorded (the arc as coalesced tone rects), nothing is painted. Its ring is the theme's: the kit's theme is made first.
+        ui_kit_theme(UI_THEME_LIGHT, UI_ACCENT_DAWN, 0);
         dl_probe_reset();
         dl_probe_ui(&probe, 1);
         memory_zero(&control, sizeof(control));
