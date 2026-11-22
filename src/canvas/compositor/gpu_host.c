@@ -486,10 +486,11 @@ static b32 compositor_gpu_spots(void)
         {
                 const struct compositor_chip *c = &compositor.chip;
                 int box[4], layers = c->kind == COMPOSITOR_CHIP_HINT ? 1 : 2;
-                unsigned long cells = (unsigned long)c->w * c->h;
+                unsigned long cells;
 
-                if (c->w <= 0 || c->w > 255)
+                if (c->w <= 0 || c->w > 255 || c->h <= 0)
                         return g->why = COMPOSITOR_GPU_WHY_OTHER, false;
+                cells = (unsigned long)c->w * (unsigned long)c->h;
 
                 compositor_chip_place(box);
                 for (int layer = 0; layer < layers; layer++)
@@ -1347,9 +1348,11 @@ static int compositor_gpu_list_render_bytes(int row, unsigned char *list, unsign
         x1 = view.x1 < 0 ? 0 : view.x1 > width ? width : view.x1, y1 = view.y1 < 0 ? 0 : view.y1 > height ? height : view.y1;
         if (!made || x1 <= x0 || y1 <= y0)
                 return 1;
-        if (view.cover_used && view.cover_at >= COMPOSITOR_GPU_LIST_REACH && view.cover_at <= list_bytes &&
-            view.cover_used <= list_bytes - view.cover_at && list_bytes - view.cover_at - view.cover_used >= COMPOSITOR_GPU_LIST_REACH)
+        if (view.cover_used)
         {
+                if (view.cover_at < COMPOSITOR_GPU_LIST_REACH || view.cover_at > list_bytes ||
+                    view.cover_used > list_bytes - view.cover_at || list_bytes - view.cover_at - view.cover_used < COMPOSITOR_GPU_LIST_REACH)
+                        return compositor_list_why = COMPOSITOR_LIST_OPEN, 0;
                 bases = (positive address_to)((p8 address_to)gpu.at + GPU_BASES_AT);
                 cover_from = (positive)list + view.cover_at - COMPOSITOR_GPU_LIST_REACH, cover_to = (positive)list + view.cover_at + view.cover_used + COMPOSITOR_GPU_LIST_REACH;
                 // The map of an earlier frame holds this one's cover bytes when the span is inside it: a frame's cover bytes are a few more or less than the last's, and a map

@@ -440,6 +440,114 @@ int main(void) {
                 check("xwm_wire parses UnmapNotify with from_configure=0", ok == 0 && parsed.kind == XWM_EV_UNMAP_NOTIFY && parsed.window == 0x222 && parsed.from_configure == 0);
         }
 
+        /* ===== PROFILE 6: Layer-Shell (zwlr_layer_surface_v1) & wl_callback delete_id ===== */
+        printf("\n=== Profile 6: Layer-Shell (zwlr_layer_surface_v1) & wl_callback delete_id ===\n");
+        {
+                /* Re-query registry to bind zwlr_layer_shell_v1 */
+                uint32_t a_reg2[1] = {45};
+                send_msg(c1, 1, WLQ_wl_display_get_registry, a_reg2, 1);
+                drain_out(c1);
+                uint32_t has_ls = bind_global(c1, 45, "zwlr_layer_shell_v1", 4, 46);
+                check("zwlr_layer_shell_v1 advertised & bound", has_ls != 0 && !wayland_dead(c1));
+
+                /* Create wl_surface (47) + zwlr_layer_surface_v1 (48) + set_size(400, 32) + initial commit */
+                a1[0] = 47; send_msg(c1, 3, WLQ_wl_compositor_create_surface, a1, 1);
+                /* get_layer_surface(id=48, surface=47, output=0, layer=2 (TOP), namespace="bar") */
+                uint32_t a_ls[6] = {48, 47, 0, 2, 4, 0x00726162u};
+                send_msg(c1, 46, WLQ_zwlr_layer_shell_v1_get_layer_surface, a_ls, 6);
+                uint32_t a_sz[2] = {400, 32};
+                send_msg(c1, 48, WLQ_zwlr_layer_surface_v1_set_size, a_sz, 2);
+                drain_out(c1);
+                send_msg(c1, 47, WLQ_wl_surface_commit, 0, 0);
+                drain_out(c1);
+                uint32_t lcfg[4] = {0};
+                int got_lcfg = find_event(48, WLE_zwlr_layer_surface_v1_configure, lcfg, 4);
+                check("zwlr_layer_surface_v1 initial commit emits configure(400x32)",
+                      got_lcfg >= 1 && lcfg[1] == 400 && lcfg[2] == 32 && !wayland_dead(c1));
+
+                /* ack_configure + attach SHM buffer (24) + commit -> maps row */
+                int opens_before = g_row_opens, pics_before = g_row_pictures;
+                a1[0] = lcfg[0]; send_msg(c1, 48, WLQ_zwlr_layer_surface_v1_ack_configure, a1, 1);
+                a_att[0] = 24; send_msg(c1, 47, WLQ_wl_surface_attach, a_att, 3);
+                send_msg(c1, 47, WLQ_wl_surface_commit, 0, 0);
+                drain_out(c1);
+                check("zwlr_layer_surface_v1 ack+attach+commit maps surface cleanly",
+                      g_row_opens == opens_before + 1 && g_row_pictures == pics_before + 1 && !wayland_dead(c1));
+
+                /* Destroy layer surface & wl_surface cleanly */
+                send_msg(c1, 48, WLQ_zwlr_layer_surface_v1_destroy, 0, 0);
+                send_msg(c1, 47, WLQ_wl_surface_destroy, 0, 0);
+                drain_out(c1);
+
+                /* wl_callback delete_id on wl_surface.destroy: pending frame callback must emit delete_id so ID is reusable */
+                a1[0] = 50; send_msg(c1, 3, WLQ_wl_compositor_create_surface, a1, 1);
+                a1[0] = 51; send_msg(c1, 50, WLQ_wl_surface_frame, a1, 1);
+                drain_out(c1);
+                send_msg(c1, 50, WLQ_wl_surface_destroy, 0, 0);
+                drain_out(c1);
+                uint32_t del_w[2] = {0};
+                int got_del = find_event(1, WLE_wl_display_delete_id, del_w, 2);
+                /* Verify callback ID 51 was deleted and can be reused immediately for wl_display.sync */
+                int deleted_51 = 0;
+                for (long off = 0; off + 12 <= g_out_len;) {
+                        uint32_t o, h, did;
+                        memcpy(&o, g_out + off, 4); memcpy(&h, g_out + off + 4, 4);
+                        uint16_t sz = (uint16_t)(h >> 16), ev = (uint16_t)(h & 0xffff);
+                        if (sz < 8 || off + sz > g_out_len) break;
+                        if (o == 1 && ev == WLE_wl_display_delete_id && sz >= 12) {
+                                memcpy(&did, g_out + off + 8, 4);
+                                if (did == 51) deleted_51 = 1;
+                        }
+                        off += sz;
+                }
+                a1[0] = 51; send_msg(c1, 1, WLQ_wl_display_sync, a1, 1);
+                drain_out(c1);
+                int got_sync_done = find_event(51, WLE_wl_callback_done, 0, 0);
+                check("wl_surface.destroy emits wl_display.delete_id for pending wl_callback and allows ID reuse",
+                      got_del >= 1 && deleted_51 && got_sync_done == 1 && !wayland_dead(c1));
+
+                /* Negative test on separate client c2: get_layer_surface on an xdg_surface must fail with already_constructed */
+                long c2 = wayland_connect(1235, 1000);
+                uint32_t r2[1] = {2}; send_msg(c2, 1, WLQ_wl_display_get_registry, r2, 1);
+                drain_out(c2);
+                bind_global(c2, 2, "wl_compositor", 4, 3);
+                bind_global(c2, 2, "xdg_wm_base", 5, 4);
+                bind_global(c2, 2, "zwlr_layer_shell_v1", 4, 5);
+                a1[0] = 10; send_msg(c2, 3, WLQ_wl_compositor_create_surface, a1, 1);
+                uint32_t x2[2] = {11, 10}; send_msg(c2, 4, WLQ_xdg_wm_base_get_xdg_surface, x2, 2);
+                uint32_t ls2[6] = {12, 10, 0, 2, 4, 0x00726162u};
+                send_msg(c2, 5, WLQ_zwlr_layer_shell_v1_get_layer_surface, ls2, 6);
+                drain_out(c2);
+                check("zwlr_layer_shell_v1 rejects surface that already has xdg_surface role",
+                      wayland_dead(c2) != 0);
+                wayland_drop(c2);
+
+                /* Negative test on separate client c3: buffer attached to layer_surface before initial configure fails on role_id */
+                long c3 = wayland_connect(1236, 1000);
+                send_msg(c3, 1, WLQ_wl_display_get_registry, r2, 1);
+                drain_out(c3);
+                bind_global(c3, 2, "wl_compositor", 4, 3);
+                bind_global(c3, 2, "wl_shm", 1, 4);
+                bind_global(c3, 2, "zwlr_layer_shell_v1", 4, 5);
+                a1[0] = 10; send_msg(c3, 3, WLQ_wl_compositor_create_surface, a1, 1);
+                uint32_t ls3[6] = {11, 10, 0, 2, 4, 0x00726162u};
+                send_msg(c3, 5, WLQ_zwlr_layer_shell_v1_get_layer_surface, ls3, 6);
+                uint32_t p3[2] = {12, 65536};
+                send_msg_fds(c3, 4, WLQ_wl_shm_create_pool, p3, 2, &fake_fd, 1);
+                uint32_t b3[6] = {13, 0, 64, 64, 256, WLN_wl_shm_format_argb8888};
+                send_msg(c3, 12, WLQ_wl_shm_pool_create_buffer, b3, 6);
+                uint32_t att3[3] = {13, 0, 0};
+                send_msg(c3, 10, WLQ_wl_surface_attach, att3, 3);
+                drain_out(c3);
+                send_msg(c3, 10, WLQ_wl_surface_commit, 0, 0);
+                drain_out(c3);
+                uint32_t err3[4] = {0};
+                int got_err3 = find_event(1, WLE_wl_display_error, err3, 4);
+                check("zwlr_layer_surface_v1 rejects unconfigured buffer with wl_display.error on layer role_id",
+                      wayland_dead(c3) != 0 && got_err3 >= 1 && err3[0] == 11);
+                wayland_drop(c3);
+        }
+
         /* ===== OVERHEAD BENCHMARK ===== */
         printf("\n=== Overhead Benchmark (local wayland.c hot path) ===\n");
         {

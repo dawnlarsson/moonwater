@@ -1080,6 +1080,168 @@ def test_canvas_spaces_invariants():
           "else if (compositor.chip.kind == COMPOSITOR_CHIP_DRAG)" in inp)
 
 
+def test_hardening_66_bug_families():
+    print("\n=== 3c. Family-Wide Hardening Invariants (Dynamic UI Lists, Intel GPU, Wayland/XWM, KMS/Scanout, Apps) ===")
+
+    ui_dir = ROOT / "src/canvas/ui"
+    ui_c = read_text("src/canvas/ui/ui.c")
+    settings_c = read_text("src/canvas/ui/settings.c")
+    launcher_c = read_text("src/canvas/ui/launcher.c")
+    installer_c = read_text("src/canvas/ui/installer.c")
+    taskbar_c = read_text("src/canvas/ui/taskbar.c")
+    files_c = read_text("src/canvas/ui/files.c")
+    terminal_c = read_text("src/canvas/ui/terminal.c")
+    osk_c = read_text("src/canvas/ui/osk.c")
+    editor_c = read_text("src/canvas/ui/editor.c")
+    gpu_c = read_text("src/canvas/gpu.c")
+    gpu_host_c = read_text("src/canvas/compositor/gpu_host.c")
+    present_c = read_text("src/canvas/compositor/present.c")
+    wl_c = read_text("src/canvas/wayland.c")
+    wlh_c = read_text("src/canvas/wayland_host.c")
+    xwm_c = read_text("src/canvas/xwm.c")
+    kms_c = read_text("src/canvas/compositor/kms.c")
+    scan_c = read_text("src/canvas/compositor/scanout.c")
+    manage_c = read_text("src/canvas/compositor/manage.c")
+    glass_c = read_text("src/canvas/compositor/glass.c")
+    input_c = read_text("src/canvas/compositor/input.c")
+
+    # --- Family 1: Dynamic ui_list, sparse ID collision & unsigned short truncation ---
+    short_list_truncs = []
+    for p in sorted(ui_dir.glob("*.c")):
+        txt = p.read_text(encoding="utf-8", errors="replace")
+        for m in re.finditer(r"(?:\bl->|\.list\.)(?:id|focus|hover|down)\b[^;\n]*\bunsigned short\b", txt):
+            short_list_truncs.append(f"{p.name}: {m.group(0)[:80]}")
+    check("Family 1: no unsigned short truncation of ui_list id/focus/hover/down across src/canvas/ui/*.c",
+          not short_list_truncs and "UI_LIST_MOST" not in ui_c and "UI_LIST_MOST" not in settings_c and
+          "UI_LIST_MOST" not in launcher_c and "UI_LIST_MOST" not in installer_c,
+          "; ".join(short_list_truncs))
+
+    m_pg = re.search(r"#define\s+UI_PAGE_GROUP\s+(0x[0-9a-fA-F]+|\d+)", ui_c)
+    m_pc = re.search(r"#define\s+UI_PAGE_CARD\s+(0x[0-9a-fA-F]+|\d+)", ui_c)
+    pg_val = int(m_pg.group(1), 0) if m_pg else 0
+    pc_val = int(m_pc.group(1), 0) if m_pc else 0
+    check("Family 1: UI_PAGE_GROUP/UI_PAGE_CARD live above 0x40000000 (cannot collide with sparse dynamic ui_list IDs)",
+          pg_val >= 0x40000000 and pc_val > pg_val, f"group={hex(pg_val)} card={hex(pc_val)}")
+
+    check("Family 1: dynamic ui_list_reserve checks mmap error, reserves in window/layout, and guards ui_list_least for large ID spaces",
+          "static b32 ui_list_reserve(" in ui_c and
+          "if (mapped < 0 && mapped > -4096)" in ui_c and
+          "if (!ui_list_reserve(l, count))" in ui_c and
+          "if (l->count > 0 && !ui_list_reserve(l, l->count))" in ui_c and
+          "if (l->ids > 4096)" in ui_c)
+
+    # Every settings.list.id[0] access must be guarded by count / settings.list.count on the preceding line
+    unguarded_id0 = []
+    s_lines = settings_c.splitlines()
+    for i, line in enumerate(s_lines):
+        if "settings.list.id[0]" in line:
+            prev = s_lines[i - 1] if i > 0 else ""
+            if "count" not in prev and "count" not in line:
+                unguarded_id0.append(f"settings.c:{i+1}: {line.strip()}")
+    check("Family 1: all settings.list.id[0] accesses are guarded against empty/NULL dynamic slab",
+          not unguarded_id0, "; ".join(unguarded_id0))
+
+    # --- Family 2: Intel Gen7/7.5 & Gen11 GPU + GPU host bounds/async invariants ---
+    check("Family 2: Intel Gen7/7.5 omits GPU_I915_WRITTEN on main batch BO & Gen7/Gen11+ userptr omits READ_ONLY with ENODEV retry",
+          "gpu.family < 800 ? 0 : GPU_I915_WRITTEN" in gpu_c and
+          "how == GPU_USER_READ && !gpu_i915.read_only_refused && gpu.family >= 800 && gpu.family < 1100" in gpu_c and
+          "up.flags &= ~1u;" in gpu_c)
+
+    check("Family 2: gpu_scene_submit supports scratch bins_at >= top for gpu_wake() without room==0",
+          "b32 scratch = bins_at >= top && bins_at + 4096 <= gpu.size;" in gpu_c and
+          "at = scratch ? bins_at : bins_at + side * room;" in gpu_c)
+
+    check("Family 2: compositor_gpu_spots rejects invalid chip dimensions (w<=0, w>255, h<=0) before computing cells",
+          "if (c->w <= 0 || c->w > 255 || c->h <= 0)" in gpu_host_c and
+          gpu_host_c.find("if (c->w <= 0 || c->w > 255 || c->h <= 0)") <
+          gpu_host_c.find("cells = (unsigned long)c->w * (unsigned long)c->h;"))
+
+    check("Family 2: compositor_gpu_list_render_bytes rejects OOB cover bounds (returns 0 instead of stale bases[slot])",
+          "if (view.cover_at < COMPOSITOR_GPU_LIST_REACH || view.cover_at > list_bytes ||" in gpu_host_c and
+          "return compositor_list_why = COMPOSITOR_LIST_OPEN, 0;" in gpu_host_c[gpu_host_c.find("if (view.cover_used)"):gpu_host_c.find("bases = (positive address_to)")])
+
+    check("Family 2: compositor_card_tick checks gpu_found == GPU_END_NONE before settling async lists",
+          "if (!compositor_card.on && !gpu.pending && gpu_found == GPU_END_NONE)" in present_c)
+
+    # --- Family 3: Wayland & XWM lifecycle, subsurface layers, flush lock & multi-Xwayland XDND ---
+    check("Family 3: wayland_surface_drop emits delete_id via wayland_object_delete for pending wl_callbacks",
+          "if (slot >= 0) wayland_object_delete(c, slot);" in wl_c)
+
+    check("Family 3: zwlr_layer_surface_v1 enforces configure/unconfigured-buffer, links surface, and rejects XDG surfaces",
+          "int layer = s->role == WAYLAND_ROLE_TOPLEVEL && s->u.top.layer_shell;" in wl_c and
+          "int xdg = ((s->flags & WAYLAND_SURFACE_XDG) != 0) || layer" in wl_c and
+          "layer ? s->role_id : s->xdg_id" in wl_c and
+          "if (s->role != WAYLAND_ROLE_NONE || s->xsurface || (s->flags & WAYLAND_SURFACE_XDG))" in wl_c and
+          "return wayland_surface_link(c, a[0].slot, s), WAYLAND_OK;" in wl_c)
+
+    check("Family 3: compositor_wl_unmap & compositor_wl_close drop subsurface layers and compositor_wl_flush checks abs_valid",
+          wlh_c.count("compositor_wl_layers_drop(row);") >= 3 and
+          "(!compositor_wl_direct.abs_valid || compositor_wl_direct.abs_slot != slot)" in wlh_c)
+
+    # Structural scan: EVERY struct wayland_table in struct compositor_xwm must be dropped in compositor_xwm_close_rows
+    m_xwm_struct = re.search(r"struct compositor_xwm\s*\{(.*?)\n\};", xwm_c, re.S)
+    m_xwm_close = re.search(r"static void compositor_xwm_close_rows\([^)]*\)\s*\{(.*?)\n\}", xwm_c, re.S)
+    xwm_tables = []
+    if m_xwm_struct:
+        for line in m_xwm_struct.group(1).splitlines():
+            m_t = re.search(r"struct wayland_table\s+([^;]+);", line)
+            if m_t:
+                xwm_tables.extend(tok.strip() for tok in m_t.group(1).split(",") if tok.strip())
+    missing_drops = [t for t in xwm_tables if not m_xwm_close or f"wayland_table_drop(&x->{t})" not in m_xwm_close.group(1)]
+    check("Family 3: compositor_xwm_close_rows drops EVERY wayland_table in struct compositor_xwm + xdrag.types + ins[at].index",
+          bool(xwm_tables) and not missing_drops and m_xwm_close is not None and
+          "wayland_table_drop(&x->xdrag.types);" in m_xwm_close.group(1) and
+          "if (x->ins[at].index >= 0)" in m_xwm_close.group(1),
+          f"missing drops: {missing_drops}")
+
+    check("Family 3: compositor_xwm_receive scans all COMPOSITOR_XWM_SLOTS for multi-Xwayland XDND (which == 2)",
+          "compositor_xwm_slots[s].xdrag.entered && compositor_xwm_slots[s].xdrag.source" in xwm_c)
+
+    # --- Family 4: KMS, Scanout, Overlay, Glass & Spaces ---
+    check("Family 4: scaled direct-scanout VRR kick uses compositor_atomic_primary & compositor_atomic_to restores 1:1 plane",
+          "if (compositor.scaled_direct && row >= 0)" in kms_c and
+          "compositor_atomic_primary(compositor.on_screen, row, compositor.front[row]" in kms_c and
+          "if (compositor.scaled_direct)" in scan_c and
+          "drm_atomic_set_plane(&req, compositor.primary, compositor.primary_props, compositor.crtc, fb, 0, 0, pw, ph, 0, 0, pw, ph);" in scan_c and
+          "compositor.scaled_direct = 0;" in scan_c[scan_c.find("static int compositor_atomic_to("):])
+
+    check("Family 4: compositor_space_take defers on async GPU/list jobs, syncs cursor thread, and frees old secondary FB",
+          "if (!first && (compositor.flip_pending || compositor_card.on || rows_any(&compositor_card.list_rows)))" in kms_c and
+          "compositor_cursor_async_sync(0, 0, 0, 0, 0, 0);" in kms_c and
+          "if (compositor.output[at].fb && compositor.output[at].fb != compositor.fb)" in kms_c)
+
+    check("Family 4: compositor_overlay_buffers disables overlay & cleans partial allocations; compositor_window_fb restores table->pinned on all failures",
+          "compositor_overlay_off();" in scan_c[scan_c.find("static int compositor_overlay_buffers("):scan_c.find("static int compositor_overlay_buffers(") + 600] and
+          "for (unsigned int prev = 0; prev < which; prev++)" in scan_c and
+          scan_c[scan_c.find("static unsigned int compositor_window_fb("):scan_c.find("static void compositor_window_fb_drop(")].count("__atomic_store_n(&compositor.table->pinned[row]") >= 3)
+
+    check("Family 4: glass skips layers/null-pixel frames, press_at forwards down, and Space remove/move preserve damage & focus",
+          "if (!compositor.glassy[row] || frames[at].layer || (!frames[at].builtin && !frames[at].pixels))" in glass_c and
+          "compositor_pointer_press(code, down);" in input_c and
+          "if (!was_active && compositor.spaces.active[screen] == fallback)" in manage_c and
+          "int keep_focus = compositor.focus >= 0 && compositor.row_space[compositor.focus] == sid" in manage_c)
+
+    # --- Family 5: Taskbar & UI Apps (Files, Terminal, OSK, Editor) ---
+    check("Family 5: taskbar glass span covers TASKBAR_STRIP_ON..view->count & tray shrink counts spaces + xtray items",
+          taskbar_c.count("for (int which = TASKBAR_STRIP_ON; which < (int)view->count; which++)") >= 2 and
+          "which != TASKBAR_TABS_LEFT && !(which <= TASKBAR_ZONE && which > TASKBAR_DONE)" in taskbar_c and
+          "sp + sp_add + (xt > 0 ? xt : 0)" in taskbar_c)
+
+    check("Family 5: files.c Empty Trash confirm, Cut dim, files_move_end on begin failure & selection revision guard",
+          "if (down && event->a != UI_POINTER_RIGHT)" in files_c and
+          "if (files_carry_take_mode(files_model_chosen(m, m->cursor)) && cut)" in files_c and
+          "return files_move_end(job), false;" in files_c and
+          files_c.count("if (m->chosen_count || m->cursor != FILES_NO)") >= 2)
+
+    m_osk_pt = re.search(r"static b32 osk_purpose_take\([^)]*\)\s*\{(.*?)\n\}", osk_c, re.S)
+    m_ed_ev = re.search(r"static b32 editor_event\([^)]*\)\s*\{(.*?)\n\}", editor_c, re.S)
+    check("Family 5: terminal.c klog SIGHUP guard, osk.c purpose-change release + accent motion, editor.c pill_down cleanup",
+          "if (!terminal.reading && !terminal.gone)" in terminal_c and
+          "if (osk.alt_key >= 0)" in osk_c and
+          m_osk_pt is not None and "osk_release();" in m_osk_pt.group(1) and
+          m_ed_ev is not None and "editor.pill_down = false;" in m_ed_ev.group(1))
+
+
 def test_build_and_audit_gates():
     print("\n=== 4. Build & Audit Gates ===")
     r1 = run_cmd([sys.executable, "test/compositor_split.py", "--check"])
@@ -1107,6 +1269,7 @@ def main():
     test_compositor_and_xwm_invariants()
     test_kernel_audio_bowl_invariants()
     test_canvas_spaces_invariants()
+    test_hardening_66_bug_families()
     test_build_and_audit_gates()
     print(f"\nSummary: {PASS} passed, {FAIL} failed")
     return 0 if FAIL == 0 else 1
