@@ -1123,6 +1123,11 @@ static fn editor_pill_row(int scale)
         centre_y = ui_dev(&editor.ui, editor.chips[0].y + editor.chips[0].h / 2);
         at.a = ui_dev(&editor.ui, ui_tab_left(&editor.ui, &editor.chips[0], 1) + ui_tab_width(&editor.ui, &editor.chips[0], 1) / 2);
         at.b = centre_y;
+        check("editor pill: the switch's label is the Wrap chip's size, the medium label",
+              ui_tab_label(&editor.chips[0]) == UI_LABEL_MEDIUM);
+        check("editor pill: a compact tab's width is its label in that size plus the compact padding, which is the width the draw uses",
+              ui_tab_natural_width(&editor.ui, &editor.chips[0], 0) ==
+                  ui_kit_measure(&editor.ui, (string_address)editor.chips[0].items[0], UI_LABEL_MEDIUM) * 100 / scale + 16);
         check("editor pill: the Hex item's centre is inside the pill", at.a >= px && at.a < px + pw && at.b >= py && at.b < py + ph);
         check("editor pill: the Hex item's whole rectangle lies inside the pill, not only its centre",
               ui_dev(&editor.ui, ui_tab_left(&editor.ui, &editor.chips[0], 1)) >= px &&
@@ -1135,8 +1140,25 @@ static fn editor_pill_row(int scale)
         compositor_call(syscall(munmap), pixels, 800 * 600 * 4, 0, 0, 0, 0);
 }
 
+/*
+        The default segmented tab is unchanged by the compact variant: it is measured in the large label with 28 px of padding, as it was.
+*/
+static fn tabs_default_check(void)
+{
+        static struct ui_control tabs;
+        struct ui ui = terminal.ui;
+
+        ui.scale = 100;
+        memory_zero(&tabs, sizeof(tabs));
+        tabs.kind = UI_TABS, tabs.variant = UI_TABS_SEGMENTED;
+        ui_tabs_fill(&tabs, 2, 0, editor_mode_name, editor_mode_marked);
+        check("tabs: a default segmented tab is measured in the large label, with 28 px of padding, as before",
+              ui_tab_natural_width(&ui, &tabs, 0) == ui_kit_measure(&ui, (string_address)tabs.items[0], UI_LABEL_LARGE) * 100 / 100 + 28);
+}
+
 static fn editor_pill_check(void)
 {
+        tabs_default_check();
         editor_pill_row(100);
         editor_pill_row(200);
 }

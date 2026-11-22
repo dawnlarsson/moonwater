@@ -10778,6 +10778,7 @@ static fn ui_chase_at(struct ui_chase address_to c, const b64 address_to want, b
 #define UI_SLIDER_BARE 8     // a track and its thumb alone, in the middle of its box: no label and no number (a list row's slider)
 #define UI_TABS_UNDERLINE 0
 #define UI_TABS_SEGMENTED 1
+#define UI_TABS_COMPACT 3 // a segmented strip in the medium label with the compact padding (16 logical px across an item): a compact pill's switch
 #define UI_TABS_VERTICAL 2 // the segmented strip stood on its end: a column of items h tall, the pip travelling along y
 #define UI_ITEMS 32 // a column's items: Settings has its sections and All commands, 17 groups, and the column must reach the last
 #define UI_RADIO_PITCH 64 // a radio row and the gap under it (48 + 16, the card's gap)
@@ -11742,11 +11743,17 @@ static fn ui_slider_draw(struct ui address_to ui, struct ui_control address_to c
 static string_address ui_fit(struct ui address_to ui, string_address text, int type, int room, char address_to fitted, positive capacity);
 static fn ui_kit_dot(struct ui address_to ui, int x, int y, unsigned int argb);
 
+// A segmented strip's tabs, whichever of the two segmented variants it is (the compact one is the same strip, smaller).
+#define UI_TAB_COMPACT_PAD 16 // logical px across a compact tab's label: 8 a side
+static inline b32 ui_tabs_segmented(const struct ui_control address_to c) { return c->variant == UI_TABS_SEGMENTED || c->variant == UI_TABS_COMPACT; }
+// The label size a tab's text is measured and drawn in: the compact variant is always medium; the default is the large one, measured.
+static inline int ui_tab_label(const struct ui_control address_to c) { return c->variant == UI_TABS_COMPACT ? UI_LABEL_MEDIUM : UI_LABEL_LARGE; }
+
 static int ui_tab_natural_width(struct ui address_to ui, const struct ui_control address_to c, int item)
 {
-        int text = ui->scale > 0 && c->items[item] ? ui_kit_measure(ui, (string_address)c->items[item], UI_LABEL_LARGE) * 100 / ui->scale : 0;
+        int text = ui->scale > 0 && c->items[item] ? ui_kit_measure(ui, (string_address)c->items[item], ui_tab_label(c)) * 100 / ui->scale : 0;
         if (!c->closable)
-                return text + 28;
+                return text + (c->variant == UI_TABS_COMPACT ? UI_TAB_COMPACT_PAD : 28);
         text += 20 + UI_TAB_CLOSE_W;
         if (text < 64)
                 text = 64;
@@ -11759,7 +11766,7 @@ static int ui_tab_width(struct ui address_to ui, const struct ui_control address
         if (!c->closable || c->w <= 0 || c->count <= 0)
                 return natural;
         {
-                int gap = c->variant == UI_TABS_SEGMENTED ? 4 : 2;
+                int gap = ui_tabs_segmented(c) ? 4 : 2;
                 int add_room = c->addable ? UI_TAB_ADD_W + gap : 0;
                 int avail = c->w - add_room - (c->count > 1 ? (c->count - 1) * gap : 0);
                 int total = 0;
@@ -11778,7 +11785,7 @@ static int ui_tab_width(struct ui address_to ui, const struct ui_control address
 
 static int ui_tab_left(struct ui address_to ui, const struct ui_control address_to c, int item)
 {
-        int x = c->x, gap = c->variant == UI_TABS_SEGMENTED ? 4 : 2;
+        int x = c->x, gap = ui_tabs_segmented(c) ? 4 : 2;
         for (int k = 0; k < item; k++)
                 x += ui_tab_width(ui, c, k) + gap;
         // Reading from the right the first tab is at the box's right end, and the strip runs to the left from it.
@@ -11790,7 +11797,7 @@ static int ui_tabs_length(struct ui address_to ui, const struct ui_control addre
 {
         int length = 0;
         for (int k = 0; k < c->count; k++)
-                length += ui_tab_width(ui, c, k) + (k ? (c->variant == UI_TABS_SEGMENTED ? 4 : 2) : 0);
+                length += ui_tab_width(ui, c, k) + (k ? (ui_tabs_segmented(c) ? 4 : 2) : 0);
         return length;
 }
 
@@ -11803,7 +11810,7 @@ static int ui_tab_close_left(struct ui address_to ui, const struct ui_control ad
 
 static int ui_tabs_add_left(struct ui address_to ui, const struct ui_control address_to c)
 {
-        int gap = c->variant == UI_TABS_SEGMENTED ? 4 : 2;
+        int gap = ui_tabs_segmented(c) ? 4 : 2;
         int x = c->x + ui_tabs_length(ui, c) + (c->count ? gap : 0);
         if (!c->addable || (c->w > 0 && x + UI_TAB_ADD_W > c->x + c->w))
                 return -1;
@@ -11897,7 +11904,7 @@ static fn ui_tabs_draw(struct ui address_to ui, struct ui_control address_to c)
         b32 was_busy = ui_kit.busy, live = 0;
         int chosen = c->at;
         ax.vertical = c->variant == UI_TABS_VERTICAL;
-        ax.seg = c->variant == UI_TABS_SEGMENTED;
+        ax.seg = ui_tabs_segmented(c);
         if (!ax.vertical && (c->count == 0 || ui->scale <= 0 || ui->width <= 0 || ui->height <= 0 || (c->closable && c->w <= 0)))
                 return;
         anim = ui_items_anim_for(c);
@@ -12014,7 +12021,7 @@ static fn ui_tabs_draw(struct ui address_to ui, struct ui_control address_to c)
                 }
                 else
                 {
-                        int tfont = ih <= UI_ROW_DENSE ? UI_LABEL_MEDIUM : UI_LABEL_LARGE;
+                        int tfont = c->variant == UI_TABS_COMPACT || ih <= UI_ROW_DENSE ? UI_LABEL_MEDIUM : UI_LABEL_LARGE;
                         int fline = ui_types[tfont].line;
                         int baseline = ui_kit_baseline(ui, ui_dev(ui, iy) + (ui_dev(ui, ih) - ui_dev(ui, fline)) / 2, tfont), width;
                         char cut[128];

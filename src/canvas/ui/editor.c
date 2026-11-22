@@ -889,7 +889,7 @@ static fn editor_pill_draw(struct ui address_to ui, struct editor_tab address_to
         // The switch is the kit's: its items are measured by the kit (its label size and its padding), so the pill is as wide as the
         // kit draws the switch. The editor's own measure disagreed with the kit's, and the Hex item fell outside the pill.
         if (s->kind != UI_TABS)
-                s->kind = UI_TABS, s->variant = UI_TABS_SEGMENTED, ui_control_start(s);
+                s->kind = UI_TABS, s->variant = UI_TABS_COMPACT, ui_control_start(s);
         ui_tabs_fill(s, 2, tab->view.hex, editor_mode_name, editor_mode_marked);
         seg_w = ui_dev(ui, ui_tabs_length(ui, s));
         int wrap_w = tab->view.hex ? 0 : ui_kit_measure(ui, (string_address)wrap_lbl, UI_LABEL_MEDIUM) + 2 * chip_px;
