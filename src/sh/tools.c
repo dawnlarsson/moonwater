@@ -4666,7 +4666,7 @@ static b32 tools_tsort()
         return_if(!bytes, text_done(1));
 
         positive tokens = 0;
-        bool inside = false;
+        p32 tsort_edges_buf[512];
 
         /*      A NUL byte is part of a token, as it is to GNU, whose names
                 are C strings: the node is the token up to its first NUL, so
@@ -4674,17 +4674,16 @@ static b32 tools_tsort()
                 starts with one is the empty name. Only the three blanks end
                 a token; each is overwritten with the terminator as the
                 graph is built. */
-        for (positive at = 0; at < length; at++)
+        for (positive at = 0; at < length;)
         {
-                p8 value = bytes[at];
+                positive found = memory_offsets_fields_blank(
+                    tsort_edges_buf, bytes + at, length - at, '\n',
+                    array_count(tsort_edges_buf) / 2);
 
-                if (value == ' ' || value == '\t' || value == '\n')
-                        inside = false;
-                else if (!inside)
-                {
-                        tokens++;
-                        inside = true;
-                }
+                tokens += found;
+                if (found < array_count(tsort_edges_buf) / 2)
+                        break;
+                at += tsort_edges_buf[2 * found - 1];
         }
         bytes[length] = end;
 
@@ -4735,45 +4734,43 @@ static b32 tools_tsort()
 
         positive relation = 0;
         b32 before = -1;
-        positive at = 0;
 
-        while (at < length)
+        for (positive at = 0; at < length;)
         {
-                while (at < length && (bytes[at] == ' ' || bytes[at] == '\t' ||
-                                       bytes[at] == '\n'))
-                        at++;
+                positive found = memory_offsets_fields_blank(
+                    tsort_edges_buf, bytes + at, length - at, '\n',
+                    array_count(tsort_edges_buf) / 2);
 
-                if (at == length)
+                for (positive f = 0; f < found; f++)
+                {
+                        string_address name = bytes + at + tsort_edges_buf[2 * f];
+
+                        bytes[at + tsort_edges_buf[2 * f + 1]] = end;
+
+                        b32 node = tsort_node_for(name);
+
+                        if (before < 0)
+                        {
+                                before = node;
+                                continue;
+                        }
+
+                        if (before != node)
+                        {
+                                tsort_edges[relation] = (tsort_edge){
+                                    .successor = node,
+                                    .next = tsort_nodes[before].top,
+                                };
+                                tsort_nodes[before].top = (b32)relation++;
+                                tsort_nodes[node].predecessors++;
+                        }
+
+                        before = -1;
+                }
+
+                if (found < array_count(tsort_edges_buf) / 2)
                         break;
-
-                string_address name = bytes + at;
-
-                while (at < length && bytes[at] != ' ' && bytes[at] != '\t' &&
-                       bytes[at] != '\n')
-                        at++;
-                bytes[at] = end;
-                if (at < length)
-                        at++;
-
-                b32 node = tsort_node_for(name);
-
-                if (before < 0)
-                {
-                        before = node;
-                        continue;
-                }
-
-                if (before != node)
-                {
-                        tsort_edges[relation] = (tsort_edge){
-                            .successor = node,
-                            .next = tsort_nodes[before].top,
-                        };
-                        tsort_nodes[before].top = (b32)relation++;
-                        tsort_nodes[node].predecessors++;
-                }
-
-                before = -1;
+                at += tsort_edges_buf[2 * found - 1];
         }
 
         if (tsort_node_count > positive_max / (2 * sizeof(b32)))

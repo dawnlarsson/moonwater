@@ -1193,10 +1193,7 @@ static bool awk_parsing;
    regex matches, as gawk's does, and a C string would end the pattern there. */
 static fn awk_regex_build(regex_program address_to into, string_address pattern, positive length)
 {
-        bool backslash = false;
-
-        for (positive i = 0; i < length && !backslash; i++)
-                backslash = pattern[i] == '\\';
+        bool backslash = memory_first_of(pattern, '\\', length) != null;
 
         awk_text address_to plain = backslash ? awk_regex_escapes(pattern, length) : null;
 
@@ -2765,7 +2762,8 @@ static awk_text address_to awk_sprintf(string_address format, positive length,
                                 bipolar value = awk_whole(taken < count
                                     ? awk_to_number(&arguments[taken++]) : 0);
                                 if (field)
-                                        precision = value < 0 ? -1 : (b32)value;
+                                        precision = value < 0 ? -1
+                                                              : (b32)min((positive)value, 2147483647ul);
                                 else
                                 {
                                         parsed.flags |= value < 0 ? CONVERSION_FLAG_LEFT : 0;
@@ -2883,7 +2881,7 @@ static awk_text address_to awk_sprintf(string_address format, positive length,
                                     exact, precision < 0 ? 6 : precision, room,
                                     sizeof(room), 'g', alternate && conversion != 'u');
 
-                                if (room[0] == '-')
+                                if (body && room[0] == '-')
                                 {
                                         prefix[prefixed++] = '-';
                                         body--;
@@ -3056,7 +3054,7 @@ static awk_text address_to awk_sprintf(string_address format, positive length,
                         // The minus is the formatter's and the field is
                         // awk's: it has to stand in front of the zero fill,
                         // so it moves out of the body and into the prefix.
-                        if (digits[0] == '-')
+                        if (body && digits[0] == '-')
                         {
                                 prefix[prefixed++] = '-';
                                 body--;
@@ -5925,6 +5923,9 @@ static awk_text address_to awk_replace(awk_text address_to subject, regex_progra
         // a UTF-8 locale is a whole sequence and not its first byte.
         bool wide = awk_text_wide(subject);
 
+        bool plain_with = !memory_first_of(with->text, '\\', with->length) &&
+                          !memory_first_of(with->text, '&', with->length);
+
         address_to made = 0;
         awk_builder_start(address_of build);
 
@@ -5962,7 +5963,11 @@ static awk_text address_to awk_replace(awk_text address_to subject, regex_progra
                         of them collapse is directly before an ampersand that
                         is meant to be the match.
                 */
-                for (positive i = 0; i < with->length; i++)
+                if (plain_with)
+                {
+                        awk_builder_put(address_of build, with->text, with->length);
+                }
+                else for (positive i = 0; i < with->length; i++)
                 {
                         if (with->text[i] == '\\' && i + 1 < with->length)
                         {
