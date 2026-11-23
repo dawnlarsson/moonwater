@@ -6523,8 +6523,15 @@ LANGUAGE_ID(files_deleted, "%d deleted") \
 LANGUAGE_ID(files_deleting, "Deleting: %d so far, Escape stops") \
 LANGUAGE_ID(files_device_eject, "Eject") \
 LANGUAGE_ID(files_device_live, "A live session opens no drives") \
+LANGUAGE_ID(files_device_nothing, "Nothing to open") \
 LANGUAGE_ID(files_device_write, "Allow Writing") \
 LANGUAGE_ID(files_devices, "Devices") \
+LANGUAGE_ID(files_disc_audio, "Audio CD") \
+LANGUAGE_ID(files_disc_kind_audio, "Audio track") \
+LANGUAGE_ID(files_disc_kind_data, "Data track") \
+LANGUAGE_ID(files_disc_none, "No disc") \
+LANGUAGE_ID(files_disc_playing, "Playing track %d") \
+LANGUAGE_ID(files_disc_track, "Track %d") \
 LANGUAGE_ID(files_drive_root, "System") \
 LANGUAGE_ID(files_empty, "This folder is empty") \
 LANGUAGE_ID(files_failed, "This folder could not be read") \

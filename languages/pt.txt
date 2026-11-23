@@ -11,6 +11,7 @@
 # machine-made 2026-11-23 (the add row of Waterlink's linked machines), not yet read by a person: settings_link_add settings_link_add_keys settings_link_show settings_link_stop settings_link_type
 # machine-made 2026-11-23 (a row menu's copy of one column), not yet read by a person: menu_copy_named
 # machine-made 2026-11-23 (Waterlink's grants as columns, and a remove asked on its row), not yet read by a person: settings_column_files settings_column_log settings_column_run settings_column_shell settings_remove_again
+# machine-made 2026-11-23 (the CD drive and the flat Devices of Files), not yet read by a person: files_device_nothing files_disc_audio files_disc_kind_audio files_disc_kind_data files_disc_none files_disc_playing files_disc_track
 @language pt
 @name Português
 @translated machine
@@ -79,8 +80,15 @@ files_deleted	8591	%d excluídos
 files_deleting	a297	Excluindo: %d até agora, Escape para
 files_device_eject	ea96	Ejetar
 files_device_live	b607	Uma sessão live não abre unidades
+files_device_nothing	c005	Nada para abrir
 files_device_write	7442	Permitir gravação
 files_devices	f320	Dispositivos
+files_disc_audio	f664	CD de áudio
+files_disc_kind_audio	f8ba	Faixa de áudio
+files_disc_kind_data	95ce	Faixa de dados
+files_disc_none	c5a3	Sem disco
+files_disc_playing	bcab	A tocar a faixa %d
+files_disc_track	5465	Faixa %d
 files_drive_root	84bc	Sistema
 files_empty	751c	Esta pasta está vazia
 files_failed	c564	Não foi possível ler esta pasta

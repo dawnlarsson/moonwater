@@ -12,6 +12,7 @@
 # machine-made 2026-11-23 (the add row of Waterlink's linked machines), not yet read by a person: settings_link_add settings_link_add_keys settings_link_show settings_link_stop settings_link_type
 # machine-made 2026-11-23 (a row menu's copy of one column), not yet read by a person: menu_copy_named
 # machine-made 2026-11-23 (Waterlink's grants as columns, and a remove asked on its row), not yet read by a person: settings_column_files settings_column_log settings_column_run settings_column_shell settings_remove_again
+# machine-made 2026-11-23 (the CD drive and the flat Devices of Files), not yet read by a person: files_device_nothing files_disc_audio files_disc_kind_audio files_disc_kind_data files_disc_none files_disc_playing files_disc_track
 @language ur
 @name اردو
 @translated machine
@@ -80,8 +81,15 @@ files_deleted	8591	%d حذف ہوئے
 files_deleting	a297	حذف ہو رہا ہے: اب تک %d، Escape روکتا ہے
 files_device_eject	ea96	نکالیں
 files_device_live	b607	لائیو سیشن کوئی ڈرائیو نہیں کھولتا
+files_device_nothing	c005	کھولنے کو کچھ نہیں
 files_device_write	7442	لکھنے کی اجازت دیں
 files_devices	f320	ڈیوائسز
+files_disc_audio	f664	آڈیو سی ڈی
+files_disc_kind_audio	f8ba	آڈیو ٹریک
+files_disc_kind_data	95ce	ڈیٹا ٹریک
+files_disc_none	c5a3	کوئی ڈسک نہیں
+files_disc_playing	bcab	ٹریک %d چل رہا ہے
+files_disc_track	5465	ٹریک %d
 files_drive_root	84bc	سسٹم
 files_empty	751c	یہ فولڈر خالی ہے
 files_failed	c564	یہ فولڈر پڑھا نہیں جا سکا

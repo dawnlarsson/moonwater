@@ -4425,8 +4425,127 @@ static fn browser_filter(struct files_model address_to m)
         The Devices group (files_devices_read, files_devices_mounted, files_tree_devices): moonwater device list read into the table,
         a disk of its own and a USB device's disk named by what the device says it is, each partition with what the line's fs tail
         says (its type, label and node), free room and a segment with no tail not listed, a disk with no table one partition where a
-        file system is on its whole; where each is mounted from the mount table; and the rows after This Machine's and before a peer.
+        file system is on its whole; where each is mounted from the mount table; and the rows after This Machine's and before a peer,
+        flat: a row a file system that opens, the media plugged in first, a stick's mount its row alone.
 */
+/*
+        Media of every kind, flat (files_tree_devices, files.c's files_device_describe): a data disc in the machine's drive (its label, the
+        disc's symbol), a CD of music (Audio CD, its length, pressed for its tracks), a USB drive with no disc (No disc, quiet), a stick of
+        two file systems and a swap partition (the stick's name before each one's, no row of the swap), and a card with nothing on it that
+        opens (quiet). Then the CD's tracks as disc tracks says them (files_disc_take), each a row (Track N, its length, a data track
+        quiet), and the one a play this window started is at by the tracks' lengths (files_disc_now).
+*/
+static fn browser_media(void)
+{
+        static struct files_devices devices;
+        static struct files_tree tree;
+        static const char list[] =
+            "  sr0 drive 650 MB view only\n"
+            "    part 0 650000000 unpartitioned - fs iso9660 PHOTOS_2009 sr0\n"
+            "    disc data\n"
+            "    where external ata\n"
+            "  sr1 drive 700 MB view only\n"
+            "    disc audio 3 600\n"
+            "    where external ata\n"
+            "  2-1 usb 0e8d:1887 Slim DVD Writer allowed\n"
+            "    drive sr2 0 MB\n"
+            "    disc none\n"
+            "  1-2 usb 0781:5581 SanDisk Ultra allowed\n"
+            "    drive sdb 31000 MB\n"
+            "    part 1048576 15000000000 other - fs exfat DATA sdb1\n"
+            "    part 15001048576 15000000000 other - fs ext4 - sdb2\n"
+            "    part 30001048576 999000000 swap Linux_swap fs swap - sdb3\n"
+            "  sdc drive 64 MB view only\n"
+            "    part 0 64000000 free -\n"
+            "    where external scsi\n";
+        static const char said[] = "[Moonwater] track 1 audio 200\n[Moonwater] track 2 audio 250\n[Moonwater] track 3 audio 150\n[Moonwater] track 4 data 90\n";
+        long mapped = ui_map(sizeof(struct files_big));
+        b32 read, rows = false, words = false, tracks = false, now = false;
+        struct ui_row row;
+        char time[16], hours[16];
+        b64 was;
+
+        memory_zero(&devices, sizeof(devices));
+        read = files_devices_read(&devices, (const p8 address_to)list, sizeof(list) - 1) && devices.disks == 5 && devices.parts == 4 &&
+               devices.disk_disc[0] == FILES_DISC_DATA && devices.disk_disc[1] == FILES_DISC_AUDIO && devices.disk_tracks[1] == 3 && devices.disk_seconds[1] == 600 &&
+               devices.disk_disc[2] == FILES_DISC_NONE && string_equals((string_address)devices.disk_label[2], (string_address) "Slim DVD Writer") &&
+               devices.disk_disc[3] == FILES_DISC_NO && devices.disk_external[3] && devices.disk_disc[4] == FILES_DISC_NO && devices.disk_count[4] == 0 &&
+               devices.part_disk[0] == 0 && string_equals((string_address)devices.part_type[0], (string_address) "iso9660") &&
+               string_equals((string_address)devices.part_label[0], (string_address) "PHOTOS 2009") && devices.part_role[3] == FILES_ROLE_SWAP;
+        check("browser: an optical drive's disc line says what is in it (data, a CD's tracks and seconds, none), a disc of data its one partition", read);
+        if (mapped < 0 && mapped > -4096)
+        {
+                check("browser: the window's memory is mapped", false);
+                return;
+        }
+        files.big = (struct files_big address_to)mapped;
+        if (files_tree_begin(&tree))
+        {
+                p32 g;
+                tree.devices = &devices;
+                files_tree_populate(&tree, (const p8 address_to) "/home/u", null, 0);
+                g = files_tree_after(&tree, 0);
+                rows = g + 7 == tree.count && tree.node[g].has == 6 &&
+                       tree.node[g + 1].kind == FILES_NODE_PART && tree.node[g + 1].device == 0 && string_equals((string_address)files_tree_name(&tree, g + 1), (string_address) "PHOTOS 2009") &&
+                       tree.node[g + 2].kind == FILES_NODE_DISK && tree.node[g + 2].device == 1 &&
+                       tree.node[g + 3].kind == FILES_NODE_DISK && tree.node[g + 3].device == 2 &&
+                       tree.node[g + 4].kind == FILES_NODE_PART && tree.node[g + 4].device == 1 && (tree.node[g + 4].flags & FILES_NODE_SEVERAL) &&
+                       string_equals((string_address)files_tree_name(&tree, g + 4), (string_address) "DATA") &&
+                       tree.node[g + 5].kind == FILES_NODE_PART && tree.node[g + 5].device == 2 && string_equals((string_address)files_tree_name(&tree, g + 5), (string_address) "sdb2") &&
+                       tree.node[g + 6].kind == FILES_NODE_DISK && tree.node[g + 6].device == 4;
+                memory_copy(&files.big->devices, &devices, sizeof(devices)), memory_copy(&files.big->tree, &tree, sizeof(tree));
+                files.big->tree.devices = &files.big->devices;
+                {
+                        // Each row's words read as it is described: the rows' words are the describe's own (static) buffers.
+                        static const char address_to const labels[7] = {null, "PHOTOS 2009", "Audio CD", "Slim DVD Writer", "SanDisk Ultra \xc2\xb7 DATA",
+                                                                        "SanDisk Ultra \xc2\xb7 sdb2", "sdc"};
+                        static const char address_to const notes[7] = {null, "iso9660", null, "No disc", "exfat", "ext4", "Nothing to open"};
+                        static const unsigned int symbols[7] = {0, UI_FILE_DISC, UI_FILE_DISC, UI_FILE_DISC, UI_FILE_STICK, UI_FILE_STICK, UI_FILE_STICK};
+                        static const b8 quiet[7] = {0, 0, 0, 1, 0, 0, 1};
+                        words = rows;
+                        for (p32 k = 1; k <= 6 && words; k++)
+                        {
+                                memory_zero(&row, sizeof(row)), files_tree_describe((int)(g + k), &row);
+                                words = row.file == 1 + symbols[k] && string_equals((string_address)row.label, (string_address)labels[k]) && (b8)row.dim == quiet[k] &&
+                                        (notes[k] ? row.note && string_equals((string_address)row.note, (string_address)notes[k]) : !row.note) &&
+                                        (k != 2 || (row.value && string_equals((string_address)row.value, (string_address) "10:00")));
+                                if (!words)
+                                        string_format(log, "  browser: the medium row %p said %s (%s), symbol %p\n", (positive)k, row.label ? row.label : "-", row.note ? row.note : "-", (positive)row.file);
+                        }
+                }
+                memory_zero(&files.big->tree, sizeof(files.big->tree)), files_tree_end(&tree);
+        }
+        check("browser: a row a medium, outside first: a data disc by its label, a CD of music, a drive with no disc, a stick's two file systems named with it (no swap), a card with nothing that opens", rows);
+        check("browser: a medium's row says what it is: the disc's symbol for a drive's (Audio CD and its length, No disc quiet), the stick's for a stick's, Nothing to open quiet", words);
+        files_disc_take(said, sizeof(said) - 1);
+        {
+                struct files_disc address_to c = &files.big->disc;
+                string_copy_bounded((string_address)c->drive, (string_address) "sr1", sizeof(c->drive));
+                c->shown = true;
+                memory_zero(&row, sizeof(row)), files_disc_describe(1, &row);
+                tracks = c->count == 4 && c->number[0] == 1 && c->seconds[1] == 250 && c->data[3] && !c->data[2] &&
+                         string_equals((string_address)row.label, (string_address) "Track 2") && string_equals((string_address)row.cells[1], (string_address) "4:10") &&
+                         string_equals((string_address)row.cells[2], (string_address) "Audio track") && row.file == 1 + UI_FILE_AUDIO && !row.dim && !row.mark;
+                memory_zero(&row, sizeof(row)), files_disc_describe(3, &row);
+                tracks = tracks && row.dim && string_equals((string_address)row.cells[2], (string_address) "Data track");
+                files_disc_time(time, sizeof(time), 65), files_disc_time(hours, sizeof(hours), 3725);
+                tracks = tracks && string_equals((string_address)time, (string_address) "1:05") && string_equals((string_address)hours, (string_address) "1:02:05");
+                // A play started at track 1, 300 seconds ago: track 1 is 200 long, so track 2 plays; a play of another drive is no track here.
+                was = ui_kit.now, ui_kit.now = 1000000000000ll;
+                c->playing = true, c->play_track = 1, c->play_at = ui_kit.now - 300000000000ll;
+                string_copy_bounded((string_address)c->play_drive, (string_address) "sr1", sizeof(c->play_drive));
+                memory_zero(&row, sizeof(row)), files_disc_describe(1, &row);
+                now = files_disc_now() == 2 && row.mark;
+                c->play_at = ui_kit.now - 2000000000000ll;
+                now = now && files_disc_now() == 3;
+                string_copy_bounded((string_address)c->play_drive, (string_address) "sr0", sizeof(c->play_drive));
+                now = now && files_disc_now() == 0;
+                memory_zero(c, sizeof(*c)), ui_kit.now = was;
+        }
+        check("browser: a CD's tracks are the lines disc tracks says: Track N, its length, a data track quiet", tracks);
+        check("browser: the track that plays is found from the one a play started at by the tracks' lengths, the last of music at most, and none on another drive", now);
+}
+
 static fn browser_devices(void)
 {
         static struct files_devices devices;
@@ -4496,35 +4615,39 @@ static fn browser_devices(void)
                          files_devices_session((const p8 address_to) "disk nvme0n1\n", 13);
                 check("browser: a live session (a verdict that is not disk DISK) offers no Open and no Allow Writing, and still ejects what it has open", offers);
         }
-        devices.disk_shut[1] = 1;
-        again =!files_devices_read(&devices, (const p8 address_to)list, sizeof(list) - 1) && devices.disk_shut[1] &&
-                files_devices_read(&devices, (const p8 address_to)list, sizeof(list) - 2) && devices.disks == 3 && devices.disk_shut[1] && !devices.disk_shut[0];
-        check("browser: the same list read again changes nothing, and a disk shut stays shut by its name when the list is read anew", again);
+        again = !files_devices_read(&devices, (const p8 address_to)list, sizeof(list) - 1) &&
+                files_devices_read(&devices, (const p8 address_to)list, sizeof(list) - 2) && devices.disks == 3 && devices.parts == 4;
+        check("browser: the same list read again changes nothing, and a list that differs is read anew", again);
         if (files_tree_begin(&tree))
         {
                 p8 path[FILES_PATH];
-                p32 group;
-                tree.devices = &devices, devices.disk_shut[1] = 0;
+                p32 group, stick = FILES_NO;
+                b32 one = true;
+                tree.devices = &devices;
                 files_tree_add_machine(&tree, (const p8 address_to) "peer", 1, FILES_NODE_ONLINE, false);
                 files_tree_populate(&tree, (const p8 address_to) "/home/u", (const p8 address_to)mounts, sizeof(mounts) - 1);
                 group = files_tree_after(&tree, 0);
-                rows = group + 8 < tree.count && tree.node[group].kind == FILES_NODE_DEVICES && tree.node[group].depth == 0 && tree.node[group].open &&
-                       tree.node[group + 1].kind == FILES_NODE_DISK && tree.node[group + 1].device == 0 && tree.node[group + 1].depth == 1 &&
-                       tree.node[group + 2].kind == FILES_NODE_PART && tree.node[group + 2].device == 0 && tree.node[group + 2].depth == 2 &&
-                       string_equals((string_address)files_tree_name(&tree, group + 2), (string_address) "ESP") &&
-                       string_equals((string_address)files_tree_name(&tree, group + 3), (string_address) "Linux filesystem") &&
-                       string_equals((string_address)files_tree_name(&tree, group + 4), (string_address) "SanDisk Ultra") &&
-                       string_equals((string_address)files_tree_name(&tree, group + 5), (string_address) "MY STICK") &&
-                       tree.node[group + 7].kind == FILES_NODE_PART && tree.node[group + 7].device == 3 &&
-                       tree.node[group + 8].kind == FILES_NODE_MACHINE && tree.node[group + 8].machine == 1;
-                pathless = !files_tree_path(&tree, group, path) && !files_tree_path(&tree, group + 1, path) && !files_tree_path(&tree, group + 5, path) &&
-                           !files_tree_open(&tree, group + 5) && files_tree_reveal(&tree, (const p8 address_to) "/run/media/root/MY STICK/a") != group + 5;
-                devices.disk_shut[0] = 1, (void)files_tree_devices(&tree);
-                shut = tree.node[group + 1].kind == FILES_NODE_DISK && !tree.node[group + 1].open && tree.node[group + 2].kind == FILES_NODE_DISK;
+                // Outside first, each a row of its own at the group's depth: the stick (its label), the card (its label); then the
+                // machine's disk, whose EFI partition opens nothing and whose one file system is the disk's name.
+                rows = group + 4 < tree.count && tree.node[group].kind == FILES_NODE_DEVICES && tree.node[group].depth == 0 && tree.node[group].open &&
+                       tree.node[group].has == 3 &&
+                       tree.node[group + 1].kind == FILES_NODE_PART && tree.node[group + 1].device == 2 && tree.node[group + 1].depth == 1 &&
+                       string_equals((string_address)files_tree_name(&tree, group + 1), (string_address) "MY STICK") && !(tree.node[group + 1].flags & FILES_NODE_SEVERAL) &&
+                       tree.node[group + 2].kind == FILES_NODE_PART && tree.node[group + 2].device == 3 && tree.node[group + 2].depth == 1 &&
+                       string_equals((string_address)files_tree_name(&tree, group + 2), (string_address) "CARD") &&
+                       tree.node[group + 3].kind == FILES_NODE_PART && tree.node[group + 3].device == 1 && tree.node[group + 3].depth == 1 &&
+                       string_equals((string_address)files_tree_name(&tree, group + 3), (string_address) "nvme0n1") &&
+                       tree.node[group + 4].kind == FILES_NODE_MACHINE && tree.node[group + 4].machine == 1;
+                for (p32 k = 1; k < group; k++)
+                        one = one && !(tree.node[k].kind == FILES_NODE_DRIVE && string_equals((string_address)files_tree_name(&tree, k), (string_address) "MY STICK"));
+                stick = files_tree_reveal(&tree, (const p8 address_to) "/run/media/root/MY STICK/a");
+                one = one && group == 5 && stick == group + 1 && files_tree_find(&tree, (const p8 address_to) "/run/media/root/MY STICK") == group + 1 && !tree.node[4].open;
+                pathless = !files_tree_path(&tree, group, path) && !files_tree_path(&tree, group + 1, path) && !files_tree_open(&tree, group + 1);
                 devices.shut = 1, (void)files_tree_devices(&tree);
-                shut = shut && tree.node[group].kind == FILES_NODE_DEVICES && !tree.node[group].open && tree.node[group + 1].kind == FILES_NODE_MACHINE;
+                shut = tree.node[group].kind == FILES_NODE_DEVICES && !tree.node[group].open && tree.node[group + 1].kind == FILES_NODE_MACHINE;
                 devices.disks = 0, (void)files_tree_devices(&tree);
                 shut = shut && tree.node[group].kind == FILES_NODE_MACHINE && tree.count == group + 1;
+                check("browser: a stick opened is one row, its Devices row: This Machine has no drive of its mount, and a path on it is shown at that row with / left shut", one);
                 files_tree_end(&tree);
         }
         {
@@ -4552,9 +4675,11 @@ static fn browser_devices(void)
                 check("browser: a block device's uevent is heard (another subsystem's is not) and makes the list due with no look and before its time",
                       quiet && heard && due);
         }
-        check("browser: the Devices group is after This Machine's rows and before a peer: each disk, then its partitions", rows);
-        check("browser: a disk or a partition has no path, is no folder to open and is never where a path is revealed", pathless);
-        check("browser: a disk shut has no partitions under it, the group shut no disks, and with no disk there is no group", shut);
+        check("browser: the Devices group is after This Machine's rows and before a peer, flat: a row a file system that opens, the stick and the card first, an EFI partition none",
+              rows);
+        check("browser: a device's row has no path and is no folder to open", pathless);
+        check("browser: the group shut has no rows under it, and with no disk there is no group", shut);
+        browser_media();
 }
 
 static fn browser_asks(void)

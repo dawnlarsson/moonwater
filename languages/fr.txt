@@ -11,6 +11,7 @@
 # machine-made 2026-11-23 (the add row of Waterlink's linked machines), not yet read by a person: settings_link_add settings_link_add_keys settings_link_show settings_link_stop settings_link_type
 # machine-made 2026-11-23 (a row menu's copy of one column), not yet read by a person: menu_copy_named
 # machine-made 2026-11-23 (Waterlink's grants as columns, and a remove asked on its row), not yet read by a person: settings_column_files settings_column_log settings_column_run settings_column_shell settings_remove_again
+# machine-made 2026-11-23 (the CD drive and the flat Devices of Files), not yet read by a person: files_device_nothing files_disc_audio files_disc_kind_audio files_disc_kind_data files_disc_none files_disc_playing files_disc_track
 @language fr
 @name Français
 @translated machine
@@ -79,8 +80,15 @@ files_deleted	8591	%d supprimés
 files_deleting	a297	Suppression : %d pour l'instant, Escape arrête
 files_device_eject	ea96	Éjecter
 files_device_live	b607	Une session live n'ouvre aucun lecteur
+files_device_nothing	c005	Rien à ouvrir
 files_device_write	7442	Autoriser l'écriture
 files_devices	f320	Périphériques
+files_disc_audio	f664	CD audio
+files_disc_kind_audio	f8ba	Piste audio
+files_disc_kind_data	95ce	Piste de données
+files_disc_none	c5a3	Aucun disque
+files_disc_playing	bcab	Lecture de la piste %d
+files_disc_track	5465	Piste %d
 files_drive_root	84bc	Système
 files_empty	751c	Ce dossier est vide
 files_failed	c564	Ce dossier n'a pas pu être lu

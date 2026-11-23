@@ -66,8 +66,15 @@ files_deleted	8591	%d deleted
 files_deleting	a297	Deleting: %d so far, Escape stops
 files_device_eject	ea96	Eject
 files_device_live	b607	A live session opens no drives
+files_device_nothing	c005	Nothing to open
 files_device_write	7442	Allow Writing
 files_devices	f320	Devices
+files_disc_audio	f664	Audio CD
+files_disc_kind_audio	f8ba	Audio track
+files_disc_kind_data	95ce	Data track
+files_disc_none	c5a3	No disc
+files_disc_playing	bcab	Playing track %d
+files_disc_track	5465	Track %d
 files_drive_root	84bc	System
 files_empty	751c	This folder is empty
 files_failed	c564	This folder could not be read
