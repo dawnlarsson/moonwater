@@ -75,6 +75,31 @@ extern int _NSGetExecutablePath(char *buffer, unsigned int *size);
 #ifndef IPV6_V6ONLY
 #define IPV6_V6ONLY 27
 #endif
+/*      Darwin's struct statfs as getfsstat fills it, in the 64 bit inode
+        layout (arm64 has no other): the mounts a Mac tells a peer's Files of
+        (link_fs_mounts). <sys/mount.h> is not included: it brings Darwin's
+        struct timespec, which lib.c has its own of. */
+struct link_darwin_mount {
+        p32 bsize;
+        b32 iosize;
+        p64 blocks, bfree, bavail, files, ffree;
+        b32 fsid[2];
+        p32 owner, type, flags, fssubtype;
+        char fstypename[16];
+        char mntonname[1024];
+        char mntfromname[1024];
+        p32 flags_ext;
+        p32 reserved[7];
+};
+_Static_assert(sizeof(struct link_darwin_mount) == 2168,
+               "Darwin's struct statfs is 2168 bytes");
+#define LINK_DARWIN_NOWAIT 2               // MNT_NOWAIT
+#define LINK_DARWIN_DONT_BROWSE 0x00100000 // MNT_DONTBROWSE: a mount Finder does not show
+#if defined(ARM64)
+extern int link_darwin_mounts(struct link_darwin_mount *into, int bytes, int mode) __asm__("_getfsstat");
+#else
+extern int link_darwin_mounts(struct link_darwin_mount *into, int bytes, int mode) __asm__("_getfsstat$INODE64");
+#endif
 #endif
 
 /*      On Darwin the host layer's names come first: the paths below are made
@@ -252,7 +277,6 @@ static p64 link_keepalive = 10000000ull;
 #define LINK_FS_HEAD 9
 #define LINK_FS_MSG_MAX (4u << 20)
 #define LINK_FS_READ_MAX (256u << 10)
-#define LINK_FS_LIST_MAX 16384u
 
 enum {
         LINK_FS_IDLE = 0,
@@ -2965,6 +2989,25 @@ static p8 link_fs_mount_served(const p8 address_to line, positive length)
 }
 #endif
 
+#if defined(MACOS)
+/*      A word of a mountinfo line on the end of body, as the kernel writes
+        one: a space, tab, newline or backslash in it a backslash and three
+        octal digits. */
+static p8 link_fs_mount_word(struct link_fs_buf address_to body, const char address_to word)
+{
+        for (positive at = 0; word[at]; at++)
+        {
+                p8 c = (p8)word[at];
+                p8 code[4] = {'\\', (p8)('0' + (c >> 6)), (p8)('0' + ((c >> 3) & 7)), (p8)('0' + (c & 7))};
+                p8 plain = c != ' ' && c != '\t' && c != '\n' && c != '\\';
+
+                if (!link_fs_buf_append(body, plain ? address_of c : code, plain ? 1 : 4))
+                        return false;
+        }
+        return true;
+}
+#endif
+
 /*      The drives a peer's Files shows of this machine, in mountinfo's lines,
         put on the end of body: false only when body could not take them. A
         machine whose mounts cannot be read has none. */
@@ -3005,8 +3048,48 @@ static p8 link_fs_mounts(struct link_fs_buf address_to body)
         link_fs_buf_free(address_of all);
         return good;
 #else
-        (void)body;
-        return true;
+        /*      A Mac has no mountinfo: what stands in for it is the volumes
+                in /Volumes that Finder shows (a stick, a disk, an image), as
+                mountinfo's lines, so Files reads them as a Linux machine's.
+                The table is as long as getfsstat says it is. */
+        int count = link_darwin_mounts(null, 0, LINK_DARWIN_NOWAIT);
+        struct link_fs_buf table = {0};
+        p8 good = true;
+
+        if (count > 0 &&
+            link_fs_buf_reserve(address_of table, (positive)count * sizeof(struct link_darwin_mount)))
+        {
+                count = link_darwin_mounts((struct link_darwin_mount address_to)table.data,
+                                           (int)table.cap, LINK_DARWIN_NOWAIT);
+                for (int at = 0; good && at < count; at++)
+                {
+                        struct link_darwin_mount address_to m =
+                                (struct link_darwin_mount address_to)table.data + at;
+                        p8 head[64];
+                        positive used;
+
+                        if (m->flags & LINK_DARWIN_DONT_BROWSE ||
+                            memory_compare(m->mntonname, "/Volumes/", 9) ||
+                            !memory_first_of(m->mntonname, 0, sizeof m->mntonname) ||
+                            !memory_first_of(m->mntfromname, 0, sizeof m->mntfromname) ||
+                            !memory_first_of(m->fstypename, 0, sizeof m->fstypename))
+                                continue;
+                        //      ID PARENT MAJOR:MINOR ROOT POINT OPTIONS - TYPE SOURCE OPTIONS
+                        used = positive_into(head, (positive)at + 2);
+                        memory_copy(head + used, " 1 0:", 5), used += 5;
+                        used += positive_into(head + used, (positive)at + 2);
+                        memory_copy(head + used, " / ", 3), used += 3;
+                        good = link_fs_buf_append(body, head, used) &&
+                               link_fs_mount_word(body, m->mntonname) &&
+                               link_fs_buf_append(body, (const p8 address_to) " rw - ", 6) &&
+                               link_fs_mount_word(body, m->fstypename) &&
+                               link_fs_buf_append(body, (const p8 address_to) " ", 1) &&
+                               link_fs_mount_word(body, m->mntfromname) &&
+                               link_fs_buf_append(body, (const p8 address_to) " rw\n", 4);
+                }
+        }
+        link_fs_buf_free(address_of table);
+        return good;
 #endif
 }
 
@@ -3052,6 +3135,95 @@ static fn link_fs_handle_info(struct link_fs_buf address_to out, p32 req_id)
         link_fs_buf_free(address_of body);
 }
 
+//      A name's facts in folder, or the negative error: file.c's look on
+//      Linux, the Darwin host layer's on a Mac.
+static bipolar link_fs_look(bipolar folder, string_address name, positive flags,
+                            file_facts address_to facts)
+{
+#if defined(MACOS)
+        return file_look(folder, name, flags, facts) ? 0 : -(bipolar)*__error();
+#else
+        return file_look_code(folder, name, flags, facts);
+#endif
+}
+
+/*      One entry of a listing on the end of body: its kind (0 a folder, 1 a
+        file, 2 a link, 3 anything else), the mode (a link's target's), size,
+        times and inode, and its name. type is the directory record's, for a
+        name that cannot be looked at. 1 put, 0 passed over (., .., a hidden
+        name not asked for, a file when folders alone are, a name gone), and
+        -1 when the listing is as long as a message is or body is full. */
+static b32 link_fs_list_put(struct link_fs_buf address_to body, p8 flags,
+                            bipolar folder, string_address name, p8 type,
+                            p64 inode)
+{
+        positive nlen = string_length(name);
+        file_facts facts, target;
+        bipolar looked;
+        p8 kind, ent[37];
+        p16 mode = 0;
+        p64 size = 0;
+        b64 modified = 0, born = 0;
+
+        if (!nlen || nlen >= 256 ||
+            (name[0] == '.' && (nlen == 1 || (nlen == 2 && name[1] == '.'))))
+                return 0;
+        if (name[0] == '.' && !(flags & 1))
+                return 0;
+        looked = link_fs_look(folder, name, AT_SYMLINK_NOFOLLOW, address_of facts);
+        if (looked == -2) // ENOENT: gone since the directory was read
+                return 0;
+        if (looked == 0)
+        {
+                kind = link_fs_kind_of(facts.mode);
+                mode = (p16)facts.mode;
+                size = facts.size;
+                modified = facts.modified.seconds;
+#if !defined(MACOS)
+                born = facts.created.seconds;
+#endif
+                inode = facts.inode;
+                if (kind == 2)
+                        mode = link_fs_look(folder, name, 0, address_of target) == 0
+                                   ? (p16)target.mode
+                                   : 0;
+        }
+        else
+                kind = type == DT_DIR   ? 0
+                       : type == DT_REG ? 1
+                       : type == DT_LNK ? 2
+                                        : 3;
+        if ((flags & 2) && kind != 0)
+                return 0;
+        if (body->len + 37 + nlen > LINK_FS_MSG_MAX ||
+            !link_fs_buf_reserve(body, body->len + 37 + nlen))
+                return -1;
+        ent[0] = kind;
+        link_fs_put16(ent + 1, mode);
+        link_fs_put64(ent + 3, size);
+        link_fs_put64(ent + 11, (p64)modified);
+        link_fs_put64(ent + 19, (p64)born);
+        link_fs_put64(ent + 27, inode);
+        link_fs_put16(ent + 35, (p16)nlen);
+        return link_fs_buf_append(body, ent, 37) &&
+                       link_fs_buf_append(body, (const p8 address_to)name, nlen)
+                   ? 1
+                   : -1;
+}
+
+#if defined(MACOS)
+/*      A record of Darwin's getdirentries64, struct direntry: the name after
+        the type, ended by a NUL, and the next record reclen bytes on. */
+struct link_darwin_entry {
+        p64 ino;
+        p64 seekoff;
+        p16 reclen;
+        p16 namlen;
+        p8 type;
+        char name[];
+};
+#endif
+
 static fn link_fs_handle_list(struct link_fs_buf address_to out, p32 req_id,
                               const p8 address_to payload, positive plen)
 {
@@ -3069,6 +3241,7 @@ static fn link_fs_handle_list(struct link_fs_buf address_to out, p32 req_id,
                 return;
         }
         flags = payload[0];
+        memory_zero(hdr, sizeof hdr);
 #if !defined(MACOS)
         {
                 file_walk walk;
@@ -3087,87 +3260,78 @@ static fn link_fs_handle_list(struct link_fs_buf address_to out, p32 req_id,
                         link_fs_reply_err(out, req_id, FS_OP_LIST, -13);
                         return;
                 }
-                memory_zero(hdr, sizeof hdr);
                 if (!link_fs_buf_append(address_of body, hdr, 8))
                 {
                         file_walk_close(address_of walk);
                         link_fs_reply_err(out, req_id, FS_OP_LIST, -12);
                         return;
                 }
-                while (count < LINK_FS_LIST_MAX &&
-                       (rec = file_walk_next(address_of walk)))
-                {
-                        positive nlen = string_length((string_address)rec->d_name);
-                        file_facts facts, target;
-                        bipolar looked;
-                        p8 kind, ent[37];
-                        p16 mode = 0;
-                        p64 size = 0, inode = rec->d_ino;
-                        b64 modified = 0, born = 0;
-
-                        if (file_is_dot((string_address)rec->d_name) || !nlen ||
-                            nlen >= 256)
-                                continue;
-                        if (rec->d_name[0] == '.' && !(flags & 1))
-                                continue;
-                        looked = file_look_code(walk.handle,
-                                                (string_address)rec->d_name,
-                                                AT_SYMLINK_NOFOLLOW,
-                                                address_of facts);
-                        if (looked == -ERROR_NO_ENTRY)
-                                continue;
-                        if (looked == 0)
-                        {
-                                kind = link_fs_kind_of(facts.mode);
-                                mode = (p16)facts.mode;
-                                size = facts.size;
-                                modified = facts.modified.seconds;
-                                born = facts.created.seconds;
-                                inode = facts.inode;
-                                if (kind == 2)
-                                        mode = file_look_code(
-                                                   walk.handle,
-                                                   (string_address)rec->d_name,
-                                                   0, address_of target) == 0
-                                                   ? (p16)target.mode
-                                                   : 0;
-                        }
-                        else
-                                kind = rec->d_type == DT_DIR   ? 0
-                                       : rec->d_type == DT_REG ? 1
-                                       : rec->d_type == DT_LNK ? 2
-                                                               : 3;
-                        if ((flags & 2) && kind != 0)
-                                continue;
-                        if (body.len + 37 + nlen > LINK_FS_MSG_MAX)
-                                break;
-                        ent[0] = kind;
-                        link_fs_put16(ent + 1, mode);
-                        link_fs_put64(ent + 3, size);
-                        link_fs_put64(ent + 11, (p64)modified);
-                        link_fs_put64(ent + 19, (p64)born);
-                        link_fs_put64(ent + 27, inode);
-                        link_fs_put16(ent + 35, (p16)nlen);
-                        if (!link_fs_buf_append(address_of body, ent, 37) ||
-                            !link_fs_buf_append(
-                                address_of body,
-                                (const p8 address_to)rec->d_name, nlen))
-                                break;
-                        count++;
-                }
+                for (b32 put = 0; put >= 0 && (rec = file_walk_next(address_of walk));)
+                        if ((put = link_fs_list_put(address_of body, flags, walk.handle,
+                                                    (string_address)rec->d_name,
+                                                    rec->d_type, rec->d_ino)) > 0)
+                                count++;
                 file_walk_close(address_of walk);
-                if (body.len >= 8)
-                        link_fs_put32(body.data + 4, count);
-                link_fs_reply_put(out, req_id, FS_OP_LIST, body.data, body.len);
-                link_fs_buf_free(address_of body);
         }
 #else
-        (void)flags;
-        (void)body;
-        (void)hdr;
-        (void)count;
-        link_fs_reply_err(out, req_id, FS_OP_LIST, -38);
+        {
+                /*      The folder's records read a block at a time, as Darwin's
+                        readdir reads them (getdirentries64, the block a chunk
+                        of the listing and not a bound on it). */
+                struct link_fs_buf block = {0};
+                bipolar folder = system_open_at(AT_FDCWD, (string_address)path,
+                                                FILE_READ | O_DIRECTORY | O_CLOEXEC);
+                b64 position = 0;
+                b32 put = 0;
+
+                if (folder < 0)
+                {
+                        link_fs_reply_err(out, req_id, FS_OP_LIST, (b32)folder);
+                        return;
+                }
+                if (!link_fs_buf_append(address_of body, hdr, 8) ||
+                    !link_fs_buf_reserve(address_of block, 65536))
+                {
+                        system_close(folder);
+                        link_fs_buf_free(address_of body);
+                        link_fs_reply_err(out, req_id, FS_OP_LIST, -12);
+                        return;
+                }
+                while (put >= 0)
+                {
+                        bipolar got = system_call_4(syscall(getdirentries64),
+                                                    (positive)folder,
+                                                    (positive)block.data,
+                                                    block.cap,
+                                                    (positive)address_of position);
+
+                        if (got <= 0)
+                                break;
+                        for (positive at = 0; put >= 0 && at + sizeof(struct link_darwin_entry) <= (positive)got;)
+                        {
+                                struct link_darwin_entry address_to e =
+                                        (struct link_darwin_entry address_to)(block.data + at);
+
+                                if (e->reclen < sizeof(struct link_darwin_entry) + 1 ||
+                                    at + e->reclen > (positive)got ||
+                                    sizeof(struct link_darwin_entry) + e->namlen >= e->reclen ||
+                                    e->name[e->namlen])
+                                        break;
+                                if ((put = link_fs_list_put(address_of body, flags, folder,
+                                                            (string_address)e->name,
+                                                            e->type, e->ino)) > 0)
+                                        count++;
+                                at += e->reclen;
+                        }
+                }
+                system_close(folder);
+                link_fs_buf_free(address_of block);
+        }
 #endif
+        if (body.len >= 8)
+                link_fs_put32(body.data + 4, count);
+        link_fs_reply_put(out, req_id, FS_OP_LIST, body.data, body.len);
+        link_fs_buf_free(address_of body);
 }
 
 static fn link_fs_handle_stat(struct link_fs_buf address_to out, p32 req_id,
