@@ -2442,7 +2442,10 @@ static b32 compositor_present_overlaid(int row, const struct compositor_frame *f
                         struct compositor_target target = {0, 0, compositor.width, compositor.height, rect[0], rect[1], rect[2], rect[3], 0, rect[1], 0};
                         int rows[2];
 
-                        compositor_wl_straight_pays(-1);
+                        // What the band is composed from: every other straight picture whole, and of the one on the plane only the band's
+                        // rows, read by the card into the table (its whole picture is still owed, for a present that composes it all).
+                        compositor_wl_straight_pays(row);
+                        compositor_wl_straight_settle(row, rect[1] - compositor.y[row], rect[3] - compositor.y[row]);
                         if (!compositor_overlay_buffers((unsigned int)(rect[3] - rect[1])))
                         {
                                 // The plane still on (its take-off refused) is not a reason to give the overlay up: the band is composed, and the take-off asked again.
@@ -2470,6 +2473,43 @@ static b32 compositor_present_overlaid(int row, const struct compositor_frame *f
         }
         scanout_direct_finish(row, fb, flipped);
         return 1;
+}
+
+/*
+        A fullscreen window shown straight under pop-ups (fp B5): a game on the plane with something small over it -- the notices' popup or
+        an alert, a menu, the launcher, a dialog of the game's own -- had the whole screen composed for as long as it was up, the card's
+        whole frame taken from the game every frame. Now the top fullscreen window under such windows is the one shown straight, and the
+        windows over it, with the tabs, are composed into the overlay's band over it (compositor_present_overlaid from the first frame over
+        it), only where they are. Over it may be only what covers an eighth of the screen or less, all of it together: the band is composed
+        by the processor at every frame of the game's, which past that costs more than the card's whole frame. The window must be one
+        compositor_direct_candidate would take were it the top, at the screen's own size (the band's commit shows the primary plane
+        unscaled). -1 with none; *over is then the first frame over it, its window's frames before.
+*/
+static int compositor_planes_off(void);
+
+static int compositor_direct_under(const struct compositor_frame *frames, const unsigned int *rows, unsigned int windows, unsigned int *over)
+{
+        const struct compositor_frame *frame;
+        unsigned int at;
+        int rect[4], row;
+
+        if (windows < 2)
+                return -1;
+        for (at = windows; at > 0 && !(compositor.fullscreen[rows[at - 1]] && compositor_client_scans((int)rows[at - 1])); at--)
+                ;
+        if (!at || at == windows || compositor_busy_wait() || compositor_planes_off() || !compositor_overlay_ready())
+                return -1;
+        row = (int)rows[at - 1], frame = &frames[at - 1];
+        // (a window's layers are frames after its own, of its row: a window with layers is composed)
+        if (frame->layer || !compositor_direct_eligible(row, compositor_row_opaque_fs(row) ? 0 : frame->blend) || compositor_radius(frame) ||
+            frame->line || frame->shaped || compositor.picture_w[row] != compositor.w[row] || compositor.picture_h[row] != compositor.h[row])
+                return -1;
+        if (!compositor_tabs_rect(frames + at, windows - at, rect) ||
+            (long long)(rect[2] - rect[0]) * (long long)(rect[3] - rect[1]) * 8 > (long long)compositor.width * (long long)compositor.height ||
+            !compositor_lent_fb_opaque(row))
+                return -1;
+        *over = at;
+        return row;
 }
 
 // The card's first picture is drawn before the compositor has made its window table, so what the table is to say of that

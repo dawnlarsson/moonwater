@@ -1586,6 +1586,7 @@ static void compositor_present_frames(void)
         unsigned short clip[COMPOSITOR_DAMAGE][4];
         unsigned int *rows = compositor_present_row_room, count, windows, scenes = 0, clips;
         int tinted, turning, direct, stay_live_direct, back, planed[4], plane, plane_off = 0, flip_own = 0;
+        unsigned int over; // the first frame over the window shown straight: the windows' end, or the first window over it (compositor_direct_under)
         int scene[COMPOSITOR_DAMAGE][4];
 
         if (!compositor.damages || compositor.dark || compositor.flip_pending || compositor_card_holds())
@@ -1622,6 +1623,17 @@ static void compositor_present_frames(void)
         tinted = compositor_preview_lift(frames, windows, &preview);
         turning = compositor_turning();
         direct = turning || compositor_scenes_shown() ? -1 : compositor_direct_candidate(frames, rows, windows);
+        // None at the top: a fullscreen window under pop-ups is shown straight, they on the overlay's band over it (compositor_direct_under).
+        over = windows;
+        if (direct < 0 && !turning && !compositor_scenes_shown() && (direct = compositor_direct_under(frames, rows, windows, &over)) >= 0)
+        {
+                // The glass of what is over it is made from it before the band is composed: its rows under the band and the blur's reach
+                // read by the card into the table first, where its picture is straight (tiled) and not read by the processor.
+                int band[4], reach = compositor_glass_reach(COMPOSITOR_GLASS_DOWN) + ((COMPOSITOR_GLASS_LEVELS + 1) << COMPOSITOR_GLASS_LEVELS);
+
+                if (compositor_tabs_rect(frames + over, windows - over, band))
+                        compositor_wl_straight_settle(direct, band[1] - reach - compositor.y[direct], band[3] + reach - compositor.y[direct]);
+        }
         stay_live_direct = direct >= 0 && !compositor_client_scans(direct) && direct == compositor.direct_row && !compositor_overlay_ready() &&
                            compositor.patched[direct][compositor.front[direct] & 1u] &&
                            compositor_window_fb(direct, compositor.front[direct]) == compositor.on_screen &&
@@ -1664,10 +1676,14 @@ static void compositor_present_frames(void)
                 compositor_spots_ready();
         if (turning)
                 compositor_unscanned(15);
+        // The band over a window under pop-ups with the tabs and the rest drawn after the windows: an eighth of the screen at most, as theirs is.
+        if (direct >= 0 && over < windows && compositor_tabs_rect(frames + over, count - over, planed) &&
+            (long long)(planed[2] - planed[0]) * (long long)(planed[3] - planed[1]) * 8 > (long long)compositor.width * (long long)compositor.height)
+                direct = -1;
         if (direct >= 0 &&
             ((compositor_overlay_ready() && !(compositor_wl_row_async(direct) && !compositor.overlay_on) &&
-              compositor_present_overlaid(direct, frames, count, windows)) ||
-             compositor_present_direct(direct, frames + windows, count - windows)))
+              compositor_present_overlaid(direct, frames, count, over)) ||
+             (over == windows && compositor_present_direct(direct, frames + windows, count - windows))))
                 return present_direct_cleared();
 
         back = !turning && compositor.on_screen && compositor.on_screen != compositor.fb;
