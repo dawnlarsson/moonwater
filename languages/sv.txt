@@ -763,6 +763,7 @@ ui_field_full	fe02	mer ryms inte
 =Taskbar tray (text with {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)	92d2	Aktivitetsfältets systemfält (text med {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)
 =Taskbar tray clock place	c2e6	Platsen för meddelandefältets klocka i aktivitetsfältet
 =Taskbar tray text place	c235	Platsen för meddelandefältets text i aktivitetsfältet
+=Tearing in fullscreen games	2c2c	Bildrivning i helskärmsspel
 =Terminal	62d1	Terminal
 =Terminal lines per wheel notch	3800	Terminalrader per hjulsteg
 =Text size (percent, or default)	51d7	Textstorlek (procent eller default)
@@ -810,6 +811,7 @@ ui_field_full	fe02	mer ryms inte
 =after	7dc9	efter
 =all	4bc4	alla
 =allow	a832	tillåt
+=always	afe4	alltid
 =amber	bec0	bärnsten
 =auto	a396	automatiskt
 =balanced	b71d	balanserad
@@ -840,10 +842,12 @@ ui_field_full	fe02	mer ryms inte
 =green	ecbc	grön
 =grouped	8b7d	grupperade
 =high	b9fd	hög
+=hinted	c039	på begäran
 =ink	8faf	bläck
 =inverted	8038	inverterad
 =kernel log	415a	kärnlogg
 =kernel log klog dmesg messages	1a8d	kärnlogg klog dmesg meddelanden
+=late	4d21	sena
 =launcher	8391	startprogram
 =left	ec70	till vänster
 =light	1e2f	ljust

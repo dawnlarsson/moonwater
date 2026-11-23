@@ -10896,6 +10896,8 @@ b32 main()
         GROUP("check_compositor_wake", check_compositor_wake());
         GROUP("check_compositor_rate_fastest", check_compositor_rate_fastest());
         GROUP("check_compositor_cadence", check_compositor_cadence());
+        GROUP("check_compositor_tearing", check_compositor_tearing());
+        GROUP("check_compositor_retry", check_compositor_retry());
         GROUP("check_compositor_screen_wait", check_compositor_screen_wait());
         GROUP("check_compositor_start_room", check_compositor_start_room());
         GROUP("check_compositor_setting_opens", check_compositor_setting_opens());

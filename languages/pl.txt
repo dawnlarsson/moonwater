@@ -763,6 +763,7 @@ ui_field_full	fe02	więcej się nie zmieści
 =Taskbar tray (text with {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)	92d2	Obszar powiadomień paska zadań (tekst z {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)
 =Taskbar tray clock place	c2e6	Miejsce zegara zasobnika na pasku zadań
 =Taskbar tray text place	c235	Miejsce tekstu zasobnika na pasku zadań
+=Tearing in fullscreen games	2c2c	Rozrywanie obrazu w grach pełnoekranowych
 =Terminal	62d1	Terminal
 =Terminal lines per wheel notch	3800	Wiersze terminala na skok kółka
 =Text size (percent, or default)	51d7	Rozmiar tekstu (procent lub default)
@@ -810,6 +811,7 @@ ui_field_full	fe02	więcej się nie zmieści
 =after	7dc9	po
 =all	4bc4	wszystkie
 =allow	a832	zezwól
+=always	afe4	zawsze
 =amber	bec0	bursztynowy
 =auto	a396	automatycznie
 =balanced	b71d	zrównoważony
@@ -840,10 +842,12 @@ ui_field_full	fe02	więcej się nie zmieści
 =green	ecbc	zielony
 =grouped	8b7d	zgrupowane
 =high	b9fd	wysoko
+=hinted	c039	na żądanie
 =ink	8faf	tusz
 =inverted	8038	odwrócona
 =kernel log	415a	dziennik jądra
 =kernel log klog dmesg messages	1a8d	dziennik jądro klog dmesg komunikaty
+=late	4d21	spóźnione
 =launcher	8391	uruchamiacz
 =left	ec70	po lewej
 =light	1e2f	jasny

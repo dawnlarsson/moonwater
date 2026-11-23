@@ -1073,6 +1073,8 @@ static void wl_ext_scan_fail(int row)
 {
         if (row < 0 || row >= COMPOSITOR_ROWS)
                 return;
+        // The card refused this framebuffer's flip: it is not kept for the buffer's next ask (scanout.c's keep).
+        canvas_scan_fb_forget(wl_row_lent(row) ? compositor_wl.lent[row].scan_fb : compositor_wl.straight[row].scan_fb);
         if (!wl_row_lent(row))
         {
                 compositor_wl.straight[row].scan_failed = 1;
@@ -6274,7 +6276,7 @@ static void compositor_wl_latch(void)
         if (!compositor_wl.started)
                 return;
         jit = compositor_wl_jit_row();
-        defer = jit >= 0 && !compositor_wl_row_async(jit);
+        defer = jit >= 0 && !compositor_row_tears(jit);
         wayland_latch_defer(defer);
         compositor_wl.latched_at = clock_monotonic_nanoseconds();
         compositor_wl.landed = 0;

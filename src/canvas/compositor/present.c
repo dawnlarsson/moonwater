@@ -123,6 +123,21 @@ static void compositor_metric_publish(void)
         table->metric_lead = (unsigned int)(compositor_present_lead() / 1000), table->metric_present_most = compositor_metric_loop_most_second;
         table->metric_flip_jobs = compositor_metric_flip_jobs_second, table->metric_flip_jobs_most = compositor_metric_flip_jobs_most_second;
         table->metric_waited = compositor_metric_waited_second;
+        // The late-latch steps of the two leads ([0] composed, [1] shown straight) and the warm count after an idle gap.
+        {
+                const struct compositor_lead_step *steps[2] = {&compositor_late.composed, &compositor_late.direct};
+
+                for (unsigned int at = 0; at < 2; at++)
+                        table->lead_widen_us[at] = (unsigned int)(steps[at]->widen / 1000), table->lead_calm[at] = steps[at]->calm,
+                        table->lead_calm_need[at] = steps[at]->calm_need ? steps[at]->calm_need : COMPOSITOR_LEAD_CALM;
+                table->lead_warm = compositor_late.warm;
+        }
+#ifdef CONFIG_MOONWATER_WAYLAND
+        table->jit_armed = compositor_jit.armed, table->jit_unarmed = compositor_jit.unarmed, table->jit_render_us = (unsigned int)(compositor_wl_game_render_ns / 1000);
+        table->jit_margin_us = (unsigned int)(compositor_jit.widen / 1000), table->jit_late = compositor_jit.late;
+        table->jit_landed = compositor_jit.landed;
+#endif
+        table->flips_late = compositor_tear.late, table->tearing = compositor_tear.policy;
 }
 
 // The loop's turns a second, and those whose ppoll had nothing to wait for (a timer already due, so the turn spun): the wake rate in moonwater debug.
@@ -301,9 +316,10 @@ HOT static positive compositor_present_lead(void)
 }
 
 /*
-        A window that allows tearing (wp_tearing_control's async hint, which Xwayland sets for an X client's PresentOptionAsync) and is shown
-        straight from its buffer is flipped asynchronously (compositor_flip): the card puts its frame up mid-scanout, at once, so a present for
-        it waits for no vblank and is due now, and is late for none (no lead: compositor_late_begin aims at no vblank). Every other present
+        A window whose flips tear (compositor_row_tears: the tearing policy and the window's async hint, which Xwayland sets for an X
+        client's PresentOptionAsync), or whose frame is late (compositor_tear_late, policy late), and is shown straight from its buffer is
+        flipped asynchronously (compositor_flip): the card puts its frame up mid-scanout, at once, so a present for it waits for no vblank
+        and is due now, and is late for none (no lead: compositor_late_begin aims at no vblank). Every other present
         keeps the rule (compositor_present_due), under variable refresh too, which needs no rule of its own: a present due at once (nothing
         drawn for a period) is shown at once by a screen that waits for its frame, where at a fixed rate it waited for the next vblank, 0 to a
         period, and one due the lead before the soonest the screen can draw again (the mode's period after the last flip, the fastest the
@@ -311,7 +327,14 @@ HOT static positive compositor_present_lead(void)
 */
 static int compositor_tearing(void)
 {
-        return compositor.card >= 0 && compositor.direct_row >= 0 && compositor_wl_row_async(compositor.direct_row);
+        int row = compositor.direct_row;
+
+        compositor_tear.now = 0;
+        if (compositor.card < 0 || row < 0)
+                return 0;
+        if (compositor_row_tears(row))
+                return 1;
+        return compositor_tear.now = compositor_tear_late(row, clock_monotonic_nanoseconds());
 }
 
 // A cadence's game (compositor_cadence, k > 1) shown straight flips no sooner than the vblank k after its last: its present is due the lead
@@ -1580,6 +1603,27 @@ static unsigned int present_compose_damage(const struct compositor_frame *frames
         return clips;
 }
 
+/*
+        A present composed while a fullscreen window is up: counted, and by why that window was not shown straight (compositor_direct_why,
+        or the screen turned, the Scenes overview drawn, or another window over it), for moonwater debug's "fullscreen composed".
+*/
+static void present_count_composed(int direct, int turning, const unsigned int *rows, unsigned int windows)
+{
+        int fs = compositor_fullscreen_top();
+        unsigned int why = compositor_direct_why;
+
+        if (!compositor.table || fs < 0 || !compositor_visible(fs))
+                return;
+        if (turning || compositor_scenes_shown())
+                why = COMPOSITOR_DIRECT_SCENE;
+        else if (!windows || rows[windows - 1] != (unsigned int)fs)
+                why = COMPOSITOR_DIRECT_NOT_TOP;
+        else if (direct >= 0 && why == COMPOSITOR_DIRECT_SHOWN)
+                why = COMPOSITOR_DIRECT_REFUSED;
+        compositor.table->composed_fullscreen++;
+        compositor.table->direct_why[why < WINDOWS_DIRECT_WHY ? why : 0]++;
+}
+
 static void compositor_present_frames(void)
 {
         struct compositor_frame *frames = compositor_present_frame_room, preview;
@@ -1681,7 +1725,7 @@ static void compositor_present_frames(void)
             (long long)(planed[2] - planed[0]) * (long long)(planed[3] - planed[1]) * 8 > (long long)compositor.width * (long long)compositor.height)
                 direct = -1;
         if (direct >= 0 &&
-            ((compositor_overlay_ready() && !(compositor_wl_row_async(direct) && !compositor.overlay_on) &&
+            ((compositor_overlay_ready() && !(compositor_flip_tears(direct) && !compositor.overlay_on) &&
               compositor_present_overlaid(direct, frames, count, over)) ||
              (over == windows && compositor_present_direct(direct, frames + windows, count - windows))))
                 return present_direct_cleared();
@@ -1701,12 +1745,15 @@ static void compositor_present_frames(void)
         compositor.screen_stale = 0;
 
         plane = !back && !turning && !compositor_scenes_shown() ? compositor_plane_candidate(frames, rows, windows, count, planed) : -1;
+        if (plane < 0 && compositor.table)
+                compositor.table->unscanned_by[compositor.table->unscanned < WINDOWS_UNSCANNED ? compositor.table->unscanned : 0]++;
         if (back || turning || !compositor_gpu_tiled_ready())
                 compositor_wl_straight_pays(plane >= 0 && planed[0] == compositor.x[plane] &&
                                             planed[2] == compositor.x[plane] + (int)compositor.w[plane] &&
                                             plane == compositor.plane_row ? plane : -1);
         if (present_overlay_plane(plane, planed, turning, &plane_off))
                 return;
+        present_count_composed(direct, turning, rows, windows);
 
         if (compositor_plate_wanted(turning))
         {

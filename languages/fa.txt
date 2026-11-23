@@ -764,6 +764,7 @@ ui_field_full	fe02	بیش از این جا ندارد
 =Taskbar tray (text with {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)	92d2	ناحیه اعلان نوار وظیفه (متن با {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)
 =Taskbar tray clock place	c2e6	جای ساعت سینی در نوار وظیفه
 =Taskbar tray text place	c235	جای متن سینی در نوار وظیفه
+=Tearing in fullscreen games	2c2c	پارگی تصویر در بازی‌های تمام‌صفحه
 =Terminal	62d1	پایانه
 =Terminal lines per wheel notch	3800	خطوط پایانه در هر گام چرخ
 =Text size (percent, or default)	51d7	اندازهٔ متن (درصد یا default)
@@ -811,6 +812,7 @@ ui_field_full	fe02	بیش از این جا ندارد
 =after	7dc9	پس
 =all	4bc4	همه
 =allow	a832	اجازه
+=always	afe4	همیشه
 =amber	bec0	کهربایی
 =auto	a396	خودکار
 =balanced	b71d	متعادل
@@ -841,10 +843,12 @@ ui_field_full	fe02	بیش از این جا ندارد
 =green	ecbc	سبز
 =grouped	8b7d	گروه‌شده
 =high	b9fd	زیاد
+=hinted	c039	در صورت درخواست
 =ink	8faf	جوهر
 =inverted	8038	وارونه
 =kernel log	415a	گزارش هسته
 =kernel log klog dmesg messages	1a8d	گزارش هسته klog dmesg پیام‌ها
+=late	4d21	هنگام تأخیر
 =launcher	8391	راه‌انداز
 =left	ec70	چپ
 =light	1e2f	روشن

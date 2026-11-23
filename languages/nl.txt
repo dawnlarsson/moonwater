@@ -763,6 +763,7 @@ ui_field_full	fe02	meer past er niet in
 =Taskbar tray (text with {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)	92d2	Systeemvak van de taakbalk (tekst met {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)
 =Taskbar tray clock place	c2e6	Plaats van de systeemvakklok op de taakbalk
 =Taskbar tray text place	c235	Plaats van de systeemvaktekst op de taakbalk
+=Tearing in fullscreen games	2c2c	Beeldscheuring in games op volledig scherm
 =Terminal	62d1	Terminal
 =Terminal lines per wheel notch	3800	Terminalregels per wielstap
 =Text size (percent, or default)	51d7	Tekstgrootte (procent of default)
@@ -810,6 +811,7 @@ ui_field_full	fe02	meer past er niet in
 =after	7dc9	erna
 =all	4bc4	alle
 =allow	a832	toestaan
+=always	afe4	altijd
 =amber	bec0	amber
 =auto	a396	automatisch
 =balanced	b71d	gebalanceerd
@@ -840,10 +842,12 @@ ui_field_full	fe02	meer past er niet in
 =green	ecbc	groen
 =grouped	8b7d	gegroepeerd
 =high	b9fd	hoog
+=hinted	c039	op verzoek
 =ink	8faf	inkt
 =inverted	8038	omgekeerd
 =kernel log	415a	kernellogboek
 =kernel log klog dmesg messages	1a8d	kernel logboek klog dmesg berichten
+=late	4d21	te laat
 =launcher	8391	starter
 =left	ec70	links
 =light	1e2f	licht

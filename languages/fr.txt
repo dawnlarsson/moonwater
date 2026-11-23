@@ -763,6 +763,7 @@ ui_field_full	fe02	c'est tout ce que ce champ peut contenir
 =Taskbar tray (text with {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)	92d2	Zone d'état de la barre des tâches (texte avec {names} : {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)
 =Taskbar tray clock place	c2e6	Place de l'horloge de la zone système
 =Taskbar tray text place	c235	Place du texte de la zone système dans la barre des tâches
+=Tearing in fullscreen games	2c2c	Déchirement d'image dans les jeux en plein écran
 =Terminal	62d1	Terminal
 =Terminal lines per wheel notch	3800	Lignes du terminal par cran de molette
 =Text size (percent, or default)	51d7	Taille du texte (pourcentage ou default)
@@ -810,6 +811,7 @@ ui_field_full	fe02	c'est tout ce que ce champ peut contenir
 =after	7dc9	après
 =all	4bc4	tous
 =allow	a832	autoriser
+=always	afe4	toujours
 =amber	bec0	ambre
 =auto	a396	automatique
 =balanced	b71d	équilibré
@@ -840,10 +842,12 @@ ui_field_full	fe02	c'est tout ce que ce champ peut contenir
 =green	ecbc	vert
 =grouped	8b7d	groupées
 =high	b9fd	élevé
+=hinted	c039	sur demande
 =ink	8faf	encre
 =inverted	8038	inversé
 =kernel log	415a	journal du noyau
 =kernel log klog dmesg messages	1a8d	journal noyau klog dmesg messages
+=late	4d21	en retard
 =launcher	8391	lanceur
 =left	ec70	à gauche
 =light	1e2f	clair

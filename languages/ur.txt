@@ -764,6 +764,7 @@ ui_field_full	fe02	اس میں اس سے زیادہ نہیں سماتا
 =Taskbar tray (text with {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)	92d2	ٹاسک بار کی ٹرے ({names} والا متن: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)
 =Taskbar tray clock place	c2e6	ٹاسک بار میں ٹرے کی گھڑی کی جگہ
 =Taskbar tray text place	c235	ٹاسک بار میں ٹرے کے متن کی جگہ
+=Tearing in fullscreen games	2c2c	فل اسکرین گیمز میں تصویر کا پھٹنا
 =Terminal	62d1	ٹرمینل
 =Terminal lines per wheel notch	3800	ہر وہیل نوچ پر ٹرمینل کی لائنیں
 =Text size (percent, or default)	51d7	متن کا سائز (فیصد یا default)
@@ -811,6 +812,7 @@ ui_field_full	fe02	اس میں اس سے زیادہ نہیں سماتا
 =after	7dc9	بعد
 =all	4bc4	سب
 =allow	a832	اجازت
+=always	afe4	ہمیشہ
 =amber	bec0	عنبری
 =auto	a396	خودکار
 =balanced	b71d	متوازن
@@ -841,10 +843,12 @@ ui_field_full	fe02	اس میں اس سے زیادہ نہیں سماتا
 =green	ecbc	سبز
 =grouped	8b7d	اکٹھے
 =high	b9fd	زیادہ
+=hinted	c039	درخواست پر
 =ink	8faf	سیاہی
 =inverted	8038	الٹا
 =kernel log	415a	کرنل لاگ
 =kernel log klog dmesg messages	1a8d	کرنل لاگ klog dmesg پیغامات
+=late	4d21	تاخیر پر
 =launcher	8391	لانچر
 =left	ec70	بائیں
 =light	1e2f	روشن

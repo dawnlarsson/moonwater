@@ -764,6 +764,7 @@ ui_field_full	fe02	זה המקסימום שהוא מכיל
 =Taskbar tray (text with {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)	92d2	אזור ההודעות בשורת המשימות (טקסט עם {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)
 =Taskbar tray clock place	c2e6	מיקום שעון המגש בשורת המשימות
 =Taskbar tray text place	c235	מיקום טקסט המגש בשורת המשימות
+=Tearing in fullscreen games	2c2c	קריעת תמונה במשחקים במסך מלא
 =Terminal	62d1	מסוף
 =Terminal lines per wheel notch	3800	שורות במסוף לכל צעד של הגלגלת
 =Text size (percent, or default)	51d7	גודל הטקסט (אחוזים או default)
@@ -811,6 +812,7 @@ ui_field_full	fe02	זה המקסימום שהוא מכיל
 =after	7dc9	אחרי
 =all	4bc4	הכול
 =allow	a832	אפשר
+=always	afe4	תמיד
 =amber	bec0	ענבר
 =auto	a396	אוטומטי
 =balanced	b71d	מאוזן
@@ -841,10 +843,12 @@ ui_field_full	fe02	זה המקסימום שהוא מכיל
 =green	ecbc	ירוק
 =grouped	8b7d	מקובצות
 =high	b9fd	גבוה
+=hinted	c039	לפי בקשה
 =ink	8faf	דיו
 =inverted	8038	הפוך
 =kernel log	415a	יומן הליבה
 =kernel log klog dmesg messages	1a8d	יומן ליבה klog dmesg הודעות
+=late	4d21	באיחור
 =launcher	8391	מפעיל
 =left	ec70	שמאל
 =light	1e2f	בהיר

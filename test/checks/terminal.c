@@ -544,7 +544,9 @@ static struct
         // page_flips is set (refused otherwise, EINVAL, as the fake card always did), the last one's framebuffer, and the errno the card answers commits with
         // while it is set (EBUSY for a commit still in flight).
         int in_fence, atomic_in_fence, atomic_errno, page_flips;
-        unsigned int atomic_flags, flips, flip_fb;
+        unsigned int atomic_flags, flips, flip_fb, flip_flags; // flip_flags: the last legacy flip's (COMPOSITOR_FLIP_ASYNC for a torn one)
+        unsigned int crtc_prop;   // the last commit's property of the crtc (VRR_ENABLED), and its value
+        unsigned long crtc_value;
         unsigned long atomic_user;
 } card_fake;
 
@@ -951,6 +953,8 @@ static bipolar card_fake_control(positive handle, positive request, positive arg
                                         card_fake.atomic_in_fence = (int)(long)values[at];
                                 else if (objects[object] == CARD_FAKE_PLANE && props[at] == 13)
                                         return -22; // a property the plane has not
+                                else if (objects[object] == CARD_FAKE_CRTC)
+                                        card_fake.crtc_prop = props[at], card_fake.crtc_value = values[at];
                 if (fb)
                         card_fake.atomic_fb = card_fake.crtc_fb = (unsigned int)fb;
                 if (rotation)
@@ -963,7 +967,7 @@ static bipolar card_fake_control(positive handle, positive request, positive arg
 
                 if (!card_fake.page_flips)
                         return -22;
-                card_fake.flips++, card_fake.flip_fb = f[1];
+                card_fake.flips++, card_fake.flip_fb = f[1], card_fake.flip_flags = f[2];
                 return 0;
         }
         case COMPOSITOR_RMFB:

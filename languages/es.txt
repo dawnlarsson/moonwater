@@ -763,6 +763,7 @@ ui_field_full	fe02	no cabe más
 =Taskbar tray (text with {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)	92d2	Bandeja de la barra de tareas (texto con {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)
 =Taskbar tray clock place	c2e6	Lugar del reloj de la bandeja en la barra de tareas
 =Taskbar tray text place	c235	Lugar del texto de la bandeja en la barra de tareas
+=Tearing in fullscreen games	2c2c	Desgarro de imagen en juegos a pantalla completa
 =Terminal	62d1	Terminal
 =Terminal lines per wheel notch	3800	Líneas del terminal por paso de la rueda
 =Text size (percent, or default)	51d7	Tamaño del texto (porcentaje o default)
@@ -810,6 +811,7 @@ ui_field_full	fe02	no cabe más
 =after	7dc9	después
 =all	4bc4	todas
 =allow	a832	permitir
+=always	afe4	siempre
 =amber	bec0	ámbar
 =auto	a396	automático
 =balanced	b71d	equilibrado
@@ -840,10 +842,12 @@ ui_field_full	fe02	no cabe más
 =green	ecbc	verde
 =grouped	8b7d	agrupadas
 =high	b9fd	alto
+=hinted	c039	si lo pide
 =ink	8faf	tinta
 =inverted	8038	invertido
 =kernel log	415a	registro del kernel
 =kernel log klog dmesg messages	1a8d	registro kernel klog dmesg mensajes
+=late	4d21	con retraso
 =launcher	8391	lanzador
 =left	ec70	izquierda
 =light	1e2f	claro

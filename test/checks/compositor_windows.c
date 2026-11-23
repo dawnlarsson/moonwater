@@ -1796,6 +1796,192 @@ static void check_compositor_cadence(void)
 }
 
 /*
+        Tearing (`canvas tearing`, scanout.c's compositor_tear): late by default; the standing rule of each policy for a window that asks
+        and one that does not; the late rule (a frame that missed the vblank just gone, whose last frame went up in the period before it,
+        within a quarter of a period); the flip asked asynchronous for a late frame, a window that asks under hinted, and every window
+        under always, and for none under off; a torn flip's frame said up by the clock, a vsync'd one's at its vblank.
+*/
+static void check_compositor_tearing(void)
+{
+        const struct settings_row *row = setting_by_path((string_address)SETTING_TEARING_PATH);
+        positive p = 6944444ull, v0 = 9000000000ull, now;
+        int was_row = compositor.direct_row, was_plane = compositor.plane_row, was_card = compositor.card, was_pending = compositor.flip_pending;
+        int was_vrr = compositor_vrr.on, hint_row = 5, plain_row = 3;
+        positive was_when = compositor.flip_when, was_period = compositor.period;
+        unsigned int was_policy = compositor_tear.policy, tears[4][2], late_count;
+        struct canvas_ext_row_state *hinted = canvas_ext_row_at(hint_row), *plain = canvas_ext_row_at(plain_row);
+        const struct canvas_ext_ops *was_host = canvas_ext_host;
+
+        check("tearing: late by default (the compositor's start and the setting's standard)",
+              compositor_tear.policy == COMPOSITOR_TEAR_LATE && row && row->standard && string_equals((string_address)row->standard, (string_address) "late"));
+        if (!hinted || !plain)
+        {
+                check("tearing: the rows' state is had", false);
+                return;
+        }
+        canvas_ext_host = 0;
+        hinted->flags |= CANVAS_EXT_ASYNC | CANVAS_EXT_LENT, plain->flags &= ~CANVAS_EXT_ASYNC;
+        plain->flags |= CANVAS_EXT_LENT; // both clients' buffers, read in place (a Canvas window's own is never late: a row below)
+        for (unsigned int policy = 0; policy < 4; policy++)
+                compositor_tear.policy = policy, tears[policy][0] = (unsigned int)compositor_row_tears(plain_row), tears[policy][1] = (unsigned int)compositor_row_tears(hint_row);
+        check("tearing: off tears no window, hinted and late the window that asks, always every window",
+              !tears[0][0] && !tears[0][1] && !tears[1][0] && tears[1][1] && !tears[2][0] && tears[2][1] && tears[3][0] && tears[3][1]);
+        // The late rule, on a 144 Hz screen whose last vsync'd flip landed at v0 and the window's frame with it.
+        compositor_tear.policy = COMPOSITOR_TEAR_LATE, compositor.period = p, compositor.flip_when = v0, compositor.flip_pending = 0;
+        compositor.direct_row = plain_row, compositor.plane_row = -1, compositor_vrr.on = 0, compositor_tear.shown_at = v0;
+        now = v0 + p + p / 8;
+        check("tearing: a frame an eighth of a period past the vblank after its last frame's is late",
+              compositor_tear_late(plain_row, now) && !compositor_tear_late(plain_row, v0 + p - p / 8));
+        check("tearing: one more than a quarter past it is not (its tear would be mid-screen; it waits for the next vblank)",
+              !compositor_tear_late(plain_row, v0 + p + p / 4 + p / 16));
+        compositor_tear.shown_at = v0 + p;
+        check("tearing: nor a frame after a vblank that showed one (the last went up at it)", !compositor_tear_late(plain_row, now));
+        compositor_tear.shown_at = v0 + p / 3;
+        check("tearing: a frame after one that tore in the period before the vblank is late", compositor_tear_late(plain_row, now));
+        compositor_tear.shown_at = v0 - p;
+        check("tearing: a window that skips vblanks anyway (its last frame two vblanks back) is not late, only slower", !compositor_tear_late(plain_row, now));
+        compositor_tear.shown_at = v0;
+        compositor_tear.policy = COMPOSITOR_TEAR_HINTED;
+        tears[0][0] = (unsigned int)compositor_tear_late(plain_row, now);
+        compositor_tear.policy = COMPOSITOR_TEAR_LATE, compositor_vrr.on = 1;
+        tears[0][1] = (unsigned int)compositor_tear_late(plain_row, now);
+        compositor_vrr.on = 0, compositor.plane_row = plain_row;
+        tears[1][0] = (unsigned int)compositor_tear_late(plain_row, now);
+        compositor.plane_row = -1, compositor.flip_pending = 1;
+        tears[1][1] = (unsigned int)compositor_tear_late(plain_row, now);
+        compositor.flip_pending = 0;
+        tears[2][0] = (unsigned int)compositor_tear_late(hint_row, now);
+        compositor.flip_when = 0;
+        tears[2][1] = (unsigned int)compositor_tear_late(plain_row, now);
+        compositor.flip_when = v0;
+        plain->flags &= ~CANVAS_EXT_LENT;
+        tears[3][0] = (unsigned int)compositor_tear_late(plain_row, now);
+        plain->flags |= CANVAS_EXT_LENT;
+        check("tearing: a Canvas window's own buffer shown straight is never late (only a client's is torn for it)", !tears[3][0]);
+        check("tearing: no frame is late under hinted, under variable refresh, on the overlay, behind a flip in flight, for another row, or with no vblank measured",
+              !tears[0][0] && !tears[0][1] && !tears[1][0] && !tears[1][1] && !tears[2][0] && !tears[2][1]);
+        // The flips asked of the fake card.
+        if (!card_fake_open(64, 64))
+        {
+                check("tearing: the fake card is made", false);
+                canvas_ext_host = was_host;
+                return;
+        }
+        card_fake.page_flips = 1, compositor.scaled_direct = 0, compositor.outputs = 1;
+        compositor_tear.now = 0, compositor_tear.policy = COMPOSITOR_TEAR_LATE, late_count = compositor_tear.late;
+        compositor_flip(200, plain_row, 0), compositor.flip_pending = 0;
+        tears[0][0] = card_fake.flip_flags & COMPOSITOR_FLIP_ASYNC;
+        compositor_tear.now = 1;
+        compositor_flip(201, plain_row, 0), compositor.flip_pending = 0;
+        tears[0][1] = card_fake.flip_flags & COMPOSITOR_FLIP_ASYNC;
+        check("tearing: a frame on time flips at the vblank, a late one asynchronously, counted as late",
+              !tears[0][0] && tears[0][1] && compositor_tear.late == late_count + 1);
+        compositor_tear.now = 0, compositor_tear.policy = COMPOSITOR_TEAR_OFF;
+        compositor.direct_row = hint_row;
+        compositor_flip(202, hint_row, 0), compositor.flip_pending = 0;
+        tears[1][0] = card_fake.flip_flags & COMPOSITOR_FLIP_ASYNC;
+        compositor_tear.policy = COMPOSITOR_TEAR_HINTED;
+        compositor_flip(203, hint_row, 0), compositor.flip_pending = 0;
+        tears[1][1] = card_fake.flip_flags & COMPOSITOR_FLIP_ASYNC;
+        compositor_tear.policy = COMPOSITOR_TEAR_ALWAYS, compositor.direct_row = plain_row;
+        compositor_flip(204, plain_row, 0), compositor.flip_pending = 0;
+        tears[2][0] = card_fake.flip_flags & COMPOSITOR_FLIP_ASYNC;
+        compositor_flip(205, -1, 0), compositor.flip_pending = 0;
+        tears[2][1] = card_fake.flip_flags & COMPOSITOR_FLIP_ASYNC;
+        check("tearing: off flips the window that asks at the vblank, hinted tears it, always tears a window that does not ask, and a plate never tears",
+              !tears[1][0] && tears[1][1] && tears[2][0] && !tears[2][1] && compositor_tear.late == late_count + 1);
+        // The flip's event: a torn frame is said up by the clock, a vsync'd one at its vblank.
+        {
+                struct
+                {
+                        unsigned int type, length;
+                        unsigned long user;
+                        unsigned int sec, usec, sequence, crtc;
+                } event = {COMPOSITOR_EVENT_FLIP_COMPLETE, 32, 0, 9, 500000, 1000, CARD_FAKE_CRTC};
+                positive before;
+
+                compositor.direct_row = plain_row, compositor.flip_row = plain_row, compositor.flip_pending = 1, compositor_flips_owed = 1;
+                compositor.flip_async = 0, event.user = compositor.flip_serial;
+                compositor_card_events((const p8 *)&event, sizeof(event));
+                tears[3][0] = compositor_tear.shown_at == 9500000000ull;
+                compositor.flip_pending = 1, compositor_flips_owed = 1, compositor.flip_async = 1, event.usec = 507000;
+                before = clock_monotonic_nanoseconds();
+                compositor_card_events((const p8 *)&event, sizeof(event));
+                tears[3][1] = compositor_tear.shown_at >= before && compositor.flip_when == 9500000000ull;
+                check("tearing: a vsync'd flip's frame went up at its vblank, a torn one's at the clock (and the vblank the presents pace by is kept)",
+                      tears[3][0] && tears[3][1]);
+        }
+        // Variable refresh: a change owed goes with the next flip in its nonblocking commit; a card that refuses it there has the flip without it.
+        {
+                unsigned int atomics = card_fake.atomics, flips = card_fake.flips;
+                int was_overlay = compositor.overlay_state;
+                unsigned int was_primary = compositor.primary, was_fb_prop = compositor.primary_props[COMPOSITOR_PLANE_FB], was_crtc = compositor.crtc;
+
+                card_fake.atomic = 1, compositor.overlay_state = -1, compositor.primary = CARD_FAKE_PLANE, compositor.primary_props[COMPOSITOR_PLANE_FB] = 1;
+                compositor.crtc = CARD_FAKE_CRTC, compositor_vrr.crtc = CARD_FAKE_CRTC, compositor_vrr.prop = 77, compositor_vrr.on = 0;
+                compositor_vrr.owed = 2, compositor_vrr.carry_refused = 0, compositor_tear.policy = COMPOSITOR_TEAR_OFF, compositor_tear.now = 0;
+                compositor_flip(210, plain_row, 0), compositor.flip_pending = 0;
+                check("vrr: a change owed goes with the next flip, in its nonblocking commit (VRR_ENABLED 1), not as a blocking set of its own",
+                      card_fake.atomics == atomics + 1 && card_fake.flips == flips && card_fake.crtc_prop == 77 && card_fake.crtc_value == 1 &&
+                          (card_fake.atomic_flags & COMPOSITOR_ATOMIC_NONBLOCK) && card_fake.atomic_fb == 210 && compositor_vrr.on == 1 && !compositor_vrr.owed);
+                compositor_vrr.owed = 1, card_fake.atomic_errno = 22, flips = card_fake.flips;
+                compositor_flip(211, plain_row, 0), compositor.flip_pending = 0;
+                check("vrr: a card that refuses it in the commit has the flip without it, and the change the blocking way after",
+                      card_fake.flips == flips + 1 && card_fake.flip_fb == 211 && compositor_vrr.carry_refused && compositor_vrr.on == 1);
+                card_fake.atomic_errno = 0, card_fake.atomic = 0;
+                compositor_vrr.owed = 0, compositor_vrr.carry_refused = 0, compositor_vrr.prop = 0, compositor_vrr.crtc = 0;
+                compositor.overlay_state = was_overlay, compositor.primary = was_primary, compositor.primary_props[COMPOSITOR_PLANE_FB] = was_fb_prop;
+                compositor.crtc = was_crtc;
+        }
+        card_fake_close();
+        hinted->flags &= ~(CANVAS_EXT_ASYNC | CANVAS_EXT_LENT), plain->flags &= ~CANVAS_EXT_LENT;
+        canvas_ext_host = was_host;
+        compositor_tear.policy = was_policy, compositor_tear.now = 0, compositor_tear.shown_at = 0;
+        compositor.direct_row = was_row, compositor.plane_row = was_plane, compositor.card = was_card, compositor.flip_pending = was_pending;
+        compositor_vrr.on = was_vrr, compositor.flip_when = was_when, compositor.period = was_period, compositor.flip_row = -1, compositor.flip_async = 0;
+}
+
+/*
+        The retry budget of a refused feature (scanout.c's compositor_retry): a refusal that is not the card being busy holds the scaled
+        plane off for its geometry for a second, another geometry is asked at once, a hold that is over is a retry (counted), the next
+        refusal holds twice as long and one taken begins again; a busy refusal holds nothing (the busy back-off has it). And why the top
+        window was not shown straight is said: no window, the card busy.
+*/
+static void check_compositor_retry(void)
+{
+        static struct windows *table_scratch;
+        struct windows *const table_at = windows_scratch_table(&table_scratch), *was_table = compositor.table;
+        struct compositor_retry retry = {0, 0, {0}};
+        int geom[6] = {1280, 720, 0, 0, 1920, 1080}, other[6] = {1600, 900, 0, 0, 1920, 1080};
+        positive now = 5000000000ull, s = COMPOSITOR_RETRY_FIRST;
+        unsigned int frames_rows[1] = {0};
+        long was_error = compositor_refused_error;
+        unsigned int was_run = compositor_busy_run;
+        positive was_until = compositor_busy_until;
+
+        windows_scratch_zero(table_at), compositor.table = table_at;
+        compositor_retry_refused(&retry, geom, now);
+        check("retry: a refusal holds its geometry off for a second, and is counted held",
+              compositor_retry_held(&retry, geom, now + s - 1) && table_at->refusal_held == 1);
+        check("retry: another geometry is asked at once", !compositor_retry_held(&retry, other, now + 1));
+        check("retry: a hold that is over is a retry, counted", !compositor_retry_held(&retry, geom, now + s) && table_at->refusal_retries == 1 && !retry.until);
+        compositor_retry_refused(&retry, geom, now + s);
+        check("retry: the next refusal holds twice as long", compositor_retry_held(&retry, geom, now + s + 2 * s - 1) && !compositor_retry_held(&retry, geom, now + 3 * s));
+        for (unsigned int at = 0; at < 20; at++)
+                compositor_retry_refused(&retry, geom, now);
+        check("retry: the hold doubles up to 64 s, never more", retry.until == now + (s << COMPOSITOR_RETRY_STEPS));
+        compositor_retry_taken(&retry);
+        compositor_retry_refused(&retry, geom, now);
+        check("retry: one taken begins them again from a second", retry.until == now + s);
+        compositor_refused_error = -(long)COMPOSITOR_EBUSY, compositor_busy_run = 0, compositor_busy_until = 0;
+        check("retry: a busy refusal is no refusal of the feature (the busy back-off holds it)", !compositor_refusal_fatal() && compositor_busy_until);
+        check("retry: and the direct candidate says it is backing off", compositor_direct_candidate(0, frames_rows, 1) < 0 && compositor_direct_why == COMPOSITOR_DIRECT_BUSY);
+        compositor_busy_until = 0;
+        check("retry: with no window the direct candidate says none", compositor_direct_candidate(0, frames_rows, 0) < 0 && compositor_direct_why == COMPOSITOR_DIRECT_NONE);
+        compositor_refused_error = was_error, compositor_busy_run = was_run, compositor_busy_until = was_until, compositor.table = was_table;
+}
+
+/*
         The wait for a screen (compositor_screen_wait) on the socket the kernel's uevents come down, here one end of a pair: a
         uevent of the drm subsystem ends it at once, one of another subsystem does not, and with none it ends at its time.
 */

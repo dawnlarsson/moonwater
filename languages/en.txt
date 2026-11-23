@@ -738,6 +738,7 @@ ui_field_full	fe02	that is as much as it holds
 =Taskbar tray (text with {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)	92d2	Taskbar tray (text with {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)
 =Taskbar tray clock place	c2e6	Taskbar tray clock place
 =Taskbar tray text place	c235	Taskbar tray text place
+=Tearing in fullscreen games	2c2c	Tearing in fullscreen games
 =Terminal	62d1	Terminal
 =Terminal lines per wheel notch	3800	Terminal lines per wheel notch
 =Text size (percent, or default)	51d7	Text size (percent, or default)
@@ -785,6 +786,7 @@ ui_field_full	fe02	that is as much as it holds
 =after	7dc9	after
 =all	4bc4	all
 =allow	a832	allow
+=always	afe4	always
 =amber	bec0	amber
 =auto	a396	auto
 =balanced	b71d	balanced
@@ -815,10 +817,12 @@ ui_field_full	fe02	that is as much as it holds
 =green	ecbc	green
 =grouped	8b7d	grouped
 =high	b9fd	high
+=hinted	c039	hinted
 =ink	8faf	ink
 =inverted	8038	inverted
 =kernel log	415a	kernel log
 =kernel log klog dmesg messages	1a8d	kernel log klog dmesg messages
+=late	4d21	late
 =launcher	8391	launcher
 =left	ec70	left
 =light	1e2f	light

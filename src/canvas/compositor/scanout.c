@@ -549,6 +549,72 @@ static int compositor_busy_wait(void)
         return compositor_busy_until && clock_monotonic_nanoseconds() < compositor_busy_until;
 }
 
+/*
+        Tearing (`canvas tearing off|hinted|late|always`, late by default): which flips of a window shown straight from its buffer are
+        asynchronous, put up mid-scanout at once instead of at the next vblank. A composed frame never tears.
+          off     none, the window's hint not honoured;
+          hinted  the windows that ask (wp_tearing_control's async hint, which Xwayland sets for an X client's PresentOptionAsync and
+                  Mesa for a Vulkan swapchain's IMMEDIATE);
+          late    those, and a frame that missed its vblank by a little (compositor_tear_late): on a screen without variable refresh
+                  a late frame otherwise waits a whole period, and torn near the top it is shown at once;
+          always  every window shown straight, hint or none: each frame up the moment it is committed (vsync off, for every game).
+        The standing rule (compositor_row_tears) is the window's own: a row that tears has its frame callbacks at the latch and no
+        just-in-time callback, as a hinted one always had. A late frame's tear is the one present's (compositor_tear.now); its
+        window keeps its pacing.
+*/
+enum
+{
+        COMPOSITOR_TEAR_OFF = 0, COMPOSITOR_TEAR_HINTED = 1, COMPOSITOR_TEAR_LATE = 2, COMPOSITOR_TEAR_ALWAYS = 3,
+};
+static struct
+{
+        unsigned int policy; // the setting's word (/root/canvas.tearing, session.c), COMPOSITOR_TEAR_*
+        int now;             // the present being made is a late frame's: its flip tears (compositor_tearing, present.c)
+        positive shown_at;   // when the direct row's last frame went up: its flip's vblank, or the clock at a torn one's event
+        unsigned int late;   // frames torn for being late
+} compositor_tear = {COMPOSITOR_TEAR_LATE, 0, 0, 0};
+
+static positive canvas_vblank_next(positive now, unsigned long *seq);
+static positive canvas_vblank_refresh(void);
+static int compositor_vrr_active(void); // kms.c: variable refresh is on (the screen waits for each frame: no frame is late)
+
+// The standing rule: whether a row's flips tear (the policy and the row's own hint).
+static inline int compositor_row_tears(int row)
+{
+        if (row < 0 || compositor_tear.policy == COMPOSITOR_TEAR_OFF)
+                return 0;
+        return compositor_tear.policy == COMPOSITOR_TEAR_ALWAYS || compositor_wl_row_async(row);
+}
+
+// Whether this flip of `row` tears: its standing rule, or the present being made is its late frame's.
+static inline int compositor_flip_tears(int row)
+{
+        return row >= 0 && (compositor_row_tears(row) || (compositor_tear.now && row == compositor.direct_row));
+}
+
+/*
+        A late frame (policy late): the direct row's frame that missed the vblank just gone by a little. The window's last frame went up
+        in the period before that vblank (its flip landed on the one before, or tore in between), nothing went up at it, and it is no
+        more than COMPOSITOR_TEAR_WINDOW of a period gone: the frame is put up now, torn in the top of the screen, instead of a whole
+        period later at the next. A frame later than that waits for the vblank (its tear would be in the middle of the screen, and the
+        wait is shorter); so does the frame of a window that skips vblanks anyway (a game held at 60 on 144 Hz shows each frame two or
+        three of them, and its frames are not late, only slower), a window under variable refresh (the screen waits for it), one on
+        the overlay, one with no vblank measured (the PLL's last vblank, canvas_vblank_next), and a Canvas window's own (the terminal
+        scrolling fullscreen does not tear): only a client's buffer, a game's, is torn for being late.
+*/
+#define COMPOSITOR_TEAR_WINDOW_QUARTERS 1u
+static int compositor_tear_late(int row, positive now)
+{
+        positive period = canvas_vblank_refresh(), next, latest, shown = compositor_tear.shown_at;
+
+        if (compositor_tear.policy != COMPOSITOR_TEAR_LATE || row < 0 || row != compositor.direct_row || compositor.plane_row >= 0 || !compositor_client_scans(row) ||
+            compositor.flip_pending || !period || !shown || compositor_vrr_active() || !(next = canvas_vblank_next(now, 0)) || next < period)
+                return 0;
+        latest = next - period;
+        return shown + period / 2 < latest && shown + period + period / 2 >= latest && now >= latest &&
+               now - latest < period * COMPOSITOR_TEAR_WINDOW_QUARTERS / 4;
+}
+
 // Common flip/atomic commit bookkeeping after the kernel accepts a page flip.
 static void compositor_flip_arm(unsigned int fb, int row, unsigned int which, int async)
 {
@@ -559,6 +625,8 @@ static void compositor_flip_arm(unsigned int fb, int row, unsigned int which, in
         compositor.flip_async = async != 0;
         if (compositor.flip_async && compositor.table)
                 compositor.table->flips_async++;
+        if (compositor.flip_async && compositor_tear.now && row == compositor.direct_row && !compositor_row_tears(row))
+                compositor_tear.late++;
         compositor.flip_issued = clock_monotonic_nanoseconds();
         compositor.flip_row = row;
         compositor.flip_buffer = which;
@@ -569,6 +637,7 @@ static void compositor_flip_arm(unsigned int fb, int row, unsigned int which, in
 static int compositor_atomic_primary(unsigned int fb, int row, unsigned int which, int src_w, int src_h, int dx, int dy, int dw, int dh);
 
 static int compositor_flip_all(unsigned int fb);
+static int compositor_flip_vrr(unsigned int fb, int row, unsigned int which, unsigned long user);
 static int compositor_flip(unsigned int fb, int row, unsigned int which)
 {
         struct
@@ -593,7 +662,7 @@ static int compositor_flip(unsigned int fb, int row, unsigned int which)
                         return 1;
         }
 
-        if (row >= 0 && compositor_wl_row_async(row))
+        if (compositor_flip_tears(row))
                 flip.flags |= COMPOSITOR_FLIP_ASYNC;
         // Headless: the file's names are exchanged now, so the flip is done at once (only the compositor's own buffers flip).
         if (compositor.card < 0)
@@ -605,6 +674,9 @@ static int compositor_flip(unsigned int fb, int row, unsigned int which)
                 return 1;
         }
         flip.user_data = ++compositor.flip_serial;
+        // A VRR_ENABLED change owed goes with this flip: the flip as a commit of the primary plane's framebuffer, which carries it.
+        if (!(flip.flags & COMPOSITOR_FLIP_ASYNC) && compositor_flip_vrr(fb, row, which, flip.user_data))
+                return 1;
         if ((compositor_refused_error = system_control(compositor.card, COMPOSITOR_PAGE_FLIP, address_of flip)) != 0)
         {
                 if (!(flip.flags & COMPOSITOR_FLIP_ASYNC))
@@ -702,28 +774,63 @@ static inline void compositor_wl_jit_measure(positive stamp)
 
 static positive compositor_present_lead(void); // after the metric rings it reads (compositor_metric_note)
 #ifdef CONFIG_MOONWATER_WAYLAND
+/*
+        The JIT row's callbacks, counted for moonwater debug (the jit line): timed (armed: sent the render estimate and a margin before the
+        slot), sent at the flip (no estimate yet, a render that fills the period, a row that tears), and the timed frames that landed a
+        vblank or more past the one they were aimed at. Such a frame missed its aim, and the estimate cannot learn why: a render of a period
+        or more is no sample, and a slot missed after a render on time is none either. So the miss itself widens the margin, an eighth of a
+        period a miss, up to half of one (past it the budget does not fit and the callback is sent at the flip); COMPOSITOR_JIT_CALM frames
+        that land where they were aimed step it back by half.
+*/
+#define COMPOSITOR_JIT_CALM 120u
+static struct
+{
+        positive aim;                // the vblank the last timed callback's frame is for (0: the last was not timed)
+        positive widen;              // what misses added to the margin
+        unsigned int calm;           // timed frames in a row that landed where they were aimed
+        unsigned int armed, unarmed; // callbacks timed, and sent at the flip
+        unsigned int late, landed;   // timed frames that landed past their aim, and at it
+} compositor_jit;
+
 // The flip that showed the JIT row's frame landed at `vblank`: its next callback is armed the render estimate and a margin before the next
 // vblank's slot (compositor.c's loop sends it then), or sent now when that does not fit (no estimate yet, or a render that fills the period).
 static void compositor_wl_jit_owed(positive vblank, positive now)
 {
         int jit = compositor_wl_jit_row();
-        positive lead = compositor_present_lead();
+        positive lead = compositor_present_lead(), period = compositor.period;
         // Direct-scanout games flip in ~25 us (no GPU compose), so a 0.6 ms safety margin suffices vs 1.0 ms + lead when GPU-composed.
-        positive margin = (jit >= 0 && (jit == compositor.direct_row || compositor_space_is_fs_row(jit)) ? 600000ull : 1000000ull) + lead;
-        positive budget = compositor_wl_game_render_ns + margin, window = compositor.period * compositor_cadence.k;
+        positive margin = (jit >= 0 && (jit == compositor.direct_row || compositor_space_is_fs_row(jit)) ? 600000ull : 1000000ull) + lead + compositor_jit.widen;
+        positive budget = compositor_wl_game_render_ns + margin, window = period * compositor_cadence.k;
 
+        if (compositor_jit.aim && period)
+        {
+                if (vblank >= compositor_jit.aim + period / 2)
+                {
+                        compositor_jit.late++, compositor_jit.calm = 0;
+                        compositor_jit.widen = compositor_jit.widen + period / 8 < period / 2 ? compositor_jit.widen + period / 8 : period / 2;
+                }
+                else if (vblank + period / 2 > compositor_jit.aim)
+                {
+                        compositor_jit.landed++;
+                        if (compositor_jit.widen && ++compositor_jit.calm >= COMPOSITOR_JIT_CALM)
+                                compositor_jit.widen /= 2, compositor_jit.calm = 0;
+                }
+                compositor_jit.aim = 0;
+        }
         compositor_wl_frame_owed = 0;
-        if (jit >= 0 && compositor_wl_game_render_ns > 0 && window > budget + 300000ull && !compositor_wl_row_async(jit))
+        if (jit >= 0 && compositor_wl_game_render_ns > 0 && window > budget + 300000ull && !compositor_row_tears(jit))
         {
                 positive target = vblank + window - budget;
 
                 if (target > now + 200000ull)
                 {
                         compositor_wl_frame_at = target;
+                        compositor_jit.aim = vblank + window, compositor_jit.armed++;
                         return;
                 }
         }
         compositor_wl_frame_at = 0;
+        compositor_jit.unarmed += jit >= 0;
         compositor_wl_jit_sent(now);
         compositor_wl_frame();
 }
@@ -732,7 +839,19 @@ static void compositor_wl_jit_owed(positive vblank, positive now)
 static void compositor_flip_done(void)
 {
         positive now = clock_monotonic_nanoseconds();
-        positive stamped = compositor.flip_stamped && compositor.flip_when ? compositor.flip_when : now;
+        positive stamped = compositor.flip_stamped && compositor.flip_when ? compositor.flip_when : now, paced = stamped;
+
+        // The direct row's frame went up now (a torn flip: its event's clock) or at its vblank, which the next frame's late rule reads.
+        // The next callback of a frame that tore is paced from the vblank before it (the PLL's), not from the tear: from the tear, the
+        // next frame aimed a period past it and was late again, a game locked onto tearing.
+        compositor_tear.shown_at = compositor.flip_row >= 0 && compositor.flip_row == compositor.direct_row ? stamped : 0;
+        if (compositor.flip_tore)
+        {
+                positive next = canvas_vblank_next(now, 0), period = canvas_vblank_refresh();
+
+                if (next && period && next > period)
+                        paced = next - period;
+        }
 
         compositor_record_vblank(now);
         compositor_keytrace_shown(stamped);
@@ -766,7 +885,7 @@ static void compositor_flip_done(void)
         // The feedbacks of the frame this flip showed are answered with the card's time for it.
         compositor_wl_flip_presented();
         if (compositor_wl_frame_owed)
-                compositor_wl_jit_owed(stamped, now);
+                compositor_wl_jit_owed(paced, now);
 #endif
 }
 
@@ -1346,25 +1465,97 @@ static int compositor_primary_bounds(int *ox, int *oy, int *ow, int *oh)
 
 static int compositor_overlay_ready(void);
 
-// Shared direct-scanout eligibility for row (global scene gates + row geometry/scaling/state).
+/*
+        Why the top window was not shown straight (compositor_direct_eligible, compositor_direct_candidate, compositor_present_direct): kept
+        for each present, and counted by present.c for every one composed while a fullscreen window is up (table->direct_why, the names are
+        moonwater debug's), so "N frames were composed because of X" can be read.
+*/
+enum
+{
+        COMPOSITOR_DIRECT_SHOWN = 0, COMPOSITOR_DIRECT_NONE, COMPOSITOR_DIRECT_BUSY, COMPOSITOR_DIRECT_TABLE, COMPOSITOR_DIRECT_SCENE,
+        COMPOSITOR_DIRECT_BLEND, COMPOSITOR_DIRECT_STATE, COMPOSITOR_DIRECT_PLACE, COMPOSITOR_DIRECT_SIZE, COMPOSITOR_DIRECT_SHAPE,
+        COMPOSITOR_DIRECT_FB, COMPOSITOR_DIRECT_REFUSED, COMPOSITOR_DIRECT_OVER, COMPOSITOR_DIRECT_NOT_TOP, COMPOSITOR_DIRECT_HELD,
+};
+static unsigned int compositor_direct_why;
+
+/*
+        A refusal the card gives a feature for a reason other than being busy (compositor_refusal_fatal) holds that feature off for a
+        while, not for the session: the scaled primary plane a low-resolution game is shown on (its geometry: another is asked at once),
+        and the flip of a Canvas window's own buffer. The first hold is COMPOSITOR_RETRY_FIRST, each refusal after it twice the last, up
+        to 2^COMPOSITOR_RETRY_STEPS of it (64 s), and one taken begins them again. A refusal was the feature off until the space was
+        taken again, busy ones too (EBUSY, a commit still in flight): one in a game's first second composed every frame of it after.
+*/
+#define COMPOSITOR_RETRY_FIRST 1000000000ull
+#define COMPOSITOR_RETRY_STEPS 6u
+struct compositor_retry
+{
+        unsigned int tries; // refusals since the feature was last taken
+        positive until;     // held off until then (0: not held)
+        int geom[6];        // what was refused: the scaled plane's source width and height and its destination
+};
+static struct compositor_retry compositor_scale_retry, compositor_flip_retry;
+
+static void compositor_retry_refused(struct compositor_retry *retry, const int *geom, positive now)
+{
+        unsigned int shift = retry->tries < COMPOSITOR_RETRY_STEPS ? retry->tries : COMPOSITOR_RETRY_STEPS;
+
+        retry->until = now + (COMPOSITOR_RETRY_FIRST << shift), retry->tries++;
+        if (geom)
+                memory_copy(retry->geom, geom, sizeof(retry->geom));
+        if (compositor.table)
+                compositor.table->refusal_held++;
+}
+
+// Whether the feature is held off now (for geom, when it is the one refused); a hold that is over is a retry.
+static int compositor_retry_held(struct compositor_retry *retry, const int *geom, positive now)
+{
+        if (!retry->until || (geom && memory_compare(retry->geom, geom, sizeof(retry->geom)) != 0))
+                return 0;
+        if (now < retry->until)
+                return 1;
+        retry->until = 0;
+        if (compositor.table)
+                compositor.table->refusal_retries++;
+        return 0;
+}
+
+static void compositor_retry_taken(struct compositor_retry *retry) { retry->tries = 0, retry->until = 0; }
+
+// The scaled plane's geometry for a fullscreen row whose picture is smaller than the window: false when it is not fitted.
+static int compositor_scale_geom(int row, int geom[6])
+{
+        int dx, dy, dw, dh;
+
+        if (!compositor_fullscreen_fit(row, &dx, &dy, &dw, &dh))
+                return 0;
+        geom[0] = (int)compositor.picture_w[row], geom[1] = (int)compositor.picture_h[row], geom[2] = dx, geom[3] = dy, geom[4] = dw, geom[5] = dh;
+        return 1;
+}
+
+// Shared direct-scanout eligibility for row (global scene gates + row geometry/scaling/state); compositor_direct_why says why not.
 static int compositor_direct_eligible(int row, int blend)
 {
-        int ox, oy, ow, oh;
+        int ox, oy, ow, oh, geom[6];
 
         if (compositor.card < 0 || (compositor_cursor_in_scene() && compositor.cursor.drawn) ||
             compositor.drag >= 0 || compositor.resize >= 0 || compositor.preview_draw ||
             compositor_spots_any(0) || !compositor_primary_bounds(&ox, &oy, &ow, &oh))
-                return 0;
-        if ((blend && !compositor_row_opaque_fs(row)) ||
-            compositor.glassy[row] || compositor.landing[row] || compositor.glide[row] || compositor.asking[row])
-                return 0;
+                return compositor_direct_why = COMPOSITOR_DIRECT_SCENE, 0;
+        if (blend && !compositor_row_opaque_fs(row))
+                return compositor_direct_why = COMPOSITOR_DIRECT_BLEND, 0;
+        if (compositor.glassy[row] || compositor.landing[row] || compositor.glide[row] || compositor.asking[row])
+                return compositor_direct_why = COMPOSITOR_DIRECT_STATE, 0;
         if (compositor.x[row] != ox || compositor.y[row] != oy ||
             compositor.w[row] != (unsigned int)ow || compositor.h[row] != (unsigned int)oh)
-                return 0;
-        if ((compositor.picture_w[row] != compositor.w[row] || compositor.picture_h[row] != compositor.h[row]) &&
-            !(compositor.fullscreen[row] && compositor_client_scans(row) && !compositor.scale_plane_refused &&
-              compositor.picture_w[row] && compositor.picture_h[row] && (compositor_overlay_ready() || compositor.primary)))
-                return 0;
+                return compositor_direct_why = COMPOSITOR_DIRECT_PLACE, 0;
+        if (compositor.picture_w[row] != compositor.w[row] || compositor.picture_h[row] != compositor.h[row])
+        {
+                if (!(compositor.fullscreen[row] && compositor_client_scans(row) && compositor.picture_w[row] && compositor.picture_h[row] &&
+                      (compositor_overlay_ready() || compositor.primary)))
+                        return compositor_direct_why = COMPOSITOR_DIRECT_SIZE, 0;
+                if (compositor_scale_geom(row, geom) && compositor_retry_held(&compositor_scale_retry, geom, clock_monotonic_nanoseconds()))
+                        return compositor_direct_why = COMPOSITOR_DIRECT_HELD, 0;
+        }
         return 1;
 }
 
@@ -1374,19 +1565,25 @@ static int compositor_direct_candidate(const struct compositor_frame *frames, co
 {
         int row;
 
-        if (!windows || compositor_busy_wait())
-                return -1;
+        if (!windows)
+                return compositor_direct_why = COMPOSITOR_DIRECT_NONE, -1;
+        if (compositor_busy_wait())
+                return compositor_direct_why = COMPOSITOR_DIRECT_BUSY, -1;
         row = rows[windows - 1];
         if (!compositor_client_scans(row) &&
             (compositor.direct_refused || !compositor.table_memfd || __atomic_load_n(&compositor.table->list_mode, __ATOMIC_ACQUIRE)))
-                return -1;
+                return compositor_direct_why = COMPOSITOR_DIRECT_TABLE, -1;
+        if (!compositor_client_scans(row) && compositor_retry_held(&compositor_flip_retry, 0, clock_monotonic_nanoseconds()))
+                return compositor_direct_why = COMPOSITOR_DIRECT_HELD, -1;
         // Dedicated Fullscreen Space row with no overlays on top has no wallpaper or windows underneath: opaque direct scanout is always safe.
-        if (!compositor_direct_eligible(row, windows == 1 && compositor_space_is_fs_row(row) ? 0 : frames[windows - 1].blend) ||
-            compositor_radius(&frames[windows - 1]) || frames[windows - 1].line || frames[windows - 1].shaped)
+        if (!compositor_direct_eligible(row, windows == 1 && compositor_space_is_fs_row(row) ? 0 : frames[windows - 1].blend))
                 return -1;
-        return (compositor_client_scans(row)
-                    ? (compositor.fullscreen[row] ? compositor_lent_fb_opaque(row) : compositor_lent_fb(row))
-                    : compositor_window_fb(row, compositor.front[row])) ? row : -1;
+        if (compositor_radius(&frames[windows - 1]) || frames[windows - 1].line || frames[windows - 1].shaped)
+                return compositor_direct_why = COMPOSITOR_DIRECT_SHAPE, -1;
+        if (!(compositor_client_scans(row) ? (compositor.fullscreen[row] ? compositor_lent_fb_opaque(row) : compositor_lent_fb(row))
+                                           : compositor_window_fb(row, compositor.front[row])))
+                return compositor_direct_why = COMPOSITOR_DIRECT_FB, -1;
+        return row;
 }
 
 static b32 compositor_present_direct(int row, const struct compositor_frame *tabs, unsigned int count)
@@ -1395,33 +1592,52 @@ static b32 compositor_present_direct(int row, const struct compositor_frame *tab
         unsigned int which = compositor.front[row];
         unsigned int fb = lent ? (compositor.fullscreen[row] ? compositor_lent_fb_opaque(row) : compositor_lent_fb(row)) : compositor_window_fb(row, which);
 
-        if (!fb || (lent && compositor_tabs_rect(tabs, count, rect)))
-                return 0;
+        if (!fb)
+                return compositor_direct_why = COMPOSITOR_DIRECT_FB, 0;
+        if (lent && compositor_tabs_rect(tabs, count, rect))
+                return compositor_direct_why = COMPOSITOR_DIRECT_OVER, 0;
         if (compositor.on_screen != fb && compositor.flip_pending)
                 return 1;
         if (!lent && !compositor_direct_patch(row, which, tabs, count))
-                return 0;
+                return compositor_direct_why = COMPOSITOR_DIRECT_OVER, 0;
         int flipped = compositor.on_screen != fb;
 
         if (flipped)
         {
-                int dx, dy, dw, dh;
+                int geom[6];
 
-                if (lent && compositor_fullscreen_fit(row, &dx, &dy, &dw, &dh))
+                if (lent && compositor_scale_geom(row, geom))
                 {
-                        if (!compositor_atomic_primary(fb, row, which, (int)compositor.picture_w[row], (int)compositor.picture_h[row], dx, dy, dw, dh))
-                                return compositor.scale_plane_refused = 1, 0;
+                        if (!compositor_atomic_primary(fb, row, which, geom[0], geom[1], geom[2], geom[3], geom[4], geom[5]))
+                        {
+                                if (compositor_refusal_fatal())
+                                        compositor_retry_refused(&compositor_scale_retry, geom, clock_monotonic_nanoseconds());
+                                return compositor_direct_why = COMPOSITOR_DIRECT_REFUSED, 0;
+                        }
+                        compositor_retry_taken(&compositor_scale_retry);
                 }
                 else if (!compositor_flip(fb, row, which))
                 {
+                        compositor_direct_why = COMPOSITOR_DIRECT_REFUSED;
+                        // A busy card backs off (compositor_busy_wait); any other refusal is the buffer's (a lent one: that buffer is not
+                        // shown straight again) or holds the table's flips off a while.
+                        if (!compositor_refusal_fatal())
+                        {
+                                if (!lent)
+                                        compositor_direct_unpatch_at(row, which);
+                                return 0;
+                        }
                         if (lent)
                                 return compositor_lent_fb_fail(row), 0;
                         compositor_direct_unpatch_at(row, which);
-                        if (compositor_refusal_fatal())
-                                compositor.direct_refused = 1, compositor.table->refused = 5;
+                        compositor_retry_refused(&compositor_flip_retry, 0, clock_monotonic_nanoseconds());
+                        compositor.table->refused = 5;
                         return 0;
                 }
+                else if (!lent)
+                        compositor_retry_taken(&compositor_flip_retry);
         }
+        compositor_direct_why = COMPOSITOR_DIRECT_SHOWN;
         scanout_direct_finish(row, fb, flipped);
         return 1;
 }
@@ -1774,7 +1990,11 @@ static void drm_atomic_set_plane(struct drm_atomic_req *req, unsigned int plane,
         drm_atomic_add(req, id[COMPOSITOR_PLANE_CRTC_H], (unsigned long)dh);
 }
 
-static long drm_atomic_commit(const struct drm_atomic_req *req, unsigned int flags, unsigned long user_data)
+static int compositor_vrr_owed(void);                     // kms.c: a VRR_ENABLED change the next flip carries
+static void compositor_vrr_carry(struct drm_atomic_req *req); // and its property added to a commit's request
+static void compositor_vrr_carried(int taken);
+
+static long drm_atomic_commit_as(const struct drm_atomic_req *req, unsigned int flags, unsigned long user_data)
 {
         struct
         {
@@ -1786,6 +2006,46 @@ static long drm_atomic_commit(const struct drm_atomic_req *req, unsigned int fla
         if (req->overflow || !req->obj_count)
                 return -COMPOSITOR_EINVAL;
         return system_control(compositor.card, COMPOSITOR_ATOMIC, address_of commit);
+}
+
+// A commit; a flip's (nonblocking, with its event, not torn) carries a VRR_ENABLED change that is owed, and is made without it when the
+// card refuses it with it (not for being busy).
+static long drm_atomic_commit(const struct drm_atomic_req *req, unsigned int flags, unsigned long user_data)
+{
+        long refused;
+
+        if ((flags & (COMPOSITOR_ATOMIC_NONBLOCK | COMPOSITOR_FLIP_EVENT | COMPOSITOR_FLIP_ASYNC)) == (COMPOSITOR_ATOMIC_NONBLOCK | COMPOSITOR_FLIP_EVENT) &&
+            compositor_vrr_owed())
+        {
+                struct drm_atomic_req carried = *req;
+
+                compositor_vrr_carry(&carried);
+                refused = drm_atomic_commit_as(&carried, flags, user_data);
+                if (!refused || refused == -(long)COMPOSITOR_EBUSY)
+                {
+                        if (!refused)
+                                compositor_vrr_carried(1);
+                        return refused;
+                }
+                compositor_vrr_carried(0);
+        }
+        return drm_atomic_commit_as(req, flags, user_data);
+}
+
+// A flip (compositor_flip's) made as a commit of the primary plane's framebuffer while a VRR_ENABLED change is owed, which the commit carries:
+// false when none is owed, the card has no primary plane known, or it refused the commit (the legacy flip is asked then).
+static int compositor_flip_vrr(unsigned int fb, int row, unsigned int which, unsigned long user)
+{
+        struct drm_atomic_req req = {0};
+
+        if (!compositor_vrr_owed() || (compositor_overlay_ready(), !compositor.primary))
+                return 0;
+        drm_atomic_begin_obj(&req, compositor.primary);
+        drm_atomic_add(&req, compositor.primary_props[COMPOSITOR_PLANE_FB], fb);
+        if ((compositor_refused_error = drm_atomic_commit(&req, COMPOSITOR_FLIP_EVENT | COMPOSITOR_ATOMIC_NONBLOCK, user)) != 0)
+                return 0;
+        compositor_flip_arm(fb, row, which, 0);
+        return 1;
 }
 
 // Unified dumb buffer: scanout, turned-screen buffer, overlay buffer, and cursor buffer.
@@ -2185,7 +2445,7 @@ static int compositor_atomic_primary(unsigned int fb, int row, unsigned int whic
                         compositor_scaled_state.geom[0] == src_w && compositor_scaled_state.geom[1] == src_h &&
                         compositor_scaled_state.geom[2] == dx && compositor_scaled_state.geom[3] == dy &&
                         compositor_scaled_state.geom[4] == dw && compositor_scaled_state.geom[5] == dh;
-        int want_async = same_geom && row >= 0 && compositor_wl_row_async(row);
+        int want_async = same_geom && compositor_flip_tears(row);
         int async = 0;
 
         compositor_refused_error = 0;
@@ -2571,6 +2831,8 @@ static int compositor_plane_candidate(const struct compositor_frame *frames, con
         row = rows[windows - 1], frame = &frames[windows - 1];
         if (!compositor_client_scans(row) && (compositor.direct_refused || !compositor.table_memfd))
                 return *why = compositor.direct_refused ? 11 : 2, -1;
+        if (!compositor_client_scans(row) && compositor_retry_held(&compositor_flip_retry, 0, clock_monotonic_nanoseconds()))
+                return *why = 11, -1;
         if (compositor.glassy[row]) return *why = 5, -1;
         if (compositor_wl_row_unscannable(row)) return *why = 22, -1;
         if (windows > 1 && rows[windows - 2] == (unsigned int)row) return *why = 18, -1;
@@ -2782,6 +3044,9 @@ static void canvas_scan_fb_rmfb(unsigned int fb)
                 system_control(compositor.card, COMPOSITOR_RMFB, address_of fb);
 }
 
+static int canvas_scan_fb_let_go(unsigned int fb); // the keep of the framebuffers made of client buffers, below
+static void canvas_scan_fb_keep_reap(positive now);
+
 static void canvas_scan_fb_reap(void)
 {
         unsigned int kept = 0;
@@ -2792,11 +3057,12 @@ static void canvas_scan_fb_reap(void)
                 else
                         canvas_scan_fb_rmfb(canvas_fb_graves.fb[at]);
         canvas_fb_graves.count = kept;
+        canvas_scan_fb_keep_reap(clock_monotonic_nanoseconds());
 }
 
 static void canvas_scan_fb_grave(unsigned int fb)
 {
-        if (!fb)
+        if (!fb || canvas_scan_fb_let_go(fb))
                 return;
         if (!canvas_scan_fb_scanned(fb))
         {
@@ -2851,6 +3117,138 @@ struct canvas_scan_fb_result
         int error;
 };
 
+/*
+        The framebuffers made of client buffers, kept by the buffer: a game's swapchain turns three or four buffers, and each one new to the row
+        was made a framebuffer again at its present (PRIME_FD_TO_HANDLE, ADDFB2 and GEM_CLOSE on the loop, an RMFB once it was off the screen).
+        One a row lets go of (canvas_scan_fb_grave) is kept, by what it was made of: each plane's buffer (its dev and inode) and the layout
+        asked; the next ask for the same is answered with it, and no call is made. One no row has held for CANVAS_FB_KEEP_NS is taken off
+        the card (RMFB, once nothing scans it), so a buffer its client let go of is not kept alive past that; one whose flip the card refused
+        is forgotten (canvas_scan_fb_forget). The keep is as large as the buffers asked for: no count is fixed.
+*/
+#define CANVAS_FB_KEEP_NS 2000000000ull
+struct canvas_scan_fb_kept
+{
+        struct canvas_scan_fb_spec spec;   // as asked, its descriptors -1 (a descriptor's number names no buffer)
+        unsigned long dev[4], ino[4];       // each plane's buffer
+        struct canvas_scan_fb_result made;
+        unsigned int users;                 // rows that hold it now
+        positive used;                      // when it was last asked for or let go of
+};
+static struct canvas_scan_fb_kept *canvas_fb_kept;
+static unsigned long canvas_fb_kept_bytes;
+static unsigned int canvas_fb_kept_count;
+static int canvas_fb_kept_card = -1; // the card they were made on: another card's framebuffers are not this one's
+static void canvas_ext_fd_ident(long fd, unsigned long *dev, unsigned long *ino); // gpu_host.c: a descriptor's dev and inode (statx)
+
+static void canvas_scan_fb_kept_said(void)
+{
+        if (compositor.table)
+                compositor.table->scan_fb_cached = canvas_fb_kept_count;
+}
+
+static int canvas_scan_fb_spec_same(const struct canvas_scan_fb_spec *a, const struct canvas_scan_fb_spec *b, unsigned int planes)
+{
+        if (a->width != b->width || a->height != b->height || a->fourcc != b->fourcc || a->planes != b->planes || a->base_offset != b->base_offset ||
+            a->opaque != b->opaque || a->linear != b->linear || a->modifier != b->modifier)
+                return 0;
+        for (unsigned int at = 0; at < planes; at++)
+                if (a->pitches[at] != b->pitches[at] || a->offsets[at] != b->offsets[at])
+                        return 0;
+        return 1;
+}
+
+static void canvas_scan_fb_kept_drop(unsigned int at)
+{
+        canvas_fb_kept[at] = canvas_fb_kept[--canvas_fb_kept_count];
+        canvas_scan_fb_kept_said();
+}
+
+// A kept framebuffer let go of by a row: kept made (true), its time from now. False for one not kept (graved as before).
+static int canvas_scan_fb_let_go(unsigned int fb)
+{
+        for (unsigned int at = 0; at < canvas_fb_kept_count; at++)
+                if (canvas_fb_kept[at].made.fb_id == fb)
+                {
+                        canvas_fb_kept[at].users -= canvas_fb_kept[at].users > 0;
+                        canvas_fb_kept[at].used = clock_monotonic_nanoseconds();
+                        return 1;
+                }
+        return 0;
+}
+
+// A framebuffer the card refused to flip: no longer kept (the caller graves it, and the next ask makes it again).
+static void canvas_scan_fb_forget(unsigned int fb)
+{
+        for (unsigned int at = 0; at < canvas_fb_kept_count; at++)
+                if (canvas_fb_kept[at].made.fb_id == fb)
+                {
+                        canvas_scan_fb_kept_drop(at);
+                        return;
+                }
+}
+
+static void canvas_scan_fb_keep_reap(positive now)
+{
+        for (unsigned int at = 0; at < canvas_fb_kept_count;)
+        {
+                struct canvas_scan_fb_kept *k = &canvas_fb_kept[at];
+
+                if (!k->users && now >= k->used && now - k->used >= CANVAS_FB_KEEP_NS && !canvas_scan_fb_scanned(k->made.fb_id))
+                {
+                        canvas_scan_fb_rmfb(k->made.fb_id);
+                        canvas_scan_fb_kept_drop(at);
+                }
+                else
+                        at++;
+        }
+}
+
+// The kept framebuffer made of the same buffers in the same layout, taken by a row; 0 when there is none.
+static unsigned int canvas_scan_fb_kept_take(const struct canvas_scan_fb_spec *spec, unsigned int planes, const unsigned long *dev,
+                                             const unsigned long *ino, struct canvas_scan_fb_result *out)
+{
+        if (canvas_fb_kept_card != compositor.card)
+                canvas_fb_kept_count = 0, canvas_fb_kept_card = compositor.card, canvas_scan_fb_kept_said();
+        for (unsigned int at = 0; at < canvas_fb_kept_count; at++)
+        {
+                struct canvas_scan_fb_kept *k = &canvas_fb_kept[at];
+                unsigned int same = canvas_scan_fb_spec_same(&k->spec, spec, planes);
+
+                for (unsigned int plane = 0; plane < planes && same; plane++)
+                        same = k->dev[plane] == dev[plane] && k->ino[plane] == ino[plane];
+                if (same)
+                {
+                        k->users++, k->used = clock_monotonic_nanoseconds();
+                        *out = k->made;
+                        if (compositor.table)
+                                compositor.table->scan_fb_reused++;
+                        return k->made.fb_id;
+                }
+        }
+        return 0;
+}
+
+// A framebuffer just made, kept for the next ask (held by the row that asked). One that cannot be kept (no memory) is the row's alone.
+static void canvas_scan_fb_kept_add(const struct canvas_scan_fb_spec *spec, unsigned int planes, const unsigned long *dev, const unsigned long *ino,
+                                    const struct canvas_scan_fb_result *made)
+{
+        void *p = canvas_fb_kept;
+        struct canvas_scan_fb_kept *k;
+
+        if (!ino[0] || !mem_buf_grow(&p, &canvas_fb_kept_bytes, (unsigned long)(canvas_fb_kept_count + 1) * sizeof(*canvas_fb_kept), MEM_BUF_KEEP))
+                return;
+        canvas_fb_kept = (struct canvas_scan_fb_kept *)p;
+        k = &canvas_fb_kept[canvas_fb_kept_count++];
+        memory_zero(k, sizeof(*k));
+        k->spec = *spec;
+        for (unsigned int at = 0; at < 4; at++)
+                k->spec.fds[at] = -1;
+        for (unsigned int at = 0; at < planes; at++)
+                k->dev[at] = dev[at], k->ino[at] = ino[at];
+        k->made = *made, k->users = 1, k->used = clock_monotonic_nanoseconds();
+        canvas_scan_fb_kept_said();
+}
+
 static unsigned int canvas_scan_fb_make(const struct canvas_scan_fb_spec *spec, struct canvas_scan_fb_result *out)
 {
         struct { unsigned int handle, flags; int fd; } prime;
@@ -2863,14 +3261,22 @@ static unsigned int canvas_scan_fb_make(const struct canvas_scan_fb_spec *spec, 
         unsigned int fourcc, planes, close_arg[2] = {0, 0};
         long refused = 0;
 
+        unsigned long dev[4] = {0, 0, 0, 0}, ino[4] = {0, 0, 0, 0};
+        positive began;
+
         memory_zero(out, sizeof(*out));
         if (!spec || compositor.card < 0 || !spec->width || !spec->height || spec->width > 32768u || spec->height > 32768u)
                 return 0;
+        planes = spec->linear ? 1u : spec->planes < 1 ? 1u : spec->planes > 4 ? 4u : spec->planes;
+        for (unsigned int at = 0; at < planes; at++)
+                canvas_ext_fd_ident(spec->fds[at], &dev[at], &ino[at]);
+        if (ino[0] && canvas_scan_fb_kept_take(spec, planes, dev, ino, out))
+                return out->fb_id;
+        began = clock_monotonic_nanoseconds();
         fourcc = spec->fourcc ? spec->fourcc : COMPOSITOR_XRGB8888;
         if (spec->opaque && (fourcc == 0x34325241u || fourcc == 0x34324241u ||
                              (spec->linear && (fourcc == 0x30335241u || fourcc == 0x30334241u))))
                 fourcc = (fourcc & ~0xffu) | 'X';
-        planes = spec->linear ? 1u : spec->planes < 1 ? 1u : spec->planes > 4 ? 4u : spec->planes;
         fb.width = spec->width, fb.height = spec->height, fb.pixel_format = fourcc;
         if (spec->linear)
         {
@@ -2949,6 +3355,9 @@ static unsigned int canvas_scan_fb_make(const struct canvas_scan_fb_spec *spec, 
                 return 0;
         }
         out->fb_id = fb.fb_id;
+        if (compositor.table)
+                compositor.table->scan_fb_made++, compositor.table->scan_fb_make_ns = (unsigned int)(clock_monotonic_nanoseconds() - began);
+        canvas_scan_fb_kept_add(spec, planes, dev, ino, out);
         return fb.fb_id;
 }
 

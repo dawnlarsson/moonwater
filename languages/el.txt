@@ -763,6 +763,7 @@ ui_field_full	fe02	δεν χωράει περισσότερο
 =Taskbar tray (text with {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)	92d2	Περιοχή ειδοποιήσεων της γραμμής εργασιών (κείμενο με {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)
 =Taskbar tray clock place	c2e6	Θέση ρολογιού ειδοποιήσεων στη γραμμή εργασιών
 =Taskbar tray text place	c235	Θέση κειμένου ειδοποιήσεων στη γραμμή εργασιών
+=Tearing in fullscreen games	2c2c	Σκίσιμο εικόνας σε παιχνίδια πλήρους οθόνης
 =Terminal	62d1	Τερματικό
 =Terminal lines per wheel notch	3800	Γραμμές τερματικού ανά βήμα τροχού
 =Text size (percent, or default)	51d7	Μέγεθος κειμένου (ποσοστό ή default)
@@ -810,6 +811,7 @@ ui_field_full	fe02	δεν χωράει περισσότερο
 =after	7dc9	μετά
 =all	4bc4	όλα
 =allow	a832	επιτρέπεται
+=always	afe4	πάντα
 =amber	bec0	κεχριμπαρί
 =auto	a396	αυτόματο
 =balanced	b71d	ισορροπημένο
@@ -840,10 +842,12 @@ ui_field_full	fe02	δεν χωράει περισσότερο
 =green	ecbc	πράσινο
 =grouped	8b7d	ομαδοποιημένες
 =high	b9fd	υψηλά
+=hinted	c039	κατόπιν αιτήματος
 =ink	8faf	μελάνι
 =inverted	8038	αντεστραμμένη
 =kernel log	415a	αρχείο καταγραφής πυρήνα
 =kernel log klog dmesg messages	1a8d	πυρήνας καταγραφή klog dmesg μηνύματα
+=late	4d21	όταν αργεί
 =launcher	8391	εκκινητής
 =left	ec70	αριστερά
 =light	1e2f	φωτεινό

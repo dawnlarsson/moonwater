@@ -763,6 +763,7 @@ ui_field_full	fe02	daha fazlası sığmaz
 =Taskbar tray (text with {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)	92d2	Görev çubuğu bildirim alanı ({names} içeren metin: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)
 =Taskbar tray clock place	c2e6	Görev çubuğunda tepsi saatinin yeri
 =Taskbar tray text place	c235	Görev çubuğunda tepsi metninin yeri
+=Tearing in fullscreen games	2c2c	Tam ekran oyunlarda görüntü yırtılması
 =Terminal	62d1	Terminal
 =Terminal lines per wheel notch	3800	Tekerlek adımı başına terminal satırı
 =Text size (percent, or default)	51d7	Metin boyutu (yüzde veya default)
@@ -810,6 +811,7 @@ ui_field_full	fe02	daha fazlası sığmaz
 =after	7dc9	sonra
 =all	4bc4	tümü
 =allow	a832	izin ver
+=always	afe4	her zaman
 =amber	bec0	kehribar
 =auto	a396	otomatik
 =balanced	b71d	dengeli
@@ -840,10 +842,12 @@ ui_field_full	fe02	daha fazlası sığmaz
 =green	ecbc	yeşil
 =grouped	8b7d	gruplu
 =high	b9fd	yüksek
+=hinted	c039	istenince
 =ink	8faf	mürekkep
 =inverted	8038	ters
 =kernel log	415a	çekirdek günlüğü
 =kernel log klog dmesg messages	1a8d	çekirdek günlüğü klog dmesg iletiler
+=late	4d21	geç kalınca
 =launcher	8391	başlatıcı
 =left	ec70	solda
 =light	1e2f	açık

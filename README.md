@@ -78,6 +78,7 @@ moonwater brightness [N%|+N|-N]        the screen backlight
 moonwater canvas modes [largest|preferred]  which mode a screen is driven at [largest]
 moonwater canvas vrr [on|games|off]    a screen that can waits for each frame, so it is shown when drawn; games: only a fullscreen window [on]
 moonwater canvas cadence [off|40|48|50|60|72]  a fullscreen Steam game on a screen without variable refresh: a rate that is a multiple of this, a frame every k vblanks [off]
+moonwater canvas tearing [off|hinted|late|always]  the frame of a fullscreen game put up at once, torn, not at the next vblank: hinted when the game asks, late also when it is late, always [late]
 
 
 # Input

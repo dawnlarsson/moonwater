@@ -763,6 +763,7 @@ ui_field_full	fe02	non ce ne sta di più
 =Taskbar tray (text with {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)	92d2	Area di notifica della barra (testo con {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)
 =Taskbar tray clock place	c2e6	Posto dell'orologio dell'area di notifica
 =Taskbar tray text place	c235	Posto del testo dell'area di notifica
+=Tearing in fullscreen games	2c2c	Strappo dell'immagine nei giochi a schermo intero
 =Terminal	62d1	Terminale
 =Terminal lines per wheel notch	3800	Righe del terminale per scatto della rotellina
 =Text size (percent, or default)	51d7	Dimensione del testo (percentuale o default)
@@ -810,6 +811,7 @@ ui_field_full	fe02	non ce ne sta di più
 =after	7dc9	dopo
 =all	4bc4	tutti
 =allow	a832	consenti
+=always	afe4	sempre
 =amber	bec0	ambra
 =auto	a396	automatico
 =balanced	b71d	bilanciato
@@ -840,10 +842,12 @@ ui_field_full	fe02	non ce ne sta di più
 =green	ecbc	verde
 =grouped	8b7d	raggruppate
 =high	b9fd	alto
+=hinted	c039	su richiesta
 =ink	8faf	inchiostro
 =inverted	8038	invertito
 =kernel log	415a	registro del kernel
 =kernel log klog dmesg messages	1a8d	registro kernel klog dmesg messaggi
+=late	4d21	in ritardo
 =launcher	8391	avvio
 =left	ec70	a sinistra
 =light	1e2f	chiaro

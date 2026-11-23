@@ -764,6 +764,7 @@ ui_field_full	fe02	هذا أقصى ما يتسع له
 =Taskbar tray (text with {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)	92d2	منطقة الإعلام في شريط المهام (نص مع {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)
 =Taskbar tray clock place	c2e6	موضع ساعة منطقة الإعلام في شريط المهام
 =Taskbar tray text place	c235	موضع نص منطقة الإعلام في شريط المهام
+=Tearing in fullscreen games	2c2c	تمزق الصورة في الألعاب بملء الشاشة
 =Terminal	62d1	الطرفية
 =Terminal lines per wheel notch	3800	أسطر الطرفية لكل خطوة من العجلة
 =Text size (percent, or default)	51d7	حجم النص (نسبة مئوية أو default)
@@ -811,6 +812,7 @@ ui_field_full	fe02	هذا أقصى ما يتسع له
 =after	7dc9	بعد
 =all	4bc4	الكل
 =allow	a832	سماح
+=always	afe4	دائمًا
 =amber	bec0	كهرماني
 =auto	a396	تلقائي
 =balanced	b71d	متوازن
@@ -841,10 +843,12 @@ ui_field_full	fe02	هذا أقصى ما يتسع له
 =green	ecbc	أخضر
 =grouped	8b7d	مجمّعة
 =high	b9fd	مرتفع
+=hinted	c039	عند الطلب
 =ink	8faf	حبر
 =inverted	8038	معكوسة
 =kernel log	415a	سجل النواة
 =kernel log klog dmesg messages	1a8d	سجل النواة klog dmesg رسائل
+=late	4d21	عند التأخر
 =launcher	8391	المُشغِّل
 =left	ec70	يسار
 =light	1e2f	فاتح

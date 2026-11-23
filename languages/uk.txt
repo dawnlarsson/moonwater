@@ -763,6 +763,7 @@ ui_field_full	fe02	більше не вміщається
 =Taskbar tray (text with {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)	92d2	Область сповіщень панелі завдань (текст із {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)
 =Taskbar tray clock place	c2e6	Місце годинника трею на панелі завдань
 =Taskbar tray text place	c235	Місце тексту трею на панелі завдань
+=Tearing in fullscreen games	2c2c	Розриви кадру в повноекранних іграх
 =Terminal	62d1	Термінал
 =Terminal lines per wheel notch	3800	Рядків термінала на крок коліщатка
 =Text size (percent, or default)	51d7	Розмір тексту (відсотки або default)
@@ -810,6 +811,7 @@ ui_field_full	fe02	більше не вміщається
 =after	7dc9	після
 =all	4bc4	усі
 =allow	a832	дозволити
+=always	afe4	завжди
 =amber	bec0	бурштиновий
 =auto	a396	авто
 =balanced	b71d	збалансований
@@ -840,10 +842,12 @@ ui_field_full	fe02	більше не вміщається
 =green	ecbc	зелений
 =grouped	8b7d	разом
 =high	b9fd	високо
+=hinted	c039	на запит
 =ink	8faf	туш
 =inverted	8038	інвертовані
 =kernel log	415a	журнал ядра
 =kernel log klog dmesg messages	1a8d	журнал ядра klog dmesg повідомлення
+=late	4d21	при запізненні
 =launcher	8391	запуск
 =left	ec70	ліворуч
 =light	1e2f	світла

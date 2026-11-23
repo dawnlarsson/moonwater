@@ -1269,7 +1269,7 @@ static b32 compositor_space_take(int first)
                 {
                         compositor.overlay_state = 0;
                         compositor.primary = compositor.overlay = 0;
-                        compositor.scale_plane_refused = 0;
+                        compositor_scale_retry = (struct compositor_retry){0, 0, {0}}; // a new primary plane: its scaler asked afresh
 #ifdef MOONWATER_GPU_C
                         compositor_fence_prop = 0; // the new primary plane's IN_FENCE_FD is looked for again (present.c's, with the GPU)
 #endif
@@ -1617,7 +1617,12 @@ static struct
 {
         unsigned int policy, crtc, connector, prop, steady;
         int capable, on, refused, said;
+        int owed;         // a change the next flip's commit carries: 1 off, 2 on (0 none)
+        int carry_refused; // a commit refused the change: it is set the blocking way (drm_obj_set_prop) from then on
 } compositor_vrr;
+
+// Variable refresh is on: the screen waits for each frame, so none is late for a vblank (compositor_tear_late).
+static int compositor_vrr_active(void) { return compositor_vrr.on > 0; }
 
 static int compositor_vrr_wants(unsigned int policy, int capable, unsigned int outputs, int flipping, int direct)
 {
@@ -1637,6 +1642,38 @@ static void compositor_vrr_publish(void)
         compositor.table->vrr = (compositor_vrr.capable ? WINDOWS_VRR_CAPABLE : 0u) | (compositor_vrr.prop ? WINDOWS_VRR_PROPERTY : 0u) |
                                 (compositor_vrr.on > 0 ? WINDOWS_VRR_ON : 0u) | (compositor_vrr.refused ? WINDOWS_VRR_REFUSED : 0u) |
                                 compositor_vrr.policy << 8;
+        compositor.table->tearing = compositor_tear.policy, compositor.table->flips_late = compositor_tear.late;
+}
+
+/*
+        VRR_ENABLED goes with the next flip, in its nonblocking commit (drm_atomic_commit, compositor_flip's commit while one is owed), and
+        costs the loop nothing: set by its own SETPROPERTY, a blocking commit of its own, it held the loop up to a frame each time it changed
+        (vrr_set_us). A card that refuses it in a flip's commit has the flip without it, and the change the blocking way after.
+*/
+static int compositor_vrr_owed(void)
+{
+        return compositor_vrr.owed && !compositor_vrr.carry_refused && compositor_vrr.prop && compositor_vrr.crtc == compositor.crtc;
+}
+
+// The owed change added to a commit's request (a copy of the caller's): its crtc's VRR_ENABLED.
+static void compositor_vrr_carry(struct drm_atomic_req *req)
+{
+        drm_atomic_begin_obj(req, compositor_vrr.crtc);
+        drm_atomic_add(req, compositor_vrr.prop, (unsigned long)(compositor_vrr.owed - 1));
+}
+
+// The commit that carried the change was taken (it is on from that flip), or refused (the blocking way after).
+static void compositor_vrr_carried(int taken)
+{
+        if (taken)
+        {
+                compositor_vrr.on = compositor_vrr.owed - 1, compositor_vrr.owed = 0;
+                if (compositor.table)
+                        compositor.table->vrr_set_us = 0; // nothing waited for
+        }
+        else
+                compositor_vrr.carry_refused = 1;
+        compositor_vrr_publish();
 }
 
 static int compositor_vrr_set(int on)
@@ -1799,14 +1836,15 @@ static void compositor_vrr_keep(void)
                                          compositor_vrr.said;
                 compositor_vrr.prop = drm_obj_get_prop(compositor.crtc, COMPOSITOR_OBJECT_CRTC, "VRR_ENABLED", &value);
                 compositor_vrr.on = compositor_vrr.prop && value;
-                compositor_vrr.refused = 0;
+                compositor_vrr.refused = 0, compositor_vrr.owed = 0, compositor_vrr.carry_refused = 0;
         }
         flipping = compositor.direct_row >= 0 || (compositor_plate_wanted(compositor_turning_software()) && compositor_spare.fb);
         want = compositor_vrr_wants(compositor_vrr.policy, compositor_vrr.capable, (unsigned int)compositor_output_count(), flipping,
                                     compositor.direct_row >= 0);
         want = compositor_vrr_step(want, compositor_vrr.on, &compositor_vrr.steady);
-        if (compositor_vrr.prop && !compositor_vrr.refused && want != compositor_vrr.on && !compositor.flip_pending)
-                compositor_vrr.refused = !compositor_vrr_set(want);
+        compositor_vrr.owed = compositor_vrr.prop && !compositor_vrr.refused && want != compositor_vrr.on ? want + 1 : 0;
+        if (compositor_vrr.owed && compositor_vrr.carry_refused && !compositor.flip_pending)
+                compositor_vrr.refused = !compositor_vrr_set(want), compositor_vrr.owed = 0;
         if (compositor_vrr.on <= 0)
                 compositor.vrr_kick = 0;
         compositor_vrr_publish();

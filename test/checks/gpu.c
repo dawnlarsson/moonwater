@@ -2080,9 +2080,10 @@ static void gpu_scan_rows(void)
         memory_copy(kept_driver, compositor.driver, sizeof kept_driver);
         memory_zero(compositor.driver, sizeof compositor.driver);
         memory_copy(compositor.driver, "amdgpu", 7);
+        compositor.driver_flags = drm_driver_flags(compositor.driver); // the rows are amdgpu's (its 256-byte pitch and offset), whatever ran before
         compositor.card = 1000; // no descriptor: the requests are the fakes, and a framebuffer's removal is EBADF
 #define GPU_SCAN_LEND(modifier_, pitch_, x_)                                                                                                              \
-        (compositor_wl_unlend(ROW), memory_zero(&compositor_wl.lent[ROW], sizeof compositor_wl.lent[ROW]),                                                   \
+        (canvas_fb_kept_count = 0, compositor_wl_unlend(ROW), memory_zero(&compositor_wl.lent[ROW], sizeof compositor_wl.lent[ROW]),                                                   \
          compositor_wl.lent[ROW].map = (const unsigned char *)buffer, compositor_wl.lent[ROW].pitch = (pitch_),                                             \
          compositor_wl.lent[ROW].pixels = buffer + 2 * (pitch_) + (x_), compositor_wl.lent[ROW].width = 128, compositor_wl.lent[ROW].height = 32,           \
          compositor_wl.lent[ROW].fd = 9, compositor_wl.lent[ROW].size = sizeof buffer, compositor_wl.lent[ROW].fourcc = 0x34325258u,                      \
@@ -2151,10 +2152,45 @@ static void gpu_scan_rows(void)
                 memory_copy(compositor_wl_graves, kept_graves, sizeof kept_graves);
                 compositor_wl_grave_count = kept_count, compositor.on_screen = kept_screen, compositor.flip_pending = kept_flip;
         }
+        // The keep (canvas_scan_fb_kept_take): a buffer (here a memfd, a file of its own) the row let go of and came back to in the same layout is
+        // the framebuffer it had, with no request; the same buffer in another layout is asked again; one no row has held for two seconds is
+        // taken off the card, and the next ask makes it again.
+        {
+                long fd = (long)system_call_2(syscall(memfd_create), (positive) "scan-keep", 1);
+                int calls;
+                unsigned int first, again, other, after;
+
+                GPU_SCAN_LEND(0, 256, 64);
+                compositor_wl.lent[ROW].fd = fd;
+                calls = gpu_fake_addfb_calls, compositor.flip_pending = 0, compositor.on_screen = 0;
+                first = compositor_lent_fb(ROW);
+                compositor_wl_lent_drop_fb(ROW);
+                again = compositor_lent_fb(ROW);
+                check("gpu scan: a buffer the row comes back to is the framebuffer it had, with no request (one made, one kept)",
+                      fd >= 0 && first && again == first && gpu_fake_addfb_calls == calls + 1 && canvas_fb_kept_count == 1 && canvas_fb_kept[0].users == 1);
+                compositor_wl_lent_drop_fb(ROW);
+                compositor_wl.lent[ROW].pitch = 512;
+                other = compositor_lent_fb(ROW);
+                check("gpu scan: the same buffer in another layout is asked again", other && other != first && gpu_fake_addfb_calls == calls + 2 &&
+                      canvas_fb_kept_count == 2);
+                compositor_wl_lent_drop_fb(ROW);
+                for (unsigned int k = 0; k < canvas_fb_kept_count; k++)
+                        canvas_fb_kept[k].used -= CANVAS_FB_KEEP_NS + 1;
+                canvas_scan_fb_keep_reap(clock_monotonic_nanoseconds());
+                compositor_wl.lent[ROW].pitch = 256;
+                after = compositor_lent_fb(ROW);
+                check("gpu scan: none held for two seconds is taken off the card, and the next ask makes it again",
+                      canvas_fb_kept_count == 1 && after && gpu_fake_addfb_calls == calls + 3);
+                compositor_wl_lent_drop_fb(ROW);
+                canvas_fb_kept_count = 0;
+                if (fd >= 0)
+                        system_close(fd);
+        }
 #undef GPU_SCAN_LEND
         memory_zero(&compositor_wl.lent[ROW], sizeof compositor_wl.lent[ROW]);
         compositor.card = kept_card;
         memory_copy(compositor.driver, kept_driver, sizeof kept_driver);
+        compositor.driver_flags = drm_driver_flags(compositor.driver);
 }
 
 /*

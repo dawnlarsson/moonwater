@@ -150,6 +150,7 @@
 #define SETTING_GPU_TILED_PATH "/root/canvas.gpu.tiled"
 #define SETTING_VRR_PATH "/root/canvas.vrr"
 #define SETTING_CADENCE_PATH "/root/canvas.cadence"
+#define SETTING_TEARING_PATH "/root/canvas.tearing"
 #define SETTING_CLIPBOARD_HISTORY_PATH "/root/canvas.clipboard.history"
 // The sound server's (src/audio/service.c reads the first three again twice a second and writes the volume and the mute back when
 // a program changes them; the machine script reads the last when it starts the server).
@@ -470,6 +471,15 @@ static const struct settings_row settings_rows[] = {
                       .refusal = "cadence is off, 40, 48, 50, 60 or 72, not %s\n",
                       .usage = "canvas cadence [off|40|48|50|60|72]",
                       .help = "a fullscreen Steam game on a screen without variable refresh: a rate that is a multiple of this, a frame every k vblanks [off]"),
+    //  Tearing (scanout.c's compositor_tear): which frames of a window shown straight from its buffer (a fullscreen game) are put up at
+    //  once, mid-scanout, instead of at the next vblank. late by default: a frame that missed its vblank by a little is shown at once,
+    //  torn near the top, where it waited a whole period (the one remedy for a late frame on a screen without variable refresh); a game
+    //  that asks to tear (vsync off) tears; off honours no game's ask; always tears every frame of every game.
+    SETTING_PLAIN_ROW(null, "Tearing in fullscreen games", SETTINGS_CHOICE, 0, ("canvas", "tearing"), "tearing ", "off hinted late always",
+                      .path = SETTING_TEARING_PATH, .standard = "late", .reset = "late",
+                      .refusal = "tearing is off, hinted, late or always, not %s\n",
+                      .usage = "canvas tearing [off|hinted|late|always]",
+                      .help = "the frame of a fullscreen game put up at once, torn, not at the next vblank: hinted when the game asks, late also when it is late, always [late]"),
     {null, "Brightness", SETTINGS_SLIDER, 1, 0, {"brightness"}, "brightness ", null, {"brightness"}, null, 0,
      .type = SETTING_NUMBER, .unit = "percent", .low = 0, .high = 100,
      .about = "The screen backlight, from 0 to 100 percent. A display with no backlight control has none to set, and this row is greyed out.",

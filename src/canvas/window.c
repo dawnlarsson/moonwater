@@ -323,7 +323,7 @@ enum
         WINDOW_POINTER_ARROW = 0u, WINDOW_POINTER_RESIZE = 1u, WINDOW_POINTER_TEXT = 5u, WINDOW_POINTER_HAND = 8u,
         WINDOW_POINTER_NOT_ALLOWED = 10u, // a control that does nothing now (a disabled button): never the window's grab band either
         WINDOWS_REFUSED_RATE = 1u, WINDOWS_REFUSED_TURN = 2u, WINDOWS_REFUSED_PLACE = 4u, WINDOWS_REFUSED_SIZE = 8u,
-        WINDOWS_LOOP_SOURCES = 10,
+        WINDOWS_LOOP_SOURCES = 10, WINDOWS_UNSCANNED = 32, WINDOWS_DIRECT_WHY = 16,
         WINDOWS_US_BUCKETS = 20, // a histogram of microseconds: under 1, then 2^(k-1) to 2^k in bucket k, and 2^18 (262 ms) and more in the last
         WINDOW_LIST_VALID = 0u, WINDOW_LIST_NONE, WINDOW_LIST_PUBLISHING, WINDOW_LIST_HEADER, WINDOW_LIST_TORN,
         WINDOW_LIST_ROOM_OTHER, WINDOW_LIST_SIZE, WINDOW_LIST_PITCH, WINDOW_LIST_DAMAGE, WINDOW_LIST_REASONS,
@@ -467,6 +467,18 @@ struct windows
         unsigned int metric_card_hand_mean, metric_card_hand_worst, metric_card_job_mean, metric_card_job_worst, metric_card_seen_mean, metric_card_seen_worst;
         unsigned int metric_card_split, metric_clocks_level, metric_clocks_held, metric_clocks_asks, metric_clocks_took, metric_clocks_error;
         unsigned int client_layers_laid_card, client_seeded[2];
+        /* The present path: the tearing policy (canvas tearing) and the frames torn for being late; the presents each reason kept off the
+           overlay or the screen straight (unscanned_by, the reasons of unscanned) and the presents composed while a fullscreen window was
+           up, by what kept it from being shown straight (direct_why); the late-latch steps ([0] composed, [1] shown straight); the JIT
+           frame callback; the scanout framebuffers made, reused and held; refusals retried and held off; flips of a client's buffer whose
+           fence the card waits for. */
+        unsigned int tearing, flips_late;
+        unsigned int unscanned_by[WINDOWS_UNSCANNED], direct_why[WINDOWS_DIRECT_WHY], composed_fullscreen;
+        unsigned int lead_widen_us[2], lead_calm[2], lead_calm_need[2], lead_warm;
+        unsigned int jit_armed, jit_unarmed, jit_render_us, jit_margin_us, jit_late, jit_landed;
+        unsigned int scan_fb_made, scan_fb_reused, scan_fb_cached, scan_fb_make_ns;
+        unsigned int refusal_retries, refusal_held;
+        unsigned int direct_fenced, direct_fence_timeouts;
         unsigned int least_width[WINDOWS], least_height[WINDOWS], most_width[WINDOWS], most_height[WINDOWS];
         signed char layer[WINDOWS];
         unsigned int close_asks[WINDOWS];
@@ -491,7 +503,7 @@ enum
         WINDOWS_MODALITY_NONE = 0u, WINDOWS_MODALITY_KEYS = 1u, WINDOWS_MODALITY_POINTER = 2u, WINDOWS_MODALITY_TOUCH = 3u
 };
 
-#define WINDOWS_ABI 14u
+#define WINDOWS_ABI 15u
 #define WINDOWS_CLIP_NO 0x80000000u
 #define WINDOWS_CLIP_MOST (64ul << 20)
 #define WINDOWS_CLIP_DOOR "/run/moonwater/clip"

@@ -763,6 +763,7 @@ ui_field_full	fe02	mehr passt nicht hinein
 =Taskbar tray (text with {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)	92d2	Taskleisten-Infobereich (Text mit {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)
 =Taskbar tray clock place	c2e6	Platz der Uhr im Infobereich
 =Taskbar tray text place	c235	Platz des Infobereich-Texts in der Taskleiste
+=Tearing in fullscreen games	2c2c	Tearing in Vollbildspielen
 =Terminal	62d1	Terminal
 =Terminal lines per wheel notch	3800	Terminalzeilen pro Mausradraste
 =Text size (percent, or default)	51d7	Textgröße (Prozent oder default)
@@ -810,6 +811,7 @@ ui_field_full	fe02	mehr passt nicht hinein
 =after	7dc9	danach
 =all	4bc4	Alle
 =allow	a832	Erlauben
+=always	afe4	Immer
 =amber	bec0	Bernstein
 =auto	a396	Automatisch
 =balanced	b71d	Ausgewogen
@@ -840,10 +842,12 @@ ui_field_full	fe02	mehr passt nicht hinein
 =green	ecbc	Grün
 =grouped	8b7d	gruppiert
 =high	b9fd	Hoch
+=hinted	c039	Auf Wunsch
 =ink	8faf	Tinte
 =inverted	8038	invertiert
 =kernel log	415a	Kernel-Protokoll
 =kernel log klog dmesg messages	1a8d	kernel protokoll klog dmesg meldungen
+=late	4d21	Verspätet
 =launcher	8391	Starter
 =left	ec70	Links
 =light	1e2f	Hell

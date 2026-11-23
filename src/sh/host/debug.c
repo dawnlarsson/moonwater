@@ -763,6 +763,62 @@ static b32 host_debug(string_address address_to arguments, positive count)
         host_say(log, "  presents        %p late a second, %p missed their vblank; lead %p us; longest in the loop %p us; %p flips a second with jobs in flight (at most %p)\n",
                  (positive)table->metric_late, (positive)table->metric_missed, (positive)table->metric_lead, (positive)table->metric_present_most,
                  (positive)table->metric_flip_jobs, (positive)table->metric_flip_jobs_most);
+        //      The late-latch back-off of each lead (scanout.c's compositor_late): what misses widened it, and the calm of flips that
+        //      landed toward the next step back; the flips since the last idle gap, up to 8 (a miss before them widens nothing).
+        host_say(log, "  lead steps      composed: widened %p us, calm %p of %p; shown straight: widened %p us, calm %p of %p; %p flips warm\n",
+                 (positive)table->lead_widen_us[0], (positive)table->lead_calm[0], (positive)table->lead_calm_need[0], (positive)table->lead_widen_us[1],
+                 (positive)table->lead_calm[1], (positive)table->lead_calm_need[1], (positive)table->lead_warm);
+        //      The just-in-time frame callback of a fullscreen game (compositor_wl_jit_owed): timed, or sent at the flip; the render it times
+        //      by, what late landings widened its margin, and the timed frames that landed past the vblank they were aimed at and at it.
+        host_say(log, "  jit             %p callbacks timed, %p sent at the flip; render %p us, margin widened %p us; %p frames landed past their aim, %p at it\n",
+                 (positive)table->jit_armed, (positive)table->jit_unarmed, (positive)table->jit_render_us, (positive)table->jit_margin_us,
+                 (positive)table->jit_late, (positive)table->jit_landed);
+        //      Tearing (canvas tearing): the policy, and the frames torn for being late (of the flips for tearing above).
+        {
+                static const char *const policies[4] = {"off", "hinted", "late", "always"};
+
+                host_say(log, "  tearing         canvas tearing %s; %p late frames torn, of %p flips for tearing\n",
+                         (string_address)policies[table->tearing < 4 ? table->tearing : 2], (positive)table->flips_late, (positive)table->flips_async);
+        }
+        //      The framebuffers made of buffers to scan out (canvas_scan_fb_make: PRIME, ADDFB2, GEM_CLOSE), those a buffer seen before reused,
+        //      those held now, and the last make's time.
+        host_say(log, "  scan-out fbs    %p made, %p reused, %p held; the last make took %p us\n", (positive)table->scan_fb_made, (positive)table->scan_fb_reused,
+                 (positive)table->scan_fb_cached, (positive)(table->scan_fb_make_ns / 1000));
+        //      A feature the card refused for a reason other than being busy is held off a while (the scaled plane, a table window's flip).
+        host_say(log, "  refusals        %p held off, %p tried again; %p flips of a client's buffer waited on its fence by the card, %p fences that took too long\n",
+                 (positive)table->refusal_held, (positive)table->refusal_retries, (positive)table->direct_fenced, (positive)table->direct_fence_timeouts);
+        //      The presents composed while a fullscreen window was up, by why it was not shown straight; and the presents each reason kept
+        //      the top window off the overlay and the screen straight (the "top window" line's reasons, counted).
+        {
+                static const string_address direct[WINDOWS_DIRECT_WHY] = {
+                    "?", "no window, a turned screen or the Scenes overview", "the card busy (backing off)", "the table's buffer refused or drawn from a list",
+                    "a pointer in software, a drag, a resize, the snap preview, finger marks or the screens' layout", "it is blended",
+                    "glass, a landing, a glide or a size asked", "not at the screen's place or size", "its picture another size, and no plane to scale it",
+                    "round corners, a line or a shape", "no framebuffer of its buffer", "the card refused the flip", "something drawn over it",
+                    "another window over it", "a refused feature held off", "?"};
+
+                if (table->composed_fullscreen)
+                {
+                        host_say(log, "  fullscreen composed %p presents;", (positive)table->composed_fullscreen);
+                        for (unsigned int at = 0; at < WINDOWS_DIRECT_WHY; at++)
+                                if (table->direct_why[at])
+                                        host_say(log, " %s %p;", direct[at], (positive)table->direct_why[at]);
+                        host_say(log, "\n");
+                }
+                unsigned int any = 0;
+
+                for (unsigned int at = 0; at < WINDOWS_UNSCANNED; at++)
+                        any |= table->unscanned_by[at];
+                if (any)
+                {
+                        host_say(log, "  top window by reason");
+                        for (unsigned int at = 0; at < WINDOWS_UNSCANNED; at++)
+                                if (table->unscanned_by[at])
+                                        host_say(log, " %s %p;", at < sizeof(reasons) / sizeof(reasons[0]) ? reasons[at] : (string_address) "?",
+                                                 (positive)table->unscanned_by[at]);
+                        host_say(log, "\n");
+                }
+        }
         host_say(log, "  waits           the loop waited %p us a second on the card's jobs\n", (positive)table->metric_waited);
         host_say(log, "  wakes           compositor loop %p turns a second, %p of them with nothing to wait for\n", (positive)table->metric_loops, (positive)table->metric_loop_idle);
         host_say(log, "  wakes by        signals %p, watch %p, inputs %p, windows %p, done %p, card %p, uevents %p, clip %p, wayland %p, other %p\n",

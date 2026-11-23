@@ -655,7 +655,7 @@ static struct
         unsigned int flip_seq;
         int flip_stamped, flip_async, flip_tore, vrr_kick;
         int overlay_state, overlay_on, overlay_rect[4];
-        int plane_row, leaving_row, plane_rect[4], scaled_direct, scale_plane_refused;
+        int plane_row, leaving_row, plane_rect[4], scaled_direct;
         unsigned int plane_fb;
         int plane_gone, overlay_owed;
         unsigned int crtc_index, primary, overlay, primary_props[11], overlay_props[11];
@@ -2149,7 +2149,7 @@ static void compositor_present_pass(void)
                                 int jit = compositor_wl_jit_row();
                                 if (!compositor_card.on && compositor.flip_pending && jit >= 0 &&
                                     (compositor.direct_row < 0 || compositor.flip_row == compositor.direct_row) &&
-                                    !compositor_wl_row_async(jit))
+                                    !compositor_row_tears(jit))
                                 {
                                         compositor_wl_jit_measure(stamp);
                                         compositor_wl_frame_owed = 1;

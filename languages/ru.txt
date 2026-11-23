@@ -763,6 +763,7 @@ ui_field_full	fe02	больше не помещается
 =Taskbar tray (text with {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)	92d2	Область уведомлений панели задач (текст с {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)
 =Taskbar tray clock place	c2e6	Место часов трея на панели задач
 =Taskbar tray text place	c235	Место текста трея на панели задач
+=Tearing in fullscreen games	2c2c	Разрывы кадра в полноэкранных играх
 =Terminal	62d1	Терминал
 =Terminal lines per wheel notch	3800	Строк терминала на щелчок колеса
 =Text size (percent, or default)	51d7	Размер текста (проценты или default)
@@ -810,6 +811,7 @@ ui_field_full	fe02	больше не помещается
 =after	7dc9	после
 =all	4bc4	все
 =allow	a832	разрешить
+=always	afe4	всегда
 =amber	bec0	янтарный
 =auto	a396	авто
 =balanced	b71d	сбалансированный
@@ -840,10 +842,12 @@ ui_field_full	fe02	больше не помещается
 =green	ecbc	зелёный
 =grouped	8b7d	вместе
 =high	b9fd	высоко
+=hinted	c039	по запросу
 =ink	8faf	тушь
 =inverted	8038	инвертированные
 =kernel log	415a	журнал ядра
 =kernel log klog dmesg messages	1a8d	журнал ядра klog dmesg сообщения
+=late	4d21	при опоздании
 =launcher	8391	запуск
 =left	ec70	слева
 =light	1e2f	светлая
