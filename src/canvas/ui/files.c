@@ -477,7 +477,7 @@ static const struct { int glyph, act; unsigned int words; } files_navs[] = {
 #define FILES_NAVS FILES_COUNT(files_navs)
 _Static_assert(sizeof(files_navs) / sizeof(files_navs[0]) == sizeof(files.nav) / sizeof(files.nav[0]), "a button of the bar for each of the table's");
 
-// The View button's width (logical px): its cog (it shows the symbol, its words are its name and tooltip), the kit's menu button's
+// The View button's width (logical px): its settings symbol (it shows the symbol, its words are its name and tooltip), the kit's menu button's
 // padding either side, the gap and the chevron (ui_menubutton_draw).
 static int files_view_wide(struct ui address_to ui)
 {
@@ -499,7 +499,7 @@ static fn files_bar_lay(void)
                 if (b->disabled)
                         b->hover = b->down = false;
         }
-        files.view_button.label = WORDS(files_view), files.view_button.icon = UI_ICON_COG + 1, files.view_button.open = files.menu.open && files.menu_view;
+        files.view_button.label = WORDS(files_view), files.view_button.icon = UI_ICON_SETTINGS + 1, files.view_button.open = files.menu.open && files.menu_view;
         files.view_button.x = files.view_box.x, files.view_button.y = files.view_box.y, files.view_button.w = files.view_box.w, files.view_button.h = files.view_box.h;
 }
 

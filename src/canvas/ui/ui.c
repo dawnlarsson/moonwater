@@ -19428,7 +19428,6 @@ enum
         UI_ICON_HOME,      // a roof over a house: home
         UI_ICON_NEW_FOLDER, // a folder's outline with a plus in it: new folder
         UI_ICON_KEYBOARD,   // a keyboard: a frame, a row of keys and the space bar (the tray's keyboard on the screen)
-        UI_ICON_COG,        // a cog: a ring, six teeth and its hub: how a view is shown (Files' View menu)
         UI_ICON_PLUS,       // a plus: add (a list's add row, ui_row's UI_ROW_ADD)
         UI_ICON_REMOVE,     // a cross: take this away (a list row's remove button, ui_row.remove)
         UI_ICON_GRIP,       // six dots, two by three: a handle to move a row by (an ordered row's, ui_row.order)
@@ -19461,9 +19460,6 @@ static const struct ui_icon_part ui_icon_parts[UI_ICON_COUNT][UI_ICON_PARTS] = {
         [UI_ICON_REMOVE] = {{UI_ICON_LINE, 14, 14, 34, 34, 0}, {UI_ICON_LINE, 34, 14, 14, 34, 0}, {UI_ICON_BOX, 20, 20, 28, 28, 0}},
         [UI_ICON_GRIP] = {{UI_ICON_BOX, 12, 7, 21, 16, 1}, {UI_ICON_BOX, 27, 7, 36, 16, 1}, {UI_ICON_BOX, 12, 19, 21, 28, 1},
                           {UI_ICON_BOX, 27, 19, 36, 28, 1}, {UI_ICON_BOX, 12, 31, 21, 40, 1}, {UI_ICON_BOX, 27, 31, 36, 40, 1}},
-        [UI_ICON_COG] = {{UI_ICON_RING, 13, 13, 35, 35, 11}, {UI_ICON_RING, 20, 20, 28, 28, 4}, {UI_ICON_LINE, 37, 24, 42, 24, 0},
-                         {UI_ICON_LINE, 31, 35, 33, 40, 0}, {UI_ICON_LINE, 17, 35, 15, 40, 0}, {UI_ICON_LINE, 11, 24, 6, 24, 0},
-                         {UI_ICON_LINE, 17, 13, 15, 8, 0}, {UI_ICON_LINE, 31, 13, 33, 8, 0}},
         [UI_ICON_KEYBOARD] = {{UI_ICON_RING, 4, 12, 44, 36, 4}, {UI_ICON_BOX, 10, 18, 15, 22, 1}, {UI_ICON_BOX, 18, 18, 23, 22, 1},
                               {UI_ICON_BOX, 26, 18, 31, 22, 1}, {UI_ICON_BOX, 34, 18, 38, 22, 1}, {UI_ICON_LINE, 14, 29, 34, 29, 0}},
         [UI_ICON_GAMEPAD] = {{UI_ICON_RING, 4, 13, 44, 37, 11}, {UI_ICON_LINE, 11, 25, 21, 25, 0}, {UI_ICON_LINE, 16, 20, 16, 30, 0}, {UI_ICON_BOX, 29, 19, 35, 25, 3},
@@ -19476,11 +19472,6 @@ static const struct ui_icon_part ui_icon_parts[UI_ICON_COUNT][UI_ICON_PARTS] = {
         [UI_ICON_BACK] = {{UI_ICON_LINE, 8, 24, 40, 24, 0}, {UI_ICON_LINE, 8, 24, 20, 12, 0}, {UI_ICON_LINE, 8, 24, 20, 36, 0}},
         [UI_ICON_FORWARD] = {{UI_ICON_LINE, 8, 24, 40, 24, 0}, {UI_ICON_LINE, 40, 24, 28, 12, 0}, {UI_ICON_LINE, 40, 24, 28, 36, 0}},
         [UI_ICON_UP] = {{UI_ICON_LINE, 24, 40, 24, 10, 0}, {UI_ICON_LINE, 24, 10, 13, 21, 0}, {UI_ICON_LINE, 24, 10, 35, 21, 0}},
-        // An arc of five sixths of a turn (six strokes on a circle of 14 round the middle), open at the top, and the arrowhead at its end
-        // pointing into the gap, the way it turns: a whole ring with a hook beside it read as no arrow at all.
-        [UI_ICON_REFRESH] = {{UI_ICON_LINE, 31, 12, 38, 22, 0}, {UI_ICON_LINE, 38, 22, 35, 33, 0}, {UI_ICON_LINE, 35, 33, 24, 38, 0},
-                             {UI_ICON_LINE, 24, 38, 13, 33, 0}, {UI_ICON_LINE, 13, 33, 10, 22, 0}, {UI_ICON_LINE, 10, 22, 17, 12, 0},
-                             {UI_ICON_LINE, 17, 12, 10, 7, 0}, {UI_ICON_LINE, 17, 12, 11, 19, 0}},
         [UI_ICON_HOME] = {{UI_ICON_LINE, 6, 24, 24, 8, 0}, {UI_ICON_LINE, 24, 8, 42, 24, 0}, {UI_ICON_LINE, 12, 22, 12, 40, 0},
                           {UI_ICON_LINE, 36, 22, 36, 40, 0}, {UI_ICON_LINE, 12, 40, 36, 40, 0}, {UI_ICON_LINE, 21, 40, 21, 30, 0}, {UI_ICON_LINE, 27, 40, 27, 30, 0}},
         [UI_ICON_NEW_FOLDER] = {{UI_ICON_RING, 6, 12, 42, 38, 4}, {UI_ICON_LINE, 24, 20, 24, 30, 0}, {UI_ICON_LINE, 19, 25, 29, 25, 0}},
@@ -19502,11 +19493,61 @@ static inline b32 ui_icon_stroke(int size)
 // The symbol which, size to a side with its top left at left, top (device pixels), in argb.
 static fn ui_icon_draw_parts_styled(struct ui address_to ui, const struct ui_icon_part address_to parts, int count, int left, int top, int size, unsigned int argb, b32 square);
 
+static fn ui_icon_refresh(struct ui address_to ui, int left, int top, int size, b32 thick, unsigned int argb)
+{
+        f64 cx = (f64)size * 0.5, cy = (f64)size * 0.5;
+        f64 t = (f64)thick / 256.0, r_mid = 14.0 * (f64)size / 48.0;
+        f64 r_in = r_mid - t * 0.5, r_out = r_mid + t * 0.5;
+        b32 ax = ui_icon_at(left, size, 34), ay = ui_icon_at(top, size, 14);
+        b32 bx = ui_icon_at(left, size, 26), by = ui_icon_at(top, size, 6);
+        b32 half = thick / 512 * 256;
+        // Circular arc centered at (24, 24) with radius 14, open on the upper right between -45 deg (1:30) and 0 deg (3:00).
+        for (int row = 0; row < size; row++)
+        {
+                f64 dy = (f64)row + 0.5 - cy;
+                f64 dy2 = dy * dy;
+                f64 dx_out, dx_in;
+                b32 y = (b32)((top + row) * 256);
+                if (dy2 >= r_out * r_out)
+                        continue;
+                dx_out = square_root(r_out * r_out - dy2);
+                if (dy2 < r_in * r_in)
+                {
+                        f64 rx1 = cx + dx_out;
+                        dx_in = square_root(r_in * r_in - dy2);
+                        ui_kit_fill(ui, &(struct ui_box){(b32)(((f64)left + cx - dx_out) * 256.0), y,
+                                                        (b32)(((f64)left + cx - dx_in) * 256.0), y + 256, 0, 0}, argb, null);
+                        if (dy < 0.0 && rx1 > cx - dy)
+                                rx1 = cx - dy;
+                        if (rx1 > cx + dx_in)
+                                ui_kit_fill(ui, &(struct ui_box){(b32)(((f64)left + cx + dx_in) * 256.0), y,
+                                                                (b32)(((f64)left + rx1) * 256.0), y + 256, 0, 0}, argb, null);
+                }
+                else
+                {
+                        f64 rx1 = cx + dx_out;
+                        if (dy < 0.0 && rx1 > cx - dy)
+                                rx1 = cx - dy;
+                        if (rx1 > cx - dx_out)
+                                ui_kit_fill(ui, &(struct ui_box){(b32)(((f64)left + cx - dx_out) * 256.0), y,
+                                                                (b32)(((f64)left + rx1) * 256.0), y + 256, 0, 0}, argb, null);
+                }
+        }
+        // Arrowhead at the top-right end of the arc (34, 14) pointing clockwise (down-right).
+        ui_kit_fill(ui, &(struct ui_box){bx, ay - half, ax - half + thick, ay - half + thick, 0, 0}, argb, null);
+        ui_kit_fill(ui, &(struct ui_box){ax - half, by, ax - half + thick, ay - half + thick, 0, 0}, argb, null);
+}
+
 static fn ui_icon(struct ui address_to ui, int which, int left, int top, int size, int value, unsigned int argb)
 {
         b32 thick = ui_icon_stroke(size);
         if (which < 0 || which >= UI_ICON_COUNT || size <= 0)
                 return;
+        if (which == UI_ICON_REFRESH)
+        {
+                ui_icon_refresh(ui, left, top, size, thick, argb);
+                return;
+        }
         if (which == UI_ICON_NETWORK)
         {
                 // Four bars, each taller than the one before it, standing on one line: the lit ones whole, the others at a third.
@@ -32461,15 +32502,22 @@ static void ui_tokens_focus(struct ui_tokens address_to k, b32 on, b32 select_al
 // Lays the chips out in the box: every token but the caret's is a chip, left to right; the chips that do not fit are not drawn (chip_left -1).
 static void ui_tokens_lay(struct ui address_to ui, struct ui_tokens address_to k, const p8 address_to bytes, positive n)
 {
-        int pad = ui_dev(ui, 8), gap = k->separator == '/' ? ui_dev(ui, 12) : ui_dev(ui, 4), room = k->right - k->left, at, first = 0, overflow_w;
+        int pad = ui_dev(ui, 6), gap = ui_dev(ui, 4), room = k->right - k->left, at, first = 0, overflow_w;
         int width[UI_TOKENS_MOST], rest[UI_TOKENS_MOST + 1];
         p64 caret = k->text.doc.selections[k->text.doc.primary].active;
         char label[UI_TOKENS_TEXT];
         k->count = ui_tokens_split(bytes, n, k->separator, k);
         k->active = -1;
         for (int t = 0; t < k->count; t++)
+        {
+                if (t == 0 && k->finish[0] == 1 && caret <= 1)
+                {
+                        k->active = 0;
+                        break;
+                }
                 if (caret >= (p64)k->start[t] && (caret < (p64)k->finish[t] || t + 1 == k->count))
                         k->active = t;
+        }
         /*
                 Typed in, the field is its whole line as a field's text across the box, scrolled by the field to keep its caret in view;
                 not typed in, every token is a chip, the caret's token among them (drawn as the one shown, ui_tokens_draw), and the
@@ -32533,7 +32581,7 @@ static fn ui_tokens_draw(struct ui address_to ui, struct ui_tokens address_to k,
         positive n = doc_length(&k->text.doc) < UI_TOKENS_TEXT - 1 ? doc_length(&k->text.doc) : UI_TOKENS_TEXT - 1;
         static p8 bytes[UI_TOKENS_TEXT];
         static char words[UI_TOKENS_TEXT * 3 + 4];
-        int height = bottom - top, pad = ui_dev(ui, 8), baseline = top + (height - ui_capital(ui, 14)) / 2 + ui_capital(ui, 14);
+        int height = bottom - top, pad = ui_dev(ui, 6), baseline = top + (height - ui_capital(ui, 14)) / 2 + ui_capital(ui, 14);
         unsigned int chip = ui_role(UI_SECONDARY_CONTAINER) & 0xffffffu, ink = ui_role(UI_ON_SECONDARY_CONTAINER) & 0xffffffu;
         unsigned int shown = ui_role(UI_PRIMARY_CONTAINER) & 0xffffffu, shown_ink = ui_role(UI_ON_PRIMARY_CONTAINER) & 0xffffffu;
         unsigned int after = ui_role(UI_ON_SURFACE_VARIANT) & 0xffffffu;
@@ -32554,7 +32602,8 @@ static fn ui_tokens_draw(struct ui address_to ui, struct ui_tokens address_to k,
                 if (t <= k->active || k->active < 0)
                         ui_round(ui, x0, top + ui_dev(ui, 4), x1 - x0, height - 2 * ui_dev(ui, 4), ui_dev(ui, 8), 0xff000000u | (t == k->active ? shown : chip));
                 ui_run_in(ui, faces, x0 + pad, baseline, (string_address)words, k->text.size + k->text.zoom,
-                          t == k->active ? shown_ink : t > k->active && k->active >= 0 ? after : ink, 255, x0, x1, 0);
+                          t == k->active ? shown_ink : t > k->active && k->active >= 0 ? after : ink,
+                          t > k->active && k->active >= 0 ? 110 : 255, x0, x1, 0);
         }
         if (k->overflow > 0)
         {

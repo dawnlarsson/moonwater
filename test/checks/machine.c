@@ -4889,9 +4889,9 @@ static fn browser_bar_view(struct files_model address_to m)
         b32 placed, opened, same = true, refresh;
 
         browser_bar_frame();
-        placed = v->label == WORDS(files_view) && v->icon == UI_ICON_COG + 1 && v->w > 0 && v->h > 0 && v->x >= files.path_box.x + files.path_box.w &&
+        placed = v->label == WORDS(files_view) && v->icon == UI_ICON_SETTINGS + 1 && v->w > 0 && v->h > 0 && v->x >= files.path_box.x + files.path_box.w &&
                  !files.menu_view;
-        check("browser: the View button is the top bar's last, after the path band: it shows the cog, and View is its name", placed);
+        check("browser: the View button is the top bar's last, after the path band: it shows the settings symbol, and View is its name", placed);
         {
                 // The pointer over the bar's controls is never the arrow, the one shape the compositor takes a press in a window's top band as
                 // a move of the window for: the hand over View and over a button, not allowed over a button that does nothing now, and the
