@@ -3340,9 +3340,14 @@ static fn bowl_session_hosts(void)
         keyboard and the pointer's events and a pad's controls: a program that
         has them reads every key typed on the machine. A bowl gets the group
         only when this file names it, one line "input ROOT" where ROOT is the
-        bowl's root as its launcher names it. The file is Moonwater's, in /etc,
-        which a bowl sees read-only; a bowl's own /var and root are its own, so
-        a marker there would be a bowl's to forge, and this is not.
+        bowl's root as its launcher names it. The file is Moonwater's, in root's
+        home with the machine's other settings (/root/bowl.input), which no bowl
+        sees; a bowl's own /var and root are its own, so a marker there would be
+        a bowl's to forge, and this is not. It was /etc/moonwater/input-bowls,
+        and /etc is the image's, made again at every boot: a grant went at the
+        first reboot while the bowl it named stayed, so Steam came back with no
+        controller at all. The old file is still read where the new is missing,
+        and the next change of a grant writes the new one and takes it away.
 
         Read by the launcher as root before the user is dropped, bounded: a
         file over BOWL_INPUT_GRANTS_LIMIT is no grant at all, and a line that
@@ -3350,7 +3355,8 @@ static fn bowl_session_hosts(void)
         word, a trailing byte, another root or a control character names
         nothing. A missing file grants nothing.
 */
-#define BOWL_INPUT_GRANTS "/etc/moonwater/input-bowls"
+#define BOWL_INPUT_GRANTS "/root/bowl.input"
+#define BOWL_INPUT_GRANTS_BEFORE "/etc/moonwater/input-bowls" // where it was, lost at every boot: read when the new one is missing
 #define BOWL_INPUT_GRANTS_LIMIT 4096
 #define BOWL_INPUT_WORD "input "
 
@@ -3374,6 +3380,10 @@ static bipolar bowl_input_read(p8 address_to text)
         //      The read keeps one byte back for the end of the text, so a file
         //      of LIMIT + 1 bytes comes back as LIMIT + 1 and is over.
         bipolar got = file_slurp_regular_at(AT_FDCWD, BOWL_INPUT_GRANTS, text,
+                                            BOWL_INPUT_GRANTS_LIMIT + 2, O_NOFOLLOW);
+
+        if (got < 0 && system_access_at(AT_FDCWD, BOWL_INPUT_GRANTS, 0) < 0)
+                got = file_slurp_regular_at(AT_FDCWD, BOWL_INPUT_GRANTS_BEFORE, text,
                                             BOWL_INPUT_GRANTS_LIMIT + 2, O_NOFOLLOW);
 
         if (got < 0 || got > BOWL_INPUT_GRANTS_LIMIT)
@@ -3430,7 +3440,7 @@ static b32 bowl_input_grant(string_address root, bool granted)
                 got = 0;
         }
 
-        system_make_directory_at(AT_FDCWD, "/etc/moonwater", 0755);
+        system_remove_at(AT_FDCWD, BOWL_INPUT_GRANTS_BEFORE, 0);
         for (positive at = 0; at < (positive)got;)
         {
                 positive stop = at + memory_span_without_byte(text + at, '\n', (positive)got - at);
