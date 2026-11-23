@@ -5568,6 +5568,42 @@ static fn launcher_words_check(void)
               launcher_program_rank("einst", 5, &launcher_programs[0]) == 2 && launcher_program_rank("settings", 8, &launcher_programs[0]) == 3 &&
                   launcher_program_rank("ajustes", 7, &launcher_programs[0]) == 0);
         language_take(0);
+        //      launcher -p: a pick says the entry's id, a tab and its command as sh runs it; a word with a byte sh reads is quoted, a program of
+        //      a terminal starts in one; and the picker's search finds the apps alone (no command line to run, no program of the PATH).
+        {
+                int kept = ui_apps.count, tool = kept, top = kept + 1, settings_app = ui_apps_find("settings");
+                char line[LAUNCHER_PICK_MOST];
+                struct ui_app_entry address_to app = &ui_apps.app[tool];
+                b32 window_only = true, command_after = false;
+
+                memory_zero(app, 2 * sizeof(*app));
+                string_copy((string_address)app[0].id, (string_address) "org.example.Tool"), string_copy((string_address)app[0].launch, (string_address) "/bowls/bin/tool");
+                string_copy((string_address)app[0].args[0], (string_address) "--name=It's here"), string_copy((string_address)app[0].args[1], (string_address) "-x");
+                app[0].arg_count = 2;
+                string_copy((string_address)app[1].id, (string_address) "htop"), string_copy((string_address)app[1].launch, (string_address) "/bowls/bin/htop");
+                app[1].terminal = true;
+                ui_apps.count = kept + 2;
+                check("launcher pick: a kit program is its id, a tab and its program",
+                      launcher_pick_line(settings_app, line, sizeof(line)) == 19 && string_equals((string_address)line, (string_address) "settings\t/settings\n"));
+                check("launcher pick: a bowl's words a blank apart, the one with a blank and a quote quoted as sh reads it",
+                      launcher_pick_line(tool, line, sizeof(line)) &&
+                          string_equals((string_address)line, (string_address) "org.example.Tool\t/bowls/bin/tool '--name=It'\\''s here' -x\n"));
+                check("launcher pick: a program of a terminal starts in one, and no room for the line says nothing",
+                      launcher_pick_line(top, line, sizeof(line)) && string_equals((string_address)line, (string_address) "htop\t/terminal -x /bowls/bin/htop\n") &&
+                          !launcher_pick_line(tool, line, 24) && !line[0] && !launcher_pick_line(kept + 2, line, sizeof(line)));
+                ui_apps.count = kept;
+                string_copy_bounded((string_address)launcher.text, (string_address) "set", sizeof(launcher.text));
+                launcher_search();
+                command_after = launcher.entries && launcher.entry[launcher.entries - 1].kind == LAUNCHER_COMMAND;
+                launcher.pick = true;
+                launcher_search();
+                for (positive at = 0; at < launcher.entries; at++)
+                        window_only &= launcher.entry[at].kind == LAUNCHER_WINDOW;
+                check("launcher pick: the picker's search finds the apps alone, where the launcher's ends in the command row",
+                      command_after && launcher.entries && window_only);
+                launcher.pick = false, launcher.text[0] = 0;
+                launcher_search();
+        }
 }
 #endif
 

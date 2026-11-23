@@ -155,6 +155,9 @@ static struct
         unsigned int power_runs;
         unsigned int session;
         b32 kept_start; // -k: started put away (the rules at the desktop's start), to be shown by its button with no program started
+        // -p: a picker (Settings' startup programs asks it): it looks as the start menu does, its search finds the apps alone, and a choice
+        // is said on standard output (launcher_pick) in place of a start; nothing chosen, it ends with 1. Never the resident launcher.
+        b32 pick, picked;
 } launcher;
 
 /* ---- model: ranking, search, and launch argv ---- */
@@ -244,13 +247,6 @@ static unsigned int launcher_app_rank(const char address_to text, positive lengt
                         : launcher_names_rank(text, length, app->name, app->words);
 }
 
-static const char address_to launcher_app_name(int which)
-{
-        const struct ui_app_entry address_to app = &ui_apps.app[which];
-
-        return app->kit ? language_of(launcher_programs[app->kit - 1].label) : app->name;
-}
-
 static b32 launcher_before(unsigned int rank, const char address_to name, unsigned int other_rank, const char address_to other)
 {
         positive size = string_length((string_address)name), other_size = string_length((string_address)other);
@@ -290,12 +286,12 @@ static fn launcher_apps_make(void)
         for (int at = 0; at < ui_apps.count && count < UI_APPS_MOST; at++)
                 if (launcher_offered((positive)at))
                 {
-                        const char address_to name = launcher_app_name(at);
+                        const char address_to name = ui_apps_name(at);
                         int place = count++;
 
                         while (place > 0 && !ui_apps.app[at].kit && !ui_apps.app[launcher.apps[place - 1]].kit)
                         {
-                                const char address_to other = launcher_app_name(launcher.apps[place - 1]);
+                                const char address_to other = ui_apps_name(launcher.apps[place - 1]);
                                 positive a = string_length((string_address)name), b = string_length((string_address)other);
                                 b32 order = memory_compare_ascii_case((address_any)name, (address_any)other, a < b ? a : b);
 
@@ -312,7 +308,8 @@ static fn launcher_apps_make(void)
 static fn launcher_search(void)
 {
         positive length = string_length((string_address)launcher.text), found = 0, count = 0;
-        b32 line = launcher_command_line(launcher.text), first = line;
+        // A picker finds the apps alone: no command line to run and no program of the PATH (it starts nothing).
+        b32 line = launcher_command_line(launcher.text) || launcher.pick, first = line && !launcher.pick, apps = launcher.pick;
         unsigned int programs[UI_APPS_MOST], ranks[LAUNCHER_ROWS];
         unsigned short best[LAUNCHER_ROWS];
 
@@ -340,7 +337,7 @@ static fn launcher_search(void)
         if (first)
                 launcher.entry[count++] = (struct launcher_entry){LAUNCHER_COMMAND, 0};
         for (unsigned int rank = 3; rank > 0; rank--)
-                for (int at = 0; at < ui_apps.count && count < LAUNCHER_ROWS - (first ? 0u : 1u); at++)
+                for (int at = 0; at < ui_apps.count && count < LAUNCHER_ROWS - (first || apps ? 0u : 1u); at++)
                         if (programs[at] == rank)
                                 launcher.entry[count++] = (struct launcher_entry){LAUNCHER_WINDOW, (unsigned short)at};
         if (!line)
@@ -378,7 +375,7 @@ static fn launcher_search(void)
                 launcher.named_length = 0;
         for (positive at = 0; at < found; at++)
                 launcher.entry[count++] = (struct launcher_entry){LAUNCHER_PROGRAM, best[at]};
-        if (!first)
+        if (!first && !apps)
                 launcher.entry[count++] = (struct launcher_entry){LAUNCHER_COMMAND, 0};
         launcher.entries = count;
 }
@@ -538,6 +535,35 @@ static fn launcher_recent_read(void)
         launcher.recent_count = ui_app_list_read(path, launcher.recent, LAUNCHER_RECENT, launcher_offered);
 }
 
+/*
+        What a pick says (launcher -p): the entry's id, a tab, and its command as sh runs it (ui_apps_command), and a line's end. Its length
+        in into, 0 for no entry; room of LAUNCHER_PICK_MOST holds any (an id is WINDOWS_APP_ID at most).
+*/
+#define LAUNCHER_PICK_MOST (WINDOWS_APP_ID + UI_APP_COMMAND_MOST + 2)
+static positive launcher_pick_line(int which, char address_to into, positive room)
+{
+        positive length, made;
+
+        if (which < 0 || which >= ui_apps.count || (length = string_length((string_address)ui_apps.app[which].id)) + 2 >= room)
+                return 0;
+        memory_copy(into, ui_apps.app[which].id, length), into[length++] = '\t';
+        if (!(made = ui_apps_command(which, into + length, room - length - 1)))
+                return into[0] = 0, 0;
+        length += made, into[length++] = '\n', into[length] = 0;
+        return length;
+}
+
+// A choice of the picker said on standard output, and the picker done (its caller ends it).
+static b32 launcher_pick(int which)
+{
+        char line[LAUNCHER_PICK_MOST];
+        positive length = launcher_pick_line(which, line, sizeof(line));
+
+        if (!length || system_write_all(1, line, length) != length)
+                return false;
+        return launcher.picked = true;
+}
+
 static b32 launcher_launch(struct launcher_entry entry, b32 mark_starting)
 {
         string_address words[LAUNCHER_WORDS];
@@ -546,6 +572,8 @@ static b32 launcher_launch(struct launcher_entry entry, b32 mark_starting)
 
         if (entry.kind == LAUNCHER_WINDOW && entry.index >= ui_apps.count)
                 return false;
+        if (launcher.pick)
+                return entry.kind == LAUNCHER_WINDOW && launcher_pick(entry.index);
         count = launcher_words(&entry, words, full, sizeof(full));
         if (!count || !ui_start_apart(words, count))
                 return false;
@@ -680,7 +708,7 @@ static fn launcher_view(void)
                         ui_rows(&launcher.recents, .class = "list", .h = UI_TILE_H, .hidden = typed || !launcher.recent_count);
                 }
                 ui_rows(&launcher.list, .class = "list", .h = (int)rows * UI_ROW, .hidden = !rows);
-                if (launcher.asked_beside)
+                if (launcher.asked_beside && !launcher.pick)
                         ui_row(.class = "foot.middle")
                                 for (int at = 0; at < LAUNCHER_POWERS; at++)
                                         if (launcher_power_offered(at))
@@ -853,7 +881,7 @@ static b32 launcher_key(const struct window_event address_to event)
         {
                 const struct launcher_entry address_to entry = &launcher.entry[launcher.list.focus];
                 const char address_to name = entry->kind == LAUNCHER_PROGRAM ? launcher_name(entry->index)
-                                             : entry->kind == LAUNCHER_WINDOW ? launcher_app_name(entry->index)
+                                             : entry->kind == LAUNCHER_WINDOW ? ui_apps_name(entry->index)
                                                                               : null;
                 if (name)
                         ui_text_set(launcher_field(), (const p8 address_to)name, string_length((string_address)name)), launcher_take();
@@ -898,23 +926,12 @@ static fn launcher_damaged(int top, int bottom)
 static fn launcher_app_safe_name(int which, char address_to into, positive room)
 {
         const struct ui_app_entry address_to app = &ui_apps.app[which];
-        const char address_to name = launcher_app_name(which);
+        const char address_to name = ui_apps_name(which);
 
         if (app->kit)
                 string_copy_bounded((string_address)into, (string_address)name, room);
         else
                 ui_label_foreign(into, room, (const p8 address_to)name, string_length((string_address)name));
-}
-
-static fn launcher_app_icon(int which, struct ui_row address_to row)
-{
-        const struct ui_app_entry address_to app = &ui_apps.app[which];
-        int symbol = app->kit ? ui_icon_of(app->id) : -1;
-
-        if (symbol >= 0)
-                row->icon = symbol + 1;
-        else
-                row->tile_name = app->kit ? app->id : app->name;
 }
 
 static const unsigned int address_to launcher_grid_picture(int id, int side)
@@ -939,7 +956,7 @@ static fn launcher_tile_describe(const unsigned short address_to ids, int count,
         label = names[next++ % 1024];
         launcher_app_safe_name(ids[id], label, UI_APP_NAME + 8);
         row->label = label;
-        launcher_app_icon(ids[id], row);
+        ui_apps_symbol(ids[id], row);
         row->tile_picture = pic;
 }
 
@@ -1081,7 +1098,7 @@ static fn launcher_describe(int id, struct ui_row address_to row)
         launcher_label(entry, label, sizeof(label), &row->note);
         row->label = label;
         if (entry->kind == LAUNCHER_WINDOW && entry->index < ui_apps.count)
-                launcher_app_icon(entry->index, row), row->tile_picture = launcher_list_picture;
+                ui_apps_symbol(entry->index, row), row->tile_picture = launcher_list_picture;
         else if (entry->kind == LAUNCHER_PROGRAM || entry->kind == LAUNCHER_COMMAND)
                 row->icon = UI_ICON_TERMINAL + 1;
 }
@@ -1130,7 +1147,7 @@ static fn launcher_fresh(void)
         struct windows address_to table = launcher.own.table;
         unsigned int row = launcher.own.row;
 
-        ui_anchor_take(&launcher.anchor, table, launcher.asked_beside);
+        ui_anchor_take(&launcher.anchor, table, launcher_app.beside);
         if (launcher.anchor.anchored)
                 launcher.anchor.gap = launcher_anchor_gap(&launcher.anchor);
         ui_apps_fresh(ui_kit_time());
@@ -1176,8 +1193,9 @@ static int launcher_open(void)
                  hashed = (positive)LAUNCHER_HASH * sizeof(unsigned short);
         char address_to mapped;
 
-        // A start put away (-k) with a launcher up already leaves it be; another start shows the one up (or puts it away with -x).
-        if (launcher.kept_start ? launcher_other() : ui_lift_other(&launcher.own, (string_address) "launcher", launcher.toggle))
+        // A start put away (-k) with a launcher up already leaves it be; another start shows the one up (or puts it away with -x). A picker
+        // is its own, whatever is up.
+        if (!launcher.pick && (launcher.kept_start ? launcher_other() : ui_lift_other(&launcher.own, (string_address) "launcher", launcher.toggle)))
                 return 0;
         if (!(mapped = ui_app_map(&launcher_app, names + from + hashed + LAUNCHER_DIRENTS)))
                 return 1;
@@ -1190,7 +1208,8 @@ static int launcher_open(void)
                 launcher.own.table->state[launcher.own.row] = WINDOW_MINIMIZED, launcher_app.put_away = true;
         launcher_fresh();
         ui_app_frame(&launcher_app);
-        launcher_scan(launcher_path_variable());
+        if (!launcher.pick)
+                launcher_scan(launcher_path_variable());
         return -1;
 }
 
@@ -1220,15 +1239,12 @@ static fn launcher_back(void)
    picture the worker has finished is taken here and the launcher drawn again at once; then the worker is given the next job
    (ui_apps_picture_tend: an app not tried, a kept picture to check, the kept file to write), and while one is under way the loop
    looks again a frame on. */
-#define LAUNCHER_PICTURE_LOOK 33000000l
-
 static long launcher_pictures(long timeout)
 {
-        if (ui_apps_picture_take())
-                launcher.dirty = true, timeout = 0;
-        ui_apps_picture_tend(true);
-        if (timeout && ui_apps_picture_making() && (timeout < 0 || timeout > LAUNCHER_PICTURE_LOOK))
-                timeout = LAUNCHER_PICTURE_LOOK;
+        b32 taken;
+
+        timeout = ui_apps_pictures_tick(timeout, true, &taken);
+        launcher.dirty |= taken;
         return timeout;
 }
 
@@ -1293,12 +1309,17 @@ static b32 launcher_main()
                         launcher.kept_start = true;
                 else if (string_equals(option, (string_address) "-x"))
                         launcher.toggle = true;
+                else if (string_equals(option, (string_address) "-p"))
+                        launcher.pick = true;
                 else if ((value = ui_argument(at, (string_address) "-m")))
                         launcher.mono = (const char address_to)value, took = 2;
                 else if ((value = ui_argument(at, (string_address) "-M")))
                         launcher.mono_bold = (const char address_to)value, took = 2;
         }
-        launcher.asked_beside = launcher_app.beside;
+        // A picker looks as the start menu does (its apps' tiles and its recents) wherever it opens, and is no resident: it ends.
+        launcher.asked_beside = launcher_app.beside || launcher.pick;
+        if (launcher.pick)
+                launcher_app.glass &= ~(unsigned int)WINDOW_RESIDENT, launcher_app.resident = false, launcher.kept_start = false;
         if (!launcher_app.font)
                 launcher_app.font = ui_faces()->text[0] ? (string_address)ui_faces()->text : (string_address)UI_FONT_REGULAR;
         if (!launcher.mono && ui_faces()->face[0])
@@ -1306,7 +1327,10 @@ static b32 launcher_main()
         if (!launcher.mono_bold && ui_faces()->bold[0])
                 launcher.mono_bold = (const char address_to)ui_faces()->bold;
         launcher.regular = (const char address_to)launcher_app.font;
-        return ui_app_run(&launcher_app);
+        {
+                int status = ui_app_run(&launcher_app);
+                return launcher.pick ? !launcher.picked : status;
+        }
 }
 
 #endif // MOONWATER_CANVAS_LAUNCHER

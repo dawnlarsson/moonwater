@@ -21770,6 +21770,21 @@ static fn ui_apps_picture_tend(b32 all)
                 ui_apps_job.flush = true, ui_apps_picture_start();
 }
 
+/* A window that shows the apps' pictures (ui_apps_picture_kept), at each pass of its loop: a picture the worker has finished taken in, and
+   taken says so (the window draws again; the loop runs again at once, 0); the worker given its next job (ui_apps_picture_tend, every entry
+   asked first where all); and while one is under way the loop looks again a frame on, UI_APPS_PICTURE_LOOK_NS. */
+#define UI_APPS_PICTURE_LOOK_NS 33000000l
+static long ui_apps_pictures_tick(long timeout, b32 all, b32 address_to taken)
+{
+        *taken = ui_apps_picture_take();
+        if (*taken)
+                timeout = 0;
+        ui_apps_picture_tend(all);
+        if (timeout && ui_apps_picture_making() && (timeout < 0 || timeout > UI_APPS_PICTURE_LOOK_NS))
+                timeout = UI_APPS_PICTURE_LOOK_NS;
+        return timeout;
+}
+
 // The pictures made again at their sizes put away (a resident window's, while it is hidden): the kept ones stay, so the next draw scales again.
 static fn ui_apps_pictures_trim(void)
 {
@@ -21826,6 +21841,67 @@ static positive ui_apps_words_of(int which, string_address address_to words, con
         }
         words[count] = null;
         return count;
+}
+
+// What an entry is called where a person reads it: a kit program's name in the language, a bowl's as its entry says it.
+static const char address_to ui_apps_name(int which)
+{
+        const struct ui_app_entry address_to app;
+        if (which < 0 || which >= ui_apps.count)
+                return "";
+        app = &ui_apps.app[which];
+        return app->kit ? language_of(ui_kit_programs[app->kit - 1].label) : app->name;
+}
+
+/*
+        An entry's command as one line sh runs (desktop startup keeps a program so, and launcher -p says it): the words that start it, as
+        ui_apps_words_of has them less the faces (a program draws in the kit's own when none is named), a blank apart; a word with a byte sh
+        reads itself is quoted ('it'\''s'). Its length, the line in into; 0 when there is no such entry or room is too small for it. An
+        entry's words are its launch and at most UI_APP_ARGS arguments, each UI_APP_PATH at most, and /terminal -x before them for one that
+        runs in a terminal: UI_APP_COMMAND_MOST is all of them with every byte a quote, so a line made into that room always fits.
+*/
+#define UI_APP_COMMAND_MOST ((UI_APP_ARGS + 3) * (4 * UI_APP_PATH + 3) + 1)
+static b32 ui_apps_word_plain(unsigned char byte)
+{
+        return (byte >= 'a' && byte <= 'z') || (byte >= 'A' && byte <= 'Z') || (byte >= '0' && byte <= '9') || byte == '/' || byte == '.' ||
+               byte == '_' || byte == '-' || byte == '+' || byte == '=' || byte == ':' || byte == ',' || byte == '@' || byte == '%';
+}
+
+static positive ui_apps_command(int which, char address_to into, positive room)
+{
+        const struct ui_app_entry address_to app;
+        const char address_to words[UI_APP_ARGS + 3];
+        positive count = 0, at = 0;
+        if (which < 0 || which >= ui_apps.count || !room)
+                return 0;
+        app = &ui_apps.app[which];
+        if (app->terminal)
+                words[count++] = "/terminal", words[count++] = "-x";
+        words[count++] = app->launch;
+        for (int arg = 0; !app->kit && arg < app->arg_count && arg < UI_APP_ARGS; arg++)
+                words[count++] = app->args[arg];
+        for (positive w = 0; w < count; w++)
+        {
+                const char address_to word = words[w];
+                b32 plain = word[0] != 0;
+                for (positive k = 0; word[k] && plain; k++)
+                        plain = ui_apps_word_plain((unsigned char)word[k]);
+                if (w && at + 1 < room)
+                        into[at++] = ' ';
+                if (!plain && at + 1 < room)
+                        into[at++] = '\'';
+                for (positive k = 0; word[k] && at + 4 < room; k++)
+                        if (word[k] == '\'' && !plain)
+                                memory_copy(into + at, "'\\''", 4), at += 4;
+                        else
+                                into[at++] = word[k];
+                if (!plain && at + 1 < room)
+                        into[at++] = '\'';
+                if (at + 4 >= room)
+                        return into[0] = 0, 0;
+        }
+        into[at] = 0;
+        return at;
 }
 
 // Whether an entry may be pinned: a kit program, or a bowl's that is a window of its own (not one in a terminal).
@@ -22657,6 +22733,22 @@ struct ui_row
 static inline b32 ui_key_is_menu(const struct window_event address_to event)
 {
         return event->a == UI_KEY_MENU || (event->a == UI_KEY_F10 && (event->flags & WINDOW_KEY_SHIFT));
+}
+
+// An entry of the registry's symbol on a row or a tile, where its picture is not (the row's tile_picture gives that, ui_apps_picture_kept):
+// a kit program's own symbol, else a tile lettered with its name.
+static fn ui_apps_symbol(int which, struct ui_row address_to row)
+{
+        const struct ui_app_entry address_to app;
+        int symbol;
+        if (which < 0 || which >= ui_apps.count)
+                return (void)(row->icon = UI_ICON_APPS + 1);
+        app = &ui_apps.app[which];
+        symbol = app->kit ? ui_icon_of(app->id) : -1;
+        if (symbol >= 0)
+                row->icon = symbol + 1;
+        else
+                row->tile_name = app->kit ? app->id : app->name;
 }
 
 // Declarative context menu hooks for a ui_list: the kit builds, opens, positions, and executes Copy / Copy row / Remove automatically.
