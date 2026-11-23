@@ -580,7 +580,7 @@ static b32 launcher_launch(struct launcher_entry entry, b32 mark_starting)
                 if (entry.kind == LAUNCHER_WINDOW)
                 {
                         ui_app_failed(ui_apps.app[entry.index].id);
-                        ui_alert_show(UI_ALERT_ERROR, "Could not open application", ui_apps_name(entry.index));
+                        ui_alert_show(UI_ALERT_ERROR, WORDS(launcher_open_failed), ui_apps_name(entry.index));
                 }
                 return false;
         }

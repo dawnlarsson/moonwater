@@ -778,14 +778,14 @@ static void check_compositor_cursor_probe(void)
 
     memory_copy(was, compositor.driver, sizeof(was));
     memory_zero(&compositor_cursor_probe, sizeof(compositor_cursor_probe));
-    string_copy((string_address)compositor.driver, (string_address) "i915");
+    string_copy((string_address)compositor.driver, (string_address) "i915"), compositor.driver_flags = drm_driver_flags("i915");
     named = !compositor_cursor_plane_wanted();
-    string_copy((string_address)compositor.driver, (string_address) "xe");
+    string_copy((string_address)compositor.driver, (string_address) "xe"), compositor.driver_flags = drm_driver_flags("xe");
     named = named && !compositor_cursor_plane_wanted();
-    string_copy((string_address)compositor.driver, (string_address) "amdgpu");
+    string_copy((string_address)compositor.driver, (string_address) "amdgpu"), compositor.driver_flags = drm_driver_flags("amdgpu");
     check("cursor probe: not asked, i915 and xe are refused the plane by name, and another driver is not", named && compositor_cursor_plane_wanted());
     compositor_cursor_probe.asked = 1;
-    string_copy((string_address)compositor.driver, (string_address) "i915");
+    string_copy((string_address)compositor.driver, (string_address) "i915"), compositor.driver_flags = drm_driver_flags("i915");
     check("cursor probe: asked for, i915 is given the plane to try", compositor_cursor_plane_wanted());
     compositor.card = -1;
     check("cursor probe: a card that cannot be asked for a vblank answers that it cannot", compositor_cursor_vblank(0) == -1);
@@ -805,7 +805,7 @@ static void check_compositor_cursor_probe(void)
     check("cursor probe: the pointer word is 1 on the plane and 0 drawn for no probe", compositor_pointer_plane_word() == 1 &&
                                                                                           (compositor.cursor.soft = 1, compositor_pointer_plane_word() == 0));
     memory_zero(&compositor_cursor_probe, sizeof(compositor_cursor_probe));
-    memory_copy(compositor.driver, was, sizeof(was));
+    memory_copy(compositor.driver, was, sizeof(was)), compositor.driver_flags = drm_driver_flags(compositor.driver);
     compositor.card = card, compositor.cursor.soft = soft;
 
     child = (bipolar)system_call_5(syscall(clone), 17, 0, 0, 0, 0);
@@ -1534,7 +1534,7 @@ static void check_compositor_wake(void)
               card_fake.set_was[sets + 1] == 1 && card_fake.crtc_fb == compositor.fb);
 
     // A guest's card: set again, never turned off.
-    string_copy((string_address)compositor.driver, (string_address) "virtio_gpu");
+    string_copy((string_address)compositor.driver, (string_address) "virtio_gpu"), compositor.driver_flags = drm_driver_flags("virtio_gpu");
     compositor.retrain = 1;
     sets = card_fake.set_count;
     compositor_space_retake();

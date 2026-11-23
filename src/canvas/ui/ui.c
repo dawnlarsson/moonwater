@@ -6651,6 +6651,7 @@ LANGUAGE_ID(installer_wifi_off, "Wi-Fi is off.") \
 LANGUAGE_ID(installer_wifi_on, "Turn on Wi-Fi") \
 LANGUAGE_ID(installer_wifi_password, "Password for %s") \
 LANGUAGE_ID(installer_wifi_saved, "Saved") \
+LANGUAGE_ID(launcher_open_failed, "Could not open application") \
 LANGUAGE_ID(launcher_power_off, "Power off") \
 LANGUAGE_ID(launcher_power_off_armed, "power off") \
 LANGUAGE_ID(launcher_recent, "Recent") \

@@ -190,6 +190,7 @@ installer_wifi_off	a42c	Wi-Fi is off.
 installer_wifi_on	0c01	Turn on Wi-Fi
 installer_wifi_password	ca99	Password for %s
 installer_wifi_saved	79e4	Saved
+launcher_open_failed	aeab	Could not open application
 launcher_power_off	ae2f	Power off
 launcher_power_off_armed	a48f	power off
 launcher_recent	88fe	Recent

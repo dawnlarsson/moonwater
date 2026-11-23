@@ -177,7 +177,7 @@ static int notices_open(void)
 {
         if (notices.alert_kind)
         {
-                ui_alert_open(&notices.alert, notices.alert_kind, notices.alert_title ? notices.alert_title : (notices.alert_kind == UI_ALERT_WARNING ? "Warning" : "Error"),
+                ui_alert_open(&notices.alert, notices.alert_kind, notices.alert_title ? notices.alert_title : (notices.alert_kind == UI_ALERT_WARNING ? WORDS(settings_badge_warning) : WORDS(settings_badge_error)),
                               notices.alert_msg ? notices.alert_msg : "");
                 {
                         struct ctl ctl;

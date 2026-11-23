@@ -18,6 +18,7 @@
 # machine-made 2026-11-23 (the Accessibility rows), not yet read by a person: =Accessibility =Sticky keys =Slow keys (ms, off or default) =Bounce keys (ms, off or default) =Mouse keys =Dwell click (ms, off or default) =Press a modifier, then the key, instead of both at once =A key types only after it is held this long =A key pressed again too soon after it is let go types once =The number pad moves the pointer and clicks =Hold the pointer still to click
 # machine-made 2026-11-23 (the bluetooth pads), not yet read by a person: settings_bt_find_keys settings_bt_listening settings_bt_near_keys settings_bt_paired settings_bt_paired_keys settings_bt_pairing =Find devices nearby
 # machine-made 2026-11-23 (Waterlink's pad grant), not yet read by a person: settings_column_pad settings_link_pad settings_link_pad_about
+# machine-made 2026-11-23 (the launcher's word when a program cannot be started), not yet read by a person: launcher_open_failed
 @language ru
 @name Русский
 @translated machine
@@ -210,6 +211,7 @@ installer_wifi_off	a42c	Wi-Fi выключен.
 installer_wifi_on	0c01	Включить Wi-Fi
 installer_wifi_password	ca99	Пароль для %s
 installer_wifi_saved	79e4	Сохранена
+launcher_open_failed	aeab	Не удалось открыть приложение
 launcher_power_off	ae2f	Выключить
 launcher_power_off_armed	a48f	выключить
 launcher_recent	88fe	Недавние

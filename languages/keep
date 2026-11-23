@@ -120,3 +120,4 @@ src/canvas/ui/terminal.c	 by
 src/canvas/ui/terminal.c	 px
 src/canvas/ui/terminal.c	klog pid 
 src/canvas/ui/terminal.c	terminal pid 
+src/canvas/ui/settings.c	Find devices nearby

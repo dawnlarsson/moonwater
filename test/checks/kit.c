@@ -5142,7 +5142,11 @@ static fn check_kit_focus(void)
                 ui_kit.test_clock = 5000000000ll;
                 ui_kit.keyed = 0, ui_event_context(&letter);
                 kept = !ui_kit.keyed; // a letter moves no focus
-                ui_event_context(&tab), by_tab = ui_kit.keyed;
+                // A Tab or an arrow that moves no focus (a caret's, a page's) shows no ring: only the keys moving the focus to another element
+                // does (ui_view_put sets it), as below.
+                ui_event_context(&tab), by_tab = !ui_kit.keyed;
+                ui_event_context(&arrow), by_arrow = !ui_kit.keyed;
+                ui_kit.keyed = 1;
                 ui_event_context(&move), ui_event_context(&wheel), ui_event_context(&lift), ui_event_context(&letter);
                 kept = kept && ui_kit.keyed; // a nudge of the mouse, a wheel, a release and a letter take no ring away
                 ui_event_context(&press), by_press = !ui_kit.keyed;
@@ -5150,8 +5154,7 @@ static fn check_kit_focus(void)
                         pixels[at] = 0xff000000u | ground;
                 ui_control_draw(&ui, &button);
                 unkeyed = by_press && button.focused && focus_at(pixels, 37, 58) == ground && focus_at(pixels, 38, 58) == ground;
-                ui_event_context(&arrow), by_arrow = ui_kit.keyed;
-                ui_event_context(&finger), by_finger = !ui_kit.keyed;
+                ui_kit.keyed = 1, ui_event_context(&finger), by_finger = !ui_kit.keyed;
                 modality = by_tab && by_arrow && by_press && by_finger && kept;
                 ui_kit.test_clock = clock, ui_kit.keyed = 1;
         }
@@ -5295,7 +5298,7 @@ static fn check_kit_focus(void)
               ringed && bare);
         check("kit focus: a click on a button does not focus it: the ring is the keys'", clicked);
         check("kit focus: a button the keys were on has no ring once a button of the pointer is pressed, anywhere: a click leaves none behind", unkeyed);
-        check("kit focus: Tab and an arrow put the hand on the keys, a press and a finger take it off, and a letter, a mouse's nudge, a wheel and a release change nothing",
+        check("kit focus: a Tab or an arrow that moves no focus shows no ring (a move of the focus does), a press and a finger take it off, and a letter, a mouse's nudge, a wheel and a release change nothing",
               modality);
         check("kit focus: the ring's ink stands out 3:1 from the light surface and from the white of a raised face with Dawn's orange too, which is 2.4:1 on white as it is",
               dawn_ink);

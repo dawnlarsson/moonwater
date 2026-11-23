@@ -19,6 +19,7 @@
 # machine-made 2026-11-23 (a linked machine that did not answer, or does not offer a request), not yet read by a person: files_remote_silent files_remote_unsupported
 # machine-made 2026-11-23 (the bluetooth pads), not yet read by a person: settings_bt_find_keys settings_bt_listening settings_bt_near_keys settings_bt_paired settings_bt_paired_keys settings_bt_pairing =Find devices nearby
 # machine-made 2026-11-23 (Waterlink's pad grant), not yet read by a person: settings_column_pad settings_link_pad settings_link_pad_about
+# machine-made 2026-11-23 (the launcher's word when a program cannot be started), not yet read by a person: launcher_open_failed
 @language ur
 @name اردو
 @translated machine
@@ -211,6 +212,7 @@ installer_wifi_off	a42c	Wi-Fi بند ہے۔
 installer_wifi_on	0c01	Wi-Fi آن کریں
 installer_wifi_password	ca99	%s کا پاس ورڈ
 installer_wifi_saved	79e4	محفوظ
+launcher_open_failed	aeab	ایپلیکیشن نہیں کھل سکی
 launcher_power_off	ae2f	بند کریں
 launcher_power_off_armed	a48f	بند کریں
 launcher_recent	88fe	حالیہ
