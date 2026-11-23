@@ -4499,7 +4499,8 @@ static fn settings_describe_item(int id, const struct settings_item address_to i
                 row->columns = settings_columns_for(0), row->mark = (item->flags & SETTINGS_ITEM_JOINED) != 0,
                 row->note = item->flags & SETTINGS_ITEM_JOINED ? WORDS(settings_joined) : item->flags & SETTINGS_ITEM_SAVED ? WORDS(settings_saved) : null,
                 row->value = item->security[0] ? item->security : null, row->bars = item->flags & SETTINGS_ITEM_HEARD ? item->bars : -1,
-                row->dim = !(item->flags & SETTINGS_ITEM_HEARD), row->cells[1] = row->note, row->cells[2] = row->value;
+                row->dim = !(item->flags & SETTINGS_ITEM_HEARD), row->cells[1] = row->note, row->cells[2] = row->value,
+                row->remove = (item->flags & SETTINGS_ITEM_SAVED) != 0; // a saved network's button forgets it, asking first (settings_forget_item)
         // A device kept has its remove button (it forgets the device, asking first); the add row after them is the kit's, its one way the
         // field of a name.
         else if (item->kind == SETTINGS_DEVICE || item->kind == SETTINGS_ADD)

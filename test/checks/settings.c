@@ -3519,6 +3519,21 @@ static fn check_settings(string_address regular, string_address bold)
                         settings_press(UI_KEY_DELETE);
                         settings_press(UI_KEY_DELETE);
                         check("settings: Delete on a network that is not saved does nothing", settings.queued == 0);
+                        // The kit's managed rows: a saved network has the remove button, which forgets it as Delete does (asking first),
+                        // and one that is not saved has none.
+                        {
+                                struct ui_row saved_row, heard_row;
+                                b32 asked;
+                                memory_zero(&saved_row, sizeof(saved_row)), settings_describe((int)SETTINGS_LIST + 2, &saved_row);
+                                memory_zero(&heard_row, sizeof(heard_row)), settings_describe((int)SETTINGS_LIST + 1, &heard_row);
+                                settings.list.removed = (int)SETTINGS_LIST + 2 + 1, settings_managed();
+                                asked = settings.queued == 0;
+                                settings.list.removed = (int)SETTINGS_LIST + 2 + 1, settings_managed();
+                                check("settings: a saved network has a remove button, which asks and then forgets it; one not saved has none",
+                                      saved_row.remove && !heard_row.remove && asked && settings.queued == 1 &&
+                                          string_equals((string_address)settings.queue[0].value, (string_address) "f\nOld Cafe"));
+                                settings.queued = 0;
+                        }
 
                         // Devices: the names kept, and a row that keeps another.
                         settings.page.chosen = bt_group;
