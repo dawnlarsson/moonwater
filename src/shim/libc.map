@@ -1,0 +1,21 @@
+/* libmoonwater-c.so's names: the only symbols it gives a program, every one a C library name of the same meaning (src/shim/libc.c says which are left out and why). test/libc_shim.c holds each against the C library. */
+{
+global:
+        /* memory */
+        memcpy; memmove; memset; memset_explicit; memcmp; bcmp; __memcmpeq; memchr; memrchr; rawmemchr; __rawmemchr;
+        memmem; memccpy; memfrob; mempcpy; __mempcpy; bzero; __bzero; explicit_bzero; bcopy;
+        /* strings */
+        strlen; strnlen; __strnlen; strcmp; strncmp; strchr; index; strchrnul; strrchr; rindex;
+        strcpy; stpcpy; __stpcpy; strncpy; stpncpy; __stpncpy; strcat; strncat; strlcpy; strlcat;
+        strstr; strspn; strcspn; strpbrk; strsep; strtok; strtok_r; __strtok_r;
+        /* wide memory */
+        wmemset; wmemcpy; wmemmove; wmempcpy;
+        /* bits and magnitudes */
+        ffs; ffsl; ffsll; abs; labs; llabs; imaxabs;
+        /* glibc's checked copies */
+        __memcpy_chk; __memmove_chk; __mempcpy_chk; __memset_chk; __explicit_bzero_chk;
+        __strcpy_chk; __stpcpy_chk; __strcat_chk; __strncat_chk; __strncpy_chk; __stpncpy_chk; __strlcpy_chk; __strlcat_chk;
+        __wmemset_chk; __wmemcpy_chk; __wmemmove_chk; __wmempcpy_chk;
+local:
+        *;
+};

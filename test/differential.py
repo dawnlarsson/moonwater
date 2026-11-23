@@ -102119,6 +102119,11 @@ CLASS_GATES_TESTS = {
     'test/profile_shell': 'a developer tool: profiles a shell build under perf, with test/floor_shell.S',
     'test/floor_shell.S': "profile_shell's floor body, read by it",
     'test/chrome_pwrite_shim.c': "built by hand into a Chromium bowl on musl 1.2.6 (its header says how and why)",
+    'test/libc_shim.c': "src/shim/libc.c's names held against each bowl's own C library (musl in alpine, glibc in arch), "
+                        'built in those bowls by test/libc_shim.sh: needs a machine with both bowls (box), by hand before '
+                        "the shim or lib.c's string bodies land",
+    'test/libc_shim.sh': 'builds src/shim/libc.c, holds it to its rules (no C, its map) and runs test/libc_shim.c in the '
+                         'alpine and arch bowls (above); by hand',
     'test/chrome_wayland_bench.html': 'the page the Chromium benches open by hand on the box (team notes); not a check',
     'test/bowl_packages.py': "network only: every package a bowl profile names, asked of the distributions' indexes "
                              'as they are today; run by hand before a profile list changes (its docstring)',

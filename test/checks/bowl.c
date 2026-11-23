@@ -1564,6 +1564,24 @@ static fn steam_profile(void)
                 check("The input libraries are i386 and x86_64 shared objects whose .dynsym exports SDL_DYNAPI_entry as a global function, and none of the C library's names or SDL's",
                       right);
         }
+        {
+                // libmoonwater-c.so: an x86_64 shared object that gives the C library's memory and string names, the checked
+                // ones glibc's fortified programs call, and none of the names that allocate, follow the locale or hold a jmp_buf.
+                static const char *const present[] = {"memcpy", "memmove", "memset", "memcmp", "strlen", "memchr", "strcmp",
+                                                      "strchr", "__memcpy_chk", "__strcpy_chk", "rawmemchr", "wmemset"};
+                static const char *const absent[] = {"strdup", "malloc", "free", "setjmp", "longjmp", "strcasecmp", "tolower",
+                                                     "isalpha", "atoi", "strtol", "memory_copy", "string_length", "main"};
+                const p8 *image = bowl_libc_shim_64;
+                bool right = sizeof(bowl_libc_shim_64) > 64 && image[0] == 0x7f && image[1] == 'E' && image[2] == 'L' &&
+                             image[3] == 'F' && image[4] == 2 && image[16] == 3 && image[18] == 62 && image[19] == 0;
+
+                for (positive name = 0; right && name < sizeof(present) / sizeof(present[0]); name++)
+                        right &= bowl_check_elf_exports(image, sizeof(bowl_libc_shim_64), present[name]) == 1;
+                for (positive name = 0; right && name < sizeof(absent) / sizeof(absent[0]); name++)
+                        right &= bowl_check_elf_exports(image, sizeof(bowl_libc_shim_64), absent[name]) == 0;
+                check("The libc shim is an x86_64 shared object whose .dynsym gives the C library's memory, string and checked names, and none that allocate, follow the locale, hold a jmp_buf or are lib.c's own",
+                      right);
+        }
 #endif
         {
                 // Every profile's session script is held whole, however long it grows: its memfd reads back as its lines, each

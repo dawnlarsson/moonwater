@@ -1360,6 +1360,7 @@ typedef struct
 } host_workaround_row;
 
 static const host_workaround_row host_workaround_rows[] = {
+    {"libc-shim", true, "preload Moonwater's lib.c memory and string routines (libmoonwater-c.so) into every program of a musl bowl"},
     {"wine-fpu", true, "reset x87 FCW/MXCSR on 32-bit GStreamer audio decode threads (fixes robotic audio in Wine/Proton games like RCT3)"},
     {"bowl-timerslack", true, "set PR_SET_TIMERSLACK=1ns for all bowl processes for tighter frame pacing and lower wake latency"},
     {"steam-overlay-gl", true, "unbind game shader/sampler around Steam overlay draws and bridge overlay on Wayland"},

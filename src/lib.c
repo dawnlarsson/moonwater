@@ -58444,8 +58444,21 @@ __asm__(
             above an overlapping source.
 
             memmove keeps memory_copy, the body that promises overlap.
+
+            LIBRARY_MEMCPY_OVERLAPS gives memcpy memmove's body instead, for
+            src/shim/libc.c: a library standing in front of glibc, whose
+            x86_64 memcpy has been its memmove since 2.14 and whose
+            memcpy@GLIBC_2.2.5 still promises overlap to the binaries linked
+            before that. A program that copies onto itself works there today,
+            and a shim must not be the thing that breaks it. Below 256 bytes
+            the two are one body; above, the cost is memory_copy's overlap
+            test.
     */
+#ifdef LIBRARY_MEMCPY_OVERLAPS
+    ASM_ALIAS(memcpy,    memory_copy)
+#else
     ASM_ALIAS(memcpy,    memory_copy_apart)
+#endif
     ASM_ALIAS(memmove,   memory_copy)
     ASM_ALIAS(memset,    memory_fill)
     ASM_ALIAS(__memcpy,  memory_copy_apart)
