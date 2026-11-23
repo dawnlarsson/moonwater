@@ -3386,11 +3386,11 @@ static fn files_disc_look(void)
         struct files_disc address_to c = &files.big->disc;
         p8 text[24];
         bipolar got = file_slurp_once_at(AT_FDCWD, (string_address)FILES_DISC_PLAY, text, sizeof(text) - 1);
-        positive pid = 0;
+        positive used = 0, pid;
         b32 playing;
-        for (bipolar at = 0; at < got && text[at] >= '0' && text[at] <= '9'; at++)
-                pid = pid * 10 + (positive)(text[at] - '0');
-        playing = pid > 1 && (bipolar)system_call_2(syscall(kill), pid, 0) == 0;
+        text[got > 0 ? got : 0] = 0;
+        pid = string_digits_max((string_address)text, 10, &used);
+        playing = used && pid > 1 && (bipolar)system_call_2(syscall(kill), pid, 0) == 0;
         if ((b64)ui_kit.now - c->play_at >= FILES_DISC_SETTLE_NS && playing != c->playing)
         {
                 c->playing = playing, files.dirty = true;

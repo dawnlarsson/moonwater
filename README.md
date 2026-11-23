@@ -260,7 +260,7 @@ moonwater disc                         each optical drive and what is in it: non
 moonwater disc tracks DRIVE            the tracks of the disc in DRIVE (sr0): each audio or data, and its seconds
 moonwater disc play DRIVE [TRACK]      play an audio CD through the sound server, from TRACK to the end [1]; a new play stops the last
 moonwater disc stop                    stop the disc playing
-moonwater disc eject DRIVE             open the drive's tray
+moonwater disc eject DRIVE             stop its play, let go of the disc where device open opened it, and open the tray
 
 
 # Power
