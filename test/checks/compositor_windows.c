@@ -5820,9 +5820,10 @@ static void check_compositor_access_aids(void)
     compositor_access_seen(WINDOWS_MODALITY_POINTER);
     compositor.pointer_x = compositor.real_x = 120, compositor_motion();
     {
-        positive still = compositor_access_aid.still_at, due = compositor_access_aid_due();
+        positive still = compositor_access_aid.still_at, due = still + 500 * ms;
 
-        all &= due == still + 500 * ms;
+        /* The loop is owed a tick at the click's time or sooner (the ring's next 32nd of a turn). */
+        all &= compositor_access_aid_due() > still && compositor_access_aid_due() <= due;
         compositor_access_aid_tick(due - 1);
         all &= access_unread(1, WINDOW_EVENT_BUTTON, COMPOSITOR_BTN_LEFT, &down) == 0;
         compositor_access_aid_tick(due);
@@ -5838,8 +5839,8 @@ static void check_compositor_access_aids(void)
         compositor_access_aid_tick(still + 400 * ms);
         compositor.pointer_x = compositor.real_x = 100, compositor_motion();
         compositor_access_aid_tick(still + 500 * ms);
-        all = access_unread(1, WINDOW_EVENT_BUTTON, COMPOSITOR_BTN_LEFT, &down) == 2 && compositor_access_aid_due() > still + 500 * ms;
-        compositor_access_aid_tick(compositor_access_aid_due());
+        all = access_unread(1, WINDOW_EVENT_BUTTON, COMPOSITOR_BTN_LEFT, &down) == 2 && compositor_access_aid.still_at > still;
+        compositor_access_aid_tick(compositor_access_aid.still_at + 500 * ms);
         all &= access_unread(1, WINDOW_EVENT_BUTTON, COMPOSITOR_BTN_LEFT, &down) == 4 && down == 2;
         check("access aids: dwell clicks nothing while the pointer keeps moving, and once when it stops", all);
     }
