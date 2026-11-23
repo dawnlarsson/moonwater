@@ -198,6 +198,7 @@ menu_bin_restore	4799	Put back
 menu_close_others	26f3	Close Other Tabs
 menu_close_tab	eb40	Close Tab
 menu_copy	43e0	&Copy
+menu_copy_named	fb68	Copy %s
 menu_copy_row	f3c8	Copy row
 menu_cut	5c17	Cu&t
 menu_delete	1e3e	&Delete

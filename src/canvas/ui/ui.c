@@ -6653,6 +6653,7 @@ LANGUAGE_ID(menu_bin_restore, "Put back") \
 LANGUAGE_ID(menu_close_others, "Close Other Tabs") \
 LANGUAGE_ID(menu_close_tab, "Close Tab") \
 LANGUAGE_ID(menu_copy, "&Copy") \
+LANGUAGE_ID(menu_copy_named, "Copy %s") \
 LANGUAGE_ID(menu_copy_row, "Copy row") \
 LANGUAGE_ID(menu_cut, "Cu&t") \
 LANGUAGE_ID(menu_delete, "&Delete") \
@@ -16630,6 +16631,8 @@ struct ui_popup
         struct ui_text address_to field; // the text widget its menu was opened for (ui_text_menu_open), or none
         struct ui_list address_to list;  // the list its row context menu was opened for (ui_list_menu_open), or none
         int list_row;                    // the row id that list menu was opened for (-1 none)
+        int list_cell;                   // the column of that row the hand was on (ui_list_cell_at), -1 none: its words are Copy <title>'s
+        char list_cell_label[96];        // that item's words, Copy and the column's title
 };
 
 // A picture of the menu, into the buffer the compositor is not reading.
@@ -22733,6 +22736,7 @@ struct ui_row
 #define UI_LIST_MENU_COPY_ROW 0x101
 #define UI_LIST_MENU_REMOVE 0x102
 #define UI_LIST_MENU_EXTRA 0x103 // the first id an app gives its own menu item (ui_list_menu.extra); the base items are below it
+#define UI_LIST_MENU_COPY_CELL 0xff // Copy <column>: the words of the cell the hand was on (ui_popup.list_cell), named by its column's title
 
 #define UI_LIST_MENU_HAS_COPY 1u      // row has copyable text (else Copy / Copy row are disabled)
 #define UI_LIST_MENU_HAS_COPY_ROW 2u  // include the second copy item (Copy row / Copy label and value)
@@ -24852,12 +24856,15 @@ static fn ui_list_row(struct ui address_to ui, struct ui_list address_to l, int 
                         ui_kit_fill(ui, &(struct ui_box){dx * 256, dy * 256, (dx + dot) * 256, (dy + dot) * 256, dot * 128, dot * 128}, ink_dot, null);
                 }
         }
-        // A row's remove button: the cross, quiet, and in the ink where the hand is over it or holds it; no well round it (a row is flush).
+        // A row's remove button: the cross, quiet; where the hand is over it, the error's red, which says what a press does, and held,
+        // the red mixed toward the ink, pressed in. No well round it (a row is flush).
         if ((n = p->remove) && seen)
         {
                 int side = ui_dev(ui, 14);
                 b32 over = l->hover == id && ui_list_part_x(ui, l, n, l->pointer_x), held = l->remove_down == id + 1;
-                ui_icon(ui, UI_ICON_REMOVE, n->x + (n->w - side) / 2, n->y + (n->h - side) / 2, side, 0, over || held ? strong : quiet);
+                unsigned int red = ui_role(UI_ERROR) | 0xff000000u;
+                ui_icon(ui, UI_ICON_REMOVE, n->x + (n->w - side) / 2, n->y + (n->h - side) / 2, side, 0,
+                        held ? ui_mix(red, 75, strong | 0xff000000u) : over ? red : quiet);
         }
         // An add row's label and its plus are the accent's.
         if (row.kind == UI_ROW_ADD)
@@ -25773,33 +25780,118 @@ static b32 ui_list_edge_scroll(const struct ui address_to ui, struct ui_list add
 
 /* ---- declarative list context menus (Copy, Copy row, Remove + extra) ---- */
 
-static fn ui_list_menu_items(struct ui_popmenu address_to m, p32 flags)
+/*
+        What a row says, for its copies: the words in its k-th place (its label at 0, a column's cell after it, its value at -1, and
+        at -2 its value or else its note), and the whole of it, the kit's own when the app gives no copy of its own. A row of columns
+        is its cells a tab apart, as a table pasted wants it (an empty cell keeps its place); any other row is its label, and its
+        value or its note after a colon.
+*/
+static const char address_to ui_row_said(const struct ui_row address_to row, int k)
 {
-        p32 copy_state = (flags & UI_LIST_MENU_HAS_COPY) ? 0 : UI_MENU_DISABLED;
-        b32 value_words = (flags & UI_LIST_MENU_VALUE_WORDS) != 0;
-        ui_popmenu_add(m, value_words ? WORDS(settings_copy_value) : WORDS(menu_copy), null, copy_state, UI_LIST_MENU_COPY);
-        if (flags & UI_LIST_MENU_HAS_COPY_ROW)
-                ui_popmenu_add(m, value_words ? WORDS(settings_copy_both) : WORDS(menu_copy_row), null, copy_state, UI_LIST_MENU_COPY_ROW);
-        if (flags & UI_LIST_MENU_CAN_REMOVE)
+        const char address_to words = k == 0 ? row->label : k > 0 && k < UI_COLUMNS_MOST ? row->cells[k] : row->value && row->value[0] ? row->value : k == -2 ? row->note : null;
+        return words && words[0] ? words : null;
+}
+
+static b32 ui_row_columned(const struct ui_row address_to row) { return row->columns && row->columns->count > 1; }
+
+static fn ui_list_row_text(const struct ui_list address_to l, int id, char address_to into, positive room)
+{
+        struct ui_row row;
+        int last = 0;
+        into[0] = 0;
+        if (!room || id < 0 || !l->describe)
+                return;
+        ui_list_describe(l, id, &row);
+        if (!ui_row_columned(&row))
         {
-                ui_popmenu_add(m, null, null, UI_MENU_SEPARATOR, 0);
-                ui_popmenu_add(m, WORDS(menu_remove), "Delete", (flags & UI_LIST_MENU_REMOVE_DIM) ? UI_MENU_DISABLED : 0, UI_LIST_MENU_REMOVE);
+                const char address_to label = ui_row_said(&row, 0), address_to said = ui_row_said(&row, -2);
+                if (label)
+                        string_copy_bounded((string_address)into, (string_address)label, room);
+                if (said)
+                        string_append_bounded((string_address)into, (string_address)(label ? ": " : ""), room),
+                        string_append_bounded((string_address)into, (string_address)said, room);
+                return;
+        }
+        for (int k = 0; k < row.columns->count && k < UI_COLUMNS_MOST; k++)
+                if (ui_row_said(&row, k))
+                        last = k;
+        for (int k = 0; k <= last; k++)
+        {
+                const char address_to words = ui_row_said(&row, k);
+                if (k)
+                        string_append_bounded((string_address)into, (string_address) "\t", room);
+                if (words)
+                        string_append_bounded((string_address)into, (string_address)words, room);
         }
 }
 
-static fn ui_list_menu_populate(struct ui_popmenu address_to m, const struct ui_list address_to l, int id)
+// The column of a row a point across the list is in (its cell, 0 the label's), -1 when the row has no columns or the point none.
+static int ui_list_cell_at(const struct ui_list address_to l, int id, int x)
 {
-        if (!l || !l->menu || !l->menu->flags)
+        struct ui_row row;
+        const struct ui_columns address_to c;
+        int px;
+        if (id < 0 || !l->describe)
+                return -1;
+        ui_list_describe(l, id, &row);
+        if (!ui_row_columned(&row) || (c = row.columns)->w <= 0)
+                return -1;
+        px = ui_point(x, c->x, c->w);
+        for (int k = 0; k < c->count && k < UI_COLUMNS_MOST; k++)
+                if (px >= c->at[k] && px < c->at[k] + ui_columns_end(c, k))
+                        return k;
+        return -1;
+}
+
+/*
+        A row's menu: the app's own items, then the copies, then Remove where the app says. Every row with words has its copies,
+        whatever the app says of it (a row under another's fold, a switch, a line of a machine's details): the app's Copy and
+        Copy row where it gives them, else the kit's from what the row says; and where the hand was on a cell of a row of columns,
+        Copy and that column's title first (Copy Status), which takes the place of the app's Copy where the two are the same words.
+        An add row has none: it is no thing to copy.
+*/
+static fn ui_list_menu_populate(struct ui_popup address_to p, const struct ui_list address_to l, int id)
+{
+        struct ui_popmenu address_to m = &p->menu;
+        struct ui_row row;
+        p32 flags;
+        const char address_to app_copy, address_to cell = null;
+        if (!l || !l->menu || !l->describe)
                 return;
-        if (l->menu->extra)
+        flags = l->menu->flags ? l->menu->flags(id) : 0;
+        ui_list_describe(l, id, &row);
+        if (row.kind == UI_ROW_ADD)
+                return;
+        app_copy = (flags & UI_LIST_MENU_HAS_COPY) && l->menu->copy ? l->menu->copy(id) : null;
+        if (flags && l->menu->extra)
                 l->menu->extra(m, id);
-        ui_list_menu_items(m, l->menu->flags(id));
+        if (p->list_cell >= 0 && ui_row_columned(&row) && p->list_cell < row.columns->count && row.columns->title[p->list_cell] &&
+            (cell = ui_row_said(&row, p->list_cell)))
+        {
+                language_format(p->list_cell_label, sizeof(p->list_cell_label), WORDS(menu_copy_named), row.columns->title[p->list_cell]);
+                ui_popmenu_add(m, p->list_cell_label, null, 0, UI_LIST_MENU_COPY_CELL);
+        }
+        if (app_copy && !(cell && string_equals((string_address)app_copy, (string_address)cell)))
+                ui_popmenu_add(m, (flags & UI_LIST_MENU_VALUE_WORDS) ? WORDS(settings_copy_value) : WORDS(menu_copy), null, 0, UI_LIST_MENU_COPY);
+        else if (!app_copy && !cell && (ui_row_said(&row, 0) || ui_row_said(&row, -1)))
+                // The kit's Copy: the row's value where it has one (Copy value), else its label.
+                ui_popmenu_add(m, ui_row_said(&row, -1) ? WORDS(settings_copy_value) : WORDS(menu_copy), null, 0, UI_LIST_MENU_COPY);
+        // Copy row where the row is more than one thing said (the app's, or the kit's when it gives none).
+        if (app_copy ? (flags & UI_LIST_MENU_HAS_COPY_ROW) != 0
+                     : ui_row_columned(&row) ? ui_row_said(&row, 1) || ui_row_said(&row, 2) || ui_row_said(&row, 3) : ui_row_said(&row, 0) && ui_row_said(&row, -2))
+                ui_popmenu_add(m, (flags & UI_LIST_MENU_VALUE_WORDS) ? WORDS(settings_copy_both) : WORDS(menu_copy_row), null, 0, UI_LIST_MENU_COPY_ROW);
+        if (flags & UI_LIST_MENU_CAN_REMOVE)
+        {
+                if (m->count)
+                        ui_popmenu_add(m, null, null, UI_MENU_SEPARATOR, 0);
+                ui_popmenu_add(m, WORDS(menu_remove), "Delete", (flags & UI_LIST_MENU_REMOVE_DIM) ? UI_MENU_DISABLED : 0, UI_LIST_MENU_REMOVE);
+        }
 }
 
 static b32 ui_list_menu_ready(const struct ui address_to ui, const struct ui_list address_to l, const struct ui_popup address_to popup,
                               const struct window_row address_to own, int id)
 {
-        return ui && l && l->menu && l->menu->flags && l->menu->copy && popup && own && ui->scale > 0 && l->menu->copy(id) && l->menu->flags(id);
+        return ui && l && l->menu && l->describe && popup && own && ui->scale > 0 && id >= 0;
 }
 
 static b32 ui_list_menu_open(struct ui address_to ui, struct ui_list address_to l, struct ui_popup address_to popup,
@@ -25811,7 +25903,8 @@ static b32 ui_list_menu_open(struct ui address_to ui, struct ui_list address_to 
         m = &popup->menu;
         m->count = 0, m->typed_length = 0;
         memory_zero(&m->press, sizeof(m->press));
-        ui_list_menu_populate(m, l, id);
+        popup->list_cell = keys ? -1 : ui_list_cell_at(l, id, x);
+        ui_list_menu_populate(popup, l, id);
         if (!m->count)
                 return false;
         popup->field = null;
@@ -25831,8 +25924,8 @@ static b32 ui_list_menu_open_keys(struct ui address_to ui, struct ui_list addres
         if (!l || (id = l->focus, at = ui_list_at(l, id)) < 0 || !ui_list_menu_ready(ui, l, popup, own, id))
                 return false;
         ui_list_reveal(ui, l);
-        measure = *ui, popup->menu.count = 0;
-        ui_list_menu_populate(&popup->menu, l, id);
+        measure = *ui, popup->menu.count = 0, popup->list_cell = -1;
+        ui_list_menu_populate(popup, l, id);
         ui_popmenu_size(&measure, &popup->menu, room_h);
         y = ui_list_row_y(l, at) + (l->tall[at] > 0 ? l->tall[at] : ui_list_pitch(ui, l)) - ui_px(ui, UI_GAP1);
         x = ui_rtl() ? l->x + l->w - ui_dev(ui, UI_INSET) - popup->menu.width : l->x + ui_dev(ui, UI_INSET);
@@ -25842,38 +25935,53 @@ static b32 ui_list_menu_open_keys(struct ui address_to ui, struct ui_list addres
 // Appends a row's base list menu items after an inline text field's menu, tagging popup->list / list_row for ui_list_menu_do.
 static fn ui_list_menu_attach(struct ui_popup address_to popup, struct ui_list address_to l, int id)
 {
-        if (!popup || !l || !l->menu || !l->menu->flags)
+        int had;
+        if (!popup || !l || !l->menu)
                 return;
+        had = popup->menu.count, popup->list_cell = -1;
         ui_popmenu_add(&popup->menu, null, null, UI_MENU_SEPARATOR, 0);
-        ui_list_menu_populate(&popup->menu, l, id);
+        ui_list_menu_populate(popup, l, id);
+        if (popup->menu.count == had + 1)
+                popup->menu.count = had;
         popup->list = l, popup->list_row = id;
 }
 
-// Executes a chosen item from a list context menu (Copy, Copy row, Remove, or extra). Returns true if handled.
+// Executes a chosen item from a list context menu (Copy <column>, Copy, Copy row, Remove, or extra). Returns true if handled.
 static b32 ui_list_menu_do(struct ui_popup address_to p, struct window_row address_to own, int id)
 {
         struct ui_list address_to l;
-        int row;
+        int row, cell;
         if (!p || !p->list || !p->list->menu)
                 return false;
-        l = p->list, row = p->list_row;
-        p->list = null, p->list_row = -1;
-        if (id == UI_LIST_MENU_COPY || id == UI_LIST_MENU_COPY_ROW)
+        l = p->list, row = p->list_row, cell = p->list_cell;
+        p->list = null, p->list_row = -1, p->list_cell = -1;
+        if (id == UI_LIST_MENU_COPY || id == UI_LIST_MENU_COPY_ROW || id == UI_LIST_MENU_COPY_CELL)
         {
                 char line[1024];
-                const char address_to text = l->menu->copy ? l->menu->copy(row) : null;
-                if (text)
+                p32 flags = l->menu->flags ? l->menu->flags(row) : 0;
+                const char address_to text = (flags & UI_LIST_MENU_HAS_COPY) && l->menu->copy ? l->menu->copy(row) : null;
+                struct ui_row described;
+                line[0] = 0;
+                ui_list_describe(l, row, &described);
+                if (id == UI_LIST_MENU_COPY_CELL)
                 {
-                        if (id == UI_LIST_MENU_COPY_ROW && l->menu->copy_row)
-                                l->menu->copy_row(row, line, sizeof(line));
-                        else
-                                string_copy_bounded((string_address)line, (string_address)text, sizeof(line));
-                        if (line[0])
-                        {
-                                windows_clip_offer(own, WINDOWS_CLIP_CLIPBOARD, line, string_length((string_address)line));
-                                if (l->menu->copied)
-                                        l->menu->copied(row);
-                        }
+                        const char address_to words = cell >= 0 ? ui_row_said(&described, cell) : null;
+                        if (words)
+                                string_copy_bounded((string_address)line, (string_address)words, sizeof(line));
+                }
+                else if (id == UI_LIST_MENU_COPY_ROW && text && (flags & UI_LIST_MENU_HAS_COPY_ROW) && l->menu->copy_row)
+                        l->menu->copy_row(row, line, sizeof(line));
+                else if (id == UI_LIST_MENU_COPY_ROW)
+                        ui_list_row_text(l, row, line, sizeof(line));
+                else if (text)
+                        string_copy_bounded((string_address)line, (string_address)text, sizeof(line));
+                else if (ui_row_said(&described, -1) || ui_row_said(&described, 0))
+                        string_copy_bounded((string_address)line, (string_address)(ui_row_said(&described, -1) ? ui_row_said(&described, -1) : ui_row_said(&described, 0)), sizeof(line));
+                if (line[0])
+                {
+                        windows_clip_offer(own, WINDOWS_CLIP_CLIPBOARD, line, string_length((string_address)line));
+                        if (l->menu->copied)
+                                l->menu->copied(row);
                 }
                 return true;
         }

@@ -10,6 +10,7 @@
 # machine-made 2026-11-22 (the Waterlink words of Settings), not yet read by a person: settings_link_address settings_link_disabled settings_link_files settings_link_files_about settings_link_group settings_link_latency settings_link_log settings_link_log_about settings_link_mismatch settings_link_no_key settings_link_offline settings_link_online settings_link_run settings_link_run_about settings_link_self settings_link_shell settings_link_shell_about settings_link_traffic
 # machine-made 2026-11-23 (the startup programs of Settings), not yet read by a person: settings_startup_add settings_startup_add_keys settings_startup_command settings_startup_hint settings_startup_keys settings_startup_program settings_startup_type
 # machine-made 2026-11-23 (the add row of Waterlink's linked machines), not yet read by a person: settings_link_add settings_link_add_keys settings_link_show settings_link_stop settings_link_type
+# machine-made 2026-11-23 (a row menu's copy of one column), not yet read by a person: menu_copy_named
 @language ur
 @name اردو
 @translated machine
@@ -210,6 +211,7 @@ menu_bin_restore	4799	واپس رکھیں
 menu_close_others	26f3	دوسرے ٹیب بند کریں
 menu_close_tab	eb40	ٹیب بند کریں
 menu_copy	43e0	کاپی
+menu_copy_named	fb68	%s کاپی کریں
 menu_copy_row	f3c8	قطار نقل کریں
 menu_cut	5c17	کٹ
 menu_delete	1e3e	حذف کریں
