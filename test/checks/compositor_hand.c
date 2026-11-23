@@ -337,7 +337,7 @@ static void check_compositor_cursor_style(void)
     compositor_cursor_tick(1000000000ull + 30000000ull + CP_DYN_IDLE_NS);
     check("cursor style: the stretch lets go when nothing has moved for CP_DYN_IDLE_NS, and not before", same && compositor.cursor.stretch.to == 0);
     compositor.cursor.stretch = (struct compositor_sway){0, 0, 0};
-    check("cursor style: and with every value at rest the pointer asks for no time of its own", compositor_cursor_due() == 0);
+    check("cursor style: and with every value at rest the pointer asks for no time of its own", compositor_cursor_due(clock_monotonic_nanoseconds()) == 0);
 
     compositor.touch.hidden = 1;
     compositor.cursor.style = 0;

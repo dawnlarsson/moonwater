@@ -122,7 +122,10 @@ static struct
         b32 hidraw_read;
         unsigned int games;             // how many of game[] are kept
         unsigned int game[32];          // the minors of the event devices found to be a game's (major 13), opened here or not
-} compositor_access = {.of = {[0 ... COMPOSITOR_INPUTS - 1] = -1}, .asked_row = -1};
+} compositor_access = {.of = {[0 ... COMPOSITOR_INPUTS - 1] = -1}, .asked_row = -1,
+                       // Every pad's slot free at the start (at -1): a slot of 0 was taken by the device at input 0, so a pad anywhere else
+                       // found no free slot and was never opened (the checks free them by hand, so they never saw it).
+                       .pad = {[0 ... COMPOSITOR_ACCESS_PADS - 1] = {.at = -1}}};
 
 static void compositor_access_act(unsigned int action, int down, unsigned int at, positive now);
 

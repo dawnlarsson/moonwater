@@ -1077,8 +1077,9 @@ static int compositor_notices_look(void)
                                 detail = compositor_notices_copy.issue[i].detail;
                                 break;
                         }
-                if (crashes > compositor_program_crash_count)
-                        compositor_alert_show(0, "Program crashed", detail && detail[0] ? detail : "A program stopped unexpectedly.");
+                // A crash is the tray's notice (the count above), never a window of its own: a game's helpers (Proton's, Wine's) crash as they
+                // start, and a dialog for each took the focus from the fullscreen game and forked the loop for it.
+                (void)detail;
                 compositor_program_crash_count = crashes;
         }
         compositor_notices_seen = count;

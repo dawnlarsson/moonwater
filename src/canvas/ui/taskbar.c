@@ -2532,13 +2532,10 @@ static bool taskbar_starting_take(positive now)
                                 string_copy_bounded((p8 *)fids[fcount++], (string_address)held, WINDOWS_APP_ID);
                         }
                 }
+                // A start with no window of its own after WINDOWS_STARTING_NS is no failure (a game through Steam and Proton takes longer, and
+                // its window is often no window of its app's): the task stops turning, and nothing is said over what the person is doing.
                 else if (now - stamp > WINDOWS_STARTING_NS)
-                {
-                        windows_starting_fail(compositor.table, held, now);
-                        fail_idx[fcount] = which;
-                        string_copy_bounded((p8 *)fids[fcount++], (string_address)held, WINDOWS_APP_ID);
-                        compositor_alert_show(0, "Application failed to start", ui_apps_name(which));
-                }
+                        windows_starting_done(compositor.table, slot);
                 else
                 {
                         app_idx[count] = which;

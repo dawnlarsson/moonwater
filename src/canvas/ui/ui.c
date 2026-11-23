@@ -11041,9 +11041,19 @@ static unsigned int ui_kit_focus_ink(const struct ui address_to ui)
         return ui_contrast_mix2(ink, ground, lit, toward, 300);
 }
 
+// The focus ring: four bars of the ring's width along the box's edges, square. Drawn as fills, which every path draws alike: a ring
+// recorded for the card is a box with a hole (ui_scene_box's mod 8), and the card's pass painted the hole, so the control inside showed black.
 static fn ui_kit_focus_ring(struct ui address_to ui, const struct ui_box address_to box)
 {
-        ui_kit_ring(ui, box, ui_q8(ui, UI_FOCUS_WIDTH), ui_kit_focus_ink(ui));
+        b32 t = ui_q8(ui, UI_FOCUS_WIDTH);
+        unsigned int ink = ui_kit_focus_ink(ui);
+        struct ui_box bar;
+        if (box->x1 - box->x0 <= 2 * t || box->y1 - box->y0 <= 2 * t)
+                return;
+        bar = (struct ui_box){box->x0, box->y0, box->x1, box->y0 + t, 0, 0}, ui_kit_fill(ui, &bar, ink, null);
+        bar = (struct ui_box){box->x0, box->y1 - t, box->x1, box->y1, 0, 0}, ui_kit_fill(ui, &bar, ink, null);
+        bar = (struct ui_box){box->x0, box->y0 + t, box->x0 + t, box->y1 - t, 0, 0}, ui_kit_fill(ui, &bar, ink, null);
+        bar = (struct ui_box){box->x1 - t, box->y0 + t, box->x1, box->y1 - t, 0, 0}, ui_kit_fill(ui, &bar, ink, null);
 }
 
 // A face grown by the focus ring's gap and width on every side, its corners with it: the box an outset ring is drawn on.
@@ -13130,16 +13140,15 @@ static b32 ui_kit_ringed(void)
         return ui_kit.keyed && hand != WINDOWS_MODALITY_POINTER && hand != WINDOWS_MODALITY_TOUCH;
 }
 
-// Whether the hand is on the keys (ui_kit.keyed), which is all the focus ring is drawn for:
+// Whether the keys moved the focus last (ui_kit.keyed), which is all the focus ring is drawn for. It is set where the keys move the focus
+// to another element of a view (ui_view_put: an arrow or Tab the element they were on did not use), never by a key an element takes for
+// itself (an arrow in a field moves its caret, Page Down pages a document): typing and a mouse show no ring. A press of a pointer's
+// button or a finger ends it.
 static fn ui_kit_keyed_note(const struct window_event address_to event)
 {
         b32 down = (event->flags & WINDOW_KEY_DOWN) != 0;
         if ((event->flags & WINDOW_KEY_TOUCH) || (event->type == WINDOW_EVENT_BUTTON && down))
                 ui_kit.keyed = 0;
-        else if (event->type == WINDOW_EVENT_KEY && down &&
-                 (event->a == 15 || event->a == 102 || event->a == 103 || event->a == 104 || event->a == 105 || event->a == 106 || event->a == 107 ||
-                  event->a == 108 || event->a == 109)) // UI_KEY_TAB, _HOME, _UP, _PAGE_UP, _LEFT, _RIGHT, _END, _DOWN, _PAGE_DOWN
-                ui_kit.keyed = 1;
 }
 
 // The pointer's buttons, the evdev codes a press carries in a (the left, the right and the middle), and their held-state bits (ui_kit.buttons).
@@ -23910,6 +23919,7 @@ static b32 ui_view_show(struct ui_view address_to v, int at)
 static p32 ui_view_put(const struct ui address_to ui, struct ui_view address_to v, int at, const struct ui_rect address_to from, int key)
 {
         struct ui_item address_to item = &v->item[at];
+        ui_kit.keyed = 1; // the keys moved the focus: the ring shows (ui_kit_ringed)
         ui_view_let_go(v);
         ui_view_show(v, at);
         v->handed = null;
