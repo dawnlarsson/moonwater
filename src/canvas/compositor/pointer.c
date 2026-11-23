@@ -222,6 +222,7 @@ struct compositor_pointer
         int lens;               // the lens over a window's edge, along ux, uy (hw its half length, hh its half thickness), not stretched
         int span, hot_x, hot_y; // a client's picture: its square's side, and the pointer's pixel of the square (compositor_picture)
         unsigned long picture;  // which picture of a window's client it is (compositor_picture.made), 0 for the compositor's own shapes
+        int ring;               // the dwell click's ring round it (access.c): the 32nds of a turn filled, 0 for none
 };
 
 // A value on its way to another (0 at rest): where it left from, where it goes, and when it left.
@@ -802,9 +803,13 @@ lined:
         off the bitmap), and the two covers of every count of edge and fill samples a pixel can have, so a pixel is its samples looked up
         and counted, and nothing is divided for it.
 */
+static void compositor_pointer_ring(const struct compositor_pointer *p, int span, int hot_x, int hot_y, int first, int rows,
+                                    unsigned char *fill, unsigned char *edge, int pitch); // below
+
 static void compositor_pointer_rows(const struct compositor_pointer *p, int span, int hot_x, int hot_y, int first, int rows,
                                     unsigned char *fill, unsigned char *edge, int pitch)
 {
+        unsigned char *fill_from = fill, *edge_from = edge;
         int n = p->dyn ? 1 : p->scale < 4 * 256 ? 4 : 2, all = n * n;
         long long step = (32768ll << 16) / (all * p->scale); // half a sample's column, in 256ths of a cell, Q16
         long long ox = hot_x * 65536ll / p->scale + (p->dyn ? 128 : -256 * compositor_cursor_hot[p->shape][0]);
@@ -882,6 +887,64 @@ static void compositor_pointer_rows(const struct compositor_pointer *p, int span
                                 }
                         fill[column] = share[inks[2] * (all + 1) + inks[1]][0];
                         edge[column] = share[inks[2] * (all + 1) + inks[1]][1];
+                }
+        }
+        if (p->ring)
+                compositor_pointer_ring(p, span, hot_x, hot_y, first, rows, fill_from, edge_from, pitch);
+}
+
+/*
+        The dwell click's ring (access.c) laid over a picture's covers: a circle round the pointer in the fill ink with a line of the
+        edge ink either side, as the pointer itself is drawn, filled clockwise from its top by p->ring 32nds of a turn: round the
+        dynamic shape's middle, or the middle of a bitmap's square. A pixel's angle is the diamond's (its quarter and the share of
+        its two legs), which runs round as a turn does with no root; the distance to the circle is the one root a pixel near it takes.
+*/
+#define CP_RING_STEPS 32
+static void compositor_pointer_ring(const struct compositor_pointer *p, int span, int hot_x, int hot_y, int first, int rows,
+                                    unsigned char *fill, unsigned char *edge, int pitch)
+{
+        // In 256ths of a pixel: the centre, the radius (12 cells round the dynamic shape, 9.5 in a bitmap's 24), the fill's half width
+        // (at least three quarters of a pixel) and the edge's line (a pixel).
+        long long cx, cy, r, core = (p->scale > 256 ? p->scale : 256) * 3 / 4, line = 256, reach, inner, outer;
+        long long turn = 4096ll * p->ring / CP_RING_STEPS;
+
+        if (p->dyn)
+                cx = (long long)hot_x * 256, cy = (long long)hot_y * 256, r = 12ll * p->scale;
+        else
+                cx = (long long)hot_x * 256 + (CP_CELL / 2 - compositor_cursor_hot[p->shape][0]) * (long long)p->scale,
+                cy = (long long)hot_y * 256 + (CP_CELL / 2 - compositor_cursor_hot[p->shape][1]) * (long long)p->scale, r = 19ll * p->scale / 2;
+        reach = core + line + 256;
+        inner = r > reach ? (r - reach) * (r - reach) : 0, outer = (r + reach) * (r + reach);
+        for (int row = first; row < first + rows; row++, fill += pitch, edge += pitch)
+        {
+                long long dy = (long long)row * 256 + 128 - cy;
+
+                if (dy * dy > outer)
+                        continue;
+                for (int column = 0; column < span; column++)
+                {
+                        long long dx = (long long)column * 256 + 128 - cx, d2 = dx * dx + dy * dy, x = dx, y = -dy, a, b, quarter, off, c, e;
+
+                        if (d2 > outer || d2 < inner)
+                                continue;
+                        // Clockwise from the top (the screen's y is down): the quarter, then the leg that grows over the two.
+                        if (x >= 0 && y > 0)
+                                quarter = 0, a = x, b = y;
+                        else if (x > 0)
+                                quarter = 1, a = -y, b = x;
+                        else if (y < 0)
+                                quarter = 2, a = -x, b = -y;
+                        else
+                                quarter = 3, a = y, b = -x;
+                        if (quarter * 1024 + a * 1024 / (a + b ? a + b : 1) >= turn)
+                                continue;
+                        off = (long long)compositor_isqrt((unsigned long long)d2) - r;
+                        off = off < 0 ? -off : off;
+                        c = core + 128 - off, c = c < 0 ? 0 : c > 256 ? 256 : c;
+                        e = core + line + 128 - off, e = (e < 0 ? 0 : e > 256 ? 256 : e) - c;
+                        c = c * 255 >> 8, e = e * 255 >> 8;
+                        fill[column] = (unsigned char)(fill[column] > c ? fill[column] : c);
+                        edge[column] = (unsigned char)(edge[column] > e ? edge[column] : e);
                 }
         }
 }

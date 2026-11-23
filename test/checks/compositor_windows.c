@@ -5844,6 +5844,26 @@ static void check_compositor_access_aids(void)
         check("access aids: dwell clicks nothing while the pointer keeps moving, and once when it stops", all);
     }
 
+    /* The ring: half way through the wait it is half a turn, drawn with the pointer's own covers clockwise from its top. */
+    {
+        static unsigned char covers[2 * 64 * 64];
+        struct compositor_pointer p = {.dyn = 1, .scale = 512, .hw = 256 * CP_DYN_RADIUS, .hh = 256 * CP_DYN_RADIUS, .c = 256 * CP_DYN_RADIUS};
+        int hot_x, hot_y, span = compositor_pointer_span(&p, &hot_x, &hot_y), r = 12 * 512 / 256;
+
+        compositor.pointer_x = compositor.real_x = 60, compositor_motion();
+        compositor_access_aid.still_at = clock_monotonic_nanoseconds() - 250 * ms;
+        p.ring = compositor_access_ring();
+        all = p.ring >= 15 && p.ring <= 17 && span == 64;
+        compositor_pointer_rows(&p, span, hot_x, hot_y, 0, span, covers, covers + span * span, span);
+        all &= covers[(hot_y - r) * span + hot_x] > 200 && covers[hot_y * span + hot_x + r] > 200 && covers[hot_y * span + hot_x - r] == 0;
+        p.ring = 0;
+        compositor_pointer_rows(&p, span, hot_x, hot_y, 0, span, covers, covers + span * span, span);
+        all &= covers[(hot_y - r) * span + hot_x] == 0;
+        compositor_access_aid_set(0, 0, 0, 0);
+        check("access aids: the dwell's ring round the pointer is half a turn half way through its wait, clockwise from its top in the pointer's own covers, and none with no click owed",
+              all && compositor_access_ring() == 0);
+    }
+
     /* The hand: a key, then a mouse's move, then a pad. */
     compositor_access_aid_set(0, 0, 0, 0);
     aid_feed(t + 6000 * ms, 30, 1), aid_feed(t + 6050 * ms, 30, 0);

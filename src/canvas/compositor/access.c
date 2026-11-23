@@ -1145,7 +1145,9 @@ static void compositor_access_tick(positive now)
         - mouse keys: the keypad is the pointer whatever Num Lock says (numbers are the top row's while it is on). 8 2 4 6 and 7 9 1 3
           move it, a pixel at the press and on from a moment later, faster the longer they are held; 5 clicks the chosen button (held
           while 5 is), / * - choose the left, the middle or the right one, 0 holds it down and . lets it go.
-        - dwell: the pointer held still, within a few pixels, this long clicks the left button once, and again only once it moved.
+        - dwell: the pointer held still, within a few pixels, this long clicks the left button once, and again only once it moved. A
+          ring round the pointer fills as it waits (pointer.c's compositor_pointer_ring, drawn with the pointer's own covers, so the
+          plane, the processor's draw and the card's all show it).
 
         While a feature of the keys is on, the reader's thread sends no key to a client itself (compositor_access_gate, the one relaxed
         load a key's report pays), and the loop's key goes through compositor_access_key. Their waits are the loop's deadlines
@@ -1189,10 +1191,12 @@ static struct
         long long left_x, left_y;
         unsigned int button, holding, clicking;
         b32 arrows_physical;
-        // Dwell: where the pointer was still from and since when, whether its click is owed, and whether the hand was the machine's.
+        // Dwell: where the pointer was still from and since when, whether its click is owed, whether the hand was the machine's, and
+        // the ring as the pointer was last drawn with it (32nds of a turn).
         int still_x, still_y;
         positive still_at;
         b32 armed, still_physical;
+        int ring;
 } compositor_access_aid = {.button = COMPOSITOR_BTN_LEFT};
 
 // The kind of hand that acted last (WINDOWS_MODALITY_*), in the table when it changes.
@@ -1468,12 +1472,34 @@ static void compositor_access_dwell_moved(void)
         compositor_access_aid.armed = compositor_access_aid.modality != WINDOWS_MODALITY_TOUCH;
 }
 
+/*
+        The ring round the pointer while a dwell click is owed: how much of a turn its stillness has filled, in 32nds (pointer.c's
+        CP_RING_STEPS), from the third on (a pointer that only paused while it moves shows none); 0 with none owed.
+*/
+static int compositor_access_ring_at(positive now)
+{
+        positive steps;
+
+        if (likely(!compositor_access_aid.armed) || !compositor_access_aid.dwell_ns || now <= compositor_access_aid.still_at)
+                return 0;
+        steps = (now - compositor_access_aid.still_at) * CP_RING_STEPS / compositor_access_aid.dwell_ns;
+        return steps < 3 ? 0 : steps > CP_RING_STEPS ? CP_RING_STEPS : (int)steps;
+}
+
+// The ring the pointer is drawn with now (kms.c's compositor_pointer_now), kept as drawn.
+static int compositor_access_ring(void)
+{
+        return compositor_access_aid.ring = compositor_access_aid.armed ? compositor_access_ring_at(clock_monotonic_nanoseconds()) : 0;
+}
+
 // The pointer still for the dwell's time: the left button pressed and let go where it is, unless a button is held or a hand drags.
 static void compositor_access_dwell_click(void)
 {
         int was = compositor_post_physical;
 
         compositor_access_aid.armed = 0;
+        if (compositor_access_aid.ring)
+                compositor_cursor_move(); // the ring goes with the click
         if (compositor.button_down || compositor.drag >= 0 || compositor.resize >= 0 || compositor.touching)
                 return;
         compositor_post_physical = compositor_access_aid.still_physical;
@@ -1500,7 +1526,14 @@ static positive compositor_access_aid_due(void)
                 due = !due || at < due ? at : due;
         }
         if (compositor_access_aid.armed)
+        {
+                // The click, and before it the ring's next 32nd of a turn.
+                positive now = clock_monotonic_nanoseconds(), step = compositor_access_aid.dwell_ns / CP_RING_STEPS;
+
                 at = compositor_access_aid.still_at + compositor_access_aid.dwell_ns, due = !due || at < due ? at : due;
+                if (step && now >= compositor_access_aid.still_at)
+                        at = compositor_access_aid.still_at + ((now - compositor_access_aid.still_at) / step + 1) * step, due = at < due ? at : due;
+        }
         return due;
 }
 
@@ -1523,6 +1556,8 @@ static void compositor_access_aid_tick(positive now)
         compositor_access_mouse_run(now);
         if (compositor_access_aid.armed && now >= compositor_access_aid.still_at + compositor_access_aid.dwell_ns)
                 compositor_access_dwell_click();
+        else if (compositor_access_ring_at(now) != compositor_access_aid.ring)
+                compositor_cursor_move(); // the ring a 32nd of a turn on (drawn with the pointer, compositor_pointer_now)
 }
 
 /*
@@ -1561,6 +1596,8 @@ static void compositor_access_aid_set(unsigned int on, positive slow_ns, positiv
         if ((on & ACCESS_DWELL) && !(was & ACCESS_DWELL))
                 compositor_access_aid.still_x = compositor.pointer_x, compositor_access_aid.still_y = compositor.pointer_y;
         compositor_access_aid.armed &= (on & ACCESS_DWELL) != 0 && (was & ACCESS_DWELL) != 0;
+        if (compositor_access_aid.ring && !compositor_access_aid.armed)
+                compositor_cursor_move();
         compositor_access_aid.on = on;
         compositor_access_dwells = (on & ACCESS_DWELL) != 0;
         __atomic_store_n(&compositor_access_gate, (on & ACCESS_KEYED) != 0 ? 1u : 0u, __ATOMIC_RELEASE);

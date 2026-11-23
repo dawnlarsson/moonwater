@@ -1879,13 +1879,16 @@ static int compositor_pointer_dynamic(void)
         by what a held button has it at, and no larger than the largest picture (CP_SPAN_MOST) holds it. The dynamic shape is on its way
         to the rectangle while the pointer is over text.
 */
+static int compositor_access_ring(void); // access.c: the dwell click's ring, 0 for none
+
 static void compositor_pointer_now(struct compositor_pointer *p)
 {
         positive period, now;
-        int morph, lens, grow, scale, most, resize;
+        int morph, lens, grow, scale, most, resize, ring = compositor_access_ring();
 
-        // A window's client's own picture is worn as it was copied: no size of the settings', and no squeeze of a held button.
-        if (compositor_picture.worn)
+        // A window's client's own picture is worn as it was copied: no size of the settings', and no squeeze of a held button. While
+        // the dwell's ring fills, the pointer is the compositor's own shape, which the ring is drawn with.
+        if (compositor_picture.worn && !ring)
         {
                 *p = (struct compositor_pointer){.shape = CP_ARROW, .scale = 256, .span = compositor_picture.span, .hot_x = compositor_picture.hot_x,
                                                  .hot_y = compositor_picture.hot_y, .picture = compositor_picture.worn};
@@ -1902,7 +1905,7 @@ static void compositor_pointer_now(struct compositor_pointer *p)
         // Over a window's edge (a resize) the pointer keeps its size whatever is held: a drag of the edge neither grows it nor eases it.
         scale = resize ? compositor_cursor_size() : (compositor_cursor_size() * (256 + compositor_sway_at(&compositor.cursor.press, now)) + 128) >> 8;
         most = (CP_SPAN_MOST << 8) / (compositor.cursor.dyn ? CP_DYN_CELL : CP_CELL);
-        *p = (struct compositor_pointer){.dyn = compositor.cursor.dyn, .scale = scale < most ? scale : most};
+        *p = (struct compositor_pointer){.dyn = compositor.cursor.dyn, .scale = scale < most ? scale : most, .ring = ring};
         if (!p->dyn)
         {
                 p->shape = compositor.cursor.shape < CP_SHAPES ? compositor.cursor.shape : CP_ARROW;
