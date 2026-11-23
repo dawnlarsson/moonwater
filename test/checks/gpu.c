@@ -6438,6 +6438,47 @@ static void grab_protocol_rows(void)
         check("xwm ewmh: _NET_ACTIVE_WINDOW unminimizes and focuses window row",
               !(compositor.state[0] & WINDOW_MINIMIZED) && compositor.focus == 0);
 
+        /*
+                The person's choice over a window's own ask: with another program's window (row 1, no X window's) given the keys, the X
+                window's own _NET_ACTIVE_WINDOW (source 1, a program's) and WM_CHANGE_STATE back to normal are refused and the keys stay;
+                a pager's (source 2) is taken. Taken out of fullscreen by the compositor's side (the person's F11), the window's own ask to
+                be fullscreen again is refused, and put back by the person it is fullscreen again.
+        */
+        {
+                b32 kept, pager, normal, fs_kept, fs_back;
+                int was_showing = compositor.showing[1];
+
+                compositor.showing[1] = 1, compositor_focus(1);
+                ev.atom = compositor_xwm.atoms[COMPOSITOR_XWM_A_NET_ACTIVE], ev.data[0] = 1;
+                compositor_xwm_event(&ev);
+                kept = compositor.focus == 1;
+                ev.atom = compositor_xwm.atoms[COMPOSITOR_XWM_A_CHANGE_STATE], ev.data[0] = COMPOSITOR_XWM_STATE_NORMAL;
+                compositor_xwm_event(&ev);
+                normal = compositor.focus == 1;
+                ev.atom = compositor_xwm.atoms[COMPOSITOR_XWM_A_NET_ACTIVE], ev.data[0] = 2;
+                compositor_xwm_event(&ev);
+                pager = compositor.focus == 0;
+                check("xwm ewmh: a program's own _NET_ACTIVE_WINDOW and WM_CHANGE_STATE normal are refused while another program has the keys, and a pager's is taken",
+                      kept && normal && pager);
+
+                compositor_fullscreen_on(0, -1), compositor_xwm_sync(&compositor_xwm, xw);
+                fs_back = xw && (xw->state & COMPOSITOR_XWM_FULLSCREEN) && !xw->left_fullscreen;
+                compositor_fullscreen_off(0), compositor_xwm_sync(&compositor_xwm, xw);
+                ev.atom = compositor_xwm.atoms[COMPOSITOR_XWM_A_NET_STATE], ev.data[0] = COMPOSITOR_XWM_NET_ADD;
+                ev.data[1] = compositor_xwm.atoms[COMPOSITOR_XWM_A_FULLSCREEN], ev.data[2] = 0;
+                compositor_xwm_event(&ev);
+                fs_kept = xw && xw->left_fullscreen && !(xw->state & COMPOSITOR_XWM_FULLSCREEN) && !compositor.fullscreen[0];
+                compositor_fullscreen_on(0, -1), compositor_xwm_sync(&compositor_xwm, xw);
+                fs_back = fs_back && xw && !xw->left_fullscreen && (xw->state & COMPOSITOR_XWM_FULLSCREEN) && compositor.fullscreen[0];
+                check("xwm ewmh: a window the person took out of fullscreen stays out on its own _NET_WM_STATE ask, and the person puts it back",
+                      fs_kept && fs_back);
+                compositor_fullscreen_off(0), compositor_xwm_sync(&compositor_xwm, xw);
+                if (xw)
+                        xw->left_fullscreen = 0;
+                compositor.showing[1] = was_showing;
+                compositor_focus(0);
+        }
+
         compositor.state[0] = 0, compositor.close_asks[0] = 0;
         ev.atom = compositor_xwm.atoms[COMPOSITOR_XWM_A_NET_CLOSE];
         compositor_xwm_event(&ev);

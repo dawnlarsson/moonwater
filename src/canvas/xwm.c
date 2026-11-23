@@ -165,6 +165,7 @@ struct compositor_xwm_window
         int row, x, y, sent_x, sent_y;
         unsigned int width, height, sent_w, sent_h, restore_w, restore_h, min_w, min_h, max_w, max_h;
         unsigned char closes, placed, no_input;
+        unsigned char left_fullscreen; // the person took it out of fullscreen (F11, Super+F11): its own asks to go back are refused till they put it back
         char title[COMPOSITOR_XWM_TITLE];
         char app[WINDOWS_APP_ID];
 };
@@ -249,6 +250,7 @@ static struct compositor_xwm compositor_xwm_slots[COMPOSITOR_XWM_SLOTS] = {[0 ..
 static struct compositor_xwm *compositor_xwm_at = &compositor_xwm_slots[0];
 static struct compositor_xwm_steam compositor_xwm_steam;
 static unsigned int compositor_xwm_counted[4];
+static void compositor_xwm_counted_refusal(void); // below: a window's own ask the person's choice outweighs, counted and said
 static int compositor_xwm_listen_fd = -1, compositor_xwm_listen_at = -1, compositor_xwm_uid;
 
 static struct compositor_xwm *compositor_xwm_slot_of_row(long row);
@@ -936,7 +938,9 @@ static void xwm_property(struct compositor_xwm *x, const unsigned char *in, long
                         w->state |= xwm_net_state_bits(x, xwm_get32(r.value + at), 0);
                 if ((w->state & COMPOSITOR_XWM_ADOPTED) && w->row >= 0 && w->row < COMPOSITOR_ROWS)
                 {
-                        if ((w->state & COMPOSITOR_XWM_FULLSCREEN) && !had_fs && !compositor.fullscreen[w->row])
+                        if ((w->state & COMPOSITOR_XWM_FULLSCREEN) && !had_fs && !compositor.fullscreen[w->row] && w->left_fullscreen)
+                                w->state &= ~COMPOSITOR_XWM_FULLSCREEN, compositor_xwm_net_state(x, w->id, (int)w->state), compositor_xwm_counted_refusal();
+                        else if ((w->state & COMPOSITOR_XWM_FULLSCREEN) && !had_fs && !compositor.fullscreen[w->row])
                         {
                                 if (!had_max)
                                         w->restore_w = w->width, w->restore_h = w->height;
@@ -1284,6 +1288,38 @@ static void compositor_xwm_resolve(struct compositor_xwm *x, struct compositor_x
                 compositor_xwm_takes_keys(w, (int)row);
 }
 
+// An ask of a window's own the person's choice outweighs (compositor_xwm_may_show, left_fullscreen): counted, and said in the compositor's log
+// for the first few, so a game that fights the person shows there.
+static unsigned int compositor_xwm_refusals;
+static void compositor_xwm_counted_refusal(void)
+{
+        if (compositor_xwm_refusals++ < 8)
+                log_direct(str("xwm: a window's own ask to be shown or made fullscreen was refused: the person chose otherwise (another program has the keys, or they took it out of fullscreen)\n"));
+}
+
+/*
+        Whether a window's own ask to be the one shown is taken: _NET_ACTIVE_WINDOW from it, or WM_CHANGE_STATE or _NET_WM_STATE
+        back from hidden. A pager's ask (source 2: a taskbar, Steam's overlay) is a person's and is always taken. A program's is taken
+        while it, or another of its own windows, has the keys, or nothing does; never while another program has them. A Proton game
+        the person left for another window through Scenes, the taskbar or a click asked straight to be shown again, was revealed,
+        and its fullscreen Space came back over what the person chose (Skyrim). Its own windows are told by the X server's owner of
+        each (XRes) or, where that is not known, by the client's resource base.
+*/
+static int compositor_xwm_may_show(struct compositor_xwm *x, const struct compositor_xwm_window *w, unsigned int source)
+{
+        int focus = (int)compositor.focus;
+        const struct compositor_xwm_window *f;
+        unsigned int base = x->resource_mask ? ~x->resource_mask : 0xffe00000u;
+
+        if (source == 2 || focus < 0 || focus >= COMPOSITOR_ROWS || !compositor.showing[focus] || focus == w->row)
+                return 1;
+        f = xwm_row_lookup(x, focus, 0);
+        if (f && ((f->owner && f->owner == w->owner) || (!f->owner && (f->id & base) == (w->id & base))))
+                return 1;
+        compositor_xwm_counted_refusal();
+        return 0;
+}
+
 static void compositor_xwm_fullscreen(struct compositor_xwm *x, struct compositor_xwm_window *w, int on)
 {
         struct compositor_row_facts f;
@@ -1292,6 +1328,14 @@ static void compositor_xwm_fullscreen(struct compositor_xwm *x, struct composito
         w->state &= ~COMPOSITOR_XWM_COVERED;
         if (on == !!(w->state & COMPOSITOR_XWM_FULLSCREEN))
                 return;
+        // A window the person took out of fullscreen stays out of it on its own ask (a Proton game put back what F11 took away): it is
+        // told its state again, without fullscreen, and goes back when the person puts it back.
+        if (on && w->left_fullscreen)
+        {
+                compositor_xwm_net_state(x, w->id, (int)w->state);
+                compositor_xwm_counted_refusal();
+                return;
+        }
         if (on)
         {
                 int has_f;
@@ -1351,12 +1395,13 @@ static void compositor_xwm_sync(struct compositor_xwm *x, struct compositor_xwm_
 
         if (compositor_row_facts(w->row, &f) != 0)
                 return;
+        // The compositor's side changed it (the person's F11 or Super+F11, Scenes): what the person chose is kept against the window's own asks.
         if (!!(w->state & COMPOSITOR_XWM_FULLSCREEN) != !!f.fullscreen)
         {
                 if (f.fullscreen)
-                        w->restore_w = w->width, w->restore_h = w->height, w->state |= COMPOSITOR_XWM_FULLSCREEN;
+                        w->restore_w = w->width, w->restore_h = w->height, w->state |= COMPOSITOR_XWM_FULLSCREEN, w->left_fullscreen = 0;
                 else
-                        w->state &= ~(COMPOSITOR_XWM_FULLSCREEN | COMPOSITOR_XWM_COVERED);
+                        w->state &= ~(COMPOSITOR_XWM_FULLSCREEN | COMPOSITOR_XWM_COVERED), w->left_fullscreen = 1;
         }
         if (!(w->state & COMPOSITOR_XWM_FULLSCREEN))
                 w->state = f.filling ? (w->state | COMPOSITOR_XWM_MAXIMIZED) : (w->state & ~COMPOSITOR_XWM_MAXIMIZED);
@@ -3214,7 +3259,7 @@ static void xwm_event(struct compositor_xwm *x, const struct xwm_event *e)
                         {
                                 if (xwm_net_state_apply(e->data[0], (compositor.state[w->row] & WINDOW_MINIMIZED) ? 1u : 0u, 1u))
                                         compositor_minimize_row(w->row);
-                                else
+                                else if (compositor_xwm_may_show(x, w, 1))
                                         compositor_reveal(w->row);
                         }
                         if ((bits & COMPOSITOR_XWM_ABOVE) && !(w->state & COMPOSITOR_XWM_DESKTOP))
@@ -3235,7 +3280,8 @@ static void xwm_event(struct compositor_xwm *x, const struct xwm_event *e)
                         compositor_xwm_moveresize(xwm_find(x, e->window, 0), e->data[2]);
                 else if (e->atom && e->atom == x->atoms[COMPOSITOR_XWM_A_NET_ACTIVE])
                 {
-                        if ((w = xwm_find(x, e->window, 0)) && xwm_row_showing(w) && !compositor_xwm_is_popup(w))
+                        if ((w = xwm_find(x, e->window, 0)) && xwm_row_showing(w) && !compositor_xwm_is_popup(w) &&
+                            compositor_xwm_may_show(x, w, e->format == XWM_FORMAT_32 ? e->data[0] : 0))
                                 compositor_reveal(w->row);
                 }
                 else if (e->atom && e->atom == x->atoms[COMPOSITOR_XWM_A_NET_CLOSE])
@@ -3250,7 +3296,7 @@ static void xwm_event(struct compositor_xwm *x, const struct xwm_event *e)
                         {
                                 if (e->data[0] == COMPOSITOR_XWM_STATE_ICONIC)
                                         compositor_minimize_row(w->row);
-                                else
+                                else if (compositor_xwm_may_show(x, w, 1))
                                         compositor_reveal(w->row);
                         }
                 }
