@@ -23409,6 +23409,8 @@ static int ui_list_hit(const struct ui address_to ui, const struct ui_list addre
                         struct ui_row said;
                         if (inside / row >= l->total)
                                 return -1;
+                        if (!l->describe)
+                                return inside / row;
                         ui_list_describe(l, inside / row, &said);
                         return said.kind == UI_ROW_CAPTION ? -1 : inside / row;
                 }
@@ -23476,6 +23478,7 @@ static b32 ui_list_move(const struct ui address_to ui, struct ui_list address_to
         at = (at < 0 ? -1 : at) + by; // with no row the keys count from above the first, so Down takes it
         at = at < 0 ? 0 : at > last ? last : at;
         // A caption is passed over in the direction of the keys (the end's row is the one before it); none past it, the focus stays.
+        if (l->describe)
         {
                 int step = by < 0 ? -1 : 1, to = at;
                 struct ui_row said;
