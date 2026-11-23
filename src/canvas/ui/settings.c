@@ -1811,42 +1811,14 @@ static fn settings_about_describe(int id, struct ui_row address_to row)
                 row->kind = UI_ROW_BUTTON, row->words = WORDS(settings_button_open);
 }
 
-static b32 settings_browser_match(const char address_to text)
-{
-        static const char address_to const names[] = {"chromium", "chrome", "firefox", "librewolf", "brave", "vivaldi", "zen", "epiphany", "falkon", "qutebrowser", "floorp", "waterfox"};
-        for (positive k = 0; text && text[0] && k < sizeof(names) / sizeof(names[0]); k++)
-                if (settings_has(text, names[k], string_length((string_address)names[k])))
-                        return true;
-        return false;
-}
-
 static fn settings_about_press(int id)
 {
-        int w = settings_about_of(id), browser = -1;
+        int w = settings_about_of(id);
         const char address_to url = settings_about_url(w);
         if (w < 0)
                 return;
-        ui_apps_fresh((b64)ui_kit_time());
-        for (int at = 0; at < ui_apps.count; at++)
-        {
-                const struct ui_app_entry address_to app = &ui_apps.app[at];
-                if (app->kit || app->terminal || !app->launch[0])
-                        continue;
-                if (string_equals((string_address)app->profile, (string_address) "chrome")) { browser = at; break; }
-                if (browser < 0 && (settings_browser_match(app->id) || settings_browser_match(app->key) || settings_browser_match(ui_apps_base(app->launch))))
-                        browser = at;
-        }
-        if (browser >= 0)
-        {
-                string_address words[UI_APP_START_WORDS + 2];
-                positive count = ui_apps_words_of(browser, words, null, null, null);
-                if (count > 0 && count + 1 < sizeof(words) / sizeof(words[0]))
-                {
-                        words[count++] = (string_address)url, words[count] = null;
-                        if (ui_start_apart(words, count))
-                                return settings_say((string_address)WORDS(settings_opened));
-                }
-        }
+        if (ui_browser_open(url))
+                return settings_say((string_address)WORDS(settings_opened));
         settings_offered(windows_clip_offer(&settings.own, WINDOWS_CLIP_CLIPBOARD, url, string_length((string_address)url)) == 0);
 }
 

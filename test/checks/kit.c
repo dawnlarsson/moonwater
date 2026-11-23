@@ -5919,6 +5919,18 @@ static fn check_kit_manage(void)
         }
 }
 
+// Which files the browser plays (ui_file_plays_in_browser): sound and video of Chromium's own decoders, by their extension in any case; a
+// text, an AVI, a name with no extension and a dot in a folder's name are not.
+static fn check_kit_browser_files(void)
+{
+        b32 plays = ui_file_plays_in_browser("/root/Music/song.mp3") && ui_file_plays_in_browser("/root/a.WAV") &&
+                    ui_file_plays_in_browser("/home/dawn/clip.mp4") && ui_file_plays_in_browser("/root/x.webm") && ui_file_plays_in_browser("/root/y.flac");
+        b32 not = !ui_file_plays_in_browser("/root/notes.txt") && !ui_file_plays_in_browser("/root/old.avi") && !ui_file_plays_in_browser("/root/README") &&
+                  !ui_file_plays_in_browser("/root/v2.mp3s/file") && !ui_file_plays_in_browser("/root/mp3");
+        check("kit browser: an MP3, a WAV in capitals, an MP4, a WebM and a FLAC are the browser's to play", plays);
+        check("kit browser: a text, an AVI, a name with no extension or a dot in a folder's name only, and a name that is an extension's word, are not", not);
+}
+
 static fn check_kit_pull_parts(void)
 {
         static unsigned int pixels[400 * 200], picture[400 * 200], scratch[400 * UI_SCRATCH_ROWS];

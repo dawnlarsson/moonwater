@@ -1453,9 +1453,16 @@ static fn files_open(p32 place)
         int came;
         if (!e)
                 return;
+        // A file of sound or video the browser plays is opened there (an MP3, a WAV, an MP4); any other file, or one with no browser to open
+        // it, in the editor as before.
         if (e->kind == FILES_KIND_FILE)
         {
-                m->cursor = place, files_open_with(true);
+                static p8 path[FILES_PATH];
+                m->cursor = place;
+                if (!files_model_is_remote(m) && files_path_join(path, sizeof(path), m->path, files_model_name(m, e)) &&
+                    ui_file_plays_in_browser((const char address_to)path) && ui_browser_open((const char address_to)path))
+                        return;
+                files_open_with(true);
                 return;
         }
         if (files_model_is_remote(m))

@@ -27534,6 +27534,66 @@ static b32 ui_start_apart(string_address address_to words, positive count)
         return ui_start_apart_at(-1, words, count);
 }
 
+/*
+        The browser the desktop opens a page, or a file of sound or video, in: the Chrome bowl's (bowl profile chrome), else the first program
+        of the registry whose id, window key or launcher names a browser (Firefox, Brave and the others); -1 for none. What Settings' About
+        links and Files' media open in.
+*/
+static b32 ui_apps_browser_named(const char address_to text)
+{
+        static const char address_to const names[] = {"chromium", "chrome", "firefox", "librewolf", "brave", "vivaldi", "zen", "epiphany", "falkon", "qutebrowser", "floorp", "waterfox"};
+        for (positive k = 0; text && text[0] && k < sizeof(names) / sizeof(names[0]); k++)
+                if (string_search((string_address)text, (string_address)names[k]))
+                        return true;
+        return false;
+}
+
+static int ui_apps_browser(void)
+{
+        int browser = -1;
+        ui_apps_fresh((b64)ui_kit_time());
+        for (int at = 0; at < ui_apps.count; at++)
+        {
+                const struct ui_app_entry address_to app = &ui_apps.app[at];
+                if (app->kit || app->terminal || !app->launch[0])
+                        continue;
+                if (string_equals((string_address)app->profile, (string_address) "chrome"))
+                        return at;
+                if (browser < 0 && (ui_apps_browser_named(app->id) || ui_apps_browser_named(app->key) || ui_apps_browser_named(ui_apps_base(app->launch))))
+                        browser = at;
+        }
+        return browser;
+}
+
+// What is at target opened in the browser: a page's address, or a file's absolute path (the bowls have the person's /root and /home where
+// the desktop has them, so the browser finds it there). False where there is no browser or it could not be started.
+static b32 ui_browser_open(const char address_to target)
+{
+        string_address words[UI_APP_START_WORDS + 2];
+        int browser = ui_apps_browser();
+        positive count;
+        if (browser < 0 || !target || !target[0])
+                return false;
+        count = ui_apps_words_of(browser, words, null, null, null);
+        if (!count || count + 1 >= sizeof(words) / sizeof(words[0]))
+                return false;
+        words[count++] = (string_address)target, words[count] = null;
+        return ui_start_apart(words, count);
+}
+
+// Whether a file is sound or video the browser plays (Chromium's own decoders): opened, it is played there and not read as text.
+static b32 ui_file_plays_in_browser(const char address_to name)
+{
+        static const char known[] = " mp3 wav mp4 m4a m4v aac ogg oga ogv opus flac webm ";
+        char ext[12], word[16];
+        positive length;
+        ui_file_extension(name, ext, sizeof(ext));
+        if (!ext[0] || (length = string_length((string_address)ext)) + 3 > sizeof(word))
+                return false;
+        word[0] = ' ', memory_copy(word + 1, ext, length), word[length + 1] = ' ', word[length + 2] = 0;
+        return string_search((string_address)known, (string_address)word) != null;
+}
+
 // Run a helper command synchronously and wait for exit status 0.
 static b32 ui_run_wait(string_address address_to words)
 {
