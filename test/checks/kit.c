@@ -5904,8 +5904,9 @@ static fn check_kit_manage(void)
         for (int at = 0; at < 3; at++)
                 mid[at] = ui_list_row_y(&l, at) + l.tall[at] / 2;
         h = l.tall[0];
-        check("kit manage: an ordered row's grip is in its inset at its start, and its remove button its last part",
-              grip_x >= 0 && remove_x > grip_x && remove_x > 400 / 2 && ui_list_part_at(&ui, &l, 0, grip_x) == 1 && ui_list_part_at(&ui, &l, 0, remove_x) == 2 &&
+        // No row has a remove button (the kit's rule: a row's removal is its menu's and Delete's), so nothing at its end is a part.
+        check("kit manage: an ordered row's grip is in its inset at its start, and a removable row has no button at its end",
+              grip_x >= 0 && remove_x < 0 && ui_list_part_at(&ui, &l, 0, grip_x) == 1 && ui_list_part_at(&ui, &l, 0, 400 - ui_dev(&ui, 8)) == 0 &&
                   ui_list_part_at(&ui, &l, 0, 200) == 0);
 
         ui_list_click(&ui, &l, &down, grip_x, mid[0]);
@@ -5924,15 +5925,14 @@ static fn check_kit_manage(void)
         kept = !l.moved && !l.lift && h > 0;
         check("kit manage: a lift let go with its press cancelled moves nothing", kept);
 
-        ui_list_click(&ui, &l, &down, remove_x, mid[1]);
-        removed = l.remove_down == 2 && !l.removed;
-        ui_list_click(&ui, &l, &up, remove_x, mid[1]);
-        removed = removed && l.removed == 2 && !l.remove_down;
-        l.removed = 0;
-        ui_list_click(&ui, &l, &down, remove_x, mid[1]);
-        ui_list_click(&ui, &l, &up, 200, mid[1]);
+        // A press at a removable row's end is a press on the row (it removes nothing); Delete with the keys on it removes it.
+        ui_list_click(&ui, &l, &down, 400 - ui_dev(&ui, 8), mid[1]);
+        ui_list_click(&ui, &l, &up, 400 - ui_dev(&ui, 8), mid[1]);
         off = !l.removed && !l.remove_down;
-        check("kit manage: a press on a row's remove button let go on it removes that row, and let go off it removes nothing", removed && off);
+        l.focus = 1, l.removed = 0;
+        removed = ui_list_manage_key(&ui, &l, &del) && l.removed == 2;
+        l.removed = 0;
+        check("kit manage: a press at a removable row's end removes nothing, and Delete on it removes it", removed && off);
 
         l.focus = 1;
         keys = ui_list_manage_key(&ui, &l, &alt_down) && l.moved && l.moved_from == 1 && l.moved_to == 2;

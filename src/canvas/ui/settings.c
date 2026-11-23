@@ -448,9 +448,9 @@ static const struct { const char address_to word; unsigned int label, note; } se
     {"shell", LANGUAGE_settings_link_shell, LANGUAGE_settings_link_shell_about},
     {"log",   LANGUAGE_settings_link_log,   LANGUAGE_settings_link_log_about},
 };
-// A machine linked is a row of columns: its name, its address, latency and traffic, and from SETTINGS_LINK_GRANT_COLUMN a check of each
+// A machine linked is a row of columns: its name, its address, latency, traffic and group, and from SETTINGS_LINK_GRANT_COLUMN a check of each
 // grant in the order above. No fold: all it says is in its row, and its state is its dot (online) and its words (an offline one dim).
-#define SETTINGS_LINK_GRANT_COLUMN 4
+#define SETTINGS_LINK_GRANT_COLUMN 5
 #define SETTINGS_LINK_COLUMNS (SETTINGS_LINK_GRANT_COLUMN + 4)
 _Static_assert(SETTINGS_LINK_COLUMNS <= UI_COLUMNS_MOST, "a machine linked's columns are the kit's at most");
 // What a linked machine's state says, by the item's link_state (0 says none): the words of the language taken, said when the row is drawn.
@@ -3082,9 +3082,9 @@ static struct ui_columns address_to settings_columns_for(int list)
             {4, 3, {0, 84, 84, 72},   {LANGUAGE_files_column_name, LANGUAGE_settings_column_status, LANGUAGE_settings_column_security, LANGUAGE_settings_column_signal}},
             {2, 1, {0, 100, 0, 0},    {LANGUAGE_files_column_name, LANGUAGE_settings_column_status, 0, 0}},
             {4, 3, {0, 108, 84, 128}, {LANGUAGE_files_column_name, 0, LANGUAGE_settings_column_status, LANGUAGE_settings_column_access}},
-            {SETTINGS_LINK_COLUMNS, 0, {0, 150, 72, 100, 52, 52, 52, 52},
+            {SETTINGS_LINK_COLUMNS, 0, {0, 150, 72, 100, 72, 52, 52, 52, 52},
              {LANGUAGE_files_column_name, LANGUAGE_settings_link_address, LANGUAGE_settings_link_latency, LANGUAGE_settings_link_traffic,
-              LANGUAGE_settings_column_files, LANGUAGE_settings_column_run, LANGUAGE_settings_column_shell, LANGUAGE_settings_column_log}},
+              LANGUAGE_settings_link_group, LANGUAGE_settings_column_files, LANGUAGE_settings_column_run, LANGUAGE_settings_column_shell, LANGUAGE_settings_column_log}},
             // The startup list's: a program (or a command), its command, and a check that starts it; its order is the person's (no sort).
             {SETTINGS_STARTUP_COLUMNS, 0, {0, 220, 52}, {LANGUAGE_settings_startup_program, LANGUAGE_settings_startup_command, LANGUAGE_settings_column_on}},
         };
@@ -3110,8 +3110,8 @@ static int settings_list_compare(int list, int col, const struct settings_item a
         int cmp = 0;
         // Waterlink's machines: by their address, latency or traffic as words, or by whether a grant's check is on.
         if (list == 3 && col >= 1 && col < SETTINGS_LINK_GRANT_COLUMN)
-                cmp = string_compare((string_address)(col == 1 ? a->link_addr : col == 2 ? a->link_rtt : a->link_traffic),
-                                     (string_address)(col == 1 ? b->link_addr : col == 2 ? b->link_rtt : b->link_traffic));
+                cmp = string_compare((string_address)(col == 1 ? a->link_addr : col == 2 ? a->link_rtt : col == 3 ? a->link_traffic : a->link_group),
+                                     (string_address)(col == 1 ? b->link_addr : col == 2 ? b->link_rtt : col == 3 ? b->link_traffic : b->link_group));
         else if (list == 3 && col >= SETTINGS_LINK_GRANT_COLUMN && col < SETTINGS_LINK_COLUMNS)
                 cmp = (int)(b->grants >> (col - SETTINGS_LINK_GRANT_COLUMN) & 1u) - (int)(a->grants >> (col - SETTINGS_LINK_GRANT_COLUMN) & 1u);
         else
@@ -4684,6 +4684,7 @@ static fn settings_describe_item(int id, const struct settings_item address_to i
                 row->columns = settings_columns_for(3);
                 row->cells[1] = item->link_addr[0] ? item->link_addr : self ? (item->detail[0] ? item->detail : null) : st;
                 row->cells[2] = item->link_rtt[0] ? item->link_rtt : null, row->cells[3] = item->link_traffic[0] ? item->link_traffic : null;
+                row->cells[4] = item->link_group[0] ? item->link_group : null;
                 row->value = row->cells[1];
                 row->dim = !self && item->link_state == SETTINGS_LINK_OFFLINE;
                 for (int part = 0; part < 4; part++)

@@ -4011,6 +4011,7 @@ static void compositor_input_gone(unsigned int at);
 HOT static void compositor_access_reader_report(unsigned int at, unsigned int generation, const struct compositor_input_event *raw, unsigned int count); // access.c
 HOT static positive compositor_access_reader_turn(const unsigned int *generations); // access.c
 static void compositor_access_lane_noted(int dx, int dy); // access.c
+static void compositor_access_reader_gone(unsigned int at); // access.c
 static void compositor_input_end(unsigned int at, int moved);
 
 static struct
@@ -4458,6 +4459,7 @@ HOT static fn compositor_reader_run(address_any context)
                                 if (bytes < 0 && bytes != -COMPOSITOR_EAGAIN && bytes != -4)
                                 {
                                         struct compositor_input_event gone = {0, 0, COMPOSITOR_READER_GONE, 0, 0};
+                                        compositor_access_reader_gone(at);
                                         system_call_4(syscall(epoll_ctl), (positive)compositor_reader.set, 2, (positive)watched[at], 0);
                                         system_close(watched[at]), watched[at] = -1;
                                         compositor_reader_put(at, generations[at], &gone), put++;

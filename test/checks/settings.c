@@ -1581,14 +1581,15 @@ static fn check_startup_table(void)
                   items[2].kind == SETTINGS_STARTUP && items[3].kind == SETTINGS_ADD && items[0].app == ui_apps_find("settings") && items[0].app >= 0 &&
                   items[1].app < 0 && items[2].app < 0 && string_equals((string_address)items[2].label, (string_address) "gone.App"));
         memory_zero(&row, sizeof(row)), settings_describe(first, &row);
-        described = row.order == SETTINGS_STARTUP_ORDER && row.remove && row.kind == UI_ROW_SWITCH && row.on && row.tile_picture &&
+        described = row.order == SETTINGS_STARTUP_ORDER && row.remove && row.columns && row.columns->count == SETTINGS_STARTUP_COLUMNS &&
+                    row.cell_check == 1u << SETTINGS_STARTUP_ON_COLUMN && row.cell_on == 1u << SETTINGS_STARTUP_ON_COLUMN && row.tile_picture &&
                     (row.icon || row.tile_name) && string_equals((string_address)row.label, (string_address) "Settings") &&
-                    string_equals((string_address)row.note, (string_address) "/settings");
-        check("startup table: an app is one of the ordered group, with a remove button, a switch on, its picture, its name and its command the note", described);
+                    row.cells[1] && string_equals((string_address)row.cells[1], (string_address) "/settings");
+        check("startup table: an app is a row of the ordered table, removable, its picture and name, its command, and its On check on", described);
         memory_zero(&row, sizeof(row)), settings_describe(first + 1, &row);
-        check("startup table: a command (its line's terminal escapes out) is the terminal's symbol and itself, its switch off",
-              row.order == SETTINGS_STARTUP_ORDER && row.remove && row.kind == UI_ROW_SWITCH && !row.on && row.icon == UI_ICON_TERMINAL + 1 &&
-                  !row.tile_picture && !row.note && string_equals((string_address)row.label, (string_address) "echo hi | tr a-z A-Z"));
+        check("startup table: a command (its line's terminal escapes out) is the terminal's symbol and itself, its On check off",
+              row.order == SETTINGS_STARTUP_ORDER && row.remove && row.cell_check == 1u << SETTINGS_STARTUP_ON_COLUMN && !row.cell_on &&
+                  row.icon == UI_ICON_TERMINAL + 1 && !row.tile_picture && !row.cells[1] && string_equals((string_address)row.label, (string_address) "echo hi | tr a-z A-Z"));
         memory_zero(&row, sizeof(row)), settings_describe(first + 3, &row);
         check("startup table: the add row adds a program or a command, its two ways a program and a command, and is no entry",
               row.kind == UI_ROW_ADD && !row.order && !row.remove && string_equals((string_address)row.words, (string_address) "Program|Command") &&
@@ -6591,7 +6592,7 @@ static fn check_settings_actions(void)
                         settings.own.table->rows = 8;
                 settings.own.table->pid[settings.own.row] = (unsigned int)window_call(WINDOW_SYS_GETPID, 0, 0, 0, 0, 0, 0);
                 b32 ext_table = false, ext_sort = false, ext_menu = false;
-                b32 link_table = false, link_menu = false, link_remove = false, link_del = false, link_named = false, link_red = false, link_details = false;
+                b32 link_table = false, link_menu = false, link_remove = false, link_del = false, link_named = false, link_details = false;
 
                 // External devices: details columns, dense rows, column sort, right-click Allow/Deny + Copy + Copy row.
                 memory_copy(settings_large->said, ext_out, sizeof(ext_out) - 1);
@@ -6686,8 +6687,8 @@ static fn check_settings_actions(void)
                                      string_equals((string_address)settings.item[3][0].access, (string_address) "run files") &&
                                      string_equals((string_address)settings.item[3][0].detail, (string_address) "heard 5s ago from 10.0.0.2:41900");
                 }
-                // The right button on the Status cell: Copy Status, the row's Copy and Copy row, and Remove; on the Name cell, Copy Name
-                // takes the place of Copy, the same words.
+                // The right button on the Address cell: Copy Address, the row's Copy and Copy row, and Remove (the row has no button: its
+                // removal is its menu's); on the Name cell, Copy Name takes the place of Copy, the same words.
                 actions_cell(&settings_large->columns[3], link_row, 1, &x, &y);
                 actions_press(UI_POINTER_RIGHT, x, y, 0);
                 {
@@ -6702,7 +6703,7 @@ static fn check_settings_actions(void)
                 }
                 serial = settings.own.table->clip_offer_serial[settings.own.row];
                 actions_pick(0, 0);
-                link_menu = link_menu && actions_clipboard(serial, "Heard 5s ago");
+                link_menu = link_menu && actions_clipboard(serial, "10.0.0.2:41900");
                 actions_press(UI_POINTER_RIGHT, x, y, 0);
                 serial = settings.own.table->clip_offer_serial[settings.own.row];
                 actions_pick(1, 0);
@@ -6710,7 +6711,7 @@ static fn check_settings_actions(void)
                 actions_press(UI_POINTER_RIGHT, x, y, 0);
                 serial = settings.own.table->clip_offer_serial[settings.own.row];
                 actions_pick(2, 0);
-                link_menu = link_menu && actions_clipboard(serial, "zeta: Heard 5s ago");
+                link_menu = link_menu && actions_clipboard(serial, "zeta: 10.0.0.2:41900");
                 {
                         int nx, ny;
                         actions_cell(&settings_large->columns[3], link_row, 0, &nx, &ny);
@@ -6721,84 +6722,16 @@ static fn check_settings_actions(void)
                         actions_pick(0, 0);
                         link_named = link_named && actions_clipboard(serial, "zeta");
                 }
-                // The remove button under the hand is the error's red.
+                // A machine has no fold: its address is its row's cell and its grants its checks, and a press on it opens nothing under it.
                 {
-                        int at = settings_pos(link_row), from = -1, to = -1, top, foot;
-                        positive red = 0;
+                        struct ui_row described;
+                        int before = settings.list.count, my = ui_list_row_y(&settings.list, settings_pos(link_row)) + settings.list.tall[settings_pos(link_row)] / 2;
 
-                        for (int px = settings.list.x; px < settings.list.x + settings.list.w; px++)
-                                if (ui_list_part_at(&settings.ui, &settings.list, link_row, px) == 2)
-                                        to = px + 1, from = from < 0 ? px : from;
-                        top = ui_list_row_y(&settings.list, at), foot = top + settings.list.tall[at];
-                        if (from >= 0)
-                        {
-                                struct window_event over = {WINDOW_EVENT_MOTION, 0, (from + to) / 2, (top + foot) / 2};
-                                settings_event_at(&over);
-                                actions_clock += 1000000000ull, ui_kit.now = actions_clock, ui_kit.busy = 0;
-                                settings_draw_rows(settings_frames_whole, 0, 0);
-                                for (int py = top; py < foot; py++)
-                                        for (int px = from; px < to; px++)
-                                        {
-                                                unsigned int pixel = settings_frames_whole[(positive)py * SETTINGS_FRAMES_W + (positive)px];
-                                                red += ((pixel >> 16) & 255) > ((pixel >> 8) & 255) + 60;
-                                        }
-                                struct window_event away = {WINDOW_EVENT_MOTION, 0, 2, 2};
-                                settings_event_at(&away);
-                        }
-                        link_red = from >= 0 && red >= 8;
-                }
-                // A machine's details, its fold open: the right button on its Address copies the address, and Copy row the line, though
-                // the app gives those rows no copy of its own; a grant's switch copies its words.
-                {
-                        int at = settings_pos(link_row), my = ui_list_row_y(&settings.list, at) + settings.list.tall[at] / 2;
-                        int address = -1, grant = -1;
-
+                        ui_list_describe(&settings.list, link_row, &described);
                         actions_press(UI_POINTER_LEFT, (settings.page.left + settings.page.right) / 2, my, 0);
                         actions_show(link_row);
-                        for (int py = ui_list_row_y(&settings.list, at) + settings.list.tall[at] + 2; py < settings.height; py += 4)
-                        {
-                                int id = ui_list_hit(&settings.ui, &settings.list, (settings.page.left + settings.page.right) / 2, py);
-                                struct ui_row described;
-                                if (id < 0)
-                                        continue;
-                                ui_list_describe(&settings.list, id, &described);
-                                if (address < 0 && described.label && string_equals((string_address)described.label, (string_address)WORDS(settings_link_address)))
-                                        address = id;
-                                if (grant < 0 && described.label && string_equals((string_address)described.label, (string_address)WORDS(settings_link_files)))
-                                        grant = id;
-                        }
-                        link_details = address >= 0 && grant >= 0;
-                        if (address >= 0)
-                        {
-                                int ax, ay;
-                                actions_middle(address, &ax, &ay);
-                                actions_press(UI_POINTER_RIGHT, ax, ay, 0);
-                                link_details = link_details && settings.popup.open && settings.popup.list_row == address && actions_item(UI_LIST_MENU_COPY) == 0 &&
-                                               actions_item(UI_LIST_MENU_COPY_ROW) == 1 && settings.popup.menu.count == 2;
-                                serial = settings.own.table->clip_offer_serial[settings.own.row];
-                                actions_pick(0, 0);
-                                link_details = link_details && actions_clipboard(serial, "10.0.0.2:41900");
-                                actions_press(UI_POINTER_RIGHT, ax, ay, 0);
-                                serial = settings.own.table->clip_offer_serial[settings.own.row];
-                                actions_pick(1, 0);
-                                {
-                                        char line[96];
-                                        language_format(line, sizeof(line), "%s: %s", WORDS(settings_link_address), "10.0.0.2:41900");
-                                        link_details = link_details && actions_clipboard(serial, line);
-                                }
-                        }
-                        if (grant >= 0)
-                        {
-                                int gx, gy;
-                                actions_middle(grant, &gx, &gy);
-                                actions_press(UI_POINTER_RIGHT, gx, gy, 0);
-                                serial = settings.own.table->clip_offer_serial[settings.own.row];
-                                link_details = link_details && settings.popup.open && actions_item(UI_LIST_MENU_COPY) == 0;
-                                actions_pick(0, 0);
-                                link_details = link_details && actions_clipboard(serial, WORDS(settings_link_files));
-                        }
-                        actions_press(UI_POINTER_LEFT, (settings.page.left + settings.page.right) / 2, my, 0);
-                        actions_show(link_row);
+                        link_details = !described.expander && described.cells[1] && string_equals((string_address)described.cells[1], (string_address) "10.0.0.2:41900") &&
+                                       described.cell_check == 0xfu << SETTINGS_LINK_GRANT_COLUMN && settings.list.count == before;
                 }
                 settings.queued = 0;
                 actions_press(UI_POINTER_RIGHT, x, y, 0);
@@ -6825,7 +6758,7 @@ static fn check_settings_actions(void)
                 check("settings lists: External devices use file-explorer-style columns, dense rows, and sortable headers", ext_table && ext_sort);
                 check("settings lists: External devices right-click menu offers Allow/Deny, Copy Port (the cell under the hand), Copy, and Copy row", ext_menu);
                 check("settings lists: Waterlink linked machines use file-explorer-style columns and dense 28px rows", link_table);
-                check("settings lists: Waterlink right-click menu offers Copy, Copy row, and direct Remove (link remove)", link_menu && link_remove);
+                check("settings lists: Waterlink's right-click menu offers Copy Address, Copy, Copy row, and Remove (link remove)", link_menu && link_remove);
                 check("settings lists: Delete twice on a Waterlink linked machine confirms and removes it", link_del);
                 // A cell that is a check (the kit's, ui_row.cell_check): Waterlink's grants, a column each. Drawn as a box, on in the accent
                 // (zeta's Files) and a ring off (its Log); a press on a box is the list's toggled, which Settings takes at once as the grant's verb
@@ -6880,8 +6813,7 @@ static fn check_settings_actions(void)
                         check("kit cell checks: a press off the box's reach, or let go off it, turns nothing", misses);
                 }
                 check("settings lists: the right button on a cell offers Copy and its column's title, which copies that cell, and on the Name cell takes Copy's place", link_menu && link_named);
-                check("settings lists: the right button on a machine's details, its address and a grant's switch, copies them though the app gives those rows none", link_details);
-                check("settings lists: a row's remove button under the hand is the error's red", link_red);
+                check("settings lists: a machine has no fold: its address is its row's, its grants its checks, and a press opens nothing under it", link_details);
                 //      The kit's managed rows: a machine linked has the remove button (link remove, asking first); after them the add row,
                 //      whose ways are the two rows that are no rows of their own now (.way): a code shown (link pair) and one typed.
                 {
@@ -6905,7 +6837,7 @@ static fn check_settings_actions(void)
                                 settings_link_global_grants = 0x0fu; // this machine allows every grant
                                 memory_zero(&linked, sizeof(linked)), settings_describe(link_row, &linked);
                                 cells = linked.cell_check == grants && linked.cell_on == on && linked.cells[1] &&
-                                        string_equals((string_address)linked.cells[1], (string_address) "Heard 5s ago");
+                                        string_equals((string_address)linked.cells[1], (string_address) "10.0.0.2:41900") && !linked.expander;
                                 settings.hand = false;
                                 settings.list.toggled = link_row + 1, settings.list.toggled_cell = SETTINGS_LINK_GRANT_COLUMN + 2, settings_managed();
                                 virtual_kept = settings.queued == 0 && !(settings.item[3][0].grants & 4u) && !settings.list.toggled;

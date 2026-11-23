@@ -1335,6 +1335,31 @@ ${tab}}
 EOF
         settings_insert "$usb_config_c" "Moonwater: a HID interface's interrupt-IN endpoint is polled every" \
                 "${tab}/* Some buggy low-speed devices have Bulk endpoints, which is" before "$settings_work/hid-interval" "hid interval"
+        #       The same for the Xbox pads the first text names no class of: the
+        #       360's wireless receiver (xpad's vendor interface, subclass 0x5d
+        #       protocol 0x81, four pads on one dongle) and the first Xbox's
+        #       pads (the XID class 0x58, subclass 0x42). A text of its own, so a
+        #       kernel source patched by the first is patched by this one too,
+        #       with no unpack again.
+        cat > "$settings_work/hid-interval-xbox" <<EOF
+${tab}/*
+${tab} * Moonwater: usbcore.hid_interval reaches the 360's wireless receiver
+${tab} * (vendor subclass 0x5d protocol 0x81) and the first Xbox's pads (XID).
+${tab} */
+${tab}if (usb_hid_interval && usb_hid_interval <= 255 && usb_endpoint_xfer_int(d) &&
+${tab}    usb_endpoint_dir_in(d) &&
+${tab}    ((ifp->desc.bInterfaceClass == 0x58 && ifp->desc.bInterfaceSubClass == 0x42) ||
+${tab}     (ifp->desc.bInterfaceClass == USB_CLASS_VENDOR_SPEC &&
+${tab}      ifp->desc.bInterfaceSubClass == 0x5d && ifp->desc.bInterfaceProtocol == 0x81))) {
+${tab}${tab}n = udev->speed >= USB_SPEED_HIGH ?
+${tab}${tab}${tab}min(fls(usb_hid_interval * 8), 16) : (int)usb_hid_interval;
+${tab}${tab}if (n < endpoint->desc.bInterval)
+${tab}${tab}${tab}endpoint->desc.bInterval = n;
+${tab}}
+
+EOF
+        settings_insert "$usb_config_c" "Moonwater: usbcore.hid_interval reaches the 360's wireless receiver" \
+                "${tab}/* Some buggy low-speed devices have Bulk endpoints, which is" before "$settings_work/hid-interval-xbox" "hid interval xbox"
 fi
 
 rm -rf "$settings_work"

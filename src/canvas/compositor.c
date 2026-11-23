@@ -2196,6 +2196,10 @@ static void compositor_stats_log(void)
                               (positive)__atomic_load_n(&compositor_reader.direct, __ATOMIC_ACQUIRE), (positive)compositor_reader.late,
                               (positive)compositor_reader.late_most, (positive)compositor_reader.keys,
                               (positive)__atomic_load_n(&compositor_reader.handed, __ATOMIC_ACQUIRE));
+        if (compositor_access_reader.moved)
+                string_format(log, "compositor: the pads' sticks moved the plane %p times at their reports (%p of them 100 us or more after "
+                                   "the report's stamp, the latest %p us)\n",
+                              (positive)compositor_access_reader.moved, (positive)compositor_access_reader.late, (positive)(compositor_access_reader.late_most / 1000));
         for (unsigned int w = 0; w < 3; w++)
                 string_format(log, "compositor: %s: %p, on average %p us, worst %p us\n", lat_names[w], (positive)compositor.latency[w].count,
                               (positive)(compositor.latency[w].count ? compositor.latency[w].total / compositor.latency[w].count / 1000 : 0),
