@@ -414,10 +414,14 @@ static struct
         unsigned int cursor_gen;
         unsigned long cursor_serial;
         long lift_off, lifts, lifts_ended; // the host's lift-off switch (wayland_lifts_off); the windows lifted and let down (wayland_lift)
+        unsigned long xgen; // what the X window manager reads of the shim changed (wayland_xgen)
 } wayland;
 
 static const struct wayland_host *wayland_tables_by;
 WAYLAND_API void wayland_tables_host(const struct wayland_host *host) { wayland_tables_by = host; }
+/* A count that moves whenever what the X window manager's pass reads of the shim may have: an X window's surface made, its serial set, a
+   window's row opened or let go of, a client gone (xwm.c walks its windows again only when this, or the X server's own words, moved). */
+WAYLAND_API unsigned long wayland_xgen(void) { return wayland.xgen; }
 WAYLAND_API unsigned long wayland_u32_hash(unsigned long key, long buckets) { return (key * 0x9e3779b97f4a7c15ul >> 24) & (unsigned long)(buckets - 1); }
 
 static inline const struct wayland_host *wayland_table_host(void) { return wayland.host ? wayland.host : wayland_tables_by; }
@@ -1417,7 +1421,7 @@ static void wayland_row_release(struct wayland_client *c, struct wayland_surface
         if (s->row < 0)
                 return;
         wayland_texts_row_gone(c, s->row), wayland_stand_lose(s->row);
-        wayland.row[s->row] = (struct wayland_row){-1, -1, 0, -1, -1};
+        wayland.row[s->row] = (struct wayland_row){-1, -1, 0, -1, -1}, wayland.xgen++;
         if (wayland.pointer_row == s->row) wayland.pointer_row = -1;
         if (wayland.keyboard_row == s->row) wayland.keyboard_row = -1;
         wayland.host->row_close(wayland.host->context, s->row);
@@ -2933,7 +2937,7 @@ static int wayland_show(struct wayland_client *c, struct wayland_object *self, s
                         wayland.host->row_close(wayland.host->context, s->row), s->row = -1;
                 if (s->row < 0)
                         return s->row = -1, WAYLAND_OK;
-                wayland.row[s->row].client = c->slot, wayland.row[s->row].surface = wayland_surface_index(c, s), wayland.rows++;
+                wayland.row[s->row].client = c->slot, wayland.row[s->row].surface = wayland_surface_index(c, s), wayland.rows++, wayland.xgen++;
                 if (s->title[0] || s->app_id[0])
                         wayland.host->row_title(wayland.host->context, s->row, s->title[0] ? s->title : s->app_id, 0);
                 if (s->app_id[0] && wayland.host->row_app)
@@ -5841,7 +5845,7 @@ static int wayland_ext_request(struct wayland_client *c, struct wayland_object *
                 if (!(s = wayland_surface_of(c, a[1].slot))) return wayland_fail(c, self->id, WAYLAND_INVALID_OBJECT, "the surface is gone");
                 if (s->xsurface || (s->flags & WAYLAND_SURFACE_XDG) || s->role != WAYLAND_ROLE_NONE)
                         return wayland_fail(c, self->id, WLN_xwayland_shell_v1_error_role, "the surface has another role");
-                return s->xsurface = 1, wayland_surface_link(c, a[0].slot, s), wayland_xwayland_client(c->slot), WAYLAND_OK;
+                return s->xsurface = 1, wayland.xgen++, wayland_surface_link(c, a[0].slot, s), wayland_xwayland_client(c->slot), WAYLAND_OK;
         case WLI_xwayland_surface_v1:
                 if (op == WLQ_xwayland_surface_v1_set_serial)
                 {
@@ -5849,7 +5853,7 @@ static int wayland_ext_request(struct wayland_client *c, struct wayland_object *
                         if (!(s = wayland_surface_of(c, self - c->objects))) return wayland_fail(c, self->id, WAYLAND_INVALID_OBJECT, "the surface is gone");
                         if (s->u.xwin.serial_set) return wayland_fail(c, self->id, WLN_xwayland_surface_v1_error_already_associated, "the surface has a serial");
                         if (!serial) return wayland_fail(c, self->id, WLN_xwayland_surface_v1_error_invalid_serial, "the serial is zero");
-                        s->u.xwin.serial = serial, s->u.xwin.serial_set = 1;
+                        s->u.xwin.serial = serial, s->u.xwin.serial_set = 1, wayland.xgen++;
                 }
                 return WAYLAND_OK;
         case WLI_zwp_relative_pointer_manager_v1:
@@ -6236,7 +6240,7 @@ WAYLAND_API void wayland_drop(long slot)
 {
         struct wayland_client *c = wayland_client_of(slot);
         if (!c) return;
-        wayland.waiting -= c->waiting;
+        wayland.waiting -= c->waiting, wayland.xgen++;
         wayland_touch_forget(slot), wayland_token_forget(slot);
         if (wayland.drag.live && wayland.drag.client == slot) wayland.drag.source = -1, wayland_drag_end(1);
         else if (wayland.drag.live && wayland.drag.target == slot)

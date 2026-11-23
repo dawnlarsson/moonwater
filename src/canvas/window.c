@@ -449,10 +449,10 @@ struct windows
         unsigned int metric_maps, metric_map_hits, metric_map_misses, metric_wakes, metric_jobs, metric_job_mean;
         unsigned int metric_presents, metric_lists, metric_loops, metric_loop_idle, metric_loop_by[WINDOWS_LOOP_SOURCES];
         /* The loop's turns (from its wait's end to the top of the next), by how long each took (WINDOWS_US_BUCKETS, windows_us_bucket): since
-           the start and in the last second, the longest of each (us), and the microseconds a second the clients went unread while a card job ran
-           (the hold, clients-held). */
+           the start and in the last second, the longest of each (us), the microseconds a second the clients went unread while a card job ran
+           (the hold, clients-held), and the X windows the window manager's pass looked at a second. */
         unsigned int metric_turns[WINDOWS_US_BUCKETS], metric_turns_second[WINDOWS_US_BUCKETS], metric_turn_most, metric_turn_most_second;
-        unsigned int metric_clients_held;
+        unsigned int metric_clients_held, metric_xwm_looked;
         unsigned int metric_late, metric_missed, metric_lead, metric_present_most, metric_flip_jobs, metric_flip_jobs_most;
         unsigned int metric_waited, metric_maps_own_user, metric_maps_own_errno;
         unsigned int metric_gpu_jobs_scene;

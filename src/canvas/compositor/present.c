@@ -165,11 +165,13 @@ static unsigned int compositor_loop_source(unsigned int at, unsigned int doors, 
         The loop's turns by how long each took (moonwater debug's loop turns): a turn is from its wait's end (compositor_loop_turn_began) to the top of
         the next, whose clock the loop reads anyway, so a turn costs no clock of its own. They are counted as microseconds in WINDOWS_US_BUCKETS powers
         of two (windows_us_bucket). Beside them the time the loop went with its clients unread because a card job ran (compositor_card_clients_held, the
-        owner's clients-held), from the top of a held turn to the top of the next.
+        owner's clients-held), from the top of a held turn to the top of the next, and the X windows the window manager's pass looked at
+        (compositor_xwm_looked).
 */
 static unsigned int compositor_loop_spans[WINDOWS_US_BUCKETS], compositor_loop_spans_then[WINDOWS_US_BUCKETS];
 static unsigned long long compositor_loop_turn_most, compositor_loop_most_second;
 static unsigned long long compositor_loop_turn_began, compositor_loop_top, compositor_clients_held_ns, compositor_clients_held_then;
+static unsigned long long compositor_xwm_looked, compositor_xwm_looked_then;
 static b32 compositor_loop_top_held;
 
 // The top of the loop at now, held saying whether the clients go unread this turn: the turn that ended counted, and the held time.
@@ -210,10 +212,11 @@ static void compositor_loop_tick(unsigned long long now, b32 idle)
                         table->metric_turn_most = (unsigned int)(compositor_loop_turn_most / 1000ull);
                         table->metric_turn_most_second = (unsigned int)(compositor_loop_most_second / 1000ull);
                         table->metric_clients_held = windows_metric_rate((compositor_clients_held_ns - compositor_clients_held_then) / 1000ull, span);
+                        table->metric_xwm_looked = windows_metric_rate(compositor_xwm_looked - compositor_xwm_looked_then, span);
                 }
                 for (unsigned int k = 0; k < WINDOWS_US_BUCKETS; k++)
                         compositor_loop_spans_then[k] = compositor_loop_spans[k];
-                compositor_loop_most_second = 0, compositor_clients_held_then = compositor_clients_held_ns;
+                compositor_loop_most_second = 0, compositor_clients_held_then = compositor_clients_held_ns, compositor_xwm_looked_then = compositor_xwm_looked;
                 for (unsigned int k = 0; table && k < WINDOWS_LOOP_SOURCES; k++)
                         table->metric_loop_by[k] = windows_metric_rate(compositor_loop_by[k] - compositor_loop_by_second[k], span),
                         compositor_loop_by_second[k] = compositor_loop_by[k];

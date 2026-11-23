@@ -242,9 +242,17 @@ struct compositor_xwm
         struct compositor_xwm_wdrag wdrag;
         struct compositor_xwm_xdrag xdrag;
         struct { unsigned int requestor, property, time; } save;
+        /* The pass walks every window only when something it reads of them may have changed (xwm_pass_one): the X server spoke, or the shim's
+           side of them did (wayland_xgen); between such walks it walks the windows that had a row at the last one (bound, a window's index and
+           id), for what the compositor's side changes of them (a close, the place and size, the state). */
+        int walk_all;
+        unsigned long walk_gen;
+        long bound_count;
+        struct wayland_table bound_table;
 };
+struct compositor_xwm_bound { long at; unsigned int id; };
 
-#define COMPOSITOR_XWM_FRESH {.fd = -1, .poll_at = -1, .focus_row = -2, .client = -1, .client_pid = -1, \
+#define COMPOSITOR_XWM_FRESH {.fd = -1, .poll_at = -1, .focus_row = -2, .client = -1, .client_pid = -1, .walk_all = 1, \
                               .sel = {{0, 0, 0, 0, 0, -1}, {0, 0, 0, 0, 0, -1}, {0, 0, 0, 0, 0, -1}}, \
                               .xdrag = {.proxy_row = -1}}
 static const struct compositor_xwm compositor_xwm_fresh = COMPOSITOR_XWM_FRESH;
@@ -254,6 +262,7 @@ static struct compositor_xwm_steam compositor_xwm_steam;
 static unsigned int compositor_xwm_counted[4];
 static void compositor_xwm_counted_refusal(void); // below: a window's own ask the person's choice outweighs, counted and said
 static int compositor_xwm_listen_fd = -1, compositor_xwm_listen_at = -1, compositor_xwm_uid;
+static b32 compositor_xwm_walk_every; // every pass walks every window, as it did (the owner's /run/moonwater/xwm-walk-all, looked for at the start)
 
 static struct compositor_xwm *compositor_xwm_slot_of_row(long row);
 static struct compositor_xwm *compositor_xwm_first_ready(void);
@@ -3597,6 +3606,7 @@ static void compositor_xwm_close_rows(struct compositor_xwm *x)
                 xwm_release(x, w);
         }
         x->pending_at = x->pending_count = 0, x->focus_row = -2;
+        wayland_table_drop(&x->bound_table), x->bound_count = 0, x->walk_all = 1;
         for (long at = 0; at < x->in_table.count; at++)
                 if (x->ins[at].window)
                 {
@@ -3750,6 +3760,7 @@ static void compositor_xwm_start(void)
         compositor_xwm_register_hooks();
         if (compositor_xwm_listen_fd >= 0)
                 return;
+        compositor_xwm_walk_every = compositor_flag_exists((string_address) "/run/moonwater/xwm-walk-all");
         memory_zero(address, sizeof address);
         address[0] = 1;
         memory_copy(address + 2, COMPOSITOR_XWM_PATH, (positive)length);
@@ -3808,13 +3819,67 @@ static unsigned int compositor_xwm_poll(struct compositor_poll *wanted, unsigned
         return count;
 }
 
+/*
+        What the compositor's side changes of a window with a row (xwm_pass_one, every pass): a close asked of it, its place, size and state told to
+        the X server, and a transient raised over its parent once that has a row.
+*/
+static void xwm_window_turn(struct compositor_xwm *x, struct compositor_xwm_window *w)
+{
+        if (compositor_xwm_close_owed(w))
+        {
+                w->closes = compositor.close_asks[w->row];
+                if (compositor_xwm_is_popup(w))
+                        compositor_xwm_window_op(x, XWM_OP_UNMAP_WINDOW, w->id);
+                else if ((w->protocols & COMPOSITOR_XWM_PROTO_DELETE) && w->closes < 2)
+                        compositor_xwm_protocol(x, w->id, x->atoms[COMPOSITOR_XWM_A_DELETE]);
+                else
+                {
+                        compositor_xwm_window_op(x, XWM_OP_DESTROY_WINDOW, w->id);
+                        if (w->closes >= 2 && w->owner > 1 && w->owner <= 0x7fffffffu)
+                                compositor_call(syscall(kill), (positive)w->owner, w->closes >= 3 ? 9 : 15, 0, 0, 0, 0);
+                }
+        }
+        if (!compositor_xwm_is_popup(w))
+                compositor_xwm_sync(x, w);
+        if (w->transient && !(w->state & COMPOSITOR_XWM_RAISED))
+        {
+                struct compositor_xwm_window *parent = xwm_find(x, w->transient, 0);
+                if (parent && parent->row >= 0 && parent->row < COMPOSITOR_ROWS)
+                {
+                        w->state |= COMPOSITOR_XWM_RAISED;
+                        compositor_owner[w->row] = parent->row + 1;
+                        compositor_raise(w->row);
+                        if ((int)compositor.focus == parent->row && !w->no_input && !compositor_xwm_is_popup(w))
+                                compositor_focus(w->row);
+                }
+        }
+}
+
+// A window with a row, kept for the passes between whole walks (bound_table, made room in as it fills): when there is no room, every pass walks all.
+static void xwm_bound_add(struct compositor_xwm *x, long at, unsigned int id)
+{
+        wayland_tables_host(&compositor_wl_host);
+        x->bound_table.unit = sizeof(struct compositor_xwm_bound);
+        if (!wayland_table_reach(&x->bound_table, x->bound_count + 1))
+        {
+                x->walk_all = 1;
+                return;
+        }
+        ((struct compositor_xwm_bound *)x->bound_table.at)[x->bound_count++] = (struct compositor_xwm_bound){at, id};
+}
+
 static void xwm_pass_one(struct compositor_xwm *x, const struct compositor_poll *wanted)
 {
         short returned;
+        unsigned long gen;
+        long unread;
         if (x->poll_at < 0)
                 return;
         returned = wanted[x->poll_at].returned;
         compositor_xwm_flush(x);
+        // The X server spoke (or what it said before is read now): every window is walked.
+        if (returned & (COMPOSITOR_POLLIN | COMPOSITOR_POLLHUP | COMPOSITOR_POLLERR))
+                x->walk_all = 1;
         if (x->fd >= 0 && (returned & COMPOSITOR_POLLIN))
                 compositor_xwm_read(x);
         else if (x->fd >= 0 && (returned & (COMPOSITOR_POLLHUP | COMPOSITOR_POLLERR)))
@@ -3828,7 +3893,10 @@ static void xwm_pass_one(struct compositor_xwm *x, const struct compositor_poll 
         if (x->fd < 0 || !x->ready)
                 return;
         compositor_xwm_flush(x);
+        unread = x->in_len;
         compositor_xwm_messages(x);
+        if (x->in_len != unread)
+                x->walk_all = 1;
         if (x->fd >= 0 && x->broken)
         {
                 xwm_drop(x, "protocol or queue error");
@@ -3836,45 +3904,43 @@ static void xwm_pass_one(struct compositor_xwm *x, const struct compositor_poll 
         }
         compositor_xwm_selections_pass(x);
         compositor_xwm_dnd_pass(x);
-        for (long at = 0; at < x->window_table.count && x->fd >= 0 && !x->broken; at++)
+        gen = wayland_xgen();
+        if (compositor_xwm_walk_every || x->walk_all || gen != x->walk_gen)
         {
-                struct compositor_xwm_window *w = &x->window[at];
-                if (!w->id)
-                        continue;
-                if (w->row >= 0 && (!(w->state & COMPOSITOR_XWM_SERIAL) || !wayland_row_has_xserial(w->row, compositor_xwm_server(x), w->serial)))
-                        xwm_unmapped(x, w);
-                compositor_xwm_resolve(x, w);
-                if (w->row < 0 || w->row >= COMPOSITOR_ROWS)
-                        continue;
-                if (compositor_xwm_close_owed(w))
+                // Every window: what the X server or the shim said of it since the last walk (a surface's row gone, a window to adopt or bind).
+                x->walk_all = 0, x->walk_gen = gen, x->bound_count = 0;
+                for (long at = 0; at < x->window_table.count && x->fd >= 0 && !x->broken; at++)
                 {
-                        w->closes = compositor.close_asks[w->row];
-                        if (compositor_xwm_is_popup(w))
-                                compositor_xwm_window_op(x, XWM_OP_UNMAP_WINDOW, w->id);
-                        else if ((w->protocols & COMPOSITOR_XWM_PROTO_DELETE) && w->closes < 2)
-                                compositor_xwm_protocol(x, w->id, x->atoms[COMPOSITOR_XWM_A_DELETE]);
-                        else
-                        {
-                                compositor_xwm_window_op(x, XWM_OP_DESTROY_WINDOW, w->id);
-                                if (w->closes >= 2 && w->owner > 1 && w->owner <= 0x7fffffffu)
-                                        compositor_call(syscall(kill), (positive)w->owner, w->closes >= 3 ? 9 : 15, 0, 0, 0, 0);
-                        }
-                }
-                if (!compositor_xwm_is_popup(w))
-                        compositor_xwm_sync(x, w);
-                if (w->transient && !(w->state & COMPOSITOR_XWM_RAISED))
-                {
-                        struct compositor_xwm_window *parent = xwm_find(x, w->transient, 0);
-                        if (parent && parent->row >= 0 && parent->row < COMPOSITOR_ROWS)
-                        {
-                                w->state |= COMPOSITOR_XWM_RAISED;
-                                compositor_owner[w->row] = parent->row + 1;
-                                compositor_raise(w->row);
-                                if ((int)compositor.focus == parent->row && !w->no_input && !compositor_xwm_is_popup(w))
-                                        compositor_focus(w->row);
-                        }
+                        struct compositor_xwm_window *w = &x->window[at];
+                        if (!w->id)
+                                continue;
+                        compositor_xwm_looked++;
+                        if (w->row >= 0 && (!(w->state & COMPOSITOR_XWM_SERIAL) || !wayland_row_has_xserial(w->row, compositor_xwm_server(x), w->serial)))
+                                xwm_unmapped(x, w);
+                        compositor_xwm_resolve(x, w);
+                        if (w->row < 0 || w->row >= COMPOSITOR_ROWS)
+                                continue;
+                        xwm_window_turn(x, w);
+                        if (w->id && w->row >= 0 && w->row < COMPOSITOR_ROWS)
+                                xwm_bound_add(x, at, w->id);
                 }
         }
+        else
+                // The windows with a row alone: nothing but the compositor's side of them can have changed. One that is not as the walk left it
+                // (let go of, or its row gone) has every window walked at the next pass.
+                for (long k = 0; k < x->bound_count && x->fd >= 0 && !x->broken; k++)
+                {
+                        const struct compositor_xwm_bound *b = &((const struct compositor_xwm_bound *)x->bound_table.at)[k];
+                        struct compositor_xwm_window *w = b->at < x->window_table.count ? &x->window[b->at] : 0;
+
+                        if (!w || w->id != b->id || w->row < 0 || w->row >= COMPOSITOR_ROWS)
+                        {
+                                x->walk_all = 1;
+                                continue;
+                        }
+                        compositor_xwm_looked++;
+                        xwm_window_turn(x, w);
+                }
         if (x->fd >= 0 && x->broken)
         {
                 xwm_drop(x, "protocol or queue error");

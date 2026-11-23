@@ -774,6 +774,7 @@ static b32 host_debug(string_address address_to arguments, positive count)
         host_debug_us_times("  loop turns      ", "the last second", table->metric_turns_second, table->metric_turn_most_second);
         host_say(log, "  clients unread  %p us a second while card jobs ran (touch /run/moonwater/clients-held before the compositor starts to hold them, as it did)\n",
                  (positive)table->metric_clients_held);
+        host_say(log, "  xwm pass        %p X windows looked at a second\n", (positive)table->metric_xwm_looked);
         host_power_block();
         // The issue board: every issue raised, one line each, so the terminal and Settings tell the same story.
         {
