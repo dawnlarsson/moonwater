@@ -1748,10 +1748,223 @@ static int bench_compare(void *shim, int argc, char **argv)
         return 0;
 }
 
+/*
+        hunt: the byte hunts (strlen, strnlen, memchr, memrchr, strchr, strchrnul, strrchr, rawmemchr), ticks a call, the C
+        library's against every shim named after "hunt" (this tree's, a baseline's, one built capped to a lower tier), each
+        measured in turn at each row so that a drift of the machine reaches every column alike.
+
+        fixed: one length a row, 1 B to 64 KiB, the same call over and over, so every branch in the body is learned. The string
+        starts 35 bytes into a page, off every vector boundary. "hit" puts the byte at the row's length less one (memrchr: that
+        far from the end of a 64 KiB count; memchr: with a count to the end of the buffer), "absent" ends the call at the length
+        (the count, or the terminator).
+
+        random: the length drawn log-uniform from 1 to 512 and from 1 to 8192 at every call. A pool of strings is laid end to
+        end, each with its own length and so its own alignment, and visited in an order drawn once (65536 picks) and read as an
+        array, so the predictor meets a length it cannot know and the only work between calls is two loads.
+
+        Ticks are rdtsc's, the best of 64 rounds, nothing subtracted: both sides pay the same loop around the call.
+*/
+enum { HUNT_STRING, HUNT_CHR_HIT, HUNT_RLAST, HUNT_MEMR_HIT };
+enum { SHAPE_LEN, SHAPE_NLEN, SHAPE_FIND, SHAPE_CHR };
+static const struct hunt_case {
+        const char *name, *symbol;
+        int layout, shape, big_count;
+} hunt_cases[] = {
+        {"strlen", "strlen", HUNT_STRING, SHAPE_LEN, 0},
+        {"strnlen ends first", "strnlen", HUNT_STRING, SHAPE_NLEN, 1},
+        {"strnlen bound first", "strnlen", HUNT_CHR_HIT, SHAPE_NLEN, 0},
+        {"memchr absent", "memchr", HUNT_STRING, SHAPE_FIND, 0},
+        {"memchr hit", "memchr", HUNT_CHR_HIT, SHAPE_FIND, 1},
+        {"memrchr absent", "memrchr", HUNT_STRING, SHAPE_FIND, 0},
+        {"memrchr hit", "memrchr", HUNT_MEMR_HIT, SHAPE_FIND, 1},
+        {"strchr absent", "strchr", HUNT_STRING, SHAPE_CHR, 0},
+        {"strchr hit", "strchr", HUNT_CHR_HIT, SHAPE_CHR, 0},
+        {"strchrnul absent", "strchrnul", HUNT_STRING, SHAPE_CHR, 0},
+        {"strchrnul hit", "strchrnul", HUNT_CHR_HIT, SHAPE_CHR, 0},
+        {"strrchr absent", "strrchr", HUNT_STRING, SHAPE_CHR, 0},
+        {"strrchr hit last", "strrchr", HUNT_RLAST, SHAPE_CHR, 0},
+        {"rawmemchr", "rawmemchr", HUNT_CHR_HIT, SHAPE_CHR, 0},
+};
+#define HUNT_ORDER 65536u
+#define HUNT_ROOM (4u << 20)
+static unsigned hunt_order[HUNT_ORDER];
+static const char *hunt_ptr[4096];
+static size_t hunt_arg[4096], hunt_len[4096];
+static volatile size_t hunt_sink;
+
+/* A byte that is none of the three the layouts mean something by (0, the hunted 0xee). */
+static unsigned char hunt_plain(void) { return (unsigned char)(1 + next() % 200); }
+
+/*
+        Lay out count strings of the lengths in hunt_len at buffer (past its first 64 bytes), end to end, the way layout says,
+        and fill hunt_ptr and hunt_arg for the case.
+*/
+static void hunt_lay(unsigned char *buffer, size_t room, const struct hunt_case *c, size_t count, size_t first)
+{
+        unsigned char *p = buffer + first, *end = buffer + room - 64;
+        /* Fresh bytes over all that the strings take and a page more: every answer is inside a string's own bytes, so what
+           an earlier layout left further on is never reached by one (bench_hunt filled the whole buffer once). */
+        size_t used = first + PAGE;
+        for (size_t j = 0; j < count; j++)
+                used += hunt_len[j] + 1;
+        for (unsigned char *q = buffer; q < buffer + used && q < end; q++)
+                *q = hunt_plain();
+        for (size_t j = 0; j < count; j++) {
+                size_t n = hunt_len[j];
+                hunt_ptr[j] = (const char *)p;
+                switch (c->layout) {
+                case HUNT_STRING:  p[n] = 0; p += n + 1; break;                 // n bytes, then the end
+                case HUNT_CHR_HIT: p[n - 1] = 0xee; p += n; break;              // the byte at n - 1, no end until the buffer's
+                case HUNT_RLAST:   p[n - 1] = 0xee; p[n] = 0; p += n + 1; break;
+                case HUNT_MEMR_HIT: p[0] = 0xee; p += n; break;                 // the byte at each start: n back from the next
+                }
+        }
+        *end = 0;
+        for (size_t j = 0; j < count; j++) {
+                size_t n = hunt_len[j];
+                if (c->layout == HUNT_MEMR_HIT) {
+                        hunt_arg[j] = (size_t)((const unsigned char *)hunt_ptr[j] + n - buffer);
+                        hunt_ptr[j] = (const char *)buffer;
+                } else
+                        hunt_arg[j] = c->big_count ? (c->shape == SHAPE_NLEN ? (size_t)1 << 30 : (size_t)(end - (const unsigned char *)hunt_ptr[j])) : n;
+        }
+}
+
+static double hunt_time(const struct hunt_case *c, void *f, int calls)
+{
+        uint64_t best = ~0ull;
+        unsigned k = 0;
+        for (int round = 0; round < 64; round++) {
+                uint64_t t0 = ticks();
+                switch (c->shape) {
+                case SHAPE_LEN:
+                        for (int i = 0; i < calls; i++) {
+                                unsigned j = hunt_order[k++ % HUNT_ORDER];
+                                hunt_sink = ((len_fn)f)(hunt_ptr[j]);
+                        }
+                        break;
+                case SHAPE_NLEN:
+                        for (int i = 0; i < calls; i++) {
+                                unsigned j = hunt_order[k++ % HUNT_ORDER];
+                                hunt_sink = ((nlen_fn)f)(hunt_ptr[j], hunt_arg[j]);
+                        }
+                        break;
+                case SHAPE_FIND:
+                        for (int i = 0; i < calls; i++) {
+                                unsigned j = hunt_order[k++ % HUNT_ORDER];
+                                hunt_sink = (size_t)((find_fn)f)(hunt_ptr[j], 0xee, hunt_arg[j]);
+                        }
+                        break;
+                case SHAPE_CHR:
+                        for (int i = 0; i < calls; i++) {
+                                unsigned j = hunt_order[k++ % HUNT_ORDER];
+                                hunt_sink = (size_t)((schr_fn)f)(hunt_ptr[j], 0xee);
+                        }
+                        break;
+                }
+                uint64_t t = ticks() - t0;
+                if (t < best)
+                        best = t;
+        }
+        return (double)best / calls;
+}
+
+/* What one call answers, the same on every side or the row is not worth its numbers. */
+static size_t hunt_answer(const struct hunt_case *c, void *f, size_t j)
+{
+        switch (c->shape) {
+        case SHAPE_LEN: return ((len_fn)f)(hunt_ptr[j]);
+        case SHAPE_NLEN: return ((nlen_fn)f)(hunt_ptr[j], hunt_arg[j]);
+        case SHAPE_FIND: return (size_t)((find_fn)f)(hunt_ptr[j], 0xee, hunt_arg[j]);
+        default: return (size_t)((schr_fn)f)(hunt_ptr[j], 0xee);
+        }
+}
+
+static void hunt_row(const struct hunt_case *c, void **sides, int count, const char *mode, size_t size, int calls, size_t pool)
+{
+        double t[16];
+        for (size_t j = 0; j < pool; j++)
+                for (int s = 1; s < count; s++)
+                        if (hunt_answer(c, sides[s], j) != hunt_answer(c, sides[0], j)) {
+                                printf("hunt: WRONG %s %s %zu: side %d answers %zu, the C library %zu\n", mode, c->name, hunt_len[j], s,
+                                       hunt_answer(c, sides[s], j), hunt_answer(c, sides[0], j));
+                                failures++;
+                                return;
+                        }
+        for (int s = 0; s < count; s++)
+                t[s] = 1e30;
+        for (int pass = 0; pass < 2; pass++)
+                for (int s = 0; s < count; s++) {
+                        double v = hunt_time(c, sides[s], calls);
+                        if (v < t[s])
+                                t[s] = v;
+                }
+        printf("%-6s %-20s %6zu %8.1f", mode, c->name, size, t[0]);
+        for (int s = 1; s < count; s++)
+                printf(" %8.1f %5.2f", t[s], t[0] / t[s]);
+        printf("\n");
+}
+
+static void bench_hunt(void **shims, int shim_count, const char *only)
+{
+        static const size_t sizes[] = {1, 2, 3, 4, 6, 8, 12, 16, 20, 24, 31, 32, 40, 48, 56, 63, 64, 80, 96, 112, 128, 160, 192,
+                                       224, 256, 320, 384, 448, 512, 640, 768, 1024, 1536, 2048, 3072, 4096, 6144, 8192, 12288,
+                                       16384, 32768, 65536};
+        unsigned char *all = mmap(0, HUNT_ROOM + 2 * PAGE, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        if (all == MAP_FAILED) {
+                perror("mmap");
+                exit(2);
+        }
+        unsigned char *buffer = all + PAGE;
+        mprotect(all, PAGE, PROT_NONE);
+        mprotect(buffer + HUNT_ROOM, PAGE, PROT_NONE);
+        for (size_t i = 0; i < HUNT_ROOM; i++)
+                buffer[i] = hunt_plain();
+        printf("ticks a call; columns: the C library, then each shim and the C library's ticks over its (above 1.00 the shim wins)\n");
+        for (size_t ci = 0; ci < sizeof hunt_cases / sizeof *hunt_cases; ci++) {
+                const struct hunt_case *c = &hunt_cases[ci];
+                if (only && strcmp(only, c->symbol))
+                        continue;
+                void *sides[16];
+                sides[0] = dlsym(RTLD_DEFAULT, c->symbol);
+                for (int s = 0; s < shim_count; s++)
+                        sides[s + 1] = dlsym(shims[s], c->symbol);
+                for (size_t si = 0; si < sizeof sizes / sizeof *sizes; si++) {
+                        size_t n = sizes[si];
+                        memset(hunt_order, 0, sizeof hunt_order);
+                        hunt_len[0] = n;
+                        hunt_lay(buffer, HUNT_ROOM, c, 1, (c->layout == HUNT_MEMR_HIT ? 65536 - n : 0) + PAGE + 35);
+                        int calls = n <= 256 ? 4096 : (int)(4096 * 256 / n) < 16 ? 16 : (int)(4096 * 256 / n);
+                        hunt_row(c, sides, shim_count + 1, "fixed", n, calls, 1);
+                }
+                static const size_t ranges[] = {512, 8192};
+                for (int r = 0; r < 2; r++) {
+                        size_t pool = ranges[r] == 512 ? 256 : 128;
+                        uint64_t keep = seed;
+                        seed = 0x2545f4914f6cdd1dull + ranges[r];       // the same lengths and order on every side and run
+                        /* log-uniform: a power of two drawn evenly, then a place drawn evenly inside its octave */
+                        unsigned octaves = ranges[r] == 512 ? 9 : 13;
+                        for (size_t j = 0; j < pool; j++) {
+                                uint64_t x = next() % ((uint64_t)octaves << 16);
+                                size_t n = (size_t)(((1ull << (x >> 16)) * (65536 + (x & 0xffff))) >> 16);
+                                hunt_len[j] = n < 1 ? 1 : n > ranges[r] ? ranges[r] : n;
+                        }
+                        for (unsigned i = 0; i < HUNT_ORDER; i++)
+                                hunt_order[i] = (unsigned)(next() % pool);
+                        seed = keep;
+                        hunt_lay(buffer, HUNT_ROOM, c, pool, 64);
+                        char mode[16];
+                        snprintf(mode, sizeof mode, "r%zu", ranges[r]);
+                        hunt_row(c, sides, shim_count + 1, mode, ranges[r], ranges[r] == 512 ? 4096 : 1024, pool);
+                }
+        }
+        munmap(all, HUNT_ROOM + 2 * PAGE);
+}
+
 int main(int argc, char **argv)
 {
         if (argc < 2) {
-                fprintf(stderr, "libc_shim SHIM.so [bench]\n");
+                fprintf(stderr, "libc_shim SHIM.so [bench | hunt [OTHER.so ...]]\n");
                 return 2;
         }
         setvbuf(stdout, 0, _IONBF, 0);  // what was said before a crash is kept
@@ -1767,6 +1980,19 @@ int main(int argc, char **argv)
         if (argc > 2 && !strcmp(argv[2], "bench")) {
                 bench(shim);
                 return 0;
+        }
+        if (argc > 2 && !strcmp(argv[2], "hunt")) {
+                /* libc_shim SHIM.so hunt [OTHER.so ...]: LIBC_SHIM_ONLY=strlen keeps the rows of one name */
+                void *shims[15] = {shim};
+                int count = 1;
+                for (int i = 3; i < argc && count < 15; i++)
+                        if (!(shims[count++] = dlopen(argv[i], RTLD_NOW | RTLD_LOCAL))) {
+                                fprintf(stderr, "dlopen: %s\n", dlerror());
+                                return 2;
+                        }
+                const char *only = getenv("LIBC_SHIM_ONLY");
+                bench_hunt(shims, count, only && *only ? only : 0);
+                return failures != 0;
         }
         make_lengths();
         /* every name src/shim/libc.map gives (test/libc_shim.sh also holds the library's exports to the map) */

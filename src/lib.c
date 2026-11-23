@@ -7340,7 +7340,17 @@ __asm__(
     //       a body that uses them in zmm asks cpu_has_avx512 as well.
     //
     "bt $9, %ecx\n   setc cpu_has_vaes(%rip)\n   bt $10, %ecx\n   setc cpu_has_vpclmul(%rip)\n   bt $5, %ebx\n   jnc 9f  # no AVX2\n"
+    //
+    //       LIBRARY_CPU_CAP is for measurement and never for a build that ships: 1 stops here at AVX2 and 0 before it,
+    //       so one machine times the bodies an older one runs (test/libc_shim.sh hunt builds the capped libraries).
+    //
+#if defined(LIBRARY_CPU_CAP) && LIBRARY_CPU_CAP < 1
+    "jmp 9f\n"
+#endif
     "movb $1, cpu_has_avx2(%rip)\n"
+#if defined(LIBRARY_CPU_CAP) && LIBRARY_CPU_CAP < 2
+    "jmp 9f\n"
+#endif
     //
     //       And again for the wider registers, which need more of both: the
     //       processor has to have F, BW and VL rather than only the first,
