@@ -8,6 +8,7 @@
 # machine-made 2026-11-22 (a registry text that had no keyed line), not yet read by a person: =An experimental speed-up. ...
 # machine-made 2026-11-22 (the Waterlink words of Settings), not yet read by a person: settings_link_address settings_link_disabled settings_link_files settings_link_files_about settings_link_group settings_link_latency settings_link_log settings_link_log_about settings_link_mismatch settings_link_no_key settings_link_offline settings_link_online settings_link_run settings_link_run_about settings_link_self settings_link_shell settings_link_shell_about settings_link_traffic
 # machine-made 2026-11-23 (the startup programs of Settings), not yet read by a person: settings_startup_add settings_startup_add_keys settings_startup_command settings_startup_hint settings_startup_keys settings_startup_program settings_startup_type
+# machine-made 2026-11-23 (the add row of Waterlink's linked machines), not yet read by a person: settings_link_add settings_link_add_keys settings_link_show settings_link_stop settings_link_type
 @language tr
 @name Türkçe
 @translated machine
@@ -331,6 +332,8 @@ settings_item_open	4429	Enter bağlanır ve kaydeder
 settings_item_saved	3ffd	kayıtlı: Enter parolayı yeniden sorar, Delete unutturur
 settings_joined	1050	bağlı
 settings_kept	4759	saklı
+settings_link_add	cf33	Bir makine bağla
+settings_link_add_keys	73ee	Enter başka bir makine için bir kod gösterir veya başka bir makinenin kodunu alır
 settings_link_address	60f3	Adres
 settings_link_disabled	08dd	Bu makinede genel olarak devre dışı
 settings_link_files	b058	Dosya sistemi erişimi
@@ -348,7 +351,10 @@ settings_link_run_about	ba14	Tek tek uzak komutlar çalıştırma
 settings_link_self	bc70	bu makine
 settings_link_shell	0fbd	Etkileşimli kabuk
 settings_link_shell_about	5034	Uzak bir terminal oturumu açma
+settings_link_show	e2fc	Bir kod göster
+settings_link_stop	0c69	Eşleştirmeyi durdur
 settings_link_traffic	9266	Trafik
+settings_link_type	978e	Başka bir makinenin kodunu yaz
 settings_map_drag	125f	Ekranı yerleştirmek için bırakın
 settings_map_fit	797e	Tüm ekranları göster
 settings_map_hint	0257	Bir ekranı taşımak için sürükleyin. Görünümü kaydırmak için ızgarayı sürükleyin, yakınlaştırmak için kaydırın.

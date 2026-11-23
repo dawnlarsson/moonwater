@@ -8,6 +8,7 @@
 # machine-made 2026-11-22 (a registry text that had no keyed line), not yet read by a person: =An experimental speed-up. ...
 # machine-made 2026-11-22 (the Waterlink words of Settings), not yet read by a person: settings_link_address settings_link_disabled settings_link_files settings_link_files_about settings_link_group settings_link_latency settings_link_log settings_link_log_about settings_link_mismatch settings_link_no_key settings_link_offline settings_link_online settings_link_run settings_link_run_about settings_link_self settings_link_shell settings_link_shell_about settings_link_traffic
 # machine-made 2026-11-23 (the startup programs of Settings), not yet read by a person: settings_startup_add settings_startup_add_keys settings_startup_command settings_startup_hint settings_startup_keys settings_startup_program settings_startup_type
+# machine-made 2026-11-23 (the add row of Waterlink's linked machines), not yet read by a person: settings_link_add settings_link_add_keys settings_link_show settings_link_stop settings_link_type
 @language pl
 @name Polski
 @translated machine
@@ -331,6 +332,8 @@ settings_item_open	4429	Enter łączy i zapisuje
 settings_item_saved	3ffd	zapisano: Enter ponownie prosi o hasło, Delete zapomina
 settings_joined	1050	połączono
 settings_kept	4759	zapamiętane
+settings_link_add	cf33	Połącz maszynę
+settings_link_add_keys	73ee	Enter pokazuje kod dla innej maszyny albo przyjmuje kod innej maszyny
 settings_link_address	60f3	Adres
 settings_link_disabled	08dd	Wyłączone globalnie na tej maszynie
 settings_link_files	b058	Dostęp do systemu plików
@@ -348,7 +351,10 @@ settings_link_run_about	ba14	Wykonywanie pojedynczych poleceń zdalnych
 settings_link_self	bc70	ta maszyna
 settings_link_shell	0fbd	Interaktywna powłoka
 settings_link_shell_about	5034	Otwieranie zdalnej sesji terminala
+settings_link_show	e2fc	Pokaż kod
+settings_link_stop	0c69	Zatrzymaj parowanie
 settings_link_traffic	9266	Ruch sieciowy
+settings_link_type	978e	Wpisz kod innej maszyny
 settings_map_drag	125f	Puść, aby umieścić ekran
 settings_map_fit	797e	Pokaż wszystkie ekrany
 settings_map_hint	0257	Przeciągnij ekran, aby go przesunąć. Przeciągnij siatkę, aby przesunąć widok, przewiń, aby powiększyć.

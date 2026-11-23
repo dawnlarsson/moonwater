@@ -6776,6 +6776,8 @@ LANGUAGE_ID(settings_item_open, "Enter joins it, and saves it") \
 LANGUAGE_ID(settings_item_saved, "saved: Enter types its passphrase again, Delete forgets it") \
 LANGUAGE_ID(settings_joined, "joined") \
 LANGUAGE_ID(settings_kept, "kept") \
+LANGUAGE_ID(settings_link_add, "Link a machine") \
+LANGUAGE_ID(settings_link_add_keys, "Enter shows a code for another machine to type, or takes the code another machine shows") \
 LANGUAGE_ID(settings_link_address, "Address") \
 LANGUAGE_ID(settings_link_disabled, "Disabled globally on this machine") \
 LANGUAGE_ID(settings_link_files, "Filesystem access") \
@@ -6793,7 +6795,10 @@ LANGUAGE_ID(settings_link_run_about, "Execute single remote commands") \
 LANGUAGE_ID(settings_link_self, "this machine") \
 LANGUAGE_ID(settings_link_shell, "Interactive shell") \
 LANGUAGE_ID(settings_link_shell_about, "Open a remote terminal session") \
+LANGUAGE_ID(settings_link_show, "Show a code") \
+LANGUAGE_ID(settings_link_stop, "Stop pairing") \
 LANGUAGE_ID(settings_link_traffic, "Traffic") \
+LANGUAGE_ID(settings_link_type, "Type another machine's code") \
 LANGUAGE_ID(settings_map_drag, "Let go to place the screen") \
 LANGUAGE_ID(settings_map_fit, "Show all screens") \
 LANGUAGE_ID(settings_map_hint, "Drag a screen to move it. Drag the grid to pan, scroll to zoom.") \

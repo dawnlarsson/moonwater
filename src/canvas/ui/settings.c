@@ -866,12 +866,14 @@ static const char address_to settings_label_window(int row)
         return settings_large->label_cut[row];
 }
 
-// Whether an item is the startup list's (its entries, its add row).
-static b32 settings_item_startup(const struct settings_item address_to item)
+// Whether an item is the list's (its rows, its add row): the startup list's, settings_item_startup.
+static b32 settings_item_in(const struct settings_item address_to item, int list)
 {
-        const struct settings_item address_to first = settings.item[SETTINGS_STARTUP_LIST];
-        return first && item >= first && item < first + settings.item_count[SETTINGS_STARTUP_LIST];
+        const struct settings_item address_to first = settings.item[list];
+        return first && item >= first && item < first + settings.item_count[list];
 }
+
+static b32 settings_item_startup(const struct settings_item address_to item) { return settings_item_in(item, SETTINGS_STARTUP_LIST); }
 
 static const char address_to settings_item_text(const struct settings_item address_to item)
 {
@@ -879,6 +881,8 @@ static const char address_to settings_item_text(const struct settings_item addre
                 return WORDS(settings_startup_keys);
         if (item->kind == SETTINGS_ADD && settings_item_startup(item))
                 return WORDS(settings_startup_add_keys);
+        if (item->kind == SETTINGS_ADD && settings_item_in(item, 3))
+                return WORDS(settings_link_add_keys);
         if (item->kind == SETTINGS_NETWORK)
                 return item->flags & SETTINGS_ITEM_JOINED ? WORDS(settings_item_joined)
                        : item->flags & SETTINGS_ITEM_CANNOT ? WORDS(settings_item_cannot)
@@ -1006,6 +1010,7 @@ static b32 settings_matches_name(const char address_to label, const char address
                (language.loaded && (settings_has(language_of(label), word, size) || settings_has(language_of(section), word, size)));
 }
 
+static int settings_way_row(unsigned char way);
 static b32 settings_matches_word(int row, const char address_to word, positive size)
 {
         int offset;
@@ -1020,7 +1025,15 @@ static b32 settings_matches_word(int row, const char address_to word, positive s
                 return settings_has(settings.value[offset], word, size) || settings_matches_name(w->label, settings_section(row), word, size) ||
                        settings_matches_name(w->about, settings_rows[settings_section_start(row)].part, word, size);
         }
-        case SETTINGS_DOM_LIST:    return settings_matches_name(settings_label(row), settings_section(row), word, size);
+        case SETTINGS_DOM_LIST:
+        {
+                // Waterlink's add row is found by the words of its ways' rows too (Pair a machine, Name and code of another machine).
+                const struct settings_item address_to it = settings_item(row);
+                for (unsigned char way = 1; it && it->kind == SETTINGS_ADD && settings_item_in(it, 3) && way <= 2; way++)
+                        if (settings_way_row(way) >= 0 && settings_matches_name(settings_rows[settings_way_row(way)].label, "", word, size))
+                                return true;
+                return settings_matches_name(settings_label(row), settings_section(row), word, size);
+        }
         case SETTINGS_DOM_ABOUT:   return settings_about_matches_word(offset, word, size);
         case SETTINGS_DOM_COMMAND: case SETTINGS_DOM_SUB: case SETTINGS_DOM_TRY:
                 return settings_has(settings_label(row), word, size) || settings_has(settings_text(row), word, size) || (row == SETTINGS_ANY && settings_has("anything", word, size));
@@ -1594,6 +1607,14 @@ static const struct settings_try
 static struct { positive at; int x, y, apart; } settings_click_try;
 
 static int settings_row_of(const char address_to path) { const struct settings_row address_to r = setting_by_path((string_address)path); return r ? (int)(r - settings_rows) : -1; }
+// The row whose verb is the way-th way of a list's add row (registry.c's .way: Waterlink's code shown, 1, and code typed, 2), -1 none.
+static int settings_way_row(unsigned char way)
+{
+        for (positive at = 0; at < SETTINGS_ROWS; at++)
+                if (settings_rows[at].way == way)
+                        return (int)at;
+        return -1;
+}
 static long settings_number_of(const char address_to path, long fallback) { int r = settings_row_of(path); long n = 0; return r >= 0 && settings.state[r] == SETTINGS_READ && setting_typed_number(&settings_rows[r], (string_address)settings.value[r], &n) ? n : fallback; }
 static b32 settings_value_is(const char address_to path, const char address_to word) { int r = settings_row_of(path); return r >= 0 && settings.state[r] == SETTINGS_READ && string_equals((string_address)settings.value[r], (string_address)word); }
 static int settings_try_of(int id) { int at; return settings_domain_of(id, &at) == SETTINGS_DOM_TRY ? at : -1; }
@@ -1873,7 +1894,9 @@ static fn settings_rebuild(void)
         settings_sub_count = 0, settings_sub_cut = 0;
         ui_list_begin(&settings.list);
         for (positive row = 0; row < settings_rows_count(); row++)
-                if (filtered ? settings_matches((int)row) : settings_group_of((int)row) == settings.page.chosen)
+                // A row that is a way of a list's add row (.way) is no row of its own.
+                if ((row >= SETTINGS_ROWS || !settings_rows[row].way) &&
+                    (filtered ? settings_matches((int)row) : settings_group_of((int)row) == settings.page.chosen))
                 {
                         count = settings_try_emit((int)row, true, count);
                         if (ui_list_add(&settings.list, (int)row))
@@ -2952,6 +2975,12 @@ static fn settings_feed_links(void)
                         else if (sc_eat(&c, "nobody")) settings_note_add(3, &count, 1, text + 2, size - 2);
                 }
         }
+        // After the machines linked, the add row: its ways a code shown for another machine and another's code typed (settings_link_way).
+        {
+                struct settings_item address_to add = settings_item_slot(3, count);
+                if (add)
+                        add->kind = SETTINGS_ADD, add->where = 1, settings_item_label(add, WORDS(settings_link_add), string_length((string_address)WORDS(settings_link_add))), count++;
+        }
         settings.item_count[3] = (int)count, settings_link_follow();
 }
 
@@ -3668,6 +3697,30 @@ static fn settings_startup_way(int row, int way)
         settings_say((string_address)WORDS(settings_startup_type));
 }
 
+/*
+        Waterlink's add row, its ways the two rows of the registry that are no rows of their own (.way): 0 a code shown for another machine
+        to type (link pair, its card while it waits, as the row had it), 1 another machine's name and code typed in the row as a field
+        (link NAME CODE). While a pairing waits the row stops it.
+*/
+static fn settings_link_way(int row, int way)
+{
+        int pair = settings_way_row(1);
+        if (way == 0)
+                return pair >= 0 && !settings_action_busy(pair) ? settings_change(pair, "") : (void)0;
+        settings_edit_begin(row, "", false);
+        settings_say((string_address)WORDS(settings_edit_keys));
+}
+
+// A way of an add row taken (ui_list_ways' menu, or an add row with one way): the startup list's, or Waterlink's.
+static fn settings_way_taken(int row, int way)
+{
+        int list = settings_list_of(row);
+        if (list == SETTINGS_STARTUP_LIST)
+                settings_startup_way(row, way);
+        else if (list == 3)
+                settings_link_way(row, way);
+}
+
 static b32 settings_output_choice(const struct settings_row address_to which, positive index, char address_to into, positive room);
 
 static b32 settings_modem_ready(void)
@@ -3987,6 +4040,9 @@ static fn settings_edit_begin(int row, const char address_to text, b32 masked)
         // A command line for desktop startup has no most: the verb keeps any line (settings_startup_typed reads it whole).
         if (settings_list_of(row) == SETTINGS_STARTUP_LIST)
                 t->most = 0;
+        // Waterlink's add row typed is the row of its way's (a name and a code, split), and a change holds SETTINGS_TYPED of it.
+        else if (settings_list_of(row) == 3)
+                t->most = SETTINGS_TYPED - 1;
         ui_page_redraw(&settings.page);
 }
 
@@ -4015,13 +4071,16 @@ static fn settings_item_activate(int row, const struct settings_item address_to 
                 settings_port_set(item, !(item->flags & SETTINGS_ITEM_JOINED));
         else if (item->kind == SETTINGS_STARTUP)
                 settings_startup_apply(SETTINGS_STARTUP_TURN, (int)(item - settings.item[SETTINGS_STARTUP_LIST]), 0);
-        // The startup list's add row: its ways (a program from the picker, or a command typed) as a menu under it, and with one, that way.
-        else if (item->kind == SETTINGS_ADD && settings_item_startup(item))
+        // An add row of ways (the startup list's: a program from the picker or a command typed; Waterlink's: a code shown or one typed): its
+        // ways a menu under it, and where the language's words left one, the last. Waterlink's stops a pairing that waits.
+        else if (item->kind == SETTINGS_ADD && settings_item_in(item, 3) && settings_pair_waiting(settings_way_row(1)))
+                system_call_2(syscall(kill), (positive)settings.runner.child, SIGTERM);
+        else if (item->kind == SETTINGS_ADD && (settings_item_startup(item) || settings_item_in(item, 3)))
         {
                 if (ui_list_ways(&settings.ui, &settings.list, &settings.popup, &settings.own, row))
                         settings.ways = row + 1;
                 else
-                        settings_startup_way(row, 1);
+                        settings_way_taken(row, 1);
         }
         else if (item->kind == SETTINGS_ADD)
                 settings_edit_begin(row, "", false), settings_say((string_address)WORDS(settings_type_device));
@@ -4167,6 +4226,7 @@ static fn settings_edit_commit(void)
                 const struct settings_item address_to it = settings_item(row);
                 if (!length) settings_say((string_address)WORDS(settings_nothing_typed));
                 else if (it && it->kind == SETTINGS_NETWORK) settings_act('j', it->label, typed + start);
+                else if (it && it->kind == SETTINGS_ADD && settings_item_in(it, 3) && settings_way_row(2) >= 0) settings_change(settings_way_row(2), typed + start);
                 else if (it && it->kind == SETTINGS_ADD) settings_act('a', typed + start, null);
                 break;
         }
@@ -4461,13 +4521,23 @@ static const unsigned int address_to settings_startup_picture(int id, int side)
         return it && it->kind == SETTINGS_STARTUP && it->app >= 0 ? ui_apps_picture_kept(it->app, side) : null;
 }
 
-// The add row's ways in the language, a '|' apart (ui_list_ways): the kit takes a way of UI_ROW_WAY_TEXT at most, so two are this room.
+// Two ways of an add row in the language, a '|' apart (ui_list_ways): the kit takes a way of UI_ROW_WAY_TEXT at most, so two are this room.
+static const char address_to settings_ways_of(char address_to ways, positive room, const char address_to first, const char address_to second)
+{
+        settings_cat(ways, room, settings_cat(ways, room, settings_cat(ways, room, 0, first), "|"), second);
+        return ways;
+}
+
 static const char address_to settings_startup_ways(void)
 {
         static char ways[2 * UI_ROW_WAY_TEXT + 2];
-        positive at = settings_cat(ways, sizeof(ways), 0, WORDS(settings_startup_program));
-        settings_cat(ways, sizeof(ways), settings_cat(ways, sizeof(ways), at, "|"), WORDS(settings_startup_command));
-        return ways;
+        return settings_ways_of(ways, sizeof(ways), WORDS(settings_startup_program), WORDS(settings_startup_command));
+}
+
+static const char address_to settings_link_ways(void)
+{
+        static char ways[2 * UI_ROW_WAY_TEXT + 2];
+        return settings_ways_of(ways, sizeof(ways), WORDS(settings_link_show), WORDS(settings_link_type));
 }
 
 /*
@@ -4495,6 +4565,16 @@ static fn settings_describe_item(int id, const struct settings_item address_to i
                 return settings_startup_describe(item, row);
         if (item->kind == SETTINGS_ADD && list == SETTINGS_STARTUP_LIST)
                 return (void)(row->kind = UI_ROW_ADD, row->words = settings_startup_ways());
+        // Waterlink's add row: its ways a code shown and a code typed; while a pairing waits it stops it.
+        if (item->kind == SETTINGS_ADD && list == 3)
+        {
+                row->kind = UI_ROW_ADD;
+                if (settings_pair_waiting(settings_way_row(1)))
+                        row->label = WORDS(settings_link_stop);
+                else
+                        row->words = settings_link_ways();
+                return;
+        }
         if (item->kind == SETTINGS_NETWORK)
                 row->columns = settings_columns_for(0), row->mark = (item->flags & SETTINGS_ITEM_JOINED) != 0,
                 row->note = item->flags & SETTINGS_ITEM_JOINED ? WORDS(settings_joined) : item->flags & SETTINGS_ITEM_SAVED ? WORDS(settings_saved) : null,
@@ -4547,6 +4627,7 @@ static fn settings_describe_item(int id, const struct settings_item address_to i
                         row->turn = settings_fold_turn(id), row->expander = settings_exp_get(id) ? UI_ROW_EXPANDER_OPEN : UI_ROW_EXPANDER_SHUT,
                         row->columns = settings_columns_for(3), row->cells[1] = item->access[0] ? item->access : null,
                         row->cells[2] = st, row->value = st ? st : row->cells[1];
+                        row->remove = true; // a machine linked is taken out by its button, asking first (settings_forget_item: link remove)
                 }
         }
         else if (item->kind == SETTINGS_NOTE)
@@ -4579,6 +4660,8 @@ static fn settings_describe(int id, struct ui_row address_to row)
                 row->kind = UI_ROW_FIELD, row->edit = &settings.edit;
                 if (item && settings_item_startup(item))
                         row->label = WORDS(settings_startup_command), row->placeholder = WORDS(settings_startup_hint);
+                else if (item && settings_item_in(item, 3) && settings_way_row(2) >= 0)
+                        row->label = language_of(settings_rows[settings_way_row(2)].label);
                 else if (item)
                         row->label = item->kind == SETTINGS_ADD ? WORDS(settings_device_name) : settings.joining;
                 else if (!w)
@@ -5053,13 +5136,13 @@ static int settings_open(void)
 static fn settings_chose(int id)
 {
         struct ui_text address_to t = settings.popup.field;
-        // The startup add row's ways (ui_list_ways opens them with no list or field of the menu's), one taken or the menu gone.
+        // An add row's ways (ui_list_ways opens them with no list or field of the menu's), one taken or the menu gone.
         if (settings.ways && !settings.popup.list && !t && settings.page.menu_row < 0)
         {
                 int row = settings.ways - 1;
                 settings.ways = 0;
                 if (id >= UI_LIST_WAY && id <= UI_LIST_WAY + 1 && settings_pos(row) >= 0)
-                        settings_startup_way(row, id - UI_LIST_WAY);
+                        settings_way_taken(row, id - UI_LIST_WAY);
                 return ui_page_redraw(&settings.page);
         }
         settings.ways = 0;

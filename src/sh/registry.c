@@ -266,6 +266,9 @@ struct settings_row
         // a key or a press with no WINDOW_EVENT_VIRTUAL, which the compositor leaves off only for what it read from a device it found
         // physical, so never for uinput, uhid or the on-screen keyboard (settings.c's settings_refused; .github/SECURITY.md, the ssh server).
         unsigned char deliberate;
+        // A row the window lists as no row of its own: its verb is a way of the add row of its group's list (settings.c's settings_way_row),
+        // the way's number from 1; 0 for every other row.
+        unsigned char way;
 };
 
 /*
@@ -963,18 +966,19 @@ static const struct settings_row settings_rows[] = {
      .help = "look again now, as far as the switches above allow, each lookup within its time limit"},
     //  Waterlink, the machines linked to this one (moonwater link, src/waterlink): this machine's name, the one switch of the
     //  listener, a code shown for another machine to type, the other machine's name and code typed here, and how the machines
-    //  reach each other. The machines linked are a list under these rows, which settings.c feeds from `link` (its status).
+    //  reach each other. The machines linked are a list under these rows, which settings.c feeds from `link` (its status); the code
+    //  shown and the code typed are the ways of that list's add row (.way), not rows of their own.
     {"Waterlink", "This machine", SETTINGS_INFO, 0, SETTINGS_LINE, {"name"}, "", null, {null}, null, 0,
      .help = "the name the other machines know this one by: moonwater name NEW changes it"},
     {null, "Waterlink", SETTINGS_SWITCH, 0, 0, {"link"}, "link ", null, {"link"}, null, 0,
      .help = "the listener: linked machines reach this one, and it them, while it is on [off]"},
     {null, "Pair a machine", SETTINGS_ACTION, 0, SETTINGS_WAITS, {null}, null, null, {"link", "pair"}, null, 0,
-     .help = "shows a code, and waits up to five minutes for the other machine to type it with this machine's name"},
+     .help = "shows a code, and waits up to five minutes for the other machine to type it with this machine's name", .way = 1},
     {null, "Purge unconnected links", SETTINGS_ACTION, 0, 0, {null}, null, null, {"link", "purge"}, null, 0,
      .help = "removes saved machines that are not currently connected (blocked machines stay blocked)"},
     {null, "Name and code of another machine", SETTINGS_FIELD, 0, SETTINGS_LINE | SETTINGS_SPLIT | SETTINGS_WAITS, {null}, null, null,
      {"link"}, null, 0,
-     .help = "the other machine's name and the code it shows, which pair the two of them"},
+     .help = "the other machine's name and the code it shows, which pair the two of them", .way = 2},
     {null, "Connect over", SETTINGS_CHOICE, 0, 0, {"link", "transport"}, "transport ", null, {"link", "transport"}, "network tcp auto modem", 0,
      .help = "network: over the network by udp, as linked machines always have [network]; tcp: over tcp, through HTTPS_PROXY when one is named; auto: udp, then tcp when udp is not answered in a second; modem: the audio modem, through the sound card, refused while it is not ready"},
     {null, "Audio modem", SETTINGS_INFO, 0, SETTINGS_LINE, {"link", "transport"}, "audio modem ", null, {null}, null, 0,

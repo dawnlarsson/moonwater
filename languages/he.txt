@@ -9,6 +9,7 @@
 # machine-made 2026-11-22 (a registry text that had no keyed line), not yet read by a person: =An experimental speed-up. ...
 # machine-made 2026-11-22 (the Waterlink words of Settings), not yet read by a person: settings_link_address settings_link_disabled settings_link_files settings_link_files_about settings_link_group settings_link_latency settings_link_log settings_link_log_about settings_link_mismatch settings_link_no_key settings_link_offline settings_link_online settings_link_run settings_link_run_about settings_link_self settings_link_shell settings_link_shell_about settings_link_traffic
 # machine-made 2026-11-23 (the startup programs of Settings), not yet read by a person: settings_startup_add settings_startup_add_keys settings_startup_command settings_startup_hint settings_startup_keys settings_startup_program settings_startup_type
+# machine-made 2026-11-23 (the add row of Waterlink's linked machines), not yet read by a person: settings_link_add settings_link_add_keys settings_link_show settings_link_stop settings_link_type
 @language he
 @name עברית
 @translated machine
@@ -332,6 +333,8 @@ settings_item_open	4429	Enter מתחבר ושומר
 settings_item_saved	3ffd	שמורה: Enter מבקש שוב את הסיסמה, Delete שוכח אותה
 settings_joined	1050	מחוברת
 settings_kept	4759	שמור
+settings_link_add	cf33	קישור מכונה
+settings_link_add_keys	73ee	Enter מציג קוד למכונה אחרת או לוקח קוד של מכונה אחרת
 settings_link_address	60f3	כתובת
 settings_link_disabled	08dd	מושבת באופן כללי במחשב הזה
 settings_link_files	b058	גישה למערכת הקבצים
@@ -349,7 +352,10 @@ settings_link_run_about	ba14	הרצת פקודות מרוחקות בודדות
 settings_link_self	bc70	המחשב הזה
 settings_link_shell	0fbd	מעטפת אינטראקטיבית
 settings_link_shell_about	5034	פתיחת הפעלת מסוף מרחוק
+settings_link_show	e2fc	הצגת קוד
+settings_link_stop	0c69	עצירת הצימוד
 settings_link_traffic	9266	תעבורה
+settings_link_type	978e	הקלדת קוד של מכונה אחרת
 settings_map_drag	125f	שחרר כדי למקם את המסך
 settings_map_fit	797e	הצג את כל המסכים
 settings_map_hint	0257	גרור מסך כדי להזיז אותו. גרור את הרשת כדי להזיז את התצוגה, גלול כדי להגדיל.

@@ -8,6 +8,7 @@
 # machine-made 2026-11-22 (a registry text that had no keyed line), not yet read by a person: =An experimental speed-up. ...
 # machine-made 2026-11-22 (the Waterlink words of Settings), not yet read by a person: settings_link_address settings_link_disabled settings_link_files settings_link_files_about settings_link_group settings_link_latency settings_link_log settings_link_log_about settings_link_mismatch settings_link_no_key settings_link_offline settings_link_online settings_link_run settings_link_run_about settings_link_self settings_link_shell settings_link_shell_about settings_link_traffic
 # machine-made 2026-11-23 (the startup programs of Settings), not yet read by a person: settings_startup_add settings_startup_add_keys settings_startup_command settings_startup_hint settings_startup_keys settings_startup_program settings_startup_type
+# machine-made 2026-11-23 (the add row of Waterlink's linked machines), not yet read by a person: settings_link_add settings_link_add_keys settings_link_show settings_link_stop settings_link_type
 @language fr
 @name Français
 @translated machine
@@ -331,6 +332,8 @@ settings_item_open	4429	Enter rejoint et l'enregistre
 settings_item_saved	3ffd	enregistré : Enter redemande son mot de passe, Delete l'oublie
 settings_joined	1050	connecté
 settings_kept	4759	gardé
+settings_link_add	cf33	Lier une machine
+settings_link_add_keys	73ee	Enter affiche un code pour une autre machine, ou prend le code d'une autre machine
 settings_link_address	60f3	Adresse
 settings_link_disabled	08dd	Désactivé globalement sur cette machine
 settings_link_files	b058	Accès au système de fichiers
@@ -348,7 +351,10 @@ settings_link_run_about	ba14	Exécuter des commandes distantes isolées
 settings_link_self	bc70	cette machine
 settings_link_shell	0fbd	Shell interactif
 settings_link_shell_about	5034	Ouvrir une session de terminal distante
+settings_link_show	e2fc	Afficher un code
+settings_link_stop	0c69	Arrêter l'appairage
 settings_link_traffic	9266	Trafic
+settings_link_type	978e	Saisir le code d'une autre machine
 settings_map_drag	125f	Relâchez pour placer l'écran
 settings_map_fit	797e	Afficher tous les écrans
 settings_map_hint	0257	Faites glisser un écran pour le déplacer. Faites glisser la grille pour déplacer la vue, faites défiler pour zoomer.

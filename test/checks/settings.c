@@ -6638,6 +6638,47 @@ static fn check_settings_actions(void)
                 check("settings lists: Waterlink linked machines use file-explorer-style columns and dense 28px rows", link_table);
                 check("settings lists: Waterlink right-click menu offers Copy, Copy row, and direct Remove (link remove)", link_menu && link_remove);
                 check("settings lists: Delete twice on a Waterlink linked machine confirms and removes it", link_del);
+                //      The kit's managed rows: a machine linked has the remove button (link remove, asking first); after them the add row,
+                //      whose ways are the two rows that are no rows of their own now (.way): a code shown (link pair) and one typed.
+                {
+                        int pair = settings_way_row(1), typed = settings_way_row(2), add_id = (int)SETTINGS_LIST_ID(3, 2), saved_job = settings.job;
+                        b32 saved_sets = settings.job_sets, asked, ways_ok, field_ok, stop_ok;
+                        struct ui_row linked, add;
+
+                        settings.queued = 0, ui_confirm_drop(&settings.confirm);
+                        memory_zero(&linked, sizeof(linked)), settings_describe(link_row, &linked);
+                        memory_zero(&add, sizeof(add)), settings_describe(add_id, &add);
+                        check("settings lists: Waterlink's two way rows are no rows of the list, and after the machines is the add row with their two ways",
+                              pair >= 0 && typed >= 0 && settings_pos(pair) < 0 && settings_pos(typed) < 0 && settings_pos(add_id) >= 0 &&
+                                  settings.item_count[3] == 3 && settings.item[3][2].kind == SETTINGS_ADD && add.kind == UI_ROW_ADD &&
+                                  string_equals((string_address)add.words, (string_address) "Show a code|Type another machine's code") &&
+                                  string_equals((string_address)add.label, (string_address) "Link a machine"));
+                        settings.list.removed = link_row + 1, settings_managed();
+                        asked = settings.queued == 0;
+                        settings.list.removed = link_row + 1, settings_managed();
+                        check("settings lists: a machine linked has a remove button, which asks and then is link remove",
+                              linked.remove && asked && settings.queued == 1 && string_equals((string_address)settings.queue[0].value, (string_address) "r\nzeta"));
+                        settings.queued = 0;
+                        settings_way_taken(add_id, 0);
+                        ways_ok = settings.queued == 1 && settings.queue[0].row == pair;
+                        settings.queued = 0;
+                        settings_way_taken(add_id, 1);
+                        memory_zero(&add, sizeof(add)), settings_describe(add_id, &add);
+                        field_ok = settings_editing() == add_id && add.kind == UI_ROW_FIELD &&
+                                   string_equals((string_address)add.label, (string_address)language_of(settings_rows[typed].label));
+                        ui_text_set(&settings.edit, (const p8 address_to) "laptop 4821", 11);
+                        settings_edit_commit();
+                        field_ok = field_ok && settings_editing() < 0 && settings.queued == 1 && settings.queue[0].row == typed &&
+                                   string_equals((string_address)settings.queue[0].value, (string_address) "laptop 4821");
+                        settings.queued = 0;
+                        settings.job = pair, settings.job_sets = true;
+                        memory_zero(&add, sizeof(add)), settings_describe(add_id, &add);
+                        stop_ok = add.kind == UI_ROW_ADD && !add.words && string_equals((string_address)add.label, (string_address)WORDS(settings_link_stop));
+                        settings.job = saved_job, settings.job_sets = saved_sets;
+                        check("settings lists: Show a code is link pair's job, the other way the add row as a field whose name and code are link's, "
+                              "and a pairing that waits makes the row Stop pairing",
+                              ways_ok && field_ok && stop_ok);
+                }
 
                 settings.item_count[2] = saved_c2, settings.item_count[3] = saved_c3;
                 memory_zero(settings_large->columns, sizeof(settings_large->columns));
@@ -7295,27 +7336,34 @@ static fn check_settings_groups(void)
                       bare && about_ok && settings.list.count > 0);
         }
 
-        // The filter lists the rows of every group: each row by the first word of its label, and each group's rows by its name.
-        for (positive at = 0; at < SETTINGS_ROWS; at++)
+        // The filter lists the rows of every group: each row by the first word of its label, and each group's rows by its name. A row
+        // that is a way of a list's add row (.way: Waterlink's code shown and code typed) is that add row, which a word of its label finds.
         {
-                const char address_to label = settings_rows[at].label;
-                positive word = 0;
-
-                while (label[word] && label[word] != ' ')
-                        word++;
-                settings_groups_filter(label, word);
-                every &= settings_pos((int)at) >= 0;
-        }
-        for (int group = 0; group < settings_groups() - 1; group++)
-        {
-                const char address_to name = settings_group_name(group);
-
-                settings_groups_filter(name, string_length((string_address)name));
+                int saved_links = settings.item_count[3];
+                settings.runner.length = 0, settings_feed_links();
                 for (positive at = 0; at < SETTINGS_ROWS; at++)
-                        if (settings_group_of((int)at) == group)
-                                every &= settings_pos((int)at) >= 0;
+                {
+                        const char address_to label = settings_rows[at].label;
+                        int shown = settings_rows[at].way ? (int)SETTINGS_LIST_ID(3, settings.item_count[3] - 1) : (int)at;
+                        positive word = 0;
+
+                        while (label[word] && label[word] != ' ')
+                                word++;
+                        settings_groups_filter(label, word);
+                        every &= settings_pos(shown) >= 0 && (!settings_rows[at].way || settings_pos((int)at) < 0);
+                }
+                for (int group = 0; group < settings_groups() - 1; group++)
+                {
+                        const char address_to name = settings_group_name(group);
+
+                        settings_groups_filter(name, string_length((string_address)name));
+                        for (positive at = 0; at < SETTINGS_ROWS; at++)
+                                if (settings_group_of((int)at) == group && !settings_rows[at].way)
+                                        every &= settings_pos((int)at) >= 0;
+                }
+                settings.item_count[3] = saved_links;
         }
-        check("settings groups: the filter lists every row of every group, by a word of its label and by its group's name", every);
+        check("settings groups: the filter lists every row of every group, by a word of its label and by its group's name (a way row as its add row)", every);
 
         settings_filter_clear(), (void)0;
         settings.page.chosen = 0;
