@@ -14,6 +14,7 @@
 # machine-made 2026-11-23 (Waterlink's grants as columns, and a remove asked on its row), not yet read by a person: settings_column_files settings_column_log settings_column_run settings_column_shell settings_remove_again
 # machine-made 2026-11-23 (the CD drive and the flat Devices of Files), not yet read by a person: files_device_nothing files_disc_audio files_disc_none files_disc_play
 # machine-made 2026-11-23 (the bands of a machine in Files' sidebar), not yet read by a person: files_band_drives files_band_removable
+# machine-made 2026-11-23 (the startup table's check column), not yet read by a person: settings_column_on
 @language fa
 @name فارسی
 @translated machine
@@ -298,6 +299,7 @@ settings_card_stopped	e24d	متوقف شد: Escape یا کلیک برای باز
 settings_column_access	ae0b	دسترسی
 settings_column_files	1b30	فایل‌ها
 settings_column_log	7bf1	گزارش
+settings_column_on	7df0	روشن
 settings_column_run	e66a	اجرا
 settings_column_security	21db	امنیت
 settings_column_shell	69a1	پوسته

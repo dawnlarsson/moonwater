@@ -54,6 +54,8 @@ enum { SETTINGS_FEED_ROWS = 1u, SETTINGS_FEED_WIFI, SETTINGS_FEED_DEVICES, SETTI
 #define SETTINGS_LISTS 5
 #define SETTINGS_STARTUP_LIST 4  // the Boot group's: what the desktop starts with it (desktop startup), the person's to order
 #define SETTINGS_STARTUP_ORDER 1 // and its entries are one ordered group of the kit's (ui_row.order)
+#define SETTINGS_STARTUP_COLUMNS 3   // a table as Waterlink's is: the program (or the command), its command, and a check that starts it
+#define SETTINGS_STARTUP_ON_COLUMN 2
 #define SETTINGS_LIST_STEP 0x040000 // sparse ID stride per dynamic live list (262,144 items/list)
 #define SETTINGS_ITEM_LABEL 96
 #define SETTINGS_FEED_WAIT_NS 8000000000ll
@@ -446,8 +448,9 @@ static const struct { const char address_to word; unsigned int label, note; } se
     {"shell", LANGUAGE_settings_link_shell, LANGUAGE_settings_link_shell_about},
     {"log",   LANGUAGE_settings_link_log,   LANGUAGE_settings_link_log_about},
 };
-// A machine linked is a row of columns: its name, its state, and from SETTINGS_LINK_GRANT_COLUMN a check of each grant in the order above.
-#define SETTINGS_LINK_GRANT_COLUMN 2
+// A machine linked is a row of columns: its name, its address, latency and traffic, and from SETTINGS_LINK_GRANT_COLUMN a check of each
+// grant in the order above. No fold: all it says is in its row, and its state is its dot (online) and its words (an offline one dim).
+#define SETTINGS_LINK_GRANT_COLUMN 4
 #define SETTINGS_LINK_COLUMNS (SETTINGS_LINK_GRANT_COLUMN + 4)
 _Static_assert(SETTINGS_LINK_COLUMNS <= UI_COLUMNS_MOST, "a machine linked's columns are the kit's at most");
 // What a linked machine's state says, by the item's link_state (0 says none): the words of the language taken, said when the row is drawn.
@@ -2630,44 +2633,13 @@ static fn settings_drive_follow(void)
         }
 }
 
+// A machine linked has no fold: its address, latency, traffic and grants are its row's columns, so it adds no rows under it.
 static int settings_link_rows(int row, int count)
 {
-        const struct settings_item address_to item = settings_item(row);
-        int section = settings_section_start(row), next;
-        if (!item || item->kind != SETTINGS_LINK || (!settings_lines_listed(row)))
-                return count;
-        settings_sub_owner = row;
-        if (item->where == 1)
-        {
-                if (item->link_addr[0] && (next = settings_sub_add(section, true, WORDS(settings_link_address), item->link_addr, 0, SETTINGS_SUB_LINK_INFO, 0, count)) != count)
-                        count = next;
-                if (item->link_rtt[0] && (next = settings_sub_add(section, true, WORDS(settings_link_latency), item->link_rtt, 0, SETTINGS_SUB_LINK_INFO, 1, count)) != count)
-                        count = next;
-                if (item->link_traffic[0] && (next = settings_sub_add(section, true, WORDS(settings_link_traffic), item->link_traffic, 0, SETTINGS_SUB_LINK_INFO, 2, count)) != count)
-                        count = next;
-                if (item->link_group[0] && (next = settings_sub_add(section, true, WORDS(settings_link_group), item->link_group, 0, SETTINGS_SUB_LINK_INFO, 3, count)) != count)
-                        count = next;
-        }
-        for (int k = 0; k < 4; k++)
-        {
-                if ((next = settings_sub_add(section, false, null, language_text(settings_link_grants[k].label), 0, SETTINGS_SUB_LINK_GRANT, k, count)) == count)
-                        break;
-                count = next;
-        }
+        (void)row;
         return count;
 }
 
-static fn settings_link_follow(void)
-{
-        for (int at = 0; at < settings.item_count[3]; at++)
-        {
-                int key = settings_fold_key(SETTINGS_LIST_ID(3, at));
-                struct settings_item address_to it = &settings.item[3][at];
-                b32 open = it->kind == SETTINGS_LINK && settings_link_is_open(it->where == 0 ? "__this_machine__" : it->label);
-                if (key >= 0 && ui_list_folded(&settings.list, key) != open)
-                        ui_list_fold(&settings.list, key, open);
-        }
-}
 
 static unsigned char settings_link_parse_grants(const char address_to text, positive size)
 {
@@ -3013,7 +2985,7 @@ static fn settings_feed_links(void)
                 if (add)
                         add->kind = SETTINGS_ADD, add->where = 1, settings_item_label(add, WORDS(settings_link_add), string_length((string_address)WORDS(settings_link_add))), count++;
         }
-        settings.item_count[3] = (int)count, settings_link_follow();
+        settings.item_count[3] = (int)count;
 }
 
 // A line kept in settings.startup_text as settings_keep keeps one (a terminal's escapes out, a tab a blank, no other control byte), ended
@@ -3110,10 +3082,11 @@ static struct ui_columns address_to settings_columns_for(int list)
             {4, 3, {0, 84, 84, 72},   {LANGUAGE_files_column_name, LANGUAGE_settings_column_status, LANGUAGE_settings_column_security, LANGUAGE_settings_column_signal}},
             {2, 1, {0, 100, 0, 0},    {LANGUAGE_files_column_name, LANGUAGE_settings_column_status, 0, 0}},
             {4, 3, {0, 108, 84, 128}, {LANGUAGE_files_column_name, 0, LANGUAGE_settings_column_status, LANGUAGE_settings_column_access}},
-            {SETTINGS_LINK_COLUMNS, 0, {0, 120, 56, 56, 56, 56},
-             {LANGUAGE_files_column_name, LANGUAGE_settings_column_status, LANGUAGE_settings_column_files, LANGUAGE_settings_column_run,
-              LANGUAGE_settings_column_shell, LANGUAGE_settings_column_log}},
-            {0, 0, {0}, {0}}, // the startup list's: no columns, its order is the person's
+            {SETTINGS_LINK_COLUMNS, 0, {0, 150, 72, 100, 52, 52, 52, 52},
+             {LANGUAGE_files_column_name, LANGUAGE_settings_link_address, LANGUAGE_settings_link_latency, LANGUAGE_settings_link_traffic,
+              LANGUAGE_settings_column_files, LANGUAGE_settings_column_run, LANGUAGE_settings_column_shell, LANGUAGE_settings_column_log}},
+            // The startup list's: a program (or a command), its command, and a check that starts it; its order is the person's (no sort).
+            {SETTINGS_STARTUP_COLUMNS, 0, {0, 220, 52}, {LANGUAGE_settings_startup_program, LANGUAGE_settings_startup_command, LANGUAGE_settings_column_on}},
         };
         struct ui_columns address_to c;
         if (!settings_large || list < 0 || list >= SETTINGS_LISTS)
@@ -3135,9 +3108,10 @@ static struct ui_columns address_to settings_columns_for(int list)
 static int settings_list_compare(int list, int col, const struct settings_item address_to a, const struct settings_item address_to b)
 {
         int cmp = 0;
-        // Waterlink's machines: by their state (online, offline, a key that does not match), or by whether a grant's check is on.
-        if (list == 3 && col == 1)
-                cmp = (int)a->link_state - (int)b->link_state;
+        // Waterlink's machines: by their address, latency or traffic as words, or by whether a grant's check is on.
+        if (list == 3 && col >= 1 && col < SETTINGS_LINK_GRANT_COLUMN)
+                cmp = string_compare((string_address)(col == 1 ? a->link_addr : col == 2 ? a->link_rtt : a->link_traffic),
+                                     (string_address)(col == 1 ? b->link_addr : col == 2 ? b->link_rtt : b->link_traffic));
         else if (list == 3 && col >= SETTINGS_LINK_GRANT_COLUMN && col < SETTINGS_LINK_COLUMNS)
                 cmp = (int)(b->grants >> (col - SETTINGS_LINK_GRANT_COLUMN) & 1u) - (int)(a->grants >> (col - SETTINGS_LINK_GRANT_COLUMN) & 1u);
         else
@@ -3647,8 +3621,10 @@ static fn settings_managed(void)
                 struct settings_item address_to it = settings_item(l->toggled - 1);
                 int part = l->toggled_cell - SETTINGS_LINK_GRANT_COLUMN;
                 l->toggled = 0;
-                if (it && it->kind == SETTINGS_LINK && it->where == 1 && settings_item_in(it, 3))
+                if (it && it->kind == SETTINGS_LINK && settings_item_in(it, 3))
                         settings_link_grant_flip(it, part), ui_list_damage(&settings.ui, l, (int)SETTINGS_LIST_ID(3, it - settings.item[3]));
+                else if (it && it->kind == SETTINGS_STARTUP && settings_item_startup(it) && l->toggled_cell == SETTINGS_STARTUP_ON_COLUMN)
+                        settings_startup_apply(SETTINGS_STARTUP_TURN, (int)(it - settings.item[SETTINGS_STARTUP_LIST]), 0);
         }
         if (l->moved)
         {
@@ -4151,7 +4127,7 @@ static fn settings_item_activate(int row, const struct settings_item address_to 
         else if (item->kind == SETTINGS_ADD)
                 settings_edit_begin(row, "", false), settings_say((string_address)WORDS(settings_type_device));
         else if (item->kind == SETTINGS_LINK)
-                settings_toggle(row);
+                settings_say((string_address)settings_item_text(item)); // a machine has no fold: all it says is in its row
         else if (item->flags & SETTINGS_ITEM_DRIVE)
                 settings_say((string_address)WORDS(settings_item_drive));
         else if (item->kind != SETTINGS_NOTE)
@@ -4630,11 +4606,12 @@ static fn settings_startup_describe(const struct settings_item address_to it, st
         struct setting_startup e;
         if (!settings_startup_entry(it, &e))
                 return;
-        row->order = SETTINGS_STARTUP_ORDER, row->remove = true, row->kind = UI_ROW_SWITCH, row->on = e.on;
+        row->order = SETTINGS_STARTUP_ORDER, row->remove = true, row->columns = settings_columns_for(SETTINGS_STARTUP_LIST);
+        row->cell_check = 1u << SETTINGS_STARTUP_ON_COLUMN, row->cell_on = e.on ? 1u << SETTINGS_STARTUP_ON_COLUMN : 0;
         row->label = settings_startup_label(it);
         if (!e.app)
                 return (void)(row->icon = UI_ICON_TERMINAL + 1);
-        row->note = e.command, row->tile_picture = settings_startup_picture;
+        row->cells[1] = e.command, row->tile_picture = settings_startup_picture;
         ui_apps_symbol(it->app, row);
 }
 
@@ -4697,28 +4674,28 @@ static fn settings_describe_item(int id, const struct settings_item address_to i
         }
         else if (item->kind == SETTINGS_LINK)
         {
+                // A machine is one row of columns, this machine's first: its dot is its state (online), its address, latency and traffic
+                // are its next cells (an offline one says its state where its address would be, and is dim), and its grants are checks
+                // (this machine's the grants it allows any). Nothing folds under it. Its removal is its menu's and Delete's.
+                b32 self = item->where == 0;
+                const char address_to st = item->link_state ? language_text(settings_link_states[item->link_state]) : item->state[0] ? item->state : item->detail[0] ? item->detail : null;
+                unsigned char granted = self ? settings_link_global_grants : item->grants;
                 row->mark = (item->flags & SETTINGS_ITEM_JOINED) != 0, row->mark_ink = ui_role(UI_SUCCESS);
-                if (item->where == 0)
-                        row->turn = settings_fold_turn(id), row->expander = settings_exp_get(id) ? UI_ROW_EXPANDER_OPEN : UI_ROW_EXPANDER_SHUT,
-                        row->note = item->detail[0] ? item->detail : null, row->value = item->access[0] ? item->access : null;
-                else
+                row->columns = settings_columns_for(3);
+                row->cells[1] = item->link_addr[0] ? item->link_addr : self ? (item->detail[0] ? item->detail : null) : st;
+                row->cells[2] = item->link_rtt[0] ? item->link_rtt : null, row->cells[3] = item->link_traffic[0] ? item->link_traffic : null;
+                row->value = row->cells[1];
+                row->dim = !self && item->link_state == SETTINGS_LINK_OFFLINE;
+                for (int part = 0; part < 4; part++)
                 {
-                        const char address_to st = item->link_state ? language_text(settings_link_states[item->link_state]) : item->state[0] ? item->state : item->detail[0] ? item->detail : null;
-                        row->turn = settings_fold_turn(id), row->expander = settings_exp_get(id) ? UI_ROW_EXPANDER_OPEN : UI_ROW_EXPANDER_SHUT,
-                        row->columns = settings_columns_for(3), row->cells[1] = st, row->value = st;
-                        // Its grants are checks in their cells (the kit's cell_check, turned in place: settings_managed), each on where the
-                        // machine may; a grant this machine allows none is a dim check, off, and a press on it says so (settings_link_grant_flip).
-                        for (int part = 0; part < 4; part++)
-                        {
-                                unsigned int cell = 1u << (SETTINGS_LINK_GRANT_COLUMN + part);
-                                row->cell_check |= cell;
-                                if (!(settings_link_global_grants & 1u << part))
-                                        row->cell_dim |= cell;
-                                else if (item->grants & 1u << part)
-                                        row->cell_on |= cell;
-                        }
-                        row->remove = true; // a machine linked is taken out by its button, asking first (settings_forget_item: link remove)
+                        unsigned int cell = 1u << (SETTINGS_LINK_GRANT_COLUMN + part);
+                        row->cell_check |= cell;
+                        if (!self && !(settings_link_global_grants & 1u << part))
+                                row->cell_dim |= cell;
+                        else if (granted & 1u << part)
+                                row->cell_on |= cell;
                 }
+                row->remove = !self;
         }
         else if (item->kind == SETTINGS_NOTE)
         {

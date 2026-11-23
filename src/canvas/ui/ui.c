@@ -6739,6 +6739,7 @@ LANGUAGE_ID(settings_card_stopped, "stopped: Escape or a press goes back") \
 LANGUAGE_ID(settings_column_access, "Access") \
 LANGUAGE_ID(settings_column_files, "Files") \
 LANGUAGE_ID(settings_column_log, "Log") \
+LANGUAGE_ID(settings_column_on, "On") \
 LANGUAGE_ID(settings_column_run, "Run") \
 LANGUAGE_ID(settings_column_security, "Security") \
 LANGUAGE_ID(settings_column_shell, "Shell") \
@@ -22672,7 +22673,8 @@ static p32 ui_strips_event(struct ui address_to ui, struct ui_strips address_to 
 #define UI_STRIP_UNPARTITIONED 5
 
 // Columns over a list (a details view):
-#define UI_COLUMNS_MOST 6
+#define UI_COLUMNS_MOST 16 // a table's columns at most: the cells' checks are bits of a 32-bit word (ui_row.cell_check), and a sidebar's width holds no more
+_Static_assert(UI_COLUMNS_MOST <= 32, "a row's cell checks are bits of an unsigned int");
 #define UI_COLUMNS_LEAST 48 // logical pixels a column keeps at least
 #define UI_COLUMN_EDGE 5   // logical pixels either side of an edge that take the hand
 #define UI_COLUMNS_H 32    // the header's height, logical pixels
@@ -22747,8 +22749,10 @@ struct ui_row
         b32 head;                          // a field right after the label, to the row's end (the words after a verb)
         int order;                         // an ordered group (non-zero): the rows of one, in the list's order, are the person's to rearrange by the grip at
                                            // each one's start, a drag or Alt+Up and Alt+Down (ui_list.moved); 0 a row that stays where the app puts it
-        b32 remove;                        // a remove button at the row's end, and Delete while the keys are on it (ui_list.removed)
-        int remove_icon;                   // its symbol, UI_ICON_* + 1 (an eject's): quiet, the ink under the hand; 0 the cross, red under the hand
+        b32 remove;                        // the person may take it away: Remove in its menu, and Delete while the keys are on it (ui_list.removed).
+                                           // No button on the row: the kit's rule is that a row's removal is in its menu, so nothing at its end
+                                           // crowds its cells (a × sat over Waterlink's Log check)
+        int remove_icon;                   // UI_ICON_EJECT + 1: its removal is an eject, its menu's item says Eject (0: Remove)
         unsigned int cell_check;           // under columns: the cells (bit k, column k, 1 on) that are a check the person presses in place (ui_list.toggled)
         unsigned int cell_on;              // which of those checks are on
         unsigned int cell_dim;             // which of those are dimmed: shown as they stand, and pressed still (the app says why it does not turn)
@@ -22771,6 +22775,7 @@ struct ui_row
 #define UI_LIST_MENU_COPY_ROW 0x101
 #define UI_LIST_MENU_REMOVE 0x102
 #define UI_LIST_MENU_EXTRA 0x103 // the first id an app gives its own menu item (ui_list_menu.extra); the base items are below it
+#define UI_LIST_MENU_REMOVE_ROW 0xfe // Remove of a row the app marks removable (ui_row.remove) and gives no Remove of its own: ui_list.removed
 #define UI_LIST_MENU_COPY_CELL 0xff // Copy <column>: the words of the cell the hand was on (ui_popup.list_cell), named by its column's title
 
 #define UI_LIST_MENU_HAS_COPY 1u      // row has copyable text (else Copy / Copy row are disabled)
@@ -23908,9 +23913,6 @@ static fn ui_row_tree_at(struct ui address_to ui, struct ui_list address_to l, i
         // A tall row is a column, and the first thing in it is its line, UI_DRIVE_LINE high, which is laid out as any row is.
         if (row->tall)
                 n = ui_tree_open(t), n->size[1].kind = UI_FIXED, n->size[1].value = ui_drive_part(ui, UI_DRIVE_LINE), n->gap = gap;
-        // The label is 17 from where the mark starts, which at some scales is a pixel more than the mark and the gap.
-        if (row->mark)
-                p->mark = n = ui_row_leaf(t, UI_FIXED, ui_dev(ui, 7)), n->margin[1] = ui_dev(ui, 17) - n->size[0].value - gap;
         if (row->check)
                 p->check = n = ui_row_leaf(t, UI_FIXED, ui_dev(ui, UI_ROW_CHECK_W));
         if (row->icon || row->tile_picture || row->tile_name)
@@ -23993,9 +23995,6 @@ static fn ui_row_tree_at(struct ui address_to ui, struct ui_list address_to l, i
                 p->toggle = ui_row_leaf(t, UI_FIXED, ui_dev(ui, UI_SWITCH_W));
         if (row->bars > 0)
                 p->bars = n = ui_row_leaf(t, UI_FIXED, ui_signal_width(ui)), n->margin[0] = ui_dev(ui, 18) - n->size[0].value;
-        // A row's remove button is its last part, a finger's target wide.
-        if (row->remove)
-                p->remove = ui_row_leaf(t, UI_FIXED, ui_dev(ui, UI_ROW_REMOVE_W));
         if (row->tall)
         {
                 int count = row->strip_count < 0 || !row->strip_bytes || !row->strip_roles ? 0 : row->strip_count > UI_STRIP_MOST ? UI_STRIP_MOST : row->strip_count;
@@ -24318,6 +24317,13 @@ static fn ui_row_label_about(struct ui address_to ui, struct ui_row_parts addres
 // A row as cells: under a list's columns its label under the first title and each of its cells under its own, cut...
 static b32 ui_row_columned(const struct ui_row address_to row) { return row->columns && row->columns->count > 1; }
 
+// A row's status dot, 6 a side, in the middle of an inset that starts at x (read as drawn) and is UI_INSET wide, and the row's height.
+static fn ui_row_dot(struct ui address_to ui, int x, int y, int height, unsigned int ink)
+{
+        int dot = ui_dev(ui, 6), dx = x + (ui_dev(ui, UI_INSET) - dot) / 2, dy = y + (height - dot) / 2;
+        ui_kit_fill(ui, &(struct ui_box){dx * 256, dy * 256, (dx + dot) * 256, (dy + dot) * 256, dot * 128, dot * 128}, ink | 0xff000000u, null);
+}
+
 // The column of a row a point across the list is in (its cell, 0 the label's), -1 when the row has no columns or the point none.
 static int ui_list_cell_at(const struct ui_list address_to l, int id, int x)
 {
@@ -24390,6 +24396,8 @@ static fn ui_cell_check_draw(struct ui address_to ui, int x, int y, int side, b3
         }
 }
 
+static int ui_list_paint_icon(struct ui address_to ui, const struct ui_row address_to row, int id, int x, int y, int size,
+                              int file_size, int file_y, const char address_to ext, unsigned int file_ink, unsigned int icon_ink, b32 mirror, int mx, int mw); // below
 static fn ui_list_cells(struct ui address_to ui, const struct ui_list address_to l, int id, const struct ui_columns address_to c,
                         const struct ui_row address_to row, int y, int height, unsigned int ink, unsigned int quiet, int trailing_w)
 {
@@ -24418,19 +24426,32 @@ static fn ui_list_cells(struct ui address_to ui, const struct ui_list address_to
                 string_address shown;
                 x += k ? gap : pad + set_in;
                 w -= (k ? gap : pad + set_in) + right_pad;
-                // A non-selectable list's mark (a joined network): an accent dot before its label in the first column.
+                // A non-selectable list's mark (a joined network, a machine online, a drive open): a dot in the inset before its label, which
+                // moves nothing; where a chevron has that room (a row that folds), the dot is after the chevron and the label after it.
                 if (!k && row->mark && !l->selected && w > 0)
                 {
-                        int dot = ui_dev(ui, 6), dx = ui_mirror(x, dot, left, span), dy = y + (height - dot) / 2;
-                        ui_kit_fill(ui, &(struct ui_box){dx * 256, dy * 256, (dx + dot) * 256, (dy + dot) * 256, dot * 128, dot * 128},
-                                    row->mark_ink ? row->mark_ink : ui_role(UI_PRIMARY), null);
-                        x += dot + ui_dev(ui, 8), w -= dot + ui_dev(ui, 8);
+                        unsigned int dot_ink = row->mark_ink ? row->mark_ink : ui_role(UI_PRIMARY);
+                        if (!row->expander)
+                                ui_row_dot(ui, ui_mirror(x - pad, pad, left, span), y, height, dot_ink);
+                        else
+                        {
+                                int dot = ui_dev(ui, 6), dx = ui_mirror(x, dot, left, span), dy = y + (height - dot) / 2;
+                                ui_kit_fill(ui, &(struct ui_box){dx * 256, dy * 256, (dx + dot) * 256, (dy + dot) * 256, dot * 128, dot * 128}, dot_ink, null);
+                                x += dot + ui_dev(ui, 8), w -= dot + ui_dev(ui, 8);
+                        }
                 }
                 // A folder's entry has its symbol before its label, 16 pixels a side, the label after it.
                 if (!k && row->file && w > 0)
                 {
                         int size = ui_dev(ui, UI_FILE_ROW_ICON);
                         ui_file_icon(ui, row->file - 1, null, ui_mirror(x, size, left, span), y + (height - size) / 2, size, quiet);
+                        x += size + ui_dev(ui, 8), w -= size + ui_dev(ui, 8);
+                }
+                // A program's picture or a symbol before its label in a table, as a folder's entry has its own (a startup table's app).
+                if (!k && !row->file && (row->icon || row->tile_picture || row->tile_name) && w > 0)
+                {
+                        int size = ui_dev(ui, UI_FILE_ROW_ICON + 4);
+                        ui_list_paint_icon(ui, row, id, x, y + (height - size) / 2, size, 0, 0, null, 0, ink, true, left, span);
                         x += size + ui_dev(ui, 8), w -= size + ui_dev(ui, 8);
                 }
                 // Reserve trailing control width (switches, segmented tabs, buttons) at the end of the last column so cell text never collides.
@@ -24473,7 +24494,7 @@ static b32 ui_list_tree_chevron_at(const struct ui address_to ui, const struct u
 
 #define UI_COLUMNS_MIN_L(c, k) ((k) == (c)->count - 1 && (c)->trailing_min > UI_COLUMNS_LEAST ? (c)->trailing_min : UI_COLUMNS_LEAST)
 // What a columned row keeps at its last column's end: its control's room, and its remove button's after it.
-#define UI_ROW_TRAILING_NEED(row, tr) (UI_ROW_TRAILING_CONTROL(row, tr) + ((row)->remove ? UI_ROW_REMOVE_W + 6 : 0))
+#define UI_ROW_TRAILING_NEED(row, tr) UI_ROW_TRAILING_CONTROL(row, tr)
 #define UI_ROW_TRAILING_CONTROL(row, tr)                                                                                                   \
         ((row)->kind == UI_ROW_SWITCH                                                                                                      \
              ? UI_SWITCH_W + UI_INSET + 8                                                                                                  \
@@ -24508,7 +24529,8 @@ static fn ui_list_columns_fit(struct ui address_to ui, struct ui_list address_to
                         need = one;
                 // What each cell's words need, the first's with what is before its words (its indent, its mark, its symbol).
                 ui_columns_need(ui, c, 0, row.label, ui_dev(ui, UI_INDENT) * row.indent + (row.expander ? ui_dev(ui, UI_INDENT) : 0) +
-                                                      (row.mark ? ui_dev(ui, 14) : 0) + (row.file ? ui_dev(ui, UI_FILE_ROW_ICON + 8) : 0));
+                                                      (row.file ? ui_dev(ui, UI_FILE_ROW_ICON + 8) : 0) +
+                                                      (!row.file && (row.icon || row.tile_picture || row.tile_name) ? ui_dev(ui, UI_FILE_ROW_ICON + 12) : 0));
                 for (int k = 1; k < c->count; k++)
                         if (row.cell_check >> k & 1u)
                                 ui_columns_need(ui, c, k, "", ui_dev(ui, UI_CELL_CHECK) + (k == c->count - 1 ? ui_dev(ui, one) : 0));
@@ -24965,7 +24987,7 @@ static fn ui_list_row(struct ui address_to ui, struct ui_list address_to l, int 
                         ui_columns_layout(ui, cols, l->x, cols->y, l->w);
                 if (trailing && trailing->w > 0 && cols->count > 0)
                 {
-                        int last = cols->count - 1, end_x = cols->at[last] + cols->wide[last] - ui_dev(ui, UI_INSET) - (row.remove ? ui_dev(ui, UI_ROW_REMOVE_W + 6) : 0);
+                        int last = cols->count - 1, end_x = cols->at[last] + cols->wide[last] - ui_dev(ui, UI_INSET);
                         trailing->x = ui_rtl() ? ui_logical(ui, cols->x + ui_dev(ui, UI_INSET)) : ui_logical(ui, end_x) - trailing->w;
                 }
         }
@@ -24988,7 +25010,7 @@ static fn ui_list_row(struct ui address_to ui, struct ui_list address_to l, int 
                         own->on = row.on, own->working = row.working, own->w = UI_SWITCH_W, own->h = 48, ui_row_control(ui, own, p->toggle);
                         if (cols && cols->count > 0)
                         {
-                                int last = cols->count - 1, end_x = cols->at[last] + cols->wide[last] - ui_dev(ui, UI_INSET) - (row.remove ? ui_dev(ui, UI_ROW_REMOVE_W + 6) : 0);
+                                int last = cols->count - 1, end_x = cols->at[last] + cols->wide[last] - ui_dev(ui, UI_INSET);
                                 own->x = ui_rtl() ? ui_logical(ui, cols->x + ui_dev(ui, UI_INSET)) : ui_logical(ui, end_x) - own->w;
                         }
                 }
@@ -24997,9 +25019,9 @@ static fn ui_list_row(struct ui address_to ui, struct ui_list address_to l, int 
         if ((n = p->picture) && row.paint && seen)
                 row.paint(ui, id, n->x, n->y, n->w, n->h);
         baseline = ui_row_baseline(ui, p->label, UI_BODY_MEDIUM);
-        if ((n = p->mark) && !cols && !l->tree)
-                ui_kit_fill(ui, &(struct ui_box){n->x * 256, (n->y + (n->h - n->w) / 2) * 256, (n->x + n->w) * 256, (n->y + (n->h + n->w) / 2) * 256, n->w * 128, n->w * 128},
-                            row.mark_ink ? row.mark_ink : ui_role(UI_PRIMARY), null);
+        // A row's mark (a status dot: joined, online, open) is in the row's inset before its words, as the grip is, and moves nothing.
+        if (row.mark && !cols && !l->tree && seen)
+                ui_row_dot(ui, ui_mirror(across, ui_dev(ui, UI_INSET), l->x, l->w), y, height, row.mark_ink ? row.mark_ink : ui_role(UI_PRIMARY));
         if ((n = p->check) && seen && row.on)
                 ui_list_check_draw(ui, &row, n, row.check == UI_ROW_CHECK_RADIO ? ui_role(UI_PRIMARY) : strong);
         // An ordered row's grip: six small round dots, two by three, in the row's inset at its start (the room no words take), quiet, and in
@@ -25017,16 +25039,6 @@ static fn ui_list_row(struct ui address_to ui, struct ui_list address_to l, int 
                         ui_kit_fill(ui, &(struct ui_box){dx * 256, dy * 256, (dx + dot) * 256, (dy + dot) * 256, dot * 128, dot * 128}, ink_dot, null);
                 }
         }
-        // A row's remove button: the cross, quiet; where the hand is over it, the error's red, which says what a press does, and held,
-        // the red mixed toward the ink, pressed in. No well round it (a row is flush).
-        if ((n = p->remove) && seen)
-        {
-                int side = ui_dev(ui, 14);
-                b32 over = l->hover == id && ui_list_part_x(ui, l, n, l->pointer_x), held = l->remove_down == id + 1;
-                unsigned int red = row.remove_icon ? strong | 0xff000000u : ui_role(UI_ERROR) | 0xff000000u;
-                ui_icon(ui, row.remove_icon ? row.remove_icon - 1 : UI_ICON_REMOVE, n->x + (n->w - side) / 2, n->y + (n->h - side) / 2, side, 0,
-                        held ? ui_mix(red, 75, strong | 0xff000000u) : over ? red : quiet);
-        }
         // An add row's label and its plus are the accent's.
         if (row.kind == UI_ROW_ADD)
                 ink = strong = ui_role(UI_PRIMARY) | 0xff000000u;
@@ -25037,8 +25049,7 @@ static fn ui_list_row(struct ui address_to ui, struct ui_list address_to l, int 
         }
         if (cols || l->tree)
         {
-                int trailing_w = (row.kind == UI_ROW_SWITCH ? ui_dev(ui, UI_SWITCH_W) : trailing && trailing->w > 0 ? ui_dev(ui, trailing->w) : 0) +
-                                 (row.remove ? ui_dev(ui, UI_ROW_REMOVE_W) + (row.kind == UI_ROW_SWITCH || (trailing && trailing->w > 0) ? ui_dev(ui, 6) : 0) : 0);
+                int trailing_w = row.kind == UI_ROW_SWITCH ? ui_dev(ui, UI_SWITCH_W) : trailing && trailing->w > 0 ? ui_dev(ui, trailing->w) : 0;
                 if (row.glow)
                 {
                         struct ui_box glow = {across * 256, y * 256, (across + across_w) * 256, (y + height) * 256, 0, 0};
@@ -26040,6 +26051,12 @@ static fn ui_list_menu_populate(struct ui_popup address_to p, const struct ui_li
                         ui_popmenu_add(m, null, null, UI_MENU_SEPARATOR, 0);
                 ui_popmenu_add(m, WORDS(menu_remove), "Delete", (flags & UI_LIST_MENU_REMOVE_DIM) ? UI_MENU_DISABLED : 0, UI_LIST_MENU_REMOVE);
         }
+        else if (row.remove)
+        {
+                if (m->count)
+                        ui_popmenu_add(m, null, null, UI_MENU_SEPARATOR, 0);
+                ui_popmenu_add(m, row.remove_icon == UI_ICON_EJECT + 1 ? WORDS(files_device_eject) : WORDS(menu_remove), "Delete", 0, UI_LIST_MENU_REMOVE_ROW);
+        }
 }
 
 static b32 ui_list_menu_ready(const struct ui address_to ui, const struct ui_list address_to l, const struct ui_popup address_to popup,
@@ -26139,6 +26156,8 @@ static b32 ui_list_menu_do(struct ui_popup address_to p, struct window_row addre
                 }
                 return true;
         }
+        if (id == UI_LIST_MENU_REMOVE_ROW)
+                return l->removed = row + 1, true;
         if (id == UI_LIST_MENU_REMOVE || (!p->field && id >= UI_LIST_MENU_EXTRA))
         {
                 if (l->menu->act)

@@ -282,6 +282,7 @@ settings_card_stopped	e24d	stopped: Escape or a press goes back
 settings_column_access	ae0b	Access
 settings_column_files	1b30	Files
 settings_column_log	7bf1	Log
+settings_column_on	7df0	On
 settings_column_run	e66a	Run
 settings_column_security	21db	Security
 settings_column_shell	69a1	Shell
