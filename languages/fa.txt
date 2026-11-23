@@ -23,6 +23,7 @@
 # machine-made 2026-11-23 (the mixer outputs pass), not yet read by a person: mixer_column_output mixer_column_plays mixer_outputs mixer_state_playing
 # machine-made 2026-11-23 (the mixer mirrors pass), not yet read by a person: mixer_column_mirror mixer_state_mirrored
 # machine-made 2026-11-23 (the loopback pass), not yet read by a person: mixer_loopback
+# machine-made 2026-11-23 (the mix router pass), not yet read by a person: settings_router settings_router_hint settings_router_main
 @language fa
 @name فارسی
 @translated machine
@@ -453,6 +454,9 @@ settings_role_linux	2c8f	داده‌های Linux
 settings_role_other	ff95	دیگر
 settings_role_swap	d36e	مبادله
 settings_role_unpartitioned	3c10	بدون جدول پارتیشن
+settings_router	fd76	مسیریاب میکس
+settings_router_hint	6509	از سمت راست یکی به سمت چپ دیگری بکشید تا صدایش به آنجا برود؛ برای سطح، پیچ را بچرخانید و برای پخش روی یک خروجی دو بار آن را بزنید
+settings_router_main	7928	اصلی
 settings_run_any	3ffd	اجرای هر فرمان moonwater
 settings_running	d0e2	در حال اجرای %s (Escape آن را متوقف می‌کند)
 settings_saved	9f44	ذخیره‌شده

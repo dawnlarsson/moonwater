@@ -83,7 +83,7 @@ struct audio_state_device
         char name[64];         // what a program or `moonwater audio device` names it
         char description[96];  // what the person is shown
         unsigned int flags;    // AUDIO_STATE_DEVICE_ACTIVE
-        unsigned int reserved;
+        unsigned int level;    // a mirror's (and the loopback's) own level in percent, after the output's volume; 0 for any other
 };
 
 struct audio_state

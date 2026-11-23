@@ -23,6 +23,7 @@
 # machine-made 2026-11-23 (the mixer outputs pass), not yet read by a person: mixer_column_output mixer_column_plays mixer_outputs mixer_state_playing
 # machine-made 2026-11-23 (the mixer mirrors pass), not yet read by a person: mixer_column_mirror mixer_state_mirrored
 # machine-made 2026-11-23 (the loopback pass), not yet read by a person: mixer_loopback
+# machine-made 2026-11-23 (the mix router pass), not yet read by a person: settings_router settings_router_hint settings_router_main
 @language ar
 @name العربية
 @translated machine
@@ -453,6 +454,9 @@ settings_role_linux	2c8f	بيانات Linux
 settings_role_other	ff95	أخرى
 settings_role_swap	d36e	التبديل
 settings_role_unpartitioned	3c10	بلا جدول أقسام
+settings_router	fd76	موجّه المزج
+settings_router_hint	6509	اسحب من يمين عقدة إلى يسار أخرى لإرسال صوتها إليها؛ أدر المقبض لضبط المستوى، واضغط مخرجًا مرتين للتشغيل عليه
+settings_router_main	7928	الرئيسي
 settings_run_any	3ffd	تنفيذ أي أمر moonwater
 settings_running	d0e2	قيد التنفيذ: %s (Escape يوقفه)
 settings_saved	9f44	محفوظة

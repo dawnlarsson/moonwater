@@ -428,6 +428,9 @@ settings_role_linux	2c8f	Linux data
 settings_role_other	ff95	Other
 settings_role_swap	d36e	Swap
 settings_role_unpartitioned	3c10	No partition table
+settings_router	fd76	Mix router
+settings_router_hint	6509	Drag from the right of one to the left of another to send its sound there; turn a knob for its level, and press an output twice to play on it
+settings_router_main	7928	Main
 settings_run_any	3ffd	Run any moonwater command
 settings_running	d0e2	running %s (Escape stops it)
 settings_saved	9f44	saved

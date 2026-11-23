@@ -14220,7 +14220,8 @@ static fn check_mixer_with(struct ui address_to ui, unsigned int address_to pixe
                 e = strips_key(UI_KEY_PAGE_DOWN, WINDOW_KEY_CONTROL);
                 check("mixer pages: and Page Down shows Recording", mixer_event(&e) && mixer.recording && s->count == 3 && s->focus == 0);
                 e = strips_key(UI_KEY_TAB, WINDOW_KEY_CONTROL);
-                check("mixer pages: Control Tab goes to the other", mixer_event(&e) && !mixer.recording);
+                check("mixer pages: Control Tab goes to the next, Outputs (the third), and again round to Playback",
+                      mixer_event(&e) && mixer.outputs && mixer.big->outputs.count == 1);
                 e = strips_key(UI_KEY_TAB, WINDOW_KEY_CONTROL);
                 mixer_event(&e);
                 {

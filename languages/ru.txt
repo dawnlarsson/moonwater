@@ -22,6 +22,7 @@
 # machine-made 2026-11-23 (the mixer outputs pass), not yet read by a person: mixer_column_output mixer_column_plays mixer_outputs mixer_state_playing
 # machine-made 2026-11-23 (the mixer mirrors pass), not yet read by a person: mixer_column_mirror mixer_state_mirrored
 # machine-made 2026-11-23 (the loopback pass), not yet read by a person: mixer_loopback
+# machine-made 2026-11-23 (the mix router pass), not yet read by a person: settings_router settings_router_hint settings_router_main
 @language ru
 @name Русский
 @translated machine
@@ -452,6 +453,9 @@ settings_role_linux	2c8f	Данные Linux
 settings_role_other	ff95	Прочее
 settings_role_swap	d36e	Подкачка
 settings_role_unpartitioned	3c10	Нет таблицы разделов
+settings_router	fd76	Маршрутизатор микса
+settings_router_hint	6509	Перетащите от правого края одного к левому краю другого, чтобы направить туда его звук; поверните ручку для уровня и нажмите на выход дважды, чтобы играть через него
+settings_router_main	7928	Главный
 settings_run_any	3ffd	Выполнить любую команду moonwater
 settings_running	d0e2	выполняется %s (Escape останавливает)
 settings_saved	9f44	сохранено

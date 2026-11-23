@@ -22,6 +22,7 @@
 # machine-made 2026-11-23 (the mixer outputs pass), not yet read by a person: mixer_column_output mixer_column_plays mixer_outputs mixer_state_playing
 # machine-made 2026-11-23 (the mixer mirrors pass), not yet read by a person: mixer_column_mirror mixer_state_mirrored
 # machine-made 2026-11-23 (the loopback pass), not yet read by a person: mixer_loopback
+# machine-made 2026-11-23 (the mix router pass), not yet read by a person: settings_router settings_router_hint settings_router_main
 @language pt
 @name Português
 @translated machine
@@ -452,6 +453,9 @@ settings_role_linux	2c8f	Dados Linux
 settings_role_other	ff95	Outro
 settings_role_swap	d36e	Troca
 settings_role_unpartitioned	3c10	Sem tabela de partições
+settings_router	fd76	Roteador de mixagem
+settings_router_hint	6509	Arraste da direita de um para a esquerda de outro para enviar o som para lá; gire um botão para o nível e pressione uma saída duas vezes para tocar nela
+settings_router_main	7928	Principal
 settings_run_any	3ffd	Executar qualquer comando do moonwater
 settings_running	d0e2	executando %s (Escape interrompe)
 settings_saved	9f44	salva

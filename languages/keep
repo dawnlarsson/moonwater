@@ -8,6 +8,7 @@ src/canvas/ui/files.c	Files
 src/canvas/ui/files.c	Enter
 src/canvas/ui/files.c	Delete
 src/canvas/ui/mixer.c	Mixer
+src/canvas/ui/mixer.c	Automatic
 src/canvas/ui/settings.c	Normal
 src/canvas/ui/settings.c	Turned right
 src/canvas/ui/settings.c	Upside down

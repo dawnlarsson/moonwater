@@ -22,6 +22,7 @@
 # machine-made 2026-11-23 (the mixer outputs pass), not yet read by a person: mixer_column_output mixer_column_plays mixer_outputs mixer_state_playing
 # machine-made 2026-11-23 (the mixer mirrors pass), not yet read by a person: mixer_column_mirror mixer_state_mirrored
 # machine-made 2026-11-23 (the loopback pass), not yet read by a person: mixer_loopback
+# machine-made 2026-11-23 (the mix router pass), not yet read by a person: settings_router settings_router_hint settings_router_main
 @language tr
 @name Türkçe
 @translated machine
@@ -452,6 +453,9 @@ settings_role_linux	2c8f	Linux verisi
 settings_role_other	ff95	Diğer
 settings_role_swap	d36e	Takas
 settings_role_unpartitioned	3c10	Bölüm tablosu yok
+settings_router	fd76	Karışım yönlendirici
+settings_router_hint	6509	Sesini oraya göndermek için birinin sağından diğerinin soluna sürükleyin; seviye için bir düğmeyi çevirin, bir çıkışta çalmak için ona iki kez basın
+settings_router_main	7928	Ana
 settings_run_any	3ffd	Herhangi bir moonwater komutunu çalıştır
 settings_running	d0e2	%s çalışıyor (Escape durdurur)
 settings_saved	9f44	kayıtlı

@@ -22,6 +22,7 @@
 # machine-made 2026-11-23 (the mixer outputs pass), not yet read by a person: mixer_column_output mixer_column_plays mixer_outputs mixer_state_playing
 # machine-made 2026-11-23 (the mixer mirrors pass), not yet read by a person: mixer_column_mirror mixer_state_mirrored
 # machine-made 2026-11-23 (the loopback pass), not yet read by a person: mixer_loopback
+# machine-made 2026-11-23 (the mix router pass), not yet read by a person: settings_router settings_router_hint settings_router_main
 @language sv
 @name Svenska
 @translated machine
@@ -452,6 +453,9 @@ settings_role_linux	2c8f	Linux-data
 settings_role_other	ff95	Annat
 settings_role_swap	d36e	Swap
 settings_role_unpartitioned	3c10	Ingen partitionstabell
+settings_router	fd76	Mixrouter
+settings_router_hint	6509	Dra från högerkanten på en till vänsterkanten på en annan för att skicka ljudet dit; vrid en ratt för nivån och tryck två gånger på en utgång för att spela på den
+settings_router_main	7928	Huvud
 settings_run_any	3ffd	Kör valfritt moonwater-kommando
 settings_running	d0e2	kör %s (Escape stoppar)
 settings_saved	9f44	sparad

@@ -368,13 +368,15 @@ static fn mixer_mirror_turn(int id)
         was[got > 0 ? got : 0] = 0;
         for (char address_to line = was; *line;)
         {
-                char address_to stop = line;
+                char address_to stop = line, address_to cut = line;
                 positive each;
 
                 while (*stop && *stop != '\n')
                         stop++;
+                while (cut < stop && *cut != '\t')
+                        cut++;
                 each = (positive)(stop - line);
-                if (each && each == length && !memory_compare(line, name, length))
+                if (each && (positive)(cut - line) == length && !memory_compare(line, name, length))
                         found = true;
                 else if (each && out + each + 2 < sizeof(now))
                 {

@@ -12,6 +12,8 @@
 #define MOONWATER_CANVAS_SETTINGS
 
 #include "../../sh/splash_mark.c"
+#include "../../audio/state.c"
+#include "../../audio/control.c"
 
 enum { SETTINGS_UNREAD = 0u, SETTINGS_READ = 1u, SETTINGS_ABSENT = 2u, SETTINGS_FAILED = 3u };
 #define SETTINGS_VALUE 128
@@ -1341,6 +1343,11 @@ static int settings_map_chosen(void)
         return settings.map.display;
 }
 
+static fn settings_router_below(void);
+static b32 settings_router_on(void);
+static b32 settings_router_event(const struct window_event address_to event);
+static fn settings_router_paint(struct ui address_to ui);
+static long settings_router_tick(long timeout);
 static b32 settings_map_on(void) { int r = settings_output_row(SETTINGS_OUT_SCREEN); return r >= 0 && !settings.page.card && !settings_filter_length() && settings_group_of(r) == settings.page.chosen; }
 
 static const struct settings_turn { const char address_to label; int degrees; } settings_turns[] = {
@@ -1603,7 +1610,7 @@ static fn settings_layout(void)
         }
         settings.page.column_on = !settings.page.card, settings.page.body = settings.page.card ? &settings.card : &settings.list.scroll;
         settings.page.column.count = settings_groups() < UI_ITEMS ? settings_groups() : UI_ITEMS;
-        settings.page.view = &settings_large->view, settings.page.above = settings_map_above, settings.page.popup = &settings.popup, settings.page.own = &settings.own;
+        settings.page.view = &settings_large->view, settings.page.above = settings_map_above, settings.page.below = settings_router_below, settings.page.popup = &settings.popup, settings.page.own = &settings.own;
         settings_least();
         ui_page_fit(ui, &settings.page, &settings.list, settings.width, settings.height, &settings.card, ui_lines_height(ui, settings.card_text.count));
 }
@@ -5007,6 +5014,433 @@ static fn settings_field_menu(void)
                 settings.popup.list = null, settings.popup.list_row = -1;
 }
 
+/*
+        The mix router, at the foot of the Sound page: what plays and where it goes, as nodes wired on the kit's graph (the display map's).
+        Every program that has a sound is a node wired into Main, its knob its volume and its wire taken off its mute; Main is wired to the
+        output that plays, its knob the master volume, and to every output that mirrors it and the loopback microphone, each knob that
+        one's own level (/root/audio.mirror, a name, a tab and the level a line). A wire drawn from Main to another output mirrors it there,
+        and taken off lets it go; the output that plays, taken off, gives its place to the first mirror (or to Automatic where the person
+        had chosen it); a second press on an output makes it the one that plays. The server's page (src/audio/state.c) is read four times a
+        second while the page is up, and what the router does goes to the server as the mixer's does: its socket, and the files it reads.
+        Where the person put a node is kept for the session by what the node is.
+*/
+#define SETTINGS_ROUTER_WHOLE 65536ul // a volume of 100%, PulseAudio's
+#define SETTINGS_ROUTER_NODES (AUDIO_STATE_STREAMS + AUDIO_STATE_DEVICES + 1)
+#define SETTINGS_ROUTER_POLL_NS 250000000ll
+#define SETTINGS_ROUTER_AGAIN_NS 400000000ll // a second press on an output this soon makes it the one that plays
+#define SETTINGS_ROUTER_PANEL 220
+#define SETTINGS_ROUTER_TALL 420
+#define SETTINGS_ROUTER_SOCKET "/run/moonwater/pulse/native"
+#define SETTINGS_ROUTER_TEXT (AUDIO_STATE_DEVICES * 2 * 64)
+#define SETTINGS_ROUTE_MAIN 1
+#define SETTINGS_ROUTE_PROGRAM 2
+#define SETTINGS_ROUTE_OUTPUT 3
+
+static struct settings_router
+{
+        struct ui_graph graph;
+        struct ui_graph_node node[SETTINGS_ROUTER_NODES];
+        struct ui_graph_edge edge[SETTINGS_ROUTER_NODES];
+        unsigned char kind[SETTINGS_ROUTER_NODES]; // SETTINGS_ROUTE_*
+        int what[SETTINGS_ROUTER_NODES];           // an output's place in the page's list
+        unsigned long id[SETTINGS_ROUTER_NODES];   // what the node is, for where it was put
+        char label[SETTINGS_ROUTER_NODES][48];
+        int member_of[AUDIO_STATE_STREAMS];        // each stream's program node, -1 none
+        struct { unsigned long id; int x, y; } place[SETTINGS_ROUTER_NODES * 2];
+        int places, pressed;
+        b64 pressed_at;
+        struct audio_state copy;
+        const volatile struct audio_state address_to page;
+        b32 have, connected;
+        b64 polled;
+        unsigned int seq;
+        struct ctl ctl;
+        struct ui_rect panel;
+        struct ui_control fit;
+} address_to settings_route;
+
+static b32 settings_router_on(void)
+{
+        int r = settings_row_of(SETTING_AUDIO_VOLUME_PATH);
+        return r >= 0 && !settings.page.card && !settings_filter_length() && settings_group_of(r) == settings.page.chosen;
+}
+
+static b32 settings_router_ready(void)
+{
+        if (!settings_route && (settings_route = (struct settings_router address_to)settings_alloc_pages(sizeof(struct settings_router))))
+        {
+                ui_graph_start(&settings_route->graph);
+                settings_route->pressed = -1;
+        }
+        return settings_route != null;
+}
+
+static int settings_router_percent(unsigned int volume)
+{
+        unsigned long percent = ((unsigned long)volume * 100 + SETTINGS_ROUTER_WHOLE / 2) / SETTINGS_ROUTER_WHOLE;
+        return percent > 100 ? 100 : (int)percent;
+}
+
+// A node: its kind, its words, its ports, its size, and where it was put (else where it is laid out first).
+static int settings_router_node(int kind, unsigned long id, const char address_to label, int x, int y, b32 address_to fresh)
+{
+        struct settings_router address_to r = settings_route;
+        int n = r->graph.nodes;
+        struct ui_graph_node address_to node = &r->node[n];
+        if (n >= SETTINGS_ROUTER_NODES)
+                return -1;
+        memory_zero(node, sizeof(*node));
+        r->kind[n] = (unsigned char)kind, r->id[n] = id, r->what[n] = -1;
+        string_copy_bounded((string_address)r->label[n], (string_address)label, sizeof(r->label[n]));
+        node->label = r->label[n];
+        node->ins = kind != SETTINGS_ROUTE_PROGRAM, node->outs = kind != SETTINGS_ROUTE_OUTPUT;
+        node->w = kind == SETTINGS_ROUTE_MAIN ? 140 : 200, node->h = 56, node->x = x, node->y = y;
+        for (int k = 0; k < r->places; k++)
+                if (r->place[k].id == id)
+                        return node->x = r->place[k].x, node->y = r->place[k].y, r->graph.nodes = n + 1, n;
+        *fresh = true;
+        r->graph.nodes = n + 1;
+        return n;
+}
+
+static fn settings_router_wire(int from, int to, int level, b32 quiet)
+{
+        struct settings_router address_to r = settings_route;
+        struct ui_graph_edge address_to e = &r->edge[r->graph.edges];
+        if (from < 0 || to < 0 || r->graph.edges >= SETTINGS_ROUTER_NODES)
+                return;
+        *e = (struct ui_graph_edge){(unsigned short)from, (unsigned short)to, 0, 0, 1, 1, (unsigned char)quiet, (unsigned short)level};
+        r->graph.edges++;
+}
+
+// The graph from the page copied: Main, the programs (the streams of one program, by its name and its user, are one), the outputs.
+static fn settings_router_list(void)
+{
+        struct settings_router address_to r = settings_route;
+        const struct audio_state address_to page = &r->copy;
+        struct ui_graph address_to g = &r->graph;
+        int main, programs = 0, outputs = 0, playing[SETTINGS_ROUTER_NODES] = {0}, level[SETTINGS_ROUTER_NODES] = {0}, muted[SETTINGS_ROUTER_NODES];
+        b32 fresh = false;
+        g->nodes = g->edges = 0;
+        main = settings_router_node(SETTINGS_ROUTE_MAIN, 1, WORDS(settings_router_main), 280, 0, &fresh);
+        for (int slot = 0; slot < AUDIO_STATE_STREAMS; slot++)
+        {
+                const struct audio_state_stream address_to s = &page->stream[slot];
+                const char address_to name = s->app[0] ? s->app : s->media[0] ? s->media : "?";
+                unsigned long id = s->app[0] ? (unsigned long)s->uid << 32 | hash_fnv1a(2166136261u, s->app, string_length(s->app)) : 0x100000000ul + s->client;
+                int k = -1;
+                r->member_of[slot] = -1;
+                if (s->index == 0xffffffffu)
+                        continue;
+                for (int j = 0; j < g->nodes && k < 0; j++)
+                        if (r->kind[j] == SETTINGS_ROUTE_PROGRAM && r->id[j] == (id | 0x2000000000000000ul))
+                                k = j;
+                if (k < 0 && (k = settings_router_node(SETTINGS_ROUTE_PROGRAM, id | 0x2000000000000000ul, name, 0, programs * 80, &fresh)) >= 0)
+                        programs++, muted[k] = 1;
+                if (k < 0)
+                        continue;
+                r->member_of[slot] = k;
+                level[k] = settings_router_percent(s->volume) > level[k] ? settings_router_percent(s->volume) : level[k];
+                muted[k] = muted[k] && (s->flags & AUDIO_STATE_MUTED);
+                playing[k] |= (s->flags & AUDIO_STATE_PLAYING) && !(s->flags & AUDIO_STATE_CORKED);
+        }
+        for (int k = 0; k < g->nodes; k++)
+                if (r->kind[k] == SETTINGS_ROUTE_PROGRAM && !muted[k])
+                        settings_router_wire(k, main, level[k], !playing[k]);
+        for (unsigned int d = 0; d < page->devices && d < AUDIO_STATE_DEVICES; d++)
+        {
+                const struct audio_state_device address_to device = &page->device_list[d];
+                unsigned int f = device->flags;
+                const char address_to label = f & AUDIO_STATE_DEVICE_VIRTUAL ? WORDS(mixer_loopback) : device->description[0] ? device->description : device->name;
+                int k = settings_router_node(SETTINGS_ROUTE_OUTPUT, hash_fnv1a(2166136261u, device->name, string_length(device->name)) | 0x3000000000000000ul, label, 560,
+                                             outputs * 80, &fresh);
+                if (k < 0)
+                        break;
+                outputs++, r->what[k] = (int)d;
+                r->node[k].line[0] = f & AUDIO_STATE_DEVICE_ACTIVE ? WORDS(mixer_state_playing) : f & AUDIO_STATE_DEVICE_MIRRORING ? WORDS(mixer_state_mirrored)
+                                     : f & AUDIO_STATE_DEVICE_UNPLUGGED ? WORDS(mixer_unplugged) : null;
+                r->node[k].flags = f & AUDIO_STATE_DEVICE_ACTIVE ? UI_GRAPH_MARKED : 0;
+                if (f & AUDIO_STATE_DEVICE_ACTIVE)
+                        settings_router_wire(main, k, settings_router_percent(page->volume), page->muted != 0);
+                else if (f & AUDIO_STATE_DEVICE_MIRROR)
+                        settings_router_wire(main, k, (int)(device->level > 100 ? 100 : device->level), !(f & AUDIO_STATE_DEVICE_MIRRORING));
+        }
+        // Main sits between its two columns where nobody moved it.
+        if (main >= 0 && r->node[main].y == 0 && r->node[main].x == 280)
+                r->node[main].y = ((programs > outputs ? programs : outputs) - 1) * 40;
+        g->node = r->node, g->edge = r->edge;
+        if (fresh)
+                g->homed = 0;
+}
+
+// The page read again (mapped read-only as the mixer maps it): true when what the router shows changed.
+static b32 settings_router_poll(b32 now)
+{
+        struct settings_router address_to r = settings_route;
+        unsigned int before = r->copy.seq;
+        b32 had = r->have;
+        if (!now && (b64)ui_kit.now - r->polled < SETTINGS_ROUTER_POLL_NS)
+                return false;
+        r->polled = (b64)ui_kit.now;
+        if (!r->page)
+        {
+                long fd = compositor_call(syscall(openat), (positive)AT_FDCWD, (positive)AUDIO_STATE_PATH, FILE_READ | O_NOFOLLOW | O_CLOEXEC, 0, 0, 0), got = -1;
+                if (fd >= 0)
+                {
+                        if (compositor_call(syscall(lseek), (positive)fd, 0, 2, 0, 0, 0) >= (long)sizeof(struct audio_state))
+                                got = compositor_call(syscall(mmap), 0, (positive)((sizeof(struct audio_state) + 4095) & ~4095ul), 1, 1, (positive)fd, 0);
+                        compositor_call(syscall(close), (positive)fd, 0, 0, 0, 0, 0);
+                }
+                r->page = got < 0 && got > -4096 ? null : (const volatile struct audio_state address_to)got;
+        }
+        r->have = r->page && audio_state_read(r->page, &r->copy);
+        if (r->have == had && (!r->have || r->copy.seq == before) && r->graph.nodes)
+                return false;
+        if (r->have)
+                settings_router_list();
+        else
+                r->graph.nodes = r->graph.edges = 0;
+        return true;
+}
+
+static fn settings_router_damage(void)
+{
+        if (settings_route)
+                ui_page_damage(&settings.page, settings_route->panel.y, settings_route->panel.y + settings_route->panel.h);
+}
+
+static long settings_router_tick(long timeout)
+{
+        if (!settings_router_on() || !settings_router_ready())
+                return timeout;
+        if (settings_router_poll(false))
+                settings_router_damage();
+        return ui_deadline_wait(timeout, (b64)ui_kit.now, settings_route->polled + SETTINGS_ROUTER_POLL_NS);
+}
+
+static fn settings_router_frame(void)
+{
+        struct ui_graph address_to g = &settings_route->graph;
+        g->x = settings_route->panel.x, g->y = settings_route->panel.y, g->w = settings_route->panel.w, g->h = settings_route->panel.h;
+        g->top = ui_px(&settings.ui, SETTINGS_MAP_STRIP + UI_GAP2);
+        g->rules = UI_GRAPH_SIDES | UI_GRAPH_GRID | UI_GRAPH_APART | UI_GRAPH_WIRING, g->grid = 20, g->least = UI_GRAPH_ONE / 4, g->most = UI_GRAPH_ONE * 2;
+        g->knob_most = 100;
+}
+
+static fn settings_router_below(void)
+{
+        int tall = settings.ui.scale > 0 ? settings.height * 100 / settings.ui.scale * 2 / 5 : 0;
+        struct ui_control address_to fit;
+        if (!settings_router_on() || !settings_router_ready())
+                return;
+        fit = &settings_route->fit;
+        tall = tall < SETTINGS_ROUTER_PANEL ? SETTINGS_ROUTER_PANEL : tall > SETTINGS_ROUTER_TALL ? SETTINGS_ROUTER_TALL : tall;
+        fit->kind = UI_BUTTON, fit->variant = UI_BUTTON_DEFAULT, fit->label = (string_address)WORDS(settings_map_fit);
+        ui_text(WORDS(settings_router), .class = "title");
+        ui_col(.host = &settings_route->panel, .class = "map", .h = tall)
+                ui_row(.class = "foot", .h = SETTINGS_MAP_STRIP)
+                        ui_control(fit, .w = SETTINGS_MAP_BUTTON_W, .h = SETTINGS_MAP_BUTTON_H, .shrink = 1);
+        ui_text(WORDS(settings_router_hint), .class = "caption");
+}
+
+static fn settings_router_paint(struct ui address_to ui)
+{
+        if (!settings_router_on() || !settings_router_ready())
+                return;
+        settings_router_poll(false), settings_router_frame();
+        if (settings_route->have)
+                ui_graph_draw(ui, &settings_route->graph);
+}
+
+/* What the router does: through the server's socket, as the mixer does, and the files the server reads. */
+
+static b32 settings_router_connect(void)
+{
+        struct settings_router address_to r = settings_route;
+        if (!r->connected)
+                r->connected = ctl_connect(&r->ctl, SETTINGS_ROUTER_SOCKET) == 0;
+        return r->connected;
+}
+
+static fn settings_router_answer(long answer)
+{
+        if (answer == CTL_FAILED)
+                ctl_disconnect(&settings_route->ctl), settings_route->connected = false;
+}
+
+// A program's streams given a volume (mute 0 or 1 instead where it is not -1).
+static fn settings_router_program(int k, int percent, int mute)
+{
+        struct settings_router address_to r = settings_route;
+        long answer = 0;
+        for (int slot = 0; slot < AUDIO_STATE_STREAMS && answer >= 0; slot++)
+                if (r->member_of[slot] == k && settings_router_connect())
+                        answer = mute >= 0 ? ctl_set_input_mute(&r->ctl, r->copy.stream[slot].index, mute)
+                                           : ctl_set_input_volume(&r->ctl, r->copy.stream[slot].index, (unsigned long)percent * SETTINGS_ROUTER_WHOLE / 100);
+        settings_router_answer(answer);
+}
+
+// The mirror list with name taken out, and put back at level where level is not -1: read and written whole, other lines kept as they are.
+static fn settings_router_mirror(const char address_to name, int level)
+{
+        char was[SETTINGS_ROUTER_TEXT], now[SETTINGS_ROUTER_TEXT];
+        positive length = string_length((string_address)name), out = 0;
+        bipolar handle, got = 0;
+        if ((handle = system_open_at(AT_FDCWD, (string_address)SETTING_AUDIO_MIRROR_PATH, FILE_READ | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK)) >= 0)
+        {
+                got = system_read_once(handle, was, sizeof(was) - 1);
+                system_close(handle);
+        }
+        was[got > 0 ? got : 0] = 0;
+        for (char address_to line = was; *line;)
+        {
+                char address_to stop = line, address_to cut = line;
+                positive each;
+                while (*stop && *stop != '\n')
+                        stop++;
+                while (cut < stop && *cut != '\t')
+                        cut++;
+                each = (positive)(stop - line);
+                if (each && !((positive)(cut - line) == length && !memory_compare(line, name, length)) && out + each + 2 < sizeof(now))
+                {
+                        memory_copy(now + out, line, each);
+                        out += each, now[out++] = '\n';
+                }
+                line = *stop ? stop + 1 : stop;
+        }
+        if (level >= 0 && out + length + 8 < sizeof(now))
+        {
+                memory_copy(now + out, name, length);
+                out += length, now[out++] = '\t';
+                out += positive_into_string((p8 address_to)now + out, (positive)level);
+                now[out++] = '\n';
+        }
+        now[out] = 0;
+        (void)file_write_atomic_at(AT_FDCWD, (string_address)SETTING_AUDIO_MIRROR_PATH, now, out, 0644);
+}
+
+static fn settings_router_device(const char address_to name)
+{
+        char line[80];
+        positive n = 0;
+        string_copy_bounded((string_address)line, (string_address)name, sizeof(line) - 2);
+        n = string_length((string_address)line), line[n++] = '\n', line[n] = 0;
+        (void)file_write_atomic_at(AT_FDCWD, (string_address)SETTING_AUDIO_DEVICE_PATH, line, n, 0644);
+}
+
+// A wire's knob turned: a program's volume, the master volume, or a mirror's (the loopback's) level.
+static fn settings_router_turned(int e, int level)
+{
+        struct settings_router address_to r = settings_route;
+        const struct ui_graph_edge address_to edge = &r->edge[e];
+        const struct audio_state_device address_to device;
+        r->edge[e].level = (unsigned short)level;
+        if (r->kind[edge->from] == SETTINGS_ROUTE_PROGRAM)
+                return settings_router_program(edge->from, level, -1);
+        if (r->kind[edge->to] != SETTINGS_ROUTE_OUTPUT || r->what[edge->to] < 0)
+                return;
+        device = &r->copy.device_list[r->what[edge->to]];
+        if (device->flags & AUDIO_STATE_DEVICE_ACTIVE)
+        {
+                if (settings_router_connect())
+                        settings_router_answer(ctl_set_sink_volume(&r->ctl, r->copy.name, (unsigned long)level * SETTINGS_ROUTER_WHOLE / 100));
+        }
+        else
+                settings_router_mirror(device->name, level);
+}
+
+// A wire taken off: a program muted; a mirror let go; the output that plays given up to the first mirror, or to Automatic where chosen.
+static fn settings_router_unwired(int e)
+{
+        struct settings_router address_to r = settings_route;
+        const struct ui_graph_edge address_to edge = &r->edge[e];
+        const struct audio_state_device address_to device;
+        if (r->kind[edge->from] == SETTINGS_ROUTE_PROGRAM)
+                return settings_router_program(edge->from, 0, 1);
+        if (r->kind[edge->to] != SETTINGS_ROUTE_OUTPUT || r->what[edge->to] < 0)
+                return;
+        device = &r->copy.device_list[r->what[edge->to]];
+        if (!(device->flags & AUDIO_STATE_DEVICE_ACTIVE))
+                return settings_router_mirror(device->name, -1);
+        for (unsigned int d = 0; d < r->copy.devices && d < AUDIO_STATE_DEVICES; d++)
+                if ((r->copy.device_list[d].flags & AUDIO_STATE_DEVICE_MIRROR) && !(r->copy.device_list[d].flags & AUDIO_STATE_DEVICE_VIRTUAL))
+                {
+                        settings_router_mirror(r->copy.device_list[d].name, -1);
+                        settings_router_device(r->copy.device_list[d].name);
+                        return;
+                }
+        if (r->copy.output_why == AUDIO_STATE_WHY_CHOSEN)
+                settings_router_device("default");
+}
+
+// A wire drawn: a program into Main is heard again; Main to an output mirrors it there (an output that plays already has it).
+static fn settings_router_wired(int from, int to)
+{
+        struct settings_router address_to r = settings_route;
+        const struct audio_state_device address_to device;
+        if (r->kind[from] == SETTINGS_ROUTE_PROGRAM && r->kind[to] == SETTINGS_ROUTE_MAIN)
+                return settings_router_program(from, 0, 0);
+        if (r->kind[from] != SETTINGS_ROUTE_MAIN || r->kind[to] != SETTINGS_ROUTE_OUTPUT || r->what[to] < 0)
+                return;
+        device = &r->copy.device_list[r->what[to]];
+        if (!(device->flags & AUDIO_STATE_DEVICE_ACTIVE))
+                settings_router_mirror(device->name, 100);
+}
+
+static b32 settings_router_event(const struct window_event address_to event)
+{
+        struct settings_router address_to r;
+        struct ui_graph address_to g;
+        int x = ui_kit.pointer_x, y = ui_kit.pointer_y;
+        unsigned int did;
+        b32 had;
+        if (!settings_router_ready())
+                return false;
+        r = settings_route, g = &r->graph, had = g->held >= 0 || g->panning || g->drag_from >= 0 || g->turning >= 0;
+        settings_router_poll(false), settings_router_frame();
+        if (!r->have)
+                return false;
+        if (event->type == WINDOW_EVENT_BUTTON && (event->flags & WINDOW_KEY_DOWN) && event->a == UI_POINTER_LEFT &&
+            ui_control_hit(&settings.ui, &r->fit, x, y) >= 0)
+                return ui_graph_home(&settings.ui, g), settings_router_damage(), true;
+        did = ui_graph_event(&settings.ui, g, event);
+        if (did & UI_GRAPH_TURNED)
+                settings_router_turned(g->turned, g->turned_level);
+        if (did & UI_GRAPH_UNWIRED)
+                settings_router_unwired(g->unwired);
+        if (did & UI_GRAPH_WIRED)
+                settings_router_wired(g->wired_from, g->wired_to);
+        if ((did & UI_GRAPH_DROP) && g->dropped >= 0 && g->dropped < g->nodes)
+        {
+                int k = g->dropped, at = 0;
+                r->node[k].x = g->at_x, r->node[k].y = g->at_y;
+                while (at < r->places && r->place[at].id != r->id[k])
+                        at++;
+                if (at < (int)(sizeof(r->place) / sizeof(r->place[0])))
+                        r->place[at].id = r->id[k], r->place[at].x = g->at_x, r->place[at].y = g->at_y, r->places += at == r->places;
+        }
+        // A second press on an output soon after the first: the one that plays.
+        if (event->type == WINDOW_EVENT_BUTTON && (event->flags & WINDOW_KEY_DOWN) && g->held >= 0)
+        {
+                int k = g->held;
+                if (k == r->pressed && (b64)ui_kit.now - r->pressed_at < SETTINGS_ROUTER_AGAIN_NS && r->kind[k] == SETTINGS_ROUTE_OUTPUT && r->what[k] >= 0 &&
+                    !(r->copy.device_list[r->what[k]].flags & (AUDIO_STATE_DEVICE_ACTIVE | AUDIO_STATE_DEVICE_VIRTUAL)))
+                {
+                        const char address_to name = r->copy.device_list[r->what[k]].name;
+                        if (r->copy.device_list[r->what[k]].flags & AUDIO_STATE_DEVICE_MIRROR)
+                                settings_router_mirror(name, -1);
+                        settings_router_device(name);
+                        k = -1;
+                }
+                r->pressed = k, r->pressed_at = (b64)ui_kit.now;
+        }
+        if (did & (UI_GRAPH_WIRED | UI_GRAPH_UNWIRED | UI_GRAPH_TURNED))
+                r->polled = 0;
+        if (did & UI_GRAPH_DRAW)
+                settings_router_damage();
+        return event->type == WINDOW_EVENT_MOTION ? had || (did & UI_GRAPH_TAKEN) != 0 : (did & UI_GRAPH_TAKEN) != 0;
+}
+
 /* ---- pointer/touch events, drawing, fold stepping & lifecycle ---- */
 
 static fn settings_press_at(void);
@@ -5080,6 +5514,8 @@ static b32 settings_event_take(const struct window_event address_to event)
         }
         if (settings_map_on() && settings.page.menu_row < 0 && event->type != WINDOW_EVENT_KEY) { if (settings_map_event(event)) return true; }
         else if (!settings_map_on()) ui_graph_let_go(&settings.map.graph);
+        if (settings_router_on() && settings.page.menu_row < 0 && event->type != WINDOW_EVENT_KEY && settings_router_event(event))
+                return true;
         if (event->type == WINDOW_EVENT_BUTTON && (event->flags & WINDOW_KEY_DOWN))
                 settings.map.keys = false;
         if ((event->type == WINDOW_EVENT_MOTION || event->type == WINDOW_EVENT_BUTTON) &&
@@ -5180,6 +5616,7 @@ static void settings_map_paint(struct ui address_to ui)
         unsigned int number[WINDOWS_OUTPUTS] = {0};
         if (settings_map_on())
                 settings_map_load(number), settings_map_frame(), ui_graph_draw(ui, &settings.map.graph);
+        settings_router_paint(ui);
 }
 
 static void settings_card_paint(struct ui address_to ui)
@@ -5312,6 +5749,7 @@ static long settings_tick(long timeout, long address_to other)
                 timeout = ui_field_tick(&settings.ui, &settings.page, t, timeout, gallery.on ? t->focused : settings.focused);
         }
         timeout = ui_timeout_min(timeout, settings_keep_tick());
+        timeout = settings_router_tick(timeout);
         if (other)
                 *other = -1;
         settings_runner_ready();

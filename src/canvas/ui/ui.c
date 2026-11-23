@@ -6889,6 +6889,9 @@ LANGUAGE_ID(settings_role_linux, "Linux data") \
 LANGUAGE_ID(settings_role_other, "Other") \
 LANGUAGE_ID(settings_role_swap, "Swap") \
 LANGUAGE_ID(settings_role_unpartitioned, "No partition table") \
+LANGUAGE_ID(settings_router, "Mix router") \
+LANGUAGE_ID(settings_router_hint, "Drag from the right of one to the left of another to send its sound there; turn a knob for its level, and press an output twice to play on it") \
+LANGUAGE_ID(settings_router_main, "Main") \
 LANGUAGE_ID(settings_run_any, "Run any moonwater command") \
 LANGUAGE_ID(settings_running, "running %s (Escape stops it)") \
 LANGUAGE_ID(settings_saved, "saved") \
@@ -17340,12 +17343,17 @@ static positive ui_label_foreign(char address_to into, positive room, const p8 a
 #define UI_GRAPH_BEND 48   // logical pixels: the least reach of a curved edge's ends, out of a port and into one
 #define UI_GRAPH_KEEP 64   // the most nodes UI_GRAPH_TOUCH holds together (past it the plane is taken as held)
 #define UI_GRAPH_SHARE 4   // a node laid against a side shares at least this part of the shorter of the two, not a corner's pixel
+#define UI_GRAPH_KNOB 11   // logical pixels: a wire's knob's radius
+#define UI_GRAPH_KNOB_RUN 160 // logical pixels the hand moves up a knob for the whole of its range
+#define UI_GRAPH_REACH 3   // a port is taken by a press within this many of its radii
+#define UI_GRAPH_AGAIN_NS 400000000ll // a second press on a knob within this puts it at its whole
 
 // The rules of a graph (ui_graph.rules).
 #define UI_GRAPH_SIDES 1u // a node dragged is pulled to the others' sides and middles
 #define UI_GRAPH_GRID 2u  // and, on an axis no side pulled it on, to the grid's unit
 #define UI_GRAPH_APART 4u // a node is never let go over another (one node is picked at a time)
 #define UI_GRAPH_TOUCH 8u // and meets another along a side, every node held to the rest
+#define UI_GRAPH_WIRING 16u // the hand draws a wire from an out port to an in port (UI_GRAPH_WIRED) and takes one off by its in end (UI_GRAPH_UNWIRED)
 
 // A node's flags.
 #define UI_GRAPH_FIXED 1u  // no hand moves it (it is chosen still)
@@ -17359,6 +17367,9 @@ static positive ui_label_foreign(char address_to into, positive room, const p8 a
 #define UI_GRAPH_DRAG 8u  // the node in hand moved: at_x, at_y are where it would be let go
 #define UI_GRAPH_DROP 16u // a node was let go somewhere new: dropped, at at_x, at_y (and the picked ones by as much)
 #define UI_GRAPH_VIEW 32u // the camera moved
+#define UI_GRAPH_WIRED 64u    // a wire was drawn: wired_from's out wired_out to wired_to's in wired_in (the app makes the edge, or does not)
+#define UI_GRAPH_UNWIRED 128u // edge unwired was taken off (let go of away from an in port; with UI_GRAPH_WIRED as well, moved to another)
+#define UI_GRAPH_TURNED 256u  // edge turned's knob is at turned_level now
 
 struct ui_graph_node
 {
@@ -17376,6 +17387,9 @@ struct ui_graph_edge
         unsigned short from, to; // the nodes it joins
         signed char out, in;     // from's out port and to's in port; -1 for the node's middle
         unsigned char curved;    // a blueprint's curve, level out of the port and into the other; 0 a straight line
+        unsigned char knob;      // a knob on its middle, at level (of ui_graph.knob_most) that the hand turns (UI_GRAPH_TURNED)
+        unsigned char quiet;     // drawn quiet: a wire that carries nothing now
+        unsigned short level;
 };
 
 struct ui_graph
@@ -17390,6 +17404,7 @@ struct ui_graph
         unsigned int rules; // UI_GRAPH_SIDES, _GRID, _APART, _TOUCH
         b64 least, most;  // the zoom's range (UI_GRAPH_ONE ths), 0 for the kit's: a 64th to 8
         b32 keys;         // the keys are in the graph: the chosen node has the ring
+        int knob_most;    // a knob's level at its top (0: 100)
         // The kit's.
         b64 zoom, pan_x, pan_y;      // the camera
         b32 homed;                   // the camera was set: the first picture frames the nodes (ui_graph_home)
@@ -17405,6 +17420,13 @@ struct ui_graph
         b32 space;                   // Space is down
         b64 pinch_from;              // the zoom a pinch began at
         int rest_x, rest_y;          // a trackpad's 120ths of a pixel not yet panned
+        // A wire in hand and a knob turned (UI_GRAPH_WIRING): the out port a wire is drawn from (-1 none), the edge taken up by its in
+        // end to be drawn again (-1 none), the edge whose knob the hand turns (-1 none) with its level and the pointer at the press,
+        // the knob under the pointer, and the last press on one (a second soon after puts it at its whole).
+        int drag_from, drag_out, lifted, turning, turn_from, turn_y, knob_hover, knob_last;
+        b64 knob_at;
+        // What an event did (UI_GRAPH_WIRED, _UNWIRED, _TURNED).
+        int wired_from, wired_out, wired_to, wired_in, unwired, turned, turned_level;
 };
 
 // A graph with nothing chosen, in hand or under the pointer, its camera to be set by the first picture.
@@ -17412,6 +17434,7 @@ static fn ui_graph_start(struct ui_graph address_to g)
 {
         g->chosen = g->hover = g->held = g->dropped = -1;
         g->moving = 0, g->panning = 0, g->homed = 0, g->zoom = UI_GRAPH_ONE, g->pan_x = g->pan_y = 0;
+        g->drag_from = g->lifted = g->turning = g->knob_hover = g->knob_last = g->unwired = g->turned = -1;
 }
 
 // a / b rounded down, b above 0.
@@ -17702,7 +17725,7 @@ static fn ui_graph_settle(const struct ui address_to ui, const struct ui_graph a
 // The hand lets go of whatever it held, nothing kept (the panel went, or the press was taken back).
 static fn ui_graph_let_go(struct ui_graph address_to g)
 {
-        g->held = -1, g->moving = 0, g->panning = 0;
+        g->held = -1, g->moving = 0, g->panning = 0, g->drag_from = g->lifted = g->turning = -1;
 }
 
 // The graph's keys while they are in it: Home and F frame the nodes, + and = zoom in about the middle, - out; Space held makes a press pan.
@@ -17741,6 +17764,129 @@ static b64 ui_graph_turned(b64 zoom, int turn)
         return zoom + zoom * turn / 480;
 }
 
+static fn ui_graph_port(const struct ui_graph address_to g, int k, b32 out, int port, b64 address_to qx, b64 address_to qy);
+static fn ui_graph_knob_centre(const struct ui address_to ui, const struct ui_graph address_to g, const struct ui_graph_edge address_to e, b64 address_to qx,
+                               b64 address_to qy);
+
+// The port of a node under the pointer (device pixels): its node (the last drawn first), whether it is an out, and its number; -1 none.
+static int ui_graph_port_at(const struct ui address_to ui, const struct ui_graph address_to g, int px, int py, b32 address_to out, int address_to port)
+{
+        b64 reach = (b64)ui_q8(ui, UI_GRAPH_PORT) * UI_GRAPH_REACH, qx = (b64)px * 256 + 128, qy = (b64)py * 256 + 128;
+        for (int k = g->nodes - 1; k >= 0; k--)
+                for (int side = 1; side >= 0; side--)
+                        for (int p = 0; p < (side ? g->node[k].outs : g->node[k].ins); p++)
+                        {
+                                b64 x, y;
+                                ui_graph_port(g, k, side, p, &x, &y);
+                                if (ui_graph_far(x, qx) <= reach && ui_graph_far(y, qy) <= reach)
+                                        return *out = side, *port = p, k;
+                        }
+        return -1;
+}
+
+// The edge whose knob is under the pointer, -1 none.
+static int ui_graph_knob_at(const struct ui address_to ui, const struct ui_graph address_to g, int px, int py)
+{
+        b64 r = ui_q8(ui, UI_GRAPH_KNOB), qx = (b64)px * 256 + 128, qy = (b64)py * 256 + 128;
+        for (int e = g->edges - 1; e >= 0; e--)
+                if (g->edge[e].knob && g->edge[e].from < g->nodes && g->edge[e].to < g->nodes && e != g->lifted)
+                {
+                        b64 cx, cy;
+                        ui_graph_knob_centre(ui, g, &g->edge[e], &cx, &cy);
+                        if ((cx - qx) * (cx - qx) + (cy - qy) * (cy - qy) <= r * r)
+                                return e;
+                }
+        return -1;
+}
+
+static int ui_graph_most_level(const struct ui_graph address_to g)
+{
+        return g->knob_most > 0 ? g->knob_most : 100;
+}
+
+// A knob turned to level, held in its range: UI_GRAPH_TURNED when it moved.
+static unsigned int ui_graph_turn(struct ui_graph address_to g, int e, int level)
+{
+        level = level < 0 ? 0 : level > ui_graph_most_level(g) ? ui_graph_most_level(g) : level;
+        if (e < 0 || e >= g->edges || (level == (int)g->edge[e].level && g->turned == e))
+                return 0;
+        g->turned = e, g->turned_level = level;
+        return UI_GRAPH_TURNED | UI_GRAPH_DRAW;
+}
+
+// The wiring's part of an event (UI_GRAPH_WIRING): a knob pressed, turned and let go; a wire drawn out of an out port, or taken up by its in
+// end, and let go on an in port or away. 0 for an event that is none of these (the graph's own then).
+static unsigned int ui_graph_wiring(const struct ui address_to ui, struct ui_graph address_to g, const struct window_event address_to event, b32 inside)
+{
+        int px = ui_kit.pointer_x, py = ui_kit.pointer_y, k, port, e;
+        b32 down = (event->flags & WINDOW_KEY_DOWN) != 0, out;
+        if (!(g->rules & UI_GRAPH_WIRING))
+                return 0;
+        if (event->type == WINDOW_EVENT_MOTION)
+        {
+                if (g->turning >= 0)
+                {
+                        int run = ui_dev(ui, UI_GRAPH_KNOB_RUN);
+                        return UI_GRAPH_TAKEN | ui_graph_turn(g, g->turning, g->turn_from + (int)((b64)(g->turn_y - py) * ui_graph_most_level(g) / (run > 0 ? run : 1)));
+                }
+                if (g->drag_from >= 0)
+                        return g->last_x = px, g->last_y = py, UI_GRAPH_TAKEN | UI_GRAPH_DRAW;
+                e = inside && g->held < 0 && !g->panning ? ui_graph_knob_at(ui, g, px, py) : -1;
+                if (e != g->knob_hover)
+                        return g->knob_hover = e, UI_GRAPH_DRAW;
+                return 0;
+        }
+        if (event->type == WINDOW_EVENT_WHEEL && inside && event->a && !event->b && (e = ui_graph_knob_at(ui, g, px, py)) >= 0)
+                return UI_GRAPH_TAKEN | ui_graph_turn(g, e, (int)g->edge[e].level + event->a * ui_graph_most_level(g) / 2400);
+        if (event->type != WINDOW_EVENT_BUTTON || event->a != UI_POINTER_LEFT)
+                return 0;
+        if (down)
+        {
+                if (!inside || g->space)
+                        return 0;
+                if ((e = ui_graph_knob_at(ui, g, px, py)) >= 0)
+                {
+                        if (e == g->knob_last && (b64)ui_kit.now - g->knob_at < UI_GRAPH_AGAIN_NS)
+                                return g->knob_last = -1, UI_GRAPH_TAKEN | ui_graph_turn(g, e, ui_graph_most_level(g));
+                        g->knob_last = e, g->knob_at = (b64)ui_kit.now;
+                        g->turning = e, g->turn_from = g->edge[e].level, g->turn_y = py, g->turned = -1;
+                        return UI_GRAPH_TAKEN | UI_GRAPH_DRAW;
+                }
+                if ((k = ui_graph_port_at(ui, g, px, py, &out, &port)) < 0)
+                        return 0;
+                g->lifted = -1;
+                if (!out)
+                {
+                        for (e = g->edges - 1; e >= 0 && !(g->edge[e].to == k && g->edge[e].in == port); e--)
+                                ;
+                        if (e < 0)
+                                return UI_GRAPH_TAKEN;
+                        g->lifted = e, k = g->edge[e].from, port = g->edge[e].out;
+                }
+                g->drag_from = k, g->drag_out = port, g->last_x = px, g->last_y = py;
+                return UI_GRAPH_TAKEN | UI_GRAPH_DRAW;
+        }
+        if (g->turning >= 0)
+                return g->turning = -1, UI_GRAPH_TAKEN | UI_GRAPH_DRAW;
+        if (g->drag_from < 0)
+                return 0;
+        {
+                unsigned int did = UI_GRAPH_TAKEN | UI_GRAPH_DRAW;
+                const struct ui_graph_edge address_to was = g->lifted >= 0 ? &g->edge[g->lifted] : null;
+                k = (event->flags & WINDOW_KEY_CANCEL) ? -1 : ui_graph_port_at(ui, g, px, py, &out, &port);
+                if (k >= 0 && !out && k != g->drag_from && !(was && was->to == k && was->in == port))
+                {
+                        g->wired_from = g->drag_from, g->wired_out = g->drag_out, g->wired_to = k, g->wired_in = port, did |= UI_GRAPH_WIRED;
+                        if (was)
+                                g->unwired = g->lifted, did |= UI_GRAPH_UNWIRED;
+                }
+                else if (was && !(k >= 0 && !out && was->to == k && was->in == port) && !(event->flags & WINDOW_KEY_CANCEL))
+                        g->unwired = g->lifted, did |= UI_GRAPH_UNWIRED;
+                g->drag_from = g->lifted = -1;
+                return did;
+        }
+}
+
 // A window's event as the graph takes it, the pointer at ui_kit.pointer_x, _y:
 static unsigned int ui_graph_event(const struct ui address_to ui, struct ui_graph address_to g, const struct window_event address_to event)
 {
@@ -17749,6 +17895,8 @@ static unsigned int ui_graph_event(const struct ui address_to ui, struct ui_grap
         unsigned int out = 0;
         if (!g->homed)
                 ui_graph_home(ui, g);
+        if ((out = ui_graph_wiring(ui, g, event, inside)) & UI_GRAPH_TAKEN)
+                return out;
         switch (event->type)
         {
         case WINDOW_EVENT_MOTION:
@@ -17771,7 +17919,7 @@ static unsigned int ui_graph_event(const struct ui address_to ui, struct ui_grap
                 }
                 hit = inside && !ui_kit_touch ? ui_graph_at(ui, g, px, py) : -1;
                 if (hit != g->hover)
-                        g->hover = hit, out = UI_GRAPH_DRAW;
+                        g->hover = hit, out |= UI_GRAPH_DRAW;
                 return out | (inside ? UI_GRAPH_TAKEN : 0);
         case WINDOW_EVENT_BUTTON:
                 if (down)
@@ -17905,18 +18053,32 @@ static inline b64 ui_graph_cubic(const b64 p[4], b64 t)
         return ui_graph_lerp(ui_graph_lerp(a, b, t), ui_graph_lerp(b, c, t), t);
 }
 
-static fn ui_graph_wire(struct ui address_to ui, const struct ui_graph address_to g, const struct ui_box address_to panel, const struct ui_graph_edge address_to e,
-                        unsigned int ink)
+// An edge's curve on the screen (256ths): its out port, its two handles and its in end (an in port, or the hand's place while it is drawn).
+static fn ui_graph_curve(const struct ui address_to ui, b64 address_to x, b64 address_to y, b32 curved)
 {
-        b64 x[4], y[4], reach, length = 0, radius = ui_stroke(ui) * UI_GRAPH_WIRE / 2, limit = 1ll << 28;
-        int steps;
-        ui_graph_port(g, e->from, 1, e->out, &x[0], &y[0]);
-        ui_graph_port(g, e->to, 0, e->in, &x[3], &y[3]);
+        b64 reach, limit = 1ll << 28;
         for (int k = 0; k < 4; k += 3)
                 x[k] = x[k] < -limit ? -limit : x[k] > limit ? limit : x[k], y[k] = y[k] < -limit ? -limit : y[k] > limit ? limit : y[k];
         reach = ui_graph_far(x[3], x[0]) / 2;
-        reach = e->curved ? (reach < ui_q8(ui, UI_GRAPH_BEND) ? ui_q8(ui, UI_GRAPH_BEND) : reach) : 0;
+        reach = curved ? (reach < ui_q8(ui, UI_GRAPH_BEND) ? ui_q8(ui, UI_GRAPH_BEND) : reach) : 0;
         x[1] = x[0] + reach, y[1] = y[0], x[2] = x[3] - reach, y[2] = y[3];
+}
+
+static fn ui_graph_knob_centre(const struct ui address_to ui, const struct ui_graph address_to g, const struct ui_graph_edge address_to e, b64 address_to qx,
+                               b64 address_to qy)
+{
+        b64 x[4], y[4];
+        ui_graph_port(g, e->from, 1, e->out, &x[0], &y[0]);
+        ui_graph_port(g, e->to, 0, e->in, &x[3], &y[3]);
+        ui_graph_curve(ui, x, y, e->curved);
+        *qx = ui_graph_cubic(x, 32768), *qy = ui_graph_cubic(y, 32768);
+}
+
+// A wire drawn along a curve (ui_graph_curve) in ink: dots a wire's width apart.
+static fn ui_graph_stroke(struct ui address_to ui, const struct ui_box address_to panel, const b64 address_to x, const b64 address_to y, unsigned int ink)
+{
+        b64 length = 0, radius = ui_stroke(ui) * UI_GRAPH_WIRE / 2;
+        int steps;
         for (int k = 0; k < 3; k++)
                 length += ui_graph_far(x[k + 1], x[k]) + ui_graph_far(y[k + 1], y[k]);
         steps = (int)(length / (radius > 0 ? radius : 1)) + 1;
@@ -17927,6 +18089,55 @@ static fn ui_graph_wire(struct ui address_to ui, const struct ui_graph address_t
                 struct ui_box dot = {(b32)(px - radius), (b32)(py - radius), (b32)(px + radius), (b32)(py + radius), (b32)radius, (b32)radius};
                 if (dot.x1 > panel->x0 && dot.x0 < panel->x1 && dot.y1 > panel->y0 && dot.y0 < panel->y1)
                         ui_kit_fill(ui, &dot, ink, panel);
+        }
+}
+
+static fn ui_graph_wire(struct ui address_to ui, const struct ui_graph address_to g, const struct ui_box address_to panel, const struct ui_graph_edge address_to e,
+                        unsigned int ink)
+{
+        b64 x[4], y[4];
+        ui_graph_port(g, e->from, 1, e->out, &x[0], &y[0]);
+        ui_graph_port(g, e->to, 0, e->in, &x[3], &y[3]);
+        ui_graph_curve(ui, x, y, e->curved);
+        ui_graph_stroke(ui, panel, x, y, ink);
+}
+
+/*
+        A wire's knob on its middle: a disc, its ring, and its level as an arc of the accent round it from the lower left (nothing) by the top
+        to the lower right (the whole), with a mark at the level; held or under the pointer, the level in words beside it.
+*/
+static fn ui_graph_knob(struct ui address_to ui, const struct ui_graph address_to g, const struct ui_box address_to panel, int e)
+{
+        const struct ui_graph_edge address_to edge = &g->edge[e];
+        b64 cx, cy, r = ui_q8(ui, UI_GRAPH_KNOB), arc = r * 7 / 10, dot = ui_stroke(ui) * 3 / 2, most = ui_graph_most_level(g);
+        b32 lit = e == g->turning || e == g->knob_hover;
+        unsigned int face = ui_role(UI_SURFACE_HIGHEST) | 0xff000000u, accent = ui_role(edge->quiet ? UI_OUTLINE : UI_PRIMARY) | 0xff000000u;
+        struct ui_box disc;
+        int steps = 40, shown = (int)((b64)steps * edge->level / (most > 0 ? most : 1));
+        ui_graph_knob_centre(ui, g, edge, &cx, &cy);
+        disc = (struct ui_box){(b32)(cx - r), (b32)(cy - r), (b32)(cx + r), (b32)(cy + r), (b32)r, (b32)r};
+        if (disc.x1 <= panel->x0 || disc.x0 >= panel->x1 || disc.y1 <= panel->y0 || disc.y0 >= panel->y1)
+                return;
+        ui_kit_fill(ui, &disc, lit ? ui_mix(ui_role(UI_ON_SURFACE) | 0xff000000u, 10, face) : face, panel);
+        ui_kit_ring(ui, &disc, ui_q8(ui, 1), ui_role(lit ? UI_PRIMARY : UI_OUTLINE));
+        // 225 degrees (the lower left) less 270 of the level, the screen's y down: 3/4 pi less 3/2 pi of it, Q30 radians, kept 0 or more.
+        for (int at = 0; at <= shown; at++)
+        {
+                b64 turn = 2529944578ll - 5059889156ll * at / steps + 6746518852ll, sine, cosine, px, py;
+                struct ui_box bead;
+                ui_sincos(turn, &sine, &cosine);
+                px = cx + (arc * cosine >> 30), py = cy - (arc * sine >> 30);
+                bead = (struct ui_box){(b32)(px - dot), (b32)(py - dot), (b32)(px + dot), (b32)(py + dot), (b32)dot, (b32)dot};
+                ui_kit_fill(ui, &bead, accent, panel);
+        }
+        if (lit)
+        {
+                char words[16];
+                positive n = positive_into_string((p8 address_to)words, (positive)edge->level);
+                int left = ui_graph_px(cx + r) + ui_dev(ui, 4), top = ui_graph_px(cy) - ui_dev(ui, ui_types[UI_LABEL_MEDIUM].line) / 2;
+                words[n] = '%', words[n + 1] = 0;
+                ui_kit_text_in(ui, left, ui_kit_baseline(ui, top, UI_LABEL_MEDIUM), (string_address)words, UI_LABEL_MEDIUM,
+                               ui_text_colour(ui, UI_ON_SURFACE), 0, g->x, g->x + g->w);
         }
 }
 
@@ -18038,13 +18249,28 @@ static fn ui_graph_draw(struct ui address_to ui, struct ui_graph address_to g)
         ui_kit_fill(ui, &panel, ground, null);
         if (g->grid >= 0)
                 ui_graph_grid(ui, g, &panel, ground);
+        // The wiring's state is only its while the app asked for wiring: a graph made without it has none (its fields are not started).
+        b32 wiring = (g->rules & UI_GRAPH_WIRING) != 0;
         for (int e = 0; e < g->edges; e++)
-                if (g->edge[e].from < g->nodes && g->edge[e].to < g->nodes)
+                if (g->edge[e].from < g->nodes && g->edge[e].to < g->nodes && !(wiring && e == g->lifted))
                         ui_graph_wire(ui, g, &panel, &g->edge[e],
-                                      ui_role(g->edge[e].from == g->chosen || g->edge[e].to == g->chosen ? UI_PRIMARY : UI_OUTLINE) | 0xff000000u);
+                                      g->edge[e].quiet ? ui_mix(ui_role(UI_OUTLINE) | 0xff000000u, 45, ground)
+                                                       : ui_role(g->edge[e].from == g->chosen || g->edge[e].to == g->chosen ? UI_PRIMARY : UI_OUTLINE) | 0xff000000u);
         for (int k = 0; k < g->nodes; k++)
                 if (k != g->held)
                         ui_graph_face(ui, g, &panel, k);
+        for (int e = 0; wiring && e < g->edges; e++)
+                if (g->edge[e].knob && g->edge[e].from < g->nodes && g->edge[e].to < g->nodes && e != g->lifted)
+                        ui_graph_knob(ui, g, &panel, e);
+        // The wire in hand: from its out port to the pointer.
+        if (wiring && g->drag_from >= 0 && g->drag_from < g->nodes)
+        {
+                b64 x[4], y[4];
+                ui_graph_port(g, g->drag_from, 1, g->drag_out, &x[0], &y[0]);
+                x[3] = (b64)g->last_x * 256 + 128, y[3] = (b64)g->last_y * 256 + 128;
+                ui_graph_curve(ui, x, y, true);
+                ui_graph_stroke(ui, &panel, x, y, ui_role(UI_PRIMARY) | 0xff000000u);
+        }
         if (g->held >= 0 && g->held < g->nodes)
         {
                 const struct ui_graph_node address_to n = &g->node[g->held];
@@ -26722,6 +26948,7 @@ struct ui_page
         const char address_to title;       // at the top left
         b32 column_on;                     // it has a column of groups at the left
         fn (*above)(void);                 // what the app shows above its rows, declared as elements of the frame (or none)
+        fn (*below)(void);                 // and below them, at the foot of the body: the rows scroll over it, it stays (or none)
         int width, height;                 // the window, device pixels
         // The frame: a view (ui_page_view) the app keeps the room for, and where it put the column's groups and bar, the...
         struct ui_view address_to view;
@@ -26783,6 +27010,8 @@ static fn ui_page_body(struct ui_page address_to p, b32 inline_col, int most)
                         if (p->above)
                                 p->above();
                         ui_host(&p->list_box, .grow = 1);
+                        if (p->below)
+                                p->below();
                 }
                 ui_row(.w = UI_PAD, .class = "middle")
                         ui_host(&p->body_bar, .w = UI_SCROLL_WIDTH);

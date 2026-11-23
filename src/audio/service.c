@@ -199,6 +199,7 @@ static struct
         {
                 char name[PULSE_NAME];
                 int wanted, opening, open, failed;
+                unsigned int level;             // its own level in percent (its wire's knob in Settings), after the output's volume
                 unsigned int gen;               // the output's open it is for
                 long card, device;
                 struct audio_pcm pcm;
@@ -212,6 +213,7 @@ static struct
         unsigned int output_gen;        // counted up at each open of the output
         int loopback_wanted;            // the mirror list names the loopback microphone (AUDIO_LOOPBACK_NAME)
         long loopback;                  // its source's slot while there is one, 0 for none (a loopback is never a monitor's place)
+        unsigned int loopback_level, loopback_applied; // its level in percent as the list says it, and as its source has it
         float mirror_planes[AUDIO_CHANNELS_MAX][AUDIO_BLOCK];
         float mirror_out[2][AUDIO_BLOCK];
         unsigned char mirror_bytes[AUDIO_BLOCK * AUDIO_CHANNELS_MAX * 4];
@@ -1355,10 +1357,13 @@ static void audio_page_write(void)
                 build.device_list[i] = audio_service.devices[i];
                 if (audio_text_equal(build.device_list[i].name, audio_service.active_name))
                         build.device_list[i].flags |= AUDIO_STATE_DEVICE_ACTIVE;
+                build.device_list[i].level = 0;
                 if (audio_text_equal(build.device_list[i].name, AUDIO_LOOPBACK_NAME))
-                        build.device_list[i].flags |= (audio_service.loopback_wanted ? AUDIO_STATE_DEVICE_MIRROR : 0) | (audio_service.loopback ? AUDIO_STATE_DEVICE_MIRRORING : 0);
+                        build.device_list[i].flags |= (audio_service.loopback_wanted ? AUDIO_STATE_DEVICE_MIRROR : 0) | (audio_service.loopback ? AUDIO_STATE_DEVICE_MIRRORING : 0),
+                        build.device_list[i].level = audio_service.loopback_wanted ? audio_service.loopback_level : 0;
                 for (int k = 0; k < AUDIO_STATE_DEVICES; k++)
                         if (audio_service.mirror[k].wanted && audio_text_equal(build.device_list[i].name, audio_service.mirror[k].name))
+                                build.device_list[i].level = audio_service.mirror[k].level,
                                 build.device_list[i].flags |= AUDIO_STATE_DEVICE_MIRROR |
                                                               (audio_service.mirror[k].open && audio_service.mirror[k].table && audio_service.mirror[k].gen == audio_service.output_gen
                                                                    ? AUDIO_STATE_DEVICE_MIRRORING : 0);
@@ -2116,7 +2121,8 @@ static int audio_output_named(const char *name, long *card, long *device)
         return 0;
 }
 
-// The person's list of mirrors (a name a line): the ones named are wanted, the others let go of (audio_mirrors_pass closes them).
+// The person's list of mirrors (a name a line, a tab and a level in percent after it where it is not the whole): the ones named are wanted,
+// the others let go of (audio_mirrors_pass closes them).
 static void audio_mirrors_want(const char *list)
 {
         for (int k = 0; k < AUDIO_STATE_DEVICES; k++)
@@ -2126,22 +2132,30 @@ static void audio_mirrors_want(const char *list)
         {
                 char name[PULSE_NAME];
                 long n = 0;
-                int free = -1, k;
+                unsigned int level = 0;
+                int free = -1, k, digits = 0;
 
                 while (*at == '\n' || *at == '\r' || *at == ' ')
                         at++;
-                while (*at && *at != '\n' && *at != '\r')
+                while (*at && *at != '\n' && *at != '\r' && *at != '\t')
                 {
                         if (n < PULSE_NAME - 1)
                                 name[n++] = *at;
                         at++;
                 }
                 name[n] = 0;
+                while (*at == '\t' || *at == ' ')
+                        at++;
+                for (; *at >= '0' && *at <= '9'; at++)
+                        level = level < 1000 ? level * 10 + (unsigned int)(*at - '0') : level, digits++;
+                while (*at && *at != '\n')
+                        at++;
+                level = !digits ? 100 : level > 100 ? 100 : level;
                 if (!n)
                         continue;
                 if (audio_text_equal(name, AUDIO_LOOPBACK_NAME))
                 {
-                        audio_service.loopback_wanted = 1;
+                        audio_service.loopback_wanted = 1, audio_service.loopback_level = level;
                         continue;
                 }
                 for (k = 0; k < AUDIO_STATE_DEVICES && !audio_text_equal(audio_service.mirror[k].name, name); k++)
@@ -2153,7 +2167,7 @@ static void audio_mirrors_want(const char *list)
                         audio_service.mirror[k].failed = 0, audio_service.mirror[k].retry_at = 0;
                 }
                 if (k >= 0 && k < AUDIO_STATE_DEVICES)
-                        audio_service.mirror[k].wanted = 1;
+                        audio_service.mirror[k].wanted = 1, audio_service.mirror[k].level = level;
         }
 }
 
@@ -2253,6 +2267,17 @@ static void audio_mirrors_pass(positive now)
                 pulse_source_remove(&audio_service.pulse, audio_service.loopback);
                 audio_service.loopback = 0;
         }
+        // Its level is its source's volume (what every program that records it is given, before its own).
+        if (audio_service.loopback && audio_service.loopback_applied != audio_service.loopback_level + 1)
+        {
+                struct pulse_source *s = &audio_service.pulse.source[audio_service.loopback];
+
+                s->volume[0] = s->volume[1] = (unsigned long)audio_service.loopback_level * AUDIO_VOLUME_NORM / 100;
+                audio_service.loopback_applied = audio_service.loopback_level + 1;
+                pulse_event(&audio_service.pulse, PULSE_FACILITY_SOURCE, PULSE_EVENT_CHANGE, (unsigned long)audio_service.loopback);
+        }
+        if (!audio_service.loopback)
+                audio_service.loopback_applied = 0;
         for (int k = 0; k < AUDIO_STATE_DEVICES && !audio_service.job.running; k++)
         {
                 struct audio_mirror *m = &audio_service.mirror[k];
@@ -2293,8 +2318,19 @@ static void audio_mirror_feed(struct audio_mirror *m, const float *left, const f
         rs->step = (unsigned long)((long long)m->step + (long long)m->step / 1000000 * ppm);
         if (audio_rs_room(rs) < frames)
                 audio_rs_reset(rs);
-        memory_copy(rs->buf[0] + rs->have, left, (unsigned long)frames * sizeof(float));
-        memory_copy(rs->buf[1] + rs->have, right, (unsigned long)frames * sizeof(float));
+        if (m->level >= 100)
+        {
+                memory_copy(rs->buf[0] + rs->have, left, (unsigned long)frames * sizeof(float));
+                memory_copy(rs->buf[1] + rs->have, right, (unsigned long)frames * sizeof(float));
+        }
+        else
+        {
+                // Its own level, on the volume's curve as a program's is (a whole the output's volume already has).
+                float gain = audio_volume_gain((unsigned long)m->level * AUDIO_VOLUME_NORM / 100);
+
+                for (long i = 0; i < frames; i++)
+                        rs->buf[0][rs->have + i] = left[i] * gain, rs->buf[1][rs->have + i] = right[i] * gain;
+        }
         rs->have += frames;
         for (;;)
         {
