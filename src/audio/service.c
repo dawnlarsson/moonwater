@@ -2317,7 +2317,7 @@ static int audio_test_page(struct audio_state *copy)
         and says so in words. The tone plays at 48000 Hz; the modem (src/waterlink/modem.c) plays at MODEM_RATE, its symbols being
         timed for that rate, so a stream at any other would play them out of time.
 */
-static b32 audio_stream_open(struct ctl *c, const char *name, const char *role, long rate, unsigned long *channel)
+static b32 audio_stream_open(struct ctl *c, const char *name, const char *role, long rate, unsigned long *channel, unsigned long *missing)
 {
         struct wire_w w;
         struct wire_r r;
@@ -2376,6 +2376,10 @@ static b32 audio_stream_open(struct ctl *c, const char *name, const char *role, 
         }
         r = (struct wire_r){c->frame + 20 + 10, got - 10, 0, 0};
         *channel = wire_r_u32(&r);
+        // The answer goes on: the stream's index, and the bytes the server asks for first (its buffer's length).
+        (void)wire_r_u32(&r);
+        if (missing)
+                *missing = wire_r_u32(&r);
         if (r.bad)
                 return 0;
         return 1;
@@ -2400,7 +2404,7 @@ static b32 audio_test(void)
                 log_flush();
                 return 1;
         }
-        if (!audio_stream_open(&c, "Test", "test", 48000, &channel))
+        if (!audio_stream_open(&c, "Test", "test", 48000, &channel, 0))
         {
                 ctl_disconnect(&c);
                 return 1;
@@ -2490,21 +2494,68 @@ static b32 audio_test(void)
 }
 
 /*
-        A stream of sound a source makes as it plays (`moonwater disc play`'s audio CD): 16 bits, two channels, at rate Hz, through the
-        server at its own socket, named name in the mixer. fill writes up to frames frames into its buffer and answers how many it wrote,
-        0 at the end (or -1 when it failed, said by it). A second is sent at once (the server's buffer, which starts the stream when it is
-        full), and after it each tenth of a second as the clock reaches it, so a source of any length (a CD's hour) is never more than a
-        second ahead of what is heard, and the server's memory holds no more than that. Answers 0 when it played to the end, 1 when it
-        could not (said in words). The stream ends with what is sent drained.
+        A source played as a stream of the sound server's (a CD's audio, which disc.c reads from the drive): fill gives frames of
+        16-bit stereo at rate, as many as asked or fewer, 0 at the end (or -1 when it failed, said by it). What is sent is what the
+        server asks for: its answer to the stream's opening asks for its buffer's length (a second), and each REQUEST after it for
+        what it has played since, so a source of any length (a CD's hour) is never ahead of what is heard by more than the buffer,
+        and the server's memory holds no more than that. The server's frames are read as they come: a client that leaves them
+        unread fills its queue at the server, which drops it (pulse.c's threat model), and a CD stopped after ten seconds so. Answers
+        0 when it played to the end, 1 when it could not (said in words). The stream ends with what is sent drained.
 */
+#define AUDIO_COMMAND_REQUEST 61  // the server asks a playback stream for bytes: its channel and how many (pulse.c PULSE_COMMAND_REQUEST)
+#define AUDIO_STREAM_WAIT_MS 10000 // the longest the server may go without asking for more while it plays: a stream not asked is stuck
+
+// One frame from the server, into the connection's frame: its size, or -1 when the connection broke or nothing came in wait_ms.
+// A command's frame says its command and tag, and its next two numbers where it has them (a REQUEST's channel and bytes).
+static long audio_stream_frame(struct ctl *c, long wait_ms, unsigned long *command, unsigned long *tag, unsigned long *first, unsigned long *second)
+{
+        unsigned char *frame = c->frame;
+        unsigned long size, channel;
+        *command = *tag = *first = *second = CTL_NONE;
+        if (c->transport.receive(c->transport.context, frame, 20, wait_ms) < 0)
+                return -1;
+        size = wire_be32(frame), channel = wire_be32(frame + 4);
+        if (size > CTL_FRAME || (size && c->transport.receive(c->transport.context, frame + 20, (long)size, wait_ms) < 0))
+                return -1;
+        if (channel == CTL_NONE && size >= 10 && frame[20] == 'L' && frame[25] == 'L')
+        {
+                *command = wire_be32(frame + 21), *tag = wire_be32(frame + 26);
+                if (size >= 15 && frame[30] == 'L')
+                        *first = wire_be32(frame + 31);
+                if (size >= 20 && frame[35] == 'L')
+                        *second = wire_be32(frame + 36);
+        }
+        return (long)size;
+}
+
+// A command on the stream and its answer, the server's REQUESTs read past while it is played out (a drain's second).
+static b32 audio_stream_command(struct ctl *c, unsigned long command, unsigned long channel)
+{
+        struct wire_w w;
+        unsigned long got, tag, first, second, mine;
+        ctl_begin(c, &w, command);
+        wire_w_u32(&w, channel);
+        mine = c->tag;
+        wire_put_be(c->frame, (unsigned long)w.len);
+        wire_put_be(c->frame + 4, CTL_NONE);
+        wire_put_be(c->frame + 8, 0), wire_put_be(c->frame + 12, 0), wire_put_be(c->frame + 16, 0);
+        if (c->transport.send(c->transport.context, c->frame, 20 + w.len, AUDIO_STREAM_WAIT_MS) < 0)
+                return 0;
+        for (;;)
+        {
+                if (audio_stream_frame(c, AUDIO_STREAM_WAIT_MS, &got, &tag, &first, &second) < 0)
+                        return 0;
+                if (tag == mine && (got == CTL_COMMAND_REPLY || got == CTL_COMMAND_ERROR))
+                        return got == CTL_COMMAND_REPLY;
+        }
+}
+
 static b32 audio_play_stream(const char *name, long rate, long (*fill)(void *context, short *into, long frames), void *context)
 {
         static struct ctl c;
         static unsigned char frame[20 + 65536];
-        struct wire_w w;
-        unsigned long channel;
-        long tenth = rate / 10, ahead = 0, got = 0;
-        positive started = 0, sent_frames = 0;
+        unsigned long channel, missing = 0, command, tag, asked_on, asked;
+        long credit, got = 0;
 
         audio_service.socket_path = AUDIO_SOCKET;
         c.timeout_ms = 4000;
@@ -2514,53 +2565,49 @@ static b32 audio_play_stream(const char *name, long rate, long (*fill)(void *con
                 log_flush();
                 return 1;
         }
-        if (!audio_stream_open(&c, name, "music", rate, &channel))
+        if (!audio_stream_open(&c, name, "music", rate, &channel, &missing))
         {
                 ctl_disconnect(&c);
                 return 1;
         }
+        credit = (long)(missing - missing % 4);
         for (;;)
         {
-                long frames = (long)((65536 / 4) < tenth ? 65536 / 4 : tenth);
-                positive now = clock_monotonic_nanoseconds();
-
-                // A second ahead at most: wait for the clock to reach what was sent less a second.
-                if (started && sent_frames > (positive)rate)
+                long frames;
+                // Until the server asks for a frame's bytes at least, its frames are read: a REQUEST of this stream's is what it asks.
+                while (credit < 4)
                 {
-                        positive due = started + (sent_frames - (positive)rate) * 1000000000ull / (positive)rate;
-                        if (due > now)
+                        if (audio_stream_frame(&c, AUDIO_STREAM_WAIT_MS, &command, &tag, &asked_on, &asked) < 0)
                         {
-                                struct { long seconds, nanoseconds; } pause = {(long)((due - now) / 1000000000ull), (long)((due - now) % 1000000000ull)};
-                                system_call_2(syscall(nanosleep), (positive)&pause, 0);
+                                string_format(log, "audio: the sound server stopped asking for %s (the connection broke, or nothing came for %p seconds).\n", name,
+                                              (positive)(AUDIO_STREAM_WAIT_MS / 1000));
+                                log_flush();
+                                ctl_disconnect(&c);
+                                return 1;
                         }
+                        if (command == AUDIO_COMMAND_REQUEST && asked_on == channel && asked != CTL_NONE)
+                                credit += (long)(asked - asked % 4);
                 }
+                frames = credit / 4 < (long)(65536 / 4) ? credit / 4 : (long)(65536 / 4);
                 got = fill(context, (short *)(frame + 20), frames);
                 if (got <= 0)
                         break;
-                if (!started)
-                        started = clock_monotonic_nanoseconds();
-                ctl_budget(&c);
                 wire_put_be(frame, (unsigned long)(got * 4));
                 wire_put_be(frame + 4, channel);
                 wire_put_be(frame + 8, 0), wire_put_be(frame + 12, 0), wire_put_be(frame + 16, 0);
-                if (c.transport.send(c.transport.context, frame, 20 + got * 4, ctl_left(&c)) < 0)
+                if (c.transport.send(c.transport.context, frame, 20 + got * 4, AUDIO_STREAM_WAIT_MS) < 0)
                 {
                         string_format(log, "audio: the connection to the sound server broke while %s played.\n", name);
                         log_flush();
                         ctl_disconnect(&c);
                         return 1;
                 }
-                sent_frames += (positive)got, ahead += got;
+                credit -= got * 4;
         }
         // What was sent is played out (drained), then the stream is let go.
-        ctl_begin(&c, &w, 12);
-        wire_w_u32(&w, channel);
-        ctl_exchange(&c, w.len);
-        ctl_begin(&c, &w, 4);
-        wire_w_u32(&w, channel);
-        ctl_exchange(&c, w.len);
+        audio_stream_command(&c, 12, channel);
+        audio_stream_command(&c, 4, channel);
         ctl_disconnect(&c);
-        (void)ahead;
         return got < 0;
 }
 

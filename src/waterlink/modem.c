@@ -1214,7 +1214,7 @@ static b32 modem_send_file(string_address path)
         modem_ctl.timeout_ms = MODEM_SEND_TIMEOUT_MS;
         if (ctl_connect(&modem_ctl, AUDIO_SOCKET) < 0)
                 return host_refuse("no sound server answers on %s: the modem has no sound card to play on (moonwater audio)\n", AUDIO_SOCKET);
-        if (!audio_stream_open(&modem_ctl, "Waterlink modem", "modem", MODEM_RATE, &channel))
+        if (!audio_stream_open(&modem_ctl, "Waterlink modem", "modem", MODEM_RATE, &channel, 0))
         {
                 ctl_disconnect(&modem_ctl);
                 return 1;
@@ -1743,7 +1743,7 @@ static p8 link_modem_start(p64 now)
         }
         modem_play.timeout_ms = MODEM_SEND_TIMEOUT_MS;
         modem_record.timeout_ms = MODEM_SEND_TIMEOUT_MS;
-        if (ctl_connect(&modem_play, AUDIO_SOCKET) < 0 || !audio_stream_open(&modem_play, "Waterlink modem", "modem", MODEM_RATE, &modem_play_channel))
+        if (ctl_connect(&modem_play, AUDIO_SOCKET) < 0 || !audio_stream_open(&modem_play, "Waterlink modem", "modem", MODEM_RATE, &modem_play_channel, 0))
         {
                 link_modem_stop();
                 return 0;
