@@ -137,8 +137,8 @@ static struct
         int room[4];     // the screen's room the overview was laid out in (the screen less the band)
         // The title under the window under the hand: its picture (the kit's, taskbar_scenes_title), the plate's width in it, and what it
         // was made of (the row, its title, the picture's size and inks), so it is made again only when one changes.
-        unsigned int *title;
-        unsigned long title_bytes;
+        unsigned int *title, *wall_half;
+        unsigned long title_bytes, wall_half_bytes;
         int title_row, title_w, title_h, title_plate;
         unsigned int title_ink, title_ground;
         char title_of[WINDOWS_TITLE];
@@ -669,38 +669,37 @@ static const unsigned int *compositor_scenes_wall_of(const int s[4], int w, int 
                         return compositor_scenes_kept.wall = 0, compositor_scenes_kept.wall_bytes = 0, (const unsigned int *)0;
                 compositor_scenes_kept.wall = (unsigned int *)p;
         }
-        for (int y = 0; y < h; y++)
+        if (s[2] >= w * 2 && s[3] >= h * 2)
         {
-                long long y0 = s[1] + (long long)y * s[3] / h, y1 = s[1] + ((long long)y + 1) * s[3] / h;
-                long long cy = y1 - y0 > 4 ? 4 : y1 - y0 < 1 ? 1 : y1 - y0;
-                long long py_off[4];
-                unsigned int *dst_row = compositor_scenes_kept.wall + (unsigned long)y * (unsigned long)w;
+                int pitch = s[2] / 2, sw = pitch, sh = s[3] / 2;
+                unsigned long hbytes = (unsigned long)pitch * (unsigned long)sh * 4;
 
-                for (long long j = 0; j < cy; j++)
-                        py_off[j] = (y0 + (y1 - y0) * (2 * j + 1) / (2 * cy)) * compositor_wall_w;
-                for (int x = 0; x < w; x++)
+                if (compositor_scenes_kept.wall_half_bytes < hbytes)
                 {
-                        long long x0 = s[0] + (long long)x * s[2] / w, x1 = s[0] + ((long long)x + 1) * s[2] / w;
-                        long long cx = x1 - x0 > 4 ? 4 : x1 - x0 < 1 ? 1 : x1 - x0;
-                        long long px[4];
-                        unsigned int red = 0, green = 0, blue = 0, taps = (unsigned int)(cx * cy);
+                        void *p = compositor_scenes_kept.wall_half;
 
-                        for (long long i = 0; i < cx; i++)
-                                px[i] = x0 + (x1 - x0) * (2 * i + 1) / (2 * cx);
-                        for (long long j = 0; j < cy; j++)
-                        {
-                                const unsigned int *wrow = compositor_wall + py_off[j];
-                                for (long long i = 0; i < cx; i++)
-                                {
-                                        unsigned int c = wrow[px[i]];
-                                        red += c >> 16 & 255, green += c >> 8 & 255, blue += c & 255;
-                                }
-                        }
-                        if (taps == 16)
-                                dst_row[x] = 0xff000000u | (red >> 4) << 16 | (green >> 4) << 8 | (blue >> 4);
-                        else
-                                dst_row[x] = 0xff000000u | (red / taps) << 16 | (green / taps) << 8 | (blue / taps);
+                        if (!mem_buf_grow(&p, &compositor_scenes_kept.wall_half_bytes, hbytes, 0))
+                                return compositor_scenes_kept.wall_half = 0, compositor_scenes_kept.wall_half_bytes = 0, (const unsigned int *)0;
+                        compositor_scenes_kept.wall_half = (unsigned int *)p;
                 }
+                memory_halve_u32(compositor_scenes_kept.wall_half, (positive)pitch,
+                                 compositor_wall + (long)s[1] * compositor_wall_w + s[0], (positive)compositor_wall_w,
+                                 (positive)sw, (positive)sh);
+                while (sw >= w * 2 && sh >= h * 2)
+                {
+                        sw /= 2, sh /= 2;
+                        memory_halve_u32(compositor_scenes_kept.wall_half, (positive)pitch,
+                                         compositor_scenes_kept.wall_half, (positive)pitch, (positive)sw, (positive)sh);
+                }
+                memory_resample_u32_rect(compositor_scenes_kept.wall, (positive)w, (positive)w, (positive)h,
+                                         compositor_scenes_kept.wall_half, (positive)pitch, (positive)sw, (positive)sh,
+                                         (positive)w, (positive)h, 0, 0);
+        }
+        else
+        {
+                memory_resample_u32_rect(compositor_scenes_kept.wall, (positive)w, (positive)w, (positive)h,
+                                         compositor_wall + (long)s[1] * compositor_wall_w + s[0], (positive)compositor_wall_w,
+                                         (positive)s[2], (positive)s[3], (positive)w, (positive)h, 0, 0);
         }
         compositor_scenes_kept.wall_of = compositor_wall, compositor_scenes_kept.wall_turn = compositor_wall_turn;
         compositor_scenes_kept.wall_w = w, compositor_scenes_kept.wall_h = h;
