@@ -410,6 +410,7 @@ struct pulse
         struct pulse_upload upload[PULSE_UPLOADS];
         unsigned long sample_total, upload_total, next_sample;
         long default_sink, default_source;
+        int loops;                      // loopback sources (pulse_loopback_add): the mix looks for none while there are none
         int capture_off;                // the person has turned capture off: no program records
         unsigned long next_client, next_input, next_output;
         unsigned long ring_total;
@@ -1554,6 +1555,7 @@ AUDIO_API long pulse_loopback_add(struct pulse *p, const char *name, const char 
 
                         memory_zero(s, sizeof(*s));
                         s->used = 1, s->capture = 1, s->loop = 1, s->sink = -1;
+                        p->loops++;
                         pulse_copy(s->name, (long)sizeof(s->name), name);
                         pulse_copy(s->description, (long)sizeof(s->description), description);
                         s->rate = p->default_sink >= 0 && p->sink[p->default_sink].used ? p->sink[p->default_sink].rate : 48000;
@@ -1592,7 +1594,8 @@ AUDIO_API void pulse_source_remove(struct pulse *p, long slot)
         for (int i = 0; i < p->record_slots; i++)
                 if (p->record[i].used && p->record[i].source == slot)
                         pulse_record_end(p, p->record + i, 1);
-        p->source[slot].used = 0;
+        p->loops -= p->source[slot].loop != 0;
+        p->source[slot].used = 0, p->source[slot].loop = 0;
         pulse_event(p, PULSE_FACILITY_SOURCE, PULSE_EVENT_REMOVE, (unsigned long)slot);
         if (p->default_source == slot)
         {
@@ -4309,7 +4312,7 @@ AUDIO_API long pulse_sink_mix(struct pulse *p, long slot, unsigned char *dst, lo
         sink->played += (unsigned long long)frames;
         pulse_source_feed(p, slot, sink->mix.mix[0], sink->mix.mix[1], frames);
         // A loopback is what the default sink plays, at its rate.
-        if (slot == p->default_sink)
+        if (slot == p->default_sink && p->loops)
                 for (long i = PULSE_SINKS; i < PULSE_SOURCES; i++)
                         if (p->source[i].used && p->source[i].loop)
                         {

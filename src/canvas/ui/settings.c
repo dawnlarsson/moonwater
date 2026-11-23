@@ -5028,6 +5028,9 @@ static fn settings_field_menu(void)
 #define SETTINGS_ROUTER_NODES (AUDIO_STATE_STREAMS + AUDIO_STATE_DEVICES + 1)
 #define SETTINGS_ROUTER_POLL_NS 250000000ll
 #define SETTINGS_ROUTER_AGAIN_NS 400000000ll // a second press on an output this soon makes it the one that plays
+#define SETTINGS_ROUTER_HOLD_NS 1500000000ll  // what the hand did is shown this long while the page catches up
+#define SETTINGS_ROUTER_WRITE_NS 100000000ll  // a mirror's level turned is written at most this often, and when its knob is let go
+#define SETTINGS_ROUTER_REMAP_NS 2000000000ll // a page that has not moved for this long is a server that went: its new page is looked for
 #define SETTINGS_ROUTER_PANEL 220
 #define SETTINGS_ROUTER_TALL 420
 #define SETTINGS_ROUTER_SOCKET "/run/moonwater/pulse/native"
@@ -5049,6 +5052,14 @@ static struct settings_router
         struct { unsigned long id; int x, y; } place[SETTINGS_ROUTER_NODES * 2];
         int places, pressed;
         b64 pressed_at;
+        // What the hand did that the page does not say yet (the server reads a file within half a second, and writes its page after): a wire
+        // drawn (1) or taken off (0), its knob at level (-1 the page's), between two nodes by what they are, until a moment has passed.
+        struct settings_route_hold { unsigned long from, to; int level; signed char wired; b64 until; } hold[8];
+        int level_of[SETTINGS_ROUTER_NODES];       // a node's level as the page says it (a program's volume, an output's level), for a wire drawn back
+        // A mirror's level turned and not yet written (a knob's drag is many turns: the file is written at most every SETTINGS_ROUTER_WRITE_NS).
+        char pending_name[64];
+        int pending_level;
+        b64 written_at, seen_at;
         struct audio_state copy;
         const volatile struct audio_state address_to page;
         b32 have, connected;
@@ -5061,8 +5072,11 @@ static struct settings_router
 
 static b32 settings_router_on(void)
 {
-        int r = settings_row_of(SETTING_AUDIO_VOLUME_PATH);
-        return r >= 0 && !settings.page.card && !settings_filter_length() && settings_group_of(r) == settings.page.chosen;
+        // The Sound group's row, looked up once: the registry is the program's, and this is asked at every tick, event and paint.
+        static int row = -2;
+        if (row == -2)
+                row = settings_row_of(SETTING_AUDIO_VOLUME_PATH);
+        return row >= 0 && !settings.page.card && !settings_filter_length() && settings_group_of(row) == settings.page.chosen;
 }
 
 static b32 settings_router_ready(void)
@@ -5145,8 +5159,12 @@ static fn settings_router_list(void)
                 playing[k] |= (s->flags & AUDIO_STATE_PLAYING) && !(s->flags & AUDIO_STATE_CORKED);
         }
         for (int k = 0; k < g->nodes; k++)
-                if (r->kind[k] == SETTINGS_ROUTE_PROGRAM && !muted[k])
-                        settings_router_wire(k, main, level[k], !playing[k]);
+                if (r->kind[k] == SETTINGS_ROUTE_PROGRAM)
+                {
+                        r->level_of[k] = level[k];
+                        if (!muted[k])
+                                settings_router_wire(k, main, level[k], !playing[k]);
+                }
         for (unsigned int d = 0; d < page->devices && d < AUDIO_STATE_DEVICES; d++)
         {
                 const struct audio_state_device address_to device = &page->device_list[d];
@@ -5157,6 +5175,7 @@ static fn settings_router_list(void)
                 if (k < 0)
                         break;
                 outputs++, r->what[k] = (int)d;
+                r->level_of[k] = f & AUDIO_STATE_DEVICE_ACTIVE ? settings_router_percent(page->volume) : f & AUDIO_STATE_DEVICE_MIRROR ? (int)device->level : 100;
                 r->node[k].line[0] = f & AUDIO_STATE_DEVICE_ACTIVE ? WORDS(mixer_state_playing) : f & AUDIO_STATE_DEVICE_MIRRORING ? WORDS(mixer_state_mirrored)
                                      : f & AUDIO_STATE_DEVICE_UNPLUGGED ? WORDS(mixer_unplugged) : null;
                 r->node[k].flags = f & AUDIO_STATE_DEVICE_ACTIVE ? UI_GRAPH_MARKED : 0;
@@ -5165,12 +5184,61 @@ static fn settings_router_list(void)
                 else if (f & AUDIO_STATE_DEVICE_MIRROR)
                         settings_router_wire(main, k, (int)(device->level > 100 ? 100 : device->level), !(f & AUDIO_STATE_DEVICE_MIRRORING));
         }
+        // What the hand did and the page does not say yet, shown as the hand left it.
+        for (int h = 0; h < (int)(sizeof(r->hold) / sizeof(r->hold[0])); h++)
+        {
+                struct settings_route_hold address_to hold = &r->hold[h];
+                int from = -1, to = -1, e;
+                if (!hold->until || (b64)ui_kit.now >= hold->until)
+                {
+                        hold->until = 0;
+                        continue;
+                }
+                for (int k = 0; k < g->nodes; k++)
+                        from = r->id[k] == hold->from ? k : from, to = r->id[k] == hold->to ? k : to;
+                if (from < 0 || to < 0)
+                        continue;
+                for (e = 0; e < g->edges && !(r->edge[e].from == from && r->edge[e].to == to); e++)
+                        ;
+                if (!hold->wired && e < g->edges)
+                        r->edge[e] = r->edge[--g->edges];
+                else if (hold->wired && e == g->edges)
+                        settings_router_wire(from, to, hold->level >= 0 ? hold->level : r->level_of[r->kind[from] == SETTINGS_ROUTE_PROGRAM ? from : to], false);
+                else if (hold->wired && hold->level >= 0)
+                        r->edge[e].level = (unsigned short)hold->level;
+        }
         // Main sits between its two columns where nobody moved it.
         if (main >= 0 && r->node[main].y == 0 && r->node[main].x == 280)
                 r->node[main].y = ((programs > outputs ? programs : outputs) - 1) * 40;
         g->node = r->node, g->edge = r->edge;
         if (fresh)
                 g->homed = 0;
+}
+
+static b32 settings_router_holding(void)
+{
+        for (int h = 0; h < (int)(sizeof(settings_route->hold) / sizeof(settings_route->hold[0])); h++)
+                if (settings_route->hold[h].until)
+                        return true;
+        return false;
+}
+
+// What the hand did between two nodes, held over the page until it says so (or a moment has passed): the same pair's hold is replaced.
+static fn settings_router_hold(int from, int to, int wired, int level)
+{
+        struct settings_router address_to r = settings_route;
+        int at = 0, oldest = 0;
+        for (int h = 0; h < (int)(sizeof(r->hold) / sizeof(r->hold[0])); h++)
+        {
+                if (r->hold[h].until && r->hold[h].from == r->id[from] && r->hold[h].to == r->id[to])
+                {
+                        at = h, oldest = -1;
+                        break;
+                }
+                oldest = !r->hold[h].until || r->hold[h].until < r->hold[oldest].until ? h : oldest;
+        }
+        at = oldest >= 0 ? oldest : at;
+        r->hold[at] = (struct settings_route_hold){r->id[from], r->id[to], level, (signed char)wired, (b64)ui_kit.now + SETTINGS_ROUTER_HOLD_NS};
 }
 
 // The page read again (mapped read-only as the mixer maps it): true when what the router shows changed.
@@ -5181,7 +5249,16 @@ static b32 settings_router_poll(b32 now)
         b32 had = r->have;
         if (!now && (b64)ui_kit.now - r->polled < SETTINGS_ROUTER_POLL_NS)
                 return false;
+        // Nothing is listed again while the hand holds a node, a wire or a knob: the edges it names keep their places.
+        if (r->graph.turning >= 0 || r->graph.drag_from >= 0 || r->graph.held >= 0)
+                return false;
         r->polled = (b64)ui_kit.now;
+        // A page that stopped moving (it is written twice a second at the least) is an old server's: it is let go, and the new one's mapped.
+        if (r->page && (b64)ui_kit.now - r->seen_at > SETTINGS_ROUTER_REMAP_NS)
+        {
+                compositor_call(syscall(munmap), (positive)r->page, (positive)((sizeof(struct audio_state) + 4095) & ~4095ul), 0, 0, 0, 0);
+                r->page = null, r->seen_at = (b64)ui_kit.now;
+        }
         if (!r->page)
         {
                 long fd = compositor_call(syscall(openat), (positive)AT_FDCWD, (positive)AUDIO_STATE_PATH, FILE_READ | O_NOFOLLOW | O_CLOEXEC, 0, 0, 0), got = -1;
@@ -5194,7 +5271,9 @@ static b32 settings_router_poll(b32 now)
                 r->page = got < 0 && got > -4096 ? null : (const volatile struct audio_state address_to)got;
         }
         r->have = r->page && audio_state_read(r->page, &r->copy);
-        if (r->have == had && (!r->have || r->copy.seq == before) && r->graph.nodes)
+        if (r->have && (r->copy.seq != before || !had))
+                r->seen_at = (b64)ui_kit.now;
+        if (r->have == had && (!r->have || r->copy.seq == before) && r->graph.nodes && !settings_router_holding())
                 return false;
         if (r->have)
                 settings_router_list();
@@ -5209,10 +5288,13 @@ static fn settings_router_damage(void)
                 ui_page_damage(&settings.page, settings_route->panel.y, settings_route->panel.y + settings_route->panel.h);
 }
 
+static fn settings_router_flush(void);
 static long settings_router_tick(long timeout)
 {
         if (!settings_router_on() || !settings_router_ready())
                 return timeout;
+        if (settings_route->pending_name[0] && (b64)ui_kit.now - settings_route->written_at >= SETTINGS_ROUTER_WRITE_NS)
+                settings_router_flush();
         if (settings_router_poll(false))
                 settings_router_damage();
         return ui_deadline_wait(timeout, (b64)ui_kit.now, settings_route->polled + SETTINGS_ROUTER_POLL_NS);
@@ -5240,7 +5322,7 @@ static fn settings_router_below(void)
         ui_col(.host = &settings_route->panel, .class = "map", .h = tall)
                 ui_row(.class = "foot", .h = SETTINGS_MAP_STRIP)
                         ui_control(fit, .w = SETTINGS_MAP_BUTTON_W, .h = SETTINGS_MAP_BUTTON_H, .shrink = 1);
-        ui_text(WORDS(settings_router_hint), .class = "caption");
+        ui_text(settings_route->have ? WORDS(settings_router_hint) : WORDS(mixer_off), .class = "caption");
 }
 
 static fn settings_router_paint(struct ui address_to ui)
@@ -5344,9 +5426,24 @@ static fn settings_router_turned(int e, int level)
         {
                 if (settings_router_connect())
                         settings_router_answer(ctl_set_sink_volume(&r->ctl, r->copy.name, (unsigned long)level * SETTINGS_ROUTER_WHOLE / 100));
+                return;
         }
-        else
-                settings_router_mirror(device->name, level);
+        // A drag is many turns: the file is written now and then, and at the knob's release (settings_router_flush).
+        if (r->pending_name[0] && !string_equals((string_address)r->pending_name, (string_address)device->name))
+                settings_router_flush();
+        string_copy_bounded((string_address)r->pending_name, (string_address)device->name, sizeof(r->pending_name));
+        r->pending_level = level;
+        if ((b64)ui_kit.now - r->written_at >= SETTINGS_ROUTER_WRITE_NS)
+                settings_router_flush();
+}
+
+static fn settings_router_flush(void)
+{
+        struct settings_router address_to r = settings_route;
+        if (!r->pending_name[0])
+                return;
+        settings_router_mirror(r->pending_name, r->pending_level);
+        r->pending_name[0] = 0, r->written_at = (b64)ui_kit.now;
 }
 
 // A wire taken off: a program muted; a mirror let go; the output that plays given up to the first mirror, or to Automatic where chosen.
@@ -5405,11 +5502,24 @@ static b32 settings_router_event(const struct window_event address_to event)
                 return ui_graph_home(&settings.ui, g), settings_router_damage(), true;
         did = ui_graph_event(&settings.ui, g, event);
         if (did & UI_GRAPH_TURNED)
+        {
+                settings_router_hold(r->edge[g->turned].from, r->edge[g->turned].to, 1, g->turned_level);
                 settings_router_turned(g->turned, g->turned_level);
+        }
         if (did & UI_GRAPH_UNWIRED)
+        {
+                settings_router_hold(r->edge[g->unwired].from, r->edge[g->unwired].to, 0, -1);
                 settings_router_unwired(g->unwired);
+        }
         if (did & UI_GRAPH_WIRED)
+        {
+                if ((r->kind[g->wired_from] == SETTINGS_ROUTE_PROGRAM && r->kind[g->wired_to] == SETTINGS_ROUTE_MAIN) ||
+                    (r->kind[g->wired_from] == SETTINGS_ROUTE_MAIN && r->kind[g->wired_to] == SETTINGS_ROUTE_OUTPUT))
+                        settings_router_hold(g->wired_from, g->wired_to, 1, r->kind[g->wired_to] == SETTINGS_ROUTE_OUTPUT ? 100 : -1);
                 settings_router_wired(g->wired_from, g->wired_to);
+        }
+        if (g->turning < 0 && r->pending_name[0])
+                settings_router_flush();
         if ((did & UI_GRAPH_DROP) && g->dropped >= 0 && g->dropped < g->nodes)
         {
                 int k = g->dropped, at = 0;
@@ -5434,7 +5544,8 @@ static b32 settings_router_event(const struct window_event address_to event)
                 }
                 r->pressed = k, r->pressed_at = (b64)ui_kit.now;
         }
-        if (did & (UI_GRAPH_WIRED | UI_GRAPH_UNWIRED | UI_GRAPH_TURNED))
+        // A wire's change is listed at once over the page (its hold); a turned knob moved its edge itself.
+        if (did & (UI_GRAPH_WIRED | UI_GRAPH_UNWIRED))
                 r->polled = 0;
         if (did & UI_GRAPH_DRAW)
                 settings_router_damage();
@@ -5516,6 +5627,8 @@ static b32 settings_event_take(const struct window_event address_to event)
         else if (!settings_map_on()) ui_graph_let_go(&settings.map.graph);
         if (settings_router_on() && settings.page.menu_row < 0 && event->type != WINDOW_EVENT_KEY && settings_router_event(event))
                 return true;
+        if (!settings_router_on() && settings_route)
+                ui_graph_let_go(&settings_route->graph);
         if (event->type == WINDOW_EVENT_BUTTON && (event->flags & WINDOW_KEY_DOWN))
                 settings.map.keys = false;
         if ((event->type == WINDOW_EVENT_MOTION || event->type == WINDOW_EVENT_BUTTON) &&

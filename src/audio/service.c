@@ -81,7 +81,6 @@
 #define AUDIO_JOB_CLOSE 2
 #define AUDIO_JOB_MIRROR_OPEN 3
 #define AUDIO_JOB_MIRROR_CLOSE 4
-#define AUDIO_MIRROR_FILL 8                        // a mirror's card is kept eight periods ahead (21 ms at 48 kHz): its writes come at the output's wakes
 #define AUDIO_MIRROR_SETTLE 10                     // seconds a mirror's fill is brought back to its target over, by the nudge of its step
 #define AUDIO_MIRROR_PPM 1000                      // the most the step is nudged, in parts a million: two cards' clocks differ by tens
 #define AUDIO_MIRROR_RETRY_NS 5000000000ull        // a mirror that could not be opened is tried again after this
@@ -181,7 +180,7 @@ static struct
         {
                 int kind, k, running, done;
                 struct audio_pcm pcm;
-                long card, device, result, rate;
+                long card, device, result, rate, period, fill;
                 thread address_to handle;
                 positive took;
                 struct audio_mixer_report mix; // what the open did to the card's capture controls
@@ -200,6 +199,7 @@ static struct
                 char name[PULSE_NAME];
                 int wanted, opening, open, failed;
                 unsigned int level;             // its own level in percent (its wire's knob in Settings), after the output's volume
+                long aim;                       // the fill it is kept at: the output's, less what its resampler holds back
                 unsigned int gen;               // the output's open it is for
                 long card, device;
                 struct audio_pcm pcm;
@@ -211,10 +211,10 @@ static struct
                 struct audio_resampler rs;
         } mirror[AUDIO_STATE_DEVICES];
         unsigned int output_gen;        // counted up at each open of the output
+        int mirrors_live;               // mirrors open for this open of the output, with a table: none costs the output one load a block
         int loopback_wanted;            // the mirror list names the loopback microphone (AUDIO_LOOPBACK_NAME)
         long loopback;                  // its source's slot while there is one, 0 for none (a loopback is never a monitor's place)
         unsigned int loopback_level, loopback_applied; // its level in percent as the list says it, and as its source has it
-        float mirror_planes[AUDIO_CHANNELS_MAX][AUDIO_BLOCK];
         float mirror_out[2][AUDIO_BLOCK];
         unsigned char mirror_bytes[AUDIO_BLOCK * AUDIO_CHANNELS_MAX * 4];
         struct audio_mixer_report hw;   // what was found and done to the output card's mixer when it was opened
@@ -935,7 +935,7 @@ static long audio_number_text(char *to, unsigned long value)
 
 static void audio_inputs_choose(void);
 static void audio_mirrors_want(const char *list);
-static void audio_mirrors_feed(const unsigned char *block, long frames);
+static void audio_mirrors_feed(long frames);
 static void audio_inputs_levels(int bits);
 static void audio_inputs_pass(int first);
 
@@ -1823,19 +1823,21 @@ static void audio_produce(long frames)
         {
                 if (pcm->fd >= 0)
                 {
-                        long written;
+                        long written, mixed = 0;
 
                         if (audio_service.block_left == 0)
                         {
                                 long n = frames < AUDIO_BLOCK ? frames : AUDIO_BLOCK;
 
                                 pulse_sink_mix(&audio_service.pulse, audio_service.sink, audio_service.block, pcm->format, pcm->channels, n);
-                                audio_mirrors_feed(audio_service.block, n);
                                 audio_service.block_at = 0;
                                 audio_service.block_left = n;
                                 frames -= n;
+                                mixed = n;
                         }
                         written = audio_pcm_write(pcm, audio_service.block + audio_service.block_at * pcm->frame_bytes, audio_service.block_left);
+                        if (mixed)
+                                audio_mirrors_feed(mixed); // the output's card has its frames first
                         if (written < 0)
                         {
                                 audio_service.block_left = 0; // refused (an underrun): what was mixed for it is dropped, not played late
@@ -2181,7 +2183,8 @@ static int audio_mirror_job(int kind, int k)
         audio_service.job.kind = kind, audio_service.job.k = k;
         __atomic_store_n(&audio_service.job.done, 0, __ATOMIC_RELEASE);
         if (kind == AUDIO_JOB_MIRROR_OPEN)
-                audio_service.job.card = m->card, audio_service.job.device = m->device, audio_service.job.rate = audio_service.rate;
+                audio_service.job.card = m->card, audio_service.job.device = m->device, audio_service.job.rate = audio_service.rate,
+                audio_service.job.period = audio_service.period, audio_service.job.fill = audio_service.low ? AUDIO_FILL_LOW : AUDIO_FILL;
         else
                 audio_service.job.pcm = m->pcm;
         audio_service.job.handle = thread_start(audio_job_entry, null);
@@ -2202,7 +2205,7 @@ static int audio_mirror_job(int kind, int k)
 // A mirror's card given silence to its target, so its first writes do not find it empty.
 static void audio_mirror_prime(struct audio_mirror *m)
 {
-        long left = m->pcm.target;
+        long left = m->aim > 0 ? m->aim : m->pcm.target;
 
         memory_fill(audio_service.mirror_bytes, audio_format_silence(m->pcm.format), sizeof(audio_service.mirror_bytes));
         while (left > 0)
@@ -2244,6 +2247,9 @@ static void audio_mirror_opened(int k)
         }
         audio_rs_open(&m->rs, m->table);
         m->step = m->rs.step;
+        // The output's fill, less the half of the filter its resampler holds (what comes out lags what goes in by that): heard together.
+        m->aim = m->pcm.target - m->table->taps / 2;
+        m->aim = m->aim < 2 * m->pcm.period ? 2 * m->pcm.period : m->aim;
         audio_mirror_prime(m);
         string_format(log, "audio: mirroring to %s at %p Hz (the output at %p), a period of %p frames, filled to %p; opened in %p us\n", m->name, (positive)m->pcm.rate,
                       (positive)audio_service.rate, (positive)m->pcm.period, (positive)m->pcm.target, (positive)(audio_service.job.took / 1000));
@@ -2278,6 +2284,9 @@ static void audio_mirrors_pass(positive now)
         }
         if (!audio_service.loopback)
                 audio_service.loopback_applied = 0;
+        audio_service.mirrors_live = 0;
+        for (int k = 0; k < AUDIO_STATE_DEVICES; k++)
+                audio_service.mirrors_live += audio_service.mirror[k].open && audio_service.mirror[k].table && audio_service.mirror[k].gen == audio_service.output_gen;
         for (int k = 0; k < AUDIO_STATE_DEVICES && !audio_service.job.running; k++)
         {
                 struct audio_mirror *m = &audio_service.mirror[k];
@@ -2310,9 +2319,10 @@ static void audio_mirror_feed(struct audio_mirror *m, const float *left, const f
                 if ((avail = audio_pcm_avail(&m->pcm)) < 0)
                         return;
         }
-        // Fuller than its target, the card plays slower than the output: an output frame takes more of the input. Smoothed over 32 blocks
-        // (the fill moves by a period between two wakes), and brought back over AUDIO_MIRROR_SETTLE seconds.
-        m->error += ((float)(m->pcm.buffer - avail - m->pcm.target) - m->error) / 32.0f;
+        // Fuller than its aim, the card plays slower than the output: an output frame takes more of the input. What it holds once this block
+        // is in it (as the output's target is what the output holds after its write), smoothed over 32 blocks (the fill moves by a period
+        // between two wakes), and brought back over AUDIO_MIRROR_SETTLE seconds.
+        m->error += ((float)(m->pcm.buffer - avail + frames - m->aim) - m->error) / 32.0f;
         ppm = (long)(m->error * 1000000.0f / (float)(m->pcm.rate * AUDIO_MIRROR_SETTLE));
         ppm = ppm > AUDIO_MIRROR_PPM ? AUDIO_MIRROR_PPM : ppm < -AUDIO_MIRROR_PPM ? -AUDIO_MIRROR_PPM : ppm;
         rs->step = (unsigned long)((long long)m->step + (long long)m->step / 1000000 * ppm);
@@ -2346,26 +2356,24 @@ static void audio_mirror_feed(struct audio_mirror *m, const float *left, const f
         }
 }
 
-// A block mixed for the output, given to every mirror open for this open of it.
-static void audio_mirrors_feed(const unsigned char *block, long frames)
+/*
+        The block just mixed for the output, given to every mirror open for this open of it: the mixer's own floats (the sink's mix, after its
+        volume, as its monitor has them), not the card's bytes decoded again, and after the output's card has its frames, so a mirror's
+        resampling and writes are never between the output's wake and its write.
+*/
+static void audio_mirrors_feed(long frames)
 {
-        const struct audio_pcm *pcm = &audio_service.pcm;
-        float *planes[AUDIO_CHANNELS_MAX];
-        int any = 0;
+        const struct audio_sink *bus;
 
-        for (int k = 0; k < AUDIO_STATE_DEVICES; k++)
-                any |= audio_service.mirror[k].open && audio_service.mirror[k].table && audio_service.mirror[k].gen == audio_service.output_gen;
-        if (!any || pcm->channels < 1 || pcm->channels > AUDIO_CHANNELS_MAX || frames > AUDIO_BLOCK)
+        if (!audio_service.mirrors_live || audio_service.sink < 0 || frames < 1 || frames > AUDIO_BLOCK)
                 return;
-        for (long c = 0; c < pcm->channels; c++)
-                planes[c] = audio_service.mirror_planes[c];
-        audio_decode(pcm->format, block, frames, pcm->channels, planes);
+        bus = &audio_service.pulse.sink[audio_service.sink].mix;
         for (int k = 0; k < AUDIO_STATE_DEVICES; k++)
         {
                 struct audio_mirror *m = &audio_service.mirror[k];
 
                 if (m->open && m->table && m->gen == audio_service.output_gen && !m->pcm.broken)
-                        audio_mirror_feed(m, planes[0], planes[pcm->channels > 1 ? 1 : 0], frames);
+                        audio_mirror_feed(m, bus->mix[0], bus->mix[1], frames);
         }
 }
 
@@ -2389,9 +2397,10 @@ static fn audio_job_entry(address_any argument)
         }
         else if (audio_service.job.kind == AUDIO_JOB_MIRROR_OPEN)
         {
-                // A mirror asks for the output's rate, which a card that takes it plays with no resampling but the nudge.
+                // A mirror asks for the output's rate, periods and fill: it plays as far behind as the output does, so two outputs in one
+                // room are one sound and not an echo, and a card that takes the rate has no resampling but the nudge.
                 audio_service.job.result = audio_pcm_open_fill(&audio_service.job.pcm, audio_service.job.card, audio_service.job.device, AUDIO_ALSA_PLAYBACK,
-                                                               audio_service.job.rate, AUDIO_PERIOD, -1, AUDIO_MIRROR_FILL);
+                                                               audio_service.job.rate, audio_service.job.period, -1, audio_service.job.fill);
                 memory_zero(&audio_service.job.mix, sizeof(audio_service.job.mix));
                 if (audio_service.job.result == 0 && !audio_service.leave_mixer)
                         audio_mixer_prepare(audio_service.job.card, 1, &audio_service.job.mix);

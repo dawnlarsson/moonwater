@@ -18113,7 +18113,17 @@ static fn ui_graph_knob(struct ui address_to ui, const struct ui_graph address_t
         b32 lit = e == g->turning || e == g->knob_hover;
         unsigned int face = ui_role(UI_SURFACE_HIGHEST) | 0xff000000u, accent = ui_role(edge->quiet ? UI_OUTLINE : UI_PRIMARY) | 0xff000000u;
         struct ui_box disc;
-        int steps = 40, shown = (int)((b64)steps * edge->level / (most > 0 ? most : 1));
+        enum { steps = 40 };
+        // The arc's places round a circle of one (Q30), made once: a sine and a cosine a bead each frame was most of a knob's cost.
+        static b64 bead_at[steps + 1][2];
+        static b32 beads_made;
+        int shown = (int)((b64)steps * edge->level / (most > 0 ? most : 1));
+        if (!beads_made)
+        {
+                for (int at = 0; at <= steps; at++)
+                        ui_sincos(2529944578ll - 5059889156ll * at / steps + 6746518852ll, &bead_at[at][1], &bead_at[at][0]);
+                beads_made = true;
+        }
         ui_graph_knob_centre(ui, g, edge, &cx, &cy);
         disc = (struct ui_box){(b32)(cx - r), (b32)(cy - r), (b32)(cx + r), (b32)(cy + r), (b32)r, (b32)r};
         if (disc.x1 <= panel->x0 || disc.x0 >= panel->x1 || disc.y1 <= panel->y0 || disc.y0 >= panel->y1)
@@ -18121,12 +18131,10 @@ static fn ui_graph_knob(struct ui address_to ui, const struct ui_graph address_t
         ui_kit_fill(ui, &disc, lit ? ui_mix(ui_role(UI_ON_SURFACE) | 0xff000000u, 10, face) : face, panel);
         ui_kit_ring(ui, &disc, ui_q8(ui, 1), ui_role(lit ? UI_PRIMARY : UI_OUTLINE));
         // 225 degrees (the lower left) less 270 of the level, the screen's y down: 3/4 pi less 3/2 pi of it, Q30 radians, kept 0 or more.
-        for (int at = 0; at <= shown; at++)
+        for (int at = 0; at <= shown && at <= steps; at++)
         {
-                b64 turn = 2529944578ll - 5059889156ll * at / steps + 6746518852ll, sine, cosine, px, py;
+                b64 px = cx + (arc * bead_at[at][0] >> 30), py = cy - (arc * bead_at[at][1] >> 30);
                 struct ui_box bead;
-                ui_sincos(turn, &sine, &cosine);
-                px = cx + (arc * cosine >> 30), py = cy - (arc * sine >> 30);
                 bead = (struct ui_box){(b32)(px - dot), (b32)(py - dot), (b32)(px + dot), (b32)(py + dot), (b32)dot, (b32)dot};
                 ui_kit_fill(ui, &bead, accent, panel);
         }
