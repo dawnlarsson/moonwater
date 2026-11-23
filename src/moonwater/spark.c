@@ -111,10 +111,13 @@ _Static_assert(sizeof(struct header) == SPARK_HEADER_SIZE,
 
 /*
         Direct zero-evdev input ring (/dev/spark mmap at offset SPARK_INPUT_MMAP_PGOFF * 4096):
-        When a locked-pointer game is active, Moonwater's in-kernel input filter writes raw
-        (dx, dy, ktime_us) directly from the USB-HID IRQ into this single shared page and
-        suppresses evdev delivery for those motion axes. The compositor's SCHED_FIFO reader
-        drains it straight from mapped RAM with zero read() syscalls.
+        while its owner has it mapped and active (the compositor's reader sets active at its open
+        and on every pass, so always while the compositor runs, game or none), Moonwater's
+        in-kernel input filter writes each report of the machine's own pointers and keyboards
+        (motion summed per report, keys and buttons, wheels; no touch, no uinput or uhid device)
+        into this single shared page with its ktime_us, and takes them from evdev: no other
+        reader of /dev/input sees them. The compositor's SCHED_FIFO reader drains it straight
+        from mapped RAM with zero read() syscalls.
 */
 #define SPARK_INPUT_MAGIC 0x504e4953u // "SINP"
 #define SPARK_INPUT_VERSION 1u

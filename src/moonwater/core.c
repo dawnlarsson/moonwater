@@ -324,6 +324,19 @@ static long device_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 }
 
 /*
+        A 32-bit program's ioctls: the focused page's claim alone, whose
+        argument is a number and no structure, the same at either width.
+        Without this every i386 game (HL2) mapped its page and had each
+        claim answered -ENOTTY, so its reader never read a report. Every
+        other number's structure is laid out for 64-bit and is refused, as
+        before (-ENOIOCTLCMD is the kernel's -ENOTTY).
+*/
+static long device_compat_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
+{
+        return cmd == SPARK_IOCTL_FOCUS_CLAIM ? spark_focus_claim(file, arg) : -ENOIOCTLCMD;
+}
+
+/*
         misc_open leaves the miscdevice in private_data. Replace it with one
         context per open: its environment snapshot belongs to that launcher.
 */
@@ -393,6 +406,7 @@ static const struct file_operations device_ops = {
     .poll = device_poll,
     .mmap = device_mmap,
     .unlocked_ioctl = device_ioctl,
+    .compat_ioctl = device_compat_ioctl,
     .flush = device_flush,
     .release = device_close,
     .llseek = noop_llseek,
