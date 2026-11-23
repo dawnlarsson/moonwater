@@ -2725,7 +2725,9 @@ static b32 usb_not_drive(string_address name)
 // An optical drive: the sr driver's (a CD, DVD or Blu-ray drive, inside the machine or on USB).
 static inline b32 usb_optical(string_address name) { return host_starts(name, "sr"); }
 
-static fn disc_census(string_address name, unsigned long long sectors); // disc.c's
+static fn disc_census(string_address name, unsigned long long sectors); // disc.c's, as the two below
+static b32 disc_music(string_address name, p64 address_to bytes);
+static string_address disc_mount_at(string_address name, string_address folder, positive uid, positive gid, bipolar address_to error);
 
 /*
         The bus a drive is on, from its name and the sysfs path its /sys/class/block link names (empty where it has none), and for an
@@ -2912,7 +2914,7 @@ typedef struct
 static const usb_openable usb_openables[] = {
     {"ext4", "ext4", 1, 0},  {"ext3", "ext4", 0, 0}, {"ext2", "ext4", 0, 0},   {"btrfs", "btrfs", 1, 0}, {"xfs", "xfs", 1, 0},
     {"f2fs", "f2fs", 1, 0},  {"vfat", "vfat", 1, 1}, {"exfat", "exfat", 1, 1}, {"ntfs", "ntfs3", 0, 1},  {"iso9660", "iso9660", 0, 0},
-    {"udf", "udf", 0, 0},
+    {"udf", "udf", 0, 0},     {"cdda", "fuse.moonwater-cd", 0, 0}, // cdda: a CD of music, its tracks a folder of WAV files (disc_mount_at)
 };
 
 static const usb_openable address_to usb_openable_of(string_address type)
@@ -3195,10 +3197,16 @@ static fn usb_open_look(string_address node, usb_open_facts address_to facts, b3
             !file_look(AT_FDCWD, (string_address)path, 0, address_of look) || (look.mode & MODE_FORMAT) != MODE_BLOCK)
                 return;
         facts->block = 1;
-        (void)storage_probe_device((string_address)path, address_of facts->identity);
-        facts->identity.path = null;
-        if (host_join(sysfs, sizeof(sysfs), "/sys/class/block/", node, "/size") && host_read_kernel(sysfs, text, sizeof(text)) > 0)
-                facts->bytes = string_digits(text, null) * 512ull;
+        // A CD of music has no file system to read (its sectors are sound): it is its folder of tracks, cdda, as the list says it.
+        if (usb_optical(node) && disc_music(node, address_of facts->bytes))
+                string_copy(facts->identity.type, "cdda"), facts->identity.type_length = 4;
+        else
+        {
+                (void)storage_probe_device((string_address)path, address_of facts->identity);
+                facts->identity.path = null;
+                if (host_join(sysfs, sizeof(sysfs), "/sys/class/block/", node, "/size") && host_read_kernel(sysfs, text, sizeof(text)) > 0)
+                        facts->bytes = string_digits(text, null) * 512ull;
+        }
         facts->diskseq = usb_diskseq(node);
         if (!whole)
                 return;
@@ -3279,7 +3287,8 @@ static b32 usb_open_verb(string_address node, string_address listed_word, string
         kind = usb_openable_of((string_address)first.identity.type);
         if (!why)
         {
-                usb_media_user(user, sizeof(user), uid), usb_media_name(name, sizeof(name), (string_address)first.identity.label, node);
+                usb_media_user(user, sizeof(user), uid);
+                usb_media_name(name, sizeof(name), string_equals((string_address)first.identity.type, "cdda") && !first.identity.label[0] ? (string_address) "Audio CD" : (string_address)first.identity.label, node);
                 why = usb_media_folder(USB_MEDIA, (string_address)user, (string_address)name, uid, folder, sizeof(folder));
         }
         if (!why)
@@ -3292,8 +3301,9 @@ static b32 usb_open_verb(string_address node, string_address listed_word, string
         if (!why)
         {
                 flags = usb_open_how(kind, false, uid, gid, options, sizeof(options));
-                made = host_mount_with(node, (string_address)folder, kind->kind, flags, options[0] ? (string_address)options : null);
-                if (made < 0)
+                if (string_equals(kind->type, "cdda"))
+                        why = disc_mount_at(node, (string_address)folder, uid, gid, address_of made);
+                else if ((made = host_mount_with(node, (string_address)folder, kind->kind, flags, options[0] ? (string_address)options : null)) < 0)
                         why = "could not be mounted";
         }
         if (!why)

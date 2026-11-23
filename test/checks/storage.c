@@ -3770,6 +3770,164 @@ static fn device_part_tail(void)
 }
 
 /*
+        A CD's folder of tracks as disc mount serves it (disc_fs_answer, the kernel's FUSE requests and their answers), fed by a reader
+        of frames made here in the drive's place: frame N's byte B is N * 7 + B, and one frame it will not give. A disc of two tracks of
+        music and one of data is two files, Track 01.wav and Track 02.wav, each its WAV header and its frames byte for byte; the frame the
+        reader will not give is silence, a read past the end is cut at it, the folder lists them, and a read in order after another is
+        the cache's (the reader is not asked again).
+*/
+struct cd_reader { int bad, calls; };
+
+static b32 cd_frames(address_any context, int lba, int frames, p8 address_to into)
+{
+        struct cd_reader address_to reader = (struct cd_reader address_to)context;
+        reader->calls++;
+        for (int f = 0; f < frames; f++)
+        {
+                if (lba + f == reader->bad)
+                        return false;
+                for (int b = 0; b < DISC_FRAME; b++)
+                        into[f * DISC_FRAME + b] = (p8)((lba + f) * 7 + b);
+        }
+        return true;
+}
+
+// A request of the kernel's: its header, opcode and node, and its body.
+static positive cd_ask(p8 address_to into, p32 opcode, p64 node, const address_any body, positive length)
+{
+        struct disc_fuse_in in;
+        memory_zero(&in, sizeof(in));
+        in.length = (p32)(sizeof(in) + length), in.opcode = opcode, in.unique = 4242 + opcode, in.node = node;
+        memory_copy(into, &in, sizeof(in)), memory_copy(into + sizeof(in), body, length);
+        return sizeof(in) + length;
+}
+
+// The byte at a track's file's offset, as the made frames and the header say it.
+static b32 cd_byte_right(const struct disc_fs address_to fs, int track, p64 offset, p8 byte, int bad)
+{
+        p8 head[DISC_WAV_HEAD];
+        p64 frame;
+        int lba;
+        if (offset < DISC_WAV_HEAD)
+                return disc_wav_head(head, fs->frames[track]), head[offset] == byte;
+        frame = (offset - DISC_WAV_HEAD) / DISC_FRAME, lba = fs->start[track] + (int)frame;
+        return byte == (lba == bad ? 0 : (p8)(lba * 7 + (int)((offset - DISC_WAV_HEAD) % DISC_FRAME)));
+}
+
+static fn disc_folder_rows(void)
+{
+        static struct disc_fs fs;
+        static struct disc_toc toc;
+        static p8 ask[8192];
+        struct cd_reader reader = {200, 0};
+        struct disc_fuse_out out;
+        struct disc_fuse_init_in init = {7, 40, 131072, 0};
+        struct disc_fuse_init_out said;
+        struct disc_fuse_entry entry;
+        struct disc_fuse_attr_out attr;
+        struct disc_fuse_open_out opened;
+        struct disc_fuse_read rd;
+        p32 flags = 0;
+        positive length, at;
+        b32 inited, looked, listed, opens, bytes = true, cached, ends, rest;
+        p8 names[128];
+        positive names_used = 0;
+
+        memory_zero(&fs, sizeof(fs)), memory_zero(&toc, sizeof(toc));
+        toc.first = 1, toc.count = 3, toc.start[0] = 0, toc.start[1] = 150, toc.start[2] = 400, toc.data[2] = 1, toc.lead_out = 1000;
+        check("disc mount: a disc's tracks of music are its files, its data track none", disc_fs_take(&fs, &toc) && fs.count == 2 && fs.frames[0] == 150 && fs.frames[1] == 250);
+        fs.uid = 1000, fs.gid = 100, fs.seconds = 1700000000ull, fs.read = cd_frames, fs.context = &reader;
+
+        length = disc_fs_answer(&fs, ask, cd_ask(ask, DISC_FUSE_INIT, 0, &init, sizeof(init)));
+        memory_copy(&out, fs.reply, sizeof(out)), memory_copy(&said, fs.reply + sizeof(out), sizeof(said));
+        inited = length == sizeof(out) + sizeof(said) && out.length == length && !out.error && out.unique == 4242 + DISC_FUSE_INIT &&
+                 said.major == 7 && said.minor == 31 && said.max_readahead == 131072 && said.max_write == DISC_FUSE_WRITE && !said.flags;
+        check("disc mount: INIT is answered as protocol 7.31, its read-ahead the kernel's, nothing asked of it beyond", inited);
+
+        length = disc_fs_answer(&fs, ask, cd_ask(ask, DISC_FUSE_LOOKUP, DISC_FUSE_ROOT, "Track 02.wav", 13));
+        memory_copy(&out, fs.reply, sizeof(out)), memory_copy(&entry, fs.reply + sizeof(out), sizeof(entry));
+        looked = length == sizeof(out) + sizeof(entry) && !out.error && entry.node == 3 && entry.attr.size == DISC_WAV_HEAD + 250ull * DISC_FRAME &&
+                 entry.attr.mode == 0100444 && entry.attr.uid == 1000 && entry.attr.gid == 100 && entry.attr.mtime == 1700000000ull;
+        length = disc_fs_answer(&fs, ask, cd_ask(ask, DISC_FUSE_LOOKUP, DISC_FUSE_ROOT, "Track 03.wav", 13));
+        memory_copy(&out, fs.reply, sizeof(out));
+        looked = looked && length == sizeof(out) && out.error == -ENOENT;
+        length = disc_fs_answer(&fs, ask, cd_ask(ask, DISC_FUSE_LOOKUP, DISC_FUSE_ROOT, "Track 01.wa", 12));
+        memory_copy(&out, fs.reply, sizeof(out)), looked = looked && out.error == -ENOENT;
+        length = disc_fs_answer(&fs, ask, cd_ask(ask, DISC_FUSE_GETATTR, DISC_FUSE_ROOT, "\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0", 16));
+        memory_copy(&out, fs.reply, sizeof(out)), memory_copy(&attr, fs.reply + sizeof(out), sizeof(attr));
+        looked = looked && length == sizeof(out) + sizeof(attr) && !out.error && attr.attr.mode == 0040555 && attr.attr.links == 2;
+        check("disc mount: a track's name is its file (Track 02.wav, the header and its frames' bytes, 0444, the folder's owner), a data track's and a name cut short none, the folder 0555",
+              looked);
+
+        memory_zero(&rd, sizeof(rd)), rd.size = 4096;
+        length = disc_fs_answer(&fs, ask, cd_ask(ask, DISC_FUSE_READDIR, DISC_FUSE_ROOT, &rd, sizeof(rd)));
+        for (at = sizeof(out); at + sizeof(struct disc_fuse_dirent) <= length;)
+        {
+                struct disc_fuse_dirent one;
+                memory_copy(&one, fs.reply + at, sizeof(one));
+                memory_copy(names + names_used, fs.reply + at + sizeof(one), one.name_length), names_used += one.name_length, names[names_used++] = '|';
+                at += (sizeof(one) + one.name_length + 7) & ~(positive)7;
+        }
+        names[names_used] = end;
+        listed = string_equals((string_address)names, (string_address) ".|..|Track 01.wav|Track 02.wav|");
+        rd.offset = 3, names_used = 0;
+        length = disc_fs_answer(&fs, ask, cd_ask(ask, DISC_FUSE_READDIR, DISC_FUSE_ROOT, &rd, sizeof(rd)));
+        listed = listed && length == sizeof(out) + ((sizeof(struct disc_fuse_dirent) + 12 + 7) & ~(positive)7);
+        rd.offset = 0, rd.size = 40, length = disc_fs_answer(&fs, ask, cd_ask(ask, DISC_FUSE_READDIR, DISC_FUSE_ROOT, &rd, sizeof(rd)));
+        listed = listed && length == sizeof(out) + 32; // the room for "." alone
+        check("disc mount: the folder lists ., .. and each track, from the entry asked for, as many as the room holds", listed);
+
+        length = disc_fs_answer(&fs, ask, cd_ask(ask, DISC_FUSE_OPEN, 2, &flags, sizeof(flags)));
+        memory_copy(&out, fs.reply, sizeof(out)), memory_copy(&opened, fs.reply + sizeof(out), sizeof(opened));
+        opens = !out.error && length == sizeof(out) + sizeof(opened) && opened.open_flags == DISC_FUSE_KEEP;
+        flags = 1, disc_fs_answer(&fs, ask, cd_ask(ask, DISC_FUSE_OPEN, 2, &flags, sizeof(flags)));
+        memory_copy(&out, fs.reply, sizeof(out)), opens = opens && out.error == -EROFS;
+        flags = 0, disc_fs_answer(&fs, ask, cd_ask(ask, DISC_FUSE_OPENDIR, 2, &flags, sizeof(flags)));
+        memory_copy(&out, fs.reply, sizeof(out)), opens = opens && out.error == -ENOTDIR;
+        disc_fs_answer(&fs, ask, cd_ask(ask, DISC_FUSE_OPEN, DISC_FUSE_ROOT, &flags, sizeof(flags)));
+        memory_copy(&out, fs.reply, sizeof(out)), opens = opens && out.error == -EISDIR;
+        disc_fs_answer(&fs, ask, cd_ask(ask, 9, DISC_FUSE_ROOT, "x", 2)); // MKDIR
+        memory_copy(&out, fs.reply, sizeof(out)), opens = opens && out.error == -ENOSYS;
+        opens = opens && !disc_fs_answer(&fs, ask, cd_ask(ask, DISC_FUSE_FORGET, 2, "\1\0\0\0\0\0\0\0", 8));
+        check("disc mount: a track opens to be read (its pages kept), not to be written; a folder is no file nor a file a folder; MKDIR and the rest are ENOSYS, FORGET has no answer",
+              opens);
+
+        // Its header and its first frame's first bytes; then across a frame's edge, the bad frame and on, a hundred frames.
+        memory_zero(&rd, sizeof(rd)), rd.size = 100;
+        length = disc_fs_answer(&fs, ask, cd_ask(ask, DISC_FUSE_READ, 2, &rd, sizeof(rd)));
+        bytes = length == sizeof(out) + 100 && !memory_compare(fs.reply + sizeof(out), "RIFF", 4) && !memory_compare(fs.reply + sizeof(out) + 8, "WAVEfmt ", 8);
+        for (at = 0; bytes && at < 100; at++)
+                bytes = cd_byte_right(&fs, 0, at, fs.reply[sizeof(out) + at], reader.bad);
+        reader.calls = 0;
+        rd.offset = DISC_WAV_HEAD + 10ull * DISC_FRAME - 5, rd.size = 100 * DISC_FRAME;
+        length = disc_fs_answer(&fs, ask, cd_ask(ask, DISC_FUSE_READ, 3, &rd, sizeof(rd)));
+        bytes = bytes && length == sizeof(out) + 100 * DISC_FRAME;
+        for (at = 0; bytes && at < 100 * DISC_FRAME; at++)
+                bytes = cd_byte_right(&fs, 1, rd.offset + at, fs.reply[sizeof(out) + at], reader.bad);
+        check("disc mount: a track's bytes are its WAV header and then its frames as the drive gives them, at any offset, a frame it will not give silence",
+              bytes && reader.calls > 1);
+        reader.calls = 0, rd.offset += rd.size, rd.size = 4096;
+        length = disc_fs_answer(&fs, ask, cd_ask(ask, DISC_FUSE_READ, 3, &rd, sizeof(rd)));
+        cached = length == sizeof(out) + 4096 && !reader.calls && cd_byte_right(&fs, 1, rd.offset + 4095, fs.reply[sizeof(out) + 4095], reader.bad);
+        check("disc mount: a read after another, in order, is the cache's: a second ahead was read with the first", cached);
+        rd.offset = DISC_WAV_HEAD + 250ull * DISC_FRAME - 10, rd.size = 4096;
+        length = disc_fs_answer(&fs, ask, cd_ask(ask, DISC_FUSE_READ, 3, &rd, sizeof(rd)));
+        ends = length == sizeof(out) + 10 && cd_byte_right(&fs, 1, rd.offset + 9, fs.reply[sizeof(out) + 9], reader.bad);
+        rd.offset = DISC_WAV_HEAD + 250ull * DISC_FRAME, length = disc_fs_answer(&fs, ask, cd_ask(ask, DISC_FUSE_READ, 3, &rd, sizeof(rd)));
+        memory_copy(&out, fs.reply, sizeof(out)), ends = ends && length == sizeof(out) && !out.error;
+        check("disc mount: a read past a track's end is cut at it, and one from its end has no bytes", ends);
+        disc_fs_answer(&fs, ask, cd_ask(ask, DISC_FUSE_DESTROY, 0, "", 0));
+        memory_copy(&out, fs.reply, sizeof(out));
+        rest = fs.ended && !out.error;
+        {
+                struct disc_toc extra = toc;
+                extra.data[2] = 1, extra.start[2] = 150 + 20000, extra.lead_out = 150 + 30000;
+                rest = rest && disc_music_frames(&extra, 1) == 20000 - DISC_EXTRA_GAP && disc_music_frames(&extra, 0) == 150;
+        }
+        check("disc mount: DESTROY lets the folder go, and a CD-Extra's last track of music ends at its session's end", rest);
+}
+
+/*
         A partition opened for the person at the machine (device open, writable, eject, tidy): why one is refused, read-only first
         and writable as a second step for the file systems that take it, the folder it is opened at, what open keeps, an eject,
         and a drive taken out let go of. The mounts here are tmpfs in the check's own mount namespace, under /tmp.
@@ -3810,6 +3968,10 @@ static fn device_open_rows(void)
         check("device open: a disc of data in an optical drive may be opened; an optical drive is a drive the list says (no loop or RAID), and UDF opens beside ISO 9660",
               !usb_open_judge(&bad, 31000000000ull, "iso9660") && usb_optical("sr0") && !usb_optical("sda") && !usb_not_drive("sr1") && usb_not_drive("loop0") &&
                   usb_openable_of("udf") && !usb_openable_of("udf")->written);
+        bad = good, string_copy(bad.disk, "sr1"), string_copy(bad.identity.type, "cdda"), bad.identity.type_length = 4, bad.identity.label[0] = end;
+        check("device open: a CD of music is its folder of tracks (cdda), opened as the list said it and only read",
+              !usb_open_judge(&bad, 31000000000ull, "cdda") && usb_openable_of("cdda") && !usb_openable_of("cdda")->written &&
+                  string_equals(usb_openable_of("cdda")->kind, "fuse.moonwater-cd"));
         check("device open: refused over a link, on the drive this runs from or keeps, on no drive, by the storage guard, held by a mapped or RAID volume, an EFI partition, a file system it does not open, one the list did not say, and no block device",
               refused && string_find(said[2], "runs from") && string_find(said[3], "runs from") && string_equals(said[5], "holds a moonwater partition") &&
                   string_find(said[6], "RAID") && string_find(said[7], "EFI"));
@@ -6697,6 +6859,7 @@ b32 main(void)
         device_where();
         device_part_tail();
         device_open_rows();
+        disc_folder_rows();
 
         if (program_argument_count() > 1)
                 format_images(program_argument_list()[1]);
