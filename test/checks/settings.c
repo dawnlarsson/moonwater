@@ -6674,6 +6674,19 @@ static fn check_settings_actions(void)
                         settings.job = pair, settings.job_sets = true;
                         memory_zero(&add, sizeof(add)), settings_describe(add_id, &add);
                         stop_ok = add.kind == UI_ROW_ADD && !add.words && string_equals((string_address)add.label, (string_address)WORDS(settings_link_stop));
+                        //      link pair's words as waterlink's command.c says them: the code is the word after code, and the card of it opens.
+                        {
+                                static const char paired[] = "[Moonwater] code ABC-DEF; this machine is called left\n"
+                                                             "[Moonwater] on the other machine, run: moonwater link left ABC-DEF\n";
+                                positive kept_length = settings.runner.length;
+                                bipolar kept_child = settings.runner.child;
+                                memory_copy(settings_large->said, paired, sizeof(paired) - 1), settings.runner.length = sizeof(paired) - 1;
+                                settings.runner.child = kept_child > 0 ? kept_child : 1; // the pairing is under way (no child is run here)
+                                settings_pair_on = false, settings_waiting_say();
+                                check("settings lists: a pairing's code is read from link pair's code line, and its card opens with it",
+                                      settings_pair_on && settings.page.card && string_equals((string_address)settings_pair_code, (string_address) "ABC-DEF"));
+                                settings_pair_on = false, settings.page.card = false, settings.runner.length = kept_length, settings.runner.child = kept_child;
+                        }
                         settings.job = saved_job, settings.job_sets = saved_sets;
                         check("settings lists: Show a code is link pair's job, the other way the add row as a field whose name and code are link's, "
                               "and a pairing that waits makes the row Stop pairing",

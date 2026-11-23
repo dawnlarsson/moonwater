@@ -3306,23 +3306,36 @@ static fn settings_pair_paint(struct ui address_to ui)
                 ui_kit_text_flipped(ui, edge, ui_kit_baseline(ui, y, UI_BODY_MEDIUM), (string_address)ui_lines_copy(&settings.card_text, e, line, sizeof(line)), UI_BODY_MEDIUM, ui_role(UI_ON_SURFACE), 0, 0, ui->width);
 }
 
+/*
+        A pairing's code, from the line of link pair's that says it (waterlink's command.c): "code ABC-DEF; this machine is called NAME",
+        the word after code to its semicolon, into settings_pair_code (a code is LINK_CODE_LENGTH letters and a dash: 7). False until a
+        line of what was said so far is that one. It was read from the first line as NAME CODE: on the other machine, which link pair has
+        not said since c065143b5, so the card of the code never opened.
+*/
+static b32 settings_pair_code_read(void)
+{
+        for (positive at = 0; at < settings.runner.length;)
+        {
+                char got[SETTINGS_STATUS];
+                positive made = settings_line(settings_large->said, settings.runner.length, &at, got, sizeof(got)), from = 5, kept = 0;
+                if (made <= from || memory_compare(got, "code ", 5))
+                        continue;
+                while (from < made && got[from] != ';' && got[from] != ' ' && kept + 1 < sizeof(settings_pair_code))
+                        settings_pair_code[kept++] = got[from++];
+                settings_pair_code[kept] = 0;
+                return kept > 0;
+        }
+        return false;
+}
+
 static fn settings_waiting_say(void)
 {
         char line[SETTINGS_STATUS];
-        positive size;
-        if (settings.runner.child > 0 && settings.job_sets && settings_waits(settings.job) && (size = settings_said_line(line, sizeof(line), false)))
+        if (settings.runner.child > 0 && settings.job_sets && settings_waits(settings.job) && settings_said_line(line, sizeof(line), false))
         {
                 settings_say((string_address)line);
-                if (!settings_pair_on && settings_pair_row(settings.job) && settings_find(line, size, "on the other machine") < size)
-                {
-                        positive at = 0, made = 0;
-                        while (at < size && line[at] != ' ') at++;
-                        while (at < size && line[at] == ' ') at++;
-                        while (at < size && line[at] != ' ' && line[at] != ':' && made + 1 < sizeof(settings_pair_code))
-                                settings_pair_code[made++] = line[at++];
-                        settings_pair_code[made] = 0, settings_pair_on = true, settings_pair_due = 0;
-                        settings_card_open(settings_label(settings.job));
-                }
+                if (!settings_pair_on && settings_pair_row(settings.job) && settings_pair_code_read())
+                        settings_pair_on = true, settings_pair_due = 0, settings_card_open(settings_label_shown(settings.job));
         }
 }
 
