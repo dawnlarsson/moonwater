@@ -11338,6 +11338,7 @@ static fn ui_kit_press_transform(const struct ui address_to ui, struct ui_contro
         *ty = (b32)((drawn[3] * ui->scale / 100) >> 22);
 }
 
+static fn ui_spinner_draw(struct ui address_to ui, struct ui_control address_to c); // below
 static fn ui_button_draw(struct ui address_to ui, struct ui_control address_to c)
 {
         UI_CALL();

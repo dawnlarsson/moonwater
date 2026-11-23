@@ -1644,6 +1644,7 @@ static void taskbar_notices_cell(const struct taskbar_view *view, const struct u
         ui_kit_dot(&ui, x, y, colour | 0xff000000u);
 }
 
+static int taskbar_cell_state(int slot); // below: a cell's state (its launch waiting, failed)
 static int taskbar_draw(const struct taskbar_view *view, unsigned long redo, taskbar_glass_fn glass, void *context, int *rect)
 {
         const struct ui_tree address_to t = taskbar_tree(view);
