@@ -2686,6 +2686,14 @@ static fn check_settings(string_address regular, string_address bold)
                                 settings_press(UI_KEY_LEFT);
                                 check("settings: Left on a switch goes back to the column and throws nothing",
                                       settings.page.pane == 0 && settings.queued == 0);
+                                // A pad's way through the page: its cross is the arrows, and its bottom button is Enter after the cross moved the keys.
+                                settings_group_choose(settings_group_of(clock_row));
+                                settings_press(UI_KEY_RIGHT);
+                                settings.list.focus = clock_row;
+                                settings_press(UI_KEY_ENTER);
+                                check("settings: Right from the column is the rows again, and Enter on a switch turns it: its change, off, is queued for its row",
+                                      settings.page.pane == 1 && settings.queued == 1 && settings.queue[0].row == clock_row &&
+                                          string_equals((string_address)settings.queue[0].value, (string_address) "off"));
                         }
                         settings.queued = 0;
                         settings.runner.child = 0;

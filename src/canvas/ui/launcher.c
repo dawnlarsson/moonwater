@@ -673,8 +673,8 @@ static fn launcher_tiles_ready(void)
         }
         launcher.grid.total = launcher.app_count;
         launcher.recents.total = launcher.recent_count < launcher_per() ? launcher.recent_count : launcher_per();
-        launcher.grid.lit = !launcher.in_recents && !launcher.text[0];
-        launcher.recents.lit = launcher.in_recents && !launcher.text[0];
+        launcher.grid.lit = !launcher.in_recents && !launcher.text[0] && !launcher.view.keys;
+        launcher.recents.lit = launcher.in_recents && !launcher.text[0] && !launcher.view.keys;
 }
 
 static int launcher_per(void)
@@ -814,6 +814,13 @@ static b32 launcher_app_menu(int which, int x, int y, b32 touch)
         return ui_popmenu_open(&launcher.menu, &launcher.own, &launcher.ui, x, y, 0, 0, WINDOW_POPUP_POINT, touch);
 }
 
+// The keys the kit's way across the bar handed to one of its lists (UI_VIEW_HANDED): the recents' line has them, or the grid.
+static fn launcher_handed(p32 asks)
+{
+        if (asks & UI_VIEW_HANDED)
+                launcher.in_recents = launcher.view.handed == &launcher.recents, launcher.dirty = true;
+}
+
 static b32 launcher_grid_key(const struct window_event address_to event)
 {
         struct ui_list address_to l = launcher.in_recents ? &launcher.recents : &launcher.grid;
@@ -851,7 +858,7 @@ static b32 launcher_grid_key(const struct window_event address_to event)
         {
                 if (l->focus < 0)
                         l->focus = 0;
-                ui_list_key(&launcher.ui, l, key, &moved);
+                launcher_handed(ui_view_list_key(&launcher.ui, &launcher.view, l, key, &moved)); // past the last line: the power row
         }
         launcher.dirty = true;
         return true;
@@ -864,6 +871,7 @@ static int launcher_view_take(const struct window_event address_to event)
 
         if (asks & UI_VIEW_DRAW)
                 launcher.dirty = true;
+        launcher_handed(asks);
         return (asks & UI_VIEW_QUIT) ? -1 : (asks & UI_VIEW_TAKEN) ? 1 : 0;
 }
 
@@ -882,7 +890,7 @@ static b32 launcher_key(const struct window_event address_to event)
             ((event->flags & WINDOW_KEY_CONTROL) && (event->a == UI_KEY_P || event->a == UI_KEY_N)))
         {
                 b32 moved;
-                ui_list_key(&launcher.ui, &launcher.list, event->a == UI_KEY_P ? UI_KEY_UP : event->a == UI_KEY_N ? UI_KEY_DOWN : event->a, &moved);
+                ui_view_list_key(&launcher.ui, &launcher.view, &launcher.list, event->a == UI_KEY_P ? UI_KEY_UP : event->a == UI_KEY_N ? UI_KEY_DOWN : event->a, &moved);
         }
         else if (event->a == UI_KEY_TAB && launcher.entries && launcher.list.focus >= 0 && (positive)launcher.list.focus < launcher.entries)
         {

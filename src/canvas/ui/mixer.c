@@ -400,7 +400,7 @@ static fn mixer_layout(void)
         ui_control(c, .class = "tabs", .hidden = mixer.quick, .on = mixer_tabbed);
         ui_col(.class = "middle", .grow = 1)
         {
-                ui_host(&mixer.strips_box, .grow = !mixer.capture_off);
+                ui_host(&mixer.strips_box, .grow = !mixer.capture_off, .keys = 1); // the strips' own keys: the kit's arrows hand them over
                 if (mixer.capture_off)
                         ui_row(.class = "foot.middle")
                                 ui_button(WORDS(mixer_allow), .class = "action.outlined", .on = mixer_act);
@@ -428,7 +428,7 @@ static fn mixer_draw(unsigned int address_to pixels)
                 ui_strips_message(ui, strips, WORDS(mixer_off), false);
                 return;
         }
-        ui_strips_draw(ui, strips, mixer.focused && !mixer.big->view.group.keys);
+        ui_strips_draw(ui, strips, mixer.focused && !mixer.big->view.group.keys && !mixer.big->view.keys);
         ui_view_draw(ui, &mixer.big->view, mixer.focused);
         // What there is to say instead of strips or beside them.
         if (mixer.capture_off)
