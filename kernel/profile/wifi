@@ -20,6 +20,17 @@
 #               to rtl8761bu_config.bin, carried so no boot logs its absence
 #   mt7921e     the MT7961 (MT7921) and MT7922 patch and RAM code
 #   btmtk       the MT7961 and MT7922 bluetooth RAM code
+#   btrtl       the common USB adapters' and combo cards' Bluetooth: RTL8761BU
+#               (most USB sticks; its config is the one rtl8822cu_config.bin
+#               is taken from), RTL8852BU and RTL8852CU (Wi-Fi 6 and 6E
+#               combos), RTL8821CU and RTL8822BU; the 8852 parts ship no
+#               config file and need none
+#   btintel     Intel's Bluetooth, which boots from its bootloader and does
+#               nothing until it is given these: AX200 (ibt-20-1-3), AX201 and
+#               9560 (ibt-19-0-4), AX210 (ibt-0041-0041), AX211 (ibt-0040-0041)
+#               and BE200 (ibt-0291-0291), each .sfi with its .ddc. The other
+#               names upstream links to these are not carried (each link is a
+#               whole copy here); about 2.7 MB of the image and of its RAM
 #
 # The regulatory database. cfg80211 asks for regulatory.db as it starts, and
 # with the signature required (below) for regulatory.db.p7s as well; without
@@ -38,7 +49,26 @@
 #> firmware mediatek/WIFI_RAM_CODE_MT7922_1.bin d100e5e04c324fc8da6302112d1e0b4fac952286447d2419eabcd8fb0a1f5b93
 #> firmware mediatek/BT_RAM_CODE_MT7961_1_2_hdr.bin 7a440a0f7404c73a2f03d8cc0475ac9f7fdc931b494dce37705e7d578153dbae
 #> firmware mediatek/BT_RAM_CODE_MT7922_1_1_hdr.bin 299942dbec7d34af030670ea59f9f7b4fd5c64e738b9e0157d76f4dd3beb190f
+#> firmware rtl_bt/rtl8761bu_fw.bin 1d7a9597349ad89344fa16c1913d3e39e9a12e966e417ca16871bc79bbe59edb
+#> firmware rtl_bt/rtl8761bu_config.bin 6c28a3f07c6a30ed208c4b64862a23f02b7d93543ea980edd24df16bab45095f
+#> firmware rtl_bt/rtl8852bu_fw.bin c2b0d34a4ff8a8ea136993f0dc4ba657522d84231b4094c2a53cda39afc91c57
+#> firmware rtl_bt/rtl8852cu_fw.bin 9b8b27741a914c1cecc1ab9837194236890522101a57ba1898eb55f8d538dae0
+#> firmware rtl_bt/rtl8821c_fw.bin dfe7ef772d078ec09490c02190a32fcd40b3eaf3b040049d8930eb80e6d5743c
+#> firmware rtl_bt/rtl8821c_config.bin 292717b0610ce920f66b734c299d349ea59a4c4400044078d8fc65625f17e382
+#> firmware rtl_bt/rtl8822b_fw.bin eecef2c3b2ff03c3a41292a93a25eca6f4ec38eb4a7491a3651b530be89a04fc
+#> firmware rtl_bt/rtl8822b_config.bin ea082136d5285655372e3805cd50d961bd7d42085c6fc1058a115a7e844df9c1
+#> firmware intel/ibt-20-1-3.sfi fd51628c307a1b03fbd7156f0d2a7f5af67b7202d4f358f5d4d807911982c3cc
+#> firmware intel/ibt-20-1-3.ddc fe272982577efdc289cfe3e8bedafca607c0b7d6c9df1aab1880e22ef930d077
+#> firmware intel/ibt-19-0-4.sfi 2e6a2027b9eeb3aa94255f10752bb828077739104b8be6769c7500322edddfd6
+#> firmware intel/ibt-19-0-4.ddc fe272982577efdc289cfe3e8bedafca607c0b7d6c9df1aab1880e22ef930d077
+#> firmware intel/ibt-0041-0041.sfi 2d891022ded1d2d8b208cc5b7632f3098c761ae099024de971e4158dd5681a9c
+#> firmware intel/ibt-0041-0041.ddc fe272982577efdc289cfe3e8bedafca607c0b7d6c9df1aab1880e22ef930d077
+#> firmware intel/ibt-0040-0041.sfi 8dcfb3a7c1592c11c3e80505d21ee78dbde3de0c830d8e3e856371c37717b62c
+#> firmware intel/ibt-0040-0041.ddc fe272982577efdc289cfe3e8bedafca607c0b7d6c9df1aab1880e22ef930d077
+#> firmware intel/ibt-0291-0291.sfi 6ed6d49e87581941a3940fcb28d9507ecef4c6a479c5291dad1ab9b4aa959ec4
+#> firmware intel/ibt-0291-0291.ddc e0fb10fe29f60607d6507ced3f697492d9611f62c4765feaee59c4bd4101d3e7
 #> firmware_licence LICENCE.rtlwifi_firmware.txt a61351665b4f264f6c631364f85b907d8f8f41f8b369533ef4021765f9f3b62e
+#> firmware_licence LICENCE.ibt_firmware 5181b0b51efc79d5acb2c9bb92042878fdbad97a92114d4ab5e32e2b5b52fce4
 #> firmware_licence LICENCE.mediatek a90d3f66704d85889945fec5525ea77622549da83aced1aac99828383f8f1805
 #> regdb regulatory.db 7e236caecd939c8ec98be4870bf30422f28ffef2565a38aaaa2d9ddabd0c2641
 #> regdb regulatory.db.p7s 50332f0db09b8bcc719235ec4985c27377f2cc2f42abb7b5dcf951866c5a888a
@@ -93,14 +123,26 @@ CONFIG_MT792x_LIB=y
 CONFIG_MT7921_COMMON=y
 CONFIG_MT7921E=y
 
+#
+# Bluetooth for pads (moonwater bluetooth pair, src/sh/host/bluetooth.c):
+# HIDP carries a classic pad's reports to its driver in the kernel, and an LE
+# pad's come through uhid (UHID, the desktop profile's). btusb selects Intel's
+# and Broadcom's protocol code by itself, so they are said as what is built;
+# Realtek's and MediaTek's are asked for. Autosuspend stays off: a suspended
+# radio wakes late for a pad's first report (the desktop's
+# usbcore.autosuspend=-1 says the same for every device).
+#
 CONFIG_BT=y
 CONFIG_BT_BREDR=y
 CONFIG_BT_LE=y
-CONFIG_BT_INTEL=n
-CONFIG_BT_BCM=n
+CONFIG_BT_INTEL=y
+CONFIG_BT_BCM=y
 CONFIG_BT_QCA=n
 CONFIG_BT_MTK=y
 CONFIG_BT_HCIBTUSB=y
+CONFIG_BT_HCIBTUSB_AUTOSUSPEND=n
+CONFIG_BT_HCIBTUSB_BCM=y
 CONFIG_BT_HCIBTUSB_MTK=y
+CONFIG_BT_HCIBTUSB_RTL=y
 CONFIG_BT_RTL=y
 CONFIG_BT_HIDP=y
