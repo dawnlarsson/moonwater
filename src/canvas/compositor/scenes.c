@@ -1171,6 +1171,22 @@ static void compositor_scenes_hover(void)
         compositor_scenes_kept.held = held, compositor_scenes_kept.at_x = x, compositor_scenes_kept.at_y = y;
 }
 
+/*
+        When the loop is owed its next pass for the overview's spring: a frame after the last present while the share is on its way (0 at
+        rest, held by the hand, or with motion off). The spring steps only on a pass (compositor_scenes_tick), and nothing else need
+        wake one: the overview opened and closed in jumps, a frame now and then a stall of up to 200 ms until a window drew (the
+        headless rig: 4 to 7 presents of 14 in 700 ms more than 20 ms apart).
+*/
+static positive compositor_scenes_due(positive now)
+{
+        positive period = compositor.period ? compositor.period : 16666667ull;
+        b64 goal = compositor.scenes.open ? COMPOSITOR_SCENES_FULL : 0;
+
+        if (compositor.scenes.drag || !compositor_glides() || (compositor_scenes_kept.shown == goal && !compositor_scenes_kept.speed))
+                return 0;
+        return compositor.presented + period > now ? compositor.presented + period : now;
+}
+
 static void compositor_scenes_tick(positive now)
 {
         compositor_scenes_step(now);

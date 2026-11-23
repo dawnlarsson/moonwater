@@ -2002,6 +2002,7 @@ static positive compositor_timers_arm(positive now, unsigned int fence_at, int h
         compositor_soon(&until, compositor_touch_due());
         compositor_soon(&until, compositor_access_due());
         compositor_soon(&until, compositor_snap_due());
+        compositor_soon(&until, compositor_scenes_due(now));
         if (compositor_spots_any(1)) compositor_soon(&until, compositor.presented + period > now ? compositor.presented + period : now);
         compositor_soon(&until, compositor_wall_due(now));
         // A list waiting on a busy card wakes the loop when the card's fence does; a card with no fence to wait on is looked at each millisecond.

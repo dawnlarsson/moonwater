@@ -1161,11 +1161,16 @@ static void check_compositor_scenes_motion(void)
             width = scenes_frames[k].width;
     compositor_scenes_card_shown(0, s, compositor_scenes_gap(), compositor_scenes_t(), card);
     check("scenes motion: 40 ms after it opens the overview is on its way, neither shut nor all of it shown", mid > 0 && mid < COMPOSITOR_SCENES_FULL);
+    compositor.period = 16666667ull, compositor.presented = t0 + 40 * UI_MS;
+    check("scenes motion: on its way it owes the loop a pass a frame after the last present (the spring steps only on a pass)",
+          compositor_scenes_due(t0 + 41 * UI_MS) == compositor.presented + compositor.period &&
+              compositor_scenes_due(t0 + 60 * UI_MS) == t0 + 60 * UI_MS);
     check("scenes motion: on the way a window is drawn between its own size and its rect's", width < 400 && width > r1[2]);
     check("scenes motion: and the strip is above where it rests", card[1] < compositor.scenes.card[0][1]);
     compositor_scenes_tick(t0 + 1000 * UI_MS);
     compositor_scenes_tick(t0 + 2000 * UI_MS);
     check("scenes motion: the spring comes to rest all the way open", compositor_scenes_kept.shown == COMPOSITOR_SCENES_FULL && compositor_scenes_t() == UI_ONE);
+    check("scenes motion: at rest it owes the loop nothing", compositor_scenes_due(t0 + 2001 * UI_MS) == 0);
 
     compositor_scenes_close();
     compositor_scenes_tick(t0 + 3000 * UI_MS);
