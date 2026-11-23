@@ -1911,9 +1911,10 @@ static int compositor_lists_take(int row, unsigned int width, unsigned int heigh
         if (!list)
                 return 0;
         gen = __atomic_load_n(&((unsigned int *)list)[UI_DRAW_LIST_GEN], __ATOMIC_ACQUIRE);
-        if (gen == table->list_seen[row] || !__atomic_load_n(&table->list_mode, __ATOMIC_ACQUIRE))
+        unsigned int mode = __atomic_load_n(&table->list_mode, __ATOMIC_ACQUIRE);
+        if (gen == table->list_seen[row] || !mode)
         {
-                if (compositor_listed[row] && __atomic_load_n(&table->list_mode, __ATOMIC_ACQUIRE))
+                if (compositor_listed[row] && mode)
                         compositor_list_count(table, COMPOSITOR_LIST_PIXELS);
                 compositor_listed[row] = 0, table->list_seen[row] = gen;
                 if (__atomic_load_n(&table->list_state[row], __ATOMIC_ACQUIRE) == 2)

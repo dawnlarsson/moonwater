@@ -672,23 +672,34 @@ static const unsigned int *compositor_scenes_wall_of(const int s[4], int w, int 
         for (int y = 0; y < h; y++)
         {
                 long long y0 = s[1] + (long long)y * s[3] / h, y1 = s[1] + ((long long)y + 1) * s[3] / h;
+                long long cy = y1 - y0 > 4 ? 4 : y1 - y0 < 1 ? 1 : y1 - y0;
+                long long py_off[4];
+                unsigned int *dst_row = compositor_scenes_kept.wall + (unsigned long)y * (unsigned long)w;
 
+                for (long long j = 0; j < cy; j++)
+                        py_off[j] = (y0 + (y1 - y0) * (2 * j + 1) / (2 * cy)) * compositor_wall_w;
                 for (int x = 0; x < w; x++)
                 {
                         long long x0 = s[0] + (long long)x * s[2] / w, x1 = s[0] + ((long long)x + 1) * s[2] / w;
-                        long long cx = x1 - x0 > 4 ? 4 : x1 - x0 < 1 ? 1 : x1 - x0, cy = y1 - y0 > 4 ? 4 : y1 - y0 < 1 ? 1 : y1 - y0;
-                        unsigned int red = 0, green = 0, blue = 0, taps = 0;
+                        long long cx = x1 - x0 > 4 ? 4 : x1 - x0 < 1 ? 1 : x1 - x0;
+                        long long px[4];
+                        unsigned int red = 0, green = 0, blue = 0, taps = (unsigned int)(cx * cy);
 
+                        for (long long i = 0; i < cx; i++)
+                                px[i] = x0 + (x1 - x0) * (2 * i + 1) / (2 * cx);
                         for (long long j = 0; j < cy; j++)
+                        {
+                                const unsigned int *wrow = compositor_wall + py_off[j];
                                 for (long long i = 0; i < cx; i++)
                                 {
-                                        long long px = x0 + (x1 - x0) * (2 * i + 1) / (2 * cx), py = y0 + (y1 - y0) * (2 * j + 1) / (2 * cy);
-                                        unsigned int c = compositor_wall[py * compositor_wall_w + px];
-
-                                        red += c >> 16 & 255, green += c >> 8 & 255, blue += c & 255, taps++;
+                                        unsigned int c = wrow[px[i]];
+                                        red += c >> 16 & 255, green += c >> 8 & 255, blue += c & 255;
                                 }
-                        compositor_scenes_kept.wall[(unsigned long)y * (unsigned long)w + (unsigned long)x] =
-                            0xff000000u | (red / taps) << 16 | (green / taps) << 8 | blue / taps;
+                        }
+                        if (taps == 16)
+                                dst_row[x] = 0xff000000u | (red >> 4) << 16 | (green >> 4) << 8 | (blue >> 4);
+                        else
+                                dst_row[x] = 0xff000000u | (red / taps) << 16 | (green / taps) << 8 | (blue / taps);
                 }
         }
         compositor_scenes_kept.wall_of = compositor_wall, compositor_scenes_kept.wall_turn = compositor_wall_turn;
