@@ -3595,15 +3595,21 @@ static int __attribute__((unused)) compositor_records_run(const unsigned int *op
 
                         if (op[0] & ~0x1fu)
                                 return -1;
-                        if (w > 0 && h > 0 && target_clip(t, x0, y0, w, h, &x2, &y2, &x3, &y3))
+                        if (w > 0 && h > 0 && (op[5] >> 24) && target_clip(t, x0, y0, w, h, &x2, &y2, &x3, &y3))
                         {
-                                compositor_reading(t);
-                                for (int py = y2; py < y3; py++)
-                                {
-                                        unsigned int *into = t->pixels + (unsigned long)(py - t->oy) * t->pitch + (unsigned long)(x2 - t->ox);
+                                unsigned int tone = op[5];
+                                unsigned long span = (unsigned long)(x3 - x2);
 
-                                        for (int px = x2; px < x3; px++, into++)
-                                                *into = compositor_over_pixel(*into, op[5]);
+                                if ((tone >> 24) == 255u)
+                                {
+                                        for (int py = y2; py < y3; py++)
+                                                memory_fill_u32(t->pixels + (unsigned long)(py - t->oy) * t->pitch + (unsigned long)(x2 - t->ox), span, tone);
+                                }
+                                else
+                                {
+                                        compositor_reading(t);
+                                        for (int py = y2; py < y3; py++)
+                                                memory_over_tone_u32(t->pixels + (unsigned long)(py - t->oy) * t->pitch + (unsigned long)(x2 - t->ox), span, tone);
                                 }
                         }
                         continue;

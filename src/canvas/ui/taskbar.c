@@ -1042,7 +1042,7 @@ static int taskbar_moon_tick(positive now, int launcher)
                 if (step != taskbar.moon_step)
                         taskbar.moon_step = step, taskbar.moon_turn = (b64)(step % period) * UI_ONE / (b64)period, changed = 1;
         }
-        ui_kit.now = ui_kit_clock(), ui_kit.motion = !taskbar.glides;
+        ui_kit.now = (b64)now, ui_kit.motion = !taskbar.glides;
         for (int at = 0; at < WINDOWS_OUTPUTS; at++)
         {
                 struct ui_tween address_to grow = &taskbar_bands[at].grow;
