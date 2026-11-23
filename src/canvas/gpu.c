@@ -1610,11 +1610,14 @@ static const struct gpu_backend *const gpu_backends[] = {&gpu_amd, &gpu_i915_row
 static const struct gpu_backend *gpu_backend = &gpu_amd; // the card's driver: the picked node's (amdgpu's until a start picks one: a check's fake card is amdgpu's)
 
 // The generations the processor composes faster than the card, whose card path is off unless canvas gpu is said on (the compositor's compositor_gpu_slower):
-// i915's Gen7 and Gen7.5, Ivy Bridge, Valleyview and Haswell. Their aliasing PPGTT has the card compose into a shadow that the present waits for
-// (gpu_needs_shadow_output), and on a Haswell HD 4600 (0x0412) the card's present measured 21.6 to 44.9 ms (up to 180) where the processor's was 0.27 to 0.34 ms.
+// none. Gen7 and Gen7.5 were (715dc66e7: a shadow the present waited for, a scene of four-pixel threads, the card at its least clock; a Haswell HD 4600's
+// present 21.6 to 44.9 ms against the processor's 0.27 to 0.34 ms). With the tile kernel, the imports floating and the clock held (17678f1ac) the card's
+// present is 2.1 to 2.6 ms and the loop's, its processor time, 76 to 171 us against the processor's present of 307 to 522 us on the lab's Ivy Bridge and
+// Haswell parts, and the compositor's processor time less than half.
 static b32 gpu_slower(const struct gpu_backend *backend, unsigned int family)
 {
-        return backend == &gpu_i915_row && family >= 700 && family < 800;
+        (void)backend, (void)family;
+        return false;
 }
 
 static const struct gpu_backend *gpu_backend_of(const char *name)
