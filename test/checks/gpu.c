@@ -1697,10 +1697,12 @@ static void gpu_i915_rows(void)
                                                                          run.flags == GPU_I915_RUN && run.rsvd1 == gpu.ctx) &&
                           buffer[1024 + 4] == 0);
                 memory_copy(objects, gpu_kernel.i915_objects, 3 * sizeof(objects[0]));
-                check("gpu i915: every buffer pinned at the address the table gave it, written only where bound written, the card's own buffer last",
+                check("gpu i915: every buffer pinned at the address the table gave it, written only where bound written, the card's own buffer (the batch) last "
+                      "and never asked written (i915 refuses a written batch with EINVAL on every generation)",
                       objects[0].handle == 40 && objects[0].offset == GPU_VA_MAPS && objects[0].flags == (GPU_I915_PINNED | GPU_I915_WIDE) &&
                           objects[1].handle == 41 && objects[1].offset == GPU_VA_MAPS + 8192 && objects[1].flags == (GPU_I915_PINNED | GPU_I915_WIDE | GPU_I915_WRITTEN) &&
-                          objects[2].handle == handle && objects[2].offset == GPU_VA && (objects[2].flags & GPU_I915_WRITTEN) && !objects[2].relocation_count);
+                          objects[2].handle == handle && objects[2].offset == GPU_VA && objects[2].flags == (GPU_I915_PINNED | GPU_I915_WIDE) &&
+                          !objects[2].relocation_count);
                 bos[1] = 42;
                 check("gpu i915: a buffer the table never bound is refused as our own (ENOENT), not sent", gpu_i915_submit(&job, bos, 2, &sequence) == 2 &&
                       gpu_kernel.i915_execs == execs + 1);

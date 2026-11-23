@@ -290,6 +290,10 @@ static long gpu_kernel_i915(unsigned int request, void *a)
                 memory_copy(gpu_kernel.i915_objects, (void *)longs[0], (words[2] < 8 ? words[2] : 8) * 56ull);
                 if (gpu_kernel.i915_exec_error)
                         return -gpu_kernel.i915_exec_error;
+                // eb_add_vma, every generation: the batch (the last object, the first under I915_EXEC_BATCH_FIRST) asked written is EINVAL
+                // ("Attempting to use self-modifying batch buffer").
+                if (words[2] && (*(p64 *)((p8 *)longs[0] + 56ull * ((longs[5] & (1ull << 16)) ? 0 : words[2] - 1) + 32) & 4ull))
+                        return -22;
                 if (request == 0xc0406469u && (longs[5] & (1ull << 17)))
                         gpu_kernel.i915_fence_fd = (int)system_call_2(syscall(eventfd2), 0, 0x80000), longs[7] = (p64)(unsigned int)gpu_kernel.i915_fence_fd << 32;
                 return 0;

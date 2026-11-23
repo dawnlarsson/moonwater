@@ -1252,12 +1252,10 @@ static unsigned int gpu_i915_submit(const struct gpu_job *job, p64 *bos, unsigne
                     .flags = GPU_I915_PINNED | wide | (gpu_i915.bound[handle].written ? GPU_I915_WRITTEN : 0)};
                 n++;
         }
-        // Gen7/7.5 (Ivy Bridge, Valleyview, Haswell): i915's command parser (eb_parse) rejects EXEC_OBJECT_WRITE on the
-        // batch BO itself with EINVAL; omit GPU_I915_WRITTEN on main for family < 800 (FENCE_OUT / GEM_WAIT still sync it).
-        gpu_i915.objects[n++] = (struct gpu_i915_object){
-            .handle = gpu_i915.main,
-            .offset = GPU_VA,
-            .flags = GPU_I915_PINNED | wide | (gpu.family < 800 ? 0 : GPU_I915_WRITTEN)};
+        // The card's own buffer holds the batch, and i915 refuses a batch asked written on every generation (eb_add_vma: "Attempting to use
+        // self-modifying batch buffer", EINVAL), so it is never asked written: the job's sync_file and GEM_WAIT (which waits for every fence of the
+        // buffer, reads too) are what the processor waits on before it reads what the card drew there.
+        gpu_i915.objects[n++] = (struct gpu_i915_object){.handle = gpu_i915.main, .offset = GPU_VA, .flags = GPU_I915_PINNED | wide};
         run.buffers_ptr = (p64)gpu_i915.objects, run.buffer_count = n, run.batch_start_offset = (unsigned int)(job->packets - GPU_VA), run.batch_len = 4 * words;
         run.flags |= gpu_i915.fence ? GPU_I915_FENCE_OUT : 0, run.rsvd1 = gpu.ctx;
         if ((e = gpu_raw(gpu.fd, gpu_i915.fence ? GPU_I915_EXECBUFFER2_WR : GPU_I915_EXECBUFFER2, &run)) != 0)
