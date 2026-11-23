@@ -1253,6 +1253,62 @@ EOF
         fi
 fi
 
+#       A userptr buffer named in a card job (a picture the compositor reads
+#       in place: a client's shared-memory pool, a page of its own) had its
+#       pages taken again at every submission: amdgpu_cs_parser_bos faults
+#       the whole range in (hmm_range_fault, a walk of every page table entry
+#       under it into a fresh array) and compares each page with the ones
+#       bound, at every frame the compositor composes, for a window whose
+#       pages never moved. Under vkcube and a 1 kHz mouse a quarter of the
+#       box's compositor loop was that walk (hmm_vma_walk_pmd, vm_normal_page,
+#       pte_to_hmm_pfn_flags), some 150 us a frame in front of the card.
+#       The pages can only have moved if the buffer's MMU notifier fired, and
+#       the submission already checks, under the notifier lock, that it has
+#       not since the pages were taken (amdgpu_hmm_range_valid). So the
+#       sequence at which that check found a buffer's pages current is kept
+#       on the buffer, and a submission that finds the notifier not fired
+#       since (mmu_interval_check_retry, a load and a compare) takes no walk
+#       and gives that sequence to the same check under the lock: a notifier
+#       that fired in between still sends the submission back (-EAGAIN) to
+#       walk. A buffer whose pages are not populated walks as before.
+cs=linux/drivers/gpu/drm/amd/amdgpu/amdgpu_cs.c
+amdgpu_obj=linux/drivers/gpu/drm/amd/amdgpu/amdgpu_object.h
+if [ -f "$cs" ] && [ -f "$amdgpu_obj" ]; then
+        cat > "$settings_work/userptr-field" <<EOF
+${tab}/* Moonwater: the notifier sequence at which a submission last found this userptr BO's pages current (amdgpu_cs.c). */
+${tab}unsigned long${tab}${tab}${tab}userptr_seq;
+${tab}bool${tab}${tab}${tab}${tab}userptr_seq_set;
+EOF
+        settings_insert "$amdgpu_obj" "Moonwater: the notifier sequence at which a submission last found" \
+                "${tab}struct mmu_interval_notifier${tab}notifier;" after "$settings_work/userptr-field" "userptr sequence"
+        cat > "$settings_work/userptr-skip" <<EOF
+#ifdef CONFIG_MMU_NOTIFIER
+${tab}${tab}/* Moonwater: pages a submission found current and no notifier fired since: no walk; the check under the lock decides. */
+${tab}${tab}if (bo->userptr_seq_set && ttm_tt_is_populated(bo->tbo.ttm) &&
+${tab}${tab}    !mmu_interval_check_retry(&bo->notifier, bo->userptr_seq)) {
+${tab}${tab}${tab}e->range->hmm_range.notifier = &bo->notifier;
+${tab}${tab}${tab}e->range->hmm_range.notifier_seq = bo->userptr_seq;
+${tab}${tab}${tab}e->user_invalidated = false;
+${tab}${tab}${tab}continue;
+${tab}${tab}}
+#endif
+
+EOF
+        settings_insert "$cs" "Moonwater: pages a submission found current and no notifier fired since" \
+                "${tab}${tab}r = amdgpu_ttm_tt_get_user_pages(bo, e->range);" before "$settings_work/userptr-skip" "userptr walk skipped"
+        cat > "$settings_work/userptr-keep" <<EOF
+#ifdef CONFIG_MMU_NOTIFIER
+${tab}${tab}/* Moonwater: the pages current at this sequence, as this check under the notifier lock found them. */
+${tab}${tab}if (amdgpu_hmm_range_valid(e->range)) {
+${tab}${tab}${tab}e->bo->userptr_seq = e->range->hmm_range.notifier_seq;
+${tab}${tab}${tab}e->bo->userptr_seq_set = true;
+${tab}${tab}}
+#endif
+EOF
+        settings_insert "$cs" "Moonwater: the pages current at this sequence" \
+                "${tab}${tab}r |= !amdgpu_hmm_range_valid(e->range);" after "$settings_work/userptr-keep" "userptr sequence kept"
+fi
+
 #       A kernel built without device coredump (ALLOW_DEV_COREDUMP is off in
 #       debug_none, as "for more sensitive systems ... not to have the code,
 #       nor keep any data") answers the MediaTek Bluetooth driver's registration

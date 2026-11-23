@@ -573,6 +573,20 @@ static void compositor_record_report(void)
         compositor_record_put_text("late         "), compositor_record_put_number(late), compositor_record_put_text(" presents more than 25 ms after the one before\n");
         compositor_record_put_text("lists        "), compositor_record_put_number(lists), compositor_record_put_text(" drawn from lists, ");
         compositor_record_put_number(lists_refused), compositor_record_put_text(" refused\n");
+        // What the compositor measures of its input while it runs (it says the same at its exit): from the device's stamp of a report to the plane
+        // moved, to the frame that shows it, and a key to the window that has the keys.
+        {
+                static const char *const names[3] = {"pointer to the plane ", "pointer to the frame ", "key to the window    "};
+
+                for (unsigned int w = 0; w < 3; w++)
+                {
+                        unsigned long long n = compositor.latency[w].count;
+
+                        compositor_record_put_text("latency      "), compositor_record_put_text(names[w]), compositor_record_put_number(n);
+                        compositor_record_put_text(", on average "), compositor_record_put_number(n ? compositor.latency[w].total / n / 1000 : 0);
+                        compositor_record_put_text(" us, worst "), compositor_record_put_number(compositor.latency[w].worst / 1000), compositor_record_put_text(" us\n");
+                }
+        }
         if (compositor_record_until)
         {
                 compositor_record_put_text("recording    running, "), compositor_record_put_number(compositor_record_frames), compositor_record_put_text(" presents so far of ");

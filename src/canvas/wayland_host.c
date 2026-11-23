@@ -6108,40 +6108,54 @@ static void compositor_wl_drain(int row)
         frame is drawn, so no event waits for it; everything queued is sent.
 */
 #define COMPOSITOR_WL_KEEP_NS 16000000ull
+#define COMPOSITOR_WL_SWEEP_NS 4000000ull // the turn's end looks at the screens, the hints and the scales at most this often
 static positive compositor_wl_kept_at; // when compositor_wl_wake last looked at the screens, the hints and the scales
 
 static void compositor_wl_wake(void)
 {
         struct wayland_stats stats;
+        static unsigned int swept_stack, swept_layout, swept_rows;
+        positive now;
+        b32 sweep;
 
         if (!compositor_wl.started)
                 return;
         // A slingshot turn (a locked pointer's counts and nothing else: compositor_sling_only) has no end, and its input's send
         // (compositor_wl_wake_input) makes this whole once a frame (COMPOSITOR_WL_KEEP_NS) and not at each of the hand's 8000 reports a second.
-        compositor_wl_kept_at = clock_monotonic_nanoseconds();
+        // Every other turn's end ran the sweeps below whole too: the screens' digest, the idle clock, every row's hints and every row's scale
+        // and screen, each a walk of the rows through the host, at each of a mouse's thousand reports a second, for what changes when a
+        // window moves, a screen changes or a client says so. They are made at most every COMPOSITOR_WL_SWEEP_NS, and at once when the stack,
+        // the screens or the rows changed; what a report needs (the woken rows, the keys' and the pointer's windows, the flush) is each turn's.
+        now = clock_monotonic_nanoseconds();
+        sweep = !compositor_wl_kept_at || now - compositor_wl_kept_at >= COMPOSITOR_WL_SWEEP_NS || compositor.stack_gen != swept_stack ||
+                compositor.layout != swept_layout || compositor_rows_in_use != swept_rows;
         wayland_stats_get(&stats);
-        // The screens: a scale, a mode, a place or a turn is told to every client whole, and each window the scale of its screen.
+        if (sweep)
         {
-                static unsigned int screens_layout;
-                static int screens_scale;
-                static positive screens_period;
-                if (compositor.layout != screens_layout || compositor.scale != screens_scale || compositor.period != screens_period || !compositor_wl.screens_told)
+                compositor_wl_kept_at = now, swept_stack = compositor.stack_gen, swept_layout = compositor.layout, swept_rows = compositor_rows_in_use;
+                // The screens: a scale, a mode, a place or a turn is told to every client whole, and each window the scale of its screen.
                 {
-                        unsigned long digest = compositor_wl_screens_digest();
-                        screens_layout = compositor.layout, screens_scale = compositor.scale, screens_period = compositor.period;
-                        if (digest != compositor_wl.screens_told)
+                        static unsigned int screens_layout;
+                        static int screens_scale;
+                        static positive screens_period;
+                        if (compositor.layout != screens_layout || compositor.scale != screens_scale || compositor.period != screens_period || !compositor_wl.screens_told)
                         {
-                                compositor_wl.screens_told = digest;
-                                wayland_screens_changed();
+                                unsigned long digest = compositor_wl_screens_digest();
+                                screens_layout = compositor.layout, screens_scale = compositor.scale, screens_period = compositor.period;
+                                if (digest != compositor_wl.screens_told)
+                                {
+                                        compositor_wl.screens_told = digest;
+                                        wayland_screens_changed();
+                                }
                         }
                 }
+                wayland_idle_tick();
+                if (compositor_wl_tiled_now() != compositor_wl.dmabuf_tiled)
+                        compositor_wl_dmabuf_refresh();
+                compositor_wl_table();
+                if (stats.rows > 0)
+                        wayland_scales_sweep();
         }
-        wayland_idle_tick();
-        if (compositor_wl_tiled_now() != compositor_wl.dmabuf_tiled)
-                compositor_wl_dmabuf_refresh();
-        compositor_wl_table();
-        if (stats.rows > 0)
-                wayland_scales_sweep();
         for (int row = rows_next(&compositor.woken, 0); row >= 0; row = rows_next(&compositor.woken, row + 1))
                 if (wayland_row_owner(row) >= 0)
                         compositor_wl_drain(row);

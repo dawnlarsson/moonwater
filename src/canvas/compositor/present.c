@@ -1150,7 +1150,9 @@ static int compositor_wall_making(void)
 
 static positive compositor_wall_due(positive now)
 {
-        if (compositor_space_all_fullscreen())
+        // A window shown straight covers the wallpaper: its moon's step (a picture drawn on the processor, on threads of its own) is not
+        // made while nobody can see it, and comes once when the window goes (compositor_wall_keep).
+        if (compositor_space_all_fullscreen() || compositor.direct_row >= 0)
                 return 0;
         if (compositor_wall_deferred && compositor.presented)
                 return now;
@@ -1232,7 +1234,7 @@ static void compositor_wall_keep(void)
                 if (compositor_wall)
                 {
                         positive clock = clock_monotonic_nanoseconds();
-                        if (taskbar_motion_about(clock))
+                        if (compositor.direct_row < 0 && taskbar_motion_about(clock))
                         {
                                 positive step = compositor_wall_step_now();
                                 if (step != compositor_wall_stepped)
