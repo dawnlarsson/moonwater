@@ -2789,7 +2789,6 @@ struct canvas_scan_fb_result
 
 static unsigned int canvas_scan_fb_make(const struct canvas_scan_fb_spec *spec, struct canvas_scan_fb_result *out)
 {
-        static const char *const amd[] = {"amdgpu"}, *const intel[] = {"i915", "xe"};
         struct { unsigned int handle, flags; int fd; } prime;
         struct
         {
@@ -2811,7 +2810,7 @@ static unsigned int canvas_scan_fb_make(const struct canvas_scan_fb_spec *spec, 
         fb.width = spec->width, fb.height = spec->height, fb.pixel_format = fourcc;
         if (spec->linear)
         {
-                unsigned int align = compositor_driver_in(amd, 1) ? 255u : compositor_driver_in(intel, 2) ? 63u : 0u;
+                unsigned int align = (compositor.driver_flags & DRV_AMD) ? 255u : (compositor.driver_flags & DRV_INTEL) ? 63u : 0u;
 
                 fb.pitches[0] = spec->pitches[0], fb.offsets[0] = spec->offsets[0];
                 if (spec->modifier != CANVAS_MODIFIER_INVALID)

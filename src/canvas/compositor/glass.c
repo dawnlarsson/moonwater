@@ -983,14 +983,14 @@ static void compositor_glass_pass(struct compositor_frame *frames, const unsigne
         }
 }
 
-static void compositor_close_mean_read(struct compositor_frame *frame)
+static int compositor_close_mean_read(struct compositor_frame *frame)
 {
         int bx, by, side, touched = 0, step;
         unsigned long sum[3] = {0, 0, 0}, count = 0;
         const unsigned int *picture;
 
         if (!compositor_close_box(frame, &bx, &by, &side))
-                return;
+                return 0;
         for (unsigned int at = 0; at < compositor.damages && !touched; at++)
         {
                 int box[4] = {bx, by, bx + side, by + side};
@@ -999,7 +999,7 @@ static void compositor_close_mean_read(struct compositor_frame *frame)
                 touched = box[2] > box[0] && box[3] > box[1];
         }
         if (!touched)
-                return;
+                return 1;
         picture = compositor_scaled(frame) ? 0 : frame->pixels;
         // Stride by 4 when reading write-combined client dma-bufs to cut uncached PCIe reads 16x with identical lightness mean.
         step = frame->gpu_base ? 4 : 1;
@@ -1016,7 +1016,7 @@ static void compositor_close_mean_read(struct compositor_frame *frame)
                 }
         }
         if (!count)
-                return;
+                return 1;
         if (frame->swap)
         {
                 unsigned long red = sum[2];
@@ -1024,6 +1024,7 @@ static void compositor_close_mean_read(struct compositor_frame *frame)
                 sum[2] = sum[0], sum[0] = red;
         }
         frame->close_mean = (unsigned int)(sum[0] / count << 16 | sum[1] / count << 8 | sum[2] / count);
+        return 1;
 }
 
 /*
@@ -1054,13 +1055,13 @@ static int compositor_ink_side_next(int previous, unsigned int mean, unsigned in
 
 static void compositor_close_mean(struct compositor_frame *frame)
 {
-        int row = frame->row_plus1 - 1, bx, by, side;
+        int row = frame->row_plus1 - 1, has_box;
 
         frame->close_mean = ~0u; // the sentinel: the read sets the mean only when it makes one this present
-        compositor_close_mean_read(frame);
+        has_box = compositor_close_mean_read(frame);
         if (row >= 0 && row < (int)WINDOWS)
         {
-                if (!compositor_close_box(frame, &bx, &by, &side))
+                if (!has_box)
                         compositor_close_side[row] = 0;
                 else if (frame->close_mean != ~0u)
                         compositor_close_side[row] = (unsigned char)compositor_ink_side_next(compositor_close_side[row], frame->close_mean, COMPOSITOR_INK_MARGIN);

@@ -2347,13 +2347,13 @@ static b32 compositor_main()
 #endif
                 if (compositor.probe_owed && turns++ && !compositor_card.on && !rows_any(&compositor_card.list_rows))
                         compositor.probe_owed = 0, compositor_space_retake();
-                held = compositor_card_clients_held(clock_monotonic_nanoseconds());
+                now = clock_monotonic_nanoseconds();
+                held = compositor_card_clients_held(now);
                 if (!wanted) { positive nap[2] = {0, 10000000}; compositor_call(syscall(nanosleep), (positive)nap, 0, 0, 0, 0, 0); continue; }
                 compositor_loop_wanted(wanted, &slots, held);
                 if (slots.count > COMPOSITOR_POLLS_FOR(compositor_rows_in_use))
                         { compositor_say("the poll list ran past its count, entries", (bipolar)slots.count); break; }
 
-                now = clock_monotonic_nanoseconds();
                 if (compositor.flip_pending && compositor_flip_lost(now)) compositor_flip_done(), compositor_damage_space();
                 until = compositor_timers_arm(now, slots.fence_at, held);
 #ifdef CONFIG_MOONWATER_WAYLAND
