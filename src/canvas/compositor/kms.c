@@ -2267,9 +2267,6 @@ static void compositor_cursor_async_sync(int active, int hot_x, int hot_y, int i
                 compositor_cursor_async.active = 0;
 }
 
-#ifdef CONFIG_MOONWATER_WAYLAND
-static void compositor_wl_direct_abs(int x, int y, positive now);
-#endif
 HOT static void compositor_cursor_async_put(int nx, int ny, positive now);
 HOT static void compositor_cursor_async_step(long dx, long dy, positive now)
 {

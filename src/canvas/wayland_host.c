@@ -5009,10 +5009,6 @@ static struct
         unsigned char ptr_ver[COMPOSITOR_WL_DIRECT_IDS];
         unsigned long *ptr_serial;
         int ptr_valid;
-        // Unlocked fullscreen direct wl_pointer.motion target.
-        int abs_valid, abs_slot, abs_fd, abs_row, abs_x, abs_y, abs_w, abs_h;
-        long abs_scale120, abs_ptrs, abs_framed;
-        unsigned int abs_ptr_ids[COMPOSITOR_WL_DIRECT_IDS], abs_frames[COMPOSITOR_WL_DIRECT_IDS];
         unsigned int rest_length; // bytes of the reader's last send the socket did not take
         int rest_slot;            // the client they are for
         unsigned char rest[COMPOSITOR_WL_DIRECT_IDS * 128];
@@ -5025,15 +5021,14 @@ static struct
         unsigned char keys_refused[32];
         // Dirty-check snapshot so steady-state loop turns never spin on `lock`.
         unsigned int pub_valid, pub_gen;
-        int pub_locked, pub_hold_row, pub_key_row, pub_kb_row, pub_ptr_row, pub_focus, pub_drag, pub_resize, pub_chip, pub_fs, pub_ov, pub_keys_to;
+        int pub_locked, pub_hold_row, pub_key_row, pub_kb_row, pub_ptr_row, pub_focus, pub_drag, pub_resize, pub_chip, pub_ov, pub_keys_to;
         unsigned int pub_mods, pub_stack_gen, pub_binds, pub_assist, pub_cycle, pub_keys_any;
-        int pub_ax, pub_ay, pub_aw, pub_ah;
         // The focused page (compositor_wl_focus_name): the row whose owner's page the pointer's reports may go to (the window that
         // holds the pointer locked, as the reader's own sends take it), and the thread group named for it now, with the row it was
         // named for and the reports the pages had taken when the loop last looked.
         int focus_row, focus_named_row;
         unsigned int focus_claim, focus_named, focus_seen;
-} compositor_wl_direct = {.slot = -1, .fd = -1, .row = -1, .abs_slot = -1, .abs_fd = -1, .abs_row = -1, .rest_slot = -1, .keys_slot = -1, .keys_fd = -1, .keys_row = -1,
+} compositor_wl_direct = {.slot = -1, .fd = -1, .row = -1, .rest_slot = -1, .keys_slot = -1, .keys_fd = -1, .keys_row = -1,
                           .focus_row = -1, .focus_named_row = -1};
 
 static void compositor_wl_direct_hold(void)
@@ -5054,13 +5049,12 @@ static void compositor_wl_direct_release(void)
 // The loop, holding the lock: what the reader sends to made again from the shim as it is now (nothing, when no client holds it locked).
 static void compositor_wl_direct_make(void)
 {
-        unsigned int was = __atomic_load_n(&compositor_spark_want, __ATOMIC_RELAXED);
         long slot;
 
-        compositor_wl_direct.valid = compositor_wl_direct.ptr_valid = compositor_wl_direct.abs_valid = 0;
+        compositor_wl_direct.valid = compositor_wl_direct.ptr_valid = 0;
         compositor_wl_direct.focus_row = -1;
         if (!compositor_reader.on || !compositor_wl.started)
-                goto sync_spark;
+                return;
         if (compositor_wl_locked())
         {
                 int row = compositor_wl.hold_row;
@@ -5086,38 +5080,6 @@ static void compositor_wl_direct_make(void)
                 if (slot >= 0 && slot < compositor_wl.slots && compositor_wl.fd[slot] >= 0 && compositor.drag < 0 && compositor.resize < 0 &&
                     !compositor.assist_armed && !compositor.cycle && !compositor_input_override_query(row))
                         compositor_wl_direct.focus_row = row;
-        }
-        else if (compositor.focus >= 0 && compositor.fullscreen[compositor.focus] && compositor.focus == wayland.pointer_row &&
-                 compositor.drag < 0 && compositor.resize < 0 && !compositor.assist_armed && !compositor.cycle &&
-                 !compositor.chip.kind && !compositor_input_override_query(compositor.focus) &&
-                 (compositor_space_is_fs_row(compositor.focus) ||
-                  (compositor.stacked > 0 && compositor.stack[compositor.stacked - 1] == compositor.focus)))
-        {
-                int row = compositor.focus;
-                unsigned char dummy_ver[COMPOSITOR_WL_DIRECT_IDS];
-
-                slot = wayland_pointer_direct_ptrs(row, compositor_wl_direct.abs_ptr_ids, dummy_ver, &compositor_wl_direct.abs_ptrs,
-                                                   compositor_wl_direct.abs_frames, &compositor_wl_direct.abs_framed, COMPOSITOR_WL_DIRECT_IDS,
-                                                   &compositor_wl_direct.abs_scale120, 0) - 1;
-                if (slot >= 0 && slot < compositor_wl.slots && compositor_wl.fd[slot] >= 0 && compositor_wl_direct.abs_ptrs > 0)
-                {
-                        compositor_wl_direct.abs_slot = (int)slot, compositor_wl_direct.abs_fd = compositor_wl.fd[slot], compositor_wl_direct.abs_row = row;
-                        compositor_wl_direct.abs_x = compositor.x[row], compositor_wl_direct.abs_y = compositor.y[row];
-                        compositor_wl_direct.abs_w = (int)compositor.w[row], compositor_wl_direct.abs_h = (int)compositor.h[row];
-                        compositor_wl_direct.abs_valid = 1;
-                }
-        }
-sync_spark:
-        if (was != (unsigned int)(compositor_wl_direct.valid || compositor_wl_direct.abs_valid))
-        {
-                unsigned int want = (unsigned int)(compositor_wl_direct.valid || compositor_wl_direct.abs_valid);
-                __atomic_store_n(&compositor_spark_want, want, __ATOMIC_RELEASE);
-                if (compositor_reader.wake >= 0)
-                {
-                        unsigned long long one = 1;
-
-                        system_write_once(compositor_reader.wake, &one, sizeof one);
-                }
         }
 }
 
@@ -5222,7 +5184,7 @@ static void compositor_wl_focus_name(void)
 
 static void compositor_wl_direct_publish(void)
 {
-        int locked, hold_row, key_row, kb_row, ptr_row, focus, drag, resize, chip, fs, ov, keys_to, ax = 0, ay = 0, aw = 0, ah = 0;
+        int locked, hold_row, key_row, kb_row, ptr_row, focus, drag, resize, chip, ov, keys_to;
         unsigned int mods, keys_any = 0, gen = compositor_wl.direct_gen ^ wayland.seat_gen ^ (unsigned int)(wayland_dragging() ? 0x80000000u : 0u);
 
         if (!compositor_reader.on)
@@ -5233,7 +5195,6 @@ static void compositor_wl_direct_publish(void)
         kb_row = compositor_wl.started ? (int)wayland.keyboard_row : -1;
         ptr_row = compositor_wl.started ? (int)wayland.pointer_row : -1;
         focus = compositor.focus;
-        fs = focus >= 0 ? (int)compositor.fullscreen[focus] : 0;
         drag = compositor.drag, resize = compositor.resize, chip = (int)compositor.chip.kind;
         ov = key_row >= 0 ? compositor_input_override_query(key_row) : (focus >= 0 ? compositor_input_override_query(focus) : 0);
         mods = compositor_modifiers();
@@ -5241,20 +5202,16 @@ static void compositor_wl_direct_publish(void)
         if (keys_to != key_row)
                 for (unsigned int k = 0; k < sizeof compositor.keys_down; k++)
                         if (compositor.keys_down[k]) { keys_any = 1; break; }
-        if (focus >= 0 && fs)
-                ax = compositor.x[focus], ay = compositor.y[focus], aw = (int)compositor.w[focus], ah = (int)compositor.h[focus];
         if (compositor_wl_direct.pub_valid && compositor_wl_direct.pub_gen == gen &&
             compositor_wl_direct.pub_locked == locked && compositor_wl_direct.pub_hold_row == hold_row &&
             compositor_wl_direct.pub_key_row == key_row && compositor_wl_direct.pub_kb_row == kb_row &&
             compositor_wl_direct.pub_ptr_row == ptr_row && compositor_wl_direct.pub_focus == focus &&
-            compositor_wl_direct.pub_fs == fs && compositor_wl_direct.pub_drag == drag &&
+            compositor_wl_direct.pub_drag == drag &&
             compositor_wl_direct.pub_resize == resize && compositor_wl_direct.pub_chip == chip &&
             compositor_wl_direct.pub_ov == ov && compositor_wl_direct.pub_mods == mods &&
             compositor_wl_direct.pub_keys_to == keys_to && compositor_wl_direct.pub_keys_any == keys_any &&
             compositor_wl_direct.pub_stack_gen == compositor.stack_gen && compositor_wl_direct.pub_binds == compositor_keys.count &&
-            compositor_wl_direct.pub_assist == compositor.assist_armed && compositor_wl_direct.pub_cycle == (unsigned int)compositor.cycle &&
-            compositor_wl_direct.pub_ax == ax && compositor_wl_direct.pub_ay == ay &&
-            compositor_wl_direct.pub_aw == aw && compositor_wl_direct.pub_ah == ah)
+            compositor_wl_direct.pub_assist == compositor.assist_armed && compositor_wl_direct.pub_cycle == (unsigned int)compositor.cycle)
         {
                 compositor_wl_focus_name();
                 return;
@@ -5265,12 +5222,11 @@ static void compositor_wl_direct_publish(void)
         compositor_wl_direct.pub_valid = 1, compositor_wl_direct.pub_gen = gen;
         compositor_wl_direct.pub_locked = locked, compositor_wl_direct.pub_hold_row = hold_row;
         compositor_wl_direct.pub_key_row = key_row, compositor_wl_direct.pub_kb_row = kb_row, compositor_wl_direct.pub_ptr_row = ptr_row;
-        compositor_wl_direct.pub_focus = focus, compositor_wl_direct.pub_fs = fs, compositor_wl_direct.pub_drag = drag;
+        compositor_wl_direct.pub_focus = focus, compositor_wl_direct.pub_drag = drag;
         compositor_wl_direct.pub_resize = resize, compositor_wl_direct.pub_chip = chip, compositor_wl_direct.pub_ov = ov;
         compositor_wl_direct.pub_mods = mods, compositor_wl_direct.pub_keys_to = keys_to, compositor_wl_direct.pub_keys_any = keys_any;
         compositor_wl_direct.pub_stack_gen = compositor.stack_gen, compositor_wl_direct.pub_binds = compositor_keys.count;
         compositor_wl_direct.pub_assist = compositor.assist_armed, compositor_wl_direct.pub_cycle = (unsigned int)compositor.cycle;
-        compositor_wl_direct.pub_ax = ax, compositor_wl_direct.pub_ay = ay, compositor_wl_direct.pub_aw = aw, compositor_wl_direct.pub_ah = ah;
         compositor_wl_direct_release();
         compositor_wl_focus_name();
 }
@@ -5493,49 +5449,9 @@ static int compositor_wl_direct_send(long dx, long dy, positive micro)
         return compositor_wl_direct_send_packet(dx, dy, 0, 0, 0, 0, micro, 0, 0);
 }
 
-// Unlocked fullscreen direct wl_pointer.motion + wl_pointer.frame from the SCHED_FIFO reader thread.
-HOT static void compositor_wl_direct_abs(int x, int y, positive now)
-{
-        unsigned char bytes[COMPOSITOR_WL_DIRECT_IDS * 28];
-        unsigned int length = 0, time_ms;
-        long sx, sy;
-
-        if (!__atomic_load_n(&compositor_wl_direct.abs_valid, __ATOMIC_RELAXED))
-                return;
-        if (!compositor_wl_direct_try())
-                return;
-        if (!compositor_wl_direct.abs_valid || compositor_wl_direct.rest_length ||
-            x < compositor_wl_direct.abs_x || y < compositor_wl_direct.abs_y ||
-            x >= compositor_wl_direct.abs_x + compositor_wl_direct.abs_w || y >= compositor_wl_direct.abs_y + compositor_wl_direct.abs_h)
-        {
-                __atomic_store_n(&compositor_wl_direct.lock, 0u, __ATOMIC_RELEASE);
-                return;
-        }
-        sx = wayland_fixed_of(x - compositor_wl_direct.abs_x, compositor_wl_direct.abs_scale120);
-        sy = wayland_fixed_of(y - compositor_wl_direct.abs_y, compositor_wl_direct.abs_scale120);
-        time_ms = (unsigned int)(now / 1000000ull);
-        for (long at = 0; at < compositor_wl_direct.abs_ptrs; at++)
-        {
-                unsigned int words[5] = {compositor_wl_direct.abs_ptr_ids[at], 20u << 16 | 2u, time_ms, (unsigned int)sx, (unsigned int)sy};
-
-                memory_copy(bytes + length, words, sizeof words);
-                length += sizeof words;
-        }
-        for (long at = 0; at < compositor_wl_direct.abs_framed; at++)
-        {
-                unsigned int words[2] = {compositor_wl_direct.abs_frames[at], 8u << 16 | 5u};
-
-                memory_copy(bytes + length, words, sizeof words);
-                length += sizeof words;
-        }
-        compositor_wl_direct_bytes(compositor_wl_direct.abs_slot, compositor_wl_direct.abs_fd, bytes, length);
-        __atomic_store_n(&compositor_wl_direct.lock, 0u, __ATOMIC_RELEASE);
-}
-
 static int compositor_wl_direct_clean(void)
 {
-        return (!compositor_wl_direct.valid || !wayland_out_dirty(compositor_wl_direct.slot)) &&
-               (!compositor_wl_direct.abs_valid || !wayland_out_dirty(compositor_wl_direct.abs_slot));
+        return !compositor_wl_direct.valid || !wayland_out_dirty(compositor_wl_direct.slot);
 }
 
 // The loop, holding the lock, before the client's own queue: the rest of the reader's send, which goes first. 0 when it is not all out.
@@ -5560,8 +5476,6 @@ static void compositor_wl_drop(long slot)
         compositor_wl_direct_hold();
         if (compositor_wl_direct.slot == slot)
                 compositor_wl_direct.valid = compositor_wl_direct.ptr_valid = 0;
-        if (compositor_wl_direct.abs_slot == slot)
-                compositor_wl_direct.abs_valid = 0;
         if (compositor_wl_direct.keys_slot == slot)
                 compositor_wl_direct.keys_valid = 0;
         if (compositor_wl_direct.rest_slot == slot)
@@ -5708,7 +5622,6 @@ static void compositor_wl_flush(long slot)
         // Only the socket the input thread sends to is shared with it; a hold it does not know of yet is made known at the next send.
         if (!compositor_reader.on || ((compositor_wl_direct.valid ? compositor_wl_direct.slot != slot : !compositor_wl_locked()) &&
                                       (compositor_wl_direct.keys_valid ? compositor_wl_direct.keys_slot != slot : wayland.keyboard_row < 0) &&
-                                      (!compositor_wl_direct.abs_valid || compositor_wl_direct.abs_slot != slot) &&
                                       compositor_wl_direct.rest_slot != slot))
         {
                 compositor_wl_flush_held(slot);

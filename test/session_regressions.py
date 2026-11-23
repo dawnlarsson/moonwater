@@ -655,10 +655,10 @@ def test_compositor_and_xwm_invariants():
           "if (pushed && was_empty && wq_has_sleeper(&spark_input_wait))" in read_text("src/moonwater/moonwater.c"))
     check("Direct-socket unlocked motion avoids duplicate wl_pointer.motion from async HW cursor step",
           "compositor_wl_direct_abs(nx, ny, now)" not in kms)
-    check("Dirty-checked direct publish tracks dragging, seat_gen on release, and abs_valid clean",
+    check("Dirty-checked direct publish tracks dragging and seat_gen on release; no unlocked direct target is left",
           "compositor_wl_direct.pub_valid && compositor_wl_direct.pub_gen == gen" in wlh and
           "wayland_dragging()" in wlh and "wayland.seat_gen++" in read_text("src/canvas/wayland.c") and
-          "compositor_wl_direct.abs_valid = 0" in wlh and "compositor_wl.direct_gen++" in wlh)
+          "abs_valid" not in wlh and "compositor_wl.direct_gen++" in wlh)
     check("Spark OOB guards in input.c: reader_put, SYN_DROPPED, EV_ABS, EV_KEY, input_gone",
           "record->at < COMPOSITOR_INPUTS ?" in inp and
           "if (is_spark)\n                                        compositor.held[COMPOSITOR_INPUTS] = 0;" in inp and
@@ -1167,9 +1167,8 @@ def test_hardening_66_bug_families():
           "if (s->role != WAYLAND_ROLE_NONE || s->xsurface || (s->flags & WAYLAND_SURFACE_XDG))" in wl_c and
           "return wayland_surface_link(c, a[0].slot, s), WAYLAND_OK;" in wl_c)
 
-    check("Family 3: compositor_wl_unmap & compositor_wl_close drop subsurface layers and compositor_wl_flush checks abs_valid",
-          wlh_c.count("compositor_wl_layers_drop(row);") >= 3 and
-          "(!compositor_wl_direct.abs_valid || compositor_wl_direct.abs_slot != slot)" in wlh_c)
+    check("Family 3: compositor_wl_unmap & compositor_wl_close drop subsurface layers",
+          wlh_c.count("compositor_wl_layers_drop(row);") >= 3)
 
     # Structural scan: EVERY struct wayland_table in struct compositor_xwm must be dropped in compositor_xwm_close_rows
     m_xwm_struct = re.search(r"struct compositor_xwm\s*\{(.*?)\n\};", xwm_c, re.S)

@@ -4348,7 +4348,6 @@ static b32 compositor_reader_owed(void)
         return compositor_reader.gone_owing != 0;
 }
 
-static unsigned int compositor_spark_want;
 // The reader's /dev/spark, the direct ring's owner, and that ring: the loop names the focused page's thread group on it
 // (compositor_wl_focus_name) and reads the reports the page took (focus_seen) as input seen.
 static int compositor_spark_fd = -1;
