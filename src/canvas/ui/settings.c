@@ -4707,11 +4707,16 @@ static fn settings_describe_item(int id, const struct settings_item address_to i
                         row->turn = settings_fold_turn(id), row->expander = settings_exp_get(id) ? UI_ROW_EXPANDER_OPEN : UI_ROW_EXPANDER_SHUT,
                         row->columns = settings_columns_for(3), row->cells[1] = st, row->value = st;
                         // Its grants are checks in their cells (the kit's cell_check, turned in place: settings_managed), each on where the
-                        // machine may; a grant this machine allows none is no check here, as its switch under the fold says so.
+                        // machine may; a grant this machine allows none is a dim check, off, and a press on it says so (settings_link_grant_flip).
                         for (int part = 0; part < 4; part++)
-                                if (settings_link_global_grants & 1u << part)
-                                        row->cell_check |= 1u << (SETTINGS_LINK_GRANT_COLUMN + part),
-                                        row->cell_on |= (item->grants & 1u << part) ? 1u << (SETTINGS_LINK_GRANT_COLUMN + part) : 0;
+                        {
+                                unsigned int cell = 1u << (SETTINGS_LINK_GRANT_COLUMN + part);
+                                row->cell_check |= cell;
+                                if (!(settings_link_global_grants & 1u << part))
+                                        row->cell_dim |= cell;
+                                else if (item->grants & 1u << part)
+                                        row->cell_on |= cell;
+                        }
                         row->remove = true; // a machine linked is taken out by its button, asking first (settings_forget_item: link remove)
                 }
         }

@@ -6917,6 +6917,18 @@ static fn check_settings_actions(void)
                                 check("settings lists: a machine linked's grants are checks in their columns, and a check a hand turns is link allow",
                                       cells && virtual_kept && turned);
                                 settings.queued = 0, settings.item[3][0].grants &= (unsigned char)~4u;
+                                // A grant this machine allows none (shell, off globally) is a dim check, off, and a hand's press on it asks nothing.
+                                {
+                                        b32 dimmed;
+                                        settings_link_global_grants = 0x0bu;
+                                        memory_zero(&linked, sizeof(linked)), settings_describe(link_row, &linked);
+                                        dimmed = linked.cell_check == grants && linked.cell_dim == 4u << SETTINGS_LINK_GRANT_COLUMN && !(linked.cell_on & 4u << SETTINGS_LINK_GRANT_COLUMN);
+                                        settings.hand = true;
+                                        settings.list.toggled = link_row + 1, settings.list.toggled_cell = SETTINGS_LINK_GRANT_COLUMN + 2, settings_managed();
+                                        settings.hand = false, settings_link_global_grants = 0x0fu;
+                                        check("settings lists: a grant this machine allows none is a dim check in a machine's row, and a press on it changes nothing",
+                                              dimmed && settings.queued == 0 && !(settings.item[3][0].grants & 4u));
+                                }
                                 memory_zero(&linked, sizeof(linked)), settings_describe(link_row, &linked);
                         }
                         settings.list.removed = link_row + 1, settings_managed();
