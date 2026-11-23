@@ -442,16 +442,18 @@ enum { SETTINGS_ABOUT_BRAND = 0, SETTINGS_ABOUT_DISCORD = 1, SETTINGS_ABOUT_GITH
 #define SETTINGS_GPU_SAMPLES 10
 #define SETTINGS_METRIC_NS 10000000000ll
 enum { SETTINGS_SUB_COPY = 0u, SETTINGS_SUB_DISMISS_ALL = 1u, SETTINGS_SUB_PARTITIONS = 2u, SETTINGS_SUB_PARTITION = 3u, SETTINGS_SUB_LINK_GRANT = 4u, SETTINGS_SUB_LINK_INFO = 5u };
-static const struct { const char address_to word; unsigned int label, note; } settings_link_grants[4] = {
+#define SETTINGS_LINK_GRANTS 5
+static const struct { const char address_to word; unsigned int label, note; } settings_link_grants[SETTINGS_LINK_GRANTS] = {
     {"files", LANGUAGE_settings_link_files, LANGUAGE_settings_link_files_about},
     {"run",   LANGUAGE_settings_link_run,   LANGUAGE_settings_link_run_about},
     {"shell", LANGUAGE_settings_link_shell, LANGUAGE_settings_link_shell_about},
     {"log",   LANGUAGE_settings_link_log,   LANGUAGE_settings_link_log_about},
+    {"pad",   LANGUAGE_settings_link_pad,   LANGUAGE_settings_link_pad_about},
 };
 // A machine linked is a row of columns: its name, its address, latency, traffic and group, and from SETTINGS_LINK_GRANT_COLUMN a check of each
 // grant in the order above. No fold: all it says is in its row, and its state is its dot (online) and its words (an offline one dim).
 #define SETTINGS_LINK_GRANT_COLUMN 5
-#define SETTINGS_LINK_COLUMNS (SETTINGS_LINK_GRANT_COLUMN + 4)
+#define SETTINGS_LINK_COLUMNS (SETTINGS_LINK_GRANT_COLUMN + SETTINGS_LINK_GRANTS)
 _Static_assert(SETTINGS_LINK_COLUMNS <= UI_COLUMNS_MOST, "a machine linked's columns are the kit's at most");
 // What a linked machine's state says, by the item's link_state (0 says none): the words of the language taken, said when the row is drawn.
 enum { SETTINGS_LINK_ONLINE = 1, SETTINGS_LINK_OFFLINE = 2, SETTINGS_LINK_MISMATCH = 3 };
@@ -481,7 +483,7 @@ static char (address_to settings_drives_open)[SETTINGS_ITEM_LABEL];
 static positive settings_drives_open_room;
 static char (address_to settings_links_open)[SETTINGS_ITEM_LABEL];
 static positive settings_links_open_room;
-static unsigned char settings_link_global_grants = 0x0fu;
+static unsigned char settings_link_global_grants = (1u << SETTINGS_LINK_GRANTS) - 1;
 
 /* The folds are the kit's (ui_list_fold): it keeps a key's open state and share, below UI_LIST_FOLD_MOST. A fold's share is applied by the
    kit to the row whose id is the key, so Settings' folds are keys that no row has: the lines under a row (its children) fold on the key of the
@@ -731,7 +733,7 @@ static fn settings_sub_describe(int at, struct ui_row address_to row)
                 row->reveal = settings_fold_reveal(sub->owner);
                 return;
         }
-        if (sub->action == SETTINGS_SUB_LINK_GRANT && sub->part >= 0 && sub->part < 4)
+        if (sub->action == SETTINGS_SUB_LINK_GRANT && sub->part >= 0 && sub->part < SETTINGS_LINK_GRANTS)
         {
                 const struct settings_item address_to item = settings_item(sub->owner);
                 unsigned char bit = (unsigned char)(1u << sub->part);
@@ -2695,7 +2697,7 @@ static unsigned char settings_link_parse_grants(const char address_to text, posi
                 positive start = at;
                 while (at < size && text[at] != ' ' && text[at] != ',') at++;
                 positive len = at - start;
-                for (int k = 0; len && k < 4; k++)
+                for (int k = 0; len && k < SETTINGS_LINK_GRANTS; k++)
                         if (string_length((string_address)settings_link_grants[k].word) == len &&
                             !memory_compare(text + start, settings_link_grants[k].word, len))
                                 mask |= (unsigned char)(1u << k);
@@ -2891,7 +2893,7 @@ static fn settings_feed_links(void)
                         if (!it) continue;
                         sc_trim_at(&c, "  next:");
                         it->kind = SETTINGS_LINK, it->where = 0, it->flags = self_on ? SETTINGS_ITEM_JOINED : 0;
-                        it->grants = 0x0fu;
+                        it->grants = (1u << SETTINGS_LINK_GRANTS) - 1;
                         if ((allow_at = settings_find_last(c.s, c.n, "  allow ")) < c.n)
                         {
                                 it->grants = settings_link_parse_grants(c.s + allow_at + 8, c.n - allow_at - 8);
@@ -3126,9 +3128,10 @@ static struct ui_columns address_to settings_columns_for(int list)
             {4, 3, {0, 84, 84, 72},   {LANGUAGE_files_column_name, LANGUAGE_settings_column_status, LANGUAGE_settings_column_security, LANGUAGE_settings_column_signal}},
             {2, 1, {0, 100, 0, 0},    {LANGUAGE_files_column_name, LANGUAGE_settings_column_status, 0, 0}},
             {4, 3, {0, 108, 84, 128}, {LANGUAGE_files_column_name, 0, LANGUAGE_settings_column_status, LANGUAGE_settings_column_access}},
-            {SETTINGS_LINK_COLUMNS, 0, {0, 150, 72, 100, 72, 52, 52, 52, 52},
+            {SETTINGS_LINK_COLUMNS, 0, {0, 150, 72, 100, 72, 52, 52, 52, 52, 52},
              {LANGUAGE_files_column_name, LANGUAGE_settings_link_address, LANGUAGE_settings_link_latency, LANGUAGE_settings_link_traffic,
-              LANGUAGE_settings_link_group, LANGUAGE_settings_column_files, LANGUAGE_settings_column_run, LANGUAGE_settings_column_shell, LANGUAGE_settings_column_log}},
+              LANGUAGE_settings_link_group, LANGUAGE_settings_column_files, LANGUAGE_settings_column_run, LANGUAGE_settings_column_shell, LANGUAGE_settings_column_log,
+              LANGUAGE_settings_column_pad}},
             // The startup list's: a program (or a command), its command, and a check that starts it; its order is the person's (no sort).
             {SETTINGS_STARTUP_COLUMNS, 0, {0, 220, 52}, {LANGUAGE_settings_startup_program, LANGUAGE_settings_startup_command, LANGUAGE_settings_column_on}},
         };
@@ -4246,7 +4249,7 @@ static fn settings_link_grant_flip(struct settings_item address_to item, int par
 {
         unsigned char bit;
         b32 allow;
-        if (!item || item->kind != SETTINGS_LINK || part < 0 || part >= 4)
+        if (!item || item->kind != SETTINGS_LINK || part < 0 || part >= SETTINGS_LINK_GRANTS)
                 return;
         bit = (unsigned char)(1u << part);
         if (item->where == 0)
@@ -4746,7 +4749,7 @@ static fn settings_describe_item(int id, const struct settings_item address_to i
                 row->cells[4] = item->link_group[0] ? item->link_group : null;
                 row->value = row->cells[1];
                 row->dim = !self && item->link_state == SETTINGS_LINK_OFFLINE;
-                for (int part = 0; part < 4; part++)
+                for (int part = 0; part < SETTINGS_LINK_GRANTS; part++)
                 {
                         unsigned int cell = 1u << (SETTINGS_LINK_GRANT_COLUMN + part);
                         row->cell_check |= cell;

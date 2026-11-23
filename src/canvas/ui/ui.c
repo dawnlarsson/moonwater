@@ -6752,6 +6752,7 @@ LANGUAGE_ID(settings_column_access, "Access") \
 LANGUAGE_ID(settings_column_files, "Files") \
 LANGUAGE_ID(settings_column_log, "Log") \
 LANGUAGE_ID(settings_column_on, "On") \
+LANGUAGE_ID(settings_column_pad, "Pad") \
 LANGUAGE_ID(settings_column_run, "Run") \
 LANGUAGE_ID(settings_column_security, "Security") \
 LANGUAGE_ID(settings_column_shell, "Shell") \
@@ -6815,6 +6816,8 @@ LANGUAGE_ID(settings_link_mismatch, "Key mismatch") \
 LANGUAGE_ID(settings_link_no_key, "no key yet") \
 LANGUAGE_ID(settings_link_offline, "Offline") \
 LANGUAGE_ID(settings_link_online, "Online") \
+LANGUAGE_ID(settings_link_pad, "Game pads") \
+LANGUAGE_ID(settings_link_pad_about, "Play its game pads here, as if plugged in") \
 LANGUAGE_ID(settings_link_run, "Run commands") \
 LANGUAGE_ID(settings_link_run_about, "Execute single remote commands") \
 LANGUAGE_ID(settings_link_self, "this machine") \

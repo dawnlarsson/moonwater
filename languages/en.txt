@@ -291,6 +291,7 @@ settings_column_access	ae0b	Access
 settings_column_files	1b30	Files
 settings_column_log	7bf1	Log
 settings_column_on	7df0	On
+settings_column_pad	ff4a	Pad
 settings_column_run	e66a	Run
 settings_column_security	21db	Security
 settings_column_shell	69a1	Shell
@@ -354,6 +355,8 @@ settings_link_mismatch	5778	Key mismatch
 settings_link_no_key	9963	no key yet
 settings_link_offline	37c8	Offline
 settings_link_online	88aa	Online
+settings_link_pad	09db	Game pads
+settings_link_pad_about	4f2f	Play its game pads here, as if plugged in
 settings_link_run	9874	Run commands
 settings_link_run_about	ba14	Execute single remote commands
 settings_link_self	bc70	this machine

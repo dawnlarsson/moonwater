@@ -17,6 +17,7 @@
 # machine-made 2026-11-23 (a linked machine that did not answer, or does not offer a request), not yet read by a person: files_remote_silent files_remote_unsupported
 # machine-made 2026-11-23 (the Accessibility rows), not yet read by a person: =Accessibility =Sticky keys =Slow keys (ms, off or default) =Bounce keys (ms, off or default) =Mouse keys =Dwell click (ms, off or default) =Press a modifier, then the key, instead of both at once =A key types only after it is held this long =A key pressed again too soon after it is let go types once =The number pad moves the pointer and clicks =Hold the pointer still to click
 # machine-made 2026-11-23 (the bluetooth pads), not yet read by a person: settings_bt_find_keys settings_bt_listening settings_bt_near_keys settings_bt_paired settings_bt_paired_keys settings_bt_pairing =Find devices nearby
+# machine-made 2026-11-23 (Waterlink's pad grant), not yet read by a person: settings_column_pad settings_link_pad settings_link_pad_about
 @language nl
 @name Nederlands
 @translated machine
@@ -310,6 +311,7 @@ settings_column_access	ae0b	Toegang
 settings_column_files	1b30	Bestanden
 settings_column_log	7bf1	Logboek
 settings_column_on	7df0	Aan
+settings_column_pad	ff4a	Controller
 settings_column_run	e66a	Uitvoeren
 settings_column_security	21db	Beveiliging
 settings_column_shell	69a1	Shell
@@ -373,6 +375,8 @@ settings_link_mismatch	5778	Sleutel komt niet overeen
 settings_link_no_key	9963	nog geen sleutel
 settings_link_offline	37c8	Offline
 settings_link_online	88aa	Online
+settings_link_pad	09db	Controllers
+settings_link_pad_about	4f2f	Zijn controllers hier gebruiken, alsof ze aangesloten zijn
 settings_link_run	9874	Opdrachten uitvoeren
 settings_link_run_about	ba14	Losse opdrachten op afstand uitvoeren
 settings_link_self	bc70	deze machine

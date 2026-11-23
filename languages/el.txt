@@ -17,6 +17,7 @@
 # machine-made 2026-11-23 (a linked machine that did not answer, or does not offer a request), not yet read by a person: files_remote_silent files_remote_unsupported
 # machine-made 2026-11-23 (the Accessibility rows), not yet read by a person: =Accessibility =Sticky keys =Slow keys (ms, off or default) =Bounce keys (ms, off or default) =Mouse keys =Dwell click (ms, off or default) =Press a modifier, then the key, instead of both at once =A key types only after it is held this long =A key pressed again too soon after it is let go types once =The number pad moves the pointer and clicks =Hold the pointer still to click
 # machine-made 2026-11-23 (the bluetooth pads), not yet read by a person: settings_bt_find_keys settings_bt_listening settings_bt_near_keys settings_bt_paired settings_bt_paired_keys settings_bt_pairing =Find devices nearby
+# machine-made 2026-11-23 (Waterlink's pad grant), not yet read by a person: settings_column_pad settings_link_pad settings_link_pad_about
 @language el
 @name Ελληνικά
 @translated machine
@@ -310,6 +311,7 @@ settings_column_access	ae0b	Πρόσβαση
 settings_column_files	1b30	Αρχεία
 settings_column_log	7bf1	Καταγραφή
 settings_column_on	7df0	Ενεργό
+settings_column_pad	ff4a	Χειριστήριο
 settings_column_run	e66a	Εκτέλεση
 settings_column_security	21db	Ασφάλεια
 settings_column_shell	69a1	Κέλυφος
@@ -373,6 +375,8 @@ settings_link_mismatch	5778	Το κλειδί δεν ταιριάζει
 settings_link_no_key	9963	δεν υπάρχει ακόμη κλειδί
 settings_link_offline	37c8	Εκτός σύνδεσης
 settings_link_online	88aa	Σε σύνδεση
+settings_link_pad	09db	Χειριστήρια
+settings_link_pad_about	4f2f	Χρήση των χειριστηρίων του εδώ, σαν να ήταν συνδεδεμένα
 settings_link_run	9874	Εκτέλεση εντολών
 settings_link_run_about	ba14	Εκτέλεση μεμονωμένων απομακρυσμένων εντολών
 settings_link_self	bc70	αυτό το μηχάνημα

@@ -6758,7 +6758,8 @@ static fn check_settings_actions(void)
                         actions_press(UI_POINTER_LEFT, (settings.page.left + settings.page.right) / 2, my, 0);
                         actions_show(link_row);
                         link_details = !described.expander && described.cells[1] && string_equals((string_address)described.cells[1], (string_address) "10.0.0.2:41900") &&
-                                       described.cell_check == 0xfu << SETTINGS_LINK_GRANT_COLUMN && settings.list.count == before;
+                                       described.cell_check == ((1u << SETTINGS_LINK_GRANTS) - 1) << SETTINGS_LINK_GRANT_COLUMN &&
+                                       settings.list.count == before;
                 }
                 settings.queued = 0;
                 actions_press(UI_POINTER_RIGHT, x, y, 0);
@@ -6797,7 +6798,7 @@ static fn check_settings_actions(void)
                                         off_k = SETTINGS_LINK_GRANT_COLUMN + 3;
                         positive accent = 0;
 
-                        settings.queued = 0, ui_confirm_drop(&settings.confirm), settings_link_global_grants = 0x0fu;
+                        settings.queued = 0, ui_confirm_drop(&settings.confirm), settings_link_global_grants = (1u << SETTINGS_LINK_GRANTS) - 1;
                         settings_rebuild();
                         actions_show(link_row);
                         at = settings_pos(link_row), bx = ui_cell_check_x(&settings.ui, c, on_k), by = ui_list_row_y(&settings.list, at) + (settings.list.tall[at] - side) / 2;
@@ -6859,9 +6860,9 @@ static fn check_settings_actions(void)
                         //      Its grants are checks in their columns, on where the machine may (zeta: run files), and a check turned is the
                         //      grant's verb, a hand's only (allowing is deliberate); its state is the Status column.
                         {
-                                unsigned int grants = 0xfu << SETTINGS_LINK_GRANT_COLUMN, on = 0x3u << SETTINGS_LINK_GRANT_COLUMN;
+                                unsigned int grants = ((1u << SETTINGS_LINK_GRANTS) - 1) << SETTINGS_LINK_GRANT_COLUMN, on = 0x3u << SETTINGS_LINK_GRANT_COLUMN;
                                 b32 cells, virtual_kept, turned;
-                                settings_link_global_grants = 0x0fu; // this machine allows every grant
+                                settings_link_global_grants = (1u << SETTINGS_LINK_GRANTS) - 1; // this machine allows every grant
                                 memory_zero(&linked, sizeof(linked)), settings_describe(link_row, &linked);
                                 cells = linked.cell_check == grants && linked.cell_on == on && linked.cells[1] &&
                                         string_equals((string_address)linked.cells[1], (string_address) "10.0.0.2:41900") && !linked.expander;
@@ -6879,12 +6880,12 @@ static fn check_settings_actions(void)
                                 // A grant this machine allows none (shell, off globally) is a dim check, off, and a hand's press on it asks nothing.
                                 {
                                         b32 dimmed;
-                                        settings_link_global_grants = 0x0bu;
+                                        settings_link_global_grants = ((1u << SETTINGS_LINK_GRANTS) - 1) & ~4u;
                                         memory_zero(&linked, sizeof(linked)), settings_describe(link_row, &linked);
                                         dimmed = linked.cell_check == grants && linked.cell_dim == 4u << SETTINGS_LINK_GRANT_COLUMN && !(linked.cell_on & 4u << SETTINGS_LINK_GRANT_COLUMN);
                                         settings.hand = true;
                                         settings.list.toggled = link_row + 1, settings.list.toggled_cell = SETTINGS_LINK_GRANT_COLUMN + 2, settings_managed();
-                                        settings.hand = false, settings_link_global_grants = 0x0fu;
+                                        settings.hand = false, settings_link_global_grants = (1u << SETTINGS_LINK_GRANTS) - 1;
                                         check("settings lists: a grant this machine allows none is a dim check in a machine's row, and a press on it changes nothing",
                                               dimmed && settings.queued == 0 && !(settings.item[3][0].grants & 4u));
                                 }
