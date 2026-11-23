@@ -1005,6 +1005,7 @@ static void compositor_notices_open(int x, int y) { compositor_popup_trigger("no
 static struct windows_issues compositor_notices_copy;
 static unsigned int compositor_notices_seq;
 
+static int compositor_ctl_ready(positive now); // below, with the volume's control socket
 static int compositor_notices_look(void)
 {
         unsigned int seq, count = 0, worst;
