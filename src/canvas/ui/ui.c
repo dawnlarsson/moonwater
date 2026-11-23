@@ -22717,6 +22717,8 @@ struct ui_row
         int order;                         // an ordered group (non-zero): the rows of one, in the list's order, are the person's to rearrange by the grip at
                                            // each one's start, a drag or Alt+Up and Alt+Down (ui_list.moved); 0 a row that stays where the app puts it
         b32 remove;                        // a remove button at the row's end, and Delete while the keys are on it (ui_list.removed)
+        unsigned int cell_check;           // under columns: the cells (bit k, column k, 1 on) that are a check the person presses in place (ui_list.toggled)
+        unsigned int cell_on;              // which of those checks are on
         int badge;                         // UI_ROW_BADGE_* at the row's right (left of a switch): the worst issue its option has, 0 none
         const char address_to badge_words; // what that badge says
         b32 sub;                           // a line under its option (an issue, its detail, a status): indented, in the quiet ink
@@ -22802,6 +22804,7 @@ enum ui_list_grab
         UI_LIST_GRAB_CHORD,       // band ended, waiting for remaining chord button release
         UI_LIST_GRAB_LIFT,        // an ordered row lifted by its grip, following the hand (ui_list.lift)
         UI_LIST_GRAB_REMOVE,      // a row's remove button pressed, acted on if let go on it (ui_list.remove_down)
+        UI_LIST_GRAB_CELL,        // a cell's check pressed, turned if let go on it (ui_list.cell_down)
 };
 
 struct ui_list
@@ -22876,8 +22879,9 @@ struct ui_list
         b32 moved;                         // an ordered row moved: from its place among its group's rows to another, both counted from 0
         int moved_from, moved_to, moved_order;
         int removed;                       // the row (plus one) whose remove button was pressed, or Delete
+        int toggled, toggled_cell;         // the row (plus one) one of whose cells' checks was pressed, and its column (ui_row.cell_check)
         // The kit's: the row (plus one) lifted by its grip, where the hand holds it (its top, device pixels from the list's) and the place it would land.
-        int lift, lift_y, lift_grab, lift_to, remove_down;
+        int lift, lift_y, lift_grab, lift_to, remove_down, cell_down, cell_down_k;
 };
 
 #define UI_LIST_STRIPE_INK 0x0d       // the alpha of the ink a striped row is tinted with in dark mode (about 5 percent)
@@ -24254,7 +24258,81 @@ static fn ui_row_label_about(struct ui address_to ui, struct ui_row_parts addres
 #define UI_INDENT 16 // logical pixels a tree's row is set in by for each level
 
 // A row as cells: under a list's columns its label under the first title and each of its cells under its own, cut...
-static fn ui_list_cells(struct ui address_to ui, const struct ui_list address_to l, const struct ui_columns address_to c,
+static b32 ui_row_columned(const struct ui_row address_to row) { return row->columns && row->columns->count > 1; }
+
+// The column of a row a point across the list is in (its cell, 0 the label's), -1 when the row has no columns or the point none.
+static int ui_list_cell_at(const struct ui_list address_to l, int id, int x)
+{
+        struct ui_row row;
+        const struct ui_columns address_to c;
+        int px;
+        if (id < 0 || !l->describe)
+                return -1;
+        ui_list_describe(l, id, &row);
+        if (!ui_row_columned(&row) || (c = row.columns)->w <= 0)
+                return -1;
+        px = ui_point(x, c->x, c->w);
+        for (int k = 0; k < c->count && k < UI_COLUMNS_MOST; k++)
+                if (px >= c->at[k] && px < c->at[k] + ui_columns_end(c, k))
+                        return k;
+        return -1;
+}
+
+// A cell's check: a box UI_CELL_CHECK logical pixels a side in the middle of its cell's words' room, read from the left; and its target,
+// the box and UI_CELL_CHECK_REACH round it, so a hand need not find the box itself.
+#define UI_CELL_CHECK 18
+#define UI_CELL_CHECK_REACH 8
+static int ui_cell_check_x(const struct ui address_to ui, const struct ui_columns address_to c, int k)
+{
+        int pad = ui_dev(ui, UI_INSET), gap = ui_dev(ui, 8), x = c->at[k] + (k ? gap : pad), w = ui_columns_end(c, k) - (k ? gap : pad) - (k == c->count - 1 ? pad : gap);
+        return x + (w - ui_dev(ui, UI_CELL_CHECK)) / 2;
+}
+
+// The check of a row's cells a point across the list is on (its column), -1 none.
+static int ui_list_check_at(const struct ui address_to ui, const struct ui_list address_to l, int id, int x)
+{
+        struct ui_row row;
+        const struct ui_columns address_to c;
+        int px, k, from, side = ui_dev(ui, UI_CELL_CHECK), reach = ui_dev(ui, UI_CELL_CHECK_REACH);
+        if (id < 0 || !l->describe)
+                return -1;
+        ui_list_describe(l, id, &row);
+        if (!row.cell_check || !ui_row_columned(&row) || (c = row.columns)->w <= 0)
+                return -1;
+        px = ui_point(x, c->x, c->w);
+        for (k = 0; k < c->count && k < UI_COLUMNS_MOST; k++)
+                if ((row.cell_check >> k & 1u) && px >= (from = ui_cell_check_x(ui, c, k)) - reach && px < from + side + reach &&
+                    px >= c->at[k] && px < c->at[k] + ui_columns_end(c, k))
+                        return k;
+        return -1;
+}
+
+// A cell's check: off, a square ring in the quiet ink (the ink under the hand); on, filled in the accent with a tick in the ink on it;
+// held, the accent toward the ink, pressed in. Its corners a little round, as a box to tick is.
+static fn ui_cell_check_draw(struct ui address_to ui, int x, int y, int side, b32 on, b32 over, b32 held, b32 dim, unsigned int ink, unsigned int quiet)
+{
+        int r = ui_dev(ui, 3);
+        unsigned int accent = ui_role(UI_PRIMARY) | 0xff000000u;
+        struct ui_box box = {x * 256, y * 256, (x + side) * 256, (y + side) * 256, r * 256, r * 256};
+        if (held)
+                accent = ui_mix(accent, 75, ink | 0xff000000u);
+        if (dim)
+                accent = ui_mix(accent, 45, 0), ink = ui_mix(ink | 0xff000000u, 45, 0), quiet = ui_mix(quiet | 0xff000000u, 45, 0);
+        if (!on)
+        {
+                ui_kit_ring(ui, &box, ui_q8(ui, 2), (over || held ? ink : quiet) | 0xff000000u);
+                return;
+        }
+        ui_kit_fill(ui, &box, accent, null);
+        {
+                unsigned int tick = ui_role(UI_ON_PRIMARY) | 0xff000000u;
+                int width = ui_kit_measure(ui, (string_address) "\xe2\x9c\x93", UI_LABEL_MEDIUM);
+                ui_kit_text(ui, x + (side - width) / 2, ui_kit_baseline(ui, y + (side - ui_dev(ui, 20)) / 2, UI_LABEL_MEDIUM), (string_address) "\xe2\x9c\x93",
+                            UI_LABEL_MEDIUM, tick, 0);
+        }
+}
+
+static fn ui_list_cells(struct ui address_to ui, const struct ui_list address_to l, int id, const struct ui_columns address_to c,
                         const struct ui_row address_to row, int y, int height, unsigned int ink, unsigned int quiet, int trailing_w)
 {
         int pad = ui_dev(ui, UI_INSET), gap = ui_dev(ui, 8);
@@ -24306,6 +24384,17 @@ static fn ui_list_cells(struct ui address_to ui, const struct ui_list address_to
                         int sig_w = ui_signal_width(ui), sx = ui_mirror(x + w - sig_w, sig_w, left, span);
                         ui_signal(ui, sx + sig_w, y + height / 2, row->bars);
                         w -= sig_w + ui_dev(ui, 6);
+                }
+                // A check in place of words: the person turns it with a press (ui_list.toggled).
+                if (c && (row->cell_check >> k & 1u))
+                {
+                        int side = ui_dev(ui, UI_CELL_CHECK), bx = ui_cell_check_x(ui, c, k);
+                        b32 held = l->cell_down == id + 1 && l->cell_down_k == k;
+                        b32 over = l->hover == id && ui_list_check_at(ui, l, id, l->pointer_x) == k;
+                        if (side <= ui_columns_end(c, k))
+                                ui_cell_check_draw(ui, ui_mirror(bx, side, left, span), y + (height - side) / 2, side, (row->cell_on >> k & 1u) != 0, over, held,
+                                                   row->dim, ink, quiet);
+                        continue;
                 }
                 if (!words || !words[0] || w <= 0)
                         continue;
@@ -24363,7 +24452,10 @@ static fn ui_list_columns_fit(struct ui address_to ui, struct ui_list address_to
                 ui_columns_need(ui, c, 0, row.label, ui_dev(ui, UI_INDENT) * row.indent + (row.expander ? ui_dev(ui, UI_INDENT) : 0) +
                                                       (row.mark ? ui_dev(ui, 14) : 0) + (row.file ? ui_dev(ui, UI_FILE_ROW_ICON + 8) : 0));
                 for (int k = 1; k < c->count; k++)
-                        ui_columns_need(ui, c, k, row.cells[k], k == c->count - 1 ? ui_dev(ui, one) + (row.bars > 0 ? ui_signal_width(ui) + ui_dev(ui, 6) : 0) : 0);
+                        if (row.cell_check >> k & 1u)
+                                ui_columns_need(ui, c, k, "", ui_dev(ui, UI_CELL_CHECK) + (k == c->count - 1 ? ui_dev(ui, one) : 0));
+                        else
+                                ui_columns_need(ui, c, k, row.cells[k], k == c->count - 1 ? ui_dev(ui, one) + (row.bars > 0 ? ui_signal_width(ui) + ui_dev(ui, 6) : 0) : 0);
         }
         c->trailing_min = need;
 }
@@ -24397,10 +24489,11 @@ static fn ui_columns_squeeze_pre(int address_to wide, const int address_to mins,
 static fn ui_columns_need(const struct ui address_to ui, struct ui_columns address_to c, int k, const char address_to words, int extra)
 {
         int pads, need;
-        if (!c || k < 0 || k >= UI_COLUMNS_MOST || !words || !words[0] || !ui->regular || ui->scale <= 0)
+        // Words of none with room of their own (a cell's check) need that room and the pads.
+        if (!c || k < 0 || k >= UI_COLUMNS_MOST || !words || (!words[0] && extra <= 0) || !ui->regular || ui->scale <= 0)
                 return;
         pads = (k ? ui_dev(ui, 8) : ui_dev(ui, UI_INSET)) + (k == c->count - 1 ? ui_dev(ui, UI_INSET) : ui_dev(ui, 8));
-        need = ((ui_kit_measure(ui, (string_address)words, UI_BODY_MEDIUM) + pads + extra) * 100 + ui->scale - 1) / ui->scale;
+        need = (((words[0] ? ui_kit_measure(ui, (string_address)words, UI_BODY_MEDIUM) : 0) + pads + extra) * 100 + ui->scale - 1) / ui->scale;
         if (need > c->need[k])
                 c->need[k] = need;
 }
@@ -24887,7 +24980,7 @@ static fn ui_list_row(struct ui address_to ui, struct ui_list address_to l, int 
                 if (row.mark && l->selected)
                         ui_kit_fill(ui, &(struct ui_box){across * 256, y * 256, (across + across_w) * 256, (y + height) * 256, 0, 0},
                                     0x38000000u | (ui_role(UI_PRIMARY) & 0xffffffu), null);
-                ui_list_cells(ui, l, cols, &row, row.tall ? y + ui_dev(ui, UI_DRIVE_TOP) : y, row.tall ? ui_drive_part(ui, UI_DRIVE_LINE) : height, ink, quiet, trailing_w);
+                ui_list_cells(ui, l, id, cols, &row, row.tall ? y + ui_dev(ui, UI_DRIVE_TOP) : y, row.tall ? ui_drive_part(ui, UI_DRIVE_LINE) : height, ink, quiet, trailing_w);
                 if (trailing)
                         ui_control_draw(ui, trailing);
                 if (row.tall)
@@ -25326,8 +25419,8 @@ static fn ui_list_press_cancel(const struct ui address_to ui, struct ui_list add
         // A lifted row goes back where it was, and a held remove button does nothing.
         if (l->lift)
                 l->lift = 0, ui_list_damage_all(ui, l);
-        if (l->remove_down)
-                l->remove_down = 0, ui_list_damage_all(ui, l);
+        if (l->remove_down || l->cell_down)
+                l->remove_down = l->cell_down = 0, ui_list_damage_all(ui, l);
         ui_press_cancel(&l->press);
         l->scroll.held = false;
         ui_scroll_let_go(&l->scroll, 0);
@@ -25654,6 +25747,9 @@ static int ui_list_click(struct ui address_to ui, struct ui_list address_to l, c
                                 return ui_list_lift(ui, l, row, y), -1;
                         if (part == 2)
                                 return ui_list_grab_set(l, UI_LIST_GRAB_REMOVE), l->remove_down = row + 1, ui_list_damage(ui, l, row), -1;
+                        // A press on a cell's check holds it till it is let go, as the remove button is held.
+                        if (row >= 0 && (part = ui_list_check_at(ui, l, row, x)) >= 0)
+                                return ui_list_grab_set(l, UI_LIST_GRAB_CELL), l->cell_down = row + 1, l->cell_down_k = part, ui_list_damage(ui, l, row), -1;
                 }
                 if (l->selected && !touch && !(event->flags & (WINDOW_KEY_CONTROL | WINDOW_KEY_SHIFT)) && row >= 0 && l->selected(row))
                 {
@@ -25683,6 +25779,15 @@ static int ui_list_click(struct ui address_to ui, struct ui_list address_to l, c
         }
         if (l->grab == UI_LIST_GRAB_LIFT)
                 return ui_list_lift_end(ui, l, cancelled), -1;
+        if (l->grab == UI_LIST_GRAB_CELL)
+        {
+                int was = l->cell_down - 1, k = l->cell_down_k;
+                ui_list_grab_set(l, UI_LIST_GRAB_NONE), l->cell_down = 0, ui_list_damage(ui, l, was);
+                row = ui_list_hit(ui, l, x, y);
+                if (!cancelled && row == was && ui_list_check_at(ui, l, row, x) == k)
+                        l->toggled = was + 1, l->toggled_cell = k;
+                return -1;
+        }
         if (l->grab == UI_LIST_GRAB_REMOVE)
         {
                 int was = l->remove_down - 1;
@@ -25792,7 +25897,6 @@ static const char address_to ui_row_said(const struct ui_row address_to row, int
         return words && words[0] ? words : null;
 }
 
-static b32 ui_row_columned(const struct ui_row address_to row) { return row->columns && row->columns->count > 1; }
 
 static fn ui_list_row_text(const struct ui_list address_to l, int id, char address_to into, positive room)
 {
@@ -25823,24 +25927,6 @@ static fn ui_list_row_text(const struct ui_list address_to l, int id, char addre
                 if (words)
                         string_append_bounded((string_address)into, (string_address)words, room);
         }
-}
-
-// The column of a row a point across the list is in (its cell, 0 the label's), -1 when the row has no columns or the point none.
-static int ui_list_cell_at(const struct ui_list address_to l, int id, int x)
-{
-        struct ui_row row;
-        const struct ui_columns address_to c;
-        int px;
-        if (id < 0 || !l->describe)
-                return -1;
-        ui_list_describe(l, id, &row);
-        if (!ui_row_columned(&row) || (c = row.columns)->w <= 0)
-                return -1;
-        px = ui_point(x, c->x, c->w);
-        for (int k = 0; k < c->count && k < UI_COLUMNS_MOST; k++)
-                if (px >= c->at[k] && px < c->at[k] + ui_columns_end(c, k))
-                        return k;
-        return -1;
 }
 
 /*
@@ -26775,7 +26861,7 @@ static fn ui_page_pointer(struct ui address_to ui, struct ui_page address_to p, 
         {
                 // A press the list holds (a row's, or a row lifted by its grip, or its remove button held) has its motions and its let go too:
                 // a lift that was not given them stayed where it went up, and a held remove button never let go.
-                b32 held = l->press.down || l->grab == UI_LIST_GRAB_LIFT || l->grab == UI_LIST_GRAB_REMOVE;
+                b32 held = l->press.down || l->grab == UI_LIST_GRAB_LIFT || l->grab == UI_LIST_GRAB_REMOVE || l->grab == UI_LIST_GRAB_CELL;
                 int t0 = held ? 0 : (event->type == WINDOW_EVENT_BUTTON && down && event->a == UI_POINTER_LEFT && !p->press.down ? ui_page_target(ui, p, l, x, y) : -1);
                 if (held ? (event->type == WINDOW_EVENT_MOTION || (event->type == WINDOW_EVENT_BUTTON && event->a == UI_POINTER_LEFT))
                                   : (t0 >= 0 && t0 < UI_PAGE_GROUP))
