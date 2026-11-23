@@ -1822,9 +1822,10 @@ static void compositor_gpu_wake(void)
 // its idle clock woken (gpu_wake: a tiny job, only when it has been idle a while). A refusal is known once the thread has answered the ask.
 static void compositor_gpu_input_turn(positive now)
 {
-        b32 answered = __atomic_load_n(&compositor_gpu_clocks.answered, __ATOMIC_ACQUIRE);
-
-        if (compositor_gpu_clocks.held && answered == compositor_gpu_clocks.asked && __atomic_load_n(&compositor_gpu_clocks.error, __ATOMIC_RELAXED))
+        if (!compositor_gpu_clocks.held && !compositor_gpu_clocks.input)
+                return;
+        if (compositor_gpu_clocks.held && __atomic_load_n(&compositor_gpu_clocks.answered, __ATOMIC_ACQUIRE) == compositor_gpu_clocks.asked &&
+            __atomic_load_n(&compositor_gpu_clocks.error, __ATOMIC_RELAXED))
                 compositor_gpu_clocks.held = 0, compositor_gpu_clocks.refused = 1;
         if (!compositor_gpu_clocks.input)
                 return;

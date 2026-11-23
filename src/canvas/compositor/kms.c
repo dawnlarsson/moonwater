@@ -1768,12 +1768,19 @@ static int compositor_cadence_step(int want, unsigned int hz, positive now)
 
 static void compositor_cadence_keep(void)
 {
+        if (!compositor_cadence.choice && !compositor_cadence.active)
+        {
+                compositor_cadence.steady = 0;
+                compositor_cadence.k = 1;
+                return;
+        }
         unsigned int hz = compositor_cadence.choice < sizeof compositor_cadence_rates ? compositor_cadence_rates[compositor_cadence.choice] : 0;
         int row = compositor.direct_row;
         int want = hz && !(compositor_vrr.capable && compositor_vrr.policy < 2) && compositor_output_count() == 1 && row >= 0 &&
                    compositor_space_is_fs_row(row) && compositor_cadence_game(row);
+        positive now = compositor_cadence.active ? clock_monotonic_nanoseconds() : 0;
 
-        if (compositor_cadence_step(want, hz, clock_monotonic_nanoseconds()))
+        if (compositor_cadence_step(want, hz, now))
                 compositor.probe_owed = 1;
         compositor_cadence.k = compositor_cadence_k(compositor_cadence.active, compositor_cadence.hz, compositor.period);
 }
@@ -1895,10 +1902,22 @@ static void compositor_pointer_now(struct compositor_pointer *p)
                 return;
         }
         // The values are read at the frame the clock is in, so the picture changes once a frame however often a moving hand asks for it.
-        period = compositor.period ? compositor.period : 16000000ull, now = clock_monotonic_nanoseconds() / period * period;
         resize = compositor.cursor.shape >= CP_RESIZE_H && compositor.cursor.shape <= CP_RESIZE_NESW;
-        compositor_sway_to(&compositor.cursor.morph, compositor.cursor.dyn && compositor.cursor.shape == CP_TEXT ? 256 : 0, now);
-        compositor_sway_to(&compositor.cursor.lens, compositor.cursor.dyn && resize ? 256 : 0, now);
+        {
+                int morph_to = compositor.cursor.dyn && compositor.cursor.shape == CP_TEXT ? 256 : 0;
+                int lens_to = compositor.cursor.dyn && resize ? 256 : 0;
+
+                if (compositor.cursor.morph.at || compositor.cursor.lens.at || compositor.cursor.stretch.at ||
+                    compositor.cursor.press.at || morph_to != compositor.cursor.morph.to || lens_to != compositor.cursor.lens.to)
+                {
+                        period = compositor.period ? compositor.period : 16000000ull;
+                        now = clock_monotonic_nanoseconds() / period * period;
+                }
+                else
+                        now = 0;
+                compositor_sway_to(&compositor.cursor.morph, morph_to, now);
+                compositor_sway_to(&compositor.cursor.lens, lens_to, now);
+        }
         morph = compositor_sway_at(&compositor.cursor.morph, now);
         lens = compositor_sway_at(&compositor.cursor.lens, now);
         grow = compositor_sway_at(&compositor.cursor.stretch, now) * CP_DYN_STRETCH >> 8;
