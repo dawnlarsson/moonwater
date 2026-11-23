@@ -990,11 +990,46 @@ static void compositor_button_rect(int x, int y, int which)
         compositor.band_at = 0;
 }
 
+static void compositor_alert_show(int warn, const char *title, const char *message)
+{
+        bipolar child = system_fork();
+
+        if (!title || !title[0] || child < 0)
+                return;
+        if (child == 0)
+        {
+                bipolar grandchild = system_fork();
+                if (grandchild == 0)
+                {
+                        string_address argv[6];
+                        int argc = 0;
+                        bipolar quiet;
+                        system_call(syscall(setsid));
+                        quiet = system_open_at(AT_FDCWD, (string_address) "/dev/null", FILE_READ_WRITE | O_CLOEXEC);
+                        for (positive at = 0; quiet >= 0 && at < 3; at++)
+                                system_call_3(syscall(dup3), (positive)quiet, at, 0);
+                        if (quiet > 2)
+                                system_close(quiet);
+                        argv[argc++] = (string_address) "/notices";
+                        argv[argc++] = (string_address)(warn ? "-W" : "-E");
+                        argv[argc++] = (string_address)title;
+                        if (message && message[0])
+                                argv[argc++] = (string_address)message;
+                        argv[argc] = null;
+                        system_call_3(syscall(execve), (positive)argv[0], (positive)argv, (positive)program_environment_list());
+                        system_call_1(syscall(exit_group), 127);
+                }
+                system_call_1(syscall(exit_group), 0);
+        }
+        (void)system_wait4_retry(child, null, 0, null);
+}
+
 static void compositor_popup_trigger(const char *named, const char *say, int x, int y, int slot)
 {
         if (named && compositor_row_named(named) >= 0)
                 return;
         compositor_button_rect(x, y, slot);
+        taskbar_cell_waiting(slot, named, clock_monotonic_nanoseconds());
         compositor_script_say(say);
 }
 
@@ -1004,6 +1039,7 @@ static void compositor_notices_open(int x, int y) { compositor_popup_trigger("no
 
 static struct windows_issues compositor_notices_copy;
 static unsigned int compositor_notices_seq;
+static unsigned int compositor_program_crash_count;
 
 static int compositor_ctl_ready(positive now); // below, with the volume's control socket
 static int compositor_notices_look(void)
@@ -1022,6 +1058,20 @@ static int compositor_notices_look(void)
                 positive now = clock_monotonic_nanoseconds();
                 if (compositor_ctl_ready(now))
                         canvas_jingle_play(&compositor_ctl, &compositor_jingle, compositor_volume_path[3], CANVAS_JINGLE_NOTICE, CTL_NONE, (long)(now / 1000000ll), 1000);
+        }
+        {
+                unsigned int crashes = 0;
+                const char *detail = null;
+                for (unsigned int i = 0; i < WINDOWS_ISSUES; i++)
+                        if (compositor_notices_copy.issue[i].used && compositor_notices_copy.issue[i].code == WINDOWS_ISSUE_KERNEL_PROGRAM)
+                        {
+                                crashes = compositor_notices_copy.issue[i].a ? compositor_notices_copy.issue[i].a : 1;
+                                detail = compositor_notices_copy.issue[i].detail;
+                                break;
+                        }
+                if (crashes > compositor_program_crash_count)
+                        compositor_alert_show(0, "Program crashed", detail && detail[0] ? detail : "A program stopped unexpectedly.");
+                compositor_program_crash_count = crashes;
         }
         compositor_notices_seen = count;
         return taskbar_notices_set(count > 0, worst);
@@ -1212,7 +1262,10 @@ static void compositor_launcher_show(void)
         if (kept >= 0)
                 compositor_reveal(kept);
         else
+        {
+                taskbar_cell_waiting(TASKBAR_LAUNCHER, "launcher", clock_monotonic_nanoseconds());
                 compositor_script_say("launcher_button");
+        }
 }
 
 static void compositor_launcher_open(int x, int y)
@@ -2140,6 +2193,8 @@ static void compositor_release_as(unsigned int code, int snap, unsigned int flag
         unsigned int index = code - COMPOSITOR_BTN_LEFT, drop_how = COMPOSITOR_FLOATING, drop_touch = 0;
 
         compositor_pointer_press(code, 0);
+        if (code == COMPOSITOR_BTN_LEFT)
+                taskbar_down_set(0, 0);
         if (dragged >= 0 && snap && compositor.drag_moved && compositor_scenes_shown())
         {
                 if (compositor_scenes_point(compositor.pointer_x, compositor.pointer_y))
@@ -2285,6 +2340,9 @@ static void compositor_button_deliver(int row, unsigned int code, int save_left,
 static int compositor_button_band(int tab, unsigned int code, int up)
 {
         int px = compositor.pointer_x, py = compositor.pointer_y;
+
+        if (code == COMPOSITOR_BTN_LEFT && tab != -1)
+                taskbar_down_set(tab, 1);
 
         if (tab == TASKBAR_LAUNCHER && code == COMPOSITOR_BTN_RIGHT)
                 return compositor_menu_open(px, py), 1;

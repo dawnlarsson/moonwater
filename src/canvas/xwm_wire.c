@@ -183,12 +183,13 @@ static int xwm_get_i16(const unsigned char *p) { unsigned int v = xwm_get16(p); 
 static void xwm_put16(unsigned char *p, unsigned int v) { p[0] = (unsigned char)v; p[1] = (unsigned char)(v >> 8); }
 XWM_API void xwm_put32(unsigned char *p, unsigned int v) { xwm_put16(p, v); xwm_put16(p + 2, v >> 16); }
 static unsigned long xwm_pad4(unsigned long n) { return (n + 3ul) & ~3ul; }
-static void xwm_copy_bytes(unsigned char *dst, const unsigned char *src, unsigned long n) { for (unsigned long i = 0; i < n; i++) dst[i] = src[i]; }
 
 #ifdef WINDOW_INCLUDED
+#define xwm_copy_bytes(dst, src, n) memory_copy((dst), (src), (positive)(n))
 #define xwm_zero(p, n) memory_zero((p), (positive)(n))
 #define xwm_name_is(name, len, word) windows_clip_same((const char *)(name), (len), (word))
 #else
+static void xwm_copy_bytes(unsigned char *dst, const unsigned char *src, unsigned long n) { for (unsigned long i = 0; i < n; i++) dst[i] = src[i]; }
 static void xwm_zero(void *p, unsigned long n) { for (unsigned long i = 0; i < n; i++) ((unsigned char *)p)[i] = 0; }
 static int xwm_name_is(const unsigned char *name, unsigned long len, const char *word)
 {

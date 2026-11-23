@@ -35,6 +35,10 @@ static struct
         struct window_row own;
         struct ui ui;
         struct ui_popmenu menu;
+        struct ui_alert alert;
+        int alert_kind;
+        const char address_to alert_title;
+        const char address_to alert_msg;
         struct windows_issues board;
         char text[NOTICES_SHOWN][NOTICES_TEXT], keys[NOTICES_SHOWN][32];
         int width, height, shown, x, y;
@@ -108,7 +112,10 @@ static void notices_draw(unsigned int address_to pixels)
         struct ui address_to ui = &notices.ui;
 
         ui_begin(ui, pixels, notices.own.table->stride, notices.width, notices.height);
-        ui_popmenu_draw(ui, &notices.menu);
+        if (notices.alert_kind)
+                ui_alert_draw(ui, &notices.alert, notices.width, notices.height);
+        else
+                ui_popmenu_draw(ui, &notices.menu);
 }
 
 // Settings on its System notices page: started with -n, which lifts a Settings already up and asks it for that page.
@@ -130,6 +137,12 @@ static b32 notices_event(const struct window_event address_to event)
 {
         int answer;
 
+        if (notices.alert_kind)
+        {
+                ui_kit.now = (b64)ui_kit_clock();
+                ui_alert_event(&notices.ui, &notices.alert, event, notices.width, notices.height, &notices.dirty);
+                return notices.alert.open;
+        }
         if (event->type == WINDOW_EVENT_KEY && (event->flags & WINDOW_KEY_DOWN) && event->a == UI_KEY_ESCAPE)
                 return false;
         if (event->type == WINDOW_EVENT_MOTION)
@@ -153,6 +166,8 @@ static b32 notices_event(const struct window_event address_to event)
 
 static fn notices_language(void)
 {
+        if (notices.alert_kind)
+                return;
         notices_board();
         notices.dirty = true;
 }
@@ -160,6 +175,22 @@ static fn notices_language(void)
 // The popup as large as its menu, beside the dot (-a) or in the middle. A second start finds the popup up and lifts it, and stops.
 static int notices_open(void)
 {
+        if (notices.alert_kind)
+        {
+                ui_alert_open(&notices.alert, notices.alert_kind, notices.alert_title ? notices.alert_title : (notices.alert_kind == UI_ALERT_WARNING ? "Warning" : "Error"),
+                              notices.alert_msg ? notices.alert_msg : "");
+                {
+                        struct ctl ctl;
+                        struct canvas_jingle jingle;
+                        memory_zero(&ctl, sizeof(ctl));
+                        memory_zero(&jingle, sizeof(jingle));
+                        ctl.timeout_ms = 60;
+                        canvas_jingle_play(&ctl, &jingle, CTL_SOCKET, CANVAS_JINGLE_NOTICE, CTL_NONE, (long)(ui_kit_clock() / 1000000ll), 0);
+                        ctl_disconnect(&ctl);
+                }
+                ui_app_place(&notices_app, UI_ALERT_W, UI_ALERT_H);
+                return -1;
+        }
         if (ui_lift_other(&notices.own, (string_address) "notices", false))
                 return 0;
         notices_board();
@@ -202,7 +233,35 @@ static b32 notices_main()
 {
         memory_zero(&notices, sizeof(notices));
         for (positive at = 1, took; at < (positive)program_argument_count(); at += took ? took : 1)
-                took = ui_app_option(&notices_app, at);
+        {
+                string_address arg = program_argument(at);
+                if (string_equals(arg, (string_address) "-E") || string_equals(arg, (string_address) "--error"))
+                {
+                        notices.alert_kind = UI_ALERT_ERROR;
+                        if (at + 1 < (positive)program_argument_count())
+                                notices.alert_title = (const char *)program_argument(++at);
+                        if (at + 1 < (positive)program_argument_count())
+                                notices.alert_msg = (const char *)program_argument(++at);
+                        took = 1;
+                }
+                else if (string_equals(arg, (string_address) "-W") || string_equals(arg, (string_address) "--warn"))
+                {
+                        notices.alert_kind = UI_ALERT_WARNING;
+                        if (at + 1 < (positive)program_argument_count())
+                                notices.alert_title = (const char *)program_argument(++at);
+                        if (at + 1 < (positive)program_argument_count())
+                                notices.alert_msg = (const char *)program_argument(++at);
+                        took = 1;
+                }
+                else
+                        took = ui_app_option(&notices_app, at);
+        }
+        if (notices.alert_kind)
+        {
+                notices_app.title = (string_address)(notices.alert_kind == UI_ALERT_WARNING ? "Warning" : "Error");
+                notices_app.glass = 0;
+                notices_app.dismiss = false;
+        }
         return ui_app_run(&notices_app);
 }
 

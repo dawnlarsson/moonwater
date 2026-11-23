@@ -942,6 +942,8 @@ static inline int ui_edge_judge(int side, int x0, int y0, int x, int y, int slop
 #define COMPOSITOR_TAB_LIT 1u
 #define COMPOSITOR_TAB_AWAY 2u
 #define COMPOSITOR_TAB_STARTING 4u // an app started from the launcher or a pin whose window is not up yet: its task turns
+#define COMPOSITOR_TAB_FAILED   8u // an app that failed or aborted before opening a window
+#define COMPOSITOR_TAB_DOWN    16u // a tab or cell currently pressed down by the pointer
 // The taskbar's own scale (`taskbar scale`, percent of the screen's) and padding (`taskbar padding`, logical pixels...
 #define TASKBAR_SCALE_LEAST 50
 #define TASKBAR_SCALE_STANDARD 100
@@ -1083,6 +1085,8 @@ static int taskbar_anchor(const struct taskbar_view *view, int which, int *x, in
 static int taskbar_volume_set(int present, int percent, int muted, int flash);
 static int taskbar_mic_set(int present, int muted);
 static int taskbar_notices_set(int present, unsigned int severity);
+static void taskbar_down_set(int tab, int on);
+static void taskbar_cell_waiting(int slot, const char *window_name, positive now);
 static int taskbar_scenes_title(const struct taskbar_view *view, unsigned int *pixels, int width, int height, const char *title, unsigned int ink,
                                 unsigned int ground);
 
@@ -10928,7 +10932,8 @@ struct ui_control
 {
         unsigned char kind, variant;
         b32 on, disabled;                  // checked; a radio group's or tabs' chosen item is at
-        b32 working;                       // a switch whose change is under way: on is where it goes, its fill quiet and a spinner in it (ui_toggle_draw)
+        b32 working;                       // a switch or button whose change is under way: shows a spinner (ui_toggle_draw / ui_button_draw)
+        b32 failed;                        // a control whose last action failed/aborted: tinted with UI_ERROR
         int at;
         int x, y, w, h;                    // logical pixels
         const char address_to label;
@@ -11301,6 +11306,11 @@ static fn ui_button_targets(struct ui_control address_to c)
                 ink = ui_role(UI_ON_SECONDARY_CONTAINER);
                 break;
         }
+        if (c->failed)
+        {
+                fill = c->variant == UI_BUTTON_TEXT || c->variant == UI_BUTTON_OUTLINED ? 0 : ui_role(UI_ERROR_CONTAINER);
+                ink = c->variant == UI_BUTTON_TEXT || c->variant == UI_BUTTON_OUTLINED ? ui_role(UI_ERROR) : ui_role(UI_ON_ERROR_CONTAINER);
+        }
         if (c->disabled)
         {
                 fill = ui_mix(ui_role(UI_ON_SURFACE), 8, 0);
@@ -11357,7 +11367,20 @@ static fn ui_button_draw(struct ui address_to ui, struct ui_control address_to c
         }
         width = ui_kit_measure(ui, (string_address)c->label, type);
         // The label at whole pixels where the transform takes its middle: never scaled, never resampled.
-        x = (ox + tx) / 256 - width / 2;
+        if (c->working && !c->disabled)
+        {
+                struct ui_control spin;
+                int scale = ui->scale > 0 ? ui->scale : 100;
+                int spin_w = 14, gap = width > 0 ? 6 : 0, total = ui_dev(ui, spin_w + gap) + width;
+                int sx0 = (ox + tx) / 256 - total / 2;
+                memory_zero(&spin, sizeof(spin));
+                spin.kind = UI_SPINNER, spin.w = spin_w;
+                spin.x = sx0 * 100 / scale, spin.y = ((oy + ty) / 256) * 100 / scale - spin_w / 2;
+                ui_spinner_draw(ui, &spin);
+                x = sx0 + ui_dev(ui, spin_w + gap);
+        }
+        else
+                x = (ox + tx) / 256 - width / 2;
         baseline = ui_kit_baseline(ui, (oy + ty) / 256 - ui_dev(ui, ui_types[type].line) / 2, type);
         ui_kit_text(ui, x, baseline, (string_address)c->label, type, ink, 0);
 }
@@ -11475,7 +11498,7 @@ static fn ui_toggle_draw(struct ui address_to ui, struct ui_control address_to c
         if (rest_w > 0)
                 ui_kit_fill(ui, &rest, c->disabled ? ui_mix(ui_role(UI_ON_SURFACE), 12, 0) : ui_role(UI_CONTROL_OFF), null);
         if (fill_w > 0)
-                ui_kit_fill(ui, &fill, c->disabled ? ui_mix(ui_role(UI_ON_SURFACE), 38, 0) : c->working ? ui_mix(ui_role(UI_PRIMARY), 40, 0) : ui_role(UI_PRIMARY), null);
+                ui_kit_fill(ui, &fill, c->disabled ? ui_mix(ui_role(UI_ON_SURFACE), 38, 0) : c->failed ? ui_role(UI_ERROR) : c->working ? ui_mix(ui_role(UI_PRIMARY), 40, 0) : ui_role(UI_PRIMARY), null);
         // A switch at work (its change asked and not answered yet): the pill already where it goes, its fill quiet, and the kit's spinner
         // turning in its middle until the app says the change is done (ui_row.working).
         if (c->working && c->kind == UI_SWITCH)
@@ -20092,7 +20115,7 @@ struct ui_iconbutton
         const char address_to name;    // the accessible name
         const char address_to tip;     // the hover tooltip: the old English label
         int x, y, w, h;               // device pixels: the box the button is drawn in
-        b32 hover, down, focus, disabled;
+        b32 hover, down, focus, disabled, working, failed;
 };
 
 // The symbol a glyph draws in this direction: back and forward swap in RTL (the arrow points the way the bar reads back).
@@ -20107,13 +20130,28 @@ static inline int ui_iconbutton_glyph(int glyph)
 static fn ui_iconbutton_draw(struct ui address_to ui, const struct ui_iconbutton address_to b)
 {
         int size = (int)(ui_em(ui, UI_BUTTON_ICON_EM) >> 6), left = b->x + (b->w - size) / 2, top = b->y + (b->h - size) / 2;
-        unsigned int ink = b->disabled ? ui_text_colour(ui, UI_ON_SURFACE_VARIANT) : ui_text_colour(ui, UI_ON_SURFACE);
-        if (b->hover || b->focus)
+        unsigned int ink = b->disabled ? ui_text_colour(ui, UI_ON_SURFACE_VARIANT) : b->failed ? ui_text_colour(ui, UI_ON_ERROR_CONTAINER) : ui_text_colour(ui, UI_ON_SURFACE);
+        if (b->down && !b->disabled)
+                top += ui_px(ui, 1);
+        if (b->failed && !b->disabled)
+                ui_round(ui, b->x, b->y, b->w, b->h, b->w < b->h ? b->w / 2 : b->h / 2, ui_role(UI_ERROR_CONTAINER) | 0xff000000u);
+        else if ((b->down && !b->disabled) || b->hover || b->focus)
         {
-                unsigned int fill = b->focus ? ui_role(UI_PRIMARY_CONTAINER) | 0xff000000u : ui_role(UI_SURFACE_HIGHEST) | 0xff000000u;
+                unsigned int fill = b->down ? (ui_mix(ui_role(UI_ON_SURFACE), 16, ui_role(UI_SURFACE_HIGHEST)) | 0xff000000u)
+                                            : b->focus ? (ui_role(UI_PRIMARY_CONTAINER) | 0xff000000u) : (ui_role(UI_SURFACE_HIGHEST) | 0xff000000u);
                 ui_round(ui, b->x, b->y, b->w, b->h, b->w < b->h ? b->w / 2 : b->h / 2, fill);
         }
-        ui_icon(ui, ui_iconbutton_glyph(b->glyph), left, top, size, 0, ink);
+        if (b->working && !b->disabled)
+        {
+                struct ui_control spin;
+                int scale = ui->scale > 0 ? ui->scale : 100;
+                memory_zero(&spin, sizeof(spin));
+                spin.kind = UI_SPINNER, spin.w = size * 100 / scale;
+                spin.x = left * 100 / scale, spin.y = top * 100 / scale;
+                ui_spinner_draw(ui, &spin);
+        }
+        else
+                ui_icon(ui, ui_iconbutton_glyph(b->glyph), left, top, size, 0, ink);
 }
 
 // The tooltip of a hovered button: its tip in a chip under the button, centred on it and kept inside the window's width.
@@ -20141,13 +20179,19 @@ static unsigned int ui_iconbutton_event(struct ui address_to ui, struct ui_iconb
         if (event->type == WINDOW_EVENT_MOTION && inside)
                 ui_kit_shape = b->disabled ? WINDOW_POINTER_NOT_ALLOWED : WINDOW_POINTER_HAND;
         if (b->disabled)
+        {
+                b->hover = b->down = false;
                 return 0;
+        }
         if (event->type == WINDOW_EVENT_MOTION)
                 b->hover = inside;
         if (event->type == WINDOW_EVENT_BUTTON && event->a == UI_POINTER_LEFT)
         {
                 if (event->flags & WINDOW_KEY_DOWN)
+                {
                         b->down = inside;
+                        if (inside) b->failed = false;
+                }
                 else
                 {
                         b32 acted = b->down && inside;
@@ -20167,7 +20211,7 @@ struct ui_menubutton
 {
         const char address_to label;   // the words: also its accessible name (and its tooltip when it shows a symbol)
         int x, y, w, h;               // device pixels
-        b32 hover, down, focus, open;  // open: the app's menu is up for it
+        b32 hover, down, focus, open, working, failed;  // open: the app's menu is up for it
         int icon;                     // the symbol it shows in place of its words (UI_ICON_ + 1), 0 for the words (last, so a button made by its words alone has none)
 };
 
@@ -20176,17 +20220,29 @@ static fn ui_menubutton_draw(struct ui address_to ui, const struct ui_menubutton
 {
         int pad = ui_px(ui, UI_MENUBUTTON_PAD), chev = ui_px(ui, 4), side = ui_px(ui, UI_MENUBUTTON_ICON);
         int label = m->icon ? side : ui_kit_measure(ui, (string_address)m->label, UI_LABEL_LARGE);
-        int cy = m->y + m->h / 2;
-        unsigned int fill = m->open || m->hover ? ui_role(UI_SURFACE_HIGHEST) | 0xff000000u : 0;
+        int cy = m->y + m->h / 2 + (m->down ? ui_px(ui, 1) : 0);
+        unsigned int fill = m->failed ? (ui_role(UI_ERROR_CONTAINER) | 0xff000000u)
+                                      : m->down ? (ui_mix(ui_role(UI_ON_SURFACE), 16, ui_role(UI_SURFACE_HIGHEST)) | 0xff000000u)
+                                                : m->open || m->hover ? (ui_role(UI_SURFACE_HIGHEST) | 0xff000000u) : 0;
+        unsigned int ink = m->failed ? ui_text_colour(ui, UI_ON_ERROR_CONTAINER) : ui_text_colour(ui, UI_ON_SURFACE);
         if (fill)
                 ui_round(ui, m->x, m->y, m->w, m->h, ui_px(ui, UI_RADIUS), fill);
         // Its symbol in the text's ink, or its words.
-        if (m->icon)
-                ui_icon(ui, m->icon - 1, m->x + pad, cy - side / 2, side, 0, ui_text_colour(ui, UI_ON_SURFACE) | 0xff000000u);
+        if (m->working)
+        {
+                struct ui_control spin;
+                int scale = ui->scale > 0 ? ui->scale : 100;
+                memory_zero(&spin, sizeof(spin));
+                spin.kind = UI_SPINNER, spin.w = UI_MENUBUTTON_ICON;
+                spin.x = (m->x + pad) * 100 / scale, spin.y = (cy - side / 2) * 100 / scale;
+                ui_spinner_draw(ui, &spin);
+        }
+        else if (m->icon)
+                ui_icon(ui, m->icon - 1, m->x + pad, cy - side / 2, side, 0, ink | 0xff000000u);
         else
-                ui_kit_text(ui, m->x + pad, ui_kit_baseline(ui, m->y + (m->h - ui_types[UI_LABEL_LARGE].line) / 2, UI_LABEL_LARGE), (string_address)m->label,
-                            UI_LABEL_LARGE, ui_text_colour(ui, UI_ON_SURFACE), 0);
-        ui_chevron(ui, m->x + pad + label + ui_px(ui, 10) + chev, cy, chev, ui_text_colour(ui, UI_ON_SURFACE_VARIANT));
+                ui_kit_text(ui, m->x + pad, ui_kit_baseline(ui, m->y + (m->h - ui_types[UI_LABEL_LARGE].line) / 2 + (m->down ? ui_px(ui, 1) : 0), UI_LABEL_LARGE),
+                            (string_address)m->label, UI_LABEL_LARGE, ink, 0);
+        ui_chevron(ui, m->x + pad + label + ui_px(ui, 10) + chev, cy, chev, m->failed ? ink : ui_text_colour(ui, UI_ON_SURFACE_VARIANT));
         if (m->focus)
                 ui_kit_ring(ui, &(struct ui_box){m->x * 256, m->y * 256, (m->x + m->w) * 256, (m->y + m->h) * 256, ui_px(ui, UI_RADIUS) * 256, ui_px(ui, UI_RADIUS) * 256},
                             ui_q8(ui, 2), ui_role(UI_PRIMARY));
@@ -20205,7 +20261,10 @@ static b32 ui_menubutton_event(struct ui address_to ui, struct ui_menubutton add
         if (event->type == WINDOW_EVENT_BUTTON && event->a == UI_POINTER_LEFT)
         {
                 if (event->flags & WINDOW_KEY_DOWN)
+                {
                         m->down = inside;
+                        if (inside) m->failed = false;
+                }
                 else
                 {
                         b32 acted = m->down && inside;
@@ -27807,6 +27866,99 @@ static b32 ui_app_present(struct window_row address_to own, int address_to shown
         return true;
 }
 
+// Classic modal error / warning dialog box (ui_alert):
+#define UI_ALERT_NONE 0
+#define UI_ALERT_WARNING 1
+#define UI_ALERT_ERROR 2
+#define UI_ALERT_W 420
+#define UI_ALERT_H 176
+
+struct ui_alert
+{
+        int kind;
+        char title[128];
+        char message[512];
+        struct ui_control ok;
+        b32 open;
+};
+
+static fn ui_alert_open(struct ui_alert address_to a, int kind, const char address_to title, const char address_to message)
+{
+        memory_zero(a, sizeof(*a));
+        a->kind = kind == UI_ALERT_WARNING ? UI_ALERT_WARNING : UI_ALERT_ERROR;
+        if (title)
+                string_copy_bounded((p8 *)a->title, (string_address)title, sizeof(a->title));
+        if (message)
+                string_copy_bounded((p8 *)a->message, (string_address)message, sizeof(a->message));
+        a->ok.kind = UI_BUTTON, a->ok.variant = UI_BUTTON_PRIMARY, a->ok.label = "OK";
+        ui_control_start(&a->ok);
+        a->open = true;
+}
+
+static fn ui_alert_draw(struct ui address_to ui, struct ui_alert address_to a, int width, int height)
+{
+        b32 standalone = width <= UI_ALERT_W && height <= UI_ALERT_H;
+        int cw = standalone ? width : UI_ALERT_W;
+        int ch = standalone ? height : UI_ALERT_H;
+        int cx, cy, badge = 36, pad = 20, bw = 88, bh = 36;
+        unsigned int bfill, bink;
+        struct ui_box card, bpill;
+        if (!a->open || cw < 180 || ch < 120)
+                return;
+        cx = (width - cw) / 2, cy = (height - ch) / 2;
+        if (!standalone)
+                ui_fill(ui, 0, 0, ui_dev(ui, width), ui_dev(ui, height), 0x88000000u);
+        card = ui_box_of(ui, ui_q(cx), ui_q(cy), ui_q(cw), ui_q(ch), ui_q(standalone ? 0 : 16));
+        ui_kit_fill(ui, &card, ui_role(UI_SURFACE_HIGH), null);
+        if (!standalone)
+                ui_kit_ring(ui, &card, ui_q8(ui, 1), ui_role(UI_OUTLINE_VARIANT));
+        ui_role_pair(a->kind == UI_ALERT_WARNING ? UI_WARNING : UI_ERROR, &bfill, &bink);
+        bpill = ui_box_of(ui, ui_q(cx + pad), ui_q(cy + pad), ui_q(badge), ui_q(badge), ui_q(badge / 2));
+        ui_kit_fill(ui, &bpill, bfill, null);
+        {
+                int mark_w = ui_kit_measure(ui, (string_address) "!", UI_TITLE_MEDIUM);
+                ui_kit_text(ui, ui_dev(ui, cx + pad) + (ui_dev(ui, badge) - mark_w) / 2,
+                            ui_kit_baseline(ui, ui_dev(ui, cy + pad + (badge - ui_types[UI_TITLE_MEDIUM].line) / 2), UI_TITLE_MEDIUM),
+                            (string_address) "!", UI_TITLE_MEDIUM, bink, 0);
+        }
+        {
+                int tx = cx + pad + badge + 14, tw = cw - (pad + badge + 14 + pad);
+                int clip_l = ui_dev(ui, tx), clip_r = ui_dev(ui, tx + tw);
+                ui_kit_start(ui, clip_l, ui_kit_baseline(ui, ui_dev(ui, cy + pad + 4), UI_TITLE_MEDIUM),
+                             (string_address)a->title, UI_TITLE_MEDIUM, ui_role(UI_ON_SURFACE), 0, clip_l, clip_r);
+                if (a->message[0])
+                        ui_kit_start(ui, clip_l, ui_kit_baseline(ui, ui_dev(ui, cy + pad + 34), UI_BODY_MEDIUM),
+                                     (string_address)a->message, UI_BODY_MEDIUM, ui_role(UI_ON_SURFACE_VARIANT), 0, clip_l, clip_r);
+        }
+        a->ok.x = cx + cw - pad - bw, a->ok.y = cy + ch - pad - bh, a->ok.w = bw, a->ok.h = bh;
+        ui_button_draw(ui, &a->ok);
+}
+
+static b32 ui_alert_event(struct ui address_to ui, struct ui_alert address_to a, const struct window_event address_to event, int width, int height, b32 address_to dirty)
+{
+        (void)width, (void)height;
+        if (!a->open)
+                return false;
+        if (event->type == WINDOW_EVENT_KEY && (event->flags & WINDOW_KEY_DOWN) &&
+            (event->a == UI_KEY_ENTER || event->a == UI_KEY_ESCAPE || event->a == UI_KEY_SPACE))
+        {
+                a->open = false;
+                if (dirty) *dirty = true;
+                return true;
+        }
+        if (event->type == WINDOW_EVENT_MOTION || event->type == WINDOW_EVENT_BUTTON)
+        {
+                b32 down = event->type == WINDOW_EVENT_BUTTON && (event->flags & WINDOW_KEY_DOWN) != 0;
+                int x = event->type == WINDOW_EVENT_MOTION ? (int)event->a : ui_kit.pointer_x;
+                int y = event->type == WINDOW_EVENT_MOTION ? (int)event->b : ui_kit.pointer_y;
+                if (ui_kit_pointer(ui, &a->ok, 1, (int)event->type, x, y, down, event->flags) == &a->ok)
+                        a->open = false;
+                if (dirty) *dirty = true;
+                return true;
+        }
+        return false;
+}
+
 // A program started apart:
 static b32 ui_start_apart_at(bipolar folder, string_address address_to words, positive count);
 
@@ -27816,9 +27968,32 @@ static fn ui_app_starting(const char address_to id)
         windows_starting_set(ui_kit_table, id, clock_monotonic_nanoseconds());
 }
 
+// An app failed or aborted before opening a window: the taskbar shows its task as failed briefly (windows_starting_fail).
+static fn ui_app_failed(const char address_to id)
+{
+        windows_starting_fail(ui_kit_table, id, clock_monotonic_nanoseconds());
+}
+
 static b32 ui_start_apart(string_address address_to words, positive count)
 {
         return ui_start_apart_at(-1, words, count);
+}
+
+// Opens a classic desktop error or warning dialog box via /notices (-E or -W).
+static b32 ui_alert_show(int kind, const char address_to title, const char address_to message)
+{
+        string_address words[6];
+        positive count = 0;
+
+        if (!title || !title[0])
+                return false;
+        words[count++] = (string_address) "/notices";
+        words[count++] = (string_address)(kind == UI_ALERT_WARNING ? "-W" : "-E");
+        words[count++] = (string_address)title;
+        if (message && message[0])
+                words[count++] = (string_address)message;
+        words[count] = null;
+        return ui_start_apart(words, count);
 }
 
 /*

@@ -20,6 +20,7 @@
 #define CANVAS_JINGLE_PI 3.14159265358979323846
 #define CANVAS_JINGLE_MAX_FRAMES 31200 // 650 ms at 48 kHz stereo S16LE
 #define CANVAS_JINGLE_RETRY_MS 2000
+#define CANVAS_JINGLE_CFG_TTL_MS 500
 #define CANVAS_JINGLES_PATH "/root/canvas.jingles"
 
 enum
@@ -35,6 +36,8 @@ struct canvas_jingle
 {
         long last_ms[CANVAS_JINGLE_COUNT];
         long retry_ms;
+        long cfg_until_ms;
+        int cfg_enabled;
 };
 
 static const char *canvas_jingle_name(int id)
@@ -54,8 +57,7 @@ static inline short canvas_jingle_clamp(long v)
         return v > 32767 ? 32767 : v < -32767 ? -32767 : (short)v;
 }
 
-// Additive stereo bell/chime note with micro-detuned L/R unison and per-partial decay.
-// pan in [-1.0, +1.0]; fundamental, 2.0x octave, 2.76x presence bell, and 4.02x airy sparkle.
+// Additive stereo bell/chime note using recursive 2-multiply oscillators (zero trig calls in the sample loop).
 static void canvas_jingle_note(short *buf, int total, int start_ms, int len_ms, f64 freq, f64 amp, f64 pan)
 {
         int start = start_ms * (CANVAS_JINGLE_RATE / 1000);
@@ -63,11 +65,21 @@ static void canvas_jingle_note(short *buf, int total, int start_ms, int len_ms, 
         int attack = 5 * (CANVAS_JINGLE_RATE / 1000);
         f64 gain_l = amp * (1.0 - pan * 0.35), gain_r = amp * (1.0 + pan * 0.35);
         f64 detune = 0.00087; // ~1.5 cents L/R spread for lush stereo width
+        f64 wl = 2.0 * CANVAS_JINGLE_PI * freq * (1.0 - detune) / (f64)CANVAS_JINGLE_RATE;
+        f64 wr = 2.0 * CANVAS_JINGLE_PI * freq * (1.0 + detune) / (f64)CANVAS_JINGLE_RATE;
+        f64 mult[4] = {1.0, 2.0, 2.76, 4.02};
+        f64 cl[4], cr[4], s1l[4], s2l[4], s1r[4], s2r[4];
 
         if (start < 0 || len <= 0 || start >= total)
                 return;
         if (start + len > total)
                 len = total - start;
+        for (int k = 0; k < 4; k++)
+        {
+                f64 al = wl * mult[k], ar = wr * mult[k];
+                cl[k] = 2.0 * (f64)cosine((decimal)al), s2l[k] = 0.0, s1l[k] = (f64)sine((decimal)al);
+                cr[k] = 2.0 * (f64)cosine((decimal)ar), s2r[k] = 0.0, s1r[k] = (f64)sine((decimal)ar);
+        }
         for (int i = 0; i < len; i++)
         {
                 f64 u = (f64)i / (f64)len;
@@ -76,21 +88,19 @@ static void canvas_jingle_note(short *buf, int total, int start_ms, int len_ms, 
                 f64 env_mid = env_body * (1.0 - u) * (1.0 - u);
                 f64 env_pres = env_mid * (1.0 - u) * (1.0 - u);
                 f64 env_air = i < len / 3 ? (1.0 - (f64)i / (f64)(len / 3)) : 0.0;
-                f64 t = (f64)i / (f64)CANVAS_JINGLE_RATE;
-                f64 pl = 2.0 * CANVAS_JINGLE_PI * freq * (1.0 - detune) * t;
-                f64 pr = 2.0 * CANVAS_JINGLE_PI * freq * (1.0 + detune) * t;
-                f64 sl = (f64)sine((decimal)pl) * env_body +
-                         0.28 * (f64)sine((decimal)(2.0 * pl)) * env_mid +
-                         0.16 * (f64)sine((decimal)(2.76 * pl)) * env_pres +
-                         0.09 * (f64)sine((decimal)(4.02 * pl)) * (env_air * env_air * env_air);
-                f64 sr = (f64)sine((decimal)pr) * env_body +
-                         0.28 * (f64)sine((decimal)(2.0 * pr)) * env_mid +
-                         0.16 * (f64)sine((decimal)(2.76 * pr)) * env_pres +
-                         0.09 * (f64)sine((decimal)(4.02 * pr)) * (env_air * env_air * env_air);
+                f64 sl = s2l[0] * env_body + 0.28 * s2l[1] * env_mid + 0.16 * s2l[2] * env_pres + 0.09 * s2l[3] * (env_air * env_air * env_air);
+                f64 sr = s2r[0] * env_body + 0.28 * s2r[1] * env_mid + 0.16 * s2r[2] * env_pres + 0.09 * s2r[3] * (env_air * env_air * env_air);
                 int idx = (start + i) * 2;
 
                 buf[idx] = canvas_jingle_clamp((long)buf[idx] + (long)(sl * fade * gain_l * 32767.0));
                 buf[idx + 1] = canvas_jingle_clamp((long)buf[idx + 1] + (long)(sr * fade * gain_r * 32767.0));
+                for (int k = 0; k < 4; k++)
+                {
+                        f64 nl = cl[k] * s1l[k] - s2l[k];
+                        f64 nr = cr[k] * s1r[k] - s2r[k];
+                        s2l[k] = s1l[k], s1l[k] = nl;
+                        s2r[k] = s1r[k], s1r[k] = nr;
+                }
         }
 }
 
@@ -155,21 +165,27 @@ static int canvas_jingle_synth(int id, short *buf, int cap)
         return frames;
 }
 
-static int canvas_jingles_enabled(void)
+static int canvas_jingles_enabled(struct canvas_jingle *j, long now_ms)
 {
+        if (j && j->cfg_until_ms && now_ms < j->cfg_until_ms)
+                return j->cfg_enabled;
+        int on = 1;
 #ifndef CTL_NO_SYSTEM
         char buf[16];
         long fd = ctl_call(syscall(openat), (positive)-100, (positive)CANVAS_JINGLES_PATH, 0, 0, 0, 0);
         long n;
 
-        if (fd < 0)
-                return 1;
-        n = ctl_call(syscall(read), (positive)fd, (positive)buf, (positive)(sizeof(buf) - 1), 0, 0, 0);
-        ctl_call(syscall(close), (positive)fd, 0, 0, 0, 0, 0);
-        if (n >= 3 && buf[0] == 'o' && buf[1] == 'f' && buf[2] == 'f')
-                return 0;
+        if (fd >= 0)
+        {
+                n = ctl_call(syscall(read), (positive)fd, (positive)buf, (positive)(sizeof(buf) - 1), 0, 0, 0);
+                ctl_call(syscall(close), (positive)fd, 0, 0, 0, 0, 0);
+                if (n >= 3 && buf[0] == 'o' && buf[1] == 'f' && buf[2] == 'f')
+                        on = 0;
+        }
 #endif
-        return 1;
+        if (j)
+                j->cfg_enabled = on, j->cfg_until_ms = now_ms + CANVAS_JINGLE_CFG_TTL_MS;
+        return on;
 }
 
 static long canvas_jingle_play(struct ctl *c, struct canvas_jingle *j, const char *socket_path, int id, unsigned long volume, long now_ms, long min_gap_ms)
@@ -180,7 +196,7 @@ static long canvas_jingle_play(struct ctl *c, struct canvas_jingle *j, const cha
 
         if (!c || !name)
                 return CTL_INVALID;
-        if (!canvas_jingles_enabled())
+        if (!canvas_jingles_enabled(j, now_ms))
                 return 0;
         if (j && min_gap_ms > 0 && j->last_ms[id] && now_ms - j->last_ms[id] < min_gap_ms)
                 return 0;

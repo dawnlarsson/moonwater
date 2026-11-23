@@ -45,6 +45,7 @@ static struct taskbar_state
         positive moon_seen;
         long long moon_step;
         b64 moon_turn;
+        int down_tab, down_on;
 } taskbar = {1, 0, 0, TASKBAR_BOTTOM, TASKBAR_BOTTOM, 0, {0}, 0, 0, 0,
              .scale = TASKBAR_SCALE_STANDARD, .padding = TASKBAR_PADDING_STANDARD, .glides = 1,
              .spin = TASKBAR_MOON_SPIN, .moon_zone = TASKBAR_ZONE_CENTRE, .tasks_zone = TASKBAR_ZONE_SPLIT,
@@ -1714,28 +1715,43 @@ static int taskbar_draw(const struct taskbar_view *view, unsigned long redo, tas
                                 clip.rx = clip.ry = 0;
                                 if (lit_length > 0)
                                         ui_glass_button(&ui, &face, lit_shown, &clip);
+                                if (mark & COMPOSITOR_TAB_FAILED)
+                                {
+                                        unsigned int err = compositor_ink_role(UI_ERROR);
+                                        ui_kit_fill(&ui, &clip, (72u << 24) | (err & 0xffffffu), null);
+                                        ground = window_mix(ground, err & 0xffffffu, 72);
+                                }
+                                else if (taskbar.down_on && which == taskbar.down_tab)
+                                        ground = ui_glass_button(&ui, &clip, UI_ONE, null);
                                 ground = mark & COMPOSITOR_TAB_LIT ? window_mix(ground, full & 0xffffffu, (full >> 24) + (full >> 31)) : ground;
                         }
-                        else if (which == TASKBAR_DONE)
+                        else if (which == TASKBAR_DONE || (taskbar.down_on && which == taskbar.down_tab))
                                 ground = ui_glass_button(&ui, &clip, UI_ONE, null);
-                        ink = which >= 0 ? taskbar_ink_on(ground, mark) : window_contrast(ground);
+                        ink = which >= 0 ? (mark & COMPOSITOR_TAB_FAILED ? compositor_ink_role(UI_ERROR) : taskbar_ink_on(ground, mark)) : window_contrast(ground);
                 }
                 if (taskbar.editing && (which >= 0 || taskbar_item_of(which) >= 0))
                         taskbar_edit_ring(view, t, n, ground, ink, 0x66000000u);
                 switch (which)
                 {
                 case TASKBAR_LAUNCHER:
-                        taskbar_moon(view, t, n, time_ok ? broken.tm_hour : -1, time_ok ? broken.tm_min : -1, view->launcher_lit);
+                {
+                        int cstate = taskbar_cell_state(TASKBAR_LAUNCHER);
+                        taskbar_moon(view, t, n, time_ok ? broken.tm_hour : -1, time_ok ? broken.tm_min : -1, view->launcher_lit || (taskbar.down_on && taskbar.down_tab == TASKBAR_LAUNCHER));
+                        if (cstate == 1)
+                                taskbar_tab_turning(view, t, n);
+                        else if (cstate == 2)
+                                taskbar_edit_ring(view, t, n, ground, compositor_ink_role(UI_ERROR), 0xcc000000u);
                         if (taskbar.editing)
                                 taskbar_edit_ring(view, t, n, ground, window_contrast(ground), 0x99000000u);
                         break;
+                }
                 case TASKBAR_TRAY: case TASKBAR_TRAY_BEFORE: break;
                 case TASKBAR_DONE: taskbar_say(view, t, n, (const char *)WORDS(tray_done), ink, ground); break;
                 case TASKBAR_STRIP_BACK: case TASKBAR_STRIP_ON:
                         taskbar_say(view, t, n, (which == TASKBAR_STRIP_BACK) != (m == 0 && language_rtl()) ? "\xe2\x80\xb9" : "\xe2\x80\xba", ink, ground);
                         break;
                 case -9: if (taskbar.tray_custom) taskbar_say(view, t, n, taskbar.tray_text, ink, ground); break;
-#define TASKBAR_CELL(slot, shown, mark, paint) case slot: paint; break;
+#define TASKBAR_CELL(slot, shown, mark, paint) case slot: { int cs = taskbar_cell_state(slot); if (cs == 1) taskbar_tab_turning(view, t, n); else { if (cs == 2) taskbar_edit_ring(view, t, n, ground, compositor_ink_role(UI_ERROR), 0xcc000000u); paint; } break; }
                 TASKBAR_TRAY_CELLS(TASKBAR_CELL)
 #undef TASKBAR_CELL
                 default:
@@ -1782,17 +1798,32 @@ static int taskbar_draw(const struct taskbar_view *view, unsigned long redo, tas
                                         int mx = mark->x - band->x, my = mark->y - band->y, mw = mark->w, mh = mark->h;
                                         int yy0 = my < 0 ? -my : 0, yy1 = my + mh > band->h ? band->h - my : mh;
                                         int xx0 = mx < 0 ? -mx : 0, xx1 = mx + mw > band->w ? band->w - mx : mw;
-                                        unsigned int step_x = ((unsigned int)TASKBAR_TRAY_ITEM_PX << 16) / (unsigned int)mw;
-                                        for (int yy = yy0; yy < yy1; yy++)
+                                        if (mw == TASKBAR_TRAY_ITEM_PX && mh == TASKBAR_TRAY_ITEM_PX && xx1 > xx0)
                                         {
-                                                const unsigned int *src_row = px + (yy * TASKBAR_TRAY_ITEM_PX / mh) * TASKBAR_TRAY_ITEM_PX;
-                                                unsigned int *dst_row = view->pixels + (long)(my + yy) * band->w + mx;
-                                                unsigned int sx = (unsigned int)xx0 * step_x;
-                                                for (int xx = xx0; xx < xx1; xx++, sx += step_x)
+                                                static const unsigned int plain[TASKBAR_TRAY_ITEM_PX];
+                                                unsigned int under[TASKBAR_TRAY_ITEM_PX];
+                                                positive span = (positive)(xx1 - xx0);
+                                                for (int yy = yy0; yy < yy1; yy++)
                                                 {
-                                                        unsigned int src = src_row[sx >> 16], a = src >> 24;
-                                                        if (a)
-                                                                dst_row[xx] = window_mix(dst_row[xx], src & 0xffffffu, (int)(a + (a >> 7)));
+                                                        unsigned int *dst_row = view->pixels + (long)(my + yy) * band->w + mx + xx0;
+                                                        memory_copy(under, dst_row, span * 4);
+                                                        memory_glass_over_u32(dst_row, px + (long)yy * TASKBAR_TRAY_ITEM_PX + xx0, under, span, plain);
+                                                }
+                                        }
+                                        else
+                                        {
+                                                unsigned int step_x = ((unsigned int)TASKBAR_TRAY_ITEM_PX << 16) / (unsigned int)mw;
+                                                for (int yy = yy0; yy < yy1; yy++)
+                                                {
+                                                        const unsigned int *src_row = px + (yy * TASKBAR_TRAY_ITEM_PX / mh) * TASKBAR_TRAY_ITEM_PX;
+                                                        unsigned int *dst_row = view->pixels + (long)(my + yy) * band->w + mx;
+                                                        unsigned int sx = (unsigned int)xx0 * step_x;
+                                                        for (int xx = xx0; xx < xx1; xx++, sx += step_x)
+                                                        {
+                                                                unsigned int src = src_row[sx >> 16], a = src >> 24;
+                                                                if (a)
+                                                                        dst_row[xx] = window_mix(dst_row[xx], src & 0xffffffu, (int)(a + (a >> 7)));
+                                                        }
                                                 }
                                         }
                                 }
@@ -1806,6 +1837,13 @@ static int taskbar_draw(const struct taskbar_view *view, unsigned long redo, tas
                                         taskbar_tab_icon(view, t, icon, n, which, ink);
                                         if (view->marks[which] & COMPOSITOR_TAB_STARTING)
                                                 taskbar_tab_turning(view, t, icon);
+                                        else if (view->marks[which] & COMPOSITOR_TAB_FAILED)
+                                        {
+                                                struct ui eui;
+                                                int ex, ey, eside;
+                                                if ((eside = taskbar_in_band(&eui, view, t, icon, &ex, &ey)) > 0)
+                                                        ui_icon(&eui, UI_ICON_REMOVE, ex, ey, eside, 0, compositor_ink_role(UI_ERROR) | 0xff000000u);
+                                        }
                                 }
                                 if (taskbar_fits(n, label) && label->w > 0 && label->h > 0 && view->titles && view->titles[which] && view->titles[which][0])
                                         taskbar_say(view, t, label, view->titles[which], ink, ground);
@@ -2403,44 +2441,175 @@ static void taskbar_pin_keep(int which, bool on)
 
 static struct
 {
-        int count;
+        int count, failed_count;
         char id[WINDOWS_STARTING][WINDOWS_APP_ID], title[WINDOWS_STARTING][TASKBAR_PIN_TITLE];
-        b32 pinned[WINDOWS_STARTING];
+        char failed_id[WINDOWS_STARTING][WINDOWS_APP_ID], failed_title[WINDOWS_STARTING][TASKBAR_PIN_TITLE];
+        b32 pinned[WINDOWS_STARTING], failed_pinned[WINDOWS_STARTING];
         positive drawn;
 } taskbar_starting;
 
+#define TASKBAR_CELL_WAITS 6
+#define TASKBAR_CELL_WAIT_NS 6000000000ull
+#define TASKBAR_CELL_FAIL_NS 3000000000ull
+static struct
+{
+        int slot[TASKBAR_CELL_WAITS];
+        const char *window[TASKBAR_CELL_WAITS];
+        positive until[TASKBAR_CELL_WAITS];
+        b32 failed[TASKBAR_CELL_WAITS];
+        int count;
+} taskbar_cells_wait;
+
+static void taskbar_down_set(int tab, int on)
+{
+        if (taskbar.down_on == on && (!on || taskbar.down_tab == tab))
+                return;
+        taskbar.down_on = on, taskbar.down_tab = tab;
+        taskbar.stale = 1;
+}
+
+static void taskbar_cell_waiting(int slot, const char *window_name, positive now)
+{
+        for (int i = 0; i < taskbar_cells_wait.count; i++)
+                if (taskbar_cells_wait.slot[i] == slot)
+                {
+                        taskbar_cells_wait.window[i] = window_name;
+                        taskbar_cells_wait.until[i] = now + TASKBAR_CELL_WAIT_NS;
+                        taskbar_cells_wait.failed[i] = false;
+                        taskbar.stale = 1;
+                        return;
+                }
+        if (taskbar_cells_wait.count < TASKBAR_CELL_WAITS)
+        {
+                int i = taskbar_cells_wait.count++;
+                taskbar_cells_wait.slot[i] = slot;
+                taskbar_cells_wait.window[i] = window_name;
+                taskbar_cells_wait.until[i] = now + TASKBAR_CELL_WAIT_NS;
+                taskbar_cells_wait.failed[i] = false;
+                taskbar.stale = 1;
+        }
+}
+
+static int taskbar_cell_state(int slot)
+{
+        for (int i = 0; i < taskbar_cells_wait.count; i++)
+                if (taskbar_cells_wait.slot[i] == slot)
+                        return taskbar_cells_wait.failed[i] ? 2 : 1;
+        return 0;
+}
+
 static bool taskbar_starting_take(positive now)
 {
-        char ids[WINDOWS_STARTING][WINDOWS_APP_ID], held[WINDOWS_APP_ID];
-        int count = 0;
+        char ids[WINDOWS_STARTING][WINDOWS_APP_ID], fids[WINDOWS_STARTING][WINDOWS_APP_ID], held[WINDOWS_APP_ID];
+        int app_idx[WINDOWS_STARTING], fail_idx[WINDOWS_STARTING];
+        int count = 0, fcount = 0;
 
         for (unsigned int slot = 0; compositor.table && slot < WINDOWS_STARTING; slot++)
         {
-                unsigned long long stamp = windows_starting_read(compositor.table, slot, held);
+                int is_failed = 0;
+                unsigned long long stamp = windows_starting_read_state(compositor.table, slot, held, &is_failed);
                 if (!stamp)
                         continue;
                 int which = ui_apps_find(held);
-                if (which < 0 || now - stamp > WINDOWS_STARTING_NS || taskbar_app_showing(ui_apps.app[which].key, ui_apps.app[which].id))
+                if (which < 0)
+                {
                         windows_starting_done(compositor.table, slot);
+                        continue;
+                }
+                if (taskbar_app_showing(ui_apps.app[which].key, ui_apps.app[which].id))
+                {
+                        windows_starting_done(compositor.table, slot);
+                        continue;
+                }
+                if (is_failed)
+                {
+                        if (now - stamp > WINDOWS_FAILED_NS)
+                                windows_starting_done(compositor.table, slot);
+                        else
+                        {
+                                fail_idx[fcount] = which;
+                                string_copy_bounded((p8 *)fids[fcount++], (string_address)held, WINDOWS_APP_ID);
+                        }
+                }
+                else if (now - stamp > WINDOWS_STARTING_NS)
+                {
+                        windows_starting_fail(compositor.table, held, now);
+                        fail_idx[fcount] = which;
+                        string_copy_bounded((p8 *)fids[fcount++], (string_address)held, WINDOWS_APP_ID);
+                        compositor_alert_show(0, "Application failed to start", ui_apps_name(which));
+                }
                 else
+                {
+                        app_idx[count] = which;
                         string_copy_bounded((p8 *)ids[count++], (string_address)held, WINDOWS_APP_ID);
+                }
         }
-        bool changed = count != taskbar_starting.count;
+        bool changed = count != taskbar_starting.count || fcount != taskbar_starting.failed_count;
         for (int i = 0; i < count && !changed; i++)
                 changed = !string_equals((string_address)ids[i], (string_address)taskbar_starting.id[i]);
+        for (int i = 0; i < fcount && !changed; i++)
+                changed = !string_equals((string_address)fids[i], (string_address)taskbar_starting.failed_id[i]);
+        for (int i = 0; i < taskbar_cells_wait.count;)
+        {
+                int up = taskbar_cells_wait.window[i] ? compositor_row_named(taskbar_cells_wait.window[i]) : -1;
+                if (up >= 0)
+                {
+                        taskbar_cells_wait.slot[i] = taskbar_cells_wait.slot[--taskbar_cells_wait.count];
+                        taskbar_cells_wait.window[i] = taskbar_cells_wait.window[taskbar_cells_wait.count];
+                        taskbar_cells_wait.until[i] = taskbar_cells_wait.until[taskbar_cells_wait.count];
+                        taskbar_cells_wait.failed[i] = taskbar_cells_wait.failed[taskbar_cells_wait.count];
+                        changed = true;
+                        continue;
+                }
+                if (now >= taskbar_cells_wait.until[i])
+                {
+                        if (!taskbar_cells_wait.failed[i])
+                        {
+                                taskbar_cells_wait.failed[i] = true;
+                                taskbar_cells_wait.until[i] = now + TASKBAR_CELL_FAIL_NS;
+                                changed = true;
+                        }
+                        else
+                        {
+                                taskbar_cells_wait.slot[i] = taskbar_cells_wait.slot[--taskbar_cells_wait.count];
+                                taskbar_cells_wait.window[i] = taskbar_cells_wait.window[taskbar_cells_wait.count];
+                                taskbar_cells_wait.until[i] = taskbar_cells_wait.until[taskbar_cells_wait.count];
+                                taskbar_cells_wait.failed[i] = taskbar_cells_wait.failed[taskbar_cells_wait.count];
+                                changed = true;
+                                continue;
+                        }
+                }
+                i++;
+        }
         if (!changed)
                 return false;
         taskbar_starting.count = count;
+        taskbar_starting.failed_count = fcount;
         for (int i = 0; i < count; i++)
         {
                 string_copy_bounded((p8 *)taskbar_starting.id[i], (string_address)ids[i], WINDOWS_APP_ID);
-                string_copy_bounded((p8 *)taskbar_starting.title[i], (string_address)ui_apps_name(ui_apps_find(ids[i])), TASKBAR_PIN_TITLE);
+                string_copy_bounded((p8 *)taskbar_starting.title[i], (string_address)ui_apps_name(app_idx[i]), TASKBAR_PIN_TITLE);
+        }
+        for (int i = 0; i < fcount; i++)
+        {
+                string_copy_bounded((p8 *)taskbar_starting.failed_id[i], (string_address)fids[i], WINDOWS_APP_ID);
+                string_copy_bounded((p8 *)taskbar_starting.failed_title[i], (string_address)ui_apps_name(fail_idx[i]), TASKBAR_PIN_TITLE);
         }
         return true;
 }
 
 static positive taskbar_pictures_looked; // the loop's last pass while an app's picture was made off the draw (ui_apps_picture_kept)
-static positive taskbar_spin_due(void) { return taskbar_starting.count ? taskbar_starting.drawn + TASKBAR_STARTING_FRAME : 0; }
+static positive taskbar_spin_due(void)
+{
+        if (taskbar_starting.count)
+                return taskbar_starting.drawn + TASKBAR_STARTING_FRAME;
+        for (int i = 0; i < taskbar_cells_wait.count; i++)
+                if (!taskbar_cells_wait.failed[i])
+                        return taskbar_starting.drawn + TASKBAR_STARTING_FRAME;
+        if (taskbar_starting.failed_count || taskbar_cells_wait.count)
+                return taskbar_starting.drawn + 1000000000ull;
+        return 0;
+}
 // When the loop is to pass again: the next frame of a starting app's turn, and a frame on while an app's picture is being made.
 static positive taskbar_starting_due(void)
 {
@@ -2454,7 +2623,7 @@ static bool taskbar_starting_keep(positive now)
         b32 picture = ui_apps_picture_take();
         ui_apps_picture_tend(false); // a kept picture the band used checked against its icon, and the pictures made written for the next process
         taskbar_pictures_looked = now;
-        if (!picture && !taskbar_starting_take(now) && !(taskbar_starting.count && now >= taskbar_spin_due()))
+        if (!picture && !taskbar_starting_take(now) && !((taskbar_starting.count || taskbar_starting.failed_count || taskbar_cells_wait.count) && now >= taskbar_spin_due()))
                 return false;
         return taskbar_starting.drawn = now, true;
 }
@@ -2476,23 +2645,32 @@ static unsigned int taskbar_pins_tabs(struct taskbar_view *view, unsigned int ro
         if (compositor.band_at != 0 || !compositor.table)
                 return 0;
         memory_zero(taskbar_starting.pinned, sizeof(taskbar_starting.pinned));
+        memory_zero(taskbar_starting.failed_pinned, sizeof(taskbar_starting.failed_pinned));
         for (int i = 0; i < taskbar_pins.count && added < room; i++)
         {
                 const struct taskbar_pin *pin = &taskbar_pins.pin[i];
                 if (taskbar_app_showing(pin->key, pin->app))
                         continue;
-                bool starting = false;
+                bool starting = false, failed = false;
                 for (int s = 0; s < taskbar_starting.count && !starting; s++)
                         if (string_equals((string_address)taskbar_starting.id[s], (string_address)pin->app))
                                 starting = taskbar_starting.pinned[s] = true;
+                for (int s = 0; s < taskbar_starting.failed_count && !failed; s++)
+                        if (string_equals((string_address)taskbar_starting.failed_id[s], (string_address)pin->app))
+                                failed = taskbar_starting.failed_pinned[s] = true;
                 unsigned int at = view->count + added++;
-                taskbar_ghost_add(view, marks, lengths, rows, at, pin->title, pin->app, (unsigned char)(COMPOSITOR_TAB_AWAY | (starting ? COMPOSITOR_TAB_STARTING : 0)));
+                taskbar_ghost_add(view, marks, lengths, rows, at, pin->title, pin->app,
+                                  (unsigned char)(COMPOSITOR_TAB_AWAY | (starting ? COMPOSITOR_TAB_STARTING : 0) | (failed ? COMPOSITOR_TAB_FAILED : 0)));
                 taskbar_pins.ghost_tab[taskbar_pins.ghosts] = (int)at, taskbar_pins.ghost_pin[taskbar_pins.ghosts++] = i;
         }
         for (int i = 0; i < taskbar_starting.count && added < room; i++)
                 if (!taskbar_starting.pinned[i])
                         taskbar_ghost_add(view, marks, lengths, rows, view->count + added++, taskbar_starting.title[i],
                                           taskbar_starting.id[i], COMPOSITOR_TAB_AWAY | COMPOSITOR_TAB_STARTING);
+        for (int i = 0; i < taskbar_starting.failed_count && added < room; i++)
+                if (!taskbar_starting.failed_pinned[i])
+                        taskbar_ghost_add(view, marks, lengths, rows, view->count + added++, taskbar_starting.failed_title[i],
+                                          taskbar_starting.failed_id[i], COMPOSITOR_TAB_AWAY | COMPOSITOR_TAB_FAILED);
         return added;
 }
 

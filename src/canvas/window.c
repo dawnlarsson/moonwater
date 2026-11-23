@@ -241,6 +241,8 @@ struct windows_issue
 #define WINDOWS_DOOR "/run/moonwater/window."
 #define WINDOWS (1u << 20)
 #define WINDOWS_STARTING_NS 30000000000ull
+#define WINDOWS_STARTING_FAILED (1ull << 63)
+#define WINDOWS_FAILED_NS 5000000000ull
 #define WINDOW_WHEEL_SPAN_NS 5000000000ull
 enum
 {
@@ -2118,22 +2120,33 @@ static unsigned int windows_app_id_read(const struct windows *table, unsigned in
         return into[0] = 0, table && row < WINDOWS ? windows_copy_word_clean(into, table->app_id[row]) : 0;
 }
 
-static unsigned long long windows_starting_read(const struct windows *table, unsigned int slot, char *into)
+static unsigned long long windows_starting_read_state(const struct windows *table, unsigned int slot, char *into, int *failed)
 {
         unsigned long long stamp;
         unsigned int length;
 
         into[0] = 0;
+        if (failed)
+                *failed = 0;
         if (!table || slot >= WINDOWS_STARTING || !(stamp = __atomic_load_n(&table->starting_at[slot], __ATOMIC_ACQUIRE)))
                 return 0;
         length = windows_copy_word_clean(into, table->starting[slot]);
         __atomic_thread_fence(__ATOMIC_ACQUIRE);
-        return length && __atomic_load_n(&table->starting_at[slot], __ATOMIC_ACQUIRE) == stamp ? stamp : 0;
+        if (!length || __atomic_load_n(&table->starting_at[slot], __ATOMIC_ACQUIRE) != stamp)
+                return 0;
+        if (failed)
+                *failed = (stamp & WINDOWS_STARTING_FAILED) != 0;
+        return stamp & ~WINDOWS_STARTING_FAILED;
 }
 
-static void windows_starting_set(struct windows *table, const char *id, unsigned long long now)
+static unsigned long long windows_starting_read(const struct windows *table, unsigned int slot, char *into)
 {
-        unsigned int length = table && now ? windows_valid_word_len(id) : 0, slot = 0;
+        return windows_starting_read_state(table, slot, into, 0);
+}
+
+static void windows_starting_put(struct windows *table, const char *id, unsigned long long value)
+{
+        unsigned int length = table && value ? windows_valid_word_len(id) : 0, slot = 0;
         unsigned long long oldest = ~0ull;
         char held[WINDOWS_APP_ID];
 
@@ -2154,7 +2167,17 @@ static void windows_starting_set(struct windows *table, const char *id, unsigned
         __atomic_store_n(&table->starting_at[slot], 0ull, __ATOMIC_RELEASE);
         __atomic_thread_fence(__ATOMIC_RELEASE);
         windows_store_word(table->starting[slot], id, length);
-        __atomic_store_n(&table->starting_at[slot], now, __ATOMIC_RELEASE);
+        __atomic_store_n(&table->starting_at[slot], value, __ATOMIC_RELEASE);
+}
+
+static void windows_starting_set(struct windows *table, const char *id, unsigned long long now)
+{
+        windows_starting_put(table, id, now & ~WINDOWS_STARTING_FAILED);
+}
+
+static void windows_starting_fail(struct windows *table, const char *id, unsigned long long now)
+{
+        windows_starting_put(table, id, (now & ~WINDOWS_STARTING_FAILED) | WINDOWS_STARTING_FAILED);
 }
 
 static void windows_starting_done(struct windows *table, unsigned int slot)
