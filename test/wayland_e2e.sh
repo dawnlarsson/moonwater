@@ -194,6 +194,41 @@ PY
         *"frames 5"*) row ok "a client of y-inverted dma-bufs draws five frames" ;;
         *) row FAIL "a client of y-inverted dma-bufs draws five frames" "$out" ;;
         esac
+        # A window drawn into a dma-buf subsurface over all of it (winewayland's client area, -U) is lifted to that subsurface's buffer
+        # (wayland_lift): the compositor says so, the screen shows the subsurface's pixels and none of the window's own (0xff302010), and
+        # its frames keep coming, each when the last is released.
+        lifted_before=$(grep -c "windows lifted to a subsurface" "$work/compositor.log")
+        "$client" -b -U -n 1000000 -s -w 320 -h 240 -q > /dev/null 2>&1 &
+        shown=$!
+        sleep 1
+        seen=$(python3 - "$work/scan.img" 800 600 << 'PY'
+import sys
+raw = open(sys.argv[1], 'rb').read()
+w, h = int(sys.argv[2]), int(sys.argv[3])
+yellow = under = 0
+for y in range(h):
+    row = raw[y * w * 4:(y + 1) * w * 4]
+    for x in range(w):
+        px = row[x * 4:x * 4 + 3]
+        yellow += px == b'\x00\xea\xff'
+        under += px == b'\x10\x20\x30'
+print(yellow, under)
+PY
+)
+        kill "$shown" 2> /dev/null
+        wait "$shown" 2> /dev/null
+        set -- $seen
+        if [ "$1" = 1 ] && [ "$2" = 0 ] && [ "$(grep -c "windows lifted to a subsurface" "$work/compositor.log")" -gt "$lifted_before" ]; then
+                row ok "a window drawn into a dma-buf subsurface over all of it is lifted to it, and the screen shows the subsurface ($seen)"
+        else
+                row FAIL "a window drawn into a dma-buf subsurface over all of it is lifted to it, and the screen shows the subsurface" \
+                        "yellow and under $seen; $(grep "windows lifted" "$work/compositor.log" | tail -1)"
+        fi
+        out=$("$client" -b -U -n 30 -w 200 -h 120 2>&1)
+        case $out in
+        *"frames 30"*) row ok "a window lifted to its subsurface draws thirty frames, each when the last is released" ;;
+        *) row FAIL "a window lifted to its subsurface draws thirty frames, each when the last is released" "$out" ;;
+        esac
 fi
 
 # wl_shm ABGR8888 and wp_viewporter source-rect crop & destination scale.

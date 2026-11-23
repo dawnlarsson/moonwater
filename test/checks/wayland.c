@@ -9905,6 +9905,125 @@ static void test_stand_in(void)
         wayland_stop();
 }
 
+/*
+        A lift (wayland_lift): a window whose picture is all one opaque dma-buf subsurface, nothing over it, shows that subsurface's buffer
+        as its picture, its layers given back; a buffer of it the screen shows is held until a later one's frame is shown; the window's own
+        commits show nothing while it is lifted; a move off the window's edge, a subsurface over it or its going lets the lift down and shows
+        the window and its layers again, and a cover again lifts it again; lift-off keeps every window composed with its layers.
+*/
+static void lift_commit(struct wlc *c, unsigned long surface, unsigned long buffer)
+{
+        wlc_send(c, surface, WLQ_wl_surface_attach, buffer, 0L, 0L);
+        wlc_send(c, surface, WLQ_wl_surface_damage_buffer, 0L, 0L, 32L, 24L);
+        wlc_send(c, surface, WLQ_wl_surface_commit);
+}
+
+static void test_lift(void)
+{
+        struct wayland_host host = fake_host;
+        struct tree t;
+        struct wlc *c;
+        unsigned long small, small_sub, child, sub, first, second, third, again;
+        long pictures, ended;
+
+        host.row_layers = fake_row_layers;
+        wl_reset();
+        memset(&fake_layers, 0, sizeof fake_layers);
+        fake_layers.answer = fake_layers.answer_root = WAYLAND_LAYERS_KEPT;
+        fake.lend = 1;
+        wayland_start(&host);
+        memset(&t, 0, sizeof t);
+        session_open(&t.s);
+        c = t.s.c;
+        t.subcompositor = wl_global(c, t.s.registry, WLI_wl_subcompositor, 1);
+        session_window(&t.s, 0xff202020);
+        // A cover under a small subsurface over it: layers, no lift.
+        child = wlc_id(c, WLI_wl_surface, 6);
+        wlc_send(c, t.s.compositor, WLQ_wl_compositor_create_surface, child);
+        sub = wlc_id(c, WLI_wl_subsurface, 1);
+        wlc_send(c, t.subcompositor, WLQ_wl_subcompositor_get_subsurface, sub, child, t.s.surface);
+        wlc_send(c, sub, WLQ_wl_subsurface_set_desync);
+        first = dmabuf_buffer(&t.s, 32, 24, 0xff400000u, DRM_XRGB8888);
+        lift_commit(c, child, first);
+        WLCHECK(c->errors == 0 && wayland.lifts == 1 && fake_layers.kept == 0 && fake.row[0].pixels[5 * FAKE_W + 5] == 0xff400505u,
+                "a window all of one opaque dma-buf subsurface is lifted to it: its layers given back, its picture the subsurface's (%ld lifts, %ld kept, %08x, %s)",
+                wayland.lifts, fake_layers.kept, fake.row[0].pixels[5 * FAKE_W + 5], c->error_text);
+        // The window's own commit while lifted: nothing of it is shown.
+        pictures = fake.row[0].pictures;
+        wlc_send(c, t.s.surface, WLQ_wl_surface_attach, t.s.buffer, 0L, 0L);
+        wlc_send(c, t.s.surface, WLQ_wl_surface_damage_buffer, 0L, 0L, 32L, 24L);
+        wlc_send(c, t.s.surface, WLQ_wl_surface_commit);
+        WLCHECK(c->errors == 0 && fake.row[0].pictures == pictures && fake.row[0].pixels[5 * FAKE_W + 5] == 0xff400505u,
+                "the lifted window's own commit shows nothing (%ld pictures)", fake.row[0].pictures - pictures);
+        // Its next buffer is the picture; the one the screen shows is held until the next one's frame is shown.
+        wayland_latch();
+        wayland_presented(1000000000ul, 6944444ul, 1, 0ul, 0L);
+        wlc_pump(c);
+        wlc_forget(c);
+        second = dmabuf_buffer(&t.s, 32, 24, 0xff500000u, DRM_XRGB8888);
+        lift_commit(c, child, second);
+        wayland_latch();
+        wayland_drawn();
+        wlc_pump(c);
+        WLCHECK(c->errors == 0 && fake.row[0].pixels[5 * FAKE_W + 5] == 0xff500505u && releases_of(c, first) == 0,
+                "a lifted subsurface's next buffer is the picture, and the one shown is held while the next one's flip is to come (%08x, %ld)",
+                fake.row[0].pixels[5 * FAKE_W + 5], releases_of(c, first));
+        wayland_presented(1006944444ul, 6944444ul, 2, 0ul, 0L);
+        wlc_pump(c);
+        WLCHECK(releases_of(c, first) == 1, "and released once, when the next one is shown (%ld)", releases_of(c, first));
+        // Moved off the window's edge (at the window's commit): let down, the window and its layer shown again.
+        ended = wayland.lifts_ended;
+        wlc_send(c, sub, WLQ_wl_subsurface_set_position, 4L, 4L);
+        wlc_send(c, t.s.surface, WLQ_wl_surface_commit);
+        WLCHECK(c->errors == 0 && wayland.lifts_ended == ended + 1 && fake_layers.kept == 1 && fake.row[0].pixels[2 * FAKE_W + 2] == 0xff202020u,
+                "a lifted subsurface moved off its window's edge lets the lift down: the window and its layer are shown again (%ld, %ld kept, %08x)",
+                wayland.lifts_ended - ended, fake_layers.kept, fake.row[0].pixels[2 * FAKE_W + 2]);
+        wlc_send(c, sub, WLQ_wl_subsurface_set_position, 0L, 0L);
+        wlc_send(c, t.s.surface, WLQ_wl_surface_commit);
+        WLCHECK(c->errors == 0 && wayland.lifts == 2 && fake_layers.kept == 0 && fake.row[0].pixels[2 * FAKE_W + 2] == 0xff500202u,
+                "moved back over all of it, the window is lifted again (%ld lifts, %08x)", wayland.lifts, fake.row[0].pixels[2 * FAKE_W + 2]);
+        // A subsurface over it lets the lift down; gone, the window is lifted again.
+        ended = wayland.lifts_ended;
+        small = layer_child(&t, 2, 2, 4, 0xff00ff00, 1, &small_sub, 0);
+        WLCHECK(c->errors == 0 && wayland.lifts_ended == ended + 1 && fake_layers.kept == 2,
+                "a subsurface over the lifted one lets the lift down, both its layers (%ld, %ld kept)", wayland.lifts_ended - ended, fake_layers.kept);
+        wlc_send(c, small_sub, WLQ_wl_subsurface_destroy);
+        wlc_send(c, small, WLQ_wl_surface_destroy);
+        WLCHECK(c->errors == 0 && wayland.lifts == 3 && fake.row[0].pixels[3 * FAKE_W + 3] == 0xff500303u,
+                "and that one gone, the window is lifted again (%ld lifts, %08x)", wayland.lifts, fake.row[0].pixels[3 * FAKE_W + 3]);
+        // Given no buffer: let down, the window shown alone.
+        ended = wayland.lifts_ended;
+        wlc_send(c, child, WLQ_wl_surface_attach, 0UL, 0L, 0L);
+        wlc_send(c, child, WLQ_wl_surface_commit);
+        WLCHECK(c->errors == 0 && wayland.lifts_ended == ended + 1 && fake.row[0].pixels[5 * FAKE_W + 5] == 0xff202020u,
+                "the lifted subsurface given no buffer lets the lift down, and the window is shown (%ld, %08x)", wayland.lifts_ended - ended,
+                fake.row[0].pixels[5 * FAKE_W + 5]);
+        third = dmabuf_buffer(&t.s, 32, 24, 0xff600000u, DRM_XRGB8888);
+        lift_commit(c, child, third);
+        WLCHECK(c->errors == 0 && wayland.lifts == 4 && fake.row[0].pixels[5 * FAKE_W + 5] == 0xff600505u, "a buffer again lifts it again (%ld)", wayland.lifts);
+        // Destroyed while lifted: the window is shown again.
+        ended = wayland.lifts_ended;
+        wlc_send(c, sub, WLQ_wl_subsurface_destroy);
+        wlc_send(c, child, WLQ_wl_surface_destroy);
+        WLCHECK(c->errors == 0 && wayland.lifts_ended == ended + 1 && fake.row[0].pixels[5 * FAKE_W + 5] == 0xff202020u,
+                "the lifted subsurface destroyed lets the lift down, and the window is shown (%08x)", fake.row[0].pixels[5 * FAKE_W + 5]);
+        // Lift-off: a cover is a layer as before.
+        wayland_lifts_off(1);
+        child = wlc_id(c, WLI_wl_surface, 6);
+        wlc_send(c, t.s.compositor, WLQ_wl_compositor_create_surface, child);
+        sub = wlc_id(c, WLI_wl_subsurface, 1);
+        wlc_send(c, t.subcompositor, WLQ_wl_subcompositor_get_subsurface, sub, child, t.s.surface);
+        wlc_send(c, sub, WLQ_wl_subsurface_set_desync);
+        again = dmabuf_buffer(&t.s, 32, 24, 0xff700000u, DRM_XRGB8888);
+        lift_commit(c, child, again);
+        WLCHECK(c->errors == 0 && wayland.lifts == 4 && fake_layers.kept == 1, "with lifts off, a cover is a layer (%ld lifts, %ld kept)", wayland.lifts,
+                fake_layers.kept);
+        wayland_lifts_off(0);
+        wlc_end(c);
+        leak_check("lifts");
+        wayland_stop();
+}
+
 /* A feedback of a frame that was not drawn, its window let go (a null buffer), is discarded, never answered presented later. */
 static void test_presented_discard_row(void)
 {
@@ -10145,6 +10264,7 @@ int main(int argc, char **argv)
         test_clipboard();
         test_bridge();
         test_stand_in();
+        test_lift();
         test_clip_fuzz(rounds);
         test_fuzz(rounds);
         test_raw(rounds);

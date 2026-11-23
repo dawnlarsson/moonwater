@@ -359,7 +359,8 @@ struct wayland_client
         struct wayland_cb *cbs;
 };
 
-struct wayland_row { long client, surface, percent, stand_client, stand_surface; }; // stand_*: the stand-in whose pictures the row shows, -1 for none
+// stand_*: the stand-in whose pictures the row shows, -1 for none; lifted: that is a subsurface of the row's own window, lifted (wayland_lift)
+struct wayland_row { long client, surface, percent, stand_client, stand_surface; unsigned char lifted; };
 struct wayland_touch { unsigned char live; int client, row, surface; long id, x, y; };
 struct wayland_token { unsigned char live, committed; int client; unsigned long serial; long when; unsigned int gen; char text[33]; };
 
@@ -412,6 +413,7 @@ static struct
         long cursor_client, cursor_surface, cursor_hot_x, cursor_hot_y;
         unsigned int cursor_gen;
         unsigned long cursor_serial;
+        long lift_off, lifts, lifts_ended; // the host's lift-off switch (wayland_lifts_off); the windows lifted and let down (wayland_lift)
 } wayland;
 
 static const struct wayland_host *wayland_tables_by;
@@ -440,7 +442,9 @@ static struct wayland_surface *wayland_row_surface(long row, struct wayland_clie
         return *client = c, &c->surfaces[wayland.row[row].surface];
 }
 
-// The stand-in whose pictures the row shows (canvas_swapchain_v1), and its client: 0 for none.
+static struct wayland_surface *wayland_root_of(struct wayland_client *c, struct wayland_surface *s);
+
+// The stand-in whose pictures the row shows (canvas_swapchain_v1), or the subsurface it lifted (wayland_lift), and its client: 0 for none.
 static struct wayland_surface *wayland_row_stand(long row, struct wayland_client **client)
 {
         struct wayland_client *c;
@@ -450,7 +454,8 @@ static struct wayland_surface *wayland_row_stand(long row, struct wayland_client
             wayland.row[row].stand_surface < 0 || wayland.row[row].stand_surface >= c->tbl[WLT_SURFACE].count)
                 return 0;
         s = &c->surfaces[wayland.row[row].stand_surface];
-        if (!s->live || s->role != WAYLAND_ROLE_STAND_IN || s->row != row)
+        if (!s->live || (wayland.row[row].lifted ? s->role != WAYLAND_ROLE_SUBSURFACE || !s->sub_parent || wayland_root_of(c, s)->row != row
+                                                 : s->role != WAYLAND_ROLE_STAND_IN || s->row != row))
                 return 0;
         return *client = c, s;
 }
@@ -1421,9 +1426,11 @@ static void wayland_row_release(struct wayland_client *c, struct wayland_surface
                 wayland_lent_let(c, s->row, held[at]);
         for (struct wayland_surface *ch = wayland_tree_next(c, s, s); ch; ch = wayland_tree_next(c, s, ch))
         {
-                unsigned int a = ch->lent, b = ch->lent_gone;
-                ch->lent = ch->lent_gone = 0;
-                wayland_lent_let(c, s->row, a), wayland_lent_let(c, s->row, b);
+                // (a subsurface that was lifted holds a latched and a shown buffer too)
+                unsigned int kept[4] = {ch->lent, ch->lent_gone, ch->lent_latched, ch->lent_shown};
+                ch->lent = ch->lent_gone = ch->lent_latched = ch->lent_shown = 0;
+                for (long at = 0; at < 4; at++)
+                        wayland_lent_let(c, s->row, kept[at]);
         }
         wayland.rows--, wayland_presentings_discard(c, s), s->row = -1;
         if (!wayland.rows)
@@ -1992,6 +1999,167 @@ static void wayland_layers_lent(struct wayland_client *c, struct wayland_surface
         root->layered = list != 0;
 }
 
+/*
+        A lift (lev A10): a window whose picture is all one subsurface -- opaque, a dma-buf, over the whole window, nothing over it -- shows
+        that subsurface's buffer as its picture, as it shows a stand-in's (wayland_stand_show): a client that draws into a subsurface over
+        its window (winewayland's client area, SDL with libdecor, a video player's) is shown straight from the buffer it draws, on the plane
+        and scaled by it, where its window and layers were composed every frame (1.2-1.8 ms of the card's time and 16.6 MB a 1080p frame).
+        What is under it is hidden, so nothing of it is lost. The subsurface keeps its role, its input and its sync: its commits that apply
+        (wayland_sub_apply) are the row's pictures, its latch, shown buffer, hints and feedback are the stand-in's (wayland_row_stand), and the
+        window's own commits put nothing on the screen while it is lifted (the stood branch of wayland_commit). The lift is looked at again
+        wherever the tree can change (wayland_layers: a subsurface's commit, a relay, a window's commit; wayland_sub_drop) and let down the
+        moment its rule breaks: the window's own picture and its layers come back (the ROOT branch of wayland_layers). A stand-in of the
+        client's (canvas_swapchain_v1) always has the row before a lift. /run/moonwater/lift-off turns it off (wayland_lifts_off).
+*/
+static void wayland_relay(struct wayland_client *c, struct wayland_surface *root);
+
+struct wayland_lifting { struct wayland_surface *root, *top; int bad; };
+
+// The top surface of the window that has a buffer (the window's own counts as one: nothing under it can be the top).
+static void wayland_lift_walk(struct wayland_client *c, struct wayland_surface *s, struct wayland_lifting *l, long depth)
+{
+        if (depth > c->tbl[WLT_SURFACE].count)
+        {
+                l->bad = 1;
+                return;
+        }
+        for (int side = 0; side < 2 && !l->bad; side++)
+        {
+                if (side && (s->held || s == l->root))
+                        l->top = s;
+                for (unsigned int ch = s->first_child[side]; ch && !l->bad; ch = c->surfaces[ch - 1].next_sib)
+                        wayland_lift_walk(c, &c->surfaces[ch - 1], l, depth + 1);
+        }
+}
+
+// The subsurface the window can be lifted to, or 0.
+static struct wayland_surface *wayland_lift_pick(struct wayland_client *c, struct wayland_surface *root)
+{
+        struct wayland_lifting l = {root, 0, 0};
+        struct wayland_surface *t;
+        struct wayland_buffer *b;
+        struct wayland_rect window;
+        long ox, oy;
+
+        if (wayland.lift_off || root->row < 0 || !(root->flags & WAYLAND_SURFACE_MAPPED) || !wayland_has_children(root))
+                return 0;
+        wayland_lift_walk(c, root, &l, 0);
+        if (l.bad || !(t = l.top) || t == root || t->role != WAYLAND_ROLE_SUBSURFACE || !t->held || t->cur.alpha != 0xffffffffu ||
+            t->pending.alpha != 0xffffffffu)
+                return 0;
+        b = &c->buffers[t->held - 1];
+        if (!c->pools[b->pool].dmabuf || !wayland_surface_is_opaque(t, b))
+                return 0;
+        window = wayland_window_of(c, root), wayland_sub_offset(c, t, &ox, &oy);
+        if (window.width <= 0 || window.height <= 0 || ox > window.x || oy > window.y || ox + t->width < window.x + window.width ||
+            oy + t->height < window.y + window.height)
+                return 0;
+        return t;
+}
+
+// The lifted subsurface's buffer to the row as its picture: the part of it over the window, at the window's size.
+static void wayland_lift_show(struct wayland_client *c, struct wayland_surface *root, struct wayland_surface *t, int full)
+{
+        struct wayland_buffer *b = &c->buffers[t->held - 1];
+        struct wayland_picture picture;
+        struct wayland_rect window = wayland_window_of(c, root);
+        long ox, oy, scale120 = t->scale120 > 0 ? t->scale120 : WAYLAND_UNIT;
+        int plain;
+
+        wayland_sub_offset(c, t, &ox, &oy);
+        wayland_picture_init(&picture, &t->cur, b, &c->pools[b->pool], t->width, t->height, ox - window.x, oy - window.y, window.width, window.height);
+        picture.transparent = 0, picture.last = 1;
+        plain = !picture.dest_x && !picture.dest_y && t->width == window.width && t->height == window.height && !picture.src_width &&
+                !picture.dst_width && !picture.transform && !picture.y_invert;
+        picture.full = full || t->need_full || !plain || t->pending.damage_full || !t->pending.damages;
+        if (!picture.full)
+                wayland_picture_clip_damage(&picture, &t->pending, scale120, b->width, b->height);
+        t->need_full = 0, t->window_x = window.x, t->window_y = window.y, t->window_w = window.width, t->window_h = window.height;
+        // (the submit names its row by its surface's: the window's, for the time of the call)
+        t->row = root->row;
+        wayland_picture_submit(c, t, b, &picture, 0, 0);
+        t->row = -1;
+}
+
+// The row's lift let down: its subsurface's buffers go back once no frame shows them (wayland_lend_leave), as a stand-in's do.
+static void wayland_lift_end(long row)
+{
+        struct wayland_client *c = wayland_client_of(wayland.row[row].stand_client);
+        long at = wayland.row[row].stand_surface;
+
+        wayland.row[row].stand_client = wayland.row[row].stand_surface = -1, wayland.row[row].lifted = 0, wayland.lifts_ended++;
+        if (c && at >= 0 && at < c->tbl[WLT_SURFACE].count && c->surfaces[at].live)
+                wayland_lend_leave(c, &c->surfaces[at]);
+}
+
+// A subsurface going (wayland_sub_drop): the window's lift let down when it is the lifted one or holds it, and the window's picture shown again.
+static void wayland_lift_drop(struct wayland_client *c, struct wayland_surface *root, struct wayland_surface *s)
+{
+        struct wayland_surface *t;
+        long row = root->row;
+
+        if (row < 0 || row >= wayland.row_made || !wayland.row[row].lifted || wayland.row[row].stand_client != c->slot ||
+            wayland.row[row].stand_surface < 0 || wayland.row[row].stand_surface >= c->tbl[WLT_SURFACE].count)
+                return;
+        t = &c->surfaces[wayland.row[row].stand_surface];
+        for (long hops = 0; t != s && t->role == WAYLAND_ROLE_SUBSURFACE && t->sub_parent && hops < c->tbl[WLT_SURFACE].count; hops++)
+                t = &c->surfaces[t->sub_parent - 1];
+        if (t == s)
+                wayland_lift_end(row), root->need_full = 1, root->window_w = -1;
+}
+
+/*
+        The window's lift looked at again, with what changed (0: all of it, a relay's): true while the window is lifted (its picture is the
+        lifted subsurface's, shown again here when that one changed or the lift moved to it), false when it is not (the caller shows the
+        window and its layers; a lift let down here has the window's own picture shown again, its window_w forgotten).
+*/
+static int wayland_lift(struct wayland_client *c, struct wayland_surface *root, struct wayland_surface *changed, int full)
+{
+        long row = root->row;
+        struct wayland_client *wc;
+        struct wayland_surface *was, *now;
+        struct wayland_rect window;
+
+        if (row < 0 || row >= wayland.row_made || (wayland_row_stood(row) && !wayland.row[row].lifted))
+                return 0;
+        was = wayland.row[row].lifted ? wayland_row_stand(row, &wc) : 0;
+        now = wayland_lift_pick(c, root);
+        if (wayland.row[row].lifted && (was != now || !was))
+        {
+                wayland_lift_end(row);
+                if (!now)
+                        return root->need_full = 1, root->window_w = -1, 0;
+        }
+        if (!now)
+                return 0;
+        if (!wayland.row[row].lifted)
+        {
+                // The window's layers given back by the host (none kept), so its picture is the subsurface's alone.
+                if (root->layered && wayland.host->row_layers)
+                        wayland.host->row_layers(wayland.host->context, root->row, 0, 0, 0);
+                wayland_layers_lent(c, root, 0, 0), root->laying = 0; // (the picture below closes what the window had open)
+                wayland.row[row].stand_client = c->slot, wayland.row[row].stand_surface = wayland_surface_index(c, now), wayland.row[row].lifted = 1;
+                wayland.lifts++, changed = now, full = 1;
+        }
+        window = wayland_window_of(c, root);
+        if (!changed || changed == now || window.x != now->window_x || window.y != now->window_y || window.width != now->window_w ||
+            window.height != now->window_h)
+                wayland_lift_show(c, root, now, full || changed != now);
+        root->need_full = 0;
+        return 1;
+}
+
+// A lifted window's own commit: what it changed (its size, its subsurfaces' places and order) looked at against the lift.
+static void wayland_lift_again(struct wayland_client *c, struct wayland_surface *root)
+{
+        if (root->row < 0 || root->row >= wayland.row_made || !wayland.row[root->row].lifted)
+                return;
+        if (!wayland_lift(c, root, root->need_full ? 0 : root, 0))
+                root->need_full = 1, wayland_relay(c, root);
+}
+
+WAYLAND_API void wayland_lifts_off(int off) { wayland.lift_off = off != 0; }
+
 static int wayland_layers(struct wayland_client *c, struct wayland_surface *root, struct wayland_surface *changed, int full)
 {
         struct wayland_picture list[WAYLAND_LAYERS];
@@ -1999,6 +2167,8 @@ static int wayland_layers(struct wayland_client *c, struct wayland_surface *root
         struct wayland_rect window, box;
         long count, status = 0;
 
+        if (wayland_lift(c, root, changed, full))
+                return 1;
         if (!wayland.host->row_layers || root->row < 0 || !(root->flags & WAYLAND_SURFACE_MAPPED) || wayland_row_stood(root->row))
                 return 0;
         window = wayland_window_of(c, root), box = (struct wayland_rect){-window.x, -window.y, root->width, root->height};
@@ -2204,6 +2374,8 @@ static void wayland_sub_drop(struct wayland_client *c, struct wayland_surface *s
 {
         struct wayland_surface *root = s->role == WAYLAND_ROLE_SUBSURFACE && s->sub_parent ? wayland_root_of(c, s) : 0;
 
+        if (root && root != s)
+                wayland_lift_drop(c, root, s);
         wayland_unhold(c, s), wayland_sub_unlink(c, s), s->sub_parent = 0;
         for (int side = 0; side < 2; side++)
                 for (unsigned int ch = s->first_child[side]; ch; ch = c->surfaces[ch - 1].next_sib)
@@ -2211,7 +2383,7 @@ static void wayland_sub_drop(struct wayland_client *c, struct wayland_surface *s
         if (root && root != s && root->live)
                 root->need_full = 1, wayland_relay(c, root);
         for (struct wayland_surface *o = s; o; o = wayland_tree_next(c, s, o))
-                if ((o != s || s->row < 0) && (o->lent || o->lent_gone))
+                if ((o != s || s->row < 0) && (o->lent || o->lent_gone || o->lent_latched || o->lent_shown))
                         wayland_lend_leave(c, o);
         for (int side = 0; side < 2; side++)
         {
@@ -2614,9 +2786,14 @@ static void wayland_stand_end(struct wayland_client *c, struct wayland_surface *
 static void wayland_stand_lose(long row)
 {
         struct wayland_client *sc;
-        struct wayland_surface *st = wayland_row_stand(row, &sc);
+        struct wayland_surface *st;
 
-        if (st)
+        if (row >= 0 && row < wayland.row_made && wayland.row[row].lifted)
+        {
+                wayland_lift_end(row);
+                return;
+        }
+        if ((st = wayland_row_stand(row, &sc)))
                 wayland_stand_end(sc, st, 0);
         if (row >= 0 && row < wayland.row_made)
                 wayland.row[row].stand_client = wayland.row[row].stand_surface = -1;
@@ -2671,6 +2848,8 @@ static long wayland_stand_row(struct wayland_client *c, struct wayland_surface *
         if (row >= 0)
         {
                 struct wayland_rect window = wayland_window_of(rc, root);
+                if (wayland.row[row].lifted) // a stand-in has the row before a lift
+                        wayland_lift_end(row);
                 if ((other = wayland_row_stand(row, &oc)) && other != s)
                         other->u.stand.displaced = 1, wayland_stand_end(oc, other, 0);
                 wayland.row[row].stand_client = c->slot, wayland.row[row].stand_surface = wayland_surface_index(c, s);
@@ -3067,6 +3246,8 @@ static int wayland_commit(struct wayland_client *c, struct wayland_object *self,
                         wayland_hold_buf(c, s, c->objects[buffer].link);
                         if (stood && wayland_has_children(s))
                                 wayland_sub_apply_children(c, wayland_surface_index(c, s));
+                        if (stood)
+                                wayland_lift_again(c, s);
                 }
                 else
                 {
@@ -3103,6 +3284,8 @@ static int wayland_commit(struct wayland_client *c, struct wayland_object *self,
                 if (s->need_full) wayland_relay(c, s);
                 wayland_sub_apply_children(c, wayland_surface_index(c, s)), wayland_row_take(c, s);
         }
+        else if (buffer < 0 && !initial && stood && s->row >= 0 && s->row < wayland.row_made && wayland.row[s->row].lifted)
+                wayland_sub_apply_children(c, wayland_surface_index(c, s)), wayland_lift_again(c, s); // its subsurfaces' state applied, as ever
         s->pending.attach_made = s->pending.attached = s->pending.damages = s->pending.damage_full = 0;
         if (s->cbq[WLCB_CALLBACK].count) wayland_callbacks_take(c, s);
         wayland_feedback_take(c, s, s->row >= 0);
@@ -6449,6 +6632,7 @@ static void wayland_presented_rows(unsigned long when, unsigned long refresh, un
         {
                 struct wayland_client *c = 0, *sc = 0;
                 struct wayland_surface *s = wayland_row_surface(row, &c), *st = wayland_row_stand(row, &sc);
+                struct wayland_surface *zero = st && wayland.row[row].lifted ? st : s; // the surface whose buffer the screen shows
                 for (int which = 0; which < 2; which++, s = st, c = sc)
                 {
                         if (!s) continue;
@@ -6471,7 +6655,7 @@ static void wayland_presented_rows(unsigned long when, unsigned long refresh, un
                         if (c->presenting_surfaces)
                                 for (struct wayland_surface *o = s; o; o = wayland_tree_next(c, s, o))
                                         wayland_presentings_done(c, o, when, refresh, seq,
-                                                                 o == s && row == zero_row ? flags | WLN_wp_presentation_feedback_kind_zero_copy : flags);
+                                                                 o == (which ? s : zero) && row == zero_row ? flags | WLN_wp_presentation_feedback_kind_zero_copy : flags);
                 }
         }
         for (long slot = 0; slot < wayland.client_slots; slot++)

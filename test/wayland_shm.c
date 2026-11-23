@@ -7,9 +7,11 @@
             wayland-scanner private-code  XDG.xml xdg-shell-code.c
             cc -std=gnu11 -Wall -Wextra -I. test/wayland_shm.c xdg-shell-code.c -lwayland-client -o wayland-shm
 
-        wayland-shm [-n FRAMES] [-w WIDTH] [-h HEIGHT] [-t TITLE] [-a APP_ID] [-s] [-m] [-f] [-d] [-D] [-K] [-u] [-b] [-L] [-S] [-C TEXT] [-P] [-T] [-q] [-v]
+        wayland-shm [-n FRAMES] [-w WIDTH] [-h HEIGHT] [-t TITLE] [-a APP_ID] [-s] [-m] [-f] [-d] [-D] [-K] [-u] [-U] [-b] [-L] [-S] [-C TEXT] [-P] [-T] [-q] [-v]
         -n frames to draw before it exits (default 60), -w and -h the size it asks to be, -s keep still (draw once, then
         only on a configure), -m ask to be maximized, -f fullscreen, -d damage only the rectangle that changes, -u a subsurface of 64 by 48 in 0xff10ff20 at (10, 20),
+        -U every frame drawn into a subsurface over all of the window, as winewayland's client area is (the window's own buffer, of shared
+        memory in 0xff302010, drawn once; the subsurface not synchronized; its buffers dma-bufs with -b),
         -L lock the pointer and say each relative motion (built with -DHAVE_GAMES: the relative pointer and pointer constraints
         protocols), -S follow the scale as a toolkit does (built with -DHAVE_SCALE: wl_output, xdg-output, the fractional scale
         and viewporter protocols): the size is logical, the buffer is the size times the preferred scale with a viewport whose
@@ -126,14 +128,14 @@ static struct wl_data_offer *selection_offer;
 static struct wl_data_source *copy_source;
 static const char *copy_text;
 static int paste_wanted, copy_done, paste_done;
-static struct wl_surface *surface;
+static struct wl_surface *surface, *cover; // cover: -U's subsurface over all of the window, where the frames are drawn
 static struct xdg_surface *xdg_surface;
 static struct xdg_toplevel *toplevel;
 static struct wl_callback *frame_callback;
 static struct buffer buffers[2];
 
 static int width = 320, height = 240, frames_wanted = 60, frames, configures, acked, closed, quiet, still, damage_only, cut_files, big_damage, hold;
-static int child_wanted, maximize, fullscreen, ready, pointer_events, key_events, enters, leaves, scale = 1, verbose;
+static int use_cover, child_wanted, maximize, fullscreen, ready, pointer_events, key_events, enters, leaves, scale = 1, verbose;
 static const char *title = "wayland-shm", *app_id = "wayland-shm";
 
 static void say(const char *what, long value)
@@ -283,17 +285,31 @@ static void redraw(void)
                 _exit(0);
         }
         paint(b, frames);
-        wl_surface_attach(surface, b->buffer, 0, 0);
-        if (big_damage)
-                wl_surface_damage_buffer(surface, (frames * 7) % 8, (frames * 5) % (height / 6), width - 16, height * 5 / 6);
-        else if (damage_only)
-                wl_surface_damage_buffer(surface, (frames * 3) % (width - 20) - 3, 10, 26, 20);
-        else
+        if (use_cover && !frames)
+        {
+                // The window's own picture, once, under the subsurface that hides it.
+                static struct buffer under;
+
+                if (make_shm_buffer(&under, width, height) < 0)
+                        exit(2);
+                for (int at = 0; at < width * height; at++)
+                        ((unsigned *)under.data)[at] = 0xff302010u;
+                wl_surface_attach(surface, under.buffer, 0, 0);
                 wl_surface_damage_buffer(surface, 0, 0, width, height);
-        frame_callback = wl_surface_frame(surface);
+                wl_surface_commit(surface);
+        }
+        struct wl_surface *into = use_cover ? cover : surface;
+        wl_surface_attach(into, b->buffer, 0, 0);
+        if (big_damage)
+                wl_surface_damage_buffer(into, (frames * 7) % 8, (frames * 5) % (height / 6), width - 16, height * 5 / 6);
+        else if (damage_only)
+                wl_surface_damage_buffer(into, (frames * 3) % (width - 20) - 3, 10, 26, 20);
+        else
+                wl_surface_damage_buffer(into, 0, 0, width, height);
+        frame_callback = wl_surface_frame(into);
         wl_callback_add_listener(frame_callback, &frame_listener, 0);
         b->busy = 1;
-        wl_surface_commit(surface);
+        wl_surface_commit(into);
 }
 
 #ifdef HAVE_SCALE
@@ -962,7 +978,7 @@ int main(int argc, char **argv)
         struct wl_registry *registry;
         int option;
 
-        while ((option = getopt(argc, argv, "n:w:h:t:a:smfdDKubBYVLSIC:PqvT")) != -1)
+        while ((option = getopt(argc, argv, "n:w:h:t:a:smfdDKuUbBYVLSIC:PqvT")) != -1)
                 switch (option)
                 {
                 case 'n': frames_wanted = atoi(optarg); break;
@@ -977,6 +993,7 @@ int main(int argc, char **argv)
                 case 'D': big_damage = 1; break;
                 case 'K': hold = 1; break;
                 case 'u': child_wanted = 1; break;
+                case 'U': use_cover = 1; break;
                 case 'b': use_dmabuf = 1; break;
                 case 'B': use_abgr = 1; break;
                 case 'Y': use_y_invert = 1; break;
@@ -1099,6 +1116,20 @@ int main(int argc, char **argv)
                 xdg_toplevel_set_maximized(toplevel);
         if (fullscreen)
                 xdg_toplevel_set_fullscreen(toplevel, 0);
+        if (use_cover)
+        {
+                struct wl_subsurface *sub;
+
+                if (!subcompositor)
+                {
+                        fprintf(stderr, "wayland-shm: no subcompositor\n");
+                        return 2;
+                }
+                cover = wl_compositor_create_surface(compositor);
+                sub = wl_subcompositor_get_subsurface(subcompositor, cover, surface);
+                wl_subsurface_set_position(sub, 0, 0);
+                wl_subsurface_set_desync(sub);
+        }
         wl_surface_commit(surface);
         if (child_wanted)
         {

@@ -4,7 +4,7 @@
         direct/overlay scanout, and peer Wayland/XWM bridges across 13 included parts under compositor/.
         Runtime switches under /run/moonwater: display-off, present-early, present-wait, vrr-capable,
         lists-off, lists-wait, gpu-nouserptr, gpu-own-userptr, gpu-gfx10, gpu-round-off, gpu-cut-off,
-        gpu-imports-all, touch-trace, layers-off, planes-off, cursor-plane-probe, game-hold-off, gpu-clocks-off.
+        gpu-imports-all, touch-trace, layers-off, lift-off, planes-off, cursor-plane-probe, game-hold-off, gpu-clocks-off.
 
         Dawn Larsson - Apache-2.0 license - github.com/dawnlarsson/moonwater
 */

@@ -6391,9 +6391,21 @@ static void compositor_wl_answer_stamp(positive when, unsigned int seq)
 static void compositor_wl_presented(void)
 {
         positive now = clock_monotonic_nanoseconds();
+        static long lifts_told, ended_told;
+        static struct canvas_switch lift_off;
 
         if (!compositor_wl.started)
                 return;
+        // Lifts off while the owner's /run/moonwater/lift-off is there (looked for every 512th present, as planes-off is): a window drawn into
+        // one subsurface over all of it is composed with its layers as before, let down at its next commit (wayland_lift).
+        wayland_lifts_off(canvas_switch_poll(&lift_off, "/run/moonwater/lift-off", 511));
+        // A window lifted to its subsurface, or let down (wayland_lift): said in the log, for the box's runs.
+        if (wayland.lifts != lifts_told || wayland.lifts_ended != ended_told)
+        {
+                string_format(log, "compositor: windows lifted to a subsurface's buffer %p times, let down %p times\n", (positive)wayland.lifts,
+                              (positive)wayland.lifts_ended), log_flush();
+                lifts_told = wayland.lifts, ended_told = wayland.lifts_ended;
+        }
         compositor_wl.zero_row = compositor.direct_row >= 0 && compositor_client_scans(compositor.direct_row) ? compositor.direct_row
                                  : compositor.plane_row >= 0 && compositor_client_scans(compositor.plane_row) ? compositor.plane_row
                                                                                                               : -1;
