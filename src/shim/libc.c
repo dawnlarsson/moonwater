@@ -45,6 +45,17 @@
                 -fuse-ld=lld -Wl,-soname,libmoonwater-c.so,--version-script=src/shim/libc.map,--gc-sections,-z,now,-Bsymbolic \
                 -Wl,--hash-style=both,--build-id=none,-s -o libmoonwater-c.so src/shim/libc.c
 */
+#if defined(__i386__)
+/*
+        The i386 build is a library with nothing in it. glibc's preload names /usr/local/$LIB/libmoonwater-c.so, and $LIB is
+        lib32 (Arch) or lib/i386-linux-gnu (Debian) in a 32-bit process, which would otherwise say "cannot be preloaded"
+        at every start of every 32-bit program (Steam's client, a 32-bit game, Wine's 32-bit side). lib.c has no i386
+        bodies, so a 32-bit program keeps its C library's routines whole. Built with:
+          clang -target i386-linux-gnu -shared -nostdlib -fuse-ld=lld -Wl,-soname,libmoonwater-c.so,--build-id=none,-s \
+                -o libmoonwater-c.so src/shim/libc.c
+*/
+__asm__("");
+#else
 #define STANDARD_NO_ENTRY 1             // no _start: the program has its own
 #define LIBRARY_MEMCPY_OVERLAPS 1       // memcpy is memmove's body (above)
 #include "../lib.c"
@@ -217,3 +228,4 @@ __asm__(
     ".popsection\n"
     ASM_END(libc_shim_overflow)
 );
+#endif

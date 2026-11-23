@@ -1581,6 +1581,11 @@ static fn steam_profile(void)
                         right &= bowl_check_elf_exports(image, sizeof(bowl_libc_shim_64), absent[name]) == 0;
                 check("The libc shim is an x86_64 shared object whose .dynsym gives the C library's memory, string and checked names, and none that allocate, follow the locale, hold a jmp_buf or are lib.c's own",
                       right);
+                image = bowl_libc_shim_32;
+                check("The libc shim's i386 build is an i386 shared object that gives no name at all, so a 32-bit program keeps its C library's",
+                      sizeof(bowl_libc_shim_32) > 64 && image[0] == 0x7f && image[1] == 'E' && image[4] == 1 && image[16] == 3 &&
+                          image[18] == 3 && bowl_check_elf_exports(image, sizeof(bowl_libc_shim_32), "memcpy") == 0 &&
+                          bowl_check_elf_exports(image, sizeof(bowl_libc_shim_32), "strlen") == 0);
         }
 #endif
         {
