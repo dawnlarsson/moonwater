@@ -281,6 +281,7 @@ struct waterlink_frame {
 #define WATERLINK_MAY_SHELL 0x0004u // a terminal
 #define WATERLINK_MAY_FILES 0x0010u // push and pull
 #define WATERLINK_MAY_LOG 0x0020u   // follow the kernel log
+#define WATERLINK_MAY_PAD 0x0080u   // a game pad of its, made here (pad.c)
 
 #define WATERLINK_MAY_DEFAULT 0u
 

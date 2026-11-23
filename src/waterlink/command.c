@@ -14,6 +14,10 @@
                 link push NAME FILE PATH   a file there, whole or not at all
                 link pull NAME PATH FILE   and back
                 link log NAME           follow the far kernel log
+                link pad NAME [DEVICE]  this machine's game pad played on
+                                        NAME, as if plugged in there (pad.c)
+                link pad stop           and no more
+                link pad                the pads sent from here and made here
                 link add NAME KEY [HOST[:PORT]]   link by key, with no code
                 link remove NAME
                 link allow NAME GRANT...
@@ -751,7 +755,7 @@ static b32 link_grant_locked(string_address name, p8 allow,
 
         if (!link_grants_parse(words, count, address_of change, address_of bad))
                 return host_refuse("%s is not a grant: shell run files "
-                                   "log\n",
+                                   "log pad\n",
                                    bad);
         if (allow)
                 found->may |= change;
@@ -3164,7 +3168,7 @@ static b32 link_policy_verb(p8 allow, string_address address_to words, positive 
         if (!count)
                 return host_usage();
         if (!link_grants_parse(words, count, address_of change, address_of bad))
-                return host_refuse("unknown grant %s (expected shell, run, files, log, or all)\n",
+                return host_refuse("unknown grant %s (expected shell, run, files, log, pad, or all)\n",
                                    bad);
         mask = allow ? (mask | change) : (mask & ~change);
         if (!link_policy_save(mask))
@@ -3286,6 +3290,7 @@ static const link_verb_desc link_verbs[] = {
     {"push",      6, 6,            LINK_DM_KIND,   0,              LINK_KIND_PUSH,  {0}},
     {"pull",      6, 6,            LINK_DM_KIND,   0,              LINK_KIND_PULL,  {0}},
     {"log",       4, 4,            LINK_DM_KIND,   0,              LINK_KIND_LOG,   {0}},
+    {"pad",       3, 5,            LINK_DM_ARGS,   LINK_VF_CHANGE, 0, {.args = link_pad_dispatch}},
     {"cancel",    3, 3,            LINK_DM_FN0,    LINK_VF_CHANGE, 0, {.fn0 = link_cancel}},
     {"doctor",    3, 3,            LINK_DM_FN0,    0,              0, {.fn0 = link_doctor}},
     {"paths",     3, 3,            LINK_DM_FN0,    0,              0, {.fn0 = link_paths_verb}},

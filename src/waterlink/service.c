@@ -260,6 +260,7 @@ static p64 link_keepalive = 10000000ull;
 #define LINK_ASK_PULL 'G'
 #define LINK_ASK_LOG 'L'
 #define LINK_ASK_FS 'F'
+#define LINK_ASK_PAD 'J'
 
 #define LINK_KIND_NONE 0
 #define LINK_KIND_SHELL 1
@@ -268,6 +269,7 @@ static p64 link_keepalive = 10000000ull;
 #define LINK_KIND_PULL 4
 #define LINK_KIND_LOG 5
 #define LINK_KIND_FS 6
+#define LINK_KIND_PAD 7
 
 #define FS_OP_INFO 1
 #define FS_OP_LIST 2
@@ -325,6 +327,7 @@ static const link_grant link_grants[] = {
     {"run", WATERLINK_MAY_RUN, LINK_ASK_RUN, 0, 0},
     {"files", WATERLINK_MAY_FILES, LINK_ASK_PUSH, LINK_ASK_PULL, LINK_ASK_FS},
     {"log", WATERLINK_MAY_LOG, LINK_ASK_LOG, 0, 0},
+    {"pad", WATERLINK_MAY_PAD, LINK_ASK_PAD, 0, 0},
 };
 
 // The grant a word names, or 0.
@@ -614,7 +617,8 @@ static bipolar link_peers_save(link_peers address_to peers)
                                  true);
 }
 
-#define LINK_POLICY_ALL (WATERLINK_MAY_SHELL | WATERLINK_MAY_RUN | WATERLINK_MAY_FILES | WATERLINK_MAY_LOG)
+#define LINK_POLICY_ALL (WATERLINK_MAY_SHELL | WATERLINK_MAY_RUN | WATERLINK_MAY_FILES | WATERLINK_MAY_LOG | \
+                         WATERLINK_MAY_PAD)
 
 static p32 link_policy_load(void)
 {
@@ -1128,6 +1132,7 @@ struct link_session {
         p8 whole[LINK_REQUEST_MAX + 1]; // and the name it becomes
         struct link_fs_state address_to fs;
         struct link_fs_client address_to fs_client;
+        struct link_pad address_to pad; // a pad session's, at either end (pad.c)
 };
 
 /*
@@ -1179,10 +1184,11 @@ typedef struct
 } link_state;
 
 static const string_address link_kind_names[] = {"open", "shell", "run",
-                                                  "push", "pull", "log", "fs"};
+                                                  "push", "pull", "log", "fs",
+                                                  "pad"};
 static const p8 link_kind_asks[] = {0, LINK_ASK_SHELL, LINK_ASK_RUN,
                                     LINK_ASK_PUSH, LINK_ASK_PULL, LINK_ASK_LOG,
-                                    LINK_ASK_FS};
+                                    LINK_ASK_FS, LINK_ASK_PAD};
 
 typedef struct
 {
@@ -1807,9 +1813,12 @@ static fn link_fs_state_free(struct link_session address_to s)
         s->fs = null;
 }
 
+static fn link_pad_close(struct link_session address_to s);
+
 static fn link_session_close(struct link_session address_to s)
 {
         link_fs_state_free(s);
+        link_pad_close(s);
         if (s->part[0])
                 link_part_discard(s->writes[0].fd, s->part);
         //      Signalled before it is waited for, as the group is: once the
@@ -2189,6 +2198,8 @@ static positive link_room(struct link_session address_to s)
                                                        : LINK_READ_FRAMES)
                         : 0;
 }
+
+#include "pad.c"
 
 /*
         A terminal's size on the wire: rows then columns, each little endian.
@@ -3660,6 +3671,28 @@ static fn link_request(struct link_session address_to s, p8 address_to payload,
                 if (link_kind_asks[kind] == payload[0])
                         s->kind = (p8)kind;
 
+        //      A pad's request is its description, judged by pad.c; the yes
+        //      says the event node it was made as.
+        if (s->kind == LINK_KIND_PAD)
+        {
+                string_address refused = link_pad_take(s, payload, length,
+                                                       peer ? (string_address)peer->name
+                                                            : (string_address)s->name);
+
+                if (refused)
+                {
+                        link_pad_close(s);
+                        link_refuse(s, refused);
+                        return;
+                }
+                (void)link_post(s, LINK_KEY_ANSWER,
+                                WATERLINK_FRAME_DURABLE | WATERLINK_FRAME_LAST, 'O',
+                                s->pad->note.node,
+                                string_length((string_address)s->pad->note.node));
+                link_self.state_dirty = true;
+                return;
+        }
+
         //      A command or a path is one string with no NUL in it, behind a
         //      push's mode; a terminal's request is its size and TERM.
         skip = s->kind == LINK_KIND_PUSH ? LINK_PUSH_HEAD : 1;
@@ -4270,6 +4303,11 @@ static p8 link_hear(address_any context, struct waterlink_frame address_to head,
                 if (!link_self.server && head->key == LINK_KEY_OUTPUT)
                         return link_fs_client_take(s, payload, length);
         }
+        if (s->pad && head->key >= LINK_KEY_PAD && head->key <= LINK_KEY_PAD_CLOCK)
+        {
+                link_pad_hear(s, head->key, payload, length);
+                return true;
+        }
         for (positive at = 0; at < 2; at++)
                 if (s->writes[at].key == head->key)
                         return link_stream_take(s, s->writes + at, payload,
@@ -4284,10 +4322,14 @@ static p8 link_hear(address_any context, struct waterlink_frame address_to head,
         case LINK_KEY_ANSWER:
                 if (link_self.server)
                         break;
+                //      A pad's yes says the node the far side made it as.
                 if ((payload[0] == 'O' && length != 1 &&
-                     !(length == 5 && s->kind == LINK_KIND_PULL)) ||
+                     !(length == 5 && s->kind == LINK_KIND_PULL) &&
+                     !(s->kind == LINK_KIND_PAD && length <= 16)) ||
                     (payload[0] != 'O' && payload[0] != 'N'))
                         break;
+                if (payload[0] == 'O' && s->kind == LINK_KIND_PAD && s->pad)
+                        link_pad_answered(s->pad, payload + 1, length - 1);
                 s->answered = true;
                 //      The far file's mode, to the bits a file's own owner
                 //      sets: nothing a far machine says makes a file here
@@ -4362,6 +4404,9 @@ static fn link_session_streams(struct link_session address_to s, p64 now)
         for (positive at = 0; at < 2; at++)
                 link_stream_read(s, s->reads + at);
 
+        if (s->pad)
+                link_pad_turn(s, now);
+
         if (link_self.server && s->kind == LINK_KIND_FS && s->fs)
         {
                 link_fs_flush_buf(s, LINK_KEY_OUTPUT, address_of s->fs->out);
@@ -4433,6 +4478,11 @@ static fn link_session_watch(struct link_session address_to s,
         }
         link_watch(watch, quiet, count, s->pidfd,
                    s->exited ? 0 : SYSTEM_POLL_READ, address_of s->pid_quiet);
+        //      A pad session's pad, as it is read: the sender's while it is
+        //      sent, the machine's while it has force feedback to hear.
+        if (s->pad && s->pad->begun && (s->pad->sender ? !s->pad->gone : s->pad->forces))
+                link_watch(watch, quiet, count, s->pad->fd, SYSTEM_POLL_READ,
+                           address_of s->pad->quiet);
 }
 
 /*
@@ -5057,6 +5107,7 @@ static fn link_state_write(p64 now)
         }
         (void)link_file_replace(LINK_STATE_PATH, state, sizeof(address_to state),
                                 false);
+        link_pads_write();
 }
 
 /*
@@ -5493,7 +5544,7 @@ static p64 link_sessions_turn(p64 now)
                                 link_session_say(s, WATERLINK_KIND_CARRY);
                 }
 
-                due = waterlink_wake(s->link, now);
+                due = link_pad_due(s, waterlink_wake(s->link, now));
                 //      With the modem's queue full, nothing this session sends
                 //      can go until the queue plays: wait for it, do not spin.
                 if (((link_modem_carrying() && !link_modem_free()) ||
@@ -6293,9 +6344,14 @@ static b32 link_client_run(string_address name, p8 kind,
         struct link_place places[LINK_PLACES_PER_PEER];
         positive place_count;
         positive tried = 0;
-        p8 request[LINK_REQUEST_MAX + 64];
+        //      A pad's request is its description, which is a frame.
+        p8 request[LINK_REQUEST_MAX + 64 > WATERLINK_FRAME_MAX ? LINK_REQUEST_MAX + 64
+                                                               : WATERLINK_FRAME_MAX];
         positive request_length = 0;
-        bipolar input = kind == LINK_KIND_PULL || kind == LINK_KIND_LOG ? -1 : 0;
+        bipolar input = kind == LINK_KIND_PULL || kind == LINK_KIND_LOG ||
+                                        kind == LINK_KIND_PAD
+                                ? -1
+                                : 0;
         p64 rekey_after = link_rekey_after();
         p8 asked = false;
         p8 input_waiting = true;
@@ -6347,6 +6403,13 @@ static b32 link_client_run(string_address name, p8 kind,
         //      The request, before anything is sent: a command that cannot be
         //      asked for is refused here.
         request[request_length++] = link_kind_asks[kind];
+#if !defined(MACOS)
+        if (kind == LINK_KIND_PAD)
+        {
+                memory_copy(request, link_pad_out.description, link_pad_out.described);
+                request_length = link_pad_out.described;
+        }
+#endif
         if (kind == LINK_KIND_PUSH || kind == LINK_KIND_PULL)
         {
                 //      words: the source, then where it goes.
@@ -6466,8 +6529,16 @@ static b32 link_client_run(string_address name, p8 kind,
                                                          : 0),
                         FILE_READ);
         s->reads[0].done = true;
-        link_stream_own(s->writes, 1, LINK_KEY_OUTPUT, 0, O_WRONLY);
-        link_stream_own(s->writes + 1, 2, LINK_KEY_ERROR, 0, O_WRONLY);
+        //      A pad has no output: what comes back is its force feedback.
+#if !defined(MACOS)
+        if (kind == LINK_KIND_PAD)
+                s->pad = address_of link_pad_out;
+        else
+#endif
+        {
+                link_stream_own(s->writes, 1, LINK_KEY_OUTPUT, 0, O_WRONLY);
+                link_stream_own(s->writes + 1, 2, LINK_KEY_ERROR, 0, O_WRONLY);
+        }
 #if defined(MACOS)
         scope_exit(link_stdio_restore());
 #endif
@@ -6628,6 +6699,15 @@ static b32 link_client_run(string_address name, p8 kind,
                 if (s->refused)
                 {
                         link_session_end(s, true);
+#if !defined(MACOS)
+                        if (s->pad)
+                        {
+                                string_copy_bounded((string_address)s->pad->note.why,
+                                                    (string_address)s->refusal,
+                                                    sizeof s->pad->note.why);
+                                s->pad->note.state = LINK_PAD_REFUSED;
+                        }
+#endif
                         edit_terminal_restore();
                         link_terminal_raw = false;
                         string_format(log_error, host_label "%s: %s\n", name,
@@ -6670,7 +6750,15 @@ static b32 link_client_run(string_address name, p8 kind,
                                 break;
                         }
                 }
-                if (s->writes[0].done &&
+                //      A pad's session ends when the pad goes, or the far side
+                //      stops asking for its clock (it has no pad of it: a
+                //      listener that started again); the sender tries again.
+                if (s->pad && (s->pad->gone || s->pad->deaf))
+                {
+                        link_session_end(s, true);
+                        break;
+                }
+                if (!s->pad && s->writes[0].done &&
                     (kind == LINK_KIND_SHELL || kind == LINK_KIND_PUSH ||
                      s->writes[1].done))
                 {
