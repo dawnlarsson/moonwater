@@ -2761,6 +2761,7 @@ static b32 files_key(const struct window_event address_to event)
                 return files_job_cancel(&files.big->job), true;
         if (key == UI_KEY_ESCAPE && files.moving && files_move_running(&files.big->move))
                 return files_move_cancel(&files.big->move), true;
+        b32 settled = !files.armed && !files.big->note[0]; // nothing an Escape would let go of
         if (files.armed || files.big->note[0])
                 files.armed = false, files.big->note[0] = 0, files.dirty = true;
         if (files.carrying && key == UI_KEY_ESCAPE)
@@ -2784,6 +2785,9 @@ static b32 files_key(const struct window_event address_to event)
                         return files_menu_do(shortcuts[k].act), files.dirty = true, true;
         if (key == UI_KEY_ESCAPE && files.finding)
                 return files_find(false), true;
+        // Escape with nothing to let go of is the window's back (a pad's right face button): the folder shown before.
+        if (key == UI_KEY_ESCAPE && settled && !control && !alt && !shift)
+                return files_menu_do(FILES_ACT_BACK), files.dirty = true, true;
         if (!control && !alt && event->b > ' ' && event->b != 0x7f && key != UI_KEY_SPACE)
                 return files_type_ahead((p32)event->b), true;
         if ((shift && key == FILES_KEY_F10) || key == FILES_KEY_MENU)
