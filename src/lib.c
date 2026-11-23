@@ -4050,7 +4050,9 @@ __asm__(
         wants, so the terminator fold and the compare fold meet in one
         vpminub and one vptestnmb answers both. The fold keeps no record of
         which vector answered, so PAIR_WHICH compares each against memory
-        again; it runs once a call.
+        again; it runs once a call. The AVX-512 form of this is
+        STRING_Z_QUAD now, in zmm16 to zmm31, and its loop STRING_Z_RUN in
+        string_compare: WIDE_COMPARE is the AVX2 body's alone.
 */
 #define AVX2_PAIR_READY "vpxor %ymm8, %ymm8, %ymm8\n"
 #define AVX2_PAIR                                                      \
@@ -4074,31 +4076,6 @@ __asm__(
     "vpminub %ymm6, %ymm2, %ymm2\n   vpcmpeqb %ymm8, %ymm2, %ymm2\n   vpmovmskb %ymm2, %ecx\n   test %ecx, %ecx\n   jnz 37f\n" \
     "vpminub %ymm7, %ymm3, %ymm3\n   vpcmpeqb %ymm8, %ymm3, %ymm3\n"           \
     "vpmovmskb %ymm3, %ecx\n   jmp 38f\n"
-
-#define AVX512_PAIR_READY "mov $1, %ecx\n   vpbroadcastb %ecx, %zmm10\n"
-#define AVX512_PAIR                                                    \
-    "vmovdqu64 (%rdi), %zmm0\n   vpcmpneqb (%rsi), %zmm0, %k0\n   vptestnmb %zmm0, %zmm0, %k1\n   korq %k1, %k0, %k0\n" \
-    "kmovq %k0, %rcx\n   test %rcx, %rcx\n"
-#define AVX512_PAIR_QUAD                                               \
-    "vmovdqu64 (%rdi), %zmm0\n"                                                \
-    "vmovdqu64 (1*" AVX512_WIDTH ")(%rdi), %zmm1\n"                    \
-    "vmovdqu64 (2*" AVX512_WIDTH ")(%rdi), %zmm2\n"                    \
-    "vmovdqu64 (3*" AVX512_WIDTH ")(%rdi), %zmm3\n"                    \
-    "vpxorq (%rsi), %zmm0, %zmm11\n"                                           \
-    "vpternlogd $0xf6, (1*" AVX512_WIDTH ")(%rsi), %zmm1, %zmm11\n"    \
-    "vpminub %zmm1, %zmm0, %zmm8\n   vpminub %zmm3, %zmm2, %zmm9\n"            \
-    "vpternlogd $0xf6, (2*" AVX512_WIDTH ")(%rsi), %zmm2, %zmm11\n"    \
-    "vpternlogd $0xf6, (3*" AVX512_WIDTH ")(%rsi), %zmm3, %zmm11\n"    \
-    "vpminub %zmm9, %zmm8, %zmm8\n   vpsubusb %zmm11, %zmm10, %zmm11\n   vpminub %zmm11, %zmm8, %zmm8\n   vptestnmb %zmm8, %zmm8, %k0\n" \
-    "kortestq %k0, %k0\n"
-#define AVX512_PAIR_WHICH                                              \
-    "vptestnmb %zmm0, %zmm0, %k0\n   vpcmpneqb (%rsi), %zmm0, %k1\n   korq %k1, %k0, %k0\n   kmovq %k0, %rcx\n   test %rcx, %rcx\n   jnz 35f\n   vptestnmb %zmm1, %zmm1, %k0\n" \
-    "vpcmpneqb (1*" AVX512_WIDTH ")(%rsi), %zmm1, %k1\n"               \
-    "korq %k1, %k0, %k0\n   kmovq %k0, %rcx\n   test %rcx, %rcx\n   jnz 40f\n   vptestnmb %zmm2, %zmm2, %k0\n" \
-    "vpcmpneqb (2*" AVX512_WIDTH ")(%rsi), %zmm2, %k1\n"               \
-    "korq %k1, %k0, %k0\n   kmovq %k0, %rcx\n   test %rcx, %rcx\n   jnz 37f\n   vptestnmb %zmm3, %zmm3, %k0\n" \
-    "vpcmpneqb (3*" AVX512_WIDTH ")(%rsi), %zmm3, %k1\n"               \
-    "korq %k1, %k0, %k0\n   kmovq %k0, %rcx\n   jmp 38f\n"
 
 /*
         The byte or the terminator, four vectors a turn, for the unbounded
@@ -4630,6 +4607,44 @@ __asm__(
     "mov $-1, %rax\n   bzhi " n ", %rax, %rax\n   kmovq %rax, %k1\n"
 
 //
+//      memory_compare's round of four vectors at the first input and the second %rsi bytes on
+//      from it: the four exclusive-ors in zmm16 to zmm19, the fourth folded with the other three,
+//      and the flags of one vptestmb of that fold.
+//
+#define COMPARE_Z4                                                                                                     \
+    "vmovdqu64 (%rdi), %zmm16\n   vmovdqu64 64(%rdi), %zmm17\n   vmovdqu64 128(%rdi), %zmm18\n   vmovdqu64 192(%rdi), %zmm19\n" \
+    "vpxorq (%rdi,%rsi), %zmm16, %zmm16\n   vpxorq 64(%rdi,%rsi), %zmm17, %zmm17\n   vpxorq 128(%rdi,%rsi), %zmm18, %zmm18\n"   \
+    "vpternlogd $0xde, 192(%rdi,%rsi), %zmm16, %zmm19\n"                                                               \
+    "vpternlogd $0xfe, %zmm17, %zmm18, %zmm19\n   vptestmb %zmm19, %zmm19, %k0\n   kortestq %k0, %k0\n"
+
+//
+//      string_compare's and string_compare_max's vectors, in zmm16 to zmm31 as memory_compare's are.
+//      STRING_Z_VEC: sixty four bytes at OFF past both cursors, %rcx one more than the mask of the lanes
+//      that agree and are not the first string's end, so its flags are nought only when every lane is
+//      that and its lowest set bit is the first lane that is not. STRING_Z_QUAD: four of those at once,
+//      asked once: the four exclusive-ors or-ed into zmm20 by vpternlogd, the four first-string vectors
+//      folded by their minimum, a saturating one minus the exclusive-ors (zmm31 holds ones) to make one
+//      where they agree and nought where they do not, and the minimum of the two, which is nought where
+//      they differ or the first string ends; the flags of one vptestnmb of it. STRING_Z_EDGE: the R
+//      bytes before an edge, R under sixty four, as the sixty four that end there with the lanes in
+//      front of the cursors masked off; its flags and %k0 the lanes that stop, %r9 and %r10 the two
+//      windows' starts.
+//
+#define STRING_Z_VEC(OFF)                                                                                              \
+    "vmovdqu64 " OFF "(%rdi), %zmm16\n   vptestmb %zmm16, %zmm16, %k2\n   vpcmpeqb " OFF "(%rsi), %zmm16, %k1{%k2}\n"        \
+    "kmovq %k1, %rcx\n   inc %rcx\n"
+#define STRING_Z_QUAD                                                                                                  \
+    "vmovdqu64 (%rdi), %zmm16\n   vmovdqu64 64(%rdi), %zmm17\n   vmovdqu64 128(%rdi), %zmm18\n   vmovdqu64 192(%rdi), %zmm19\n" \
+    "vpxorq (%rsi), %zmm16, %zmm20\n   vpternlogd $0xf6, 64(%rsi), %zmm17, %zmm20\n   vpminub %zmm17, %zmm16, %zmm21\n"        \
+    "vpternlogd $0xf6, 128(%rsi), %zmm18, %zmm20\n   vpminub %zmm19, %zmm18, %zmm22\n   vpternlogd $0xf6, 192(%rsi), %zmm19, %zmm20\n" \
+    "vpminub %zmm22, %zmm21, %zmm21\n   vpsubusb %zmm20, %zmm31, %zmm20\n   vpminub %zmm20, %zmm21, %zmm21\n"                 \
+    "vptestnmb %zmm21, %zmm21, %k0\n   kortestq %k0, %k0\n"
+#define STRING_Z_EDGE(R)                                                                                               \
+    "mov %" R "d, %ecx\n   neg %ecx\n   mov $-1, %rax\n   shl %cl, %rax\n   kmovq %rax, %k3  # the top R lanes\n"          \
+    "lea -64(%rdi,%" R "), %r9\n   lea -64(%rsi,%" R "), %r10\n   vmovdqu8 (%r9), %zmm16{%k3}{z}\n"                         \
+    "vptestmb %zmm16, %zmm16, %k2{%k3}\n   vpcmpeqb (%r10), %zmm16, %k1{%k2}\n   kandnq %k3, %k1, %k0\n   kortestq %k0, %k0\n"
+
+//
 //      Which body to run. AVX-512 is asked about first because a processor
 //      that has it has AVX2 as well. Label 6 is the wide body for it and
 //      label 5 is the word at a time one, in every routine that has all
@@ -4783,13 +4798,7 @@ __asm__(
     "push %r9\n   push %r10\n   push %rdi\n   mov %rdi, %rdx\n   sub %r8, %rdx\n   mov %r8, %rsi\n   mov %r9, %rdi\n" \
     "vzeroupper\n   call memory_copy_apart  # the head, up to the first block\n" \
     "pop %rdi\n   pop %r10\n   pop %r9\n"                                      \
-    ASM_WIDER("cpu_has_avx512", "6f")                                         \
     AVX2_ZEROED "jmp 20f\n"
-
-//      The lanes up to and including the terminator, whose flag is the
-//      lowest in %rax, as a store mask.
-#define AVX512_COPY_MASK                                                      \
-    "bsf %rax, %rcx\n   mov $2, %rax\n   shl %cl, %rax\n   dec %rax\n   kmovq %rax, %k3\n"
 
 #define AVX2_COPY_BLOCKS                                                      \
     ".balign 32\n"                                                             \
@@ -4809,26 +4818,54 @@ __asm__(
     "sub %rdi, %rdx\n   mov %rdi, %rsi\n   add %r10, %rdi\n   vzeroupper\n   push %r9\n   call memory_copy_apart  # the rest of it\n   pop %rax\n" \
     ASM_RET
 
-#define AVX512_COPY_BLOCKS                                                    \
-    ".balign 32\n"                                                             \
-    "20: vmovdqa64 (%rdi), %zmm1\n   vmovdqa64 (1*" AVX512_WIDTH ")(%rdi), %zmm6\n" \
-    "vmovdqa64 (2*" AVX512_WIDTH ")(%rdi), %zmm4\n   vmovdqa64 (3*" AVX512_WIDTH ")(%rdi), %zmm7\n" \
-    "vpminub %zmm6, %zmm1, %zmm3\n   vpminub %zmm7, %zmm4, %zmm5\n   vptestnmb %zmm3, %zmm3, %k0\n   vptestnmb %zmm5, %zmm5, %k2\n   kortestq %k0, %k2\n   jnz 4f\n" \
-    "vmovdqu64 %zmm1, (%rdi,%r10)\n   vmovdqu64 %zmm6, (1*" AVX512_WIDTH ")(%rdi,%r10)\n" \
-    "vmovdqu64 %zmm4, (2*" AVX512_WIDTH ")(%rdi,%r10)\n   vmovdqu64 %zmm7, (3*" AVX512_WIDTH ")(%rdi,%r10)\n" \
-    "add $(4*" AVX512_WIDTH "), %rdi\n   jmp 20b\n"                           \
-    "4:  " AVX512_QUAD_WHICH                                                  \
-    "23: vmovdqu64 %zmm4, (2*" AVX512_WIDTH ")(%rdi,%r10)\n"                  \
-    "vmovdqu64 %zmm6, (1*" AVX512_WIDTH ")(%rdi,%r10)\n   vmovdqu64 %zmm1, (%rdi,%r10)\n" \
-    "add $(3*" AVX512_WIDTH "), %rdi\n" AVX512_COPY_MASK                      \
-    "vmovdqu8 %zmm7, (%rdi,%r10){%k3}\n   jmp 9f\n"                            \
-    "22: vmovdqu64 %zmm6, (1*" AVX512_WIDTH ")(%rdi,%r10)\n   vmovdqu64 %zmm1, (%rdi,%r10)\n" \
-    "add $(2*" AVX512_WIDTH "), %rdi\n" AVX512_COPY_MASK                      \
-    "vmovdqu8 %zmm4, (%rdi,%r10){%k3}\n   jmp 9f\n"                            \
-    "21: vmovdqu64 %zmm1, (%rdi,%r10)\n   add $" AVX512_WIDTH ", %rdi\n" AVX512_COPY_MASK \
-    "vmovdqu8 %zmm6, (%rdi,%r10){%k3}\n   jmp 9f\n"                            \
-    "2:  " AVX512_COPY_MASK "vmovdqu8 %zmm1, (%rdi,%r10){%k3}\n"              \
-    "9:  mov %r9, %rax\n   vzeroupper\n" ASM_RET
+//
+//      string_copy's, string_copy_end's and string_append's AVX-512 body, in zmm16 to zmm31 so nothing is
+//      left for a vzeroupper. SHORT_END and LONG_END set %rax for a copy that ends in the first sixty four
+//      bytes and for one that ends after them (strcpy's %rax is the destination already, set before).
+//      The first sixty four bytes of the source when they are inside its page (else the line they are in,
+//      aligned, which cannot leave it): a terminator in them is copied with the two overlapping stores of
+//      its size class, glibc's ladder, from the vector read and one more load. Without a masked store:
+//      Zen 5's are dear, and a load of what one wrote waits for it. Past that the source is read a line
+//      at a time to a block of four, then four lines a turn, folded by their minimum and asked once,
+//      every line stored as it is found to hold no end, and the line that holds it finished by the
+//      sixty four bytes that end on the terminator, read and stored again whole: what that stores twice
+//      is the same bytes. A line or block read aligned never leaves the page of its first byte, which is
+//      the string's; the first sixty four are read unaligned across a page's end only once the line before
+//      it has shown that the string runs on past it.
+//
+#define STRING_COPY_Z(SHORT_END, LONG_END)                                                                             \
+    "mov %esi, %ecx\n   and $4095, %ecx\n   cmp $4032, %ecx\n   ja 70f\n"                                                \
+    "vmovdqu64 (%rsi), %zmm16\n   vptestnmb %zmm16, %zmm16, %k0\n   kmovq %k0, %rcx\n   tzcnt %rcx, %rdx\n   jc 72f  # no end in them\n" \
+    "60: " SHORT_END "cmp $16, %edx\n   jae 67f\n   cmp $8, %edx\n   jae 63f\n   cmp $4, %edx\n   jae 62f\n   cmp $2, %edx\n   jae 61f\n" \
+    "test %edx, %edx\n   jz 66f\n   movzwl (%rsi), %ecx\n   mov %cx, (%rdi)\n" ASM_RET                                 \
+    "66: movb $0, (%rdi)\n" ASM_RET                                                                                   \
+    "61: movzwl (%rsi), %ecx\n   movzwl -1(%rsi,%rdx), %r8d\n   mov %cx, (%rdi)\n   mov %r8w, -1(%rdi,%rdx)\n" ASM_RET      \
+    "62: mov (%rsi), %ecx\n   mov -3(%rsi,%rdx), %r8d\n   mov %ecx, (%rdi)\n   mov %r8d, -3(%rdi,%rdx)\n" ASM_RET           \
+    "63: mov (%rsi), %rcx\n   mov -7(%rsi,%rdx), %r8\n   mov %rcx, (%rdi)\n   mov %r8, -7(%rdi,%rdx)\n" ASM_RET               \
+    "67: cmp $32, %edx\n   jae 65f\n"                                                                                \
+    "vmovdqu64 -15(%rsi,%rdx), %xmm17\n   vmovdqu64 %xmm16, (%rdi)\n   vmovdqu64 %xmm17, -15(%rdi,%rdx)\n" ASM_RET         \
+    "65: vmovdqu64 -31(%rsi,%rdx), %ymm17\n   vmovdqu64 %ymm16, (%rdi)\n   vmovdqu64 %ymm17, -31(%rdi,%rdx)\n" ASM_RET      \
+    "70: mov %rsi, %r8\n   and $-64, %r8\n   vmovdqa64 (%r8), %zmm17\n   vptestnmb %zmm17, %zmm17, %k0\n   kmovq %k0, %rdx\n" \
+    "mov %esi, %ecx\n   and $63, %ecx\n   shr %cl, %rdx  # from the source on\n   mov $64, %r8d\n   sub %ecx, %r8d  # to the page's end\n" \
+    "mov $-1, %r10\n   bzhi %r8, %r10, %r10\n   kmovq %r10, %k1\n   vmovdqu8 (%rsi), %zmm16{%k1}{z}\n   tzcnt %rdx, %rdx\n   jnc 60b\n" \
+    "vmovdqu64 (%rsi), %zmm16  # the string runs on into the next page, so these are all there\n"                     \
+    "vptestnmb %zmm16, %zmm16, %k0\n   kmovq %k0, %rcx\n   tzcnt %rcx, %rdx\n   jnc 60b\n"                              \
+    "72: vmovdqu64 %zmm16, (%rdi)\n   mov %rdi, %r9\n   sub %rsi, %r9  # the destination as a distance from the source\n"   \
+    "lea 64(%rsi), %r8\n   and $-64, %r8  # the source's next line\n"                                                  \
+    "73: test $192, %r8b\n   jz 75f\n   vmovdqa64 (%r8), %zmm16\n   vptestnmb %zmm16, %zmm16, %k0\n   kortestq %k0, %k0\n   jnz 78f\n" \
+    "vmovdqu64 %zmm16, (%r8,%r9)\n   add $64, %r8\n   jmp 73b\n"                                                        \
+    ".balign 32\n"                                                                                                     \
+    "75: vmovdqa64 (%r8), %zmm16\n   vmovdqa64 64(%r8), %zmm17\n   vmovdqa64 128(%r8), %zmm18\n   vmovdqa64 192(%r8), %zmm19\n" \
+    "vpminub %zmm17, %zmm16, %zmm20\n   vpminub %zmm19, %zmm18, %zmm21\n   vpminub %zmm21, %zmm20, %zmm20\n"                \
+    "vptestnmb %zmm20, %zmm20, %k0\n   kortestq %k0, %k0\n   jnz 76f\n"                                                  \
+    "vmovdqu64 %zmm16, (%r8,%r9)\n   vmovdqu64 %zmm17, 64(%r8,%r9)\n   vmovdqu64 %zmm18, 128(%r8,%r9)\n   vmovdqu64 %zmm19, 192(%r8,%r9)\n" \
+    "add $256, %r8\n   jmp 75b\n"                                                                                     \
+    "76: vptestnmb %zmm16, %zmm16, %k0\n   kortestq %k0, %k0\n   jnz 78f\n   vmovdqu64 %zmm16, (%r8,%r9)\n   add $64, %r8\n" \
+    "vptestnmb %zmm17, %zmm17, %k0\n   kortestq %k0, %k0\n   jnz 78f\n   vmovdqu64 %zmm17, (%r8,%r9)\n   add $64, %r8\n"      \
+    "vptestnmb %zmm18, %zmm18, %k0\n   kortestq %k0, %k0\n   jnz 78f\n   vmovdqu64 %zmm18, (%r8,%r9)\n   add $64, %r8\n"      \
+    "vptestnmb %zmm19, %zmm19, %k0\n"                                                                                  \
+    "78: kmovq %k0, %rcx\n   tzcnt %rcx, %rcx\n   lea -63(%r8,%rcx), %rsi  # the sixty four that end on the terminator\n" \
+    "vmovdqu64 (%rsi), %zmm16\n   vmovdqu64 %zmm16, (%rsi,%r9)\n" LONG_END ASM_RET
 
 #define WIDE_LENGTH_INTO(W, ZEROED, ZEROS_AT, QUAD, QUAD_WHICH, LEAVE, TAIL)  \
     "mov %rdi, %r8  # keep the start\n"                                        \
@@ -6840,16 +6877,78 @@ __asm__(
     //      every dispatch there is; it would not be for two strings already
     //      known to be alike.
     //
+    //      Where the processor has AVX-512, the body under this, which falls through from the test:
+    //      STRING_Z_VEC answers a first byte that differs from the same one compare as every other.
+    ASM_USERSPACE_WIDE("cmpb $0, cpu_has_avx512(%rip)\n   je " ASM_LABEL(strcmp_narrow) "\n"
+    //
+    //      AVX-512, in zmm16 to zmm31, which leave nothing for a vzeroupper to clean up. The first sixty
+    //      four bytes when neither pointer is in the last sixty four of its page (one test of their offsets
+    //      or-ed, as memory_compare's, which sometimes says so of two that are not, and the precise test
+    //      then sends those back), then the next three each on its own when both have two hundred and fifty
+    //      six to their page's end, then STRING_Z_RUN. A pointer that is that near its end has the bytes up
+    //      to it compared as the sixty four that end there, the lanes in front of the cursors masked off,
+    //      which keeps every lane read in a page one of them is in: only a lane in front of the other
+    //      pointer can be in a page that is not there, which costs it time and never a fault, and only when
+    //      that pointer is in the first sixty four bytes of its page as well.
+    //
+    //      This replaced a first byte asked on its own, a masked window of sixty four, and the word body
+    //      with the four vectors of WIDE_COMPARE after it. Ticks a call on a 9950X, against glibc 2.44's
+    //      __strcmp_evex: equal strings of two to thirty one bytes 6.3 against its 5.5, of ninety six 13.5
+    //      against 7.9, of two hundred and fifty six 22.7 against 15.5; strings that end where a page ends,
+    //      eight to sixty three bytes, 16.6 to 60.1 against 9.5 to 11.1.
+    //
+    "" ASM_LABEL(strcmp_z) ":\n   mov %edi, %eax\n   or %esi, %eax\n   not %eax\n   test $0xfc0, %eax\n   jz " ASM_LABEL(strcmp_zcross) "\n"
+    "" ASM_LABEL(strcmp_zfirst) ":\n" STRING_Z_VEC("0") "jnz " ASM_LABEL(strcmp_zat0) "\n"
+    "test $0xf00, %eax\n   jz " ASM_LABEL(strcmp_zmore) "  # either may be in the last 256 bytes of its page (the or again)\n"
+    STRING_Z_VEC("64") "jnz " ASM_LABEL(strcmp_zat64) "\n"
+    STRING_Z_VEC("128") "jnz " ASM_LABEL(strcmp_zat128) "\n"
+    STRING_Z_VEC("192") "jnz " ASM_LABEL(strcmp_zat192) "\n"
+    "add $192, %rdi\n   add $192, %rsi\n"
+    "" ASM_LABEL(strcmp_zmore) ":\n   add $64, %rdi\n   add $64, %rsi\n   movabs $0x4000000000000000, %rdx  # no bound\n"
+    //
+    //      STRING_Z_RUN: everything in front of the cursors agrees and nothing has ended there, and at least
+    //      sixty four bytes of each are behind them; %rdx is what is left of the bound. The run is how far
+    //      both can read before a page ends or the bound does: four vectors a turn through it, one at a time
+    //      under that, and the last few before the edge as the sixty four that end there. The first cursor is
+    //      put on a line before the four a turn, by one vector read where it is and a step forward to the
+    //      line inside it, so its loads are never across two (two loads each on Zen 5). Not by a step back:
+    //      after an edge of the second string that undid the step the edge had just made, for ever.
+    //      Everything read twice is bytes already known to agree and not to end, which flag no lane.
+    //
+    "" ASM_LABEL(strcmp_zloop) ":\n   vpternlogd $0xff, %zmm31, %zmm31, %zmm31\n   vpabsb %zmm31, %zmm31  # ones\n"
+    "" ASM_LABEL(strcmp_zrun) ":\n   mov %edi, %eax\n   and $0xfff, %eax\n   mov %esi, %ecx\n   and $0xfff, %ecx\n   cmp %ecx, %eax\n   cmovb %ecx, %eax\n"
+    "mov $4096, %r8d\n   sub %eax, %r8d\n   cmp %rdx, %r8\n   cmova %rdx, %r8  # what both may read before an edge or the bound\n"
+    "mov %edi, %ecx\n   and $63, %ecx\n   jz " ASM_LABEL(strcmp_zlined) "\n   cmp $64, %r8\n   jb " ASM_LABEL(strcmp_zedge) "\n"
+    STRING_Z_VEC("0") "jnz " ASM_LABEL(strcmp_zat0) "\n"
+    "mov %edi, %ecx\n   and $63, %ecx\n   sub $64, %ecx\n   neg %ecx  # to the line inside it\n   add %rcx, %rdi\n   add %rcx, %rsi\n   sub %rcx, %rdx\n   sub %rcx, %r8\n"
+    "" ASM_LABEL(strcmp_zlined) ":\n   sub $256, %r8\n   jb " ASM_LABEL(strcmp_zsingles) "\n"
+    ".balign 32\n"
+    "" ASM_LABEL(strcmp_zquad) ":\n   " STRING_Z_QUAD "jnz " ASM_LABEL(strcmp_zwhich) "\n"
+    "add $256, %rdi\n   add $256, %rsi\n   sub $256, %rdx\n   sub $256, %r8\n   jae " ASM_LABEL(strcmp_zquad) "\n"
+    "" ASM_LABEL(strcmp_zsingles) ":\n   add $256, %r8\n   cmp $64, %r8\n   jb " ASM_LABEL(strcmp_zedge) "\n"
+    "" ASM_LABEL(strcmp_zsingle) ":\n   " STRING_Z_VEC("0") "jnz " ASM_LABEL(strcmp_zat0) "\n"
+    "add $64, %rdi\n   add $64, %rsi\n   sub $64, %rdx\n   sub $64, %r8\n   cmp $64, %r8\n   jae " ASM_LABEL(strcmp_zsingle) "\n"
+    "" ASM_LABEL(strcmp_zedge) ":\n   test %rdx, %rdx\n   jz " ASM_LABEL(strcmp_zzero) "\n   test %r8, %r8\n   jz " ASM_LABEL(strcmp_zrun) "\n"
+    "lea -64(%rdi,%r8), %rdi\n   lea -64(%rsi,%r8), %rsi\n" STRING_Z_VEC("0") "jnz " ASM_LABEL(strcmp_zat0) "\n"
+    "add $64, %rdi\n   add $64, %rsi\n   sub %r8, %rdx\n   jnz " ASM_LABEL(strcmp_zrun) "\n"
+    "" ASM_LABEL(strcmp_zzero) ":\n   xor %eax, %eax\n" ASM_RET
+    "" ASM_LABEL(strcmp_zwhich) ":\n   " STRING_Z_VEC("0") "jnz " ASM_LABEL(strcmp_zat0) "\n" STRING_Z_VEC("64") "jnz " ASM_LABEL(strcmp_zat64) "\n"
+    STRING_Z_VEC("128") "jnz " ASM_LABEL(strcmp_zat128) "\n" STRING_Z_VEC("192") "\n"
+    "" ASM_LABEL(strcmp_zat192) ":\n   add $64, %rdi\n   add $64, %rsi\n"
+    "" ASM_LABEL(strcmp_zat128) ":\n   add $64, %rdi\n   add $64, %rsi\n"
+    "" ASM_LABEL(strcmp_zat64) ":\n   add $64, %rdi\n   add $64, %rsi\n"
+    "" ASM_LABEL(strcmp_zat0) ":\n   tzcnt %rcx, %rcx\n   movzbl (%rdi,%rcx), %eax\n   movzbl (%rsi,%rcx), %ecx\n   sub %ecx, %eax\n" ASM_RET
+    //      One of them in the last sixty four bytes of its page: the bytes up to that edge, then the rest.
+    "" ASM_LABEL(strcmp_zcross) ":\n   mov %edi, %eax\n   and $0xfff, %eax\n   mov %esi, %ecx\n   and $0xfff, %ecx\n   cmp %ecx, %eax\n   cmovb %ecx, %eax\n"
+    "mov $4096, %r8d\n   sub %eax, %r8d\n   cmp $64, %r8d\n   jb " ASM_LABEL(strcmp_zedgein) "\n"
+    "mov %edi, %eax\n   or %esi, %eax\n   not %eax  # the or again, which the next test asks\n   jmp " ASM_LABEL(strcmp_zfirst) "\n"
+    "" ASM_LABEL(strcmp_zedgein) ":\n   " STRING_Z_EDGE("r8") "jnz " ASM_LABEL(strcmp_zedge_at) "\n"
+    "add %r8, %rdi\n   add %r8, %rsi\n   jmp " ASM_LABEL(strcmp_z) "\n"
+    "" ASM_LABEL(strcmp_zedge_at) ":\n   kmovq %k0, %rcx\n   tzcnt %rcx, %rcx\n   movzbl (%r9,%rcx), %eax\n   movzbl (%r10,%rcx), %ecx\n   sub %ecx, %eax\n" ASM_RET
+    "" ASM_LABEL(strcmp_narrow) ":\n")
     "movzbl (%rdi), %eax\n   movzbl (%rsi), %ecx\n   sub %ecx, %eax\n   jnz 4f\n   test %ecx, %ecx\n   jz 4f  # both ended here, and eax is zero\n"
-    //
-    //      Sixty four bytes of each in one compare when the processor has AVX-512 and neither pointer is in
-    //      the last sixty four of its page, which TINY_PAGE_EDGE explains: what differs and what ends in one
-    //      mask, and the lowest flag in it is the byte to answer with. Strings of one to sixty two bytes
-    //      drawn at random from a pool, ticks a call: 32.4 to 44.9 before and 10.8 to 11.3 after. Two strings
-    //      that agree through all sixty four go on from there with the generic body.
-    //
     ASM_USERSPACE_WIDE(
-    "cmpb $0, cpu_has_avx512(%rip)\n   jne " ASM_LABEL(compare_zmm) "\n   cmpb $0, cpu_has_avx2(%rip)\n   je " ASM_LABEL(strcmp_generic) "\n"
+    "cmpb $0, cpu_has_avx2(%rip)\n   je " ASM_LABEL(strcmp_generic) "\n"
     //      Two 256-bit vectors where there is no AVX-512: sixty four bytes of each, what differs and what ends.
     TINY_PAGE_EDGE("edi", "" ASM_LABEL(strcmp_generic) "") TINY_PAGE_EDGE("esi", "" ASM_LABEL(strcmp_generic) "")
     "vmovdqu (%rdi), %ymm0\n   vpcmpeqb (%rsi), %ymm0, %ymm1\n   vpxor %xmm4, %xmm4, %xmm4\n   vpcmpeqb %ymm4, %ymm0, %ymm2\n   vpandn %ymm1, %ymm2, %ymm1\n   vpmovmskb %ymm1, %eax\n"
@@ -6903,12 +7002,9 @@ __asm__(
     //
     "20:\n"
     ASM_USERSPACE_WIDE(
-    ASM_WIDER("cpu_has_avx512", "26f")
     ASM_NARROW("cpu_has_avx2", "21f")
     WIDE_COMPARE(AVX2_WIDTH, AVX2_PAIR_READY, AVX2_PAIR, AVX2_PAIR_QUAD,
                  AVX2_PAIR_WHICH, AVX2_LEAVE)
-    "26: " WIDE_COMPARE(AVX512_WIDTH, AVX512_PAIR_READY, AVX512_PAIR,
-                        AVX512_PAIR_QUAD, AVX512_PAIR_WHICH, AVX512_LEAVE)
     )
     "21:  jmp 1b\n"
     //
@@ -6934,14 +7030,6 @@ __asm__(
     "2:  movzbl (%rdi), %eax\n   movzbl (%rsi), %ecx\n   sub %ecx, %eax\n   jnz 4f\n   test %ecx, %ecx\n   jz 3f\n   inc %rdi\n   inc %rsi\n   jmp 1b\n"
     "3:  xor %eax, %eax\n"
     "4:  #\n" ASM_RET
-    ASM_USERSPACE_WIDE(
-    "" ASM_LABEL(compare_zmm) ":\n"
-    TINY_PAGE_EDGE("edi", "" ASM_LABEL(strcmp_generic) "") TINY_PAGE_EDGE("esi", "" ASM_LABEL(strcmp_generic) "")
-    "vmovdqu8 (%rdi), %zmm0\n   vpcmpneqb (%rsi), %zmm0, %k0\n   vptestnmb %zmm0, %zmm0, %k1\n   korq %k1, %k0, %k0\n   kmovq %k0, %rcx\n   test %rcx, %rcx\n   jz " ASM_LABEL(strcmp_long) "\n"
-    "tzcnt %rcx, %rcx\n   movzbl (%rdi,%rcx), %eax\n   movzbl (%rsi,%rcx), %ecx\n   sub %ecx, %eax\n   vzeroupper\n" ASM_RET
-    //      Equal for sixty four bytes and nothing ended: the rest is the same question asked of what follows.
-    "" ASM_LABEL(strcmp_long) ":\n   vzeroupper\n   add $64, %rdi\n   add $64, %rsi\n   jmp " ASM_LABEL(strcmp_generic) "\n"
-    )
     ASM_END(string_compare)
     //
     //       string_first_of and memory_first_of -- sixty four bytes at a time,
@@ -7641,53 +7729,110 @@ __asm__(
     ASM_USERSPACE_WIDE(
     WIDE_PICK_MAX
     //
-    //       Sixty four bytes a vector and four vectors a round where the
-    //       processor has the registers, because the thirty two byte round
-    //       below is half the machine on one that does: a 9950X issues two
-    //       loads a cycle whatever their width, so its eight ymm loads read
-    //       a hundred and twenty eight bytes in the time eight zmm loads
-    //       read two hundred and fifty six. Against BENCH_floor, which reads
-    //       both streams at the widest load and answers nothing, the ymm
-    //       round measured 2.0x slower at four kilobytes on that machine.
+    //       AVX-512 in zmm16 to zmm31, which no vzeroupper has to clean up
+    //       after: glibc's EVEX bodies are written in them for that reason,
+    //       and the vzeroupper on every way out of the ymm0 to zmm15 body
+    //       this replaces was one more instruction on calls that are a
+    //       dozen long.
     //
-    //       Not four compares into mask registers. That was written first,
-    //       folded with two kor and a kortest, and measured 1.5x the floor
-    //       at four kilobytes: compares into mask registers and the kor
-    //       between them share one pipe, and seven of them a round is more
-    //       cycles than eight loads. Exclusive-or leaves nought where the
-    //       lanes agree and runs on any pipe, vpternlogd folds three of the
-    //       four into one, and one vptestmb is the whole of the test. That
-    //       measured 1.09x to 1.15x the floor at four kilobytes over four
-    //       runs on a loaded machine, and at the floor from sixty four
-    //       kilobytes up, where the ymm round had been 2.0x and 1.04x. A
-    //       round that differs anywhere falls into the single vector loop
-    //       to find where, as the ymm round does and for the reason given
-    //       there.
+    //       Up to sixty four bytes, one masked window, cut to the count by
+    //       bzhi. Its lanes past the count never fault, but a lane in a page
+    //       that is not there costs about 250 ticks (TINY_PAGE_EDGE), so the
+    //       window is taken when neither pointer is in the last sixty four
+    //       bytes of its page. One test of the two offsets or-ed together
+    //       answers that for both: an or has bits six to eleven all set when
+    //       either does, and sometimes when neither does, which only sends
+    //       the call to the precise test. Where one is that near its end,
+    //       the window is turned round to end where the inputs end, which
+    //       keeps every lane inside a page they are in, unless one of them
+    //       starts in the first sixty four bytes of its page as well; only
+    //       then is it the ymm body's or the words'. Inputs that end where a
+    //       page ends, one to sixty four bytes, ticks a call on a 9950X:
+    //       8.6 to 10.4 before, against glibc 2.44's 6.3 to 7.1.
     //
-    //       The ladder is the one WIDE_PICK_MAX describes: a count under
-    //       sixty four is handed forward to the ymm body, which hands one
-    //       under thirty two forward to the words.
+    //       Above sixty four, glibc's shape at twice its width: the first
+    //       vector, the second, then the third and fourth, each asked on its
+    //       own, with the count asked between them, so a difference near the
+    //       front is answered from the vector it is in and a count is
+    //       finished by the last one or two or four vectors read back from
+    //       its end. The four vector round of before was entered first from
+    //       two hundred and fifty six bytes, and a difference in it was
+    //       looked for again a vector at a time: differing at the first byte
+    //       of two hundred and fifty six to sixty five thousand cost 10.7 to
+    //       13.4 ticks against glibc's 7.1 to 8.1.
     //
-    "cmp $64, %rdx\n   jbe " ASM_LABEL(compare_tiny) "\n   cmp $256, %rdx\n   jb 13f\n"
+    //       The round is four vectors of exclusive-or folded by two
+    //       vpternlogd and asked one vptestmb, as before (compares into mask
+    //       registers share one pipe on Zen 5, and seven of them a round were
+    //       1.5x the floor at four kilobytes). The first input is read on a
+    //       line of its own: a sixty four byte load across two lines is two
+    //       loads, and with both streams unaligned every load of the round
+    //       was. The second input is a distance from the first, so one
+    //       pointer moves. Where the round says no, the first three vectors
+    //       say which in turn, and the fourth's fold has nothing else in it
+    //       by then.
+    //
+    "cmp $64, %rdx\n   ja " ASM_LABEL(compare_zbig) "\n"
+    "mov %edi, %ecx\n   or %esi, %ecx\n   not %ecx\n   test $0xfc0, %ecx\n   jz " ASM_LABEL(compare_zedge) "\n"
+    "" ASM_LABEL(compare_zwindow) ":\n   mov $-1, %r8\n   bzhi %rdx, %r8, %r8\n   kmovq %r8, %k1\n"
+    "vmovdqu8 (%rdi), %zmm16{%k1}{z}\n   vpcmpneqb (%rsi), %zmm16, %k0{%k1}\n   kortestq %k0, %k0\n   jnz " ASM_LABEL(compare_zdiff) "\n" ASM_RET
+    "" ASM_LABEL(compare_zedge) ":\n   test %rdx, %rdx\n   jz 2f\n"
+    "lea -1(%rdi,%rdx), %ecx\n   test $0xfc0, %ecx\n   jz 1f\n   lea -1(%rsi,%rdx), %ecx\n   test $0xfc0, %ecx\n   jz 1f\n"
+    "mov %edx, %ecx\n   neg %ecx\n   mov $-1, %r8\n   shl %cl, %r8\n   kmovq %r8, %k1  # the top n lanes\n"
+    "vmovdqu8 -64(%rdi,%rdx), %zmm16{%k1}{z}\n   vpcmpneqb -64(%rsi,%rdx), %zmm16, %k0{%k1}\n   kortestq %k0, %k0\n   jnz 3f\n"
+    "2:  " ASM_RET
+    "3:  lea -64(%rdi,%rdx), %rdi\n   lea -64(%rsi,%rdx), %rsi\n   jmp " ASM_LABEL(compare_zdiff) "\n"
+    //      The window turned round would reach back into the page before one of them: forward, if neither is
+    //      in fact near its end (the or says so of two that are not), else the ymm body or the words.
+    "1:  mov %edi, %ecx\n   not %ecx\n   test $0xfc0, %ecx\n   jz 7f\n   mov %esi, %ecx\n   not %ecx\n   test $0xfc0, %ecx\n   jnz " ASM_LABEL(compare_zwindow) "\n"
+    "jmp 7f\n"
+    "" ASM_LABEL(compare_zbig) ":\n   vmovdqu64 (%rdi), %zmm16\n   vpcmpneqb (%rsi), %zmm16, %k0\n   kortestq %k0, %k0\n   jnz " ASM_LABEL(compare_zdiff) "\n"
+    "cmp $128, %rdx\n   jbe " ASM_LABEL(compare_zlast1) "\n"
+    "vmovdqu64 64(%rdi), %zmm17\n   vpcmpneqb 64(%rsi), %zmm17, %k0\n   kortestq %k0, %k0\n   jnz " ASM_LABEL(compare_zdiff64) "\n"
+    "cmp $256, %rdx\n   jbe " ASM_LABEL(compare_zlast2) "\n"
+    //      Past the second vector. To three hundred and eighty four bytes, the third and fourth one at a time
+    //      and then the last two, whose fold is a round's first two, so the round's ladder answers for them.
+    //      Past that, rounds from the third vector, the first put on a line, which can only move it back, and
+    //      the last read back from the end, what it reads twice being equal; up to five hundred and twelve,
+    //      one round and the last two vectors. Every load of these is two when the inputs sit across lines,
+    //      and Zen 5 issues two a cycle, so what decides is how much is read before the answer: a round from
+    //      the third vector read three hundred and eighty four bytes that differ in the middle to their end,
+    //      16 cycles a call against glibc's 12, and the third and fourth asked one at a time before the
+    //      rounds read too much of five hundred and twelve that differ in the middle, 16.5 ticks against
+    //      13.3. Two vectors in place of the loop's last round wherever they would do, a test of what was
+    //      left, made counts drawn at random from one to 8192 nine per cent slower.
+    "sub %rdi, %rsi  # the second input as a distance from the first\n"
+    "cmp $384, %rdx\n   ja 3f\n"
+    "vmovdqu64 128(%rdi), %zmm18\n   vpcmpneqb 128(%rdi,%rsi), %zmm18, %k0\n   kortestq %k0, %k0\n   jnz 4f\n"
+    "vmovdqu64 192(%rdi), %zmm19\n   vpcmpneqb 192(%rdi,%rsi), %zmm19, %k0\n   kortestq %k0, %k0\n   jnz 5f\n"
+    "lea -128(%rdi,%rdx), %rdi\n   jmp 2f\n"
+    "5:  add $64, %rdi\n"
+    "4:  sub $-128, %rdi\n   jmp " ASM_LABEL(compare_zat) "\n"
+    "3:  cmp $512, %rdx\n   jbe 1f\n"
+    "lea -256(%rdi,%rdx), %rdx  # where the last round starts\n   sub $-128, %rdi\n   and $-64, %rdi  # on a line of the first input\n"
     ".balign 32\n"
-    "11: vmovdqu64 (%rdi), %zmm0\n   vmovdqu64 64(%rdi), %zmm1\n   vmovdqu64 128(%rdi), %zmm2\n   vmovdqu64 192(%rdi), %zmm3\n"
-    "vpxorq (%rsi), %zmm0, %zmm0\n   vpxorq 64(%rsi), %zmm1, %zmm1\n   vpxorq 128(%rsi), %zmm2, %zmm2\n   vpxorq 192(%rsi), %zmm3, %zmm3\n"
-    "vporq %zmm1, %zmm0, %zmm0\n   vpternlogd $0xfe, %zmm3, %zmm2, %zmm0\n   vptestmb %zmm0, %zmm0, %k0\n   kortestq %k0, %k0\n   jnz 13f  # somewhere in these four\n"
-    "add $256, %rdi\n   add $256, %rsi\n   sub $256, %rdx\n   cmp $256, %rdx\n   jae 11b\n"
-    "13: cmp $64, %rdx\n   jb 14f\n   vmovdqu64 (%rdi), %zmm0\n   vpcmpneqb (%rsi), %zmm0, %k0\n"
-    "kortestq %k0, %k0\n   jnz 18f\n   add $64, %rdi\n   add $64, %rsi\n   sub $64, %rdx\n   jmp 13b\n"
-    //
-    //       The last sixty four bytes, read again, for the reason the ymm
-    //       body gives for its last thirty two.
-    //
-    "14: test %rdx, %rdx\n   jz 16f\n   lea -64(%rdi,%rdx), %rdi\n   lea -64(%rsi,%rdx), %rsi\n   vmovdqu64 (%rdi), %zmm0\n   vpcmpneqb (%rsi), %zmm0, %k0\n   kortestq %k0, %k0\n   jz 16f\n"
-    "18: kmovq %k0, %rcx\n   bsf %rcx, %rcx\n   vzeroupper\n   movzbl (%rdi,%rcx), %eax\n   movzbl (%rsi,%rcx), %ecx\n   sub %ecx, %eax\n" ASM_RET
-    "16: vzeroupper\n   xor %eax, %eax\n" ASM_RET
-    "" ASM_LABEL(compare_tiny) ":\n"
-    TINY_PAGE_EDGE("edi", "7f") TINY_PAGE_EDGE("esi", "7f") TINY_MASK("%rdx")
-    "vmovdqu8 (%rdi), %zmm0{%k1}{z}\n   vpcmpneqb (%rsi), %zmm0, %k0{%k1}\n   kortestq %k0, %k0\n   jnz " ASM_LABEL(compare_tiny_diff) "\n   vzeroupper\n   xor %eax, %eax\n" ASM_RET
-    "" ASM_LABEL(compare_tiny_diff) ":\n   kmovq %k0, %rcx\n   tzcnt %rcx, %rcx\n   movzbl (%rdi,%rcx), %eax\n   movzbl (%rsi,%rcx), %ecx\n   sub %ecx, %eax\n   vzeroupper\n" ASM_RET
-    ".balign 32\n"
+    "" ASM_LABEL(compare_zloop) ":\n" COMPARE_Z4 "jnz " ASM_LABEL(compare_zfound) "\n"
+    "add $256, %rdi\n   cmp %rdx, %rdi\n   jb " ASM_LABEL(compare_zloop) "\n"
+    "mov %rdx, %rdi\n" COMPARE_Z4 "jnz " ASM_LABEL(compare_zfound) "\n" ASM_RET
+    "1:  lea -128(%rdi,%rdx), %rdx\n   sub $-128, %rdi\n" COMPARE_Z4 "jnz " ASM_LABEL(compare_zfound) "\n   mov %rdx, %rdi\n"
+    "2:  vmovdqu64 (%rdi), %zmm16\n   vpxorq (%rdi,%rsi), %zmm16, %zmm16\n   vmovdqu64 64(%rdi), %zmm17\n   vpternlogd $0xde, 64(%rdi,%rsi), %zmm16, %zmm17\n"
+    "vptestmb %zmm17, %zmm17, %k0\n   kortestq %k0, %k0\n   jnz " ASM_LABEL(compare_zfound) "\n" ASM_RET
+    "" ASM_LABEL(compare_zfound) ":\n"
+    "vptestmb %zmm16, %zmm16, %k0\n   kortestq %k0, %k0\n   jnz " ASM_LABEL(compare_zat) "\n   add $64, %rdi\n"
+    "vptestmb %zmm17, %zmm17, %k0\n   kortestq %k0, %k0\n   jnz " ASM_LABEL(compare_zat) "\n   add $64, %rdi\n"
+    "vptestmb %zmm18, %zmm18, %k0\n   kortestq %k0, %k0\n   jnz " ASM_LABEL(compare_zat) "\n   add $64, %rdi\n"
+    "vptestmb %zmm19, %zmm19, %k0\n"
+    "" ASM_LABEL(compare_zat) ":\n   add %rdi, %rsi\n   jmp " ASM_LABEL(compare_zdiff) "\n"
+    "" ASM_LABEL(compare_zlast2) ":\n   lea -128(%rdi,%rdx), %rdi\n   lea -128(%rsi,%rdx), %rsi\n"
+    "vmovdqu64 (%rdi), %zmm16\n   vpcmpneqb (%rsi), %zmm16, %k0\n   kortestq %k0, %k0\n   jnz " ASM_LABEL(compare_zdiff) "\n"
+    "vmovdqu64 64(%rdi), %zmm17\n   vpcmpneqb 64(%rsi), %zmm17, %k0\n   kortestq %k0, %k0\n   jnz " ASM_LABEL(compare_zdiff64) "\n" ASM_RET
+    "" ASM_LABEL(compare_zlast1) ":\n   lea -64(%rdi,%rdx), %rdi\n   lea -64(%rsi,%rdx), %rsi\n"
+    "vmovdqu64 (%rdi), %zmm16\n   vpcmpneqb (%rsi), %zmm16, %k0\n   kortestq %k0, %k0\n   jnz " ASM_LABEL(compare_zdiff) "\n" ASM_RET
+    "" ASM_LABEL(compare_zdiff64) ":\n   add $64, %rdi\n   add $64, %rsi\n"
+    "" ASM_LABEL(compare_zdiff) ":\n   kmovq %k0, %rcx\n   tzcnt %rcx, %rcx\n   movzbl (%rdi,%rcx), %eax\n   movzbl (%rsi,%rcx), %ecx\n   sub %ecx, %eax\n" ASM_RET
+    //      On a line of its own: where the body above happened to leave it, half a line on, the AVX2 window
+    //      that follows took 7.1 ticks a call where it had taken 6.3, for the same instructions.
+    ".balign 64\n"
     "7:\n" ASM_NARROW("cpu_has_avx2", "5f")
     //
     //      The same window with two 256-bit vectors where there is no AVX-512: sixty four bytes of each, the
@@ -8935,7 +9080,42 @@ __asm__(
     //       found once per call, so simple beats clever there.
     //
     ASM_FUNC(string_compare_max)
-    ASM_USERSPACE_WIDE("cmpb $0, cpu_has_avx512(%rip)\n   jne " ASM_LABEL(cmpmax_zmm) "\n" ASM_LABEL(cmpmax_generic) ":\n")
+    ASM_USERSPACE_WIDE("cmpb $0, cpu_has_avx512(%rip)\n   je " ASM_LABEL(cmpmax_narrow) "\n"
+    //
+    //      AVX-512: string_compare's body with the bound asked where it can end the call, and its
+    //      STRING_Z_RUN for what is past the first four vectors, entered with the bound held to 2^62
+    //      so that stepping back can never carry it. A difference or an end found past the bound is
+    //      no answer, and nothing past it is read except inside a page the bytes in front of it are in.
+    //      This replaced a masked window of sixty four and the thirty two byte AVX2 body after it, a
+    //      vzeroupper on the way out: equal strings of four kilobytes under a bound of their length
+    //      took 306 ticks a call on a 9950X against glibc 2.44's 132, and 65536 bytes 5308 against 3029.
+    //
+    "" ASM_LABEL(cmpmax_z) ":\n   cmp $1, %rdx\n   jbe " ASM_LABEL(cmpmax_zone) "\n"
+    "" ASM_LABEL(cmpmax_zagain) ":\n   mov %edi, %eax\n   or %esi, %eax\n   not %eax\n   test $0xfc0, %eax\n   jz " ASM_LABEL(cmpmax_zcross) "\n"
+    "" ASM_LABEL(cmpmax_zfirst) ":\n" STRING_Z_VEC("0") "jnz " ASM_LABEL(cmpmax_zat0) "\n   cmp $64, %rdx\n   jbe " ASM_LABEL(cmpmax_zzero) "\n"
+    "test $0xf00, %eax\n   jz " ASM_LABEL(cmpmax_zmore) "  # either may be in the last 256 bytes of its page (the or again)\n"
+    STRING_Z_VEC("64") "jnz " ASM_LABEL(cmpmax_zat64) "\n   cmp $128, %rdx\n   jbe " ASM_LABEL(cmpmax_zzero) "\n"
+    STRING_Z_VEC("128") "jnz " ASM_LABEL(cmpmax_zat128) "\n   cmp $192, %rdx\n   jbe " ASM_LABEL(cmpmax_zzero) "\n"
+    STRING_Z_VEC("192") "jnz " ASM_LABEL(cmpmax_zat192) "\n   cmp $256, %rdx\n   jbe " ASM_LABEL(cmpmax_zzero) "\n"
+    "add $192, %rdi\n   add $192, %rsi\n   sub $192, %rdx\n"
+    "" ASM_LABEL(cmpmax_zmore) ":\n   add $64, %rdi\n   add $64, %rsi\n   sub $64, %rdx\n"
+    "movabs $0x4000000000000000, %rcx\n   cmp %rcx, %rdx\n   cmova %rcx, %rdx\n   jmp " ASM_LABEL(strcmp_zloop) "\n"
+    "" ASM_LABEL(cmpmax_zat192) ":\n   add $64, %rdi\n   add $64, %rsi\n   sub $64, %rdx\n"
+    "" ASM_LABEL(cmpmax_zat128) ":\n   add $64, %rdi\n   add $64, %rsi\n   sub $64, %rdx\n"
+    "" ASM_LABEL(cmpmax_zat64) ":\n   add $64, %rdi\n   add $64, %rsi\n   sub $64, %rdx\n"
+    "" ASM_LABEL(cmpmax_zat0) ":\n   tzcnt %rcx, %rcx\n   cmp %rdx, %rcx\n   jae " ASM_LABEL(cmpmax_zzero) "  # past the bound\n"
+    "movzbl (%rdi,%rcx), %eax\n   movzbl (%rsi,%rcx), %ecx\n   sub %ecx, %eax\n" ASM_RET
+    "" ASM_LABEL(cmpmax_zzero) ":\n   xor %eax, %eax\n" ASM_RET
+    //      A bound of one or none: the first bytes, or nothing.
+    "" ASM_LABEL(cmpmax_zone) ":\n   jb " ASM_LABEL(cmpmax_zzero) "\n   movzbl (%rdi), %eax\n   movzbl (%rsi), %ecx\n   sub %ecx, %eax\n" ASM_RET
+    "" ASM_LABEL(cmpmax_zcross) ":\n   mov %edi, %eax\n   and $0xfff, %eax\n   mov %esi, %ecx\n   and $0xfff, %ecx\n   cmp %ecx, %eax\n   cmovb %ecx, %eax\n"
+    "mov $4096, %r8d\n   sub %eax, %r8d\n   cmp $64, %r8d\n   jb " ASM_LABEL(cmpmax_zedgein) "\n"
+    "mov %edi, %eax\n   or %esi, %eax\n   not %eax  # the or again, which the next test asks\n   jmp " ASM_LABEL(cmpmax_zfirst) "\n"
+    "" ASM_LABEL(cmpmax_zedgein) ":\n   cmp %rdx, %r8\n   cmova %rdx, %r8  # or the bound, if that is nearer\n"
+    STRING_Z_EDGE("r8") "jnz " ASM_LABEL(cmpmax_zedge_at) "\n"
+    "sub %r8, %rdx\n   jz " ASM_LABEL(cmpmax_zzero) "\n   add %r8, %rdi\n   add %r8, %rsi\n   jmp " ASM_LABEL(cmpmax_zagain) "\n"
+    "" ASM_LABEL(cmpmax_zedge_at) ":\n   kmovq %k0, %rcx\n   tzcnt %rcx, %rcx\n   movzbl (%r9,%rcx), %eax\n   movzbl (%r10,%rcx), %ecx\n   sub %ecx, %eax\n" ASM_RET
+    "" ASM_LABEL(cmpmax_narrow) ":\n")
     "xor %eax, %eax\n   test %rdx, %rdx\n   jz 9f\n"
     //
     //      Thirty two bytes a step while there are sixty four left to do.
@@ -9008,18 +9188,6 @@ __asm__(
     "8:  xor %eax, %eax\n"
     "9:\n" ASM_RET
     "6:  movzbl (%rsi,%rcx), %ecx\n   sub %ecx, %eax  # once a call, so leave it long\n" ASM_RET
-    ASM_USERSPACE_WIDE(
-    //      The first sixty four bytes of each, or the bound if it is less, in one compare: where they differ or
-    //      the first ends, in the lanes the bound allows. Nothing there and a bound of more than sixty four go
-    //      on from sixty four with what is left of it; nothing there and a bound inside it is equal.
-    "" ASM_LABEL(cmpmax_zmm) ":\n   test %rdx, %rdx\n   jz " ASM_LABEL(cmpmax_generic) "\n"
-    TINY_PAGE_EDGE("edi", "" ASM_LABEL(cmpmax_generic) "") TINY_PAGE_EDGE("esi", "" ASM_LABEL(cmpmax_generic) "")
-    "mov $64, %ecx\n   cmp %rcx, %rdx\n   cmovb %rdx, %rcx\n   mov $-1, %rax\n   bzhi %rcx, %rax, %rax\n   kmovq %rax, %k1\n"
-    "vmovdqu8 (%rdi), %zmm0\n   vpcmpneqb (%rsi), %zmm0, %k0{%k1}\n   vptestnmb %zmm0, %zmm0, %k2{%k1}\n   korq %k2, %k0, %k0\n   kmovq %k0, %rax\n   test %rax, %rax\n   jz " ASM_LABEL(cmpmax_none) "\n"
-    "tzcnt %rax, %rax\n   movzbl (%rdi,%rax), %ecx\n   movzbl (%rsi,%rax), %eax\n   sub %eax, %ecx\n   mov %ecx, %eax\n   vzeroupper\n" ASM_RET
-    "" ASM_LABEL(cmpmax_none) ":\n   vzeroupper\n   cmp $64, %rdx\n   ja " ASM_LABEL(cmpmax_more) "\n   xor %eax, %eax\n" ASM_RET
-    "" ASM_LABEL(cmpmax_more) ":\n   add $64, %rdi\n   add $64, %rsi\n   sub $64, %rdx\n   jmp " ASM_LABEL(cmpmax_generic) "\n"
-    )
     ASM_END(string_compare_max)
     //
     //       size_t string_length_max(const char *s, size_t n)
@@ -20360,12 +20528,21 @@ __asm__(
     //       the destination waits.
     //
     ASM_FUNC(string_copy)
+    ASM_USERSPACE_WIDE("cmpb $0, cpu_has_avx512(%rip)\n   je " ASM_LABEL(strcpy_narrow) "\n"
+    //
+    //      AVX-512: STRING_COPY_Z. It replaced string_length's four vectors a turn with the copy after them, in
+    //      ymm0 to ymm15 and a vzeroupper, and the call to memory_copy_apart for anything that ended in the
+    //      head: strings of one to five hundred and twelve bytes took 6.5 to 19.7 ticks a call on a 9950X
+    //      against glibc 2.44's __strcpy_evex at 5.5 to 17.0.
+    //
+    "" ASM_LABEL(strcpy_z) ":\n   mov %rdi, %rax\n"
+    "" ASM_LABEL(strcpy_zcore) ":\n" STRING_COPY_Z("", "")
+    "" ASM_LABEL(strcpy_narrow) ":\n")
     "mov %rdi, %r9  # the destination, where the scan will not look\n   mov %rsi, %rdi\n"
     ASM_USERSPACE_WIDE(
         ASM_NARROW("cpu_has_avx2", "5f")
         WIDE_COPY_HEAD
         AVX2_COPY_BLOCKS
-        "6:  " AVX512_COPY_BLOCKS
     )
     //       string_length's word at a time loop, and the same tail.
     ".balign 32\n"
@@ -20391,6 +20568,26 @@ __asm__(
     //      dangerous than the one it replaces; it is the same contract.
     //
     ASM_FUNC(string_append)
+    ASM_USERSPACE_WIDE("cmpb $0, cpu_has_avx512(%rip)\n   je " ASM_LABEL(strcat_narrow) "\n"
+    //
+    //      AVX-512: the destination's end found here, without a call, and string_copy's STRING_COPY_Z from it,
+    //      the destination kept in %rax for the answer. The end is looked for a line at a time, aligned, so no
+    //      read leaves the page of a byte the string is in, the line the string starts in with the flags in
+    //      front of it shifted out, then four lines a turn folded by their minimum once on a block of four.
+    //
+    "" ASM_LABEL(strcat_z) ":\n   mov %rdi, %rax\n   mov %rdi, %rcx\n   and $-64, %rcx\n   vmovdqa64 (%rcx), %zmm16\n   vptestnmb %zmm16, %zmm16, %k0\n"
+    "kmovq %k0, %rdx\n   mov %edi, %ecx\n   and $63, %ecx\n   shr %cl, %rdx\n   tzcnt %rdx, %rdx\n   jc 1f\n"
+    "add %rdx, %rdi\n   jmp " ASM_LABEL(strcpy_zcore) "\n"
+    "1:  lea 64(%rdi), %rcx\n   and $-64, %rcx\n"
+    "2:  test $192, %cl\n   jz 3f\n   vmovdqa64 (%rcx), %zmm16\n   vptestnmb %zmm16, %zmm16, %k0\n   kortestq %k0, %k0\n   jnz 4f\n   add $64, %rcx\n   jmp 2b\n"
+    ".balign 32\n"
+    "3:  vmovdqa64 (%rcx), %zmm16\n   vmovdqa64 64(%rcx), %zmm17\n   vmovdqa64 128(%rcx), %zmm18\n   vmovdqa64 192(%rcx), %zmm19\n"
+    "vpminub %zmm17, %zmm16, %zmm20\n   vpminub %zmm19, %zmm18, %zmm21\n   vpminub %zmm21, %zmm20, %zmm20\n   vptestnmb %zmm20, %zmm20, %k0\n"
+    "kortestq %k0, %k0\n   jnz 5f\n   add $256, %rcx\n   jmp 3b\n"
+    "5:  vptestnmb %zmm16, %zmm16, %k0\n   kortestq %k0, %k0\n   jnz 4f\n   add $64, %rcx\n   vptestnmb %zmm17, %zmm17, %k0\n   kortestq %k0, %k0\n   jnz 4f\n"
+    "add $64, %rcx\n   vptestnmb %zmm18, %zmm18, %k0\n   kortestq %k0, %k0\n   jnz 4f\n   add $64, %rcx\n   vptestnmb %zmm19, %zmm19, %k0\n"
+    "4:  kmovq %k0, %rdx\n   tzcnt %rdx, %rdx\n   lea (%rcx,%rdx), %rdi\n   jmp " ASM_LABEL(strcpy_zcore) "\n"
+    "" ASM_LABEL(strcat_narrow) ":\n")
     "push %rbx\n   push %r12\n   sub $8, %rsp  # aligned at the calls\n"
     "mov %rdi, %rbx\n   mov %rsi, %r12\n   call string_length  # the destination is already in rdi\n"
     "lea (%rbx,%rax), %rdi\n   mov %r12, %rsi\n   call string_copy\n   mov %rbx, %rax  # strcat hands the destination back\n"
@@ -64940,6 +65137,12 @@ __asm__(
     //       copy rather than kept in a third register.
     //
     ASM_FUNC(string_copy_end)
+    ASM_USERSPACE_WIDE("cmpb $0, cpu_has_avx512(%rip)\n   je " ASM_LABEL(stpcpy_narrow) "\n"
+    //      AVX-512: string_copy's one pass, answering where the terminator went. The two calls below took
+    //      12.6 to 23.2 ticks a call on a 9950X for one to five hundred and twelve bytes, against glibc
+    //      2.44's __stpcpy_evex at 6.3 to 17.3.
+    "" ASM_LABEL(stpcpy_z) ":\n" STRING_COPY_Z("lea (%rdi,%rdx), %rax\n", "lea 63(%rsi,%r9), %rax\n")
+    "" ASM_LABEL(stpcpy_narrow) ":\n")
     "push %rbx\n   push %r12\n   sub $8, %rsp\n   mov %rdi, %rbx  # the destination\n   mov %rsi, %r12  # the source\n"
     "mov %rsi, %rdi\n   call string_length\n   mov %rbx, %rdi\n   mov %r12, %rsi\n   lea 1(%rax), %rdx  # the terminator is copied too\n"
     "add %rax, %rbx  # which is where it lands, and the answer\n"
@@ -64954,6 +65157,59 @@ __asm__(
     //       copy is what makes the test after it free.
     //
     ASM_FUNC(string_copy_max_endptr)
+    ASM_USERSPACE_WIDE("cmpb $0, cpu_has_avx512(%rip)\n   je " ASM_LABEL(stpncpy_calls) "\n"
+    //
+    //      AVX-512, one pass in zmm16 to zmm31. The first sixty four bytes of the source as string_copy reads
+    //      them, its lanes from the terminator on made nought: a bound of sixty four or less is those lanes
+    //      stored under a mask of the bound, one store and no branch on either length. Past sixty four, a
+    //      source that ends in its first line has the padding stored first, a line at a time and the last
+    //      line ending on the bound, and then that line whole over the front of it. A longer one is copied a
+    //      line at a time and then four, as string_copy's, each line stored once it is known to hold no end
+    //      and to be inside the bound; the end is the sixty four bytes that finish on the terminator or the
+    //      bound, read again, and after a terminator the padding to the bound, its last few bytes under a
+    //      mask. The three calls below, a length, a copy and a fill, took 12.0 to 25.4 ticks a call on a
+    //      9950X for bounds of one to five hundred and twelve, against glibc 2.44's 6.3 to 17.6.
+    //
+    "" ASM_LABEL(stpncpy_z) ":\n   mov %rdi, %rax\n   test %rdx, %rdx\n   jz 9f\n"
+    "mov %esi, %ecx\n   and $4095, %ecx\n   cmp $4032, %ecx\n   ja 70f\n"
+    "vmovdqu64 (%rsi), %zmm16\n   vptestnmb %zmm16, %zmm16, %k0\n   kmovq %k0, %rcx\n   tzcnt %rcx, %r8  # the length, or 64\n"
+    "60: mov $-1, %rcx\n   bzhi %r8, %rcx, %rcx\n   kmovq %rcx, %k1\n   vmovdqu8 %zmm16, %zmm16{%k1}{z}  # nought from the end on\n"
+    "cmp $64, %rdx\n   ja 61f\n"
+    "mov $-1, %rcx\n   bzhi %rdx, %rcx, %rcx\n   kmovq %rcx, %k2\n   vmovdqu8 %zmm16, (%rdi){%k2}\n"
+    "cmp %rdx, %r8\n   cmova %rdx, %r8\n   add %r8, %rax\n"
+    "9:  " ASM_RET
+    //      Past sixty four. A terminator in the first line: the padding behind it, then the line.
+    "61: cmp $64, %r8\n   jae 72f\n   lea (%rdi,%rdx), %r11  # the end of the bound\n   lea 64(%rdi), %r10\n   vpxorq %xmm18, %xmm18, %xmm18\n"
+    "vmovdqu64 %zmm18, -64(%r11)  # the last line of the padding\n"
+    "62: lea 64(%r10), %rcx\n   cmp %r11, %rcx\n   ja 63f\n   vmovdqu64 %zmm18, (%r10)\n   mov %rcx, %r10\n   jmp 62b\n"
+    "63: vmovdqu64 %zmm16, (%rdi)\n   add %r8, %rax\n" ASM_RET
+    //      The first line is all source and the bound is past it.
+    "72: vmovdqu64 %zmm16, (%rdi)\n   mov %rdi, %r9\n   sub %rsi, %r9  # the destination as a distance from the source\n"
+    "lea (%rsi,%rdx), %r11  # the end of the bound, in the source\n   lea 64(%rsi), %r8\n   and $-64, %r8\n"
+    "73: lea 64(%r8), %rcx\n   cmp %r11, %rcx\n   ja 79f  # the bound ends in this line\n   test $192, %r8b\n   jnz 74f\n"
+    "lea 256(%r8), %rcx\n   cmp %r11, %rcx\n   jbe 75f  # four whole lines inside the bound\n"
+    "74: vmovdqa64 (%r8), %zmm16\n   vptestnmb %zmm16, %zmm16, %k0\n   kortestq %k0, %k0\n   jnz 78f\n   vmovdqu64 %zmm16, (%r8,%r9)\n   add $64, %r8\n   jmp 73b\n"
+    "75: vmovdqa64 (%r8), %zmm16\n   vmovdqa64 64(%r8), %zmm17\n   vmovdqa64 128(%r8), %zmm18\n   vmovdqa64 192(%r8), %zmm19\n"
+    "vpminub %zmm17, %zmm16, %zmm20\n   vpminub %zmm19, %zmm18, %zmm21\n   vpminub %zmm21, %zmm20, %zmm20\n   vptestnmb %zmm20, %zmm20, %k0\n   kortestq %k0, %k0\n   jnz 74b  # one line at a time finds it\n"
+    "vmovdqu64 %zmm16, (%r8,%r9)\n   vmovdqu64 %zmm17, 64(%r8,%r9)\n   vmovdqu64 %zmm18, 128(%r8,%r9)\n   vmovdqu64 %zmm19, 192(%r8,%r9)\n   add $256, %r8\n   jmp 73b\n"
+    //      The bound ends inside the line at %r8: a terminator before it, or the sixty four that end on it.
+    "79: cmp %r11, %r8\n   jae 69f  # on the bound already\n   vmovdqa64 (%r8), %zmm16\n   vptestnmb %zmm16, %zmm16, %k0\n   kmovq %k0, %rcx\n   tzcnt %rcx, %rcx\n   add %r8, %rcx\n   cmp %r11, %rcx\n   jb 77f\n"
+    "vmovdqu64 -64(%r11), %zmm16\n   vmovdqu64 %zmm16, -64(%r11,%r9)\n"
+    "69: lea (%r11,%r9), %rax\n" ASM_RET
+    "78: kmovq %k0, %rcx\n   tzcnt %rcx, %rcx\n   add %r8, %rcx\n"
+    //      The terminator at %rcx: the sixty four that end on it, then nought to the bound.
+    "77: vmovdqu64 -64(%rcx), %zmm16\n   vmovdqu64 %zmm16, -64(%rcx,%r9)\n   add %r9, %rcx\n   add %r9, %r11\n   mov %rcx, %rax\n"
+    "vpxorq %xmm18, %xmm18, %xmm18\n   mov %r11, %rdx\n   sub %rcx, %rdx\n   cmp $64, %rdx\n   jb 76f\n"
+    "71: vmovdqu64 %zmm18, (%rcx)\n   add $64, %rcx\n   lea 64(%rcx), %rdx\n   cmp %r11, %rdx\n   jb 71b\n   vmovdqu64 %zmm18, -64(%r11)\n" ASM_RET
+    "76: mov $-1, %r10\n   bzhi %rdx, %r10, %r10\n   kmovq %r10, %k1\n   vmovdqu8 %zmm18, (%rcx){%k1}\n" ASM_RET
+    //      The source in the last sixty four bytes of its page: its line, aligned, for the length, and the
+    //      lanes inside the page read under a mask. A source that runs on into the next page and a bound
+    //      past this one is the calls' below to finish.
+    "70: mov %rsi, %r8\n   and $-64, %r8\n   vmovdqa64 (%r8), %zmm17\n   vptestnmb %zmm17, %zmm17, %k0\n   kmovq %k0, %r8\n"
+    "mov %esi, %ecx\n   and $63, %ecx\n   shr %cl, %r8\n   mov $64, %r9d\n   sub %ecx, %r9d  # to the page's end\n"
+    "mov $-1, %r10\n   bzhi %r9, %r10, %r10\n   kmovq %r10, %k1\n   vmovdqu8 (%rsi), %zmm16{%k1}{z}\n   tzcnt %r8, %r8\n   jnc 60b\n"
+    "cmp %r9, %rdx\n   ja " ASM_LABEL(stpncpy_calls) "\n   mov %r9, %r8  # the bound ends in the page: what is there is all source\n   jmp 60b\n"
+    "" ASM_LABEL(stpncpy_calls) ":\n")
     "push %rbx\n   push %r12\n   push %r13\n   mov %rdi, %rbx  # the destination\n   mov %rsi, %r12  # the source\n"
     "mov %rdx, %r13  # the bound\n"
     "mov %rsi, %rdi\n   mov %rdx, %rsi\n   call string_length_max\n   mov %rbx, %rdi\n   mov %r12, %rsi\n   mov %rax, %rdx\n"

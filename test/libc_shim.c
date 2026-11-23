@@ -226,6 +226,104 @@ static void check_compare(const char *name, cmp_fn ours, cmp_fn theirs, int zero
         }
 }
 
+/* Where an input of n bytes sits against a page edge, j bytes in from it: 0 its last byte j before the end of the region (the
+   page after unmapped), 1 its first j after the region's start (the page before unmapped), 2 ending j before an edge inside
+   the region, 3 starting j after one, 4 across one, 5 in the middle of a page. */
+static size_t edge_place(size_t n, int k, size_t j)
+{
+        switch (k) {
+        case 0: return SPAN - n - j;
+        case 1: return j;
+        case 2: return 5 * PAGE - n - j;
+        case 3: return 7 * PAGE + j;
+        case 4: return 9 * PAGE - n / 2 - j;
+        default: return 11 * PAGE + 1000 + j;
+        }
+}
+
+/* memcmp and bcmp at every length to 300 with each input against every kind of page edge, at every offset from it to 72
+   for the two that have an unmapped page beside them: equal, then one byte changed first, last and in the middle. */
+static void check_compare_edges(const char *name, cmp_fn ours, int zero_only)
+{
+        for (size_t n = 0; n <= 300; n += (n < 140 ? 1 : 7))
+                for (int ka = 0; ka < 6; ka++)
+                        for (size_t ja = 0; ja < 72; ja += (ka < 2 ? 1 : 11))
+                                for (int kb = 0; kb < 6; kb++) {
+                                        size_t a = edge_place(n, ka, ja), b = edge_place(n, kb, (ja * 7 + (size_t)kb * 13) % 72);
+                                        fill_random(src + a, n, 0);
+                                        memcpy(src2 + b, src + a, n);
+                                        for (int d = 0; d < 4; d++) {
+                                                size_t at = d == 1 ? 0 : d == 2 ? n - 1 : n / 2;
+                                                if (d && !n)
+                                                        break;
+                                                if (d)
+                                                        src2[b + at] ^= (unsigned char)(d == 3 ? 0x80 : 0x01);
+                                                int x = ours(src + a, src2 + b, n), y = memcmp(src + a, src2 + b, n);
+                                                checks++;
+                                                if (zero_only ? ((x == 0) != (y == 0)) : sign(x) != sign(y))
+                                                        fail(name, "against a page edge", n, a, b);
+                                                x = ours(src2 + b, src + a, n), y = memcmp(src2 + b, src + a, n);
+                                                if (zero_only ? ((x == 0) != (y == 0)) : sign(x) != sign(y))
+                                                        fail(name, "against a page edge, swapped", n, a, b);
+                                                if (d)
+                                                        src2[b + at] ^= (unsigned char)(d == 3 ? 0x80 : 0x01);
+                                        }
+                                }
+}
+
+/* strcmp and strncmp the same way: strings of every length to 300 whose terminator sits against every kind of page edge,
+   equal, one byte changed first, last and in the middle, and the second ended early; strncmp under bounds around the length.
+   Then strncmp of arrays with no terminator at all, n bytes ending against the unmapped page, which may be read to n only. */
+static void check_string_compare_edges(scmp_fn ours, sncmp_fn ours_n)
+{
+        for (size_t n = 0; n <= 300; n += (n < 140 ? 1 : 7))
+                for (int ka = 0; ka < 6; ka++)
+                        for (size_t ja = 0; ja < 72; ja += (ka < 2 ? 3 : 11))
+                                for (int kb = 0; kb < 6; kb++) {
+                                        size_t a = edge_place(n + 1, ka, ja), b = edge_place(n + 1, kb, (ja * 7 + (size_t)kb * 13) % 72);
+                                        fill_random(src + a, n, 255);
+                                        src[a + n] = 0;
+                                        memcpy(src2 + b, src + a, n + 1);
+                                        const char *x = (const char *)src + a, *y = (const char *)src2 + b;
+                                        for (int d = 0; d < 5; d++) {
+                                                size_t at = d == 1 ? 0 : d == 2 ? n - 1 : n / 2;
+                                                if (d && !n)
+                                                        break;
+                                                unsigned char keep = src2[b + at];
+                                                if (d == 4)
+                                                        src2[b + at] = 0;
+                                                else if (d)
+                                                        src2[b + at] = (unsigned char)(keep == 0xff ? 1 : keep + 1);
+                                                checks++;
+                                                if (sign(ours(x, y)) != sign(strcmp(x, y)) || sign(ours(y, x)) != sign(strcmp(y, x)))
+                                                        fail("strcmp", "against a page edge", n, a, b);
+                                                if (d != 1 && d != 3) {
+                                                        size_t bounds[] = {0, 1, n / 2, n, n + 1, n + 64, (size_t)-1};
+                                                        for (int k = 0; k < 7; k++)
+                                                                if (sign(ours_n(x, y, bounds[k])) != sign(strncmp(x, y, bounds[k])) ||
+                                                                    sign(ours_n(y, x, bounds[k])) != sign(strncmp(y, x, bounds[k])))
+                                                                        fail("strncmp", "against a page edge", n, bounds[k], (size_t)d);
+                                                }
+                                                if (d)
+                                                        src2[b + at] = keep;
+                                        }
+                                }
+        for (size_t n = 1; n <= 320; n++)
+                for (int k = 0; k < 4; k++) {
+                        size_t a = k & 1 ? 0 : SPAN - n, b = k & 2 ? 0 : SPAN - n;
+                        fill_random(src + a, n, 255);
+                        memcpy(src2 + b, src + a, n);
+                        checks++;
+                        if (ours_n((char *)src + a, (char *)src2 + b, n) != 0)
+                                fail("strncmp", "no terminator, equal", n, a, b);
+                        unsigned char keep = src2[b + n - 1];
+                        src2[b + n - 1] = (unsigned char)(keep == 0xff ? 1 : keep + 1);
+                        if (sign(ours_n((char *)src + a, (char *)src2 + b, n)) != sign(strncmp((char *)src + a, (char *)src2 + b, n)))
+                                fail("strncmp", "no terminator, the last byte differs", n, a, b);
+                        src2[b + n - 1] = keep;
+                }
+}
+
 /* memchr and memrchr: the byte absent, then placed once at each position (and its value given with high bits set). */
 static void check_find(const char *name, find_fn ours, find_fn theirs)
 {
@@ -480,6 +578,75 @@ static void check_memccpy(ccpy_fn ours)
 
 typedef char *(*sncpy_fn)(char *, const char *, size_t);
 typedef size_t (*slcpy_fn)(char *, const char *, size_t);
+/* strcpy, stpcpy, strcat, strncpy and stpncpy with the source's terminator against every kind of page edge, at every length
+   to 300, into a destination that ends on the unmapped page or sits after it, canaries all round; strcat onto heads of a few
+   lengths; the bounded two under bounds around the length, and with sources that have no terminator inside the bound, n bytes
+   ending against the unmapped page. */
+static void check_copy_edges(void *shim)
+{
+        scpy_fn cpy[3] = {(scpy_fn)dlsym(shim, "strcpy"), (scpy_fn)dlsym(shim, "stpcpy"), (scpy_fn)dlsym(shim, "strcat")};
+        scpy_fn cpy_c[3] = {strcpy, stpcpy, strcat};
+        const char *cpy_name[3] = {"strcpy", "stpcpy", "strcat"};
+        sncpy_fn ncpy[2] = {(sncpy_fn)dlsym(shim, "strncpy"), (sncpy_fn)dlsym(shim, "stpncpy")};
+        sncpy_fn ncpy_c[2] = {strncpy, stpncpy};
+        const char *ncpy_name[2] = {"strncpy", "stpncpy"};
+        for (size_t n = 0; n <= 300; n += (n < 140 ? 1 : 7))
+                for (int ka = 0; ka < 6; ka++)
+                        for (size_t ja = 0; ja < 72; ja += (ka < 2 ? 5 : 23)) {
+                                size_t a = edge_place(n + 1, ka, ja);
+                                fill_random(src + a, n, 255);
+                                src[a + n] = 0;
+                                const char *x = (const char *)src + a;
+                                for (int kd = 0; kd < 3; kd++) {
+                                        size_t head = kd == 2 ? (ja * 3 + n) % 150 : 0;
+                                        size_t d = kd == 0 ? SPAN - n - 1 - head : kd == 1 ? (ja * 7) % 64 : PAGE * 3 - head - (n / 3);
+                                        for (int k = 0; k < 3; k++) {
+                                                memset(dst_a, 0xa5, SPAN);
+                                                if (k == 2) {
+                                                        memset(dst_a + d, 'h', head);
+                                                        dst_a[d + head] = 0;
+                                                } else if (head)
+                                                        continue;
+                                                memcpy(dst_b, dst_a, SPAN);
+                                                char *ra = cpy[k]((char *)dst_a + d, x), *rb = cpy_c[k]((char *)dst_b + d, x);
+                                                checks++;
+                                                if (ra - (char *)dst_a != rb - (char *)dst_b || memcmp(dst_a, dst_b, SPAN))
+                                                        fail(cpy_name[k], "against a page edge", n, a, d);
+                                        }
+                                        size_t bounds[] = {0, 1, n / 2, n, n + 1, n + 63, n + 64, n + 65, 2 * n + 70};
+                                        for (int b = 0; b < 9; b++) {
+                                                size_t bound = bounds[b], dd = kd == 0 ? SPAN - bound : kd == 1 ? (ja * 7) % 64 : PAGE * 3 - bound / 2;
+                                                if (bound > SPAN - 64 || (kd == 2 && bound / 2 > PAGE * 3))
+                                                        continue;
+                                                for (int k = 0; k < 2; k++) {
+                                                        memset(dst_a, 0xa5, SPAN);
+                                                        memset(dst_b, 0xa5, SPAN);
+                                                        char *ra = ncpy[k]((char *)dst_a + dd, x, bound), *rb = ncpy_c[k]((char *)dst_b + dd, x, bound);
+                                                        checks++;
+                                                        if (ra - (char *)dst_a != rb - (char *)dst_b || memcmp(dst_a, dst_b, SPAN))
+                                                                fail(ncpy_name[k], "against a page edge", n, bound, dd);
+                                                }
+                                        }
+                                }
+                        }
+        /* no terminator inside the bound: n bytes that end on the unmapped page, the bound n and less */
+        for (size_t n = 1; n <= 320; n++)
+                for (int k = 0; k < 2; k++) {
+                        size_t a = SPAN - n;
+                        fill_random(src + a, n, 255);
+                        size_t bounds[] = {n, n - n / 3, n > 64 ? n - 64 : n};
+                        for (int b = 0; b < 3; b++) {
+                                memset(dst_a, 0xa5, SPAN);
+                                memset(dst_b, 0xa5, SPAN);
+                                char *ra = ncpy[k]((char *)dst_a + 5, (char *)src + a, bounds[b]);
+                                char *rb = ncpy_c[k]((char *)dst_b + 5, (char *)src + a, bounds[b]);
+                                checks++;
+                                if (ra - (char *)dst_a != rb - (char *)dst_b || memcmp(dst_a, dst_b, SPAN))
+                                        fail(ncpy_name[k], "no terminator", n, bounds[b], 0);
+                        }
+                }
+}
+
 typedef char *(*ssep_fn)(char **, const char *);
 typedef char *(*stok_fn)(char *, const char *);
 typedef char *(*stokr_fn)(char *, const char *, char **);
@@ -1035,6 +1202,552 @@ static void bench(void *shim)
         }
 }
 
+/*
+        bench compare [OLD.so|-] [NAME...]: the compare, copy and search family -- memcmp, strcmp, strncmp, strcpy,
+        stpcpy, stpncpy, strcat, strstr, memmem -- in ticks a call, the best of 32 rounds. Fixed lengths from 1 B to
+        64 KiB, with the difference or the match at the start, the middle and the end where a routine has one; then
+        lengths drawn log-uniform over 1-512 and over 1-8192 (an octave at random, then a length in it), in an order the
+        branch predictor cannot learn: 65536 lengths, read from where the last round stopped. Every string of n bytes ends
+        at the same place, so its start moves with n and so does its alignment, as a program's do. OLD.so, a second build
+        of the shim, is timed in the same rounds, interleaved, so a change is read against what it replaced on the same
+        core in the same minute. NAME limits the run to the routines named. Each case is called once on every side first
+        and the answers held against each other: a bench that times different work says so.
+*/
+#define BC_END (80 * 1024ul + 1347)             // where every string ends: mid-page, off any line
+#define BC_SPAN (BC_END + 72 * 1024ul)
+#define BC_SLOT (136 * 1024ul)                  // strcat's destinations: eight, so no call reads the byte the last wrote
+#define BC_SLOT_END (66 * 1024ul)
+#define BC_ROUNDS 32
+#define BC_POOL 65536u
+
+static unsigned char *bc_a, *bc_b, *bc_c, *bc_e, *bc_t, *bc_d, *bc_slots;
+static char bc_needle[64];
+static size_t bc_pool[2][BC_POOL];
+static double bc_best[3];
+static int bc_sides;
+static const char *const bc_side_name[3] = {"new", "old", "libc"};
+
+static unsigned char *bc_region(size_t bytes)
+{
+        unsigned char *p = mmap(0, bytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        if (p == MAP_FAILED) {
+                perror("mmap");
+                exit(2);
+        }
+        return p;
+}
+
+/* calls a round: enough work to time, few enough that 64 KiB finishes */
+static unsigned bc_calls(size_t n) { return n <= 256 ? 1024 : 256; }
+
+/* Times CALL (which sees the side's pointer as f and the length as n) on every side, interleaved round by round.
+   N is evaluated each call; base is where in the pool this round starts. */
+#define BC_RUN(fns, calls_, N, CALL)                                                                    \
+        do {                                                                                            \
+                unsigned calls = (calls_);                                                              \
+                for (int s_ = 0; s_ < bc_sides; s_++)                                                   \
+                        bc_best[s_] = 1e30;                                                             \
+                for (unsigned r_ = 0; r_ < BC_ROUNDS; r_++)                                             \
+                        for (int t_ = 0; t_ < bc_sides; t_++) {                                         \
+                                int s_ = (int)((t_ + r_) % (unsigned)bc_sides); /* each side first in turn */ \
+                                __typeof__((fns)[0]) f = (fns)[s_];                                     \
+                                unsigned base = r_ * calls;                                             \
+                                uintptr_t acc_ = 0;                                                     \
+                                uint64_t t0_ = ticks();                                                 \
+                                for (unsigned i = 0; i < calls; i++) {                                  \
+                                        size_t n = (N);                                                 \
+                                        (void)n;                                                        \
+                                        acc_ += (uintptr_t)(CALL);                                      \
+                                }                                                                       \
+                                uint64_t t_ = ticks() - t0_;                                            \
+                                __asm__ volatile("" ::"r"(acc_));                                       \
+                                (void)base;                                                             \
+                                if ((double)t_ / calls < bc_best[s_])                                   \
+                                        bc_best[s_] = (double)t_ / calls;                               \
+                        }                                                                               \
+        } while (0)
+
+static void bc_head(const char *what)
+{
+        printf("\n%s\n%8s", what, "size");
+        for (int s = 0; s < bc_sides; s++)
+                printf(" %8s", bc_side_name[s]);
+        printf("  %8s", "libc/new");
+        if (bc_sides == 3)
+                printf(" %8s %8s", "libc/old", "old/new");
+        printf("\n");
+}
+
+static void bc_row(const char *size)
+{
+        double libc = bc_best[bc_sides - 1];
+        printf("%8s", size);
+        for (int s = 0; s < bc_sides; s++)
+                printf(" %8.1f", bc_best[s]);
+        printf("  %8.2f", libc / bc_best[0]);
+        if (bc_sides == 3)
+                printf(" %8.2f %8.2f", libc / bc_best[1], bc_best[1] / bc_best[0]);
+        printf("%s\n", libc / bc_best[0] < 0.995 ? "  <" : "");
+}
+
+static void bc_row_n(size_t n)
+{
+        char room[16];
+        snprintf(room, sizeof room, "%zu", n);
+        bc_row(room);
+}
+
+static void bc_disagree(const char *name, const char *what, size_t n)
+{
+        printf("  BENCH DISAGREES: %s %s at %zu\n", name, what, n);
+}
+
+static const size_t bc_sizes[] = {1,   2,   3,   4,   7,   8,    12,   16,   24,   31,    32,    33,    48,   63,  64,
+                                  65,  96,  128, 200, 256, 384,  512,  1024, 2048, 4096,  8192,  16384, 32768, 65536};
+#define BC_SIZES (sizeof bc_sizes / sizeof *bc_sizes)
+#define BC_RANDOM(k) (bc_pool[k][(base + i) & (BC_POOL - 1)])
+
+static int bc_wanted(int argc, char **argv, const char *name)
+{
+        if (argc < 1)
+                return 1;
+        for (int i = 0; i < argc; i++)
+                if (!strcmp(argv[i], name))
+                        return 1;
+        return 0;
+}
+
+/* where a fixed-size case puts its one difference: start, middle, end; -1 none */
+static long bc_at(int where, size_t n) { return where == 0 ? -1 : where == 1 ? 0 : where == 2 ? (long)(n / 2) : (long)n - 1; }
+static const char *const bc_where[4] = {"equal", "differ at the start", "differ in the middle", "differ at the end"};
+
+static void bc_memcmp(cmp_fn *fns)
+{
+        for (int where = 0; where < 4; where++) {
+                char title[64];
+                snprintf(title, sizeof title, "memcmp, %s", bc_where[where]);
+                bc_head(title);
+                for (size_t k = 0; k < BC_SIZES; k++) {
+                        size_t n0 = bc_sizes[k];
+                        unsigned char *a = bc_a + BC_END - n0, *b = bc_b + BC_END - n0;
+                        long at = bc_at(where, n0);
+                        if (at >= 0)
+                                b[at] ^= 0x40;
+                        int want = sign(fns[bc_sides - 1](a, b, n0));
+                        for (int s = 0; s < bc_sides - 1; s++)
+                                if (sign(fns[s](a, b, n0)) != want)
+                                        bc_disagree("memcmp", bc_side_name[s], n0);
+                        BC_RUN(fns, bc_calls(n0), n0, f(a, b, n));
+                        if (at >= 0)
+                                b[at] ^= 0x40;
+                        bc_row_n(n0);
+                }
+        }
+        static const char *const mode[2] = {"r512", "r8192"};
+        /* the slow way some bodies take: an input whose last byte is the last of its page (the next one mapped) */
+        bc_head("memcmp, equal, both ending where a page ends");
+        size_t edge = BC_END - 1347 + 4096;
+        for (size_t k = 0; k < BC_SIZES && bc_sizes[k] <= 256; k++) {
+                size_t n0 = bc_sizes[k];
+                BC_RUN(fns, bc_calls(n0), n0, f(bc_a + edge - n, bc_e + edge - n, n));
+                bc_row_n(n0);
+        }
+        for (int k = 0; k < 2; k++) {
+                BC_RUN(fns, 1024, BC_RANDOM(k), f(bc_a + edge - n, bc_e + edge - n, n));
+                bc_row(mode[k]);
+        }
+        bc_head("memcmp, random lengths: equal (start moves with n)");
+        for (int k = 0; k < 2; k++) {
+                BC_RUN(fns, 1024, BC_RANDOM(k), f(bc_a + BC_END - n, bc_b + BC_END - n, n));
+                bc_row(mode[k]);
+        }
+        bc_head("memcmp, random lengths: equal (start fixed at +5)");
+        for (int k = 0; k < 2; k++) {
+                BC_RUN(fns, 1024, BC_RANDOM(k), f(bc_a + 5, bc_b + 5, n));
+                bc_row(mode[k]);
+        }
+        bc_head("memcmp, random lengths: differ at the end");
+        for (int k = 0; k < 2; k++) {
+                BC_RUN(fns, 1024, BC_RANDOM(k), f(bc_a + BC_END - n, bc_c + BC_END - n, n));
+                bc_row(mode[k]);
+        }
+}
+
+static void bc_strcmp(scmp_fn *fns)
+{
+        for (int where = 0; where < 4; where++) {
+                char title[64];
+                snprintf(title, sizeof title, "strcmp, %s", bc_where[where]);
+                bc_head(title);
+                for (size_t k = 0; k < BC_SIZES; k++) {
+                        size_t n0 = bc_sizes[k];
+                        const char *a = (char *)bc_a + BC_END - n0;
+                        char *b = (char *)bc_b + BC_END - n0;
+                        long at = bc_at(where, n0);
+                        if (at >= 0)
+                                b[at] ^= 0x40;
+                        int want = sign(fns[bc_sides - 1](a, b));
+                        for (int s = 0; s < bc_sides - 1; s++)
+                                if (sign(fns[s](a, b)) != want)
+                                        bc_disagree("strcmp", bc_side_name[s], n0);
+                        BC_RUN(fns, bc_calls(n0), n0, f(a, b));
+                        if (at >= 0)
+                                b[at] ^= 0x40;
+                        bc_row_n(n0);
+                }
+        }
+        static const char *const mode[2] = {"r512", "r8192"};
+        bc_head("strcmp, equal, both ending where a page ends");
+        size_t edge = BC_END - 1347 + 4096;
+        bc_a[edge] = 0, bc_e[edge] = 0;
+        for (size_t k = 0; k < BC_SIZES && bc_sizes[k] <= 256; k++) {
+                size_t n0 = bc_sizes[k];
+                if (fns[0]((char *)bc_a + edge - n0, (char *)bc_e + edge - n0))
+                        bc_disagree("strcmp", "page end", n0);
+                BC_RUN(fns, bc_calls(n0), n0, f((char *)bc_a + edge - n, (char *)bc_e + edge - n));
+                bc_row_n(n0);
+        }
+        for (int k = 0; k < 2; k++) {
+                BC_RUN(fns, 1024, BC_RANDOM(k), f((char *)bc_a + edge - n, (char *)bc_e + edge - n));
+                bc_row(mode[k]);
+        }
+        bc_a[edge] = bc_e[edge] = 1;
+        bc_head("strcmp, random lengths: equal");
+        for (int k = 0; k < 2; k++) {
+                BC_RUN(fns, 1024, BC_RANDOM(k), f((char *)bc_a + BC_END - n, (char *)bc_b + BC_END - n));
+                bc_row(mode[k]);
+        }
+        bc_head("strcmp, random lengths: differ at the end");
+        for (int k = 0; k < 2; k++) {
+                BC_RUN(fns, 1024, BC_RANDOM(k), f((char *)bc_a + BC_END - n, (char *)bc_c + BC_END - n));
+                bc_row(mode[k]);
+        }
+}
+
+static void bc_strncmp(sncmp_fn *fns)
+{
+        for (int where = 0; where < 4; where++) {
+                char title[80];
+                snprintf(title, sizeof title, "strncmp, bound n, strings of n, %s", bc_where[where]);
+                bc_head(title);
+                for (size_t k = 0; k < BC_SIZES; k++) {
+                        size_t n0 = bc_sizes[k];
+                        const char *a = (char *)bc_a + BC_END - n0;
+                        char *b = (char *)bc_b + BC_END - n0;
+                        long at = bc_at(where, n0);
+                        if (at >= 0)
+                                b[at] ^= 0x40;
+                        int want = sign(fns[bc_sides - 1](a, b, n0));
+                        for (int s = 0; s < bc_sides - 1; s++)
+                                if (sign(fns[s](a, b, n0)) != want)
+                                        bc_disagree("strncmp", bc_side_name[s], n0);
+                        BC_RUN(fns, bc_calls(n0), n0, f(a, b, n));
+                        if (at >= 0)
+                                b[at] ^= 0x40;
+                        bc_row_n(n0);
+                }
+        }
+        bc_head("strncmp, bound 2n + 1, strings of n, equal (the terminator decides)");
+        for (size_t k = 0; k < BC_SIZES; k++) {
+                size_t n0 = bc_sizes[k];
+                const char *a = (char *)bc_a + BC_END - n0, *b = (char *)bc_b + BC_END - n0;
+                BC_RUN(fns, bc_calls(n0), 2 * n0 + 1, f(a, b, n));
+                bc_row_n(n0);
+        }
+        static const char *const mode[2] = {"r512", "r8192"};
+        bc_head("strncmp, random lengths: bound n, equal");
+        for (int k = 0; k < 2; k++) {
+                BC_RUN(fns, 1024, BC_RANDOM(k), f((char *)bc_a + BC_END - n, (char *)bc_b + BC_END - n, n));
+                bc_row(mode[k]);
+        }
+        bc_head("strncmp, random lengths: bound n, differ at the end");
+        for (int k = 0; k < 2; k++) {
+                BC_RUN(fns, 1024, BC_RANDOM(k), f((char *)bc_a + BC_END - n, (char *)bc_c + BC_END - n, n));
+                bc_row(mode[k]);
+        }
+}
+
+/* strcpy and stpcpy: a string of n into a destination 3 bytes past a line */
+static void bc_strcpy(const char *name, scpy_fn *fns)
+{
+        char title[64];
+        snprintf(title, sizeof title, "%s, a string of n", name);
+        bc_head(title);
+        char *d = (char *)bc_d + 3;
+        for (size_t k = 0; k < BC_SIZES; k++) {
+                size_t n0 = bc_sizes[k];
+                const char *s = (char *)bc_a + BC_END - n0;
+                char *want = 0;
+                for (int side = bc_sides - 1; side >= 0; side--) {
+                        memset(d, 0x5a, n0 + 2);
+                        char *r = fns[side](d, s);
+                        if (side == bc_sides - 1)
+                                want = r;
+                        else if (r != want)
+                                bc_disagree(name, bc_side_name[side], n0);
+                        if (memcmp(d, s, n0 + 1) || d[n0 + 1] != 0x5a)
+                                bc_disagree(name, bc_side_name[side], n0);
+                }
+                BC_RUN(fns, bc_calls(n0), n0, f(d, (char *)bc_a + BC_END - n));
+                bc_row_n(n0);
+        }
+        static const char *const mode[2] = {"r512", "r8192"};
+        snprintf(title, sizeof title, "%s, random lengths", name);
+        bc_head(title);
+        for (int k = 0; k < 2; k++) {
+                BC_RUN(fns, 1024, BC_RANDOM(k), f(d, (char *)bc_a + BC_END - n));
+                bc_row(mode[k]);
+        }
+}
+
+static void bc_stpncpy(sncpy_fn *fns)
+{
+        char *d = (char *)bc_d + 3;
+        for (int pad = 0; pad < 2; pad++) {
+                bc_head(pad ? "stpncpy, bound n, a string of n/2 (half padding)" : "stpncpy, bound n, a string of n (no terminator)");
+                for (size_t k = 0; k < BC_SIZES; k++) {
+                        size_t n0 = bc_sizes[k], len = pad ? n0 / 2 : n0;
+                        const char *s = (char *)bc_a + BC_END - len;
+                        char *want = 0;
+                        for (int side = bc_sides - 1; side >= 0; side--) {
+                                memset(d, 0x5a, n0 + 2);
+                                char *r = fns[side](d, s, n0);
+                                if (side == bc_sides - 1)
+                                        want = r;
+                                else if (r != want)
+                                        bc_disagree("stpncpy", bc_side_name[side], n0);
+                                if (memcmp(d, s, len) || d[n0] != 0x5a)
+                                        bc_disagree("stpncpy bytes", bc_side_name[side], n0);
+                        }
+                        BC_RUN(fns, bc_calls(n0), n0, f(d, (char *)bc_a + BC_END - (pad ? n / 2 : n), n));
+                        bc_row_n(n0);
+                }
+        }
+        static const char *const mode[2] = {"r512", "r8192"};
+        bc_head("stpncpy, random lengths: bound n, a string of n");
+        for (int k = 0; k < 2; k++) {
+                BC_RUN(fns, 1024, BC_RANDOM(k), f(d, (char *)bc_a + BC_END - n, n));
+                bc_row(mode[k]);
+        }
+        bc_head("stpncpy, random lengths: bound n, a string of n/2");
+        for (int k = 0; k < 2; k++) {
+                BC_RUN(fns, 1024, BC_RANDOM(k), f(d, (char *)bc_a + BC_END - n / 2, n));
+                bc_row(mode[k]);
+        }
+}
+
+/* strcat: a destination string of n and a source of n; the destination's terminator put back after each call, in
+   one of eight slots so no call reads a byte the one before it wrote */
+static char *bc_cat(scpy_fn f, size_t n, unsigned i)
+{
+        char *slot = (char *)bc_slots + (i & 7) * BC_SLOT;
+        char *r = f(slot + BC_SLOT_END - n, (char *)bc_a + BC_END - n);
+        slot[BC_SLOT_END] = 0;
+        return r;
+}
+
+static void bc_strcat(scpy_fn *fns)
+{
+        bc_head("strcat, a string of n onto a string of n");
+        for (size_t k = 0; k < BC_SIZES; k++) {
+                size_t n0 = bc_sizes[k];
+                for (int side = 0; side < bc_sides; side++) {
+                        char *slot = (char *)bc_slots;
+                        char *r = fns[side](slot + BC_SLOT_END - n0, (char *)bc_a + BC_END - n0);
+                        if (r != slot + BC_SLOT_END - n0 || memcmp(slot + BC_SLOT_END, bc_a + BC_END - n0, n0 + 1))
+                                bc_disagree("strcat", bc_side_name[side], n0);
+                        slot[BC_SLOT_END] = 0;
+                }
+                BC_RUN(fns, bc_calls(n0), n0, bc_cat(f, n, i));
+                bc_row_n(n0);
+        }
+        static const char *const mode[2] = {"r512", "r8192"};
+        bc_head("strcat, random lengths");
+        for (int k = 0; k < 2; k++) {
+                BC_RUN(fns, 1024, BC_RANDOM(k), bc_cat(f, n, i));
+                bc_row(mode[k]);
+        }
+}
+
+/* strstr and memmem: a haystack of n letters, a needle of 8 letters absent from it, then planted at the start, in the
+   middle and at the end */
+static const char *const bc_find_where[4] = {"absent", "at the start", "in the middle", "at the end"};
+#define BC_NEEDLE 8
+
+static void bc_plant(size_t n, int where, int undo)
+{
+        static unsigned char keep[BC_NEEDLE];
+        if (where == 0 || n < BC_NEEDLE)
+                return;
+        unsigned char *h = bc_t + BC_END - n;
+        size_t at = where == 1 ? 0 : where == 2 ? (n - BC_NEEDLE) / 2 : n - BC_NEEDLE;
+        if (undo)
+                memcpy(h + at, keep, BC_NEEDLE);
+        else
+                memcpy(keep, h + at, BC_NEEDLE), memcpy(h + at, bc_needle, BC_NEEDLE);
+}
+
+static void bc_strstr(sstr_fn *fns)
+{
+        for (int where = 0; where < 4; where++) {
+                char title[80];
+                snprintf(title, sizeof title, "strstr, a haystack of n letters, a needle of %d, %s", BC_NEEDLE, bc_find_where[where]);
+                bc_head(title);
+                for (size_t k = 0; k < BC_SIZES; k++) {
+                        size_t n0 = bc_sizes[k];
+                        if (where && n0 < BC_NEEDLE)
+                                continue;
+                        bc_plant(n0, where, 0);
+                        const char *h = (char *)bc_t + BC_END - n0;
+                        char *want = fns[bc_sides - 1](h, bc_needle);
+                        for (int s = 0; s < bc_sides - 1; s++)
+                                if (fns[s](h, bc_needle) != want)
+                                        bc_disagree("strstr", bc_side_name[s], n0);
+                        BC_RUN(fns, bc_calls(n0), n0, f((char *)bc_t + BC_END - n, bc_needle));
+                        bc_plant(n0, where, 1);
+                        bc_row_n(n0);
+                }
+        }
+        static const char *const mode[2] = {"r512", "r8192"};
+        bc_head("strstr, random lengths: absent");
+        for (int k = 0; k < 2; k++) {
+                BC_RUN(fns, 1024, BC_RANDOM(k), f((char *)bc_t + BC_END - n, bc_needle));
+                bc_row(mode[k]);
+        }
+}
+
+static void bc_memmem(mem_fn *fns)
+{
+        for (int where = 0; where < 4; where++) {
+                char title[80];
+                snprintf(title, sizeof title, "memmem, a haystack of n letters, a needle of %d, %s", BC_NEEDLE, bc_find_where[where]);
+                bc_head(title);
+                for (size_t k = 0; k < BC_SIZES; k++) {
+                        size_t n0 = bc_sizes[k];
+                        if (where && n0 < BC_NEEDLE)
+                                continue;
+                        bc_plant(n0, where, 0);
+                        const void *h = bc_t + BC_END - n0;
+                        void *want = fns[bc_sides - 1](h, n0, bc_needle, BC_NEEDLE);
+                        for (int s = 0; s < bc_sides - 1; s++)
+                                if (fns[s](h, n0, bc_needle, BC_NEEDLE) != want)
+                                        bc_disagree("memmem", bc_side_name[s], n0);
+                        BC_RUN(fns, bc_calls(n0), n0, f(bc_t + BC_END - n, n, bc_needle, BC_NEEDLE));
+                        bc_plant(n0, where, 1);
+                        bc_row_n(n0);
+                }
+        }
+        static const char *const mode[2] = {"r512", "r8192"};
+        bc_head("memmem, random lengths: absent");
+        for (int k = 0; k < 2; k++) {
+                BC_RUN(fns, 1024, BC_RANDOM(k), f(bc_t + BC_END - n, n, bc_needle, BC_NEEDLE));
+                bc_row(mode[k]);
+        }
+}
+
+/* The floor under every row: the same loop around a call that does nothing. */
+__asm__(".text\n.globl bc_null\n.type bc_null, @function\nbc_null: xor %eax, %eax\n ret\n.size bc_null, .-bc_null\n");
+int bc_null(const void *, const void *, size_t);
+
+static int bench_compare(void *shim, int argc, char **argv)
+{
+        void *old = 0;
+        if (argc > 0 && strcmp(argv[0], "-")) {
+                old = dlopen(argv[0], RTLD_NOW | RTLD_LOCAL);
+                if (!old || old == shim) {
+                        fprintf(stderr, "dlopen %s: %s\n", argv[0], old ? "the same library as the new one" : dlerror());
+                        return 2;
+                }
+        }
+        if (argc > 0)
+                argc--, argv++;
+        bc_sides = old ? 3 : 2;
+        void *libs[2] = {shim, old};
+        /* b and c sit 7 and 13 bytes on from a line where a sits on one, so no two streams share an alignment */
+        bc_a = bc_region(BC_SPAN), bc_b = bc_region(BC_SPAN) + 7, bc_c = bc_region(BC_SPAN) + 13, bc_t = bc_region(BC_SPAN);
+        bc_d = bc_region(BC_SPAN), bc_slots = bc_region(8 * BC_SLOT);
+        /* a, b and c the same bytes (1 to 200) but c's last before the end; every string ends at BC_END */
+        fill_random(bc_a, BC_SPAN - 64, 200);
+        memcpy(bc_b, bc_a, BC_SPAN - 64);
+        memcpy(bc_c, bc_a, BC_SPAN - 64);
+        bc_e = bc_region(BC_SPAN);      // a again, on a's alignment: the inputs that end where a page does
+        memcpy(bc_e, bc_a, BC_SPAN);
+        bc_a[BC_END] = bc_b[BC_END] = bc_c[BC_END] = 0;
+        bc_c[BC_END - 1] ^= 0x40;
+        for (size_t i = 0; i < BC_SPAN; i++)
+                bc_t[i] = (unsigned char)('a' + next() % 26);
+        bc_t[BC_END] = 0;
+        for (int s = 0; s < 8; s++) {
+                fill_random(bc_slots + s * BC_SLOT, BC_SLOT, 200);
+                bc_slots[s * BC_SLOT + BC_SLOT_END] = 0;
+        }
+        /* a needle of letters that is nowhere in the haystack */
+        for (;;) {
+                for (int i = 0; i < BC_NEEDLE; i++)
+                        bc_needle[i] = (char)('a' + next() % 26);
+                bc_needle[BC_NEEDLE] = 0;
+                if (!memmem(bc_t, BC_SPAN - 64, bc_needle, BC_NEEDLE))
+                        break;
+        }
+        for (int k = 0; k < 2; k++) {
+                unsigned octaves = k ? 13 : 9;
+                for (unsigned i = 0; i < BC_POOL; i++) {
+                        unsigned o = (unsigned)(next() % octaves);
+                        bc_pool[k][i] = ((size_t)1 << o) + (size_t)(next() % ((size_t)1 << o));
+                }
+        }
+        printf("ticks a call, the best of %d rounds; %s; libc/new below 1.00 is a loss (marked <)\n", BC_ROUNDS,
+               old ? "new = the shim, old = OLD.so" : "new = the shim");
+#define BC_FNS(type, name, libc_fn)                                                     \
+        type name[3];                                                                   \
+        for (int s_ = 0; s_ < bc_sides - 1; s_++)                                       \
+                name[s_] = (type)dlsym(libs[s_], #libc_fn);                             \
+        name[bc_sides - 1] = (type)libc_fn
+        {
+                cmp_fn fns[3] = {bc_null, bc_null, bc_null};
+                bc_head("the loop around a call that does nothing");
+                BC_RUN(fns, 1024, 8, f(bc_a, bc_b, n));
+                bc_row("null");
+        }
+        if (bc_wanted(argc, argv, "memcmp")) {
+                BC_FNS(cmp_fn, fns, memcmp);
+                bc_memcmp(fns);
+        }
+        if (bc_wanted(argc, argv, "strcmp")) {
+                BC_FNS(scmp_fn, fns, strcmp);
+                bc_strcmp(fns);
+        }
+        if (bc_wanted(argc, argv, "strncmp")) {
+                BC_FNS(sncmp_fn, fns, strncmp);
+                bc_strncmp(fns);
+        }
+        if (bc_wanted(argc, argv, "strcpy")) {
+                BC_FNS(scpy_fn, fns, strcpy);
+                bc_strcpy("strcpy", fns);
+        }
+        if (bc_wanted(argc, argv, "stpcpy")) {
+                BC_FNS(scpy_fn, fns, stpcpy);
+                bc_strcpy("stpcpy", fns);
+        }
+        if (bc_wanted(argc, argv, "stpncpy")) {
+                BC_FNS(sncpy_fn, fns, stpncpy);
+                bc_stpncpy(fns);
+        }
+        if (bc_wanted(argc, argv, "strcat")) {
+                BC_FNS(scpy_fn, fns, strcat);
+                bc_strcat(fns);
+        }
+        if (bc_wanted(argc, argv, "strstr")) {
+                BC_FNS(sstr_fn, fns, strstr);
+                bc_strstr(fns);
+        }
+        if (bc_wanted(argc, argv, "memmem")) {
+                BC_FNS(mem_fn, fns, memmem);
+                bc_memmem(fns);
+        }
+        return 0;
+}
+
 int main(int argc, char **argv)
 {
         if (argc < 2) {
@@ -1049,6 +1762,8 @@ int main(int argc, char **argv)
                 return 2;
         }
         src = region(), src2 = region(), dst_a = region(), dst_b = region();
+        if (argc > 3 && !strcmp(argv[2], "bench") && !strcmp(argv[3], "compare"))
+                return bench_compare(shim, argc - 4, argv + 4);
         if (argc > 2 && !strcmp(argv[2], "bench")) {
                 bench(shim);
                 return 0;
@@ -1102,6 +1817,10 @@ int main(int argc, char **argv)
                 fprintf(stderr, "%s\n", "check_compare");
         check_compare("bcmp", (cmp_fn)dlsym(shim, "bcmp"), memcmp, 1);
         if (trace)
+                fprintf(stderr, "%s\n", "check_compare_edges");
+        check_compare_edges("memcmp", (cmp_fn)dlsym(shim, "memcmp"), 0);
+        check_compare_edges("bcmp", (cmp_fn)dlsym(shim, "bcmp"), 1);
+        if (trace)
                 fprintf(stderr, "%s\n", "check_find");
         check_find("memchr", (find_fn)dlsym(shim, "memchr"), (find_fn)memchr);
         if (trace)
@@ -1116,6 +1835,12 @@ int main(int argc, char **argv)
         if (trace)
                 fprintf(stderr, "%s\n", "check_strings");
         check_strings(shim);
+        if (trace)
+                fprintf(stderr, "%s\n", "check_string_compare_edges");
+        check_string_compare_edges((scmp_fn)dlsym(shim, "strcmp"), (sncmp_fn)dlsym(shim, "strncmp"));
+        if (trace)
+                fprintf(stderr, "%s\n", "check_copy_edges");
+        check_copy_edges(shim);
         if (trace)
                 fprintf(stderr, "%s\n", "check_more");
         check_more(shim);
