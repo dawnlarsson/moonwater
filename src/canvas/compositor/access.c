@@ -20,6 +20,7 @@
 */
 
 #define COMPOSITOR_ACCESS_PADS 8
+#define COMPOSITOR_ACCESS_LINKED_PHYS "waterlink/" // the phys of a pad Waterlink made of another machine's (uinput's UI_SET_PHYS), then the machine's name
 #define COMPOSITOR_ACCESS_DEAD 3932             // a stick's middle that moves nothing: 12% of its reach, in 32767ths
 #define COMPOSITOR_ACCESS_FULL 31128            // and its rim, where the speed is all of it: 95%
 #define COMPOSITOR_ACCESS_SPEED 17              // the pointer at the rim: 1.7 heights of its screen a second (in tenths)
@@ -94,6 +95,7 @@ struct compositor_access_pad
         unsigned int held;              // the buttons down (the triggers' among them), as bits
         unsigned int acted;             // and as they were when they were last acted on
         unsigned char pressed_as[ACCESS_BUTTONS]; // the action each button down was pressed as (its let go is that action's)
+        unsigned char map[ACCESS_BUTTONS];        // what each button does on this pad: the defaults, and the person's map (/root/access.map)
         positive home_at;               // when the home button went down, while the pad is a program's
 };
 
@@ -456,6 +458,161 @@ static void compositor_access_lane_noted(int dx, int dy)
         compositor_access_move(dx, dy);
 }
 
+/*
+        The person's map of a pad's buttons: /root/access.map, root's home with the machine's other settings (the data partition, so it
+        stays through a reboot). A line is [VENDOR:PRODUCT] BUTTON ACTION, or VENDOR:PRODUCT on|off: the buttons by where they sit
+        (south east west north l1 r1 l2 r2 select start home l3 r3 up down left right) and what one does (none primary secondary
+        middle back home overview previous next up down left right find keyboard backspace enter). A line with no device is every
+        pad's; one with a device that pad's alone; a later line wins over an earlier. A device off is no pad of the desktop's (a
+        game's alone); on is one even where its class says not (a wheel, a flight stick). # starts a comment. The file is read as it
+        comes, a line at a time, so it may be as long as it likes; a line longer than COMPOSITOR_ACCESS_MAP_LINE is no line (a person's
+        map has no word that long) and is passed over.
+*/
+#define COMPOSITOR_ACCESS_MAP_PATH "/root/access.map"
+#define COMPOSITOR_ACCESS_MAP_LINE 256
+static const char *const compositor_access_button_names[ACCESS_BUTTONS] = {
+    "south", "east", "north", "west", "l1", "r1", "l2", "r2", "select", "start", "home", "l3", "r3", "up", "down", "left", "right"};
+static const char *const compositor_access_action_names[ACCESS_ACTIONS] = {
+    "none", "primary", "secondary", "middle", "back", "home", "overview", "previous", "next", "up", "down", "left", "right", "find",
+    "keyboard", "backspace", "enter"};
+
+// The next word of a line (bytes up to a blank), its length; *at moves past it and the blanks after.
+static unsigned int compositor_access_word(const char *line, unsigned int length, unsigned int *at, const char **word)
+{
+        unsigned int from;
+        while (*at < length && (line[*at] == ' ' || line[*at] == '\t'))
+                (*at)++;
+        from = *at, *word = line + from;
+        while (*at < length && line[*at] != ' ' && line[*at] != '\t')
+                (*at)++;
+        return *at - from;
+}
+
+static int compositor_access_named(const char *const *names, unsigned int count, const char *word, unsigned int length)
+{
+        for (unsigned int k = 0; k < count; k++)
+                if (string_length((string_address)names[k]) == length && !memory_compare(names[k], word, length))
+                        return (int)k;
+        return -1;
+}
+
+// A VENDOR:PRODUCT word as the two numbers, or 0 when it is none (four hexadecimal digits each).
+static b32 compositor_access_ids(const char *word, unsigned int length, unsigned int *vendor, unsigned int *product)
+{
+        unsigned int value = 0;
+        if (length != 9 || word[4] != ':')
+                return 0;
+        for (unsigned int k = 0; k < 9; k++)
+        {
+                char c = word[k];
+                if (k == 4)
+                        continue;
+                c = (char)(c | 0x20);
+                if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')))
+                        return 0;
+                value = value << 4 | (unsigned int)(c <= '9' ? c - '0' : c - 'a' + 10);
+        }
+        return *vendor = value >> 16, *product = value & 0xffffu, 1;
+}
+
+// One line of the map for a pad of vendor:product: its buttons changed in map, and *taken on (1) or off (0) where the line says so.
+static void compositor_access_map_line(const char *line, unsigned int length, unsigned int vendor, unsigned int product, unsigned char *map, int *taken)
+{
+        unsigned int at = 0, wanted_vendor, wanted_product, size;
+        const char *word;
+        int button, action;
+
+        size = compositor_access_word(line, length, &at, &word);
+        if (!size || word[0] == '#')
+                return;
+        if (compositor_access_ids(word, size, &wanted_vendor, &wanted_product))
+        {
+                if (wanted_vendor != vendor || wanted_product != product)
+                        return;
+                if (!(size = compositor_access_word(line, length, &at, &word)))
+                        return;
+                if ((size == 2 && !memory_compare(word, "on", 2)) || (size == 3 && !memory_compare(word, "off", 3)))
+                        return (void)(*taken = size == 2);
+        }
+        if ((button = compositor_access_named(compositor_access_button_names, ACCESS_BUTTONS, word, size)) < 0 ||
+            !(size = compositor_access_word(line, length, &at, &word)) ||
+            (action = compositor_access_named(compositor_access_action_names, ACCESS_ACTIONS, word, size)) < 0)
+                return;
+        map[button] = (unsigned char)action;
+}
+
+// A pad's map read: the defaults, then the person's file line by line. The answer: 1 the device is taken on, 0 off, -1 the file says nothing.
+static int compositor_access_map_read(unsigned int vendor, unsigned int product, unsigned char *map)
+{
+        char chunk[4096], line[COMPOSITOR_ACCESS_MAP_LINE];
+        unsigned int used = 0, skipping = 0;
+        int taken = -1;
+        long handle, got;
+
+        memory_copy(map, compositor_access_actions, ACCESS_BUTTONS);
+        if ((handle = system_open_at(AT_FDCWD, (string_address)COMPOSITOR_ACCESS_MAP_PATH, O_RDONLY | O_CLOEXEC | O_NOFOLLOW)) < 0)
+                return taken;
+        while ((got = (long)system_read_once((int)handle, chunk, sizeof(chunk))) > 0)
+                for (long k = 0; k < got; k++)
+                {
+                        if (chunk[k] == '\n')
+                        {
+                                if (!skipping)
+                                        compositor_access_map_line(line, used, vendor, product, map, &taken);
+                                used = 0, skipping = 0;
+                        }
+                        else if (used < sizeof(line))
+                                line[used++] = chunk[k];
+                        else
+                                skipping = 1;
+                }
+        if (used && !skipping)
+                compositor_access_map_line(line, used, vendor, product, map, &taken);
+        system_close((int)handle);
+        return taken;
+}
+
+// A sysfs number of the input device (its id/vendor, id/product), hexadecimal, or 0.
+static unsigned int compositor_access_sys_hex(unsigned int number, const char *leaf)
+{
+        char path[80], text[16];
+        long got;
+        unsigned int value = 0;
+
+        windows_num_path(path, sizeof(path), "/sys/class/input/event", number, leaf);
+        got = file_slurp_once_at(AT_FDCWD, (string_address)path, (p8 *)text, sizeof(text) - 1);
+        for (long k = 0; k < got; k++)
+        {
+                char c = (char)(text[k] | 0x20);
+                if ((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))
+                        value = value << 4 | (unsigned int)(c <= '9' ? c - '0' : c - 'a' + 10);
+                else
+                        break;
+        }
+        return value;
+}
+
+/*
+        The classes a controller is of, which say whether it is the desktop's: a pad (a stick, or a cross, and a bottom face button
+        or a joystick's trigger) is; a wheel or a pedal (force feedback beyond rumble: a constant force, a spring, a damper, which a
+        pad never asks for) and a flight stick (a throttle or a rudder and no face buttons) are a game's alone, as a wheel at rest or
+        a throttle left half way would drift the pointer. The person's map turns either way (VENDOR:PRODUCT on|off).
+*/
+static b32 compositor_access_games_only(bipolar handle, const p8 *keys, unsigned long absolute)
+{
+        unsigned char ff[16];
+        b32 face = (keys[0x130 / 8] >> (0x130 % 8) & 1) != 0;
+
+        memory_zero(ff, sizeof(ff));
+        system_control(handle, COMPOSITOR_EVIOCGBIT(0x15, sizeof(ff)), ff);
+        // FF_CONSTANT 0x52, FF_SPRING 0x53, FF_FRICTION 0x54, FF_DAMPER 0x55, FF_INERTIA 0x56, FF_RAMP 0x57.
+        for (unsigned int code = 0x52; code <= 0x57; code++)
+                if (ff[code / 8] >> (code % 8) & 1)
+                        return 1;
+        // ABS_THROTTLE 6, ABS_RUDDER 7, ABS_WHEEL 8.
+        return !face && (absolute >> 6 & 7) != 0;
+}
+
 static b32 compositor_access_open(unsigned int at, bipolar handle, const p8 *keys, unsigned long absolute, unsigned int properties,
                                   const char *link, unsigned int number)
 {
@@ -467,16 +624,38 @@ static b32 compositor_access_open(unsigned int at, bipolar handle, const p8 *key
 
         // A pad: a left stick, a right one alone (a right Joy-Con), or a cross on a hat alone (a pad of buttons and a cross).
         if ((properties & 0x40) || ((absolute & 3) != 3 && (absolute >> 3 & 3) != 3 && (absolute >> 0x10 & 3) != 3) || at >= COMPOSITOR_INPUTS ||
-            !((keys[0x130 / 8] >> (0x130 % 8) & 1) || (keys[0x120 / 8] >> (0x120 % 8) & 1)) ||
-            !link || string_search((string_address)link, (string_address) "/devices/virtual/input/"))
+            !((keys[0x130 / 8] >> (0x130 % 8) & 1) || (keys[0x120 / 8] >> (0x120 % 8) & 1)) || !link)
                 return 0;
-        for (int each = 0; each < COMPOSITOR_ACCESS_PADS && index < 0; each++)
-                if (compositor_access.pad[each].at < 0 || compositor_access.pad[each].at == (int)at)
-                        index = each;
-        if (index < 0)
-                return 0;
-        pad = &compositor_access.pad[index];
-        memory_zero(pad, sizeof *pad);
+        // A virtual pad is no pad of the desktop's (Steam's, a game's own: they are made from a pad the desktop already reads), but for one
+        // Waterlink made of another machine's pad: its phys says so (COMPOSITOR_ACCESS_LINKED_PHYS), and it is a pad here as it was there.
+        if (string_search((string_address)link, (string_address) "/devices/virtual/input/"))
+        {
+                char phys_path[64], phys[64];
+                long read;
+
+                windows_num_path(phys_path, sizeof(phys_path), "/sys/class/input/event", number, "/device/phys");
+                read = file_slurp_once_at(AT_FDCWD, (string_address)phys_path, (p8 *)phys, sizeof(phys) - 1);
+                phys[read > 0 ? read : 0] = 0;
+                if (!string_has_prefix((string_address)phys, COMPOSITOR_ACCESS_LINKED_PHYS))
+                        return 0;
+        }
+        {
+                // The person's map says first whether the device is the desktop's, then its class does.
+                unsigned char map[ACCESS_BUTTONS];
+                int taken = compositor_access_map_read(compositor_access_sys_hex(number, "/device/id/vendor"),
+                                                       compositor_access_sys_hex(number, "/device/id/product"), map);
+
+                if (taken == 0 || (taken < 0 && compositor_access_games_only(handle, keys, absolute)))
+                        return 0;
+                for (int each = 0; each < COMPOSITOR_ACCESS_PADS && index < 0; each++)
+                        if (compositor_access.pad[each].at < 0 || compositor_access.pad[each].at == (int)at)
+                                index = each;
+                if (index < 0)
+                        return 0;
+                pad = &compositor_access.pad[index];
+                memory_zero(pad, sizeof *pad);
+                memory_copy(pad->map, map, ACCESS_BUTTONS);
+        }
         pad->at = (int)at;
         for (unsigned int code = 0; code < 0x16; code++)
         {
@@ -743,7 +922,7 @@ static void compositor_access_report(struct compositor_access_pad *pad, positive
                         continue;
                 // A press is the action of the moment (the keyboard's when it is up); its let go is whatever it was pressed as.
                 if (held >> button & 1)
-                        action = compositor.osk_shown && compositor_access_typing[button] ? compositor_access_typing[button] : compositor_access_actions[button],
+                        action = compositor.osk_shown && compositor_access_typing[button] ? compositor_access_typing[button] : pad->map[button],
                         pad->pressed_as[button] = (unsigned char)action;
                 else
                         action = pad->pressed_as[button], pad->pressed_as[button] = 0;
