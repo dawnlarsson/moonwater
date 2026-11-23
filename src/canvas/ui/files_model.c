@@ -1017,7 +1017,7 @@ enum { FILES_MENU_OPEN = 16, FILES_MENU_EDITOR, FILES_MENU_TERMINAL, FILES_MENU_
        FILES_MENU_SHEET, FILES_MENU_DETAILS, FILES_MENU_ICONS, FILES_MENU_LIST, FILES_MENU_SORT = 32,
        FILES_MENU_UNDO = 40, FILES_MENU_REDO, FILES_MENU_BIN, FILES_MENU_BIN_EMPTY, FILES_MENU_RESTORE,
        FILES_MENU_WALLPAPER, FILES_MENU_WALLPAPER_OF,
-       FILES_MENU_DEVICE_OPEN = 56, FILES_MENU_DEVICE_WRITE, FILES_MENU_DEVICE_EJECT, FILES_MENU_DEVICE_LIVE,
+       FILES_MENU_DEVICE_OPEN = 56, FILES_MENU_DEVICE_WRITE, FILES_MENU_DEVICE_EJECT, FILES_MENU_DEVICE_LIVE, FILES_MENU_DEVICE_PLAY,
        FILES_ACT_BACK = 64, FILES_ACT_FWD, FILES_ACT_UP, FILES_ACT_RELOAD, FILES_ACT_FIND, FILES_ACT_CTX, FILES_ACT_SHEET, FILES_ACT_STOP };
 
 // The folder's own acts, in their order, 0 a line between two groups: the menu of the folder's empty space and the View menu are both this
@@ -1707,7 +1707,7 @@ static inline b32 files_disk_outside(const struct files_devices address_to d, p3
 */
 static b32 files_part_opens(const struct files_devices address_to d, p32 p)
 {
-        static const char address_to const opened[] = {"ext4", "ext3", "ext2", "btrfs", "xfs", "f2fs", "vfat", "exfat", "ntfs", "iso9660", "udf"};
+        static const char address_to const opened[] = {"ext4", "ext3", "ext2", "btrfs", "xfs", "f2fs", "vfat", "exfat", "ntfs", "iso9660", "udf", "cdda"};
         if (p >= d->parts)
                 return false;
         if (files_part_mount(d, p))
@@ -1737,9 +1737,9 @@ static p32 files_tree_device_at(const struct files_tree address_to t, const p8 a
 
 /*
         The Devices group's rows, made again from the table: the group after This Machine's own rows and before any peer, and under it
-        one row a medium, never a disk with its partitions under it: each file system that opens (files_part_opens), named by its label
-        alone where its disk has one (the disk's name where it has no label), and with its disk's name where the disk has more; an optical
-        drive holding music (a CD's tracks) or nothing, and a disk with nothing that opens, a row of the disk's. The disks that are outside
+        one row a medium, never a disk with its partitions under it: each file system that opens (files_part_opens, a CD's folder of
+        tracks, cdda, among them), named by its label alone where its disk has one (the disk's name where it has no label), and with its
+        disk's name where the disk has more; an optical drive with no disc, and a disk with nothing that opens, a row of the disk's. The disks that are outside
         (files_disk_outside) come first. A group that is shut has no rows under it; no disk, no group.
 */
 static b32 files_tree_devices(struct files_tree address_to t)
@@ -1778,7 +1778,7 @@ static b32 files_tree_devices(struct files_tree address_to t)
                                         return false;
                                 t->node[ins].device = (p16)p, t->node[ins++].flags = opens > 1 ? FILES_NODE_SEVERAL : 0;
                         }
-                        if (opens && d->disk_disc[k] != FILES_DISC_AUDIO && d->disk_disc[k] != FILES_DISC_MIXED)
+                        if (opens)
                                 continue;
                         if (!files_tree_insert_root(t, ins, d->disk_label[k][0] ? d->disk_label[k] : d->disk_name[k], null, FILES_NODE_DISK, FILES_PLACE_NONE, 1, 0, false))
                                 return false;

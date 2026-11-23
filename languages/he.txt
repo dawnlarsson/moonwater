@@ -12,7 +12,7 @@
 # machine-made 2026-11-23 (the add row of Waterlink's linked machines), not yet read by a person: settings_link_add settings_link_add_keys settings_link_show settings_link_stop settings_link_type
 # machine-made 2026-11-23 (a row menu's copy of one column), not yet read by a person: menu_copy_named
 # machine-made 2026-11-23 (Waterlink's grants as columns, and a remove asked on its row), not yet read by a person: settings_column_files settings_column_log settings_column_run settings_column_shell settings_remove_again
-# machine-made 2026-11-23 (the CD drive and the flat Devices of Files), not yet read by a person: files_device_nothing files_disc_audio files_disc_kind_audio files_disc_kind_data files_disc_none files_disc_playing files_disc_track
+# machine-made 2026-11-23 (the CD drive and the flat Devices of Files), not yet read by a person: files_device_nothing files_disc_audio files_disc_none files_disc_play
 @language he
 @name עברית
 @translated machine
@@ -85,11 +85,8 @@ files_device_nothing	c005	אין מה לפתוח
 files_device_write	7442	אפשר כתיבה
 files_devices	f320	התקנים
 files_disc_audio	f664	תקליטור שמע
-files_disc_kind_audio	f8ba	רצועת שמע
-files_disc_kind_data	95ce	רצועת נתונים
 files_disc_none	c5a3	אין תקליטור
-files_disc_playing	bcab	מנגן את רצועה %d
-files_disc_track	5465	רצועה %d
+files_disc_play	6c28	נגן את התקליטור
 files_drive_root	84bc	מערכת
 files_empty	751c	התיקייה הזו ריקה
 files_failed	c564	לא ניתן היה לקרוא את התיקייה

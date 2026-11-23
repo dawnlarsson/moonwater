@@ -4430,10 +4430,9 @@ static fn browser_filter(struct files_model address_to m)
 */
 /*
         Media of every kind, flat (files_tree_devices, files.c's files_device_describe): a data disc in the machine's drive (its label, the
-        disc's symbol), a CD of music (Audio CD, its length, pressed for its tracks), a USB drive with no disc (No disc, quiet), a stick of
-        two file systems and a swap partition (the stick's name before each one's, no row of the swap), and a card with nothing on it that
-        opens (quiet). Then the CD's tracks as disc tracks says them (files_disc_take), each a row (Track N, its length, a data track
-        quiet), and the one a play this window started is at by the tracks' lengths (files_disc_now).
+        disc's symbol), a CD of music (its folder of tracks, cdda: Audio CD and its length, opened as a stick is), a USB drive with no disc
+        (No disc, quiet), a stick of two file systems and a swap partition (the stick's name before each one's, no row of the swap), and
+        a card with nothing on it that opens (quiet).
 */
 static fn browser_media(void)
 {
@@ -4445,6 +4444,7 @@ static fn browser_media(void)
             "    disc data\n"
             "    where external ata\n"
             "  sr1 drive 700 MB view only\n"
+            "    part 0 105840132 unpartitioned - fs cdda - sr1\n"
             "    disc audio 3 600\n"
             "    where external ata\n"
             "  2-1 usb 0e8d:1887 Slim DVD Writer allowed\n"
@@ -4458,21 +4458,21 @@ static fn browser_media(void)
             "  sdc drive 64 MB view only\n"
             "    part 0 64000000 free -\n"
             "    where external scsi\n";
-        static const char said[] = "[Moonwater] track 1 audio 200\n[Moonwater] track 2 audio 250\n[Moonwater] track 3 audio 150\n[Moonwater] track 4 data 90\n";
         long mapped = ui_map(sizeof(struct files_big));
-        b32 read, rows = false, words = false, tracks = false, now = false;
+        b32 read, rows = false, words = false;
         struct ui_row row;
         char time[16], hours[16];
-        b64 was;
 
         memory_zero(&devices, sizeof(devices));
-        read = files_devices_read(&devices, (const p8 address_to)list, sizeof(list) - 1) && devices.disks == 5 && devices.parts == 4 &&
+        read = files_devices_read(&devices, (const p8 address_to)list, sizeof(list) - 1) && devices.disks == 5 && devices.parts == 5 &&
                devices.disk_disc[0] == FILES_DISC_DATA && devices.disk_disc[1] == FILES_DISC_AUDIO && devices.disk_tracks[1] == 3 && devices.disk_seconds[1] == 600 &&
                devices.disk_disc[2] == FILES_DISC_NONE && string_equals((string_address)devices.disk_label[2], (string_address) "Slim DVD Writer") &&
                devices.disk_disc[3] == FILES_DISC_NO && devices.disk_external[3] && devices.disk_disc[4] == FILES_DISC_NO && devices.disk_count[4] == 0 &&
                devices.part_disk[0] == 0 && string_equals((string_address)devices.part_type[0], (string_address) "iso9660") &&
-               string_equals((string_address)devices.part_label[0], (string_address) "PHOTOS 2009") && devices.part_role[3] == FILES_ROLE_SWAP;
-        check("browser: an optical drive's disc line says what is in it (data, a CD's tracks and seconds, none), a disc of data its one partition", read);
+               string_equals((string_address)devices.part_label[0], (string_address) "PHOTOS 2009") && devices.part_role[4] == FILES_ROLE_SWAP &&
+               devices.part_disk[1] == 1 && string_equals((string_address)devices.part_type[1], (string_address) "cdda") && devices.part_bytes[1] == 105840132ull;
+        check("browser: an optical drive's disc line says what is in it (data, a CD's tracks and seconds, none), a disc of data its one partition, a CD of music its folder of tracks (cdda)",
+              read);
         if (mapped < 0 && mapped > -4096)
         {
                 check("browser: the window's memory is mapped", false);
@@ -4487,11 +4487,11 @@ static fn browser_media(void)
                 g = files_tree_after(&tree, 0);
                 rows = g + 7 == tree.count && tree.node[g].has == 6 &&
                        tree.node[g + 1].kind == FILES_NODE_PART && tree.node[g + 1].device == 0 && string_equals((string_address)files_tree_name(&tree, g + 1), (string_address) "PHOTOS 2009") &&
-                       tree.node[g + 2].kind == FILES_NODE_DISK && tree.node[g + 2].device == 1 &&
+                       tree.node[g + 2].kind == FILES_NODE_PART && tree.node[g + 2].device == 1 &&
                        tree.node[g + 3].kind == FILES_NODE_DISK && tree.node[g + 3].device == 2 &&
-                       tree.node[g + 4].kind == FILES_NODE_PART && tree.node[g + 4].device == 1 && (tree.node[g + 4].flags & FILES_NODE_SEVERAL) &&
+                       tree.node[g + 4].kind == FILES_NODE_PART && tree.node[g + 4].device == 2 && (tree.node[g + 4].flags & FILES_NODE_SEVERAL) &&
                        string_equals((string_address)files_tree_name(&tree, g + 4), (string_address) "DATA") &&
-                       tree.node[g + 5].kind == FILES_NODE_PART && tree.node[g + 5].device == 2 && string_equals((string_address)files_tree_name(&tree, g + 5), (string_address) "sdb2") &&
+                       tree.node[g + 5].kind == FILES_NODE_PART && tree.node[g + 5].device == 3 && string_equals((string_address)files_tree_name(&tree, g + 5), (string_address) "sdb2") &&
                        tree.node[g + 6].kind == FILES_NODE_DISK && tree.node[g + 6].device == 4;
                 memory_copy(&files.big->devices, &devices, sizeof(devices)), memory_copy(&files.big->tree, &tree, sizeof(tree));
                 files.big->tree.devices = &files.big->devices;
@@ -4499,7 +4499,7 @@ static fn browser_media(void)
                         // Each row's words read as it is described: the rows' words are the describe's own (static) buffers.
                         static const char address_to const labels[7] = {null, "PHOTOS 2009", "Audio CD", "Slim DVD Writer", "SanDisk Ultra \xc2\xb7 DATA",
                                                                         "SanDisk Ultra \xc2\xb7 sdb2", "sdc"};
-                        static const char address_to const notes[7] = {null, "iso9660", null, "No disc", "exfat", "ext4", "Nothing to open"};
+                        static const char address_to const notes[7] = {null, "iso9660", "10:00", "No disc", "exfat", "ext4", "Nothing to open"};
                         static const unsigned int symbols[7] = {0, UI_FILE_DISC, UI_FILE_DISC, UI_FILE_DISC, UI_FILE_STICK, UI_FILE_STICK, UI_FILE_STICK};
                         static const b8 quiet[7] = {0, 0, 0, 1, 0, 0, 1};
                         words = rows;
@@ -4507,43 +4507,18 @@ static fn browser_media(void)
                         {
                                 memory_zero(&row, sizeof(row)), files_tree_describe((int)(g + k), &row);
                                 words = row.file == 1 + symbols[k] && string_equals((string_address)row.label, (string_address)labels[k]) && (b8)row.dim == quiet[k] &&
-                                        (notes[k] ? row.note && string_equals((string_address)row.note, (string_address)notes[k]) : !row.note) &&
-                                        (k != 2 || (row.value && string_equals((string_address)row.value, (string_address) "10:00")));
+                                        (notes[k] ? row.note && string_equals((string_address)row.note, (string_address)notes[k]) : !row.note) && (k != 2 || row.value);
                                 if (!words)
                                         string_format(log, "  browser: the medium row %p said %s (%s), symbol %p\n", (positive)k, row.label ? row.label : "-", row.note ? row.note : "-", (positive)row.file);
                         }
                 }
                 memory_zero(&files.big->tree, sizeof(files.big->tree)), files_tree_end(&tree);
         }
-        check("browser: a row a medium, outside first: a data disc by its label, a CD of music, a drive with no disc, a stick's two file systems named with it (no swap), a card with nothing that opens", rows);
+        check("browser: a row a medium, outside first: a data disc by its label, a CD of music's folder, a drive with no disc, a stick's two file systems named with it (no swap), a card with nothing that opens", rows);
         check("browser: a medium's row says what it is: the disc's symbol for a drive's (Audio CD and its length, No disc quiet), the stick's for a stick's, Nothing to open quiet", words);
-        files_disc_take(said, sizeof(said) - 1);
-        {
-                struct files_disc address_to c = &files.big->disc;
-                string_copy_bounded((string_address)c->drive, (string_address) "sr1", sizeof(c->drive));
-                c->shown = true;
-                memory_zero(&row, sizeof(row)), files_disc_describe(1, &row);
-                tracks = c->count == 4 && c->number[0] == 1 && c->seconds[1] == 250 && c->data[3] && !c->data[2] &&
-                         string_equals((string_address)row.label, (string_address) "Track 2") && string_equals((string_address)row.cells[1], (string_address) "4:10") &&
-                         string_equals((string_address)row.cells[2], (string_address) "Audio track") && row.file == 1 + UI_FILE_AUDIO && !row.dim && !row.mark;
-                memory_zero(&row, sizeof(row)), files_disc_describe(3, &row);
-                tracks = tracks && row.dim && string_equals((string_address)row.cells[2], (string_address) "Data track");
-                files_disc_time(time, sizeof(time), 65), files_disc_time(hours, sizeof(hours), 3725);
-                tracks = tracks && string_equals((string_address)time, (string_address) "1:05") && string_equals((string_address)hours, (string_address) "1:02:05");
-                // A play started at track 1, 300 seconds ago: track 1 is 200 long, so track 2 plays; a play of another drive is no track here.
-                was = ui_kit.now, ui_kit.now = 1000000000000ll;
-                c->playing = true, c->play_track = 1, c->play_at = ui_kit.now - 300000000000ll;
-                string_copy_bounded((string_address)c->play_drive, (string_address) "sr1", sizeof(c->play_drive));
-                memory_zero(&row, sizeof(row)), files_disc_describe(1, &row);
-                now = files_disc_now() == 2 && row.mark;
-                c->play_at = ui_kit.now - 2000000000000ll;
-                now = now && files_disc_now() == 3;
-                string_copy_bounded((string_address)c->play_drive, (string_address) "sr0", sizeof(c->play_drive));
-                now = now && files_disc_now() == 0;
-                memory_zero(c, sizeof(*c)), ui_kit.now = was;
-        }
-        check("browser: a CD's tracks are the lines disc tracks says: Track N, its length, a data track quiet", tracks);
-        check("browser: the track that plays is found from the one a play started at by the tracks' lengths, the last of music at most, and none on another drive", now);
+        files_disc_time(time, sizeof(time), 65), files_disc_time(hours, sizeof(hours), 3725);
+        check("browser: a CD's length is said as a player says it: 1:05, 1:02:05",
+              string_equals((string_address)time, (string_address) "1:05") && string_equals((string_address)hours, (string_address) "1:02:05"));
 }
 
 static fn browser_devices(void)

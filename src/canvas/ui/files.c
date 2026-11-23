@@ -36,10 +36,8 @@
 #define FILES_CENSUS_WAIT_NS 10000000000ll // and a reading that takes longer than this is given up
 #define FILES_CENSUS_ROOM 32768
 #define FILES_DEVICE_WAIT_NS 60000000000ll // a partition opened, made writable or ejected, given up after this
-// The jobs of the device verb (open, writable, eject, tidy) and of disc's (a CD's tracks read, its tray opened), one at a time.
-enum { FILES_DEVICE_OPEN = 1, FILES_DEVICE_WRITE, FILES_DEVICE_EJECT, FILES_DEVICE_TIDY, FILES_DEVICE_TRACKS, FILES_DEVICE_TRAY };
-#define FILES_DISC_TRACKS 99                 // a CD's tracks are numbered 1 to 99 (the Red Book): the most a disc holds
-#define FILES_DISC_SAID (FILES_DISC_TRACKS * 64) // what disc tracks says of them: a line a track, its label and three words
+// The jobs of the device verb (open, writable, eject, tidy) and of disc's (a drive's tray opened), one at a time.
+enum { FILES_DEVICE_OPEN = 1, FILES_DEVICE_WRITE, FILES_DEVICE_EJECT, FILES_DEVICE_TIDY, FILES_DEVICE_TRAY };
 #define FILES_DISC_PLAY "/run/moonwater/disc.play" // the pid of the disc that plays (disc.c's DISC_PLAY_PATH)
 #define FILES_DISC_SETTLE_NS 3000000000ll    // a play started or stopped is taken at its word this long, before its pid says
 
@@ -82,21 +80,11 @@ struct files_remote_read
         p8 remote_path[FILES_PATH], local_path[FILES_PATH], name[FILES_NAME];
 };
 
-/*
-        A CD of music shown in the main pane in the place of the folder: its tracks, read from disc tracks, each a row the list draws
-        and the keys and the hand move over as they do a folder's; one opened plays from it to the disc's end (disc play), and the
-        play this window started is followed by its tracks' lengths.
-*/
+// A CD that plays through the sound server (disc play, the row's Play disc): from its pid, and the drive this window started it on.
 struct files_disc
 {
-        b32 shown;
-        p8 drive[FILES_DEVICE_NODE];
-        p32 count, cursor;
-        p32 number[FILES_DISC_TRACKS], seconds[FILES_DISC_TRACKS];
-        b8 data[FILES_DISC_TRACKS];
         b32 playing;                       // a disc plays (its pid is in FILES_DISC_PLAY)
-        p8 play_drive[FILES_DEVICE_NODE];  // the drive and the track this window started it from, none when another did
-        p32 play_track;
+        p8 play_drive[FILES_DEVICE_NODE];  // the drive this window started it on, none when another did
         b64 play_at;                       // when it started or stopped (FILES_DISC_SETTLE_NS)
 };
 
@@ -116,7 +104,7 @@ struct files_big
         struct ui_tokens path;     // the path band: the kit's token field, a chip a folder of the trail
         char note[256], status[192], sheet[FILES_SHEET_LINES][FILES_NAME * 3 + 64];
         p8 band_base[FILES_MOST / 8], git_state[FILES_MOST];
-        char census[FILES_CENSUS_ROOM], device_said[2048], disc_said[FILES_DISC_SAID];
+        char census[FILES_CENSUS_ROOM], device_said[2048];
         struct files_disc disc;
 };
 
@@ -174,16 +162,9 @@ static fn files_moved(void);
 static fn files_device_enter(p32 p);
 static fn files_device_menu(const struct files_node address_to n, int x, int y);
 static b32 files_device_run(int kind, p32 p);
-static fn files_disc_open(p32 k);
-static fn files_disc_leave(void);
+static fn files_disc_play(p32 k);
 static fn files_disc_stop(void);
-static p32 files_disc_now(void);
-static p32 files_disc_node(void);
 static p32 files_disc_disk(const p8 address_to name);
-static fn files_disc_describe(int id, struct ui_row address_to row);
-static b32 files_disc_selected(int id);
-static b32 files_disc_key(const struct window_event address_to event);
-static fn files_disc_press(struct ui_list address_to l, int row, const struct window_event address_to event);
 static fn files_open_with(b32 editor);
 static fn files_remote_nav(void);
 static struct files_peer address_to files_peer_by_machine(p8 machine);
@@ -342,8 +323,8 @@ static fn files_disc_time(char address_to into, positive room, p32 seconds)
 /*
         A row of the Devices group: the group (the word Settings' group of devices has); a file system that opens (its label, or its disk's
         name; its disk's name before it where the disk has more than one; its file system's type and its size, a dot where it is mounted);
-        or a disk or a drive with no file system that opens: a CD of music (its length, a dot while it plays), a drive with no disc in it,
-        and a disk with nothing on it that opens, which are quiet.
+        or a disk or a drive with no file system that opens: a drive with no disc in it, and a disk with nothing on it that opens, which
+        are quiet. A CD of music is its folder of tracks (cdda): Audio CD, its length, a dot while it is open or plays.
 */
 static fn files_device_describe(const struct files_tree address_to t, const struct files_node address_to n, int id, struct ui_row address_to row)
 {
@@ -362,14 +343,6 @@ static fn files_device_describe(const struct files_tree address_to t, const stru
         if (n->kind == FILES_NODE_DISK && n->device < d->disks)
         {
                 k = n->device, row->file = 1 + files_disk_symbol(d, k, false);
-                if (d->disk_disc[k] == FILES_DISC_AUDIO || d->disk_disc[k] == FILES_DISC_MIXED)
-                {
-                        const struct files_disc address_to c = &files.big->disc;
-                        row->label = WORDS(files_disc_audio), files_disc_time(size, sizeof(size), d->disk_seconds[k]), row->value = size;
-                        if (c->playing && (!c->play_drive[0] || string_equals((string_address)c->play_drive, (string_address)d->disk_name[k])))
-                                row->mark = true, row->mark_ink = ui_role(UI_SUCCESS);
-                        return;
-                }
                 row->note = d->disk_disc[k] == FILES_DISC_NONE || d->disk_disc[k] == FILES_DISC_OPEN ? WORDS(files_disc_none) : WORDS(files_device_nothing);
                 if (!d->disk_disc[k])
                         ui_size_text(size, sizeof(size), d->disk_bytes[k]), row->value = size;
@@ -389,7 +362,16 @@ static fn files_device_describe(const struct files_tree address_to t, const stru
                 row->label = disk;
         }
         ui_size_text(size, sizeof(size), d->part_bytes[n->device]), row->value = size;
-        if (d->part_type[n->device][0])
+        if (string_equals((string_address)d->part_type[n->device], (string_address) "cdda") && k < d->disks)
+        {
+                const struct files_disc address_to c = &files.big->disc;
+                if (!d->part_label[n->device][0])
+                        row->label = WORDS(files_disc_audio);
+                files_disc_time(type, sizeof(type), d->disk_seconds[k]), row->note = type;
+                if (c->playing && (!c->play_drive[0] || string_equals((string_address)c->play_drive, (string_address)d->disk_name[k])))
+                        row->mark = true, row->mark_ink = ui_role(UI_SUCCESS);
+        }
+        else if (d->part_type[n->device][0])
                 ui_label_foreign(type, sizeof(type), d->part_type[n->device], string_length((string_address)d->part_type[n->device])), row->note = type;
         if (files_part_mount(d, n->device))
                 row->mark = true, row->mark_ink = ui_role(UI_SUCCESS);
@@ -449,7 +431,7 @@ static fn files_tree_follow(void)
         const struct files_model address_to m = &files.big->model;
         struct files_peer address_to p = files_model_is_remote(m) ? files_peer_by_name(m->peer) : null;
         p8 machine = p ? p->machine : 0;
-        files.tree_shown = files.big->disc.shown ? files_disc_node() : files_tree_reveal_in(&files.big->tree, machine, m->path);
+        files.tree_shown = files_tree_reveal_in(&files.big->tree, machine, m->path);
         if (files.tree_shown != FILES_NO)
                 files.tree_at = files.tree_shown, files.tree_reseat = true;
 }
@@ -491,11 +473,6 @@ static fn files_status_text(void)
                 string_copy_bounded((string_address)into, (string_address)files.big->note, room);
         else if (files.said)
                 string_copy_bounded((string_address)into, (string_address)language_text(files.said), room);
-        else if (files.big->disc.shown)
-        {
-                if (files_disc_now())
-                        language_format(into, room, WORDS(files_disc_playing), (int)files_disc_now());
-        }
         else if (m->state == FILES_READY && m->chosen_count > 1)
         {
                 p64 bytes = 0;
@@ -538,18 +515,8 @@ static fn files_path_sync(void)
 {
         struct ui_tokens address_to k = &files.big->path;
         const struct files_trail address_to t = &files.trail;
-        static p8 drive[FILES_DEVICE_NODE + 8];
-        static const struct files_trail none;
         const p8 address_to want = t->count ? t->path : files.big->model.path;
-        positive length, caret;
-        // The tracks of a CD are the drive's own: the band says the drive (/dev/sr0) while they are shown.
-        if (files.big->disc.shown)
-        {
-                string_copy_bounded((string_address)drive, (string_address) "/dev/", sizeof(drive));
-                string_append_bounded((string_address)drive, (string_address)files.big->disc.drive, sizeof(drive));
-                want = drive, t = &none;
-        }
-        length = string_length((string_address)want), caret = t->count ? t->to[t->current] : length;
+        positive length = string_length((string_address)want), caret = t->count ? t->to[t->current] : length;
         static p8 had[UI_TOKENS_TEXT];
         const struct doc_selection address_to sel;
         if (!k->text.doc.selections || files.editing == FILES_EDIT_PATH)
@@ -585,8 +552,7 @@ static int files_view_wide(struct ui address_to ui)
 static fn files_bar_lay(void)
 {
         const struct files_model address_to m = &files.big->model;
-        b32 disc = files.big->disc.shown;
-        const b32 off[FILES_NAVS] = {!disc && !m->back_count, !m->forward_count, !disc && m->path[0] == '/' && !m->path[1], false};
+        const b32 off[FILES_NAVS] = {!m->back_count, !m->forward_count, m->path[0] == '/' && !m->path[1], false};
         for (int k = 0; k < FILES_NAVS; k++)
         {
                 struct ui_iconbutton address_to b = &files.nav[k];
@@ -621,10 +587,6 @@ static fn files_layout(void)
         files.path.items[0] = files.editing == FILES_EDIT_NAME ? WORDS(files_rename_hint) : null;
         l->total = (int)files_model_count(m), l->focus = m->cursor != FILES_NO ? (int)m->cursor : -1;
         l->empty = m->state == FILES_NONE ? "" : language_text(files_state_said(m->state));
-        l->describe = files_describe, l->selected = files_row_selected;
-        if (files.big->disc.shown)
-                l->total = (int)files.big->disc.count, l->focus = (int)files.big->disc.cursor, l->empty = "",
-                l->describe = files_disc_describe, l->selected = files_disc_selected;
         l->columns = files.view == FILES_VIEW_DETAILS ? &files.columns : null;
         l->stripe = modes[files.view].stripe, l->tiles = modes[files.view].tiles, l->tile_h = modes[files.view].tile_h;
         ui_view_begin(&files.big->view, ui, files.width, -files.height);
@@ -656,27 +618,24 @@ static fn files_layout(void)
                 }
         }
         ui_view_end(&files.big->view);
-        if (files.reseat && !files.big->disc.shown)
+        if (files.reseat)
                 ui_scroll_set(&l->scroll, (int)m->seat), files.reseat = false;
-        if (!files.big->disc.shown)
-                m->seat = l->scroll.scroll;
+        m->seat = l->scroll.scroll;
         for (int k = 0; k < 4; k++)
                 files.columns.title[k] = cols[k];
         // What the columns need, from every row of the listing, read again when the listing is another or more of it was read: each column is
         // as wide as its widest words however far down they are, and a folder left leaves no width behind (ui_columns_layout).
         {
-                b32 disc = files.big->disc.shown;
-                p32 rows = disc ? files.big->disc.count : files_model_count(m);
-                p32 key = (disc ? 0x9e3779b9u ^ files.big->disc.count : m->listed * 2654435761u ^ m->reads * 40503u) ^ rows * 69069u ^ (p32)files.view;
+                p32 key = m->listed * 2654435761u ^ m->reads * 40503u ^ files_model_count(m) * 69069u ^ (p32)files.view;
                 if (key != files.columns_key)
                 {
                         files.columns_key = key;
                         ui_columns_forget(&files.columns);
-                        for (p32 id = 0; files.view == FILES_VIEW_DETAILS && id < rows; id++)
+                        for (p32 id = 0; files.view == FILES_VIEW_DETAILS && id < files_model_count(m); id++)
                         {
                                 struct ui_row row;
                                 memory_zero(&row, sizeof(row));
-                                l->describe((int)id, &row);
+                                files_describe((int)id, &row);
                                 ui_columns_need(ui, &files.columns, 0, row.label, ui_dev(ui, UI_FILE_ROW_ICON + 8));
                                 for (int k = 1; k < 4; k++)
                                         ui_columns_need(ui, &files.columns, k, row.cells[k], 0);
@@ -1311,8 +1270,7 @@ static b32 files_drag_event(const struct window_event address_to event)
                                ? hit_node : -1;
                 int row = node >= 0 ? -2 : hit_node >= 0 ? -3 : files_drop_row(files.drop.x, files.drop.y);
                 int spring = node >= 0 ? FILES_SPRING_NODE + node : row;
-                b32 none = hit_node >= 0 && node < 0 ? true : (files.drag.live && row == -1) ||
-                           (node < 0 && (files.big->model.state != FILES_READY || files_model_is_remote(&files.big->model) || files.big->disc.shown));
+                b32 none = hit_node >= 0 && node < 0 ? true : (files.drag.live && row == -1) || (node < 0 && (files.big->model.state != FILES_READY || files_model_is_remote(&files.big->model)));
                 p32 pref = files.drop.keys & WINDOW_KEY_CONTROL ? WINDOWS_DRAG_COPY
                            : files.drop.keys & WINDOW_KEY_SHIFT ? WINDOWS_DRAG_MOVE : files.drag.live && files_drop_near() ? WINDOWS_DRAG_MOVE : WINDOWS_DRAG_COPY;
                 files.drop_over = true, tl->drop = node >= 0 ? node + 1 : 0;
@@ -1450,7 +1408,6 @@ static fn files_crumb_go(int which)
 static fn files_moved(void)
 {
         struct files_model address_to m = &files.big->model;
-        files.big->disc.shown = false;
         if (files.editing == FILES_EDIT_PATH)
                 ui_tokens_focus(&files.big->path, false, false);
         files.editing = 0, files.armed = false, files_clear_msg();
@@ -1594,13 +1551,6 @@ static fn files_open(p32 place)
 static b32 files_act(int which)
 {
         struct files_model address_to m = &files.big->model;
-        // From a CD's tracks, Back and Up are the folder that was shown; Forward is the folder's own.
-        if (files.big->disc.shown)
-        {
-                files_disc_leave();
-                if (which != 1)
-                        return true;
-        }
         if (which == 2 ? files_model_up(m) : files_model_back(m, which == 1))
         {
                 files_moved();
@@ -1934,21 +1884,20 @@ static fn files_find(b32 on)
 static fn files_menu_do(int id)
 {
         struct files_model address_to m = &files.big->model;
-        if (id >= FILES_MENU_DEVICE_OPEN && id <= FILES_MENU_DEVICE_LIVE)
+        if (id >= FILES_MENU_DEVICE_OPEN && id <= FILES_MENU_DEVICE_PLAY)
         {
                 // Found again by its node's name: the list read since the menu opened may have moved it. An optical drive's Eject opens
-                // its tray (disc eject lets go of what is opened from the disc first), and its Open with no file system is its tracks.
+                // its tray (disc eject lets go of what is opened from the disc first, a CD's folder of tracks too).
                 const struct files_devices address_to d = &files.big->devices;
                 p32 p = 0, disc = files_disc_disk(files.device_menu_node);
                 while (p < d->parts && !string_equals((string_address)d->part_node[p], (string_address)files.device_menu_node))
                         p++;
                 if (id == FILES_MENU_DEVICE_EJECT && disc != FILES_NO)
                         (void)files_device_run(FILES_DEVICE_TRAY, disc);
+                else if (id == FILES_MENU_DEVICE_PLAY)
+                        files_disc_play(disc);
                 else if (p == d->parts)
-                {
-                        if (id == FILES_MENU_DEVICE_OPEN && disc != FILES_NO)
-                                files_disc_open(disc);
-                }
+                        return;
                 else if (id == FILES_MENU_DEVICE_OPEN)
                         files.device_at = p, files_device_enter(p);
                 else if (id != FILES_MENU_DEVICE_LIVE)
@@ -2520,21 +2469,14 @@ static b32 files_tree_go(p32 at)
         if (t->node[at].kind == FILES_NODE_MACHINE || t->node[at].kind == FILES_NODE_DEVICES)
                 return files_tree_toggle(at), true;
         if (t->node[at].kind == FILES_NODE_DISK)
-        {
-                // A CD of music shows its tracks; a drive with no disc and a disk with nothing that opens are no press.
-                const struct files_devices address_to d = &files.big->devices;
-                p32 k = t->node[at].device;
-                if (k >= d->disks || (d->disk_disc[k] != FILES_DISC_AUDIO && d->disk_disc[k] != FILES_DISC_MIXED))
-                        return false;
-                return files_disc_open(k), true;
-        }
+                return false; // a drive with no disc, a disk with nothing that opens: no press
         if (t->node[at].kind == FILES_NODE_PART)
         {
                 // One press opens a medium: one mounted is gone to where it is mounted (as a drive is), and one that is not is opened,
                 // read-only, and gone to once it is.
                 const p8 address_to mount = files_part_mount(&files.big->devices, t->node[at].device);
                 if (mount && (string_copy_bounded((string_address)path, (string_address)mount, sizeof(path)) >= sizeof(path) ||
-                              (!files.big->disc.shown && !files_model_is_remote(&files.big->model) && string_equals((string_address)path, (string_address)files.big->model.path))))
+                              (!files_model_is_remote(&files.big->model) && string_equals((string_address)path, (string_address)files.big->model.path))))
                         return false;
                 files_device_enter(t->node[at].device);
                 return true;
@@ -2600,7 +2542,7 @@ static fn files_tree_toggle(p32 at)
                 files_tree_open(t, at);
         {
                 struct files_peer address_to cur = files_model_is_remote(&files.big->model) ? files_peer_by_name(files.big->model.peer) : null;
-                files.tree_shown = files.big->disc.shown ? files_disc_node() : files_tree_find_in(t, cur ? cur->machine : 0, files.big->model.path), files.dirty = true;
+                files.tree_shown = files_tree_find_in(t, cur ? cur->machine : 0, files.big->model.path), files.dirty = true;
         }
 }
 
@@ -2684,13 +2626,6 @@ static b32 files_key(const struct window_event address_to event)
         b32 alt = (event->flags & WINDOW_KEY_ALT) != 0, control = (event->flags & WINDOW_KEY_CONTROL) != 0, shift = (event->flags & WINDOW_KEY_SHIFT) != 0;
         int key = (int)event->a;
         b32 moved = false;
-        // A CD's tracks shown: the sidebar's keys are the sidebar's, and every other is the tracks' (none acts on the folder under them).
-        if (files.big->disc.shown)
-        {
-                if (files.focus == FILES_FOCUS_TREE && files_tree_key(event))
-                        return true;
-                return files.focus = FILES_FOCUS_ROWS, files_disc_key(event);
-        }
         if (key == UI_KEY_DELETE)
         {
                 if (!(event->flags & WINDOW_KEY_REPEAT))
@@ -2872,11 +2807,6 @@ static fn files_button_event(const struct window_event address_to event, b32 dow
                 return;
         if (down && event->a == UI_POINTER_LEFT)
                 files.focus = FILES_FOCUS_ROWS;
-        if (files.big->disc.shown)
-        {
-                files_disc_press(l, row, event);
-                return;
-        }
         if (l->band_began)
         {
                 files.band_add = (event->flags & WINDOW_KEY_CONTROL) != 0;
@@ -2983,9 +2913,9 @@ static b32 files_event(const struct window_event address_to event)
                         return files.dirty = true, true;
                 }
                 ui_view_list_click(ui, &files.big->view, event, event->a, event->b, null);
-                if (l->band_moved && !files.big->disc.shown)
+                if (l->band_moved)
                         files_band_apply();
-                if (l->drag_began && !files.big->disc.shown)
+                if (l->drag_began)
                         files_drag_start((p32)l->drag_row);
                 // A chip is the hand's and the rest of the path the I-beam's: either way a press there is the path's, never the window's grab band.
                 if (files_path_chip((int)event->a, (int)event->b))
@@ -3075,16 +3005,9 @@ static fn files_draw(unsigned int address_to pixels)
 static fn files_census_done(struct ui_job address_to j, b32 killed, positive status)
 {
         b32 ok = !killed && (status & 0x7f) == 0 && ((status >> 8) & 0xff) == 0;
-        if (ok && files_devices_read(&files.big->devices, (const p8 address_to)files.big->census, j->length))
-        {
-                // The tracks of a disc that is out of its drive (or that is no CD of music now) are shown no more.
-                p32 disc = files_disc_disk(files.big->disc.drive);
-                const struct files_devices address_to d = &files.big->devices;
-                if (files.big->disc.shown && (disc == FILES_NO || (d->disk_disc[disc] != FILES_DISC_AUDIO && d->disk_disc[disc] != FILES_DISC_MIXED)))
-                        files_disc_leave();
-                if (files_tree_sync_drives(&files.big->tree, (const p8 address_to)getenv((string_address) "HOME"), false))
-                        files_tree_follow(), files.dirty = true;
-        }
+        if (ok && files_devices_read(&files.big->devices, (const p8 address_to)files.big->census, j->length) &&
+            files_tree_sync_drives(&files.big->tree, (const p8 address_to)getenv((string_address) "HOME"), false))
+                files_tree_follow(), files.dirty = true;
         files.next_census = files.census_again ? 0 : (b64)ui_kit.now + FILES_CENSUS_NS, files.census_again = false;
 }
 
@@ -3145,30 +3068,6 @@ static fn files_device_leave(const p8 address_to node)
         }
 }
 
-// What disc tracks said, as the rows of the disc shown: "track N audio|data SECONDS" a line, the verb's label before it.
-static fn files_disc_take(const char address_to said, positive length)
-{
-        struct files_disc address_to c = &files.big->disc;
-        c->count = 0;
-        for (positive at = 0; at < length && c->count < FILES_DISC_TRACKS;)
-        {
-                const p8 address_to line = (const p8 address_to)said + at, address_to nl = (const p8 address_to)memory_first_of(line, '\n', length - at);
-                const p8 address_to stop = nl ? nl : (const p8 address_to)said + length, address_to from, address_to cursor, address_to w[3];
-                positive n[3];
-                at = nl ? (positive)(nl - (const p8 address_to)said) + 1 : length;
-                from = (const p8 address_to)memory_search((address_any)line, (positive)(stop - line), (address_any) "track ", 6);
-                if (!from)
-                        continue;
-                cursor = from + 6;
-                for (int k = 0; k < 3; k++)
-                        w[k] = files_word(&cursor, stop, &n[k]);
-                if (!w[2] || !files_word_digits(w[0], n[0]))
-                        continue;
-                c->number[c->count] = (p32)files_word_digits(w[0], n[0]), c->data[c->count] = (b8)files_word_is(w[1], n[1], "data");
-                c->seconds[c->count++] = (p32)files_word_digits(w[2], n[2]);
-        }
-}
-
 static fn files_device_done(struct ui_job address_to j, b32 killed, positive status)
 {
         b32 ok = !killed && (status & 0x7f) == 0 && ((status >> 8) & 0xff) == 0;
@@ -3191,28 +3090,12 @@ static fn files_device_done(struct ui_job address_to j, b32 killed, positive sta
         }
         else if (ok && kind == FILES_DEVICE_OPEN)
                 string_copy_bounded((string_address)files.open_after, (string_address)files.device_node, sizeof(files.open_after));
-        else if (ok && kind == FILES_DEVICE_TRACKS)
-        {
-                struct files_disc address_to c = &files.big->disc;
-                files_disc_take(j->buf, j->length < j->room ? j->length : 0);
-                string_copy_bounded((string_address)c->drive, (string_address)files.device_node, sizeof(c->drive));
-                if (files.finding)
-                        files_find(false);
-                if (files.editing)
-                        files_edit(0);
-                c->shown = true, c->cursor = 0, files.focus = FILES_FOCUS_ROWS;
-                for (p32 k = 0; k + 1 < c->count && c->data[c->cursor]; k++)
-                        c->cursor = k + 1;
-                ui_scroll_set(&files.big->list.scroll, 0), files_tree_follow();
-        }
         else if (ok && kind == FILES_DEVICE_TRAY)
         {
-                // The disc is out: its tracks are shown no more, and the list is read again for the drive's new state.
+                // The disc is out: what played of it stopped (disc eject stops it), and the list is read again for the drive's new state.
                 struct files_disc address_to c = &files.big->disc;
-                if (c->shown && string_equals((string_address)c->drive, (string_address)files.device_node))
-                        files_disc_leave();
                 if (string_equals((string_address)c->play_drive, (string_address)files.device_node))
-                        c->playing = false, c->play_drive[0] = 0, c->play_track = 0, c->play_at = (b64)ui_kit.now;
+                        c->playing = false, c->play_drive[0] = 0, c->play_at = (b64)ui_kit.now;
                 files_census();
         }
         if (files_tree_sync_drives(&files.big->tree, (const p8 address_to)getenv((string_address) "HOME"), false))
@@ -3221,16 +3104,15 @@ static fn files_device_done(struct ui_job address_to j, b32 killed, positive sta
 }
 
 /*
-        The job of kind for p: a partition's for open, writable and eject, a disk's (its index) for a CD's tracks and its tray, none for
-        tidy. A medium ejected, a partition or a disc, is left by the window first.
+        The job of kind for p: a partition's for open, writable and eject, a disk's (its index) for its tray, none for tidy. A medium ejected, a partition or a disc, is left by the window first.
 */
 static b32 files_device_run(int kind, p32 p)
 {
         static const char address_to const verbs[] = {[FILES_DEVICE_OPEN] = "open", [FILES_DEVICE_WRITE] = "writable", [FILES_DEVICE_EJECT] = "eject",
-                                                      [FILES_DEVICE_TIDY] = "tidy", [FILES_DEVICE_TRACKS] = "tracks", [FILES_DEVICE_TRAY] = "eject"};
+                                                      [FILES_DEVICE_TIDY] = "tidy", [FILES_DEVICE_TRAY] = "eject"};
         const struct files_devices address_to d = &files.big->devices;
         static p8 bytes[24];
-        b32 disc = kind == FILES_DEVICE_TRACKS || kind == FILES_DEVICE_TRAY;
+        b32 disc = kind == FILES_DEVICE_TRAY;
         string_address words[7] = {(string_address) "/moonwater", disc ? (string_address) "disc" : (string_address) "device", (string_address)verbs[kind], null, null, null, null};
         positive count = 3;
         if (files.device.child > 0 || (kind != FILES_DEVICE_TIDY && p >= (disc ? d->disks : d->parts)))
@@ -3246,8 +3128,7 @@ static b32 files_device_run(int kind, p32 p)
         if (kind == FILES_DEVICE_EJECT || kind == FILES_DEVICE_TRAY)
                 files_device_leave(files.device_node);
         files.device.done = files_device_done, files.device.data = null;
-        if (!ui_job_start(&files.device, words, count, null, kind == FILES_DEVICE_TRACKS ? files.big->disc_said : files.big->device_said,
-                          kind == FILES_DEVICE_TRACKS ? sizeof(files.big->disc_said) : sizeof(files.big->device_said), (positive)FILES_DEVICE_WAIT_NS))
+        if (!ui_job_start(&files.device, words, count, null, files.big->device_said, sizeof(files.big->device_said), (positive)FILES_DEVICE_WAIT_NS))
                 return false;
         files.device_kind = kind, files_clear_msg();
         return true;
@@ -3278,19 +3159,20 @@ static p32 files_disc_disk(const p8 address_to name)
 }
 
 /*
-        A medium's menu, a partition's row or a disk's: Open (a partition, or a CD's tracks), Allow Writing where the device verb opened it
-        read-only and its file system is written, Eject where the verb opened it and on any optical drive (whose tray it opens, a disc
-        in it or none), and why nothing opens in a live session.
+        A medium's menu, a partition's row or a disk's: Open, Play disc on a CD of music (through the sound server, from its first track),
+        Allow Writing where the device verb opened it read-only and its file system is written, Eject where the verb opened it and on any
+        optical drive (whose tray it opens, a disc in it or none), and why nothing opens in a live session.
 */
 static fn files_device_menu(const struct files_node address_to n, int x, int y)
 {
         const struct files_devices address_to d = &files.big->devices;
         b32 part = n->kind == FILES_NODE_PART && n->device < d->parts;
         p32 p = part ? n->device : 0, k = part ? d->part_disk[p] : n->device, offers = part ? files_device_offers(d, p) : 0;
-        b32 optical = k < d->disks && d->disk_disc[k], audio = !part && optical && (d->disk_disc[k] == FILES_DISC_AUDIO || d->disk_disc[k] == FILES_DISC_MIXED);
+        b32 optical = k < d->disks && d->disk_disc[k], music = optical && (d->disk_disc[k] == FILES_DISC_AUDIO || d->disk_disc[k] == FILES_DISC_MIXED);
         b32 mounted = part && files_part_mount(d, p) != null, ours = (offers & FILES_OFFER_EJECT) != 0;
         const struct ui_menu_spec items[] = {
-            {WORDS(menu_open), "Enter", mounted || audio || (offers & FILES_OFFER_OPEN) ? 0 : UI_MENU_DISABLED, FILES_MENU_DEVICE_OPEN, false},
+            {WORDS(menu_open), "Enter", mounted || (offers & FILES_OFFER_OPEN) ? 0 : UI_MENU_DISABLED, FILES_MENU_DEVICE_OPEN, !part},
+            {WORDS(files_disc_play), null, 0, FILES_MENU_DEVICE_PLAY, !music},
             {WORDS(files_device_write), null, offers & FILES_OFFER_WRITE ? 0 : UI_MENU_DISABLED, FILES_MENU_DEVICE_WRITE, !ours || !d->part_ro[p]},
             {WORDS(files_device_eject), null, 0, FILES_MENU_DEVICE_EJECT, !ours && !optical},
             {WORDS(files_device_live), null, UI_MENU_DISABLED, FILES_MENU_DEVICE_LIVE, !d->live || !part || mounted},
@@ -3303,71 +3185,19 @@ static fn files_device_menu(const struct files_node address_to n, int x, int y)
         files_popup_open(x, y), files.dirty = true;
 }
 
-/* ---- a CD of music: its tracks in the main pane, one played through the sound server (moonwater disc) ---- */
+/* ---- a CD played through the sound server (moonwater disc play), from the row's menu; its tracks are its folder's files ---- */
 
-// The tracks of disk k's disc, read (disc tracks) and then shown in the place of the folder; the disc shown already is shown again.
-static fn files_disc_open(p32 k)
+// Disk k's disc played from its first track to its end (disc play stops what played before).
+static fn files_disc_play(p32 k)
 {
         const struct files_devices address_to d = &files.big->devices;
         struct files_disc address_to c = &files.big->disc;
+        string_address words[5] = {(string_address) "/moonwater", (string_address) "disc", (string_address) "play", null, null};
         if (k >= d->disks)
                 return;
-        if (c->shown && string_equals((string_address)c->drive, (string_address)d->disk_name[k]))
-                files.focus = FILES_FOCUS_ROWS;
-        else
-                (void)files_device_run(FILES_DEVICE_TRACKS, k);
-        files.dirty = true;
-}
-
-// The folder again in the main pane, where it was.
-static fn files_disc_leave(void)
-{
-        struct files_disc address_to c = &files.big->disc;
-        if (!c->shown)
-                return;
-        c->shown = false, files.reseat = true, files_tree_follow(), files.dirty = true;
-}
-
-// The row of the disc shown in the sidebar: its drive's disk row (FILES_NO where it is gone).
-static p32 files_disc_node(void)
-{
-        const struct files_tree address_to t = &files.big->tree;
-        const struct files_devices address_to d = &files.big->devices;
-        for (p32 at = 0; at < t->count; at++)
-                if (t->node[at].kind == FILES_NODE_DISK && t->node[at].device < d->disks &&
-                    string_equals((string_address)d->disk_name[t->node[at].device], (string_address)files.big->disc.drive))
-                        return at;
-        return FILES_NO;
-}
-
-// The track that plays now, of the play this window started on the disc shown: from the track it started at, each track's length on.
-static p32 files_disc_now(void)
-{
-        const struct files_disc address_to c = &files.big->disc;
-        b64 gone = ((b64)ui_kit.now - c->play_at) / 1000000000ll;
-        p32 at = 0;
-        if (!c->playing || !c->play_track || !string_equals((string_address)c->play_drive, (string_address)c->drive))
-                return 0;
-        while (at < c->count && c->number[at] != c->play_track)
-                at++;
-        if (at == c->count)
-                return 0;
-        while (gone >= (b64)c->seconds[at] && at + 1 < c->count && !c->data[at + 1])
-                gone -= (b64)c->seconds[at], at++;
-        return c->number[at];
-}
-
-// A track of the disc shown played, from it to the disc's end (disc play stops what played before), or the play stopped.
-static fn files_disc_play(p32 at)
-{
-        struct files_disc address_to c = &files.big->disc;
-        static p8 number[16];
-        string_address words[6] = {(string_address) "/moonwater", (string_address) "disc", (string_address) "play", (string_address)c->drive, (string_address)number, null};
-        if (at >= c->count || c->data[at])
-                return;
-        number[positive_into_string(number, c->number[at])] = 0;
-        if (ui_start_apart(words, 5))
-                c->playing = true, c->play_track = c->number[at], c->play_at = (b64)ui_kit.now, string_copy_bounded((string_address)c->play_drive, (string_address)c->drive, sizeof(c->play_drive));
+        words[3] = (string_address)d->disk_name[k];
+        if (ui_start_apart(words, 4))
+                c->playing = true, c->play_at = (b64)ui_kit.now, string_copy_bounded((string_address)c->play_drive, (string_address)d->disk_name[k], sizeof(c->play_drive));
         files.dirty = true;
 }
 
@@ -3376,7 +3206,7 @@ static fn files_disc_stop(void)
         struct files_disc address_to c = &files.big->disc;
         string_address words[4] = {(string_address) "/moonwater", (string_address) "disc", (string_address) "stop", null};
         if (ui_start_apart(words, 3))
-                c->playing = false, c->play_track = 0, c->play_drive[0] = 0, c->play_at = (b64)ui_kit.now;
+                c->playing = false, c->play_drive[0] = 0, c->play_at = (b64)ui_kit.now;
         files.dirty = true;
 }
 
@@ -3395,60 +3225,7 @@ static fn files_disc_look(void)
         {
                 c->playing = playing, files.dirty = true;
                 if (!playing)
-                        c->play_track = 0, c->play_drive[0] = 0;
-        }
-        files.dirty |= c->playing && c->shown;
-}
-
-static fn files_disc_describe(int id, struct ui_row address_to row)
-{
-        static char label[48], length[16];
-        const struct files_disc address_to c = &files.big->disc;
-        if (id < 0 || (p32)id >= c->count)
-                return;
-        language_format(label, sizeof(label), WORDS(files_disc_track), (int)c->number[id]);
-        files_disc_time(length, sizeof(length), c->seconds[id]);
-        row->label = label, row->cells[1] = length, row->cells[2] = c->data[id] ? WORDS(files_disc_kind_data) : WORDS(files_disc_kind_audio);
-        row->file = 1 + (c->data[id] ? UI_FILE_DISC : UI_FILE_AUDIO), row->dim = c->data[id];
-        if (c->number[id] == files_disc_now())
-                row->mark = true, row->mark_ink = ui_role(UI_SUCCESS);
-}
-
-static b32 files_disc_selected(int id) { return id >= 0 && (p32)id == files.big->disc.cursor; }
-
-// The keys on the tracks: the list's own move the row, Enter plays from it, Space stops what plays (or plays the row), and Back, Up,
-// Backspace and Escape show the folder again.
-static b32 files_disc_key(const struct window_event address_to event)
-{
-        struct files_disc address_to c = &files.big->disc;
-        struct ui_list address_to l = &files.big->list;
-        int key = (int)event->a;
-        b32 moved = false, alt = (event->flags & WINDOW_KEY_ALT) != 0;
-        if (key == UI_KEY_ESCAPE || key == UI_KEY_BACKSPACE || (alt && (key == UI_KEY_LEFT || key == UI_KEY_UP)))
-                return files_disc_leave(), true;
-        if (key == UI_KEY_ENTER || key == UI_KEY_ENTER_PAD)
-                return (event->flags & WINDOW_KEY_REPEAT ? (void)0 : files_disc_play(c->cursor)), true;
-        if (key == UI_KEY_SPACE)
-                return (event->flags & WINDOW_KEY_REPEAT ? (void)0 : c->playing ? files_disc_stop() : files_disc_play(c->cursor)), true;
-        if (ui_list_key(&files.ui, l, key, &moved) && moved)
-                c->cursor = l->focus < 0 ? 0 : (p32)l->focus, files_layout(), ui_list_reveal(&files.ui, l);
-        return files.dirty = true, true;
-}
-
-// A press on the tracks: one chooses a row, two (or a touch) play from it; the menu of the hand's other button has nothing here.
-static fn files_disc_press(struct ui_list address_to l, int row, const struct window_event address_to event)
-{
-        struct files_disc address_to c = &files.big->disc;
-        if (l->menu_asked || l->band_began)
-        {
-                ui_view_cancel(&files.ui, &files.big->view);
-                return;
-        }
-        if (row >= 0 && (p32)row < c->count)
-        {
-                c->cursor = (p32)row;
-                if ((event->flags & WINDOW_KEY_TOUCH) || l->double_clicked)
-                        files_disc_play((p32)row);
+                        c->play_drive[0] = 0;
         }
 }
 
