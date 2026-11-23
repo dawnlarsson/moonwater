@@ -150,9 +150,16 @@ static int compositor_frost_has_gpu(const struct compositor_frame *frames, unsig
                 if (f->x < x1 && x0 < f->x + f->width && f->y < y1 && y0 < f->y + f->height)
                 {
                         if (f->tiled_kind)
+                        {
                                 tiled_any = 1, gpu_any = 1;
-                        else if (f->gpu_base)
+                                break;
+                        }
+                        if (f->gpu_base)
+                        {
                                 gpu_any = 1;
+                                if (!has_tiled)
+                                        return 1;
+                        }
                 }
         }
         if (has_tiled)

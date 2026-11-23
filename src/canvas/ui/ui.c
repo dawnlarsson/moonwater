@@ -16646,7 +16646,7 @@ static int ui_popmenu_event(struct ui address_to ui, struct ui_popmenu address_t
                 }
                 if (c > ' ' && c < 127)
                 {
-                        positive now = ui_kit_clock();
+                        positive now = ui_kit.now ? (positive)ui_kit.now : (positive)ui_kit_clock();
                         p8 shown[96], low = (p8)byte_to_lower((b8)c);
                         p32 mnemonic;
                         int prefix = -1;
@@ -31703,7 +31703,7 @@ static fn ui_select_overlay_draw(struct ui address_to ui, struct ui_select addre
         UI_CALL();
         struct ui_select_box bx;
         p64 anchor, active, start, finish;
-        positive now = ui_kit_clock();
+        positive now = ui_kit.now ? (positive)ui_kit.now : (positive)ui_kit_clock();
         b32 was = s->bar_up;
         int radius = ui_dev(ui, UI_SELECT_HANDLE), stem = ui_dev(ui, 2) ? ui_dev(ui, 2) : 1;
         s->ops->box(s->self, &bx);
@@ -32310,7 +32310,7 @@ static p32 ui_text_pointer(struct ui address_to ui, struct ui_text address_to t,
                 ui_text_wake(t);
                 return UI_TEXT_MOVED;
         }
-        positive now = ui_kit_clock();
+        positive now = ui_kit.now ? (positive)ui_kit.now : (positive)ui_kit_clock();
         if (event->type == WINDOW_EVENT_WHEEL)
         {
                 long pixels;

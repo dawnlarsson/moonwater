@@ -1409,6 +1409,8 @@ static b32 compositor_gpu_slept(positive gap, positive *seen)
 // lead that grew between two looks (presents, the loop). Only a card that is up is started again; the flag waits for it otherwise.
 static void compositor_gpu_restart_check(void)
 {
+        if (!compositor_gpu)
+                return;
         if (compositor_gpu_slept(compositor_slept_clock(), &compositor_gpu_state.slept_seen))
                 compositor_gpu_state.restart_due = 1;
         if (!compositor_gpu_state.restart_due || !compositor_gpu_state.up || compositor_gpu_state.dead)
