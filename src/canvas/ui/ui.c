@@ -22611,6 +22611,8 @@ static p32 ui_strips_event(struct ui address_to ui, struct ui_strips address_to 
 #define UI_ROW_ADD 10 // a list's add row: a plus and its label in the accent; its words, where they are two or more, the ways to add (ui_list_ways)
 #define UI_ROW_WAYS 8         // the most ways an add row's menu has, its words a '|' apart
 #define UI_ROW_WAY_TEXT 96    // and the most bytes of one
+#define UI_ROW_REMOVE_W 32    // a row's remove button (ui_row.remove), logical pixels
+#define UI_ROW_GRIP_W 20      // an ordered row's grip (ui_row.order), logical pixels: a columned row's first words start past it and its gap
 #define UI_ROW_BUTTON_LEAST 64 // the button's least width, logical pixels: its words and 14 at each side where they are wider
 // A row's badge (ui_row.badge): the severity of the issues its option has, the words the badge says being ui_row.badge_words.
 #define UI_ROW_BADGE_WARNING 1
@@ -23838,7 +23840,7 @@ static fn ui_row_tree_at(struct ui address_to ui, struct ui_list address_to l, i
                 n = ui_tree_open(t), n->size[1].kind = UI_FIXED, n->size[1].value = ui_drive_part(ui, UI_DRIVE_LINE), n->gap = gap;
         // An ordered row's grip is its first part, as wide as a symbol: what a press lifts the row by.
         if (row->order)
-                p->grip = ui_row_leaf(t, UI_FIXED, ui_dev(ui, 20));
+                p->grip = ui_row_leaf(t, UI_FIXED, ui_dev(ui, UI_ROW_GRIP_W));
         // The label is 17 from where the mark starts, which at some scales is a pixel more than the mark and the gap.
         if (row->mark)
                 p->mark = n = ui_row_leaf(t, UI_FIXED, ui_dev(ui, 7)), n->margin[1] = ui_dev(ui, 17) - n->size[0].value - gap;
@@ -23926,7 +23928,7 @@ static fn ui_row_tree_at(struct ui address_to ui, struct ui_list address_to l, i
                 p->bars = n = ui_row_leaf(t, UI_FIXED, ui_signal_width(ui)), n->margin[0] = ui_dev(ui, 18) - n->size[0].value;
         // A row's remove button is its last part, a finger's target wide.
         if (row->remove)
-                p->remove = ui_row_leaf(t, UI_FIXED, ui_dev(ui, 32));
+                p->remove = ui_row_leaf(t, UI_FIXED, ui_dev(ui, UI_ROW_REMOVE_W));
         if (row->tall)
         {
                 int count = row->strip_count < 0 || !row->strip_bytes || !row->strip_roles ? 0 : row->strip_count > UI_STRIP_MOST ? UI_STRIP_MOST : row->strip_count;
@@ -24275,6 +24277,9 @@ static fn ui_list_cells(struct ui address_to ui, const struct ui_list address_to
                 string_address shown;
                 x += k ? gap : pad + set_in;
                 w -= (k ? gap : pad + set_in) + right_pad;
+                // An ordered row's grip is before its first column's words.
+                if (!k && row->order)
+                        x += ui_dev(ui, UI_ROW_GRIP_W + UI_ROW_GAP), w -= ui_dev(ui, UI_ROW_GRIP_W + UI_ROW_GAP);
                 // A non-selectable list's mark (a joined network): an accent dot before its label in the first column.
                 if (!k && row->mark && !l->selected && w > 0)
                 {
@@ -24318,7 +24323,9 @@ static b32 ui_list_tree_chevron_at(const struct ui address_to ui, const struct u
 }
 
 #define UI_COLUMNS_MIN_L(c, k) ((k) == (c)->count - 1 && (c)->trailing_min > UI_COLUMNS_LEAST ? (c)->trailing_min : UI_COLUMNS_LEAST)
-#define UI_ROW_TRAILING_NEED(row, tr)                                                                                                      \
+// What a columned row keeps at its last column's end: its control's room, and its remove button's after it.
+#define UI_ROW_TRAILING_NEED(row, tr) (UI_ROW_TRAILING_CONTROL(row, tr) + ((row)->remove ? UI_ROW_REMOVE_W + 6 : 0))
+#define UI_ROW_TRAILING_CONTROL(row, tr)                                                                                                   \
         ((row)->kind == UI_ROW_SWITCH                                                                                                      \
              ? UI_SWITCH_W + UI_INSET + 8                                                                                                  \
              : (tr) && (tr)->w > 0 &&                                                                                                      \
@@ -24352,7 +24359,8 @@ static fn ui_list_columns_fit(struct ui address_to ui, struct ui_list address_to
                         need = one;
                 // What each cell's words need, the first's with what is before its words (its indent, its mark, its symbol).
                 ui_columns_need(ui, c, 0, row.label, ui_dev(ui, UI_INDENT) * row.indent + (row.expander ? ui_dev(ui, UI_INDENT) : 0) +
-                                                      (row.mark ? ui_dev(ui, 14) : 0) + (row.file ? ui_dev(ui, UI_FILE_ROW_ICON + 8) : 0));
+                                                      (row.mark ? ui_dev(ui, 14) : 0) + (row.file ? ui_dev(ui, UI_FILE_ROW_ICON + 8) : 0) +
+                                                      (row.order ? ui_dev(ui, UI_ROW_GRIP_W + UI_ROW_GAP) : 0));
                 for (int k = 1; k < c->count; k++)
                         ui_columns_need(ui, c, k, row.cells[k], k == c->count - 1 ? ui_dev(ui, one) + (row.bars > 0 ? ui_signal_width(ui) + ui_dev(ui, 6) : 0) : 0);
         }
@@ -24795,7 +24803,7 @@ static fn ui_list_row(struct ui address_to ui, struct ui_list address_to l, int 
                         ui_columns_layout(ui, cols, l->x, cols->y, l->w);
                 if (trailing && trailing->w > 0 && cols->count > 0)
                 {
-                        int last = cols->count - 1, end_x = cols->at[last] + cols->wide[last] - ui_dev(ui, UI_INSET);
+                        int last = cols->count - 1, end_x = cols->at[last] + cols->wide[last] - ui_dev(ui, UI_INSET) - (row.remove ? ui_dev(ui, UI_ROW_REMOVE_W + 6) : 0);
                         trailing->x = ui_rtl() ? ui_logical(ui, cols->x + ui_dev(ui, UI_INSET)) : ui_logical(ui, end_x) - trailing->w;
                 }
         }
@@ -24818,7 +24826,7 @@ static fn ui_list_row(struct ui address_to ui, struct ui_list address_to l, int 
                         own->on = row.on, own->w = UI_SWITCH_W, own->h = 48, ui_row_control(ui, own, p->toggle);
                         if (cols && cols->count > 0)
                         {
-                                int last = cols->count - 1, end_x = cols->at[last] + cols->wide[last] - ui_dev(ui, UI_INSET);
+                                int last = cols->count - 1, end_x = cols->at[last] + cols->wide[last] - ui_dev(ui, UI_INSET) - (row.remove ? ui_dev(ui, UI_ROW_REMOVE_W + 6) : 0);
                                 own->x = ui_rtl() ? ui_logical(ui, cols->x + ui_dev(ui, UI_INSET)) : ui_logical(ui, end_x) - own->w;
                         }
                 }
@@ -24860,7 +24868,8 @@ static fn ui_list_row(struct ui address_to ui, struct ui_list address_to l, int 
         }
         if (cols || l->tree)
         {
-                int trailing_w = row.kind == UI_ROW_SWITCH ? ui_dev(ui, UI_SWITCH_W) : trailing && trailing->w > 0 ? ui_dev(ui, trailing->w) : 0;
+                int trailing_w = (row.kind == UI_ROW_SWITCH ? ui_dev(ui, UI_SWITCH_W) : trailing && trailing->w > 0 ? ui_dev(ui, trailing->w) : 0) +
+                                 (row.remove ? ui_dev(ui, UI_ROW_REMOVE_W) + (row.kind == UI_ROW_SWITCH || (trailing && trailing->w > 0) ? ui_dev(ui, 6) : 0) : 0);
                 if (row.glow)
                 {
                         struct ui_box glow = {across * 256, y * 256, (across + across_w) * 256, (y + height) * 256, 0, 0};

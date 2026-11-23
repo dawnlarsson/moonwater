@@ -5909,6 +5909,14 @@ static fn check_kit_manage(void)
 
         ui_list_describe(&l, 3, &row);
         check("kit manage: an add row has the plus, and one way is no menu", row.icon == UI_ICON_PLUS + 1 && !ui_list_ways(&ui, &l, null, null, 3));
+        {
+                // A columned row keeps room at its last column's end for its remove button, after its switch where it has one.
+                struct ui_row both = {0}, alone = {0};
+                both.kind = UI_ROW_SWITCH, both.remove = true, alone.remove = true;
+                check("kit manage: a columned row's last column keeps room for its remove button after its switch, and for the button alone",
+                      UI_ROW_TRAILING_NEED(&both, (struct ui_control address_to)null) == UI_SWITCH_W + UI_INSET + 8 + UI_ROW_REMOVE_W + 6 &&
+                          UI_ROW_TRAILING_NEED(&alone, (struct ui_control address_to)null) == UI_ROW_REMOVE_W + 6);
+        }
 }
 
 static fn check_kit_pull_parts(void)
