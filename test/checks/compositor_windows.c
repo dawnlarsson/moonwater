@@ -5420,6 +5420,8 @@ static void access_pad_hand(unsigned char xbox)
     compositor_access.ticked = 0, compositor_access.left_x = compositor_access.left_y = 0, compositor_access.repeat = 0;
     compositor_access.yields = compositor_access.reads = 0, compositor_access.asked_row = -1, compositor_access.scrolled = 0;
     pad->at = 0, pad->xbox_letters = xbox, pad->physical = 1;
+    // The map a pad has at its open (compositor_access_open: the defaults, with no /root/access.map in the checks).
+    memory_copy(pad->map, compositor_access_actions, ACCESS_BUTTONS);
     for (unsigned int axis = ACCESS_LX; axis <= ACCESS_RY; axis++)
         pad->low[axis] = -32768, pad->high[axis] = 32767;
     pad->low[ACCESS_LT] = pad->low[ACCESS_RT] = 0, pad->high[ACCESS_LT] = pad->high[ACCESS_RT] = 1023;
