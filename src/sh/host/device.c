@@ -2470,7 +2470,8 @@ static fn usb_recover(void)
         /sys/block that is not a loop, ram, device-mapper or floppy disk, and one on a USB bus is
         listed as the USB device it is: its line is followed by "    drive NAME N MB" and the disk's
         segments. An optical drive's segments are the file system of a disc of data in it, and they are
-        followed by "    disc none|open|audio TRACKS SECONDS|data|mixed TRACKS SECONDS" (disc_census). Any other disk's segments are followed by "    where internal BUS" or "    where external
+        followed by "    disc none|open|audio TRACKS SECONDS|data|mixed TRACKS SECONDS" (disc_census). A disk of
+        its own says what it is next, "    model WORDS" (its model in sysfs, plained), where it says. Any other disk's segments are followed by "    where internal BUS" or "    where external
         BUS" (usb_drive_bus). A reader from before these lines skips them: each starts with four blanks and is
         no part line. It reads and changes nothing and needs no root.
 */
@@ -2778,7 +2779,7 @@ static bool usb_list_disk(string_address directory, string_address name, address
 {
         p8 sysfs[HOST_PATH_ROOM];
         p8 link[HOST_PATH_ROOM * 2];
-        p8 type[16], shown[64];
+        p8 type[16], shown[64], model[64];
         unsigned long long sectors;
         string_address bus;
 
@@ -2800,6 +2801,16 @@ static bool usb_list_disk(string_address directory, string_address name, address
                 disc_census(name, sectors);
         else
                 usb_disk_strip(name, sectors);
+        // What it says it is (its model, as sysfs has it: blanks at its end trimmed, those in it plained), where it says.
+        if (host_join(sysfs, sizeof(sysfs), "/sys/block/", name, "/device/model") && host_read_kernel(sysfs, model, sizeof(model)) > 0)
+        {
+                positive length = string_length((string_address)model);
+                while (length && (model[length - 1] == ' ' || model[length - 1] == '\n' || model[length - 1] == '\t'))
+                        model[--length] = end;
+                usb_plain_copy(shown, sizeof(shown), (string_address)model);
+                if (length)
+                        host_say(log, "    model %s\n", (string_address)shown);
+        }
         // Where it is, after its segments: in the machine, or plugged in.
         if (host_join(sysfs, sizeof(sysfs), "/sys/block/", name, "/device/type"))
                 host_read_kernel(sysfs, type, sizeof(type));
