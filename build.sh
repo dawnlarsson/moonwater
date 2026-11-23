@@ -1002,7 +1002,7 @@ build)
                 idle="nice -n 19"
         fi
         ! ionice -c 3 true 2> /dev/null || idle="ionice -c 3 $idle"
-        #       bowl is the shell's own on Moonwater (a builtin, and the applet /bowl), and flock runs a program by
+        #       bowl is a builtin of the shell on Moonwater (and the applet /bowl), and flock runs a program by
         #       its path: from an image whose PATH holds no bowl (/bin has sh and the tools, the applets are at /),
         #       flock found nothing to run and every build here failed at once ("flock: failed to execute bowl").
         bowl_program=bowl
