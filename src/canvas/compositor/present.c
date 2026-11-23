@@ -1316,6 +1316,8 @@ static unsigned int present_build_frames(struct compositor_frame *frames, unsign
 
 static unsigned int present_bands_pass(struct compositor_frame *frames, unsigned int windows, int direct, int stay_live_direct)
 {
+        if (taskbar_shift() >= UI_ONE)
+                return 0;
         int stale = taskbar_stale(), bands = compositor_bands();
         const unsigned int *saved_direct_pixels = 0;
         struct compositor_frame band;
@@ -1537,7 +1539,12 @@ static void compositor_present_frames(void)
         compositor_wl_gathers_fill();
         if (compositor.table)
         {
-                memory_copy(compositor.table->driver, compositor.driver, sizeof(compositor.table->driver));
+                static unsigned int driver_synced;
+                if (!driver_synced || memory_compare(compositor.table->driver, compositor.driver, sizeof(compositor.table->driver)))
+                {
+                        memory_copy(compositor.table->driver, compositor.driver, sizeof(compositor.table->driver));
+                        driver_synced = 1;
+                }
                 compositor.table->pointer_plane = compositor_pointer_plane_word();
                 compositor.table->overlay = compositor.overlay_state;
         }

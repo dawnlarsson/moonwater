@@ -1166,6 +1166,8 @@ static void compositor_scenes_step(positive now)
 static void compositor_scenes_hover(void)
 {
         int x = compositor.pointer_x, y = compositor.pointer_y, slop = 8 * compositor.scale / 100;
+        if (x == compositor_scenes_kept.at_x && y == compositor_scenes_kept.at_y && !compositor.scenes.pressed && !compositor_scenes_kept.held)
+                return;
         int row = compositor_scenes_window_at(x, y), card = compositor_scenes_card_at(x, y), close = card >= 0 && compositor_scenes_on_close(card, x, y);
         int held = compositor_scenes_kept.held, d = (x - compositor.scenes.press_x < 0 ? compositor.scenes.press_x - x : x - compositor.scenes.press_x) +
                                                      (y - compositor.scenes.press_y < 0 ? compositor.scenes.press_y - y : y - compositor.scenes.press_y);
