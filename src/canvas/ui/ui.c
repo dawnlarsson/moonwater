@@ -31332,15 +31332,31 @@ static p32 ui_text_pointer(struct ui address_to ui, struct ui_text address_to t,
         if (!touch && !s->finger)
         {
                 struct ui_bar_rect r;
-                p64 pos = t->hex ? t->hex_top / 16 : t->top_line;
+                b32 wrapped = !t->hex && t->wrap && t->wrap_cache_rows > 0;
+                p64 before = t->hex ? t->hex_top / 16 : (wrapped ? t->scroll_vrow : t->top_line);
+                p64 pos = before;
                 b32 ok = ui_text_bar_rect(ui, t, &r);
                 if (ui_bar_event(ui, &t->bar, &r, ok, event, x, y, &pos))
                 {
-                        if (t->hex)
-                                t->hex_top = pos * 16;
-                        else
-                                t->top_line = pos;
-                        ui_text_scroll_jump(t);
+                        if (pos != before)
+                        {
+                                if (t->hex)
+                                {
+                                        t->hex_top = pos * 16;
+                                        ui_text_scroll_jump(t);
+                                }
+                                else if (wrapped)
+                                {
+                                        p64 px = pos * (p64)t->line_height;
+                                        t->scroll_rem = 0;
+                                        ui_scroll_set(&t->scroll, (int)(px > 0x3fffffff ? 0x3fffffff : px));
+                                }
+                                else
+                                {
+                                        t->top_line = pos;
+                                        ui_text_scroll_jump(t);
+                                }
+                        }
                         return UI_TEXT_MOVED;
                 }
                 if (t->bar.held)
@@ -31352,7 +31368,7 @@ static p32 ui_text_pointer(struct ui address_to ui, struct ui_text address_to t,
         b32 in_gutter = !touch && !s->finger && well && t->numbers && t->gutter > 0 && (ui_rtl() ? x >= t->right : x < t->left);
         b32 shift = (event->flags & WINDOW_KEY_SHIFT) != 0, alt = (event->flags & WINDOW_KEY_ALT) != 0 && t->mode != UI_TEXT_FIELD;
         // A text well is the I-beam's, while the line-number gutter uses the arrow cursor for whole-line selection.
-        if (!touch && event->type == WINDOW_EVENT_MOTION && well)
+        if (!touch && event->type == WINDOW_EVENT_MOTION && well && !t->bar.hover)
                 ui_kit_shape = in_gutter ? WINDOW_POINTER_ARROW : WINDOW_POINTER_TEXT;
         if (t->gutter_drag)
         {
