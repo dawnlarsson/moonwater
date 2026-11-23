@@ -889,6 +889,24 @@ static void check_more(void *shim)
                 }
         }
 
+        /* wmemset on a destination that is not a whole word (wchar_t promises one; a caller can still hand this over):
+           every store has to keep the word's phase, so the aligned stores of the wide rungs must not be reached. Held to
+           a word at a time and not to the C library: glibc's own loses the phase there from 128 bytes. */
+        for (size_t n = 0; n < 300; n++)
+                for (size_t off = 1; off < 4; off++) {
+                        size_t d = 64 + off + (n % 16) * 4;
+                        uint32_t v = (uint32_t)next();
+                        memset(dst_a, 0x5a, SPAN);
+                        memset(dst_b, 0x5a, SPAN);
+                        uint32_t *ra = wset((uint32_t *)(dst_a + d), v, n);
+                        for (size_t i = 0; i < n; i++)
+                                memcpy(dst_b + d + 4 * i, &v, 4);
+                        checks++;
+                        if ((unsigned char *)ra != dst_a + d)
+                                fail("wmemset off a word", "return", n, d, 0);
+                        same_bytes("wmemset off a word", "bytes", n, d);
+                }
+
         /* ffs and the absolute values, over the bits one at a time and at random */
         int (*ffs_ours)(int) = (int (*)(int))dlsym(shim, "ffs");
         int (*ffsl_ours[2])(long) = {(int (*)(long))dlsym(shim, "ffsl"), (int (*)(long))dlsym(shim, "ffsll")};
@@ -1177,6 +1195,229 @@ static double time_find(find_fn f, size_t n)
                         best = t;
         }
         return (double)best / 4096;
+}
+
+/*
+        copy: the copies and fills (memcpy, memmove both ways over itself, memset, bzero, mempcpy, wmemset, wmemcpy), ticks a
+        call, the C library's against every shim named after "copy" (this tree's, a baseline's, builds capped to a lower tier),
+        each side timed in turn at every row and the row taken twice, so a drift of the machine reaches every column alike.
+
+        fixed: one length a row, 1 B to 64 MiB, the same call over and over, so every branch in a body is learned.
+        o<N>: the length drawn at every call from the octave [N, 2N), uniform, so the rung is known and the length is not.
+        r512, r8192: the length drawn log-uniform from 1 to 512 and from 1 to 8192, so no rung can be learned.
+        The lengths are drawn once (4M of them, the same on every run) and read in order from an array by a cursor that
+        never goes back, so the work between calls is a load and an increment, and no side meets a stretch of lengths a
+        side before it trained the predictor on: a pool of 65536 read in overlapping windows was learned, and the side
+        timed first in a pass took 13.5 ticks a call at r512 where the same bytes timed later took 20.
+
+        Where the bytes sit: the source one byte into a page and the destination seven bytes and half a page further on
+        (apart), the same with the destination seven bytes after the source modulo a page (near, the bench rows' placing,
+        which glibc copies backwards for 4K aliasing), the source 37 bytes below the destination in one buffer (up, the copy
+        that has to run backwards when it overlaps) and 37 above it (down). The fills start three bytes into a page.
+        Ticks are rdtsc's, the best of the rounds, the sides taking turns a round at a time, nothing subtracted: every side
+        pays the same loop around the call. The core clock is reported against them (a chain of dependent adds), since
+        ticks are the TSC's and not the core's.
+*/
+enum { CB_COPY, CB_NEAR, CB_UP, CB_DOWN, CB_SET, CB_ZERO, CB_PCPY, CB_WSET, CB_WCPY };
+static const struct copy_case {
+        const char *name, *symbol;
+        int shape;
+} copy_cases[] = {
+        {"memcpy", "memcpy", CB_COPY},       {"memcpy-near", "memcpy", CB_NEAR}, {"memmove-up", "memmove", CB_UP},
+        {"memmove-down", "memmove", CB_DOWN}, {"memset", "memset", CB_SET},      {"bzero", "bzero", CB_ZERO},
+        {"mempcpy", "mempcpy", CB_PCPY},     {"wmemset", "wmemset", CB_WSET},    {"wmemcpy", "wmemcpy", CB_WCPY},
+};
+#define COPY_ORDER (1u << 22)   // more lengths than a predictor can learn, used once each before they come round again
+#define COPY_BIG ((size_t)64 << 20)
+static uint32_t *copy_len;
+static unsigned copy_cursor;
+static unsigned char *copy_src, *copy_dst;
+
+/* How many calls a round, and how many rounds, so that a round is long enough to time and the row short enough to run. */
+static void copy_budget(size_t n, int *calls, int *rounds)
+{
+        size_t c = n <= 512 ? 4096 : (size_t)4096 * 512 / n;
+        *calls = c < 2 ? 2 : (int)c;
+        *rounds = n <= ((size_t)1 << 20) ? 64 : n <= ((size_t)8 << 20) ? 16 : 6;
+}
+
+/* One round of calls on one side: ticks for all of them. */
+static uint64_t copy_round(const struct copy_case *c, void *f, int calls)
+{
+        unsigned char *s = copy_src + 1, *d = copy_dst + 7 + PAGE / 2;
+        switch (c->shape) {
+        case CB_NEAR: d = copy_dst + 8; break;
+        case CB_UP: s = copy_src + 64, d = s + 37; break;
+        case CB_DOWN: d = copy_src + 64, s = d + 37; break;
+        case CB_SET: case CB_ZERO: d = copy_dst + 3; break;
+        case CB_WSET: case CB_WCPY: s = copy_src + 4, d = copy_dst + 8 + PAGE / 2; break;
+        }
+        unsigned k = copy_cursor;
+        copy_cursor += (unsigned)calls;
+        uint64_t t0 = ticks();
+        switch (c->shape) {
+        case CB_SET:
+                for (int i = 0; i < calls; i++)
+                        sink = ((fill_fn)f)(d, 0x5c, copy_len[k++ % COPY_ORDER]);
+                break;
+        case CB_ZERO:
+                for (int i = 0; i < calls; i++) {
+                        ((zero_fn)f)(d, copy_len[k++ % COPY_ORDER]);
+                        sink = d;
+                }
+                break;
+        case CB_WSET:
+                for (int i = 0; i < calls; i++)
+                        sink = ((wset_fn)f)((uint32_t *)d, 0x5c5c5c5c, (copy_len[k++ % COPY_ORDER] + 3) / 4);
+                break;
+        case CB_WCPY:
+                for (int i = 0; i < calls; i++)
+                        sink = ((wcpy_fn)f)((uint32_t *)d, (const uint32_t *)s, (copy_len[k++ % COPY_ORDER] + 3) / 4);
+                break;
+        default:
+                for (int i = 0; i < calls; i++)
+                        sink = ((copy_fn)f)(d, s, copy_len[k++ % COPY_ORDER]);
+                break;
+        }
+        return ticks() - t0;
+}
+
+/* The best round of a side, the sides taking turns a round at a time, so whatever the machine does meanwhile (its clock,
+   a neighbour on the other thread of the core) reaches every column alike: taking each side's rounds in one run let a
+   burst of load land on one column (glibc's own body read 0.57 to 0.89 of itself from one run to the next). */
+static void copy_times(const struct copy_case *c, void **sides, int count, int calls, int rounds, double *t)
+{
+        uint64_t best[16];
+        for (int s = 0; s < count; s++)
+                best[s] = ~0ull;
+        for (int round = 0; round < rounds; round++)
+                for (int i = 0; i < count; i++) {
+                        int s = (i + round) % count;    // who goes first turns too
+                        uint64_t v = copy_round(c, sides[s], calls);
+                        if (v < best[s])
+                                best[s] = v;
+                }
+        for (int s = 0; s < count; s++)
+                t[s] = (double)best[s] / calls;
+}
+
+static void copy_row(const struct copy_case *c, void **sides, int count, const char *mode, size_t size)
+{
+        double t[16];
+        int calls, rounds;
+        size_t total = 0;
+        for (unsigned i = 0; i < COPY_ORDER; i++)
+                total += copy_len[i];
+        copy_budget(total / COPY_ORDER, &calls, &rounds);       // the mean length's
+        copy_times(c, sides, count, calls, 2 * rounds, t);
+        printf("%-13s %-6s %9zu %9.1f", c->name, mode, size, t[0]);
+        for (int s = 1; s < count; s++)
+                printf(" %9.1f %5.2f", t[s], t[0] / t[s]);
+        printf("\n");
+}
+
+/* log2 and 2^x to a part in ten thousand, which is all a draw of lengths needs (and no libm to link). */
+static double copy_log2(double v)
+{
+        double e = 0;
+        while (v >= 2)
+                v /= 2, e++;
+        double z = (v - 1) / (v + 1), z2 = z * z;      // ln v = 2 atanh z
+        return e + 2 * z * (1 + z2 / 3 + z2 * z2 / 5 + z2 * z2 * z2 / 7) / 0.6931471805599453;
+}
+
+static double copy_exp2(double x)
+{
+        double whole = 1;
+        while (x >= 1)
+                x -= 1, whole *= 2;
+        return whole * (1 + x * (0.6931471805599453 + x * (0.2402265069591007 + x * (0.0555041086648216 + x * 0.0096181291076285))));
+}
+
+/* Core cycles a tick: a chain of 4 dependent adds a turn is 4 cycles a turn on anything this runs on. */
+static double copy_clock(void)
+{
+        double best = 1e30;
+        for (int r = 0; r < 16; r++) {
+                uint64_t t0 = ticks();
+                __asm__ volatile("mov $250000, %%ecx\n 1: add $1, %%rax\n add $1, %%rax\n add $1, %%rax\n add $1, %%rax\n dec %%ecx\n jnz 1b"
+                                 ::: "rax", "rcx", "cc");
+                double v = (double)(ticks() - t0);
+                if (v < best)
+                        best = v;
+        }
+        return 1000000.0 / best;
+}
+
+static void bench_copy(void **shims, int shim_count, const char *only)
+{
+        static const size_t sizes[] = {1, 2, 3, 4, 5, 7, 8, 12, 15, 16, 17, 24, 31, 32, 33, 48, 63, 64, 65, 80, 96, 112, 127, 128,
+                                       129, 160, 192, 224, 255, 256, 257, 320, 384, 448, 511, 512, 513, 640, 768, 1024, 1536,
+                                       2048, 3072, 4096, 6144, 8192, 12288, 16384, 24576, 32768, 65536, 131072, 262144, 524288,
+                                       (size_t)1 << 20, (size_t)2 << 20, (size_t)4 << 20, (size_t)8 << 20, (size_t)16 << 20,
+                                       (size_t)24 << 20, (size_t)32 << 20, (size_t)64 << 20};
+        size_t room = 2 * (COPY_BIG + 2 * PAGE);
+        unsigned char *all = mmap(0, room, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_POPULATE, -1, 0);
+        if (all == MAP_FAILED) {
+                perror("mmap");
+                exit(2);
+        }
+        copy_src = all, copy_dst = all + COPY_BIG + 2 * PAGE;
+        fill_random(copy_src, COPY_BIG + 2 * PAGE, 0);
+        copy_len = mmap(0, COPY_ORDER * sizeof *copy_len, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        memset(copy_dst, 1, COPY_BIG + 2 * PAGE);
+        size_t largest = (size_t)-1;
+        const char *cap = getenv("LIBC_SHIM_COPY_MAX");
+        if (cap)
+                largest = (size_t)strtoull(cap, 0, 0);
+        printf("core cycles a tick %.3f; columns: the C library's ticks a call, then each shim's and the C library's over it (above 1.00 the shim wins)\n", copy_clock());
+        for (size_t ci = 0; ci < sizeof copy_cases / sizeof *copy_cases; ci++) {
+                const struct copy_case *c = &copy_cases[ci];
+                if (only && strcmp(only, c->name) && strcmp(only, c->symbol))
+                        continue;
+                void *sides[16];
+                sides[0] = dlsym(RTLD_DEFAULT, c->symbol);
+                for (int s = 0; s < shim_count; s++)
+                        sides[s + 1] = dlsym(shims[s], c->symbol);
+                for (size_t si = 0; si < sizeof sizes / sizeof *sizes; si++) {
+                        size_t n = sizes[si];
+                        if (n > largest || ((c->shape == CB_UP || c->shape == CB_DOWN) && n > COPY_BIG - 256))
+                                continue;
+                        if (si == 0) {  // a case's first row is timed twice and the first kept from no one: whichever
+                                        // side went first there came out a quarter quicker, at every size
+                                for (unsigned i = 0; i < COPY_ORDER; i++)
+                                        copy_len[i] = (uint32_t)(n + 7);
+                                double t[16];
+                                copy_times(c, sides, shim_count + 1, 4096, 16, t);
+                        }
+                        for (unsigned i = 0; i < COPY_ORDER; i++)
+                                copy_len[i] = (uint32_t)n;
+                        copy_row(c, sides, shim_count + 1, "fixed", n);
+                }
+                uint64_t keep = seed;
+                for (size_t lo = 1; lo <= 16384 && lo <= largest; lo *= 2) {
+                        seed = 0x2545f4914f6cdd1dull + lo;      // the same lengths on every side and every run
+                        for (unsigned i = 0; i < COPY_ORDER; i++)
+                                copy_len[i] = (uint32_t)(lo + next() % lo);
+                        char mode[16];
+                        snprintf(mode, sizeof mode, "o%zu", lo);
+                        copy_row(c, sides, shim_count + 1, mode, 2 * lo - 1);
+                }
+                static const size_t ranges[] = {512, 8192};
+                for (int r = 0; r < 2; r++) {
+                        seed = 0x9e3779b97f4a7c15ull + ranges[r];
+                        double bits = copy_log2((double)ranges[r] + 1);
+                        for (unsigned i = 0; i < COPY_ORDER; i++) {
+                                size_t n = (size_t)copy_exp2((double)(next() >> 11) / 9007199254740992.0 * bits);
+                                copy_len[i] = (uint32_t)(n < 1 ? 1 : n > ranges[r] ? ranges[r] : n);
+                        }
+                        char mode[16];
+                        snprintf(mode, sizeof mode, "r%zu", ranges[r]);
+                        copy_row(c, sides, shim_count + 1, mode, ranges[r]);
+                }
+                seed = keep;
+        }
+        munmap(all, room);
 }
 
 static void bench(void *shim)
@@ -2004,7 +2245,7 @@ static void bench_hunt(void **shims, int shim_count, const char *only)
 int main(int argc, char **argv)
 {
         if (argc < 2) {
-                fprintf(stderr, "libc_shim SHIM.so [bench | hunt [OTHER.so ...]]\n");
+                fprintf(stderr, "libc_shim SHIM.so [bench | hunt [OTHER.so ...] | copy [OTHER.so ...]]\n");
                 return 2;
         }
         setvbuf(stdout, 0, _IONBF, 0);  // what was said before a crash is kept
@@ -2021,8 +2262,9 @@ int main(int argc, char **argv)
                 bench(shim);
                 return 0;
         }
-        if (argc > 2 && !strcmp(argv[2], "hunt")) {
-                /* libc_shim SHIM.so hunt [OTHER.so ...]: LIBC_SHIM_ONLY=strlen keeps the rows of one name */
+        if (argc > 2 && (!strcmp(argv[2], "hunt") || !strcmp(argv[2], "copy"))) {
+                /* libc_shim SHIM.so hunt [OTHER.so ...]: LIBC_SHIM_ONLY=strlen keeps the rows of one name;
+                   libc_shim SHIM.so copy [OTHER.so ...]: LIBC_SHIM_COPY_ONLY=NAME keeps one case */
                 void *shims[15] = {shim};
                 int count = 1;
                 for (int i = 3; i < argc && count < 15; i++)
@@ -2030,6 +2272,11 @@ int main(int argc, char **argv)
                                 fprintf(stderr, "dlopen: %s\n", dlerror());
                                 return 2;
                         }
+                if (!strcmp(argv[2], "copy")) {
+                        const char *only = getenv("LIBC_SHIM_COPY_ONLY");
+                        bench_copy(shims, count, only && *only ? only : 0);
+                        return 0;
+                }
                 const char *only = getenv("LIBC_SHIM_ONLY");
                 bench_hunt(shims, count, only && *only ? only : 0);
                 return failures != 0;

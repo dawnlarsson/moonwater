@@ -28,7 +28,8 @@
 
         memcpy is memmove here (LIBRARY_MEMCPY_OVERLAPS): glibc's x86_64 memcpy has been its memmove since 2.14, and
         memcpy@GLIBC_2.2.5 promises overlap to every binary linked before that, so a program that copies onto itself works
-        under glibc and must go on working. The two are one body to 255 bytes; above, memmove's overlap test is the cost.
+        under glibc and must go on working. On x86_64 the two are one body (memory_copy_apart, which keeps memmove's
+        promise in userspace), and every name here that copies jumps to it.
 
         The _chk names are glibc's checked copies, which a program built with _FORTIFY_SOURCE calls when it knows how large
         the destination is: the same work after one comparison, and the same end when the destination is too small (the
@@ -196,11 +197,13 @@ __asm__(
     ASM_ALIAS(__rawmemchr,    rawmemchr)
 
     //
-    //       mempcpy: the copy, and the end of the destination handed back (kept on the stack across the call, which also
-    //       leaves the stack aligned for it).
+    //       mempcpy: the copy, and the end of the destination handed back. memory_copy_apart's body leaves %rax as it
+    //       found it past its first instruction, so mempcpy sets the end there and jumps in after it: one instruction
+    //       and a jump, where a call around the copy (the end kept on the stack) was 0.57 to 0.77 of glibc's mempcpy at
+    //       every length to 1 KiB.
     //
     ASM_FUNC(mempcpy)
-    "lea (%rdi,%rdx), %rax\n   push %rax\n   call memory_copy\n   pop %rax\n" ASM_RET
+    "lea (%rdi,%rdx), %rax\n   jmp " ASM_LABEL(memory_copy_apart_rax) "\n"
     ASM_END(mempcpy)
     ASM_ALIAS(__mempcpy,      mempcpy)
 
@@ -208,7 +211,7 @@ __asm__(
     //       The wide copies: a count of wchar_t, four bytes on Linux, made a count of bytes.
     //
     ASM_FUNC(wmemcpy)
-    "shl $2, %rdx\n   jmp memory_copy\n"
+    "shl $2, %rdx\n   jmp memory_copy_apart\n"
     ASM_END(wmemcpy)
     ASM_ALIAS(wmemmove,       wmemcpy)
     ASM_FUNC(wmempcpy)
@@ -220,7 +223,7 @@ __asm__(
     //       rcx is the room for the four argument forms, rdx for the three argument ones.
     //
     ASM_FUNC(__memcpy_chk)
-    "cmp %rdx, %rcx\n   jb libc_shim_overflow\n   jmp memory_copy\n"
+    "cmp %rdx, %rcx\n   jb libc_shim_overflow\n   jmp memory_copy_apart\n"
     ASM_END(__memcpy_chk)
     ASM_ALIAS(__memmove_chk,  __memcpy_chk)
     ASM_FUNC(__mempcpy_chk)
@@ -249,7 +252,7 @@ __asm__(
     "cmp %rdx, %rcx\n   jb libc_shim_overflow\n   jmp memory_fill_32\n"
     ASM_END(__wmemset_chk)
     ASM_FUNC(__wmemcpy_chk)
-    "cmp %rdx, %rcx\n   jb libc_shim_overflow\n   shl $2, %rdx\n   jmp memory_copy\n"
+    "cmp %rdx, %rcx\n   jb libc_shim_overflow\n   shl $2, %rdx\n   jmp memory_copy_apart\n"
     ASM_END(__wmemcpy_chk)
     ASM_ALIAS(__wmemmove_chk, __wmemcpy_chk)
     ASM_FUNC(__wmempcpy_chk)

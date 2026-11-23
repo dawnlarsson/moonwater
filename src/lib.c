@@ -9537,6 +9537,7 @@ __asm__(
     // alignment work to get there. Below the point where starting one pays,
     // eight bytes at a time out of a plain loop is cheaper.
     ASM_FUNC(memory_fill)
+#ifdef KERNEL_MODE
     KERNEL_BULK_FILL
     "mov %rdi, %rax\n   movzbl %sil, %ecx\n   movabs $0x0101010101010101, %r8\n   imul %r8, %rcx  # the byte, eight times over\n"
     "cmp $16, %rdx\n   jae 6f\n   cmp $8, %rdx\n   jae 7f\n   cmp $4, %rdx\n   jae 8f\n   test %rdx, %rdx\n   jz 9f\n"
@@ -9546,47 +9547,6 @@ __asm__(
     "8:  mov %ecx, (%rdi)\n   mov %ecx, -4(%rdi,%rdx)\n" ASM_RET
     "7:  mov %rcx, (%rdi)\n   mov %rcx, -8(%rdi,%rdx)\n" ASM_RET
     "6:\n"
-    ASM_USERSPACE_WIDE(
-    ASM_NARROW("cpu_has_avx2", "2f")
-    //
-    //       vpbroadcastb into xmm rather than ymm on purpose: a VEX encoded
-    //       128 bit write zeroes the upper half, which is the state a return
-    //       may leave, so the sixteen to thirty two byte case needs no
-    //       vzeroupper. Every path that widens past that does.
-    //
-    "vmovd %ecx, %xmm0\n   vpbroadcastb %xmm0, %xmm0\n   cmp $32, %rdx\n   ja 3f\n   vmovdqu %xmm0, (%rdi)\n   vmovdqu %xmm0, -16(%rdi,%rdx)\n" ASM_RET
-    "3:\n" ASM_WIDER("cpu_has_avx512", "5f")
-    "vinserti128 $1, %xmm0, %ymm0, %ymm0\n   cmp $64, %rdx\n   ja 4f\n   vmovdqu %ymm0, (%rdi)\n   vmovdqu %ymm0, -32(%rdi,%rdx)\n   vzeroupper\n" ASM_RET
-    "4:  cmp $128, %rdx\n   ja 1f\n   vmovdqu %ymm0, (%rdi)\n   vmovdqu %ymm0, 32(%rdi)\n   vmovdqu %ymm0, -64(%rdi,%rdx)\n   vmovdqu %ymm0, -32(%rdi,%rdx)\n   vzeroupper\n" ASM_RET
-    "1:  cmp $256, %rdx\n   ja 0f\n   vmovdqu %ymm0, (%rdi)\n   vmovdqu %ymm0, 32(%rdi)\n"
-    "vmovdqu %ymm0, 64(%rdi)\n   vmovdqu %ymm0, 96(%rdi)\n   vmovdqu %ymm0, -128(%rdi,%rdx)\n   vmovdqu %ymm0, -96(%rdi,%rdx)\n"
-    "vmovdqu %ymm0, -64(%rdi,%rdx)\n   vmovdqu %ymm0, -32(%rdi,%rdx)\n   vzeroupper\n" ASM_RET
-    //
-    //       Above 256: an unaligned store at the front, the destination aligned
-    //       up past it, then 128 bytes an iteration. The store that ends it is
-    //       the last 128 bytes wherever they fall, which overlaps whatever the
-    //       loop already wrote.
-    //
-    "0:  lea (%rdi,%rdx), %r8\n   vmovdqu %ymm0, (%rdi)\n   add $32, %rdi\n   and $-32, %rdi\n   lea -128(%r8), %r10\n   .balign 16\n"
-    "1:  vmovdqa %ymm0, (%rdi)\n   vmovdqa %ymm0, 32(%rdi)\n   vmovdqa %ymm0, 64(%rdi)\n   vmovdqa %ymm0, 96(%rdi)\n   add $128, %rdi\n   cmp %r10, %rdi\n   jbe 1b\n"
-    "1:  vmovdqu %ymm0, -128(%r8)\n   vmovdqu %ymm0, -96(%r8)\n   vmovdqu %ymm0, -64(%r8)\n   vmovdqu %ymm0, -32(%r8)\n   vzeroupper\n" ASM_RET
-    //
-    //       The same shape twice as wide. The rungs go one further because the
-    //       loop writes 256 bytes an iteration and a size that cannot fit one
-    //       whole iteration after the alignment step has to be finished by the
-    //       overlapping pair instead -- 257 bytes through a 256 byte loop wrote
-    //       one iteration past the end before the rung was added.
-    //
-    "5:  vpbroadcastb %ecx, %zmm0\n   cmp $64, %rdx\n   ja 4f\n   vmovdqu %ymm0, (%rdi)\n   vmovdqu %ymm0, -32(%rdi,%rdx)\n   vzeroupper\n" ASM_RET
-    "4:  cmp $128, %rdx\n   ja 1f\n   vmovdqu64 %zmm0, (%rdi)\n   vmovdqu64 %zmm0, -64(%rdi,%rdx)\n   vzeroupper\n" ASM_RET
-    "1:  cmp $256, %rdx\n   ja 0f\n   vmovdqu64 %zmm0, (%rdi)\n   vmovdqu64 %zmm0, 64(%rdi)\n   vmovdqu64 %zmm0, -128(%rdi,%rdx)\n   vmovdqu64 %zmm0, -64(%rdi,%rdx)\n   vzeroupper\n" ASM_RET
-    "0:  cmp $512, %rdx\n   ja 0f\n   vmovdqu64 %zmm0, (%rdi)\n   vmovdqu64 %zmm0, 64(%rdi)\n"
-    "vmovdqu64 %zmm0, 128(%rdi)\n   vmovdqu64 %zmm0, 192(%rdi)\n   vmovdqu64 %zmm0, -256(%rdi,%rdx)\n   vmovdqu64 %zmm0, -192(%rdi,%rdx)\n"
-    "vmovdqu64 %zmm0, -128(%rdi,%rdx)\n   vmovdqu64 %zmm0, -64(%rdi,%rdx)\n   vzeroupper\n" ASM_RET
-    "0:  lea (%rdi,%rdx), %r8\n   vmovdqu64 %zmm0, (%rdi)\n   add $64, %rdi\n   and $-64, %rdi\n   lea -256(%r8), %r10\n   .balign 16\n"
-    "1:  vmovdqa64 %zmm0, (%rdi)\n   vmovdqa64 %zmm0, 64(%rdi)\n   vmovdqa64 %zmm0, 128(%rdi)\n   vmovdqa64 %zmm0, 192(%rdi)\n   add $256, %rdi\n   cmp %r10, %rdi\n   jbe 1b\n"
-    "1:  vmovdqu64 %zmm0, -256(%r8)\n   vmovdqu64 %zmm0, -192(%r8)\n   vmovdqu64 %zmm0, -128(%r8)\n   vmovdqu64 %zmm0, -64(%r8)\n   vzeroupper\n" ASM_RET
-    )
     //
     //       No vector registers past here. rep stosb stays because on a machine
     //       old enough to be here it is still the widest store the part has, and
@@ -9596,6 +9556,95 @@ __asm__(
     "1:  mov %rcx, (%rdi)\n   add $8, %rdi\n   cmp %r10, %rdi\n   jbe 1b\n   mov %rcx, -8(%r9)\n" ASM_RET
     "0:  mov %rax, %r11\n   mov %ecx, %eax  # rep stosb stores al\n"
     "mov %rdx, %rcx\n   rep stosb\n   mov %r11, %rax\n" ASM_RET
+#else
+    //
+    //       Userspace. Every length to sixty three is one body with no
+    //       branch in it: pairs of sixteen byte stores at 0 and n-16 and at 16
+    //       and n-32, then a pair of eight, a pair of four, a pair of two and a
+    //       single byte, each set aimed at the destination when the length is
+    //       at least what it needs (16, 32, 8, 4, 2 and 1) and at the red zone
+    //       below the stack pointer when it is not, so none of them
+    //       writes outside the fill and none of them needs a test the
+    //       predictor could get wrong. The red zone is the leaf's own by the
+    //       SysV ABI: a call has already written into the caller's, and a
+    //       signal handler's frame is built below it. Only sixteen bytes at a
+    //       time go there: a 32 byte store into it cost 27 to 46 ticks a call
+    //       on the 9950X.
+    //
+    //       glibc's is one masked store for the same lengths, which lib.c
+    //       does not use (memory_first_of's block has the measurements). Ticks
+    //       a call on the 9950X against __memset_avx512_unaligned_erms, a
+    //       length that stays put: 6.3 against 5.5 (glibc's masked store is a
+    //       cycle quicker); lengths no predictor can learn, 1 to 64: 6.28
+    //       against 6.23, where the ladder of tests this replaces took 19.
+    //
+    //       memory_zero enters at memory_fill_rcx with the byte's eight copies
+    //       (nothing) in %rcx, the byte in %esi and the destination in %rax.
+    //
+    "mov %rdi, %rax\n   movzbl %sil, %ecx\n   movabs $0x0101010101010101, %r8\n   imul %r8, %rcx  # the byte, eight times over\n"
+    "" ASM_LABEL(memory_fill_rcx) ":\n"
+    "cmp $63, %rdx\n   ja " ASM_LABEL(fill_x64_wide) "\n"
+    "movq %rcx, %xmm0\n   punpcklqdq %xmm0, %xmm0\n   lea -64(%rsp), %r9  # the red zone\n"
+    "mov %rdi, %r8\n   cmp $32, %rdx\n   cmovb %r9, %r8\n   movdqu %xmm0, 16(%r8)\n   movdqu %xmm0, -32(%r8,%rdx)\n"
+    "mov %rdi, %r8\n   cmp $16, %rdx\n   cmovb %r9, %r8\n   movdqu %xmm0, (%r8)\n   movdqu %xmm0, -16(%r8,%rdx)\n"
+    "mov %rdi, %r8\n   cmp $8, %rdx\n   cmovb %r9, %r8\n   mov %rcx, -8(%r8,%rdx)\n   mov %rcx, (%r8)\n"
+    "mov %rdi, %r8\n   cmp $4, %rdx\n   cmovb %r9, %r8\n   mov %ecx, -4(%r8,%rdx)\n   mov %ecx, (%r8)\n"
+    "mov %rdi, %r8\n   cmp $2, %rdx\n   cmovb %r9, %r8\n   mov %cx, -2(%r8,%rdx)\n   mov %cx, (%r8)\n"
+    "test %rdx, %rdx\n   cmovz %r9, %rdi\n   mov %cl, (%rdi)\n" ASM_RET
+    //
+    //       Sixty four and up: glibc's rungs, which are the store floor here
+    //       (memory_copy_apart's block has the numbers), in zmm16 so no
+    //       vzeroupper; then four unaligned at the front, 256 bytes a turn
+    //       aligned, and the last 256 wherever they fall.
+    //
+    ".balign 16\n" ASM_LABEL(fill_x64_wide) ":  cmpb $0, cpu_has_avx512(%rip)\n   je " ASM_LABEL(fill_x64_ymm) "\n"
+    "vpbroadcastb %esi, %zmm16\n"
+    "" ASM_LABEL(fill_x64_zmm) ":  cmp $128, %rdx\n   ja 1f\n"
+    "vmovdqu64 %zmm16, -64(%rdi,%rdx)\n   vmovdqu64 %zmm16, (%rdi)\n" ASM_RET
+    "1:  cmp $256, %rdx\n   ja 2f\n"
+    "vmovdqu64 %zmm16, -128(%rdi,%rdx)\n   vmovdqu64 %zmm16, -64(%rdi,%rdx)\n   vmovdqu64 %zmm16, 64(%rdi)\n   vmovdqu64 %zmm16, (%rdi)\n" ASM_RET
+    "2:  cmp $512, %rdx\n   ja 3f\n"
+    "vmovdqu64 %zmm16, -256(%rdi,%rdx)\n   vmovdqu64 %zmm16, -192(%rdi,%rdx)\n   vmovdqu64 %zmm16, -128(%rdi,%rdx)\n   vmovdqu64 %zmm16, -64(%rdi,%rdx)\n"
+    "vmovdqu64 %zmm16, 192(%rdi)\n   vmovdqu64 %zmm16, 128(%rdi)\n   vmovdqu64 %zmm16, 64(%rdi)\n   vmovdqu64 %zmm16, (%rdi)\n" ASM_RET
+    "3:  lea -512(%rdi,%rdx), %rcx\n"
+    "vmovdqu64 %zmm16, (%rdi)\n   vmovdqu64 %zmm16, 64(%rdi)\n   vmovdqu64 %zmm16, 128(%rdi)\n   vmovdqu64 %zmm16, 192(%rdi)\n"
+    "and $-64, %rdi\n"
+    ".balign 64\n"
+    "4:  vmovdqa64 %zmm16, 256(%rdi)\n   vmovdqa64 %zmm16, 320(%rdi)\n   vmovdqa64 %zmm16, 384(%rdi)\n   vmovdqa64 %zmm16, 448(%rdi)\n"
+    "add $256, %rdi\n   cmp %rcx, %rdi\n   jb 4b\n"
+    "vmovdqu64 %zmm16, 256(%rcx)\n   vmovdqu64 %zmm16, 320(%rcx)\n   vmovdqu64 %zmm16, 384(%rcx)\n   vmovdqu64 %zmm16, 448(%rcx)\n" ASM_RET
+    //
+    //       AVX2: the same at half the width, the 128 byte loop this routine
+    //       always had. The pattern is broadcast as four byte words, which is
+    //       the byte's for memset and the word's for wmemset.
+    //
+    ".balign 16\n" ASM_LABEL(fill_x64_ymm) ":  cmpb $0, cpu_has_avx2(%rip)\n   je " ASM_LABEL(fill_x64_xmm) "\n"
+    "vmovd %ecx, %xmm0\n   vpbroadcastd %xmm0, %ymm0\n"
+    "" ASM_LABEL(fill_x64_ymm_ladder) ":  cmp $128, %rdx\n   ja 1f\n"
+    "vmovdqu %ymm0, -64(%rdi,%rdx)\n   vmovdqu %ymm0, -32(%rdi,%rdx)\n   vmovdqu %ymm0, 32(%rdi)\n   vmovdqu %ymm0, (%rdi)\n   vzeroupper\n" ASM_RET
+    "1:  cmp $256, %rdx\n   ja 2f\n"
+    "vmovdqu %ymm0, -128(%rdi,%rdx)\n   vmovdqu %ymm0, -96(%rdi,%rdx)\n   vmovdqu %ymm0, -64(%rdi,%rdx)\n   vmovdqu %ymm0, -32(%rdi,%rdx)\n"
+    "vmovdqu %ymm0, 96(%rdi)\n   vmovdqu %ymm0, 64(%rdi)\n   vmovdqu %ymm0, 32(%rdi)\n   vmovdqu %ymm0, (%rdi)\n   vzeroupper\n" ASM_RET
+    "2:  lea (%rdi,%rdx), %r8\n   vmovdqu %ymm0, (%rdi)\n   add $32, %rdi\n   and $-32, %rdi\n   lea -128(%r8), %r10\n   .balign 16\n"
+    "3:  vmovdqa %ymm0, (%rdi)\n   vmovdqa %ymm0, 32(%rdi)\n   vmovdqa %ymm0, 64(%rdi)\n   vmovdqa %ymm0, 96(%rdi)\n   add $128, %rdi\n   cmp %r10, %rdi\n   jbe 3b\n"
+    "vmovdqu %ymm0, -128(%r8)\n   vmovdqu %ymm0, -96(%r8)\n   vmovdqu %ymm0, -64(%r8)\n   vmovdqu %ymm0, -32(%r8)\n   vzeroupper\n" ASM_RET
+    //
+    //       Neither extension: the sixteen SSE2 registers, eight stores to 128
+    //       bytes, then 64 a turn aligned, and rep stosb from 2 KiB. This was
+    //       eight bytes a turn to 256 and rep stosb above, which costs some 40
+    //       ticks before it stores anything on the 9950X (256 bytes in 39.9
+    //       against 7.0 for the AVX2 body); from 2 KiB it is the quicker.
+    //
+    ".balign 16\n" ASM_LABEL(fill_x64_xmm) ":  movq %rcx, %xmm0\n   punpcklqdq %xmm0, %xmm0\n"
+    "" ASM_LABEL(fill_x64_xmm_ladder) ":  cmp $128, %rdx\n   ja 1f\n"
+    "movdqu %xmm0, -64(%rdi,%rdx)\n   movdqu %xmm0, -48(%rdi,%rdx)\n   movdqu %xmm0, -32(%rdi,%rdx)\n   movdqu %xmm0, -16(%rdi,%rdx)\n"
+    "movdqu %xmm0, 48(%rdi)\n   movdqu %xmm0, 32(%rdi)\n   movdqu %xmm0, 16(%rdi)\n   movdqu %xmm0, (%rdi)\n" ASM_RET
+    "1:  cmp $2048, %rdx\n   jae 3f\n   lea -64(%rdi,%rdx), %r8\n   movdqu %xmm0, (%rdi)\n   or $15, %rdi\n   inc %rdi  # the first aligned sixteen after the head\n"
+    ".balign 16\n"
+    "2:  movdqa %xmm0, (%rdi)\n   movdqa %xmm0, 16(%rdi)\n   movdqa %xmm0, 32(%rdi)\n   movdqa %xmm0, 48(%rdi)\n   add $64, %rdi\n   cmp %rdi, %r8\n   ja 2b\n"
+    "movdqu %xmm0, (%r8)\n   movdqu %xmm0, 16(%r8)\n   movdqu %xmm0, 32(%r8)\n   movdqu %xmm0, 48(%r8)\n" ASM_RET
+    "3:  mov %rax, %r8\n   mov %ecx, %eax  # rep stosb stores al\n   mov %rdx, %rcx\n   rep stosb\n   mov %r8, %rax\n" ASM_RET
+#endif
     ASM_END(memory_fill)
 
     /*
@@ -9738,6 +9787,7 @@ __asm__(
             is worth.
     */
     ASM_FUNC(memory_fill_32)
+#ifdef KERNEL_MODE
     "mov %rdi, %r8  # the destination is the answer\n"
     "cmp $4, %rdx\n   jae 3f\n   test %rdx, %rdx\n   jz 9f\n   mov %esi, (%rdi)\n   mov %esi, -4(%rdi,%rdx,4)\n   cmp $3, %rdx\n   jb 9f\n   mov %esi, 4(%rdi)\n"
     "9:  mov %r8, %rax\n" ASM_RET
@@ -9748,6 +9798,47 @@ __asm__(
     "8:  mov %r8, %rax\n" ASM_RET
     "5:  mov %rcx, %rax\n   mov %rdx, %rcx\n   shr $1, %rcx\n   rep stosq\n   test $1, %dl\n   jz 6f\n   mov %eax, (%rdi)\n"
     "6:  mov %r8, %rax\n" ASM_RET
+#else
+    //
+    //       Userspace: wmemset. Fifteen words and under are one body with no
+    //       branch, as memory_fill's sixty three bytes are: pairs of sixteen
+    //       bytes at 0 and the end and at 16 and 32 from the end, a pair of
+    //       eight and one word, each aimed at the red zone below the stack
+    //       pointer when the count is under what it needs. Sixteen and up on a destination that is a whole word go into
+    //       memory_fill's zmm or ymm rungs with the word broadcast, which store
+    //       at offsets from the destination and at aligned addresses, both a
+    //       whole number of words in. A destination that is not (wchar_t
+    //       promises it is, a caller can still hand one over) and a machine
+    //       with neither extension take the eight byte body below, whose stores
+    //       all fall a whole number of words from the destination: memory_fill's
+    //       SSE2 rung ends in rep stosb, a byte at a time of the pattern.
+    //
+    //       Ticks a call on the 9950X against glibc's __wmemset_avx512_unaligned:
+    //       the eight byte body this was took 0.16 to 0.50 of its time from 64
+    //       bytes to 1 KiB.
+    //
+    "mov %rdi, %rax\n   mov %esi, %ecx\n   mov %rcx, %r8\n   shl $32, %r8\n   or %r8, %rcx  # the word twice\n"
+    "cmp $16, %rdx\n   jae " ASM_LABEL(fill32_x64_wide) "\n"
+    "movq %rcx, %xmm0\n   punpcklqdq %xmm0, %xmm0\n   lea -64(%rsp), %r9  # the red zone\n"
+    "mov %rdi, %r8\n   cmp $8, %rdx\n   cmovb %r9, %r8\n   movdqu %xmm0, 16(%r8)\n   movdqu %xmm0, -32(%r8,%rdx,4)\n"
+    "mov %rdi, %r8\n   cmp $4, %rdx\n   cmovb %r9, %r8\n   movdqu %xmm0, (%r8)\n   movdqu %xmm0, -16(%r8,%rdx,4)\n"
+    "mov %rdi, %r8\n   cmp $2, %rdx\n   cmovb %r9, %r8\n   mov %rcx, -8(%r8,%rdx,4)\n   mov %rcx, (%r8)\n"
+    "test %rdx, %rdx\n   cmovz %r9, %rdi\n   mov %ecx, (%rdi)\n" ASM_RET
+    "" ASM_LABEL(fill32_x64_wide) ":  test $3, %dil\n   jnz " ASM_LABEL(fill32_x64_words) "\n"
+    "cmpb $0, cpu_has_avx512(%rip)\n   je 1f\n   shl $2, %rdx\n   vpbroadcastd %esi, %zmm16\n   jmp " ASM_LABEL(fill_x64_zmm) "\n"
+    "1:  cmpb $0, cpu_has_avx2(%rip)\n   je " ASM_LABEL(fill32_x64_words) "\n   shl $2, %rdx\n   vmovd %esi, %xmm0\n   vpbroadcastd %xmm0, %ymm0\n   jmp " ASM_LABEL(fill_x64_ymm_ladder) "\n"
+    "" ASM_LABEL(fill32_x64_words) ":\n"
+    "mov %rdi, %r8  # the destination is the answer\n"
+    "cmp $4, %rdx\n   jae 3f\n   test %rdx, %rdx\n   jz 9f\n   mov %esi, (%rdi)\n   mov %esi, -4(%rdi,%rdx,4)\n   cmp $3, %rdx\n   jb 9f\n   mov %esi, 4(%rdi)\n"
+    "9:  mov %r8, %rax\n" ASM_RET
+    "3:  mov %esi, %ecx\n   mov %rcx, %r9\n   shl $32, %r9\n   or %r9, %rcx\n   cmp $208, %rdx\n   jae 5f\n   sub $4, %rdx\n   jb 2f\n"
+    "1:  mov %rcx, (%rdi)\n   mov %rcx, 8(%rdi)\n   add $16, %rdi\n   sub $4, %rdx\n   jae 1b\n"
+    "2:  add $4, %rdx\n   jz 8f\n   test $2, %dl\n   jz 4f\n   mov %rcx, (%rdi)\n   add $8, %rdi\n"
+    "4:  test $1, %dl\n   jz 8f\n   mov %ecx, (%rdi)\n"
+    "8:  mov %r8, %rax\n" ASM_RET
+    "5:  mov %rcx, %rax\n   mov %rdx, %rcx\n   shr $1, %rcx\n   rep stosq\n   test $1, %dl\n   jz 6f\n   mov %eax, (%rdi)\n"
+    "6:  mov %r8, %rax\n" ASM_RET
+#endif
     ASM_END(memory_fill_32)
 
     /*
@@ -17555,6 +17646,7 @@ __asm__(
 
     ".balign 32\n"
     ASM_FUNC(memory_copy_apart)
+#ifdef KERNEL_MODE
     KERNEL_BULK_COPY
     "mov %rdi, %rax\n   cmp $32, %rdx\n   ja 6f\n   cmp $16, %rdx\n   jb 7f\n"
     //
@@ -17592,12 +17684,8 @@ __asm__(
     //       above are the kernel's, for the reason given): half the
     //       instructions, and at sixteen the one load and the one store.
     //
-#ifdef KERNEL_MODE
     "mov (%rsi), %r9\n   mov 8(%rsi), %r10\n   mov -16(%rsi,%rdx), %r11\n   mov -8(%rsi,%rdx), %rcx\n"
     "mov %r9, (%rdi)\n   mov %r10, 8(%rdi)\n   mov %r11, -16(%rdi,%rdx)\n   mov %rcx, -8(%rdi,%rdx)\n" ASM_RET
-#else
-    "movdqu (%rsi), %xmm0\n   movdqu -16(%rsi,%rdx), %xmm1\n   movdqu %xmm0, (%rdi)\n   movdqu %xmm1, -16(%rdi,%rdx)\n" ASM_RET
-#endif
     "7:  cmp $8, %rdx\n   jb 8f\n   mov (%rsi), %r9\n   mov -8(%rsi,%rdx), %r10\n   mov %r9, (%rdi)\n   mov %r10, -8(%rdi,%rdx)\n" ASM_RET
     "8:  cmp $4, %rdx\n   jb 0f\n   mov (%rsi), %r9d\n   mov -4(%rsi,%rdx), %r10d\n   mov %r9d, (%rdi)\n   mov %r10d, -4(%rdi,%rdx)\n" ASM_RET
     //
@@ -17619,62 +17707,189 @@ __asm__(
     //       same eight instructions the pair of ymm and its four more cost.
     //
     "6:\n"
-    ASM_USERSPACE_WIDE(
-    "cmp $64, %rdx\n   ja 61f\n   movdqu (%rsi), %xmm0\n   movdqu 16(%rsi), %xmm1\n   movdqu -32(%rsi,%rdx), %xmm2\n   movdqu -16(%rsi,%rdx), %xmm3\n"
-    "movdqu %xmm0, (%rdi)\n   movdqu %xmm1, 16(%rdi)\n   movdqu %xmm2, -32(%rdi,%rdx)\n   movdqu %xmm3, -16(%rdi,%rdx)\n" ASM_RET
-    "61:\n"
-    ASM_NARROW("cpu_has_avx2", "3f")
-    ASM_WIDER("cpu_has_avx512", "5f")
-    "4:  cmp $128, %rdx\n   ja 1f\n   vmovdqu (%rsi), %ymm0\n   vmovdqu 32(%rsi), %ymm1\n"
+    //       Neither extension: eight bytes at a time, and rep movsb where it pays.
+    "2:  cmp $256, %rdx\n   jae 0f\n   lea (%rdi,%rdx), %r8\n   lea (%rsi,%rdx), %r11\n   mov -8(%r11), %r10\n   mov (%rsi), %rdx\n   mov %rdi, %r9\n   add $8, %rdi\n"
+    "and $-8, %rdi\n   sub %r9, %rdi\n   add %rdi, %rsi\n   add %r9, %rdi\n   lea -8(%r8), %rcx\n"
+    "1:  mov (%rsi), %r9\n   mov %r9, (%rdi)\n   add $8, %rsi\n   add $8, %rdi\n   cmp %rcx, %rdi\n   jbe 1b\n   mov %r10, -8(%r8)\n   mov %rdx, (%rax)\n" ASM_RET
+    "0:  mov %rdx, %rcx\n   rep movsb\n" ASM_RET
+#else
+    //
+    //       Userspace: one body for memcpy and memmove.
+    //
+    //       Every rung up to 512 bytes reads all of its input into registers
+    //       before it writes any of its output, so it is right whichever way
+    //       the two regions lie; above that the distance between them picks
+    //       the direction, which is four instructions against a loop. So the
+    //       overlap promise costs nothing a caller of the plain copy pays for,
+    //       and memory_copy is a jump here and memmove this body.
+    //
+    //       mempcpy enters at memory_copy_apart_rax with %rax already the end
+    //       it returns: no path below writes %rax.
+    //
+    //       The rungs are classes, and fewer classes is fewer branches the
+    //       predictor cannot learn when the length changes from call to call.
+    //       Sixteen to sixty four is one class: four sixteen byte chunks at
+    //       0, p1, p2 and n-16, where p1 = min(16, n-16) and p2 = n-16-p1,
+    //       cover every length from 16 to 64 with no branch; four to fifteen
+    //       is the same at four bytes, and one to three is the first byte, the
+    //       middle and the last. From 32 to 64 those are the four chunks
+    //       the old rung had, and they are stored in its order, the head
+    //       first and the tail last, as glibc's are: a memmove over itself
+    //       that reads what the last one wrote waits on whichever of the last
+    //       one's stores it overlaps, and stored the other way round a shift
+    //       up of 37 bytes measured 0.82 of glibc at 48 to 63 bytes and a
+    //       shift down 1.14 (this order, 1.00 and 0.94).
+    //
+    //       Above sixty four the wider registers, asked for once. AVX-512
+    //       works in zmm16 to zmm31, whose upper halves no SSE code can be
+    //       hurt by, so nothing it leaves needs a vzeroupper. Its rungs are
+    //       glibc's because they are the store floor here: an unaligned zmm
+    //       store is 1.4 cycles a line on the 9950X and an aligned one 1.1,
+    //       and the loop's aligned stores are what makes 4 KiB 1.1 cycles a
+    //       line. Sixteen unaligned stores for 257 to 512 (one class of four
+    //       clamped 256 byte chunks) took 20 ticks where glibc's eight take 11.
+    //
+    //       Ticks a call on the 9950X, the same length every call against
+    //       glibc 2.44's __memmove_avx512_unaligned_erms (source one byte
+    //       into a page, destination half a page and seven bytes on), then
+    //       lengths drawn at every call from a pool no predictor can learn:
+    //       fixed 1 to 512 level with it, 513 10.5 against 11.6, 1 KiB 16.8
+    //       against 19.9; random 1 to 64, 1 to 512 and 1 to 8192: 18.5, 27.6
+    //       and 37.4 against 22.8, 28.8 and 42.8.
+    //
+    "mov %rdi, %rax\n"
+    "" ASM_LABEL(memory_copy_apart_rax) ":\n"
+    "cmp $16, %rdx\n   jb " ASM_LABEL(copy_x64_under16) "\n   cmp $64, %rdx\n   ja " ASM_LABEL(copy_x64_wide) "\n"
+    "lea -16(%rdx), %rcx\n   mov $16, %r8d\n   cmp %r8, %rcx\n   cmovb %rcx, %r8  # p1\n   mov %rcx, %r9\n   sub %r8, %r9  # p2\n"
+    "movdqu (%rsi), %xmm0\n   movdqu (%rsi,%r8), %xmm1\n   movdqu (%rsi,%r9), %xmm2\n   movdqu (%rsi,%rcx), %xmm3\n"
+    "movdqu %xmm0, (%rdi)\n   movdqu %xmm1, (%rdi,%r8)\n   movdqu %xmm2, (%rdi,%r9)\n   movdqu %xmm3, (%rdi,%rcx)\n" ASM_RET
+    "" ASM_LABEL(copy_x64_under16) ":  cmp $4, %rdx\n   jb " ASM_LABEL(copy_x64_under4) "\n"
+    "lea -4(%rdx), %rcx\n   mov $4, %r8d\n   cmp %r8, %rcx\n   cmovb %rcx, %r8\n   mov %rcx, %r9\n   sub %r8, %r9\n"
+    "mov (%rsi), %r10d\n   mov (%rsi,%r8), %r11d\n   mov (%rsi,%r9), %edx\n   mov (%rsi,%rcx), %esi\n"
+    "mov %r10d, (%rdi)\n   mov %r11d, (%rdi,%r8)\n   mov %edx, (%rdi,%r9)\n   mov %esi, (%rdi,%rcx)\n" ASM_RET
+    "" ASM_LABEL(copy_x64_under4) ":  test %rdx, %rdx\n   jz " ASM_LABEL(copy_x64_done) "\n"
+    "movzbl (%rsi), %ecx\n   movzbl -1(%rsi,%rdx), %r8d\n   mov %rdx, %r9\n   shr %r9\n   movzbl (%rsi,%r9), %r10d\n"
+    "mov %r8b, -1(%rdi,%rdx)\n   mov %r10b, (%rdi,%r9)\n   mov %cl, (%rdi)\n"
+    "" ASM_LABEL(copy_x64_done) ":  " ASM_RET
+    ".balign 16\n" ASM_LABEL(copy_x64_wide) ":\n"
+    "cmpb $0, cpu_has_avx512(%rip)\n   je " ASM_LABEL(copy_x64_ymm) "\n"
+    "vmovdqu64 (%rsi), %zmm16\n   cmp $128, %rdx\n   ja " ASM_LABEL(copy_x64_zmm_129) "\n"
+    "vmovdqu64 -64(%rsi,%rdx), %zmm17\n   vmovdqu64 %zmm16, (%rdi)\n   vmovdqu64 %zmm17, -64(%rdi,%rdx)\n" ASM_RET
+    ".balign 16\n" ASM_LABEL(copy_x64_zmm_129) ":  cmp $512, %rdx\n   ja " ASM_LABEL(copy_x64_zmm_513) "\n"
+    "vmovdqu64 64(%rsi), %zmm17\n   vmovdqu64 -128(%rsi,%rdx), %zmm18\n   vmovdqu64 -64(%rsi,%rdx), %zmm19\n"
+    "cmp $256, %rdx\n   ja " ASM_LABEL(copy_x64_zmm_257) "\n"
+    "vmovdqu64 %zmm16, (%rdi)\n   vmovdqu64 %zmm17, 64(%rdi)\n   vmovdqu64 %zmm18, -128(%rdi,%rdx)\n   vmovdqu64 %zmm19, -64(%rdi,%rdx)\n" ASM_RET
+    "" ASM_LABEL(copy_x64_zmm_257) ":\n"
+    "vmovdqu64 128(%rsi), %zmm20\n   vmovdqu64 192(%rsi), %zmm21\n   vmovdqu64 -256(%rsi,%rdx), %zmm22\n   vmovdqu64 -192(%rsi,%rdx), %zmm23\n"
+    "vmovdqu64 %zmm16, (%rdi)\n   vmovdqu64 %zmm17, 64(%rdi)\n   vmovdqu64 %zmm20, 128(%rdi)\n   vmovdqu64 %zmm21, 192(%rdi)\n"
+    "vmovdqu64 %zmm22, -256(%rdi,%rdx)\n   vmovdqu64 %zmm23, -192(%rdi,%rdx)\n   vmovdqu64 %zmm18, -128(%rdi,%rdx)\n   vmovdqu64 %zmm19, -64(%rdi,%rdx)\n" ASM_RET
+    //
+    //       Above 512: backwards when the destination starts inside the
+    //       source, and backwards too when the destination is less than 256
+    //       bytes past the source modulo a page and that is safe (glibc's
+    //       test): forwards, every load would wait on a store four kilobytes
+    //       back that only shares its low twelve bits with it.
+    //
+    "" ASM_LABEL(memory_copy_apart_zmm) ":  vmovdqu64 (%rsi), %zmm16\n"
+    "" ASM_LABEL(copy_x64_zmm_513) ":\n"
+    "mov %rdi, %rcx\n   sub %rsi, %rcx\n   cmp %rdx, %rcx\n   jb " ASM_LABEL(copy_x64_zmm_overlap) "\n"
+    "lea (%rcx,%rdx), %r8\n   xor %rcx, %r8\n   shr $63, %r8  # the source is above the destination and inside the copy\n"
+    "and $0xf00, %ecx\n   add %r8d, %ecx\n   jz " ASM_LABEL(copy_x64_zmm_back) "\n"
+    //
+    //       Forwards: the head and the last 256 bytes are in registers first,
+    //       the destination is aligned up past the head, 256 bytes a turn are
+    //       stored aligned, and the last 256 and the head are stored at the end
+    //       wherever they fall. Two loops, for what their setup costs against
+    //       what their turn costs. Under 2 KiB glibc's: two pointers and a
+    //       compare, eleven instructions a turn, with the first load's address
+    //       three instructions from the call. From 2 KiB the loop lib.c had: an
+    //       index that counts up to nothing, ten instructions a turn, behind a
+    //       chain of ten. Ticks on the 9950X against glibc, the one and then the
+    //       other: 1536 bytes 0.99 and 0.84, 3 KiB 0.99 and 1.11, 4 KiB 1.16
+    //       and 1.12, 24 KiB 1.02 and 1.04. memory_copy_rect_u32 calls
+    //       memory_copy_apart_zmm above for a row of more than 512 bytes, with
+    //       %rax set.
+    //
+    "cmp $2048, %rdx\n   jae " ASM_LABEL(copy_x64_zmm_long) "\n"
+    "vmovdqu64 -256(%rsi,%rdx), %zmm20\n   vmovdqu64 -192(%rsi,%rdx), %zmm21\n   vmovdqu64 -128(%rsi,%rdx), %zmm22\n   vmovdqu64 -64(%rsi,%rdx), %zmm23\n"
+    "mov %rdi, %rcx\n   lea -256(%rdi,%rdx), %r8\n   or $63, %rdi\n   sub %rcx, %rsi\n   inc %rdi  # the first aligned line after the head\n   add %rdi, %rsi\n"
+    ".balign 64\n" ASM_LABEL(copy_x64_zmm_short) ":\n"
+    "vmovdqu64 (%rsi), %zmm17\n   vmovdqu64 64(%rsi), %zmm18\n   vmovdqu64 128(%rsi), %zmm19\n   vmovdqu64 192(%rsi), %zmm24\n   sub $-256, %rsi\n"
+    "vmovdqa64 %zmm17, (%rdi)\n   vmovdqa64 %zmm18, 64(%rdi)\n   vmovdqa64 %zmm19, 128(%rdi)\n   vmovdqa64 %zmm24, 192(%rdi)\n   sub $-256, %rdi\n"
+    "cmp %rdi, %r8\n   ja " ASM_LABEL(copy_x64_zmm_short) "\n"
+    "vmovdqu64 %zmm20, (%r8)\n   vmovdqu64 %zmm21, 64(%r8)\n   vmovdqu64 %zmm22, 128(%r8)\n   vmovdqu64 %zmm23, 192(%r8)\n   vmovdqu64 %zmm16, (%rcx)\n" ASM_RET
+    "" ASM_LABEL(copy_x64_zmm_long) ":\n"
+    "lea (%rdi,%rdx), %r8\n   lea (%rsi,%rdx), %r11\n   vmovdqu64 -256(%r11), %zmm20\n   vmovdqu64 -192(%r11), %zmm21\n"
+    "vmovdqu64 -128(%r11), %zmm22\n   vmovdqu64 -64(%r11), %zmm23\n"
+    "mov %rdi, %r9\n   lea 64(%rdi), %r10\n   and $-64, %r10\n   sub %r9, %r10\n   add %r10, %rsi\n   lea (%rdi,%r10), %rdi\n"
+    "lea -256(%r8), %rcx\n   sub %rdi, %rcx\n   and $-256, %rcx\n   add $256, %rcx  # what the turns store, a multiple of 256\n"
+    "add %rcx, %rsi\n   add %rcx, %rdi\n   neg %rcx\n"
+    ".balign 64\n" ASM_LABEL(copy_x64_zmm_forward) ":\n"
+    "vmovdqu64 (%rsi,%rcx), %zmm17\n   vmovdqu64 64(%rsi,%rcx), %zmm18\n   vmovdqu64 128(%rsi,%rcx), %zmm19\n   vmovdqu64 192(%rsi,%rcx), %zmm24\n"
+    "vmovdqa64 %zmm17, (%rdi,%rcx)\n   vmovdqa64 %zmm18, 64(%rdi,%rcx)\n   vmovdqa64 %zmm19, 128(%rdi,%rcx)\n   vmovdqa64 %zmm24, 192(%rdi,%rcx)\n"
+    "add $256, %rcx\n   jnz " ASM_LABEL(copy_x64_zmm_forward) "\n"
+    "vmovdqu64 %zmm20, -256(%r8)\n   vmovdqu64 %zmm21, -192(%r8)\n   vmovdqu64 %zmm22, -128(%r8)\n   vmovdqu64 %zmm23, -64(%r8)\n   vmovdqu64 %zmm16, (%r9)\n" ASM_RET
+    //
+    //       Backwards: the first 256 bytes and the last 64 in registers, then
+    //       256 bytes a turn down from the last aligned line, each turn read
+    //       before it is written and below what it writes.
+    //
+    "" ASM_LABEL(copy_x64_zmm_overlap) ":  test %rcx, %rcx\n   jz " ASM_LABEL(copy_x64_done) "\n"
+    "" ASM_LABEL(copy_x64_zmm_back) ":\n"
+    "vmovdqu64 64(%rsi), %zmm21\n   vmovdqu64 128(%rsi), %zmm22\n   vmovdqu64 192(%rsi), %zmm23\n   vmovdqu64 -64(%rsi,%rdx), %zmm24\n"
+    "lea -257(%rdi,%rdx), %rcx\n   sub %rdi, %rsi\n   and $-64, %rcx\n   add %rcx, %rsi\n"
+    ".balign 64\n" ASM_LABEL(copy_x64_zmm_backward) ":\n"
+    "vmovdqu64 192(%rsi), %zmm17\n   vmovdqu64 128(%rsi), %zmm18\n   vmovdqu64 64(%rsi), %zmm19\n   vmovdqu64 (%rsi), %zmm20\n   add $-256, %rsi\n"
+    "vmovdqa64 %zmm17, 192(%rcx)\n   vmovdqa64 %zmm18, 128(%rcx)\n   vmovdqa64 %zmm19, 64(%rcx)\n   vmovdqa64 %zmm20, (%rcx)\n   add $-256, %rcx\n"
+    "cmp %rcx, %rdi\n   jb " ASM_LABEL(copy_x64_zmm_backward) "\n"
+    "vmovdqu64 %zmm24, -64(%rdi,%rdx)\n   vmovdqu64 %zmm23, 192(%rdi)\n   vmovdqu64 %zmm22, 128(%rdi)\n   vmovdqu64 %zmm21, 64(%rdi)\n   vmovdqu64 %zmm16, (%rdi)\n" ASM_RET
+    //
+    //       AVX2: the ymm ladder and the 128 byte loop this routine always
+    //       had, the overlap test in front of the loop and the backwards loop
+    //       memory_copy had behind it.
+    //
+    ".balign 16\n" ASM_LABEL(copy_x64_ymm) ":  cmpb $0, cpu_has_avx2(%rip)\n   je " ASM_LABEL(copy_x64_xmm) "\n"
+    "cmp $128, %rdx\n   ja 1f\n   vmovdqu (%rsi), %ymm0\n   vmovdqu 32(%rsi), %ymm1\n"
     "vmovdqu -64(%rsi,%rdx), %ymm2\n   vmovdqu -32(%rsi,%rdx), %ymm3\n   vmovdqu %ymm0, (%rdi)\n   vmovdqu %ymm1, 32(%rdi)\n"
     "vmovdqu %ymm2, -64(%rdi,%rdx)\n   vmovdqu %ymm3, -32(%rdi,%rdx)\n   vzeroupper\n" ASM_RET
-    "1:  cmp $256, %rdx\n   ja 0f\n   vmovdqu (%rsi), %ymm0\n   vmovdqu 32(%rsi), %ymm1\n"
+    "1:  cmp $256, %rdx\n   ja 2f\n   vmovdqu (%rsi), %ymm0\n   vmovdqu 32(%rsi), %ymm1\n"
     "vmovdqu 64(%rsi), %ymm2\n   vmovdqu 96(%rsi), %ymm3\n   vmovdqu -128(%rsi,%rdx), %ymm4\n   vmovdqu -96(%rsi,%rdx), %ymm5\n"
     "vmovdqu -64(%rsi,%rdx), %ymm6\n   vmovdqu -32(%rsi,%rdx), %ymm7\n   vmovdqu %ymm0, (%rdi)\n   vmovdqu %ymm1, 32(%rdi)\n"
     "vmovdqu %ymm2, 64(%rdi)\n   vmovdqu %ymm3, 96(%rdi)\n   vmovdqu %ymm4, -128(%rdi,%rdx)\n   vmovdqu %ymm5, -96(%rdi,%rdx)\n"
     "vmovdqu %ymm6, -64(%rdi,%rdx)\n   vmovdqu %ymm7, -32(%rdi,%rdx)\n   vzeroupper\n" ASM_RET
-    //
-    //       The last 128 bytes are read into ymm4-7 before the head store, so
-    //       the loop may write over the source it has already passed.
-    //
-    "0:  lea (%rdi,%rdx), %r8\n   lea (%rsi,%rdx), %r11\n   vmovdqu -128(%r11), %ymm4\n   vmovdqu -96(%r11), %ymm5\n"
-    "vmovdqu -64(%r11), %ymm6\n   vmovdqu -32(%r11), %ymm7\n   vmovdqu (%rsi), %ymm8  # and the first 32, for the same reason\n"
+    "2:  mov %rdi, %rcx\n   sub %rsi, %rcx\n   cmp %rdx, %rcx\n   jb 5f\n"
+    //       The last 128 bytes and the first 32 are read before the loop
+    //       stores anything, so it may write over the source it has passed.
+    "lea (%rdi,%rdx), %r8\n   lea (%rsi,%rdx), %r11\n   vmovdqu -128(%r11), %ymm4\n   vmovdqu -96(%r11), %ymm5\n"
+    "vmovdqu -64(%r11), %ymm6\n   vmovdqu -32(%r11), %ymm7\n   vmovdqu (%rsi), %ymm8\n"
     "mov %rdi, %r9\n   add $32, %rdi\n   and $-32, %rdi\n   sub %r9, %rdi\n   add %rdi, %rsi\n   add %r9, %rdi  # the source moves with it\n"
     "lea -128(%r8), %r10\n   .balign 16\n"
-    "1:  vmovdqu (%rsi), %ymm0\n   vmovdqu 32(%rsi), %ymm1\n   vmovdqu 64(%rsi), %ymm2\n   vmovdqu 96(%rsi), %ymm3\n"
-    "vmovdqa %ymm0, (%rdi)\n   vmovdqa %ymm1, 32(%rdi)\n   vmovdqa %ymm2, 64(%rdi)\n   vmovdqa %ymm3, 96(%rdi)\n   add $128, %rsi\n   add $128, %rdi\n   cmp %r10, %rdi\n   jbe 1b\n"
-    "vmovdqu %ymm4, -128(%r8)\n   vmovdqu %ymm5, -96(%r8)\n   vmovdqu %ymm6, -64(%r8)\n   vmovdqu %ymm7, -32(%r8)\n   vmovdqu %ymm8, (%rax)\n   vzeroupper\n" ASM_RET
-    //       The zmm ladder, one rung longer for the reason memory_fill gives.
-    "5:\n4:  cmp $128, %rdx\n   ja 1f\n   vmovdqu64 (%rsi), %zmm0\n   vmovdqu64 -64(%rsi,%rdx), %zmm1\n   vmovdqu64 %zmm0, (%rdi)\n   vmovdqu64 %zmm1, -64(%rdi,%rdx)\n   vzeroupper\n" ASM_RET
-    "1:  cmp $256, %rdx\n   ja 0f\n   vmovdqu64 (%rsi), %zmm0\n   vmovdqu64 64(%rsi), %zmm1\n"
-    "vmovdqu64 -128(%rsi,%rdx), %zmm2\n   vmovdqu64 -64(%rsi,%rdx), %zmm3\n   vmovdqu64 %zmm0, (%rdi)\n"
-    "vmovdqu64 %zmm1, 64(%rdi)\n   vmovdqu64 %zmm2, -128(%rdi,%rdx)\n   vmovdqu64 %zmm3, -64(%rdi,%rdx)\n   vzeroupper\n" ASM_RET
-    "0:  cmp $512, %rdx\n   ja 0f\n   vmovdqu64 (%rsi), %zmm0\n   vmovdqu64 64(%rsi), %zmm1\n"
-    "vmovdqu64 128(%rsi), %zmm2\n   vmovdqu64 192(%rsi), %zmm3\n   vmovdqu64 -256(%rsi,%rdx), %zmm4\n   vmovdqu64 -192(%rsi,%rdx), %zmm5\n"
-    "vmovdqu64 -128(%rsi,%rdx), %zmm6\n   vmovdqu64 -64(%rsi,%rdx), %zmm7\n   vmovdqu64 %zmm0, (%rdi)\n"
-    "vmovdqu64 %zmm1, 64(%rdi)\n   vmovdqu64 %zmm2, 128(%rdi)\n   vmovdqu64 %zmm3, 192(%rdi)\n   vmovdqu64 %zmm4, -256(%rdi,%rdx)\n"
-    "vmovdqu64 %zmm5, -192(%rdi,%rdx)\n   vmovdqu64 %zmm6, -128(%rdi,%rdx)\n   vmovdqu64 %zmm7, -64(%rdi,%rdx)\n   vzeroupper\n" ASM_RET
-    "" ASM_LABEL(memory_copy_apart_zmm) ":\n0:  lea (%rdi,%rdx), %r8\n   lea (%rsi,%rdx), %r11\n   vmovdqu64 -256(%r11), %zmm4\n   vmovdqu64 -192(%r11), %zmm5\n"
-    "vmovdqu64 -128(%r11), %zmm6\n   vmovdqu64 -64(%r11), %zmm7\n   vmovdqu64 (%rsi), %zmm8\n"
-    "mov %rdi, %r9\n   lea 64(%rdi), %r10\n   and $-64, %r10\n   sub %r9, %r10\n   add %r10, %rsi\n   lea (%rdi,%r10), %rdi\n"
-    "lea -256(%r8), %rcx\n   sub %rdi, %rcx\n   and $-256, %rcx\n   add $256, %rcx\n"
-    "add %rcx, %rsi\n   add %rcx, %rdi\n   neg %rcx\n   .balign 16\n"
-    "1:  vmovdqu64 (%rsi,%rcx), %zmm0\n   vmovdqu64 64(%rsi,%rcx), %zmm1\n   vmovdqu64 128(%rsi,%rcx), %zmm2\n   vmovdqu64 192(%rsi,%rcx), %zmm3\n"
-    "vmovdqa64 %zmm0, (%rdi,%rcx)\n   vmovdqa64 %zmm1, 64(%rdi,%rcx)\n   vmovdqa64 %zmm2, 128(%rdi,%rcx)\n   vmovdqa64 %zmm3, 192(%rdi,%rcx)\n"
-    "add $256, %rcx\n   jnz 1b\n"
-    "vmovdqu64 %zmm4, -256(%r8)\n   vmovdqu64 %zmm5, -192(%r8)\n   vmovdqu64 %zmm6, -128(%r8)\n   vmovdqu64 %zmm7, -64(%r8)\n   vmovdqu64 %zmm8, (%rax)\n   vzeroupper\n" ASM_RET
+    "3:  vmovdqu (%rsi), %ymm0\n   vmovdqu 32(%rsi), %ymm1\n   vmovdqu 64(%rsi), %ymm2\n   vmovdqu 96(%rsi), %ymm3\n"
+    "vmovdqa %ymm0, (%rdi)\n   vmovdqa %ymm1, 32(%rdi)\n   vmovdqa %ymm2, 64(%rdi)\n   vmovdqa %ymm3, 96(%rdi)\n   add $128, %rsi\n   add $128, %rdi\n   cmp %r10, %rdi\n   jbe 3b\n"
+    "vmovdqu %ymm4, -128(%r8)\n   vmovdqu %ymm5, -96(%r8)\n   vmovdqu %ymm6, -64(%r8)\n   vmovdqu %ymm7, -32(%r8)\n   vmovdqu %ymm8, (%r9)\n   vzeroupper\n" ASM_RET
+    "5:  test %rcx, %rcx\n   jz " ASM_LABEL(copy_x64_done) "\n"
+    "vmovdqu (%rsi), %ymm4\n   vmovdqu 32(%rsi), %ymm5\n   vmovdqu 64(%rsi), %ymm6\n   vmovdqu 96(%rsi), %ymm7\n"
+    "lea (%rdi,%rdx), %r8\n   lea (%rsi,%rdx), %r11\n   vmovdqu -32(%r11), %ymm8  # and the last 32\n"
+    "mov %r8, %r9\n   and $-32, %r8\n   sub %r8, %r9\n   sub %r9, %r11\n   lea 128(%rdi), %r10\n   .balign 16\n"
+    "6:  cmp %r10, %r8\n   jbe 7f\n   sub $128, %r8\n   sub $128, %r11\n   vmovdqu (%r11), %ymm0\n   vmovdqu 32(%r11), %ymm1\n   vmovdqu 64(%r11), %ymm2\n   vmovdqu 96(%r11), %ymm3\n"
+    "vmovdqa %ymm0, (%r8)\n   vmovdqa %ymm1, 32(%r8)\n   vmovdqa %ymm2, 64(%r8)\n   vmovdqa %ymm3, 96(%r8)\n   jmp 6b\n"
+    "7:  vmovdqu %ymm8, -32(%rdi,%rdx)\n   vmovdqu %ymm4, (%rdi)\n   vmovdqu %ymm5, 32(%rdi)\n   vmovdqu %ymm6, 64(%rdi)\n   vmovdqu %ymm7, 96(%rdi)\n   vzeroupper\n" ASM_RET
     //
-    //       Without AVX2, from 65 bytes to 255: the same ladder in the sixteen SSE2 registers, the head and
-    //       the tail of the copy in up to eight of them each, where the general registers took eight bytes a
-    //       turn; from 256 the rep movsb below, as before. Userspace only: the kernel's copies stay in the
-    //       general registers, for the reason given above.
+    //       Neither extension: the same rungs in the sixteen SSE2 registers,
+    //       then 64 bytes a turn either way, and rep movsb forwards from 1 KiB.
+    //       rep movsb was the copy from 256 bytes up, and on the 9950X it costs
+    //       some 40 ticks before it moves anything (256 bytes in 43.6 against
+    //       7.1 for sixteen xmm). The loop is quicker at a length that stays
+    //       put to 1.5 KiB, but a length that changes costs it the exit of its
+    //       loop every call, and lengths drawn from 1 to 2 KiB took it 0.76 of
+    //       rep movsb's time; from 2 KiB rep movsb is as quick as the zmm loop.
     //
-    "3:\n31:  cmp $128, %rdx\n   ja 32f\n"
+    ".balign 16\n" ASM_LABEL(copy_x64_xmm) ":  cmp $128, %rdx\n   ja 1f\n"
     "movdqu (%rsi), %xmm0\n   movdqu 16(%rsi), %xmm1\n   movdqu 32(%rsi), %xmm2\n   movdqu 48(%rsi), %xmm3\n"
     "movdqu -64(%rsi,%rdx), %xmm4\n   movdqu -48(%rsi,%rdx), %xmm5\n   movdqu -32(%rsi,%rdx), %xmm6\n   movdqu -16(%rsi,%rdx), %xmm7\n"
     "movdqu %xmm0, (%rdi)\n   movdqu %xmm1, 16(%rdi)\n   movdqu %xmm2, 32(%rdi)\n   movdqu %xmm3, 48(%rdi)\n"
     "movdqu %xmm4, -64(%rdi,%rdx)\n   movdqu %xmm5, -48(%rdi,%rdx)\n   movdqu %xmm6, -32(%rdi,%rdx)\n   movdqu %xmm7, -16(%rdi,%rdx)\n" ASM_RET
-    "32:  cmp $256, %rdx\n   jae 2f\n"
+    "1:  cmp $256, %rdx\n   ja 2f\n"
     "movdqu (%rsi), %xmm0\n   movdqu 16(%rsi), %xmm1\n   movdqu 32(%rsi), %xmm2\n   movdqu 48(%rsi), %xmm3\n"
     "movdqu 64(%rsi), %xmm4\n   movdqu 80(%rsi), %xmm5\n   movdqu 96(%rsi), %xmm6\n   movdqu 112(%rsi), %xmm7\n"
     "movdqu -128(%rsi,%rdx), %xmm8\n   movdqu -112(%rsi,%rdx), %xmm9\n   movdqu -96(%rsi,%rdx), %xmm10\n   movdqu -80(%rsi,%rdx), %xmm11\n"
@@ -17683,12 +17898,22 @@ __asm__(
     "movdqu %xmm4, 64(%rdi)\n   movdqu %xmm5, 80(%rdi)\n   movdqu %xmm6, 96(%rdi)\n   movdqu %xmm7, 112(%rdi)\n"
     "movdqu %xmm8, -128(%rdi,%rdx)\n   movdqu %xmm9, -112(%rdi,%rdx)\n   movdqu %xmm10, -96(%rdi,%rdx)\n   movdqu %xmm11, -80(%rdi,%rdx)\n"
     "movdqu %xmm12, -64(%rdi,%rdx)\n   movdqu %xmm13, -48(%rdi,%rdx)\n   movdqu %xmm14, -32(%rdi,%rdx)\n   movdqu %xmm15, -16(%rdi,%rdx)\n" ASM_RET
-    )
-    //       Neither extension: eight bytes at a time, and rep movsb where it pays.
-    "2:  cmp $256, %rdx\n   jae 0f\n   lea (%rdi,%rdx), %r8\n   lea (%rsi,%rdx), %r11\n   mov -8(%r11), %r10\n   mov (%rsi), %rdx\n   mov %rdi, %r9\n   add $8, %rdi\n"
-    "and $-8, %rdi\n   sub %r9, %rdi\n   add %rdi, %rsi\n   add %r9, %rdi\n   lea -8(%r8), %rcx\n"
-    "1:  mov (%rsi), %r9\n   mov %r9, (%rdi)\n   add $8, %rsi\n   add $8, %rdi\n   cmp %rcx, %rdi\n   jbe 1b\n   mov %r10, -8(%r8)\n   mov %rdx, (%rax)\n" ASM_RET
-    "0:  mov %rdx, %rcx\n   rep movsb\n" ASM_RET
+    "2:  mov %rdi, %rcx\n   sub %rsi, %rcx\n   cmp %rdx, %rcx\n   jb 5f\n   cmp $1024, %rdx\n   jae 4f\n"
+    "movdqu (%rsi), %xmm8\n   movdqu -64(%rsi,%rdx), %xmm4\n   movdqu -48(%rsi,%rdx), %xmm5\n   movdqu -32(%rsi,%rdx), %xmm6\n   movdqu -16(%rsi,%rdx), %xmm7\n"
+    "mov %rdi, %rcx\n   lea -64(%rdi,%rdx), %r8\n   or $15, %rdi\n   sub %rcx, %rsi\n   inc %rdi  # the first aligned sixteen after the head\n   add %rdi, %rsi\n"
+    ".balign 16\n"
+    "3:  movdqu (%rsi), %xmm0\n   movdqu 16(%rsi), %xmm1\n   movdqu 32(%rsi), %xmm2\n   movdqu 48(%rsi), %xmm3\n   add $64, %rsi\n"
+    "movdqa %xmm0, (%rdi)\n   movdqa %xmm1, 16(%rdi)\n   movdqa %xmm2, 32(%rdi)\n   movdqa %xmm3, 48(%rdi)\n   add $64, %rdi\n   cmp %rdi, %r8\n   ja 3b\n"
+    "movdqu %xmm4, (%r8)\n   movdqu %xmm5, 16(%r8)\n   movdqu %xmm6, 32(%r8)\n   movdqu %xmm7, 48(%r8)\n   movdqu %xmm8, (%rcx)\n" ASM_RET
+    "4:  mov %rdx, %rcx\n   rep movsb\n" ASM_RET
+    "5:  test %rcx, %rcx\n   jz " ASM_LABEL(copy_x64_done) "\n"
+    "movdqu (%rsi), %xmm4\n   movdqu 16(%rsi), %xmm5\n   movdqu 32(%rsi), %xmm6\n   movdqu 48(%rsi), %xmm7\n   movdqu -16(%rsi,%rdx), %xmm8\n"
+    "lea -64(%rdi,%rdx), %rcx\n   and $-16, %rcx\n   sub %rdi, %rsi\n   add %rcx, %rsi\n"
+    ".balign 16\n"
+    "6:  movdqu 48(%rsi), %xmm3\n   movdqu 32(%rsi), %xmm2\n   movdqu 16(%rsi), %xmm1\n   movdqu (%rsi), %xmm0\n   sub $64, %rsi\n"
+    "movdqa %xmm3, 48(%rcx)\n   movdqa %xmm2, 32(%rcx)\n   movdqa %xmm1, 16(%rcx)\n   movdqa %xmm0, (%rcx)\n   sub $64, %rcx\n   cmp %rcx, %rdi\n   jb 6b\n"
+    "movdqu %xmm8, -16(%rdi,%rdx)\n   movdqu %xmm7, 48(%rdi)\n   movdqu %xmm6, 32(%rdi)\n   movdqu %xmm5, 16(%rdi)\n   movdqu %xmm4, (%rdi)\n" ASM_RET
+#endif
     ASM_END(memory_copy_apart)
 
     // Exact non-overlapping copy, followed by one terminator, with dst+n
@@ -17714,21 +17939,9 @@ __asm__(
     ASM_FUNC(memory_copy)
 #ifdef KERNEL_MODE
     "cmp $32, %rdx\n   jbe memory_copy_apart\n"
-#else
-    "cmp $255, %rdx\n   jbe memory_copy_apart\n"
-#endif
     "mov %rdi, %rax\n   cmp %rsi, %rdi\n   jbe 1f\n   mov %rsi, %r8\n   add %rdx, %r8\n   cmp %r8, %rdi\n   jb 2f\n"
     "1:  jmp memory_copy_apart\n"
     "2:\n"
-    ASM_USERSPACE_WIDE(
-    ASM_NARROW("cpu_has_avx2", "5f") "   cmp $128, %rdx\n   jb 5f\n"
-    "vmovdqu (%rsi), %ymm4\n   vmovdqu 32(%rsi), %ymm5\n   vmovdqu 64(%rsi), %ymm6\n   vmovdqu 96(%rsi), %ymm7\n"
-    "lea (%rdi,%rdx), %r8\n   lea (%rsi,%rdx), %r11\n   vmovdqu -32(%r11), %ymm8  # and the last 32\n"
-    "mov %r8, %r9\n   and $-32, %r8\n   sub %r8, %r9\n   sub %r9, %r11\n   lea 128(%rdi), %r10\n   .balign 16\n"
-    "3:  cmp %r10, %r8\n   jbe 4f\n   sub $128, %r8\n   sub $128, %r11\n   vmovdqu (%r11), %ymm0\n   vmovdqu 32(%r11), %ymm1\n   vmovdqu 64(%r11), %ymm2\n   vmovdqu 96(%r11), %ymm3\n"
-    "vmovdqa %ymm0, (%r8)\n   vmovdqa %ymm1, 32(%r8)\n   vmovdqa %ymm2, 64(%r8)\n   vmovdqa %ymm3, 96(%r8)\n   jmp 3b\n"
-    "4:  vmovdqu %ymm8, -32(%rdi,%rdx)\n   vmovdqu %ymm4, (%rdi)\n   vmovdqu %ymm5, 32(%rdi)\n   vmovdqu %ymm6, 64(%rdi)\n   vmovdqu %ymm7, 96(%rdi)\n   vzeroupper\n" ASM_RET
-    )
     //
     //       Under 128 bytes, or with no vector registers to use -- which is
     //       every length a kernel build takes this way -- thirty two bytes a
@@ -17785,6 +17998,13 @@ __asm__(
     "9:  cmp $2, %rdx\n   jb 0f\n   movzwl (%rsi), %r9d\n   movzwl -2(%rsi,%rdx), %r10d\n   mov %r9w, (%rdi)\n   mov %r10w, -2(%rdi,%rdx)\n" ASM_RET
     "0:  test %rdx, %rdx\n   jz 8f\n   movzbl (%rsi), %r9d\n   mov %r9b, (%rdi)\n"
     "8:\n" ASM_RET
+#else
+    //
+    //       Userspace: memory_copy_apart above is memmove's body (it says why), so
+    //       this is the jump to it. memmove and memcpy name it directly.
+    //
+    "jmp memory_copy_apart\n"
+#endif
     ASM_END(memory_copy)
 
     //
@@ -58905,13 +59125,24 @@ __asm__(
             and a shim must not be the thing that breaks it. Below 256 bytes
             the two are one body; above, the cost is memory_copy's overlap
             test.
+
+            x86_64 userspace has one body for both: memory_copy_apart there
+            keeps memmove's promise (its own block says why that costs nothing
+            below 512 bytes and four instructions above), and memory_copy is a
+            jump to it, so memcpy and memmove both name memory_copy_apart and
+            neither pays the jump.
     */
+#if X64 && !defined(KERNEL_MODE)
+    ASM_ALIAS(memcpy,    memory_copy_apart)
+    ASM_ALIAS(memmove,   memory_copy_apart)
+#else
 #ifdef LIBRARY_MEMCPY_OVERLAPS
     ASM_ALIAS(memcpy,    memory_copy)
 #else
     ASM_ALIAS(memcpy,    memory_copy_apart)
 #endif
     ASM_ALIAS(memmove,   memory_copy)
+#endif
     ASM_ALIAS(memset,    memory_fill)
     ASM_ALIAS(__memcpy,  memory_copy_apart)
     ASM_ALIAS(__memmove, memory_copy)
@@ -65497,7 +65728,12 @@ __asm__(
     //       not. gcc emits exactly these two sequences from the obvious C.
     //
     ASM_FUNC(memory_zero)
+#ifdef KERNEL_MODE
     "mov %rsi, %rdx\n   xor %esi, %esi\n   jmp memory_fill\n"
+#else
+    //       Userspace enters the fill past its pattern: eight copies of nothing are nothing.
+    "mov %rdi, %rax\n   mov %rsi, %rdx\n   xor %ecx, %ecx\n   xor %esi, %esi\n   jmp " ASM_LABEL(memory_fill_rcx) "\n"
+#endif
     ASM_END(memory_zero)
     ASM_FUNC(memory_copy_source_first)
     "mov %rdi, %rax\n   mov %rsi, %rdi\n   mov %rax, %rsi\n   jmp memory_copy\n"
