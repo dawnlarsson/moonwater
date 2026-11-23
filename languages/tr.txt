@@ -7,6 +7,7 @@
 # machine-made 2026-11-22 (two registry texts that had no keyed line), not yet read by a person: =Purge unconnected links =The screen backlight, from 0 to 100 percent. ...
 # machine-made 2026-11-22 (a registry text that had no keyed line), not yet read by a person: =An experimental speed-up. ...
 # machine-made 2026-11-22 (the Waterlink words of Settings), not yet read by a person: settings_link_address settings_link_disabled settings_link_files settings_link_files_about settings_link_group settings_link_latency settings_link_log settings_link_log_about settings_link_mismatch settings_link_no_key settings_link_offline settings_link_online settings_link_run settings_link_run_about settings_link_self settings_link_shell settings_link_shell_about settings_link_traffic
+# machine-made 2026-11-23 (the startup programs of Settings), not yet read by a person: settings_startup_add settings_startup_add_keys settings_startup_command settings_startup_hint settings_startup_keys settings_startup_program settings_startup_type
 @language tr
 @name Türkçe
 @translated machine
@@ -417,6 +418,13 @@ settings_size_kept	7101	%d × %d korundu
 settings_size_own	810e	kendi boyutu
 settings_size_plain	9453	%d × %d
 settings_size_refused	20a9	Ekran %d × %d boyutunu almadı: %s boyutuna dönüldü
+settings_startup_add	f281	Program veya komut ekle
+settings_startup_add_keys	901e	Enter başlat menüsünden bir program veya bir komut ekler
+settings_startup_command	8f52	Komut
+settings_startup_hint	df62	yazıldığı gibi çalışan bir komut satırı
+settings_startup_keys	8875	Enter açar veya kapatır; Alt+Yukarı ve Alt+Aşağı taşır; Delete kaldırır
+settings_startup_program	3b6b	Program
+settings_startup_type	3e44	bir komut satırı yazın: Enter onu masaüstüyle başlatır, Escape bırakır
 settings_state_allowed	e443	izin verildi
 settings_state_blocked	6eb3	engellendi
 settings_state_view_only	031a	yalnızca görüntüleme
@@ -498,7 +506,6 @@ ui_field_full	fe02	daha fazlası sığmaz
 =Accent	ccd7	Vurgu
 =Accent colour (rrggbb or reset)	53aa	Vurgu rengi (rrggbb veya reset)
 =Add a key (label, then the public key)	e2e3	Anahtar ekle (etiket, sonra açık anahtar)
-=Add a program to start (its path)	5e20	Başlangıca program ekle (yolu)
 =Airplane mode	3b8a	Uçak modu
 =All commands	4a42	Tüm komutlar
 =Allow recording	f7e5	Kayda izin ver
@@ -612,7 +619,6 @@ ui_field_full	fe02	daha fazlası sığmaz
 =Notices	8f06	Bildirimler
 =On-screen keyboard	97f8	Ekran klavyesi
 =Open windows where they were last put	8711	Pencereleri en son bırakıldıkları yerde aç
-=Opened in this order when the desktop starts; none starts it with no windows	5790	Masaüstü başladığında bu sırayla açılır; none onu pencere olmadan başlatır
 =Output device (name, or default)	d73c	Çıkış aygıtı (ad veya default)
 =Pair a machine	b39b	Bir makine eşleştir
 =Paths	263f	Yollar
@@ -635,7 +641,6 @@ ui_field_full	fe02	daha fazlası sığmaz
 =Purge unconnected links	5c67	Bağlı olmayan makineleri temizle
 =Refresh rate	bf6e	Yenileme hızı
 =Remembered devices	abbc	Hatırlanan aygıtlar
-=Remove a program from the start (its path)	1013	Başlangıçtan program kaldır (yolu)
 =Resize border width (pixels, or default)	7fdf	Boyutlandırma kenarlığı genişliği (piksel veya default)
 =Resize grip (pixels, or default)	dddd	Boyutlandırma tutamacı (piksel veya default)
 =Resolution	18af	Çözünürlük

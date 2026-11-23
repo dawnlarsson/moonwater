@@ -7,6 +7,7 @@
 # machine-made 2026-11-22 (two registry texts that had no keyed line), not yet read by a person: =Purge unconnected links =The screen backlight, from 0 to 100 percent. ...
 # machine-made 2026-11-22 (a registry text that had no keyed line), not yet read by a person: =An experimental speed-up. ...
 # machine-made 2026-11-22 (the Waterlink words of Settings), not yet read by a person: settings_link_address settings_link_disabled settings_link_files settings_link_files_about settings_link_group settings_link_latency settings_link_log settings_link_log_about settings_link_mismatch settings_link_no_key settings_link_offline settings_link_online settings_link_run settings_link_run_about settings_link_self settings_link_shell settings_link_shell_about settings_link_traffic
+# machine-made 2026-11-23 (the startup programs of Settings), not yet read by a person: settings_startup_add settings_startup_add_keys settings_startup_command settings_startup_hint settings_startup_keys settings_startup_program settings_startup_type
 @language fr
 @name Français
 @translated machine
@@ -417,6 +418,13 @@ settings_size_kept	7101	%d × %d gardé
 settings_size_own	810e	sa propre taille
 settings_size_plain	9453	%d × %d
 settings_size_refused	20a9	L'écran n'a pas pris %d × %d : retour à %s
+settings_startup_add	f281	Ajouter un programme ou une commande
+settings_startup_add_keys	901e	Enter ajoute un programme du menu Démarrer ou une commande
+settings_startup_command	8f52	Commande
+settings_startup_hint	df62	une ligne de commande, lancée telle qu'elle est saisie
+settings_startup_keys	8875	Enter l'active ou le désactive ; Alt+Haut et Alt+Bas le déplacent ; Delete le retire
+settings_startup_program	3b6b	Programme
+settings_startup_type	3e44	saisissez une ligne de commande : Enter la lance avec le bureau, Escape laisse
 settings_state_allowed	e443	autorisé
 settings_state_blocked	6eb3	bloqué
 settings_state_view_only	031a	consultation seule
@@ -498,7 +506,6 @@ ui_field_full	fe02	c'est tout ce que ce champ peut contenir
 =Accent	ccd7	Accent
 =Accent colour (rrggbb or reset)	53aa	Couleur d'accent (rrggbb ou reset)
 =Add a key (label, then the public key)	e2e3	Ajouter une clé (nom, puis la clé publique)
-=Add a program to start (its path)	5e20	Ajouter un programme au démarrage (son chemin)
 =Airplane mode	3b8a	Mode avion
 =All commands	4a42	Toutes les commandes
 =Allow recording	f7e5	Autoriser l'enregistrement
@@ -612,7 +619,6 @@ ui_field_full	fe02	c'est tout ce que ce champ peut contenir
 =Notices	8f06	Notifications
 =On-screen keyboard	97f8	Clavier à l'écran
 =Open windows where they were last put	8711	Ouvrir les fenêtres où elles ont été laissées
-=Opened in this order when the desktop starts; none starts it with no windows	5790	Ouverts dans cet ordre au démarrage du bureau ; none le démarre sans fenêtre
 =Output device (name, or default)	d73c	Périphérique de sortie (nom ou default)
 =Pair a machine	b39b	Associer une machine
 =Paths	263f	Chemins
@@ -635,7 +641,6 @@ ui_field_full	fe02	c'est tout ce que ce champ peut contenir
 =Purge unconnected links	5c67	Retirer les machines non connectées
 =Refresh rate	bf6e	Fréquence de rafraîchissement
 =Remembered devices	abbc	Appareils mémorisés
-=Remove a program from the start (its path)	1013	Retirer un programme du démarrage (son chemin)
 =Resize border width (pixels, or default)	7fdf	Épaisseur de la bordure de redimensionnement (pixels ou default)
 =Resize grip (pixels, or default)	dddd	Prise de redimensionnement (pixels ou default)
 =Resolution	18af	Résolution

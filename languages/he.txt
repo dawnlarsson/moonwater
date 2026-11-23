@@ -8,6 +8,7 @@
 # machine-made 2026-11-22 (two registry texts that had no keyed line), not yet read by a person: =Purge unconnected links =The screen backlight, from 0 to 100 percent. ...
 # machine-made 2026-11-22 (a registry text that had no keyed line), not yet read by a person: =An experimental speed-up. ...
 # machine-made 2026-11-22 (the Waterlink words of Settings), not yet read by a person: settings_link_address settings_link_disabled settings_link_files settings_link_files_about settings_link_group settings_link_latency settings_link_log settings_link_log_about settings_link_mismatch settings_link_no_key settings_link_offline settings_link_online settings_link_run settings_link_run_about settings_link_self settings_link_shell settings_link_shell_about settings_link_traffic
+# machine-made 2026-11-23 (the startup programs of Settings), not yet read by a person: settings_startup_add settings_startup_add_keys settings_startup_command settings_startup_hint settings_startup_keys settings_startup_program settings_startup_type
 @language he
 @name עברית
 @translated machine
@@ -418,6 +419,13 @@ settings_size_kept	7101	נשמר %d × %d
 settings_size_own	810e	הגודל שלו
 settings_size_plain	9453	%d × %d
 settings_size_refused	20a9	המסך לא קיבל %d × %d: חזרה אל %s
+settings_startup_add	f281	הוספת תוכנית או פקודה
+settings_startup_add_keys	901e	Enter מוסיף תוכנית מתפריט ההתחלה או פקודה
+settings_startup_command	8f52	פקודה
+settings_startup_hint	df62	שורת פקודה, מורצת כפי שהוקלדה
+settings_startup_keys	8875	Enter מפעיל או מכבה, Alt+למעלה ו-Alt+למטה מזיזים, Delete מסיר
+settings_startup_program	3b6b	תוכנית
+settings_startup_type	3e44	הקלד שורת פקודה: Enter מפעיל אותה עם שולחן העבודה, Escape עוזב
 settings_state_allowed	e443	מותר
 settings_state_blocked	6eb3	חסום
 settings_state_view_only	031a	צפייה בלבד
@@ -499,7 +507,6 @@ ui_field_full	fe02	זה המקסימום שהוא מכיל
 =Accent	ccd7	צבע הדגשה
 =Accent colour (rrggbb or reset)	53aa	צבע הדגשה (rrggbb או reset)
 =Add a key (label, then the public key)	e2e3	הוספת מפתח (תווית, ואז המפתח הציבורי)
-=Add a program to start (its path)	5e20	הוספת תוכנית להפעלה (הנתיב שלה)
 =Airplane mode	3b8a	מצב טיסה
 =All commands	4a42	כל הפקודות
 =Allow recording	f7e5	אפשר הקלטה
@@ -613,7 +620,6 @@ ui_field_full	fe02	זה המקסימום שהוא מכיל
 =Notices	8f06	הודעות
 =On-screen keyboard	97f8	מקלדת על המסך
 =Open windows where they were last put	8711	פתח חלונות במקום שבו הונחו לאחרונה
-=Opened in this order when the desktop starts; none starts it with no windows	5790	נפתחות בסדר הזה כששולחן העבודה מופעל; none מפעיל אותו בלי חלונות
 =Output device (name, or default)	d73c	התקן פלט (שם או default)
 =Pair a machine	b39b	צימוד מחשב
 =Paths	263f	נתיבים
@@ -636,7 +642,6 @@ ui_field_full	fe02	זה המקסימום שהוא מכיל
 =Purge unconnected links	5c67	הסר מכונות שאינן מחוברות
 =Refresh rate	bf6e	קצב רענון
 =Remembered devices	abbc	התקנים שמורים
-=Remove a program from the start (its path)	1013	הסרת תוכנית מההפעלה (הנתיב שלה)
 =Resize border width (pixels, or default)	7fdf	רוחב מסגרת שינוי הגודל (פיקסלים או default)
 =Resize grip (pixels, or default)	dddd	אחיזת שינוי הגודל (פיקסלים או default)
 =Resolution	18af	רזולוציה

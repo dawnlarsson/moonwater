@@ -7,6 +7,7 @@
 # machine-made 2026-11-22 (two registry texts that had no keyed line), not yet read by a person: =Purge unconnected links =The screen backlight, from 0 to 100 percent. ...
 # machine-made 2026-11-22 (a registry text that had no keyed line), not yet read by a person: =An experimental speed-up. ...
 # machine-made 2026-11-22 (the Waterlink words of Settings), not yet read by a person: settings_link_address settings_link_disabled settings_link_files settings_link_files_about settings_link_group settings_link_latency settings_link_log settings_link_log_about settings_link_mismatch settings_link_no_key settings_link_offline settings_link_online settings_link_run settings_link_run_about settings_link_self settings_link_shell settings_link_shell_about settings_link_traffic
+# machine-made 2026-11-23 (the startup programs of Settings), not yet read by a person: settings_startup_add settings_startup_add_keys settings_startup_command settings_startup_hint settings_startup_keys settings_startup_program settings_startup_type
 @language sv
 @name Svenska
 @translated machine
@@ -417,6 +418,13 @@ settings_size_kept	7101	Behöll %d × %d
 settings_size_own	810e	dess egen storlek
 settings_size_plain	9453	%d × %d
 settings_size_refused	20a9	Skärmen tog inte %d × %d: tillbaka till %s
+settings_startup_add	f281	Lägg till ett program eller kommando
+settings_startup_add_keys	901e	Enter lägger till ett program från startmenyn eller ett kommando
+settings_startup_command	8f52	Kommando
+settings_startup_hint	df62	en kommandorad, körs som den skrivs
+settings_startup_keys	8875	Enter slår på eller av den; Alt+Upp och Alt+Ned flyttar den; Delete tar bort den
+settings_startup_program	3b6b	Program
+settings_startup_type	3e44	skriv en kommandorad: Enter startar den med skrivbordet, Escape lämnar
 settings_state_allowed	e443	tillåten
 settings_state_blocked	6eb3	blockerad
 settings_state_view_only	031a	endast visning
@@ -498,7 +506,6 @@ ui_field_full	fe02	mer ryms inte
 =Accent	ccd7	Accent
 =Accent colour (rrggbb or reset)	53aa	Accentfärg (rrggbb eller reset)
 =Add a key (label, then the public key)	e2e3	Lägg till en nyckel (etikett, sedan den publika nyckeln)
-=Add a program to start (its path)	5e20	Lägg till ett program i starten (dess sökväg)
 =Airplane mode	3b8a	Flygplansläge
 =All commands	4a42	Alla kommandon
 =Allow recording	f7e5	Tillåt inspelning
@@ -612,7 +619,6 @@ ui_field_full	fe02	mer ryms inte
 =Notices	8f06	Meddelanden
 =On-screen keyboard	97f8	Skärmtangentbord
 =Open windows where they were last put	8711	Öppna fönster där de senast lades
-=Opened in this order when the desktop starts; none starts it with no windows	5790	Öppnas i den här ordningen när skrivbordet startar; none startar det utan fönster
 =Output device (name, or default)	d73c	Utgångsenhet (namn eller default)
 =Pair a machine	b39b	Para ihop en maskin
 =Paths	263f	Vägar
@@ -635,7 +641,6 @@ ui_field_full	fe02	mer ryms inte
 =Purge unconnected links	5c67	Ta bort maskiner som inte är anslutna
 =Refresh rate	bf6e	Uppdateringsfrekvens
 =Remembered devices	abbc	Ihågkomna enheter
-=Remove a program from the start (its path)	1013	Ta bort ett program från starten (dess sökväg)
 =Resize border width (pixels, or default)	7fdf	Bredd på kanten för storleksändring (pixlar eller default)
 =Resize grip (pixels, or default)	dddd	Grepp för storleksändring (pixlar eller default)
 =Resolution	18af	Upplösning

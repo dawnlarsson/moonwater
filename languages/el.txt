@@ -7,6 +7,7 @@
 # machine-made 2026-11-22 (two registry texts that had no keyed line), not yet read by a person: =Purge unconnected links =The screen backlight, from 0 to 100 percent. ...
 # machine-made 2026-11-22 (a registry text that had no keyed line), not yet read by a person: =An experimental speed-up. ...
 # machine-made 2026-11-22 (the Waterlink words of Settings), not yet read by a person: settings_link_address settings_link_disabled settings_link_files settings_link_files_about settings_link_group settings_link_latency settings_link_log settings_link_log_about settings_link_mismatch settings_link_no_key settings_link_offline settings_link_online settings_link_run settings_link_run_about settings_link_self settings_link_shell settings_link_shell_about settings_link_traffic
+# machine-made 2026-11-23 (the startup programs of Settings), not yet read by a person: settings_startup_add settings_startup_add_keys settings_startup_command settings_startup_hint settings_startup_keys settings_startup_program settings_startup_type
 @language el
 @name Ελληνικά
 @translated machine
@@ -417,6 +418,13 @@ settings_size_kept	7101	Διατηρήθηκε %d × %d
 settings_size_own	810e	το δικό της μέγεθος
 settings_size_plain	9453	%d × %d
 settings_size_refused	20a9	Η οθόνη δεν δέχτηκε το %d × %d: πίσω στο %s
+settings_startup_add	f281	Προσθήκη προγράμματος ή εντολής
+settings_startup_add_keys	901e	Το Enter προσθέτει ένα πρόγραμμα του μενού έναρξης ή μια εντολή
+settings_startup_command	8f52	Εντολή
+settings_startup_hint	df62	μια γραμμή εντολών, εκτελείται όπως γράφτηκε
+settings_startup_keys	8875	Το Enter το ανοίγει ή το κλείνει, τα Alt+Πάνω και Alt+Κάτω το μετακινούν, το Delete το αφαιρεί
+settings_startup_program	3b6b	Πρόγραμμα
+settings_startup_type	3e44	πληκτρολογήστε μια γραμμή εντολών: το Enter την ξεκινά με την επιφάνεια εργασίας, το Escape το αφήνει
 settings_state_allowed	e443	επιτρέπεται
 settings_state_blocked	6eb3	αποκλεισμένο
 settings_state_view_only	031a	μόνο προβολή
@@ -498,7 +506,6 @@ ui_field_full	fe02	δεν χωράει περισσότερο
 =Accent	ccd7	Έμφαση
 =Accent colour (rrggbb or reset)	53aa	Χρώμα έμφασης (rrggbb ή reset)
 =Add a key (label, then the public key)	e2e3	Προσθήκη κλειδιού (ετικέτα, μετά το δημόσιο κλειδί)
-=Add a program to start (its path)	5e20	Προσθήκη προγράμματος στην εκκίνηση (η διαδρομή του)
 =Airplane mode	3b8a	Λειτουργία πτήσης
 =All commands	4a42	Όλες οι εντολές
 =Allow recording	f7e5	Να επιτρέπεται η εγγραφή
@@ -612,7 +619,6 @@ ui_field_full	fe02	δεν χωράει περισσότερο
 =Notices	8f06	Ειδοποιήσεις
 =On-screen keyboard	97f8	Πληκτρολόγιο οθόνης
 =Open windows where they were last put	8711	Άνοιγμα παραθύρων εκεί που αφέθηκαν τελευταία
-=Opened in this order when the desktop starts; none starts it with no windows	5790	Ανοίγουν με αυτή τη σειρά όταν ξεκινά η επιφάνεια εργασίας, ενώ το none την ξεκινά χωρίς παράθυρα
 =Output device (name, or default)	d73c	Συσκευή εξόδου (όνομα ή default)
 =Pair a machine	b39b	Σύνδεση μηχανήματος
 =Paths	263f	Διαδρομές
@@ -635,7 +641,6 @@ ui_field_full	fe02	δεν χωράει περισσότερο
 =Purge unconnected links	5c67	Αφαίρεση μη συνδεδεμένων μηχανημάτων
 =Refresh rate	bf6e	Ρυθμός ανανέωσης
 =Remembered devices	abbc	Συσκευές που θυμάται
-=Remove a program from the start (its path)	1013	Αφαίρεση προγράμματος από την εκκίνηση (η διαδρομή του)
 =Resize border width (pixels, or default)	7fdf	Πλάτος περιγράμματος αλλαγής μεγέθους (pixel ή default)
 =Resize grip (pixels, or default)	dddd	Λαβή αλλαγής μεγέθους (pixel ή default)
 =Resolution	18af	Ανάλυση

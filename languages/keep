@@ -32,6 +32,8 @@ src/canvas/ui/settings.c	Internal storage
 src/canvas/ui/settings.c	External devices
 src/canvas/ui/settings.c	Waterlink
 src/canvas/ui/settings.c	Linked machines
+src/canvas/ui/settings.c	Boot
+src/canvas/ui/settings.c	Programs started with the desktop
 src/canvas/ui/settings.c	This machine
 src/canvas/ui/settings.c	MB
 src/canvas/ui/ui.c	Ctrl

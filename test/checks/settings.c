@@ -1459,7 +1459,8 @@ static b32 settings_event_real(const struct window_event address_to event)
 
 /*
         The programs the desktop opens when it starts (registry.c's setting_autostart_valid, the verb desktop autostart): what a line is,
-        its limits, a path found in it, and the three rows of the Boot group that read it, set it whole, add one and take one out.
+        its limits and a path found in it. It is what desktop startup began with (desktop_startup_read); Settings has no row of it: the
+        Boot group's list is desktop startup's (check_startup_table).
 */
 static fn check_autostart(void)
 {
@@ -1467,12 +1468,8 @@ static fn check_autostart(void)
         static const char address_to const bad[] = {"", "   ", "klog", "/", "/klog /klog", "/a//b", "/a/./b", "/a/../b", "/a/..", "/a/.", "/a/",
                                                      "/klog;rm", "/a b'c", "/x$(y)", "/k\tlog", "none"};
         static char line[90000];
-        char value[SETTINGS_VALUE];
-        string_address words[SETTINGS_WORDS];
-        positive bad_at = 0, count;
+        positive bad_at = 0;
         b32 grammar = true, refused = true, many = true;
-        int list = settings_row_named("Programs started with the desktop"), add = settings_row_named("Add a program to start (its path)"),
-            remove = settings_row_named("Remove a program from the start (its path)");
 
         for (positive each = 0; each < sizeof(good) / sizeof(good[0]); each++)
                 grammar &= setting_autostart_valid(good[each], null);
@@ -1529,27 +1526,124 @@ static fn check_autostart(void)
         }
         check("autostart: a path is found in a line as a whole word", setting_autostart_has("/klog /terminal", "/terminal") &&
               !setting_autostart_has("/klog /terminal", "/term") && !setting_autostart_has("/klog /terminal", "/klog /terminal"));
+        check("autostart: no row of the table is desktop autostart's or startup's any more (the Boot group lists desktop startup)",
+              !settings_row_named("Programs started with the desktop") && !settings_row_named("Add a program to start (its path)") &&
+                  !settings_row_named("Remove a program from the start (its path)"));
+}
 
-        check("autostart: the three rows are in the Boot group, and the list's verb is desktop autostart", list && add && remove &&
-              settings_rows[list].how == SETTING_SPECIAL && string_equals((string_address)settings_rows[list].read[0], (string_address) "desktop") &&
-              string_equals((string_address)settings_rows[list].read[1], (string_address) "autostart") &&
-              string_equals((string_address)settings_rows[add].usage, (string_address) "desktop autostart add PROGRAM") &&
-              string_equals((string_address)settings_rows[remove].usage, (string_address) "desktop autostart remove PROGRAM"));
-        check("autostart: the list row reads what the verb says, and none",
-              settings_parsed((unsigned int)list, "[Moonwater] autostart /klog /terminal\n", value) == SETTINGS_READ &&
-                  string_equals((string_address)value, (string_address) "/klog /terminal") &&
-                  settings_parsed((unsigned int)list, "[Moonwater] autostart none\n", value) == SETTINGS_READ &&
-                  string_equals((string_address)value, (string_address) "none"));
-        count = settings_command(&settings_rows[list], (string_address) "/moonwater", "/klog /bin/x", words, SETTINGS_WORDS, false);
-        check("autostart: the list typed is the words of desktop autostart, a program each",
-              count == 5 && string_equals(words[1], (string_address) "desktop") && string_equals(words[2], (string_address) "autostart") &&
-                  string_equals(words[3], (string_address) "/klog") && string_equals(words[4], (string_address) "/bin/x") && !words[5]);
-        count = settings_command(&settings_rows[add], (string_address) "/moonwater", "/bin/x", words, SETTINGS_WORDS, false);
-        check("autostart: a program added is desktop autostart add and its path",
-              count == 5 && string_equals(words[3], (string_address) "add") && string_equals(words[4], (string_address) "/bin/x") && !words[5]);
-        count = settings_command(&settings_rows[remove], (string_address) "/moonwater", "/klog", words, SETTINGS_WORDS, false);
-        check("autostart: and one taken out is desktop autostart remove and its path",
-              count == 5 && string_equals(words[3], (string_address) "remove") && string_equals(words[4], (string_address) "/klog") && !words[5]);
+// The startup jobs waiting (settings_startup_ask), a job's words a blank apart and the jobs a | apart.
+static fn startup_jobs_said(char address_to into, positive room)
+{
+        positive made = 0;
+        into[0] = 0;
+        for (positive at = 0; at < settings.startup_jobs_used && made + 2 < room; at++)
+        {
+                char c = settings.startup_jobs[at];
+                if (c)
+                        into[made++] = c;
+                else if (at + 1 < settings.startup_jobs_used && settings.startup_jobs[at + 1])
+                        into[made++] = ' ';
+                else if (at + 2 < settings.startup_jobs_used)
+                        into[made++] = '|', at++;
+        }
+        into[made] = 0;
+}
+
+/*
+        The Boot group's list is desktop startup's (settings_feed_startup): its entries in their order, one ordered group with a grip, a
+        remove button and a switch each, an app by its picture (its symbol until the picture is made) and its name with its command the
+        note, a command by the terminal's symbol and itself, and after them the add row with its two ways. What the person does is the
+        verb's words, places from 1, kept in order and none merged: a move by the kit (a drag) and by Alt+Down, a remove by Delete, a
+        switch turned, a command typed (longer than any of the window's other buffers, whole) and the picker's line.
+*/
+static fn check_startup_table(void)
+{
+        static const char said[] = "[Moonwater] startup 1 on app settings /settings\n"
+                                   "\x1b[1m[Moonwater]\x1b[0m startup 2 off command echo hi | tr a-z A-Z\n"
+                                   "[Moonwater] startup 3 on app gone.App /bowls/bin/gone --x\n";
+        static char typed[400], jobs[1200];
+        struct ui_row row;
+        struct window_event key = {0};
+        const struct settings_item address_to items;
+        int first = SETTINGS_LIST_ID(SETTINGS_STARTUP_LIST, 0), group, was_job = settings.job, add_row;
+        bipolar was_child = settings.runner.child;
+        b32 described, unbounded;
+
+        // No job begins here: the runner is held busy (and no feed is under way, which a change would end).
+        settings.runner.child = 1, settings.job = 0, settings.startup_jobs_used = 0;
+        memory_copy(settings_large->said, said, sizeof(said) - 1), settings.runner.length = sizeof(said) - 1, settings.runner.cut_lines = 0;
+        settings_feed_startup();
+        items = settings.item[SETTINGS_STARTUP_LIST];
+        check("startup table: the Boot group's feed is desktop startup's, read into its entries in order and the add row after them",
+              string_equals((string_address)settings_feeds[SETTINGS_STARTUP_LIST].group, (string_address) "Boot") &&
+                  string_equals((string_address)settings_feeds[SETTINGS_STARTUP_LIST].read[1], (string_address) "startup") &&
+                  settings.item_count[SETTINGS_STARTUP_LIST] == 4 && items[0].kind == SETTINGS_STARTUP && items[1].kind == SETTINGS_STARTUP &&
+                  items[2].kind == SETTINGS_STARTUP && items[3].kind == SETTINGS_ADD && items[0].app == ui_apps_find("settings") && items[0].app >= 0 &&
+                  items[1].app < 0 && items[2].app < 0 && string_equals((string_address)items[2].label, (string_address) "gone.App"));
+        memory_zero(&row, sizeof(row)), settings_describe(first, &row);
+        described = row.order == SETTINGS_STARTUP_ORDER && row.remove && row.kind == UI_ROW_SWITCH && row.on && row.tile_picture &&
+                    (row.icon || row.tile_name) && string_equals((string_address)row.label, (string_address) "Settings") &&
+                    string_equals((string_address)row.note, (string_address) "/settings");
+        check("startup table: an app is one of the ordered group, with a remove button, a switch on, its picture, its name and its command the note", described);
+        memory_zero(&row, sizeof(row)), settings_describe(first + 1, &row);
+        check("startup table: a command (its line's terminal escapes out) is the terminal's symbol and itself, its switch off",
+              row.order == SETTINGS_STARTUP_ORDER && row.remove && row.kind == UI_ROW_SWITCH && !row.on && row.icon == UI_ICON_TERMINAL + 1 &&
+                  !row.tile_picture && !row.note && string_equals((string_address)row.label, (string_address) "echo hi | tr a-z A-Z"));
+        memory_zero(&row, sizeof(row)), settings_describe(first + 3, &row);
+        check("startup table: the add row adds a program or a command, its two ways a program and a command, and is no entry",
+              row.kind == UI_ROW_ADD && !row.order && !row.remove && string_equals((string_address)row.words, (string_address) "Program|Command") &&
+                  string_equals((string_address)row.label, (string_address) "Add a program or command") &&
+                  string_equals((string_address)settings_text(first + 3), (string_address)WORDS(settings_startup_add_keys)));
+
+        // The person's changes, on the Boot group as it is shown.
+        group = settings_group_of(first), settings.page.chosen = group, settings.page.pane = 1, settings.page.menu_row = -1;
+        settings_rebuild();
+        settings.list.moved = true, settings.list.moved_from = 0, settings.list.moved_to = 2, settings.list.moved_order = SETTINGS_STARTUP_ORDER;
+        settings_managed();
+        check("startup table: a drag of the first past the third is move 1 3, and the list is in that order at once, the keys on it",
+              settings.startup_jobs_used && (startup_jobs_said(jobs, sizeof(jobs)), string_equals((string_address)jobs, (string_address) "move 1 3")) &&
+                  items[2].app == ui_apps_find("settings") && items[0].app < 0 && settings.list.focus == first + 2);
+        settings.list.focus = first;
+        key.type = WINDOW_EVENT_KEY, key.flags = WINDOW_KEY_DOWN | WINDOW_KEY_ALT, key.a = UI_KEY_DOWN;
+        settings_key(&key);
+        key.flags = WINDOW_KEY_DOWN, key.a = UI_KEY_DELETE, settings.list.focus = first;
+        settings_key(&key);
+        settings_startup_apply(SETTINGS_STARTUP_TURN, 0, 0);
+        described = settings_startup_entries() == 2 && settings_startup_entry(&items[0], &(struct setting_startup){0}) &&
+                    settings.startup_text[items[0].line_at] == 'o' && settings.startup_text[items[0].line_at + 1] == 'n' &&
+                    settings.startup_text[items[0].line_at + 2] == ' ';
+        settings.list.focus = first;
+        settings_key(&key);
+        startup_jobs_said(jobs, sizeof(jobs));
+        check("startup table: Alt+Down is move 1 2, Delete is remove 1, the switch is on 1, each after the one before, and the same verb twice is two",
+              described && string_equals((string_address)jobs, (string_address) "move 1 3|move 1 2|remove 1|on 1|remove 1") && settings_startup_entries() == 1);
+        settings.startup_jobs_used = 0;
+        // A command typed in the add row: the field has no most, and the whole line is asked.
+        for (positive at = 0; at + 1 < sizeof(typed); at++)
+                typed[at] = at % 10 == 9 ? ' ' : (char)('a' + at % 26);
+        typed[sizeof(typed) - 1] = 0;
+        add_row = SETTINGS_LIST_ID(SETTINGS_STARTUP_LIST, settings.item_count[SETTINGS_STARTUP_LIST] - 1);
+        settings_startup_way(add_row, 1);
+        unbounded = settings_editing() == add_row && settings.edit.most == 0;
+        memory_zero(&row, sizeof(row)), settings_describe(add_row, &row);
+        unbounded &= row.kind == UI_ROW_FIELD && string_equals((string_address)row.label, (string_address) "Command");
+        ui_text_set(&settings.edit, (const p8 address_to)typed, sizeof(typed) - 1);
+        settings_edit_commit();
+        startup_jobs_said(jobs, sizeof(jobs));
+        check("startup table: the Command way is the add row as a field with no most, and what is typed (399 bytes) is add command and all of it",
+              unbounded && settings_editing() < 0 && !memory_compare(jobs, "add command ", 12) && string_length((string_address)jobs) == 12 + 399 &&
+                  !memory_compare(jobs + 12, typed, 399));
+        settings.startup_jobs_used = 0;
+        {
+                char line[] = "org.example.Tool\t/bowls/bin/tool '--name=It'\\''s here'\n", none[] = "no tab here\n";
+                b32 taken = settings_picker_take(line, sizeof(line) - 1), refused = !settings_picker_take(none, sizeof(none) - 1);
+                startup_jobs_said(jobs, sizeof(jobs));
+                check("startup table: the picker's line is add app, its id and its command whole; a line with no tab is none",
+                      taken && refused && string_equals((string_address)jobs, (string_address) "add app org.example.Tool /bowls/bin/tool '--name=It'\\''s here'"));
+        }
+        settings.startup_jobs_used = 0, settings.item_count[SETTINGS_STARTUP_LIST] = 0, settings.runner.length = 0;
+        settings.runner.child = was_child, settings.job = was_job;
+        settings.page.chosen = 0, settings_rebuild();
 }
 
 /*
@@ -1606,6 +1700,7 @@ static fn check_settings(string_address regular, string_address bold)
         // After the map: a list typed is split in the window's own buffers.
         check_autostart();
         check_startup_entry();
+        check_startup_table();
         char value[SETTINGS_VALUE], next[SETTINGS_VALUE];
         string_address words[SETTINGS_WORDS];
 
@@ -3236,15 +3331,17 @@ static fn check_settings(string_address regular, string_address bold)
                                   string_equals((string_address)settings_group_name(wifi_group), (string_address) "Wi-Fi") &&
                                   string_equals((string_address)settings_group_name(bt_group), (string_address) "Bluetooth"));
                         settings.page.chosen = wifi_group;
-                        // The table of feeds (settings_feeds) is Wi-Fi, Bluetooth, Devices, Waterlink, Power, Time and Network, in that order.
-                        check("settings: the feeds are of Wi-Fi, Bluetooth, Devices, Waterlink, Power, Time and Network and no others",
+                        // The table of feeds (settings_feeds) is Wi-Fi, Bluetooth, Devices, Waterlink, Boot, Power, Time and Network, in that order:
+                        // the first five are lists, each feed's place its list's.
+                        check("settings: the feeds are of Wi-Fi, Bluetooth, Devices, Waterlink, Boot, Power, Time and Network and no others",
                               settings_feed_of_group() == 0 && (settings.page.chosen = bt_group, settings_feed_of_group() == 1) &&
                                   (settings.page.chosen = settings_group_of(settings_row_named("New devices")), settings_feed_of_group() == 2) &&
                                   (settings.page.chosen = settings_group_of(settings_row_named("Pair a machine")), settings_feed_of_group() == 3) &&
-                                  (settings.page.chosen = settings_group_of(battery), settings_feed_of_group() == 4) &&
-                                  (settings.page.chosen = settings_group_of(clock_row), settings_feed_of_group() == 5) &&
-                                  (settings.page.chosen = settings_group_of(settings_row_named("Wired IP address")), settings_feed_of_group() == 6) &&
-                                  (settings.page.chosen = 0, settings_feed_of_group() < 0));
+                                  (settings.page.chosen = settings_group_of(settings_row_named("Start the desktop")), settings_feed_of_group() == SETTINGS_STARTUP_LIST) &&
+                                  (settings.page.chosen = settings_group_of(battery), settings_feed_of_group() == 5) &&
+                                  (settings.page.chosen = settings_group_of(clock_row), settings_feed_of_group() == 6) &&
+                                  (settings.page.chosen = settings_group_of(settings_row_named("Wired IP address")), settings_feed_of_group() == 7) &&
+                                  (settings.page.chosen = 0, settings_feed_of_group() < 0) && SETTINGS_FEEDS == 8);
 
                         // What moonwater wifi says, as the list: marker, name (with blanks), dBm, bars, what it asks for.
                         settings.page.chosen = wifi_group;

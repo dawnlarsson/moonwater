@@ -408,6 +408,13 @@ settings_size_kept	7101	Kept %d × %d
 settings_size_own	810e	its own size
 settings_size_plain	9453	%d × %d
 settings_size_refused	20a9	The screen did not take %d × %d: back to %s
+settings_startup_add	f281	Add a program or command
+settings_startup_add_keys	901e	Enter adds a program of the start menu, or a command
+settings_startup_command	8f52	Command
+settings_startup_hint	df62	a command line, run as typed
+settings_startup_keys	8875	Enter turns it on or off; Alt+Up and Alt+Down move it; Delete takes it out
+settings_startup_program	3b6b	Program
+settings_startup_type	3e44	type a command line: Enter starts it with the desktop, Escape leaves it
 settings_state_allowed	e443	allowed
 settings_state_blocked	6eb3	blocked
 settings_state_view_only	031a	view only
@@ -489,7 +496,6 @@ ui_field_full	fe02	that is as much as it holds
 =Accent	ccd7	Accent
 =Accent colour (rrggbb or reset)	53aa	Accent colour (rrggbb or reset)
 =Add a key (label, then the public key)	e2e3	Add a key (label, then the public key)
-=Add a program to start (its path)	5e20	Add a program to start (its path)
 =Airplane mode	3b8a	Airplane mode
 =All commands	4a42	All commands
 =Allow recording	f7e5	Allow recording
@@ -603,7 +609,6 @@ ui_field_full	fe02	that is as much as it holds
 =Notices	8f06	Notices
 =On-screen keyboard	97f8	On-screen keyboard
 =Open windows where they were last put	8711	Open windows where they were last put
-=Opened in this order when the desktop starts; none starts it with no windows	5790	Opened in this order when the desktop starts; none starts it with no windows
 =Output device (name, or default)	d73c	Output device (name, or default)
 =Pair a machine	b39b	Pair a machine
 =Paths	263f	Paths
@@ -626,7 +631,6 @@ ui_field_full	fe02	that is as much as it holds
 =Purge unconnected links	5c67	Purge unconnected links
 =Refresh rate	bf6e	Refresh rate
 =Remembered devices	abbc	Remembered devices
-=Remove a program from the start (its path)	1013	Remove a program from the start (its path)
 =Resize border width (pixels, or default)	7fdf	Resize border width (pixels, or default)
 =Resize grip (pixels, or default)	dddd	Resize grip (pixels, or default)
 =Resolution	18af	Resolution

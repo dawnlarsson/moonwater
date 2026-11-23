@@ -7,6 +7,7 @@
 # machine-made 2026-11-22 (two registry texts that had no keyed line), not yet read by a person: =Purge unconnected links =The screen backlight, from 0 to 100 percent. ...
 # machine-made 2026-11-22 (a registry text that had no keyed line), not yet read by a person: =An experimental speed-up. ...
 # machine-made 2026-11-22 (the Waterlink words of Settings), not yet read by a person: settings_link_address settings_link_disabled settings_link_files settings_link_files_about settings_link_group settings_link_latency settings_link_log settings_link_log_about settings_link_mismatch settings_link_no_key settings_link_offline settings_link_online settings_link_run settings_link_run_about settings_link_self settings_link_shell settings_link_shell_about settings_link_traffic
+# machine-made 2026-11-23 (the startup programs of Settings), not yet read by a person: settings_startup_add settings_startup_add_keys settings_startup_command settings_startup_hint settings_startup_keys settings_startup_program settings_startup_type
 @language pt
 @name Português
 @translated machine
@@ -417,6 +418,13 @@ settings_size_kept	7101	Mantido %d × %d
 settings_size_own	810e	o seu próprio tamanho
 settings_size_plain	9453	%d × %d
 settings_size_refused	20a9	O ecrã não aceitou %d × %d: volta para %s
+settings_startup_add	f281	Adicionar um programa ou um comando
+settings_startup_add_keys	901e	Enter adiciona um programa do menu Iniciar ou um comando
+settings_startup_command	8f52	Comando
+settings_startup_hint	df62	uma linha de comandos, executada tal como foi escrita
+settings_startup_keys	8875	Enter liga-o ou desliga-o; Alt+Cima e Alt+Baixo movem-no; Delete retira-o
+settings_startup_program	3b6b	Programa
+settings_startup_type	3e44	escreva uma linha de comandos: Enter inicia-a com o ambiente de trabalho, Escape deixa
 settings_state_allowed	e443	permitido
 settings_state_blocked	6eb3	bloqueado
 settings_state_view_only	031a	apenas visualização
@@ -498,7 +506,6 @@ ui_field_full	fe02	não cabe mais que isso
 =Accent	ccd7	Destaque
 =Accent colour (rrggbb or reset)	53aa	Cor de destaque (rrggbb ou reset)
 =Add a key (label, then the public key)	e2e3	Adicionar uma chave (rótulo e a chave pública)
-=Add a program to start (its path)	5e20	Adicionar um programa ao início (o seu caminho)
 =Airplane mode	3b8a	Modo avião
 =All commands	4a42	Todos os comandos
 =Allow recording	f7e5	Permitir gravação
@@ -612,7 +619,6 @@ ui_field_full	fe02	não cabe mais que isso
 =Notices	8f06	Avisos
 =On-screen keyboard	97f8	Teclado na tela
 =Open windows where they were last put	8711	Abrir janelas onde foram deixadas
-=Opened in this order when the desktop starts; none starts it with no windows	5790	Abertos por esta ordem quando a área de trabalho inicia; none inicia-a sem janelas
 =Output device (name, or default)	d73c	Dispositivo de saída (nome ou default)
 =Pair a machine	b39b	Parear uma máquina
 =Paths	263f	Caminhos
@@ -635,7 +641,6 @@ ui_field_full	fe02	não cabe mais que isso
 =Purge unconnected links	5c67	Remover as máquinas não conectadas
 =Refresh rate	bf6e	Taxa de atualização
 =Remembered devices	abbc	Dispositivos lembrados
-=Remove a program from the start (its path)	1013	Remover um programa do início (o seu caminho)
 =Resize border width (pixels, or default)	7fdf	Largura da borda de redimensionamento (pixels ou default)
 =Resize grip (pixels, or default)	dddd	Alça de redimensionamento (pixels ou default)
 =Resolution	18af	Resolução

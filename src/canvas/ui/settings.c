@@ -45,12 +45,15 @@ enum { SETTINGS_UNREAD = 0u, SETTINGS_READ = 1u, SETTINGS_ABSENT = 2u, SETTINGS_
 #define SETTINGS_JOB_FEED -3
 #define SETTINGS_JOB_ACT -4
 #define SETTINGS_JOB_IDENTIFY -5
+#define SETTINGS_JOB_STARTUP -6 // the next of the person's changes to desktop startup (settings_startup_ask)
 #define SETTINGS_ANY ((int)SETTINGS_ROWS)
 #define SETTINGS_ALL_HEADER "All commands"
 #define SETTINGS_EXTERNAL_HEADER "External devices"
 
-enum { SETTINGS_FEED_ROWS = 1u, SETTINGS_FEED_WIFI, SETTINGS_FEED_DEVICES, SETTINGS_FEED_HARDWARE, SETTINGS_FEED_LINKS };
-#define SETTINGS_LISTS 4
+enum { SETTINGS_FEED_ROWS = 1u, SETTINGS_FEED_WIFI, SETTINGS_FEED_DEVICES, SETTINGS_FEED_HARDWARE, SETTINGS_FEED_LINKS, SETTINGS_FEED_STARTUP };
+#define SETTINGS_LISTS 5
+#define SETTINGS_STARTUP_LIST 4  // the Boot group's: what the desktop starts with it (desktop startup), the person's to order
+#define SETTINGS_STARTUP_ORDER 1 // and its entries are one ordered group of the kit's (ui_row.order)
 #define SETTINGS_LIST_STEP 0x040000 // sparse ID stride per dynamic live list (262,144 items/list)
 #define SETTINGS_ITEM_LABEL 96
 #define SETTINGS_FEED_WAIT_NS 8000000000ll
@@ -86,6 +89,7 @@ static const struct settings_feed settings_feeds[] = {
     {"Bluetooth", "Bluetooth", {"bluetooth"}, "Remembered devices", 3000, SETTINGS_FEED_DEVICES},
     {"Devices", null, {"device", "list"}, "Internal storage", 3000, SETTINGS_FEED_HARDWARE},
     {"Waterlink", "Waterlink", {"link"}, "Linked machines", 500, SETTINGS_FEED_LINKS},
+    {"Boot", null, {"desktop", "startup"}, "Programs started with the desktop", 3000, SETTINGS_FEED_STARTUP},
     {"Power", null, {null}, null, 2000, SETTINGS_FEED_ROWS},
     {"Time", null, {null}, null, 1000, SETTINGS_FEED_ROWS},
     {"Network", null, {null}, null, 2000, SETTINGS_FEED_ROWS},
@@ -107,6 +111,10 @@ struct settings_item
         unsigned char bars, flags, kind, where, segment_count, grants, link_state;
         unsigned short segment_more;
         int drive_idx;
+        // A startup entry's (SETTINGS_STARTUP): where its line is in settings.startup_text, whole and ended by a 0, and the registry's
+        // entry its app's id names (ui_apps, -1 none: a command, or an app that is not installed now).
+        positive line_at;
+        int app;
         unsigned char address_to segment_role;
         unsigned long long address_to segment_bytes, total;
         char (address_to segment_name)[SETTINGS_SEGMENT_NAME];
@@ -378,6 +386,16 @@ static struct
         struct ui_job runner;
         struct settings_change address_to queue;
         struct settings_map map;
+        // The startup list's lines (settings_feed_startup) and the person's changes to it that wait for the runner (settings_startup_ask),
+        // each grown as it fills: nothing cuts an entry or a command line typed.
+        char address_to startup_text, address_to startup_jobs;
+        positive startup_used, startup_room, startup_jobs_used, startup_jobs_room;
+        int ways; // the add row (plus one) whose ways are the menu open (ui_list_ways), 0 none
+        // The program picker (launcher -p) while it is up: its pid, the read end of its output and the line it says, grown as it comes.
+        bipolar picker;
+        int picker_out;
+        char address_to picked;
+        positive picked_used, picked_room;
 } settings;
 
 static struct settings_large
@@ -792,6 +810,20 @@ static struct settings_item address_to settings_item(int row)
         return list >= 0 && list < SETTINGS_LISTS && at >= 0 && at < settings.item_count[list] ? &settings.item[list][at] : null;
 }
 
+// A startup entry taken apart from its line (registry.c's setting_startup_entry); its command runs to the line's end, which is a 0.
+static b32 settings_startup_entry(const struct settings_item address_to it, struct setting_startup address_to e)
+{
+        const char address_to line = it && it->kind == SETTINGS_STARTUP && settings.startup_text ? settings.startup_text + it->line_at : "";
+        return setting_startup_entry(line, string_length((string_address)line), e);
+}
+
+// What a startup entry is called: an app by its name (the item's label, made when the feed was read), a command by itself, whole.
+static const char address_to settings_startup_label(const struct settings_item address_to it)
+{
+        struct setting_startup e;
+        return !settings_startup_entry(it, &e) ? "" : e.app ? it->label : e.command;
+}
+
 static const char address_to settings_label_get(int row, b32 shown)
 {
         int at;
@@ -799,7 +831,12 @@ static const char address_to settings_label_get(int row, b32 shown)
         {
         case SETTINGS_DOM_ROW:     return shown ? language_of(settings_rows[at].label) : settings_rows[at].label;
         case SETTINGS_DOM_COMMAND: return at > 0 ? settings_large->pool + settings.generic[at - 1].command : WORDS(settings_run_any);
-        case SETTINGS_DOM_LIST:    { const struct settings_item address_to it = settings_item(row); return !it ? WORDS(settings_run_any) : shown && it->kind == SETTINGS_ADD ? language_of(it->label) : it->label; }
+        case SETTINGS_DOM_LIST:
+        {
+                const struct settings_item address_to it = settings_item(row);
+                return !it ? WORDS(settings_run_any) : it->kind == SETTINGS_STARTUP ? settings_startup_label(it)
+                       : shown && it->kind == SETTINGS_ADD ? language_of(it->label) : it->label;
+        }
         case SETTINGS_DOM_ABOUT:   return shown ? settings_about_label(at) : WORDS(settings_run_any);
         default:                   return WORDS(settings_run_any);
         }
@@ -829,8 +866,19 @@ static const char address_to settings_label_window(int row)
         return settings_large->label_cut[row];
 }
 
+// Whether an item is the startup list's (its entries, its add row).
+static b32 settings_item_startup(const struct settings_item address_to item)
+{
+        const struct settings_item address_to first = settings.item[SETTINGS_STARTUP_LIST];
+        return first && item >= first && item < first + settings.item_count[SETTINGS_STARTUP_LIST];
+}
+
 static const char address_to settings_item_text(const struct settings_item address_to item)
 {
+        if (item->kind == SETTINGS_STARTUP)
+                return WORDS(settings_startup_keys);
+        if (item->kind == SETTINGS_ADD && settings_item_startup(item))
+                return WORDS(settings_startup_add_keys);
         if (item->kind == SETTINGS_NETWORK)
                 return item->flags & SETTINGS_ITEM_JOINED ? WORDS(settings_item_joined)
                        : item->flags & SETTINGS_ITEM_CANNOT ? WORDS(settings_item_cannot)
@@ -2123,6 +2171,7 @@ static positive settings_not_understood(void)
         return failed;
 }
 
+static b32 settings_startup_start(void);
 static fn settings_next_job(void)
 {
         string_address words[SETTINGS_WORDS];
@@ -2136,6 +2185,8 @@ static fn settings_next_job(void)
                         memory_copy(settings.queue, settings.queue + 1, (--settings.queued) * sizeof(settings.queue[0]));
                         settings_wipe(&settings.queue[settings.queued], sizeof(settings.queue[0]));
                 }
+                else if (settings.startup_jobs_used)
+                        settings.job = SETTINGS_JOB_STARTUP, settings.job_sets = true;
                 else if (settings_unread_any())
                 {
                         positive first = 0;
@@ -2157,6 +2208,12 @@ static fn settings_next_job(void)
                         b32 started = words[0] && settings_start(words, words[4] ? 5 : 4, pass);
                         settings_wipe(settings.job_value, sizeof(settings.job_value));
                         if (started) return;
+                        count = 0;
+                }
+                else if (settings.job == SETTINGS_JOB_STARTUP)
+                {
+                        if (settings_startup_start())
+                                return;
                         count = 0;
                 }
                 else if (settings.job >= SETTINGS_ANY)
@@ -2288,7 +2345,7 @@ static struct settings_item address_to settings_item_slot(int list, positive at)
                 if (!array_store_reserve(settings.item[list], settings.item_room[list], at, at + 1, 32))
                         return null;
         memory_zero(&settings.item[list][at], sizeof(settings.item[list][at]));
-        settings.item[list][at].drive_idx = -1;
+        settings.item[list][at].drive_idx = -1, settings.item[list][at].app = -1;
         return &settings.item[list][at];
 }
 
@@ -2898,6 +2955,93 @@ static fn settings_feed_links(void)
         settings.item_count[3] = (int)count, settings_link_follow();
 }
 
+// A line kept in settings.startup_text as settings_keep keeps one (a terminal's escapes out, a tab a blank, no other control byte), ended
+// by a 0: where it starts, or the room's end when it could not grow.
+static positive settings_startup_keep(const char address_to text, positive size)
+{
+        positive at = settings.startup_used, made = at;
+        if (!array_store_reserve(settings.startup_text, settings.startup_room, at, at + size + 1, 4096))
+                return settings.startup_room;
+        for (positive k = 0; k < size;)
+        {
+                char c = text[k++];
+                if (c == 0x1b)
+                {
+                        if (k < size && text[k] == '[')
+                                for (k++; k < size && (text[k] < 0x40 || text[k] > 0x7e); k++)
+                                        ;
+                        k += k < size;
+                        continue;
+                }
+                if (c == '\t')
+                        c = ' ';
+                if ((unsigned char)c >= ' ' && c != 0x7f)
+                        settings.startup_text[made++] = c;
+        }
+        settings.startup_text[made] = 0, settings.startup_used = made + 1;
+        return at;
+}
+
+/*
+        The Boot group's list, as desktop startup says it: a line each, "startup N LINE" (N from 1, LINE an entry: registry.c's
+        setting_startup_entry) or "startup none", the runner's label before each. An entry is an item in its place, its line kept whole in
+        settings.startup_text (no line is cut: it grows as it fills; a control byte in it is a blank, as settings_keep makes one); after
+        them a note of the lines the runner did not keep, where it cut its output, and the add row. An app's id is looked up in the
+        registry (ui_apps, read again where its directories changed): its name, as a stranger's words are written, is the item's label.
+*/
+static fn settings_feed_startup(void)
+{
+        const char address_to said = settings_large->said;
+        positive length = settings.runner.length, at = 0, count = 0;
+
+        settings.startup_used = 0;
+        ui_apps_fresh(ui_kit_time());
+        while (at < length)
+        {
+                positive start = at, kept, skip;
+                struct settings_cursor c;
+                struct setting_startup e;
+                struct settings_item address_to it;
+
+                while (at < length && said[at] != '\n')
+                        at++;
+                kept = settings_startup_keep(said + start, at - start), at += at < length;
+                if (kept >= settings.startup_room)
+                        continue;
+                c.s = settings.startup_text + kept, c.n = string_length((string_address)c.s);
+                skip = settings_label_length(c.s, c.n), c.s += skip, c.n -= skip;
+                sc_spaces(&c);
+                if (!sc_eat(&c, "startup") || !c.n || c.s[0] != ' ' || (sc_spaces(&c), !c.n) || c.s[0] < '1' || c.s[0] > '9' ||
+                    (sc_u64(&c, 0), sc_spaces(&c), !setting_startup_entry(c.s, c.n, &e)) || !(it = settings_item_slot(SETTINGS_STARTUP_LIST, count)))
+                {
+                        settings.startup_used = kept;
+                        continue;
+                }
+                it->kind = SETTINGS_STARTUP, it->line_at = (positive)(c.s - settings.startup_text), count++;
+                if (e.app)
+                {
+                        char id[WINDOWS_APP_ID];
+                        it->app = e.id_length < sizeof(id) ? (settings_slice(id, sizeof(id), e.id, e.id_length), ui_apps_find(id)) : -1;
+                        if (it->app >= 0)
+                                ui_label_foreign(it->label, sizeof(it->label), (const p8 address_to)ui_apps_name(it->app), string_length((string_address)ui_apps_name(it->app)));
+                        else
+                                ui_label_foreign(it->label, sizeof(it->label), (const p8 address_to)e.id, e.id_length);
+                }
+        }
+        if (settings.runner.cut_lines)
+        {
+                char note[SETTINGS_ITEM_LABEL];
+                language_format(note, sizeof(note), WORDS(settings_not_shown), (long)settings.runner.cut_lines);
+                settings_note_add(SETTINGS_STARTUP_LIST, &count, 0, note, string_length((string_address)note));
+        }
+        {
+                struct settings_item address_to add = settings_item_slot(SETTINGS_STARTUP_LIST, count);
+                if (add)
+                        add->kind = SETTINGS_ADD, settings_item_label(add, WORDS(settings_startup_add), string_length((string_address)WORDS(settings_startup_add))), count++;
+        }
+        settings.item_count[SETTINGS_STARTUP_LIST] = (int)count;
+}
+
 static struct ui_columns address_to settings_columns_for(int list)
 {
         static const struct { unsigned char count, at_end; unsigned short w[4]; unsigned int title_id[4]; } specs[SETTINGS_LISTS] = {
@@ -2905,6 +3049,7 @@ static struct ui_columns address_to settings_columns_for(int list)
             {2, 1, {0, 100, 0, 0},    {LANGUAGE_files_column_name, LANGUAGE_settings_column_status, 0, 0}},
             {4, 3, {0, 108, 84, 128}, {LANGUAGE_files_column_name, 0, LANGUAGE_settings_column_status, LANGUAGE_settings_column_access}},
             {3, 0, {0, 150, 140, 0},  {LANGUAGE_files_column_name, LANGUAGE_settings_column_access, LANGUAGE_settings_column_status, 0}},
+            {0, 0, {0, 0, 0, 0},      {0, 0, 0, 0}}, // the startup list's: no columns, its order is the person's
         };
         struct ui_columns address_to c;
         if (!settings_large || list < 0 || list >= SETTINGS_LISTS)
@@ -2940,7 +3085,7 @@ static int settings_list_compare(int list, int col, const struct settings_item a
         return cmp ? cmp : (int)string_compare_folded((string_address)a->label, (string_address)b->label);
 }
 
-static b32 settings_item_sortable(int list, const struct settings_item address_to it) { return it->kind != SETTINGS_NOTE && it->kind != SETTINGS_ADD && (list != 2 || settings_device_section(it) == 1) && (list != 3 || it->where == 1); }
+static b32 settings_item_sortable(int list, const struct settings_item address_to it) { return it->kind != SETTINGS_NOTE && it->kind != SETTINGS_ADD && list != SETTINGS_STARTUP_LIST && (list != 2 || settings_device_section(it) == 1) && (list != 3 || it->where == 1); }
 
 /* The sort of a list's column: the kit orders the ids of each run of sortable items of one list (ui_list_order_range); the items
    themselves do not move, so the rows keep their ids and the section adjacency the items keep. */
@@ -2979,7 +3124,8 @@ static fn settings_sort_runs(void)
 static fn settings_focus_keep(int list, char address_to keep, positive room)
 {
         keep[0] = 0;
-        if (settings_list_of(settings.list.focus) == list && settings_item(settings.list.focus))
+        // The startup list's entries may name one app twice: the keys stay on the place, which the person's changes keep (settings_startup_apply).
+        if (settings_list_of(settings.list.focus) == list && list != SETTINGS_STARTUP_LIST && settings_item(settings.list.focus))
                 string_copy_bounded((string_address)keep, (string_address)settings_item(settings.list.focus)->label, room);
 }
 
@@ -3007,6 +3153,8 @@ static positive settings_list_sum(int list)
                 sum = settings_fnv64_bytes(sum, settings.item[list], (positive)settings.item_count[list] * sizeof(settings.item[list][0]));
         if (list == 2 && settings.drive && settings.drive_count > 0)
                 sum = settings_fnv64_bytes(sum, settings.drive, settings.drive_count * sizeof(settings.drive[0]));
+        if (list == SETTINGS_STARTUP_LIST && settings.startup_text)
+                sum = settings_fnv64_bytes(sum, settings.startup_text, settings.startup_used);
         return sum ^ (positive)settings.item_count[list];
 }
 
@@ -3020,7 +3168,8 @@ static int settings_feed_of_group(void)
 
 static fn settings_feed_read(b32 killed, b32 failed)
 {
-        static fn (*const parsers[])(void) = {[SETTINGS_FEED_WIFI] = settings_feed_wifi, [SETTINGS_FEED_DEVICES] = settings_feed_devices, [SETTINGS_FEED_HARDWARE] = settings_feed_hardware, [SETTINGS_FEED_LINKS] = settings_feed_links};
+        static fn (*const parsers[])(void) = {[SETTINGS_FEED_WIFI] = settings_feed_wifi, [SETTINGS_FEED_DEVICES] = settings_feed_devices, [SETTINGS_FEED_HARDWARE] = settings_feed_hardware,
+                                              [SETTINGS_FEED_LINKS] = settings_feed_links, [SETTINGS_FEED_STARTUP] = settings_feed_startup};
         int feed = settings.feed_list, list = feed, owner = -1, at;
         char keep[SETTINGS_ITEM_LABEL];
         positive before;
@@ -3064,7 +3213,8 @@ static long settings_feed_tick(void)
         positive now = (positive)ui_kit.now, count = 1;
         string_address words[SETTINGS_WORDS];
         if (feed < 0 || settings.page.card || settings_editing() >= 0 || settings_filter_length() ||
-            (settings.own.table && (settings.own.table->state[settings.own.row] & WINDOW_MINIMIZED)) || settings.runner.child > 0 || settings.queued || settings_unread_any() || settings.help == 1)
+            (settings.own.table && (settings.own.table->state[settings.own.row] & WINDOW_MINIMIZED)) || settings.runner.child > 0 || settings.queued || settings.startup_jobs_used ||
+            settings_unread_any() || settings.help == 1)
                 return -1;
         if (now < settings.feed_due)
                 return (long)(settings.feed_due - now);
@@ -3175,11 +3325,14 @@ static fn settings_waiting_say(void)
         }
 }
 
+static fn settings_startup_done(b32 killed, positive status);
 static fn settings_complete(b32 killed, positive status)
 {
         int row = settings.job;
         b32 action = settings.job_sets && settings_action_row(row);
-        if (settings.job_sets)
+        if (row == SETTINGS_JOB_STARTUP)
+                settings_startup_done(killed, status);
+        else if (settings.job_sets)
         {
                 char line[SETTINGS_STATUS];
                 if (row >= SETTINGS_ANY)
@@ -3262,6 +3415,254 @@ static b32 settings_run(int row, const char address_to args)
 }
 
 static b32 settings_stop(void) { return settings.runner.child > 0 && settings.job_sets && settings.job >= SETTINGS_ANY ? (settings_finished(true), true) : false; }
+
+/* ---- the startup list: the person's changes as verbs of desktop startup, and the program picker ---- */
+
+/*
+        A change of the person's to the startup list: the words after desktop startup, kept as a job (each word ended by a 0, and an empty
+        word after the last) until the runner takes it, after Settings' own changes (settings_next_job). The jobs are kept in order and
+        never merged, as the queue merges a row's: each is said of the list as the person saw it then, which is what the items are (each
+        change is made to them at once, settings_startup_apply), so the verbs one after another leave the file as the person left the list.
+*/
+static fn settings_startup_ask(const char address_to const address_to words, positive count)
+{
+        positive need = settings.startup_jobs_used + 1;
+        for (positive w = 0; w < count; w++)
+                need += string_length((string_address)words[w]) + 1;
+        if (!array_store_reserve(settings.startup_jobs, settings.startup_jobs_room, settings.startup_jobs_used, need, 256))
+                return settings_say((string_address)WORDS(settings_busy));
+        for (positive w = 0; w < count; w++)
+        {
+                positive size = string_length((string_address)words[w]) + 1;
+                memory_copy(settings.startup_jobs + settings.startup_jobs_used, words[w], size), settings.startup_jobs_used += size;
+        }
+        settings.startup_jobs[settings.startup_jobs_used++] = 0;
+        settings_feed_drop(), settings_say((string_address) ""), settings_next_job();
+}
+
+/*
+        The first job begun (moonwater desktop startup and its words) and taken off the jobs. Where it could not begin, every job is let
+        go and the list is read again (the items say what the person asked for, and the file does not).
+*/
+#define SETTINGS_STARTUP_WORDS 8 // moonwater desktop startup and a job's words: add app ID COMMAND, four, is the most the verb takes (desktop.c)
+static b32 settings_startup_start(void)
+{
+        string_address words[SETTINGS_STARTUP_WORDS];
+        positive count = 3, at = 0;
+        b32 started;
+        words[0] = settings.moonwater, words[1] = (string_address) "desktop", words[2] = (string_address) "startup";
+        for (; settings.startup_jobs[at]; at += string_length((string_address)settings.startup_jobs + at) + 1)
+                if (count + 1 < SETTINGS_STARTUP_WORDS)
+                        words[count++] = (string_address)settings.startup_jobs + at;
+        words[count] = null, at++;
+        started = settings_start(words, count, null);
+        memory_copy(settings.startup_jobs, settings.startup_jobs + at, settings.startup_jobs_used - at), settings.startup_jobs_used -= at;
+        if (!started)
+                settings.startup_jobs_used = 0, settings.feed_due = 0;
+        return started;
+}
+
+// A job done: what the verb says is the list as it is now, taken where no other job waits; a refusal is said, and the list read again.
+static fn settings_startup_done(b32 killed, positive status)
+{
+        char line[SETTINGS_STATUS];
+        if (killed || wait_status_code(status))
+        {
+                positive said = settings_said_line(line, sizeof(line), false);
+                settings_say((string_address)(killed ? WORDS(settings_too_long) : said ? line : WORDS(settings_refused)));
+                settings.startup_jobs_used = 0, settings.feed_due = 0;
+                return ui_page_redraw(&settings.page);
+        }
+        if (!settings.startup_jobs_used)
+                settings.feed_list = SETTINGS_STARTUP_LIST, settings_feed_read(false, false);
+}
+
+// The entry (its place in the items, from 0) of the place-th entry the list shows (the kit's places in the ordered group), -1 none.
+static int settings_startup_entry_at(int place)
+{
+        for (int at = 0, seen = 0; at < settings.list.count; at++)
+        {
+                const struct settings_item address_to it = settings_item(settings.list.id[at]);
+                if (it && it->kind == SETTINGS_STARTUP && settings_item_startup(it) && seen++ == place)
+                        return (int)(it - settings.item[SETTINGS_STARTUP_LIST]);
+        }
+        return -1;
+}
+
+static int settings_startup_entries(void)
+{
+        int count = 0;
+        while (count < settings.item_count[SETTINGS_STARTUP_LIST] && settings.item[SETTINGS_STARTUP_LIST][count].kind == SETTINGS_STARTUP)
+                count++;
+        return count;
+}
+
+/*
+        A change made to the items at once, as the verb will make it to the file: an entry moved from one place to another (the keys stay on
+        it), taken out, or turned on or off (its line kept again with its first word turned); then the verb asked, its places from 1.
+*/
+enum { SETTINGS_STARTUP_MOVE, SETTINGS_STARTUP_REMOVE, SETTINGS_STARTUP_TURN };
+static fn settings_startup_apply(int how, int from, int to)
+{
+        struct settings_item address_to items = settings.item[SETTINGS_STARTUP_LIST], kept;
+        int entries = settings_startup_entries();
+        char place[24], other[24];
+        const char address_to words[3];
+        struct setting_startup e;
+        if (from < 0 || from >= entries || (how == SETTINGS_STARTUP_MOVE && (to < 0 || to >= entries || to == from)))
+                return;
+        positive_into_string((p8 address_to)place, (positive)from + 1), positive_into_string((p8 address_to)other, (positive)to + 1);
+        if (how == SETTINGS_STARTUP_MOVE)
+        {
+                kept = items[from];
+                if (to > from)
+                        memory_copy(items + from, items + from + 1, (positive)(to - from) * sizeof(items[0]));
+                else
+                        memory_copy(items + to + 1, items + to, (positive)(from - to) * sizeof(items[0]));
+                items[to] = kept, settings.list.focus = SETTINGS_LIST_ID(SETTINGS_STARTUP_LIST, to);
+                words[0] = "move", words[1] = place, words[2] = other;
+        }
+        else if (how == SETTINGS_STARTUP_REMOVE)
+        {
+                memory_copy(items + from, items + from + 1, (positive)(settings.item_count[SETTINGS_STARTUP_LIST] - from - 1) * sizeof(items[0]));
+                settings.item_count[SETTINGS_STARTUP_LIST]--;
+                words[0] = "remove", words[1] = place;
+        }
+        else
+        {
+                const char address_to line = settings.startup_text + items[from].line_at;
+                positive length = string_length((string_address)line), skip = line[1] == 'n' ? 3 : 4, at;
+                if (!settings_startup_entry(&items[from], &e))
+                        return;
+                words[0] = e.on ? "off" : "on", words[1] = place;
+                // The line again with its first word turned, after the others (startup_text may move as it grows: line is found again).
+                if (array_store_reserve(settings.startup_text, settings.startup_room, settings.startup_used, settings.startup_used + length + 2, 4096))
+                {
+                        positive word = string_length((string_address)words[0]);
+                        line = settings.startup_text + items[from].line_at, at = settings.startup_used;
+                        memory_copy(settings.startup_text + at, words[0], word), settings.startup_text[at + word] = ' ';
+                        memory_copy(settings.startup_text + at + word + 1, line + skip, length - skip + 1);
+                        items[from].line_at = at, settings.startup_used = at + word + 1 + length - skip + 1;
+                }
+        }
+        settings_rebuild();
+        settings_startup_ask(words, how == SETTINGS_STARTUP_MOVE ? 3 : 2);
+}
+
+// What the person did to the list's rows (the kit's ui_list.moved and .removed), done: the startup list's entries are the ones it has now.
+static fn settings_managed(void)
+{
+        struct ui_list address_to l = &settings.list;
+        if (l->moved)
+        {
+                l->moved = false;
+                if (l->moved_order == SETTINGS_STARTUP_ORDER)
+                        settings_startup_apply(SETTINGS_STARTUP_MOVE, settings_startup_entry_at(l->moved_from), settings_startup_entry_at(l->moved_to));
+        }
+        if (l->removed)
+        {
+                const struct settings_item address_to it = settings_item(l->removed - 1);
+                l->removed = 0;
+                if (it && it->kind == SETTINGS_STARTUP && settings_item_startup(it))
+                        settings_startup_apply(SETTINGS_STARTUP_REMOVE, (int)(it - settings.item[SETTINGS_STARTUP_LIST]), 0);
+        }
+}
+
+// A command typed in the add row: desktop startup add command and the whole of it (the field has no most: nothing cuts it).
+static fn settings_startup_typed(void)
+{
+        positive room = (positive)doc_length(&settings.edit.doc) + 1, length, start = 0;
+        char address_to typed = (char address_to)memory_take(room);
+        if (!typed)
+                return settings_say((string_address)WORDS(settings_busy)), settings_edit_end();
+        length = ui_text_string(&settings.edit, (p8 address_to)typed, room);
+        while (start < length && typed[start] == ' ')
+                start++;
+        while (length > start && typed[length - 1] == ' ')
+                length--;
+        typed[length] = 0;
+        if (length == start)
+                settings_say((string_address)WORDS(settings_nothing_typed));
+        else
+        {
+                const char address_to words[3] = {"add", "command", typed + start};
+                settings_startup_ask(words, 3);
+        }
+        memory_give(typed);
+        settings_edit_end();
+}
+
+/*
+        The program picker: launcher -p, a process of its own, on a pipe. Its choice is a line, the app's id, a tab and its command, which
+        is asked as desktop startup add app ID COMMAND when it ends with 0; nothing chosen, it ends with 1 and nothing is said. Its line is
+        read as it comes (settings_picker_read: at each pass, and when its pipe wakes the loop), into a buffer grown as it fills.
+*/
+static fn settings_picker_open(void)
+{
+        string_address words[3] = {(string_address) "/launcher", (string_address) "-p", null};
+        if (settings.picker > 0)
+                return;
+        settings.picked_used = 0;
+        if (!ui_start_piped(words, 2, null, &settings.picker, &settings.picker_out))
+                settings.picker = 0, settings.picker_out = -1, settings_say((string_address)WORDS(settings_cannot_run));
+}
+
+// The picker's line taken (length bytes, with room for a 0 after them): its id up to the tab, its command after it to the line's end,
+// asked as desktop startup add app ID COMMAND. False for a line that is no choice.
+static b32 settings_picker_take(char address_to line, positive length)
+{
+        positive tab = 0;
+        while (tab < length && line[tab] != '\t')
+                tab++;
+        length -= length && line[length - 1] == '\n';
+        if (!tab || tab + 1 >= length)
+                return false;
+        line[tab] = 0, line[length] = 0;
+        {
+                const char address_to words[4] = {"add", "app", line, line + tab + 1};
+                settings_startup_ask(words, 4);
+        }
+        return true;
+}
+
+static fn settings_picker_end(void)
+{
+        positive status = 0;
+        system_close(settings.picker_out), settings.picker_out = -1;
+        system_wait4_retry(settings.picker, address_of status, 0, null), settings.picker = 0;
+        if (!wait_status_code(status) && settings.picked_used)
+                settings_picker_take(settings.picked, settings.picked_used);
+}
+
+static fn settings_picker_read(void)
+{
+        for (;;)
+        {
+                bipolar got;
+                if (settings.picker <= 0 || settings.picker_out < 0)
+                        return;
+                if (!array_store_reserve(settings.picked, settings.picked_room, settings.picked_used, settings.picked_used + 1024, 1024))
+                        return settings_picker_end();
+                got = system_read_once(settings.picker_out, settings.picked + settings.picked_used, settings.picked_room - settings.picked_used - 1);
+                if (got > 0)
+                        settings.picked_used += (positive)got;
+                else
+                {
+                        if (got == 0 || (got != -11 && got != -4))
+                                settings_picker_end();
+                        return;
+                }
+        }
+}
+
+// The add row's way taken: 0 a program of the start menu (the picker), 1 a command, typed in the row as a field.
+static fn settings_startup_way(int row, int way)
+{
+        if (way == 0)
+                return settings_picker_open();
+        settings_edit_begin(row, "", false);
+        settings_say((string_address)WORDS(settings_startup_type));
+}
 
 static b32 settings_output_choice(const struct settings_row address_to which, positive index, char address_to into, positive room);
 
@@ -3579,6 +3980,9 @@ static fn settings_edit_begin(int row, const char address_to text, b32 masked)
                   : dom == SETTINGS_DOM_COMMAND || (dom == SETTINGS_DOM_ROW && (settings_rows[row].flags & SETTINGS_SPLIT)) ? SETTINGS_TYPED - 1 : SETTINGS_VALUE - 1;
         if (row == SETTINGS_NAME_ROW)
                 t->accept = settings_name_accepts, t->most = SETTINGS_NAME_MOST, t->most_said = WORDS(settings_name_long);
+        // A command line for desktop startup has no most: the verb keeps any line (settings_startup_typed reads it whole).
+        if (settings_list_of(row) == SETTINGS_STARTUP_LIST)
+                t->most = 0;
         ui_page_redraw(&settings.page);
 }
 
@@ -3605,6 +4009,16 @@ static fn settings_item_activate(int row, const struct settings_item address_to 
         }
         else if (item->kind == SETTINGS_PORT)
                 settings_port_set(item, !(item->flags & SETTINGS_ITEM_JOINED));
+        else if (item->kind == SETTINGS_STARTUP)
+                settings_startup_apply(SETTINGS_STARTUP_TURN, (int)(item - settings.item[SETTINGS_STARTUP_LIST]), 0);
+        // The startup list's add row: its ways (a program from the picker, or a command typed) as a menu under it, and with one, that way.
+        else if (item->kind == SETTINGS_ADD && settings_item_startup(item))
+        {
+                if (ui_list_ways(&settings.ui, &settings.list, &settings.popup, &settings.own, row))
+                        settings.ways = row + 1;
+                else
+                        settings_startup_way(row, 1);
+        }
         else if (item->kind == SETTINGS_ADD)
                 settings_edit_begin(row, "", false), settings_say((string_address)WORDS(settings_type_device));
         else if (item->kind == SETTINGS_LINK)
@@ -3731,8 +4145,11 @@ static fn settings_group_choose(int group)
 static fn settings_edit_commit(void)
 {
         char typed[SETTINGS_TYPED];
-        positive length = ui_text_string(&settings.edit, (p8 address_to)typed, sizeof(typed)), start = 0;
+        positive length, start = 0;
         int row = settings_editing();
+        if (settings_list_of(row) == SETTINGS_STARTUP_LIST)
+                return settings_startup_typed();
+        length = ui_text_string(&settings.edit, (p8 address_to)typed, sizeof(typed));
         while (!settings.edit.masked && start < length && typed[start] == ' ') start++;
         while (!settings.edit.masked && length > start && typed[length - 1] == ' ') length--;
         typed[length] = 0, length -= start;
@@ -3889,7 +4306,7 @@ static b32 settings_key(const struct window_event address_to event)
 {
         if (!(event->flags & WINDOW_KEY_DOWN))
                 return ui_graph_key(&settings.ui, &settings.map.graph, event), true;
-        if (settings.page.menu_row >= 0 || (settings.popup.open && settings.popup.list && !settings.popup.field))
+        if (settings.page.menu_row >= 0 || (settings.popup.open && ((settings.popup.list && !settings.popup.field) || settings.ways)))
                 return settings_menu_answer(ui_popmenu_event(&settings.ui, &settings.popup.menu, event, 0, 0)), true;
         if (settings_editing() >= 0 && !settings_edit_shown())
         {
@@ -3949,6 +4366,9 @@ static b32 settings_key(const struct window_event address_to event)
                 if (asks)
                         return true;
         }
+        // The keys' management of a row the person keeps (an ordered one moved by Alt+Up and Alt+Down, one with a remove button by Delete).
+        if (settings.page.pane && ui_list_manage_key(&settings.ui, &settings.list, event))
+                return settings_managed(), ui_page_redraw(&settings.page), true;
         if (event->a == UI_KEY_ESCAPE)
                 return settings_stop();
         if (settings.page.pane && event->a == UI_KEY_UP && settings_map_on() && settings.list.focus == settings_output_row(SETTINGS_OUT_SCREEN) && settings_map_count())
@@ -4029,9 +4449,46 @@ static const char address_to settings_state_text(int id, unsigned int state, con
                : state == SETTINGS_FAILED || !shown[0] ? WORDS(settings_unknown) : settings_number_shown(id, shown);
 }
 
+static const unsigned int address_to settings_startup_picture(int id, int side)
+{
+        const struct settings_item address_to it = settings_item(id);
+        return it && it->kind == SETTINGS_STARTUP && it->app >= 0 ? ui_apps_picture_kept(it->app, side) : null;
+}
+
+// The add row's ways in the language, a '|' apart (ui_list_ways): the kit takes a way of UI_ROW_WAY_TEXT at most, so two are this room.
+static const char address_to settings_startup_ways(void)
+{
+        static char ways[2 * UI_ROW_WAY_TEXT + 2];
+        positive at = settings_cat(ways, sizeof(ways), 0, WORDS(settings_startup_program));
+        settings_cat(ways, sizeof(ways), settings_cat(ways, sizeof(ways), at, "|"), WORDS(settings_startup_command));
+        return ways;
+}
+
+/*
+        A startup entry's row: one of the ordered group (its grip at the start), a remove button at its end and a switch for on or off. An
+        app is its picture (its symbol where it has none yet) and its name, its command the quiet note; a command is the terminal's symbol
+        and the command itself.
+*/
+static fn settings_startup_describe(const struct settings_item address_to it, struct ui_row address_to row)
+{
+        struct setting_startup e;
+        if (!settings_startup_entry(it, &e))
+                return;
+        row->order = SETTINGS_STARTUP_ORDER, row->remove = true, row->kind = UI_ROW_SWITCH, row->on = e.on;
+        row->label = settings_startup_label(it);
+        if (!e.app)
+                return (void)(row->icon = UI_ICON_TERMINAL + 1);
+        row->note = e.command, row->tile_picture = settings_startup_picture;
+        ui_apps_symbol(it->app, row);
+}
+
 static fn settings_describe_item(int id, const struct settings_item address_to item, struct ui_row address_to row)
 {
         int list = settings_list_of(id);
+        if (item->kind == SETTINGS_STARTUP)
+                return settings_startup_describe(item, row);
+        if (item->kind == SETTINGS_ADD && list == SETTINGS_STARTUP_LIST)
+                return (void)(row->kind = UI_ROW_ADD, row->words = settings_startup_ways());
         if (item->kind == SETTINGS_NETWORK)
                 row->columns = settings_columns_for(0), row->mark = (item->flags & SETTINGS_ITEM_JOINED) != 0,
                 row->note = item->flags & SETTINGS_ITEM_JOINED ? WORDS(settings_joined) : item->flags & SETTINGS_ITEM_SAVED ? WORDS(settings_saved) : null,
@@ -4110,7 +4567,9 @@ static fn settings_describe(int id, struct ui_row address_to row)
         {
                 const struct settings_generic address_to g = settings_generic_of(id);
                 row->kind = UI_ROW_FIELD, row->edit = &settings.edit;
-                if (item)
+                if (item && settings_item_startup(item))
+                        row->label = WORDS(settings_startup_command), row->placeholder = WORDS(settings_startup_hint);
+                else if (item)
                         row->label = item->kind == SETTINGS_ADD ? WORDS(settings_device_name) : settings.joining;
                 else if (!w)
                 {
@@ -4181,7 +4640,11 @@ static const char address_to settings_copy_text(int id)
                 memory_zero(&row, sizeof(row)), settings_describe(id, &row);
                 return !row.dim && row.value && row.value[0] ? row.value : null;
         case SETTINGS_DOM_COMMAND: return offset > 0 ? settings_label_shown(id) : null;
-        case SETTINGS_DOM_LIST:    { const struct settings_item address_to it = settings_item(id); return it && it->kind != SETTINGS_ADD && it->label[0] ? it->label : null; }
+        case SETTINGS_DOM_LIST:
+        {
+                const struct settings_item address_to it = settings_item(id);
+                return it && it->kind == SETTINGS_STARTUP ? settings_startup_label(it) : it && it->kind != SETTINGS_ADD && it->label[0] ? it->label : null;
+        }
         case SETTINGS_DOM_SUB:
                 if (offset >= settings_sub_count) return null;
                 if (settings_sub[offset].action == SETTINGS_SUB_COPY) return settings_sub[offset].text[0] ? settings_sub[offset].text : null;
@@ -4208,7 +4671,7 @@ static p32 settings_row_menu_flags(int id)
                 if (!it || it->kind == SETTINGS_ADD) return 0;
                 if (it->kind == SETTINGS_NOTE) return has ? UI_LIST_MENU_HAS_COPY : 0;
                 if (it->kind == SETTINGS_NETWORK) return copy | ((it->flags & SETTINGS_ITEM_SAVED) ? UI_LIST_MENU_CAN_REMOVE : 0);
-                return copy | (it->kind == SETTINGS_DEVICE || (it->kind == SETTINGS_LINK && it->where == 1) ? UI_LIST_MENU_CAN_REMOVE : 0);
+                return copy | (it->kind == SETTINGS_DEVICE || it->kind == SETTINGS_STARTUP || (it->kind == SETTINGS_LINK && it->where == 1) ? UI_LIST_MENU_CAN_REMOVE : 0);
         }
         case SETTINGS_DOM_SUB:
                 if (offset >= settings_sub_count) return 0;
@@ -4279,7 +4742,9 @@ static fn settings_row_menu_act(int id, int item_id)
                 {
                         const struct settings_item address_to it = settings_item(id);
                         char code = it && (it->flags & SETTINGS_ITEM_SAVED) ? settings_forget_code(it->kind) : 0;
-                        if (code) settings_act(code, it->label, null);
+                        if (it && it->kind == SETTINGS_STARTUP && settings_item_startup(it))
+                                settings_startup_apply(SETTINGS_STARTUP_REMOVE, (int)(it - settings.item[SETTINGS_STARTUP_LIST]), 0);
+                        else if (code) settings_act(code, it->label, null);
                 }
                 else if (dom == SETTINGS_DOM_SUB && offset < settings_sub_count)
                         settings_dismiss_notice(settings_sub[offset].code);
@@ -4411,7 +4876,7 @@ static b32 settings_event_take(const struct window_event address_to event)
         switch (event->type)
         {
         case WINDOW_EVENT_KEY:    return settings_key(event);
-        case WINDOW_EVENT_MOTION: case WINDOW_EVENT_BUTTON: ui_page_pointer(&settings.ui, &settings.page, &settings.list, event, settings_press_at), settings_slid(); break;
+        case WINDOW_EVENT_MOTION: case WINDOW_EVENT_BUTTON: ui_page_pointer(&settings.ui, &settings.page, &settings.list, event, settings_press_at), settings_slid(), settings_managed(); break;
         case WINDOW_EVENT_WHEEL:  ui_page_wheel(&settings.ui, &settings.page, event); break;
         }
         return true;
@@ -4578,6 +5043,16 @@ static int settings_open(void)
 static fn settings_chose(int id)
 {
         struct ui_text address_to t = settings.popup.field;
+        // The startup add row's ways (ui_list_ways opens them with no list or field of the menu's), one taken or the menu gone.
+        if (settings.ways && !settings.popup.list && !t && settings.page.menu_row < 0)
+        {
+                int row = settings.ways - 1;
+                settings.ways = 0;
+                if (id >= UI_LIST_WAY && id <= UI_LIST_WAY + 1 && settings_pos(row) >= 0)
+                        settings_startup_way(row, id - UI_LIST_WAY);
+                return ui_page_redraw(&settings.page);
+        }
+        settings.ways = 0;
         if (ui_list_menu_do(&settings.popup, &settings.own, id))
                 return ui_page_redraw(&settings.page);
         if (!t && settings.page.menu_row >= 0)
@@ -4613,6 +5088,20 @@ static long settings_tick(long timeout, long address_to other)
         if (settings.runner.child > 0 && settings.runner.ending == 1 && settings.runner.timeout_ns && (positive)ui_kit.now >= settings.runner.began + settings.runner.timeout_ns)
                 return ui_job_kill(&settings.runner), 0;
         timeout = ui_job_tick(&settings.runner, timeout, other);
+        // The picker's line read as it comes, and its pipe waited on while the runner's is not; the apps' pictures (startup rows) made.
+        if (settings.picker > 0)
+        {
+                settings_picker_read();
+                if (settings.picker_out >= 0 && other && *other < 0)
+                        *other = settings.picker_out;
+        }
+        if (ui_apps.read)
+        {
+                b32 taken;
+                timeout = ui_apps_pictures_tick(timeout, false, &taken);
+                if (taken)
+                        ui_page_redraw(&settings.page);
+        }
         if (settings.runner.child <= 0)
         {
                 timeout = ui_timeout_min(timeout, settings_feed_tick());
@@ -4637,6 +5126,12 @@ static fn settings_close(void)
         if (settings.queue && settings.queue_room)
                 settings_wipe(settings.queue, settings.queue_room * sizeof(settings.queue[0]));
         ui_field_close(&settings.edit);
+        if (settings.picker > 0)
+        {
+                positive status = 0;
+                system_call_2(syscall(kill), (positive)settings.picker, SIGTERM);
+                system_close(settings.picker_out), system_wait4_retry(settings.picker, address_of status, 0, null), settings.picker = 0;
+        }
         if (settings.runner.child > 0)
         {
                 positive status = 0;
@@ -4662,14 +5157,14 @@ static struct ui_app settings_app = {
     .open = settings_open, .page = settings_asked, .frame = settings_frame,
     .language = settings_language, .event = settings_event, .focus = settings_focus,
     .buffers = &settings.page.buffers, .size = settings_size, .tick = settings_tick,
-    .job = &settings.runner, .close = settings_close, .popup = &settings.popup, .chose = settings_chose,
+    .job = &settings.runner, .close = settings_close, .popup = &settings.popup, .chose = settings_chose, .ready = settings_picker_read,
 };
 
 static b32 settings_main()
 {
         memory_zero(&settings, sizeof(settings));
         settings.moonwater = (string_address) "/moonwater", ui_buffers_start(&settings.page.buffers);
-        settings.runner.output = -1, settings.page.pane = 1, settings.page.menu_row = -1, settings_runner_ready();
+        settings.runner.output = -1, settings.picker_out = -1, settings.page.pane = 1, settings.page.menu_row = -1, settings_runner_ready();
         for (positive at = 1; at < (positive)program_argument_count();)
         {
                 positive used = ui_app_option(&settings_app, at);

@@ -7,6 +7,7 @@
 # machine-made 2026-11-22 (two registry texts that had no keyed line), not yet read by a person: =Purge unconnected links =The screen backlight, from 0 to 100 percent. ...
 # machine-made 2026-11-22 (a registry text that had no keyed line), not yet read by a person: =An experimental speed-up. ...
 # machine-made 2026-11-22 (the Waterlink words of Settings), not yet read by a person: settings_link_address settings_link_disabled settings_link_files settings_link_files_about settings_link_group settings_link_latency settings_link_log settings_link_log_about settings_link_mismatch settings_link_no_key settings_link_offline settings_link_online settings_link_run settings_link_run_about settings_link_self settings_link_shell settings_link_shell_about settings_link_traffic
+# machine-made 2026-11-23 (the startup programs of Settings), not yet read by a person: settings_startup_add settings_startup_add_keys settings_startup_command settings_startup_hint settings_startup_keys settings_startup_program settings_startup_type
 @language ru
 @name Русский
 @translated machine
@@ -417,6 +418,13 @@ settings_size_kept	7101	Оставлено %d × %d
 settings_size_own	810e	его собственный размер
 settings_size_plain	9453	%d × %d
 settings_size_refused	20a9	Экран не принял %d × %d: возврат к %s
+settings_startup_add	f281	Добавить программу или команду
+settings_startup_add_keys	901e	Enter добавляет программу из меню запуска или команду
+settings_startup_command	8f52	Команда
+settings_startup_hint	df62	командная строка, выполняется как набрана
+settings_startup_keys	8875	Enter включает или выключает; Alt+Вверх и Alt+Вниз перемещают; Delete убирает
+settings_startup_program	3b6b	Программа
+settings_startup_type	3e44	введите командную строку: Enter запустит её вместе с рабочим столом, Escape оставит
 settings_state_allowed	e443	разрешено
 settings_state_blocked	6eb3	заблокировано
 settings_state_view_only	031a	только просмотр
@@ -498,7 +506,6 @@ ui_field_full	fe02	больше не помещается
 =Accent	ccd7	Акцент
 =Accent colour (rrggbb or reset)	53aa	Цвет акцента (rrggbb или reset)
 =Add a key (label, then the public key)	e2e3	Добавить ключ (метка, затем открытый ключ)
-=Add a program to start (its path)	5e20	Добавить программу в автозапуск (её путь)
 =Airplane mode	3b8a	Режим полёта
 =All commands	4a42	Все команды
 =Allow recording	f7e5	Разрешить запись
@@ -612,7 +619,6 @@ ui_field_full	fe02	больше не помещается
 =Notices	8f06	Уведомления
 =On-screen keyboard	97f8	Экранная клавиатура
 =Open windows where they were last put	8711	Открывать окна там, где их оставили
-=Opened in this order when the desktop starts; none starts it with no windows	5790	Открываются в этом порядке при запуске рабочего стола; none запускает его без окон
 =Output device (name, or default)	d73c	Устройство вывода (имя или default)
 =Pair a machine	b39b	Связать компьютер
 =Paths	263f	Пути
@@ -635,7 +641,6 @@ ui_field_full	fe02	больше не помещается
 =Purge unconnected links	5c67	Удалить неподключённые компьютеры
 =Refresh rate	bf6e	Частота обновления
 =Remembered devices	abbc	Запомненные устройства
-=Remove a program from the start (its path)	1013	Убрать программу из автозапуска (её путь)
 =Resize border width (pixels, or default)	7fdf	Ширина рамки изменения размера (пикселей или default)
 =Resize grip (pixels, or default)	dddd	Захват для изменения размера (пикселей или default)
 =Resolution	18af	Разрешение

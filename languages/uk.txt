@@ -7,6 +7,7 @@
 # machine-made 2026-11-22 (two registry texts that had no keyed line), not yet read by a person: =Purge unconnected links =The screen backlight, from 0 to 100 percent. ...
 # machine-made 2026-11-22 (a registry text that had no keyed line), not yet read by a person: =An experimental speed-up. ...
 # machine-made 2026-11-22 (the Waterlink words of Settings), not yet read by a person: settings_link_address settings_link_disabled settings_link_files settings_link_files_about settings_link_group settings_link_latency settings_link_log settings_link_log_about settings_link_mismatch settings_link_no_key settings_link_offline settings_link_online settings_link_run settings_link_run_about settings_link_self settings_link_shell settings_link_shell_about settings_link_traffic
+# machine-made 2026-11-23 (the startup programs of Settings), not yet read by a person: settings_startup_add settings_startup_add_keys settings_startup_command settings_startup_hint settings_startup_keys settings_startup_program settings_startup_type
 @language uk
 @name Українська
 @translated machine
@@ -417,6 +418,13 @@ settings_size_kept	7101	Залишено %d × %d
 settings_size_own	810e	його власний розмір
 settings_size_plain	9453	%d × %d
 settings_size_refused	20a9	Екран не прийняв %d × %d: повернення до %s
+settings_startup_add	f281	Додати програму або команду
+settings_startup_add_keys	901e	Enter додає програму з меню запуску або команду
+settings_startup_command	8f52	Команда
+settings_startup_hint	df62	командний рядок, виконується як набрано
+settings_startup_keys	8875	Enter вмикає або вимикає; Alt+Вгору й Alt+Вниз переміщують; Delete прибирає
+settings_startup_program	3b6b	Програма
+settings_startup_type	3e44	введіть командний рядок: Enter запустить його разом зі стільницею, Escape залишить
 settings_state_allowed	e443	дозволено
 settings_state_blocked	6eb3	заблоковано
 settings_state_view_only	031a	лише перегляд
@@ -498,7 +506,6 @@ ui_field_full	fe02	більше не вміщається
 =Accent	ccd7	Акцент
 =Accent colour (rrggbb or reset)	53aa	Колір акценту (rrggbb або reset)
 =Add a key (label, then the public key)	e2e3	Додати ключ (мітка, потім відкритий ключ)
-=Add a program to start (its path)	5e20	Додати програму до автозапуску (її шлях)
 =Airplane mode	3b8a	Режим польоту
 =All commands	4a42	Усі команди
 =Allow recording	f7e5	Дозволити запис
@@ -612,7 +619,6 @@ ui_field_full	fe02	більше не вміщається
 =Notices	8f06	Сповіщення
 =On-screen keyboard	97f8	Екранна клавіатура
 =Open windows where they were last put	8711	Відкривати вікна там, де їх залишили
-=Opened in this order when the desktop starts; none starts it with no windows	5790	Відкриваються в цьому порядку під час запуску робочого столу; none запускає його без вікон
 =Output device (name, or default)	d73c	Пристрій виводу (назва або default)
 =Pair a machine	b39b	Зв'язати комп'ютер
 =Paths	263f	Шляхи
@@ -635,7 +641,6 @@ ui_field_full	fe02	більше не вміщається
 =Purge unconnected links	5c67	Видалити непідключені комп'ютери
 =Refresh rate	bf6e	Частота оновлення
 =Remembered devices	abbc	Запам'ятовані пристрої
-=Remove a program from the start (its path)	1013	Прибрати програму з автозапуску (її шлях)
 =Resize border width (pixels, or default)	7fdf	Ширина рамки зміни розміру (пікселів або default)
 =Resize grip (pixels, or default)	dddd	Захоплення для зміни розміру (пікселів або default)
 =Resolution	18af	Роздільність

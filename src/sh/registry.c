@@ -47,6 +47,7 @@
 #define SETTINGS_SLIDER 12u // a whole number from the row's low to its high on a slider (the kit's UI_SLIDER); the verb sets any number in range
 #define SETTINGS_PORT 14u   // a device the system sees, in the Devices list: a press allows or blocks it
 #define SETTINGS_LINK 13u // a machine linked, as moonwater link says it: its name and what it was last heard as (not pressed)
+#define SETTINGS_STARTUP 15u // a program the desktop starts with it, as desktop startup says it (setting_startup_entry): on or off, in its place
 
 // How a row's value is taken from the line it is on.
 #define SETTINGS_LINE 1u  // the value is the rest of the line and not a word
@@ -1011,17 +1012,9 @@ static const struct settings_row settings_rows[] = {
      null, 0, .usage = "init canvas [on|off]", .help = "start Canvas at boot [on]"},
     {null, "Mount kept disks", SETTINGS_SWITCH, 1, 0, {"init", "mount"}, "init mount ", null, {"init", "mount"}, null,
      0, .usage = "init mount [on|off]", .help = "mount kept disks at boot [on]"},
-    //  What the desktop opens when it starts, in order (desktop.c's desktop_autostart; the machine script's desktop_autostart opens each):
-    //  the desktop opens no window of its own, so these are all there is at its start: none unless the person says other. The whole list is typed in the first row, and one program is added or taken out in the two after it.
-    {null, "Programs started with the desktop", SETTINGS_FIELD, 0, SETTINGS_LINE | SETTINGS_SPLIT, {"desktop", "autostart"}, "autostart ", null,
-     {"desktop", "autostart"}, null, 0,
-     .usage = "desktop autostart [PROGRAM...|none|default]",
-     .help = "the programs the desktop opens when it starts, each an absolute path, in this order; none opens nothing [none]",
-     .about = "Opened in this order when the desktop starts; none starts it with no windows"},
-    {null, "Add a program to start (its path)", SETTINGS_FIELD, 0, SETTINGS_LINE, {null}, null, null, {"desktop", "autostart", "add"}, null, 0,
-     .usage = "desktop autostart add PROGRAM", .help = "open PROGRAM as well when the desktop starts, after the others"},
-    {null, "Remove a program from the start (its path)", SETTINGS_FIELD, 0, SETTINGS_LINE, {null}, null, null, {"desktop", "autostart", "remove"},
-     null, 0, .usage = "desktop autostart remove PROGRAM", .help = "no longer open PROGRAM when the desktop starts"},
+    //  What the desktop starts with it, in order (desktop.c's desktop_startup), is no row: it is the Boot group's list (settings.c's startup
+    //  feed), each entry a row of its own that the person turns on or off, moves and takes out, with an add row after them. The pages say
+    //  its verb and desktop autostart's, which it took the programs of (page.c's host_rows).
     //  OpenSSH's server, from bowl profile ssh, which Moonwater runs from these rows and nothing else (src/sh/ssh.c): the one
     //  switch first, then who may log in and where it listens, what a client is to compare, and the keys. Every row reads
     //  moonwater ssh, which says "this machine has no ssh server" until the profile is installed, so each is not here then.

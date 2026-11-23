@@ -7,6 +7,7 @@
 # machine-made 2026-11-22 (two registry texts that had no keyed line), not yet read by a person: =Purge unconnected links =The screen backlight, from 0 to 100 percent. ...
 # machine-made 2026-11-22 (a registry text that had no keyed line), not yet read by a person: =An experimental speed-up. ...
 # machine-made 2026-11-22 (the Waterlink words of Settings), not yet read by a person: settings_link_address settings_link_disabled settings_link_files settings_link_files_about settings_link_group settings_link_latency settings_link_log settings_link_log_about settings_link_mismatch settings_link_no_key settings_link_offline settings_link_online settings_link_run settings_link_run_about settings_link_self settings_link_shell settings_link_shell_about settings_link_traffic
+# machine-made 2026-11-23 (the startup programs of Settings), not yet read by a person: settings_startup_add settings_startup_add_keys settings_startup_command settings_startup_hint settings_startup_keys settings_startup_program settings_startup_type
 @language it
 @name Italiano
 @translated machine
@@ -417,6 +418,13 @@ settings_size_kept	7101	Mantenuta %d × %d
 settings_size_own	810e	la sua dimensione
 settings_size_plain	9453	%d × %d
 settings_size_refused	20a9	Lo schermo non ha accettato %d × %d: torna a %s
+settings_startup_add	f281	Aggiungi un programma o un comando
+settings_startup_add_keys	901e	Enter aggiunge un programma del menu Start o un comando
+settings_startup_command	8f52	Comando
+settings_startup_hint	df62	una riga di comando, eseguita come è scritta
+settings_startup_keys	8875	Enter lo attiva o lo disattiva; Alt+Su e Alt+Giù lo spostano; Delete lo toglie
+settings_startup_program	3b6b	Programma
+settings_startup_type	3e44	scrivi una riga di comando: Enter la avvia con il desktop, Escape lascia
 settings_state_allowed	e443	consentito
 settings_state_blocked	6eb3	bloccato
 settings_state_view_only	031a	solo visualizzazione
@@ -498,7 +506,6 @@ ui_field_full	fe02	non ce ne sta di più
 =Accent	ccd7	Accento
 =Accent colour (rrggbb or reset)	53aa	Colore di accento (rrggbb o reset)
 =Add a key (label, then the public key)	e2e3	Aggiungi una chiave (etichetta, poi la chiave pubblica)
-=Add a program to start (its path)	5e20	Aggiungi un programma all'avvio (il suo percorso)
 =Airplane mode	3b8a	Modalità aereo
 =All commands	4a42	Tutti i comandi
 =Allow recording	f7e5	Consenti registrazione
@@ -612,7 +619,6 @@ ui_field_full	fe02	non ce ne sta di più
 =Notices	8f06	Avvisi
 =On-screen keyboard	97f8	Tastiera a schermo
 =Open windows where they were last put	8711	Apri le finestre dove sono state lasciate
-=Opened in this order when the desktop starts; none starts it with no windows	5790	Aperti in quest'ordine all'avvio del desktop; none lo avvia senza finestre
 =Output device (name, or default)	d73c	Dispositivo di uscita (nome o default)
 =Pair a machine	b39b	Abbina una macchina
 =Paths	263f	Percorsi
@@ -635,7 +641,6 @@ ui_field_full	fe02	non ce ne sta di più
 =Purge unconnected links	5c67	Rimuovi le macchine non connesse
 =Refresh rate	bf6e	Frequenza di aggiornamento
 =Remembered devices	abbc	Dispositivi ricordati
-=Remove a program from the start (its path)	1013	Rimuovi un programma dall'avvio (il suo percorso)
 =Resize border width (pixels, or default)	7fdf	Larghezza del bordo di ridimensionamento (pixel o default)
 =Resize grip (pixels, or default)	dddd	Presa di ridimensionamento (pixel o default)
 =Resolution	18af	Risoluzione

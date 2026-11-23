@@ -6863,6 +6863,13 @@ LANGUAGE_ID(settings_size_kept, "Kept %d × %d") \
 LANGUAGE_ID(settings_size_own, "its own size") \
 LANGUAGE_ID(settings_size_plain, "%d × %d") \
 LANGUAGE_ID(settings_size_refused, "The screen did not take %d × %d: back to %s") \
+LANGUAGE_ID(settings_startup_add, "Add a program or command") \
+LANGUAGE_ID(settings_startup_add_keys, "Enter adds a program of the start menu, or a command") \
+LANGUAGE_ID(settings_startup_command, "Command") \
+LANGUAGE_ID(settings_startup_hint, "a command line, run as typed") \
+LANGUAGE_ID(settings_startup_keys, "Enter turns it on or off; Alt+Up and Alt+Down move it; Delete takes it out") \
+LANGUAGE_ID(settings_startup_program, "Program") \
+LANGUAGE_ID(settings_startup_type, "type a command line: Enter starts it with the desktop, Escape leaves it") \
 LANGUAGE_ID(settings_state_allowed, "allowed") \
 LANGUAGE_ID(settings_state_blocked, "blocked") \
 LANGUAGE_ID(settings_state_view_only, "view only") \

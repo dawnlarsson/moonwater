@@ -8,6 +8,7 @@
 # machine-made 2026-11-22 (two registry texts that had no keyed line), not yet read by a person: =Purge unconnected links =The screen backlight, from 0 to 100 percent. ...
 # machine-made 2026-11-22 (a registry text that had no keyed line), not yet read by a person: =An experimental speed-up. ...
 # machine-made 2026-11-22 (the Waterlink words of Settings), not yet read by a person: settings_link_address settings_link_disabled settings_link_files settings_link_files_about settings_link_group settings_link_latency settings_link_log settings_link_log_about settings_link_mismatch settings_link_no_key settings_link_offline settings_link_online settings_link_run settings_link_run_about settings_link_self settings_link_shell settings_link_shell_about settings_link_traffic
+# machine-made 2026-11-23 (the startup programs of Settings), not yet read by a person: settings_startup_add settings_startup_add_keys settings_startup_command settings_startup_hint settings_startup_keys settings_startup_program settings_startup_type
 @language ur
 @name اردو
 @translated machine
@@ -418,6 +419,13 @@ settings_size_kept	7101	%d × %d رکھا
 settings_size_own	810e	اس کا اپنا سائز
 settings_size_plain	9453	%d × %d
 settings_size_refused	20a9	اسکرین نے %d × %d نہیں لیا: واپس %s
+settings_startup_add	f281	پروگرام یا کمانڈ شامل کریں
+settings_startup_add_keys	901e	Enter اسٹارٹ مینو سے ایک پروگرام یا ایک کمانڈ شامل کرتا ہے
+settings_startup_command	8f52	کمانڈ
+settings_startup_hint	df62	ایک کمانڈ لائن، جیسے لکھی گئی ویسے چلتی ہے
+settings_startup_keys	8875	Enter اسے چالو یا بند کرتا ہے، Alt+اوپر اور Alt+نیچے اسے ہٹاتے ہیں، Delete اسے نکال دیتا ہے
+settings_startup_program	3b6b	پروگرام
+settings_startup_type	3e44	ایک کمانڈ لائن لکھیں: Enter اسے ڈیسک ٹاپ کے ساتھ شروع کرتا ہے، Escape چھوڑ دیتا ہے
 settings_state_allowed	e443	اجازت ہے
 settings_state_blocked	6eb3	مسدود
 settings_state_view_only	031a	صرف دیکھنے کے لیے
@@ -499,7 +507,6 @@ ui_field_full	fe02	اس میں اس سے زیادہ نہیں سماتا
 =Accent	ccd7	نمایاں رنگ
 =Accent colour (rrggbb or reset)	53aa	نمایاں رنگ (rrggbb یا reset)
 =Add a key (label, then the public key)	e2e3	کلید شامل کریں (لیبل، پھر عوامی کلید)
-=Add a program to start (its path)	5e20	شروع میں پروگرام شامل کریں (اس کا راستہ)
 =Airplane mode	3b8a	ہوائی جہاز موڈ
 =All commands	4a42	تمام کمانڈز
 =Allow recording	f7e5	ریکارڈنگ کی اجازت دیں
@@ -613,7 +620,6 @@ ui_field_full	fe02	اس میں اس سے زیادہ نہیں سماتا
 =Notices	8f06	اطلاعات
 =On-screen keyboard	97f8	اسکرین کی بورڈ
 =Open windows where they were last put	8711	کھڑکیاں وہاں کھولیں جہاں آخری بار رکھی گئیں
-=Opened in this order when the desktop starts; none starts it with no windows	5790	ڈیسک ٹاپ شروع ہونے پر اسی ترتیب سے کھلتے ہیں؛ none اسے بغیر ونڈوز کے شروع کرتا ہے
 =Output device (name, or default)	d73c	آؤٹ پٹ ڈیوائس (نام یا default)
 =Pair a machine	b39b	ایک کمپیوٹر جوڑیں
 =Paths	263f	راستے
@@ -636,7 +642,6 @@ ui_field_full	fe02	اس میں اس سے زیادہ نہیں سماتا
 =Purge unconnected links	5c67	غیر منسلک مشینیں ہٹائیں
 =Refresh rate	bf6e	ریفریش ریٹ
 =Remembered devices	abbc	محفوظ ڈیوائسز
-=Remove a program from the start (its path)	1013	شروع سے پروگرام ہٹائیں (اس کا راستہ)
 =Resize border width (pixels, or default)	7fdf	سائز بدلنے کے کنارے کی چوڑائی (پکسل یا default)
 =Resize grip (pixels, or default)	dddd	سائز بدلنے کی گرفت (پکسل یا default)
 =Resolution	18af	ریزولوشن

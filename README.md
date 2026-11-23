@@ -290,9 +290,14 @@ moonwater clipboard watch [primary]    a line each time something is copied, the
 moonwater debug                        what the desktop is doing and why (root): the card, the screens, the windows and their scroll bodies, the pointer, the input devices and the wheel
 moonwater desktop [on|off]             the desktop, now and at every start; off leaves the text console [on]
 moonwater desktop start|rest           begin the chosen desktop now; rest is the text console until the next start, the choice kept as it is
-moonwater desktop autostart [PROGRAM...|none|default]  the programs the desktop opens when it starts, each an absolute path, in this order; none opens nothing [none]
-moonwater desktop autostart add PROGRAM  open PROGRAM as well when the desktop starts, after the others
-moonwater desktop autostart remove PROGRAM  no longer open PROGRAM when the desktop starts
+moonwater desktop startup              the programs and commands the desktop starts with it, in order, each on or off
+moonwater desktop startup add app ID COMMAND  start a program of the start menu, by its id, with the desktop
+moonwater desktop startup add command COMMAND  run a command line with the desktop, as typed
+moonwater desktop startup remove|on|off N  take the Nth out, or start it or keep it but not start it
+moonwater desktop startup move N TO    put the Nth in place TO
+moonwater desktop startup none         start nothing with the desktop
+moonwater desktop autostart [PROGRAM...|none|default]  the programs desktop startup began with: each an absolute path, in this order [none]
+moonwater desktop autostart add|remove PROGRAM  one more of them, or one fewer
 moonwater help [VERB]                  these commands, or the page of one
 moonwater latency [reset]              what the input handlers cost a report, and who has the display
 moonwater notices [clear]              the errors and warnings of the kernel the desktop has (root): clear dismisses them
