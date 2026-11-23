@@ -51,7 +51,7 @@ static void compositor_hold_drop(positive now)
 
 static int compositor_write_sysfs(const char *path, const void *data, unsigned long len)
 {
-        long fd = system_open_at(AT_FDCWD, (string_address)path, O_WRONLY | O_CLOEXEC);
+        long fd = system_open_at(AT_FDCWD, (string_address)path, O_WRONLY | O_TRUNC | O_CLOEXEC); // as a shell's > (a file of the checks' trees is cut)
 
         if (fd < 0)
                 return 0;
@@ -135,48 +135,6 @@ static int compositor_multi_ccd(void)
 {
         compositor_ccd_init();
         return compositor_ccd.multi;
-}
-
-static char compositor_game_epp_saved[32];
-static char compositor_game_dpm_saved[4][32];
-static int compositor_game_epp_active;
-
-static void compositor_game_epp(int on)
-{
-        const char *want = on ? "performance" : compositor_game_epp_saved;
-        unsigned long len;
-
-        if (on == compositor_game_epp_active)
-                return;
-        if (on && !compositor_game_epp_saved[0])
-                compositor_word("/sys/devices/system/cpu/cpu0/cpufreq/energy_performance_preference", compositor_game_epp_saved, sizeof(compositor_game_epp_saved));
-        if (compositor_game_epp_saved[0] && !(on && string_equals((string_address)compositor_game_epp_saved, (string_address) "performance")))
-        {
-                len = (unsigned long)string_length((string_address)want);
-                for (unsigned int cpu = 0; cpu < 64; cpu++)
-                {
-                        char path[96];
-
-                        windows_num_path(path, sizeof(path), "/sys/devices/system/cpu/cpu", cpu, "/cpufreq/energy_performance_preference");
-                        if (!compositor_write_sysfs(path, want, len))
-                                break;
-                }
-        }
-        for (unsigned int card = 0; card < 4; card++)
-        {
-                char path[96];
-                const char *dpm_want;
-
-                windows_num_path(path, sizeof(path), "/sys/class/drm/card", card, "/device/power_dpm_force_performance_level");
-                if (on && !compositor_game_dpm_saved[card][0])
-                        compositor_word(path, compositor_game_dpm_saved[card], sizeof(compositor_game_dpm_saved[card]));
-                if (!compositor_game_dpm_saved[card][0] ||
-                    (on && string_equals((string_address)compositor_game_dpm_saved[card], (string_address) "high")))
-                        continue;
-                dpm_want = on ? "high" : compositor_game_dpm_saved[card];
-                compositor_write_sysfs(path, dpm_want, (unsigned long)string_length((string_address)dpm_want));
-        }
-        compositor_game_epp_active = on;
 }
 
 static int compositor_ccd0_mask(unsigned long mask[2])
@@ -263,6 +221,36 @@ static int compositor_game_mask(unsigned long mask[2])
         return 1;
 }
 
+/*
+        Where game mode puts a game's threads (compositor_game_mask), in Wine's own words for the steam session: /run/moonwater/game-cpus holds
+        COUNT:CPU,CPU,... (WINE_CPU_TOPOLOGY), so Wine, DXVK and the game size their pools by the CPUs they get. The session listed the whole
+        first CCD, 16 CPUs on the box, where the threads got 14 (the input core and its sibling are kept out). Written at the display's start on
+        a machine of two CCDs or more, none on one, where the threads go anywhere.
+*/
+#define COMPOSITOR_GAME_CPUS_FILE "/run/moonwater/game-cpus"
+static const char *compositor_game_cpus_file = COMPOSITOR_GAME_CPUS_FILE;
+static void compositor_game_cpus_note(void)
+{
+        unsigned long mask[2];
+        char text[128 * 4 + 16], list[128 * 4];
+        positive at = 0, count = 0, used = 0;
+        bipolar handle;
+
+        if (!compositor_game_mask(mask))
+                return;
+        for (unsigned int cpu = 0; cpu < 128; cpu++)
+                if (mask[cpu >> 6] >> (cpu & 63) & 1)
+                {
+                        if (used)
+                                list[used++] = ',';
+                        used += positive_into_string((string_address)list + used, cpu), count++;
+                }
+        at = positive_into_string((string_address)text, count), text[at++] = ':';
+        memory_copy(text + at, list, used), at += used, text[at++] = '\n';
+        if ((handle = system_open_at_mode(AT_FDCWD, (string_address)compositor_game_cpus_file, O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW | O_CLOEXEC, 0644)) >= 0)
+                system_write_once(handle, text, at), system_close(handle);
+}
+
 // The reader goes to the input core when the display's start took one, else to CCD0 as before.
 static void compositor_pin_input_core(void)
 {
@@ -284,7 +272,7 @@ static void compositor_pin_irqs_ccd0(void)
 
         if (!compositor_multi_ccd() || (fd = system_open_at(AT_FDCWD, (string_address) "/proc/interrupts", FILE_READ | O_CLOEXEC)) < 0)
                 return;
-        compositor_input_core_take();
+        compositor_input_core_take(), compositor_game_cpus_note();
         while (got < (long)sizeof(buf) - 1 &&
                (n = (long)compositor_call(syscall(read), (positive)fd, (positive)(buf + got), (positive)(sizeof(buf) - 1 - (unsigned long)got), 0, 0, 0)) > 0)
                 got += n;
@@ -401,42 +389,18 @@ static int compositor_qos_keep(int input, int game)
         return 1;
 }
 
-static void compositor_game_watch(void)
-{
-        static const char *const batteries[] = {"/sys/class/power_supply/BAT0/status", "/sys/class/power_supply/BAT1/status",
-                                                "/sys/class/power_supply/battery/status"};
-        int game = compositor.games != ~0ul && compositor_fullscreen_up(), battery = 0;
-
-        if (game == (compositor.game >= 0))
-                return;
-        if (game)
-                compositor_late_reset();
-        if (!game)
-                { compositor_gpu_game_clocks(0), compositor_game_epp(0), compositor.game = -1, compositor_qos_keep(compositor.hold >= 0, 0); return; }
-        if (!compositor_qos_keep(compositor.hold >= 0, 1))
-                { compositor.game = -1, compositor.games = ~0ul; return; }
-        compositor.game = 1;
-        for (unsigned int at = 0; at < 3; at++)
-        {
-                char status[16];
-
-                compositor_word(batteries[at], status, sizeof(status));
-                battery |= string_equals((string_address)status, (string_address) "Discharging");
-        }
-        if (!battery)
-                compositor_game_epp(1), compositor_gpu_game_clocks(1);
-        compositor.games++;
-}
-
-// EEVDF custom 100 us runtime slice + uclamp.min boost + multi-CCD V-Cache pinning for fullscreen top games,
-// plus uclamp.max cap + secondary-CCD pinning for background window processes while a fullscreen game runs.
+/*
+        A game's threads: the EEVDF custom 100 us runtime slice, uclamp.min and the game's CCD; the background's window processes while it runs:
+        uclamp.max and the other CCD. uclamp moves no clock under amd-pstate's active mode, where the CPU's firmware picks the clock from the
+        energy preference, nor any thread where every core is the same size: on the box a busy loop ran at 5.13 GHz with uclamp.max 0 as with
+        none (2026-11-23), so the CCDs' preferences do that work (compositor_game_epp). It is kept for machines whose cores differ in size,
+        where it places a thread.
+*/
 #define COMPOSITOR_GAME_SLICE_NS 100000ull
 #define COMPOSITOR_GAME_UCLAMP_MIN 512u
 #define COMPOSITOR_BG_UCLAMP_MAX 256u
 #define COMPOSITOR_SCHED_FLAG_UCLAMP_MIN 0x20ull
 #define COMPOSITOR_SCHED_FLAG_UCLAMP_MAX 0x40ull
-#define COMPOSITOR_GAME_SLICES 8
-#define COMPOSITOR_BG_SLICES 32
 #define COMPOSITOR_GAME_SLICE_FILE "/run/moonwater/game-slice"
 static b32 compositor_game_off;
 struct compositor_sched_attr
@@ -576,89 +540,36 @@ static unsigned int compositor_row_pids(int row, unsigned int me, int server, un
         return n;
 }
 
-// The value of `key` (its name and the '=') in a process's environment, into value (NUL-terminated, at most room - 1 bytes): its length, 0 for none.
+/*
+        The value of `key` (its name and the '=') in a process's environment, into value (NUL-terminated, at most room - 1 bytes): its length, 0
+        for none. Read as it comes, a piece at a time, so an environment of any size is read to its end (it was read whole into 128 KiB, and a
+        key past that was none).
+*/
 static unsigned int compositor_environ_word(unsigned int pid, const char *key, char *value, unsigned int room)
 {
-        static char text[1 << 17]; // an environment read whole (Steam's are some tens of KiB)
-        char path[40];
-        unsigned int length = (unsigned int)string_length((string_address)key), got = 0;
-        bipolar handle, step;
+        char chunk[4096], path[40];
+        unsigned int length = (unsigned int)string_length((string_address)key), matched = 0, size = 0;
+        int state = 0; // 0: an entry's start, matched bytes of the key so far; 1: in the key's value; 2: in another entry
+        bipolar handle, got;
 
         windows_num_path(path, sizeof(path), "/proc/", pid, "/environ");
-        if (!room || (handle = system_open_at(AT_FDCWD, (string_address)path, FILE_READ | O_CLOEXEC)) < 0)
+        if (!room || !length || (handle = system_open_at(AT_FDCWD, (string_address)path, FILE_READ | O_CLOEXEC)) < 0)
                 return 0;
-        while (got < sizeof text && (step = system_read_once(handle, text + got, sizeof text - got)) > 0)
-                got += (unsigned int)step;
-        system_close(handle);
-        for (unsigned int at = 0; at < got;)
-        {
-                unsigned int stop = at;
-
-                while (stop < got && text[stop])
-                        stop++;
-                if (stop - at > length && !memory_compare(text + at, key, length))
+        while (state != 3 && (got = system_read_once(handle, chunk, sizeof chunk)) > 0)
+                for (bipolar at = 0; at < got && state != 3; at++)
                 {
-                        unsigned int size = stop - at - length < room - 1 ? stop - at - length : room - 1;
+                        char c = chunk[at];
 
-                        memory_copy(value, text + at + length, size), value[size] = 0;
-                        return size;
-                }
-                at = stop + 1;
-        }
-        return 0;
-}
-
-/*
-        A Wine game's wineserver: every one of the game's waits, messages and window calls goes through it, so it is the game's as Xwayland is. It
-        is the process named wineserver whose environment has the game's SteamGameId (Steam sets it for the launch, and the server, started by the
-        game's first Wine process, inherits it). 0 for a game that is not Steam's or has none.
-*/
-static unsigned int compositor_game_wineserver(unsigned int pid)
-{
-        char game[24], other[24], path[40], comm[32];
-        p8 buffer[4096];
-        bipolar handle, got;
-        unsigned int found = 0;
-
-        if (!compositor_environ_word(pid, "SteamGameId=", game, sizeof game) ||
-            (handle = system_open_at(AT_FDCWD, (string_address) "/proc", FILE_READ | O_DIRECTORY | O_CLOEXEC)) < 0)
-                return 0;
-        while (!found && (got = system_call_3(syscall(getdents64), (positive)handle, (positive)buffer, sizeof(buffer))) > 0)
-                for (bipolar at = 0; at < got && !found;)
-                {
-                        string_address name = (string_address)(buffer + at + 19);
-                        unsigned int other_pid = 0;
-
-                        at += memory_load_unaligned(p16, buffer + at + 16);
-                        for (; *name >= '0' && *name <= '9'; name++)
-                                other_pid = other_pid * 10 + (unsigned int)(*name - '0');
-                        if (!other_pid || *name || other_pid == pid)
-                                continue;
-                        windows_num_path(path, sizeof(path), "/proc/", other_pid, "/comm");
-                        compositor_word(path, comm, sizeof(comm));
-                        if (string_equals((string_address)comm, (string_address) "wineserver") &&
-                            compositor_environ_word(other_pid, "SteamGameId=", other, sizeof other) && string_equals((string_address)other, (string_address)game))
-                                found = other_pid;
+                        if (!c)
+                                state = state == 1 ? 3 : 0, matched = 0;
+                        else if (state == 0)
+                                state = c != key[matched] ? 2 : ++matched == length ? 1 : 0;
+                        else if (state == 1 && size < room - 1)
+                                value[size++] = c;
                 }
         system_close(handle);
-        return found;
-}
-
-static void compositor_game_slice_note(const unsigned int *pids, unsigned int count)
-{
-        char text[COMPOSITOR_GAME_SLICES * 12];
-        positive at = 0;
-        bipolar handle = system_open_at_mode(AT_FDCWD, (string_address)COMPOSITOR_GAME_SLICE_FILE, O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW | O_CLOEXEC, 0600);
-
-        if (handle < 0)
-                return;
-        if (count > COMPOSITOR_GAME_SLICES)
-                count = COMPOSITOR_GAME_SLICES;
-        for (unsigned int k = 0; k < count && at + 12 <= sizeof(text); k++)
-                at += positive_into_string((string_address)text + at, (positive)pids[k]), text[at++] = '\n';
-        if (at)
-                system_write_once(handle, text, at);
-        system_close(handle);
+        value[size] = 0;
+        return state == 1 || state == 3 ? size : 0;
 }
 
 static int compositor_pid_in(const unsigned int *list, unsigned int n, unsigned int pid)
@@ -669,105 +580,485 @@ static int compositor_pid_in(const unsigned int *list, unsigned int n, unsigned 
         return 0;
 }
 
+/*
+        Game mode's workaround switches, each on unless /root/workarounds has "NAME off" as a line (tune.c's table: `moonwater workaround NAME
+        off`). Read again each time the fullscreen windows are weighed (compositor_game_up), so a switch turned takes at the next game, with no
+        restart of the compositor.
+*/
+#define COMPOSITOR_WA_STEAM_ONLY 1u // game-steam-only: game mode for a game (compositor_game_id), not for every fullscreen window
+#define COMPOSITOR_WA_CCD_EPP 2u    // game-ccd-epp: the CPUs past the game's CCD at balance_power while it runs
+#define COMPOSITOR_WA_NVME 4u       // game-nvme: the NVMe drives out of their deep power states while it runs
+#define COMPOSITOR_WA_GROUP 8u      // game-group: every process of the game's Steam launch on its slice and its CCD
+static const char *const compositor_wa_names[] = {"game-steam-only", "game-ccd-epp", "game-nvme", "game-group"};
+static const char *compositor_wa_file = "/root/workarounds";
+static unsigned int compositor_wa = ~0u;
+
+// The switch a line "NAME off" turns off (its bit), 0 for any other line.
+static unsigned int compositor_wa_line(const char *line, unsigned int length)
+{
+        for (unsigned int k = 0; k < sizeof compositor_wa_names / sizeof compositor_wa_names[0]; k++)
+        {
+                unsigned int size = (unsigned int)string_length((string_address)compositor_wa_names[k]);
+
+                if (length == size + 4 && !memory_compare(line, compositor_wa_names[k], size) && !memory_compare(line + size, " off", 4))
+                        return 1u << k;
+        }
+        return 0;
+}
+
+static void compositor_wa_read(void)
+{
+        char chunk[512], line[sizeof "game-steam-only off" + 4]; // a line longer than every "NAME off" is no switch's
+        unsigned int off = 0, length = 0;
+        bipolar handle = system_open_at(AT_FDCWD, (string_address)compositor_wa_file, FILE_READ | O_NOFOLLOW | O_CLOEXEC), got;
+
+        compositor_wa = ~0u;
+        if (handle < 0)
+                return;
+        while ((got = system_read_once(handle, chunk, sizeof chunk)) > 0)
+                for (bipolar at = 0; at < got; at++)
+                        if (chunk[at] == '\n')
+                                off |= length <= sizeof line ? compositor_wa_line(line, length) : 0, length = 0;
+                        else if (++length <= sizeof line)
+                                line[length - 1] = chunk[at];
+        off |= length <= sizeof line ? compositor_wa_line(line, length) : 0;
+        system_close(handle);
+        compositor_wa = ~off;
+}
+
+/*
+        The CPUs' energy preference while a game runs: performance on the game's CCD, where its threads, the compositor's loop and reader and the
+        card's and the USB's interrupts are pinned, and, with game-ccd-epp, balance_power on the others, which run only the background then
+        (compositor_bg_throttle_of pins it there): uclamp.max did nothing for that (above). The others are lowered only from the machine's
+        default (balance_performance): a preference the person set, higher or lower, is left. Every CPU is the game's where there is one CCD.
+        Each CPU takes cpu0's preference from before the game back at its end.
+*/
+static char compositor_game_epp_saved[32];
+static char compositor_game_dpm_saved[4][32];
+static int compositor_game_epp_active;
+static const char *compositor_drm_root = "/sys/class/drm"; // the cards' files (the checks' own tree in their place)
+
+static void compositor_game_epp(int on)
+{
+        static const char leaf[] = "/cpufreq/energy_performance_preference";
+        unsigned long game[2] = {~0ul, ~0ul};
+        char path[128];
+        const char *rest;
+
+        if (on == compositor_game_epp_active)
+                return;
+        compositor_cpu_path(path, sizeof path, 0, leaf);
+        if (on && !compositor_game_epp_saved[0])
+                compositor_word(path, compositor_game_epp_saved, sizeof(compositor_game_epp_saved));
+        compositor_ccd0_mask(game); // one CCD: every CPU
+        rest = !(compositor_wa & COMPOSITOR_WA_CCD_EPP) ? "performance"
+               : string_equals((string_address)compositor_game_epp_saved, (string_address) "balance_performance") ||
+                         string_equals((string_address)compositor_game_epp_saved, (string_address) "default")
+                   ? "balance_power"
+                   : null;
+        // Every CPU the machine has (an offline one has a directory and no preference): no count of them is assumed.
+        for (unsigned int cpu = 0; compositor_game_epp_saved[0]; cpu++)
+        {
+                const char *want = !on ? compositor_game_epp_saved : cpu < 128 && (game[cpu >> 6] >> (cpu & 63) & 1) ? "performance" : rest;
+
+                compositor_cpu_path(path, sizeof path, cpu, "");
+                if (compositor_call(syscall(faccessat), (positive)AT_FDCWD, (positive)path, 0, 0, 0, 0) != 0)
+                        break;
+                compositor_cpu_path(path, sizeof path, cpu, leaf);
+                if (want)
+                        compositor_write_sysfs(path, want, (unsigned long)string_length((string_address)want));
+        }
+        for (unsigned int card = 0; card < 4; card++)
+        {
+                const char *dpm_want;
+                unsigned int at = 0;
+
+                windows_buf_str(path, sizeof path, &at, compositor_drm_root), windows_buf_kv(path, sizeof path, &at, "/card", (long)card);
+                windows_buf_str(path, sizeof path, &at, "/device/power_dpm_force_performance_level");
+                if (on && !compositor_game_dpm_saved[card][0])
+                        compositor_word(path, compositor_game_dpm_saved[card], sizeof(compositor_game_dpm_saved[card]));
+                if (!compositor_game_dpm_saved[card][0] ||
+                    (on && string_equals((string_address)compositor_game_dpm_saved[card], (string_address) "high")))
+                        continue;
+                dpm_want = on ? "high" : compositor_game_dpm_saved[card];
+                compositor_write_sysfs(path, dpm_want, (unsigned long)string_length((string_address)dpm_want));
+        }
+        compositor_game_epp_active = on;
+}
+
+/*
+        The NVMe drives held out of their non-operational power states while a game runs (game-nvme), for the reads a game streams after a
+        quiet spell. At the kernel's default tolerance (100 ms) APST puts a drive in its deepest state 100 ms after its last command, and the
+        box's Kingstons declare 2.5 + 7.5 ms to come out of it: a 4 KiB read after 200 ms of quiet took 5.42 ms (median of 30, O_DIRECT, the
+        idle nvme1, 2026-11-23), and 0.42 ms with a tolerance of 1000 us, which leaves a drive only the states within a millisecond of use.
+        Each drive's own value is put back at the end; ours, left by a compositor that died holding it, is put back as the kernel's default.
+*/
+#define COMPOSITOR_GAME_NVME_US "1000"
+static const char *compositor_nvme_root = "/sys/class/nvme";
+static const char *compositor_nvme_default = "/sys/module/nvme_core/parameters/default_ps_max_latency_us";
+struct compositor_nvme_kept
+{
+        unsigned int index, length;
+        char value[16];
+};
+static struct
+{
+        int active;
+        unsigned int count;
+        unsigned long bytes;
+        struct compositor_nvme_kept *kept;
+} compositor_game_nvme_state;
+
+static void compositor_nvme_path(char *path, unsigned int room, unsigned int index)
+{
+        unsigned int at = 0;
+
+        windows_buf_str(path, room, &at, compositor_nvme_root), windows_buf_kv(path, room, &at, "/nvme", (long)index);
+        windows_buf_str(path, room, &at, "/power/pm_qos_latency_tolerance_us");
+}
+
+static void compositor_game_nvme(int on)
+{
+        char path[192];
+        p8 buffer[2048];
+        bipolar handle, got;
+
+        if (on == compositor_game_nvme_state.active)
+                return;
+        compositor_game_nvme_state.active = on;
+        if (!on)
+        {
+                for (unsigned int k = 0; k < compositor_game_nvme_state.count; k++)
+                {
+                        const struct compositor_nvme_kept *drive = &compositor_game_nvme_state.kept[k];
+
+                        compositor_nvme_path(path, sizeof path, drive->index);
+                        compositor_write_sysfs(path, drive->value, drive->length);
+                }
+                compositor_game_nvme_state.count = 0;
+                return;
+        }
+        if ((handle = system_open_at(AT_FDCWD, (string_address)compositor_nvme_root, FILE_READ | O_DIRECTORY | O_CLOEXEC)) < 0)
+                return;
+        while ((got = system_call_3(syscall(getdents64), (positive)handle, (positive)buffer, sizeof(buffer))) > 0)
+                for (bipolar at = 0; at < got;)
+                {
+                        string_address name = (string_address)(buffer + at + 19);
+                        struct compositor_nvme_kept drive = {0, 0, {0}};
+
+                        at += memory_load_unaligned(p16, buffer + at + 16);
+                        if (memory_compare(name, "nvme", 4) || name[4] < '0' || name[4] > '9')
+                                continue;
+                        for (name += 4; *name >= '0' && *name <= '9' && drive.index < 100000000u; name++)
+                                drive.index = drive.index * 10 + (unsigned int)(*name - '0');
+                        compositor_nvme_path(path, sizeof path, drive.index);
+                        compositor_word(path, drive.value, sizeof drive.value);
+                        if (*name || !drive.value[0])
+                                continue;
+                        if (string_equals((string_address)drive.value, (string_address)COMPOSITOR_GAME_NVME_US))
+                                compositor_word(compositor_nvme_default, drive.value, sizeof drive.value);
+                        drive.length = (unsigned int)string_length((string_address)drive.value);
+                        if (!drive.length || !mem_buf_grow((void **)&compositor_game_nvme_state.kept, &compositor_game_nvme_state.bytes,
+                                                           (compositor_game_nvme_state.count + 1ul) * sizeof drive, MEM_BUF_KEEP | MEM_BUF_GROW_2X))
+                                continue;
+                        compositor_game_nvme_state.kept[compositor_game_nvme_state.count++] = drive;
+                        compositor_write_sysfs(path, COMPOSITOR_GAME_NVME_US, sizeof COMPOSITOR_GAME_NVME_US - 1);
+                }
+        system_close(handle);
+}
+
+/*
+        A process is a game's: Steam started it for one (SteamGameId in its environment, which every process of the launch inherits) or it says
+        it is one (MOONWATER_GAME=1, for a game Steam did not start). A fullscreen video, terminal or browser is neither: game mode (performance
+        clocks on the CPUs and the card, the wakeup hold, the NVMe hold, the slice and the CCD) came for every fullscreen window. Its SteamGameId
+        into id, empty for MOONWATER_GAME; 0 for neither.
+*/
+#define COMPOSITOR_GAME_ID 24 // a SteamGameId: a decimal of 64 bits at most
+static int compositor_game_id(unsigned int pid, char *id)
+{
+        char word[4];
+
+        if (compositor_environ_word(pid, "SteamGameId=", id, COMPOSITOR_GAME_ID))
+                return 1;
+        id[0] = 0;
+        return compositor_environ_word(pid, "MOONWATER_GAME=", word, sizeof word) && word[0] != '0';
+}
+
+/*
+        The fullscreen windows weighed: each screen's top one, the processes its frames are made by (compositor_row_pids: an X window's client and
+        its X server), and whether it is a game's (its process, an X window's client). Weighed again when the top windows or the stack change, and
+        once a second besides, for an owner the X window manager learns after the window is up; a process's environment is read once while it
+        stays a top window's. gen counts the changes of the game's processes, for compositor_game_slice.
+*/
+static struct
+{
+        unsigned int gen, stack_gen, tops, roots, game;
+        positive next;
+        int rows[WINDOWS_OUTPUTS];
+        unsigned int root[2 * WINDOWS_OUTPUTS], weighed[WINDOWS_OUTPUTS];
+        unsigned char root_game[2 * WINDOWS_OUTPUTS], weighed_game[WINDOWS_OUTPUTS];
+        char root_id[2 * WINDOWS_OUTPUTS][COMPOSITOR_GAME_ID], weighed_id[WINDOWS_OUTPUTS][COMPOSITOR_GAME_ID];
+} compositor_games;
+
+static int compositor_game_up(positive now)
+{
+        __typeof__(compositor_games) *g = &compositor_games;
+        int rows[WINDOWS_OUTPUTS];
+        unsigned int tops = compositor_fullscreen_tops(rows, WINDOWS_OUTPUTS), me, roots = 0, game = 0, weighed = 0, root[2 * WINDOWS_OUTPUTS];
+        unsigned int weighed_pid[WINDOWS_OUTPUTS];
+        unsigned char root_game[2 * WINDOWS_OUTPUTS], weighed_game[WINDOWS_OUTPUTS];
+        char root_id[2 * WINDOWS_OUTPUTS][COMPOSITOR_GAME_ID], weighed_id[WINDOWS_OUTPUTS][COMPOSITOR_GAME_ID];
+
+        if (tops == g->tops && !memory_compare(rows, g->rows, tops * sizeof rows[0]) && g->stack_gen == compositor.stack_gen && (!tops || now < g->next))
+                return g->game;
+        g->tops = tops, memory_copy(g->rows, rows, tops * sizeof rows[0]), g->stack_gen = compositor.stack_gen, g->next = now + 1000000000ull;
+        if (tops)
+                compositor_wa_read();
+        me = (unsigned int)compositor_call(syscall(getpid), 0, 0, 0, 0, 0, 0);
+        for (unsigned int k = 0; k < tops && compositor.table; k++)
+        {
+                unsigned int got[2], n = compositor_row_pids(rows[k], me, 1, got), w = 0;
+                int known = 0;
+
+                if (!n)
+                        continue;
+                // The table's pid is the client's word: its scheduling is changed only for a process the compositor can vouch for (B2)
+                for (unsigned int c = 0; c < WINDOWS_OUTPUTS && !known; c++)
+                        if (g->weighed[c] == got[0])
+                                known = 1, w = c;
+                weighed_pid[weighed] = got[0];
+                if (known)
+                        weighed_game[weighed] = g->weighed_game[w], memory_copy(weighed_id[weighed], g->weighed_id[w], COMPOSITOR_GAME_ID);
+                else
+                        weighed_game[weighed] = (unsigned char)compositor_game_id(got[0], weighed_id[weighed]);
+                if (weighed_game[weighed] || !(compositor_wa & COMPOSITOR_WA_STEAM_ONLY))
+                        for (unsigned int j = 0; j < n; j++)
+                                if (!compositor_pid_in(root, roots, got[j]))
+                                {
+                                        root_game[roots] = j == 0 && weighed_game[weighed]; // the X server is every X window's, no game's
+                                        memory_copy(root_id[roots], weighed_id[weighed], COMPOSITOR_GAME_ID);
+                                        root[roots++] = got[j];
+                                }
+                game |= weighed_game[weighed];
+                weighed++;
+        }
+        // Every fullscreen window is a game's when game-steam-only is off, as before it (one whose processes are not known too)
+        game = (compositor_wa & COMPOSITOR_WA_STEAM_ONLY) ? game != 0 : tops != 0;
+        memory_copy(g->weighed, weighed_pid, weighed * sizeof weighed_pid[0]), memory_copy(g->weighed_game, weighed_game, weighed);
+        memory_copy(g->weighed_id, weighed_id, weighed * sizeof weighed_id[0]);
+        for (unsigned int c = weighed; c < WINDOWS_OUTPUTS; c++)
+                g->weighed[c] = 0;
+        if (roots != g->roots || memory_compare(root, g->root, roots * sizeof root[0]))
+                g->gen++;
+        g->roots = roots, g->game = game;
+        memory_copy(g->root, root, roots * sizeof root[0]), memory_copy(g->root_game, root_game, roots);
+        memory_copy(g->root_id, root_id, roots * sizeof root_id[0]);
+        return game;
+}
+
+static void compositor_game_watch(positive now)
+{
+        static const char *const batteries[] = {"/sys/class/power_supply/BAT0/status", "/sys/class/power_supply/BAT1/status",
+                                                "/sys/class/power_supply/battery/status"};
+        int game = compositor.games != ~0ul && compositor_game_up(now), battery = 0;
+
+        if (game == (compositor.game >= 0))
+                return;
+        if (game)
+                compositor_late_reset();
+        if (!game)
+        {
+                compositor_gpu_game_clocks(0), compositor_game_epp(0), compositor_game_nvme(0);
+                compositor.game = -1, compositor_qos_keep(compositor.hold >= 0, 0);
+                return;
+        }
+        if (!compositor_qos_keep(compositor.hold >= 0, 1))
+                { compositor.game = -1, compositor.games = ~0ul; return; }
+        compositor.game = 1;
+        for (unsigned int at = 0; at < 3; at++)
+        {
+                char status[16];
+
+                compositor_word(batteries[at], status, sizeof(status));
+                battery |= string_equals((string_address)status, (string_address) "Discharging");
+        }
+        if (!battery)
+        {
+                compositor_game_epp(1), compositor_gpu_game_clocks(1);
+                if (compositor_wa & COMPOSITOR_WA_NVME)
+                        compositor_game_nvme(1);
+        }
+        compositor.games++;
+}
+
+// A list of pids that grows as it needs (the game's processes, the background's): 0 where there was no memory for one more.
+struct compositor_pids
+{
+        unsigned int count;
+        unsigned long bytes;
+        unsigned int *pid;
+};
+
+static int compositor_pids_add(struct compositor_pids *list, unsigned int pid)
+{
+        if (!pid || compositor_pid_in(list->pid, list->count, pid))
+                return 1;
+        if (!mem_buf_grow((void **)&list->pid, &list->bytes, (list->count + 1ul) * sizeof list->pid[0], MEM_BUF_KEEP | MEM_BUF_GROW_2X))
+                return 0;
+        list->pid[list->count++] = pid;
+        return 1;
+}
+
+/*
+        Every process of a game's Steam launch (game-group): its environment has the game's SteamGameId, which Steam sets for the launch and every
+        process of it inherits. Proton's wineserver, which every wait, message and window call of the game goes through, as Xwayland is (it was
+        the only one taken, by its name); services.exe, winedevice.exe, explorer.exe and the game's other Wine processes; and the reaper's and
+        pressure-vessel's, which only wait. A walk of /proc reading each process's environment, once a game's process, as it first goes
+        fullscreen; a process the game starts later inherits its slice and its CPUs.
+*/
+static void compositor_game_group(const char *id, unsigned int me, struct compositor_pids *list)
+{
+        char other[COMPOSITOR_GAME_ID];
+        p8 buffer[4096];
+        bipolar handle, got;
+
+        if (!id[0] || (handle = system_open_at(AT_FDCWD, (string_address) "/proc", FILE_READ | O_DIRECTORY | O_CLOEXEC)) < 0)
+                return;
+        while ((got = system_call_3(syscall(getdents64), (positive)handle, (positive)buffer, sizeof(buffer))) > 0)
+                for (bipolar at = 0; at < got;)
+                {
+                        string_address name = (string_address)(buffer + at + 19);
+                        unsigned int pid = 0;
+
+                        at += memory_load_unaligned(p16, buffer + at + 16);
+                        for (; *name >= '0' && *name <= '9' && pid < 100000000u; name++)
+                                pid = pid * 10 + (unsigned int)(*name - '0');
+                        if (pid && !*name && pid != me && compositor_environ_word(pid, "SteamGameId=", other, sizeof other) &&
+                            string_equals((string_address)other, (string_address)id))
+                                compositor_pids_add(list, pid);
+                }
+        system_close(handle);
+}
+
+// The game's processes as the slice left them, for the next compositor to put back (one a line).
+static void compositor_game_slice_note(const struct compositor_pids *list)
+{
+        bipolar handle = system_open_at_mode(AT_FDCWD, (string_address)COMPOSITOR_GAME_SLICE_FILE, O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW | O_CLOEXEC, 0600);
+        char text[512];
+        positive at = 0;
+
+        if (handle < 0)
+                return;
+        for (unsigned int k = 0; k < list->count; k++)
+        {
+                at += positive_into_string((string_address)text + at, (positive)list->pid[k]), text[at++] = '\n';
+                if (at + 12 > sizeof text || k + 1 == list->count)
+                        system_write_once(handle, text, at), at = 0;
+        }
+        system_close(handle);
+}
+
+// What a compositor that went before left on its game's processes (compositor_game_slice_note's file), taken off and the file emptied.
+static void compositor_game_slice_undo(unsigned int me)
+{
+        char text[512];
+        bipolar handle = system_open_at(AT_FDCWD, (string_address)COMPOSITOR_GAME_SLICE_FILE, FILE_READ | O_NOFOLLOW | O_CLOEXEC), got;
+        b32 any = false;
+        unsigned int value = 0;
+
+        if (handle < 0)
+                return;
+        while ((got = system_read_once(handle, text, sizeof text)) > 0)
+                for (bipolar k = (any = true, 0); k < got; k++)
+                        if (text[k] >= '0' && text[k] <= '9')
+                        {
+                                unsigned int d = (unsigned int)(text[k] - '0');
+
+                                value = value <= (0x7fffffffu - d) / 10u ? value * 10u + d : 0x80000000u;
+                        }
+                        else
+                        {
+                                if (value && value <= 0x7fffffffu && value != me)
+                                        compositor_game_slice_of(value, 0);
+                                value = 0;
+                        }
+        system_close(handle);
+        if (any)
+        {
+                struct compositor_pids none = {0, 0, null};
+
+                compositor_game_slice_note(&none);
+        }
+}
+
 static void compositor_game_slice(void)
 {
-        static unsigned int pids[COMPOSITOR_GAME_SLICES], count;
-        static unsigned int bg_pids[COMPOSITOR_BG_SLICES], bg_count;
-        static unsigned int last_stack_gen;
+        static struct compositor_pids applied, next, bg_applied, bg_next, group;
+        static unsigned int last_stack_gen, last_gen, group_of;
+        static int last_game;
+        static char group_id[COMPOSITOR_GAME_ID];
         static b32 started;
-        static unsigned int servers_game[COMPOSITOR_GAME_SLICES], servers_of[COMPOSITOR_GAME_SLICES], servers_count; // each game pid's wineserver (0: none)
-        unsigned int next_game[COMPOSITOR_GAME_SLICES], next_of[COMPOSITOR_GAME_SLICES], servers_next = 0;
-        unsigned int now[COMPOSITOR_GAME_SLICES], nows = 0, me;
-        unsigned int bg_now[COMPOSITOR_BG_SLICES], bg_nows = 0;
-        int rows[COMPOSITOR_GAME_SLICES];
-        unsigned int tops;
+        const __typeof__(compositor_games) *g = &compositor_games;
+        unsigned int me, roots = compositor_game_off || compositor.game < 0 ? 0 : g->roots;
         b32 changed = false;
 
-        if (started && last_stack_gen == compositor.stack_gen)
+        if (started && last_stack_gen == compositor.stack_gen && last_gen == g->gen && last_game == (compositor.game >= 0))
                 return;
-        last_stack_gen = compositor.stack_gen;
+        last_stack_gen = compositor.stack_gen, last_gen = g->gen, last_game = compositor.game >= 0;
         me = (unsigned int)compositor_call(syscall(getpid), 0, 0, 0, 0, 0, 0);
-        tops = compositor_game_off ? 0 : compositor_fullscreen_tops(rows, COMPOSITOR_GAME_SLICES);
-
         if (!started)
         {
                 started = 1;
                 if (compositor.table_giver)
-                {
-                        char text[COMPOSITOR_GAME_SLICES * 12 + 1];
-                        bipolar handle = system_open_at(AT_FDCWD, (string_address)COMPOSITOR_GAME_SLICE_FILE, FILE_READ | O_NOFOLLOW | O_CLOEXEC), got = 0;
-                        unsigned int value = 0;
-
-                        if (handle >= 0)
-                                got = system_read_once(handle, text, sizeof text - 1), system_close(handle);
-                        for (bipolar k = 0; k < got; k++)
-                                if (text[k] >= '0' && text[k] <= '9')
-                                {
-                                        unsigned int d = (unsigned int)(text[k] - '0');
-                                        value = value <= (0x7fffffffu - d) / 10u ? value * 10u + d : 0x80000000u;
-                                }
-                                else
-                                {
-                                        if (value && value <= 0x7fffffffu && value != me)
-                                                compositor_game_slice_of(value, 0);
-                                        value = 0;
-                                }
-                        if (got > 0)
-                                compositor_game_slice_note(pids, 0);
-                }
+                        compositor_game_slice_undo(me);
         }
-        for (unsigned int k = 0; k < tops && compositor.table; k++)
+        next.count = 0;
+        for (unsigned int k = 0; k < roots; k++)
         {
-                unsigned int got[2], n = compositor_row_pids(rows[k], me, 1, got);
-
-                // The table's pid is the client's word: its scheduling is changed only for a process the compositor can vouch for (B2)
-                for (unsigned int j = 0; j < n && nows < COMPOSITOR_GAME_SLICES; j++)
-                        if (!compositor_pid_in(now, nows, got[j]))
-                                now[nows++] = got[j];
-                // A Wine game's wineserver (looked for once a game pid, when it first goes fullscreen: a walk of /proc)
-                if (n && nows < COMPOSITOR_GAME_SLICES)
-                {
-                        unsigned int server = 0, cached = 0;
-
-                        for (unsigned int c = 0; c < servers_count; c++)
-                                if (servers_game[c] == got[0])
-                                        server = servers_of[c], cached = 1;
-                        if (!cached)
-                                server = compositor_game_wineserver(got[0]);
-                        if (servers_next < COMPOSITOR_GAME_SLICES)
-                                next_game[servers_next] = got[0], next_of[servers_next++] = server;
-                        if (server && server != me && !compositor_pid_in(now, nows, server))
-                                now[nows++] = server;
-                }
+                compositor_pids_add(&next, g->root[k]);
+                if (!g->root_game[k] || !(compositor_wa & COMPOSITOR_WA_GROUP))
+                        continue;
+                if (group_of != g->root[k] || !string_equals((string_address)group_id, (string_address)g->root_id[k]))
+                        group.count = 0, compositor_game_group(g->root_id[k], me, &group), group_of = g->root[k],
+                        memory_copy(group_id, g->root_id[k], COMPOSITOR_GAME_ID);
+                for (unsigned int j = 0; j < group.count; j++)
+                        compositor_pids_add(&next, group.pid[j]);
         }
-        memory_copy(servers_game, next_game, sizeof next_game[0] * servers_next);
-        memory_copy(servers_of, next_of, sizeof next_of[0] * servers_next), servers_count = servers_next;
-        for (unsigned int k = 0; k < count; k++)
-                if (!compositor_pid_in(now, nows, pids[k]))
-                        compositor_game_slice_of(pids[k], 0), changed = true;
-        for (unsigned int j = 0; j < nows; j++)
-                if (!compositor_pid_in(pids, count, now[j]))
-                        compositor_game_slice_of(now[j], COMPOSITOR_GAME_SLICE_NS), changed = true;
-        if (nows > 0 && compositor.table)
-                for (int r = 0; r < (int)compositor_rows_in_use && bg_nows < COMPOSITOR_BG_SLICES; r++)
+        for (unsigned int k = 0; k < applied.count; k++)
+                if (!compositor_pid_in(next.pid, next.count, applied.pid[k]))
+                        compositor_game_slice_of(applied.pid[k], 0), changed = true;
+        for (unsigned int j = 0; j < next.count; j++)
+                if (!compositor_pid_in(applied.pid, applied.count, next.pid[j]))
+                        compositor_game_slice_of(next.pid[j], COMPOSITOR_GAME_SLICE_NS), changed = true;
+        bg_next.count = 0;
+        if (next.count && compositor.table)
+                for (int r = 0; r < (int)compositor_rows_in_use; r++)
                 {
                         unsigned int got[2], pid = compositor_row_pids(r, me, 0, got) ? got[0] : 0;
 
-                        if (pid && !compositor_pid_in(now, nows, pid) && !compositor_pid_in(bg_now, bg_nows, pid))
-                                bg_now[bg_nows++] = pid;
+                        if (pid && !compositor_pid_in(next.pid, next.count, pid))
+                                compositor_pids_add(&bg_next, pid);
                 }
-        for (unsigned int k = 0; k < bg_count; k++)
-                if (!compositor_pid_in(bg_now, bg_nows, bg_pids[k]))
-                        compositor_bg_throttle_of(bg_pids[k], 0);
-        for (unsigned int j = 0; j < bg_nows; j++)
-                if (!compositor_pid_in(bg_pids, bg_count, bg_now[j]))
-                        compositor_bg_throttle_of(bg_now[j], 1);
-        memory_copy(bg_pids, bg_now, sizeof bg_now[0] * bg_nows), bg_count = bg_nows;
+        for (unsigned int k = 0; k < bg_applied.count; k++)
+                if (!compositor_pid_in(bg_next.pid, bg_next.count, bg_applied.pid[k]))
+                        compositor_bg_throttle_of(bg_applied.pid[k], 0);
+        for (unsigned int j = 0; j < bg_next.count; j++)
+                if (!compositor_pid_in(bg_applied.pid, bg_applied.count, bg_next.pid[j]))
+                        compositor_bg_throttle_of(bg_next.pid[j], 1);
+        {
+                struct compositor_pids swap = bg_applied;
+
+                bg_applied = bg_next, bg_next = swap;
+        }
         if (!changed)
                 return;
-        memory_copy(pids, now, sizeof now[0] * nows), count = nows;
+        {
+                struct compositor_pids swap = applied;
+
+                applied = next, next = swap;
+        }
         if (compositor.table_giver)
-                compositor_game_slice_note(pids, count);
+                compositor_game_slice_note(&applied);
 }
 
 // Desktop chords from /run/moonwater/keys -> FIFO /run/moonwater/keys.fire (runner starts everything).

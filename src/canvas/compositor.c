@@ -2404,7 +2404,7 @@ static b32 compositor_main()
                 if (minute_tick)
                         compositor_theme_tick();
                 compositor_wake_check(now), compositor_wake_pass(now);
-                compositor_hold_drop(now), compositor_game_watch(), compositor_game_slice();
+                compositor_hold_drop(now), compositor_game_watch(now), compositor_game_slice();
 #ifdef MOONWATER_GPU_C
                 compositor_gpu_late_tick(now), compositor_gpu_clocks_tick(now);
 #endif

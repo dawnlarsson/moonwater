@@ -1679,13 +1679,13 @@ static fn steam_profile(void)
         {
                 const struct bowl_profile address_to chrome_profile = bowl_find_profile("chrome");
                 positive latency = chrome_line(steam ? steam->session : null, "export DXVK_CONFIG='dxvk.latencySleep = True'");
-                positive topology = chrome_line(steam ? steam->session : null, "export WINE_CPU_TOPOLOGY=$n:$cpus");
+                positive topology = chrome_line(steam ? steam->session : null, "export WINE_CPU_TOPOLOGY=$cpus");
 
                 check("The session turns DXVK's latency sleep on unless the person set DXVK_CONFIG, behind wa dxvk-latency, before Steam starts",
                       latency && latency < run && strstr(steam->session[latency - 1], "wa dxvk-latency && [ -z \"$DXVK_CONFIG\" ]"));
-                check("The session tells Wine games of the first CCD's CPUs where there are two, unless the person set WINE_CPU_TOPOLOGY",
+                check("The session tells Wine games of the CPUs game mode pins them to, the compositor's list, unless the person set WINE_CPU_TOPOLOGY",
                       topology && topology < run && strstr(steam->session[topology - 1], "wa wine-ccd && [ -z \"$WINE_CPU_TOPOLOGY\" ]") &&
-                          strstr(steam->session[topology - 1], "cache/index3/shared_cpu_list"));
+                          strstr(steam->session[topology - 1], "/run/moonwater/game-cpus"));
                 check("The session starts the shader warm in the background behind wa shader-warm, after the Vulkan driver is picked, before Steam",
                       chrome_line(steam->session, "wa shader-warm && { bowl shaders >/dev/null 2>&1 & }") > chrome_line(steam->session, "VK_DRIVER_FILES") &&
                           chrome_line(steam->session, "wa shader-warm") < run);

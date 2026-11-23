@@ -5203,6 +5203,119 @@ static void input_core_rows(void)
 }
 
 /*
+        Game mode's own files, in a tree of the check's own: the workaround switches (compositor_wa_read: "NAME off" turns one off, any other line
+        nothing); the CPUs' energy preference per CCD (compositor_game_epp: the game's CCD performance and the others balance_power from the
+        machine's default, every CPU there is and none past it, all put back; game-ccd-epp off, performance on all as before); the NVMe drives'
+        tolerance (compositor_game_nvme: 1000 us while a game runs, each drive's own after it, a dead compositor's 1000 as the kernel's
+        default); and the game's CPUs in Wine's words (compositor_game_cpus_note: CCD0 less the input core and its sibling).
+*/
+static void game_tree_file(const char *path, const char *text)
+{
+        char dir[192];
+        unsigned int length = (unsigned int)string_length((string_address)path);
+        bipolar handle;
+
+        for (unsigned int at = 1; at < length && at < sizeof dir; at++)
+                if (path[at] == '/')
+                        memory_copy(dir, path, at), dir[at] = 0, compositor_call(syscall(mkdirat), (positive)AT_FDCWD, (positive)dir, 0700, 0, 0, 0);
+        handle = system_open_at_mode(AT_FDCWD, (string_address)path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
+        if (handle >= 0)
+                system_write_once(handle, text, (positive)string_length((string_address)text)), system_close(handle);
+}
+
+static int game_tree_is(const char *dir, const char *leaf, const char *want)
+{
+        char path[192], text[64];
+        unsigned int at = 0;
+        bipolar handle, got;
+
+        windows_buf_str(path, sizeof path, &at, dir), windows_buf_str(path, sizeof path, &at, leaf);
+        if ((handle = system_open_at(AT_FDCWD, (string_address)path, FILE_READ | O_CLOEXEC)) < 0)
+                return 0;
+        got = system_read_once(handle, text, sizeof text - 1), system_close(handle);
+        while (got > 0 && text[got - 1] == '\n')
+                got--;
+        text[got < 0 ? 0 : got] = 0;
+        return string_equals((string_address)text, (string_address)want);
+}
+
+static int game_epp_are(const char *dir, const char *ccd0, const char *ccd1)
+{
+        return game_tree_is(dir, "/cpu0/cpufreq/energy_performance_preference", ccd0) && game_tree_is(dir, "/cpu1/cpufreq/energy_performance_preference", ccd0) &&
+               game_tree_is(dir, "/cpu2/cpufreq/energy_performance_preference", ccd1) && game_tree_is(dir, "/cpu3/cpufreq/energy_performance_preference", ccd1);
+}
+
+static void game_mode_rows(void)
+{
+        static const char dir[] = "/run/moonwater/check-game";
+        __typeof__(compositor_ccd) kept_ccd = compositor_ccd;
+        __typeof__(compositor_input_core) kept_core = compositor_input_core;
+        const char *kept_root = compositor_qos_root, *kept_drm = compositor_drm_root, *kept_wa_file = compositor_wa_file;
+        const char *kept_nvme = compositor_nvme_root, *kept_default = compositor_nvme_default, *kept_cpus = compositor_game_cpus_file;
+        unsigned int kept_wa = compositor_wa;
+        char kept_saved[sizeof compositor_game_epp_saved];
+        b32 switches, none, split, back, flat, nvme_held, nvme_back, cpus;
+
+        memory_copy(kept_saved, compositor_game_epp_saved, sizeof kept_saved);
+        compositor_call(syscall(mkdirat), (positive)AT_FDCWD, (positive)dir, 0700, 0, 0, 0);
+        // The switches
+        game_tree_file("/run/moonwater/check-game/workarounds", "libc-shim off\ngame-nvme off\ngame-group on\ngame-ccd-epp offx\n game-steam-only off\n");
+        compositor_wa_file = "/run/moonwater/check-game/workarounds", compositor_wa_read();
+        switches = compositor_wa == ~COMPOSITOR_WA_NVME;
+        compositor_wa_file = "/run/moonwater/check-game/no-such-file", compositor_wa_read();
+        none = compositor_wa == ~0u;
+        check("game: a workaround line NAME off turns that switch of game mode off, any other line none, and no file leaves every one on", switches && none);
+        // Energy preference: CPUs 0 and 1 are the game's CCD, 2 and 3 the other's, and there is no CPU 4
+        for (unsigned int cpu = 0; cpu < 4; cpu++)
+        {
+                char path[128];
+                unsigned int at = 0;
+
+                windows_buf_str(path, sizeof path, &at, dir), windows_buf_kv(path, sizeof path, &at, "/cpu/cpu", (long)cpu);
+                windows_buf_str(path, sizeof path, &at, "/cpufreq/energy_performance_preference");
+                game_tree_file(path, "balance_performance\n");
+        }
+        compositor_ccd.ready = 1, compositor_ccd.multi = 1, compositor_ccd.ccd0[0] = 3, compositor_ccd.ccd0[1] = 0;
+        compositor_qos_root = "/run/moonwater/check-game/cpu", compositor_drm_root = "/run/moonwater/check-game/drm";
+        compositor_game_epp_saved[0] = 0, compositor_game_epp_active = 0, compositor_wa = ~0u;
+        compositor_game_epp(1);
+        split = game_epp_are("/run/moonwater/check-game/cpu", "performance", "balance_power") &&
+                !game_tree_is("/run/moonwater/check-game/cpu", "/cpu4/cpufreq/energy_performance_preference", "performance");
+        compositor_game_epp(0);
+        back = game_epp_are("/run/moonwater/check-game/cpu", "balance_performance", "balance_performance");
+        compositor_wa = ~COMPOSITOR_WA_CCD_EPP, compositor_game_epp(1);
+        flat = game_epp_are("/run/moonwater/check-game/cpu", "performance", "performance");
+        compositor_game_epp(0);
+        flat &= game_epp_are("/run/moonwater/check-game/cpu", "balance_performance", "balance_performance");
+        check("game: the game's CCD at performance and the other at balance_power while it runs, and every CPU back after it", split && back);
+        check("game: with game-ccd-epp off every CPU is at performance while a game runs, as before, and back after it", flat);
+        // NVMe: drive 0 at the kernel's default, drive 1 at the 1000 a compositor that died left, and an entry that is no drive
+        game_tree_file("/run/moonwater/check-game/nvme/nvme0/power/pm_qos_latency_tolerance_us", "100000\n");
+        game_tree_file("/run/moonwater/check-game/nvme/nvme1/power/pm_qos_latency_tolerance_us", "1000\n");
+        game_tree_file("/run/moonwater/check-game/nvme/nvme-subsys0/power/pm_qos_latency_tolerance_us", "7\n");
+        game_tree_file("/run/moonwater/check-game/default_ps_max_latency_us", "100000\n");
+        compositor_nvme_root = "/run/moonwater/check-game/nvme", compositor_nvme_default = "/run/moonwater/check-game/default_ps_max_latency_us";
+        compositor_game_nvme(1);
+        nvme_held = game_tree_is(dir, "/nvme/nvme0/power/pm_qos_latency_tolerance_us", "1000") &&
+                    game_tree_is(dir, "/nvme/nvme1/power/pm_qos_latency_tolerance_us", "1000") &&
+                    game_tree_is(dir, "/nvme/nvme-subsys0/power/pm_qos_latency_tolerance_us", "7");
+        compositor_game_nvme(0);
+        nvme_back = game_tree_is(dir, "/nvme/nvme0/power/pm_qos_latency_tolerance_us", "100000") &&
+                    game_tree_is(dir, "/nvme/nvme1/power/pm_qos_latency_tolerance_us", "100000");
+        check("game: every NVMe drive within 1000 us while a game runs, and each back after it (a dead compositor's 1000 as the kernel's default)",
+              nvme_held && nvme_back);
+        // The game's CPUs: CCD0 is 0-3 and 16-19, the input core 1 and its sibling 17
+        compositor_ccd.ccd0[0] = 0xful | 0xful << 16;
+        compositor_input_core.cpu = 1, compositor_input_core.sibling = 17, compositor_input_core.mask[0] = 1ul << 1 | 1ul << 17, compositor_input_core.mask[1] = 0;
+        compositor_game_cpus_file = "/run/moonwater/check-game/game-cpus", compositor_game_cpus_note();
+        cpus = game_tree_is(dir, "/game-cpus", "6:0,2,3,16,18,19");
+        check("game: the game's CPUs are written in Wine's words (COUNT:LIST), CCD0 less the input core and its sibling", cpus);
+        compositor_ccd = kept_ccd, compositor_input_core = kept_core, compositor_qos_root = kept_root, compositor_drm_root = kept_drm;
+        compositor_wa_file = kept_wa_file, compositor_wa = kept_wa, compositor_nvme_root = kept_nvme, compositor_nvme_default = kept_default;
+        compositor_game_cpus_file = kept_cpus, memory_copy(compositor_game_epp_saved, kept_saved, sizeof kept_saved), compositor_game_epp_active = 0;
+}
+
+/*
         A fullscreen game at a lower resolution through Xwayland: a 1280x720 buffer its viewport shows at 1920x1080 needed a transform
         (compositor_wl_needs_xform), so every frame was copied and scaled into the table (a waited card job or a processor loop) and the copy
         scanned out. It is taken as a picture of the buffer's size (compositor_wl_view_take), which the plane scales, and its client is still
@@ -6967,6 +7080,7 @@ b32 main(void)
         game_pids_rows();
         qos_rows();
         input_core_rows();
+        game_mode_rows();
         view_rows();
         reader_own_rows();
         clip_most_rows();

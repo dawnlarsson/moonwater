@@ -22271,14 +22271,12 @@ static string_address bowl_steam_session[] = {
     // DXVK's low-latency pacing (dxvk.latencySleep, in Proton 11's DXVK 2.7): the CPU's next frame starts as late as lets it make
     // the vblank, so the input a frame shows is that much newer. A person's own DXVK_CONFIG is left as it is.
     "wa dxvk-latency && [ -z \"$DXVK_CONFIG\" ] && export DXVK_CONFIG='dxvk.latencySleep = True'",
-    // A Wine game is told of one CCD's CPUs (WINE_CPU_TOPOLOGY), the compositor's, where game mode pins its threads
-    // (compositor_game_slice), on a machine with two or more: Wine, DXVK and the game size their thread pools by the count, and
-    // 32 threads squeezed onto a CCD's 16 queued behind each other, worst in shader compiles and loads.
-    "wa wine-ccd && [ -z \"$WINE_CPU_TOPOLOGY\" ] && { l3=$(cat /sys/devices/system/cpu/cpu0/cache/index3/shared_cpu_list 2>/dev/null); "
-    "pk=$(cat /sys/devices/system/cpu/cpu0/topology/package_cpus_list 2>/dev/null); "
-    "if [ -n \"$l3\" ] && [ -n \"$pk\" ] && [ \"$l3\" != \"$pk\" ]; then cpus=; n=0; "
-    "for r in $(echo \"$l3\" | tr , ' '); do lo=${r%-*}; hi=${r#*-}; while [ \"$lo\" -le \"$hi\" ]; do "
-    "cpus=${cpus:+$cpus,}$lo; n=$((n + 1)); lo=$((lo + 1)); done; done; [ $n -gt 0 ] && export WINE_CPU_TOPOLOGY=$n:$cpus; fi; } || true",
+    // A Wine game is told of the CPUs game mode pins its threads to (WINE_CPU_TOPOLOGY), on a machine with two CCDs or more: Wine,
+    // DXVK and the game size their thread pools by the count, and 32 threads squeezed onto a CCD's 16 queued behind each other,
+    // worst in shader compiles and loads. The compositor writes the list in Wine's words (compositor_game_cpus_note): the first
+    // CCD less the input core and its sibling, 14 CPUs on the box, where the session counted the CCD's 16.
+    "wa wine-ccd && [ -z \"$WINE_CPU_TOPOLOGY\" ] && cpus=$(cat /run/moonwater/game-cpus 2>/dev/null) && [ -n \"$cpus\" ] && "
+    "export WINE_CPU_TOPOLOGY=$cpus || true",
     "gl=software; for node in /sys/class/drm/renderD*; do [ -e \"$node/device\" ] || continue; "
     "case $(cat \"$node\"/device/uevent 2>/dev/null) in *DRIVER=vgem*|*platform:vgem*|*DRIVER=vkms*) continue ;; esac; "
     "case $(cat \"$node\"/device/features \"$node\"/device/virtio*/features 2>/dev/null) in 0*) ;; *) gl=card ;; esac; done",
