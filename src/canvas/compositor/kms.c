@@ -2248,9 +2248,10 @@ static void compositor_cursor_async_sync(int active, int hot_x, int hot_y, int i
 #ifdef CONFIG_MOONWATER_WAYLAND
 static void compositor_wl_direct_abs(int x, int y, positive now);
 #endif
+HOT static void compositor_cursor_async_put(int nx, int ny, positive now);
 HOT static void compositor_cursor_async_step(long dx, long dy, positive now)
 {
-        int gain, ax, ay, nx, ny, left, top;
+        int gain, ax, ay;
 
         if ((!dx && !dy) || !__atomic_load_n(&compositor_cursor_async.active, __ATOMIC_ACQUIRE) ||
             __atomic_load_n(&compositor.dark, __ATOMIC_RELAXED))
@@ -2268,8 +2269,19 @@ HOT static void compositor_cursor_async_step(long dx, long dy, positive now)
         compositor_cursor_async.stamp = now;
         ax = compositor_accel((int)dx, &compositor_cursor_async.accel_x, gain);
         ay = compositor_accel((int)dy, &compositor_cursor_async.accel_y, gain);
-        nx = compositor_counts(compositor_cursor_async.x, ax);
-        ny = compositor_counts(compositor_cursor_async.y, ay);
+        compositor_cursor_async_put(compositor_counts(compositor_cursor_async.x, ax), compositor_counts(compositor_cursor_async.y, ay), now);
+        compositor_cursor_lock_drop();
+}
+
+/*
+        The cursor plane put at a point, with the lock held: the point kept on the screens, and the plane moved where its corner
+        changed (no more than once a millisecond, as a mouse's reports come at most). The mouse's step comes here after its gain,
+        and a stick's shift (access.c, on the reader's thread) with the pixels its time and its push made.
+*/
+HOT static void compositor_cursor_async_put(int nx, int ny, positive now)
+{
+        int left, top;
+
         compositor_screen_keep_point((const int (*)[4])compositor_cursor_async.screens, compositor_cursor_async.count,
                                      compositor_cursor_async.x, compositor_cursor_async.y, &nx, &ny);
         compositor_cursor_async.x = nx, compositor_cursor_async.y = ny;
@@ -2296,7 +2308,33 @@ HOT static void compositor_cursor_async_step(long dx, long dy, positive now)
                 if (moved)
                         compositor_cursor_async.last_left = left, compositor_cursor_async.last_top = top, compositor_cursor_async.moved_ns = now;
         }
+}
+
+// A stick's move on the reader's thread: the pixels as they are (no gain: the stick's speed is its own curve), the plane at once.
+HOT static void compositor_cursor_async_shift(int dx, int dy, positive now)
+{
+        if ((!dx && !dy) || !__atomic_load_n(&compositor_cursor_async.active, __ATOMIC_ACQUIRE) || __atomic_load_n(&compositor.dark, __ATOMIC_RELAXED))
+                return;
+        if (__atomic_exchange_n(&compositor_cursor_async.lock, 1u, __ATOMIC_ACQUIRE))
+                return;
+        if (compositor_cursor_async.active)
+                compositor_cursor_async_put(compositor_counts(compositor_cursor_async.x, dx), compositor_counts(compositor_cursor_async.y, dy), now);
         compositor_cursor_lock_drop();
+}
+
+// The height of the screen the plane's point is on, as the reader last had the screens (1080 where it has none).
+static int compositor_cursor_async_height(void)
+{
+        unsigned int count = __atomic_load_n(&compositor_cursor_async.count, __ATOMIC_ACQUIRE);
+        int x = compositor_cursor_async.x, y = compositor_cursor_async.y;
+
+        for (unsigned int at = 0; at < count && at < WINDOWS_OUTPUTS; at++)
+        {
+                const int *screen = compositor_cursor_async.screens[at];
+                if (x >= screen[0] && x < screen[0] + screen[2] && y >= screen[1] && y < screen[1] + screen[3] && screen[3] > 0)
+                        return screen[3];
+        }
+        return count && compositor_cursor_async.screens[0][3] > 0 ? compositor_cursor_async.screens[0][3] : 1080;
 }
 
 static int compositor_cursor_planes(int left, int top)

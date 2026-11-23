@@ -264,6 +264,155 @@ static int compositor_access_axis_of(unsigned int code)
         buttons if it is: one with a bottom face button or a joystick's trigger and both axes of a stick, not an accelerometer,
         and not a program's own (uinput's). link is where /sys/dev/char has it (compositor_input_handle_link).
 */
+/*
+        The left sticks on the input reader's thread (input.c, compositor_reader_run), at the hardware's own pace: a pad reports
+        every millisecond while it moves (the Elite 2's endpoint polls at 1 ms, full speed's least), and each report moves the
+        pointer at once by the time since the last move at the stick as it was then, by the kernel's own stamp of the report.
+        While the stick is held still it reports nothing, and the reader moves it each millisecond itself. The cursor plane is
+        moved from that thread (kms.c's fast path, as a mouse's is), and the loop is told the same pixels by a note in the
+        reader's ring (COMPOSITOR_READER_PAD_NOTE) so the pointer it keeps is the plane's. Before this the loop moved the
+        pointer by the sticks once a frame, so a push changed it a refresh late at most (6.9 ms at 144 Hz), and a loop busy
+        with a present held it longer.
+
+        The reader's lanes are its own: no lock. What it reads of the loop's is a range per slot, written at the pad's open
+        before its shape says it is a pad (the release the shape's generation is published with orders it), and the word
+        free, which the loop writes each turn: the desktop may move the pointer by a stick (no program reads the pads, no
+        program holds the pointer locked).
+*/
+static void compositor_access_move(int dx, int dy); // below
+static void compositor_access_take_hand(void);       // below
+#define COMPOSITOR_ACCESS_LANE_NS 1000000ull // a stick held still moves the pointer each millisecond, as a report would
+struct compositor_access_lane
+{
+        int x, y;            // the stick at its last report, -32767 to 32767 from its middle
+        positive stamp;      // when the pointer was last moved by it (ns); 0 at rest or while the desktop may not
+        long long fx, fy;    // what of a pixel is owed, in 65536ths
+        unsigned int held;   // the stick is away from its middle
+};
+static struct
+{
+        int low[COMPOSITOR_INPUTS][2], high[COMPOSITOR_INPUTS][2]; // the left stick's range of each pad's slot (the loop's, at open)
+        __attribute__((aligned(64))) unsigned int free;            // the loop's word: 1 while the desktop may move the pointer by a stick
+        __attribute__((aligned(64))) struct compositor_access_lane lane[COMPOSITOR_INPUTS]; // the reader's own
+        unsigned int active;                                       // the reader's: how many lanes have a stick away from its middle
+} compositor_access_reader;
+
+// A pad opened: its left stick's range where the reader reads it, before the slot's shape says it is a pad.
+static void compositor_access_lane_open(unsigned int at, const struct compositor_access_pad *pad)
+{
+        compositor_access_reader.low[at][0] = pad->low[ACCESS_LX], compositor_access_reader.high[at][0] = pad->high[ACCESS_LX];
+        compositor_access_reader.low[at][1] = pad->low[ACCESS_LY], compositor_access_reader.high[at][1] = pad->high[ACCESS_LY];
+        // The shape that says so is published after this (session.c's add calls compositor_reader_changed once the slot is whole).
+}
+
+// Whether slot at is a pad with a left stick (its shape's pad bit, input.c's compositor_shape_of).
+static unsigned int compositor_access_stick_of(unsigned int at)
+{
+        return at < COMPOSITOR_INPUTS && compositor_access.of[at] >= 0 && compositor_access_reader.high[at][0] > compositor_access_reader.low[at][0];
+}
+
+// A stick's value from its middle, -32767 to 32767, by the range the loop published (compositor_access_axis's sum).
+HOT static int compositor_access_lane_axis(unsigned int at, unsigned int which, int value)
+{
+        long long low = compositor_access_reader.low[at][which], high = compositor_access_reader.high[at][which], middle = (low + high) / 2,
+                  half = (high - low) / 2, from = ((long long)value - middle) * 32767 / (half ? half : 1);
+
+        return high <= low ? 0 : (int)(from < -32767 ? -32767 : from > 32767 ? 32767 : from);
+}
+
+// A lane moved on to now: the pointer by the stick as it was since its last move, on the plane at once and to the loop by a note.
+HOT static void compositor_access_lane_run(unsigned int at, unsigned int generation, struct compositor_access_lane *lane, positive now)
+{
+        positive since = now > lane->stamp ? now - lane->stamp : 0;
+        long long share, step;
+        unsigned int r;
+        int dx, dy;
+
+        if (!lane->stamp)
+                return;
+        lane->stamp = now;
+        since = since > COMPOSITOR_ACCESS_TICK_MOST ? COMPOSITOR_ACCESS_TICK_MOST : since;
+        if (!since || !(share = compositor_access_share(lane->x, lane->y, &r)))
+                return;
+        // The move in 65536ths of a pixel: the speed at the rim (a share of the screen's height) times the stick's share, over the time.
+        step = (long long)compositor_cursor_async_height() * COMPOSITOR_ACCESS_SPEED / 10 * share * (long long)since / 1000000000ll;
+        lane->fx += step * lane->x / (long long)r, lane->fy += step * lane->y / (long long)r;
+        dx = (int)(lane->fx / 65536), dy = (int)(lane->fy / 65536);
+        lane->fx -= (long long)dx * 65536, lane->fy -= (long long)dy * 65536;
+        if (dx || dy)
+        {
+                struct compositor_input_event note = {dx, dy, COMPOSITOR_READER_PAD_NOTE, 0, 0};
+
+                compositor_cursor_async_shift(dx, dy, now);
+                compositor_reader_put(at, generation, &note);
+                compositor_reader_knock();
+        }
+}
+
+// A pad's report on the reader's thread: the pointer moved to the report's stamp by the stick as it was, then the stick taken as it is.
+HOT static void compositor_access_reader_report(unsigned int at, unsigned int generation, const struct compositor_input_event *raw, unsigned int count)
+{
+        struct compositor_access_lane *lane = &compositor_access_reader.lane[at];
+        positive stamp = (positive)raw[count - 1].seconds * 1000000000ull + (positive)raw[count - 1].microseconds * 1000ull;
+        int x = lane->x, y = lane->y, changed = 0;
+        unsigned int r;
+
+        for (unsigned int k = 0; k < count; k++)
+                if (raw[k].type == COMPOSITOR_EV_ABS && raw[k].code <= 1)
+                {
+                        int value = compositor_access_lane_axis(at, raw[k].code, raw[k].value);
+                        changed |= raw[k].code ? value != y : value != x;
+                        if (raw[k].code) y = value; else x = value;
+                }
+        if (!changed)
+                return;
+        if (__atomic_load_n(&compositor_access_reader.free, __ATOMIC_ACQUIRE))
+                compositor_access_lane_run(at, generation, lane, stamp);
+        lane->x = x, lane->y = y;
+        if (!compositor_access_share(x, y, &r))
+        {
+                compositor_access_reader.active -= lane->held;
+                lane->held = 0, lane->stamp = 0, lane->fx = lane->fy = 0;
+                return;
+        }
+        compositor_access_reader.active += !lane->held, lane->held = 1;
+        if (!lane->stamp && __atomic_load_n(&compositor_access_reader.free, __ATOMIC_ACQUIRE))
+                lane->stamp = stamp;
+}
+
+// The reader's turn while a stick is held away from its middle: each lane moved on to now. How long it may wait, in ns (0: no stick).
+HOT static positive compositor_access_reader_turn(const unsigned int *generations)
+{
+        positive now;
+
+        if (!compositor_access_reader.active)
+                return 0;
+        now = clock_monotonic_nanoseconds();
+        for (unsigned int at = 0; at < COMPOSITOR_INPUTS; at++)
+        {
+                struct compositor_access_lane *lane = &compositor_access_reader.lane[at];
+
+                if (!lane->held)
+                        continue;
+                if (!__atomic_load_n(&compositor_access_reader.free, __ATOMIC_ACQUIRE))
+                        lane->stamp = 0, lane->fx = lane->fy = 0;
+                else if (!lane->stamp)
+                        lane->stamp = now;
+                else if (now - lane->stamp >= COMPOSITOR_ACCESS_LANE_NS - 50000ull)
+                        compositor_access_lane_run(at, generations[at], lane, now);
+        }
+        return COMPOSITOR_ACCESS_LANE_NS;
+}
+
+// The note of a lane's move, in the loop: the pointer it keeps moved by the same pixels the plane was (and the hand the pad's).
+static void compositor_access_lane_noted(int dx, int dy)
+{
+        if (compositor_access.yields)
+                return;
+        compositor_access_take_hand();
+        compositor_access_move(dx, dy);
+}
+
 static b32 compositor_access_open(unsigned int at, bipolar handle, const p8 *keys, unsigned long absolute, unsigned int properties,
                                   const char *link, unsigned int number)
 {
@@ -308,6 +457,7 @@ static b32 compositor_access_open(unsigned int at, bipolar handle, const p8 *key
                 pad->xbox_letters |= (unsigned char)(size >= tail && string_equals((string_address)driver + size - tail, (string_address)xbox[each]));
         }
         compositor_access.of[at] = (signed char)index;
+        compositor_access_lane_open(at, pad);
         compositor_osk_sync();
         return 1;
 }
@@ -616,13 +766,15 @@ static b32 compositor_access_busy(void)
         if (compositor_access.yields)
                 return 0;
         compositor_access_sticks(&lx, &ly, &rx, &ry);
-        return compositor_access_share(lx, ly, &r) || compositor_access_share(rx, ry, &r) || compositor_access.scrolled;
+        return (!compositor_reader_running() && compositor_access_share(lx, ly, &r)) || compositor_access_share(rx, ry, &r) || compositor_access.scrolled;
 }
 
 // When the loop is next owed a tick of the pads: a frame on while a stick is pushed, or the next repeat of an arrow; 0 for none.
 static positive compositor_access_due(void)
 {
         positive period = compositor.period ? compositor.period : 1000000000ull / 60, due = 0;
+
+        __atomic_store_n(&compositor_access_reader.free, (unsigned int)(!compositor_access.yields && !compositor_wl_locked()), __ATOMIC_RELEASE);
 
         if (compositor_access.repeat && !compositor_access.yields)
                 due = compositor_access.repeat_at;
@@ -691,7 +843,7 @@ static void compositor_access_tick(positive now)
                 compositor_access.repeat_at = now + COMPOSITOR_ACCESS_REPEAT_NS;
         }
         compositor_access_sticks(&lx, &ly, &rx, &ry);
-        if ((share = compositor_access_share(lx, ly, &r)) && since && !compositor_wl_locked())
+        if (!compositor_reader_running() && (share = compositor_access_share(lx, ly, &r)) && since && !compositor_wl_locked())
         {
                 // The move in 65536ths of a pixel: the speed at the rim (a share of the screen's height) times the stick's share, over the time.
                 long long step = compositor_access_height() * COMPOSITOR_ACCESS_SPEED / 10 * share * (long long)since / 1000000000ll;

@@ -3996,6 +3996,7 @@ static void compositor_input_dropped(unsigned int at, positive now)
 #define COMPOSITOR_READER_GONE 0xffffu
 #define COMPOSITOR_READER_NOTE 0xfffeu
 #define COMPOSITOR_READER_BTN_NOTE 0xfffdu
+#define COMPOSITOR_READER_PAD_NOTE 0xfffcu // a stick's move on the reader's thread (access.c's lanes): seconds the pixels across, microseconds down
 #define COMPOSITOR_READER_UNWATCH -1
 
 struct compositor_reader_record
@@ -4007,6 +4008,9 @@ struct compositor_reader_record
 
 static int compositor_input_take(unsigned int at, const struct compositor_input_event *raw, bipolar got, int moved);
 static void compositor_input_gone(unsigned int at);
+HOT static void compositor_access_reader_report(unsigned int at, unsigned int generation, const struct compositor_input_event *raw, unsigned int count); // access.c
+HOT static positive compositor_access_reader_turn(const unsigned int *generations); // access.c
+static void compositor_access_lane_noted(int dx, int dy); // access.c
 static void compositor_input_end(unsigned int at, int moved);
 
 static struct
@@ -4029,10 +4033,13 @@ static int compositor_reader_dup(unsigned int at)
 }
 
 // A device's kind as the loop has it: bit 0 a touchpad, 1 a touchscreen, 2 a device the wake only reads, 3 and 4 its hires wheels.
+#define COMPOSITOR_SHAPE_PAD (1u << 5) // a pad with a left stick: the reader moves the pointer by it (access.c's lanes)
+static unsigned int compositor_access_stick_of(unsigned int at); // access.c
 static unsigned int compositor_shape_of(unsigned int at)
 {
         return (unsigned int)compositor.touchpad[at] | (unsigned int)compositor.touchscreen[at] << 1 |
-               (unsigned int)(compositor.devices[at].wakeonly != 0) << 2 | (unsigned int)(compositor.hires[at] & 3) << 3;
+               (unsigned int)(compositor.devices[at].wakeonly != 0) << 2 | (unsigned int)(compositor.hires[at] & 3) << 3 |
+               (compositor_access_stick_of(at) ? COMPOSITOR_SHAPE_PAD : 0u);
 }
 
 static void compositor_reader_changed(unsigned int at)
@@ -4421,6 +4428,12 @@ HOT static fn compositor_reader_run(address_any context)
                         wait[1] = (long)(compositor_reader.note_due - now);
                 if (owed && (!compositor_reader.note_due || wait[1] > 1000000))
                         wait[1] = 1000000;
+                // A stick held away from its middle owes the pointer a move each millisecond (access.c's lanes).
+                {
+                        positive held = compositor_access_reader_turn(generations);
+                        if (held && (!(compositor_reader.note_due || owed) || (positive)wait[1] > held))
+                                wait[0] = 0, wait[1] = (long)held, owed = 1;
+                }
                 got = (long)system_call_6(syscall(epoll_pwait2), (positive)compositor_reader.set, (positive)ready, 16,
                                           compositor_reader.note_due || owed ? (positive)wait : 0, 0, 0);
                 // The ring first, before the evdev fds that woke with it: its reports are the newest input, and theirs go to the client only
@@ -4450,9 +4463,13 @@ HOT static fn compositor_reader_run(address_any context)
                                         compositor_reader_put(at, generations[at], &gone), put++;
                                         break;
                                 }
+                                unsigned int pad = __atomic_load_n(&compositor_reader.shape[at], __ATOMIC_ACQUIRE) & COMPOSITOR_SHAPE_PAD;
                                 for (unsigned int k2 = 0; k2 < records; k2++)
                                         if (raw[k2].type == COMPOSITOR_EV_SYN && raw[k2].code == 0)
                                         {
+                                                // A pad's left stick moves the pointer here, at its report; the report goes on to the loop for the rest.
+                                                if (pad)
+                                                        compositor_access_reader_report(at, generations[at], raw + from, k2 + 1 - from);
                                                 if (!compositor_reader_direct(at, raw + from, k2 + 1 - from))
                                                         for (unsigned int r = from; r <= k2; r++)
                                                         {
@@ -4526,6 +4543,14 @@ static void compositor_reader_take(void)
                 unsigned int device = first->at, generation = first->generation, count = 0;
                 int moved = 0, is_spark = device == COMPOSITOR_INPUTS;
 
+                if (first->raw.type == COMPOSITOR_READER_PAD_NOTE)
+                {
+                        if (device < COMPOSITOR_INPUTS && generation == __atomic_load_n(&compositor_reader.generation[device], __ATOMIC_ACQUIRE))
+                                compositor_post_physical = compositor_input_physical[device], compositor_access_lane_noted((int)first->raw.seconds, (int)first->raw.microseconds),
+                                compositor_post_physical = 0;
+                        at++;
+                        continue;
+                }
 #ifdef CONFIG_MOONWATER_WAYLAND
                 if (first->raw.type == COMPOSITOR_READER_NOTE)
                 {
@@ -4546,7 +4571,8 @@ static void compositor_reader_take(void)
                         const struct compositor_reader_record *record = &compositor_reader.ring[at % COMPOSITOR_READER_RING];
 
                         if (record->at != device || record->generation != generation ||
-                            record->raw.type == COMPOSITOR_READER_NOTE || record->raw.type == COMPOSITOR_READER_BTN_NOTE)
+                            record->raw.type == COMPOSITOR_READER_NOTE || record->raw.type == COMPOSITOR_READER_BTN_NOTE ||
+                            record->raw.type == COMPOSITOR_READER_PAD_NOTE)
                                 break;
                         raw[count++] = record->raw, at++, compositor_reader.reading_out++;
                         if (record->raw.type == COMPOSITOR_READER_GONE)
