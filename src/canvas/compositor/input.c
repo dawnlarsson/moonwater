@@ -273,6 +273,15 @@ static void compositor_pin_irqs_ccd0(void)
         if (!compositor_multi_ccd() || (fd = system_open_at(AT_FDCWD, (string_address) "/proc/interrupts", FILE_READ | O_CLOEXEC)) < 0)
                 return;
         compositor_input_core_take(), compositor_game_cpus_note();
+        // The loop (this thread, and each it starts from here on) off the input core, as a game's threads are: the reader at FIFO 50 never
+        // preempts the loop there while the loop holds the direct lock (compositor_wl_flush), which the reader would spin on for nothing
+        // for COMPOSITOR_WL_DIRECT_TRIES and then give its report to the loop all the same (input-path #7).
+        {
+                unsigned long mask[2];
+
+                if (compositor_game_mask(mask))
+                        compositor_call(syscall(sched_setaffinity), 0, sizeof(mask), (positive)mask, 0, 0, 0);
+        }
         while (got < (long)sizeof(buf) - 1 &&
                (n = (long)compositor_call(syscall(read), (positive)fd, (positive)(buf + got), (positive)(sizeof(buf) - 1 - (unsigned long)got), 0, 0, 0)) > 0)
                 got += n;
