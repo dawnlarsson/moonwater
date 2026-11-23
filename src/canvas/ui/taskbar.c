@@ -2334,7 +2334,6 @@ static struct
 static const char *taskbar_run_root = "/run/moonwater";
 
 static const char *taskbar_pin_word(const struct taskbar_pin *pin, int at) { return pin->text + pin->at[at]; }
-static inline const char *taskbar_app_title(const struct ui_app_entry address_to a) { return a->kit ? language_of(ui_kit_programs[a->kit - 1].label) : a->name; }
 static inline bool taskbar_pin_runs(const struct taskbar_pin *p, const char *app) { return app && app[0] && (ui_apps_same(app, p->key) || ui_apps_same(app, p->app)); }
 
 static bool taskbar_pin_put(struct taskbar_pin *pin, positive *used, const char *word)
@@ -2365,7 +2364,7 @@ static bool taskbar_pin_of(int which, struct taskbar_pin *pin)
         const struct ui_app_entry *app = &ui_apps.app[which];
         string_copy_bounded((p8 *)pin->app, (string_address)app->id, sizeof(pin->app));
         string_copy_bounded((p8 *)pin->key, (string_address)app->key, sizeof(pin->key));
-        string_copy_bounded((p8 *)pin->title, (string_address)taskbar_app_title(app), sizeof(pin->title));
+        string_copy_bounded((p8 *)pin->title, (string_address)ui_apps_name(which), sizeof(pin->title));
         return taskbar_pin_put(pin, &used, app->id) && taskbar_pin_put(pin, &used, app->source) && taskbar_pin_put(pin, &used, app->launch);
 }
 
@@ -2434,9 +2433,8 @@ static bool taskbar_starting_take(positive now)
         taskbar_starting.count = count;
         for (int i = 0; i < count; i++)
         {
-                const struct ui_app_entry address_to app = &ui_apps.app[ui_apps_find(ids[i])];
                 string_copy_bounded((p8 *)taskbar_starting.id[i], (string_address)ids[i], WINDOWS_APP_ID);
-                string_copy_bounded((p8 *)taskbar_starting.title[i], (string_address)taskbar_app_title(app), TASKBAR_PIN_TITLE);
+                string_copy_bounded((p8 *)taskbar_starting.title[i], (string_address)ui_apps_name(ui_apps_find(ids[i])), TASKBAR_PIN_TITLE);
         }
         return true;
 }
