@@ -27585,14 +27585,13 @@ static b32 ui_browser_open(const char address_to target)
 // Whether a file is sound or video the browser plays (Chromium's own decoders): opened, it is played there and not read as text.
 static b32 ui_file_plays_in_browser(const char address_to name)
 {
-        static const char known[] = " mp3 wav mp4 m4a m4v aac ogg oga ogv opus flac webm ";
-        char ext[12], word[16];
-        positive length;
+        static const char address_to const known[] = {"mp3", "wav", "mp4", "m4a", "m4v", "aac", "ogg", "oga", "ogv", "opus", "flac", "webm"};
+        char ext[12];
         ui_file_extension(name, ext, sizeof(ext));
-        if (!ext[0] || (length = string_length((string_address)ext)) + 3 > sizeof(word))
-                return false;
-        word[0] = ' ', memory_copy(word + 1, ext, length), word[length + 1] = ' ', word[length + 2] = 0;
-        return string_search((string_address)known, (string_address)word) != null;
+        for (positive k = 0; ext[0] && k < sizeof(known) / sizeof(known[0]); k++)
+                if (string_equals((string_address)ext, (string_address)known[k]))
+                        return true;
+        return false;
 }
 
 // Run a helper command synchronously and wait for exit status 0.
