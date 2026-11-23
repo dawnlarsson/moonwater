@@ -9512,6 +9512,7 @@ static struct ui_kit
         int pointer_x, pointer_y;          // the window's pointer, device pixels: the last motion's place (ui_event_context)
         unsigned int buttons;              // pointer buttons currently held (UI_BTN_*), tracked by ui_event_context and cleared on focus loss
         b32 keyed;                         // the hand is on the keys: the last thing that moved the focus was a key, and no press came since (ui_kit_keyed_note)
+        b32 ringed;                        // the focus ring was shown at the loop's last pass (ui_kit_ringed): a change of it, or of the desktop's hand, is a picture due
         b64 test_clock;                    // a check's clock, ns (0: the monotonic clock): the kit reads it for every time, so a row needs no real one
         b64 stamp;                         // the device's stamp of the event being handled (window_event.when), or 0: a hand reads its time from it (ui_press_now)
 } ui_kit = {.caret_speed = UI_CARET_NORMAL, .caret_thick = UI_CARET_MID};
@@ -11017,6 +11018,7 @@ static inline b32 ui_stroke(const struct ui address_to ui) { return ui_q8(ui, 1)
 // The focus ring: the one outline the kit draws whatever UI_KIT_OUTLINES says, and only where nothing else says...
 #define UI_FOCUS_WIDTH 2
 #define UI_FOCUS_GAP 2
+static b32 ui_kit_ringed(void);
 static unsigned int ui_kit_focus_ink(const struct ui address_to ui)
 {
         unsigned int ink = ui_role(UI_PRIMARY) | 0xff000000u, ground = ui_role(UI_SURFACE) | 0xff000000u;
@@ -11357,7 +11359,7 @@ static fn ui_button_draw(struct ui address_to ui, struct ui_control address_to c
         ui_kit_fill(ui, &face, fill, null);
         ui_kit_layer_fill(ui, &face, ink, layer);
         // The keys on it: the focus ring, a gap out from the pill, whatever its variant, while the hand is on the keys (a click leaves none).
-        if (c->focused && !c->disabled && ui_kit.keyed)
+        if (c->focused && !c->disabled && ui_kit_ringed())
         {
                 struct ui_box ring = ui_kit_focus_outset(ui, face);
                 ui_kit_focus_ring(ui, &ring);
@@ -12646,7 +12648,7 @@ static fn ui_control_draw(struct ui address_to ui, struct ui_control address_to 
         ui_kit.reached = 0;
         ui_kit.reach_top = ui_kit.reach_bottom = 0;
         ui_control_draw_one(ui, c);
-        if (c->focused && !c->disabled && ui_kit.keyed)
+        if (c->focused && !c->disabled && ui_kit_ringed())
                 ui_kit_focus_mark(ui, c);
         if (ui_kit.busy)
                 ui_kit_mark(ui, c);
@@ -13109,6 +13111,14 @@ static fn ui_kit_pass(void)
                 __atomic_store_n(&ui_kit_table->pointer_shape[ui_kit_row], ui_kit_shape, __ATOMIC_RELEASE);
                 ui_kit_shape_sent = ui_kit_shape;
         }
+}
+
+// Whether the focus ring is drawn: the keys moved the focus last (ui_kit.keyed), and the hand that acted last on the desktop is the keys'
+// or a pad's (the table's input_modality: a mouse's, a trackpad's or a finger's hides it). A window with no table has the kit's word alone.
+static b32 ui_kit_ringed(void)
+{
+        unsigned int hand = ui_kit_table ? __atomic_load_n(&ui_kit_table->input_modality, __ATOMIC_RELAXED) : WINDOWS_MODALITY_NONE;
+        return ui_kit.keyed && hand != WINDOWS_MODALITY_POINTER && hand != WINDOWS_MODALITY_TOUCH;
 }
 
 // Whether the hand is on the keys (ui_kit.keyed), which is all the focus ring is drawn for:
@@ -28948,15 +28958,15 @@ static int ui_app_run(struct ui_app address_to app)
                         app->pass();
                 while (running && windows_event(app->own, &event))
                 {
-                        b32 keyed = ui_kit.keyed;
                         ui_event_context(&event);
-                        if (keyed != ui_kit.keyed)
-                                ui_app_changed(app);
                         if (app->popup)
                                 ui_app_popup_done(app, ui_popmenu_scroll(app->popup, &event));
                         if (!app->event(&event))
                                 app->resident ? ui_app_put_away(app) : (void)(running = false);
                 }
+                // The ring comes and goes with the hand on the keys and the desktop's hand, which another window's input can change.
+                if (ui_kit.ringed != ui_kit_ringed())
+                        ui_kit.ringed = !ui_kit.ringed, ui_app_changed(app);
                 ui_kit_pass();
                 if (app->popup && app->popup->open)
                 {
