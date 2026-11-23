@@ -2616,6 +2616,31 @@ static fn files_tree_toggle(p32 at)
         }
 }
 
+// The keys the kit's way across the window took out of one of its lists into the other (UI_VIEW_HANDED): the sidebar's row they came to
+// has them, or the main pane's, chosen as the arrows choose one. Answers whether the key was taken.
+static b32 files_keys_moved(p32 asks)
+{
+        struct files_model address_to m = &files.big->model;
+        struct ui_list address_to rows = &files.big->list, address_to tree = &files.big->tree_list;
+        if (!(asks & UI_VIEW_HANDED))
+                return (asks & UI_VIEW_TAKEN) != 0;
+        if (files.big->view.handed == tree)
+                files.focus = FILES_FOCUS_TREE, files.tree_at = tree->focus >= 0 ? (p32)tree->focus : 0;
+        else
+        {
+                files.focus = FILES_FOCUS_ROWS;
+                if (rows->focus >= 0 && (p32)rows->focus < files_model_count(m))
+                        m->cursor = (p32)rows->focus, m->revision++, files_model_choose(m, m->cursor, FILES_CHOOSE_ONLY), files_show_cursor();
+        }
+        return files.dirty = true, true;
+}
+
+// A row of the sidebar the keys stand on: any but a band's caption.
+static b32 files_tree_choosable(int id)
+{
+        return id >= 0 && (p32)id < files.big->tree.count && files.big->tree.node[id].kind != FILES_NODE_BAND;
+}
+
 static b32 files_tree_key(const struct window_event address_to event)
 {
         struct files_tree address_to t = &files.big->tree;
@@ -2623,6 +2648,12 @@ static b32 files_tree_key(const struct window_event address_to event)
         p32 at = files.tree_at < t->count ? files.tree_at : 0;
         if (event->flags & (WINDOW_KEY_CONTROL | WINDOW_KEY_ALT))
                 return false;
+        // An arrow the sidebar goes no further with (its first row's Up, its last's Down, Right on an open folder with nothing in it, Left
+        // on a closed one at the top) takes the keys out of it the way it points: to the main pane at its side.
+        if ((key == UI_KEY_UP && !at) || (key == UI_KEY_DOWN && at + 1 >= t->count) ||
+            ((key == UI_KEY_LEFT || key == UI_KEY_RIGHT) && at < t->count && (ui_arrow(key) > 0) == (t->node[at].open != 0) &&
+             !(ui_arrow(key) > 0 ? at + 1 < t->count && t->node[at + 1].depth > t->node[at].depth : files_tree_parent(t, at) != FILES_NO)))
+                return files_keys_moved(ui_view_away(&files.ui, &files.big->view, &files.big->tree_list, null, key)), true;
         switch (key)
         {
         case UI_KEY_UP: at = at ? at - 1 : 0; break;
@@ -2699,6 +2730,7 @@ static b32 files_key(const struct window_event address_to event)
         b32 alt = (event->flags & WINDOW_KEY_ALT) != 0, control = (event->flags & WINDOW_KEY_CONTROL) != 0, shift = (event->flags & WINDOW_KEY_SHIFT) != 0;
         int key = (int)event->a;
         b32 moved = false;
+        p32 asks;
         if (key == UI_KEY_DELETE && files.focus == FILES_FOCUS_TREE)
         {
                 // Delete on the sidebar is a medium's Eject (its menu's), and never the folder's files the main pane has chosen.
@@ -2764,8 +2796,12 @@ static b32 files_key(const struct window_event address_to event)
         case UI_KEY_ENTER_PAD: if (!(event->flags & WINDOW_KEY_REPEAT)) files_open(m->cursor); return true;
         case UI_KEY_SPACE: return files_model_choose(m, m->cursor, FILES_CHOOSE_TOGGLE), files.dirty = true, true;
         }
-        // The list's own keys: Up, Down, Left, Right, Page Up, Page Down, Home and End move the focus row.
-        if (!ui_list_key(&files.ui, l, key, &moved))
+        // The list's own keys: Up, Down, Left, Right, Page Up, Page Down, Home and End move the focus row, and an arrow it goes no further
+        // with takes the keys out of it the way it points (the sidebar at its side).
+        asks = ui_view_list_key(&files.ui, &files.big->view, l, key, &moved);
+        if (asks & UI_VIEW_HANDED)
+                return files_keys_moved(asks);
+        if (!(asks & UI_VIEW_TAKEN))
                 return true;
         files.said = 0;
         if (moved)
@@ -3475,7 +3511,7 @@ static b32 files_parts_open(void)
         for (int k = 0; k < 2; k++)
                 lists[k]->virtual = lists[k]->beside = true, lists[k]->row_h = FILES_ROW, lists[k]->damaged = files_damaged, lists[k]->hover = lists[k]->down = -1;
         files.big->list.describe = files_describe, files.big->list.selected = files_row_selected;
-        files.big->tree_list.tree = true, files.big->tree_list.describe = files_tree_describe;
+        files.big->tree_list.tree = true, files.big->tree_list.describe = files_tree_describe, files.big->tree_list.choosable = files_tree_choosable;
         files.path.kind = files.finder_field.kind = UI_INPUT, files.path.variant = files.finder_field.variant = UI_FIELD_BARE;
         files.path.edit = files_field(), files.finder_field.edit = &files.finder;
         files.drop_row = files.drop_node = files.spring = -1;
