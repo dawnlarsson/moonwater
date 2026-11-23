@@ -1309,6 +1309,30 @@ EOF
                 "${tab}${tab}r |= !amdgpu_hmm_range_valid(e->range);" after "$settings_work/userptr-keep" "userptr sequence kept"
 fi
 
+#       A cursor plane's move programmed the cursor's attributes again at
+#       every report: amdgpu_dm_plane_handle_cursor_update calls
+#       dc_stream_program_cursor_attributes (the image's address, size,
+#       pitch and format, with a Z10 restore, the DMUB hardware lock and the
+#       idle optimisations turned off and on round it) before the position,
+#       for a move whose attributes are the ones the stream already has. On
+#       the box a quarter of the compositor's input thread was that call
+#       (some 15 us a report with the position's own). DC keeps the
+#       attributes it programmed on the stream (stream->cursor_attributes)
+#       and programs the cursor from them again whenever it programs a pipe,
+#       so a move whose attributes are the stream's programs the position
+#       alone; a new image, size or stream still programs them.
+dm_plane=linux/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm_plane.c
+cursor_call="${tab}${tab}if (!dc_stream_program_cursor_attributes(crtc_state->stream,"
+if [ -f "$dm_plane" ] && ! grep -q -F -- "Moonwater: a cursor's move" "$dm_plane"; then
+        [ "$(grep -c -F -- "$cursor_call" "$dm_plane")" = 1 ] || die "amdgpu cursor attributes: the call moved in $dm_plane"
+        awk -v call="$cursor_call" -v note="${tab}${tab}/* Moonwater: a cursor's move whose attributes are the stream's programs the position alone. */" '
+                index($0, call) == 1 { print note; sub(/if \(!dc_stream_program_cursor_attributes/, "if (memcmp(\\&crtc_state->stream->cursor_attributes, \\&attributes, sizeof(attributes)) \\&\\& !dc_stream_program_cursor_attributes") }
+                { print }
+        ' "$dm_plane" > "$settings_work/edit" && sudo cp "$settings_work/edit" "$dm_plane" ||
+                die "amdgpu cursor attributes: could not edit $dm_plane"
+        grep -q -F -- "Moonwater: a cursor's move" "$dm_plane" || die "amdgpu cursor attributes: the edit did not land in $dm_plane"
+fi
+
 #       A kernel built without device coredump (ALLOW_DEV_COREDUMP is off in
 #       debug_none, as "for more sensitive systems ... not to have the code,
 #       nor keep any data") answers the MediaTek Bluetooth driver's registration
