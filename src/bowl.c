@@ -4435,9 +4435,9 @@ static string_address address_to bowl_without_exposed_path(
         4.0x and 14x. Speedometer 3.1 in the alpine bowl's Chromium 158, interleaved runs: 34.2 and 34.3 with it, 33.9 and
         33.9 without.
 
-        A musl bowl only, for now: glibc's x86_64 routines are AVX-512 and EVEX bodies that lib.c does not yet beat at every
-        length, and the library is installed in every bowl so that turning glibc's bowls on is the musl test below and
-        nothing else. Not a package manager's run (isolated): what repairs a bowl does not lean on what it installed. The
+        Every bowl: musl's by the library's own path, glibc's by $LIB (BOWL_LIBC_SHIM_GLIBC, below). Against glibc's
+        AVX-512 and EVEX bodies lib.c was behind at some lengths when this was turned on (memset 48-256, strlen 32-256,
+        memcpy 96-128, memchr from 4 KiB, 0.70-0.89x) and ahead at others; the floor pass on those bodies goes on under it. Not a package manager's run (isolated): what repairs a bowl does not lean on what it installed. The
         workaround libc-shim off (moonwater workarounds) leaves every program its C library's, and it can be off for one
         program by name. A library already named in LD_PRELOAD stays where it was, after this one.
 */
@@ -4446,9 +4446,10 @@ static string_address address_to bowl_without_exposed_path(
 #define BOWL_LIBC_SHIM_LIBRARY BOWL_LIBC_SHIM_DIRECTORY "/" BOWL_LIBC_SHIM_NAME
 #define BOWL_LIBC_SHIM_MUSL "/lib/ld-musl-x86_64.so.1"
 //      glibc's bowls: the preload is the library by $LIB, so a 64-bit process finds the build with the routines and a 32-bit
-//      one the build with nothing in it (bowl_libc_shim_install puts both where each distribution's $LIB points). Off until
-//      lib.c's bodies are at or above glibc's at every length (test/libc_shim.sh bench); this is the one line to turn.
-#define BOWL_LIBC_SHIM_GLIBC 0
+//      one the build with nothing in it (bowl_libc_shim_install puts both where each distribution's $LIB points). On, as every
+//      shim is, with workaround libc-shim off to take it away; the floor pass on lib.c's bodies against glibc's AVX-512 and
+//      EVEX ones (test/libc_shim.sh bench) goes on under it.
+#define BOWL_LIBC_SHIM_GLIBC 1
 #define BOWL_LIBC_SHIM_GLIBC_LIBRARY "/usr/local/$LIB/" BOWL_LIBC_SHIM_NAME
 #define BOWL_LIBC_SHIM_GLIBC_MARK "/usr/local/lib32/" BOWL_LIBC_SHIM_NAME
 
@@ -18777,9 +18778,14 @@ static string_address bowl_steam_session[] = {
     // 32-bit Wine/Proton games (e.g. RCT3) leak x87 FCW=0x0c7f (round-toward-zero) into GStreamer decode threads via Linux clone().
     "wa wine-fpu && [ -r " BOWL_ROOT_PREFIX "arch" BOWL_STEAM_OVERLAY_GL_LIB32 "/" BOWL_WINE_FPU_NAME " ] && "
     "export LD_PRELOAD='" BOWL_WINE_FPU_PRELOAD "'${LD_PRELOAD:+:$LD_PRELOAD}",
-    // A game's reader of the focused page (bowl_steam_overlay_gl_install, src/shim/input.c): inert until an SDL names it.
+    // A game's reader of the focused page (bowl_steam_overlay_gl_install, src/shim/input.c): inert until an SDL names it, and every
+    // SDL 2 is told to name it (SDL_DYNAMIC_API), so every SDL 2 game reads the pointer from the kernel's page while it holds it
+    // locked, with no hop through Xwayland. On for every game, as every shim is; a person's own SDL_DYNAMIC_API is left as it
+    // is, and workaround moonwater-input off takes the library and the name away. SDL 3 reads another name and is not touched.
     "wa moonwater-input && [ -r " BOWL_ROOT_PREFIX "arch" BOWL_STEAM_OVERLAY_GL_LIB64 "/" BOWL_MOONWATER_INPUT_NAME " ] && "
     "export LD_PRELOAD='" BOWL_MOONWATER_INPUT_PRELOAD "'${LD_PRELOAD:+:$LD_PRELOAD}",
+    "wa moonwater-input && [ -r " BOWL_ROOT_PREFIX "arch" BOWL_STEAM_OVERLAY_GL_LIB64 "/" BOWL_MOONWATER_INPUT_NAME " ] && "
+    "[ -z \"$SDL_DYNAMIC_API\" ] && export SDL_DYNAMIC_API=" BOWL_MOONWATER_INPUT_NAME,
     // Rootless, through the wrapper, when Canvas listens for a window manager of Xwayland: Steam runs under it, so the X server
     // ends with Steam. Status 125 is that the server could not be started, and the rootful one below is the fallback.
     "if [ -S " BOWL_STEAM_WM " ]; then",

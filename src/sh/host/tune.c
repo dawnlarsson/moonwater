@@ -1360,7 +1360,11 @@ typedef struct
 } host_workaround_row;
 
 static const host_workaround_row host_workaround_rows[] = {
-    {"libc-shim", true, "preload Moonwater's lib.c memory and string routines (libmoonwater-c.so) into every program of a musl bowl"},
+    {"libc-shim", true, "preload Moonwater's lib.c memory and string routines (libmoonwater-c.so) into every program of every bowl"},
+    {"moonwater-input", true, "SDL 2 games read the locked pointer from the kernel's page (libmoonwater-input.so, SDL_DYNAMIC_API), with no Xwayland hop"},
+    {"dxvk-latency", true, "turn on DXVK's latency sleep (dxvk.latencySleep) so each frame starts as late as still makes the vblank"},
+    {"wine-ccd", true, "tell Wine games of one CCD's CPUs (WINE_CPU_TOPOLOGY), where game mode pins them"},
+    {"shader-warm", true, "replay the Steam bowl's shader caches at idle after its graphics driver changes, never beside a game"},
     {"wine-fpu", true, "reset x87 FCW/MXCSR on 32-bit GStreamer audio decode threads (fixes robotic audio in Wine/Proton games like RCT3)"},
     {"bowl-timerslack", true, "set PR_SET_TIMERSLACK=1ns for all bowl processes for tighter frame pacing and lower wake latency"},
     {"steam-overlay-gl", true, "unbind game shader/sampler around Steam overlay draws and bridge overlay on Wayland"},
