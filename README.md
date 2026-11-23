@@ -114,10 +114,10 @@ moonwater canvas trackpad speed [PERCENT|slow|normal|fast|default]  how far a wh
 
 
 # Accessibility
-moonwater access bounce [MS|off|default]  a key pressed again this soon after it was let go is a bounce, and it and its release are dropped, 10 to 2000 ms [off]
-moonwater access dwell [MS|off|default]  the pointer held still this long clicks the left button once, 200 to 5000 ms; it clicks again after it moves [off]
-moonwater access mousekeys [on|off]    the keypad moves the pointer, faster the longer it is held, whatever Num Lock says: 5 clicks, / * - choose the left, middle or right button, 0 holds it and . lets it go; numbers are the top row's [off]
-moonwater access slow [MS|off|default]  a key counts only once it is held this long, 50 to 5000 ms; one let go sooner types nothing [off]
+moonwater access bounce [MS|off|default]  a key pressed again this soon after it was let go is a bounce, and it and its release are dropped, up to 2000 ms, 0 or off for none [off]
+moonwater access dwell [MS|off|default]  the pointer held still this long clicks the left button once, up to 5000 ms, 0 or off for none; it clicks again after it moves [off]
+moonwater access mousekeys [on|off]    the keypad moves the pointer, faster the longer it is held, whatever Num Lock says: 5 clicks, / * - choose the left, middle or right button, 0 holds it and . lets it go; numbers are typed on the top row [off]
+moonwater access slow [MS|off|default]  a key counts only once it is held this long, up to 5000 ms, 0 or off for none; one let go sooner types nothing [off]
 moonwater access sticky [on|off]       Shift, Ctrl, Alt, AltGr or Super pressed and let go alone holds for the next key; pressed twice, it holds until pressed again [off]
 
 

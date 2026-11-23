@@ -5695,6 +5695,7 @@ static void check_compositor_access_aids(void)
         compositor_access.pad[each].at = -1;
     compositor_access.of[0] = -1;
     compositor_access_aid.modality = WINDOWS_MODALITY_NONE;
+    compositor_motion(); /* the pointer shown where it is, as a session's always is */
 
     /* The gate: open with every aid off and with dwell alone (a timer on the pointer's stillness), shut by each aid of the keys. */
     compositor_access_aid_set(0, 0, 0, 0);
