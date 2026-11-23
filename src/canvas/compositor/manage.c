@@ -3266,7 +3266,12 @@ static int taskbar_keyboard_set(int present); // ui/taskbar.c: the tray's keyboa
 static void compositor_osk_sync(void)
 {
         struct windows *table = compositor.table;
-        int kb = compositor_osk_row(), focus = compositor.focus, want = 0;
+        int kb, focus, want = 0;
+        // The devices are opened before the table is made (compositor_inputs_open, then compositor_table): a pad found at that start
+        // (access.c's open) asks for this before there is a table to write. The table's own start syncs it after.
+        if (!table)
+                return;
+        kb = compositor_osk_row(), focus = compositor.focus;
         // A touch's hand, or a controller's (access.c): the keyboard comes up on a field for either, as Steam's does for its controller.
         b32 touch = (!compositor.osk_typed && compositor.owner != COMPOSITOR_PREDICT_MOUSE) || compositor_access_drives(), kb_plugged = compositor_input_has(0);
         unsigned int purpose;
