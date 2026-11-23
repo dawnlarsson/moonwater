@@ -1432,6 +1432,47 @@ static fn columns_drag(struct ui address_to wui, struct ui_columns address_to c,
         ui_columns_event(wui, c, &release, to, 10);
 }
 
+/*
+        Columns that size themselves (ui_columns_layout, ui_columns_need): Size, Type and Modified at the app's widths (floors), Type's widest
+        words noted wider than its floor take Type that wide and Name the rest; a window too narrow cuts Name first, down to its least, and the
+        short columns stay whole; an edge the person dragged is a share that follows the window, and a column the shares leave short of its
+        words takes room from the ones with more than theirs once no hand holds the edge.
+*/
+static fn columns_fit_check(struct ui address_to wui)
+{
+        static struct ui_columns c;
+        b32 floors, wider, narrow, shares, lifted;
+
+        wui->scale = 100;
+        ui_kit.rtl = 0;
+        memory_zero(&c, sizeof(c));
+        c.count = 4, c.width[1] = 90, c.width[2] = 110, c.width[3] = 140, c.hover = c.held = -1;
+        ui_columns_layout(wui, &c, 0, 0, 800);
+        floors = c.wide[1] == 90 && c.wide[2] == 110 && c.wide[3] == 140 && c.wide[0] == 460;
+        c.need[2] = 200;
+        ui_columns_layout(wui, &c, 0, 0, 800);
+        wider = c.wide[2] == 200 && c.wide[1] == 90 && c.wide[0] == 800 - 90 - 200 - 140;
+        check("columns fit: the app's widths are floors, a column's widest words take it wider, and Name takes the rest", floors && wider);
+        ui_columns_layout(wui, &c, 0, 0, 90 + 200 + 140 + UI_COLUMNS_LEAST + 10);
+        narrow = c.wide[0] == UI_COLUMNS_LEAST + 10 && c.wide[1] == 90 && c.wide[2] == 200 && c.wide[3] == 140;
+        check("columns fit: too narrow a window cuts Name first, to its least, and the short columns stay whole", narrow);
+        // The person's edge: Name taken to 400 at 800 wide (a share), the window made 1000 wide: Name 500, the shares followed.
+        c.need[2] = 0;
+        ui_columns_layout(wui, &c, 0, 0, 800);
+        c.width[0] = 400, c.width[1] = 90, c.width[2] = 110, c.width[3] = 200, c.ref_w = 800;
+        ui_columns_layout(wui, &c, 0, 0, 1000);
+        shares = c.wide[0] == 500 && c.wide[1] == 112 && c.wide[2] == 137 && c.at[3] == 749;
+        // Type's words need 260: its share (137) is short of them, and the room comes from those with more than their words need.
+        c.need[2] = 260;
+        ui_columns_layout(wui, &c, 0, 0, 1000);
+        lifted = c.wide[2] == 260 && c.wide[0] + c.wide[1] + c.wide[2] + c.wide[3] == 1000 && c.wide[0] < 500;
+        check("columns fit: a dragged edge is a share that follows the window, and a column it leaves short of its words takes room from the others",
+              shares && lifted);
+        c.held = 0;
+        ui_columns_layout(wui, &c, 0, 0, 1000);
+        check("columns fit: while the hand holds an edge, the shares are the hand's alone", c.wide[2] == 137);
+}
+
 static fn columns_check(struct ui address_to wui)
 {
         static struct ui_columns c;
@@ -2391,6 +2432,7 @@ static fn text_widget_check(string_address inter, string_address mono)
         drop_check(&wui);
         band_check(&wui);
         columns_check(&wui);
+        columns_fit_check(&wui);
         list_interaction_check(&wui);
         copy_cap_check();
         squiggle_check(&wui);

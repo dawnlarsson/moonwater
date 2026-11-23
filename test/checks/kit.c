@@ -5787,7 +5787,7 @@ static fn check_kit_tokens(void)
         // A chip's text is the field's: its width less the chip's padding is the plain text's width in the field, so a token keeps its width.
         {
                 static struct ui_text_layout plain;
-                int pad = ui_dev(&ui, 8), chip_w, plain_w;
+                int pad = ui_dev(&ui, UI_TOKENS_PAD), chip_w, plain_w;
                 ui_tokens_draw(&ui, &k, 0, 0, 400, 60);
                 chip_w = k.chip_right[1] - k.chip_left[1] - 2 * pad;
                 ui_text_layout_line(&ui, &k.text, 0, &plain);

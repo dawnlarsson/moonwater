@@ -129,6 +129,7 @@ static struct
         struct ui_popup menu;
         struct ui_drag drag;
         struct ui_columns columns;
+        p32 columns_key;           // the listing the columns' needs were read from (ui_columns_need): read again when it is another
         p8 address_to carry_paths, carry_from[FILES_PATH], move_into[FILES_PATH], flash[4096], typed[32];
         positive carry_room, carry_used, flash_used, typed_length;
         struct files_deed deed[FILES_DEEDS];
@@ -557,6 +558,25 @@ static fn files_layout(void)
         m->seat = l->scroll.scroll;
         for (int k = 0; k < 4; k++)
                 files.columns.title[k] = cols[k];
+        // What the columns need, from every row of the listing, read again when the listing is another or more of it was read: each column is
+        // as wide as its widest words however far down they are, and a folder left leaves no width behind (ui_columns_layout).
+        {
+                p32 key = m->listed * 2654435761u ^ m->reads * 40503u ^ files_model_count(m) * 69069u ^ (p32)files.view;
+                if (key != files.columns_key)
+                {
+                        files.columns_key = key;
+                        ui_columns_forget(&files.columns);
+                        for (p32 id = 0; files.view == FILES_VIEW_DETAILS && id < files_model_count(m); id++)
+                        {
+                                struct ui_row row;
+                                memory_zero(&row, sizeof(row));
+                                files_describe((int)id, &row);
+                                ui_columns_need(ui, &files.columns, 0, row.label, ui_dev(ui, UI_FILE_ROW_ICON + 8));
+                                for (int k = 1; k < 4; k++)
+                                        ui_columns_need(ui, &files.columns, k, row.cells[k], 0);
+                        }
+                }
+        }
         ui_columns_layout(ui, &files.columns, l->x, files.head_box.y, l->w);
         if (files.tree_reseat && files.big->tree_list.h > 0)
                 files.big->tree_list.focus = (int)files.tree_shown, ui_list_reveal(ui, &files.big->tree_list), files.tree_reseat = false;

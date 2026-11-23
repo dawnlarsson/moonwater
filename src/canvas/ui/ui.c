@@ -22572,6 +22572,7 @@ struct ui_columns
         int hover, held, held_edge; // held -1 when no edge is (an app sets it so at the start)
         int trailing_min;           // logical pixels reserved in the last column for trailing controls (switches/tabs/buttons)
         int ref_w;                  // logical list width when columns were manually adjusted (for proportional resize)
+        int need[UI_COLUMNS_MOST];  // logical pixels each column needs not to cut its widest words, padding included (ui_columns_need), 0 none known
         struct ui_splitter split;
 };
 
@@ -24227,12 +24228,17 @@ static b32 ui_list_tree_chevron_at(const struct ui address_to ui, const struct u
                    ? (tr)->w + UI_INSET + 8                                                                                                \
                    : 0)
 
+static fn ui_columns_need(const struct ui address_to ui, struct ui_columns address_to c, int k, const char address_to words, int extra); // below
+static inline fn ui_columns_forget(struct ui_columns address_to c);
+
 // Scans a columned section from start_at so the last column reserves room for any trailing controls before layout.
 static fn ui_list_columns_fit(struct ui address_to ui, struct ui_list address_to l, int start_at, struct ui_columns address_to c)
 {
         int need = 0;
         if (!c || l->virtual)
                 return;
+        // A section's rows are all here, so what its columns need is read from them afresh: a row gone or shorter leaves no width behind.
+        ui_columns_forget(c);
         for (int j = start_at; j < l->count && (j == start_at || !(l->starts[j] & UI_LIST_STARTS)); j++)
         {
                 struct ui_row row;
@@ -24245,6 +24251,11 @@ static fn ui_list_columns_fit(struct ui address_to ui, struct ui_list address_to
                 one = UI_ROW_TRAILING_NEED(&row, trailing);
                 if (one > need)
                         need = one;
+                // What each cell's words need, the first's with what is before its words (its indent, its mark, its symbol).
+                ui_columns_need(ui, c, 0, row.label, ui_dev(ui, UI_INDENT) * row.indent + (row.expander ? ui_dev(ui, UI_INDENT) : 0) +
+                                                      (row.mark ? ui_dev(ui, 14) : 0) + (row.file ? ui_dev(ui, UI_FILE_ROW_ICON + 8) : 0));
+                for (int k = 1; k < c->count; k++)
+                        ui_columns_need(ui, c, k, row.cells[k], k == c->count - 1 ? ui_dev(ui, one) + (row.bars > 0 ? ui_signal_width(ui) + ui_dev(ui, 6) : 0) : 0);
         }
         c->trailing_min = need;
 }
@@ -24269,11 +24280,55 @@ static fn ui_columns_squeeze_pre(int address_to wide, const int address_to mins,
         wide[0] += rem - used;
 }
 
-// Place columns across [x, x + w) with last column locked flush to x + w and trailing controls protected.
+/*
+        What a column needs not to cut its words (ui_columns.need, logical pixels): its widest cell noted, with the padding the cells are drawn
+        with (the inset at the first column's start and the last's end, the gap elsewhere) and extra device pixels before the words (a first
+        column's indent and its symbol). A list's rows note theirs as they are laid out (ui_list_columns_fit); an app whose list is virtual
+        notes its own as its rows change, and forgets them when its rows are others (a folder left).
+*/
+static fn ui_columns_need(const struct ui address_to ui, struct ui_columns address_to c, int k, const char address_to words, int extra)
+{
+        int pads, need;
+        if (!c || k < 0 || k >= UI_COLUMNS_MOST || !words || !words[0] || !ui->regular || ui->scale <= 0)
+                return;
+        pads = (k ? ui_dev(ui, 8) : ui_dev(ui, UI_INSET)) + (k == c->count - 1 ? ui_dev(ui, UI_INSET) : ui_dev(ui, 8));
+        need = ((ui_kit_measure(ui, (string_address)words, UI_BODY_MEDIUM) + pads + extra) * 100 + ui->scale - 1) / ui->scale;
+        if (need > c->need[k])
+                c->need[k] = need;
+}
+
+static inline fn ui_columns_forget(struct ui_columns address_to c)
+{
+        for (int k = 0; k < UI_COLUMNS_MOST; k++)
+                c->need[k] = 0;
+}
+
+// What column k needs (device pixels): its least, the app's width for it (a floor), its title with its padding and its order's arrow, and its cells.
+static int ui_columns_room(const struct ui address_to ui, const struct ui_columns address_to c, int k, int least)
+{
+        int room = least, title, pads = (k ? ui_dev(ui, 8) : ui_dev(ui, UI_INSET)) + (k == c->count - 1 ? ui_dev(ui, UI_INSET) : ui_dev(ui, 8));
+        if (k > 0 && ui_dev(ui, c->width[k]) > room)
+                room = ui_dev(ui, c->width[k]);
+        if (c->title[k] && ui->regular)
+                title = ui_kit_measure(ui, (string_address)c->title[k], UI_LABEL_MEDIUM) + pads + ui_dev(ui, 14), room = title > room ? title : room;
+        if (ui_dev(ui, c->need[k]) > room)
+                room = ui_dev(ui, c->need[k]);
+        return room;
+}
+
+/*
+        Place columns across [x, x + w) with the last locked flush to x + w and trailing controls protected. The person never sizes a column
+        by hand to read it: each takes what its words need (ui_columns_room: its title and its widest cell, the app's width a floor), and the
+        first, the names', takes the rest, so no words are cut while the window has room for them, and a window made wider is all used. With
+        too little room, the first gives way first (its names are cut with dots, the short columns of sizes, kinds and times stay whole), then
+        all shrink to their least in proportion. An edge the person dragged is a bias, not a size: their widths are kept as shares of the width
+        they were set at (ref_w) and follow the window's, and a column the shares leave narrower than its words is given room from the columns
+        with more than theirs, while no hand holds an edge.
+*/
 static fn ui_columns_layout(const struct ui address_to ui, struct ui_columns address_to c, int x, int y, int w)
 {
         int count = c->count = c->count < 1 ? 1 : c->count > UI_COLUMNS_MOST ? UI_COLUMNS_MOST : c->count;
-        int mins[UI_COLUMNS_MOST], at = x, last = count - 1;
+        int mins[UI_COLUMNS_MOST], rooms[UI_COLUMNS_MOST], at = x, last = count - 1;
         c->x = x, c->y = y, c->w = w, c->h = ui_dev(ui, UI_COLUMNS_H);
         if (count == 1 || w <= 0)
         {
@@ -24287,22 +24342,29 @@ static fn ui_columns_layout(const struct ui address_to ui, struct ui_columns add
                 mins[k] = ui_dev(ui, ml);
                 if ((k > 0 || c->width[0] > 0) && c->width[k] < ml)
                         c->width[k] = ml;
+                rooms[k] = ui_columns_room(ui, c, k, mins[k]);
         }
         if (c->width[0] <= 0)
         {
                 int first = w * 2 / 5 > mins[0] ? w * 2 / 5 : mins[0], room = w > first ? w - first : 0, others = 0, min_others = 0;
                 for (int k = 1; k < count; k++)
-                        c->wide[k] = ui_dev(ui, c->width[k]), others += c->wide[k], min_others += mins[k];
-                if (others > room)
-                        others = ui_columns_shrink(c->wide, mins, 1, count, room, others, min_others);
+                        c->wide[k] = rooms[k], others += c->wide[k], min_others += mins[k];
+                // The others whole where the first keeps its least: the names give way before the short columns do.
                 if (w >= mins[0] + others)
                         c->wide[0] = w - others;
                 else
                 {
-                        int sum_pre = 0;
-                        for (int k = 0; k < last; k++)
-                                c->wide[k] = k ? ui_dev(ui, c->width[k]) : first, sum_pre += c->wide[k];
-                        ui_columns_squeeze_pre(c->wide, mins, last, w, sum_pre);
+                        if (others > room)
+                                others = ui_columns_shrink(c->wide, mins, 1, count, w - mins[0] > room ? w - mins[0] : room, others, min_others);
+                        if (w >= mins[0] + others)
+                                c->wide[0] = w - others;
+                        else
+                        {
+                                int sum_pre = 0;
+                                for (int k = 0; k < last; k++)
+                                        c->wide[k] = k ? rooms[k] : first, sum_pre += c->wide[k];
+                                ui_columns_squeeze_pre(c->wide, mins, last, w, sum_pre);
+                        }
                 }
         }
         else
@@ -24321,6 +24383,33 @@ static fn ui_columns_layout(const struct ui address_to ui, struct ui_columns add
                         c->wide[last] = w - ui_columns_shrink(c->wide, mins, 0, last, w - mins[last], pre_sum, pre_min);
                 else
                         ui_columns_squeeze_pre(c->wide, mins, last, w, pre_sum);
+                // The shares are a bias: a column they leave short of its words takes room from those with more than theirs.
+                if (c->held < 0)
+                {
+                        int spare = 0, short_of = 0;
+                        for (int k = 0; k < count; k++)
+                                spare += c->wide[k] > rooms[k] ? c->wide[k] - rooms[k] : 0, short_of += c->wide[k] < rooms[k] ? rooms[k] - c->wide[k] : 0;
+                        if (short_of > 0 && spare > 0)
+                        {
+                                int give = short_of < spare ? short_of : spare, taken = 0, given = 0, most = -1;
+                                for (int k = 0; k < count; k++)
+                                        if (c->wide[k] > rooms[k])
+                                        {
+                                                int part = (int)((b64)give * (c->wide[k] - rooms[k]) / spare);
+                                                c->wide[k] -= part, taken += part;
+                                                most = most < 0 || c->wide[k] - rooms[k] > c->wide[most] - rooms[most] ? k : most;
+                                        }
+                                // What the shares' rounding left is taken from the column with the most to spare still.
+                                if (most >= 0 && taken < give)
+                                        c->wide[most] -= give - taken, taken = give;
+                                for (int k = 0; k < count && given < taken; k++)
+                                        if (c->wide[k] < rooms[k])
+                                        {
+                                                int part = rooms[k] - c->wide[k] < taken - given ? rooms[k] - c->wide[k] : taken - given;
+                                                c->wide[k] += part, given += part;
+                                        }
+                        }
+                }
         }
         for (int k = 0; k < count; k++)
                 c->at[k] = at, at += c->wide[k];
@@ -32445,6 +32534,7 @@ struct ui_tokens
         char hidden[UI_TOKENS_MOST][64];                                           // each token's name for the … menu (cut to 63 bytes)
 };
 
+#define UI_TOKENS_PAD 6     // logical pixels inside a chip either side of its name (the row of chips and its checks read this one)
 #define UI_TOKENS_MENU 32u  // the … chip was pressed: its menu is up (the popup's items are the hidden tokens, id UI_TOKENS_ITEM + token)
 #define UI_TOKENS_ITEM 1000 // a menu item's id: the hidden token it names, added to this
 
@@ -32502,7 +32592,7 @@ static void ui_tokens_focus(struct ui_tokens address_to k, b32 on, b32 select_al
 // Lays the chips out in the box: every token but the caret's is a chip, left to right; the chips that do not fit are not drawn (chip_left -1).
 static void ui_tokens_lay(struct ui address_to ui, struct ui_tokens address_to k, const p8 address_to bytes, positive n)
 {
-        int pad = ui_dev(ui, 6), gap = ui_dev(ui, 4), room = k->right - k->left, at, first = 0, overflow_w;
+        int pad = ui_dev(ui, UI_TOKENS_PAD), gap = ui_dev(ui, 4), room = k->right - k->left, at, first = 0, overflow_w;
         int width[UI_TOKENS_MOST], rest[UI_TOKENS_MOST + 1];
         p64 caret = k->text.doc.selections[k->text.doc.primary].active;
         char label[UI_TOKENS_TEXT];
@@ -32581,7 +32671,7 @@ static fn ui_tokens_draw(struct ui address_to ui, struct ui_tokens address_to k,
         positive n = doc_length(&k->text.doc) < UI_TOKENS_TEXT - 1 ? doc_length(&k->text.doc) : UI_TOKENS_TEXT - 1;
         static p8 bytes[UI_TOKENS_TEXT];
         static char words[UI_TOKENS_TEXT * 3 + 4];
-        int height = bottom - top, pad = ui_dev(ui, 6), baseline = top + (height - ui_capital(ui, 14)) / 2 + ui_capital(ui, 14);
+        int height = bottom - top, pad = ui_dev(ui, UI_TOKENS_PAD), baseline = top + (height - ui_capital(ui, 14)) / 2 + ui_capital(ui, 14);
         unsigned int chip = ui_role(UI_SECONDARY_CONTAINER) & 0xffffffu, ink = ui_role(UI_ON_SECONDARY_CONTAINER) & 0xffffffu;
         unsigned int shown = ui_role(UI_PRIMARY_CONTAINER) & 0xffffffu, shown_ink = ui_role(UI_ON_PRIMARY_CONTAINER) & 0xffffffu;
         unsigned int after = ui_role(UI_ON_SURFACE_VARIANT) & 0xffffffu;
