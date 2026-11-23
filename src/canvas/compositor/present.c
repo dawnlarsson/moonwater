@@ -823,6 +823,8 @@ static void compositor_card_began(positive began)
 
 HOT static void compositor_present(void)
 {
+        if (!compositor.damages || compositor.dark || compositor.flip_pending || compositor_card_holds())
+                return;
         unsigned long long began = clock_monotonic_nanoseconds(), ended;
         enum compositor_record_path path;
         b32 jobs_before = compositor_card.on; // a present made while one's jobs are on the card draws nothing (compositor_card_holds)
@@ -1227,10 +1229,16 @@ static void compositor_wall_keep(void)
         now[6] = (unsigned int)compositor_wall_rows.maria, now[7] = count ? (unsigned int)(screens[0][2] * 31 + screens[0][3]) : 0;
         if (!memory_compare(compositor_wall_key, now, sizeof(now)))
         {
-                positive clock = clock_monotonic_nanoseconds(), step = compositor_wall_step_now();
-
-                if (compositor_wall && taskbar_motion_about(clock) && step != compositor_wall_stepped)
-                        compositor_wall_stepped = step, compositor_wall_start(compositor_wall_turn_of(step), 1);
+                if (compositor_wall)
+                {
+                        positive clock = clock_monotonic_nanoseconds();
+                        if (taskbar_motion_about(clock))
+                        {
+                                positive step = compositor_wall_step_now();
+                                if (step != compositor_wall_stepped)
+                                        compositor_wall_stepped = step, compositor_wall_start(compositor_wall_turn_of(step), 1);
+                        }
+                }
                 return;
         }
         if ((!compositor_wall_rows.moon && !compositor_wall_rows.picture && !compositor_wall_rows.stamp) || compositor.width <= 0 || compositor.height <= 0)
@@ -1320,7 +1328,8 @@ static unsigned int present_bands_pass(struct compositor_frame *frames, unsigned
                 return 0;
         int stale = taskbar_stale(), bands = compositor_bands();
         const unsigned int *saved_direct_pixels = 0;
-        struct compositor_frame band;
+        struct compositor_frame band, band_kept[WINDOWS_OUTPUTS];
+        struct taskbar_view view_kept[WINDOWS_OUTPUTS];
         unsigned int added = 0;
 
         for (int band_idx = 0; band_idx < bands; band_idx++)
@@ -1333,12 +1342,14 @@ static unsigned int present_bands_pass(struct compositor_frame *frames, unsigned
                 compositor.band_at = band_idx;
                 compositor_band_frame_for(band_idx, &band);
                 view = compositor_taskbar_view_for(band_idx);
+                if ((unsigned int)band_idx < WINDOWS_OUTPUTS)
+                        band_kept[band_idx] = band, view_kept[band_idx] = view;
                 solid = (unsigned char)compositor_band_covers(frames, windows, &band);
                 if (solid != compositor_band_solid[at])
                         compositor_band_solid[at] = solid, redo = COMPOSITOR_TABS_ALL;
                 if (!redo && view.pixels)
                         redo = taskbar_meets(&view, compositor.damage, compositor.damages, solid);
-                if (taskbar_shift() >= UI_ONE || !redo)
+                if (!redo)
                         continue;
                 if (!solid && stay_live_direct && !saved_direct_pixels && windows)
                 {
@@ -1378,10 +1389,10 @@ static unsigned int present_bands_pass(struct compositor_frame *frames, unsigned
                 struct taskbar_view view;
 
                 compositor.band_at = band_idx;
-                compositor_band_frame_for(band_idx, &band);
-                if (taskbar_shift() >= UI_ONE)
-                        continue;
-                view = compositor_taskbar_view_for(band_idx);
+                if ((unsigned int)band_idx < WINDOWS_OUTPUTS)
+                        band = band_kept[band_idx], view = view_kept[band_idx];
+                else
+                        compositor_band_frame_for(band_idx, &band), view = compositor_taskbar_view_for(band_idx);
                 added += compositor_moon_glow_frame_for(band_idx, &frames[windows + added]);
                 added += compositor_panel_tabs_with(&view, &band, &frames[windows + added]);
         }

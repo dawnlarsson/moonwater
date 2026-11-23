@@ -1932,7 +1932,8 @@ static b32 compositor_gpu_frames(const struct compositor_frame *frames, unsigned
         for (unsigned int k = first; k < count; k++)
                 if (!compositor_gpu_frame(&frames[k]))
                         goto refused;
-        for (unsigned int pass = 0; pass < 2; pass++)
+        if (has_tint)
+                for (unsigned int pass = 0; pass < 2; pass++)
                 for (unsigned int k = 0; k < count; k++)
                 {
                         const struct compositor_frame *f = &frames[k];

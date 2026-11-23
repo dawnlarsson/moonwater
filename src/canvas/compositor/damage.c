@@ -704,13 +704,14 @@ static void compositor_glide_frame(int row, struct compositor_frame *frame)
 */
 static void compositor_glide_keep(void)
 {
+        positive now = 0;
+
         for (unsigned int row = 0; row < compositor_rows_in_use; row++)
         {
-                positive now;
-
                 if (!compositor.glide[row])
                         continue;
-                now = clock_monotonic_nanoseconds();
+                if (!now)
+                        now = clock_monotonic_nanoseconds();
                 if (!compositor.glide_at[row])
                         compositor.glide_at[row] = now;
                 if (!compositor_visible((int)row) || (row == (unsigned int)compositor.drag && compositor.drag_glide != (int)row + 1) ||
