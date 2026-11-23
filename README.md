@@ -256,6 +256,11 @@ moonwater device writable NODE         let a partition opened be written to: ext
 moonwater device eject NODE            unmount a partition opened, and take its folder away
 moonwater device tidy                  let go of what was opened from a drive taken out
 moonwater device log [N]               the last decisions, the newest last [20]
+moonwater disc                         each optical drive and what is in it: none, open, audio TRACKS SECONDS, data, or mixed TRACKS SECONDS
+moonwater disc tracks DRIVE            the tracks of the disc in DRIVE (sr0): each audio or data, and its seconds
+moonwater disc play DRIVE [TRACK]      play an audio CD through the sound server, from TRACK to the end [1]; a new play stops the last
+moonwater disc stop                    stop the disc playing
+moonwater disc eject DRIVE             open the drive's tray
 
 
 # Power

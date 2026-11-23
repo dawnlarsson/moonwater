@@ -2489,6 +2489,81 @@ static b32 audio_test(void)
         return 0;
 }
 
+/*
+        A stream of sound a source makes as it plays (`moonwater disc play`'s audio CD): 16 bits, two channels, at rate Hz, through the
+        server at its own socket, named name in the mixer. fill writes up to frames frames into its buffer and answers how many it wrote,
+        0 at the end (or -1 when it failed, said by it). A second is sent at once (the server's buffer, which starts the stream when it is
+        full), and after it each tenth of a second as the clock reaches it, so a source of any length (a CD's hour) is never more than a
+        second ahead of what is heard, and the server's memory holds no more than that. Answers 0 when it played to the end, 1 when it
+        could not (said in words). The stream ends with what is sent drained.
+*/
+static b32 audio_play_stream(const char *name, long rate, long (*fill)(void *context, short *into, long frames), void *context)
+{
+        static struct ctl c;
+        static unsigned char frame[20 + 65536];
+        struct wire_w w;
+        unsigned long channel;
+        long tenth = rate / 10, ahead = 0, got = 0;
+        positive started = 0, sent_frames = 0;
+
+        audio_service.socket_path = AUDIO_SOCKET;
+        c.timeout_ms = 4000;
+        if (ctl_connect(&c, audio_service.socket_path) < 0)
+        {
+                string_format(log, "audio: no sound server answers on %s: nothing can be heard. Start it with the desktop, or `moonwater audio server on`.\n", audio_service.socket_path);
+                log_flush();
+                return 1;
+        }
+        if (!audio_stream_open(&c, name, "music", rate, &channel))
+        {
+                ctl_disconnect(&c);
+                return 1;
+        }
+        for (;;)
+        {
+                long frames = (long)((65536 / 4) < tenth ? 65536 / 4 : tenth);
+                positive now = clock_monotonic_nanoseconds();
+
+                // A second ahead at most: wait for the clock to reach what was sent less a second.
+                if (started && sent_frames > (positive)rate)
+                {
+                        positive due = started + (sent_frames - (positive)rate) * 1000000000ull / (positive)rate;
+                        if (due > now)
+                        {
+                                struct { long seconds, nanoseconds; } pause = {(long)((due - now) / 1000000000ull), (long)((due - now) % 1000000000ull)};
+                                system_call_2(syscall(nanosleep), (positive)&pause, 0);
+                        }
+                }
+                got = fill(context, (short *)(frame + 20), frames);
+                if (got <= 0)
+                        break;
+                if (!started)
+                        started = clock_monotonic_nanoseconds();
+                ctl_budget(&c);
+                wire_put_be(frame, (unsigned long)(got * 4));
+                wire_put_be(frame + 4, channel);
+                wire_put_be(frame + 8, 0), wire_put_be(frame + 12, 0), wire_put_be(frame + 16, 0);
+                if (c.transport.send(c.transport.context, frame, 20 + got * 4, ctl_left(&c)) < 0)
+                {
+                        string_format(log, "audio: the connection to the sound server broke while %s played.\n", name);
+                        log_flush();
+                        ctl_disconnect(&c);
+                        return 1;
+                }
+                sent_frames += (positive)got, ahead += got;
+        }
+        // What was sent is played out (drained), then the stream is let go.
+        ctl_begin(&c, &w, 12);
+        wire_w_u32(&w, channel);
+        ctl_exchange(&c, w.len);
+        ctl_begin(&c, &w, 4);
+        wire_w_u32(&w, channel);
+        ctl_exchange(&c, w.len);
+        ctl_disconnect(&c);
+        (void)ahead;
+        return got < 0;
+}
+
 // `moonwater audio test`: the tone, to the server at its own socket and page.
 static b32 audio_test_run(void)
 {

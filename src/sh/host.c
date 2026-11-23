@@ -345,6 +345,7 @@ static bool host_proc_path(p8 address_to into, positive room, positive pid,
 #include "host/radio.c" // the verbs wifi, bluetooth, priority and wired: the switches, the saved networks, the air scanned, a join, its password and its state files (wifi.last), the status, the shared link
 #include "host/tune.c" // the verbs airplane, brightness, charge, battery, power, cpu, sleep and hibernate: the switches the kernel keeps in sysfs
 #include "host/device.c" // the verb device: which devices plugged in are let in, the rules, the census, the lock, the watch, the list
+#include "host/disc.c" // the verb disc: the optical drives, a disc's tracks, a CD of music played through the sound server, eject
 #include "host/locale.c" // the timezone and the clock (SNTP, NTS, the zone found and set), the keyboard's layout and the canvas's modes: the work under the verbs time, timezone, ntp and keyboard, which are debug.c's
 #include "host/setting.c" // the verbs splash, taskbar, mouse, language and audio, and the canvas's settings; the clock kept and restored at boot, and the name
 static long host_windows_map(bool writable);
@@ -1068,6 +1069,7 @@ static b32 host_main()
             {"priority", host_priority, false, true},
             {"wired", host_wired, false, true},
             {"device", host_device, false, true},
+            {"disc", host_disc, false, true},
             {"timezone", host_timezone, false, true},
             {"ntp", host_ntp, false, true},
             {"keyboard", host_keyboard, false, true},

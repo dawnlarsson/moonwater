@@ -91,10 +91,13 @@ CONFIG_SND_HDA_POWER_SAVE_DEFAULT=10
 
 #
 # Desktop filesystems & optical media: NTFS3 for Windows dual-boot disks,
-# ISO9660 and SCSI optical drives for disc images/drives.
+# ISO9660 (with Joliet's long names and zisofs), UDF (DVDs and newer discs) and SCSI optical drives for disc images/drives.
 #
 CONFIG_NTFS3_FS=y
 CONFIG_ISO9660_FS=y
+CONFIG_JOLIET=y
+CONFIG_ZISOFS=y
+CONFIG_UDF_FS=y
 CONFIG_NLS_ISO8859_1=y
 CONFIG_BLK_DEV_SR=y
 
