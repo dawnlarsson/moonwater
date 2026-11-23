@@ -3922,7 +3922,9 @@ static string_address address_to bowl_environment(
              "ELECTRON_OZONE_PLATFORM_HINT=auto", BOWL_OPT_WAYLAND, true},
             {"MOZ_ENABLE_WAYLAND", "MOZ_ENABLE_WAYLAND=1",
              BOWL_OPT_WAYLAND, true},
-            {"QT_QPA_PLATFORM", "QT_QPA_PLATFORM=wayland;xcb",
+            // Wayland alone: it is set only where there is no X display (skip_if_display), so xcb has nothing to fall back to, and a Qt
+            // older than 5.12 reads no list ("wayland;xcb" is one plugin's name to it, found nowhere, and it aborts).
+            {"QT_QPA_PLATFORM", "QT_QPA_PLATFORM=wayland",
              BOWL_OPT_WAYLAND, true},
             {BOWL_LANGUAGE_VARIABLE, null, BOWL_OPT_LANGUAGE, false},
             {"MESA_VK_WSI_PRESENT_MODE", "MESA_VK_WSI_PRESENT_MODE=mailbox",
@@ -15220,6 +15222,9 @@ static string_address bowl_steam_session[] = {
     "n=0; while [ ! -S \"$xsaving\" ] && [ $n -lt 50 ]; do n=$((n + 1)); sleep 0.1; done",
     "[ -S \"$xsaving\" ] || { echo \"steam: the X server did not start (no $xsaving in 5 s)\" >&2; kill $xwayland 2>/dev/null; exit 1; }",
     "export DISPLAY=\"$display\"",
+    // A game brings its own Qt, as old as 5.9 (Black Mesa's), which has no Wayland plugin and reads no list: with the session's X
+    // display up, Qt picks xcb itself where the bowl's QT_QPA_PLATFORM (set before the display was) would have it abort.
+    "unset QT_QPA_PLATFORM",
     "bowl " BOWL_ROOT_PREFIX "arch /usr/bin/steam \"$@\"",
     // The X server is not ended under a game still on it (Steam's renderer loaded, DISPLAY the display): Steam may end first.
     "status=$?; while :; do g=; for p in /proc/[0-9]*; do tr '\\0' '\\n' < \"$p/environ\" 2>/dev/null | grep -qx \"DISPLAY=$display\" && "
