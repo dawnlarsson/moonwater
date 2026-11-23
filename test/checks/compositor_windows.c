@@ -799,7 +799,7 @@ static void check_compositor_cursor_probe(void)
     memory_zero(&compositor_cursor_probe, sizeof(compositor_cursor_probe));
     check("cursor probe: a card that cannot be asked keeps the names' refusal for i915", compositor_cursor_probed(-1) == -1);
     memory_zero(&compositor_cursor_probe, sizeof(compositor_cursor_probe));
-    string_copy((string_address)compositor.driver, (string_address) "amdgpu");
+    string_copy((string_address)compositor.driver, (string_address) "amdgpu"), compositor.driver_flags = drm_driver_flags("amdgpu");
     check("cursor probe: and for no other driver", compositor_cursor_probed(-1) == 0 && !compositor_cursor_probe.stopped);
     compositor.cursor.soft = 0;
     check("cursor probe: the pointer word is 1 on the plane and 0 drawn for no probe", compositor_pointer_plane_word() == 1 &&
