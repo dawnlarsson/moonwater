@@ -1306,6 +1306,7 @@ enum
         UI_FILE_MACHINE,     // a computer: this machine or a linked peer
         UI_FILE_STICK,       // a disk on USB: a stick's body and its plug with its two contacts (Files' Devices)
         UI_FILE_PARTITION,   // a part of a disk: the disk's outline cut once, the part before the cut shaded (Files' Devices)
+        UI_FILE_DISC,        // an optical disc: its round outline, the hole at its middle and a glint (Files' Devices, a CD's tracks)
         UI_FILE_KINDS
 };
 #define UI_FILE_LINKED 0x100u // with a kind: it is a link to one (the arrow at its foot)
@@ -1339,6 +1340,7 @@ static const struct ui_icon_part ui_file_parts[UI_FILE_KINDS][UI_FILE_PARTS] = {
         [UI_FILE_STICK] = {{UI_ICON_RING, 15, 16, 33, 44, 4}, {UI_ICON_RING, 18, 4, 30, 16, 1}, {UI_ICON_BOX, 21, 8, 23, 11, 0},
                             {UI_ICON_BOX, 25, 8, 27, 11, 0}},
         [UI_FILE_PARTITION] = {{UI_ICON_RING, 4, 15, 44, 35, 3}, {UI_ICON_LINE, 20, 15, 20, 35, 0}, {UI_ICON_SHADE, 6, 17, 20, 33, 2}},
+        [UI_FILE_DISC] = {{UI_ICON_RING, 4, 4, 44, 44, 20}, {UI_ICON_RING, 18, 18, 30, 30, 6}, {UI_ICON_LINE, 11, 21, 21, 11, 0}},
         [UI_FILE_MACHINE] = {{UI_ICON_RING, 6, 8, 42, 32, 2}, {UI_ICON_LINE, 24, 32, 24, 40, 0}, {UI_ICON_LINE, 14, 40, 34, 40, 0}},
 };
 
@@ -19463,6 +19465,7 @@ enum
         UI_ICON_PLUS,       // a plus: add (a list's add row, ui_row's UI_ROW_ADD)
         UI_ICON_REMOVE,     // a cross: take this away (a list row's remove button, ui_row.remove)
         UI_ICON_GRIP,       // six dots, two by three: a handle to move a row by (an ordered row's, ui_row.order)
+        UI_ICON_STOP,       // a square filled: stop what plays (a file browser's CD)
         UI_ICON_COUNT
 };
 
@@ -19492,6 +19495,7 @@ static const struct ui_icon_part ui_icon_parts[UI_ICON_COUNT][UI_ICON_PARTS] = {
         [UI_ICON_REMOVE] = {{UI_ICON_LINE, 14, 14, 34, 34, 0}, {UI_ICON_LINE, 34, 14, 14, 34, 0}, {UI_ICON_BOX, 20, 20, 28, 28, 0}},
         [UI_ICON_GRIP] = {{UI_ICON_BOX, 12, 7, 21, 16, 1}, {UI_ICON_BOX, 27, 7, 36, 16, 1}, {UI_ICON_BOX, 12, 19, 21, 28, 1},
                           {UI_ICON_BOX, 27, 19, 36, 28, 1}, {UI_ICON_BOX, 12, 31, 21, 40, 1}, {UI_ICON_BOX, 27, 31, 36, 40, 1}},
+        [UI_ICON_STOP] = {{UI_ICON_BOX, 13, 13, 35, 35, 3}},
         [UI_ICON_KEYBOARD] = {{UI_ICON_RING, 4, 12, 44, 36, 4}, {UI_ICON_BOX, 10, 18, 15, 22, 1}, {UI_ICON_BOX, 18, 18, 23, 22, 1},
                               {UI_ICON_BOX, 26, 18, 31, 22, 1}, {UI_ICON_BOX, 34, 18, 38, 22, 1}, {UI_ICON_LINE, 14, 29, 34, 29, 0}},
         [UI_ICON_GAMEPAD] = {{UI_ICON_RING, 4, 13, 44, 37, 11}, {UI_ICON_LINE, 11, 25, 21, 25, 0}, {UI_ICON_LINE, 16, 20, 16, 30, 0}, {UI_ICON_BOX, 29, 19, 35, 25, 3},
