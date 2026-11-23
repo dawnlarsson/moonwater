@@ -2677,6 +2677,19 @@ static b32 files_key(const struct window_event address_to event)
         b32 alt = (event->flags & WINDOW_KEY_ALT) != 0, control = (event->flags & WINDOW_KEY_CONTROL) != 0, shift = (event->flags & WINDOW_KEY_SHIFT) != 0;
         int key = (int)event->a;
         b32 moved = false;
+        if (key == UI_KEY_DELETE && files.focus == FILES_FOCUS_TREE)
+        {
+                // Delete on the sidebar is a medium's Eject (its menu's), and never the folder's files the main pane has chosen.
+                const struct files_tree address_to t = &files.big->tree;
+                const struct files_devices address_to d = &files.big->devices;
+                const struct files_node address_to n = files.tree_at < t->count ? &t->node[files.tree_at] : null;
+                if (!(event->flags & WINDOW_KEY_REPEAT) && n && n->kind == FILES_NODE_PART && n->device < d->parts && files_disk_outside(d, d->part_disk[n->device]))
+                {
+                        string_copy_bounded((string_address)files.device_menu_node, (string_address)d->part_node[n->device], sizeof(files.device_menu_node));
+                        files_menu_do(FILES_MENU_DEVICE_EJECT);
+                }
+                return true;
+        }
         if (key == UI_KEY_DELETE)
         {
                 if (!(event->flags & WINDOW_KEY_REPEAT))
