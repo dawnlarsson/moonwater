@@ -1992,7 +1992,7 @@ static positive compositor_timers_arm(positive now, unsigned int fence_at, int h
         if (compositor.wake_stage) compositor_soon(&until, compositor.wake_at);
         if (compositor.hold >= 0) compositor_soon(&until, compositor.hold_until);
         if (compositor.cursor.magnified) compositor_soon(&until, compositor.cursor.magnified_until);
-        compositor_soon(&until, compositor_cursor_due());
+        compositor_soon(&until, compositor_cursor_due(now));
         if (compositor.band)
         {
                 compositor_soon(&until, compositor_volume.look_at ? compositor_volume.look_at : 1);

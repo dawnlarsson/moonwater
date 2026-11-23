@@ -1578,9 +1578,10 @@ static void compositor_present_frames(void)
         if (tinted)
                 frames[count++] = preview;
         count += compositor_moon_menu_frame(&frames[count]);
-        if ((unsigned int)compositor_overlays_up() != compositor.overlays_up)
+        unsigned int overlays_up = (unsigned int)compositor_overlays_up();
+        if (overlays_up != compositor.overlays_up)
         {
-                compositor.overlays_up = (unsigned int)compositor_overlays_up();
+                compositor.overlays_up = overlays_up;
                 if ((compositor.overlays_up && !compositor.assist_on) || (!compositor.overlays_up && !compositor_glides()))
                         compositor.assist_count = 0;
                 compositor_overlay_fade(compositor.overlays_up ? 100 : 0);

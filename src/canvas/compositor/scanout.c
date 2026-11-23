@@ -2526,9 +2526,12 @@ static int compositor_plane_candidate(const struct compositor_frame *frames, con
         rect[0] = frame->x, rect[1] = top, rect[2] = frame->x + frame->width, rect[3] = bottom;
         if (frame->blend && !compositor_row_opaque_fs(row) &&
             !compositor_wl_row_opaque(row, 0, top - frame->y, frame->width, bottom - frame->y)) return *why = 20, -1;
-        compositor_band_frame(&band);
-        if (compositor.band && band.x < rect[2] && band.x + band.width > rect[0] && band.y < rect[3] && band.y + band.height > rect[1])
-                return *why = 9, -1;
+        if (compositor.band)
+        {
+                compositor_band_frame(&band);
+                if (band.x < rect[2] && band.x + band.width > rect[0] && band.y < rect[3] && band.y + band.height > rect[1])
+                        return *why = 9, -1;
+        }
         for (unsigned int at = windows; at < count; at++)
         {
                 int x, y, w, h;

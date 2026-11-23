@@ -2000,12 +2000,12 @@ static void compositor_cursor_moved(positive now)
 
 // When the pointer is to be drawn again for its own reasons: the next frame while a value of it is on its way, or when its stretch lets
 // go (0 for neither). The main loop sleeps until then.
-static positive compositor_cursor_due(void)
+static positive compositor_cursor_due(positive now)
 {
         positive glass = compositor_glass_bg_due(), due = 0;
 
         if (compositor.cursor.press.at || compositor.cursor.morph.at || compositor.cursor.lens.at || compositor.cursor.stretch.at)
-                due = clock_monotonic_nanoseconds() + (compositor.period ? compositor.period : 16000000ull);
+                due = now + (compositor.period ? compositor.period : 16000000ull);
         else if (compositor.cursor.stretch.to)
                 due = compositor.cursor.idle_until;
         return glass && (!due || glass < due) ? glass : due;
