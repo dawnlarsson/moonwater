@@ -5266,12 +5266,14 @@ static int wayland_syncobj_request(struct wayland_client *c, struct wayland_obje
 
 /* ---- relative pointer, direct input, constraints, extensions, and dispatch ---- */
 
+// The accelerated motion in the surface's units; the unaccelerated is the device's own counts, unscaled, as other compositors send it
+// (Xwayland makes its raw events of it, and SDL 2 truncates a raw delta's fraction: above 100% a lone count was read as 0).
 static long wayland_relative_send(struct wayland_client *c, long scale120, long dx, long dy, long udx, long udy, long micro)
 {
         long sent = 0;
         const unsigned int words[6] = {(unsigned int)((unsigned long)micro >> 32), (unsigned int)micro,
                                        (unsigned int)wayland_units_fixed(dx, scale120), (unsigned int)wayland_units_fixed(dy, scale120),
-                                       (unsigned int)wayland_units_fixed(udx, scale120), (unsigned int)wayland_units_fixed(udy, scale120)};
+                                       (unsigned int)((unsigned long)udx * 256), (unsigned int)((unsigned long)udy * 256)};
         for (long at = 0, slot; (slot = wayland_ids_next(c, &c->relative_ids, WLI_zwp_relative_pointer_v1, &at)) >= 0; sent++)
                 wayland_emit(c, c->objects[slot].id, WLE_zwp_relative_pointer_v1_relative_motion, words, 6);
         return sent;

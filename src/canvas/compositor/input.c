@@ -4141,7 +4141,7 @@ static int compositor_wl_direct_send(long dx, long dy, positive micro);
 static int compositor_wl_direct_send_packet(long dx, long dy, unsigned int btn, int btn_val, int wheel_v120, int wheel_horiz,
                                             positive micro, unsigned long *btn_serial, int *btn_row);
 static int compositor_wl_direct_clean(void);
-static int compositor_wl_direct_key(unsigned int code, int pressed, unsigned long *serial, int *row, int to);
+static int compositor_wl_direct_key(unsigned int code, int pressed, unsigned long *serial, int *row, int to, positive micro);
 static void compositor_wl_key_noted(unsigned int at, unsigned int code, int value, unsigned long serial, int row, positive stamp, positive read, positive sent);
 static void compositor_wl_button_noted(unsigned int code, int pressed, unsigned long serial, int row);
 static void compositor_wl_direct_publish(void);
@@ -4203,7 +4203,7 @@ HOT static int compositor_reader_key(unsigned int at, unsigned int code, int val
         if (value == 2)
                 return compositor_reader.down[code] != 0;
         compositor_reader.note_read = clock_monotonic_nanoseconds();
-        if (!compositor_wl_direct_key(code, value, &serial, &row, value ? -1 : compositor_reader.down[code] - 1))
+        if (!compositor_wl_direct_key(code, value, &serial, &row, value ? -1 : compositor_reader.down[code] - 1, micro))
                 return compositor_reader.down[code] = 0, 0;
         compositor_reader.note_sent = clock_monotonic_nanoseconds();
         compositor_reader.down[code] = value ? row + 1 : 0, compositor_reader.keys++;

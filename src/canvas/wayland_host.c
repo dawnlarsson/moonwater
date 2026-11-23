@@ -5295,11 +5295,12 @@ static int compositor_wl_direct_try(void)
 
 /*
         The thread's send of a key to the window that has the keys (compositor_reader_key): wl_keyboard.key (event 3: serial, time, key,
-        state) to each of its keyboards, the words wayland_key sends, with a serial of the client's own count. 1 with the serial and the row
-        when it went, 0 when the key is the loop's (no window of a client's has the keys as made, the key is refused with the modifiers
+        state) to each of its keyboards, the words wayland_key sends, with a serial of the client's own count and the time the device
+        stamped (micro, the kernel's microseconds, as the pointer's buttons have it). 1 with the serial and the row when it went, 0 when the
+        key is the loop's (no window of a client's has the keys as made, the key is refused with the modifiers
         held, the lock is the loop's, a rest of a send is still out, a release whose press went to another window: to, -1 for a press).
 */
-HOT static int compositor_wl_direct_key(unsigned int code, int pressed, unsigned long *serial, int *row, int to)
+HOT static int compositor_wl_direct_key(unsigned int code, int pressed, unsigned long *serial, int *row, int to, positive micro)
 {
         unsigned char bytes[COMPOSITOR_WL_DIRECT_IDS * 24];
         unsigned int length = 0, time;
@@ -5315,7 +5316,7 @@ HOT static int compositor_wl_direct_key(unsigned int code, int pressed, unsigned
         }
         *serial = __atomic_add_fetch(compositor_wl_direct.keys_serial, 1, __ATOMIC_RELAXED);
         *row = compositor_wl_direct.keys_row;
-        time = (unsigned int)(clock_monotonic_nanoseconds() / 1000000ull);
+        time = (unsigned int)(micro / 1000ull);
         for (long at = 0; at < compositor_wl_direct.keys_count; at++)
         {
                 unsigned int words[6] = {compositor_wl_direct.keys_ids[at], 24u << 16 | 3u, (unsigned int)*serial, time, code, pressed ? 1u : 0u};
@@ -5368,11 +5369,11 @@ HOT static int compositor_wl_direct_send_packet(long dx, long dy, unsigned int b
         {
                 for (long at = 0; at < compositor_wl_direct.relatives; at++)
                 {
+                        // Unaccelerated is the device's own counts, unscaled (wayland_relative_send's rule).
                         unsigned int words[8] = {compositor_wl_direct.relative[at], 32u << 16, (unsigned int)(micro >> 32), (unsigned int)micro,
                                                  (unsigned int)wayland_fixed_of(dx, compositor_wl_direct.scale120),
                                                  (unsigned int)wayland_fixed_of(dy, compositor_wl_direct.scale120),
-                                                 (unsigned int)wayland_fixed_of(dx, compositor_wl_direct.scale120),
-                                                 (unsigned int)wayland_fixed_of(dy, compositor_wl_direct.scale120)};
+                                                 (unsigned int)(unsigned long)(dx * 256), (unsigned int)(unsigned long)(dy * 256)};
 
                         memory_copy(bytes + length, words, sizeof words);
                         length += sizeof words;
