@@ -189,6 +189,7 @@ static struct
         mwi_fn real[MWI_AT_LAST + 1]; // the calling SDL's own functions, for the places taken over
         const volatile struct mwi_page *page;
         int fd, looked, claim_wanted, claimed, armed, busy;
+        int compat;                   // the SDL is sdl2-compat (SDL 2's API on SDL 3: its patch numbers start at 50)
         unsigned int generation, cursor, held, lost;
         long sum_x, sum_y;            // the relative motion read and not yet asked for (SDL_GetRelativeMouseState)
         int fine_x, fine_y;           // high-resolution wheel turns not yet a whole notch (120ths)
@@ -437,8 +438,13 @@ static void mwi_report(const struct mwi_slot *slot, unsigned int window, int x, 
                         *rest += slot->dx, notches = *rest / 120, *rest -= notches * 120;
                 else
                         notches = slot->dx;
+                // sdl2-compat makes a pushed SDL 2 wheel into SDL 3's by copying its words over SDL 3's (whose wheel.integer_x and
+                // integer_y then hold SDL 2's mouseX and mouseY, which it never writes again) and back into SDL 2's (x and y from
+                // integer_x and integer_y): the game read the pointer's place as its notches (seen on the box, 2.32.74). There the
+                // place words carry the notches, so x and y come out right; in relative mode the place is nothing a game reads.
                 event = (union mwi_sdl_event){.wheel = {MWI_SDL_MOUSEWHEEL, 0, window, 0, sideways ? notches : 0, sideways ? 0 : notches, 0,
-                                                        sideways ? precise : 0.0f, sideways ? 0.0f : precise, x, y}};
+                                                        sideways ? precise : 0.0f, sideways ? 0.0f : precise,
+                                                        mwi.compat ? (sideways ? notches : 0) : x, mwi.compat ? (sideways ? 0 : notches) : y}};
                 mwi_push(&event);
         }
 }
@@ -698,6 +704,7 @@ static int mwi_install(unsigned int api, void *table, unsigned int size, mwi_ent
         platform = ((const char *(*)(void))slots[MWI_AT_PLATFORM])();
         if (version.major != 2 || !platform || !mwi_same(platform, "Linux"))
                 return -1;
+        mwi.compat = version.patch >= 50;
         for (unsigned int at = 0; at < sizeof places / sizeof places[0]; at++)
                 if (!slots[places[at].at])
                         return -1;

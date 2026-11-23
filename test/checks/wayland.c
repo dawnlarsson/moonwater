@@ -11679,13 +11679,13 @@ static unsigned is_checks, is_failures;
 static mwi_fn is_table[IS_TABLE];
 static union mwi_sdl_event is_pushed[512];
 static unsigned is_pushes, is_polls, is_waits[4], is_wait_calls, is_swaps, is_quits;
-static int is_version_major = 2, is_rel_x, is_rel_y, is_set_relative_result;
+static int is_version_major = 2, is_version_patch = 10, is_rel_x, is_rel_y, is_set_relative_result;
 static const char *is_platform = "Linux";
 static union mwi_sdl_event is_x_event;
 static int is_x_pending;
 
 static void is_stub(void) {}
-static void is_version(struct mwi_sdl_version *v) { v->major = (unsigned char)is_version_major, v->minor = 32, v->patch = 10; }
+static void is_version(struct mwi_sdl_version *v) { v->major = (unsigned char)is_version_major, v->minor = 32, v->patch = (unsigned char)is_version_patch; }
 static const char *is_get_platform(void) { return is_platform; }
 static int is_push(union mwi_sdl_event *event)
 {
@@ -11949,6 +11949,21 @@ static void is_test_wheel(void)
                 "half notches are precise and a whole one counts (%d %d)", is_pushed[0].wheel.y, is_pushed[1].wheel.y);
         ISCHECK(is_pushed[2].wheel.y == -1 && is_pushed[2].wheel.precise_y == -1.0f && is_pushed[3].wheel.x == 1 && is_pushed[3].wheel.y == 0,
                 "a notch toward the person is y -1, one to the right x 1");
+        ISCHECK(!mwi.compat && is_pushed[2].wheel.mouse_x == 100 && is_pushed[3].wheel.mouse_x == 100 && is_pushed[3].wheel.mouse_y == is_pushed[2].wheel.mouse_y,
+                "SDL 2 (2.32.10): a wheel's place words are the pointer's (%d %d)", is_pushed[3].wheel.mouse_x, is_pushed[3].wheel.mouse_y);
+        // sdl2-compat (2.32.74): its SDL_PushEvent carries a wheel's place words into SDL 2's x and y, so they carry the notches there.
+        is_version_patch = 74;
+        is_reset();
+        is_version_patch = 10;
+        mwi_set_relative(1);
+        is_arm(1);
+        is_poll_all();
+        is_put(SPARK_INPUT_KIND_WHEEL, 8, -1, 0);
+        is_put(SPARK_INPUT_KIND_WHEEL, 6, 1, 0);
+        is_poll_all();
+        ISCHECK(mwi.compat && is_pushes == 2 && is_pushed[0].wheel.mouse_x == 0 && is_pushed[0].wheel.mouse_y == -1 &&
+                    is_pushed[1].wheel.mouse_x == 1 && is_pushed[1].wheel.mouse_y == 0 && is_pushed[0].wheel.y == -1 && is_pushed[1].wheel.x == 1,
+                "sdl2-compat: a wheel's place words are its notches, x and y as before (%d %d)", is_pushed[0].wheel.mouse_y, is_pushed[1].wheel.mouse_x);
 }
 
 static void is_test_observe(void)
