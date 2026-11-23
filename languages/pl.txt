@@ -12,6 +12,7 @@
 # machine-made 2026-11-23 (a row menu's copy of one column), not yet read by a person: menu_copy_named
 # machine-made 2026-11-23 (Waterlink's grants as columns, and a remove asked on its row), not yet read by a person: settings_column_files settings_column_log settings_column_run settings_column_shell settings_remove_again
 # machine-made 2026-11-23 (the CD drive and the flat Devices of Files), not yet read by a person: files_device_nothing files_disc_audio files_disc_none files_disc_play
+# machine-made 2026-11-23 (the bands of a machine in Files' sidebar), not yet read by a person: files_band_drives files_band_removable
 @language pl
 @name Polski
 @translated machine
@@ -54,6 +55,8 @@ editor_write_beside	ec75	nie można zapisać obok pliku
 editor_writes_over_changed	df15	nadpisuje zmianę na dysku (Ctrl+R wczytuje ponownie)
 editor_writes_over_readonly	e22f	nadpisuje plik tylko do odczytu
 files_back	4bc2	Wstecz
+files_band_drives	516c	Dyski
+files_band_removable	742e	Wymienne
 files_bin_cross	da73	Kosz jest na innym dysku: Shift+Delete usuwa na zawsze
 files_bin_emptied	15da	Kosz jest pusty
 files_binned	4b0f	Przeniesiono %d do kosza: Ctrl+Z je przywraca
@@ -82,7 +85,6 @@ files_device_eject	ea96	Wysuń
 files_device_live	b607	Sesja live nie otwiera dysków
 files_device_nothing	c005	Nie ma czego otworzyć
 files_device_write	7442	Zezwól na zapis
-files_devices	f320	Urządzenia
 files_disc_audio	f664	Płyta audio
 files_disc_none	c5a3	Brak płyty
 files_disc_play	6c28	Odtwórz płytę

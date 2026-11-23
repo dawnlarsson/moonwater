@@ -12,6 +12,7 @@
 # machine-made 2026-11-23 (a row menu's copy of one column), not yet read by a person: menu_copy_named
 # machine-made 2026-11-23 (Waterlink's grants as columns, and a remove asked on its row), not yet read by a person: settings_column_files settings_column_log settings_column_run settings_column_shell settings_remove_again
 # machine-made 2026-11-23 (the CD drive and the flat Devices of Files), not yet read by a person: files_device_nothing files_disc_audio files_disc_none files_disc_play
+# machine-made 2026-11-23 (the bands of a machine in Files' sidebar), not yet read by a person: files_band_drives files_band_removable
 @language nl
 @name Nederlands
 @translated machine
@@ -54,6 +55,8 @@ editor_write_beside	ec75	kon niet naast het bestand schrijven
 editor_writes_over_changed	df15	overschrijft de wijziging op schijf (Ctrl+R leest opnieuw)
 editor_writes_over_readonly	e22f	overschrijft een alleen-lezen bestand
 files_back	4bc2	Terug
+files_band_drives	516c	Stations
+files_band_removable	742e	Verwisselbaar
 files_bin_cross	da73	De prullenbak staat op een andere schijf: Shift+Delete verwijdert het voorgoed
 files_bin_emptied	15da	De prullenbak is leeg
 files_binned	4b0f	%d naar de prullenbak: Ctrl+Z zet ze terug
@@ -82,7 +85,6 @@ files_device_eject	ea96	Uitwerpen
 files_device_live	b607	Een livesessie opent geen schijven
 files_device_nothing	c005	Niets om te openen
 files_device_write	7442	Schrijven toestaan
-files_devices	f320	Apparaten
 files_disc_audio	f664	Audio-cd
 files_disc_none	c5a3	Geen schijf
 files_disc_play	6c28	Schijf afspelen

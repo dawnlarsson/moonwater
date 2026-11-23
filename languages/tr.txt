@@ -12,6 +12,7 @@
 # machine-made 2026-11-23 (a row menu's copy of one column), not yet read by a person: menu_copy_named
 # machine-made 2026-11-23 (Waterlink's grants as columns, and a remove asked on its row), not yet read by a person: settings_column_files settings_column_log settings_column_run settings_column_shell settings_remove_again
 # machine-made 2026-11-23 (the CD drive and the flat Devices of Files), not yet read by a person: files_device_nothing files_disc_audio files_disc_none files_disc_play
+# machine-made 2026-11-23 (the bands of a machine in Files' sidebar), not yet read by a person: files_band_drives files_band_removable
 @language tr
 @name Türkçe
 @translated machine
@@ -54,6 +55,8 @@ editor_write_beside	ec75	dosyanın yanına yazılamadı
 editor_writes_over_changed	df15	diskteki değişikliğin üzerine yazar (Ctrl+R yeniden okur)
 editor_writes_over_readonly	e22f	salt okunur bir dosyanın üzerine yazar
 files_back	4bc2	Geri
+files_band_drives	516c	Sürücüler
+files_band_removable	742e	Çıkarılabilir
 files_bin_cross	da73	Çöp kutusu başka bir diskte: Shift+Delete kalıcı olarak siler
 files_bin_emptied	15da	Çöp kutusu boş
 files_binned	4b0f	%d öğe çöp kutusuna taşındı: Ctrl+Z geri getirir
@@ -82,7 +85,6 @@ files_device_eject	ea96	Çıkar
 files_device_live	b607	Canlı oturum hiçbir sürücüyü açmaz
 files_device_nothing	c005	Açılacak bir şey yok
 files_device_write	7442	Yazmaya izin ver
-files_devices	f320	Aygıtlar
 files_disc_audio	f664	Ses CD'si
 files_disc_none	c5a3	Disk yok
 files_disc_play	6c28	Diski çal

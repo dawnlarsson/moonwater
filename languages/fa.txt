@@ -13,6 +13,7 @@
 # machine-made 2026-11-23 (a row menu's copy of one column), not yet read by a person: menu_copy_named
 # machine-made 2026-11-23 (Waterlink's grants as columns, and a remove asked on its row), not yet read by a person: settings_column_files settings_column_log settings_column_run settings_column_shell settings_remove_again
 # machine-made 2026-11-23 (the CD drive and the flat Devices of Files), not yet read by a person: files_device_nothing files_disc_audio files_disc_none files_disc_play
+# machine-made 2026-11-23 (the bands of a machine in Files' sidebar), not yet read by a person: files_band_drives files_band_removable
 @language fa
 @name فارسی
 @translated machine
@@ -55,6 +56,8 @@ editor_write_beside	ec75	نوشتن در کنار پرونده ممکن نشد
 editor_writes_over_changed	df15	تغییر دیسک را بازنویسی می‌کند
 editor_writes_over_readonly	e22f	فقط‌خواندنی را بازنویسی می‌کند
 files_back	4bc2	عقب
+files_band_drives	516c	درایوها
+files_band_removable	742e	جداشدنی
 files_bin_cross	da73	سطل بازیافت روی دیسک دیگری است: Shift+Delete آن را برای همیشه پاک می‌کند
 files_bin_emptied	15da	سطل بازیافت خالی است
 files_binned	4b0f	%d به سطل بازیافت رفت: Ctrl+Z آن‌ها را برمی‌گرداند
@@ -83,7 +86,6 @@ files_device_eject	ea96	بیرون دادن
 files_device_live	b607	جلسهٔ زنده هیچ درایوی را باز نمی‌کند
 files_device_nothing	c005	چیزی برای باز کردن نیست
 files_device_write	7442	اجازهٔ نوشتن
-files_devices	f320	دستگاه‌ها
 files_disc_audio	f664	سی‌دی صوتی
 files_disc_none	c5a3	دیسکی نیست
 files_disc_play	6c28	پخش دیسک

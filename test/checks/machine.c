@@ -4318,20 +4318,21 @@ static fn browser_tree(void)
                 browser_path(home, (string_address) "tr");
                 browser_path(sub_path, (string_address) "tr/a");
                 files_tree_populate(&tree, home, (const p8 address_to)mountinfo, sizeof(mountinfo) - 1);
-                // Expected: This Machine, and under it Home, Downloads, Pictures, /, usb, My Drive (six roots, all collapsed).
-                roots_ok = tree.count == 7 && tree.node[0].kind == FILES_NODE_MACHINE && tree.node[0].machine == 0 && tree.node[0].open &&
+                // Expected: This Machine, and under it Home, Downloads, Pictures, the Drives band, /, usb, My Drive (all collapsed).
+                roots_ok = tree.count == 8 && tree.node[0].kind == FILES_NODE_MACHINE && tree.node[0].machine == 0 && tree.node[0].open &&
                            tree.node[1].kind == FILES_NODE_PLACE && tree.node[1].place == FILES_PLACE_HOME && !tree.node[1].open && tree.node[1].depth == 1 &&
                            tree.node[2].kind == FILES_NODE_PLACE && tree.node[2].place == FILES_PLACE_DOWNLOADS &&
                            tree.node[3].kind == FILES_NODE_PLACE && tree.node[3].place == FILES_PLACE_PICTURES &&
-                           tree.node[4].kind == FILES_NODE_DRIVE && tree.node[4].place == FILES_PLACE_ROOT && !tree.node[4].open &&
-                           tree.node[5].kind == FILES_NODE_DRIVE && string_equals((string_address)files_tree_name(&tree, 5), (string_address) "usb") &&
-                           tree.node[6].kind == FILES_NODE_DRIVE && string_equals((string_address)files_tree_name(&tree, 6), (string_address) "My Drive") &&
-                           files_tree_path(&tree, 6, made) && string_equals((string_address)made, (string_address) "/run/media/u/My Drive");
+                           tree.node[4].kind == FILES_NODE_BAND && tree.node[4].place == FILES_BAND_DRIVES && tree.node[4].depth == 1 &&
+                           tree.node[5].kind == FILES_NODE_DRIVE && tree.node[5].place == FILES_PLACE_ROOT && !tree.node[5].open &&
+                           tree.node[6].kind == FILES_NODE_DRIVE && string_equals((string_address)files_tree_name(&tree, 6), (string_address) "usb") &&
+                           tree.node[7].kind == FILES_NODE_DRIVE && string_equals((string_address)files_tree_name(&tree, 7), (string_address) "My Drive") &&
+                           files_tree_path(&tree, 7, made) && string_equals((string_address)made, (string_address) "/run/media/u/My Drive");
                 hnode = files_tree_reveal(&tree, home);
                 dnode = files_tree_find(&tree, (const p8 address_to) "/");
-                reveal_ok = hnode == 1 && !tree.node[1].open && dnode == 4 && !tree.node[4].open;
+                reveal_ok = hnode == 1 && !tree.node[1].open && dnode == 5 && !tree.node[5].open && !files_tree_path(&tree, 4, made);
                 snode = files_tree_reveal(&tree, sub_path);
-                reveal_ok = reveal_ok && snode != FILES_NO && tree.node[1].open && !tree.node[4].open &&
+                reveal_ok = reveal_ok && snode != FILES_NO && tree.node[1].open && !tree.node[6].open &&
                             files_tree_path(&tree, snode, made) && string_equals((string_address)made, (string_address)sub_path);
                 files_tree_shut(&tree, 1);
                 find_ok = files_tree_find(&tree, sub_path) == FILES_NO && !tree.node[1].open && files_tree_find(&tree, home) == 1;
@@ -4358,8 +4359,8 @@ static fn browser_tree(void)
                         for (p32 k = 0; k < probe.count; k++)
                                 homes_c += probe.node[k].kind == FILES_NODE_PLACE && probe.node[k].place == FILES_PLACE_HOME && probe.node[k].depth == 1 && probe.node[k].machine == 0;
                         files_tree_add_machine(&probe, (const p8 address_to) "peer2", 2, FILES_NODE_ONLINE, false);
-                        dropped = files_tree_drop_machine(&probe, 1) && probe.count == 6 && probe.node[5].kind == FILES_NODE_MACHINE &&
-                                  probe.node[5].machine == 2 && !files_tree_drop_machine(&probe, 1) && !files_tree_drop_machine(&probe, 0);
+                        dropped = files_tree_drop_machine(&probe, 1) && probe.count == 7 && probe.node[6].kind == FILES_NODE_MACHINE &&
+                                  probe.node[6].machine == 2 && !files_tree_drop_machine(&probe, 1) && !files_tree_drop_machine(&probe, 0);
                         files_tree_end(&probe);
                 }
                 check("browser: the sidebar lists the Home place once after a rebuild, with or without a remote machine",
@@ -4484,8 +4485,10 @@ static fn browser_media(void)
                 p32 g;
                 tree.devices = &devices;
                 files_tree_populate(&tree, (const p8 address_to) "/home/u", null, 0);
-                g = files_tree_after(&tree, 0);
-                rows = g + 7 == tree.count && tree.node[g].has == 6 &&
+                // This machine's Removable band, its rows after its caption (every disk of the list is outside).
+                g = 6;
+                rows = tree.count == 13 && files_tree_after(&tree, 0) == 13 && tree.node[g].kind == FILES_NODE_BAND && tree.node[g].place == FILES_BAND_REMOVABLE &&
+                       tree.node[4].kind == FILES_NODE_BAND && tree.node[4].place == FILES_BAND_DRIVES && tree.node[5].place == FILES_PLACE_ROOT &&
                        tree.node[g + 1].kind == FILES_NODE_PART && tree.node[g + 1].device == 0 && string_equals((string_address)files_tree_name(&tree, g + 1), (string_address) "PHOTOS 2009") &&
                        tree.node[g + 2].kind == FILES_NODE_PART && tree.node[g + 2].device == 1 &&
                        tree.node[g + 3].kind == FILES_NODE_DISK && tree.node[g + 3].device == 2 &&
@@ -4501,24 +4504,177 @@ static fn browser_media(void)
                                                                         "SanDisk Ultra \xc2\xb7 sdb2", "sdc"};
                         static const char address_to const notes[7] = {null, "iso9660", "10:00", "No disc", "exfat", "ext4", "Nothing to open"};
                         static const unsigned int symbols[7] = {0, UI_FILE_DISC, UI_FILE_DISC, UI_FILE_DISC, UI_FILE_STICK, UI_FILE_STICK, UI_FILE_STICK};
-                        static const b8 quiet[7] = {0, 0, 0, 1, 0, 0, 1};
+                        static const b8 quiet[7] = {0, 0, 0, 1, 0, 0, 1}, ejects[7] = {0, 1, 1, 0, 0, 0, 0};
                         words = rows;
                         for (p32 k = 1; k <= 6 && words; k++)
                         {
                                 memory_zero(&row, sizeof(row)), files_tree_describe((int)(g + k), &row);
                                 words = row.file == 1 + symbols[k] && string_equals((string_address)row.label, (string_address)labels[k]) && (b8)row.dim == quiet[k] &&
-                                        (notes[k] ? row.note && string_equals((string_address)row.note, (string_address)notes[k]) : !row.note) && (k != 2 || row.value);
+                                        (notes[k] ? row.note && string_equals((string_address)row.note, (string_address)notes[k]) : !row.note) && (k != 2 || row.value) &&
+                                        (b8)row.remove == ejects[k] && (!row.remove || row.remove_icon == 1 + UI_ICON_EJECT);
                                 if (!words)
                                         string_format(log, "  browser: the medium row %p said %s (%s), symbol %p\n", (positive)k, row.label ? row.label : "-", row.note ? row.note : "-", (positive)row.file);
                         }
                 }
                 memory_zero(&files.big->tree, sizeof(files.big->tree)), files_tree_end(&tree);
         }
-        check("browser: a row a medium, outside first: a data disc by its label, a CD of music's folder, a drive with no disc, a stick's two file systems named with it (no swap), a card with nothing that opens", rows);
-        check("browser: a medium's row says what it is: the disc's symbol for a drive's (Audio CD and its length, No disc quiet), the stick's for a stick's, Nothing to open quiet", words);
+        check("browser: the Removable band is a row a medium: a data disc by its label, a CD of music's folder, a drive with no disc, a stick's two file systems named with it (no swap), a card with nothing that opens", rows);
+        check("browser: a medium's row says what it is: the disc's symbol for a drive's (Audio CD and its length, No disc quiet), the stick's for a stick's, Nothing to open quiet; a disc's has the eject's button", words);
         files_disc_time(time, sizeof(time), 65), files_disc_time(hours, sizeof(hours), 3725);
         check("browser: a CD's length is said as a player says it: 1:05, 1:02:05",
               string_equals((string_address)time, (string_address) "1:05") && string_equals((string_address)hours, (string_address) "1:02:05"));
+}
+
+/*
+        The box's own census (two NVMe disks: nvme0n1 the boot partition and the data partition the home is on, nvme1n1 eleven of
+        another system's, several opened at /run/media/root), with a stick and a CD of music plugged in, its mount table (a network
+        mount besides), and two linked machines, one online with its INFO: the machine hierarchy (files_tree_machine_rows,
+        files_tree_set_machine_children, files_tree_order_machines) and what its rows say (files_tree_describe).
+*/
+static fn browser_box(void)
+{
+        static struct files_devices devices;
+        static struct files_tree tree;
+        static const char list[] =
+            "  1-7 usb 1462:7d67 MYSTIC LIGHT  blocked\n"
+            "  1-2 usb 0781:5581 SanDisk Ultra allowed\n"
+            "    drive sdb 31000 MB\n"
+            "    part 1048576 30000000000 other - fs exfat MY_STICK sdb1\n"
+            "  nvme0n1 drive 2000398 MB view only\n"
+            "    part 0 1048576 free -\n"
+            "    part 1048576 536870912 other moonwater-boot fs vfat MOONWATER nvme0n1p1\n"
+            "    part 537919488 1999860924416 other moonwater-data fs ext4 moonwater nvme0n1p2\n"
+            "    part 2000398843904 90112 free -\n"
+            "    model KINGSTON_SFYRD2000G\n"
+            "    where internal nvme\n"
+            "  nvme1n1 drive 2048408 MB view only\n"
+            "    part 0 1048576 free -\n"
+            "    part 1048576 67108864 other esp fs vfat esp nvme1n1p1\n"
+            "    part 68157440 134217728 other efi-A fs vfat efi nvme1n1p2\n"
+            "    part 202375168 134217728 other efi-B fs vfat efi nvme1n1p3\n"
+            "    part 336592896 5368709120 other rootfs-A fs btrfs rootfs nvme1n1p4\n"
+            "    part 5705302016 5368709120 other rootfs-B fs btrfs rootfs nvme1n1p5\n"
+            "    part 11074011136 268435456 other var-A fs ext4 var nvme1n1p6\n"
+            "    part 11342446592 268435456 other var-B fs ext4 var nvme1n1p7\n"
+            "    part 11610882048 536870912000 other home fs ext4 home nvme1n1p8\n"
+            "    part 548481794048 1073741824 other bazzite-esp fs vfat BZESP nvme1n1p9\n"
+            "    part 549555535872 536870912000 other bazzite fs btrfs bazzite nvme1n1p10\n"
+            "    part 1086426447872 68719476736 other scratch fs btrfs rootfs nvme1n1p11\n"
+            "    part 1155145924608 893262323712 free -\n"
+            "    model KINGSTON_SKC3000D2048G\n"
+            "    where internal nvme\n"
+            "  sr0 drive 700 MB view only\n"
+            "    part 0 105840132 unpartitioned - fs cdda - sr0\n"
+            "    disc audio 12 4452\n"
+            "    where external ata\n";
+        static const char mounts[] =
+            "2 1 0:3 / / rw - rootfs rootfs rw\n"
+            "30 2 259:3 / /run/moonwater/data rw,nodev,noatime - ext4 /dev/nvme0n1p2 rw\n"
+            "31 2 259:3 /bowls /bowls rw,nodev,noatime - ext4 /dev/nvme0n1p2 rw\n"
+            "32 2 259:3 /root /root rw,nodev,noatime - ext4 /dev/nvme0n1p2 rw\n"
+            "33 2 259:3 /home /home rw,nodev,noatime - ext4 /dev/nvme0n1p2 rw\n"
+            "34 2 259:4 / /run/media/root/esp ro,nosuid,nodev,noexec - vfat /dev/nvme1n1p1 ro\n"
+            "36 2 0:26 / /run/media/root/rootfs ro,nosuid,nodev,noexec - btrfs /dev/nvme1n1p4 ro\n"
+            "35 2 259:12 / /run/media/root/BZESP ro,nosuid,nodev,noexec - vfat /dev/nvme1n1p9 ro\n"
+            "37 2 259:5 / /run/media/root/efi ro,nosuid,nodev,noexec - vfat /dev/nvme1n1p2 ro\n"
+            "38 2 259:9 / /run/media/root/var ro,nosuid,nodev,noexec - ext4 /dev/nvme1n1p6 ro\n"
+            "40 2 0:28 / /run/media/root/bazzite ro,nosuid,nodev,noexec - btrfs /dev/nvme1n1p10 ro\n"
+            "41 2 0:30 / /mnt/share rw - nfs4 server:/share rw\n";
+        static const char peer_mounts[] = "21 1 8:2 / / rw - ext4 /dev/sda2 rw\n22 21 8:3 / /home rw - ext4 /dev/sda3 rw\n"
+                                          "23 21 8:17 / /mnt/backup rw - ext4 /dev/sdb1 rw\n24 21 8:33 / /run/media/b/STICK ro - vfat /dev/sdc1 ro\n";
+        static const char again[] = "  sr9 drive 0 MB view only\n    disc none\n";
+        static const char address_to const folded[11] = {"esp", "efi-A", "efi-B", "rootfs-A", "rootfs-B", "var-A", "var-B", "home", "BZESP", "bazzite", "scratch"};
+        static char longer[sizeof(list) + sizeof(again)];
+        long mapped = ui_map(sizeof(struct files_big));
+        const p8 address_to home = (const p8 address_to) "/root";
+        b32 bands = false, disk, fold, kept, opened, peer, order, said = false;
+        struct ui_row row;
+        p32 b, a, y;
+
+        memory_zero(&devices, sizeof(devices));
+        if (!files_devices_read(&devices, (const p8 address_to)list, sizeof(list) - 1) || !files_tree_begin(&tree) || (mapped < 0 && mapped > -4096))
+        {
+                check("browser: the box's census is read and the tree begun", false);
+                return;
+        }
+        tree.devices = &devices;
+        files_tree_populate(&tree, home, (const p8 address_to)mounts, sizeof(mounts) - 1);
+        // Home, Downloads, Pictures; Drives: System, the second disk one row that folds (the first's partitions are its boot one and the
+        // home's), the network mount by its folder; Removable: the stick, the CD.
+        bands = tree.count == 11 && tree.node[4].kind == FILES_NODE_BAND && tree.node[4].place == FILES_BAND_DRIVES && tree.node[5].place == FILES_PLACE_ROOT &&
+                tree.node[6].kind == FILES_NODE_DISK && tree.node[6].device == 2 && !tree.node[6].open && tree.node[6].depth == 1 &&
+                string_equals((string_address)files_tree_name(&tree, 6), (string_address) "KINGSTON SKC3000D2048G") &&
+                tree.node[7].kind == FILES_NODE_DRIVE && string_equals((string_address)files_tree_name(&tree, 7), (string_address) "share") &&
+                tree.node[8].kind == FILES_NODE_BAND && tree.node[8].place == FILES_BAND_REMOVABLE &&
+                tree.node[9].kind == FILES_NODE_PART && string_equals((string_address)files_tree_name(&tree, 9), (string_address) "MY STICK") &&
+                tree.node[10].kind == FILES_NODE_PART && string_equals((string_address)devices.part_type[tree.node[10].device], (string_address) "cdda");
+        check("browser: the box's machine: its places, Drives (System, its second disk one row, a network mount by its folder) and Removable (a stick, a CD); the data partition the home is on, its boot one and the opened partitions no row of their own",
+              bands);
+        if (!bands)
+                for (p32 k = 0; k < tree.count; k++)
+                        string_format(log, "  browser: box row %p kind %p depth %p %s\n", (positive)k, (positive)tree.node[k].kind, (positive)tree.node[k].depth,
+                                      (string_address)files_tree_name(&tree, k));
+        disk = devices.disk_count[1] == 2 && devices.part_home[2] && !devices.part_home[1] && files_part_boot(&devices, 1) && files_part_boot(&devices, 3) &&
+               files_part_boot(&devices, 11) && files_part_boot(&devices, 4) && !files_part_boot(&devices, 6) && !files_part_boot(&devices, 0);
+        check("browser: a partition a mount of which holds the home is the home's (all its mounts with it), and a FAT partition named esp, efi-*, moonwater-boot or *-esp is one a machine boots from",
+              disk);
+        files_disk_fold(&devices, 2, true);
+        (void)files_tree_load(&tree, home, (const p8 address_to)mounts, sizeof(mounts) - 1, true);
+        fold = tree.node[6].kind == FILES_NODE_DISK && tree.node[6].open && tree.node[6].has == 11 && files_tree_after(&tree, 6) == 18;
+        for (p32 k = 0; fold && k < 11; k++)
+                fold = tree.node[7 + k].kind == FILES_NODE_PART && tree.node[7 + k].depth == 2 && string_equals((string_address)files_tree_name(&tree, 7 + k), (string_address)folded[k]);
+        opened = fold && files_tree_reveal(&tree, (const p8 address_to) "/run/media/root/rootfs/etc") == 10 && files_tree_find(&tree, (const p8 address_to) "/run/media/root/var") == 12 &&
+                 files_part_mount(&devices, tree.node[10].device);
+        check("browser: a disk of several file systems folds one level to each (its boot partitions among them), by its label, or its name where another has the same label",
+              fold);
+        check("browser: a partition opened is its row in its disk's fold (a path on it shown there), never a drive besides", opened);
+        string_copy_bounded((string_address)longer, (string_address)list, sizeof(longer));
+        string_append_bounded((string_address)longer, (string_address)again, sizeof(longer));
+        kept = files_devices_read(&devices, (const p8 address_to)longer, string_length((string_address)longer)) &&
+               files_tree_load(&tree, home, (const p8 address_to)mounts, sizeof(mounts) - 1, false) && tree.node[6].open && files_tree_after(&tree, 6) == 18;
+        files_disk_fold(&devices, 2, false), (void)files_tree_load(&tree, home, (const p8 address_to)mounts, sizeof(mounts) - 1, true);
+        kept = kept && !tree.node[6].open && tree.node[7].kind == FILES_NODE_DRIVE && files_tree_reveal(&tree, (const p8 address_to) "/run/media/root/rootfs/etc") == 6;
+        check("browser: a disk's fold stays as it was when the list is read anew, and shut, a path on it is shown at the disk's row", kept);
+        b = files_tree_after(&tree, 0);
+        files_tree_add_machine(&tree, (const p8 address_to) "young-bridge", 2, 0, false);
+        files_tree_add_machine(&tree, (const p8 address_to) "bubbly-acorn", 1, FILES_NODE_ONLINE | FILES_NODE_MAY_FILES, false);
+        a = files_tree_after(&tree, b);
+        (void)files_tree_set_machine_children(&tree, a, (const p8 address_to) "/home/b", 3, (const p8 address_to)peer_mounts, sizeof(peer_mounts) - 1);
+        peer = tree.node[a].kind == FILES_NODE_MACHINE && tree.node[a].machine == 1 && tree.node[a].open &&
+               tree.node[a + 4].kind == FILES_NODE_BAND && tree.node[a + 4].place == FILES_BAND_DRIVES && tree.node[a + 4].machine == 1 &&
+               tree.node[a + 5].place == FILES_PLACE_ROOT && string_equals((string_address)files_tree_name(&tree, a + 6), (string_address) "backup") &&
+               !(tree.node[a + 6].flags & FILES_NODE_OUTSIDE) && tree.node[a + 7].kind == FILES_NODE_BAND && tree.node[a + 7].place == FILES_BAND_REMOVABLE &&
+               string_equals((string_address)files_tree_name(&tree, a + 8), (string_address) "STICK") && (tree.node[a + 8].flags & FILES_NODE_OUTSIDE) &&
+               files_tree_after(&tree, a) == a + 9;
+        check("browser: a linked machine's rows are in the same bands: its places, Drives (System, its mounts but the home's) and Removable (its mounts under /run/media)", peer);
+        order = files_tree_order_machines(&tree) && tree.node[b].kind == FILES_NODE_MACHINE && tree.node[b].machine == 1 &&
+                (y = files_tree_after(&tree, b)) < tree.count && tree.node[y].machine == 2 && files_tree_after(&tree, y) == tree.count && !files_tree_order_machines(&tree);
+        check("browser: the linked machines are after this one, those online first, each with its rows", order);
+        files.big = (struct files_big address_to)mapped;
+        memory_copy(&files.big->devices, &devices, sizeof(devices)), memory_copy(&files.big->tree, &tree, sizeof(tree));
+        files.big->tree.devices = &files.big->devices;
+        memory_zero(&row, sizeof(row)), files_tree_describe(0, &row);
+        said = string_equals((string_address)row.label, (string_address) "This Machine") && row.file == 1 + UI_FILE_MACHINE && row.expander;
+        memory_zero(&row, sizeof(row)), files_tree_describe(4, &row);
+        said = said && row.kind == UI_ROW_CAPTION && string_equals((string_address)row.label, (string_address) "Drives") && !row.file;
+        memory_zero(&row, sizeof(row)), files_tree_describe(5, &row);
+        said = said && string_equals((string_address)row.label, (string_address) "System") && row.note && string_equals((string_address)row.note, (string_address) "/");
+        memory_zero(&row, sizeof(row)), files_tree_describe(6, &row);
+        said = said && string_equals((string_address)row.label, (string_address) "KINGSTON SKC3000D2048G") && row.file == 1 + UI_FILE_DRIVE && row.value &&
+               row.expander == UI_ROW_EXPANDER_SHUT;
+        memory_zero(&row, sizeof(row)), files_tree_describe(8, &row);
+        said = said && row.kind == UI_ROW_CAPTION && string_equals((string_address)row.label, (string_address) "Removable");
+        b = files_tree_after(&tree, 0), y = files_tree_after(&tree, b);
+        memory_zero(&row, sizeof(row)), files_tree_describe((int)b, &row);
+        said = said && row.note && string_equals((string_address)row.note, (string_address) "Online") && !row.dim && row.mark && row.file == 1 + UI_FILE_MACHINE;
+        memory_zero(&row, sizeof(row)), files_tree_describe((int)(b + 8), &row);
+        said = said && row.file == 1 + UI_FILE_STICK;
+        memory_zero(&row, sizeof(row)), files_tree_describe((int)y, &row);
+        said = said && row.note && string_equals((string_address)row.note, (string_address) "Offline") && row.dim && !row.mark;
+        memory_zero(&files.big->tree, sizeof(files.big->tree));
+        check("browser: the rows say what they are: a machine its computer, a band a caption (Drives, Removable), System its path, a disk its name, a linked machine Online or Offline (quiet), its stick a stick",
+              said);
+        files_tree_end(&tree);
 }
 
 static fn browser_devices(void)
@@ -4602,27 +4758,26 @@ static fn browser_devices(void)
                 files_tree_add_machine(&tree, (const p8 address_to) "peer", 1, FILES_NODE_ONLINE, false);
                 files_tree_populate(&tree, (const p8 address_to) "/home/u", (const p8 address_to)mounts, sizeof(mounts) - 1);
                 group = files_tree_after(&tree, 0);
-                // Outside first, each a row of its own at the group's depth: the stick (its label), the card (its label); then the
-                // machine's disk, whose EFI partition opens nothing and whose one file system is the disk's name.
-                rows = group + 4 < tree.count && tree.node[group].kind == FILES_NODE_DEVICES && tree.node[group].depth == 0 && tree.node[group].open &&
-                       tree.node[group].has == 3 &&
-                       tree.node[group + 1].kind == FILES_NODE_PART && tree.node[group + 1].device == 2 && tree.node[group + 1].depth == 1 &&
-                       string_equals((string_address)files_tree_name(&tree, group + 1), (string_address) "MY STICK") && !(tree.node[group + 1].flags & FILES_NODE_SEVERAL) &&
-                       tree.node[group + 2].kind == FILES_NODE_PART && tree.node[group + 2].device == 3 && tree.node[group + 2].depth == 1 &&
-                       string_equals((string_address)files_tree_name(&tree, group + 2), (string_address) "CARD") &&
-                       tree.node[group + 3].kind == FILES_NODE_PART && tree.node[group + 3].device == 1 && tree.node[group + 3].depth == 1 &&
-                       string_equals((string_address)files_tree_name(&tree, group + 3), (string_address) "nvme0n1") &&
-                       tree.node[group + 4].kind == FILES_NODE_MACHINE && tree.node[group + 4].machine == 1;
+                // This machine's rows: its places, Drives (System alone: the disk's EFI partition opens nothing, its other is the root,
+                // which System is), Removable (the stick, its label, then the card, its label); then the linked machine.
+                rows = group == 9 && tree.node[4].kind == FILES_NODE_BAND && tree.node[4].place == FILES_BAND_DRIVES && tree.node[5].place == FILES_PLACE_ROOT &&
+                       tree.node[6].kind == FILES_NODE_BAND && tree.node[6].place == FILES_BAND_REMOVABLE &&
+                       tree.node[7].kind == FILES_NODE_PART && tree.node[7].device == 2 && tree.node[7].depth == 1 &&
+                       string_equals((string_address)files_tree_name(&tree, 7), (string_address) "MY STICK") && !(tree.node[7].flags & FILES_NODE_SEVERAL) &&
+                       tree.node[8].kind == FILES_NODE_PART && tree.node[8].device == 3 && tree.node[8].depth == 1 &&
+                       string_equals((string_address)files_tree_name(&tree, 8), (string_address) "CARD") &&
+                       tree.node[9].kind == FILES_NODE_MACHINE && tree.node[9].machine == 1;
                 for (p32 k = 1; k < group; k++)
                         one = one && !(tree.node[k].kind == FILES_NODE_DRIVE && string_equals((string_address)files_tree_name(&tree, k), (string_address) "MY STICK"));
                 stick = files_tree_reveal(&tree, (const p8 address_to) "/run/media/root/MY STICK/a");
-                one = one && group == 5 && stick == group + 1 && files_tree_find(&tree, (const p8 address_to) "/run/media/root/MY STICK") == group + 1 && !tree.node[4].open;
-                pathless = !files_tree_path(&tree, group, path) && !files_tree_path(&tree, group + 1, path) && !files_tree_open(&tree, group + 1);
-                devices.shut = 1, (void)files_tree_devices(&tree);
-                shut = tree.node[group].kind == FILES_NODE_DEVICES && !tree.node[group].open && tree.node[group + 1].kind == FILES_NODE_MACHINE;
-                devices.disks = 0, (void)files_tree_devices(&tree);
-                shut = shut && tree.node[group].kind == FILES_NODE_MACHINE && tree.count == group + 1;
-                check("browser: a stick opened is one row, its Devices row: This Machine has no drive of its mount, and a path on it is shown at that row with / left shut", one);
+                one = one && stick == 7 && files_tree_find(&tree, (const p8 address_to) "/run/media/root/MY STICK") == 7 && !tree.node[5].open;
+                pathless = !files_tree_path(&tree, 6, path) && !files_tree_path(&tree, 7, path) && !files_tree_open(&tree, 7);
+                devices.disks = devices.parts = 0, devices.stale = true;
+                (void)files_tree_load(&tree, (const p8 address_to) "/home/u", (const p8 address_to)mounts, sizeof(mounts) - 1, false);
+                // The table empty, the stick's mount is no partition it knows: a drive by its folder's name in Drives, and no Removable band.
+                shut = files_tree_after(&tree, 0) == 7 && tree.node[5].place == FILES_PLACE_ROOT && tree.node[6].kind == FILES_NODE_DRIVE &&
+                       string_equals((string_address)files_tree_name(&tree, 6), (string_address) "MY STICK") && tree.node[7].kind == FILES_NODE_MACHINE;
+                check("browser: a stick opened is one row, its row in Removable: This Machine has no drive of its mount, and a path on it is shown at that row with / left shut", one);
                 files_tree_end(&tree);
         }
         {
@@ -4650,11 +4805,12 @@ static fn browser_devices(void)
                 check("browser: a block device's uevent is heard (another subsystem's is not) and makes the list due with no look and before its time",
                       quiet && heard && due);
         }
-        check("browser: the Devices group is after This Machine's rows and before a peer, flat: a row a file system that opens, the stick and the card first, an EFI partition none",
+        check("browser: the top is machines alone: under this one its places, Drives (System, an EFI partition and the root no row) and Removable (the stick and the card), then the linked machine",
               rows);
-        check("browser: a device's row has no path and is no folder to open", pathless);
-        check("browser: the group shut has no rows under it, and with no disk there is no group", shut);
+        check("browser: a band and a device's row have no path and are no folder to open", pathless);
+        check("browser: with nothing the table knows plugged in there is no Removable band, and a mount of no partition it knows is a drive in Drives", shut);
         browser_media();
+        browser_box();
 }
 
 static fn browser_asks(void)

@@ -12,6 +12,7 @@
 # machine-made 2026-11-23 (a row menu's copy of one column), not yet read by a person: menu_copy_named
 # machine-made 2026-11-23 (Waterlink's grants as columns, and a remove asked on its row), not yet read by a person: settings_column_files settings_column_log settings_column_run settings_column_shell settings_remove_again
 # machine-made 2026-11-23 (the CD drive and the flat Devices of Files), not yet read by a person: files_device_nothing files_disc_audio files_disc_none files_disc_play
+# machine-made 2026-11-23 (the bands of a machine in Files' sidebar), not yet read by a person: files_band_drives files_band_removable
 @language pt
 @name Português
 @translated machine
@@ -54,6 +55,8 @@ editor_write_beside	ec75	não foi possível gravar ao lado do arquivo
 editor_writes_over_changed	df15	sobrescreve a alteração no disco (Ctrl+R lê de novo)
 editor_writes_over_readonly	e22f	sobrescreve um arquivo somente leitura
 files_back	4bc2	Voltar
+files_band_drives	516c	Unidades
+files_band_removable	742e	Amovíveis
 files_bin_cross	da73	A lixeira está noutro disco: Shift+Delete apaga-o de vez
 files_bin_emptied	15da	A lixeira está vazia
 files_binned	4b0f	%d movidos para a lixeira: Ctrl+Z devolve-os
@@ -82,7 +85,6 @@ files_device_eject	ea96	Ejetar
 files_device_live	b607	Uma sessão live não abre unidades
 files_device_nothing	c005	Nada para abrir
 files_device_write	7442	Permitir gravação
-files_devices	f320	Dispositivos
 files_disc_audio	f664	CD de áudio
 files_disc_none	c5a3	Sem disco
 files_disc_play	6c28	Reproduzir disco

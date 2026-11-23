@@ -28,7 +28,6 @@
 #define FILES_TILE_LIST 232
 #define FILES_WALL_SCREENS 8
 #define FILES_SHEET_LINES 10
-#define FILES_GROUP_GAP 14 // logical px of space above the first row of a sidebar group (in place of a divider line)
 #define FILES_DEEDS 32
 #define FILES_DROP_MOST (FILES_MOVE_MOST * FILES_PATH / 4)
 #define FILES_CLIP_CUT "application/x-moonwater-cut"
@@ -321,10 +320,12 @@ static fn files_disc_time(char address_to into, positive room, p32 seconds)
 }
 
 /*
-        A row of the Devices group: the group (the word Settings' group of devices has); a file system that opens (its label, or its disk's
-        name; its disk's name before it where the disk has more than one; its file system's type and its size, a dot where it is mounted);
-        or a disk or a drive with no file system that opens: a drive with no disc in it, and a disk with nothing on it that opens, which
-        are quiet. A CD of music is its folder of tracks (cdda): Audio CD, its length, a dot while it is open or plays.
+        A row of a machine's bands that is no place or drive: the band's caption (Drives, Removable: a few quiet words the keys and the
+        hand pass over); a file system that opens (its label, or its disk's name; its disk's name before it where a disk plugged in has
+        more than one; its file system's type and its size, a dot where it is mounted; the eject's button where it may be taken out);
+        a disk inside the machine that folds to its file systems (its name, its size); or a disk or a drive with no file system that
+        opens: a drive with no disc in it, and a disk with nothing on it that opens, which are quiet. A CD of music is its folder of
+        tracks (cdda): Audio CD, its length, a dot while it is open or plays.
 */
 static fn files_device_describe(const struct files_tree address_to t, const struct files_node address_to n, int id, struct ui_row address_to row)
 {
@@ -333,26 +334,33 @@ static fn files_device_describe(const struct files_tree address_to t, const stru
         const p8 address_to name = files_tree_name(t, (p32)id);
         p32 k;
         row->file = 1 + UI_FILE_DRIVE, row->indent = n->depth;
-        if (n->kind == FILES_NODE_DEVICES)
+        if (n->kind == FILES_NODE_BAND)
         {
-                row->label = WORDS(files_devices), row->gap = FILES_GROUP_GAP;
-                row->expander = n->open ? UI_ROW_EXPANDER_OPEN : UI_ROW_EXPANDER_SHUT;
+                row->file = 0, row->kind = UI_ROW_CAPTION, row->indent = n->depth ? n->depth - 1 : 0;
+                row->label = n->place == FILES_BAND_REMOVABLE ? WORDS(files_band_removable) : WORDS(files_band_drives);
                 return;
         }
         ui_label_foreign(label, sizeof(label), name, n->length), row->label = label;
         if (n->kind == FILES_NODE_DISK && n->device < d->disks)
         {
                 k = n->device, row->file = 1 + files_disk_symbol(d, k, false);
+                ui_size_text(size, sizeof(size), d->disk_bytes[k]);
+                if (!files_disk_outside(d, k))
+                {
+                        // A disk of the machine's that folds to its file systems: its name and its size, and the fold's chevron.
+                        row->value = size, row->expander = n->open ? UI_ROW_EXPANDER_OPEN : UI_ROW_EXPANDER_SHUT;
+                        return;
+                }
                 row->note = d->disk_disc[k] == FILES_DISC_NONE || d->disk_disc[k] == FILES_DISC_OPEN ? WORDS(files_disc_none) : WORDS(files_device_nothing);
                 if (!d->disk_disc[k])
-                        ui_size_text(size, sizeof(size), d->disk_bytes[k]), row->value = size;
+                        row->value = size;
                 row->dim = true;
                 return;
         }
         if (n->kind != FILES_NODE_PART || n->device >= d->parts)
                 return;
         k = d->part_disk[n->device];
-        row->file = 1 + files_disk_symbol(d, k, (n->flags & FILES_NODE_SEVERAL) != 0);
+        row->file = 1 + (n->depth > 1 ? UI_FILE_PARTITION : files_disk_symbol(d, k, false));
         if ((n->flags & FILES_NODE_SEVERAL) && k < d->disks)
         {
                 // Its disk's name, then its own: the disk is said once a row, never as a row of its own above them.
@@ -375,8 +383,31 @@ static fn files_device_describe(const struct files_tree address_to t, const stru
                 ui_label_foreign(type, sizeof(type), d->part_type[n->device], string_length((string_address)d->part_type[n->device])), row->note = type;
         if (files_part_mount(d, n->device))
                 row->mark = true, row->mark_ink = ui_role(UI_SUCCESS);
+        // Taken out from its row: what the device verb opened of a disk plugged in, and a disc in its drive (its tray).
+        if (files_disk_outside(d, k) && ((files_device_offers(d, n->device) & FILES_OFFER_EJECT) || d->disk_disc[k]))
+                row->remove = true, row->remove_icon = 1 + UI_ICON_EJECT;
 }
 
+// The machine's own name, as the kernel calls it (moonwater name sets it), read once.
+static const char address_to files_machine_name(void)
+{
+        static char name[72];
+        static b32 read;
+        if (!read)
+        {
+                file_machine machine;
+                read = true, name[0] = 0;
+                if (file_machine_read(&machine))
+                        ui_label_foreign(name, sizeof(name), (const p8 address_to)machine.node, string_length((string_address)machine.node));
+        }
+        return name;
+}
+
+/*
+        A row of the sidebar: a machine (this one, its name its note; a linked one, Online, Offline, or that its files are not granted, and
+        quiet where it is not online or not granted), a place (its folder's symbol), a drive (System is the root, its path its note; a
+        linked machine's of its Removable band a stick's symbol), a folder, or a row of the devices table (files_device_describe).
+*/
 static fn files_tree_describe(int id, struct ui_row address_to row)
 {
         static const struct { unsigned int word, icon; } places[] = {
@@ -389,7 +420,7 @@ static fn files_tree_describe(int id, struct ui_row address_to row)
         unsigned int icon;
         if (!n)
                 return;
-        if (n->kind >= FILES_NODE_DEVICES)
+        if (n->kind >= FILES_NODE_BAND)
         {
                 files_device_describe(t, n, id, row);
                 return;
@@ -397,33 +428,36 @@ static fn files_tree_describe(int id, struct ui_row address_to row)
         if (n->kind == FILES_NODE_MACHINE)
         {
                 if (n->machine == 0)
-                        row->label = language_text(LANGUAGE_files_this_machine);
+                        row->label = language_text(LANGUAGE_files_this_machine), row->note = files_machine_name()[0] ? files_machine_name() : null;
                 else
                 {
                         const p8 address_to name = files_tree_name(t, (p32)id);
+                        b32 online = (n->flags & FILES_NODE_ONLINE) != 0, may = (n->flags & FILES_NODE_MAY_FILES) != 0;
                         ui_label_foreign(label, sizeof(label), name, n->length), row->label = label;
-                        if (n->flags & FILES_NODE_ONLINE)
+                        row->note = !online ? WORDS(settings_link_offline) : !may ? WORDS(files_remote_denied) : WORDS(settings_link_online);
+                        if (online)
                                 row->mark = true, row->mark_ink = ui_role(UI_SUCCESS);
-                        if (!(n->flags & FILES_NODE_ONLINE) || !(n->flags & FILES_NODE_MAY_FILES))
-                                row->dim = true;
+                        row->dim = !online || !may;
                 }
-                icon = UI_FILE_MACHINE;
-                row->indent = n->depth, row->file = 1 + icon;
+                row->indent = n->depth, row->file = 1 + UI_FILE_MACHINE;
                 row->expander = n->open ? UI_ROW_EXPANDER_OPEN : UI_ROW_EXPANDER_SHUT;
-                row->gap = id > 0 && n->machine != 0 ? FILES_GROUP_GAP : 0;
                 return;
         }
         if (n->depth == 1 && n->place > FILES_PLACE_NONE && n->place <= FILES_PLACE_ROOT)
+        {
                 row->label = language_text(places[n->place].word), icon = places[n->place].icon;
+                if (n->place == FILES_PLACE_ROOT)
+                        row->note = "/";
+        }
         else
         {
                 const p8 address_to name = files_tree_name(t, (p32)id);
                 ui_label_foreign(label, sizeof(label), name, n->length), row->label = label;
-                icon = n->kind == FILES_NODE_DRIVE ? UI_FILE_DRIVE : files_tree_trash(name, n->length) ? UI_FILE_TRASH : n->open ? UI_FILE_FOLDER_OPEN : UI_FILE_FOLDER;
+                icon = n->kind == FILES_NODE_DRIVE ? ((n->flags & FILES_NODE_OUTSIDE) ? UI_FILE_STICK : UI_FILE_DRIVE)
+                       : files_tree_trash(name, n->length) ? UI_FILE_TRASH : n->open ? UI_FILE_FOLDER_OPEN : UI_FILE_FOLDER;
         }
         row->indent = n->depth, row->file = 1 + icon;
         row->expander = n->open ? UI_ROW_EXPANDER_OPEN : n->read && !n->has ? 0 : UI_ROW_EXPANDER_SHUT;
-        row->gap = id > 0 && n->kind == FILES_NODE_DRIVE && t->node[id - 1].kind != FILES_NODE_DRIVE && t->node[id - 1].kind != FILES_NODE_MACHINE ? FILES_GROUP_GAP : 0;
 }
 
 static fn files_tree_follow(void)
@@ -2055,11 +2089,18 @@ static fn files_peers_sync(void)
                 if (node == FILES_NO)
                         files_tree_add_machine(t, p->name, p->machine, flags, false);
                 else
+                {
+                        // A machine that went offline is shut, its rows let go of (they are asked for again when it is opened).
+                        if (!online && (t->node[node].flags & FILES_NODE_ONLINE) && t->node[node].open)
+                                files_tree_shut(t, node);
                         t->node[node].flags = (p8)((t->node[node].flags & FILES_NODE_LOADING) | flags);
+                }
         }
         for (p32 k = 0; k < files.big->peer_count; k++)
                 if (files.big->peers[k].used && !kept[k])
                         files_peer_drop(k);
+        if (files_tree_order_machines(t))
+                files_tree_follow(), files.dirty = true;
 }
 
 static fn files_rpc_forget_machine(p8 machine);
@@ -2466,10 +2507,18 @@ static b32 files_tree_go(p32 at)
         const struct files_tree address_to t = &files.big->tree;
         if (at >= t->count)
                 return false;
-        if (t->node[at].kind == FILES_NODE_MACHINE || t->node[at].kind == FILES_NODE_DEVICES)
+        if (t->node[at].kind == FILES_NODE_MACHINE)
                 return files_tree_toggle(at), true;
+        if (t->node[at].kind == FILES_NODE_BAND)
+                return false; // a caption: no press
         if (t->node[at].kind == FILES_NODE_DISK)
-                return false; // a drive with no disc, a disk with nothing that opens: no press
+        {
+                // A disk of the machine's folds to its file systems; a drive with no disc, a disk with nothing that opens: no press.
+                const struct files_devices address_to d = &files.big->devices;
+                if (t->node[at].device >= d->disks || files_disk_outside(d, t->node[at].device))
+                        return false;
+                return files_tree_toggle(at), true;
+        }
         if (t->node[at].kind == FILES_NODE_PART)
         {
                 // One press opens a medium: one mounted is gone to where it is mounted (as a drive is), and one that is not is opened,
@@ -2510,13 +2559,12 @@ static fn files_tree_toggle(p32 at)
         struct files_tree address_to t = &files.big->tree;
         if (at >= t->count)
                 return;
-        if (t->node[at].kind == FILES_NODE_DEVICES)
+        if (t->node[at].kind == FILES_NODE_DISK && t->node[at].device < files.big->devices.disks && !files_disk_outside(&files.big->devices, t->node[at].device))
         {
-                // What is shut is the table's, so that it stays shut when the devices are read again.
-                files.big->devices.shut = !files.big->devices.shut;
-                (void)files_tree_devices(t);
+                // A disk's fold opened or shut where it is (the folders open under Home and System stay open).
+                files_tree_fold(t, at, !t->node[at].open);
         }
-        else if (t->node[at].kind == FILES_NODE_PART || t->node[at].kind == FILES_NODE_DISK)
+        else if (t->node[at].kind == FILES_NODE_PART || t->node[at].kind == FILES_NODE_DISK || t->node[at].kind == FILES_NODE_BAND)
                 return;
         else if (t->node[at].open)
                 files_tree_shut(t, at);
@@ -2579,6 +2627,9 @@ static b32 files_tree_key(const struct window_event address_to event)
         case UI_KEY_ESCAPE: files.focus = FILES_FOCUS_ROWS; break;
         default: return false;
         }
+        // A band's caption is no row the keys stop on: they go on past it the way they went (a band is never first, nor last).
+        while (at < t->count && t->node[at].kind == FILES_NODE_BAND)
+                at = (key == UI_KEY_UP || key == UI_KEY_LEFT) && at ? at - 1 : at + 1 < t->count ? at + 1 : at - 1;
         files.tree_at = at, files.big->tree_list.focus = (int)at, ui_list_reveal(&files.ui, &files.big->tree_list);
         return files.dirty = true, true;
 }
@@ -2783,6 +2834,19 @@ static fn files_button_event(const struct window_event address_to event, b32 dow
                                 files.tree_at = (p32)mrow, files_device_menu(&files.big->tree.node[mrow], hit_list->menu_x, hit_list->menu_y);
                                 return;
                         }
+                }
+                if (hit_list->removed)
+                {
+                        // A medium's eject button pressed and let go on: its Eject, as its menu's.
+                        p32 node = (p32)(hit_list->removed - 1);
+                        const struct files_devices address_to d = &files.big->devices;
+                        hit_list->removed = 0;
+                        if (node < files.big->tree.count && files.big->tree.node[node].kind == FILES_NODE_PART && files.big->tree.node[node].device < d->parts)
+                        {
+                                string_copy_bounded((string_address)files.device_menu_node, (string_address)d->part_node[files.big->tree.node[node].device], sizeof(files.device_menu_node));
+                                files_menu_do(FILES_MENU_DEVICE_EJECT);
+                        }
+                        return;
                 }
                 if (row >= 0 && (p32)row < files.big->tree.count)
                 {

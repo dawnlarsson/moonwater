@@ -12,6 +12,7 @@
 # machine-made 2026-11-23 (a row menu's copy of one column), not yet read by a person: menu_copy_named
 # machine-made 2026-11-23 (Waterlink's grants as columns, and a remove asked on its row), not yet read by a person: settings_column_files settings_column_log settings_column_run settings_column_shell settings_remove_again
 # machine-made 2026-11-23 (the CD drive and the flat Devices of Files), not yet read by a person: files_device_nothing files_disc_audio files_disc_none files_disc_play
+# machine-made 2026-11-23 (the bands of a machine in Files' sidebar), not yet read by a person: files_band_drives files_band_removable
 @language fr
 @name Français
 @translated machine
@@ -54,6 +55,8 @@ editor_write_beside	ec75	impossible d'écrire à côté du fichier
 editor_writes_over_changed	df15	écrase la modification sur le disque (Ctrl+R la relit)
 editor_writes_over_readonly	e22f	écrase un fichier en lecture seule
 files_back	4bc2	Retour
+files_band_drives	516c	Lecteurs
+files_band_removable	742e	Amovibles
 files_bin_cross	da73	La corbeille est sur un autre disque : Maj+Suppr le supprime définitivement
 files_bin_emptied	15da	La corbeille est vide
 files_binned	4b0f	%d mis à la corbeille : Ctrl+Z les remet
@@ -82,7 +85,6 @@ files_device_eject	ea96	Éjecter
 files_device_live	b607	Une session live n'ouvre aucun lecteur
 files_device_nothing	c005	Rien à ouvrir
 files_device_write	7442	Autoriser l'écriture
-files_devices	f320	Périphériques
 files_disc_audio	f664	CD audio
 files_disc_none	c5a3	Aucun disque
 files_disc_play	6c28	Lire le disque

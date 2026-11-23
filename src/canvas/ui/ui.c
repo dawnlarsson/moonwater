@@ -6497,6 +6497,8 @@ LANGUAGE_ID(editor_write_beside, "could not write beside the file") \
 LANGUAGE_ID(editor_writes_over_changed, "writes over the change on disk (Ctrl+R reads it again)") \
 LANGUAGE_ID(editor_writes_over_readonly, "writes over a read-only file") \
 LANGUAGE_ID(files_back, "Back") \
+LANGUAGE_ID(files_band_drives, "Drives") \
+LANGUAGE_ID(files_band_removable, "Removable") \
 LANGUAGE_ID(files_bin_cross, "The bin is on another disk: Shift+Delete deletes it for good") \
 LANGUAGE_ID(files_bin_emptied, "The bin is empty") \
 LANGUAGE_ID(files_binned, "%d moved to the bin: Ctrl+Z puts them back") \
@@ -6525,7 +6527,6 @@ LANGUAGE_ID(files_device_eject, "Eject") \
 LANGUAGE_ID(files_device_live, "A live session opens no drives") \
 LANGUAGE_ID(files_device_nothing, "Nothing to open") \
 LANGUAGE_ID(files_device_write, "Allow Writing") \
-LANGUAGE_ID(files_devices, "Devices") \
 LANGUAGE_ID(files_disc_audio, "Audio CD") \
 LANGUAGE_ID(files_disc_none, "No disc") \
 LANGUAGE_ID(files_disc_play, "Play disc") \

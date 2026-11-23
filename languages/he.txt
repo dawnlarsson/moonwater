@@ -13,6 +13,7 @@
 # machine-made 2026-11-23 (a row menu's copy of one column), not yet read by a person: menu_copy_named
 # machine-made 2026-11-23 (Waterlink's grants as columns, and a remove asked on its row), not yet read by a person: settings_column_files settings_column_log settings_column_run settings_column_shell settings_remove_again
 # machine-made 2026-11-23 (the CD drive and the flat Devices of Files), not yet read by a person: files_device_nothing files_disc_audio files_disc_none files_disc_play
+# machine-made 2026-11-23 (the bands of a machine in Files' sidebar), not yet read by a person: files_band_drives files_band_removable
 @language he
 @name עברית
 @translated machine
@@ -55,6 +56,8 @@ editor_write_beside	ec75	לא ניתן לכתוב לצד הקובץ
 editor_writes_over_changed	df15	יכתוב מעל שינוי הדיסק (Ctrl+R קורא שוב)
 editor_writes_over_readonly	e22f	יכתוב מעל קובץ לקריאה בלבד
 files_back	4bc2	אחורה
+files_band_drives	516c	כוננים
+files_band_removable	742e	נשלפים
 files_bin_cross	da73	סל המחזור בכונן אחר: Shift+Delete מוחק לצמיתות
 files_bin_emptied	15da	סל המחזור ריק
 files_binned	4b0f	%d הועברו לסל המחזור: Ctrl+Z מחזיר אותם
@@ -83,7 +86,6 @@ files_device_eject	ea96	הוצא
 files_device_live	b607	הפעלה חיה אינה פותחת כוננים
 files_device_nothing	c005	אין מה לפתוח
 files_device_write	7442	אפשר כתיבה
-files_devices	f320	התקנים
 files_disc_audio	f664	תקליטור שמע
 files_disc_none	c5a3	אין תקליטור
 files_disc_play	6c28	נגן את התקליטור

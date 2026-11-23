@@ -12,6 +12,7 @@
 # machine-made 2026-11-23 (a row menu's copy of one column), not yet read by a person: menu_copy_named
 # machine-made 2026-11-23 (Waterlink's grants as columns, and a remove asked on its row), not yet read by a person: settings_column_files settings_column_log settings_column_run settings_column_shell settings_remove_again
 # machine-made 2026-11-23 (the CD drive and the flat Devices of Files), not yet read by a person: files_device_nothing files_disc_audio files_disc_none files_disc_play
+# machine-made 2026-11-23 (the bands of a machine in Files' sidebar), not yet read by a person: files_band_drives files_band_removable
 @language el
 @name Ελληνικά
 @translated machine
@@ -54,6 +55,8 @@ editor_write_beside	ec75	δεν ήταν δυνατή η εγγραφή δίπλ
 editor_writes_over_changed	df15	αντικαθιστά την αλλαγή στον δίσκο (το Ctrl+R το διαβάζει ξανά)
 editor_writes_over_readonly	e22f	αντικαθιστά αρχείο μόνο για ανάγνωση
 files_back	4bc2	Πίσω
+files_band_drives	516c	Δίσκοι
+files_band_removable	742e	Αφαιρούμενα
 files_bin_cross	da73	Ο κάδος είναι σε άλλο δίσκο: το Shift+Delete το διαγράφει οριστικά
 files_bin_emptied	15da	Ο κάδος είναι άδειος
 files_binned	4b0f	%d μετακινήθηκαν στον κάδο: το Ctrl+Z τα επαναφέρει
@@ -82,7 +85,6 @@ files_device_eject	ea96	Εξαγωγή
 files_device_live	b607	Μια ζωντανή συνεδρία δεν ανοίγει δίσκους
 files_device_nothing	c005	Τίποτα για άνοιγμα
 files_device_write	7442	Να επιτρέπεται η εγγραφή
-files_devices	f320	Συσκευές
 files_disc_audio	f664	CD ήχου
 files_disc_none	c5a3	Κανένας δίσκος
 files_disc_play	6c28	Αναπαραγωγή δίσκου

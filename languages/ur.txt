@@ -13,6 +13,7 @@
 # machine-made 2026-11-23 (a row menu's copy of one column), not yet read by a person: menu_copy_named
 # machine-made 2026-11-23 (Waterlink's grants as columns, and a remove asked on its row), not yet read by a person: settings_column_files settings_column_log settings_column_run settings_column_shell settings_remove_again
 # machine-made 2026-11-23 (the CD drive and the flat Devices of Files), not yet read by a person: files_device_nothing files_disc_audio files_disc_none files_disc_play
+# machine-made 2026-11-23 (the bands of a machine in Files' sidebar), not yet read by a person: files_band_drives files_band_removable
 @language ur
 @name اردو
 @translated machine
@@ -55,6 +56,8 @@ editor_write_beside	ec75	فائل کے ساتھ لکھنا ممکن نہ ہوا
 editor_writes_over_changed	df15	ڈسک کی تبدیلی پر لکھتا ہے (Ctrl+R)
 editor_writes_over_readonly	e22f	صرف پڑھنے والی فائل پر لکھتا ہے
 files_back	4bc2	پیچھے
+files_band_drives	516c	ڈرائیوز
+files_band_removable	742e	قابلِ علیحدگی
 files_bin_cross	da73	ردی کی ٹوکری دوسری ڈسک پر ہے: Shift+Delete اسے ہمیشہ کے لیے حذف کرتا ہے
 files_bin_emptied	15da	ردی کی ٹوکری خالی ہے
 files_binned	4b0f	%d ردی کی ٹوکری میں منتقل: Ctrl+Z انہیں واپس لاتا ہے
@@ -83,7 +86,6 @@ files_device_eject	ea96	نکالیں
 files_device_live	b607	لائیو سیشن کوئی ڈرائیو نہیں کھولتا
 files_device_nothing	c005	کھولنے کو کچھ نہیں
 files_device_write	7442	لکھنے کی اجازت دیں
-files_devices	f320	ڈیوائسز
 files_disc_audio	f664	آڈیو سی ڈی
 files_disc_none	c5a3	کوئی ڈسک نہیں
 files_disc_play	6c28	ڈسک چلائیں

@@ -1183,16 +1183,19 @@ static b32 files_job_step(struct files_model address_to m, struct files_job addr
 #define FILES_TREE_BYTES ((positive)FILES_TREE_MOST * sizeof(struct files_node) + FILES_TREE_NAMES)
 
 /*
-        A node past FILES_NODE_MACHINE is the Devices group's (files_tree_devices), no folder and no path of its own: a file system that
-        opens (a partition, a stick's, a disc's of data), or a disk or a drive with none (a CD of music, a drive with no disc, a disk with
-        nothing on it that opens).
+        The sidebar's top is machines alone (FILES_NODE_MACHINE), each one's rows under it: its places, and its bands (FILES_NODE_BAND, a
+        caption: Drives, Removable) with their rows after each. A node past FILES_NODE_MACHINE has no folder and no path of its own: a band,
+        a file system of the devices table that opens (a partition, a stick's, a disc's, a CD's folder of tracks), or a disk (one that
+        folds to its file systems, a drive with no disc, a disk with nothing that opens).
 */
-enum { FILES_NODE_FOLDER, FILES_NODE_PLACE, FILES_NODE_DRIVE, FILES_NODE_MACHINE, FILES_NODE_DEVICES, FILES_NODE_DISK, FILES_NODE_PART };
+enum { FILES_NODE_FOLDER, FILES_NODE_PLACE, FILES_NODE_DRIVE, FILES_NODE_MACHINE, FILES_NODE_BAND, FILES_NODE_DISK, FILES_NODE_PART };
+enum { FILES_BAND_DRIVES = 1, FILES_BAND_REMOVABLE }; // a band's place
 enum { FILES_PLACE_NONE, FILES_PLACE_HOME, FILES_PLACE_DOWNLOADS, FILES_PLACE_PICTURES, FILES_PLACE_ROOT };
 #define FILES_NODE_ONLINE 1u
 #define FILES_NODE_MAY_FILES 2u
 #define FILES_NODE_LOADING 4u
 #define FILES_NODE_SEVERAL 8u // a file system's row whose disk has more than one: its row says the disk's name too
+#define FILES_NODE_OUTSIDE 16u // a linked machine's drive of its Removable band (mounted under /run/media)
 
 /*
         The devices: the disks and their partitions as moonwater device list says them (device.c's usb_list_show), one table of
@@ -1212,7 +1215,7 @@ enum { FILES_DISC_NO, FILES_DISC_NONE, FILES_DISC_OPEN, FILES_DISC_AUDIO, FILES_
 struct files_devices
 {
         p32 disks, parts, mounts_used;
-        b32 shut, stale;                  // the group is shut (its rows are not shown); the table changed and the rows are not made from it yet
+        b32 stale;                        // the table changed and the rows are not made from it yet
         b32 live;                         // this session is no install's (boot's verdict is not "disk DISK"): nothing is opened
         p8 media[64];                     // where moonwater device open opens a partition for this user: /run/media/USER/
         p64 census, mounted;              // hashes: the list last read, the mounts its partitions have
@@ -1224,6 +1227,9 @@ struct files_devices
         p8 disk_name[FILES_DISKS_MOST][FILES_DEVICE_NODE], disk_label[FILES_DISKS_MOST][FILES_DEVICE_WORD];
         p64 part_bytes[FILES_PARTS_MOST];
         p16 part_mount[FILES_PARTS_MOST]; // where it is mounted: an offset into mounts, plus one; 0 where it is not
+        b8 part_home[FILES_PARTS_MOST];   // a mount of it holds the home (files_devices_homes): no row of its own
+        p8 folds[FILES_DISKS_MOST][FILES_DEVICE_NODE]; // the disks whose fold is open, by name (files_disk_fold): kept when the list is read again
+        p32 fold_count;
         p8 part_disk[FILES_PARTS_MOST], part_role[FILES_PARTS_MOST], part_ro[FILES_PARTS_MOST]; // its mount is read-only
         p8 part_node[FILES_PARTS_MOST][FILES_DEVICE_NODE], part_type[FILES_PARTS_MOST][16];
         p8 part_label[FILES_PARTS_MOST][FILES_DEVICE_WORD], part_name[FILES_PARTS_MOST][FILES_DEVICE_WORD];
@@ -1401,6 +1407,7 @@ static int files_drives_parse(const p8 address_to text, positive length, struct 
 
 static p32 files_tree_after(const struct files_tree address_to t, p32 at);
 static fn files_tree_compact(struct files_tree address_to t);
+static fn files_tree_shut(struct files_tree address_to t, p32 at);
 
 /* ---- the devices: moonwater device list read into the table, the mounts its partitions have, the Devices group's rows ---- */
 
@@ -1461,7 +1468,7 @@ static int files_disk_add(struct files_devices address_to d, const p8 address_to
         followed by its segments; any other line of two blanks is a device with no disk. A segment "    part START BYTES ROLE NAME"
         with the tail "fs TYPE LABEL NODE" is a partition (an unpartitioned disk's whole is one where a file system is on it); free
         room and a segment with no tail are not. "    disc WHAT [TRACKS SECONDS]" after a disk's segments makes it an optical drive
-        holding WHAT. Words after those known are passed by. Returns whether the table changed: the same list read again changes nothing.
+        holding WHAT, and "    model WORDS" names a disk of its own by what it says it is. Words after those known are passed by. Returns whether the table changed: the same list read again changes nothing.
 */
 static b32 files_devices_read(struct files_devices address_to d, const p8 address_to text, positive length)
 {
@@ -1529,6 +1536,14 @@ static b32 files_devices_read(struct files_devices address_to d, const p8 addres
                                                 d->disk_disc[disk] = k;
                                 d->disk_tracks[disk] = (p16)(files_word_digits(w[2], n[2]) < 100 ? files_word_digits(w[2], n[2]) : 99);
                                 d->disk_seconds[disk] = (p32)(files_word_digits(w[3], n[3]) < 0xffffffffull ? files_word_digits(w[3], n[3]) : 0xffffffffull);
+                        }
+                        else if (files_word_is(w[0], n[0], "model") && disk >= 0 && own)
+                        {
+                                // What a disk inside the machine says it is (its model): its name in the rows, as a USB device's product is.
+                                const p8 address_to from = cursor;
+                                while (from < stop && *from == ' ')
+                                        from++;
+                                files_word_copy(d->disk_label[disk], FILES_DEVICE_WORD, from, (positive)(stop - from), true);
                         }
                         else if (files_word_is(w[0], n[0], "where"))
                         {
@@ -1696,8 +1711,15 @@ static b32 files_devices_heard(bipolar events)
 */
 static inline b32 files_census_due(b32 heard, b32 looked, b32 mounts, b64 now, b64 due) { return heard || (looked && (mounts || now >= due)); }
 
-// A disk a person plugs in and takes out (a stick, a card) or an optical drive: its rows are the group's first, and where one of its file
-// systems is mounted is its row alone (This Machine has no drive of it: files_tree_load).
+// A request a link never answered is given up after this long (nanoseconds); so is one a reopened link can no longer answer.
+#define FILES_RPC_WAIT_NS 15000000000ll
+
+static b32 files_rpc_overdue(p64 sent, p64 now)
+{
+        return now > sent && now - sent > FILES_RPC_WAIT_NS;
+}
+
+// A disk a person plugs in and takes out (a stick, a card) or an optical drive: its rows are a machine's Removable band.
 static inline b32 files_disk_outside(const struct files_devices address_to d, p32 k) { return k < d->disks && (d->disk_external[k] || d->disk_disc[k]); }
 
 /*
@@ -1715,8 +1737,53 @@ static b32 files_part_opens(const struct files_devices address_to d, p32 p)
         return d->part_role[p] != FILES_ROLE_EFI && d->part_role[p] != FILES_ROLE_SWAP && files_in_strtab(d->part_type[p], opened, sizeof(opened) / sizeof(opened[0]), 0);
 }
 
-// The row of a mounted file system of a disk that is outside (files_disk_outside) whose mount holds path: exactly it, or the deepest
-// one path is under. FILES_NO where none is.
+/*
+        A partition a machine boots from: a FAT one whose role is EFI or whose name says it is one (esp, efi-A, moonwater-boot, bazzite-esp).
+        It is no row of the Drives band; inside a disk's fold it is one.
+*/
+static b32 files_part_boot(const struct files_devices address_to d, p32 p)
+{
+        const p8 address_to name = d->part_name[p];
+        positive length = string_length((string_address)name);
+        if (p >= d->parts || !string_equals((string_address)d->part_type[p], (string_address) "vfat"))
+                return false;
+        return d->part_role[p] == FILES_ROLE_EFI || string_equals((string_address)name, (string_address) "esp") ||
+               string_equals((string_address)name, (string_address) "moonwater-boot") || !string_compare_max((string_address)name, (string_address) "efi", 3) ||
+               (length > 4 && !memory_compare(name + length - 4, "-esp", 4)) || string_find((string_address)name, (string_address) "EFI");
+}
+
+// A partition the machine's own folders are on (a mount of it holds the home) or its root: Home and System are where it is, and it has no row.
+static inline b32 files_part_held(const struct files_devices address_to d, p32 p)
+{
+        const p8 address_to mount = files_part_mount(d, p);
+        return p < d->parts && (d->part_home[p] || (mount && mount[0] == '/' && !mount[1]));
+}
+
+// Whether disk k's fold is open (a disk of several file systems is one row that folds to them): the table's, by the disk's name, so it
+// stays as it was when the devices are read again.
+static b32 files_disk_folded(const struct files_devices address_to d, p32 k)
+{
+        for (p32 at = 0; k < d->disks && at < d->fold_count; at++)
+                if (string_equals((string_address)d->folds[at], (string_address)d->disk_name[k]))
+                        return true;
+        return false;
+}
+
+static fn files_disk_fold(struct files_devices address_to d, p32 k, b32 open)
+{
+        p32 at = 0;
+        while (at < d->fold_count && !string_equals((string_address)d->folds[at], (string_address)d->disk_name[k]))
+                at++;
+        if (open && at == d->fold_count && at < FILES_DISKS_MOST && k < d->disks)
+                string_copy_bounded((string_address)d->folds[d->fold_count++], (string_address)d->disk_name[k], FILES_DEVICE_NODE);
+        else if (!open && at < d->fold_count)
+                memory_copy(d->folds[at], d->folds[--d->fold_count], FILES_DEVICE_NODE);
+}
+
+/*
+        The row of a mounted file system whose mount holds path: exactly it, or the deepest one path is under; a shut fold's disk row where
+        the file system is in it. FILES_NO where none is (the root's is System, a place's own).
+*/
 static p32 files_tree_device_at(const struct files_tree address_to t, const p8 address_to path, b32 exactly, positive address_to length)
 {
         const struct files_devices address_to d = t->devices;
@@ -1724,76 +1791,31 @@ static p32 files_tree_device_at(const struct files_tree address_to t, const p8 a
         positive best = 0;
         for (p32 k = 0; d && k < t->count; k++)
         {
-                const p8 address_to mount = t->node[k].kind == FILES_NODE_PART ? files_part_mount(d, t->node[k].device) : null;
-                positive mlen = mount ? string_length((string_address)mount) : 0;
-                if (mlen > 1 && mlen > best && files_disk_outside(d, d->part_disk[t->node[k].device]) &&
-                    (exactly ? string_equals((string_address)path, (string_address)mount) : files_path_under(path, (const char address_to)mount)))
-                        found = k, best = mlen;
+                const struct files_node address_to n = &t->node[k];
+                if (n->machine || (n->kind != FILES_NODE_PART && (n->kind != FILES_NODE_DISK || n->open)))
+                        continue;
+                for (p32 p = n->kind == FILES_NODE_PART ? n->device : d->disk_first[n->device];
+                     n->kind == FILES_NODE_PART ? p == n->device : p < (p32)d->disk_first[n->device] + d->disk_count[n->device]; p++)
+                {
+                        const p8 address_to mount = files_part_mount(d, p);
+                        positive mlen = mount ? string_length((string_address)mount) : 0;
+                        if (mlen > 1 && mlen > best &&
+                            (exactly ? string_equals((string_address)path, (string_address)mount) : files_path_under(path, (const char address_to)mount)))
+                                found = k, best = mlen;
+                }
         }
         if (length)
                 *length = best;
         return found;
 }
 
-/*
-        The Devices group's rows, made again from the table: the group after This Machine's own rows and before any peer, and under it
-        one row a medium, never a disk with its partitions under it: each file system that opens (files_part_opens, a CD's folder of
-        tracks, cdda, among them), named by its label alone where its disk has one (the disk's name where it has no label), and with its
-        disk's name where the disk has more; an optical drive with no disc, and a disk with nothing that opens, a row of the disk's. The disks that are outside
-        (files_disk_outside) come first. A group that is shut has no rows under it; no disk, no group.
-*/
-static b32 files_tree_devices(struct files_tree address_to t)
+// Whether a mount's source (its node in /dev) is a partition the devices table has: its row is in its disk's place, and no drive of its own.
+static b32 files_drive_known(const struct files_devices address_to d, const p8 address_to node)
 {
-        const struct files_devices address_to d = t->devices;
-        p32 at = FILES_NO, ins, top;
-        for (p32 k = 0; k < t->count && at == FILES_NO; k++)
-                if (t->node[k].kind == FILES_NODE_DEVICES)
-                        at = k;
-        if (at != FILES_NO)
-        {
-                p32 after = files_tree_after(t, at);
-                memory_copy(&t->node[at], &t->node[after], (positive)(t->count - after) * sizeof(struct files_node));
-                t->count -= after - at, files_tree_compact(t);
-        }
-        if (!d || !d->disks || !t->count || t->node[0].kind != FILES_NODE_MACHINE || t->node[0].machine != 0)
-                return false;
-        ins = top = files_tree_after(t, 0);
-        if (!files_tree_insert_root(t, ins++, (const p8 address_to) "devices", null, FILES_NODE_DEVICES, FILES_PLACE_NONE, 0, 0, false))
-                return false;
-        t->node[top].open = t->node[top].read = !d->shut;
-        for (int outside = 1; outside >= 0 && !d->shut; outside--)
-                for (p32 k = 0; k < d->disks; k++)
-                {
-                        p32 opens = 0;
-                        if (files_disk_outside(d, k) != (b32)outside)
-                                continue;
-                        for (p32 p = d->disk_first[k]; p < (p32)d->disk_first[k] + d->disk_count[k]; p++)
-                                opens += files_part_opens(d, p);
-                        for (p32 p = d->disk_first[k]; p < (p32)d->disk_first[k] + d->disk_count[k]; p++)
-                        {
-                                const p8 address_to label = d->part_label[p][0] ? d->part_label[p] : opens > 1 && d->part_name[p][0] ? d->part_name[p] : opens > 1 ? d->part_node[p] : d->disk_label[k];
-                                if (!files_part_opens(d, p))
-                                        continue;
-                                if (!files_tree_insert_root(t, ins, label[0] ? label : d->part_node[p], null, FILES_NODE_PART, FILES_PLACE_NONE, 1, 0, false))
-                                        return false;
-                                t->node[ins].device = (p16)p, t->node[ins++].flags = opens > 1 ? FILES_NODE_SEVERAL : 0;
-                        }
-                        if (opens)
-                                continue;
-                        if (!files_tree_insert_root(t, ins, d->disk_label[k][0] ? d->disk_label[k] : d->disk_name[k], null, FILES_NODE_DISK, FILES_PLACE_NONE, 1, 0, false))
-                                return false;
-                        t->node[ins++].device = (p16)k;
-                }
-        t->node[top].has = (p16)(ins - top - 1);
-        return true;
-}
-
-// A request a link never answered is given up after this long (nanoseconds); so is one a reopened link can no longer answer.
-#define FILES_RPC_WAIT_NS 15000000000ll
-
-static b32 files_rpc_overdue(p64 sent, p64 now)
-{
-        return now > sent && now - sent > FILES_RPC_WAIT_NS;
+        for (p32 p = 0; d && node[0] && p < d->parts; p++)
+                if (string_equals((string_address)node, (string_address)d->part_node[p]))
+                        return true;
+        return false;
 }
 
 // A mount that holds the user's home (/home when the home is /home/u, or the home's own partition) is no drive of its own: the Home place is that folder.
@@ -1802,78 +1824,192 @@ static b32 files_home_mount(const p8 address_to home, const p8 address_to mount)
         return home && home[0] == '/' && string_length((string_address)mount) > 1 && files_path_under(home, (const char address_to)mount);
 }
 
-// Whether a mount's source (its node in /dev) is a file system of a disk outside: its row in Devices is where it is, and This Machine has no drive of it.
-static b32 files_drive_outside(const struct files_devices address_to d, const p8 address_to node)
+// Which partitions a home mount is of (files_part_held): every mount of one that holds the home makes it the home's, and its other mounts too.
+static fn files_devices_homes(struct files_devices address_to d, const p8 address_to home, const struct files_drive address_to drives, int n)
 {
-        for (p32 p = 0; d && node[0] && p < d->parts; p++)
-                if (string_equals((string_address)node, (string_address)d->part_node[p]) && files_disk_outside(d, d->part_disk[p]))
-                        return true;
-        return false;
+        for (p32 p = 0; d && p < d->parts; p++)
+        {
+                d->part_home[p] = 0;
+                for (int k = 0; k < n; k++)
+                        d->part_home[p] |= (b8)(string_equals((string_address)drives[k].node, (string_address)d->part_node[p]) && files_home_mount(home, drives[k].path));
+        }
+}
+
+// A band of a machine's rows: its caption (Drives, Removable), a row of words the keys and the hand pass over.
+static b32 files_tree_band(struct files_tree address_to t, p32 at, p8 band, p8 machine)
+{
+        return files_tree_insert_root(t, at, band == FILES_BAND_DRIVES ? (const p8 address_to) "drives" : (const p8 address_to) "removable", null, FILES_NODE_BAND, band, 1, machine, false);
+}
+
+// A file system's row of the devices table at depth: its node's name the label the row is said by (files.c's describe says it again).
+static b32 files_tree_part(struct files_tree address_to t, p32 at, p32 p, const p8 address_to label, p16 depth, p8 flags)
+{
+        const struct files_devices address_to d = t->devices;
+        if (!files_tree_insert_root(t, at, label && label[0] ? label : d->part_node[p], null, FILES_NODE_PART, FILES_PLACE_NONE, depth, 0, false))
+                return false;
+        return t->node[at].device = (p16)p, t->node[at].flags = flags, true;
+}
+
+// Disk k's fold, its file systems at depth 2 from at (its boot partitions among them), each by its label, or by its name in the table
+// where another of the disk's has the same label (rootfs-A, rootfs-B): how many rows.
+static p32 files_tree_fold_rows(struct files_tree address_to t, p32 at, p32 k)
+{
+        const struct files_devices address_to d = t->devices;
+        p32 first = d->disk_first[k], last = first + d->disk_count[k], ins = at;
+        for (p32 p = first; p < last; p++)
+        {
+                b32 shared = false;
+                if (files_part_held(d, p) || !files_part_opens(d, p))
+                        continue;
+                for (p32 q = first; q < last && d->part_label[p][0]; q++)
+                        shared |= q != p && files_part_opens(d, q) && string_equals((string_address)d->part_label[q], (string_address)d->part_label[p]);
+                ins += files_tree_part(t, ins, p, d->part_label[p][0] && !(shared && d->part_name[p][0]) ? d->part_label[p] : d->part_name[p], 2, 0);
+        }
+        return ins - at;
+}
+
+// A disk's row opened to its fold or shut (the fold's state the table's, by the disk's name, so it stays when the rows are made again).
+static fn files_tree_fold(struct files_tree address_to t, p32 at, b32 open)
+{
+        struct files_devices address_to d = t->devices;
+        if (!d || at >= t->count || t->node[at].kind != FILES_NODE_DISK || t->node[at].device >= d->disks || files_disk_outside(d, t->node[at].device))
+                return;
+        files_disk_fold(d, t->node[at].device, open);
+        files_tree_shut(t, at);
+        if (open)
+                (void)files_tree_fold_rows(t, at + 1, t->node[at].device), t->node[at].open = t->node[at].read = true;
+}
+
+/*
+        This machine's rows under its row, from at (each one in, at depth 1), and how many there are:
+        - its places: Home, Downloads, Pictures;
+        - the Drives band: System (the root), then each disk inside the machine: one with one file system that opens is that file system's
+          row (its label, or the disk's name); one with more is a row of its own that folds to them (each by its label, or its name in the
+          table where another on the disk has its label), its boot partitions among them; a partition the home is on or the root is no row,
+          a boot one none outside a fold. A mount the devices table has no partition of (a bind's, a network's) is a drive by its folder's name;
+        - the Removable band, where something is plugged in: each file system of a disk outside that opens (a stick's, a card's, a disc's, a
+          CD's folder of tracks), its disk's name before it where the disk has more, and a drive with no disc or a disk with nothing that
+          opens, a quiet row.
+        A partition opened (mounted where the device verb opens one) is its row in its disk's place, with its dot, and never a drive besides.
+*/
+static p32 files_tree_machine_rows(struct files_tree address_to t, p32 at, const p8 address_to home, const struct files_drive address_to drives, int n)
+{
+        static const struct { const char address_to name; p8 place; } places[] = {{"Downloads", FILES_PLACE_DOWNLOADS}, {"Pictures", FILES_PLACE_PICTURES}};
+        const struct files_devices address_to d = t->devices;
+        p8 sub[FILES_PATH];
+        p32 ins = at;
+        b32 outside = false;
+        if (home && home[0] == '/')
+        {
+                if (files_tree_insert_root(t, ins, (const p8 address_to) "Home", home, FILES_NODE_PLACE, FILES_PLACE_HOME, 1, 0, true))
+                        ins++;
+                for (int k = 0; k < 2; k++)
+                        if (files_path_join(sub, sizeof(sub), home, (const p8 address_to)places[k].name) &&
+                            files_tree_insert_root(t, ins, (const p8 address_to)places[k].name, sub, FILES_NODE_PLACE, places[k].place, 1, 0, true))
+                                ins++;
+        }
+        ins += files_tree_band(t, ins, FILES_BAND_DRIVES, 0);
+        if (files_tree_insert_root(t, ins, (const p8 address_to) "/", (const p8 address_to) "/", FILES_NODE_DRIVE, FILES_PLACE_ROOT, 1, 0, true))
+                ins++;
+        for (p32 k = 0; d && k < d->disks; k++)
+        {
+                p32 first = d->disk_first[k], last = first + d->disk_count[k], top = 0, fold = 0, boot_open = 0, alone = FILES_NO;
+                if (files_disk_outside(d, k))
+                {
+                        outside = true;
+                        continue;
+                }
+                for (p32 p = first; p < last; p++)
+                        if (!files_part_held(d, p) && files_part_opens(d, p))
+                        {
+                                fold++;
+                                if (files_part_boot(d, p))
+                                        boot_open += files_part_mount(d, p) != null;
+                                else
+                                        top++, alone = p;
+                        }
+                if (!top)
+                        continue;
+                if (top == 1 && !boot_open)
+                {
+                        ins += files_tree_part(t, ins, alone, d->part_label[alone][0] ? d->part_label[alone] : d->disk_label[k], 1, 0);
+                        continue;
+                }
+                if (!files_tree_insert_root(t, ins, d->disk_label[k][0] ? d->disk_label[k] : d->disk_name[k], null, FILES_NODE_DISK, FILES_PLACE_NONE, 1, 0, false))
+                        break;
+                t->node[ins].device = (p16)k, t->node[ins].has = (p16)fold, t->node[ins].read = true, t->node[ins].open = (b8)files_disk_folded(d, k), ins++;
+                if (files_disk_folded(d, k))
+                        ins += files_tree_fold_rows(t, ins, k);
+        }
+        for (int k = 0; k < n; k++)
+                if (!files_home_mount(home, drives[k].path) && !files_drive_known(d, drives[k].node) &&
+                    files_tree_insert_root(t, ins, drives[k].label, drives[k].path, FILES_NODE_DRIVE, FILES_PLACE_NONE, 1, 0, true))
+                        ins++;
+        if (outside)
+                ins += files_tree_band(t, ins, FILES_BAND_REMOVABLE, 0);
+        for (p32 k = 0; outside && k < d->disks; k++)
+        {
+                p32 opens = 0;
+                if (!files_disk_outside(d, k))
+                        continue;
+                for (p32 p = d->disk_first[k]; p < (p32)d->disk_first[k] + d->disk_count[k]; p++)
+                        opens += files_part_opens(d, p);
+                for (p32 p = d->disk_first[k]; p < (p32)d->disk_first[k] + d->disk_count[k]; p++)
+                        if (files_part_opens(d, p))
+                                ins += files_tree_part(t, ins, p, d->part_label[p][0] ? d->part_label[p] : opens > 1 && d->part_name[p][0] ? d->part_name[p] : opens > 1 ? d->part_node[p] : d->disk_label[k],
+                                                       1, opens > 1 ? FILES_NODE_SEVERAL : 0);
+                if (opens)
+                        continue;
+                if (!files_tree_insert_root(t, ins, d->disk_label[k][0] ? d->disk_label[k] : d->disk_name[k], null, FILES_NODE_DISK, FILES_PLACE_NONE, 1, 0, false))
+                        break;
+                t->node[ins++].device = (p16)k;
+        }
+        return ins - at;
 }
 
 static b32 files_tree_load(struct files_tree address_to t, const p8 address_to home, const p8 address_to mountinfo, positive len, b32 force)
 {
-        static const struct { const char address_to name; p8 place; } places[] = {{"Downloads", FILES_PLACE_DOWNLOADS}, {"Pictures", FILES_PLACE_PICTURES}};
         struct files_drive address_to drives = mountinfo && len ? (struct files_drive address_to)files_anon_map(sizeof(struct files_drive) * FILES_DRIVES_MOST, null) : null;
         p64 hash = 0;
         int n = drives ? files_drives_parse(mountinfo, len, drives, FILES_DRIVES_MOST, &hash) : 0;
-        b32 changed = force || hash != t->drives_hash || (t->devices && t->devices->stale);
+        b32 moved = t->devices && files_devices_mounted(t->devices, mountinfo, len);
+        b32 changed = force || moved || hash != t->drives_hash || (t->devices && t->devices->stale);
         if (changed)
         {
-                p8 sub[FILES_PATH];
-                p32 after, ins = 1, added = 0;
+                p32 after;
                 t->drives_hash = hash;
+                if (t->devices)
+                        t->devices->stale = false, files_devices_homes(t->devices, home, drives, n);
                 if (!t->count || t->node[0].kind != FILES_NODE_MACHINE || t->node[0].machine != 0)
                 {
                         t->count = t->names_used = 0;
                         files_tree_add_machine(t, (const p8 address_to) "This Machine", 0, FILES_NODE_ONLINE | FILES_NODE_MAY_FILES, true);
                 }
-                else
+                else if ((after = files_tree_after(t, 0)) > 1)
                 {
-                        after = files_tree_after(t, 0);
-                        if (after > 1)
-                        {
-                                memory_copy(&t->node[1], &t->node[after], (positive)(t->count - after) * sizeof(struct files_node));
-                                t->count -= after - 1;
-                                files_tree_compact(t);
-                        }
+                        memory_copy(&t->node[1], &t->node[after], (positive)(t->count - after) * sizeof(struct files_node));
+                        t->count -= after - 1;
+                        files_tree_compact(t);
                 }
                 if (t->node[0].open)
-                {
-                        if (home && home[0] == '/')
-                        {
-                                if (files_tree_insert_root(t, ins, (const p8 address_to) "Home", home, FILES_NODE_PLACE, FILES_PLACE_HOME, 1, 0, true))
-                                        ins++, added++;
-                                for (int k = 0; k < 2; k++)
-                                        if (files_path_join(sub, sizeof(sub), home, (const p8 address_to)places[k].name) &&
-                                            files_tree_insert_root(t, ins, (const p8 address_to)places[k].name, sub, FILES_NODE_PLACE, places[k].place, 1, 0, true))
-                                                ins++, added++;
-                        }
-                        if (files_tree_insert_root(t, ins, (const p8 address_to) "/", (const p8 address_to) "/", FILES_NODE_DRIVE, FILES_PLACE_ROOT, 1, 0, true))
-                                ins++, added++;
-                        for (int k = 0; k < n; k++)
-                                if (!files_home_mount(home, drives[k].path) && !files_drive_outside(t->devices, drives[k].node) &&
-                                    files_tree_insert_root(t, ins, drives[k].label, drives[k].path, FILES_NODE_DRIVE, FILES_PLACE_NONE, 1, 0, true))
-                                        ins++, added++;
-                        t->node[0].has = (p16)added, t->node[0].read = true;
-                }
-        }
-        if (t->devices)
-        {
-                b32 moved = files_devices_mounted(t->devices, mountinfo, len);
-                if (changed || moved || t->devices->stale)
-                        t->devices->stale = false, (void)files_tree_devices(t), changed = true;
+                        t->node[0].has = (p16)files_tree_machine_rows(t, 1, home, drives, n), t->node[0].read = true;
         }
         return files_unmap(drives, sizeof(struct files_drive) * FILES_DRIVES_MOST), changed;
 }
 
+/*
+        A linked machine's rows, from what it said of itself (its home, which of Downloads and Pictures it has, its mount table), in the
+        bands this machine's are in: its places, Drives (System, its root, then its mounts by their folders' names), and Removable (its
+        mounts under /run/media, where its device verb opens what is plugged in).
+*/
 static b32 files_tree_set_machine_children(struct files_tree address_to t, p32 at, const p8 address_to home, p8 home_flags, const p8 address_to mountinfo, positive mi_len)
 {
         struct files_drive address_to drives = mountinfo && mi_len ? (struct files_drive address_to)files_anon_map(sizeof(struct files_drive) * FILES_DRIVES_MOST, null) : null;
         int n = drives ? files_drives_parse(mountinfo, mi_len, drives, FILES_DRIVES_MOST, null) : 0;
-        p32 after, ins, added = 0;
+        p32 after, ins;
         p8 machine;
         p8 sub[FILES_PATH];
+        b32 outside = false;
         if (at >= t->count || t->node[at].kind != FILES_NODE_MACHINE)
                 return files_unmap(drives, sizeof(struct files_drive) * FILES_DRIVES_MOST), false;
         machine = t->node[at].machine;
@@ -1888,20 +2024,29 @@ static b32 files_tree_set_machine_children(struct files_tree address_to t, p32 a
         if (home && home[0] == '/')
         {
                 if (files_tree_insert_root(t, ins, (const p8 address_to) "Home", home, FILES_NODE_PLACE, FILES_PLACE_HOME, 1, machine, false))
-                        ins++, added++;
+                        ins++;
                 if ((home_flags & 1) && files_path_join(sub, sizeof(sub), home, (const p8 address_to) "Downloads") &&
                     files_tree_insert_root(t, ins, (const p8 address_to) "Downloads", sub, FILES_NODE_PLACE, FILES_PLACE_DOWNLOADS, 1, machine, false))
-                        ins++, added++;
+                        ins++;
                 if ((home_flags & 2) && files_path_join(sub, sizeof(sub), home, (const p8 address_to) "Pictures") &&
                     files_tree_insert_root(t, ins, (const p8 address_to) "Pictures", sub, FILES_NODE_PLACE, FILES_PLACE_PICTURES, 1, machine, false))
-                        ins++, added++;
+                        ins++;
         }
+        ins += files_tree_band(t, ins, FILES_BAND_DRIVES, machine);
         if (files_tree_insert_root(t, ins, (const p8 address_to) "/", (const p8 address_to) "/", FILES_NODE_DRIVE, FILES_PLACE_ROOT, 1, machine, false))
-                ins++, added++;
-        for (int k = 0; k < n; k++)
-                if (!files_home_mount(home, drives[k].path) && files_tree_insert_root(t, ins, drives[k].label, drives[k].path, FILES_NODE_DRIVE, FILES_PLACE_NONE, 1, machine, false))
-                        ins++, added++;
-        t->node[at].open = true, t->node[at].read = true, t->node[at].has = (p16)added, t->node[at].flags &= (p8)~FILES_NODE_LOADING;
+                ins++;
+        for (int pass = 0; pass < 2; pass++)
+                for (int k = 0; k < n; k++)
+                {
+                        b32 removable = files_path_under(drives[k].path, "/run/media");
+                        if (files_home_mount(home, drives[k].path) || removable != (b32)pass)
+                                continue;
+                        if (pass && !outside)
+                                outside = true, ins += files_tree_band(t, ins, FILES_BAND_REMOVABLE, machine);
+                        if (files_tree_insert_root(t, ins, drives[k].label, drives[k].path, FILES_NODE_DRIVE, FILES_PLACE_NONE, 1, machine, false))
+                                t->node[ins++].flags = pass ? FILES_NODE_OUTSIDE : 0;
+                }
+        t->node[at].open = true, t->node[at].read = true, t->node[at].has = (p16)(ins - at - 1), t->node[at].flags &= (p8)~FILES_NODE_LOADING;
         return files_unmap(drives, sizeof(struct files_drive) * FILES_DRIVES_MOST), true;
 }
 
@@ -2090,6 +2235,35 @@ static b32 files_tree_drop_machine(struct files_tree address_to t, p8 machine)
                         return true;
                 }
         return false;
+}
+
+/*
+        The linked machines in the order they are worth: those online first, then those offline, each in the order it had; this machine
+        first of all. Each machine moves with its rows. Whether any moved.
+*/
+static b32 files_tree_order_machines(struct files_tree address_to t)
+{
+        positive bytes = (positive)t->count * sizeof(struct files_node);
+        struct files_node address_to into;
+        p32 used = 0;
+        b32 moved = false;
+        if (t->count < 2 || !(into = (struct files_node address_to)files_anon_map(bytes, null)))
+                return false;
+        for (int pass = 0; pass < 3; pass++)
+                for (p32 at = 0; at < t->count; at = files_tree_after(t, at))
+                {
+                        const struct files_node address_to n = &t->node[at];
+                        int want = n->kind != FILES_NODE_MACHINE || !n->machine ? 0 : (n->flags & FILES_NODE_ONLINE) ? 1 : 2;
+                        p32 after = files_tree_after(t, at);
+                        if (want != pass)
+                                continue;
+                        moved |= used != at;
+                        memory_copy(&into[used], &t->node[at], (positive)(after - at) * sizeof(struct files_node)), used += after - at;
+                }
+        if (moved && used == t->count)
+                memory_copy(t->node, into, bytes);
+        files_unmap(into, bytes);
+        return moved && used == t->count;
 }
 
 static fn files_tree_shut(struct files_tree address_to t, p32 at)

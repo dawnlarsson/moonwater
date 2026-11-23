@@ -40,6 +40,8 @@ editor_write_beside	ec75	could not write beside the file
 editor_writes_over_changed	df15	writes over the change on disk (Ctrl+R reads it again)
 editor_writes_over_readonly	e22f	writes over a read-only file
 files_back	4bc2	Back
+files_band_drives	516c	Drives
+files_band_removable	742e	Removable
 files_bin_cross	da73	The bin is on another disk: Shift+Delete deletes it for good
 files_bin_emptied	15da	The bin is empty
 files_binned	4b0f	%d moved to the bin: Ctrl+Z puts them back
@@ -68,7 +70,6 @@ files_device_eject	ea96	Eject
 files_device_live	b607	A live session opens no drives
 files_device_nothing	c005	Nothing to open
 files_device_write	7442	Allow Writing
-files_devices	f320	Devices
 files_disc_audio	f664	Audio CD
 files_disc_none	c5a3	No disc
 files_disc_play	6c28	Play disc

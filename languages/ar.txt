@@ -13,6 +13,7 @@
 # machine-made 2026-11-23 (a row menu's copy of one column), not yet read by a person: menu_copy_named
 # machine-made 2026-11-23 (Waterlink's grants as columns, and a remove asked on its row), not yet read by a person: settings_column_files settings_column_log settings_column_run settings_column_shell settings_remove_again
 # machine-made 2026-11-23 (the CD drive and the flat Devices of Files), not yet read by a person: files_device_nothing files_disc_audio files_disc_none files_disc_play
+# machine-made 2026-11-23 (the bands of a machine in Files' sidebar), not yet read by a person: files_band_drives files_band_removable
 @language ar
 @name العربية
 @translated machine
@@ -55,6 +56,8 @@ editor_write_beside	ec75	تعذرت الكتابة بجوار الملف
 editor_writes_over_changed	df15	يكتب فوق تغيير القرص (Ctrl+R)
 editor_writes_over_readonly	e22f	يكتب فوق ملف للقراءة فقط
 files_back	4bc2	رجوع
+files_band_drives	516c	محركات الأقراص
+files_band_removable	742e	قابلة للإزالة
 files_bin_cross	da73	سلة المهملات على قرص آخر: Shift+Delete يحذفه نهائيا
 files_bin_emptied	15da	سلة المهملات فارغة
 files_binned	4b0f	نُقل %d إلى سلة المهملات: Ctrl+Z يعيدها
@@ -83,7 +86,6 @@ files_device_eject	ea96	إخراج
 files_device_live	b607	الجلسة الحية لا تفتح أي محرك أقراص
 files_device_nothing	c005	لا شيء لفتحه
 files_device_write	7442	السماح بالكتابة
-files_devices	f320	الأجهزة
 files_disc_audio	f664	قرص صوتي
 files_disc_none	c5a3	لا يوجد قرص
 files_disc_play	6c28	تشغيل القرص
