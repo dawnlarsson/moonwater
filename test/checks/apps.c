@@ -10935,6 +10935,7 @@ b32 main()
         GROUP("check_kit_pull_parts", check_kit_pull_parts());
         GROUP("check_kit_text_lines", check_kit_text_lines());
         GROUP("check_kit_tokens", check_kit_tokens());
+        GROUP("check_kit_manage", check_kit_manage());
         GROUP("check_kit_cells", check_kit_cells());
         GROUP("check_kit_stripes", check_kit_stripes());
         GROUP("check_kit_file_icons", check_kit_file_icons());

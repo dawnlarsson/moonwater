@@ -5823,6 +5823,94 @@ static fn check_kit_tokens(void)
         }
 }
 
+/*
+        A list the person manages (ui_row.order, ui_row.remove, UI_ROW_ADD): three ordered rows that each have a remove button, and an add row.
+        A press on a row's grip lifts it and the hand carries it down past two rows, where it is let go: the list says it moved from 0 to 2 in its
+        group; one let go with the press cancelled moves nothing. A press on a row's remove button let go on it removes that row, let go off it
+        nothing. Alt+Down moves the row the keys are on one place, Alt+Up at the group's first moves nothing, Delete removes it. The add row has
+        the plus, and one way only is no menu.
+*/
+static void manage_row(int id, struct ui_row address_to row)
+{
+        static const char address_to names[] = {"Files", "Terminal", "Editor"};
+        if (id < 3)
+                row->label = names[id], row->order = 1, row->remove = true;
+        else
+                row->kind = UI_ROW_ADD, row->label = "Add a program", row->words = id == 3 ? "Program" : "";
+}
+
+static fn check_kit_manage(void)
+{
+        struct ui ui;
+        struct ui_list l;
+        struct ui_row row;
+        struct window_event down = {WINDOW_EVENT_BUTTON, WINDOW_KEY_DOWN, UI_POINTER_LEFT, 0}, up = {WINDOW_EVENT_BUTTON, 0, UI_POINTER_LEFT, 0};
+        struct window_event cancel = {WINDOW_EVENT_BUTTON, WINDOW_KEY_CANCEL, UI_POINTER_LEFT, 0}, motion = {WINDOW_EVENT_MOTION, 0, 0, 0};
+        struct window_event alt_down = {WINDOW_EVENT_KEY, WINDOW_KEY_DOWN | WINDOW_KEY_ALT, UI_KEY_DOWN, 0};
+        struct window_event alt_up = {WINDOW_EVENT_KEY, WINDOW_KEY_DOWN | WINDOW_KEY_ALT, UI_KEY_UP, 0}, del = {WINDOW_EVENT_KEY, WINDOW_KEY_DOWN, UI_KEY_DELETE, 0};
+        int grip_x, remove_x, mid[3], h;
+        b32 lifted, carried, moved, kept, removed, off, keys;
+
+        memory_zero(&ui, sizeof(ui));
+        ui.scale = 100;
+        memory_zero(&l, sizeof(l));
+        ui_list_reserve(&l, 4);
+        l.count = 4, l.ids = 4, l.describe = manage_row, l.focus = l.hover = l.down = -1;
+        for (int at = 0; at < 4; at++)
+                l.id[at] = (unsigned short)at;
+        ui_list_place(&ui, &l, 0, 0, 400, 400);
+        ui_list_layout(&ui, &l);
+        ui_list_describe(&l, 0, &row);
+        ui_row_tree(&ui, &l, 0, &row, ui_list_pitch(&ui, &l), false);
+        grip_x = ui_row_parts.grip ? ui_row_parts.grip->x + ui_row_parts.grip->w / 2 : -1;
+        remove_x = ui_row_parts.remove ? ui_row_parts.remove->x + ui_row_parts.remove->w / 2 : -1;
+        for (int at = 0; at < 3; at++)
+                mid[at] = ui_list_row_y(&l, at) + l.tall[at] / 2;
+        h = l.tall[0];
+        check("kit manage: an ordered row's grip is its first part and its remove button its last",
+              grip_x >= 0 && remove_x > grip_x && remove_x > 400 / 2 && ui_list_part_at(&ui, &l, 0, grip_x) == 1 && ui_list_part_at(&ui, &l, 0, remove_x) == 2 &&
+                  ui_list_part_at(&ui, &l, 0, 200) == 0);
+
+        ui_list_click(&ui, &l, &down, grip_x, mid[0]);
+        lifted = l.lift == 1 && l.grab == UI_LIST_GRAB_LIFT && l.lift_to == 0;
+        motion.a = grip_x, motion.b = mid[2] + 2;
+        ui_list_click(&ui, &l, &motion, grip_x, mid[2] + 2);
+        carried = l.lift_to == 2 && l.lift_y > ui_list_row_y(&l, 1);
+        ui_list_click(&ui, &l, &up, grip_x, mid[2] + 2);
+        moved = l.moved && l.moved_from == 0 && l.moved_to == 2 && l.moved_order == 1 && !l.lift && l.grab == UI_LIST_GRAB_NONE;
+        check("kit manage: a press on the grip lifts the row, the hand carries it past two rows, and let go the list says it moved from 0 to 2",
+              lifted && carried && moved);
+        l.moved = false;
+        ui_list_click(&ui, &l, &down, grip_x, mid[0]);
+        ui_list_click(&ui, &l, &motion, grip_x, mid[2] + 2);
+        ui_list_click(&ui, &l, &cancel, grip_x, mid[2] + 2);
+        kept = !l.moved && !l.lift && h > 0;
+        check("kit manage: a lift let go with its press cancelled moves nothing", kept);
+
+        ui_list_click(&ui, &l, &down, remove_x, mid[1]);
+        removed = l.remove_down == 2 && !l.removed;
+        ui_list_click(&ui, &l, &up, remove_x, mid[1]);
+        removed = removed && l.removed == 2 && !l.remove_down;
+        l.removed = 0;
+        ui_list_click(&ui, &l, &down, remove_x, mid[1]);
+        ui_list_click(&ui, &l, &up, 200, mid[1]);
+        off = !l.removed && !l.remove_down;
+        check("kit manage: a press on a row's remove button let go on it removes that row, and let go off it removes nothing", removed && off);
+
+        l.focus = 1;
+        keys = ui_list_manage_key(&ui, &l, &alt_down) && l.moved && l.moved_from == 1 && l.moved_to == 2;
+        l.moved = false, l.focus = 0;
+        keys = keys && ui_list_manage_key(&ui, &l, &alt_up) && !l.moved;
+        l.focus = 1;
+        keys = keys && ui_list_manage_key(&ui, &l, &del) && l.removed == 2;
+        l.removed = 0, l.focus = 3;
+        keys = keys && !ui_list_manage_key(&ui, &l, &del) && !l.removed;
+        check("kit manage: Alt+Down moves the row the keys are on a place, Alt+Up at the first moves nothing, Delete removes a removable row and no other", keys);
+
+        ui_list_describe(&l, 3, &row);
+        check("kit manage: an add row has the plus, and one way is no menu", row.icon == UI_ICON_PLUS + 1 && !ui_list_ways(&ui, &l, null, null, 3));
+}
+
 static fn check_kit_pull_parts(void)
 {
         static unsigned int pixels[400 * 200], picture[400 * 200], scratch[400 * UI_SCRATCH_ROWS];

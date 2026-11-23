@@ -19429,6 +19429,9 @@ enum
         UI_ICON_NEW_FOLDER, // a folder's outline with a plus in it: new folder
         UI_ICON_KEYBOARD,   // a keyboard: a frame, a row of keys and the space bar (the tray's keyboard on the screen)
         UI_ICON_COG,        // a cog: a ring, six teeth and its hub: how a view is shown (Files' View menu)
+        UI_ICON_PLUS,       // a plus: add (a list's add row, ui_row's UI_ROW_ADD)
+        UI_ICON_REMOVE,     // a cross: take this away (a list row's remove button, ui_row.remove)
+        UI_ICON_GRIP,       // six dots, two by three: a handle to move a row by (an ordered row's, ui_row.order)
         UI_ICON_COUNT
 };
 
@@ -19451,6 +19454,13 @@ static const struct ui_icon_part ui_icon_parts[UI_ICON_COUNT][UI_ICON_PARTS] = {
         [UI_ICON_NOTE] = {{UI_ICON_RING, 6, 8, 42, 40, 4}, {UI_ICON_LINE, 12, 18, 36, 18, 0}, {UI_ICON_LINE, 12, 24, 36, 24, 0}, {UI_ICON_LINE, 12, 30, 28, 30, 0}},
         [UI_ICON_GLOBE] = {{UI_ICON_RING, 6, 6, 42, 42, 18}, {UI_ICON_RING, 15, 6, 33, 42, 9}, {UI_ICON_LINE, 7, 24, 41, 24, 0}, {UI_ICON_LINE, 11, 15, 37, 15, 0},
                            {UI_ICON_LINE, 11, 33, 37, 33, 0}},
+        // Its arms are boxes a sixth of a side thick round the middle: a stroke on the middle line falls between two pixels at 16, all edge.
+        [UI_ICON_PLUS] = {{UI_ICON_BOX, 21, 10, 27, 38, 1}, {UI_ICON_BOX, 10, 21, 38, 27, 1}},
+        // The cross's middle and the grip's dots are square and three pixels across at 16 (nine of the grid's 48), so each has pixels that
+        // are the ink whole however small it is drawn.
+        [UI_ICON_REMOVE] = {{UI_ICON_LINE, 14, 14, 34, 34, 0}, {UI_ICON_LINE, 34, 14, 14, 34, 0}, {UI_ICON_BOX, 20, 20, 28, 28, 0}},
+        [UI_ICON_GRIP] = {{UI_ICON_BOX, 12, 7, 21, 16, 1}, {UI_ICON_BOX, 27, 7, 36, 16, 1}, {UI_ICON_BOX, 12, 19, 21, 28, 1},
+                          {UI_ICON_BOX, 27, 19, 36, 28, 1}, {UI_ICON_BOX, 12, 31, 21, 40, 1}, {UI_ICON_BOX, 27, 31, 36, 40, 1}},
         [UI_ICON_COG] = {{UI_ICON_RING, 13, 13, 35, 35, 11}, {UI_ICON_RING, 20, 20, 28, 28, 4}, {UI_ICON_LINE, 37, 24, 42, 24, 0},
                          {UI_ICON_LINE, 31, 35, 33, 40, 0}, {UI_ICON_LINE, 17, 35, 15, 40, 0}, {UI_ICON_LINE, 11, 24, 6, 24, 0},
                          {UI_ICON_LINE, 17, 13, 15, 8, 0}, {UI_ICON_LINE, 31, 13, 33, 8, 0}},
@@ -22474,6 +22484,9 @@ static p32 ui_strips_event(struct ui address_to ui, struct ui_strips address_to 
 #define UI_ROW_GAP 10 // between two parts of a row, logical pixels
 // A row that is an action:
 #define UI_ROW_BUTTON 9
+#define UI_ROW_ADD 10 // a list's add row: a plus and its label in the accent; its words, where they are two or more, the ways to add (ui_list_ways)
+#define UI_ROW_WAYS 8         // the most ways an add row's menu has, its words a '|' apart
+#define UI_ROW_WAY_TEXT 96    // and the most bytes of one
 #define UI_ROW_BUTTON_LEAST 64 // the button's least width, logical pixels: its words and 14 at each side where they are wider
 // A row's badge (ui_row.badge): the severity of the issues its option has, the words the badge says being ui_row.badge_words.
 #define UI_ROW_BADGE_WARNING 1
@@ -22567,6 +22580,9 @@ struct ui_row
         b32 separator;                     // a subtle hairline rule above this row (e.g. between sidebar sections)
         int gap;                           // logical pixels of space above this row in the list's layout (a group's gap; not in a virtual list)
         b32 head;                          // a field right after the label, to the row's end (the words after a verb)
+        int order;                         // an ordered group (non-zero): the rows of one, in the list's order, are the person's to rearrange by the grip at
+                                           // each one's start, a drag or Alt+Up and Alt+Down (ui_list.moved); 0 a row that stays where the app puts it
+        b32 remove;                        // a remove button at the row's end, and Delete while the keys are on it (ui_list.removed)
         int badge;                         // UI_ROW_BADGE_* at the row's right (left of a switch): the worst issue its option has, 0 none
         const char address_to badge_words; // what that badge says
         b32 sub;                           // a line under its option (an issue, its detail, a status): indented, in the quiet ink
@@ -22633,6 +22649,8 @@ enum ui_list_grab
         UI_LIST_GRAB_RIGHT,       // right button held alone -> menu_asked on clean release
         UI_LIST_GRAB_BAND,        // L+R chord rubber-band box selection active
         UI_LIST_GRAB_CHORD,       // band ended, waiting for remaining chord button release
+        UI_LIST_GRAB_LIFT,        // an ordered row lifted by its grip, following the hand (ui_list.lift)
+        UI_LIST_GRAB_REMOVE,      // a row's remove button pressed, acted on if let go on it (ui_list.remove_down)
 };
 
 struct ui_list
@@ -22703,6 +22721,12 @@ struct ui_list
         struct ui_list_fold_slot { int id; struct ui_spring spring; } fold_pool[UI_LIST_FOLDS]; // the springs of the rows moving (id + 1; 0 free)
         void (*shut)(void);                // a fold closed: its rows leave the list, so the app lists them again
         b32 (*choosable)(int id);          // optional: false for a row the keys and typeahead skip (a separator, a disabled item, a header); null: all
+        // The person's management of the rows (ui_row.order, ui_row.remove, UI_ROW_ADD): what they did, which the app keeps and clears.
+        b32 moved;                         // an ordered row moved: from its place among its group's rows to another, both counted from 0
+        int moved_from, moved_to, moved_order;
+        int removed;                       // the row (plus one) whose remove button was pressed, or Delete
+        // The kit's: the row (plus one) lifted by its grip, where the hand holds it (its top, device pixels from the list's) and the place it would land.
+        int lift, lift_y, lift_grab, lift_to, remove_down;
 };
 
 #define UI_LIST_STRIPE_INK 0x0d       // the alpha of the ink a striped row is tinted with in dark mode (about 5 percent)
@@ -22722,6 +22746,9 @@ static fn ui_list_describe(const struct ui_list address_to l, int id, struct ui_
         row->reveal = UI_ONE; // a whole row unless the app says it folds
         row->turn = -1;       // the expander's flag decides its chevron unless the app says it is turning
         l->describe(id, row);
+        // An add row has the plus where the app gives it no symbol of its own.
+        if (row->kind == UI_ROW_ADD && !row->icon && !row->tile_picture && !row->tile_name)
+                row->icon = UI_ICON_PLUS + 1;
         // A row the kit folds: its share is its reveal, and its chevron turns with it (the app's describe is not asked for them).
         if (l->fold_at && id >= 0 && id < UI_LIST_FOLD_MOST && l->fold_at[id] >= 0)
                 row->reveal = row->turn = l->fold_at[id];
@@ -23487,7 +23514,7 @@ static int ui_row_drive_height(const struct ui address_to ui, const struct ui_ro
 static struct ui_row_parts
 {
         struct ui_tree tree;
-        struct ui_node address_to mark, address_to check, address_to icon, address_to label, address_to note_room, address_to note, address_to value_box, address_to back, address_to value,
+        struct ui_node address_to mark, address_to grip, address_to remove, address_to check, address_to icon, address_to label, address_to note_room, address_to note, address_to value_box, address_to back, address_to value,
                 address_to on, address_to more, address_to control, address_to expander, address_to badge, address_to toggle, address_to bars,
                 address_to share, address_to amount, address_to aside, address_to swatch, address_to segment[UI_STRIP_MOST];
         const char address_to label_shown, address_to value_shown; // the label and the value as they fit, null when they are not written
@@ -23668,6 +23695,9 @@ static fn ui_row_tree_at(struct ui address_to ui, struct ui_list address_to l, i
         // A tall row is a column, and the first thing in it is its line, UI_DRIVE_LINE high, which is laid out as any row is.
         if (row->tall)
                 n = ui_tree_open(t), n->size[1].kind = UI_FIXED, n->size[1].value = ui_drive_part(ui, UI_DRIVE_LINE), n->gap = gap;
+        // An ordered row's grip is its first part, as wide as a symbol: what a press lifts the row by.
+        if (row->order)
+                p->grip = ui_row_leaf(t, UI_FIXED, ui_dev(ui, 20));
         // The label is 17 from where the mark starts, which at some scales is a pixel more than the mark and the gap.
         if (row->mark)
                 p->mark = n = ui_row_leaf(t, UI_FIXED, ui_dev(ui, 7)), n->margin[1] = ui_dev(ui, 17) - n->size[0].value - gap;
@@ -23753,6 +23783,9 @@ static fn ui_row_tree_at(struct ui address_to ui, struct ui_list address_to l, i
                 p->toggle = ui_row_leaf(t, UI_FIXED, ui_dev(ui, UI_SWITCH_W));
         if (row->bars > 0)
                 p->bars = n = ui_row_leaf(t, UI_FIXED, ui_signal_width(ui)), n->margin[0] = ui_dev(ui, 18) - n->size[0].value;
+        // A row's remove button is its last part, a finger's target wide.
+        if (row->remove)
+                p->remove = ui_row_leaf(t, UI_FIXED, ui_dev(ui, 32));
         if (row->tall)
         {
                 int count = row->strip_count < 0 || !row->strip_bytes || !row->strip_roles ? 0 : row->strip_count > UI_STRIP_MOST ? UI_STRIP_MOST : row->strip_count;
@@ -23923,6 +23956,13 @@ static struct ui_control address_to ui_list_row_place(struct ui address_to ui, s
         if (c->kind == UI_SLIDER)
                 c->hover_x = c->hover ? ui_slider_along(ui, c, l->pointer_x, l->pointer_y) : -1, c->pointer_x = l->pointer_x, c->pointer_y = l->pointer_y;
         return c;
+}
+
+// Whether px (device pixels) is over a part of the row just laid out at its place (its grip, its remove button), with a little to spare each side.
+static b32 ui_list_part_x(const struct ui address_to ui, const struct ui_list address_to l, const struct ui_node address_to n, int px)
+{
+        (void)l;
+        return n && px >= n->x - ui_dev(ui, 4) && px < n->x + n->w + ui_dev(ui, 4);
 }
 
 // The baseline of a role's line centred down a part.
@@ -24563,6 +24603,27 @@ static fn ui_list_row(struct ui address_to ui, struct ui_list address_to l, int 
                             row.mark_ink ? row.mark_ink : ui_role(UI_PRIMARY), null);
         if ((n = p->check) && seen && row.on)
                 ui_list_check_draw(ui, &row, n, row.check == UI_ROW_CHECK_RADIO ? ui_role(UI_PRIMARY) : strong);
+        // An ordered row's grip, in the quiet ink, and the ink where the hand is over it or holds it.
+        if ((n = p->grip) && seen)
+        {
+                int side = n->w < n->h ? n->w : n->h;
+                b32 held = l->lift == id + 1 || (l->hover == id && ui_list_part_x(ui, l, n, l->pointer_x));
+                ui_icon(ui, UI_ICON_GRIP, n->x + (n->w - side) / 2, n->y + (n->h - side) / 2, side, 0, held ? strong : quiet);
+        }
+        // A row's remove button: the cross in the quiet ink, on a round well where the hand is over it, pressed while it holds it.
+        if ((n = p->remove) && seen)
+        {
+                int side = ui_dev(ui, 16), well = ui_dev(ui, 28);
+                b32 over = l->hover == id && ui_list_part_x(ui, l, n, l->pointer_x), held = l->remove_down == id + 1;
+                if (over || held)
+                        ui_kit_fill(ui, &(struct ui_box){(n->x + (n->w - well) / 2) * 256, (n->y + (n->h - well) / 2) * 256,
+                                                        (n->x + (n->w + well) / 2) * 256, (n->y + (n->h + well) / 2) * 256, well * 128, well * 128},
+                                    ui_well(ui, UI_ON_SURFACE, held ? 24 : 12), null);
+                ui_icon(ui, UI_ICON_REMOVE, n->x + (n->w - side) / 2, n->y + (n->h - side) / 2, side, 0, over || held ? strong : quiet);
+        }
+        // An add row's label and its plus are the accent's.
+        if (row.kind == UI_ROW_ADD)
+                ink = strong = ui_role(UI_PRIMARY) | 0xff000000u;
         if ((n = p->icon) && !cols && !l->tree && seen)
         {
                 int icon_side = n->w < n->h ? n->w : n->h;
@@ -24772,6 +24833,8 @@ static void ui_list_fold_step(struct ui address_to ui, struct ui_list address_to
 }
 
 // The list drawn: the headers of the sections in view and their rows, cut to the list's band, and its scrollbar.
+static int ui_list_group(struct ui_list address_to l, int at, int address_to first, int address_to last); // below: an ordered group's places
+
 static fn ui_list_draw(struct ui address_to ui, struct ui_list address_to l)
 {
         UI_CALL();
@@ -24806,9 +24869,14 @@ static fn ui_list_draw(struct ui address_to ui, struct ui_list address_to l)
         {
                 int section_row = 0;
                 b32 section_table = false;
+                // A row lifted by its grip is drawn over the others where the hand holds it, and its group's rows between where it was and
+                // where it would land make room for it, a place up or down (ui_list_lift_follow).
+                int lift_at = l->lift ? ui_list_at(l, l->lift - 1) : -1, lift_first = 0, lift_last = -1;
+                if (lift_at >= 0)
+                        ui_list_group(l, lift_at, &lift_first, &lift_last);
                 for (int at = 0; at < l->count; at++)
                 {
-                        int y = ui_list_row_y(l, at), height = l->tall[at];
+                        int y = ui_list_row_y(l, at), height = l->tall[at], shift = 0;
                         int col_h = (l->starts[at] & UI_LIST_COLUMNS) ? ui_dev(ui, UI_COLUMNS_H) : 0;
                         int sec_h = (l->starts[at] & UI_LIST_HEADED) ? ui_dev(ui, UI_SECTION) : 0;
                         if (y - col_h - sec_h >= l->y + l->h)
@@ -24837,8 +24905,16 @@ static fn ui_list_draw(struct ui address_to ui, struct ui_list address_to l)
                                         }
                                 }
                         }
+                        if (lift_at >= 0 && at >= lift_first && at <= lift_last && at != lift_at)
+                        {
+                                int from = lift_at - lift_first, k = at - lift_first;
+                                shift = l->lift_to > from && k > from && k <= l->lift_to   ? -l->tall[lift_at]
+                                        : l->lift_to < from && k >= l->lift_to && k < from ? l->tall[lift_at]
+                                                                                           : 0;
+                        }
+                        y += shift;
                         // A row folding is cut to its share: its words stay in it while it shows less than its line (a row, or its lines).
-                        if (height > 0 && y + height > l->y && y < l->y + l->h)
+                        if (height > 0 && y + height > l->y && y < l->y + l->h && at != lift_at)
                         {
                                 int band_top = ui->top, band_bottom = ui->bottom;
                                 if (height < l->whole[at])
@@ -24855,6 +24931,17 @@ static fn ui_list_draw(struct ui address_to ui, struct ui_list address_to l)
                                 ui->top = band_top, ui->bottom = band_bottom;
                         }
                         section_row++;
+                }
+                if (lift_at >= 0)
+                {
+                        int across, wide, height = l->tall[lift_at], radius = ui_dev(ui, 8);
+                        struct ui_box plate;
+                        ui_list_across(l, &across, &wide);
+                        plate = (struct ui_box){across * 256, l->lift_y * 256, (across + wide) * 256, (l->lift_y + height) * 256, radius * 256, radius * 256};
+                        ui->top = l->y, ui->bottom = l->y + l->h;
+                        ui_kit_fill(ui, &plate, ui_role(UI_SURFACE_HIGHEST) | 0xff000000u, null);
+                        ui_kit_ring(ui, &plate, ui_q8(ui, 1), ui_well(ui, UI_OUTLINE_VARIANT, 80));
+                        ui_list_row(ui, l, l->lift - 1, l->lift_y, height);
                 }
         }
         l->scroll.scroll = drawn;
@@ -24989,6 +25076,11 @@ static fn ui_press_cancel(struct ui_press address_to press)
 
 static fn ui_list_press_cancel(const struct ui address_to ui, struct ui_list address_to l)
 {
+        // A lifted row goes back where it was, and a held remove button does nothing.
+        if (l->lift)
+                l->lift = 0, ui_list_damage_all(ui, l);
+        if (l->remove_down)
+                l->remove_down = 0, ui_list_damage_all(ui, l);
         ui_press_cancel(&l->press);
         l->scroll.held = false;
         ui_scroll_let_go(&l->scroll, 0);
@@ -25094,6 +25186,143 @@ static fn ui_list_chord_band(const struct ui address_to ui, struct ui_list addre
         l->band_began = true;
 }
 
+/*
+        The person's management of a list's rows (ui_row.order, ui_row.remove): what part of row id a press at px (device pixels) is on, 1 its grip,
+        2 its remove button, 0 neither; an ordered group's places (the run of places round at whose rows have its order); and a row lifted by its
+        grip, which follows the hand while the rest of its group makes room (ui_list_draw), and is let go where the hand leaves it: the app is told
+        the move (ui_list.moved) and puts its items in that order.
+*/
+static int ui_list_part_at(struct ui address_to ui, struct ui_list address_to l, int id, int px)
+{
+        struct ui_row row;
+        const struct ui_row_parts address_to p = &ui_row_parts;
+        int x = ui_point(px, l->x, l->w) - l->x, spare = ui_dev(ui, 4);
+        ui_list_describe(l, id, &row);
+        if (!row.order && !row.remove)
+                return 0;
+        ui_row_tree(ui, l, id, &row, ui_list_pitch(ui, l), false);
+        if (p->grip && x >= p->grip->x - spare && x < p->grip->x + p->grip->w + spare)
+                return 1;
+        if (p->remove && x >= p->remove->x - spare && x < p->remove->x + p->remove->w + spare)
+                return 2;
+        return 0;
+}
+
+static int ui_list_group(struct ui_list address_to l, int at, int address_to first, int address_to last)
+{
+        struct ui_row row;
+        int order;
+        ui_list_describe(l, ui_list_id(l, at), &row);
+        order = row.order, *first = *last = at;
+        while (*first > 0 && (ui_list_describe(l, ui_list_id(l, *first - 1), &row), row.order == order))
+                (*first)--;
+        while (*last + 1 < l->count && (ui_list_describe(l, ui_list_id(l, *last + 1), &row), row.order == order))
+                (*last)++;
+        return order;
+}
+
+// Where the lifted row would land among its group's rows: how many of the others have their middle above its own, or level with it (held
+// against the group's end, its middle is its last row's, and it lands past it).
+static fn ui_list_lift_follow(const struct ui address_to ui, struct ui_list address_to l, int y)
+{
+        int at = ui_list_at(l, l->lift - 1), first, last, top, bottom, to = 0, middle;
+        if (at < 0)
+                return;
+        ui_list_group(l, at, &first, &last);
+        top = ui_list_row_y(l, first), bottom = ui_list_row_y(l, last) + l->tall[last] - l->tall[at];
+        l->lift_y = y - l->lift_grab;
+        l->lift_y = l->lift_y < top ? top : l->lift_y > bottom ? bottom : l->lift_y;
+        middle = l->lift_y + l->tall[at] / 2;
+        for (int k = first; k <= last; k++)
+                if (k != at && ui_list_row_y(l, k) + l->tall[k] / 2 <= middle)
+                        to++;
+        l->lift_to = to;
+        ui_list_damage_all(ui, l);
+}
+
+static fn ui_list_lift(const struct ui address_to ui, struct ui_list address_to l, int id, int y)
+{
+        int at = ui_list_at(l, id), first, last;
+        if (at < 0)
+                return;
+        ui_list_group(l, at, &first, &last);
+        ui_list_grab_set(l, UI_LIST_GRAB_LIFT);
+        l->lift = id + 1, l->lift_grab = y - ui_list_row_y(l, at), l->lift_y = ui_list_row_y(l, at), l->lift_to = at - first;
+        ui_list_damage_all(ui, l);
+}
+
+static fn ui_list_lift_end(const struct ui address_to ui, struct ui_list address_to l, b32 cancelled)
+{
+        int at = l->lift ? ui_list_at(l, l->lift - 1) : -1, first, last, order;
+        if (at >= 0)
+        {
+                order = ui_list_group(l, at, &first, &last);
+                if (!cancelled && l->lift_to != at - first)
+                        l->moved = true, l->moved_from = at - first, l->moved_to = l->lift_to, l->moved_order = order;
+        }
+        l->lift = 0;
+        ui_list_grab_set(l, UI_LIST_GRAB_NONE);
+        ui_list_damage_all(ui, l);
+}
+
+/*
+        The keys' management of the row they are on: Alt+Up and Alt+Down move an ordered row one place among its group's (none past its ends),
+        Delete takes away a row with a remove button. True when the key was one of these on such a row (the app keeps what ui_list.moved or
+        ui_list.removed say).
+*/
+static b32 ui_list_manage_key(struct ui address_to ui, struct ui_list address_to l, const struct window_event address_to event)
+{
+        struct ui_row row;
+        int at, first, last, order;
+        b32 alt = (event->flags & WINDOW_KEY_ALT) != 0;
+        if (event->type != WINDOW_EVENT_KEY || !(event->flags & WINDOW_KEY_DOWN) || l->focus < 0 || (at = ui_list_at(l, l->focus)) < 0)
+                return false;
+        ui_list_describe(l, l->focus, &row);
+        if (event->a == UI_KEY_DELETE && !alt && row.remove)
+                return l->removed = l->focus + 1, true;
+        if (!alt || !row.order || (event->a != UI_KEY_UP && event->a != UI_KEY_DOWN))
+                return false;
+        order = ui_list_group(l, at, &first, &last);
+        if ((event->a == UI_KEY_UP && at == first) || (event->a == UI_KEY_DOWN && at == last))
+                return true;
+        l->moved = true, l->moved_from = at - first, l->moved_to = at - first + (event->a == UI_KEY_UP ? -1 : 1), l->moved_order = order;
+        ui_list_damage_all(ui, l);
+        return true;
+}
+
+/*
+        An add row's ways (its words, a blank apart) as a menu under it, where they are two or more: each item's id is UI_LIST_WAY plus its number
+        from 0. False where the row has one way or none (the app adds it at once).
+*/
+#define UI_LIST_WAY 0x200
+static b32 ui_list_ways(struct ui address_to ui, struct ui_list address_to l, struct ui_popup address_to popup, struct window_row address_to own, int id)
+{
+        static char ways[UI_ROW_WAYS][UI_ROW_WAY_TEXT];
+        struct ui_row row;
+        int x, y, w, h, count = 0;
+        const char address_to at;
+        ui_list_describe(l, id, &row);
+        if (row.kind != UI_ROW_ADD || !row.words || !popup || !ui_list_row_rect(l, id, &x, &y, &w, &h))
+                return false;
+        for (at = row.words; *at && count < UI_ROW_WAYS;)
+        {
+                positive length = 0;
+                while (at[length] && at[length] != '|')
+                        length++;
+                if (length && length < UI_ROW_WAY_TEXT)
+                        memory_copy(ways[count], at, length), ways[count][length] = 0, count++;
+                at += length + (at[length] == '|');
+        }
+        if (count < 2)
+                return false;
+        popup->menu.count = 0;
+        for (int k = 0; k < count; k++)
+                ui_popmenu_add(&popup->menu, ways[k], null, 0, UI_LIST_WAY + k);
+        popup->field = null, popup->list = null, popup->list_row = -1;
+        ui_popmenu_open(popup, own, ui, ui_rtl() ? x + w - ui_dev(ui, UI_INSET) : x + ui_dev(ui, UI_INSET), y + h, 0, 0, WINDOW_POPUP_POINT, false);
+        return true;
+}
+
 static int ui_list_click(struct ui address_to ui, struct ui_list address_to l, const struct window_event address_to event, int x, int y)
 {
         b32 touch = (event->flags & WINDOW_KEY_TOUCH) != 0, cancelled = (event->flags & WINDOW_KEY_CANCEL) != 0;
@@ -25105,6 +25334,8 @@ static int ui_list_click(struct ui address_to ui, struct ui_list address_to l, c
         l->drag_began = l->band_began = l->band_moved = l->ground_clicked = l->double_clicked = l->menu_asked = false;
         if (event->type == WINDOW_EVENT_MOTION)
         {
+                if (l->grab == UI_LIST_GRAB_LIFT)
+                        return ui_list_lift_follow(ui, l, y), -1;
                 if (l->grab == UI_LIST_GRAB_BAND)
                 {
                         l->band_moved = ui_list_band_follow(l, x, y);
@@ -25168,6 +25399,14 @@ static int ui_list_click(struct ui address_to ui, struct ui_list address_to l, c
                         return ui_list_chord_band(ui, l, x, y), -1;
                 ui_list_grab_set(l, UI_LIST_GRAB_NONE);
                 row = ui_list_hit(ui, l, x, y);
+                // A press on an ordered row's grip lifts the row; on a row's remove button, holds the button till it is let go.
+                {
+                        int part = row >= 0 ? ui_list_part_at(ui, l, row, x) : 0;
+                        if (part == 1)
+                                return ui_list_lift(ui, l, row, y), -1;
+                        if (part == 2)
+                                return ui_list_grab_set(l, UI_LIST_GRAB_REMOVE), l->remove_down = row + 1, ui_list_damage(ui, l, row), -1;
+                }
                 if (l->selected && !touch && !(event->flags & (WINDOW_KEY_CONTROL | WINDOW_KEY_SHIFT)) && row >= 0 && l->selected(row))
                 {
                         ui_list_grab_set(l, UI_LIST_GRAB_DRAG);
@@ -25192,6 +25431,17 @@ static int ui_list_click(struct ui address_to ui, struct ui_list address_to l, c
         if (l->grab == UI_LIST_GRAB_BAND || l->grab == UI_LIST_GRAB_CHORD)
         {
                 ui_list_grab_set(l, (ui_kit.buttons & UI_BTN_RIGHT) ? UI_LIST_GRAB_CHORD : UI_LIST_GRAB_NONE);
+                return -1;
+        }
+        if (l->grab == UI_LIST_GRAB_LIFT)
+                return ui_list_lift_end(ui, l, cancelled), -1;
+        if (l->grab == UI_LIST_GRAB_REMOVE)
+        {
+                int was = l->remove_down - 1;
+                ui_list_grab_set(l, UI_LIST_GRAB_NONE), l->remove_down = 0, ui_list_damage(ui, l, was);
+                row = ui_list_hit(ui, l, x, y);
+                if (!cancelled && row == was && ui_list_part_at(ui, l, row, x) == 2)
+                        l->removed = was + 1;
                 return -1;
         }
         if (l->grab == UI_LIST_GRAB_DRAG)
