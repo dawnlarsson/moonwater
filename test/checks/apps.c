@@ -11017,6 +11017,7 @@ b32 main()
         GROUP("check_kit_browser_files", check_kit_browser_files());
         GROUP("check_kit_cells", check_kit_cells());
         GROUP("check_kit_stripes", check_kit_stripes());
+        GROUP("check_kit_captions", check_kit_captions());
         GROUP("check_kit_file_icons", check_kit_file_icons());
         GROUP("check_kit_view_pull", check_kit_view_pull());
         GROUP("check_kit_graph", check_kit_graph());

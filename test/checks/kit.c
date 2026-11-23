@@ -5584,6 +5584,43 @@ static fn check_kit_stripes(void)
               (accent & 0xffffffu) == (ui_role(UI_PRIMARY) & 0xffffffu) && accent >> 24 == UI_LIST_STRIPE_ACCENT && ui_list_stripe_colour(&ui, &l) == 0x40123456u);
 }
 
+// Rows 1 and 4 of six are captions (a tree's bands): the rest plain.
+static void caption_row(int id, struct ui_row address_to row)
+{
+        row->label = id == 1 || id == 4 ? "Drives" : "";
+        row->kind = id == 1 || id == 4 ? UI_ROW_CAPTION : UI_ROW_PLAIN;
+}
+
+/*
+        A caption row (UI_ROW_CAPTION, a tree's band): the hand is over no row there (ui_list_hit), the keys pass over it either way
+        (ui_list_move, Down from the row before it and Up from the row after it), and it draws no fill where the keys or the hand are.
+*/
+static fn check_kit_captions(void)
+{
+        static unsigned int pixels[300 * 400], scratch[300 * UI_SCRATCH_ROWS];
+        static struct ui_list l;
+        struct ui ui = terminal.ui;
+        int row;
+        b32 hit, keys, quiet;
+
+        ui.pixels = pixels, ui.pitch = 300, ui.width = 300, ui.height = 400, ui.top = 0, ui.bottom = 400, ui.scale = 100, ui.scene = null;
+        ui.scratch = scratch, ui.scratch_width = 300, ui.band_top = ui.band_bottom = 0, ui.glass = false, ui.opaque = true;
+        ui_kit.motion = 0, row = ui_dev(&ui, UI_ROW);
+        memory_zero(&l, sizeof(l));
+        l.virtual = true, l.total = 6, l.describe = caption_row, l.empty = "", l.focus = 0, l.lit = true, l.keys = true, l.hover = l.down = -1;
+        ui_list_place(&ui, &l, 10, 0, 280, 6 * row);
+        ui_list_layout(&ui, &l);
+        hit = ui_list_hit(&ui, &l, 150, row + row / 2) == -1 && ui_list_hit(&ui, &l, 150, row / 2) == 0 && ui_list_hit(&ui, &l, 150, 2 * row + row / 2) == 2;
+        keys = ui_list_move(&ui, &l, 1) && l.focus == 2 && ui_list_move(&ui, &l, -1) && l.focus == 0;
+        l.focus = 3, keys = keys && ui_list_move(&ui, &l, 1) && l.focus == 5 && ui_list_move(&ui, &l, -1) && l.focus == 3;
+        l.focus = 1, l.hover = 1;
+        for (int p = 0; p < 300 * 400; p++)
+                pixels[p] = 0xff202020u;
+        ui_list_draw(&ui, &l);
+        quiet = pixels[(row + 4) * 300 + 280] == 0xff202020u;
+        check("kit list: a caption row is no row the hand is over, the keys pass over it either way, and it has no fill where the keys and the hand are", hit && keys && quiet);
+}
+
 /*
         A file's symbol: its kind from its name and mode (a folder by its mode whatever its name, one anyone may run a program whatever its
         extension, an extension it is known by in either case, a device special, none plain), and drawn crisp: a shut folder at 16 and at

@@ -19470,6 +19470,7 @@ enum
         UI_ICON_REMOVE,     // a cross: take this away (a list row's remove button, ui_row.remove)
         UI_ICON_GRIP,       // six dots, two by three: a handle to move a row by (an ordered row's, ui_row.order)
         UI_ICON_STOP,       // a square filled: stop what plays (a file browser's CD)
+        UI_ICON_EJECT,      // a triangle over a bar: take a medium out (a file browser's stick or disc, ui_row.remove_icon)
         UI_ICON_COUNT
 };
 
@@ -19500,6 +19501,7 @@ static const struct ui_icon_part ui_icon_parts[UI_ICON_COUNT][UI_ICON_PARTS] = {
         [UI_ICON_GRIP] = {{UI_ICON_BOX, 12, 7, 21, 16, 1}, {UI_ICON_BOX, 27, 7, 36, 16, 1}, {UI_ICON_BOX, 12, 19, 21, 28, 1},
                           {UI_ICON_BOX, 27, 19, 36, 28, 1}, {UI_ICON_BOX, 12, 31, 21, 40, 1}, {UI_ICON_BOX, 27, 31, 36, 40, 1}},
         [UI_ICON_STOP] = {{UI_ICON_BOX, 13, 13, 35, 35, 3}},
+        [UI_ICON_EJECT] = {{UI_ICON_LINE, 11, 27, 24, 12, 0}, {UI_ICON_LINE, 24, 12, 37, 27, 0}, {UI_ICON_LINE, 11, 27, 37, 27, 0}, {UI_ICON_BOX, 11, 32, 37, 36, 1}},
         [UI_ICON_KEYBOARD] = {{UI_ICON_RING, 4, 12, 44, 36, 4}, {UI_ICON_BOX, 10, 18, 15, 22, 1}, {UI_ICON_BOX, 18, 18, 23, 22, 1},
                               {UI_ICON_BOX, 26, 18, 31, 22, 1}, {UI_ICON_BOX, 34, 18, 38, 22, 1}, {UI_ICON_LINE, 14, 29, 34, 29, 0}},
         [UI_ICON_GAMEPAD] = {{UI_ICON_RING, 4, 13, 44, 37, 11}, {UI_ICON_LINE, 11, 25, 21, 25, 0}, {UI_ICON_LINE, 16, 20, 16, 30, 0}, {UI_ICON_BOX, 29, 19, 35, 25, 3},
@@ -22642,6 +22644,8 @@ static p32 ui_strips_event(struct ui address_to ui, struct ui_strips address_to 
 // A row that is an action:
 #define UI_ROW_BUTTON 9
 #define UI_ROW_ADD 10 // a list's add row: a plus and its label in the accent; its words, where they are two or more, the ways to add (ui_list_ways)
+#define UI_ROW_CAPTION 11 // a caption over the rows after it (a tree's band): its label small and quiet at its indent, no row of its own: no fill,
+                          // no hover, never pressed (ui_list_hit has none there) and never where the keys stop (ui_list_move passes it)
 #define UI_ROW_WAYS 8         // the most ways an add row's menu has, its words a '|' apart
 #define UI_ROW_WAY_TEXT 96    // and the most bytes of one
 #define UI_ROW_REMOVE_W 32    // a row's remove button (ui_row.remove), logical pixels
@@ -22743,6 +22747,7 @@ struct ui_row
         int order;                         // an ordered group (non-zero): the rows of one, in the list's order, are the person's to rearrange by the grip at
                                            // each one's start, a drag or Alt+Up and Alt+Down (ui_list.moved); 0 a row that stays where the app puts it
         b32 remove;                        // a remove button at the row's end, and Delete while the keys are on it (ui_list.removed)
+        int remove_icon;                   // its symbol, UI_ICON_* + 1 (an eject's): quiet, the ink under the hand; 0 the cross, red under the hand
         unsigned int cell_check;           // under columns: the cells (bit k, column k, 1 on) that are a check the person presses in place (ui_list.toggled)
         unsigned int cell_on;              // which of those checks are on
         unsigned int cell_dim;             // which of those are dimmed: shown as they stand, and pressed still (the app says why it does not turn)
@@ -23394,7 +23399,13 @@ static int ui_list_hit(const struct ui address_to ui, const struct ui_list addre
                 if (inside < 0)
                         return -1;
                 if (!l->tiles)
-                        return inside / row < l->total ? inside / row : -1;
+                {
+                        struct ui_row said;
+                        if (inside / row >= l->total)
+                                return -1;
+                        ui_list_describe(l, inside / row, &said);
+                        return said.kind == UI_ROW_CAPTION ? -1 : inside / row;
+                }
                 // A centred line begins where its tiles do (ui_list_line_in), and a point before it is on none.
                 column = ui_point(x, l->x, l->w) - l->x - ui_list_line_in(ui, l, inside / row);
                 column = column < 0 ? -1 : column / ui_dev(ui, l->tiles);
@@ -23458,6 +23469,25 @@ static b32 ui_list_move(const struct ui address_to ui, struct ui_list address_to
         by = by < -last - 1 ? -last - 1 : by > last + 1 ? last + 1 : by;
         at = (at < 0 ? -1 : at) + by; // with no row the keys count from above the first, so Down takes it
         at = at < 0 ? 0 : at > last ? last : at;
+        // A caption is passed over in the direction of the keys (the end's row is the one before it); none past it, the focus stays.
+        {
+                int step = by < 0 ? -1 : 1, to = at;
+                struct ui_row said;
+                for (int turn = 0; turn < 2; turn++, step = -step, to = at)
+                {
+                        for (; to >= 0 && to <= last; to += step)
+                        {
+                                ui_list_describe(l, l->virtual ? to : l->id[to], &said);
+                                if (said.kind != UI_ROW_CAPTION)
+                                        break;
+                        }
+                        if (to >= 0 && to <= last)
+                                break;
+                }
+                if (to < 0 || to > last)
+                        return false;
+                at = to;
+        }
         // A row the list's choosable hook refuses is passed over in the direction of the keys; no choosable row past it, the focus stays.
         if (l->choosable)
         {
@@ -24890,6 +24920,16 @@ static fn ui_list_row(struct ui address_to ui, struct ui_list address_to l, int 
         // Whether any of its rows may be written, with room for a run's rows round its line.
         b32 seen = ui_rows_seen(ui, y - ui_dev(ui, 4), y + height + ui_dev(ui, 4));
         ui_list_describe(l, id, &row);
+        if (row.kind == UI_ROW_CAPTION)
+        {
+                // A caption: its words, small and quiet, set in as a row of its indent is, low in its row (it heads the rows under it).
+                int x = l->x + ui_dev(ui, UI_INSET) + ui_dev(ui, UI_INDENT) * row.indent, room = l->w - (x - l->x) - ui_dev(ui, UI_INSET);
+                char cut[UI_CUT_TEXT];
+                if (room > 0 && row.label)
+                        ui_kit_text_flipped(ui, x, ui_kit_baseline(ui, y + height - ui_dev(ui, 20), UI_LABEL_MEDIUM),
+                                            ui_fit(ui, (string_address)row.label, UI_LABEL_MEDIUM, room, cut, sizeof(cut)), UI_LABEL_MEDIUM, quiet, 0, l->x, l->w);
+                return;
+        }
         trailing = ui_list_row_place(ui, l, id, &row, y, height, seen);
         ui_list_across(l, &across, &across_w);
         if (row.separator)
@@ -24982,8 +25022,8 @@ static fn ui_list_row(struct ui address_to ui, struct ui_list address_to l, int 
         {
                 int side = ui_dev(ui, 14);
                 b32 over = l->hover == id && ui_list_part_x(ui, l, n, l->pointer_x), held = l->remove_down == id + 1;
-                unsigned int red = ui_role(UI_ERROR) | 0xff000000u;
-                ui_icon(ui, UI_ICON_REMOVE, n->x + (n->w - side) / 2, n->y + (n->h - side) / 2, side, 0,
+                unsigned int red = row.remove_icon ? strong | 0xff000000u : ui_role(UI_ERROR) | 0xff000000u;
+                ui_icon(ui, row.remove_icon ? row.remove_icon - 1 : UI_ICON_REMOVE, n->x + (n->w - side) / 2, n->y + (n->h - side) / 2, side, 0,
                         held ? ui_mix(red, 75, strong | 0xff000000u) : over ? red : quiet);
         }
         // An add row's label and its plus are the accent's.
