@@ -196,6 +196,7 @@ struct wayland_host
         // row, or -WAYLAND_STAND_WAITING (the window is the client's and not shown yet, or its X client is not named yet),
         // -WAYLAND_STAND_UNKNOWN (no X server of the compositor has it), -WAYLAND_STAND_NOT_OWNER (another X client made it).
         long (*stand_in)(void *context, long client, unsigned long window);
+        void (*frame_sent)(void *context, int row); // a row's frame callbacks answered (the frames trace's C mark); may be null
 };
 
 struct wayland_object { unsigned int id; unsigned char iface, version; unsigned short flags; int link; unsigned int aux; };
@@ -6532,11 +6533,13 @@ static void wayland_callbacks_due(long now)
         {
                 struct wayland_client *c, *sc;
                 struct wayland_surface *s = wayland_row_surface(row, &c), *st = wayland_row_stand(row, &sc);
+                int sent = 0;
                 if (s && c->waiting && wayland_tree_has_cb(c, s, WLCB_READY) && !wayland_row_suspended(row))
                         for (struct wayland_surface *o = s; o; o = wayland_tree_next(c, s, o))
-                                wayland_callbacks_done(c, o, now);
+                                wayland_callbacks_done(c, o, now), sent = 1;
                 if (st && st->cbq[WLCB_READY].count && !wayland_row_suspended(row))
-                        wayland_callbacks_done(sc, st, now);
+                        wayland_callbacks_done(sc, st, now), sent = 1;
+                if (sent && wayland.host->frame_sent) wayland.host->frame_sent(wayland.host->context, (int)row);
         }
 }
 

@@ -3,19 +3,42 @@
 
     frames.py FRAMES.txt [ROW]
 
-The file is a line an event: "T ROW NS" a window's new picture taken, "P - NS" a present made, "V - NS" the vblank a flip landed on.
-For the window with the most pictures (or ROW): its frame times (picture to picture), fps, the 50th, 99th and 99.9th percentile frame
-time and the 1% and 0.1% lows (the fps of the slowest 1% and 0.1% of frames, averaged), the longest gap; the pictures replaced before a
-present showed them (dropped); the time from a picture to the vblank that showed it; and the refreshes between shown pictures (pacing:
-how many vblanks each shown picture stayed). Standard library only.
+The file is a line an event: "T ROW NS" a window's new picture taken, "B - NS" a present begun, "P - NS" a present made, "F - NS" the
+card's last job of a present done, "C ROW NS" a window's frame callbacks sent, "V - NS" the vblank a flip landed on, "W - NS" a wake or
+the screens taken again (src/canvas/record.h). For the window with the most pictures (or ROW): its frame times (picture to picture), fps,
+the 50th, 99th and 99.9th percentile frame time and the 1% and 0.1% lows (the fps of the slowest 1% and 0.1% of frames, averaged), the
+longest gap; the pictures replaced before a present showed them (dropped); the time from a picture to the vblank that showed it; the
+refreshes between shown pictures (pacing: how many vblanks each shown picture stayed); the time from its frame callback to its next
+picture. For every present: its time from begun to made (B to P), and for the card's, from begun to its job done (B to F). For every
+wake: the window's longest frame time in the two seconds after it. Standard library only.
 """
+import bisect
 import sys
+
+
+def spread(values):
+    """p50, p99 and the most of a list of milliseconds, as text (empty for none)."""
+    if not values:
+        return ""
+    v = sorted(values)
+    return "p50 %.2f, p99 %.2f, max %.2f (%d)" % (v[len(v) // 2], v[int(0.99 * (len(v) - 1))], v[-1], len(v))
+
+
+def after(begins, ends):
+    """Each end paired with the latest begin at or before it (and after the end before it): the spans in milliseconds."""
+    spans, used = [], -1
+    for end in ends:
+        at = bisect.bisect_right(begins, end) - 1
+        if at >= 0 and at > used:
+            spans.append((end - begins[at]) / 1e6)
+            used = at
+    return spans
 
 
 def main():
     if len(sys.argv) < 2:
         raise SystemExit(__doc__)
-    takes, presents, vblanks = {}, [], []
+    takes, presents, vblanks, begins, fences, callbacks, wakes = {}, [], [], [], [], {}, []
     for line in open(sys.argv[1]):
         parts = line.split()
         if len(parts) != 3:
@@ -27,6 +50,17 @@ def main():
             presents.append(when)
         elif kind == "V":
             vblanks.append(when)
+        elif kind == "B":
+            begins.append(when)
+        elif kind == "F":
+            fences.append(when)
+        elif kind == "C":
+            callbacks.setdefault(int(row), []).append(when)
+        elif kind == "W":
+            wakes.append(when)
+    # The ring is in the order the events were noted: a present's B is noted at its end, an F before its P.
+    for marks in [presents, vblanks, begins, fences, wakes] + list(takes.values()) + list(callbacks.values()):
+        marks.sort()
     if not takes:
         raise SystemExit("no window drew a picture in the recording")
     row = int(sys.argv[2]) if len(sys.argv) > 2 else max(takes, key=lambda r: len(takes[r]))
@@ -78,6 +112,15 @@ def main():
         for h in held:
             counts[h] = counts.get(h, 0) + 1
         print("refreshes each shown picture stayed (refresh %.2f ms): %s" % (period / 1e6, ", ".join("%d:%d" % (k, counts[k]) for k in sorted(counts))))
+    if row in callbacks:
+        print("frame callback to its next picture ms: " + spread(after(callbacks[row], t)))
+    if begins:
+        print("present begun to made ms (the loop's, or to the card's jobs seen done): " + spread(after(begins, presents)))
+    if fences:
+        print("present begun to the card's job done ms: " + spread(after(begins, fences)))
+    for wake in wakes:
+        near = [(b - a) / 1e6 for a, b in zip(t, t[1:]) if wake <= b <= wake + 2000000000]
+        print("wake at +%.3f s: the window's longest frame time in the 2 s after it %.2f ms" % ((wake - t[0]) / 1e9, max(near) if near else 0.0))
     others = sorted(((len(v), r) for r, v in takes.items() if r != row), reverse=True)[:4]
     if others:
         print("other windows: " + ", ".join("%d (%d pictures)" % (r, n) for n, r in others))

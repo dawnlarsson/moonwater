@@ -155,6 +155,7 @@ static void compositor_woke(positive now, unsigned int how)
                 return;
         }
         compositor.wakes++;
+        compositor_frametrace_note('W', -1, now);
         if (compositor.table)
                 compositor.table->wakes = compositor.wakes, compositor.table->wake_how = how;
         // The flip the sleep cut off is let go of as landed, and what it held back given back; both plates are drawn whole.

@@ -1233,6 +1233,8 @@ static void compositor_space_retake(void)
         b32 status = 0, turned = 0;
         int gone = compositor.screens_gone, wake = compositor.retrain && compositor.card >= 0;
 
+        if (compositor_frametrace.until)
+                compositor_frametrace_note('W', -1, clock_monotonic_nanoseconds());
         for (unsigned int at = 0; at < was_count && at < WINDOWS_OUTPUTS; at++)
                 memory_copy(was[at].name, compositor.output[at].name, WINDOWS_OUTPUT_NAME), was[at].degrees = compositor.output[at].degrees;
         if (wake && system_control(compositor.card, COMPOSITOR_SET_MASTER, 0) != 0)

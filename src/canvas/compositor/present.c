@@ -624,6 +624,7 @@ static void compositor_card_split(positive now)
 
         if (!signalled || compositor_card.handed < compositor_card.began || signalled < compositor_card.handed || now < signalled)
                 return;
+        compositor_frametrace_note('F', -1, signalled);
         compositor_metric_hand[compositor_metric_split_at] = compositor_card.handed - compositor_card.began;
         compositor_metric_job[compositor_metric_split_at] = signalled - compositor_card.handed;
         compositor_metric_seen[compositor_metric_split_at] = now - signalled;

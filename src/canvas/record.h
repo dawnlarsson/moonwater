@@ -948,10 +948,18 @@ static void compositor_keytrace_end(void)
 
 /*
         moonwater canvas frames SECONDS: for SECONDS (1 to 60), every window's new picture taken (compositor_take: a frame of its program's), every
-        present's end and every flip's vblank, stamped on the monotonic clock into a ring (a compare a stage while nothing runs), and at the end
-        /run/moonwater/record/frames.txt, a line an event: "T ROW NS" for a window's picture taken, "P - NS" for a present made, "V - NS" for the
-        vblank a flip landed on. test/perf/frames.py reads it: the frame times of a game (its window's pictures), its 1% and 0.1% lows, the
-        pictures replaced before a present showed them, and when each reached the screen.
+        present's start and end, the card's job's end, every frame callback, every flip's vblank and every wake, stamped on the monotonic clock into
+        a ring (a compare a stage while nothing runs), and at the end /run/moonwater/record/frames.txt, a line an event:
+                "T ROW NS" a window's picture taken,
+                "B - NS" a present begun, "P - NS" a present made (for a present the card draws, when its jobs were seen done),
+                "F - NS" the card's last job of a present done (its fence's own stamp, SYNC_IOC_FILE_INFO: compositor_card_split),
+                "C ROW NS" a Wayland window's frame callbacks sent (wayland_callbacks_due),
+                "V - NS" the vblank a flip landed on,
+                "W - NS" a wake from sleep, or the screens taken again (a mode set) begun.
+        The ring starts at COMPOSITOR_FRAMETRACE_RING events and grows as it fills. test/perf/frames.py reads it: the frame times of a game (its
+        window's pictures), its 1% and 0.1% lows, the pictures replaced before a present showed them, when each reached the screen; and from the
+        marks a present's cost in the loop (B to P, or to F), its card's time (F after B), a client's callback to its next picture (C to T), and
+        the frames around each wake.
 */
 #define COMPOSITOR_FRAMETRACE_RING 131072
 #define COMPOSITOR_FRAMETRACE_MAX_SECONDS 60
@@ -965,8 +973,17 @@ static struct
 
 static void compositor_frametrace_note(char kind, int row, unsigned long long when)
 {
-        if (!compositor_frametrace.until || !compositor_frametrace.ring || compositor_frametrace.count >= COMPOSITOR_FRAMETRACE_RING)
+        if (!compositor_frametrace.until || !compositor_frametrace.ring)
                 return;
+        if ((unsigned long)(compositor_frametrace.count + 1) * sizeof(compositor_frametrace.ring[0]) > compositor_frametrace.bytes)
+        {
+                void *p = compositor_frametrace.ring;
+
+                if (!mem_buf_grow(&p, &compositor_frametrace.bytes, (unsigned long)(compositor_frametrace.count + 1) * sizeof(compositor_frametrace.ring[0]),
+                                  MEM_BUF_KEEP | MEM_BUF_GROW_2X))
+                        return;
+                compositor_frametrace.ring = p;
+        }
         compositor_frametrace.ring[compositor_frametrace.count].when = when;
         compositor_frametrace.ring[compositor_frametrace.count].row = row;
         compositor_frametrace.ring[compositor_frametrace.count++].kind = kind;
@@ -1113,6 +1130,7 @@ static void compositor_record_present(unsigned long long began, unsigned long lo
                 compositor_record_capture(ended);
         if (compositor_frametrace.until)
         {
+                compositor_frametrace_note('B', -1, began);
                 compositor_frametrace_note('P', -1, ended);
                 if (ended >= compositor_frametrace.until)
                         compositor_frametrace_end();

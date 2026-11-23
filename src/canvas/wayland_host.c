@@ -4851,6 +4851,14 @@ static int compositor_wl_dmabuf_signaled(void *context, long fd)
         return (watch.returned & COMPOSITOR_POLLIN) != 0;
 }
 
+// A row's frame callbacks sent (wayland_callbacks_due): the frames trace's C mark (moonwater canvas frames), the client's go to draw its next picture.
+static void compositor_wl_frame_sent(void *context, int row)
+{
+        (void)context;
+        if (compositor_frametrace.until)
+                compositor_frametrace_note('C', row, clock_monotonic_nanoseconds());
+}
+
 static int compositor_wl_row_busy(void *context, int row)
 {
         (void)context;
@@ -4870,7 +4878,7 @@ static const struct wayland_host compositor_wl_host = {
         compositor_wl_clip_type, compositor_wl_clip_pull, compositor_wl_clip_abort, compositor_wl_clip_push, compositor_wl_clip_clear,
         compositor_wl_dmabuf_signaled, compositor_wl_random, compositor_wl_row_layers, compositor_wl_row_busy, compositor_wl_reserve,
         compositor_wl_commit, compositor_wl_unreserve, compositor_wl_xreceive, compositor_wl_xdrag, compositor_wl_row_app,
-        compositor_wl_stand_in,
+        compositor_wl_stand_in, compositor_wl_frame_sent,
 };
 
 /* ---- the socket ---- */
