@@ -4847,7 +4847,7 @@ static void game_pids_rows(void)
         const int wl_row = 4, x_row = 5;
         struct windows_owner kept_wl = windows_owner_held[wl_row], kept_x = windows_owner_held[x_row];
         char value[64];
-        b32 wayland_ok, x_ok, x_alone, forged, other_server, environ_ok;
+        b32 wayland_ok, x_ok, x_alone, forged, other_server, wrapped = 0, environ_ok;
 
         // The game stands as a child of this process, held until the rows are done (the runner's parent may be outside its pid namespace: 0).
         compositor_call(syscall(pipe2), (positive)ends, 0x80000, 0, 0, 0, 0);
@@ -4882,12 +4882,29 @@ static void game_pids_rows(void)
                 forged = compositor_row_pids(x_row, 0, 1, got) == 0;
                 compositor.table->pid[x_row] = parent, x->peer_pid = (int)parent; // the window's server is not the row's claim: refused
                 other_server = compositor_row_pids(x_row, 0, 1, got) == 0;
+                // As the steam session starts it: the window manager's connection is the wrapper's (this process), the server is its
+                // child (the Wayland client, whose pid is the row's claim), and the client the server named is this process.
+                {
+                        struct wayland_client server_client = {0}, *clients[1] = {&server_client}, **kept_clients = wayland.client;
+                        long kept_slots = wayland.client_slots;
+
+                        server_client.live = 1, server_client.pid = parent, wayland.client = clients, wayland.client_slots = 1;
+                        x->client = x->client_pid = -1, x->peer_pid = (int)self;
+                        if (w)
+                                w->owner = self;
+                        windows_owner_take(&windows_owner_held[x_row], parent), compositor.table->pid[x_row] = self;
+                        n = compositor_row_pids(x_row, 0, 1, got);
+                        wrapped = w && n == 2 && got[0] == self && got[1] == parent;
+                        wayland.client = kept_clients, wayland.client_slots = kept_slots, x->client = x->client_pid = -1;
+                }
                 if (w)
                         compositor_xwm_release(w);
         }
         check("game: a Wayland game is its claim; an X game is its X client and its X server (Xwayland), the client alone for the background",
               wayland_ok && x_ok && x_alone);
         check("game: an X row's pid the X window manager did not name, or a window of another server than the row's claim, is refused", forged && other_server);
+        check("game: an X row of a server a wrapper started (the window manager's connection the wrapper's, the server its child) is its client and that server",
+              wrapped);
         // The wineserver is found by the game's SteamGameId (compositor_environ_word): a key the environment has, and one it has not.
         environ_ok = compositor_environ_word(self, "PATH=", value, sizeof value) > 0 && value[0] == '/' &&
                      compositor_environ_word(self, "MOONWATER_NO_SUCH_KEY=", value, sizeof value) == 0;

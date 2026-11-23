@@ -1124,7 +1124,10 @@ HOT static struct compositor_xwm_window *xwm_row_lookup(const struct compositor_
 }
 
 // The X client behind a row, as the X server named it (XRes, compositor_xwm_owned), and that server's pid in *server: 0 for a row no X window
-// has, or whose client the server has not named.
+// has, or whose client the server has not named. The server is the Wayland client the window manager's connection belongs to
+// (compositor_xwm_server: the child of the process that connected it, as xwayland-moonwater starts Xwayland), or the connecting process
+// itself, for a server that made its own connection. The connecting process alone was the wrapper, never the Wayland client, so no X
+// row of the steam session was ever vouched for: no game mode for X games and no focused page for them.
 static unsigned int compositor_xwm_row_owner(int row, unsigned int *server)
 {
         struct compositor_xwm *sx = 0;
@@ -1132,7 +1135,7 @@ static unsigned int compositor_xwm_row_owner(int row, unsigned int *server)
 
         if (!w || !w->owner || !sx || sx->peer_pid <= 0)
                 return 0;
-        *server = (unsigned int)sx->peer_pid;
+        *server = compositor_xwm_server(sx) >= 0 && sx->client_pid > 0 ? (unsigned int)sx->client_pid : (unsigned int)sx->peer_pid;
         return w->owner;
 }
 
