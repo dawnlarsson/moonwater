@@ -1136,6 +1136,34 @@ static unsigned int compositor_xwm_row_owner(int row, unsigned int *server)
         return w->owner;
 }
 
+/*
+        The row of the X window `id` for a Wayland client of pid `pid` that would stand in for its pictures (canvas_swapchain_v1, a game's
+        Vulkan layer, which runs in the game: the X client that made the window): the window's row once its X server has named its
+        client and that client is `pid`; -WAYLAND_STAND_WAITING while the window is not shown or its client not named yet;
+        -WAYLAND_STAND_NOT_OWNER for another client's window, or on a server that names no client (no XRes); -WAYLAND_STAND_UNKNOWN
+        when no X server of the compositor has a window of that id.
+*/
+static long compositor_xwm_stand_row(unsigned int id, unsigned int pid)
+{
+        long answer = -WAYLAND_STAND_UNKNOWN;
+
+        for (int at = 0; at < COMPOSITOR_XWM_SLOTS; at++)
+        {
+                struct compositor_xwm *x = &compositor_xwm_slots[at];
+                const struct compositor_xwm_window *w = x->fd >= 0 && x->window ? xwm_find(x, id, 0) : 0;
+
+                if (!w)
+                        continue;
+                if (!x->xres || !pid || (w->owner && w->owner != pid))
+                {
+                        answer = -WAYLAND_STAND_NOT_OWNER;
+                        continue;
+                }
+                return !w->owner || w->row < 0 || w->row >= COMPOSITOR_ROWS ? -WAYLAND_STAND_WAITING : (long)w->row;
+        }
+        return answer;
+}
+
 static void xwm_release(struct compositor_xwm *x, struct compositor_xwm_window *w)
 {
         long slot;

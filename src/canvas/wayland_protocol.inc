@@ -90,6 +90,7 @@ enum {
         WLI_wl_drm,
         WLI_zwlr_layer_shell_v1,
         WLI_zwlr_layer_surface_v1,
+        WLI_canvas_swapchain_v1,
         WLI_COUNT
 };
 
@@ -180,6 +181,7 @@ enum {
 #define WLV_wl_drm 2
 #define WLV_zwlr_layer_shell_v1 4
 #define WLV_zwlr_layer_surface_v1 4
+#define WLV_canvas_swapchain_v1 1
 
 /* Request opcodes (WLQ_), event opcodes (WLE_) and enum entries (WLN_). */
 #define WLQ_wl_display_sync 0
@@ -904,10 +906,28 @@ enum {
 #define WLQ_zwlr_layer_surface_v1_set_layer 8
 #define WLE_zwlr_layer_surface_v1_configure 0
 #define WLE_zwlr_layer_surface_v1_closed 1
+#define WLN_zwlr_layer_surface_v1_keyboard_interactivity_none 0
+#define WLN_zwlr_layer_surface_v1_keyboard_interactivity_exclusive 1
+#define WLN_zwlr_layer_surface_v1_keyboard_interactivity_on_demand 2
+#define WLN_zwlr_layer_surface_v1_error_invalid_surface_state 0
+#define WLN_zwlr_layer_surface_v1_error_invalid_size 1
+#define WLN_zwlr_layer_surface_v1_error_invalid_anchor 2
+#define WLN_zwlr_layer_surface_v1_error_invalid_keyboard_interactivity 3
 #define WLN_zwlr_layer_surface_v1_anchor_top 1
 #define WLN_zwlr_layer_surface_v1_anchor_bottom 2
 #define WLN_zwlr_layer_surface_v1_anchor_left 4
 #define WLN_zwlr_layer_surface_v1_anchor_right 8
+#define WLQ_canvas_swapchain_v1_destroy 0
+#define WLQ_canvas_swapchain_v1_override_window 1
+#define WLQ_canvas_swapchain_v1_override_surface 2
+#define WLE_canvas_swapchain_v1_answer 0
+#define WLN_canvas_swapchain_v1_error_role 0
+#define WLN_canvas_swapchain_v1_answer_shown 0
+#define WLN_canvas_swapchain_v1_answer_waiting 1
+#define WLN_canvas_swapchain_v1_answer_unknown_window 2
+#define WLN_canvas_swapchain_v1_answer_not_owner 3
+#define WLN_canvas_swapchain_v1_answer_partial 4
+#define WLN_canvas_swapchain_v1_answer_own 5
 
 /* An argument is a kind byte and an interface byte (an object's or a new id's, else 0), the list ended by a
    zero kind: i int, u uint, f fixed, s string, S string that may be null, o object, O object that may be null,
@@ -1299,6 +1319,10 @@ static const unsigned char wl_q_zwlr_layer_surface_v1_destroy[] = {0, 0};
 static const unsigned char wl_q_zwlr_layer_surface_v1_set_layer[] = {'u', 0, 0, 0};
 static const unsigned char wl_e_zwlr_layer_surface_v1_configure[] = {'u', 0, 'u', 0, 'u', 0, 0, 0};
 static const unsigned char wl_e_zwlr_layer_surface_v1_closed[] = {0, 0};
+static const unsigned char wl_q_canvas_swapchain_v1_destroy[] = {0, 0};
+static const unsigned char wl_q_canvas_swapchain_v1_override_window[] = {'o', WLI_wl_surface, 'u', 0, 0, 0};
+static const unsigned char wl_q_canvas_swapchain_v1_override_surface[] = {'o', WLI_wl_surface, 'o', WLI_wl_surface, 0, 0};
+static const unsigned char wl_e_canvas_swapchain_v1_answer[] = {'o', WLI_wl_surface, 'u', 0, 'i', 0, 'i', 0, 0, 0};
 
 static const struct wl_message wl_requests_wl_display[] = {
         {1, 0, wl_q_wl_display_sync},
@@ -1922,6 +1946,14 @@ static const struct wl_message wl_events_zwlr_layer_surface_v1[] = {
         {1, 0, wl_e_zwlr_layer_surface_v1_configure},
         {1, 0, wl_e_zwlr_layer_surface_v1_closed},
 };
+static const struct wl_message wl_requests_canvas_swapchain_v1[] = {
+        {1, 1, wl_q_canvas_swapchain_v1_destroy},
+        {1, 0, wl_q_canvas_swapchain_v1_override_window},
+        {1, 0, wl_q_canvas_swapchain_v1_override_surface},
+};
+static const struct wl_message wl_events_canvas_swapchain_v1[] = {
+        {1, 0, wl_e_canvas_swapchain_v1_answer},
+};
 
 static const struct wl_interface_info wl_interfaces[WLI_COUNT] = {
         [WLI_NONE] = {0, 0, 0, 0, 0, 0},
@@ -2011,4 +2043,5 @@ static const struct wl_interface_info wl_interfaces[WLI_COUNT] = {
         [WLI_wl_drm] = {"wl_drm", 2, 4, 4, wl_requests_wl_drm, wl_events_wl_drm},
         [WLI_zwlr_layer_shell_v1] = {"zwlr_layer_shell_v1", 4, 2, 0, wl_requests_zwlr_layer_shell_v1, 0},
         [WLI_zwlr_layer_surface_v1] = {"zwlr_layer_surface_v1", 4, 9, 2, wl_requests_zwlr_layer_surface_v1, wl_events_zwlr_layer_surface_v1},
+        [WLI_canvas_swapchain_v1] = {"canvas_swapchain_v1", 1, 3, 1, wl_requests_canvas_swapchain_v1, wl_events_canvas_swapchain_v1},
 };

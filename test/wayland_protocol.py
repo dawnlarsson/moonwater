@@ -120,10 +120,49 @@ CONFIG = [
     ("inline", "wlr-layer-shell-unstable-v1.xml", [
         "zwlr_layer_shell_v1", "zwlr_layer_surface_v1",
     ]),
+    ("inline", "canvas-swapchain-v1.xml", [
+        "canvas_swapchain_v1",
+    ]),
 ]
 
 
 INLINE_XML = {
+    # Canvas's own: a surface that stands in for a window's picture. A Vulkan layer in a game's process (src/shim/wsi.c) gives
+    # the game's swapchain a surface of its own and names the window it is the picture of: an X window (its id; the client
+    # asking must be the X client that made it) or a surface of the same client (winewayland's client area). The answer says
+    # whether the stand-in is the window's picture now, will be once the window is shown, or is not (the layer then presents
+    # where it would have), with the window's size; one comes again when a waiting stand-in is taken or refused.
+    "canvas-swapchain-v1.xml": """<protocol name="canvas_swapchain_v1">
+  <interface name="canvas_swapchain_v1" version="1">
+    <enum name="error">
+      <entry name="role" value="0"/>
+    </enum>
+    <enum name="answer">
+      <entry name="shown" value="0"/>
+      <entry name="waiting" value="1"/>
+      <entry name="unknown_window" value="2"/>
+      <entry name="not_owner" value="3"/>
+      <entry name="partial" value="4"/>
+      <entry name="own" value="5"/>
+    </enum>
+    <request name="destroy" type="destructor"/>
+    <request name="override_window">
+      <arg name="surface" type="object" interface="wl_surface"/>
+      <arg name="x11_window" type="uint"/>
+    </request>
+    <request name="override_surface">
+      <arg name="surface" type="object" interface="wl_surface"/>
+      <arg name="target" type="object" interface="wl_surface"/>
+    </request>
+    <event name="answer">
+      <arg name="surface" type="object" interface="wl_surface"/>
+      <arg name="answer" type="uint" enum="answer"/>
+      <arg name="width" type="int"/>
+      <arg name="height" type="int"/>
+    </event>
+  </interface>
+</protocol>
+""",
     "wlr-layer-shell-unstable-v1.xml": """<protocol name="wlr_layer_shell_unstable_v1">
   <interface name="zwlr_layer_shell_v1" version="4">
     <enum name="error">

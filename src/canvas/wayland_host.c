@@ -818,7 +818,7 @@ static b32 compositor_wl_card_blame(positive import)
                 for (unsigned int k = 0; !had && compositor_wl_layers.count && k < compositor_wl_layers.count[row]; k++)
                         had = compositor_wl_layers.layer[row][k].import == import;
                 if (had)
-                        client = wayland_row_owner(row);
+                        client = wayland_row_painter(row);
         }
         if (client < 0 || client >= compositor_wl.slots)
                 return false;
@@ -832,7 +832,7 @@ static b32 compositor_wl_card_blame(positive import)
 // Whether the row's client is barred from the card (compositor_wl_card_blame): its buffers are not imported.
 static b32 compositor_wl_card_barred(int row)
 {
-        long client = row >= 0 ? wayland_row_owner(row) : -1;
+        long client = row >= 0 ? wayland_row_painter(row) : -1;
 
         return client >= 0 && client < compositor_wl.slots && compositor_wl.barred[client];
 }
@@ -2289,7 +2289,7 @@ static int compositor_wl_straight_take(int row, const struct wayland_picture *pi
                 compositor_wl_straight_drop(row);
                 return 0;
         }
-        shown = (compositor_wl_straight_whole(row) || picture->explicit_sync || compositor_wl_dmabuf_ready(wayland_row_owner(row), (int)picture->sync_fd)) &&
+        shown = (compositor_wl_straight_whole(row) || picture->explicit_sync || compositor_wl_dmabuf_ready(wayland_row_painter(row), (int)picture->sync_fd)) &&
                 (compositor_wl_straight_shown(row) || compositor_gpu_tiled_ready() ||
                  (compositor.direct_row >= 0 && compositor.direct_row != row && compositor.plane_row != compositor.direct_row)) &&
                 compositor.table && width == (long)compositor.table->width[row] && height == (long)compositor.table->height[row];
@@ -2991,7 +2991,7 @@ static int wl_pic_sync_begin(int row, const struct wayland_picture *picture, int
         {
                 // Always issue DMA_BUF_SYNC_START|READ under the setitimer guard (ready=0) so a wedged implicit fence
                 // on a client DMA-BUF can never hang the compositor even when explicit_sync is advertised.
-                if (!compositor_wl_sync_start(wayland_row_owner(row), (int)picture->sync_fd, 0))
+                if (!compositor_wl_sync_start(wayland_row_painter(row), (int)picture->sync_fd, 0))
                         return compositor_wl.laying[row].open = 0, 0;
                 *sync_started = 1;
         }
@@ -3105,7 +3105,7 @@ static int compositor_wl_row_picture(void *context, int row, const struct waylan
         // An implicit-sync dma-buf is taken only once the kernel says its writes are done: a straight, lent or card read of one still being
         // drawn is a tear. (It was checked after the lend, which took the buffer unchecked.) An explicit-sync buffer is held at its acquire
         // point by the shim's commit (wayland.c), so it needs no check here.
-        if (picture->sync_fd >= 0 && !picture->explicit_sync && !compositor_wl_dmabuf_ready(wayland_row_owner(row), (int)picture->sync_fd))
+        if (picture->sync_fd >= 0 && !picture->explicit_sync && !compositor_wl_dmabuf_ready(wayland_row_painter(row), (int)picture->sync_fd))
                 return compositor_wl_layers.pending_row = -1, 1;
         if (has_content && !compositor_wl.laying[row].open && compositor_wl_straight_take(row, picture, width, height) == 2)
                 return wl_pic_commit_lent(table, row, picture, width, height, 0, 0);
@@ -3397,6 +3397,17 @@ static void compositor_wl_row_do(void *context, int row, long what, long a, long
 }
 
 /* What the compositor says of a row, in the shim's words (from Canvas's canonical compositor_row_facts). */
+static long compositor_xwm_stand_row(unsigned int id, unsigned int pid); // xwm.c
+
+// A stand-in's X window (canvas_swapchain_v1.override_window): its row, as the X window manager vouches the asking client made it.
+static long compositor_wl_stand_in(void *context, long client, unsigned long window)
+{
+        (void)context;
+        if (client < 0 || client >= compositor_wl.slots || !window || window > 0xffffffffUL)
+                return -WAYLAND_STAND_UNKNOWN;
+        return compositor_xwm_stand_row((unsigned int)window, compositor_wl.pid[client] > 0 ? (unsigned int)compositor_wl.pid[client] : 0);
+}
+
 static int compositor_wl_row_facts(void *context, int row, struct wayland_facts *facts)
 {
         struct compositor_row_facts f;
@@ -4854,6 +4865,7 @@ static const struct wayland_host compositor_wl_host = {
         compositor_wl_clip_type, compositor_wl_clip_pull, compositor_wl_clip_abort, compositor_wl_clip_push, compositor_wl_clip_clear,
         compositor_wl_dmabuf_signaled, compositor_wl_random, compositor_wl_row_layers, compositor_wl_row_busy, compositor_wl_reserve,
         compositor_wl_commit, compositor_wl_unreserve, compositor_wl_xreceive, compositor_wl_xdrag, compositor_wl_row_app,
+        compositor_wl_stand_in,
 };
 
 /* ---- the socket ---- */

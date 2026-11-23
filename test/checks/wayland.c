@@ -64,6 +64,7 @@ struct fake_row
         long x, y, width, height;
         long picture_w, picture_h, pictures;
         long transparent, opaque[4]; // the last picture's: not opaque, and where it is all the same (x, y, width, height in the window)
+        long buffer_w, dst_w;        // the last picture's buffer width, and the width it is scaled to (0: its own)
         long states, closing, width_asked, height_asked, scale;
         char title[128];
         unsigned pixels[FAKE_W * FAKE_H];
@@ -103,6 +104,8 @@ static struct fake_host_state
         // The tables' reservations (reserve, commit, unreserve) and the commit that is refused: commit_fail_at counts down the commits
         // that go through, and the one it reaches 1 at, and every one after, fails (0: none fails).
         long reserves, unreserves, commits, commit_fail_at, commits_refused;
+        // the X window manager's word on a stand-in's X window (stand_in): the row, or a -WAYLAND_STAND_ answer; and what was asked
+        long stand_answer, stand_client, stand_window, stand_asks;
 } fake;
 
 static void *fake_alloc(void *context, long bytes)
@@ -251,6 +254,7 @@ static int fake_row_picture(void *context, int row, const struct wayland_picture
         r->picture_w = picture->row_width;
         r->picture_h = picture->row_height;
         r->transparent = picture->transparent;
+        r->buffer_w = picture->width, r->dst_w = picture->dst_width;
         r->opaque[0] = picture->opaque_x, r->opaque[1] = picture->opaque_y, r->opaque[2] = picture->opaque_w, r->opaque[3] = picture->opaque_h;
         if (picture->pixels)
         {
@@ -9731,6 +9735,176 @@ static void test_xwm_places(void)
         wayland_stop();
 }
 
+/*
+        Stand-ins (canvas_swapchain_v1): a surface of a game's Vulkan layer shows an X window's pictures (the X server's client is
+        another) or a part of a window of its own client. Its commits are the window's pictures, scaled to the window's size; the
+        window's own commits put nothing on the screen while it is stood in for, and its last picture comes back when the stand-in goes;
+        a stand-in's frame callbacks are answered with the frame; an X window the X window manager does not vouch for is refused
+        (another client's, or none), and one not shown yet is waited for, the answer coming when it is.
+*/
+static long fake_stand_in(void *context, long client, unsigned long window)
+{
+        (void)context;
+        fake.stand_client = client, fake.stand_window = (long)window, fake.stand_asks++;
+        return fake.stand_answer;
+}
+
+static struct wl_event_seen *stand_answer_of(struct wlc *c)
+{
+        struct wl_event_seen *e = 0;
+
+        wlc_pump(c);
+        for (long at = 0; at < c->events; at++)
+                if (c->ev[at].iface == WLI_canvas_swapchain_v1 && c->ev[at].opcode == WLE_canvas_swapchain_v1_answer)
+                        e = &c->ev[at];
+        return e;
+}
+
+static void test_stand_in(void)
+{
+        struct wayland_host host = fake_host;
+        struct session x, g;
+        unsigned long xsurface, xwin, manager, subcompositor, stand, other, buffer, callback;
+        struct wl_event_seen *e;
+        long row, pictures;
+
+        wl_reset();
+        host.stand_in = fake_stand_in;
+        wayland_start(&host);
+        session_open(&x);
+        xsurface = wlc_id(x.c, WLI_wl_surface, 6);
+        wlc_send(x.c, x.compositor, WLQ_wl_compositor_create_surface, xsurface);
+        xwin = wlc_id(x.c, WLI_xwayland_surface_v1, 1);
+        wlc_send(x.c, x.xshell, WLQ_xwayland_shell_v1_get_xwayland_surface, xwin, xsurface);
+        wlc_send(x.c, xwin, WLQ_xwayland_surface_v1_set_serial, 0x7171UL, 0UL);
+        wayland_xwindow_adopt(x.c->slot, 0x7171, 0, 0, 0, "game");
+        wlc_send(x.c, xsurface, WLQ_wl_surface_attach, wl_buffer_of(&x, 32, 24, 0xff111111, WLN_wl_shm_format_xrgb8888), 0L, 0L);
+        wlc_send(x.c, xsurface, WLQ_wl_surface_commit);
+        row = wayland_xwindow_adopt(x.c->slot, 0x7171, 0, 0, 0, "game");
+        WLCHECK(row >= 0 && fake.row[row].used && fake.row[row].pictures == 1, "the X window is a row with its picture (%ld)", row);
+        if (row < 0)
+                return;
+
+        session_open(&g);
+        manager = wl_global(g.c, g.registry, WLI_canvas_swapchain_v1, 1);
+        subcompositor = wl_global(g.c, g.registry, WLI_wl_subcompositor, 1);
+        WLCHECK(manager != 0, "canvas_swapchain_v1 is offered");
+        stand = wlc_id(g.c, WLI_wl_surface, 6);
+        wlc_send(g.c, g.compositor, WLQ_wl_compositor_create_surface, stand);
+        fake.stand_answer = row;
+        wlc_send(g.c, manager, WLQ_canvas_swapchain_v1_override_window, stand, 0x4400001UL);
+        e = stand_answer_of(g.c);
+        WLCHECK(g.c->errors == 0 && e && e->u[0] == stand && e->u[1] == WLN_canvas_swapchain_v1_answer_shown && e->u[2] == 32 && e->u[3] == 24 &&
+                    fake.stand_window == 0x4400001 && fake.stand_client == g.c->slot,
+                "a stand-in for an X window the window manager vouches for is shown, told the window's size (%s)", g.c->error_text);
+        pictures = fake.row[row].pictures;
+        wlc_forget(g.c);
+        callback = wlc_id(g.c, WLI_wl_callback, 1);
+        buffer = wl_buffer_of(&g, 16, 12, 0xff00aa00, WLN_wl_shm_format_xrgb8888);
+        wlc_send(g.c, stand, WLQ_wl_surface_attach, buffer, 0L, 0L);
+        wlc_send(g.c, stand, WLQ_wl_surface_damage_buffer, 0L, 0L, 16L, 12L);
+        wlc_send(g.c, stand, WLQ_wl_surface_frame, callback);
+        wlc_send(g.c, stand, WLQ_wl_surface_commit);
+        WLCHECK(fake.row[row].pictures == pictures + 1 && fake.row[row].buffer_w == 16 && fake.row[row].dst_w == 32 &&
+                    fake.row[row].width == 32 && fake.row[row].pixels[0] == 0xff00aa00,
+                "the stand-in's commit is the window's picture, its buffer scaled to the window's size (%ld %ld %ld)", fake.row[row].buffer_w,
+                fake.row[row].dst_w, fake.row[row].width);
+        wlc_pump(g.c);
+        WLCHECK(wlc_count(g.c, WLI_wl_callback, WLE_wl_callback_done) == 0, "the stand-in's frame callback waits for the frame");
+        wayland_frame();
+        wlc_pump(g.c);
+        WLCHECK(wlc_count(g.c, WLI_wl_callback, WLE_wl_callback_done) == 1, "the stand-in's frame callback is answered with the frame");
+        pictures = fake.row[row].pictures;
+        wlc_send(x.c, xsurface, WLQ_wl_surface_attach, wl_buffer_of(&x, 32, 24, 0xff222222, WLN_wl_shm_format_xrgb8888), 0L, 0L);
+        wlc_send(x.c, xsurface, WLQ_wl_surface_damage_buffer, 0L, 0L, 32L, 24L);
+        wlc_send(x.c, xsurface, WLQ_wl_surface_commit);
+        WLCHECK(x.c->errors == 0 && fake.row[row].pictures == pictures && fake.row[row].pixels[0] == 0xff00aa00,
+                "the X window's own commit puts nothing on the screen while it is stood in for");
+
+        fake.stand_answer = -WAYLAND_STAND_NOT_OWNER;
+        other = wlc_id(g.c, WLI_wl_surface, 6);
+        wlc_send(g.c, g.compositor, WLQ_wl_compositor_create_surface, other);
+        wlc_forget(g.c);
+        wlc_send(g.c, manager, WLQ_canvas_swapchain_v1_override_window, other, 0x4400002UL);
+        e = stand_answer_of(g.c);
+        WLCHECK(e && e->u[0] == other && e->u[1] == WLN_canvas_swapchain_v1_answer_not_owner, "a stand-in for another client's X window is refused");
+        pictures = fake.row[row].pictures;
+        wlc_send(g.c, other, WLQ_wl_surface_attach, wl_buffer_of(&g, 16, 12, 0xffff0000, WLN_wl_shm_format_xrgb8888), 0L, 0L);
+        wlc_send(g.c, other, WLQ_wl_surface_commit);
+        WLCHECK(fake.row[row].pictures == pictures && fake.row[row].pixels[0] == 0xff00aa00, "a refused stand-in's commit shows nowhere");
+        fake.stand_answer = -WAYLAND_STAND_UNKNOWN;
+        wlc_forget(g.c);
+        wlc_send(g.c, manager, WLQ_canvas_swapchain_v1_override_window, other, 0x4400003UL);
+        e = stand_answer_of(g.c);
+        WLCHECK(e && e->u[1] == WLN_canvas_swapchain_v1_answer_unknown_window, "a stand-in for an X window no X server has is refused");
+        fake.stand_answer = -WAYLAND_STAND_WAITING;
+        wlc_forget(g.c);
+        wlc_send(g.c, manager, WLQ_canvas_swapchain_v1_override_window, other, 0x4400004UL);
+        e = stand_answer_of(g.c);
+        WLCHECK(e && e->u[1] == WLN_canvas_swapchain_v1_answer_waiting, "a stand-in for an X window not shown yet waits");
+        wlc_forget(g.c);
+        fake.stand_answer = row;
+        wlc_send(g.c, other, WLQ_wl_surface_attach, wl_buffer_of(&g, 16, 12, 0xff0000ff, WLN_wl_shm_format_xrgb8888), 0L, 0L);
+        wlc_send(g.c, other, WLQ_wl_surface_commit);
+        e = stand_answer_of(g.c);
+        WLCHECK(e && e->u[0] == other && e->u[1] == WLN_canvas_swapchain_v1_answer_shown && fake.row[row].pixels[0] == 0xff0000ff,
+                "a waiting stand-in takes the window at its first commit once it is shown, says so, and the last one gives it up");
+        wlc_forget(g.c);
+        wlc_send(g.c, stand, WLQ_wl_surface_attach, wl_buffer_of(&g, 16, 12, 0xff00aa00, WLN_wl_shm_format_xrgb8888), 0L, 0L);
+        wlc_send(g.c, stand, WLQ_wl_surface_commit);
+        WLCHECK(fake.row[row].pixels[0] == 0xff0000ff, "a stand-in another took the window from shows nowhere");
+
+        pictures = fake.row[row].pictures;
+        wlc_send(g.c, other, WLQ_wl_surface_destroy);
+        WLCHECK(g.c->errors == 0 && fake.row[row].used && fake.row[row].pictures > pictures && fake.row[row].pixels[0] == 0xff222222,
+                "the stand-in gone, the X window shows its own newest picture again (%08x)", fake.row[row].pixels[0]);
+
+        {
+                unsigned long child, target_stand, own_stand;
+
+                session_window(&g, 0xff444444);
+                child = wlc_id(g.c, WLI_wl_surface, 6);
+                wlc_send(g.c, g.compositor, WLQ_wl_compositor_create_surface, child);
+                wlc_send(g.c, subcompositor, WLQ_wl_subcompositor_get_subsurface, wlc_id(g.c, WLI_wl_subsurface, 1), child, g.surface);
+                wlc_send(g.c, child, WLQ_wl_surface_attach, wl_buffer_of(&g, 32, 24, 0xff555555, WLN_wl_shm_format_xrgb8888), 0L, 0L);
+                wlc_send(g.c, child, WLQ_wl_surface_commit);
+                wlc_send(g.c, g.surface, WLQ_wl_surface_commit);
+                own_stand = wlc_id(g.c, WLI_wl_surface, 6);
+                wlc_send(g.c, g.compositor, WLQ_wl_compositor_create_surface, own_stand);
+                wlc_forget(g.c);
+                wlc_send(g.c, manager, WLQ_canvas_swapchain_v1_override_surface, own_stand, g.surface);
+                e = stand_answer_of(g.c);
+                WLCHECK(g.c->errors == 0 && e && e->u[1] == WLN_canvas_swapchain_v1_answer_own,
+                        "a stand-in for a window's own surface is not taken: that surface is shown straight as it is (%s)", g.c->error_text);
+                target_stand = wlc_id(g.c, WLI_wl_surface, 6);
+                wlc_send(g.c, g.compositor, WLQ_wl_compositor_create_surface, target_stand);
+                wlc_forget(g.c);
+                wlc_send(g.c, manager, WLQ_canvas_swapchain_v1_override_surface, target_stand, child);
+                e = stand_answer_of(g.c);
+                WLCHECK(g.c->errors == 0 && e && e->u[1] == WLN_canvas_swapchain_v1_answer_shown && e->u[2] == 32 && e->u[3] == 24,
+                        "a stand-in for a subsurface over all of its window is that window's picture (%s)", g.c->error_text);
+                {
+                        long own = -1;
+
+                        for (int at = 0; at < FAKE_ROWS; at++)
+                                if (fake.row[at].used && at != row)
+                                        own = at;
+                        wlc_send(g.c, target_stand, WLQ_wl_surface_attach, wl_buffer_of(&g, 32, 24, 0xff666666, WLN_wl_shm_format_xrgb8888), 0L, 0L);
+                        wlc_send(g.c, target_stand, WLQ_wl_surface_commit);
+                        WLCHECK(own >= 0 && fake.row[own].pixels[0] == 0xff666666, "the subsurface's stand-in's commit is its window's picture");
+                        wlc_send(g.c, g.surface, WLQ_wl_surface_attach, wl_buffer_of(&g, 32, 24, 0xff777777, WLN_wl_shm_format_xrgb8888), 0L, 0L);
+                        wlc_send(g.c, g.surface, WLQ_wl_surface_commit);
+                        WLCHECK(g.c->errors == 0 && own >= 0 && fake.row[own].pixels[0] == 0xff666666,
+                                "the window's own commit, with its subsurface, puts nothing on the screen while it is stood in for");
+                }
+        }
+        wlc_end(g.c);
+        WLCHECK(fake.row[row].used && fake.row[row].pixels[0] == 0xff222222, "the stand-in's client gone, the X window is its own again");
+        wlc_end(x.c);
+        leak_check("stand-ins");
+        wayland_stop();
+}
+
 /* A feedback of a frame that was not drawn, its window let go (a null buffer), is discarded, never answered presented later. */
 static void test_presented_discard_row(void)
 {
@@ -9970,6 +10144,7 @@ int main(int argc, char **argv)
         test_tree_fuzz(rounds);
         test_clipboard();
         test_bridge();
+        test_stand_in();
         test_clip_fuzz(rounds);
         test_fuzz(rounds);
         test_raw(rounds);
