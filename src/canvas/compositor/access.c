@@ -817,9 +817,25 @@ static b32 compositor_access_program_reads(positive now)
         compositor_access.asked_row = row, compositor_access.asked_pid = pid, compositor_access.asked_at = now, compositor_access.reads = 0;
         me = (unsigned int)compositor_call(syscall(getpid), 0, 0, 0, 0, 0, 0);
         count = compositor_row_pids(row, me, 0, pids);
+        // The pads may be held by the process that made the window and not by the window's own: Steam's Big Picture is a window of
+        // steamwebhelper, and steam, its parent, reads the pads. Not yielding there, the Guide button both opened Steam's menu and
+        // sent its window home, and the menu came and went. Each forebear is asked up to the compositor or the first process, while
+        // each started no later than the one under it (a number taken again by a younger process ends the walk).
         for (unsigned int each = 0; each < count && !compositor_access.reads; each++)
-                compositor_access.reads = compositor_environ_word(pids[each], "SteamGameId=", game, sizeof game) ||
-                                          compositor_access_holds_pad(pids[each]);
+        {
+                unsigned int at = pids[each], parent = 0, next = 0;
+                unsigned long start = windows_proc_stat(at, &parent), above;
+
+                compositor_access.reads = compositor_environ_word(at, "SteamGameId=", game, sizeof game) != 0;
+                while (!compositor_access.reads && start && at > 1 && at != me)
+                {
+                        compositor_access.reads = compositor_access_holds_pad(at);
+                        above = parent > 1 && parent != me && parent != at ? windows_proc_stat(parent, &next) : 0;
+                        if (!above || above > start)
+                                break;
+                        at = parent, start = above, parent = next;
+                }
+        }
         return compositor_access.reads;
 }
 
