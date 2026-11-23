@@ -16,6 +16,7 @@
 # machine-made 2026-11-23 (the startup table's check column), not yet read by a person: settings_column_on
 # machine-made 2026-11-23 (a linked machine that did not answer, or does not offer a request), not yet read by a person: files_remote_silent files_remote_unsupported
 # machine-made 2026-11-23 (the Accessibility rows), not yet read by a person: =Accessibility =Sticky keys =Slow keys (ms, off or default) =Bounce keys (ms, off or default) =Mouse keys =Dwell click (ms, off or default) =Press a modifier, then the key, instead of both at once =A key types only after it is held this long =A key pressed again too soon after it is let go types once =The number pad moves the pointer and clicks =Hold the pointer still to click
+# machine-made 2026-11-23 (the bluetooth pads), not yet read by a person: settings_bt_find_keys settings_bt_listening settings_bt_near_keys settings_bt_paired settings_bt_paired_keys settings_bt_pairing =Find devices nearby
 @language it
 @name Italiano
 @translated machine
@@ -286,6 +287,12 @@ settings_battery_charging	5116	, in carica
 settings_battery_discharging	7964	, in scarica
 settings_battery_full	ded8	, carica
 settings_battery_idle	1635	, non in carica
+settings_bt_find_keys	9c26	Enter cerca per dieci secondi i dispositivi in modalità di abbinamento
+settings_bt_listening	074a	ricerca di dispositivi vicini: metti un controller in modalità di abbinamento
+settings_bt_near_keys	b268	vicino: Enter lo abbina
+settings_bt_paired	7508	abbinato
+settings_bt_paired_keys	6d99	abbinato: si connette quando si risveglia; Delete lo dimentica
+settings_bt_pairing	da7b	abbinamento: tieni il dispositivo in modalità di abbinamento
 settings_busy	34e0	moonwater è occupato: le modifiche precedenti non sono finite
 settings_button_discover	c0ee	Rileva
 settings_button_end	adad	Termina tutte
@@ -586,6 +593,7 @@ ui_field_full	fe02	non ce ne sta di più
 =End every session	12e1	Termina tutte le sessioni
 =External devices	5769	Dispositivi esterni
 =Files	1b30	File
+=Find devices nearby	006c	Trova dispositivi vicini
 =GPU rendering (alpha)	e5e6	Rendering con GPU (alpha)
 =GPU samples tiled client buffers	783a	La GPU campiona i buffer a mosaico dei client
 =Gallery	4cdd	Galleria

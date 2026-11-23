@@ -16,6 +16,7 @@
 # machine-made 2026-11-23 (the startup table's check column), not yet read by a person: settings_column_on
 # machine-made 2026-11-23 (a linked machine that did not answer, or does not offer a request), not yet read by a person: files_remote_silent files_remote_unsupported
 # machine-made 2026-11-23 (the Accessibility rows), not yet read by a person: =Accessibility =Sticky keys =Slow keys (ms, off or default) =Bounce keys (ms, off or default) =Mouse keys =Dwell click (ms, off or default) =Press a modifier, then the key, instead of both at once =A key types only after it is held this long =A key pressed again too soon after it is let go types once =The number pad moves the pointer and clicks =Hold the pointer still to click
+# machine-made 2026-11-23 (the bluetooth pads), not yet read by a person: settings_bt_find_keys settings_bt_listening settings_bt_near_keys settings_bt_paired settings_bt_paired_keys settings_bt_pairing =Find devices nearby
 @language ru
 @name Русский
 @translated machine
@@ -286,6 +287,12 @@ settings_battery_charging	5116	, заряжается
 settings_battery_discharging	7964	, разряжается
 settings_battery_full	ded8	, заряжена
 settings_battery_idle	1635	, не заряжается
+settings_bt_find_keys	9c26	Enter десять секунд ищет устройства в режиме сопряжения
+settings_bt_listening	074a	поиск устройств рядом: переведите геймпад в режим сопряжения
+settings_bt_near_keys	b268	рядом: Enter связывает его
+settings_bt_paired	7508	связано
+settings_bt_paired_keys	6d99	связано: подключается, когда просыпается; Delete забывает
+settings_bt_pairing	da7b	сопряжение: держите устройство в режиме сопряжения
 settings_busy	34e0	moonwater занят: предыдущие изменения ещё не выполнены
 settings_button_discover	c0ee	Обнаружить
 settings_button_end	adad	Завершить все
@@ -586,6 +593,7 @@ ui_field_full	fe02	больше не помещается
 =End every session	12e1	Завершить все сеансы
 =External devices	5769	Внешние устройства
 =Files	1b30	Файлы
+=Find devices nearby	006c	Найти устройства рядом
 =GPU rendering (alpha)	e5e6	Отрисовка на GPU (альфа)
 =GPU samples tiled client buffers	783a	GPU читает мозаичные буферы клиентов
 =Gallery	4cdd	Галерея

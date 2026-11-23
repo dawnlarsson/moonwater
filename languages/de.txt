@@ -16,6 +16,7 @@
 # machine-made 2026-11-23 (the startup table's check column), not yet read by a person: settings_column_on
 # machine-made 2026-11-23 (a linked machine that did not answer, or does not offer a request), not yet read by a person: files_remote_silent files_remote_unsupported
 # machine-made 2026-11-23 (the Accessibility rows), not yet read by a person: =Accessibility =Sticky keys =Slow keys (ms, off or default) =Bounce keys (ms, off or default) =Mouse keys =Dwell click (ms, off or default) =Press a modifier, then the key, instead of both at once =A key types only after it is held this long =A key pressed again too soon after it is let go types once =The number pad moves the pointer and clicks =Hold the pointer still to click
+# machine-made 2026-11-23 (the bluetooth pads), not yet read by a person: settings_bt_find_keys settings_bt_listening settings_bt_near_keys settings_bt_paired settings_bt_paired_keys settings_bt_pairing =Find devices nearby
 @language de
 @name Deutsch
 @translated machine
@@ -286,6 +287,12 @@ settings_battery_charging	5116	, lädt
 settings_battery_discharging	7964	, entlädt
 settings_battery_full	ded8	, voll
 settings_battery_idle	1635	, lädt nicht
+settings_bt_find_keys	9c26	Enter sucht zehn Sekunden lang nach Geräten im Kopplungsmodus
+settings_bt_listening	074a	suche Geräte in der Nähe: einen Controller in den Kopplungsmodus versetzen
+settings_bt_near_keys	b268	in der Nähe: Enter koppelt es
+settings_bt_paired	7508	gekoppelt
+settings_bt_paired_keys	6d99	gekoppelt: verbindet sich, wenn es aufwacht; Delete vergisst es
+settings_bt_pairing	da7b	kopple: das Gerät im Kopplungsmodus lassen
 settings_busy	34e0	moonwater ist beschäftigt: die vorherigen Änderungen sind noch nicht fertig
 settings_button_discover	c0ee	Erkennen
 settings_button_end	adad	Alle beenden
@@ -586,6 +593,7 @@ ui_field_full	fe02	mehr passt nicht hinein
 =End every session	12e1	Alle Sitzungen beenden
 =External devices	5769	Externe Geräte
 =Files	1b30	Dateien
+=Find devices nearby	006c	Geräte in der Nähe suchen
 =GPU rendering (alpha)	e5e6	GPU-Rendering (alpha)
 =GPU samples tiled client buffers	783a	GPU nimmt gekachelte Client-Puffer direkt
 =Gallery	4cdd	Galerie

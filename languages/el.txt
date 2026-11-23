@@ -16,6 +16,7 @@
 # machine-made 2026-11-23 (the startup table's check column), not yet read by a person: settings_column_on
 # machine-made 2026-11-23 (a linked machine that did not answer, or does not offer a request), not yet read by a person: files_remote_silent files_remote_unsupported
 # machine-made 2026-11-23 (the Accessibility rows), not yet read by a person: =Accessibility =Sticky keys =Slow keys (ms, off or default) =Bounce keys (ms, off or default) =Mouse keys =Dwell click (ms, off or default) =Press a modifier, then the key, instead of both at once =A key types only after it is held this long =A key pressed again too soon after it is let go types once =The number pad moves the pointer and clicks =Hold the pointer still to click
+# machine-made 2026-11-23 (the bluetooth pads), not yet read by a person: settings_bt_find_keys settings_bt_listening settings_bt_near_keys settings_bt_paired settings_bt_paired_keys settings_bt_pairing =Find devices nearby
 @language el
 @name Ελληνικά
 @translated machine
@@ -286,6 +287,12 @@ settings_battery_charging	5116	, φορτίζει
 settings_battery_discharging	7964	, αποφορτίζεται
 settings_battery_full	ded8	, πλήρης
 settings_battery_idle	1635	, δεν φορτίζει
+settings_bt_find_keys	9c26	το Enter ψάχνει για δέκα δευτερόλεπτα συσκευές σε λειτουργία σύζευξης
+settings_bt_listening	074a	αναζήτηση κοντινών συσκευών: βάλτε ένα χειριστήριο σε λειτουργία σύζευξης
+settings_bt_near_keys	b268	κοντά: το Enter το συζευγνύει
+settings_bt_paired	7508	συζευγμένο
+settings_bt_paired_keys	6d99	συζευγμένο: συνδέεται όταν ξυπνά· το Delete το ξεχνά
+settings_bt_pairing	da7b	σύζευξη: κρατήστε τη συσκευή σε λειτουργία σύζευξης
 settings_busy	34e0	το moonwater είναι απασχολημένο: οι προηγούμενες αλλαγές δεν έχουν ολοκληρωθεί
 settings_button_discover	c0ee	Ανακάλυψη
 settings_button_end	adad	Τερματισμός όλων
@@ -586,6 +593,7 @@ ui_field_full	fe02	δεν χωράει περισσότερο
 =End every session	12e1	Τερματισμός όλων των συνεδριών
 =External devices	5769	Εξωτερικές συσκευές
 =Files	1b30	Αρχεία
+=Find devices nearby	006c	Εύρεση κοντινών συσκευών
 =GPU rendering (alpha)	e5e6	Απόδοση με GPU (άλφα)
 =GPU samples tiled client buffers	783a	Η GPU διαβάζει τα πλακωτά buffers των εφαρμογών
 =Gallery	4cdd	Συλλογή

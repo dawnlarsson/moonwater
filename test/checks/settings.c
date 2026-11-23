@@ -3385,7 +3385,9 @@ static fn check_settings(string_address regular, string_address bold)
                             "[Moonwater]   Corp -x    -70 dBm ##..  802.1X   5 GHz ch 40\n";
                         static const char silent[] =
                             "[Moonwater] wifi on\n[Moonwater]   HomeNet\n[Moonwater] no networks heard (a new scan needs root)\n";
-                        static const char tooth[] = "[Moonwater] bluetooth on\n[Moonwater]   Keyboard K1\n[Moonwater]   Mouse\n";
+                        static const char tooth[] = "[Moonwater] bluetooth on\n[Moonwater]   Keyboard K1\n"
+                                                    "[Moonwater]   AA:BB:CC:DD:EE:01  connected  Wireless Controller\n"
+                                                    "[Moonwater]   AA:BB:CC:DD:EE:02  near gamepad  Pro Controller\n";
                         int wifi = settings_row_named("Wi-Fi"), bt = settings_row_named("Bluetooth"), battery = settings_row_named("Battery"),
                             clock_row = settings_row_named("Clock"), wifi_group = settings_group_of(wifi),
                             bt_group = settings_group_of(bt);
@@ -3603,40 +3605,57 @@ static fn check_settings(string_address regular, string_address bold)
                                 settings.queued = 0;
                         }
 
-                        // Devices: the names kept, and a row that keeps another.
+                        // Devices: a name kept, a pad paired (connected), one the last scan heard, and a row that scans for more.
                         settings.page.chosen = bt_group;
                         settings.item_count[1] = 0;
                         settings.feed_list = 1;
                         memory_copy(settings_large->said, tooth, sizeof(tooth) - 1);
                         settings.runner.length = sizeof(tooth) - 1;
                         settings_feed_read(false, false);
-                        check("settings: the devices kept are rows, and a last row keeps one more",
-                              settings.item_count[1] == 3 && string_equals((string_address)devices[0].label, (string_address) "Keyboard K1") &&
-                                  devices[0].kind == SETTINGS_DEVICE && devices[2].kind == SETTINGS_ADD &&
+                        check("settings: the devices are rows (a name kept, a pad paired and connected, one heard near), and a last row scans",
+                              settings.item_count[1] == 4 && string_equals((string_address)devices[0].label, (string_address) "Keyboard K1") &&
+                                  devices[0].kind == SETTINGS_DEVICE && !devices[0].port[0] && devices[3].kind == SETTINGS_ADD &&
+                                  string_equals((string_address)devices[1].label, (string_address) "Wireless Controller") &&
+                                  string_equals((string_address)devices[1].port, (string_address) "AA:BB:CC:DD:EE:01") &&
+                                  devices[1].flags == (SETTINGS_ITEM_SAVED | SETTINGS_ITEM_JOINED) &&
+                                  string_equals((string_address)devices[2].label, (string_address) "Pro Controller") &&
+                                  string_equals((string_address)devices[2].port, (string_address) "AA:BB:CC:DD:EE:02") && devices[2].flags == SETTINGS_ITEM_HEARD &&
                                   string_equals((string_address)settings.value[bt], (string_address) "on"));
+                        settings.list.focus = (int)SETTINGS_LIST_ID(1, 3);
+                        settings_press(UI_KEY_ENTER);
+                        check("settings: Enter on it listens for ten seconds by bluetooth scan, and opens no field", settings.queued == 1 &&
+                                  string_equals((string_address)settings.queue[0].value, (string_address) "s\n10") && settings_editing() < 0);
+                        settings.queued = 0;
                         settings.list.focus = (int)SETTINGS_LIST_ID(1, 2);
                         settings_press(UI_KEY_ENTER);
-                        for (const char address_to letter = "Pen"; *letter; letter++)
-                                settings_type_code((unsigned int)*letter);
-                        settings_press(UI_KEY_ENTER);
-                        check("settings: Enter on it opens a field, and the name typed is kept by bluetooth add", settings.queued == 1 &&
-                                  string_equals((string_address)settings.queue[0].value, (string_address) "a\nPen") && settings_editing() < 0);
+                        check("settings: Enter on a device heard pairs it by its address", settings.queued == 1 &&
+                                  string_equals((string_address)settings.queue[0].value, (string_address) "p\nAA:BB:CC:DD:EE:02"));
                         settings.queued = 0;
+                        settings.list.focus = (int)SETTINGS_LIST_ID(1, 2);
+                        settings_press(UI_KEY_DELETE);
+                        settings_press(UI_KEY_DELETE);
+                        check("settings: Delete on a device only heard forgets nothing", settings.queued == 0);
                         settings.list.focus = (int)SETTINGS_LIST_ID(1, 1);
                         settings_press(UI_KEY_DELETE);
                         settings_press(UI_KEY_DELETE);
-                        check("settings: and Delete twice on a device forgets it", settings.queued == 1 &&
-                                  string_equals((string_address)settings.queue[0].value, (string_address) "d\nMouse"));
+                        check("settings: and Delete twice on a paired one forgets it by its address", settings.queued == 1 &&
+                                  string_equals((string_address)settings.queue[0].value, (string_address) "g\nAA:BB:CC:DD:EE:01"));
                         settings.queued = 0;
                         // The kit's managed rows: a device kept has its remove button, which forgets it as Delete does (the first press
                         // asks), and the last row is the kit's add row, the plus and its words.
                         {
                                 struct ui_row kept_row, add_row;
                                 b32 asked;
+                                struct ui_row paired_row, near_row;
                                 memory_zero(&kept_row, sizeof(kept_row)), settings_describe((int)SETTINGS_LIST_ID(1, 0), &kept_row);
-                                memory_zero(&add_row, sizeof(add_row)), settings_describe((int)SETTINGS_LIST_ID(1, 2), &add_row);
+                                memory_zero(&paired_row, sizeof(paired_row)), settings_describe((int)SETTINGS_LIST_ID(1, 1), &paired_row);
+                                memory_zero(&near_row, sizeof(near_row)), settings_describe((int)SETTINGS_LIST_ID(1, 2), &near_row);
+                                memory_zero(&add_row, sizeof(add_row)), settings_describe((int)SETTINGS_LIST_ID(1, 3), &add_row);
                                 check("settings: a device kept has a remove button, and the add row is the kit's",
                                       kept_row.remove && !kept_row.order && add_row.kind == UI_ROW_ADD && !add_row.remove);
+                                check("settings: a paired pad is marked connected and removable, one heard says Pair and is not",
+                                      paired_row.remove && paired_row.mark && string_equals((string_address)paired_row.value, (string_address)WORDS(installer_wifi_joined)) &&
+                                          !near_row.remove && !near_row.mark && string_equals((string_address)near_row.value, (string_address)WORDS(settings_button_pair)));
                                 settings.list.removed = (int)SETTINGS_LIST_ID(1, 0) + 1, settings_managed();
                                 asked = settings.queued == 0 && !settings.list.removed;
                                 settings.list.removed = (int)SETTINGS_LIST_ID(1, 0) + 1, settings_managed();

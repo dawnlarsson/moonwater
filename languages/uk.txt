@@ -16,6 +16,7 @@
 # machine-made 2026-11-23 (the startup table's check column), not yet read by a person: settings_column_on
 # machine-made 2026-11-23 (a linked machine that did not answer, or does not offer a request), not yet read by a person: files_remote_silent files_remote_unsupported
 # machine-made 2026-11-23 (the Accessibility rows), not yet read by a person: =Accessibility =Sticky keys =Slow keys (ms, off or default) =Bounce keys (ms, off or default) =Mouse keys =Dwell click (ms, off or default) =Press a modifier, then the key, instead of both at once =A key types only after it is held this long =A key pressed again too soon after it is let go types once =The number pad moves the pointer and clicks =Hold the pointer still to click
+# machine-made 2026-11-23 (the bluetooth pads), not yet read by a person: settings_bt_find_keys settings_bt_listening settings_bt_near_keys settings_bt_paired settings_bt_paired_keys settings_bt_pairing =Find devices nearby
 @language uk
 @name Українська
 @translated machine
@@ -286,6 +287,12 @@ settings_battery_charging	5116	, заряджається
 settings_battery_discharging	7964	, розряджається
 settings_battery_full	ded8	, заряджена
 settings_battery_idle	1635	, не заряджається
+settings_bt_find_keys	9c26	Enter десять секунд шукає пристрої в режимі з'єднання
+settings_bt_listening	074a	пошук пристроїв поруч: переведіть геймпад у режим з'єднання
+settings_bt_near_keys	b268	поруч: Enter зв'язує його
+settings_bt_paired	7508	зв'язано
+settings_bt_paired_keys	6d99	зв'язано: підключається, коли прокидається; Delete забуває
+settings_bt_pairing	da7b	з'єднання: тримайте пристрій у режимі з'єднання
 settings_busy	34e0	moonwater зайнятий: попередні зміни ще не виконано
 settings_button_discover	c0ee	Виявити
 settings_button_end	adad	Завершити всі
@@ -586,6 +593,7 @@ ui_field_full	fe02	більше не вміщається
 =End every session	12e1	Завершити всі сеанси
 =External devices	5769	Зовнішні пристрої
 =Files	1b30	Файли
+=Find devices nearby	006c	Знайти пристрої поруч
 =GPU rendering (alpha)	e5e6	Рендеринг на GPU (альфа)
 =GPU samples tiled client buffers	783a	GPU читає мозаїчні буфери клієнтів
 =Gallery	4cdd	Галерея

@@ -17,6 +17,7 @@
 # machine-made 2026-11-23 (the bands of a machine in Files' sidebar), not yet read by a person: files_band_drives files_band_removable
 # machine-made 2026-11-23 (the startup table's check column), not yet read by a person: settings_column_on
 # machine-made 2026-11-23 (a linked machine that did not answer, or does not offer a request), not yet read by a person: files_remote_silent files_remote_unsupported
+# machine-made 2026-11-23 (the bluetooth pads), not yet read by a person: settings_bt_find_keys settings_bt_listening settings_bt_near_keys settings_bt_paired settings_bt_paired_keys settings_bt_pairing =Find devices nearby
 @language he
 @name עברית
 @translated machine
@@ -287,6 +288,12 @@ settings_battery_charging	5116	, בטעינה
 settings_battery_discharging	7964	, בפריקה
 settings_battery_full	ded8	, מלאה
 settings_battery_idle	1635	, לא בטעינה
+settings_bt_find_keys	9c26	Enter מחפש במשך עשר שניות התקנים במצב צימוד
+settings_bt_listening	074a	מחפש התקנים קרובים: העבירו בקר למצב צימוד
+settings_bt_near_keys	b268	קרוב: Enter מצמד אותו
+settings_bt_paired	7508	מצומד
+settings_bt_paired_keys	6d99	מצומד: מתחבר כשהוא מתעורר; Delete שוכח אותו
+settings_bt_pairing	da7b	מצמד: השאירו את ההתקן במצב צימוד
 settings_busy	34e0	moonwater עסוק: השינויים שלפני זה טרם הושלמו
 settings_button_discover	c0ee	גלה
 settings_button_end	adad	סיים הכול
@@ -587,6 +594,7 @@ ui_field_full	fe02	זה המקסימום שהוא מכיל
 =End every session	12e1	סיום כל ההפעלות
 =External devices	5769	התקנים חיצוניים
 =Files	1b30	קבצים
+=Find devices nearby	006c	חיפוש התקנים קרובים
 =GPU rendering (alpha)	e5e6	רינדור ב-GPU (אלפא)
 =GPU samples tiled client buffers	783a	ה-GPU קורא מאגרי יישומים משובצים-אריחים
 =Gallery	4cdd	גלריה

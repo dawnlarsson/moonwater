@@ -268,6 +268,12 @@ settings_battery_charging	5116	, Charging
 settings_battery_discharging	7964	, Discharging
 settings_battery_full	ded8	, Full
 settings_battery_idle	1635	, Not charging
+settings_bt_find_keys	9c26	Enter listens for devices in pairing mode for ten seconds
+settings_bt_listening	074a	listening for devices nearby: put a pad in its pairing mode
+settings_bt_near_keys	b268	heard nearby: Enter pairs it
+settings_bt_paired	7508	paired
+settings_bt_paired_keys	6d99	paired: it connects when it wakes; Delete forgets it
+settings_bt_pairing	da7b	pairing: keep the device in its pairing mode
 settings_busy	34e0	moonwater is busy: the changes before this one are not done
 settings_button_discover	c0ee	Discover
 settings_button_end	adad	End all
@@ -568,6 +574,7 @@ ui_field_full	fe02	that is as much as it holds
 =End every session	12e1	End every session
 =External devices	5769	External devices
 =Files	1b30	Files
+=Find devices nearby	006c	Find devices nearby
 =GPU rendering (alpha)	e5e6	GPU rendering (alpha)
 =GPU samples tiled client buffers	783a	GPU samples tiled client buffers
 =Gallery	4cdd	Gallery

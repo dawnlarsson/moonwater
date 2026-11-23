@@ -16,6 +16,7 @@
 # machine-made 2026-11-23 (the startup table's check column), not yet read by a person: settings_column_on
 # machine-made 2026-11-23 (a linked machine that did not answer, or does not offer a request), not yet read by a person: files_remote_silent files_remote_unsupported
 # machine-made 2026-11-23 (the Accessibility rows), not yet read by a person: =Accessibility =Sticky keys =Slow keys (ms, off or default) =Bounce keys (ms, off or default) =Mouse keys =Dwell click (ms, off or default) =Press a modifier, then the key, instead of both at once =A key types only after it is held this long =A key pressed again too soon after it is let go types once =The number pad moves the pointer and clicks =Hold the pointer still to click
+# machine-made 2026-11-23 (the bluetooth pads), not yet read by a person: settings_bt_find_keys settings_bt_listening settings_bt_near_keys settings_bt_paired settings_bt_paired_keys settings_bt_pairing =Find devices nearby
 @language fr
 @name Français
 @translated machine
@@ -286,6 +287,12 @@ settings_battery_charging	5116	, en charge
 settings_battery_discharging	7964	, en décharge
 settings_battery_full	ded8	, pleine
 settings_battery_idle	1635	, ne charge pas
+settings_bt_find_keys	9c26	Enter cherche pendant dix secondes les appareils en mode d'association
+settings_bt_listening	074a	recherche d'appareils proches : mettez une manette en mode d'association
+settings_bt_near_keys	b268	à proximité : Enter l'associe
+settings_bt_paired	7508	associé
+settings_bt_paired_keys	6d99	associé : il se connecte à son réveil ; Delete l'oublie
+settings_bt_pairing	da7b	association : gardez l'appareil en mode d'association
 settings_busy	34e0	moonwater est occupé : les changements précédents ne sont pas terminés
 settings_button_discover	c0ee	Découvrir
 settings_button_end	adad	Tout terminer
@@ -586,6 +593,7 @@ ui_field_full	fe02	c'est tout ce que ce champ peut contenir
 =End every session	12e1	Terminer toutes les sessions
 =External devices	5769	Périphériques externes
 =Files	1b30	Fichiers
+=Find devices nearby	006c	Trouver des appareils à proximité
 =GPU rendering (alpha)	e5e6	Rendu par GPU (alpha)
 =GPU samples tiled client buffers	783a	Le GPU lit les tampons en mosaïque des clients
 =Gallery	4cdd	Galerie

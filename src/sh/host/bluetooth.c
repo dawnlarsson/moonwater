@@ -2179,18 +2179,38 @@ static fn bt_keep(void)
 static b32 bt_status(void)
 {
         bt_book book;
-        bipolar got = bt_book_read(address_of book);
+        bt_text found = {0};
+        bipolar got = bt_book_read(address_of book), heard = bt_read_whole(BT_FOUND, address_of found);
+        positive at = 0, start, length;
+        p8 address[18], shown[249 * 4 + 1];
 
         radio_bluetooth_status();
-        for (positive at = 0; got >= 0 && at < book.pads; at++)
+        for (positive pad = 0; got >= 0 && pad < book.pads; pad++)
         {
-                p8 address[18], shown[249 * 4 + 1];
-
-                bt_address_text(address, book.pad[at].address, true);
-                radio_display(shown, sizeof(shown), book.pad[at].name, string_length(book.pad[at].name));
+                bt_address_text(address, book.pad[pad].address, true);
+                radio_display(shown, sizeof(shown), book.pad[pad].name, string_length(book.pad[pad].name));
                 string_format(log, host_label "  %s  %s  %s\n", (string_address)address,
-                              bt_input_is(book.pad[at].address) ? (string_address) "connected" : (string_address) "paired", (string_address)shown);
+                              bt_input_is(book.pad[pad].address) ? (string_address) "connected" : (string_address) "paired", (string_address)shown);
         }
+        //      And what the last scan heard that is not paired: near, what it is, and its name, for a pair to be asked of.
+        while (heard > 0 && host_line_next(found.bytes, (positive)heard, address_of at, address_of start, address_of length))
+        {
+                const p8 address_to line = found.bytes + start;
+                positive word = 0, from[3], size[3];
+                p8 near[6], kind[16];
+                bool whole = true;
+
+                for (positive part = 0; part < 3 && whole; part++)
+                        whole = bt_word(line, length, address_of word, from + part, size + part);
+                if (!whole || !bt_address_read(line + from[0], size[0], near) || (got >= 0 && bt_book_find(address_of book, near)) ||
+                    size[2] >= sizeof(kind))
+                        continue;
+                memory_copy(kind, line + from[2], size[2]), kind[size[2]] = end;
+                bt_address_text(address, near, true);
+                radio_display(shown, sizeof(shown), (p8 address_to)line + word, length - word > 248 ? 248 : length - word);
+                string_format(log, host_label "  %s  near %s  %s\n", (string_address)address, (string_address)kind, (string_address)shown);
+        }
+        bt_text_free(address_of found);
         bt_book_free(address_of book);
         log_flush();
         return 0;

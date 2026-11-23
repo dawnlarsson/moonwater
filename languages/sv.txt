@@ -16,6 +16,7 @@
 # machine-made 2026-11-23 (the startup table's check column), not yet read by a person: settings_column_on
 # machine-made 2026-11-23 (a linked machine that did not answer, or does not offer a request), not yet read by a person: files_remote_silent files_remote_unsupported
 # machine-made 2026-11-23 (the Accessibility rows), not yet read by a person: =Accessibility =Sticky keys =Slow keys (ms, off or default) =Bounce keys (ms, off or default) =Mouse keys =Dwell click (ms, off or default) =Press a modifier, then the key, instead of both at once =A key types only after it is held this long =A key pressed again too soon after it is let go types once =The number pad moves the pointer and clicks =Hold the pointer still to click
+# machine-made 2026-11-23 (the bluetooth pads), not yet read by a person: settings_bt_find_keys settings_bt_listening settings_bt_near_keys settings_bt_paired settings_bt_paired_keys settings_bt_pairing =Find devices nearby
 @language sv
 @name Svenska
 @translated machine
@@ -286,6 +287,12 @@ settings_battery_charging	5116	, laddar
 settings_battery_discharging	7964	, laddar ur
 settings_battery_full	ded8	, full
 settings_battery_idle	1635	, laddar inte
+settings_bt_find_keys	9c26	Enter söker i tio sekunder efter enheter i parkopplingsläge
+settings_bt_listening	074a	söker enheter i närheten: sätt en handkontroll i parkopplingsläge
+settings_bt_near_keys	b268	i närheten: Enter parar ihop den
+settings_bt_paired	7508	ihopparad
+settings_bt_paired_keys	6d99	ihopparad: ansluter när den vaknar; Delete glömmer den
+settings_bt_pairing	da7b	parar ihop: håll enheten i parkopplingsläge
 settings_busy	34e0	moonwater är upptaget: ändringarna före den här är inte klara
 settings_button_discover	c0ee	Upptäck
 settings_button_end	adad	Avsluta alla
@@ -586,6 +593,7 @@ ui_field_full	fe02	mer ryms inte
 =End every session	12e1	Avsluta alla sessioner
 =External devices	5769	Externa enheter
 =Files	1b30	Filer
+=Find devices nearby	006c	Hitta enheter i närheten
 =GPU rendering (alpha)	e5e6	GPU-rendering (alfa)
 =GPU samples tiled client buffers	783a	GPU läser klienters kakelbuffertar
 =Gallery	4cdd	Galleri

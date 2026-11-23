@@ -897,6 +897,10 @@ static const char address_to settings_item_text(const struct settings_item addre
                        : item->flags & SETTINGS_ITEM_CANNOT ? WORDS(settings_item_cannot)
                        : item->flags & SETTINGS_ITEM_OPEN ? WORDS(settings_item_open)
                        : item->flags & SETTINGS_ITEM_SAVED ? WORDS(settings_item_saved) : WORDS(settings_item_ask);
+        if (item->kind == SETTINGS_DEVICE && item->port[0])
+                return item->flags & SETTINGS_ITEM_SAVED ? WORDS(settings_bt_paired_keys) : WORDS(settings_bt_near_keys);
+        if (item->kind == SETTINGS_ADD && settings_item_in(item, 1))
+                return WORDS(settings_bt_find_keys);
         return item->flags & SETTINGS_ITEM_DRIVE ? WORDS(settings_item_drive)
                : item->kind == SETTINGS_DEVICE ? WORDS(settings_item_kept)
                : item->kind == SETTINGS_LINK ? WORDS(settings_item_link)
@@ -2129,6 +2133,7 @@ static fn settings_join(string_address address_to words, positive count, char ad
 
 static const struct settings_act_spec { char code; b32 takes_pass, takes_arg; const char address_to radio, address_to how; } settings_act_specs[] = {
     {'j', true, false, "wifi", "add"}, {'f', false, false, "wifi", "remove"}, {'a', false, false, "bluetooth", "add"}, {'d', false, false, "bluetooth", "remove"},
+    {'s', false, false, "bluetooth", "scan"}, {'p', false, false, "bluetooth", "pair"}, {'g', false, false, "bluetooth", "forget"},
     {'v', false, false, "device", "allow"}, {'x', false, false, "device", "deny"}, {'r', false, false, "link", "remove"},
     {'l', false, true, "link", "allow"}, {'n', false, true, "link", "deny"},
     {'L', false, false, "link", "allow-all"}, {'N', false, false, "link", "deny-all"},
@@ -2462,25 +2467,64 @@ static fn settings_feed_wifi(void)
         settings.item_count[0] = (int)count;
 }
 
+// Whether a line of moonwater bluetooth starts with a device's address and two spaces (AA:BB:CC:DD:EE:FF, as the verb says it).
+static b32 settings_bluetooth_address(const char address_to text, positive size)
+{
+        if (size < 19 || text[17] != ' ' || text[18] != ' ')
+                return false;
+        for (positive at = 0; at < 17; at++)
+                if (at % 3 == 2 ? text[at] != ':' : !((text[at] >= '0' && text[at] <= '9') || (text[at] >= 'A' && text[at] <= 'F')))
+                        return false;
+        return true;
+}
+
+/*
+        moonwater bluetooth's devices: a paired one is its address, connected or paired, and its name; one the last scan heard and
+        nothing paired is its address, near and what it is, and its name; a name kept (bluetooth add) is its name alone. The address
+        is the item's port, which pair and forget are given; the add row after them scans.
+*/
 static fn settings_feed_devices(void)
 {
         char line[SETTINGS_PROBE], address_to text;
-        const char address_to keep = language_of("Keep a device by its name");
+        const char address_to find = language_of("Find devices nearby");
         positive at, size, count = 0;
         for (at = 0; settings_feed_line(&at, line, sizeof(line), &text, &size);)
         {
                 struct settings_cursor c = {text, size};
-                if (sc_eat(&c, "  ") && c.n && c.s[0] != ' ')
+                struct settings_item address_to it;
+                if (!sc_eat(&c, "  ") || !c.n || c.s[0] == ' ')
+                        continue;
+                if (!(it = settings_item_slot(1, count)))
+                        break;
+                count++, it->kind = SETTINGS_DEVICE, it->flags = SETTINGS_ITEM_SAVED;
+                if (!settings_bluetooth_address(c.s, c.n))
                 {
-                        struct settings_item address_to it = settings_item_slot(1, count);
-                        if (!it) break;
-                        it->kind = SETTINGS_DEVICE, it->flags = SETTINGS_ITEM_SAVED, settings_item_label(it, c.s, c.n), count++;
+                        settings_item_label(it, c.s, c.n);
+                        continue;
                 }
+                settings_slice(it->port, sizeof(it->port), c.s, 17);
+                {
+                        positive state = 19, name;
+                        while (state < c.n && c.s[state] == ' ')
+                                state++;
+                        for (name = state; name + 1 < c.n && !(c.s[name] == ' ' && c.s[name + 1] == ' '); name++)
+                                ;
+                        if (name + 1 >= c.n)
+                                name = c.n;
+                        settings_slice(it->state, sizeof(it->state), c.s + state, name - state);
+                        while (name < c.n && c.s[name] == ' ')
+                                name++;
+                        settings_item_label(it, name < c.n ? c.s + name : it->port, name < c.n ? c.n - name : 17);
+                }
+                if (string_has_prefix((string_address)it->state, "near"))
+                        it->flags = SETTINGS_ITEM_HEARD;
+                else if (string_equals((string_address)it->state, (string_address) "connected"))
+                        it->flags |= SETTINGS_ITEM_JOINED;
         }
         {
                 struct settings_item address_to add = settings_item_slot(1, count);
                 if (add)
-                        add->kind = SETTINGS_ADD, settings_item_label(add, keep, string_length((string_address)keep)), count++;
+                        add->kind = SETTINGS_ADD, settings_item_label(add, find, string_length((string_address)find)), count++;
         }
         settings.item_count[1] = (int)count;
 }
@@ -4124,6 +4168,11 @@ static fn settings_item_activate(int row, const struct settings_item address_to 
                 else
                         settings_way_taken(row, 1);
         }
+        // Bluetooth's add row listens for what is near (moonwater bluetooth scan), and a device it heard pairs at Enter.
+        else if (item->kind == SETTINGS_ADD && settings_item_in(item, 1))
+                settings_act('s', "10", null), settings_say((string_address)WORDS(settings_bt_listening));
+        else if (item->kind == SETTINGS_DEVICE && item->port[0] && !(item->flags & SETTINGS_ITEM_SAVED))
+                settings_act('p', item->port, null), settings_say((string_address)WORDS(settings_bt_pairing));
         else if (item->kind == SETTINGS_ADD)
                 settings_edit_begin(row, "", false), settings_say((string_address)WORDS(settings_type_device));
         else if (item->kind == SETTINGS_LINK)
@@ -4143,6 +4192,9 @@ static fn settings_forget_item(const struct settings_item address_to item)
                 return;
         if (!ui_confirm_ask(&settings.confirm, -1 - (int)item->kind, item->label))
                 return language_format(text, sizeof(text), WORDS(settings_forget), item->label), settings_confirm_say(text), ui_page_redraw(&settings.page);
+        // A paired Bluetooth device is forgotten by its address (moonwater bluetooth forget), a name kept by its name.
+        if (item->kind == SETTINGS_DEVICE && item->port[0])
+                return settings_act('g', item->port, null);
         settings_act(code, item->label, null);
 }
 
@@ -4640,6 +4692,13 @@ static fn settings_describe_item(int id, const struct settings_item address_to i
                 row->remove = (item->flags & SETTINGS_ITEM_SAVED) != 0; // a saved network's button forgets it, asking first (settings_forget_item)
         // A device kept has its remove button (it forgets the device, asking first); the add row after them is the kit's, its one way the
         // field of a name.
+        // A Bluetooth device says connected, paired, or (heard by the last scan) Pair, which Enter does; a paired one is marked
+        // while connected and removed (forgotten) from its menu or by Delete.
+        else if (item->kind == SETTINGS_DEVICE && item->port[0])
+                row->columns = settings_columns_for(1), row->mark = (item->flags & SETTINGS_ITEM_JOINED) != 0,
+                row->value = row->cells[1] = item->flags & SETTINGS_ITEM_JOINED ? WORDS(installer_wifi_joined)
+                                             : item->flags & SETTINGS_ITEM_SAVED ? WORDS(settings_bt_paired) : WORDS(settings_button_pair),
+                row->remove = (item->flags & SETTINGS_ITEM_SAVED) != 0;
         else if (item->kind == SETTINGS_DEVICE || item->kind == SETTINGS_ADD)
                 row->columns = settings_columns_for(1), row->value = row->cells[1] = item->kind == SETTINGS_DEVICE ? WORDS(settings_kept) : null,
                 row->remove = item->kind == SETTINGS_DEVICE, row->kind = item->kind == SETTINGS_ADD ? UI_ROW_ADD : row->kind;
@@ -4839,7 +4898,7 @@ static p32 settings_row_menu_flags(int id)
                 if (!it || it->kind == SETTINGS_ADD) return 0;
                 if (it->kind == SETTINGS_NOTE) return has ? UI_LIST_MENU_HAS_COPY : 0;
                 if (it->kind == SETTINGS_NETWORK) return copy | ((it->flags & SETTINGS_ITEM_SAVED) ? UI_LIST_MENU_CAN_REMOVE : 0);
-                return copy | (it->kind == SETTINGS_DEVICE || it->kind == SETTINGS_STARTUP || (it->kind == SETTINGS_LINK && it->where == 1) ? UI_LIST_MENU_CAN_REMOVE : 0);
+                return copy | ((it->kind == SETTINGS_DEVICE && (it->flags & SETTINGS_ITEM_SAVED)) || it->kind == SETTINGS_STARTUP || (it->kind == SETTINGS_LINK && it->where == 1) ? UI_LIST_MENU_CAN_REMOVE : 0);
         }
         case SETTINGS_DOM_SUB:
                 if (offset >= settings_sub_count) return 0;

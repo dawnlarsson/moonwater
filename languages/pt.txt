@@ -16,6 +16,7 @@
 # machine-made 2026-11-23 (the startup table's check column), not yet read by a person: settings_column_on
 # machine-made 2026-11-23 (a linked machine that did not answer, or does not offer a request), not yet read by a person: files_remote_silent files_remote_unsupported
 # machine-made 2026-11-23 (the Accessibility rows), not yet read by a person: =Accessibility =Sticky keys =Slow keys (ms, off or default) =Bounce keys (ms, off or default) =Mouse keys =Dwell click (ms, off or default) =Press a modifier, then the key, instead of both at once =A key types only after it is held this long =A key pressed again too soon after it is let go types once =The number pad moves the pointer and clicks =Hold the pointer still to click
+# machine-made 2026-11-23 (the bluetooth pads), not yet read by a person: settings_bt_find_keys settings_bt_listening settings_bt_near_keys settings_bt_paired settings_bt_paired_keys settings_bt_pairing =Find devices nearby
 @language pt
 @name Português
 @translated machine
@@ -286,6 +287,12 @@ settings_battery_charging	5116	, carregando
 settings_battery_discharging	7964	, descarregando
 settings_battery_full	ded8	, completa
 settings_battery_idle	1635	, não está carregando
+settings_bt_find_keys	9c26	Enter procura durante dez segundos dispositivos em modo de emparelhamento
+settings_bt_listening	074a	procurando dispositivos próximos: coloque um controle em modo de emparelhamento
+settings_bt_near_keys	b268	próximo: Enter emparelha
+settings_bt_paired	7508	emparelhado
+settings_bt_paired_keys	6d99	emparelhado: conecta quando desperta; Delete esquece
+settings_bt_pairing	da7b	emparelhando: mantenha o dispositivo em modo de emparelhamento
 settings_busy	34e0	moonwater está ocupado: as alterações anteriores não terminaram
 settings_button_discover	c0ee	Descobrir
 settings_button_end	adad	Encerrar todas
@@ -586,6 +593,7 @@ ui_field_full	fe02	não cabe mais que isso
 =End every session	12e1	Encerrar todas as sessões
 =External devices	5769	Dispositivos externos
 =Files	1b30	Arquivos
+=Find devices nearby	006c	Encontrar dispositivos próximos
 =GPU rendering (alpha)	e5e6	Renderização por GPU (alfa)
 =GPU samples tiled client buffers	783a	A GPU lê os buffers em mosaico dos clientes
 =Gallery	4cdd	Galeria

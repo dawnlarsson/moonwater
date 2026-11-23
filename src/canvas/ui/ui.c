@@ -6729,6 +6729,12 @@ LANGUAGE_ID(settings_battery_charging, ", Charging") \
 LANGUAGE_ID(settings_battery_discharging, ", Discharging") \
 LANGUAGE_ID(settings_battery_full, ", Full") \
 LANGUAGE_ID(settings_battery_idle, ", Not charging") \
+LANGUAGE_ID(settings_bt_find_keys, "Enter listens for devices in pairing mode for ten seconds") \
+LANGUAGE_ID(settings_bt_listening, "listening for devices nearby: put a pad in its pairing mode") \
+LANGUAGE_ID(settings_bt_near_keys, "heard nearby: Enter pairs it") \
+LANGUAGE_ID(settings_bt_paired, "paired") \
+LANGUAGE_ID(settings_bt_paired_keys, "paired: it connects when it wakes; Delete forgets it") \
+LANGUAGE_ID(settings_bt_pairing, "pairing: keep the device in its pairing mode") \
 LANGUAGE_ID(settings_busy, "moonwater is busy: the changes before this one are not done") \
 LANGUAGE_ID(settings_button_discover, "Discover") \
 LANGUAGE_ID(settings_button_end, "End all") \

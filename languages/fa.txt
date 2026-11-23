@@ -17,6 +17,7 @@
 # machine-made 2026-11-23 (the bands of a machine in Files' sidebar), not yet read by a person: files_band_drives files_band_removable
 # machine-made 2026-11-23 (the startup table's check column), not yet read by a person: settings_column_on
 # machine-made 2026-11-23 (a linked machine that did not answer, or does not offer a request), not yet read by a person: files_remote_silent files_remote_unsupported
+# machine-made 2026-11-23 (the bluetooth pads), not yet read by a person: settings_bt_find_keys settings_bt_listening settings_bt_near_keys settings_bt_paired settings_bt_paired_keys settings_bt_pairing =Find devices nearby
 @language fa
 @name فارسی
 @translated machine
@@ -287,6 +288,12 @@ settings_battery_charging	5116	، در حال شارژ
 settings_battery_discharging	7964	، در حال تخلیه
 settings_battery_full	ded8	، شارژ کامل
 settings_battery_idle	1635	، در حال شارژ نیست
+settings_bt_find_keys	9c26	Enter ده ثانیه دنبال دستگاه‌های در حالت جفت شدن می‌گردد
+settings_bt_listening	074a	در جست‌وجوی دستگاه‌های نزدیک: دسته را در حالت جفت شدن بگذارید
+settings_bt_near_keys	b268	نزدیک: Enter آن را جفت می‌کند
+settings_bt_paired	7508	جفت‌شده
+settings_bt_paired_keys	6d99	جفت‌شده: وقتی بیدار شود وصل می‌شود؛ Delete آن را فراموش می‌کند
+settings_bt_pairing	da7b	در حال جفت کردن: دستگاه را در حالت جفت شدن نگه دارید
 settings_busy	34e0	moonwater مشغول است: تغییرات پیش از این هنوز انجام نشده‌اند
 settings_button_discover	c0ee	کشف کن
 settings_button_end	adad	پایان همه
@@ -587,6 +594,7 @@ ui_field_full	fe02	بیش از این جا ندارد
 =End every session	12e1	پایان همه نشست‌ها
 =External devices	5769	دستگاه‌های خارجی
 =Files	1b30	پرونده‌ها
+=Find devices nearby	006c	یافتن دستگاه‌های نزدیک
 =GPU rendering (alpha)	e5e6	رندر با GPU (آلفا)
 =GPU samples tiled client buffers	783a	GPU بافرهای کاشی‌شده‌ی برنامه را می‌خواند
 =Gallery	4cdd	گالری

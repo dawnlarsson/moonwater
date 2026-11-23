@@ -17,6 +17,7 @@
 # machine-made 2026-11-23 (the bands of a machine in Files' sidebar), not yet read by a person: files_band_drives files_band_removable
 # machine-made 2026-11-23 (the startup table's check column), not yet read by a person: settings_column_on
 # machine-made 2026-11-23 (a linked machine that did not answer, or does not offer a request), not yet read by a person: files_remote_silent files_remote_unsupported
+# machine-made 2026-11-23 (the bluetooth pads), not yet read by a person: settings_bt_find_keys settings_bt_listening settings_bt_near_keys settings_bt_paired settings_bt_paired_keys settings_bt_pairing =Find devices nearby
 @language ar
 @name العربية
 @translated machine
@@ -287,6 +288,12 @@ settings_battery_charging	5116	، قيد الشحن
 settings_battery_discharging	7964	، قيد التفريغ
 settings_battery_full	ded8	، مشحونة بالكامل
 settings_battery_idle	1635	، لا يتم الشحن
+settings_bt_find_keys	9c26	Enter يبحث عن أجهزة في وضع الإقران لمدة عشر ثوانٍ
+settings_bt_listening	074a	البحث عن أجهزة قريبة: ضع وحدة التحكم في وضع الإقران
+settings_bt_near_keys	b268	قريب: Enter يقرنه
+settings_bt_paired	7508	مقترن
+settings_bt_paired_keys	6d99	مقترن: يتصل عندما يستيقظ؛ Delete لنسيانه
+settings_bt_pairing	da7b	جارٍ الإقران: أبقِ الجهاز في وضع الإقران
 settings_busy	34e0	moonwater مشغول: لم تكتمل التغييرات السابقة بعد
 settings_button_discover	c0ee	اكتشف
 settings_button_end	adad	إنهاء الكل
@@ -587,6 +594,7 @@ ui_field_full	fe02	هذا أقصى ما يتسع له
 =End every session	12e1	إنهاء كل الجلسات
 =External devices	5769	الأجهزة الخارجية
 =Files	1b30	الملفات
+=Find devices nearby	006c	البحث عن أجهزة قريبة
 =GPU rendering (alpha)	e5e6	التصيير على GPU (ألفا)
 =GPU samples tiled client buffers	783a	تقرأ وحدة GPU مخازن التطبيقات المبلّطة
 =Gallery	4cdd	المعرض

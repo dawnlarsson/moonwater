@@ -16,6 +16,7 @@
 # machine-made 2026-11-23 (the startup table's check column), not yet read by a person: settings_column_on
 # machine-made 2026-11-23 (a linked machine that did not answer, or does not offer a request), not yet read by a person: files_remote_silent files_remote_unsupported
 # machine-made 2026-11-23 (the Accessibility rows), not yet read by a person: =Accessibility =Sticky keys =Slow keys (ms, off or default) =Bounce keys (ms, off or default) =Mouse keys =Dwell click (ms, off or default) =Press a modifier, then the key, instead of both at once =A key types only after it is held this long =A key pressed again too soon after it is let go types once =The number pad moves the pointer and clicks =Hold the pointer still to click
+# machine-made 2026-11-23 (the bluetooth pads), not yet read by a person: settings_bt_find_keys settings_bt_listening settings_bt_near_keys settings_bt_paired settings_bt_paired_keys settings_bt_pairing =Find devices nearby
 @language tr
 @name Türkçe
 @translated machine
@@ -286,6 +287,12 @@ settings_battery_charging	5116	, şarj oluyor
 settings_battery_discharging	7964	, boşalıyor
 settings_battery_full	ded8	, dolu
 settings_battery_idle	1635	, şarj olmuyor
+settings_bt_find_keys	9c26	Enter on saniye boyunca eşleştirme kipindeki aygıtları arar
+settings_bt_listening	074a	yakındaki aygıtlar aranıyor: bir oyun kumandasını eşleştirme kipine alın
+settings_bt_near_keys	b268	yakında: Enter eşleştirir
+settings_bt_paired	7508	eşleşmiş
+settings_bt_paired_keys	6d99	eşleşmiş: uyandığında bağlanır; Delete unutturur
+settings_bt_pairing	da7b	eşleştiriliyor: aygıtı eşleştirme kipinde tutun
 settings_busy	34e0	moonwater meşgul: bundan önceki değişiklikler bitmedi
 settings_button_discover	c0ee	Keşfet
 settings_button_end	adad	Tümünü sonlandır
@@ -586,6 +593,7 @@ ui_field_full	fe02	daha fazlası sığmaz
 =End every session	12e1	Tüm oturumları sonlandır
 =External devices	5769	Harici aygıtlar
 =Files	1b30	Dosyalar
+=Find devices nearby	006c	Yakındaki aygıtları bul
 =GPU rendering (alpha)	e5e6	GPU ile oluşturma (alfa)
 =GPU samples tiled client buffers	783a	GPU, istemcilerin döşemeli arabelleklerini okur
 =Gallery	4cdd	Galeri

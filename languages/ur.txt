@@ -17,6 +17,7 @@
 # machine-made 2026-11-23 (the bands of a machine in Files' sidebar), not yet read by a person: files_band_drives files_band_removable
 # machine-made 2026-11-23 (the startup table's check column), not yet read by a person: settings_column_on
 # machine-made 2026-11-23 (a linked machine that did not answer, or does not offer a request), not yet read by a person: files_remote_silent files_remote_unsupported
+# machine-made 2026-11-23 (the bluetooth pads), not yet read by a person: settings_bt_find_keys settings_bt_listening settings_bt_near_keys settings_bt_paired settings_bt_paired_keys settings_bt_pairing =Find devices nearby
 @language ur
 @name اردو
 @translated machine
@@ -287,6 +288,12 @@ settings_battery_charging	5116	، چارج ہو رہی ہے
 settings_battery_discharging	7964	، ڈسچارج ہو رہی ہے
 settings_battery_full	ded8	، مکمل چارج
 settings_battery_idle	1635	، چارج نہیں ہو رہی
+settings_bt_find_keys	9c26	Enter دس سیکنڈ تک جوڑنے کی حالت میں ڈیوائسز ڈھونڈتا ہے
+settings_bt_listening	074a	قریبی ڈیوائسز ڈھونڈی جا رہی ہیں: کنٹرولر کو جوڑنے کی حالت میں رکھیں
+settings_bt_near_keys	b268	قریب: Enter اسے جوڑتا ہے
+settings_bt_paired	7508	جوڑا گیا
+settings_bt_paired_keys	6d99	جوڑا گیا: جاگنے پر جڑ جاتا ہے؛ Delete اسے بھلا دیتا ہے
+settings_bt_pairing	da7b	جوڑا جا رہا ہے: ڈیوائس کو جوڑنے کی حالت میں رکھیں
 settings_busy	34e0	moonwater مصروف ہے: اس سے پہلے کی تبدیلیاں ابھی مکمل نہیں ہوئیں
 settings_button_discover	c0ee	دریافت کریں
 settings_button_end	adad	سب ختم کریں
@@ -587,6 +594,7 @@ ui_field_full	fe02	اس میں اس سے زیادہ نہیں سماتا
 =End every session	12e1	تمام سیشن ختم کریں
 =External devices	5769	بیرونی ڈیوائسز
 =Files	1b30	فائلیں
+=Find devices nearby	006c	قریبی ڈیوائسز ڈھونڈیں
 =GPU rendering (alpha)	e5e6	GPU رینڈرنگ (الفا)
 =GPU samples tiled client buffers	783a	GPU کلائنٹ کے ٹائل والے بفرز پڑھتا ہے
 =Gallery	4cdd	گیلری
