@@ -244,6 +244,7 @@ mixer_column_mirror	7ee2	Mirror
 mixer_column_output	4324	Output
 mixer_column_plays	36d0	Plays
 mixer_empty	eef1	No sound is playing
+mixer_loopback	962c	Loopback microphone
 mixer_no_mic	412a	No microphone
 mixer_nobody	cc29	No program is recording
 mixer_off	e944	Sound server is off

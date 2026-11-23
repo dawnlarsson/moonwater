@@ -353,6 +353,7 @@ struct pulse_source
         char name[PULSE_NAME + 16], description[PULSE_DESCRIPTION + 24];
         long rate;
         long sink;                      // a monitor: the slot of its sink
+        int loop;                       // a loopback (with capture): what the default sink plays, which no program can tell from a microphone's
         unsigned long volume[2];
         int muted;
         long delay_frames;              // what the device holds, as the host last read it
@@ -1496,11 +1497,12 @@ AUDIO_API void pulse_capture_allow(struct pulse *p, int allowed)
         pulse_event(p, PULSE_FACILITY_SERVER, PULSE_EVENT_CHANGE, 0);
 }
 
-// The source a program that does not name one is given: the first capture device, else the monitor of the default sink.
+// The source a program that does not name one is given: the first capture device, else the monitor of the default sink. A loopback is
+// no program's microphone that did not ask for it.
 static long pulse_source_fallback(struct pulse *p)
 {
         for (long i = PULSE_SINKS; i < PULSE_SOURCES; i++)
-                if (p->source[i].used)
+                if (p->source[i].used && !p->source[i].loop)
                         return i;
         return p->default_sink >= 0 && p->source[p->default_sink].used ? p->default_sink : -1;
 }
@@ -1532,6 +1534,32 @@ AUDIO_API long pulse_source_add(struct pulse *p, const char *name, const char *d
                                 pulse_event(p, PULSE_FACILITY_SERVER, PULSE_EVENT_CHANGE, 0);
                                 pulse_changed(p, PULSE_CHANGED_DEFAULT_SOURCE, i);
                         }
+                        return i;
+                }
+        return -1;
+}
+
+/*
+        A loopback: a source that is what the default sink plays (after its volume, as its monitor is), shown to programs as a microphone is
+        (no monitor_of, the class of sound): the person's virtual cable from what plays to a program that records, which Chromium and the
+        programs built on it (they list no monitor) can choose. It is never the default source by itself, and another user's program does not
+        record it, as it records no monitor. Answers its slot or a negative number.
+*/
+AUDIO_API long pulse_loopback_add(struct pulse *p, const char *name, const char *description)
+{
+        for (long i = PULSE_SINKS; i < PULSE_SOURCES; i++)
+                if (!p->source[i].used)
+                {
+                        struct pulse_source *s = p->source + i;
+
+                        memory_zero(s, sizeof(*s));
+                        s->used = 1, s->capture = 1, s->loop = 1, s->sink = -1;
+                        pulse_copy(s->name, (long)sizeof(s->name), name);
+                        pulse_copy(s->description, (long)sizeof(s->description), description);
+                        s->rate = p->default_sink >= 0 && p->sink[p->default_sink].used ? p->sink[p->default_sink].rate : 48000;
+                        s->volume[0] = s->volume[1] = AUDIO_VOLUME_NORM;
+                        s->now = 1.0f;
+                        pulse_event(p, PULSE_FACILITY_SOURCE, PULSE_EVENT_NEW, (unsigned long)i);
                         return i;
                 }
         return -1;
@@ -1689,7 +1717,7 @@ static void pulse_fill_source(struct pulse *p, struct wire_w *w, struct pulse_cl
         pulse_fill_device(w, c, (unsigned long)slot, s->name, s->description, s->rate, s->volume, s->muted,
                           s->capture ? PULSE_INVALID : (unsigned long)s->sink, s->capture ? 0 : p->sink[s->sink].name,
                           pulse_delay_us(s->delay_frames, s->rate),
-                          s->capture ? 0x2 | 0x4 | 0x10 : 0x1 | 0x2 | 0x4 | 0x8 | 0x10,
+                          s->loop ? 0x2 : s->capture ? 0x2 | 0x4 | 0x10 : 0x1 | 0x2 | 0x4 | 0x8 | 0x10,
                           s->capture ? "sound" : "monitor", busy ? 0 : 1, 22);
 }
 
@@ -2447,7 +2475,7 @@ static int pulse_command_create_record(struct pulse *p, long slot, struct wire_r
                 source = p->default_source;
         // What a sink plays is what everyone in the session plays: another user's program does not hear it, and a source it may
         // not hear (a monitor, or one that is not there) is refused alike.
-        if (!c->root && (source < 0 || !p->source[source].capture))
+        if (!c->root && (source < 0 || !p->source[source].capture || p->source[source].loop))
                 return pulse_error(p, c, tag, PULSE_ERR_ACCESS);
         if (source < 0)
                 return pulse_error(p, c, tag, PULSE_ERR_NOENTITY);
@@ -4280,6 +4308,18 @@ AUDIO_API long pulse_sink_mix(struct pulse *p, long slot, unsigned char *dst, lo
         bytes = audio_sink_end(&sink->mix, dst, format, channels, frames);
         sink->played += (unsigned long long)frames;
         pulse_source_feed(p, slot, sink->mix.mix[0], sink->mix.mix[1], frames);
+        // A loopback is what the default sink plays, at its rate.
+        if (slot == p->default_sink)
+                for (long i = PULSE_SINKS; i < PULSE_SOURCES; i++)
+                        if (p->source[i].used && p->source[i].loop)
+                        {
+                                if (p->source[i].rate != sink->rate)
+                                {
+                                        p->source[i].rate = sink->rate;
+                                        pulse_source_retable(p, i);
+                                }
+                                pulse_source_feed(p, i, sink->mix.mix[0], sink->mix.mix[1], frames);
+                        }
         for (int i = 0; i < p->stream_slots; i++)
                 if (p->stream[i].used && p->stream[i].sink == slot)
                         pulse_stream_request(p, p->stream + i);

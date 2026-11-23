@@ -21,6 +21,7 @@
 # machine-made 2026-11-23 (the launcher's word when a program cannot be started), not yet read by a person: launcher_open_failed
 # machine-made 2026-11-23 (the mixer outputs pass), not yet read by a person: mixer_column_output mixer_column_plays mixer_outputs mixer_state_playing
 # machine-made 2026-11-23 (the mixer mirrors pass), not yet read by a person: mixer_column_mirror mixer_state_mirrored
+# machine-made 2026-11-23 (the loopback pass), not yet read by a person: mixer_loopback
 @language tr
 @name Türkçe
 @translated machine
@@ -267,6 +268,7 @@ mixer_column_mirror	7ee2	Yansıt
 mixer_column_output	4324	Çıkış
 mixer_column_plays	36d0	Çalar
 mixer_empty	eef1	Çalan ses yok
+mixer_loopback	962c	Geri döngü mikrofonu
 mixer_no_mic	412a	Mikrofon yok
 mixer_nobody	cc29	Hiçbir program kayıt yapmıyor
 mixer_off	e944	Ses sunucusu kapalı

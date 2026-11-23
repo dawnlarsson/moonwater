@@ -85,6 +85,8 @@
 #define AUDIO_MIRROR_SETTLE 10                     // seconds a mirror's fill is brought back to its target over, by the nudge of its step
 #define AUDIO_MIRROR_PPM 1000                      // the most the step is nudged, in parts a million: two cards' clocks differ by tens
 #define AUDIO_MIRROR_RETRY_NS 5000000000ull        // a mirror that could not be opened is tried again after this
+#define AUDIO_LOOPBACK_NAME "moonwater.loopback"     // the loopback microphone's name in the mirror list and the output list
+#define AUDIO_LOOPBACK_DESCRIPTION "Loopback microphone"
 
 struct audio_poll
 {
@@ -208,6 +210,8 @@ static struct
                 struct audio_resampler rs;
         } mirror[AUDIO_STATE_DEVICES];
         unsigned int output_gen;        // counted up at each open of the output
+        int loopback_wanted;            // the mirror list names the loopback microphone (AUDIO_LOOPBACK_NAME)
+        long loopback;                  // its source's slot while there is one, 0 for none (a loopback is never a monitor's place)
         float mirror_planes[AUDIO_CHANNELS_MAX][AUDIO_BLOCK];
         float mirror_out[2][AUDIO_BLOCK];
         unsigned char mirror_bytes[AUDIO_BLOCK * AUDIO_CHANNELS_MAX * 4];
@@ -509,6 +513,16 @@ static int audio_card_pick(long *card_out, long *device_out, char *name, long na
                                 best_why = why;
                         }
                 }
+        }
+        // The loopback microphone is listed with the outputs (it is mirrored to as an output is), never picked to play on.
+        if (audio_service.device_count < AUDIO_STATE_DEVICES)
+        {
+                struct audio_state_device *loop = &audio_service.devices[audio_service.device_count++];
+
+                memory_zero(loop, sizeof(*loop));
+                pulse_copy(loop->name, sizeof(loop->name), AUDIO_LOOPBACK_NAME);
+                pulse_copy(loop->description, sizeof(loop->description), AUDIO_LOOPBACK_DESCRIPTION);
+                loop->flags = AUDIO_STATE_DEVICE_VIRTUAL;
         }
         if (best < 0)
                 return 0;
@@ -1341,6 +1355,8 @@ static void audio_page_write(void)
                 build.device_list[i] = audio_service.devices[i];
                 if (audio_text_equal(build.device_list[i].name, audio_service.active_name))
                         build.device_list[i].flags |= AUDIO_STATE_DEVICE_ACTIVE;
+                if (audio_text_equal(build.device_list[i].name, AUDIO_LOOPBACK_NAME))
+                        build.device_list[i].flags |= (audio_service.loopback_wanted ? AUDIO_STATE_DEVICE_MIRROR : 0) | (audio_service.loopback ? AUDIO_STATE_DEVICE_MIRRORING : 0);
                 for (int k = 0; k < AUDIO_STATE_DEVICES; k++)
                         if (audio_service.mirror[k].wanted && audio_text_equal(build.device_list[i].name, audio_service.mirror[k].name))
                                 build.device_list[i].flags |= AUDIO_STATE_DEVICE_MIRROR |
@@ -2105,6 +2121,7 @@ static void audio_mirrors_want(const char *list)
 {
         for (int k = 0; k < AUDIO_STATE_DEVICES; k++)
                 audio_service.mirror[k].wanted = 0;
+        audio_service.loopback_wanted = 0;
         for (const char *at = list; at && *at;)
         {
                 char name[PULSE_NAME];
@@ -2122,6 +2139,11 @@ static void audio_mirrors_want(const char *list)
                 name[n] = 0;
                 if (!n)
                         continue;
+                if (audio_text_equal(name, AUDIO_LOOPBACK_NAME))
+                {
+                        audio_service.loopback_wanted = 1;
+                        continue;
+                }
                 for (k = 0; k < AUDIO_STATE_DEVICES && !audio_text_equal(audio_service.mirror[k].name, name); k++)
                         if (free < 0 && !audio_service.mirror[k].wanted && !audio_service.mirror[k].open && !audio_service.mirror[k].opening)
                                 free = k;
@@ -2218,6 +2240,19 @@ static void audio_mirror_opened(int k)
 // earlier open, or has no table, is closed. One job at a time, as the inputs' are.
 static void audio_mirrors_pass(positive now)
 {
+        // The loopback microphone is a source of the engine, made and let go here: no card, no job.
+        if (audio_service.loopback_wanted && !audio_service.loopback)
+        {
+                long slot = pulse_loopback_add(&audio_service.pulse, AUDIO_LOOPBACK_NAME, AUDIO_LOOPBACK_DESCRIPTION);
+
+                audio_service.loopback = slot > 0 ? slot : 0;
+                audio_say_text(slot > 0 ? "a loopback microphone plays what plays:" : "no place for the loopback microphone:", AUDIO_LOOPBACK_NAME);
+        }
+        else if (!audio_service.loopback_wanted && audio_service.loopback)
+        {
+                pulse_source_remove(&audio_service.pulse, audio_service.loopback);
+                audio_service.loopback = 0;
+        }
         for (int k = 0; k < AUDIO_STATE_DEVICES && !audio_service.job.running; k++)
         {
                 struct audio_mirror *m = &audio_service.mirror[k];

@@ -22,6 +22,7 @@
 # machine-made 2026-11-23 (the launcher's word when a program cannot be started), not yet read by a person: launcher_open_failed
 # machine-made 2026-11-23 (the mixer outputs pass), not yet read by a person: mixer_column_output mixer_column_plays mixer_outputs mixer_state_playing
 # machine-made 2026-11-23 (the mixer mirrors pass), not yet read by a person: mixer_column_mirror mixer_state_mirrored
+# machine-made 2026-11-23 (the loopback pass), not yet read by a person: mixer_loopback
 @language fa
 @name فارسی
 @translated machine
@@ -268,6 +269,7 @@ mixer_column_mirror	7ee2	آینه
 mixer_column_output	4324	خروجی
 mixer_column_plays	36d0	پخش
 mixer_empty	eef1	صدایی پخش نمی‌شود
+mixer_loopback	962c	میکروفون حلقه‌ای
 mixer_no_mic	412a	میکروفونی نیست
 mixer_nobody	cc29	هیچ برنامه‌ای ضبط نمی‌کند
 mixer_off	e944	کارساز صدا خاموش است

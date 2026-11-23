@@ -21,6 +21,7 @@
 # machine-made 2026-11-23 (the launcher's word when a program cannot be started), not yet read by a person: launcher_open_failed
 # machine-made 2026-11-23 (the mixer outputs pass), not yet read by a person: mixer_column_output mixer_column_plays mixer_outputs mixer_state_playing
 # machine-made 2026-11-23 (the mixer mirrors pass), not yet read by a person: mixer_column_mirror mixer_state_mirrored
+# machine-made 2026-11-23 (the loopback pass), not yet read by a person: mixer_loopback
 @language fr
 @name Français
 @translated machine
@@ -267,6 +268,7 @@ mixer_column_mirror	7ee2	Miroir
 mixer_column_output	4324	Sortie
 mixer_column_plays	36d0	Joue
 mixer_empty	eef1	Aucun son n'est lu
+mixer_loopback	962c	Micro de bouclage
 mixer_no_mic	412a	Aucun microphone
 mixer_nobody	cc29	Aucun programme n'enregistre
 mixer_off	e944	Le serveur de son est arrêté

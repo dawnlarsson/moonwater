@@ -28,9 +28,9 @@
 
 #define AUDIO_STATE_PATH "/run/moonwater/pulse/state"
 #define AUDIO_STATE_MAGIC 0x5341574du // "MWAS"
-#define AUDIO_STATE_VERSION 3u
+#define AUDIO_STATE_VERSION 4u
 #define AUDIO_STATE_STREAMS 32
-#define AUDIO_STATE_DEVICES 8
+#define AUDIO_STATE_DEVICES 16 // a desktop with four HDMI pins and a board's USB codec of four outputs has eight already
 #define AUDIO_STATE_INPUTS 8
 #define AUDIO_STATE_RECORDS 16
 #define AUDIO_STATE_BYTES 16384
@@ -54,6 +54,7 @@
 #define AUDIO_STATE_DEVICE_UNPLUGGED 4u // an output whose card says nothing is plugged in (no speakers in its jack, no display on its pin)
 #define AUDIO_STATE_DEVICE_MIRROR 8u     // an output the person asked to play what the output plays, besides it (/root/audio.mirror)
 #define AUDIO_STATE_DEVICE_MIRRORING 16u // and it does now
+#define AUDIO_STATE_DEVICE_VIRTUAL 32u   // no card: the loopback microphone, a source programs record what plays from while it is mirrored to
 
 // Why the output is the one that plays (output_why).
 #define AUDIO_STATE_WHY_CHOSEN 1u // the person chose it (moonwater audio device)

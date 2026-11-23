@@ -6705,6 +6705,7 @@ LANGUAGE_ID(mixer_column_mirror, "Mirror") \
 LANGUAGE_ID(mixer_column_output, "Output") \
 LANGUAGE_ID(mixer_column_plays, "Plays") \
 LANGUAGE_ID(mixer_empty, "No sound is playing") \
+LANGUAGE_ID(mixer_loopback, "Loopback microphone") \
 LANGUAGE_ID(mixer_no_mic, "No microphone") \
 LANGUAGE_ID(mixer_nobody, "No program is recording") \
 LANGUAGE_ID(mixer_off, "Sound server is off") \

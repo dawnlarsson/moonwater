@@ -22,6 +22,7 @@
 # machine-made 2026-11-23 (the launcher's word when a program cannot be started), not yet read by a person: launcher_open_failed
 # machine-made 2026-11-23 (the mixer outputs pass), not yet read by a person: mixer_column_output mixer_column_plays mixer_outputs mixer_state_playing
 # machine-made 2026-11-23 (the mixer mirrors pass), not yet read by a person: mixer_column_mirror mixer_state_mirrored
+# machine-made 2026-11-23 (the loopback pass), not yet read by a person: mixer_loopback
 @language he
 @name עברית
 @translated machine
@@ -268,6 +269,7 @@ mixer_column_mirror	7ee2	שיקוף
 mixer_column_output	4324	יציאה
 mixer_column_plays	36d0	מנגן
 mixer_empty	eef1	לא מושמע צליל
+mixer_loopback	962c	מיקרופון לולאה
 mixer_no_mic	412a	אין מיקרופון
 mixer_nobody	cc29	אף תוכנית לא מקליטה
 mixer_off	e944	שרת השמע כבוי

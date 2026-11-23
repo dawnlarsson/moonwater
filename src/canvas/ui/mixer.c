@@ -4,7 +4,8 @@
         given first and then a strip for every program that records from one (a program that records what plays is none), and Outputs, a
         table of the outputs the server can play on, Automatic first, whose Plays check is the one that plays: Automatic while nobody chose,
         the server picking by what is plugged in; checked on an output, that output (/root/audio.device, which `moonwater audio device` writes);
-        and a Mirror check on every other output, which then plays what that one plays too (/root/audio.mirror, a name a line);
+        and a Mirror check on every other output, which then plays what that one plays too (/root/audio.mirror, a name a line), the last of
+        them the Loopback microphone: mirrored to, it is a microphone programs can choose that records what plays (a virtual cable);
         the kit's strips, ui.c: every channel its name on end beside a level meter and a vertical slider, and under them its volume and the glyph that mutes it. It says
         what each strip is, hands the strips its events and acts on the one that changed; the sliders,
         the keys, the wheel, the meters' fall and hold, the scrolling when there are more strips than room and the
@@ -291,7 +292,14 @@ static fn mixer_output_describe(int id, struct ui_row address_to row)
         if (id < 1 || (unsigned int)id > page->devices || id > AUDIO_STATE_DEVICES)
                 return;
         device = &page->device_list[id - 1];
-        row->label = device->description[0] ? device->description : device->name;
+        row->label = device->flags & AUDIO_STATE_DEVICE_VIRTUAL ? WORDS(mixer_loopback) : device->description[0] ? device->description : device->name;
+        if (device->flags & AUDIO_STATE_DEVICE_VIRTUAL)
+        {
+                row->cell_check = 1u << MIXER_COLUMN_MIRROR;
+                row->cell_on = device->flags & AUDIO_STATE_DEVICE_MIRROR ? 1u << MIXER_COLUMN_MIRROR : 0;
+                row->cells[1] = device->flags & AUDIO_STATE_DEVICE_MIRRORING ? WORDS(mixer_state_mirrored) : null;
+                return;
+        }
         row->cells[1] = device->flags & AUDIO_STATE_DEVICE_ACTIVE ? WORDS(mixer_state_playing) : device->flags & AUDIO_STATE_DEVICE_MIRRORING ? WORDS(mixer_state_mirrored)
                         : device->flags & AUDIO_STATE_DEVICE_UNPLUGGED ? WORDS(mixer_unplugged) : null;
         row->dim = (device->flags & AUDIO_STATE_DEVICE_UNPLUGGED) && !(device->flags & (AUDIO_STATE_DEVICE_ACTIVE | AUDIO_STATE_DEVICE_MIRRORING));
@@ -331,7 +339,7 @@ static fn mixer_output_choose(int id)
         const struct audio_state address_to page = &mixer.big->copy;
         char line[sizeof(page->device_list[0].name) + 2];
 
-        if (id < 0 || (unsigned int)id > page->devices || id > AUDIO_STATE_DEVICES)
+        if (id < 0 || (unsigned int)id > page->devices || id > AUDIO_STATE_DEVICES || (id && (page->device_list[id - 1].flags & AUDIO_STATE_DEVICE_VIRTUAL)))
                 return;
         string_copy_bounded((string_address)line, (string_address)(id ? page->device_list[id - 1].name : "default"), sizeof(line) - 1);
         string_append_bounded((string_address)line, (string_address) "\n", sizeof(line));
