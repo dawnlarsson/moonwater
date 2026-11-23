@@ -20,6 +20,7 @@
 # machine-made 2026-11-23 (the bluetooth pads), not yet read by a person: settings_bt_find_keys settings_bt_listening settings_bt_near_keys settings_bt_paired settings_bt_paired_keys settings_bt_pairing =Find devices nearby
 # machine-made 2026-11-23 (Waterlink's pad grant), not yet read by a person: settings_column_pad settings_link_pad settings_link_pad_about
 # machine-made 2026-11-23 (the launcher's word when a program cannot be started), not yet read by a person: launcher_open_failed
+# machine-made 2026-11-23 (the mixer outputs pass), not yet read by a person: mixer_column_output mixer_column_plays mixer_outputs mixer_state_playing
 @language ar
 @name العربية
 @translated machine
@@ -262,13 +263,17 @@ menu_word_wrap	db6f	التفاف الأسطر
 menu_zoom_in	5bcf	تكبير
 menu_zoom_out	9234	تصغير
 mixer_allow	19d2	السماح
+mixer_column_output	4324	المخرج
+mixer_column_plays	36d0	يشغّل
 mixer_empty	eef1	لا يوجد صوت قيد التشغيل
 mixer_no_mic	412a	لا يوجد ميكروفون
 mixer_nobody	cc29	لا يوجد برنامج يسجّل
 mixer_off	e944	خادم الصوت متوقف
+mixer_outputs	01f5	المخارج
 mixer_playback	110c	التشغيل
 mixer_recording	f20c	التسجيل
 mixer_recording_off	9c09	التسجيل متوقف
+mixer_state_playing	0ad5	قيد التشغيل
 mixer_unplugged	3ed9	لا شيء متصل
 notices_dismiss	9a10	تجاهل الكل
 notices_item	56a6	%1$s: %2$s

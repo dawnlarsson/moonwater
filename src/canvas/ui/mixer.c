@@ -1,7 +1,9 @@
 /*
         The mixer, a window of the sound server's volumes in two pages (the kit's segmented tabs along its top): Playback, the
         output device first and then a strip for every program that has a sound, and Recording, the microphone programs are
-        given first and then a strip for every program that records from one (a program that records what plays is none);
+        given first and then a strip for every program that records from one (a program that records what plays is none), and Outputs, a
+        table of the outputs the server can play on, Automatic first, whose Plays check is the one that plays: Automatic while nobody chose,
+        the server picking by what is plugged in; checked on an output, that output (/root/audio.device, which `moonwater audio device` writes);
         the kit's strips, ui.c: every channel its name on end beside a level meter and a vertical slider, and under them its volume and the glyph that mutes it. It says
         what each strip is, hands the strips its events and acts on the one that changed; the sliders,
         the keys, the wheel, the meters' fall and hold, the scrolling when there are more strips than room and the
@@ -54,6 +56,8 @@
 #define MIXER_VOLUME 65536u
 #define MIXER_NONE 0xffffffffu
 #define MIXER_QUICK_H 380              // the popup: as wide as its strips (mixer_open) and this tall, the last of it the Mixer row
+#define MIXER_PAGE_OUTPUTS 2           // the third tab: the outputs' table
+#define MIXER_COLUMN_PLAYS 2           // the Outputs table's columns: the output, its state, and the check of the one that plays
 
 struct mixer_group
 {
@@ -73,6 +77,8 @@ struct mixer_big
         char source[64];                    // and the microphone
         int device;                         // 1 when strip 0 is the device's: the programs' groups follow it
         struct ui_view view;                // the window as a tree: the tabs, Allow on the Recording page with recording turned off, and the popup's Mixer row
+        struct ui_list outputs;             // the Outputs page: Automatic (row 0), then the page's outputs (row k is device k - 1)
+        struct ui_columns columns;
 };
 
 static struct
@@ -86,7 +92,7 @@ static struct
         const char address_to socket_path;
         int width, height, shown;
         unsigned int ground;
-        b32 focused, dirty, have, connected, listed, recording, capture_off;
+        b32 focused, dirty, have, connected, listed, recording, capture_off, outputs;
         b64 next_poll, seen_at;
         b32 quick;                           // the tray's popup (-q)
         struct ui_rect strips_box;           // what the tree gave the strips
@@ -250,6 +256,79 @@ static fn mixer_list(b64 now)
         ui_strips_end(&big->strips);
 }
 
+/* ---- the outputs ---- */
+
+static struct ui_columns address_to mixer_columns(void)
+{
+        struct ui_columns address_to c = &mixer.big->columns;
+
+        if (!c->count)
+                c->sorted = c->hover = c->held = -1, c->count = 3, c->width[1] = 160, c->width[MIXER_COLUMN_PLAYS] = 60;
+        c->title[0] = WORDS(mixer_column_output), c->title[1] = WORDS(settings_column_status), c->title[MIXER_COLUMN_PLAYS] = WORDS(mixer_column_plays);
+        return c;
+}
+
+// The Outputs table's rows: Automatic, its state the output the server picked, checked while nobody chose one; then each output, its
+// state whether it plays or has nothing plugged in (dim then), checked when it is the one chosen.
+static fn mixer_output_describe(int id, struct ui_row address_to row)
+{
+        const struct audio_state address_to page = &mixer.big->copy;
+        b32 chosen = page->output_why == AUDIO_STATE_WHY_CHOSEN;
+        const struct audio_state_device address_to device;
+
+        row->columns = mixer_columns(), row->cell_check = 1u << MIXER_COLUMN_PLAYS;
+        if (!id)
+        {
+                row->label = language_of("Automatic");
+                row->cells[1] = chosen ? null : page->device[0] ? page->device : null;
+                row->cell_on = chosen ? 0 : 1u << MIXER_COLUMN_PLAYS;
+                return;
+        }
+        if (id < 1 || (unsigned int)id > page->devices || id > AUDIO_STATE_DEVICES)
+                return;
+        device = &page->device_list[id - 1];
+        row->label = device->description[0] ? device->description : device->name;
+        row->cells[1] = device->flags & AUDIO_STATE_DEVICE_ACTIVE ? WORDS(mixer_state_playing) : device->flags & AUDIO_STATE_DEVICE_UNPLUGGED ? WORDS(mixer_unplugged) : null;
+        row->dim = (device->flags & AUDIO_STATE_DEVICE_UNPLUGGED) && !(device->flags & AUDIO_STATE_DEVICE_ACTIVE);
+        row->cell_on = chosen && (device->flags & AUDIO_STATE_DEVICE_ACTIVE) ? 1u << MIXER_COLUMN_PLAYS : 0;
+}
+
+static fn mixer_damaged(int top, int bottom)
+{
+        (void)top, (void)bottom;
+        mixer.dirty = true;
+}
+
+// The Outputs table's rows from the page copied.
+static fn mixer_outputs_list(void)
+{
+        struct ui_list address_to l = &mixer.big->outputs;
+        const struct audio_state address_to page = &mixer.big->copy;
+
+        if (!l->ids)
+                l->ids = AUDIO_STATE_DEVICES + 1, l->describe = mixer_output_describe, l->damaged = mixer_damaged, l->hover = l->down = -1, l->focus = -1;
+        ui_list_begin(l);
+        for (unsigned int k = 0; mixer.have && k <= page->devices && k <= AUDIO_STATE_DEVICES; k++)
+                if (!ui_list_add(l, (int)k))
+                        break;
+        ui_list_end(l);
+        l->revision++;
+}
+
+// A Plays check pressed: that output is the one that plays from now on, or Automatic is; the server reads the file within half a second,
+// and the page says so.
+static fn mixer_output_choose(int id)
+{
+        const struct audio_state address_to page = &mixer.big->copy;
+        char line[sizeof(page->device_list[0].name) + 2];
+
+        if (id < 0 || (unsigned int)id > page->devices || id > AUDIO_STATE_DEVICES)
+                return;
+        string_copy_bounded((string_address)line, (string_address)(id ? page->device_list[id - 1].name : "default"), sizeof(line) - 1);
+        string_append_bounded((string_address)line, (string_address) "\n", sizeof(line));
+        compositor_volume_write(SETTING_AUDIO_DEVICE_PATH, line);
+}
+
 // The page read again: true when what is shown changed. The strips follow it.
 static b32 mixer_poll(b64 now)
 {
@@ -272,6 +351,8 @@ static b32 mixer_poll(b64 now)
         }
         if (changed)
                 mixer_list(now);
+        if (changed && mixer.outputs)
+                mixer_outputs_list();
         mixer.listed = true;
         return changed;
 }
@@ -342,14 +423,27 @@ static fn mixer_flush(void)
 
 /* ---- the window ---- */
 
-// The other page shown: what was to be sent is sent first, and the strips are listed again from nothing (their keys, their scroll and what they held are the other page's).
-static fn mixer_page(b32 recording)
+// The other page shown: what was to be sent is sent first, and the strips are listed again from nothing (their keys, their scroll and what they
+// held are the other page's). The Outputs page (MIXER_PAGE_OUTPUTS) is a table, listed from the page as it is.
+static fn mixer_show(int page)
 {
         struct ui_strips address_to strips = &mixer.big->strips;
+        b32 recording = page == 1;
 
-        if (mixer.recording == recording)
+        if (page == MIXER_PAGE_OUTPUTS)
+        {
+                if (mixer.outputs)
+                        return;
+                mixer_flush();
+                mixer.outputs = true;
+                mixer_outputs_list();
+                mixer.dirty = true;
+                return;
+        }
+        if (!mixer.outputs && mixer.recording == recording)
                 return;
         mixer_flush();
+        mixer.outputs = false;
         mixer.recording = recording;
         strips->ready = 0, strips->count = 0, strips->before_count = 0, strips->focus_id = 0;
         memory_zero(mixer.big->send, sizeof(mixer.big->send));
@@ -376,10 +470,20 @@ static b32 mixer_act(int which)
         return !ui_start_apart(words, mixer.recording ? 4 : 3);
 }
 
+static fn mixer_page(b32 recording)
+{
+        mixer_show(recording ? 1 : 0);
+}
+
+static int mixer_page_now(void)
+{
+        return mixer.outputs ? MIXER_PAGE_OUTPUTS : mixer.recording ? 1 : 0;
+}
+
 // A tab was chosen: its page is shown.
 static b32 mixer_tabbed(int which)
 {
-        return (void)which, mixer_page(mixer.tabs.at == 1), true;
+        return (void)which, mixer_show(mixer.tabs.at), true;
 }
 
 // The window as a tree, every size and place the tree's: the tabs (the full window; they take no press while there is no page to show), the
@@ -393,25 +497,29 @@ static fn mixer_layout(void)
 
         if (c->kind != UI_TABS)
                 c->kind = UI_TABS, c->variant = UI_TABS_SEGMENTED, ui_control_start(c);
-        c->count = 2;
-        c->items[0] = WORDS(mixer_playback), c->items[1] = WORDS(mixer_recording);
-        c->at = mixer.recording, c->disabled = !mixer.have;
+        c->count = 3;
+        c->items[0] = WORDS(mixer_playback), c->items[1] = WORDS(mixer_recording), c->items[2] = WORDS(mixer_outputs);
+        c->at = mixer_page_now(), c->disabled = !mixer.have;
         ui_view_begin(&mixer.big->view, ui, mixer.width, -mixer.height);
         ui_control(c, .class = "tabs", .hidden = mixer.quick, .on = mixer_tabbed);
-        ui_col(.class = "middle", .grow = 1)
+        if (mixer.outputs)
+                ui_rows(&mixer.big->outputs, .class = "list", .grow = 1);
+        else ui_col(.class = "middle", .grow = 1)
         {
                 ui_host(&mixer.strips_box, .grow = !mixer.capture_off, .keys = 1); // the strips' own keys: the kit's arrows hand them over
                 if (mixer.capture_off)
                         ui_row(.class = "foot.middle")
                                 ui_button(WORDS(mixer_allow), .class = "action.outlined", .on = mixer_act);
         }
-        if (mixer.note && !mixer.quick)
+        if (mixer.note && !mixer.quick && !mixer.outputs)
                 ui_row(.class = "bar")
                         ui_text(mixer.note, .class = "warning");
         if (mixer.quick)
                 ui_row(.class = "foot.middle")
                         ui_button(language_of("Mixer"), .class = "outlined", .w = UI_STRIP_W, .h = UI_BUTTONS_H, .on = mixer_act, .arg = 1);
         ui_view_end(&mixer.big->view);
+        if (mixer.outputs)
+                mixer.strips_box.w = mixer.strips_box.h = 0;
         ui_strips_place(ui, &mixer.big->strips, mixer.strips_box.x, mixer.strips_box.y, mixer.strips_box.w, mixer.strips_box.h);
 }
 
@@ -428,6 +536,8 @@ static fn mixer_draw(unsigned int address_to pixels)
                 ui_strips_message(ui, strips, WORDS(mixer_off), false);
                 return;
         }
+        if (mixer.outputs)
+                return ui_view_draw(ui, &mixer.big->view, mixer.focused);
         ui_strips_draw(ui, strips, mixer.focused && !mixer.big->view.group.keys && !mixer.big->view.keys);
         ui_view_draw(ui, &mixer.big->view, mixer.focused);
         // What there is to say instead of strips or beside them.
@@ -453,7 +563,9 @@ static b32 mixer_event(const struct window_event address_to event)
         if (!mixer.quick && mixer.have && event->type == WINDOW_EVENT_KEY && down && (event->flags & WINDOW_KEY_CONTROL) &&
             (event->a == UI_KEY_PAGE_UP || event->a == UI_KEY_PAGE_DOWN || event->a == UI_KEY_TAB))
         {
-                mixer_page(event->a == UI_KEY_TAB ? !mixer.recording : event->a == UI_KEY_PAGE_DOWN);
+                int page = mixer_page_now(), back = event->a == UI_KEY_PAGE_UP || (event->a == UI_KEY_TAB && (event->flags & WINDOW_KEY_SHIFT));
+
+                mixer_show((page + (back ? MIXER_PAGE_OUTPUTS : 1)) % (MIXER_PAGE_OUTPUTS + 1));
                 return true;
         }
         mixer_layout();
@@ -465,6 +577,21 @@ static b32 mixer_event(const struct window_event address_to event)
         mixer.dirty |= (asks & UI_VIEW_DRAW) != 0;
         if (asks & UI_VIEW_TAKEN)
                 return true;
+        if (mixer.outputs)
+        {
+                struct ui_list address_to l = &mixer.big->outputs;
+
+                if (event->type == WINDOW_EVENT_MOTION || event->type == WINDOW_EVENT_BUTTON)
+                        ui_view_list_click(ui, &mixer.big->view, event, ui_kit.pointer_x, ui_kit.pointer_y, null);
+                if (l->toggled)
+                {
+                        if (l->toggled_cell == MIXER_COLUMN_PLAYS)
+                                mixer_output_choose(l->toggled - 1);
+                        l->toggled = 0;
+                }
+                mixer.dirty = true;
+                return true;
+        }
         bits = ui_strips_event(ui, &mixer.big->strips, event);
         if (mixer.big->strips.changed >= 0 && mixer.big->strips.changed < UI_STRIPS_MOST)
         {

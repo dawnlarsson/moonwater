@@ -19,6 +19,7 @@
 # machine-made 2026-11-23 (the bluetooth pads), not yet read by a person: settings_bt_find_keys settings_bt_listening settings_bt_near_keys settings_bt_paired settings_bt_paired_keys settings_bt_pairing =Find devices nearby
 # machine-made 2026-11-23 (Waterlink's pad grant), not yet read by a person: settings_column_pad settings_link_pad settings_link_pad_about
 # machine-made 2026-11-23 (the launcher's word when a program cannot be started), not yet read by a person: launcher_open_failed
+# machine-made 2026-11-23 (the mixer outputs pass), not yet read by a person: mixer_column_output mixer_column_plays mixer_outputs mixer_state_playing
 @language ru
 @name Русский
 @translated machine
@@ -261,13 +262,17 @@ menu_word_wrap	db6f	Перенос строк
 menu_zoom_in	5bcf	Увеличить
 menu_zoom_out	9234	Уменьшить
 mixer_allow	19d2	Разрешить
+mixer_column_output	4324	Выход
+mixer_column_plays	36d0	Играет
 mixer_empty	eef1	Звук не воспроизводится
 mixer_no_mic	412a	Нет микрофона
 mixer_nobody	cc29	Ни одна программа не записывает
 mixer_off	e944	Звуковой сервер выключен
+mixer_outputs	01f5	Выходы
 mixer_playback	110c	Воспроизведение
 mixer_recording	f20c	Запись
 mixer_recording_off	9c09	Запись отключена
+mixer_state_playing	0ad5	Воспроизводится
 mixer_unplugged	3ed9	Ничего не подключено
 notices_dismiss	9a10	Скрыть все
 notices_item	56a6	%1$s: %2$s

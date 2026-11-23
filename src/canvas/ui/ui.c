@@ -6701,13 +6701,17 @@ LANGUAGE_ID(menu_word_wrap, "Word Wrap") \
 LANGUAGE_ID(menu_zoom_in, "Zoom &In") \
 LANGUAGE_ID(menu_zoom_out, "Zoom &Out") \
 LANGUAGE_ID(mixer_allow, "Allow") \
+LANGUAGE_ID(mixer_column_output, "Output") \
+LANGUAGE_ID(mixer_column_plays, "Plays") \
 LANGUAGE_ID(mixer_empty, "No sound is playing") \
 LANGUAGE_ID(mixer_no_mic, "No microphone") \
 LANGUAGE_ID(mixer_nobody, "No program is recording") \
 LANGUAGE_ID(mixer_off, "Sound server is off") \
+LANGUAGE_ID(mixer_outputs, "Outputs") \
 LANGUAGE_ID(mixer_playback, "Playback") \
 LANGUAGE_ID(mixer_recording, "Recording") \
 LANGUAGE_ID(mixer_recording_off, "Recording is off") \
+LANGUAGE_ID(mixer_state_playing, "Playing") \
 LANGUAGE_ID(mixer_unplugged, "Nothing plugged in") \
 LANGUAGE_ID(notices_dismiss, "Dismiss all") \
 LANGUAGE_ID(notices_item, "%1$s: %2$s") \

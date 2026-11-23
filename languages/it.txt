@@ -19,6 +19,7 @@
 # machine-made 2026-11-23 (the bluetooth pads), not yet read by a person: settings_bt_find_keys settings_bt_listening settings_bt_near_keys settings_bt_paired settings_bt_paired_keys settings_bt_pairing =Find devices nearby
 # machine-made 2026-11-23 (Waterlink's pad grant), not yet read by a person: settings_column_pad settings_link_pad settings_link_pad_about
 # machine-made 2026-11-23 (the launcher's word when a program cannot be started), not yet read by a person: launcher_open_failed
+# machine-made 2026-11-23 (the mixer outputs pass), not yet read by a person: mixer_column_output mixer_column_plays mixer_outputs mixer_state_playing
 @language it
 @name Italiano
 @translated machine
@@ -261,13 +262,17 @@ menu_word_wrap	db6f	A capo automatico
 menu_zoom_in	5bcf	I&ngrandisci
 menu_zoom_out	9234	&Riduci
 mixer_allow	19d2	Consenti
+mixer_column_output	4324	Uscita
+mixer_column_plays	36d0	Riproduce
 mixer_empty	eef1	Nessun suono in riproduzione
 mixer_no_mic	412a	Nessun microfono
 mixer_nobody	cc29	Nessun programma sta registrando
 mixer_off	e944	Il server audio è spento
+mixer_outputs	01f5	Uscite
 mixer_playback	110c	Riproduzione
 mixer_recording	f20c	Registrazione
 mixer_recording_off	9c09	La registrazione è disattivata
+mixer_state_playing	0ad5	In riproduzione
 mixer_unplugged	3ed9	Nulla collegato
 notices_dismiss	9a10	Ignora tutto
 notices_item	56a6	%1$s: %2$s

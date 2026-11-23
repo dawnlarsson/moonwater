@@ -19,6 +19,7 @@
 # machine-made 2026-11-23 (the bluetooth pads), not yet read by a person: settings_bt_find_keys settings_bt_listening settings_bt_near_keys settings_bt_paired settings_bt_paired_keys settings_bt_pairing =Find devices nearby
 # machine-made 2026-11-23 (Waterlink's pad grant), not yet read by a person: settings_column_pad settings_link_pad settings_link_pad_about
 # machine-made 2026-11-23 (the launcher's word when a program cannot be started), not yet read by a person: launcher_open_failed
+# machine-made 2026-11-23 (the mixer outputs pass), not yet read by a person: mixer_column_output mixer_column_plays mixer_outputs mixer_state_playing
 @language tr
 @name Türkçe
 @translated machine
@@ -261,13 +262,17 @@ menu_word_wrap	db6f	Sözcük Kaydırma
 menu_zoom_in	5bcf	&Yakınlaştır
 menu_zoom_out	9234	&Uzaklaştır
 mixer_allow	19d2	İzin ver
+mixer_column_output	4324	Çıkış
+mixer_column_plays	36d0	Çalar
 mixer_empty	eef1	Çalan ses yok
 mixer_no_mic	412a	Mikrofon yok
 mixer_nobody	cc29	Hiçbir program kayıt yapmıyor
 mixer_off	e944	Ses sunucusu kapalı
+mixer_outputs	01f5	Çıkışlar
 mixer_playback	110c	Oynatma
 mixer_recording	f20c	Kayıt
 mixer_recording_off	9c09	Kayıt kapalı
+mixer_state_playing	0ad5	Çalıyor
 mixer_unplugged	3ed9	Hiçbir şey takılı değil
 notices_dismiss	9a10	Tümünü kapat
 notices_item	56a6	%1$s: %2$s

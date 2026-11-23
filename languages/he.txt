@@ -20,6 +20,7 @@
 # machine-made 2026-11-23 (the bluetooth pads), not yet read by a person: settings_bt_find_keys settings_bt_listening settings_bt_near_keys settings_bt_paired settings_bt_paired_keys settings_bt_pairing =Find devices nearby
 # machine-made 2026-11-23 (Waterlink's pad grant), not yet read by a person: settings_column_pad settings_link_pad settings_link_pad_about
 # machine-made 2026-11-23 (the launcher's word when a program cannot be started), not yet read by a person: launcher_open_failed
+# machine-made 2026-11-23 (the mixer outputs pass), not yet read by a person: mixer_column_output mixer_column_plays mixer_outputs mixer_state_playing
 @language he
 @name עברית
 @translated machine
@@ -262,13 +263,17 @@ menu_word_wrap	db6f	גלישת שורות
 menu_zoom_in	5bcf	הגדל זום
 menu_zoom_out	9234	הקטן זום
 mixer_allow	19d2	אפשר
+mixer_column_output	4324	יציאה
+mixer_column_plays	36d0	מנגן
 mixer_empty	eef1	לא מושמע צליל
 mixer_no_mic	412a	אין מיקרופון
 mixer_nobody	cc29	אף תוכנית לא מקליטה
 mixer_off	e944	שרת השמע כבוי
+mixer_outputs	01f5	יציאות
 mixer_playback	110c	השמעה
 mixer_recording	f20c	הקלטה
 mixer_recording_off	9c09	ההקלטה כבויה
+mixer_state_playing	0ad5	מתנגן
 mixer_unplugged	3ed9	שום דבר לא מחובר
 notices_dismiss	9a10	דחה הכול
 notices_item	56a6	%1$s: %2$s
