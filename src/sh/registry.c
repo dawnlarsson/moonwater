@@ -190,6 +190,11 @@
 // says what a line is. It names any number of programs, each a path of any length: there is no cap, as with the rest of the system.
 #define SETTING_DESKTOP_AUTOSTART_PATH "/root/desktop.autostart"
 #define SETTING_AUTOSTART_STANDARD "" // none
+// The programs the desktop starts with it (`desktop startup`), in order: a line each, "on" or "off" (started or kept but not started), then
+// "app ID COMMAND" (a program of the start menu's by its id, and the command that starts it) or "command COMMAND" (a command line of the
+// person's, run by sh -c). With no file yet, desktop autostart's programs are its entries, each on (desktop_startup_read).
+#define SETTING_DESKTOP_STARTUP_PATH "/root/desktop.startup"
+
 #define SETTING_THEME_PATH "/root/canvas.theme"
 // The theme `auto` is light from this hour of the local clock to the other, and dark outside them: the compositor's windows
 // and the session bus's color-scheme (src/dbus/service.c) take it from here, so that a program of a bowl turns with them.
@@ -1743,6 +1748,55 @@ static bool setting_autostart_valid(const char *line, positive *bad)
         entries++;
     }
     return entries > 0;
+}
+
+/*
+        One line of desktop startup (its bytes, no line's end) taken apart: on or off, an app's id or none, and the command. False for a line
+        that is no entry: another first word, an id with a byte no registry id has, or no command. Nothing is copied, so no buffer bounds it.
+*/
+struct setting_startup
+{
+    bool on, app;
+    const char *id, *command;
+    positive id_length, command_length;
+};
+
+static bool setting_startup_id_byte(unsigned char byte)
+{
+    return (byte >= 'a' && byte <= 'z') || (byte >= 'A' && byte <= 'Z') || (byte >= '0' && byte <= '9') || byte == '.' || byte == '_' ||
+           byte == '-' || byte == '+' || byte == '@';
+}
+
+static bool setting_startup_entry(const char *line, positive length, struct setting_startup *e)
+{
+    positive at;
+
+    e->id = e->command = 0, e->id_length = e->command_length = 0, e->app = false;
+    if (length >= 3 && !memory_compare((address_any)line, (address_any) "on ", 3))
+        e->on = true, at = 3;
+    else if (length >= 4 && !memory_compare((address_any)line, (address_any) "off ", 4))
+        e->on = false, at = 4;
+    else
+        return false;
+    if (length - at >= 4 && !memory_compare((address_any)(line + at), (address_any) "app ", 4))
+    {
+        e->app = true, at += 4, e->id = line + at;
+        while (at < length && line[at] != ' ' && setting_startup_id_byte((unsigned char)line[at]))
+            at++;
+        e->id_length = (positive)(line + at - e->id);
+        if (!e->id_length || at >= length || line[at] != ' ')
+            return false;
+        at++;
+    }
+    else if (length - at >= 8 && !memory_compare((address_any)(line + at), (address_any) "command ", 8))
+        at += 8;
+    else
+        return false;
+    e->command = line + at, e->command_length = length - at;
+    for (positive k = at; k < length; k++)
+        if (line[k] == '\n' || line[k] == '\r' || !line[k])
+            return false;
+    return e->command_length > 0;
 }
 
 #endif // MOONWATER_SETTINGS_REGISTRY

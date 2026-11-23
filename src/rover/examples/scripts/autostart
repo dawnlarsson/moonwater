@@ -1,12 +1,12 @@
 #!/bin/sh
-# The programs of moonwater desktop autostart, in its order, as a person asked for them (desktop_autostart).
-words=$(moonwater desktop autostart 2> /dev/null)
-case $words in
-*"autostart "*) words=${words#*autostart } ;;
-*) exit 0 ;;
-esac
-for program in $words; do
-  case $program in
-  /*) MOONWATER_ASKED=1 "$program" < /dev/null > /dev/null 2>&1 & ;;
+# The programs of moonwater desktop startup that are on, in its order, as a person asked for them (desktop_startup): each line says its place,
+# on or off, and an app's id and its command, or a command, which sh runs as the person typed it.
+moonwater desktop startup 2> /dev/null | while read -r label word place state kind rest; do
+  [ "$word" = startup ] && [ "$state" = on ] || continue
+  case $kind in
+  app) rest=${rest#* } ;;
+  command) ;;
+  *) continue ;;
   esac
+  MOONWATER_ASKED=1 sh -c "$rest" < /dev/null > /dev/null 2>&1 &
 done

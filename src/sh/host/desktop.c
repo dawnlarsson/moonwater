@@ -346,6 +346,255 @@ no_memory:
         return host_fail("desktop autostart", -ENOMEM);
 }
 
+/*
+        moonwater desktop startup [add app ID COMMAND...|add command COMMAND...|remove N|move N TO|on N|off N|none]: the programs the desktop
+        starts with it, a line each in order (registry.c's setting_startup_entry says what one is); N counts from 1. With no file yet, desktop
+        autostart's programs are its entries, each on, so what a person kept there before is kept. Each says its place and its line:
+        "startup 2 on app files /files"; none says "startup none". The image's autostart script starts the ones on, in order.
+*/
+static p8 address_to desktop_file_read(string_address path, bipolar address_to error)
+{
+        positive room = 4096;
+        p8 address_to text = null;
+        bipolar got;
+
+        for (;;)
+        {
+                p8 address_to more = (p8 address_to)memory_resize(text, room);
+
+                if (!more)
+                {
+                        desktop_give(text);
+                        *error = -ENOMEM;
+                        return null;
+                }
+                text = more;
+                got = host_read_state(path, text, room);
+                if (got < 0 || (positive)got + 1 < room)
+                        break;
+                room *= 2;
+        }
+        *error = got < 0 ? got : 0;
+        text[got < 0 ? 0 : got] = end;
+        return text;
+}
+
+// A line appended to the text being made, its line's end after it, the room grown as it needs.
+static bool desktop_line_append(p8 address_to address_to text, positive address_to used, positive address_to room, const char address_to a, positive a_length,
+                                const char address_to b, positive b_length)
+{
+        positive need = *used + a_length + b_length + 2;
+
+        if (need > *room)
+        {
+                positive grown = *room * 2 > need ? *room * 2 : need;
+                p8 address_to more = (p8 address_to)memory_resize(*text, grown);
+
+                if (!more)
+                        return false;
+                *text = more, *room = grown;
+        }
+        memory_copy(*text + *used, a, a_length), *used += a_length;
+        memory_copy(*text + *used, b, b_length), *used += b_length;
+        (*text)[(*used)++] = '\n';
+        (*text)[*used] = end;
+        return true;
+}
+
+// The entries as they are now: the file's text, or with none yet what desktop autostart keeps, each on. Null when it cannot be read.
+static p8 address_to desktop_startup_read(bipolar address_to error)
+{
+        p8 address_to text = desktop_file_read((string_address)SETTING_DESKTOP_STARTUP_PATH, error), address_to old, address_to made = null;
+        positive used = 0, room = 0, from = 0, length;
+        const char address_to word;
+        bipolar old_error;
+
+        if (!text || *error != -ENOENT)
+                return text;
+        old = desktop_autostart_read(address_of old_error);
+        if (!old)
+                return text;
+        if (old[0] && !string_equals((string_address)old, "none") && setting_autostart_valid((const char *)old, null))
+                while ((word = setting_autostart_next((const char *)old, &from, &length)))
+                        if (!desktop_line_append(&made, &used, &room, "on command ", 11, word, length))
+                                break;
+        desktop_give(old);
+        if (made)
+        {
+                desktop_give(text);
+                text = made;
+        }
+        *error = 0;
+        return text;
+}
+
+// The lines of text that are entries, in order: their starts and lengths, in memory taken for them (given back by the caller).
+static positive desktop_startup_lines(p8 address_to text, positive address_to address_to starts, positive address_to address_to lengths)
+{
+        positive count = 0, at = 0, total = string_length((string_address)text) + 1;
+        struct setting_startup e;
+
+        *starts = (positive address_to)memory_take(total * sizeof(positive)), *lengths = (positive address_to)memory_take(total * sizeof(positive));
+        if (!*starts || !*lengths)
+                return 0;
+        while (text[at])
+        {
+                positive from = at;
+
+                while (text[at] && text[at] != '\n')
+                        at++;
+                if (setting_startup_entry((const char *)text + from, at - from, &e))
+                        (*starts)[count] = from, (*lengths)[count] = at - from, count++;
+                if (text[at])
+                        at++;
+        }
+        return count;
+}
+
+static b32 desktop_startup_status(void)
+{
+        bipolar error;
+        p8 address_to text = desktop_startup_read(address_of error);
+        positive address_to starts = null, address_to lengths = null, count;
+
+        if (!text || (error < 0 && error != -ENOENT && !bowl_is_root()))
+        {
+                desktop_give(text);
+                host_say(log, host_label "startup " LOCALE_NEEDS_ROOT "\n");
+                return 0;
+        }
+        count = desktop_startup_lines(text, &starts, &lengths);
+        if (!count)
+                host_say(log, host_label "startup none\n");
+        for (positive k = 0; k < count; k++)
+        {
+                text[starts[k] + lengths[k]] = end;
+                host_say(log, host_label "startup %p %s\n", k + 1, (string_address)text + starts[k]);
+        }
+        desktop_give(starts);
+        desktop_give(lengths);
+        desktop_give(text);
+        return 0;
+}
+
+// A place said by the person (from 1), among count entries: its index from 0, or count when it is none of them.
+static positive desktop_startup_place(string_address word, positive count)
+{
+        positive n = 0;
+
+        for (positive at = 0; word && word[at]; at++)
+        {
+                if (word[at] < '0' || word[at] > '9' || n > count)
+                        return count;
+                n = n * 10 + (positive)(word[at] - '0');
+        }
+        return n >= 1 && n <= count ? n - 1 : count;
+}
+
+static b32 desktop_startup(string_address address_to arguments, positive count)
+{
+        string_address verb = count > 3 ? arguments[3] : null;
+        p8 address_to text, address_to made = null;
+        positive address_to starts = null, address_to lengths = null, entries, used = 0, room = 0, which, to;
+        bipolar error, failed;
+        b32 ok = true;
+
+        return_if(count == 3, desktop_startup_status());
+        host_need_root();
+        text = desktop_startup_read(address_of error);
+        return_if(!text, host_fail("desktop startup", error));
+        entries = desktop_startup_lines(text, &starts, &lengths);
+        which = count > 4 ? desktop_startup_place(arguments[4], entries) : entries;
+        if (string_equals(verb, "add") && count >= 6 && (string_equals(arguments[4], "command") || (string_equals(arguments[4], "app") && count >= 7)))
+        {
+                b32 app = string_equals(arguments[4], "app");
+                positive first = app ? 6 : 5;
+                p8 address_to line = null;
+                positive line_used = 0, line_room = 0;
+
+                // The entry made: on, its kind (and an app's id), and the words of its command a blank apart; a line's end in them is none.
+                ok = desktop_line_append(&line, &line_used, &line_room, app ? "on app " : "on command ", app ? 7 : 11,
+                                         app ? (const char address_to)arguments[5] : "", app ? string_length(arguments[5]) : 0);
+                if (ok && app)
+                        line[line_used - 1] = ' ';
+                else if (ok)
+                        line_used--;
+                for (positive w = first; ok && w < count; w++)
+                {
+                        ok = desktop_line_append(&line, &line_used, &line_room, w > first ? " " : "", w > first ? 1 : 0, (const char address_to)arguments[w],
+                                                 string_length(arguments[w]));
+                        if (ok)
+                                line_used--;
+                }
+                {
+                        struct setting_startup e;
+                        if (!ok || !setting_startup_entry((const char address_to)line, line_used, &e))
+                        {
+                                desktop_give(line);
+                                desktop_give(starts);
+                                desktop_give(lengths);
+                                desktop_give(text);
+                                return ok ? host_refuse("an app's id is letters, digits and . _ - + @, and a command is one line\n") : host_fail("desktop startup", -ENOMEM);
+                        }
+                }
+                for (positive k = 0; ok && k < entries; k++)
+                        ok = desktop_line_append(&made, &used, &room, (const char address_to)text + starts[k], lengths[k], "", 0);
+                ok = ok && desktop_line_append(&made, &used, &room, (const char address_to)line, line_used, "", 0);
+                desktop_give(line);
+        }
+        else if ((string_equals(verb, "remove") || string_equals(verb, "on") || string_equals(verb, "off")) && count == 5 && which < entries)
+        {
+                for (positive k = 0; ok && k < entries; k++)
+                {
+                        const char address_to line = (const char address_to)text + starts[k];
+                        positive skip = line[1] == 'n' ? 3 : 4; // past "on " or "off "
+                        if (k != which)
+                                ok = desktop_line_append(&made, &used, &room, line, lengths[k], "", 0);
+                        else if (!string_equals(verb, "remove"))
+                                ok = desktop_line_append(&made, &used, &room, string_equals(verb, "on") ? "on " : "off ", string_equals(verb, "on") ? 3 : 4,
+                                                         line + skip, lengths[k] - skip);
+                }
+        }
+        else if (string_equals(verb, "move") && count == 6 && which < entries && (to = desktop_startup_place(arguments[5], entries)) < entries)
+        {
+                // Every entry in order with the one moved taken out, and put back in at its new place.
+                for (positive place = 0, k = 0; ok && place < entries; place++)
+                {
+                        positive from;
+                        if (place == to)
+                                from = which;
+                        else
+                        {
+                                if (k == which)
+                                        k++;
+                                from = k++;
+                        }
+                        ok = desktop_line_append(&made, &used, &room, (const char address_to)text + starts[from], lengths[from], "", 0);
+                }
+        }
+        else if (string_equals(verb, "none") && count == 4)
+                ok = true;
+        else
+        {
+                desktop_give(starts);
+                desktop_give(lengths);
+                desktop_give(text);
+                return which >= entries && count > 4 && !string_equals(verb, "add") ? host_refuse("there is no entry %s\n", arguments[4]) : host_usage();
+        }
+        desktop_give(starts);
+        desktop_give(lengths);
+        desktop_give(text);
+        if (!ok)
+        {
+                desktop_give(made);
+                return host_fail("desktop startup", -ENOMEM);
+        }
+        failed = host_write_file((string_address)SETTING_DESKTOP_STARTUP_PATH, made ? made : (p8 address_to) "", used, 0644, true);
+        desktop_give(made);
+        return_if(failed < 0, host_fail("desktop startup", failed));
+        return desktop_startup_status();
+}
+
 /* moonwater desktop [on|off|start|rest]: the choice kept and put in force now. rest is off put in force and not kept: the
    text console until the next start or `desktop on`, for a desktop that would not stay up on this boot (and rover's desktop
    rest). The machine script's supervisor said `desktop off` after four quick ends of the compositor, which is kept, so one
@@ -357,6 +606,7 @@ static b32 host_desktop(string_address address_to arguments, positive count)
 
         return_if(count == 2, desktop_status());
         return_if(string_equals(word, "autostart"), desktop_autostart(arguments, count));
+        return_if(string_equals(word, "startup"), desktop_startup(arguments, count));
         return_if(count != 3, host_usage());
 
         return_if(string_equals(word, "boot"), desktop_boot());

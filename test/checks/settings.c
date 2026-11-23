@@ -1552,6 +1552,30 @@ static fn check_autostart(void)
               count == 5 && string_equals(words[3], (string_address) "remove") && string_equals(words[4], (string_address) "/klog") && !words[5]);
 }
 
+/*
+        A line of desktop startup (registry.c's setting_startup_entry): on or off, an app's id and its command or a command; its parts are
+        found in place. Another first word, an id with a byte no registry id has, an app with no command, or a line's end inside is none.
+*/
+static fn check_startup_entry(void)
+{
+        static const char address_to good[] = {"on app files /files", "off command echo hello  world | tr a-z A-Z", "on app org.gnome.Maps flatpak run x"};
+        static const char address_to bad[] = {"", "on", "maybe app files /files", "on app files", "on app fi/les /x", "on command ", "on thing x",
+                                             "on command a\nb"};
+        struct setting_startup e;
+        b32 parsed = true, refused = true;
+
+        for (positive at = 0; at < sizeof(good) / sizeof(good[0]); at++)
+                parsed &= setting_startup_entry(good[at], string_length((string_address)good[at]), &e);
+        setting_startup_entry(good[1], string_length((string_address)good[1]), &e);
+        parsed &= !e.on && !e.app && e.command_length == 30 && !memory_compare(e.command, "echo hello  world | tr a-z A-Z", 30);
+        setting_startup_entry(good[0], string_length((string_address)good[0]), &e);
+        parsed &= e.on && e.app && e.id_length == 5 && !memory_compare(e.id, "files", 5) && e.command_length == 6;
+        for (positive at = 0; at < sizeof(bad) / sizeof(bad[0]); at++)
+                refused &= !setting_startup_entry(bad[at], string_length((string_address)bad[at]), &e);
+        check("startup: on and off, an app's id and its command or a command, are entries whose parts are found in place (a command as typed)", parsed);
+        check("startup: another first word, an id with a slash, an app or a command with no command, or a line's end inside is none", refused);
+}
+
 static fn check_settings(string_address regular, string_address bold)
 {
         check_registry();
@@ -1581,6 +1605,7 @@ static fn check_settings(string_address regular, string_address bold)
         }
         // After the map: a list typed is split in the window's own buffers.
         check_autostart();
+        check_startup_entry();
         char value[SETTINGS_VALUE], next[SETTINGS_VALUE];
         string_address words[SETTINGS_WORDS];
 
