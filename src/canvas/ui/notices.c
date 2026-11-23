@@ -21,6 +21,9 @@
 #ifndef MOONWATER_CANVAS_NOTICES
 #define MOONWATER_CANVAS_NOTICES
 
+#include "../../audio/control.c"
+#include "../jingle.c"
+
 #define NOTICES_SHOWN 6              // the items listed, the most urgent first
 #define NOTICES_TEXT 512             // a line's bytes, its null with them
 #define NOTICES_ID_ITEM 1            // a listed item is id NOTICES_ID_ITEM + its index: chosen, it opens Settings
@@ -160,6 +163,15 @@ static int notices_open(void)
         if (ui_lift_other(&notices.own, (string_address) "notices", false))
                 return 0;
         notices_board();
+        {
+                struct ctl ctl;
+                struct canvas_jingle jingle;
+                memory_zero(&ctl, sizeof(ctl));
+                memory_zero(&jingle, sizeof(jingle));
+                ctl.timeout_ms = 60;
+                canvas_jingle_play(&ctl, &jingle, CTL_SOCKET, CANVAS_JINGLE_POP, CTL_NONE, (long)(ui_kit_clock() / 1000000ll), 0);
+                ctl_disconnect(&ctl);
+        }
         ui_popmenu_size(&notices.ui, &notices.menu, ui_app_room(&notices_app));
         ui_app_place(&notices_app, notices.menu.width, notices.menu.height);
         return -1;

@@ -41,6 +41,7 @@
 
 #include "../../audio/state.c"
 #include "../../audio/control.c"
+#include "../jingle.c"
 
 #define MIXER_WIDTH 640   // logical pixels, times the scale
 #define MIXER_HEIGHT 400
@@ -79,6 +80,7 @@ static struct
         struct window_row own;
         struct ui ui;
         struct mixer_big address_to big;
+        struct canvas_jingle jingle;
         const volatile struct audio_state address_to page;
         const char address_to page_path;
         const char address_to socket_path;
@@ -306,6 +308,8 @@ static fn mixer_flush(void)
                                 answer = ctl_set_sink_volume(&big->ctl, big->sink, volume);
                         if (answer >= 0 && (big->send[k] & 2))
                                 answer = ctl_set_sink_mute(&big->ctl, big->sink, strip->muted);
+                        if (answer >= 0 && (big->send[k] & 1) && !strip->muted && strip->percent > 0)
+                                canvas_jingle_play(&big->ctl, &mixer.jingle, mixer.socket_path, CANVAS_JINGLE_VOLUME, CTL_NONE, (long)(ui_kit.now / 1000000ll), 60);
                 }
                 else if (strip->master)
                 {

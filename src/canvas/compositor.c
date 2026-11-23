@@ -226,6 +226,7 @@ static positive compositor_epoll_close(long fd)
 #undef UI_SHARED_ONLY
 #include "../audio/state.c"
 #include "../audio/control.c"
+#include "jingle.c"
 #if !defined(SHELL_NO_GPU) && !defined(MOONWATER_BUILD_TOOL)
 #include "gpu.c"
 #else

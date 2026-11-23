@@ -123,6 +123,7 @@ moonwater audio mute [on|off]          silence everything that plays, and keep t
 moonwater audio server [on|off]        the server programs play their sound through; off keeps it from starting with the desktop [on]
 moonwater audio source [NAME|default]  the microphone programs record from, by the name bare audio lists; default picks the first [default]
 moonwater audio test                   play a second of 440 Hz through the sound server and say what became of it: no server, no card, a mixer that is off, muted, or played on this card
+moonwater canvas jingles [on|off]      short chimes for desktop startup, notices, popups and volume changes; off silences them [on]
 moonwater audio volume [PERCENT|default]  the volume of everything that plays, 0 to 100 percent [100]
 
 

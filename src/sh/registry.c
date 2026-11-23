@@ -157,6 +157,7 @@
 #define SETTING_AUDIO_SOURCE_PATH "/root/audio.source"
 #define SETTING_AUDIO_SOURCE_VOLUME_PATH "/root/audio.source.volume"
 #define SETTING_AUDIO_SOURCE_MUTE_PATH "/root/audio.source.mute"
+#define SETTING_JINGLES_PATH "/root/canvas.jingles"
 // Where the windows were last put, which the compositor writes (window.c's places) and is no plain row's file: `canvas
 // windows` reads it and its forget empties it, and wipe keeps it with the settings (host_wipe_keep).
 #define SETTING_WINDOWS_PLACES_PATH "/root/canvas.windows"
@@ -699,6 +700,9 @@ static const struct settings_row settings_rows[] = {
     SETTING_PLAIN_ROW(null, "Input mute", SETTINGS_SWITCH, 0, ("audio", "input", "mute"), "mute ", null,
                       .live = SETTING_LIVE_NONE, .need = "", .path = SETTING_AUDIO_SOURCE_MUTE_PATH, .standard = "off", .usage = "audio input mute [on|off]",
                       .help = "silence the microphone, and keep its volume [off]"),
+    SETTING_PLAIN_ROW(null, "Desktop jingles", SETTINGS_SWITCH, 0, ("canvas", "jingles"), "jingles ", null,
+                      .live = SETTING_LIVE_NONE, .need = "", .path = SETTING_JINGLES_PATH, .standard = "on", .usage = "canvas jingles [on|off]",
+                      .help = "short chimes for desktop startup, notices, popups and volume changes; off silences them [on]"),
     SETTING_PLAIN_ROW("Taskbar", "Taskbar position", SETTINGS_CHOICE, 0, ("taskbar", "position"), "position ", "bottom top left right",
                       .path = SETTING_TASKBAR_POSITION_PATH, .standard = "bottom", .reset = "bottom",
                       .refusal = "taskbar position is bottom, top, left or right, not %s\n",

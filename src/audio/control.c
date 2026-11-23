@@ -44,6 +44,9 @@
 #define CTL_COMMAND_REPLY 2
 #define CTL_COMMAND_AUTH 8
 #define CTL_COMMAND_SET_CLIENT_NAME 9
+#define CTL_COMMAND_CREATE_UPLOAD_STREAM 15
+#define CTL_COMMAND_FINISH_UPLOAD_STREAM 17
+#define CTL_COMMAND_PLAY_SAMPLE 18
 #define CTL_COMMAND_GET_SINK_INPUT_INFO 29
 #define CTL_COMMAND_SET_SINK_VOLUME 36
 #define CTL_COMMAND_SET_SINK_INPUT_VOLUME 37
@@ -54,6 +57,7 @@
 #define CTL_COMMAND_SET_SINK_INPUT_MUTE 69
 #define CTL_COMMAND_SET_SOURCE_OUTPUT_VOLUME 98
 #define CTL_COMMAND_SET_SOURCE_OUTPUT_MUTE 99
+#define CTL_FORMAT_S16LE 3
 #define CTL_ERR_ACCESS 1
 #define CTL_ERR_INVALID 3
 #define CTL_ERR_NOENTITY 5
@@ -537,6 +541,84 @@ static long ctl_set_source_volume(struct ctl *c, const char *source, unsigned lo
 static long ctl_set_source_mute(struct ctl *c, const char *source, int muted)
 {
         return ctl_index_send(c, CTL_COMMAND_SET_SOURCE_MUTE, CTL_NONE, 1, source, muted);
+}
+
+// Uploads a PCM sample to the sound server's sample cache under name. 0, or CTL_INVALID / CTL_FAILED.
+static long ctl_upload_sample(struct ctl *c, const char *name, long format, long channels, long rate, const void *data, unsigned long bytes)
+{
+        struct wire_w w;
+        struct wire_r r;
+        unsigned long channel, sent = 0;
+        const unsigned char *p = (const unsigned char *)data;
+        long size;
+
+        if (!c->open || !name || !name[0] || !data || !bytes || channels < 1 || channels > CTL_CHANNELS || rate < 1)
+                return CTL_INVALID;
+        ctl_budget(c);
+        ctl_begin(c, &w, CTL_COMMAND_CREATE_UPLOAD_STREAM);
+        wire_w_string(&w, name);
+        wire_w_byte(&w, 'a');
+        wire_w_byte(&w, (unsigned char)format);
+        wire_w_byte(&w, (unsigned char)channels);
+        wire_w_be32(&w, (unsigned long)rate);
+        wire_w_byte(&w, 'm');
+        wire_w_byte(&w, (unsigned char)channels);
+        for (long i = 0; i < channels; i++)
+                wire_w_byte(&w, (unsigned char)(channels == 1 ? 0 : i + 1));
+        wire_w_u32(&w, bytes);
+        wire_w_byte(&w, 'P');
+        wire_w_byte(&w, 'N');
+        if (w.bad || (size = ctl_exchange(c, w.len)) < 0)
+                return size < 0 ? size : CTL_FAILED;
+        r = (struct wire_r){c->frame + 20, size, 10, 0};
+        channel = wire_r_u32(&r);
+        if (r.bad)
+                return CTL_FAILED;
+        while (sent < bytes)
+        {
+                unsigned long chunk = bytes - sent;
+
+                if (chunk > CTL_FRAME)
+                        chunk = CTL_FRAME;
+                wire_put_be(c->frame, chunk);
+                wire_put_be(c->frame + 4, channel);
+                wire_put_be(c->frame + 8, 0);
+                wire_put_be(c->frame + 12, 0);
+                wire_put_be(c->frame + 16, 0);
+                memory_copy_apart(c->frame + 20, p + sent, chunk);
+                if (c->transport.send(c->transport.context, c->frame, (long)(20 + chunk), ctl_left(c)) < 0)
+                {
+                        c->open = 0;
+                        return CTL_FAILED;
+                }
+                sent += chunk;
+        }
+        ctl_begin(c, &w, CTL_COMMAND_FINISH_UPLOAD_STREAM);
+        wire_w_u32(&w, channel);
+        if (w.bad || (size = ctl_exchange(c, w.len)) < 0)
+                return size < 0 ? size : CTL_FAILED;
+        return 0;
+}
+
+// Plays a named sample from the sound server's cache on the default sink (volume CTL_NONE for normal). 0, CTL_NOENTITY, or CTL_FAILED.
+static long ctl_play_sample(struct ctl *c, const char *name, unsigned long volume)
+{
+        struct wire_w w;
+        long size;
+
+        if (!c->open || !name || !name[0])
+                return CTL_INVALID;
+        ctl_budget(c);
+        ctl_begin(c, &w, CTL_COMMAND_PLAY_SAMPLE);
+        wire_w_u32(&w, CTL_NONE);
+        wire_w_string(&w, 0);
+        wire_w_u32(&w, volume);
+        wire_w_string(&w, name);
+        wire_w_byte(&w, 'P');
+        wire_w_byte(&w, 'N');
+        if (w.bad || (size = ctl_exchange(c, w.len)) < 0)
+                return size < 0 ? size : CTL_FAILED;
+        return 0;
 }
 
 #ifndef CTL_NO_SYSTEM

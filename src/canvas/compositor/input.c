@@ -885,6 +885,9 @@ static void compositor_script_say(const char *name)
 static const char *compositor_volume_path[5] = {AUDIO_STATE_PATH, SETTING_AUDIO_VOLUME_PATH, SETTING_AUDIO_MUTE_PATH, CTL_SOCKET, SETTING_AUDIO_SOURCE_MUTE_PATH};
 static struct ctl compositor_ctl;
 static positive compositor_ctl_again;
+static struct canvas_jingle compositor_jingle;
+static int compositor_welcome_played;
+static unsigned int compositor_notices_seen;
 
 static struct
 {
@@ -1013,6 +1016,13 @@ static int compositor_notices_look(void)
                 return 0;
         compositor_notices_seq = seq;
         worst = windows_issues_summary(&compositor_notices_copy, &count);
+        if (count > compositor_notices_seen)
+        {
+                positive now = clock_monotonic_nanoseconds();
+                if (compositor_ctl_ready(now))
+                        canvas_jingle_play(&compositor_ctl, &compositor_jingle, compositor_volume_path[3], CANVAS_JINGLE_NOTICE, CTL_NONE, (long)(now / 1000000ll), 1000);
+        }
+        compositor_notices_seen = count;
         return taskbar_notices_set(count > 0, worst);
 }
 
@@ -1057,6 +1067,11 @@ static void compositor_volume_look(positive now)
                 compositor_volume.look_at = compositor_volume.flash_until;
         if (compositor_volume.mic_flash_until && compositor_volume.mic_flash_until < compositor_volume.look_at)
                 compositor_volume.look_at = compositor_volume.mic_flash_until;
+        if (compositor_volume.present && !compositor_welcome_played && !compositor_volume.muted && compositor_volume.percent > 0 && compositor_ctl_ready(now))
+        {
+                compositor_welcome_played = 1;
+                canvas_jingle_play(&compositor_ctl, &compositor_jingle, compositor_volume_path[3], CANVAS_JINGLE_WELCOME, CTL_NONE, (long)(now / 1000000ll), 0);
+        }
         compositor_volume_show();
 }
 
@@ -1132,6 +1147,8 @@ static void compositor_volume_step(int step, int toggle)
         }
         if (muted != compositor_volume.muted)
                 compositor_volume_write(compositor_volume_path[2], muted ? "on\n" : "off\n");
+        if ((percent != compositor_volume.percent || muted != compositor_volume.muted) && !muted && percent > 0 && compositor_ctl_ready(now))
+                canvas_jingle_play(&compositor_ctl, &compositor_jingle, compositor_volume_path[3], CANVAS_JINGLE_VOLUME, CTL_NONE, (long)(now / 1000000ll), 55);
         compositor_volume.percent = percent, compositor_volume.muted = muted;
         compositor_volume.look_at = compositor_volume.flash_until = now + COMPOSITOR_VOLUME_FLASH_NS;
         compositor_volume.hold_until = now + COMPOSITOR_VOLUME_HOLD_NS;
