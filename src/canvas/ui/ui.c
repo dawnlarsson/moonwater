@@ -30354,7 +30354,7 @@ static fn ui_text_wake(struct ui_text address_to t)
 // A caret's cover at now, for a phase that restarted at since, and when that cover next changes (0 for never, the...
 static unsigned int ui_caret_at(positive since, positive address_to due)
 {
-        positive now = (positive)ui_kit_clock();
+        positive now = ui_kit.now ? (positive)ui_kit.now : (positive)ui_kit_clock();
         b64 cycle = ui_caret_cycle(), q;
         unsigned int cover;
         *due = 0;
@@ -31952,16 +31952,22 @@ static b32 ui_select_fling(struct ui address_to ui, struct ui_select address_to 
 // A selection drag past an edge scrolls the client, smoothly, as the time passes (ui_edge_steps:
 static positive ui_select_autoscroll(struct ui address_to ui, struct ui_select address_to s, b32 address_to redraw)
 {
-        positive now = (positive)ui_kit_clock();
+        positive now;
         struct ui_select_box b;
         long steps;
         int edge_x, edge_y;
-        s->ops->box(s->self, &b);
-        if (!s->dragging || !s->edge.past || s->boxed || (b.field ? b.right <= b.left : b.line_height <= 0))
+        if (!s->dragging || !s->edge.past || s->boxed)
         {
                 s->edge.at = 0;
                 return 0;
         }
+        s->ops->box(s->self, &b);
+        if (b.field ? b.right <= b.left : b.line_height <= 0)
+        {
+                s->edge.at = 0;
+                return 0;
+        }
+        now = ui_kit.now ? (positive)ui_kit.now : (positive)ui_kit_clock();
         steps = ui_edge_steps(&s->edge, ui->scale, b.field ? 1000l : 1000l * b.line_height);
         if (steps <= 0)
                 return now + (positive)ui_kit_frame_ns();
@@ -31976,11 +31982,11 @@ static positive ui_select_autoscroll(struct ui address_to ui, struct ui_select a
 // The bar's coming and going as a tick sees it:
 static positive ui_select_bar_tick(struct ui_select address_to s, b32 address_to redraw)
 {
-        positive now = (positive)ui_kit_clock();
         b32 want = s->bar && ui_select_bar_still(s);
         if (want != s->bar_want)
                 *redraw = true;
-        if (s->bar && now < s->quiet_at && s->finger != UI_SELECT_FINGER_HANDLE && s->finger != UI_SELECT_FINGER_SELECT && !ui_body_going(&s->fling))
+        if (s->bar && (ui_kit.now ? (positive)ui_kit.now : (positive)ui_kit_clock()) < s->quiet_at &&
+            s->finger != UI_SELECT_FINGER_HANDLE && s->finger != UI_SELECT_FINGER_SELECT && !ui_body_going(&s->fling))
                 return s->quiet_at;
         return 0;
 }

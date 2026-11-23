@@ -929,7 +929,7 @@ static void compositor_crtc_off(unsigned int crtc)
 */
 static int compositor_virtual(void)
 {
-        return (drm_driver_flags(compositor.driver) & DRV_VIRTUAL) != 0;
+        return (compositor.driver_flags & DRV_VIRTUAL) != 0;
 }
 
 // Whether two modes are the same timing: what a crtc scans at, whatever the name says.
@@ -2060,7 +2060,7 @@ static int compositor_cursor_probe_asked(void)
 // Whether the card's driver is one refused the plane by name.
 static int compositor_cursor_named(void)
 {
-        return (drm_driver_flags(compositor.driver) & DRV_NO_CURSOR_PLANE) != 0;
+        return (compositor.driver_flags & DRV_NO_CURSOR_PLANE) != 0;
 }
 
 /*
