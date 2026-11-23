@@ -2104,6 +2104,7 @@ static fn files_peers_sync(void)
 }
 
 static fn files_rpc_forget_machine(p8 machine);
+static fn files_remote_read_abort(void);
 
 static b32 files_peer_ensure(struct files_peer address_to p)
 {
@@ -2144,7 +2145,18 @@ static fn files_rpc_forget(struct files_rpc address_to r)
                 t->node[node].flags &= (p8)~FILES_NODE_LOADING;
         if (r->kind == FILES_RPC_NAV_LIST && files_model_is_remote(m) && string_equals((string_address)r->path, (string_address)m->path))
                 files_model_fail(m, -5, true), files.said = LANGUAGE_files_failed, files.dirty = true;
+        // A read whose request is given up ends, and its file with it: else it said Opening for ever.
+        if (r->kind == FILES_RPC_READ && files.big->remote_read.active && files.big->remote_read.machine == r->machine &&
+            files.big->remote_read.req_id == r->req_id)
+                files_remote_read_abort(), files.big->note[0] = 0, files.said = LANGUAGE_files_failed, files.dirty = true;
         r->kind = FILES_RPC_NONE;
+}
+
+// What the status line says of a linked machine's refusal: a request it does not answer at all (an older machine, -38), or the
+// folder's own state.
+static unsigned int files_remote_said(b32 status)
+{
+        return status == -38 ? LANGUAGE_files_remote_unsupported : files_state_said(files_state_of(status));
 }
 
 static fn files_rpc_forget_machine(p8 machine)
@@ -2308,10 +2320,14 @@ static fn files_remote_handle_reply(struct files_peer address_to p, const struct
         struct files_rpc rpc;
         if (!files_rpc_take(p->machine, rep->req_id, &rpc))
                 return;
-        if (rpc.kind == FILES_RPC_INFO && rep->op == FS_OP_INFO && rep->length >= 11)
+        if (rpc.kind == FILES_RPC_INFO && rep->op == FS_OP_INFO)
         {
-                b32 status = (b32)link_fs_get32(rep->data);
+                b32 status = rep->length >= 4 ? (b32)link_fs_get32(rep->data) : -5;
                 p32 node = files_tree_machine_node(&files.big->tree, p->machine);
+                if (status == 0 && rep->length < 11)
+                        status = -5;
+                if (status < 0)
+                        files.said = files_remote_said(status);
                 if (status == 0 && node != FILES_NO)
                 {
                         p8 hflags = rep->data[4];
@@ -2363,6 +2379,8 @@ static fn files_remote_handle_reply(struct files_peer address_to p, const struct
                 }
                 else if (node != FILES_NO)
                         files.big->tree.node[node].read = true, files.big->tree.node[node].has = 0, files.big->tree.node[node].flags &= (p8)~FILES_NODE_LOADING;
+                if (status < 0)
+                        files.said = files_remote_said(status);
                 files.dirty = true;
         }
         else if (rpc.kind == FILES_RPC_NAV_LIST && rep->op == FS_OP_LIST)
@@ -2372,6 +2390,8 @@ static fn files_remote_handle_reply(struct files_peer address_to p, const struct
                     string_equals((string_address)m->path, (string_address)rpc.path))
                 {
                         files_model_take_remote(m, rep->data, rep->length);
+                        if (m->state != FILES_READY)
+                                files.said = rep->length >= 4 ? files_remote_said((b32)link_fs_get32(rep->data)) : LANGUAGE_files_failed;
                         files_tree_follow();
                         files.dirty = true;
                 }
@@ -2383,7 +2403,9 @@ static fn files_remote_handle_reply(struct files_peer address_to p, const struct
                         return;
                 if (rep->length < 17 || (b32)link_fs_get32(rep->data) < 0)
                 {
-                        files_remote_read_abort(), files.big->note[0] = 0, files.said = LANGUAGE_files_failed, files.dirty = true;
+                        b32 status = rep->length >= 4 ? (b32)link_fs_get32(rep->data) : -5;
+                        files_remote_read_abort(), files.big->note[0] = 0, files.dirty = true;
+                        files.said = status == -38 ? LANGUAGE_files_remote_unsupported : LANGUAGE_files_failed;
                         return;
                 }
                 {
@@ -2480,7 +2502,7 @@ static fn files_remote_tick(long address_to timeout, long address_to other)
                         busy = true;
         for (int r = 0; r < FILES_RPCS_MOST; r++)
                 if (files.big->rpcs[r].kind != FILES_RPC_NONE && files_rpc_overdue(files.big->rpcs[r].sent, (p64)ui_kit.now))
-                        files_rpc_forget(&files.big->rpcs[r]), files.dirty = true;
+                        files_rpc_forget(&files.big->rpcs[r]), files.said = LANGUAGE_files_remote_silent, files.dirty = true;
         if (busy)
                 *timeout = ui_timeout_min(*timeout, 50000000);
 }
@@ -2873,7 +2895,7 @@ static fn files_button_event(const struct window_event address_to event, b32 dow
                                 if (!moved && files.big->tree.node[row].kind == FILES_NODE_PART)
                                         files_device_enter(files.big->tree.node[row].device);
                                 else if (!moved && files.big->tree.node[row].read && !files.big->tree.node[row].has)
-                                        files.focus = FILES_FOCUS_ROWS, files_model_reload(m);
+                                        files.focus = FILES_FOCUS_ROWS, files_reload();
                         }
                         else if (files_tree_go((p32)row))
                                 files.dirty = true;

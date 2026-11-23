@@ -14,6 +14,7 @@
 # machine-made 2026-11-23 (the CD drive and the flat Devices of Files), not yet read by a person: files_device_nothing files_disc_audio files_disc_none files_disc_play
 # machine-made 2026-11-23 (the bands of a machine in Files' sidebar), not yet read by a person: files_band_drives files_band_removable
 # machine-made 2026-11-23 (the startup table's check column), not yet read by a person: settings_column_on
+# machine-made 2026-11-23 (a linked machine that did not answer, or does not offer a request), not yet read by a person: files_remote_silent files_remote_unsupported
 @language fr
 @name Français
 @translated machine
@@ -117,6 +118,8 @@ files_refresh	aad4	Actualiser
 files_remote_denied	81a0	L'accès aux fichiers n'est pas accordé
 files_remote_offline	3c65	La machine est hors ligne
 files_remote_opening	99bd	Ouverture de %s...
+files_remote_silent	5dbd	La machine n'a pas répondu
+files_remote_unsupported	91f5	La machine ne propose pas cela par le lien
 files_rename_hint	ad88	Nouveau nom
 files_restored	4c30	%d remis à leur place
 files_sheet_created	59ac	Créé %s

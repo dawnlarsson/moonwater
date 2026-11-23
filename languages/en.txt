@@ -101,6 +101,8 @@ files_refresh	aad4	Refresh
 files_remote_denied	81a0	Files access is not granted
 files_remote_offline	3c65	Machine is offline
 files_remote_opening	99bd	Opening %s...
+files_remote_silent	5dbd	The machine did not answer
+files_remote_unsupported	91f5	The machine does not offer that over the link
 files_rename_hint	ad88	New name
 files_restored	4c30	%d put back where they were
 files_sheet_created	59ac	Made %s

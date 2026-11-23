@@ -15,6 +15,7 @@
 # machine-made 2026-11-23 (the CD drive and the flat Devices of Files), not yet read by a person: files_device_nothing files_disc_audio files_disc_none files_disc_play
 # machine-made 2026-11-23 (the bands of a machine in Files' sidebar), not yet read by a person: files_band_drives files_band_removable
 # machine-made 2026-11-23 (the startup table's check column), not yet read by a person: settings_column_on
+# machine-made 2026-11-23 (a linked machine that did not answer, or does not offer a request), not yet read by a person: files_remote_silent files_remote_unsupported
 @language ur
 @name اردو
 @translated machine
@@ -118,6 +119,8 @@ files_refresh	aad4	تازہ کریں
 files_remote_denied	81a0	فائلوں تک رسائی نہیں دی گئی
 files_remote_offline	3c65	مشین آف لائن ہے
 files_remote_opening	99bd	%s کھل رہا ہے...
+files_remote_silent	5dbd	مشین نے جواب نہیں دیا
+files_remote_unsupported	91f5	مشین یہ لنک پر پیش نہیں کرتی
 files_rename_hint	ad88	نیا نام
 files_restored	4c30	%d اپنی جگہ واپس رکھے گئے
 files_sheet_created	59ac	بنایا %s

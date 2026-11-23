@@ -6558,6 +6558,8 @@ LANGUAGE_ID(files_refresh, "Refresh") \
 LANGUAGE_ID(files_remote_denied, "Files access is not granted") \
 LANGUAGE_ID(files_remote_offline, "Machine is offline") \
 LANGUAGE_ID(files_remote_opening, "Opening %s...") \
+LANGUAGE_ID(files_remote_silent, "The machine did not answer") \
+LANGUAGE_ID(files_remote_unsupported, "The machine does not offer that over the link") \
 LANGUAGE_ID(files_rename_hint, "New name") \
 LANGUAGE_ID(files_restored, "%d put back where they were") \
 LANGUAGE_ID(files_sheet_created, "Made %s") \

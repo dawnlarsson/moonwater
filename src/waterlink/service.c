@@ -1353,8 +1353,17 @@ static p8 link_dir_in_rules(bipolar dir_fd)
 static p8 link_path_in_tree(string_address path, positive which)
 {
         p8 leaf[256];
-        bipolar at = system_open_parent_pinned(AT_FDCWD, path, leaf, sizeof leaf);
+        bipolar at;
 
+        //      The top has no parent to open, and is in no tree: it is walked
+        //      from itself, so that a peer with files may list / (Files' System
+        //      row of a linked machine), which was refused as a parent unopened.
+        if (path[0] == '/' && !path[string_span_of_set(path, "/")])
+        {
+                at = system_open_at(AT_FDCWD, "/", O_PATH | O_DIRECTORY | O_CLOEXEC);
+                return at < 0 || link_dir_in_tree(at, null, which, true);
+        }
+        at = system_open_parent_pinned(AT_FDCWD, path, leaf, sizeof leaf);
         if (at < 0)
                 return at != -2; // no parent at all is nothing to write into
         return link_dir_in_tree(at, leaf, which, true);
@@ -1918,8 +1927,13 @@ static bipolar link_send_to(p8 address_to bytes, positive length,
                 return link_modem_put(bytes, length, link_self.put_at)
                                ? (bipolar)length
                                : -EAGAIN;
+        //      A place is dialled here only while the carrier is TCP alone.
+        //      Under auto the handshake dials the place it falls back on
+        //      (link_client_initiate), and a session that came up over TCP has
+        //      its stream; one up over UDP stays there, whatever another
+        //      session's place did (Files holds a session to each machine).
         stream = link_tcp_for(address, port);
-        if (!stream && link_tcp_self.client && link_tcp_wanted(0, link_self.now))
+        if (!stream && link_tcp_self.client && link_carrier(link_self.now) == LINK_CARRIER_TCP)
                 stream = link_tcp_dial(address, port, link_self.now);
         if (stream)
                 return link_tcp_send(stream, bytes, length, link_self.now) ? (bipolar)length
@@ -2913,6 +2927,89 @@ static fn link_fs_reply_err(struct link_fs_buf address_to out, p32 req_id,
         link_fs_reply_put(out, req_id, op, body, 4);
 }
 
+#if !defined(MACOS)
+/*      Whether the files grant opens where a line of mountinfo is mounted.
+        The fifth field is the mount point, a space, tab, newline or backslash
+        in it a backslash and three octal digits. One in a tree the grant
+        leaves out (link_path_is_own) is no drive of this machine to a peer:
+        Files would show it, and no LIST of it is answered. The data partition
+        is one, at /run/moonwater/data; what it holds is /root, /home and
+        /bowls, each a mount of its own. */
+static p8 link_fs_mount_served(const p8 address_to line, positive length)
+{
+        p8 point[4096];
+        positive at = 0, used = 0;
+
+        for (positive field = 0; field < 4; field++)
+        {
+                while (at < length && line[at] != ' ')
+                        at++;
+                while (at < length && line[at] == ' ')
+                        at++;
+        }
+        while (at < length && line[at] != ' ' && line[at] != '\n')
+        {
+                p8 c = line[at++];
+
+                if (c == '\\' && at + 3 <= length &&
+                    line[at] >= '0' && line[at] <= '3' &&
+                    line[at + 1] >= '0' && line[at + 1] <= '7' &&
+                    line[at + 2] >= '0' && line[at + 2] <= '7')
+                        c = (p8)(((line[at] - '0') << 6) | ((line[at + 1] - '0') << 3) | (line[at + 2] - '0')), at += 3;
+                if (!c || used + 1 >= sizeof point)
+                        return false;
+                point[used++] = c;
+        }
+        point[used] = 0;
+        return used && point[0] == '/' && !link_path_is_own((string_address)point);
+}
+#endif
+
+/*      The drives a peer's Files shows of this machine, in mountinfo's lines,
+        put on the end of body: false only when body could not take them. A
+        machine whose mounts cannot be read has none. */
+static p8 link_fs_mounts(struct link_fs_buf address_to body)
+{
+#if !defined(MACOS)
+        struct link_fs_buf all = {0};
+        bipolar fd = system_open_at(AT_FDCWD, "/proc/self/mountinfo",
+                                    FILE_READ | O_CLOEXEC);
+        p8 good = true;
+
+        //      Read whole, as large as it is: a file of /proc says no size.
+        while (fd >= 0)
+        {
+                bipolar got;
+
+                if (all.cap - all.len < 4096 &&
+                    !link_fs_buf_reserve(address_of all, all.len + 4096))
+                        break;
+                got = system_read_retry((positive)fd, all.data + all.len,
+                                        all.cap - all.len);
+                if (got <= 0)
+                        break;
+                all.len += (positive)got;
+        }
+        if (fd >= 0)
+                system_close(fd);
+        for (positive at = 0; good && at < all.len;)
+        {
+                const p8 address_to nl = memory_first_of(all.data + at, '\n',
+                                                         all.len - at);
+                positive after = nl ? (positive)(nl - all.data) + 1 : all.len;
+
+                if (link_fs_mount_served(all.data + at, after - at))
+                        good = link_fs_buf_append(body, all.data + at, after - at);
+                at = after;
+        }
+        link_fs_buf_free(address_of all);
+        return good;
+#else
+        (void)body;
+        return true;
+#endif
+}
+
 static fn link_fs_handle_info(struct link_fs_buf address_to out, p32 req_id)
 {
         string_address home = (string_address)LINK_HOME_DIR;
@@ -2920,12 +3017,11 @@ static fn link_fs_handle_info(struct link_fs_buf address_to out, p32 req_id)
         if (hlen > 65535)
                 hlen = 0;
         p8 flags = 0;
-        p8 sub[1024];
+        p8 sub[4096];
         file_facts facts;
-        p8 address_to mi = null;
-        positive mi_len = 0;
         struct link_fs_buf body = {0};
         p8 hdr[11];
+        positive mounts_at = 0;
 
         if (hlen > 0 && hlen + 16 < sizeof sub)
         {
@@ -2939,37 +3035,21 @@ static fn link_fs_handle_info(struct link_fs_buf address_to out, p32 req_id)
                     (facts.mode & MODE_FORMAT) == MODE_DIRECTORY)
                         flags |= 2;
         }
-#if !defined(MACOS)
-        {
-                bipolar mapped = system_call_6(
-                    syscall(mmap), 0, 65536,
-                    FILE_PROTECT_READ | FILE_PROTECT_WRITE,
-                    FILE_MAP_PRIVATE | FILE_MAP_ANONYMOUS,
-                    (positive)(bipolar)-1, 0);
-                if (!(mapped < 0 && mapped > -4096))
-                {
-                        bipolar got = file_slurp_once_at(
-                            AT_FDCWD, (string_address) "/proc/self/mountinfo",
-                            (p8 address_to)mapped, 65535);
-                        mi = (p8 address_to)mapped;
-                        if (got > 0)
-                                mi_len = (positive)got;
-                }
-        }
-#endif
         link_fs_put32(hdr, 0);
         hdr[4] = flags;
         link_fs_put16(hdr + 5, (p16)hlen);
+        link_fs_put32(hdr + 7, 0); // the mounts' length, once they are in
         if (link_fs_buf_append(address_of body, hdr, 7) &&
             (!hlen || link_fs_buf_append(address_of body, (const p8 address_to)home, hlen)) &&
-            (link_fs_put32(hdr, (p32)mi_len), link_fs_buf_append(address_of body, hdr, 4)) &&
-            (!mi_len || link_fs_buf_append(address_of body, mi, mi_len)))
+            link_fs_buf_append(address_of body, hdr + 7, 4) &&
+            (mounts_at = body.len, link_fs_mounts(address_of body)))
+        {
+                link_fs_put32(body.data + mounts_at - 4, (p32)(body.len - mounts_at));
                 link_fs_reply_put(out, req_id, FS_OP_INFO, body.data, body.len);
+        }
         else
                 link_fs_reply_err(out, req_id, FS_OP_INFO, -12);
         link_fs_buf_free(address_of body);
-        if (mi)
-                system_call_2(syscall(munmap), (positive)mi, 65536);
 }
 
 static fn link_fs_handle_list(struct link_fs_buf address_to out, p32 req_id,
@@ -5554,6 +5634,18 @@ static positive link_client_reason(void)
         an initiation at once. A cookie is the place's own, and is not sent
         to another, so it is forgotten with the place it came from.
 */
+/*      Under auto a place is asked over UDP first and over TCP once it has
+        gone a second unanswered, each place for itself: a place that did not
+        answer is no word on the next, which may be a listener on UDP alone (a
+        Mac's). When the second was counted from the first place tried and the
+        fall to TCP was kept, every place after the first was asked over TCP
+        only, and a machine whose first place was stale was never reached. */
+static fn link_client_fresh_place(void)
+{
+        link_client.unanswered_since = 0;
+        link_tcp_self.fell_back = false;
+}
+
 static fn link_client_place(struct link_session address_to s,
                             struct link_place address_to place)
 {
@@ -5563,6 +5655,7 @@ static fn link_client_place(struct link_session address_to s,
         link_client.ours = 0;
         link_client.cookie_at = 0;
         link_client.cookied = false;
+        link_client_fresh_place();
 }
 
 /*      The client's terminal goes raw as the line editor's does, and back:
@@ -5904,6 +5997,7 @@ static p8 link_keep_begin(struct link_session address_to s, p64 now, p8 rekey)
         link_keep_rekey = rekey;
         link_client.attempts = 1;
         link_client.ours = 0;
+        link_client_fresh_place();
         if (!rekey)
                 link_client.cookie_at = 0;
         return link_client_initiate(s, now);
@@ -6566,23 +6660,30 @@ static b32 link_fs_open(struct link_fs_client address_to c,
 {
         link_peers peers;
         link_state st;
-        link_places saved;
         positive st_got = 0;
         struct waterlink_peer address_to peer;
         struct link_session address_to s = null;
 
-        memory_zero(c, sizeof(address_to c));
+        memory_zero(c, sizeof *c);
         if (!peer_name || !peer_name[0] || !link_fs_ensure_socket())
                 return false;
         link_peers_load(address_of peers);
         peer = link_peer_named(address_of peers, peer_name);
         if (!peer || (peer->flags & WATERLINK_PEER_BLOCKED))
                 return false;
-        // Collect candidate endpoints: peer record, live IP at peer's listen port, then saved link_places.
+        /*      The places, the likeliest first: where the machine is heard
+                now (its sessions open here, its greetings), at the port its
+                listener takes; then the record's place, the record's address
+                at that port, and the places it was heard at before, newest
+                first (link_places_for). The record's port is where the
+                machine last spoke from, a client's port when it last dialled
+                here (a Mac's moonwater link): nothing listens there, and a
+                Mac tried there first was never reached. */
         {
-                p16 listen_port = peer->port ? peer->port : link_port();
+                p16 listen_port = link_port();
+                struct link_place known[LINK_PLACES_PER_PEER];
+                positive count;
 
-                link_fs_add_place(c, peer->key, peer->address, peer->port);
                 memory_zero(address_of st, sizeof st);
                 if (link_read_private_records(LINK_STATE_PATH, (p8 address_to)address_of st, sizeof st, sizeof st, address_of st_got) == 0 && st_got == sizeof st)
                 {
@@ -6593,11 +6694,10 @@ static b32 link_fs_open(struct link_fs_client address_to c,
                                 if (crypto_same(st.seen[j].key, peer->key, 32) && st.seen[j].port)
                                         link_fs_add_place(c, peer->key, st.seen[j].address, listen_port);
                 }
+                count = peer->port ? link_places_for(peer->key, peer->address, peer->port, known) : 0;
+                for (positive at = 0; at < count; at++)
+                        link_fs_add_place(c, peer->key, known[at].address, known[at].port);
         }
-        link_places_load(address_of saved);
-        for (positive at = 0; at < saved.count; at++)
-                if (crypto_same(saved.place[at].key, peer->key, 32))
-                        link_fs_add_place(c, peer->key, saved.place[at].address, saved.place[at].port);
         if (!c->place_count)
                 return false;
         for (positive at = 0; at < LINK_SESSIONS; at++)
@@ -6651,7 +6751,7 @@ static fn link_fs_close(struct link_fs_client address_to c)
         }
         link_fs_buf_free(address_of c->out);
         link_fs_buf_free(address_of c->in);
-        memory_zero(c, sizeof(address_to c));
+        memory_zero(c, sizeof *c);
         for (positive at = 0; at < LINK_SESSIONS; at++)
                 if (link_self.session[at].used)
                         any = true;
@@ -6723,7 +6823,7 @@ static int link_fs_step(struct link_fs_client address_to c,
                         if (!link_client.ours && link_client.session != s)
                         {
                                 link_client.attempts = 0;
-                                link_client.unanswered_since = 0;
+                                link_client_fresh_place();
                         }
                         if (!link_client.ours ||
                             link_age(now, link_client.initiated) >= LINK_ATTEMPT)

@@ -15,6 +15,7 @@
 # machine-made 2026-11-23 (the CD drive and the flat Devices of Files), not yet read by a person: files_device_nothing files_disc_audio files_disc_none files_disc_play
 # machine-made 2026-11-23 (the bands of a machine in Files' sidebar), not yet read by a person: files_band_drives files_band_removable
 # machine-made 2026-11-23 (the startup table's check column), not yet read by a person: settings_column_on
+# machine-made 2026-11-23 (a linked machine that did not answer, or does not offer a request), not yet read by a person: files_remote_silent files_remote_unsupported
 @language he
 @name עברית
 @translated machine
@@ -118,6 +119,8 @@ files_refresh	aad4	רענון
 files_remote_denied	81a0	לא ניתנה גישה לקבצים
 files_remote_offline	3c65	המכונה אינה מקוונת
 files_remote_opening	99bd	פותח את %s...
+files_remote_silent	5dbd	המכונה לא ענתה
+files_remote_unsupported	91f5	המכונה אינה מציעה זאת דרך הקישור
 files_rename_hint	ad88	שם חדש
 files_restored	4c30	%d הוחזרו למקומם
 files_sheet_created	59ac	נוצר %s
