@@ -5629,6 +5629,238 @@ static void check_compositor_access(void)
 }
 
 /*
+        The aids of the keys and the pointer (access.c's second half), on the window of check_compositor_access with a keyboard in
+        slot 0 whose reports carry the kernel's stamps: the reader's gate shut only while an aid of the keys is on; a modifier tapped
+        latched for one key and tapped twice locked for each; a key held under the slow time typing nothing and one held past it typed
+        at that moment; a bounce dropped with its release; the keypad moving the pointer at once and faster as it is held, and its
+        clicks; a dwell clicking once after the pointer is still and not while it moves; and the hand that acted last in the table.
+*/
+static void aid_feed(positive ns, unsigned short code, int value)
+{
+    struct compositor_input_event events[2] = {{(long)(ns / 1000000000ull), (long)(ns % 1000000000ull / 1000ull), COMPOSITOR_EV_KEY, code, value},
+                                               {(long)(ns / 1000000000ull), (long)(ns % 1000000000ull / 1000ull), COMPOSITOR_EV_SYN, 0, 0}};
+
+    system_write_once(wheel_pipe[1], events, sizeof events);
+    compositor_input_read(0);
+}
+
+// The flags of the last press of code in row's ring from its tail, ~0 for none.
+static unsigned int aid_key_flags(int row, int code)
+{
+    struct windows address_to table = compositor.table;
+    unsigned int flags = ~0u;
+
+    for (unsigned int at = table->event_tail[row]; at != table->event_head[row]; at++)
+        if (table->event_type[row][at % WINDOWS_EVENTS] == WINDOW_EVENT_KEY && table->event_a[row][at % WINDOWS_EVENTS] == code &&
+            (table->event_flags[row][at % WINDOWS_EVENTS] & WINDOW_KEY_DOWN))
+            flags = table->event_flags[row][at % WINDOWS_EVENTS];
+    return flags;
+}
+
+static void check_compositor_access_aids(void)
+{
+    static unsigned int screen[GLASS_SIDE * GLASS_SIDE];
+    struct windows address_to table;
+    positive t = 1000000000000ull, ms = 1000000ull;
+    unsigned int down, gates = 0;
+    int x0, y0, moved_first, moved_second;
+    b32 all;
+
+    compositor_zero();
+    compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
+    compositor.resize = compositor.press = compositor.keys_to = compositor.told_row = COMPOSITOR_NONE;
+    compositor.width = compositor.height = GLASS_SIDE;
+    compositor.scale = 100;
+    compositor.card = -1;
+    compositor.hold = -1;
+    compositor.holds = ~0ul;
+    compositor.scanout = screen;
+    compositor.scanout_pitch = GLASS_SIDE * 4;
+    compositor.period = 10000000ull;
+    if (!glass_table_map() || system_call_2(syscall(pipe2), (positive)wheel_pipe, O_NONBLOCK))
+    {
+        check("access aids: the table and the keyboard are made", false);
+        return;
+    }
+    table = compositor.table;
+    table->x[1] = 50, table->y[1] = 30, table->width[1] = 120, table->height[1] = 80;
+    glass_paint(1, 0, 0, 120, 80, 0x404040u, true);
+    compositor_present();
+    compositor.inputs[0] = wheel_pipe[0];
+    compositor.input_count = 1;
+    compositor.pointer_x = compositor.real_x = 110, compositor.pointer_y = compositor.real_y = 70;
+    compositor.focus = 1;
+    compositor_input_physical[0] = 1;
+    for (unsigned int each = 0; each < COMPOSITOR_ACCESS_PADS; each++)
+        compositor_access.pad[each].at = -1;
+    compositor_access.of[0] = -1;
+    compositor_access_aid.modality = WINDOWS_MODALITY_NONE;
+
+    /* The gate: open with every aid off and with dwell alone (a timer on the pointer's stillness), shut by each aid of the keys. */
+    compositor_access_aid_set(0, 0, 0, 0);
+    gates |= compositor_access_gate;
+    compositor_access_aid_set(ACCESS_DWELL, 0, 0, 500 * ms);
+    gates |= compositor_access_gate << 1;
+    compositor_access_aid_set(0, 0, 0, 0);
+    all = !gates && !compositor_access_dwells && compositor_access_aid_due() == 0;
+    compositor_access_aid_set(ACCESS_STICKY, 0, 0, 0), all &= compositor_access_gate == 1;
+    compositor_access_aid_set(ACCESS_SLOW, 300 * ms, 0, 0), all &= compositor_access_gate == 1;
+    compositor_access_aid_set(ACCESS_BOUNCE, 0, 100 * ms, 0), all &= compositor_access_gate == 1;
+    compositor_access_aid_set(ACCESS_MOUSE, 0, 0, 0), all &= compositor_access_gate == 1;
+    compositor_access_aid_set(0, 0, 0, 0), all &= compositor_access_gate == 0;
+    table->event_tail[1] = table->event_head[1];
+    aid_feed(t, 30, 1), aid_feed(t + 50 * ms, 30, 0);
+    all &= access_unread(1, WINDOW_EVENT_KEY, 30, &down) == 2 && down == 1 && table->input_modality == WINDOWS_MODALITY_KEYS;
+    check("access aids: the reader's direct path for keys is shut only while sticky, slow, bounce or mouse keys is on (not for dwell alone), and with all off a key is the loop's as before",
+          all);
+
+    /* Sticky keys: Shift tapped is latched for the next key alone; Ctrl tapped twice is locked for every key till tapped again. */
+    compositor_access_aid_set(ACCESS_STICKY, 0, 0, 0);
+    table->event_tail[1] = table->event_head[1];
+    aid_feed(t + 100 * ms, 42, 1), aid_feed(t + 150 * ms, 42, 0);
+    all = table->access_latched == WINDOW_KEY_SHIFT && !table->access_locked && !(compositor_modifiers() & WINDOW_KEY_SHIFT);
+    aid_feed(t + 200 * ms, 30, 1);
+    all &= (aid_key_flags(1, 30) & WINDOW_KEY_SHIFT) && !table->access_latched;
+    aid_feed(t + 250 * ms, 30, 0);
+    all &= !(compositor_modifiers() & WINDOW_KEY_SHIFT);
+    aid_feed(t + 300 * ms, 48, 1), aid_feed(t + 350 * ms, 48, 0);
+    all &= aid_key_flags(1, 48) != ~0u && !(aid_key_flags(1, 48) & WINDOW_KEY_SHIFT);
+    check("access aids: sticky keys latches Shift tapped alone (shown in the table), presses it for the next key and lets it go after, and the key after that is plain",
+          all);
+    table->event_tail[1] = table->event_head[1];
+    aid_feed(t + 400 * ms, 29, 1), aid_feed(t + 420 * ms, 29, 0), aid_feed(t + 440 * ms, 29, 1), aid_feed(t + 460 * ms, 29, 0);
+    all = table->access_locked == WINDOW_KEY_CONTROL && !table->access_latched;
+    aid_feed(t + 500 * ms, 30, 1), aid_feed(t + 520 * ms, 30, 0), aid_feed(t + 540 * ms, 48, 1), aid_feed(t + 560 * ms, 48, 0);
+    all &= (aid_key_flags(1, 30) & WINDOW_KEY_CONTROL) && (aid_key_flags(1, 48) & WINDOW_KEY_CONTROL) && !(compositor_modifiers() & WINDOW_KEY_CONTROL);
+    aid_feed(t + 600 * ms, 29, 1), aid_feed(t + 620 * ms, 29, 0);
+    table->event_tail[1] = table->event_head[1];
+    aid_feed(t + 640 * ms, 46, 1), aid_feed(t + 660 * ms, 46, 0);
+    all &= !table->access_locked && !table->access_latched && aid_key_flags(1, 46) != ~0u && !(aid_key_flags(1, 46) & WINDOW_KEY_CONTROL);
+    /* A chord held by hand latches nothing. */
+    aid_feed(t + 700 * ms, 42, 1), aid_feed(t + 710 * ms, 30, 1), aid_feed(t + 720 * ms, 30, 0), aid_feed(t + 730 * ms, 42, 0);
+    all &= !table->access_latched && !table->access_locked;
+    check("access aids: Ctrl tapped twice is locked and pressed for each key after, a third tap lets it go, and Shift held through a key by hand latches nothing",
+          all);
+
+    /* Slow keys at 300 ms: a key let go at 100 ms types nothing; one held is pressed at 300 ms, then let go as it is. */
+    compositor_access_aid_set(ACCESS_SLOW, 300 * ms, 0, 0);
+    table->event_tail[1] = table->event_head[1];
+    aid_feed(t + 1000 * ms, 30, 1), aid_feed(t + 1100 * ms, 30, 0);
+    all = access_unread(1, WINDOW_EVENT_KEY, 30, &down) == 0 && compositor_access_aid_due() == 0;
+    aid_feed(t + 1200 * ms, 30, 1), aid_feed(t + 1400 * ms, 30, 2);
+    all &= access_unread(1, WINDOW_EVENT_KEY, 30, &down) == 0 && compositor_access_aid_due() == t + 1500 * ms;
+    compositor_access_aid_tick(t + 1499 * ms);
+    all &= access_unread(1, WINDOW_EVENT_KEY, 30, &down) == 0;
+    compositor_access_aid_tick(t + 1500 * ms);
+    all &= access_unread(1, WINDOW_EVENT_KEY, 30, &down) == 1 && down == 1 && compositor_access_aid_due() == 0;
+    aid_feed(t + 1600 * ms, 30, 0);
+    all &= access_unread(1, WINDOW_EVENT_KEY, 30, &down) == 2 && down == 1;
+    check("access aids: slow keys drops a key let go before its time and its repeats, gives a key held its press at the time on the loop's deadline, then its let go", all);
+
+    /* Bounce keys at 100 ms: a press 50 ms after a release is dropped with its own release; one 250 ms after it types. */
+    compositor_access_aid_set(ACCESS_BOUNCE, 0, 100 * ms, 0);
+    table->event_tail[1] = table->event_head[1];
+    aid_feed(t + 2000 * ms, 30, 1), aid_feed(t + 2050 * ms, 30, 0);
+    aid_feed(t + 2100 * ms, 30, 1), aid_feed(t + 2120 * ms, 30, 0);
+    all = access_unread(1, WINDOW_EVENT_KEY, 30, &down) == 2 && down == 1;
+    aid_feed(t + 2300 * ms, 30, 1), aid_feed(t + 2350 * ms, 30, 0);
+    all &= access_unread(1, WINDOW_EVENT_KEY, 30, &down) == 4 && down == 2;
+    check("access aids: bounce keys drops a press too soon after a release, and its release with it, and takes one after its time", all);
+
+    /* Mouse keys: 6 moves a pixel at its press and nothing more in its delay, then on, faster in its second half second than its first;
+       9 a pixel up and right; 5 the left button, - then 5 the right one, 0 holds the right one and . lets it go; none is a key. */
+    compositor_access_aid_set(ACCESS_MOUSE, 0, 0, 0);
+    table->event_tail[1] = table->event_head[1];
+    x0 = compositor.pointer_x, y0 = compositor.pointer_y;
+    aid_feed(t + 3000 * ms, 77, 1);
+    all = compositor.pointer_x == x0 + 1 && compositor.pointer_y == y0 && table->input_modality == WINDOWS_MODALITY_POINTER;
+    for (positive at = 1; at <= 150; at++)
+        compositor_access_aid_tick(t + 3000 * ms + at * ms);
+    all &= compositor.pointer_x == x0 + 1 && compositor_access_aid_due() == t + 3151 * ms;
+    for (positive at = 151; at <= 650; at++)
+        compositor_access_aid_tick(t + 3000 * ms + at * ms);
+    moved_first = compositor.pointer_x - x0 - 1;
+    for (positive at = 651; at <= 1150; at++)
+        compositor_access_aid_tick(t + 3000 * ms + at * ms);
+    moved_second = compositor.pointer_x - x0 - 1 - moved_first;
+    /* A 256-pixel screen: from 6.4 pixels a second up the square for 0.5 s of a 1.5 s ramp to 256 is 7.8 pixels; the next half second 35. */
+    all &= moved_first >= 6 && moved_first <= 10 && moved_second >= 30 && moved_second <= 40 && compositor.pointer_y == y0;
+    aid_feed(t + 4150 * ms, 77, 0);
+    x0 = compositor.pointer_x;
+    compositor_access_aid_tick(t + 4200 * ms);
+    all &= compositor.pointer_x == x0 && compositor_access_aid_due() == 0;
+    aid_feed(t + 4300 * ms, 73, 1), aid_feed(t + 4320 * ms, 73, 0);
+    all &= compositor.pointer_x == x0 + 1 && compositor.pointer_y == y0 - 1;
+    check("access aids: mouse keys moves the pointer a pixel at an arrow's press, then on from 150 ms by the loop's millisecond, faster as it is held, and a diagonal both ways",
+          all);
+    /* Back over the window's middle for the clicks. */
+    compositor.pointer_x = compositor.real_x = 110, compositor.pointer_y = compositor.real_y = 70;
+    compositor_motion();
+    table->event_tail[1] = table->event_head[1];
+    aid_feed(t + 5000 * ms, 76, 1), aid_feed(t + 5050 * ms, 76, 0);
+    all = access_unread(1, WINDOW_EVENT_BUTTON, COMPOSITOR_BTN_LEFT, &down) == 2 && down == 1;
+    aid_feed(t + 5100 * ms, 74, 1), aid_feed(t + 5110 * ms, 74, 0), aid_feed(t + 5200 * ms, 76, 1), aid_feed(t + 5250 * ms, 76, 0);
+    all &= access_unread(1, WINDOW_EVENT_BUTTON, COMPOSITOR_BTN_RIGHT, &down) == 2 && down == 1;
+    aid_feed(t + 5300 * ms, 82, 1), aid_feed(t + 5310 * ms, 82, 0);
+    all &= access_unread(1, WINDOW_EVENT_BUTTON, COMPOSITOR_BTN_RIGHT, &down) == 3 && down == 2 && compositor.button_down;
+    aid_feed(t + 5400 * ms, 83, 1), aid_feed(t + 5410 * ms, 83, 0);
+    all &= access_unread(1, WINDOW_EVENT_BUTTON, COMPOSITOR_BTN_RIGHT, &down) == 4 && down == 2 && !compositor.button_down;
+    all &= access_unread(1, WINDOW_EVENT_KEY, -1, &down) == 0;
+    aid_feed(t + 5500 * ms, 98, 1), aid_feed(t + 5510 * ms, 98, 0);
+    check("access aids: the keypad's 5 clicks the chosen button, - chooses the right one, 0 holds it and . lets it go, and none of the keypad's keys is a key",
+          all && compositor_access_aid.button == COMPOSITOR_BTN_LEFT);
+
+    /* Dwell at 500 ms: the pointer moved and still clicks once at its time and never again till it moves; moving again starts the wait over. */
+    compositor_access_aid_set(ACCESS_DWELL, 0, 0, 500 * ms);
+    table->event_tail[1] = table->event_head[1];
+    all = !compositor_access_aid_due() && !compositor_access_gate;
+    compositor_access_seen(WINDOWS_MODALITY_POINTER);
+    compositor.pointer_x = compositor.real_x = 120, compositor_motion();
+    {
+        positive still = compositor_access_aid.still_at, due = compositor_access_aid_due();
+
+        all &= due == still + 500 * ms;
+        compositor_access_aid_tick(due - 1);
+        all &= access_unread(1, WINDOW_EVENT_BUTTON, COMPOSITOR_BTN_LEFT, &down) == 0;
+        compositor_access_aid_tick(due);
+        all &= access_unread(1, WINDOW_EVENT_BUTTON, COMPOSITOR_BTN_LEFT, &down) == 2 && down == 1 && !compositor_access_aid_due();
+        compositor_access_aid_tick(due + 2000 * ms);
+        compositor.pointer_x = compositor.real_x = 122, compositor_motion();
+        all &= !compositor_access_aid_due() && access_unread(1, WINDOW_EVENT_BUTTON, COMPOSITOR_BTN_LEFT, &down) == 2;
+        check("access aids: dwell clicks the left button once when the pointer is still for its time, and not again while it stays or wanders within a few pixels",
+              all);
+        /* Moving: each move past the slop starts the wait over, so the first move's time clicks nothing. */
+        compositor.pointer_x = compositor.real_x = 140, compositor_motion();
+        compositor_access_aid.still_at = still = clock_monotonic_nanoseconds() - 1000ull;
+        compositor_access_aid_tick(still + 400 * ms);
+        compositor.pointer_x = compositor.real_x = 100, compositor_motion();
+        compositor_access_aid_tick(still + 500 * ms);
+        all = access_unread(1, WINDOW_EVENT_BUTTON, COMPOSITOR_BTN_LEFT, &down) == 2 && compositor_access_aid_due() > still + 500 * ms;
+        compositor_access_aid_tick(compositor_access_aid_due());
+        all &= access_unread(1, WINDOW_EVENT_BUTTON, COMPOSITOR_BTN_LEFT, &down) == 4 && down == 2;
+        check("access aids: dwell clicks nothing while the pointer keeps moving, and once when it stops", all);
+    }
+
+    /* The hand: a key, then a mouse's move, then a pad. */
+    compositor_access_aid_set(0, 0, 0, 0);
+    aid_feed(t + 6000 * ms, 30, 1), aid_feed(t + 6050 * ms, 30, 0);
+    all = table->input_modality == WINDOWS_MODALITY_KEYS;
+    compositor.raw_x = 3, compositor_report(1, 1);
+    all &= table->input_modality == WINDOWS_MODALITY_POINTER && !compositor_access.hand;
+    compositor_access_take_hand();
+    all &= table->input_modality == WINDOWS_MODALITY_KEYS;
+    compositor_access_let_go();
+    check("access aids: the table says the hand that acted last: the keys or a pad (a focus ring's), or a pointer", all);
+
+    compositor.focus = COMPOSITOR_NONE;
+    compositor_input_physical[0] = 0;
+    system_close(wheel_pipe[1]);
+    system_close(wheel_pipe[0]);
+    compositor.inputs[0] = -1;
+    compositor.input_count = 0;
+}
+
+/*
         A game's device is no pointer (window_input_game): a pad (BTN_SOUTH), a joystick (BTN_TRIGGER), one with trigger-happy
         buttons alone and an accelerometer (a DualSense's motion sensors) are; a mouse, a touchpad, a pen tablet and a touch screen
         are not, nor a pad's buttons on a device that is also a mouse or marked a pointer.

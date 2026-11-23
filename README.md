@@ -113,6 +113,14 @@ moonwater canvas terminal wheel [LINES|default]  how many lines a notch of the m
 moonwater canvas trackpad speed [PERCENT|slow|normal|fast|default]  how far a wheel notch and a trackpad scroll move the content, 25 to 400 percent: a notch is two and a half rows, a stream notch of a trackpad 8 px at 100 and more as its notches come faster; slow, normal and fast are 60, 100 and 160 [100]
 
 
+# Accessibility
+moonwater access bounce [MS|off|default]  a key pressed again this soon after it was let go is a bounce, and it and its release are dropped, 10 to 2000 ms [off]
+moonwater access dwell [MS|off|default]  the pointer held still this long clicks the left button once, 200 to 5000 ms; it clicks again after it moves [off]
+moonwater access mousekeys [on|off]    the keypad moves the pointer, faster the longer it is held, whatever Num Lock says: 5 clicks, / * - choose the left, middle or right button, 0 holds it and . lets it go; numbers are the top row's [off]
+moonwater access slow [MS|off|default]  a key counts only once it is held this long, 50 to 5000 ms; one let go sooner types nothing [off]
+moonwater access sticky [on|off]       Shift, Ctrl, Alt, AltGr or Super pressed and let go alone holds for the next key; pressed twice, it holds until pressed again [off]
+
+
 # Sound
 moonwater audio                        the volume and the mute, the sound card and the cards there are, the programs that play, the microphone and the programs that record, and whether the sound server starts
 moonwater audio capture [on|off]       let programs record from the microphone; off ends every recording and refuses new ones [on]

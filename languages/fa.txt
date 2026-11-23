@@ -2,6 +2,7 @@
 # machine-made 2026-11-19 (the displays pass), not yet read by a person: settings_no_sizes settings_primary_no settings_primary_other settings_primary_yes settings_refused_size settings_size_ask settings_size_back settings_size_best settings_size_keep settings_size_kept settings_size_own settings_size_plain settings_size_refused =Resolution =Primary display =Graphics
 # machine-made 2026-11-19 (the apps pass), not yet read by a person: launcher_recent
 # machine-made 2026-11-22 (the files top bar), not yet read by a person: files_refresh files_view
+# machine-made 2026-11-23 (the Accessibility rows), not yet read by a person: =Accessibility =Sticky keys =Slow keys (ms, off or default) =Bounce keys (ms, off or default) =Mouse keys =Dwell click (ms, off or default) =Press a modifier, then the key, instead of both at once =A key types only after it is held this long =A key pressed again too soon after it is let go types once =The number pad moves the pointer and clicks =Hold the pointer still to click
 @direction rtl
 # machine-made 2026-11-22 (the devices pass), not yet read by a person: files_device_eject files_device_live files_device_write
 # machine-made 2026-11-22 (the ids 8a55b4ad0 and the taskbar left out), not yet read by a person: files_remote_denied files_remote_offline files_remote_opening files_this_machine taskbar_tab_uninstall
@@ -529,9 +530,12 @@ ui_field_full	fe02	بیش از این جا ندارد
 =24h	f841	24h
 =A circle under each finger on a touch screen	1bd7	دایره‌ای زیر هر انگشت روی صفحه لمسی
 =A finger or pen is followed a frame ahead, so it lags less	c7a3	انگشت یا قلم یک فریم جلوتر دنبال می‌شود تا کمتر عقب بماند
+=A key pressed again too soon after it is let go types once	8a76	کلیدی که خیلی زود پس از رها شدن دوباره فشرده شود یک بار تایپ می‌کند
+=A key types only after it is held this long	c4b2	کلید فقط پس از این مدت نگه داشتن تایپ می‌کند
 =A quick shake makes the pointer large for a moment	4d81	یک تکان سریع نشانگر را لحظه‌ای بزرگ می‌کند
 =Accent	ccd7	رنگ تأکید
 =Accent colour (rrggbb or reset)	53aa	رنگ تأکید (rrggbb یا reset)
+=Accessibility	d09f	دسترس‌پذیری
 =Add a key (label, then the public key)	e2e3	افزودن کلید (برچسب، سپس کلید عمومی)
 =Airplane mode	3b8a	حالت هواپیما
 =All commands	4a42	همه فرمان‌ها
@@ -553,6 +557,7 @@ ui_field_full	fe02	بیش از این جا ندارد
 =Bluetooth	14bd	Bluetooth
 =Boost	a6cc	Boost
 =Boot	38f5	بوت
+=Bounce keys (ms, off or default)	a3cb	کلیدهای جهشی (ms، off یا default)
 =Bowl tier	7b7f	سطح bowl
 =Brightness	324a	روشنایی
 =Build	7543	ساخت
@@ -576,6 +581,7 @@ ui_field_full	fe02	بیش از این جا ندارد
 =Display	d9b5	نمایشگر
 =Double-click time (ms, or default)	9af1	زمان دوبار کلیک (ms یا default)
 =Drag lists with the mouse	4ee2	کشیدن فهرست‌ها با ماوس
+=Dwell click (ms, off or default)	de27	کلیک با مکث (ms، off یا default)
 =Edge swipes	7aaf	کشیدن از لبه‌ها
 =Editor	bf98	ویرایشگر
 =End every session	12e1	پایان همه نشست‌ها
@@ -586,6 +592,7 @@ ui_field_full	fe02	بیش از این جا ندارد
 =Gallery	4cdd	گالری
 =Game frame cadence	fb65	آهنگ فریم بازی
 =Graphics	9fa8	گرافیک
+=Hold the pointer still to click	e349	برای کلیک، نشانگر را ثابت نگه دارید
 =Host key fingerprint	2398	اثر انگشت کلید میزبان
 =How fast the pointer follows the mouse	0a45	سرعت دنبال کردن ماوس توسط نشانگر
 =How long it stays large after a shake	82a0	پس از تکان چه مدت بزرگ بماند
@@ -630,6 +637,7 @@ ui_field_full	fe02	بیش از این جا ندارد
 =Mount kept disks	f0c8	سوار کردن دیسک‌های نگه‌داشته‌شده
 =Mouse	9b64	ماوس
 =Mouse acceleration	c400	شتاب ماوس
+=Mouse keys	3058	کلیدهای ماوس
 =Mouse sensitivity (percent, or default)	8a23	حساسیت ماوس (درصد یا default)
 =Mute	9f74	بی‌صدا
 =NAT	95ec	NAT
@@ -657,6 +665,7 @@ ui_field_full	fe02	بیش از این جا ندارد
 =Power	a5e6	انرژی
 =Power profile	8def	نمایه انرژی
 =Predict touch and pen	e2b7	پیش‌بینی لمس و قلم
+=Press a modifier, then the key, instead of both at once	fca5	به جای فشردن هر دو با هم، اول کلید تغییردهنده و سپس کلید را بفشارید
 =Primary display	924b	صفحه اصلی
 =Programs started with the desktop	5b74	برنامه‌هایی که با میز کار شروع می‌شوند
 =Proxy	1bfb	پراکسی
@@ -694,10 +703,12 @@ ui_field_full	fe02	بیش از این جا ندارد
 =Show touch area	9ca8	نمایش ناحیه لمس
 =Side taskbar text faces	d115	جهت متن نوار وظیفه کناری
 =Simultaneous threads (SMT)	e836	رشته‌های هم‌زمان (SMT)
+=Slow keys (ms, off or default)	8f8e	کلیدهای کند (ms، off یا default)
 =Smooth mouse wheel	0dab	چرخ ماوس نرم
 =Sound	9a34	صدا
 =Sound server	84bf	کارساز صدا
 =Start the desktop	be4c	اجرای رومیزی
+=Sticky keys	4992	کلیدهای چسبنده
 =System	84bc	سیستم
 =System notices	fa89	اعلان‌های سیستم
 =Taskbar	d759	نوار وظیفه
@@ -731,6 +742,7 @@ ui_field_full	fe02	بیش از این جا ندارد
 =The commit this system was built from	160b	کامیتی که این سیستم از آن ساخته شده است
 =The internet prefers	3dbe	اینترنت ترجیح می‌دهد
 =The layout the keys type in	c104	چیدمانی که کلیدها با آن تایپ می‌کنند
+=The number pad moves the pointer and clicks	0736	صفحه اعداد نشانگر را جابه‌جا می‌کند و کلیک می‌کند
 =The page glides with each notch instead of jumping	0357	صفحه با هر ضامن چرخ نرم می‌لغزد نه پرشی
 =The pointer goes further when the mouse moves fast	d21b	وقتی ماوس تند حرکت کند نشانگر دورتر می‌رود
 =The pointer shrinks while a button is held down	574c	نشانگر تا وقتی دکمه‌ای نگه داشته شده کوچک می‌شود

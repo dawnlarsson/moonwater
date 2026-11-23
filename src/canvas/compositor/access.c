@@ -140,7 +140,7 @@ static b32 compositor_access_present(void)
 static void compositor_access_take_hand(void)
 {
         if (!compositor_access.hand)
-                compositor_access.hand = 1, compositor.osk_typed = 0, compositor_osk_sync();
+                compositor_access.hand = 1, compositor.osk_typed = 0, compositor_osk_sync(), compositor_access_seen(WINDOWS_MODALITY_KEYS);
 }
 
 // An event device's minor kept as a game's (game) or dropped (a device that is not one took the minor), for compositor_access_holds_pad.
@@ -1129,4 +1129,455 @@ static void compositor_access_tick(positive now)
         if (!compositor_access_busy())
                 compositor_access.ticked = 0;
         compositor_post_physical = was;
+}
+
+/*
+        The aids of the keys and the pointer: access.c is for every hand, not a controller's alone. Each is off until the person turns
+        it on (the Accessibility group of the settings, moonwater access), and each is the one a desktop is known by:
+
+        - sticky keys: Shift, Ctrl, Alt, AltGr or Super pressed and let go alone is latched for the next key; pressed and let go again
+          it is locked, and a third time it is let go. A latched or locked modifier is pressed before the next key that is no modifier
+          and let go after it, and a latch is spent by that key. What is latched and locked is the table's (access_latched and
+          access_locked), for the taskbar or the keyboard on the screen to show. A tap of Super latches it and opens no launcher.
+        - slow keys: a key counts only once it is held this long. Its press is given then, and it is held and let go as it is; one let
+          go sooner was never pressed.
+        - bounce keys: a press of a key this soon after its release is a bounce, and it and its release are dropped.
+        - mouse keys: the keypad is the pointer whatever Num Lock says (numbers are the top row's while it is on). 8 2 4 6 and 7 9 1 3
+          move it, a pixel at the press and on from a moment later, faster the longer they are held; 5 clicks the chosen button (held
+          while 5 is), / * - choose the left, the middle or the right one, 0 holds it down and . lets it go.
+        - dwell: the pointer held still, within a few pixels, this long clicks the left button once, and again only once it moved.
+
+        While a feature of the keys is on, the reader's thread sends no key to a client itself (compositor_access_gate, the one relaxed
+        load a key's report pays), and the loop's key goes through compositor_access_key. Their waits are the loop's deadlines
+        (compositor_access_aid_due): nothing sleeps and there is no thread of theirs. With every one off, a key costs the loop one
+        branch and the reader one load, and the pointer's paths cost the reader nothing and the loop's motion one branch.
+
+        Which hand acted last is the table's too (input_modality, written when it changes): the keys or a pad, a pointer, or a touch,
+        so a window shows its focus ring for the keys alone.
+*/
+#define ACCESS_STICKY 1u
+#define ACCESS_SLOW 2u
+#define ACCESS_BOUNCE 4u
+#define ACCESS_MOUSE 8u
+#define ACCESS_DWELL 16u
+#define ACCESS_KEYED (ACCESS_STICKY | ACCESS_SLOW | ACCESS_BOUNCE | ACCESS_MOUSE) // the ones that take every key through the loop
+#define COMPOSITOR_ACCESS_MOUSE_DELAY_NS 150000000ull // a keypad arrow moves a pixel at its press, and goes on from this long after it
+#define COMPOSITOR_ACCESS_MOUSE_RAMP_MS 1500ll        // and is at its full speed this long after that
+#define COMPOSITOR_ACCESS_MOUSE_LEAST 25ll            // its speed as it starts, in thousandths of the screen's height a second
+#define COMPOSITOR_ACCESS_MOUSE_MOST 1000ll           // and its full speed: a height a second
+#define COMPOSITOR_ACCESS_DWELL_SLOP 4                // how far (pixels at 100%) a pointer may wander and still be still
+
+static struct
+{
+        unsigned int on;                // the aids on (ACCESS_*)
+        positive slow_ns, bounce_ns, dwell_ns;
+        unsigned int modality;          // the table's input_modality, as last written
+        // Sticky keys, in WINDOW_KEY_* bits: latched, locked, held by hand, pressed and let go with no key between (alone), and
+        // pressed here for the keys held now (pressed, from slot pressed_at); riding is how many keys are held with them, riders which.
+        unsigned int latched, locked, physical, alone, pressed, pressed_at, riding;
+        unsigned char riders[32];
+        // Slow and bounce keys, a bit or an entry a code: a press not yet given, whether its device is the machine's own, when it went
+        // down and from which slot; a press dropped as a bounce (its let go is dropped with it), and when each key was last let go.
+        unsigned char waiting[32], physical_of[32], bounced[32];
+        unsigned int waits;
+        positive down_at[256], up_at[256];
+        unsigned short from[256];
+        // Mouse keys: the arrows held (a bit each), when the first went down and when they last moved the pointer, what of a pixel is
+        // owed (65536ths), the button chosen, the one 0 holds and the one 5 holds (0 for none), and whether the keys are the machine's.
+        unsigned int arrows;
+        positive arrows_at, moved_at;
+        long long left_x, left_y;
+        unsigned int button, holding, clicking;
+        b32 arrows_physical;
+        // Dwell: where the pointer was still from and since when, whether its click is owed, and whether the hand was the machine's.
+        int still_x, still_y;
+        positive still_at;
+        b32 armed, still_physical;
+} compositor_access_aid = {.button = COMPOSITOR_BTN_LEFT};
+
+// The kind of hand that acted last (WINDOWS_MODALITY_*), in the table when it changes.
+static void compositor_access_seen(unsigned int modality)
+{
+        if (likely(compositor_access_aid.modality == modality) || !compositor.table)
+                return;
+        compositor_access_aid.modality = modality;
+        __atomic_store_n(&compositor.table->input_modality, modality, __ATOMIC_RELEASE);
+}
+
+// What sticky keys holds, in the table.
+static void compositor_access_sticky_publish(void)
+{
+        if (!compositor.table)
+                return;
+        __atomic_store_n(&compositor.table->access_latched, compositor_access_aid.latched, __ATOMIC_RELEASE);
+        __atomic_store_n(&compositor.table->access_locked, compositor_access_aid.locked, __ATOMIC_RELEASE);
+}
+
+// A modifier's kind (WINDOW_KEY_SHIFT, _CONTROL, _ALT, _ALTGR or _SUPER), 0 for a key that is none.
+static unsigned int compositor_access_kind(unsigned int code) { return compositor_held_flags(compositor_held_bit(code)); }
+
+// The kinds pressed (down) or let go as the left key of each, the right Alt for AltGr, said from slot at.
+static void compositor_access_kinds(unsigned int at, unsigned int kinds, int down, positive now)
+{
+        static const unsigned short kind[5] = {WINDOW_KEY_SHIFT, WINDOW_KEY_CONTROL, WINDOW_KEY_ALT, WINDOW_KEY_ALTGR, WINDOW_KEY_SUPER};
+        static const unsigned char key[5] = {42, 29, 56, 100, 125};
+
+        for (unsigned int k = 0; k < 5; k++)
+                if (kinds & kind[k])
+                        compositor_key(at, key[k], down, now);
+}
+
+// A key past slow and bounce keys while sticky keys is on: a modifier's press and let go counted, and a key that is none pressed with
+// what is latched or locked pressed before it and let go after it.
+static void compositor_access_sticky(unsigned int at, unsigned int code, int value, positive now)
+{
+        unsigned int kind = compositor_access_kind(code), byte = code >> 3 & 31;
+        unsigned char bit = (unsigned char)(1u << (code & 7));
+
+        if (kind)
+        {
+                if (value == 1)
+                {
+                        // One pressed here for a key, pressed by hand now: its press here is let go first, so the hand's is the one held.
+                        if (compositor_access_aid.pressed & kind)
+                                compositor_access_kinds(compositor_access_aid.pressed_at, kind, 0, now), compositor_access_aid.pressed &= ~kind;
+                        compositor_access_aid.physical |= kind, compositor_access_aid.alone = kind;
+                }
+                else if (!value)
+                        compositor_access_aid.physical &= ~kind;
+                compositor_key(at, code, value, now);
+                if (value == 1 && kind == WINDOW_KEY_SUPER)
+                        compositor.logo_alone = 0; // a tap of Super is a latch, not the launcher
+                if (!value && (compositor_access_aid.alone & kind))
+                {
+                        compositor_access_aid.alone &= ~kind;
+                        if (compositor_access_aid.locked & kind)
+                                compositor_access_aid.locked &= ~kind;
+                        else if (compositor_access_aid.latched & kind)
+                                compositor_access_aid.latched &= ~kind, compositor_access_aid.locked |= kind;
+                        else
+                                compositor_access_aid.latched |= kind;
+                        compositor_access_sticky_publish();
+                }
+                return;
+        }
+        if (value == 1)
+        {
+                unsigned int want = (compositor_access_aid.latched | compositor_access_aid.locked) & ~compositor_access_aid.physical;
+                unsigned int spent = compositor_access_aid.latched;
+
+                compositor_access_aid.alone = 0;
+                // What was pressed for a key still held and is not wanted now (a latch that key spent) is let go first: this key is not its.
+                if (compositor_access_aid.pressed && compositor_access_aid.pressed_at != at)
+                        compositor_access_kinds(compositor_access_aid.pressed_at, compositor_access_aid.pressed, 0, now), compositor_access_aid.pressed = 0;
+                if (compositor_access_aid.pressed & ~want)
+                        compositor_access_kinds(at, compositor_access_aid.pressed & ~want, 0, now);
+                if (want & ~compositor_access_aid.pressed)
+                        compositor_access_kinds(at, want & ~compositor_access_aid.pressed, 1, now);
+                compositor_access_aid.pressed = want, compositor_access_aid.pressed_at = at, compositor_access_aid.latched = 0;
+                if (spent)
+                        compositor_access_sticky_publish();
+                if (!(compositor_access_aid.riders[byte] & bit))
+                        compositor_access_aid.riders[byte] |= bit, compositor_access_aid.riding++;
+                compositor_key(at, code, 1, now);
+                return;
+        }
+        compositor_key(at, code, value, now);
+        if (!value && (compositor_access_aid.riders[byte] & bit))
+        {
+                compositor_access_aid.riders[byte] &= (unsigned char)~bit;
+                if (!--compositor_access_aid.riding && compositor_access_aid.pressed)
+                        compositor_access_kinds(compositor_access_aid.pressed_at, compositor_access_aid.pressed, 0, now), compositor_access_aid.pressed = 0;
+        }
+}
+
+// The keypad's arrow at a code (8 2 4 6 7 9 1 3, a bit each), -1 for a key that is none; and the way each points, across and down.
+static int compositor_access_arrow(unsigned int code)
+{
+        switch (code)
+        {
+        case 72: return 0;
+        case 80: return 1;
+        case 75: return 2;
+        case 77: return 3;
+        case 71: return 4;
+        case 73: return 5;
+        case 79: return 6;
+        case 81: return 7;
+        }
+        return -1;
+}
+static const signed char compositor_access_ways[8][2] = {{0, -1}, {0, 1}, {-1, 0}, {1, 0}, {-1, -1}, {1, -1}, {-1, 1}, {1, 1}};
+
+// The pointer moved by whole pixels for mouse keys, as the keys' device is (the machine's own or not), the plane at once.
+static void compositor_access_mouse_move(int dx, int dy)
+{
+        int was = compositor_post_physical;
+
+        compositor_post_physical = compositor_access_aid.arrows_physical;
+        compositor_access_move(dx, dy);
+        compositor_post_physical = was;
+}
+
+/*
+        The pointer moved on by the arrows held, from their last move to now (a key's report or a millisecond's tick): nothing for the
+        delay after the first went down, then a speed that grows with the square of the time since to its full one, by the height of
+        the screen as a stick's is. Two that point against each other are none; a diagonal goes as fast as a straight way.
+*/
+static void compositor_access_mouse_run(positive now)
+{
+        positive since, after;
+        long long ms, speed, step;
+        int x = 0, y = 0, dx, dy;
+
+        if (!compositor_access_aid.arrows || now <= compositor_access_aid.moved_at)
+                return;
+        since = now - compositor_access_aid.moved_at, compositor_access_aid.moved_at = now;
+        if (now - compositor_access_aid.arrows_at <= COMPOSITOR_ACCESS_MOUSE_DELAY_NS)
+                return;
+        after = now - compositor_access_aid.arrows_at - COMPOSITOR_ACCESS_MOUSE_DELAY_NS;
+        since = since > after ? after : since;
+        since = since > COMPOSITOR_ACCESS_TICK_MOST ? COMPOSITOR_ACCESS_TICK_MOST : since;
+        for (unsigned int k = 0; k < 8; k++)
+                if (compositor_access_aid.arrows >> k & 1)
+                        x += compositor_access_ways[k][0], y += compositor_access_ways[k][1];
+        dx = x < 0 ? -1 : x > 0, dy = y < 0 ? -1 : y > 0;
+        if (!dx && !dy)
+                return;
+        ms = (long long)(after / 1000000ull);
+        ms = ms > COMPOSITOR_ACCESS_MOUSE_RAMP_MS ? COMPOSITOR_ACCESS_MOUSE_RAMP_MS : ms;
+        speed = COMPOSITOR_ACCESS_MOUSE_LEAST +
+                (COMPOSITOR_ACCESS_MOUSE_MOST - COMPOSITOR_ACCESS_MOUSE_LEAST) * ms * ms / (COMPOSITOR_ACCESS_MOUSE_RAMP_MS * COMPOSITOR_ACCESS_MOUSE_RAMP_MS);
+        // The move in 65536ths of a pixel: the speed (thousandths of the height a second) over the time.
+        step = compositor_access_height() * speed * 65536 / 1000 * (long long)since / 1000000000ll;
+        if (dx && dy)
+                step = step * 46341 / 65536;
+        compositor_access_aid.left_x += step * dx, compositor_access_aid.left_y += step * dy;
+        x = (int)(compositor_access_aid.left_x / 65536), y = (int)(compositor_access_aid.left_y / 65536);
+        compositor_access_aid.left_x -= (long long)x * 65536, compositor_access_aid.left_y -= (long long)y * 65536;
+        if (x || y)
+                compositor_access_mouse_move(x, y);
+}
+
+// A key of the keypad while mouse keys is on: 1 when it is the pointer's (and taken), 0 for a key that is none of them.
+static int compositor_access_keypad(unsigned int code, int value, positive now)
+{
+        int arrow = compositor_access_arrow(code);
+        unsigned int button = code == 98 ? COMPOSITOR_BTN_LEFT : code == 55 ? COMPOSITOR_BTN_MIDDLE : code == 74 ? COMPOSITOR_BTN_RIGHT : 0;
+
+        if (arrow < 0 && !button && code != 76 && code != 82 && code != 83)
+                return 0;
+        if (value == 2)
+                return 1;
+        compositor_access_seen(WINDOWS_MODALITY_POINTER);
+        if (arrow >= 0)
+        {
+                // The time up to this report is moved by the arrows as they were; a press moves its own pixel at once.
+                compositor_access_mouse_run(now);
+                if (!value)
+                        return compositor_access_aid.arrows &= ~(1u << arrow), 1;
+                if (!compositor_access_aid.arrows)
+                        compositor_access_aid.arrows_at = compositor_access_aid.moved_at = now, compositor_access_aid.left_x = compositor_access_aid.left_y = 0;
+                compositor_access_aid.arrows |= 1u << arrow, compositor_access_aid.arrows_physical = compositor_post_physical != 0;
+                compositor_access_mouse_move(compositor_access_ways[arrow][0], compositor_access_ways[arrow][1]);
+                return 1;
+        }
+        if (button)
+                return value == 1 ? (void)(compositor_access_aid.button = button) : (void)0, 1;
+        if (code == 76 && value == 1 && !compositor_access_aid.clicking && compositor_access_aid.holding != compositor_access_aid.button)
+                compositor_access_aid.clicking = compositor_access_aid.button, compositor_press(compositor_access_aid.clicking, 1);
+        else if (code == 76 && !value && compositor_access_aid.clicking)
+                compositor_press(compositor_access_aid.clicking, 0), compositor_access_aid.clicking = 0;
+        else if (code == 82 && value == 1 && !compositor_access_aid.holding)
+                compositor_access_aid.holding = compositor_access_aid.button, compositor_press(compositor_access_aid.holding, 1);
+        else if (code == 83 && value == 1 && compositor_access_aid.holding)
+                compositor_press(compositor_access_aid.holding, 0), compositor_access_aid.holding = 0;
+        return 1;
+}
+
+// A key past slow and bounce keys: the keypad's while mouse keys is on, then sticky keys', then the loop's own.
+static void compositor_access_given(unsigned int at, unsigned int code, int value, positive now)
+{
+        if ((compositor_access_aid.on & ACCESS_MOUSE) && compositor_access_keypad(code, value, now))
+                return;
+        if (compositor_access_aid.on & ACCESS_STICKY)
+                compositor_access_sticky(at, code, value, now);
+        else
+                compositor_key(at, code, value, now);
+}
+
+// A key from a device while a feature of the keys is on (input.c's compositor_input_take): bounce keys first, then slow keys.
+static void compositor_access_key(unsigned int at, unsigned int code, int value, positive now)
+{
+        unsigned int byte = code >> 3 & 31;
+        unsigned char bit = (unsigned char)(1u << (code & 7));
+
+        now = now ? now : clock_monotonic_nanoseconds();
+        if (compositor_access_aid.on & ACCESS_BOUNCE)
+        {
+                if (compositor_access_aid.bounced[byte] & bit)
+                {
+                        if (!value)
+                                compositor_access_aid.bounced[byte] &= (unsigned char)~bit;
+                        return;
+                }
+                if (value == 1 && compositor_access_aid.up_at[code] && now - compositor_access_aid.up_at[code] < compositor_access_aid.bounce_ns)
+                {
+                        compositor_access_aid.bounced[byte] |= bit;
+                        return;
+                }
+                if (!value)
+                        compositor_access_aid.up_at[code] = now;
+        }
+        if (compositor_access_aid.on & ACCESS_SLOW)
+        {
+                if (value == 1)
+                {
+                        if (!(compositor_access_aid.waiting[byte] & bit))
+                        {
+                                compositor_access_aid.waiting[byte] |= bit, compositor_access_aid.waits++;
+                                compositor_access_aid.down_at[code] = now, compositor_access_aid.from[code] = (unsigned short)at;
+                                compositor_access_aid.physical_of[byte] = compositor_post_physical ? (unsigned char)(compositor_access_aid.physical_of[byte] | bit)
+                                                                                                   : (unsigned char)(compositor_access_aid.physical_of[byte] & ~bit);
+                        }
+                        return;
+                }
+                // A repeat or a let go of a key not yet given is none.
+                if (compositor_access_aid.waiting[byte] & bit)
+                {
+                        if (!value)
+                                compositor_access_aid.waiting[byte] &= (unsigned char)~bit, compositor_access_aid.waits--;
+                        return;
+                }
+        }
+        compositor_access_given(at, code, value, now);
+}
+
+// The pointer moved, while dwell is on (input.c's compositor_motion): a move past the slop from where it was still starts the wait again.
+static void compositor_access_dwell_moved(void)
+{
+        long long slop = COMPOSITOR_ACCESS_DWELL_SLOP * (compositor.scale > 0 ? compositor.scale : 100) / 100;
+        long long dx = compositor.pointer_x - compositor_access_aid.still_x, dy = compositor.pointer_y - compositor_access_aid.still_y;
+
+        if (dx * dx + dy * dy <= slop * slop)
+                return;
+        compositor_access_aid.still_x = compositor.pointer_x, compositor_access_aid.still_y = compositor.pointer_y;
+        compositor_access_aid.still_at = clock_monotonic_nanoseconds();
+        compositor_access_aid.still_physical = compositor_post_physical != 0;
+        // A finger presses for itself: a pointer a touch moved is never clicked again by its stillness.
+        compositor_access_aid.armed = compositor_access_aid.modality != WINDOWS_MODALITY_TOUCH;
+}
+
+// The pointer still for the dwell's time: the left button pressed and let go where it is, unless a button is held or a hand drags.
+static void compositor_access_dwell_click(void)
+{
+        int was = compositor_post_physical;
+
+        compositor_access_aid.armed = 0;
+        if (compositor.button_down || compositor.drag >= 0 || compositor.resize >= 0 || compositor.touching)
+                return;
+        compositor_post_physical = compositor_access_aid.still_physical;
+        compositor_press(COMPOSITOR_BTN_LEFT, 1), compositor_press(COMPOSITOR_BTN_LEFT, 0);
+        compositor_post_physical = was;
+        compositor_access_aid.still_x = compositor.pointer_x, compositor_access_aid.still_y = compositor.pointer_y;
+}
+
+// When the loop is next owed a tick of the aids: a slow key's time, a millisecond on while an arrow is held, the dwell's click; 0 for none.
+static positive compositor_access_aid_due(void)
+{
+        positive due = 0, at;
+
+        if (likely(!compositor_access_aid.on))
+                return 0;
+        for (unsigned int code = 0; compositor_access_aid.waits && code < 256; code++)
+                if (compositor_access_aid.waiting[code >> 3] >> (code & 7) & 1)
+                        at = compositor_access_aid.down_at[code] + compositor_access_aid.slow_ns, due = !due || at < due ? at : due;
+        if (compositor_access_aid.arrows)
+        {
+                positive from = compositor_access_aid.arrows_at + COMPOSITOR_ACCESS_MOUSE_DELAY_NS;
+
+                at = (compositor_access_aid.moved_at > from ? compositor_access_aid.moved_at : from) + COMPOSITOR_ACCESS_LANE_NS;
+                due = !due || at < due ? at : due;
+        }
+        if (compositor_access_aid.armed)
+                at = compositor_access_aid.still_at + compositor_access_aid.dwell_ns, due = !due || at < due ? at : due;
+        return due;
+}
+
+// A tick of the aids: each slow key held its time given, the arrows held moved on, and the dwell's click made.
+static void compositor_access_aid_tick(positive now)
+{
+        int was = compositor_post_physical;
+
+        for (unsigned int code = 0; compositor_access_aid.waits && code < 256; code++)
+        {
+                unsigned char bit = (unsigned char)(1u << (code & 7));
+
+                if (!(compositor_access_aid.waiting[code >> 3] & bit) || now < compositor_access_aid.down_at[code] + compositor_access_aid.slow_ns)
+                        continue;
+                compositor_access_aid.waiting[code >> 3] &= (unsigned char)~bit, compositor_access_aid.waits--;
+                compositor_post_physical = (compositor_access_aid.physical_of[code >> 3] & bit) != 0;
+                compositor_access_given(compositor_access_aid.from[code], code, 1, now);
+        }
+        compositor_post_physical = was;
+        compositor_access_mouse_run(now);
+        if (compositor_access_aid.armed && now >= compositor_access_aid.still_at + compositor_access_aid.dwell_ns)
+                compositor_access_dwell_click();
+}
+
+/*
+        The aids as the settings have them: what was held for one turned off is let go (a modifier sticky keys pressed, the button mouse
+        keys holds), what one waited on is dropped, and dwell starts from where the pointer is, owing no click till it moves. The gate
+        the reader reads is published last.
+*/
+static void compositor_access_aid_set(unsigned int on, positive slow_ns, positive bounce_ns, positive dwell_ns)
+{
+        unsigned int was = compositor_access_aid.on, off = was & ~on;
+        positive now = clock_monotonic_nanoseconds();
+
+        compositor_access_aid.slow_ns = slow_ns, compositor_access_aid.bounce_ns = bounce_ns, compositor_access_aid.dwell_ns = dwell_ns;
+        if (off & ACCESS_STICKY)
+        {
+                if (compositor_access_aid.pressed)
+                        compositor_access_kinds(compositor_access_aid.pressed_at, compositor_access_aid.pressed, 0, now);
+                compositor_access_aid.latched = compositor_access_aid.locked = compositor_access_aid.physical = compositor_access_aid.alone = 0;
+                compositor_access_aid.pressed = compositor_access_aid.riding = 0;
+                memory_zero(compositor_access_aid.riders, sizeof compositor_access_aid.riders);
+                compositor_access_sticky_publish();
+        }
+        if (!(on & ACCESS_SLOW))
+                memory_zero(compositor_access_aid.waiting, sizeof compositor_access_aid.waiting), compositor_access_aid.waits = 0;
+        if (!(on & ACCESS_BOUNCE))
+                memory_zero(compositor_access_aid.bounced, sizeof compositor_access_aid.bounced);
+        if (off & ACCESS_MOUSE)
+        {
+                if (compositor_access_aid.clicking)
+                        compositor_press(compositor_access_aid.clicking, 0);
+                if (compositor_access_aid.holding)
+                        compositor_press(compositor_access_aid.holding, 0);
+                compositor_access_aid.clicking = compositor_access_aid.holding = compositor_access_aid.arrows = 0;
+                compositor_access_aid.button = COMPOSITOR_BTN_LEFT;
+        }
+        if ((on & ACCESS_DWELL) && !(was & ACCESS_DWELL))
+                compositor_access_aid.still_x = compositor.pointer_x, compositor_access_aid.still_y = compositor.pointer_y;
+        compositor_access_aid.armed &= (on & ACCESS_DWELL) != 0 && (was & ACCESS_DWELL) != 0;
+        compositor_access_aid.on = on;
+        compositor_access_dwells = (on & ACCESS_DWELL) != 0;
+        __atomic_store_n(&compositor_access_gate, (on & ACCESS_KEYED) != 0 ? 1u : 0u, __ATOMIC_RELEASE);
+}
+
+// The Accessibility rows read (session.c's COMPOSITOR_SET_ACCESS): a switch's value is 0 for on, a time's is its ms or 0 for off.
+static void compositor_access_settings_read(void)
+{
+        long sticky = 1, slow = 0, bounce = 0, mouse = 1, dwell = 0;
+
+        compositor_setting_num(SETTING_ACCESS_STICKY_PATH, &sticky);
+        compositor_setting_num(SETTING_ACCESS_SLOW_PATH, &slow);
+        compositor_setting_num(SETTING_ACCESS_BOUNCE_PATH, &bounce);
+        compositor_setting_num(SETTING_ACCESS_MOUSEKEYS_PATH, &mouse);
+        compositor_setting_num(SETTING_ACCESS_DWELL_PATH, &dwell);
+        compositor_access_aid_set((sticky == 0 ? ACCESS_STICKY : 0u) | (slow > 0 ? ACCESS_SLOW : 0u) | (bounce > 0 ? ACCESS_BOUNCE : 0u) |
+                                      (mouse == 0 ? ACCESS_MOUSE : 0u) | (dwell > 0 ? ACCESS_DWELL : 0u),
+                                  slow > 0 ? (positive)slow * 1000000ull : 0, bounce > 0 ? (positive)bounce * 1000000ull : 0,
+                                  dwell > 0 ? (positive)dwell * 1000000ull : 0);
 }

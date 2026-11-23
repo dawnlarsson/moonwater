@@ -2002,6 +2002,7 @@ static positive compositor_timers_arm(positive now, unsigned int fence_at, int h
         compositor_soon(&until, compositor_predict_due());
         compositor_soon(&until, compositor_touch_due());
         compositor_soon(&until, compositor_access_due());
+        compositor_soon(&until, compositor_access_aid_due());
         compositor_soon(&until, compositor_snap_due());
         compositor_soon(&until, compositor_scenes_due(now));
         if (compositor_spots_any(1)) compositor_soon(&until, compositor.presented + period > now ? compositor.presented + period : now);
@@ -2311,7 +2312,8 @@ static b32 compositor_main()
 #ifdef CONFIG_MOONWATER_WAYLAND
         compositor_wl_start(), compositor_xwm_start();
 #endif
-        compositor_settings_apply(COMPOSITOR_SET_THEME | COMPOSITOR_SET_SCROLL | COMPOSITOR_SET_VRR | COMPOSITOR_SET_HAND | COMPOSITOR_SET_OSK);
+        compositor_settings_apply(COMPOSITOR_SET_THEME | COMPOSITOR_SET_SCROLL | COMPOSITOR_SET_VRR | COMPOSITOR_SET_HAND | COMPOSITOR_SET_OSK |
+                                  COMPOSITOR_SET_ACCESS);
         for (unsigned int at = 0; at < COMPOSITOR_INPUTS; at++) compositor_input_publish(at);
         // The launcher's button's square, there before any press: a launcher kept up and put away from the start (launcher -k) anchors to it.
         compositor_button_rect(-1, -1, TASKBAR_LAUNCHER);
@@ -2451,6 +2453,7 @@ static b32 compositor_main()
                 compositor_owed_pass();
                 if (compositor_touch_due()) compositor_touch_tick(now);
                 { positive due = compositor_access_due(); if (due && now >= due) compositor_access_tick(now); }
+                { positive due = compositor_access_aid_due(); if (due && now >= due) compositor_access_aid_tick(now); }
                 if (compositor_snap_due()) compositor_snap_tick(now);
                 if (compositor_spots_any(1)) compositor_spots_tick(now);
                 if (compositor_notices_look() && compositor.band) compositor_tabs_changed();

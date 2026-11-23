@@ -2,6 +2,7 @@
 # machine-made 2026-11-19 (the displays pass), not yet read by a person: settings_no_sizes settings_primary_no settings_primary_other settings_primary_yes settings_refused_size settings_size_ask settings_size_back settings_size_best settings_size_keep settings_size_kept settings_size_own settings_size_plain settings_size_refused =Resolution =Primary display =Graphics
 # machine-made 2026-11-19 (the apps pass), not yet read by a person: launcher_recent
 # machine-made 2026-11-22 (the files top bar), not yet read by a person: files_refresh files_view
+# machine-made 2026-11-23 (the Accessibility rows), not yet read by a person: =Accessibility =Sticky keys =Slow keys (ms, off or default) =Bounce keys (ms, off or default) =Mouse keys =Dwell click (ms, off or default) =Press a modifier, then the key, instead of both at once =A key types only after it is held this long =A key pressed again too soon after it is let go types once =The number pad moves the pointer and clicks =Hold the pointer still to click
 @direction rtl
 # machine-made 2026-11-22 (the devices pass), not yet read by a person: files_device_eject files_device_live files_device_write
 # machine-made 2026-11-22 (the ids 8a55b4ad0 and the taskbar left out), not yet read by a person: files_remote_denied files_remote_offline files_remote_opening files_this_machine taskbar_tab_uninstall
@@ -529,9 +530,12 @@ ui_field_full	fe02	זה המקסימום שהוא מכיל
 =24h	f841	24h
 =A circle under each finger on a touch screen	1bd7	עיגול מתחת לכל אצבע במסך מגע
 =A finger or pen is followed a frame ahead, so it lags less	c7a3	אצבע או עט נעקבים פריים אחד קדימה, כך שיש פחות השהיה
+=A key pressed again too soon after it is let go types once	8a76	מקש שנלחץ שוב מהר מדי אחרי ששוחרר מקליד פעם אחת
+=A key types only after it is held this long	c4b2	מקש מקליד רק אחרי שהוחזק זמן כזה
 =A quick shake makes the pointer large for a moment	4d81	ניעור מהיר מגדיל את המצביע לרגע
 =Accent	ccd7	צבע הדגשה
 =Accent colour (rrggbb or reset)	53aa	צבע הדגשה (rrggbb או reset)
+=Accessibility	d09f	נגישות
 =Add a key (label, then the public key)	e2e3	הוספת מפתח (תווית, ואז המפתח הציבורי)
 =Airplane mode	3b8a	מצב טיסה
 =All commands	4a42	כל הפקודות
@@ -553,6 +557,7 @@ ui_field_full	fe02	זה המקסימום שהוא מכיל
 =Bluetooth	14bd	Bluetooth
 =Boost	a6cc	Boost
 =Boot	38f5	אתחול
+=Bounce keys (ms, off or default)	a3cb	מקשי ניתור (ms, off או default)
 =Bowl tier	7b7f	רמת bowl
 =Brightness	324a	בהירות
 =Build	7543	בנייה
@@ -576,6 +581,7 @@ ui_field_full	fe02	זה המקסימום שהוא מכיל
 =Display	d9b5	מסך
 =Double-click time (ms, or default)	9af1	זמן לחיצה כפולה (ms או default)
 =Drag lists with the mouse	4ee2	גרירת רשימות בעכבר
+=Dwell click (ms, off or default)	de27	לחיצה בהשהיה (ms, off או default)
 =Edge swipes	7aaf	החלקה מהקצוות
 =Editor	bf98	עורך
 =End every session	12e1	סיום כל ההפעלות
@@ -586,6 +592,7 @@ ui_field_full	fe02	זה המקסימום שהוא מכיל
 =Gallery	4cdd	גלריה
 =Game frame cadence	fb65	קצב פריימים במשחקים
 =Graphics	9fa8	גרפיקה
+=Hold the pointer still to click	e349	החזיקו את המצביע ללא תנועה כדי ללחוץ
 =Host key fingerprint	2398	טביעת אצבע של מפתח המארח
 =How fast the pointer follows the mouse	0a45	כמה מהר המצביע עוקב אחרי העכבר
 =How long it stays large after a shake	82a0	כמה זמן הוא נשאר גדול אחרי ניעור
@@ -630,6 +637,7 @@ ui_field_full	fe02	זה המקסימום שהוא מכיל
 =Mount kept disks	f0c8	הרכבת הדיסקים השמורים
 =Mouse	9b64	עכבר
 =Mouse acceleration	c400	האצת העכבר
+=Mouse keys	3058	מקשי עכבר
 =Mouse sensitivity (percent, or default)	8a23	רגישות העכבר (אחוזים או default)
 =Mute	9f74	השתקה
 =NAT	95ec	NAT
@@ -657,6 +665,7 @@ ui_field_full	fe02	זה המקסימום שהוא מכיל
 =Power	a5e6	צריכת חשמל
 =Power profile	8def	פרופיל צריכת חשמל
 =Predict touch and pen	e2b7	חיזוי מגע ועט
+=Press a modifier, then the key, instead of both at once	fca5	לחצו על מקש שינוי ואז על המקש, במקום על שניהם יחד
 =Primary display	924b	מסך ראשי
 =Programs started with the desktop	5b74	תוכניות שמופעלות עם שולחן העבודה
 =Proxy	1bfb	פרוקסי
@@ -694,10 +703,12 @@ ui_field_full	fe02	זה המקסימום שהוא מכיל
 =Show touch area	9ca8	הצג אזור מגע
 =Side taskbar text faces	d115	כיוון הטקסט בשורת המשימות הצדדית
 =Simultaneous threads (SMT)	e836	תהליכונים בו-זמניים (SMT)
+=Slow keys (ms, off or default)	8f8e	מקשים איטיים (ms, off או default)
 =Smooth mouse wheel	0dab	גלגלת עכבר חלקה
 =Sound	9a34	צליל
 =Sound server	84bf	שרת השמע
 =Start the desktop	be4c	הפעל את שולחן העבודה
+=Sticky keys	4992	מקשים דביקים
 =System	84bc	מערכת
 =System notices	fa89	הודעות המערכת
 =Taskbar	d759	שורת המשימות
@@ -731,6 +742,7 @@ ui_field_full	fe02	זה המקסימום שהוא מכיל
 =The commit this system was built from	160b	ה-commit שממנו נבנתה המערכת הזו
 =The internet prefers	3dbe	האינטרנט מעדיף
 =The layout the keys type in	c104	הפריסה שבה המקשים מקלידים
+=The number pad moves the pointer and clicks	0736	לוח המספרים מזיז את המצביע ולוחץ
 =The page glides with each notch instead of jumping	0357	הדף גולש בכל שנת גלגלת במקום לקפוץ
 =The pointer goes further when the mouse moves fast	d21b	המצביע מגיע רחוק יותר כשהעכבר זז מהר
 =The pointer shrinks while a button is held down	574c	המצביע מתכווץ כל עוד לחצן מוחזק

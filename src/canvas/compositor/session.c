@@ -1196,6 +1196,7 @@ static void compositor_inputs_open(void)
 }
 
 static void compositor_osk_setting_read(void);
+static void compositor_access_settings_read(void); // access.c: the aids of the keys and the pointer
 static void compositor_keys_read(void);
 
 // Declarative mapping from /root/<name> setting files to the reader group(s) they affect.
@@ -1213,8 +1214,9 @@ static void compositor_keys_read(void);
 #define COMPOSITOR_SET_CLICK    (1u << 11)
 #define COMPOSITOR_SET_HAND     (1u << 12)
 #define COMPOSITOR_SET_OSK      (1u << 13)
-#define COMPOSITOR_SET_DISPLAYS (1u << 14)
-#define COMPOSITOR_SET_ALL      ((1u << 14) - 1u)
+#define COMPOSITOR_SET_ACCESS   (1u << 14)
+#define COMPOSITOR_SET_DISPLAYS (1u << 15)
+#define COMPOSITOR_SET_ALL      ((1u << 15) - 1u)
 
 enum compositor_setting_bind
 {
@@ -1280,6 +1282,9 @@ static const struct compositor_setting_spec compositor_setting_specs[] = {
         CS_G(SETTING_TERMINAL_WHEEL_PATH, COMPOSITOR_SET_HAND), CS_G(SETTING_SHAKE_FEEL_PATH, COMPOSITOR_SET_HAND),
         CS_G(SETTING_BORDER_GRIP_PATH, COMPOSITOR_SET_HAND),
         CS_G(SETTING_ONSCREEN_PATH, COMPOSITOR_SET_OSK),
+        CS_G(SETTING_ACCESS_STICKY_PATH, COMPOSITOR_SET_ACCESS), CS_G(SETTING_ACCESS_SLOW_PATH, COMPOSITOR_SET_ACCESS),
+        CS_G(SETTING_ACCESS_BOUNCE_PATH, COMPOSITOR_SET_ACCESS), CS_G(SETTING_ACCESS_MOUSEKEYS_PATH, COMPOSITOR_SET_ACCESS),
+        CS_G(SETTING_ACCESS_DWELL_PATH, COMPOSITOR_SET_ACCESS),
         CS_G(SETTING_CANVAS_ARRANGE_PATH, COMPOSITOR_SET_DISPLAYS), CS_G(SETTING_CANVAS_DISPLAYS_PATH, COMPOSITOR_SET_DISPLAYS),
 };
 #undef CS_G
@@ -1379,6 +1384,8 @@ static void compositor_settings_apply(unsigned int mask)
         }
         if (mask & COMPOSITOR_SET_OSK)
                 compositor_osk_setting_read();
+        if (mask & COMPOSITOR_SET_ACCESS)
+                compositor_access_settings_read();
         if (mask & COMPOSITOR_SET_DISPLAYS)
                 compositor_modes_forget(), compositor_space_retake();
 }

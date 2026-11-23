@@ -2,6 +2,7 @@
 # machine-made 2026-11-19 (the displays pass), not yet read by a person: settings_no_sizes settings_primary_no settings_primary_other settings_primary_yes settings_refused_size settings_size_ask settings_size_back settings_size_best settings_size_keep settings_size_kept settings_size_own settings_size_plain settings_size_refused =Resolution =Primary display =Graphics
 # machine-made 2026-11-19 (the apps pass), not yet read by a person: launcher_recent
 # machine-made 2026-11-22 (the files top bar), not yet read by a person: files_refresh files_view
+# machine-made 2026-11-23 (the Accessibility rows), not yet read by a person: =Accessibility =Sticky keys =Slow keys (ms, off or default) =Bounce keys (ms, off or default) =Mouse keys =Dwell click (ms, off or default) =Press a modifier, then the key, instead of both at once =A key types only after it is held this long =A key pressed again too soon after it is let go types once =The number pad moves the pointer and clicks =Hold the pointer still to click
 @direction rtl
 # machine-made 2026-11-22 (the devices pass), not yet read by a person: files_device_eject files_device_live files_device_write
 # machine-made 2026-11-22 (the ids 8a55b4ad0 and the taskbar left out), not yet read by a person: files_remote_denied files_remote_offline files_remote_opening files_this_machine taskbar_tab_uninstall
@@ -529,9 +530,12 @@ ui_field_full	fe02	اس میں اس سے زیادہ نہیں سماتا
 =24h	f841	24h
 =A circle under each finger on a touch screen	1bd7	ٹچ اسکرین پر ہر انگلی کے نیچے ایک دائرہ
 =A finger or pen is followed a frame ahead, so it lags less	c7a3	انگلی یا قلم کو ایک فریم آگے رکھا جاتا ہے تاکہ تاخیر کم ہو
+=A key pressed again too soon after it is let go types once	8a76	چھوڑنے کے بہت جلد بعد دوبارہ دبائی گئی کلید ایک بار لکھتی ہے
+=A key types only after it is held this long	c4b2	کلید صرف اتنی دیر دبائے رکھنے کے بعد لکھتی ہے
 =A quick shake makes the pointer large for a moment	4d81	تیز ہلانے سے پوائنٹر ایک لمحے کے لیے بڑا ہو جاتا ہے
 =Accent	ccd7	نمایاں رنگ
 =Accent colour (rrggbb or reset)	53aa	نمایاں رنگ (rrggbb یا reset)
+=Accessibility	d09f	رسائی
 =Add a key (label, then the public key)	e2e3	کلید شامل کریں (لیبل، پھر عوامی کلید)
 =Airplane mode	3b8a	ہوائی جہاز موڈ
 =All commands	4a42	تمام کمانڈز
@@ -553,6 +557,7 @@ ui_field_full	fe02	اس میں اس سے زیادہ نہیں سماتا
 =Bluetooth	14bd	Bluetooth
 =Boost	a6cc	Boost
 =Boot	38f5	بوٹ
+=Bounce keys (ms, off or default)	a3cb	اچھلنے والی کلیدیں (ms، off یا default)
 =Bowl tier	7b7f	bowl کی سطح
 =Brightness	324a	چمک
 =Build	7543	بلڈ
@@ -576,6 +581,7 @@ ui_field_full	fe02	اس میں اس سے زیادہ نہیں سماتا
 =Display	d9b5	اسکرین
 =Double-click time (ms, or default)	9af1	ڈبل کلک کا وقت (ms یا default)
 =Drag lists with the mouse	4ee2	ماؤس سے فہرستیں گھسیٹیں
+=Dwell click (ms, off or default)	de27	ٹھہر کر کلک (ms، off یا default)
 =Edge swipes	7aaf	کنارے سے سوائپ
 =Editor	bf98	ایڈیٹر
 =End every session	12e1	تمام سیشن ختم کریں
@@ -586,6 +592,7 @@ ui_field_full	fe02	اس میں اس سے زیادہ نہیں سماتا
 =Gallery	4cdd	گیلری
 =Game frame cadence	fb65	کھیلوں میں فریم کی رفتار
 =Graphics	9fa8	گرافکس
+=Hold the pointer still to click	e349	کلک کرنے کے لیے پوائنٹر کو ساکن رکھیں
 =Host key fingerprint	2398	ہوسٹ کلید کا فنگر پرنٹ
 =How fast the pointer follows the mouse	0a45	پوائنٹر ماؤس کے ساتھ کتنا تیز چلے
 =How long it stays large after a shake	82a0	ہلانے کے بعد کتنی دیر بڑا رہے
@@ -630,6 +637,7 @@ ui_field_full	fe02	اس میں اس سے زیادہ نہیں سماتا
 =Mount kept disks	f0c8	محفوظ ڈسکس ماؤنٹ کریں
 =Mouse	9b64	ماؤس
 =Mouse acceleration	c400	ماؤس ایکسیلریشن
+=Mouse keys	3058	ماؤس کلیدیں
 =Mouse sensitivity (percent, or default)	8a23	ماؤس کی حساسیت (فیصد یا default)
 =Mute	9f74	خاموش
 =NAT	95ec	NAT
@@ -657,6 +665,7 @@ ui_field_full	fe02	اس میں اس سے زیادہ نہیں سماتا
 =Power	a5e6	پاور
 =Power profile	8def	پاور پروفائل
 =Predict touch and pen	e2b7	ٹچ اور قلم کی پیشگوئی
+=Press a modifier, then the key, instead of both at once	fca5	دونوں ایک ساتھ دبانے کے بجائے پہلے ترمیمی کلید دبائیں، پھر کلید
 =Primary display	924b	بنیادی اسکرین
 =Programs started with the desktop	5b74	ڈیسک ٹاپ کے ساتھ شروع ہونے والے پروگرام
 =Proxy	1bfb	پراکسی
@@ -694,10 +703,12 @@ ui_field_full	fe02	اس میں اس سے زیادہ نہیں سماتا
 =Show touch area	9ca8	ٹچ کا علاقہ دکھائیں
 =Side taskbar text faces	d115	سائیڈ ٹاسک بار کے متن کا رخ
 =Simultaneous threads (SMT)	e836	بیک وقت تھریڈز (SMT)
+=Slow keys (ms, off or default)	8f8e	سست کلیدیں (ms، off یا default)
 =Smooth mouse wheel	0dab	ہموار ماؤس وہیل
 =Sound	9a34	آواز
 =Sound server	84bf	آواز کا سرور
 =Start the desktop	be4c	ڈیسک ٹاپ شروع کریں
+=Sticky keys	4992	چپکنے والی کلیدیں
 =System	84bc	سسٹم
 =System notices	fa89	سسٹم اطلاعات
 =Taskbar	d759	ٹاسک بار
@@ -731,6 +742,7 @@ ui_field_full	fe02	اس میں اس سے زیادہ نہیں سماتا
 =The commit this system was built from	160b	وہ commit جس سے یہ نظام بنایا گیا
 =The internet prefers	3dbe	انٹرنیٹ ترجیح دیتا ہے
 =The layout the keys type in	c104	وہ ترتیب جس میں کلیدیں ٹائپ کرتی ہیں
+=The number pad moves the pointer and clicks	0736	نمبر پیڈ پوائنٹر کو ہلاتا ہے اور کلک کرتا ہے
 =The page glides with each notch instead of jumping	0357	صفحہ ہر نوچ پر اچھلنے کے بجائے پھسلتا ہے
 =The pointer goes further when the mouse moves fast	d21b	ماؤس تیز چلے تو پوائنٹر زیادہ دور جاتا ہے
 =The pointer shrinks while a button is held down	574c	بٹن دبا رہے تو پوائنٹر سکڑ جاتا ہے

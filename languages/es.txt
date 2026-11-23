@@ -15,6 +15,7 @@
 # machine-made 2026-11-23 (the bands of a machine in Files' sidebar), not yet read by a person: files_band_drives files_band_removable
 # machine-made 2026-11-23 (the startup table's check column), not yet read by a person: settings_column_on
 # machine-made 2026-11-23 (a linked machine that did not answer, or does not offer a request), not yet read by a person: files_remote_silent files_remote_unsupported
+# machine-made 2026-11-23 (the Accessibility rows), not yet read by a person: =Accessibility =Sticky keys =Slow keys (ms, off or default) =Bounce keys (ms, off or default) =Mouse keys =Dwell click (ms, off or default) =Press a modifier, then the key, instead of both at once =A key types only after it is held this long =A key pressed again too soon after it is let go types once =The number pad moves the pointer and clicks =Hold the pointer still to click
 @language es
 @name Español
 @translated machine
@@ -528,9 +529,12 @@ ui_field_full	fe02	no cabe más
 =24h	f841	24h
 =A circle under each finger on a touch screen	1bd7	Un círculo bajo cada dedo en una pantalla táctil
 =A finger or pen is followed a frame ahead, so it lags less	c7a3	Un dedo o lápiz se sigue un fotograma por delante, así se retrasa menos
+=A key pressed again too soon after it is let go types once	8a76	Una tecla pulsada otra vez demasiado pronto tras soltarla escribe una vez
+=A key types only after it is held this long	c4b2	Una tecla escribe solo tras mantenerla pulsada este tiempo
 =A quick shake makes the pointer large for a moment	4d81	Una sacudida rápida agranda el puntero un momento
 =Accent	ccd7	Acento
 =Accent colour (rrggbb or reset)	53aa	Color de acento (rrggbb o reset)
+=Accessibility	d09f	Accesibilidad
 =Add a key (label, then the public key)	e2e3	Añadir una clave (etiqueta y la clave pública)
 =Airplane mode	3b8a	Modo avión
 =All commands	4a42	Todos los comandos
@@ -552,6 +556,7 @@ ui_field_full	fe02	no cabe más
 =Bluetooth	14bd	Bluetooth
 =Boost	a6cc	Boost
 =Boot	38f5	Arranque
+=Bounce keys (ms, off or default)	a3cb	Teclas de rebote (ms, off o default)
 =Bowl tier	7b7f	Nivel de los bowls
 =Brightness	324a	Brillo
 =Build	7543	Compilación
@@ -575,6 +580,7 @@ ui_field_full	fe02	no cabe más
 =Display	d9b5	Pantalla
 =Double-click time (ms, or default)	9af1	Tiempo de doble clic (ms o default)
 =Drag lists with the mouse	4ee2	Arrastrar listas con el ratón
+=Dwell click (ms, off or default)	de27	Clic al detenerse (ms, off o default)
 =Edge swipes	7aaf	Deslizar desde el borde
 =Editor	bf98	Editor
 =End every session	12e1	Terminar todas las sesiones
@@ -585,6 +591,7 @@ ui_field_full	fe02	no cabe más
 =Gallery	4cdd	Galería
 =Game frame cadence	fb65	Cadencia de fotogramas en juegos
 =Graphics	9fa8	Gráficos
+=Hold the pointer still to click	e349	Mantén el puntero quieto para hacer clic
 =Host key fingerprint	2398	Huella de la clave del servidor
 =How fast the pointer follows the mouse	0a45	Lo rápido que el puntero sigue al ratón
 =How long it stays large after a shake	82a0	Cuánto tiempo sigue grande tras una sacudida
@@ -629,6 +636,7 @@ ui_field_full	fe02	no cabe más
 =Mount kept disks	f0c8	Montar los discos guardados
 =Mouse	9b64	Ratón
 =Mouse acceleration	c400	Aceleración del ratón
+=Mouse keys	3058	Teclas del ratón
 =Mouse sensitivity (percent, or default)	8a23	Sensibilidad del ratón (porcentaje o default)
 =Mute	9f74	Silenciar
 =NAT	95ec	NAT
@@ -656,6 +664,7 @@ ui_field_full	fe02	no cabe más
 =Power	a5e6	Energía
 =Power profile	8def	Perfil de energía
 =Predict touch and pen	e2b7	Predecir el tacto y el lápiz
+=Press a modifier, then the key, instead of both at once	fca5	Pulsa un modificador y luego la tecla, en vez de ambas a la vez
 =Primary display	924b	Pantalla principal
 =Programs started with the desktop	5b74	Programas que se inician con el escritorio
 =Proxy	1bfb	Proxy
@@ -693,10 +702,12 @@ ui_field_full	fe02	no cabe más
 =Show touch area	9ca8	Mostrar el área táctil
 =Side taskbar text faces	d115	Orientación del texto de la barra lateral
 =Simultaneous threads (SMT)	e836	Hilos simultáneos (SMT)
+=Slow keys (ms, off or default)	8f8e	Teclas lentas (ms, off o default)
 =Smooth mouse wheel	0dab	Rueda del ratón suave
 =Sound	9a34	Sonido
 =Sound server	84bf	Servidor de sonido
 =Start the desktop	be4c	Iniciar el escritorio
+=Sticky keys	4992	Teclas persistentes
 =System	84bc	Sistema
 =System notices	fa89	Avisos del sistema
 =Taskbar	d759	Barra de tareas
@@ -730,6 +741,7 @@ ui_field_full	fe02	no cabe más
 =The commit this system was built from	160b	El commit del que se compiló este sistema
 =The internet prefers	3dbe	Internet prefiere
 =The layout the keys type in	c104	La distribución con la que escriben las teclas
+=The number pad moves the pointer and clicks	0736	El teclado numérico mueve el puntero y hace clic
 =The page glides with each notch instead of jumping	0357	La página se desliza con cada muesca en vez de saltar
 =The pointer goes further when the mouse moves fast	d21b	El puntero llega más lejos cuando el ratón se mueve rápido
 =The pointer shrinks while a button is held down	574c	El puntero se encoge mientras se mantiene pulsado un botón

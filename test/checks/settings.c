@@ -7396,7 +7396,7 @@ static fn check_settings_drive_rows(string_address regular, string_address bold)
 
 static fn check_settings_groups(void)
 {
-        static const char address_to names[] = {"System", "Canvas", "Display", "Input", "Scrolling", "Sound", "Taskbar", "Time",
+        static const char address_to names[] = {"System", "Canvas", "Display", "Input", "Scrolling", "Accessibility", "Sound", "Taskbar", "Time",
                                                 "Network", "Waterlink", "Wi-Fi", "Bluetooth", "Devices", "Power", "Boot", "SSH"};
         static const struct
         {
@@ -7407,7 +7407,7 @@ static fn check_settings_groups(void)
             {{"canvas", "motion"}, "Canvas"}, {{"canvas", "caret"}, "Canvas"}, {{"canvas", "text"}, "Canvas"}, {{"canvas", "windows"}, "Canvas"}, {{"canvas", "border"}, "Canvas"},
             {{"canvas", "clipboard"}, "Canvas"}, {{"canvas", "gpu"}, "Display"}, {{"canvas", "display"}, "Display"}, {{"canvas", "modes"}, "Display"}, {{"canvas", "vrr"}, "Display"}, {{"canvas", "cadence"}, "Display"},
             {{"brightness"}, "Display"}, {{"keyboard"}, "Input"}, {{"mouse"}, "Input"}, {{"canvas", "cursor"}, "Input"},
-            {{"canvas", "wheel"}, "Input"}, {{"canvas", "trackpad"}, "Scrolling"}, {{"canvas", "scroll"}, "Scrolling"}, {{"canvas", "predict"}, "Input"}, {{"canvas", "touch"}, "Input"}, {{"audio"}, "Sound"},
+            {{"canvas", "wheel"}, "Input"}, {{"canvas", "trackpad"}, "Scrolling"}, {{"canvas", "scroll"}, "Scrolling"}, {{"canvas", "predict"}, "Input"}, {{"canvas", "touch"}, "Input"}, {{"access"}, "Accessibility"}, {{"audio"}, "Sound"},
             {{"taskbar"}, "Taskbar"}, {{"timezone"}, "Time"}, {{"ntp"}, "Time"}, {{"time"}, "Time"}, {{"wired"}, "Network"},
             {{"airplane"}, "Network"}, {{"priority"}, "Network"}, {{"dns"}, "Network"}, {{"link"}, "Waterlink"}, {{"wifi"}, "Wi-Fi"},
             {{"bluetooth"}, "Bluetooth"}, {{"device"}, "Devices"}, {{"charge"}, "Power"}, {{"battery"}, "Power"}, {{"power"}, "Power"},
@@ -7425,6 +7425,8 @@ static fn check_settings_groups(void)
             {"Pointer squeezes on click", "Input"},
             {"Predict touch and pen", "Input"}, {"Show touch area", "Input"}, {"Left edge", "Input"}, {"Right edge", "Input"},
             {"Natural direction", "Scrolling"}, {"Scroll speed", "Scrolling"}, {"Momentum", "Scrolling"}, {"Rubber band", "Scrolling"},
+            {"Sticky keys", "Accessibility"}, {"Slow keys (ms, off or default)", "Accessibility"}, {"Bounce keys (ms, off or default)", "Accessibility"},
+            {"Mouse keys", "Accessibility"}, {"Dwell click (ms, off or default)", "Accessibility"},
             {"Time zone", "Time"},
             {"Volume (percent, or default)", "Sound"}, {"Mute", "Sound"}, {"Output device (name, or default)", "Sound"}, {"Sound server", "Sound"},
             {"Allow recording", "Sound"}, {"Input device (name, or default)", "Sound"}, {"Input volume (percent, or default)", "Sound"}, {"Input mute", "Sound"},
@@ -7443,7 +7445,7 @@ static fn check_settings_groups(void)
         for (int at = 0; at < count && at < settings_groups(); at++)
                 order &= string_equals((string_address)settings_group_name(at), (string_address)names[at]);
         order &= string_equals((string_address)settings_group_name(settings_groups() - 1), (string_address)SETTINGS_ALL_HEADER);
-        check("settings groups: System, Canvas, Display, Input, Scrolling, Sound, Taskbar, Time, Network, Waterlink, Wi-Fi, Bluetooth, Devices, Power, Boot, SSH, then All commands", order);
+        check("settings groups: System, Canvas, Display, Input, Scrolling, Accessibility, Sound, Taskbar, Time, Network, Waterlink, Wi-Fi, Bluetooth, Devices, Power, Boot, SSH, then All commands", order);
 
         // Each row in the group of its verb's family: the groups are what the rows do.
         for (positive at = 0; at < SETTINGS_ROWS; at++)

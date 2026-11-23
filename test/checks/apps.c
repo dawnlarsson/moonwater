@@ -10941,6 +10941,7 @@ b32 main()
         GROUP("check_compositor_grid_drag", check_compositor_grid_drag());
         GROUP("check_compositor_wheel", check_compositor_wheel());
         GROUP("check_compositor_access", check_compositor_access());
+        GROUP("check_compositor_access_aids", check_compositor_access_aids());
 #ifdef COMPOSITOR_LINE
         GROUP("check_compositor_touch", check_compositor_touch());
         GROUP("check_compositor_edges", check_compositor_edges());

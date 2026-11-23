@@ -15,6 +15,7 @@
 # machine-made 2026-11-23 (the bands of a machine in Files' sidebar), not yet read by a person: files_band_drives files_band_removable
 # machine-made 2026-11-23 (the startup table's check column), not yet read by a person: settings_column_on
 # machine-made 2026-11-23 (a linked machine that did not answer, or does not offer a request), not yet read by a person: files_remote_silent files_remote_unsupported
+# machine-made 2026-11-23 (the Accessibility rows), not yet read by a person: =Accessibility =Sticky keys =Slow keys (ms, off or default) =Bounce keys (ms, off or default) =Mouse keys =Dwell click (ms, off or default) =Press a modifier, then the key, instead of both at once =A key types only after it is held this long =A key pressed again too soon after it is let go types once =The number pad moves the pointer and clicks =Hold the pointer still to click
 @language nl
 @name Nederlands
 @translated machine
@@ -528,9 +529,12 @@ ui_field_full	fe02	meer past er niet in
 =24h	f841	24h
 =A circle under each finger on a touch screen	1bd7	Een cirkel onder elke vinger op een aanraakscherm
 =A finger or pen is followed a frame ahead, so it lags less	c7a3	Een vinger of pen wordt een beeld vooruit gevolgd, met minder vertraging
+=A key pressed again too soon after it is let go types once	8a76	Een toets die te snel na het loslaten opnieuw wordt ingedrukt, typt één keer
+=A key types only after it is held this long	c4b2	Een toets typt pas als hij zo lang is vastgehouden
 =A quick shake makes the pointer large for a moment	4d81	Even schudden maakt de aanwijzer kort groot
 =Accent	ccd7	Accent
 =Accent colour (rrggbb or reset)	53aa	Accentkleur (rrggbb of reset)
+=Accessibility	d09f	Toegankelijkheid
 =Add a key (label, then the public key)	e2e3	Sleutel toevoegen (label, dan de publieke sleutel)
 =Airplane mode	3b8a	Vliegtuigmodus
 =All commands	4a42	Alle opdrachten
@@ -552,6 +556,7 @@ ui_field_full	fe02	meer past er niet in
 =Bluetooth	14bd	Bluetooth
 =Boost	a6cc	Boost
 =Boot	38f5	Opstarten
+=Bounce keys (ms, off or default)	a3cb	Stuitertoetsen (ms, off of default)
 =Bowl tier	7b7f	Bowl-niveau
 =Brightness	324a	Helderheid
 =Build	7543	Build
@@ -575,6 +580,7 @@ ui_field_full	fe02	meer past er niet in
 =Display	d9b5	Scherm
 =Double-click time (ms, or default)	9af1	Dubbelkliktijd (ms of default)
 =Drag lists with the mouse	4ee2	Lijsten met de muis slepen
+=Dwell click (ms, off or default)	de27	Klikken door stilhouden (ms, off of default)
 =Edge swipes	7aaf	Vegen vanaf de rand
 =Editor	bf98	Editor
 =End every session	12e1	Alle sessies beëindigen
@@ -585,6 +591,7 @@ ui_field_full	fe02	meer past er niet in
 =Gallery	4cdd	Galerij
 =Game frame cadence	fb65	Beeldritme voor games
 =Graphics	9fa8	Graphics
+=Hold the pointer still to click	e349	Houd de aanwijzer stil om te klikken
 =Host key fingerprint	2398	Vingerafdruk van de hostsleutel
 =How fast the pointer follows the mouse	0a45	Hoe snel de aanwijzer de muis volgt
 =How long it stays large after a shake	82a0	Hoe lang hij groot blijft na het schudden
@@ -629,6 +636,7 @@ ui_field_full	fe02	meer past er niet in
 =Mount kept disks	f0c8	Bewaarde schijven aankoppelen
 =Mouse	9b64	Muis
 =Mouse acceleration	c400	Muisversnelling
+=Mouse keys	3058	Muistoetsen
 =Mouse sensitivity (percent, or default)	8a23	Muisgevoeligheid (procent of default)
 =Mute	9f74	Dempen
 =NAT	95ec	NAT
@@ -656,6 +664,7 @@ ui_field_full	fe02	meer past er niet in
 =Power	a5e6	Energie
 =Power profile	8def	Energieprofiel
 =Predict touch and pen	e2b7	Aanraking en pen voorspellen
+=Press a modifier, then the key, instead of both at once	fca5	Druk een modificatietoets en dan de toets, in plaats van beide tegelijk
 =Primary display	924b	Primair scherm
 =Programs started with the desktop	5b74	Programma's die met het bureaublad starten
 =Proxy	1bfb	Proxy
@@ -693,10 +702,12 @@ ui_field_full	fe02	meer past er niet in
 =Show touch area	9ca8	Aanraakgebied tonen
 =Side taskbar text faces	d115	Tekstrichting van de zijtaakbalk
 =Simultaneous threads (SMT)	e836	Gelijktijdige threads (SMT)
+=Slow keys (ms, off or default)	8f8e	Trage toetsen (ms, off of default)
 =Smooth mouse wheel	0dab	Soepel muiswiel
 =Sound	9a34	Geluid
 =Sound server	84bf	Geluidsserver
 =Start the desktop	be4c	Bureaublad starten
+=Sticky keys	4992	Plaktoetsen
 =System	84bc	Systeem
 =System notices	fa89	Systeemmeldingen
 =Taskbar	d759	Taakbalk
@@ -730,6 +741,7 @@ ui_field_full	fe02	meer past er niet in
 =The commit this system was built from	160b	De commit waaruit dit systeem is gebouwd
 =The internet prefers	3dbe	Internet verkiest
 =The layout the keys type in	c104	De indeling waarin de toetsen typen
+=The number pad moves the pointer and clicks	0736	Het numerieke toetsenblok beweegt de aanwijzer en klikt
 =The page glides with each notch instead of jumping	0357	De pagina glijdt bij elke klik van het wiel in plaats van te springen
 =The pointer goes further when the mouse moves fast	d21b	De aanwijzer gaat verder als de muis snel beweegt
 =The pointer shrinks while a button is held down	574c	De aanwijzer krimpt zolang een knop is ingedrukt

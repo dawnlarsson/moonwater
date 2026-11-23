@@ -15,6 +15,7 @@
 # machine-made 2026-11-23 (the bands of a machine in Files' sidebar), not yet read by a person: files_band_drives files_band_removable
 # machine-made 2026-11-23 (the startup table's check column), not yet read by a person: settings_column_on
 # machine-made 2026-11-23 (a linked machine that did not answer, or does not offer a request), not yet read by a person: files_remote_silent files_remote_unsupported
+# machine-made 2026-11-23 (the Accessibility rows), not yet read by a person: =Accessibility =Sticky keys =Slow keys (ms, off or default) =Bounce keys (ms, off or default) =Mouse keys =Dwell click (ms, off or default) =Press a modifier, then the key, instead of both at once =A key types only after it is held this long =A key pressed again too soon after it is let go types once =The number pad moves the pointer and clicks =Hold the pointer still to click
 @language el
 @name Ελληνικά
 @translated machine
@@ -528,9 +529,12 @@ ui_field_full	fe02	δεν χωράει περισσότερο
 =24h	f841	24h
 =A circle under each finger on a touch screen	1bd7	Ένας κύκλος κάτω από κάθε δάχτυλο σε οθόνη αφής
 =A finger or pen is followed a frame ahead, so it lags less	c7a3	Δάχτυλο ή πένα ακολουθούνται ένα καρέ μπροστά, με λιγότερη καθυστέρηση
+=A key pressed again too soon after it is let go types once	8a76	Ένα πλήκτρο που πατιέται ξανά πολύ σύντομα αφού αφεθεί γράφει μία φορά
+=A key types only after it is held this long	c4b2	Ένα πλήκτρο γράφει μόνο αφού κρατηθεί τόσο
 =A quick shake makes the pointer large for a moment	4d81	Ένα γρήγορο κούνημα μεγαλώνει τον δείκτη για λίγο
 =Accent	ccd7	Έμφαση
 =Accent colour (rrggbb or reset)	53aa	Χρώμα έμφασης (rrggbb ή reset)
+=Accessibility	d09f	Προσβασιμότητα
 =Add a key (label, then the public key)	e2e3	Προσθήκη κλειδιού (ετικέτα, μετά το δημόσιο κλειδί)
 =Airplane mode	3b8a	Λειτουργία πτήσης
 =All commands	4a42	Όλες οι εντολές
@@ -552,6 +556,7 @@ ui_field_full	fe02	δεν χωράει περισσότερο
 =Bluetooth	14bd	Bluetooth
 =Boost	a6cc	Boost
 =Boot	38f5	Εκκίνηση
+=Bounce keys (ms, off or default)	a3cb	Πλήκτρα αναπήδησης (ms, off ή default)
 =Bowl tier	7b7f	Επίπεδο bowl
 =Brightness	324a	Φωτεινότητα
 =Build	7543	Κατασκευή
@@ -575,6 +580,7 @@ ui_field_full	fe02	δεν χωράει περισσότερο
 =Display	d9b5	Οθόνη
 =Double-click time (ms, or default)	9af1	Χρόνος διπλού κλικ (ms ή default)
 =Drag lists with the mouse	4ee2	Σύρσιμο λιστών με το ποντίκι
+=Dwell click (ms, off or default)	de27	Κλικ με παραμονή (ms, off ή default)
 =Edge swipes	7aaf	Σαρώσεις από τις άκρες
 =Editor	bf98	Επεξεργαστής
 =End every session	12e1	Τερματισμός όλων των συνεδριών
@@ -585,6 +591,7 @@ ui_field_full	fe02	δεν χωράει περισσότερο
 =Gallery	4cdd	Συλλογή
 =Game frame cadence	fb65	Ρυθμός καρέ παιχνιδιών
 =Graphics	9fa8	Γραφικά
+=Hold the pointer still to click	e349	Κρατήστε τον δείκτη ακίνητο για να κάνετε κλικ
 =Host key fingerprint	2398	Αποτύπωμα κλειδιού διακομιστή
 =How fast the pointer follows the mouse	0a45	Πόσο γρήγορα ακολουθεί ο δείκτης το ποντίκι
 =How long it stays large after a shake	82a0	Πόση ώρα μένει μεγάλος μετά από κούνημα
@@ -629,6 +636,7 @@ ui_field_full	fe02	δεν χωράει περισσότερο
 =Mount kept disks	f0c8	Προσάρτηση των κρατημένων δίσκων
 =Mouse	9b64	Ποντίκι
 =Mouse acceleration	c400	Επιτάχυνση ποντικιού
+=Mouse keys	3058	Πλήκτρα ποντικιού
 =Mouse sensitivity (percent, or default)	8a23	Ευαισθησία ποντικιού (ποσοστό ή default)
 =Mute	9f74	Σίγαση
 =NAT	95ec	NAT
@@ -656,6 +664,7 @@ ui_field_full	fe02	δεν χωράει περισσότερο
 =Power	a5e6	Ενέργεια
 =Power profile	8def	Προφίλ ενέργειας
 =Predict touch and pen	e2b7	Πρόβλεψη αφής και πένας
+=Press a modifier, then the key, instead of both at once	fca5	Πατήστε έναν τροποποιητή και μετά το πλήκτρο, αντί για τα δύο μαζί
 =Primary display	924b	Κύρια οθόνη
 =Programs started with the desktop	5b74	Προγράμματα που ξεκινούν με την επιφάνεια εργασίας
 =Proxy	1bfb	Μεσολαβητής
@@ -693,10 +702,12 @@ ui_field_full	fe02	δεν χωράει περισσότερο
 =Show touch area	9ca8	Εμφάνιση περιοχής αφής
 =Side taskbar text faces	d115	Προσανατολισμός κειμένου πλευρικής γραμμής
 =Simultaneous threads (SMT)	e836	Ταυτόχρονα νήματα (SMT)
+=Slow keys (ms, off or default)	8f8e	Αργά πλήκτρα (ms, off ή default)
 =Smooth mouse wheel	0dab	Ομαλός τροχός ποντικιού
 =Sound	9a34	Ήχος
 =Sound server	84bf	Διακομιστής ήχου
 =Start the desktop	be4c	Έναρξη της επιφάνειας εργασίας
+=Sticky keys	4992	Κολλημένα πλήκτρα
 =System	84bc	Σύστημα
 =System notices	fa89	Ειδοποιήσεις συστήματος
 =Taskbar	d759	Γραμμή εργασιών
@@ -730,6 +741,7 @@ ui_field_full	fe02	δεν χωράει περισσότερο
 =The commit this system was built from	160b	Το commit από το οποίο δημιουργήθηκε αυτό το σύστημα
 =The internet prefers	3dbe	Το διαδίκτυο προτιμά
 =The layout the keys type in	c104	Η διάταξη με την οποία γράφουν τα πλήκτρα
+=The number pad moves the pointer and clicks	0736	Το αριθμητικό πληκτρολόγιο κινεί τον δείκτη και κάνει κλικ
 =The page glides with each notch instead of jumping	0357	Η σελίδα γλιστρά σε κάθε εγκοπή αντί να πηδά
 =The pointer goes further when the mouse moves fast	d21b	Ο δείκτης πηγαίνει πιο μακριά όταν το ποντίκι κινείται γρήγορα
 =The pointer shrinks while a button is held down	574c	Ο δείκτης μικραίνει όσο ένα κουμπί είναι πατημένο

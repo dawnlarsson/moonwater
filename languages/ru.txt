@@ -15,6 +15,7 @@
 # machine-made 2026-11-23 (the bands of a machine in Files' sidebar), not yet read by a person: files_band_drives files_band_removable
 # machine-made 2026-11-23 (the startup table's check column), not yet read by a person: settings_column_on
 # machine-made 2026-11-23 (a linked machine that did not answer, or does not offer a request), not yet read by a person: files_remote_silent files_remote_unsupported
+# machine-made 2026-11-23 (the Accessibility rows), not yet read by a person: =Accessibility =Sticky keys =Slow keys (ms, off or default) =Bounce keys (ms, off or default) =Mouse keys =Dwell click (ms, off or default) =Press a modifier, then the key, instead of both at once =A key types only after it is held this long =A key pressed again too soon after it is let go types once =The number pad moves the pointer and clicks =Hold the pointer still to click
 @language ru
 @name Русский
 @translated machine
@@ -528,9 +529,12 @@ ui_field_full	fe02	больше не помещается
 =24h	f841	24h
 =A circle under each finger on a touch screen	1bd7	Круг под каждым пальцем на сенсорном экране
 =A finger or pen is followed a frame ahead, so it lags less	c7a3	Палец или перо отслеживаются на кадр вперёд и меньше отстают
+=A key pressed again too soon after it is let go types once	8a76	Клавиша, нажатая снова слишком скоро после отпускания, печатает один раз
+=A key types only after it is held this long	c4b2	Клавиша печатает, только если её держать столько времени
 =A quick shake makes the pointer large for a moment	4d81	Быстрое встряхивание ненадолго увеличивает указатель
 =Accent	ccd7	Акцент
 =Accent colour (rrggbb or reset)	53aa	Цвет акцента (rrggbb или reset)
+=Accessibility	d09f	Специальные возможности
 =Add a key (label, then the public key)	e2e3	Добавить ключ (метка, затем открытый ключ)
 =Airplane mode	3b8a	Режим полёта
 =All commands	4a42	Все команды
@@ -552,6 +556,7 @@ ui_field_full	fe02	больше не помещается
 =Bluetooth	14bd	Bluetooth
 =Boost	a6cc	Boost
 =Boot	38f5	Загрузка
+=Bounce keys (ms, off or default)	a3cb	Отскок клавиш (мс, off или default)
 =Bowl tier	7b7f	Уровень bowl
 =Brightness	324a	Яркость
 =Build	7543	Сборка
@@ -575,6 +580,7 @@ ui_field_full	fe02	больше не помещается
 =Display	d9b5	Экран
 =Double-click time (ms, or default)	9af1	Время двойного щелчка (мс или default)
 =Drag lists with the mouse	4ee2	Перетаскивать списки мышью
+=Dwell click (ms, off or default)	de27	Щелчок при задержке (мс, off или default)
 =Edge swipes	7aaf	Жесты от края
 =Editor	bf98	Редактор
 =End every session	12e1	Завершить все сеансы
@@ -585,6 +591,7 @@ ui_field_full	fe02	больше не помещается
 =Gallery	4cdd	Галерея
 =Game frame cadence	fb65	Ритм кадров в играх
 =Graphics	9fa8	Графика
+=Hold the pointer still to click	e349	Задержите указатель неподвижно, чтобы щёлкнуть
 =Host key fingerprint	2398	Отпечаток ключа хоста
 =How fast the pointer follows the mouse	0a45	Как быстро указатель следует за мышью
 =How long it stays large after a shake	82a0	Сколько он остаётся крупным после встряхивания
@@ -629,6 +636,7 @@ ui_field_full	fe02	больше не помещается
 =Mount kept disks	f0c8	Монтировать сохранённые диски
 =Mouse	9b64	Мышь
 =Mouse acceleration	c400	Ускорение мыши
+=Mouse keys	3058	Клавиши мыши
 =Mouse sensitivity (percent, or default)	8a23	Чувствительность мыши (проценты или default)
 =Mute	9f74	Без звука
 =NAT	95ec	NAT
@@ -656,6 +664,7 @@ ui_field_full	fe02	больше не помещается
 =Power	a5e6	Питание
 =Power profile	8def	Профиль питания
 =Predict touch and pen	e2b7	Предсказывать касание и перо
+=Press a modifier, then the key, instead of both at once	fca5	Нажмите модификатор, затем клавишу, а не обе сразу
 =Primary display	924b	Основной экран
 =Programs started with the desktop	5b74	Программы, запускаемые с рабочим столом
 =Proxy	1bfb	Прокси
@@ -693,10 +702,12 @@ ui_field_full	fe02	больше не помещается
 =Show touch area	9ca8	Показывать область касания
 =Side taskbar text faces	d115	Направление текста боковой панели
 =Simultaneous threads (SMT)	e836	Одновременные потоки (SMT)
+=Slow keys (ms, off or default)	8f8e	Медленные клавиши (мс, off или default)
 =Smooth mouse wheel	0dab	Плавное колесо мыши
 =Sound	9a34	Звук
 =Sound server	84bf	Звуковой сервер
 =Start the desktop	be4c	Запускать рабочий стол
+=Sticky keys	4992	Залипание клавиш
 =System	84bc	Система
 =System notices	fa89	Уведомления системы
 =Taskbar	d759	Панель задач
@@ -730,6 +741,7 @@ ui_field_full	fe02	больше не помещается
 =The commit this system was built from	160b	Коммит, из которого собрана эта система
 =The internet prefers	3dbe	Интернет предпочитает
 =The layout the keys type in	c104	Раскладка, в которой печатают клавиши
+=The number pad moves the pointer and clicks	0736	Цифровая клавиатура двигает указатель и щёлкает
 =The page glides with each notch instead of jumping	0357	Страница плавно скользит с каждым щелчком колеса, а не прыгает
 =The pointer goes further when the mouse moves fast	d21b	Указатель уходит дальше, когда мышь движется быстро
 =The pointer shrinks while a button is held down	574c	Указатель сжимается, пока кнопка нажата

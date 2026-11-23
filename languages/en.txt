@@ -511,9 +511,12 @@ ui_field_full	fe02	that is as much as it holds
 =24h	f841	24h
 =A circle under each finger on a touch screen	1bd7	A circle under each finger on a touch screen
 =A finger or pen is followed a frame ahead, so it lags less	c7a3	A finger or pen is followed a frame ahead, so it lags less
+=A key pressed again too soon after it is let go types once	8a76	A key pressed again too soon after it is let go types once
+=A key types only after it is held this long	c4b2	A key types only after it is held this long
 =A quick shake makes the pointer large for a moment	4d81	A quick shake makes the pointer large for a moment
 =Accent	ccd7	Accent
 =Accent colour (rrggbb or reset)	53aa	Accent colour (rrggbb or reset)
+=Accessibility	d09f	Accessibility
 =Add a key (label, then the public key)	e2e3	Add a key (label, then the public key)
 =Airplane mode	3b8a	Airplane mode
 =All commands	4a42	All commands
@@ -535,6 +538,7 @@ ui_field_full	fe02	that is as much as it holds
 =Bluetooth	14bd	Bluetooth
 =Boost	a6cc	Boost
 =Boot	38f5	Boot
+=Bounce keys (ms, off or default)	a3cb	Bounce keys (ms, off or default)
 =Bowl tier	7b7f	Bowl tier
 =Brightness	324a	Brightness
 =Build	7543	Build
@@ -558,6 +562,7 @@ ui_field_full	fe02	that is as much as it holds
 =Display	d9b5	Display
 =Double-click time (ms, or default)	9af1	Double-click time (ms, or default)
 =Drag lists with the mouse	4ee2	Drag lists with the mouse
+=Dwell click (ms, off or default)	de27	Dwell click (ms, off or default)
 =Edge swipes	7aaf	Edge swipes
 =Editor	bf98	Editor
 =End every session	12e1	End every session
@@ -568,6 +573,7 @@ ui_field_full	fe02	that is as much as it holds
 =Gallery	4cdd	Gallery
 =Game frame cadence	fb65	Game frame cadence
 =Graphics	9fa8	Graphics
+=Hold the pointer still to click	e349	Hold the pointer still to click
 =Host key fingerprint	2398	Host key fingerprint
 =How fast the pointer follows the mouse	0a45	How fast the pointer follows the mouse
 =How long it stays large after a shake	82a0	How long it stays large after a shake
@@ -612,6 +618,7 @@ ui_field_full	fe02	that is as much as it holds
 =Mount kept disks	f0c8	Mount kept disks
 =Mouse	9b64	Mouse
 =Mouse acceleration	c400	Mouse acceleration
+=Mouse keys	3058	Mouse keys
 =Mouse sensitivity (percent, or default)	8a23	Mouse sensitivity (percent, or default)
 =Mute	9f74	Mute
 =NAT	95ec	NAT
@@ -639,6 +646,7 @@ ui_field_full	fe02	that is as much as it holds
 =Power	a5e6	Power
 =Power profile	8def	Power profile
 =Predict touch and pen	e2b7	Predict touch and pen
+=Press a modifier, then the key, instead of both at once	fca5	Press a modifier, then the key, instead of both at once
 =Primary display	924b	Primary display
 =Programs started with the desktop	5b74	Programs started with the desktop
 =Proxy	1bfb	Proxy
@@ -676,10 +684,12 @@ ui_field_full	fe02	that is as much as it holds
 =Show touch area	9ca8	Show touch area
 =Side taskbar text faces	d115	Side taskbar text faces
 =Simultaneous threads (SMT)	e836	Simultaneous threads (SMT)
+=Slow keys (ms, off or default)	8f8e	Slow keys (ms, off or default)
 =Smooth mouse wheel	0dab	Smooth mouse wheel
 =Sound	9a34	Sound
 =Sound server	84bf	Sound server
 =Start the desktop	be4c	Start the desktop
+=Sticky keys	4992	Sticky keys
 =System	84bc	System
 =System notices	fa89	System notices
 =Taskbar	d759	Taskbar
@@ -713,6 +723,7 @@ ui_field_full	fe02	that is as much as it holds
 =The commit this system was built from	160b	The commit this system was built from
 =The internet prefers	3dbe	The internet prefers
 =The layout the keys type in	c104	The layout the keys type in
+=The number pad moves the pointer and clicks	0736	The number pad moves the pointer and clicks
 =The page glides with each notch instead of jumping	0357	The page glides with each notch instead of jumping
 =The pointer goes further when the mouse moves fast	d21b	The pointer goes further when the mouse moves fast
 =The pointer shrinks while a button is held down	574c	The pointer shrinks while a button is held down

@@ -470,6 +470,15 @@ struct windows
         unsigned int abi, rows, capacity;
         /* Counts the programs that found every row taken and asked for more. The clipboard door is only the doorbell. */
         unsigned int rows_wanted;
+        /* The hand that acted last (WINDOWS_MODALITY_*): a window shows its focus ring for the keys or a pad alone. And the
+           modifiers sticky keys holds for the next key and keeps held (WINDOW_KEY_* bits), for the taskbar or the keyboard on
+           the screen to show. The compositor's (access.c), written when they change. */
+        unsigned int input_modality, access_latched, access_locked;
+};
+
+enum
+{
+        WINDOWS_MODALITY_NONE = 0u, WINDOWS_MODALITY_KEYS = 1u, WINDOWS_MODALITY_POINTER = 2u, WINDOWS_MODALITY_TOUCH = 3u
 };
 
 #define WINDOWS_ABI 14u

@@ -15,6 +15,7 @@
 # machine-made 2026-11-23 (the bands of a machine in Files' sidebar), not yet read by a person: files_band_drives files_band_removable
 # machine-made 2026-11-23 (the startup table's check column), not yet read by a person: settings_column_on
 # machine-made 2026-11-23 (a linked machine that did not answer, or does not offer a request), not yet read by a person: files_remote_silent files_remote_unsupported
+# machine-made 2026-11-23 (the Accessibility rows), not yet read by a person: =Accessibility =Sticky keys =Slow keys (ms, off or default) =Bounce keys (ms, off or default) =Mouse keys =Dwell click (ms, off or default) =Press a modifier, then the key, instead of both at once =A key types only after it is held this long =A key pressed again too soon after it is let go types once =The number pad moves the pointer and clicks =Hold the pointer still to click
 @language fr
 @name Français
 @translated machine
@@ -528,9 +529,12 @@ ui_field_full	fe02	c'est tout ce que ce champ peut contenir
 =24h	f841	24h
 =A circle under each finger on a touch screen	1bd7	Un cercle sous chaque doigt sur un écran tactile
 =A finger or pen is followed a frame ahead, so it lags less	c7a3	Le doigt ou le stylet est suivi une image d'avance, avec moins de retard
+=A key pressed again too soon after it is let go types once	8a76	Une touche pressée de nouveau trop tôt après l'avoir lâchée n'écrit qu'une fois
+=A key types only after it is held this long	c4b2	Une touche n'écrit qu'après avoir été tenue aussi longtemps
 =A quick shake makes the pointer large for a moment	4d81	Une petite secousse agrandit le pointeur un instant
 =Accent	ccd7	Accent
 =Accent colour (rrggbb or reset)	53aa	Couleur d'accent (rrggbb ou reset)
+=Accessibility	d09f	Accessibilité
 =Add a key (label, then the public key)	e2e3	Ajouter une clé (nom, puis la clé publique)
 =Airplane mode	3b8a	Mode avion
 =All commands	4a42	Toutes les commandes
@@ -552,6 +556,7 @@ ui_field_full	fe02	c'est tout ce que ce champ peut contenir
 =Bluetooth	14bd	Bluetooth
 =Boost	a6cc	Boost
 =Boot	38f5	Démarrage
+=Bounce keys (ms, off or default)	a3cb	Touches à rebond (ms, off ou default)
 =Bowl tier	7b7f	Niveau des bowls
 =Brightness	324a	Luminosité
 =Build	7543	Version
@@ -575,6 +580,7 @@ ui_field_full	fe02	c'est tout ce que ce champ peut contenir
 =Display	d9b5	Écran
 =Double-click time (ms, or default)	9af1	Délai du double-clic (ms ou default)
 =Drag lists with the mouse	4ee2	Faire glisser les listes avec la souris
+=Dwell click (ms, off or default)	de27	Clic par immobilité (ms, off ou default)
 =Edge swipes	7aaf	Balayages depuis les bords
 =Editor	bf98	Éditeur
 =End every session	12e1	Terminer toutes les sessions
@@ -585,6 +591,7 @@ ui_field_full	fe02	c'est tout ce que ce champ peut contenir
 =Gallery	4cdd	Galerie
 =Game frame cadence	fb65	Cadence d'images des jeux
 =Graphics	9fa8	Graphismes
+=Hold the pointer still to click	e349	Gardez le pointeur immobile pour cliquer
 =Host key fingerprint	2398	Empreinte de la clé d'hôte
 =How fast the pointer follows the mouse	0a45	La vitesse à laquelle le pointeur suit la souris
 =How long it stays large after a shake	82a0	Combien de temps il reste grand après une secousse
@@ -629,6 +636,7 @@ ui_field_full	fe02	c'est tout ce que ce champ peut contenir
 =Mount kept disks	f0c8	Monter les disques conservés
 =Mouse	9b64	Souris
 =Mouse acceleration	c400	Accélération de la souris
+=Mouse keys	3058	Touches souris
 =Mouse sensitivity (percent, or default)	8a23	Sensibilité de la souris (pourcentage ou default)
 =Mute	9f74	Couper le son
 =NAT	95ec	NAT
@@ -656,6 +664,7 @@ ui_field_full	fe02	c'est tout ce que ce champ peut contenir
 =Power	a5e6	Alimentation
 =Power profile	8def	Profil d'alimentation
 =Predict touch and pen	e2b7	Prédire le toucher et le stylet
+=Press a modifier, then the key, instead of both at once	fca5	Appuyez sur un modificateur, puis sur la touche, plutôt que sur les deux à la fois
 =Primary display	924b	Écran principal
 =Programs started with the desktop	5b74	Programmes lancés avec le bureau
 =Proxy	1bfb	Proxy
@@ -693,10 +702,12 @@ ui_field_full	fe02	c'est tout ce que ce champ peut contenir
 =Show touch area	9ca8	Afficher la zone de toucher
 =Side taskbar text faces	d115	Orientation du texte de la barre latérale
 =Simultaneous threads (SMT)	e836	Threads simultanés (SMT)
+=Slow keys (ms, off or default)	8f8e	Touches lentes (ms, off ou default)
 =Smooth mouse wheel	0dab	Molette de la souris fluide
 =Sound	9a34	Son
 =Sound server	84bf	Serveur de son
 =Start the desktop	be4c	Démarrer le bureau
+=Sticky keys	4992	Touches rémanentes
 =System	84bc	Système
 =System notices	fa89	Avis du système
 =Taskbar	d759	Barre des tâches
@@ -730,6 +741,7 @@ ui_field_full	fe02	c'est tout ce que ce champ peut contenir
 =The commit this system was built from	160b	Le commit à partir duquel ce système a été construit
 =The internet prefers	3dbe	Internet préfère
 =The layout the keys type in	c104	La disposition dans laquelle les touches écrivent
+=The number pad moves the pointer and clicks	0736	Le pavé numérique déplace le pointeur et clique
 =The page glides with each notch instead of jumping	0357	La page glisse à chaque cran au lieu de sauter
 =The pointer goes further when the mouse moves fast	d21b	Le pointeur va plus loin quand la souris bouge vite
 =The pointer shrinks while a button is held down	574c	Le pointeur rétrécit tant qu'un bouton est enfoncé

@@ -23,6 +23,14 @@ static inline INLINE PURE int compositor_in_row(int row, int x, int y)
 
 static int compositor_qos_keep(int input, int game); // below: the wakeup latency held for an input or a game
 static void compositor_access_let_go(void);      // access.c: a mouse, a pen or a touch moved the pointer, not a controller
+// access.c's aids of the keys and the pointer: the kind of hand that acted last, a key while a feature of the keys is on, the pointer moved
+// while dwell is on. The word is 1 while a feature of the keys is on: then every key is the loop's (the reader sends none to a client), and
+// the loop's goes through compositor_access_key. The loop writes it, the reader reads it with one relaxed load of a key's report.
+static void compositor_access_seen(unsigned int modality);
+static void compositor_access_key(unsigned int at, unsigned int code, int value, positive now);
+static void compositor_access_dwell_moved(void);
+static __attribute__((aligned(64))) unsigned int compositor_access_gate;
+static unsigned int compositor_access_dwells; // the loop's: dwell is on
 
 static void compositor_hold_touch(positive now)
 {
@@ -1996,6 +2004,8 @@ static void compositor_motion(void)
         unsigned int zone;
 
         compositor_pointer_clamp();
+        if (unlikely(compositor_access_dwells))
+                compositor_access_dwell_moved();
         under = compositor_under(compositor.pointer_x, compositor.pointer_y, &tab);
         taskbar_moon_seen(clock_monotonic_nanoseconds());
         taskbar_moon_hover(tab == TASKBAR_LAUNCHER ? compositor_moon_band(compositor.pointer_x, compositor.pointer_y) : -1);
@@ -2803,7 +2813,7 @@ static int compositor_report(positive now, positive stamp)
                 moved = 1;
         }
         if (moved)
-                compositor.touch.hidden = 0, compositor_access_let_go();
+                compositor.touch.hidden = 0, compositor_access_let_go(), compositor_access_seen(WINDOWS_MODALITY_POINTER);
         return moved;
 }
 
@@ -3680,6 +3690,7 @@ static void compositor_touch_apply(unsigned int at, const struct ui_touch_out *o
                         compositor.touch.device = (int)at;
                         compositor.touch.physical = at < COMPOSITOR_INPUTS && compositor_input_physical[at];
                         compositor.touch.hidden = 1, compositor_access_let_go(), compositor.touch.closing = compositor.touch.hold_row = COMPOSITOR_NONE;
+                        compositor_access_seen(WINDOWS_MODALITY_TOUCH);
                         compositor_touch_grab_clear(COMPOSITOR_GRAB_TOUCH_CLOSE), compositor_touch_grab_clear(COMPOSITOR_GRAB_TOUCH_HOLD);
                         compositor_touch_motion(e->x, e->y, now);
                         break;
@@ -4280,8 +4291,10 @@ HOT static int compositor_reader_direct(unsigned int at, const struct compositor
                 else if (raw[k].type != 4u && !(raw[k].type == COMPOSITOR_EV_SYN && raw[k].code == 0))
                         return 0;
         micro = (positive)raw[count - 1].seconds * 1000000ull + (positive)raw[count - 1].microseconds;
+        // A key while a feature of the keys is on (access.c) is the loop's: its gate is the one load a key's report pays for them.
         if (key >= 0)
-                return !dx && !dy && !btn && !wheel_v120 && compositor_reader_key(at, (unsigned int)key, value, micro);
+                return !dx && !dy && !btn && !wheel_v120 && !__atomic_load_n(&compositor_access_gate, __ATOMIC_RELAXED) &&
+                       compositor_reader_key(at, (unsigned int)key, value, micro);
         if (!dx && !dy && !btn && !wheel_v120)
                 return 0;
         return compositor_reader_button(at, dx, dy, (unsigned int)btn, btn_val, wheel_v120, wheel_horiz, micro);
@@ -4385,7 +4398,8 @@ HOT static unsigned int compositor_reader_spark_drain(struct spark_input_ring *r
                                 if (!__atomic_load_n(&compositor.dark, __ATOMIC_RELAXED) &&
                                     __atomic_load_n(&compositor_reader.taken, __ATOMIC_ACQUIRE) == compositor_reader.handed_out && !compositor_reader.dropped)
                                 {
-                                        if (code < 256 && compositor_reader_key(COMPOSITOR_INPUTS, code, dx, micro))
+                                        if (code < 256 && !__atomic_load_n(&compositor_access_gate, __ATOMIC_RELAXED) &&
+                                            compositor_reader_key(COMPOSITOR_INPUTS, code, dx, micro))
                                                 { count++; continue; }
                                         if (code >= COMPOSITOR_BTN_LEFT && code <= COMPOSITOR_BTN_TASK &&
                                             compositor_reader_button(COMPOSITOR_INPUTS, 0, 0, code, dx, 0, 0, micro))
@@ -4614,6 +4628,8 @@ static void compositor_reader_take(void)
 #ifdef CONFIG_MOONWATER_WAYLAND
                 if (first->raw.type == COMPOSITOR_READER_NOTE)
                 {
+                        if (first->raw.value == 1)
+                                compositor_access_seen(WINDOWS_MODALITY_KEYS);
                         compositor_wl_key_noted(first->at, first->raw.code, first->raw.value, (unsigned long)first->raw.seconds, (int)first->generation,
                                                 (positive)first->raw.microseconds * 1000ull, first->read, first->sent);
                         at++;
@@ -4928,13 +4944,20 @@ static int compositor_input_take(unsigned int at, const struct compositor_input_
                                 }
                                 if ((moved |= compositor_report(now, now)))
                                         compositor_motion(), moved = 0;
+                                if (event->value)
+                                        compositor_access_seen(WINDOWS_MODALITY_POINTER);
                                 compositor_press(code, event->value != 0);
                         }
                         else if (event->code < 256)
                         {
                                 if (event->value == 1 && (is_spark || (compositor.input_kinds[at] & WINDOWS_INPUT_KEYBOARD)))
                                         compositor.osk_typed = 1;
-                                compositor_key(at, event->code, event->value, now);
+                                if (event->value == 1)
+                                        compositor_access_seen(WINDOWS_MODALITY_KEYS);
+                                if (unlikely(compositor_access_gate))
+                                        compositor_access_key(at, event->code, event->value, now);
+                                else
+                                        compositor_key(at, event->code, event->value, now);
                         }
                         break;
                 }

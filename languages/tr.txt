@@ -15,6 +15,7 @@
 # machine-made 2026-11-23 (the bands of a machine in Files' sidebar), not yet read by a person: files_band_drives files_band_removable
 # machine-made 2026-11-23 (the startup table's check column), not yet read by a person: settings_column_on
 # machine-made 2026-11-23 (a linked machine that did not answer, or does not offer a request), not yet read by a person: files_remote_silent files_remote_unsupported
+# machine-made 2026-11-23 (the Accessibility rows), not yet read by a person: =Accessibility =Sticky keys =Slow keys (ms, off or default) =Bounce keys (ms, off or default) =Mouse keys =Dwell click (ms, off or default) =Press a modifier, then the key, instead of both at once =A key types only after it is held this long =A key pressed again too soon after it is let go types once =The number pad moves the pointer and clicks =Hold the pointer still to click
 @language tr
 @name Türkçe
 @translated machine
@@ -528,9 +529,12 @@ ui_field_full	fe02	daha fazlası sığmaz
 =24h	f841	24h
 =A circle under each finger on a touch screen	1bd7	Dokunmatik ekranda her parmağın altında bir daire
 =A finger or pen is followed a frame ahead, so it lags less	c7a3	Parmak ya da kalem bir kare önden izlenir, böylece daha az gecikir
+=A key pressed again too soon after it is let go types once	8a76	Bırakıldıktan çok kısa süre sonra yeniden basılan tuş bir kez yazar
+=A key types only after it is held this long	c4b2	Bir tuş ancak bu kadar basılı tutulunca yazar
 =A quick shake makes the pointer large for a moment	4d81	Hızlı bir sallama işaretçiyi bir an büyütür
 =Accent	ccd7	Vurgu
 =Accent colour (rrggbb or reset)	53aa	Vurgu rengi (rrggbb veya reset)
+=Accessibility	d09f	Erişilebilirlik
 =Add a key (label, then the public key)	e2e3	Anahtar ekle (etiket, sonra açık anahtar)
 =Airplane mode	3b8a	Uçak modu
 =All commands	4a42	Tüm komutlar
@@ -552,6 +556,7 @@ ui_field_full	fe02	daha fazlası sığmaz
 =Bluetooth	14bd	Bluetooth
 =Boost	a6cc	Boost
 =Boot	38f5	Açılış
+=Bounce keys (ms, off or default)	a3cb	Sıçrama tuşları (ms, off veya default)
 =Bowl tier	7b7f	Bowl düzeyi
 =Brightness	324a	Parlaklık
 =Build	7543	Derleme
@@ -575,6 +580,7 @@ ui_field_full	fe02	daha fazlası sığmaz
 =Display	d9b5	Ekran
 =Double-click time (ms, or default)	9af1	Çift tıklama süresi (ms veya default)
 =Drag lists with the mouse	4ee2	Listeleri fareyle sürükle
+=Dwell click (ms, off or default)	de27	Bekleyerek tıklama (ms, off veya default)
 =Edge swipes	7aaf	Kenardan kaydırma
 =Editor	bf98	Düzenleyici
 =End every session	12e1	Tüm oturumları sonlandır
@@ -585,6 +591,7 @@ ui_field_full	fe02	daha fazlası sığmaz
 =Gallery	4cdd	Galeri
 =Game frame cadence	fb65	Oyun kare temposu
 =Graphics	9fa8	Grafik
+=Hold the pointer still to click	e349	Tıklamak için işaretçiyi sabit tutun
 =Host key fingerprint	2398	Ana makine anahtarı parmak izi
 =How fast the pointer follows the mouse	0a45	İşaretçinin fareyi ne kadar hızlı izlediği
 =How long it stays large after a shake	82a0	Sallamadan sonra ne kadar büyük kaldığı
@@ -629,6 +636,7 @@ ui_field_full	fe02	daha fazlası sığmaz
 =Mount kept disks	f0c8	Saklanan diskleri bağla
 =Mouse	9b64	Fare
 =Mouse acceleration	c400	Fare ivmesi
+=Mouse keys	3058	Fare tuşları
 =Mouse sensitivity (percent, or default)	8a23	Fare duyarlılığı (yüzde veya default)
 =Mute	9f74	Sessiz
 =NAT	95ec	NAT
@@ -656,6 +664,7 @@ ui_field_full	fe02	daha fazlası sığmaz
 =Power	a5e6	Güç
 =Power profile	8def	Güç profili
 =Predict touch and pen	e2b7	Dokunma ve kalemi tahmin et
+=Press a modifier, then the key, instead of both at once	fca5	İkisine birden değil, önce bir değiştirici tuşa, sonra tuşa basın
 =Primary display	924b	Birincil ekran
 =Programs started with the desktop	5b74	Masaüstüyle başlayan programlar
 =Proxy	1bfb	Vekil sunucu
@@ -693,10 +702,12 @@ ui_field_full	fe02	daha fazlası sığmaz
 =Show touch area	9ca8	Dokunma alanını göster
 =Side taskbar text faces	d115	Yan çubuğun metin yönü
 =Simultaneous threads (SMT)	e836	Eşzamanlı iş parçacıkları (SMT)
+=Slow keys (ms, off or default)	8f8e	Yavaş tuşlar (ms, off veya default)
 =Smooth mouse wheel	0dab	Düzgün fare tekerleği
 =Sound	9a34	Ses
 =Sound server	84bf	Ses sunucusu
 =Start the desktop	be4c	Masaüstünü başlat
+=Sticky keys	4992	Yapışkan tuşlar
 =System	84bc	Sistem
 =System notices	fa89	Sistem bildirimleri
 =Taskbar	d759	Görev çubuğu
@@ -730,6 +741,7 @@ ui_field_full	fe02	daha fazlası sığmaz
 =The commit this system was built from	160b	Bu sistemin derlendiği commit
 =The internet prefers	3dbe	İnternet şunu tercih eder
 =The layout the keys type in	c104	Tuşların yazdığı düzen
+=The number pad moves the pointer and clicks	0736	Sayısal tuş takımı işaretçiyi hareket ettirir ve tıklar
 =The page glides with each notch instead of jumping	0357	Sayfa her çentikte atlamak yerine kayarak ilerler
 =The pointer goes further when the mouse moves fast	d21b	Fare hızlı hareket edince işaretçi daha uzağa gider
 =The pointer shrinks while a button is held down	574c	Bir düğme basılıyken işaretçi küçülür

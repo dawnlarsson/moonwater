@@ -105,6 +105,12 @@
 #define SETTING_SENSITIVITY_PATH "/root/mouse.sensitivity"
 #define SETTING_DOUBLE_CLICK_PATH "/root/mouse.double.click"
 #define SETTING_ACCELERATION_PATH "/root/mouse.acceleration"
+// The aids of the keys and the pointer (src/canvas/compositor/access.c), the Accessibility group's.
+#define SETTING_ACCESS_STICKY_PATH "/root/access.sticky"
+#define SETTING_ACCESS_SLOW_PATH "/root/access.slow"
+#define SETTING_ACCESS_BOUNCE_PATH "/root/access.bounce"
+#define SETTING_ACCESS_MOUSEKEYS_PATH "/root/access.mousekeys"
+#define SETTING_ACCESS_DWELL_PATH "/root/access.dwell"
 #define SETTING_TASKBAR_POSITION_PATH "/root/taskbar.position"
 #define SETTING_TASKBAR_DISPLAY_PATH "/root/taskbar.display"
 #define SETTING_TASKBAR_SCALE_PATH "/root/taskbar.scale"
@@ -665,6 +671,36 @@ static const struct settings_row settings_rows[] = {
                       .path = SETTING_SCROLL_DRAG_PATH, .standard = "on",
                       .usage = "canvas scroll drag [on|off]",
                       .help = "a mouse press on a list that moves drags the list as a finger does, and its release throws it; a slider, a scroll bar or a text keeps its own drag; off, the mouse scrolls a list by its wheel and its bar alone [on]"),
+    //  The aids of the keys and the pointer, for a hand a keyboard or a mouse asks too much of (src/canvas/compositor/access.c): each is
+    //  off until the person turns it on, and with all of them off the keys and the pointer take the paths they take without them.
+    SETTING_PLAIN_ROW("Accessibility", "Sticky keys", SETTINGS_SWITCH, 0, ("access", "sticky"), "sticky ", null,
+                      .need = "", .path = SETTING_ACCESS_STICKY_PATH, .standard = "off",
+                      .usage = "access sticky [on|off]",
+                      .help = "Shift, Ctrl, Alt, AltGr or Super pressed and let go alone holds for the next key; pressed twice, it holds until pressed again [off]",
+                      .about = "Press a modifier, then the key, instead of both at once"),
+    SETTING_PLAIN_ROW(null, "Slow keys (ms, off or default)", SETTINGS_FIELD, 0, ("access", "slow"), "slow ", "off",
+                      .type = SETTING_NUMBER, .need = "", .path = SETTING_ACCESS_SLOW_PATH,
+                      .standard = "off", .unit = "ms", .low = 50, .high = 5000,
+                      .usage = "access slow [MS|off|default]",
+                      .help = "a key counts only once it is held this long, 50 to 5000 ms; one let go sooner types nothing [off]",
+                      .about = "A key types only after it is held this long"),
+    SETTING_PLAIN_ROW(null, "Bounce keys (ms, off or default)", SETTINGS_FIELD, 0, ("access", "bounce"), "bounce ", "off",
+                      .type = SETTING_NUMBER, .need = "", .path = SETTING_ACCESS_BOUNCE_PATH,
+                      .standard = "off", .unit = "ms", .low = 10, .high = 2000,
+                      .usage = "access bounce [MS|off|default]",
+                      .help = "a key pressed again this soon after it was let go is a bounce, and it and its release are dropped, 10 to 2000 ms [off]",
+                      .about = "A key pressed again too soon after it is let go types once"),
+    SETTING_PLAIN_ROW(null, "Mouse keys", SETTINGS_SWITCH, 0, ("access", "mousekeys"), "mousekeys ", null,
+                      .need = "", .path = SETTING_ACCESS_MOUSEKEYS_PATH, .standard = "off",
+                      .usage = "access mousekeys [on|off]",
+                      .help = "the keypad moves the pointer, faster the longer it is held, whatever Num Lock says: 5 clicks, / * - choose the left, middle or right button, 0 holds it and . lets it go; numbers are the top row's [off]",
+                      .about = "The number pad moves the pointer and clicks"),
+    SETTING_PLAIN_ROW(null, "Dwell click (ms, off or default)", SETTINGS_FIELD, 0, ("access", "dwell"), "dwell ", "off",
+                      .type = SETTING_NUMBER, .need = "", .path = SETTING_ACCESS_DWELL_PATH,
+                      .standard = "off", .unit = "ms", .low = 200, .high = 5000,
+                      .usage = "access dwell [MS|off|default]",
+                      .help = "the pointer held still this long clicks the left button once, 200 to 5000 ms; it clicks again after it moves [off]",
+                      .about = "Hold the pointer still to click"),
     //  The sound server's master volume, mute and card (src/audio): files the server reads again twice a second and writes back
     //  when a program (the mixer, the tray, a volume key) changes the volume, so a row here and a slider there are one value.
     //  The window stops at 100 percent, as the mixer does; the server itself takes up to 200 from a file. default puts the volume

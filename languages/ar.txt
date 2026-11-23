@@ -2,6 +2,7 @@
 # machine-made 2026-11-19 (the displays pass), not yet read by a person: settings_no_sizes settings_primary_no settings_primary_other settings_primary_yes settings_refused_size settings_size_ask settings_size_back settings_size_best settings_size_keep settings_size_kept settings_size_own settings_size_plain settings_size_refused =Resolution =Primary display =Graphics
 # machine-made 2026-11-19 (the apps pass), not yet read by a person: launcher_recent
 # machine-made 2026-11-22 (the files top bar), not yet read by a person: files_refresh files_view
+# machine-made 2026-11-23 (the Accessibility rows), not yet read by a person: =Accessibility =Sticky keys =Slow keys (ms, off or default) =Bounce keys (ms, off or default) =Mouse keys =Dwell click (ms, off or default) =Press a modifier, then the key, instead of both at once =A key types only after it is held this long =A key pressed again too soon after it is let go types once =The number pad moves the pointer and clicks =Hold the pointer still to click
 @direction rtl
 # machine-made 2026-11-22 (the devices pass), not yet read by a person: files_device_eject files_device_live files_device_write
 # machine-made 2026-11-22 (the ids 8a55b4ad0 and the taskbar left out), not yet read by a person: files_remote_denied files_remote_offline files_remote_opening files_this_machine taskbar_tab_uninstall
@@ -529,9 +530,12 @@ ui_field_full	fe02	هذا أقصى ما يتسع له
 =24h	f841	24h
 =A circle under each finger on a touch screen	1bd7	دائرة تحت كل إصبع على شاشة اللمس
 =A finger or pen is followed a frame ahead, so it lags less	c7a3	يُتتبَّع الإصبع أو القلم قبل إطار واحد فيتأخر أقل
+=A key pressed again too soon after it is let go types once	8a76	المفتاح الذي يضغط مرة أخرى بعد تركه بوقت قصير جدا يكتب مرة واحدة
+=A key types only after it is held this long	c4b2	لا يكتب المفتاح إلا بعد الضغط عليه هذه المدة
 =A quick shake makes the pointer large for a moment	4d81	هزة سريعة تكبّر المؤشر لحظة
 =Accent	ccd7	لون التمييز
 =Accent colour (rrggbb or reset)	53aa	لون التمييز (rrggbb أو reset)
+=Accessibility	d09f	إمكانية الوصول
 =Add a key (label, then the public key)	e2e3	إضافة مفتاح (تسمية، ثم المفتاح العام)
 =Airplane mode	3b8a	وضع الطيران
 =All commands	4a42	كل الأوامر
@@ -553,6 +557,7 @@ ui_field_full	fe02	هذا أقصى ما يتسع له
 =Bluetooth	14bd	Bluetooth
 =Boost	a6cc	Boost
 =Boot	38f5	الإقلاع
+=Bounce keys (ms, off or default)	a3cb	مفاتيح الارتداد (ms، off أو default)
 =Bowl tier	7b7f	مستوى bowl
 =Brightness	324a	السطوع
 =Build	7543	البناء
@@ -576,6 +581,7 @@ ui_field_full	fe02	هذا أقصى ما يتسع له
 =Display	d9b5	الشاشة
 =Double-click time (ms, or default)	9af1	مدة النقر المزدوج (ms أو default)
 =Drag lists with the mouse	4ee2	سحب القوائم بالماوس
+=Dwell click (ms, off or default)	de27	النقر بالتوقف (ms، off أو default)
 =Edge swipes	7aaf	السحب من الحواف
 =Editor	bf98	المحرر
 =End every session	12e1	إنهاء كل الجلسات
@@ -586,6 +592,7 @@ ui_field_full	fe02	هذا أقصى ما يتسع له
 =Gallery	4cdd	المعرض
 =Game frame cadence	fb65	إيقاع إطارات الألعاب
 =Graphics	9fa8	الرسوميات
+=Hold the pointer still to click	e349	أبق المؤشر ثابتا للنقر
 =Host key fingerprint	2398	بصمة مفتاح المضيف
 =How fast the pointer follows the mouse	0a45	سرعة تتبع المؤشر للماوس
 =How long it stays large after a shake	82a0	مدة بقائه كبيرًا بعد الهز
@@ -630,6 +637,7 @@ ui_field_full	fe02	هذا أقصى ما يتسع له
 =Mount kept disks	f0c8	تركيب الأقراص المحفوظة
 =Mouse	9b64	الماوس
 =Mouse acceleration	c400	تسارع الماوس
+=Mouse keys	3058	مفاتيح الماوس
 =Mouse sensitivity (percent, or default)	8a23	حساسية الماوس (نسبة مئوية أو default)
 =Mute	9f74	كتم الصوت
 =NAT	95ec	NAT
@@ -657,6 +665,7 @@ ui_field_full	fe02	هذا أقصى ما يتسع له
 =Power	a5e6	الطاقة
 =Power profile	8def	نمط الطاقة
 =Predict touch and pen	e2b7	توقع اللمس والقلم
+=Press a modifier, then the key, instead of both at once	fca5	اضغط مفتاح تعديل ثم المفتاح، بدلا من الضغط عليهما معا
 =Primary display	924b	الشاشة الرئيسية
 =Programs started with the desktop	5b74	البرامج التي تبدأ مع سطح المكتب
 =Proxy	1bfb	الوكيل
@@ -694,10 +703,12 @@ ui_field_full	fe02	هذا أقصى ما يتسع له
 =Show touch area	9ca8	إظهار منطقة اللمس
 =Side taskbar text faces	d115	اتجاه نص شريط المهام الجانبي
 =Simultaneous threads (SMT)	e836	الخيوط المتزامنة (SMT)
+=Slow keys (ms, off or default)	8f8e	المفاتيح البطيئة (ms، off أو default)
 =Smooth mouse wheel	0dab	عجلة الماوس السلسة
 =Sound	9a34	الصوت
 =Sound server	84bf	خادم الصوت
 =Start the desktop	be4c	تشغيل سطح المكتب
+=Sticky keys	4992	المفاتيح الثابتة
 =System	84bc	النظام
 =System notices	fa89	إشعارات النظام
 =Taskbar	d759	شريط المهام
@@ -731,6 +742,7 @@ ui_field_full	fe02	هذا أقصى ما يتسع له
 =The commit this system was built from	160b	الـ commit الذي بُني منه هذا النظام
 =The internet prefers	3dbe	يفضل الإنترنت
 =The layout the keys type in	c104	التخطيط الذي تكتب به المفاتيح
+=The number pad moves the pointer and clicks	0736	لوحة الأرقام تحرك المؤشر وتنقر
 =The page glides with each notch instead of jumping	0357	تنزلق الصفحة مع كل نقرة للعجلة بدلًا من القفز
 =The pointer goes further when the mouse moves fast	d21b	يذهب المؤشر أبعد عندما يتحرك الماوس بسرعة
 =The pointer shrinks while a button is held down	574c	ينكمش المؤشر ما دام زر مضغوطًا

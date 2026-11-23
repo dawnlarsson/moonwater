@@ -1074,6 +1074,7 @@ static b32 host_main()
             {"ntp", host_ntp, false, true},
             {"keyboard", host_keyboard, false, true},
             {"mouse", host_setting_verb, false, true},
+            {"access", host_setting_verb, false, true},
             {"language", host_setting_verb, false, true},
             {"taskbar", host_taskbar, false, true},
             {"audio", host_audio, false, true},
