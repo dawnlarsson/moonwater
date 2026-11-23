@@ -3805,6 +3805,11 @@ static fn device_open_rows(void)
         bad = good, bad.block = 0, said[11] = usb_open_judge(&bad, 31000000000ull, "exfat");
         for (positive at = 1; at < 12; at++)
                 refused &= said[at] != null;
+        // A disc in an optical drive is a drive's whole, as a stick with no table is: opened (read-only) as the list said it.
+        bad = good, string_copy(bad.disk, "sr0"), string_copy(bad.identity.type, "iso9660"), bad.identity.type_length = 7;
+        check("device open: a disc of data in an optical drive may be opened; an optical drive is a drive the list says (no loop or RAID), and UDF opens beside ISO 9660",
+              !usb_open_judge(&bad, 31000000000ull, "iso9660") && usb_optical("sr0") && !usb_optical("sda") && !usb_not_drive("sr1") && usb_not_drive("loop0") &&
+                  usb_openable_of("udf") && !usb_openable_of("udf")->written);
         check("device open: refused over a link, on the drive this runs from or keeps, on no drive, by the storage guard, held by a mapped or RAID volume, an EFI partition, a file system it does not open, one the list did not say, and no block device",
               refused && string_find(said[2], "runs from") && string_find(said[3], "runs from") && string_equals(said[5], "holds a moonwater partition") &&
                   string_find(said[6], "RAID") && string_find(said[7], "EFI"));

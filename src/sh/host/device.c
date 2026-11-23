@@ -2467,9 +2467,10 @@ static fn usb_recover(void)
         its state: allowed, blocked (a deny rule holds it) or waiting (held for want of an allow). A disk
         has no hold, so it is allowed; device deny of one is refused, as device allow of a name that is no
         port is. A root hub is a controller, not a device, and is not listed. A disk is a whole one in
-        /sys/block that is not a loop, ram, device-mapper, optical or floppy disk, and one on a USB bus is
+        /sys/block that is not a loop, ram, device-mapper or floppy disk, and one on a USB bus is
         listed as the USB device it is: its line is followed by "    drive NAME N MB" and the disk's
-        segments. Any other disk's segments are followed by "    where internal BUS" or "    where external
+        segments. An optical drive's segments are the file system of a disc of data in it, and they are
+        followed by "    disc none|open|audio TRACKS SECONDS|data|mixed TRACKS SECONDS" (disc_census). Any other disk's segments are followed by "    where internal BUS" or "    where external
         BUS" (usb_drive_bus). A reader from before these lines skips them: each starts with four blanks and is
         no part line. It reads and changes nothing and needs no root.
 */
@@ -2713,12 +2714,18 @@ static fn usb_list_strip(string_address name, unsigned long long total, usb_part
                 host_say(log, "    more %p\n", (positive)(parts->more));
 }
 
-// A block device that is no drive a person keeps: a loop, ram, device-mapper, RAID, optical or floppy one, or an eMMC's boot area.
+// A block device that is no drive a person keeps: a loop, ram, device-mapper, RAID or floppy one, or an eMMC's boot area. An optical
+// drive is one (usb_optical): what is in it is said as disc says it (disc_census).
 static b32 usb_not_drive(string_address name)
 {
         return host_starts(name, "loop") || host_starts(name, "ram") || host_starts(name, "zram") || host_starts(name, "dm-") ||
-               host_starts(name, "md") || host_starts(name, "sr") || host_starts(name, "fd") || (host_starts(name, "mmcblk") && string_find(name, "boot"));
+               host_starts(name, "md") || host_starts(name, "fd") || (host_starts(name, "mmcblk") && string_find(name, "boot"));
 }
+
+// An optical drive: the sr driver's (a CD, DVD or Blu-ray drive, inside the machine or on USB).
+static inline b32 usb_optical(string_address name) { return host_starts(name, "sr"); }
+
+static fn disc_census(string_address name, unsigned long long sectors); // disc.c's
 
 /*
         The bus a drive is on, from its name and the sysfs path its /sys/class/block link names (empty where it has none), and for an
@@ -2787,7 +2794,10 @@ static bool usb_list_disk(string_address directory, string_address name, address
         // No verb holds a drive, so its row is shown and not pressed: it says what is true of it. Its name is one word in the line.
         usb_plain_copy(shown, sizeof(shown), name);
         host_say(log, "  %s drive %p MB view only\n", (string_address)shown, (positive)(sectors * 512 / 1000000ull));
-        usb_disk_strip(name, sectors);
+        if (usb_optical(name))
+                disc_census(name, sectors);
+        else
+                usb_disk_strip(name, sectors);
         // Where it is, after its segments: in the machine, or plugged in.
         if (host_join(sysfs, sizeof(sysfs), "/sys/block/", name, "/device/type"))
                 host_read_kernel(sysfs, type, sizeof(type));
@@ -2818,7 +2828,10 @@ static bool usb_list_device_disk(string_address directory, string_address name, 
         sectors = usb_disk_sectors(name);
         usb_plain_copy(shown, sizeof(shown), name);
         host_say(log, "    drive %s %p MB\n", (string_address)shown, (positive)(sectors * 512 / 1000000ull));
-        usb_disk_strip(name, sectors);
+        if (usb_optical(name))
+                disc_census(name, sectors);
+        else
+                usb_disk_strip(name, sectors);
         return true;
 }
 
@@ -2899,6 +2912,7 @@ typedef struct
 static const usb_openable usb_openables[] = {
     {"ext4", "ext4", 1, 0},  {"ext3", "ext4", 0, 0}, {"ext2", "ext4", 0, 0},   {"btrfs", "btrfs", 1, 0}, {"xfs", "xfs", 1, 0},
     {"f2fs", "f2fs", 1, 0},  {"vfat", "vfat", 1, 1}, {"exfat", "exfat", 1, 1}, {"ntfs", "ntfs3", 0, 1},  {"iso9660", "iso9660", 0, 0},
+    {"udf", "udf", 0, 0},
 };
 
 static const usb_openable address_to usb_openable_of(string_address type)
@@ -3207,10 +3221,14 @@ static string_address usb_open_judge(const usb_open_facts address_to facts, p64 
                 return "is opened only at the machine, not by a command a link or ssh runs";
         if (!facts->block)
                 return "is no block device here";
-        if (installer_skipped((const char address_to)facts->disk))
+        // An optical drive is no drive an install is written to (the installer skips it), and its disc is opened as any partition is,
+        // but for one this system started from.
+        if (!usb_optical((string_address)facts->disk) && installer_skipped((const char address_to)facts->disk))
                 return "is on a device that is no drive a person keeps (loop, ram, mapped or RAID)";
-        if (installer_excluded((const char address_to)facts->disk, (const char address_to)facts->kept) ||
-            installer_excluded((const char address_to)facts->disk, (const char address_to)facts->boot))
+        if (usb_optical((string_address)facts->disk)
+                    ? string_equals((string_address)facts->disk, (string_address)facts->kept) || string_equals((string_address)facts->disk, (string_address)facts->boot)
+                    : installer_excluded((const char address_to)facts->disk, (const char address_to)facts->kept) ||
+                          installer_excluded((const char address_to)facts->disk, (const char address_to)facts->boot))
                 return "is on the drive this system runs from";
         if (facts->guard)
                 return facts->guard;
