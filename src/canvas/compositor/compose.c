@@ -140,6 +140,12 @@ struct compositor_frame
         // A client's tiled/DCC dma-buf resource (gpu_amd_image) sampled directly in the scene kernel (0x40 on op[0], zero detile pass).
         unsigned int tiled_desc[8];
         unsigned int tiled_kind;
+        // An X window's bounding shape (compositor_row_shape): the rectangles of its picture that are the window, x, y, width and
+        // height in the picture's pixels (shape_w by shape_h; 0 is the frame's size). Only they are drawn: a shaped frame has no
+        // line, corners or buttons and covers nothing under it, and shaped with no rectangles it is nothing at all.
+        const int (*shape)[4];
+        unsigned int shape_count, shaped;
+        int shape_w, shape_h;
 };
 
 /*
@@ -990,11 +996,30 @@ static int canvas_emit_lit_over(const struct canvas_sink *sink, void *ctx, const
         return 1;
 }
 
+// A shaped window (compositor_row_shape): its picture in each rectangle of its shape, at the frame's size, and nothing else.
+static int canvas_emit_shaped(const struct canvas_sink *sink, void *ctx, const struct compositor_frame *f)
+{
+        long pw = f->shape_w > 0 ? f->shape_w : f->width, ph = f->shape_h > 0 ? f->shape_h : f->height;
+
+        for (unsigned int at = 0; at < f->shape_count && pw > 0 && ph > 0; at++)
+        {
+                long x1 = f->shape[at][0], y1 = f->shape[at][1], x2 = x1 + f->shape[at][2], y2 = y1 + f->shape[at][3];
+
+                x1 = (x1 < 0 ? 0 : x1) * f->width / pw, x2 = (x2 > pw ? pw : x2) * f->width / pw;
+                y1 = (y1 < 0 ? 0 : y1) * f->height / ph, y2 = (y2 > ph ? ph : y2) * f->height / ph;
+                if (x2 > x1 && y2 > y1)
+                        sink->contents(ctx, f, 0, f->x + (int)x1, f->y + (int)y1, (int)(x2 - x1), (int)(y2 - y1));
+        }
+        return 1;
+}
+
 static int canvas_emit_frame(const struct canvas_sink *sink, void *ctx, const struct compositor_frame *f, int r)
 {
         int x = f->x, y = f->y, w = f->width, h = f->height, ox, oy, ow, oh, b, ri;
         unsigned int tab = f->builtin ? taskbar_tab_ink(f->slot, compositor_panel_mark(f)) : 0;
 
+        if (f->shaped)
+                return canvas_emit_shaped(sink, ctx, f);
         compositor_outline(f, &ox, &oy, &ow, &oh);
         b = x - ox;
         ri = r > b ? r - b : 0;
@@ -1399,7 +1424,8 @@ static inline b32 compositor_frame_covers_opaque(const struct compositor_frame *
 {
         int r;
 
-        if (f->blend || f->builtin || (!f->pixels && !f->fill && !f->tiled_kind) || compositor_scaled(f) || f->width <= 0 || f->height <= 0)
+        if (f->blend || f->shaped || f->builtin || (!f->pixels && !f->fill && !f->tiled_kind) || compositor_scaled(f) || f->width <= 0 ||
+            f->height <= 0)
                 return false;
         r = compositor_radius(f);
         if (r <= 0)
@@ -2695,13 +2721,14 @@ static void compositor_scene_plan(const struct compositor_target *t, const struc
         const unsigned int *owner = plan->owner;
         unsigned int edges = 0, pieces = plan->pieces;
 
-        // A blended frame with a frame under it, or a border-only frame (no picture/fill, e.g. snap grid): draw bottom-to-top so interiors are never left unwritten.
+        // A blended frame with a frame under it, a border-only frame (no picture/fill, e.g. snap grid) or a shaped one (whose
+        // pieces are not its whole box): draw bottom-to-top so interiors are never left unwritten.
         for (unsigned int at = 0; at < count; at++)
         {
                 int border_only = !frames[at].builtin && !frames[at].pixels && !frames[at].fill && frames[at].line > 0;
                 int fall_back = (frames[at].blend && !compositor_blend_alone(t, frames, at));
 
-                if (border_only)
+                if (border_only || frames[at].shaped)
                 {
                         int fx, fy, fw, fh;
 

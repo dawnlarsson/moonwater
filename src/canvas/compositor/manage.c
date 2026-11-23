@@ -4633,6 +4633,7 @@ static int compositor_row_open_external(const struct compositor_row_spec *spec)
 
 static void compositor_row_release(int row)
 {
+        compositor_row_shape_set(row, 0, 0, 0);
         compositor_clip_leave(row);
         compositor_popup_leave(row);
         compositor_leave(row);

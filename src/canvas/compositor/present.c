@@ -1541,7 +1541,7 @@ static void compositor_present_frames(void)
         {
                 int row = compositor.direct_row, menu[4];
 
-                if (!taskbar_menu_rect(menu) && compositor_client_scans(row) && !compositor_busy_wait() &&
+                if (!taskbar_menu_rect(menu) && compositor_client_scans(row) && !compositor_busy_wait() && !compositor_row_shaped(row) &&
                     compositor_direct_eligible(row, compositor_row_opaque_fs(row) ? 0 : compositor_wl_row_blend(row)) &&
                     compositor_present_direct(row, 0, 0))
                         return present_direct_cleared();

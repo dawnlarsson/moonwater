@@ -98,6 +98,9 @@ enum { XWM_OK = 0, XWM_ERR_SPACE = -1, XWM_ERR_ARG = -2, XWM_ERR_SHORT = -3, XWM
 #define XWM_XFIXES_WINDOW_DESTROY 2u
 #define XWM_XFIXES_CLIENT_CLOSE 4u
 #define XWM_XFIXES_SELECTION_MASK 7u
+#define XWM_SHAPE_SELECT_INPUT 6
+#define XWM_SHAPE_GET_RECTANGLES 8
+#define XWM_SHAPE_BOUNDING 0u
 
 #define XWM_SETUP_FAILED 0
 #define XWM_SETUP_SUCCESS 1
@@ -442,6 +445,22 @@ XWM_API long xwm_enc_xfixes_select_selection_input(unsigned char *out, unsigned 
         return (!window || !selection || (mask & ~XWM_XFIXES_SELECTION_MASK))
                    ? XWM_ERR_ARG
                    : xwm_ext_words(out, cap, major, XWM_XFIXES_SELECT_SELECTION_INPUT, w, 3);
+}
+
+// SHAPE's SelectInput: a ShapeNotify for the window whenever one of its shapes changes.
+XWM_API long xwm_enc_shape_select_input(unsigned char *out, unsigned long cap, unsigned int major, unsigned int window, int enable)
+{
+        unsigned int w[2] = {window, enable ? 1u : 0u};
+
+        return !window ? XWM_ERR_ARG : xwm_ext_words(out, cap, major, XWM_SHAPE_SELECT_INPUT, w, 2);
+}
+
+// SHAPE's GetRectangles of the window's bounding shape: the rectangles it is cut to, in its own coordinates.
+XWM_API long xwm_enc_shape_get_rectangles(unsigned char *out, unsigned long cap, unsigned int major, unsigned int window)
+{
+        unsigned int w[2] = {window, XWM_SHAPE_BOUNDING};
+
+        return !window ? XWM_ERR_ARG : xwm_ext_words(out, cap, major, XWM_SHAPE_GET_RECTANGLES, w, 2);
 }
 
 XWM_API long xwm_enc_xtest_key(unsigned char *out, unsigned long cap, unsigned int major, unsigned int type, unsigned int detail)

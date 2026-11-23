@@ -1407,6 +1407,35 @@ static void compositor_row_prepare(int row)
 }
 
 // Pure geometry & frame descriptor query for row (no buffer-settle or table/woken side effects).
+/*
+        A row's shape: the rectangles of its picture that are the window, x, y, width and height in the picture's pixels (an X
+        window's bounding shape, the SHAPE extension, as xwm.c reads it). Wine cuts windows so: the Skyrim launcher's highlight is
+        a 285 by 60 picture, black inside a frame of four rectangles, and drawn whole it hid the button under it. The rest of a
+        shaped row's rectangle is not the window's and shows what is under it. The list grows to the highest row ever shaped.
+*/
+struct compositor_cut
+{
+        int (*rect)[4];
+        unsigned long bytes;
+        unsigned int count, shaped;
+};
+static struct compositor_cut *compositor_cuts;
+static unsigned long compositor_cuts_bytes;
+static unsigned int compositor_cuts_rows;
+
+static unsigned int compositor_row_shape(int row, const int (**rect)[4], unsigned int *count)
+{
+        if (row < 0 || (unsigned int)row >= compositor_cuts_rows || !compositor_cuts[row].shaped)
+                return 0;
+        *rect = (const int (*)[4])compositor_cuts[row].rect, *count = compositor_cuts[row].count;
+        return 1;
+}
+
+static int compositor_row_shaped(int row)
+{
+        return row >= 0 && (unsigned int)row < compositor_cuts_rows && compositor_cuts[row].shaped;
+}
+
 static void compositor_frame_of(int row, struct compositor_frame *frame)
 {
         int line = compositor_frame_line(row), scale = compositor_row_scale(row);
@@ -1424,6 +1453,11 @@ static void compositor_frame_of(int row, struct compositor_frame *frame)
         frame->row_plus1 = row + 1;
         frame->close = !(compositor.asks[row] & WINDOW_NO_CLOSE);
         frame->minimize = !(compositor.asks[row] & WINDOW_NO_TAB);
+        if (compositor_row_shape(row, &frame->shape, &frame->shape_count))
+        {
+                frame->shaped = 1, frame->shape_w = (int)compositor.picture_w[row], frame->shape_h = (int)compositor.picture_h[row];
+                frame->radius = 0, frame->line = line = 0, frame->close = 0, frame->minimize = 0;
+        }
         compositor_land_frame(row, frame);
         if (compositor.glide[row] && !compositor.landing[row] && (row != compositor.drag || compositor.drag_glide == row + 1))
                 compositor_glide_frame(row, frame);
@@ -1499,6 +1533,49 @@ static void compositor_damage_row(int row)
         compositor_frame_of(row, &frame);
         compositor_outline(&frame, &x, &y, &width, &height);
         compositor_damage(x, y, width, height);
+}
+
+/*
+        A row's shape set from X's rectangles as a GetRectangles reply has them (8 bytes each, little-endian: x and y signed, width
+        and height unsigned), or let go (shaped 0: the row is its whole rectangle again). The row is drawn again where it was and
+        where it is. A shape whose list cannot be had is let go: the window is drawn whole, as before shapes were read.
+*/
+static void compositor_row_shape_set(int row, const unsigned char *x_rects, unsigned long count, unsigned int shaped)
+{
+        struct compositor_cut *s;
+        int changed;
+
+        if (row < 0 || (!shaped && (unsigned int)row >= compositor_cuts_rows))
+                return;
+        if ((unsigned int)row >= compositor_cuts_rows)
+        {
+                if (!mem_buf_grow((void **)&compositor_cuts, &compositor_cuts_bytes, ((unsigned long)row + 1) * sizeof(struct compositor_cut),
+                                  MEM_BUF_GROW_2X | MEM_BUF_KEEP))
+                        return;
+                compositor_cuts_rows = (unsigned int)(compositor_cuts_bytes / sizeof(struct compositor_cut));
+        }
+        s = &compositor_cuts[row];
+        if (shaped && count > s->bytes / sizeof(s->rect[0]) &&
+            !mem_buf_grow((void **)&s->rect, &s->bytes, count * sizeof(s->rect[0]), MEM_BUF_GROW_2X))
+                shaped = 0, count = 0, s->count = 0;
+        if (!shaped)
+                count = 0;
+        changed = s->shaped != shaped || s->count != count;
+        for (unsigned long at = 0; at < count; at++)
+        {
+                const unsigned char *r = x_rects + at * 8;
+                int one[4] = {(short)(r[0] | r[1] << 8), (short)(r[2] | r[3] << 8), r[4] | r[5] << 8, r[6] | r[7] << 8};
+
+                changed |= memory_compare(s->rect[at], one, sizeof one) != 0;
+                memory_copy(s->rect[at], one, sizeof one);
+        }
+        if (!changed)
+                return;
+        if (compositor.showing[row])
+                compositor_damage_row(row);
+        s->shaped = shaped, s->count = (unsigned int)count;
+        if (compositor.showing[row])
+                compositor_damage_row(row);
 }
 
 // A window's line and its corners' squares, and not what is inside them: what lighting an edge draws again.

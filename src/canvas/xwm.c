@@ -103,7 +103,7 @@ enum compositor_xwm_prop
         COMPOSITOR_XWM_PROP_XDND_SYNC, COMPOSITOR_XWM_PROP_ICON, COMPOSITOR_XWM_PROP_MULTIPLE,
         COMPOSITOR_XWM_PROP_XDND_PROXY, COMPOSITOR_XWM_PROP_XDND_PROXIED, COMPOSITOR_XWM_PROP_XDND_ACTIONS,
         COMPOSITOR_XWM_PROP_XDND_WORDS, COMPOSITOR_XWM_PROP_STEAM, COMPOSITOR_XWM_PROP_STEAM_OPEN,
-        COMPOSITOR_XWM_PROP_CLASS, COMPOSITOR_XWM_PROP_EXT, COMPOSITOR_XWM_PROP_MOTIF,
+        COMPOSITOR_XWM_PROP_CLASS, COMPOSITOR_XWM_PROP_EXT, COMPOSITOR_XWM_PROP_MOTIF, COMPOSITOR_XWM_PROP_SHAPE,
 };
 #define COMPOSITOR_XWM_DND_REPLY(what) (((what) >= COMPOSITOR_XWM_PROP_XDND_AWARE && (what) <= COMPOSITOR_XWM_PROP_XDND_SYNC) || \
                                         ((what) >= COMPOSITOR_XWM_PROP_XDND_PROXY && (what) <= COMPOSITOR_XWM_PROP_XDND_WORDS))
@@ -122,9 +122,9 @@ enum compositor_xwm_prop
 #define COMPOSITOR_XWM_NET_ADD 1
 #define COMPOSITOR_XWM_NET_TOGGLE 2
 
-enum { XWM_EXT_COMPOSITE, XWM_EXT_XRES, XWM_EXT_XFIXES, XWM_EXT_XTEST };
-static const struct { const char *name; unsigned char len; } xwm_ext_spec[4] = {
-        {"Composite", 9}, {"X-Resource", 10}, {"XFIXES", 6}, {"XTEST", 5},
+enum { XWM_EXT_COMPOSITE, XWM_EXT_XRES, XWM_EXT_XFIXES, XWM_EXT_XTEST, XWM_EXT_SHAPE };
+static const struct { const char *name; unsigned char len; } xwm_ext_spec[] = {
+        {"Composite", 9}, {"X-Resource", 10}, {"XFIXES", 6}, {"XTEST", 5}, {"SHAPE", 5},
 };
 
 #define COMPOSITOR_XWM_MAPPED 1u
@@ -226,6 +226,8 @@ struct compositor_xwm
         unsigned int xtest, xres, resource_base, resource_mask, root, seq, atoms[COMPOSITOR_XWM_ATOMS];
         unsigned int atoms_seen, refused, errors, last_stack_gen, focus_window;
         unsigned int pending_at, pending_count, pending_room, xfixes_opcode, xfixes_event, setting, next_requestor;
+        unsigned int shape_opcode, shape_event; // SHAPE: windows cut to rectangles (xwm_shape_reply)
+        long shape_skip;                        // bytes of a shape's reply too long to keep, still to pass over
         long client, client_pid, in_len, out_len, windows, atoms_indexed, name_bytes, in_count, out_count;
         positive since;
         unsigned char in[COMPOSITOR_XWM_IN], out[COMPOSITOR_XWM_OUT];
@@ -483,7 +485,7 @@ static void compositor_xwm_start_session(struct compositor_xwm *x)
         for (unsigned int at = 0; at < COMPOSITOR_XWM_ATOMS; at++)
                 compositor_xwm_queue(x, req, xwm_enc_intern_atom(req, sizeof req, 0, (const unsigned char *)xwm_atom_spec[at].name,
                                                                  (unsigned long)string_length((string_address)xwm_atom_spec[at].name)));
-        for (unsigned int i = 0; i < 4; i++)
+        for (unsigned int i = 0; i < sizeof xwm_ext_spec / sizeof xwm_ext_spec[0]; i++)
                 compositor_xwm_wait(x, req, xwm_enc_query_extension(req, sizeof req, (const unsigned char *)xwm_ext_spec[i].name, xwm_ext_spec[i].len),
                                     0, COMPOSITOR_XWM_PROP_EXT, i);
 }
@@ -576,6 +578,47 @@ static void xwm_ext_reply(struct compositor_xwm *x, const unsigned char *in, lon
         }
         else if (ext == XWM_EXT_XTEST)
                 x->xtest = r.major_opcode;
+        else if (ext == XWM_EXT_SHAPE && r.first_event > XWM_EVENT_LAST)
+                x->shape_opcode = r.major_opcode, x->shape_event = r.first_event;
+}
+
+HOT static struct compositor_xwm_window *xwm_find(struct compositor_xwm *x, unsigned int id, int add);
+
+// A window's ShapeNotify asked for: it comes when the window is cut to a shape or let go of one.
+static void xwm_shape_watch(struct compositor_xwm *x, unsigned int window)
+{
+        unsigned char req[16];
+
+        if (x->shape_opcode)
+                compositor_xwm_queue(x, req, xwm_enc_shape_select_input(req, sizeof req, x->shape_opcode, window, 1));
+}
+
+// The bounding shape of a window that has a row, asked of the X server: xwm_shape_reply gives it to the row.
+static void xwm_shape_ask(struct compositor_xwm *x, const struct compositor_xwm_window *w)
+{
+        unsigned char req[16];
+
+        if (x->shape_opcode && w->row >= 0)
+                compositor_xwm_wait(x, req, xwm_enc_shape_get_rectangles(req, sizeof req, x->shape_opcode, w->id), w->id,
+                                    COMPOSITOR_XWM_PROP_SHAPE, 0);
+}
+
+/*
+        A window's bounding shape (GetRectangles: the count at 8, the rectangles from 32, 8 bytes each) to its row
+        (compositor_row_shape_set): none where it is one rectangle holding the whole window, the rectangles where it is cut. Wine
+        cuts layered and regioned windows so: the Skyrim launcher's highlight over its buttons is a frame of four.
+*/
+static void xwm_shape_reply(struct compositor_xwm *x, const unsigned char *in, long size, const struct compositor_xwm_pending *found)
+{
+        struct compositor_xwm_window *w = xwm_find(x, found->window, 0);
+        unsigned long count = size >= 32 ? xwm_get32(in + 8) : 0;
+        int whole;
+
+        if (size < 32 || count > (unsigned long)(size - 32) / 8 || !w || w->row < 0)
+                return;
+        whole = count == 1 && xwm_get_i16(in + 32) <= 0 && xwm_get_i16(in + 34) <= 0 &&
+                xwm_get_i16(in + 32) + (long)xwm_get16(in + 36) >= (long)w->width && xwm_get_i16(in + 34) + (long)xwm_get16(in + 38) >= (long)w->height;
+        compositor_row_shape_set(w->row, in + 32, whole ? 0 : count, !whole);
 }
 
 /* ---- properties, tray, and window table ---- */
@@ -1269,6 +1312,7 @@ static void compositor_xwm_resolve(struct compositor_xwm *x, struct compositor_x
         if (row < 0 || w->row == (int)row)
                 return;
         xwm_row_bind(x, w, (int)row);
+        xwm_shape_ask(x, w);
         x->last_stack_gen = 0;
         compositor_xwm_app(w);
         compositor_xwm_owned(w);
@@ -3118,6 +3162,7 @@ static void xwm_event(struct compositor_xwm *x, const struct xwm_event *e)
         case XWM_EV_CREATE_NOTIFY:
                 if (e->synthetic || !(w = xwm_find(x, e->window, 1)))
                         break;
+                xwm_shape_watch(x, e->window);
                 if (e->override)
                         w->state |= COMPOSITOR_XWM_OVERRIDE;
                 else if (x->atoms[COMPOSITOR_XWM_A_STEAM])
@@ -3137,6 +3182,9 @@ static void xwm_event(struct compositor_xwm *x, const struct xwm_event *e)
                         unsigned int prev_w = w->width, prev_h = w->height;
                         int covers;
                         w->x = e->x, w->y = e->y, w->width = e->width, w->height = e->height;
+                        // A shape is told whole by the window's size (xwm_shape_reply): a shaped window's new size asks it again.
+                        if (w->row >= 0 && (w->width != prev_w || w->height != prev_h) && compositor_row_shaped(w->row))
+                                xwm_shape_ask(x, w);
                         if ((w->state & COMPOSITOR_XWM_ADOPTED) && (w->state & (COMPOSITOR_XWM_OVERRIDE | COMPOSITOR_XWM_BORDERLESS)) &&
                             w->row >= 0 && w->row < COMPOSITOR_ROWS && !(w->state & COMPOSITOR_XWM_FULLSCREEN) &&
                             (w->width != prev_w || w->height != prev_h) && (covers = compositor_xwm_covers(w)) >= 0)
@@ -3376,6 +3424,8 @@ static void compositor_xwm_message(struct compositor_xwm *x, const unsigned char
                         compositor_xwm_dnd_reply(x, in, size, &found);
                 else if (found.what == COMPOSITOR_XWM_PROP_MULTIPLE)
                         compositor_xwm_multiple_reply(x, in, size, &found);
+                else if (found.what == COMPOSITOR_XWM_PROP_SHAPE)
+                        xwm_shape_reply(x, in, size, &found);
                 else
                         xwm_property(x, in, size, &found);
         }
@@ -3403,6 +3453,14 @@ static void compositor_xwm_message(struct compositor_xwm *x, const unsigned char
                         x->broken = 1;
                 else if (!e.synthetic)
                         compositor_xwm_owner(x, &e);
+        }
+        else if (x->shape_event && (in[0] & XWM_TYPE_MASK) == x->shape_event)
+        {
+                struct compositor_xwm_window *w;
+
+                // ShapeNotify: the shape's kind at 1 (0 the bounding one), the window at 4.
+                if (in[1] == XWM_SHAPE_BOUNDING && (w = xwm_find(x, xwm_get32(in + 4), 0)))
+                        xwm_shape_ask(x, w);
         }
         else
         {
@@ -3450,10 +3508,32 @@ static void compositor_xwm_messages(struct compositor_xwm *x)
                         compositor_xwm_start_session(x);
                         continue;
                 }
+                if (x->shape_skip)
+                {
+                        long here = x->in_len - at < x->shape_skip ? x->in_len - at : x->shape_skip;
+
+                        at += here, x->shape_skip -= here;
+                        if (x->shape_skip)
+                                break;
+                        continue;
+                }
                 if ((type = xwm_message_type(x->in + at, (unsigned long)(x->in_len - at))) == XWM_ERR_SHORT)
                         break;
                 if ((size = xwm_server_message_size(x->in + at, (unsigned long)(x->in_len - at))) < 0)
                 {
+                        // A shape of more rectangles than a reply is kept for (a window cut pixel by pixel) is passed over as it
+                        // comes, and its window is drawn whole, as before shapes were read. Any other reply that long ends the link.
+                        if (size == XWM_ERR_CAP && type == XWM_REPLY && x->pending_count &&
+                            x->pending[x->pending_at].what == COMPOSITOR_XWM_PROP_SHAPE && x->pending[x->pending_at].seq == xwm_get16(x->in + at + 2))
+                        {
+                                struct compositor_xwm_window *w = xwm_find(x, x->pending[x->pending_at].window, 0);
+
+                                compositor_xwm_pending_done(x);
+                                if (w && w->row >= 0)
+                                        compositor_row_shape_set(w->row, 0, 0, 0);
+                                x->shape_skip = XWM_HEADER + (long)XWM_UNIT * (long)xwm_get32(x->in + at + 4);
+                                continue;
+                        }
                         xwm_drop(x, "reply too long");
                         return;
                 }
@@ -3506,6 +3586,7 @@ static void compositor_xwm_close_rows(struct compositor_xwm *x)
         for (int which = 0; which < 3; which++)
                 x->sel[which] = (struct compositor_xwm_selection){0, 0, 0, 0, 0, -1};
         x->xfixes_opcode = x->xfixes_event = x->setting = x->save.requestor = 0;
+        x->shape_opcode = x->shape_event = 0, x->shape_skip = 0;
         if (x->xdrag.began && !x->xdrag.dropped)
                 wayland_drag_x_leave();
         if (x->wdrag.live && x->wdrag.dropped)
