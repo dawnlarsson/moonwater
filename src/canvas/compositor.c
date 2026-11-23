@@ -4,7 +4,7 @@
         direct/overlay scanout, and peer Wayland/XWM bridges across 13 included parts under compositor/.
         Runtime switches under /run/moonwater: display-off, present-early, present-wait, vrr-capable,
         lists-off, lists-wait, gpu-nouserptr, gpu-own-userptr, gpu-gfx10, gpu-round-off, gpu-cut-off,
-        gpu-imports-all, touch-trace, layers-off, lift-off, planes-off, cursor-plane-probe, game-hold-off, gpu-clocks-off.
+        gpu-imports-all, touch-trace, layers-off, lift-off, planes-off, cursor-plane-probe, game-hold-off, gpu-clocks-off, clients-held.
 
         Dawn Larsson - Apache-2.0 license - github.com/dawnlarsson/moonwater
 */
@@ -2265,6 +2265,7 @@ static b32 compositor_main()
         compositor_card.nowait = !compositor_flag_exists((string_address) "/run/moonwater/present-wait");
         if (compositor_flag_exists((string_address) "/run/moonwater/gpu-clocks-off")) compositor_gpu_clocks.level = 0, compositor_gpu_clocks.game_off = 1;
         compositor_card.lists_nowait = !compositor_flag_exists((string_address) "/run/moonwater/lists-wait");
+        compositor_card.hold_clients = compositor_flag_exists((string_address) "/run/moonwater/clients-held");
 #endif
         if (compositor.scale < 25 || compositor.scale > 800) compositor.scale = WINDOWS_SCALE_DEFAULT;
         compositor.boot_scale = compositor.scale;
@@ -2342,6 +2343,7 @@ static b32 compositor_main()
                 {
                         sling = 0, again = 1, slots = sling_slots, held = sling_held, until = sling_until;
                         now = clock_monotonic_nanoseconds();
+                        compositor_loop_turned(now, held);
                         goto compositor_sling_poll;
                 }
 #endif
@@ -2349,6 +2351,7 @@ static b32 compositor_main()
                         compositor.probe_owed = 0, compositor_space_retake();
                 now = clock_monotonic_nanoseconds();
                 held = compositor_card_clients_held(now);
+                compositor_loop_turned(now, held);
                 if (!wanted) { positive nap[2] = {0, 10000000}; compositor_call(syscall(nanosleep), (positive)nap, 0, 0, 0, 0, 0); continue; }
                 compositor_loop_wanted(wanted, &slots, held);
                 if (slots.count > COMPOSITOR_POLLS_FOR(compositor_rows_in_use))
@@ -2364,6 +2367,7 @@ static b32 compositor_main()
                 idle_turn = until && until <= now;
                 awaited = compositor_loop_wait(wanted, slots.count, until ? wait : 0, again, held);
                 now = clock_monotonic_nanoseconds();
+                compositor_loop_turn_began = now;
 
                 if (awaited > 0)
                 {

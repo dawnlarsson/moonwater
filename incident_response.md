@@ -209,7 +209,7 @@ card here, NOT RUN.
 
 | | |
 |---|---|
-| Status | Contained: both release points wait on `compositor_card_reads`, the door's taken (compositor_take, 2f46b9dd) and the Wayland shim's releases (`row_busy`, 54cbc391), and the card's present goes without a wait by default since the commit that says so (`git log -S 'present-wait' -- src/canvas/compositor.c`); the entry was added with the present (`git log -S 'MW-2026-200' -- incident_response.md`), when it was opt-in |
+| Status | Contained: both release points wait on `compositor_card_reads`, the door's taken (compositor_take, 2f46b9dd) and the Wayland shim's releases (`row_busy`, 54cbc391), and the card's present goes without a wait by default since the commit that says so (`git log -S 'present-wait' -- src/canvas/compositor.c`); the entry was added with the present (`git log -S 'MW-2026-200' -- incident_response.md`), when it was opt-in. Since `git log -S 'clients-held' -- src/canvas/compositor.c` the loop reads its clients while the jobs run, the hold below the owner's opt-in `/run/moonwater/clients-held`, and the third writer, the Wayland host's own copy of a client's picture into the window table, writes the picture a job does not read (`compositor_card_reads_picture`) |
 | Class | A release race: a program is told a buffer is free (a native window's "taken", a Wayland wl_buffer.release) while a job of the card that composes the desktop still reads it in place |
 | Attacker | Any window program, native or Wayland, in any bowl: it only draws into a buffer the compositor said it may draw into. It reads nothing and runs nothing of the compositor's; the harm is the desktop's frame, which can show half its new picture over half its old one, or anything it writes into the buffer then, for the frame the job drew |
 | Reachable | src/canvas/compositor.c `compositor_card` (the present's jobs, `compositor_card_go`, `compositor_card_done`), `compositor_take` (the door's taken), src/canvas/wayland.c `wayland_gone_let`, `wayland_drawn_rows`, `wayland_presented_rows` (the releases) |
@@ -250,9 +250,23 @@ held for the job is told its picture was taken when the fence says done.
 queues a release of a buffer read in place while `compositor_card_reads` says
 the row is busy, and lets it go at the next drawn or presented frame, the
 client's socket read all along. The extra wait of a client's request under the
-hold is the job's time, about 0.7 to 0.9 ms mean on the owner's card, against
-none were the clients read during the job; computed from that card's debug,
-not measured on it.
+hold was the job's time, about 0.7 to 0.9 ms mean on the owner's card, 1.0 ms
+on the box (its debug, "handed to the fence"), and more under a game's load.
+
+**The hold let go of (fp L7, 2026-11-23).** The loop reads its clients while
+the jobs run, as it does with a flip in flight. Three writers could reach a
+picture a job reads in place: a native window (held by its door's taken,
+`compositor_take`), a Wayland client (held by `row_busy`), and the Wayland
+host itself, which copies a client's picture into the window's table picture
+where it is not lent, in place into the one shown when nothing pins it. That
+one was kept off it only by the hold; it now writes the other picture while a
+job reads the shown one (`compositor_card_reads_picture`, from the rows and
+fronts the present recorded in `compositor_card_after`), from a copy of it,
+and a second commit in the same job writes that one in place, which no job
+reads. A window's list that finds the card busy waits for the job with no turn
+counted against it (`compositor_lists_later`), so lists are not refused for
+the doors read meanwhile. Held by CHECK_gpu_kit `gpu_card_rows`: the clients
+are read while a job runs, and with `hold_clients` the hold is as it was.
 
 ### MW-2026-199: `setup update usb` wrote whatever disk had the install's name when the answer came
 

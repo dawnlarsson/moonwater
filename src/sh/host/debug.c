@@ -769,6 +769,11 @@ static b32 host_debug(string_address address_to arguments, positive count)
                  (positive)table->metric_loop_by[0], (positive)table->metric_loop_by[1], (positive)table->metric_loop_by[2], (positive)table->metric_loop_by[3],
                  (positive)table->metric_loop_by[4], (positive)table->metric_loop_by[5], (positive)table->metric_loop_by[6], (positive)table->metric_loop_by[7],
                  (positive)table->metric_loop_by[8], (positive)table->metric_loop_by[9]);
+        // The loop's turns by how long each took (window.c, metric_turns): since the start, and the last second's (a second's worth).
+        host_debug_us_times("  loop turns      ", "since the start, each from its wait's end to the top of the next turn", table->metric_turns, table->metric_turn_most);
+        host_debug_us_times("  loop turns      ", "the last second", table->metric_turns_second, table->metric_turn_most_second);
+        host_say(log, "  clients unread  %p us a second while card jobs ran (touch /run/moonwater/clients-held before the compositor starts to hold them, as it did)\n",
+                 (positive)table->metric_clients_held);
         host_power_block();
         // The issue board: every issue raised, one line each, so the terminal and Settings tell the same story.
         {

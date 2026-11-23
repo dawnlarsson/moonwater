@@ -4124,7 +4124,12 @@ static void gpu_card_rows(void)
         compositor_card_after(clip, 1, 0, 1, 0, 0, 0, rows, 1), compositor_card_began(now);
         check("gpu card: the next present is held while its job runs", compositor_card_holds());
         check("gpu card: and the picture of the row it reads is the job's, no other's", compositor_card_reads(3) && !compositor_card_reads(4));
-        check("gpu card: the clients are held while the job is younger than GPU_LATE_NS, and not after",
+        check("gpu card: of the row's two table pictures the job reads the one that was its front, and the Wayland host writes the other",
+              compositor_card_reads_picture(3, compositor.front[3] & 1u) && !compositor_card_reads_picture(3, (compositor.front[3] & 1u) ^ 1u) &&
+                  !compositor_card_reads_picture(4, 0) && !compositor_card_reads_picture(4, 1));
+        check("gpu card: by default the clients are read while the job runs", !compositor_card_clients_held(now + 1000000ull) && !compositor_card_clients_held(now));
+        compositor_card.hold_clients = 1; // the owner's /run/moonwater/clients-held: the hold as it was
+        check("gpu card: held (clients-held), the clients are held while the job is younger than GPU_LATE_NS, and not after",
               compositor_card_clients_held(now + 1000000ull) && compositor_card_clients_held(now + GPU_LATE_NS - 1) && !compositor_card_clients_held(now + GPU_LATE_NS));
         {
                 int kept_door = compositor.door[2], kept_input = compositor.inputs[0];
@@ -4408,7 +4413,10 @@ static void gpu_lists_nowait_rows(void)
         check("lists nowait: a present is held while it runs, the present waiting for its jobs or not", compositor_card_holds() && compositor_card_awaits());
         compositor_card.nowait = 1;
         check("lists nowait: (without a wait too)", compositor_card_holds() && compositor_card_awaits());
-        check("lists nowait: the clients are held while the job is younger than GPU_LATE_NS, and not after",
+        check("lists nowait: by default the clients are read while it runs", !compositor_card_clients_held(compositor_card.list_began + 1000000ull));
+        check("lists nowait: and the picture it draws is the row's first", compositor_card_reads_picture(5, 0) && !compositor_card_reads_picture(5, 1));
+        compositor_card.hold_clients = 1; // the owner's /run/moonwater/clients-held: the hold as it was
+        check("lists nowait: held (clients-held), the clients are held while the job is younger than GPU_LATE_NS, and not after",
               compositor_card_clients_held(compositor_card.list_began + 1000000ull) && compositor_card_clients_held(compositor_card.list_began + GPU_LATE_NS - 1) &&
                   !compositor_card_clients_held(compositor_card.list_began + GPU_LATE_NS));
         {

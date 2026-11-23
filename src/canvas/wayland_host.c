@@ -3127,7 +3127,9 @@ static int compositor_wl_row_picture(void *context, int row, const struct waylan
         if (!compositor_wl.laying[row].open)
         {
                 unsigned int shown = compositor.showing[row] ? compositor.front[row] & 1u : 0;
-                int pinned = compositor.showing[row] && (table->pinned[row] || compositor.direct_row == row);
+                // The picture shown is written in place unless something reads it where it is: the card's scanout, a pin, or a job of the card the
+                // loop reads its clients beside (compositor_card_reads_picture): then the other is written, from a copy of it.
+                int pinned = compositor.showing[row] && (table->pinned[row] || compositor.direct_row == row || compositor_card_reads_picture(row, shown));
                 long tw = picture->dst_width > 0 ? picture->dst_width : (picture->transform & 1 ? picture->height : picture->width);
                 long th = picture->dst_height > 0 ? picture->dst_height : (picture->transform & 1 ? picture->width : picture->height);
                 int covers = has_content && !picture->blend && !picture->dest_x && !picture->dest_y && tw >= width &&

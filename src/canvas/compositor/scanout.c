@@ -267,7 +267,9 @@ static int compositor_shows_row(int row)
         the frame's: the flip of the plate composed into is committed with it as the primary plane's IN_FENCE_FD (compositor_flip_fenced), so the kernel
         flips once the card is done, and the loop polls it too, for what comes once the pixels are there (compositor_card_done): the screens told what
         changed, the flip where the card takes no fence (the legacy flip, a headless scan image's names), the present's time (the metric the lead is measured
-        on), and what the clients are told of their pictures: nothing while a job may read them (the loop reads no client while compositor_card.on). Nothing
+        on), and what the clients are told of their pictures: nothing while a job may read them (compositor_card_reads, below). The loop reads its clients
+        while the jobs run (their doors, their Wayland sockets, the X window manager), as it reads them with a flip in flight: the door's taken, the shim's
+        releases and the Wayland host's own writes into a window's table picture (compositor_card_reads_picture) keep off what a job reads. Nothing
         waits for the card in place. A job not done GPU_HANG_NS after its submit is the hang path there was (compositor_gpu_job_failed: the cool-down, the
         processor draws), and the frame it was for is drawn again (compositor_card_abandon); a flip whose event never comes is compositor_flip_lost.
 
@@ -278,10 +280,13 @@ static int compositor_shows_row(int row)
         A window's list is drawn the same way unless the owner asks for it waited for in place, as it was (the file /run/moonwater/lists-wait, looked
         for at the start: compositor_card.lists_nowait 0): its job is submitted (gpu_scene_submit, its records in their own half
         of the ops' megabyte, COMPOSITOR_GPU_LIST_OPS_AT) and the row's picture is the job's until its fence says done (compositor_card_reads, so the door's
-        taken is held and the program writes nothing the job reads); a present is held while it runs (it reads that picture), the clients' doors and
-        sockets are not read while it is younger than GPU_LATE_NS (no other list asks for the card meanwhile, so none is refused for want of it), the doors
-        that knocked with it are read at a later turn from the first of them (compositor_card_door_waits), and the loop's turn gives the row back when it is
-        done (compositor_card_lists_settle), or with the hang path at its deadline, the list then refused (list_state 2: the program paints that frame).
+        taken is held and the program writes nothing the job reads); a present is held while it runs (it reads that picture), the doors that knocked with
+        it are read at a later turn from the first of them (compositor_card_door_waits), a list that finds the card busy then waits for it with no turn
+        counted while a job the loop waits on runs (compositor_lists_later), so none is refused for want of it, and the loop's turn gives the row back when
+        it is done (compositor_card_lists_settle), or with the hang path at its deadline, the list then refused (list_state 2: the program paints that frame).
+
+        The owner's file /run/moonwater/clients-held (looked for at the start: compositor_card.hold_clients) has the loop read no client while a present's
+        jobs or a list's are younger than GPU_LATE_NS, as it did (compositor_card_clients_held), for a comparison.
 */
 enum
 {
@@ -314,6 +319,8 @@ static struct
         unsigned int clips;
         int turning, composed, flip_own, back, plane_off; // how the present ends (compositor_present_tell)
         struct compositor_rows rows; // the rows whose pictures the present's jobs read (bit row)
+        struct compositor_rows front1; // of those, the rows whose table picture read is the second (compositor.front[row] 1 when the present was made)
+        b32 hold_clients;           // the loop reads no client while a job is younger than GPU_LATE_NS (/run/moonwater/clients-held at the start)
         b32 lists_nowait;           // a window's list is drawn by a job not waited for (/run/moonwater/lists-wait was not there at the start)
         struct compositor_rows list_rows; // the rows whose picture a list's job not waited for draws (bit row), each one's job, and when the first began
         positive *list_seq, list_began;
@@ -330,6 +337,20 @@ static struct
 static int compositor_card_reads(int row)
 {
         return row >= 0 && row < COMPOSITOR_ROWS && ((compositor_card.on && rows_has(&compositor_card.rows, row)) || rows_has(&compositor_card.list_rows, row));
+}
+
+/*
+        Whether a job of the card reads the row's table picture `which` (0 or 1) where it is: a present's job reads the one that was the row's front when the
+        present was made (compositor_card.front1), a list's job draws the first. The Wayland host, which writes a window's table picture as its program would,
+        writes the other while a job reads the one it would write in place (compositor_wl_row_picture), so a commit read while the job runs tears nothing.
+*/
+static int compositor_card_reads_picture(int row, unsigned int which)
+{
+        if (row < 0 || row >= COMPOSITOR_ROWS)
+                return 0;
+        if (rows_has(&compositor_card.list_rows, row) && !(which & 1u))
+                return 1;
+        return compositor_card.on && rows_has(&compositor_card.rows, row) && (unsigned int)rows_has(&compositor_card.front1, row) == (which & 1u);
 }
 
 // Whether the doors still to be read this turn wait for a later one: a list's job not waited for was submitted in this turn (listing: one was on the card

@@ -161,6 +161,34 @@ static unsigned int compositor_loop_source(unsigned int at, unsigned int doors, 
         return 9;
 }
 
+/*
+        The loop's turns by how long each took (moonwater debug's loop turns): a turn is from its wait's end (compositor_loop_turn_began) to the top of
+        the next, whose clock the loop reads anyway, so a turn costs no clock of its own. They are counted as microseconds in WINDOWS_US_BUCKETS powers
+        of two (windows_us_bucket). Beside them the time the loop went with its clients unread because a card job ran (compositor_card_clients_held, the
+        owner's clients-held), from the top of a held turn to the top of the next.
+*/
+static unsigned int compositor_loop_spans[WINDOWS_US_BUCKETS], compositor_loop_spans_then[WINDOWS_US_BUCKETS];
+static unsigned long long compositor_loop_turn_most, compositor_loop_most_second;
+static unsigned long long compositor_loop_turn_began, compositor_loop_top, compositor_clients_held_ns, compositor_clients_held_then;
+static b32 compositor_loop_top_held;
+
+// The top of the loop at now, held saying whether the clients go unread this turn: the turn that ended counted, and the held time.
+static inline void compositor_loop_turned(unsigned long long now, b32 held)
+{
+        if (compositor_loop_turn_began && now >= compositor_loop_turn_began)
+        {
+                unsigned long long took = now - compositor_loop_turn_began;
+
+                compositor_loop_spans[windows_us_bucket(took / 1000ull)]++;
+                compositor_loop_turn_most = took > compositor_loop_turn_most ? took : compositor_loop_turn_most;
+                compositor_loop_most_second = took > compositor_loop_most_second ? took : compositor_loop_most_second;
+                compositor_loop_turn_began = 0;
+        }
+        if (compositor_loop_top_held && now > compositor_loop_top)
+                compositor_clients_held_ns += now - compositor_loop_top;
+        compositor_loop_top = now, compositor_loop_top_held = held;
+}
+
 static void compositor_loop_tick(unsigned long long now, b32 idle)
 {
         struct windows address_to table = compositor.table;
@@ -170,11 +198,24 @@ static void compositor_loop_tick(unsigned long long now, b32 idle)
                 compositor_loop_since = now, compositor_loop_then = compositor_loop_turns, compositor_loop_idle_then = compositor_loop_idle;
         if (now - compositor_loop_since >= 1000000000ull)
         {
+                unsigned long long span = now - compositor_loop_since;
+
                 if (table)
-                        table->metric_loops = windows_metric_rate(compositor_loop_turns - compositor_loop_then, now - compositor_loop_since),
-                        table->metric_loop_idle = windows_metric_rate(compositor_loop_idle - compositor_loop_idle_then, now - compositor_loop_since);
+                {
+                        table->metric_loops = windows_metric_rate(compositor_loop_turns - compositor_loop_then, span),
+                        table->metric_loop_idle = windows_metric_rate(compositor_loop_idle - compositor_loop_idle_then, span);
+                        for (unsigned int k = 0; k < WINDOWS_US_BUCKETS; k++)
+                                table->metric_turns[k] = compositor_loop_spans[k],
+                                table->metric_turns_second[k] = windows_metric_rate(compositor_loop_spans[k] - compositor_loop_spans_then[k], span);
+                        table->metric_turn_most = (unsigned int)(compositor_loop_turn_most / 1000ull);
+                        table->metric_turn_most_second = (unsigned int)(compositor_loop_most_second / 1000ull);
+                        table->metric_clients_held = windows_metric_rate((compositor_clients_held_ns - compositor_clients_held_then) / 1000ull, span);
+                }
+                for (unsigned int k = 0; k < WINDOWS_US_BUCKETS; k++)
+                        compositor_loop_spans_then[k] = compositor_loop_spans[k];
+                compositor_loop_most_second = 0, compositor_clients_held_then = compositor_clients_held_ns;
                 for (unsigned int k = 0; table && k < WINDOWS_LOOP_SOURCES; k++)
-                        table->metric_loop_by[k] = windows_metric_rate(compositor_loop_by[k] - compositor_loop_by_second[k], now - compositor_loop_since),
+                        table->metric_loop_by[k] = windows_metric_rate(compositor_loop_by[k] - compositor_loop_by_second[k], span),
                         compositor_loop_by_second[k] = compositor_loop_by[k];
                 compositor_loop_since = now, compositor_loop_then = compositor_loop_turns, compositor_loop_idle_then = compositor_loop_idle;
         }
@@ -501,14 +542,18 @@ static positive compositor_card_held_until(void)
         return (compositor_card.on ? compositor_card.began : compositor_card.list_began) + GPU_LATE_NS;
 }
 
-// Whether the loop reads no client this turn: a present's jobs are on the card, or a list's not waited for, and it began less than GPU_LATE_NS ago
-// (compositor_card_held_until; a list's holds them so that no other list asks for the card meanwhile). Past that the clients are read again (a client
-// not read for a hung job's two seconds is ended by its toolkit's watchdog, its pings unanswered), and what the jobs read is kept from them by
-// compositor_card_reads (the doors' taken, the shim's releases) until they are done or the hang path ends them. The input devices are read whatever
-// this says.
+/*
+        Whether the loop reads no client this turn. It reads them while the card's jobs run: what the jobs read is kept from the clients by
+        compositor_card_reads (the doors' taken, the shim's releases) and from the Wayland host's own writes by compositor_card_reads_picture, until the jobs
+        are done or the hang path ends them, and a list that finds the card busy waits for it (compositor_lists_later). A commit, a ping or an X window's
+        request waited out the job before, up to GPU_LATE_NS: about a millisecond a composed frame on the box's card idle, more under a game's load.
+        The owner's /run/moonwater/clients-held (compositor_card.hold_clients) holds them as it was: while a present's jobs are on the card, or a list's,
+        and it began less than GPU_LATE_NS ago (compositor_card_held_until), past which a client not read for a hung job's two seconds would be ended by
+        its toolkit's watchdog. The input devices are read whatever this says.
+*/
 static b32 compositor_card_clients_held(positive now)
 {
-        return (compositor_card.on || rows_any(&compositor_card.list_rows)) && now < compositor_card_held_until();
+        return compositor_card.hold_clients && (compositor_card.on || rows_any(&compositor_card.list_rows)) && now < compositor_card_held_until();
 }
 
 // The present whose jobs are on the card began at `began`: its time is noted when they are done, and the clients' hold is counted from it.
@@ -661,10 +706,14 @@ static void compositor_card_said(void)
 static void compositor_card_after(const unsigned short (*clip)[4], unsigned int clips, int turning, int gpu_composed, int flip_own, int back, int plane_off,
                                   const unsigned int *rows, unsigned int windows)
 {
-        rows_none(&compositor_card.rows);
+        rows_none(&compositor_card.rows), rows_none(&compositor_card.front1);
         for (unsigned int at = 0; at < windows; at++)
                 if (rows[at] < COMPOSITOR_ROWS)
+                {
                         rows_add(&compositor_card.rows, rows[at]);
+                        if (compositor.front[rows[at]] & 1u)
+                                rows_add(&compositor_card.front1, rows[at]);
+                }
         memory_copy(compositor_card.clip, clip, (positive)clips * sizeof(clip[0]));
         compositor_card.clips = clips, compositor_card.turning = turning, compositor_card.composed = gpu_composed;
         compositor_card.flip_own = flip_own, compositor_card.back = back, compositor_card.plane_off = plane_off;
@@ -717,6 +766,7 @@ static void compositor_take(int row);
 
 // The rows whose list waited for the card taken again, now that it is idle (compositor_lists_take).
 static b32 compositor_list_wait_turn(int row);
+static b32 compositor_card_awaits(void);
 
 static void compositor_lists_later(void)
 {
@@ -727,8 +777,10 @@ static void compositor_lists_later(void)
         rows_take(&later, &compositor.list_later);
         for (int row = rows_next(&later, 0); row >= 0; row = rows_next(&later, row + 1))
         {
-                // Still busy: a turn it waited (counted toward COMPOSITOR_LIST_WAITS), kept in list_later; at the bound the take refuses it.
-                if ((compositor_card.on || !gpu_idle()) && compositor_list_wait_turn(row))
+                // Still busy: kept in list_later. A job the loop waits on (a present's, a list's: compositor_card_awaits) ends by its fence, which wakes
+                // the loop, or by the hang path at its deadline, so the list waits for it with no turn counted: the loop reads its clients while the job
+                // runs, and its turns are theirs. Otherwise a turn it waited is counted toward COMPOSITOR_LIST_WAITS, and at the bound the take refuses it.
+                if ((compositor_card.on || !gpu_idle()) && (compositor_card_awaits() || compositor_list_wait_turn(row)))
                 {
                         rows_add(&compositor.list_later, row);
                         continue;
