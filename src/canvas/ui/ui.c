@@ -12011,6 +12011,18 @@ static fn ui_vtabs_row(const struct ui_control address_to c, int address_to x, i
         *w = c->row_w > 0 ? c->row_w : c->w;
 }
 
+// Item k of tabs as it is laid out, logical pixels.
+static fn ui_tab_box(struct ui address_to ui, const struct ui_control address_to c, int item, int address_to x, int address_to y, int address_to w, int address_to h)
+{
+        if (c->variant == UI_TABS_VERTICAL)
+        {
+                ui_vtabs_row(c, x, w);
+                *y = c->y + item * c->h, *h = c->h;
+                return;
+        }
+        *x = ui_tab_left(ui, c, item), *y = c->y, *w = ui_tab_width(ui, c, item), *h = c->h > 0 ? c->h : (c->variant ? 32 : 40);
+}
+
 static struct ui_tab_hit ui_tab_hit_at(struct ui address_to ui, const struct ui_control address_to c, int x, int y)
 {
         if (c->variant == UI_TABS_VERTICAL)
@@ -12604,6 +12616,26 @@ static fn ui_kit_mark(const struct ui address_to ui, const struct ui_control add
 
 static fn ui_control_draw_one(struct ui address_to ui, struct ui_control address_to c);
 
+// The focus ring on a control the keys are on, while the hand is on the keys: round a switch's, a check box's or a slider's box, the radio
+// chosen and the tab of a strip chosen. A button draws its own, with its press; a field's caret and tint are its focus; a column of tabs's
+// pip, as a list's lit row, is the fill that says the keys are on it.
+static fn ui_kit_focus_mark(struct ui address_to ui, const struct ui_control address_to c)
+{
+        int x = c->x, y = c->y, w = c->w, h = c->h;
+        b32 pill = c->kind == UI_TABS && ui_tabs_segmented(c);
+        struct ui_box face;
+        if ((c->kind == UI_TABS || c->kind == UI_RADIOS) && (c->at < 0 || c->at >= c->count || (c->kind == UI_TABS && c->variant == UI_TABS_VERTICAL)))
+                return;
+        if (c->kind == UI_TABS)
+                ui_tab_box(ui, c, c->at, &x, &y, &w, &h);
+        else if (c->kind == UI_RADIOS)
+                y = ui_radio_row_y(c, c->at);
+        else if (c->kind != UI_SWITCH && c->kind != UI_CHECKBOX && c->kind != UI_SLIDER)
+                return;
+        face = ui_kit_focus_outset(ui, ui_box_of(ui, ui_q(x), ui_q(y), ui_q(w), ui_q(h), pill ? ui_q(h) / 2 : ui_q(8)));
+        ui_kit_focus_ring(ui, &face);
+}
+
 // One control drawn, whatever it is; the rows it reaches marked when anything in it is moving.
 static fn ui_control_draw(struct ui address_to ui, struct ui_control address_to c)
 {
@@ -12613,6 +12645,8 @@ static fn ui_control_draw(struct ui address_to ui, struct ui_control address_to 
         ui_kit.reached = 0;
         ui_kit.reach_top = ui_kit.reach_bottom = 0;
         ui_control_draw_one(ui, c);
+        if (c->focused && !c->disabled && ui_kit.keyed)
+                ui_kit_focus_mark(ui, c);
         if (ui_kit.busy)
                 ui_kit_mark(ui, c);
         ui_kit.busy |= was;
@@ -12894,6 +12928,14 @@ static struct ui_control address_to ui_tabs_release(struct ui address_to ui, str
         return changed;
 }
 
+// A switch or a check box turned (a click, or Enter and Space on it): the fill's stretch goes the way it turned.
+static fn ui_toggle_turn(struct ui_control address_to c)
+{
+        c->on = !c->on, c->dom_origin = (c->on ? 1 : -1) * ui_dir();
+        if (!ui_kit.motion)
+                ui_stretch_go(&c->dom, ui_kit.now, UI_Q2(111));
+}
+
 static struct ui_control address_to ui_toggle_release(struct ui address_to ui, struct ui_control address_to c, int x, int y)
 {
         struct ui_control address_to changed = null;
@@ -12916,11 +12958,7 @@ static struct ui_control address_to ui_toggle_release(struct ui address_to ui, s
                         }
                 }
                 else
-                {
-                        c->on = !c->on, changed = c, c->dom_origin = (c->on ? 1 : -1) * ui_dir();
-                        if (!ui_kit.motion)
-                                ui_stretch_go(&c->dom, ui_kit.now, UI_Q2(111));
-                }
+                        ui_toggle_turn(c), changed = c;
         }
         c->moved = 0;
         if (c->kind != UI_RADIOS)
@@ -18022,11 +18060,36 @@ static fn ui_graph_draw(struct ui address_to ui, struct ui_graph address_to g)
 #define UI_VIEW_DRAW UI_BUTTONS_DRAW
 #define UI_VIEW_TAKEN UI_BUTTONS_TAKEN
 #define UI_VIEW_QUIT 8u
+#define UI_VIEW_HANDED 16u        // the kit's keys went to an element of the app's (ui_view.handed): a list, or a host it marked .keys
 
 struct ui_rect
 {
         int x, y, w, h;
 };
+
+// The keys' way across a window: an arrow (UI_KEY_LEFT, _RIGHT, _UP, _DOWN, as the screen has them whichever way it reads) goes from
+// box from to the box nearest that way. A box is that way when it reaches past from's far side and begins past its near one; its score is
+// the gap along the way, and twice the gap across it (none where they overlap across), and then how far apart their middles are across:
+// the least wins. -1: not that way.
+static b64 ui_spot_way(struct ui_rect from, struct ui_rect to, int key)
+{
+        b32 down = key == UI_KEY_UP || key == UI_KEY_DOWN, back = key == UI_KEY_LEFT || key == UI_KEY_UP;
+        int near = down ? from.y : from.x, far = near + (down ? from.h : from.w), begin = down ? to.y : to.x, past = begin + (down ? to.h : to.w);
+        int low = down ? from.x : from.y, high = low + (down ? from.w : from.h), start = down ? to.x : to.y, stop = start + (down ? to.w : to.h);
+        int along, across, middle;
+        if (back)
+        {
+                int was = near;
+                near = -far, far = -was, was = begin, begin = -past, past = -was;
+        }
+        if (!((far <= begin || near < begin) && far < past))
+                return -1;
+        along = begin > far ? begin - far : 0;
+        across = start >= high ? start - high : low >= stop ? low - stop : 0;
+        middle = (start + stop) - (low + high);
+        middle = middle < 0 ? -middle : middle;
+        return ((b64)along + 2 * (b64)across) << 32 | (p32)middle;
+}
 
 // What an app writes for an element (the element macros set the kind): its class and the few sizes a class cannot say, and what it is for.
 struct ui_props
@@ -18049,6 +18112,7 @@ struct ui_props
         struct ui_rect address_to host;   // where the element's rectangle is written by ui_view_end, device pixels: a host's, or any element's the app asks for
         struct ui_control address_to control; // the app's control the element is (ui_control), or the surface of a container
         struct ui_list address_to list;   // the kit's list the element is (ui_rows): placed, laid out, drawn and turned by the wheel by the view
+        b32 keys;                         // a host that is the app's own place for the keys (a mixer's strips): the kit's arrows hand them to it
 };
 
 // A class: what its name stands for, in logical pixels. A zero is not said, so a class that says nothing of a thing...
@@ -18122,6 +18186,7 @@ struct ui_item
         struct ui_rect address_to host;
         struct ui_control address_to control;
         struct ui_list address_to list;   // a list's (ui_rows)
+        b32 keys;                         // a host the keys can be handed to (ui_props.keys)
         b32 (*on)(int value);             // a button's or a control's handler, and what it is given
         int arg;
 };
@@ -18224,7 +18289,30 @@ struct ui_view
         struct ui_rect side_box;
         b32 side_held;                    // mirrors side_split.held for external readers/checks
         struct ui_splitter side_split;
+        // The keys (ui_view_key): the kit's element they are on (a control, or a button of the group), none while they are the app's own;
+        // and the app's element the kit's arrows last handed them to (a list, or a host marked .keys), which the app takes them in.
+        struct ui_control address_to keys;
+        address_any handed;
 };
+
+static inline b32 ui_view_button_of(const struct ui_view address_to v, const struct ui_control address_to c)
+{
+        return c >= v->group.button && c < v->group.button + UI_BUTTONS_MOST;
+}
+
+// The group's keys and the kit's as one: a button the group's keys are on has the kit's (a press on it, or the app's say), and one they left has none.
+static fn ui_view_keys_group(struct ui_view address_to v)
+{
+        struct ui_control address_to button = v->group.keys > 0 && v->group.keys <= v->group.count ? &v->group.button[v->group.keys - 1] : null;
+        if (button && v->keys != button)
+        {
+                if (v->keys)
+                        v->keys->focused = 0;
+                v->keys = button;
+        }
+        else if (!button && v->keys && ui_view_button_of(v, v->keys))
+                v->keys = null;
+}
 
 // A view never begun pointed at its own tree's elements and items, so a read before its first build reads zeros.
 static inline fn ui_view_ready(const struct ui_view address_to v)
@@ -18243,6 +18331,7 @@ static fn ui_list_draw(struct ui address_to ui, struct ui_list address_to l);
 static b32 ui_view_list_wheel(struct ui address_to ui, struct ui_list address_to l, int x, int y, b32 anywhere, const struct window_event address_to event);
 static b32 ui_view_list_bar(const struct ui address_to ui, struct ui_list address_to l, int type, int x, int y, b32 down, b32 address_to lit);
 static b32 ui_view_list_bar_cancel(struct ui_list address_to l);
+static p32 ui_view_key(struct ui address_to ui, struct ui_view address_to v, const struct window_event address_to event);
 static fn ui_list_press_cancel(const struct ui address_to ui, struct ui_list address_to l);
 
 // The finger's recogniser and a scroll region's keys are defined with the list and the lines, after the view.
@@ -18458,7 +18547,7 @@ static struct ui_item address_to ui_view_open(int kind, int dir, const struct ui
         }
         item->kind = (unsigned char)kind, item->look = look, item->text = p->text, item->host = p->host, item->button = item->scroll = -1;
         item->paint = p->paint, item->ink = p->ink, item->size = p->size, item->drop = p->drop, item->cut = p->cut || look.cut;
-        item->control = p->control, item->list = p->list, item->on = p->on, item->arg = p->arg;
+        item->control = p->control, item->list = p->list, item->on = p->on, item->arg = p->arg, item->keys = p->keys;
         // A column that scrolls:
         if (look.scroll && dir == 1 && item != &v->discard && v->scrolls < UI_VIEW_SCROLLS)
         {
@@ -18951,7 +19040,10 @@ static p32 ui_view_event(struct ui address_to ui, struct ui_view address_to v, c
         }
         else
         {
-                asks |= ui_buttons_event(ui, &v->group, event, ui_kit.pointer_x, ui_kit.pointer_y);
+                if (event->type == WINDOW_EVENT_KEY)
+                        asks |= ui_view_key(ui, v, event);
+                else
+                        asks |= ui_buttons_event(ui, &v->group, event, ui_kit.pointer_x, ui_kit.pointer_y), ui_view_keys_group(v);
                 for (int at = 0; at < v->tree.count && (asks & UI_BUTTONS_FIRED); at++)
                         if (v->item[at].kind == UI_ITEM_BUTTON && v->item[at].button == v->group.fired)
                                 asks = (asks & ~UI_BUTTONS_FIRED) | ui_view_act(&v->item[at]);
@@ -18984,6 +19076,9 @@ static p32 ui_view_event(struct ui address_to ui, struct ui_view address_to v, c
                 else if (c->kind == UI_SLIDER && ghost != c->hover_x)
                         ui_view_due(v, ui_dev(ui, c->y - 8) < 0 ? 0 : ui_dev(ui, c->y - 8), ui_dev(ui, c->y + c->h + 8));
         }
+        // A press takes the kit's keys from the control they were on (a button's are its group's, which the press just settled).
+        if (event->type == WINDOW_EVENT_BUTTON && down && v->keys && !ui_view_button_of(v, v->keys))
+                v->keys->focused = 0, v->keys = null, asks |= UI_VIEW_DRAW;
         if (button && down && under &&
             ((event->flags & WINDOW_KEY_TOUCH) || (ui_press_drags(event->flags) && !ui_kit_held && !(asks & UI_VIEW_TAKEN) && !ui_view_text_at(ui, v, x, y))))
                 ui_press_down(&v->finger, x, y, -1, under);
@@ -23643,6 +23738,281 @@ static b32 ui_list_key(const struct ui address_to ui, struct ui_list address_to 
         }
         *moved = ui_list_move(ui, l, by);
         return true;
+}
+
+/* ---- the keys across a view ---- */
+// The element the keys are on takes the keys it uses, and an arrow it does not use takes them to the nearest element that way
+// (ui_spot_way): the kit's own (a control, a button of the group) it keeps, an app's (a list, a host marked .keys) it hands over.
+
+// A row's box as the keys stand on it, device pixels: its tile in a list of tiles, else its span across the list. False when it is not placed.
+static b32 ui_list_key_box(const struct ui address_to ui, const struct ui_list address_to l, int id, struct ui_rect address_to box)
+{
+        int at = id >= 0 ? ui_list_at(l, id) : -1, place = l->virtual ? id : at, per, unit;
+        if (!l->tiles)
+                return ui_list_row_rect(l, id, &box->x, &box->y, &box->w, &box->h);
+        if (at < 0)
+                return false;
+        per = ui_list_per(ui, l), unit = ui_list_unit(ui, l), per = per > 0 ? per : 1;
+        *box = (struct ui_rect){ui_list_tile_x(ui, l, place), l->y + place / per * unit - l->scroll.scroll, ui_dev(ui, l->tiles), unit};
+        return true;
+}
+
+static inline b32 ui_list_choosable(const struct ui_list address_to l, int id) { return !l->choosable || l->choosable(id); }
+
+// The keys come into a list from box from by an arrow: of its rows in sight, the one nearest that way has them. With none that way (or by
+// Tab, key 0) the row they were on keeps them, or the first the keys may stand on.
+static fn ui_list_enter(const struct ui address_to ui, struct ui_list address_to l, const struct ui_rect address_to from, int key)
+{
+        b64 best = -1, score;
+        int found = -1;
+        for (int at = 0; from && key && at < l->count; at++)
+        {
+                int id = ui_list_id(l, at);
+                struct ui_rect box;
+                if (!ui_list_choosable(l, id) || !ui_list_key_box(ui, l, id, &box) || box.y + box.h <= l->y || box.y >= l->y + l->h)
+                        continue;
+                score = ui_spot_way(*from, box, key);
+                if (score >= 0 && (best < 0 || score < best))
+                        best = score, found = id;
+        }
+        for (int at = 0; found < 0 && ui_list_at(l, l->focus) < 0 && at < l->count; at++)
+                found = ui_list_choosable(l, ui_list_id(l, at)) ? ui_list_id(l, at) : -1;
+        if (found >= 0)
+                l->focus = found;
+        l->keys = l->lit = true;
+        ui_list_reveal(ui, l);
+        ui_list_damage_all(ui, l);
+}
+
+// What element at is to the keys: its list, its control, its button of the group, or the rectangle of a host marked .keys; none.
+static address_any ui_view_element(struct ui_view address_to v, int at)
+{
+        struct ui_item address_to item = &v->item[at];
+        if (item->list)
+                return item->list;
+        if (item->control)
+                return item->control;
+        if (item->kind == UI_ITEM_BUTTON && item->button >= 0)
+                return &v->group.button[item->button];
+        return item->keys ? item->host : null;
+}
+
+static int ui_view_find(struct ui_view address_to v, const void address_to element)
+{
+        for (int at = 0; element && at < v->tree.count; at++)
+                if (ui_view_element(v, at) == element)
+                        return at;
+        return -1;
+}
+
+// Element at's box in the window (device pixels) where the keys can stand on it: a live control other than a field (a field's keys are its
+// app's, who types into it), a list with rows, a button of the group in sight, a host marked .keys.
+static b32 ui_view_spot(const struct ui_view address_to v, int at, struct ui_rect address_to box)
+{
+        const struct ui_node address_to n = &v->tree.node[at];
+        const struct ui_item address_to item = &v->item[at];
+        const struct ui_control address_to c = item->control                                       ? item->control
+                                               : item->kind == UI_ITEM_BUTTON && item->button >= 0 ? &v->group.button[item->button]
+                                                                                                   : null;
+        if (n->w <= 0 || n->h <= 0)
+                return false;
+        if (item->list ? !(item->list->virtual ? item->list->total : item->list->count)
+            : c        ? !ui_control_live(c) || c->kind == UI_INPUT || c->w <= 0
+                       : !item->keys || !item->host)
+                return false;
+        *box = (struct ui_rect){n->x, n->y, n->w, n->h};
+        return true;
+}
+
+// Where the keys are in element at, device pixels: a list's row they are on, the tab chosen, else the element's box.
+static struct ui_rect ui_view_from(struct ui address_to ui, const struct ui_view address_to v, int at)
+{
+        const struct ui_node address_to n = &v->tree.node[at];
+        const struct ui_item address_to item = &v->item[at];
+        struct ui_rect box = {n->x, n->y, n->w, n->h}, row;
+        if (item->list && ui_list_key_box(ui, item->list, item->list->focus, &row))
+                return row;
+        if (item->control && item->control->kind == UI_TABS && item->control->at >= 0 && item->control->at < item->control->count)
+        {
+                ui_tab_box(ui, item->control, item->control->at, &row.x, &row.y, &row.w, &row.h);
+                return (struct ui_rect){ui_dev(ui, row.x), ui_dev(ui, row.y), ui_dev(ui, row.w), ui_dev(ui, row.h)};
+        }
+        return box;
+}
+
+// The element nearest the way key points from box from, other than element skip: -1 for none. One pass over the elements, nothing kept.
+static int ui_view_toward(const struct ui_view address_to v, const struct ui_rect address_to from, int skip, int key)
+{
+        b64 best = -1, score;
+        int found = -1;
+        struct ui_rect box;
+        for (int at = 0; at < v->tree.count; at++)
+                if (at != skip && ui_view_spot(v, at, &box) && (score = ui_spot_way(*from, box, key)) >= 0 && (best < 0 || score < best))
+                        best = score, found = at;
+        return found;
+}
+
+// The element after at (way 1) or before it (-1) in the order the elements were declared, that the keys can stand on: -1 past the ends.
+static int ui_view_next(const struct ui_view address_to v, int at, int way)
+{
+        struct ui_rect box;
+        for (at += way; at >= 0 && at < v->tree.count; at += way)
+                if (ui_view_spot(v, at, &box))
+                        return at;
+        return -1;
+}
+
+// The kit's keys let go: the control or button they were on shows them no more, and they are the app's own again.
+static fn ui_view_let_go(struct ui_view address_to v)
+{
+        if (v->keys)
+                v->keys->focused = 0;
+        v->keys = null, v->group.keys = 0;
+}
+
+// Element at brought into sight: each scroll container it is in scrolled by as little as shows it. True when one moves.
+static b32 ui_view_show(struct ui_view address_to v, int at)
+{
+        const struct ui_node address_to n = &v->tree.node[at];
+        b32 moved = false;
+        for (int up = n->parent; up >= 0; up = v->tree.node[up].parent)
+                if (v->item[up].scroll >= 0)
+                {
+                        struct ui_scroll address_to s = &v->scroll[v->item[up].scroll];
+                        ui_scroll_extent(s);
+                        moved |= ui_body_reveal(&s->body, n->y - v->tree.node[up].y + ui_scroll_rest(s, s->scroll, s->view), n->h, ui_kit_time());
+                }
+        return moved;
+}
+
+// The keys put on element at, come from box from by key (0: by Tab): the kit's element has them, or the app's is handed them (UI_VIEW_HANDED,
+// v->handed), a list's row nearest the way they came having them. Either way the element is brought into sight.
+static p32 ui_view_put(const struct ui address_to ui, struct ui_view address_to v, int at, const struct ui_rect address_to from, int key)
+{
+        struct ui_item address_to item = &v->item[at];
+        ui_view_let_go(v);
+        ui_view_show(v, at);
+        v->handed = null;
+        if (item->control || item->kind == UI_ITEM_BUTTON)
+        {
+                v->keys = ui_view_element(v, at), v->keys->focused = 1;
+                v->group.keys = item->control ? 0 : item->button + 1;
+                return UI_VIEW_DRAW | UI_VIEW_TAKEN;
+        }
+        v->handed = ui_view_element(v, at);
+        if (item->list)
+                ui_list_enter(ui, item->list, from, key);
+        return UI_VIEW_DRAW | UI_VIEW_TAKEN | UI_VIEW_HANDED;
+}
+
+// An arrow the app's own element of the view (a list, or a host marked .keys: its address) did not use, taken out of it the way it points
+// from box (none: the list's row the keys are on, or the element's box). The asks of ui_view_put, or 0 where nothing is that way.
+static p32 ui_view_away(struct ui address_to ui, struct ui_view address_to v, const void address_to element, const struct ui_rect address_to box, int key)
+{
+        int at = ui_view_find(v, element), to;
+        struct ui_rect from;
+        if (at < 0)
+                return 0;
+        from = box ? *box : ui_view_from(ui, v, at);
+        to = ui_view_toward(v, &from, at, key);
+        return to < 0 ? 0 : ui_view_put(ui, v, to, &from, key);
+}
+
+// A list's keys where it is an element of a view: ui_list_key, and an arrow the list cannot go on with (Up at its first row, Down at its
+// last, Left and Right across a list of lines) goes out of it to the nearest element that way. The asks: UI_VIEW_TAKEN as the list took it,
+// and ui_view_put's where the keys left it (v->keys or v->handed says where to).
+static p32 ui_view_list_key(struct ui address_to ui, struct ui_view address_to v, struct ui_list address_to l, int key, b32 address_to moved)
+{
+        b32 took;
+        *moved = false;
+        took = ui_list_key(ui, l, key, moved);
+        if ((key == UI_KEY_UP || key == UI_KEY_DOWN || key == UI_KEY_LEFT || key == UI_KEY_RIGHT) && !*moved)
+        {
+                p32 asks = ui_view_away(ui, v, l, null, key);
+                if (asks)
+                        return l->keys = false, asks;
+        }
+        return took ? UI_VIEW_TAKEN : 0;
+}
+
+// The keys the kit's element of the view takes, the one they are on (v->keys). Enter and Space press a button and turn a switch or a check
+// box. An arrow along tabs, radios or a slider moves in it; past their ends, and any other arrow, it takes the keys to the nearest element that
+// way (none there: Up gives them back to the app, the rest stay). Tab and Shift+Tab go on in the order of the elements and give them back past
+// the last or the first. Any other key gives them back, and is the app's. A button's keys are its group's (ui_buttons_key) but for the arrows,
+// and with no element of the kit's the keys are the group's alone (Shift+Tab gives it them).
+static p32 ui_view_key(struct ui address_to ui, struct ui_view address_to v, const struct window_event address_to event)
+{
+        struct ui_control address_to c = (ui_view_keys_group(v), v->keys); // a button the app gave the group's keys to has them
+        int key = (int)event->a, at = ui_view_find(v, c), to, way;
+        b32 repeat = (event->flags & WINDOW_KEY_REPEAT) != 0, vertical;
+        b32 arrow = key == UI_KEY_UP || key == UI_KEY_DOWN || key == UI_KEY_LEFT || key == UI_KEY_RIGHT;
+        struct ui_rect from;
+        p32 asks;
+        if (c && at < 0) // its element is gone from the view
+                ui_view_let_go(v), c = null;
+        if (!(event->flags & WINDOW_KEY_DOWN) || ui_key_modifier(key))
+                return 0;
+        if (!c || (ui_view_button_of(v, c) && (!arrow || (event->flags & (WINDOW_KEY_CONTROL | WINDOW_KEY_ALT)))))
+        {
+                asks = ui_buttons_key(&v->group, event);
+                if (v->keys && v->group.keys != (int)(v->keys - v->group.button) + 1)
+                        v->keys->focused = 0, v->keys = null;
+                if (v->group.keys > 0 && v->group.keys <= v->group.count)
+                        v->keys = &v->group.button[v->group.keys - 1];
+                return asks;
+        }
+        if (event->flags & (WINDOW_KEY_CONTROL | WINDOW_KEY_ALT)) // the app's shortcuts
+                return 0;
+        if (key == UI_KEY_TAB)
+        {
+                to = ui_view_next(v, at, (event->flags & WINDOW_KEY_SHIFT) ? -1 : 1);
+                return to < 0 ? (ui_view_let_go(v), UI_VIEW_DRAW | UI_VIEW_TAKEN) : ui_view_put(ui, v, to, null, 0);
+        }
+        if (key == UI_KEY_ENTER || key == UI_KEY_ENTER_PAD || key == UI_KEY_SPACE)
+        {
+                if (repeat || ui_view_button_of(v, c))
+                        return UI_VIEW_TAKEN;
+                if (c->kind == UI_SWITCH || c->kind == UI_CHECKBOX)
+                        ui_toggle_turn(c);
+                return c->kind == UI_BUTTON || c->kind == UI_SWITCH || c->kind == UI_CHECKBOX ? UI_VIEW_DRAW | UI_VIEW_TAKEN | ui_view_act(&v->item[at])
+                                                                                               : UI_VIEW_TAKEN;
+        }
+        vertical = c->kind == UI_TABS ? c->variant == UI_TABS_VERTICAL : c->kind == UI_SLIDER ? (c->variant & UI_SLIDER_VERTICAL) != 0 : c->kind == UI_RADIOS;
+        way = key == UI_KEY_HOME || key == UI_KEY_PAGE_UP ? -UI_ITEMS * 64 : key == UI_KEY_END || key == UI_KEY_PAGE_DOWN ? UI_ITEMS * 64
+              : vertical ? (key == UI_KEY_DOWN) - (key == UI_KEY_UP)
+                         : (key == UI_KEY_LEFT || key == UI_KEY_RIGHT ? ui_arrow(key) : 0);
+        if (!arrow && !way) // a key of the app's: the keys are its again
+                return ui_view_let_go(v), UI_VIEW_DRAW;
+        if (way && (c->kind == UI_TABS || c->kind == UI_RADIOS))
+        {
+                to = c->at + way < 0 ? (way < -1 ? 0 : -1) : c->at + way >= c->count ? (way > 1 ? c->count - 1 : -1) : c->at + way;
+                if (to >= 0 && to != c->at)
+                {
+                        if (c->kind == UI_TABS)
+                                c->close_item = c->tab_right_click = -1, c->add_clicked = false, ui_tabs_choose(ui, c, to);
+                        else
+                                ui_radios_choose(c, to);
+                        return UI_VIEW_DRAW | UI_VIEW_TAKEN | ui_view_act(&v->item[at]);
+                }
+                if (to >= 0 || !arrow)
+                        return UI_VIEW_TAKEN;
+        }
+        else if (way && c->kind == UI_SLIDER)
+        {
+                b64 step = c->step > 0 ? c->step : (c->high - c->low) / 20, value = c->value + (vertical ? -way : way) * step;
+                value = way < -1 ? c->low : way > 1 ? c->high : value < c->low ? c->low : value > c->high ? c->high : value;
+                if (value == c->value)
+                        return UI_VIEW_TAKEN;
+                c->value = value, c->sliding = 0;
+                return UI_VIEW_DRAW | UI_VIEW_TAKEN | ui_view_act(&v->item[at]);
+        }
+        else if (!arrow)
+                return ui_view_let_go(v), UI_VIEW_DRAW;
+        from = ui_view_from(ui, v, at);
+        to = ui_view_toward(v, &from, at, key);
+        if (to >= 0)
+                return ui_view_put(ui, v, to, &from, key);
+        return key == UI_KEY_UP ? (ui_view_let_go(v), UI_VIEW_DRAW | UI_VIEW_TAKEN) : UI_VIEW_TAKEN;
 }
 
 // A tree that was run, put where the window has it:

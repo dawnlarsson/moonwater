@@ -10763,6 +10763,192 @@ static fn check_kit_view_controls(void)
         ui_kit.test_clock = 0, ui_kit.busy = 0;
 }
 
+/*
+        The keys across a view, as a pad's cross and a keyboard's arrows move them: tabs over a switch over a list of three rows over a row
+        of two buttons, and a switch out of sight at the foot of a scroll container under them. An arrow the element the keys are on does not
+        use takes them to the nearest element that way; the list is the app's, handed the keys on its row nearest the way they came, and gives
+        them up past its ends; Enter turns the switch and presses a button; what they go to out of sight is scrolled in; Escape is the app's;
+        the ring is drawn only while the hand is on the keys. A window 400 by 400 at 100 percent.
+*/
+static struct ui view_keys_ui;
+static struct ui_control view_keys_tabs, view_keys_switch, view_keys_far;
+static struct ui_list view_keys_list;
+static int view_keys_acts, view_keys_last;
+
+static b32 view_keys_act(int value)
+{
+        view_keys_acts++, view_keys_last = value;
+        return true;
+}
+
+static fn view_keys_build(void)
+{
+        ui_view_begin(&view_check, &view_keys_ui, 400, -400);
+        ui_col(.class = "inset")
+        {
+                ui_control(&view_keys_tabs, .class = "tabs", .on = view_keys_act, .arg = 1);
+                ui_control(&view_keys_switch, .h = 48, .on = view_keys_act, .arg = 2);
+                ui_rows(&view_keys_list, .class = "list", .h = 3 * UI_ROW);
+                ui_row(.class = "foot")
+                {
+                        ui_button("One", .class = "action.outlined", .on = view_keys_act, .arg = 3);
+                        ui_button("Two", .class = "action.outlined", .on = view_keys_act, .arg = 4);
+                }
+        }
+        ui_col(.class = "scroll", .grow = 1)
+        {
+                ui_host(null, .h = 600);
+                ui_control(&view_keys_far, .h = 48, .on = view_keys_act, .arg = 5);
+        }
+        ui_view_end(&view_check);
+}
+
+// A key going down, as the loop sends it: the kit's event context first, then the screen declared again, then the view's.
+static p32 view_keys_send(int key, unsigned int flags)
+{
+        struct window_event event = {WINDOW_EVENT_KEY, WINDOW_KEY_DOWN | flags, key, 0};
+
+        ui_kit.test_clock += 8000000;
+        ui_event_context(&event);
+        view_keys_build();
+        return ui_view_event(&view_keys_ui, &view_check, &event);
+}
+
+// The pixel a ring round a control would cross: the middle of the ring's band, out from the middle of its left side.
+static unsigned int view_keys_ring(struct ui address_to ui, unsigned int address_to pixels, struct ui_control address_to c, b32 keyed)
+{
+        ui_kit.keyed = keyed;
+        view_keys_build();
+        ui_begin(ui, pixels, 400, 400, 400);
+        ui_view_draw(ui, &view_check, true);
+        return pixels[(c->y + c->h / 2) * 400 + c->x - UI_FOCUS_GAP - UI_FOCUS_WIDTH / 2] & 0xffffffu;
+}
+
+static fn check_kit_view_keys(void)
+{
+        static unsigned int pixels[400 * 400], scratch[400 * UI_SCRATCH_ROWS];
+        static font_face face;
+        struct ui address_to ui = &view_keys_ui;
+        struct ui_list address_to l = &view_keys_list;
+        struct ui_view address_to v = &view_check;
+        positive size = 0, bytes = compositor_map_file(program_argument(program_argument_count() > 3 ? 3 : 1), &size);
+        unsigned int ringed, bare;
+        b32 moved, kept;
+        b64 before;
+        p32 asks;
+
+        if (!bytes || font_load(&face, (const p8 address_to)bytes, size, 0) != 0)
+        {
+                check("kit keys: the face loads", false);
+                return;
+        }
+        *ui = terminal.ui;
+        ui->pixels = pixels, ui->pitch = 400, ui->width = 400, ui->height = 400, ui->scale = 100;
+        ui->scratch = scratch, ui->scratch_width = 400, ui->band_top = ui->band_bottom = 0, ui->mono = null, ui->scene = null;
+        ui->regular = ui->bold = &face;
+        ui_kit_theme(UI_THEME_DARK, 0xffffffu, 0);
+        ui_kit.now = ui_kit.test_clock = 9000000000ll;
+        ui_kit.rtl = 0, ui_kit_held = null, ui_kit.keyed = 0;
+        ui_kit_settle();
+        memory_zero(&view_check, sizeof(view_check));
+        memory_zero(&view_keys_tabs, sizeof(view_keys_tabs));
+        memory_zero(&view_keys_switch, sizeof(view_keys_switch));
+        memory_zero(&view_keys_far, sizeof(view_keys_far));
+        view_keys_tabs.kind = UI_TABS, view_keys_tabs.variant = UI_TABS_SEGMENTED, view_keys_tabs.count = 2;
+        view_keys_tabs.items[0] = "Wired", view_keys_tabs.items[1] = "Wireless";
+        view_keys_switch.kind = view_keys_far.kind = UI_SWITCH, view_keys_switch.label = "Radio", view_keys_far.label = "Far";
+        ui_control_start(&view_keys_tabs), ui_control_start(&view_keys_switch), ui_control_start(&view_keys_far);
+        bounds_list_make(ui, l, 3, 3 * UI_ROW);
+        view_keys_acts = 0;
+
+        // The app's keys: none of the kit's elements has them, and an arrow is not theirs (the view's scroll container's, as before).
+        view_keys_send(UI_KEY_DOWN, 0);
+        check("kit keys: while the keys are the app's own an arrow gives them to no element of the kit's", !v->keys && !v->handed && !v->group.keys);
+        ui_scroll_set(&v->scroll[0], 0);
+
+        // Shift+Tab gives the row of buttons the keys, the first of them; Up from it hands them to the list above, on its last row.
+        view_keys_send(UI_KEY_TAB, WINDOW_KEY_SHIFT);
+        kept = v->keys == &v->group.button[0] && v->group.keys == 1;
+        asks = view_keys_send(UI_KEY_UP, 0);
+        check("kit keys: Up from a button hands the keys to the list above it, the app's (UI_VIEW_HANDED), on its row nearest the way they came: its last",
+              kept && (asks & UI_VIEW_HANDED) && (asks & UI_VIEW_TAKEN) && v->handed == l && !v->keys && !v->group.keys && l->keys && l->focus == 2);
+
+        // The list's own keys: Up moves in it, and Up at its first row takes the keys out of it to the switch above.
+        moved = false;
+        asks = ui_view_list_key(ui, v, l, UI_KEY_UP, &moved);
+        kept = moved && asks == UI_VIEW_TAKEN && l->focus == 1;
+        ui_view_list_key(ui, v, l, UI_KEY_UP, &moved);
+        asks = ui_view_list_key(ui, v, l, UI_KEY_UP, &moved);
+        check("kit keys: Up in a list moves along it, and Up at its first row gives the keys to the control above it, the kit's",
+              kept && !moved && v->keys == &view_keys_switch && view_keys_switch.focused && !l->keys && (asks & UI_VIEW_TAKEN) && !(asks & UI_VIEW_HANDED));
+
+        // Enter on the switch turns it and calls its handler once; a held Enter's repeat turns nothing.
+        asks = view_keys_send(UI_KEY_ENTER, 0);
+        kept = view_keys_switch.on && view_keys_acts == 1 && view_keys_last == 2 && (asks & UI_VIEW_TAKEN);
+        view_keys_send(UI_KEY_ENTER, WINDOW_KEY_REPEAT);
+        view_keys_send(UI_KEY_SPACE, 0);
+        check("kit keys: Enter on a switch turns it and calls its handler once, a held Enter's repeat turns nothing, and Space turns it back",
+              kept && !view_keys_switch.on && view_keys_acts == 2);
+
+        // Up to the tabs: Right and Left move along them and choose, and Left at their start, with nothing at the left, keeps the keys.
+        view_keys_send(UI_KEY_UP, 0);
+        kept = v->keys == &view_keys_tabs && !view_keys_switch.focused;
+        view_keys_send(UI_KEY_RIGHT, 0);
+        kept = kept && view_keys_tabs.at == 1 && view_keys_acts == 3 && view_keys_last == 1;
+        view_keys_send(UI_KEY_LEFT, 0);
+        kept = kept && view_keys_tabs.at == 0 && view_keys_acts == 4;
+        asks = view_keys_send(UI_KEY_LEFT, 0);
+        check("kit keys: Up from the switch is the tabs above it; Right and Left along them choose and call their handler, and Left at their start, nothing that way, keeps the keys",
+              kept && (asks & UI_VIEW_TAKEN) && v->keys == &view_keys_tabs && view_keys_tabs.at == 0 && view_keys_acts == 4);
+
+        // Tab goes on in the order of the elements: the switch, then the list, handed on the row it had.
+        view_keys_send(UI_KEY_TAB, 0);
+        kept = v->keys == &view_keys_switch;
+        asks = view_keys_send(UI_KEY_TAB, 0);
+        check("kit keys: Tab goes on in the order the elements were declared, the switch and then the list, handed the keys on the row it had",
+              kept && (asks & UI_VIEW_HANDED) && v->handed == l && !v->keys && l->focus == 0);
+
+        // Down past the list's last row: the nearest control below it, the first button; Right is the second, and Enter presses it.
+        ui_view_list_key(ui, v, l, UI_KEY_DOWN, &moved);
+        ui_view_list_key(ui, v, l, UI_KEY_DOWN, &moved);
+        asks = ui_view_list_key(ui, v, l, UI_KEY_DOWN, &moved);
+        kept = !moved && v->keys == &v->group.button[0] && v->group.keys == 1 && !l->keys;
+        view_keys_send(UI_KEY_RIGHT, 0);
+        kept = kept && v->keys == &v->group.button[1] && v->group.keys == 2;
+        asks = view_keys_send(UI_KEY_ENTER, 0);
+        check("kit keys: Down past a list's last row reaches the control below it, the first button; Right is the next, and Enter presses it, once",
+              kept && (asks & UI_VIEW_TAKEN) && view_keys_acts == 5 && view_keys_last == 4);
+
+        // The ring: drawn round the control the keys are on while the hand is on the keys, and not when the pointer moved last.
+        view_keys_send(UI_KEY_UP, 0);
+        kept = v->handed == l && l->focus == 2;
+        for (int k = 0; k < 3; k++)
+                ui_view_list_key(ui, v, l, UI_KEY_UP, &moved);
+        kept = kept && v->keys == &view_keys_switch;
+        ringed = view_keys_ring(ui, pixels, &view_keys_switch, true);
+        bare = view_keys_ring(ui, pixels, &view_keys_switch, false);
+        check("kit keys: the control the keys are on has the focus ring round it while the hand is on the keys, and none once the pointer moved last",
+              kept && ringed != bare && bare == (pixels[5 * 400 + 2] & 0xffffffu) && ui_contrast(ringed, bare) >= 300);
+
+        // Out of sight: Down from the buttons is the far switch, under the scroll container's fold, and the container scrolls to show it.
+        ui_kit.keyed = 1;
+        view_keys_send(UI_KEY_DOWN, 0);
+        kept = v->handed == l && l->focus == 0;
+        for (int k = 0; k < 3; k++)
+                ui_view_list_key(ui, v, l, UI_KEY_DOWN, &moved);
+        kept = kept && v->keys == &v->group.button[0];
+        before = v->scroll[0].body.target;
+        asks = view_keys_send(UI_KEY_DOWN, 0);
+        check("kit keys: Down to a control out of sight puts the keys on it and scrolls its container to show it",
+              kept && v->keys == &view_keys_far && (asks & UI_VIEW_DRAW) && v->scroll[0].body.target > before);
+
+        // Escape is the app's: the keys let go of the kit's element, and the view takes nothing.
+        asks = view_keys_send(UI_KEY_ESCAPE, 0);
+        check("kit keys: Escape on a control is the app's (its back), and gives the app the keys again", !(asks & UI_VIEW_TAKEN) && !v->keys && !view_keys_far.focused);
+        ui_kit.keyed = 0, ui_kit_held = null;
+        ui_kit.test_clock = 0, ui_kit.busy = 0;
+}
+
 static fn check_kit_scroll_ends(void)
 {
         struct ui ui = terminal.ui;

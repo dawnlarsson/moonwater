@@ -11045,6 +11045,7 @@ b32 main()
         GROUP("check_topbar_buttons", check_topbar_buttons());
         GROUP("check_kit_mouse_drag", check_kit_mouse_drag());
         GROUP("check_kit_view_controls", check_kit_view_controls());
+        GROUP("check_kit_view_keys", check_kit_view_keys());
         GROUP("check_kit_view_wrap", check_kit_view_wrap());
         GROUP("check_kit_list_wrap", check_kit_list_wrap());
         GROUP("check_kit_hand", check_kit_hand());
