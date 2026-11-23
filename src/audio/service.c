@@ -420,12 +420,6 @@ static int audio_is_hdmi(const char *label)
         return string_search_folded((string_address)label, (string_address) "hdmi") != null;
 }
 
-// A USB card is named by where it is plugged in ("... at usb-0000:12:00.0-6, high speed"): it is there because someone plugged it in.
-static int audio_is_usb(const char *longname)
-{
-        return string_search((string_address)longname, (string_address) "usb-") != null;
-}
-
 /*
         Looks at the cards: the list of playback devices is made (what the page shows, and what a choice may name), and
         one is picked: the one the person chose by name, else the one -d names, else the best placed to be heard by what the
@@ -444,7 +438,7 @@ static int audio_card_pick(long *card_out, long *device_out, char *name, long na
         for (long i = 0; i < found; i++)
         {
                 struct audio_jacks jacks;
-                int usb = audio_is_usb(cards[i].longname), looked = 0;
+                int looked = 0;
 
                 for (long d = 0; d < cards[i].devices; d++)
                 {
@@ -460,7 +454,7 @@ static int audio_card_pick(long *card_out, long *device_out, char *name, long na
                                 audio_jacks_read(cards[i].number, &jacks);
                                 looked = 1;
                         }
-                        automatic = audio_output_rank(&jacks, audio_is_hdmi(cards[i].device[d].name), cards[i].device[d].device, usb);
+                        automatic = audio_output_rank(&jacks, audio_is_hdmi(cards[i].device[d].name), cards[i].device[d].device);
                         why = automatic == 6 ? AUDIO_STATE_WHY_ANALOG : automatic == 5 ? AUDIO_STATE_WHY_DISPLAY : automatic == 4 ? AUDIO_STATE_WHY_HDMI : AUDIO_STATE_WHY_NOTHING;
                         audio_device_name(listed, sizeof(listed), "alsa_output.", cards + i, cards[i].device[d].device);
                         if (at < AUDIO_STATE_DEVICES)

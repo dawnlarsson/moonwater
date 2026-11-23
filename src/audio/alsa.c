@@ -1302,17 +1302,19 @@ AUDIO_API long audio_jacks_read(long card, struct audio_jacks *jacks)
 
 /*
         How well a playback device is placed to be heard when nobody chose one, by what its card says is plugged in:
-        6 an analog or USB output that can be heard (a USB card is there because it was plugged in; an analog output has an
-          internal speaker, or something in a jack, or has no jack that could tell),
+        6 an analog or USB output that can be heard (an internal speaker, something in a jack, or no jack that could tell),
         5 an HDMI or DisplayPort output with a display in it,
         4 one whose pin cannot tell,
         3 an analog output with nothing in any jack,
         2 an HDMI or DisplayPort output with no display.
         The better rank is the one played on; ties go to the first. Plugged-in analog outranks a display as sound servers
         have it (the speakers or headphones that were put in are what was meant), and a display outranks a jack with nothing
-        in it (a desktop with its sound from the monitor).
+        in it (a desktop with its sound from the monitor). A USB card is judged by its jacks as an analog one is: a board's
+        own sound is often a USB codec (Realtek's ALC4080 on AM5 boards, "Speaker - Output Jack" and "Headphone - Output
+        Jack" as UAC2's connectors say them), there with nothing plugged into it; a USB headset or DAC has no jack controls
+        and is heard.
 */
-AUDIO_API int audio_output_rank(const struct audio_jacks *jacks, int hdmi, long device, int usb)
+AUDIO_API int audio_output_rank(const struct audio_jacks *jacks, int hdmi, long device)
 {
         if (hdmi)
         {
@@ -1320,7 +1322,7 @@ AUDIO_API int audio_output_rank(const struct audio_jacks *jacks, int hdmi, long 
                         return 4;
                 return (jacks->hdmi_plugged >> device) & 1 ? 5 : 2;
         }
-        if (usb || jacks->always || !jacks->output_jacks || jacks->output_plugged)
+        if (jacks->always || !jacks->output_jacks || jacks->output_plugged)
                 return 6;
         return 3;
 }
