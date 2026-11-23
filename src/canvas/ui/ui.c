@@ -22617,7 +22617,6 @@ static p32 ui_strips_event(struct ui address_to ui, struct ui_strips address_to 
 #define UI_ROW_WAYS 8         // the most ways an add row's menu has, its words a '|' apart
 #define UI_ROW_WAY_TEXT 96    // and the most bytes of one
 #define UI_ROW_REMOVE_W 32    // a row's remove button (ui_row.remove), logical pixels
-#define UI_ROW_GRIP_W 20      // an ordered row's grip (ui_row.order), logical pixels: a columned row's first words start past it and its gap
 #define UI_ROW_BUTTON_LEAST 64 // the button's least width, logical pixels: its words and 14 at each side where they are wider
 // A row's badge (ui_row.badge): the severity of the issues its option has, the words the badge says being ui_row.badge_words.
 #define UI_ROW_BADGE_WARNING 1
@@ -23843,9 +23842,6 @@ static fn ui_row_tree_at(struct ui address_to ui, struct ui_list address_to l, i
         // A tall row is a column, and the first thing in it is its line, UI_DRIVE_LINE high, which is laid out as any row is.
         if (row->tall)
                 n = ui_tree_open(t), n->size[1].kind = UI_FIXED, n->size[1].value = ui_drive_part(ui, UI_DRIVE_LINE), n->gap = gap;
-        // An ordered row's grip is its first part, as wide as a symbol: what a press lifts the row by.
-        if (row->order)
-                p->grip = ui_row_leaf(t, UI_FIXED, ui_dev(ui, UI_ROW_GRIP_W));
         // The label is 17 from where the mark starts, which at some scales is a pixel more than the mark and the gap.
         if (row->mark)
                 p->mark = n = ui_row_leaf(t, UI_FIXED, ui_dev(ui, 7)), n->margin[1] = ui_dev(ui, 17) - n->size[0].value - gap;
@@ -24282,9 +24278,6 @@ static fn ui_list_cells(struct ui address_to ui, const struct ui_list address_to
                 string_address shown;
                 x += k ? gap : pad + set_in;
                 w -= (k ? gap : pad + set_in) + right_pad;
-                // An ordered row's grip is before its first column's words.
-                if (!k && row->order)
-                        x += ui_dev(ui, UI_ROW_GRIP_W + UI_ROW_GAP), w -= ui_dev(ui, UI_ROW_GRIP_W + UI_ROW_GAP);
                 // A non-selectable list's mark (a joined network): an accent dot before its label in the first column.
                 if (!k && row->mark && !l->selected && w > 0)
                 {
@@ -24364,8 +24357,7 @@ static fn ui_list_columns_fit(struct ui address_to ui, struct ui_list address_to
                         need = one;
                 // What each cell's words need, the first's with what is before its words (its indent, its mark, its symbol).
                 ui_columns_need(ui, c, 0, row.label, ui_dev(ui, UI_INDENT) * row.indent + (row.expander ? ui_dev(ui, UI_INDENT) : 0) +
-                                                      (row.mark ? ui_dev(ui, 14) : 0) + (row.file ? ui_dev(ui, UI_FILE_ROW_ICON + 8) : 0) +
-                                                      (row.order ? ui_dev(ui, UI_ROW_GRIP_W + UI_ROW_GAP) : 0));
+                                                      (row.mark ? ui_dev(ui, 14) : 0) + (row.file ? ui_dev(ui, UI_FILE_ROW_ICON + 8) : 0));
                 for (int k = 1; k < c->count; k++)
                         ui_columns_need(ui, c, k, row.cells[k], k == c->count - 1 ? ui_dev(ui, one) + (row.bars > 0 ? ui_signal_width(ui) + ui_dev(ui, 6) : 0) : 0);
         }
@@ -24845,22 +24837,26 @@ static fn ui_list_row(struct ui address_to ui, struct ui_list address_to l, int 
                             row.mark_ink ? row.mark_ink : ui_role(UI_PRIMARY), null);
         if ((n = p->check) && seen && row.on)
                 ui_list_check_draw(ui, &row, n, row.check == UI_ROW_CHECK_RADIO ? ui_role(UI_PRIMARY) : strong);
-        // An ordered row's grip, in the quiet ink, and the ink where the hand is over it or holds it.
-        if ((n = p->grip) && seen)
+        // An ordered row's grip: six small round dots, two by three, in the row's inset at its start (the room no words take), quiet, and in
+        // the ink where the hand is over it or holds it.
+        if (row.order && seen)
         {
-                int side = n->w < n->h ? n->w : n->h;
-                b32 held = l->lift == id + 1 || (l->hover == id && ui_list_part_x(ui, l, n, l->pointer_x));
-                ui_icon(ui, UI_ICON_GRIP, n->x + (n->w - side) / 2, n->y + (n->h - side) / 2, side, 0, held ? strong : quiet);
+                int inset = ui_dev(ui, UI_INSET), dot = ui_dev(ui, 3) > 2 ? ui_dev(ui, 3) : 2, step = dot + (ui_dev(ui, 2) > 1 ? ui_dev(ui, 2) : 1);
+                int cx = ui_mirror(across, inset, l->x, l->w) + inset / 2, cy = y + height / 2, x0 = cx - (step + dot) / 2, y0 = cy - step - dot / 2;
+                int px = ui_point(l->pointer_x, l->x, l->w) - l->x;
+                b32 held = l->lift == id + 1 || (l->hover == id && px >= 0 && px < inset + ui_dev(ui, 4));
+                unsigned int ink_dot = (held ? strong : quiet) | 0xff000000u;
+                for (int k = 0; k < 6; k++)
+                {
+                        int dx = x0 + (k & 1) * step, dy = y0 + (k >> 1) * step;
+                        ui_kit_fill(ui, &(struct ui_box){dx * 256, dy * 256, (dx + dot) * 256, (dy + dot) * 256, dot * 128, dot * 128}, ink_dot, null);
+                }
         }
-        // A row's remove button: the cross in the quiet ink, on a round well where the hand is over it, pressed while it holds it.
+        // A row's remove button: the cross, quiet, and in the ink where the hand is over it or holds it; no well round it (a row is flush).
         if ((n = p->remove) && seen)
         {
-                int side = ui_dev(ui, 16), well = ui_dev(ui, 28);
+                int side = ui_dev(ui, 14);
                 b32 over = l->hover == id && ui_list_part_x(ui, l, n, l->pointer_x), held = l->remove_down == id + 1;
-                if (over || held)
-                        ui_kit_fill(ui, &(struct ui_box){(n->x + (n->w - well) / 2) * 256, (n->y + (n->h - well) / 2) * 256,
-                                                        (n->x + (n->w + well) / 2) * 256, (n->y + (n->h + well) / 2) * 256, well * 128, well * 128},
-                                    ui_well(ui, UI_ON_SURFACE, held ? 24 : 12), null);
                 ui_icon(ui, UI_ICON_REMOVE, n->x + (n->w - side) / 2, n->y + (n->h - side) / 2, side, 0, over || held ? strong : quiet);
         }
         // An add row's label and its plus are the accent's.
@@ -25177,10 +25173,11 @@ static fn ui_list_draw(struct ui address_to ui, struct ui_list address_to l)
                 }
                 if (lift_at >= 0)
                 {
-                        int across, wide, height = l->tall[lift_at], radius = ui_dev(ui, 8);
+                        int across, wide, height = l->tall[lift_at];
                         struct ui_box plate;
                         ui_list_across(l, &across, &wide);
-                        plate = (struct ui_box){across * 256, l->lift_y * 256, (across + wide) * 256, (l->lift_y + height) * 256, radius * 256, radius * 256};
+                        // The lifted row on a plate as flush as the rows are: square, the row's whole width.
+                        plate = (struct ui_box){across * 256, l->lift_y * 256, (across + wide) * 256, (l->lift_y + height) * 256, 0, 0};
                         ui->top = l->y, ui->bottom = l->y + l->h;
                         ui_kit_fill(ui, &plate, ui_role(UI_SURFACE_HIGHEST) | 0xff000000u, null);
                         ui_kit_ring(ui, &plate, ui_q8(ui, 1), ui_well(ui, UI_OUTLINE_VARIANT, 80));
@@ -25444,7 +25441,8 @@ static int ui_list_part_at(struct ui address_to ui, struct ui_list address_to l,
         if (!row.order && !row.remove)
                 return 0;
         ui_row_tree(ui, l, id, &row, ui_list_pitch(ui, l), false);
-        if (p->grip && x >= p->grip->x - spare && x < p->grip->x + p->grip->w + spare)
+        // The grip is in the row's own inset at its start, the room no words take: a press there lifts the row.
+        if (row.order && x >= 0 && x < ui_dev(ui, UI_INSET) + spare)
                 return 1;
         if (p->remove && x >= p->remove->x - spare && x < p->remove->x + p->remove->w + spare)
                 return 2;
@@ -26667,8 +26665,11 @@ static fn ui_page_pointer(struct ui address_to ui, struct ui_page address_to p, 
         // Route list-row pointer interactions (when the page body is the list's own scroll) through ui_list_click.
         if (!p->card && (!p->body || p->body == &l->scroll))
         {
-                int t0 = l->press.down ? 0 : (event->type == WINDOW_EVENT_BUTTON && down && event->a == UI_POINTER_LEFT && !p->press.down ? ui_page_target(ui, p, l, x, y) : -1);
-                if (l->press.down ? (event->type == WINDOW_EVENT_MOTION || (event->type == WINDOW_EVENT_BUTTON && event->a == UI_POINTER_LEFT))
+                // A press the list holds (a row's, or a row lifted by its grip, or its remove button held) has its motions and its let go too:
+                // a lift that was not given them stayed where it went up, and a held remove button never let go.
+                b32 held = l->press.down || l->grab == UI_LIST_GRAB_LIFT || l->grab == UI_LIST_GRAB_REMOVE;
+                int t0 = held ? 0 : (event->type == WINDOW_EVENT_BUTTON && down && event->a == UI_POINTER_LEFT && !p->press.down ? ui_page_target(ui, p, l, x, y) : -1);
+                if (held ? (event->type == WINDOW_EVENT_MOTION || (event->type == WINDOW_EVENT_BUTTON && event->a == UI_POINTER_LEFT))
                                   : (t0 >= 0 && t0 < UI_PAGE_GROUP))
                 {
                         int press_x = l->press.x, press_y = l->press.y, clicked = ui_list_click(ui, l, event, x, y);

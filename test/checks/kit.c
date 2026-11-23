@@ -5862,12 +5862,12 @@ static fn check_kit_manage(void)
         ui_list_layout(&ui, &l);
         ui_list_describe(&l, 0, &row);
         ui_row_tree(&ui, &l, 0, &row, ui_list_pitch(&ui, &l), false);
-        grip_x = ui_row_parts.grip ? ui_row_parts.grip->x + ui_row_parts.grip->w / 2 : -1;
+        grip_x = ui_dev(&ui, UI_INSET) / 2; // the grip is in the row's inset at its start
         remove_x = ui_row_parts.remove ? ui_row_parts.remove->x + ui_row_parts.remove->w / 2 : -1;
         for (int at = 0; at < 3; at++)
                 mid[at] = ui_list_row_y(&l, at) + l.tall[at] / 2;
         h = l.tall[0];
-        check("kit manage: an ordered row's grip is its first part and its remove button its last",
+        check("kit manage: an ordered row's grip is in its inset at its start, and its remove button its last part",
               grip_x >= 0 && remove_x > grip_x && remove_x > 400 / 2 && ui_list_part_at(&ui, &l, 0, grip_x) == 1 && ui_list_part_at(&ui, &l, 0, remove_x) == 2 &&
                   ui_list_part_at(&ui, &l, 0, 200) == 0);
 
@@ -5909,6 +5909,34 @@ static fn check_kit_manage(void)
 
         ui_list_describe(&l, 3, &row);
         check("kit manage: an add row has the plus, and one way is no menu", row.icon == UI_ICON_PLUS + 1 && !ui_list_ways(&ui, &l, null, null, 3));
+        {
+                // Through a page (Settings' way: ui_page_pointer), the lift's motions and its let go reach the list: a page that gave the
+                // list only a held row's press left the lifted row where it went up, and nothing moved.
+                struct ui_page p;
+                memory_zero(&p, sizeof(p));
+                p.width = 400, p.height = 400, p.top = 0, p.bottom = 400, p.left = 0, p.right = 400;
+                l.moved = false, l.removed = 0, l.focus = -1;
+                motion.a = grip_x, motion.b = mid[0];
+                ui_kit_track(&motion);
+                ui_event_context(&down);
+                ui_page_pointer(&ui, &p, &l, &down, null);
+                motion.a = grip_x, motion.b = mid[2] + 2;
+                ui_kit_track(&motion);
+                ui_page_pointer(&ui, &p, &l, &motion, null);
+                ui_event_context(&up);
+                ui_page_pointer(&ui, &p, &l, &up, null);
+                check("kit manage: through a page, a lifted row follows the hand and lands where it is let go",
+                      l.moved && l.moved_from == 0 && l.moved_to == 2 && !l.lift && l.grab == UI_LIST_GRAB_NONE);
+                l.moved = false;
+                motion.a = remove_x, motion.b = mid[1];
+                ui_kit_track(&motion);
+                ui_event_context(&down);
+                ui_page_pointer(&ui, &p, &l, &down, null);
+                ui_event_context(&up);
+                ui_page_pointer(&ui, &p, &l, &up, null);
+                check("kit manage: through a page, a remove button let go on it removes its row", l.removed == 2 && !l.remove_down);
+                l.removed = 0;
+        }
         {
                 // A columned row keeps room at its last column's end for its remove button, after its switch where it has one.
                 struct ui_row both = {0}, alone = {0};
