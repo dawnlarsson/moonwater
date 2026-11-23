@@ -6341,17 +6341,6 @@ static fn actions_cell(const struct ui_columns address_to c, int row, int k, int
         *y = at >= 0 ? ui_list_row_y(&settings.list, at) + settings.list.tall[at] / 2 : -1;
 }
 
-// The Waterlink table with its Access cells checks of the kit's (ui_row.cell_check), on as actions_checks_on says: Settings' rows as
-// they are, the cells made checks by the check alone.
-static void (*actions_describe_kept)(int id, struct ui_row address_to row);
-static unsigned int actions_checks_on;
-static fn actions_describe_checked(int id, struct ui_row address_to row)
-{
-        actions_describe_kept(id, row);
-        if (settings_large && row->columns == &settings_large->columns[3])
-                row->cell_check = 1u << 1, row->cell_on = actions_checks_on << 1;
-}
-
 // What the window last put on the clipboard is want, exactly, and it was put there since serial.
 static b32 actions_clipboard(unsigned int serial, const char address_to want)
 {
@@ -6699,13 +6688,13 @@ static fn check_settings_actions(void)
                 }
                 // The right button on the Status cell: Copy Status, the row's Copy and Copy row, and Remove; on the Name cell, Copy Name
                 // takes the place of Copy, the same words.
-                actions_cell(&settings_large->columns[3], link_row, 2, &x, &y);
+                actions_cell(&settings_large->columns[3], link_row, 1, &x, &y);
                 actions_press(UI_POINTER_RIGHT, x, y, 0);
                 {
                         const struct ui_popmenu address_to m = &settings.popup.menu;
                         char named[96];
 
-                        language_format(named, sizeof(named), WORDS(menu_copy_named), settings_large->columns[3].title[2]);
+                        language_format(named, sizeof(named), WORDS(menu_copy_named), settings_large->columns[3].title[1]);
                         link_menu = settings.popup.open && settings.popup.list == &settings.list && settings.popup.list_row == link_row &&
                                     m->count == 5 && m->items[0].id == UI_LIST_MENU_COPY_CELL && string_equals((string_address)m->items[0].label, (string_address)named) &&
                                     m->items[1].id == UI_LIST_MENU_COPY && m->items[2].id == UI_LIST_MENU_COPY_ROW &&
@@ -6838,38 +6827,41 @@ static fn check_settings_actions(void)
                 check("settings lists: Waterlink linked machines use file-explorer-style columns and dense 28px rows", link_table);
                 check("settings lists: Waterlink right-click menu offers Copy, Copy row, and direct Remove (link remove)", link_menu && link_remove);
                 check("settings lists: Delete twice on a Waterlink linked machine confirms and removes it", link_del);
-                // A cell that is a check (the kit's, ui_row.cell_check): drawn as a box, on in the accent; a press on it is the list's
-                // toggled (the row and the column), a press in its cell but off the box's reach is not, and a press on it let go off it is not.
+                // A cell that is a check (the kit's, ui_row.cell_check): Waterlink's grants, a column each. Drawn as a box, on in the accent
+                // (zeta's Files) and a ring off (its Log); a press on a box is the list's toggled, which Settings takes at once as the grant's verb
+                // (Shell: link allow zeta shell); a press in its cell but off the box's reach is not, and a press on it let go off it is not.
                 {
                         b32 toggles = false, misses = true, drawn_on = false, ringed = false;
                         const struct ui_columns address_to c = &settings_large->columns[3];
-                        int at, bx, by, side = ui_dev(&settings.ui, UI_CELL_CHECK);
+                        int at, bx, by, side = ui_dev(&settings.ui, UI_CELL_CHECK), on_k = SETTINGS_LINK_GRANT_COLUMN, press_k = SETTINGS_LINK_GRANT_COLUMN + 2,
+                                        off_k = SETTINGS_LINK_GRANT_COLUMN + 3;
                         positive accent = 0;
 
-                        settings.queued = 0, ui_confirm_drop(&settings.confirm);
-                        actions_describe_kept = settings.list.describe, settings.list.describe = actions_describe_checked, actions_checks_on = 1;
+                        settings.queued = 0, ui_confirm_drop(&settings.confirm), settings_link_global_grants = 0x0fu;
                         settings_rebuild();
                         actions_show(link_row);
-                        at = settings_pos(link_row), bx = ui_cell_check_x(&settings.ui, c, 1), by = ui_list_row_y(&settings.list, at) + (settings.list.tall[at] - side) / 2;
+                        at = settings_pos(link_row), bx = ui_cell_check_x(&settings.ui, c, on_k), by = ui_list_row_y(&settings.list, at) + (settings.list.tall[at] - side) / 2;
                         for (int py = by; py < by + side; py++)
                                 for (int px = bx; px < bx + side; px++)
                                         accent += (settings_frames_whole[(positive)py * SETTINGS_FRAMES_W + (positive)px] & 0xffffffu) == (ui_role(UI_PRIMARY) & 0xffffffu);
                         drawn_on = accent >= (positive)(side * side / 3);
+                        bx = ui_cell_check_x(&settings.ui, c, press_k);
                         settings.list.toggled = 0;
                         actions_press(UI_POINTER_LEFT, bx + side / 2, by + side / 2, 0);
-                        toggles = settings.list.toggled == link_row + 1 && settings.list.toggled_cell == 1 && settings.queued == 0;
-                        settings.list.toggled = 0;
-                        if (c->at[1] + ui_columns_end(c, 1) > bx + side + ui_dev(&settings.ui, UI_CELL_CHECK_REACH) + 2)
-                                actions_press(UI_POINTER_LEFT, bx + side + ui_dev(&settings.ui, UI_CELL_CHECK_REACH) + 1, by + side / 2, 0), misses = settings.list.toggled == 0;
+                        toggles = settings.list.toggled == 0 && settings.queued == 1 && string_equals((string_address)settings.queue[0].value, (string_address) "l\nzeta\nshell");
+                        settings.queued = 0, settings.item[3][0].grants &= (unsigned char)~4u;
+                        actions_show(link_row);
+                        if (c->at[press_k] + ui_columns_end(c, press_k) > bx + side + ui_dev(&settings.ui, UI_CELL_CHECK_REACH) + 2)
+                                actions_press(UI_POINTER_LEFT, bx + side + ui_dev(&settings.ui, UI_CELL_CHECK_REACH) + 1, by + side / 2, 0), misses = settings.queued == 0;
                         {
                                 struct window_event over = {WINDOW_EVENT_MOTION, 0, bx + side / 2, by + side / 2}, land = {WINDOW_EVENT_BUTTON, WINDOW_KEY_DOWN, UI_POINTER_LEFT, 0};
                                 struct window_event away = {WINDOW_EVENT_MOTION, 0, 2, by + side / 2}, lift = {WINDOW_EVENT_BUTTON, 0, UI_POINTER_LEFT, 0};
-                                settings.list.toggled = 0;
                                 settings_event_at(&over), settings_event_at(&land), settings_event_at(&away), settings_event_at(&lift);
-                                misses = misses && settings.list.toggled == 0 && settings.list.cell_down == 0;
+                                misses = misses && settings.queued == 0 && settings.list.cell_down == 0;
                         }
-                        actions_checks_on = 0;
+                        settings.queued = 0;
                         actions_show(link_row);
+                        bx = ui_cell_check_x(&settings.ui, c, off_k);
                         {
                                 positive ring = 0, filled = 0;
                                 for (int py = by; py < by + side; py++)
@@ -6881,10 +6873,10 @@ static fn check_settings_actions(void)
                                         }
                                 ringed = filled == 0 && ring > 0;
                         }
-                        settings.list.describe = actions_describe_kept, settings.list.toggled = 0;
+                        settings.list.toggled = 0;
                         settings_rebuild();
                         check("kit cell checks: a cell that is a check is a box, filled in the accent when on and a ring when off", drawn_on && ringed);
-                        check("kit cell checks: a press on the box is the list's toggled, its row and column, and asks nothing of the app", toggles);
+                        check("kit cell checks: a press on a grant's box is the list's toggled, which Settings takes as that grant's verb", toggles);
                         check("kit cell checks: a press off the box's reach, or let go off it, turns nothing", misses);
                 }
                 check("settings lists: the right button on a cell offers Copy and its column's title, which copies that cell, and on the Name cell takes Copy's place", link_menu && link_named);
@@ -6905,10 +6897,37 @@ static fn check_settings_actions(void)
                                   settings.item_count[3] == 3 && settings.item[3][2].kind == SETTINGS_ADD && add.kind == UI_ROW_ADD &&
                                   string_equals((string_address)add.words, (string_address) "Show a code|Type another machine's code") &&
                                   string_equals((string_address)add.label, (string_address) "Link a machine"));
+                        //      Its grants are checks in their columns, on where the machine may (zeta: run files), and a check turned is the
+                        //      grant's verb, a hand's only (allowing is deliberate); its state is the Status column.
+                        {
+                                unsigned int grants = 0xfu << SETTINGS_LINK_GRANT_COLUMN, on = 0x3u << SETTINGS_LINK_GRANT_COLUMN;
+                                b32 cells, virtual_kept, turned;
+                                settings_link_global_grants = 0x0fu; // this machine allows every grant
+                                memory_zero(&linked, sizeof(linked)), settings_describe(link_row, &linked);
+                                cells = linked.cell_check == grants && linked.cell_on == on && linked.cells[1] &&
+                                        string_equals((string_address)linked.cells[1], (string_address) "Heard 5s ago");
+                                settings.hand = false;
+                                settings.list.toggled = link_row + 1, settings.list.toggled_cell = SETTINGS_LINK_GRANT_COLUMN + 2, settings_managed();
+                                virtual_kept = settings.queued == 0 && !(settings.item[3][0].grants & 4u) && !settings.list.toggled;
+                                settings.hand = true;
+                                settings.list.toggled = link_row + 1, settings.list.toggled_cell = SETTINGS_LINK_GRANT_COLUMN + 2, settings_managed();
+                                settings.hand = false;
+                                turned = settings.queued == 1 && string_equals((string_address)settings.queue[0].value, (string_address) "l\nzeta\nshell") &&
+                                         (settings.item[3][0].grants & 4u);
+                                check("settings lists: a machine linked's grants are checks in their columns, and a check a hand turns is link allow",
+                                      cells && virtual_kept && turned);
+                                settings.queued = 0, settings.item[3][0].grants &= (unsigned char)~4u;
+                                memory_zero(&linked, sizeof(linked)), settings_describe(link_row, &linked);
+                        }
                         settings.list.removed = link_row + 1, settings_managed();
                         asked = settings.queued == 0;
+                        {
+                                struct ui_row asking;
+                                memory_zero(&asking, sizeof(asking)), settings_describe(link_row, &asking);
+                                asked = asked && asking.cells[1] && string_equals((string_address)asking.cells[1], (string_address)WORDS(settings_remove_again));
+                        }
                         settings.list.removed = link_row + 1, settings_managed();
-                        check("settings lists: a machine linked has a remove button, which asks and then is link remove",
+                        check("settings lists: a machine linked has a remove button, whose first press is said in its row, and the second is link remove",
                               linked.remove && asked && settings.queued == 1 && string_equals((string_address)settings.queue[0].value, (string_address) "r\nzeta"));
                         settings.queued = 0;
                         settings_way_taken(add_id, 0);

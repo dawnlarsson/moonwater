@@ -10,6 +10,7 @@
 # machine-made 2026-11-23 (the startup programs of Settings), not yet read by a person: settings_startup_add settings_startup_add_keys settings_startup_command settings_startup_hint settings_startup_keys settings_startup_program settings_startup_type
 # machine-made 2026-11-23 (the add row of Waterlink's linked machines), not yet read by a person: settings_link_add settings_link_add_keys settings_link_show settings_link_stop settings_link_type
 # machine-made 2026-11-23 (a row menu's copy of one column), not yet read by a person: menu_copy_named
+# machine-made 2026-11-23 (Waterlink's grants as columns, and a remove asked on its row), not yet read by a person: settings_column_files settings_column_log settings_column_run settings_column_shell settings_remove_again
 @language ru
 @name Русский
 @translated machine
@@ -287,7 +288,11 @@ settings_cannot_run	954f	команду moonwater не удалось выпол
 settings_card_back	db52	Escape или щелчок — назад
 settings_card_stopped	e24d	остановлено: Escape или щелчок — назад
 settings_column_access	ae0b	Доступ
+settings_column_files	1b30	Файлы
+settings_column_log	7bf1	Журнал
+settings_column_run	e66a	Запуск
 settings_column_security	21db	Защита
+settings_column_shell	69a1	Оболочка
 settings_column_signal	4529	Сигнал
 settings_column_status	f20f	Состояние
 settings_copied	0bd7	скопировано в буфер обмена
@@ -396,6 +401,7 @@ settings_refused_place	9632	%s (его положение в файле не п�
 settings_refused_rate	97bc	%1$s (%2$d Гц не предлагается)
 settings_refused_size	1332	%s (%d × %d не предлагается)
 settings_refused_turn	7b3a	%1$s (не удалось: %2$s)
+settings_remove_again	85e0	нажмите ещё раз, чтобы убрать
 settings_req_context	a233	видеокарта не выделяет буфер, VM-отображение или контекст: кольцо amdgpu или его прошивка не запущены
 settings_req_driver	42ea	у драйвера видеокарты, %1$s, пока нет пути GPU: всё рисует процессор
 settings_req_family	8305	для этого чипа пока нет ядер GPU, %1$s: всё рисует процессор

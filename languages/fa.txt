@@ -11,6 +11,7 @@
 # machine-made 2026-11-23 (the startup programs of Settings), not yet read by a person: settings_startup_add settings_startup_add_keys settings_startup_command settings_startup_hint settings_startup_keys settings_startup_program settings_startup_type
 # machine-made 2026-11-23 (the add row of Waterlink's linked machines), not yet read by a person: settings_link_add settings_link_add_keys settings_link_show settings_link_stop settings_link_type
 # machine-made 2026-11-23 (a row menu's copy of one column), not yet read by a person: menu_copy_named
+# machine-made 2026-11-23 (Waterlink's grants as columns, and a remove asked on its row), not yet read by a person: settings_column_files settings_column_log settings_column_run settings_column_shell settings_remove_again
 @language fa
 @name فارسی
 @translated machine
@@ -288,7 +289,11 @@ settings_cannot_run	954f	فرمان moonwater اجرا نشد
 settings_card_back	db52	Escape یا کلیک برای بازگشت
 settings_card_stopped	e24d	متوقف شد: Escape یا کلیک برای بازگشت
 settings_column_access	ae0b	دسترسی
+settings_column_files	1b30	فایل‌ها
+settings_column_log	7bf1	گزارش
+settings_column_run	e66a	اجرا
 settings_column_security	21db	امنیت
+settings_column_shell	69a1	پوسته
 settings_column_signal	4529	سیگنال
 settings_column_status	f20f	وضعیت
 settings_copied	0bd7	در کلیپ‌بورد کپی شد
@@ -397,6 +402,7 @@ settings_refused_place	9632	%s (جایگاه آن در پرونده خوانده
 settings_refused_rate	97bc	%1$s (%2$d هرتز ارائه نمی‌شود)
 settings_refused_size	1332	%s (%d × %d ارائه نمی‌شود)
 settings_refused_turn	7b3a	%1$s (%2$s انجام نشد)
+settings_remove_again	85e0	دوباره بزنید تا حذف شود
 settings_req_context	a233	کارت بافر، نگاشت VM یا بستر محاسبه نمی‌دهد: حلقه محاسبه amdgpu یا سخت‌افزار نرم آن بالا نیست
 settings_req_driver	42ea	درایور کارت، %1$s، هنوز مسیر GPU ندارد: پردازنده همه چیز را می‌کشد
 settings_req_family	8305	هنوز هسته GPU برای این تراشه نیست، %1$s: پردازنده همه چیز را می‌کشد

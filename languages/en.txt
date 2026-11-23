@@ -275,7 +275,11 @@ settings_cannot_run	954f	the moonwater command could not be run
 settings_card_back	db52	Escape or a press goes back
 settings_card_stopped	e24d	stopped: Escape or a press goes back
 settings_column_access	ae0b	Access
+settings_column_files	1b30	Files
+settings_column_log	7bf1	Log
+settings_column_run	e66a	Run
 settings_column_security	21db	Security
+settings_column_shell	69a1	Shell
 settings_column_signal	4529	Signal
 settings_column_status	f20f	Status
 settings_copied	0bd7	copied to the clipboard
@@ -384,6 +388,7 @@ settings_refused_place	9632	%s (its place in the file is not read)
 settings_refused_rate	97bc	%1$s (%2$d Hz is not offered)
 settings_refused_size	1332	%s (%d × %d is not offered)
 settings_refused_turn	7b3a	%1$s (%2$s could not be done)
+settings_remove_again	85e0	press again to remove it
 settings_req_context	a233	the card would not give a buffer, its VM map or a compute context: the amdgpu compute ring or its firmware is not up (the kernel lines say which)
 settings_req_driver	42ea	the card's driver, %1$s, has no GPU path yet: the processor draws everything
 settings_req_family	8305	there are no GPU kernels for this chip yet, %1$s: the processor draws everything

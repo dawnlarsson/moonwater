@@ -10,6 +10,7 @@
 # machine-made 2026-11-23 (the startup programs of Settings), not yet read by a person: settings_startup_add settings_startup_add_keys settings_startup_command settings_startup_hint settings_startup_keys settings_startup_program settings_startup_type
 # machine-made 2026-11-23 (the add row of Waterlink's linked machines), not yet read by a person: settings_link_add settings_link_add_keys settings_link_show settings_link_stop settings_link_type
 # machine-made 2026-11-23 (a row menu's copy of one column), not yet read by a person: menu_copy_named
+# machine-made 2026-11-23 (Waterlink's grants as columns, and a remove asked on its row), not yet read by a person: settings_column_files settings_column_log settings_column_run settings_column_shell settings_remove_again
 @language fr
 @name Français
 @translated machine
@@ -287,7 +288,11 @@ settings_cannot_run	954f	la commande moonwater n'a pas pu être lancée
 settings_card_back	db52	Escape ou un clic revient en arrière
 settings_card_stopped	e24d	arrêté : Escape ou un clic revient en arrière
 settings_column_access	ae0b	Accès
+settings_column_files	1b30	Fichiers
+settings_column_log	7bf1	Journal
+settings_column_run	e66a	Exécuter
 settings_column_security	21db	Sécurité
+settings_column_shell	69a1	Shell
 settings_column_signal	4529	Signal
 settings_column_status	f20f	État
 settings_copied	0bd7	copié dans le presse-papiers
@@ -396,6 +401,7 @@ settings_refused_place	9632	%s (sa place dans le fichier n'est pas lue)
 settings_refused_rate	97bc	%1$s (%2$d Hz n'est pas proposé)
 settings_refused_size	1332	%s (%d × %d n'est pas proposé)
 settings_refused_turn	7b3a	%1$s (%2$s n'a pas pu être fait)
+settings_remove_again	85e0	appuyez encore pour le retirer
 settings_req_context	a233	la carte ne fournit ni tampon, ni mappage VM, ni contexte de calcul : l'anneau de calcul amdgpu ou son micrologiciel n'est pas prêt
 settings_req_driver	42ea	le pilote de la carte, %1$s, n'a pas encore de voie GPU : le processeur dessine tout
 settings_req_family	8305	il n'y a pas encore de noyaux GPU pour cette puce, %1$s : le processeur dessine tout

@@ -6730,7 +6730,11 @@ LANGUAGE_ID(settings_cannot_run, "the moonwater command could not be run") \
 LANGUAGE_ID(settings_card_back, "Escape or a press goes back") \
 LANGUAGE_ID(settings_card_stopped, "stopped: Escape or a press goes back") \
 LANGUAGE_ID(settings_column_access, "Access") \
+LANGUAGE_ID(settings_column_files, "Files") \
+LANGUAGE_ID(settings_column_log, "Log") \
+LANGUAGE_ID(settings_column_run, "Run") \
 LANGUAGE_ID(settings_column_security, "Security") \
+LANGUAGE_ID(settings_column_shell, "Shell") \
 LANGUAGE_ID(settings_column_signal, "Signal") \
 LANGUAGE_ID(settings_column_status, "Status") \
 LANGUAGE_ID(settings_copied, "copied to the clipboard") \
@@ -6839,6 +6843,7 @@ LANGUAGE_ID(settings_refused_place, "%s (its place in the file is not read)") \
 LANGUAGE_ID(settings_refused_rate, "%1$s (%2$d Hz is not offered)") \
 LANGUAGE_ID(settings_refused_size, "%s (%d × %d is not offered)") \
 LANGUAGE_ID(settings_refused_turn, "%1$s (%2$s could not be done)") \
+LANGUAGE_ID(settings_remove_again, "press again to remove it") \
 LANGUAGE_ID(settings_req_context, "the card would not give a buffer, its VM map or a compute context: the amdgpu compute ring or its firmware is not up (the kernel lines say which)") \
 LANGUAGE_ID(settings_req_driver, "the card's driver, %1$s, has no GPU path yet: the processor draws everything") \
 LANGUAGE_ID(settings_req_family, "there are no GPU kernels for this chip yet, %1$s: the processor draws everything") \

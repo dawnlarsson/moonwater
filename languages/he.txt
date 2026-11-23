@@ -11,6 +11,7 @@
 # machine-made 2026-11-23 (the startup programs of Settings), not yet read by a person: settings_startup_add settings_startup_add_keys settings_startup_command settings_startup_hint settings_startup_keys settings_startup_program settings_startup_type
 # machine-made 2026-11-23 (the add row of Waterlink's linked machines), not yet read by a person: settings_link_add settings_link_add_keys settings_link_show settings_link_stop settings_link_type
 # machine-made 2026-11-23 (a row menu's copy of one column), not yet read by a person: menu_copy_named
+# machine-made 2026-11-23 (Waterlink's grants as columns, and a remove asked on its row), not yet read by a person: settings_column_files settings_column_log settings_column_run settings_column_shell settings_remove_again
 @language he
 @name עברית
 @translated machine
@@ -288,7 +289,11 @@ settings_cannot_run	954f	לא ניתן היה להריץ את פקודת moonwat
 settings_card_back	db52	Escape או לחיצה לחזרה
 settings_card_stopped	e24d	נעצר: Escape או לחיצה לחזרה
 settings_column_access	ae0b	גישה
+settings_column_files	1b30	קבצים
+settings_column_log	7bf1	יומן
+settings_column_run	e66a	הרצה
 settings_column_security	21db	אבטחה
+settings_column_shell	69a1	מעטפת
 settings_column_signal	4529	אות
 settings_column_status	f20f	מצב
 settings_copied	0bd7	הועתק ללוח הגזירים
@@ -397,6 +402,7 @@ settings_refused_place	9632	%s (מקומו בקובץ לא נקרא)
 settings_refused_rate	97bc	%1$s (%2$d הרץ אינו מוצע)
 settings_refused_size	1332	%s (%d × %d לא מוצע)
 settings_refused_turn	7b3a	%1$s (לא ניתן היה לבצע %2$s)
+settings_remove_again	85e0	לחץ שוב כדי להסיר
 settings_req_context	a233	הכרטיס לא מספק מאגר, מיפוי VM או הקשר חישוב: טבעת החישוב של amdgpu או הקושחה שלה אינן פעילות
 settings_req_driver	42ea	למנהל ההתקן של הכרטיס, %1$s, אין עדיין נתיב GPU: המעבד מצייר הכול
 settings_req_family	8305	אין עדיין ליבות GPU עבור השבב הזה, %1$s: המעבד מצייר הכול

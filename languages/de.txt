@@ -10,6 +10,7 @@
 # machine-made 2026-11-23 (the startup programs of Settings), not yet read by a person: settings_startup_add settings_startup_add_keys settings_startup_command settings_startup_hint settings_startup_keys settings_startup_program settings_startup_type
 # machine-made 2026-11-23 (the add row of Waterlink's linked machines), not yet read by a person: settings_link_add settings_link_add_keys settings_link_show settings_link_stop settings_link_type
 # machine-made 2026-11-23 (a row menu's copy of one column), not yet read by a person: menu_copy_named
+# machine-made 2026-11-23 (Waterlink's grants as columns, and a remove asked on its row), not yet read by a person: settings_column_files settings_column_log settings_column_run settings_column_shell settings_remove_again
 @language de
 @name Deutsch
 @translated machine
@@ -287,7 +288,11 @@ settings_cannot_run	954f	der moonwater-Befehl ließ sich nicht ausführen
 settings_card_back	db52	Escape oder ein Klick geht zurück
 settings_card_stopped	e24d	angehalten: Escape oder ein Klick geht zurück
 settings_column_access	ae0b	Zugriff
+settings_column_files	1b30	Dateien
+settings_column_log	7bf1	Protokoll
+settings_column_run	e66a	Ausführen
 settings_column_security	21db	Sicherheit
+settings_column_shell	69a1	Shell
 settings_column_signal	4529	Signal
 settings_column_status	f20f	Status
 settings_copied	0bd7	in die Zwischenablage kopiert
@@ -396,6 +401,7 @@ settings_refused_place	9632	%s (seine Position in der Datei wird nicht gelesen)
 settings_refused_rate	97bc	%1$s (%2$d Hz wird nicht angeboten)
 settings_refused_size	1332	%s (%d × %d wird nicht angeboten)
 settings_refused_turn	7b3a	%1$s (%2$s ließ sich nicht ausführen)
+settings_remove_again	85e0	noch einmal drücken, um es zu entfernen
 settings_req_context	a233	die Karte liefert keinen Puffer, keine VM-Abbildung und keinen Compute-Kontext: der amdgpu-Compute-Ring oder seine Firmware läuft nicht
 settings_req_driver	42ea	der Treiber der Grafikkarte, %1$s, hat noch keinen GPU-Pfad: der Prozessor zeichnet alles
 settings_req_family	8305	für diesen Chip gibt es noch keine GPU-Kernel, %1$s: der Prozessor zeichnet alles

@@ -11,6 +11,7 @@
 # machine-made 2026-11-23 (the startup programs of Settings), not yet read by a person: settings_startup_add settings_startup_add_keys settings_startup_command settings_startup_hint settings_startup_keys settings_startup_program settings_startup_type
 # machine-made 2026-11-23 (the add row of Waterlink's linked machines), not yet read by a person: settings_link_add settings_link_add_keys settings_link_show settings_link_stop settings_link_type
 # machine-made 2026-11-23 (a row menu's copy of one column), not yet read by a person: menu_copy_named
+# machine-made 2026-11-23 (Waterlink's grants as columns, and a remove asked on its row), not yet read by a person: settings_column_files settings_column_log settings_column_run settings_column_shell settings_remove_again
 @language ar
 @name العربية
 @translated machine
@@ -288,7 +289,11 @@ settings_cannot_run	954f	تعذر تشغيل أمر moonwater
 settings_card_back	db52	Escape أو نقرة للرجوع
 settings_card_stopped	e24d	توقف: Escape أو نقرة للرجوع
 settings_column_access	ae0b	الوصول
+settings_column_files	1b30	الملفات
+settings_column_log	7bf1	السجل
+settings_column_run	e66a	تشغيل
 settings_column_security	21db	الأمان
+settings_column_shell	69a1	الصدفة
 settings_column_signal	4529	الإشارة
 settings_column_status	f20f	الحالة
 settings_copied	0bd7	نُسخ إلى الحافظة
@@ -397,6 +402,7 @@ settings_refused_place	9632	%s (موضعه في الملف غير مقروء)
 settings_refused_rate	97bc	%1$s (%2$d هرتز غير متاح)
 settings_refused_size	1332	%s (%d × %d غير متاح)
 settings_refused_turn	7b3a	%1$s (تعذر تنفيذ %2$s)
+settings_remove_again	85e0	اضغط مرة أخرى لإزالته
 settings_req_context	a233	لا تعطي البطاقة مخزنًا ولا خريطة VM ولا سياق حوسبة: حلقة الحوسبة في amdgpu أو برنامجها الثابت غير جاهز
 settings_req_driver	42ea	مشغّل البطاقة، %1$s، ليس له مسار للمعالج الرسومي بعد: المعالج يرسم كل شيء
 settings_req_family	8305	لا توجد نوى للمعالج الرسومي لهذه الشريحة بعد، %1$s: المعالج يرسم كل شيء

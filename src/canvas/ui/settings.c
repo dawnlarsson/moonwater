@@ -446,6 +446,10 @@ static const struct { const char address_to word; unsigned int label, note; } se
     {"shell", LANGUAGE_settings_link_shell, LANGUAGE_settings_link_shell_about},
     {"log",   LANGUAGE_settings_link_log,   LANGUAGE_settings_link_log_about},
 };
+// A machine linked is a row of columns: its name, its state, and from SETTINGS_LINK_GRANT_COLUMN a check of each grant in the order above.
+#define SETTINGS_LINK_GRANT_COLUMN 2
+#define SETTINGS_LINK_COLUMNS (SETTINGS_LINK_GRANT_COLUMN + 4)
+_Static_assert(SETTINGS_LINK_COLUMNS <= UI_COLUMNS_MOST, "a machine linked's columns are the kit's at most");
 // What a linked machine's state says, by the item's link_state (0 says none): the words of the language taken, said when the row is drawn.
 enum { SETTINGS_LINK_ONLINE = 1, SETTINGS_LINK_OFFLINE = 2, SETTINGS_LINK_MISMATCH = 3 };
 static const unsigned int settings_link_states[] = {0, LANGUAGE_settings_link_online, LANGUAGE_settings_link_offline, LANGUAGE_settings_link_mismatch};
@@ -3101,12 +3105,15 @@ static fn settings_feed_startup(void)
 
 static struct ui_columns address_to settings_columns_for(int list)
 {
-        static const struct { unsigned char count, at_end; unsigned short w[4]; unsigned int title_id[4]; } specs[SETTINGS_LISTS] = {
+        // Waterlink's: a machine's name, its state, and a check of each grant (settings_link_grants' order), turned in its cell.
+        static const struct { unsigned char count, at_end; unsigned short w[UI_COLUMNS_MOST]; unsigned int title_id[UI_COLUMNS_MOST]; } specs[SETTINGS_LISTS] = {
             {4, 3, {0, 84, 84, 72},   {LANGUAGE_files_column_name, LANGUAGE_settings_column_status, LANGUAGE_settings_column_security, LANGUAGE_settings_column_signal}},
             {2, 1, {0, 100, 0, 0},    {LANGUAGE_files_column_name, LANGUAGE_settings_column_status, 0, 0}},
             {4, 3, {0, 108, 84, 128}, {LANGUAGE_files_column_name, 0, LANGUAGE_settings_column_status, LANGUAGE_settings_column_access}},
-            {3, 0, {0, 150, 140, 0},  {LANGUAGE_files_column_name, LANGUAGE_settings_column_access, LANGUAGE_settings_column_status, 0}},
-            {0, 0, {0, 0, 0, 0},      {0, 0, 0, 0}}, // the startup list's: no columns, its order is the person's
+            {SETTINGS_LINK_COLUMNS, 0, {0, 120, 56, 56, 56, 56},
+             {LANGUAGE_files_column_name, LANGUAGE_settings_column_status, LANGUAGE_settings_column_files, LANGUAGE_settings_column_run,
+              LANGUAGE_settings_column_shell, LANGUAGE_settings_column_log}},
+            {0, 0, {0}, {0}}, // the startup list's: no columns, its order is the person's
         };
         struct ui_columns address_to c;
         if (!settings_large || list < 0 || list >= SETTINGS_LISTS)
@@ -3128,6 +3135,12 @@ static struct ui_columns address_to settings_columns_for(int list)
 static int settings_list_compare(int list, int col, const struct settings_item address_to a, const struct settings_item address_to b)
 {
         int cmp = 0;
+        // Waterlink's machines: by their state (online, offline, a key that does not match), or by whether a grant's check is on.
+        if (list == 3 && col == 1)
+                cmp = (int)a->link_state - (int)b->link_state;
+        else if (list == 3 && col >= SETTINGS_LINK_GRANT_COLUMN && col < SETTINGS_LINK_COLUMNS)
+                cmp = (int)(b->grants >> (col - SETTINGS_LINK_GRANT_COLUMN) & 1u) - (int)(a->grants >> (col - SETTINGS_LINK_GRANT_COLUMN) & 1u);
+        else
         switch (list * 4 + col)
         {
         case 1:  cmp = (a->flags & SETTINGS_ITEM_JOINED ? 0 : a->flags & SETTINGS_ITEM_SAVED ? 1 : 2) - (b->flags & SETTINGS_ITEM_JOINED ? 0 : b->flags & SETTINGS_ITEM_SAVED ? 1 : 2); break;
@@ -3136,8 +3149,6 @@ static int settings_list_compare(int list, int col, const struct settings_item a
         case 9:  cmp = (int)string_compare_folded((string_address)a->port, (string_address)b->port); break;
         case 10: cmp = (int)string_compare_folded((string_address)settings_state_word(a->state), (string_address)settings_state_word(b->state)); break;
         case 11: cmp = ((a->flags & SETTINGS_ITEM_JOINED) ? 0 : 1) - ((b->flags & SETTINGS_ITEM_JOINED) ? 0 : 1); break;
-        case 13: cmp = (int)string_compare_folded((string_address)a->access, (string_address)b->access); break;
-        case 14: cmp = (int)string_compare_folded((string_address)a->detail, (string_address)b->detail); break;
         }
         return cmp ? cmp : (int)string_compare_folded((string_address)a->label, (string_address)b->label);
 }
@@ -3626,9 +3637,19 @@ static fn settings_startup_apply(int how, int from, int to)
 // What the person did to the list's rows (the kit's ui_list.moved and .removed), done: the startup list's entries are the ones it has now,
 // and a saved item's remove button forgets it as Delete does (asking first).
 static fn settings_forget_item(const struct settings_item address_to item);
+static fn settings_link_grant_flip(struct settings_item address_to item, int part);
 static fn settings_managed(void)
 {
         struct ui_list address_to l = &settings.list;
+        // A check in a cell turned (the kit's cell_check): a machine linked's grant, by its column.
+        if (l->toggled)
+        {
+                struct settings_item address_to it = settings_item(l->toggled - 1);
+                int part = l->toggled_cell - SETTINGS_LINK_GRANT_COLUMN;
+                l->toggled = 0;
+                if (it && it->kind == SETTINGS_LINK && it->where == 1 && settings_item_in(it, 3))
+                        settings_link_grant_flip(it, part), ui_list_damage(&settings.ui, l, (int)SETTINGS_LIST_ID(3, it - settings.item[3]));
+        }
         if (l->moved)
         {
                 l->moved = false;
@@ -4145,8 +4166,15 @@ static fn settings_forget_item(const struct settings_item address_to item)
         if (!code)
                 return;
         if (!ui_confirm_ask(&settings.confirm, -1 - (int)item->kind, item->label))
-                return language_format(text, sizeof(text), WORDS(settings_forget), item->label), settings_confirm_say(text);
+                return language_format(text, sizeof(text), WORDS(settings_forget), item->label), settings_confirm_say(text), ui_page_redraw(&settings.page);
         settings_act(code, item->label, null);
+}
+
+// Whether the item's remove asked once and waits for the second (its row says so: settings_describe_item).
+static b32 settings_forget_asked(const struct settings_item address_to item)
+{
+        return item && (item->flags & SETTINGS_ITEM_SAVED) && settings_forget_code(item->kind) && settings.confirm.armed &&
+               settings.confirm.what == -1 - (int)item->kind && string_equals((string_address)settings.confirm.text, (string_address)item->label);
 }
 
 static fn settings_forget(void) { settings_forget_item(settings_item(settings.list.focus)); }
@@ -4184,32 +4212,38 @@ static fn settings_row_activate(int row, int offset, int way)
                 settings_change(row, next);
 }
 
-static fn settings_link_grant_toggle(int at)
+// A grant of a machine linked turned (part, in settings_link_grants' order), by its switch under the fold or its check in the row; this
+// machine's own row turns the grant for every machine. Allowing is a deliberate act; a grant this machine allows none of stays off.
+static fn settings_link_grant_flip(struct settings_item address_to item, int part)
 {
-        if (at < 0 || at >= settings_sub_count || settings_sub[at].action != SETTINGS_SUB_LINK_GRANT ||
-            settings_sub[at].part < 0 || settings_sub[at].part >= 4)
+        unsigned char bit;
+        b32 allow;
+        if (!item || item->kind != SETTINGS_LINK || part < 0 || part >= 4)
                 return;
-        struct settings_item address_to item = settings_item(settings_sub[at].owner);
-        if (!item || item->kind != SETTINGS_LINK)
-                return;
-        unsigned char bit = (unsigned char)(1u << settings_sub[at].part);
+        bit = (unsigned char)(1u << part);
         if (item->where == 0)
         {
-                b32 allow = (settings_link_global_grants & bit) == 0;
+                allow = (settings_link_global_grants & bit) == 0;
                 if (allow && !settings.hand)
                         return settings_say((string_address)WORDS(settings_virtual_refused));
                 settings_link_global_grants ^= bit;
                 item->grants = settings_link_global_grants;
-                settings_act(allow ? 'L' : 'N', settings_link_grants[settings_sub[at].part].word, null);
+                settings_act(allow ? 'L' : 'N', settings_link_grants[part].word, null);
                 return;
         }
         if (!(settings_link_global_grants & bit))
-                return;
-        b32 allow = (item->grants & bit) == 0;
+                return settings_say((string_address)WORDS(settings_link_disabled));
+        allow = (item->grants & bit) == 0;
         if (allow && !settings.hand)
                 return settings_say((string_address)WORDS(settings_virtual_refused));
         item->grants ^= bit;
-        settings_act(allow ? 'l' : 'n', item->label, settings_link_grants[settings_sub[at].part].word);
+        settings_act(allow ? 'l' : 'n', item->label, settings_link_grants[part].word);
+}
+
+static fn settings_link_grant_toggle(int at)
+{
+        if (at >= 0 && at < settings_sub_count && settings_sub[at].action == SETTINGS_SUB_LINK_GRANT)
+                settings_link_grant_flip(settings_item(settings_sub[at].owner), settings_sub[at].part);
 }
 
 static fn settings_activate(int row, int way)
@@ -4671,8 +4705,13 @@ static fn settings_describe_item(int id, const struct settings_item address_to i
                 {
                         const char address_to st = item->link_state ? language_text(settings_link_states[item->link_state]) : item->state[0] ? item->state : item->detail[0] ? item->detail : null;
                         row->turn = settings_fold_turn(id), row->expander = settings_exp_get(id) ? UI_ROW_EXPANDER_OPEN : UI_ROW_EXPANDER_SHUT,
-                        row->columns = settings_columns_for(3), row->cells[1] = item->access[0] ? item->access : null,
-                        row->cells[2] = st, row->value = st ? st : row->cells[1];
+                        row->columns = settings_columns_for(3), row->cells[1] = st, row->value = st;
+                        // Its grants are checks in their cells (the kit's cell_check, turned in place: settings_managed), each on where the
+                        // machine may; a grant this machine allows none is no check here, as its switch under the fold says so.
+                        for (int part = 0; part < 4; part++)
+                                if (settings_link_global_grants & 1u << part)
+                                        row->cell_check |= 1u << (SETTINGS_LINK_GRANT_COLUMN + part),
+                                        row->cell_on |= (item->grants & 1u << part) ? 1u << (SETTINGS_LINK_GRANT_COLUMN + part) : 0;
                         row->remove = true; // a machine linked is taken out by its button, asking first (settings_forget_item: link remove)
                 }
         }
@@ -4681,6 +4720,10 @@ static fn settings_describe_item(int id, const struct settings_item address_to i
                 if ((list == 0 && settings.item_count[list] > 1) || (list == 2 && settings_device_section(item) == 1)) row->columns = settings_columns_for(list);
                 row->dim = true;
         }
+        // A saved item whose remove button (or Delete) asked once says so in its row, where its state is: the second press removes it.
+        // The ask was said in the status line alone, so a single press on the button looked like nothing.
+        if (settings_forget_asked(item))
+                row->cells[1] = row->value = WORDS(settings_remove_again), row->note = row->columns ? row->note : null;
 }
 
 static fn settings_describe(int id, struct ui_row address_to row)

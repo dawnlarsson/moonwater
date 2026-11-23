@@ -10,6 +10,7 @@
 # machine-made 2026-11-23 (the startup programs of Settings), not yet read by a person: settings_startup_add settings_startup_add_keys settings_startup_command settings_startup_hint settings_startup_keys settings_startup_program settings_startup_type
 # machine-made 2026-11-23 (the add row of Waterlink's linked machines), not yet read by a person: settings_link_add settings_link_add_keys settings_link_show settings_link_stop settings_link_type
 # machine-made 2026-11-23 (a row menu's copy of one column), not yet read by a person: menu_copy_named
+# machine-made 2026-11-23 (Waterlink's grants as columns, and a remove asked on its row), not yet read by a person: settings_column_files settings_column_log settings_column_run settings_column_shell settings_remove_again
 @language pl
 @name Polski
 @translated machine
@@ -287,7 +288,11 @@ settings_cannot_run	954f	nie można uruchomić polecenia moonwater
 settings_card_back	db52	Escape lub kliknięcie wraca
 settings_card_stopped	e24d	zatrzymano: Escape lub kliknięcie wraca
 settings_column_access	ae0b	Dostęp
+settings_column_files	1b30	Pliki
+settings_column_log	7bf1	Dziennik
+settings_column_run	e66a	Uruchamianie
 settings_column_security	21db	Zabezpieczenia
+settings_column_shell	69a1	Powłoka
 settings_column_signal	4529	Sygnał
 settings_column_status	f20f	Stan
 settings_copied	0bd7	skopiowano do schowka
@@ -396,6 +401,7 @@ settings_refused_place	9632	%s (jego położenie w pliku nie jest odczytywane)
 settings_refused_rate	97bc	%1$s (%2$d Hz nie jest dostępne)
 settings_refused_size	1332	%s (%d × %d nie jest oferowana)
 settings_refused_turn	7b3a	%1$s (nie udało się: %2$s)
+settings_remove_again	85e0	naciśnij ponownie, aby usunąć
 settings_req_context	a233	karta nie daje bufora, mapy VM ani kontekstu obliczeń: pierścień obliczeń amdgpu lub jego firmware nie działa
 settings_req_driver	42ea	sterownik karty, %1$s, nie ma jeszcze ścieżki GPU: procesor rysuje wszystko
 settings_req_family	8305	dla tego układu nie ma jeszcze jąder GPU, %1$s: procesor rysuje wszystko

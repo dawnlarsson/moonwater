@@ -11,6 +11,7 @@
 # machine-made 2026-11-23 (the startup programs of Settings), not yet read by a person: settings_startup_add settings_startup_add_keys settings_startup_command settings_startup_hint settings_startup_keys settings_startup_program settings_startup_type
 # machine-made 2026-11-23 (the add row of Waterlink's linked machines), not yet read by a person: settings_link_add settings_link_add_keys settings_link_show settings_link_stop settings_link_type
 # machine-made 2026-11-23 (a row menu's copy of one column), not yet read by a person: menu_copy_named
+# machine-made 2026-11-23 (Waterlink's grants as columns, and a remove asked on its row), not yet read by a person: settings_column_files settings_column_log settings_column_run settings_column_shell settings_remove_again
 @language ur
 @name اردو
 @translated machine
@@ -288,7 +289,11 @@ settings_cannot_run	954f	moonwater کمانڈ چلائی نہ جا سکی
 settings_card_back	db52	Escape یا کلک واپسی کے لیے
 settings_card_stopped	e24d	رک گیا: Escape یا کلک واپسی کے لیے
 settings_column_access	ae0b	رسائی
+settings_column_files	1b30	فائلیں
+settings_column_log	7bf1	لاگ
+settings_column_run	e66a	چلائیں
 settings_column_security	21db	سکیورٹی
+settings_column_shell	69a1	شیل
 settings_column_signal	4529	سگنل
 settings_column_status	f20f	حالت
 settings_copied	0bd7	کلپ بورڈ پر کاپی ہو گیا
@@ -397,6 +402,7 @@ settings_refused_place	9632	%s (فائل میں اس کی جگہ پڑھی نہی
 settings_refused_rate	97bc	%1$s (%2$d ہرٹز دستیاب نہیں)
 settings_refused_size	1332	%s (%d × %d پیش نہیں)
 settings_refused_turn	7b3a	%1$s (%2$s نہیں ہو سکا)
+settings_remove_again	85e0	ہٹانے کے لیے دوبارہ دبائیں
 settings_req_context	a233	کارڈ بفر، VM میپ یا کمپیوٹ کانٹیکسٹ نہیں دیتا: amdgpu کمپیوٹ رنگ یا اس کا فرم ویئر چالو نہیں
 settings_req_driver	42ea	کارڈ کا درائیور، %1$s، ابھی GPU راستہ نہیں رکھتا: سب کچھ پروسیسر بناتا ہے
 settings_req_family	8305	اس چپ کے لیے ابھی GPU کرنل نہیں، %1$s: سب کچھ پروسیسر بناتا ہے
