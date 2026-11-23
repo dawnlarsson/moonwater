@@ -21,6 +21,7 @@
 # machine-made 2026-11-23 (Waterlink's pad grant), not yet read by a person: settings_column_pad settings_link_pad settings_link_pad_about
 # machine-made 2026-11-23 (the launcher's word when a program cannot be started), not yet read by a person: launcher_open_failed
 # machine-made 2026-11-23 (the mixer outputs pass), not yet read by a person: mixer_column_output mixer_column_plays mixer_outputs mixer_state_playing
+# machine-made 2026-11-23 (the mixer mirrors pass), not yet read by a person: mixer_column_mirror mixer_state_mirrored
 @language ur
 @name اردو
 @translated machine
@@ -263,6 +264,7 @@ menu_word_wrap	db6f	سطر لپیٹنا
 menu_zoom_in	5bcf	بڑا کریں
 menu_zoom_out	9234	چھوٹا کریں
 mixer_allow	19d2	اجازت دیں
+mixer_column_mirror	7ee2	عکس
 mixer_column_output	4324	آؤٹ پٹ
 mixer_column_plays	36d0	چلاتا ہے
 mixer_empty	eef1	کوئی آواز نہیں چل رہی
@@ -273,6 +275,7 @@ mixer_outputs	01f5	آؤٹ پٹس
 mixer_playback	110c	پلے بیک
 mixer_recording	f20c	ریکارڈنگ
 mixer_recording_off	9c09	ریکارڈنگ بند ہے
+mixer_state_mirrored	cc33	عکس جاری
 mixer_state_playing	0ad5	چل رہا ہے
 mixer_unplugged	3ed9	کچھ لگا ہوا نہیں
 notices_dismiss	9a10	سب کو مسترد کریں

@@ -20,6 +20,7 @@
 # machine-made 2026-11-23 (Waterlink's pad grant), not yet read by a person: settings_column_pad settings_link_pad settings_link_pad_about
 # machine-made 2026-11-23 (the launcher's word when a program cannot be started), not yet read by a person: launcher_open_failed
 # machine-made 2026-11-23 (the mixer outputs pass), not yet read by a person: mixer_column_output mixer_column_plays mixer_outputs mixer_state_playing
+# machine-made 2026-11-23 (the mixer mirrors pass), not yet read by a person: mixer_column_mirror mixer_state_mirrored
 @language nl
 @name Nederlands
 @translated machine
@@ -262,6 +263,7 @@ menu_word_wrap	db6f	Regelomslaan
 menu_zoom_in	5bcf	&Inzoomen
 menu_zoom_out	9234	&Uitzoomen
 mixer_allow	19d2	Toestaan
+mixer_column_mirror	7ee2	Spiegelen
 mixer_column_output	4324	Uitgang
 mixer_column_plays	36d0	Speelt
 mixer_empty	eef1	Er wordt geen geluid afgespeeld
@@ -272,6 +274,7 @@ mixer_outputs	01f5	Uitgangen
 mixer_playback	110c	Afspelen
 mixer_recording	f20c	Opnemen
 mixer_recording_off	9c09	Opnemen staat uit
+mixer_state_mirrored	cc33	Gespiegeld
 mixer_state_playing	0ad5	Speelt af
 mixer_unplugged	3ed9	Niets aangesloten
 notices_dismiss	9a10	Alles negeren

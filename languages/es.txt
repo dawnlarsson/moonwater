@@ -20,6 +20,7 @@
 # machine-made 2026-11-23 (Waterlink's pad grant), not yet read by a person: settings_column_pad settings_link_pad settings_link_pad_about
 # machine-made 2026-11-23 (the launcher's word when a program cannot be started), not yet read by a person: launcher_open_failed
 # machine-made 2026-11-23 (the mixer outputs pass), not yet read by a person: mixer_column_output mixer_column_plays mixer_outputs mixer_state_playing
+# machine-made 2026-11-23 (the mixer mirrors pass), not yet read by a person: mixer_column_mirror mixer_state_mirrored
 @language es
 @name Español
 @translated machine
@@ -262,6 +263,7 @@ menu_word_wrap	db6f	Ajuste de línea
 menu_zoom_in	5bcf	&Ampliar
 menu_zoom_out	9234	&Reducir
 mixer_allow	19d2	Permitir
+mixer_column_mirror	7ee2	Duplicar
 mixer_column_output	4324	Salida
 mixer_column_plays	36d0	Suena
 mixer_empty	eef1	No se reproduce ningún sonido
@@ -272,6 +274,7 @@ mixer_outputs	01f5	Salidas
 mixer_playback	110c	Reproducción
 mixer_recording	f20c	Grabación
 mixer_recording_off	9c09	La grabación está desactivada
+mixer_state_mirrored	cc33	Duplicado
 mixer_state_playing	0ad5	Sonando
 mixer_unplugged	3ed9	Nada conectado
 notices_dismiss	9a10	Descartar todo

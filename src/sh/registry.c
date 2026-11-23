@@ -156,6 +156,8 @@
 #define SETTING_AUDIO_VOLUME_PATH "/root/audio.volume"
 #define SETTING_AUDIO_MUTE_PATH "/root/audio.mute"
 #define SETTING_AUDIO_DEVICE_PATH "/root/audio.device"
+// The outputs that play what that one plays, besides it (the mixer's Outputs page): a name a line.
+#define SETTING_AUDIO_MIRROR_PATH "/root/audio.mirror"
 #define SETTING_AUDIO_SERVER_PATH "/root/audio.server"
 // And the recording half, read the same way: whether programs may record at all (absent is on), the microphone they are given by name,
 // and that microphone's volume and mute.

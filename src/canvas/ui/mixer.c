@@ -4,6 +4,7 @@
         given first and then a strip for every program that records from one (a program that records what plays is none), and Outputs, a
         table of the outputs the server can play on, Automatic first, whose Plays check is the one that plays: Automatic while nobody chose,
         the server picking by what is plugged in; checked on an output, that output (/root/audio.device, which `moonwater audio device` writes);
+        and a Mirror check on every other output, which then plays what that one plays too (/root/audio.mirror, a name a line);
         the kit's strips, ui.c: every channel its name on end beside a level meter and a vertical slider, and under them its volume and the glyph that mutes it. It says
         what each strip is, hands the strips its events and acts on the one that changed; the sliders,
         the keys, the wheel, the meters' fall and hold, the scrolling when there are more strips than room and the
@@ -57,7 +58,9 @@
 #define MIXER_NONE 0xffffffffu
 #define MIXER_QUICK_H 380              // the popup: as wide as its strips (mixer_open) and this tall, the last of it the Mixer row
 #define MIXER_PAGE_OUTPUTS 2           // the third tab: the outputs' table
-#define MIXER_COLUMN_PLAYS 2           // the Outputs table's columns: the output, its state, and the check of the one that plays
+#define MIXER_COLUMN_PLAYS 2           // the Outputs table's columns: the output, its state, the check of the one that plays,
+#define MIXER_COLUMN_MIRROR 3          // and the check of each that plays it too
+#define MIXER_MIRRORS_TEXT (AUDIO_STATE_DEVICES * 2 * 64) // the mirror list's file read and written: the server keeps as many mirrors as outputs it lists
 
 struct mixer_group
 {
@@ -263,8 +266,9 @@ static struct ui_columns address_to mixer_columns(void)
         struct ui_columns address_to c = &mixer.big->columns;
 
         if (!c->count)
-                c->sorted = c->hover = c->held = -1, c->count = 3, c->width[1] = 160, c->width[MIXER_COLUMN_PLAYS] = 60;
+                c->sorted = c->hover = c->held = -1, c->count = 4, c->width[1] = 160, c->width[MIXER_COLUMN_PLAYS] = 60, c->width[MIXER_COLUMN_MIRROR] = 64;
         c->title[0] = WORDS(mixer_column_output), c->title[1] = WORDS(settings_column_status), c->title[MIXER_COLUMN_PLAYS] = WORDS(mixer_column_plays);
+        c->title[MIXER_COLUMN_MIRROR] = WORDS(mixer_column_mirror);
         return c;
 }
 
@@ -288,9 +292,14 @@ static fn mixer_output_describe(int id, struct ui_row address_to row)
                 return;
         device = &page->device_list[id - 1];
         row->label = device->description[0] ? device->description : device->name;
-        row->cells[1] = device->flags & AUDIO_STATE_DEVICE_ACTIVE ? WORDS(mixer_state_playing) : device->flags & AUDIO_STATE_DEVICE_UNPLUGGED ? WORDS(mixer_unplugged) : null;
-        row->dim = (device->flags & AUDIO_STATE_DEVICE_UNPLUGGED) && !(device->flags & AUDIO_STATE_DEVICE_ACTIVE);
-        row->cell_on = chosen && (device->flags & AUDIO_STATE_DEVICE_ACTIVE) ? 1u << MIXER_COLUMN_PLAYS : 0;
+        row->cells[1] = device->flags & AUDIO_STATE_DEVICE_ACTIVE ? WORDS(mixer_state_playing) : device->flags & AUDIO_STATE_DEVICE_MIRRORING ? WORDS(mixer_state_mirrored)
+                        : device->flags & AUDIO_STATE_DEVICE_UNPLUGGED ? WORDS(mixer_unplugged) : null;
+        row->dim = (device->flags & AUDIO_STATE_DEVICE_UNPLUGGED) && !(device->flags & (AUDIO_STATE_DEVICE_ACTIVE | AUDIO_STATE_DEVICE_MIRRORING));
+        row->cell_check |= 1u << MIXER_COLUMN_MIRROR;
+        row->cell_on = (chosen && (device->flags & AUDIO_STATE_DEVICE_ACTIVE) ? 1u << MIXER_COLUMN_PLAYS : 0) |
+                       (device->flags & AUDIO_STATE_DEVICE_MIRROR ? 1u << MIXER_COLUMN_MIRROR : 0);
+        // The output that plays is no mirror of itself: its check stands as the list has it, and a press says nothing.
+        row->cell_dim = device->flags & AUDIO_STATE_DEVICE_ACTIVE ? 1u << MIXER_COLUMN_MIRROR : 0;
 }
 
 static fn mixer_damaged(int top, int bottom)
@@ -327,6 +336,52 @@ static fn mixer_output_choose(int id)
         string_copy_bounded((string_address)line, (string_address)(id ? page->device_list[id - 1].name : "default"), sizeof(line) - 1);
         string_append_bounded((string_address)line, (string_address) "\n", sizeof(line));
         compositor_volume_write(SETTING_AUDIO_DEVICE_PATH, line);
+}
+
+// A Mirror check pressed: the output is put in the mirror list, or taken out of it. The file is read and written whole, so a mirror whose
+// output is not plugged in now (and is not on the page) is kept; the server reads it within half a second.
+static fn mixer_mirror_turn(int id)
+{
+        const struct audio_state address_to page = &mixer.big->copy;
+        char was[MIXER_MIRRORS_TEXT], now[MIXER_MIRRORS_TEXT];
+        const char address_to name;
+        positive length, out = 0;
+        b32 found = false;
+        bipolar handle, got = 0;
+
+        if (id < 1 || (unsigned int)id > page->devices || id > AUDIO_STATE_DEVICES || (page->device_list[id - 1].flags & AUDIO_STATE_DEVICE_ACTIVE))
+                return;
+        name = page->device_list[id - 1].name, length = string_length((string_address)name);
+        if ((handle = system_open_at(AT_FDCWD, (string_address)SETTING_AUDIO_MIRROR_PATH, FILE_READ | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK)) >= 0)
+        {
+                got = system_read_once(handle, was, sizeof(was) - 1);
+                system_close(handle);
+        }
+        was[got > 0 ? got : 0] = 0;
+        for (char address_to line = was; *line;)
+        {
+                char address_to stop = line;
+                positive each;
+
+                while (*stop && *stop != '\n')
+                        stop++;
+                each = (positive)(stop - line);
+                if (each && each == length && !memory_compare(line, name, length))
+                        found = true;
+                else if (each && out + each + 2 < sizeof(now))
+                {
+                        memory_copy(now + out, line, each);
+                        out += each, now[out++] = '\n';
+                }
+                line = *stop ? stop + 1 : stop;
+        }
+        if (!found && length && out + length + 2 < sizeof(now))
+        {
+                memory_copy(now + out, name, length);
+                out += length, now[out++] = '\n';
+        }
+        now[out] = 0;
+        compositor_volume_write(SETTING_AUDIO_MIRROR_PATH, now);
 }
 
 // The page read again: true when what is shown changed. The strips follow it.
@@ -587,6 +642,8 @@ static b32 mixer_event(const struct window_event address_to event)
                 {
                         if (l->toggled_cell == MIXER_COLUMN_PLAYS)
                                 mixer_output_choose(l->toggled - 1);
+                        else if (l->toggled_cell == MIXER_COLUMN_MIRROR)
+                                mixer_mirror_turn(l->toggled - 1);
                         l->toggled = 0;
                 }
                 mixer.dirty = true;

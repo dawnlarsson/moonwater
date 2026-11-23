@@ -20,6 +20,7 @@
 # machine-made 2026-11-23 (Waterlink's pad grant), not yet read by a person: settings_column_pad settings_link_pad settings_link_pad_about
 # machine-made 2026-11-23 (the launcher's word when a program cannot be started), not yet read by a person: launcher_open_failed
 # machine-made 2026-11-23 (the mixer outputs pass), not yet read by a person: mixer_column_output mixer_column_plays mixer_outputs mixer_state_playing
+# machine-made 2026-11-23 (the mixer mirrors pass), not yet read by a person: mixer_column_mirror mixer_state_mirrored
 @language uk
 @name Українська
 @translated machine
@@ -262,6 +263,7 @@ menu_word_wrap	db6f	Перенесення рядків
 menu_zoom_in	5bcf	Збільшити
 menu_zoom_out	9234	Зменшити
 mixer_allow	19d2	Дозволити
+mixer_column_mirror	7ee2	Дублювати
 mixer_column_output	4324	Вихід
 mixer_column_plays	36d0	Грає
 mixer_empty	eef1	Звук не відтворюється
@@ -272,6 +274,7 @@ mixer_outputs	01f5	Виходи
 mixer_playback	110c	Відтворення
 mixer_recording	f20c	Запис
 mixer_recording_off	9c09	Запис вимкнено
+mixer_state_mirrored	cc33	Дублюється
 mixer_state_playing	0ad5	Відтворюється
 mixer_unplugged	3ed9	Нічого не підключено
 notices_dismiss	9a10	Сховати всі

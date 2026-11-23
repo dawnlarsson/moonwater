@@ -240,6 +240,7 @@ menu_word_wrap	db6f	Word Wrap
 menu_zoom_in	5bcf	Zoom &In
 menu_zoom_out	9234	Zoom &Out
 mixer_allow	19d2	Allow
+mixer_column_mirror	7ee2	Mirror
 mixer_column_output	4324	Output
 mixer_column_plays	36d0	Plays
 mixer_empty	eef1	No sound is playing
@@ -250,6 +251,7 @@ mixer_outputs	01f5	Outputs
 mixer_playback	110c	Playback
 mixer_recording	f20c	Recording
 mixer_recording_off	9c09	Recording is off
+mixer_state_mirrored	cc33	Mirrored
 mixer_state_playing	0ad5	Playing
 mixer_unplugged	3ed9	Nothing plugged in
 notices_dismiss	9a10	Dismiss all

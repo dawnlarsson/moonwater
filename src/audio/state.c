@@ -52,6 +52,8 @@
 #define AUDIO_STATE_DEVICE_ACTIVE 1u
 #define AUDIO_STATE_DEVICE_MONITOR 2u // an input: the monitor of a sink (what the machine plays), not a microphone
 #define AUDIO_STATE_DEVICE_UNPLUGGED 4u // an output whose card says nothing is plugged in (no speakers in its jack, no display on its pin)
+#define AUDIO_STATE_DEVICE_MIRROR 8u     // an output the person asked to play what the output plays, besides it (/root/audio.mirror)
+#define AUDIO_STATE_DEVICE_MIRRORING 16u // and it does now
 
 // Why the output is the one that plays (output_why).
 #define AUDIO_STATE_WHY_CHOSEN 1u // the person chose it (moonwater audio device)

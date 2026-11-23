@@ -636,6 +636,7 @@ AUDIO_API int audio_remix_build(float matrix[2][AUDIO_CHANNELS_MAX], long channe
 struct audio_table
 {
         int narrow;        // built for a 16-bit card: the shorter filter
+        int adapt;         // never exact: the place is counted by a step its user nudges (a mirror following another card's clock)
         long rin, rout;    // the rates it is for; 0 when the slot is free
         long taps, phases; // taps a phase, and phases (the rows are phases + 1; an exact table has exactly phases rows)
         long exact;        // set: rin / rout is num / den in lowest terms and the table has a row for each of den places an output can be at
@@ -690,7 +691,7 @@ AUDIO_API int audio_table_build(struct audio_table *table, long rin, long rout)
         }
         num = (unsigned long)rin / a;
         den = (unsigned long)rout / a;
-        if (den <= AUDIO_EXACT_MOST && (taps & 63) == 0 && den * (unsigned long)taps <= AUDIO_TABLE_FLOATS)
+        if (!table->adapt && den <= AUDIO_EXACT_MOST && (taps & 63) == 0 && den * (unsigned long)taps <= AUDIO_TABLE_FLOATS)
         {
                 exact = 1;
                 phases = (long)den;
@@ -726,13 +727,13 @@ AUDIO_API int audio_table_build(struct audio_table *table, long rin, long rout)
         return 0;
 }
 
-// The table for two rates: the one cached, else one built in a slot nobody uses (the oldest). Counts a user.
-AUDIO_API struct audio_table *audio_table_take(long rin, long rout)
+// The table for two rates, adapting or not: the one cached, else one built in a slot nobody uses (the oldest). Counts a user.
+static struct audio_table *audio_table_take_as(long rin, long rout, int adapt)
 {
         struct audio_table *pick = 0;
 
         for (int at = 0; at < AUDIO_TABLES; at++)
-                if (audio_tables[at].rin == rin && audio_tables[at].rout == rout && audio_tables[at].narrow == audio_narrow)
+                if (audio_tables[at].rin == rin && audio_tables[at].rout == rout && audio_tables[at].narrow == audio_narrow && audio_tables[at].adapt == adapt)
                 {
                         pick = audio_tables + at;
                         break;
@@ -746,12 +747,24 @@ AUDIO_API struct audio_table *audio_table_take(long rin, long rout)
                         return 0;
                 pick->rin = pick->rout = 0;
                 pick->narrow = audio_narrow;
+                pick->adapt = adapt;
                 if (audio_table_build(pick, rin, rout) < 0)
                         return 0;
         }
         pick->users++;
         pick->used = ++audio_table_clock;
         return pick;
+}
+
+AUDIO_API struct audio_table *audio_table_take(long rin, long rout)
+{
+        return audio_table_take_as(rin, rout, 0);
+}
+
+// A table whose user moves its step (audio_resampler.step) a little at a time: a card on another clock followed (service.c's mirrors).
+AUDIO_API struct audio_table *audio_table_take_adapting(long rin, long rout)
+{
+        return audio_table_take_as(rin, rout, 1);
 }
 
 AUDIO_API void audio_table_give(struct audio_table *table)
