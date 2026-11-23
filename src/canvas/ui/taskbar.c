@@ -2644,8 +2644,10 @@ static unsigned int taskbar_pins_tabs(struct taskbar_view *view, unsigned int ro
                 taskbar_pins_read();
         if (compositor.band_at != 0 || !compositor.table)
                 return 0;
-        memory_zero(taskbar_starting.pinned, sizeof(taskbar_starting.pinned));
-        memory_zero(taskbar_starting.failed_pinned, sizeof(taskbar_starting.failed_pinned));
+        if (taskbar_starting.count)
+                memory_zero(taskbar_starting.pinned, sizeof(taskbar_starting.pinned));
+        if (taskbar_starting.failed_count)
+                memory_zero(taskbar_starting.failed_pinned, sizeof(taskbar_starting.failed_pinned));
         for (int i = 0; i < taskbar_pins.count && added < room; i++)
         {
                 const struct taskbar_pin *pin = &taskbar_pins.pin[i];

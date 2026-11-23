@@ -2352,7 +2352,8 @@ static void compositor_tint(const struct compositor_target *t, const struct comp
         }
         canvas_emit_tint(&canvas_cpu_tint_sink, &ctx, rect, ink, radius, edge_line, edge);
         // The bands of a scene are drawn on threads of their own: each adds its own, once.
-        __atomic_fetch_add(&compositor_tint_pixels, ctx.made, __ATOMIC_RELAXED);
+        if (ctx.made)
+                __atomic_fetch_add(&compositor_tint_pixels, ctx.made, __ATOMIC_RELAXED);
         for (unsigned int each = from; each < count; each++)
         {
                 int x, y, width, height;

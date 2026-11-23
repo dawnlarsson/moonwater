@@ -2002,12 +2002,13 @@ static void compositor_motion(void)
 {
         int under, tab, rect[4], held, of, asked, dnd_shape = -1;
         unsigned int zone;
+        positive now = clock_monotonic_nanoseconds();
 
         compositor_pointer_clamp();
         if (unlikely(compositor_access_dwells))
                 compositor_access_dwell_moved();
         under = compositor_under(compositor.pointer_x, compositor.pointer_y, &tab);
-        taskbar_moon_seen(clock_monotonic_nanoseconds());
+        taskbar_moon_seen(now);
         taskbar_moon_hover(tab == TASKBAR_LAUNCHER ? compositor_moon_band(compositor.pointer_x, compositor.pointer_y) : -1);
         if (taskbar_globe_held())
                 compositor_globe_move();
@@ -2034,9 +2035,9 @@ static void compositor_motion(void)
 #ifdef CONFIG_MOONWATER_WAYLAND
         compositor_picture_poll(asked >= 0 ? of : COMPOSITOR_NONE);
 #endif
-        compositor_cursor_moved(clock_monotonic_nanoseconds());
+        compositor_cursor_moved(now);
         if (compositor.cursor.magnify)
-                compositor_magnify(clock_monotonic_nanoseconds());
+                compositor_magnify(now);
         compositor_lit(compositor.resize >= 0 ? compositor.resize : compositor.drag >= 0 ? compositor.drag : under,
                        compositor.resize >= 0 ? compositor.edges[compositor.resize]
                        : compositor.drag >= 0 ? COMPOSITOR_LIT_ALL
@@ -2072,7 +2073,7 @@ static void compositor_motion(void)
         // Deliver pointer motion to the client before the synchronous DRM_MODE_CURSOR ioctl (-15 to -60 us).
         compositor_cursor_move();
         if (compositor.motion_ts && !compositor_cursor_in_scene())
-                compositor_latency(0, compositor.motion_ts, clock_monotonic_nanoseconds()), compositor.motion_ts = 0;
+                compositor_latency(0, compositor.motion_ts, now), compositor.motion_ts = 0;
 }
 
 static void compositor_shape_sync(void)
@@ -4210,7 +4211,7 @@ HOT static int compositor_reader_key(unsigned int at, unsigned int code, int val
         if (value == 1 && __atomic_load_n(&compositor_keytrace.until, __ATOMIC_RELAXED))
                 return compositor_reader_knock(), 1;
         if (!compositor_reader.note_due)
-                compositor_reader.note_due = clock_monotonic_nanoseconds() + COMPOSITOR_READER_NOTE_DELAY_NS;
+                compositor_reader.note_due = compositor_reader.note_sent + COMPOSITOR_READER_NOTE_DELAY_NS;
         return 1;
 }
 
@@ -4234,14 +4235,15 @@ static int compositor_reader_button(unsigned int at, long dx, long dy, unsigned 
 
         if (!compositor_wl_direct_send_packet(dx, dy, code, value, wheel_v120, wheel_horiz, micro, &serial, &row))
                 return 0;
+        positive now = clock_monotonic_nanoseconds();
         if (code)
         {
                 note.seconds = (long)serial, note.microseconds = (long)micro, note.code = (unsigned short)code, note.value = value;
                 compositor_reader_put(at, (unsigned int)row, &note);
                 if (!compositor_reader.note_due)
-                        compositor_reader.note_due = clock_monotonic_nanoseconds() + COMPOSITOR_READER_NOTE_DELAY_NS;
+                        compositor_reader.note_due = now + COMPOSITOR_READER_NOTE_DELAY_NS;
         }
-        compositor_reader_direct_stat(clock_monotonic_nanoseconds() / 1000, micro);
+        compositor_reader_direct_stat(now / 1000, micro);
         return 1;
 }
 #endif

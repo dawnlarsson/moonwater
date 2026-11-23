@@ -589,13 +589,14 @@ static void compositor_land(int row)
 */
 static void compositor_land_keep(void)
 {
+        positive now = 0;
+
         for (unsigned int row = 0; row < compositor_rows_in_use; row++)
         {
-                positive now;
-
                 if (!compositor.landing[row])
                         continue;
-                now = clock_monotonic_nanoseconds();
+                if (!now)
+                        now = clock_monotonic_nanoseconds();
                 if (!compositor.land_at[row])
                         compositor.land_at[row] = now;
                 if (!compositor.showing[row] || !compositor_visible(row) || now - compositor.land_at[row] >= (positive)ui_paced(COMPOSITOR_LAND_NS))
