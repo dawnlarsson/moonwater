@@ -22013,16 +22013,16 @@ static positive bowl_graphics_stamp(string_address root, p8 *out, positive room)
         return length;
 }
 
-// A game Steam launched is running: a process under proc whose command line says "SteamLaunch AppId=" (Steam's reaper for it).
-static b32 bowl_steam_game_running(string_address proc)
+// A game Steam launched: the pid of its reaper under proc (a process whose command line says "SteamLaunch AppId=N"), 0 for none; N into appid.
+static positive bowl_steam_launch(string_address proc, positive *appid)
 {
         static const char want[] = "SteamLaunch AppId=";
         p8 buffer[4096], line[1024], path[96];
         bipolar handle, got;
-        b32 found = false;
+        positive found = 0;
 
         if ((handle = system_open_at(AT_FDCWD, proc, FILE_READ | O_DIRECTORY | O_CLOEXEC)) < 0)
-                return false;
+                return 0;
         while (!found && (got = system_call_3(syscall(getdents64), (positive)handle, (positive)buffer, sizeof buffer)) > 0)
                 for (bipolar at = 0; at < got && !found;)
                 {
@@ -22037,10 +22037,26 @@ static b32 bowl_steam_game_running(string_address proc)
                         for (bipolar k = 0; k < read; k++)
                                 line[k] = line[k] ? line[k] : ' ';
                         for (bipolar k = 0; read > 0 && k + (bipolar)sizeof want - 1 <= read && !found; k++)
-                                found = !memory_compare(line + k, want, sizeof want - 1);
+                                if (!memory_compare(line + k, want, sizeof want - 1))
+                                {
+                                        positive id = 0;
+
+                                        for (k += sizeof want - 1; k < read && line[k] >= '0' && line[k] <= '9'; k++)
+                                                id = id * 10 + (positive)(line[k] - '0');
+                                        for (string_address digit = name; *digit >= '0' && *digit <= '9'; digit++)
+                                                found = found * 10 + (positive)(*digit - '0');
+                                        if (appid)
+                                                *appid = id;
+                                        break;
+                                }
                 }
         system_close(handle);
         return found;
+}
+
+static b32 bowl_steam_game_running(string_address proc)
+{
+        return bowl_steam_launch(proc, null) != 0;
 }
 
 // What the warm does now: nothing (the caches are this driver's, or there is no driver), wait (a game is up), or run.
@@ -22106,6 +22122,27 @@ static positive bowl_shaders_cpus(unsigned long mask[2])
         return count && count < online ? count : 0;
 }
 
+// This process (and what it starts) at the background's priority, SCHED_IDLE, nice 19 and idle I/O, on the background's CPUs (into mask): their count.
+static positive bowl_background(unsigned long mask[2])
+{
+        struct
+        {
+                unsigned int size, policy;
+                unsigned long long flags;
+                int nice;
+                unsigned int priority;
+                unsigned long long runtime, deadline, period;
+        } idle = {48, 5, 0, 19, 0, 0, 0, 0}; // SCHED_IDLE
+        positive cpus;
+
+        system_call_3(syscall(sched_setattr), 0, (positive)address_of idle, 0);
+        system_call_3(syscall(setpriority), 0, 0, 19);
+        system_call_3(syscall(ioprio_set), 1, 0, (positive)3 << 13); // IOPRIO_WHO_PROCESS, IOPRIO_CLASS_IDLE
+        if ((cpus = bowl_shaders_cpus(mask)) != 0)
+                system_call_3(syscall(sched_setaffinity), 0, sizeof(unsigned long) * 2, (positive)mask);
+        return cpus;
+}
+
 static b32 bowl_shaders(positive count, string_address address_to arguments)
 {
         string_address address_to environment = file_environment_all();
@@ -22115,14 +22152,6 @@ static b32 bowl_shaders(positive count, string_address address_to arguments)
         positive length = bowl_graphics_stamp(BOWL_ROOT_PREFIX "arch", stamp, sizeof stamp), cpus;
         bipolar warmed_length, handle, got;
         unsigned long mask[2];
-        struct
-        {
-                unsigned int size, policy;
-                unsigned long long flags;
-                int nice;
-                unsigned int priority;
-                unsigned long long runtime, deadline, period;
-        } idle = {48, 5, 0, 19, 0, 0, 0, 0}; // SCHED_IDLE
 
         (void)count, (void)arguments;
         if (!home || !bowl_root_path(done, sizeof done, home, BOWL_SHADERS_DONE) || !bowl_root_path(replay, sizeof replay, home, BOWL_SHADERS_REPLAY) ||
@@ -22133,11 +22162,7 @@ static b32 bowl_shaders(positive count, string_address address_to arguments)
             system_access_at(AT_FDCWD, (string_address)replay, BOWL_ACCESS_EXECUTE) < 0)
                 return 0;
         // The whole warm, and every replay it starts, at the background's priority: it runs only where nothing else would.
-        system_call_3(syscall(sched_setattr), 0, (positive)address_of idle, 0);
-        system_call_3(syscall(setpriority), 0, 0, 19);
-        system_call_3(syscall(ioprio_set), 1, 0, (positive)3 << 13); // IOPRIO_WHO_PROCESS, IOPRIO_CLASS_IDLE
-        if ((cpus = bowl_shaders_cpus(mask)) != 0)
-                system_call_3(syscall(sched_setaffinity), 0, sizeof mask, (positive)mask);
+        cpus = bowl_background(mask);
         if ((handle = system_open_at(AT_FDCWD, (string_address)caches, FILE_READ | O_DIRECTORY | O_CLOEXEC)) < 0)
                 return 0;
         while ((got = system_call_3(syscall(getdents64), (positive)handle, (positive)buffer, sizeof buffer)) > 0)
@@ -22208,6 +22233,256 @@ static b32 bowl_shaders(positive count, string_address address_to arguments)
                 system_write_once(handle, stamp, length), system_close(handle);
         return 0;
 }
+/*
+        A game's files read into the page cache as Steam launches it (`bowl prewarm`, which the steam session starts in the background behind
+        `wa game-prewarm`, for the session's life). A game's first run after a boot read its archives from the drive as it went: its start,
+        its loads and its streaming were each as long as their reads. The launch names its files. The command line of Steam's reaper for it
+        (SteamLaunch AppId=N) has every program of the launch, the Steam Runtime's entry point, Proton and the game, each under a library's
+        steamapps/common/DIR. They are read in this order: the game's shader caches (steamapps/shadercache/N, less Steam's Fossilize
+        databases, which only a replay reads), each DIR but the last (the runtime and Proton, which the launch wants first), the game's Wine
+        prefix (compatdata/N), then the last DIR, the game's own. Every path is taken through the reaper's own root (/proc/PID/root), so a
+        library is found where its bowl has it.
+
+        It is gentle with the drive and the memory:
+        - It runs at SCHED_IDLE, nice 19 and idle I/O, on the background's CPUs.
+        - It reads a megabyte at a time and waits for each one (readahead, then a read of the piece's last byte). NVMe's queues have no I/O
+          priority under the scheduler none, so a read of the game's waits behind one piece at most.
+        - A piece already in the cache is passed by (cachestat), so a warm game costs system calls only.
+        - It reads in no more than half the memory available at the launch.
+        - It stops when the launch ends.
+*/
+#define BOWL_PREWARM_PIECE ((positive)1 << 20)
+struct bowl_prewarm
+{
+        positive reaper, budget, read, cached;
+        p8 cmdline[BOWL_PATH_LIMIT], root[BOWL_PATH_LIMIT]; // PROC/PID/cmdline and PROC/PID/root, the reaper's
+};
+
+struct bowl_cachestat_range
+{
+        p64 offset, length;
+};
+
+struct bowl_cachestat
+{
+        p64 cache, dirty, writeback, evicted, recently_evicted;
+};
+
+// The launch goes on and there is room left to read into.
+static b32 bowl_prewarm_on(const struct bowl_prewarm address_to warm)
+{
+        return warm->budget > warm->read && system_call_2(syscall(kill), warm->reaper, 0) == 0;
+}
+
+static fn bowl_prewarm_file(struct bowl_prewarm address_to warm, bipolar directory, string_address name)
+{
+        bipolar handle = system_open_at(directory, name, FILE_READ | O_NOFOLLOW | O_CLOEXEC), size;
+        p8 byte;
+
+        if (handle < 0)
+                return;
+        size = system_call_3(syscall(lseek), (positive)handle, 0, 2); // SEEK_END
+        for (bipolar at = 0; at < size && bowl_prewarm_on(warm); at += (bipolar)BOWL_PREWARM_PIECE)
+        {
+                positive length = (positive)(size - at) < BOWL_PREWARM_PIECE ? (positive)(size - at) : BOWL_PREWARM_PIECE;
+                struct bowl_cachestat_range range = {(p64)at, length};
+                struct bowl_cachestat have = {0, 0, 0, 0, 0};
+
+                if (system_call_4(syscall(cachestat), (positive)handle, (positive)address_of range, (positive)address_of have, 0) == 0 &&
+                    have.cache * 4096 >= length)
+                {
+                        warm->cached += length;
+                        continue;
+                }
+                system_call_3(syscall(readahead), (positive)handle, (positive)at, length);
+                system_call_4(syscall(pread64), (positive)handle, (positive)address_of byte, 1, (positive)at + length - 1);
+                warm->read += length;
+        }
+        system_close((positive)handle);
+}
+
+// Every file under name (a directory of directory's), but skip, a directory of its own: no symbolic link is followed.
+static fn bowl_prewarm_tree(struct bowl_prewarm address_to warm, bipolar directory, string_address name, string_address skip)
+{
+        bipolar handle = system_open_at(directory, name, FILE_READ | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC), got;
+        p8 buffer[4096];
+
+        if (handle < 0)
+                return;
+        while (bowl_prewarm_on(warm) && (got = system_call_3(syscall(getdents64), (positive)handle, (positive)buffer, sizeof buffer)) > 0)
+                for (bipolar at = 0; at < got && bowl_prewarm_on(warm);)
+                {
+                        string_address entry = (string_address)(buffer + at + 19);
+                        p8 type = buffer[at + 18];
+
+                        at += memory_load_unaligned(p16, buffer + at + 16);
+                        if ((entry[0] == '.' && (!entry[1] || (entry[1] == '.' && !entry[2]))) || (skip && string_equals(entry, skip)))
+                                continue;
+                        if (type == 4 || type == 0) // DT_DIR, DT_UNKNOWN (a file's open as a directory fails)
+                                bowl_prewarm_tree(warm, handle, entry, null);
+                        if (type == 8 || type == 0) // DT_REG
+                                bowl_prewarm_file(warm, handle, entry);
+                }
+        system_close((positive)handle);
+}
+
+// A directory of the launch's (a path of the reaper's), read in.
+static fn bowl_prewarm_path(struct bowl_prewarm address_to warm, const p8 address_to path, positive length, string_address tail, string_address skip)
+{
+        p8 full[BOWL_PATH_LIMIT];
+        positive root = string_length(warm->root), more = tail ? string_length(tail) : 0;
+
+        if (root + length + more >= sizeof full)
+                return;
+        memory_copy(full, warm->root, root), memory_copy(full + root, path, length);
+        if (tail)
+                memory_copy(full + root + length, tail, more);
+        full[root + length + more] = 0;
+        bowl_prewarm_tree(warm, AT_FDCWD, (string_address)full, skip);
+}
+
+// The steamapps/common/DIR a word of a command line is under (its length in word: up to DIR's end), 0 for none.
+static positive bowl_prewarm_common(const p8 address_to word, positive length)
+{
+        static const char common[] = "/steamapps/common/";
+
+        for (positive at = 0; at + sizeof common - 1 < length; at++)
+                if (!memory_compare(word + at, common, sizeof common - 1))
+                {
+                        positive stop = at + sizeof common - 1;
+
+                        while (stop < length && word[stop] != '/')
+                                stop++;
+                        return stop;
+                }
+        return 0;
+}
+
+/*
+        The launch's DIRs, in its command line's order: each one but the last read in (skip_last), or none read and only counted; their
+        count. With last, the last one's path (its length into last_length) for its library's shadercache and compatdata. A word longer than
+        a path can be is no path.
+*/
+static positive bowl_prewarm_dirs(struct bowl_prewarm address_to warm, positive read_before, p8 address_to last, positive address_to last_length)
+{
+        p8 chunk[4096], word[BOWL_PATH_LIMIT], previous[BOWL_PATH_LIMIT];
+        positive length = 0, count = 0, previous_length = 0;
+        bipolar handle, got;
+
+        if ((handle = system_open_at(AT_FDCWD, (string_address)warm->cmdline, FILE_READ | O_CLOEXEC)) < 0)
+                return 0;
+        while ((got = system_read_once((positive)handle, chunk, sizeof chunk)) > 0)
+                for (bipolar at = 0; at < got; at++)
+                {
+                        positive dir;
+
+                        if (chunk[at])
+                        {
+                                if (length < sizeof word)
+                                        word[length] = chunk[at];
+                                length++;
+                                continue;
+                        }
+                        dir = length < sizeof word ? bowl_prewarm_common(word, length) : 0;
+                        length = 0;
+                        if (!dir || (dir == previous_length && !memory_compare(word, previous, dir)))
+                                continue;
+                        memory_copy(previous, word, dir), previous_length = dir, count++;
+                        if (count <= read_before)
+                                bowl_prewarm_path(warm, word, dir, null, null);
+                }
+        system_close((positive)handle);
+        if (last && previous_length)
+                memory_copy(last, previous, previous_length), *last_length = previous_length;
+        return count;
+}
+
+// Half the memory the machine has available now (MemAvailable), in bytes; 0 where it cannot be read.
+static positive bowl_prewarm_budget(void)
+{
+        p8 text[4096];
+        bipolar got = file_slurp_regular_at(AT_FDCWD, "/proc/meminfo", text, sizeof text - 1, 0);
+        static const char key[] = "MemAvailable:";
+
+        for (bipolar at = 0; got > 0 && at + (bipolar)sizeof key - 1 < got; at++)
+                if (!memory_compare(text + at, key, sizeof key - 1))
+                {
+                        positive kib = 0;
+
+                        for (at += sizeof key - 1; at < got && (text[at] == ' ' || text[at] == '\t'); at++)
+                                ;
+                        for (; at < got && text[at] >= '0' && text[at] <= '9'; at++)
+                                kib = kib * 10 + (positive)(text[at] - '0');
+                        return kib * 1024 / 2;
+                }
+        return 0;
+}
+
+static positive bowl_prewarm_read; // the last launch's bytes read in
+
+// A launch's files read in (its reaper's pid under proc, its AppId): the bytes passed over, read in or found cached.
+static positive bowl_prewarm_launch(string_address proc, positive reaper, positive appid)
+{
+        static struct bowl_prewarm warm;
+        p8 last[BOWL_PATH_LIMIT], tail[64], pid[24];
+        positive last_length = 0, count, at, steamapps;
+
+        warm.reaper = reaper, warm.budget = bowl_prewarm_budget(), warm.read = warm.cached = 0;
+        pid[0] = '/', at = 1 + positive_into_string((string_address)pid + 1, reaper), pid[at] = 0;
+        if (!bowl_root_path(warm.cmdline, sizeof warm.cmdline, proc, (string_address)pid) ||
+            !bowl_root_path(warm.cmdline + string_length(warm.cmdline), sizeof warm.cmdline - string_length(warm.cmdline), "/cmdline", "") ||
+            !bowl_root_path(warm.root, sizeof warm.root, proc, (string_address)pid) ||
+            !bowl_root_path(warm.root + string_length(warm.root), sizeof warm.root - string_length(warm.root), "/root", "") ||
+            !(count = bowl_prewarm_dirs(address_of warm, 0, last, address_of last_length)))
+                return 0;
+        // The game's library: the last DIR's path up to its steamapps/, which has the game's shadercache/N and compatdata/N
+        steamapps = bowl_prewarm_common(last, last_length);
+        while (steamapps && last[steamapps - 1] != '/')
+                steamapps--;
+        steamapps = steamapps > sizeof "common/" - 1 ? steamapps - (sizeof "common/" - 1) : 0;
+        memory_copy(tail, "shadercache/", sizeof "shadercache/" - 1), at = sizeof "shadercache/" - 1;
+        at += positive_into_string((string_address)tail + at, appid), tail[at] = 0;
+        if (steamapps)
+                bowl_prewarm_path(address_of warm, last, steamapps, (string_address)tail, "fozpipelinesv6");
+        bowl_prewarm_dirs(address_of warm, count - 1, null, null);
+        memory_copy(tail, "compatdata/", sizeof "compatdata/" - 1), at = sizeof "compatdata/" - 1;
+        at += positive_into_string((string_address)tail + at, appid), tail[at] = 0;
+        if (steamapps)
+                bowl_prewarm_path(address_of warm, last, steamapps, (string_address)tail, null);
+        bowl_prewarm_path(address_of warm, last, last_length, null, null);
+        bowl_prewarm_read = warm.read;
+        return warm.read + warm.cached;
+}
+
+static b32 bowl_prewarm(positive count, string_address address_to arguments)
+{
+        positive parent = (positive)system_call_1(syscall(getppid), 0), warmed = 0;
+        unsigned long mask[2];
+
+        (void)count, (void)arguments;
+        bowl_background(mask);
+        // For the session's life: its shell gone, this is another's child
+        while ((positive)system_call_1(syscall(getppid), 0) == parent)
+        {
+                positive appid = 0, reaper = bowl_steam_launch("/proc", address_of appid);
+
+                if (reaper && reaper != warmed && appid)
+                {
+                        timespec start, stop;
+                        positive seen;
+
+                        system_call_2(syscall(clock_gettime), 1, (positive)address_of start);
+                        warmed = reaper, seen = bowl_prewarm_launch("/proc", reaper, appid);
+                        system_call_2(syscall(clock_gettime), 1, (positive)address_of stop);
+                        string_format(log, bowl_label "prewarm: app %p: %p MiB passed, %p MiB read in, in %p ms\n", appid, seen >> 20, bowl_prewarm_read >> 20,
+                                      (positive)((stop.tv_sec * 1000000000ull + stop.tv_nsec - start.tv_sec * 1000000000ull - start.tv_nsec) / 1000000)),
+                            log_flush();
+                }
+                bowl_shaders_nap(1);
+        }
+        return 0;
+}
+
 /*
         The session. It runs in the machine's shell with the arguments the
         launcher was given, which Steam takes. Canvas's socket is checked
@@ -22285,6 +22560,9 @@ static string_address bowl_steam_session[] = {
     BOWL_SHADER_CACHE_LIVE,
     // The shader caches warmed again in the background after the bowl's graphics driver changed (bowl_shaders: at idle, never beside a game).
     "wa shader-warm && { bowl shaders >/dev/null 2>&1 & } || true",
+    // A game's files read into the page cache as Steam launches it (bowl_prewarm: the runtime, Proton, its shader caches, its prefix and
+    // its own directory, at idle, a megabyte at a time, up to half the memory available).
+    "wa game-prewarm && { bowl prewarm >/dev/null 2>&1 & } || true",
     // Steam's overlay drawn into OpenGL games (bowl_steam_overlay_gl_install): ld.so takes /usr/local/$LIB as each program's own.
     "wa steam-overlay-gl && [ -r " BOWL_ROOT_PREFIX "arch" BOWL_STEAM_OVERLAY_GL_LIB64 "/" BOWL_STEAM_OVERLAY_GL_NAME " ] && "
     "export LD_PRELOAD='" BOWL_STEAM_OVERLAY_GL_PRELOAD "'${LD_PRELOAD:+:$LD_PRELOAD}",
@@ -24099,6 +24377,7 @@ static b32 bowl_main()
             {"udev", bowl_udev_verb},
             {"bus", bowl_bus},
             {"shaders", bowl_shaders},
+            {"prewarm", bowl_prewarm},
         };
         static const struct
         {

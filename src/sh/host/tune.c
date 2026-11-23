@@ -1368,6 +1368,7 @@ static const host_workaround_row host_workaround_rows[] = {
     {"game-steam-only", true, "game mode for a game's fullscreen window (SteamGameId, or MOONWATER_GAME=1), not for every fullscreen window"},
     {"game-ccd-epp", true, "while a game runs, the CPUs past its CCD at energy preference balance_power (they run only the background)"},
     {"game-nvme", true, "while a game runs, NVMe drives kept within 1 ms of use (APST tolerance), so a read after a quiet spell takes no 5 ms"},
+    {"game-prewarm", true, "read a game's files (runtime, Proton, shader caches, prefix, its directory) into memory at idle as Steam launches it"},
     {"game-group", true, "every process of a game's Steam launch (its wineserver, Wine's services) on the game's CPUs and slice with it"},
     {"wine-fpu", true, "reset x87 FCW/MXCSR on 32-bit GStreamer audio decode threads (fixes robotic audio in Wine/Proton games like RCT3)"},
     {"bowl-timerslack", true, "set PR_SET_TIMERSLACK=1ns for all bowl processes for tighter frame pacing and lower wake latency"},

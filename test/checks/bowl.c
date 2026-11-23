@@ -1689,6 +1689,9 @@ static fn steam_profile(void)
                 check("The session starts the shader warm in the background behind wa shader-warm, after the Vulkan driver is picked, before Steam",
                       chrome_line(steam->session, "wa shader-warm && { bowl shaders >/dev/null 2>&1 & }") > chrome_line(steam->session, "VK_DRIVER_FILES") &&
                           chrome_line(steam->session, "wa shader-warm") < run);
+                check("The session starts the game prewarm in the background behind wa game-prewarm, before Steam",
+                      chrome_line(steam->session, "wa game-prewarm && { bowl prewarm >/dev/null 2>&1 & }") &&
+                          chrome_line(steam->session, "wa game-prewarm") < run);
                 check("No session says PROTON_USE_NTSYNC or PROTON_ENABLE_NTSYNC (Proton 11 opens /dev/ntsync itself)",
                       steam && !chrome_line(steam->session, "NTSYNC") && chrome_profile && !chrome_line(chrome_profile->session, "NTSYNC"));
         }
@@ -4590,11 +4593,85 @@ static fn shader_warm_rows(void)
                 game = bowl_steam_game_running((string_address)proc);
                 check("shaders: a game Steam launched is seen by its reaper's command line, and Steam alone is no game", idle && game);
         }
+        {
+                positive appid = 0, reaper = bowl_steam_launch((string_address)proc, address_of appid);
+
+                check("prewarm: the launch is its reaper's pid and the AppId its command line names", reaper == 4242 && appid == 489830);
+        }
+}
+
+/*
+        A game's files read in as Steam launches it (bowl_prewarm): the launch's DIRs (steamapps/common/DIR in its reaper's command line, the
+        runtime's and the game's), the game's shader caches less Steam's Fossilize databases, and its prefix, taken through the reaper's root.
+        A library of the check's own, and a /proc of its own whose reaper is this process (the launch goes on while it lives) and whose root
+        is the machine's.
+*/
+static void prewarm_tree_file(string_address root, string_address leaf, positive size)
+{
+        static char bytes[8192];
+        p8 path[512];
+        positive length = string_length(root);
+
+        memory_copy(path, root, length);
+        for (positive at = 0; leaf[at]; at++)
+        {
+                path[length++] = (p8)leaf[at], path[length] = 0;
+                if (leaf[at] == '/')
+                        path[length - 1] = 0, system_call_3(syscall(mkdirat), (positive)AT_FDCWD, (positive)path, 0700), path[length - 1] = '/';
+        }
+        path[length] = 0;
+        shaders_file((string_address)path, bytes, size);
+}
+
+static fn prewarm_rows(void)
+{
+        p8 root[96] = "/tmp/moonwater-bowl-check-prewarm-", proc[160], line[1024], path[256];
+        positive self = (positive)system_call_1(syscall(getpid), 0), at = string_length(root), size = 0, seen;
+
+        at += positive_into_string((string_address)root + at, self), root[at] = 0;
+        system_call_3(syscall(mkdirat), (positive)AT_FDCWD, (positive)root, 0700);
+        prewarm_tree_file((string_address)root, "/lib/steamapps/common/Runtime/entry", 100);
+        prewarm_tree_file((string_address)root, "/lib/steamapps/common/Game/game.exe", 300);
+        prewarm_tree_file((string_address)root, "/lib/steamapps/common/Game/data/a.bsa", 5000);
+        prewarm_tree_file((string_address)root, "/lib/steamapps/shadercache/489830/mesa_shader_cache_sf/cache", 700);
+        prewarm_tree_file((string_address)root, "/lib/steamapps/shadercache/489830/fozpipelinesv6/steam.foz", 900);
+        prewarm_tree_file((string_address)root, "/lib/steamapps/compatdata/489830/pfx/x.dll", 50);
+        prewarm_tree_file((string_address)root, "/lib/steamapps/common/Other/never", 4000);
+        // The /proc: this process's command line is the reaper's, and its root is the machine's /
+        bowl_root_path(proc, sizeof proc, (string_address)root, "/proc");
+        system_call_3(syscall(mkdirat), (positive)AT_FDCWD, (positive)proc, 0700);
+        at = string_length(proc), proc[at++] = '/', at += positive_into_string((string_address)proc + at, self), proc[at] = 0;
+        system_call_3(syscall(mkdirat), (positive)AT_FDCWD, (positive)proc, 0700);
+        bowl_root_path(path, sizeof path, (string_address)proc, "/root");
+        system_call_3(syscall(symlinkat), (positive)"/", (positive)AT_FDCWD, (positive)path);
+        {
+                static const char *const words[] = {"reaper", "SteamLaunch", "AppId=489830", "--", "/lib/steamapps/common/Runtime/entry", "--",
+                                                    "/lib/steamapps/common/Runtime/entry", "/lib/steamapps/common/Game/game.exe", null};
+
+                for (positive k = 0; words[k]; k++)
+                {
+                        positive length = string_length(words[k]);
+
+                        if (words[k][0] == '/')
+                                memory_copy(line + size, root, string_length(root)), size += string_length(root);
+                        memory_copy(line + size, words[k], length), size += length, line[size++] = 0;
+                }
+        }
+        bowl_root_path(path, sizeof path, (string_address)proc, "/cmdline");
+        shaders_file((string_address)path, (const char *)line, size);
+        proc[string_length(proc) - positive_into_string((string_address)line, self) - 1] = 0;
+        seen = bowl_prewarm_launch((string_address)proc, self, 489830);
+        check("prewarm: a launch reads in its DIRs, the game's shader caches less the Fossilize databases, and its prefix, and nothing else",
+              seen == 100 + 300 + 5000 + 700 + 50);
+        check("prewarm: a DIR's path is the word's up to DIR, and a word under no steamapps/common is none",
+              bowl_prewarm_common((const p8 *)"/a/steamapps/common/Proton 11.0/proton", 38) == 31 &&
+                  bowl_prewarm_common((const p8 *)"/a/steamapps/common/Game", 24) == 24 && bowl_prewarm_common((const p8 *)"/a/b/c", 6) == 0);
 }
 
 b32 main(void)
 {
         shader_warm_rows(); // first: a later group crashes the run (pre-existing), and these rows must run
+        prewarm_rows();
         ssh_rows();
         names();
         launchers();
