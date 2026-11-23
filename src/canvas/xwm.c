@@ -1161,12 +1161,14 @@ static unsigned int compositor_xwm_row_owner(int row, unsigned int *server)
         Vulkan layer, which runs in the game: the X client that made the window): the window's row once its X server has named its
         client and that client is `pid`; -WAYLAND_STAND_WAITING while the window is not shown or its client not named yet;
         -WAYLAND_STAND_NOT_OWNER for another client's window, or on a server that names no client (no XRes); -WAYLAND_STAND_UNKNOWN
-        when no X server of the compositor has a window of that id.
+        when no X server of the compositor has a window of that id. A window of the client's its window manager took that has no row (its
+        server drew nothing in it) has its server's Wayland client and its serial put in x_client and serial, for the stand-in to open it.
 */
-static long compositor_xwm_stand_row(unsigned int id, unsigned int pid)
+static long compositor_xwm_stand_row(unsigned int id, unsigned int pid, long *x_client, unsigned long long *serial)
 {
         long answer = -WAYLAND_STAND_UNKNOWN;
 
+        *x_client = -1, *serial = 0;
         for (int at = 0; at < COMPOSITOR_XWM_SLOTS; at++)
         {
                 struct compositor_xwm *x = &compositor_xwm_slots[at];
@@ -1179,6 +1181,8 @@ static long compositor_xwm_stand_row(unsigned int id, unsigned int pid)
                         answer = -WAYLAND_STAND_NOT_OWNER;
                         continue;
                 }
+                if (w->owner && (w->row < 0 || w->row >= COMPOSITOR_ROWS) && (w->state & COMPOSITOR_XWM_ADOPTED) && (w->state & COMPOSITOR_XWM_SERIAL))
+                        *x_client = compositor_xwm_server(x), *serial = w->serial;
                 return !w->owner || w->row < 0 || w->row >= COMPOSITOR_ROWS ? -WAYLAND_STAND_WAITING : (long)w->row;
         }
         return answer;

@@ -194,8 +194,9 @@ struct wayland_host
         void (*row_app)(void *context, int row, const char *app_id);
         // The row of the X window `window` for a stand-in of the Wayland client `client` (canvas_swapchain_v1.override_window): the
         // row, or -WAYLAND_STAND_WAITING (the window is the client's and not shown yet, or its X client is not named yet),
-        // -WAYLAND_STAND_UNKNOWN (no X server of the compositor has it), -WAYLAND_STAND_NOT_OWNER (another X client made it).
-        long (*stand_in)(void *context, long client, unsigned long window);
+        // -WAYLAND_STAND_UNKNOWN (no X server of the compositor has it), -WAYLAND_STAND_NOT_OWNER (another X client made it). A
+        // window of the client's that has no row has its X server's Wayland client and serial put in x_client and serial (-1, 0 else).
+        long (*stand_in)(void *context, long client, unsigned long window, long *x_client, unsigned long long *serial);
         void (*frame_sent)(void *context, int row); // a row's frame callbacks answered (the frames trace's C mark); may be null
 };
 
@@ -2744,6 +2745,51 @@ static long wayland_xparent(struct wayland_client *c, const struct wayland_surfa
         return best_row;
 }
 
+static struct wayland_surface *wayland_xserial_surface(long client, unsigned long long serial, struct wayland_client **out_c);
+
+// A surface's row, opened for its first picture (or for a stand-in, of an X window that has drawn none): -1 when it has none to open.
+static long wayland_row_open(struct wayland_client *c, struct wayland_surface *s)
+{
+        int parent = -1, popup = s->role == WAYLAND_ROLE_POPUP, placed;
+        long open_x = popup ? s->u.popup.x : 0, open_y = popup ? s->u.popup.y : 0;
+        struct wayland_facts facts = {0};
+
+        if (popup)
+        {
+                struct wayland_surface *above = s->parent ? &c->surfaces[s->parent - 1] : 0;
+                if (!above || !above->live || above->row < 0) return -1;
+                parent = above->row;
+        }
+        else if (s->xsurface && s->u.xwin.popup)
+        {
+                long px = 0, py = 0;
+                if ((parent = (int)wayland_xparent(c, s, &px, &py)) >= 0)
+                        popup = 1, open_x = px, open_y = py;
+                s->u.xwin.alone = parent < 0;
+        }
+        else
+        {
+                struct wayland_surface *above = !s->xsurface && s->parent ? &c->surfaces[s->parent - 1] : 0;
+                parent = above && above->live && above->row >= 0 ? (int)above->row : s->xsurface && s->u.xwin.owner > 0 ? (int)s->u.xwin.owner - 1 : -1;
+        }
+        placed = !popup && s->xsurface && (s->u.xwin.alone || s->u.xwin.placed);
+        s->row = wayland.host->row_open(wayland.host->context, c->slot,
+                                        popup ? WAYLAND_KIND_POPUP : placed ? WAYLAND_KIND_PLACED : WAYLAND_KIND_TOPLEVEL,
+                                        parent, placed ? s->u.xwin.x : open_x, placed ? s->u.xwin.y : open_y);
+        if (s->row >= 0 && !wayland_rows_reach(s->row))
+                wayland.host->row_close(wayland.host->context, s->row), s->row = -1;
+        if (s->row < 0)
+                return s->row = -1;
+        wayland.row[s->row].client = c->slot, wayland.row[s->row].surface = wayland_surface_index(c, s), wayland.rows++, wayland.xgen++;
+        if (s->title[0] || s->app_id[0])
+                wayland.host->row_title(wayland.host->context, s->row, s->title[0] ? s->title : s->app_id, 0);
+        if (s->app_id[0] && wayland.host->row_app)
+                wayland.host->row_app(wayland.host->context, s->row, s->app_id);
+        if (wayland_row_facts(s->row, &facts) >= 0)
+                wayland_surface_screens(c, s, wayland_screen_at(facts.x, facts.y));
+        return s->row;
+}
+
 /*
         A stand-in (canvas_swapchain_v1): a surface whose pictures a window shows in place of its own, the swapchain a game's Vulkan layer
         made for the window (src/shim/wsi.c). The window stays the window: its own surface keeps the input, the focus, the size, the
@@ -2845,7 +2891,25 @@ static long wayland_stand_row(struct wayland_client *c, struct wayland_surface *
         if (s->row >= 0 || s->u.stand.displaced)
                 return s->row >= 0 ? s->row : -1;
         if (s->u.stand.window)
-                row = wayland.host->stand_in ? wayland.host->stand_in(wayland.host->context, c->slot, s->u.stand.window) : -WAYLAND_STAND_UNKNOWN;
+        {
+                long x_client = -1;
+                unsigned long long serial = 0;
+                struct wayland_client *xc = 0;
+                struct wayland_surface *xs;
+
+                row = wayland.host->stand_in ? wayland.host->stand_in(wayland.host->context, c->slot, s->u.stand.window, &x_client, &serial)
+                                             : -WAYLAND_STAND_UNKNOWN;
+                // The client's window its X window manager took (adopted) that its server never drew in: a game whose every frame is
+                // the stand-in's commits nothing to its X window's own surface, which then has no row for the stand-in to show.
+                xs = row == -WAYLAND_STAND_WAITING && serial ? wayland_xserial_surface(x_client, serial, &xc) : 0;
+                if (xs && xs->xsurface && xs->u.xwin.adopted && !xs->u.xwin.dead)
+                {
+                        if (xs->row < 0 && wayland_row_open(xc, xs) >= 0 && xs->u.xwin.alone)
+                                wayland_row_do(xs->row, WAYLAND_DO_PLACE, xs->u.xwin.x, xs->u.xwin.y);
+                        if (xs->row >= 0)
+                                row = xs->row;
+                }
+        }
         else if (s->u.stand.target)
                 row = wayland_stand_target(c, s, &width, &height);
         if (row >= 0 && (row >= wayland.row_made || !(root = wayland_row_surface(row, &rc))))
@@ -2880,8 +2944,12 @@ static int wayland_stand_show(struct wayland_client *c, struct wayland_object *s
         if (root)
         {
                 struct wayland_rect window = wayland_window_of(rc, root);
+                struct wayland_facts facts;
+
                 if (window.width > 0 && window.height > 0)
                         tw = window.width, th = window.height;
+                else if (wayland_row_facts(s->row, &facts) >= 0 && facts.width > 0 && facts.height > 0)
+                        tw = facts.width, th = facts.height;
         }
         wayland_picture_init(&picture, &s->pending, b, p, tw, th, 0, 0, tw, th);
         picture.transparent = !wayland_surface_is_opaque_at(s, &s->pending, b), picture.last = 1;
@@ -2906,46 +2974,8 @@ static int wayland_show(struct wayland_client *c, struct wayland_object *self, s
         long wx, wy, ww, wh, tw, th, status;
 
         wayland_surface_target_pixels(s, &s->pending, b, &tw, &th);
-        if (first)
-        {
-                int parent = -1, popup = s->role == WAYLAND_ROLE_POPUP, placed;
-                long open_x = popup ? s->u.popup.x : 0, open_y = popup ? s->u.popup.y : 0;
-                struct wayland_facts facts = {0};
-
-                if (popup)
-                {
-                        struct wayland_surface *above = s->parent ? &c->surfaces[s->parent - 1] : 0;
-                        if (!above || !above->live || above->row < 0) return WAYLAND_OK;
-                        parent = above->row;
-                }
-                else if (s->xsurface && s->u.xwin.popup)
-                {
-                        long px = 0, py = 0;
-                        if ((parent = (int)wayland_xparent(c, s, &px, &py)) >= 0)
-                                popup = 1, open_x = px, open_y = py;
-                        s->u.xwin.alone = parent < 0;
-                }
-                else
-                {
-                        struct wayland_surface *above = !s->xsurface && s->parent ? &c->surfaces[s->parent - 1] : 0;
-                        parent = above && above->live && above->row >= 0 ? (int)above->row : s->xsurface && s->u.xwin.owner > 0 ? (int)s->u.xwin.owner - 1 : -1;
-                }
-                placed = !popup && s->xsurface && (s->u.xwin.alone || s->u.xwin.placed);
-                s->row = wayland.host->row_open(wayland.host->context, c->slot,
-                                                popup ? WAYLAND_KIND_POPUP : placed ? WAYLAND_KIND_PLACED : WAYLAND_KIND_TOPLEVEL,
-                                                parent, placed ? s->u.xwin.x : open_x, placed ? s->u.xwin.y : open_y);
-                if (s->row >= 0 && !wayland_rows_reach(s->row))
-                        wayland.host->row_close(wayland.host->context, s->row), s->row = -1;
-                if (s->row < 0)
-                        return s->row = -1, WAYLAND_OK;
-                wayland.row[s->row].client = c->slot, wayland.row[s->row].surface = wayland_surface_index(c, s), wayland.rows++, wayland.xgen++;
-                if (s->title[0] || s->app_id[0])
-                        wayland.host->row_title(wayland.host->context, s->row, s->title[0] ? s->title : s->app_id, 0);
-                if (s->app_id[0] && wayland.host->row_app)
-                        wayland.host->row_app(wayland.host->context, s->row, s->app_id);
-                if (wayland_row_facts(s->row, &facts) >= 0)
-                        wayland_surface_screens(c, s, wayland_screen_at(facts.x, facts.y));
-        }
+        if (first && wayland_row_open(c, s) < 0)
+                return WAYLAND_OK;
         wayland_window_rect(c, s, tw, th, scale120, &wx, &wy, &ww, &wh);
         wayland_picture_init(&picture, &s->pending, b, p, tw, th, -wx, -wy, ww, wh);
         picture.transparent = !wayland_surface_is_opaque_at(s, &s->pending, b);

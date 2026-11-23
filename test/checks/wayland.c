@@ -106,6 +106,8 @@ static struct fake_host_state
         long reserves, unreserves, commits, commit_fail_at, commits_refused;
         // the X window manager's word on a stand-in's X window (stand_in): the row, or a -WAYLAND_STAND_ answer; and what was asked
         long stand_answer, stand_client, stand_window, stand_asks;
+        long stand_x_client;                 // the X server's client and the window's serial the window manager gives for a window with no row
+        unsigned long long stand_serial;
 } fake;
 
 static void *fake_alloc(void *context, long bytes)
@@ -9742,10 +9744,11 @@ static void test_xwm_places(void)
         a stand-in's frame callbacks are answered with the frame; an X window the X window manager does not vouch for is refused
         (another client's, or none), and one not shown yet is waited for, the answer coming when it is.
 */
-static long fake_stand_in(void *context, long client, unsigned long window)
+static long fake_stand_in(void *context, long client, unsigned long window, long *x_client, unsigned long long *serial)
 {
         (void)context;
         fake.stand_client = client, fake.stand_window = (long)window, fake.stand_asks++;
+        *x_client = fake.stand_x_client, *serial = fake.stand_serial;
         return fake.stand_answer;
 }
 
@@ -9896,6 +9899,42 @@ static void test_stand_in(void)
                         wlc_send(g.c, g.surface, WLQ_wl_surface_commit);
                         WLCHECK(g.c->errors == 0 && own >= 0 && fake.row[own].pixels[0] == 0xff666666,
                                 "the window's own commit, with its subsurface, puts nothing on the screen while it is stood in for");
+                }
+        }
+        {
+                // An X window its window manager took that its server never drew in (a game whose every frame is the stand-in's):
+                // the stand-in opens its row and shows there.
+                unsigned long undrawn = wlc_id(x.c, WLI_wl_surface, 6), xundrawn = wlc_id(x.c, WLI_xwayland_surface_v1, 1);
+                unsigned long late = wlc_id(g.c, WLI_wl_surface, 6);
+                long rows_before = 0, opened = -1;
+
+                wlc_send(x.c, x.compositor, WLQ_wl_compositor_create_surface, undrawn);
+                wlc_send(x.c, x.xshell, WLQ_xwayland_shell_v1_get_xwayland_surface, xundrawn, undrawn);
+                wlc_send(x.c, xundrawn, WLQ_xwayland_surface_v1_set_serial, 0x7272UL, 0UL);
+                WLCHECK(wayland_xwindow_adopt(x.c->slot, 0x7272, 0, 0, 0, "undrawn") == -1, "the undrawn X window is taken with no row");
+                for (int at = 0; at < FAKE_ROWS; at++)
+                        rows_before += fake.row[at].used;
+                wlc_send(g.c, g.compositor, WLQ_wl_compositor_create_surface, late);
+                fake.stand_answer = -WAYLAND_STAND_WAITING, fake.stand_x_client = x.c->slot, fake.stand_serial = 0x7272;
+                wlc_forget(g.c);
+                wlc_send(g.c, manager, WLQ_canvas_swapchain_v1_override_window, late, 0x4400005UL);
+                e = stand_answer_of(g.c);
+                opened = wayland_xwindow_adopt(x.c->slot, 0x7272, 0, 0, 0, "undrawn");
+                {
+                        long rows_after = 0;
+                        for (int at = 0; at < FAKE_ROWS; at++)
+                                rows_after += fake.row[at].used;
+                        WLCHECK(x.c->errors == 0 && g.c->errors == 0 && e && e->u[1] == WLN_canvas_swapchain_v1_answer_shown && opened >= 0 &&
+                                    rows_after == rows_before + 1,
+                                "a stand-in for an X window that drew nothing opens the window's row and is shown (%ld, %ld rows)", opened,
+                                rows_after - rows_before);
+                }
+                fake.stand_x_client = 0, fake.stand_serial = 0;
+                if (opened >= 0)
+                {
+                        wlc_send(g.c, late, WLQ_wl_surface_attach, wl_buffer_of(&g, 16, 12, 0xff00ccff, WLN_wl_shm_format_xrgb8888), 0L, 0L);
+                        wlc_send(g.c, late, WLQ_wl_surface_commit);
+                        WLCHECK(fake.row[opened].pixels[0] == 0xff00ccff, "the opened window's picture is the stand-in's");
                 }
         }
         wlc_end(g.c);

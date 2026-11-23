@@ -3435,15 +3435,17 @@ static void compositor_wl_row_do(void *context, int row, long what, long a, long
 }
 
 /* What the compositor says of a row, in the shim's words (from Canvas's canonical compositor_row_facts). */
-static long compositor_xwm_stand_row(unsigned int id, unsigned int pid); // xwm.c
+static long compositor_xwm_stand_row(unsigned int id, unsigned int pid, long *x_client, unsigned long long *serial); // xwm.c
 
 // A stand-in's X window (canvas_swapchain_v1.override_window): its row, as the X window manager vouches the asking client made it.
-static long compositor_wl_stand_in(void *context, long client, unsigned long window)
+static long compositor_wl_stand_in(void *context, long client, unsigned long window, long *x_client, unsigned long long *serial)
 {
         (void)context;
+        *x_client = -1, *serial = 0;
         if (client < 0 || client >= compositor_wl.slots || !window || window > 0xffffffffUL)
                 return -WAYLAND_STAND_UNKNOWN;
-        return compositor_xwm_stand_row((unsigned int)window, compositor_wl.pid[client] > 0 ? (unsigned int)compositor_wl.pid[client] : 0);
+        return compositor_xwm_stand_row((unsigned int)window, compositor_wl.pid[client] > 0 ? (unsigned int)compositor_wl.pid[client] : 0,
+                                        x_client, serial);
 }
 
 static int compositor_wl_row_facts(void *context, int row, struct wayland_facts *facts)
