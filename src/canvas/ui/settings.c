@@ -3549,7 +3549,9 @@ static fn settings_startup_apply(int how, int from, int to)
         settings_startup_ask(words, how == SETTINGS_STARTUP_MOVE ? 3 : 2);
 }
 
-// What the person did to the list's rows (the kit's ui_list.moved and .removed), done: the startup list's entries are the ones it has now.
+// What the person did to the list's rows (the kit's ui_list.moved and .removed), done: the startup list's entries are the ones it has now,
+// and a saved item's remove button forgets it as Delete does (asking first).
+static fn settings_forget_item(const struct settings_item address_to item);
 static fn settings_managed(void)
 {
         struct ui_list address_to l = &settings.list;
@@ -3565,6 +3567,8 @@ static fn settings_managed(void)
                 l->removed = 0;
                 if (it && it->kind == SETTINGS_STARTUP && settings_item_startup(it))
                         settings_startup_apply(SETTINGS_STARTUP_REMOVE, (int)(it - settings.item[SETTINGS_STARTUP_LIST]), 0);
+                else if (it)
+                        settings_forget_item(it);
         }
 }
 
@@ -4030,9 +4034,9 @@ static fn settings_item_activate(int row, const struct settings_item address_to 
         ui_page_redraw(&settings.page);
 }
 
-static fn settings_forget(void)
+// A saved item forgotten (a network, a device kept, a machine linked): the first ask says what goes, and the second, the same, does it.
+static fn settings_forget_item(const struct settings_item address_to item)
 {
-        const struct settings_item address_to item = settings_item(settings.list.focus);
         char code = item && (item->flags & SETTINGS_ITEM_SAVED) ? settings_forget_code(item->kind) : 0, text[SETTINGS_STATUS];
         if (!code)
                 return;
@@ -4040,6 +4044,8 @@ static fn settings_forget(void)
                 return language_format(text, sizeof(text), WORDS(settings_forget), item->label), settings_confirm_say(text);
         settings_act(code, item->label, null);
 }
+
+static fn settings_forget(void) { settings_forget_item(settings_item(settings.list.focus)); }
 
 static fn settings_row_activate(int row, int offset, int way)
 {
@@ -4494,8 +4500,11 @@ static fn settings_describe_item(int id, const struct settings_item address_to i
                 row->note = item->flags & SETTINGS_ITEM_JOINED ? WORDS(settings_joined) : item->flags & SETTINGS_ITEM_SAVED ? WORDS(settings_saved) : null,
                 row->value = item->security[0] ? item->security : null, row->bars = item->flags & SETTINGS_ITEM_HEARD ? item->bars : -1,
                 row->dim = !(item->flags & SETTINGS_ITEM_HEARD), row->cells[1] = row->note, row->cells[2] = row->value;
+        // A device kept has its remove button (it forgets the device, asking first); the add row after them is the kit's, its one way the
+        // field of a name.
         else if (item->kind == SETTINGS_DEVICE || item->kind == SETTINGS_ADD)
-                row->columns = settings_columns_for(1), row->value = row->cells[1] = item->kind == SETTINGS_DEVICE ? WORDS(settings_kept) : null;
+                row->columns = settings_columns_for(1), row->value = row->cells[1] = item->kind == SETTINGS_DEVICE ? WORDS(settings_kept) : null,
+                row->remove = item->kind == SETTINGS_DEVICE, row->kind = item->kind == SETTINGS_ADD ? UI_ROW_ADD : row->kind;
         else if (item->kind == SETTINGS_PORT)
         {
                 b32 waiting = string_equals((string_address)item->state, (string_address) "waiting");

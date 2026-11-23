@@ -3545,6 +3545,22 @@ static fn check_settings(string_address regular, string_address bold)
                         check("settings: and Delete twice on a device forgets it", settings.queued == 1 &&
                                   string_equals((string_address)settings.queue[0].value, (string_address) "d\nMouse"));
                         settings.queued = 0;
+                        // The kit's managed rows: a device kept has its remove button, which forgets it as Delete does (the first press
+                        // asks), and the last row is the kit's add row, the plus and its words.
+                        {
+                                struct ui_row kept_row, add_row;
+                                b32 asked;
+                                memory_zero(&kept_row, sizeof(kept_row)), settings_describe((int)SETTINGS_LIST_ID(1, 0), &kept_row);
+                                memory_zero(&add_row, sizeof(add_row)), settings_describe((int)SETTINGS_LIST_ID(1, 2), &add_row);
+                                check("settings: a device kept has a remove button, and the add row is the kit's",
+                                      kept_row.remove && !kept_row.order && add_row.kind == UI_ROW_ADD && !add_row.remove);
+                                settings.list.removed = (int)SETTINGS_LIST_ID(1, 0) + 1, settings_managed();
+                                asked = settings.queued == 0 && !settings.list.removed;
+                                settings.list.removed = (int)SETTINGS_LIST_ID(1, 0) + 1, settings_managed();
+                                check("settings: its remove button asks first, and pressed again forgets the device by bluetooth remove",
+                                      asked && settings.queued == 1 && string_equals((string_address)settings.queue[0].value, (string_address) "d\nKeyboard K1"));
+                                settings.queued = 0;
+                        }
                         settings.runner.child = 0;
 
                         // The rows that change by themselves, and when a feed is run.
