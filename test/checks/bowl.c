@@ -1511,6 +1511,19 @@ static fn steam_profile(void)
                                  "wa moonwater-input && [ -r " BOWL_ROOT_PREFIX "arch/usr/local/lib/libmoonwater-input.so ] && "));
         }
         {
+                positive wsi = chrome_line(steam ? steam->session : null, "export MOONWATER_WSI=${MOONWATER_WSI:-1}");
+
+                check("The session turns the Canvas Vulkan layer on, behind its workaround switch, when the bowl holds it, a game's own MOONWATER_WSI kept, before Steam starts",
+                      wsi && wsi < wrapped && wsi < run &&
+                          strstr(steam->session[wsi - 1], "wa canvas-wsi && [ -r " BOWL_ROOT_PREFIX "arch/usr/lib/libVkLayer_MOONWATER_canvas.so ] && "));
+                check("Each architecture's manifest names its own library by its path, under a layer name of its own, enabled by MOONWATER_WSI=1 and off by MOONWATER_WSI_OFF",
+                      strstr(bowl_canvas_wsi_json_64, "\"library_path\": \"/usr/lib/libVkLayer_MOONWATER_canvas.so\"") &&
+                          strstr(bowl_canvas_wsi_json_32, "\"library_path\": \"/usr/lib32/libVkLayer_MOONWATER_canvas.so\"") &&
+                          strstr(bowl_canvas_wsi_json_64, "VK_LAYER_MOONWATER_canvas_x86_64") && strstr(bowl_canvas_wsi_json_32, "VK_LAYER_MOONWATER_canvas_i686") &&
+                          strstr(bowl_canvas_wsi_json_64, "\"enable_environment\": {\"MOONWATER_WSI\": \"1\"}") &&
+                          strstr(bowl_canvas_wsi_json_32, "\"disable_environment\": {\"MOONWATER_WSI_OFF\": \"1\"}"));
+        }
+        {
                 const struct bowl_profile address_to chrome_profile = bowl_find_profile("chrome");
 
                 check("Only the steam profile holds the overlay library",
@@ -1562,6 +1575,30 @@ static fn steam_profile(void)
                                 right &= bowl_check_elf_exports(image, sizes[which], absent[name]) == 0;
                 }
                 check("The input libraries are i386 and x86_64 shared objects whose .dynsym exports SDL_DYNAPI_entry as a global function, and none of the C library's names or SDL's",
+                      right);
+        }
+        {
+                // libVkLayer_MOONWATER_canvas.so: the loader's negotiation alone (the manifest names it; the loader takes the rest from
+                // it), never a name of the loader's, the driver's, the C library's or libwayland's (a layer that exports one takes it from
+                // everything loaded after it).
+                static const char *const absent[] = {"vkGetInstanceProcAddr", "vkGetDeviceProcAddr", "vkCreateInstance", "vkQueuePresentKHR",
+                                                     "vkCreateSwapchainKHR", "dlsym", "malloc", "poll", "wl_display_connect", "xcb_query_tree"};
+                const p8 *const images[] = {bowl_canvas_wsi_32, bowl_canvas_wsi_64};
+                const positive sizes[] = {sizeof(bowl_canvas_wsi_32), sizeof(bowl_canvas_wsi_64)};
+                bool right = true;
+
+                for (positive which = 0; which < 2; which++)
+                {
+                        const p8 *image = images[which];
+
+                        right &= sizes[which] > 64 && image[0] == 0x7f && image[1] == 'E' && image[2] == 'L' &&
+                                 image[3] == 'F' && image[4] == which + 1 && image[16] == 3 &&
+                                 image[18] == (which ? 62 : 3) && image[19] == 0;
+                        right &= bowl_check_elf_exports(image, sizes[which], "vkNegotiateLoaderLayerInterfaceVersion") == 1;
+                        for (positive name = 0; right && name < sizeof(absent) / sizeof(absent[0]); name++)
+                                right &= bowl_check_elf_exports(image, sizes[which], absent[name]) == 0;
+                }
+                check("The Vulkan layers are i386 and x86_64 shared objects whose .dynsym exports vkNegotiateLoaderLayerInterfaceVersion as a global function, and none of the loader's, the C library's or libwayland's names",
                       right);
         }
         {

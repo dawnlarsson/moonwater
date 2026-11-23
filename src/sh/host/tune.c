@@ -1368,6 +1368,7 @@ static const host_workaround_row host_workaround_rows[] = {
     {"wine-fpu", true, "reset x87 FCW/MXCSR on 32-bit GStreamer audio decode threads (fixes robotic audio in Wine/Proton games like RCT3)"},
     {"bowl-timerslack", true, "set PR_SET_TIMERSLACK=1ns for all bowl processes for tighter frame pacing and lower wake latency"},
     {"steam-overlay-gl", true, "unbind game shader/sampler around Steam overlay draws and bridge overlay on Wayland"},
+    {"canvas-wsi", true, "show a Vulkan game's swapchain straight on Canvas, no Xwayland in its present path (MOONWATER_WSI=0 for one game)"},
     {"steam-fontconfig", true, "set FONTCONFIG_FILE/FONTCONFIG_PATH for old bundled libfontconfig in Steam games"},
     {"sdl-no-udev", true, "disable SDL udev probing so gamepads hotplug directly from /dev/input"},
     {"chrome-pwrite", true, "route musl pwritev2 to pwrite64 so Chromium's seccomp sandbox does not trap"},
