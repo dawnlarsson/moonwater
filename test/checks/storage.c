@@ -3928,6 +3928,83 @@ static fn disc_folder_rows(void)
 }
 
 /*
+        The same folder through the kernel (disc_fs_mount: a real FUSE mount, its server forked, the reader of made frames in the drive's
+        place), where /dev/fuse is and the check is root (the box's runs, in a mount namespace of their own): the folder lists the two
+        tracks, a track's size is its header and frames, its bytes read with read(2) from first to last are those byte for byte (the bad
+        frame silence), nothing is written to it, and unmounted its server ends.
+*/
+static bool cd_name_seen(string_address directory, string_address name, address_any context)
+{
+        p8 address_to names = (p8 address_to)context;
+        (void)directory;
+        string_append_bounded((string_address)names, name, 128), string_append_bounded((string_address)names, (string_address) "|", 128);
+        return true;
+}
+
+static fn disc_folder_kernel(void)
+{
+        static struct disc_fs fs;
+        static struct disc_toc toc;
+        static p8 whole[DISC_WAV_HEAD + 250 * DISC_FRAME + 64];
+        struct cd_reader reader = {200, 0};
+        p8 folder[64], digits[24], track[96], names[128], state[64];
+        file_facts facts;
+        bipolar error = 0, handle;
+        positive got = 0;
+        string_address why;
+        b32 listed, sized, bytes = true, shut, ended = false;
+
+        if (system_access_at(AT_FDCWD, "/dev/fuse", 0) < 0 || system_call(syscall(getuid)) != 0)
+        {
+                string_format(log, "  disc mount through the kernel NOT RUN: no /dev/fuse here, or not root\n");
+                return;
+        }
+        memory_zero(&fs, sizeof(fs)), memory_zero(&toc, sizeof(toc));
+        toc.first = 1, toc.count = 3, toc.start[0] = 0, toc.start[1] = 150, toc.start[2] = 400, toc.data[2] = 1, toc.lead_out = 1000;
+        (void)disc_fs_take(&fs, &toc);
+        fs.seconds = 1700000000ull, fs.read = cd_frames, fs.context = &reader;
+        digits[positive_into_string(digits, (positive)system_call(syscall(getpid)))] = end;
+        string_join(folder, sizeof(folder), "/tmp/mw-cd.", (string_address)digits);
+        (void)system_make_directory_at(AT_FDCWD, (string_address)folder, 0700);
+        why = disc_fs_mount(&fs, -1, "check9", (string_address)folder, &error);
+        check("disc mount: a folder of tracks mounts over the kernel's FUSE", !why);
+        if (why)
+        {
+                string_format(log, "  disc mount: %s (%b)\n", why, error);
+                system_remove_at(AT_FDCWD, (string_address)folder, AT_REMOVEDIR);
+                return;
+        }
+        names[0] = end;
+        host_each_entry((string_address)folder, cd_name_seen, names);
+        listed = string_equals((string_address)names, (string_address) "Track 01.wav|Track 02.wav|");
+        string_join(track, sizeof(track), (string_address)folder, "/Track 02.wav");
+        sized = file_look(AT_FDCWD, (string_address)track, 0, address_of facts) && facts.size == DISC_WAV_HEAD + 250ull * DISC_FRAME &&
+                (facts.mode & 0777) == 0444 && (facts.mode & MODE_FORMAT) == MODE_FILE;
+        if ((handle = system_open_at(AT_FDCWD, (string_address)track, FILE_READ | O_CLOEXEC)) >= 0)
+        {
+                for (bipolar part; got < sizeof(whole) && (part = system_read_once(handle, whole + got, sizeof(whole) - got)) > 0;)
+                        got += (positive)part;
+                system_close(handle);
+        }
+        bytes = got == DISC_WAV_HEAD + 250 * DISC_FRAME;
+        for (positive at = 0; bytes && at < got; at++)
+                bytes = cd_byte_right(&fs, 1, at, whole[at], reader.bad);
+        shut = system_open_at(AT_FDCWD, (string_address)track, FILE_WRITE | O_CLOEXEC) < 0;
+        check("disc mount: through the kernel the folder lists its two tracks, Track 02.wav is its size and 0444, and read from first to last its bytes are the header and the frames, the bad one silence",
+              listed && sized && bytes);
+        check("disc mount: through the kernel a track is not opened to be written", shut);
+        if (!listed || !sized || !bytes)
+                string_format(log, "  disc mount: listed %s, size %p, read %p\n", (string_address)names, (positive)facts.size, got);
+        system_call_2(syscall(umount2), (positive)folder, 0);
+        string_join(state, sizeof(state), DISC_MOUNT_STATE, "check9");
+        for (int wait = 0; wait < 100 && !ended; wait++)
+                if (!(ended = system_access_at(AT_FDCWD, (string_address)state, 0) < 0))
+                        host_pause(20000000);
+        system_remove_at(AT_FDCWD, (string_address)folder, AT_REMOVEDIR);
+        check("disc mount: unmounted, its server ends (its state file goes)", ended);
+}
+
+/*
         A partition opened for the person at the machine (device open, writable, eject, tidy): why one is refused, read-only first
         and writable as a second step for the file systems that take it, the folder it is opened at, what open keeps, an eject,
         and a drive taken out let go of. The mounts here are tmpfs in the check's own mount namespace, under /tmp.
@@ -6860,6 +6937,7 @@ b32 main(void)
         device_part_tail();
         device_open_rows();
         disc_folder_rows();
+        disc_folder_kernel();
 
         if (program_argument_count() > 1)
                 format_images(program_argument_list()[1]);

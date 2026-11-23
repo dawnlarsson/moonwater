@@ -658,49 +658,35 @@ static fn disc_fs_serve(struct disc_fs address_to fs, bipolar fuse, string_addre
 }
 
 /*
-        A CD of music served at folder as its folder of tracks, read-only, owned by uid and gid: the kernel's FUSE (/dev/fuse, which every
-        image but the locked one has) mounted there with the drive's node as its source (so the mount table says which drive it is, as a
-        partition's says), allow_other (a browser in its bowl reads it) and default_permissions (the kernel judges who may by the modes,
-        0444 and 0555), and a server of its own detached to answer it. Null when it serves; else why not, error the mount's.
+        A folder of tracks served at folder, read-only: the kernel's FUSE (/dev/fuse, which every image but the locked one has) mounted
+        there with source as its source (a drive's node, so the mount table says which drive it is, as a partition's says), allow_other
+        (a browser in its bowl reads it) and default_permissions (the kernel judges who may by the modes, 0444 and 0555), and a server of
+        its own detached to answer it, which keeps the drive's handle (none: -1) and DISC_MOUNT_STATE name. Null when it serves; else why
+        not, error the mount's.
 */
-static string_address disc_mount_at(string_address name, string_address folder, positive uid, positive gid, bipolar address_to error)
+static string_address disc_fs_mount(struct disc_fs address_to fs, bipolar handle, string_address name, string_address folder, bipolar address_to error)
 {
-        static struct disc_fs fs;
-        struct disc_toc toc;
         p8 options[192], source[32], digits[3][24];
-        bipolar handle, fuse, child, made = 0;
+        bipolar fuse, child, made = 0;
         positive status = 0;
 
         address_to error = 0;
         if (system_access_at(AT_FDCWD, "/dev/fuse", 0) < 0)
                 return "is not served as a folder: this system has no /dev/fuse (its kernel was built with no FUSE, as the locked image is)";
-        if ((handle = disc_open(name)) < 0)
-                return "is no optical drive here";
-        memory_zero(&fs, sizeof(fs));
-        if (!disc_toc_read(handle, &toc) || !disc_fs_take(&fs, &toc))
-        {
-                system_close(handle);
-                return "has no track of music on it";
-        }
-        fs.uid = (p32)uid, fs.gid = (p32)gid, fs.seconds = system_clock_ns(HOST_CLOCK_REALTIME) / 1000000000ull;
-        fs.read = disc_drive_read, fs.context = (address_any)(positive)handle;
         if ((fuse = system_open_at(AT_FDCWD, "/dev/fuse", FILE_READ_WRITE | O_CLOEXEC)) < 0)
-        {
-                system_close(handle);
                 return address_to error = fuse, (string_address) "could not open /dev/fuse";
-        }
         digits[0][positive_into_string(digits[0], (positive)fuse)] = end;
-        digits[1][positive_into_string(digits[1], uid)] = end, digits[2][positive_into_string(digits[2], gid)] = end;
+        digits[1][positive_into_string(digits[1], fs->uid)] = end, digits[2][positive_into_string(digits[2], fs->gid)] = end;
         if (!string_join(options, sizeof(options), "fd=", (string_address)digits[0], ",rootmode=40000,user_id=", (string_address)digits[1],
                          ",group_id=", (string_address)digits[2], ",allow_other,default_permissions") ||
             !host_join(source, sizeof(source), "/dev/", name) ||
             (made = system_mount((string_address)source, folder, "fuse.moonwater-cd", MS_RDONLY | MS_NOSUID | MS_NODEV, (string_address)options)) < 0)
         {
-                system_close(fuse), system_close(handle);
+                system_close(fuse);
                 return address_to error = made < 0 ? made : -ERROR_INVALID, (string_address) "could not be mounted";
         }
-        // The server: forked twice (init reaps it), a session of its own, /dev/null for its three descriptors, and the drive and
-        // /dev/fuse alone besides. The first child says whether the second came.
+        // The server: forked twice (init reaps it), a session of its own, /dev/null for its three descriptors, and /dev/fuse and the
+        // drive alone besides. The first child says whether the second came.
         if ((child = system_fork()) == 0)
         {
                 bipolar server = system_fork(), quiet;
@@ -711,19 +697,43 @@ static string_address disc_mount_at(string_address name, string_address folder, 
                 for (positive at = 0; quiet >= 0 && at < 3; at++)
                         if ((positive)quiet != at)
                                 system_call_3(syscall(dup3), (positive)quiet, at, 0);
-                (void)descriptors_close_except(3, (p32)fuse, (p32)handle);
-                disc_fs_serve(&fs, fuse, name, folder);
+                (void)descriptors_close_except(3, (p32)fuse, handle >= 0 ? (p32)handle : descriptors_none);
+                disc_fs_serve(fs, fuse, name, folder);
                 system_call_1(syscall(exit_group), 0);
         }
         if (child > 0)
                 system_call_4(syscall(wait4), (positive)child, (positive)address_of status, 0, 0);
-        system_close(fuse), system_close(handle);
+        system_close(fuse);
         if (child < 0 || status)
         {
                 system_call_2(syscall(umount2), (positive)folder, MNT_DETACH);
                 return address_to error = child < 0 ? child : -ERROR_INVALID, (string_address) "could not start its server";
         }
         return null;
+}
+
+// A CD of music served at folder as its folder of tracks, owned by uid and gid (disc_fs_mount), its frames the drive's.
+static string_address disc_mount_at(string_address name, string_address folder, positive uid, positive gid, bipolar address_to error)
+{
+        static struct disc_fs fs;
+        struct disc_toc toc;
+        bipolar handle;
+        string_address why;
+
+        address_to error = 0;
+        if ((handle = disc_open(name)) < 0)
+                return "is no optical drive here";
+        memory_zero(&fs, sizeof(fs));
+        if (!disc_toc_read(handle, &toc) || !disc_fs_take(&fs, &toc))
+        {
+                system_close(handle);
+                return "has no track of music on it";
+        }
+        fs.uid = (p32)uid, fs.gid = (p32)gid, fs.seconds = system_clock_ns(HOST_CLOCK_REALTIME) / 1000000000ull;
+        fs.read = disc_drive_read, fs.context = (address_any)(positive)handle;
+        why = disc_fs_mount(&fs, handle, name, folder, error);
+        system_close(handle);
+        return why;
 }
 
 // A CD's folder that disc mount served by hand let go of, and its server waited for, which holds the drive (an eject waits for it).
