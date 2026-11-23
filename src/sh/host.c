@@ -243,6 +243,7 @@ static b32 host_version_verb(string_address address_to arguments, positive count
 static fn tune_restore(void);
 static fn radio_restore(void);
 static fn radio_recover(void);
+static fn bt_keep(void);
 static fn usb_restore(void);
 static fn usb_recover(void);
 static fn locale_restore(void);
@@ -343,6 +344,7 @@ static bool host_proc_path(p8 address_to into, positive room, positive pid,
 #include "host/boot.c" // boot's service, its events and the shells it starts; the verbs canvas, latency and bios
 #include "host/nl80211.c" // the radio's words to the kernel: nl80211, a station joined and left and the process that keeps it (the keeper), WPA's and SAE's handshakes; the wifi verb is radio.c's
 #include "host/radio.c" // the verbs wifi, bluetooth, priority and wired: the switches, the saved networks, the air scanned, a join, its password and its state files (wifi.last), the status, the shared link
+#include "host/bluetooth.c" // the verbs bluetooth scan, pair and forget and the bluetooth verb itself: the kernel's management socket, SDP, HIDP and HID over GATT spoken directly, the paired devices and their keys, and the keeper that lets a pad back in and bridges an LE pad
 #include "host/tune.c" // the verbs airplane, brightness, charge, battery, power, cpu, sleep and hibernate: the switches the kernel keeps in sysfs
 #include "host/device.c" // the verb device: which devices plugged in are let in, the rules, the census, the lock, the watch, the list
 #include "host/disc.c" // the verb disc: the optical drives, a disc's tracks, a CD of music played through the sound server, eject

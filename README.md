@@ -245,6 +245,9 @@ moonwater wifi remove SSID             forget a saved network, and leave it
 
 # Bluetooth
 moonwater bluetooth [on|off]           the radio and the remembered devices [off]
+moonwater bluetooth scan [SECONDS]     what is near for SECONDS, pads first: each one's address, kind and name [10]
+moonwater bluetooth pair ADDRESS       pair a pad, keyboard or mouse a scan heard, keep its keys in /root and connect it; it comes back when it wakes
+moonwater bluetooth forget ADDRESS     unpair a device and drop its keys
 moonwater bluetooth add NAME           keep the name of a device, found once the radio is on
 moonwater bluetooth remove NAME        forget a bluetooth device
 moonwater bluetooth share [on|off]     the internet of this machine, shared with the Bluetooth devices that pair with it; needs the Bluetooth network tools [off]
@@ -416,6 +419,14 @@ them: a machine that has not asked for a radio has it soft-blocked from boot, an
 `bluetooth add` keep a name for when it is on and do not switch it. A machine that already
 used one (a saved network, a remembered device) keeps it on as it was, and `airplane off`
 brings back what was on.
+
+`moonwater bluetooth pair` speaks to the kernel's own Bluetooth sockets, with no daemon. A
+classic pad is handed to the kernel's HID layer once its records are read, and nothing in
+userspace stands between its reports and its driver; an LE pad is carried by a keeper process
+through uhid. A classic link is kept out of sniff mode and an LE link asks for a 7.5 ms
+interval, so no report waits for the radio. The keys are kept in `/root/bluetooth.pads`,
+readable by root alone, and a paired device is let in again when it wakes, after every boot. A
+radio the device policy holds needs `moonwater device allow` first.
 
 `moonwater device lock` holds what somebody plugs in: a stick, a keyboard that types on its
 own, a hub, a network, audio or camera function. Every device plugged in when it runs

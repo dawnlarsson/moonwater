@@ -3508,9 +3508,9 @@ static b32 radio_bluetooth_power(bool on, bool report)
         return radio_switch(NET_BLUETOOTH_POWER, RADIO_RFKILL_BLUETOOTH, on, report);
 }
 
-/* Remember a device's name or forget it. Nothing here pairs or connects: the
-   list is the names a person keeps, shown by `moonwater bluetooth`, and a name
-   added turns the radio on for whatever does pair. It is read, changed and
+/* Remember a device's name or forget it. Nothing here pairs or connects (bluetooth.c's
+   pair does): the list is the names a person keeps, shown by `moonwater bluetooth`, and a
+   name added turns the radio on for whatever does pair. It is read, changed and
    written back whole under the lock the wifi verbs take, so two runs at once
    cannot lose each other's names. */
 static b32 radio_bluetooth_edit(string_address identity, bool add)
@@ -3869,6 +3869,7 @@ static fn radio_recover(void)
 
         if (radio_wifi_wanted(radio_kept(NET_WIFI_POWER)))
                 radio_wifi_keep();
+        bt_keep();
 }
 
 /* What a verb says it did, when it did not fail. */
@@ -4137,27 +4138,3 @@ static b32 radio_share(string_address address_to arguments, positive count)
         host_say(log, host_label "bluetooth share on\n");
         return 0;
 }
-
-static b32 host_bluetooth(string_address address_to arguments, positive count)
-{
-        string_address word = count > 2 ? arguments[2] : null;
-        bipolar power = count == 3 ? host_onoff(word) : -1;
-
-        if (count < 3)
-                return radio_bluetooth_status();
-        if (string_equals(word, "share"))
-                return radio_share(arguments, count);
-        if (power >= 0)
-        {
-                host_need_root();
-                return radio_done(radio_bluetooth_power(power, true),
-                                  power ? "bluetooth on" : "bluetooth off");
-        }
-        if ((string_equals(word, "add") || string_equals(word, "remove")) && count == 4)
-        {
-                host_need_root();
-                return radio_bluetooth_edit(arguments[3], string_equals(word, "add"));
-        }
-        return host_usage();
-}
-
