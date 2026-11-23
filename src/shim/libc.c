@@ -92,20 +92,106 @@ __asm__(
     ASM_ALIAS(wmemset,        memory_fill_32)       // a count of four byte units, the destination returned: wmemset's contract
 
     //
-    //       rawmemchr: memchr with no end, a page at a time. The byte is promised to be there, so every page up to the
-    //       one that holds it is mapped and none after it need be; memory_first_of is given the rest of the page the
-    //       cursor is in and then whole pages, so no block it reads ahead in can reach past the page of the answer. (Its
-    //       bound as the rest of the address space was a read past the answer's page by the unrolled loop, which
-    //       test/libc_shim.c's unmapped page after the answer caught.) One call a page is nothing beside the hunt.
-    //       rbx the cursor, r12 the byte, r13 the span asked; three pushes keep the call aligned.
+    //       rawmemchr: memchr with no end. The byte is promised to be there, so every byte up to it is the caller's and
+    //       none after it need be. The first window is read where it is only when it does not reach the next page;
+    //       every load after it is aligned to its own width, so it is inside one page, and is made only after
+    //       everything in front of it held no match, so the byte is at or after it and its page is the caller's. (A
+    //       count of the rest of the address space handed to memory_first_of was a read past the answer's page by
+    //       its unrolled loop, which test/libc_shim.c's unmapped page after the answer caught; a page at a time
+    //       through memory_first_of was safe and cost eleven to thirteen cycles a call when the byte was in the first
+    //       few, against seven for these.) Three bodies, one a machine: zmm16 and up with AVX-512, so no way out needs
+    //       a vzeroupper; 256-bit with AVX2; 128-bit everywhere, which is also what runs before moonwater_cpu_detect.
+    //       Each is the first window, four vectors aligned down one at a time, then blocks of four aligned to their
+    //       size.
     //
     ASM_FUNC(rawmemchr)
-    "push %rbx\n   push %r12\n   push %r13\n   mov %rdi, %rbx\n   mov %esi, %r12d\n"
-    "" ASM_LABEL(libc_shim_raw_page) ":\n"
-    "mov %ebx, %edx\n   and $4095, %edx\n   neg %rdx\n   add $4096, %rdx  # to the end of this page, 1 to 4096\n   mov %rdx, %r13\n"
-    "mov %rbx, %rdi\n   mov %r12d, %esi\n   call memory_first_of\n   test %rax, %rax\n   jnz " ASM_LABEL(libc_shim_raw_found) "\n"
-    "add %r13, %rbx\n   jmp " ASM_LABEL(libc_shim_raw_page) "\n"
-    "" ASM_LABEL(libc_shim_raw_found) ":  pop %r13\n   pop %r12\n   pop %rbx\n" ASM_RET
+    "cmpb $0, cpu_has_avx512(%rip)\n   jne " ASM_LABEL(libc_shim_raw_z) "\n   cmpb $0, cpu_has_avx2(%rip)\n   jne " ASM_LABEL(libc_shim_raw_y) "\n"
+    "movzbl %sil, %eax\n   imul $0x01010101, %eax, %eax\n   movd %eax, %xmm0\n   pshufd $0, %xmm0, %xmm0\n"
+    "mov %edi, %eax\n   and $4095, %eax\n   cmp $4080, %eax\n   ja " ASM_LABEL(libc_shim_raw_x_edge) "\n"
+    "movdqu (%rdi), %xmm1\n   pcmpeqb %xmm0, %xmm1\n   pmovmskb %xmm1, %eax\n   test %eax, %eax\n   jz " ASM_LABEL(libc_shim_raw_x_more) "\n"
+    "bsf %eax, %eax\n   add %rdi, %rax\n" ASM_RET
+    "" ASM_LABEL(libc_shim_raw_x_more) ":\n   and $-16, %rdi\n"
+    "" ASM_LABEL(libc_shim_raw_x_rungs) ":\n"
+    "movdqa 16(%rdi), %xmm1\n   pcmpeqb %xmm0, %xmm1\n   pmovmskb %xmm1, %eax\n   test %eax, %eax\n   jnz " ASM_LABEL(libc_shim_raw_x1) "\n"
+    "movdqa 32(%rdi), %xmm1\n   pcmpeqb %xmm0, %xmm1\n   pmovmskb %xmm1, %eax\n   test %eax, %eax\n   jnz " ASM_LABEL(libc_shim_raw_x2) "\n"
+    "movdqa 48(%rdi), %xmm1\n   pcmpeqb %xmm0, %xmm1\n   pmovmskb %xmm1, %eax\n   test %eax, %eax\n   jnz " ASM_LABEL(libc_shim_raw_x3) "\n"
+    "movdqa 64(%rdi), %xmm1\n   pcmpeqb %xmm0, %xmm1\n   pmovmskb %xmm1, %eax\n   test %eax, %eax\n   jnz " ASM_LABEL(libc_shim_raw_x4) "\n"
+    "add $16, %rdi\n   and $-64, %rdi\n"
+    "" ASM_LABEL(libc_shim_raw_x_loop) ":\n"
+    "movdqa 64(%rdi), %xmm1\n   movdqa 80(%rdi), %xmm2\n   movdqa 96(%rdi), %xmm3\n   movdqa 112(%rdi), %xmm4\n"
+    "pcmpeqb %xmm0, %xmm1\n   pcmpeqb %xmm0, %xmm2\n   pcmpeqb %xmm0, %xmm3\n   pcmpeqb %xmm0, %xmm4\n"
+    "movdqa %xmm1, %xmm5\n   por %xmm2, %xmm5\n   movdqa %xmm3, %xmm6\n   por %xmm4, %xmm6\n   por %xmm6, %xmm5\n   pmovmskb %xmm5, %eax\n"
+    "add $64, %rdi\n   test %eax, %eax\n   jz " ASM_LABEL(libc_shim_raw_x_loop) "\n"
+    "pmovmskb %xmm1, %eax\n   test %eax, %eax\n   jnz " ASM_LABEL(libc_shim_raw_x0) "\n"
+    "pmovmskb %xmm2, %eax\n   test %eax, %eax\n   jnz " ASM_LABEL(libc_shim_raw_x1) "\n"
+    "pmovmskb %xmm3, %eax\n   test %eax, %eax\n   jnz " ASM_LABEL(libc_shim_raw_x2) "\n"
+    "pmovmskb %xmm4, %eax\n"
+    "" ASM_LABEL(libc_shim_raw_x3) ":\n   bsf %eax, %eax\n   lea 48(%rdi,%rax), %rax\n" ASM_RET
+    "" ASM_LABEL(libc_shim_raw_x0) ":\n   bsf %eax, %eax\n   add %rdi, %rax\n" ASM_RET
+    "" ASM_LABEL(libc_shim_raw_x1) ":\n   bsf %eax, %eax\n   lea 16(%rdi,%rax), %rax\n" ASM_RET
+    "" ASM_LABEL(libc_shim_raw_x2) ":\n   bsf %eax, %eax\n   lea 32(%rdi,%rax), %rax\n" ASM_RET
+    "" ASM_LABEL(libc_shim_raw_x4) ":\n   bsf %eax, %eax\n   lea 64(%rdi,%rax), %rax\n" ASM_RET
+    "" ASM_LABEL(libc_shim_raw_x_edge) ":\n   mov %rdi, %rcx\n   and $-16, %rdi\n   movdqa (%rdi), %xmm1\n   pcmpeqb %xmm0, %xmm1\n   pmovmskb %xmm1, %eax\n"
+    "and $15, %ecx\n   shr %cl, %eax\n   jz " ASM_LABEL(libc_shim_raw_x_rungs) "\n   bsf %eax, %eax\n   add %rdi, %rax\n   add %rcx, %rax\n" ASM_RET
+    //       AVX2.
+    ".balign 64\n"
+    "" ASM_LABEL(libc_shim_raw_y) ":\n   vmovd %esi, %xmm0\n   vpbroadcastb %xmm0, %ymm0\n"
+    "mov %edi, %eax\n   and $4095, %eax\n   cmp $4064, %eax\n   ja " ASM_LABEL(libc_shim_raw_y_edge) "\n"
+    "vpcmpeqb (%rdi), %ymm0, %ymm1\n   vpmovmskb %ymm1, %eax\n   test %eax, %eax\n   jz " ASM_LABEL(libc_shim_raw_y_more) "\n"
+    "tzcnt %eax, %eax\n   add %rdi, %rax\n   vzeroupper\n" ASM_RET
+    "" ASM_LABEL(libc_shim_raw_y_more) ":\n   and $-32, %rdi\n"
+    "" ASM_LABEL(libc_shim_raw_y_rungs) ":\n"
+    "vpcmpeqb 32(%rdi), %ymm0, %ymm1\n   vpmovmskb %ymm1, %eax\n   test %eax, %eax\n   jnz " ASM_LABEL(libc_shim_raw_y1) "\n"
+    "vpcmpeqb 64(%rdi), %ymm0, %ymm1\n   vpmovmskb %ymm1, %eax\n   test %eax, %eax\n   jnz " ASM_LABEL(libc_shim_raw_y2) "\n"
+    "vpcmpeqb 96(%rdi), %ymm0, %ymm1\n   vpmovmskb %ymm1, %eax\n   test %eax, %eax\n   jnz " ASM_LABEL(libc_shim_raw_y3) "\n"
+    "vpcmpeqb 128(%rdi), %ymm0, %ymm1\n   vpmovmskb %ymm1, %eax\n   test %eax, %eax\n   jnz " ASM_LABEL(libc_shim_raw_y4) "\n"
+    "add $32, %rdi\n   and $-128, %rdi\n"
+    "" ASM_LABEL(libc_shim_raw_y_loop) ":\n"
+    "vpcmpeqb 128(%rdi), %ymm0, %ymm1\n   vpcmpeqb 160(%rdi), %ymm0, %ymm2\n   vpcmpeqb 192(%rdi), %ymm0, %ymm3\n   vpcmpeqb 224(%rdi), %ymm0, %ymm4\n"
+    "vpor %ymm1, %ymm2, %ymm5\n   vpor %ymm3, %ymm4, %ymm6\n   vpor %ymm5, %ymm6, %ymm5\n   vpmovmskb %ymm5, %eax\n"
+    "sub $-128, %rdi\n   test %eax, %eax\n   jz " ASM_LABEL(libc_shim_raw_y_loop) "\n"
+    "vpmovmskb %ymm1, %eax\n   test %eax, %eax\n   jnz " ASM_LABEL(libc_shim_raw_y0) "\n"
+    "vpmovmskb %ymm2, %eax\n   test %eax, %eax\n   jnz " ASM_LABEL(libc_shim_raw_y1) "\n"
+    "vpmovmskb %ymm3, %eax\n   test %eax, %eax\n   jnz " ASM_LABEL(libc_shim_raw_y2) "\n"
+    "vpmovmskb %ymm4, %eax\n"
+    "" ASM_LABEL(libc_shim_raw_y3) ":\n   tzcnt %eax, %eax\n   lea 96(%rdi,%rax), %rax\n   vzeroupper\n" ASM_RET
+    "" ASM_LABEL(libc_shim_raw_y0) ":\n   tzcnt %eax, %eax\n   add %rdi, %rax\n   vzeroupper\n" ASM_RET
+    "" ASM_LABEL(libc_shim_raw_y1) ":\n   tzcnt %eax, %eax\n   lea 32(%rdi,%rax), %rax\n   vzeroupper\n" ASM_RET
+    "" ASM_LABEL(libc_shim_raw_y2) ":\n   tzcnt %eax, %eax\n   lea 64(%rdi,%rax), %rax\n   vzeroupper\n" ASM_RET
+    "" ASM_LABEL(libc_shim_raw_y4) ":\n   tzcnt %eax, %eax\n   lea 128(%rdi,%rax), %rax\n   vzeroupper\n" ASM_RET
+    "" ASM_LABEL(libc_shim_raw_y_edge) ":\n   mov %rdi, %rcx\n   and $-32, %rdi\n   vpcmpeqb (%rdi), %ymm0, %ymm1\n   vpmovmskb %ymm1, %eax\n"
+    "shr %cl, %eax  # by the start's place in its vector: a 32-bit shift counts five bits\n   jz " ASM_LABEL(libc_shim_raw_y_rungs) "\n   tzcnt %eax, %eax\n   add %rcx, %rax\n   vzeroupper\n" ASM_RET
+    //       AVX-512: the block is four exclusive-ors with the loads inside them, three minima and one test.
+    //
+    ".balign 64\n"
+    "" ASM_LABEL(libc_shim_raw_z) ":\n   vpbroadcastb %esi, %zmm16\n"
+    "mov %edi, %eax\n   and $4095, %eax\n   cmp $4032, %eax\n   ja " ASM_LABEL(libc_shim_raw_edge) "\n"
+    "vpcmpeqb (%rdi), %zmm16, %k0\n   kmovq %k0, %rax\n   test %rax, %rax\n   jz " ASM_LABEL(libc_shim_raw_more) "\n"
+    "tzcnt %rax, %rax\n   add %rdi, %rax\n" ASM_RET
+    ".balign 16\n"
+    "" ASM_LABEL(libc_shim_raw_more) ":\n   and $-64, %rdi\n"
+    "" ASM_LABEL(libc_shim_raw_rungs) ":\n"
+    "vpcmpeqb 64(%rdi), %zmm16, %k0\n   kortestq %k0, %k0\n   jnz " ASM_LABEL(libc_shim_raw_1) "\n"
+    "vpcmpeqb 128(%rdi), %zmm16, %k0\n   kortestq %k0, %k0\n   jnz " ASM_LABEL(libc_shim_raw_2) "\n"
+    "vpcmpeqb 192(%rdi), %zmm16, %k0\n   kortestq %k0, %k0\n   jnz " ASM_LABEL(libc_shim_raw_3) "\n"
+    "vpcmpeqb 256(%rdi), %zmm16, %k0\n   kortestq %k0, %k0\n   jnz " ASM_LABEL(libc_shim_raw_4) "\n"
+    "add $64, %rdi\n   xor %dil, %dil\n"
+    ".balign 16\n"
+    "" ASM_LABEL(libc_shim_raw_loop) ":\n"
+    "vpxorq 256(%rdi), %zmm16, %zmm17\n   vpxorq 320(%rdi), %zmm16, %zmm18\n   vpxorq 384(%rdi), %zmm16, %zmm19\n   vpxorq 448(%rdi), %zmm16, %zmm20\n"
+    "vpminub %zmm18, %zmm17, %zmm21\n   vpminub %zmm20, %zmm19, %zmm22\n   vpminub %zmm21, %zmm22, %zmm21\n   vptestnmb %zmm21, %zmm21, %k2\n"
+    "kmovq %k2, %rdx\n   add $256, %rdi\n   test %rdx, %rdx\n   jz " ASM_LABEL(libc_shim_raw_loop) "\n"
+    "vptestnmb %zmm17, %zmm17, %k0\n   kortestq %k0, %k0\n   jnz " ASM_LABEL(libc_shim_raw_0) "\n"
+    "vptestnmb %zmm18, %zmm18, %k0\n   kortestq %k0, %k0\n   jnz " ASM_LABEL(libc_shim_raw_1) "\n"
+    "vptestnmb %zmm19, %zmm19, %k0\n   kortestq %k0, %k0\n   jnz " ASM_LABEL(libc_shim_raw_2) "\n"
+    "tzcnt %rdx, %rax\n   lea 192(%rdi,%rax), %rax\n" ASM_RET
+    "" ASM_LABEL(libc_shim_raw_0) ":\n   kmovq %k0, %rax\n   tzcnt %rax, %rax\n   add %rdi, %rax\n" ASM_RET
+    "" ASM_LABEL(libc_shim_raw_1) ":\n   kmovq %k0, %rax\n   tzcnt %rax, %rax\n   lea 64(%rdi,%rax), %rax\n" ASM_RET
+    "" ASM_LABEL(libc_shim_raw_2) ":\n   kmovq %k0, %rax\n   tzcnt %rax, %rax\n   lea 128(%rdi,%rax), %rax\n" ASM_RET
+    "" ASM_LABEL(libc_shim_raw_3) ":\n   kmovq %k0, %rax\n   tzcnt %rax, %rax\n   lea 192(%rdi,%rax), %rax\n" ASM_RET
+    "" ASM_LABEL(libc_shim_raw_4) ":\n   kmovq %k0, %rax\n   tzcnt %rax, %rax\n   lea 256(%rdi,%rax), %rax\n" ASM_RET
+    "" ASM_LABEL(libc_shim_raw_edge) ":\n   mov %rdi, %rcx\n   and $-64, %rdi\n   vpcmpeqb (%rdi), %zmm16, %k0\n   kmovq %k0, %rax\n   shr %cl, %rax\n"
+    "jz " ASM_LABEL(libc_shim_raw_rungs) "\n   tzcnt %rax, %rax\n   add %rcx, %rax\n" ASM_RET
     ASM_END(rawmemchr)
     ASM_ALIAS(__rawmemchr,    rawmemchr)
 

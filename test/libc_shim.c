@@ -25,6 +25,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <sys/syscall.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -398,6 +399,17 @@ static void check_strings(void *shim)
                                 for (int k = 0; k < 7; k++)
                                         if (strnlen_ours(s, limits[k]) != strnlen_theirs(s, limits[k]))
                                                 fail("strnlen", "length", n, limits[k], align);
+                                /* no terminator at all: n bytes whose last is the last mapped one, the bound n, n - 1 and
+                                   n - 64; a read past the bound faults */
+                                if (where == 0 && n) {
+                                        unsigned char *unended = src2 + SPAN - n;
+                                        fill_random(unended, n, 255);
+                                        for (size_t cut = 0; cut < 128 && cut < n; cut += cut < 2 ? 1 : 63) {
+                                                checks++;
+                                                if (strnlen_ours((char *)unended + cut, n - cut) != n - cut)
+                                                        fail("strnlen", "unended", n, cut, align);
+                                        }
+                                }
                                 /* strchr, strrchr, strchrnul: absent, the terminator, then each position */
                                 char *t = string_at(src2, n, (where + 1) % 3, (align * 3) % 64, 200);
                                 for (int c = 0; c < 3; c++) {
@@ -1762,7 +1774,8 @@ static int bench_compare(void *shim, int argc, char **argv)
         end, each with its own length and so its own alignment, and visited in an order drawn once (65536 picks) and read as an
         array, so the predictor meets a length it cannot know and the only work between calls is two loads.
 
-        Ticks are rdtsc's, the best of 64 rounds, nothing subtracted: both sides pay the same loop around the call.
+        The cost is core cycles in user mode (hunt_now), the best of 64 rounds and of three passes over every side, nothing
+        subtracted: both sides pay the same loop around the call.
 */
 enum { HUNT_STRING, HUNT_CHR_HIT, HUNT_RLAST, HUNT_MEMR_HIT };
 enum { SHAPE_LEN, SHAPE_NLEN, SHAPE_FIND, SHAPE_CHR };
@@ -1830,12 +1843,38 @@ static void hunt_lay(unsigned char *buffer, size_t room, const struct hunt_case 
         }
 }
 
+/*
+        Core cycles in user mode, from the processor's own counter (perf_event_open), so a clock that boosts or drops while
+        the machine is shared changes nothing; ticks of the time stamp counter where the counter cannot be had.
+*/
+static int hunt_counter = -2;
+
+static uint64_t hunt_now(void)
+{
+        if (hunt_counter == -2) {
+                struct {
+                        uint32_t type, size;
+                        uint64_t config, period, sample_type, read_format, flags, rest[12];
+                } attr = {0, sizeof attr, 0};   // PERF_TYPE_HARDWARE, PERF_COUNT_HW_CPU_CYCLES
+                attr.size = 112;
+                attr.flags = (1ull << 5) | (1ull << 6); // exclude_kernel, exclude_hv
+                hunt_counter = (int)syscall(SYS_perf_event_open, &attr, 0, -1, -1, 0);
+                printf("hunt: %s\n", hunt_counter >= 0 ? "core cycles in user mode" : "time stamp ticks (no cycle counter)");
+        }
+        if (hunt_counter < 0)
+                return ticks();
+        uint64_t v = 0;
+        if (read(hunt_counter, &v, sizeof v) != sizeof v)
+                return 0;
+        return v;
+}
+
 static double hunt_time(const struct hunt_case *c, void *f, int calls)
 {
         uint64_t best = ~0ull;
         unsigned k = 0;
         for (int round = 0; round < 64; round++) {
-                uint64_t t0 = ticks();
+                uint64_t t0 = hunt_now();
                 switch (c->shape) {
                 case SHAPE_LEN:
                         for (int i = 0; i < calls; i++) {
@@ -1862,7 +1901,7 @@ static double hunt_time(const struct hunt_case *c, void *f, int calls)
                         }
                         break;
                 }
-                uint64_t t = ticks() - t0;
+                uint64_t t = hunt_now() - t0;
                 if (t < best)
                         best = t;
         }
@@ -1893,7 +1932,7 @@ static void hunt_row(const struct hunt_case *c, void **sides, int count, const c
                         }
         for (int s = 0; s < count; s++)
                 t[s] = 1e30;
-        for (int pass = 0; pass < 2; pass++)
+        for (int pass = 0; pass < 3; pass++)
                 for (int s = 0; s < count; s++) {
                         double v = hunt_time(c, sides[s], calls);
                         if (v < t[s])
@@ -1920,7 +1959,7 @@ static void bench_hunt(void **shims, int shim_count, const char *only)
         mprotect(buffer + HUNT_ROOM, PAGE, PROT_NONE);
         for (size_t i = 0; i < HUNT_ROOM; i++)
                 buffer[i] = hunt_plain();
-        printf("ticks a call; columns: the C library, then each shim and the C library's ticks over its (above 1.00 the shim wins)\n");
+        printf("a call's cost; columns: the C library, then each shim and the C library's cost over its (above 1.00 the shim wins)\n");
         for (size_t ci = 0; ci < sizeof hunt_cases / sizeof *hunt_cases; ci++) {
                 const struct hunt_case *c = &hunt_cases[ci];
                 if (only && strcmp(only, c->symbol))
