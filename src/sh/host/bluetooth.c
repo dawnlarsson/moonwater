@@ -275,11 +275,14 @@ static bool bt_line_read(bt_book address_to book, const p8 address_to line, posi
         bipolar type;
         bt_pad address_to pad;
 
+        //      A line that is no device's is passed over (false is for no memory alone): one bad line does not take the
+        //      others with it, and the keeper does not stop and start again over it.
         for (positive word = 0; word < 8; word++)
                 if (!bt_word(line, size, address_of at, start + word, length + word))
-                        return false;
-        if (!bt_address_read(line + start[0], length[0], address) || (type = bt_kind_read(line + start[1], length[1])) < 0 ||
-            !(pad = bt_book_add(book, address, (p8)type)))
+                        return true;
+        if (!bt_address_read(line + start[0], length[0], address) || (type = bt_kind_read(line + start[1], length[1])) < 0)
+                return true;
+        if (!(pad = bt_book_add(book, address, (p8)type)))
                 return false;
         if (bt_hex_read(line + start[2], length[2], pad->key, sizeof(pad->key)))
                 pad->keys |= BT_HAS_KEY;
@@ -2071,11 +2074,18 @@ static fn bt_keeper_doors_tidy(void)
 static fn bt_keeper_run(void)
 {
         system_poll_descriptor address_to set = null;
-        positive set_room = 0;
-        bipolar lock = host_lock(BT_KEEPER, false);
+        positive set_room = 0, plain[4] = {0, 0, 0, 0}, ignored[4] = {SIGNAL_IGNORE, 0, 0, 0}, none = 0;
+        bipolar lock = host_lock(BT_KEEPER, false), reset = 0;
 
         if (lock < 0)
                 system_call_1(syscall(exit_group), 0);
+        //      A fork of the machine's shell keeps its handlers and its mask: the keeper has the kernel's own, so the
+        //      SIGTERM bluetooth off sends ends it, and a write to a channel gone is an error and not a death.
+        for (b32 number = 1; number < 32 && reset >= 0; number++)
+                if (number != 9 && number != 19)
+                        reset = system_signal_action(number, number == 13 ? ignored : plain, null, 8);
+        if (reset >= 0)
+                reset = system_signal_mask(SIG_SETMASK, address_of none, null, 8);
         host_state_ready();
         //      The FIFO the verbs wake this by, made here, and nothing else: a name that is not a FIFO is not read.
         bt_keeper.wake = system_call_4(syscall(mknodat), AT_FDCWD, (positive)(string_address)BT_WAKE, S_IFIFO | 0600, 0);
