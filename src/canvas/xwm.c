@@ -519,6 +519,8 @@ static void compositor_xwm_owned(struct compositor_xwm_window *w)
                 __atomic_compare_exchange_n(&table->pid[w->row], &now, w->owner, 0, __ATOMIC_ACQ_REL, __ATOMIC_RELAXED);
 }
 
+static void compositor_xwm_ask_owner(struct compositor_xwm *x, unsigned int window);
+
 static void xwm_ext_reply(struct compositor_xwm *x, const unsigned char *in, long size, unsigned int ext)
 {
         struct xwm_extension_reply r;
@@ -559,6 +561,12 @@ static void xwm_ext_reply(struct compositor_xwm *x, const unsigned char *in, lon
                         return;
                 compositor_xwm_queue(x, req, xwm_enc_xres_query_version(req, sizeof req, r.major_opcode, 1, 2));
                 x->xres = r.major_opcode;
+                // A window mapped before the extension was known asked no one for its client (compositor_xwm_ask_owner): it is asked
+                // now, as a game's first window is made a moment after its server starts, and its client is the game's (game mode,
+                // a stand-in's owner, compositor_xwm_stand_row).
+                for (long at = 0; x->window && at < x->window_table.count; at++)
+                        if (x->window[at].id && !x->window[at].owner)
+                                compositor_xwm_ask_owner(x, x->window[at].id);
         }
         else if (ext == XWM_EXT_XFIXES)
         {
