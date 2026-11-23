@@ -6402,19 +6402,34 @@ static void fullscreen_rows(void)
         check("fullscreen: and a glass window is not", compositor_direct_candidate(&frame, rows, 1) == -1);
         compositor.glassy[0] = 0;
 
-        // The framebuffer the card shows is kept past the client's next buffer, and removed once the card is off it.
-        graves = compositor_wl_grave_count;
-        compositor.on_screen = compositor_lent_fb(0), compositor.flip_pending = 0;
-        compositor_wl_lent_drop_fb(0);
-        check("fullscreen: a client's framebuffer on the screen is not removed when its buffer is replaced", compositor_wl_grave_count == graves + 1);
-        compositor_wl_graves_sweep();
-        check("fullscreen: nor while it is still on the screen", compositor_wl_grave_count == graves + 1);
-        compositor.on_screen = 77, compositor.flip_pending = 1;
-        compositor_wl_graves_sweep();
-        check("fullscreen: nor while a flip is on its way (the card scans the one before it until it lands)", compositor_wl_grave_count == graves + 1);
-        compositor.flip_pending = 0;
-        compositor_wl_graves_sweep();
-        check("fullscreen: and is removed once the card is off it", compositor_wl_grave_count == graves);
+        // The framebuffer the card shows is kept past the client's next buffer (its buffer a memfd, a file of its own: the keep of made framebuffers
+        // holds it by its inode), and removed once the card is off it and no row has held it for two seconds; before that, not while the card
+        // shows it or a flip is on its way.
+        {
+                long fd = (long)system_call_2(syscall(memfd_create), (positive) "fullscreen-keep", 1);
+                unsigned int kept;
+
+                canvas_fb_kept_count = 0;
+                compositor_wl.lent[0].fd = fd;
+                graves = compositor_wl_grave_count;
+                compositor.on_screen = compositor_lent_fb(0), compositor.flip_pending = 0;
+                kept = canvas_fb_kept_count;
+                compositor_wl_lent_drop_fb(0);
+                for (unsigned int k = 0; k < canvas_fb_kept_count; k++)
+                        canvas_fb_kept[k].used -= CANVAS_FB_KEEP_NS + 1; // let go of more than two seconds ago
+                check("fullscreen: a client's framebuffer on the screen is not removed when its buffer is replaced (it is kept)",
+                      fd >= 0 && compositor.on_screen && kept == 1 && canvas_fb_kept_count == 1 && compositor_wl_grave_count == graves);
+                compositor_wl_graves_sweep();
+                check("fullscreen: nor while it is still on the screen", canvas_fb_kept_count == 1);
+                compositor.on_screen = 77, compositor.flip_pending = 1;
+                compositor_wl_graves_sweep();
+                check("fullscreen: nor while a flip is on its way (the card scans the one before it until it lands)", canvas_fb_kept_count == 1);
+                compositor.flip_pending = 0;
+                compositor_wl_graves_sweep();
+                check("fullscreen: and is removed once the card is off it", canvas_fb_kept_count == 0 && compositor_wl_grave_count == graves);
+                if (fd >= 0)
+                        system_close(fd);
+        }
         compositor.on_screen = 0;
         memory_zero(&compositor_wl.lent[0], sizeof compositor_wl.lent[0]);
 
@@ -6961,6 +6976,7 @@ static void jit_ready_rows(void)
         compositor.direct_row = row, compositor.flip_row = row, compositor.showing[row] = 1, compositor.state[row] = 0;
         compositor.spaces.ready = 0, compositor_wl.started = 0;
         compositor_wl_game_render_ns = 0, compositor_wl_jit_sent(0), compositor_wl_frame_at = 0;
+        memory_zero(&compositor_jit, sizeof compositor_jit);
         check("jit: the game's row is the JIT row", compositor_wl_jit_row() == row);
         // The first flip has no estimate: the callback goes at the flip.
         compositor_wl_frame_owed = 1;
@@ -6992,6 +7008,31 @@ static void jit_ready_rows(void)
         check("jit: a steady 2 ms render keeps the callback armed every frame, not off after about nine",
                     armed == 40 && target == vblank + period - (compositor_wl_game_render_ns + 600000ull));
         check("jit: the estimate is the render, not the render and the margin", compositor_wl_game_render_ns >= render && compositor_wl_game_render_ns < render + 10000);
+        // A timed frame that lands a vblank past the one it was aimed at widens the margin an eighth of a period (the estimate cannot learn it),
+        // counted; 120 that land where they were aimed step it back by half.
+        {
+                unsigned int late = compositor_jit.late, landed = compositor_jit.landed;
+                positive aim;
+
+                compositor_wl_frame_owed = 1;
+                compositor_wl_jit_owed(vblank, vblank + 30000);
+                aim = compositor_jit.aim;
+                compositor_wl_frame_at = 0;
+                vblank += 2 * period; // the frame missed its vblank and landed at the one after
+                compositor_wl_frame_owed = 1;
+                compositor_wl_jit_owed(vblank, vblank + 30000);
+                check("jit: a timed frame landed a vblank past its aim is counted late and widens the margin an eighth of a period",
+                      aim && compositor_jit.late == late + 1 && compositor_jit.widen == period / 8 && compositor_jit.landed == landed &&
+                          compositor_wl_frame_at == vblank + period - (compositor_wl_game_render_ns + 600000ull + period / 8));
+                for (frame = 0; frame < COMPOSITOR_JIT_CALM; frame++)
+                {
+                        compositor_wl_frame_at = 0, vblank += period, compositor_wl_frame_owed = 1;
+                        compositor_wl_jit_owed(vblank, vblank + 30000);
+                }
+                check("jit: and 120 that land where they were aimed step it back by half", compositor_jit.widen == period / 16 &&
+                      compositor_jit.landed == landed + COMPOSITOR_JIT_CALM);
+                memory_zero(&compositor_jit, sizeof compositor_jit), compositor_wl_frame_at = 0;
+        }
         // A present before the game's commit (another row's damage) samples nothing, and the commit after it is sampled by the present that shows it.
         {
                 positive sent = compositor_wl_frame_sent_at;

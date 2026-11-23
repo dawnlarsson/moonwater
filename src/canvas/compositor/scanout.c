@@ -797,11 +797,9 @@ static struct
 static void compositor_wl_jit_owed(positive vblank, positive now)
 {
         int jit = compositor_wl_jit_row();
-        positive lead = compositor_present_lead(), period = compositor.period;
-        // Direct-scanout games flip in ~25 us (no GPU compose), so a 0.6 ms safety margin suffices vs 1.0 ms + lead when GPU-composed.
-        positive margin = (jit >= 0 && (jit == compositor.direct_row || compositor_space_is_fs_row(jit)) ? 600000ull : 1000000ull) + lead + compositor_jit.widen;
-        positive budget = compositor_wl_game_render_ns + margin, window = period * compositor_cadence.k;
+        positive lead = compositor_present_lead(), period = compositor.period, margin, budget, window = period * compositor_cadence.k;
 
+        // The frame the last timed callback was for has landed: where it was aimed, or past it (which widens the margin this callback has).
         if (compositor_jit.aim && period)
         {
                 if (vblank >= compositor_jit.aim + period / 2)
@@ -817,6 +815,9 @@ static void compositor_wl_jit_owed(positive vblank, positive now)
                 }
                 compositor_jit.aim = 0;
         }
+        // Direct-scanout games flip in ~25 us (no GPU compose), so a 0.6 ms safety margin suffices vs 1.0 ms + lead when GPU-composed.
+        margin = (jit >= 0 && (jit == compositor.direct_row || compositor_space_is_fs_row(jit)) ? 600000ull : 1000000ull) + lead + compositor_jit.widen;
+        budget = compositor_wl_game_render_ns + margin;
         compositor_wl_frame_owed = 0;
         if (jit >= 0 && compositor_wl_game_render_ns > 0 && window > budget + 300000ull && !compositor_row_tears(jit))
         {
