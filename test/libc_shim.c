@@ -1926,7 +1926,8 @@ static void bench_hunt(void **shims, int shim_count, const char *only)
                 if (only && strcmp(only, c->symbol))
                         continue;
                 void *sides[16];
-                sides[0] = dlsym(RTLD_DEFAULT, c->symbol);
+                if (!(sides[0] = dlsym(RTLD_DEFAULT, c->symbol)))
+                        continue;       // musl has no rawmemchr
                 for (int s = 0; s < shim_count; s++)
                         sides[s + 1] = dlsym(shims[s], c->symbol);
                 for (size_t si = 0; si < sizeof sizes / sizeof *sizes; si++) {
