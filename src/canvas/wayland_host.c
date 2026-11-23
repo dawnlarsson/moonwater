@@ -3348,11 +3348,14 @@ static void compositor_wl_caret(int row, long bottom)
         compositor_osk_sync();
 }
 
+static void compositor_wl_hinted(long slot); // below: the Xwayland hop's end
+
 static void compositor_wl_row_do(void *context, int row, long what, long a, long b)
 {
         (void)context;
         if (row < 0 || row >= COMPOSITOR_ROWS)
                 return;
+        if (what == WAYLAND_DO_HINT) { compositor_wl_hinted(a); return; }
         if (what == WAYLAND_DO_TEXT) { compositor_wl_field(row, a, b); return; }
         if (what == WAYLAND_DO_CARET) { compositor_wl_caret(row, a); return; }
         if (!compositor.showing[row])
@@ -5028,6 +5031,10 @@ static struct
         // named for and the reports the pages had taken when the loop last looked.
         int focus_row, focus_named_row;
         unsigned int focus_claim, focus_named, focus_seen;
+        // The Xwayland hop (compositor_wl_hinted): the oldest locked report the reader sent that its client has not answered with a cursor
+        // hint yet (ns, 0 for none), and that client's slot. The reader writes them, the loop takes them.
+        unsigned long long hop_sent;
+        long hop_slot;
 } compositor_wl_direct = {.slot = -1, .fd = -1, .row = -1, .rest_slot = -1, .keys_slot = -1, .keys_fd = -1, .keys_row = -1,
                           .focus_row = -1, .focus_named_row = -1};
 
@@ -5441,8 +5448,32 @@ HOT static int compositor_wl_direct_send_packet(long dx, long dy, unsigned int b
                 length += sizeof words;
         }
         got = compositor_wl_direct_bytes(compositor_wl_direct.slot, compositor_wl_direct.fd, bytes, length);
+        if (got && (dx || dy) && !__atomic_load_n(&compositor_wl_direct.hop_sent, __ATOMIC_RELAXED))
+        {
+                __atomic_store_n(&compositor_wl_direct.hop_slot, (long)compositor_wl_direct.slot, __ATOMIC_RELAXED);
+                __atomic_store_n(&compositor_wl_direct.hop_sent, clock_monotonic_nanoseconds(), __ATOMIC_RELEASE);
+        }
         __atomic_store_n(&compositor_wl_direct.lock, 0u, __ATOMIC_RELEASE);
         return (int)got;
+}
+
+/*
+        The loop, reading a cursor hint from the client in slot (the row that holds the pointer locked): the time from the oldest report the
+        reader sent it unanswered to now, into the table's input_hop (moonwater debug says it). Xwayland's warp emulator answers every
+        relative motion with a hint and a commit, so this is the X server's turn-around and the loop's read of the answer (input-path #4);
+        a Wayland game that never hints adds nothing, and a hint with no send outstanding (the loop's own sends) is not counted.
+*/
+static void compositor_wl_hinted(long slot)
+{
+        unsigned long long sent = __atomic_exchange_n(&compositor_wl_direct.hop_sent, 0ull, __ATOMIC_ACQ_REL), now, us;
+
+        if (!sent || __atomic_load_n(&compositor_wl_direct.hop_slot, __ATOMIC_RELAXED) != slot || !compositor.table)
+                return;
+        now = clock_monotonic_nanoseconds();
+        us = now > sent ? (now - sent) / 1000ull : 0;
+        compositor.table->input_hop[windows_us_bucket(us)]++;
+        if (us > compositor.table->input_hop_most && us < 0xffffffffull)
+                compositor.table->input_hop_most = (unsigned int)us;
 }
 
 static int compositor_wl_direct_send(long dx, long dy, positive micro)

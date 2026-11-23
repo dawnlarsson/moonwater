@@ -483,6 +483,35 @@ static b32 host_sensors(string_address address_to arguments, positive count)
         return 0;
 }
 
+// A histogram of microseconds (window.c, WINDOWS_US_BUCKETS): its count, the power of two the half and the 99 in 100 are under, its most,
+// and each bucket that has any ("<N us" for 2^(k-1) to 2^k, the last "N us and more").
+static void host_debug_us_times(string_address label, string_address what, const unsigned int *buckets, unsigned int most)
+{
+        positive total = 0, seen = 0, half = 0, nearly = 0;
+
+        for (unsigned int at = 0; at < WINDOWS_US_BUCKETS; at++)
+                total += buckets[at];
+        if (!total)
+        {
+                host_say(log, "%snone yet (%s)\n", label, what);
+                return;
+        }
+        for (unsigned int at = 0; at < WINDOWS_US_BUCKETS; at++)
+        {
+                seen += buckets[at];
+                if (!half && seen * 2 >= total)
+                        half = (positive)1 << at;
+                if (!nearly && seen * 100 >= total * 99)
+                        nearly = (positive)1 << at;
+        }
+        host_say(log, "%s%p, %s: half under %p us, 99 in 100 under %p us, the most %p us;", label, total, what, half, nearly, (positive)most);
+        for (unsigned int at = 0; at < WINDOWS_US_BUCKETS; at++)
+                if (buckets[at])
+                        host_say(log, at + 1 < WINDOWS_US_BUCKETS ? " <%p us %p" : " %p us and more %p",
+                                 (positive)1 << (at + 1 < WINDOWS_US_BUCKETS ? at : at - 1), (positive)buckets[at]);
+        host_say(log, "\n");
+}
+
 static b32 host_debug(string_address address_to arguments, positive count)
 {
         static const string_address refusals[] = {
@@ -845,6 +874,11 @@ static b32 host_debug(string_address address_to arguments, positive count)
                          (positive)table->wl_idled);
         else
                 host_say(log, "  idle            no clock (the Wayland shim is off)\n");
+        //      The input path's two times (window.c, input_late and input_hop): how many, the half and the 99 in 100 under a power of two,
+        //      the most, and every bucket that has any.
+        host_debug_us_times("  input late      ", "a report's kernel stamp to the reader's send to its window", table->input_late, table->input_late_most);
+        host_debug_us_times("  xwayland hop    ", "a locked report the reader sent, to the client's next cursor hint (Xwayland's answer)", table->input_hop,
+                            table->input_hop_most);
         //      The Wayland shim's hints: the bell rings and toplevel icons (counted), and the windows that say a content type, are modal, or have an icon.
         if (table->wl_input_ms)
         {

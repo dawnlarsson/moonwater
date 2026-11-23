@@ -324,6 +324,7 @@ enum
         WINDOW_POINTER_NOT_ALLOWED = 10u, // a control that does nothing now (a disabled button): never the window's grab band either
         WINDOWS_REFUSED_RATE = 1u, WINDOWS_REFUSED_TURN = 2u, WINDOWS_REFUSED_PLACE = 4u, WINDOWS_REFUSED_SIZE = 8u,
         WINDOWS_LOOP_SOURCES = 10,
+        WINDOWS_US_BUCKETS = 20, // a histogram of microseconds: under 1, then 2^(k-1) to 2^k in bucket k, and 2^18 (262 ms) and more in the last
         WINDOW_LIST_VALID = 0u, WINDOW_LIST_NONE, WINDOW_LIST_PUBLISHING, WINDOW_LIST_HEADER, WINDOW_LIST_TORN,
         WINDOW_LIST_ROOM_OTHER, WINDOW_LIST_SIZE, WINDOW_LIST_PITCH, WINDOW_LIST_DAMAGE, WINDOW_LIST_REASONS,
         WINDOWS_COPY_TABLE = 0, WINDOWS_COPY_CARD, WINDOWS_COPY_CPU, WINDOWS_COPY_WHOLE
@@ -429,6 +430,10 @@ struct windows
         unsigned int list_tried[WINDOWS], list_lost[WINDOWS][UI_LOST_COUNT];
         unsigned long wl_input_ms;
         unsigned int wl_inhibitors, wl_idled, wl_bells, wl_icons, wl_shortcuts;
+        /* The input path's times, written by the compositor alone, said by moonwater debug: the reader's lateness (a report's kernel stamp
+           to its direct send, the reader's thread) and the Xwayland hop (a locked report the reader sent to a client, to that client's next
+           cursor hint: Xwayland answers every relative motion with one, so it is the X server's turn-around and the loop's read of it). */
+        unsigned int input_late[WINDOWS_US_BUCKETS], input_hop[WINDOWS_US_BUCKETS], input_late_most, input_hop_most;
         unsigned char wl_content[WINDOWS], wl_modal[WINDOWS], wl_icon[WINDOWS];
         unsigned int issue_seq, issue_lock, issue_count, issue_refused;
         struct windows_issue issues[WINDOWS_ISSUES];
@@ -556,6 +561,14 @@ static void window_wheel_report(const struct windows address_to table, unsigned 
         }
         if (r->gaps)
                 r->least = gap[0], r->median = gap[r->gaps / 2];
+}
+
+// The bucket of WINDOWS_US_BUCKETS a time of us microseconds counts in.
+static inline unsigned int windows_us_bucket(unsigned long long us)
+{
+        unsigned int bucket = us ? 64u - (unsigned int)bits_leading_zeros((positive)us) : 0u;
+
+        return bucket < WINDOWS_US_BUCKETS ? bucket : WINDOWS_US_BUCKETS - 1u;
 }
 
 #define WINDOWS_HEADER ((sizeof(struct windows) + 4095) & ~4095ul)

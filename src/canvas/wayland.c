@@ -90,7 +90,8 @@ enum
 {
         WAYLAND_DO_MINIMIZE = 1, WAYLAND_DO_MAXIMIZE, WAYLAND_DO_UNMAXIMIZE, WAYLAND_DO_FULLSCREEN, WAYLAND_DO_UNFULLSCREEN,
         WAYLAND_DO_MOVE, WAYLAND_DO_RESIZE, WAYLAND_DO_CLOSE, WAYLAND_DO_FOCUS, WAYLAND_DO_CURSOR, WAYLAND_DO_PINCH_WANT,
-        WAYLAND_DO_TEXT, WAYLAND_DO_CARET, WAYLAND_DO_PLACE, WAYLAND_DO_LAYER, WAYLAND_DO_MIN_SIZE, WAYLAND_DO_MAX_SIZE
+        WAYLAND_DO_TEXT, WAYLAND_DO_CARET, WAYLAND_DO_PLACE, WAYLAND_DO_LAYER, WAYLAND_DO_MIN_SIZE, WAYLAND_DO_MAX_SIZE,
+        WAYLAND_DO_HINT // a locked pointer's cursor hint from the client in a (the row holding the pointer locked): its answer to a motion
 };
 
 enum
@@ -5706,6 +5707,7 @@ static int wayland_ext_request(struct wayland_client *c, struct wayland_object *
                 {
                         wayland.quiet++;
                         if (con) con->hinted = 1, con->hint_x = (int)a[0].i, con->hint_y = (int)a[1].i;
+                        if (wayland.hold_row >= 0) wayland_row_do(wayland.hold_row, WAYLAND_DO_HINT, c->slot, 0);
                 }
                 else if (op == WLQ_zwp_locked_pointer_v1_destroy)
                 {

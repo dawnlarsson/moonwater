@@ -4224,6 +4224,13 @@ static void compositor_reader_direct_stat(positive now_us, positive micro)
         if (late > compositor_reader.late_most && late < 1000000000ull)
                 compositor_reader.late_most = late;
         compositor_reader.late += late >= 100;
+        // Its histogram, in the table for moonwater debug (this thread alone writes it): the scalars above are said only at the exit.
+        if (compositor.table && late < 1000000000ull)
+        {
+                compositor.table->input_late[windows_us_bucket(late)]++;
+                if (late > compositor.table->input_late_most)
+                        compositor.table->input_late_most = (unsigned int)late;
+        }
 }
 #endif
 
