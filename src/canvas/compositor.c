@@ -238,6 +238,7 @@ static void gpu_release_import(positive at) { (void)at; }
 static void gpu_release_import_gen(positive at, unsigned int gen) { (void)at, (void)gen; }
 static unsigned int gpu_import_gen(positive at) { (void)at; return 0; }
 static void gpu_forget(const void *addr, positive bytes) { (void)addr, (void)bytes; }
+static void gpu_own(const void *addr, positive bytes, b32 held) { (void)addr, (void)bytes, (void)held; }
 static b32 gpu_idle(void) { return true; }
 static positive gpu_va_bytes(const void *p, positive bytes) { (void)p, (void)bytes; return 0; }
 static positive gpu_va_written(const void *p, positive bytes) { (void)p, (void)bytes; return 0; }

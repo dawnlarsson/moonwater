@@ -5148,13 +5148,13 @@ static b32 build_gpu_kernels(string_address input, string_address output)
         is neither a kernel nor words refuses the build. The checker (test/gpu_kernels.py
         --target intel-gen9) holds the words to Intel's own table.
 */
-static p8 build_gpu_i915_source[1 << 16];
-static p8 build_gpu_i915_made[1 << 17];
+static p8 address_to build_gpu_i915_made; // the output, sized from the source (build_gpu_i915): no kernel set outgrows it
+static positive build_gpu_i915_room;
 
 //      Appends text to the output at at, as much of it as the output holds (a caller refuses an output that comes to the end); the new end.
 static positive build_gpu_i915_put(positive at, string_address text)
 {
-        positive room = sizeof(build_gpu_i915_made) - at, length = string_length(text);
+        positive room = build_gpu_i915_room - at, length = string_length(text);
 
         if (length > room)
                 length = room;
@@ -5193,12 +5193,21 @@ static b32 build_gpu_i915(string_address input, string_address output)
         string_address temporary = null;
         bipolar got;
         bipolar handle;
-        positive at = 0, lines = 0, in_kernel = 0, column = 0;
-        p8 address_to line, address_to stop;
+        positive at = 0, lines = 0, in_kernel = 0, column = 0, bytes;
+        p8 address_to line, address_to stop, address_to build_gpu_i915_source;
+        error_stat status;
+        long mapped;
 
-        refuse_if(!build_is_type(input, S_IFREG), 1, "gpu-i915: no such file: %s\n", input);
-        got = file_slurp(input, build_gpu_i915_source, sizeof(build_gpu_i915_source));
-        refuse_if(got < 0 || (positive)got + 1 >= sizeof(build_gpu_i915_source), 1, "gpu-i915: cannot read %s\n", input);
+        refuse_if(stat(input, address_of status) < 0 || (status.st_mode & S_IFMT) != S_IFREG, 1, "gpu-i915: no such file: %s\n", input);
+        //      The source and the output in one map sized from the source: a word of the source is four bytes at the least ("0x0,") and twelve of
+        //      the output at the most, and a kernel's open and close are under the 4096 more.
+        bytes = (positive)status.st_size;
+        build_gpu_i915_room = 4 * bytes + 4096;
+        mapped = (long)system_call_6(syscall(mmap), 0, bytes + 1 + build_gpu_i915_room, 3, 0x22, (positive)-1, 0);
+        refuse_if(mapped < 0 && mapped > -4096, 1, "gpu-i915: no memory to read %s\n", input);
+        build_gpu_i915_source = (p8 address_to)mapped, build_gpu_i915_made = build_gpu_i915_source + bytes + 1;
+        got = file_slurp(input, build_gpu_i915_source, bytes + 1);
+        refuse_if(got < 0 || (positive)got > bytes, 1, "gpu-i915: cannot read %s\n", input);
         build_gpu_i915_source[got] = 0;
 
         //      The output: each word on its line's column, ten to a line, the arrays closed when the next kernel starts.
@@ -5224,7 +5233,7 @@ static b32 build_gpu_i915(string_address input, string_address output)
                         name += string_span_max(name, (positive)(p - name), string_set_blanks);
                         if (name >= p)
                                 return string_report(log_error, 1, "gpu-i915: a kernel with no name in %s, line %lu\n", input, (unsigned long)lines);
-                        if (at + 256 >= sizeof(build_gpu_i915_made))
+                        if (at + 256 >= build_gpu_i915_room)
                                 return string_report(log_error, 1, "gpu-i915: the arrays for %s are larger than the build's buffer\n", input);
                         if (in_kernel)
                                 at = build_gpu_i915_put(at, "\n};\n");
@@ -5249,7 +5258,7 @@ static b32 build_gpu_i915(string_address input, string_address output)
                                 if (!used || v > 0xffffffffUL || (q < p && *q != ',' && *q != ' ' && *q != '\t' && *q != '\r'))
                                         return string_report(log_error, 1, "gpu-i915: not a word in %s, line %lu\n", input, (unsigned long)lines);
                                 //      the output has a line's room of its own: a larger input is refused, never cut short
-                                if (at + 64 >= sizeof(build_gpu_i915_made))
+                                if (at + 64 >= build_gpu_i915_room)
                                         return string_report(log_error, 1, "gpu-i915: the arrays for %s are larger than the build's buffer\n", input);
                                 if (column == 0)
                                         at = build_gpu_i915_put(at, "    ");
@@ -5277,7 +5286,7 @@ static b32 build_gpu_i915(string_address input, string_address output)
         }
         if (!in_kernel)
                 return string_report(log_error, 1, "gpu-i915: no kernels in %s\n", input);
-        if (at + 64 >= sizeof(build_gpu_i915_made))
+        if (at + 64 >= build_gpu_i915_room)
                 return string_report(log_error, 1, "gpu-i915: the arrays for %s are larger than the build's buffer\n", input);
         at = build_gpu_i915_put(at, "\n};\n");
 

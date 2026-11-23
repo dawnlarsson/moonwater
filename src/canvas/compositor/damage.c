@@ -31,6 +31,7 @@ static void mem_buf_free(void **ptr, unsigned long *cap, unsigned int flags)
         {
                 if (flags & MEM_BUF_GPU_FORGET)
                         gpu_forget((const void *)*ptr, (positive)*cap);
+                gpu_own((const void *)*ptr, (positive)*cap, 0);
                 compositor_call(syscall(munmap), (positive)*ptr, *cap, 0, 0, 0, 0);
         }
         *ptr = 0;
@@ -55,6 +56,7 @@ static void *mem_buf_grow(void **ptr, unsigned long *cap, unsigned long need, un
         mapped = (long)compositor_call(syscall(mmap), 0, bytes, 3, 0x22, (positive)-1, 0);
         if (mapped < 0 && mapped > -4096)
                 return 0;
+        gpu_own((const void *)mapped, (positive)bytes, 1); // the compositor's own private pages: the card may map them written where it has no read-only maps
         if (*ptr)
         {
                 memory_copy((void *)mapped, *ptr, *cap);

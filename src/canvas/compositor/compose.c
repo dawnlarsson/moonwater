@@ -1551,6 +1551,7 @@ static positive compositor_gpu_i915_tiles_va(void)
 
                 if (!gpu_buf_grow(&p, &cap, 2ull << 20, 0))
                         return 0;
+                gpu_own(p, cap, 1); // the compositor's own private pages: mapped written where the chip has no read-only maps (Gen7, Gen7.5, Gen11, Gen12)
                 compositor_gpu_i915_tiles.pixels = (unsigned int *)p, compositor_gpu_i915_tiles.bytes = (unsigned long)cap;
                 compositor_gpu_i915_tiles.va = 0, compositor_gpu_i915_tiles.va_marked = 0;
         }

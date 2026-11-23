@@ -869,6 +869,7 @@ static positive compositor_card_awaited(void)
 
 // A job of the card is a submit and a wait (tens of microseconds and a kernel entry, more than the card spends on a few tens of thousand pixels), so two
 // damage rectangles are one job when the box round them is no more than this many pixels bigger than the two together.
+static void compositor_gpu_present_clocks(void);
 #define COMPOSITOR_GPU_MERGE_SLACK 32768
 static enum compositor_gpu_why compositor_gpu_draw(const struct compositor_frame *frames, unsigned int count)
 {
@@ -1128,6 +1129,7 @@ static enum compositor_gpu_why compositor_gpu_draw(const struct compositor_frame
                 compositor_gpu_state.told = 1, compositor_say("the GPU composes the desktop, frame records", g->count);
         if (!compositor_card.failed)
                 compositor_gpu_state.failures = 0;
+        compositor_gpu_present_clocks();
         return COMPOSITOR_GPU_WHY_DRAWN;
 }
 
@@ -1884,6 +1886,26 @@ static void compositor_gpu_game_clocks(int on)
         compositor_gpu_clocks.game = 0, compositor_gpu_clocks.held = 0;
         if (compositor_gpu_clocks.epoch == gpu_epoch)
                 compositor_gpu_clocks_ask(0u);
+}
+
+// A present the card composed, on a card whose autotuning keeps it at its least clock under a desktop's load (i915, gpu_i915_clocks: a present's
+// job keeps it busy a third of the time, under every threshold it has): its peak (4) held while presents come, let go COMPOSITOR_GPU_CLOCKS_HOLD after
+// the last (compositor_gpu_clocks_keep, as an input's hold is), and not asked again once refused. gpu-clocks-off turns it off with the game's.
+static void compositor_gpu_present_clocks(void)
+{
+        if (gpu_backend != &gpu_i915_row || compositor_gpu_clocks.game_off || compositor_gpu_clocks.refused || !compositor_gpu_awake_wanted())
+                return;
+        if (compositor_gpu_clocks.held && __atomic_load_n(&compositor_gpu_clocks.answered, __ATOMIC_ACQUIRE) == compositor_gpu_clocks.asked &&
+            __atomic_load_n(&compositor_gpu_clocks.error, __ATOMIC_RELAXED))
+        {
+                compositor_gpu_clocks.held = 0, compositor_gpu_clocks.refused = 1;
+                return;
+        }
+        compositor_gpu_clocks.until = clock_monotonic_nanoseconds() + COMPOSITOR_GPU_CLOCKS_HOLD;
+        if (compositor_gpu_clocks.held && compositor_gpu_clocks.epoch == gpu_epoch)
+                return;
+        compositor_gpu_clocks.held = 1, compositor_gpu_clocks.epoch = gpu_epoch;
+        compositor_gpu_clocks_ask(4u);
 }
 
 // A screen Canvas turns, the damage of it (x0, y0, x1, y1 of the screen) turned from the scanout into the screen's own buffer by the GPU (windows_rotate_u32's turn:

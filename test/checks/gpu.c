@@ -142,7 +142,11 @@ static void gpu_glass_rows(void)
 static void gpu_i915_set_rows(void)
 {
         unsigned int kept_family = gpu.family;
-        gpu.family = 900;
+        positive kept_size = gpu.size;
+
+        // The rows run before any card starts (gpu.size 0): the encoders read a job's arguments and records through the card's buffer and refuse
+        // what lies past its size, so the buffer is said to be a megabyte for them.
+        gpu.family = 900, gpu.size = 1u << 20;
         // The cp (op 4), the scene's batch: a picture 13 pixels by 9 rows on a pitch of 16 pixels, its destination at GPU_VA + 0x2000, its bins at
         // GPU_VA + 0x8000 (the table of one cell, then the lists). The walker's groups are the blocks of a row (4) and the rows (9); the CURBE holds the
         // width, the cells a row and the lists' offset (8 times the cells); the bins are binding table entry 1. A pitch that is not a multiple of 16
@@ -323,67 +327,106 @@ static void gpu_i915_set_rows(void)
                 }
         }
         {
-                // The scene (op 6): two records (a fill and a tone) on a 256 by 32 picture at a 256-pixel pitch, the records at GPU_VA + 3072 (64-byte aligned).
-                static unsigned char buffer[8192] __attribute__((aligned(4096)));
+                // The scene (op 6): records on a 256 by 32 picture at a 256-pixel pitch, the records at GPU_VA + 512 KiB, the side's bins at GPU_VA + 8192
+                // (slot 0's part: the packed records a 64-byte row each, the images' surfaces at its top), the walker a thread an 8 by 8 tile.
+                static unsigned char buffer[(1u << 20)] __attribute__((aligned(4096)));
                 struct gpu_job job;
                 struct gpu_args address_to a = (struct gpu_args address_to)(buffer + 2048);
                 unsigned int words[64];
                 unsigned int address_to state = (unsigned int address_to)(buffer + 2560);
-                unsigned int address_to recs = (unsigned int address_to)(buffer + 3072);
-                unsigned int n;
-
+                unsigned int address_to recs = (unsigned int address_to)(buffer + (512u << 10));
+                unsigned int address_to pack = (unsigned int address_to)(buffer + 8192);
+                unsigned int address_to surf = (unsigned int address_to)(buffer + 8192 + GPU_I915_SCENE_SURFACES);
+                unsigned int n, slot = gpu_slot;
                 positive gpu_size = gpu.size;
 
                 memset(buffer, 0, sizeof buffer);
-                gpu.size = sizeof buffer; // the records are read through the buffer: the encoder checks they lie in gpu.size
+                gpu.size = sizeof buffer, gpu_slot = 0; // the records are read and packed through the buffer: the encoder checks they lie in gpu.size
                 recs[0] = 0, recs[1] = 0, recs[2] = 0, recs[3] = 256, recs[4] = 32, recs[5] = 0x11223344u, recs[6] = recs[7] = 0;
-                recs[8] = 1, recs[9] = 3, recs[10] = 4, recs[11] = 20, recs[12] = 9, recs[13] = 0x80402010u, recs[14] = recs[15] = 0;
+                recs[8] = 1, recs[9] = (unsigned int)-3, recs[10] = 4, recs[11] = 20, recs[12] = 40, recs[13] = 0x80402010u, recs[14] = recs[15] = 0;
                 a->d = GPU_VA + 0x2000, a->dp = 256, a->sp = 256, a->gp = 32, a->w = 256, a->rows = 8, a->op = 6, a->x0 = 0, a->y0 = 0, a->count = 2;
-                a->ops = GPU_VA + 3072;
+                a->ops = GPU_VA + (512u << 10), a->g = GPU_VA + 8192;
                 job.arguments = GPU_VA + 2048, job.state = GPU_VA + 2560, job.state_at = (unsigned int address_to)(buffer + 2560);
-                job.code = GPU_VA + 3584;
+                job.code = GPU_VA + 6656;
                 n = gpu_i915_gen9_batch(&job, words, 64);
-                check("gpu i915 scene: two records make the 64 dwords of the walker, over 64 blocks by 32 rows",
-                      n == 64 && words[0] == 0x69040302u && words[29] == 0x70010002u && words[32] == 2560 + 192 && words[44] == 64u && words[47] == 32u);
-                check("gpu i915 scene: the CURBE holds the count, then the first pixel's x and y (0 and 0)",
-                      state[48] == 2u && state[49] == 0u && state[50] == 0u);
-                check("gpu i915 scene: entry 1 is the records (two a 64-byte row, so one row: height 0, width and pitch 63), based on the first record",
-                      state[1] == 2560 + 256 && state[(256 + 8) / 4] == 63u && state[(256 + 12) / 4] == 63u && state[(256 + 32) / 4] == (unsigned int)(GPU_VA + 3072));
-                a->count = 3;
-                check("gpu i915 scene: three records are two rows (height 1)", gpu_i915_gen9_batch(&job, words, 64) == 64 && state[(256 + 8) / 4] == (63u | (1u << 16)));
-                a->count = 2, recs[8] = 2;
-                check("gpu i915 scene: a record that is not a fill or a tone (kind 2, a box) is refused (0 words)", gpu_i915_gen9_batch(&job, words, 64) == 0);
-                recs[8] = 1, a->ops = GPU_VA + 3072 + 8;
+                check("gpu i915 scene: two records make the 64 dwords of the walker, a thread an 8 by 8 tile: 32 tiles a row, 4 rows of them",
+                      n == 64 && words[0] == 0x69040302u && words[29] == 0x70010002u && words[32] == 2560 + 192 && words[44] == 32u && words[47] == 4u);
+                check("gpu i915 scene: the CURBE holds the records kept, then the damage (0, 0 to 256, 32)",
+                      state[48] == 2u && state[49] == 0u && state[50] == 0u && state[51] == 256u && state[52] == 32u);
+                check("gpu i915 scene: the binding table is at 512 of the slot's state (entry 0 the damage at 64, entry 1 the records at 256), the descriptor names it",
+                      state[128] == 2560 + 64 && state[129] == 2560 + 256 && state[(128 + 16) / 4] == 2560 + GPU_I915_SCENE_TABLE);
+                check("gpu i915 scene: the records are packed a 64-byte row each at the side's bins (two rows: height 1, width and pitch 63)",
+                      state[(256 + 8) / 4] == (63u | (1u << 16)) && state[(256 + 12) / 4] == 63u && state[(256 + 32) / 4] == (unsigned int)(GPU_VA + 8192));
+                check("gpu i915 scene: each record is clipped to the damage (the tone at -3, 4 to 20, 40 is kept as 0, 4 to 20, 32)",
+                      pack[0] == 0 && pack[3] == 256 && pack[5] == 0x11223344u && pack[16] == 1 && pack[17] == 0 && pack[18] == 4 && pack[19] == 20 && pack[20] == 32 &&
+                          pack[21] == 0x80402010u);
+                recs[0] = 1, recs[8] = 0, recs[9] = 0, recs[10] = 0, recs[11] = 256, recs[12] = 32;
+                check("gpu i915 scene: a fill over the whole damage hides the records before it: one is kept",
+                      gpu_i915_gen9_batch(&job, words, 64) == 64 && state[48] == 1u && pack[0] == 0 && state[(256 + 8) / 4] == 63u);
+                recs[0] = 0, recs[8] = 1, recs[9] = 3, recs[10] = 4, recs[11] = 20, recs[12] = 9;
+                recs[8] = 2;
+                check("gpu i915 scene: a record that is not a fill, a tone or a picture (kind 2, a box) is refused (0 words)", gpu_i915_gen9_batch(&job, words, 64) == 0);
+                recs[8] = 1, a->ops = GPU_VA + (512u << 10) + 8;
                 check("gpu i915 scene: records not 64-byte aligned are refused (0 words)", gpu_i915_gen9_batch(&job, words, 64) == 0);
-                a->ops = GPU_VA + 3072, a->count = 0;
+                a->ops = GPU_VA + (512u << 10), a->count = 0;
                 check("gpu i915 scene: no records is refused (0 words)", gpu_i915_gen9_batch(&job, words, 64) == 0);
-                a->count = 16385;
-                check("gpu i915 scene: more records than the surface's height holds is refused (0 words)", gpu_i915_gen9_batch(&job, words, 64) == 0);
-                a->w = 7;
-                check("gpu i915 scene: a rectangle 7 pixels wide (not a multiple of 4) is refused (0 words): its last block would be dropped",
+                a->count = 2, a->g = GPU_VA + 8192 + 8;
+                check("gpu i915 scene: bins not 64-byte aligned are refused (0 words)", gpu_i915_gen9_batch(&job, words, 64) == 0);
+                a->g = GPU_VA + sizeof buffer - 4096;
+                check("gpu i915 scene: a slot's part of the bins past the buffer is refused (0 words), not written", gpu_i915_gen9_batch(&job, words, 64) == 0);
+                a->g = GPU_VA + 8192, a->w = 7;
+                check("gpu i915 scene: a rectangle 7 pixels wide (not a multiple of 4) is refused (0 words): its last tile could not be written whole",
                       gpu_i915_gen9_batch(&job, words, 64) == 0);
-                a->w = 256;
-                a->count = 300;
+                a->w = 256, a->ops = GPU_VA + sizeof buffer - 64, a->count = 16;
                 check("gpu i915 scene: records that run past the GPU buffer are refused (0 words), not read", gpu_i915_gen9_batch(&job, words, 64) == 0);
-                // Image records (kind 4 copy, 11 alpha-over, optional 0x80 R/B swap): BTI 2 surface state at offset 320 and CURBE dword 3 img_base_lo.
+                a->ops = GPU_VA + (512u << 10);
+                // Pictures (kind 4 copy, 11 alpha-over, optional 0x80 R/B swap): a surface each at the top of the slot's part, its entry in word 7.
                 {
-                        positive img_va = GPU_VA + 0x4014ull;
+                        positive img_va = GPU_VA + 0x4014ull, surface_at = 8192 + GPU_I915_SCENE_SURFACES;
 
                         a->count = 3;
                         recs[16] = 4u | 0x80u, recs[17] = 4, recs[18] = 2, recs[19] = 68, recs[20] = 18;
                         recs[21] = (unsigned int)img_va, recs[22] = (unsigned int)(img_va >> 32), recs[23] = 128;
-                        check("gpu i915 scene: image copy (4 | 0x80) binds BTI 2 (32-byte aligned base) and sets CURBE dword 3",
-                              gpu_i915_gen9_batch(&job, words, 64) == 64 && state[2] == 2560 + 320 &&
-                                  state[51] == (unsigned int)(img_va & ~31ull) && state[(320 + 32) / 4] == (unsigned int)(img_va & ~31ull));
-                        recs[16] = 11u;
-                        check("gpu i915 scene: image alpha-over (11) is accepted with BTI 2", gpu_i915_gen9_batch(&job, words, 64) == 64);
-                        recs[21] = (unsigned int)(img_va + 1); // unaligned (not multiple of 4)
-                        check("gpu i915 scene: an image record with a non-4-byte-aligned VA is refused (0 words)", gpu_i915_gen9_batch(&job, words, 64) == 0);
-                        recs[21] = (unsigned int)img_va, recs[23] = 0; // zero pitch
-                        check("gpu i915 scene: an image record with zero pitch is refused (0 words)", gpu_i915_gen9_batch(&job, words, 64) == 0);
+                        check("gpu i915 scene: a picture (4 | 0x80) is entry 2, its surface at the 64-byte line of its first pixel, as wide as its part, at its pitch",
+                              gpu_i915_gen9_batch(&job, words, 64) == 64 && state[130] == (unsigned int)surface_at &&
+                                  surf[32 / 4] == (unsigned int)(img_va & ~63ull) && surf[8 / 4] == ((20u + 4u * 64u - 1u) | (15u << 16)) && surf[12 / 4] == 4u * 128u - 1u);
+                        check("gpu i915 scene: the picture's record keeps its kind and rectangle and says its x bias (20 - 4 * 4), row bias (-2) and entry (2)",
+                              pack[32] == (4u | 0x80u) && pack[33] == 4 && pack[36] == 18 && pack[37] == 20u - 16u && pack[38] == (unsigned int)-2 && pack[39] == 2u);
+                        recs[17] = (unsigned int)-8, recs[19] = 40;
+                        check("gpu i915 scene: a picture left of the damage starts at its first pixel inside it (8 pixels in: 32 bytes further on the same line)",
+                              gpu_i915_gen9_batch(&job, words, 64) == 64 && pack[33] == 0 && surf[32 / 4] == (unsigned int)(img_va & ~63ull) &&
+                                  pack[37] == 20u + 32u && surf[8 / 4] == ((52u + 4u * 40u - 1u) | (15u << 16)));
+                        recs[17] = 4, recs[19] = 68, recs[16] = 11u;
+                        check("gpu i915 scene: a picture laid over (11) is taken the same way", gpu_i915_gen9_batch(&job, words, 64) == 64 && pack[39] == 2u);
+                        recs[21] = (unsigned int)(img_va + 1);
+                        check("gpu i915 scene: a picture not 4-byte aligned is refused (0 words)", gpu_i915_gen9_batch(&job, words, 64) == 0);
+                        recs[21] = (unsigned int)img_va, recs[23] = 0;
+                        check("gpu i915 scene: a picture of no pitch is refused (0 words)", gpu_i915_gen9_batch(&job, words, 64) == 0);
+                        recs[23] = 128;
+                        {
+                                unsigned int picture[8];
+
+                                memory_copy(picture, recs + 16, 32);
+                                for (unsigned int i = 0; i < GPU_I915_SCENE_IMAGES + 1; i++)
+                                        memory_copy(recs + 8 * i, picture, 32);
+                        }
+                        a->count = GPU_I915_SCENE_IMAGES;
+                        check("gpu i915 scene: as many pictures as the binding table's entries reach are taken, the last entry 239",
+                              gpu_i915_gen9_batch(&job, words, 64) == 64 && pack[16 * (GPU_I915_SCENE_IMAGES - 1) + 7] == 239u);
+                        a->count = GPU_I915_SCENE_IMAGES + 1;
+                        check("gpu i915 scene: one picture more than the entries reach is refused (0 words): the processor draws the scene",
+                              gpu_i915_gen9_batch(&job, words, 64) == 0);
+                        a->count = 3, recs[0] = 0, recs[8] = 1;
+                        memory_zero(recs + 16, 32);
+                        recs[16] = 4, recs[17] = 4, recs[18] = 2, recs[19] = 68, recs[20] = 18;
+                        recs[21] = (unsigned int)img_va, recs[22] = (unsigned int)(img_va >> 32), recs[23] = 128;
+                        gpu.family = 750;
+                        check("gpu i915 scene: on Gen7.5 a picture's surface is the 32-byte one, its base in its second word",
+                              gpu_i915_gen9_batch(&job, words, 64) == 64 && surf[4 / 4] == (unsigned int)(img_va & ~63ull) && words[0] == 0x69040002u);
+                        gpu.family = 900;
                 }
                 a->count = 2, a->op = 6;
-                gpu.size = gpu_size;
+                gpu.size = gpu_size, gpu_slot = slot;
         }
         {
                 // The scale (op 7): 37 pixels of a 48-pixel source's rows, 23 rows, into a destination 48 pixels a row (whole 64-byte rows), the tables at
@@ -448,7 +491,7 @@ static void gpu_i915_set_rows(void)
 #endif
                 check("gpu i915 scale: the last batch is 64 dwords", n == 64);
         }
-        gpu.family = kept_family;
+        gpu.family = kept_family, gpu.size = kept_size;
 }
 
 b32 main(void)
@@ -647,6 +690,59 @@ b32 main(void)
                         run = began < run ? began : run;
                 }
                 string_format(log, "  gpu: 8K scene of %p ops: GPU with the binning %p us, the run alone %p us, CPU %p us\n", (positive)M, total / 1000, run / 1000, host / 1000);
+        }
+
+        // 5. i915: a buffer made on the render node and imported as the display's buffers are (gpu_import: floating, its surfaces relocated, on Gen7 and
+        // Gen7.5; pinned on Gen8 and later), drawn into by a scene of a fill, a tone and a picture laid over, twice: the first job the kernel places
+        // and relocates, the second runs on the place presumed from the first's answer. Its pixels are read through its own map.
+        if (gpu_backend == &gpu_i915_row)
+        {
+                enum { IW = 64, IH = 16 };
+                struct gpu_i915_create made = {(positive)IW * IH * 4, 0, 0};
+                struct gpu_i915_mmap map = {0, 0, 0, 0, 0};
+                unsigned int address_to ops = (unsigned int address_to)((p8 address_to)gpu.at + ops_at), address_to src_px = (unsigned int address_to)((p8 address_to)gpu.at + src_at);
+                unsigned int address_to px = 0;
+                positive va = 0, bad = 0;
+                long at = -1;
+                static const unsigned int records[3][8] = {{0, 0, 0, IW, IH, 0xff102030u, 0, 0}, {1, 3, 2, 50, 13, 0x60201008u, 0, 0}, {11, 9, 3, 41, 15, 0, 0, IW}};
+
+                if (gpu_call(3u, 0x1b, 16, &made) == 0 && (map.handle = made.handle, map.flags = gpu_i915.llc ? 2 : 1, gpu_call(3u, 0x24, 32, &map) == 0))
+                        at = (long)system_call_6(syscall(mmap), 0, (positive)IW * IH * 4, 3, 1, (positive)gpu.fd, map.offset);
+                if (at > 0 || at < -4095)
+                        px = (unsigned int address_to)at, va = gpu_import(gpu.fd, made.handle, (positive)IW * IH * 4);
+                check("gpu i915: a buffer of the render node is imported (floating on Gen7 and Gen7.5)", va != 0 &&
+                      (gpu.family >= 800 || gpu_i915.bound[made.handle].floating));
+                for (int round = 0; va && round < 2; round++)
+                {
+                        for (unsigned int i = 0; i < IW * IH; i++)
+                                src_px[i] = gpu_random() | (i & 1 ? 0 : 0xff000000u), px[i] = 0;
+                        for (unsigned int k = 0; k < 3; k++)
+                                memory_copy(ops + 8 * k, records[k], 32);
+                        ops[16 + 5] = (unsigned int)(GPU_VA + src_at), ops[16 + 6] = (unsigned int)((GPU_VA + src_at) >> 32);
+                        gpu_import_handed(va);
+                        check("gpu i915: a scene into the imported buffer finishes", gpu_scene(ops_at, 3, bins_at, va, IW, IW, IH, 0, 0, IW, IH));
+                        bad = 0;
+                        for (unsigned int y = 0; y < IH; y++)
+                                for (unsigned int x = 0; x < IW; x++)
+                                {
+                                        unsigned int c = 0xff102030u;
+
+                                        if (x >= 3 && x < 50 && y >= 2 && y < 13)
+                                                c = gpu_test_overv(c, 0x60201008u);
+                                        if (x >= 9 && x < 41 && y >= 3 && y < 15)
+                                                c = gpu_test_overv(c, src_px[(y - 3) * IW + (x - 9)]);
+                                        checks++;
+                                        if (px[y * IW + x] != c && (++failures, ++bad) < 4)
+                                                string_format(log, "  FAIL gpu i915 import round %p: pixel %p,%p is %p, wanted %p\n", (positive)round, (positive)x, (positive)y,
+                                                              (positive)px[y * IW + x], (positive)c);
+                                }
+                        string_format(log, "  gpu i915 import round %p: %p of %p pixels as wanted%s\n", (positive)round, (positive)(IW * IH - bad), (positive)(IW * IH),
+                                      gpu.family < 800 ? (string_address) " (floating, relocated)" : (string_address) "");
+                }
+                if (va)
+                        gpu_unimport(va, GPU_GONE_UNIMPORT);
+                if (px)
+                        system_call_2(syscall(munmap), (positive)px, (positive)IW * IH * 4);
         }
         return test_report(null);
 }
@@ -1462,11 +1558,14 @@ static b32 gpu_route_rows(void)
         they were. Everything the rows change of gpu.c's and the compositor's state is put back.
 */
 static unsigned int gpu_i915_test_words;
+static positive gpu_i915_test_float; // a surface base the test batch names at 3072 of the card's buffer (0 none): the floating rows
 static unsigned int gpu_i915_test_batch(const struct gpu_job *job, unsigned int address_to words, unsigned int room)
 {
         (void)job;
         if (room < 1 || !gpu_i915_test_words)
                 return 0;
+        if (gpu_i915_test_float)
+                gpu_i915_surface((p8 address_to)gpu.at, 3072, gpu_i915_test_float, 64, 1, 64);
         words[0] = 0x05000000u; // MI_BATCH_BUFFER_END (one word: the call pads it to a quadword)
         return gpu_i915_test_words;
 }
@@ -1522,20 +1621,20 @@ static void gpu_i915_rows(void)
                         all &= gpu_i915_identify(GPU_KERNEL_I915, &family, &device) == 0 && family == ids[i][1] && device == ids[i][0];
                 }
                 check("gpu i915: CHIPSET_ID's device is the chip's family (Ivy Bridge 700 through Meteor Lake 1270; Sandy Bridge 0)", all);
-                gpu_kernel.i915_chip = 0x9a49;
-                check("gpu i915: Gen7-Gen11 have registered kernel sets; Gen12+ not yet",
-                      gpu_i915_set(700) && gpu_i915_set(750) && gpu_i915_set(800) && gpu_i915_set(900) && gpu_i915_set(1100) && !gpu_i915_set(1200));
+                gpu_kernel.i915_chip = 0x7d55;
+                check("gpu i915: Gen7 to Gen11 have registered kernel sets; Gen12 and later not yet",
+                      gpu_i915_set(700) && gpu_i915_set(750) && gpu_i915_set(800) && gpu_i915_set(900) && gpu_i915_set(1100) && !gpu_i915_set(1200) && !gpu_i915_set(1270));
         }
-        // A start on the i915 node: the driver is known, the chip (Gen12 0x9a49) has no kernels yet, the start stops at the chip's step with nothing of a card made, and it is settled.
+        // A start on the i915 node: the driver is known, the chip (Meteor Lake 0x7d55) has no kernels yet, the start stops at the chip's step with nothing of a card made, and it is settled.
         identified = gpu_kernel.i915_identifies;
         check("gpu i915: a start on an i915 node stops at the chip's step, with the driver and the chip kept",
-              !gpu_start(1 << 20) && gpu_req.first == GPU_REQ_FAMILY && (gpu_req.mask & (1u << GPU_REQ_DRIVER)) && gpu_req.family == 1200 && gpu_req.device == 0x9a49 &&
+              !gpu_start(1 << 20) && gpu_req.first == GPU_REQ_FAMILY && (gpu_req.mask & (1u << GPU_REQ_DRIVER)) && gpu_req.family == 1270 && gpu_req.device == 0x7d55 &&
                   string_equals((string_address)gpu_req.name, (string_address) "i915"));
         check("gpu i915: and nothing of a card was made (no buffer, no context), the descriptor closed", gpu_kernel.i915_creates == 0 && gpu_kernel.i915_contexts == 0 && gpu.fd == -1 &&
               gpu_kernel.i915_identifies == identified + 1);
         check("gpu i915: a chip with no kernel set is settled, and the nodes it saw are kept", gpu_req.settled && gpu_req.nodes != 0 && gpu_req.nodes == gpu_nodes_seen());
         check("gpu i915: the notice's words name the driver and the chip",
-              gpu_req_words(words, sizeof(words)) && gpu_i915_has(words, "i915 Gen12 Tiger Lake to Raptor Lake") && gpu_i915_has(words, "0x9a49"));
+              gpu_req_words(words, sizeof(words)) && gpu_i915_has(words, "i915 Xe-LPG Meteor Lake") && gpu_i915_has(words, "0x7d55"));
         nodes = gpu_req.nodes;
         string_copy_bounded((string_address)gpu_kernel.i915, (string_address) "virtio_gpu", sizeof(gpu_kernel.i915));
         check("gpu i915: a driver loaded in the node's place is other nodes", gpu_nodes_seen() != nodes);
@@ -1667,6 +1766,13 @@ static void gpu_i915_rows(void)
                 calls = gpu_kernel.i915_userptrs, gpu.family = 750;
                 check("gpu i915: a map to read on a chip without read-only entries (Haswell) is refused at once, EPERM, and the kernel not asked",
                       gpu_i915_user(0x10000000ull, 4096, GPU_USER_READ, &h) == 1 && h == 0 && gpu_kernel.i915_userptrs == calls);
+                gpu_own((const void *)0x10000000ull, 8192, 1);
+                check("gpu i915: a map to read of the compositor's own private pages (gpu_own) there is a written userptr, its range looked at now",
+                      gpu_i915_user(0x10000000ull, 4096, GPU_USER_READ, &h) == 0 && h && gpu_kernel.i915_userptr_flags == 2 && gpu_kernel.i915_userptrs == calls + 1);
+                gpu_own((const void *)0x10000000ull, 8192, 0);
+                check("gpu i915: and once they are let go of (gpu_own, not held), a map to read of them is refused again and the kernel not asked",
+                      gpu_i915_user(0x10000000ull, 4096, GPU_USER_READ, &h) == 1 && gpu_kernel.i915_userptrs == calls + 1);
+                calls = gpu_kernel.i915_userptrs;
                 gpu.family = 1200;
                 check("gpu i915: and on Gen12", gpu_i915_user(0x10000000ull, 4096, GPU_USER_READ, &h) == 1 && gpu_kernel.i915_userptrs == calls);
                 gpu.family = 900, gpu_kernel.i915_userptr_error = 19, gpu_i915.read_only_refused = 0; // another chip: its own card's state
@@ -1711,6 +1817,31 @@ static void gpu_i915_rows(void)
                 check("gpu i915: a batch past its slot's room is refused as our own (EINVAL), not sent", gpu_i915_submit(&job, bos, 2, &sequence) == 22 &&
                       gpu_kernel.i915_execs == execs + 1);
                 gpu_i915_test_words = 1;
+                // Gen7.5 (aliasing PPGTT, the display's address space): an import floats. It is listed unpinned where the kernel last put it, and the
+                // surface the batch names inside it is written for that place and relocated on the card's own buffer's entry.
+                {
+                        unsigned int imported[1] = {43}, address_to kept_imported = gpu.imported, kept_imports = gpu.imports;
+                        const positive at = GPU_VA_MAPS + 16384;
+
+                        gpu.family = 750, gpu.imported = imported, gpu.imports = 1;
+                        gpu_i915_bind(43, at, 8192, true);
+                        gpu_i915.bound[43].floating = 1, gpu_i915.bound[43].presumed = 0x2000000ull;
+                        gpu_i915_test_float = at + 64, bos[1] = 43;
+                        check("gpu i915: on Gen7.5 a surface inside a floating import is written for the import's presumed place, one relocation of it listed",
+                              gpu_i915_submit(&job, bos, 2, &sequence) == 0 && *(unsigned int address_to)(buffer + 3076) == 0x2000040u && gpu_i915.relocs_count == 1 &&
+                                  gpu_i915.relocs[0].target == 43 && gpu_i915.relocs[0].delta == 64 && gpu_i915.relocs[0].offset == 3076 &&
+                                  gpu_i915.relocs[0].presumed == 0x2000000ull && gpu_i915.relocs[0].read == 2 && gpu_i915.relocs[0].write == 2);
+                        memory_copy(objects, gpu_kernel.i915_objects, 3 * sizeof(objects[0]));
+                        check("gpu i915: the floating import goes to the kernel unpinned at its presumed place, written; the card's own buffer carries the relocation",
+                              objects[1].handle == 43 && objects[1].offset == 0x2000000ull && objects[1].flags == GPU_I915_WRITTEN &&
+                                  objects[2].handle == handle && objects[2].relocation_count == 1 && objects[2].relocs_ptr == (p64)gpu_i915.relocs &&
+                                  (objects[2].flags & GPU_I915_PINNED));
+                        gpu_i915.bound[43].floating = 0;
+                        check("gpu i915: a pinned range names its own address and is not relocated", gpu_i915_submit(&job, bos, 2, &sequence) == 0 &&
+                                                                                                  *(unsigned int address_to)(buffer + 3076) == (unsigned int)(at + 64) && gpu_i915.relocs_count == 0);
+                        gpu_i915_unbind(43, at, 8192), gpu_i915_test_float = 0, bos[1] = 41;
+                        gpu.family = 900, gpu.imported = kept_imported, gpu.imports = kept_imports;
+                }
         }
         // The waits: GEM_WAIT on the card's own buffer, what is left to the deadline (0 a look), ETIME still running; done, the context's lost batches looked at.
         {

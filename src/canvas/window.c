@@ -185,7 +185,7 @@ static const string_address windows_gpu_req_names[WINDOWS_GPU_REQS] = {"none", "
 static const string_address windows_gpu_req_fixes[WINDOWS_GPU_REQS] = {
     "", "no render node of the card opened: check its mode and owner, and that the driver is loaded (the render group, or mode 0666, lets a user open it)",
     "the card's driver has no GPU path: Canvas reads amdgpu and i915 cards (virtio_gpu, nouveau and xe stay on the processor)",
-    "the chip has no GPU kernels yet (so far AMD RDNA2 only: families 144, 146, 149, 151; none for i915 yet): the processor draws everything",
+    "the chip has no GPU kernels yet (AMD RDNA2 to RDNA4; Intel Gen7 to Gen9 and Gen11): the processor draws everything",
     "the kernel would not map a page for the card: rebuild it with CONFIG_DRM_AMDGPU_USERPTR=y (error 19 is that kernel: it selects HMM_MIRROR and MMU_NOTIFIER)",
     "the card would not give a buffer, its VM map or a compute context: the amdgpu compute ring or its firmware is not up (the kernel lines say which)",
     "the compute ring did not finish the self-test job: firmware, clocks or a ring reset (the kernel lines say which)",
