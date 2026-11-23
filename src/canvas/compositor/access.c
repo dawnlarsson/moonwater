@@ -111,6 +111,8 @@ static struct
         int repeat;                     // the arrow held (an action), 0 for none
         positive repeat_at;             // and when it is next repeated
         b32 hand;                       // a pad was the last thing a hand moved (the pointer is the dynamic one)
+        b32 keyed;                      // the last thing the pad did was move the focus (its cross, the arrows), not the pointer: its
+                                        // bottom button is Enter on the focused control (the kit's), not a click where the pointer is
         b32 yields;                     // the pad is the focused program's
         int asked_row;                  // the row the program question was last asked for, its process, and when
         unsigned int asked_pid;
@@ -157,6 +159,7 @@ static void compositor_access_note(unsigned int minor, b32 game)
 // A mouse, a touchpad, a pen or a touch moved the pointer: it is no longer the pad's.
 static void compositor_access_let_go(void)
 {
+        compositor_access.keyed = 0;
         if (compositor_access.hand)
                 compositor_access.hand = 0, compositor_osk_sync();
 }
@@ -454,6 +457,7 @@ static void compositor_access_lane_noted(int dx, int dy)
 {
         if (compositor_access.yields)
                 return;
+        compositor_access.keyed = 0;
         compositor_access_take_hand();
         compositor_access_move(dx, dy);
 }
@@ -922,8 +926,16 @@ static void compositor_access_report(struct compositor_access_pad *pad, positive
                         continue;
                 // A press is the action of the moment (the keyboard's when it is up); its let go is whatever it was pressed as.
                 if (held >> button & 1)
-                        action = compositor.osk_shown && compositor_access_typing[button] ? compositor_access_typing[button] : pad->map[button],
+                {
+                        action = compositor.osk_shown && compositor_access_typing[button] ? compositor_access_typing[button] : pad->map[button];
+                        // The cross moved the focus last: the primary button presses the focused control (Enter), as a Steam Deck's A does;
+                        // after the stick moved the pointer it clicks where the pointer is.
+                        if (action == ACCESS_PRIMARY && compositor_access.keyed)
+                                action = ACCESS_ENTER;
+                        if (action >= ACCESS_KEY_UP && action <= ACCESS_KEY_RIGHT)
+                                compositor_access.keyed = 1;
                         pad->pressed_as[button] = (unsigned char)action;
+                }
                 else
                         action = pad->pressed_as[button], pad->pressed_as[button] = 0;
                 if (action)
@@ -1086,6 +1098,7 @@ static void compositor_access_tick(positive now)
                 dx = (int)(compositor_access.left_x / 65536), dy = (int)(compositor_access.left_y / 65536);
                 compositor_access.left_x -= (long long)dx * 65536, compositor_access.left_y -= (long long)dy * 65536;
                 compositor_access_take_hand();
+                compositor_access.keyed = 0;
                 compositor_access_move(dx, dy);
         }
         else if (!share)
