@@ -22737,6 +22737,7 @@ struct ui_row
         b32 remove;                        // a remove button at the row's end, and Delete while the keys are on it (ui_list.removed)
         unsigned int cell_check;           // under columns: the cells (bit k, column k, 1 on) that are a check the person presses in place (ui_list.toggled)
         unsigned int cell_on;              // which of those checks are on
+        unsigned int cell_dim;             // which of those are dimmed: shown as they stand, and pressed still (the app says why it does not turn)
         int badge;                         // UI_ROW_BADGE_* at the row's right (left of a switch): the worst issue its option has, 0 none
         const char address_to badge_words; // what that badge says
         b32 sub;                           // a line under its option (an issue, its detail, a status): indented, in the quiet ink
@@ -24411,7 +24412,7 @@ static fn ui_list_cells(struct ui address_to ui, const struct ui_list address_to
                         b32 over = l->hover == id && ui_list_check_at(ui, l, id, l->pointer_x) == k;
                         if (side <= ui_columns_end(c, k))
                                 ui_cell_check_draw(ui, ui_mirror(bx, side, left, span), y + (height - side) / 2, side, (row->cell_on >> k & 1u) != 0, over, held,
-                                                   row->dim, ink, quiet);
+                                                   row->dim || (row->cell_dim >> k & 1u), ink, quiet);
                         continue;
                 }
                 if (!words || !words[0] || w <= 0)
