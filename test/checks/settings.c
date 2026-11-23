@@ -1891,6 +1891,48 @@ static fn check_settings(string_address regular, string_address bold)
         check("settings: and a change to a row waiting replaces its change", settings.queued == 2 &&
                   string_equals((string_address)settings.queue[0].value, (string_address) "off"));
         settings.queued = 0;
+        //      A switch pressed is where it goes, at work (the kit's working switch), until its row is read back: a second press takes it
+        //      back, the read after the change reads its row first, and read back it is what was read and at rest.
+        {
+                static const char said[] = "[Moonwater] bluetooth on\n";
+                struct ui_row turned;
+                b32 going, back, first, rest;
+
+                memory_zero(settings.turning, sizeof(settings.turning)), memory_zero(settings.unread, sizeof(settings.unread));
+                settings.state[bluetooth] = SETTINGS_READ;
+                string_copy_bounded((string_address)settings.value[bluetooth], (string_address) "off", SETTINGS_VALUE);
+                settings_activate(bluetooth, 1);
+                memory_zero(&turned, sizeof(turned)), settings_describe(bluetooth, &turned);
+                going = settings.queued == 1 && string_equals((string_address)settings.queue[0].value, (string_address) "on") && turned.kind == UI_ROW_SWITCH &&
+                        turned.on && turned.working;
+                settings_activate(bluetooth, 1);
+                memory_zero(&turned, sizeof(turned)), settings_describe(bluetooth, &turned);
+                back = settings.queued == 1 && string_equals((string_address)settings.queue[0].value, (string_address) "off") && !turned.on && turned.working;
+                settings_activate(bluetooth, 1);
+                settings.queued = 0; // its change ran; the read of every row follows: here the first row and the switch's, unread
+                settings_unread_set(0, 1), settings_unread_set((positive)bluetooth, 1);
+                first = settings_unread_first() == (positive)bluetooth;
+                memory_copy(settings_large->said, said, sizeof(said) - 1), settings.runner.length = sizeof(said) - 1;
+                settings.job = bluetooth, settings.job_sets = false;
+                settings_complete(false, 0);
+                memory_zero(&turned, sizeof(turned)), settings_describe(bluetooth, &turned);
+                rest = !settings_turning_is(bluetooth) && string_equals((string_address)settings.value[bluetooth], (string_address) "on") && turned.on &&
+                       !turned.working;
+                check("settings: a switch pressed is where it goes and at work while its verb waits, and a second press takes it back", going && back);
+                check("settings: its row is read back first after the change, and then it is what was read, at rest", first && rest);
+                memory_zero(settings.turning, sizeof(settings.turning)), memory_zero(settings.unread, sizeof(settings.unread));
+                settings.runner.length = 0, settings.job = clock;
+        }
+        //      The window's least width lays every group out in turn: the keys stay on their row and the rows where they were scrolled (each
+        //      group's rebuild put the keys on its first row, so a value read back, which asks for the least again, lost the person's row).
+        {
+                int kept = settings_row_named("Mount kept disks"), focus, scrolled;
+                settings_show(kept);
+                focus = settings.list.focus, scrolled = settings.list.scroll.scroll;
+                settings.least_key = 0, settings_least();
+                check("settings: the least width's walk of every group leaves the keys on their row, the rows where they were and the group shown",
+                      focus == kept && settings.list.focus == focus && settings.list.scroll.scroll == scrolled && settings.page.chosen == settings_group_of(kept));
+        }
         /*
                 A deliberate change (registry.c's deliberate: the SSH server on, root let in, a key added) is made by a key or a press a
                 device plugged into the machine sent, never by one a virtual device sent (WINDOW_EVENT_VIRTUAL: uinput, uhid, the on-screen
@@ -2848,6 +2890,23 @@ static fn check_settings(string_address regular, string_address bold)
                         check("ui: a switch on is the accent across its pill, one off the controls' rest colour",
                               (pixels[24 * 320 + 84] | 0xff000000u) == (ui_role(UI_PRIMARY) | 0xff000000u) &&
                                   (pixels[24 * 320 + 234] | 0xff000000u) == (ui_role(UI_CONTROL_OFF) | 0xff000000u));
+                        // At work (its change asked and not answered): still on, its fill quiet, and the spinner in the pill's middle.
+                        {
+                                static struct ui_control busy;
+                                unsigned int centre;
+                                b32 spun = false;
+
+                                memory_zero(&busy, sizeof(busy));
+                                busy.kind = UI_SWITCH, busy.label = "", busy.on = 1, busy.working = 1, busy.x = 10, busy.w = 100, busy.h = 48;
+                                ui_clear(&ui);
+                                ui_control_draw(&ui, &busy);
+                                centre = pixels[24 * 320 + 10 + 100 - UI_SWITCH_W / 2] | 0xff000000u; // the pill's middle, inside the spinner's ring
+                                for (int y = 24 - 8; y <= 24 + 8; y++)
+                                        for (int x = 10 + 100 - UI_SWITCH_W / 2 - 8; x <= 10 + 100 - UI_SWITCH_W / 2 + 8; x++)
+                                                spun |= (pixels[y * 320 + x] | 0xff000000u) != centre;
+                                check("ui: a switch at work is on, its fill quieter than the accent, with the spinner in its pill",
+                                      centre != (ui_role(UI_PRIMARY) | 0xff000000u) && centre != (ui_role(UI_CONTROL_OFF) | 0xff000000u) && spun);
+                        }
                 }
 
                 ui_clear(&ui);
@@ -4146,6 +4205,7 @@ static fn settings_frames_scenario(string_address name, b32 switches_only, b32 c
                                 int row = settings.queue[0].row;
 
                                 string_copy_bounded((string_address)settings.value[row], (string_address)settings.queue[0].value, SETTINGS_VALUE);
+                                settings_turning(row, false, false); // the answer is the verb run and its row read back (settings_complete's read)
                                 settings.queued--;
                                 memory_copy(settings.queue, settings.queue + 1, settings.queued * sizeof(settings.queue[0]));
                                 settings_say((string_address) "done");
@@ -4251,6 +4311,7 @@ static fn settings_frames_play(string_address name, int group, const struct sett
                                 int changed = settings.queue[0].row;
 
                                 string_copy_bounded((string_address)settings.value[changed], (string_address)settings.queue[0].value, SETTINGS_VALUE);
+                                settings_turning(changed, false, false); // the answer is the verb run and its row read back (settings_complete's read)
                                 settings_frames.asked++;
                                 settings.queued--;
                                 memory_copy(settings.queue, settings.queue + 1, settings.queued * sizeof(settings.queue[0]));

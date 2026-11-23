@@ -366,6 +366,8 @@ static struct
         unsigned char state[SETTINGS_ROWS];
         struct settings_generic generic[SETTINGS_GENERATED];
         positive generic_count, pool_used, feed_due, battery_menu_count, unread[SETTINGS_UNREAD_WORDS], queue_room, queued;
+        // The switches turned and not read back yet (settings_turning): a bit a row, as unread is, and where each goes (its turning_on bit).
+        positive turning[SETTINGS_UNREAD_WORDS], turning_on[SETTINGS_UNREAD_WORDS];
         unsigned int last_text, least_key, ground;
         b32 truncated, filter_open, focused, hand, job_sets, told;
         int help, feed_list, width, height, least_w, least_h, job;
@@ -1541,17 +1543,25 @@ static int settings_least(void)
                 return 1;
         settings_least_busy = true;
         chosen = settings.page.chosen, column = settings.page.column_on, shown = settings.page.title;
-        for (int group = 0; group < settings_groups(); group++)
+        // The row the keys are on and where the rows are scrolled to are the person's: the groups laid out in turn moved both (each
+        // rebuild put the keys on its group's first row, and each reveal scrolled to it), so they are kept and put back.
         {
-                int w;
-                settings.page.chosen = group;
-                settings_refilter();
-                settings.page.column_on = true, settings.page.title = language_of("Settings");
-                w = ui_page_least(ui, &settings.page, &settings.list, settings.page.title);
-                most = w > most ? w : most;
+                int focus = settings.list.focus;
+                struct ui_scroll scrolled = settings.list.scroll;
+                for (int group = 0; group < settings_groups(); group++)
+                {
+                        int w;
+                        settings.page.chosen = group;
+                        settings_refilter();
+                        settings.page.column_on = true, settings.page.title = language_of("Settings");
+                        w = ui_page_least(ui, &settings.page, &settings.list, settings.page.title);
+                        most = w > most ? w : most;
+                }
+                settings.page.chosen = chosen, settings.page.column_on = column, settings.page.title = shown;
+                settings.list.focus = focus;
+                settings_rebuild();
+                settings.list.scroll = scrolled;
         }
-        settings.page.chosen = chosen, settings.page.column_on = column, settings.page.title = shown;
-        settings_refilter();
         settings_least_busy = false;
         settings.least_w = most;
         settings.least_key = settings_least_key_of(ui); // the key after the layout above: the rebuilds moved the list's revision
@@ -2155,6 +2165,49 @@ static b32 settings_same_verb(const struct settings_row address_to a, const stru
 static void settings_unread_set(positive row, int on) { positive b = (positive)1 << (row % 64); if (on) settings.unread[row / 64] |= b; else settings.unread[row / 64] &= ~b; }
 static int settings_unread_is(positive row) { return (int)((settings.unread[row / 64] >> (row % 64)) & 1); }
 static int settings_unread_any(void) { for (positive w = 0; w < SETTINGS_UNREAD_WORDS; w++) if (settings.unread[w]) return 1; return 0; }
+
+/*
+        A switch turned is shown where it goes, at work (the kit's ui_row.working: its fill quiet and a spinner in it), from the press until
+        its row is read back after the verb: a change is followed by a read of every row (settings_ask_all), from the first, and a switch's
+        own row was read a hundred and more rows on, a second or more after the press, so the switch stood as it was and a second press,
+        which saw nothing done, turned it back. Its row is read first now (settings_next_job), and until then it says what was asked.
+*/
+// It turns while its change waits or runs, or its row waits to be read back: a turn whose change went any other way (dropped, or
+// its read never asked) is over, so no switch is left at work.
+static b32 settings_turning_is(int row)
+{
+        positive at = 0;
+        if (row < 0 || row >= SETTINGS_ANY || !((settings.turning[row / 64] >> (row % 64)) & 1))
+                return false;
+        while (at < settings.queued && settings.queue[at].row != row)
+                at++;
+        return at < settings.queued || (settings.runner.child > 0 && settings.job == row && settings.job_sets) || settings_unread_is((positive)row);
+}
+static fn settings_turning(int row, b32 asked, b32 on)
+{
+        positive bit = (positive)1 << (row % 64);
+        if (row < 0 || row >= SETTINGS_ANY)
+                return;
+        settings.turning[row / 64] = asked ? settings.turning[row / 64] | bit : settings.turning[row / 64] & ~bit;
+        settings.turning_on[row / 64] = on ? settings.turning_on[row / 64] | bit : settings.turning_on[row / 64] & ~bit;
+}
+// The row read next: a switch turned first, before the rows of the read that follows every change; else the first unread (one is).
+static positive settings_unread_first(void)
+{
+        positive first = 0;
+        while (first < SETTINGS_ROWS && !(settings_unread_is(first) && settings_turning_is((int)first)))
+                first++;
+        if (first == SETTINGS_ROWS)
+                for (first = 0; first < SETTINGS_ROWS && !settings_unread_is(first);)
+                        first++;
+        return first;
+}
+
+// What a switch row says: where it goes while it turns, else what was read.
+static const char address_to settings_switch_word(int row)
+{
+        return !settings_turning_is(row) ? settings.value[row] : (settings.turning_on[row / 64] >> (row % 64)) & 1 ? "on" : "off";
+}
 static b32 settings_action_row(int row) { return row >= 0 && row < SETTINGS_ANY && settings_rows[row].kind == SETTINGS_ACTION; }
 
 static positive settings_not_understood(void)
@@ -2184,8 +2237,7 @@ static fn settings_next_job(void)
                         settings.job = SETTINGS_JOB_STARTUP, settings.job_sets = true;
                 else if (settings_unread_any())
                 {
-                        positive first = 0;
-                        while (!settings_unread_is(first)) first++;
+                        positive first = settings_unread_first();
                         settings.job = (int)first, settings.job_sets = false, settings_unread_set(first, 0);
                 }
                 else if (settings.help == 1)
@@ -2229,6 +2281,7 @@ static fn settings_next_job(void)
                 settings_wipe(settings_large->split, sizeof(settings_large->split));
                 if (settings.job_sets) settings_say((string_address)(count || settings.job < SETTINGS_ANY ? WORDS(settings_cannot_run) : WORDS(settings_too_many)));
                 else if (settings.job >= 0) settings.state[settings.job] = SETTINGS_FAILED;
+                settings_turning(settings.job, false, false); // a switch whose verb could not run is what it was
                 ui_page_redraw(&settings.page);
         }
 }
@@ -2288,6 +2341,9 @@ static fn settings_change(int row, const char address_to value)
                 settings.queue[at].row = row, settings.queued++;
         }
         string_copy_bounded((string_address)settings.queue[at].value, (string_address)value, sizeof(settings.queue[at].value));
+        // A switch is where it was asked to go, at work, until its row is read back (settings_turning_is).
+        if (row >= 0 && row < SETTINGS_ANY && settings_rows[row].kind == SETTINGS_SWITCH)
+                settings_turning(row, true, string_equals((string_address)value, (string_address) "on")), ui_list_damage(&settings.ui, &settings.list, row);
         settings_say((string_address) "..."), settings_next_job();
         if (settings_action_row(row)) ui_page_redraw(&settings.page);
 }
@@ -3389,10 +3445,14 @@ static fn settings_complete(b32 killed, positive status)
                         unsigned char was = settings.state[o];
                         if (((int)o != row && !settings_unread_is(o)) || !settings_same_verb(&settings_rows[row], &settings_rows[o]))
                                 continue;
+                        // Read back, a switch is done turning, unless the person turned it again and that change waits.
+                        b32 turned = settings_turning_is((int)o);
                         settings_unread_set(o, 0);
+                        if (settings_slot((int)o) == settings.queued)
+                                settings_turning((int)o, false, false);
                         string_copy_bounded((string_address)before, (string_address)settings.value[o], sizeof(before));
                         settings.state[o] = killed ? SETTINGS_FAILED : (unsigned char)settings_read(&settings_rows[o], settings_large->said, settings.runner.length, settings.value[o], SETTINGS_VALUE, wait_status_code(status) != 0);
-                        if (settings.state[o] != was || !string_equals((string_address)before, (string_address)settings.value[o]))
+                        if (turned || settings.state[o] != was || !string_equals((string_address)before, (string_address)settings.value[o]))
                                 settings_reading_changed((int)o);
                 }
         settings_next_job();
@@ -4118,8 +4178,9 @@ static fn settings_row_activate(int row, int offset, int way)
                 return;
         }
         }
-        settings_next(w, settings.value[row], way, next, sizeof(next));
-        if (next[0] && !string_equals((string_address)next, (string_address)settings.value[row]))
+        // A switch turns from what it shows: where it goes while it turns (a second press takes the first back), else what was read.
+        settings_next(w, w->kind == SETTINGS_SWITCH ? settings_switch_word(row) : settings.value[row], way, next, sizeof(next));
+        if (next[0] && !string_equals((string_address)next, (string_address)(w->kind == SETTINGS_SWITCH ? settings_switch_word(row) : settings.value[row])))
                 settings_change(row, next);
 }
 
@@ -4628,7 +4689,8 @@ static fn settings_describe(int id, struct ui_row address_to row)
         const struct settings_row address_to w = dom == SETTINGS_DOM_ROW ? &settings_rows[offset] : null;
         const struct settings_item address_to item = dom == SETTINGS_DOM_LIST ? settings_item(id) : null;
         unsigned int state = w ? settings.state[offset] : SETTINGS_READ;
-        const char address_to shown = w ? settings.value[offset] : "", address_to header;
+        // A switch turned says where it goes until it is read back (settings_switch_word).
+        const char address_to shown = w ? (w->kind == SETTINGS_SWITCH ? settings_switch_word(offset) : settings.value[offset]) : "", address_to header;
 
         if (dom < 0)
                 return;
@@ -4671,7 +4733,9 @@ static fn settings_describe(int id, struct ui_row address_to row)
                 return;
         switch (w->kind)
         {
-        case SETTINGS_SWITCH: row->kind = UI_ROW_SWITCH, row->on = string_equals((string_address)shown, (string_address) "on"); break;
+        case SETTINGS_SWITCH:
+                row->kind = UI_ROW_SWITCH, row->on = string_equals((string_address)shown, (string_address) "on"), row->working = settings_turning_is(id);
+                break;
         case SETTINGS_STEP:   row->kind = UI_ROW_STEP; break;
         case SETTINGS_CHOICE:
                 if (settings_is_tabs(id) && setting_place(w->choices, (string_address)shown) >= 0)

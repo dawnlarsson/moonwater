@@ -10913,6 +10913,7 @@ struct ui_control
 {
         unsigned char kind, variant;
         b32 on, disabled;                  // checked; a radio group's or tabs' chosen item is at
+        b32 working;                       // a switch whose change is under way: on is where it goes, its fill quiet and a spinner in it (ui_toggle_draw)
         int at;
         int x, y, w, h;                    // logical pixels
         const char address_to label;
@@ -11399,6 +11400,7 @@ static inline INLINE CONST int ui_moon_cover(long inside)
 #define UI_SWITCH_W 52 // a switch's pill across, logical pixels: what a row of a list keeps for it at its end
 
 // A switch or a checkbox (the kit draws them alike):
+static fn ui_spinner_draw(struct ui address_to ui, struct ui_control address_to c);
 static fn ui_toggle_draw(struct ui address_to ui, struct ui_control address_to c)
 {
         UI_CALL();
@@ -11458,7 +11460,17 @@ static fn ui_toggle_draw(struct ui address_to ui, struct ui_control address_to c
         if (rest_w > 0)
                 ui_kit_fill(ui, &rest, c->disabled ? ui_mix(ui_role(UI_ON_SURFACE), 12, 0) : ui_role(UI_CONTROL_OFF), null);
         if (fill_w > 0)
-                ui_kit_fill(ui, &fill, c->disabled ? ui_mix(ui_role(UI_ON_SURFACE), 38, 0) : ui_role(UI_PRIMARY), null);
+                ui_kit_fill(ui, &fill, c->disabled ? ui_mix(ui_role(UI_ON_SURFACE), 38, 0) : c->working ? ui_mix(ui_role(UI_PRIMARY), 40, 0) : ui_role(UI_PRIMARY), null);
+        // A switch at work (its change asked and not answered yet): the pill already where it goes, its fill quiet, and the kit's spinner
+        // turning in its middle until the app says the change is done (ui_row.working).
+        if (c->working && c->kind == UI_SWITCH)
+        {
+                struct ui_control spin;
+                memory_zero(&spin, sizeof(spin));
+                spin.kind = UI_SPINNER, spin.w = 14;
+                spin.x = (ui_rtl() ? c->x : c->x + c->w - UI_SWITCH_W) + UI_SWITCH_W / 2 - spin.w / 2, spin.y = c->y + c->h / 2 - spin.w / 2;
+                ui_spinner_draw(ui, &spin);
+        }
         // Label stretched 0.6 of the domino about its trailing edge, clipped before the pill.
         width = ui_kit_measure(ui, (string_address)c->label, UI_BODY_LARGE);
         {
@@ -22707,6 +22719,7 @@ struct ui_row
         int swatch;                        // a share row's square before its label: UI_STRIP_* + 1, the role whose colour it is (0: none)
         b32 tall;                          // a drive: its line, its heading and its strip under it, as tall as they are (ui_row_drive_height)
         b32 on;                            // a switch's
+        b32 working;                       // a switch's change asked and not answered: on is where it goes, drawn so with a spinner (ui_toggle_draw)
         b32 dim;                           // the label and the value quiet: a note, a value that is not there
         b32 mark;                          // a dot before the label: the one in use
         int check;                         // a mark before the label: UI_ROW_CHECK_TICK or UI_ROW_CHECK_RADIO, drawn when on
@@ -24917,7 +24930,7 @@ static fn ui_list_row(struct ui address_to ui, struct ui_list address_to l, int 
                 own->disabled = row.kind == UI_ROW_FIELD || (row.kind == UI_ROW_BUTTON && row.dim);
                 if (kind == UI_SWITCH)
                 {
-                        own->on = row.on, own->w = UI_SWITCH_W, own->h = 48, ui_row_control(ui, own, p->toggle);
+                        own->on = row.on, own->working = row.working, own->w = UI_SWITCH_W, own->h = 48, ui_row_control(ui, own, p->toggle);
                         if (cols && cols->count > 0)
                         {
                                 int last = cols->count - 1, end_x = cols->at[last] + cols->wide[last] - ui_dev(ui, UI_INSET) - (row.remove ? ui_dev(ui, UI_ROW_REMOVE_W + 6) : 0);
