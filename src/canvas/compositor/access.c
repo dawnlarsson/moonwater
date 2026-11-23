@@ -52,7 +52,7 @@ enum
 {
         ACCESS_NONE, ACCESS_PRIMARY, ACCESS_SECONDARY, ACCESS_MIDDLE, ACCESS_BACK, ACCESS_GO_HOME, ACCESS_OVERVIEW,
         ACCESS_PREVIOUS, ACCESS_NEXT, ACCESS_KEY_UP, ACCESS_KEY_DOWN, ACCESS_KEY_LEFT, ACCESS_KEY_RIGHT, ACCESS_FIND,
-        ACCESS_KEYBOARD, ACCESS_BACKSPACE, ACCESS_ENTER, ACCESS_ACTIONS
+        ACCESS_KEYBOARD, ACCESS_BACKSPACE, ACCESS_ENTER, ACCESS_MENU, ACCESS_ACTIONS
 };
 
 /*
@@ -82,7 +82,7 @@ static const unsigned char compositor_access_typing[ACCESS_BUTTONS] = {
 // The key an action is, for the ones that are keys (0 for the rest).
 static const unsigned char compositor_access_keys[ACCESS_ACTIONS] = {
         [ACCESS_BACK] = CK_KEY_ESC, [ACCESS_KEY_UP] = CK_KEY_UP, [ACCESS_KEY_DOWN] = CK_KEY_DOWN, [ACCESS_KEY_LEFT] = 105,
-        [ACCESS_KEY_RIGHT] = 106, [ACCESS_BACKSPACE] = CK_KEY_BACKSPACE, [ACCESS_ENTER] = 28,
+        [ACCESS_KEY_RIGHT] = 106, [ACCESS_BACKSPACE] = CK_KEY_BACKSPACE, [ACCESS_ENTER] = 28, [ACCESS_MENU] = 127, // KEY_COMPOSE: the menu key
 };
 
 struct compositor_access_pad
@@ -478,7 +478,7 @@ static const char *const compositor_access_button_names[ACCESS_BUTTONS] = {
     "south", "east", "north", "west", "l1", "r1", "l2", "r2", "select", "start", "home", "l3", "r3", "up", "down", "left", "right"};
 static const char *const compositor_access_action_names[ACCESS_ACTIONS] = {
     "none", "primary", "secondary", "middle", "back", "home", "overview", "previous", "next", "up", "down", "left", "right", "find",
-    "keyboard", "backspace", "enter"};
+    "keyboard", "backspace", "enter", "menu"};
 
 // The next word of a line (bytes up to a blank), its length; *at moves past it and the blanks after.
 static unsigned int compositor_access_word(const char *line, unsigned int length, unsigned int *at, const char **word)
@@ -865,9 +865,9 @@ static void compositor_access_act(unsigned int action, int down, unsigned int at
         case ACCESS_SECONDARY: compositor_press(COMPOSITOR_BTN_RIGHT, down); break;
         case ACCESS_MIDDLE: compositor_press(COMPOSITOR_BTN_LEFT + 2, down); break;
         case ACCESS_BACK: case ACCESS_KEY_UP: case ACCESS_KEY_DOWN: case ACCESS_KEY_LEFT: case ACCESS_KEY_RIGHT:
-        case ACCESS_BACKSPACE: case ACCESS_ENTER:
+        case ACCESS_BACKSPACE: case ACCESS_ENTER: case ACCESS_MENU:
                 compositor_key(at, compositor_access_keys[action], down, now);
-                if (action != ACCESS_BACK && action != ACCESS_ENTER)
+                if (action != ACCESS_BACK && action != ACCESS_ENTER && action != ACCESS_MENU)
                         compositor_access.repeat = down ? (int)action : 0, compositor_access.repeat_at = now + COMPOSITOR_ACCESS_DELAY_NS;
                 break;
         case ACCESS_GO_HOME: if (down) compositor_logo_act(); break;
@@ -932,6 +932,9 @@ static void compositor_access_report(struct compositor_access_pad *pad, positive
                         // after the stick moved the pointer it clicks where the pointer is.
                         if (action == ACCESS_PRIMARY && compositor_access.keyed)
                                 action = ACCESS_ENTER;
+                        // And the secondary button opens the focused control's menu (the menu key, which the kit takes as Shift+F10).
+                        else if (action == ACCESS_SECONDARY && compositor_access.keyed)
+                                action = ACCESS_MENU;
                         if (action >= ACCESS_KEY_UP && action <= ACCESS_KEY_RIGHT)
                                 compositor_access.keyed = 1;
                         pad->pressed_as[button] = (unsigned char)action;
