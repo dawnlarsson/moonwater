@@ -263,6 +263,8 @@ static fn kernel_settings(void)
               sysfs && (sysfs->flags & MS_RDONLY) != 0);
         check("Bowl binds /proc/sys and /proc/sysrq-trigger read-only",
               string_equals(bowl_kernel_settings[0], "/proc/sys") && trigger);
+        check("but for /proc/sys/user, each user namespace's own, where bubblewrap's --disable-userns sets its new one's limit",
+              string_equals(BOWL_KERNEL_SETTINGS_OWN, "user"));
         if (!sysfs)
                 return;
 

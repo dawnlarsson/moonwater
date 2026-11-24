@@ -1072,25 +1072,66 @@ static string_address bowl_kernel_settings[] = {
     "/proc/sys", "/proc/sysrq-trigger", "/proc/irq", "/proc/bus", "/proc/fs",
     null};
 
+/*
+        /proc/sys is sealed a directory at a time, each of its directories but user, which is each user namespace's own:
+        user.max_user_namespaces and the other limits there are looked up for the namespace of whoever looks, so the one a
+        program sees in a namespace it has made is another entry than the machine's. bubblewrap's --disable-userns sets the
+        limit of the namespace it has just made, through the /proc of the view it was started in, and flatpak runs it so as it
+        installs an app whose files are fetched from its maker (apply_extra: Slack, Spotify): with /proc/sys sealed whole,
+        flatpak install of those failed in the package manager's view ("cannot open /proc/sys/user/max_user_namespaces:
+        Read-only file system"), and a bind of the machine's entry alone did not reach the new namespace's. What this leaves a
+        package script, root of the view, is the machine's own limits of namespaces and inotify; no distribution's sysctl.d
+        sets them. The directories are read from /proc/sys itself, so one a newer kernel adds is sealed too.
+*/
+#define BOWL_KERNEL_SETTINGS_OWN "user"
+
+static bipolar bowl_kernel_setting_seal(string_address path)
+{
+        bipolar failed = system_mount(path, path, 0, MS_BIND, 0);
+
+        if (!failed)
+                failed = system_mount(0, path, 0, MS_BIND | MS_REMOUNT | MS_RDONLY | MS_NOSUID | MS_NOEXEC | MS_NODEV, 0);
+        return failed;
+}
+
 static bipolar bowl_kernel_settings_seal(void)
 {
-        for (positive i = 0; bowl_kernel_settings[i]; i++)
+        file_walk walk;
+        struct linux_dirent64 address_to entry;
+        p8 path[BOWL_PATH_LIMIT];
+        positive sealed = 0;
+        bipolar failed = 0;
+
+        if (!file_walk_open(address_of walk, AT_FDCWD, bowl_kernel_settings[0]))
+                return bowl_fail(bowl_kernel_settings[0], -ENOENT);
+        while (!failed && (entry = file_walk_next(address_of walk)))
         {
-                string_address path = bowl_kernel_settings[i];
-                bipolar failed = system_mount(path, path, 0, MS_BIND, 0);
-
-                if (failed == -ENOENT && i)
+                if (entry->d_type != 4 /* DT_DIR */ || entry->d_name[0] == '.' || string_equals(entry->d_name, BOWL_KERNEL_SETTINGS_OWN))
                         continue;
+                if (!path_join(path, sizeof(path), bowl_kernel_settings[0], entry->d_name))
+                        continue;
+                failed = bowl_kernel_setting_seal(path);
+                if (failed)
+                        bowl_fail(path, failed);
+                sealed++;
+        }
+        file_walk_close(address_of walk);
+        if (failed)
+                return failed;
+        // A /proc/sys with no directory to seal is not the kernel's: nothing of it is left writable for being unknown.
+        if (!sealed && (failed = bowl_kernel_setting_seal(bowl_kernel_settings[0])))
+                return bowl_fail(bowl_kernel_settings[0], failed), failed;
 
-                if (!failed)
-                        failed = system_mount(0, path, 0,
-                                              MS_BIND | MS_REMOUNT | MS_RDONLY |
-                                                  MS_NOSUID | MS_NOEXEC | MS_NODEV,
-                                              0);
+        for (positive i = 1; bowl_kernel_settings[i]; i++)
+        {
+                string_address target = bowl_kernel_settings[i];
 
+                failed = bowl_kernel_setting_seal(target);
+                if (failed == -ENOENT)
+                        continue;
                 if (failed)
                 {
-                        bowl_fail(path, failed);
+                        bowl_fail(target, failed);
                         return failed;
                 }
         }
