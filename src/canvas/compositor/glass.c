@@ -547,7 +547,8 @@ static int compositor_fullscreen_up(void)
 }
 
 // The taskbar's place, asked on every pass of the loop before a frame is drawn, with the clock: away while `taskbar fullscreen on`
-// and a window is fullscreen (unless the Scenes overview is open). A move damages the band where it was and where it goes.
+// and a window is fullscreen, unless the Scenes overview is open or the launcher is up (the logo key over a fullscreen window brings
+// the band back with the launcher over it, and puts both away again). A move damages the band where it was and where it goes.
 static void compositor_scenes_tick(positive now); // scenes.c
 static int compositor_scenes_shown(void);
 
@@ -557,7 +558,7 @@ static void compositor_taskbar_slide(positive now)
 
         compositor_glass_bg_flush(now);
         compositor_scenes_tick(now);
-        if (taskbar_slide_now(compositor_fullscreen_up() && !compositor_scenes_shown(), now, compositor_glides(), &before))
+        if (taskbar_slide_now(compositor_fullscreen_up() && !compositor_scenes_shown() && compositor_launcher_row() < 0, now, compositor_glides(), &before))
                 compositor_taskbar_damage(before);
 }
 

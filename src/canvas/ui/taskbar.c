@@ -740,6 +740,12 @@ static int taskbar_anchor(const struct taskbar_view *view, int which, int *x, in
                 *x = band->x, *w = band->w;
         else
                 *y = band->y, *h = band->h;
+        // Where the slot is with the band shown: a band slid away over a fullscreen window has its slots off the screen, and the
+        // launcher the logo key opens there (the band comes back while it is up, compositor_taskbar_slide) would be anchored off it.
+        if (taskbar_vertical(view->position))
+                *x -= taskbar_off(view, taskbar.shift);
+        else
+                *y -= taskbar_off(view, taskbar.shift);
         return 1;
 }
 
