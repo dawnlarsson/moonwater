@@ -110,7 +110,7 @@ struct settings_drive
 struct settings_item
 {
         char label[SETTINGS_ITEM_LABEL], security[12], state[SETTINGS_STATE], port[SETTINGS_PORT_ROOM], size[SETTINGS_SIZE_TEXT], access[48], detail[SETTINGS_ITEM_LABEL];
-        char link_addr[64], link_rtt[24], link_traffic[48], link_group[32];
+        char link_addr[64], link_rtt[24], link_up[24], link_down[24], link_group[32];
         signed short dbm;
         unsigned char bars, flags, kind, where, segment_count, grants, link_state;
         unsigned short segment_more;
@@ -452,10 +452,14 @@ static const struct { const char address_to word; unsigned int label, note; } se
     {"log",   LANGUAGE_settings_link_log,   LANGUAGE_settings_link_log_about},
     {"input", LANGUAGE_settings_link_input, LANGUAGE_settings_link_input_about},
 };
-// A machine linked is a row of columns: its name, its address, latency, traffic and group, and from SETTINGS_LINK_GRANT_COLUMN a check of each
-// grant in the order above. No fold: all it says is in its row, and its state is its dot (online) and its words (an offline one dim).
-#define SETTINGS_LINK_ON_COLUMN 5 // the machine switched on or off (moonwater link on|off NAME), a check before its grants
-#define SETTINGS_LINK_GRANT_COLUMN 6
+// A machine linked is a row of columns: its name, its address, latency, the packets sent (Up) and received (Down) and its group, and from
+// SETTINGS_LINK_GRANT_COLUMN a check of each grant in the order above. No fold: all it says is in its row, and its state is its dot
+// (online) and its words (an offline one dim).
+#define SETTINGS_LINK_UP_COLUMN 3
+#define SETTINGS_LINK_DOWN_COLUMN 4
+#define SETTINGS_LINK_GROUP_COLUMN 5
+#define SETTINGS_LINK_ON_COLUMN 6 // the machine switched on or off (moonwater link on|off NAME), a check before its grants
+#define SETTINGS_LINK_GRANT_COLUMN 7
 #define SETTINGS_LINK_COLUMNS (SETTINGS_LINK_GRANT_COLUMN + SETTINGS_LINK_GRANTS)
 _Static_assert(SETTINGS_LINK_COLUMNS <= UI_COLUMNS_MOST, "a machine linked's columns are the kit's at most");
 // What a linked machine's state says, by the item's link_state (0 says none): the words of the language taken, said when the row is drawn.
@@ -3005,13 +3009,15 @@ static fn settings_feed_links(void)
                                         if (s1 > s0)
                                                 settings_slice(it->link_rtt, sizeof(it->link_rtt), c.s + s0, s1 - s0);
                                 }
-                                if ((pos = settings_find_last(c.s, c.n, "\xe2\x86\x91")) < c.n)
-                                {
-                                        positive s0 = pos, s1 = s0;
-                                        while (s1 < c.n && !(c.s[s1] == ' ' && s1 + 1 < c.n && c.s[s1 + 1] == ' ')) s1++;
-                                        if (s1 > s0)
-                                                settings_slice(it->link_traffic, sizeof(it->link_traffic), c.s + s0, s1 - s0);
-                                }
+                                // The packets sent and received (open now, an up arrow and N, a down arrow and M, pkts): each its column's number.
+                                for (int way = 0; way < 2; way++)
+                                        if ((pos = settings_find_last(c.s, c.n, way ? "\xe2\x86\x93" : "\xe2\x86\x91")) < c.n)
+                                        {
+                                                positive s0 = pos + 3, s1 = s0;
+                                                while (s1 < c.n && c.s[s1] >= '0' && c.s[s1] <= '9') s1++;
+                                                if (s1 > s0)
+                                                        settings_slice(way ? it->link_down : it->link_up, sizeof(it->link_up), c.s + s0, s1 - s0);
+                                        }
                                 settings_cat_sep(it->detail, sizeof(it->detail), string_length((string_address)it->detail), "; ", piece);
                         }
                 }
@@ -3154,9 +3160,9 @@ static struct ui_columns address_to settings_columns_for(int list)
             {4, 3, {0, 84, 84, 72},   {LANGUAGE_files_column_name, LANGUAGE_settings_column_status, LANGUAGE_settings_column_security, LANGUAGE_settings_column_signal}},
             {2, 1, {0, 100, 0, 0},    {LANGUAGE_files_column_name, LANGUAGE_settings_column_status, 0, 0}},
             {4, 3, {0, 108, 84, 128}, {LANGUAGE_files_column_name, 0, LANGUAGE_settings_column_status, LANGUAGE_settings_column_access}},
-            {SETTINGS_LINK_COLUMNS, 0, {0, 150, 72, 100, 72, 52, 52, 52, 52, 52, 52},
-             {LANGUAGE_files_column_name, LANGUAGE_settings_link_address, LANGUAGE_settings_link_latency, LANGUAGE_settings_link_traffic,
-              LANGUAGE_settings_link_group, LANGUAGE_settings_column_on, LANGUAGE_settings_column_files, LANGUAGE_settings_column_run, LANGUAGE_settings_column_shell, LANGUAGE_settings_column_log,
+            {SETTINGS_LINK_COLUMNS, 0, {0, 150, 72, 64, 64, 72, 52, 52, 52, 52, 52, 52},
+             {LANGUAGE_files_column_name, LANGUAGE_settings_link_address, LANGUAGE_settings_link_latency, LANGUAGE_settings_link_up,
+              LANGUAGE_settings_link_down, LANGUAGE_settings_link_group, LANGUAGE_settings_column_on, LANGUAGE_settings_column_files, LANGUAGE_settings_column_run, LANGUAGE_settings_column_shell, LANGUAGE_settings_column_log,
               LANGUAGE_settings_column_input}},
             // The startup list's: a program (or a command), its command, and a check that starts it; its order is the person's (no sort).
             {SETTINGS_STARTUP_COLUMNS, 0, {0, 220, 52}, {LANGUAGE_settings_startup_program, LANGUAGE_settings_startup_command, LANGUAGE_settings_column_on}},
@@ -3178,15 +3184,28 @@ static struct ui_columns address_to settings_columns_for(int list)
         return c;
 }
 
+// Two numbers said as words (12, 3.4 ms): the longer run of leading digits is the larger, then digit by digit; none is the least.
+static int settings_number_compare(const char address_to a, const char address_to b)
+{
+        positive da = 0, db = 0;
+        while (a[da] >= '0' && a[da] <= '9') da++;
+        while (b[db] >= '0' && b[db] <= '9') db++;
+        if (da != db)
+                return da < db ? -1 : 1;
+        return (int)string_compare((string_address)a, (string_address)b);
+}
+
 static int settings_list_compare(int list, int col, const struct settings_item address_to a, const struct settings_item address_to b)
 {
         int cmp = 0;
-        // Waterlink's machines: by their address, latency or traffic as words, or by whether a grant's check is on.
+        // Waterlink's machines: by their address and group as words, their latency and packets as numbers, or by whether a check is on.
         if (list == 3 && col == SETTINGS_LINK_ON_COLUMN)
                 cmp = (a->link_state == SETTINGS_LINK_SWITCHED_OFF) - (b->link_state == SETTINGS_LINK_SWITCHED_OFF);
-        else if (list == 3 && col >= 1 && col < SETTINGS_LINK_ON_COLUMN)
-                cmp = string_compare((string_address)(col == 1 ? a->link_addr : col == 2 ? a->link_rtt : col == 3 ? a->link_traffic : a->link_group),
-                                     (string_address)(col == 1 ? b->link_addr : col == 2 ? b->link_rtt : col == 3 ? b->link_traffic : b->link_group));
+        else if (list == 3 && (col == 1 || col == SETTINGS_LINK_GROUP_COLUMN))
+                cmp = string_compare((string_address)(col == 1 ? a->link_addr : a->link_group), (string_address)(col == 1 ? b->link_addr : b->link_group));
+        else if (list == 3 && col >= 2 && col <= SETTINGS_LINK_DOWN_COLUMN)
+                cmp = settings_number_compare(col == 2 ? a->link_rtt : col == SETTINGS_LINK_UP_COLUMN ? a->link_up : a->link_down,
+                                              col == 2 ? b->link_rtt : col == SETTINGS_LINK_UP_COLUMN ? b->link_up : b->link_down);
         else if (list == 3 && col >= SETTINGS_LINK_GRANT_COLUMN && col < SETTINGS_LINK_COLUMNS)
                 cmp = (int)(b->grants >> (col - SETTINGS_LINK_GRANT_COLUMN) & 1u) - (int)(a->grants >> (col - SETTINGS_LINK_GRANT_COLUMN) & 1u);
         else
@@ -3283,6 +3302,7 @@ static int settings_feed_of_group(void)
         return -1;
 }
 
+static fn settings_feed_rows(void); // below
 static fn settings_feed_read(b32 killed, b32 failed)
 {
         static fn (*const parsers[])(void) = {[SETTINGS_FEED_WIFI] = settings_feed_wifi, [SETTINGS_FEED_DEVICES] = settings_feed_devices, [SETTINGS_FEED_HARDWARE] = settings_feed_hardware,
@@ -3292,9 +3312,19 @@ static fn settings_feed_read(b32 killed, b32 failed)
         positive before;
         b32 changed = false;
 
-        settings.feed_due = (positive)ui_kit.now + (positive)settings_feeds[feed].every * 1000000ull;
+        // The next reading is due a period after this one began (settings_feed_tick set that), so the time the verb took is not added to
+        // each period, and a live table (Waterlink's latency and packets, every half second) is read at its period; one that ran past it
+        // waits a quarter of one, so the verbs do not run back to back, and one stopped waits a whole one.
+        {
+                positive now = (positive)ui_kit.now, gap = (positive)settings_feeds[feed].every * 1000000ull;
+                if (killed || settings.feed_due < now + gap / 4)
+                        settings.feed_due = now + (killed ? gap : gap / 4);
+        }
         if (killed || settings_editing() >= (int)SETTINGS_LIST)
                 return;
+        // The group's rows that change by themselves (SETTINGS_TICK: Waterlink's paths) are asked again with each reading of its list, as a
+        // group with no list has its rows asked at its period (settings_feed_rows); the next reading waits for them.
+        settings_feed_rows();
         for (positive r = 0; r < SETTINGS_ROWS && settings_feeds[feed].owner; r++)
                 if (string_equals((string_address)settings_rows[r].label, (string_address)settings_feeds[feed].owner)) { owner = (int)r; break; }
         if (owner >= 0)
@@ -4793,7 +4823,7 @@ static fn settings_describe_item(int id, const struct settings_item address_to i
         }
         else if (item->kind == SETTINGS_LINK)
         {
-                // A machine is one row of columns, this machine's first: its dot is its state (online), its address, latency and traffic
+                // A machine is one row of columns, this machine's first: its dot is its state (online), its address, latency and packets
                 // are its next cells (an offline one says its state where its address would be, and is dim), and its grants are checks
                 // (this machine's the grants it allows any). Nothing folds under it. Its removal is its menu's and Delete's.
                 b32 self = item->where == 0;
@@ -4802,8 +4832,10 @@ static fn settings_describe_item(int id, const struct settings_item address_to i
                 row->mark = (item->flags & SETTINGS_ITEM_JOINED) != 0, row->mark_ink = ui_role(UI_SUCCESS);
                 row->columns = settings_columns_for(3);
                 row->cells[1] = item->link_addr[0] ? item->link_addr : self ? (item->detail[0] ? item->detail : null) : st;
-                row->cells[2] = item->link_rtt[0] ? item->link_rtt : null, row->cells[3] = item->link_traffic[0] ? item->link_traffic : null;
-                row->cells[4] = item->link_group[0] ? item->link_group : null;
+                row->cells[2] = item->link_rtt[0] ? item->link_rtt : null;
+                row->cells[SETTINGS_LINK_UP_COLUMN] = item->link_up[0] ? item->link_up : null;
+                row->cells[SETTINGS_LINK_DOWN_COLUMN] = item->link_down[0] ? item->link_down : null;
+                row->cells[SETTINGS_LINK_GROUP_COLUMN] = item->link_group[0] ? item->link_group : null;
                 row->value = row->cells[1];
                 row->dim = !self && (item->link_state == SETTINGS_LINK_OFFLINE || item->link_state == SETTINGS_LINK_SWITCHED_OFF);
                 // Another machine's switch: on unless switched off (this machine's is the Waterlink row's, the listener).

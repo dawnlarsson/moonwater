@@ -25,6 +25,7 @@
 # machine-made 2026-11-23 (the loopback pass), not yet read by a person: mixer_loopback
 # machine-made 2026-11-23 (the mix router pass), not yet read by a person: settings_router settings_router_hint settings_router_main
 # machine-made 2026-11-24 (Waterlink's pad grant is called input), not yet read by a person: settings_column_input settings_link_input
+# machine-made 2026-11-24 (Waterlink's Traffic column split into the packets sent and received), not yet read by a person: settings_link_down settings_link_up
 @language ar
 @name العربية
 @translated machine
@@ -380,6 +381,7 @@ settings_link_add	cf33	ربط جهاز
 settings_link_add_keys	73ee	Enter يعرض رمزا لجهاز آخر أو يأخذ رمز جهاز آخر
 settings_link_address	60f3	العنوان
 settings_link_disabled	08dd	معطل بشكل عام على هذا الحاسوب
+settings_link_down	5035	المستلمة
 settings_link_files	b058	الوصول إلى نظام الملفات
 settings_link_files_about	a65e	تصفح الملفات ورفعها وتنزيلها
 settings_link_group	902c	المجموعة
@@ -399,8 +401,8 @@ settings_link_shell	0fbd	الصدفة التفاعلية
 settings_link_shell_about	5034	فتح جلسة طرفية عن بعد
 settings_link_show	e2fc	عرض رمز
 settings_link_stop	0c69	إيقاف الاقتران
-settings_link_traffic	9266	حركة البيانات
 settings_link_type	978e	اكتب رمز جهاز آخر
+settings_link_up	5940	المرسلة
 settings_map_drag	125f	أفلت لوضع الشاشة
 settings_map_fit	797e	إظهار كل الشاشات
 settings_map_hint	0257	اسحب شاشة لتحريكها. اسحب الشبكة لتحريك العرض، ومرّر للتكبير.

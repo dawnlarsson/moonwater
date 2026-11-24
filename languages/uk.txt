@@ -24,6 +24,7 @@
 # machine-made 2026-11-23 (the loopback pass), not yet read by a person: mixer_loopback
 # machine-made 2026-11-23 (the mix router pass), not yet read by a person: settings_router settings_router_hint settings_router_main
 # machine-made 2026-11-24 (Waterlink's pad grant is called input), not yet read by a person: settings_column_input settings_link_input
+# machine-made 2026-11-24 (Waterlink's Traffic column split into the packets sent and received), not yet read by a person: settings_link_down settings_link_up
 @language uk
 @name Українська
 @translated machine
@@ -379,6 +380,7 @@ settings_link_add	cf33	Зв'язати машину
 settings_link_add_keys	73ee	Enter показує код для іншої машини або приймає код іншої машини
 settings_link_address	60f3	Адреса
 settings_link_disabled	08dd	Вимкнено глобально на цьому комп'ютері
+settings_link_down	5035	Отримано
 settings_link_files	b058	Доступ до файлової системи
 settings_link_files_about	a65e	Перегляд, надсилання й завантаження файлів
 settings_link_group	902c	Група
@@ -398,8 +400,8 @@ settings_link_shell	0fbd	Інтерактивна оболонка
 settings_link_shell_about	5034	Відкриття віддаленого сеансу термінала
 settings_link_show	e2fc	Показати код
 settings_link_stop	0c69	Зупинити сполучення
-settings_link_traffic	9266	Трафік
 settings_link_type	978e	Ввести код іншої машини
+settings_link_up	5940	Надіслано
 settings_map_drag	125f	Відпустіть, щоб розмістити екран
 settings_map_fit	797e	Показати всі екрани
 settings_map_hint	0257	Перетягніть екран, щоб перемістити його. Перетягніть сітку, щоб зсунути вигляд, прокрутіть для масштабу.

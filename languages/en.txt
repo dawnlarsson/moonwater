@@ -353,6 +353,7 @@ settings_link_add	cf33	Link a machine
 settings_link_add_keys	73ee	Enter shows a code for another machine to type, or takes the code another machine shows
 settings_link_address	60f3	Address
 settings_link_disabled	08dd	Disabled globally on this machine
+settings_link_down	5035	Down
 settings_link_files	b058	Filesystem access
 settings_link_files_about	a65e	Browse, upload, and download files
 settings_link_group	902c	Group
@@ -372,8 +373,8 @@ settings_link_shell	0fbd	Interactive shell
 settings_link_shell_about	5034	Open a remote terminal session
 settings_link_show	e2fc	Show a code
 settings_link_stop	0c69	Stop pairing
-settings_link_traffic	9266	Traffic
 settings_link_type	978e	Type another machine's code
+settings_link_up	5940	Up
 settings_map_drag	125f	Let go to place the screen
 settings_map_fit	797e	Show all screens
 settings_map_hint	0257	Drag a screen to move it. Drag the grid to pan, scroll to zoom.

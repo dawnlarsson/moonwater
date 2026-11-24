@@ -24,6 +24,7 @@
 # machine-made 2026-11-23 (the loopback pass), not yet read by a person: mixer_loopback
 # machine-made 2026-11-23 (the mix router pass), not yet read by a person: settings_router settings_router_hint settings_router_main
 # machine-made 2026-11-24 (Waterlink's pad grant is called input), not yet read by a person: settings_column_input settings_link_input
+# machine-made 2026-11-24 (Waterlink's Traffic column split into the packets sent and received), not yet read by a person: settings_link_down settings_link_up
 @language es
 @name Español
 @translated machine
@@ -379,6 +380,7 @@ settings_link_add	cf33	Vincular una máquina
 settings_link_add_keys	73ee	Enter muestra un código para otra máquina o toma el código de otra máquina
 settings_link_address	60f3	Dirección
 settings_link_disabled	08dd	Desactivado globalmente en esta máquina
+settings_link_down	5035	Recibidos
 settings_link_files	b058	Acceso al sistema de archivos
 settings_link_files_about	a65e	Explorar, subir y descargar archivos
 settings_link_group	902c	Grupo
@@ -398,8 +400,8 @@ settings_link_shell	0fbd	Shell interactivo
 settings_link_shell_about	5034	Abrir una sesión de terminal remota
 settings_link_show	e2fc	Mostrar un código
 settings_link_stop	0c69	Detener el emparejamiento
-settings_link_traffic	9266	Tráfico
 settings_link_type	978e	Escribir el código de otra máquina
+settings_link_up	5940	Enviados
 settings_map_drag	125f	Suelte para colocar la pantalla
 settings_map_fit	797e	Mostrar todas las pantallas
 settings_map_hint	0257	Arrastre una pantalla para moverla. Arrastre la cuadrícula para desplazar la vista y use la rueda para hacer zoom.
