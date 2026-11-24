@@ -987,7 +987,7 @@ static const unsigned short gpu_i915_mtl[] = {0x7D40, 0x7D45, 0x7D55, 0x7D60, 0x
 static const unsigned short gpu_i915_arl[] = {0x7D41, 0x7D51, 0x7D67, 0x7DD1, 0xB640};
 static const unsigned short gpu_i915_lnl[] = {0x6420, 0x64A0, 0x64B0};
 static const unsigned short gpu_i915_bmg[] = {0xE202, 0xE209, 0xE20B, 0xE20C, 0xE20D, 0xE210, 0xE211, 0xE212, 0xE215, 0xE216, 0xE220, 0xE221, 0xE222, 0xE223};
-static const unsigned short gpu_i915_ptl[] = {0xB080, 0xB081, 0xB082, 0xB083, 0xB084, 0xB085, 0xB086, 0xB087, 0xB08F, 0xB090, 0xB0A0, 0xB0B0};
+static const unsigned short gpu_i915_ptl[] = {0xB080, 0xB081, 0xB082, 0xB083, 0xB084, 0xB085, 0xB086, 0xB087, 0xB08F, 0xB090, 0xB0A0, 0xB0A1, 0xB0B0};
 #define GPU_I915_CHIPS(X) X(gpu_i915_ivb, 700, "Gen7 Ivy Bridge") X(gpu_i915_vlv, 701, "Gen7 Valleyview") X(gpu_i915_hsw, 750, "Gen7.5 Haswell") \
         X(gpu_i915_bdw, 800, "Gen8 Broadwell") X(gpu_i915_chv, 801, "Gen8 Cherry View") X(gpu_i915_gen9, 900, "Gen9 Skylake to Comet Lake")       \
         X(gpu_i915_gen9lp, 901, "Gen9 Broxton or Gemini Lake") X(gpu_i915_icl, 1100, "Gen11 Ice Lake") X(gpu_i915_ehl, 1101, "Gen11 Elkhart Lake or Jasper Lake") \
@@ -1586,10 +1586,12 @@ static unsigned int gpu_nouveau_describe(unsigned int family, unsigned int devic
 {
         const char *arch = "NVIDIA GPU";
 
-        if (family >= 0x1b0)
+        if (family >= 0x1a0)
                 arch = "Blackwell";
         else if (family >= 0x190)
                 arch = "Ada Lovelace";
+        else if (family >= 0x180)
+                arch = "Hopper";
         else if (family >= 0x170)
                 arch = "Ampere";
         else if (family >= 0x160)
