@@ -1695,6 +1695,11 @@ static void compositor_xwm_sync(struct compositor_xwm *x, struct compositor_xwm_
                 compositor_xwm_clamp_size(w, &cw, &ch);
                 if ((cw != w->sent_w || ch != w->sent_h) && (!f.resizing || w->sync_present != compositor_metric_presents))
                         c.mask |= XWM_CONFIGURE_WIDTH | XWM_CONFIGURE_HEIGHT, c.width = cw, c.height = ch, w->sync_present = compositor_metric_presents;
+                // A window resized from its top or left edge is moved as it is sized: its place waits for the size, which goes at
+                // most once a present, so its far edge holds. Sent alone, the place moved the bottom edge by the change of height
+                // until the size followed (Substance Designer's bottom edge shook while its top was dragged), and Wine answered each half.
+                else if (cw != w->sent_w || ch != w->sent_h)
+                        c.mask &= ~(XWM_CONFIGURE_X | XWM_CONFIGURE_Y);
         }
         if (!c.mask)
                 return;
