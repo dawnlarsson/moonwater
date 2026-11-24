@@ -3223,10 +3223,14 @@ static void xwm_event(struct compositor_xwm *x, const struct xwm_event *e)
                 if (w && ((w->state & COMPOSITOR_XWM_MAXIMIZED) ||
                           (w->row >= 0 && (compositor.resize == w->row || compositor.arranged[w->row] != COMPOSITOR_FLOATING))))
                         c.mask &= ~(XWM_CONFIGURE_WIDTH | XWM_CONFIGURE_HEIGHT);
+                // A place the client asks for before Canvas has the window (mapped, not yet adopted) is its place, as a place asked
+                // before the map is: laf (Aseprite) maps a menu, a submenu or a dialog and moves it at once (XMoveResizeWindow after
+                // XMapWindow, its WM_NORMAL_HINTS already rewritten without PPosition), and the menu opened centred on its owner.
+                // Once the window is Canvas's, its place is Canvas's: a toplevel does not move itself.
                 if (!w || !(w->state & COMPOSITOR_XWM_POPUPTYPE))
                 {
                         c.mask &= ~(XWM_CONFIGURE_SIBLING | XWM_CONFIGURE_STACK_MODE);
-                        if (!w || (w->state & COMPOSITOR_XWM_MAPPED))
+                        if (!w || ((w->state & COMPOSITOR_XWM_MAPPED) && (w->state & COMPOSITOR_XWM_ADOPTED)))
                                 c.mask &= ~(XWM_CONFIGURE_X | XWM_CONFIGURE_Y);
                 }
                 c.x = e->x, c.y = e->y;
