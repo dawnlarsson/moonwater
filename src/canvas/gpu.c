@@ -303,18 +303,18 @@ typedef char gpu_kernels_fit[sizeof(gpu_k_copy) + sizeof(gpu_k_fill) + sizeof(gp
 #define GPU_TEST_HASH 1092551981u
 // The rest of the chips the kernels are code for, which nobody has run them on: family 143 (Navi 10, 12 and 14, RDNA1; Navi 21 to 24, the RDNA2 cards). llvm-mc
 // makes of gpu.asm the same 3,749 words for gfx1010, gfx1012, gfx1030 and gfx1036 (the gate asks it: gpu-kernels-chips), so the code is theirs too as far as an assembler can say; what the dispatch's
-// registers and the ring do on them has been seen by no one. They are let in only where the machine's owner asks (the file /run/moonwater/gpu-gfx10, looked for at
-// each start, as gpu-nouserptr is), and then held to the self-test as every card is: a card that draws it wrong is not trusted, and one that hangs on it is the
-// hang's two seconds and no card. Off unless asked: a job that hangs on a ring the kernel ends only after its own timeout (sixty seconds at v6.12) is a minute of
-// the processor drawing on a machine whose owner did not choose to try.
+// registers and the ring do on them has been seen by no one. A card of them whose kernel says its graphics core is 10.1 or 10.3 (gpu_amd_identify) is taken as
+// every card is, and held to the self-test as every card is: a card that draws it wrong is not trusted, and one that hangs on it is the hang's seconds and no
+// card, the processor drawing. Where the kernel does not say the core's version, the family is let in by the machine's owner (the file /run/moonwater/gpu-gfx10,
+// looked for at each start, as gpu-nouserptr is), and held to the same test.
 #define GPU_FAMILIES_WIDE(f) ((f) == 143)
 static b32 gpu_wide; // the owner asked for them
-static b32 gpu_gfx103; // the open card has GFX 10.3 compute IP (RDNA2: Navi 21/22/23/24, Van Gogh, Rembrandt, Raphael, Mendocino)
-static unsigned int gpu_amd_gfx_major, gpu_amd_gfx_minor; // compute IP version from AMDGPU_INFO_HW_IP_INFO
+static b32 gpu_gfx103; // the open card's graphics core is 10.3 (RDNA2: Navi 21/22/23/24, Van Gogh, Rembrandt, Raphael, Mendocino)
+static unsigned int gpu_amd_gfx_major, gpu_amd_gfx_minor; // the graphics core's version as gpu_amd_identify read it (0.0 before a card is asked, and at each start)
 static b32 gpu_family_ok(unsigned int family)
 {
-        // Enable all RDNA2 (GFX 10.3) and RDNA1 (GFX 10.1) cards via compute IP version (validated by gpu_test_hash at startup),
-        // falling back to the explicit family allowlist when HW_IP_INFO is unavailable (e.g. unit-test fake cards).
+        // Every card whose core is 10.3 (RDNA2) or 10.1 (RDNA1) by its own version, whatever its family; a card that did not say one is held to the families
+        // (a kernel without the version, a check's fake card).
         if (gpu_amd_gfx_major == 10 && (gpu_amd_gfx_minor == 3 || gpu_amd_gfx_minor == 1))
                 return true;
         return GPU_FAMILIES(family) || ((gpu_wide || gpu_gfx103) && GPU_FAMILIES_WIDE(family));
@@ -552,7 +552,12 @@ static unsigned int gpu_amd_identify(int fd, unsigned int *family, unsigned int 
                 if (!ip[6]) // available_rings == 0: compute-disabled/harvested node
                         return *family = 0, 19u;
                 gpu_amd_gfx_major = ip[0], gpu_amd_gfx_minor = ip[1];
-                if (ip[0] == 10 && ip[1] == 3 && (who[4] != 143 || who[2] >= 0x28))
+                // Those two words are the version of the driver's block, 10.0 for every gfx10 chip (gfx_v10_0_ip_block); the chip's own graphics core is the
+                // eighth (ip_discovery_version: the major in bits 23:16, the minor in 15:8), which the kernel fills for Vega 10 and every chip after it and
+                // leaves 0 before. The minor is the core's where the two agree on the major: 10.1 a Navi 10, 12 or 14, 10.3 a Navi 21 to 24 and the APUs.
+                if ((ip[7] >> 16 & 0xff) == ip[0])
+                        gpu_amd_gfx_minor = ip[7] >> 8 & 0xff;
+                if (gpu_amd_gfx_major == 10 && gpu_amd_gfx_minor == 3)
                         gpu_gfx103 = 1;
         }
         else if (who[4] == 145 || who[4] == 148 || who[4] == 150)
@@ -636,7 +641,7 @@ static unsigned int gpu_amd_describe(unsigned int family, unsigned int device, c
         else if (family == 141 || family == 142)
                 arch = ", Vega / GCN5 (GFX9)";
         else if (family == 143)
-                arch = gpu_gfx103 ? ", RDNA2 (GFX10.3)" : ", RDNA1 (GFX10.1)";
+                arch = gpu_gfx103 ? ", RDNA2 (GFX10.3)" : gpu_amd_gfx_major == 10 && gpu_amd_gfx_minor == 1 ? ", RDNA1 (GFX10.1)" : ", RDNA1 or RDNA2 (GFX10)";
         else if (GPU_FAMILIES(family))
                 arch = ", RDNA2 APU (GFX10.3)";
         else if (family == 145 || family == 148)
@@ -1927,7 +1932,7 @@ static b32 gpu_start(positive bytes)
         size = (GPU_DATA + bytes + (1 << 20) + 4095) & ~4095ull; // last MiB is self-test
 
         memory_zero(&gpu_req, sizeof(gpu_req));
-        gpu.fd = -1, gpu.broken = 0, gpu_bytes = bytes, gpu_lost = 0, gpu_gfx103 = 0, gpu_userptr_ok = 0;
+        gpu.fd = -1, gpu.broken = 0, gpu_bytes = bytes, gpu_lost = 0, gpu_gfx103 = 0, gpu_amd_gfx_major = gpu_amd_gfx_minor = 0, gpu_userptr_ok = 0;
         gpu_userptr_off = gpu_flag("/run/moonwater/gpu-nouserptr"), gpu_userptr_gone = 0;
         gpu_own_userptr = gpu_flag("/run/moonwater/gpu-own-userptr");
         gpu_round_off = gpu_flag("/run/moonwater/gpu-round-off");

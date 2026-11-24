@@ -3622,7 +3622,8 @@ static void gpu_import_rows(void)
         }
 
         // The families: the four the kernels were written and run on are let in always; family 143 (the rest of gfx10: the same words by llvm-mc, run by nobody)
-        // only where the owner's file asks, which a start looks for each time; no other family either way.
+        // where its kernel says the core is 10.1 or 10.3 (the rows after these) and, with no version said (no node answers here), only where the owner's
+        // file asks, which a start looks for each time; no other family either way.
         gpu_fake_wide = -1, gpu_fake_absent = 64, gpu_start(1 << 20);
         check("gpu family: with no file asking, the families are the four the kernels were run on, and 143 is not one",
               !gpu_wide && gpu_family_ok(144) && gpu_family_ok(146) && gpu_family_ok(149) && gpu_family_ok(151) && !gpu_family_ok(143));
@@ -3631,6 +3632,43 @@ static void gpu_import_rows(void)
               gpu_wide && gpu_family_ok(143) && gpu_family_ok(149) && !gpu_family_ok(145) && !gpu_family_ok(148) && !gpu_family_ok(150) && !gpu_family_ok(142) && !gpu_family_ok(0));
         gpu_fake_wide = -1, gpu_fake_absent = 64, gpu_start(1 << 20);
         check("gpu family: the file gone at the next start, 143 is out again", !gpu_wide && !gpu_family_ok(143));
+        // The chip's own version. HW_IP_INFO's first two words are the driver's block's, 10.0 for every gfx10 chip, and the chip's graphics core is its eighth
+        // (ip_discovery_version): a card of family 143 is RDNA1 or RDNA2 by that word, and takes the kernel set with no file where it says 10.1 or 10.3. A
+        // kernel that says no core (the word 0) leaves the family to the owner's file; the block's major picks the set of the other instruction sets.
+        {
+                unsigned int family = 0, device = 0;
+                positive kept_va = gpu_amd_va_max;
+                int kept_on = gpu_kernel.on;
+                char said[96];
+
+#define GPU_FAKE_CHIP(f, external, major, core, rings)                                                                                                             \
+        (gpu_kernel.info_family = (f), gpu_kernel.info_external = (external), memory_zero(gpu_kernel.info_ip, sizeof(gpu_kernel.info_ip)),                        \
+         gpu_kernel.info_ip[0] = (major), gpu_kernel.info_ip[6] = (rings), gpu_kernel.info_ip[7] = (core), gpu_amd_identify(GPU_KERNEL_FD, &family, &device))
+#define GPU_FAKE_SAID(f, words) (gpu_amd_describe((f), 0, said, 0, sizeof said), string_find((string_address)said, (string_address)(words)) != 0)
+                gpu_kernel.on = 1;
+                check("gpu family: a Navi 21 (family 143, the block 10.0, the core 10.3.0) is RDNA2 by its core, and takes the kernel set with no file",
+                      GPU_FAKE_CHIP(143, 0x28, 10, 10u << 16 | 3u << 8, 1) == 0 && family == 143 && gpu_amd_gfx_major == 10 && gpu_amd_gfx_minor == 3 && gpu_gfx103 &&
+                          !gpu_wide && gpu_family_ok(143) && gpu_amd_set(143) == &gpu_amd_rdna2 && GPU_FAKE_SAID(143, "RDNA2 (GFX10.3)"));
+                check("gpu family: a Navi 10 (the core 10.1.0) is RDNA1 by its core, and takes the same set with no file",
+                      GPU_FAKE_CHIP(143, 0x01, 10, 10u << 16 | 1u << 8, 1) == 0 && gpu_amd_gfx_major == 10 && gpu_amd_gfx_minor == 1 && !gpu_gfx103 && gpu_family_ok(143) &&
+                          gpu_amd_set(143) == &gpu_amd_rdna2 && GPU_FAKE_SAID(143, "RDNA1 (GFX10.1)"));
+                check("gpu family: a kernel that says no core (the eighth word 0) leaves family 143 to the owner's file, and the words say neither generation",
+                      GPU_FAKE_CHIP(143, 0x28, 10, 0, 1) == 0 && gpu_amd_gfx_major == 10 && gpu_amd_gfx_minor == 0 && !gpu_gfx103 && !gpu_family_ok(143) &&
+                          !gpu_amd_set(143) && GPU_FAKE_SAID(143, "RDNA1 or RDNA2 (GFX10)") && (gpu_wide = 1, gpu_amd_set(143) == &gpu_amd_rdna2) && (gpu_wide = 0, true));
+                check("gpu family: an APU the kernels were run on (family 149, the core 10.3.6) is taken as it was, its core read too",
+                      GPU_FAKE_CHIP(149, 0x01, 10, 10u << 16 | 3u << 8 | 6u, 1) == 0 && family == 149 && gpu_amd_gfx_minor == 3 && gpu_gfx103 && gpu_amd_set(149) == &gpu_amd_rdna2);
+                check("gpu family: the block's major picks the other sets (11.0 with the core 11.5.0 the gfx11 one, 12.0 the gfx12 one), and a Raven's 9.0 none",
+                      GPU_FAKE_CHIP(150, 0x01, 11, 11u << 16 | 5u << 8, 1) == 0 && gpu_amd_gfx_major == 11 && gpu_amd_gfx_minor == 5 && !gpu_gfx103 && gpu_amd_set(150) == &gpu_amd_rdna3 &&
+                          GPU_FAKE_CHIP(152, 0x01, 12, 12u << 16 | 1u, 1) == 0 && gpu_amd_gfx_major == 12 && gpu_amd_set(152) == &gpu_amd_rdna4 &&
+                          GPU_FAKE_CHIP(142, 0x01, 9, 9u << 16 | 1u << 8, 1) == 0 && gpu_amd_gfx_major == 9 && gpu_amd_gfx_minor == 1 && !gpu_amd_set(142));
+                check("gpu family: a core of another major than the block's is not read (the block 10.0 keeps its 0), and a node with no compute ring is no card (ENODEV)",
+                      GPU_FAKE_CHIP(143, 0x28, 10, 11u << 16 | 3u << 8, 1) == 0 && gpu_amd_gfx_major == 10 && gpu_amd_gfx_minor == 0 && !gpu_family_ok(143) &&
+                          GPU_FAKE_CHIP(143, 0x28, 10, 10u << 16 | 3u << 8, 0) == 19 && family == 0);
+#undef GPU_FAKE_SAID
+#undef GPU_FAKE_CHIP
+                gpu_kernel.info_family = 0, gpu_kernel.on = kept_on;
+                gpu_wide = 0, gpu_gfx103 = 0, gpu_amd_gfx_major = gpu_amd_gfx_minor = 0, gpu_amd_va_max = kept_va;
+        }
         gpu_fake_wide = 0, gpu_fake_absent = 0;
         gpu.fd = GPU_KERNEL_FD, gpu.at = 0;
 
@@ -6860,11 +6898,15 @@ static void gpu_engine_and_render_regressions(void)
         int kept_up = compositor_gpu_state.up, kept_list_mode = compositor.table ? compositor.table->list_mode : 0;
 
         /* 1. RDNA2 gpu_gfx103 family acceptance without wide flag */
-        gpu_wide = 0, gpu_gfx103 = 0;
-        check("gpu family: 143 refused when neither wide nor gfx103", !gpu_family_ok(143));
-        gpu_gfx103 = 1;
-        check("gpu family: 143 accepted when gpu_gfx103 is set", gpu_family_ok(143));
-        gpu_gfx103 = 0;
+        {
+                unsigned int kept_major = gpu_amd_gfx_major, kept_minor = gpu_amd_gfx_minor; // a card started before these rows said its core's version
+
+                gpu_wide = 0, gpu_gfx103 = 0, gpu_amd_gfx_major = gpu_amd_gfx_minor = 0;
+                check("gpu family: 143 refused when neither wide nor gfx103, and no core's version said", !gpu_family_ok(143));
+                gpu_gfx103 = 1;
+                check("gpu family: 143 accepted when gpu_gfx103 is set", gpu_family_ok(143));
+                gpu_gfx103 = 0, gpu_amd_gfx_major = kept_major, gpu_amd_gfx_minor = kept_minor;
+        }
 
         /* 2. gpu_register_memfd / gpu_unregister_memfd & gpu_drop_unmapped */
         {

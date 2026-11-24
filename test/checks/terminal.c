@@ -178,6 +178,10 @@ static struct
         long pstate_error;
         int priority_asked, priority_refused; // the priority the last AMDGPU_CTX_OP_ALLOC_CTX asked; one above normal is refused (EACCES) while set
         unsigned int interrupts, waits; // the waits a signal ends before one is answered (EINTR), and the waits asked
+        // AMDGPU_INFO on the render node (gpu_amd_identify), answered while info_family is set and refused (EINVAL) while it is 0: DEV_INFO says that family and
+        // the external revision, HW_IP_INFO the eight words of struct drm_amdgpu_info_hw_ip a row gives (the block's major and minor, the rings at 6, and at 7
+        // ip_discovery_version, the chip's own core: the major in bits 23:16, the minor in 15:8).
+        unsigned int info_family, info_external, info_ip[8];
         char unique[40];              // the display node's bus as GET_UNIQUE says it
         unsigned int unique_length;
         // The dma-buf route and userptr (gpu_map_as): /dev/udmabuf opens as GPU_KERNEL_UDMABUF while udmabuf is set; each UDMABUF_CREATE is counted with the
@@ -412,6 +416,18 @@ static long gpu_kernel_control(int fd, unsigned int request, void *a)
                         return gpu_kernel.interrupts--, -4;
                 longs[0] = 0;
                 return 0;
+        case 0x40206445u: // DRM_IOCTL_AMDGPU_INFO: where the answer goes, then its size and above it the query (0x16 DEV_INFO, 0x02 HW_IP_INFO)
+        {
+                unsigned int *into = (unsigned int *)longs[0], size = (unsigned int)longs[1], query = (unsigned int)(longs[1] >> 32);
+
+                if (!gpu_kernel.info_family || fd != GPU_KERNEL_FD)
+                        return -22;
+                if (query == 0x16 && size >= 20)
+                        return memory_zero(into, size), into[2] = gpu_kernel.info_external, into[4] = gpu_kernel.info_family, 0;
+                if (query == 0x02 && size >= sizeof(gpu_kernel.info_ip))
+                        return memory_copy(into, gpu_kernel.info_ip, sizeof(gpu_kernel.info_ip)), 0;
+                return -22;
+        }
         case 0xc0106401u: // DRM_IOCTL_GET_UNIQUE
                 if (fd == GPU_KERNEL_FD)
                         return -13;
