@@ -2580,8 +2580,10 @@ static int compositor_space_row_active(int row)
 {
         if (!compositor.spaces.ready || !compositor.row_space || row < 0 || row >= COMPOSITOR_ROWS)
                 return 1;
+        // The desktop's picture is under a fullscreen Scene's window and not drawn; while Scenes roll it is the ground the windows move
+        // over, or what they uncover keeps the last frame's pixels (compositor_roll).
         if (compositor.layer[row] == WINDOW_LAYER_BACKGROUND)
-                return !compositor_space_screen_fullscreen(compositor_screen_of(row));
+                return compositor_roll.on || !compositor_space_screen_fullscreen(compositor_screen_of(row));
         // A popup answers for its root: the walk is bounded (compositor_popup_root), and the root is not a popup, so no recursion.
         if (compositor_popup_parent && compositor_popup_parent[row] >= 0)
                 row = compositor_popup_root(row);

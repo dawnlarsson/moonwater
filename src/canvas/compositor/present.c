@@ -1744,7 +1744,8 @@ static void compositor_present_frames(void)
                 compositor_damage(0, 0, compositor.width, compositor.height);
         compositor.screen_stale = 0;
 
-        plane = !back && !turning && !compositor_scenes_shown() ? compositor_plane_candidate(frames, rows, windows, count, planed) : -1;
+        // No window is lifted onto a plane while Scenes roll: the plane shows a window where it is, and the roll draws it on its way.
+        plane = !back && !turning && !compositor_scenes_shown() && !compositor_roll.on ? compositor_plane_candidate(frames, rows, windows, count, planed) : -1;
         if (plane < 0 && compositor.table)
                 compositor.table->unscanned_by[compositor.table->unscanned < WINDOWS_UNSCANNED ? compositor.table->unscanned : 0]++;
         if (back || turning || !compositor_gpu_tiled_ready())
