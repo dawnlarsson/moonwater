@@ -21969,7 +21969,11 @@ static bipolar ui_apps_picture_open(const char address_to root, const char addre
                 positive nlen;
                 string_copy_bounded((p8 address_to)name, (string_address)icon, sizeof(name));
                 nlen = string_length((string_address)name);
-                if (nlen > 4 && name[nlen - 4] == '.')
+                // An Icon named with its picture's extension (a few entries say Icon=name.png): the name is what is before it. Only a
+                // picture's: a Flatpak app's Icon is its id, whose last part may be three letters (com.heroicgameslauncher.hgl), and
+                // cut there it named no file at all.
+                if (nlen > 4 && (memory_has_suffix((string_address)name, nlen, ".png") || memory_has_suffix((string_address)name, nlen, ".svg") ||
+                                 memory_has_suffix((string_address)name, nlen, ".xpm")))
                         name[nlen - 4] = 0;
                 // A bowl's icons, then its Flatpak apps' (exports/share/icons, links into each app's tree, resolved inside the root).
                 for (positive at = 0; at <= 2 * (sizeof(sides) / sizeof(sides[0])) && handle < 0; at++)
