@@ -903,7 +903,7 @@ static fn files_edit(int how)
         const struct files_model address_to m = &files.big->model;
         const struct files_entry address_to e = files_model_entry(m, m->cursor);
         struct ui_tokens address_to k = &files.big->path;
-        if (how == FILES_EDIT_NAME && !e)
+        if (how == FILES_EDIT_NAME && (!e || files_model_is_remote(m)))
                 return;
         files.editing = how;
         if (how == FILES_EDIT_NAME)
@@ -1240,7 +1240,15 @@ static fn files_copy_path(void)
         p8 address_to list = null, address_to text = null;
         positive lr = 0, lu = 0, tr = 0, tu = 0;
         if (!files_paths_collect(m->cursor, files_model_chosen(m, m->cursor), &list, &lr, &lu, null))
+        {
+                positive plen = string_length((string_address)m->path);
+                if (plen)
+                {
+                        struct windows_clip_part part = {WINDOWS_CLIP_TEXT, m->path, plen};
+                        windows_clip_offer_parts(&files.own, WINDOWS_CLIP_CLIPBOARD, &part, 1);
+                }
                 return;
+        }
         for (positive at = 0; at < lu;)
         {
                 const p8 address_to path = list + at;
@@ -1410,6 +1418,8 @@ static b32 files_transfer(const p8 address_to paths, p32 count, int row, int how
                 return files_tree_path(t, (p32)files.drop_node, dest) &&
                        files_transfer_start(paths, count, files_open_dir(AT_FDCWD, dest, 0), dest, how, false);
         }
+        if (files_model_is_remote(m))
+                return false;
         if (e)
                 files_path_join(dest, FILES_PATH, m->path, files_model_name(m, e));
         else
@@ -2102,7 +2112,8 @@ static fn files_folder_menu(struct ui_popmenu address_to menu)
                 if (act == FILES_MENU_HIDDEN)
                         flags = UI_MENU_CHECK | (m->hidden ? UI_MENU_ON : 0);
                 if ((act == FILES_MENU_UNDO && files.deed_done <= 0) || (act == FILES_MENU_REDO && files.deed_done >= files.deed_count) ||
-                    (act == FILES_MENU_ALL && !any) || (act == FILES_MENU_BIN && bin && !any))
+                    (act == FILES_MENU_ALL && !any) || (act == FILES_MENU_BIN && bin && !any) ||
+                    (files_model_is_remote(m) && (act == FILES_MENU_PASTE || act == FILES_MENU_NEW_FOLDER || act == FILES_MENU_NEW_FILE)))
                         flags |= UI_MENU_DISABLED;
                 if (act == FILES_MENU_BIN && bin)
                         label = WORDS(menu_bin_empty), act = FILES_MENU_BIN_EMPTY;
@@ -2127,16 +2138,17 @@ static fn files_menu_open(b32 on, int x, int y)
                     {WORDS(menu_open_editor), null, 0, FILES_MENU_EDITOR, folder},
                     {WORDS(menu_set_wallpaper), null, 0, FILES_MENU_WALLPAPER, !png},
                 };
+                b32 remote = files_model_is_remote(m);
                 const struct ui_menu_spec tail[] = {
-                    {WORDS(menu_open_terminal), null, 0, FILES_MENU_TERMINAL, !folder}, FILES_SEP,
-                    {WORDS(menu_cut), "Ctrl+X", 0, FILES_MENU_CUT, false}, {WORDS(menu_copy), "Ctrl+C", 0, FILES_MENU_COPY, false},
+                    {WORDS(menu_open_terminal), null, 0, FILES_MENU_TERMINAL, !folder || remote}, FILES_SEP,
+                    {WORDS(menu_cut), "Ctrl+X", remote ? UI_MENU_DISABLED : 0, FILES_MENU_CUT, false}, {WORDS(menu_copy), "Ctrl+C", 0, FILES_MENU_COPY, false},
                     {WORDS(menu_copy_path), "Ctrl+Shift+C", 0, FILES_MENU_COPY_PATH, false},
-                    {WORDS(menu_duplicate), "Ctrl+D", 0, FILES_MENU_DUPLICATE, files_model_is_remote(m)},
-                    {WORDS(menu_paste), "Ctrl+V", 0, FILES_MENU_PASTE, false}, FILES_SEP,
-                    {WORDS(menu_rename), "F2", m->chosen_count > 1 ? UI_MENU_DISABLED : 0, FILES_MENU_RENAME, false},
+                    {WORDS(menu_duplicate), "Ctrl+D", 0, FILES_MENU_DUPLICATE, remote},
+                    {WORDS(menu_paste), "Ctrl+V", remote ? UI_MENU_DISABLED : 0, FILES_MENU_PASTE, false}, FILES_SEP,
+                    {WORDS(menu_rename), "F2", m->chosen_count > 1 || remote ? UI_MENU_DISABLED : 0, FILES_MENU_RENAME, false},
                     {WORDS(menu_bin_restore), null, 0, FILES_MENU_RESTORE, !bin},
-                    {WORDS(menu_delete), bin ? "Shift+Delete" : "Delete", 0, FILES_MENU_DELETE, false}, FILES_SEP,
-                    {WORDS(menu_properties), "Alt+Enter", 0, FILES_MENU_PROPERTIES, false},
+                    {WORDS(menu_delete), bin ? "Shift+Delete" : "Delete", remote ? UI_MENU_DISABLED : 0, FILES_MENU_DELETE, false}, FILES_SEP,
+                    {WORDS(menu_properties), "Alt+Enter", remote ? UI_MENU_DISABLED : 0, FILES_MENU_PROPERTIES, false},
                 };
                 ui_popmenu_build(menu, head, FILES_COUNT(head));
                 ui_popmenu_build(menu, tail, FILES_COUNT(tail));
@@ -2688,7 +2700,11 @@ static fn files_remote_handle_reply(struct files_peer address_to p, const struct
                                 (void)ui_start_apart(words, 5);
                         }
                         else
+                        {
+                                if ((b64)ui_kit.now >= files.next_progress || rr->offset == (p64)dlen)
+                                        files.next_progress = (b64)ui_kit.now + FILES_SHOW_NS, files.dirty = true;
                                 files_remote_read_chunk(p);
+                        }
                 }
         }
 }
@@ -3563,12 +3579,13 @@ static fn files_transfer_card_draw(struct ui address_to ui, const struct ui_list
         ui_kit_fill(ui, &box, ui_tone(ui_role(UI_SURFACE_CONTAINER) & 0xffffffu, 244), null);
         ui_kit_ring(ui, &box, ui_q8(ui, 1), ui_tone(ui_role(UI_OUTLINE_VARIANT) & 0xffffffu, 130));
 
-        // Header + Cancel button
+        // Header + Cancel button (shift header right of Cancel button in RTL)
         tx = r->x + pad, tw = r->w - 2 * pad - btn - ui_dev(ui, 6), y = r->y + ui_dev(ui, 10);
         if (head[0] && tw > 0)
         {
+                int hx = ui_rtl() ? tx + btn + ui_dev(ui, 6) : tx;
                 string_address text = ui_fit(ui, (string_address)head, UI_LABEL_LARGE, tw, cut, sizeof(cut));
-                ui_kit_text(ui, tx, ui_kit_baseline(ui, y, UI_LABEL_LARGE), text, UI_LABEL_LARGE, ui_text_colour(ui, UI_ON_SURFACE), 0);
+                ui_kit_text(ui, hx, ui_kit_baseline(ui, y, UI_LABEL_LARGE), text, UI_LABEL_LARGE, ui_text_colour(ui, UI_ON_SURFACE), 0);
         }
         ui_iconbutton_draw(ui, &files.transfer_cancel);
 
@@ -4003,7 +4020,7 @@ static long files_tick(long timeout, long address_to other)
                 if (!files_move_running(job))
                 {
                         b32 was_measure = files.measuring;
-                        int ended_state = job->state;
+                        int ended_state = job->state, ended_how = job->how;
                         if (was_measure)
                         {
                                 files.measuring = false;
@@ -4011,9 +4028,15 @@ static long files_tick(long timeout, long address_to other)
                                         files_sheet_show();
                         }
                         else
+                        {
                                 files_move_said(), files_move_deed(job), files_reload();
+                                if (ended_how == FILES_MOVE_MOVE && ended_state != FILES_JOB_CANCELLED && files.cut_dim)
+                                        files_carry_end();
+                        }
                         files_move_end(job), files.moving = false;
-                        if (!was_measure && ended_state != FILES_JOB_CANCELLED)
+                        if (!was_measure && ended_state == FILES_JOB_CANCELLED)
+                                files_queue_clear(&files.big->queue);
+                        else
                                 files_transfer_dequeue();
                 }
                 else if (now >= files.next_progress)
@@ -4036,9 +4059,13 @@ static long files_tick(long timeout, long address_to other)
                                 files.big->note[0] = 0, files.said = LANGUAGE_files_bin_emptied; // Empty the bin ran to its end: the bin is empty
                         else
                                 language_format(files.big->note, sizeof(files.big->note), WORDS(files_deleted), (int)job->removed);
+                        int del_state = job->state;
                         files.emptying = false;
                         files_job_end(job), files_after_delete(m), files_model_reload(m);
-                        files_transfer_dequeue();
+                        if (del_state == FILES_JOB_CANCELLED)
+                                files_queue_clear(&files.big->queue);
+                        else
+                                files_transfer_dequeue();
                 }
                 if (!more || now >= files.next_show)
                         files.next_show = now + FILES_SHOW_NS, files.dirty = true;
