@@ -138,7 +138,7 @@ static void gpu_glass_rows(void)
               mismatches == 0 && n == 2 * 4 * 4 * 4 * 16);
 }
 
-// The Intel set (Gen7-Gen11 active, Gen12+ frame checks): the edge split of a byte fill, and its batch, on the host (no card).
+// The Intel sets (Gen7 to Gen11 by Gen9's words, Gen12 by its own): the edge split of a byte fill, and its batch, on the host (no card).
 static void gpu_i915_set_rows(void)
 {
         unsigned int kept_family = gpu.family;
@@ -251,6 +251,20 @@ static void gpu_i915_set_rows(void)
                               state[(64 + 32) / 4] == (unsigned int)(GPU_VA + 0x2020) && ((state[(64 + 32) / 4]) & 31) == 0);
                         check("gpu i915: the surface is 80 bytes wide, 4 rows high, on a 512-byte pitch",
                               state[(64 + 8) / 4] == (79u | (3u << 16)) && state[(64 + 12) / 4] == 511u);
+                        check("gpu i915: Gen9's threads are dispatched as the walker does by default, and its batch ends with the data cache's flush",
+                              words[20] == 0x70000007u && !(words[23] & 1u << 6) && words[52] == 0x7a000004u && words[53] == (1u << 12 | 1u << 20 | 1u << 5) && words[58] == 0x05000000u);
+                        // Gen12: STATE_BASE_ADDRESS is 22 words (the bindless sampler state's base and size after Gen9's 19), the walker's threads are not
+                        // dispatched to fused pairs (MEDIA_VFE_STATE word 3 bit 6: a pair runs its two threads on one instruction pointer, and the
+                        // kernels jump each for itself), and the HDC pipeline's flush is bit 9 of PIPE_CONTROL's first word.
+                        gpu.family = 1200;
+                        n = gpu_i915_gen9_batch(&job, words, 64);
+                        check("gpu i915: Gen12's batch is the same 64 dwords with a STATE_BASE_ADDRESS of 22 words", n == 64 && words[0] == 0x69040302u && words[1] == 0x61010014u &&
+                                                                                                                         words[23] == 0x70000007u && words[40] == 0x7105000du && words[61] == 0x05000000u);
+                        check("gpu i915: Gen12's threads are not dispatched to fused pairs, and its batch ends with the HDC pipeline's and the data cache's flush",
+                              (words[26] & 0xffffu) == (1u << 8 | 1u << 6) && words[47] == 5u && words[50] == 4u && words[55] == 0x7a000204u &&
+                                  words[56] == (1u << 12 | 1u << 20 | 1u << 5));
+                        gpu.family = 900;
+                        n = gpu_i915_gen9_batch(&job, words, 64);
                         a->op = 5;
                         check("gpu i915: an op the set has no encoder for (5, bx) is refused (0 words)", gpu_i915_gen9_batch(&job, words, 64) == 0);
                         a->op = 8;
@@ -2071,8 +2085,9 @@ static void gpu_i915_rows(void)
                 }
                 check("gpu i915: CHIPSET_ID's device is the chip's family (Ivy Bridge 700 through Meteor Lake 1270; Sandy Bridge 0)", all);
                 gpu_kernel.i915_chip = 0x7d55;
-                check("gpu i915: Gen7 to Gen11 have registered kernel sets; Gen12 and later not yet",
-                      gpu_i915_set(700) && gpu_i915_set(750) && gpu_i915_set(800) && gpu_i915_set(900) && gpu_i915_set(1100) && !gpu_i915_set(1200) && !gpu_i915_set(1270));
+                check("gpu i915: Gen7 to Gen12 have registered kernel sets (Gen12's its own); DG1, Alchemist and Meteor Lake not yet",
+                      gpu_i915_set(700) && gpu_i915_set(750) && gpu_i915_set(800) && gpu_i915_set(900) && gpu_i915_set(1100) && gpu_i915_set(1200) == &gpu_i915_gen12_set &&
+                          gpu_i915_set(900) == &gpu_i915_gen9_set && !gpu_i915_set(1201) && !gpu_i915_set(1255) && !gpu_i915_set(1270));
         }
         // A start on the i915 node: the driver is known, the chip (Meteor Lake 0x7d55) has no kernels yet, the start stops at the chip's step with nothing of a card made, and it is settled.
         identified = gpu_kernel.i915_identifies;

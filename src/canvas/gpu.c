@@ -263,8 +263,8 @@ static positive gpu_bytes; // the bytes gpu_start was asked for (gpu_recover sta
 #error "the GPU kernels' include is not of this src/canvas/gpu.asm: python3 -I test/gpu_kernels.py --print src/canvas/gpu.asm > artifacts/gpu_kernels.inc (and --hash src/canvas/gpu.asm > src/canvas/gpu_asm.hash after a change of gpu.asm)"
 #endif
 
-// The Intel GPU's kernels, Gen9: src/canvas/gpu_i915.asm as `build gpu-i915` assembles them. gpu_i915_fill is op 1: its entry is
-// the instruction after IGT's colour replicate (64-byte aligned, see the source). The build names the file with
+// The Intel GPU's kernels, Gen9's and Gen12's (NAME12): src/canvas/gpu_i915.asm as `build gpu-i915` assembles them. gpu_i915_fill is op 1: its
+// entry is the instruction after IGT's colour replicate (64-byte aligned, see the source). The build names the file with
 // -DMOONWATER_GPU_I915_KERNELS; a program compiled by hand has it where ./build gpu-i915 writes it.
 #ifdef MOONWATER_GPU_I915_KERNELS
 #include MOONWATER_GPU_I915_KERNELS
@@ -961,14 +961,16 @@ _Static_assert(sizeof(struct gpu_i915_param) == 16 && sizeof(struct gpu_i915_cre
 #define GPU_I915_STATE 2048u     // a slot's state: the copy's and fill's binding table, surfaces, descriptor and CURBE in its first 512, the scene's table from 512
 #define GPU_I915_HANDLES (GPU_IMPORTS_MOST + 64 + 1024) // the table of bound ranges, by handle (the kernel gives the lowest free one: as many as the buffers held)
 
-// Forward declaration for the Intel kernel set (defined below gpu_i915_gen9_batch): Gen9's words, patched at the start for Gen7, Gen7.5, Gen8 and Gen11.
-static const struct gpu_set gpu_i915_gen9_set;
+// Forward declaration for the Intel kernel sets (defined below gpu_i915_gen9_batch): Gen9's words, patched at the start for Gen7, Gen7.5, Gen8 and Gen11,
+// and Gen12's own (its instructions are another encoding, with the dependencies between them said in each: the same sources assembled for it).
+static const struct gpu_set gpu_i915_gen9_set, gpu_i915_gen12_set;
 // Intel i915 kernel sets by family range: Gen7/7.5 (Ivy Bridge/Valleyview/Haswell), Gen8 (Broadwell/Cherry View),
 // Gen9/Gen9LP (Skylake through Comet Lake, Broxton/Apollo/Gemini Lake), and Gen11 (Ice Lake, Elkhart Lake, Jasper Lake)
 // all active via deterministic EU binary patching verified against intel-probe kern7/kern8/kern9/kern11 and bit-exact
-// gpu_test_hash() at startup.
+// gpu_test_hash() at startup; Gen12 (Tiger Lake to Raptor Lake, the integrated chips: DG1 is not taken) by its own words.
 static const struct { unsigned int from, to; const struct gpu_set *set; } gpu_i915_sets[] = {
-    {700, 750, &gpu_i915_gen9_set}, {800, 801, &gpu_i915_gen9_set}, {900, 901, &gpu_i915_gen9_set}, {1100, 1101, &gpu_i915_gen9_set}, {0, 0, 0}};
+    {700, 750, &gpu_i915_gen9_set}, {800, 801, &gpu_i915_gen9_set}, {900, 901, &gpu_i915_gen9_set}, {1100, 1101, &gpu_i915_gen9_set},
+    {1200, 1200, &gpu_i915_gen12_set}, {0, 0, 0}};
 
 /*
         The chips, by the PCI device id CHIPSET_ID / XE_DEVICE_QUERY answers (include/drm/intel/pciids.h): family is the
@@ -1641,7 +1643,9 @@ static const struct gpu_backend *gpu_backend = &gpu_amd; // the card's driver: t
 // d4330c65e: a scene of many records did not finish, each tile looking at every record). With the scene a strip a thread and its records binned by cell,
 // and Gen7's pictures read by the sampler cache's port, CHECK_gpu_scene draws every scene right (145 million checks, 1 to 2000 records) on an Ivy
 // Bridge HD 2500, two Haswells (HD 4400, HD 4600) and a Coffee Lake UHD 630, a 1080p desktop's scene in 3.0, 2.9 and 1.5 ms with the clock held, and
-// the compositor with a terminal scrolling fullscreen spends a sixth to a third of the processor time it spends composing itself.
+// the compositor with a terminal scrolling fullscreen spends a sixth to a third of the processor time it spends composing itself. Gen12 by its own
+// words, on an Alder Lake UHD 710 (16 EUs, a thread a fused pair): the same 145 million right, the desktop's scene 2.0 ms against 3.7 by the
+// processor's rows, and the compositor with the terminal fullscreen 18 ticks in ten seconds against 75 composing itself.
 static b32 gpu_slower(const struct gpu_backend *backend, unsigned int family)
 {
         (void)backend, (void)family;
@@ -3319,16 +3323,24 @@ static void gpu_i915_frame(unsigned int address_to words, unsigned int sbase, un
 
                 if (threads > max_threads)
                         threads = max_threads;
-                words[n++] = 0x70000007u; words[n++] = 0; words[n++] = 0; words[n++] = (threads << 16) | (1u << 8); words[n++] = 0; words[n++] = 1; words[n++] = 0; words[n++] = 0; words[n++] = 0;
+                // Gen12's EUs are fused in pairs, and as the walker dispatches by default a row's two threads next to each other are run by a pair on one
+                // instruction pointer: a jmpi moves both by the first one's flag. The kernels' jumps are each thread's own (a strip's count of records,
+                // their kinds, whether a tile is covered), so on an Alder Lake UHD 710 the second strip of every pair drew with the first's jumps: its
+                // list cut at the first's length, a tone drawn as the first's fill, tiles not read because the first's were covered. MEDIA_VFE_STATE's
+                // Fused EU Dispatch (word 3, bit 6: set is disabled) dispatches a thread a pair instead, each with its own pointer.
+                unsigned int unfused = gpu.family >= 1200 ? 1u << 6 : 0u;
+
+                words[n++] = 0x70000007u; words[n++] = 0; words[n++] = 0; words[n++] = (threads << 16) | (1u << 8) | unfused; words[n++] = 0; words[n++] = 1; words[n++] = 0; words[n++] = 0; words[n++] = 0;
         }
         words[n++] = 0x70010002u; words[n++] = 0; words[n++] = 64; words[n++] = sbase + 192;
         words[n++] = 0x70020002u; words[n++] = 0; words[n++] = 32; words[n++] = sbase + 128;
         words[n++] = 0x7105000du; words[n++] = 0; words[n++] = 0; words[n++] = 0; words[n++] = 1u << 30;
         words[n++] = 0; words[n++] = 0; words[n++] = cols; words[n++] = 0; words[n++] = 0; words[n++] = rows; words[n++] = 0; words[n++] = 1;
         words[n++] = 0xffffu; words[n++] = 0xffffffffu;
-        // PIPE_CONTROL: Render Target Cache Flush (bit 12) + CS Stall (bit 20) + HDC Flush (Gen12 bit 9) / DC Flush (Gen9-11 bit 5).
-        words[n++] = 0x7a000004u;
-        words[n++] = (1u << 12) | (1u << 20) | (gpu.family >= 1200 ? (1u << 9) : (1u << 5));
+        // PIPE_CONTROL: Render Target Cache Flush (bit 12) + CS Stall (bit 20) + DC Flush (bit 5), and on Gen12 the HDC Pipeline Flush, which is
+        // bit 9 of the command's first word there (bit 9 of the second is Indirect State Pointers Disable on every generation).
+        words[n++] = 0x7a000004u | (gpu.family >= 1200 ? 1u << 9 : 0u);
+        words[n++] = (1u << 12) | (1u << 20) | (1u << 5);
         words[n++] = 0; words[n++] = 0; words[n++] = 0; words[n++] = 0;
         words[n++] = 0x05000000u;
         memory_zero(words + n, (64 - n) * sizeof words[0]);
@@ -3681,6 +3693,12 @@ static const struct gpu_code gpu_i915_gen9_kernels[] = {
 // The Intel set takes the AMD set's self-test hash: it is registered only when its kernels draw the same pixels as the AMD ones (bit-exact,
 // the rule every set meets), so one picture stands for both. A set whose picture differs is not registered (the self-test would refuse it).
 static const struct gpu_set gpu_i915_gen9_set = {gpu_i915_gen9_kernels, 8, 0, GPU_TEST_HASH, gpu_i915_gen9_batch};
+// Gen12's set: the same eight ops and the same encoders (their words by family, gpu_i915_frame), the kernels src/canvas/gpu_i915.asm's NAME12, which
+// are the Gen9 sources assembled for Gen12 (test/gpu_kernels.py --intel-gen12, then iga64 -a -p=12p1 -Xauto-deps -Xforce-no-compact). Nothing of them
+// is patched at the start. Held to the processor by CHECK_gpu_scene on an Alder Lake UHD 710 (0x4693); the other chips of the family are not run.
+static const struct gpu_code gpu_i915_gen12_kernels[] = {
+        {gpu_i915_copy12, sizeof(gpu_i915_copy12)}, {gpu_i915_fill12, sizeof(gpu_i915_fill12)}, {gpu_i915_tone12, sizeof(gpu_i915_tone12)}, {gpu_i915_glass12, sizeof(gpu_i915_glass12)}, {gpu_i915_cp12, sizeof(gpu_i915_cp12)}, {0, 0}, {gpu_i915_scene12, sizeof(gpu_i915_scene12)}, {gpu_i915_scale12, sizeof(gpu_i915_scale12)}};
+static const struct gpu_set gpu_i915_gen12_set = {gpu_i915_gen12_kernels, 8, 0, GPU_TEST_HASH, gpu_i915_gen9_batch};
 
 // The bins sides of the scenes built without a wait (gpu_scene_submit): the last job that reads each (0 none), the side and the place of the last scene
 static struct { positive job[2]; unsigned int side; } gpu_bins;
@@ -5089,7 +5107,50 @@ static unsigned int gpu_test_hash(void)
                                 else if (pic[y * W2 + x] != c)
                                         ok = false;
                         }
-                return ok ? gpu_set->hash : (gpu_set->hash ^ 4u);
+                if (!ok)
+                        return gpu_set->hash ^ 4u;
+                // A third scene, two cells wide, the cells' lists unlike: the left's starts at a fill that covers it (no tile read) and goes on with a
+                // picture and a picture laid over, the right's is a tone, the picture and a fill that covers its last four tiles (the others read). A
+                // row's two strips are two threads next to each other: a card that runs such a pair on one instruction pointer (Gen12's fused EUs
+                // as they are dispatched by default, gpu_i915_frame) draws the second strip with the first's jumps, and the scenes above, one cell
+                // wide, do not see it.
+                {
+                        enum { W3 = 128, H3 = 16 };
+                        static const unsigned int wide[][8] = {{0, 0, 0, 64, H3, 0xff203040u, 0, 0}, {1, 70, 3, 120, 13, 0x80403020u, 0, 0}, {4, 40, 2, 100, 14, 0, 0, 64},
+                                                               {0, 96, 0, W3, H3, 0xff112233u, 0, 0}, {11, 10, 6, 30, H3, 0, 0, 64}};
+
+                        for (n = 0; n < sizeof(wide) / sizeof(wide[0]); n++)
+                        {
+                                memory_copy(ops + 8 * n, wide[n], 32);
+                                if (wide[n][0] > 1)
+                                        ops[8 * n + 5] = (unsigned int)(GPU_VA + src_at), ops[8 * n + 6] = (unsigned int)((GPU_VA + src_at) >> 32);
+                        }
+                        memory_zero(pic, W3 * H3 * 4);
+                        patient = gpu_patient, gpu_patient = gpu_recovered ? 2 : 1;
+                        done = gpu_scene(ops_at, n, bins_at, pic_at, W3, W3, H3, 0, 0, W3, H3);
+                        gpu_patient = patient;
+                        if (!done)
+                                return 0;
+                        for (unsigned int y = 0; y < H3; y++)
+                                for (unsigned int x = 0; x < W3; x++)
+                                {
+                                        unsigned int c = x < 64 ? 0xff203040u : 0u;
+
+                                        if (x >= 70 && x < 120 && y >= 3 && y < 13)
+                                                c = gpu_test_overv(c, 0x80403020u);
+                                        if (x >= 40 && x < 100 && y >= 2 && y < 14)
+                                                c = src[(y - 2) * 64 + (x - 40)];
+                                        if (x >= 96)
+                                                c = 0xff112233u;
+                                        if (x >= 10 && x < 30 && y >= 6)
+                                                c = gpu_test_overv(c, src[(y - 6) * 64 + (x - 10)]);
+                                        if (pic[y * W3 + x] != c && ok)
+                                                ok = false, gpu_test_say(3, x, y, pic[y * W3 + x], c);
+                                        else if (pic[y * W3 + x] != c)
+                                                ok = false;
+                                }
+                }
+                return ok ? gpu_set->hash : (gpu_set->hash ^ 8u);
         }
         for (unsigned int i = 0; i < 32 * 16 + 14 * 14; i++)
                 seed = seed * 1664525u + 1013904223u, cover[i] = (p8)((seed >> 24) % 4 == 0 ? 0 : (seed >> 24) % 4 == 1 ? 255 : seed >> 16);
