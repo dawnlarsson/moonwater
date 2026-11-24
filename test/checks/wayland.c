@@ -5102,16 +5102,19 @@ static void test_tree_cost(void)
         window woken between. What each step shows is the rows above's; what is asked here is that nothing fails, no event
         is malformed, and every buffer, mapping and window comes back.
 */
+static unsigned long dmabuf_buffer(struct session *s, long width, long height, unsigned base, long format);
+
 static void test_tree_fuzz(long rounds)
 {
         enum { SURFACES = 8, BUFFERS = 5 };
         struct session s;
         struct wlc *c = 0;
         unsigned long surface[SURFACES], sub[SURFACES], buffer[BUFFERS], subcompositor = 0;
-        long trees = 0, made = 0, drawn = 0, malformed = 0;
+        long trees = 0, made = 0, drawn = 0, malformed = 0, lifts;
 
         wl_reset();
         wayland_start(&fake_host);
+        lifts = wayland.lifts;
         for (long round = 0; round < rounds; round++)
         {
                 long i = (long)(wl_random() % SURFACES), j = (long)(wl_random() % SURFACES), b = (long)(wl_random() % BUFFERS);
@@ -5157,8 +5160,12 @@ static void test_tree_fuzz(long rounds)
                         }
                         break;
                 case 4:
-                        buffer[b] = wl_buffer_of(&s, 4 + (long)(wl_random() % 28), 4 + (long)(wl_random() % 20), 0xff000000u | (unsigned)wl_random(),
-                                                 wl_random() & 1 ? WLN_wl_shm_format_argb8888 : WLN_wl_shm_format_xrgb8888);
+                        // A third of them dma-bufs larger than any window here: one at (-8, -8) over the rest is lifted (wayland_lift).
+                        if (wl_random() % 3 == 0)
+                                buffer[b] = dmabuf_buffer(&s, 80, 64, 0xff000000u | ((unsigned)wl_random() & 0xff0000u), (long)WAYLAND_FOURCC_XRGB8888);
+                        else
+                                buffer[b] = wl_buffer_of(&s, 4 + (long)(wl_random() % 28), 4 + (long)(wl_random() % 20), 0xff000000u | (unsigned)wl_random(),
+                                                         wl_random() & 1 ? WLN_wl_shm_format_argb8888 : WLN_wl_shm_format_xrgb8888);
                         break;
                 case 5:
                 case 6:
@@ -5177,7 +5184,9 @@ static void test_tree_fuzz(long rounds)
                                 wlc_send(c, surface[i], WLQ_wl_surface_commit);
                         break;
                 case 9:
-                        if (sub[i])
+                        if (sub[i] && wl_random() % 4 == 0)
+                                wlc_send(c, sub[i], WLQ_wl_subsurface_set_position, -8L, -8L);
+                        else if (sub[i])
                                 wlc_send(c, sub[i], WLQ_wl_subsurface_set_position, (long)(wl_random() % 40) - 8, (long)(wl_random() % 40) - 8);
                         break;
                 case 10:
@@ -5223,7 +5232,11 @@ static void test_tree_fuzz(long rounds)
                                         fake.row[row].width_asked = (long)(wl_random() % 60);
                                         wayland_row_wake(row);
                                 }
-                        wayland_frame();
+                        // A latch and its flip, the window shown straight or composed: a lifted subsurface's latched and shown buffers.
+                        if (wl_random() & 1)
+                                wayland_latch(), wayland_presented((unsigned long)round * 6944444ul, 6944444ul, (unsigned long)round, 0ul, wl_random() & 1 ? 0L : -1L);
+                        else
+                                wayland_frame();
                         break;
                 }
                 if (round % 8 == 0 && c && !wayland_dead(c->slot))
@@ -5236,6 +5249,7 @@ static void test_tree_fuzz(long rounds)
         }
         WLCHECK(malformed == 0, "every event of the tree fuzz was well-formed (%ld malformed)", malformed);
         WLCHECK(made > 0 && drawn > 0 && trees > 1, "the tree fuzz hung subsurfaces and drew on surfaces (%ld, %ld, %ld trees)", made, drawn, trees);
+        WLCHECK(wayland.lifts > lifts, "the tree fuzz lifted windows to their subsurfaces and let them down (%ld lifts)", wayland.lifts - lifts);
         leak_check("tree fuzz");
         WLCHECK(fds_balanced(), "every descriptor of the tree fuzz was closed (%ld %ld)", fake.fds_open, fake.fds_closed);
         printf("CHECK_wayland tree fuzz: %ld rounds, %ld subsurfaces, %ld commits, %ld trees\n", rounds, made, drawn, trees);
