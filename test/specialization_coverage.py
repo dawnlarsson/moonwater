@@ -428,6 +428,16 @@ cover('folds_already', 'count', 'memory_s16_to_u8',
 cover('folds_already', 'frames', 'memory_window_peaks',
       'the frames are a source block (the sink\'s period, 16 to 512 or more), and the window is the source\'s rate over the stream\'s, '
       'both set at run time; a literal count would remove one compare from a loop of vector turns of four frames')
+cover('folds_already', 'width', 'conv3x3_f32',
+      'the enhancer hands it a band of a picture a row at a time: the width is the band\'s, from the picture at run '
+      'time, and the channel counts, though the model\'s, settle only the panel and tile chosen once a call, a few '
+      'compares against thousands of FMAs')
+cover('folds_already', 'count', 'u8_to_f32',
+      'a band\'s row of a picture, its length from the picture at run time; a literal would remove one compare a '
+      'vector from a stream of hundreds')
+cover('folds_already', 'quads', 'picture_quads_f32 picture_quads_add_f32',
+      'a band\'s row of a picture, its length from the picture at run time; a literal would remove one compare a quad '
+      'from a stream of hundreds')
 cover('folds_already', 'count', 'fused_residual_add_f32',
       'a training step hands it a whole activation, batch by context by '
       'width: thousands to millions of floats a call, where a literal count '

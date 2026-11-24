@@ -250,7 +250,7 @@ fi
 #       kernel/profile/sec_sanitize.
 asked_lanes="gpulists gpuanim gpumodel wifi fuzz msan proof mutation ring0 tier input scale desktop chrome usb firewall sound gate net_fast net_x86_64 net_arm64 net_riscv64 net_crypto net_tls net_fuzz net_http mutation_wayland mutation_dbus mutation_audio mutation_ui mutation_audiolib stop locks chromium_theme"
 
-lanes="standard declare fold allocator reserve utf8 hex codec fixed table error strings stdlib leaving numbers clock math format scan stream spool process signal lock verify exact libdiff text_asm shell_asm known socket net waterlink modem link netem bowl tar zstd gzip xz compression_floor compression reuse_shell audit regex editing slurp wait writer native probe stack checksum storage_io storage_format machine rover snapshot sensors browser font font_shape cli script differential_oracle text files misc util_linux shell builtins awk term edit kit switches boot install canvas sleep tensor matrix train ranged audiolib clang wayland osk band audio dbus issues installer"
+lanes="standard declare fold allocator reserve utf8 hex codec fixed table error strings stdlib leaving numbers clock math format scan stream spool process signal lock verify exact libdiff text_asm shell_asm known socket net waterlink modem link netem bowl tar zstd gzip xz compression_floor compression reuse_shell audit regex editing slurp wait writer native probe stack checksum storage_io storage_format machine rover snapshot sensors browser font font_shape cli script differential_oracle text files misc util_linux shell builtins awk term edit kit switches boot install canvas sleep tensor matrix train enhance ranged audiolib clang wayland osk band audio dbus issues installer"
 
 describe()
 {
@@ -352,6 +352,7 @@ describe()
         browser) echo "the file browser's model with no window: a folder read in steps, its order, its selection, the way back, hostile names, links not followed, a folder that changes under its listing" ;;
         font) echo "the text engine: exact coverage of fonts written in the check, hostile fonts against a guard page, and FreeType and the exact area when both and a font are here" ;;
         font_shape) echo "the text engine's right to left half: the bidirectional algorithm against samples of the Unicode tests, Arabic and Hebrew shaping against HarfBuzz's glyphs, mixed lines, carets, and hostile layout tables against a guard page" ;;
+        enhance) echo "the picture network routines against a double-precision model (conv3x3_f32: every tile, panel and tail, guard pages) and exact arithmetic (the byte routines: ties to even, NaN, infinities), each x86 tier, and riscv64 with no V and V at 128, 256, 512 and 1024 bits" ;;
         tensor) echo "the f32 transformer kernels against a double-precision model: every count, guard pages, in place, each x86 tier, and riscv64 with no V and V at 128, 256, 512 and 1024 bits" ;;
         cli)      echo "the moonwater command in a namespace: every verb, every zone it names, what it writes, and argument vectors drawn from its usage" ;;
         script)   echo "every verb as the machine script runs it, with no terminal and nothing on its input: bounded, asking nothing, and the same twice" ;;
@@ -411,7 +412,7 @@ seams="lib compress net link shell tools machine desktop image engine"
 seam_lanes()
 {
         case $1 in
-        lib) echo "standard declare fold allocator reserve utf8 hex codec fixed error strings stdlib leaving numbers clock math format scan stream spool process signal lock verify exact libdiff text_asm shell_asm known slurp wait writer native probe stack tensor matrix train ranged audiolib clang" ;;
+        lib) echo "standard declare fold allocator reserve utf8 hex codec fixed error strings stdlib leaving numbers clock math format scan stream spool process signal lock verify exact libdiff text_asm shell_asm known slurp wait writer native probe stack tensor matrix train enhance ranged audiolib clang" ;;
         compress) echo "tar zstd gzip xz compression_floor compression" ;;
         net) echo "socket netem net_fast net_x86_64 net_arm64 net_riscv64 net_crypto net_tls net_fuzz net_http" ;;
         link) echo "waterlink modem link" ;;
@@ -4319,6 +4320,12 @@ freestanding_checks_no_zbb()
 #       AVX-512, AVX2 + FMA and SSE2 bodies itself.
 #
 lane_tensor() { freestanding_checks_vector_lane tensor tensor; }
+
+#
+#       The picture network routines of lib.c (conv3x3_f32 and the byte routines either side of it) and the
+#       wallpaper enhancer built on them; the x86_64 run walks the AVX-512, AVX2 + FMA and SSE2 bodies itself.
+#
+lane_enhance() { freestanding_checks_vector_lane enhance enhance; }
 
 #
 #       The moonwater command, which only the boot lane reached before: run

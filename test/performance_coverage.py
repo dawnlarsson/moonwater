@@ -298,6 +298,10 @@ cover('direct_benchmark', 'test/checks.c#BENCH_matrix', 'gemm_f32',
 cover('benchmark_context', 'test/checks.c#BENCH_matrix', 'matrix_engine_f32',
       'the blocked engine gemm_f32 hands its job to, timed in every gemm_f32 row',
       {'matrix_engine_f32': 'gemm_f32'})
+cover('correctness_only', 'test/checks.c#CHECK_enhance', 'conv3x3_f32 u8_to_f32 picture_quads_f32 picture_quads_add_f32',
+      'the picture network routines the wallpaper enhancer runs on: every tile, panel and tail against a double model, '
+      'guard pages, each x86-64 tier and riscv64 with V and without; timed in the enhancer\'s own rows (a 3840 by 2160 '
+      'wallpaper), not yet against a C reference of their own')
 cover('direct_benchmark', 'test/checks.c#BENCH_fill_rect', 'memory_fill_u32_rect',
       'paired timing against a memory_fill_u32 a row over cells, a sliver, a '
       'line of blank cells and a panel, with AVX-512 and without')

@@ -64,7 +64,7 @@
         A .set is a second label on the same address, so there is no wrapper
         and no jump, and which names get one depends on who is linking.
 
-        520 routines (493 public, 27 local), 508 of them on all three and 12 local to one.
+        524 routines (497 public, 27 local), 512 of them on all three and 12 local to one.
         Raw C purity: 0 function bodies, 0 object definitions, 0 body macros, and 0 object macros (all forbidden).
 
           routine                        scope   x86_64  arm64   riscv64
@@ -136,6 +136,7 @@
           canvas_row_blit_wide           public  yes     yes     yes
           cells_from_ascii               public  yes     yes     yes
           cells_from_ascii_wide          public  yes     yes     yes
+          conv3x3_f32                    public  yes     yes     yes
           cpu_hash_detect                local   yes     yes     yes
           cpu_vector_detect              local   --      --      yes
           decimal_ceiling                public  yes     yes     yes
@@ -412,6 +413,8 @@
           path_tail_copy                 public  yes     yes     yes
           pcm_pack24                     public  yes     yes     yes
           pcm_widen                      public  yes     yes     yes
+          picture_quads_add_f32          public  yes     yes     yes
+          picture_quads_f32              public  yes     yes     yes
           pointer_gain                   public  yes     yes     yes
           pointer_scale                  public  yes     yes     yes
           positive_digits                public  yes     yes     yes
@@ -557,6 +560,7 @@
           thread_start                   public  yes     yes     yes
           thread_wait                    public  yes     yes     yes
           thread_wake                    public  yes     yes     yes
+          u8_to_f32                      public  yes     yes     yes
           unicode_case                   public  yes     yes     yes
           unicode_width                  public  yes     yes     yes
           wait_status_code               public  yes     yes     yes
@@ -58623,6 +58627,781 @@ __asm__(
 );
 #endif
 #endif // KERNEL_MODE, gemm_f32
+
+/*
+        Pictures through small convolutional networks.
+
+        conv3x3_f32(out, rows, weights, bias, width, in_channels, out_channels, relu) is one row of a 3x3
+        convolution over pixels whose channels are contiguous floats (NHWC). rows points at three row pointers, the
+        row above, the row and the row below, and each of those rows holds width + 2 pixels of in_channels floats:
+        the output pixel x reads input pixels x, x + 1 and x + 2 of each, so the first and last are the caller's
+        padding (zeros at a picture's edge, the neighbours inside a band of it). weights are 9 * in_channels *
+        out_channels floats, [dy][dx][in][out], out the fastest, and bias out_channels floats. out gets width *
+        out_channels floats:
+
+            out[x][o] = bias[o] + sum over dy, dx, i of rows[dy][(x + dx) * in_channels + i] * weights[dy][dx][i][o]
+
+        added in that order into one lane, so the error is a serial sum's: about (9 * in_channels + 1) eps times
+        the sum of the magnitudes. With relu not zero each output is then max(0, sum), a NaN or a minus zero giving
+        plus zero (maxNum's answer, which every machine below gives in one instruction). A width or out_channels of
+        0 touches nothing; an in_channels of 0 writes the bias. out must not overlap the rows, weights or bias;
+        nothing is asked of alignment beyond a float's, and nothing outside the arrays is read or written.
+
+        The arrangement is gemm_f32's tile with A read in place: a tile is a few pixels by a panel of output
+        columns, accumulating in registers; each k (an in channel of one tap) broadcasts one float of each pixel and
+        multiplies it into the panel's row of weights. The three taps of a row are 3 * in_channels contiguous floats
+        of each pixel, so a row of the 3x3 is one stretch of k and there is nothing to gather or pack: the weights
+        are read in place, in order, the panel's B rows a row of out_channels floats apart. A panel's weights are 9
+        * in_channels * 32 floats at most, 36 KB for 32 in channels, and stay in L1 across the row's tiles.
+
+        x86_64, AVX-512: 12 pixels by 32 columns (24 zmm accumulating, B in two, the broadcasts alternating in two
+        more), 4 and then 1 pixel for the end of the row; a panel of 32 while more than 16 columns are left, its
+        second vector under k2, then one of 16 or fewer under k1, the masks' fault suppression keeping the loads of
+        B and the bias inside their arrays. AVX2 and FMA: 6 pixels by 16 columns (12 ymm), and a short panel under
+        vmaskmovps masks with 4 pixels. SSE2: a multiply and an add, 4 pixels by 8 columns, then 4, then a column
+        at a time in scalars.
+
+        arm64: 6 pixels by 16 columns, 24 q accumulating; each pixel's next four k in a q of its own, used a lane
+        at a time by fmla by element, B two q at a time. Then panels of 4 columns and of one (fmla on s registers
+        by element). NEON has no masks, so the columns go as wide as are left: 16, 4, 1.
+
+        riscv64, with V: 7 pixels by VLMAX columns of e32 m4, the last panel a shorter vl; each pixel's float comes
+        to an f register by a load offset, four k a turn, for vfmacc.vf. Without V: 6 pixels by 4 columns of
+        fmadd.s, 24 f registers accumulating, then a column at a time.
+
+        Measured, one core, a row of 132 pixels of 32 channels into 32 (the shape of a band of the wallpaper
+        restorer): 9950X AVX-512 165 GFMA/s against the 176 of a loop of independent zmm FMAs on the same core (94
+        percent), AVX2 84.5 against 88.3 (96), SSE2 29.6 multiply-add lane pairs a ns; M2 Pro NEON 52.6 against 55.8
+        (16 FMA lanes a cycle at 3.49 GHz, 94 percent). riscv64 is unmeasured (qemu).
+
+        u8_to_f32(out, bytes, count) is out[i] = bytes[i], exactly.
+
+        picture_quads_f32(out, top, bottom, quads) reads two rows of 0xaarrggbb words a quad at a time, a quad being
+        top[2q], top[2q + 1], bottom[2q], bottom[2q + 1], and writes each quad's 16 bytes as 16 floats in memory order
+        (blue, green, red, alpha of each word in turn): out[16q + 4p + b] = byte b of word p. That is the input of a
+        network that works at half the resolution with the quad's pixels as its channels, the pixel unshuffle.
+
+        picture_quads_add_f32(top, bottom, residual, quads) is the way back, in place: each colour byte b of word p
+        of quad q becomes byte + residual[16q + 4p + b], clamped to [0, 255] (a NaN to 0) and rounded to the nearest
+        integer, ties to even, and each alpha byte becomes 0xff whatever its residual says. A quad of the output can
+        be a pixel of the input repeated, so the same call finishes a network that doubles the resolution.
+*/
+#ifndef KERNEL_MODE
+fn conv3x3_f32(f32 address_to out, const f32 address_to const address_to rows, const f32 address_to weights,
+               const f32 address_to bias, positive width, positive in_channels, positive out_channels, p32 relu);
+WRITES(1, 3) READS(2, 3)
+fn u8_to_f32(f32 address_to out, const p8 address_to bytes, positive count);
+fn picture_quads_f32(f32 address_to out, const p32 address_to top, const p32 address_to bottom, positive quads);
+fn picture_quads_add_f32(p32 address_to top, p32 address_to bottom, const f32 address_to residual, positive quads);
+#if X64
+//      conv3x3_f32's pieces on x86_64. B, the weights, is read in place a row of out_channels floats at a time from
+//      r15, which steps by rbp (out_channels * 4) after each row; the rows of the tile's pixels are bases r10-r13 plus
+//      0, 1 or 2 times rbx (in_channels * 4), each k one float of each broadcast. The accumulators are named by number.
+#define CONV_Z_B2 "vmovups (%r15), %zmm30\n   vmovups 64(%r15), %zmm31{%k2}{z}\n   add %rbp, %r15\n"
+#define CONV_Z_B1 "vmovups (%r15), %zmm30{%k1}{z}\n   add %rbp, %r15\n"
+#define CONV_Z_P2(ADDR, S, A0, A1)                                                                                 \
+    "vbroadcastss " ADDR ", %zmm" S "\n   vfmadd231ps %zmm30, %zmm" S ", %zmm" A0 "\n   vfmadd231ps %zmm31, %zmm" S \
+    ", %zmm" A1 "\n"
+#define CONV_Z_P1(ADDR, S, A0) "vbroadcastss " ADDR ", %zmm" S "\n   vfmadd231ps %zmm30, %zmm" S ", %zmm" A0 "\n"
+#define CONV_Z_K12V2(U)                                                                                            \
+    CONV_Z_B2 CONV_Z_P2(U "*4(%r10)", "28", "0", "1") CONV_Z_P2(U "*4(%r10,%rbx,1)", "29", "2", "3")             \
+    CONV_Z_P2(U "*4(%r10,%rbx,2)", "28", "4", "5") CONV_Z_P2(U "*4(%r11)", "29", "6", "7")                         \
+    CONV_Z_P2(U "*4(%r11,%rbx,1)", "28", "8", "9") CONV_Z_P2(U "*4(%r11,%rbx,2)", "29", "10", "11")               \
+    CONV_Z_P2(U "*4(%r12)", "28", "12", "13") CONV_Z_P2(U "*4(%r12,%rbx,1)", "29", "14", "15")                     \
+    CONV_Z_P2(U "*4(%r12,%rbx,2)", "28", "16", "17") CONV_Z_P2(U "*4(%r13)", "29", "18", "19")                     \
+    CONV_Z_P2(U "*4(%r13,%rbx,1)", "28", "20", "21") CONV_Z_P2(U "*4(%r13,%rbx,2)", "29", "22", "23")
+#define CONV_Z_K4V2(U)                                                                                             \
+    CONV_Z_B2 CONV_Z_P2(U "*4(%r10)", "28", "0", "1") CONV_Z_P2(U "*4(%r10,%rbx,1)", "29", "2", "3")             \
+    CONV_Z_P2(U "*4(%r10,%rbx,2)", "28", "4", "5") CONV_Z_P2(U "*4(%r11)", "29", "6", "7")
+#define CONV_Z_K1V2(U) CONV_Z_B2 CONV_Z_P2(U "*4(%r10)", "28", "0", "1")
+#define CONV_Z_K12V1(U)                                                                                            \
+    CONV_Z_B1 CONV_Z_P1(U "*4(%r10)", "28", "0") CONV_Z_P1(U "*4(%r10,%rbx,1)", "29", "1")                        \
+    CONV_Z_P1(U "*4(%r10,%rbx,2)", "28", "2") CONV_Z_P1(U "*4(%r11)", "29", "3")                                   \
+    CONV_Z_P1(U "*4(%r11,%rbx,1)", "28", "4") CONV_Z_P1(U "*4(%r11,%rbx,2)", "29", "5")                           \
+    CONV_Z_P1(U "*4(%r12)", "28", "6") CONV_Z_P1(U "*4(%r12,%rbx,1)", "29", "7")                                   \
+    CONV_Z_P1(U "*4(%r12,%rbx,2)", "28", "8") CONV_Z_P1(U "*4(%r13)", "29", "9")                                   \
+    CONV_Z_P1(U "*4(%r13,%rbx,1)", "28", "10") CONV_Z_P1(U "*4(%r13,%rbx,2)", "29", "11")
+#define CONV_Z_K4V1(U)                                                                                             \
+    CONV_Z_B1 CONV_Z_P1(U "*4(%r10)", "28", "0") CONV_Z_P1(U "*4(%r10,%rbx,1)", "29", "1")                        \
+    CONV_Z_P1(U "*4(%r10,%rbx,2)", "28", "2") CONV_Z_P1(U "*4(%r11)", "29", "3")
+#define CONV_Z_K1V1(U) CONV_Z_B1 CONV_Z_P1(U "*4(%r10)", "28", "0")
+#define CONV_X_BUMP4(N) "add $" N ", %r10\n   add $" N ", %r11\n   add $" N ", %r12\n   add $" N ", %r13\n"
+#define CONV_X_BUMP2(N) "add $" N ", %r10\n   add $" N ", %r11\n"
+#define CONV_X_BUMP1(N) "add $" N ", %r10\n"
+//      Each accumulator starts as the bias (zmm25, and zmm26 for the second vector), the ReLU is a max with zmm24 as
+//      the operand returned when the other is a NaN or a zero, and a pixel's outputs go to rax, which steps a pixel
+//      (rbp) at a time.
+#define CONV_Z_I2(A0, A1) "vmovaps %zmm25, %zmm" A0 "\n   vmovaps %zmm26, %zmm" A1 "\n"
+#define CONV_Z_I1(A0) "vmovaps %zmm25, %zmm" A0 "\n"
+#define CONV_Z_R(A) "vmaxps %zmm24, %zmm" A ", %zmm" A "\n"
+#define CONV_Z_S2(A0, A1) "vmovups %zmm" A0 ", (%rax)\n   vmovups %zmm" A1 ", 64(%rax){%k2}\n   add %rbp, %rax\n"
+#define CONV_Z_S1(A0) "vmovups %zmm" A0 ", (%rax){%k1}\n   add %rbp, %rax\n"
+#define CONV_Z_INIT2 "vmovups (%rax), %zmm25\n   vmovups 64(%rax), %zmm26{%k2}{z}\n"
+#define CONV_Z_INIT1 "vmovups (%rax), %zmm25{%k1}{z}\n"
+#define CONV_Z_I12V2                                                                                               \
+    CONV_Z_INIT2 CONV_Z_I2("0", "1") CONV_Z_I2("2", "3") CONV_Z_I2("4", "5") CONV_Z_I2("6", "7") CONV_Z_I2("8", "9")  \
+    CONV_Z_I2("10", "11") CONV_Z_I2("12", "13") CONV_Z_I2("14", "15") CONV_Z_I2("16", "17") CONV_Z_I2("18", "19")     \
+    CONV_Z_I2("20", "21") CONV_Z_I2("22", "23")
+#define CONV_Z_I4V2 CONV_Z_INIT2 CONV_Z_I2("0", "1") CONV_Z_I2("2", "3") CONV_Z_I2("4", "5") CONV_Z_I2("6", "7")
+#define CONV_Z_I1V2 CONV_Z_INIT2 CONV_Z_I2("0", "1")
+#define CONV_Z_I12V1                                                                                               \
+    CONV_Z_INIT1 CONV_Z_I1("0") CONV_Z_I1("1") CONV_Z_I1("2") CONV_Z_I1("3") CONV_Z_I1("4") CONV_Z_I1("5")         \
+    CONV_Z_I1("6") CONV_Z_I1("7") CONV_Z_I1("8") CONV_Z_I1("9") CONV_Z_I1("10") CONV_Z_I1("11")
+#define CONV_Z_I4V1 CONV_Z_INIT1 CONV_Z_I1("0") CONV_Z_I1("1") CONV_Z_I1("2") CONV_Z_I1("3")
+#define CONV_Z_I1V1 CONV_Z_INIT1 CONV_Z_I1("0")
+#define CONV_Z_R4(A, B, C, D) CONV_Z_R(A) CONV_Z_R(B) CONV_Z_R(C) CONV_Z_R(D)
+#define CONV_Z_R24                                                                                                 \
+    CONV_Z_R4("0", "1", "2", "3") CONV_Z_R4("4", "5", "6", "7") CONV_Z_R4("8", "9", "10", "11")                     \
+    CONV_Z_R4("12", "13", "14", "15") CONV_Z_R4("16", "17", "18", "19") CONV_Z_R4("20", "21", "22", "23")
+#define CONV_Z_R12 CONV_Z_R4("0", "1", "2", "3") CONV_Z_R4("4", "5", "6", "7") CONV_Z_R4("8", "9", "10", "11")
+#define CONV_Z_R8 CONV_Z_R4("0", "1", "2", "3") CONV_Z_R4("4", "5", "6", "7")
+#define CONV_Z_R2 CONV_Z_R("0") CONV_Z_R("1")
+#define CONV_Z_R1 CONV_Z_R("0")
+#define CONV_Z_S12V2                                                                                               \
+    CONV_Z_S2("0", "1") CONV_Z_S2("2", "3") CONV_Z_S2("4", "5") CONV_Z_S2("6", "7") CONV_Z_S2("8", "9")             \
+    CONV_Z_S2("10", "11") CONV_Z_S2("12", "13") CONV_Z_S2("14", "15") CONV_Z_S2("16", "17") CONV_Z_S2("18", "19")    \
+    CONV_Z_S2("20", "21") CONV_Z_S2("22", "23")
+#define CONV_Z_S4V2 CONV_Z_S2("0", "1") CONV_Z_S2("2", "3") CONV_Z_S2("4", "5") CONV_Z_S2("6", "7")
+#define CONV_Z_S1V2 CONV_Z_S2("0", "1")
+#define CONV_Z_S12V1                                                                                               \
+    CONV_Z_S1("0") CONV_Z_S1("1") CONV_Z_S1("2") CONV_Z_S1("3") CONV_Z_S1("4") CONV_Z_S1("5") CONV_Z_S1("6")       \
+    CONV_Z_S1("7") CONV_Z_S1("8") CONV_Z_S1("9") CONV_Z_S1("10") CONV_Z_S1("11")
+#define CONV_Z_S4V1 CONV_Z_S1("0") CONV_Z_S1("1") CONV_Z_S1("2") CONV_Z_S1("3")
+#define CONV_Z_S1V1 CONV_Z_S1("0")
+//      One tile loop of every tier: while R pixels are left of the width (32(%rsp), done so far at 88(%rsp)), the tile's
+//      accumulators from the bias at the panel (24(%rsp) + 80(%rsp)), then each of the three rows (8(%rsp) holds them)
+//      over its 3 * in_channels floats, four k a turn (64(%rsp) turns) and then one (72(%rsp)), the ReLU when 56(%rsp)
+//      asks, and the stores at out (0(%rsp)) + the pixel * rbp + the panel.
+#define CONV_X_TILE(ID, R, INIT, KMAC, BUMP, RELU, STORE)                                                          \
+    "" ASM_LABEL(conv_##ID) ":\n   mov 32(%rsp), %rax\n   sub 88(%rsp), %rax\n   cmp $" #R ", %rax\n   jb "          \
+    ASM_LABEL(conv_##ID##_end) "\n   mov 24(%rsp), %rax\n   add 80(%rsp), %rax\n" INIT                              \
+    "mov 16(%rsp), %r15\n   add 80(%rsp), %r15\n   mov 88(%rsp), %rdx\n   imul %rbx, %rdx\n   xor %r9d, %r9d\n"          \
+    "" ASM_LABEL(conv_##ID##_row) ":\n   mov 8(%rsp), %rsi\n   mov (%rsi,%r9,8), %r10\n   add %rdx, %r10\n"              \
+    "lea (%r10,%rbx,2), %r11\n   add %rbx, %r11\n   lea (%r11,%rbx,2), %r12\n   add %rbx, %r12\n"                     \
+    "lea (%r12,%rbx,2), %r13\n   add %rbx, %r13\n   mov 64(%rsp), %r14\n   test %r14, %r14\n   jz "                   \
+    ASM_LABEL(conv_##ID##_one) "\n" ASM_LABEL(conv_##ID##_four) ":\n" KMAC("0") KMAC("1") KMAC("2") KMAC("3")          \
+    BUMP("16") "dec %r14\n   jnz " ASM_LABEL(conv_##ID##_four) "\n" ASM_LABEL(conv_##ID##_one) ":\n"                 \
+    "mov 72(%rsp), %r14\n   test %r14, %r14\n   jz " ASM_LABEL(conv_##ID##_next) "\n" ASM_LABEL(conv_##ID##_onek)   \
+    ":\n" KMAC("0") BUMP("4") "dec %r14\n   jnz " ASM_LABEL(conv_##ID##_onek) "\n" ASM_LABEL(conv_##ID##_next) ":\n"   \
+    "inc %r9d\n   cmp $3, %r9d\n   jb " ASM_LABEL(conv_##ID##_row) "\n   cmpl $0, 56(%rsp)\n   je "                    \
+    ASM_LABEL(conv_##ID##_store) "\n" RELU ASM_LABEL(conv_##ID##_store) ":\n   mov 88(%rsp), %rax\n   imul %rbp, %rax\n" \
+    "add 0(%rsp), %rax\n   add 80(%rsp), %rax\n" STORE "addq $" #R ", 88(%rsp)\n   jmp " ASM_LABEL(conv_##ID) "\n"   \
+    "" ASM_LABEL(conv_##ID##_end) ":\n"
+//      AVX2 and FMA: a full panel is 16 columns in two ymm (12 and 13) and 6 pixels (ymm0-11), the broadcast in ymm14
+//      and the ReLU's zero in ymm15; a short panel goes under the masks of ymm10 and 11 with 4 pixels (ymm0-7), B in
+//      ymm8 and 9 and the broadcast in ymm12.
+#define CONV_Y_B2 "vmovups (%r15), %ymm12\n   vmovups 32(%r15), %ymm13\n   add %rbp, %r15\n"
+#define CONV_Y_BM "vmaskmovps (%r15), %ymm10, %ymm8\n   vmaskmovps 32(%r15), %ymm11, %ymm9\n   add %rbp, %r15\n"
+#define CONV_Y_P2(ADDR, A0, A1)                                                                                    \
+    "vbroadcastss " ADDR ", %ymm14\n   vfmadd231ps %ymm12, %ymm14, %ymm" A0 "\n   vfmadd231ps %ymm13, %ymm14, %ymm" A1 "\n"
+#define CONV_Y_PM(ADDR, A0, A1)                                                                                    \
+    "vbroadcastss " ADDR ", %ymm12\n   vfmadd231ps %ymm8, %ymm12, %ymm" A0 "\n   vfmadd231ps %ymm9, %ymm12, %ymm" A1 "\n"
+#define CONV_Y_K6(U)                                                                                               \
+    CONV_Y_B2 CONV_Y_P2(U "*4(%r10)", "0", "1") CONV_Y_P2(U "*4(%r10,%rbx,1)", "2", "3")                            \
+    CONV_Y_P2(U "*4(%r10,%rbx,2)", "4", "5") CONV_Y_P2(U "*4(%r11)", "6", "7") CONV_Y_P2(U "*4(%r11,%rbx,1)", "8", "9") \
+    CONV_Y_P2(U "*4(%r11,%rbx,2)", "10", "11")
+#define CONV_Y_K1(U) CONV_Y_B2 CONV_Y_P2(U "*4(%r10)", "0", "1")
+#define CONV_Y_KM4(U)                                                                                              \
+    CONV_Y_BM CONV_Y_PM(U "*4(%r10)", "0", "1") CONV_Y_PM(U "*4(%r10,%rbx,1)", "2", "3")                            \
+    CONV_Y_PM(U "*4(%r10,%rbx,2)", "4", "5") CONV_Y_PM(U "*4(%r11)", "6", "7")
+#define CONV_Y_KM1(U) CONV_Y_BM CONV_Y_PM(U "*4(%r10)", "0", "1")
+#define CONV_Y_I2(A0, A1) "vmovaps %ymm12, %ymm" A0 "\n   vmovaps %ymm13, %ymm" A1 "\n"
+#define CONV_Y_INIT "vmovups (%rax), %ymm12\n   vmovups 32(%rax), %ymm13\n"
+#define CONV_Y_INITM "vmaskmovps (%rax), %ymm10, %ymm12\n   vmaskmovps 32(%rax), %ymm11, %ymm13\n"
+#define CONV_Y_I6 CONV_Y_INIT CONV_Y_I2("0", "1") CONV_Y_I2("2", "3") CONV_Y_I2("4", "5") CONV_Y_I2("6", "7") CONV_Y_I2("8", "9") CONV_Y_I2("10", "11")
+#define CONV_Y_I1 CONV_Y_INIT CONV_Y_I2("0", "1")
+#define CONV_Y_IM4 CONV_Y_INITM CONV_Y_I2("0", "1") CONV_Y_I2("2", "3") CONV_Y_I2("4", "5") CONV_Y_I2("6", "7")
+#define CONV_Y_IM1 CONV_Y_INITM CONV_Y_I2("0", "1")
+#define CONV_Y_R(Z, A) "vmaxps %ymm" Z ", %ymm" A ", %ymm" A "\n"
+#define CONV_Y_R12                                                                                                 \
+    "vxorps %ymm15, %ymm15, %ymm15\n" CONV_Y_R("15", "0") CONV_Y_R("15", "1") CONV_Y_R("15", "2") CONV_Y_R("15", "3") \
+    CONV_Y_R("15", "4") CONV_Y_R("15", "5") CONV_Y_R("15", "6") CONV_Y_R("15", "7") CONV_Y_R("15", "8")             \
+    CONV_Y_R("15", "9") CONV_Y_R("15", "10") CONV_Y_R("15", "11")
+#define CONV_Y_R2 "vxorps %ymm15, %ymm15, %ymm15\n" CONV_Y_R("15", "0") CONV_Y_R("15", "1")
+#define CONV_Y_RM8                                                                                                 \
+    "vxorps %ymm12, %ymm12, %ymm12\n" CONV_Y_R("12", "0") CONV_Y_R("12", "1") CONV_Y_R("12", "2") CONV_Y_R("12", "3") \
+    CONV_Y_R("12", "4") CONV_Y_R("12", "5") CONV_Y_R("12", "6") CONV_Y_R("12", "7")
+#define CONV_Y_RM2 "vxorps %ymm12, %ymm12, %ymm12\n" CONV_Y_R("12", "0") CONV_Y_R("12", "1")
+#define CONV_Y_S2(A0, A1) "vmovups %ymm" A0 ", (%rax)\n   vmovups %ymm" A1 ", 32(%rax)\n   add %rbp, %rax\n"
+#define CONV_Y_SM(A0, A1) "vmaskmovps %ymm" A0 ", %ymm10, (%rax)\n   vmaskmovps %ymm" A1 ", %ymm11, 32(%rax)\n   add %rbp, %rax\n"
+#define CONV_Y_S6 CONV_Y_S2("0", "1") CONV_Y_S2("2", "3") CONV_Y_S2("4", "5") CONV_Y_S2("6", "7") CONV_Y_S2("8", "9") CONV_Y_S2("10", "11")
+#define CONV_Y_S1 CONV_Y_S2("0", "1")
+#define CONV_Y_SM4 CONV_Y_SM("0", "1") CONV_Y_SM("2", "3") CONV_Y_SM("4", "5") CONV_Y_SM("6", "7")
+#define CONV_Y_SM1 CONV_Y_SM("0", "1")
+//      SSE2: no FMA, so a multiply and an add, the product rounded first. 8 columns (xmm8, 9) by 4 pixels (xmm0-7), then
+//      4 columns (xmm8) by 4 pixels (xmm0-3), then a column at a time in scalars; the broadcasts alternate xmm10 / 12
+//      and their products take xmm11 / 13.
+#define CONV_S_B2 "movups (%r15), %xmm8\n   movups 16(%r15), %xmm9\n   add %rbp, %r15\n"
+#define CONV_S_B1 "movups (%r15), %xmm8\n   add %rbp, %r15\n"
+#define CONV_S_B0 "movss (%r15), %xmm8\n   add %rbp, %r15\n"
+#define CONV_S_P2(ADDR, S, T, A0, A1)                                                                              \
+    "movss " ADDR ", %xmm" S "\n   shufps $0, %xmm" S ", %xmm" S "\n   movaps %xmm" S ", %xmm" T "\n   mulps %xmm8, %xmm" S \
+    "\n   mulps %xmm9, %xmm" T "\n   addps %xmm" S ", %xmm" A0 "\n   addps %xmm" T ", %xmm" A1 "\n"
+#define CONV_S_P1(ADDR, S, A0)                                                                                     \
+    "movss " ADDR ", %xmm" S "\n   shufps $0, %xmm" S ", %xmm" S "\n   mulps %xmm8, %xmm" S "\n   addps %xmm" S ", %xmm" A0 "\n"
+#define CONV_S_P0(ADDR, S, A0) "movss " ADDR ", %xmm" S "\n   mulss %xmm8, %xmm" S "\n   addss %xmm" S ", %xmm" A0 "\n"
+#define CONV_S_K4W8(U)                                                                                             \
+    CONV_S_B2 CONV_S_P2(U "*4(%r10)", "10", "11", "0", "1") CONV_S_P2(U "*4(%r10,%rbx,1)", "12", "13", "2", "3")      \
+    CONV_S_P2(U "*4(%r10,%rbx,2)", "10", "11", "4", "5") CONV_S_P2(U "*4(%r11)", "12", "13", "6", "7")
+#define CONV_S_K1W8(U) CONV_S_B2 CONV_S_P2(U "*4(%r10)", "10", "11", "0", "1")
+#define CONV_S_K4W4(U)                                                                                             \
+    CONV_S_B1 CONV_S_P1(U "*4(%r10)", "10", "0") CONV_S_P1(U "*4(%r10,%rbx,1)", "12", "1")                          \
+    CONV_S_P1(U "*4(%r10,%rbx,2)", "10", "2") CONV_S_P1(U "*4(%r11)", "12", "3")
+#define CONV_S_K1W4(U) CONV_S_B1 CONV_S_P1(U "*4(%r10)", "10", "0")
+#define CONV_S_K4W1(U)                                                                                             \
+    CONV_S_B0 CONV_S_P0(U "*4(%r10)", "10", "0") CONV_S_P0(U "*4(%r10,%rbx,1)", "12", "1")                          \
+    CONV_S_P0(U "*4(%r10,%rbx,2)", "10", "2") CONV_S_P0(U "*4(%r11)", "12", "3")
+#define CONV_S_K1W1(U) CONV_S_B0 CONV_S_P0(U "*4(%r10)", "10", "0")
+#define CONV_S_INIT2 "movups (%rax), %xmm14\n   movups 16(%rax), %xmm15\n"
+#define CONV_S_I2(A0, A1) "movaps %xmm14, %xmm" A0 "\n   movaps %xmm15, %xmm" A1 "\n"
+#define CONV_S_I4W8 CONV_S_INIT2 CONV_S_I2("0", "1") CONV_S_I2("2", "3") CONV_S_I2("4", "5") CONV_S_I2("6", "7")
+#define CONV_S_I1W8 CONV_S_INIT2 CONV_S_I2("0", "1")
+#define CONV_S_I4W4 "movups (%rax), %xmm14\n   movaps %xmm14, %xmm0\n   movaps %xmm14, %xmm1\n   movaps %xmm14, %xmm2\n   movaps %xmm14, %xmm3\n"
+#define CONV_S_I1W4 "movups (%rax), %xmm0\n"
+#define CONV_S_I4W1 "movss (%rax), %xmm0\n   movaps %xmm0, %xmm1\n   movaps %xmm0, %xmm2\n   movaps %xmm0, %xmm3\n"
+#define CONV_S_I1W1 "movss (%rax), %xmm0\n"
+//      maxps returns its source when either is a NaN or both are zeros, so the zero is the source: a NaN and a minus
+//      zero become plus zero, as on the other machines.
+#define CONV_S_R(A) "maxps %xmm14, %xmm" A "\n"
+#define CONV_S_RS(A) "maxss %xmm14, %xmm" A "\n"
+#define CONV_S_R8 "xorps %xmm14, %xmm14\n" CONV_S_R("0") CONV_S_R("1") CONV_S_R("2") CONV_S_R("3") CONV_S_R("4") CONV_S_R("5") CONV_S_R("6") CONV_S_R("7")
+#define CONV_S_R4 "xorps %xmm14, %xmm14\n" CONV_S_R("0") CONV_S_R("1") CONV_S_R("2") CONV_S_R("3")
+#define CONV_S_R2 "xorps %xmm14, %xmm14\n" CONV_S_R("0") CONV_S_R("1")
+#define CONV_S_R1 "xorps %xmm14, %xmm14\n" CONV_S_R("0")
+#define CONV_S_RS4 "xorps %xmm14, %xmm14\n" CONV_S_RS("0") CONV_S_RS("1") CONV_S_RS("2") CONV_S_RS("3")
+#define CONV_S_RS1 "xorps %xmm14, %xmm14\n" CONV_S_RS("0")
+#define CONV_S_S2(A0, A1) "movups %xmm" A0 ", (%rax)\n   movups %xmm" A1 ", 16(%rax)\n   add %rbp, %rax\n"
+#define CONV_S_S1(A0) "movups %xmm" A0 ", (%rax)\n   add %rbp, %rax\n"
+#define CONV_S_S0(A0) "movss %xmm" A0 ", (%rax)\n   add %rbp, %rax\n"
+#define CONV_S_S4W8 CONV_S_S2("0", "1") CONV_S_S2("2", "3") CONV_S_S2("4", "5") CONV_S_S2("6", "7")
+#define CONV_S_S1W8 CONV_S_S2("0", "1")
+#define CONV_S_S4W4 CONV_S_S1("0") CONV_S_S1("1") CONV_S_S1("2") CONV_S_S1("3")
+#define CONV_S_S1W4 CONV_S_S1("0")
+#define CONV_S_S4W1 CONV_S_S0("0") CONV_S_S0("1") CONV_S_S0("2") CONV_S_S0("3")
+#define CONV_S_S1W1 CONV_S_S0("0")
+__asm__(
+    ASM_SECTION
+    //      conv3x3_f32: rdi out, rsi rows, rdx weights, rcx bias, r8 width, r9 in_channels, 8(%rsp) out_channels,
+    //      16(%rsp) relu (32 bits). A frame of the arguments: 0 out, 8 rows, 16 weights, 24 bias, 32 width, 40
+    //      in_channels * 4, 48 out_channels * 4, 56 relu, 64 the turns of four k, 72 the k left, 80 the panel's column
+    //      * 4, 88 the pixel the tiles are at. rbx holds in_channels * 4 and rbp out_channels * 4 throughout.
+    ASM_FUNC(conv3x3_f32)
+    "test %r8, %r8\n   jz " ASM_LABEL(conv_none) "\n   cmpq $0, 8(%rsp)\n   jz " ASM_LABEL(conv_none) "\n"
+    "push %rbx\n   push %rbp\n   push %r12\n   push %r13\n   push %r14\n   push %r15\n   sub $104, %rsp\n"
+    "mov %rdi, 0(%rsp)\n   mov %rsi, 8(%rsp)\n   mov %rdx, 16(%rsp)\n   mov %rcx, 24(%rsp)\n   mov %r8, 32(%rsp)\n"
+    "lea (,%r9,4), %rbx\n   mov %rbx, 40(%rsp)\n   mov 160(%rsp), %rbp\n   shl $2, %rbp\n   mov %rbp, 48(%rsp)\n"
+    "movl 168(%rsp), %eax\n   mov %rax, 56(%rsp)\n   lea (%r9,%r9,2), %rax\n   mov %rax, %rcx\n   shr $2, %rax\n"
+    "mov %rax, 64(%rsp)\n   and $3, %ecx\n   mov %rcx, 72(%rsp)\n   movq $0, 80(%rsp)\n"
+    ASM_NARROW("cpu_has_avx2", "" ASM_LABEL(conv_sse2) "")
+    ASM_NARROW("cpu_has_fma", "" ASM_LABEL(conv_sse2) "")
+    ASM_NARROW("cpu_has_avx512", "" ASM_LABEL(conv_avx2) "")
+    //      AVX-512: a panel of 32 columns while more than 16 are left, the second vector's columns under k2; then one
+    //      of up to 16 under k1. Tiles of 12 pixels, then 4, then 1.
+    "vpxord %zmm24, %zmm24, %zmm24\n"
+    "" ASM_LABEL(conv_z_panel) ":\n   mov %rbp, %rax\n   sub 80(%rsp), %rax\n   shr $2, %rax\n   movq $0, 88(%rsp)\n"
+    "cmp $16, %rax\n   jbe " ASM_LABEL(conv_z_narrow) "\n   lea -16(%rax), %rcx\n   mov $-1, %edx\n   cmp $16, %rcx\n"
+    "jae 1f\n   bzhi %ecx, %edx, %edx\n1:  kmovw %edx, %k2\n"
+    CONV_X_TILE(z12w, 12, CONV_Z_I12V2, CONV_Z_K12V2, CONV_X_BUMP4, CONV_Z_R24, CONV_Z_S12V2)
+    CONV_X_TILE(z4w, 4, CONV_Z_I4V2, CONV_Z_K4V2, CONV_X_BUMP2, CONV_Z_R8, CONV_Z_S4V2)
+    CONV_X_TILE(z1w, 1, CONV_Z_I1V2, CONV_Z_K1V2, CONV_X_BUMP1, CONV_Z_R2, CONV_Z_S1V2)
+    "addq $128, 80(%rsp)\n   cmp 80(%rsp), %rbp\n   ja " ASM_LABEL(conv_z_panel) "\n   jmp " ASM_LABEL(conv_z_done) "\n"
+    "" ASM_LABEL(conv_z_narrow) ":\n   mov $-1, %edx\n   cmp $16, %eax\n   jae 1f\n   bzhi %eax, %edx, %edx\n"
+    "1:  kmovw %edx, %k1\n"
+    CONV_X_TILE(z12n, 12, CONV_Z_I12V1, CONV_Z_K12V1, CONV_X_BUMP4, CONV_Z_R12, CONV_Z_S12V1)
+    CONV_X_TILE(z4n, 4, CONV_Z_I4V1, CONV_Z_K4V1, CONV_X_BUMP2, CONV_Z_R4("0", "1", "2", "3"), CONV_Z_S4V1)
+    CONV_X_TILE(z1n, 1, CONV_Z_I1V1, CONV_Z_K1V1, CONV_X_BUMP1, CONV_Z_R1, CONV_Z_S1V1)
+    "" ASM_LABEL(conv_z_done) ":\n   vzeroupper\n   jmp " ASM_LABEL(conv_out) "\n"
+    //      AVX2: panels of 16 columns while 16 are left, then one short panel under masks made by comparing the
+    //      columns left against the lane numbers (16 lanes, two ymm).
+    "" ASM_LABEL(conv_avx2) ":\n"
+    "" ASM_LABEL(conv_y_panel) ":\n   mov %rbp, %rax\n   sub 80(%rsp), %rax\n   shr $2, %rax\n   movq $0, 88(%rsp)\n"
+    "cmp $16, %rax\n   jb " ASM_LABEL(conv_y_short) "\n"
+    CONV_X_TILE(y6, 6, CONV_Y_I6, CONV_Y_K6, CONV_X_BUMP2, CONV_Y_R12, CONV_Y_S6)
+    CONV_X_TILE(y1, 1, CONV_Y_I1, CONV_Y_K1, CONV_X_BUMP1, CONV_Y_R2, CONV_Y_S1)
+    "addq $64, 80(%rsp)\n   cmp 80(%rsp), %rbp\n   ja " ASM_LABEL(conv_y_panel) "\n   jmp " ASM_LABEL(conv_y_done) "\n"
+    "" ASM_LABEL(conv_y_short) ":\n   vmovd %eax, %xmm12\n   vpbroadcastd %xmm12, %ymm12\n"
+    "lea " ASM_LABEL(conv_lanes) "(%rip), %rcx\n   vmovdqu (%rcx), %ymm10\n   vmovdqu 32(%rcx), %ymm11\n"
+    "vpcmpgtd %ymm10, %ymm12, %ymm10\n   vpcmpgtd %ymm11, %ymm12, %ymm11\n"
+    CONV_X_TILE(ym4, 4, CONV_Y_IM4, CONV_Y_KM4, CONV_X_BUMP2, CONV_Y_RM8, CONV_Y_SM4)
+    CONV_X_TILE(ym1, 1, CONV_Y_IM1, CONV_Y_KM1, CONV_X_BUMP1, CONV_Y_RM2, CONV_Y_SM1)
+    "" ASM_LABEL(conv_y_done) ":\n   vzeroupper\n   jmp " ASM_LABEL(conv_out) "\n"
+    //      SSE2: 8 columns at a time while 8 are left, 4 if 4 are, then one at a time.
+    "" ASM_LABEL(conv_sse2) ":\n   mov %rbp, %rax\n   sub 80(%rsp), %rax\n   shr $2, %rax\n   movq $0, 88(%rsp)\n"
+    "cmp $8, %rax\n   jb " ASM_LABEL(conv_s_four) "\n"
+    CONV_X_TILE(s4w8, 4, CONV_S_I4W8, CONV_S_K4W8, CONV_X_BUMP2, CONV_S_R8, CONV_S_S4W8)
+    CONV_X_TILE(s1w8, 1, CONV_S_I1W8, CONV_S_K1W8, CONV_X_BUMP1, CONV_S_R2, CONV_S_S1W8)
+    "addq $32, 80(%rsp)\n   jmp " ASM_LABEL(conv_s_next) "\n"
+    "" ASM_LABEL(conv_s_four) ":\n   cmp $4, %rax\n   jb " ASM_LABEL(conv_s_lane) "\n"
+    CONV_X_TILE(s4w4, 4, CONV_S_I4W4, CONV_S_K4W4, CONV_X_BUMP2, CONV_S_R4, CONV_S_S4W4)
+    CONV_X_TILE(s1w4, 1, CONV_S_I1W4, CONV_S_K1W4, CONV_X_BUMP1, CONV_S_R1, CONV_S_S1W4)
+    "addq $16, 80(%rsp)\n   jmp " ASM_LABEL(conv_s_next) "\n"
+    "" ASM_LABEL(conv_s_lane) ":\n"
+    CONV_X_TILE(s4w1, 4, CONV_S_I4W1, CONV_S_K4W1, CONV_X_BUMP2, CONV_S_RS4, CONV_S_S4W1)
+    CONV_X_TILE(s1w1, 1, CONV_S_I1W1, CONV_S_K1W1, CONV_X_BUMP1, CONV_S_RS1, CONV_S_S1W1)
+    "addq $4, 80(%rsp)\n"
+    "" ASM_LABEL(conv_s_next) ":\n   cmp 80(%rsp), %rbp\n   ja " ASM_LABEL(conv_sse2) "\n"
+    "" ASM_LABEL(conv_out) ":\n   add $104, %rsp\n   pop %r15\n   pop %r14\n   pop %r13\n   pop %r12\n   pop %rbp\n   pop %rbx\n"
+    "" ASM_LABEL(conv_none) ":\n" ASM_RET
+    "" ASM_RODATA_PUSH "\n   .balign 32\n"
+    "" ASM_LABEL(conv_lanes) ":\n   .4byte 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15\n"
+    ".popsection\n"
+    ASM_END(conv3x3_f32)
+);
+#elif ARM64
+//      conv3x3_f32's pieces on arm64. A tile's pixels are x19-x24, each reading four k into its own q (v24-v29) and
+//      used a lane at a time by fmla by element; B, at x14, steps a row of weights (x9 bytes) after each k and is
+//      loaded two q at a time into v30 and v31. A full panel is 16 columns (four q a pixel, v0-v23 for 6 pixels), a
+//      quarter panel 4 (one q a pixel, v0-v5), a lane one (s0-s5).
+#define CONV_N_F2(K, A, D0, D1) "fmla v" D0 ".4s, v30.4s, v" A ".s[" K "]\n   fmla v" D1 ".4s, v31.4s, v" A ".s[" K "]\n"
+#define CONV_N_K16R6(K)                                                                                            \
+    "ldp q30, q31, [x14]\n" CONV_N_F2(K, "24", "0", "1") CONV_N_F2(K, "25", "4", "5") CONV_N_F2(K, "26", "8", "9")   \
+    CONV_N_F2(K, "27", "12", "13") CONV_N_F2(K, "28", "16", "17") CONV_N_F2(K, "29", "20", "21")                    \
+    "ldp q30, q31, [x14, #32]\n" CONV_N_F2(K, "24", "2", "3") CONV_N_F2(K, "25", "6", "7")                          \
+    CONV_N_F2(K, "26", "10", "11") CONV_N_F2(K, "27", "14", "15") CONV_N_F2(K, "28", "18", "19")                    \
+    CONV_N_F2(K, "29", "22", "23") "add x14, x14, x9\n"
+#define CONV_N_K16R1(K) "ldp q30, q31, [x14]\n" CONV_N_F2(K, "24", "0", "1") "ldp q30, q31, [x14, #32]\n" CONV_N_F2(K, "24", "2", "3") "add x14, x14, x9\n"
+#define CONV_N_F1(K, A, D) "fmla v" D ".4s, v30.4s, v" A ".s[" K "]\n"
+#define CONV_N_K4R6(K)                                                                                             \
+    "ldr q30, [x14]\n   add x14, x14, x9\n" CONV_N_F1(K, "24", "0") CONV_N_F1(K, "25", "1") CONV_N_F1(K, "26", "2")      \
+    CONV_N_F1(K, "27", "3") CONV_N_F1(K, "28", "4") CONV_N_F1(K, "29", "5")
+#define CONV_N_K4R1(K) "ldr q30, [x14]\n   add x14, x14, x9\n" CONV_N_F1(K, "24", "0")
+#define CONV_N_F0(K, A, D) "fmla s" D ", s30, v" A ".s[" K "]\n"
+#define CONV_N_K1R6(K)                                                                                             \
+    "ldr s30, [x14]\n   add x14, x14, x9\n" CONV_N_F0(K, "24", "0") CONV_N_F0(K, "25", "1") CONV_N_F0(K, "26", "2")      \
+    CONV_N_F0(K, "27", "3") CONV_N_F0(K, "28", "4") CONV_N_F0(K, "29", "5")
+#define CONV_N_K1R1(K) "ldr s30, [x14]\n   add x14, x14, x9\n" CONV_N_F0(K, "24", "0")
+#define CONV_N_A6Q "ldr q24, [x19], #16\n   ldr q25, [x20], #16\n   ldr q26, [x21], #16\n   ldr q27, [x22], #16\n   ldr q28, [x23], #16\n   ldr q29, [x24], #16\n"
+#define CONV_N_A6S "ldr s24, [x19], #4\n   ldr s25, [x20], #4\n   ldr s26, [x21], #4\n   ldr s27, [x22], #4\n   ldr s28, [x23], #4\n   ldr s29, [x24], #4\n"
+#define CONV_N_A1Q "ldr q24, [x19], #16\n"
+#define CONV_N_A1S "ldr s24, [x19], #4\n"
+#define CONV_N_I16(A, B, C, D) "mov v" A ".16b, v24.16b\n   mov v" B ".16b, v25.16b\n   mov v" C ".16b, v26.16b\n   mov v" D ".16b, v27.16b\n"
+#define CONV_N_I16R6                                                                                               \
+    "ld1 {v24.4s, v25.4s, v26.4s, v27.4s}, [x16]\n" CONV_N_I16("0", "1", "2", "3") CONV_N_I16("4", "5", "6", "7")    \
+    CONV_N_I16("8", "9", "10", "11") CONV_N_I16("12", "13", "14", "15") CONV_N_I16("16", "17", "18", "19")          \
+    CONV_N_I16("20", "21", "22", "23")
+#define CONV_N_I16R1 "ld1 {v24.4s, v25.4s, v26.4s, v27.4s}, [x16]\n" CONV_N_I16("0", "1", "2", "3")
+#define CONV_N_I4R6 "ldr q24, [x16]\n   mov v0.16b, v24.16b\n   mov v1.16b, v24.16b\n   mov v2.16b, v24.16b\n   mov v3.16b, v24.16b\n   mov v4.16b, v24.16b\n   mov v5.16b, v24.16b\n"
+#define CONV_N_I4R1 "ldr q0, [x16]\n"
+#define CONV_N_I1R6 "ldr s24, [x16]\n   fmov s0, s24\n   fmov s1, s24\n   fmov s2, s24\n   fmov s3, s24\n   fmov s4, s24\n   fmov s5, s24\n"
+#define CONV_N_I1R1 "ldr s0, [x16]\n"
+//      fmaxnm against zero: a NaN and a minus zero become plus zero, as on the other machines.
+#define CONV_N_R(D) "fmaxnm v" D ".4s, v" D ".4s, v24.4s\n"
+#define CONV_N_RS(D) "fmaxnm s" D ", s" D ", s24\n"
+#define CONV_N_R4(A, B, C, D) CONV_N_R(A) CONV_N_R(B) CONV_N_R(C) CONV_N_R(D)
+#define CONV_N_R16R6                                                                                               \
+    "movi v24.4s, #0\n" CONV_N_R4("0", "1", "2", "3") CONV_N_R4("4", "5", "6", "7") CONV_N_R4("8", "9", "10", "11")  \
+    CONV_N_R4("12", "13", "14", "15") CONV_N_R4("16", "17", "18", "19") CONV_N_R4("20", "21", "22", "23")
+#define CONV_N_R16R1 "movi v24.4s, #0\n" CONV_N_R4("0", "1", "2", "3")
+#define CONV_N_R4R6 "movi v24.4s, #0\n" CONV_N_R4("0", "1", "2", "3") CONV_N_R("4") CONV_N_R("5")
+#define CONV_N_R4R1 "movi v24.4s, #0\n" CONV_N_R("0")
+#define CONV_N_R1R6 "movi v24.4s, #0\n" CONV_N_RS("0") CONV_N_RS("1") CONV_N_RS("2") CONV_N_RS("3") CONV_N_RS("4") CONV_N_RS("5")
+#define CONV_N_R1R1 "movi v24.4s, #0\n" CONV_N_RS("0")
+#define CONV_N_S16(A, B, C, D) "st1 {v" A ".4s, v" B ".4s, v" C ".4s, v" D ".4s}, [x16]\n   add x16, x16, x9\n"
+#define CONV_N_S16R6                                                                                               \
+    CONV_N_S16("0", "1", "2", "3") CONV_N_S16("4", "5", "6", "7") CONV_N_S16("8", "9", "10", "11")                  \
+    CONV_N_S16("12", "13", "14", "15") CONV_N_S16("16", "17", "18", "19") CONV_N_S16("20", "21", "22", "23")
+#define CONV_N_S16R1 CONV_N_S16("0", "1", "2", "3")
+#define CONV_N_S4(D) "str q" D ", [x16]\n   add x16, x16, x9\n"
+#define CONV_N_S4R6 CONV_N_S4("0") CONV_N_S4("1") CONV_N_S4("2") CONV_N_S4("3") CONV_N_S4("4") CONV_N_S4("5")
+#define CONV_N_S4R1 CONV_N_S4("0")
+#define CONV_N_S1(D) "str s" D ", [x16]\n   add x16, x16, x9\n"
+#define CONV_N_S1R6 CONV_N_S1("0") CONV_N_S1("1") CONV_N_S1("2") CONV_N_S1("3") CONV_N_S1("4") CONV_N_S1("5")
+#define CONV_N_S1R1 CONV_N_S1("0")
+//      One tile loop: while R pixels are left (x4 the width, x13 done), the accumulators from the bias at the panel
+//      (x3 + x12), then each of the three rows (x1 holds them) over its 3 * in_channels floats, four k a turn (x10
+//      turns) and then one (x11), the ReLU when w7 asks, and the stores at x0 + the pixel * x9 + the panel.
+#define CONV_N_TILE(ID, R, INIT, A4, A1, KMAC, RELU, STORE)                                                        \
+    "" ASM_LABEL(conv_##ID) ":\n   sub x16, x4, x13\n   cmp x16, #" #R "\n   b.lo " ASM_LABEL(conv_##ID##_end) "\n"         \
+    "add x16, x3, x12\n" INIT "add x14, x2, x12\n   mul x17, x13, x8\n   mov x15, #0\n" ASM_LABEL(conv_##ID##_row) ":\n" \
+    "ldr x19, [x1, x15, lsl #3]\n   add x19, x19, x17\n   add x20, x19, x8\n   add x21, x20, x8\n   add x22, x21, x8\n"  \
+    "add x23, x22, x8\n   add x24, x23, x8\n   mov x16, x10\n   cbz x16, " ASM_LABEL(conv_##ID##_one) "\n"              \
+    ASM_LABEL(conv_##ID##_four) ":\n" A4 KMAC("0") KMAC("1") KMAC("2") KMAC("3") "subs x16, x16, #1\n   b.ne "         \
+    ASM_LABEL(conv_##ID##_four) "\n" ASM_LABEL(conv_##ID##_one) ":\n   mov x16, x11\n   cbz x16, "                       \
+    ASM_LABEL(conv_##ID##_next) "\n" ASM_LABEL(conv_##ID##_onek) ":\n" A1 KMAC("0") "subs x16, x16, #1\n   b.ne "      \
+    ASM_LABEL(conv_##ID##_onek) "\n" ASM_LABEL(conv_##ID##_next) ":\n   add x15, x15, #1\n   cmp x15, #3\n   b.lo "    \
+    ASM_LABEL(conv_##ID##_row) "\n   cbz w7, " ASM_LABEL(conv_##ID##_store) "\n" RELU ASM_LABEL(conv_##ID##_store) ":\n" \
+    "mul x16, x13, x9\n   add x16, x16, x0\n   add x16, x16, x12\n" STORE "add x13, x13, #" #R "\n   b "                 \
+    ASM_LABEL(conv_##ID) "\n" ASM_LABEL(conv_##ID##_end) ":\n"
+__asm__(
+    ASM_SECTION
+    //
+    //      conv3x3_f32 -- x0 out, x1 rows, x2 weights, x3 bias, x4 width, x5 in_channels, x6 out_channels, w7 relu.
+    //      x8 in_channels * 4, x9 out_channels * 4, x10 the turns of four k, x11 the k left, x12 the panel's column
+    //      * 4, x13 the pixel the tiles are at. Panels of 16 columns while 16 are left, of 4 while 4 are, then one
+    //      at a time; tiles of 6 pixels, then 1. v8-v15 accumulate, so d8-d15 are kept, and x19-x24 point.
+    //
+    ASM_FUNC(conv3x3_f32)
+    "cbz x4, " ASM_LABEL(conv_none) "\n   cbz x6, " ASM_LABEL(conv_none) "\n"
+    "stp x19, x20, [sp, #-112]!\n   stp x21, x22, [sp, #16]\n   stp x23, x24, [sp, #32]\n   stp d8, d9, [sp, #48]\n"
+    "stp d10, d11, [sp, #64]\n   stp d12, d13, [sp, #80]\n   stp d14, d15, [sp, #96]\n"
+    "lsl x8, x5, #2\n   lsl x9, x6, #2\n   add x10, x5, x5, lsl #1\n   and x11, x10, #3\n   lsr x10, x10, #2\n   mov x12, #0\n"
+    "" ASM_LABEL(conv_n_panel) ":\n   sub x16, x9, x12\n   lsr x16, x16, #2\n   mov x13, #0\n   cmp x16, #16\n   b.lo "
+    ASM_LABEL(conv_n_quarter) "\n"
+    CONV_N_TILE(n16r6, 6, CONV_N_I16R6, CONV_N_A6Q, CONV_N_A6S, CONV_N_K16R6, CONV_N_R16R6, CONV_N_S16R6)
+    CONV_N_TILE(n16r1, 1, CONV_N_I16R1, CONV_N_A1Q, CONV_N_A1S, CONV_N_K16R1, CONV_N_R16R1, CONV_N_S16R1)
+    "add x12, x12, #64\n   b " ASM_LABEL(conv_n_more) "\n"
+    "" ASM_LABEL(conv_n_quarter) ":\n   cmp x16, #4\n   b.lo " ASM_LABEL(conv_n_lane) "\n"
+    CONV_N_TILE(n4r6, 6, CONV_N_I4R6, CONV_N_A6Q, CONV_N_A6S, CONV_N_K4R6, CONV_N_R4R6, CONV_N_S4R6)
+    CONV_N_TILE(n4r1, 1, CONV_N_I4R1, CONV_N_A1Q, CONV_N_A1S, CONV_N_K4R1, CONV_N_R4R1, CONV_N_S4R1)
+    "add x12, x12, #16\n   b " ASM_LABEL(conv_n_more) "\n"
+    "" ASM_LABEL(conv_n_lane) ":\n"
+    CONV_N_TILE(n1r6, 6, CONV_N_I1R6, CONV_N_A6Q, CONV_N_A6S, CONV_N_K1R6, CONV_N_R1R6, CONV_N_S1R6)
+    CONV_N_TILE(n1r1, 1, CONV_N_I1R1, CONV_N_A1Q, CONV_N_A1S, CONV_N_K1R1, CONV_N_R1R1, CONV_N_S1R1)
+    "add x12, x12, #4\n"
+    "" ASM_LABEL(conv_n_more) ":\n   cmp x12, x9\n   b.lo " ASM_LABEL(conv_n_panel) "\n"
+    "ldp d14, d15, [sp, #96]\n   ldp d12, d13, [sp, #80]\n   ldp d10, d11, [sp, #64]\n   ldp d8, d9, [sp, #48]\n"
+    "ldp x23, x24, [sp, #32]\n   ldp x21, x22, [sp, #16]\n   ldp x19, x20, [sp], #112\n"
+    "" ASM_LABEL(conv_none) ":\n" ASM_RET
+    ASM_END(conv3x3_f32)
+);
+#elif RISCV64
+//      conv3x3_f32's pieces on riscv64. With V: a panel is VLMAX columns of e32 m4 (the last one shorter), a tile 7
+//      pixels, their accumulators v0, v4 ... v24 and B's row in v28; each pixel's float comes to an f register (ft0-ft6)
+//      from its pointer (t0-t6) by a load offset, four k a turn, so vfmacc.vf needs no broadcast. Without: 6 pixels by
+//      4 columns of fmadd.s (fs0-fs11 and ft0-ft11 accumulating, B in fa0-fa3, the pixel's float in fa4 / fa5), then a
+//      column at a time (fs0-fs5).
+#define CONV_RV_VK7(U)                                                                                             \
+    "vle32.v v28, (s6)\n   add s6, s6, a6\n   flw ft0, " U "*4(t0)\n   flw ft1, " U "*4(t1)\n   flw ft2, " U "*4(t2)\n"     \
+    "flw ft3, " U "*4(t3)\n   flw ft4, " U "*4(t4)\n   flw ft5, " U "*4(t5)\n   flw ft6, " U "*4(t6)\n"                     \
+    "vfmacc.vf v0, ft0, v28\n   vfmacc.vf v4, ft1, v28\n   vfmacc.vf v8, ft2, v28\n   vfmacc.vf v12, ft3, v28\n"            \
+    "vfmacc.vf v16, ft4, v28\n   vfmacc.vf v20, ft5, v28\n   vfmacc.vf v24, ft6, v28\n"
+#define CONV_RV_VK1(U) "vle32.v v28, (s6)\n   add s6, s6, a6\n   flw ft0, " U "*4(t0)\n   vfmacc.vf v0, ft0, v28\n"
+#define CONV_RV_BUMP7(N)                                                                                           \
+    "addi t0, t0, " N "\n   addi t1, t1, " N "\n   addi t2, t2, " N "\n   addi t3, t3, " N "\n   addi t4, t4, " N "\n"   \
+    "addi t5, t5, " N "\n   addi t6, t6, " N "\n"
+#define CONV_RV_BUMP6(N)                                                                                           \
+    "addi t0, t0, " N "\n   addi t1, t1, " N "\n   addi t2, t2, " N "\n   addi t3, t3, " N "\n   addi t4, t4, " N "\n"   \
+    "addi t5, t5, " N "\n"
+#define CONV_RV_BUMP1(N) "addi t0, t0, " N "\n"
+#define CONV_RV_PTRS "add t1, t0, a5\n   add t2, t1, a5\n   add t3, t2, a5\n   add t4, t3, a5\n   add t5, t4, a5\n   add t6, t5, a5\n"
+#define CONV_RV_VI7                                                                                                \
+    "vle32.v v28, (s10)\n   vmv.v.v v0, v28\n   vmv.v.v v4, v28\n   vmv.v.v v8, v28\n   vmv.v.v v12, v28\n"              \
+    "vmv.v.v v16, v28\n   vmv.v.v v20, v28\n   vmv.v.v v24, v28\n"
+#define CONV_RV_VI1 "vle32.v v0, (s10)\n"
+//      vfmax against zero: a NaN and a minus zero become plus zero, as on the other machines.
+#define CONV_RV_VR7                                                                                                \
+    "fmv.w.x fa0, zero\n   vfmax.vf v0, v0, fa0\n   vfmax.vf v4, v4, fa0\n   vfmax.vf v8, v8, fa0\n"                     \
+    "vfmax.vf v12, v12, fa0\n   vfmax.vf v16, v16, fa0\n   vfmax.vf v20, v20, fa0\n   vfmax.vf v24, v24, fa0\n"
+#define CONV_RV_VR1 "fmv.w.x fa0, zero\n   vfmax.vf v0, v0, fa0\n"
+#define CONV_RV_VS(V) "vse32.v " V ", (s11)\n   add s11, s11, a6\n"
+#define CONV_RV_VS7                                                                                                \
+    CONV_RV_VS("v0") CONV_RV_VS("v4") CONV_RV_VS("v8") CONV_RV_VS("v12") CONV_RV_VS("v16") CONV_RV_VS("v20") CONV_RV_VS("v24")
+#define CONV_RV_VS1 CONV_RV_VS("v0")
+#define CONV_RV_F4(A, D0, D1, D2, D3)                                                                              \
+    "fmadd.s " D0 ", " A ", fa0, " D0 "\n   fmadd.s " D1 ", " A ", fa1, " D1 "\n   fmadd.s " D2 ", " A ", fa2, " D2 "\n"     \
+    "fmadd.s " D3 ", " A ", fa3, " D3 "\n"
+#define CONV_RV_SB4 "flw fa0, 0(s6)\n   flw fa1, 4(s6)\n   flw fa2, 8(s6)\n   flw fa3, 12(s6)\n   add s6, s6, a6\n"
+#define CONV_RV_SK6(U)                                                                                             \
+    CONV_RV_SB4 "flw fa4, " U "*4(t0)\n" CONV_RV_F4("fa4", "fs0", "fs1", "fs2", "fs3") "flw fa5, " U "*4(t1)\n"        \
+    CONV_RV_F4("fa5", "fs4", "fs5", "fs6", "fs7") "flw fa4, " U "*4(t2)\n" CONV_RV_F4("fa4", "fs8", "fs9", "fs10", "fs11") \
+    "flw fa5, " U "*4(t3)\n" CONV_RV_F4("fa5", "ft0", "ft1", "ft2", "ft3") "flw fa4, " U "*4(t4)\n"                       \
+    CONV_RV_F4("fa4", "ft4", "ft5", "ft6", "ft7") "flw fa5, " U "*4(t5)\n" CONV_RV_F4("fa5", "ft8", "ft9", "ft10", "ft11")
+#define CONV_RV_SK1(U) CONV_RV_SB4 "flw fa4, " U "*4(t0)\n" CONV_RV_F4("fa4", "fs0", "fs1", "fs2", "fs3")
+#define CONV_RV_LK6(U)                                                                                             \
+    "flw fa0, 0(s6)\n   add s6, s6, a6\n   flw fa4, " U "*4(t0)\n   fmadd.s fs0, fa4, fa0, fs0\n   flw fa5, " U "*4(t1)\n"  \
+    "fmadd.s fs1, fa5, fa0, fs1\n   flw fa4, " U "*4(t2)\n   fmadd.s fs2, fa4, fa0, fs2\n   flw fa5, " U "*4(t3)\n"        \
+    "fmadd.s fs3, fa5, fa0, fs3\n   flw fa4, " U "*4(t4)\n   fmadd.s fs4, fa4, fa0, fs4\n   flw fa5, " U "*4(t5)\n"        \
+    "fmadd.s fs5, fa5, fa0, fs5\n"
+#define CONV_RV_LK1(U) "flw fa0, 0(s6)\n   add s6, s6, a6\n   flw fa4, " U "*4(t0)\n   fmadd.s fs0, fa4, fa0, fs0\n"
+#define CONV_RV_SI4(D0, D1, D2, D3) "fmv.s " D0 ", fa0\n   fmv.s " D1 ", fa1\n   fmv.s " D2 ", fa2\n   fmv.s " D3 ", fa3\n"
+#define CONV_RV_SI6                                                                                                \
+    "flw fa0, 0(s10)\n   flw fa1, 4(s10)\n   flw fa2, 8(s10)\n   flw fa3, 12(s10)\n" CONV_RV_SI4("fs0", "fs1", "fs2", "fs3") \
+    CONV_RV_SI4("fs4", "fs5", "fs6", "fs7") CONV_RV_SI4("fs8", "fs9", "fs10", "fs11") CONV_RV_SI4("ft0", "ft1", "ft2", "ft3") \
+    CONV_RV_SI4("ft4", "ft5", "ft6", "ft7") CONV_RV_SI4("ft8", "ft9", "ft10", "ft11")
+#define CONV_RV_SI1 "flw fs0, 0(s10)\n   flw fs1, 4(s10)\n   flw fs2, 8(s10)\n   flw fs3, 12(s10)\n"
+#define CONV_RV_LI6                                                                                                \
+    "flw fs0, 0(s10)\n   fmv.s fs1, fs0\n   fmv.s fs2, fs0\n   fmv.s fs3, fs0\n   fmv.s fs4, fs0\n   fmv.s fs5, fs0\n"
+#define CONV_RV_LI1 "flw fs0, 0(s10)\n"
+#define CONV_RV_SR4(D0, D1, D2, D3) "fmax.s " D0 ", " D0 ", fa6\n   fmax.s " D1 ", " D1 ", fa6\n   fmax.s " D2 ", " D2 ", fa6\n   fmax.s " D3 ", " D3 ", fa6\n"
+#define CONV_RV_SR6                                                                                                \
+    "fmv.w.x fa6, zero\n" CONV_RV_SR4("fs0", "fs1", "fs2", "fs3") CONV_RV_SR4("fs4", "fs5", "fs6", "fs7")             \
+    CONV_RV_SR4("fs8", "fs9", "fs10", "fs11") CONV_RV_SR4("ft0", "ft1", "ft2", "ft3") CONV_RV_SR4("ft4", "ft5", "ft6", "ft7") \
+    CONV_RV_SR4("ft8", "ft9", "ft10", "ft11")
+#define CONV_RV_SR1 "fmv.w.x fa6, zero\n" CONV_RV_SR4("fs0", "fs1", "fs2", "fs3")
+#define CONV_RV_LR6 "fmv.w.x fa6, zero\n" CONV_RV_SR4("fs0", "fs1", "fs2", "fs3") "fmax.s fs4, fs4, fa6\n   fmax.s fs5, fs5, fa6\n"
+#define CONV_RV_LR1 "fmv.w.x fa6, zero\n   fmax.s fs0, fs0, fa6\n"
+#define CONV_RV_SS4(D0, D1, D2, D3) "fsw " D0 ", 0(s11)\n   fsw " D1 ", 4(s11)\n   fsw " D2 ", 8(s11)\n   fsw " D3 ", 12(s11)\n   add s11, s11, a6\n"
+#define CONV_RV_SS6                                                                                                \
+    CONV_RV_SS4("fs0", "fs1", "fs2", "fs3") CONV_RV_SS4("fs4", "fs5", "fs6", "fs7") CONV_RV_SS4("fs8", "fs9", "fs10", "fs11") \
+    CONV_RV_SS4("ft0", "ft1", "ft2", "ft3") CONV_RV_SS4("ft4", "ft5", "ft6", "ft7") CONV_RV_SS4("ft8", "ft9", "ft10", "ft11")
+#define CONV_RV_SS1 CONV_RV_SS4("fs0", "fs1", "fs2", "fs3")
+#define CONV_RV_L1(D) "fsw " D ", 0(s11)\n   add s11, s11, a6\n"
+#define CONV_RV_LS6 CONV_RV_L1("fs0") CONV_RV_L1("fs1") CONV_RV_L1("fs2") CONV_RV_L1("fs3") CONV_RV_L1("fs4") CONV_RV_L1("fs5")
+#define CONV_RV_LS1 CONV_RV_L1("fs0")
+//      One tile loop: while R pixels are left (a4 the width, s4 done), the accumulators from the bias at the panel (s10
+//      = a3 + s3), then each of the three rows (a1 holds them) over its 3 * in_channels floats, four k a turn (s1
+//      turns) and then one (s2), the ReLU when a7 asks, and the stores at a0 + the pixel * a6 + the panel.
+#define CONV_RV_TILE(ID, R, INIT, PTRS, KMAC, BUMP, RELU, STORE)                                                   \
+    "" ASM_LABEL(conv_##ID) ":\n   sub s10, a4, s4\n   li s11, " #R "\n   bltu s10, s11, " ASM_LABEL(conv_##ID##_end) "\n" \
+    "add s10, a3, s3\n" INIT "add s6, a2, s3\n   mul s9, s4, a5\n   li s7, 0\n" ASM_LABEL(conv_##ID##_row) ":\n"            \
+    "slli s10, s7, 3\n   add s10, a1, s10\n   ld t0, 0(s10)\n   add t0, t0, s9\n" PTRS "mv s8, s1\n   beqz s8, "           \
+    ASM_LABEL(conv_##ID##_one) "\n" ASM_LABEL(conv_##ID##_four) ":\n" KMAC("0") KMAC("1") KMAC("2") KMAC("3") BUMP("16")  \
+    "addi s8, s8, -1\n   bnez s8, " ASM_LABEL(conv_##ID##_four) "\n" ASM_LABEL(conv_##ID##_one) ":\n   mv s8, s2\n"       \
+    "beqz s8, " ASM_LABEL(conv_##ID##_next) "\n" ASM_LABEL(conv_##ID##_onek) ":\n" KMAC("0") BUMP("4")                    \
+    "addi s8, s8, -1\n   bnez s8, " ASM_LABEL(conv_##ID##_onek) "\n" ASM_LABEL(conv_##ID##_next) ":\n   addi s7, s7, 1\n" \
+    "li s10, 3\n   bltu s7, s10, " ASM_LABEL(conv_##ID##_row) "\n   beqz a7, " ASM_LABEL(conv_##ID##_store) "\n" RELU       \
+    ASM_LABEL(conv_##ID##_store) ":\n   mul s11, s4, a6\n   add s11, s11, a0\n   add s11, s11, s3\n" STORE               \
+    "addi s4, s4, " #R "\n   j " ASM_LABEL(conv_##ID) "\n" ASM_LABEL(conv_##ID##_end) ":\n"
+__asm__(
+    ASM_SECTION
+    //
+    //      conv3x3_f32 -- a0 out, a1 rows, a2 weights, a3 bias, a4 width, a5 in_channels, a6 out_channels, a7 relu.
+    //      a5 and a6 become their bytes; s1 the turns of four k, s2 the k left, s3 the panel's column * 4, s4 the
+    //      pixel the tiles are at, s5 the panel's columns, s6 B, s7 the row. The first call asks for V
+    //      (cpu_vector_detect keeps a0-a4 and a7, so a5 and a6 are spilled with ra).
+    //
+    ".option push\n   .option arch, +v\n"
+    ASM_FUNC(conv3x3_f32)
+    "beqz a4, " ASM_LABEL(conv_none) "\n   beqz a6, " ASM_LABEL(conv_none) "\n"
+#if defined(__ELF__) && !defined(STANDARD_NO_PLATFORM)
+    "lla t3, cpu_has_vector\n   lbu t3, 0(t3)\n   bnez t3, " ASM_LABEL(conv_rv_known) "\n"
+    "addi sp, sp, -32\n   sd ra, 8(sp)\n   sd a5, 16(sp)\n   sd a6, 24(sp)\n   call cpu_vector_detect\n"
+    "ld ra, 8(sp)\n   ld a5, 16(sp)\n   ld a6, 24(sp)\n   addi sp, sp, 32\n   j conv3x3_f32\n"
+    "" ASM_LABEL(conv_rv_known) ":\n"
+#endif
+    "addi sp, sp, -208\n   sd s0, 0(sp)\n   sd s1, 8(sp)\n   sd s2, 16(sp)\n   sd s3, 24(sp)\n   sd s4, 32(sp)\n"
+    "sd s5, 40(sp)\n   sd s6, 48(sp)\n   sd s7, 56(sp)\n   sd s8, 64(sp)\n   sd s9, 72(sp)\n   sd s10, 80(sp)\n"
+    "sd s11, 88(sp)\n   fsd fs0, 96(sp)\n   fsd fs1, 104(sp)\n   fsd fs2, 112(sp)\n   fsd fs3, 120(sp)\n"
+    "fsd fs4, 128(sp)\n   fsd fs5, 136(sp)\n   fsd fs6, 144(sp)\n   fsd fs7, 152(sp)\n   fsd fs8, 160(sp)\n"
+    "fsd fs9, 168(sp)\n   fsd fs10, 176(sp)\n   fsd fs11, 184(sp)\n"
+    "slli t0, a5, 1\n   add t0, t0, a5\n   srli s1, t0, 2\n   andi s2, t0, 3\n   slli a5, a5, 2\n   slli a6, a6, 2\n   li s3, 0\n"
+#if defined(__ELF__) && !defined(STANDARD_NO_PLATFORM)
+    "li t0, 2\n   bne t3, t0, " ASM_LABEL(conv_rv_scalar) "\n"
+    "" ASM_LABEL(conv_rv_vpanel) ":\n   sub t0, a6, s3\n   srli t0, t0, 2\n   vsetvli s5, t0, e32, m4, ta, ma\n   li s4, 0\n"
+    CONV_RV_TILE(rv7, 7, CONV_RV_VI7, CONV_RV_PTRS, CONV_RV_VK7, CONV_RV_BUMP7, CONV_RV_VR7, CONV_RV_VS7)
+    CONV_RV_TILE(rv1, 1, CONV_RV_VI1, "", CONV_RV_VK1, CONV_RV_BUMP1, CONV_RV_VR1, CONV_RV_VS1)
+    "slli t0, s5, 2\n   add s3, s3, t0\n   bltu s3, a6, " ASM_LABEL(conv_rv_vpanel) "\n   j " ASM_LABEL(conv_rv_out) "\n"
+#endif
+    "" ASM_LABEL(conv_rv_scalar) ":\n   sub t0, a6, s3\n   srli s5, t0, 2\n   li s4, 0\n   li t0, 4\n   bltu s5, t0, "
+    ASM_LABEL(conv_rv_lane) "\n"
+    CONV_RV_TILE(rs6, 6, CONV_RV_SI6, CONV_RV_PTRS, CONV_RV_SK6, CONV_RV_BUMP6, CONV_RV_SR6, CONV_RV_SS6)
+    CONV_RV_TILE(rs1, 1, CONV_RV_SI1, "", CONV_RV_SK1, CONV_RV_BUMP1, CONV_RV_SR1, CONV_RV_SS1)
+    "addi s3, s3, 16\n   j " ASM_LABEL(conv_rv_snext) "\n"
+    "" ASM_LABEL(conv_rv_lane) ":\n"
+    CONV_RV_TILE(rl6, 6, CONV_RV_LI6, CONV_RV_PTRS, CONV_RV_LK6, CONV_RV_BUMP6, CONV_RV_LR6, CONV_RV_LS6)
+    CONV_RV_TILE(rl1, 1, CONV_RV_LI1, "", CONV_RV_LK1, CONV_RV_BUMP1, CONV_RV_LR1, CONV_RV_LS1)
+    "addi s3, s3, 4\n"
+    "" ASM_LABEL(conv_rv_snext) ":\n   bltu s3, a6, " ASM_LABEL(conv_rv_scalar) "\n"
+    "" ASM_LABEL(conv_rv_out) ":\n   ld s0, 0(sp)\n   ld s1, 8(sp)\n   ld s2, 16(sp)\n   ld s3, 24(sp)\n   ld s4, 32(sp)\n"
+    "ld s5, 40(sp)\n   ld s6, 48(sp)\n   ld s7, 56(sp)\n   ld s8, 64(sp)\n   ld s9, 72(sp)\n   ld s10, 80(sp)\n"
+    "ld s11, 88(sp)\n   fld fs0, 96(sp)\n   fld fs1, 104(sp)\n   fld fs2, 112(sp)\n   fld fs3, 120(sp)\n"
+    "fld fs4, 128(sp)\n   fld fs5, 136(sp)\n   fld fs6, 144(sp)\n   fld fs7, 152(sp)\n   fld fs8, 160(sp)\n"
+    "fld fs9, 168(sp)\n   fld fs10, 176(sp)\n   fld fs11, 184(sp)\n   addi sp, sp, 208\n"
+    "" ASM_LABEL(conv_none) ":\n" ASM_RET
+    ASM_END(conv3x3_f32)
+    ".option pop\n"
+);
+#endif
+#if X64
+__asm__(
+    ASM_SECTION
+    //      u8_to_f32: rdi out, rsi bytes, rdx count. AVX2 widens eight bytes into a ymm of dwords by vpmovzxbd straight
+    //      from memory and converts them, 32 a turn; SSE2 unpacks sixteen against zero. The last few one at a time.
+    ASM_FUNC(u8_to_f32)
+    "test %rdx, %rdx\n   jz " ASM_LABEL(u8f_done) "\n"
+    ASM_NARROW("cpu_has_avx2", "" ASM_LABEL(u8f_sse2) "")
+    "cmp $32, %rdx\n   jb " ASM_LABEL(u8f_y8) "\n"
+    "" ASM_LABEL(u8f_y32) ":\n   vpmovzxbd (%rsi), %ymm0\n   vpmovzxbd 8(%rsi), %ymm1\n   vpmovzxbd 16(%rsi), %ymm2\n   vpmovzxbd 24(%rsi), %ymm3\n"
+    "vcvtdq2ps %ymm0, %ymm0\n   vcvtdq2ps %ymm1, %ymm1\n   vcvtdq2ps %ymm2, %ymm2\n   vcvtdq2ps %ymm3, %ymm3\n"
+    "vmovups %ymm0, (%rdi)\n   vmovups %ymm1, 32(%rdi)\n   vmovups %ymm2, 64(%rdi)\n   vmovups %ymm3, 96(%rdi)\n"
+    "add $32, %rsi\n   sub $-128, %rdi\n   sub $32, %rdx\n   cmp $32, %rdx\n   jae " ASM_LABEL(u8f_y32) "\n"
+    "" ASM_LABEL(u8f_y8) ":\n   cmp $8, %rdx\n   jb " ASM_LABEL(u8f_y1) "\n   vpmovzxbd (%rsi), %ymm0\n   vcvtdq2ps %ymm0, %ymm0\n"
+    "vmovups %ymm0, (%rdi)\n   add $8, %rsi\n   add $32, %rdi\n   sub $8, %rdx\n   jmp " ASM_LABEL(u8f_y8) "\n"
+    "" ASM_LABEL(u8f_y1) ":\n   vzeroupper\n   jmp " ASM_LABEL(u8f_one) "\n"
+    "" ASM_LABEL(u8f_sse2) ":\n   pxor %xmm7, %xmm7\n"
+    "" ASM_LABEL(u8f_s16) ":\n   cmp $16, %rdx\n   jb " ASM_LABEL(u8f_one) "\n   movdqu (%rsi), %xmm0\n   movdqa %xmm0, %xmm2\n"
+    "punpcklbw %xmm7, %xmm0\n   punpckhbw %xmm7, %xmm2\n   movdqa %xmm0, %xmm1\n   movdqa %xmm2, %xmm3\n"
+    "punpcklwd %xmm7, %xmm0\n   punpckhwd %xmm7, %xmm1\n   punpcklwd %xmm7, %xmm2\n   punpckhwd %xmm7, %xmm3\n"
+    "cvtdq2ps %xmm0, %xmm0\n   cvtdq2ps %xmm1, %xmm1\n   cvtdq2ps %xmm2, %xmm2\n   cvtdq2ps %xmm3, %xmm3\n"
+    "movups %xmm0, (%rdi)\n   movups %xmm1, 16(%rdi)\n   movups %xmm2, 32(%rdi)\n   movups %xmm3, 48(%rdi)\n"
+    "add $16, %rsi\n   add $64, %rdi\n   sub $16, %rdx\n   jmp " ASM_LABEL(u8f_s16) "\n"
+    "" ASM_LABEL(u8f_one) ":\n   test %rdx, %rdx\n   jz " ASM_LABEL(u8f_done) "\n"
+    "" ASM_LABEL(u8f_one_more) ":\n   movzbl (%rsi), %eax\n   cvtsi2ss %eax, %xmm0\n   movss %xmm0, (%rdi)\n"
+    "inc %rsi\n   add $4, %rdi\n   dec %rdx\n   jnz " ASM_LABEL(u8f_one_more) "\n"
+    "" ASM_LABEL(u8f_done) ":\n" ASM_RET
+    ASM_END(u8_to_f32)
+
+    //      picture_quads_f32: rdi out, rsi top, rdx bottom, rcx quads. A quad's two words of each row are eight bytes,
+    //      so each half is one vpmovzxbd from memory with AVX2 and one unpack with SSE2.
+    ASM_FUNC(picture_quads_f32)
+    "test %rcx, %rcx\n   jz " ASM_LABEL(pqf_done) "\n"
+    ASM_NARROW("cpu_has_avx2", "" ASM_LABEL(pqf_sse2) "")
+    "" ASM_LABEL(pqf_y) ":\n   vpmovzxbd (%rsi), %ymm0\n   vpmovzxbd (%rdx), %ymm1\n   vcvtdq2ps %ymm0, %ymm0\n   vcvtdq2ps %ymm1, %ymm1\n"
+    "vmovups %ymm0, (%rdi)\n   vmovups %ymm1, 32(%rdi)\n   add $8, %rsi\n   add $8, %rdx\n   add $64, %rdi\n   dec %rcx\n"
+    "jnz " ASM_LABEL(pqf_y) "\n   vzeroupper\n" ASM_RET
+    "" ASM_LABEL(pqf_sse2) ":\n   pxor %xmm7, %xmm7\n"
+    "" ASM_LABEL(pqf_s) ":\n   movq (%rsi), %xmm0\n   movq (%rdx), %xmm2\n   punpcklbw %xmm7, %xmm0\n   punpcklbw %xmm7, %xmm2\n"
+    "movdqa %xmm0, %xmm1\n   movdqa %xmm2, %xmm3\n   punpcklwd %xmm7, %xmm0\n   punpckhwd %xmm7, %xmm1\n"
+    "punpcklwd %xmm7, %xmm2\n   punpckhwd %xmm7, %xmm3\n   cvtdq2ps %xmm0, %xmm0\n   cvtdq2ps %xmm1, %xmm1\n"
+    "cvtdq2ps %xmm2, %xmm2\n   cvtdq2ps %xmm3, %xmm3\n   movups %xmm0, (%rdi)\n   movups %xmm1, 16(%rdi)\n"
+    "movups %xmm2, 32(%rdi)\n   movups %xmm3, 48(%rdi)\n   add $8, %rsi\n   add $8, %rdx\n   add $64, %rdi\n   dec %rcx\n"
+    "jnz " ASM_LABEL(pqf_s) "\n"
+    "" ASM_LABEL(pqf_done) ":\n" ASM_RET
+    ASM_END(picture_quads_f32)
+
+    //      picture_quads_add_f32: rdi top, rsi bottom, rdx residual, rcx quads. Each half: the bytes widened and
+    //      converted, the residual added, max with zero (the zero is the operand a NaN returns), min with 255, rounded
+    //      to nearest even by the conversion, packed twice with saturation, alpha or'd in.
+    ASM_FUNC(picture_quads_add_f32)
+    "test %rcx, %rcx\n   jz " ASM_LABEL(pqa_done) "\n"
+    "lea " ASM_LABEL(pqa_k) "(%rip), %rax\n"
+    ASM_NARROW("cpu_has_avx2", "" ASM_LABEL(pqa_sse2) "")
+    "vxorps %ymm14, %ymm14, %ymm14\n   vbroadcastss (%rax), %ymm15\n   vmovq 4(%rax), %xmm13\n   vpunpcklqdq %xmm13, %xmm13, %xmm13\n"
+    "" ASM_LABEL(pqa_y) ":\n   vpmovzxbd (%rdi), %ymm0\n   vpmovzxbd (%rsi), %ymm1\n   vcvtdq2ps %ymm0, %ymm0\n   vcvtdq2ps %ymm1, %ymm1\n"
+    "vaddps (%rdx), %ymm0, %ymm0\n   vaddps 32(%rdx), %ymm1, %ymm1\n   vmaxps %ymm14, %ymm0, %ymm0\n   vmaxps %ymm14, %ymm1, %ymm1\n"
+    "vminps %ymm15, %ymm0, %ymm0\n   vminps %ymm15, %ymm1, %ymm1\n   vcvtps2dq %ymm0, %ymm0\n   vcvtps2dq %ymm1, %ymm1\n"
+    "vextracti128 $1, %ymm0, %xmm2\n   vextracti128 $1, %ymm1, %xmm3\n   vpackssdw %xmm2, %xmm0, %xmm0\n   vpackssdw %xmm3, %xmm1, %xmm1\n"
+    "vpackuswb %xmm1, %xmm0, %xmm0\n   vpor %xmm13, %xmm0, %xmm0\n"
+    "vmovq %xmm0, (%rdi)\n   vpextrq $1, %xmm0, (%rsi)\n   add $8, %rdi\n   add $8, %rsi\n   add $64, %rdx\n   dec %rcx\n"
+    "jnz " ASM_LABEL(pqa_y) "\n   vzeroupper\n" ASM_RET
+    "" ASM_LABEL(pqa_sse2) ":\n   pxor %xmm7, %xmm7\n   xorps %xmm14, %xmm14\n   movss (%rax), %xmm15\n   shufps $0, %xmm15, %xmm15\n"
+    "movq 4(%rax), %xmm13\n   punpcklqdq %xmm13, %xmm13\n"
+    "" ASM_LABEL(pqa_s) ":\n   movq (%rdi), %xmm0\n   movq (%rsi), %xmm2\n   punpcklbw %xmm7, %xmm0\n   punpcklbw %xmm7, %xmm2\n"
+    "movdqa %xmm0, %xmm1\n   movdqa %xmm2, %xmm3\n   punpcklwd %xmm7, %xmm0\n   punpckhwd %xmm7, %xmm1\n"
+    "punpcklwd %xmm7, %xmm2\n   punpckhwd %xmm7, %xmm3\n   cvtdq2ps %xmm0, %xmm0\n   cvtdq2ps %xmm1, %xmm1\n"
+    "cvtdq2ps %xmm2, %xmm2\n   cvtdq2ps %xmm3, %xmm3\n   movups (%rdx), %xmm8\n   movups 16(%rdx), %xmm9\n"
+    "movups 32(%rdx), %xmm10\n   movups 48(%rdx), %xmm11\n   addps %xmm8, %xmm0\n   addps %xmm9, %xmm1\n"
+    "addps %xmm10, %xmm2\n   addps %xmm11, %xmm3\n   maxps %xmm14, %xmm0\n   maxps %xmm14, %xmm1\n   maxps %xmm14, %xmm2\n"
+    "maxps %xmm14, %xmm3\n   minps %xmm15, %xmm0\n   minps %xmm15, %xmm1\n   minps %xmm15, %xmm2\n   minps %xmm15, %xmm3\n"
+    "cvtps2dq %xmm0, %xmm0\n   cvtps2dq %xmm1, %xmm1\n   cvtps2dq %xmm2, %xmm2\n   cvtps2dq %xmm3, %xmm3\n"
+    "packssdw %xmm1, %xmm0\n   packssdw %xmm3, %xmm2\n   packuswb %xmm2, %xmm0\n   por %xmm13, %xmm0\n"
+    "movq %xmm0, (%rdi)\n   punpckhqdq %xmm0, %xmm0\n   movq %xmm0, (%rsi)\n"
+    "add $8, %rdi\n   add $8, %rsi\n   add $64, %rdx\n   dec %rcx\n   jnz " ASM_LABEL(pqa_s) "\n"
+    "" ASM_LABEL(pqa_done) ":\n" ASM_RET
+    "" ASM_RODATA_PUSH "\n   .balign 16\n"
+    "" ASM_LABEL(pqa_k) ":\n   .4byte 0x437f0000, 0xff000000, 0xff000000\n"
+    ".popsection\n"
+    ASM_END(picture_quads_add_f32)
+);
+#elif ARM64
+__asm__(
+    ASM_SECTION
+    //
+    //      u8_to_f32 -- x0 out, x1 bytes, x2 count. Sixteen bytes a turn widened twice by uxtl and converted by ucvtf,
+    //      then one at a time.
+    //
+    ASM_FUNC(u8_to_f32)
+    "lsr x9, x2, #4\n   cbz x9, 2f\n"
+    "1:  ldr q0, [x1], #16\n   uxtl v1.8h, v0.8b\n   uxtl2 v2.8h, v0.16b\n   uxtl v3.4s, v1.4h\n   uxtl2 v4.4s, v1.8h\n"
+    "uxtl v5.4s, v2.4h\n   uxtl2 v6.4s, v2.8h\n   ucvtf v3.4s, v3.4s\n   ucvtf v4.4s, v4.4s\n   ucvtf v5.4s, v5.4s\n"
+    "ucvtf v6.4s, v6.4s\n   st1 {v3.4s, v4.4s, v5.4s, v6.4s}, [x0], #64\n   subs x9, x9, #1\n   b.ne 1b\n"
+    "2:  ands x2, x2, #15\n   b.eq 4f\n"
+    "3:  ldrb w9, [x1], #1\n   ucvtf s0, w9\n   str s0, [x0], #4\n   subs x2, x2, #1\n   b.ne 3b\n"
+    "4:  " ASM_RET
+    ASM_END(u8_to_f32)
+    //
+    //      picture_quads_f32 -- x0 out, x1 top, x2 bottom, x3 quads. Each row's eight bytes of a quad widened and
+    //      converted into two q.
+    //
+    ASM_FUNC(picture_quads_f32)
+    "cbz x3, 2f\n"
+    "1:  ldr d0, [x1], #8\n   ldr d1, [x2], #8\n   uxtl v0.8h, v0.8b\n   uxtl v1.8h, v1.8b\n   uxtl v2.4s, v0.4h\n"
+    "uxtl2 v3.4s, v0.8h\n   uxtl v4.4s, v1.4h\n   uxtl2 v5.4s, v1.8h\n   ucvtf v2.4s, v2.4s\n   ucvtf v3.4s, v3.4s\n"
+    "ucvtf v4.4s, v4.4s\n   ucvtf v5.4s, v5.4s\n   st1 {v2.4s, v3.4s, v4.4s, v5.4s}, [x0], #64\n   subs x3, x3, #1\n   b.ne 1b\n"
+    "2:  " ASM_RET
+    ASM_END(picture_quads_f32)
+    //
+    //      picture_quads_add_f32 -- x0 top, x1 bottom, x2 residual, x3 quads. Widened, converted, the residual added,
+    //      fmaxnm with zero (a NaN gives zero) and fminnm with 255, fcvtnu (nearest, ties to even), narrowed twice
+    //      with saturation, alpha or'd in.
+    //
+    ASM_FUNC(picture_quads_add_f32)
+    "cbz x3, 2f\n   movi v16.4s, #0\n   mov w9, #0x437f0000\n   dup v17.4s, w9\n   movi v18.2s, #0xff, lsl #24\n"
+    "1:  ldr d0, [x0]\n   ldr d1, [x1]\n   uxtl v0.8h, v0.8b\n   uxtl v1.8h, v1.8b\n   uxtl v2.4s, v0.4h\n"
+    "uxtl2 v3.4s, v0.8h\n   uxtl v4.4s, v1.4h\n   uxtl2 v5.4s, v1.8h\n   ucvtf v2.4s, v2.4s\n   ucvtf v3.4s, v3.4s\n"
+    "ucvtf v4.4s, v4.4s\n   ucvtf v5.4s, v5.4s\n   ld1 {v19.4s, v20.4s, v21.4s, v22.4s}, [x2], #64\n"
+    "fadd v2.4s, v2.4s, v19.4s\n   fadd v3.4s, v3.4s, v20.4s\n   fadd v4.4s, v4.4s, v21.4s\n   fadd v5.4s, v5.4s, v22.4s\n"
+    "fmaxnm v2.4s, v2.4s, v16.4s\n   fmaxnm v3.4s, v3.4s, v16.4s\n   fmaxnm v4.4s, v4.4s, v16.4s\n   fmaxnm v5.4s, v5.4s, v16.4s\n"
+    "fminnm v2.4s, v2.4s, v17.4s\n   fminnm v3.4s, v3.4s, v17.4s\n   fminnm v4.4s, v4.4s, v17.4s\n   fminnm v5.4s, v5.4s, v17.4s\n"
+    "fcvtnu v2.4s, v2.4s\n   fcvtnu v3.4s, v3.4s\n   fcvtnu v4.4s, v4.4s\n   fcvtnu v5.4s, v5.4s\n"
+    "uqxtn v2.4h, v2.4s\n   uqxtn2 v2.8h, v3.4s\n   uqxtn v4.4h, v4.4s\n   uqxtn2 v4.8h, v5.4s\n   uqxtn v2.8b, v2.8h\n"
+    "uqxtn v4.8b, v4.8h\n   orr v2.8b, v2.8b, v18.8b\n   orr v4.8b, v4.8b, v18.8b\n   str d2, [x0], #8\n   str d4, [x1], #8\n"
+    "subs x3, x3, #1\n   b.ne 1b\n"
+    "2:  " ASM_RET
+    ASM_END(picture_quads_add_f32)
+);
+#elif RISCV64
+__asm__(
+    ASM_SECTION
+    //
+    //      u8_to_f32 -- a0 out, a1 bytes, a2 count. With V a strip of bytes at e8 m1, widened by vzext.vf4 into e32 m4
+    //      and converted; without, one byte at a time.
+    //
+    ".option push\n   .option arch, +v\n"
+    ASM_FUNC(u8_to_f32)
+    "beqz a2, 9f\n"
+#if defined(__ELF__) && !defined(STANDARD_NO_PLATFORM)
+    "lla t3, cpu_has_vector\n   lbu t3, 0(t3)\n   li t4, 2\n   beq t3, t4, 5f\n   bnez t3, 1f\n"
+    "addi sp, sp, -16\n   sd ra, 8(sp)\n   call cpu_vector_detect\n   ld ra, 8(sp)\n   addi sp, sp, 16\n   j u8_to_f32\n"
+#endif
+    "1:  lbu t0, 0(a1)\n   fcvt.s.wu ft0, t0\n   fsw ft0, 0(a0)\n   addi a1, a1, 1\n   addi a0, a0, 4\n   addi a2, a2, -1\n"
+    "bnez a2, 1b\n   j 9f\n"
+#if defined(__ELF__) && !defined(STANDARD_NO_PLATFORM)
+    "5:  vsetvli t0, a2, e8, m1, ta, ma\n   vle8.v v0, (a1)\n   vsetvli zero, t0, e32, m4, ta, ma\n   vzext.vf4 v4, v0\n"
+    "vfcvt.f.xu.v v4, v4\n   vse32.v v4, (a0)\n   add a1, a1, t0\n   slli t1, t0, 2\n   add a0, a0, t1\n   sub a2, a2, t0\n"
+    "bnez a2, 5b\n"
+#endif
+    "9:  " ASM_RET
+    ASM_END(u8_to_f32)
+    //
+    //      picture_quads_f32 -- a0 out, a1 top, a2 bottom, a3 quads. With V a quad's eight bytes of each row at e8,
+    //      widened and converted at e32 (8 lanes, m2); without, a byte at a time.
+    //
+    ASM_FUNC(picture_quads_f32)
+    "beqz a3, 9f\n"
+#if defined(__ELF__) && !defined(STANDARD_NO_PLATFORM)
+    "lla t3, cpu_has_vector\n   lbu t3, 0(t3)\n   li t4, 2\n   beq t3, t4, 5f\n   bnez t3, 1f\n"
+    "addi sp, sp, -16\n   sd ra, 8(sp)\n   call cpu_vector_detect\n   ld ra, 8(sp)\n   addi sp, sp, 16\n   j picture_quads_f32\n"
+#endif
+    "1:  li t1, 8\n"
+    "2:  lbu t0, 0(a1)\n   fcvt.s.wu ft0, t0\n   fsw ft0, 0(a0)\n   lbu t0, 0(a2)\n   fcvt.s.wu ft0, t0\n   fsw ft0, 32(a0)\n"
+    "addi a1, a1, 1\n   addi a2, a2, 1\n   addi a0, a0, 4\n   addi t1, t1, -1\n   bnez t1, 2b\n   addi a0, a0, 32\n"
+    "addi a3, a3, -1\n   bnez a3, 1b\n   j 9f\n"
+#if defined(__ELF__) && !defined(STANDARD_NO_PLATFORM)
+    "5:  vsetivli zero, 8, e8, mf2, ta, ma\n   vle8.v v0, (a1)\n   vle8.v v1, (a2)\n   vsetivli zero, 8, e32, m2, ta, ma\n"
+    "vzext.vf4 v2, v0\n   vzext.vf4 v4, v1\n   vfcvt.f.xu.v v2, v2\n   vfcvt.f.xu.v v4, v4\n   vse32.v v2, (a0)\n"
+    "addi t0, a0, 32\n   vse32.v v4, (t0)\n   addi a1, a1, 8\n   addi a2, a2, 8\n   addi a0, a0, 64\n   addi a3, a3, -1\n"
+    "bnez a3, 5b\n"
+#endif
+    "9:  " ASM_RET
+    ASM_END(picture_quads_f32)
+    //
+    //      picture_quads_add_f32 -- a0 top, a1 bottom, a2 residual, a3 quads. Widened and converted, the residual
+    //      added, fmax with zero (a NaN gives the zero), fmin with 255, converted to nearest even (rne on the scalar
+    //      path, frm's default with V), narrowed twice, alpha or'd in.
+    //
+    ASM_FUNC(picture_quads_add_f32)
+    "beqz a3, 9f\n"
+#if defined(__ELF__) && !defined(STANDARD_NO_PLATFORM)
+    "lla t3, cpu_has_vector\n   lbu t3, 0(t3)\n   li t4, 2\n   beq t3, t4, 5f\n   bnez t3, 1f\n"
+    "addi sp, sp, -16\n   sd ra, 8(sp)\n   call cpu_vector_detect\n   ld ra, 8(sp)\n   addi sp, sp, 16\n   j picture_quads_add_f32\n"
+#endif
+    "1:  fmv.w.x ft1, zero\n   li t0, 0x437f0000\n   fmv.w.x ft2, t0\n   li t5, 255\n"
+    "2:  mv t2, a0\n   li t1, 8\n"
+    "3:  lbu t0, 0(t2)\n   fcvt.s.wu ft0, t0\n   flw ft3, 0(a2)\n   fadd.s ft0, ft0, ft3\n   fmax.s ft0, ft0, ft1\n"
+    "fmin.s ft0, ft0, ft2\n   fcvt.wu.s t0, ft0, rne\n   sb t0, 0(t2)\n   addi t2, t2, 1\n   addi a2, a2, 4\n   addi t1, t1, -1\n"
+    "bnez t1, 3b\n   sb t5, -5(t2)\n   sb t5, -1(t2)\n   mv t2, a1\n   li t1, 8\n"
+    "4:  lbu t0, 0(t2)\n   fcvt.s.wu ft0, t0\n   flw ft3, 0(a2)\n   fadd.s ft0, ft0, ft3\n   fmax.s ft0, ft0, ft1\n"
+    "fmin.s ft0, ft0, ft2\n   fcvt.wu.s t0, ft0, rne\n   sb t0, 0(t2)\n   addi t2, t2, 1\n   addi a2, a2, 4\n   addi t1, t1, -1\n"
+    "bnez t1, 4b\n   sb t5, -5(t2)\n   sb t5, -1(t2)\n   addi a0, a0, 8\n   addi a1, a1, 8\n   addi a3, a3, -1\n"
+    "bnez a3, 2b\n   j 9f\n"
+#if defined(__ELF__) && !defined(STANDARD_NO_PLATFORM)
+    "5:  fmv.w.x ft1, zero\n   li t0, 0x437f0000\n   fmv.w.x ft2, t0\n   li t0, 0xff000000ff000000\n"
+    "vsetivli zero, 1, e64, m1, ta, ma\n   vmv.v.x v12, t0\n"
+    "8:  vsetivli zero, 8, e8, mf2, ta, ma\n   vle8.v v0, (a0)\n   vle8.v v1, (a1)\n   vsetivli zero, 8, e32, m2, ta, ma\n"
+    "vzext.vf4 v2, v0\n   vzext.vf4 v4, v1\n   vfcvt.f.xu.v v2, v2\n   vfcvt.f.xu.v v4, v4\n   vle32.v v6, (a2)\n"
+    "addi t0, a2, 32\n   vle32.v v8, (t0)\n   vfadd.vv v2, v2, v6\n   vfadd.vv v4, v4, v8\n   vfmax.vf v2, v2, ft1\n"
+    "vfmax.vf v4, v4, ft1\n   vfmin.vf v2, v2, ft2\n   vfmin.vf v4, v4, ft2\n   vfcvt.xu.f.v v2, v2\n   vfcvt.xu.f.v v4, v4\n"
+    "vsetivli zero, 8, e16, m1, ta, ma\n   vnsrl.wi v6, v2, 0\n   vnsrl.wi v7, v4, 0\n   vsetivli zero, 8, e8, mf2, ta, ma\n"
+    "vnsrl.wi v8, v6, 0\n   vnsrl.wi v9, v7, 0\n   vor.vv v8, v8, v12\n   vor.vv v9, v9, v12\n   vse8.v v8, (a0)\n"
+    "vse8.v v9, (a1)\n   addi a0, a0, 8\n   addi a1, a1, 8\n   addi a2, a2, 64\n   addi a3, a3, -1\n   bnez a3, 8b\n"
+#endif
+    "9:  " ASM_RET
+    ASM_END(picture_quads_add_f32)
+    ".option pop\n"
+);
+#endif
+#endif // KERNEL_MODE, conv3x3_f32
 
 /*
         What this processor turned out to have.

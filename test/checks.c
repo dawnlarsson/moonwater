@@ -10073,6 +10073,7 @@ static AUDIO_C_UNUSED long audio_c_window_peaks(float *out0, float *out1, const 
 #include "checks/installer.c" // the installer: its drives, its plan, its steps and its write path on a file
 #include "checks/machine.c" // the machine, snapshots, sensors and the browser
 #include "checks/tensor.c" // the tensor routines
+#include "checks/enhance.c" // the picture network routines and the wallpaper enhancer
 #include "checks/font.c" // the font engine and shaping
 
 #if defined(CHECK_terminal) || defined(CHECK_kit_frames) || defined(CHECK_gpu_kit) || defined(CHECK_draw_list) || defined(CHECK_gpu_model_kit) || defined(CHECK_doc)
