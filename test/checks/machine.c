@@ -5493,6 +5493,54 @@ static fn browser_apart(void)
         check("browser: the model's code names nothing of the kit, a window, a font or a language: it is apart from the view", apart && lines > 300);
 }
 
+static fn browser_transfer_status(void)
+{
+        struct files_move job;
+        struct files_queue q;
+        struct files_queued out;
+        p64 bps = 0;
+        p32 eta = 0, permille = 0;
+        p8 cur[FILES_NAME];
+        char eta_buf[32];
+
+        memory_fill(&job, 0, sizeof(job));
+        job.active_phase = FILES_MOVE_COUNT;
+        files_move_metrics(&job, 2000000000ull, &bps, &eta, &permille);
+        check("transfer: counting phase is indeterminate", permille == FILES_PERMILLE_INDETERMINATE && bps == 0 && eta == 0);
+
+        job.active_phase = FILES_MOVE_COPYING;
+        job.started_ns = 1000000000ull;
+        job.bytes_done = 500000ull;
+        job.bytes_total = 1000000ull;
+        files_move_metrics(&job, 2000000000ull, &bps, &eta, &permille);
+        check("transfer: copying metrics compute 50%, 500KB/s, 1s ETA", permille == 500 && bps == 500000ull && eta == 1);
+
+        files_move_set_current(&job, (const p8 address_to) "archive.tar.xz");
+        check("transfer: current filename snapshot matches", files_move_current(&job, cur, sizeof(cur)) && string_equals(cur, (string_address) "archive.tar.xz"));
+
+        files_format_eta(eta_buf, sizeof(eta_buf), 4);
+        check("transfer: format eta seconds", string_equals((string_address)eta_buf, (string_address) "4s"));
+        files_format_eta(eta_buf, sizeof(eta_buf), 135);
+        check("transfer: format eta minutes", string_equals((string_address)eta_buf, (string_address) "2m 15s"));
+        files_format_eta(eta_buf, sizeof(eta_buf), 3840);
+        check("transfer: format eta hours", string_equals((string_address)eta_buf, (string_address) "1h 4m"));
+
+        memory_fill(&q, 0, sizeof(q));
+        check("transfer: queue push first", files_queue_push(&q, FILES_MOVE_COPY, (const p8 address_to) "/tmp/a\0", 1, (const p8 address_to) "/tmp/dst1"));
+        check("transfer: queue push second", files_queue_push(&q, FILES_MOVE_MOVE, (const p8 address_to) "/tmp/b\0", 1, (const p8 address_to) "/tmp/dst2"));
+        check("transfer: queue count is 2", q.count == 2);
+        check("transfer: queue pop FIFO first", files_queue_pop(&q, &out) && out.how == FILES_MOVE_COPY && string_equals(out.dest, (string_address) "/tmp/dst1"));
+        files_queued_drop(&out);
+        check("transfer: queue pop FIFO second", files_queue_pop(&q, &out) && out.how == FILES_MOVE_MOVE && string_equals(out.dest, (string_address) "/tmp/dst2"));
+        files_queued_drop(&out);
+        check("transfer: queue empty after pop", q.count == 0 && !files_queue_pop(&q, &out));
+        for (int i = 0; i < FILES_QUEUE_MOST; i++)
+                (void)files_queue_push(&q, FILES_MOVE_COPY, (const p8 address_to) "/tmp/x\0", 1, (const p8 address_to) "/tmp/dst");
+        check("transfer: queue enforces capacity", q.count == FILES_QUEUE_MOST && !files_queue_push(&q, FILES_MOVE_COPY, (const p8 address_to) "/tmp/y\0", 1, (const p8 address_to) "/tmp/dst"));
+        files_queue_clear(&q);
+        check("transfer: queue clear empties", q.count == 0);
+}
+
 b32 main(void)
 {
         static struct files_model model;
@@ -5521,6 +5569,7 @@ b32 main(void)
         browser_many(address_of model);
         browser_ops(address_of model);
         browser_moves();
+        browser_transfer_status();
         browser_tree();
         browser_filter(address_of model);
         browser_devices();

@@ -2383,12 +2383,12 @@ enum { FILES_MOVE_RENAME, FILES_MOVE_COUNT, FILES_MOVE_COPYING, FILES_MOVE_OVER 
 
 struct files_move
 {
-        int how, state, phase, depth;
+        int how, state, phase, active_phase, depth;
         bipolar error, into, from, made[FILES_JOB_DEEP], in, out, out_folder, src_dir;
         b32 cancel, ranged, begun;
-        p64 bytes_total, bytes_done, left;
-        p32 items_total, items_done, skipped, renamed, count, next, address_to offsets;
-        p8 at[FILES_NAME], name[FILES_NAME], named[FILES_NAME], out_name[FILES_NAME], src_name[FILES_NAME], inside[FILES_JOB_DEEP][FILES_NAME];
+        p64 bytes_total, bytes_done, left, started_ns;
+        p32 items_total, items_done, skipped, renamed, count, next, current_gen, address_to offsets;
+        p8 at[FILES_NAME], name[FILES_NAME], named[FILES_NAME], out_name[FILES_NAME], src_name[FILES_NAME], current_name[FILES_NAME], inside[FILES_JOB_DEEP][FILES_NAME];
         p8 address_to paths, address_to copied, address_to landed, address_to buffer;
         file_facts into_facts, facts, made_facts[FILES_JOB_DEEP], piece_facts;
         file_walk walk[FILES_JOB_DEEP];
@@ -2400,6 +2400,125 @@ static inline const p8 address_to files_move_path(const struct files_move addres
 static inline b32 files_move_running(const struct files_move address_to j) { return __atomic_load_n(&j->state, __ATOMIC_ACQUIRE) == FILES_JOB_RUNNING; }
 static inline fn files_move_cancel(struct files_move address_to j) { __atomic_store_n(&j->cancel, 1, __ATOMIC_RELEASE); }
 static inline b32 files_move_fail(struct files_move address_to j, bipolar e) { return j->error = e, __atomic_store_n(&j->state, FILES_JOB_FAILED, __ATOMIC_RELEASE), false; }
+
+static fn files_move_set_current(struct files_move address_to j, const p8 address_to name)
+{
+        p32 g = __atomic_load_n(&j->current_gen, __ATOMIC_RELAXED);
+        __atomic_store_n(&j->current_gen, g + 1, __ATOMIC_RELEASE);
+        string_copy_bounded((string_address)j->current_name, (string_address)(name ? name : (const p8 address_to) ""), FILES_NAME);
+        __atomic_store_n(&j->current_gen, g + 2, __ATOMIC_RELEASE);
+}
+
+static b32 files_move_current(const struct files_move address_to j, p8 address_to into, positive room)
+{
+        if (!room)
+                return false;
+        into[0] = 0;
+        for (int tries = 0; tries < 4; tries++)
+        {
+                p32 g1 = __atomic_load_n(&j->current_gen, __ATOMIC_ACQUIRE);
+                if (g1 & 1u)
+                        continue;
+                string_copy_bounded((string_address)into, (string_address)j->current_name, room);
+                __atomic_thread_fence(__ATOMIC_ACQUIRE);
+                if (__atomic_load_n(&j->current_gen, __ATOMIC_ACQUIRE) == g1)
+                        return into[0] != 0;
+        }
+        return false;
+}
+
+#define FILES_PERMILLE_INDETERMINATE 0xffffffffu
+
+static fn files_move_metrics(const struct files_move address_to j, p64 now_ns, p64 address_to out_bps, p32 address_to out_eta, p32 address_to out_permille)
+{
+        int phase = __atomic_load_n(&j->active_phase, __ATOMIC_ACQUIRE);
+        p64 done = __atomic_load_n(&j->bytes_done, __ATOMIC_ACQUIRE);
+        p64 total = __atomic_load_n(&j->bytes_total, __ATOMIC_ACQUIRE);
+        p32 id = __atomic_load_n(&j->items_done, __ATOMIC_ACQUIRE);
+        p32 it = __atomic_load_n(&j->items_total, __ATOMIC_ACQUIRE);
+        p64 started = __atomic_load_n(&j->started_ns, __ATOMIC_ACQUIRE);
+        p64 bps = 0;
+        p32 eta = 0, permille = FILES_PERMILLE_INDETERMINATE;
+
+        if (phase == FILES_MOVE_COPYING || phase == FILES_MOVE_OVER)
+        {
+                if (total > 0)
+                        permille = done >= total ? 1000u : (p32)((done * 1000ull) / total);
+                else if (it > 0)
+                        permille = id >= it ? 1000u : (p32)(((p64)id * 1000ull) / it);
+        }
+        if (started && now_ns > started + 200000000ull && done > 0)
+        {
+                p64 ms = (now_ns - started) / 1000000ull;
+                if (ms > 0)
+                        bps = (done * 1000ull) / ms;
+                if (bps > 0 && total > done)
+                {
+                        p64 rem = total - done;
+                        p64 sec = (rem + bps - 1) / bps;
+                        eta = sec > 999999ull ? 999999u : (p32)sec;
+                }
+        }
+        if (out_bps)
+                *out_bps = bps;
+        if (out_eta)
+                *out_eta = eta;
+        if (out_permille)
+                *out_permille = permille;
+}
+
+static fn files_format_eta(char address_to into, positive room, p32 seconds)
+{
+        p8 digits[16];
+        positive used = 0, n;
+        if (!room)
+                return;
+        if (seconds < 60)
+        {
+                n = positive_into_string(digits, seconds ? seconds : 1);
+                for (positive k = 0; k < n && used + 2 < room; k++)
+                        into[used++] = (char)digits[k];
+                if (used + 1 < room)
+                        into[used++] = 's';
+        }
+        else if (seconds < 3600)
+        {
+                p32 m = seconds / 60, s = seconds % 60;
+                n = positive_into_string(digits, m);
+                for (positive k = 0; k < n && used + 2 < room; k++)
+                        into[used++] = (char)digits[k];
+                if (used + 1 < room)
+                        into[used++] = 'm';
+                if (s && used + 4 < room)
+                {
+                        into[used++] = ' ';
+                        n = positive_into_string(digits, s);
+                        for (positive k = 0; k < n && used + 2 < room; k++)
+                                into[used++] = (char)digits[k];
+                        if (used + 1 < room)
+                                into[used++] = 's';
+                }
+        }
+        else
+        {
+                p32 h = seconds / 3600, m = (seconds % 3600) / 60;
+                n = positive_into_string(digits, h);
+                for (positive k = 0; k < n && used + 2 < room; k++)
+                        into[used++] = (char)digits[k];
+                if (used + 1 < room)
+                        into[used++] = 'h';
+                if (m && used + 4 < room)
+                {
+                        into[used++] = ' ';
+                        n = positive_into_string(digits, m);
+                        for (positive k = 0; k < n && used + 2 < room; k++)
+                                into[used++] = (char)digits[k];
+                        if (used + 1 < room)
+                                into[used++] = 'm';
+                }
+        }
+        into[used] = 0;
+}
 
 static fn files_move_file_drop(struct files_move address_to job, b32 whole)
 {
@@ -2439,6 +2558,8 @@ static b32 files_move_begin(struct files_move address_to job, int how, bipolar i
         memory_fill(job, 0, sizeof(*job));
         job->into = into, job->from = job->in = job->out = job->out_folder = -1, job->begun = true;
         job->how = how == FILES_MOVE_MOVE || how == FILES_MOVE_MEASURE ? how : FILES_MOVE_COPY;
+        job->active_phase = FILES_MOVE_RENAME;
+        job->started_ns = (p64)clock_monotonic_nanoseconds();
         for (int k = 0; k < FILES_JOB_DEEP; k++)
                 job->made[k] = -1, job->walk[k].handle = -1;
         if (into < 0 || files_look_fd(into, &job->into_facts) < 0 || (job->into_facts.mode & MODE_FORMAT) != MODE_DIRECTORY)
@@ -2476,6 +2597,7 @@ static b32 files_move_take(struct files_move address_to job, p32 which)
         if (!files_path_clean(path, length) || !files_path_parent(path, folder, job->name) || !files_name_good(job->name))
                 return files_move_fail(job, -ERROR_INVALID);
         string_copy_bounded(job->at, (string_address)job->name, FILES_NAME);
+        files_move_set_current(job, job->name);
         job->from = files_open_dir(AT_FDCWD, folder, 0);
         looked = job->from < 0 ? job->from : files_look_at(job->from, job->name, &job->facts);
         return looked < 0 ? files_move_fail(job, looked) : true;
@@ -2597,6 +2719,7 @@ static b32 files_move_one(struct files_move address_to job, bipolar source, cons
         }
         job->out_folder = target, job->left = facts->size, job->ranged = true, job->piece_facts = *facts;
         job->src_dir = source, string_copy_bounded(job->src_name, (string_address)name, FILES_NAME);
+        files_move_set_current(job, name);
         return string_copy_bounded(job->out_name, (string_address)made_name, FILES_NAME), true;
 }
 
@@ -2694,7 +2817,7 @@ static b32 files_move_step(struct files_move address_to job)
                 bipolar moved;
                 file_facts folder;
                 if (job->next >= job->count)
-                        return job->phase = FILES_MOVE_COUNT, job->next = 0, true;
+                        return job->phase = FILES_MOVE_COUNT, __atomic_store_n(&job->active_phase, FILES_MOVE_COUNT, __ATOMIC_RELEASE), job->next = 0, true;
                 if (!files_move_take(job, job->next))
                         return false;
                 if (job->how == FILES_MOVE_MEASURE)
@@ -2740,6 +2863,9 @@ static b32 files_move_step(struct files_move address_to job)
                 if (job->next >= job->count)
                 {
                         job->next = 0, job->phase = counting && job->how != FILES_MOVE_MEASURE ? FILES_MOVE_COPYING : FILES_MOVE_OVER;
+                        __atomic_store_n(&job->active_phase, job->phase, __ATOMIC_RELEASE);
+                        if (job->phase == FILES_MOVE_COPYING)
+                                __atomic_store_n(&job->started_ns, (p64)clock_monotonic_nanoseconds(), __ATOMIC_RELEASE);
                         if (job->phase == FILES_MOVE_OVER)
                                 __atomic_store_n(&job->state, FILES_JOB_DONE, __ATOMIC_RELEASE);
                         return job->phase != FILES_MOVE_OVER;
@@ -2778,6 +2904,74 @@ static fn files_move_end(struct files_move address_to job)
         }
         memory_fill(job, 0, sizeof(*job));
         job->into = job->from = job->in = job->out = job->out_folder = -1;
+}
+
+#define FILES_QUEUE_MOST 8
+
+struct files_queued
+{
+        int how;
+        p32 count;
+        positive used, room;
+        p8 address_to paths;
+        p8 dest[FILES_PATH];
+};
+
+struct files_queue
+{
+        struct files_queued item[FILES_QUEUE_MOST];
+        p32 head, count;
+};
+
+static b32 files_queue_push(struct files_queue address_to q, int how, const p8 address_to paths, p32 count, const p8 address_to dest)
+{
+        positive total = 0;
+        const p8 address_to cur = paths;
+        struct files_queued address_to slot;
+        if (!q || q->count >= FILES_QUEUE_MOST || !paths || !count || !dest || dest[0] != '/')
+                return false;
+        for (p32 k = 0; k < count; k++)
+        {
+                positive len = string_length((string_address)cur);
+                if (total + len + 1 > FILES_MOVE_PATHS)
+                        return false;
+                total += len + 1, cur += len + 1;
+        }
+        slot = &q->item[(q->head + q->count) % FILES_QUEUE_MOST];
+        memory_fill(slot, 0, sizeof(*slot));
+        if (!(slot->paths = (p8 address_to)files_anon_map(total, null)))
+                return false;
+        memory_copy(slot->paths, paths, total);
+        slot->how = how, slot->count = count, slot->used = slot->room = total;
+        string_copy_bounded((string_address)slot->dest, (string_address)dest, FILES_PATH);
+        q->count++;
+        return true;
+}
+
+static b32 files_queue_pop(struct files_queue address_to q, struct files_queued address_to out)
+{
+        if (!q || !q->count || !out)
+                return false;
+        *out = q->item[q->head];
+        memory_fill(&q->item[q->head], 0, sizeof(q->item[q->head]));
+        q->head = (q->head + 1) % FILES_QUEUE_MOST;
+        q->count--;
+        return true;
+}
+
+static fn files_queued_drop(struct files_queued address_to item)
+{
+        if (item && item->paths)
+                files_unmap(item->paths, item->room), item->paths = null, item->room = item->used = 0;
+}
+
+static fn files_queue_clear(struct files_queue address_to q)
+{
+        struct files_queued item;
+        while (files_queue_pop(q, &item))
+                files_queued_drop(&item);
+        if (q)
+                q->head = q->count = 0;
 }
 
 /* ---- desktop trash bin ---- */

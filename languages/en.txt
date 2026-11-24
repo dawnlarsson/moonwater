@@ -124,6 +124,13 @@ files_sheet_owner	8b0c	Owner %1$d, group %2$d
 files_sheet_size	eca5	Size %1$s (%2$s bytes)
 files_sheet_size_in	31a1	Size %1$s in %2$d items
 files_this_machine	d630	This Machine
+files_transfer_copying	646a	Copying %1$d of %2$d
+files_transfer_deleting	1e56	Deleting %d
+files_transfer_eta	3f47	%1$s/s, %2$s left
+files_transfer_moving	1813	Moving %1$d of %2$d
+files_transfer_preparing	85cb	Preparing...
+files_transfer_queued	7198	+%d queued
+files_transfer_rate	e593	%s/s
 files_type_link	e589	Link
 files_type_other	80d0	Special
 files_undone	4da3	%d undone

@@ -74,7 +74,7 @@ struct files_remote_read
         p8 machine;
         p32 req_id;
         bipolar fd;
-        p64 offset;
+        p64 offset, total, started_ns;
         p8 remote_path[FILES_PATH], local_path[FILES_PATH], name[FILES_NAME];
 };
 
@@ -93,6 +93,7 @@ struct files_big
         struct ui_view view;
         struct files_job job;
         struct files_move move;
+        struct files_queue queue;
         struct files_tree tree;
         struct files_devices devices;
         struct files_peer peers[FILES_PEERS_MOST];
@@ -131,8 +132,9 @@ static struct
         string_address start;
         struct ui_rect path_box, head_box, side_box, nav_box[4];
         struct ui_iconbutton nav[4];
-        struct ui_rect view_box;
+        struct ui_rect view_box, transfer_box;
         struct ui_menubutton view_button;
+        struct ui_iconbutton transfer_cancel;
         struct files_trail trail;
         struct ui_text field, finder, pick_name;
         struct ui_control path, finder_field, pick_field;
@@ -163,6 +165,8 @@ static fn files_disc_play(p32 k);
 static fn files_disc_stop(void);
 static p32 files_disc_disk(const p8 address_to name);
 static fn files_open_with(b32 editor);
+static fn files_transfer_card_lay(struct ui address_to ui, const struct ui_list address_to l);
+static fn files_transfer_cancel_active(void);
 static fn files_remote_nav(void);
 static struct files_peer address_to files_peer_by_machine(p8 machine);
 static struct files_peer address_to files_peer_by_name(const p8 address_to name);
@@ -619,6 +623,7 @@ static fn files_bar_lay(void)
         }
         files.view_button.label = WORDS(files_view), files.view_button.icon = UI_ICON_SETTINGS + 1, files.view_button.open = files.menu.open && files.menu_view;
         files.view_button.x = files.view_box.x, files.view_button.y = files.view_box.y, files.view_button.w = files.view_box.w, files.view_button.h = files.view_box.h;
+        files_transfer_card_lay(&files.ui, &files.big->list);
 }
 
 // A pick bar's button's width (logical px): an action's, or its words' and their padding where those are wider (Choose this folder, and
@@ -1283,7 +1288,12 @@ static b32 files_transfer_start(const p8 address_to paths, p32 count, bipolar in
         struct files_move address_to job = &files.big->move;
         files_clear_msg(), files.dirty = true;
         if (files_move_running(job) || files.big->job.state == FILES_JOB_RUNNING)
-                return files_close(&into), files.said = LANGUAGE_files_busy, false;
+        {
+                files_close(&into);
+                if (files_queue_push(&files.big->queue, how, paths, count, dest))
+                        return true;
+                return files.said = LANGUAGE_files_busy, false;
+        }
         files_move_end(job);
         if (into < 0)
         {
@@ -1296,6 +1306,19 @@ static b32 files_transfer_start(const p8 address_to paths, p32 count, bipolar in
                 return files_move_end(job), false;
         string_copy_bounded((string_address)files.move_into, (string_address)dest, FILES_PATH), files_move_start(job);
         return files.moving = true, files.next_progress = (b64)ui_kit.now, true;
+}
+
+static fn files_transfer_dequeue(void)
+{
+        struct files_queued next;
+        while (files_queue_pop(&files.big->queue, &next))
+        {
+                bipolar into = files_open_dir(AT_FDCWD, next.dest, 0);
+                b32 started = files_transfer_start(next.paths, next.count, into, next.dest, next.how, false);
+                files_queued_drop(&next);
+                if (started)
+                        return;
+        }
 }
 
 static b32 files_transfer(const p8 address_to paths, p32 count, int row, int how)
@@ -1809,7 +1832,7 @@ static b32 files_is_png(struct files_model address_to m, const struct files_entr
         return len > 4 && name[len - 4] == '.' && (name[len - 3] | 32) == 'p' && (name[len - 2] | 32) == 'n' && (name[len - 1] | 32) == 'g';
 }
 
-static fn files_remote_open_file(struct files_peer address_to p, const p8 address_to remote_path, const p8 address_to name);
+static fn files_remote_open_file(struct files_peer address_to p, const p8 address_to remote_path, const p8 address_to name, p64 total);
 
 static fn files_open_with(b32 editor)
 {
@@ -1821,7 +1844,7 @@ static fn files_open_with(b32 editor)
                 struct files_peer address_to p = files_peer_by_name(m->peer);
                 if (editor && p && e && e->kind != FILES_KIND_DIRECTORY &&
                     files_path_join(path, sizeof(path), m->path, files_model_name(m, e)))
-                        files_remote_open_file(p, path, files_model_name(m, e));
+                        files_remote_open_file(p, path, files_model_name(m, e), e->size);
                 return;
         }
         if (editor)
@@ -2425,7 +2448,7 @@ static fn files_remote_read_abort(void)
         }
 }
 
-static fn files_remote_open_file(struct files_peer address_to p, const p8 address_to remote_path, const p8 address_to name)
+static fn files_remote_open_file(struct files_peer address_to p, const p8 address_to remote_path, const p8 address_to name, p64 total)
 {
         struct files_remote_read address_to rr = &files.big->remote_read;
         p8 dir[FILES_PATH], safe[FILES_NAME];
@@ -2450,7 +2473,7 @@ static fn files_remote_open_file(struct files_peer address_to p, const p8 addres
         system_close(folder);
         if (rr->fd < 0)
                 return;
-        rr->active = true, rr->machine = p->machine, rr->offset = 0;
+        rr->active = true, rr->machine = p->machine, rr->offset = 0, rr->total = total, rr->started_ns = (p64)ui_kit.now;
         string_copy_bounded((string_address)rr->remote_path, (string_address)remote_path, sizeof(rr->remote_path));
         string_copy_bounded((string_address)rr->name, (string_address)name, sizeof(rr->name));
         ui_label_foreign(shown, 96, name, nlen);
@@ -2658,6 +2681,7 @@ static fn files_close_window(void)
         if (!files.big)
                 return;
         files_remote_read_abort();
+        files_queue_clear(&files.big->queue);
         if (files.uevents >= 0)
                 system_close(files.uevents), files.uevents = -1;
         for (p32 k = 0; k < files.big->peer_count; k++)
@@ -2910,6 +2934,8 @@ static b32 files_key(const struct window_event address_to event)
                 return files_job_cancel(&files.big->job), true;
         if (key == UI_KEY_ESCAPE && files.moving && files_move_running(&files.big->move))
                 return files_move_cancel(&files.big->move), true;
+        if (key == UI_KEY_ESCAPE && files.big->remote_read.active)
+                return files_remote_read_abort(), files.big->note[0] = 0, files.dirty = true, true;
         b32 settled = !files.armed && !files.big->note[0]; // nothing an Escape would let go of
         if (files.armed || files.big->note[0])
                 files.armed = false, files.big->note[0] = 0, files.dirty = true;
@@ -3182,6 +3208,16 @@ static b32 files_bar_event(const struct window_event address_to event)
                 took |= event->type == WINDOW_EVENT_BUTTON && files_in_rect(x, y, v->x, v->y, v->w, v->h);
                 files.dirty |= hover != v->hover || took;
         }
+        if (files.transfer_box.w > 0 && files.transfer_box.h > 0)
+        {
+                struct ui_iconbutton address_to c = &files.transfer_cancel;
+                b32 hover = c->hover;
+                if (ui_iconbutton_event(&files.ui, c, event, x, y) & UI_ICONBUTTON_PRESSED)
+                        files_transfer_cancel_active();
+                took |= event->type == WINDOW_EVENT_BUTTON &&
+                        files_in_rect(x, y, files.transfer_box.x, files.transfer_box.y, files.transfer_box.w, files.transfer_box.h);
+                files.dirty |= hover != c->hover || took;
+        }
         return took;
 }
 
@@ -3251,6 +3287,237 @@ static b32 files_event(const struct window_event address_to event)
 
 /* ---- draw, tick, lifecycle ---- */
 
+static b32 files_transfer_active(void)
+{
+        if (!files.big)
+                return false;
+        return (files.moving && !files.measuring && files_move_running(&files.big->move)) ||
+               files.big->job.state == FILES_JOB_RUNNING || files.big->remote_read.active;
+}
+
+static fn files_transfer_cancel_active(void)
+{
+        if (!files.big)
+                return;
+        if (files.big->job.state == FILES_JOB_RUNNING)
+                files_job_cancel(&files.big->job);
+        else if (files.moving && !files.measuring && files_move_running(&files.big->move))
+                files_move_cancel(&files.big->move);
+        else if (files.big->remote_read.active)
+                files_remote_read_abort(), files.big->note[0] = 0;
+        files.dirty = true;
+}
+
+static fn files_transfer_card_lay(struct ui address_to ui, const struct ui_list address_to l)
+{
+        int margin_r = ui_dev(ui, UI_PAD), margin_b = ui_dev(ui, 10);
+        int cw = ui_dev(ui, 340), ch = ui_dev(ui, 82), max_w = l->w - 2 * margin_r;
+        int pad = ui_dev(ui, 12), btn = ui_dev(ui, 24);
+        struct ui_iconbutton address_to b = &files.transfer_cancel;
+
+        if (!files_transfer_active() || max_w < ui_dev(ui, 160) || l->h < ch + 2 * margin_b)
+        {
+                files.transfer_box = (struct ui_rect){0, 0, 0, 0};
+                b->w = b->h = 0, b->hover = b->down = false;
+                return;
+        }
+        if (cw > max_w)
+                cw = max_w;
+        files.transfer_box.x = ui_mirror(l->x + l->w - margin_r - cw, cw, l->x, l->w);
+        files.transfer_box.y = l->y + l->h - margin_b - ch;
+        files.transfer_box.w = cw;
+        files.transfer_box.h = ch;
+        b->glyph = UI_ICON_REMOVE;
+        b->name = b->tip = WORDS(files_pick_cancel);
+        b->x = ui_mirror(files.transfer_box.x + cw - pad - btn, btn, files.transfer_box.x, cw);
+        b->y = files.transfer_box.y + ui_dev(ui, 8);
+        b->w = btn, b->h = btn, b->disabled = false;
+}
+
+static fn files_transfer_card_draw(struct ui address_to ui, const struct ui_list address_to l)
+{
+        const struct ui_rect address_to r = &files.transfer_box;
+        int pad = ui_dev(ui, 12), btn = ui_dev(ui, 24), bar_h = ui_dev(ui, 6), rad = ui_dev(ui, 12);
+        char head[128], sub[192], left_m[96], right_m[96], cut[192];
+        p32 permille = FILES_PERMILLE_INDETERMINATE;
+        struct ui_box box, track, fill;
+        int y, tx, tw, by, bw;
+
+        (void)l;
+        if (r->w <= 0 || r->h <= 0)
+                return;
+        head[0] = sub[0] = left_m[0] = right_m[0] = 0;
+        if (files.moving && !files.measuring && files_move_running(&files.big->move))
+        {
+                const struct files_move address_to job = &files.big->move;
+                p32 id = __atomic_load_n(&job->items_done, __ATOMIC_ACQUIRE);
+                p32 it = __atomic_load_n(&job->items_total, __ATOMIC_ACQUIRE);
+                p64 bdone = __atomic_load_n(&job->bytes_done, __ATOMIC_ACQUIRE);
+                p64 btot = __atomic_load_n(&job->bytes_total, __ATOMIC_ACQUIRE);
+                p64 bps = 0;
+                p32 eta = 0;
+                p8 cur[FILES_NAME];
+                char done_s[16], tot_s[16], rate_s[16], eta_s[24], cur_s[FILES_NAME * 3 + 4], dst_s[FILES_NAME * 3 + 4];
+                int phase = __atomic_load_n(&job->active_phase, __ATOMIC_ACQUIRE);
+
+                files_move_metrics(job, (p64)clock_monotonic_nanoseconds(), &bps, &eta, &permille);
+                language_format(head, sizeof(head), job->how == FILES_MOVE_MOVE ? WORDS(files_transfer_moving) : WORDS(files_transfer_copying),
+                                (int)id, (int)(it > id ? it : id));
+                if (files.big->queue.count > 0)
+                {
+                        char qbuf[48];
+                        language_format(qbuf, sizeof(qbuf), WORDS(files_transfer_queued), (int)files.big->queue.count);
+                        string_append_bounded((string_address)head, (string_address) "  ", sizeof(head));
+                        string_append_bounded((string_address)head, (string_address)qbuf, sizeof(head));
+                }
+                if (phase == FILES_MOVE_RENAME || phase == FILES_MOVE_COUNT)
+                        string_copy_bounded((string_address)sub, (string_address)WORDS(files_transfer_preparing), sizeof(sub));
+                else
+                {
+                        const p8 address_to dst_base = files_base_name(files.move_into);
+                        if (files_move_current(job, cur, sizeof(cur)))
+                                ui_label_foreign(cur_s, 80, cur, string_length((string_address)cur));
+                        else
+                                cur_s[0] = 0;
+                        ui_label_foreign(dst_s, 48, dst_base, string_length((string_address)dst_base));
+                        if (cur_s[0] && dst_s[0])
+                        {
+                                string_copy_bounded((string_address)sub, (string_address)cur_s, sizeof(sub));
+                                string_append_bounded((string_address)sub, (string_address) " \xe2\x86\x92 ", sizeof(sub));
+                                string_append_bounded((string_address)sub, (string_address)dst_s, sizeof(sub));
+                        }
+                        else if (cur_s[0])
+                                string_copy_bounded((string_address)sub, (string_address)cur_s, sizeof(sub));
+                }
+                ui_size_text(done_s, sizeof(done_s), bdone);
+                if (btot > 0)
+                {
+                        ui_size_text(tot_s, sizeof(tot_s), btot);
+                        string_copy_bounded((string_address)left_m, (string_address)done_s, sizeof(left_m));
+                        string_append_bounded((string_address)left_m, (string_address) " / ", sizeof(left_m));
+                        string_append_bounded((string_address)left_m, (string_address)tot_s, sizeof(left_m));
+                }
+                else
+                        string_copy_bounded((string_address)left_m, (string_address)done_s, sizeof(left_m));
+                if (bps > 0)
+                {
+                        ui_size_text(rate_s, sizeof(rate_s), bps);
+                        if (eta > 0)
+                                files_format_eta(eta_s, sizeof(eta_s), eta),
+                                    language_format(right_m, sizeof(right_m), WORDS(files_transfer_eta), rate_s, eta_s);
+                        else
+                                language_format(right_m, sizeof(right_m), WORDS(files_transfer_rate), rate_s);
+                }
+                else if (permille != FILES_PERMILLE_INDETERMINATE)
+                {
+                        p8 digits[8];
+                        positive dlen = positive_into_string(digits, permille / 10);
+                        memory_copy(right_m, digits, dlen), right_m[dlen] = '%', right_m[dlen + 1] = 0;
+                }
+        }
+        else if (files.big->job.state == FILES_JOB_RUNNING)
+        {
+                const struct files_job address_to job = &files.big->job;
+                language_format(head, sizeof(head), WORDS(files_transfer_deleting), (int)job->removed);
+                if (job->at[0])
+                        ui_label_foreign(sub, sizeof(sub), job->at, string_length((string_address)job->at));
+                else
+                        string_copy_bounded((string_address)sub, (string_address)WORDS(files_transfer_preparing), sizeof(sub));
+                if (files.big->queue.count > 0)
+                        language_format(left_m, sizeof(left_m), WORDS(files_transfer_queued), (int)files.big->queue.count);
+        }
+        else if (files.big->remote_read.active)
+        {
+                const struct files_remote_read address_to rr = &files.big->remote_read;
+                char shown[FILES_NAME * 3 + 4], done_s[16], tot_s[16], rate_s[16];
+                p64 now_ns = (p64)ui_kit.now;
+                ui_label_foreign(shown, 80, rr->name, string_length((string_address)rr->name));
+                language_format(head, sizeof(head), WORDS(files_remote_opening), shown);
+                ui_size_text(done_s, sizeof(done_s), rr->offset);
+                if (rr->total > 0)
+                {
+                        permille = rr->offset >= rr->total ? 1000u : (p32)((rr->offset * 1000ull) / rr->total);
+                        ui_size_text(tot_s, sizeof(tot_s), rr->total);
+                        string_copy_bounded((string_address)left_m, (string_address)done_s, sizeof(left_m));
+                        string_append_bounded((string_address)left_m, (string_address) " / ", sizeof(left_m));
+                        string_append_bounded((string_address)left_m, (string_address)tot_s, sizeof(left_m));
+                }
+                else
+                        string_copy_bounded((string_address)left_m, (string_address)done_s, sizeof(left_m));
+                if (rr->started_ns && now_ns > rr->started_ns + 200000000ull && rr->offset > 0)
+                {
+                        p64 ms = (now_ns - rr->started_ns) / 1000000ull;
+                        if (ms > 0)
+                                ui_size_text(rate_s, sizeof(rate_s), (rr->offset * 1000ull) / ms),
+                                    language_format(right_m, sizeof(right_m), WORDS(files_transfer_rate), rate_s);
+                }
+        }
+
+        box = ui_box_px(r->x, r->y, r->w, r->h, rad * 256);
+        ui_kit_fill(ui, &box, ui_tone(ui_role(UI_SURFACE_CONTAINER) & 0xffffffu, 244), null);
+        ui_kit_ring(ui, &box, ui_q8(ui, 1), ui_tone(ui_role(UI_OUTLINE_VARIANT) & 0xffffffu, 130));
+
+        // Header + Cancel button
+        tx = r->x + pad, tw = r->w - 2 * pad - btn - ui_dev(ui, 6), y = r->y + ui_dev(ui, 10);
+        if (head[0] && tw > 0)
+        {
+                string_address text = ui_fit(ui, (string_address)head, UI_LABEL_LARGE, tw, cut, sizeof(cut));
+                ui_kit_text(ui, tx, ui_kit_baseline(ui, y, UI_LABEL_LARGE), text, UI_LABEL_LARGE, ui_text_colour(ui, UI_ON_SURFACE), 0);
+        }
+        ui_iconbutton_draw(ui, &files.transfer_cancel);
+
+        // Subtitle (current file -> destination)
+        y += ui_dev(ui, 19);
+        if (sub[0])
+        {
+                string_address text = ui_fit(ui, (string_address)sub, UI_LABEL_MEDIUM, r->w - 2 * pad, cut, sizeof(cut));
+                ui_kit_text(ui, tx, ui_kit_baseline(ui, y, UI_LABEL_MEDIUM), text, UI_LABEL_MEDIUM, ui_text_colour(ui, UI_ON_SURFACE_VARIANT), 0);
+        }
+
+        // Progress bar track + fill (determinate or smooth indeterminate)
+        by = r->y + ui_dev(ui, 50), bw = r->w - 2 * pad;
+        track = ui_box_px(tx, by, bw, bar_h, bar_h * 128);
+        ui_kit_fill(ui, &track, ui_role(UI_SURFACE_HIGHEST) | 0xff000000u, null);
+        if (permille == FILES_PERMILLE_INDETERMINATE)
+        {
+                p64 period = 1400000000ull;
+                p64 phase_ns = ((p64)ui_kit.now) % period;
+                int seg_w = bw * 30 / 100;
+                int travel = bw + seg_w;
+                int sx = tx - seg_w + (int)((phase_ns * (p64)travel) / period);
+                int fx0 = sx < tx ? tx : sx;
+                int fx1 = sx + seg_w > tx + bw ? tx + bw : sx + seg_w;
+                if (fx1 > fx0)
+                        fill = ui_box_px(fx0, by, fx1 - fx0, bar_h, bar_h * 128),
+                        ui_kit_fill(ui, &fill, ui_role(UI_PRIMARY) | 0xff000000u, null);
+        }
+        else if (permille > 0)
+        {
+                int fw = (int)(((p64)bw * (p64)permille) / 1000ull);
+                if (fw < bar_h)
+                        fw = bar_h;
+                if (fw > bw)
+                        fw = bw;
+                fill = ui_box_px(tx, by, fw, bar_h, bar_h * 128);
+                ui_kit_fill(ui, &fill, ui_role(UI_PRIMARY) | 0xff000000u, null);
+        }
+
+        // Bottom metrics row: bytes left, speed/ETA right
+        y = r->y + ui_dev(ui, 60);
+        {
+                int rw = right_m[0] ? ui_kit_measure(ui, (string_address)right_m, UI_LABEL_MEDIUM) : 0;
+                int lw_room = rw ? bw - rw - ui_dev(ui, 8) : bw;
+                if (left_m[0] && lw_room > ui_dev(ui, 24))
+                {
+                        string_address text = ui_fit(ui, (string_address)left_m, UI_LABEL_MEDIUM, lw_room, cut, sizeof(cut));
+                        ui_kit_text(ui, tx, ui_kit_baseline(ui, y, UI_LABEL_MEDIUM), text, UI_LABEL_MEDIUM, ui_text_colour(ui, UI_ON_SURFACE_VARIANT), 0);
+                }
+                if (right_m[0] && rw <= bw)
+                        ui_kit_text(ui, tx + bw - rw, ui_kit_baseline(ui, y, UI_LABEL_MEDIUM), (string_address)right_m, UI_LABEL_MEDIUM,
+                                    ui_text_colour(ui, UI_ON_SURFACE_VARIANT), 0);
+        }
+}
+
 static fn files_status_pill_draw(struct ui address_to ui, const struct ui_list address_to l)
 {
         int pad_x = ui_dev(ui, 10), ph = ui_dev(ui, 28), margin_r = ui_dev(ui, UI_PAD), margin_b = ui_dev(ui, 10);
@@ -3292,6 +3559,8 @@ static fn files_bar_tips(struct ui address_to ui)
 {
         for (int k = 0; k < FILES_NAVS; k++)
                 ui_iconbutton_tip(ui, &files.nav[k]);
+        if (files.transfer_cancel.w > 0)
+                ui_iconbutton_tip(ui, &files.transfer_cancel);
 }
 
 static fn files_draw(unsigned int address_to pixels)
@@ -3307,7 +3576,10 @@ static fn files_draw(unsigned int address_to pixels)
         if (files.view == FILES_VIEW_DETAILS)
                 ui_columns_draw(ui, &files.columns);
         files_bar_draw(ui);
-        files_status_pill_draw(ui, l);
+        if (files_transfer_active())
+                files_transfer_card_draw(ui, l);
+        else
+                files_status_pill_draw(ui, l);
         if (files.editing)
                 ui_text_overlay(ui, files.editing == FILES_EDIT_PATH ? &files.big->path.text : files_field());
         if (files.finding)
@@ -3620,7 +3892,9 @@ static long files_tick(long timeout, long address_to other)
                 FILES_SLICE(!job->worker && files_move_running(job), files_move_step(job));
                 if (!files_move_running(job))
                 {
-                        if (files.measuring)
+                        b32 was_measure = files.measuring;
+                        int ended_state = job->state;
+                        if (was_measure)
                         {
                                 files.measuring = false;
                                 if (files.sheet && files.menu.open)
@@ -3629,11 +3903,13 @@ static long files_tick(long timeout, long address_to other)
                         else
                                 files_move_said(), files_move_deed(job), files_reload();
                         files_move_end(job), files.moving = false;
+                        if (!was_measure && ended_state != FILES_JOB_CANCELLED)
+                                files_transfer_dequeue();
                 }
                 else if (now >= files.next_progress)
-                        files.next_progress = now + FILES_SHOW_NS, files.dirty = true;
+                        files.next_progress = now + (job->active_phase == FILES_MOVE_COPYING ? FILES_SHOW_NS : 33000000ll), files.dirty = true;
                 if (files.moving)
-                        timeout = job->worker ? ui_timeout_min(timeout, (long)FILES_SHOW_NS) : 1;
+                        timeout = job->worker ? ui_timeout_min(timeout, (long)(job->active_phase == FILES_MOVE_COPYING ? FILES_SHOW_NS : 33000000ll)) : 1;
         }
         if (files.big->job.state == FILES_JOB_RUNNING)
         {
@@ -3652,6 +3928,7 @@ static long files_tick(long timeout, long address_to other)
                                 language_format(files.big->note, sizeof(files.big->note), WORDS(files_deleted), (int)job->removed);
                         files.emptying = false;
                         files_job_end(job), files_after_delete(m), files_model_reload(m);
+                        files_transfer_dequeue();
                 }
                 if (!more || now >= files.next_show)
                         files.next_show = now + FILES_SHOW_NS, files.dirty = true;

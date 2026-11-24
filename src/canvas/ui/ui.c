@@ -6636,6 +6636,13 @@ LANGUAGE_ID(files_sheet_owner, "Owner %1$d, group %2$d") \
 LANGUAGE_ID(files_sheet_size, "Size %1$s (%2$s bytes)") \
 LANGUAGE_ID(files_sheet_size_in, "Size %1$s in %2$d items") \
 LANGUAGE_ID(files_this_machine, "This Machine") \
+LANGUAGE_ID(files_transfer_copying, "Copying %1$d of %2$d") \
+LANGUAGE_ID(files_transfer_deleting, "Deleting %d") \
+LANGUAGE_ID(files_transfer_eta, "%1$s/s, %2$s left") \
+LANGUAGE_ID(files_transfer_moving, "Moving %1$d of %2$d") \
+LANGUAGE_ID(files_transfer_preparing, "Preparing...") \
+LANGUAGE_ID(files_transfer_queued, "+%d queued") \
+LANGUAGE_ID(files_transfer_rate, "%s/s") \
 LANGUAGE_ID(files_type_link, "Link") \
 LANGUAGE_ID(files_type_other, "Special") \
 LANGUAGE_ID(files_undone, "%d undone") \
