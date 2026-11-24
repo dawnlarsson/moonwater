@@ -421,6 +421,9 @@ static void gpu_i915_set_rows(void)
                         check("gpu i915 scene: a picture not 4-byte aligned is refused (0 words)", gpu_i915_gen9_batch(&job, words, 64) == 0);
                         recs[21] = (unsigned int)img_va, recs[23] = 0;
                         check("gpu i915 scene: a picture of no pitch is refused (0 words)", gpu_i915_gen9_batch(&job, words, 64) == 0);
+                        recs[23] = 1324;
+                        check("gpu i915 scene: a picture whose rows do not begin on 64-byte lines (a pitch of 1324 pixels) is refused (0 words): the card would read them off their place",
+                              gpu_i915_gen9_batch(&job, words, 64) == 0);
                         recs[23] = 128;
                         {
                                 unsigned int picture[8];

@@ -3547,7 +3547,12 @@ HOT static unsigned int gpu_i915_scene_batch(const struct gpu_job *job, unsigned
                                                 unsigned int rp = r[7], xo, width, rows = (unsigned int)(c[3] - c[1]);
                                                 p8 address_to surface;
 
-                                                if (!rp || rp > 65535u || va < GPU_VA || (va & 3) || images == GPU_I915_SCENE_IMAGES ||
+                                                // The card finds a row of a surface at its pitch times the row, rounded down: to a 64-byte line by
+                                                // the sampler cache's port (a row that begins elsewhere in a line is read up to 15 pixels off: a
+                                                // window 1324 wide drew sheared, a sawtooth, on a Haswell), to 8 bytes by the render cache's. So a
+                                                // picture whose pitch is not whole 64-byte lines (a window as wide as it likes) is not read as it
+                                                // is: the processor draws the scene.
+                                                if (!rp || rp > 65535u || (rp & 15) || va < GPU_VA || (va & 3) || images == GPU_I915_SCENE_IMAGES ||
                                                     64ull * (images + 1) > pack_room - heads - 64ull * (more + 8))
                                                         return 0;
                                                 at = va + 4ull * ((positive)(c[1] - (int)r[2]) * rp + (positive)(c[0] - (int)r[1])), line = at & ~63ull;
