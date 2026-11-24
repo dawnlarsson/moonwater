@@ -1014,48 +1014,6 @@ static void compositor_device_reset(unsigned int at)
         compositor.input_kinds[at] = 0;
 }
 
-/*
-        The input probe: what the compositor took each device, key and press for, in compositor.log, the first COMPOSITOR_PROBE keys and
-        presses of a session (a log, not a store: it stops where a session's first minutes are told). A box booted from the stick on
-        2026-11-24 took every click on a window for the window's move and every key for nothing, and none of the machines it was tried on
-        again did: what the devices there said, and which held modifier made a click a move, is what this writes, and the stick's
-        stick-debug script carries compositor.log home.
-*/
-#define COMPOSITOR_PROBE 200
-#define COMPOSITOR_PROBE_EVIOCGNAME(bytes) (0x80000000u | (bytes) << 16 | 0x4506u)
-#define COMPOSITOR_PROBE_EVIOCGID 0x80084502u
-#define COMPOSITOR_PROBE_EVIOCGKEY(bytes) (0x80000000u | (bytes) << 16 | 0x4518u)
-static unsigned int compositor_probe_presses, compositor_probe_keys;
-
-// Every device's held modifiers that are not none, a line each.
-static void compositor_probe_held(void)
-{
-        for (unsigned int at = 0; at <= COMPOSITOR_INPUTS; at++)
-                if (compositor.held[at])
-                        string_format(log, "compositor: probe   held: device %p bits %p\n", (positive)at, (positive)compositor.held[at]);
-}
-
-// A device as it was found: its name, its ids, what it was taken for and every key it says is down now.
-static void compositor_probe_device(bipolar handle, unsigned int number, unsigned int at, int keyboard, int mouse, int tablet, int game,
-                                    int wakes)
-{
-        char name[80];
-        unsigned short id[4] = {0, 0, 0, 0};
-        p8 down[96];
-
-        memory_zero(name, sizeof(name)), memory_zero(down, sizeof(down));
-        system_control(handle, COMPOSITOR_PROBE_EVIOCGNAME(sizeof(name) - 1), name);
-        system_control(handle, COMPOSITOR_PROBE_EVIOCGID, id);
-        system_control(handle, COMPOSITOR_PROBE_EVIOCGKEY(sizeof(down)), down);
-        string_format(log, "compositor: probe device event%p as %p: %s bus %p id %p:%p keyboard %b mouse %b tablet %b game %b wakes %b\n",
-                      (positive)number, (positive)at, (string_address)name, (positive)id[0], (positive)id[1], (positive)id[2],
-                      (bipolar)keyboard, (bipolar)mouse, (bipolar)tablet, (bipolar)game, (bipolar)wakes);
-        for (unsigned int code = 0; code < sizeof(down) * 8; code++)
-                if (down[code >> 3] >> (code & 7) & 1)
-                        string_format(log, "compositor: probe   event%p says key %p is down as it opens\n", (positive)number, (positive)code);
-        log_flush();
-}
-
 static void compositor_input_add(unsigned int number)
 {
         char path[32];
@@ -1119,7 +1077,6 @@ static void compositor_input_add(unsigned int number)
         touchscreen = (properties & 2) && !(keys[COMPOSITOR_BTN_TOOL_PEN / 8] >> (COMPOSITOR_BTN_TOOL_PEN % 8) & 1) &&
                       (slotted || (tablet && (keys[COMPOSITOR_BTN_TOUCH / 8] >> (COMPOSITOR_BTN_TOUCH % 8) & 1)));
 
-        compositor_probe_device(handle, number, at, keyboard, mouse, tablet, game, wakes);
         if (!keyboard && !mouse && !tablet && !wakes && !touchscreen && !stick)
         {
                 system_close(handle);

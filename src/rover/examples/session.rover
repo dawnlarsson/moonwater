@@ -27,11 +27,3 @@ rule installer
 	on boot
 	if $verdict != disk
 	do open installer
-
-# A boot from the stick writes its story onto the stick: the logs, the input devices and the compositor's input probe, every five
-# seconds for ten minutes, for another machine to read (scripts/stick-debug).
-rule stick-debug
-	about "The session's logs written onto the stick, on a live boot"
-	on boot
-	if $verdict != disk
-	run stick-debug

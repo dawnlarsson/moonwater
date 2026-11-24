@@ -2275,39 +2275,17 @@ static int compositor_wl_straight_whole(int row)
 }
 
 /*
-        A tiled picture not taken straight, by the first rule it broke: said in the log at the first of each rule and at every 4096th, with
-        the picture and the window, since such a picture is copied by the card every frame and never shown straight (2026-11-23: a fullscreen
-        X11 Vulkan client through Xwayland, its buffers tiled and at the window's size, was copied every frame with nothing to say why).
+        Whether a tiled picture is not taken straight: the rules it must keep (the window's last picture, opaque, at the window's corner and
+        its size, four planes at most, no window being laid or with layers, the card composing and reading its modifier, nothing turned,
+        flipped, cropped or scaled). A picture that is not tiled is never taken straight.
 */
 static unsigned int compositor_wl_straight_refusal(int row, const struct wayland_picture *picture, long width, long height)
 {
-        static const char *const why[] = {"", "not the window's last picture", "blended", "not at the window's corner", "smaller than the window",
-                                          "more than four planes", "a picture of the window being laid", "the window has layers",
-                                          "the card does not compose or is not the display's", "a modifier the card does not read",
-                                          "turned, flipped, cropped, scaled or of another format"};
-        static unsigned long said[sizeof why / sizeof why[0]];
-        unsigned int rule = !compositor_wl_tiled(picture) ? 0
-                            : !picture->last ? 1
-                            : picture->blend && !compositor_row_opaque_fs(row) ? 2
-                            : picture->dest_x || picture->dest_y ? 3
-                            : width <= 0 || height <= 0 || picture->width < width || picture->height < height ? 4
-                            : picture->plane_count > 4 ? 5
-                            : compositor_wl.laying[row].open ? 6
-                            : compositor_wl_layers.pending_row == row || compositor_wl_layers.count[row] ? 7
-                            : !compositor_wl_tiled_now() ? 8
-                            : !compositor_wl_tiled_takes(picture->modifier) ? 9
-                            : compositor_wl_needs_xform_ordered(picture, width, height, 3) ? 10
-                                                                                          : 0;
-
-        if (rule && (said[rule]++ & 4095) == 0)
-                string_format(log, "compositor: a tiled picture not shown straight (%p times): %s; window %p, %px%p of %px%p at %p,%p, "
-                                   "fourcc %p modifier %p, %p planes, last %p\n",
-                              (positive)said[rule], (string_address)why[rule], (positive)row, (positive)picture->width, (positive)picture->height,
-                              (positive)(width > 0 ? width : 0), (positive)(height > 0 ? height : 0), (positive)(picture->dest_x < 0 ? 0 : picture->dest_x),
-                              (positive)(picture->dest_y < 0 ? 0 : picture->dest_y), (positive)picture->fourcc, (positive)picture->modifier,
-                              (positive)picture->plane_count, (positive)picture->last),
-                        log_flush();
-        return rule || !compositor_wl_tiled(picture);
+        return !compositor_wl_tiled(picture) || !picture->last || (picture->blend && !compositor_row_opaque_fs(row)) || picture->dest_x ||
+               picture->dest_y || width <= 0 || height <= 0 || picture->width < width || picture->height < height || picture->plane_count > 4 ||
+               compositor_wl.laying[row].open || compositor_wl_layers.pending_row == row || compositor_wl_layers.count[row] ||
+               !compositor_wl_tiled_now() || !compositor_wl_tiled_takes(picture->modifier) ||
+               compositor_wl_needs_xform_ordered(picture, width, height, 3);
 }
 
 static int compositor_wl_straight_take(int row, const struct wayland_picture *picture, long width, long height)
@@ -6436,7 +6414,6 @@ static void compositor_wl_answer_stamp(positive when, unsigned int seq)
 static void compositor_wl_presented(void)
 {
         positive now = clock_monotonic_nanoseconds();
-        static long lifts_told, ended_told;
         static struct canvas_switch lift_off;
 
         if (!compositor_wl.started)
@@ -6444,13 +6421,6 @@ static void compositor_wl_presented(void)
         // Lifts off while the owner's /run/moonwater/lift-off is there (looked for every 512th present, as planes-off is): a window drawn into
         // one subsurface over all of it is composed with its layers as before, let down at its next commit (wayland_lift).
         wayland_lifts_off(canvas_switch_poll(&lift_off, "/run/moonwater/lift-off", 511));
-        // A window lifted to its subsurface, or let down (wayland_lift): said in the log, for the box's runs.
-        if (wayland.lifts != lifts_told || wayland.lifts_ended != ended_told)
-        {
-                string_format(log, "compositor: windows lifted to a subsurface's buffer %p times, let down %p times\n", (positive)wayland.lifts,
-                              (positive)wayland.lifts_ended), log_flush();
-                lifts_told = wayland.lifts, ended_told = wayland.lifts_ended;
-        }
         compositor_wl.zero_row = compositor.direct_row >= 0 && compositor_client_scans(compositor.direct_row) ? compositor.direct_row
                                  : compositor.plane_row >= 0 && compositor_client_scans(compositor.plane_row) ? compositor.plane_row
                                                                                                               : -1;
