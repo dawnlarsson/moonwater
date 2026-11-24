@@ -70,7 +70,7 @@ static void db_random(void *context, unsigned char *bytes, long count)
                 bytes[at] = (unsigned char)(0x10 + at * 7);
 }
 
-static const struct dbus_host db_host = {0, db_alloc, db_release, db_now, db_random, 0, 0};
+static const struct dbus_host db_host = {0, db_alloc, db_release, db_now, db_random, 0, 0, 0, 0};
 
 /* ---- a client ---- */
 
@@ -1261,7 +1261,7 @@ static void db_room_trace(void *context, const char *line)
 */
 static void db_test_trace_room(void)
 {
-        static const struct dbus_host traced = {0, db_alloc, db_release, db_now, db_random, db_room_trace, 0};
+        static const struct dbus_host traced = {0, db_alloc, db_release, db_now, db_random, db_room_trace, 0, 0, 0};
         char path[260], member[256], interface[256], argument[200];
         long slot;
 
@@ -2142,7 +2142,7 @@ static void db_trace_take(void *context, const char *line)
 // The trace (sessionbus -t) puts what clients wrote on standard error, which is a terminal: no byte of theirs a terminal acts on.
 static void db_test_trace(void)
 {
-        static const struct dbus_host traced = {0, db_alloc, db_release, db_now, db_random, db_trace_take, 0};
+        static const struct dbus_host traced = {0, db_alloc, db_release, db_now, db_random, db_trace_take, 0, 0, 0};
         long a;
         int clean = 1;
 
@@ -3739,6 +3739,193 @@ static void db_test_requests(void)
 }
 
 /*
+        The FileChooser answered by the host's chooser (Files, in the sessionbus): OpenFile and SaveFile are the request's path at
+        once, the host is asked to show a chooser with what the program said (the title, multiple, directory, the name, the folder),
+        and the Response comes when the host says what was picked: 0 and the file: URIs, or 1 for none. One chooser a client; a
+        Close, or the client gone, lets it go and sends nothing; what was picked for a client that is gone goes nowhere.
+*/
+static struct dbus_choice db_chosen;
+static long db_choices, db_unchosen = -1, db_choose_refuses;
+
+static long db_choose_seen(void *context, const struct dbus_choice *choice)
+{
+        (void)context;
+        db_chosen = *choice, db_choices++;
+        return db_choose_refuses ? -1 : 0;
+}
+
+static void db_unchoose_seen(void *context, long slot)
+{
+        (void)context;
+        db_unchosen = slot;
+}
+
+static const struct dbus_host db_chooser_host = {0, db_alloc, db_release, db_now, db_random, 0, 0, db_choose_seen, db_unchoose_seen};
+
+// OpenFile or SaveFile with the options a chooser reads: multiple and directory (b), current_name (s), current_folder or current_file (ay).
+static void db_choose_call(long slot, const char *member, const char *token, int multiple, int directory, const char *name, const char *folder_key,
+                           const char *folder)
+{
+        struct db_call c;
+        struct dbus_fields f = {DBUS_PATH_PORTAL, "org.freedesktop.portal.FileChooser", member, "", DBUS_NAME_PORTAL, "", "ssa{sv}", 0, 0};
+        long length_at, first;
+
+        db_begin(&c, DBUS_CALL, 0, &f);
+        dbus_o_string(&c.w, "x11:1a");
+        dbus_o_string(&c.w, "Open Image");
+        dbus_o_u32(&c.w, 0);
+        length_at = c.w.length - 4;
+        dbus_o_pad(&c.w, 8);
+        first = c.w.length;
+        dbus_o_pad(&c.w, 8);
+        dbus_o_string(&c.w, "handle_token");
+        dbus_o_sig(&c.w, "s");
+        dbus_o_string(&c.w, token);
+        dbus_o_pad(&c.w, 8);
+        dbus_o_string(&c.w, "multiple");
+        dbus_o_sig(&c.w, "b");
+        dbus_o_u32(&c.w, (unsigned long)multiple);
+        dbus_o_pad(&c.w, 8);
+        dbus_o_string(&c.w, "directory");
+        dbus_o_sig(&c.w, "b");
+        dbus_o_u32(&c.w, (unsigned long)directory);
+        if (name)
+        {
+                dbus_o_pad(&c.w, 8);
+                dbus_o_string(&c.w, "current_name");
+                dbus_o_sig(&c.w, "s");
+                dbus_o_string(&c.w, name);
+        }
+        if (folder)
+        {
+                dbus_o_pad(&c.w, 8);
+                dbus_o_string(&c.w, folder_key);
+                dbus_o_sig(&c.w, "ay");
+                dbus_o_u32(&c.w, (unsigned long)strlen(folder) + 1);
+                dbus_o_raw(&c.w, folder, (long)strlen(folder) + 1);
+        }
+        dbus_o_patch32(&c.w, length_at, (unsigned long)(c.w.length - first));
+        db_send(slot, &c);
+}
+
+// The uris of a Response(0, {uris: as}), joined by newlines into `into`: how many there were, -1 when it is not that.
+static int db_response_uris(const struct db_seen *s, char *into, long room)
+{
+        const unsigned char *p = s->bytes + s->m.body_at;
+        long at = 8, stop, n = 0;
+        int count = 0;
+
+        into[0] = 0;
+        if (!s->ok || s->m.type != DBUS_SIGNAL || strcmp(s->m.signature, "ua{sv}") || dbus_get32(p) != 0)
+                return -1;
+        stop = 8 + (long)dbus_get32(p + 4);
+        if (stop > s->m.body_length || at + 4 + 4 > stop || dbus_get32(p + at) != 4 || memcmp(p + at + 4, "uris", 5) || p[at + 9] != 2 ||
+            memcmp(p + at + 10, "as", 3))
+                return -1;
+        at = (at + 13 + 3) & ~3L;
+        stop = at + 4 + (long)dbus_get32(p + at);
+        for (at += 4; at < stop; at = (at + 4 + (long)dbus_get32(p + at) + 1 + 3) & ~3L, count++)
+        {
+                long length = (long)dbus_get32(p + at);
+
+                if (n + length + 2 > room)
+                        return -1;
+                if (n)
+                        into[n++] = '\n';
+                memcpy(into + n, p + at + 4, (size_t)length), n += length, into[n] = 0;
+        }
+        return count;
+}
+
+static void db_test_chooser(void)
+{
+        long a, b;
+        struct db_seen s;
+        char path[200], text[600];
+
+        db_reset();
+        dbus_stop();
+        dbus_start(&db_chooser_host);
+        dbus_interface_claim("org.freedesktop.portal.FileChooser", 4);
+        db_choices = db_choose_refuses = 0, db_unchosen = -1;
+        a = db_connect(1000);
+        b = db_connect(1000);
+        db_hello(a);
+        db_hello(b);
+        db_drain(a);
+        db_drain(b);
+        db_call(a, DBUS_NAME_PORTAL, DBUS_PATH_PORTAL, "org.freedesktop.DBus.Properties", "Get", "ss", "org.freedesktop.portal.FileChooser", "version");
+        db_next(a, &s);
+        DBCHECK(s.ok && s.m.type == DBUS_RETURN && dbus_get32(s.bytes + s.m.body_at + 4) == 4,
+                "a host with a chooser claims FileChooser 4, the version a browser opens its file dialogs through");
+
+        db_request_path(a, "pick1", path, sizeof path);
+        db_rule(a, "type='signal',interface='org.freedesktop.portal.Request'");
+        db_drain(a);
+        db_choose_call(a, "OpenFile", "pick1", 1, 0, 0, "current_folder", "/root/Pictures");
+        db_next(a, &s);
+        DBCHECK(s.ok && s.m.type == DBUS_RETURN && db_string_arg(&s, 0, text, sizeof text) && !strcmp(text, path), "OpenFile answers its request's path");
+        DBCHECK(!db_queued(a), "and no Response yet: the person is picking (%ld bytes)", db_queued(a));
+        DBCHECK(db_choices == 1 && db_chosen.slot == a && db_chosen.kind == DBUS_CHOOSE_OPEN && db_chosen.multiple && !db_chosen.directory &&
+                    !strcmp(db_chosen.title, "Open Image") && !strcmp(db_chosen.folder, "/root/Pictures") && !db_chosen.name[0],
+                "the host is asked for a chooser with the program's title, multiple and its folder");
+        db_time += DBUS_RESPONSE_MS * 10;
+        dbus_tick();
+        DBCHECK(!db_queued(a), "a chooser's request waits for the person, however long (%ld bytes)", db_queued(a));
+        dbus_choice_done(a, db_chosen.id + 1, "/root/x\0", 8);
+        DBCHECK(!db_queued(a), "what another client's chooser picked is not this one's (%ld bytes)", db_queued(a));
+        dbus_choice_done(a, db_chosen.id, "/root/Pictures/a b.png\0/root/Pictures/\xc3\xa4%.png\0relative\0", 55);
+        db_next(a, &s);
+        DBCHECK(db_response_uris(&s, text, sizeof text) == 2 && !strcmp(s.m.path, path) && !strcmp(s.m.destination, db_unique(a)) &&
+                    !strcmp(text, "file:///root/Pictures/a%20b.png\nfile:///root/Pictures/%C3%A4%25.png"),
+                "the picked paths are the Response's uris, each a file: URI with what is not unreserved escaped, a relative one left out: %s", text);
+
+        db_request_path(a, "save1", path, sizeof path);
+        db_choose_call(a, "SaveFile", "save1", 0, 0, "Untitled.xcf", "current_file", "/root/Documents/drawing.xcf");
+        db_next(a, &s);
+        DBCHECK(db_choices == 2 && db_chosen.kind == DBUS_CHOOSE_SAVE && !strcmp(db_chosen.folder, "/root/Documents") &&
+                    !strcmp(db_chosen.name, "drawing.xcf"),
+                "SaveFile of a file there already (current_file) asks to save it again where it is, under its own name, whatever current_name says: %s %s",
+                db_chosen.folder, db_chosen.name);
+        db_choose_call(a, "OpenFile", "pick2", 0, 1, 0, 0, 0);
+        db_next(a, &s);
+        db_next(a, &s);
+        DBCHECK(db_choices == 2 && s.ok && s.m.type == DBUS_SIGNAL && db_u32_body(&s) == 2, "a second request while a chooser is open ends at once (2)");
+        dbus_choice_done(a, db_chosen.id, "", 0);
+        db_next(a, &s);
+        DBCHECK(db_is_response(&s, a, path, 1), "a chooser shut with nothing picked is the person's cancel (1)");
+
+        db_request_path(a, "closed", path, sizeof path);
+        db_choose_call(a, "OpenFile", "closed", 0, 1, "../x", "current_folder", "relative/folder");
+        db_next(a, &s);
+        DBCHECK(db_chosen.directory && !db_chosen.folder[0] && !db_chosen.name[0], "a folder that is not absolute is no folder to start in, nor is a name a path");
+        db_call(a, DBUS_NAME_PORTAL, path, "org.freedesktop.portal.Request", "Close", "", 0, 0);
+        db_next(a, &s);
+        DBCHECK(db_unchosen == a, "Request.Close lets the chooser go");
+        dbus_choice_done(a, db_chosen.id, "/root/x\0", 8);
+        DBCHECK(!db_queued(a), "and what it picked after is sent nowhere (%ld bytes)", db_queued(a));
+
+        db_unchosen = -1;
+        db_choose_call(b, "OpenFile", "gone", 0, 0, 0, 0, 0);
+        db_next(b, &s);
+        dbus_drop(b);
+        DBCHECK(db_unchosen == b, "a client that goes takes its chooser with it");
+        dbus_choice_done(b, db_chosen.id, "/root/x\0", 8);
+
+        db_choose_refuses = 1;
+        db_request_path(a, "refused", path, sizeof path);
+        db_choose_call(a, "OpenFile", "refused", 0, 0, 0, 0, 0);
+        db_next(a, &s);
+        db_next(a, &s);
+        DBCHECK(db_is_response(&s, a, path, 2), "a chooser the host cannot show ends the request at once (2), as with no chooser");
+        dbus_drop(a);
+        dbus_interface_claim("org.freedesktop.portal.FileChooser", 1);
+        DBCHECK(db_allocs == db_releases, "every record is returned (%ld %ld)", db_allocs, db_releases);
+        dbus_stop();
+        dbus_start(&db_host);
+}
+
+/*
         Deadlines on the bus's waits (2026-11-15): a call routed to a client that never answers held its caller's row for ever,
         so a callee could take every row of a caller (DBUS_PENDING_PER) and have each later call of it refused LimitsExceeded.
         Now the caller is told NoReply at DBUS_REPLY_MS and its row let go; a late answer goes nowhere. And a call to a name
@@ -3916,7 +4103,7 @@ static void db_notices_seen(void *context, const struct dbus_notice *notice, lon
         db_notices_told += count == DBUS_NOTICES;
 }
 
-static const struct dbus_host db_notice_host = {0, db_alloc, db_release, db_now, db_random, 0, db_notices_seen};
+static const struct dbus_host db_notice_host = {0, db_alloc, db_release, db_now, db_random, 0, db_notices_seen, 0, 0};
 
 static const struct dbus_notice *db_notice_of(unsigned long id)
 {
@@ -4384,6 +4571,7 @@ int main(int argc, char **argv)
         if (argc > 3)
                 db_seed = strtoul(argv[3], 0, 0) | 1;
         db_test_requests();
+        db_test_chooser();
         db_test_deadlines();
         db_test_kept();
         db_test_notifications();

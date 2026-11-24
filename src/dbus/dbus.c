@@ -122,6 +122,20 @@ struct dbus_notice
 };
 
 /* What the bus asks of its host. now is milliseconds on a clock that only goes forward; random fills bytes with random ones. */
+/* What a FileChooser request asks of the host's chooser (dbus_portal_choose). */
+#define DBUS_CHOOSE_OPEN 0
+#define DBUS_CHOOSE_SAVE 1
+#define DBUS_CHOOSE_PATH 4096
+struct dbus_choice
+{
+        long slot, id;                  // the client asking, and its id (its slot may be another client's by the time it is answered)
+        unsigned char kind;             // DBUS_CHOOSE_OPEN or DBUS_CHOOSE_SAVE
+        unsigned char multiple, directory;
+        char title[256];                // the title the program gives the chooser, or nothing
+        char name[256];                 // SaveFile's suggested name, or nothing
+        char folder[DBUS_CHOOSE_PATH];  // the folder to start in, or nothing
+};
+
 struct dbus_host
 {
         void *context;
@@ -132,6 +146,10 @@ struct dbus_host
         void (*trace)(void *context, const char *line); // optional: one line for each message the bus routes, to read what a program asks
         // optional: the notifications the bus keeps, every time they change (DBUS_NOTICES of them, id 0 where there is none)
         void (*notices)(void *context, const struct dbus_notice *notice, long count);
+        // optional: a chooser of files shown for a client's FileChooser request (0, or -1 when none can be), its answer given back by
+        // dbus_choice_done; and one let go (the request closed, the client gone) before it was answered
+        long (*choose)(void *context, const struct dbus_choice *choice);
+        void (*unchoose)(void *context, long slot);
 };
 
 /* A match rule, as AddMatch gave it. */
@@ -175,6 +193,7 @@ struct dbus_client
         long responses;                         // of response[], the ones held
         struct dbus_response response[DBUS_RESPONSES];
         long notice_span, notice_count;         // when its span of DBUS_NOTICE_SPAN_MS began, and the notifications it posted in it
+        char choosing[DBUS_REQUEST_PATH];       // the request a chooser of the host's is open for (dbus_portal_choose), or nothing
         unsigned char in[DBUS_MESSAGE + 16];
         unsigned char out[DBUS_OUT];
 };
@@ -2193,13 +2212,14 @@ static void dbus_portal_read_all(struct dbus_client *from, const struct dbus_mes
 
 /*
         The portal interfaces the service claims, with the version each answers to Properties.Get. Settings is its own.
-        FileChooser is not, and is claimed at version 1 for a reason: Chromium asks for the version of the FileChooser
-        portal at startup to learn whether there is a portal, and reads the Settings (the color-scheme, and with it
-        prefers-color-scheme) only once that has been answered. It uses the portal for its file dialogs only from
+        FileChooser is claimed at version 1 for a reason, where the host has no chooser: Chromium asks for the version of
+        the FileChooser portal at startup to learn whether there is a portal, and reads the Settings (the color-scheme, and
+        with it prefers-color-scheme) only once that has been answered. It uses the portal for its file dialogs only from
         version 3, so at 1 its dialogs stay the toolkit's, and it never calls a method of this interface; a program
         that does (GTK 4 asked to use the portal, Qt's portal theme) is answered a request that ends at once as
-        cancelled, until there is a chooser (dbus_portal_request). (test/wayland_chromium.py holds Chromium's side: the
-        theme follows, and a click on a file input calls no OpenFile.)
+        cancelled (dbus_portal_request). A host with a chooser (the sessionbus's: Files, dbus_portal_choose) claims 4, and
+        then Chromium's and Electron's file dialogs are Files. (test/wayland_chromium.py holds Chromium's side with no
+        chooser: the theme follows, and a click on a file input calls no OpenFile.)
 */
 static struct
 {
@@ -2222,6 +2242,15 @@ static long dbus_interface_version(const char *name)
 // An interface the service claims: 0, or -1 when there is no room or the name is too long.
 DBUS_API int dbus_interface_claim(const char *name, unsigned version)
 {
+        // one the table has already answers the version claimed now (a host with a chooser claims FileChooser's)
+        for (long at = 0; at < 8; at++)
+                if (dbus_interfaces[at].version && dbus_equal(dbus_interfaces[at].name, name))
+                {
+                        if (!version || version > 255)
+                                return -1;
+                        dbus_interfaces[at].version = (unsigned char)version;
+                        return 0;
+                }
         for (long at = 0; at < 8; at++)
                 if (!dbus_interfaces[at].version)
                 {
@@ -2459,8 +2488,11 @@ static void dbus_portal_request(struct dbus_client *from, const struct dbus_mess
 }
 
 // Request.Close of a request: its Response, held, is not sent (the specification: a closed request emits none).
+static void dbus_choice_close(struct dbus_client *c, const char *path);
+
 static void dbus_request_close(struct dbus_client *from, const char *path)
 {
+        dbus_choice_close(from, path);
         for (long k = 0; from->responses && k < DBUS_RESPONSES; k++)
                 if (from->response[k].due && dbus_equal(from->response[k].path, path))
                 {
@@ -2784,6 +2816,229 @@ static int dbus_portal_notification(struct dbus_client *from, const struct dbus_
         return 1;
 }
 
+/* ---- the FileChooser: Files' pick mode ---- */
+
+/*
+        FileChooser's OpenFile and SaveFile, answered by a chooser the host shows (the sessionbus's: Files in pick mode),
+        when the host has one: the request's path is the reply at once, as the specification has it, and its Response comes when
+        the person has picked (0, the picked files' file: URIs in results' uris) or shut the chooser (1). One chooser a client: a
+        request while one is open for it, or one the host cannot show, ends at once as before (2, which a program takes for no
+        dialog), and so does SaveFiles (a folder for files the program names, which Files does not pick yet). Request.Close of the
+        request, or the client gone, lets the chooser go (the host's unchoose) and nothing is sent.
+        What a program asks is held to what it is: the title, the name and the folder each fit their room or are not used, and a
+        folder is an absolute path or nothing.
+*/
+
+// Where the value of `key` is in the a{sv} that is argument `index`, when its variant holds signature `sig` exactly: the offset of the
+// value in the body (aligned for its first type), or -1. (dbus_option_at is this for one basic type.)
+static long dbus_option_typed(const struct dbus_message *m, long index, const char *key, const char *sig)
+{
+        const unsigned char *p = m->bytes + m->body_at;
+        long s, at = dbus_arg_at(m, index, &s), n = dbus_length(m->signature), limit = m->body_length, stop, length = dbus_length(sig);
+
+        if (at < 0 || s + 4 > n || m->signature[s] != 'a' || m->signature[s + 1] != '{' || m->signature[s + 2] != 's' || m->signature[s + 3] != 'v')
+                return -1;
+        at = DBUS_ALIGN(at, 4);
+        if (at + 4 > limit)
+                return -1;
+        stop = (long)dbus_get32(p + at);
+        at = DBUS_ALIGN(at + 4, 8);
+        stop += at;
+        if (stop > limit)
+                return -1;
+        while (at < stop)
+        {
+                long key_at, sig_at, ks = 0, vs = 0, first;
+
+                at = DBUS_ALIGN(at, 8);
+                key_at = at;
+                if (!dbus_value(p, &at, stop, "s", 1, &ks, 0, 0))
+                        return -1;
+                sig_at = at;
+                if (!dbus_value(p, &at, stop, "v", 1, &vs, 0, m->fds))
+                        return -1;
+                if (p[sig_at] != length || !dbus_equal((const char *)p + key_at + 4, key))
+                        continue;
+                for (long k = 0; k < length; k++)
+                        if (p[sig_at + 1 + k] != (unsigned char)sig[k])
+                                length = -1;
+                if (length < 0)
+                        return -1;
+                first = dbus_fixed_size(sig[0]);
+                return DBUS_ALIGN(sig_at + 2 + length, sig[0] == 'a' || sig[0] == 's' || sig[0] == 'o' ? 4 : first ? first : 1);
+        }
+        return -1;
+}
+
+// A boolean option of argument `index`: 1 or 0, and 0 when there is none.
+static int dbus_option_true(const struct dbus_message *m, long index, const char *key)
+{
+        long at = dbus_option_typed(m, index, key, "b");
+
+        return at >= 0 && dbus_get32(m->bytes + m->body_at + at) != 0;
+}
+
+// A path option (ay, its bytes ended by a NUL as the portal sends them) into `into`: its length, or -1 when there is none, it does not
+// fit, it is not absolute, or a NUL comes before its end.
+static long dbus_option_path(const struct dbus_message *m, long index, const char *key, char *into, long room)
+{
+        long at = dbus_option_typed(m, index, key, "ay"), length;
+        const unsigned char *bytes;
+
+        if (at < 0)
+                return -1;
+        length = (long)dbus_get32(m->bytes + m->body_at + at);
+        bytes = m->bytes + m->body_at + at + 4;
+        while (length > 0 && !bytes[length - 1])
+                length--;
+        if (length <= 0 || length + 1 > room || bytes[0] != '/')
+                return -1;
+        for (long k = 0; k < length; k++)
+                if (!bytes[k])
+                        return -1;
+        dbus_copy(into, bytes, length);
+        into[length] = 0;
+        return length;
+}
+
+// The Response of a chooser's request: `code`, and for 0 the paths (each ended by a NUL, `length` bytes in all) as file: URIs.
+static long dbus_choice_response(const struct dbus_client *c, const char *path, unsigned long code, const char *paths, long length)
+{
+        struct dbus_out w = {dbus.scratch, 0, DBUS_MESSAGE, 0};
+        struct dbus_fields f = {path, "org.freedesktop.portal.Request", "Response", "", c->unique, dbus.service.unique, "ua{sv}", 0, 0};
+        static char uri[3 * DBUS_CHOOSE_PATH + 8];
+        long body, outer, first, inner, items;
+        struct dbus_message parsed;
+
+        dbus_o_header(&w, DBUS_SIGNAL, DBUS_FLAG_NO_REPLY, dbus_next_serial(), &f);
+        body = w.length;
+        dbus_o_u32(&w, code);
+        dbus_o_u32(&w, 0);
+        outer = w.length - 4;
+        dbus_o_pad(&w, 8);
+        first = w.length;
+        if (!code && length > 0)
+        {
+                dbus_o_pad(&w, 8);
+                dbus_o_string(&w, "uris");
+                dbus_o_sig(&w, "as");
+                dbus_o_u32(&w, 0);
+                inner = w.length - 4;
+                items = w.length;
+                for (long at = 0; at < length;)
+                {
+                        long n = 0, stop = at;
+
+                        while (stop < length && paths[stop])
+                                stop++;
+                        for (long k = 0; "file://"[k]; k++)
+                                uri[n++] = "file://"[k];
+                        // A byte of the path that is not unreserved (letters, digits, - . _ ~) or a slash is written %XX.
+                        for (long k = at; k < stop && n + 4 < (long)sizeof uri; k++)
+                        {
+                                unsigned char b = (unsigned char)paths[k];
+
+                                if (dbus_letter((char)b) || dbus_digit((char)b) || b == '-' || b == '.' || b == '_' || b == '~' || b == '/')
+                                        uri[n++] = (char)b;
+                                else
+                                        uri[n++] = '%', uri[n++] = "0123456789ABCDEF"[b >> 4], uri[n++] = "0123456789ABCDEF"[b & 15];
+                        }
+                        uri[n] = 0;
+                        if (stop > at && paths[at] == '/')
+                                dbus_o_string(&w, uri);
+                        at = stop + 1;
+                }
+                dbus_o_patch32(&w, inner, (unsigned long)(w.length - items));
+        }
+        dbus_o_patch32(&w, outer, (unsigned long)(w.length - first));
+        dbus_o_end(&w, body);
+        return w.bad || dbus_parse(w.at, w.length, &parsed) < 0 ? -1 : w.length;
+}
+
+// FileChooser's methods, when the host shows a chooser: 1 when the call was one and is answered, 0 to leave it to the request that ends.
+static int dbus_portal_choose(struct dbus_client *from, const struct dbus_message *m)
+{
+        static struct dbus_choice choice;
+        char token[DBUS_TOKEN + 8], path[DBUS_REQUEST_PATH];
+        const unsigned char *title;
+        struct dbus_out w;
+        long body, length;
+
+        if (!dbus.host->choose || !dbus_equal(m->interface, "org.freedesktop.portal.FileChooser") || !dbus_equal(m->signature, "ssa{sv}") ||
+            !(dbus_equal(m->member, "OpenFile") || dbus_equal(m->member, "SaveFile")))
+                return 0;
+        dbus_zero(&choice, sizeof choice);
+        choice.slot = from->slot, choice.id = from->id;
+        choice.kind = dbus_equal(m->member, "OpenFile") ? DBUS_CHOOSE_OPEN : DBUS_CHOOSE_SAVE;
+        choice.multiple = choice.kind == DBUS_CHOOSE_OPEN && dbus_option_true(m, 2, "multiple");
+        choice.directory = choice.kind == DBUS_CHOOSE_OPEN && dbus_option_true(m, 2, "directory");
+        if ((length = dbus_arg_text(m, 1, &title)) > 0 && length < (long)sizeof choice.title)
+                dbus_copy(choice.title, title, length), choice.title[length] = 0;
+        if (dbus_option_string(m, 2, "current_name", choice.name, sizeof choice.name) < 0)
+                choice.name[0] = 0;
+        for (long k = 0; choice.name[k]; k++)
+                if (choice.name[k] == '/')
+                        choice.name[0] = 0;
+        if (dbus_option_path(m, 2, "current_folder", choice.folder, sizeof choice.folder) < 0)
+        {
+                // SaveFile's current_file: the file being saved again, its folder the chooser's and its name the one suggested
+                choice.folder[0] = 0;
+                if (choice.kind == DBUS_CHOOSE_SAVE && (length = dbus_option_path(m, 2, "current_file", choice.folder, sizeof choice.folder)) > 1)
+                {
+                        long cut = length;
+
+                        while (cut > 0 && choice.folder[cut - 1] != '/')
+                                cut--;
+                        if (cut > 0 && length - cut < (long)sizeof choice.name)
+                                dbus_text(choice.name, sizeof choice.name, choice.folder + cut);
+                        choice.folder[cut > 1 ? cut - 1 : 1] = 0;
+                }
+                else
+                        choice.folder[0] = 0;
+        }
+        if (dbus_option_string(m, 2, "handle_token", token, sizeof token) < 0)
+                token[0] = 0;
+        dbus_request_path(from, token, path);
+        dbus_reply_begin(&w, from, m, "o", dbus.service.unique, &body);
+        dbus_o_string(&w, path);
+        dbus_reply_end(&w, from, m, body);
+        if (from->choosing[0] || dbus.host->choose(dbus.host->context, &choice) < 0)
+                dbus_response_owe(from, path, 2);
+        else
+                dbus_text(from->choosing, sizeof from->choosing, path);
+        return 1;
+}
+
+// The chooser open for a client let go: the one of the request at `path`, or any (path null: the client is gone).
+static void dbus_choice_close(struct dbus_client *c, const char *path)
+{
+        if (!c->choosing[0] || (path && !dbus_equal(c->choosing, path)))
+                return;
+        c->choosing[0] = 0;
+        if (dbus.host->unchoose)
+                dbus.host->unchoose(dbus.host->context, c->slot);
+}
+
+/*
+        The host's chooser for client `id` at `slot` is done: the paths picked, each ended by a NUL (`length` bytes in all; none is
+        the chooser shut, cancelled). Sent as its request's Response to the client that asked, when it is still connected there with
+        that request open; a path that is not absolute is not sent.
+*/
+DBUS_API void dbus_choice_done(long slot, long id, const char *paths, long length)
+{
+        struct dbus_client *c = slot >= 0 && slot < DBUS_CLIENTS ? dbus.client[slot] : 0;
+        long n;
+
+        if (!c || c->id != id || !c->choosing[0] || length < 0)
+                return;
+        n = dbus_choice_response(c, c->choosing, length > 0 ? 0 : 1, paths, length);
+        if (n < 0)
+                n = dbus_choice_response(c, c->choosing, 2, 0, 0);
+        c->choosing[0] = 0;
+        if (n > 0)
+                dbus_deliver(c, dbus.scratch, n, DBUS_ASKED_FOR);
+}
+
 // A call to the portal (the service's own).
 static void dbus_service_call(struct dbus_client *from, const struct dbus_message *m)
 {
@@ -2895,11 +3150,14 @@ static void dbus_service_call(struct dbus_client *from, const struct dbus_messag
                 dbus_reply_end(&w, from, m, body);
                 return;
         }
+        if (dbus_portal_choose(from, m))
+                return;
         /*
                 A monitor of the session would be told when it ends and asked whether it may (StateChanged, QueryEndResponse),
                 and the desktop asks no program that: so the request ends at once, 2 (another way), and the program goes on with
-                no monitor, as it does under a portal that has none. A file chooser is not here yet: its requests end at once
-                as cancelled (1 is the person's; 2 is what a program takes for "no dialog"), so an upload is never left open.
+                no monitor, as it does under a portal that has none. A file chooser's requests, where the host shows none (or
+                SaveFiles, or one asked while the caller's is open), end at once as cancelled (1 is the person's; 2 is what a
+                program takes for "no dialog"), so an upload is never left open.
         */
         if ((dbus_equal(m->interface, "org.freedesktop.portal.Inhibit") && dbus_equal(m->member, "CreateMonitor") && dbus_equal(m->signature, "sa{sv}")) ||
             (dbus_equal(m->interface, "org.freedesktop.portal.FileChooser") &&
@@ -3412,6 +3670,7 @@ DBUS_API void dbus_drop(long slot)
 
         if (!c)
                 return;
+        dbus_choice_close(c, 0);
         dbus_close_fds(c->in_fd, c->in_fds);
         dbus_close_fds(c->out_fd, c->out_fds);
         c->in_fds = c->out_fds = c->out_fd_runs = 0;

@@ -28,6 +28,7 @@
 # machine-made 2026-11-24 (the heading of a table's columns in a row's menu), not yet read by a person: menu_columns
 # machine-made 2026-11-24 (the wallpaper editor, each Scene's), not yet read by a person: settings_button_edit =Choose each Scene's wallpaper on the desktop
 # machine-made 2026-11-24 (Files' pick mode for the wallpaper editor), not yet read by a person: files_pick
+# machine-made 2026-11-24 (Files' pick mode for programs, the FileChooser portal), not yet read by a person: files_pick_cancel files_pick_folder files_pick_replace files_pick_save
 @language fr
 @name Français
 @translated machine
@@ -123,6 +124,10 @@ files_nothing_to_paste	c9d4	Le presse-papiers ne contient aucun fichier
 files_nothing_to_redo	b2a4	Rien à rétablir
 files_nothing_to_undo	1433	Rien à annuler
 files_pick	8f59	Ouvrez une image PNG pour en faire le fond d'écran de cette scène
+files_pick_cancel	ca3b	Annuler
+files_pick_folder	1108	Choisir ce dossier
+files_pick_replace	a2d7	Un fichier de ce nom existe déjà : enregistrez à nouveau pour le remplacer
+files_pick_save	5d68	Enregistrer
 files_place_downloads	07de	Téléchargements
 files_place_home	0eae	Dossier personnel
 files_place_pictures	feae	Images

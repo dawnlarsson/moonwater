@@ -28,6 +28,7 @@
 # machine-made 2026-11-24 (the heading of a table's columns in a row's menu), not yet read by a person: menu_columns
 # machine-made 2026-11-24 (the wallpaper editor, each Scene's), not yet read by a person: settings_button_edit =Choose each Scene's wallpaper on the desktop
 # machine-made 2026-11-24 (Files' pick mode for the wallpaper editor), not yet read by a person: files_pick
+# machine-made 2026-11-24 (Files' pick mode for programs, the FileChooser portal), not yet read by a person: files_pick_cancel files_pick_folder files_pick_replace files_pick_save
 @language ru
 @name Русский
 @translated machine
@@ -123,6 +124,10 @@ files_nothing_to_paste	c9d4	В буфере обмена нет файлов
 files_nothing_to_redo	b2a4	Нечего повторять
 files_nothing_to_undo	1433	Нечего отменять
 files_pick	8f59	Откройте изображение PNG, чтобы сделать его обоями этой сцены
+files_pick_cancel	ca3b	Отмена
+files_pick_folder	1108	Выбрать эту папку
+files_pick_replace	a2d7	Файл с таким именем уже есть: сохраните ещё раз, чтобы заменить его
+files_pick_save	5d68	Сохранить
 files_place_downloads	07de	Загрузки
 files_place_home	0eae	Домашняя
 files_place_pictures	feae	Изображения

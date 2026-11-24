@@ -29,6 +29,7 @@
 # machine-made 2026-11-24 (the heading of a table's columns in a row's menu), not yet read by a person: menu_columns
 # machine-made 2026-11-24 (the wallpaper editor, each Scene's), not yet read by a person: settings_button_edit =Choose each Scene's wallpaper on the desktop
 # machine-made 2026-11-24 (Files' pick mode for the wallpaper editor), not yet read by a person: files_pick
+# machine-made 2026-11-24 (Files' pick mode for programs, the FileChooser portal), not yet read by a person: files_pick_cancel files_pick_folder files_pick_replace files_pick_save
 @language he
 @name עברית
 @translated machine
@@ -124,6 +125,10 @@ files_nothing_to_paste	c9d4	בלוח אין קבצים
 files_nothing_to_redo	b2a4	אין מה לבצע שוב
 files_nothing_to_undo	1433	אין מה לבטל
 files_pick	8f59	פתחו תמונת PNG כדי שתהיה הרקע של הסצנה הזו
+files_pick_cancel	ca3b	ביטול
+files_pick_folder	1108	בחירת תיקייה זו
+files_pick_replace	a2d7	קובץ בשם זה כבר קיים: יש לשמור שוב כדי להחליף אותו
+files_pick_save	5d68	שמירה
 files_place_downloads	07de	הורדות
 files_place_home	0eae	בית
 files_place_pictures	feae	תמונות

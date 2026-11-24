@@ -234,7 +234,145 @@ static void sessionbus_notices(void *context, const struct dbus_notice *notice, 
         memory_copy(sessionbus_board.key, shown, sizeof shown);
 }
 
-static struct dbus_host sessionbus_host = {0, sessionbus_alloc, sessionbus_release, sessionbus_now, sessionbus_random, 0, sessionbus_notices};
+/*
+        The FileChooser portal's chooser (dbus.c's dbus_portal_choose): Files in pick mode, files -pick open|folder|save (src/canvas/ui/
+        files.c), started on the desktop as the person's (MOONWATER_ASKED, so its window takes the keys), with the program's title, the
+        name it suggests and the folder to start in. Its standard output is a pipe this reads until Files ends: what Files wrote there,
+        each path ended by a NUL, is the request's answer (dbus_choice_done), and nothing is the chooser shut. One a client, by its slot;
+        what Files writes is kept in memory that grows as it is written, so a folder's every file picked at once fits. A request let go
+        (Request.Close, its program gone) ends its Files. Files runs as the desktop does, so what a program of a bowl is given is only what
+        the person picked in it.
+*/
+#define SESSIONBUS_CHOOSER_ROOM 4096
+
+static struct
+{
+        long pid, id;   // Files, and the id of the client it answers
+        int out;        // the pipe's end Files writes to, -1 for none
+        char *said;     // what it has written: used bytes of room
+        long used, room;
+} sessionbus_chooser[DBUS_CLIENTS];
+
+static long sessionbus_choose(void *context, const struct dbus_choice *choice)
+{
+        long slot = choice->slot, child;
+        int ends[2];
+        string_address argv[12];
+        positive count = 0;
+
+        (void)context;
+        if (slot < 0 || slot >= DBUS_CLIENTS || sessionbus_chooser[slot].out >= 0 ||
+            sessionbus_call(syscall(pipe2), (positive)ends, O_CLOEXEC, 0, 0, 0, 0) < 0)
+                return -1;
+        argv[count++] = (string_address) "/files", argv[count++] = (string_address) "-pick";
+        argv[count++] = (string_address)(choice->kind == DBUS_CHOOSE_SAVE ? "save" : choice->directory ? "folder" : "open");
+        if (choice->multiple)
+                argv[count++] = (string_address) "-multiple";
+        if (choice->title[0])
+                argv[count++] = (string_address) "-title", argv[count++] = (string_address)choice->title;
+        if (choice->name[0])
+                argv[count++] = (string_address) "-name", argv[count++] = (string_address)choice->name;
+        if (choice->folder[0] == '/')
+                argv[count++] = (string_address)choice->folder;
+        argv[count] = null;
+        child = system_fork();
+        if (child == 0)
+        {
+                string_address address_to inherited = file_environment_all();
+                positive have = 0, used = 0;
+                long quiet = sessionbus_call(syscall(openat), (positive)AT_FDCWD, (positive) "/dev/null", O_RDWR | O_CLOEXEC, 0, 0, 0);
+
+                while (inherited && inherited[have])
+                        have++;
+                string_address environment[have + 2];
+                environment[used++] = (string_address) "MOONWATER_ASKED=1";
+                for (positive at = 0; at < have; at++)
+                        if (!string_has_prefix(inherited[at], "MOONWATER_ASKED="))
+                                environment[used++] = inherited[at];
+                environment[used] = null;
+                sessionbus_call(syscall(dup3), (positive)ends[1], 1, 0, 0, 0, 0);
+                if (quiet >= 0)
+                        sessionbus_call(syscall(dup3), (positive)quiet, 0, 0, 0, 0, 0);
+                sessionbus_call(syscall(setsid), 0, 0, 0, 0, 0, 0);
+                system_execute(argv[0], argv, environment);
+                sessionbus_call(syscall(exit_group), 127, 0, 0, 0, 0, 0);
+        }
+        system_close(ends[1]);
+        if (child < 0)
+                return system_close(ends[0]), -1;
+        sessionbus_call(syscall(fcntl), (positive)ends[0], 4, 04000, 0, 0, 0); // F_SETFL O_NONBLOCK
+        sessionbus_chooser[slot].pid = child, sessionbus_chooser[slot].id = choice->id;
+        sessionbus_chooser[slot].out = ends[0], sessionbus_chooser[slot].used = 0;
+        return 0;
+}
+
+// A chooser's Files let go of: its pipe closed and Files ended (it is reaped with the others, sessionbus_reap).
+static void sessionbus_unchoose(void *context, long slot)
+{
+        (void)context;
+        if (slot < 0 || slot >= DBUS_CLIENTS || sessionbus_chooser[slot].out < 0)
+                return;
+        sessionbus_call(syscall(kill), (positive)sessionbus_chooser[slot].pid, 15, 0, 0, 0, 0); // SIGTERM
+        system_close(sessionbus_chooser[slot].out);
+        sessionbus_chooser[slot].out = -1, sessionbus_chooser[slot].used = 0;
+}
+
+// What a chooser's Files wrote, read; at its end (Files gone) the request is answered with it.
+static void sessionbus_chooser_read(long slot)
+{
+        long got;
+
+        for (;;)
+        {
+                if (sessionbus_chooser[slot].used == sessionbus_chooser[slot].room)
+                {
+                        long room = sessionbus_chooser[slot].room ? 2 * sessionbus_chooser[slot].room : SESSIONBUS_CHOOSER_ROOM;
+                        char *more = (char *)sessionbus_alloc(0, room);
+
+                        if (!more)
+                        {
+                                dbus_choice_done(slot, sessionbus_chooser[slot].id, "", 0);
+                                sessionbus_unchoose(0, slot);
+                                return;
+                        }
+                        if (sessionbus_chooser[slot].said)
+                        {
+                                memory_copy(more, sessionbus_chooser[slot].said, (positive)sessionbus_chooser[slot].used);
+                                sessionbus_release(0, sessionbus_chooser[slot].said, sessionbus_chooser[slot].room);
+                        }
+                        sessionbus_chooser[slot].said = more, sessionbus_chooser[slot].room = room;
+                }
+                got = (long)system_read_once(sessionbus_chooser[slot].out, sessionbus_chooser[slot].said + sessionbus_chooser[slot].used,
+                                             (positive)(sessionbus_chooser[slot].room - sessionbus_chooser[slot].used));
+                if (got > 0)
+                {
+                        sessionbus_chooser[slot].used += got;
+                        continue;
+                }
+                if (got == -11) // EAGAIN: more to come
+                        return;
+                break;
+        }
+        system_close(sessionbus_chooser[slot].out);
+        sessionbus_chooser[slot].out = -1;
+        // Only what ends a path: a path cut short by Files ending as it wrote is not one.
+        while (sessionbus_chooser[slot].used > 0 && sessionbus_chooser[slot].said[sessionbus_chooser[slot].used - 1])
+                sessionbus_chooser[slot].used--;
+        dbus_choice_done(slot, sessionbus_chooser[slot].id, sessionbus_chooser[slot].said, sessionbus_chooser[slot].used);
+        sessionbus_chooser[slot].used = 0;
+}
+
+// Every chooser's Files that has ended, reaped.
+static void sessionbus_reap(void)
+{
+        positive status;
+
+        while (sessionbus_call(syscall(wait4), (positive)-1, (positive)address_of status, 1, 0, 0, 0) > 0) // WNOHANG
+                ;
+}
+
+static struct dbus_host sessionbus_host = {0, sessionbus_alloc, sessionbus_release, sessionbus_now, sessionbus_random, 0, sessionbus_notices,
+                                           sessionbus_choose, sessionbus_unchoose};
 
 /* ---- the settings ---- */
 
@@ -712,7 +850,7 @@ static b32 sessionbus_main()
                 }
         }
         for (int at = 0; at < DBUS_CLIENTS; at++)
-                sessionbus.fd[at] = -1;
+                sessionbus.fd[at] = -1, sessionbus_chooser[at].out = -1;
         dbus_set_fd_ops(sessionbus_dup_fd, sessionbus_close_fd);
         if (dbus_start(&sessionbus_host) < 0 || sessionbus_listen() < 0)
         {
@@ -741,12 +879,15 @@ static b32 sessionbus_main()
                         version = version * 10 + (unsigned)(*digit - '0');
                 dbus_interface_claim(name, version);
         }
+        // Files is the chooser of FileChooser's requests, so the portal answers the version a browser asks for before it uses one (4:
+        // OpenFile's directory and current_folder are read).
+        dbus_interface_claim("org.freedesktop.portal.FileChooser", 4);
         sessionbus_watch();
         sessionbus_settings();
         for (;;)
         {
-                struct sessionbus_poll watch[3 + DBUS_CLIENTS];
-                long owner[3 + DBUS_CLIENTS], count = 0;
+                struct sessionbus_poll watch[3 + 2 * DBUS_CLIENTS];
+                long owner[3 + 2 * DBUS_CLIENTS], count = 0;
                 long wait = dbus_wait(1000); // a second, or less when the bus has a deadline sooner (a portal Response it holds)
                 positive timeout[2] = {(positive)(wait / 1000), (positive)(wait % 1000) * 1000000};
                 long now;
@@ -772,6 +913,12 @@ static b32 sessionbus_main()
                                                                          (short)(SESSIONBUS_POLLIN | (dbus_out(slot, &bytes) ? SESSIONBUS_POLLOUT : 0)), 0};
                                 owner[count++] = slot;
                         }
+                for (long slot = 0; slot < DBUS_CLIENTS; slot++)
+                        if (sessionbus_chooser[slot].out >= 0)
+                        {
+                                watch[count] = (struct sessionbus_poll){sessionbus_chooser[slot].out, SESSIONBUS_POLLIN, 0};
+                                owner[count++] = -4 - slot;
+                        }
                 sessionbus_call(syscall(ppoll), (positive)watch, (positive)count, (positive)timeout, 0, 0, 0);
                 for (long at = 0; at < count; at++)
                 {
@@ -783,6 +930,11 @@ static b32 sessionbus_main()
                                 goto stop;
                         else if (owner[at] == -3)
                                 sessionbus_drain_watch();
+                        else if (owner[at] <= -4)
+                        {
+                                if (sessionbus_chooser[-4 - owner[at]].out >= 0)
+                                        sessionbus_chooser_read(-4 - owner[at]);
+                        }
                         else if (sessionbus.fd[owner[at]] >= 0)
                         {
                                 if (watch[at].returned & (SESSIONBUS_POLLIN | SESSIONBUS_POLLHUP | SESSIONBUS_POLLERR))
@@ -793,6 +945,7 @@ static b32 sessionbus_main()
                         }
                 }
                 now = sessionbus_now(0);
+                sessionbus_reap();
                 sessionbus_rewatch(now);
                 if (sessionbus.dirty || (sessionbus.auto_theme && now - sessionbus.last_settings > SESSIONBUS_TICK_MS) ||
                     (sessionbus.inotify < 0 && now - sessionbus.last_settings > 1000))

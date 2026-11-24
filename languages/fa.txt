@@ -29,6 +29,7 @@
 # machine-made 2026-11-24 (the heading of a table's columns in a row's menu), not yet read by a person: menu_columns
 # machine-made 2026-11-24 (the wallpaper editor, each Scene's), not yet read by a person: settings_button_edit =Choose each Scene's wallpaper on the desktop
 # machine-made 2026-11-24 (Files' pick mode for the wallpaper editor), not yet read by a person: files_pick
+# machine-made 2026-11-24 (Files' pick mode for programs, the FileChooser portal), not yet read by a person: files_pick_cancel files_pick_folder files_pick_replace files_pick_save
 @language fa
 @name فارسی
 @translated machine
@@ -124,6 +125,10 @@ files_nothing_to_paste	c9d4	کلیپ‌بورد پرونده‌ای ندارد
 files_nothing_to_redo	b2a4	چیزی برای انجام دوباره نیست
 files_nothing_to_undo	1433	چیزی برای واگرد نیست
 files_pick	8f59	یک تصویر PNG باز کنید تا پس‌زمینهٔ این صحنه شود
+files_pick_cancel	ca3b	لغو
+files_pick_folder	1108	انتخاب این پوشه
+files_pick_replace	a2d7	فایلی با این نام وجود دارد: برای جایگزینی دوباره ذخیره کنید
+files_pick_save	5d68	ذخیره
 files_place_downloads	07de	بارگیری‌ها
 files_place_home	0eae	خانه
 files_place_pictures	feae	تصویرها

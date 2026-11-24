@@ -28,6 +28,7 @@
 # machine-made 2026-11-24 (the heading of a table's columns in a row's menu), not yet read by a person: menu_columns
 # machine-made 2026-11-24 (the wallpaper editor, each Scene's), not yet read by a person: settings_button_edit =Choose each Scene's wallpaper on the desktop
 # machine-made 2026-11-24 (Files' pick mode for the wallpaper editor), not yet read by a person: files_pick
+# machine-made 2026-11-24 (Files' pick mode for programs, the FileChooser portal), not yet read by a person: files_pick_cancel files_pick_folder files_pick_replace files_pick_save
 @language uk
 @name Українська
 @translated machine
@@ -123,6 +124,10 @@ files_nothing_to_paste	c9d4	У буфері обміну немає файлів
 files_nothing_to_redo	b2a4	Нічого повторювати
 files_nothing_to_undo	1433	Нічого скасовувати
 files_pick	8f59	Відкрийте зображення PNG, щоб зробити його шпалерами цієї сцени
+files_pick_cancel	ca3b	Скасувати
+files_pick_folder	1108	Вибрати цю теку
+files_pick_replace	a2d7	Файл із такою назвою вже є: збережіть ще раз, щоб замінити його
+files_pick_save	5d68	Зберегти
 files_place_downloads	07de	Завантаження
 files_place_home	0eae	Домівка
 files_place_pictures	feae	Зображення

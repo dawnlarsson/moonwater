@@ -3657,7 +3657,7 @@ static void bd_random(void *context, unsigned char *bytes, long count)
                 bytes[at] = (unsigned char)(at * 37 + 11);
 }
 
-static const struct dbus_host bd_host = {0, bd_alloc, bd_release, bd_now, bd_random, 0, 0};
+static const struct dbus_host bd_host = {0, bd_alloc, bd_release, bd_now, bd_random, 0, 0, 0, 0};
 static string_address bd_only; // a row to run alone (call, readone, setting), or every row
 
 static p8 bd_want(string_address row)

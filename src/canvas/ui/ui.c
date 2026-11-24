@@ -6566,6 +6566,10 @@ LANGUAGE_ID(files_nothing_to_paste, "The clipboard holds no files") \
 LANGUAGE_ID(files_nothing_to_redo, "Nothing to do again") \
 LANGUAGE_ID(files_nothing_to_undo, "Nothing to undo") \
 LANGUAGE_ID(files_pick, "Open a PNG picture to make it the wallpaper of this Scene") \
+LANGUAGE_ID(files_pick_cancel, "Cancel") \
+LANGUAGE_ID(files_pick_folder, "Choose this folder") \
+LANGUAGE_ID(files_pick_replace, "A file of this name is here: Save again to replace it") \
+LANGUAGE_ID(files_pick_save, "Save") \
 LANGUAGE_ID(files_place_downloads, "Downloads") \
 LANGUAGE_ID(files_place_home, "Home") \
 LANGUAGE_ID(files_place_pictures, "Pictures") \

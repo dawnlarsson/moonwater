@@ -44,7 +44,7 @@ enum { FILES_KEY_1 = 2, FILES_KEY_R = 19, FILES_KEY_Y = 21, FILES_KEY_A = 30, FI
        FILES_KEY_F2 = 60, FILES_KEY_F5 = 63, FILES_KEY_F6 = 64, FILES_KEY_F10 = 68, FILES_KEY_MENU = 127 };
 enum { FILES_EDIT_PATH = 1, FILES_EDIT_NAME = 2 };
 enum { FILES_VIEW_DETAILS, FILES_VIEW_ICONS, FILES_VIEW_LIST };
-enum { FILES_FOCUS_ROWS, FILES_FOCUS_TREE, FILES_FOCUS_FIND };
+enum { FILES_FOCUS_ROWS, FILES_FOCUS_TREE, FILES_FOCUS_FIND, FILES_FOCUS_PICK };
 enum { FILES_DEED_MOVE, FILES_DEED_COPY, FILES_DEED_RENAME, FILES_DEED_BIN };
 
 #define FILES_PEERS_MOST 16
@@ -134,8 +134,8 @@ static struct
         struct ui_rect view_box;
         struct ui_menubutton view_button;
         struct files_trail trail;
-        struct ui_text field, finder;
-        struct ui_control path, finder_field;
+        struct ui_text field, finder, pick_name;
+        struct ui_control path, finder_field, pick_field;
         struct ui_popup menu;
         struct ui_drag drag;
         struct ui_columns columns;
@@ -170,9 +170,21 @@ static struct files_peer address_to files_peer_by_name(const p8 address_to name)
 static inline b32 files_in_rect(int x, int y, int rx, int ry, int rw, int rh) { return x >= rx && x < rx + rw && y >= ry && y < ry + rh; }
 static inline fn files_clear_msg(void) { files.said = 0, files.big->note[0] = 0; }
 
-// Pick mode (files -pick image, which the wallpaper's editor starts): a PNG opened is the wallpaper of the Scene you are on, and Files ends.
-static b32 files_picking, files_picked;
+/*
+        Pick mode. files -pick image, which the wallpaper's editor starts: a PNG opened is the wallpaper of the Scene you are on, and Files
+        ends. files -pick open|folder|save, which the session bus's FileChooser portal starts for a program (src/dbus/service.c): what the
+        person picks is written to standard output, each path ended by a NUL, and Files ends; Cancel, or the window shut, writes nothing.
+        open picks a file (Enter, a double press, or Open on the bar), and with -multiple every file chosen when more than one is; folder
+        picks the folder shown (Choose this folder); save picks a name in the folder shown, from the bar's field (-name NAME suggests one,
+        a file opened puts its name there), and a name that is there already is picked only at a second Save. -title TITLE is the
+        program's words for what it asks, the status line's. Paths are this machine's: a linked machine's folder picks nothing.
+*/
+enum { FILES_PICK_NONE, FILES_PICK_IMAGE, FILES_PICK_OPEN, FILES_PICK_FOLDER, FILES_PICK_SAVE };
+static int files_pick_kind;
+static b32 files_picking, files_picked, files_pick_many, files_pick_armed;
+static string_address files_pick_title, files_pick_suggested;
 static fn files_pick(struct files_model address_to m, const struct files_entry address_to e);
+static b32 files_pick_act(int which);
 static inline fn files_reload(void)
 {
         if (files_model_is_remote(&files.big->model))
@@ -509,8 +521,10 @@ static fn files_status_text(void)
                 string_copy_bounded((string_address)into, (string_address)files.big->note, room);
         else if (files.said)
                 string_copy_bounded((string_address)into, (string_address)language_text(files.said), room);
-        else if (files_picking)
+        else if (files_pick_kind == FILES_PICK_IMAGE)
                 string_copy_bounded((string_address)into, (string_address)WORDS(files_pick), room);
+        else if (files_picking && files_pick_title)
+                string_copy_bounded((string_address)into, files_pick_title, room);
         else if (m->state == FILES_READY && m->chosen_count > 1)
         {
                 p64 bytes = 0;
@@ -607,6 +621,16 @@ static fn files_bar_lay(void)
         files.view_button.x = files.view_box.x, files.view_button.y = files.view_box.y, files.view_button.w = files.view_box.w, files.view_button.h = files.view_box.h;
 }
 
+// A pick bar's button's width (logical px): an action's, or its words' and their padding where those are wider (Choose this folder, and
+// any language's words), which the action's fixed width cut.
+static int files_pick_wide(const char address_to words)
+{
+        struct ui address_to ui = &files.ui;
+        int scale = ui->scale > 0 ? ui->scale : 100;
+        int want = ui_kit_measure(ui, (string_address)words, UI_LABEL_LARGE) * 100 / scale + 2 * UI_GAP3 + 8;
+        return want > UI_BUTTONS_W ? want : UI_BUTTONS_W;
+}
+
 static fn files_layout(void)
 {
         static const struct { int stripe, tiles, tile_h; } modes[3] = {
@@ -621,6 +645,8 @@ static fn files_layout(void)
         files_status_text();
         files.path.focused = files.editing == FILES_EDIT_NAME && files.focused;
         files.finder_field.focused = files.finding && files.focus == FILES_FOCUS_FIND && files.focused;
+        files.pick_field.focused = files_pick_kind == FILES_PICK_SAVE && files.focus == FILES_FOCUS_PICK && files.focused;
+        files.pick_field.items[0] = WORDS(files_column_name);
         files.finder_field.items[0] = WORDS(files_find_hint);
         files.path.items[0] = files.editing == FILES_EDIT_NAME ? WORDS(files_rename_hint) : null;
         l->total = (int)files_model_count(m), l->focus = m->cursor != FILES_NO ? (int)m->cursor : -1;
@@ -653,6 +679,21 @@ static fn files_layout(void)
                         if (files.finding)
                                 ui_row(.class = "bar")
                                         ui_control(&files.finder_field, .grow = 1, .h = FILES_BAND);
+                        // A program's pick: the name to save under, and Cancel and the pick's own act.
+                        if (files_pick_kind >= FILES_PICK_OPEN)
+                                ui_row(.class = "bar")
+                                {
+                                        if (files_pick_kind == FILES_PICK_SAVE)
+                                                ui_control(&files.pick_field, .grow = 1, .h = FILES_BAND);
+                                        else
+                                                ui_col(.grow = 1);
+                                        const char address_to act = files_pick_kind == FILES_PICK_SAVE     ? WORDS(files_pick_save)
+                                                                    : files_pick_kind == FILES_PICK_FOLDER ? WORDS(files_pick_folder)
+                                                                                                           : WORDS(settings_button_open);
+                                        ui_button(WORDS(files_pick_cancel), .class = "action.ghost", .on = files_pick_act, .arg = 0,
+                                                  .w = files_pick_wide(WORDS(files_pick_cancel)));
+                                        ui_button(act, .class = "action.primary", .on = files_pick_act, .arg = 1, .w = files_pick_wide(act));
+                                }
                 }
         }
         ui_view_end(&files.big->view);
@@ -1562,6 +1603,8 @@ static fn files_open(p32 place)
         // it, in the editor as before.
         if (e->kind == FILES_KIND_FILE && files_picking)
                 return (void)(m->cursor = place, files_pick(m, e));
+        if (e->kind == FILES_KIND_DIRECTORY && files_pick_kind == FILES_PICK_FOLDER && files_model_is_remote(m))
+                return;
         if (e->kind == FILES_KIND_FILE)
         {
                 static p8 path[FILES_PATH];
@@ -1815,17 +1858,83 @@ static fn files_pick_back(void)
         (void)ui_start_apart(words, 5);
 }
 
-// A file opened in pick mode: a PNG of this machine is remembered and the Scene's (Set as Wallpaper's verb), the editor shown again with it,
-// and Files ends; anything else is not a picture, and it says so.
+// A path picked for the program that asked: written to standard output with its NUL (the session bus reads it).
+static b32 files_pick_say(const p8 address_to path)
+{
+        positive length = string_length((string_address)path) + 1;
+        return path[0] == '/' && system_write_all(1, path, length) == (bipolar)length;
+}
+
+// A file opened in pick mode. The wallpaper's: a PNG of this machine is remembered and the Scene's (Set as Wallpaper's verb), the editor
+// shown again with it, and Files ends; anything else is not a picture, and it says so. A program's open: the file, or every file chosen
+// when it takes many and more than one is, and Files ends. A program's save: the file's name is the one to save under. A folder pick
+// takes no file.
 static fn files_pick(struct files_model address_to m, const struct files_entry address_to e)
 {
         static p8 path[FILES_PATH];
         string_address words[6] = {(string_address) "/moonwater", (string_address) "canvas", (string_address) "wallpaper", (string_address) "picture",
                                    (string_address)path, null};
+        if (files_pick_kind == FILES_PICK_SAVE)
+        {
+                const p8 address_to name = files_model_name(m, e);
+                ui_text_set(&files.pick_name, name, string_length((string_address)name));
+                files_pick_armed = false, files.said = 0, files.focus = FILES_FOCUS_PICK, files.dirty = true;
+                return;
+        }
+        if (files_pick_kind == FILES_PICK_FOLDER)
+                return;
+        if (files_pick_kind == FILES_PICK_OPEN)
+        {
+                b32 said = false;
+                if (files_model_is_remote(m))
+                        return;
+                for (p32 at = 0; files_pick_many && m->chosen_count > 1 && at < files_model_count(m); at++)
+                {
+                        const struct files_entry address_to chosen = files_model_entry(m, at);
+                        if (chosen && chosen->kind == FILES_KIND_FILE && files_model_chosen(m, at) &&
+                            files_path_join(path, sizeof(path), m->path, files_model_name(m, chosen)))
+                                said |= files_pick_say(path);
+                }
+                if (!said && files_path_join(path, sizeof(path), m->path, files_model_name(m, e)))
+                        (void)files_pick_say(path);
+                files_picked = true;
+                return;
+        }
         if (files_model_is_remote(m) || !files_is_png(m, e) || !files_path_join(path, sizeof(path), m->path, files_model_name(m, e)))
                 return (void)(files.said = LANGUAGE_files_pick, files.dirty = true);
         (void)ui_start_apart(words, 5);
         files_pick_back(), files_picked = true;
+}
+
+// The bar's buttons of a program's pick: Cancel (0) ends with nothing picked; the act (1) opens the file at the cursor, picks the folder
+// shown, or saves under the field's name in the folder shown, asking once more before a file of that name is replaced.
+static b32 files_pick_act(int which)
+{
+        struct files_model address_to m = &files.big->model;
+        const struct files_entry address_to e = files_model_entry(m, m->cursor);
+        static p8 path[FILES_PATH], name[FILES_NAME];
+        if (!which)
+                return files_picked = true;
+        if (files_model_is_remote(m))
+                return true;
+        if (files_pick_kind == FILES_PICK_FOLDER)
+                return files_picked = files_pick_say(m->path), true;
+        if (files_pick_kind == FILES_PICK_OPEN)
+        {
+                if (e && e->kind == FILES_KIND_FILE)
+                        files_pick(m, e);
+                else if (e && e->kind == FILES_KIND_DIRECTORY)
+                        files_open(m->cursor);
+                return true;
+        }
+        files_field_read(&files.pick_name, name, sizeof(name));
+        if (!name[0] || string_first_of((string_address)name, '/') || string_equals((string_address)name, (string_address) ".") ||
+            string_equals((string_address)name, (string_address) "..") || !files_path_join(path, sizeof(path), m->path, name))
+                return files.focus = FILES_FOCUS_PICK, files.dirty = true, true;
+        if (!files_pick_armed && system_access_at(AT_FDCWD, (string_address)path, 0) >= 0)
+                return files_pick_armed = true, files.said = LANGUAGE_files_pick_replace, files.dirty = true, true;
+        files_picked = files_pick_say(path);
+        return true;
 }
 
 static b32 files_pick_done(void)
@@ -2532,7 +2641,7 @@ static fn files_remote_tick(long address_to timeout, long address_to other)
 
 static fn files_close_window(void)
 {
-        if (files_picking && !files_picked)
+        if (files_pick_kind == FILES_PICK_IMAGE && !files_picked)
                 files_pick_back(), files_picked = true;
         if (!files.big)
                 return;
@@ -2756,6 +2865,9 @@ static b32 files_key(const struct window_event address_to event)
         int key = (int)event->a;
         b32 moved = false;
         p32 asks;
+        // A program's pick: Ctrl+Enter is the bar's act (Open, Choose this folder, Save) from wherever the keys are.
+        if (files_pick_kind >= FILES_PICK_OPEN && control && (key == UI_KEY_ENTER || key == UI_KEY_ENTER_PAD))
+                return (void)files_pick_act(1), files.dirty = true, true;
         if (key == UI_KEY_DELETE && files.focus == FILES_FOCUS_TREE)
         {
                 // Delete on the sidebar is a medium's Eject (its menu's), and never the folder's files the main pane has chosen.
@@ -2846,6 +2958,33 @@ static b32 files_key(const struct window_event address_to event)
 
 /* ---- event dispatch ---- */
 
+// The save pick's name field: a press in its well gives it the keys, Enter saves, Escape gives the keys back to the rows; any change to
+// the name asks again before a file of that name is replaced.
+static b32 files_pick_field_event(const struct window_event address_to event, b32 down)
+{
+        struct ui address_to ui = &files.ui;
+        struct ui_text address_to t = &files.pick_name;
+        p32 asks;
+        if (files_pick_kind != FILES_PICK_SAVE || files.editing)
+                return false;
+        if (event->type == WINDOW_EVENT_BUTTON && down && event->a == UI_POINTER_LEFT)
+                files.focus = files_in_rect(ui_kit.pointer_x, ui_kit.pointer_y, t->well_left, t->well_top, t->well_right - t->well_left,
+                                            t->well_bottom - t->well_top)
+                                  ? FILES_FOCUS_PICK
+                              : files.focus == FILES_FOCUS_PICK ? FILES_FOCUS_ROWS
+                                                                : files.focus;
+        if (files.focus != FILES_FOCUS_PICK)
+                return false;
+        asks = ui_field_send(ui, t, &files.menu, event);
+        if (asks & UI_TEXT_SUBMIT)
+                return files_pick_act(1), files.dirty = true, true;
+        if (asks & UI_TEXT_CANCEL)
+                files.focus = FILES_FOCUS_ROWS;
+        if (asks & ~(p32)(UI_TEXT_SUBMIT | UI_TEXT_CANCEL | UI_TEXT_COMMIT))
+                files_pick_armed = false, files.said = 0;
+        return files.dirty |= asks != 0, asks || event->type == WINDOW_EVENT_KEY;
+}
+
 static b32 files_field_event(const struct window_event address_to event, b32 down)
 {
         struct ui address_to ui = &files.ui;
@@ -2868,6 +3007,8 @@ static b32 files_field_event(const struct window_event address_to event, b32 dow
                 return event->type == WINDOW_EVENT_KEY;
         }
         if (files_path_event(event, down))
+                return true;
+        if (files_pick_field_event(event, down))
                 return true;
         if (files.editing || !files.finding || (files.focus != FILES_FOCUS_FIND && event->type != WINDOW_EVENT_BUTTON))
                 return false;
@@ -3398,7 +3539,10 @@ static fn files_disc_look(void)
 static long files_tick(long timeout, long address_to other)
 {
         struct files_model address_to m = &files.big->model;
-        struct ui_text address_to active = files.editing == FILES_EDIT_PATH ? &files.big->path.text : files.editing ? files_field() : files.finding && files.focus == FILES_FOCUS_FIND ? &files.finder : null;
+        struct ui_text address_to active = files.editing == FILES_EDIT_PATH ? &files.big->path.text : files.editing ? files_field()
+                                          : files.finding && files.focus == FILES_FOCUS_FIND ? &files.finder
+                                          : files_pick_kind == FILES_PICK_SAVE && files.focus == FILES_FOCUS_PICK ? &files.pick_name
+                                                                                                                  : null;
         b64 now = (b64)ui_kit.now;
         files_remote_tick(&timeout, other);
         // The device job is not the wait's other descriptor: its pipe is the framework's to drain only for the app's own job, and a
@@ -3543,8 +3687,13 @@ static b32 files_parts_open(void)
                 lists[k]->virtual = lists[k]->beside = true, lists[k]->row_h = FILES_ROW, lists[k]->damaged = files_damaged, lists[k]->hover = lists[k]->down = -1;
         files.big->list.describe = files_describe, files.big->list.selected = files_row_selected;
         files.big->tree_list.tree = true, files.big->tree_list.describe = files_tree_describe, files.big->tree_list.choosable = files_tree_choosable;
-        files.path.kind = files.finder_field.kind = UI_INPUT, files.path.variant = files.finder_field.variant = UI_FIELD_BARE;
+        files.path.kind = files.finder_field.kind = files.pick_field.kind = UI_INPUT;
+        files.path.variant = files.finder_field.variant = files.pick_field.variant = UI_FIELD_BARE;
         files.path.edit = files_field(), files.finder_field.edit = &files.finder;
+        files.pick_field.edit = files_field_init(&files.pick_name, FILES_NAME - 1);
+        if (files_pick_kind == FILES_PICK_SAVE && files_pick_suggested)
+                ui_text_set(&files.pick_name, (const p8 address_to)files_pick_suggested, string_length(files_pick_suggested)),
+                    files.focus = FILES_FOCUS_PICK;
         files.drop_row = files.drop_node = files.spring = -1;
         files.columns.count = 4, files.columns.at_end[1] = true, files.columns.sorted = 0, files.columns.hover = files.columns.held = -1;
         files.columns.width[1] = 90, files.columns.width[2] = 110, files.columns.width[3] = 140;
@@ -3611,17 +3760,27 @@ static b32 files_main()
         memory_zero(&files, sizeof(files));
         files.runner.output = files.device.output = files.uevents = -1;
         files.start = getenv((string_address) "HOME");
-        files_picking = files_picked = false;
+        files_picking = files_picked = files_pick_many = files_pick_armed = false, files_pick_kind = FILES_PICK_NONE;
+        files_pick_title = files_pick_suggested = null;
         for (positive at = 1, took; at < (positive)program_argument_count(); at += took ? took : 1)
         {
+                static const string_address kinds[] = {"image", "open", "folder", "save"};
+                b32 more = at + 1 < (positive)program_argument_count();
                 if ((took = ui_app_option(&files_app, at)))
                         continue;
-                if (string_equals(program_argument(at), (string_address) "-pick") && at + 1 < (positive)program_argument_count() &&
-                    string_equals(program_argument(at + 1), (string_address) "image"))
-                        files_picking = true, took = 2;
+                if (string_equals(program_argument(at), (string_address) "-pick") && more &&
+                    string_table_lookup(program_argument(at + 1), kinds) < array_count(kinds))
+                        files_pick_kind = FILES_PICK_IMAGE + (int)string_table_lookup(program_argument(at + 1), kinds), took = 2;
+                else if (string_equals(program_argument(at), (string_address) "-multiple"))
+                        files_pick_many = true;
+                else if (string_equals(program_argument(at), (string_address) "-title") && more)
+                        files_pick_title = program_argument(at + 1), took = 2;
+                else if (string_equals(program_argument(at), (string_address) "-name") && more)
+                        files_pick_suggested = program_argument(at + 1), took = 2;
                 else if (program_argument(at)[0] == '/')
                         files.start = program_argument(at);
         }
+        files_picking = files_pick_kind != FILES_PICK_NONE;
         return ui_app_run(&files_app);
 }
 

@@ -28,6 +28,7 @@
 # machine-made 2026-11-24 (the heading of a table's columns in a row's menu), not yet read by a person: menu_columns
 # machine-made 2026-11-24 (the wallpaper editor, each Scene's), not yet read by a person: settings_button_edit =Choose each Scene's wallpaper on the desktop
 # machine-made 2026-11-24 (Files' pick mode for the wallpaper editor), not yet read by a person: files_pick
+# machine-made 2026-11-24 (Files' pick mode for programs, the FileChooser portal), not yet read by a person: files_pick_cancel files_pick_folder files_pick_replace files_pick_save
 @language el
 @name Ελληνικά
 @translated machine
@@ -123,6 +124,10 @@ files_nothing_to_paste	c9d4	Το πρόχειρο δεν έχει αρχεία
 files_nothing_to_redo	b2a4	Τίποτα για επανάληψη
 files_nothing_to_undo	1433	Τίποτα για αναίρεση
 files_pick	8f59	Ανοίξτε μια εικόνα PNG για να γίνει η ταπετσαρία αυτής της σκηνής
+files_pick_cancel	ca3b	Ακύρωση
+files_pick_folder	1108	Επιλογή αυτού του φακέλου
+files_pick_replace	a2d7	Υπάρχει ήδη αρχείο με αυτό το όνομα: Αποθηκεύστε ξανά για να αντικατασταθεί
+files_pick_save	5d68	Αποθήκευση
 files_place_downloads	07de	Λήψεις
 files_place_home	0eae	Αρχική
 files_place_pictures	feae	Εικόνες

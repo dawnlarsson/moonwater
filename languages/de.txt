@@ -28,6 +28,7 @@
 # machine-made 2026-11-24 (the heading of a table's columns in a row's menu), not yet read by a person: menu_columns
 # machine-made 2026-11-24 (the wallpaper editor, each Scene's), not yet read by a person: settings_button_edit =Choose each Scene's wallpaper on the desktop
 # machine-made 2026-11-24 (Files' pick mode for the wallpaper editor), not yet read by a person: files_pick
+# machine-made 2026-11-24 (Files' pick mode for programs, the FileChooser portal), not yet read by a person: files_pick_cancel files_pick_folder files_pick_replace files_pick_save
 @language de
 @name Deutsch
 @translated machine
@@ -123,6 +124,10 @@ files_nothing_to_paste	c9d4	Die Zwischenablage enthält keine Dateien
 files_nothing_to_redo	b2a4	Nichts zu wiederholen
 files_nothing_to_undo	1433	Nichts rückgängig zu machen
 files_pick	8f59	Öffnen Sie ein PNG-Bild, um es zum Hintergrundbild dieser Szene zu machen
+files_pick_cancel	ca3b	Abbrechen
+files_pick_folder	1108	Diesen Ordner wählen
+files_pick_replace	a2d7	Eine Datei mit diesem Namen ist schon da: Erneut speichern, um sie zu ersetzen
+files_pick_save	5d68	Speichern
 files_place_downloads	07de	Downloads
 files_place_home	0eae	Persönlich
 files_place_pictures	feae	Bilder

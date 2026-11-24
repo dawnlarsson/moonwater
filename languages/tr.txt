@@ -28,6 +28,7 @@
 # machine-made 2026-11-24 (the heading of a table's columns in a row's menu), not yet read by a person: menu_columns
 # machine-made 2026-11-24 (the wallpaper editor, each Scene's), not yet read by a person: settings_button_edit =Choose each Scene's wallpaper on the desktop
 # machine-made 2026-11-24 (Files' pick mode for the wallpaper editor), not yet read by a person: files_pick
+# machine-made 2026-11-24 (Files' pick mode for programs, the FileChooser portal), not yet read by a person: files_pick_cancel files_pick_folder files_pick_replace files_pick_save
 @language tr
 @name Türkçe
 @translated machine
@@ -123,6 +124,10 @@ files_nothing_to_paste	c9d4	Panoda dosya yok
 files_nothing_to_redo	b2a4	Yinelenecek bir şey yok
 files_nothing_to_undo	1433	Geri alınacak bir şey yok
 files_pick	8f59	Bu sahnenin duvar kâğıdı olması için bir PNG resmi açın
+files_pick_cancel	ca3b	İptal
+files_pick_folder	1108	Bu klasörü seç
+files_pick_replace	a2d7	Bu adda bir dosya zaten var: değiştirmek için yeniden kaydedin
+files_pick_save	5d68	Kaydet
 files_place_downloads	07de	İndirilenler
 files_place_home	0eae	Ev
 files_place_pictures	feae	Resimler

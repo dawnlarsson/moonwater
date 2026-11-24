@@ -28,6 +28,7 @@
 # machine-made 2026-11-24 (the heading of a table's columns in a row's menu), not yet read by a person: menu_columns
 # machine-made 2026-11-24 (the wallpaper editor, each Scene's), not yet read by a person: settings_button_edit =Choose each Scene's wallpaper on the desktop
 # machine-made 2026-11-24 (Files' pick mode for the wallpaper editor), not yet read by a person: files_pick
+# machine-made 2026-11-24 (Files' pick mode for programs, the FileChooser portal), not yet read by a person: files_pick_cancel files_pick_folder files_pick_replace files_pick_save
 @language nl
 @name Nederlands
 @translated machine
@@ -123,6 +124,10 @@ files_nothing_to_paste	c9d4	Het klembord bevat geen bestanden
 files_nothing_to_redo	b2a4	Niets om opnieuw te doen
 files_nothing_to_undo	1433	Niets om ongedaan te maken
 files_pick	8f59	Open een PNG-afbeelding om er de achtergrond van deze scène van te maken
+files_pick_cancel	ca3b	Annuleren
+files_pick_folder	1108	Deze map kiezen
+files_pick_replace	a2d7	Er is al een bestand met deze naam: sla nogmaals op om het te vervangen
+files_pick_save	5d68	Opslaan
 files_place_downloads	07de	Downloads
 files_place_home	0eae	Persoonlijk
 files_place_pictures	feae	Afbeeldingen
