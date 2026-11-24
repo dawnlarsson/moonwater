@@ -64,6 +64,7 @@
 #define WAYLAND_MIME_BYTES (64L << 10) /* all the mime types one source offers, NULs included */
 #define WAYLAND_SUB_LEVELS 32L /* subsurface nesting; flatten and the sub walks recurse once per level */
 #define WAYLAND_TOKENS_MAX 256L /* global live activation tokens */
+#define WAYLAND_TOKENS_CLIENT 16L /* per-client live activation tokens */
 #define WAYLAND_OUT_FDS_MAX (WAYLAND_OUT_FDS * 16L) /* queued outgoing FDs per client */
 
 enum
@@ -338,6 +339,8 @@ struct wayland_client
         unsigned int press_serial, pointer_enter;
         struct wayland_ids device_ids[2];
         unsigned int input_serial[WAYLAND_INPUT_SERIALS];
+        long input_when[WAYLAND_INPUT_SERIALS];
+        unsigned char input_active[WAYLAND_INPUT_SERIALS];
         unsigned char input_next;
         long server_hint, server_live, pending[2], feedbacks;
         unsigned char feedback_pending;
@@ -369,7 +372,7 @@ struct wayland_client
 // stand_*: the stand-in whose pictures the row shows, -1 for none; lifted: that is a subsurface of the row's own window, lifted (wayland_lift)
 struct wayland_row { long client, surface, percent, stand_client, stand_surface; unsigned char lifted; };
 struct wayland_touch { unsigned char live; int client, row, surface; long id, x, y; };
-struct wayland_token { unsigned char live, committed; int client; unsigned long serial; long when; unsigned int gen; char text[33]; };
+struct wayland_token { unsigned char live, committed, focused; int client; unsigned long serial; long when; unsigned int gen; char text[33]; };
 
 static struct
 {
@@ -1023,12 +1026,18 @@ static long wayland_find(struct wayland_client *c, unsigned long id, long iface)
 
 static inline unsigned long wayland_serial(struct wayland_client *c) { return __atomic_add_fetch(&c->serial, 1, __ATOMIC_RELAXED); }
 
-static unsigned long wayland_input_serial(struct wayland_client *c)
+static unsigned long wayland_input_serial_kind(struct wayland_client *c, unsigned char active)
 {
         unsigned long s = wayland_serial(c);
+        unsigned char at = c->input_next++ % WAYLAND_INPUT_SERIALS;
 
-        return c->input_serial[c->input_next++ % WAYLAND_INPUT_SERIALS] = (unsigned int)s, s;
+        c->input_serial[at] = (unsigned int)s;
+        c->input_when[at] = wayland_now();
+        c->input_active[at] = active;
+        return s;
 }
+
+static unsigned long wayland_input_serial(struct wayland_client *c) { return wayland_input_serial_kind(c, 1); }
 
 static inline int wayland_pointer_serial_ok(const struct wayland_client *c, unsigned long serial)
 {
@@ -2263,6 +2272,12 @@ static void wayland_sub_apply(struct wayland_client *c, struct wayland_surface *
 
         if (root->row < 0 || !(root->flags & WAYLAND_SURFACE_MAPPED))
         {
+                if (s->pending.attach_made && s->cached.attached && s->cached.attached != s->pending.attached)
+                {
+                        long old = wayland_find(c, s->cached.attached, WLI_wl_buffer);
+                        if (old >= 0) wayland_release_buffer(c, old);
+                }
+                if (s->pending.attach_made) s->cached.attached = s->pending.attached;
                 if (root->row < 0)
                         wayland_callbacks_take(c, s), wayland_callbacks_done(c, s, wayland_now());
                 s->u.sub.dirty = 1;
@@ -2940,6 +2955,9 @@ static long wayland_stand_row(struct wayland_client *c, struct wayland_surface *
                         wayland_lift_end(row);
                 if ((other = wayland_row_stand(row, &oc)) && other != s)
                         other->u.stand.displaced = 1, wayland_stand_end(oc, other, 0);
+                if (root->layered && wayland.host->row_layers)
+                        wayland.host->row_layers(wayland.host->context, root->row, 0, 0, 0);
+                wayland_layers_lent(rc, root, 0, 0), root->laying = 0;
                 wayland.row[row].stand_client = c->slot, wayland.row[row].stand_surface = wayland_surface_index(c, s);
                 s->row = (int)row, s->need_full = 1, s->window_w = s->window_h = 0, width = window.width, height = window.height;
         }
@@ -3994,6 +4012,8 @@ static void wayland_pointer_to_at(long row, long x, long y, struct wayland_surfa
             old->surfaces[wayland.pointer_surface].live)
                 wayland_seat_ev(old, WLI_wl_pointer, WLE_wl_pointer_leave, 1,
                                 (unsigned int)wayland_serial(old), old->surfaces[wayland.pointer_surface].id);
+        if (old && old != now)
+                old->press_serial = 0;
         if (wayland.pointer_row >= 0 && wayland.pointer_row != (is ? row : -1))
                 wayland_row_do(wayland.pointer_row, WAYLAND_DO_CURSOR, -1, 0);
         if (is)
@@ -4003,7 +4023,7 @@ static void wayland_pointer_to_at(long row, long x, long y, struct wayland_surfa
         wayland.pointer_row = is ? row : -1, wayland.pointer_surface = is ? wayland_surface_index(now, is) : -1;
         if (is)
         {
-                unsigned long serial = wayland_input_serial(now);
+                unsigned long serial = wayland_input_serial_kind(now, 0);
                 now->pointer_enter = (unsigned int)serial;
                 wayland_seat_ev(now, WLI_wl_pointer, WLE_wl_pointer_enter, 1, (unsigned int)serial, is->id,
                                 (unsigned int)wayland_units_fixed(sx, is->scale120), (unsigned int)wayland_units_fixed(sy, is->scale120));
@@ -4118,6 +4138,7 @@ WAYLAND_API void wayland_pointer_button(long row, long code, long pressed)
         if (row != wayland.pointer_row || !wayland_row_surface(row, &c)) return;
         unsigned long serial = wayland_input_serial(c);
         if (pressed) c->press_serial = (unsigned int)serial;
+        else c->press_serial = 0;
         wayland_seat_ev(c, WLI_wl_pointer, WLE_wl_pointer_button, 1, (unsigned int)serial, (unsigned int)wayland_now(), (unsigned int)code,
                         pressed ? WLN_wl_pointer_button_state_pressed : WLN_wl_pointer_button_state_released);
 }
@@ -4315,7 +4336,7 @@ WAYLAND_API void wayland_keyboard_to(long row)
         wayland_constraints_update();
         if (is)
         {
-                unsigned long serial = wayland_input_serial(now);
+                unsigned long serial = wayland_input_serial_kind(now, 0);
                 wayland.mods[0] = wayland_depressed();
                 wayland.mods[1] = wayland.mods[3] = 0;
                 wayland.mods[2] = (unsigned long)wayland.host->locks(wayland.host->context);
@@ -4383,7 +4404,7 @@ static int wayland_seat_request(struct wayland_client *c, struct wayland_object 
             (s = wayland_row_surface(wayland.pointer_row, &owner)) && owner == c && c->surfaces[wayland.pointer_surface].live)
         {
                 long sx = 0, sy = 0;
-                unsigned long serial = wayland_input_serial(c);
+                unsigned long serial = wayland_input_serial_kind(c, 0);
                 c->pointer_enter = (unsigned int)serial, s = wayland_pick(c, s, wayland.pointer_x, wayland.pointer_y, &sx, &sy);
                 wayland_ev(c, c->objects[slot].id, WLE_wl_pointer_enter, (unsigned int)serial, s->id,
                            (unsigned int)wayland_units_fixed(sx, s->scale120), (unsigned int)wayland_units_fixed(sy, s->scale120));
@@ -4771,7 +4792,7 @@ static void wayland_drag_over(long row, long x, long y)
                                                          source ? source->actions : wayland.drag.x_actions, &index)))
                         return;
         wayland.drag.target = t->slot, wayland.drag.surface = wayland_surface_index(t, is), wayland.drag.offer = index;
-        wayland_ev(t, t->objects[device].id, WLE_wl_data_device_enter, (unsigned int)wayland_input_serial(t), is->id,
+        wayland_ev(t, t->objects[device].id, WLE_wl_data_device_enter, (unsigned int)wayland_input_serial_kind(t, 0), is->id,
                    (unsigned int)wayland_units_fixed(sx, is->scale120), (unsigned int)wayland_units_fixed(sy, is->scale120), (unsigned int)id);
 }
 
@@ -4938,13 +4959,16 @@ static int wayland_data_request(struct wayland_client *c, struct wayland_object 
                 if (!which && op == WLQ_wl_data_device_start_drag)
                 {
                         long source = -1;
+                        struct wayland_surface *origin = wayland_surface_of(c, a[1].slot);
                         if (a[0].slot >= 0 && c->objects[a[0].slot].iface == WLI_wl_data_source)
                         {
                                 source = c->objects[a[0].slot].link;
                                 if (source < 0 || source >= c->tbl[WLT_SOURCE].count || c->sources[source].state != 0)
                                         return wayland_fail(c, c->objects[a[0].slot].id, WLN_wl_data_device_error_used_source, "the source was used before");
                         }
-                        if (!wayland.buttons || (unsigned int)a[3].u != c->press_serial || !wayland_surface_of(c, a[1].slot) || wayland.drag.live)
+                        if (!wayland.buttons || !c->press_serial || (unsigned int)a[3].u != c->press_serial || !origin ||
+                            wayland.pointer_row < 0 || wayland.pointer_row >= wayland.row_made || wayland.row[wayland.pointer_row].client != c->slot ||
+                            wayland_root_of(c, origin)->row != wayland.pointer_row || wayland.drag.live)
                         {
                                 if (source >= 0) wayland_source_cancel(c, source);
                                 return WAYLAND_OK;
@@ -5608,7 +5632,13 @@ WAYLAND_API void wayland_pointer_noted(long row, long pressed, unsigned long ser
         if (!wayland.host || row != wayland.pointer_row || !wayland_row_surface(row, &c))
                 return;
         if (pressed) c->press_serial = (unsigned int)serial;
-        c->input_serial[c->input_next++ % WAYLAND_INPUT_SERIALS] = (unsigned int)serial;
+        else c->press_serial = 0;
+        {
+                unsigned char at = c->input_next++ % WAYLAND_INPUT_SERIALS;
+                c->input_serial[at] = (unsigned int)serial;
+                c->input_when[at] = wayland_now();
+                c->input_active[at] = 1;
+        }
 }
 
 WAYLAND_API long wayland_keyboard_direct(long row, unsigned int *ids, long *count, long room, unsigned long **serial)
@@ -5631,7 +5661,12 @@ WAYLAND_API void wayland_key_noted(long row, long code, long pressed, unsigned l
                 wayland.keys[code >> 3] = pressed ? (unsigned char)(wayland.keys[code >> 3] | bit) : (unsigned char)(wayland.keys[code >> 3] & ~bit);
         }
         if (row == wayland.keyboard_row && wayland_row_surface(row, &c))
-                c->input_serial[c->input_next++ % WAYLAND_INPUT_SERIALS] = (unsigned int)serial;
+        {
+                unsigned char at = c->input_next++ % WAYLAND_INPUT_SERIALS;
+                c->input_serial[at] = (unsigned int)serial;
+                c->input_when[at] = wayland_now();
+                c->input_active[at] = 1;
+        }
 }
 
 static void wayland_constraint_event(struct wayland_client *c, struct wayland_constraint *con, int on)
@@ -5714,19 +5749,44 @@ static void wayland_outputs_send(struct wayland_client *c)
                 if (c->objects[at].iface == WLI_wl_output) wayland_output_send(c, at);
 }
 
-static int wayland_token_free(void)
+static int wayland_token_free(long client)
 {
-        long now = wayland_now(), free_at = -1;
+        long now = wayland_now(), free_at = -1, owned = 0, own_old = -1, own_uncommitted = -1, any_old = -1;
         for (long at = 0; at < wayland.tokens; at++)
         {
                 /* a token expires WAYLAND_TOKEN_MS after it was made, committed or not: an uncommitted one never did, and grew the table */
                 if (wayland.token[at].live && now - wayland.token[at].when >= WAYLAND_TOKEN_MS)
                         wayland.token[at].live = 0;
-                if (!wayland.token[at].live && free_at < 0) free_at = at;
+                if (!wayland.token[at].live)
+                {
+                        if (free_at < 0) free_at = at;
+                        continue;
+                }
+                if (any_old < 0 || wayland.token[at].when < wayland.token[any_old].when)
+                        any_old = at;
+                if (wayland.token[at].client == client)
+                {
+                        owned++;
+                        if (own_old < 0 || wayland.token[at].when < wayland.token[own_old].when)
+                                own_old = at;
+                        if (!wayland.token[at].committed && (own_uncommitted < 0 || wayland.token[at].when < wayland.token[own_uncommitted].when))
+                                own_uncommitted = at;
+                }
+        }
+        if (owned >= WAYLAND_TOKENS_CLIENT)
+        {
+                long evict = own_uncommitted >= 0 ? own_uncommitted : own_old;
+                return wayland.token[evict].live = 0, wayland.token[evict].gen++, (int)evict;
         }
         if (free_at >= 0) return wayland.token[free_at].gen++, (int)free_at;
         wayland.token_table.unit = sizeof(struct wayland_token);
-        if (wayland.tokens >= WAYLAND_TOKENS_MAX || !wayland_table_reach(&wayland.token_table, wayland.tokens + 1)) return -1;
+        if (wayland.tokens >= WAYLAND_TOKENS_MAX)
+        {
+                if (any_old >= 0)
+                        return wayland.token[any_old].live = 0, wayland.token[any_old].gen++, (int)any_old;
+                return -1;
+        }
+        if (!wayland_table_reach(&wayland.token_table, wayland.tokens + 1)) return -1;
         wayland.token = (struct wayland_token *)wayland.token_table.at;
         wayland.token[wayland.tokens].live = 0, wayland.token[wayland.tokens].gen = 0;
         return (int)wayland.tokens++;
@@ -5744,6 +5804,30 @@ static void wayland_token_forget(long slot)
                 wayland_table_drop(&wayland.token_table), wayland.token = 0, wayland.tokens = 0;
 }
 
+static int wayland_client_focused(const struct wayland_client *c)
+{
+        return (wayland.keyboard_row >= 0 && wayland.keyboard_row < wayland.row_made && wayland.row[wayland.keyboard_row].client == c->slot) ||
+               (wayland.pointer_row >= 0 && wayland.pointer_row < wayland.row_made && wayland.row[wayland.pointer_row].client == c->slot);
+}
+
+static int wayland_activation_serial_take(struct wayland_client *c, unsigned long serial, int token_focused)
+{
+        long now = wayland_now();
+        int focused = wayland_client_focused(c);
+
+        for (long at = 0; serial && at < WAYLAND_INPUT_SERIALS; at++)
+                if (c->input_serial[at] == (unsigned int)serial)
+                {
+                        if (now - c->input_when[at] >= WAYLAND_TOKEN_MS)
+                                return 0;
+                        if (!focused && !(token_focused && c->input_active[at]))
+                                return 0;
+                        c->input_serial[at] = 0;
+                        return 1;
+                }
+        return 0;
+}
+
 static int wayland_activation_request(struct wayland_client *c, struct wayland_object *self, long op, struct wayland_arg *a)
 {
         int at = self->link;
@@ -5755,7 +5839,7 @@ static int wayland_activation_request(struct wayland_client *c, struct wayland_o
                 struct wayland_surface *s;
                 if (op == WLQ_xdg_activation_v1_get_activation_token)
                 {
-                        if ((at = wayland_token_free()) < 0) return wayland_fail(c, self->id, WAYLAND_NO_MEMORY, "no memory for an activation token");
+                        if ((at = wayland_token_free(c->slot)) < 0) return wayland_fail(c, self->id, WAYLAND_NO_MEMORY, "no memory for an activation token");
                         wayland.token[at] = (struct wayland_token){.live = 1, .client = (int)c->slot, .gen = wayland.token[at].gen, .when = wayland_now()};
                         c->objects[a[0].slot].link = at, c->objects[a[0].slot].aux = wayland.token[at].gen;
                         return WAYLAND_OK;
@@ -5770,7 +5854,8 @@ static int wayland_activation_request(struct wayland_client *c, struct wayland_o
                         struct wayland_token *g = &wayland.token[at];
                         struct wayland_client *issuer = wayland.client[g->client];
                         g->live = 0;
-                        if (wayland_now() - g->when < WAYLAND_TOKEN_MS && issuer && s->row >= 0 && wayland_input_serial_ok(issuer, g->serial))
+                        if (wayland_now() - g->when < WAYLAND_TOKEN_MS && issuer && s->row >= 0 &&
+                            wayland_activation_serial_take(issuer, g->serial, g->focused))
                                 s->attention = 0, wayland_row_do(s->row, WAYLAND_DO_FOCUS, 0, 0);
                         else
                                 s->attention = 1;
@@ -5783,7 +5868,7 @@ static int wayland_activation_request(struct wayland_client *c, struct wayland_o
         {
                 unsigned char bytes[16];
                 if (!wayland.host->random(wayland.host->context, bytes, (long)sizeof bytes)) return t->live = 0, WAYLAND_OK;
-                memory_into_hex(t->text, bytes, 16), t->text[32] = 0, t->committed = 1, t->when = wayland_now();
+                memory_into_hex(t->text, bytes, 16), t->text[32] = 0, t->committed = 1, t->focused = (unsigned char)wayland_client_focused(c), t->when = wayland_now();
                 wayland_ev_str(c, self->id, WLE_xdg_activation_token_v1_done, t->text);
         }
         else if (op == WLQ_xdg_activation_token_v1_destroy) t->live = 0;

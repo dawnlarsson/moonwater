@@ -62,7 +62,7 @@ struct compositor_wl_client { int uid; unsigned char asked; positive slow_until;
 
 static struct
 {
-        int listen, *fd, *pid, started, handler, wake, hold_row, hold, uid;
+        int listen, *fd, *pid, started, handler, wake, hold_row, hold, uid, sync_timer_ok, sync_timer;
         unsigned char *barred, *cursor_asked, *row_blend, *wc_reads, *wc_copy;
         struct compositor_wl_client *client;
         long slots, polled, transfers, dmabuf_table_size, dmabuf_entry_count, zero_row, map_live, map_hint, drag_reading;
@@ -678,6 +678,7 @@ static int compositor_wl_row_open(void *context, long client, long kind, int par
                 return -1;
         compositor_wl.laying[row].open = 0;
         compositor_wl.laying[row].last = 0;
+        compositor_wl.parts[row].count = 0;
         compositor_wl.cursor_asked[row] = 0;
         return row;
 }
@@ -692,6 +693,7 @@ static void compositor_wl_row_close(void *context, int row)
         {
                 compositor_wl.laying[row].open = 0;
                 compositor_wl.laying[row].last = 0;
+                compositor_wl.parts[row].count = 0;
                 compositor_wl.cursor_asked[row] = 0;
                 compositor_wl.row_blend[row] = 0;
                 compositor_wl.wc_reads[row] = 0;
@@ -755,7 +757,7 @@ static void compositor_wl_part(int row, long x1, long y1, long x2, long y2)
 */
 static int wl_ext_row_parts(int row, const int (**rects)[4])
 {
-        if (row < 0 || row >= COMPOSITOR_ROWS || compositor_wl.parts[row].count < 2)
+        if (row < 0 || row >= COMPOSITOR_ROWS || wayland_row_owner(row) < 0 || compositor_wl.parts[row].count < 2)
                 return 0;
         *rects = compositor_wl.parts[row].rect;
         return compositor_wl.parts[row].count;
@@ -3179,6 +3181,7 @@ static int compositor_wl_row_picture(void *context, int row, const struct waylan
                                 {
                                         if (compositor_wl.tiled_lent)
                                                 wl_ext_tiled_settle();
+                                        compositor_wl.parts[row].count = 0;
                                         return 1;
                                 }
                                 wl_ext_tiled_settle();
@@ -3190,7 +3193,7 @@ static int compositor_wl_row_picture(void *context, int row, const struct waylan
                         {
                                 if (compositor_wl.tiled_lent)
                                         wl_ext_tiled_settle();
-                                return compositor_wl.laying[row].open = 0, -1;
+                                return compositor_wl.laying[row].open = 0, compositor_wl.parts[row].count = 0, -1;
                         }
                         if (xst == 2)
                                 table->client_rects_card++, compositor_wl_copied(row, WINDOWS_COPY_CARD);
@@ -3240,6 +3243,7 @@ static int compositor_wl_row_picture(void *context, int row, const struct waylan
                                         {
                                                 if (compositor_wl.tiled_lent)
                                                         wl_ext_tiled_settle();
+                                                compositor_wl.parts[row].count = 0;
                                                 return 1;
                                         }
                                         wl_ext_tiled_settle();
@@ -3255,6 +3259,7 @@ static int compositor_wl_row_picture(void *context, int row, const struct waylan
                                         {
                                                 if (compositor_wl.tiled_lent)
                                                         wl_ext_tiled_settle();
+                                                compositor_wl.parts[row].count = 0;
                                                 return 1;
                                         }
                                         wl_ext_tiled_settle();
@@ -3275,7 +3280,7 @@ static int compositor_wl_row_picture(void *context, int row, const struct waylan
                         {
                                 if (compositor_wl.tiled_lent)
                                         wl_ext_tiled_settle();
-                                return compositor_wl.laying[row].open = 0, -1;
+                                return compositor_wl.laying[row].open = 0, compositor_wl.parts[row].count = 0, -1;
                         }
                 }
         }
@@ -3290,7 +3295,7 @@ static int compositor_wl_row_picture(void *context, int row, const struct waylan
                 return 0;
         if (has_content && !picture->pixels && !compositor_wl.laying[row].touched)
         {
-                compositor_wl.laying[row].open = 0;
+                compositor_wl.laying[row].open = 0, compositor_wl.parts[row].count = 0;
                 return 1;
         }
         table->client_copied++, compositor_wl_copied(row, WINDOWS_COPY_TABLE);
@@ -4050,7 +4055,6 @@ static void compositor_wl_alarm(int number)
 
 static int compositor_wl_sync_start(long client, int fd, int ready)
 {
-        positive timer[4] = {0, 0, 0, COMPOSITOR_WL_DMABUF_WAIT_NS / 1000}, off[4] = {0, 0, 0, 0}; // struct itimerval, in us
         long got;
 
         if (client >= 0 && client < compositor_wl.slots && compositor_wl.client[client].slow_until &&
@@ -4059,9 +4063,20 @@ static int compositor_wl_sync_start(long client, int fd, int ready)
         if (ready)
                 return canvas_dmabuf_sync_fd(fd, 1) != -5;
 
-        compositor_call(syscall(setitimer), 0, (positive)timer, 0, 0, 0, 0); // ITIMER_REAL
-        got = canvas_dmabuf_sync_fd(fd, 1); // DMA_BUF_SYNC_START | DMA_BUF_SYNC_READ
-        compositor_call(syscall(setitimer), 0, (positive)off, 0, 0, 0, 0);
+        if (compositor_wl.sync_timer_ok)
+        {
+                positive its[4] = {0, 0, 0, COMPOSITOR_WL_DMABUF_WAIT_NS}, off[4] = {0, 0, 0, 0}; // struct itimerspec
+                compositor_call(syscall(timer_settime), (positive)compositor_wl.sync_timer, 0, (positive)its, 0, 0, 0);
+                got = canvas_dmabuf_sync_fd(fd, 1); // DMA_BUF_SYNC_START | DMA_BUF_SYNC_READ
+                compositor_call(syscall(timer_settime), (positive)compositor_wl.sync_timer, 0, (positive)off, 0, 0, 0);
+        }
+        else
+        {
+                positive timer[4] = {0, 2000, 0, COMPOSITOR_WL_DMABUF_WAIT_NS / 1000}, off[4] = {0, 0, 0, 0}; // repeating fallback
+                compositor_call(syscall(setitimer), 0, (positive)timer, 0, 0, 0, 0); // ITIMER_REAL
+                got = canvas_dmabuf_sync_fd(fd, 1); // DMA_BUF_SYNC_START | DMA_BUF_SYNC_READ
+                compositor_call(syscall(setitimer), 0, (positive)off, 0, 0, 0, 0);
+        }
         if (got != -4 && got != -5) // EINTR: timer ended wait; EIO: GPU reset; anything else (0 or ENOTTY on non-dmabuf) proceeds
                 return 1;
         if (got == -4 && client >= 0 && client < compositor_wl.slots)
@@ -4115,7 +4130,9 @@ static void compositor_wl_transfer_run(address_any context)
 {
         long at = (long)context;
         unsigned char bytes[65536];
+        unsigned long sigmask = 1ull << (COMPOSITOR_WL_SIGALRM - 1);
 
+        compositor_call(syscall(rt_sigprocmask), 0, (positive)&sigmask, 0, 8, 0, 0); // SIG_BLOCK SIGALRM in worker threads
         compositor_ordinary(0);
         if (compositor_wl.transfer[at].state == COMPOSITOR_WL_PUMP)
         {
@@ -5007,6 +5024,20 @@ static void compositor_wl_start(void)
         // The timer that bounds a dma-buf's sync (compositor_wl_sync_start): a handler that does nothing, and no restart, so the wait ends.
         system_signal_install(COMPOSITOR_WL_SIGALRM, (positive)compositor_wl_alarm, SIGNAL_CATCH_FLAGS & ~SIGNAL_RESTART,
                               SIGNAL_CATCH_RESTORER, null);
+        // Per-thread POSIX timer (SIGEV_THREAD_ID) targeting the main thread's TID so background threads cannot steal SIGALRM.
+        {
+                unsigned char sev[64];
+                int tid = (int)compositor_call(syscall(gettid), 0, 0, 0, 0, 0, 0);
+                int timer_id = 0;
+
+                memory_zero(sev, sizeof sev);
+                *(int *)(sev + 8) = COMPOSITOR_WL_SIGALRM; // sigev_signo
+                *(int *)(sev + 12) = 4;                    // SIGEV_THREAD_ID
+                *(int *)(sev + 16) = tid;                  // _sigev_un._tid
+                compositor_wl.sync_timer_ok =
+                    compositor_call(syscall(timer_create), 1 /* CLOCK_MONOTONIC */, (positive)sev, (positive)&timer_id, 0, 0, 0) == 0;
+                compositor_wl.sync_timer = timer_id;
+        }
         // The handler of a pool cut under a read: SA_SIGINFO and SA_NODEFER, with the library's restorer.
         compositor_wl.handler = system_signal_install(COMPOSITOR_WL_SIGBUS, (positive)compositor_wl_bus,
                                                       (SIGNAL_CATCH_FLAGS & ~SIGNAL_RESTART) | 4 | 0x40000000,
@@ -5053,7 +5084,7 @@ static struct
         unsigned long *keys_serial;
         unsigned char keys_refused[32];
         // Dirty-check snapshot so steady-state loop turns never spin on `lock`.
-        unsigned int pub_valid, pub_gen;
+        unsigned int pub_valid, pub_gen, pub_dirty;
         int pub_locked, pub_hold_row, pub_key_row, pub_kb_row, pub_ptr_row, pub_focus, pub_drag, pub_resize, pub_chip, pub_ov, pub_keys_to;
         unsigned int pub_mods, pub_stack_gen, pub_binds, pub_assist, pub_cycle, pub_keys_any;
         // The focused page (compositor_wl_focus_name): the row whose owner's page the pointer's reports may go to (the window that
@@ -5143,7 +5174,7 @@ static void compositor_wl_direct_keys_make(void)
                                 return;
         slot = wayland_keyboard_direct(row, compositor_wl_direct.keys_ids, &compositor_wl_direct.keys_count, COMPOSITOR_WL_DIRECT_IDS,
                                        &compositor_wl_direct.keys_serial) - 1;
-        if (slot < 0 || slot >= compositor_wl.slots || compositor_wl.fd[slot] < 0)
+        if (slot < 0 || slot >= compositor_wl.slots || compositor_wl.fd[slot] < 0 || wayland_out_dirty(slot))
                 return;
         // The keys refused whatever is held, made once: the modifiers, the locks (Caps, Num, Scroll) and the volume keys.
         {
@@ -5222,7 +5253,7 @@ static void compositor_wl_focus_name(void)
 static void compositor_wl_direct_publish(void)
 {
         int locked, hold_row, key_row, kb_row, ptr_row, focus, drag, resize, chip, ov, keys_to;
-        unsigned int mods, keys_any = 0, gen = compositor_wl.direct_gen ^ wayland.seat_gen ^ (unsigned int)(wayland_dragging() ? 0x80000000u : 0u);
+        unsigned int mods, keys_any = 0, dirty = 0, gen = compositor_wl.direct_gen ^ wayland.seat_gen ^ (unsigned int)(wayland_dragging() ? 0x80000000u : 0u);
 
         if (!compositor_reader.on)
                 return;
@@ -5231,6 +5262,18 @@ static void compositor_wl_direct_publish(void)
         key_row = compositor_wl.started ? compositor_wl_key_row() : -1;
         kb_row = compositor_wl.started ? (int)wayland.keyboard_row : -1;
         ptr_row = compositor_wl.started ? (int)wayland.pointer_row : -1;
+        if (hold_row >= 0)
+        {
+                long hs = wayland_row_owner(hold_row);
+                if (hs >= 0 && wayland_out_dirty(hs))
+                        dirty |= 1u;
+        }
+        if (key_row >= 0)
+        {
+                long ks = wayland_row_owner(key_row);
+                if (ks >= 0 && wayland_out_dirty(ks))
+                        dirty |= 2u;
+        }
         focus = compositor.focus;
         drag = compositor.drag, resize = compositor.resize, chip = (int)compositor.chip.kind;
         ov = key_row >= 0 ? compositor_input_override_query(key_row) : (focus >= 0 ? compositor_input_override_query(focus) : 0);
@@ -5239,7 +5282,7 @@ static void compositor_wl_direct_publish(void)
         if (keys_to != key_row)
                 for (unsigned int k = 0; k < sizeof compositor.keys_down; k++)
                         if (compositor.keys_down[k]) { keys_any = 1; break; }
-        if (compositor_wl_direct.pub_valid && compositor_wl_direct.pub_gen == gen &&
+        if (compositor_wl_direct.pub_valid && compositor_wl_direct.pub_gen == gen && compositor_wl_direct.pub_dirty == dirty &&
             compositor_wl_direct.pub_locked == locked && compositor_wl_direct.pub_hold_row == hold_row &&
             compositor_wl_direct.pub_key_row == key_row && compositor_wl_direct.pub_kb_row == kb_row &&
             compositor_wl_direct.pub_ptr_row == ptr_row && compositor_wl_direct.pub_focus == focus &&
@@ -5256,7 +5299,7 @@ static void compositor_wl_direct_publish(void)
         compositor_wl_direct_hold();
         compositor_wl_direct_make();
         compositor_wl_direct_keys_make();
-        compositor_wl_direct.pub_valid = 1, compositor_wl_direct.pub_gen = gen;
+        compositor_wl_direct.pub_valid = 1, compositor_wl_direct.pub_gen = gen, compositor_wl_direct.pub_dirty = dirty;
         compositor_wl_direct.pub_locked = locked, compositor_wl_direct.pub_hold_row = hold_row;
         compositor_wl_direct.pub_key_row = key_row, compositor_wl_direct.pub_kb_row = kb_row, compositor_wl_direct.pub_ptr_row = ptr_row;
         compositor_wl_direct.pub_focus = focus, compositor_wl_direct.pub_drag = drag;
@@ -5692,6 +5735,13 @@ static void compositor_wl_flush(long slot)
         compositor_wl_direct_hold();
         if (compositor_wl_direct_rest(slot))
                 compositor_wl_flush_held(slot);
+        if (wayland_out_dirty(slot))
+        {
+                if (compositor_wl_direct.valid && compositor_wl_direct.slot == slot)
+                        compositor_wl_direct.valid = compositor_wl_direct.ptr_valid = 0, compositor_wl_direct.pub_valid = 0;
+                if (compositor_wl_direct.keys_valid && compositor_wl_direct.keys_slot == slot)
+                        compositor_wl_direct.keys_valid = 0, compositor_wl_direct.pub_valid = 0;
+        }
         // Only rebuild direct tables when seat/direct generation changed; avoids holding the reader spinlock across table scans on every frame flush.
         {
                 unsigned int gen = compositor_wl.direct_gen ^ wayland.seat_gen ^ (unsigned int)(wayland_dragging() ? 0x80000000u : 0u);
@@ -5760,9 +5810,24 @@ static void compositor_wl_flush_held(long slot)
 
 HOT static void compositor_wl_flush_all(void)
 {
+        long rest_slot = -1;
+
+        if (compositor_reader.on && __atomic_load_n(&compositor_wl_direct.rest_length, __ATOMIC_ACQUIRE) > 0)
+        {
+                compositor_wl_direct_hold();
+                if (compositor_wl_direct.rest_length > 0)
+                        rest_slot = compositor_wl_direct.rest_slot;
+                compositor_wl_direct_release();
+        }
         for (long slot = wayland_out_dirty_next(0); slot >= 0 && slot < compositor_wl.slots; slot = wayland_out_dirty_next(slot + 1))
+        {
+                if (slot == rest_slot)
+                        rest_slot = -1;
                 if (compositor_wl.fd[slot] >= 0)
                         compositor_wl_flush(slot);
+        }
+        if (rest_slot >= 0 && rest_slot < compositor_wl.slots && compositor_wl.fd[rest_slot] >= 0)
+                compositor_wl_flush(rest_slot);
         compositor_keytrace_flushed();
 }
 
@@ -5782,6 +5847,14 @@ static unsigned int compositor_wl_poll(struct compositor_poll *wanted, unsigned 
                 return count;
         wanted[count++] = (struct compositor_poll){compositor_wl.listen, COMPOSITOR_POLLIN, 0};
         compositor_wl.polled = compositor_wl.slots;
+        long rest_slot = -1;
+        if (compositor_reader.on && __atomic_load_n(&compositor_wl_direct.rest_length, __ATOMIC_ACQUIRE) > 0)
+        {
+                compositor_wl_direct_hold();
+                if (compositor_wl_direct.rest_length > 0)
+                        rest_slot = compositor_wl_direct.rest_slot;
+                compositor_wl_direct_release();
+        }
         for (long slot = 0; slot < compositor_wl.slots; slot++)
         {
                 const unsigned char *bytes;
@@ -5792,7 +5865,8 @@ static unsigned int compositor_wl_poll(struct compositor_poll *wanted, unsigned 
                 // once a send has taken it below.
                 short events = compositor_wl.fd[slot] >= 0 && (wayland_stalled(slot) || wayland_out_backlog(slot)) ? 0 : COMPOSITOR_POLLIN;
 
-                if (compositor_wl.fd[slot] >= 0 && wayland_out_dirty(slot) && wayland_out(slot, &bytes, &fds, &fd_count))
+                if (compositor_wl.fd[slot] >= 0 &&
+                    ((wayland_out_dirty(slot) && wayland_out(slot, &bytes, &fds, &fd_count)) || slot == rest_slot))
                         events |= COMPOSITOR_POLLOUT;
                 wanted[count++] = (struct compositor_poll){compositor_wl.fd[slot], events, 0};
         }
@@ -6495,6 +6569,9 @@ static void compositor_wl_stop(void)
                         compositor_wl.transfer[at].worker = 0;
                         compositor_wl_transfer_free(at);
                 }
+        if (compositor_wl.sync_timer_ok)
+                compositor_call(syscall(timer_delete), (positive)compositor_wl.sync_timer, 0, 0, 0, 0, 0);
+        compositor_wl.sync_timer_ok = 0;
         if (compositor_wl.wake >= 0)
                 system_close(compositor_wl.wake);
         compositor_wl.wake = -1;

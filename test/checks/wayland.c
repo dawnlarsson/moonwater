@@ -9374,27 +9374,27 @@ static void test_token_expiry(void)
         unsigned long act, tok;
         long i;
 
-        /* hostile: 100 activation tokens made and never committed or destroyed. Eleven seconds on, they have expired, so 50 more reuse their
-           slots: the table holds 100, not 150 (an uncommitted token used to stay live for ever). */
+        /* hostile: 12 activation tokens (< WAYLAND_TOKENS_CLIENT) made and never committed or destroyed. Eleven seconds on, they have expired,
+           so 6 more reuse their slots: the table holds 12, not 18 (an uncommitted token used to stay live for ever). */
         wayland_stop();
         memset(&fake, 0, sizeof fake);
         wayland_start(&fake_host);
         session_open(&s);
         c = s.c;
         act = wl_global(c, s.registry, WLI_xdg_activation_v1, 1);
-        for (i = 0; i < 100; i++)
+        for (i = 0; i < 12; i++)
         {
                 tok = wlc_id(c, WLI_xdg_activation_token_v1, 1);
                 wlc_send(c, act, WLQ_xdg_activation_v1_get_activation_token, tok);
         }
         fake.now += 11000;
-        for (i = 0; i < 50; i++)
+        for (i = 0; i < 6; i++)
         {
                 tok = wlc_id(c, WLI_xdg_activation_token_v1, 1);
                 wlc_send(c, act, WLQ_xdg_activation_v1_get_activation_token, tok);
         }
         wlc_pump(c);
-        WLCHECK(c->errors == 0 && wayland.tokens == 100, "uncommitted activation tokens expire and their slots are reused (%ld tokens)", wayland.tokens);
+        WLCHECK(c->errors == 0 && wayland.tokens == 12, "uncommitted activation tokens expire and their slots are reused (%ld tokens)", wayland.tokens);
 }
 
 static void test_mime_bytes_cap(void)
@@ -10330,6 +10330,344 @@ static void test_dmabuf_caps(void)
         wayland_stop();
 }
 
+static void test_wl01_drag_hijack(void)
+{
+        struct session a, b;
+        unsigned long mgr_b, seat_b, dev_b, src_b, surf_b;
+        unsigned long mgr_a, seat_a, dev_a, src_a, surf_a2;
+        struct wlc *ca, *cb;
+        long row_a;
+
+        wl_reset();
+        wayland_start(&fake_host);
+        session_open(&a);
+        session_window(&a, 0xff223344);
+        ca = a.c;
+        row_a = 0;
+
+        /* Client B has no mapped windows and never received a button press (press_serial == 0). */
+        session_open(&b);
+        cb = b.c;
+        mgr_b = wl_global(cb, b.registry, WLI_wl_data_device_manager, 3);
+        seat_b = wl_global(cb, b.registry, WLI_wl_seat, 9);
+        dev_b = wlc_id(cb, WLI_wl_data_device, 3);
+        wlc_send(cb, mgr_b, WLQ_wl_data_device_manager_get_data_device, dev_b, seat_b);
+        surf_b = wlc_id(cb, WLI_wl_surface, 6);
+        wlc_send(cb, b.compositor, WLQ_wl_compositor_create_surface, surf_b);
+        src_b = wlc_id(cb, WLI_wl_data_source, 3);
+        wlc_send(cb, mgr_b, WLQ_wl_data_device_manager_create_data_source, src_b);
+        wlc_send(cb, src_b, WLQ_wl_data_source_offer, "text/plain");
+        wlc_pump(cb);
+
+        /* Hold a button down on client A's foreground window; B tries to hijack with serial 0. */
+        wayland_pointer_to(row_a, 10, 10);
+        wayland_pointer_button(row_a, 272, 1);
+        wlc_pump(ca);
+        wlc_forget(cb);
+        wlc_send(cb, dev_b, WLQ_wl_data_device_start_drag, src_b, surf_b, 0UL, 0L);
+        wlc_pump(cb);
+        WLCHECK(!wayland_dragging() && wlc_count(cb, WLI_wl_data_source, WLE_wl_data_source_cancelled) == 1,
+                "WL-01: background client with press_serial==0 cannot hijack drag when another window has button held");
+
+        /* Give B a mapped window, press+release on B, then move pointer to A and press on A; B tries stale press_serial. */
+        wayland_pointer_button(row_a, 272, 0);
+        session_window(&b, 0xff334455);
+        wayland_pointer_to(1, 10, 10);
+        wayland_pointer_button(1, 272, 1);
+        wlc_pump(cb);
+        unsigned int stale_serial = wayland.client[cb->slot]->press_serial;
+        wayland_pointer_button(1, 272, 0);
+        wayland_pointer_to(row_a, 10, 10);
+        wayland_pointer_button(row_a, 272, 1);
+        wlc_pump(ca);
+        wlc_pump(cb);
+        src_b = wlc_id(cb, WLI_wl_data_source, 3);
+        wlc_send(cb, mgr_b, WLQ_wl_data_device_manager_create_data_source, src_b);
+        wlc_send(cb, src_b, WLQ_wl_data_source_offer, "text/plain");
+        wlc_forget(cb);
+        wlc_send(cb, dev_b, WLQ_wl_data_device_start_drag, src_b, b.surface, 0UL, (long)stale_serial);
+        wlc_pump(cb);
+        WLCHECK(!wayland_dragging() && wayland.client[cb->slot]->press_serial == 0,
+                "WL-01: stale press_serial cleared on button release/leave cannot hijack another window's drag");
+
+        /* Client A has pointer on row_a, tries to start_drag with an unpointed surface of its own. */
+        mgr_a = wl_global(ca, a.registry, WLI_wl_data_device_manager, 3);
+        seat_a = wl_global(ca, a.registry, WLI_wl_seat, 9);
+        dev_a = wlc_id(ca, WLI_wl_data_device, 3);
+        wlc_send(ca, mgr_a, WLQ_wl_data_device_manager_get_data_device, dev_a, seat_a);
+        surf_a2 = wlc_id(ca, WLI_wl_surface, 6);
+        wlc_send(ca, a.compositor, WLQ_wl_compositor_create_surface, surf_a2);
+        src_a = wlc_id(ca, WLI_wl_data_source, 3);
+        wlc_send(ca, mgr_a, WLQ_wl_data_device_manager_create_data_source, src_a);
+        wlc_send(ca, src_a, WLQ_wl_data_source_offer, "text/plain");
+        wlc_forget(ca);
+        wlc_send(ca, dev_a, WLQ_wl_data_device_start_drag, src_a, surf_a2, 0UL, (long)wayland.client[ca->slot]->press_serial);
+        wlc_pump(ca);
+        WLCHECK(!wayland_dragging() && wlc_count(ca, WLI_wl_data_source, WLE_wl_data_source_cancelled) == 1,
+                "WL-01: start_drag with origin surface not belonging to pointed root is rejected");
+        wayland_pointer_button(row_a, 272, 0);
+        wlc_end(ca);
+        wlc_end(cb);
+        wayland_stop();
+}
+
+static void test_wl04_token_exhaustion(void)
+{
+        struct session attacker, victim;
+        unsigned long act_a, act_v, tok;
+        long a;
+
+        wl_reset();
+        wayland_start(&fake_host);
+        session_open(&attacker);
+        session_open(&victim);
+        act_a = wl_global(attacker.c, attacker.registry, WLI_xdg_activation_v1, 1);
+        act_v = wl_global(victim.c, victim.registry, WLI_xdg_activation_v1, 1);
+        for (long i = 0; i < WAYLAND_TOKENS_MAX; i++)
+        {
+                tok = wlc_id(attacker.c, WLI_xdg_activation_token_v1, 1);
+                wlc_send(attacker.c, act_a, WLQ_xdg_activation_v1_get_activation_token, tok);
+        }
+        wlc_pump(attacker.c);
+        wlc_forget(victim.c);
+        tok = wlc_id(victim.c, WLI_xdg_activation_token_v1, 1);
+        wlc_send(victim.c, act_v, WLQ_xdg_activation_v1_get_activation_token, tok);
+        wlc_send(victim.c, tok, WLQ_xdg_activation_token_v1_commit);
+        wlc_pump(victim.c);
+        a = event_at(victim.c, WLI_xdg_activation_token_v1, WLE_xdg_activation_token_v1_done, 0);
+        WLCHECK(victim.c->errors == 0 && !wayland_dead(victim.c->slot) && a >= 0 && strlen(victim.c->ev[a].text[0]) == 32,
+                "WL-04: victim client is not killed when attacker requests WAYLAND_TOKENS_MAX activation tokens");
+        wlc_end(attacker.c);
+        wlc_end(victim.c);
+        wayland_stop();
+}
+
+static void test_wl05_activation_focus_steal(void)
+{
+        struct session a, b;
+        unsigned long seat_a, ptr_a, act_a, tok;
+        long ev, serial, before;
+        char given[64];
+
+        wl_reset();
+        wayland_start(&fake_host);
+        session_open(&a);
+        session_window(&a, 0xff223344);
+        session_open(&b);
+        session_window(&b, 0xff445566);
+
+        act_a = wl_global(a.c, a.registry, WLI_xdg_activation_v1, 1);
+        seat_a = wl_global(a.c, a.registry, WLI_wl_seat, 9);
+        ptr_a = wlc_id(a.c, WLI_wl_pointer, 9);
+        wlc_forget(a.c);
+        wlc_send(a.c, seat_a, WLQ_wl_seat_get_pointer, ptr_a);
+        wayland_pointer_to(0, 10, 10);
+        wlc_pump(a.c);
+        ev = event_at(a.c, WLI_wl_pointer, WLE_wl_pointer_enter, 0);
+        serial = ev >= 0 ? (long)a.c->ev[ev].u[0] : 0;
+
+        /* Switch focus to B; A is now in the background and tries to steal focus using its old wl_pointer.enter serial. */
+        wayland_pointer_to(1, 10, 10);
+        wayland_keyboard_to(1);
+        fake.now += 500;
+        wlc_forget(a.c);
+        tok = wlc_id(a.c, WLI_xdg_activation_token_v1, 1);
+        wlc_send(a.c, act_a, WLQ_xdg_activation_v1_get_activation_token, tok);
+        wlc_send(a.c, tok, WLQ_xdg_activation_token_v1_set_serial, (unsigned long)serial, seat_a);
+        wlc_send(a.c, tok, WLQ_xdg_activation_token_v1_commit);
+        wlc_pump(a.c);
+        ev = event_at(a.c, WLI_xdg_activation_token_v1, WLE_xdg_activation_token_v1_done, 0);
+        if (ev >= 0) memcpy(given, a.c->ev[ev].text[0], sizeof given); else given[0] = 0;
+        before = fake.row[0].did_count;
+        wlc_send(a.c, act_a, WLQ_xdg_activation_v1_activate, given, a.surface);
+        WLCHECK(fake.row[0].did_count == before && wayland_row_hint(0, WAYLAND_HINT_ATTENTION) == 1,
+                "WL-05: unfocused background client cannot steal focus with a stale wl_pointer.enter serial");
+
+        /* Even a real button serial cannot be replayed after focus loss or consumed twice. */
+        wayland_pointer_to(0, 10, 10);
+        wayland_keyboard_to(0);
+        wlc_forget(a.c);
+        wayland_pointer_button(0, 272, 1);
+        wayland_pointer_button(0, 272, 0);
+        wlc_pump(a.c);
+        ev = event_at(a.c, WLI_wl_pointer, WLE_wl_pointer_button, 0);
+        serial = ev >= 0 ? (long)a.c->ev[ev].u[0] : 0;
+
+        /* First use while focused succeeds and consumes the serial. */
+        wlc_forget(a.c);
+        tok = wlc_id(a.c, WLI_xdg_activation_token_v1, 1);
+        wlc_send(a.c, act_a, WLQ_xdg_activation_v1_get_activation_token, tok);
+        wlc_send(a.c, tok, WLQ_xdg_activation_token_v1_set_serial, (unsigned long)serial, seat_a);
+        wlc_send(a.c, tok, WLQ_xdg_activation_token_v1_commit);
+        wlc_pump(a.c);
+        ev = event_at(a.c, WLI_xdg_activation_token_v1, WLE_xdg_activation_token_v1_done, 0);
+        if (ev >= 0) memcpy(given, a.c->ev[ev].text[0], sizeof given); else given[0] = 0;
+        before = fake.row[0].did_count;
+        wlc_send(a.c, act_a, WLQ_xdg_activation_v1_activate, given, a.surface);
+        WLCHECK(fake.row[0].did_count == before + 1 && fake.row[0].did[before] == WAYLAND_DO_FOCUS,
+                "WL-05: focused client with fresh button serial activates once");
+
+        /* Second use of the same serial is rejected because the serial was consumed. */
+        wlc_forget(a.c);
+        tok = wlc_id(a.c, WLI_xdg_activation_token_v1, 1);
+        wlc_send(a.c, act_a, WLQ_xdg_activation_v1_get_activation_token, tok);
+        wlc_send(a.c, tok, WLQ_xdg_activation_token_v1_set_serial, (unsigned long)serial, seat_a);
+        wlc_send(a.c, tok, WLQ_xdg_activation_token_v1_commit);
+        wlc_pump(a.c);
+        ev = event_at(a.c, WLI_xdg_activation_token_v1, WLE_xdg_activation_token_v1_done, 0);
+        if (ev >= 0) memcpy(given, a.c->ev[ev].text[0], sizeof given); else given[0] = 0;
+        before = fake.row[0].did_count;
+        wlc_send(a.c, act_a, WLQ_xdg_activation_v1_activate, given, a.surface);
+        WLCHECK(fake.row[0].did_count == before,
+                "WL-05: activation serial is consumed on first use and cannot be replayed");
+
+        wlc_end(a.c);
+        wlc_end(b.c);
+        wayland_stop();
+}
+
+static void test_wl07_stand_in_clears_layers(void)
+{
+        struct wayland_host host = fake_host;
+        struct tree t;
+        struct session g;
+        unsigned long manager, stand, buf;
+
+        host.row_layers = fake_row_layers;
+        host.stand_in = fake_stand_in;
+        wl_reset();
+        memset(&fake_layers, 0, sizeof fake_layers);
+        fake_layers.answer = fake_layers.answer_root = WAYLAND_LAYERS_KEPT;
+        fake.lend = 1;
+        wayland_start(&host);
+        tree_open(&t, 1);
+        WLCHECK(fake_layers.kept == 1 && wayland.client[t.s.c->slot]->surfaces[0].layered == 1,
+                "WL-07 setup: window has subsurface promoted to host layer");
+
+        session_open(&g);
+        manager = wl_global(g.c, g.registry, WLI_canvas_swapchain_v1, 1);
+        stand = wlc_id(g.c, WLI_wl_surface, 6);
+        wlc_send(g.c, g.compositor, WLQ_wl_compositor_create_surface, stand);
+        fake.stand_answer = 0;
+        wlc_forget(t.s.c);
+        wlc_send(g.c, manager, WLQ_canvas_swapchain_v1_override_window, stand, 0x5500001UL);
+        buf = wl_buffer_of(&g, 32, 24, 0xff00ff00, WLN_wl_shm_format_xrgb8888);
+        wlc_send(g.c, stand, WLQ_wl_surface_attach, buf, 0L, 0L);
+        wlc_send(g.c, stand, WLQ_wl_surface_commit);
+        wayland_drawn();
+        wlc_pump(t.s.c);
+        WLCHECK(fake_layers.kept == 0 && wayland.client[t.s.c->slot]->surfaces[0].layered == 0,
+                "WL-07: stand-in takeover clears host subsurface layers (kept=%ld layered=%u)",
+                fake_layers.kept, wayland.client[t.s.c->slot]->surfaces[0].layered);
+        wlc_end(g.c);
+        wlc_end(t.s.c);
+        wayland_stop();
+}
+
+static void test_wl08_desync_sub_unmapped_release(void)
+{
+        struct session s;
+        struct wlc *c;
+        unsigned long root, child, sub, subcompositor, b1, b2;
+
+        wl_reset();
+        wayland_start(&fake_host);
+        session_open(&s);
+        c = s.c;
+        subcompositor = wl_global(c, s.registry, WLI_wl_subcompositor, 1);
+        root = wlc_id(c, WLI_wl_surface, 6);
+        wlc_send(c, s.compositor, WLQ_wl_compositor_create_surface, root);
+        child = wlc_id(c, WLI_wl_surface, 6);
+        wlc_send(c, s.compositor, WLQ_wl_compositor_create_surface, child);
+        sub = wlc_id(c, WLI_wl_subsurface, 1);
+        wlc_send(c, subcompositor, WLQ_wl_subcompositor_get_subsurface, sub, child, root);
+        wlc_send(c, sub, WLQ_wl_subsurface_set_desync);
+
+        b1 = wl_buffer_of(&s, 16, 16, 0xff112233, WLN_wl_shm_format_xrgb8888);
+        b2 = wl_buffer_of(&s, 16, 16, 0xff445566, WLN_wl_shm_format_xrgb8888);
+        wlc_forget(c);
+        wlc_send(c, child, WLQ_wl_surface_attach, b1, 0L, 0L);
+        wlc_send(c, child, WLQ_wl_surface_commit);
+        wlc_send(c, child, WLQ_wl_surface_attach, b2, 0L, 0L);
+        wlc_send(c, child, WLQ_wl_surface_commit);
+        wlc_pump(c);
+        WLCHECK(c->errors == 0 && wlc_count(c, WLI_wl_buffer, WLE_wl_buffer_release) == 1,
+                "WL-08: desynced subsurface commits before parent maps release superseded buffer B1 (got %ld)",
+                wlc_count(c, WLI_wl_buffer, WLE_wl_buffer_release));
+        wlc_end(c);
+        wayland_stop();
+}
+
+static void test_wl_host_regressions(void)
+{
+        FILE *f = fopen("src/canvas/wayland_host.c", "rb");
+        char *src = NULL;
+        size_t len = 0;
+
+        if (f)
+        {
+                fseek(f, 0, SEEK_END);
+                long sz = ftell(f);
+                fseek(f, 0, SEEK_SET);
+                if (sz > 0)
+                {
+                        src = malloc((size_t)sz + 1);
+                        if (src)
+                        {
+                                len = fread(src, 1, (size_t)sz, f);
+                                src[len] = 0;
+                        }
+                }
+                fclose(f);
+        }
+        WLCHECK(src != NULL, "wayland_host.c readable for WL-02/WL-03/WL-06 invariant checks");
+        if (!src)
+                return;
+
+        /* WL-02: compositor_wl_sync_start must not rely solely on one-shot process-wide setitimer(ITIMER_REAL) */
+        const char *sync_fn = strstr(src, "static int compositor_wl_sync_start(long client, int fd, int ready)\n{");
+        const char *sync_end = sync_fn ? strstr(sync_fn, "\n}\n") : NULL;
+        int wl02_ok = 0;
+        if (sync_fn && sync_end)
+        {
+                const char *p_timer = strstr(sync_fn, "timer_settime");
+                const char *p_tid = strstr(src, "timer_create");
+                wl02_ok = p_timer && p_timer < sync_end && p_tid != NULL;
+        }
+        WLCHECK(wl02_ok, "WL-02: compositor_wl_sync_start uses per-thread POSIX timer (SIGEV_THREAD_ID)");
+
+        /* WL-03: direct_keys_make checks !wayland_out_dirty(slot), flush clears valid/keys_valid when dirty,
+           and poll/flush_all handle rest_length > 0 */
+        const char *keys_fn = strstr(src, "static void compositor_wl_direct_keys_make(");
+        const char *keys_end = keys_fn ? strstr(keys_fn, "\n}\n") : NULL;
+        const char *flush_fn = strstr(src, "static void compositor_wl_flush(long slot)");
+        const char *flush_end = flush_fn ? strstr(flush_fn, "\n}\n") : NULL;
+        const char *flush_all_fn = strstr(src, "compositor_wl_flush_all(void)");
+        const char *flush_all_end = flush_all_fn ? strstr(flush_all_fn, "\n}\n") : NULL;
+        const char *poll_fn = strstr(src, "compositor_wl_poll(struct compositor_poll");
+        const char *poll_end = poll_fn ? strstr(poll_fn, "\n}\n") : NULL;
+        int wl03_a = keys_fn && keys_end && strstr(keys_fn, "wayland_out_dirty(slot)") && strstr(keys_fn, "wayland_out_dirty(slot)") < keys_end;
+        int wl03_b = flush_fn && flush_end && strstr(flush_fn, "wayland_out_dirty(slot)") && strstr(flush_fn, "wayland_out_dirty(slot)") < flush_end;
+        int wl03_c = flush_all_fn && flush_all_end && strstr(flush_all_fn, "rest_length") && strstr(flush_all_fn, "rest_length") < flush_all_end &&
+                     poll_fn && poll_end && strstr(poll_fn, "rest_length") && strstr(poll_fn, "rest_length") < poll_end;
+        WLCHECK(wl03_a && wl03_b && wl03_c,
+                "WL-03: direct_keys_make checks out_dirty (%d), flush invalidates when dirty (%d), flush_all/poll drain rest (%d)",
+                wl03_a, wl03_b, wl03_c);
+
+        /* WL-06: compositor_wl_row_close resets parts[row].count and wl_ext_row_parts checks wayland_row_owner(row) >= 0 */
+        const char *close_fn = strstr(src, "static void compositor_wl_row_close(");
+        const char *close_end = close_fn ? strstr(close_fn, "\n}\n") : NULL;
+        const char *parts_fn = strstr(src, "static int wl_ext_row_parts(");
+        const char *parts_end = parts_fn ? strstr(parts_fn, "\n}\n") : NULL;
+        int wl06_a = close_fn && close_end && strstr(close_fn, "parts[row].count = 0") && strstr(close_fn, "parts[row].count = 0") < close_end;
+        int wl06_b = parts_fn && parts_end && strstr(parts_fn, "wayland_row_owner(row)") && strstr(parts_fn, "wayland_row_owner(row)") < parts_end;
+        WLCHECK(wl06_a && wl06_b,
+                "WL-06: row_close resets parts[row].count (%d) and wl_ext_row_parts guards with wayland_row_owner (%d)",
+                wl06_a, wl06_b);
+
+        free(src);
+}
+
 int main(int argc, char **argv)
 {
         long rounds = argc > 1 ? atol(argv[1]) : 20000;
@@ -10412,6 +10750,12 @@ int main(int argc, char **argv)
         test_bridge();
         test_stand_in();
         test_lift();
+        test_wl01_drag_hijack();
+        test_wl04_token_exhaustion();
+        test_wl05_activation_focus_steal();
+        test_wl07_stand_in_clears_layers();
+        test_wl08_desync_sub_unmapped_release();
+        test_wl_host_regressions();
         test_clip_fuzz(rounds);
         test_fuzz(rounds);
         test_raw(rounds);
