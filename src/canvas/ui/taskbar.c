@@ -2121,7 +2121,7 @@ static void taskbar_menu_shut(void) { taskbar_menu.open = 0; }
    centred and fitted (its ellipsis past width), on the ground, height high, into pixels whose pitch is width. Answers the width of the
    plate that holds it (the title's and half the height each side, width at the most), which the overview draws round at half its height;
    0 with no face or no title. */
-static int taskbar_scenes_title(const struct taskbar_view *view, unsigned int *pixels, int width, int height, const char *title, unsigned int ink,
+static int taskbar_scenes_title(const struct taskbar_view *view, unsigned int *pixels, unsigned long pitch, int width, int height, const char *title, unsigned int ink,
                                 unsigned int ground)
 {
         struct ui ui;
@@ -2135,7 +2135,7 @@ static int taskbar_scenes_title(const struct taskbar_view *view, unsigned int *p
                 2 * pad;
         plate = plate > width ? width : plate;
         memory_zero(&ui, sizeof(ui));
-        ui.pixels = pixels, ui.pitch = (unsigned long)width, ui.width = plate, ui.height = height, ui.bottom = height;
+        ui.pixels = pixels, ui.pitch = pitch, ui.width = plate, ui.height = height, ui.bottom = height;
         ui.scale = view->scale, ui.engine = view->engine, ui.regular = view->face;
         ui_fill(&ui, 0, 0, plate, height, 0xff000000u | ground);
         ui_cell_line(&ui, pad, 0, plate - 2 * pad, height, title, 0xff000000u | ink, 0xff000000u | ground);

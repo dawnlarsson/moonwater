@@ -1094,7 +1094,7 @@ static int taskbar_mic_set(int present, int muted);
 static int taskbar_notices_set(int present, unsigned int severity);
 static void taskbar_down_set(int tab, int on);
 static void taskbar_cell_waiting(int slot, const char *window_name, positive now);
-static int taskbar_scenes_title(const struct taskbar_view *view, unsigned int *pixels, int width, int height, const char *title, unsigned int ink,
+static int taskbar_scenes_title(const struct taskbar_view *view, unsigned int *pixels, unsigned long pitch, int width, int height, const char *title, unsigned int ink,
                                 unsigned int ground);
 
 

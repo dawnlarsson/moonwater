@@ -655,7 +655,7 @@ static int compositor_scenes_drag_drop(int row, int x, int y)
 // it. Made when the wallpaper, its turn, the screen or the card's size changes, and kept; 0 with no wallpaper kept.
 static const unsigned int *compositor_scenes_wall_of(const int s[4], int w, int h)
 {
-        unsigned long bytes = (unsigned long)w * (unsigned long)h * 4;
+        unsigned long pitch_w = compositor_whole_lines(w), bytes = pitch_w * (unsigned long)h * 4; // its rows as a miniature's are (compositor_wall_mini)
 
         if (!compositor_wall || w <= 0 || h <= 0 || s[2] <= 0 || s[3] <= 0 || s[0] < 0 || s[1] < 0 || s[0] + s[2] > compositor_wall_w ||
             s[1] + s[3] > compositor_wall_h)
@@ -693,13 +693,13 @@ static const unsigned int *compositor_scenes_wall_of(const int s[4], int w, int 
                         memory_halve_u32(compositor_scenes_kept.wall_half, (positive)pitch,
                                          compositor_scenes_kept.wall_half, (positive)pitch, (positive)sw, (positive)sh);
                 }
-                memory_resample_u32_rect(compositor_scenes_kept.wall, (positive)w, (positive)w, (positive)h,
+                memory_resample_u32_rect(compositor_scenes_kept.wall, (positive)pitch_w, (positive)w, (positive)h,
                                          compositor_scenes_kept.wall_half, (positive)pitch, (positive)sw, (positive)sh,
                                          (positive)w, (positive)h, 0, 0);
         }
         else
         {
-                memory_resample_u32_rect(compositor_scenes_kept.wall, (positive)w, (positive)w, (positive)h,
+                memory_resample_u32_rect(compositor_scenes_kept.wall, (positive)pitch_w, (positive)w, (positive)h,
                                          compositor_wall + (long)s[1] * compositor_wall_pitch + s[0], (positive)compositor_wall_pitch,
                                          (positive)s[2], (positive)s[3], (positive)w, (positive)h, 0, 0);
         }
@@ -833,7 +833,7 @@ static unsigned int compositor_scenes_plain(struct compositor_frame *frames, uns
 // or the inks change, and kept. Answers the plate's width, 0 for none.
 static int compositor_scenes_title_of(int row, int w, int h, int screen)
 {
-        unsigned long bytes = (unsigned long)w * (unsigned long)h * 4;
+        unsigned long bytes = compositor_whole_lines(w) * (unsigned long)h * 4;
         unsigned int ink = compositor_ink_role(UI_ON_SURFACE) & 0xffffffu, ground = compositor_ink_role(UI_SURFACE_HIGH) & 0xffffffu;
         struct taskbar_view view;
 
@@ -852,7 +852,7 @@ static int compositor_scenes_title_of(int row, int w, int h, int screen)
                 compositor_scenes_kept.title = (unsigned int *)p;
         }
         view = compositor_taskbar_view_for(compositor_bands() > 1 ? screen : 0);
-        compositor_scenes_kept.title_plate = taskbar_scenes_title(&view, compositor_scenes_kept.title, w, h, compositor.title[row], ink, ground);
+        compositor_scenes_kept.title_plate = taskbar_scenes_title(&view, compositor_scenes_kept.title, compositor_whole_lines(w), w, h, compositor.title[row], ink, ground);
         compositor_scenes_kept.title_row = row, compositor_scenes_kept.title_w = w, compositor_scenes_kept.title_h = h;
         compositor_scenes_kept.title_ink = ink, compositor_scenes_kept.title_ground = ground;
         memory_copy(compositor_scenes_kept.title_of, compositor.title[row], WINDOWS_TITLE);
@@ -933,7 +933,8 @@ static unsigned int compositor_scenes_frames(struct compositor_frame *frames, un
                         continue;
                 wall = sp->kind != COMPOSITOR_SPACE_FULLSCREEN ? compositor_wall_card(sp, s, c[2], c[3]) : 0; // the Scene's own (wallpaper.c)
                 if (wall)
-                        frames[at].pixels = wall + (frames[at].y - c[1]) * c[2] + (frames[at].x - c[0]), frames[at].pitch = (unsigned long)c[2];
+                        frames[at].pixels = wall + (unsigned long)(frames[at].y - c[1]) * compositor_whole_lines(c[2]) + (frames[at].x - c[0]),
+                        frames[at].pitch = compositor_whole_lines(c[2]);
                 else
                         frames[at].fill = sp->kind == COMPOSITOR_SPACE_FULLSCREEN ? 0xff000000u : compositor_ground | 0xff000000u;
                 frames[at].radius = radius, frames[at].line = line;
@@ -1096,8 +1097,8 @@ static unsigned int compositor_scenes_frames(struct compositor_frame *frames, un
                                 place[0] = place[0] < s[0] ? s[0] : place[0] + plate > s[0] + s[2] ? s[0] + s[2] - plate : place[0];
                                 if (compositor_scenes_plain(frames, rows, at, room, filler, place, clip, scale))
                                 {
-                                        frames[at].pixels = compositor_scenes_kept.title + (frames[at].y - place[1]) * w + (frames[at].x - place[0]);
-                                        frames[at].pitch = (unsigned long)w, frames[at].radius = h / 2;
+                                        frames[at].pixels = compositor_scenes_kept.title + (unsigned long)(frames[at].y - place[1]) * compositor_whole_lines(w) + (frames[at].x - place[0]);
+                                        frames[at].pitch = compositor_whole_lines(w), frames[at].radius = h / 2;
                                         at++;
                                 }
                                 break;

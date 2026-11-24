@@ -483,8 +483,8 @@ static struct
         unsigned int count;
 } compositor_wall_minis;
 
-// A picture's miniature file into w by h: cut at its long sides to w by h's shape, as the wallpaper is (compositor_wall_picture).
-static int compositor_wall_mini_picture(const char *word, unsigned int *into, int w, int h)
+// A picture's miniature file into w by h (its rows pitch pixels apart): cut at its long sides to w by h's shape, as the wallpaper is (compositor_wall_picture).
+static int compositor_wall_mini_picture(const char *word, unsigned int *into, unsigned long pitch, int w, int h)
 {
         char path[sizeof(SETTING_WALLPAPER_DIR "/curated/") + SETTING_WALLPAPER_WORD + 8];
         int width = 0, height = 0;
@@ -498,7 +498,7 @@ static int compositor_wall_mini_picture(const char *word, unsigned int *into, in
         else
                 vis_w = (positive)width, vis_h = (positive)width * (positive)h / (positive)w, ox = 0, oy = ((positive)height - vis_h) / 2;
         vis_w = vis_w ? vis_w : 1, vis_h = vis_h ? vis_h : 1;
-        memory_resample_u32_rect(into, (positive)w, (positive)w, (positive)h, mini + oy * (positive)width + ox, (positive)width, vis_w, vis_h,
+        memory_resample_u32_rect(into, (positive)pitch, (positive)w, (positive)h, mini + oy * (positive)width + ox, (positive)width, vis_w, vis_h,
                                  (positive)w, (positive)h, 0, 0);
         memory_free(mini, bytes);
         return 1;
@@ -506,6 +506,7 @@ static int compositor_wall_mini_picture(const char *word, unsigned int *into, in
 
 static const unsigned int *compositor_wall_mini(const char *word, int w, int h)
 {
+        unsigned long pitch = compositor_whole_lines(w); // the miniature's rows: w pixels on a pitch of whole 64-byte lines, as every reader of one takes them
         int dark = !(compositor.table && compositor.table->themed && compositor.table->theme == UI_THEME_LIGHT), moon, own;
         unsigned int accent = taskbar_wall_accent();
         positive now = clock_monotonic_nanoseconds();
@@ -541,22 +542,22 @@ static const unsigned int *compositor_wall_mini(const char *word, int w, int h)
                 m->w = w, m->h = h;
         }
         p = m->pixels;
-        if (!mem_buf_grow(&p, &m->bytes, (unsigned long)w * (unsigned long)h * 4, MEM_BUF_GPU_FORGET))
+        if (!mem_buf_grow(&p, &m->bytes, pitch * (unsigned long)h * 4, MEM_BUF_GPU_FORGET))
                 return m->pixels = 0, m->bytes = 0, (const unsigned int *)0;
         m->pixels = (unsigned int *)p, m->used = now, m->dark = own, m->accent = accent, m->gen = compositor_walls.listed;
         if (moon)
         {
                 int rect[4] = {0};
 
-                memory_fill_u32_rect(m->pixels, (positive)w, (positive)w, (positive)h, 0xff000000u);
-                taskbar_wall_draw(m->pixels, w, w, h, own, 1, 45, 1, accent, compositor_wall_turn, 0, rect);
-                memory_or_u32(m->pixels, m->pixels, (positive)w * (positive)h, 0xff000000u);
+                memory_fill_u32_rect(m->pixels, (positive)pitch, (positive)w, (positive)h, 0xff000000u);
+                taskbar_wall_draw(m->pixels, (int)pitch, w, h, own, 1, 45, 1, accent, compositor_wall_turn, 0, rect);
+                memory_or_u32(m->pixels, m->pixels, (positive)pitch * (positive)h, 0xff000000u);
                 return m->pixels;
         }
-        if (compositor_wall_mini_picture(word, m->pixels, w, h))
+        if (compositor_wall_mini_picture(word, m->pixels, pitch, w, h))
                 return m->pixels;
         // No miniature to be had (gone, or not made yet): the ground's colour, made again at the next change of the list.
-        memory_fill_u32_rect(m->pixels, (positive)w, (positive)w, (positive)h, compositor_ground | 0xff000000u);
+        memory_fill_u32_rect(m->pixels, (positive)pitch, (positive)w, (positive)h, compositor_ground | 0xff000000u);
         return m->pixels;
 }
 
@@ -995,7 +996,7 @@ static void compositor_wall_veil_keep(void)
             compositor_wall_editor.veil_turn == compositor_wall_turn && !memory_compare(compositor_wall_editor.veil_rect, s, sizeof(s)))
                 return;
         p = compositor_wall_editor.veil;
-        if (!mem_buf_grow(&p, &compositor_wall_editor.veil_bytes, (unsigned long)s[2] * (unsigned long)s[3] * 4, MEM_BUF_GPU_FORGET))
+        if (!mem_buf_grow(&p, &compositor_wall_editor.veil_bytes, compositor_whole_lines(s[2]) * (unsigned long)s[3] * 4, MEM_BUF_GPU_FORGET))
                 return (void)(compositor_wall_editor.veil = 0, compositor_wall_editor.veil_bytes = 0, compositor_wall_editor.veil_level = 0);
         compositor_wall_editor.veil = (unsigned int *)p;
         alpha = COMPOSITOR_WALL_VEIL * (unsigned int)level / COMPOSITOR_WALL_VEIL_STEPS;
@@ -1003,7 +1004,7 @@ static void compositor_wall_veil_keep(void)
         {
                 const unsigned int *from = compositor_wall && s[0] >= 0 && s[1] >= 0 && s[0] + s[2] <= compositor_wall_w && s[1] + s[3] <= compositor_wall_h
                                                ? compositor_wall + (long)(s[1] + y) * compositor_wall_pitch + s[0] : 0;
-                unsigned int *into = compositor_wall_editor.veil + (long)y * s[2];
+                unsigned int *into = compositor_wall_editor.veil + (unsigned long)y * compositor_whole_lines(s[2]);
 
                 for (int x = 0; x < s[2]; x++)
                 {
@@ -1022,6 +1023,7 @@ static void compositor_wall_veil_keep(void)
 static const unsigned int *compositor_wall_editor_auto(int w, int h)
 {
         const unsigned int *dark = compositor_wall_mini("dark", w, h), *white = compositor_wall_mini("white", w, h);
+        unsigned long pitch = compositor_whole_lines(w); // the miniatures' rows, and this one's
         struct compositor_wall_mini *m = 0;
         void *p;
 
@@ -1044,15 +1046,15 @@ static const unsigned int *compositor_wall_editor_auto(int w, int h)
         }
         m->accent = taskbar_wall_accent();
         p = m->pixels;
-        if (!mem_buf_grow(&p, &m->bytes, (unsigned long)w * (unsigned long)h * 4, MEM_BUF_GPU_FORGET))
+        if (!mem_buf_grow(&p, &m->bytes, pitch * (unsigned long)h * 4, MEM_BUF_GPU_FORGET))
                 return m->pixels = 0, m->bytes = 0, dark;
         m->pixels = (unsigned int *)p, m->used = clock_monotonic_nanoseconds();
         for (int y = 0; y < h; y++)
         {
                 int cut = w - (int)((long long)y * w / h);
 
-                memory_copy(m->pixels + (long)y * w, dark + (long)y * w, (positive)cut * 4);
-                memory_copy(m->pixels + (long)y * w + cut, white + (long)y * w + cut, (positive)(w - cut) * 4);
+                memory_copy(m->pixels + (unsigned long)y * pitch, dark + (unsigned long)y * pitch, (positive)cut * 4);
+                memory_copy(m->pixels + (unsigned long)y * pitch + cut, white + (unsigned long)y * pitch + cut, (positive)(w - cut) * 4);
         }
         return m->pixels;
 }
@@ -1128,7 +1130,9 @@ static const unsigned int *compositor_wall_editor_pill_pixels(int w, int h, int 
                         if (em < (8u << 6))
                                 em = 8u << 6;
                         fm = font_metrics_at(&compositor.face, em);
-                        tw = (int)(font_draw(compositor.engine, faces, 1, (const p8 address_to)labels[seg], len, em, 0, null, 0, 0, 0, 0) >> 16);
+                        // (measured by font_extent: font_draw with no target to draw into read the target's fields and the compositor fell, at the
+                        // editor's first frame with the switch in it)
+                        tw = (int)(font_extent(compositor.engine, faces, 1, (const p8 address_to)labels[seg], len, em, 0) >> 16);
                         tx = sx0 + ((sx1 - sx0) - tw) / 2;
                         if (tx < sx0)
                                 tx = sx0;
@@ -1170,7 +1174,7 @@ static unsigned int compositor_wall_editor_frames(struct compositor_frame *frame
 
                 memory_zero(veil, sizeof(*veil));
                 veil->x = s[0], veil->y = s[1], veil->width = s[2], veil->height = s[3], veil->scale = scale, veil->layer = 1, veil->blend = 1;
-                veil->pixels = compositor_wall_editor.veil, veil->pitch = (unsigned long)s[2];
+                veil->pixels = compositor_wall_editor.veil, veil->pitch = compositor_whole_lines(s[2]);
                 rows[at++] = filler;
         }
         for (unsigned int card = 0; card < compositor_wall_editor.cards; card++)
@@ -1190,7 +1194,8 @@ static unsigned int compositor_wall_editor_frames(struct compositor_frame *frame
                 else
                         mini = !word[0] ? 0 : compositor_wall_mini(word, c[2], c[3]);
                 if (mini)
-                        frames[at].pixels = mini + (frames[at].y - c[1]) * c[2] + (frames[at].x - c[0]), frames[at].pitch = (unsigned long)c[2];
+                        frames[at].pixels = mini + (unsigned long)(frames[at].y - c[1]) * compositor_whole_lines(c[2]) + (frames[at].x - c[0]),
+                        frames[at].pitch = compositor_whole_lines(c[2]);
                 else
                         frames[at].fill = compositor_ink_role(UI_SURFACE_CONTAINER) | 0xff000000u;
                 frames[at].radius = radius, frames[at].line = line;

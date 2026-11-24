@@ -234,6 +234,13 @@ static int compositor_wall_w, compositor_wall_h;
 // whatever the screen's width (a wallpaper 1366 wide at its own width was refused, or copied, with every present over the desktop).
 static int compositor_wall_pitch;
 
+// A picture's pitch in pixels for its width: the width in whole 64-byte lines, where a card that finds a picture's row only on a line
+// (i915) reads the picture where it is. The compositor's own pictures are made on it, so none of them is copied for the card.
+static inline unsigned long compositor_whole_lines(int width)
+{
+        return ((unsigned long)width + 15) & ~15ul;
+}
+
 static int compositor_space_all_fullscreen(void);
 
 // The ground at a point of the space: solid black on Fullscreen Spaces, else the wallpaper's pixel or colour.
