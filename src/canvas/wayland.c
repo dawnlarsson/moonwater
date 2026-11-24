@@ -198,6 +198,10 @@ struct wayland_host
         // window of the client's that has no row has its X server's Wayland client and serial put in x_client and serial (-1, 0 else).
         long (*stand_in)(void *context, long client, unsigned long window, long *x_client, unsigned long long *serial);
         void (*frame_sent)(void *context, int row); // a row's frame callbacks answered (the frames trace's C mark); may be null
+        // A toplevel's row opened: its window draws no frame from the host, so the host may lay its own controls over what the
+        // window leaves empty (Canvas's compositor_controls). Popups, subsurfaces and X windows' surfaces (xwm says for those) never;
+        // may be null.
+        void (*row_controls)(void *context, int row, int on);
 };
 
 struct wayland_object { unsigned int id; unsigned char iface, version; unsigned short flags; int link; unsigned int aux; };
@@ -2781,6 +2785,8 @@ static long wayland_row_open(struct wayland_client *c, struct wayland_surface *s
         if (s->row < 0)
                 return s->row = -1;
         wayland.row[s->row].client = c->slot, wayland.row[s->row].surface = wayland_surface_index(c, s), wayland.rows++, wayland.xgen++;
+        if (s->role == WAYLAND_ROLE_TOPLEVEL && !s->xsurface && wayland.host->row_controls)
+                wayland.host->row_controls(wayland.host->context, s->row, 1);
         if (s->title[0] || s->app_id[0])
                 wayland.host->row_title(wayland.host->context, s->row, s->title[0] ? s->title : s->app_id, 0);
         if (s->app_id[0] && wayland.host->row_app)

@@ -1774,7 +1774,7 @@ static void compositor_present_frames(void)
         compositor_wl_tiled_settle();
 #endif
         for (unsigned int at = 0; at < windows; at++)
-                compositor_close_mean(&frames[at]), compositor_close_ready(&frames[at]);
+                compositor_controls_read(&frames[at]), compositor_close_mean(&frames[at]), compositor_close_ready(&frames[at]);
         int strip_damage = 0;
 
         if (compositor.width & 3)

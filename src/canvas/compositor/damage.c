@@ -1438,6 +1438,67 @@ static int compositor_row_shaped(int row)
         return row >= 0 && (unsigned int)row < compositor_cuts_rows && compositor_cuts[row].shaped;
 }
 
+/*
+        Controls for a window that asked for the manager's frame and draws none: an X window whose Motif hints left the frame on
+        (Aseprite, a Wine program, a game in a window), set by xwm (compositor_controls_want). Canvas gives it no title bar of its own.
+        It reads the window's picture instead: where the window's top at its start corner (the top right, the top left for a
+        language read from the right) is a bar of one colour with nothing drawn on it, COMPOSITOR_CONTROLS_LEAST to COMPOSITOR_CONTROLS_MOST
+        logical pixels deep (a menu bar's empty end, a strip of title), the close and minimise buttons are laid over it, sized to
+        it (compositor_controls_apply). A press on the bar where its column is the bar's colour to the bar's foot moves the window,
+        and two maximise it, as on a title bar (compositor_controls_grabs). Anything the window drew there (a word, a button, an edge)
+        is the window's and takes the press. A colour deeper than the most (a game's sky) is no bar. A window with no bar found
+        gets neither, and keeps the alt hold.
+*/
+#define COMPOSITOR_CONTROLS_LEAST 14 // logical pixels: a bar shallower than this has no room for a button
+#define COMPOSITOR_CONTROLS_MOST 48  // logical pixels: one colour deeper than this is a picture, not a bar
+#define COMPOSITOR_CONTROLS_SKIP 2   // logical pixels at the top read past: a window's own edge line
+#define COMPOSITOR_CONTROLS_NEAR 12  // a channel within this of the bar's is the bar's colour
+
+struct compositor_controls_row
+{
+        unsigned int ink;    // the bar's colour, 0xrrggbb
+        unsigned short band; // the bar's depth from the window's top in device pixels; 0: none found
+        unsigned char want;  // the window asked for the manager's frame
+        unsigned char read;  // the bar has been read since the window asked
+};
+static struct compositor_controls_row *compositor_controls;
+
+static void compositor_controls_want(int row, int want)
+{
+        if (!compositor_controls || row < 0 || row >= COMPOSITOR_ROWS || compositor_controls[row].want == (want != 0))
+                return;
+        compositor_controls[row] = (struct compositor_controls_row){0, 0, (unsigned char)(want != 0), 0};
+        compositor_damage_row(row);
+}
+
+// The buttons on the bar found: as tall as the bar leaves room for, at most the kit's, centred down it, inset a fifth of the bar.
+static void compositor_controls_apply(int row, struct compositor_frame *frame)
+{
+        int band, in, side, most;
+
+        if (!compositor_controls || !compositor_controls[row].want)
+                return;
+        frame->close = frame->minimize = 0;
+        if (!(band = compositor_controls[row].band) || compositor.fullscreen[row])
+                return;
+        most = UI_CLOSE * frame->scale / 100;
+        in = band / 5 < UI_CLOSE_IN * frame->scale / 100 ? band / 5 : UI_CLOSE_IN * frame->scale / 100;
+        in = in < 1 ? 1 : in;
+        side = band - 2 * in < most ? band - 2 * in : most;
+        if (side < 4)
+                return;
+        frame->ctl_side = side, frame->ctl_in = in, frame->ctl_top = (band - side) / 2;
+        frame->close = 1, frame->minimize = !(compositor.asks[row] & WINDOW_NO_TAB);
+}
+
+static int compositor_controls_near(unsigned int a, unsigned int b)
+{
+        int dr = (int)(a >> 16 & 255) - (int)(b >> 16 & 255), dg = (int)(a >> 8 & 255) - (int)(b >> 8 & 255), db = (int)(a & 255) - (int)(b & 255);
+
+        return dr <= COMPOSITOR_CONTROLS_NEAR && dr >= -COMPOSITOR_CONTROLS_NEAR && dg <= COMPOSITOR_CONTROLS_NEAR && dg >= -COMPOSITOR_CONTROLS_NEAR &&
+               db <= COMPOSITOR_CONTROLS_NEAR && db >= -COMPOSITOR_CONTROLS_NEAR;
+}
+
 static void compositor_frame_of(int row, struct compositor_frame *frame)
 {
         int line = compositor_frame_line(row), scale = compositor_row_scale(row);
@@ -1455,6 +1516,7 @@ static void compositor_frame_of(int row, struct compositor_frame *frame)
         frame->row_plus1 = row + 1;
         frame->close = !(compositor.asks[row] & WINDOW_NO_CLOSE);
         frame->minimize = !(compositor.asks[row] & WINDOW_NO_TAB);
+        compositor_controls_apply(row, frame);
         if (compositor_row_shape(row, &frame->shape, &frame->shape_count))
         {
                 frame->shaped = 1, frame->shape_w = (int)compositor.picture_w[row], frame->shape_h = (int)compositor.picture_h[row];
@@ -1535,6 +1597,90 @@ static void compositor_damage_row(int row)
         compositor_frame_of(row, &frame);
         compositor_outline(&frame, &x, &y, &width, &height);
         compositor_damage(x, y, width, height);
+}
+
+/*
+        The bar under a window's buttons, read from its picture (compositor_controls): once when the window asks, and again whenever
+        the present's damage meets the bar's room at the start corner, three buttons wide. Each column there is read down from
+        past the window's edge line while it is the colour of the first; the bar is the shallowest column, kept when it is
+        between the least and the most. A bar that comes, goes or changes depth or colour has the window drawn whole again.
+*/
+static void compositor_controls_read(struct compositor_frame *frame)
+{
+        int row = frame->row_plus1 - 1, scale = frame->scale, least, most, skip, reach, x0, band, step;
+        unsigned int ink;
+
+        if (row < 0 || row >= COMPOSITOR_ROWS || !compositor_controls || !compositor_controls[row].want || frame->builtin || frame->layer ||
+            !frame->pixels || compositor_scaled(frame))
+                return;
+        least = COMPOSITOR_CONTROLS_LEAST * scale / 100, most = COMPOSITOR_CONTROLS_MOST * scale / 100;
+        skip = COMPOSITOR_CONTROLS_SKIP * scale / 100 > 0 ? COMPOSITOR_CONTROLS_SKIP * scale / 100 : 1;
+        reach = 3 * (UI_CLOSE + UI_CLOSE_IN) * scale / 100;
+        x0 = language_rtl() ? skip : frame->width - reach - skip;
+        if (frame->width < 4 * reach || frame->height < 2 * most || x0 < 0)
+                band = 0, ink = 0;
+        else
+        {
+                if (compositor_controls[row].read)
+                {
+                        int touched = 0;
+
+                        for (unsigned int at = 0; at < compositor.damages && !touched; at++)
+                        {
+                                int box[4] = {frame->x + x0, frame->y, frame->x + x0 + reach, frame->y + most + 1};
+
+                                compositor_meet(box, compositor.damage[at]);
+                                touched = box[2] > box[0] && box[3] > box[1];
+                        }
+                        if (!touched)
+                                return;
+                }
+                // A client's dma-buf mapped write-combined is read every other column: the bar is a run, and a word on it is wider.
+                step = frame->gpu_base ? 2 : 1;
+                ink = compositor_picture_at(frame, x0 + reach / 2, skip) & 0xffffffu;
+                band = most + 1;
+                for (int x = x0; x < x0 + reach && band >= least; x += step)
+                {
+                        int depth = skip;
+
+                        while (depth < band && compositor_controls_near(compositor_picture_at(frame, x, depth), ink))
+                                depth++;
+                        band = depth < band ? depth : band;
+                }
+                if (band < least || band > most)
+                        band = 0;
+        }
+        compositor_controls[row].read = 1;
+        if ((unsigned int)band != compositor_controls[row].band || (band && ink != compositor_controls[row].ink))
+        {
+                compositor_controls[row].band = (unsigned short)band, compositor_controls[row].ink = ink;
+                compositor_damage_row(row);
+        }
+        frame->ctl_side = frame->ctl_in = frame->ctl_top = 0;
+        frame->close = !(compositor.asks[row] & WINDOW_NO_CLOSE), frame->minimize = !(compositor.asks[row] & WINDOW_NO_TAB);
+        compositor_controls_apply(row, frame);
+}
+
+// A press at px, py on the bar found under a window's buttons, where its column, and the columns a few pixels either side, are the
+// bar's colour from past the window's edge line to the bar's foot: nothing the window drew is there, so the press is the window's frame's.
+static int compositor_controls_grabs(int row, int px, int py)
+{
+        struct compositor_frame frame;
+        int band, dx, dy, half, skip;
+
+        if (!compositor_controls || row < 0 || row >= COMPOSITOR_ROWS || !compositor_controls[row].want || !(band = compositor_controls[row].band) ||
+            compositor.fullscreen[row])
+                return 0;
+        compositor_frame_of(row, &frame);
+        dx = px - frame.x, dy = py - frame.y;
+        if (!frame.pixels || compositor_scaled(&frame) || dx < 0 || dx >= frame.width || dy < 0 || dy >= band)
+                return 0;
+        half = 3 * frame.scale / 100 + 1, skip = COMPOSITOR_CONTROLS_SKIP * frame.scale / 100 > 0 ? COMPOSITOR_CONTROLS_SKIP * frame.scale / 100 : 1;
+        for (int x = dx - half; x <= dx + half; x++)
+                for (int y = skip; y < band; y++)
+                        if (x >= 0 && x < frame.width && !compositor_controls_near(compositor_picture_at(&frame, x, y), compositor_controls[row].ink))
+                                return 0;
+        return 1;
 }
 
 /*

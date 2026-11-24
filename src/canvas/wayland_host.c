@@ -3316,6 +3316,13 @@ static void compositor_wl_row_title(void *context, int row, const char *text, lo
         compositor_take(row);
 }
 
+// A Wayland toplevel's row: Canvas's controls may be laid over the bar the detector finds empty in it (compositor_controls, damage.c).
+static void compositor_wl_row_controls(void *context, int row, int on)
+{
+        (void)context;
+        compositor_controls_want(row, on);
+}
+
 static void compositor_wl_row_app(void *context, int row, const char *app_id)
 {
         (void)context;
@@ -4891,7 +4898,7 @@ static const struct wayland_host compositor_wl_host = {
         compositor_wl_clip_type, compositor_wl_clip_pull, compositor_wl_clip_abort, compositor_wl_clip_push, compositor_wl_clip_clear,
         compositor_wl_dmabuf_signaled, compositor_wl_random, compositor_wl_row_layers, compositor_wl_row_busy, compositor_wl_reserve,
         compositor_wl_commit, compositor_wl_unreserve, compositor_wl_xreceive, compositor_wl_xdrag, compositor_wl_row_app,
-        compositor_wl_stand_in, compositor_wl_frame_sent,
+        compositor_wl_stand_in, compositor_wl_frame_sent, compositor_wl_row_controls,
 };
 
 /* ---- the socket ---- */

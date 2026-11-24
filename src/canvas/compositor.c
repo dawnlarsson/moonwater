@@ -1723,6 +1723,7 @@ _Static_assert(COMPOSITOR_POLLS_OWN + COMPOSITOR_INPUTS_KEPT + COMPOSITOR_CLIP_H
 
 #define COMPOSITOR_ROWS_KEPT(X) \
         X(compositor_popup_parent, COMPOSITOR_ROWS_ROW) X(compositor_owner, COMPOSITOR_ROWS_ROW) X(compositor_listed, COMPOSITOR_ROWS_ROW) \
+        X(compositor_controls, COMPOSITOR_ROWS_ROW) \
         X(compositor_list_waits, COMPOSITOR_ROWS_ROW) X(compositor_clip.offer_seen, COMPOSITOR_ROWS_ROW) X(compositor_clip.ask_seen, COMPOSITOR_ROWS_ROW) \
         X(compositor_clip.gesture, COMPOSITOR_ROWS_ROW) X(compositor_dnd.offer_seen, COMPOSITOR_ROWS_ROW) X(compositor_dnd.take_seen, COMPOSITOR_ROWS_ROW) \
         X(compositor_dnd.done_seen, COMPOSITOR_ROWS_ROW) X(compositor_gpu_pins, COMPOSITOR_ROWS_ROW) X(compositor_osk_held, COMPOSITOR_ROWS_ROW) \

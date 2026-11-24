@@ -2788,9 +2788,12 @@ static int compositor_button_window(int under, unsigned int code, int alt)
                         compositor_lit(under, compositor.edges[under], 1);
                 return 1;
         }
-        band = !alt && code == COMPOSITOR_BTN_LEFT && !compositor.fullscreen[under] && !(compositor.asks[under] & WINDOW_NO_GRAB) &&
-               px >= compositor.x[under] && px < compositor.x[under] + (int)compositor.w[under] &&
-               py >= compositor.y[under] && py < compositor.y[under] + COMPOSITOR_GRAB * compositor.scale / 100;
+        // The kit's windows' band, or the bar Canvas found empty in a window that draws no frame of its own (compositor_controls_grabs).
+        band = !alt && code == COMPOSITOR_BTN_LEFT && !compositor.fullscreen[under] &&
+               ((!(compositor.asks[under] & WINDOW_NO_GRAB) &&
+                 px >= compositor.x[under] && px < compositor.x[under] + (int)compositor.w[under] &&
+                 py >= compositor.y[under] && py < compositor.y[under] + COMPOSITOR_GRAB * compositor.scale / 100) ||
+                compositor_controls_grabs(under, px, py));
         if (band && compositor_on_button(under, px, py, compositor_close_box))
                 return compositor.press = COMPOSITOR_NONE, compositor_close(under), 1;
         asked = compositor_asked_shape(under);

@@ -4608,6 +4608,7 @@ static int compositor_row_open_external(const struct compositor_row_spec *spec)
                 if (!__atomic_compare_exchange_n(&table->pid[row], &none, WINDOWS_TAKING, 0, __ATOMIC_ACQ_REL, __ATOMIC_RELAXED))
                         continue;
                 windows_reset_row(table, (unsigned int)row);
+                compositor_controls[row] = (struct compositor_controls_row){0, 0, 0, 0};
                 table->glass[row] = spec->glass, table->asked[row] = spec->asked ? 1u : 0u;
                 compositor_owner[row] = (spec->kind == COMPOSITOR_ROW_TOPLEVEL || spec->kind == COMPOSITOR_ROW_PLACED) &&
                                                 spec->parent >= 0 && spec->parent < (int)compositor_rows_in_use

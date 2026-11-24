@@ -95,6 +95,10 @@ struct compositor_frame
         const unsigned char *lengths; // the panel: each window's title in characters, which its tab fits
         int close;           // a window with a close button over its top right
         int minimize;        // a window with a minimise button: it has a tab, which brings it back (none for WINDOW_NO_TAB)
+        // The buttons laid over a window that draws no frame of its own on the bar Canvas found in its picture (compositor_controls_apply): their
+        // side, their inset from the window's edge and from each other, and their top from the window's top, in device pixels. 0 for the
+        // kit's place, UI_CLOSE and UI_CLOSE_IN at the frame's scale.
+        int ctl_side, ctl_in, ctl_top;
         unsigned int close_mean; // the mean colour under the close button, made once a present (compositor_close_mean)
         int close_side;          // the close button's ink side, 1 dark or 2 light, from the row's hysteresis (compositor_close_mean); 0: the plain test
         int row_plus1;           // the window's row + 1 (compositor_frame_of), 0 for a frame that is not a window's: the row keeps its ink side
@@ -164,14 +168,15 @@ static inline int language_rtl(void)
 
 static int compositor_close_box(const struct compositor_frame *frame, int *x, int *y, int *side)
 {
-        int box = UI_CLOSE * frame->scale / 100, in = UI_CLOSE_IN * frame->scale / 100;
+        int box = frame->ctl_side ? frame->ctl_side : UI_CLOSE * frame->scale / 100;
+        int in = frame->ctl_side ? frame->ctl_in : UI_CLOSE_IN * frame->scale / 100;
 
-        if (!frame->close || frame->builtin || frame->width < box + 2 * in + 4 * box || frame->height < box + 2 * in)
+        if (!frame->close || frame->builtin || box <= 0 || frame->width < box + 2 * in + 4 * box || frame->height < box + 2 * in)
                 return 0;
         *side = box;
         // At the window's start corner: the top right, or the top left where the language reads from the right.
         *x = language_rtl() ? frame->x + in : frame->x + frame->width - box - in;
-        *y = frame->y + in;
+        *y = frame->y + (frame->ctl_side ? frame->ctl_top : in);
         return 1;
 }
 
@@ -533,7 +538,7 @@ static unsigned int compositor_picture_at(const struct compositor_frame *frame, 
 */
 static int compositor_minimize_box(const struct compositor_frame *frame, int *x, int *y, int *side)
 {
-        int bx, by, box, in = UI_CLOSE_IN * frame->scale / 100;
+        int bx, by, box, in = frame->ctl_side ? frame->ctl_in : UI_CLOSE_IN * frame->scale / 100;
 
         if (!frame->minimize || !compositor_close_box(frame, &bx, &by, &box) || frame->width < 2 * box + 3 * in + 4 * box)
                 return 0;

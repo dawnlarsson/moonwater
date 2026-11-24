@@ -914,6 +914,7 @@ static void xwm_fullscreen_place(const struct compositor_xwm_window *w, struct x
         c->height = has_f && f.want_height ? f.want_height : has_f && f.height ? f.height : (compositor.height > 0 ? (unsigned int)compositor.height : 1u);
 }
 
+static int compositor_xwm_framed(const struct compositor_xwm_window *w);
 static void xwm_property(struct compositor_xwm *x, const unsigned char *in, long size, const struct compositor_xwm_pending *p)
 {
         struct compositor_xwm_window *w;
@@ -1059,6 +1060,8 @@ static void xwm_property(struct compositor_xwm *x, const unsigned char *in, long
                 w->state |= COMPOSITOR_XWM_PROPS_READ;
                 if ((w->state & COMPOSITOR_XWM_DESKTOP) && !was_desktop && (w->state & COMPOSITOR_XWM_ADOPTED) && w->row >= 0)
                         compositor_layer_set(w->row, WINDOW_LAYER_BACKGROUND, -1);
+                if (w->row >= 0 && w->row < COMPOSITOR_ROWS)
+                        compositor_controls_want(w->row, compositor_xwm_framed(w));
                 break;
         }
         case COMPOSITOR_XWM_PROP_PROTOCOLS:
@@ -1086,6 +1089,8 @@ static void xwm_property(struct compositor_xwm *x, const unsigned char *in, long
                         w->state |= COMPOSITOR_XWM_BORDERLESS;
                 else
                         w->state &= ~COMPOSITOR_XWM_BORDERLESS;
+                if (w->row >= 0 && w->row < COMPOSITOR_ROWS)
+                        compositor_controls_want(w->row, compositor_xwm_framed(w));
                 break;
         case COMPOSITOR_XWM_PROP_EMU:
         {
@@ -1330,6 +1335,15 @@ static int compositor_xwm_is_popup(const struct compositor_xwm_window *w)
                !((w->state & COMPOSITOR_XWM_OVERRIDE) && !w->transient && compositor_xwm_covers(w) >= 0);
 }
 
+// A window that asked for the manager's frame and draws none of its own: not borderless by its Motif hints, not a popup, an override,
+// the desktop or a tray icon. Canvas lays its controls over the bar it finds empty in such a window's picture (compositor_controls).
+static int compositor_xwm_framed(const struct compositor_xwm_window *w)
+{
+        return !(w->state & (COMPOSITOR_XWM_BORDERLESS | COMPOSITOR_XWM_OVERRIDE | COMPOSITOR_XWM_POPUPTYPE | COMPOSITOR_XWM_DESKTOP |
+                             COMPOSITOR_XWM_TRAY_ICON)) &&
+               !compositor_xwm_is_popup(w);
+}
+
 static void compositor_xwm_hints_push(const struct compositor_xwm_window *w)
 {
         unsigned int scale;
@@ -1427,6 +1441,7 @@ static void compositor_xwm_resolve(struct compositor_xwm *x, struct compositor_x
         compositor_xwm_app(w);
         compositor_xwm_owned(w);
         compositor_xwm_hints_push(w);
+        compositor_controls_want((int)row, compositor_xwm_framed(w));
         if (w->state & COMPOSITOR_XWM_DESKTOP)
                 compositor_layer_set((int)row, WINDOW_LAYER_BACKGROUND, -1);
         else
