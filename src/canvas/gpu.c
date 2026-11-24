@@ -1609,15 +1609,14 @@ static const struct gpu_backend *const gpu_backends[] = {&gpu_amd, &gpu_i915_row
 #define GPU_BACKENDS (sizeof(gpu_backends) / sizeof(gpu_backends[0]))
 static const struct gpu_backend *gpu_backend = &gpu_amd; // the card's driver: the picked node's (amdgpu's until a start picks one: a check's fake card is amdgpu's)
 
-// The generations the processor composes faster than the card, whose card path is off unless canvas gpu is said on (the compositor's compositor_gpu_slower):
-// none. Gen7 and Gen7.5 were (715dc66e7: a shadow the present waited for, a scene of four-pixel threads, the card at its least clock; a Haswell HD 4600's
-// present 21.6 to 44.9 ms against the processor's 0.27 to 0.34 ms). With the tile kernel, the imports floating and the clock held (17678f1ac) the card's
-// present is 2.1 to 2.6 ms and the loop's, its processor time, 76 to 171 us against the processor's present of 307 to 522 us on the lab's Ivy Bridge and
-// Haswell parts, and the compositor's processor time less than half.
+// The generations whose card path is off unless canvas gpu is said on (the compositor's compositor_gpu_slower): i915's Gen7 to Gen11, every family the
+// Gen9 kernel set draws for. Gen7 and Gen7.5 were the processor's by default as slower (715dc66e7: 21.6 to 44.9 ms a present on a Haswell HD 4600 against
+// 0.27 to 0.34 ms); with the tile kernel (7a9d0800a) the card's present is 0.7 to 2.6 ms and asynchronous, its loop part under the processor's present, but
+// CHECK_gpu's random scene (300 fills and tones) draws most of its tiles wrong on Gen9 and Gen7.5 where a scene of a handful of records (the self-test,
+// a desktop's) draws right: until that is right the card is the processor's by default on every one of them, and said on it composes.
 static b32 gpu_slower(const struct gpu_backend *backend, unsigned int family)
 {
-        (void)backend, (void)family;
-        return false;
+        return backend == &gpu_i915_row && family >= 700 && family < 1200;
 }
 
 static const struct gpu_backend *gpu_backend_of(const char *name)

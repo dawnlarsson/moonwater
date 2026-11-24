@@ -176,7 +176,7 @@ static const string_address windows_gpu_reasons[WINDOWS_GPU_REASONS] = {
     "the scanout is not one the card can draw into", "a window's picture is not mapped for the card", "a landing (scaled)", "a snap preview or a shared edge",
     "the records or the cover tables are full", "a close button not wholly in its picture", "the scene did not finish", "a turned screen (the processor turned it)",
     "other frames, or empty damage", "a window with alpha and round corners (the file gpu-round-off is there)",
-    "a client's own pointer picture drawn into the scene", "card path off by default on this GPU generation: slower than the processor, measured"};
+    "a client's own pointer picture drawn into the scene", "card path off by default on this GPU generation (canvas gpu on turns it on)"};
 #define WINDOWS_GPU_WHY_GENERATION 19u // the last: a default, not a fault (no warning on the board; moonwater canvas says it)
 
 #define WINDOWS_GPU_REQS 10
