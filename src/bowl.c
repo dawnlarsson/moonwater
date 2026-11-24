@@ -133,6 +133,14 @@ static struct bowl_mount_point bowl_isolated_mounts[] = {
         /nix is a Nix bowl's store. Everything Nix installs names its loader
         and libraries by /nix/store paths, so without it a program from
         a Nix profile runs only in the isolated view.
+
+        /var/lib/flatpak is a bowl's system installation of Flatpak: the
+        apps and runtimes `flatpak install` puts there, in the isolated view
+        as every package manager runs. The view's /var is the machine's, so
+        without it `flatpak run` in a session found nothing installed
+        ("app/com.discordapp.Discord/x86_64/master not installed"). It is
+        read-only here, as /usr is: a session runs what is installed and
+        only the package manager's view changes it.
 */
 static string_address bowl_fast_layers[] = {
     "/lib",
@@ -140,6 +148,7 @@ static string_address bowl_fast_layers[] = {
     "/lib64",
     "/opt",
     "/nix",
+    "/var/lib/flatpak",
     null,
 };
 
@@ -531,7 +540,24 @@ static bool bowl_shebang_target(string_address line, p8 address_to root,
         return bowl_launcher(line, root, room, program_out);
 }
 
-static bool bowl_needs_isolated(string_address program)
+/*
+        Whether a program is a package manager, which runs in the isolated view (the bowl's own tree, writable). Flatpak is one
+        for the subcommands that change its installation (install, update, a remote added): `flatpak run` and the rest run in a
+        session's view, where its installation is read-only (/var/lib/flatpak, bowl_fast_layers) and the desktop is there.
+*/
+static bool bowl_flatpak_changes(string_address address_to arguments)
+{
+        static string_address changing[] = {
+            "install", "uninstall", "remove", "update", "upgrade", "remote-add", "remote-delete", "remote-modify",
+            "repair", "mask", "pin", "make-current", "config"};
+
+        for (positive at = 1; arguments && arguments[at]; at++)
+                if (arguments[at][0] != '-')
+                        return string_table_lookup(arguments[at], changing) < array_count(changing);
+        return false;
+}
+
+static bool bowl_needs_isolated(string_address program, string_address address_to arguments)
 {
         static string_address managers[] = {
             "pacman", "pacman-key", "pacman-conf", "makepkg", "repo-add",
@@ -547,6 +573,8 @@ static bool bowl_needs_isolated(string_address program)
                 return false;
 
         path_tail_copy(name, sizeof(name), program);
+        if (string_equals(name, "flatpak"))
+                return bowl_flatpak_changes(arguments);
         return string_table_lookup(name, managers) < array_count(managers);
 }
 
@@ -25647,7 +25675,7 @@ static b32 bowl_main()
         }
 
         if (!isolated_told)
-                isolated = bowl_needs_isolated(program);
+                isolated = bowl_needs_isolated(program, command_arguments);
 
         /*  packages off (moonwater security packages; always off at the bowl's
             tight tier) means a program of a bowl may not run the distribution's
@@ -25659,7 +25687,7 @@ static b32 bowl_main()
             this by its launcher reads the real switch. `bowl setup` and `bowl
             profile`, the owner's own host actions, are dispatched above and do
             not pass here. */
-        if ((isolated || bowl_as_root || bowl_needs_isolated(program)) &&
+        if ((isolated || bowl_as_root || bowl_needs_isolated(program, command_arguments)) &&
             !security_switch_on("packages"))
                 return bowl_refuse(
                     "the package manager is off for the programs of a bowl: "

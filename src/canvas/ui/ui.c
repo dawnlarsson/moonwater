@@ -21182,7 +21182,21 @@ static fn ui_apps_entry(const char address_to root, bipolar directory, const cha
         if (ui_apps.count >= UI_APPS_MOST || length <= 8 || !memory_has_suffix((string_address)file, length, ".desktop"))
                 return;
         // Root's alone, a regular file, opened through the directory with O_NOFOLLOW and verified on the open fd to prevent TOCTOU.
+        // Flatpak exports its apps' entries as links into each app's own tree (exports/share/applications/ID.desktop to
+        // app/ID/current/active/export/...): a link in a bowl's folder is opened again, resolved inside that bowl's root, so it
+        // reaches nothing outside the bowl, and the file it reaches is verified as any other.
         handle = system_open_at(directory, (string_address)file, FILE_READ | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK);
+        if (handle < 0 && root[0] && string_length((string_address)folder) > string_length((string_address)root))
+        {
+                char inside[UI_APP_PATH * 2];
+                bipolar top = system_open_at(AT_FDCWD, (string_address)root, FILE_READ | O_DIRECTORY | O_CLOEXEC);
+                string_copy_bounded((p8 address_to)inside, (string_address)(folder + string_length((string_address)root)), sizeof(inside));
+                string_append_bounded((p8 address_to)inside, (string_address) "/", sizeof(inside));
+                string_append_bounded((p8 address_to)inside, (string_address)file, sizeof(inside));
+                if (top >= 0)
+                        handle = system_open_resolved(top, (string_address)inside, FILE_READ | O_CLOEXEC | O_NONBLOCK,
+                                                      SYSTEM_RESOLVE_IN_ROOT | SYSTEM_RESOLVE_NO_MAGICLINKS), system_close(top);
+        }
         if (handle < 0)
                 return;
         memory_zero(&facts, sizeof(facts));
@@ -21334,7 +21348,10 @@ static fn ui_apps_scan_folder(const char address_to base, const char address_to 
 static fn ui_apps_cache_map(void);
 static fn ui_apps_read(void)
 {
-        static const char address_to const folders[] = {"/usr/share/applications", "/usr/local/share/applications"};
+        // A bowl's own entries, and the apps of its Flatpak installation (flatpak install in the isolated view puts their entries
+        // there; a session runs them through the view's /var/lib/flatpak, bowl.c).
+        static const char address_to const folders[] = {"/usr/share/applications", "/usr/local/share/applications",
+                                                        "/var/lib/flatpak/exports/share/applications"};
         char address_to bowls = null, address_to entries = null;
         unsigned int bowl_order[UI_APPS_NAMES], entry_order[UI_APPS_NAMES];
         positive bowl_count, room = 64 * 1024;
@@ -21372,7 +21389,7 @@ static fn ui_apps_read(void)
                 string_copy_bounded((p8 address_to)root, (string_address)ui_apps_bowls, sizeof(root));
                 string_append_bounded((p8 address_to)root, (string_address) "/", sizeof(root));
                 string_append_bounded((p8 address_to)root, (string_address)bowl, sizeof(root));
-                for (positive which = 0; which < 2; which++)
+                for (positive which = 0; which < sizeof(folders) / sizeof(folders[0]); which++)
                         ui_apps_scan_folder(root, folders[which], root, entries, room, entry_order);
         }
         // User XDG desktop entries (e.g. Steam game shortcuts in /root/.local/share/applications), resolved inside ui_apps_local.
@@ -21812,13 +21829,17 @@ static bipolar ui_apps_picture_open(const char address_to root, const char addre
                 nlen = string_length((string_address)name);
                 if (nlen > 4 && name[nlen - 4] == '.')
                         name[nlen - 4] = 0;
-                for (positive at = 0; at <= sizeof(sides) / sizeof(sides[0]) && handle < 0; at++)
+                // A bowl's icons, then its Flatpak apps' (exports/share/icons, links into each app's tree, resolved inside the root).
+                for (positive at = 0; at <= 2 * (sizeof(sides) / sizeof(sides[0])) && handle < 0; at++)
                 {
-                        if (at < sizeof(sides) / sizeof(sides[0]))
+                        positive sized = sizeof(sides) / sizeof(sides[0]);
+                        if (at < 2 * sized && !(is_local && at >= sized))
                         {
                                 char digits[8];
-                                positive_into_string((p8 address_to)digits, sides[at]);
-                                string_copy_bounded((p8 address_to)path, (string_address)(is_local ? "icons/hicolor/" : "usr/share/icons/hicolor/"), sizeof(path));
+                                positive_into_string((p8 address_to)digits, sides[at % sized]);
+                                string_copy_bounded((p8 address_to)path, (string_address)(is_local ? "icons/hicolor/" : at < sized ? "usr/share/icons/hicolor/"
+                                                                                                                          : "var/lib/flatpak/exports/share/icons/hicolor/"),
+                                                    sizeof(path));
                                 string_append_bounded((p8 address_to)path, (string_address)digits, sizeof(path));
                                 string_append_bounded((p8 address_to)path, (string_address) "x", sizeof(path));
                                 string_append_bounded((p8 address_to)path, (string_address)digits, sizeof(path));
@@ -21826,6 +21847,18 @@ static bipolar ui_apps_picture_open(const char address_to root, const char addre
                         }
                         else
                                 string_copy_bounded((p8 address_to)path, (string_address)(is_local ? "pixmaps/" : "usr/share/pixmaps/"), sizeof(path));
+                        string_append_bounded((p8 address_to)path, (string_address)name, sizeof(path));
+                        string_append_bounded((p8 address_to)path, (string_address) ".png", sizeof(path));
+                        handle = system_open_resolved(inside, (string_address)path, FILE_READ | O_CLOEXEC | O_NONBLOCK,
+                                                      SYSTEM_RESOLVE_IN_ROOT | SYSTEM_RESOLVE_NO_MAGICLINKS);
+                }
+                // A Flatpak app that exports its icon as SVG alone (Discord) has a PNG in Flathub's AppStream data, which flatpak
+                // keeps for every app of the remote (flatpak update --appstream, which the flatpak profile runs).
+                static const char address_to const streams[] = {"var/lib/flatpak/appstream/flathub/x86_64/active/icons/128x128/",
+                                                                "var/lib/flatpak/appstream/flathub/x86_64/active/icons/64x64/"};
+                for (positive at = 0; !is_local && handle < 0 && at < sizeof(streams) / sizeof(streams[0]); at++)
+                {
+                        string_copy_bounded((p8 address_to)path, (string_address)streams[at], sizeof(path));
                         string_append_bounded((p8 address_to)path, (string_address)name, sizeof(path));
                         string_append_bounded((p8 address_to)path, (string_address) ".png", sizeof(path));
                         handle = system_open_resolved(inside, (string_address)path, FILE_READ | O_CLOEXEC | O_NONBLOCK,
