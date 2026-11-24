@@ -25,7 +25,8 @@
         From the one place every frame passes, it also gives:
           pacing: a FIFO swapchain waits in vkAcquireNextImageKHR for its last frame's callback (Canvas answers a fullscreen
             game's at its JIT time, the vblank less its render time), so the game starts each frame as late as still makes it;
-            MOONWATER_WSI_PACE=0 turns it off. MOONWATER_WSI_FPS=N caps the frames a second, slept to a grid of 1/N s.
+            only while the game makes every vblank: a game slower than the screen is never waited for, so it runs at the most
+            frames it can make (the highest rate always wins). MOONWATER_WSI_PACE=0 turns it off. MOONWATER_WSI_FPS=N caps the frames a second, slept to a grid of 1/N s.
           render size: MOONWATER_WSI_SCALE=PERCENT (25 to 100) or MOONWATER_WSI_SIZE=WxH reports an X window's surface that much
             smaller (its current extent), for a game that sizes its swapchain by it; Canvas scales the picture up on the plane.
           present to photon: MOONWATER_WSI_LOG=PATH writes a line a present (P: CLOCK_MONOTONIC ns of the present, ns of the
@@ -492,6 +493,8 @@ struct wsi_swapchain
         struct wl_proxy *callback;
         unsigned long long cap_next, refresh;
         struct wsi_feedback *feedback; // the feedback asked and not yet answered
+        unsigned long long shown;      // the vblank the last frame was shown at (its feedback), 0 for none yet
+        unsigned int behind, on_time;  // pacing held off while frames miss vblanks (behind); on_time counts the frames that made the next
 };
 
 struct wsi_feedback { struct wsi_feedback *next; struct wsi_swapchain *swapchain; struct wl_proxy *proxy; unsigned long long at; };
@@ -1465,6 +1468,23 @@ static void wsi_feedback_presented(void *data, struct wl_proxy *proxy, unsigned 
         (void)proxy, (void)seq_hi, (void)seq_lo;
         if (refresh)
                 f->swapchain->refresh = refresh;
+        //      Whether the game makes every vblank: a frame shown more than a period and a half after the one before missed one. Pacing
+        //      only waits for a game that keeps up (it makes such a game start each frame as late as still makes the vblank); one that is
+        //      slower than the screen is never held back by it, whatever its rate (Skyrim at 40 fps on 144 Hz was held to 36 by the wait,
+        //      every frame rounded up to four vblanks). Two missed in a row and it stops waiting; 32 on time in a row and it waits again.
+        {
+                struct wsi_swapchain *chain = f->swapchain;
+                unsigned long long period = chain->refresh ? chain->refresh : 6944444ull;
+
+                if (chain->shown && at > chain->shown)
+                {
+                        if (at - chain->shown > period + period / 2)
+                                chain->on_time = 0, chain->behind = chain->behind < 2 ? chain->behind + 1 : 2;
+                        else if (++chain->on_time >= 32)
+                                chain->behind = 0;
+                }
+                chain->shown = at;
+        }
         wsi_lock(), wsi_note('P', f->at, at, refresh, (long)flags, (long)f->swapchain->stood), wsi_unlock();
         wsi_feedback_end(f);
 }
@@ -1537,7 +1557,7 @@ static VkResult wsi_before_acquire(VkSwapchainKHR swapchain)
         if (!chain)
                 return VK_SUCCESS;
         if (chain->target)
-                wsi_chain_pump(chain, chain->pace && chain->callback ? wsi_now() + 2 * chain->refresh + 1000000ull : 0);
+                wsi_chain_pump(chain, chain->pace && chain->callback && chain->behind < 2 ? wsi_now() + 2 * chain->refresh + 1000000ull : 0);
         if (wsi.fps > 0)
         {
                 unsigned long long now = wsi_now(), step = wsi_divide(1000000000ull, (unsigned int)wsi.fps);
