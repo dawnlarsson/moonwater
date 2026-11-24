@@ -974,6 +974,9 @@ SHELL_OPTIMIZE_OS_POP
 #if MOONWATER_UI_SOFTWARE
 #include "../canvas/ui/software.c"
 #endif
+#if MOONWATER_UI_ANY
+#include "../canvas/ui/open.c" // the open tool: what opens what (moonwater open, moonwater defaults)
+#endif
 #if MOONWATER_UI_KEYBOARD
 #include "../canvas/ui/osk.c"
 #endif

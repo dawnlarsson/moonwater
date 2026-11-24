@@ -968,3 +968,47 @@ static b32 host_apps(string_address address_to arguments, positive count)
         }
         return host_usage();
 }
+
+/* ---- open and defaults: the open tool's (src/canvas/ui/open.c), what opens what ---- */
+
+// The open tool run with words, standard output and error this verb's: what it says is what the verb says.
+static b32 apps_open_tool(string_address address_to words, positive count)
+{
+        string_address argv[count + 2];
+
+        argv[0] = (string_address) "/open";
+        for (positive at = 0; at < count; at++)
+                argv[at + 1] = words[at];
+        argv[count + 1] = null;
+        log_flush();
+        return host_run(argv);
+}
+
+// moonwater open TARGET...: each opened with what opens its type (a page, a link of a program's scheme, a file, a folder).
+static b32 host_open(string_address address_to arguments, positive count)
+{
+        if (count < 3)
+                return host_usage();
+        return apps_open_tool(arguments + 2, count - 2);
+}
+
+/*
+        moonwater defaults                      each kind (browser, mail, folders, text, images, video, music, documents) and what opens it
+        moonwater defaults KIND|TYPE            every program that opens it, * the one that does
+        moonwater defaults KIND|TYPE APP|auto   the program that opens it, by its name from the list (alpine:chromium), or auto
+*/
+static b32 host_defaults(string_address address_to arguments, positive count)
+{
+        string_address words[3];
+
+        if (count == 2)
+                return words[0] = (string_address) "-defaults", apps_open_tool(words, 1);
+        if (count == 3)
+                return words[0] = (string_address) "-handlers", words[1] = arguments[2], apps_open_tool(words, 2);
+        if (count == 4)
+        {
+                host_need_root();
+                return words[0] = (string_address) "-set", words[1] = arguments[2], words[2] = arguments[3], apps_open_tool(words, 3);
+        }
+        return host_usage();
+}

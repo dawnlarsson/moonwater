@@ -1059,6 +1059,8 @@ static b32 host_main()
             {"profile", host_profile, false},
             {"memory", host_memory, false},
             {"apps", host_apps, false, true},
+            {"open", host_open, false, true},
+            {"defaults", host_defaults, false, true},
             {"bios", host_bios, false},
             {"airplane", tune_airplane, false, true},
             {"brightness", tune_brightness, false, true},

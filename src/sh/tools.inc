@@ -240,6 +240,9 @@ SHELL_TOOL(SYSTEM, share, share_main)
 #if MOONWATER_UI_SOFTWARE
 SHELL_TOOL(SYSTEM, software, software_main)
 #endif
+#if MOONWATER_UI_ANY
+SHELL_TOOL(SYSTEM, open, open_main)
+#endif
 #if MOONWATER_UI_KEYBOARD
 SHELL_TOOL(SYSTEM, osk, osk_main)
 #endif

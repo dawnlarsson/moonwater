@@ -5987,16 +5987,40 @@ static fn check_kit_manage(void)
         }
 }
 
-// Which files the browser plays (ui_file_plays_in_browser): sound and video of Chromium's own decoders, by their extension in any case; a
-// text, an AVI, a name with no extension and a dot in a folder's name are not.
+// What opens what (ui_open_type, ui_open_kind_of, ui_handler_takes): a URI's type is its scheme's, a file: URI is its file (escapes
+// undone), a folder is inode/directory; a type's kind is the browser's for HTML and http, images for any image, text for plain text;
+// a handler named for a type takes it before one named for its group, and one named for neither does not.
 static fn check_kit_browser_files(void)
 {
-        b32 plays = ui_file_plays_in_browser("/root/Music/song.mp3") && ui_file_plays_in_browser("/root/a.WAV") &&
-                    ui_file_plays_in_browser("/home/dawn/clip.mp4") && ui_file_plays_in_browser("/root/x.webm") && ui_file_plays_in_browser("/root/y.flac");
-        b32 not = !ui_file_plays_in_browser("/root/notes.txt") && !ui_file_plays_in_browser("/root/old.avi") && !ui_file_plays_in_browser("/root/README") &&
-                  !ui_file_plays_in_browser("/root/v2.mp3s/file") && !ui_file_plays_in_browser("/root/mp3");
-        check("kit browser: an MP3, a WAV in capitals, an MP4, a WebM and a FLAC are the browser's to play", plays);
-        check("kit browser: a text, an AVI, a name with no extension or a dot in a folder's name only, and a name that is an extension's word, are not", not);
+        char type[UI_OPEN_TYPE], path[256];
+        struct ui_handler h;
+        b32 schemes, files, kinds, takes;
+
+        schemes = ui_open_type("https://example.com/a?b=c", type, sizeof type, path, sizeof path) &&
+                  string_equals((string_address)type, (string_address) "x-scheme-handler/https") && !path[0] &&
+                  ui_open_type("Discord://-/channels/1", type, sizeof type, path, sizeof path) &&
+                  string_equals((string_address)type, (string_address) "x-scheme-handler/discord") &&
+                  ui_open_type("mailto:a@b.c", type, sizeof type, path, sizeof path) && string_equals((string_address)type, (string_address) "x-scheme-handler/mailto");
+        files = ui_open_type("file:///", type, sizeof type, path, sizeof path) && string_equals((string_address)type, (string_address) "inode/directory") &&
+                string_equals((string_address)path, (string_address) "/") && ui_open_type("/", type, sizeof type, path, sizeof path) &&
+                string_equals((string_address)type, (string_address) "inode/directory") &&
+                !ui_open_type("/no/such/place/at/all", type, sizeof type, path, sizeof path) && !ui_open_type("", type, sizeof type, path, sizeof path);
+        kinds = ui_open_kind_of("text/html") == ui_open_kind_named("browser") && ui_open_kind_of("x-scheme-handler/http") == ui_open_kind_named("browser") &&
+                ui_open_kind_of("image/webp") == ui_open_kind_named("images") && ui_open_kind_of("text/plain") == ui_open_kind_named("text") &&
+                ui_open_kind_of("text/x-python") == ui_open_kind_named("text") && ui_open_kind_of("inode/directory") == ui_open_kind_named("folders") &&
+                !ui_open_kind_of("x-scheme-handler/discord") && !ui_open_kind_of("application/zip");
+        memory_zero(&ui_handlers, sizeof(ui_handlers));
+        memory_zero(&h, sizeof(h));
+        h.types = ui_handlers_keep("image/png;text/*;x-scheme-handler/vscode;", 41);
+        *ui_handlers_add() = h, ui_handlers.count = 1;
+        takes = ui_handler_takes(&ui_handlers.handler[0], "image/png") == 2 && ui_handler_takes(&ui_handlers.handler[0], "text/markdown") == 1 &&
+                ui_handler_takes(&ui_handlers.handler[0], "x-scheme-handler/vscode") == 2 && !ui_handler_takes(&ui_handlers.handler[0], "image/jpeg") &&
+                !ui_handler_takes(&ui_handlers.handler[0], "image/pn") && !ui_handler_takes(&ui_handlers.handler[0], "text");
+        ui_handlers.count = 0;
+        check("kit open: a URI's type is its scheme's, in any case, and a page's address is no path", schemes);
+        check("kit open: a file: URI is its file, a folder is inode/directory, and what is not there or is nothing has no type", files);
+        check("kit open: HTML and http are the browser's kind, an image the images', any text the text's, a program's scheme and a ZIP none", kinds);
+        check("kit open: a handler takes the type it names, a type of a group it names, and nothing else", takes);
 }
 
 static fn check_kit_pull_parts(void)

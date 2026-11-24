@@ -105,6 +105,7 @@ src/canvas/ui/ui.c	Icon
 src/canvas/ui/ui.c	StartupWMClass
 src/canvas/ui/ui.c	Hidden
 src/canvas/ui/ui.c	NoDisplay
+src/canvas/ui/ui.c	MimeType
 src/canvas/ui/ui.c	OnlyShowIn
 src/canvas/ui/ui.c	NotShowIn
 src/canvas/ui/ui.c	Delete

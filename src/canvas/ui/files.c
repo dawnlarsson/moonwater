@@ -1599,8 +1599,8 @@ static fn files_open(p32 place)
         int came;
         if (!e)
                 return;
-        // A file of sound or video the browser plays is opened there (an MP3, a WAV, an MP4); any other file, or one with no browser to open
-        // it, in the editor as before.
+        // A file is opened with what opens its type (ui_open: the person's default app, else the first that says it opens it: the Editor
+        // text, a bowl's player sound and video); one nothing opens, or a remote machine's, in the editor as before.
         if (e->kind == FILES_KIND_FILE && files_picking)
                 return (void)(m->cursor = place, files_pick(m, e));
         if (e->kind == FILES_KIND_DIRECTORY && files_pick_kind == FILES_PICK_FOLDER && files_model_is_remote(m))
@@ -1610,7 +1610,7 @@ static fn files_open(p32 place)
                 static p8 path[FILES_PATH];
                 m->cursor = place;
                 if (!files_model_is_remote(m) && files_path_join(path, sizeof(path), m->path, files_model_name(m, e)) &&
-                    ui_file_plays_in_browser((const char address_to)path) && ui_browser_open((const char address_to)path))
+                    ui_open((const char address_to)path) == UI_OPEN_DONE)
                         return;
                 files_open_with(true);
                 return;

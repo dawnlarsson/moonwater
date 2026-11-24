@@ -20847,6 +20847,8 @@ struct ui_desktop
         char name[UI_APP_NAME], generic[UI_APP_NAME], exec[512], icon[UI_APP_PATH], key[WINDOWS_APP_ID], keywords[UI_APP_WORDS];
         b32 application, terminal, hidden, no_display, shown;
         b32 name_local, generic_local, keywords_local; // the value is the language's, which another line without one does not replace
+        const char address_to types;   // MimeType's value where it is in the text parsed (valid while that text is), none when null
+        positive types_length;
 };
 
 // A value's escapes undone into into (room bytes, a null after):
@@ -20991,6 +20993,8 @@ static b32 ui_desktop_parse(const char address_to text, positive size, unsigned 
                                 out->hidden = ui_desktop_true(v, said);
                         else if (UI_DESKTOP_KEY("NoDisplay"))
                                 out->no_display = ui_desktop_true(v, said);
+                        else if (UI_DESKTOP_KEY("MimeType"))
+                                out->types = v, out->types_length = said;
                         else if (UI_DESKTOP_KEY("OnlyShowIn"))
                                 out->shown &= ui_desktop_lists(v, said, UI_APPS_DESKTOP);
                         else if (UI_DESKTOP_KEY("NotShowIn"))
@@ -21222,25 +21226,20 @@ static b32 ui_apps_make_id(const char address_to file, positive stem, const char
 }
 
 // One desktop file of a bowl or of the user's XDG data directory (root == ""), read and listed when it is one of the...
-static fn ui_apps_entry(const char address_to root, bipolar directory, const char address_to folder, const char address_to file, unsigned int code)
+/*
+        A desktop file's text, read as the registry reads one: root's alone, a regular file no one else may write, opened through its
+        directory with O_NOFOLLOW and checked on the open descriptor. Flatpak exports its apps' entries as links into each app's own tree
+        (exports/share/applications/ID.desktop to app/ID/current/active/export/...): a link in a bowl's folder is opened again, resolved
+        inside that bowl's root, so it reaches nothing outside the bowl. The text is memory_checked, *room bytes, a null after what was
+        read; null for none.
+*/
+static p8 address_to ui_apps_entry_text(const char address_to root, bipolar directory, const char address_to folder, const char address_to file,
+                                        positive address_to room, positive address_to got_out)
 {
-        struct ui_app_entry address_to app;
-        struct ui_desktop desktop;
         struct ui_apps_facts facts;
-        char words[UI_APP_ARGS + 8][UI_APP_PATH], profile[48], steam_id[WINDOWS_APP_ID], id[WINDOWS_APP_ID];
-        const char address_to program;
-        const char address_to entry_root = root[0] ? root : ui_apps_local;
-        positive length = string_length((string_address)file);
         bipolar handle, got;
         p8 address_to text;
-        int count, first = 0;
-        positive room;
-        if (ui_apps.count >= UI_APPS_MOST || length <= 8 || !memory_has_suffix((string_address)file, length, ".desktop"))
-                return;
-        // Root's alone, a regular file, opened through the directory with O_NOFOLLOW and verified on the open fd to prevent TOCTOU.
-        // Flatpak exports its apps' entries as links into each app's own tree (exports/share/applications/ID.desktop to
-        // app/ID/current/active/export/...): a link in a bowl's folder is opened again, resolved inside that bowl's root, so it
-        // reaches nothing outside the bowl, and the file it reaches is verified as any other.
+
         handle = system_open_at(directory, (string_address)file, FILE_READ | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK);
         if (handle < 0 && root[0] && string_length((string_address)folder) > string_length((string_address)root))
         {
@@ -21254,22 +21253,45 @@ static fn ui_apps_entry(const char address_to root, bipolar directory, const cha
                                                       SYSTEM_RESOLVE_IN_ROOT | SYSTEM_RESOLVE_NO_MAGICLINKS), system_close(top);
         }
         if (handle < 0)
-                return;
+                return null;
         memory_zero(&facts, sizeof(facts));
         if (system_stat_at(handle, (string_address) "", AT_EMPTY_PATH, 0x7ff, &facts) != 0 ||
             (facts.mode & 0170000u) != 0100000u || facts.owner != ui_apps_owner || (facts.mode & 0022) ||
             facts.size > UI_APPS_ENTRY_MOST)
         {
                 system_close(handle);
-                return;
+                return null;
         }
-        // A buffer the file's size (a byte over, to see a file that grew): a desktop file is a few KiB, not the 96 KiB cap.
-        room = (positive)facts.size + 1;
-        text = (p8 address_to)memory_checked(room);
-        got = text ? system_read_retry((positive)handle, text, room) : -1;
+        // A buffer the file's size (a byte over, to see a file that grew, and one for the null).
+        *room = (positive)facts.size + 2;
+        text = (p8 address_to)memory_checked(*room);
+        got = text ? system_read_retry((positive)handle, text, *room - 1) : -1;
         system_close(handle);
-        if (got > 0 && !ui_desktop_parse((const char address_to)text, (positive)got, code, &desktop))
-                got = -1;
+        if (got <= 0)
+        {
+                if (text)
+                        memory_free(text, *room);
+                return null;
+        }
+        text[got] = 0, *got_out = (positive)got;
+        return text;
+}
+
+static fn ui_apps_entry(const char address_to root, bipolar directory, const char address_to folder, const char address_to file, unsigned int code)
+{
+        struct ui_app_entry address_to app;
+        struct ui_desktop desktop;
+        char words[UI_APP_ARGS + 8][UI_APP_PATH], profile[48], steam_id[WINDOWS_APP_ID], id[WINDOWS_APP_ID];
+        const char address_to program;
+        const char address_to entry_root = root[0] ? root : ui_apps_local;
+        positive length = string_length((string_address)file), room = 0, read = 0;
+        bipolar got;
+        p8 address_to text;
+        int count, first = 0;
+        if (ui_apps.count >= UI_APPS_MOST || length <= 8 || !memory_has_suffix((string_address)file, length, ".desktop"))
+                return;
+        text = ui_apps_entry_text(root, directory, folder, file, &room, &read);
+        got = text && ui_desktop_parse((const char address_to)text, read, code, &desktop) ? (bipolar)read : -1;
         if (text)
                 memory_free(text, room);
         if (got <= 0 || !desktop.application || desktop.hidden || desktop.no_display || !desktop.shown || !desktop.name[0] || !desktop.exec[0])
@@ -29242,12 +29264,29 @@ static int ui_apps_browser(void)
 
 // What is at target opened in the browser: a page's address, or a file's absolute path (the bowls have the person's /root and /home where
 // the desktop has them, so the browser finds it there). False where there is no browser or it could not be started.
+#define UI_OPEN_DEFAULTS "/root/apps.defaults" // the person's default apps (ui_open_chosen): a type or a kind, a tab, a handler; a line each
+#define UI_OPEN_HANDLE 96 // a handler's name: kit:PROGRAM, BOWL:ID or local:ID
+static int ui_handler_find(const char address_to handle);
+static fn ui_handlers_read(void);
+static b32 ui_open_chosen(const char address_to key, char address_to into, positive room);
+static b32 ui_handler_start(int which, const char address_to target, const char address_to path);
 static b32 ui_browser_open(const char address_to target)
 {
         string_address words[UI_APP_START_WORDS + 2];
-        int browser = ui_apps_browser();
+        int browser;
         positive count;
-        if (browser < 0 || !target || !target[0])
+        char handle[UI_OPEN_HANDLE];
+        if (!target || !target[0])
+                return false;
+        // The browser the person chose (moonwater defaults browser, Settings' Default apps), where they chose one.
+        if (ui_open_chosen("browser", handle, sizeof(handle)))
+        {
+                int chosen;
+                ui_handlers_read();
+                if ((chosen = ui_handler_find(handle)) >= 0)
+                        return ui_handler_start(chosen, target, target[0] == '/' ? target : null);
+        }
+        if ((browser = ui_apps_browser()) < 0)
                 return false;
         count = ui_apps_words_of(browser, words, null, null, null);
         if (!count || count + 1 >= sizeof(words) / sizeof(words[0]))
@@ -29256,16 +29295,565 @@ static b32 ui_browser_open(const char address_to target)
         return ui_start_apart(words, count);
 }
 
-// Whether a file is sound or video the browser plays (Chromium's own decoders): opened, it is played there and not read as text.
-static b32 ui_file_plays_in_browser(const char address_to name)
+/* ---- apps: what opens what ----
+        A target is a page's address, a link of a program's own scheme (discord:, vscode:, steam:, the address an app's sign-in comes
+        back to), a file or a folder, and it has a type: a URI's is x-scheme-handler/SCHEME, a folder's inode/directory, a file's the
+        one its name's extension says (ui_open_extensions, then the shared MIME globs of the bowls), else text/plain where its first
+        bytes are text and application/octet-stream where they are not. A file: URI is the file.
+
+        A handler is a desktop entry that says what it opens (its MimeType), hidden or not (a program's link handler is hidden: VS
+        Code's url-handler), read as the registry reads entries (ui_apps_entry_text), or one of the kit's own: Files a folder, the
+        Editor text. It is named kit:PROGRAM, or BOWL:ID, its desktop file's name less .desktop in that bowl (alpine:chromium,
+        arch:com.discordapp.Discord), local:ID for the person's own entries.
+
+        What opens a type is the person's choice for that type where there is one, else their choice for its kind (UI_OPEN_DEFAULTS,
+        a line each: a type or a kind, a tab, a handler), else the first handler that opens the type: the kit's before a bowl's, one
+        that names it before one that names its whole group (image/*), one the launcher lists before a hidden one, in the bowls' order. A kind is what a person picks one program for (ui_open_kinds): the browser, mail, folders, text, images, video, music,
+        documents.
+*/
+#define UI_OPEN_TYPE 128  // a type: major/minor, or x-scheme-handler/SCHEME
+
+struct ui_handler
 {
-        static const char address_to const known[] = {"mp3", "wav", "mp4", "m4a", "m4v", "aac", "ogg", "oga", "ogv", "opus", "flac", "webm"};
-        char ext[12];
-        ui_file_extension(name, ext, sizeof(ext));
-        for (positive k = 0; ext[0] && k < sizeof(known) / sizeof(known[0]); k++)
-                if (string_equals((string_address)ext, (string_address)known[k]))
+        char handle[UI_OPEN_HANDLE];
+        char name[UI_APP_NAME];
+        char root[UI_APP_PATH]; // the bowl's root, ui_apps_local for the person's own, "" the kit's
+        p32 exec, types;        // into ui_handlers.text: the Exec as the entry says it, and its MimeType (';' apart), each null-ended
+        int kit;                // a kit program: its place in ui_kit_programs + 1, 0 none
+        b32 shown;              // the launcher lists it (no NoDisplay): a program a person is offered to choose
+};
+
+static struct
+{
+        struct ui_handler address_to handler;
+        int count;
+        positive room;          // bytes of handler
+        char address_to text;
+        positive used, size;
+} ui_handlers;
+
+static const struct ui_open_kind
+{
+        const char address_to kind;
+        const char address_to types; // the types it is the choice for, ';' apart (a group's: major/*); the first is the one its handlers are
+                                     // looked for by, where none is chosen
+} ui_open_kinds[] = {
+    {"browser", "x-scheme-handler/https;x-scheme-handler/http;text/html;application/xhtml+xml;"},
+    {"mail", "x-scheme-handler/mailto;"},
+    {"folders", "inode/directory;"},
+    {"text", "text/plain;text/*;"},
+    {"images", "image/png;image/*;"},
+    {"video", "video/mp4;video/*;"},
+    {"music", "audio/mpeg;audio/*;"},
+    {"documents", "application/pdf;"},
+};
+
+// The kit's own handlers: Files opens a folder, the Editor text and what is text written in a language (a script, a table of settings).
+static const struct
+{
+        const char address_to program;
+        const char address_to types;
+} ui_open_kit[] = {
+#if MOONWATER_UI_FILES
+    {"/files", "inode/directory;"},
+#endif
+#if MOONWATER_UI_EDITOR
+    {"/editor", "text/*;application/json;application/x-shellscript;application/xml;application/javascript;application/x-yaml;"
+                "application/toml;application/x-desktop;application/x-subrip;"},
+#endif
+};
+
+// A type by a file's extension, the common ones (a bowl's shared MIME globs say the rest): "ext type", a line each.
+static const char ui_open_extensions[] =
+    "txt text/plain\nmd text/markdown\nc text/x-csrc\nh text/x-chdr\ncc text/x-c++src\ncpp text/x-c++src\npy text/x-python\n"
+    "sh application/x-shellscript\njs application/javascript\njson application/json\nxml application/xml\nyaml application/x-yaml\n"
+    "yml application/x-yaml\ntoml application/toml\nini text/plain\nconf text/plain\nlog text/plain\ncsv text/csv\nhtml text/html\n"
+    "htm text/html\ncss text/css\nsvg image/svg+xml\npng image/png\njpg image/jpeg\njpeg image/jpeg\ngif image/gif\nwebp image/webp\n"
+    "bmp image/bmp\nico image/vnd.microsoft.icon\ntif image/tiff\ntiff image/tiff\navif image/avif\nheic image/heic\nqoi image/qoi\n"
+    "ppm image/x-portable-pixmap\nmp3 audio/mpeg\nogg audio/ogg\noga audio/ogg\nopus audio/ogg\nflac audio/flac\nwav audio/x-wav\n"
+    "m4a audio/mp4\naac audio/aac\nmid audio/midi\nmp4 video/mp4\nm4v video/mp4\nmkv video/x-matroska\nwebm video/webm\navi video/x-msvideo\n"
+    "mov video/quicktime\nogv video/ogg\nmpg video/mpeg\nmpeg video/mpeg\npdf application/pdf\nepub application/epub+zip\n"
+    "odt application/vnd.oasis.opendocument.text\nods application/vnd.oasis.opendocument.spreadsheet\n"
+    "odp application/vnd.oasis.opendocument.presentation\n"
+    "docx application/vnd.openxmlformats-officedocument.wordprocessingml.document\n"
+    "xlsx application/vnd.openxmlformats-officedocument.spreadsheetml.sheet\n"
+    "pptx application/vnd.openxmlformats-officedocument.presentationml.presentation\ndoc application/msword\n"
+    "xls application/vnd.ms-excel\nppt application/vnd.ms-powerpoint\nrtf application/rtf\nzip application/zip\n"
+    "tar application/x-tar\ngz application/gzip\nxz application/x-xz\nzst application/zstd\n7z application/x-7z-compressed\n"
+    "iso application/x-cd-image\ndesktop application/x-desktop\nappimage application/vnd.appimage\n";
+
+// A block grown to hold need bytes (doubled from first), what it held kept: false where no memory was had.
+static b32 ui_open_grow(void address_to address_to block, positive address_to size, positive need, positive first)
+{
+        positive next = *size ? *size : first;
+        void address_to grown;
+        if (need <= *size)
+                return true;
+        while (next < need)
+                next *= 2;
+        if (!(grown = memory_checked(next)))
+                return false;
+        if (*block)
+                memory_copy(grown, *block, *size), memory_free(*block, *size);
+        *block = grown, *size = next;
+        return true;
+}
+
+// A text kept with the handlers' (null-ended), its offset given back; 0 is the empty text, and what could not be kept.
+static p32 ui_handlers_keep(const char address_to text, positive length)
+{
+        p32 at;
+        if (!ui_open_grow((void address_to address_to)&ui_handlers.text, &ui_handlers.size, ui_handlers.used + length + 2, 16384))
+                return 0;
+        if (!ui_handlers.used)
+                ui_handlers.text[ui_handlers.used++] = 0;
+        at = (p32)ui_handlers.used;
+        memory_copy(ui_handlers.text + at, text, length), ui_handlers.used += length, ui_handlers.text[ui_handlers.used++] = 0;
+        return at;
+}
+
+static struct ui_handler address_to ui_handlers_add(void)
+{
+        struct ui_handler address_to h;
+        if (!ui_open_grow((void address_to address_to)&ui_handlers.handler, &ui_handlers.room, ((positive)ui_handlers.count + 1) * sizeof(*h),
+                          64 * sizeof(*h)))
+                return null;
+        h = &ui_handlers.handler[ui_handlers.count];
+        memory_zero(h, sizeof(*h));
+        return h;
+}
+
+// A bowl's folder of desktop entries: every one that says what it opens is a handler, named BOWL:ID (prefix "alpine:").
+static fn ui_handlers_folder(const char address_to root, const char address_to sub, const char address_to prefix, char address_to names,
+                             positive room, unsigned int address_to order)
+{
+        char folder[UI_APP_PATH];
+        bipolar inside, directory;
+        positive count;
+        string_copy_bounded((p8 address_to)folder, (string_address)root, sizeof(folder));
+        string_append_bounded((p8 address_to)folder, (string_address) "/", sizeof(folder));
+        string_append_bounded((p8 address_to)folder, (string_address)sub, sizeof(folder));
+        if ((inside = system_open_at(AT_FDCWD, (string_address)root, FILE_READ | O_DIRECTORY | O_CLOEXEC)) < 0)
+                return;
+        directory = system_open_resolved(inside, (string_address)sub, FILE_READ | O_DIRECTORY | O_CLOEXEC,
+                                         SYSTEM_RESOLVE_IN_ROOT | SYSTEM_RESOLVE_NO_MAGICLINKS);
+        system_close(inside);
+        if (directory < 0)
+                return;
+        count = ui_apps_names(directory, names, room, order);
+        for (positive each = 0; each < count; each++)
+        {
+                const char address_to file = names + order[each];
+                positive length = string_length((string_address)file), text_room = 0, read = 0;
+                struct ui_desktop desktop;
+                struct ui_handler address_to h;
+                p8 address_to text;
+                if (length <= 8 || !memory_has_suffix((string_address)file, length, ".desktop") ||
+                    !(text = ui_apps_entry_text(root, directory, folder, file, &text_room, &read)))
+                        continue;
+                if (ui_desktop_parse((const char address_to)text, read, language.code, &desktop) && desktop.application && !desktop.hidden &&
+                    desktop.exec[0] && desktop.types_length && (h = ui_handlers_add()))
+                {
+                        string_copy_bounded((p8 address_to)h->handle, (string_address)prefix, sizeof(h->handle));
+                        if (string_length((string_address)h->handle) + length - 8 < sizeof(h->handle))
+                        {
+                                memory_copy(h->handle + string_length((string_address)h->handle), file, length - 8);
+                                h->handle[string_length((string_address)prefix) + length - 8] = 0;
+                                string_copy_bounded((p8 address_to)h->name, (string_address)(desktop.name[0] ? desktop.name : h->handle), sizeof(h->name));
+                                string_copy_bounded((p8 address_to)h->root, (string_address)root, sizeof(h->root));
+                                h->exec = ui_handlers_keep(desktop.exec, string_length((string_address)desktop.exec));
+                                h->types = ui_handlers_keep(desktop.types, desktop.types_length);
+                                h->shown = !desktop.no_display;
+                                if (h->exec && h->types)
+                                        ui_handlers.count++;
+                        }
+                }
+                memory_free(text, text_room);
+        }
+        system_close(directory);
+}
+
+// Every handler read again: the kit's, then each bowl's in the bowls' order, then the person's own entries.
+static fn ui_handlers_read(void)
+{
+        static const char address_to const folders[] = {"usr/share/applications", "usr/local/share/applications",
+                                                        "var/lib/flatpak/exports/share/applications"};
+        positive room = 64 * 1024, bowl_count;
+        unsigned int bowl_order[UI_APPS_NAMES], entry_order[UI_APPS_NAMES];
+        char address_to bowls = (char address_to)memory_checked(room * 2), address_to entries;
+        bipolar handle;
+        ui_handlers.count = 0, ui_handlers.used = 0;
+        for (positive at = 0; at < sizeof(ui_open_kit) / sizeof(ui_open_kit[0]); at++)
+        {
+                struct ui_handler address_to h = ui_handlers_add();
+                if (!h)
+                        break;
+                for (positive k = 0; k < UI_KIT_PROGRAMS; k++)
+                        if (string_equals((string_address)ui_kit_programs[k].command, (string_address)ui_open_kit[at].program))
+                                h->kit = (int)k + 1, string_copy_bounded((p8 address_to)h->name, (string_address)language_of(ui_kit_programs[k].label), sizeof(h->name));
+                string_copy_bounded((p8 address_to)h->handle, (string_address) "kit:", sizeof(h->handle));
+                string_append_bounded((p8 address_to)h->handle, (string_address)(ui_open_kit[at].program + 1), sizeof(h->handle));
+                h->exec = ui_handlers_keep(ui_open_kit[at].program, string_length((string_address)ui_open_kit[at].program));
+                h->types = ui_handlers_keep(ui_open_kit[at].types, string_length((string_address)ui_open_kit[at].types));
+                h->shown = true;
+                if (h->kit && h->exec && h->types)
+                        ui_handlers.count++;
+        }
+        if (!bowls)
+                return;
+        entries = bowls + room;
+        if ((handle = system_open_at(AT_FDCWD, (string_address)ui_apps_bowls, FILE_READ | O_DIRECTORY | O_CLOEXEC)) >= 0)
+        {
+                bowl_count = ui_apps_names(handle, bowls, room, bowl_order);
+                system_close(handle);
+                for (positive at = 0; at < bowl_count; at++)
+                {
+                        const char address_to bowl = bowls + bowl_order[at];
+                        char root[UI_APP_PATH], prefix[64];
+                        if (string_equals((string_address)bowl, (string_address) "bin") || string_length((string_address)bowl) + 2 > sizeof(prefix))
+                                continue;
+                        string_copy_bounded((p8 address_to)root, (string_address)ui_apps_bowls, sizeof(root));
+                        string_append_bounded((p8 address_to)root, (string_address) "/", sizeof(root));
+                        string_append_bounded((p8 address_to)root, (string_address)bowl, sizeof(root));
+                        string_copy_bounded((p8 address_to)prefix, (string_address)bowl, sizeof(prefix));
+                        string_append_bounded((p8 address_to)prefix, (string_address) ":", sizeof(prefix));
+                        for (positive which = 0; which < sizeof(folders) / sizeof(folders[0]); which++)
+                                ui_handlers_folder(root, folders[which], prefix, entries, room, entry_order);
+                }
+        }
+        if (ui_apps_local && ui_apps_local[0])
+                ui_handlers_folder(ui_apps_local, "applications", "local:", entries, room, entry_order);
+        memory_free(bowls, room * 2);
+}
+
+static const char address_to ui_handler_text(const struct ui_handler address_to h, p32 at) { return ui_handlers.text + at; }
+
+// How well a handler takes a type: 2 it names the type, 1 it names the type's group (image/*), 0 not at all.
+static int ui_handler_takes(const struct ui_handler address_to h, const char address_to type)
+{
+        const char address_to list = ui_handler_text(h, h->types);
+        positive length = string_length((string_address)type), slash = 0, best = 0;
+        while (slash < length && type[slash] != '/')
+                slash++;
+        for (positive at = 0; list[at];)
+        {
+                positive stop = at;
+                while (list[stop] && list[stop] != ';')
+                        stop++;
+                if (stop - at == length && !memory_compare(list + at, type, length))
+                        return 2;
+                if (stop - at == slash + 2 && slash < length && !memory_compare(list + at, type, slash + 1) && list[at + slash + 1] == '*')
+                        best = 1;
+                at = stop + (list[stop] == ';');
+        }
+        return (int)best;
+}
+
+// Whether a type is one of a kind's, by its list (a group's pattern takes any of the group).
+static b32 ui_open_kind_takes(const struct ui_open_kind address_to k, const char address_to type)
+{
+        // The kind's list matched as a handler's is (ui_handler_takes).
+        for (positive at = 0, length = string_length((string_address)type); k->types[at];)
+        {
+                positive stop = at, slash = 0;
+                while (k->types[stop] && k->types[stop] != ';')
+                        stop++;
+                while (slash < length && type[slash] != '/')
+                        slash++;
+                if ((stop - at == length && !memory_compare(k->types + at, type, length)) ||
+                    (stop - at == slash + 2 && slash < length && !memory_compare(k->types + at, type, slash + 1) && k->types[at + slash + 1] == '*'))
                         return true;
+                at = stop + (k->types[stop] == ';');
+        }
         return false;
+}
+
+static const struct ui_open_kind address_to ui_open_kind_of(const char address_to type)
+{
+        for (positive at = 0; at < sizeof(ui_open_kinds) / sizeof(ui_open_kinds[0]); at++)
+                if (ui_open_kind_takes(&ui_open_kinds[at], type))
+                        return &ui_open_kinds[at];
+        return null;
+}
+
+static const struct ui_open_kind address_to ui_open_kind_named(const char address_to name)
+{
+        for (positive at = 0; at < sizeof(ui_open_kinds) / sizeof(ui_open_kinds[0]); at++)
+                if (string_equals((string_address)ui_open_kinds[at].kind, (string_address)name))
+                        return &ui_open_kinds[at];
+        return null;
+}
+
+static int ui_handler_find(const char address_to handle)
+{
+        for (int at = 0; handle && handle[0] && at < ui_handlers.count; at++)
+                if (string_equals((string_address)ui_handlers.handler[at].handle, (string_address)handle))
+                        return at;
+        return -1;
+}
+
+// The person's choice for a key (a type or a kind) in UI_OPEN_DEFAULTS, into into; false for none.
+static b32 ui_open_chosen(const char address_to key, char address_to into, positive room)
+{
+        positive size = 0, length = string_length((string_address)key);
+        positive bytes = compositor_map_file((string_address)UI_OPEN_DEFAULTS, &size);
+        const char address_to text = (const char address_to)bytes;
+        b32 found = false;
+        into[0] = 0;
+        for (positive at = 0; bytes && at < size && !found;)
+        {
+                positive stop = at;
+                while (stop < size && text[stop] != '\n')
+                        stop++;
+                if (stop - at > length + 1 && !memory_compare(text + at, key, length) && text[at + length] == '\t' && stop - at - length - 1 < room)
+                        memory_copy(into, text + at + length + 1, stop - at - length - 1), into[stop - at - length - 1] = 0, found = true;
+                at = stop + 1;
+        }
+        if (bytes)
+                system_call_2(syscall(munmap), bytes, size);
+        return found;
+}
+
+// The handler a type is opened with (ui_handlers read): the person's choice for the type, for its kind, else the first that takes it.
+static int ui_open_handler(const char address_to type, b32 address_to chosen)
+{
+        const struct ui_open_kind address_to kind = ui_open_kind_of(type);
+        char handle[UI_OPEN_HANDLE];
+        int best = -1, best_rank = 0;
+        if (chosen)
+                *chosen = false;
+        if ((ui_open_chosen(type, handle, sizeof(handle)) || (kind && ui_open_chosen(kind->kind, handle, sizeof(handle)))) &&
+            (best = ui_handler_find(handle)) >= 0)
+                return chosen ? (*chosen = true, best) : best;
+        for (int at = 0; at < ui_handlers.count; at++)
+        {
+                const struct ui_handler address_to h = &ui_handlers.handler[at];
+                int rank = ui_handler_takes(h, type);
+                // The kit's before a bowl's (the Editor opens text before a program that names text/plain), then named before grouped,
+                // then a listed program before a hidden handler.
+                rank = rank ? (h->kit ? 8 : 0) + rank * 2 + (h->shown ? 1 : 0) : 0;
+                if (rank > best_rank)
+                        best = at, best_rank = rank;
+        }
+        return best;
+}
+
+// A type by the shared MIME globs of a bowl (usr/share/mime/globs2: "weight:type:*.ext"), for an extension the kit's list has not.
+static b32 ui_open_globs(const char address_to ext, char address_to type, positive room)
+{
+        static const char address_to const bowls[] = {"/bowls/arch", "/bowls/debian", "/bowls/fedora", "/bowls/alpine"};
+        positive length = string_length((string_address)ext);
+        for (positive b = 0; b < sizeof(bowls) / sizeof(bowls[0]); b++)
+        {
+                char path[UI_APP_PATH];
+                positive size = 0, bytes;
+                const char address_to text;
+                b32 found = false;
+                string_copy_bounded((p8 address_to)path, (string_address)bowls[b], sizeof(path));
+                string_append_bounded((p8 address_to)path, (string_address) "/usr/share/mime/globs2", sizeof(path));
+                if (!(bytes = compositor_map_file((string_address)path, &size)))
+                        continue;
+                text = (const char address_to)bytes;
+                for (positive at = 0; at < size && !found;)
+                {
+                        positive stop = at, first = 0, second = 0;
+                        while (stop < size && text[stop] != '\n')
+                                stop++;
+                        for (positive k = at; k < stop && !second; k++)
+                                if (text[k] == ':')
+                                        first ? (second = k) : (first = k);
+                        if (second && stop - second == length + 3 && text[second + 1] == '*' && text[second + 2] == '.' &&
+                            !memory_compare(text + second + 3, ext, length) && second - first - 1 < room)
+                                memory_copy(type, text + first + 1, second - first - 1), type[second - first - 1] = 0, found = true;
+                        at = stop + 1;
+                }
+                system_call_2(syscall(munmap), bytes, size);
+                if (found)
+                        return true;
+        }
+        return false;
+}
+
+static int ui_open_hex(char c) { return c >= '0' && c <= '9' ? c - '0' : (c | 32) >= 'a' && (c | 32) <= 'f' ? (c | 32) - 'a' + 10 : -1; }
+
+/*
+        A target's type into type, and where it is a file or a folder its absolute path into path (a file: URI undone, a path that is
+        not absolute taken from the working folder); a URI of another scheme leaves path empty. False for a target that is none of these.
+*/
+static b32 ui_open_type(const char address_to target, char address_to type, positive type_room, char address_to path, positive path_room)
+{
+        positive scheme = 0;
+        struct ui_apps_facts facts;
+        bipolar handle;
+        type[0] = path[0] = 0;
+        if (!target || !target[0])
+                return false;
+        while ((target[scheme] >= 'a' && target[scheme] <= 'z') || (target[scheme] >= 'A' && target[scheme] <= 'Z') ||
+               (scheme && ((target[scheme] >= '0' && target[scheme] <= '9') || target[scheme] == '+' || target[scheme] == '-' || target[scheme] == '.')))
+                scheme++;
+        if (scheme >= 2 && target[scheme] == ':' && !(scheme == 4 && !memory_compare(target, "file", 4)))
+        {
+                if (scheme + 18 > type_room)
+                        return false;
+                string_copy_bounded((p8 address_to)type, (string_address) "x-scheme-handler/", type_room);
+                for (positive at = 0, made = 17; at < scheme; at++)
+                        type[made++] = (char)(target[at] >= 'A' && target[at] <= 'Z' ? target[at] + 32 : target[at]), type[made] = 0;
+                return true;
+        }
+        // A file: URI's path, its escapes undone; a relative path from the working folder.
+        {
+                const char address_to from = target;
+                positive made = 0;
+                if (scheme == 4 && target[4] == ':')
+                {
+                        from = target + 5;
+                        if (from[0] == '/' && from[1] == '/')
+                        {
+                                from += 2;
+                                while (*from && *from != '/')
+                                        from++; // the host: this machine's
+                        }
+                }
+                else if (from[0] != '/' && getcwd((string_address)path, path_room))
+                        made = string_length((string_address)path), made += made + 1 < path_room ? (path[made] = '/', 1) : 0;
+                for (; *from && made + 1 < path_room; from++)
+                {
+                        int high = ui_open_hex(from[1]), low = high >= 0 ? ui_open_hex(from[2]) : -1;
+                        if (*from == '%' && scheme == 4 && target[4] == ':' && high >= 0 && low >= 0)
+                                path[made++] = (char)(high * 16 + low), from += 2;
+                        else
+                                path[made++] = *from;
+                }
+                path[made] = 0;
+        }
+        if ((handle = system_open_at(AT_FDCWD, (string_address)path, FILE_READ | O_CLOEXEC | O_NONBLOCK)) < 0)
+                return false;
+        memory_zero(&facts, sizeof(facts));
+        if (system_stat_at(handle, (string_address) "", AT_EMPTY_PATH, 0x7ff, &facts) != 0)
+                return system_close(handle), false;
+        if ((facts.mode & 0170000u) == 0040000u)
+                return system_close(handle), string_copy_bounded((p8 address_to)type, (string_address) "inode/directory", type_room), true;
+        {
+                char ext[24];
+                positive length;
+                ui_file_extension(path, ext, sizeof(ext));
+                for (positive k = 0; ext[k]; k++)
+                        ext[k] = (char)(ext[k] >= 'A' && ext[k] <= 'Z' ? ext[k] + 32 : ext[k]);
+                length = string_length((string_address)ext);
+                for (positive at = 0; length && ui_open_extensions[at];)
+                {
+                        positive stop = at, blank;
+                        while (ui_open_extensions[stop] != '\n')
+                                stop++;
+                        for (blank = at; ui_open_extensions[blank] != ' '; blank++)
+                                ;
+                        if (blank - at == length && !memory_compare(ui_open_extensions + at, ext, length) && stop - blank - 1 < type_room)
+                        {
+                                memory_copy(type, ui_open_extensions + blank + 1, stop - blank - 1), type[stop - blank - 1] = 0;
+                                return system_close(handle), true;
+                        }
+                        at = stop + 1;
+                }
+                if (length && ui_open_globs(ext, type, type_room))
+                        return system_close(handle), true;
+        }
+        // No name that says: text where its first bytes have no null and no byte of control but white space.
+        {
+                p8 head[512];
+                bipolar got = system_read_once(handle, head, sizeof(head));
+                b32 text = got >= 0;
+                for (bipolar at = 0; at < got && text; at++)
+                        text = head[at] >= 0x20 || head[at] == '\n' || head[at] == '\r' || head[at] == '\t' || head[at] == 0x1b || head[at] == '\f';
+                system_close(handle);
+                string_copy_bounded((p8 address_to)type, (string_address)(text ? "text/plain" : "application/octet-stream"), type_room);
+        }
+        return true;
+}
+
+/*
+        A handler started with a target: the kit's own as its program and the path (Files' folder, the Editor's file), a bowl's by its
+        Exec, started through its bowl's launcher (/bowls/bin/NAME, ui_apps_launcher) as the launcher starts it. The target stands where
+        the Exec's %u, %U, %f or %F is, whole (an address a sign-in sends is long), and after the words where it has none; Flatpak's
+        forwarding of files through its document portal (--file-forwarding, @@u and @@) is left out: the person's files are where the
+        app's view has them, and a URI is given as it is.
+*/
+static b32 ui_handler_start(int which, const char address_to target, const char address_to path)
+{
+        const struct ui_handler address_to h;
+        const char address_to given = path && path[0] ? path : target;
+        if (which < 0 || which >= ui_handlers.count)
+                return false;
+        h = &ui_handlers.handler[which];
+        if (h->kit)
+        {
+                string_address words[4] = {(string_address)ui_handler_text(h, h->exec), null, null, null};
+                positive count = 1;
+                if (string_equals(words[0], (string_address) "/editor"))
+                        words[count++] = (string_address) "--";
+                words[count++] = (string_address)given, words[count] = null;
+                return ui_start_apart(words, count);
+        }
+        {
+                const char address_to exec = ui_handler_text(h, h->exec);
+                positive length = string_length((string_address)exec), made = 0;
+                char marked[512], launch[UI_APP_PATH], profile[48], words[UI_APP_ARGS + 8][UI_APP_PATH];
+                string_address argv[UI_APP_ARGS + 12];
+                positive count = 0;
+                int split, first = 0;
+                b32 placed = false;
+                // The file and URI codes marked by a byte no Exec has (\001), which the split keeps as a word of its own.
+                for (positive at = 0; at < length && made + 2 < sizeof(marked); at++)
+                        if (exec[at] == '%' && at + 1 < length && string_first_of((string_address) "uUfF", exec[at + 1]))
+                                marked[made++] = 1, at++;
+                        else
+                                marked[made++] = exec[at];
+                marked[made] = 0;
+                if ((split = ui_desktop_exec(marked, words, (int)(sizeof(words) / sizeof(words[0])))) <= 0)
+                        return false;
+                if (string_equals((string_address)ui_apps_base(words[0]), (string_address) "env"))
+                        for (first = 1; first < split && string_first_of((string_address)words[first], '=') && words[first][0] != '-'; first++)
+                                ;
+                if (first >= split || !ui_apps_launcher(h->root[0] && !string_equals((string_address)h->root, (string_address)ui_apps_local) ? h->root : "",
+                                                        ui_apps_base(words[first]), launch, sizeof(launch), profile, sizeof(profile)))
+                        return false;
+                argv[count++] = (string_address)launch;
+                for (int at = first + 1; at < split && count + 2 < sizeof(argv) / sizeof(argv[0]); at++)
+                {
+                        if (string_equals((string_address)words[at], (string_address) "--file-forwarding") || string_equals((string_address)words[at], (string_address) "@@") ||
+                            string_equals((string_address)words[at], (string_address) "@@u") || string_equals((string_address)words[at], (string_address) "@@f"))
+                                continue;
+                        if (words[at][0] == 1 && !words[at][1])
+                                argv[count++] = (string_address)given, placed = true;
+                        else
+                                argv[count++] = (string_address)words[at];
+                }
+                if (!placed)
+                        argv[count++] = (string_address)given;
+                argv[count] = null;
+                return ui_start_apart(argv, count);
+        }
+}
+
+// What ui_open says of a target it could not open.
+enum
+{
+        UI_OPEN_DONE,
+        UI_OPEN_NOT_THERE, // a file or folder that is not there, or a target that is no address
+        UI_OPEN_NO_HANDLER,
+        UI_OPEN_NOT_STARTED,
+};
+
+// A target opened with what opens its type: the handlers read again first, as a list that changes as apps come and go.
+static int ui_open(const char address_to target)
+{
+        char type[UI_OPEN_TYPE], path[4096];
+        int which;
+        if (!ui_open_type(target, type, sizeof(type), path, sizeof(path)))
+                return UI_OPEN_NOT_THERE;
+        ui_handlers_read();
+        if ((which = ui_open_handler(type, null)) < 0)
+                return UI_OPEN_NO_HANDLER;
+        return ui_handler_start(which, target, path) ? UI_OPEN_DONE : UI_OPEN_NOT_STARTED;
 }
 
 // Run a helper command synchronously and wait for exit status 0.
