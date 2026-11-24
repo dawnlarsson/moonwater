@@ -1021,6 +1021,8 @@ static b32 locale_curated_fetch(void)
         host_say(log, host_label "%p curated wallpapers, from the feed of sequence %p\n", made, (positive)h.sequence);
         return 0;
 }
+#include "../../canvas/enhance.c" // the wallpaper enhancer's model fetch (enhance_model_fetch); its stage runs in the compositor
+
 // canvas wallpaper curated get HEX: the picture of the feed's wallpaper whose digest is HEX, fetched and checked, then made the wallpaper.
 static b32 locale_curated_get(string_address want)
 {
@@ -1081,6 +1083,8 @@ static b32 locale_curated_get(string_address want)
                 return host_refuse("no wallpaper of the feed has the digest %s\n", want);
         if (failed < 0)
                 return host_refuse("the curated wallpaper %s could not be fetched, or is not the picture the feed names\n", want);
+        if (enhance_wallpaper_licence() >= 0)
+                (void)enhance_model_fetch(); // the enhancer's weights, once, here where the network is; none and it is skipped
         if (locale_wallpaper_ask((string_address) "made\n"))
                 return 1;
         host_say(log, host_label "the curated wallpaper %s is kept as %s\n", want, path);

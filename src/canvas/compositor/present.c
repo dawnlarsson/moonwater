@@ -1086,6 +1086,8 @@ static b32 ui_image_measure(const p8 *file, positive size, unsigned int most, un
 static unsigned int *ui_image_decode_at(const p8 *file, positive size, int *width_out, int *height_out, unsigned int most, unsigned int want_w,
                                         unsigned int want_h);
 
+#include "../enhance.c" // the learned stage: restore and double the decoded picture, grade the screen's (no model, no stage)
+
 static int compositor_wall_picture(const char *path, unsigned int *into, int pitch, int w, int h)
 {
         bipolar handle = system_open_at(AT_FDCWD, (string_address)path, FILE_READ | O_NOFOLLOW | O_CLOEXEC);
@@ -1114,6 +1116,14 @@ static int compositor_wall_picture(const char *path, unsigned int *into, int pit
         memory_free(file, COMPOSITOR_WALL_FILE_MOST);
         if (!picture)
                 return 0;
+#ifdef ENHANCE_MODEL_DIR
+        enhance_model enhancer;
+        bipolar licence;
+        bool enhancing = enhance_wallpaper_begin(&enhancer, &licence);
+
+        if (enhancing)
+                picture = enhance_wallpaper_picture(&enhancer, picture, &width, &height, w, h);
+#endif
         if ((positive)width * (positive)h > (positive)height * (positive)w)
                 vis_h = (positive)height, vis_w = (positive)height * (positive)w / (positive)h, ox = ((positive)width - vis_w) / 2, oy = 0;
         else
@@ -1152,6 +1162,11 @@ static int compositor_wall_picture(const char *path, unsigned int *into, int pit
                         dst_row[x] = 0xff000000u | (unsigned int)(r / n) << 16 | (unsigned int)(g / n) << 8 | (unsigned int)(b / n);
                 }
         }
+#ifdef ENHANCE_MODEL_DIR
+        if (enhancing)
+                enhance_grade(&enhancer, into, (positive)pitch, (positive)w, (positive)h, (f64)licence / 100.0, 0),
+                    enhance_model_drop(&enhancer);
+#endif
         memory_free(picture, (positive)width * (positive)height * 4);
         return 1;
 }
