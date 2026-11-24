@@ -6758,7 +6758,7 @@ static fn check_settings_actions(void)
                         actions_press(UI_POINTER_LEFT, (settings.page.left + settings.page.right) / 2, my, 0);
                         actions_show(link_row);
                         link_details = !described.expander && described.cells[1] && string_equals((string_address)described.cells[1], (string_address) "10.0.0.2:41900") &&
-                                       described.cell_check == ((1u << SETTINGS_LINK_GRANTS) - 1) << SETTINGS_LINK_GRANT_COLUMN &&
+                                       described.cell_check == (((1u << SETTINGS_LINK_GRANTS) - 1) << SETTINGS_LINK_GRANT_COLUMN | 1u << SETTINGS_LINK_ON_COLUMN) &&
                                        settings.list.count == before;
                 }
                 settings.queued = 0;
@@ -6852,15 +6852,19 @@ static fn check_settings_actions(void)
                         settings.queued = 0, ui_confirm_drop(&settings.confirm);
                         memory_zero(&linked, sizeof(linked)), settings_describe(link_row, &linked);
                         memory_zero(&add, sizeof(add)), settings_describe(add_id, &add);
-                        check("settings lists: Waterlink's two way rows are no rows of the list, and after the machines is the add row with their two ways",
+                        check("settings lists: Waterlink's way rows are no rows of the list, and after the machines is the add row with their two ways, then purge",
                               pair >= 0 && typed >= 0 && settings_pos(pair) < 0 && settings_pos(typed) < 0 && settings_pos(add_id) >= 0 &&
-                                  settings.item_count[3] == 3 && settings.item[3][2].kind == SETTINGS_ADD && add.kind == UI_ROW_ADD &&
+                                  settings_way_row(3) >= 0 && settings_pos(settings_way_row(3)) < 0 &&
+                                  settings.item_count[3] == 4 && settings.item[3][2].kind == SETTINGS_ADD && add.kind == UI_ROW_ADD &&
+                                  settings.item[3][3].kind == SETTINGS_LIST_ACTION && settings.item[3][3].where == 3 &&
                                   string_equals((string_address)add.words, (string_address) "Show a code|Type another machine's code") &&
                                   string_equals((string_address)add.label, (string_address) "Link a machine"));
                         //      Its grants are checks in their columns, on where the machine may (zeta: run files), and a check turned is the
                         //      grant's verb, a hand's only (allowing is deliberate); its state is the Status column.
                         {
-                                unsigned int grants = ((1u << SETTINGS_LINK_GRANTS) - 1) << SETTINGS_LINK_GRANT_COLUMN, on = 0x3u << SETTINGS_LINK_GRANT_COLUMN;
+                                // Another machine's row has its switch too, on: the check before its grants (SETTINGS_LINK_ON_COLUMN).
+                                unsigned int grants = ((1u << SETTINGS_LINK_GRANTS) - 1) << SETTINGS_LINK_GRANT_COLUMN | 1u << SETTINGS_LINK_ON_COLUMN,
+                                             on = 0x3u << SETTINGS_LINK_GRANT_COLUMN | 1u << SETTINGS_LINK_ON_COLUMN;
                                 b32 cells, virtual_kept, turned;
                                 settings_link_global_grants = (1u << SETTINGS_LINK_GRANTS) - 1; // this machine allows every grant
                                 memory_zero(&linked, sizeof(linked)), settings_describe(link_row, &linked);

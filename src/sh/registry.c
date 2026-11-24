@@ -48,6 +48,7 @@
 #define SETTINGS_PORT 14u   // a device the system sees, in the Devices list: a press allows or blocks it
 #define SETTINGS_LINK 13u // a machine linked, as moonwater link says it: its name and what it was last heard as (not pressed)
 #define SETTINGS_STARTUP 15u // a program the desktop starts with it, as desktop startup says it (setting_startup_entry): on or off, in its place
+#define SETTINGS_LIST_ACTION 16u // a row of a list, after its add row, that is a row of the registry with no row of its own (.way): pressed, it runs that row's verb
 
 // How a row's value is taken from the line it is on.
 #define SETTINGS_LINE 1u  // the value is the rest of the line and not a word
@@ -1019,7 +1020,7 @@ static const struct settings_row settings_rows[] = {
     //  Waterlink, the machines linked to this one (moonwater link, src/waterlink): this machine's name, the one switch of the
     //  listener, a code shown for another machine to type, the other machine's name and code typed here, and how the machines
     //  reach each other. The machines linked are a list under these rows, which settings.c feeds from `link` (its status); the code
-    //  shown and the code typed are the ways of that list's add row (.way), not rows of their own.
+    //  shown and the code typed are the ways of that list's add row (.way), not rows of their own; purge is the list's row after it (.way 3).
     {"Waterlink", "This machine", SETTINGS_INFO, 0, SETTINGS_LINE, {"name"}, "", null, {null}, null, 0,
      .help = "the name the other machines know this one by: moonwater name NEW changes it"},
     {null, "Waterlink", SETTINGS_SWITCH, 0, 0, {"link"}, "link ", null, {"link"}, null, 0,
@@ -1027,7 +1028,7 @@ static const struct settings_row settings_rows[] = {
     {null, "Pair a machine", SETTINGS_ACTION, 0, SETTINGS_WAITS, {null}, null, null, {"link", "pair"}, null, 0,
      .help = "shows a code, and waits up to five minutes for the other machine to type it with this machine's name", .way = 1},
     {null, "Purge unconnected links", SETTINGS_ACTION, 0, 0, {null}, null, null, {"link", "purge"}, null, 0,
-     .help = "removes saved machines that are not currently connected (blocked machines stay blocked)"},
+     .help = "removes saved machines that are not currently connected (blocked and switched off machines stay)", .way = 3},
     {null, "Name and code of another machine", SETTINGS_FIELD, 0, SETTINGS_LINE | SETTINGS_SPLIT | SETTINGS_WAITS, {null}, null, null,
      {"link"}, null, 0,
      .help = "the other machine's name and the code it shows, which pair the two of them", .way = 2},

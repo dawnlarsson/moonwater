@@ -333,6 +333,14 @@ struct waterlink_peer {
         after a code or a group had paired it, which LABELLED says. */
 #define WATERLINK_PEER_LABELLED 0x0001u
 #define WATERLINK_PEER_BLOCKED  0x0002u
+/*      Switched off by its person (moonwater link off NAME): kept, with its key,
+        its grants and its group, and no link to it or from it until it is
+        switched on again. Not a block: its hardware is not marked
+        (link.hwids), so the machine pairing again under a new key is not
+        refused for it, and purge keeps it, as it keeps a blocked one. */
+#define WATERLINK_PEER_OFF      0x0004u
+//      No link to or from the machine: blocked, or switched off.
+#define WATERLINK_PEER_SHUT     (WATERLINK_PEER_BLOCKED | WATERLINK_PEER_OFF)
 
 _Static_assert(sizeof(struct waterlink_peer) == 96,
                "waterlink peer record must be exactly 96 bytes");

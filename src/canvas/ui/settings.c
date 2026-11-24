@@ -454,12 +454,14 @@ static const struct { const char address_to word; unsigned int label, note; } se
 };
 // A machine linked is a row of columns: its name, its address, latency, traffic and group, and from SETTINGS_LINK_GRANT_COLUMN a check of each
 // grant in the order above. No fold: all it says is in its row, and its state is its dot (online) and its words (an offline one dim).
-#define SETTINGS_LINK_GRANT_COLUMN 5
+#define SETTINGS_LINK_ON_COLUMN 5 // the machine switched on or off (moonwater link on|off NAME), a check before its grants
+#define SETTINGS_LINK_GRANT_COLUMN 6
 #define SETTINGS_LINK_COLUMNS (SETTINGS_LINK_GRANT_COLUMN + SETTINGS_LINK_GRANTS)
 _Static_assert(SETTINGS_LINK_COLUMNS <= UI_COLUMNS_MOST, "a machine linked's columns are the kit's at most");
 // What a linked machine's state says, by the item's link_state (0 says none): the words of the language taken, said when the row is drawn.
-enum { SETTINGS_LINK_ONLINE = 1, SETTINGS_LINK_OFFLINE = 2, SETTINGS_LINK_MISMATCH = 3 };
-static const unsigned int settings_link_states[] = {0, LANGUAGE_settings_link_online, LANGUAGE_settings_link_offline, LANGUAGE_settings_link_mismatch};
+enum { SETTINGS_LINK_ONLINE = 1, SETTINGS_LINK_OFFLINE = 2, SETTINGS_LINK_MISMATCH = 3, SETTINGS_LINK_SWITCHED_OFF = 4 };
+static const unsigned int settings_link_states[] = {0, LANGUAGE_settings_link_online, LANGUAGE_settings_link_offline, LANGUAGE_settings_link_mismatch,
+                                                     LANGUAGE_settings_link_switched_off};
 #define SETTINGS_PART_FREE -1
 #define SETTINGS_PART_MORE -2
 
@@ -848,7 +850,7 @@ static const char address_to settings_label_get(int row, b32 shown)
         {
                 const struct settings_item address_to it = settings_item(row);
                 return !it ? WORDS(settings_run_any) : it->kind == SETTINGS_STARTUP ? settings_startup_label(it)
-                       : shown && it->kind == SETTINGS_ADD ? language_of(it->label) : it->label;
+                       : shown && (it->kind == SETTINGS_ADD || it->kind == SETTINGS_LIST_ACTION) ? language_of(it->label) : it->label;
         }
         case SETTINGS_DOM_ABOUT:   return shown ? settings_about_label(at) : WORDS(settings_run_any);
         default:                   return WORDS(settings_run_any);
@@ -888,6 +890,8 @@ static b32 settings_item_in(const struct settings_item address_to item, int list
 
 static b32 settings_item_startup(const struct settings_item address_to item) { return settings_item_in(item, SETTINGS_STARTUP_LIST); }
 
+static int settings_way_row(unsigned char way);
+
 static const char address_to settings_item_text(const struct settings_item address_to item)
 {
         if (item->kind == SETTINGS_STARTUP)
@@ -896,6 +900,8 @@ static const char address_to settings_item_text(const struct settings_item addre
                 return WORDS(settings_startup_add_keys);
         if (item->kind == SETTINGS_ADD && settings_item_in(item, 3))
                 return WORDS(settings_link_add_keys);
+        if (item->kind == SETTINGS_LIST_ACTION && settings_way_row(item->where) >= 0)
+                return language_of(settings_rows[settings_way_row(item->where)].help);
         if (item->kind == SETTINGS_NETWORK)
                 return item->flags & SETTINGS_ITEM_JOINED ? WORDS(settings_item_joined)
                        : item->flags & SETTINGS_ITEM_CANNOT ? WORDS(settings_item_cannot)
@@ -1027,7 +1033,6 @@ static b32 settings_matches_name(const char address_to label, const char address
                (language.loaded && (settings_has(language_of(label), word, size) || settings_has(language_of(section), word, size)));
 }
 
-static int settings_way_row(unsigned char way);
 static b32 settings_matches_word(int row, const char address_to word, positive size)
 {
         int offset;
@@ -2146,6 +2151,7 @@ static const struct settings_act_spec { char code; b32 takes_pass, takes_arg; co
     {'v', false, false, "device", "allow"}, {'x', false, false, "device", "deny"}, {'r', false, false, "link", "remove"},
     {'l', false, true, "link", "allow"}, {'n', false, true, "link", "deny"},
     {'L', false, false, "link", "allow-all"}, {'N', false, false, "link", "deny-all"},
+    {'o', false, false, "link", "on"}, {'O', false, false, "link", "off"},
 };
 
 static const char address_to settings_act_words(string_address address_to words)
@@ -2322,7 +2328,7 @@ static b32 settings_refused(int row, const char address_to value)
         b32 delib = false;
         if (settings.hand) return false;
         if (row == SETTINGS_JOB_ACT)
-                delib = value && (value[0] == 'v' || value[0] == 'l' || value[0] == 'L');
+                delib = value && (value[0] == 'v' || value[0] == 'l' || value[0] == 'L' || value[0] == 'o');
         else if (row >= 0 && row < SETTINGS_ANY)
                 delib = settings_rows[row].deliberate && (settings_rows[row].kind != SETTINGS_SWITCH || string_equals((string_address)value, (string_address) "on"));
         else if (row >= SETTINGS_ANY && row < (int)SETTINGS_LIST)
@@ -2950,7 +2956,9 @@ static fn settings_feed_links(void)
                                 char piece[SETTINGS_ITEM_LABEL];
                                 positive pos;
                                 settings_slice(piece, sizeof(piece), c.s, c.n);
-                                if (c.n >= 8 && !memory_compare(c.s, "open now", 8))
+                                if (it->link_state == SETTINGS_LINK_SWITCHED_OFF)
+                                        ;
+                                else if (c.n >= 8 && !memory_compare(c.s, "open now", 8))
                                 {
                                         it->flags |= SETTINGS_ITEM_JOINED, it->state[0] = 0, it->link_state = SETTINGS_LINK_ONLINE;
                                 }
@@ -3018,7 +3026,10 @@ static fn settings_feed_links(void)
                                 if (!it) continue;
                                 while (cut + 1 < c.n && (c.s[cut] != ' ' || c.s[cut + 1] != ' ')) cut++;
                                 sc_trim_at(&grants, "  next:");
-                                it->kind = SETTINGS_LINK, it->where = 1, it->flags = SETTINGS_ITEM_SAVED;
+                                it->kind = SETTINGS_LINK, it->where = 1, it->flags = SETTINGS_ITEM_SAVED, it->link_state = 0;
+                                // A machine switched off says so last (", off"): it is kept, with its grants, and no link opens to it.
+                                if (grants.n >= 5 && !memory_compare(grants.s + grants.n - 5, ", off", 5))
+                                        grants.n -= 5, it->link_state = SETTINGS_LINK_SWITCHED_OFF;
                                 it->grants = settings_link_parse_grants(grants.s, grants.n);
                                 if ((grp_at = settings_find_last(grants.s, grants.n, ", in group ")) < grants.n)
                                 {
@@ -3037,6 +3048,14 @@ static fn settings_feed_links(void)
                 struct settings_item address_to add = settings_item_slot(3, count);
                 if (add)
                         add->kind = SETTINGS_ADD, add->where = 1, settings_item_label(add, WORDS(settings_link_add), string_length((string_address)WORDS(settings_link_add))), count++;
+        }
+        // And beside it, the purge of the machines not connected: the registry's row of it (.way 3), a row of the list (SETTINGS_LIST_ACTION).
+        {
+                int purge = settings_way_row(3);
+                struct settings_item address_to it = purge >= 0 ? settings_item_slot(3, count) : null;
+                if (it)
+                        it->kind = SETTINGS_LIST_ACTION, it->where = 3,
+                        settings_item_label(it, settings_rows[purge].label, string_length((string_address)settings_rows[purge].label)), count++;
         }
         settings.item_count[3] = (int)count;
 }
@@ -3135,9 +3154,9 @@ static struct ui_columns address_to settings_columns_for(int list)
             {4, 3, {0, 84, 84, 72},   {LANGUAGE_files_column_name, LANGUAGE_settings_column_status, LANGUAGE_settings_column_security, LANGUAGE_settings_column_signal}},
             {2, 1, {0, 100, 0, 0},    {LANGUAGE_files_column_name, LANGUAGE_settings_column_status, 0, 0}},
             {4, 3, {0, 108, 84, 128}, {LANGUAGE_files_column_name, 0, LANGUAGE_settings_column_status, LANGUAGE_settings_column_access}},
-            {SETTINGS_LINK_COLUMNS, 0, {0, 150, 72, 100, 72, 52, 52, 52, 52, 52},
+            {SETTINGS_LINK_COLUMNS, 0, {0, 150, 72, 100, 72, 52, 52, 52, 52, 52, 52},
              {LANGUAGE_files_column_name, LANGUAGE_settings_link_address, LANGUAGE_settings_link_latency, LANGUAGE_settings_link_traffic,
-              LANGUAGE_settings_link_group, LANGUAGE_settings_column_files, LANGUAGE_settings_column_run, LANGUAGE_settings_column_shell, LANGUAGE_settings_column_log,
+              LANGUAGE_settings_link_group, LANGUAGE_settings_column_on, LANGUAGE_settings_column_files, LANGUAGE_settings_column_run, LANGUAGE_settings_column_shell, LANGUAGE_settings_column_log,
               LANGUAGE_settings_column_pad}},
             // The startup list's: a program (or a command), its command, and a check that starts it; its order is the person's (no sort).
             {SETTINGS_STARTUP_COLUMNS, 0, {0, 220, 52}, {LANGUAGE_settings_startup_program, LANGUAGE_settings_startup_command, LANGUAGE_settings_column_on}},
@@ -3163,7 +3182,9 @@ static int settings_list_compare(int list, int col, const struct settings_item a
 {
         int cmp = 0;
         // Waterlink's machines: by their address, latency or traffic as words, or by whether a grant's check is on.
-        if (list == 3 && col >= 1 && col < SETTINGS_LINK_GRANT_COLUMN)
+        if (list == 3 && col == SETTINGS_LINK_ON_COLUMN)
+                cmp = (a->link_state == SETTINGS_LINK_SWITCHED_OFF) - (b->link_state == SETTINGS_LINK_SWITCHED_OFF);
+        else if (list == 3 && col >= 1 && col < SETTINGS_LINK_ON_COLUMN)
                 cmp = string_compare((string_address)(col == 1 ? a->link_addr : col == 2 ? a->link_rtt : col == 3 ? a->link_traffic : a->link_group),
                                      (string_address)(col == 1 ? b->link_addr : col == 2 ? b->link_rtt : col == 3 ? b->link_traffic : b->link_group));
         else if (list == 3 && col >= SETTINGS_LINK_GRANT_COLUMN && col < SETTINGS_LINK_COLUMNS)
@@ -3181,7 +3202,7 @@ static int settings_list_compare(int list, int col, const struct settings_item a
         return cmp ? cmp : (int)string_compare_folded((string_address)a->label, (string_address)b->label);
 }
 
-static b32 settings_item_sortable(int list, const struct settings_item address_to it) { return it->kind != SETTINGS_NOTE && it->kind != SETTINGS_ADD && list != SETTINGS_STARTUP_LIST && (list != 2 || settings_device_section(it) == 1) && (list != 3 || it->where == 1); }
+static b32 settings_item_sortable(int list, const struct settings_item address_to it) { return it->kind != SETTINGS_NOTE && it->kind != SETTINGS_ADD && it->kind != SETTINGS_LIST_ACTION && list != SETTINGS_STARTUP_LIST && (list != 2 || settings_device_section(it) == 1) && (list != 3 || it->where == 1); }
 
 /* The sort of a list's column: the kit orders the ids of each run of sortable items of one list (ui_list_order_range); the items
    themselves do not move, so the rows keep their ids and the section adjacency the items keep. */
@@ -3666,6 +3687,23 @@ static fn settings_startup_apply(int how, int from, int to)
 // and a saved item's remove button forgets it as Delete does (asking first).
 static fn settings_forget_item(const struct settings_item address_to item);
 static fn settings_link_grant_flip(struct settings_item address_to item, int part);
+
+static fn settings_act(char what, const char address_to name, const char address_to pass);
+
+// A machine linked switched off or on by its check (moonwater link off|on NAME): off keeps it, with its grants, and opens no link to it;
+// on is the link it was, so turning it on is a deliberate act, as allowing a grant is (settings_refused).
+static fn settings_link_switch(struct settings_item address_to item)
+{
+        b32 on;
+        if (!item || item->kind != SETTINGS_LINK || item->where == 0)
+                return;
+        on = item->link_state == SETTINGS_LINK_SWITCHED_OFF;
+        if (on && !settings.hand)
+                return settings_say((string_address)WORDS(settings_virtual_refused));
+        item->link_state = on ? 0 : SETTINGS_LINK_SWITCHED_OFF;
+        settings_act(on ? 'o' : 'O', item->label, null);
+}
+
 static fn settings_managed(void)
 {
         struct ui_list address_to l = &settings.list;
@@ -3675,7 +3713,9 @@ static fn settings_managed(void)
                 struct settings_item address_to it = settings_item(l->toggled - 1);
                 int part = l->toggled_cell - SETTINGS_LINK_GRANT_COLUMN;
                 l->toggled = 0;
-                if (it && it->kind == SETTINGS_LINK && settings_item_in(it, 3))
+                if (it && it->kind == SETTINGS_LINK && settings_item_in(it, 3) && l->toggled_cell == SETTINGS_LINK_ON_COLUMN)
+                        settings_link_switch(it), ui_list_damage(&settings.ui, l, (int)SETTINGS_LIST_ID(3, it - settings.item[3]));
+                else if (it && it->kind == SETTINGS_LINK && settings_item_in(it, 3))
                         settings_link_grant_flip(it, part), ui_list_damage(&settings.ui, l, (int)SETTINGS_LIST_ID(3, it - settings.item[3]));
                 else if (it && it->kind == SETTINGS_STARTUP && settings_item_startup(it) && l->toggled_cell == SETTINGS_STARTUP_ON_COLUMN)
                         settings_startup_apply(SETTINGS_STARTUP_TURN, (int)(it - settings.item[SETTINGS_STARTUP_LIST]), 0);
@@ -4177,6 +4217,13 @@ static fn settings_item_activate(int row, const struct settings_item address_to 
                         settings.ways = row + 1;
                 else
                         settings_way_taken(row, 1);
+        }
+        // A list's row of a registry row (Waterlink's purge): that row's verb, as its own row's press would run it.
+        else if (item->kind == SETTINGS_LIST_ACTION)
+        {
+                int way = settings_way_row(item->where);
+                if (way >= 0 && !settings_action_busy(way))
+                        settings_change(way, "");
         }
         // Bluetooth's add row listens for what is near (moonwater bluetooth scan), and a device it heard pairs at Enter.
         else if (item->kind == SETTINGS_ADD && settings_item_in(item, 1))
@@ -4684,6 +4731,9 @@ static fn settings_describe_item(int id, const struct settings_item address_to i
                 return settings_startup_describe(item, row);
         if (item->kind == SETTINGS_ADD && list == SETTINGS_STARTUP_LIST)
                 return (void)(row->kind = UI_ROW_ADD, row->words = settings_startup_ways());
+        // A list's row of a registry row: drawn as the add row is, its mark the one of taking away.
+        if (item->kind == SETTINGS_LIST_ACTION)
+                return (void)(row->kind = UI_ROW_ADD, row->icon = UI_ICON_REMOVE + 1);
         // Waterlink's add row: its ways a code shown and a code typed; while a pairing waits it stops it.
         if (item->kind == SETTINGS_ADD && list == 3)
         {
@@ -4755,7 +4805,14 @@ static fn settings_describe_item(int id, const struct settings_item address_to i
                 row->cells[2] = item->link_rtt[0] ? item->link_rtt : null, row->cells[3] = item->link_traffic[0] ? item->link_traffic : null;
                 row->cells[4] = item->link_group[0] ? item->link_group : null;
                 row->value = row->cells[1];
-                row->dim = !self && item->link_state == SETTINGS_LINK_OFFLINE;
+                row->dim = !self && (item->link_state == SETTINGS_LINK_OFFLINE || item->link_state == SETTINGS_LINK_SWITCHED_OFF);
+                // Another machine's switch: on unless switched off (this machine's is the Waterlink row's, the listener).
+                if (!self)
+                {
+                        row->cell_check |= 1u << SETTINGS_LINK_ON_COLUMN;
+                        if (item->link_state != SETTINGS_LINK_SWITCHED_OFF)
+                                row->cell_on |= 1u << SETTINGS_LINK_ON_COLUMN;
+                }
                 for (int part = 0; part < SETTINGS_LINK_GRANTS; part++)
                 {
                         unsigned int cell = 1u << (SETTINGS_LINK_GRANT_COLUMN + part);

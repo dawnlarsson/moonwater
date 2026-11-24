@@ -3638,7 +3638,7 @@ static fn link_request(struct link_session address_to s, p8 address_to payload,
         //      Grants as they are now, not as they were at the handshake.
         link_peers_load(address_of peers);
         peer = link_peer_keyed(address_of peers, s->peer);
-        if (peer && !(peer->flags & WATERLINK_PEER_BLOCKED))
+        if (peer && !(peer->flags & WATERLINK_PEER_SHUT))
                 may = peer->may;
 
         grant = link_grant_asked(payload[0]);
@@ -4708,7 +4708,7 @@ static p8 link_server_initiation(p8 address_to datagram, positive length,
         /*      Proof of a key no longer paired or blocked: what it has open
                 ends now, before a datagram queued behind this one can use its
                 keys. */
-        if (!peer || (peer->flags & WATERLINK_PEER_BLOCKED))
+        if (!peer || (peer->flags & WATERLINK_PEER_SHUT))
         {
                 link_self.granted = 0;
                 link_sessions_granted(now);
@@ -5426,7 +5426,7 @@ static fn link_sessions_granted(p64 now)
                         link_peer_keyed(address_of peers, s->peer);
                 positive need = link_grant_asked(link_kind_asks[s->kind]);
 
-                if (!peer || (peer->flags & WATERLINK_PEER_BLOCKED) ||
+                if (!peer || (peer->flags & WATERLINK_PEER_SHUT) ||
                     (need < array_count(link_grants) &&
                      !((peer->may & link_policy_load()) & link_grants[need].bit)))
                         link_session_end(s, true);
@@ -6146,7 +6146,7 @@ static fn link_keep_look(void)
         }
         for (positive at = 0; at < peers.count; at++)
                 if (peers.peer[at].group &&
-                    !(peers.peer[at].flags & WATERLINK_PEER_BLOCKED))
+                    !(peers.peer[at].flags & WATERLINK_PEER_SHUT))
                         (void)link_keep_for(peers.peer[at].key, true);
 }
 
@@ -6235,7 +6235,7 @@ static fn link_keep_dial_new(p64 now)
                         continue;
                 link_peers_load(address_of peers);
                 peer = link_peer_keyed(address_of peers, entry->key);
-                if (!peer || (peer->flags & WATERLINK_PEER_BLOCKED))
+                if (!peer || (peer->flags & WATERLINK_PEER_SHUT))
                 {
                         entry->used = false;
                         continue;
@@ -6393,6 +6393,8 @@ static b32 link_client_run(string_address name, p8 kind,
         peer = link_peer_named(address_of peers, name);
         if (!peer)
                 return host_refuse("no peer is called %s\n", name);
+        if (peer->flags & WATERLINK_PEER_OFF)
+                return host_refuse("%s is switched off: moonwater link on %s\n", name, name);
         if (!peer->port)
                 return host_refuse("%s has no address: moonwater link add "
                                    "it again with one\n",
@@ -6921,7 +6923,7 @@ static b32 link_fs_open(struct link_fs_client address_to c,
                 return false;
         link_peers_load(address_of peers);
         peer = link_peer_named(address_of peers, peer_name);
-        if (!peer || (peer->flags & WATERLINK_PEER_BLOCKED))
+        if (!peer || (peer->flags & WATERLINK_PEER_SHUT))
                 return false;
         /*      The places, the likeliest first: where the machine is heard
                 now (its sessions open here, its greetings), at the port its

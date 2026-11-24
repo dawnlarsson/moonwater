@@ -429,7 +429,7 @@ static struct waterlink_peer address_to link_peer_returned(
         if (!link_name_good((string_address)offered))
                 return null;
         peer = link_peer_named(peers, (string_address)offered);
-        if (!peer || (peer->flags & WATERLINK_PEER_BLOCKED) ||
+        if (!peer || (peer->flags & WATERLINK_PEER_SHUT) ||
             (!once && (!mark || peer->group != mark ||
                        (peer->flags & WATERLINK_PEER_LABELLED) ||
                        link_keep_has(peer->key))))
@@ -750,7 +750,7 @@ static p8 link_pair_keep(positive group, p8 address_to key,
         //      (link_peer_returned); another is named before it is in the
         //      list, or it meets itself, and with no name left that nobody
         //      has, it is not kept. A blocked peer is refused outright.
-        if (peer && (peer->flags & WATERLINK_PEER_BLOCKED))
+        if (peer && (peer->flags & WATERLINK_PEER_SHUT))
                 peer = null;
         else if (!peer && open && !crypto_same(key, link_self.me.public, 32))
         {

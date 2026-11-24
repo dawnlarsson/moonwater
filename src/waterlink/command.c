@@ -4,6 +4,8 @@
                 link                    who this machine is linked with and
                                         what each may do
                 link on | off           the listener, kept across boots
+                link on | off NAME      the machine called NAME switched on or
+                                        off, kept with its grants either way
                 link pair [NAME]        a code, and wait for a machine to use it
                 link cancel             end every wait for a code
                 link NAME CODE          link to the machine called NAME
@@ -397,10 +399,11 @@ static b32 link_status(void)
                                                               sizeof in_group);
                                         how = (string_address)in_group;
                                 }
-                        string_format(log, "  %s  %s...  may %s%s\n",
+                        string_format(log, "  %s  %s...  may %s%s%s\n",
                                       (string_address)peer->name,
                                       (string_address)short_key,
-                                      (string_address)grants, how);
+                                      (string_address)grants, how,
+                                      peer->flags & WATERLINK_PEER_OFF ? (string_address) ", off" : (string_address) "");
                 }
 
                 //      The listener's word on where it was last heard, over
@@ -422,7 +425,10 @@ static b32 link_status(void)
                 //      Each line says how it was known: a session open now, a
                 //      greeting heard since boot, or nothing heard, and why.
                 open_now = link_open_of(address_of state, peer->key, (string_address)peer->name);
-                if (open_now)
+                if (peer->flags & WATERLINK_PEER_OFF)
+                        string_format(log, "      switched off  next: moonwater link on %s\n",
+                                      (string_address)peer->name);
+                else if (open_now)
                 {
                         link_place_text(open_now->address, open_now->port, place);
                         string_format(log, "      open now  \xe2\x86\x91%p \xe2\x86\x93%p pkts  rtt %p.%p ms  from %s  next: "
@@ -636,7 +642,7 @@ static b32 link_add_locked(string_address name, string_address text,
                         peer.may = found->may;
                         peer.group = found->group;
                         peer.seen = found->seen;
-                        peer.flags |= found->flags & WATERLINK_PEER_BLOCKED;
+                        peer.flags |= found->flags & WATERLINK_PEER_SHUT;
                         if (!where)
                         {
                                 memory_copy(peer.address, found->address,
@@ -682,6 +688,41 @@ static b32 link_remove_locked(string_address name)
         return 0;
 }
 
+/*
+        A machine switched off or on by its person: off keeps it as it is (its
+        key, its grants, its group, its places) and no link opens to it or from
+        it (WATERLINK_PEER_OFF); what it has open now ends at the listener's
+        next look at the peers, as a removed machine's does. On is the link it
+        was, with nothing to pair or allow again.
+*/
+static b32 link_peer_switch_locked(string_address name, p8 on)
+{
+        link_peers peers;
+        struct waterlink_peer address_to found;
+
+        if (!link_peers_for_change(address_of peers))
+                return host_refuse("%s could not be read\n", LINK_PEERS_PATH);
+        found = link_peer_named(address_of peers, name);
+        if (!found)
+                return host_refuse("no machine is called %s\n", name);
+        if (on == !(found->flags & WATERLINK_PEER_OFF))
+        {
+                host_say(log, host_label "%s is %s already\n", name, on ? "on" : "off");
+                return 0;
+        }
+        if (on)
+                found->flags &= (unsigned short)~WATERLINK_PEER_OFF;
+        else
+                found->flags |= WATERLINK_PEER_OFF;
+        if (link_peers_save(address_of peers) < 0)
+                return host_refuse("%s could not be written\n", LINK_PEERS_PATH);
+        if (on)
+                host_say(log, host_label "%s is on\n", name);
+        else
+                host_say(log, host_label "%s is off, and kept with its grants: moonwater link on %s\n", name, name);
+        return 0;
+}
+
 static b32 link_purge_locked(void)
 {
         link_peers peers;
@@ -699,7 +740,7 @@ static b32 link_purge_locked(void)
                 struct waterlink_peer address_to peer = peers.peer + at;
 
                 peer->name[WATERLINK_NAME_MAX - 1] = 0;
-                if ((peer->flags & WATERLINK_PEER_BLOCKED) ||
+                if ((peer->flags & WATERLINK_PEER_SHUT) ||
                     link_open_of(address_of state, peer->key, (string_address)peer->name) != null)
                         peers.peer[kept++] = *peer;
                 else
@@ -3239,6 +3280,7 @@ static b32 link_peers_dispatch(p8 op, string_address address_to arguments, posit
                                            count == 6 ? address_of where : null)
                : op == 1 ? link_remove_locked(arguments[3])
                : op == 2 ? link_purge_locked()
+               : op == 5 || op == 6 ? link_peer_switch_locked(arguments[3], op == 5)
                          : link_grant_locked(arguments[3], op == 3,
                                              arguments + 4, count - 4);
         link_peers_unlock(lock);
@@ -3270,8 +3312,8 @@ typedef struct
 } link_verb_desc;
 
 static const link_verb_desc link_verbs[] = {
-    {"on",        3, 3,            LINK_DM_SWITCH, LINK_VF_CHANGE, 1, {0}},
-    {"off",       3, 3,            LINK_DM_SWITCH, LINK_VF_CHANGE, 0, {0}},
+    {"on",        3, 4,            LINK_DM_SWITCH, LINK_VF_CHANGE, 1, {0}},
+    {"off",       3, 4,            LINK_DM_SWITCH, LINK_VF_CHANGE, 0, {0}},
     {"key",       3, 3,            LINK_DM_FN0,    0,              0, {.fn0 = link_key_verb}},
     {"serve",     3, 4,            LINK_DM_FN1,    0,              1, {.fn1 = link_serve}},
     {"port",      3, 4,            LINK_DM_FN1,    LINK_VF_CHANGE, 0, {.fn1 = link_port_verb}},
@@ -3359,7 +3401,8 @@ static b32 link_dispatch(string_address address_to arguments, positive count)
                 case LINK_DM_FN0:    return v->run.fn0();
                 case LINK_DM_FN1:    return v->run.fn1(count == 4 ? arguments[3] : null);
                 case LINK_DM_ARGS:   return v->run.args(arguments, count);
-                case LINK_DM_SWITCH: return link_switch(v->arg, true);
+                //      on and off alone are the listener; with a machine's name, that machine (link_peer_switch_locked).
+                case LINK_DM_SWITCH: return count == 4 ? link_peers_dispatch(v->arg ? 5 : 6, arguments, count) : link_switch(v->arg, true);
                 case LINK_DM_POLICY: return link_policy_verb(v->arg, arguments + 3, count - 3);
                 case LINK_DM_LOCKED: return link_peers_dispatch(v->arg, arguments, count);
                 case LINK_DM_KIND:   return link_client_run(arguments[3], v->arg,

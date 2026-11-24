@@ -6845,6 +6845,7 @@ LANGUAGE_ID(settings_link_shell, "Interactive shell") \
 LANGUAGE_ID(settings_link_shell_about, "Open a remote terminal session") \
 LANGUAGE_ID(settings_link_show, "Show a code") \
 LANGUAGE_ID(settings_link_stop, "Stop pairing") \
+LANGUAGE_ID(settings_link_switched_off, "Switched off") \
 LANGUAGE_ID(settings_link_traffic, "Traffic") \
 LANGUAGE_ID(settings_link_type, "Type another machine's code") \
 LANGUAGE_ID(settings_map_drag, "Let go to place the screen") \

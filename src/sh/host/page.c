@@ -188,6 +188,7 @@ static const host_row host_rows[] = {
     {null, "link log NAME", "follow the kernel log of NAME", 'f'},
     {null, "link pad NAME [DEVICE]", "this machine's game pad, the first or DEVICE (eventN), played on NAME as if plugged in there; NAME must allow pad", 'f'},
     {null, "link pad stop", "send no pad any more", 'f'},
+    {null, "link on|off NAME", "switch the machine called NAME off, kept with its key and grants and no link to or from it, or on again", 'f'},
     {null, "link pad", "the pads sent from here and made here, and the delay of each", 'f'},
     {null, "link add NAME KEY [HOST[:PORT]]", "link by key, with no code", 'f'},
     {null, "link remove NAME", "stop knowing it", 'f'},
